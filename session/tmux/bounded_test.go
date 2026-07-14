@@ -1,0 +1,123 @@
+package tmux
+
+import (
+	"errors"
+	"os"
+	"path/filepath"
+	"testing"
+	"time"
+
+	"github.com/sachiniyer/agent-factory/cmd"
+)
+
+// stallingTmuxOnPath puts a `tmux` earlier on PATH that never exits, standing in
+// for a wedged tmux server: EVERY tmux invocation — including the
+// DoesSessionExist probe the error paths would otherwise fall back to — hangs.
+// The script sleeps in a CHILD process, so it also covers the case that makes a
+// naive deadline useless: killing only the direct tmux process leaves the child
+// holding the inherited capture pipe, and Output()/Run() block on pipe EOF until
+// it dies. Passing therefore requires the process-group kill AND tmuxWaitDelay,
+// not just exec.CommandContext.
+func stallingTmuxOnPath(t *testing.T) {
+	t.Helper()
+	dir := t.TempDir()
+	script := "#!/bin/sh\nsleep 300 &\nwait\n"
+	if err := os.WriteFile(filepath.Join(dir, "tmux"), []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake tmux: %v", err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+// shortTmuxTimeout shortens the production deadline so the test asserts in
+// milliseconds instead of tmuxCommandTimeout's generous production value.
+func shortTmuxTimeout(t *testing.T, d time.Duration) {
+	t.Helper()
+	prev := tmuxCommandTimeout
+	tmuxCommandTimeout = d
+	t.Cleanup(func() { tmuxCommandTimeout = prev })
+}
+
+// TestBoundedTmuxCommandsDoNotHang is the #1787 regression: a stalled tmux must
+// not hang the WS PTY subscribe path (CaptureVisiblePaneGrid / CursorPosition,
+// which run before the 101 upgrade) or the capture transitions
+// (EnablePipePane / DisablePipePane, which run while the broker holds captureMu).
+// Before the fix each of these blocked forever on `exec.Command`; now each is
+// bound by tmuxCommandTimeout and reports ErrTmuxTimeout.
+func TestBoundedTmuxCommandsDoNotHang(t *testing.T) {
+	cases := []struct {
+		name string
+		call func(ts *TmuxSession) error
+	}{
+		{"CaptureVisiblePaneGrid", func(ts *TmuxSession) error { _, err := ts.CaptureVisiblePaneGrid(); return err }},
+		{"CursorPosition", func(ts *TmuxSession) error { _, _, err := ts.CursorPosition(); return err }},
+		{"EnablePipePane", func(ts *TmuxSession) error { return ts.EnablePipePane("dd of=/dev/null") }},
+		{"DisablePipePane", func(ts *TmuxSession) error { return ts.DisablePipePane() }},
+		// Not named in #1787, but the same unbounded pattern on the same WS data
+		// path — covered so the whole clientless channel keeps the invariant.
+		{"SendRawKeys", func(ts *TmuxSession) error { return ts.SendRawKeys([]byte("hi")) }},
+		{"ResizeWindow", func(ts *TmuxSession) error { return ts.ResizeWindow(80, 24) }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			stallingTmuxOnPath(t)
+			shortTmuxTimeout(t, 200*time.Millisecond)
+			ts := NewTmuxSessionWithDeps("bounded-1787", "sh", MakePtyFactory(), cmd.MakeExecutor())
+
+			done := make(chan error, 1)
+			go func() { done <- tc.call(ts) }()
+
+			// Generous relative to the 200ms deadline, but far below the fake
+			// tmux's 300s sleep: only a real bound can land inside it.
+			select {
+			case err := <-done:
+				if !errors.Is(err, ErrTmuxTimeout) {
+					t.Fatalf("want ErrTmuxTimeout against a stalled tmux, got %v", err)
+				}
+				// A timeout means the server is wedged and the session's state is
+				// unknown — it must never be reported as a confirmed-gone session.
+				if errors.Is(err, ErrSessionGone) {
+					t.Fatalf("timeout must not be reported as ErrSessionGone: %v", err)
+				}
+			case <-time.After(30 * time.Second):
+				t.Fatalf("%s hung against a stalled tmux (#1787): no return within 30s", tc.name)
+			}
+		})
+	}
+}
+
+// TestBoundedTmuxCommandsSucceedWhenTmuxIsHealthy guards the other direction: the
+// deadline must not break the normal path. A fake tmux that answers immediately
+// stands in for a healthy server, so a regression that always trips the timeout
+// (or that mis-reads a fast exit as a deadline) fails here.
+func TestBoundedTmuxCommandsSucceedWhenTmuxIsHealthy(t *testing.T) {
+	dir := t.TempDir()
+	// display-message drives CursorPosition, which parses "row col"; every other
+	// command just needs a clean exit.
+	script := "#!/bin/sh\nif [ \"$1\" = \"display-message\" ]; then echo '3 7'; else echo 'pane line'; fi\n"
+	if err := os.WriteFile(filepath.Join(dir, "tmux"), []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake tmux: %v", err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	shortTmuxTimeout(t, 10*time.Second)
+	ts := NewTmuxSessionWithDeps("healthy-1787", "sh", MakePtyFactory(), cmd.MakeExecutor())
+
+	if got, err := ts.CaptureVisiblePaneGrid(); err != nil || got != "pane line\n" {
+		t.Fatalf("CaptureVisiblePaneGrid: got %q err %v", got, err)
+	}
+	row, col, err := ts.CursorPosition()
+	if err != nil || row != 3 || col != 7 {
+		t.Fatalf("CursorPosition: got (%d,%d) err %v, want (3,7)", row, col, err)
+	}
+	if err := ts.EnablePipePane("dd of=/dev/null"); err != nil {
+		t.Fatalf("EnablePipePane: %v", err)
+	}
+	if err := ts.DisablePipePane(); err != nil {
+		t.Fatalf("DisablePipePane: %v", err)
+	}
+	if err := ts.SendRawKeys([]byte("hi")); err != nil {
+		t.Fatalf("SendRawKeys: %v", err)
+	}
+	if err := ts.ResizeWindow(80, 24); err != nil {
+		t.Fatalf("ResizeWindow: %v", err)
+	}
+}

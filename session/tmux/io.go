@@ -189,10 +189,19 @@ func (t *TmuxSession) CapturePaneContentContext(ctx context.Context) (string, er
 // width, so a client wider or narrower than the pane shifts the rows out from under
 // the absolute cursor move. Wraps ErrSessionGone when the session has vanished,
 // mirroring CapturePaneContent (#496, #1006).
+//
+// Bounded by tmuxCommandTimeout (#1787): this runs on the WS subscribe path
+// BEFORE the 101 upgrade, so an unbounded stall here means the client never
+// receives a socket at all. On a tripped deadline it returns ErrTmuxTimeout
+// without probing DoesSessionExist — see tmuxTimeoutContext.
 func (t *TmuxSession) CaptureVisiblePaneGrid() (string, error) {
-	cmd := exec.Command("tmux", "capture-pane", "-p", "-e", "-t", exactTarget(t.sanitizedName))
-	output, err := t.cmdExec.Output(cmd)
+	ctx, cancel := tmuxTimeoutContext()
+	defer cancel()
+	output, err := t.outputTmuxBounded(ctx, "capture-pane", "-p", "-e", "-t", exactTarget(t.sanitizedName))
 	if err != nil {
+		if ctx.Err() != nil {
+			return "", fmt.Errorf("%w: capture-pane grid after %s", ErrTmuxTimeout, tmuxCommandTimeout)
+		}
 		if !t.DoesSessionExist() {
 			return "", fmt.Errorf("%w: capture-pane: %v", ErrSessionGone, err)
 		}
@@ -207,10 +216,19 @@ func (t *TmuxSession) CaptureVisiblePaneGrid() (string, error) {
 // cursor actually is, so a fresh subscriber's redraw does not orphan a stale copy
 // of the line at the top (the duplicated-prompt artifact). `=` forces an exact
 // session match, mirroring CapturePaneContent (#1006).
+//
+// Bounded by tmuxCommandTimeout (#1787): like CaptureVisiblePaneGrid it runs on
+// the WS subscribe path before the 101 upgrade. The broker already treats a
+// cursor-read failure as best-effort (degrading to a screen-only repaint), so a
+// wedged server costs the cursor restore rather than the whole subscription.
 func (t *TmuxSession) CursorPosition() (row, col int, err error) {
-	cmd := exec.Command("tmux", "display-message", "-p", "-t", exactTarget(t.sanitizedName), "#{cursor_y} #{cursor_x}")
-	output, err := t.cmdExec.Output(cmd)
+	ctx, cancel := tmuxTimeoutContext()
+	defer cancel()
+	output, err := t.outputTmuxBounded(ctx, "display-message", "-p", "-t", exactTarget(t.sanitizedName), "#{cursor_y} #{cursor_x}")
 	if err != nil {
+		if ctx.Err() != nil {
+			return 0, 0, fmt.Errorf("%w: display-message after %s", ErrTmuxTimeout, tmuxCommandTimeout)
+		}
 		return 0, 0, fmt.Errorf("failed to read tmux cursor position: %v", err)
 	}
 	if _, err := fmt.Sscanf(strings.TrimSpace(string(output)), "%d %d", &row, &col); err != nil {
