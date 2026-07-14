@@ -127,6 +127,11 @@ type TermPane struct {
 	// gridMu's write lock). MouseTrackingEnabled reads it under the read lock. It
 	// mirrors exactly the set emu.SendMouse consults, so "tracking enabled" means
 	// "a forwarded wheel/click would actually reach the inner app". Starts empty.
+	//
+	// It cannot go stale across a terminal reset: a full reset (RIS) runs the
+	// emulator's resetModes, which re-drives setMode(ModeReset) for every mouse
+	// mode and thus fires DisableMode for each — clearing this set — so the wheel
+	// can never stay stuck forwarding to a program that reset the terminal (#1748).
 	mouseModes    map[ansi.Mode]bool
 	width, height int
 

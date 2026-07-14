@@ -144,3 +144,22 @@ func TestMouseTrackingEnabledReflectsDECSET(t *testing.T) {
 	s.feed("\x1b[?1002l")
 	waitTrackingEnabled(t, tp, false, "DECRST 1002 must disable tracking")
 }
+
+// TestMouseTrackingEnabledClearedByReset pins the #1748 review hardening: a full
+// terminal RESET (RIS, ESC c — e.g. a program exits or reinitializes the
+// terminal) must clear the tracked mouse state so the wheel doesn't stay stuck
+// forwarding to a program that no longer wants the mouse. The emulator's
+// resetModes re-drives setMode(ModeReset) for every mouse mode, which fires the
+// DisableMode callback, so the tracked set can't persist across a reset.
+func TestMouseTrackingEnabledClearedByReset(t *testing.T) {
+	tp, s := newSingleStreamPane(t, 40, 6)
+
+	// An app enables mouse reporting…
+	s.feed("\x1b[?1000h")
+	waitTrackingEnabled(t, tp, true, "DECSET 1000 must enable tracking")
+
+	// …then the terminal is fully reset (RIS). Tracking must go false again so the
+	// wheel returns to scrolling scrollback.
+	s.feed("\x1bc")
+	waitTrackingEnabled(t, tp, false, "a full reset (RIS) must clear mouse tracking, not leave it stuck on")
+}
