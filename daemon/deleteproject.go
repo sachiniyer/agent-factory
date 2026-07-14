@@ -57,6 +57,11 @@ func (m *Manager) DeleteProject(req DeleteProjectRequest) (DeleteProjectResult, 
 		if root == "" {
 			return DeleteProjectResult{}, fmt.Errorf("delete project: repo_id or repo_path is required")
 		}
+		// Expand a leading ~ BEFORE canonicalizing: git (RepoFromPath) does not do
+		// tilde expansion — the shell normally would — so a literal "~/repo" request
+		// (a root_agents key spelling, or a hand-typed CLI arg) must be expanded here
+		// or it resolves to nothing and silently misses (#1740 review).
+		root = config.ExpandTilde(root)
 		// Canonicalize the path the SAME way the daemon keys repos everywhere:
 		// resolve it to the main-repo root (git toplevel) and hash THAT, so a
 		// symlinked / trailing-slash / relative / subdirectory / ".."-laden form of
@@ -73,24 +78,25 @@ func (m *Manager) DeleteProject(req DeleteProjectRequest) (DeleteProjectResult, 
 	}
 	result := DeleteProjectResult{RepoID: repoID}
 
-	// Suppress the always-on root FIRST (in-memory, instant): m.cfg is immutable
-	// after start, so this is what stops the ensure loop, and doing it before any
-	// teardown guarantees no poll tick can respawn a root we are about to remove
-	// (#1735).
-	m.suppressRootAgent(repoID)
-
-	// Drop the repo's root_agents opt-in on disk BEFORE archiving, and treat a
-	// failed write as FATAL to the whole delete (#1740 review): if this durable
+	// Durably drop the repo's root_agents opt-in FIRST, before mutating ANY state,
+	// and treat a failed write as FATAL to the whole delete (#1740 review): if this
 	// removal fails, a daemon restart would re-register the root and the project
-	// would REAPPEAR — so reporting success would be a lie. Aborting here (before
-	// any session is archived) also keeps the failure clean: nothing is torn down,
-	// the project is intact, and the returned error tells the caller to retry. A
-	// project with no opt-in is a nil, nil no-op that falls straight through.
+	// would REAPPEAR — so reporting success would be a lie. Persisting before any
+	// in-memory change also keeps the failure ATOMIC: on error nothing is archived
+	// AND no in-memory suppression is left behind, so a failed delete leaves the
+	// project fully intact. A project with no opt-in is a nil, nil no-op.
 	if removed, cfgErr := deregisterRootAgents(repoID); cfgErr != nil {
-		return result, fmt.Errorf("delete project %s: could not durably remove its root_agents opt-in — the project would reappear on daemon restart, so nothing was archived; retry: %w", repoID, cfgErr)
+		return result, fmt.Errorf("delete project %s: could not durably remove its root_agents opt-in — the project would reappear on daemon restart, so nothing was changed; retry: %w", repoID, cfgErr)
 	} else if len(removed) > 0 {
 		log.InfoLog.Printf("delete project %s: removed %d root_agents opt-in(s): %v", repoID, len(removed), removed)
 	}
+
+	// The durable removal succeeded, so now apply the in-memory suppression that
+	// stops the ensure loop re-creating the always-on root (m.cfg is immutable
+	// after start). Doing it before the teardown guarantees no poll tick respawns
+	// the root we are about to tear down; doing it only AFTER the persist means a
+	// failed write above never leaves a dangling suppression (#1740 review).
+	m.suppressRootAgent(repoID)
 
 	// Snapshot the repo's LIVE (non-archived) sessions under the lock, then act
 	// with the lock released — ArchiveSession/KillSession take their own

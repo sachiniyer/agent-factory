@@ -183,4 +183,30 @@ func TestDeleteProject_RootAgentsWriteFailureIsFatal(t *testing.T) {
 	assert.NotEqual(t, session.Archived, inst.GetStatus(), "the session must remain live on a failed delete")
 	assert.True(t, exists(src), "the session's worktree must be untouched on a failed delete")
 	assert.True(t, liveProjectRoots(manager.Snapshot(repoID))[repoPath], "the project must remain in the active list on a failed delete")
+
+	// The failure is atomic: NO in-memory root-agent suppression is left behind, so
+	// a failed delete doesn't silently keep the always-on root from re-registering
+	// (#1740 review). The persist runs before any in-memory mutation.
+	manager.mu.Lock()
+	_, suppressed := manager.deletedRootRepos[repoID]
+	manager.mu.Unlock()
+	assert.False(t, suppressed, "a failed delete must leave no dangling root-agent suppression")
+}
+
+// TestDeleteProject_TildePathMatches: a request whose path is a literal "~/…"
+// (git does not expand tilde; the shell normally would) still resolves to the
+// real project — the daemon expands the tilde before canonicalizing (#1740
+// review), so it is never a silent miss.
+func TestDeleteProject_TildePathMatches(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	registerArchivable(t, manager, repoID, repoPath, "worker")
+
+	// Point HOME at the repo's parent so "~/<basename>" expands to the real repo.
+	t.Setenv("HOME", filepath.Dir(repoPath))
+	tildePath := "~/" + filepath.Base(repoPath)
+
+	result, err := manager.DeleteProject(DeleteProjectRequest{RepoPath: tildePath})
+	require.NoError(t, err)
+	assert.Len(t, result.Archived, 1, "a ~/-prefixed path must resolve to the real project, not silently miss")
+	assert.Empty(t, liveProjectRoots(manager.Snapshot(repoID)))
 }
