@@ -103,7 +103,11 @@ func printAPICatalogHuman(w io.Writer, socketPath string, routes []daemon.HTTPRo
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Examples:")
 	for _, rt := range routes {
-		fmt.Fprintf(w, "  # %s\n", rt.Description)
+		// The table above already carries each endpoint's full description;
+		// repeating it verbatim here doubled the catalog's length. A short
+		// operation name (the last path segment, e.g. "# CreateSession") is
+		// enough to anchor the curl beneath it (#1749).
+		fmt.Fprintf(w, "  # %s\n", routeName(rt))
 		fmt.Fprintf(w, "  %s\n", curlExample(socketPath, rt))
 		if len(rt.RequestFields) > 0 {
 			fmt.Fprintf(w, "  # request fields: %s\n", strings.Join(rt.RequestFields, ", "))
@@ -111,6 +115,15 @@ func printAPICatalogHuman(w io.Writer, socketPath string, routes []daemon.HTTPRo
 		fmt.Fprintln(w)
 	}
 	return nil
+}
+
+// routeName is the short operation label for a route: the last segment of its
+// path (e.g. "/v1/CreateSession" -> "CreateSession", "/v1/health" -> "health").
+func routeName(rt daemon.HTTPRoute) string {
+	if i := strings.LastIndex(rt.Path, "/"); i >= 0 && i+1 < len(rt.Path) {
+		return rt.Path[i+1:]
+	}
+	return rt.Path
 }
 
 // curlExample builds a ready-to-run curl invocation for a route. GET routes

@@ -208,7 +208,7 @@ func getSessionByTitleInScope(repoID, title string) (*session.InstanceData, erro
 			return &data[i], nil
 		}
 	}
-	return nil, fmt.Errorf("instance %q %w", title, errTitleNotFound)
+	return nil, fmt.Errorf("session %q %w", title, errTitleNotFound)
 }
 
 var sessionsWatchCmd = &cobra.Command{

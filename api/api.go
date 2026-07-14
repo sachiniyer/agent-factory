@@ -120,7 +120,7 @@ var errTitleNotFound = errors.New("not found")
 func findInstanceByTitle(title string) (*session.InstanceData, string, error) {
 	allInstances, err := config.LoadAllRepoInstances()
 	if err != nil {
-		return nil, "", fmt.Errorf("failed to load instances: %w", err)
+		return nil, "", fmt.Errorf("failed to load sessions: %w", err)
 	}
 
 	var corrupted []string
@@ -141,11 +141,11 @@ func findInstanceByTitle(title string) (*session.InstanceData, string, error) {
 		}
 	}
 	if len(corrupted) > 0 {
-		return nil, "", fmt.Errorf("instance %q not found; %s", title, corruptedReposSuffix(corrupted))
+		return nil, "", fmt.Errorf("session %q not found; %s", title, corruptedReposSuffix(corrupted))
 	}
 	// Wrap the sentinel so a clean miss stays distinguishable from a
 	// corruption-tainted miss (#861); the user-facing text is unchanged.
-	return nil, "", fmt.Errorf("instance %q %w", title, errTitleNotFound)
+	return nil, "", fmt.Errorf("session %q %w", title, errTitleNotFound)
 }
 
 // corruptedReposSuffix builds a sorted, human-readable clause naming the repos
@@ -179,7 +179,7 @@ func diskListSessions(repoID string) ([]session.InstanceData, error) {
 		}
 		var data []session.InstanceData
 		if err := json.Unmarshal(raw, &data); err != nil {
-			return nil, fmt.Errorf("failed to parse instances: %w", err)
+			return nil, fmt.Errorf("failed to parse sessions: %w", err)
 		}
 		// Single repo: the (repoID, title) key reduces to title order.
 		sort.Slice(data, func(i, j int) bool { return data[i].Title < data[j].Title })
@@ -232,7 +232,7 @@ func diskListSessions(repoID string) ([]session.InstanceData, error) {
 func diskWhoami(tmuxName string) (*session.InstanceData, error) {
 	allInstances, err := config.LoadAllRepoInstances()
 	if err != nil {
-		return nil, fmt.Errorf("failed to load instances: %w", err)
+		return nil, fmt.Errorf("failed to load sessions: %w", err)
 	}
 	var corrupted []string
 	for repoID, raw := range allInstances {
@@ -270,11 +270,11 @@ func repoHasInstanceTitle(repoID, title string) (bool, error) {
 func loadRepoInstanceData(repoID string) ([]session.InstanceData, error) {
 	raw, err := config.LoadRepoInstances(repoID)
 	if err != nil {
-		return nil, fmt.Errorf("failed to load instances for repo %s: %w", repoID, err)
+		return nil, fmt.Errorf("failed to load sessions for repo %s: %w", repoID, err)
 	}
 	var instances []session.InstanceData
 	if err := json.Unmarshal(raw, &instances); err != nil {
-		return nil, fmt.Errorf("failed to parse instances for repo %s: %w", repoID, err)
+		return nil, fmt.Errorf("failed to parse sessions for repo %s: %w", repoID, err)
 	}
 	return instances, nil
 }
@@ -287,7 +287,7 @@ func findLiveInstanceByTitle(title string) (*session.Instance, string, error) {
 	}
 	instance, err := session.FromInstanceData(*data)
 	if err != nil {
-		return nil, "", fmt.Errorf("failed to restore instance %q: %w", title, err)
+		return nil, "", fmt.Errorf("failed to restore session %q: %w", title, err)
 	}
 	return instance, repoID, nil
 }
@@ -312,7 +312,7 @@ func findInstanceByTitleInScope(repoID, title string) (*session.InstanceData, st
 	}
 	// Wrap the sentinel so a scoped clean miss stays distinguishable from a
 	// corruption-tainted miss, mirroring findInstanceByTitle (#861).
-	return nil, "", fmt.Errorf("instance %q %w", title, errTitleNotFound)
+	return nil, "", fmt.Errorf("session %q %w", title, errTitleNotFound)
 }
 
 // findLiveInstanceByTitleInScope finds an instance by title within the resolved
@@ -327,7 +327,7 @@ func findLiveInstanceByTitleInScope(repoID, title string) (*session.Instance, st
 	}
 	instance, err := session.FromInstanceData(*data)
 	if err != nil {
-		return nil, "", fmt.Errorf("failed to restore instance %q: %w", title, err)
+		return nil, "", fmt.Errorf("failed to restore session %q: %w", title, err)
 	}
 	return instance, repoID, nil
 }
@@ -431,8 +431,13 @@ func jsonOut(v any) error {
 // the opt-in --json flag it emits the shared failure Envelope instead. The
 // original error is always returned so exit codes are unchanged.
 func jsonError(err error) error {
+	// jsonError always prints the error itself — the bare {"error":...} or the
+	// envelope — so tell cobra not to re-print it (as "Error: ...") or dump
+	// usage. Without this a single runtime error prints two or three times
+	// (#1749). Flag-parse errors never reach here, so their usage help is
+	// unaffected.
+	silenceCobraOutput()
 	if envelopeOutput {
-		silenceEnvelopeCobra()
 		log.CloseQuiet()
 		_ = apiproto.WriteEnvelope(os.Stderr, apiproto.Failure(err.Error()))
 		return err
@@ -442,7 +447,10 @@ func jsonError(err error) error {
 	return err
 }
 
-func silenceEnvelopeCobra() {
+// silenceCobraOutput suppresses cobra's own error line and usage dump on the
+// sessions/tasks command trees (and their shared root) so a command that has
+// already reported its failure does not have it re-printed (#1749).
+func silenceCobraOutput() {
 	SessionsCmd.SilenceUsage = true
 	SessionsCmd.SilenceErrors = true
 	TasksCmd.SilenceUsage = true
@@ -458,9 +466,11 @@ func silenceEnvelopeCobra() {
 }
 
 func init() {
-	// --repo flag on each top-level subcommand
-	SessionsCmd.PersistentFlags().StringVar(&repoFlag, "repo", "", "Path to git repository")
-	TasksCmd.PersistentFlags().StringVar(&repoFlag, "repo", "", "Path to git repository")
+	// --repo flag on each top-level subcommand. The flag name stays --repo (a
+	// technical git term), but the help reads "project" — the user-facing noun
+	// the TUI and web share for a repo's session grouping (#1749).
+	SessionsCmd.PersistentFlags().StringVar(&repoFlag, "repo", "", "Path to the project's git repository")
+	TasksCmd.PersistentFlags().StringVar(&repoFlag, "repo", "", "Path to the project's git repository")
 
 	// Opt-in envelope output. Defaults OFF so existing scripts keep parsing the
 	// bare payload; --json wraps stdout/stderr in the {data,error} Envelope that

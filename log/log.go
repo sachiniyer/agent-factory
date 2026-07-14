@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/pelletier/go-toml/v2"
@@ -30,6 +31,24 @@ var (
 	InfoLog    *log.Logger
 	ErrorLog   *log.Logger
 )
+
+// dirty is set the first time anything is written at WARNING or ERROR level in
+// the current run. Close only prints the "wrote logs to ..." note when the run
+// is dirty (something worth looking at was recorded) — a clean, successful
+// command ends with its own output instead of that bookkeeping line (#1749).
+// Initialize resets it so each logical run (the daemon reinitializes per task
+// trigger) starts fresh.
+var dirty atomic.Bool
+
+// dirtyWriter marks the run dirty on its first write, then delegates. It wraps
+// only the WARNING and ERROR sinks, so an INFO-only run (the common successful
+// case) stays clean.
+type dirtyWriter struct{ w io.Writer }
+
+func (d dirtyWriter) Write(p []byte) (int, error) {
+	dirty.Store(true)
+	return d.w.Write(p)
+}
 
 // Default the package-level loggers to discard sinks so callers that reach a
 // log call before Initialize do not nil-panic. Initialize replaces these with
@@ -394,6 +413,10 @@ func Initialize(daemon bool) {
 	mu.Lock()
 	defer mu.Unlock()
 
+	// Each run starts clean; only a WARNING/ERROR write makes Close report the
+	// log path (#1749).
+	dirty.Store(false)
+
 	logFileName = resolveLogPath()
 
 	// Close any previously opened log file to avoid leaking file descriptors
@@ -434,8 +457,8 @@ func Initialize(daemon bool) {
 			fmtS = "[DAEMON] %s"
 		}
 		InfoLog = log.New(os.Stderr, fmt.Sprintf(fmtS, "INFO:"), log.Ldate|log.Ltime|log.Lshortfile)
-		WarningLog = log.New(os.Stderr, fmt.Sprintf(fmtS, "WARNING:"), log.Ldate|log.Ltime|log.Lshortfile)
-		ErrorLog = log.New(os.Stderr, fmt.Sprintf(fmtS, "ERROR:"), log.Ldate|log.Ltime|log.Lshortfile)
+		WarningLog = log.New(dirtyWriter{os.Stderr}, fmt.Sprintf(fmtS, "WARNING:"), log.Ldate|log.Ltime|log.Lshortfile)
+		ErrorLog = log.New(dirtyWriter{os.Stderr}, fmt.Sprintf(fmtS, "ERROR:"), log.Ldate|log.Ltime|log.Lshortfile)
 		return
 	}
 
@@ -452,8 +475,8 @@ func Initialize(daemon bool) {
 		fmtS = "[DAEMON] %s"
 	}
 	InfoLog = log.New(w, fmt.Sprintf(fmtS, "INFO:"), log.Ldate|log.Ltime|log.Lshortfile)
-	WarningLog = log.New(w, fmt.Sprintf(fmtS, "WARNING:"), log.Ldate|log.Ltime|log.Lshortfile)
-	ErrorLog = log.New(w, fmt.Sprintf(fmtS, "ERROR:"), log.Ldate|log.Ltime|log.Lshortfile)
+	WarningLog = log.New(dirtyWriter{w}, fmt.Sprintf(fmtS, "WARNING:"), log.Ldate|log.Ltime|log.Lshortfile)
+	ErrorLog = log.New(dirtyWriter{w}, fmt.Sprintf(fmtS, "ERROR:"), log.Ldate|log.Ltime|log.Lshortfile)
 
 	globalLogFile = w
 }
@@ -496,7 +519,12 @@ func closeWithReport(report bool) {
 		_ = globalLogFile.Close()
 		globalLogFile = nil
 	}
-	if fileWasOpened && report {
+	// Only point the user at the log when the run actually recorded something
+	// worth reading (a WARNING/ERROR write set the dirty flag). A clean,
+	// successful command ends with its own result, not this bookkeeping line;
+	// and when nothing was logged there is nothing in the file to point at
+	// anyway, so suppressing it on a quiet non-zero exit loses nothing (#1749).
+	if fileWasOpened && report && dirty.Load() {
 		fmt.Fprintln(os.Stderr, "wrote logs to "+logFileName)
 	}
 }
