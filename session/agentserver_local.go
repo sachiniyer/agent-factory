@@ -27,10 +27,16 @@ type localAgentServer struct {
 	inst *Instance
 
 	mu sync.Mutex
-	// brokers holds one lazy ptyBroker per tab index (#1592 Phase 2 PR6, tab-aware
-	// streaming): the agent tab (0) and each shell/process tab (>0) have their own
-	// clientless capture + ring buffer so a pane bound to any tab streams over WS.
-	brokers map[int]*ptyBroker
+	// brokers holds one lazy ptyBroker per tab, keyed by the tab's STABLE id
+	// (#1738), not its ordinal index (#1592 Phase 2 PR6, tab-aware streaming): the
+	// agent tab and each shell/process tab have their own clientless capture + ring
+	// buffer so a pane bound to any tab streams over WS. Keying on the stable id
+	// (resolved from the caller's index at ensureBroker time) means a broker follows
+	// its tab across a reorder/close — after tab 1 of [agent,A,B] closes, B's broker
+	// is still found under B's id even though B is now at index 1, so a new
+	// subscriber for B never lands on A's stale (dead-tmux) broker the way an
+	// index-keyed map would.
+	brokers map[string]*ptyBroker
 	// closed latches once Kill has run. A Subscribe/Input/Resize that races the
 	// kill must NOT lazily resurrect a broker (which would start a fresh clientless
 	// capture goroutine on a session that is already being torn down and never gets
@@ -172,23 +178,29 @@ func (s *localAgentServer) TapEnter() {
 // a remote runtime with no tmux session, or an out-of-range tab) rather than
 // panicking.
 func (s *localAgentServer) ensureBroker(tab int) (*ptyBroker, error) {
+	// Resolve the caller's ordinal to the tab's STABLE id (#1738) and the tmux it
+	// currently backs, under the instance lock, BEFORE taking s.mu — so the broker
+	// map key is the identity that follows the tab across a reorder/close, not the
+	// shifting ordinal. tabTmuxSession and TabIDAt each take i.mu; call them before
+	// s.mu (never nest s.mu → i.mu).
+	id, ok := s.inst.TabIDAt(tab)
+	ts := s.inst.tabTmuxSession(tab)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.closed {
 		return nil, fmt.Errorf("session %q is being terminated", s.inst.Title)
 	}
-	if br := s.brokers[tab]; br != nil {
-		return br, nil
-	}
-	ts := s.inst.tabTmuxSession(tab)
-	if ts == nil {
+	if !ok || ts == nil {
 		return nil, fmt.Errorf("session %q tab %d has no local PTY to stream", s.inst.Title, tab)
 	}
+	if br := s.brokers[id]; br != nil {
+		return br, nil
+	}
 	if s.brokers == nil {
-		s.brokers = make(map[int]*ptyBroker)
+		s.brokers = make(map[string]*ptyBroker)
 	}
 	br := newPTYBroker(newTmuxClientlessChannel(ts))
-	s.brokers[tab] = br
+	s.brokers[id] = br
 	return br, nil
 }
 

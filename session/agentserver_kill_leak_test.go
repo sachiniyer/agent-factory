@@ -34,7 +34,7 @@ func TestInstanceKillClosesOpenStream(t *testing.T) {
 		t.Fatalf("subscribe: %v", err)
 	}
 	las.mu.Lock()
-	las.brokers = map[int]*ptyBroker{0: br}
+	las.brokers = map[string]*ptyBroker{"agent": br}
 	las.mu.Unlock()
 
 	if ch.starts != 1 {

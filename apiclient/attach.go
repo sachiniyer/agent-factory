@@ -61,8 +61,8 @@ var attachDrainTimeout = 2 * time.Second
 // and restores the terminal on exit. The signature matches the attach seam
 // (app.attachOverlayCallback's `func() (chan struct{}, error)`), so local
 // full-screen attach drops in where the tmux driver used to be.
-func (c *Client) AttachStream(ctx context.Context, title, repoID string, tab int) (chan struct{}, error) {
-	sc, err := c.DialStream(ctx, title, repoID, tab, 0) // 0 = live tail
+func (c *Client) AttachStream(ctx context.Context, title, repoID, tabID string, tab int) (chan struct{}, error) {
+	sc, err := c.DialStream(ctx, title, repoID, tabID, tab, 0) // 0 = live tail
 	if err != nil {
 		return nil, err
 	}

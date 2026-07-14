@@ -96,6 +96,11 @@ export interface SessionData {
  *  display name and the kind (index 0 / TabKind.Agent is the unclosable agent
  *  tab). Field names match the Go JSON tags so this decodes the projection as-is. */
 export interface TabData {
+  /** The tab's stable id (session/storage.go TabData.ID, #1738): minted at
+   *  creation and never reused, so the web addresses a tab's stream (?tab_id=) and
+   *  its DnD/pane binding by this id rather than the ordinal, which shifts on a
+   *  reorder/close. Absent only for a legacy record written before #1738. */
+  id?: string;
   name: string;
   kind: number;
   command?: string;

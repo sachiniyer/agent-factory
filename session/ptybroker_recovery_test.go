@@ -142,7 +142,7 @@ func TestLocalAgentServerResetBrokerCaptures(t *testing.T) {
 	}
 	mustRepaintContains(t, a1, "tab1-screen")
 
-	s := &localAgentServer{brokers: map[int]*ptyBroker{0: br0, 1: br1}}
+	s := &localAgentServer{brokers: map[string]*ptyBroker{"tab0": br0, "tab1": br1}}
 	s.resetBrokerCaptures()
 
 	for name, ch := range map[string]*fakeClientlessChannel{"tab0": ch0, "tab1": ch1} {

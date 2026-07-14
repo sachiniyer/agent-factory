@@ -850,9 +850,12 @@ function syncSplit(state: AppState): void {
   // The per-tab iframe target for web tabs (undefined for terminal tabs), parallel
   // to tabIds, so the split view can iframe a web leaf.
   const tabTargets = selected ? sessionTabs(selected).map((t) => t.url) : [];
+  // The kind of each tab, parallel to tabIds — the split view reads it to tell a web
+  // tab from a terminal one now that the identity is the opaque stable id (#1738).
+  const tabKinds = selected ? sessionTabs(selected).map((t) => t.kind) : [];
   // `tok !== null` not `tok`: "" is the authorized-tokenless credential (#1696), so a
   // loopback client still attaches its live panes.
-  splitView.setSession(tok !== null ? selId : null, tok, tabIds, initialTab, tabTargets);
+  splitView.setSession(tok !== null ? selId : null, tok, tabIds, initialTab, tabTargets, tabKinds);
 }
 
 function disposeSplit(): void {

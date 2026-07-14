@@ -86,7 +86,7 @@ func startDriver(t *testing.T) (srvConn *websocket.Conn, stdinW *io.PipeWriter, 
 	c, connCh := attachWSServer(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	t.Cleanup(cancel)
-	sc, err := c.DialStream(ctx, "alpha", "", 0, 0)
+	sc, err := c.DialStream(ctx, "alpha", "", "", 0, 0)
 	if err != nil {
 		t.Fatalf("DialStream: %v", err)
 	}

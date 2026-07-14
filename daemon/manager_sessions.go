@@ -215,13 +215,13 @@ func shellQuoteArg(s string) string {
 // collision — a title alone can name two sessions in two repos, an id names
 // exactly one. Both paths return the tracked instance's cached agent-server
 // singleton whose ring buffer/subscribers persist.
-func (m *Manager) agentServerForStream(idOrTitle, repoID string) (session.AgentServer, error) {
+func (m *Manager) agentServerForStream(idOrTitle, repoID string) (session.AgentServer, *session.Instance, error) {
 	instance, resolvedRepoID, title, err := m.resolveStreamSession(idOrTitle, repoID)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if instance == nil {
-		return nil, fmt.Errorf("session %q not found", idOrTitle)
+		return nil, nil, fmt.Errorf("session %q not found", idOrTitle)
 	}
 	// Reject a new subscription while a kill is in flight for this session, the
 	// same killsInFlight gate SendPrompt checks (#1632). Streaming previously
@@ -234,9 +234,9 @@ func (m *Manager) agentServerForStream(idOrTitle, repoID string) (session.AgentS
 	_, killing := m.killsInFlight[key]
 	m.mu.Unlock()
 	if killing {
-		return nil, fmt.Errorf("session %q is being deleted", title)
+		return nil, nil, fmt.Errorf("session %q is being deleted", title)
 	}
-	return instance.AgentServer(), nil
+	return instance.AgentServer(), instance, nil
 }
 
 // resolveStreamSession resolves a stream target by the session's stable id first

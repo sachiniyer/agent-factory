@@ -796,7 +796,10 @@ func (m *home) attachInstanceTab(instance *session.Instance, tabIdx int, agentLa
 		if err != nil {
 			return nil, err
 		}
-		return c.AttachStream(context.Background(), instance.Title, repoID, tabIdx)
+		// Address the attach by the tab's stable id (#1738) so a reorder/close can't
+		// misroute the full-screen stream; empty falls back to the ordinal.
+		tabID, _ := instance.TabIDAt(tabIdx)
+		return c.AttachStream(context.Background(), instance.Title, repoID, tabID, tabIdx)
 	}
 	return m.showHelpScreen(helpTypeInstanceAttach{}, func() tea.Cmd {
 		return m.beginAttachTransition(func() tea.Cmd {

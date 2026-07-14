@@ -28,7 +28,11 @@ func (m *home) newTabPaneSource() ui.PreviewSource {
 		if instance == nil || fetch == nil {
 			return "", nil
 		}
-		content, gone, err := fetch(daemon.PreviewRequest{Title: instance.Title, RepoID: repoID, Tab: tab, Full: full})
+		// Address the capture by the tab's stable id (#1738) so it can't grab the
+		// wrong tab after a reorder/close; the daemon falls back to the ordinal Tab
+		// when the id is empty or no longer resolves.
+		tabID, _ := instance.TabIDAt(tab)
+		content, gone, err := fetch(daemon.PreviewRequest{Title: instance.Title, RepoID: repoID, Tab: tab, TabID: tabID, Full: full})
 		if err != nil {
 			return "", err
 		}
@@ -50,13 +54,13 @@ func (m *home) newTabPaneSource() ui.PreviewSource {
 // tab). The returned dialer opens a fresh apiclient WS subscription starting at
 // the requested replay cursor; the termpane run loop calls it on connect and on
 // every reconnect.
-func streamDialer(title, repoID string, tab int) termpane.Dialer {
+func streamDialer(title, repoID, tabID string, tab int) termpane.Dialer {
 	return func(ctx context.Context, since uint64) (termpane.Stream, error) {
 		c, err := apiclient.NewTargeted()
 		if err != nil {
 			return nil, err
 		}
-		sc, err := c.DialStream(ctx, title, repoID, tab, since)
+		sc, err := c.DialStream(ctx, title, repoID, tabID, tab, since)
 		if err != nil {
 			return nil, err
 		}

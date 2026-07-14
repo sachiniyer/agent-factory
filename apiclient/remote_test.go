@@ -257,7 +257,7 @@ func TestDialStream_StalledHandshakeTimesOut(t *testing.T) {
 
 	errc := make(chan error, 1)
 	go func() {
-		_, e := c.DialStream(context.Background(), "alpha", "", 0, 0)
+		_, e := c.DialStream(context.Background(), "alpha", "", "", 0, 0)
 		errc <- e
 	}()
 	select {
@@ -332,7 +332,7 @@ func TestDialStream_RemoteThreadsTokenHeaderAndQuery(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	sc, err := c.DialStream(ctx, "alpha", "", 0, 0)
+	sc, err := c.DialStream(ctx, "alpha", "", "", 0, 0)
 	if err != nil {
 		t.Fatalf("DialStream over HTTP: %v", err)
 	}

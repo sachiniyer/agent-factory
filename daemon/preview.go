@@ -26,7 +26,13 @@ type PreviewRequest struct {
 	Title  string `json:"title"`
 	RepoID string `json:"repo_id"`
 	Tab    int    `json:"tab"`
-	Full   bool   `json:"full"`
+	// TabID addresses the tab by its stable id (#1738) rather than its ordinal
+	// Tab. When set and it resolves against the session's live tab list it wins
+	// over Tab, so a capture can't grab the wrong tab after a reorder/close; when
+	// empty (or it no longer resolves) the handler falls back to the ordinal Tab
+	// for backward compatibility.
+	TabID string `json:"tab_id,omitempty"`
+	Full  bool   `json:"full"`
 }
 
 // PreviewResponse carries the captured content, or Gone=true when the session's
@@ -49,11 +55,19 @@ func (s *controlServer) Preview(req PreviewRequest, resp *PreviewResponse) error
 	if err := validateRPCRepoID(req.RepoID); err != nil {
 		return err
 	}
-	as, err := s.manager.agentServerForStream(req.Title, req.RepoID)
+	as, instance, err := s.manager.agentServerForStream(req.Title, req.RepoID)
 	if err != nil {
 		return err
 	}
-	content, err := as.Preview(req.Tab, req.Full)
+	// Prefer the stable tab id (#1738): resolve it to the tab's CURRENT ordinal so
+	// a capture addresses the right tab after a reorder/close. Fall back to the
+	// ordinal Tab when no id is given or it no longer resolves (legacy clients /
+	// a since-closed tab).
+	tab := req.Tab
+	if idx, ok := instance.TabIndexByID(req.TabID); ok {
+		tab = idx
+	}
+	content, err := as.Preview(tab, req.Full)
 	if err != nil {
 		if errors.Is(err, tmux.ErrSessionGone) {
 			resp.Gone = true

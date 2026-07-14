@@ -55,8 +55,8 @@ type liveTermAttachment interface {
 // newLiveTermPaneFn is the attachment creation seam. Production dials the daemon
 // WS PTY stream for (title, repoID, tab); tests swap in a fake factory. Read on
 // the event loop only.
-var newLiveTermPaneFn = func(title, repoID string, tab, width, height int) liveTermAttachment {
-	return termpane.New(streamDialer(title, repoID, tab), width, height)
+var newLiveTermPaneFn = func(title, repoID, tabID string, tab, width, height int) liveTermAttachment {
+	return termpane.New(streamDialer(title, repoID, tabID, tab), width, height)
 }
 
 // syncLiveTermPane reconciles the live attachments with current focus, pane
@@ -102,7 +102,7 @@ func (m *home) reconcileLiveTermPanes() {
 		if m.paneIsPreviewing(p) {
 			continue
 		}
-		key, title, repoID, tab, ok := m.liveBindCandidate(p)
+		key, title, repoID, tabID, tab, ok := m.liveBindCandidate(p)
 		if !ok {
 			continue
 		}
@@ -131,7 +131,7 @@ func (m *home) reconcileLiveTermPanes() {
 			continue
 		}
 		m.closeLiveTermPaneFor(p.ID())
-		tp := newLiveTermPaneFn(title, repoID, tab, width, height)
+		tp := newLiveTermPaneFn(title, repoID, tabID, tab, width, height)
 		m.liveTerms[p.ID()] = tp
 		m.liveKeys[p.ID()] = key
 		w.SetLive(tp)
@@ -269,17 +269,22 @@ func (m *home) focusedLiveTerm() (liveTermAttachment, *store.OpenPane) {
 // (remote instances, not-started/transitional/dead instances, tabs with no
 // session). The key changes whenever the pane, its tab index, or the underlying
 // session name changes, which is exactly when a rebind is needed.
-func (m *home) liveBindCandidate(p *store.OpenPane) (key, title, repoID string, tab int, ok bool) {
+func (m *home) liveBindCandidate(p *store.OpenPane) (key, title, repoID, tabID string, tab int, ok bool) {
 	if p == nil {
-		return "", "", "", 0, false
+		return "", "", "", "", 0, false
 	}
 	tab = p.Tab()
 	name := liveSessionName(p.Instance(), tab)
 	if name == "" {
-		return "", "", "", 0, false
+		return "", "", "", "", 0, false
 	}
 	inst := p.Instance()
-	return fmt.Sprintf("%d/%d/%s", p.ID(), tab, name), inst.Title, m.repoID, tab, true
+	// Address the stream by the tab's STABLE id (#1738) so a reorder/close can't
+	// misroute it; empty (a just-created tab whose daemon id hasn't synced yet)
+	// falls back to the ordinal in DialStream. The bind key still carries the
+	// ordinal + tmux name, so a positional shift still forces a rebind.
+	tabID, _ = inst.TabIDAt(tab)
+	return fmt.Sprintf("%d/%d/%s", p.ID(), tab, name), inst.Title, m.repoID, tabID, tab, true
 }
 
 // liveSessionName resolves an (instance, tab) to the tmux session a live

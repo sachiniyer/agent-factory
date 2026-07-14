@@ -105,6 +105,7 @@ export class AttachTerminal {
     container: HTMLElement,
     private readonly sessionId: string,
     private readonly token: string,
+    private readonly tabId: string,
     private readonly tab: number,
     private readonly cb: TerminalCallbacks,
   ) {
@@ -204,9 +205,14 @@ export class AttachTerminal {
     const base = `${wsScheme()}//${window.location.host}/v1/sessions/${encodeURIComponent(this.sessionId)}/stream`;
     const params = new URLSearchParams();
     params.set("access_token", this.token);
-    // Select the bound tab (parseTab in daemon/ws_pty.go: empty/absent = 0 = the
-    // agent tab). Sent only for a non-agent tab so the agent-tab URL is unchanged.
-    if (this.tab > 0) {
+    // Address the bound tab by its STABLE id (#1738) so a reorder/close server-side
+    // resolves to the right PTY — the daemon maps ?tab_id= to the tab's current
+    // ordinal. Fall back to the ordinal ?tab= for a legacy tab with no id (parseTab
+    // in daemon/ws_pty.go: empty/absent = 0 = the agent tab), keeping the agent-tab
+    // URL unchanged when neither is needed.
+    if (this.tabId !== "") {
+      params.set("tab_id", this.tabId);
+    } else if (this.tab > 0) {
       params.set("tab", String(this.tab));
     }
     if (this.seeded) {

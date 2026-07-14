@@ -394,7 +394,11 @@ func (hs *headlessServer) streamHandler(w http.ResponseWriter, r *http.Request) 
 		_ = sub.Close()
 		return
 	}
-	servePTYStream(hs.as, tab, sub, conn)
+	// The in-sandbox headless server is addressed by ordinal only: the orchestrator's
+	// remoteAgentServer has already resolved any stable ?tab_id= to an index before
+	// forwarding it here (#1738), and a sandbox's tab set is fixed for its lifetime,
+	// so there is nothing to re-resolve — pin the ordinal.
+	servePTYStream(hs.as, staticTabResolver(tab), sub, conn)
 }
 
 // streamInfoHandler answers GET /v1/sessions/{id}/stream-info with where the
