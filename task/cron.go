@@ -68,6 +68,21 @@ func normalizeDOWField(field string) string {
 	if field == "*" {
 		return field
 	}
+	// Pure single-part wildcard-step forms ("*/N") pass through unchanged.
+	// Such a field is a wildcard base and is scheduling-equivalent to "*":
+	// robfig handles it correctly for the 0-6 DOW range and keeps its starBit,
+	// which drives Vixie's DOM/DOW AND rule (fire only on the restricted DOM
+	// when DOW is a wildcard). Rewriting it to an explicit value list — as the
+	// expansion path below would ("*/1" → "0,1,2,3,4,5,6") — destroys that
+	// starBit, flipping AND to OR so the schedule fires daily instead of on the
+	// restricted DOM (#1724). This is the *opposite* of the #1007 regression
+	// (which dropped Sunday by NOT normalizing expanded 7s): only a comma-less
+	// "*/N" qualifies here, so comma-separated forms mixing a step with ranges
+	// or lists (e.g. "*/1,5-7") still take the per-part path below, which
+	// normalizes their range bounds and 7→0 aliases.
+	if !strings.Contains(field, ",") && strings.HasPrefix(field, "*/") {
+		return field
+	}
 	listParts := strings.Split(field, ",")
 	rewroteStepBase := false
 	rangeToSeven := false

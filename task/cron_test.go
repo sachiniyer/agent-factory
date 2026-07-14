@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	cron "github.com/robfig/cron/v3"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -368,6 +369,108 @@ func TestParseCronDOWListWithRangeEndingAtSevenKeepsSunday(t *testing.T) {
 	}
 }
 
+// robfigReferenceParser is a standalone robfig parser configured identically to
+// the package's private cronParser (standard 5-field Vixie cron). The
+// DOM/DOW-semantics matrix below compares AF's ParseCron against this parser
+// directly so the two can never silently drift: robfig is the ground truth for
+// the AND-when-wildcard / OR-when-both-restricted rule, and if AF's DOW
+// normalization ever changes a field's wildcard-ness (as #1724's "*/1"→list
+// rewrite did), these sequence comparisons fail.
+var robfigReferenceParser = cron.NewParser(cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow)
+
+// assertSchedulesAgreeForAYear walks both schedules forward from the same start
+// and asserts they produce an identical firing sequence for at least a year of
+// ticks — enough to cover every month boundary and DOM/DOW interaction.
+func assertSchedulesAgreeForAYear(t *testing.T, afExpr, robfigExpr string) {
+	t.Helper()
+	afSched, err := ParseCron(afExpr)
+	require.NoError(t, err, "ParseCron(%q)", afExpr)
+	refSched, err := robfigReferenceParser.Parse(robfigExpr)
+	require.NoError(t, err, "robfig.Parse(%q)", robfigExpr)
+
+	from := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	yearEnd := time.Date(2027, 1, 1, 0, 0, 0, 0, time.UTC)
+	curAF, curRef := from, from
+	ticks := 0
+	for {
+		curAF = afSched.Next(curAF)
+		curRef = refSched.Next(curRef)
+		require.Equal(t, curRef, curAF,
+			"AF %q and robfig %q diverged at firing %d", afExpr, robfigExpr, ticks)
+		ticks++
+		if curRef.After(yearEnd) || curRef.IsZero() {
+			break
+		}
+	}
+	require.Greater(t, ticks, 0, "no firings compared for %q vs %q", afExpr, robfigExpr)
+}
+
+// TestParseCronDOMWithWildcardStepDOWFiresMonthly is the direct regression for
+// #1724: "0 0 15 * */1" must fire only on the 15th of each month (AND
+// semantics — DOW "*/1" is a wildcard base), not every day. Before the fix
+// normalizeDOWField rewrote "*/1" into the explicit list "0,1,2,3,4,5,6",
+// destroying robfig's starBit and flipping the DOM/DOW rule to OR so it fired
+// daily.
+func TestParseCronDOMWithWildcardStepDOWFiresMonthly(t *testing.T) {
+	schedule, err := ParseCron("0 0 15 * */1")
+	require.NoError(t, err)
+	// AF must agree with robfig parsing the identical expression.
+	assertSchedulesAgreeForAYear(t, "0 0 15 * */1", "0 0 15 * */1")
+
+	// Concretely: from mid-January the next firing is the 15th, and each
+	// subsequent firing is the 15th of the following month — never a run of
+	// consecutive days.
+	from := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	want := []time.Time{
+		time.Date(2026, 1, 15, 0, 0, 0, 0, time.UTC),
+		time.Date(2026, 2, 15, 0, 0, 0, 0, time.UTC),
+		time.Date(2026, 3, 15, 0, 0, 0, 0, time.UTC),
+		time.Date(2026, 4, 15, 0, 0, 0, 0, time.UTC),
+	}
+	cur := from
+	for i, w := range want {
+		cur = schedule.Next(cur)
+		assert.Equal(t, w, cur, "0 0 15 * */1 firing %d must be the 15th", i)
+	}
+}
+
+// TestParseCronDOMDOWMatrixMatchesRobfig sweeps a matrix of DOW shapes combined
+// with a restricted DOM and confirms AF's schedule matches robfig's over a full
+// year for each. Wildcard DOW forms ("*", "*/1", "*/2") must AND with DOM (fire
+// only on the 15th); genuinely restricted forms ("1-5", "0,3,5", and the
+// wildcard-plus-range list "*/1,5-7" which is a restricted list, not a
+// wildcard) must OR with DOM. The reference expression differs from the AF
+// expression only where robfig can't parse AF's input directly (the Sunday
+// alias 7, which AF normalizes to 0).
+func TestParseCronDOMDOWMatrixMatchesRobfig(t *testing.T) {
+	cases := []struct {
+		afDOW  string
+		refDOW string // robfig-acceptable equivalent (7→0 already applied)
+	}{
+		{"*", "*"},                   // wildcard: AND → 15th only
+		{"*/1", "*/1"},               // wildcard base: AND → 15th only (#1724)
+		{"*/2", "*/2"},               // wildcard base: AND → 15th only
+		{"1-5", "1-5"},               // restricted range: OR
+		{"0,3,5", "0,3,5"},           // restricted list: OR
+		{"*/1,5-7", "0,1,2,3,4,5,6"}, // wildcard-step in a list is a restricted list: OR
+	}
+	for _, tc := range cases {
+		afExpr := "0 0 15 * " + tc.afDOW
+		refExpr := "0 0 15 * " + tc.refDOW
+		t.Run(tc.afDOW, func(t *testing.T) {
+			assertSchedulesAgreeForAYear(t, afExpr, refExpr)
+		})
+	}
+}
+
+// TestParseCronBothRestrictedMatchesRobfigOrSemantics pins that when both DOM
+// and DOW are genuinely restricted (DOM=15, DOW=1) AF still applies Vixie OR
+// semantics — fire on the 15th OR on Mondays — identically to robfig. The
+// #1724 fix must not disturb this: only pure wildcard-step DOW forms change.
+func TestParseCronBothRestrictedMatchesRobfigOrSemantics(t *testing.T) {
+	assertSchedulesAgreeForAYear(t, "0 0 15 * 1", "0 0 15 * 1")
+}
+
 func TestNormalizeDOWField(t *testing.T) {
 	cases := []struct {
 		in   string
@@ -377,11 +480,12 @@ func TestNormalizeDOWField(t *testing.T) {
 		{"1-5", "1-5"},           // untouched: no 7 present
 		{"0/2", "0/2"},           // untouched: no 7, step preserved for robfig
 		{"*/2", "*/2"},           // untouched: no 7, step preserved for robfig
+		{"*/1", "*/1"},           // pure wildcard-step: passed through so robfig keeps starBit (#1724)
+		{"*/7", "*/7"},           // pure wildcard-step passes through unchanged, never a 0-based list (#1724)
 		{"7", "0"},               // bare Sunday alias
 		{"07", "0"},              // leading-zero Sunday alias (#743)
 		{"5-7", "0,5,6"},         // range ending at 7
 		{"1,7", "0,1"},           // list containing 7
-		{"*/7", "0"},             // step that only lands on 0 and 7
 		{"7/2", "0,2,4,6"},       // step base 7 must keep its step (#888): Sun,Tue,Thu,Sat
 		{"07/2", "0,2,4,6"},      // leading-zero step base 7 (#888 + #743)
 		{"007/2", "0,2,4,6"},     // multi-leading-zero step base 7 (#915): numeric parse, not string compare
