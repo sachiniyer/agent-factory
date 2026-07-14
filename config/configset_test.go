@@ -41,6 +41,78 @@ func TestSetTOMLScalarInsertIntoExistingSection(t *testing.T) {
 	}
 }
 
+// TestSetTOMLScalarInsertIntoCommentOnlySection is the #1687 regression: a
+// section that holds ONLY comments (no key=value pairs) must get a new key
+// appended at the END of the section — AFTER its comments — not jammed between
+// the [section] header and its first comment.
+func TestSetTOMLScalarInsertIntoCommentOnlySection(t *testing.T) {
+	in := "[program_overrides]\n# This section stores program overrides\n# Another helpful comment\n"
+	got := setTOMLScalar(in, "program_overrides", "claude", "'/bin/claude'")
+	want := "[program_overrides]\n# This section stores program overrides\n# Another helpful comment\nclaude = '/bin/claude'\n"
+	if got != want {
+		t.Fatalf("comment-only section insert wrong.\n got: %q\nwant: %q", got, want)
+	}
+}
+
+// TestSetTOMLScalarInsertAfterTrailingComment covers a section that has an
+// existing key followed by a trailing comment: per the contract the new key
+// goes at the end of the section's content block, i.e. after the comment.
+func TestSetTOMLScalarInsertAfterTrailingComment(t *testing.T) {
+	in := "[program_overrides]\nclaude = 'x'\n# trailing note about overrides\n"
+	got := setTOMLScalar(in, "program_overrides", "codex", "'/usr/bin/codex'")
+	want := "[program_overrides]\nclaude = 'x'\n# trailing note about overrides\ncodex = '/usr/bin/codex'\n"
+	if got != want {
+		t.Fatalf("trailing-comment insert wrong.\n got: %q\nwant: %q", got, want)
+	}
+}
+
+// TestSetTOMLScalarInsertBeforeTrailingBlank guards that a trailing blank line
+// separating the target section from the next section (or EOF) is preserved:
+// the key is inserted at the end of the section's CONTENT, before the blank, and
+// never spills into the following section.
+func TestSetTOMLScalarInsertBeforeTrailingBlank(t *testing.T) {
+	in := "[program_overrides]\n# comment only\n\n[limit_patterns]\nclaude = 'rate'\n"
+	got := setTOMLScalar(in, "program_overrides", "claude", "'/bin/claude'")
+	want := "[program_overrides]\n# comment only\nclaude = '/bin/claude'\n\n[limit_patterns]\nclaude = 'rate'\n"
+	if got != want {
+		t.Fatalf("trailing-blank insert wrong.\n got: %q\nwant: %q", got, want)
+	}
+
+	// Same, but the section already has a key, then a comment, then a blank line
+	// before the next section.
+	in2 := "[program_overrides]\nclaude = 'x'\n# note\n\n[limit_patterns]\nclaude = 'rate'\n"
+	got2 := setTOMLScalar(in2, "program_overrides", "codex", "'y'")
+	want2 := "[program_overrides]\nclaude = 'x'\n# note\ncodex = 'y'\n\n[limit_patterns]\nclaude = 'rate'\n"
+	if got2 != want2 {
+		t.Fatalf("keyed trailing-blank insert wrong.\n got: %q\nwant: %q", got2, want2)
+	}
+}
+
+// TestSetTOMLScalarCommentOnlySectionIdempotentAndPreserving proves the #1687
+// insert is idempotent (re-setting the same value only replaces the value's
+// bytes) and leaves every unrelated section, comment, and blank line untouched.
+func TestSetTOMLScalarCommentOnlySectionIdempotentAndPreserving(t *testing.T) {
+	in := "# top-of-file note\ndefault_program = 'claude'\n\n" +
+		"[program_overrides]\n# overrides live here\n# keep both comments\n\n" +
+		"[limit_patterns]\nclaude = 'rate.*limit'  # keep me\n"
+
+	once := setTOMLScalar(in, "program_overrides", "claude", "'/bin/claude'")
+	wantOnce := "# top-of-file note\ndefault_program = 'claude'\n\n" +
+		"[program_overrides]\n# overrides live here\n# keep both comments\nclaude = '/bin/claude'\n\n" +
+		"[limit_patterns]\nclaude = 'rate.*limit'  # keep me\n"
+	if once != wantOnce {
+		t.Fatalf("first insert wrong.\n got: %q\nwant: %q", once, wantOnce)
+	}
+
+	// Re-setting the same key to a new value replaces only the value; the layout
+	// stays put (idempotent placement).
+	twice := setTOMLScalar(once, "program_overrides", "claude", "'/bin/claude2'")
+	wantTwice := strings.Replace(wantOnce, "claude = '/bin/claude'", "claude = '/bin/claude2'", 1)
+	if twice != wantTwice {
+		t.Fatalf("re-set not idempotent in placement.\n got: %q\nwant: %q", twice, wantTwice)
+	}
+}
+
 func TestSetTOMLScalarAppendsNewSection(t *testing.T) {
 	in := "default_program = 'claude'\n"
 	got := setTOMLScalar(in, "limit_patterns", "claude", "'rate.*limit'")
