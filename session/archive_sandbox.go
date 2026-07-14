@@ -164,11 +164,12 @@ func (i *Instance) bindProvisionResult(res ProvisionResult) error {
 			return err
 		}
 	}
-	i.agentSrvMu.Lock()
-	i.agentSrv = nil
-	i.agentSrvMu.Unlock()
-
+	// Clear the cached agent-server AND swap the runtime fields in ONE i.mu section
+	// (#1729): AgentServer() reads the cache and the fields under the same i.mu, so
+	// doing the rebind atomically means the poll can never rebuild the cache from a
+	// pre-restore snapshot of remoteClient — no stale/torn-down endpoint pinned.
 	i.mu.Lock()
+	i.agentSrv = nil
 	i.backend = res.Backend
 	i.remoteClient = rc
 	i.runtimeTeardown = res.Teardown
@@ -181,11 +182,10 @@ func (i *Instance) bindProvisionResult(res ProvisionResult) error {
 // classifies it as a remote sandbox (#1592 Phase 4 PR6). A subsequent restore
 // rebuilds the wiring via bindProvisionResult.
 func (i *Instance) resetRemoteRuntime() {
-	i.agentSrvMu.Lock()
-	i.agentSrv = nil
-	i.agentSrvMu.Unlock()
-
+	// Clear the cache and the runtime fields together under i.mu (#1729), so a
+	// concurrent AgentServer() never rebuilds against a half-cleared state.
 	i.mu.Lock()
+	i.agentSrv = nil
 	i.remoteClient = nil
 	i.runtimeTeardown = nil
 	i.mu.Unlock()

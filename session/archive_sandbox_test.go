@@ -144,10 +144,10 @@ func TestReprovisionRemote_RebindsInstance(t *testing.T) {
 	require.NotNil(t, gotClient, "remote agent-server client built from the new endpoint")
 	require.NotNil(t, gotTeardown, "teardown rebound to the fresh sandbox")
 	// The cached agent-server is discarded so AgentServer() rebuilds against the
-	// new client.
-	i.agentSrvMu.Lock()
+	// new client (cache + fields share i.mu since #1729).
+	i.mu.RLock()
 	assert.Nil(t, i.agentSrv)
-	i.agentSrvMu.Unlock()
+	i.mu.RUnlock()
 	assert.False(t, toreDown, "a successful bind does not tear the new sandbox down")
 }
 
