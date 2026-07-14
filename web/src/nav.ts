@@ -19,16 +19,17 @@
  *  on attach (Enter / click) and hands back on Escape. */
 export type KeyboardFocus = "rail" | "terminal";
 
-/** The app's top-level view (#1592 Phase 5 PR8), mirroring the TUI's rail sections:
- *  the live sessions rail, the projects (repo grouping) pane, and the tasks
- *  (scheduled automations) pane. It is a HIGHER-level switch than keyboard focus —
- *  it selects which surface the body shows — so it composes with the nav-vs-terminal
- *  model rather than replacing it. */
-export type View = "sessions" | "projects" | "tasks";
+/** The app's top-level view: the live sessions rail+terminal, or the tasks
+ *  (scheduled automations) pane. Both are SCOPED to the selected project (redesign
+ *  PR2): the old top-level Projects view is gone — its project list folded into the
+ *  top-right project switcher (the switcher is how you change project now). It is a
+ *  HIGHER-level switch than keyboard focus — it selects which surface the body shows
+ *  — so it composes with the nav-vs-terminal model rather than replacing it. */
+export type View = "sessions" | "tasks";
 
 /** The view cycle order for the [ / ] view-switch keys, left-to-right the same as
  *  the appbar's view tabs. */
-export const VIEWS: readonly View[] = ["sessions", "projects", "tasks"];
+export const VIEWS: readonly View[] = ["sessions", "tasks"];
 
 /** The view `delta` steps from `current`, wrapping around the cycle (so ] past the
  *  last view returns to the first, and [ before the first wraps to the last). */
@@ -44,10 +45,10 @@ export function cycleView(current: View, delta: 1 | -1): View {
 export interface NavContext {
   focus: KeyboardFocus;
   modalOpen: boolean;
-  /** The current top-level view (#1592 Phase 5 PR8). The rail-mode session keys
-   *  (Enter/attach, j/k, 1-9/t/w) apply only in the "sessions" view — the projects
-   *  and tasks views are mouse/button-driven browse/list surfaces — while the
-   *  [ / ] view-switch keys apply in EVERY view's rail mode. */
+  /** The current top-level view. The rail-mode session keys (Enter/attach, j/k,
+   *  1-9/t/w) apply only in the "sessions" view — the tasks view is a mouse/button-
+   *  driven list surface — while the [ / ] view-switch keys apply in EVERY view's
+   *  rail mode. */
   view: View;
   /** The rail's session ids in DISPLAY order (the same order the DOM shows). */
   orderedIds: string[];
@@ -138,7 +139,7 @@ export function decideKey(key: string, ctx: NavContext, mods: KeyMods = {}): Nav
   if (ctx.focus === "terminal") {
     return key === "Escape" ? { kind: "toRail" } : { kind: "none" };
   }
-  // View switching (#1592 Phase 5 PR8): [ / ] cycle the top-level view. Rail-mode
+  // View switching: [ / ] cycle the top-level view (sessions ⇄ tasks). Rail-mode
   // ONLY — a modal owns the keyboard (handled above) and a focused terminal forwards
   // them to the agent (also above), so switching views composes with the #1694 focus
   // model instead of fighting it. Shared across every view, unlike the session keys
@@ -151,9 +152,9 @@ export function decideKey(key: string, ctx: NavContext, mods: KeyMods = {}): Nav
   }
   // The remaining rail keys (Enter/attach, j/k selection, 1-9/t/w tabs) are the
   // SESSIONS view's model: they act on the live session list + the selected
-  // session's terminal. The projects and tasks views are mouse/button-driven browse
-  // and list surfaces with no terminal, so those keys pass through there — only the
-  // view-switch keys above are ours outside the sessions view.
+  // session's terminal. The tasks view is a mouse/button-driven list surface with no
+  // terminal, so those keys pass through there — only the view-switch keys above are
+  // ours outside the sessions view.
   if (ctx.view !== "sessions") {
     return { kind: "none" };
   }

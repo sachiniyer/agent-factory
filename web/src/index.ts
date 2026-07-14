@@ -36,6 +36,7 @@ import {
 import { EventStream, type EventStreamStatus } from "./events.js";
 import { confirmDeleteProjectModal, confirmModal, type ModalHandle, newSessionModal, promptModal } from "./modals.js";
 import { decideKey, type KeyboardFocus, type View } from "./nav.js";
+import { loadProjectChoice, persistProjectChoice, pickerProjects, reconcileProject, scopeToProject } from "./project.js";
 import { applyEvent, clampActiveTab, pickSelection, upsertSession } from "./sessions.js";
 import { SplitView } from "./split.js";
 import { Store } from "./store.js";
@@ -44,7 +45,6 @@ import { addTaskModal, type AddTaskInput, buildTask } from "./tasks.js";
 import type { TerminalStatus } from "./terminal.js";
 import {
   AppShell,
-  deriveProjects,
   orderedSessions,
   renderLogin,
   sessionTabs,
@@ -63,6 +63,7 @@ const initialThemeChoice = bootStampTheme();
 const store = new Store<AppState>({
   phase: "login",
   view: "sessions",
+  selectedProject: null,
   authRequired: true,
   // Start in the connecting state: mount() immediately probes /v1/auth-info, and
   // showing the paste form before that resolves would flash a token field a
@@ -237,9 +238,25 @@ async function connect(candidate: string): Promise<void> {
   if (candidate !== "") {
     storeToken(candidate);
   }
+  // Fetch the tasks BEFORE choosing the initial project scope (redesign PR2, Greptile
+  // follow-on Fix 2): the persisted selection must reconcile against the FULL project
+  // list — sessions AND tasks — so a persisted TASK-ONLY project restores AS ITSELF,
+  // not as a temporary session-backed fallback that would then stick (reconcile keeps
+  // a valid current selection). A transport failure degrades to no tasks (the events
+  // plane / a view switch refetches); the scope then falls back until they load.
+  let tasks: TaskData[] = [];
+  try {
+    tasks = await listTasks(candidate);
+  } catch {
+    tasks = [];
+  }
+  // Scope to a project on connect: resume the persisted choice if it is still a real
+  // project (session- OR task-derived), else the most-recently-active default.
+  const selectedProject = reconcileProject(sessions, tasks, loadProjectChoice(), null);
   store.set({
     phase: "app",
     view: "sessions",
+    selectedProject,
     connecting: false,
     loginError: null,
     sessions,
@@ -249,13 +266,9 @@ async function connect(candidate: string): Promise<void> {
     activeTab: 0,
     shownTabs: [0],
     tabError: null,
-    tasks: [],
+    tasks,
   });
   startStream(candidate);
-  // Seed the tasks view alongside the rail: one ListTasks fetch so the tasks pane is
-  // populated the moment the user switches to it. Task deltas then arrive via the
-  // task.* events plane (onEvent), which triggers a debounced refetch.
-  refreshTasks();
 }
 
 /** Forgets the token, tears down the push stream + terminal, and returns to login. */
@@ -267,6 +280,7 @@ function disconnect(): void {
   store.set({
     phase: "login",
     view: "sessions",
+    selectedProject: null,
     connecting: false,
     loginError: null,
     sessions: [],
@@ -342,6 +356,24 @@ function switchView(view: View): void {
   }
 }
 
+/** Switches the active project (redesign PR2): scope the rail + views to `root`,
+ *  persist it so a reload resumes it, and drop a selection that doesn't belong to the
+ *  new project (its terminal detaches). A no-op when already on that project. */
+function switchProject(root: string): void {
+  if (store.get().selectedProject === root) {
+    return;
+  }
+  clearTabError();
+  persistProjectChoice(root);
+  // Keep the current selection only if it lives in the newly selected project; else
+  // clear it so the main pane returns to its empty state instead of showing a session
+  // hidden from the scoped rail.
+  const sel = selectedSessionData();
+  const keep = sel && sel.worktree?.repo_path === root ? store.get().selectedId : null;
+  splitView.blur();
+  store.set({ selectedProject: root, selectedId: keep, focus: "rail", activeTab: 0 });
+}
+
 // --- lifecycle actions (modals) --------------------------------------------
 
 /** The currently selected session's stable id + display title, or null if none.
@@ -375,9 +407,9 @@ function openModal(m: ModalHandle): void {
  *  submit it creates the session via the daemon; the created row arrives via the
  *  events stream. Errors (e.g. a bad repo) surface in the modal for a retry. */
 function newSession(): void {
-  const projects = deriveProjects(store.get().sessions);
+  const projects = pickerProjects(store.get().sessions, store.get().tasks);
   openModal(
-    newSessionModal(projects, {
+    newSessionModal(projects, store.get().selectedProject, {
       onSubmit: (values: CreateSessionInput) => {
         const tok = token;
         // `=== null` not `!tok`: "" is the authorized-tokenless credential (#1696).
@@ -635,7 +667,14 @@ function refreshTasks(): void {
     return;
   }
   void listTasks(tok)
-    .then((tasks) => store.set({ tasks }))
+    .then((tasks) => {
+      // Reconcile the project scope against the new task set (redesign PR2): a
+      // task-only project appears once its tasks load, and drops when its last task
+      // is removed (if it also has no live sessions). This is what makes a task-only
+      // repo reachable in the switcher and its tasks scoped to it.
+      const selectedProject = reconcileProject(store.get().sessions, tasks, loadProjectChoice(), store.get().selectedProject);
+      store.set({ tasks, selectedProject });
+    })
     .catch(() => {
       // Transport/auth failure: leave the last-known list up; a task.* event or the
       // next mutation refetches. Nothing to surface here.
@@ -658,9 +697,13 @@ function requestTaskResync(): void {
  *  the created task also arrives via a task.created event, and a refetch reconciles.
  *  Errors (a bad cron expression, a duplicate) surface in the modal for a retry. */
 function openAddTask(): void {
-  const projects = deriveProjects(store.get().sessions);
+  // The picker's projects come from sessions AND tasks (redesign PR2, Greptile
+  // follow-on Fix 1), so a TASK-ONLY project is selectable and the default lands on
+  // the currently-scoped project — adding a task targets ITS repo, and is never
+  // blocked by the absence of a session.
+  const projects = pickerProjects(store.get().sessions, store.get().tasks);
   openModal(
-    addTaskModal(projects, {
+    addTaskModal(projects, store.get().selectedProject, {
       onSubmit: (input: AddTaskInput) => {
         const tok = token;
         // `=== null` not `!tok`: "" is the authorized-tokenless credential (#1696).
@@ -777,6 +820,7 @@ const actions = {
   newTab: createSessionTab,
   closeTab: closeSessionTab,
   switchView,
+  switchProject,
   addTask: openAddTask,
   toggleTask,
   triggerTask: doTriggerTask,
@@ -875,9 +919,21 @@ function onEvent(ev: WireEvent): void {
  *  the selected session was killed), the active tab resets to the agent tab. */
 function applySessions(sessions: SessionData[]): void {
   const prevSel = store.get().selectedId;
-  const selectedId = pickSelection(sessions, prevSel);
+  // Reconcile the project scope against the new session set (redesign PR2): a project
+  // that vanished (its last session gone) falls back gracefully to the persisted/
+  // default one, so the rail is never pinned to a dead root.
+  const selectedProject = reconcileProject(sessions, store.get().tasks, loadProjectChoice(), store.get().selectedProject);
+  let selectedId = pickSelection(sessions, prevSel);
+  // Drop a selection that no longer belongs to the scoped project, so the terminal
+  // never stays attached to a session hidden from the (now re-scoped) rail.
+  if (selectedId) {
+    const sel = sessions.find((s) => s.id === selectedId);
+    if (sel && sel.worktree?.repo_path !== selectedProject) {
+      selectedId = null;
+    }
+  }
   const activeTab = selectedId === prevSel ? clampActiveTab(sessions, selectedId, store.get().activeTab) : 0;
-  store.set({ sessions, selectedId, activeTab });
+  store.set({ sessions, selectedProject, selectedId, activeTab });
 }
 
 /** Re-fetches the authoritative Snapshot (debounced) and replaces the rail — the
@@ -953,7 +1009,9 @@ function onKeydown(e: KeyboardEvent): void {
       focus,
       modalOpen: modal !== null,
       view: state.view,
-      orderedIds: orderedSessions(state.sessions)
+      // j/k navigate only the SCOPED rail (redesign PR2): the ids in the order the
+      // rail shows them, restricted to the selected project.
+      orderedIds: orderedSessions(scopeToProject(state.sessions, state.selectedProject))
         .map((s) => s.id ?? "")
         .filter((id) => id !== ""),
       selectedId: state.selectedId,

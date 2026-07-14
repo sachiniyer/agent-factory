@@ -6421,7 +6421,7 @@ function asForm(card, onSubmit) {
     onSubmit();
   });
 }
-function newSessionModal(projects, callbacks) {
+function newSessionModal(projects, defaultProject2, callbacks) {
   const { handle, body, confirmBtn } = modalChrome({
     title: "New session",
     confirmLabel: "Create",
@@ -6441,6 +6441,9 @@ function newSessionModal(projects, callbacks) {
   } else {
     for (const p of projects) {
       projectSelect.append(h("option", { value: p }, projectLabel(p)));
+    }
+    if (defaultProject2 && projects.includes(defaultProject2)) {
+      projectSelect.value = defaultProject2;
     }
   }
   const programSelect = h("select", { class: "af-input" });
@@ -6557,7 +6560,7 @@ function projectLabel(root2) {
 }
 
 // src/nav.ts
-var VIEWS = ["sessions", "projects", "tasks"];
+var VIEWS = ["sessions", "tasks"];
 function cycleView(current, delta) {
   const i = VIEWS.indexOf(current);
   const n = VIEWS.length;
@@ -6632,6 +6635,288 @@ function decideKey(key, ctx, mods = {}) {
   }
   const next = nextSelection(ctx.orderedIds, ctx.selectedId, delta);
   return next ? { kind: "select", id: next } : { kind: "none" };
+}
+
+// src/types.ts
+var Liveness = {
+  Unset: 0,
+  Running: 1,
+  Ready: 2,
+  Lost: 3,
+  Dead: 4,
+  Archived: 5,
+  LimitReached: 6
+};
+var TabKind = {
+  Agent: 0,
+  Shell: 1,
+  Process: 2,
+  /** A URL/iframe tab (no PTY): rendered as an iframe, not an xterm. A loopback
+   *  target is reverse-proxied by the daemon (/v1/webtab/...); an external URL is
+   *  iframed directly. Mirrors session.TabKindWeb (session/tab.go). */
+  Web: 3
+};
+var InFlightOp = {
+  None: 0,
+  Creating: 1,
+  Killing: 2,
+  Archiving: 3,
+  Restoring: 4
+};
+var Status = {
+  Running: 0,
+  Ready: 1,
+  Loading: 2,
+  Deleting: 3,
+  Dead: 4,
+  Lost: 5,
+  Archived: 6
+};
+
+// src/status.ts
+var READY_GLYPH = "\u25CF";
+var DEAD_GLYPH = "\u25CB";
+var LOST_GLYPH = "\u25CC";
+var ARCHIVED_GLYPH = "\u25A7";
+var LIMIT_GLYPH = "\u25C6";
+var WORKING_GLYPH = "\u25CF";
+var WORKING = { glyph: WORKING_GLYPH, kind: "working", spinning: true, label: "Working" };
+function rowStatus(s) {
+  const op = s.in_flight_op ?? InFlightOp.None;
+  if (op !== InFlightOp.None) {
+    return WORKING;
+  }
+  return dotForLiveness(livenessOf(s));
+}
+function livenessOf(s) {
+  const lv = s.liveness ?? Liveness.Unset;
+  if (lv !== Liveness.Unset) {
+    return lv;
+  }
+  switch (s.status) {
+    case Status.Ready:
+      return Liveness.Ready;
+    case Status.Dead:
+      return Liveness.Dead;
+    case Status.Lost:
+      return Liveness.Lost;
+    case Status.Archived:
+      return Liveness.Archived;
+    // Running and the transient values (Loading/Deleting, which never persist)
+    // fall through to the working dot, matching render.go's LivenessUnset arm.
+    default:
+      return Liveness.Running;
+  }
+}
+function dotForLiveness(lv) {
+  switch (lv) {
+    case Liveness.Ready:
+      return { glyph: READY_GLYPH, kind: "ready", spinning: false, label: "Ready" };
+    case Liveness.Lost:
+      return { glyph: LOST_GLYPH, kind: "lost", spinning: false, label: "Lost" };
+    case Liveness.Dead:
+      return { glyph: DEAD_GLYPH, kind: "dead", spinning: false, label: "Dead" };
+    case Liveness.Archived:
+      return { glyph: ARCHIVED_GLYPH, kind: "archived", spinning: false, label: "Archived" };
+    case Liveness.LimitReached:
+      return { glyph: LIMIT_GLYPH, kind: "limit", spinning: false, label: "Limit reached" };
+    // LiveRunning and LivenessUnset both render as working (render.go:285, 297).
+    case Liveness.Running:
+    case Liveness.Unset:
+    default:
+      return WORKING;
+  }
+}
+function isArchived(s) {
+  return livenessOf(s) === Liveness.Archived;
+}
+function compareSessionsForRail(a, b) {
+  const aArchived = isArchived(a);
+  const aa = aArchived ? 1 : 0;
+  const bb = isArchived(b) ? 1 : 0;
+  if (aa !== bb) {
+    return aa - bb;
+  }
+  const at = a.created_at ?? "";
+  const bt = b.created_at ?? "";
+  if (at !== bt) {
+    const asc = at < bt ? -1 : 1;
+    return aArchived ? -asc : asc;
+  }
+  return a.title < b.title ? -1 : a.title > b.title ? 1 : 0;
+}
+function rowTitle(s) {
+  const lv = livenessOf(s);
+  const op = s.in_flight_op ?? InFlightOp.None;
+  let title = s.title;
+  if (op === InFlightOp.Killing || op === InFlightOp.Archiving) {
+    title = "[deleting] " + title;
+  } else if (lv === Liveness.Lost) {
+    title = "[lost] " + title;
+  } else if (lv === Liveness.LimitReached) {
+    title = limitBadgePrefix(s) + title;
+  }
+  if (s.backend_type === "remote") {
+    title = "[remote] " + title;
+  }
+  return title;
+}
+function limitBadgePrefix(s) {
+  if (!s.limit_reset_at) {
+    return "[limit] ";
+  }
+  const reset = new Date(s.limit_reset_at);
+  if (Number.isNaN(reset.getTime())) {
+    return "[limit] ";
+  }
+  return `[limit] resets ${formatLimitReset(reset, /* @__PURE__ */ new Date())} `;
+}
+function formatLimitReset(reset, now) {
+  const h12 = (reset.getHours() + 11) % 12 + 1;
+  const ampm = reset.getHours() < 12 ? "am" : "pm";
+  const min = reset.getMinutes();
+  const clock = min === 0 ? `${h12}${ampm}` : `${h12}:${String(min).padStart(2, "0")}${ampm}`;
+  const sameDay = reset.getFullYear() === now.getFullYear() && reset.getMonth() === now.getMonth() && reset.getDate() === now.getDate();
+  if (sameDay) {
+    return clock;
+  }
+  const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+  return `${months[reset.getMonth()]} ${reset.getDate()} ${clock}`;
+}
+
+// src/project.ts
+var PROJECT_KEY = "af-project";
+function projectName(root2) {
+  const parts = root2.replace(/\/+$/, "").split("/");
+  return parts[parts.length - 1] || root2;
+}
+function projectSummaries(sessions, tasks) {
+  const byRoot = /* @__PURE__ */ new Map();
+  for (const s of sessions) {
+    const root2 = s.worktree?.repo_path;
+    if (!root2) {
+      continue;
+    }
+    const arr = byRoot.get(root2) ?? [];
+    arr.push(s);
+    byRoot.set(root2, arr);
+  }
+  const taskCounts = /* @__PURE__ */ new Map();
+  for (const t of tasks) {
+    const root2 = t.project_path;
+    if (!root2) {
+      continue;
+    }
+    taskCounts.set(root2, (taskCounts.get(root2) ?? 0) + 1);
+  }
+  const roots = /* @__PURE__ */ new Set();
+  for (const [root2, rows] of byRoot) {
+    if (rows.some((s) => !isArchived(s))) {
+      roots.add(root2);
+    }
+  }
+  for (const root2 of taskCounts.keys()) {
+    roots.add(root2);
+  }
+  return [...roots].sort().map((root2) => {
+    const rows = byRoot.get(root2) ?? [];
+    const live = rows.filter((s) => !isArchived(s));
+    const working = live.filter((s) => rowStatus(s).spinning).length;
+    return {
+      root: root2,
+      name: projectName(root2),
+      path: root2,
+      liveCount: live.length,
+      workingCount: working,
+      totalCount: rows.length,
+      taskCount: taskCounts.get(root2) ?? 0
+    };
+  });
+}
+function projectMeta(p) {
+  if (p.liveCount === 0) {
+    return p.taskCount > 0 ? `${p.taskCount} task${p.taskCount === 1 ? "" : "s"}` : "no sessions yet";
+  }
+  const base = `${p.liveCount} session${p.liveCount === 1 ? "" : "s"}`;
+  return p.workingCount > 0 ? `${base} \xB7 ${p.workingCount} working` : base;
+}
+function pickerProjects(sessions, tasks) {
+  const roots = /* @__PURE__ */ new Set();
+  for (const s of sessions) {
+    const root2 = s.worktree?.repo_path;
+    if (root2) {
+      roots.add(root2);
+    }
+  }
+  for (const t of tasks) {
+    if (t.project_path) {
+      roots.add(t.project_path);
+    }
+  }
+  return [...roots].sort();
+}
+function scopeToProject(sessions, root2) {
+  if (!root2) {
+    return [];
+  }
+  return sessions.filter((s) => s.worktree?.repo_path === root2);
+}
+function validRoots(sessions, tasks) {
+  return new Set(projectSummaries(sessions, tasks).map((p) => p.root));
+}
+function defaultProject(sessions, tasks) {
+  const summaries = projectSummaries(sessions, tasks);
+  if (summaries.length === 0) {
+    return null;
+  }
+  const valid = new Set(summaries.map((p) => p.root));
+  let best = null;
+  for (const s of sessions) {
+    const root2 = s.worktree?.repo_path;
+    if (!root2 || isArchived(s) || !valid.has(root2)) {
+      continue;
+    }
+    if (!best || (s.created_at ?? "") > (best.created_at ?? "")) {
+      best = s;
+    }
+  }
+  if (best?.worktree?.repo_path) {
+    return best.worktree.repo_path;
+  }
+  let bestTask = null;
+  for (const t of tasks) {
+    if (!t.project_path || !valid.has(t.project_path)) {
+      continue;
+    }
+    if (!bestTask || (t.created_at ?? "") > (bestTask.created_at ?? "")) {
+      bestTask = t;
+    }
+  }
+  return bestTask?.project_path ?? summaries[0]?.root ?? null;
+}
+function reconcileProject(sessions, tasks, persisted, current) {
+  const valid = validRoots(sessions, tasks);
+  if (current && valid.has(current)) {
+    return current;
+  }
+  if (persisted && valid.has(persisted)) {
+    return persisted;
+  }
+  return defaultProject(sessions, tasks);
+}
+function loadProjectChoice() {
+  try {
+    const v = localStorage.getItem(PROJECT_KEY);
+    return v && v !== "" ? v : null;
+  } catch {
+    return null;
+  }
+}
+function persistProjectChoice(root2) {
+  try {
+    localStorage.setItem(PROJECT_KEY, root2);
+  } catch {
+  }
 }
 
 // src/sessions.ts
@@ -7258,42 +7543,6 @@ var AttachTerminal = class {
       ws.send(bytes);
     }
   }
-};
-
-// src/types.ts
-var Liveness = {
-  Unset: 0,
-  Running: 1,
-  Ready: 2,
-  Lost: 3,
-  Dead: 4,
-  Archived: 5,
-  LimitReached: 6
-};
-var TabKind = {
-  Agent: 0,
-  Shell: 1,
-  Process: 2,
-  /** A URL/iframe tab (no PTY): rendered as an iframe, not an xterm. A loopback
-   *  target is reverse-proxied by the daemon (/v1/webtab/...); an external URL is
-   *  iframed directly. Mirrors session.TabKindWeb (session/tab.go). */
-  Web: 3
-};
-var InFlightOp = {
-  None: 0,
-  Creating: 1,
-  Killing: 2,
-  Archiving: 3,
-  Restoring: 4
-};
-var Status = {
-  Running: 0,
-  Ready: 1,
-  Loading: 2,
-  Deleting: 3,
-  Dead: 4,
-  Lost: 5,
-  Archived: 6
 };
 
 // src/split.ts
@@ -7995,12 +8244,18 @@ var TasksPane = class {
   }
   el;
   lastTasks = null;
-  update(tasks) {
-    if (this.lastTasks === tasks) {
+  lastProject = null;
+  /** Re-renders the tasks list SCOPED to the selected project (redesign PR2): only
+   *  tasks whose project_path matches, so the tasks view operates within the same
+   *  project the rail is scoped to. A null project (none exist) shows no tasks. */
+  update(tasks, selectedProject) {
+    if (this.lastTasks === tasks && this.lastProject === selectedProject) {
       return;
     }
     this.lastTasks = tasks;
-    this.render(tasks);
+    this.lastProject = selectedProject;
+    const scoped = selectedProject ? tasks.filter((t) => t.project_path === selectedProject) : [];
+    this.render(scoped);
   }
   render(tasks) {
     const addBtn = h("button", { type: "button", class: "af-tasks-add", title: "Add task" }, "+ Add");
@@ -8058,7 +8313,7 @@ var TasksPane = class {
     return h("li", { class: "af-task-row" }, enabledDot, main, actions2);
   }
 };
-function addTaskModal(projects, callbacks) {
+function addTaskModal(projects, defaultProject2, callbacks) {
   const { handle, body, confirmBtn } = modalChrome({
     title: "Add task",
     confirmLabel: "Add",
@@ -8078,6 +8333,9 @@ function addTaskModal(projects, callbacks) {
   } else {
     for (const p of projects) {
       projectSelect.append(h("option", { value: p }, projectLabel(p)));
+    }
+    if (defaultProject2 && projects.includes(defaultProject2)) {
+      projectSelect.value = defaultProject2;
     }
   }
   const triggerSelect = h("select", { class: "af-input" });
@@ -8155,224 +8413,6 @@ function addTaskModal(projects, callbacks) {
   return handle;
 }
 
-// src/status.ts
-var READY_GLYPH = "\u25CF";
-var DEAD_GLYPH = "\u25CB";
-var LOST_GLYPH = "\u25CC";
-var ARCHIVED_GLYPH = "\u25A7";
-var LIMIT_GLYPH = "\u25C6";
-var WORKING_GLYPH = "\u25CF";
-var WORKING = { glyph: WORKING_GLYPH, kind: "working", spinning: true, label: "Working" };
-function rowStatus(s) {
-  const op = s.in_flight_op ?? InFlightOp.None;
-  if (op !== InFlightOp.None) {
-    return WORKING;
-  }
-  return dotForLiveness(livenessOf(s));
-}
-function livenessOf(s) {
-  const lv = s.liveness ?? Liveness.Unset;
-  if (lv !== Liveness.Unset) {
-    return lv;
-  }
-  switch (s.status) {
-    case Status.Ready:
-      return Liveness.Ready;
-    case Status.Dead:
-      return Liveness.Dead;
-    case Status.Lost:
-      return Liveness.Lost;
-    case Status.Archived:
-      return Liveness.Archived;
-    // Running and the transient values (Loading/Deleting, which never persist)
-    // fall through to the working dot, matching render.go's LivenessUnset arm.
-    default:
-      return Liveness.Running;
-  }
-}
-function dotForLiveness(lv) {
-  switch (lv) {
-    case Liveness.Ready:
-      return { glyph: READY_GLYPH, kind: "ready", spinning: false, label: "Ready" };
-    case Liveness.Lost:
-      return { glyph: LOST_GLYPH, kind: "lost", spinning: false, label: "Lost" };
-    case Liveness.Dead:
-      return { glyph: DEAD_GLYPH, kind: "dead", spinning: false, label: "Dead" };
-    case Liveness.Archived:
-      return { glyph: ARCHIVED_GLYPH, kind: "archived", spinning: false, label: "Archived" };
-    case Liveness.LimitReached:
-      return { glyph: LIMIT_GLYPH, kind: "limit", spinning: false, label: "Limit reached" };
-    // LiveRunning and LivenessUnset both render as working (render.go:285, 297).
-    case Liveness.Running:
-    case Liveness.Unset:
-    default:
-      return WORKING;
-  }
-}
-function isArchived(s) {
-  return livenessOf(s) === Liveness.Archived;
-}
-function compareSessionsForRail(a, b) {
-  const aArchived = isArchived(a);
-  const aa = aArchived ? 1 : 0;
-  const bb = isArchived(b) ? 1 : 0;
-  if (aa !== bb) {
-    return aa - bb;
-  }
-  const at = a.created_at ?? "";
-  const bt = b.created_at ?? "";
-  if (at !== bt) {
-    const asc = at < bt ? -1 : 1;
-    return aArchived ? -asc : asc;
-  }
-  return a.title < b.title ? -1 : a.title > b.title ? 1 : 0;
-}
-function rowTitle(s) {
-  const lv = livenessOf(s);
-  const op = s.in_flight_op ?? InFlightOp.None;
-  let title = s.title;
-  if (op === InFlightOp.Killing || op === InFlightOp.Archiving) {
-    title = "[deleting] " + title;
-  } else if (lv === Liveness.Lost) {
-    title = "[lost] " + title;
-  } else if (lv === Liveness.LimitReached) {
-    title = limitBadgePrefix(s) + title;
-  }
-  if (s.backend_type === "remote") {
-    title = "[remote] " + title;
-  }
-  return title;
-}
-function limitBadgePrefix(s) {
-  if (!s.limit_reset_at) {
-    return "[limit] ";
-  }
-  const reset = new Date(s.limit_reset_at);
-  if (Number.isNaN(reset.getTime())) {
-    return "[limit] ";
-  }
-  return `[limit] resets ${formatLimitReset(reset, /* @__PURE__ */ new Date())} `;
-}
-function formatLimitReset(reset, now) {
-  const h12 = (reset.getHours() + 11) % 12 + 1;
-  const ampm = reset.getHours() < 12 ? "am" : "pm";
-  const min = reset.getMinutes();
-  const clock = min === 0 ? `${h12}${ampm}` : `${h12}:${String(min).padStart(2, "0")}${ampm}`;
-  const sameDay = reset.getFullYear() === now.getFullYear() && reset.getMonth() === now.getMonth() && reset.getDate() === now.getDate();
-  if (sameDay) {
-    return clock;
-  }
-  const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-  return `${months[reset.getMonth()]} ${reset.getDate()} ${clock}`;
-}
-
-// src/projects.ts
-function orderWithinProject(sessions) {
-  return [...sessions].sort(compareSessionsForRail);
-}
-function groupSessionsByProject(sessions) {
-  const byRoot = /* @__PURE__ */ new Map();
-  for (const s of sessions) {
-    if (isArchived(s)) {
-      continue;
-    }
-    const root2 = s.worktree?.repo_path;
-    if (!root2) {
-      continue;
-    }
-    const arr = byRoot.get(root2) ?? [];
-    arr.push(s);
-    byRoot.set(root2, arr);
-  }
-  return [...byRoot.keys()].sort().map((root2) => ({ root: root2, label: projectLabel(root2), sessions: orderWithinProject(byRoot.get(root2) ?? []) }));
-}
-var ProjectsPane = class {
-  /** onOpen selects + attaches a session by its stable id (index.ts switches to the
-   *  sessions view and hands the terminal the keyboard), so a project's session row
-   *  is a jump-to-session affordance. onDeleteProject deletes a project by its repo
-   *  root (#1735) — index.ts confirms first, then calls the DeleteProject RPC. */
-  constructor(onOpen, onDeleteProject) {
-    this.onOpen = onOpen;
-    this.onDeleteProject = onDeleteProject;
-    this.el = h("section", { class: "af-projects" });
-    this.el.setAttribute("aria-label", "Projects");
-  }
-  el;
-  lastSessions = null;
-  lastSelectedId = null;
-  /** Re-renders when the session list or the selection changed. */
-  update(sessions, selectedId) {
-    if (this.lastSessions === sessions && this.lastSelectedId === selectedId) {
-      return;
-    }
-    this.lastSessions = sessions;
-    this.lastSelectedId = selectedId;
-    this.render(sessions, selectedId);
-  }
-  render(sessions, selectedId) {
-    const groups = groupSessionsByProject(sessions);
-    const head = h(
-      "div",
-      { class: "af-projects-head" },
-      h("span", { class: "af-projects-title" }, "Projects"),
-      h("span", { class: "af-view-count" }, String(groups.length))
-    );
-    if (groups.length === 0) {
-      this.el.replaceChildren(
-        head,
-        h(
-          "p",
-          { class: "af-projects-empty" },
-          "No projects yet. Create a session in a repo (the TUI or ",
-          h("code", {}, "af sessions create"),
-          ") and it appears here."
-        )
-      );
-      return;
-    }
-    const sections = groups.map((g) => this.projectSection(g, selectedId));
-    this.el.replaceChildren(head, h("div", { class: "af-projects-list" }, ...sections));
-  }
-  projectSection(group, selectedId) {
-    const deleteBtn = h("button", { type: "button", class: "af-ghost af-project-delete" }, "Delete");
-    deleteBtn.setAttribute("title", `Delete project ${group.label} (archives its sessions, restorable)`);
-    deleteBtn.setAttribute("aria-label", `Delete project ${group.label}`);
-    deleteBtn.addEventListener("click", () => this.onDeleteProject(group.root, group.label, group.sessions.length));
-    const header = h(
-      "div",
-      { class: "af-project-head" },
-      h("span", { class: "af-project-name" }, group.label),
-      h("span", { class: "af-project-count" }, `${group.sessions.length}`),
-      deleteBtn
-    );
-    header.append(h("div", { class: "af-project-path" }, group.root));
-    const rows = group.sessions.map((s) => this.sessionRow(s, s.id === selectedId));
-    return h("section", { class: "af-project" }, header, h("ul", { class: "af-project-sessions" }, ...rows));
-  }
-  /** One session row under a project: the same status dot + prefixed title the rail
-   *  row carries (status.ts), keyed by the stable id. Clicking opens it (→ sessions
-   *  view). A row with no id (never from a live Snapshot) renders but is inert. */
-  sessionRow(s, selected) {
-    const status = rowStatus(s);
-    const dot = h(
-      "span",
-      { class: `af-dot af-dot-${status.kind}${status.spinning ? " af-dot-spin" : ""}` },
-      status.glyph
-    );
-    dot.setAttribute("aria-hidden", "true");
-    const title = h("div", { class: "af-row-title" }, rowTitle(s));
-    const cls = `af-row af-project-row${selected ? " af-row-selected" : ""}${isArchived(s) ? " af-row-archived" : ""}`;
-    const row = h("li", { class: cls }, dot, h("div", { class: "af-row-main" }, title));
-    row.setAttribute("role", "button");
-    row.setAttribute("title", `${s.title} \u2014 ${status.label}`);
-    if (s.id) {
-      const id = s.id;
-      row.addEventListener("click", () => this.onOpen(id));
-    }
-    return row;
-  }
-};
-
 // src/ui.ts
 var MAX_TABS = 9;
 function supportsTabManagement(s) {
@@ -8399,22 +8439,10 @@ function tabLabel(tab) {
   }
   return tab.name || "Tab";
 }
-function deriveProjects(sessions) {
-  const roots = /* @__PURE__ */ new Set();
-  for (const s of sessions) {
-    const root2 = s.worktree?.repo_path;
-    if (root2) {
-      roots.add(root2);
-    }
-  }
-  return [...roots].sort();
-}
 function viewLabel(view) {
   switch (view) {
     case "sessions":
       return "Sessions";
-    case "projects":
-      return "Projects";
     case "tasks":
       return "Tasks";
   }
@@ -8582,11 +8610,41 @@ var AppShell = class {
       this.viewTabs.set(v, tab);
       viewNav.append(tab);
     }
+    this.projectSwitchName = h2("span", { class: "af-project-switch-name" }, "\u2014");
+    const switchGlyph = h2("span", { class: "af-project-glyph" }, "\u25A3");
+    switchGlyph.setAttribute("aria-hidden", "true");
+    const switchCaret = h2("span", { class: "af-project-caret" }, "\u25BC");
+    switchCaret.setAttribute("aria-hidden", "true");
+    this.projectSwitchBtn = h2(
+      "button",
+      { type: "button", class: "af-project-switch" },
+      switchGlyph,
+      this.projectSwitchName,
+      switchCaret
+    );
+    this.projectSwitchBtn.setAttribute("aria-haspopup", "listbox");
+    this.projectSwitchBtn.setAttribute("aria-expanded", "false");
+    this.projectSwitchBtn.setAttribute("aria-label", "Switch project");
+    this.projectSwitchBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      this.toggleProjectMenu();
+    });
+    this.projectMenu = h2("div", { class: "af-project-menu" });
+    this.projectMenu.setAttribute("role", "listbox");
+    this.projectMenu.setAttribute("aria-label", "Switch project");
+    this.projectMenu.hidden = true;
+    this.projectSwitchWrap = h2("div", { class: "af-project-switch-wrap" }, this.projectSwitchBtn, this.projectMenu);
+    document.addEventListener("click", (e) => {
+      if (this.projectMenuOpen && !this.projectSwitchWrap.contains(e.target)) {
+        this.closeProjectMenu();
+      }
+    });
     const header = h2(
       "header",
       { class: "af-appbar" },
       h2("span", { class: "af-brand" }, "Agent Factory"),
       viewNav,
+      this.projectSwitchWrap,
       live,
       themeToggle,
       disconnect2
@@ -8607,17 +8665,13 @@ var AppShell = class {
     const rail = h2("nav", { class: "af-rail" }, railHead, this.railList);
     this.main = h2("section", { class: "af-main" });
     this.sessionsBody = h2("div", { class: "af-body" }, rail, this.main);
-    this.projectsPane = new ProjectsPane(
-      (id) => this.actions.open(id),
-      (root2, label, count) => this.actions.deleteProject(root2, label, count)
-    );
     this.tasksPane = new TasksPane({
       add: () => this.actions.addTask(),
       toggle: (task) => this.actions.toggleTask(task),
       trigger: (task) => this.actions.triggerTask(task),
       remove: (task) => this.actions.removeTask(task)
     });
-    const viewport = h2("div", { class: "af-viewport" }, this.sessionsBody, this.projectsPane.el, this.tasksPane.el);
+    const viewport = h2("div", { class: "af-viewport" }, this.sessionsBody, this.tasksPane.el);
     this.toast = h2("div", { class: "af-toast" });
     this.toast.setAttribute("role", "alert");
     this.el = h2("main", { class: "af-app" }, header, viewport, this.toast, this.modalHost);
@@ -8640,10 +8694,25 @@ var AppShell = class {
   themeOpts = /* @__PURE__ */ new Map();
   lastThemeChoice = null;
   sessionsBody;
-  projectsPane;
   tasksPane;
   lastView = null;
   lastTasks = null;
+  lastTasksProject = null;
+  // The top-right project switcher (redesign PR2): a button showing the current
+  // project + a dropdown menu listing every project with its per-project counts, the
+  // single place project context changes. Managed imperatively (open/close, outside-
+  // click dismiss) like the modals — its open state is UI ephemera, not store state.
+  projectSwitchWrap;
+  projectSwitchBtn;
+  projectSwitchName;
+  projectMenu;
+  projectMenuOpen = false;
+  // Change-detection for the switcher label + menu: rebuilt only when the session set,
+  // the task set, or the selected project changes (the counts + the current-item
+  // highlight; the task set can add/drop a task-only project).
+  lastProjectSessions = null;
+  lastProjectTasks = null;
+  lastSelectedProject = null;
   // Header text nodes for the selected pane, (re)created per selection.
   headTitle = null;
   headMeta = null;
@@ -8685,7 +8754,6 @@ var AppShell = class {
     if (this.lastView !== state.view) {
       this.lastView = state.view;
       this.sessionsBody.hidden = state.view !== "sessions";
-      this.projectsPane.el.hidden = state.view !== "projects";
       this.tasksPane.el.hidden = state.view !== "tasks";
       for (const [v, tab] of this.viewTabs) {
         tab.classList.toggle("af-viewtab-active", v === state.view);
@@ -8700,16 +8768,23 @@ var AppShell = class {
         opt.setAttribute("aria-pressed", active ? "true" : "false");
       }
     }
-    this.projectsPane.update(state.sessions, state.selectedId);
-    if (this.lastTasks !== state.tasks) {
+    if (this.lastTasks !== state.tasks || this.lastTasksProject !== state.selectedProject) {
       this.lastTasks = state.tasks;
-      this.tasksPane.update(state.tasks);
+      this.lastTasksProject = state.selectedProject;
+      this.tasksPane.update(state.tasks, state.selectedProject);
     }
     const sessionsChanged = this.lastSessions !== state.sessions;
     const selectionChanged = this.lastSelectedId !== state.selectedId;
+    const projectChanged = this.lastSelectedProject !== state.selectedProject;
+    if (this.lastProjectSessions !== state.sessions || this.lastProjectTasks !== state.tasks || projectChanged) {
+      this.lastProjectSessions = state.sessions;
+      this.lastProjectTasks = state.tasks;
+      this.lastSelectedProject = state.selectedProject;
+      this.renderProjectSwitch(state);
+    }
     this.lastSessions = state.sessions;
     this.lastSelectedId = state.selectedId;
-    if (sessionsChanged || selectionChanged) {
+    if (sessionsChanged || selectionChanged || projectChanged) {
       this.renderRail(state);
     }
     const activeTabChanged = this.lastActiveTab !== state.activeTab;
@@ -8724,10 +8799,15 @@ var AppShell = class {
       }
     }
   }
+  /** Renders the rail SCOPED to the selected project (redesign PR2): only that
+   *  project's sessions, never the whole projection. Three states: no project at all
+   *  (nothing created yet) → the "no sessions yet" empty rail; a project with no LIVE
+   *  sessions → the dim one-line per-project empty state; otherwise the scoped rows. */
   renderRail(state) {
-    this.railCount.textContent = String(state.sessions.length);
+    const scoped = scopeToProject(state.sessions, state.selectedProject);
+    this.railCount.textContent = String(scoped.length);
     const list = this.railList;
-    if (state.sessions.length === 0) {
+    if (!state.selectedProject) {
       list.replaceChildren(
         h2(
           "li",
@@ -8739,10 +8819,101 @@ var AppShell = class {
       );
       return;
     }
-    const rows = orderedSessions(state.sessions).map(
-      (s) => sessionRow(s, s.id === state.selectedId, this.actions)
-    );
+    const rows = orderedSessions(scoped).map((s) => sessionRow(s, s.id === state.selectedId, this.actions));
+    const hasLive = scoped.some((s) => !isArchived(s));
+    if (!hasLive) {
+      const name = projectName(state.selectedProject);
+      const newBtn = h2("button", { type: "button", class: "af-rail-empty-new", title: "New session" }, "+ New");
+      newBtn.addEventListener("click", () => this.actions.newSession());
+      const empty = h2("li", { class: "af-rail-empty-project" }, `No sessions in ${name} \u2014 `, newBtn);
+      list.replaceChildren(empty, ...rows);
+      return;
+    }
     list.replaceChildren(...rows);
+  }
+  /** (Re)builds the project switcher: the button's current-project name and the
+   *  dropdown menu of every project with its per-project counts (redesign PR2). The
+   *  menu's open/closed state (`hidden`) is preserved across rebuilds so a rebuild
+   *  triggered by a live event doesn't snap an open menu shut. */
+  renderProjectSwitch(state) {
+    const summaries = projectSummaries(state.sessions, state.tasks);
+    const current = state.selectedProject;
+    this.projectSwitchName.textContent = current ? projectName(current) : "No project";
+    this.projectSwitchBtn.disabled = summaries.length === 0;
+    const children = [h2("div", { class: "af-project-menu-label" }, "Switch project")];
+    if (summaries.length === 0) {
+      children.push(h2("div", { class: "af-project-menu-empty" }, "No projects yet."));
+    }
+    for (const p of summaries) {
+      children.push(this.projectItem(p, p.root === current));
+    }
+    const currentSummary = summaries.find((p) => p.root === current);
+    if (currentSummary) {
+      const del = h2("button", { type: "button", class: "af-ghost af-project-delete" }, "Delete project");
+      if (currentSummary.liveCount === 0) {
+        del.disabled = true;
+        del.setAttribute(
+          "title",
+          `No live sessions in ${currentSummary.name} to archive \u2014 remove its tasks from the Tasks view to clear it`
+        );
+      } else {
+        del.setAttribute("title", `Delete project ${currentSummary.name} (archives its sessions, restorable)`);
+        del.addEventListener("click", (e) => {
+          e.stopPropagation();
+          this.closeProjectMenu();
+          this.actions.deleteProject(currentSummary.root, currentSummary.name, currentSummary.liveCount);
+        });
+      }
+      children.push(h2("div", { class: "af-project-menu-foot" }, del));
+    }
+    this.projectMenu.replaceChildren(...children);
+  }
+  /** One project row in the switcher menu: a check on the current project, the name +
+   *  full path, and the cross-project glance (session + working counts). Clicking it
+   *  switches the active project and closes the menu. */
+  projectItem(p, current) {
+    const cls = `af-project-item${current ? " af-project-item-current" : ""}`;
+    const check = h2("span", { class: "af-project-check" }, current ? "\u2713" : "");
+    check.setAttribute("aria-hidden", "true");
+    const label = h2(
+      "span",
+      { class: "af-project-item-label" },
+      h2("span", { class: "af-project-item-name" }, p.name),
+      h2("span", { class: "af-project-item-path" }, p.path)
+    );
+    const meta = h2("span", { class: "af-project-item-meta" }, projectMeta(p));
+    const item = h2("button", { type: "button", class: cls }, check, label, meta);
+    item.setAttribute("role", "option");
+    item.setAttribute("aria-selected", current ? "true" : "false");
+    item.addEventListener("click", (e) => {
+      e.stopPropagation();
+      this.closeProjectMenu();
+      this.actions.switchProject(p.root);
+    });
+    return item;
+  }
+  toggleProjectMenu() {
+    if (this.projectMenuOpen) {
+      this.closeProjectMenu();
+    } else {
+      this.openProjectMenu();
+    }
+  }
+  openProjectMenu() {
+    if (this.projectSwitchBtn.disabled) {
+      return;
+    }
+    this.projectMenuOpen = true;
+    this.projectMenu.hidden = false;
+    this.projectSwitchBtn.setAttribute("aria-expanded", "true");
+  }
+  closeProjectMenu() {
+    if (!this.projectMenuOpen) {
+      return;
+    }
+    this.projectMenuOpen = false;
+    this.projectMenu.hidden = true;
+    this.projectSwitchBtn.setAttribute("aria-expanded", "false");
   }
   renderMain(state) {
     const selected = selectedSession(state);
@@ -8880,6 +9051,7 @@ var initialThemeChoice = bootStampTheme();
 var store = new Store({
   phase: "login",
   view: "sessions",
+  selectedProject: null,
   authRequired: true,
   // Start in the connecting state: mount() immediately probes /v1/auth-info, and
   // showing the paste form before that resolves would flash a token field a
@@ -8989,9 +9161,17 @@ async function connect(candidate) {
   if (candidate !== "") {
     storeToken(candidate);
   }
+  let tasks = [];
+  try {
+    tasks = await listTasks(candidate);
+  } catch {
+    tasks = [];
+  }
+  const selectedProject = reconcileProject(sessions, tasks, loadProjectChoice(), null);
   store.set({
     phase: "app",
     view: "sessions",
+    selectedProject,
     connecting: false,
     loginError: null,
     sessions,
@@ -9001,10 +9181,9 @@ async function connect(candidate) {
     activeTab: 0,
     shownTabs: [0],
     tabError: null,
-    tasks: []
+    tasks
   });
   startStream(candidate);
-  refreshTasks();
 }
 function disconnect() {
   stopStream();
@@ -9014,6 +9193,7 @@ function disconnect() {
   store.set({
     phase: "login",
     view: "sessions",
+    selectedProject: null,
     connecting: false,
     loginError: null,
     sessions: [],
@@ -9058,6 +9238,17 @@ function switchView(view) {
     refreshTasks();
   }
 }
+function switchProject(root2) {
+  if (store.get().selectedProject === root2) {
+    return;
+  }
+  clearTabError();
+  persistProjectChoice(root2);
+  const sel = selectedSessionData();
+  const keep = sel && sel.worktree?.repo_path === root2 ? store.get().selectedId : null;
+  splitView.blur();
+  store.set({ selectedProject: root2, selectedId: keep, focus: "rail", activeTab: 0 });
+}
 function selectedSession2() {
   const { sessions, selectedId } = store.get();
   const s = sessions.find((x) => x.id === selectedId);
@@ -9075,9 +9266,9 @@ function openModal(m) {
   modalHost.replaceChildren(m.el);
 }
 function newSession() {
-  const projects = deriveProjects(store.get().sessions);
+  const projects = pickerProjects(store.get().sessions, store.get().tasks);
   openModal(
-    newSessionModal(projects, {
+    newSessionModal(projects, store.get().selectedProject, {
       onSubmit: (values) => {
         const tok = token;
         if (tok === null || !modal) {
@@ -9246,7 +9437,10 @@ function refreshTasks() {
   if (tok === null) {
     return;
   }
-  void listTasks(tok).then((tasks) => store.set({ tasks })).catch(() => {
+  void listTasks(tok).then((tasks) => {
+    const selectedProject = reconcileProject(store.get().sessions, tasks, loadProjectChoice(), store.get().selectedProject);
+    store.set({ tasks, selectedProject });
+  }).catch(() => {
   });
 }
 function requestTaskResync() {
@@ -9259,9 +9453,9 @@ function requestTaskResync() {
   }, 150);
 }
 function openAddTask() {
-  const projects = deriveProjects(store.get().sessions);
+  const projects = pickerProjects(store.get().sessions, store.get().tasks);
   openModal(
-    addTaskModal(projects, {
+    addTaskModal(projects, store.get().selectedProject, {
       onSubmit: (input) => {
         const tok = token;
         if (tok === null || !modal) {
@@ -9342,6 +9536,7 @@ var actions = {
   newTab: createSessionTab,
   closeTab: closeSessionTab,
   switchView,
+  switchProject,
   addTask: openAddTask,
   toggleTask,
   triggerTask: doTriggerTask,
@@ -9398,9 +9593,16 @@ function onEvent(ev) {
 }
 function applySessions(sessions) {
   const prevSel = store.get().selectedId;
-  const selectedId = pickSelection(sessions, prevSel);
+  const selectedProject = reconcileProject(sessions, store.get().tasks, loadProjectChoice(), store.get().selectedProject);
+  let selectedId = pickSelection(sessions, prevSel);
+  if (selectedId) {
+    const sel = sessions.find((s) => s.id === selectedId);
+    if (sel && sel.worktree?.repo_path !== selectedProject) {
+      selectedId = null;
+    }
+  }
   const activeTab = selectedId === prevSel ? clampActiveTab(sessions, selectedId, store.get().activeTab) : 0;
-  store.set({ sessions, selectedId, activeTab });
+  store.set({ sessions, selectedProject, selectedId, activeTab });
 }
 function requestResync() {
   if (resyncTimer !== null) {
@@ -9442,7 +9644,9 @@ function onKeydown(e) {
       focus,
       modalOpen: modal !== null,
       view: state.view,
-      orderedIds: orderedSessions(state.sessions).map((s) => s.id ?? "").filter((id) => id !== ""),
+      // j/k navigate only the SCOPED rail (redesign PR2): the ids in the order the
+      // rail shows them, restricted to the selected project.
+      orderedIds: orderedSessions(scopeToProject(state.sessions, state.selectedProject)).map((s) => s.id ?? "").filter((id) => id !== ""),
       selectedId: state.selectedId,
       tabCount: selected ? sessionTabs(selected).length : 1,
       activeTab: state.activeTab,

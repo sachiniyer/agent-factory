@@ -136,21 +136,20 @@ test("terminal mode: tab keys reach the agent, not the tab bar", () => {
   assert.deepEqual(decideKey("w", ctx({ focus: "terminal", tabCount: 2, activeTab: 1 })), { kind: "none" });
 });
 
-// --- view switching (#1592 Phase 5 PR8) ------------------------------------
+// --- view switching (redesign PR2: sessions ⇄ tasks; Projects folded away) --
 
-test("cycleView: ] advances and [ reverses, wrapping the sessions/projects/tasks cycle", () => {
-  assert.equal(cycleView("sessions", 1), "projects");
-  assert.equal(cycleView("projects", 1), "tasks");
+test("cycleView: ] advances and [ reverses, wrapping the sessions/tasks cycle", () => {
+  assert.equal(cycleView("sessions", 1), "tasks");
   assert.equal(cycleView("tasks", 1), "sessions", "] past the last view wraps to the first");
   assert.equal(cycleView("sessions", -1), "tasks", "[ before the first view wraps to the last");
-  assert.equal(cycleView("tasks", -1), "projects");
+  assert.equal(cycleView("tasks", -1), "sessions");
 });
 
 test("view switch: ] / [ cycle the top-level view in rail mode of any view", () => {
-  assert.deepEqual(decideKey("]", ctx({ view: "sessions" })), { kind: "switchView", view: "projects" });
+  assert.deepEqual(decideKey("]", ctx({ view: "sessions" })), { kind: "switchView", view: "tasks" });
   assert.deepEqual(decideKey("[", ctx({ view: "sessions" })), { kind: "switchView", view: "tasks" });
-  assert.deepEqual(decideKey("]", ctx({ view: "projects" })), { kind: "switchView", view: "tasks" });
   assert.deepEqual(decideKey("]", ctx({ view: "tasks" })), { kind: "switchView", view: "sessions" });
+  assert.deepEqual(decideKey("[", ctx({ view: "tasks" })), { kind: "switchView", view: "sessions" });
 });
 
 test("view switch: a focused terminal / an open modal own the keyboard — [ and ] fall through", () => {
@@ -163,18 +162,13 @@ test("view switch: a focused terminal / an open modal own the keyboard — [ and
 });
 
 test("non-sessions views: the session keys pass through, only view switching is ours", () => {
-  // In the projects view the body is a mouse-driven browse surface: j/k/Enter and
-  // the tab keys are NOT ours (they'd have no terminal to act on), but ] still
-  // switches views.
-  const proj = ctx({ view: "projects", tabCount: 3, activeTab: 0 });
-  assert.deepEqual(decideKey("j", proj), { kind: "none" }, "j is not a projects-view key");
-  assert.deepEqual(decideKey("Enter", proj), { kind: "none" }, "Enter attaches only in the sessions view");
-  assert.deepEqual(decideKey("t", proj), { kind: "none" }, "no tab management outside the sessions view");
-  assert.deepEqual(decideKey("2", proj), { kind: "none" });
-  assert.deepEqual(decideKey("]", proj), { kind: "switchView", view: "tasks" });
-  // The tasks view is likewise button-driven: only the view-switch keys are ours.
-  const tasksView = ctx({ view: "tasks" });
-  assert.deepEqual(decideKey("j", tasksView), { kind: "none" });
-  assert.deepEqual(decideKey("Enter", tasksView), { kind: "none" });
-  assert.deepEqual(decideKey("[", tasksView), { kind: "switchView", view: "projects" });
+  // The tasks view is a mouse/button-driven list surface: j/k/Enter and the tab keys
+  // are NOT ours (they'd have no terminal to act on), but ] / [ still switch views.
+  const tasksView = ctx({ view: "tasks", tabCount: 3, activeTab: 0 });
+  assert.deepEqual(decideKey("j", tasksView), { kind: "none" }, "j is not a tasks-view key");
+  assert.deepEqual(decideKey("Enter", tasksView), { kind: "none" }, "Enter attaches only in the sessions view");
+  assert.deepEqual(decideKey("t", tasksView), { kind: "none" }, "no tab management outside the sessions view");
+  assert.deepEqual(decideKey("2", tasksView), { kind: "none" });
+  assert.deepEqual(decideKey("]", tasksView), { kind: "switchView", view: "sessions" });
+  assert.deepEqual(decideKey("[", tasksView), { kind: "switchView", view: "sessions" });
 });
