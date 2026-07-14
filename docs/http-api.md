@@ -63,9 +63,10 @@ anything. Do not proxy this socket to a network interface.
 
     To drive the daemon from a **different host** — a remote TUI, or the
     browser web client — don't proxy this socket. SSH to the host and run `af`
-    there, or expose the TLS+token TCP listener to the network (it's on by
-    default on loopback; point `listen_addr` at a routable host:port). Both are
-    covered in [Remote daemon access](remote-tcp-auth.md).
+    there, or expose the HTTP+token TCP listener to the network (it's on by
+    default on loopback; point `listen_addr` at a routable host:port). The
+    listener is plain HTTP — front it with a TLS-terminating proxy or a private
+    network. Both are covered in [Remote daemon access](remote-http-auth.md).
 
 ## Response envelope
 

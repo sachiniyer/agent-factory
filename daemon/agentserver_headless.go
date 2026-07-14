@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"strconv"
 	"syscall"
 
@@ -21,7 +20,7 @@ import (
 // that will later run INSIDE each docker/ssh sandbox (§1.1). It is the mirror
 // image of the daemon's in-process localAgentServer: where the daemon drives a
 // local session through session.AgentServer directly, this exposes ONE session's
-// AgentServer over the exact HTTP/WS+TLS+token wire the daemon already speaks, so
+// AgentServer over the exact HTTP/WS+token wire the daemon already speaks, so
 // a remote daemon (PR2's remoteAgentServer) can drive it across the process
 // boundary exactly like the in-process one.
 //
@@ -32,7 +31,7 @@ import (
 // drives it yet (PR2) — it is a standalone `af agent-server` you run and hit
 // directly.
 //
-// Reuse, not reimplementation: the TLS+token listener (startTCPListener), the
+// Reuse, not reimplementation: the HTTP+token listener (startTCPListener), the
 // auth+CORS gate (withAuth), the WS PTY broker fan-out (servePTYStream), the
 // events plane (serveEvents), the REST envelope dispatch (rpcHandler), and the
 // agentproto wire frames are all the Phase-1–3 seams, unchanged. This file is
@@ -60,7 +59,7 @@ type headlessServer struct {
 
 // AgentServerOptions configures a headless agent-server process.
 type AgentServerOptions struct {
-	// ListenAddr is the TLS TCP bind address (host:port). "127.0.0.1:0" — the
+	// ListenAddr is the HTTP TCP bind address (host:port). "127.0.0.1:0" — the
 	// loopback zero-config default — lets the kernel pick a free port, reported
 	// back in the startup banner.
 	ListenAddr string
@@ -76,29 +75,31 @@ type AgentServerOptions struct {
 
 // AgentServerInfo is the machine-readable startup banner the process prints to
 // stdout as one JSON line the instant the listener binds. A driver reads it to
-// learn the concrete bound address (port filled in for :0), the bearer token to
-// present, and the self-signed cert path/fingerprint to TOFU-pin — the same
-// three facts the daemon's tcpListenerInfo carries, surfaced on stdout because
-// the agent-server has no daemon log the operator watches.
+// learn the concrete bound address (port filled in for :0) and the bearer token
+// to present — the same facts the daemon's tcpListenerInfo carries, surfaced on
+// stdout because the agent-server has no daemon log the operator watches. The
+// listener is plain HTTP (no TLS), so there is no cert path or fingerprint to
+// carry; the token authenticates and the driver reaches it over a private
+// network / tunnel (the docker runtime publishes a loopback port, ssh forwards
+// one).
 type AgentServerInfo struct {
-	Addr        string `json:"addr"`
-	Token       string `json:"token"`
-	Fingerprint string `json:"fingerprint"`
-	SelfSigned  bool   `json:"self_signed"`
-	CertPath    string `json:"cert_path"`
-	Title       string `json:"title"`
+	Addr  string `json:"addr"`
+	Token string `json:"token"`
+	Title string `json:"title"`
 }
 
-// RunAgentServer builds the single workspace's agent-server, binds the TLS+token
+// RunAgentServer builds the single workspace's agent-server, binds the HTTP+token
 // listener, prints the startup banner to stdout, and blocks until SIGINT/SIGTERM,
 // at which point it tears the workspace down. It is the process body behind
 // `af agent-server`.
 //
-// The listener is ALWAYS TLS + token here (unlike the daemon, where the TCP
-// listener is off-by-default): the agent-server exists to be reached over the
-// network by a remote daemon, so the bearer token must never ride the wire in the
-// clear. It reuses startTCPListener verbatim — the same cert/token/gate wiring the
-// daemon's `listen_addr` opt-in uses.
+// The listener always requires the token here (unlike the daemon, where the TCP
+// listener's token is loopback-exempt): the agent-server exists to be reached
+// over the network by a remote daemon. The transport is plain HTTP (no TLS) — the
+// token travels over it, so a driver reaches the agent-server over a private
+// network or tunnel (the docker/ssh runtimes forward a loopback port). It reuses
+// startTCPListener verbatim — the same token/gate wiring the daemon's
+// `listen_addr` opt-in uses.
 func RunAgentServer(opts AgentServerOptions, stdout io.Writer) error {
 	if opts.Title == "" {
 		return fmt.Errorf("agent-server requires a session title (--title)")
@@ -107,8 +108,8 @@ func RunAgentServer(opts AgentServerOptions, stdout io.Writer) error {
 		return fmt.Errorf("agent-server requires a repository path (--repo)")
 	}
 
-	// LoadConfig honors tls_cert/tls_key/cors_allowed_origins/default_program for
-	// a configured host; a sandbox with no config file falls back to defaults.
+	// LoadConfig honors cors_allowed_origins/default_program for a configured
+	// host; a sandbox with no config file falls back to defaults.
 	cfg, err := config.LoadConfig()
 	if err != nil {
 		cfg = config.DefaultConfig()
@@ -154,21 +155,17 @@ func RunAgentServer(opts AgentServerOptions, stdout io.Writer) error {
 	}
 
 	info := AgentServerInfo{
-		Addr:        tcpInfo.Addr,
-		Token:       tcpInfo.Token,
-		Fingerprint: tcpInfo.Fingerprint,
-		SelfSigned:  tcpInfo.SelfSigned,
-		CertPath:    resolveCertPath(cfg, tcpInfo.SelfSigned),
-		Title:       opts.Title,
+		Addr:  tcpInfo.Addr,
+		Token: tcpInfo.Token,
+		Title: opts.Title,
 	}
 	// The startup banner is a single JSON line on stdout — the agent-server's only
-	// channel to hand a driver the address+token+pin, since it runs headless with
+	// channel to hand a driver the address+token, since it runs headless with
 	// no daemon log to read (mirrors tcpListenerInfo's role for the daemon).
 	if data, mErr := json.Marshal(info); mErr == nil {
 		fmt.Fprintln(stdout, string(data))
 	}
-	log.InfoLog.Printf("af agent-server listening on %s (self-signed=%v) for workspace %q", info.Addr, info.SelfSigned, info.Title)
-	log.InfoLog.Printf("  cert fingerprint: %s", info.Fingerprint)
+	log.InfoLog.Printf("af agent-server listening on %s (plain HTTP) for workspace %q", info.Addr, info.Title)
 
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
@@ -182,21 +179,6 @@ func RunAgentServer(opts AgentServerOptions, stdout io.Writer) error {
 		log.WarningLog.Printf("agent-server: workspace teardown on shutdown: %v", err)
 	}
 	return nil
-}
-
-// resolveCertPath returns the certificate path a client TOFU-pins. For the
-// self-signed default it is the generated cert in the af home; for a user cert it
-// is the configured tls_cert (verified against system roots, so the pin is
-// advisory).
-func resolveCertPath(cfg *config.Config, selfSigned bool) string {
-	if !selfSigned {
-		return cfg.TLSCert
-	}
-	dir, err := config.GetConfigDir()
-	if err != nil {
-		return ""
-	}
-	return filepath.Join(dir, daemonTLSCertFileName)
 }
 
 // newMux builds the single-workspace route table. The control plane mirrors the

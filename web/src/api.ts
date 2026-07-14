@@ -71,8 +71,8 @@ export async function af<T>(method: string, body: unknown, token: string): Promi
       body: JSON.stringify(body ?? {}),
     });
   } catch (e) {
-    // A TypeError from fetch is a transport failure (daemon down, TLS rejected,
-    // wrong host). Surface it as status 0 with an actionable message.
+    // A TypeError from fetch is a transport failure (daemon down, wrong host).
+    // Surface it as status 0 with an actionable message.
     throw new ApiError(0, `cannot reach the daemon: ${(e as Error).message}`);
   }
 

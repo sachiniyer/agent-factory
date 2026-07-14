@@ -18,7 +18,7 @@ import (
 //
 // Enforcement is PER-LISTENER. The local unix socket is trusted transport
 // (filesystem 0600 perms are the auth, #1029): it passes a nil gate and every
-// request is authorized, token ignored. The TCP+TLS listener passes a real gate
+// request is authorized, token ignored. The TCP listener passes a real gate
 // (startTCPListener) and requires a valid bearer token on every request, so the
 // nil-vs-real gate is the whole difference between the two transports.
 
@@ -117,7 +117,7 @@ func webTabAwareToken(r *http.Request) string {
 // accepted TCP connection. It NEVER consults a header: X-Forwarded-For,
 // X-Real-IP, Forwarded, Host, and Origin are all attacker-controlled, so a
 // network peer cannot set one to 127.0.0.1 and skip the token (#1696). The TCP
-// source address cannot be forged and still complete the TLS handshake, so this
+// source address cannot be forged and still complete the TCP handshake, so this
 // is the only spoof-resistant signal.
 func isLoopbackRequest(r *http.Request) bool {
 	host := r.RemoteAddr

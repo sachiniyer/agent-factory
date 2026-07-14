@@ -53,7 +53,7 @@ type SSHConfig struct {
 	// KnownHosts is the path to the OpenSSH known_hosts file the runtime verifies
 	// the remote's host key against (#1592 Phase 4 PR5). Optional — empty defers
 	// to the user's ~/.ssh/known_hosts. Host-key verification is always on
-	// (secure by default, mirroring the TLS TOFU pin on the agent-server); an
+	// (secure by default, matching the agent-server's own token requirement); an
 	// unknown or changed host key fails the connection with an actionable error.
 	// Point this at a dedicated file for ephemeral/CI hosts whose keys you seed
 	// out of band.

@@ -23,8 +23,8 @@ import (
 // ordinary NewInstance path — so the ssh runtime dials the host with the Go
 // x/crypto/ssh client (key auth + known_hosts verification), clones the workspace
 // into a per-session dir, streams a static `af` binary onto the remote, starts an
-// `af agent-server` bound to remote loopback behind TLS+token, and exposes its
-// wss:// URL through an ssh local-forward tunnel. The daemon-side Instance then
+// `af agent-server` bound to remote loopback behind a bearer token, and exposes its
+// http:// URL through an ssh local-forward tunnel. The daemon-side Instance then
 // drives that remote agent-server over the wire, through the FULL surface:
 //
 //	Start (Provision+Launch the remote workspace) → Subscribe to its PTY stream →
@@ -117,7 +117,7 @@ func TestSSHBackendRoundTrip(t *testing.T) {
 	if dirs := sshdSessionDirs(t, cname); len(dirs) == 0 {
 		t.Fatal("expected a per-session dir under ~/.af-sessions on the remote after provisioning")
 	}
-	t.Logf("remote agent-server is up; exposed over wss:// through the ssh tunnel with TLS+token")
+	t.Logf("remote agent-server is up; exposed over http:// through the ssh tunnel with a bearer token")
 	killed := false
 	defer func() {
 		if !killed {

@@ -12,15 +12,15 @@ import (
 	"github.com/sachiniyer/agent-factory/config"
 )
 
-// The bearer-token material for the daemon's TCP/TLS surface (#1592 Phase 3,
+// The bearer-token material for the daemon's HTTP TCP surface (#1592 Phase 3,
 // §1.3). The auth model is a single bearer token = full access, single-owner.
 // This file produces and compares the material; the withAuth gate enforces it
-// on the TLS TCP listener (startTCPListener), reading it fresh per auth event so
+// on the HTTP TCP listener (startTCPListener), reading it fresh per auth event so
 // `af token rotate` takes effect without a restart. The unix control socket
 // stays unauthenticated (filesystem 0600 perms are the local auth, #1029) and
 // never reads this token.
 //
-// Two concurrency guarantees mirror the TLS-material fix (#1690):
+// Two concurrency guarantees mirror the token-material fix (#1690):
 //
 //   - Generation is serialized under an exclusive file lock (config.WithFileLock,
 //     the sibling daemon-token.lock). Before this, EnsureToken's LoadToken-miss →

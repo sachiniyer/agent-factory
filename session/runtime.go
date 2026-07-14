@@ -88,7 +88,7 @@ type ProvisionResult struct {
 	// Backend is the in-process Backend an Instance is built with. Always set
 	// on success.
 	Backend Backend
-	// Endpoint is the authed `af agent-server` URL + token + TLS pin a sandbox
+	// Endpoint is the authed `af agent-server` URL + token a sandbox
 	// runtime exposes (#1592 Phase 4). nil for an in-process runtime
 	// (local/hook), whose agent-server is the local tmux facade with no network
 	// hop. The docker/ssh runtimes fill this in (docker: PR4); NewInstance threads
@@ -116,7 +116,7 @@ type ProvisionResult struct {
 // expose an in-process endpoint (Endpoint nil) and the session keeps using the
 // local AgentServer over tmux — byte-identical to before Phase 4. The docker and
 // ssh runtimes (PR4/PR5) provision a real sandbox, start an `af agent-server`,
-// and expose its authed wss:// URL; the session then drives it through the
+// and expose its authed http:// URL; the session then drives it through the
 // remoteAgentServer client (PR2). Both satisfy this one interface, so the create
 // flow above does not branch on locality.
 type Runtime interface {
@@ -160,7 +160,7 @@ func (localRuntime) Provision(ProvisionSpec) (ProvisionResult, error) {
 // hookRuntime provisions a session on user-provided infrastructure (#1592 Phase 4
 // PR7 — the bring-your-own-provisioner escape hatch). Its Provision lives in
 // backend_hook_backend.go: run the repo's launch_cmd, which clones the workspace
-// and starts an `af agent-server` on the user's infra, parse the authed wss://
+// and starts an `af agent-server` on the user's infra, parse the authed http://
 // URL it echoes, and expose it — the SAME provision-and-expose contract as
 // docker/ssh. The type is declared there. Its old terminal/attach contract is
 // deleted (clean-break).
@@ -168,13 +168,13 @@ func (localRuntime) Provision(ProvisionSpec) (ProvisionResult, error) {
 // dockerRuntime provisions a real container sandbox (#1592 Phase 4 PR4). Its
 // Provision lives in backend_docker.go: run a container from the configured
 // docker.image, clone the repo inside it, docker cp the `af` binary in, start an
-// `af agent-server` on a published port, and expose its authed wss:// URL. The
+// `af agent-server` on a published port, and expose its authed http:// URL. The
 // type is declared there.
 
 // sshRuntime provisions a real remote-machine sandbox (#1592 Phase 4 PR5). Its
 // Provision lives in backend_ssh.go: dial the configured ssh.host, clone the repo
 // into a per-session dir, stream the `af` binary onto the remote, start an `af
-// agent-server` bound to remote loopback, and expose its authed wss:// URL through
+// agent-server` bound to remote loopback, and expose its authed http:// URL through
 // an ssh local-forward tunnel. The type is declared there.
 
 // resolveRepoConfig loads the resolved config for the repo containing absPath.

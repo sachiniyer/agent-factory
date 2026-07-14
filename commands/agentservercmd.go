@@ -10,12 +10,12 @@ import (
 )
 
 // `af agent-server` (#1592 Phase 4 PR1) runs a headless, single-workspace
-// agent-server over the HTTP/WS+TLS+token protocol — the process that will later
+// agent-server over the HTTP/WS+token protocol — the process that will later
 // run INSIDE each docker/ssh sandbox and be driven by a remote daemon over an
 // authed URL. It is the standalone, out-of-process form of the daemon's
 // in-process local agent-server: one session's workspace (worktree + tmux),
 // exposed over the exact wire the daemon already speaks, behind a bearer token on
-// a TLS listener.
+// a plain-HTTP listener.
 //
 // It is DARK in this PR: nothing provisions a sandbox to run it and nothing in the
 // daemon drives it yet. Run it by hand and drive it directly to prove the process
@@ -31,22 +31,22 @@ var (
 
 var agentServerCmd = &cobra.Command{
 	Use:   "agent-server",
-	Short: "Run a headless single-workspace agent-server over HTTP/WS+TLS+token",
+	Short: "Run a headless single-workspace agent-server over HTTP/WS+token",
 	Long: `Run a headless agent-server for exactly one session's workspace, served over
-the same REST + WebSocket protocol the daemon speaks, behind a TLS listener that
-requires a bearer token on every request.
+the same REST + WebSocket protocol the daemon speaks, behind a plain-HTTP
+listener that requires a bearer token on every request.
 
 This is the process that will later run inside a docker container or on an ssh
 remote (#1592 Phase 4): a remote daemon dials the authed URL it exposes and
 drives the workspace exactly as it drives a local in-process session. Run it
 directly to reach one workspace over the network.
 
-The listener is always TLS + token (the token must never ride the wire in the
-clear). On startup it prints one JSON line to stdout carrying the bound address,
-the bearer token, and the self-signed cert path/fingerprint to pin. On
-SIGINT/SIGTERM it tears the workspace down (kills tmux, removes the worktree) —
-durability of in-progress work is the driving daemon's job (push the branch
-before shutdown), not this server's.`,
+The listener always requires the token and serves plain HTTP (no TLS) — reach it
+over a private network or a tunnel (the docker/ssh runtimes forward a loopback
+port). On startup it prints one JSON line to stdout carrying the bound address
+and the bearer token. On SIGINT/SIGTERM it tears the workspace down (kills tmux,
+removes the worktree) — durability of in-progress work is the driving daemon's
+job (push the branch before shutdown), not this server's.`,
 	Args: cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		log.Initialize(false)
@@ -73,7 +73,7 @@ before shutdown), not this server's.`,
 
 func init() {
 	agentServerCmd.Flags().StringVar(&agentServerListen, "listen", "127.0.0.1:0",
-		"TLS TCP bind address (host:port); :0 lets the kernel pick a free port")
+		"HTTP TCP bind address (host:port); :0 lets the kernel pick a free port")
 	agentServerCmd.Flags().StringVar(&agentServerRepo, "repo", "",
 		"Repository path the workspace runs against (default: current directory)")
 	agentServerCmd.Flags().StringVar(&agentServerTitle, "title", "",

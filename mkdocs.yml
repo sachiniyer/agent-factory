@@ -122,7 +122,7 @@ nav:
           - Tasks & automation: tasks.md
           - Backends (runtimes): backends.md
           - Remote hooks: remote-hooks.md
-          - Remote daemon access: remote-tcp-auth.md
+          - Remote daemon access: remote-http-auth.md
           - Usage limits: usage-limits.md
       - API & reference:
           - HTTP API guide: http-api.md

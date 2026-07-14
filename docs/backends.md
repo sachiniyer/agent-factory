@@ -27,8 +27,8 @@ With `backend = "docker"`, a session runs entirely inside a container:
    container.
 3. It copies the `af` binary into the container and starts an
    **`af agent-server`** there — a headless, single-workspace server over the
-   same TLS + bearer-token HTTP/WS protocol the daemon speaks.
-4. The daemon drives that in-container agent-server over `wss://127.0.0.1:<port>`.
+   same bearer-token HTTP/WS protocol the daemon speaks (plain HTTP, no TLS).
+4. The daemon drives that in-container agent-server over `http://127.0.0.1:<port>` (a container-published loopback port).
    Attach, preview, prompts, and the live terminal stream all flow over that one
    authed connection.
 5. On kill, the container is torn down (`docker rm -f`) — no leaked containers.
@@ -99,7 +99,7 @@ RUN apk add --no-cache git tmux bash
 
 `make backend-docker-roundtrip` runs the real end-to-end container round-trips on
 a host with Docker: it builds a slim git+tmux image, creates a session on the
-docker backend, drives the in-container agent-server over `wss://` (input →
+docker backend, drives the in-container agent-server over `http://`/`ws://` (input →
 stream echo → preview/snapshot/liveness), and asserts the container is reaped on
 kill. A second case commits real work on the session branch, **archives** it
 (asserting the branch is pushed to `origin` and the container reaped), then
@@ -121,11 +121,11 @@ built-in, opinionated version of what a `hook` `launch_cmd` did by hand:
    and clones the repo (from the repo's `origin` remote) into `workspace/` there.
 3. It streams the `af` binary onto the remote and starts an **`af agent-server`**
    bound to `127.0.0.1:0` (a random loopback port — never exposed on the remote's
-   public interface), behind the same TLS + bearer-token protocol.
+   public interface), behind the same bearer-token protocol (plain HTTP).
 4. It opens an **SSH local-forward tunnel** from a daemon-local loopback port to
-   that remote port and drives the agent-server over `wss://127.0.0.1:<localport>`.
+   that remote port and drives the agent-server over `http://127.0.0.1:<localport>`.
    Attach, preview, prompts, and the live terminal stream all flow through the one
-   tunneled, authed connection (TLS + token still apply end to end inside the
+   tunneled, authed connection (the SSH tunnel encrypts it; the bearer token still applies end to end inside the
    tunnel — defense in depth).
 5. On kill, the remote `af agent-server` is stopped, the session directory is
    removed, and the tunnel + SSH connection are closed — no leaked process, dir,
@@ -192,7 +192,7 @@ key first with `ssh-keyscan -H host >> ~/.ssh/known_hosts` (or point
 with Docker: it stands up a throwaway `sshd`+git+tmux container as the ssh target
 (no external host, no dependency on the box's own sshd), creates a session on the
 ssh backend pointing at it, drives the remote agent-server over the ssh-tunneled
-`wss://` (input → stream echo → preview/snapshot/liveness), and asserts the remote
+`http://`/`ws://` (input → stream echo → preview/snapshot/liveness), and asserts the remote
 process is reaped + the session dir removed + the tunnel closed on kill. A second
 case commits real work, **archives** it (branch pushed to `origin`, remote
 sandbox reaped), then **restores** it (a fresh remote clones the branch back, the
@@ -212,8 +212,8 @@ it down.
 Since **#1592 Phase 4 PR7** the hook backend follows the **same
 provision-and-expose contract** as `docker`/`ssh`. Your `launch_cmd` clones the
 repo on your infra, starts an **`af agent-server`** there, and echoes that
-server's authed endpoint (`{url, token, tls_fingerprint}`); the daemon then
-drives the session over that `wss://` stream — so a hook session is
+server's authed endpoint (`{url, token}`); the daemon then
+drives the session over that `ws://` stream — so a hook session is
 behaviorally identical to a local, docker, or ssh one (attach, type, resize,
 tabs, preview, archive/restore, kill).
 

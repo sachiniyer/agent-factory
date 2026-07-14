@@ -7,33 +7,32 @@ the TUI: everything reads from the daemon's live projection, so what you see in 
 browser matches what you see in `af` and `af sessions list`.
 
 It is **on by default**. The daemon serves it on loopback
-(`https://127.0.0.1:8443`) with no extra setup, so a same-machine browser reaches
+(`http://127.0.0.1:8443`) with no extra setup, so a same-machine browser reaches
 it with no token. You only touch config to **disable** it or to **expose** it to
 another machine; the rest of this page is a tour.
 
 !!! note "Where the auth details live"
-    This page covers the web client itself. The listener, TLS, and token model it
+    This page covers the web client itself. The listener and token model it
     rides on are shared with every remote `af` client and documented in full under
-    [Remote daemon access](remote-tcp-auth.md). This page gives you the short path
+    [Remote daemon access](remote-http-auth.md). This page gives you the short path
     for the common cases and links there for the rest.
 
 ---
 
 ## It's already on
 
-The web client is served on the daemon's **TLS TCP listener**, and that listener
-is bound by default at `127.0.0.1:8443`. A fresh install needs **zero** config:
-start the daemon (any `af` command does), open `https://127.0.0.1:8443`, and
+The web client is served on the daemon's **plain-HTTP TCP listener**, and that
+listener is bound by default at `127.0.0.1:8443`. A fresh install needs **zero**
+config: start the daemon (any `af` command does), open `http://127.0.0.1:8443`, and
 you're in. The address is controlled by one **global-only** key, `listen_addr` — a
 cloned repo must never be able to open a network port, so it lives only in your
 global config and defaults to loopback.
 
-On startup the daemon logs a one-time banner with the address, TLS fingerprint,
-and the bearer token:
+On startup the daemon logs a one-time banner with the address and the bearer
+token:
 
 ```
-daemon TLS TCP listener enabled on 127.0.0.1:8443 (self-signed=true)
-  cert fingerprint: sha256:2f1c…
+daemon HTTP TCP listener enabled on 127.0.0.1:8443 (plain HTTP — terminate TLS at a proxy if needed)
   bearer token: kZ9…-…q0
   loopback peers (127.0.0.1/::1) connect with no token; network peers must present the token above
 ```
@@ -71,10 +70,10 @@ same.
     af daemon restart   # live sessions keep running; the new daemon re-adopts them
     ```
 
-    See [Remote daemon access](remote-tcp-auth.md#option-2-direct-tcp-token) for the
+    See [Remote daemon access](remote-http-auth.md#option-2-direct-tcp-token) for the
     full network setup, including CORS and `require_token`.
 
-- **`""` — disable the web server.** An explicit empty value turns the TLS/TCP
+- **`""` — disable the web server.** An explicit empty value turns the HTTP TCP
   listener off entirely; the daemon runs pure-unix-socket and serves no browser UI:
 
     ```toml
@@ -90,33 +89,29 @@ If the default loopback port is already taken (for example a second daemon), the
 bind is **logged and skipped** — the daemon keeps running, just without the web
 server. A web-port conflict never blocks session management.
 
-TLS is always on. With no `tls_cert`/`tls_key` configured, the daemon generates a
-self-signed certificate once — which your browser will warn about the first time.
-See [TLS trust](#opening-it-in-a-browser) below.
+The listener is **plain HTTP** — af terminates no TLS of its own. If you expose it
+beyond loopback and want transport encryption, put it behind a reverse proxy
+(nginx/Caddy) or a private network (Tailscale/VPN). See
+[Transport encryption](remote-http-auth.md#transport-encryption-terminate-tls-yourself).
 
 ---
 
 ## Open it in a browser
 
-Point your browser at the listener's address over **HTTPS**:
+Point your browser at the listener's address:
 
 ```
-https://127.0.0.1:8443/
+http://127.0.0.1:8443/
 ```
 
-The same TLS listener serves both the app (at `/`) and the API (at `/v1/...`), so
-there is nothing else to run — the daemon *is* the web server.
+The same listener serves both the app (at `/`) and the API (at `/v1/...`), so
+there is nothing else to run — the daemon *is* the web server. It serves plain
+HTTP; there is no certificate warning to click through.
 
-**Self-signed certificate (the default).** The first visit shows a browser
-certificate warning because the daemon's cert is self-signed. Accept it to
-continue (in Chrome: **Advanced → Proceed**; in Firefox: **Advanced → Accept the
-Risk**). This is a one-time trust-on-first-use step per browser. If you'd rather
-not see the warning, point the daemon at a real CA-signed certificate — see
-[TLS trust](remote-tcp-auth.md#tls-trust).
-
-!!! warning "Use `https://`, not `http://`"
-    The listener is **TLS-only**. A plaintext `http://` URL will not connect —
-    the daemon never serves the app in the clear.
+If you front the daemon with a TLS-terminating reverse proxy, point the browser at
+the **proxy's** `https://` origin instead, and let the proxy reach af's plaintext
+backend — see
+[Transport encryption](remote-http-auth.md#transport-encryption-terminate-tls-yourself).
 
 ---
 
@@ -124,7 +119,7 @@ not see the warning, point the daemon at a real CA-signed certificate — see
 
 Whether the web client asks you for a token depends on **where your browser is**,
 judged from the real TCP connection address (never a header — those are
-attacker-controlled and ignored, see [When is a token required?](remote-tcp-auth.md#when-is-a-token-required-loopback-vs-network)).
+attacker-controlled and ignored, see [When is a token required?](remote-http-auth.md#when-is-a-token-required-loopback-vs-network)).
 
 | Your browser is on… | Token needed? | What you see |
 | --- | --- | --- |
@@ -153,8 +148,7 @@ field. Get the token from the **host**:
 
 ```console
 $ af token show
-token:           kZ9abc...-...q0
-tls_fingerprint: sha256:2f1c9e...af
+token: kZ9abc...-...q0
 ```
 
 Paste the `token` value into the field and click **Connect**. The token is stored
@@ -164,9 +158,10 @@ af token show on the host and try again.`).
 
 To reach the app from a trusted network without a token at all — a private
 Tailscale tailnet, a locked-down VPN — the daemon supports an opt-in
-`require_token = false`. It disables the token for network peers too (TLS still
-applies) and logs a loud startup warning. See
-[Opting out on a trusted network](remote-tcp-auth.md#opting-out-on-a-trusted-network-require_token-false).
+`require_token = false`. It disables the token for network peers too and logs a
+loud startup warning (the listener is plain HTTP, so front it with a proxy or a
+private network). See
+[Opting out on a trusted network](remote-http-auth.md#opting-out-on-a-trusted-network-require_token-false).
 
 **Disconnect** (top-right) forgets the stored token and returns you to the login
 screen — useful on a shared machine.
@@ -424,19 +419,25 @@ While a terminal is attached, all keys except `Escape` flow to the agent.
   control of the daemon. Treat it like a password; never commit it or paste it into
   a shared log. Rotate it with `af token rotate` if you suspect exposure.
 - **Prefer loopback + SSH over `0.0.0.0`.** Binding `listen_addr` to `127.0.0.1`
-  and forwarding over SSH keeps the port off the network entirely while still
-  giving you the browser UI.
-- **TLS is never optional.** The listener is always TLS, and the client never skips
-  certificate verification — a self-signed cert is trusted by pinning, a CA-signed
-  one by the system trust store.
-- **Loopback is same-machine trust, not "internal network" trust.** The token-free
-  exemption is for `127.0.0.1` / `::1` only. If a same-host reverse proxy fronts the
-  daemon, every request looks loopback and auth must live at the proxy.
+  and forwarding over SSH keeps the port off the network entirely, encrypts the
+  channel, and still gives you the browser UI.
+- **af serves plain HTTP — front it for encryption.** The listener terminates no
+  TLS. Never expose it beyond loopback without a TLS-terminating reverse proxy
+  (nginx/Caddy), a private network (Tailscale/VPN), or an SSH tunnel — the token
+  travels over the connection as-is.
+- **The loopback exemption is scoped to a loopback bind.** It applies only when
+  `listen_addr` is loopback (`127.0.0.1`/`::1`/`localhost`). On a **network** bind
+  (`0.0.0.0`/routable) the token is enforced for every peer, loopback-origin
+  included, so a same-host reverse proxy cannot bypass it. Behind a proxy on a
+  loopback-bound daemon, auth is the proxy's job (or set `require_loopback_token
+  = true`). See
+  [Reverse proxies and the loopback exemption](remote-http-auth.md#reverse-proxies-and-the-loopback-exemption).
 
 ## See also
 
-- [Remote daemon access](remote-tcp-auth.md) — the full listener, TLS, token, CORS,
-  and `require_token` reference the web client rides on.
+- [Remote daemon access](remote-http-auth.md) — the full listener, token, CORS,
+  and `require_token` reference the web client rides on (including how to terminate
+  TLS at a proxy).
 - [The TUI](concepts/tui.md) — the terminal client the web client mirrors.
 - [Tasks & automation](tasks.md) — the scheduled tasks the Tasks view drives.
 - [HTTP API guide](http-api.md) — the `/v1/...` API the same listener serves.

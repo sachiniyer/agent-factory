@@ -172,7 +172,7 @@ async function bootstrap(): Promise<void> {
   try {
     required = await probeAuthRequired();
   } catch {
-    // Can't reach the probe (daemon down / TLS not yet trusted): fail safe to the
+    // Can't reach the probe (daemon down / wrong host): fail safe to the
     // token login — the user can still paste a token and retry.
     required = true;
   }
@@ -1070,7 +1070,7 @@ function describeError(e: unknown): string {
       return "That token was rejected. Check `af token show` on the host and try again.";
     }
     if (e.status === 0) {
-      return `Couldn't reach the daemon. Confirm the listener address and TLS, then retry. (${e.message})`;
+      return `Couldn't reach the daemon. Confirm the listener address, then retry. (${e.message})`;
     }
     return `Login failed: ${e.message}`;
   }

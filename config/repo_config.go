@@ -19,8 +19,8 @@ const RepoConfigFileName = "config.json"
 // downstream to the docker/ssh runtimes (BREAKING change):
 //   - launch_cmd clones repo@branch on the user's infra, starts an
 //     `af agent-server --listen :PORT` there, and echoes that server's authed
-//     endpoint as JSON: {"url":"wss://…","token":"…","tls_fingerprint":"…"}.
-//     The daemon then drives the session over that wss:// stream exactly as it
+//     endpoint as JSON: {"url":"http://…","token":"…"}.
+//     The daemon then drives the session over that ws:// stream exactly as it
 //     drives a docker/ssh session — no terminal/attach/preview scripting.
 //   - delete_cmd tears the provisioned sandbox back down (the runtime teardown).
 //
@@ -38,7 +38,7 @@ type RemoteHooks struct {
 	// fields so a stale config fails loudly with an actionable migration message
 	// (Validate) instead of silently ignoring a key the user still depends on.
 	// The terminal/attach/preview contract they configured is now served by the
-	// in-sandbox `af agent-server` over the wss:// stream.
+	// in-sandbox `af agent-server` over the ws:// stream.
 	RemovedListCmd     string `json:"list_cmd,omitempty" toml:"list_cmd,omitempty"`
 	RemovedAttachCmd   string `json:"attach_cmd,omitempty" toml:"attach_cmd,omitempty"`
 	RemovedTerminalCmd string `json:"terminal_cmd,omitempty" toml:"terminal_cmd,omitempty"`
@@ -68,7 +68,7 @@ func (h RemoteHooks) Validate() error {
 		return fmt.Errorf("remote_hooks.%s was removed in the provision-and-expose migration (#1592 Phase 4): "+
 			"the remote hook backend no longer uses terminal/attach/preview/enumeration scripts. "+
 			"Your launch_cmd must now start an `af agent-server` in the remote workspace and echo its "+
-			"{\"url\",\"token\",\"tls_fingerprint\"}, and delete_cmd reaps it. "+
+			"{\"url\",\"token\"}, and delete_cmd reaps it. "+
 			"Delete list_cmd/attach_cmd/terminal_cmd and follow the migration recipe in docs/remote-hooks.md", removed)
 	}
 	if strings.TrimSpace(h.LaunchCmd) == "" {

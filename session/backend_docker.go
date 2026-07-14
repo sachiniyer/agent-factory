@@ -15,7 +15,7 @@ import (
 
 // The docker container runtime (#1592 Phase 4 PR4) — the first-class sandboxed
 // backend. A session's workspace + agent run in a container; the container
-// exposes an `af agent-server` (PR1) on a published loopback port behind TLS +
+// exposes an `af agent-server` (PR1) on a published loopback port behind a bearer
 // token; the daemon drives it through the remoteAgentServer HTTP/WS client (PR2)
 // exactly as it drives a local in-process session. This is the "provision-and-
 // expose" model the whole epic was built toward, at parity with local.
@@ -36,8 +36,8 @@ import (
 //	git clone      — clone the repo's origin into /workspace inside the container
 //	docker cp      — copy the daemon's own `af` binary into the container
 //	docker exec    — start `af agent-server --listen :<port>` headless in the
-//	                 container; read its startup banner (addr/token/fingerprint)
-//	docker port    — map the published port to build wss://127.0.0.1:<hostport>
+//	                 container; read its startup banner (addr/token)
+//	docker port    — map the published port to build http://127.0.0.1:<hostport>
 //
 // The result is an AgentServerEndpoint the daemon dials, plus a container-reap
 // teardown run when the session is killed. The in-container agent-server itself
@@ -61,7 +61,7 @@ const (
 	dockerAfBinaryPath = "/usr/local/bin/af"
 	// dockerBannerPath/dockerLogPath capture the agent-server's stdout banner and
 	// stderr log inside the container. The banner is a single JSON line (addr,
-	// token, fingerprint) the server prints the instant its listener binds; the
+	// token) the server prints the instant its listener binds; the
 	// runtime polls the file for it because `docker exec -d` detaches the process.
 	dockerBannerPath = "/tmp/af-agent-server.json"
 	dockerLogPath    = "/tmp/af-agent-server.log"
@@ -104,12 +104,9 @@ func SetDockerSelfBinaryForTest(path string) func() {
 // imported because daemon imports session (a cycle); the shared contract is the
 // JSON tags, pinned by the round-trip test.
 type dockerBanner struct {
-	Addr        string `json:"addr"`
-	Token       string `json:"token"`
-	Fingerprint string `json:"fingerprint"`
-	SelfSigned  bool   `json:"self_signed"`
-	CertPath    string `json:"cert_path"`
-	Title       string `json:"title"`
+	Addr  string `json:"addr"`
+	Token string `json:"token"`
+	Title string `json:"title"`
 }
 
 // dockerRuntime provisions a real container sandbox (#1592 Phase 4 PR4). Declared
@@ -203,9 +200,8 @@ func (p *dockerProvisioner) provision() (ProvisionResult, error) {
 	}
 
 	endpoint := &AgentServerEndpoint{
-		URL:         "wss://127.0.0.1:" + hostPort,
-		Token:       banner.Token,
-		Fingerprint: banner.Fingerprint,
+		URL:   "http://127.0.0.1:" + hostPort,
+		Token: banner.Token,
 	}
 	teardown := p.reap
 	log.InfoLog.Printf("docker runtime: session %q running in container %s, agent-server at %s", p.spec.Title, p.shortID(), endpoint.URL)
@@ -337,7 +333,7 @@ func (p *dockerProvisioner) startAgentServer() error {
 }
 
 // readBanner polls the in-container banner file until the agent-server has bound
-// its listener and printed its {addr,token,fingerprint} JSON line, or times out.
+// its listener and printed its {addr,token} JSON line, or times out.
 // On timeout it pulls the agent-server's stderr log into the error so a failure
 // to start (bad image, missing tmux, port clash) is self-diagnosing.
 func (p *dockerProvisioner) readBanner() (dockerBanner, error) {

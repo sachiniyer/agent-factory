@@ -21,7 +21,7 @@ import (
 // the agentSrv cache every iteration, so AgentServer() re-enters its build branch
 // (the only place the pre-fix code touched remoteClient) each loop.
 func TestAgentServer_RestoreRace_NoDataRace(t *testing.T) {
-	ep := AgentServerEndpoint{URL: "wss://127.0.0.1:9", Token: "tok", Fingerprint: validFingerprint}
+	ep := AgentServerEndpoint{URL: "http://127.0.0.1:9", Token: "tok"}
 	newRes := func() ProvisionResult {
 		return ProvisionResult{
 			Backend:  &dockerBackend{containerID: "c"},
@@ -78,7 +78,7 @@ func TestAgentServer_RestoreRace_NoDataRace(t *testing.T) {
 // stale cache violates rc == remoteClient. It also asserts the FINAL cached server
 // reflects the last rebind, never a superseded runtime. Runs under -race too.
 func TestAgentServer_RestoreCacheConsistency(t *testing.T) {
-	ep := AgentServerEndpoint{URL: "wss://127.0.0.1:9", Token: "tok", Fingerprint: validFingerprint}
+	ep := AgentServerEndpoint{URL: "http://127.0.0.1:9", Token: "tok"}
 	newRes := func() ProvisionResult {
 		return ProvisionResult{
 			Backend:  &dockerBackend{containerID: "c"},

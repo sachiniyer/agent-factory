@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Runs INSIDE the web-selftest container (see scripts/testbox.sh web-selftest):
 # build af from the mounted source, bring up a REAL af daemon on a throwaway home
-# with a loopback TLS listener, seed a couple of sessions in a mock repo, then drive
+# with a loopback HTTP listener, seed a couple of sessions in a mock repo, then drive
 # the embedded SPA in a headless Chromium via Playwright and assert the core flows
 # (web/selftest/web-driver.spec.ts).
 #
@@ -38,7 +38,7 @@ MOCK2=/work/mock-repo-2
 MOCK3=/work/mock-repo-3
 BIN=/work/bin/af
 LISTEN=127.0.0.1:8899
-BASE_URL="https://${LISTEN}"
+BASE_URL="http://${LISTEN}"
 READY_MARKER=AF_SELFTEST_READY
 SESSION_A=probe-a
 SESSION_B=probe-b
@@ -64,7 +64,7 @@ mkdir -p "$HOME_DIR" /work/bin
 echo ">>> building af from /work ..."
 go build -buildvcs=false -o "$BIN" .
 
-# --- throwaway AF home: TLS listener + a fake agent -------------------------
+# --- throwaway AF home: HTTP listener + a fake agent ------------------------
 # The fake agent prints a deterministic ready marker (the "live output" the
 # terminal flow asserts on) then execs `cat`, so typed input echoes back — the
 # same shape the WS PTY broker round-trip uses. Because the override is a custom
@@ -77,7 +77,7 @@ exec cat
 EOF
 chmod +x "$HOME_DIR/fake-agent.sh"
 
-# listen_addr turns on the TLS TCP listener that serves the SPA + /v1 API and
+# listen_addr turns on the plain-HTTP TCP listener that serves the SPA + /v1 API and
 # generates the bearer token (daemon/tcpserver.go). Global-only key, so it lives
 # in the home config.json.
 cat >"$HOME_DIR/config.json" <<EOF
@@ -102,7 +102,7 @@ for repo in "$MOCK" "$MOCK2" "$MOCK3"; do
     fi
 done
 
-# --- start the daemon + wait for the TLS listener ---------------------------
+# --- start the daemon + wait for the HTTP listener --------------------------
 echo ">>> starting af daemon (listen_addr=$LISTEN) ..."
 "$BIN" --daemon >/work/daemon.log 2>&1 &
 DAEMON_PID=$!
@@ -124,11 +124,11 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# Poll the TLS port until it serves the SPA shell (200). Once it binds, the token
+# Poll the HTTP port until it serves the SPA shell (200). Once it binds, the token
 # file exists (EnsureToken runs before the port opens).
-echo ">>> waiting for the TLS listener ..."
+echo ">>> waiting for the HTTP listener ..."
 for i in $(seq 1 60); do
-    if curl -sk -o /dev/null -w '%{http_code}' "$BASE_URL/" 2>/dev/null | grep -q '^200$'; then
+    if curl -s -o /dev/null -w '%{http_code}' "$BASE_URL/" 2>/dev/null | grep -q '^200$'; then
         break
     fi
     if ! kill -0 "$DAEMON_PID" 2>/dev/null; then

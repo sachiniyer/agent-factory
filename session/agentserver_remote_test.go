@@ -4,10 +4,6 @@ import (
 	"testing"
 )
 
-// validFingerprint is a well-formed (64-hex) SHA-256 pin — enough for
-// construction, which validates the shape without dialing.
-const validFingerprint = "aa11bb22cc33dd44ee55ff66007788990011223344556677889900aabbccddee"
-
 // TestAgentServerFactory_SelectsRuntime is the per-runtime factory proof (#1592
 // Phase 4 PR2): AgentServer() returns the local in-process impl for a default
 // instance, and a remoteAgentServer for one whose runtime exposes a remote
@@ -25,9 +21,8 @@ func TestAgentServerFactory_SelectsRuntime(t *testing.T) {
 		Title: "remote",
 		Path:  t.TempDir(),
 		RemoteAgentServer: &AgentServerEndpoint{
-			URL:         "wss://127.0.0.1:1",
-			Token:       "secret",
-			Fingerprint: validFingerprint,
+			URL:   "http://127.0.0.1:1",
+			Token: "secret",
 		},
 	})
 	if err != nil {
@@ -44,20 +39,19 @@ func TestAgentServerFactory_SelectsRuntime(t *testing.T) {
 }
 
 // TestNewRemoteAgentServer_ValidatesEndpoint proves the endpoint is validated at
-// construction (no dial): a plaintext scheme, a malformed fingerprint, and a
-// missing title are all rejected up front, so the AgentServer() factory can stay
-// infallible.
+// construction (no dial): a TLS scheme (the agent-server is HTTP-only), a missing
+// host, and a missing title are all rejected up front, so the AgentServer()
+// factory can stay infallible.
 func TestNewRemoteAgentServer_ValidatesEndpoint(t *testing.T) {
 	cases := []struct {
 		name  string
 		ep    AgentServerEndpoint
 		title string
 	}{
-		{"plaintext scheme", AgentServerEndpoint{URL: "ws://host:1", Fingerprint: validFingerprint}, "t"},
-		{"http scheme", AgentServerEndpoint{URL: "http://host:1", Fingerprint: validFingerprint}, "t"},
-		{"no host", AgentServerEndpoint{URL: "wss://", Fingerprint: validFingerprint}, "t"},
-		{"bad fingerprint", AgentServerEndpoint{URL: "wss://host:1", Fingerprint: "nope"}, "t"},
-		{"empty title", AgentServerEndpoint{URL: "wss://host:1", Fingerprint: validFingerprint}, ""},
+		{"tls scheme wss", AgentServerEndpoint{URL: "wss://host:1"}, "t"},
+		{"tls scheme https", AgentServerEndpoint{URL: "https://host:1"}, "t"},
+		{"no host", AgentServerEndpoint{URL: "http://"}, "t"},
+		{"empty title", AgentServerEndpoint{URL: "http://host:1"}, ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -68,11 +62,14 @@ func TestNewRemoteAgentServer_ValidatesEndpoint(t *testing.T) {
 	}
 
 	// A well-formed endpoint constructs (still no dial — the URL is never reached).
-	as, err := NewRemoteAgentServer(AgentServerEndpoint{URL: "wss://127.0.0.1:1", Token: "tok", Fingerprint: validFingerprint}, "probe")
-	if err != nil {
-		t.Fatalf("NewRemoteAgentServer(valid): %v", err)
-	}
-	if _, ok := as.(*remoteAgentServer); !ok {
-		t.Fatalf("expected *remoteAgentServer, got %T", as)
+	// Both http:// and ws:// are accepted interchangeably.
+	for _, u := range []string{"http://127.0.0.1:1", "ws://127.0.0.1:1"} {
+		as, err := NewRemoteAgentServer(AgentServerEndpoint{URL: u, Token: "tok"}, "probe")
+		if err != nil {
+			t.Fatalf("NewRemoteAgentServer(%q): %v", u, err)
+		}
+		if _, ok := as.(*remoteAgentServer); !ok {
+			t.Fatalf("expected *remoteAgentServer, got %T", as)
+		}
 	}
 }

@@ -9698,7 +9698,7 @@ function describeError(e) {
       return "That token was rejected. Check `af token show` on the host and try again.";
     }
     if (e.status === 0) {
-      return `Couldn't reach the daemon. Confirm the listener address and TLS, then retry. (${e.message})`;
+      return `Couldn't reach the daemon. Confirm the listener address, then retry. (${e.message})`;
     }
     return `Login failed: ${e.message}`;
   }

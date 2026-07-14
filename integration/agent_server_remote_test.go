@@ -16,7 +16,7 @@ import (
 )
 
 // TestRemoteAgentServerRoundTrip is the #1592 Phase 4 PR2 de-risk payoff: it
-// starts a REAL, out-of-process `af agent-server` (PR1) on a loopback TLS+token
+// starts a REAL, out-of-process `af agent-server` (PR1) on a loopback HTTP+token
 // listener, constructs a daemon-side session.remoteAgentServer pointing at it, and
 // drives the FULL AgentServer surface across the process boundary — Provision +
 // Launch the workspace in the remote runtime, Subscribe to its PTY stream, Input
@@ -73,20 +73,19 @@ func TestRemoteAgentServerRoundTrip(t *testing.T) {
 	})
 
 	banner := readAgentServerBanner(t, stdout)
-	if banner.Addr == "" || banner.Token == "" || banner.Fingerprint == "" {
+	if banner.Addr == "" || banner.Token == "" {
 		t.Fatalf("incomplete startup banner: %+v", banner)
 	}
-	t.Logf("agent-server up: addr=%s self_signed=%v fingerprint=%s title=%s (token %d bytes)",
-		banner.Addr, banner.SelfSigned, banner.Fingerprint, banner.Title, len(banner.Token))
+	t.Logf("agent-server up: addr=%s title=%s (token %d bytes)",
+		banner.Addr, banner.Title, len(banner.Token))
 
 	// --- construct the daemon-side remote agent-server ----------------------
 	// This is the exact impl Instance.AgentServer() returns for a remote-runtime
 	// session; the whole point is that it satisfies session.AgentServer identically
 	// to the in-process local one, so the daemon above it is unchanged.
 	as, err := session.NewRemoteAgentServer(session.AgentServerEndpoint{
-		URL:         "wss://" + banner.Addr,
-		Token:       banner.Token,
-		Fingerprint: banner.Fingerprint,
+		URL:   "http://" + banner.Addr,
+		Token: banner.Token,
 	}, "probe")
 	if err != nil {
 		t.Fatalf("NewRemoteAgentServer: %v", err)

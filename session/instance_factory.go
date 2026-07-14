@@ -36,7 +36,7 @@ type InstanceOptions struct {
 	// RemoteAgentServer, when set, points the instance's AgentServer() at a REMOTE
 	// `af agent-server` reachable at the endpoint's authed URL (#1592 Phase 4 PR2)
 	// instead of the local in-process runtime. Validated at NewInstance (a bad URL
-	// or fingerprint fails there). DARK in PR2: no runtime provisions a sandbox to
+	// or a malformed URL fails there). DARK in PR2: no runtime provisions a sandbox to
 	// fill this in yet (PR3-PR5); it is exercised by the out-of-process round-trip
 	// test.
 	RemoteAgentServer *AgentServerEndpoint
@@ -173,7 +173,7 @@ func NewInstance(opts InstanceOptions) (*Instance, error) {
 	// A sandboxed runtime (docker) provisions its workspace during backendFactory
 	// and hands back the in-sandbox agent-server's authed endpoint; a caller can
 	// also pass one explicitly (the PR2 out-of-process round-trip). Either way the
-	// session builds its agent-server transport up front so the endpoint (URL, TLS
+	// session builds its agent-server transport up front so the endpoint (URL,
 	// pin) is validated here rather than on first AgentServer() use — which keeps
 	// the AgentServer() factory infallible (#1592 Phase 4 PR2). nil for every local
 	// session, so the default path is untouched.

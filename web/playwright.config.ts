@@ -5,18 +5,17 @@
 // suite (the locked toolchain decision). It drives the daemon's embedded SPA in a
 // headless Chromium against a REAL af daemon that the container entry script
 // (scripts/container/web-selftest-entry.sh) brings up on a throwaway home — a
-// loopback TLS listener — and exports as env:
+// loopback plain-HTTP listener — and exports as env:
 //
-//   AF_WEB_BASE_URL   https://127.0.0.1:<port>   the SPA + /v1 API origin
+//   AF_WEB_BASE_URL   http://127.0.0.1:<port>   the SPA + /v1 API origin
 //   AF_WEB_SESSION_A  / AF_WEB_SESSION_B          the two seeded session titles
 //
 // No token is exported: the daemon binds loopback, so under #1696 the browser is a
 // loopback peer the daemon exempts from the bearer token — the SPA auto-connects
 // with no credential. The harness asserts exactly that tokenless flow.
 //
-// The listener is self-signed (the daemon's generated default), so
-// ignoreHTTPSErrors accepts it — the browser cannot TOFU-pin a fingerprint the
-// way the CLI does, and this is a loopback test origin, not a trust boundary.
+// The listener is plain HTTP (af removed TLS — terminate it at a proxy if you need
+// it), so there is no cert to trust; the origin is loopback anyway.
 
 import { defineConfig, devices } from "@playwright/test";
 
@@ -44,7 +43,6 @@ export default defineConfig({
   use: {
     baseURL,
     headless: true,
-    ignoreHTTPSErrors: true,
     // Capture a trace only on a failing run, into the gitignored artifacts dir.
     trace: "retain-on-failure",
     // The harness container runs as root (it builds af + runs the daemon), and

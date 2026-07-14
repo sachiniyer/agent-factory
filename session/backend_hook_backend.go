@@ -20,7 +20,7 @@ import (
 // and the ssh runtime dials a host, the hook runtime shells out to a
 // user-provided launch_cmd that provisions the workspace on WHATEVER infra the
 // user owns (k8s, Modal, Daytona, a bespoke orchestrator) and starts an
-// `af agent-server` (PR1) there, echoing that server's authed wss:// URL. The
+// `af agent-server` (PR1) there, echoing that server's authed http:// URL. The
 // daemon then drives it through the remoteAgentServer HTTP/WS client (PR2)
 // exactly as it drives a docker/ssh (or local) session — no hook attach proxy,
 // no preview capture, no per-config terminal gating.
@@ -32,7 +32,10 @@ import (
 //	    clones <cloneURL> (repo@branch on RESTORE) on the user's infra, starts
 //	    `af agent-server --listen :PORT --repo <clonedir> --title <title> …`
 //	    there, and echoes ONE JSON object on stdout:
-//	        {"url":"wss://host:port","token":"…","tls_fingerprint":"…"}
+//	        {"url":"http://host:port","token":"…"}
+//	    The agent-server is HTTP-only; the URL must be http:// (or ws://). The
+//	    token travels over the plaintext connection, so the launch_cmd must reach
+//	    the agent-server over a private network / tunnel it controls.
 //	delete_cmd --name <slug>
 //	    reaps whatever launch_cmd provisioned (the runtime teardown).
 //
@@ -87,10 +90,14 @@ type hookProvisioner struct {
 }
 
 // hookEndpointJSON is the object launch_cmd echoes: the authed `af agent-server`
-// endpoint the daemon dials. It mirrors AgentServerEndpoint's fields under the
-// documented wire names (tls_fingerprint rather than fingerprint) — the same
-// three values docker/ssh read from their in-sandbox agent-server banner, here
-// handed back by the user's script instead.
+// endpoint the daemon dials — the same {url,token} docker/ssh read from their
+// in-sandbox agent-server banner, here handed back by the user's script instead.
+//
+// TLSFingerprint is accepted but IGNORED: af removed TLS, so a fingerprint is
+// meaningless now. It stays in the struct only so a launch_cmd written against
+// the old TLS contract (which echoed "tls_fingerprint") still parses without
+// error — the field is dropped, not honored. New scripts should omit it and echo
+// an http:// URL.
 type hookEndpointJSON struct {
 	URL            string `json:"url"`
 	Token          string `json:"token"`
@@ -115,9 +122,9 @@ func (p *hookProvisioner) provision() (ProvisionResult, error) {
 }
 
 // launch runs the user's launch_cmd with the provision spec as flags, then
-// recovers the {url,token,tls_fingerprint} JSON it echoes (stderr may interleave
-// progress, so extractJSON pulls the object out of the combined output, mirroring
-// how docker/ssh poll their agent-server banner file).
+// recovers the {url,token} JSON it echoes (stderr may interleave progress, so
+// extractJSON pulls the object out of the combined output, mirroring how
+// docker/ssh poll their agent-server banner file).
 func (p *hookProvisioner) launch() (*AgentServerEndpoint, error) {
 	args := []string{
 		"--name", p.slug,
@@ -146,19 +153,20 @@ func (p *hookProvisioner) launch() (*AgentServerEndpoint, error) {
 
 	jsonStr := extractJSON(string(out))
 	if jsonStr == "" {
-		return nil, fmt.Errorf("launch_cmd returned no {\"url\",\"token\",\"tls_fingerprint\"} JSON in its output (see docs/remote-hooks.md for the recipe): %s", strings.TrimSpace(string(out)))
+		return nil, fmt.Errorf("launch_cmd returned no {\"url\",\"token\"} JSON in its output (see docs/remote-hooks.md for the recipe): %s", strings.TrimSpace(string(out)))
 	}
 	var ej hookEndpointJSON
 	if err := json.Unmarshal([]byte(jsonStr), &ej); err != nil {
 		return nil, fmt.Errorf("launch_cmd returned invalid endpoint JSON: %s: %w", jsonStr, err)
 	}
 	if strings.TrimSpace(ej.URL) == "" || strings.TrimSpace(ej.Token) == "" {
-		return nil, fmt.Errorf("launch_cmd endpoint JSON is missing url or token (got %s); it must echo the af agent-server's {\"url\",\"token\",\"tls_fingerprint\"}", jsonStr)
+		return nil, fmt.Errorf("launch_cmd endpoint JSON is missing url or token (got %s); it must echo the af agent-server's {\"url\",\"token\"}", jsonStr)
 	}
+	// ej.TLSFingerprint is intentionally not read — TLS was removed; an old
+	// script that still echoes it parses fine and the value is dropped.
 	return &AgentServerEndpoint{
-		URL:         ej.URL,
-		Token:       ej.Token,
-		Fingerprint: ej.TLSFingerprint,
+		URL:   ej.URL,
+		Token: ej.Token,
 	}, nil
 }
 

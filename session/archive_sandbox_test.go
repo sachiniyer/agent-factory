@@ -62,7 +62,7 @@ func assertRemoteRuntimeReset(t *testing.T, i *Instance) {
 // the container/remote is reclaimed rather than leaked.
 func TestRecoverSandbox_TeardownOnStartFailure(t *testing.T) {
 	var tornDown bool
-	ep := &AgentServerEndpoint{URL: "wss://127.0.0.1:9", Token: "tok", Fingerprint: validFingerprint}
+	ep := &AgentServerEndpoint{URL: "http://127.0.0.1:9", Token: "tok"}
 	fake := fakeRuntime{res: ProvisionResult{
 		Backend:  &failingStartBackend{FakeBackend: NewFakeBackend(), typ: "docker"},
 		Endpoint: ep,
@@ -92,7 +92,7 @@ func TestRecoverSandbox_TeardownOnStartFailure(t *testing.T) {
 // RestoreSandbox (the archive-restore mechanic).
 func TestRestoreSandbox_TeardownOnStartFailure(t *testing.T) {
 	var tornDown bool
-	ep := &AgentServerEndpoint{URL: "wss://127.0.0.1:9", Token: "tok", Fingerprint: validFingerprint}
+	ep := &AgentServerEndpoint{URL: "http://127.0.0.1:9", Token: "tok"}
 	fake := fakeRuntime{res: ProvisionResult{
 		Backend:  &failingStartBackend{FakeBackend: NewFakeBackend(), typ: "docker"},
 		Endpoint: ep,
@@ -125,7 +125,7 @@ func TestRestoreSandbox_TeardownOnStartFailure(t *testing.T) {
 // one sandbox is ever live at once across both attempts.
 func TestRecoverSandbox_RetryDoesNotStackSandboxes(t *testing.T) {
 	rt := &countingRuntime{
-		endpoint: &AgentServerEndpoint{URL: "wss://127.0.0.1:9", Token: "tok", Fingerprint: validFingerprint},
+		endpoint: &AgentServerEndpoint{URL: "http://127.0.0.1:9", Token: "tok"},
 		typ:      "docker",
 	}
 	prev := runtimeRegistry[BackendDocker]
@@ -260,7 +260,7 @@ func TestArchiveSandbox_RejectsNonSandbox(t *testing.T) {
 func TestReprovisionRemote_RebindsInstance(t *testing.T) {
 	freshBackend := &dockerBackend{containerID: "fresh"}
 	var toreDown bool
-	ep := &AgentServerEndpoint{URL: "wss://127.0.0.1:9", Token: "tok", Fingerprint: validFingerprint}
+	ep := &AgentServerEndpoint{URL: "http://127.0.0.1:9", Token: "tok"}
 	fake := fakeRuntime{res: ProvisionResult{
 		Backend:  freshBackend,
 		Endpoint: ep,

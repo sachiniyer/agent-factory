@@ -2,7 +2,7 @@
 // browser web client, the browser analogue of tui-driver-selftest.sh.
 //
 // It drives a headless Chromium against a REAL af daemon (a throwaway home on a
-// loopback TLS listener, brought up by web-selftest-entry.sh) and asserts the core
+// loopback plain-HTTP listener, brought up by web-selftest-entry.sh) and asserts the core
 // v1 loop end to end — assertions are the gate, not screenshots:
 //
 //   1. tokenless open  loopback ⇒ no token required (#1696): the SPA auto-connects
@@ -948,7 +948,7 @@ test("delete project (#1735, redesign PR2, Fix 2): deleting an archived-only-bou
 // TerminalStatus="exited" pane header). It is NOT browser-tested here: a real
 // mid-stream exit can't be forced without killing the session (which removes the row
 // and disposes the terminal before the exit renders), and mocking the per-session WS
-// against the loopback TLS daemon proved unreliable in this harness. The Go side is
+// against the loopback HTTP daemon proved unreliable in this harness. The Go side is
 // the regression guard for the emit; the client arm is exercised by the daemon's own
 // session-end path in manual play-testing.
 

@@ -38,7 +38,7 @@ type remoteSnapshotResponse struct {
 // A repo is configured backend=hook with a launch_cmd shell script that clones
 // repo@origin, starts an `af agent-server --listen 127.0.0.1:0` against the clone
 // (on the host, no container/ssh — hook is the most direct provision-and-expose),
-// and echoes that server's authed {url, token, tls_fingerprint}. The session is
+// and echoes that server's authed {url, token} over plain HTTP. The session is
 // created through the ordinary NewInstance path, so the hook runtime runs the
 // script, parses the endpoint, and hands it to the daemon-side remoteAgentServer,
 // which then drives the FULL surface across the process boundary:
@@ -48,7 +48,7 @@ type remoteSnapshotResponse struct {
 //	reflect the pane → Kill → delete_cmd reaps the af agent-server (no leak).
 //
 // This is the mock-hook round-trip the plan asks for: launch_cmd echoes an
-// af agent-server URL → the daemon drives it over wss → typed input echoes →
+// af agent-server URL → the daemon drives it over http/ws → typed input echoes →
 // teardown. Run it in the container fence: make remote-roundtrip-container. It
 // needs git + tmux (the in-workspace agent-server runs the local tmux runtime).
 func TestRemoteHookRoundTripMockRemote(t *testing.T) {
@@ -99,7 +99,7 @@ func TestRemoteHookRoundTripMockRemote(t *testing.T) {
 	if !mockHookServerAlive(state, slug) {
 		t.Fatal("expected the mock launch_cmd to have started an af agent-server")
 	}
-	t.Logf("launch_cmd started an af agent-server; endpoint exposed over wss:// with TLS+token")
+	t.Logf("launch_cmd started an af agent-server; endpoint exposed over http:// with a bearer token")
 	killed := false
 	defer func() {
 		if !killed {
@@ -186,7 +186,7 @@ func TestRemoteHookRoundTripMockRemote(t *testing.T) {
 
 // writeMockHookLaunch writes a launch_cmd that provisions a session by cloning
 // repo@origin and starting a REAL `af agent-server` against the clone, then
-// echoing its authed {url, token, tls_fingerprint} — the provision-and-expose
+// echoing its authed {url, token} — the provision-and-expose
 // contract. It backgrounds the server with its stdio redirected to files (so the
 // launch_cmd exec returns) and records its PID for delete_cmd to reap.
 func writeMockHookLaunch(t *testing.T, path, afBin, state string) string {
@@ -224,9 +224,8 @@ while [ $i -lt 200 ]; do
 done
 ADDR=$(sed -n 's/.*"addr":"\([^"]*\)".*/\1/p' "$BANNER")
 TOKEN=$(sed -n 's/.*"token":"\([^"]*\)".*/\1/p' "$BANNER")
-FP=$(sed -n 's/.*"fingerprint":"\([^"]*\)".*/\1/p' "$BANNER")
 [ -n "$ADDR" ] || { echo "launch: af agent-server printed no banner:" >&2; cat "$LOG" >&2; exit 1; }
-printf '{"url":"wss://%%s","token":"%%s","tls_fingerprint":"%%s"}\n' "$ADDR" "$TOKEN" "$FP"
+printf '{"url":"http://%%s","token":"%%s"}\n' "$ADDR" "$TOKEN"
 `, afBin, state)
 	return writeScript(t, path, body)
 }

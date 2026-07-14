@@ -1096,6 +1096,15 @@ codex = "/opt/codex/bin/codex --quiet"
 		assert.Equal(t, "0.0.0.0:8443", cfg.ListenAddr)
 	})
 
+	t.Run("removed TLS keys are ignored, not hard-errored (HTTP-only migration)", func(t *testing.T) {
+		// An old config still carrying the removed tls_cert/tls_key must load
+		// (ignore-with-warning), never hard-fail the daemon on an old key.
+		writeToml(t, "listen_addr = \"127.0.0.1:8443\"\ntls_cert = \"/old/c.pem\"\ntls_key = \"/old/k.pem\"\n")
+		cfg, err := LoadConfig()
+		require.NoError(t, err, "an old config carrying removed TLS keys must still load")
+		assert.Equal(t, "127.0.0.1:8443", cfg.ListenAddr)
+	})
+
 	t.Run("require_loopback_token defaults false and is honored when set", func(t *testing.T) {
 		writeToml(t, "default_program = \"claude\"\n")
 		cfg, err := LoadConfig()

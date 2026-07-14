@@ -35,12 +35,13 @@ var (
 same daemon non-interactively (` + "`af sessions`, `af tasks`" + ` emit JSON).
 
 By default 'af' talks to a daemon on the local machine over a Unix socket. The
-daemon also serves the bundled web UI on loopback (https://127.0.0.1:8443) by
+daemon also serves the bundled web UI on loopback (http://127.0.0.1:8443) by
 default. To drive a daemon on ANOTHER machine, SSH to the host and run 'af'
-there, or expose the TLS+token TCP listener to the network (set a routable
-listen_addr) and point a client at it with the persistent
---daemon-url/--token/--tls-fingerprint flags (see 'af token' for the credentials).
-Full guide: https://sachiniyer.github.io/agent-factory/remote-tcp-auth/`,
+there, or expose the HTTP+token TCP listener to the network (set a routable
+listen_addr) and point a client at it with the persistent --daemon-url/--token
+flags (see 'af token' for the credential). The listener is plain HTTP — put it
+behind a reverse proxy or a private network (Tailscale/VPN) if you need TLS.
+Full guide: https://sachiniyer.github.io/agent-factory/remote-http-auth/`,
 		// A runtime (RunE) failure should print as one calm line, not a usage
 		// dump. Silencing usage here — after flag parsing has already succeeded —
 		// keeps the usage/flag help on flag-PARSE errors (which fail before this
@@ -254,14 +255,15 @@ func init() {
 		panic(err)
 	}
 
-	// Remote-daemon target (#1592 Phase 3 PR4). Persistent so they apply to the
-	// bare TUI and every `af sessions ...`/`af tasks ...` subcommand. Unset ⇒ the
-	// local unix socket (unchanged); each has an AF_DAEMON_* env fallback resolved
-	// in apiclient. TLS is mandatory on the remote listener, so --daemon-url is a
-	// wss:///https:// URL and verification is never skipped (fingerprint pin or CA).
+	// Remote-daemon target (#1592 Phase 3 PR4; HTTP-only since 2026-07-14).
+	// Persistent so they apply to the bare TUI and every `af sessions ...`/`af
+	// tasks ...` subcommand. Unset ⇒ the local unix socket (unchanged); each has
+	// an AF_DAEMON_* env fallback resolved in apiclient. The remote listener is
+	// plain HTTP (no TLS), so --daemon-url is an http:///ws:// URL; a wss:///https://
+	// URL is rejected with an HTTP-only error pointing at http://.
 	rootCmd.PersistentFlags().StringVar(&apiclient.FlagDaemonURL, "daemon-url", "",
-		"Target a REMOTE daemon at this wss:// or https:// URL instead of the local unix socket "+
-			"(env: AF_DAEMON_URL). Requires --token.")
+		"Target a REMOTE daemon at this http:// or ws:// URL instead of the local unix socket "+
+			"(env: AF_DAEMON_URL). The daemon is HTTP-only; terminate TLS at your own proxy if needed.")
 	// NOTE: no backticks in these usage strings. pflag's UnquoteUsage treats the
 	// first backticked span as the flag's arg-name placeholder, so `af token
 	// show` would render "--token af token show" instead of "--token string" on
@@ -269,9 +271,6 @@ func init() {
 	rootCmd.PersistentFlags().StringVar(&apiclient.FlagDaemonToken, "token", "",
 		"Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). "+
 			"Get it with 'af token show' on the daemon host.")
-	rootCmd.PersistentFlags().StringVar(&apiclient.FlagTLSFingerprint, "tls-fingerprint", "",
-		"Pinned SHA-256 fingerprint of a remote daemon's self-signed TLS cert "+
-			"(env: AF_DAEMON_TLS_FINGERPRINT); omit for a CA-signed cert. From 'af token show'.")
 
 	rootCmd.AddCommand(debugCmd)
 	rootCmd.AddCommand(keysCmd)

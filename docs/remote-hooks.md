@@ -2,7 +2,9 @@
 
 Agent Factory ships two first-class off-box backends — [`docker` and `ssh`](backends.md) — that need zero scripting. The **remote-hook backend** is the escape hatch for infrastructure those don't model (Kubernetes, Modal, Daytona, a bastion with exotic auth, a bespoke orchestrator): you provide two shell scripts and `af` runs your session on whatever you provision.
 
-Since **#1592 Phase 4 PR7** the hook backend follows the same **provision-and-expose** contract as `docker`/`ssh`: your `launch_cmd` starts an [`af agent-server`](backends.md) in the remote workspace and echoes its authed URL; the daemon then drives the session over that `wss://` stream. A remote-hook session is behaviorally identical to a local one — attach, type, resize, tabs, preview, archive/restore, kill — because it is driven through the exact same agent-server protocol.
+Since **#1592 Phase 4 PR7** the hook backend follows the same **provision-and-expose** contract as `docker`/`ssh`: your `launch_cmd` starts an [`af agent-server`](backends.md) in the remote workspace and echoes its authed URL; the daemon then drives the session over that `ws://` stream. A remote-hook session is behaviorally identical to a local one — attach, type, resize, tabs, preview, archive/restore, kill — because it is driven through the exact same agent-server protocol.
+
+> **Transport:** the `af agent-server` serves **plain HTTP** (no TLS — af terminates none of its own). The URL must be `http://` (or `ws://`), and the bearer token travels over the connection, so your `launch_cmd` must make the agent-server reachable from the daemon over a private network or tunnel it controls (a container's published loopback port, an SSH forward, a tailnet address).
 
 > **⚠️ Breaking change (#1592 Phase 4 PR7).** The old hook contract — `launch_cmd` returning a session id, plus `list_cmd`/`attach_cmd`/`terminal_cmd` scripts for enumeration, terminal proxying, and preview capture — has been **removed**. `launch_cmd` now returns an `af agent-server` endpoint, and the only other script is `delete_cmd`. A config that still sets `list_cmd`, `attach_cmd`, or `terminal_cmd` is **rejected** with an error pointing here. See [Migrating from the old contract](#migrating-from-the-old-contract) for a copy-pasteable recipe.
 
@@ -70,14 +72,13 @@ Provisions the workspace on your infrastructure, starts an `af agent-server` the
 **stdout (one JSON object):**
 
 ```json
-{"url": "wss://10.0.0.7:8443", "token": "…bearer…", "tls_fingerprint": "AB:CD:…"}
+{"url": "http://10.0.0.7:8443", "token": "…bearer…"}
 ```
 
-- `url` (**required**) — the `af agent-server`'s TLS base URL (`wss://host:port`), reachable from the daemon.
+- `url` (**required**) — the `af agent-server`'s base URL (`http://host:port` or `ws://host:port`), reachable from the daemon. It must be plain HTTP — a `wss://`/`https://` URL is rejected (af serves no TLS).
 - `token` (**required**) — the bearer token the server printed on startup.
-- `tls_fingerprint` — the server's self-signed cert SHA-256 to pin (TOFU). Omit only if the server presents a CA-trusted cert.
 
-These three values are exactly the `af agent-server` startup banner (`addr`/`token`/`fingerprint`). If `launch_cmd` exits 0 but echoes no parseable endpoint JSON, `af` runs `delete_cmd --name <slug>` best-effort to avoid orphaning whatever was provisioned, then surfaces the error — so keep non-JSON output on stderr.
+These values are the `af agent-server` startup banner (`addr`/`token`). A legacy `tls_fingerprint` field is accepted-and-ignored, so an old script keeps parsing, but it does nothing — drop it. If `launch_cmd` exits 0 but echoes no parseable endpoint JSON, `af` runs `delete_cmd --name <slug>` best-effort to avoid orphaning whatever was provisioned, then surfaces the error — so keep non-JSON output on stderr.
 
 ### `delete_cmd`
 
@@ -91,7 +92,7 @@ Tears down whatever `launch_cmd` provisioned (the runtime teardown). Runs on kil
 
 Because the session is driven through a real `af agent-server`, a remote-hook session has **full parity** with local and docker/ssh:
 
-- **Attach / input / resize / tabs** happen client-side over the agent-server's `wss://` PTY stream — there is no hook attach proxy or preview-capture loop anymore.
+- **Attach / input / resize / tabs** happen client-side over the agent-server's `ws://` PTY stream — there is no hook attach proxy or preview-capture loop anymore.
 - **Preview / liveness / prompt delivery** go over the same REST surface.
 - The agent-server manages tabs natively, so a remote session gets its Agent tab (and shell tabs) with no per-config gating.
 
@@ -142,9 +143,8 @@ echo $! > "$WORKDIR/pid"
 for _ in $(seq 1 200); do grep -q '"addr"' "$BANNER" && break; sleep 0.1; done
 ADDR=$(sed -n 's/.*"addr":"\([^"]*\)".*/\1/p' "$BANNER")
 TOKEN=$(sed -n 's/.*"token":"\([^"]*\)".*/\1/p' "$BANNER")
-FP=$(sed -n 's/.*"fingerprint":"\([^"]*\)".*/\1/p' "$BANNER")
 [ -n "$ADDR" ] || { echo "agent-server did not start" >&2; cat "$WORKDIR/agent-server.log" >&2; exit 1; }
-printf '{"url":"wss://%s","token":"%s","tls_fingerprint":"%s"}\n' "$ADDR" "$TOKEN" "$FP"
+printf '{"url":"http://%s","token":"%s"}\n' "$ADDR" "$TOKEN"
 ```
 
 The matching `delete.sh`:
@@ -159,15 +159,15 @@ WORKDIR="$HOME/.af-hook/$NAME"
 rm -rf "$WORKDIR"
 ```
 
-For a real orchestrator, replace `WORKDIR=…` / `setsid af …` with your provisioning (create a pod, `ssh` to a host, spin up a Modal/Daytona sandbox) and run `af agent-server` there, then surface its banner however you reach it (e.g. read a published address). The daemon only needs the three fields back.
+For a real orchestrator, replace `WORKDIR=…` / `setsid af …` with your provisioning (create a pod, `ssh` to a host, spin up a Modal/Daytona sandbox) and run `af agent-server` there, then surface its banner however you reach it (e.g. read a published address). The daemon only needs the `url` and `token` back — over plain HTTP, so make sure the address you hand back is reachable from the daemon on a private network or tunnel.
 
 ## Migrating from the old contract
 
 | Old | New |
 |---|---|
-| `launch_cmd` echoes `{"name","status"}` | `launch_cmd` echoes `{"url","token","tls_fingerprint"}` and starts an `af agent-server` |
+| `launch_cmd` echoes `{"name","status"}` | `launch_cmd` echoes `{"url","token"}` (plain-HTTP URL) and starts an `af agent-server` |
 | `list_cmd` enumerated remote sessions | **Removed.** The daemon owns sessions; restore re-runs `launch_cmd --branch`. |
-| `attach_cmd` proxied a terminal / captured preview | **Removed.** Attach + preview go over the agent-server's `wss://` stream. |
+| `attach_cmd` proxied a terminal / captured preview | **Removed.** Attach + preview go over the agent-server's `ws://` stream. |
 | `terminal_cmd` powered the Terminal tab | **Removed.** The agent-server manages tabs natively. |
 | `delete_cmd --name <slug> --json` | `delete_cmd --name <slug>` (unchanged in spirit) |
 

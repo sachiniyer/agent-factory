@@ -43,8 +43,9 @@ export interface EventStreamCallbacks {
 const BACKOFF_BASE_MS = 500;
 const BACKOFF_MAX_MS = 10_000;
 
-/** Returns the WS scheme matching the page origin: wss: under https: (the TLS TCP
- *  listener the SPA is served from), ws: otherwise. */
+/** Returns the WS scheme matching the page origin: ws: under the daemon's plain
+ *  HTTP listener (the normal case), wss: when a reverse proxy serves the page over
+ *  https:. */
 function wsScheme(): string {
   return window.location.protocol === "https:" ? "wss:" : "ws:";
 }

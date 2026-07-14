@@ -2,14 +2,12 @@ package daemon
 
 import (
 	"context"
-	"crypto/tls"
-	"crypto/x509"
 	"encoding/json"
 	"io"
 	"net"
 	"net/http"
 	"os"
-	"strings"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -19,23 +17,11 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// pinnedTLSConfig builds a client TLS config that trusts ONLY the daemon's
-// self-signed cert (read from disk), mirroring the fingerprint-pin PR4 will do.
-// The cert carries a 127.0.0.1 SAN, so verifying against 127.0.0.1 succeeds.
-func pinnedTLSConfig(t *testing.T, certPath string) *tls.Config {
-	t.Helper()
-	pem, err := os.ReadFile(certPath)
-	require.NoError(t, err)
-	pool := x509.NewCertPool()
-	require.True(t, pool.AppendCertsFromPEM(pem), "load self-signed cert into pool")
-	return &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12}
-}
-
-// TestTCPListener_TLS_TokenRoundTrip is the PR3 payoff: a real TLS TCP listener
-// on loopback that REQUIRES the bearer token. It proves REST + WS both accept a
-// correct token over https/wss and reject a missing/wrong one, with the client
-// pinning the self-signed cert.
-func TestTCPListener_TLS_TokenRoundTrip(t *testing.T) {
+// TestTCPListener_HTTP_TokenRoundTrip is the PR3 payoff, now HTTP-only: a real
+// plain-HTTP TCP listener on loopback that REQUIRES the bearer token. It proves
+// REST + WS both accept a correct token over http/ws and reject a missing/wrong
+// one, with no TLS anywhere (the client is a bare http.Client).
+func TestTCPListener_HTTP_TokenRoundTrip(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 
 	cfg := config.DefaultConfig()
@@ -53,24 +39,23 @@ func TestTCPListener_TLS_TokenRoundTrip(t *testing.T) {
 	defer func() { _ = closeTCP() }()
 
 	require.NotEmpty(t, info.Token)
-	require.True(t, info.SelfSigned)
-	require.True(t, strings.HasPrefix(info.Fingerprint, "sha256:"))
 
-	// The self-signed material lives in the af home; pin it.
+	// No TLS: prove the daemon serves without any cert on disk (the old self-signed
+	// material is gone). daemon-tls.crt must never be created.
 	dir, err := config.GetConfigDir()
 	require.NoError(t, err)
-	client := &http.Client{
-		Timeout:   5 * time.Second,
-		Transport: &http.Transport{TLSClientConfig: pinnedTLSConfig(t, dir+"/"+daemonTLSCertFileName)},
-	}
-	baseURL := "https://" + info.Addr
+	_, statErr := os.Stat(filepath.Join(dir, "daemon-tls.crt"))
+	require.True(t, os.IsNotExist(statErr), "HTTP-only daemon must generate no TLS cert")
+
+	client := &http.Client{Timeout: 5 * time.Second}
+	baseURL := "http://" + info.Addr
 
 	// --- REST: correct token → 200 -----------------------------------------
 	req, err := http.NewRequest(http.MethodGet, baseURL+"/v1/health", nil)
 	require.NoError(t, err)
 	req.Header.Set("Authorization", "Bearer "+info.Token)
 	resp, err := client.Do(req)
-	require.NoError(t, err, "TLS handshake + authorized request must succeed")
+	require.NoError(t, err, "authorized request must succeed")
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 	_ = resp.Body.Close()
 
@@ -92,7 +77,7 @@ func TestTCPListener_TLS_TokenRoundTrip(t *testing.T) {
 	_ = resp.Body.Close()
 
 	// --- WS: correct token via ?access_token= → upgrades + streams ---------
-	wsBase := "wss://" + info.Addr
+	wsBase := "ws://" + info.Addr
 	dialOpts := &websocket.DialOptions{HTTPClient: client}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -102,7 +87,7 @@ func TestTCPListener_TLS_TokenRoundTrip(t *testing.T) {
 	defer func() { _ = conn.Close(websocket.StatusNormalClosure, "") }()
 
 	// Prove the stream is live: publish repeatedly (absorb subscribe race) and
-	// read one event back over the encrypted, token-gated socket.
+	// read one event back over the token-gated socket.
 	ev, err := agentproto.NewEvent(agentproto.EventTaskCreated, nil)
 	require.NoError(t, err)
 	got := make(chan agentproto.MessageType, 1)
@@ -137,7 +122,7 @@ func TestTCPListener_TLS_TokenRoundTrip(t *testing.T) {
 	require.Error(t, err, "unauthenticated WS handshake must be rejected")
 }
 
-// TestTCPListener_ServesWebShellUnauthed is the PR2 payoff: the TLS TCP listener
+// TestTCPListener_ServesWebShellUnauthed is the PR2 payoff: the HTTP TCP listener
 // serves the embedded SPA shell WITHOUT a token (you cannot paste a token into a
 // page that will not load), while the /v1/ data plane stays token-gated on the
 // exact same listener. It also asserts the strict CSP the static handler sets.
@@ -157,13 +142,8 @@ func TestTCPListener_ServesWebShellUnauthed(t *testing.T) {
 	require.NoError(t, err)
 	defer func() { _ = closeTCP() }()
 
-	dir, err := config.GetConfigDir()
-	require.NoError(t, err)
-	client := &http.Client{
-		Timeout:   5 * time.Second,
-		Transport: &http.Transport{TLSClientConfig: pinnedTLSConfig(t, dir+"/"+daemonTLSCertFileName)},
-	}
-	baseURL := "https://" + info.Addr
+	client := &http.Client{Timeout: 5 * time.Second}
+	baseURL := "http://" + info.Addr
 
 	// --- Static shell: NO token → 200 + index.html + strict CSP ------------
 	resp, err := client.Get(baseURL + "/")
@@ -196,10 +176,10 @@ func TestTCPListener_ServesWebShellUnauthed(t *testing.T) {
 }
 
 // TestTCPListener_LoopbackExempt is the #1696 end-to-end payoff: the daemon's
-// web policy (loopback exempt) over a REAL TLS TCP socket on 127.0.0.1 serves the
+// web policy (loopback exempt) over a REAL HTTP TCP socket on 127.0.0.1 serves the
 // /v1 data plane with NO token, because the peer is loopback. It proves the
-// exemption holds through the full TLS + webShellHandler + gate stack, not just
-// the handler unit test.
+// exemption holds through the full webShellHandler + gate stack, not just the
+// handler unit test.
 func TestTCPListener_LoopbackExempt(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 
@@ -215,13 +195,8 @@ func TestTCPListener_LoopbackExempt(t *testing.T) {
 	require.NoError(t, err)
 	defer func() { _ = closeTCP() }()
 
-	dir, err := config.GetConfigDir()
-	require.NoError(t, err)
-	client := &http.Client{
-		Timeout:   5 * time.Second,
-		Transport: &http.Transport{TLSClientConfig: pinnedTLSConfig(t, dir+"/"+daemonTLSCertFileName)},
-	}
-	baseURL := "https://" + info.Addr
+	client := &http.Client{Timeout: 5 * time.Second}
+	baseURL := "http://" + info.Addr
 
 	// --- /v1 data plane over loopback with NO token → 200 (exempt) ----------
 	resp, err := client.Get(baseURL + "/v1/health")
@@ -249,7 +224,7 @@ func TestTCPListener_LoopbackExempt(t *testing.T) {
 // startHTTPServer builds from the config flag), so a same-machine peer must
 // present the token exactly like a network peer. This is the shared/multi-user
 // tighten-up — it proves a local process WITHOUT the token is rejected while the
-// same request WITH the token is allowed, through the full TLS + gate stack.
+// same request WITH the token is allowed, through the full gate stack.
 func TestTCPListener_RequireLoopbackToken(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 
@@ -267,13 +242,8 @@ func TestTCPListener_RequireLoopbackToken(t *testing.T) {
 	defer func() { _ = closeTCP() }()
 	require.NotEmpty(t, info.Token)
 
-	dir, err := config.GetConfigDir()
-	require.NoError(t, err)
-	client := &http.Client{
-		Timeout:   5 * time.Second,
-		Transport: &http.Transport{TLSClientConfig: pinnedTLSConfig(t, dir+"/"+daemonTLSCertFileName)},
-	}
-	baseURL := "https://" + info.Addr
+	client := &http.Client{Timeout: 5 * time.Second}
+	baseURL := "http://" + info.Addr
 
 	// --- loopback with NO token → 401 (exemption withdrawn) -----------------
 	resp, err := client.Get(baseURL + "/v1/health")
@@ -309,7 +279,7 @@ func TestTCPListener_RequireLoopbackToken(t *testing.T) {
 
 // TestStartHTTPServer_WebOnByDefault pins the bundled-web-UI default: the plain
 // DefaultConfig() carries the loopback listen_addr, so startHTTPServer binds the
-// TLS TCP listener (and generates the self-signed cert) with no config at all.
+// HTTP TCP listener with no config at all — and generates NO cert on disk.
 func TestStartHTTPServer_WebOnByDefault(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 	cfg := config.DefaultConfig()
@@ -325,11 +295,11 @@ func TestStartHTTPServer_WebOnByDefault(t *testing.T) {
 	require.NoError(t, err)
 	defer func() { require.NoError(t, closeHTTP()) }()
 
-	// The self-signed TLS material is materialized once the listener binds.
+	// HTTP-only: no TLS material is ever materialized, even with the listener up.
 	dir, err := config.GetConfigDir()
 	require.NoError(t, err)
-	_, statErr := os.Stat(dir + "/" + daemonTLSCertFileName)
-	require.NoError(t, statErr, "self-signed cert should be generated when the web listener binds")
+	_, statErr := os.Stat(filepath.Join(dir, "daemon-tls.crt"))
+	require.True(t, os.IsNotExist(statErr), "no cert should be generated for the HTTP listener")
 }
 
 // TestStartHTTPServer_NoTCPWhenDisabled pins the opt-out: an explicit
@@ -345,12 +315,6 @@ func TestStartHTTPServer_NoTCPWhenDisabled(t *testing.T) {
 	closeHTTP, err := startHTTPServer(m, newTaskScheduler(), nil)
 	require.NoError(t, err)
 	require.NoError(t, closeHTTP())
-
-	// No self-signed TLS material is generated when the listener never binds.
-	dir, err := config.GetConfigDir()
-	require.NoError(t, err)
-	_, statErr := os.Stat(dir + "/" + daemonTLSCertFileName)
-	require.True(t, os.IsNotExist(statErr), "no cert should be generated when the web server is disabled")
 }
 
 // TestStartHTTPServer_BindConflictNonFatal pins robustness item 3: when the web
@@ -361,7 +325,7 @@ func TestStartHTTPServer_BindConflictNonFatal(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 
 	// Occupy a port, then point the daemon's web listener straight at it so the
-	// TLS bind is guaranteed to fail with EADDRINUSE.
+	// bind is guaranteed to fail with EADDRINUSE.
 	blocker, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
 	defer func() { _ = blocker.Close() }()

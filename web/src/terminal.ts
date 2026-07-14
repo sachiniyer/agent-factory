@@ -60,8 +60,9 @@ const BACKOFF_MAX_MS = 10_000;
 // settle, not one per animation frame. The server echoes the winning size back.
 const RESIZE_DEBOUNCE_MS = 120;
 
-/** ws: under http:, wss: under the TLS TCP listener the SPA is normally served
- *  from — matching the page origin so the stream rides the same authed transport. */
+/** ws: matching the page origin — the daemon serves the SPA over plain HTTP, so
+ *  this is normally ws:. If a reverse proxy fronts the daemon and serves the page
+ *  over https:, it becomes wss: so the stream rides the same proxied transport. */
 function wsScheme(): string {
   return window.location.protocol === "https:" ? "wss:" : "ws:";
 }

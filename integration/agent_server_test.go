@@ -3,8 +3,6 @@ package integration_test
 import (
 	"bufio"
 	"context"
-	"crypto/tls"
-	"crypto/x509"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -23,19 +21,18 @@ import (
 )
 
 // agentServerBanner mirrors daemon.AgentServerInfo — the JSON startup line the
-// `af agent-server` process prints to stdout the instant its listener binds.
+// `af agent-server` process prints to stdout the instant its listener binds. The
+// listener is plain HTTP, so the banner carries only the address and token (no
+// cert path or fingerprint).
 type agentServerBanner struct {
-	Addr        string `json:"addr"`
-	Token       string `json:"token"`
-	Fingerprint string `json:"fingerprint"`
-	SelfSigned  bool   `json:"self_signed"`
-	CertPath    string `json:"cert_path"`
-	Title       string `json:"title"`
+	Addr  string `json:"addr"`
+	Token string `json:"token"`
+	Title string `json:"title"`
 }
 
 // TestAgentServerRoundTrip is the #1592 Phase 4 PR1 payoff: it starts a REAL,
-// out-of-process `af agent-server` on a loopback TLS+token listener against a real
-// git repo + tmux session, then drives it directly over HTTPS/WSS presenting the
+// out-of-process `af agent-server` on a loopback HTTP+token listener against a real
+// git repo + tmux session, then drives it directly over HTTP/WS presenting the
 // token — provisioning + launching the workspace, subscribing to the PTY stream,
 // typing input and seeing the pane echo it, and reading a snapshot. This proves
 // the agent-server is a real out-of-process runtime a remote daemon can drive over
@@ -90,18 +87,15 @@ func TestAgentServerRoundTrip(t *testing.T) {
 
 	// --- read the machine-readable startup banner ---------------------------
 	banner := readAgentServerBanner(t, stdout)
-	if banner.Addr == "" || banner.Token == "" || banner.CertPath == "" {
+	if banner.Addr == "" || banner.Token == "" {
 		t.Fatalf("incomplete startup banner: %+v", banner)
 	}
-	if !strings.HasPrefix(banner.Fingerprint, "sha256:") {
-		t.Fatalf("expected a sha256 cert fingerprint, got %q", banner.Fingerprint)
-	}
 
-	t.Logf("agent-server up: addr=%s self_signed=%v fingerprint=%s title=%s (token %d bytes)",
-		banner.Addr, banner.SelfSigned, banner.Fingerprint, banner.Title, len(banner.Token))
+	t.Logf("agent-server up: addr=%s title=%s (token %d bytes)",
+		banner.Addr, banner.Title, len(banner.Token))
 
-	client := pinnedClient(t, banner.CertPath)
-	base := "https://" + banner.Addr
+	client := &http.Client{Timeout: 10 * time.Second}
+	base := "http://" + banner.Addr
 
 	post := func(path, body string) map[string]any {
 		t.Helper()
@@ -139,11 +133,11 @@ func TestAgentServerRoundTrip(t *testing.T) {
 	post("/v1/agent/provision", `{"first_time_setup":true}`)
 	post("/v1/agent/launch", `{"first_time_setup":true}`)
 
-	// --- subscribe to the PTY stream over WSS -------------------------------
+	// --- subscribe to the PTY stream over WS --------------------------------
 	wsCtx, wsCancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer wsCancel()
 	conn, _, err := websocket.Dial(wsCtx,
-		"wss://"+banner.Addr+"/v1/sessions/probe/stream?"+agentproto.AccessTokenQueryParam+"="+banner.Token,
+		"ws://"+banner.Addr+"/v1/sessions/probe/stream?"+agentproto.AccessTokenQueryParam+"="+banner.Token,
 		&websocket.DialOptions{HTTPClient: client})
 	if err != nil {
 		t.Fatalf("dial PTY stream: %v", err)
@@ -182,7 +176,7 @@ func TestAgentServerRoundTrip(t *testing.T) {
 	waitUntil(t, 10*time.Second, "PTY stream echoes typed input", func() bool {
 		return strings.Contains(output(), "hello-agent-server")
 	})
-	t.Logf("PTY stream echoed typed input over WSS: %q", strings.TrimSpace(output()))
+	t.Logf("PTY stream echoed typed input over WS: %q", strings.TrimSpace(output()))
 
 	// --- read a snapshot over the control REST ------------------------------
 	snap := post("/v1/agent/snapshot", ``)
@@ -231,24 +225,6 @@ func readAgentServerBanner(t *testing.T, stdout io.Reader) agentServerBanner {
 		t.Fatalf("decode startup banner %q: %v", line, err)
 	}
 	return banner
-}
-
-// pinnedClient builds an HTTPS client that trusts ONLY the agent-server's
-// self-signed cert (TOFU pin), mirroring what a remote daemon does.
-func pinnedClient(t *testing.T, certPath string) *http.Client {
-	t.Helper()
-	pem, err := os.ReadFile(certPath)
-	if err != nil {
-		t.Fatalf("read cert %s: %v", certPath, err)
-	}
-	pool := x509.NewCertPool()
-	if !pool.AppendCertsFromPEM(pem) {
-		t.Fatalf("load cert %s into pool", certPath)
-	}
-	return &http.Client{
-		Timeout:   10 * time.Second,
-		Transport: &http.Transport{TLSClientConfig: &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12}},
-	}
 }
 
 // tmuxNameForProbe derives the sanitized tmux session name for the "probe"

@@ -104,51 +104,47 @@ func startHTTPServer(manager *Manager, scheduler *taskScheduler, watchers *watch
 		}
 	}()
 
-	// TLS TCP listener (#1592 Phase 3 PR3, §1.1) — the daemon's bundled web UI +
-	// HTTP/WS surface. ON BY DEFAULT: listen_addr defaults to loopback
-	// ("127.0.0.1:8443"), so a daemon with no config serves the browser client on
-	// localhost. An explicit `listen_addr = ""` is the opt-out that skips this
-	// block entirely (pure-unix daemon). It serves the same mux behind a
-	// token-enforcing gate. A bind failure — including the loopback default
-	// losing a port race with another daemon — is logged but NEVER fatal: the
-	// unix socket and control plane every local client depends on must not
-	// regress because a web port could not open, so the daemon keeps running with
-	// the web server skipped.
+	// Plain-HTTP TCP listener (#1592 Phase 3 PR3, §1.1; HTTP-only since
+	// 2026-07-14) — the daemon's bundled web UI + HTTP/WS surface. ON BY
+	// DEFAULT: listen_addr defaults to loopback ("127.0.0.1:8443"), so a daemon
+	// with no config serves the browser client on localhost. An explicit
+	// `listen_addr = ""` is the opt-out that skips this block entirely
+	// (pure-unix daemon). It serves the same mux behind a token-enforcing gate.
+	// A bind failure — including the loopback default losing a port race with
+	// another daemon — is logged but NEVER fatal: the unix socket and control
+	// plane every local client depends on must not regress because a web port
+	// could not open, so the daemon keeps running with the web server skipped.
 	closeTCP := func() error { return nil }
 	if manager.cfg.ListenAddr != "" {
-		// The daemon's web listener exempts loopback peers from the token by
-		// default (a same-machine browser gets the unix-socket's local trust,
-		// #1696) and honors require_token=false to drop the token for network peers
-		// too on a trusted network. require_loopback_token=true withdraws the
-		// loopback exemption so even same-machine peers must present the token —
-		// the tighten-up for a SHARED/multi-user host, where the default exemption
-		// would hand every local account the full control plane. All three are safe
-		// relaxations/tightenings of the token ONLY — TLS stays mandatory in
-		// startTCPListener regardless.
-		policy := tokenGatePolicy{
-			tokenDisabled:  !manager.cfg.RequireToken,
-			loopbackExempt: !manager.cfg.RequireLoopbackToken,
-		}
-		if !manager.cfg.RequireToken {
+		// The daemon's web listener exempts loopback peers from the token only when
+		// the listener is LOOPBACK-BOUND (a same-machine browser gets the
+		// unix-socket's local trust, #1696), honors require_token=false to drop the
+		// token for all peers on a trusted network, and withdraws the loopback
+		// exemption on require_loopback_token=true. Crucially, a NETWORK-bound
+		// listener never exempts loopback: a same-host reverse proxy connects from
+		// 127.0.0.1, so exempting it would bypass the token (webListenerPolicy).
+		policy := webListenerPolicy(manager.cfg)
+		if policy.tokenDisabled {
 			// A network-reachable, tokenless control plane is a deliberate but
 			// dangerous choice: anyone who can reach listen_addr has full control.
 			// Make it impossible to miss in the daemon log.
-			log.WarningLog.Printf("WARNING: require_token=false — the daemon web API on %q accepts NETWORK peers with NO token; anyone who can reach it has full control. TLS still applies; this disables ONLY the bearer token. Unset require_token (or set it true) to re-enable auth.", manager.cfg.ListenAddr)
+			log.WarningLog.Printf("WARNING: require_token=false — the daemon web API on %q accepts NETWORK peers with NO token; anyone who can reach it has full control. The listener is plain HTTP (no TLS), so this leaves it fully open. Unset require_token (or set it true) to re-enable auth.", manager.cfg.ListenAddr)
 		}
 		if closer, info, err := startTCPListener(mux, manager.cfg, policy); err != nil {
-			log.WarningLog.Printf("failed to start daemon TLS TCP listener on %q: %v", manager.cfg.ListenAddr, err)
+			log.WarningLog.Printf("failed to start daemon HTTP TCP listener on %q: %v", manager.cfg.ListenAddr, err)
 		} else {
 			closeTCP = closer
-			log.InfoLog.Printf("daemon TLS TCP listener enabled on %s (self-signed=%v)", info.Addr, info.SelfSigned)
-			log.InfoLog.Printf("  cert fingerprint: %s", info.Fingerprint)
+			log.InfoLog.Printf("daemon HTTP TCP listener enabled on %s (plain HTTP — terminate TLS at a proxy if needed)", info.Addr)
 			log.InfoLog.Printf("  bearer token: %s", info.Token)
 			switch {
-			case manager.cfg.RequireLoopbackToken:
-				log.InfoLog.Printf("  require_loopback_token=true: loopback peers (127.0.0.1/::1) must present the token above, same as network peers")
-			case manager.cfg.RequireToken:
+			case policy.tokenDisabled:
+				log.InfoLog.Printf("  all peers connect with NO token (require_token=false)")
+			case policy.loopbackExempt:
 				log.InfoLog.Printf("  loopback peers (127.0.0.1/::1) connect with no token; network peers must present the token above")
+			case isLoopbackListenAddr(manager.cfg.ListenAddr):
+				log.InfoLog.Printf("  require_loopback_token=true: every peer (loopback included) must present the token above")
 			default:
-				log.InfoLog.Printf("  loopback peers (127.0.0.1/::1) connect with no token; network peers also need NO token (require_token=false)")
+				log.InfoLog.Printf("  listener is network-bound: every peer must present the token above, INCLUDING loopback-origin requests — a same-host reverse proxy is NOT exempt (front it and let the proxy pass the token, or set require_token=false only on a fully trusted network)")
 			}
 		}
 	}

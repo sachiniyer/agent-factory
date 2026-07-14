@@ -68,20 +68,20 @@ const dialTimeout = 250 * time.Millisecond
 // The Unix-socket dialer ignores it (the socket path is the real address), but
 // net/http requires a valid URL, so every local request targets
 // http://af/v1/<Method>. A remote Client (NewRemote) carries the real
-// https://host:port authority instead.
+// http://host:port authority instead.
 const localHTTPBase = "http://af"
 
 // localWSBase is the placeholder WS authority for the LOCAL unix socket: the
 // http.Client's transport dials the socket regardless of host, so ws://unix is
-// purely syntactic. A remote Client carries the real wss://host:port authority.
+// purely syntactic. A remote Client carries the real ws://host:port authority.
 const localWSBase = "ws://unix"
 
 // Client dials the daemon's HTTP/JSON API and calls its /v1/* routes. By default
 // it dials the local unix socket (New / NewWithSocket) — the transport ignores
 // the URL host and connects to the fixed socket path, so a Client is bound to one
-// daemon home. NewRemote instead dials a REMOTE daemon over TCP+TLS and threads a
+// daemon home. NewRemote instead dials a REMOTE daemon over plain HTTP/WS and threads a
 // bearer token on every call (#1592 Phase 3 PR4); httpBase/wsBase then carry the
-// real https://host:port / wss://host:port authority. A zero Client is not usable.
+// real http://host:port / ws://host:port authority. A zero Client is not usable.
 type Client struct {
 	httpClient *http.Client
 	// token is the bearer credential threaded on every REST call (Authorization
@@ -90,14 +90,14 @@ type Client struct {
 	// auth, #1029) — so the local path sends no Authorization header, unchanged.
 	token string
 	// httpBase is the REST scheme+authority: localHTTPBase ("http://af") for the
-	// unix socket, "https://host:port" for a remote daemon.
+	// unix socket, "http://host:port" for a remote daemon.
 	httpBase string
 	// wsBase is the WS scheme+authority: localWSBase ("ws://unix") for the unix
-	// socket, "wss://host:port" for a remote daemon.
+	// socket, "ws://host:port" for a remote daemon.
 	wsBase string
 	// requestTimeout is the SINGLE overall deadline applied to each REST call()
 	// round-trip via the request context. It is set only for a REMOTE target
-	// (NewRemote), so a daemon that completes TLS but then never responds surfaces
+	// (NewRemote), so a daemon that accepts the connection but then never responds surfaces
 	// as a timeout instead of hanging forever (#1730) — the sole REST wait-bound,
 	// deliberately generous so a synchronous mutating RPC (a remote docker/ssh
 	// CreateSession) is not severed mid-provision. It is 0 for the local unix
@@ -156,7 +156,7 @@ func (c *Client) call(method string, req any, resp any) error {
 	}
 
 	// A remote target bounds the whole round-trip with a single overall deadline so
-	// a wedged daemon (TLS up, never responds) times out instead of hanging
+	// a wedged daemon (connected, never responds) times out instead of hanging
 	// (#1730); the deadline is generous so a slow synchronous create is not
 	// severed. The local socket leaves requestTimeout zero and blocks on the
 	// in-memory snapshot as before.

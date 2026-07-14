@@ -124,13 +124,13 @@ func (s *fakeSub) NextEvent(ctx context.Context) (session.PTYEvent, error) {
 func (s *fakeSub) Seq() session.Seq { return 0 }
 func (s *fakeSub) Close() error     { return nil }
 
-// TestHeadlessAgentServer_TLSTokenRoundTrip drives the headless agent-server's
-// wiring in-process over a REAL loopback TLS+token listener: the control REST
-// mirror of session.AgentServer and the WS PTY stream, both behind the bearer
-// token, plus a missing-token rejection. It proves the routes are wired to the
-// single AgentServer and gated exactly like the daemon surface — without a real
-// session or a spawned daemon.
-func TestHeadlessAgentServer_TLSTokenRoundTrip(t *testing.T) {
+// TestHeadlessAgentServer_HTTPTokenRoundTrip drives the headless agent-server's
+// wiring in-process over a REAL loopback plain-HTTP+token listener: the control
+// REST mirror of session.AgentServer and the WS PTY stream, both behind the
+// bearer token, plus a missing-token rejection. It proves the routes are wired to
+// the single AgentServer and gated exactly like the daemon surface — without a
+// real session or a spawned daemon.
+func TestHeadlessAgentServer_HTTPTokenRoundTrip(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 
 	fake := newFakeHeadlessAgentServer()
@@ -146,13 +146,8 @@ func TestHeadlessAgentServer_TLSTokenRoundTrip(t *testing.T) {
 	defer func() { _ = closeTCP() }()
 	require.NotEmpty(t, info.Token)
 
-	dir, err := config.GetConfigDir()
-	require.NoError(t, err)
-	client := &http.Client{
-		Timeout:   5 * time.Second,
-		Transport: &http.Transport{TLSClientConfig: pinnedTLSConfig(t, dir+"/"+daemonTLSCertFileName)},
-	}
-	baseURL := "https://" + info.Addr
+	client := &http.Client{Timeout: 5 * time.Second}
+	baseURL := "http://" + info.Addr
 
 	post := func(path, body string) (*http.Response, error) {
 		req, rerr := http.NewRequest(http.MethodPost, baseURL+path, strings.NewReader(body))
@@ -227,7 +222,7 @@ func TestHeadlessAgentServer_TLSTokenRoundTrip(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	conn, _, err := websocket.Dial(ctx,
-		"wss://"+info.Addr+"/v1/sessions/probe/stream?"+agentproto.AccessTokenQueryParam+"="+info.Token,
+		"ws://"+info.Addr+"/v1/sessions/probe/stream?"+agentproto.AccessTokenQueryParam+"="+info.Token,
 		&websocket.DialOptions{HTTPClient: client})
 	require.NoError(t, err, "authorized WS handshake must upgrade")
 	defer func() { _ = conn.Close(websocket.StatusNormalClosure, "") }()
@@ -235,7 +230,7 @@ func TestHeadlessAgentServer_TLSTokenRoundTrip(t *testing.T) {
 	// The very first frame on a fresh subscription is the OpHello start-seq (#1592
 	// Phase 5 PR1): the in-band cursor seed a browser needs because it cannot read the
 	// X-Af-Stream-Seq handshake header off the WS upgrade. Assert it here on the real
-	// TLS/WSS transport this test drives.
+	// plain-HTTP/WS transport this test drives.
 	first, err := agentproto.ReadMessage(ctx, conn)
 	require.NoError(t, err)
 	require.True(t, first.Binary)
@@ -257,7 +252,7 @@ func TestHeadlessAgentServer_TLSTokenRoundTrip(t *testing.T) {
 	// --- WS PTY stream: no token → handshake rejected -----------------------
 	badCtx, badCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer badCancel()
-	badConn, _, err := websocket.Dial(badCtx, "wss://"+info.Addr+"/v1/sessions/probe/stream",
+	badConn, _, err := websocket.Dial(badCtx, "ws://"+info.Addr+"/v1/sessions/probe/stream",
 		&websocket.DialOptions{HTTPClient: client})
 	if badConn != nil {
 		_ = badConn.Close(websocket.StatusNormalClosure, "")
