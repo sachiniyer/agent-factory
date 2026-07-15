@@ -3,6 +3,7 @@ package daemon
 import (
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -339,6 +340,11 @@ func (cs *controlServer) webTabProxyHandler(w http.ResponseWriter, r *http.Reque
 			// host) so the cookie lands on the right path and coexists with the
 			// daemon's token cookie.
 			rewriteSetCookiePaths(resp.Header, tabPathPrefix)
+			// Send the app's own redirects back through the prefix rather than out
+			// to the daemon's origin, which is where a bare "/login" would otherwise
+			// land (#1843).
+			rewriteRedirectLocation(resp, tabPathPrefix, targetURL)
+			rewriteRefreshURL(resp.Header, tabPathPrefix, targetURL)
 			return nil
 		},
 		ErrorHandler: func(w http.ResponseWriter, _ *http.Request, err error) {
@@ -405,6 +411,162 @@ func rewriteSetCookiePaths(h http.Header, prefix string) {
 	for _, v := range rewritten {
 		h.Add("Set-Cookie", v)
 	}
+}
+
+// rewriteRedirectLocation sends an upstream redirect back through this tab's
+// proxy prefix, so the browser follows it to the proxied app rather than to the
+// daemon's own origin (#1843). A dev app that 302s to "/login" would otherwise
+// navigate the iframe to the daemon's /login — a 404 — breaking every login and
+// post-action redirect flow, which is the primary reason the proxy exists.
+//
+// Only 3xx Location is rewritten. On a redirect the header is NAVIGATIONAL: the
+// browser follows it, so it must name a browser-reachable path. On a 2xx (201
+// Created, say) it instead IDENTIFIES a resource — the app's own JS may compare it
+// against a canonical id it already holds, and prefixing it would corrupt that
+// comparison for no navigational gain.
+func rewriteRedirectLocation(resp *http.Response, prefix string, target *url.URL) {
+	if resp.StatusCode < 300 || resp.StatusCode >= 400 {
+		return
+	}
+	loc := resp.Header.Get("Location")
+	if loc == "" { // 304, or a 3xx that carries none
+		return
+	}
+	if dest, ok := rewriteUpstreamRef(loc, prefix, target); ok {
+		resp.Header.Set("Location", dest)
+	}
+}
+
+// rewriteRefreshURL rewrites the url= of a Refresh header ("5; url=/login"), which
+// some dev apps and frameworks use as a delayed redirect. It escapes the prefix
+// exactly the way a Location does, and it is the same rewrite, so it is fixed
+// alongside. Refresh is not status-gated: it is a meta-refresh equivalent and
+// normally rides a 200.
+//
+// A Refresh without a url= re-fetches the current URL, which is already correct
+// under the prefix, so it is left alone.
+func rewriteRefreshURL(h http.Header, prefix string, target *url.URL) {
+	v := h.Get("Refresh")
+	if v == "" {
+		return
+	}
+	delay, rest, ok := strings.Cut(v, ";")
+	if !ok {
+		return
+	}
+	const urlKey = "url="
+	trimmed := strings.TrimSpace(rest)
+	if len(trimmed) < len(urlKey) || !strings.EqualFold(trimmed[:len(urlKey)], urlKey) {
+		return
+	}
+	raw := strings.TrimSpace(trimmed[len(urlKey):])
+	// The value may be quoted; keep whichever quoting the app chose.
+	quote := ""
+	if len(raw) >= 2 && (raw[0] == '"' || raw[0] == '\'') && raw[len(raw)-1] == raw[0] {
+		quote = string(raw[0])
+		raw = raw[1 : len(raw)-1]
+	}
+	dest, ok := rewriteUpstreamRef(raw, prefix, target)
+	if !ok {
+		return
+	}
+	h.Set("Refresh", strings.TrimSpace(delay)+"; url="+quote+dest+quote)
+}
+
+// rewriteUpstreamRef maps a URL reference the upstream app emitted into this tab's
+// proxy prefix, reporting false when the reference must be passed through
+// untouched. It is the shared rule behind Location and Refresh.
+//
+// Because the browser path MIRRORS the upstream path, the mapping is the same pure
+// prefix-prepend that re-scopes cookies:
+//
+//	/app/                      -> /v1/webtab/s/t/app/          (absolute path: prepend)
+//	http://localhost:3000/app/ -> /v1/webtab/s/t/app/          (same upstream: strip origin, keep path)
+//	app/x                      -> unchanged                    (relative: already at mirrored depth)
+//	https://example.com/x      -> unchanged                    (foreign host)
+//
+// A RELATIVE reference needs no help: the browser resolves it against the current
+// proxied URL, which sits at the same depth as the upstream one, so it lands on the
+// right path by construction — the same property that makes relative sub-resource
+// links work.
+//
+// A FOREIGN host is passed through verbatim: it is a real off-site redirect (an
+// OAuth provider, say) that must leave the frame. Rewriting it would both point the
+// browser at a prefix the daemon would then refuse to proxy (only loopback targets
+// are proxied) and silently rehost someone else's origin under ours.
+//
+// The path is carried VERBATIM, in the upstream's own encoding: Path and RawPath are
+// prefixed together so url.String() reproduces the app's escaping rather than
+// re-canonicalizing it (a literal %2F in a redirect target stays %2F).
+func rewriteUpstreamRef(ref, prefix string, target *url.URL) (string, bool) {
+	u, err := url.Parse(strings.TrimSpace(ref))
+	if err != nil {
+		return "", false // unparseable: pass through rather than mangle
+	}
+	switch {
+	case u.Scheme != "" || u.Host != "":
+		// Absolute, or protocol-relative (//host/path). Ours to rewrite only if it
+		// names the very server we proxy; anything else (including mailto:/data:,
+		// which carry no host) leaves untouched.
+		if !sameUpstreamHost(u, target) {
+			return "", false
+		}
+		u.Scheme, u.Host, u.User = "", "", nil
+	case !strings.HasPrefix(u.Path, "/"):
+		return "", false // relative — already mirrored
+	}
+	if u.Path == "" { // origin-only, e.g. http://localhost:3000?x=1
+		u.Path = "/"
+	}
+	escaped := u.EscapedPath()
+	u.Path = joinURLPath(prefix, u.Path)
+	u.RawPath = joinURLPath(prefix, escaped)
+	return u.String(), true // query and fragment ride along untouched
+}
+
+// sameUpstreamHost reports whether ref names the same origin as the tab's proxied
+// target, and so is a self-redirect the proxy should keep inside its prefix.
+//
+// Loopback ALIASES are deliberately not treated as equal: a target of
+// localhost:3000 and a redirect to 127.0.0.1:3000 are the same server in almost
+// every setup, but "almost" is what #1810 already paid for here. Binding a frame to
+// a server it never named is the failure this file exists to prevent, so an alias
+// mismatch degrades to an honest un-rewritten redirect instead. The realistic case
+// costs nothing: the Rewrite hook sends the upstream its own Host, so a
+// self-redirect echoes the target's host string verbatim.
+//
+// Scheme must match too. An http->https self-redirect is the app upgrading an origin
+// the proxy does not speak; rewriting it would strip the upgrade and hand the
+// request straight back to the http upstream, which would redirect again — an
+// infinite loop in the frame rather than a visible failure.
+func sameUpstreamHost(ref, target *url.URL) bool {
+	if ref.Host == "" {
+		return false
+	}
+	scheme := ref.Scheme
+	if scheme == "" {
+		scheme = target.Scheme // protocol-relative inherits the upstream hop's scheme
+	}
+	if !strings.EqualFold(scheme, target.Scheme) {
+		return false
+	}
+	return normalizedHostPort(ref.Host, scheme) == normalizedHostPort(target.Host, target.Scheme)
+}
+
+// normalizedHostPort renders host:port lowercased with the scheme's default port
+// made explicit, so "localhost" and "localhost:80" compare equal under http.
+func normalizedHostPort(host, scheme string) string {
+	h := strings.ToLower(host)
+	if _, _, err := net.SplitHostPort(h); err == nil {
+		return h // already carries a port ("[::1]:3000" included)
+	}
+	switch strings.ToLower(scheme) {
+	case "http":
+		return h + ":80"
+	case "https":
+		return h + ":443"
+	}
+	return h
 }
 
 // stripFrameAncestors removes the frame-ancestors directive from any
