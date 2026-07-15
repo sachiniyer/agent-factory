@@ -161,6 +161,41 @@ func loadRepoInstanceData(repoID string) ([]session.InstanceData, error) {
 	return data, nil
 }
 
+// collectTitleRepoPathsOnDisk returns repoID -> repo path for every PERSISTED row
+// holding the title, across all repos.
+//
+// It exists because the in-memory instance map is not proof of uniqueness: a
+// repo's row is skipped during refresh when it cannot be restored (its worktree
+// or tmux session is gone), so a single in-memory match can hide a second repo
+// that also holds the title. Callers union this with their in-memory matches
+// before concluding a title is unambiguous — otherwise a daemon-up unscoped
+// kill/archive would act on the restored session while the daemon-down disk path
+// would correctly refuse to guess.
+//
+// Corrupted per-repo files are skipped (mirroring findInstanceDataByTitle); only
+// a failure to enumerate repos at all is returned as an error.
+func collectTitleRepoPathsOnDisk(title string) (map[string]string, error) {
+	allInstances, err := config.LoadAllRepoInstances()
+	if err != nil {
+		return nil, fmt.Errorf("failed to load instances: %w", err)
+	}
+	found := make(map[string]string)
+	for rid, raw := range allInstances {
+		var data []session.InstanceData
+		if err := json.Unmarshal(raw, &data); err != nil {
+			log.WarningLog.Printf("daemon skipping repo %s while checking title ambiguity: corrupted instances.json: %v", rid, err)
+			continue
+		}
+		for i := range data {
+			if data[i].Title == title {
+				found[rid] = data[i].Path
+				break
+			}
+		}
+	}
+	return found, nil
+}
+
 func findInstanceDataByTitle(title, repoID string) (*session.InstanceData, string, error) {
 	if repoID != "" {
 		data, err := loadRepoInstanceData(repoID)
@@ -180,6 +215,11 @@ func findInstanceDataByTitle(title, repoID string) (*session.InstanceData, strin
 		return nil, "", fmt.Errorf("failed to load instances: %w", err)
 	}
 	var corrupted []string
+	// Titles are unique per-repo: collect all matches so an unscoped lookup
+	// reports ambiguity instead of resolving whichever repo the map walk reached
+	// first (the disk mirror of findSession's unscoped branch).
+	var matches []session.InstanceData
+	var matchRepoIDs []string
 	for rid, raw := range allInstances {
 		var data []session.InstanceData
 		if err := json.Unmarshal(raw, &data); err != nil {
@@ -192,9 +232,22 @@ func findInstanceDataByTitle(title, repoID string) (*session.InstanceData, strin
 		}
 		for i := range data {
 			if data[i].Title == title {
-				return &data[i], rid, nil
+				matches = append(matches, data[i])
+				matchRepoIDs = append(matchRepoIDs, rid)
 			}
 		}
+	}
+	// Only a title held by distinct REPOS is ambiguous; duplicate rows inside one
+	// repo's instances.json are a corruption artifact, not a cross-project clash.
+	if len(session.DedupeSorted(matchRepoIDs)) > 1 {
+		paths := make([]string, 0, len(matches))
+		for i := range matches {
+			paths = append(paths, matches[i].Path)
+		}
+		return nil, "", session.AmbiguousTitleError(title, paths)
+	}
+	if len(matches) > 0 {
+		return &matches[0], matchRepoIDs[0], nil
 	}
 	if len(corrupted) > 0 {
 		sort.Strings(corrupted)

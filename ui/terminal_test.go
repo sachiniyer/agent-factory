@@ -155,7 +155,7 @@ func TestTabPaneShellFallbackStates(t *testing.T) {
 	})
 
 	// #920: a Deleting instance reports Started()==false during teardown. It
-	// must show "Tearing down session..." rather than the not-started fallback.
+	// must show "Tearing down session…" rather than the not-started fallback.
 	t.Run("deleting instance", func(t *testing.T) {
 		inst, err := session.NewInstance(session.InstanceOptions{
 			Title: "deleting", Path: t.TempDir(), Program: "bash",
@@ -167,7 +167,7 @@ func TestTabPaneShellFallbackStates(t *testing.T) {
 		require.NoError(t, p.UpdateContent(inst, 1))
 		p.mu.Lock()
 		require.True(t, p.content.fallback)
-		require.Contains(t, p.content.text, "Tearing down session...")
+		require.Contains(t, p.content.text, "Tearing down session…")
 		require.NotContains(t, p.content.text, "not started",
 			"deleting instance must NOT show the not-started fallback (#920)")
 		p.mu.Unlock()

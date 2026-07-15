@@ -59,12 +59,22 @@ func (s *controlServer) Preview(req PreviewRequest, resp *PreviewResponse) error
 	if err != nil {
 		return err
 	}
-	// Prefer the stable tab id (#1738): resolve it to the tab's CURRENT ordinal so
-	// a capture addresses the right tab after a reorder/close. Fall back to the
-	// ordinal Tab when no id is given or it no longer resolves (legacy clients /
-	// a since-closed tab).
+	// Address the capture by the stable tab id (#1738) when the client gives one:
+	// resolve it to the tab's CURRENT ordinal so a capture follows the tab across a
+	// reorder/close. A non-empty id that no longer resolves is REFUSED as gone —
+	// NOT fallen back to req.Tab (#1779). The fallback previewed whatever tab had
+	// shifted into the stale ordinal, which is precisely the misroute the stable id
+	// exists to prevent. Gone (rather than an error) is the honest answer and the
+	// shape the TUI already degrades on: the addressed tab is genuinely no longer
+	// there. The ordinal is used ONLY when no id was supplied at all — a legacy
+	// client, for which positional addressing is all there ever was.
 	tab := req.Tab
-	if idx, ok := instance.TabIndexByID(req.TabID); ok {
+	if req.TabID != "" {
+		idx, ok := instance.TabIndexByID(req.TabID)
+		if !ok {
+			resp.Gone = true
+			return nil
+		}
 		tab = idx
 	}
 	content, err := as.Preview(tab, req.Full)

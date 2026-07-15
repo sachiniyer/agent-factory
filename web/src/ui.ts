@@ -185,6 +185,25 @@ export function tabIdentity(tab: { id?: string; name: string; kind: number }): s
   return tab.id && tab.id !== "" ? tab.id : `${tab.kind}:${tab.name}`;
 }
 
+/** The REAL daemon tab id, or "" when the tab has none (#1779).
+ *
+ *  This is deliberately NOT tabIdentity. The two answer different questions and
+ *  conflating them is a bug in both directions:
+ *
+ *  - tabIdentity answers "is this the same tab as before?" for LOCAL bookkeeping
+ *    (reconcile, mid-drag change detection). It must always return something, so
+ *    it synthesizes a `kind:name` fallback for an id-less tab.
+ *  - tabRealId answers "what id may I hand to the DAEMON?" — and a synthesized
+ *    `1:shell` is not an answer. The daemon 404s an unknown non-empty ?tab_id=,
+ *    so passing a fallback breaks a legacy tab that would otherwise attach fine by
+ *    ordinal. "" is the honest "no id" that makes callers fall back to ?tab=.
+ *
+ *  Anything crossing the wire, or claiming an identity is collision-proof, uses
+ *  this; the fallback is only ever a local hint. */
+export function tabRealId(tab: { id?: string }): string {
+  return tab.id && tab.id !== "" ? tab.id : "";
+}
+
 /** The label a tab reads as, mirroring the TUI's labelForTab (ui/tree/labels.go):
  *  the agent tab is "Agent", a shell tab is "Terminal", a process tab shows its
  *  name. Keeps the web tab bar TUI-faithful. */
@@ -443,6 +462,10 @@ export class AppShell {
   // dragged tab's payload by the delegated dragstart so a drop can detect a mid-drag
   // tab-set change and cancel (see split.ts). Kept live by renderTabBar.
   private currentTabIds: string[] = [];
+  // The REAL daemon tab ids drawn in the bar at its last render ("" for a tab with
+  // none), parallel to currentTabIds. Separate because only a real id may be
+  // treated as a stable identity by a drop (#1779) — see tabRealId.
+  private currentTabRealIds: string[] = [];
   // A signature of everything the bar DRAWS (see tabBarSig): the bar is rebuilt only
   // when this changes, so an unrelated status snapshot never churns its DOM (#1737).
   private lastTabBarSig = "";
@@ -453,6 +476,9 @@ export class AppShell {
   private lastLive: EventStreamStatus | null = null;
   private lastKb: KeyboardFocus | null = null;
   private lastError: string | null = null;
+  // The last value written to document.title, so an unrelated update doesn't
+  // reassign it (see syncDocumentTitle).
+  private lastDocTitle: string | null = null;
   // Whether the main pane has been rendered at least once. The constructor leaves it
   // an empty <section>, so the FIRST update must render it even when nothing is
   // selected (selectedId is null before AND after that first update, so the
@@ -587,8 +613,20 @@ export class AppShell {
     this.el = h("main", { class: "af-app" }, header, viewport, this.toast, this.modalHost);
   }
 
+  /** Points the browser tab at what is on screen, so a pinned/backgrounded tab and the
+   *  history entry name the session and project rather than a static "Agent Factory".
+   *  Assigns only on a real change (a rename, a selection, or a project switch). */
+  private syncDocumentTitle(state: AppState): void {
+    const title = documentTitle(state);
+    if (this.lastDocTitle !== title) {
+      this.lastDocTitle = title;
+      document.title = title;
+    }
+  }
+
   /** Applies the latest state, touching only what changed. */
   update(state: AppState): void {
+    this.syncDocumentTitle(state);
     // The keyboard-focus indicator (#1693): a modifier class on the app root that
     // CSS turns into an accent border on whichever pane owns the keyboard. The
     // terminal only "holds" it while a session is actually selected; with none
@@ -691,6 +729,28 @@ export class AppShell {
         this.renderTabBar(state);
       }
     }
+
+    // The dragstart caches are refreshed on EVERY snapshot, deliberately outside the
+    // tab-bar's render gate (#1779). The gate keys on tabBarSig, which covers only
+    // what the bar DRAWS — kind/name/active/shown — and so ignores tab IDs. That is
+    // correct for the DOM (an id backfill changes no pixel, and rebuilding the bar
+    // would destroy a button mid-drag, the #1737 regression) but wrong for the
+    // caches: a just-created tab whose id the next snapshot backfills would keep a
+    // stale "" here, and the drag it stamps would fall back to the legacy guard
+    // instead of using the now-known stable id. Adding ids to the signature would fix
+    // the cache by reintroducing exactly the #1737 rebuild — so the cache is synced
+    // independently of the render instead.
+    this.syncTabIdentityCaches(state);
+  }
+
+  /** Refreshes the ordered tab identity + REAL-id caches the delegated dragstart
+   *  stamps into a payload. Cheap (two maps over ≤9 tabs) and pure bookkeeping — it
+   *  touches no DOM, so it is safe to run on every snapshot. */
+  private syncTabIdentityCaches(state: AppState): void {
+    const selected = selectedSession(state);
+    const tabs = selected ? sessionTabs(selected) : [];
+    this.currentTabIds = tabs.map(tabIdentity);
+    this.currentTabRealIds = tabs.map(tabRealId);
   }
 
   /** Renders the rail SCOPED to the selected project (redesign PR2): only that
@@ -899,10 +959,9 @@ export class AppShell {
     // Which tabs are currently rendered in a pane (feat: split tabs), so the bar can
     // mark an already-open tab distinctly from the focused one.
     const shown = new Set(state.shownTabs);
-    // The ordered tab identities at THIS render, kept for the delegated dragstart to
-    // stamp into a dragged tab's payload so the drop can detect a mid-drag tab-set
-    // change and cancel (split.ts).
-    this.currentTabIds = tabs.map(tabIdentity);
+    // The dragstart caches are NOT refreshed here: this render is gated on tabBarSig,
+    // which ignores tab ids, so an id backfill would never reach them. update() syncs
+    // them on every snapshot instead — see syncTabIdentityCaches (#1779).
 
     const children: HTMLElement[] = tabs.map((tab, i) =>
       tabButton(tab, i, i === active, shown.has(i), canManage, this.actions),
@@ -944,8 +1003,10 @@ export class AppShell {
       // Stamp the dragged tab's STABLE id (#1738) so the drop resolves it to the
       // tab's CURRENT ordinal — correct even if a concurrent client reordered/closed
       // tabs mid-drag. index + the identity snapshot ride along as a legacy fallback
-      // for a tab without an id (pre-#1738 record).
-      const id = this.currentTabIds[index] ?? "";
+      // for a tab without an id (pre-#1738 record). The id comes from the REAL-id
+      // list, so a tab without one stamps "" and the drop takes the guarded legacy
+      // branch rather than trusting a synthesized identity (#1779).
+      const id = this.currentTabRealIds[index] ?? "";
       e.dataTransfer.setData(TAB_DND_MIME, JSON.stringify({ id, index, tabs: this.currentTabIds }));
       e.dataTransfer.effectAllowed = "move";
       document.body.classList.add("af-dragging-tab");
@@ -966,6 +1027,33 @@ export class AppShell {
     this.headMeta.textContent = parts.join(" · ");
     this.headMeta.className = `af-term-meta af-term-${state.termStatus}`;
   }
+}
+
+/** The product name, and the browser-tab title when there is nothing to qualify it. */
+const APP_NAME = "Agent Factory";
+
+/**
+ * The browser-tab title for a state: "‹session› — ‹project› · Agent Factory" while a
+ * session is selected, degrading to "‹project› · Agent Factory" when only a project is
+ * scoped and to the bare app name when neither is. It reads the SELECTED session's own
+ * repo root rather than the scoped project, so the title always names the project the
+ * session actually lives in.
+ *
+ * Pure (state in, string out) and exported so it is unit-testable without a DOM;
+ * AppShell.syncDocumentTitle owns the assignment.
+ */
+export function documentTitle(state: AppState): string {
+  const sel = selectedSession(state);
+  const root = sel?.worktree?.repo_path ?? state.selectedProject;
+  const parts: string[] = [];
+  if (sel && sel.title !== "") {
+    parts.push(sel.title);
+  }
+  if (root) {
+    parts.push(projectName(root));
+  }
+  const lead = parts.join(" — ");
+  return lead === "" ? APP_NAME : `${lead} · ${APP_NAME}`;
 }
 
 /** The currently selected session row, or null. */

@@ -139,7 +139,7 @@ func (cs *controlServer) webTabProxyHandler(w http.ResponseWriter, r *http.Reque
 			pr.Out.URL.Scheme = targetURL.Scheme
 			pr.Out.URL.Host = targetURL.Host
 			pr.Out.Host = targetURL.Host
-			pr.Out.URL.Path = joinURLPath(targetURL.Path, "/"+rest)
+			pr.Out.URL.Path, pr.Out.URL.RawPath = resolveUpstreamPath(targetURL, rest)
 			// Never leak the daemon credential upstream: drop the Authorization
 			// header and the daemon's own token cookie, but FORWARD the dev app's
 			// cookies so cookie-backed dev servers work in the iframe.
@@ -262,9 +262,41 @@ func stripFrameAncestors(h http.Header) {
 	}
 }
 
+// resolveUpstreamPath computes the upstream path (and its escaped form) for a
+// proxied web-tab request whose remainder under the tab's prefix is rest.
+//
+// The target is treated as a DOCUMENT reference and rest is resolved against it
+// exactly as a browser resolves a link on that page (RFC 3986 §5.3):
+//
+//	target /viewer.html     + rest ""             -> /viewer.html
+//	target /viewer.html     + rest "assets/x.css" -> /assets/x.css
+//	target /app/viewer.html + rest "assets/x.css" -> /app/assets/x.css
+//	target /app/            + rest "assets/x.css" -> /app/assets/x.css
+//	target / (or "")        + rest "assets/x.css" -> /assets/x.css
+//
+// A root request therefore fetches the target path EXACTLY — appending a trailing
+// slash to a file target ("/viewer.html/") makes a static file server (python
+// -m http.server, and most dev servers) 404 the page the tab points at — while a
+// relative sub-resource still lands next to the document it came from.
+//
+// rest arrives percent-DECODED from the ServeMux "{rest...}" wildcard, so it is
+// assigned as the reference's Path rather than parsed with url.Parse: parsing
+// would misread a literal "?" or "#" in a filename as a query/fragment, and a
+// "//host"-style reference would try to swap the upstream host. Leading slashes
+// are trimmed so rest is always relative to the target document.
+func resolveUpstreamPath(target *url.URL, rest string) (path, rawPath string) {
+	resolved := target.ResolveReference(&url.URL{Path: strings.TrimLeft(rest, "/")})
+	if resolved.Path == "" {
+		// Host-only target ("http://localhost:8899") fetched at its root.
+		return "/", ""
+	}
+	return resolved.Path, resolved.RawPath
+}
+
 // joinURLPath joins a base path and a sub path with exactly one slash between
-// them, so a target with its own base path ("/app") composes with the proxied
-// remainder correctly.
+// them. Used to re-scope an upstream cookie's Path under the tab's proxy prefix,
+// which is a true directory join (unlike the upstream URL, where the target is a
+// document — see resolveUpstreamPath).
 func joinURLPath(base, sub string) string {
 	if base == "" || base == "/" {
 		return sub

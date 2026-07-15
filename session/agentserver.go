@@ -2,8 +2,41 @@ package session
 
 import (
 	"context"
+	"errors"
 	"io"
 )
+
+// ErrTabGone reports that a stable tab id (#1738) names no live tab — it was
+// closed, or it never existed. It is the REFUSAL the id-addressed data plane
+// returns instead of falling back to a positional tab: once a client addresses a
+// tab by its stable id, silently serving whatever tab now sits at some ordinal is
+// the misroute the id exists to prevent (#1779). Callers map it to a 404/gone.
+var ErrTabGone = errors.New("no tab with that id")
+
+// TabAddressableServer is implemented by an agent-server whose data plane can be
+// addressed by a tab's STABLE id (#1738) instead of a shifting ordinal. It is the
+// id-native half of AgentServer's ordinal data plane: the ordinal methods stay for
+// legacy clients that never supplied a ?tab_id=, while a client that DID supply one
+// binds through here, so the id is resolved exactly ONCE — atomically, at the
+// moment the operation binds — and never round-trips through an ordinal that a
+// concurrent close/reorder can shift underneath it (#1779).
+//
+// The local runtime implements it (its brokers are already keyed by stable id, so
+// id-addressing is strictly simpler than the ordinal round-trip it replaces). A
+// runtime whose wire protocol is ordinal-shaped — the remote agent-server, whose
+// sessions stream through the daemon's Preview capture rather than this WS plane —
+// does not, and the handler falls back to the ordinal path for it.
+type TabAddressableServer interface {
+	// SubscribeTab is Subscribe addressed by stable tab id. ErrTabGone when the id
+	// names no live tab.
+	SubscribeTab(tabID string, since Seq) (PTYSubscription, error)
+	// InputTab is Input addressed by stable tab id. ErrTabGone when the id names no
+	// live tab.
+	InputTab(tabID string, b []byte) error
+	// ResizeTab is Resize addressed by stable tab id. ErrTabGone when the id names
+	// no live tab.
+	ResizeTab(tabID string, rows, cols uint16) error
+}
 
 // AgentServer is the uniform contract the daemon speaks to a session's runtime,
 // regardless of where that runtime physically lives (#1592 Phase 2 — the
@@ -52,11 +85,27 @@ type AgentServer interface {
 	// can't stream live (remote/hook sessions, scroll-mode scrollback, the transient
 	// preview target) — the TUI no longer captures tmux itself (#1592 Phase 2 PR6).
 	Preview(tab int, full bool) (string, error)
-	// Alive reports whether the underlying session process is still running. Kept
-	// separate from Snapshot (rather than folded into Observation) so the daemon
-	// probes liveness ONLY on the idle branch, exactly as before — folding it in
-	// would add a liveness probe to every non-idle tick.
-	Alive() bool
+	// Alive reports whether the underlying session process is still running, and
+	// whether the probe could be ANSWERED at all. Kept separate from Snapshot
+	// (rather than folded into Observation) so the daemon probes liveness ONLY on
+	// the idle branch, exactly as before — folding it in would add a liveness
+	// probe to every non-idle tick.
+	//
+	// A non-nil error means UNKNOWN, not dead: the probe itself failed. For the
+	// remote runtime that is a REST call to the sandbox's agent-server that never
+	// completed — a dropped ssh forward, a docker-proxy hiccup, a blackholed
+	// route. The local runtime probes in-process and never errors.
+	//
+	// The distinction is load-bearing, which is why the error is on the signature
+	// rather than swallowed into a bare bool. "Unreachable" and "reachable, and
+	// the agent is gone" are the same `false` but demand OPPOSITE responses: the
+	// first may be a transient blip that must be waited out, the second is an
+	// authoritative answer that may be acted on at once. Collapsing them is what
+	// let a single transport blip re-provision a live sandbox and destroy its
+	// unpushed work (#1794) — so callers that act destructively on `false` MUST
+	// branch on the error. Callers for whom both cases warrant the same response
+	// may ignore it.
+	Alive() (bool, error)
 
 	// SendPrompt delivers a prompt over the reliable command path (tmux send-keys
 	// for the local runtime) — the path automated/scheduled deliveries use, which

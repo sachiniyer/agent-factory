@@ -84,7 +84,7 @@ func TestTabbedWindowResetPreviewScrollUsesCommittedBinding(t *testing.T) {
 	require.True(t, w.JumpToTab(1), "precondition: original pane is alpha's terminal tab")
 
 	w.SetPreview(beta, 0, "alpha · Terminal")
-	w.InvalidateContent(beta, 0, "Loading preview...")
+	w.InvalidateContent(beta, 0, "Loading preview…")
 	w.ScrollUp()
 	require.True(t, w.IsInScrollMode(), "precondition: preview target is scrolled")
 

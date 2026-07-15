@@ -335,12 +335,55 @@ func (m *Manager) findSession(title, repoID string) (*session.Instance, string, 
 			return instance, repoID, nil, nil
 		}
 	} else {
+		// Unscoped: titles are unique per-repo, so collect every match rather
+		// than returning the first one the map walk happens to reach. One match
+		// resolves; several are ambiguous and must not be silently picked
+		// between — a kill/archive would otherwise hit an arbitrary repo's
+		// session (the collision resolveActionSession's id-first path avoids).
+		var matched *session.Instance
+		var matchedRepoID string
+		var matchRepoIDs, repoPaths []string
 		for key, instance := range m.instances {
-			if instance.Title == title {
-				rid, _ := splitDaemonInstanceKey(key)
-				m.mu.Unlock()
-				return instance, rid, nil, nil
+			if instance == nil || instance.Title != title {
+				continue
 			}
+			rid, _ := splitDaemonInstanceKey(key)
+			if matched == nil {
+				matched, matchedRepoID = instance, rid
+			}
+			matchRepoIDs = append(matchRepoIDs, rid)
+			repoPaths = append(repoPaths, instance.Path)
+		}
+		if len(session.DedupeSorted(matchRepoIDs)) > 1 {
+			m.mu.Unlock()
+			return nil, "", nil, session.AmbiguousTitleError(title, repoPaths)
+		}
+		if matched != nil {
+			m.mu.Unlock()
+			// One live match is NOT proof the title is unique. A second repo's row
+			// is skipped during refresh when it cannot be restored (worktree/tmux
+			// gone), so it never reaches m.instances — and resolving here would let
+			// an unscoped kill/archive hit this repo while the daemon-down disk path
+			// would refuse to guess. Union the persisted rows before resolving.
+			if paths, err := collectTitleRepoPathsOnDisk(title); err != nil {
+				// Could not enumerate repos at all: prefer the live match over
+				// failing a working lookup, but say so — this is the one window
+				// where the ambiguity guard cannot be applied.
+				log.WarningLog.Printf("could not check %q for cross-repo ambiguity, resolving the live match in repo %s: %v", title, matchedRepoID, err)
+			} else {
+				repos := map[string]string{matchedRepoID: matched.Path}
+				for rid, p := range paths {
+					repos[rid] = p
+				}
+				if len(repos) > 1 {
+					all := make([]string, 0, len(repos))
+					for _, p := range repos {
+						all = append(all, p)
+					}
+					return nil, "", nil, session.AmbiguousTitleError(title, all)
+				}
+			}
+			return matched, matchedRepoID, nil, nil
 		}
 	}
 	m.mu.Unlock()

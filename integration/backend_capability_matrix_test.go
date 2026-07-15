@@ -63,7 +63,7 @@ func assertLiveCapabilityMatrix(t *testing.T, label string, inst *session.Instan
 	if _, err := as.Preview(0, false); err != nil {
 		t.Errorf("%s: Preview over the wire failed (capability not serviced): %v", label, err)
 	}
-	if !as.Alive() {
+	if alive, err := as.Alive(); err != nil || !alive {
 		t.Errorf("%s: live sandbox reports not Alive (liveness not serviced)", label)
 	}
 	t.Logf("%s capability matrix ✓ full remote parity advertised + attach/input/preview/liveness serviced over the wire", label)

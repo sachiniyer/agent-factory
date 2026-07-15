@@ -20,6 +20,21 @@ af                 # launch the TUI
 
 All subcommands accept `--repo <path>` to target a repository other than the current directory, and `--json` to wrap output in the shared envelope.
 
+Session titles are unique **within a project, not across projects** — the same name may exist in several repos at once. Every command that takes a `<title>` resolves it inside the repo named by `--repo`, falling back to the current directory's repo. With no repo context (no `--repo`, cwd outside a repo) a title held by exactly one session anywhere still resolves; a title held by sessions in several projects is ambiguous and reports an error naming them rather than picking one:
+
+```
+session "foo" exists in multiple projects: /repos/alpha, /repos/beta — pass --repo to pick one
+```
+
+Against a remote daemon (`--daemon-url`/`AF_DAEMON_URL`), the split follows the transport:
+
+- **Reads served by the targeted daemon** — `list`, `get`, `watch`, `preview` — ignore the current directory rather than sending it as a scope, since it names a repo on *your* machine, not the daemon's. A bare title resolves across the remote's projects.
+- **Everything else** — `kill`, `archive`, `restore`, `send-prompt`, tab create/delete — reaches the *local* daemon regardless of `--daemon-url`, so it stays scoped to the current directory.
+
+Caveat for the reads: `--repo` becomes an id by hashing the path **as given on this machine**, so it only disambiguates when the daemon has that project checked out at the same absolute path. Prefer a bare title against a remote and let the ambiguity error tell you when to narrow it.
+
+One exception to per-project titles: **remote hook** sessions share a global name namespace, because the slug reaches `launch_cmd`/`delete_cmd` verbatim and external provisioners key real sandboxes on it — see [remote-hooks.md](remote-hooks.md#session-names).
+
 ```bash
 af sessions list                                          # list sessions in the repo
 af sessions get <title>                                   # fetch one session

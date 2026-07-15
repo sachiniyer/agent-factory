@@ -31,16 +31,16 @@ var (
 
 var agentServerCmd = &cobra.Command{
 	Use:   "agent-server",
-	Short: "Run a headless single-workspace backend (NOT the web UI — that is 'af daemon')",
+	Short: "Run a headless single-workspace backend (not the web UI — that is 'af daemon')",
 	Long: `Run a headless agent-server for exactly one session's workspace, served over
 the same REST + WebSocket protocol the daemon speaks, behind a plain-HTTP
 listener that requires a bearer token on every request.
 
-This does NOT start the web UI, and serves no frontend at all — opening its port
+This does not start the web UI, and serves no frontend at all — opening its port
 in a browser returns a 404 saying so. If you want the browser app, run the
 daemon — any 'af' command starts it — and open http://localhost:8443. The web UI
 is bundled into the daemon and served from its listen_addr; agent-server is only
-the headless per-workspace BACKEND that a daemon drives, and it exists to be
+the headless per-workspace backend that a daemon drives, and it exists to be
 consumed by a daemon rather than opened by a person.
 
 This is the process that runs inside a docker container or on an ssh remote
@@ -50,8 +50,8 @@ to host one workspace as a backend for a daemon on another machine.
 
 The listener always requires the token and serves plain HTTP (no TLS) — reach it
 over a private network or a tunnel (the docker/ssh runtimes forward a loopback
-port). Its token is mandatory for every peer and is NOT affected by the global
-require_token key, which governs only the daemon's own web listener. On startup
+port). Its token is mandatory for every peer, whatever the global require_token
+key says: that key governs only the daemon's own web listener. On startup
 it prints one JSON line to stdout carrying the bound address and the bearer
 token. On SIGINT/SIGTERM it tears the workspace down (kills tmux, removes the
 worktree) — durability of in-progress work is the driving daemon's job (push the

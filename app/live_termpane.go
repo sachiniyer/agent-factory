@@ -281,10 +281,16 @@ func (m *home) liveBindCandidate(p *store.OpenPane) (key, title, repoID, tabID s
 	inst := p.Instance()
 	// Address the stream by the tab's STABLE id (#1738) so a reorder/close can't
 	// misroute it; empty (a just-created tab whose daemon id hasn't synced yet)
-	// falls back to the ordinal in DialStream. The bind key still carries the
-	// ordinal + tmux name, so a positional shift still forces a rebind.
+	// falls back to the ordinal in DialStream.
 	tabID, _ = inst.TabIDAt(tab)
-	return fmt.Sprintf("%d/%d/%s", p.ID(), tab, name), inst.Title, m.repoID, tabID, tab, true
+	// The id is part of the bind key, not just the stream coordinates (#1779).
+	// AttachShellTab opens a pane BEFORE the daemon id exists, so that pane connects
+	// positionally; when the next snapshot adopts the real id, nothing else in the
+	// key changes, so without the id here the pane would keep its old ORDINAL
+	// connection forever and could send keystrokes to a different tab after another
+	// client reorders/closes a lower one. Keying on the id makes id adoption itself
+	// a rebind, so the pane reconnects with ?tab_id= the moment one is known.
+	return fmt.Sprintf("%d/%d/%s/%s", p.ID(), tab, name, tabID), inst.Title, m.repoID, tabID, tab, true
 }
 
 // liveSessionName resolves an (instance, tab) to the tmux session a live

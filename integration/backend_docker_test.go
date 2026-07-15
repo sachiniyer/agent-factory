@@ -160,7 +160,7 @@ func TestDockerBackendRoundTrip(t *testing.T) {
 	if !strings.Contains(preview, marker) {
 		t.Fatalf("Preview did not reflect the typed input: %q", preview)
 	}
-	if !as.Alive() {
+	if alive, err := as.Alive(); err != nil || !alive {
 		t.Fatal("expected the in-container workspace to report Alive")
 	}
 	t.Logf("preview/liveness reflect the in-container workspace over the wire")

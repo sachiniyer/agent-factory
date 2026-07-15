@@ -311,18 +311,18 @@ func (s *SearchOverlay) Render() string {
 	plan := s.renderPlan(style)
 
 	var lines []string
-	lines = append(lines, truncateOverlayLine(titleStyle.Render("Search Sessions"), plan.contentWidth))
+	lines = append(lines, truncateOverlayLine(titleStyle.Render("Search sessions"), plan.contentWidth))
 	if !plan.compact {
 		lines = append(lines, "")
 	}
-	lines = append(lines, truncateOverlayLine("/ "+queryStyle.Render(s.query+"_"), plan.contentWidth))
+	lines = append(lines, truncateOverlayLine("/ "+queryStyle.Render(s.query)+ui.InputCaret(), plan.contentWidth))
 	if !plan.compact {
 		lines = append(lines, "")
 	}
 
 	if len(s.results) == 0 {
 		if s.query == "" {
-			lines = append(lines, truncateOverlayLine(normalStyle.Render("  type to search..."), plan.contentWidth))
+			lines = append(lines, truncateOverlayLine(normalStyle.Render("  type to search…"), plan.contentWidth))
 		} else {
 			lines = append(lines, truncateOverlayLine(normalStyle.Render("  no matches found"), plan.contentWidth))
 		}
@@ -330,7 +330,7 @@ func (s *SearchOverlay) Render() string {
 
 	if plan.showAbove {
 		lines = append(lines, truncateOverlayLine(normalStyle.Render(
-			fmt.Sprintf("    ... %d more above", plan.startIdx)), plan.contentWidth))
+			fmt.Sprintf("    … %d more above", plan.startIdx)), plan.contentWidth))
 	}
 
 	for i := plan.startIdx; i < plan.endIdx; i++ {
@@ -384,7 +384,7 @@ func (s *SearchOverlay) Render() string {
 	if plan.showBelow {
 		remaining := len(s.results) - plan.endIdx
 		lines = append(lines, truncateOverlayLine(normalStyle.Render(
-			fmt.Sprintf("    ... and %d more below", remaining)), plan.contentWidth))
+			fmt.Sprintf("    … and %d more below", remaining)), plan.contentWidth))
 	}
 
 	if !plan.compact {
