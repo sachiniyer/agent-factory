@@ -5,6 +5,41 @@
 // logic lives beside split.ts's rendering but must be importable — and unit-testable
 // — without dragging in xterm and its CSS, which the node test runner cannot load.
 
+import { TabKind } from "./types.js";
+
+/** What an iframe pane shows: a web tab's target URL, or a vscode tab, which
+ *  deliberately has NO target — its editor is a daemon-managed per-session
+ *  code-server on an ephemeral port, so the proxy path is the only address that
+ *  exists for it. See SplitView.iframeSpecAt. */
+export type IframeSpec =
+  | { kind: typeof TabKind.Web; target: string }
+  | { kind: typeof TabKind.VSCode; target: "" };
+
+/** Whether an iframe pane is served through the daemon proxy (rather than framing
+ *  its target directly) — i.e. whether its src is a /v1/webtab/ path or the target
+ *  URL itself. (It no longer feeds paneAddressUsesOrdinal: since #1810 the proxy is
+ *  id-keyed, so no iframe pane addresses by ordinal and the question is moot.)
+ *
+ *  A vscode tab is ALWAYS proxied — its code-server is loopback-only, and it has no
+ *  target to classify, so the empty-target test that decides a web tab would answer
+ *  the wrong question for it. */
+export function iframeIsProxied(spec: IframeSpec): boolean {
+  if (spec.kind === TabKind.VSCode) {
+    return true;
+  }
+  return spec.target !== "" && isLoopbackWebUrl(spec.target);
+}
+
+/** The stable identity of what an iframe pane is showing, used to decide whether a
+ *  reconcile must rebuild the frame. It must NOT change across reconciles of an
+ *  unchanged tab: a rebuild reloads the iframe, dropping a dev server's in-page
+ *  state or a VS Code pane's unsaved buffers. A vscode tab has no target, so its
+ *  identity is a constant — which is exactly right. The leading space keeps it from
+ *  ever colliding with a real URL. */
+export function iframeIdentity(spec: IframeSpec): string {
+  return spec.kind === TabKind.VSCode ? " vscode" : spec.target;
+}
+
 /** Whether a web-tab target points at a loopback host (localhost/127.x/::1) — the
  *  only targets the daemon reverse-proxies. Mirrors session.IsLoopbackWebTarget
  *  (session/weburl.go). A URL that does not parse is treated as non-loopback. */
@@ -78,7 +113,10 @@ export function webProxyPath(
  *    other, never both), so its captured ordinal is inert;
  *  - a proxied web tab's src is `/v1/webtab/{session}/{tabId}/…` — id-keyed since
  *    #1810, so a shifted ordinal no longer changes what it fetches;
- *  - an external web tab's src is the target URL itself and encodes no ordinal.
+ *  - an external web tab's src is the target URL itself and encodes no ordinal;
+ *  - a VSCODE pane is always proxied, so it rides the same id-keyed guarantee: its
+ *    src is /v1/webtab/{session}/{tabId}/, and a move cannot repoint it at another
+ *    session's editor.
  *
  *  Web panes used to answer true here purely BECAUSE the proxy route was
  *  ordinal-keyed: a moved tab had to be torn down or its frame would silently proxy

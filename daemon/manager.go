@@ -119,6 +119,14 @@ type Manager struct {
 	// mutate through this one Manager, so a single hub captures every change.
 	// Immutable after construction; the hub is internally synchronized.
 	events *eventsHub
+
+	// vscode owns the daemon-spawned VS Code editors backing TabKindVSCode tabs
+	// (one code-server per session, see vscode_server.go). On the Manager because
+	// an editor's lifetime is a SESSION's lifetime — kill/archive/close-tab stop
+	// it, and the webtab proxy resolves a vscode tab's target through it.
+	// Immutable after construction; the supervisor carries its own mutex, so
+	// spawning (seconds) never touches m.mu.
+	vscode *vscodeSupervisor
 }
 
 // NewManager constructs a manager and synchronously restores all persisted
@@ -145,6 +153,15 @@ func newManagerShell(cfg *config.Config) (*Manager, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize storage: %w", err)
 	}
+	vscode := newVSCodeSupervisor()
+	// Read the editor override off the manager's own config rather than
+	// re-reading config from disk on every spawn.
+	vscode.configuredBinary = func() string {
+		if cfg == nil {
+			return ""
+		}
+		return cfg.VSCodeServerBinary
+	}
 	return &Manager{
 		cfg:                 cfg,
 		limitDetector:       task.NewLimitDetector(cfg.LimitPatterns),
@@ -165,6 +182,7 @@ func newManagerShell(cfg *config.Config) (*Manager, error) {
 		instanceOpLocks:     make(map[string]*sync.Mutex),
 		pausedPolls:         make(map[string]time.Time),
 		events:              newEventsHub(),
+		vscode:              vscode,
 	}, nil
 }
 

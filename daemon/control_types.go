@@ -185,7 +185,7 @@ type DeliverPromptResponse struct {
 // worktree. Title selects the session; RepoID scopes the lookup like the other
 // sessions verbs (empty = all-repo).
 //
-// Three kinds of tab can be created:
+// Four kinds of tab can be created:
 //   - Process tab (Shell=false, the #930 PR 5 default): runs Command in the
 //     worktree. Name is the optional display name (a default is derived from
 //     Command's basename when empty). Command must be non-empty.
@@ -195,6 +195,11 @@ type DeliverPromptResponse struct {
 //     here so the daemon — not the TUI — owns the tab write (#960 PR 2).
 //   - Web tab (Kind="web"): an iframe/URL tab with no PTY. URL is the target
 //     (or Port as a localhost:<port> convenience). See the Kind/URL/Port fields.
+//   - VS Code tab (Kind="vscode"): a code-server editor on the session's
+//     worktree, with no PTY and no target — URL/Port/Command are REJECTED, since
+//     the worktree is always what it opens. The editor is daemon-managed (one per
+//     session, spawned lazily on first render); creating the tab neither starts a
+//     process nor requires code-server to be installed.
 //
 // Either way the resolved, collision-suffixed name is returned.
 type CreateTabRequest struct {
@@ -205,9 +210,12 @@ type CreateTabRequest struct {
 	Shell   bool   `json:"shell"`
 	// Kind selects the tab type. Empty (the default) means a process tab (or a
 	// shell tab when Shell is set); "web" creates a URL/iframe tab with no PTY,
-	// targeting URL (or Port as a localhost:<port> convenience). Value types so
-	// they travel over both the gob control socket (CLI) and JSON (HTTP) without
-	// the zero-value pointer elision gob applies to *T fields.
+	// targeting URL (or Port as a localhost:<port> convenience); "vscode" creates
+	// a VS Code editor tab on the session's worktree, which takes no target. The
+	// vocabulary is session.ParseTabKindName — shared with the CLI, so the two
+	// can't drift. Value types so they travel over both the gob control socket
+	// (CLI) and JSON (HTTP) without the zero-value pointer elision gob applies to
+	// *T fields.
 	Kind string `json:"kind,omitempty"`
 	// URL is the target of a web tab (Kind=="web"): a loopback dev-server address
 	// the daemon reverse-proxies or an external absolute URL the web UI iframes.

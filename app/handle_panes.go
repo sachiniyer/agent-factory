@@ -490,5 +490,14 @@ func (m *home) handleEnterPane(p *store.OpenPane) (tea.Model, tea.Cmd) {
 	if !instance.TmuxAlive() {
 		return m, m.handleError(fmt.Errorf("session '%s' is no longer running", instance.Title))
 	}
+	// Fence attach off a browser-only tab HERE too. The tree-selection paths guard
+	// on the SELECTED tab, but a web/vscode tab already open as a focused pane
+	// reaches attach through here instead — and this pane's tab, not the selection,
+	// is what gets attached. Without this, Enter/`o` on such a pane dials a PTY
+	// stream for a tab that has none and surfaces the low-level attach failure
+	// rather than the message telling the user where to actually view it.
+	if err := webTabAttachGuard(instance, p.Tab()); err != nil {
+		return m, m.handleError(err)
+	}
 	return m.attachInstanceTab(instance, p.Tab(), "handleEnter-pane", "handleEnter-pane-terminal")
 }

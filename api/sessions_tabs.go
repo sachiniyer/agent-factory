@@ -6,6 +6,7 @@ import (
 
 	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/log"
+	"github.com/sachiniyer/agent-factory/session"
 
 	"github.com/spf13/cobra"
 )
@@ -21,9 +22,9 @@ var (
 // bindTabCreateFlags registers the tab-create flags on c, bound to the shared
 // globals. Called for both the hyphen verb and the tabs-create alias (#1192).
 func bindTabCreateFlags(c *cobra.Command) {
-	c.Flags().StringVar(&tabCreateCommandFlag, "command", "", "Command to run in a process tab (required unless --kind web)")
-	c.Flags().StringVar(&tabCreateNameFlag, "name", "", "Tab name (defaults to the command basename, or \"web\" for a web tab; auto-suffixed on collision)")
-	c.Flags().StringVar(&tabCreateKindFlag, "kind", "", "Tab kind: empty for a process tab, or \"web\" for a URL/iframe tab")
+	c.Flags().StringVar(&tabCreateCommandFlag, "command", "", "Command to run in a process tab (required unless --kind web/vscode)")
+	c.Flags().StringVar(&tabCreateNameFlag, "name", "", "Tab name (defaults to the command basename, or \"web\"/\"vscode\" for those kinds; auto-suffixed on collision)")
+	c.Flags().StringVar(&tabCreateKindFlag, "kind", "", "Tab kind: empty for a process tab, \"web\" for a URL/iframe tab, or \"vscode\" for a VS Code editor on the session's worktree")
 	c.Flags().StringVar(&tabCreateURLFlag, "url", "", "Web tab target URL (with --kind web): a localhost dev-server address or an external https URL")
 	c.Flags().IntVar(&tabCreatePortFlag, "port", 0, "Web tab convenience for --url http://localhost:<port> (with --kind web)")
 }
@@ -37,7 +38,7 @@ func bindTabDeleteFlags(c *cobra.Command) {
 
 var sessionsTabCreateCmd = &cobra.Command{
 	Use:   "tab-create <title>",
-	Short: "Spawn a process tab (a command) or a web tab (a URL/iframe) in a session",
+	Short: "Spawn a process tab (a command), a web tab (a URL/iframe), or a VS Code tab in a session",
 	Long: `Create a new tab in an existing session.
 
 Process tab (default): runs --command in the session's git worktree (e.g. a data
@@ -68,20 +69,34 @@ func runTabCreate(cmd *cobra.Command, args []string) error {
 	log.Initialize(false)
 	defer log.Close()
 
-	isWeb := tabCreateKindFlag == "web"
+	// The kind vocabulary lives in the session package (session.ParseTabKindName),
+	// which the daemon dispatches on too — so this client-side check can never
+	// accept a kind the daemon would reject. It stays a pre-check purely to fail
+	// fast with a flag-shaped message; the daemon re-validates regardless.
+	kind, explicitKind := session.ParseTabKindName(tabCreateKindFlag)
 	switch {
-	case tabCreateKindFlag != "" && !isWeb:
-		return jsonError(fmt.Errorf("--kind must be empty or \"web\", got %q", tabCreateKindFlag))
-	case isWeb:
+	case tabCreateKindFlag != "" && !explicitKind:
+		return jsonError(fmt.Errorf("--kind must be empty or one of %s, got %q",
+			strings.Join(session.TabKindNameList(), ", "), tabCreateKindFlag))
+	case explicitKind && kind == session.TabKindWeb:
 		if strings.TrimSpace(tabCreateURLFlag) == "" && tabCreatePortFlag == 0 {
 			return jsonError(fmt.Errorf("--kind web requires --url or --port"))
 		}
 		if strings.TrimSpace(tabCreateCommandFlag) != "" {
 			return jsonError(fmt.Errorf("--command is not valid for a web tab (--kind web); use --url or --port"))
 		}
+	case explicitKind && kind == session.TabKindVSCode:
+		// A vscode tab always opens the session's own worktree, so a target is
+		// meaningless rather than optional.
+		if strings.TrimSpace(tabCreateURLFlag) != "" || tabCreatePortFlag != 0 {
+			return jsonError(fmt.Errorf("--url/--port are not valid for a vscode tab (--kind vscode): it always opens the session's worktree"))
+		}
+		if strings.TrimSpace(tabCreateCommandFlag) != "" {
+			return jsonError(fmt.Errorf("--command is not valid for a vscode tab (--kind vscode)"))
+		}
 	default:
 		if strings.TrimSpace(tabCreateCommandFlag) == "" {
-			return jsonError(fmt.Errorf("--command is required (or pass --kind web with --url/--port)"))
+			return jsonError(fmt.Errorf("--command is required (or pass --kind web with --url/--port, or --kind vscode)"))
 		}
 	}
 

@@ -20,6 +20,14 @@ import (
 )
 
 func TestMain(m *testing.M) {
+	// A re-exec of this test binary standing in for code-server (see
+	// writeFakeVSCodeBinary): serve and exit. It must return BEFORE the tripwires
+	// and sandboxing below — it is a child process of a test, not a test run, and
+	// it must neither run the suite nor trip the guards its parent armed.
+	if os.Getenv(fakeVSCodeEnv) != "" {
+		fakeVSCodeServerMain()
+		return
+	}
 	// #837: fail the package loudly if any test touches the real config.json.
 	verifyRealConfig := testguard.ConfigTripwire()
 	// #1056: fail loudly if a test leaks an af_ session onto the ambient tmux

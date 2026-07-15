@@ -18,9 +18,9 @@ import assert from "node:assert/strict";
 
 import { tabBarSig, tabIdentity, tabRealId } from "./ui.js";
 import type { AppState } from "./ui.js";
-import type { SessionData } from "./types.js";
+import { type SessionData, TabKind } from "./types.js";
 import { leaves, remapByIdentity, resolveDragTab, tabsRebound } from "./layout.js";
-import { paneAddressUsesOrdinal, webProxyPath } from "./tabaddr.js";
+import { iframeIdentity, iframeIsProxied, paneAddressUsesOrdinal, webProxyPath } from "./tabaddr.js";
 
 // --- tabRealId: the real id, never a synthesized one -----------------------
 
@@ -357,4 +357,46 @@ test("after a cross-client close+create, the pane's stream id is still the tab i
   // built against, the terminal is FOLLOWED rather than torn down and re-dialled.
   assert.equal(ids[leaf.tab], "id-b");
   assert.equal(paneAddressUsesOrdinal(null, realIdsNow[leaf.tab]), false, "an id-addressed pane need not rebuild to follow");
+});
+
+// --- the vscode pane's addressing (feat: VS Code tabs) ----------------------
+
+test("a VSCODE pane is always proxied — it has no target to classify", () => {
+  // The empty-target test that correctly answers false for a URL-less WEB tab would
+  // answer the wrong question here: a vscode tab carries no target BY DESIGN (its
+  // code-server is a daemon-managed per-session process on an ephemeral port), and
+  // the proxy path is the only address that exists for it.
+  assert.equal(iframeIsProxied({ kind: TabKind.VSCode, target: "" }), true);
+  // A web tab still classifies by its target.
+  assert.equal(iframeIsProxied({ kind: TabKind.Web, target: "http://localhost:3000" }), true);
+  assert.equal(iframeIsProxied({ kind: TabKind.Web, target: "https://example.com" }), false);
+  assert.equal(iframeIsProxied({ kind: TabKind.Web, target: "" }), false);
+});
+
+test("a VSCODE pane's identity is constant, so a reconcile never reloads the editor", () => {
+  // The identity feeds the rebuild guard, and a rebuild reloads the iframe — which
+  // for VS Code means dropping unsaved buffers. A vscode tab has no target to vary,
+  // so its identity must not vary either.
+  const a = iframeIdentity({ kind: TabKind.VSCode, target: "" });
+  const b = iframeIdentity({ kind: TabKind.VSCode, target: "" });
+  assert.equal(a, b);
+  // ...and it can never collide with a real URL identity.
+  assert.notEqual(a, iframeIdentity({ kind: TabKind.Web, target: "" }));
+});
+
+test("a VSCODE pane addresses by tab id, not ordinal — a move never repoints it", () => {
+  // Since #1810 the proxy is id-keyed, so no iframe pane rebuilds on a move. For a
+  // vscode pane that is what stops a moved tab from framing ANOTHER session's editor.
+  assert.equal(paneAddressUsesOrdinal("", "id-vscode"), false);
+});
+
+test("a VSCODE pane's proxy path is the bare tab prefix — there is no target to mirror", () => {
+  // The mirror-path model (#1808) splices the TARGET's path into the URL. A vscode
+  // tab has none, so its src is just the tab prefix — and the trailing slash still
+  // matters: code-server derives its relative asset URLs from the path depth.
+  assert.equal(webProxyPath("sess-1", "id-vscode", "", null), "/v1/webtab/sess-1/id-vscode/");
+  assert.equal(
+    webProxyPath("sess-1", "id-vscode", "", "tok"),
+    "/v1/webtab/sess-1/id-vscode/?access_token=tok",
+  );
 });

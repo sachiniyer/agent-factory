@@ -20,6 +20,7 @@ import {
   createSession,
   type CreateSessionInput,
   createTab,
+  createVSCodeTab,
   deleteProject,
   errorText,
   fetchSnapshot,
@@ -54,6 +55,7 @@ import {
   tabIdentity,
   tabRealId,
   type AppState,
+  type NewTabKind,
 } from "./ui.js";
 import type { SessionData, TaskData, WireEvent } from "./types.js";
 
@@ -584,7 +586,7 @@ function openTab(index: number): void {
  *  changed by any OTHER actor now arrives on its own, since CreateTab/CloseTab
  *  publish session.updated with the refreshed roster (#1812). Errors (e.g. a
  *  remote session, or the tab cap) surface on the pane header's status line. */
-function createSessionTab(): void {
+function createSessionTab(kind: NewTabKind = "shell"): void {
   const sel = selectedSessionData();
   const tok = token;
   // `tok === null` not `!tok`: "" is the authorized-tokenless credential (#1696),
@@ -594,7 +596,8 @@ function createSessionTab(): void {
   }
   clearTabError();
   const selId = sel.id ?? "";
-  void createTab(selId, sel.title, tok)
+  const create = kind === "vscode" ? createVSCodeTab : createTab;
+  void create(selId, sel.title, tok)
     .then(() => fetchSnapshot(tok))
     .then((sessions) => {
       const grown = sessions.find((s) => s.id === selId);

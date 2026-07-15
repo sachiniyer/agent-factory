@@ -185,6 +185,14 @@ func RunDaemon(cfg *config.Config) error {
 	}
 	defer watchers.Stop()
 
+	// Stop every daemon-spawned VS Code editor on the way out. Without this a
+	// shutdown would strand a code-server per session, still holding its loopback
+	// port and now reachable by nothing — the leak class this feature must not
+	// introduce. (A SIGKILLed daemon still orphans them; ensureServer's
+	// worktree-checked reuse means a restarted daemon starts fresh editors rather
+	// than adopting the strays.)
+	defer manager.vscode.Stop()
+
 	pollInterval := time.Duration(cfg.DaemonPollInterval) * time.Millisecond
 
 	wg := &sync.WaitGroup{}

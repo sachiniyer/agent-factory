@@ -73,6 +73,21 @@ func (m *Manager) KillSession(req KillSessionRequest) (session.InstanceData, err
 	// window, which must not block the kill itself.
 	m.persistKillTombstone(repoID, instance, data)
 
+	// Stop this session's VS Code editor before the worktree goes away: it is
+	// daemon-owned infrastructure rather than a tab, so no tab teardown covers it,
+	// and a killed session's editor would otherwise linger rooted at a directory
+	// that is being removed. No-ops when the session never had a vscode tab.
+	//
+	// Stopped TWICE, deliberately. The webtab proxy resolves (and may spawn) an
+	// editor without this op-lock — it must, since a spawn blocks for seconds — so
+	// a request racing this teardown could start one after the stop below.
+	// ensureVSCodeServer refuses once the session is inert, which closes most of
+	// that window; the deferred sweep closes the rest, so "a killed session has no
+	// editor" holds on ordering rather than on timing.
+	vscodeKey := daemonInstanceKey(repoID, req.Title)
+	defer m.vscode.stopFor(vscodeKey)
+	m.vscode.stopFor(vscodeKey)
+
 	if instance != nil {
 		if err := instance.Kill(); err != nil {
 			return session.InstanceData{}, fmt.Errorf("failed to kill instance: %w", err)

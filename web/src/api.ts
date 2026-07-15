@@ -344,6 +344,22 @@ export async function createTab(id: string, title: string, token: string): Promi
   return resp.name;
 }
 
+/** Creates a VS Code tab on the session: a code-server the daemon runs on that
+ *  session's worktree. It takes no target — the worktree IS the target — so
+ *  unlike a web tab there is nothing to prompt the user for, which is why this is
+ *  offerable from the + menu at all. Mirrors
+ *  `af sessions tab-create <title> --kind vscode`. Returns the daemon's resolved,
+ *  collision-suffixed tab name. Refuses a session with no id. */
+export async function createVSCodeTab(id: string, title: string, token: string): Promise<string> {
+  requireSessionID(id, "create a VS Code tab");
+  const resp = await af<{ name: string }>(
+    "CreateTab",
+    { id, title, repo_id: "", shell: false, command: "", name: "", kind: "vscode" },
+    token,
+  );
+  return resp.name;
+}
+
 /** Closes a non-agent tab by name (mirrors the TUI `w` key). The agent tab
  *  (index 0) is refused daemon-side — kill the session to tear it down. Refuses a
  *  session with no stable id, before issuing the request. */

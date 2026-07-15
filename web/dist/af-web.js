@@ -6263,6 +6263,15 @@ async function createTab(id, title, token2) {
   );
   return resp.name;
 }
+async function createVSCodeTab(id, title, token2) {
+  requireSessionID(id, "create a VS Code tab");
+  const resp = await af(
+    "CreateTab",
+    { id, title, repo_id: "", shell: false, command: "", name: "", kind: "vscode" },
+    token2
+  );
+  return resp.name;
+}
 async function closeTab(id, title, tabName, token2) {
   requireSessionID(id, "close a tab");
   await af("CloseTab", { id, title, repo_id: "", tab_name: tabName, tab_index: 0 }, token2);
@@ -6687,7 +6696,13 @@ var TabKind = {
   /** A URL/iframe tab (no PTY): rendered as an iframe, not an xterm. A loopback
    *  target is reverse-proxied by the daemon (/v1/webtab/...); an external URL is
    *  iframed directly. Mirrors session.TabKindWeb (session/tab.go). */
-  Web: 3
+  Web: 3,
+  /** A VS Code editor tab (no PTY, and no URL either): a daemon-managed
+   *  per-session code-server rooted at the session's worktree, reachable only
+   *  through the daemon proxy (/v1/webtab/...). Mirrors session.TabKindVSCode
+   *  (session/tab.go) — the kind travels as a bare int, so this MUST stay in
+   *  lockstep with the Go enum. */
+  VSCode: 4
 };
 var InFlightOp = {
   None: 0,
@@ -7186,6 +7201,15 @@ function resolveDragTab(drag, tabRealIds, tabIds, tabCount) {
 }
 
 // src/tabaddr.ts
+function iframeIsProxied(spec) {
+  if (spec.kind === TabKind.VSCode) {
+    return true;
+  }
+  return spec.target !== "" && isLoopbackWebUrl(spec.target);
+}
+function iframeIdentity(spec) {
+  return spec.kind === TabKind.VSCode ? " vscode" : spec.target;
+}
 function isLoopbackWebUrl(raw) {
   try {
     let host = new URL(raw).hostname.toLowerCase();
@@ -7951,20 +7975,20 @@ var SplitView = class {
       if (!pane) {
         continue;
       }
-      const webTarget = this.webTargetAt(leaf.tab);
+      const spec = this.iframeSpecAt(leaf.tab);
       const identity = this.tabIds[leaf.tab] ?? "";
       const realId = this.tabRealIds[leaf.tab] ?? "";
       const moved = pane.tab !== leaf.tab;
-      const staleAddress = pane.identity !== identity || moved && paneAddressUsesOrdinal(webTarget, realId);
-      if (webTarget !== null) {
-        if (pane.term || pane.webUrl !== webTarget || staleAddress || pane.webArchived !== this.archived) {
+      const staleAddress = pane.identity !== identity || moved && paneAddressUsesOrdinal(spec ? spec.target : null, realId);
+      if (spec !== null) {
+        if (pane.term || pane.webUrl !== iframeIdentity(spec) || staleAddress || pane.webArchived !== this.archived) {
           pane.term?.dispose();
           pane.term = null;
           pane.webDispose?.();
           pane.host.replaceChildren();
           pane.tab = leaf.tab;
           pane.identity = identity;
-          this.mountWebPane(pane, webTarget, realId);
+          this.mountWebPane(pane, spec, realId);
           pane.status = "open";
           this.onPaneStatus(leaf.id, "open");
         } else if (moved) {
@@ -8028,18 +8052,26 @@ var SplitView = class {
     this.wireDrop(pane);
     return pane;
   }
-  /** The iframe target for the tab at `idx`, or null when it is not a web tab.
-   *  Confirms the kind from the parallel tabKinds list (the identity is now the
-   *  opaque stable id, #1738) so a stale/mismatched tabTargets entry can never turn a
-   *  terminal tab into an iframe. */
-  webTargetAt(idx) {
+  /** What the tab at `idx` should render as an iframe, or null when it is a
+   *  terminal tab. See IframeSpec. Confirms the kind from the parallel tabKinds list (the identity
+   *  is now the opaque stable id, #1738) so a stale/mismatched tabTargets entry can
+   *  never turn a terminal tab into an iframe.
+   *
+   *  A vscode tab deliberately carries NO target: its editor is a daemon-managed
+   *  per-session code-server on an ephemeral port, so the only address is the
+   *  daemon proxy path, which is derived from the session + tab, not stored. */
+  iframeSpecAt(idx) {
     if (idx < 0 || idx >= this.tabIds.length) {
       return null;
     }
-    if (this.tabKinds[idx] !== TabKind.Web) {
-      return null;
+    const kind = this.tabKinds[idx];
+    if (kind === TabKind.Web) {
+      return { kind: TabKind.Web, target: this.tabTargets[idx] ?? "" };
     }
-    return this.tabTargets[idx] ?? "";
+    if (kind === TabKind.VSCode) {
+      return { kind: TabKind.VSCode, target: "" };
+    }
+    return null;
   }
   /** Mounts an iframe for a web tab into pane.host and records its teardown on the
    *  pane. A loopback target is loaded through the same-origin daemon proxy
@@ -8048,11 +8080,13 @@ var SplitView = class {
    *  directly (best-effort). A reload control and an "open in new tab" affordance
    *  are always present; for a direct external frame a load-timeout reveals a
    *  fallback when embedding is blocked. */
-  mountWebPane(pane, target, realId) {
-    pane.webUrl = target;
+  mountWebPane(pane, spec, realId) {
+    const target = spec.target;
+    const isVSCode = spec.kind === TabKind.VSCode;
+    pane.webUrl = iframeIdentity(spec);
     pane.webArchived = this.archived;
     const sessionId = this.sessionId ?? "";
-    const proxied = target !== "" && realId !== "" && isLoopbackWebUrl(target);
+    const proxied = realId !== "" && iframeIsProxied(spec);
     const src = this.archived ? "" : proxied ? webProxyPath(sessionId, realId, target, this.token) : target;
     const openHref = proxied ? webProxyPath(sessionId, realId, target, this.token) : target;
     const wrap = el("div", "af-webpane");
@@ -8061,11 +8095,11 @@ var SplitView = class {
     reload.type = "button";
     reload.className = "af-ghost af-webpane-reload";
     reload.title = "Reload";
-    reload.setAttribute("aria-label", "Reload web tab");
+    reload.setAttribute("aria-label", isVSCode ? "Reload VS Code" : "Reload web tab");
     reload.textContent = "\u21BB";
     const urlText = el("span", "af-webpane-url");
-    urlText.textContent = target || "(no URL)";
-    urlText.title = target;
+    urlText.textContent = isVSCode ? "VS Code \u2014 session worktree" : target || "(no URL)";
+    urlText.title = urlText.textContent;
     const open = document.createElement("a");
     open.className = "af-ghost af-webpane-open";
     open.href = openHref;
@@ -8075,7 +8109,13 @@ var SplitView = class {
     bar.append(reload, urlText, open);
     const frame = document.createElement("iframe");
     frame.className = "af-webframe";
-    frame.setAttribute("sandbox", "allow-scripts allow-forms allow-popups allow-modals");
+    frame.setAttribute(
+      "sandbox",
+      isVSCode ? "allow-scripts allow-forms allow-popups allow-modals allow-same-origin allow-downloads" : "allow-scripts allow-forms allow-popups allow-modals"
+    );
+    if (isVSCode) {
+      frame.setAttribute("allow", "clipboard-read; clipboard-write");
+    }
     frame.setAttribute("referrerpolicy", "no-referrer");
     if (src !== "") {
       frame.src = src;
@@ -8095,7 +8135,7 @@ var SplitView = class {
     pane.host.replaceChildren(wrap);
     if (this.archived) {
       fallback.classList.add("af-webpane-archived");
-      fbMsg.textContent = "This session is archived. Restore it to load this web tab.";
+      fbMsg.textContent = isVSCode ? "This session is archived. Restore it to open VS Code." : "This session is archived. Restore it to load this web tab.";
       fbLink.hidden = true;
       open.hidden = true;
       fallback.hidden = false;
@@ -8103,8 +8143,9 @@ var SplitView = class {
       pane.webDispose = null;
       return;
     }
-    if (target.trim() === "") {
-      fbMsg.textContent = "This web tab has no URL.";
+    const unaddressable = isVSCode ? realId === "" : target.trim() === "";
+    if (unaddressable) {
+      fbMsg.textContent = isVSCode ? "This VS Code tab can't be addressed yet. Reload the page." : "This web tab has no URL.";
       fbLink.hidden = true;
       open.hidden = true;
       fallback.hidden = false;
@@ -8619,14 +8660,17 @@ function tabRealId(tab) {
   return tab.id && tab.id !== "" ? tab.id : "";
 }
 function tabLabel(tab) {
-  if (tab.kind === 0) {
+  if (tab.kind === TabKind.Agent) {
     return "Agent";
   }
-  if (tab.kind === 1) {
+  if (tab.kind === TabKind.Shell) {
     return "Terminal";
   }
-  if (tab.kind === 3) {
+  if (tab.kind === TabKind.Web) {
     return tab.name || "Web";
+  }
+  if (tab.kind === TabKind.VSCode) {
+    return tab.name || "VS Code";
   }
   return tab.name || "Tab";
 }
@@ -9115,6 +9159,78 @@ var AppShell = class {
     });
     return item;
   }
+  /** The `+` button and its kind menu.
+   *
+   *  `+` still creates a terminal tab in ONE click — it is long-established muscle
+   *  memory (and the mouse twin of the TUI's `t`), so making it open a menu would
+   *  tax every existing user to surface a second kind. The `▾` beside it opens the
+   *  picker instead: the same split VS Code itself uses for its terminal + / ▾.
+   *
+   *  Built per render (the tab bar is rebuilt wholesale), so the menu's listeners
+   *  are bound to THIS instance and torn down with it — see the isConnected check
+   *  in onDocMouseDown, which self-cleans if a rerender detaches an open menu. */
+  newTabControl() {
+    const wrap = h2("div", { class: "af-tab-new-wrap" });
+    const add = h2("button", { type: "button", class: "af-tab-new", title: "New terminal tab" }, "+");
+    add.addEventListener("click", (e) => {
+      e.stopPropagation();
+      this.actions.newTab("shell");
+    });
+    const caret = h2("button", { type: "button", class: "af-tab-new-kind", title: "New tab\u2026" }, "\u25BE");
+    caret.setAttribute("aria-haspopup", "menu");
+    caret.setAttribute("aria-expanded", "false");
+    caret.setAttribute("aria-label", "Choose tab type");
+    const menu = h2("div", { class: "af-tab-menu" });
+    menu.setAttribute("role", "menu");
+    menu.setAttribute("aria-label", "Tab type");
+    menu.hidden = true;
+    const close = () => {
+      menu.hidden = true;
+      caret.setAttribute("aria-expanded", "false");
+      document.removeEventListener("mousedown", onDocMouseDown);
+      document.removeEventListener("keydown", onKeyDown, true);
+    };
+    const onDocMouseDown = (e) => {
+      if (!wrap.isConnected || !wrap.contains(e.target)) {
+        close();
+      }
+    };
+    const onKeyDown = (e) => {
+      if (e.key !== "Escape") {
+        return;
+      }
+      e.stopPropagation();
+      close();
+      caret.focus();
+    };
+    const open = () => {
+      menu.hidden = false;
+      caret.setAttribute("aria-expanded", "true");
+      document.addEventListener("mousedown", onDocMouseDown);
+      document.addEventListener("keydown", onKeyDown, true);
+    };
+    const item = (label, kind) => {
+      const b = h2("button", { type: "button", class: "af-tab-menu-item" }, label);
+      b.setAttribute("role", "menuitem");
+      b.addEventListener("click", (e) => {
+        e.stopPropagation();
+        close();
+        this.actions.newTab(kind);
+      });
+      return b;
+    };
+    menu.append(item("Terminal", "shell"), item("VS Code", "vscode"));
+    caret.addEventListener("click", (e) => {
+      e.stopPropagation();
+      if (menu.hidden) {
+        open();
+      } else {
+        close();
+      }
+    });
+    wrap.append(add, caret, menu);
+    return wrap;
+  }
   toggleProjectMenu() {
     if (this.projectMenuOpen) {
       this.closeProjectMenu();
@@ -9191,9 +9307,7 @@ var AppShell = class {
       (tab, i) => tabButton(tab, i, i === active, shown.has(i), canManage, this.actions)
     );
     if (canManage && tabs.length < MAX_TABS) {
-      const add = h2("button", { type: "button", class: "af-tab-new", title: "New tab" }, "+");
-      add.addEventListener("click", () => this.actions.newTab());
-      children.push(add);
+      children.push(this.newTabControl());
     }
     bar.replaceChildren(...children);
     document.body.classList.remove("af-dragging-tab");
@@ -9651,7 +9765,7 @@ function openTab(index) {
   splitView.setFocusedTab(index);
   focusTerminal();
 }
-function createSessionTab() {
+function createSessionTab(kind = "shell") {
   const sel = selectedSessionData();
   const tok = token;
   if (!sel || tok === null || !canManageTabs(sel)) {
@@ -9659,7 +9773,8 @@ function createSessionTab() {
   }
   clearTabError();
   const selId = sel.id ?? "";
-  void createTab(selId, sel.title, tok).then(() => fetchSnapshot(tok)).then((sessions) => {
+  const create = kind === "vscode" ? createVSCodeTab : createTab;
+  void create(selId, sel.title, tok).then(() => fetchSnapshot(tok)).then((sessions) => {
     const grown = sessions.find((s) => s.id === selId);
     const newIdx = grown ? sessionTabs(grown).length - 1 : store.get().activeTab;
     store.set({ sessions, selectedId: pickSelection(sessions, store.get().selectedId) });

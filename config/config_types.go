@@ -192,6 +192,19 @@ type Config struct {
 	// reset time WAS parsed (that schedules against the reset time + grace).
 	// Global-only, like limit_auto_resume. See LimitRetryIntervalDuration.
 	LimitRetryInterval string `json:"limit_retry_interval" toml:"limit_retry_interval"`
+	// VSCodeServerBinary overrides the binary a VS Code tab (--kind vscode) is
+	// served by. Empty (the default) DETECTS one on PATH: code-server first, then
+	// openvscode-server. af never bundles or installs either — when neither is
+	// found the pane renders an install hint instead of failing. Set this to a
+	// full path when the editor lives outside PATH or under another name (a
+	// leading ~ is expanded); a configured path that is not executable is an
+	// error rather than a silent fall back to detection.
+	//
+	// Deliberately GLOBAL-ONLY (absent from InRepoConfig), like root_agents and
+	// listen_addr: the value names a binary the DAEMON executes, so honoring it
+	// from a repo's checked-in config would let merely cloning a repo choose what
+	// af runs on your machine.
+	VSCodeServerBinary string `json:"vscode_server_binary,omitempty" toml:"vscode_server_binary,omitempty"`
 	// ListenAddr binds the daemon's web UI + HTTP/WS API to a plain-HTTP TCP
 	// listener in addition to the always-present local unix socket (#1592 Phase
 	// 3). It DEFAULTS to defaultListenAddr ("127.0.0.1:8443"): the web client is

@@ -49,6 +49,11 @@ func labelForTab(tab *session.Tab) string {
 			return tab.Name
 		}
 		return "Web"
+	case session.TabKindVSCode:
+		if tab.Name != "" {
+			return tab.Name
+		}
+		return "VS Code"
 	default:
 		if tab.Name != "" {
 			return tab.Name

@@ -67,6 +67,9 @@ const SESSION_WEB_SHELVED = process.env.AF_WEB_SESSION_WEB_SHELVED ?? "probe-she
 // part of probe-web's REAL roster for the whole run, not a per-test mock.
 const NOURL_TAB = process.env.AF_WEBTAB_NOURL_NAME ?? "nourl";
 const WEBTAB_LOCAL_MARKER = process.env.AF_WEBTAB_LOCAL_MARKER ?? "AF_WEBTAB_LOCAL_OK";
+const VSCODE_MARKER = process.env.AF_VSCODE_MARKER ?? "AF_VSCODE_TAB_OK";
+// No vscode session/tab is seeded — the test below creates its tab through the +
+// menu, which needs no fixture and covers the real create flow.
 const WEBTAB_EXTERNAL_URL = process.env.AF_WEBTAB_EXTERNAL_URL ?? "https://blocked.example.test/";
 // The mirror-path session (#1806/#1811): one web tab targeting a SUBDIRECTORY
 // document with sibling, parent-relative and absolute-path assets — the shape the
@@ -1978,4 +1981,62 @@ test("#1812 review: a close held in flight must not clobber a tab the user picks
   await page.unroute("**/v1/CloseTab");
   af("sessions", "tab-delete", SESSION_A, "--name", "keeper");
   await expect(keeper).toHaveCount(0, { timeout: 15_000 });
+});
+
+test("vscode tab (feat): the ▾ menu creates a VS Code tab and the daemon serves it through the proxy", async () => {
+  // End to end, with no seeded fixture: pick VS Code from the tab bar's kind menu,
+  // and the daemon spawns a code-server (the FAKE one on PATH — no CI box has a
+  // real one) on a loopback port it picks, rooted at THIS session's worktree, and
+  // reverse-proxies it into the pane. Nothing has spawned before this click: the
+  // editor starts lazily on the first render.
+  //
+  // It runs near the end of the file on purpose: it leaves a tab on probe-a, and
+  // the earlier tabs test asserts that session's exact tab count.
+  await row(page, SESSION_A).click();
+  await expect(page.locator(".af-main.af-main-term")).toBeVisible();
+
+  const tabbar = page.locator(".af-tabbar");
+  // + still creates a terminal in one click; the kind picker is the ▾ beside it.
+  await expect(page.locator(".af-tab-new")).toHaveCount(1);
+  const caret = page.locator(".af-tab-new-kind");
+  await expect(caret).toHaveCount(1);
+  await expect(page.locator(".af-tab-menu")).toBeHidden();
+
+  await caret.click();
+  const menu = page.locator(".af-tab-menu");
+  await expect(menu).toBeVisible();
+  await expect(menu.locator(".af-tab-menu-item")).toHaveText(["Terminal", "VS Code"]);
+
+  await menu.locator(".af-tab-menu-item", { hasText: "VS Code" }).click();
+  await expect(menu).toBeHidden();
+
+  const editorTab = tabbar.locator(".af-tab", { hasText: "vscode" });
+  await expect(editorTab).toHaveCount(1, { timeout: 30_000 });
+  await editorTab.click();
+
+  const frame = page.locator(".af-term-host .af-pane-host iframe.af-webframe");
+  await expect(frame).toHaveCount(1, { timeout: 15_000 });
+  // A vscode tab is ALWAYS daemon-proxied: its code-server is loopback-only, so the
+  // proxy path is the only address a (possibly remote) browser can reach.
+  await expect(frame).toHaveAttribute("src", /\/v1\/webtab\//);
+  // It is an editor pane, not a terminal.
+  await expect(page.locator(".af-term-host .af-pane-host .xterm")).toHaveCount(0);
+  await expect(page.locator(".af-webpane-reload")).toHaveCount(1);
+  // Unlike a web tab, the editor MUST have a real origin: VS Code needs
+  // localStorage/workers, which an opaque origin denies. See mountWebPane.
+  await expect(frame).toHaveAttribute("sandbox", /allow-same-origin/);
+
+  // The daemon really spawned it and really relayed its content. A cold start shows
+  // the self-refreshing "starting" notice first, so poll.
+  const framed = page.frameLocator(".af-webframe");
+  await expect(framed.locator("#marker")).toHaveText(VSCODE_MARKER, { timeout: 30_000 });
+  // ...rooted at THIS session's worktree, not some other directory.
+  await expect(framed.locator("#folder")).toContainText(SESSION_A, { timeout: 15_000 });
+
+  // Escape closes the menu without creating anything (checked after, so a stray
+  // tab from a mis-click can't be mistaken for the one above).
+  await caret.click();
+  await expect(menu).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(menu).toBeHidden();
 });
