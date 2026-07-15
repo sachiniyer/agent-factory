@@ -578,7 +578,14 @@ func (b *dockerBackend) SendPromptCommand(i *Instance, prompt string) error {
 }
 
 func (b *dockerBackend) IsAlive(i *Instance) bool {
-	return i.AgentServer().Alive()
+	// Backend.IsAlive is bool by contract, so an unanswerable probe collapses to
+	// "not alive" here. That is safe ONLY because this method's callers
+	// (Instance.TmuxAlive, for TUI affordance checks) merely gray out a control.
+	// The daemon's destructive paths — Lost/re-provision/respawn — must NOT come
+	// through here; they call AgentServer().Alive() directly and branch on the
+	// error, because for them "unreachable" and "dead" are not the same (#1794).
+	alive, _ := i.AgentServer().Alive()
+	return alive
 }
 
 // CheckAndHandleTrustPrompt is a daemon-side no-op: the in-container agent-server

@@ -168,7 +168,7 @@ func TestRemoteHookRoundTripMockRemote(t *testing.T) {
 	if !strings.Contains(preview, marker) {
 		t.Fatalf("Preview did not reflect the typed input: %q", preview)
 	}
-	if !as.Alive() {
+	if alive, err := as.Alive(); err != nil || !alive {
 		t.Fatal("expected the workspace to report Alive")
 	}
 	t.Logf("preview/liveness reflect the workspace over the wire")

@@ -89,14 +89,6 @@ func (m *Manager) RestoreLostSessions() {
 			delete(m.lostRestoreStates, key)
 		}
 	}
-	// Same unbounded-growth guard for the remote-loss debounce (#1794): a probe
-	// success drops an entry, but a session killed mid-episode never gets that
-	// success, so sweep entries whose instance is gone.
-	for key := range m.remoteLossStates {
-		if _, live := m.instances[key]; !live {
-			delete(m.remoteLossStates, key)
-		}
-	}
 	m.mu.Unlock()
 
 	// Stable order so multi-session recovery after an outage is deterministic
@@ -191,11 +183,11 @@ func (m *Manager) restoreLostSession(key, repoID string, inst *session.Instance)
 	// settle its real liveness. Bounded, so a genuinely wedged remote cannot
 	// stall the poll loop here either.
 	if isRemoteWorkspace(inst) {
-		if aliveWithin(inst.AgentServer(), remoteLostConfirmTimeout) {
+		if aliveWithin(inst.AgentServer(), remoteLostConfirmTimeout) == probeAlive {
 			log.InfoLog.Printf("not re-provisioning lost remote session %q: its sandbox answers as alive (re-provisioning would orphan it and lose unpushed work) — clearing the Lost mark", inst.Title)
 			_ = inst.Transition(session.ObserveLiveness(session.LiveRunning))
 			m.persistInstance(repoID, inst)
-			m.clearRemoteLoss(key)
+			m.clearRemoteLoss(remoteLossKey(repoID, inst))
 			m.mu.Lock()
 			delete(m.lostRestoreStates, key)
 			m.mu.Unlock()
@@ -218,7 +210,16 @@ func (m *Manager) restoreLostSession(key, repoID string, inst *session.Instance)
 		return
 	}
 
-	log.InfoLog.Printf("restored lost session %q (repo %s): tmux re-spawned in its worktree", inst.Title, repoID)
+	log.InfoLog.Printf("restored lost session %q (repo %s): agent re-spawned in its workspace", inst.Title, repoID)
+	// Drop the remote-loss debounce along with the retry state (#1794). Recovery
+	// REPLACED the runtime those failures were about — for a remote session the
+	// sandbox behind them no longer exists — so the accumulated count describes a
+	// thing that is gone. Left behind, it stays threshold-satisfying, and the
+	// first transport blip against the FRESH sandbox would immediately re-satisfy
+	// the debounce and re-provision again, orphaning the sandbox we just built:
+	// the debounce defeated at exactly the moment it matters most. Any lifecycle
+	// event that replaces or revalidates the runtime must reset this counter.
+	m.clearRemoteLoss(remoteLossKey(repoID, inst))
 	m.mu.Lock()
 	delete(m.lostRestoreStates, key)
 	m.mu.Unlock()

@@ -370,23 +370,21 @@ func TestRefreshStatuses_ConfirmationProbeIsBounded(t *testing.T) {
 	}
 }
 
-// TestRefreshStatuses_ReachableRemoteWithDeadAgentStillGoesLost guards the trap
-// the #1794 debounce opens if its counter is wired to the wrong signal.
+// TestRefreshStatuses_ReachableRemoteWithDeadAgentGoesLostImmediately fences the
+// debounce from OVER-applying, which is the failure mode a debounce invites.
 //
-// A container can outlive the agent inside it: the sandbox is up, the
-// agent-server keeps serving, but the agent process is gone. Every tick then
-// yields a perfectly successful, perfectly idle (false,false) snapshot, and only
-// the Alive() probe reports the truth. If a successful Snapshot were taken as
-// proof of life and used to clear the debounce, this session's failure count
-// would reset on every one of those ticks, never accumulate past one, and the
-// session would stay green FOREVER — silently regressing #935/#1108 for exactly
-// the sessions #1782 set out to fix.
+// A container outlives the agent inside it: the sandbox is up and its
+// agent-server keeps serving clean idle (false,false) snapshots, but the agent
+// process is gone. Here the probe is ANSWERED — the sandbox was asked, it
+// looked, and it says the agent is not there. That evidence is present and
+// conclusive, so there is nothing to wait for: debouncing it would leave a dead
+// session showing green for a grace period, and if the debounce were keyed on
+// "looks dead" rather than "could not tell" it would never mark it Lost AT ALL,
+// silently regressing #935/#1108 for exactly the sessions #1782 set out to fix.
 //
-// So the debounce must count observations with no evidence of LIFE, not
-// transport errors: reachability is not liveness.
-func TestRefreshStatuses_ReachableRemoteWithDeadAgentStillGoesLost(t *testing.T) {
+// One tick, Lost. The debounce is for absent evidence, not bad evidence.
+func TestRefreshStatuses_ReachableRemoteWithDeadAgentGoesLostImmediately(t *testing.T) {
 	withRemoteLossThresholds(t, 3, time.Minute, time.Second)
-	advance := withFrozenClock(t)
 
 	// The sandbox is healthy and answering. The agent inside it is not.
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -409,10 +407,106 @@ func TestRefreshStatuses_ReachableRemoteWithDeadAgentStillGoesLost(t *testing.T)
 	manager, repoID, repoPath := newStatusTestManager(t)
 	registerStartedRemote(t, manager, repoID, repoPath, "remote-agent-dead", srv.URL, session.Running)
 
-	driveDurableRemoteLoss(manager, advance)
+	manager.RefreshStatuses() // exactly one tick
 
 	inst := manager.instances[daemonInstanceKey(repoID, "remote-agent-dead")]
 	if got := inst.GetLiveness(); got != session.LiveLost {
-		t.Fatalf("liveness = %v, want LiveLost — the agent-server answers but reports its agent dead, and a successful snapshot must never be mistaken for evidence of life", got)
+		t.Fatalf("liveness after one tick = %v, want LiveLost — the sandbox ANSWERED that its agent is gone, which is authoritative; the debounce is for probes that could not be answered, not for answers we dislike", got)
+	}
+}
+
+// TestRestoreLostSessions_PostRecoverBlipDoesNotReprovisionAgain is codex's #1
+// on PR #1804: stale debounce state surviving a recovery.
+//
+// A successful Recover REPLACES the runtime — for a remote session the sandbox
+// behind the old failures no longer exists. The threshold-satisfying
+// remoteLossStates entry describes that dead sandbox, so leaving it behind arms
+// a trap: the very first transport blip against the FRESH sandbox re-satisfies
+// the debounce instantly (the count is already past the threshold and
+// firstFailureAt is long past the grace period), marks it Lost, and
+// re-provisions AGAIN — orphaning the sandbox we just built. The debounce would
+// be defeated at precisely the moment it matters most, and each cycle would
+// strand another live container.
+//
+// So: recover, then blip once. Exactly one re-provision may ever happen.
+func TestRestoreLostSessions_PostRecoverBlipDoesNotReprovisionAgain(t *testing.T) {
+	withRemoteLossThresholds(t, 3, time.Minute, time.Second)
+	zeroRestoreBackoff(t)
+	advance := withFrozenClock(t)
+
+	manager, repoID, repoPath := newStatusTestManager(t)
+	// Nothing listening: every probe is refused, so the loss is real and durable.
+	inst, backend := registerStartedRemote(t, manager, repoID, repoPath, "remote-recovered", "http://127.0.0.1:1", session.Running)
+
+	// Durable loss -> Lost -> the restore loop re-provisions once. That part is
+	// the #1108/#1782 feature working correctly.
+	driveDurableRemoteLoss(manager, advance)
+	if got := inst.GetLiveness(); got != session.LiveLost {
+		t.Fatalf("setup: liveness = %v, want LiveLost before the restore pass", got)
+	}
+	manager.RestoreLostSessions()
+	if got := backend.recoverCalls(); got != 1 {
+		t.Fatalf("setup: Recover calls = %d, want 1 (a durably-lost remote must be recovered)", got)
+	}
+
+	// The fresh sandbox now takes ONE transport blip.
+	advance(time.Second)
+	manager.RefreshStatuses()
+	manager.RestoreLostSessions()
+
+	if got := backend.recoverCalls(); got != 1 {
+		t.Fatalf("Recover calls = %d, want still 1 — one blip against the freshly recovered sandbox re-provisioned it again, so the recovery left stale debounce state behind and each blip now orphans another live sandbox (#1794)", got)
+	}
+	if got := inst.GetLiveness(); got == session.LiveLost {
+		t.Fatal("liveness = LiveLost after a single post-recovery blip: the debounce restarted from the dead sandbox's count instead of from zero")
+	}
+}
+
+// TestRefreshStatuses_NewSessionDoesNotInheritDebounceState is codex's #2 on PR
+// #1804: debounce state keyed by identity, not by title.
+//
+// Titles get reused — kill or archive a remote session and make another with the
+// same name. Keyed by repo/title, the successor would inherit its predecessor's
+// accumulated failures: one blip would then satisfy the threshold instantly and
+// re-provision a sandbox that had never failed a probe in its life. This is the
+// key-by-title-instead-of-stable-id class (#1723/#1678/#1738); Instance.ID is
+// the field #1195 minted to tell "same session" from "title reused".
+func TestRefreshStatuses_NewSessionDoesNotInheritDebounceState(t *testing.T) {
+	withRemoteLossThresholds(t, 3, time.Minute, time.Second)
+	advance := withFrozenClock(t)
+
+	manager, repoID, repoPath := newStatusTestManager(t)
+	const title = "reused-title"
+	old, _ := registerStartedRemote(t, manager, repoID, repoPath, title, "http://127.0.0.1:1", session.Running)
+
+	// The doomed predecessor accumulates a threshold-satisfying failure history.
+	driveDurableRemoteLoss(manager, advance)
+	if got := old.GetLiveness(); got != session.LiveLost {
+		t.Fatalf("setup: predecessor liveness = %v, want LiveLost", got)
+	}
+	manager.mu.Lock()
+	stale := len(manager.remoteLossStates)
+	manager.mu.Unlock()
+	if stale == 0 {
+		t.Fatal("setup: expected the predecessor to have left debounce state to inherit")
+	}
+
+	// It is replaced by a NEW session reusing the same repo/title — a distinct
+	// instance with its own stable ID, and its own healthy sandbox.
+	fresh, freshBackend := registerStartedRemote(t, manager, repoID, repoPath, title, "http://127.0.0.1:1", session.Running)
+	if fresh.ID == old.ID {
+		t.Fatal("setup: the replacement must be a distinct instance with its own stable ID")
+	}
+
+	// One blip against the newcomer.
+	advance(time.Second)
+	manager.RefreshStatuses()
+	manager.RestoreLostSessions()
+
+	if got := fresh.GetLiveness(); got != session.LiveRunning {
+		t.Fatalf("new session's liveness = %v, want LiveRunning — it inherited the killed session's failure count through the repo/title key, so its FIRST blip marked it Lost (#1794)", got)
+	}
+	if got := freshBackend.recoverCalls(); got != 0 {
+		t.Fatalf("Recover calls on the new session = %d, want 0 — inherited state re-provisioned a sandbox that had never failed a probe", got)
 	}
 }

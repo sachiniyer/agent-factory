@@ -157,8 +157,12 @@ func (s *localAgentServer) PreviewContext(ctx context.Context, tab int, full boo
 	return s.Preview(tab, full)
 }
 
-func (s *localAgentServer) Alive() bool {
-	return s.inst.backend.IsAlive(s.inst)
+// Alive probes the local backend in-process, so the answer is always definitive
+// and the error is always nil — there is no transport between here and the tmux
+// server that could leave liveness UNKNOWN. The error exists for the remote
+// runtime; see the AgentServer interface.
+func (s *localAgentServer) Alive() (bool, error) {
+	return s.inst.backend.IsAlive(s.inst), nil
 }
 
 func (s *localAgentServer) SendPrompt(prompt string) error {

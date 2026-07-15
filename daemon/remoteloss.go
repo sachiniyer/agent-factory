@@ -11,12 +11,12 @@ import (
 //
 // A remote session is observed over REST to its in-sandbox agent-server, so
 // every probe carries the transport's failure modes: a dropped ssh forward, a
-// docker-proxy hiccup, a NAT rebind, a blackholed route. NONE of those are
-// distinguishable from a dead sandbox at the call site — Snapshot() and Alive()
-// both just fail.
+// docker-proxy hiccup, a NAT rebind, a blackholed route. A probe that dies to
+// any of those tells you NOTHING about the agent — but it used to look exactly
+// like a dead sandbox, because Snapshot() and Alive() both merely "failed".
 //
-// That indistinguishability is dangerous because of what sits downstream. The
-// poll loop runs RefreshStatuses then RestoreLostSessions in the SAME tick, and
+// That conflation is dangerous because of what sits downstream. The poll loop
+// runs RefreshStatuses then RestoreLostSessions in the SAME tick, and
 // docker/ssh/hook backends all advertise Capabilities().Recover — but their
 // Recover is not a reconnect. It is recoverSandbox: provision a BRAND-NEW
 // sandbox and clone the branch back from origin. So a remote row that flips Lost
@@ -24,23 +24,31 @@ import (
 // unreferenced, and every commit it never pushed is gone. A single blip must
 // therefore never be sufficient to mark a remote session Lost (#1794).
 //
-// The debounce demands the failure be DURABLE on two independent axes before the
-// poll will settle Lost:
+// The fix is in two layers, and the ORDER of them matters:
 //
-//   - COUNT (remoteLostFailureThreshold): N consecutive failed probes, so one
-//     bad round-trip is absorbed.
+//  1. DISTINGUISH. AgentServer.Alive returns an error, so "the sandbox answered:
+//     the agent is gone" and "the sandbox never answered" stop being the same
+//     `false`. See livenessProbe: probeDead is authoritative and acted on at
+//     once (#935/#1108 immediacy, unchanged); probeUnknown is an absence of
+//     evidence and settles nothing on its own. Most of the safety lives here —
+//     no amount of debouncing rescues a caller that cannot tell the two apart,
+//     which is why the limit-resume path needed the distinction rather than a
+//     debounce of its own.
+//  2. DEBOUNCE what remains. A run of probeUnknown could still be a real outage,
+//     so it must eventually settle Lost (that is #1782's guarantee). This is the
+//     only thing the counter tracks — consecutive UNANSWERABLE probes, never
+//     "looks dead" observations. Any answered probe clears it.
+//
+// The debounce demands the failure be DURABLE on two independent axes:
+//
+//   - COUNT (remoteLostFailureThreshold): N consecutive unanswered probes, so
+//     one bad round-trip is absorbed.
 //   - TIME (remoteLostGracePeriod): the failures must also span a real
 //     wall-clock window. Count alone is not enough — a fast-failing blip
 //     (ECONNREFUSED returns instantly while a forward re-establishes) can burn
 //     N ticks in a couple of seconds, which is exactly the blip this is meant
 //     to survive.
 //
-// The counter tracks consecutive observations that found NO EVIDENCE OF LIFE —
-// not merely consecutive transport errors. Evidence of life (fresh output, a
-// waiting prompt, an Alive() that answers true) clears it; a Snapshot that
-// merely completes does not, because an agent-server can keep serving clean idle
-// snapshots long after the agent inside it died. See the clear sites in
-// refreshInstanceStatus.
 // Both axes must be satisfied, so whichever is slower under the operator's
 // daemon_poll_interval governs — which is the point of having both. At the 1s
 // default the grace period dominates (a durably dead remote surfaces as Lost
@@ -73,6 +81,28 @@ type remoteLossState struct {
 	firstFailureAt      time.Time
 }
 
+// remoteLossKey identifies the debounce entry for an instance.
+//
+// It keys on the STABLE INSTANCE ID (#1195), not the repo/title daemon key, so
+// failure state can never outlive the session that earned it. Titles are reused:
+// kill or archive a remote session and create another with the same title, and a
+// title-keyed entry would hand the NEW session the OLD one's accumulated
+// failures — one blip would then satisfy the threshold instantly and re-provision
+// a sandbox that had never failed a probe in its life. That is the
+// key-by-title-instead-of-identity class from #1723/#1678/#1738, and the ID is
+// exactly the field #1195 minted to tell "same session" from "title reused".
+//
+// Legacy records persisted before #1195 carry no ID; they fall back to the
+// daemon key. No remote session can be one of those — the remote runtime landed
+// in #1592, long after — so the fallback only ever serves local sessions, which
+// never enter the debounce at all.
+func remoteLossKey(repoID string, instance *session.Instance) string {
+	if instance.ID != "" {
+		return instance.ID
+	}
+	return daemonInstanceKey(repoID, instance.Title)
+}
+
 // isRemoteWorkspace reports whether an instance's workspace lives off-box, so
 // its probes cross a network and can fail transiently. Branching on the
 // capability rather than the backend's name is the #1592 Phase 1 contract: a new
@@ -82,10 +112,10 @@ func isRemoteWorkspace(instance *session.Instance) bool {
 	return instance.Capabilities().Workspace == session.WorkspaceRemote
 }
 
-// noteRemoteProbeFailure records one failed remote probe and reports whether the
-// loss now looks DURABLE — N consecutive failures spanning at least the grace
-// period. Until both hold the caller must leave the session's liveness alone and
-// let the next tick decide.
+// noteRemoteProbeFailure records one UNANSWERABLE remote probe and reports
+// whether the loss now looks DURABLE — N consecutive unanswered probes spanning
+// at least the grace period. Until both hold the caller must leave the session's
+// liveness alone and let the next tick decide.
 func (m *Manager) noteRemoteProbeFailure(key, title string) bool {
 	now := nowFunc()
 	m.mu.Lock()
@@ -106,15 +136,39 @@ func (m *Manager) noteRemoteProbeFailure(key, title string) bool {
 	return true
 }
 
-// clearRemoteLoss drops a session's debounce state once the poll has positive
-// evidence the agent is alive. The next episode then starts from zero rather
+// clearRemoteLoss drops a session's debounce state. Callers must have ANSWERED
+// evidence — a completed probe, or a lifecycle event that replaced the runtime
+// the old failures were about. The next episode then starts from zero rather
 // than inheriting a stale count that could tip a later single blip straight over
-// the threshold. Callers must hold evidence of LIFE, not just of reachability —
-// see the switch in refreshInstanceStatus.
+// the threshold.
 func (m *Manager) clearRemoteLoss(key string) {
 	m.mu.Lock()
 	delete(m.remoteLossStates, key)
 	m.mu.Unlock()
+}
+
+// sweepRemoteLossStates drops debounce entries whose instance is no longer live
+// under that identity — killed, archived, or replaced by a same-title session
+// with a fresh ID. Keying by instance ID already stops a new session from
+// READING an old one's failures; this is what stops the map from growing, since
+// a session killed mid-episode never gets the answered probe that would clear it.
+// Called from the poll that populates the map. Guarded by m.mu.
+func (m *Manager) sweepRemoteLossStates() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if len(m.remoteLossStates) == 0 {
+		return
+	}
+	live := make(map[string]struct{}, len(m.instances))
+	for key, inst := range m.instances {
+		repoID, _ := splitDaemonInstanceKey(key)
+		live[remoteLossKey(repoID, inst)] = struct{}{}
+	}
+	for key := range m.remoteLossStates {
+		if _, ok := live[key]; !ok {
+			delete(m.remoteLossStates, key)
+		}
+	}
 }
 
 // settleRemoteProbeFailure decides what a failed observation probe means for one
@@ -144,22 +198,66 @@ func (m *Manager) settleRemoteProbeFailure(repoID, key string, instance *session
 	if !m.noteRemoteProbeFailure(key, instance.Title) {
 		return // not durable yet — the next tick decides
 	}
-	// Durable failure. Confirm with the INDEPENDENT Alive() probe before the
-	// transition: Snapshot can fail on its own (a capture error from a server
+	// Durable unreachability. Confirm with the INDEPENDENT Alive() probe before
+	// transitioning: Snapshot can fail on its own (a capture error from a server
 	// that is up and answering), and Lost is the trigger for a destructive
 	// re-provision, so it is worth one bounded round-trip to be sure.
-	if aliveWithin(instance.AgentServer(), remoteLostConfirmTimeout) {
+	switch probe := aliveWithin(instance.AgentServer(), remoteLostConfirmTimeout); probe {
+	case probeAlive:
 		log.InfoLog.Printf("remote session %q failed repeated snapshots but its agent-server answers as alive; leaving its status alone", instance.Title)
 		m.clearRemoteLoss(key)
 		return
+	case probeDead:
+		// The server answered: reachable, agent gone. The snapshots were failing
+		// for some other reason. An answer of any kind ends the transport episode.
+		log.WarningLog.Printf("remote session %q: agent-server reports its agent is gone — marking it Lost", instance.Title)
+		m.clearRemoteLoss(key)
+	case probeUnknown:
+		log.WarningLog.Printf("remote session %q: agent-server unreachable and still unanswerable after %s — marking it Lost", instance.Title, remoteLostGracePeriod)
 	}
-	log.WarningLog.Printf("remote session %q: agent-server unreachable and confirmed not alive — marking it Lost", instance.Title)
 	_ = instance.Transition(session.ObserveLiveness(session.LiveLost))
 	m.persistPollChange(repoID, instance, before, beforeReset)
 }
 
-// aliveWithin runs a possibly-slow Alive() probe under a hard local deadline,
-// returning false if it cannot answer in time.
+// livenessProbe is the outcome of a liveness probe. It is a tri-state, not a
+// bool, because the third case is the one that matters: a probe that never
+// answered tells you nothing about the agent, and treating it as death is what
+// re-provisions over a live sandbox (#1794).
+type livenessProbe int
+
+const (
+	// probeAlive: the agent answered and is running.
+	probeAlive livenessProbe = iota
+	// probeDead: the agent-server answered and reports its agent gone. This is
+	// AUTHORITATIVE — the sandbox is reachable, it looked, and the agent is not
+	// there. Callers may act on it immediately.
+	probeDead
+	// probeUnknown: the probe could not be answered — a transport failure or a
+	// timeout. NOT evidence of death. Only repetition over time (the debounce)
+	// may turn a run of these into a conclusion.
+	probeUnknown
+)
+
+// probeLiveness runs one liveness probe for an instance, bounding the wait for
+// REMOTE instances only. A local probe is in-process (no network to hang on) and
+// its Alive never errors, so it answers directly; wrapping it would spend a
+// goroutine and a timer per idle session per tick for nothing.
+func probeLiveness(instance *session.Instance, as session.AgentServer) livenessProbe {
+	if isRemoteWorkspace(instance) {
+		return aliveWithin(as, remoteLostConfirmTimeout)
+	}
+	alive, err := as.Alive()
+	if err != nil {
+		return probeUnknown
+	}
+	if alive {
+		return probeAlive
+	}
+	return probeDead
+}
+
+// aliveWithin runs a possibly-slow remote Alive() probe under a hard local
+// deadline, reporting probeUnknown if it cannot answer in time.
 //
 // It bounds the CALLER's wait, not the underlying REST call — AgentServer.Alive
 // takes no context, and threading one through the whole interface to serve this
@@ -168,18 +266,32 @@ func (m *Manager) settleRemoteProbeFailure(repoID, key string, instance *session
 // never blocks and nothing leaks past that; at most one such goroutine exists
 // per wedged remote per tick.
 //
-// Timing out reports not-alive, which is correct in position: every caller has
-// already established durable failure, so an agent-server that cannot answer a
-// short liveness ping on top of that is unreachable by any useful definition.
-func aliveWithin(as session.AgentServer, timeout time.Duration) bool {
-	result := make(chan bool, 1)
-	go func() { result <- as.Alive() }()
+// A timeout reports probeUnknown rather than probeDead: a server that cannot
+// answer in time has told us nothing, and the whole point of the tri-state is
+// that we stop inventing a verdict from silence.
+func aliveWithin(as session.AgentServer, timeout time.Duration) livenessProbe {
+	type result struct {
+		alive bool
+		err   error
+	}
+	done := make(chan result, 1) // buffered: the goroutine never blocks, even if we gave up
+	go func() {
+		alive, err := as.Alive()
+		done <- result{alive: alive, err: err}
+	}()
 	timer := time.NewTimer(timeout)
 	defer timer.Stop()
 	select {
-	case alive := <-result:
-		return alive
+	case r := <-done:
+		switch {
+		case r.err != nil:
+			return probeUnknown
+		case r.alive:
+			return probeAlive
+		default:
+			return probeDead
+		}
 	case <-timer.C:
-		return false
+		return probeUnknown
 	}
 }
