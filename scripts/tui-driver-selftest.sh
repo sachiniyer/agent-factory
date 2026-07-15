@@ -306,6 +306,21 @@ step "assert selection survived attach/detach"              af_expect_selected b
 step "assert no orphan tmux attach clients"                 af_assert_no_orphan_clients
 step "pane text must not inflate the tab count (#1561 review)" _expect_pane_text_not_counted_as_tabs
 
+# --- #1832 regression: detach when the pane program has upgraded the keyboard ---
+# Full-screen attach is a raw byte proxy, so an agent CLI that negotiates a
+# richer keyboard encoding with the REAL terminal (claude emits `CSI > 1 u` and
+# `CSI > 4 ; 2 m` at startup) makes it report ctrl+w as an escape sequence rather
+# than 0x17 — and the user was left with no way out of the attach.
+#
+# The sandbox terminal is not kitty, so these steps inject the exact bytes such a
+# terminal sends for ctrl+w. That reproduces #1832 here without needing kitty:
+# before the fix both steps hang in the attach until they time out.
+step "attach full-screen (#1832 kitty encoding)"            af_attach
+step "detach via the kitty CSI u ctrl+w encoding (#1832)"   af_detach $'\e[119;5u'
+step "attach full-screen (#1832 modifyOtherKeys encoding)"  af_attach
+step "detach via the modifyOtherKeys ctrl+w encoding (#1832)" af_detach $'\e[27;5;119~'
+step "assert selection survived the encoded detaches (#1832)" af_expect_selected beta
+
 # --- #1822 regression: af_hide_pane across the multi-pane and single-pane flows ---
 # Runs last: it deliberately ends with an empty workspace.
 step "hide a pane while another remains, then the last (#1822)" _expect_multipane_hide

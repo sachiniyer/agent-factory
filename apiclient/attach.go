@@ -175,16 +175,22 @@ func driveAttachStream(conn *websocket.Conn, oldState *term.State) {
 
 	// stdin → INPUT, with detach-key detection. stdin.Read can batch the detach
 	// key with preceding bytes in a single read (buffered terminal input), so
-	// check the LAST byte rather than requiring it to be the sole byte, forwarding
-	// any preceding bytes first (#975).
+	// check the END of the chunk rather than requiring the key to be the sole
+	// bytes, forwarding anything before it first (#975).
+	//
+	// The detach key is matched in every encoding the pane program may have
+	// negotiated onto the real terminal, not just the legacy C0 byte: an agent
+	// CLI that turns on the kitty keyboard protocol or modifyOtherKeys makes the
+	// terminal report ctrl+<key> as an escape sequence, and matching 0x17 alone
+	// left the user unable to detach at all (#1832). See detachkey.go.
 	go func() {
 		buf := make([]byte, 32)
 		for {
 			n, err := in.Read(buf)
 			if n > 0 {
-				if buf[n-1] == tmux.DetachKeyByte {
-					if n > 1 {
-						_ = writeFrame(agentproto.InputFrame(buf[:n-1]))
+				if keyLen := trailingDetachKeyLen(buf[:n]); keyLen > 0 {
+					if n > keyLen {
+						_ = writeFrame(agentproto.InputFrame(buf[:n-keyLen]))
 					}
 					detach()
 					return

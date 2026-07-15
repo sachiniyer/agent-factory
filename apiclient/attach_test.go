@@ -180,6 +180,80 @@ func TestAttachStream_BatchedDetachFlushesPrecedingInput(t *testing.T) {
 	waitClosed(t, done)
 }
 
+// TestAttachStream_EncodedDetachKeyDetaches is the #1832 regression guard, at the
+// level the bug actually bit: the whole attach driver, driven from stdin.
+//
+// A raw-proxied attach lets the pane program negotiate a richer keyboard encoding
+// with the REAL terminal (claude emits `CSI > 1 u` and `CSI > 4 ; 2 m` at
+// startup), after which the terminal reports ctrl+w as an escape sequence and
+// NEVER as 0x17. Matching only the legacy byte forwarded the key to the agent —
+// a harmless word-erase — so the user was trapped in the attach with no way back
+// to the TUI. Each encoding here must produce a MsgDetach, not an INPUT frame.
+func TestAttachStream_EncodedDetachKeyDetaches(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		seq  string
+	}{
+		{"kitty CSI u (macOS + kitty + claude, #1832)", "\x1b[119;5u"},
+		{"kitty CSI u with num-lock on", "\x1b[119;133u"},
+		{"xterm modifyOtherKeys=2", "\x1b[27;5;119~"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server, stdinW, _, done := startDriver(t)
+
+			if _, err := stdinW.Write([]byte(tc.seq)); err != nil {
+				t.Fatalf("write encoded detach key: %v", err)
+			}
+			msg := readServerMsg(t, server)
+			if typ, _ := agentproto.MessageTypeOf(msg.Text); msg.Binary || typ != agentproto.MsgDetach {
+				t.Fatalf("encoded detach key %q must detach, not forward as INPUT; got %+v", tc.seq, msg)
+			}
+			_ = server.Close(websocket.StatusNormalClosure, "")
+			waitClosed(t, done)
+		})
+	}
+}
+
+// TestAttachStream_EncodedDetachKeyFlushesPrecedingInput extends the #975 batching
+// rule to the encoded forms: bytes typed just before the detach key still reach
+// the agent, and only the key's own sequence is swallowed.
+func TestAttachStream_EncodedDetachKeyFlushesPrecedingInput(t *testing.T) {
+	server, stdinW, _, done := startDriver(t)
+
+	if _, err := stdinW.Write([]byte("abc\x1b[119;5u")); err != nil {
+		t.Fatalf("write batched encoded detach: %v", err)
+	}
+	in := readServerMsg(t, server)
+	if !in.Binary || in.Frame.Op != agentproto.OpInput || string(in.Frame.Data) != "abc" {
+		t.Fatalf("expected INPUT 'abc' before the encoded detach, got %+v", in)
+	}
+	det := readServerMsg(t, server)
+	if typ, _ := agentproto.MessageTypeOf(det.Text); det.Binary || typ != agentproto.MsgDetach {
+		t.Fatalf("expected MsgDetach after the flushed input, got %+v", det)
+	}
+	_ = server.Close(websocket.StatusNormalClosure, "")
+	waitClosed(t, done)
+}
+
+// TestAttachStream_EncodedNonDetachKeyForwards is the other half of the contract:
+// widening detection must not start swallowing keys the agent needs. ctrl+shift+w
+// under the same kitty encoding differs from the detach key only in its modifier
+// bits, so it is the sharpest available tripwire for an over-broad match.
+func TestAttachStream_EncodedNonDetachKeyForwards(t *testing.T) {
+	server, stdinW, _, done := startDriver(t)
+
+	const ctrlShiftW = "\x1b[119;6u"
+	if _, err := stdinW.Write([]byte(ctrlShiftW)); err != nil {
+		t.Fatalf("write ctrl+shift+w: %v", err)
+	}
+	in := readServerMsg(t, server)
+	if !in.Binary || in.Frame.Op != agentproto.OpInput || string(in.Frame.Data) != ctrlShiftW {
+		t.Fatalf("ctrl+shift+w must forward to the agent verbatim, got %+v", in)
+	}
+	_ = server.Close(websocket.StatusNormalClosure, "")
+	waitClosed(t, done)
+}
+
 // TestAttachStream_InputForwarded: plain keystrokes reach the server as INPUT.
 func TestAttachStream_InputForwarded(t *testing.T) {
 	server, stdinW, _, done := startDriver(t)
