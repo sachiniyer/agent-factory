@@ -5,7 +5,6 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
-	"strconv"
 	"strings"
 
 	"github.com/sachiniyer/agent-factory/agentproto"
@@ -25,11 +24,17 @@ const webtabPathPrefix = "/v1/webtab/"
 // the auth gate then accepts it for FOLLOW-UP requests under that prefix only.
 const webtabTokenCookie = "af_webtab_token" //nolint:gosec // cookie name, not a credential
 
-// WebTabTarget resolves the target URL of the web tab at tabIdx in the session
-// addressed by sessionID (the stable id the web client uses). It errors when the
-// session or tab is missing, or when the tab is not a web tab. The returned URL
-// is the normalized target stored at create time.
-func (m *Manager) WebTabTarget(sessionID string, tabIdx int) (string, error) {
+// WebTabTarget resolves the target URL of the web tab addressed by tabID — the
+// tab's STABLE id (#1738), not its ordinal — in the session addressed by
+// sessionID. It errors when the session or tab is missing, or when the tab is not
+// a web tab. The returned URL is the normalized target stored at create time.
+//
+// Addressing by id is what keeps an open preview pinned to the dev server it was
+// opened on: closing a LOWER tab shifts every higher ordinal down, so an
+// ordinal-keyed proxy would silently start relaying a DIFFERENT tab's dev server
+// to a frame that never navigated (#1810). An id that names no live tab resolves
+// to nothing — a clean 404 — rather than to whatever now occupies its old slot.
+func (m *Manager) WebTabTarget(sessionID, tabID string) (string, error) {
 	instance, _, _, err := m.resolveStreamSession(sessionID, "")
 	if err != nil {
 		return "", err
@@ -37,26 +42,59 @@ func (m *Manager) WebTabTarget(sessionID string, tabIdx int) (string, error) {
 	if instance == nil {
 		return "", fmt.Errorf("session %q not found", sessionID)
 	}
-	tabs := instance.GetTabs()
-	if tabIdx < 0 || tabIdx >= len(tabs) {
-		return "", fmt.Errorf("session %q has no tab at index %d", sessionID, tabIdx)
+	idx, ok := instance.TabIndexByID(tabID)
+	if !ok {
+		return "", fmt.Errorf("session %q has no tab with id %q (it may have been closed)", sessionID, tabID)
 	}
-	tab := tabs[tabIdx]
+	tabs := instance.GetTabs()
+	if idx < 0 || idx >= len(tabs) {
+		// TabIndexByID resolved against a tab list that changed under us.
+		return "", fmt.Errorf("session %q has no tab with id %q (it may have been closed)", sessionID, tabID)
+	}
+	tab := tabs[idx]
 	if tab.Kind != session.TabKindWeb {
-		return "", fmt.Errorf("tab %d of session %q is not a web tab", tabIdx, sessionID)
+		return "", fmt.Errorf("tab %q of session %q is not a web tab", tabID, sessionID)
 	}
 	if strings.TrimSpace(tab.URL) == "" {
-		return "", fmt.Errorf("web tab %d of session %q has no target URL", tabIdx, sessionID)
+		return "", fmt.Errorf("web tab %q of session %q has no target URL", tabID, sessionID)
 	}
 	return tab.URL, nil
 }
 
-// webTabProxyHandler reverse-proxies GET /v1/webtab/{sessionId}/{tabIdx}/{rest...}
+// webTabProxyHandler reverse-proxies GET /v1/webtab/{sessionId}/{tabId}/{rest...}
 // to the tab's loopback dev-server target ON THE DAEMON MACHINE. This is what
 // makes a localhost dev-server preview visible to a REMOTE web-UI viewer (over
 // Tailscale/SSH): the browser fetches this same-origin daemon path, the daemon
 // (which shares the machine with the dev server) fetches the loopback target and
 // relays it back. Same-origin also sidesteps the dev server's X-Frame-Options.
+//
+// THE URL MODEL — the browser-visible path MIRRORS the upstream path. The client
+// mints the iframe src with the target's OWN path appended to the tab prefix
+// (web/src/tabaddr.ts webProxyPath), so
+//
+//	target   http://localhost:3000/app/viewer.html
+//	iframe   /v1/webtab/<sid>/<tabId>/app/viewer.html
+//	upstream /app/viewer.html
+//
+// and this handler simply strips the prefix and forwards {rest...} VERBATIM. A
+// bare request to the tab root redirects to the target's path so the mirror holds
+// from the first navigation on (see mirrorRootRedirect).
+//
+// Mirroring the path — rather than re-resolving the remainder against the target —
+// is what makes the whole class of sub-path bugs disappear, because the browser's
+// own URL resolution now happens at the SAME DEPTH as the dev server's:
+//
+//   - a sibling link (x.css on /app/viewer.html) resolves to /v1/webtab/<sid>/<t>/app/x.css
+//     → upstream /app/x.css;
+//   - a PARENT-relative link (../shared.css) resolves to /v1/webtab/<sid>/<t>/shared.css
+//     → upstream /shared.css — depth is preserved, so it cannot climb out of the prefix;
+//   - a Set-Cookie Path=/app re-scopes by pure PREFIX-PREPEND to
+//     /v1/webtab/<sid>/<t>/app, which is exactly the browser path those cookies must
+//     ride on;
+//   - a subdirectory target (/app/viewer.html) works outright.
+//
+// This REPLACES the document-resolution rule of #1806 (resolveUpstreamPath) and
+// retires the subdirectory-target limits that PR documented as known.
 //
 // It proxies ONLY loopback targets (localhost/127.0.0.1/::1); an external target
 // is rejected here (it is iframed directly by the web UI, never routed through the
@@ -70,12 +108,8 @@ func (cs *controlServer) webTabProxyHandler(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	sessionID := r.PathValue("sessionId")
+	tabID := r.PathValue("tabId")
 	rest := r.PathValue("rest")
-	tabIdx, err := strconv.Atoi(r.PathValue("tabIdx"))
-	if err != nil || tabIdx < 0 {
-		writeHTTPError(w, http.StatusBadRequest, fmt.Errorf("invalid web tab index %q", r.PathValue("tabIdx")))
-		return
-	}
 	// Defense in depth: the stdlib ServeMux already cleans "." / ".." out of the
 	// path before matching, but reject any residue so a crafted request can never
 	// escape the proxied prefix.
@@ -84,7 +118,9 @@ func (cs *controlServer) webTabProxyHandler(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	target, err := cs.manager.WebTabTarget(sessionID, tabIdx)
+	// Addressed by the tab's STABLE id: a stale id (its tab was closed) is a clean
+	// 404 here, never a silent bind to whatever tab took its old ordinal (#1810).
+	target, err := cs.manager.WebTabTarget(sessionID, tabID)
 	if err != nil {
 		writeHTTPError(w, http.StatusNotFound, err)
 		return
@@ -113,7 +149,7 @@ func (cs *controlServer) webTabProxyHandler(w http.ResponseWriter, r *http.Reque
 			Value:    tok,
 			Path:     webtabPathPrefix,
 			HttpOnly: true,
-			Secure:   true,
+			Secure:   requestIsHTTPS(r),
 			SameSite: http.SameSiteStrictMode,
 		})
 	}
@@ -121,15 +157,34 @@ func (cs *controlServer) webTabProxyHandler(w http.ResponseWriter, r *http.Reque
 	// The path prefix this tab's cookies are scoped under. Upstream Set-Cookie
 	// paths are rewritten beneath it so a cookie-backed dev app (login/session/
 	// CSRF) works in the iframe without its cookies colliding with the daemon's
-	// own /v1/webtab/ token cookie or leaking to a sibling tab.
-	cookiePathPrefix := webtabPathPrefix + sessionID + "/" + strconv.Itoa(tabIdx)
+	// own /v1/webtab/ token cookie or leaking to a sibling tab. Because the browser
+	// path mirrors the upstream path, this is a pure prefix-prepend and the
+	// re-scoped cookie lands on exactly the requests the app scoped it to.
+	tabPathPrefix := webtabPathPrefix + sessionID + "/" + tabID
+
+	// Keep the browser-visible URL mirroring the upstream one: a bare hit on the
+	// tab root is sent to the target's own path, after which every relative URL the
+	// app emits resolves at the right depth on its own.
+	if rest == "" {
+		if dest, ok := mirrorRootRedirect(tabPathPrefix, targetURL, r.URL.RawQuery); ok {
+			http.Redirect(w, r, dest, http.StatusFound)
+			return
+		}
+	}
 
 	proxy := &httputil.ReverseProxy{
 		Rewrite: func(pr *httputil.ProxyRequest) {
 			pr.Out.URL.Scheme = targetURL.Scheme
 			pr.Out.URL.Host = targetURL.Host
 			pr.Out.Host = targetURL.Host
-			pr.Out.URL.Path, pr.Out.URL.RawPath = resolveUpstreamPath(targetURL, rest)
+			// The browser path mirrors the upstream path, so the remainder under
+			// the tab prefix IS the upstream path: forward it verbatim. rest
+			// arrives percent-DECODED from the "{rest...}" wildcard and is assigned
+			// as Path (not parsed), so net/url re-encodes it canonically and a
+			// literal "?"/"#"/"%" in a filename cannot be misread as a
+			// query/fragment/escape.
+			pr.Out.URL.Path = "/" + strings.TrimLeft(rest, "/")
+			pr.Out.URL.RawPath = ""
 			// Never leak the daemon credential upstream: drop the Authorization
 			// header and the daemon's own token cookie, but FORWARD the dev app's
 			// cookies so cookie-backed dev servers work in the iframe.
@@ -154,7 +209,7 @@ func (cs *controlServer) webTabProxyHandler(w http.ResponseWriter, r *http.Reque
 			// this tab's proxy path (and Domain dropped so it defaults to the daemon
 			// host) so the cookie lands on the right path and coexists with the
 			// daemon's token cookie.
-			rewriteSetCookiePaths(resp.Header, cookiePathPrefix)
+			rewriteSetCookiePaths(resp.Header, tabPathPrefix)
 			return nil
 		},
 		ErrorHandler: func(w http.ResponseWriter, _ *http.Request, err error) {
@@ -252,41 +307,66 @@ func stripFrameAncestors(h http.Header) {
 	}
 }
 
-// resolveUpstreamPath computes the upstream path (and its escaped form) for a
-// proxied web-tab request whose remainder under the tab's prefix is rest.
+// requestIsHTTPS reports whether the request reached the daemon over TLS, so the
+// web-tab token cookie can carry Secure exactly when the browser will accept it.
 //
-// The target is treated as a DOCUMENT reference and rest is resolved against it
-// exactly as a browser resolves a link on that page (RFC 3986 §5.3):
+// The daemon's own listener serves PLAIN HTTP by design (tcpserver.go — the
+// HTTP-only migration removed TLS), and a browser SILENTLY DROPS a Secure cookie
+// delivered over http:// to a non-localhost origin. Flagging it unconditionally
+// therefore killed the cookie in the one deployment it exists for — a network
+// (Tailscale/SSH) peer with require_token=true — so every iframe sub-resource
+// 401'd and the preview rendered unstyled (#1808). Loopback hid the bug: Chrome
+// treats http://127.0.0.1 as a secure context AND loopback peers are token-exempt.
 //
-//	target /viewer.html     + rest ""             -> /viewer.html
-//	target /viewer.html     + rest "assets/x.css" -> /assets/x.css
-//	target /app/viewer.html + rest "assets/x.css" -> /app/assets/x.css
-//	target /app/            + rest "assets/x.css" -> /app/assets/x.css
-//	target / (or "")        + rest "assets/x.css" -> /assets/x.css
-//
-// A root request therefore fetches the target path EXACTLY — appending a trailing
-// slash to a file target ("/viewer.html/") makes a static file server (python
-// -m http.server, and most dev servers) 404 the page the tab points at — while a
-// relative sub-resource still lands next to the document it came from.
-//
-// rest arrives percent-DECODED from the ServeMux "{rest...}" wildcard, so it is
-// assigned as the reference's Path rather than parsed with url.Parse: parsing
-// would misread a literal "?" or "#" in a filename as a query/fragment, and a
-// "//host"-style reference would try to swap the upstream host. Leading slashes
-// are trimmed so rest is always relative to the target document.
-func resolveUpstreamPath(target *url.URL, rest string) (path, rawPath string) {
-	resolved := target.ResolveReference(&url.URL{Path: strings.TrimLeft(rest, "/")})
-	if resolved.Path == "" {
-		// Host-only target ("http://localhost:8899") fetched at its root.
-		return "/", ""
+// r.TLS covers a future direct-TLS listener; X-Forwarded-Proto covers the
+// RECOMMENDED deployment, where a front proxy terminates TLS and speaks plain HTTP
+// to the daemon — there the cookie both can and should be Secure. The header is
+// only trusted to ADD the flag: a peer that forges it merely asks for a stricter
+// cookie its own plain-HTTP browser will then refuse to store, which fails closed
+// (a broken preview) rather than open. It can never remove protection or
+// authenticate anything — the token itself is still verified by the auth gate.
+func requestIsHTTPS(r *http.Request) bool {
+	if r.TLS != nil {
+		return true
 	}
-	return resolved.Path, resolved.RawPath
+	// A proxy chain may append (X-Forwarded-Proto: https, http); the FIRST entry is
+	// the scheme the original client actually used.
+	proto, _, _ := strings.Cut(r.Header.Get("X-Forwarded-Proto"), ",")
+	return strings.EqualFold(strings.TrimSpace(proto), "https")
+}
+
+// mirrorRootRedirect computes where a bare request to a tab's proxy root should be
+// sent so the browser-visible URL starts MIRRORING the target's path, and reports
+// whether a redirect is needed at all.
+//
+//	prefix /v1/webtab/s/t + target /app/viewer.html -> /v1/webtab/s/t/app/viewer.html, true
+//	prefix /v1/webtab/s/t + target /app/            -> /v1/webtab/s/t/app/,            true
+//	prefix /v1/webtab/s/t + target /                -> "",                             false
+//	prefix /v1/webtab/s/t + target "" (host-only)   -> "",                             false
+//
+// A root-URL target already mirrors itself, so it is left alone — redirecting it
+// to its own path would be an infinite loop. Any other target redirects exactly
+// once: the destination's remainder is non-empty, so the follow-up request takes
+// the proxy path rather than returning here.
+//
+// The query (which carries ?access_token for a network peer's top-level
+// navigation) rides along, so the redirected request authorizes even if the
+// browser has not yet stored the token cookie.
+func mirrorRootRedirect(prefix string, target *url.URL, rawQuery string) (string, bool) {
+	if target.Path == "" || target.Path == "/" {
+		return "", false
+	}
+	dest := &url.URL{
+		Path:     prefix + "/" + strings.TrimLeft(target.Path, "/"),
+		RawQuery: rawQuery,
+	}
+	return dest.String(), true
 }
 
 // joinURLPath joins a base path and a sub path with exactly one slash between
-// them. Used to re-scope an upstream cookie's Path under the tab's proxy prefix,
-// which is a true directory join (unlike the upstream URL, where the target is a
-// document — see resolveUpstreamPath).
+// them. Used to re-scope an upstream cookie's Path under the tab's proxy prefix.
+// Because the browser path mirrors the upstream path, prepending the prefix is all
+// a correct re-scope takes.
 func joinURLPath(base, sub string) string {
 	if base == "" || base == "/" {
 		return sub

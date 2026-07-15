@@ -140,6 +140,31 @@ func serveSPA(assets fs.FS, w http.ResponseWriter, r *http.Request) {
 	if serveAsset(assets, name, w, r) {
 		return
 	}
+	// A path that NAMES A FILE but matches no embedded asset is not a client-side
+	// route — overwhelmingly it is a previewed dev app's ABSOLUTE-path asset
+	// (/assets/app.js, /static/js/bundle.js, /@vite/client's chunks) that resolved
+	// against the origin root and escaped its /v1/webtab/ prefix (#1811). Handing
+	// it the SPA shell answers "200 text/html" to a request for JavaScript or CSS:
+	// the browser aborts the stylesheet on MIME mismatch and feeds the af app's own
+	// HTML to a <script>, so the preview breaks with NOTHING reporting an error.
+	// 404 makes that failure visible and honest instead.
+	//
+	// Only extension-bearing paths are refused; an extension-less deep link is a
+	// real client route and still renders the shell.
+	//
+	// This does not RESCUE the asset: attributing it back to its tab would need the
+	// request's Referer, and the preview iframe is sandboxed WITHOUT
+	// allow-same-origin, so it has an opaque origin and Chromium sends no Referer at
+	// all (measured — no referrer policy changes it). Granting the frame a real
+	// origin would let a previewed dev server read the SPA's bearer token, which is
+	// a far worse trade. An app whose assets are absolute must be served from its
+	// own root (see docs/web.md); a dedicated preview origin is the only real fix (#1856).
+	if path.Ext(name) != "" {
+		writeHTTPError(w, http.StatusNotFound,
+			fmt.Errorf("no asset %q; if this is a web-tab preview's absolute-path asset, "+
+				"it escaped the tab's proxy prefix — see docs/web.md (absolute-path assets)", r.URL.Path))
+		return
+	}
 	// SPA fallback: the path names no embedded asset, so serve the app shell for
 	// client-side routing.
 	serveAsset(assets, "index.html", w, r)

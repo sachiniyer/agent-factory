@@ -7195,13 +7195,21 @@ function isLoopbackWebUrl(raw) {
     return false;
   }
 }
-function webProxyPath(sessionId, tabIdx, token2) {
-  const base = `/v1/webtab/${encodeURIComponent(sessionId)}/${tabIdx}/`;
+function targetPathOf(target) {
+  try {
+    const p = new URL(target).pathname;
+    return p === "/" ? "" : p.replace(/^\//, "");
+  } catch {
+    return "";
+  }
+}
+function webProxyPath(sessionId, tabId, target, token2) {
+  const base = `/v1/webtab/${encodeURIComponent(sessionId)}/${encodeURIComponent(tabId)}/${targetPathOf(target)}`;
   return token2 ? `${base}?access_token=${encodeURIComponent(token2)}` : base;
 }
 function paneAddressUsesOrdinal(webTarget, realId) {
   if (webTarget !== null) {
-    return webTarget !== "" && isLoopbackWebUrl(webTarget);
+    return false;
   }
   return realId === "";
 }
@@ -7910,7 +7918,7 @@ var SplitView = class {
           pane.host.replaceChildren();
           pane.tab = leaf.tab;
           pane.identity = identity;
-          this.mountWebPane(pane, webTarget);
+          this.mountWebPane(pane, webTarget, realId);
           pane.status = "open";
           this.onPaneStatus(leaf.id, "open");
         } else if (moved) {
@@ -7993,12 +8001,12 @@ var SplitView = class {
    *  directly (best-effort). A reload control and an "open in new tab" affordance
    *  are always present; for a direct external frame a load-timeout reveals a
    *  fallback when embedding is blocked. */
-  mountWebPane(pane, target) {
+  mountWebPane(pane, target, realId) {
     pane.webUrl = target;
     const sessionId = this.sessionId ?? "";
-    const proxied = target !== "" && isLoopbackWebUrl(target);
-    const src = proxied ? webProxyPath(sessionId, pane.tab, this.token) : target;
-    const openHref = proxied ? webProxyPath(sessionId, pane.tab, this.token) : target;
+    const proxied = target !== "" && realId !== "" && isLoopbackWebUrl(target);
+    const src = proxied ? webProxyPath(sessionId, realId, target, this.token) : target;
+    const openHref = src;
     const wrap = el("div", "af-webpane");
     const bar = el("div", "af-webpane-bar");
     const reload = document.createElement("button");

@@ -54,6 +54,28 @@ TASK3_NAME=mock3-task
 WEBTAB_PORT=8890
 WEBTAB_LOCAL_MARKER=AF_WEBTAB_LOCAL_OK
 WEBTAB_EXTERNAL_URL=https://blocked.example.test/
+# A SECOND, VITE-SHAPED preview server (#1806/#1810/#1811): unlike the single
+# self-contained document above, it serves a SUBDIRECTORY document with real
+# sub-resources — a sibling, a PARENT-relative one, and an ABSOLUTE-path one. That
+# combination is what the mirror-path URL model exists for and what the old fixture
+# structurally could not fail on (it had no sub-resources at all).
+VITE_PORT=8891
+VITE_MARKER=AF_VITE_OK
+# Set as document.title by the ABSOLUTE-path script IF it ever executes. It must
+# not: an absolute path escapes the tab prefix and cannot be attributed back to a
+# tab (#1811), so it has to 404 rather than be answered with the SPA shell.
+VITE_ABS_TITLE=AF_ABS_ASSET_EXECUTED
+# The web-tab session for the mirror-path / asset tests, kept SEPARATE from
+# SESSION_WEB so it is immune to the tab-consuming order of the tests there.
+SESSION_VITE=probe-vite
+# The #1810 misroute test gets its OWN session, visited by exactly one test. That is
+# not fastidiousness: re-selecting a session resets the store's activeTab to 0 while
+# the split view keeps its retained tree (and lastFocusedTab), so clicking the
+# already-focused tab is a no-op that never re-syncs the store — the tab bar then
+# highlights Agent while the pane still shows tab 2, and the next tab-close yanks the
+# pane to Agent. That desync is a real pre-existing SPA bug (filed separately); a
+# first-visit session sidesteps it so this test measures the proxy, not that.
+SESSION_MIS=probe-misroute
 export AGENT_FACTORY_HOME="$HOME_DIR"
 # A container binary is built at the branch version (typically behind the latest
 # release); without this it would self-update on boot and restart the daemon
@@ -107,6 +129,7 @@ echo ">>> starting af daemon (listen_addr=$LISTEN) ..."
 "$BIN" --daemon >/work/daemon.log 2>&1 &
 DAEMON_PID=$!
 WEBTAB_SERVER_PID=""
+VITE_SERVER_PID=""
 
 cleanup() {
     rc=$?
@@ -115,7 +138,10 @@ cleanup() {
     "$BIN" sessions kill "$SESSION_B" >/dev/null 2>&1 || true
     "$BIN" sessions kill "$SESSION_C" >/dev/null 2>&1 || true
     "$BIN" sessions kill "$SESSION_WEB" >/dev/null 2>&1 || true
+    "$BIN" sessions kill "$SESSION_VITE" >/dev/null 2>&1 || true
+    "$BIN" sessions kill "$SESSION_MIS" >/dev/null 2>&1 || true
     kill "$WEBTAB_SERVER_PID" >/dev/null 2>&1 || true
+    kill "$VITE_SERVER_PID" >/dev/null 2>&1 || true
     kill "$DAEMON_PID" >/dev/null 2>&1 || true
     if [ "$rc" -ne 0 ]; then
         echo "===== daemon.log (tail) =====" >&2
@@ -205,6 +231,55 @@ EOF
 node /work/webtab-server.js &
 WEBTAB_SERVER_PID=$!
 
+# A VITE-SHAPED app: a document under /app/ whose assets are referenced the three
+# ways real dev servers reference them.
+echo ">>> starting vite-shaped preview server on 127.0.0.1:$VITE_PORT ..."
+cat >/work/vite-server.js <<EOF
+const http = require("http");
+const PAGE = [
+  "<!doctype html><html><head>",
+  // SIBLING: resolves to /app/x.css through the mirrored prefix.
+  '<link rel="stylesheet" href="x.css">',
+  // PARENT-RELATIVE: resolves to /shared.css — inside the prefix only because the
+  // proxy URL mirrors the target's DEPTH.
+  '<link rel="stylesheet" href="../shared.css">',
+  // ABSOLUTE: resolves against the ORIGIN ROOT and escapes the prefix entirely.
+  // Nothing can route it back (#1811) — it must 404, not get the SPA shell.
+  '<script src="/assets/app.js"></script>',
+  '</head><body><h1 id="marker">$VITE_MARKER</h1>',
+  '<p id="sib">sibling</p><p id="par">parent</p></body></html>',
+].join("");
+http
+  .createServer((req, res) => {
+    const path = req.url.split("?")[0];
+    if (path === "/app/viewer.html") {
+      res.setHeader("content-type", "text/html");
+      res.end(PAGE);
+      return;
+    }
+    if (path === "/app/x.css") {
+      res.setHeader("content-type", "text/css");
+      res.end("#sib{color:rgb(1,2,3)}");
+      return;
+    }
+    if (path === "/shared.css") {
+      res.setHeader("content-type", "text/css");
+      res.end("#par{color:rgb(4,5,6)}");
+      return;
+    }
+    if (path === "/assets/app.js") {
+      res.setHeader("content-type", "application/javascript");
+      res.end('document.title=" $VITE_ABS_TITLE ";');
+      return;
+    }
+    res.statusCode = 404;
+    res.end("404 File not found: " + path);
+  })
+  .listen($VITE_PORT, "127.0.0.1");
+EOF
+node /work/vite-server.js &
+VITE_SERVER_PID=$!
+
 echo ">>> creating web-tab session $SESSION_WEB ..."
 "$BIN" sessions create --repo "$MOCK" --name "$SESSION_WEB" --program claude >/dev/null
 for i in $(seq 1 30); do
@@ -217,6 +292,44 @@ done
 # "external", so the Playwright test can address each by its tab label.
 "$BIN" sessions tab-create --repo "$MOCK" "$SESSION_WEB" --kind web --port "$WEBTAB_PORT" --name preview >/dev/null
 "$BIN" sessions tab-create --repo "$MOCK" "$SESSION_WEB" --kind web --url "$WEBTAB_EXTERNAL_URL" --name external >/dev/null
+
+# --- the mirror-path (#1806/#1811) session -----------------------------------
+# One web tab targeting a SUBDIRECTORY document with sibling / parent-relative /
+# absolute assets.
+echo ">>> creating web-tab session $SESSION_VITE ..."
+"$BIN" sessions create --repo "$MOCK" --name "$SESSION_VITE" --program claude >/dev/null
+for i in $(seq 1 30); do
+    if "$BIN" sessions get "$SESSION_VITE" >/dev/null 2>&1; then
+        break
+    fi
+    sleep 1
+done
+"$BIN" sessions tab-create --repo "$MOCK" "$SESSION_VITE" --kind web \
+    --url "http://127.0.0.1:$VITE_PORT/app/viewer.html" --name vite >/dev/null
+
+# --- the #1810 misroute session ---------------------------------------------
+# The tab layout is load-bearing, reproducing #1810's SILENT wrong-server shape:
+#
+#   0 agent
+#   1 lower  -> :WEBTAB_PORT  (AF_WEBTAB_LOCAL_OK)
+#   2 mis    -> :VITE_PORT/app/viewer.html  (AF_VITE_OK)   <-- a pane opens on this
+#   3 after  -> :WEBTAB_PORT  (AF_WEBTAB_LOCAL_OK)
+#
+# Closing "lower" shifts mis 2->1 and after 3->2. An ORDINAL-keyed iframe minted at
+# index 2 would then serve "after" — a DIFFERENT app, HTTP 200, no error, no reload.
+# Keyed by the stable tab id, the pane keeps showing mis's own dev server.
+echo ">>> creating web-tab session $SESSION_MIS ..."
+"$BIN" sessions create --repo "$MOCK" --name "$SESSION_MIS" --program claude >/dev/null
+for i in $(seq 1 30); do
+    if "$BIN" sessions get "$SESSION_MIS" >/dev/null 2>&1; then
+        break
+    fi
+    sleep 1
+done
+"$BIN" sessions tab-create --repo "$MOCK" "$SESSION_MIS" --kind web --port "$WEBTAB_PORT" --name lower >/dev/null
+"$BIN" sessions tab-create --repo "$MOCK" "$SESSION_MIS" --kind web \
+    --url "http://127.0.0.1:$VITE_PORT/app/viewer.html" --name mis >/dev/null
+"$BIN" sessions tab-create --repo "$MOCK" "$SESSION_MIS" --kind web --port "$WEBTAB_PORT" --name after >/dev/null
 
 # --- run the Playwright harness ---------------------------------------------
 echo ">>> installing web deps + running the Playwright harness ..."
@@ -236,5 +349,9 @@ export AF_WEB_TASK_NAME="$SEEDED_TASK"
 export AF_WEB_TASK3_NAME="$TASK3_NAME"
 export AF_WEBTAB_LOCAL_MARKER="$WEBTAB_LOCAL_MARKER"
 export AF_WEBTAB_EXTERNAL_URL="$WEBTAB_EXTERNAL_URL"
+export AF_WEB_SESSION_VITE="$SESSION_VITE"
+export AF_WEB_SESSION_MIS="$SESSION_MIS"
+export AF_VITE_MARKER="$VITE_MARKER"
+export AF_VITE_ABS_TITLE="$VITE_ABS_TITLE"
 
 npx playwright test
