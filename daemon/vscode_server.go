@@ -280,6 +280,14 @@ type vscodeServer struct {
 	// killGroup overrides the process-group signal syscall. Teardown's correctness
 	// is about WHICH signals are sent and WHEN, which a test can only observe by
 	// intercepting them; nil means the real syscall.
+	//
+	// Test seam, and it must be in place at CONSTRUCTION, never written after:
+	// reap() runs on its own goroutine from the moment of the spawn and reads this
+	// on its way out, so a later write is an unsynchronized write against an
+	// already-running reader. A spawned server therefore inherits it from
+	// vscodeSupervisor.killGroup, which startOne copies in before it starts the
+	// reaper; only a test that builds a vscodeServer directly — no reaper, no
+	// second goroutine — may set it inline.
 	killGroup func(pgid int, sig syscall.Signal) error
 }
 
@@ -416,6 +424,14 @@ type vscodeSupervisor struct {
 	startGrace       time.Duration
 	cooldown         time.Duration
 	now              func() time.Time
+
+	// killGroup is the process-group signal seam (see vscodeServer.killGroup),
+	// injected HERE rather than onto the server a spawn hands back because this is
+	// the only place a test can install it safely: startOne copies it into the
+	// server before starting the reaper goroutine that reads it, so the spawn
+	// itself supplies the happens-before edge. Setting it on the returned server
+	// would be a write racing a reader that is already running.
+	killGroup func(pgid int, sig syscall.Signal) error
 }
 
 // vscodeFailure is a remembered spawn failure and when it happened.
@@ -622,6 +638,9 @@ func (v *vscodeSupervisor) startOne(binary string, flavor vscodeFlavor, port int
 		port:     port,
 		cmd:      cmd,
 		exited:   make(chan struct{}),
+		// Copied in HERE, before the reaper below exists to read it — the seam has
+		// to be installed by construction rather than by a later assignment.
+		killGroup: v.killGroup,
 	}
 	// Reap the child AND clean up its process group; see reap's doc for why the
 	// group kill belongs there rather than in stop().

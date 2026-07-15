@@ -758,21 +758,34 @@ func TestVSCodeServer_StopDoesNotSignalAReapedLeadersGroup(t *testing.T) {
 func TestVSCodeServer_StopSignalsWhileTheLeaderIsUnreaped(t *testing.T) {
 	binary := writeFakeVSCodeBinary(t, "code-server", nil)
 	v := newTestVSCodeSupervisor(t, binary)
-	if _, err := v.ensureServer("k", t.TempDir()); err != nil {
-		t.Fatalf("ensureServer: %v", err)
-	}
-	s := v.servers["k"]
-	if !s.alive() {
-		t.Fatal("the editor is not alive; the fixture proves nothing")
-	}
 
+	// The seam goes on the SUPERVISOR, before the spawn: startOne copies it into
+	// the server it builds, so it is in place before the reaper goroutine that
+	// reads it exists. Setting it on the server ensureServer hands back — the
+	// obvious spelling — is a write racing that already-running reaper, which
+	// signals the group through this same seam on its way out.
+	//
+	// Buffered for every signal this teardown can produce (stop()'s SIGTERM, its
+	// SIGKILL escalation, and the reaper's own SIGKILL) so no send can wedge the
+	// reaper on a channel the assertion below has stopped reading.
 	sigs := make(chan syscall.Signal, 4)
-	s.killGroup = func(pgid int, sig syscall.Signal) error {
+	v.killGroup = func(pgid int, sig syscall.Signal) error {
 		sigs <- sig
 		return syscall.Kill(-pgid, sig) // still really tear it down
 	}
+
+	if _, err := v.ensureServer("k", t.TempDir()); err != nil {
+		t.Fatalf("ensureServer: %v", err)
+	}
+	if s := v.servers["k"]; s == nil || !s.alive() {
+		t.Fatal("the editor is not alive; the fixture proves nothing")
+	}
+
 	v.stopFor("k")
 
+	// SIGTERM is first by construction, not by scheduling luck: the reaper cannot
+	// signal until cmd.Wait() returns, and the leader only exits because of the
+	// SIGTERM this channel recorded before it was even delivered.
 	select {
 	case got := <-sigs:
 		if got != syscall.SIGTERM {
