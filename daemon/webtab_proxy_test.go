@@ -774,6 +774,80 @@ func TestWebTabProxy_ForeignRedirectPassesThrough(t *testing.T) {
 	}
 }
 
+// TestWebTabProxy_NetworkPathRedirectPassesThrough is the OAuth case in the spelling
+// net/url does not read as a host. "///accounts.example.com/oauth" is a navigation to
+// accounts.example.com in every browser, but Go parses it with an empty Host and the
+// whole reference as a path — so the absolute-path rule captured it into the tab and
+// sent the user to the dev server's /accounts.example.com/oauth instead of to the
+// identity provider.
+func TestWebTabProxy_NetworkPathRedirectPassesThrough(t *testing.T) {
+	const foreign = "///accounts.example.com/oauth"
+	upstream := redirectingUpstream(t, http.StatusFound, foreign)
+	mux, id, tabID := newWebTabProxyFixture(t, upstream.URL)
+
+	rec := proxyGet(t, mux, id, tabID, "login")
+
+	if got := rec.Header().Get("Location"); got != foreign {
+		t.Fatalf("Location = %q, want %q untouched (a network-path redirect is a foreign host)", got, foreign)
+	}
+}
+
+// TestWebTabProxy_RedirectDotSegmentsNormalized pins the dot-segment rule end to end.
+// The browser resolves "/../login" AFTER reading the header, so prefixing it verbatim
+// yields ".../<tab>/../login" — which normalizes to /v1/webtab/<sid>/login, a path
+// naming no tab at all. The upstream meant /login; that is what must ride the prefix.
+func TestWebTabProxy_RedirectDotSegmentsNormalized(t *testing.T) {
+	upstream := redirectingUpstream(t, http.StatusFound, "/../login")
+	mux, id, tabID := newWebTabProxyFixture(t, upstream.URL)
+
+	rec := proxyGet(t, mux, id, tabID, "deep/page")
+
+	want := fmt.Sprintf("/v1/webtab/%s/%s/login", id, tabID)
+	if got := rec.Header().Get("Location"); got != want {
+		t.Fatalf("Location = %q, want %q (a dot segment ate the tab prefix)", got, want)
+	}
+}
+
+// TestWebTabProxy_RedirectKeepsLeadingEncodedSlash is the encoding half of the same
+// header: %2F is a literal path character, not a separator, and an app that redirects
+// to /%2Ffoo names a different resource than /foo. Prefixing Path and RawPath
+// independently desynced them, and url.String() answers a desync by dropping RawPath.
+func TestWebTabProxy_RedirectKeepsLeadingEncodedSlash(t *testing.T) {
+	upstream := redirectingUpstream(t, http.StatusFound, "/%2Ffoo")
+	mux, id, tabID := newWebTabProxyFixture(t, upstream.URL)
+
+	rec := proxyGet(t, mux, id, tabID, "x")
+
+	want := fmt.Sprintf("/v1/webtab/%s/%s/%%2Ffoo", id, tabID)
+	if got := rec.Header().Get("Location"); got != want {
+		t.Fatalf("Location = %q, want %q (the escaped slash was decoded away)", got, want)
+	}
+}
+
+// TestRewriteUpstreamRefNeverEmitsNetworkPath guards the one way this rewrite could
+// hand out an OPEN REDIRECT. A real tab prefix is always "/v1/webtab/<sid>/<tab>", so
+// the prefixed path can never begin "//" — but normalization can produce a leading
+// "//" from an upstream "/..//evil.com/x", and with no prefix in front of it that is
+// a Location the browser reads as a foreign host. The rewrite must refuse instead.
+func TestRewriteUpstreamRefNeverEmitsNetworkPath(t *testing.T) {
+	target, err := url.Parse("http://localhost:3000")
+	if err != nil {
+		t.Fatalf("parse target: %v", err)
+	}
+	for _, prefix := range []string{"", "/"} {
+		got, ok := rewriteUpstreamRef("/..//evil.com/x", prefix, target)
+		if ok {
+			t.Fatalf("rewriteUpstreamRef(prefix=%q) = %q, true; want pass-through, not a network-path Location",
+				prefix, got)
+		}
+	}
+	// With a real prefix in front the same reference is an ordinary local path.
+	want := "/v1/webtab/sess/tab-1//evil.com/x"
+	if got, ok := rewriteUpstreamRef("/..//evil.com/x", "/v1/webtab/sess/tab-1", target); !ok || got != want {
+		t.Fatalf("rewriteUpstreamRef = %q, %v; want %q, true", got, ok, want)
+	}
+}
+
 // TestWebTabProxy_RefreshHeaderRewritten covers the delayed-redirect spelling of the
 // same escape.
 func TestWebTabProxy_RefreshHeaderRewritten(t *testing.T) {
@@ -836,6 +910,40 @@ func TestRewriteUpstreamRef(t *testing.T) {
 		{name: "relative stays relative", ref: "next/page"},
 		{name: "dot relative stays relative", ref: "../up"},
 		{name: "foreign host", ref: "https://example.com/x"},
+		// The spellings whose BROWSER reading diverges from net/url's parse. Each
+		// one reached master rewriting to something the browser would not follow
+		// where the upstream pointed.
+		//
+		// A LEADING %2F decodes to a second slash in Path but not in RawPath, so
+		// prefixing the two independently desynced them and url.String() dropped the
+		// encoding — silently renaming the resource the app named.
+		{name: "leading encoded slash keeps its encoding", ref: "/%2Ffoo", want: prefix + "/%2Ffoo"},
+		{name: "leading encoded slash on a same-origin absolute",
+			ref: "http://localhost:3000/%2Ffoo", want: prefix + "/%2Ffoo"},
+		{name: "real double slash in a same-origin path survives",
+			ref: "http://localhost:3000//foo", want: prefix + "//foo"},
+		// DOT SEGMENTS are resolved by the browser AFTER it reads the header, so an
+		// un-normalized one eats the prefix it was just given and escapes the tab.
+		{name: "dot segments resolved before prefixing", ref: "/../login", want: prefix + "/login"},
+		{name: "encoded dot segments resolved too", ref: "/%2e%2e/login", want: prefix + "/login"},
+		{name: "encoded dot segments are case insensitive", ref: "/%2E%2E/login", want: prefix + "/login"},
+		{name: "dot segments cannot climb past root", ref: "/../../x", want: prefix + "/x"},
+		{name: "interior dot segments resolved", ref: "/a/b/../c", want: prefix + "/a/c"},
+		{name: "single dot segment resolved", ref: "/a/./b", want: prefix + "/a/b"},
+		{name: "trailing single dot keeps the directory slash", ref: "/a/.", want: prefix + "/a/"},
+		{name: "trailing double dot keeps the directory slash", ref: "/a/..", want: prefix + "/"},
+		{name: "dot segments in the query are left alone", ref: "/x?q=/../y", want: prefix + "/x?q=/../y"},
+		// A NETWORK-PATH reference names a host to the browser, but net/url reports
+		// the longer slash runs as a plain local path. Foreign is foreign: pass it
+		// through, or an OAuth handoff gets stranded in the frame.
+		{name: "triple-slash network path is foreign", ref: "///accounts.example.com/oauth"},
+		{name: "backslash network path is foreign", ref: "/\\accounts.example.com/oauth"},
+		// Even when it names the upstream: the browser would leave the proxy for the
+		// loopback origin, which a remote viewer cannot reach. sameUpstreamHost's rule
+		// applies — an ambiguous spelling degrades to an honest un-rewritten redirect
+		// rather than a frame bound to a server it never named.
+		{name: "triple-slash naming the upstream is still not ours to claim",
+			ref: "///localhost:3000/x"},
 		{name: "loopback alias is not the same host", ref: "http://127.0.0.1:3000/x"},
 		{name: "different port", ref: "http://localhost:3001/x"},
 		{name: "scheme upgrade is not ours", ref: "https://localhost:3000/x"},

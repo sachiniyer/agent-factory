@@ -482,8 +482,10 @@ func rewriteRefreshURL(h http.Header, prefix string, target *url.URL) {
 //
 //	/app/                      -> /v1/webtab/s/t/app/          (absolute path: prepend)
 //	http://localhost:3000/app/ -> /v1/webtab/s/t/app/          (same upstream: strip origin, keep path)
+//	/../login                  -> /v1/webtab/s/t/login         (dot segments resolved first)
 //	app/x                      -> unchanged                    (relative: already at mirrored depth)
 //	https://example.com/x      -> unchanged                    (foreign host)
+//	///example.com/x           -> unchanged                    (foreign host, network-path spelling)
 //
 // A RELATIVE reference needs no help: the browser resolves it against the current
 // proxied URL, which sits at the same depth as the upstream one, so it lands on the
@@ -495,11 +497,19 @@ func rewriteRefreshURL(h http.Header, prefix string, target *url.URL) {
 // browser at a prefix the daemon would then refuse to proxy (only loopback targets
 // are proxied) and silently rehost someone else's origin under ours.
 //
-// The path is carried VERBATIM, in the upstream's own encoding: Path and RawPath are
-// prefixed together so url.String() reproduces the app's escaping rather than
-// re-canonicalizing it (a literal %2F in a redirect target stays %2F).
+// Everything here is decided the way the BROWSER will read the header, which is not
+// always the way net/url parses it. Two spellings diverge, and both are handled
+// before the prefix goes on: a network-path reference net/url hands back as a plain
+// path (isNetworkPathRef), and dot segments that would otherwise eat the prefix
+// after the browser normalizes them (normalizeEscapedPath).
+//
+// The path is carried VERBATIM, in the upstream's own encoding: the prefix is
+// prepended to the ESCAPED path and the result re-parsed, so url.String() reproduces
+// the app's escaping rather than re-canonicalizing it (a literal %2F in a redirect
+// target stays %2F, leading or not).
 func rewriteUpstreamRef(ref, prefix string, target *url.URL) (string, bool) {
-	u, err := url.Parse(strings.TrimSpace(ref))
+	raw := strings.TrimSpace(ref)
+	u, err := url.Parse(raw)
 	if err != nil {
 		return "", false // unparseable: pass through rather than mangle
 	}
@@ -514,14 +524,111 @@ func rewriteUpstreamRef(ref, prefix string, target *url.URL) (string, bool) {
 		u.Scheme, u.Host, u.User = "", "", nil
 	case !strings.HasPrefix(u.Path, "/"):
 		return "", false // relative — already mirrored
+	case isNetworkPathRef(raw):
+		// A foreign host in a spelling net/url reported as a local path. Same rule
+		// as any other foreign host: pass it through untouched.
+		return "", false
 	}
 	if u.Path == "" { // origin-only, e.g. http://localhost:3000?x=1
 		u.Path = "/"
 	}
-	escaped := u.EscapedPath()
-	u.Path = joinURLPath(prefix, u.Path)
-	u.RawPath = joinURLPath(prefix, escaped)
+	// Prefix the escaped form and re-parse it, rather than prefixing Path and RawPath
+	// separately: the two must stay consistent or url.String() silently drops RawPath
+	// and re-canonicalizes, and a re-parse is what net/url itself uses to keep them so.
+	final := strings.TrimRight(prefix, "/") + normalizeEscapedPath(u.EscapedPath())
+	if isNetworkPathRef(final) {
+		// Unreachable for a real tab prefix (always "/v1/webtab/<sid>/<tab>"), which
+		// is exactly why it is asserted rather than assumed: an empty prefix plus an
+		// upstream "/..//evil.com" would otherwise emit a Location the browser reads
+		// as an off-site host — this proxy handing out an open redirect.
+		return "", false
+	}
+	p, err := url.Parse(final)
+	if err != nil {
+		return "", false
+	}
+	u.Path, u.RawPath = p.Path, p.RawPath
 	return u.String(), true // query and fragment ride along untouched
+}
+
+// isAuthoritySlash reports whether c is a slash the browser's URL parser accepts as
+// an authority delimiter for an http(s) URL. Backslash counts: the WHATWG parser
+// folds "\" to "/" for these "special" schemes, so "/\host/x" reaches the same
+// authority state "//host/x" does.
+func isAuthoritySlash(c byte) bool { return c == '/' || c == '\\' }
+
+// isNetworkPathRef reports whether a BROWSER would read ref as naming a HOST rather
+// than a path on the current origin — RFC 3986's network-path reference, which the
+// browser enters on a leading "//" and, for http(s), on any leading run of slashes
+// or backslashes: "///example.com/x" and "/\example.com/x" both navigate to
+// example.com.
+//
+// net/url recognizes only the exact two-slash spelling, filling in Host for it; the
+// longer runs it hands back with an EMPTY host and the whole reference as Path. So
+// an absolute-path test alone sees a local path and prefixes it, turning an upstream
+// "Location: ///accounts.example.com/oauth" into a path on the dev server and
+// stranding an OAuth handoff inside the frame.
+//
+// The test reads the RAW header value because that is the byte string the browser
+// parses. A percent-escape is an ordinary path character to it, not a delimiter, so
+// "/%2Ffoo" is deliberately NOT a network path here even though net/url decodes its
+// Path to "//foo".
+func isNetworkPathRef(ref string) bool {
+	return len(ref) >= 2 && isAuthoritySlash(ref[0]) && isAuthoritySlash(ref[1])
+}
+
+// isSingleDotSegment and isDoubleDotSegment recognize dot segments in the forms a
+// BROWSER resolves. The WHATWG URL parser decodes %2e before classifying a segment,
+// so "%2e%2e" walks up exactly like ".." does. Neither url.ResolveReference nor
+// path.Clean knows that — they compare the literal segment — which is why the rule
+// is spelled out here instead of delegated.
+func isSingleDotSegment(seg string) bool {
+	return seg == "." || strings.EqualFold(seg, "%2e")
+}
+
+func isDoubleDotSegment(seg string) bool {
+	return seg == ".." || strings.EqualFold(seg, ".%2e") ||
+		strings.EqualFold(seg, "%2e.") || strings.EqualFold(seg, "%2e%2e")
+}
+
+// normalizeEscapedPath resolves the "." and ".." segments of an absolute escaped
+// path, the way the browser resolves them when it follows the rewritten header.
+//
+// Doing it BEFORE the prefix goes on is what stops a dot segment from eating the
+// prefix. An upstream "Location: /../login" prefixed verbatim yields
+// "/v1/webtab/<sid>/<tab>/../login"; the browser normalizes that to
+// "/v1/webtab/<sid>/login", which names a different tab — or, far more often, a 404
+// — instead of the upstream's "/login". Normalizing first sends "/login" through
+// the prefix, which is what the upstream meant and what an unproxied browser would
+// have fetched.
+//
+// It walks the ESCAPED path, so a %2F stays an ordinary path character rather than
+// becoming a segment separator.
+func normalizeEscapedPath(escaped string) string {
+	if !strings.HasPrefix(escaped, "/") {
+		return escaped
+	}
+	segments := strings.Split(escaped[1:], "/")
+	out := make([]string, 0, len(segments))
+	for i, seg := range segments {
+		last := i == len(segments)-1
+		switch {
+		case isSingleDotSegment(seg):
+			if last {
+				out = append(out, "") // "/a/." names the directory: keep its slash
+			}
+		case isDoubleDotSegment(seg):
+			if len(out) > 0 {
+				out = out[:len(out)-1] // at root already: ".." has nothing to pop
+			}
+			if last {
+				out = append(out, "")
+			}
+		default:
+			out = append(out, seg)
+		}
+	}
+	return "/" + strings.Join(out, "/")
 }
 
 // sameUpstreamHost reports whether ref names the same origin as the tab's proxied
