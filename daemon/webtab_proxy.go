@@ -64,18 +64,25 @@ func (m *Manager) WebTabTarget(sessionID, tabID string) (string, session.TabKind
 	// created: the dev server behind it is long gone, and the port may now host
 	// something else entirely. Proxying it would make an archived session reach into
 	// a live port on the daemon's machine — the opposite of inert. The tab starts
-	// resolving again the moment a restore flips liveness back.
+	// resolving again the moment a restore begins (its worktree is home by then).
+	//
+	// WebTabServeBlocked, not the settled IsArchived: the fence has to go up when
+	// the archive STARTS, not when it finishes. BeginArchive raises OpArchiving and
+	// only then tears tmux down and moves the worktree, so a gate on LiveArchived
+	// alone would let an already-open iframe keep proxying through that whole
+	// teardown. This route is not serialized with ArchiveSession (a proxied request
+	// must not block behind a worktree move), so the fence lives on the instance.
 	//
 	// Checked before the tab lookup: it is a property of the SESSION, so it holds
 	// however the tab is addressed.
 	//
 	// It fences a VSCODE tab too, for a different reason with the same conclusion:
 	// serving one SPAWNS an editor, and an archived session's worktree has been
-	// moved out to the archive dir. (ensureVSCodeServer refuses archived sessions on
-	// its own as well — this just refuses earlier, before any kind lookup.) The
+	// moved out to the archive dir. (ensureVSCodeServer refuses on its own via
+	// TabSpawnBlocked — this just refuses earlier, before any kind lookup.) The
 	// message stays kind-agnostic because this runs before the kind is known.
-	if instance.IsArchived() {
-		return "", 0, fmt.Errorf("cannot open the tab of archived session %q: it is inert until restored (af sessions restore)", sessionID)
+	if blocked := instance.WebTabServeBlocked(); blocked != nil {
+		return "", 0, fmt.Errorf("cannot open the tab of session %q: %w", sessionID, blocked)
 	}
 	idx, ok := instance.TabIndexByID(tabID)
 	if !ok {

@@ -154,6 +154,14 @@ func (m *Manager) CreateTab(req CreateTabRequest) (string, error) {
 	return tab.Name, nil
 }
 
+// errCloseTabArchived is the refusal CloseTab returns for an archived session.
+// It is shared by the pre-lock fast path and the post-lock gate so a close that
+// loses the race to an archive is indistinguishable — to a CLI user or the web ×
+// — from one that arrived after it: same refusal, same advice, tab intact.
+func errCloseTabArchived(title string) error {
+	return fmt.Errorf("cannot close a tab on archived session %q; restore it first (af sessions restore)", title)
+}
+
 // CloseTab closes a non-agent tab of the target session, kills its tmux
 // session, and persists the shrunk tab list (#960 PR 1). It is the close-side
 // counterpart of CreateTab and mirrors its discipline: find the session, run
@@ -196,8 +204,13 @@ func (m *Manager) CloseTab(req CloseTabRequest) (string, error) {
 	// exact loss the preservation exists to prevent, just moved later. This mirrors
 	// the AddTab side (TabSpawnBlocked), which has refused archived sessions since
 	// #1196: archive is inert in BOTH directions.
+	//
+	// This is the FAST path only — it rejects an already-archived session without
+	// making the caller wait on the op-lock. It is not the real gate: the session
+	// can still archive between here and the lock. The authoritative check is the
+	// post-lock one below.
 	if instance.IsArchived() {
-		return "", fmt.Errorf("cannot close a tab on archived session %q; restore it first (af sessions restore)", title)
+		return "", errCloseTabArchived(title)
 	}
 
 	// Serialize the tab close against archive/kill/restore teardown for this
@@ -218,6 +231,17 @@ func (m *Manager) CloseTab(req CloseTabRequest) (string, error) {
 	m.mu.Unlock()
 	if current != instance || instance.UserKilled() {
 		return "", fmt.Errorf("session %q changed state before tab close could start", title)
+	}
+	// Re-check archived UNDER the lock, because the pointer check above cannot see
+	// an archive: ArchiveSession holds this same op-lock, commits LiveArchived, and
+	// leaves the SAME instance in m.instances (an archived row stays tracked — it is
+	// still listed and restorable). So a close that resolved a live session and then
+	// queued behind an archive arrives here with current == instance and
+	// UserKilled() false — both checks pass — and would delete the web tab the
+	// archive just preserved, then persist the loss. That is the #1809 URL loss
+	// exactly, reached through the race instead of through the front door.
+	if instance.IsArchived() {
+		return "", errCloseTabArchived(title)
 	}
 
 	// Serialize against other create/tab mutations on this repo, mirroring

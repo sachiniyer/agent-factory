@@ -137,6 +137,92 @@ func TestWebTabProxy_RejectsArchivedSession(t *testing.T) {
 	}
 }
 
+// TestWebTabProxy_RejectsWhileArchiveInFlight covers the window the settled
+// LiveArchived gate misses. BeginArchive raises OpArchiving and only THEN tears
+// tmux down and moves the worktree; liveness stays live until CommitArchive lands
+// at the very end. A gate reading only the settled state would keep proxying the
+// preserved loopback URL for the whole teardown, so an iframe left open when the
+// user hit archive goes on reaching a port on the daemon's machine while its
+// session is being dismantled. Terminal streams fence this window via
+// killsInFlight; the proxy route is not serialized with ArchiveSession at all, so
+// the fence has to live on the instance.
+func TestWebTabProxy_RejectsWhileArchiveInFlight(t *testing.T) {
+	const marker = "AF_WEBTAB_ARCHIVING_GATE"
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprint(w, marker)
+	}))
+	defer upstream.Close()
+
+	mux, inst, id, tabID := newWebTabProxyFixtureWithInstance(t, upstream.URL)
+
+	// Live: proxies through — the control.
+	if rec := proxyGet(t, mux, id, tabID, ""); rec.Code != http.StatusOK {
+		t.Fatalf("live web tab: status = %d, want 200 (body: %s)", rec.Code, rec.Body.String())
+	}
+
+	// Mid-archive: liveness is still live, only the op has moved. This is the state
+	// ArchiveSession sits in while tmux comes down and the worktree moves.
+	if err := inst.Transition(session.BeginArchive()); err != nil {
+		t.Fatalf("BeginArchive: %v", err)
+	}
+	if inst.IsArchived() {
+		t.Fatal("fixture invalid: a mid-archive session must not read as settled-archived, or this test proves nothing")
+	}
+	rec := proxyGet(t, mux, id, tabID, "")
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("mid-archive web tab: status = %d, want 404", rec.Code)
+	}
+	if strings.Contains(rec.Body.String(), marker) {
+		t.Fatal("mid-archive web tab: the upstream was proxied; archive must be inert from the moment it starts, not only once it commits")
+	}
+
+	// Committed: still refused, now on the settled state.
+	if err := inst.Transition(session.CommitArchive()); err != nil {
+		t.Fatalf("CommitArchive: %v", err)
+	}
+	rec = proxyGet(t, mux, id, tabID, "")
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("archived web tab: status = %d, want 404", rec.Code)
+	}
+	if body := rec.Body.String(); !strings.Contains(body, "archived") {
+		t.Fatalf("archived web tab: body = %q, want an actionable archived message", body)
+	}
+}
+
+// TestWebTabProxy_ServesDuringRestore pins the deliberate other half of the
+// serve gate: a restore is NOT inert. BeginRestore moves the session to
+// LiveLost + OpRestoring, but both callers (RestoreArchived, undoCommittedArchive)
+// move the worktree home BEFORE that transition, so there is no mid-move window to
+// protect — and the tab served here is the same one the session serves a moment
+// later when the restore completes. Gating it would only blank a pane that is
+// about to work, so the inert predicate stops at archive/kill.
+func TestWebTabProxy_ServesDuringRestore(t *testing.T) {
+	const marker = "AF_WEBTAB_RESTORE_SERVES"
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprint(w, marker)
+	}))
+	defer upstream.Close()
+
+	mux, inst, id, tabID := newWebTabProxyFixtureWithInstance(t, upstream.URL)
+
+	inst.SetStatusForTest(session.Archived)
+	if rec := proxyGet(t, mux, id, tabID, ""); rec.Code != http.StatusNotFound {
+		t.Fatalf("archived web tab: status = %d, want 404", rec.Code)
+	}
+
+	// Restore in flight: liveness Lost + OpRestoring, worktree already home.
+	if err := inst.Transition(session.BeginRestore()); err != nil {
+		t.Fatalf("BeginRestore: %v", err)
+	}
+	rec := proxyGet(t, mux, id, tabID, "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("restoring web tab: status = %d, want 200 (body: %s)", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), marker) {
+		t.Fatalf("restoring web tab: body = %q, want the upstream content", rec.Body.String())
+	}
+}
+
 // TestWebTabProxy_ServesLoopbackTarget is the headline proxy test: a web tab
 // pointing at a loopback HTTP server is reverse-proxied by the daemon, so a
 // same-origin GET /v1/webtab/{id}/{tabId}/ returns the server's content.

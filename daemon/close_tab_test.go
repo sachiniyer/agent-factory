@@ -169,6 +169,79 @@ func TestCloseTab_RejectsArchivedSession(t *testing.T) {
 	}
 }
 
+// TestCloseTab_ArchiveWinningOpLockRaceKeepsWebTab closes the hole the plain
+// archived gate leaves open: that gate runs BEFORE the op-lock, so it only sees a
+// session that was already archived when the close arrived. ArchiveSession holds
+// the same op-lock, commits the archive under it, and leaves the SAME instance in
+// m.instances (an archived row stays tracked — it is still listed and restorable).
+// So a close that resolves a live session and then queues behind an archive finds
+// current == instance and UserKilled() false: every pre-existing post-lock check
+// passes, and it would go on to delete the web tab the archive just preserved and
+// persist the loss — the #1809 URL loss reached through the race rather than the
+// front door.
+func TestCloseTab_ArchiveWinningOpLockRaceKeepsWebTab(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	repoPath := setupControlRepo(t)
+	repo, err := config.RepoFromPath(repoPath)
+	if err != nil {
+		t.Fatalf("RepoFromPath: %v", err)
+	}
+	manager, err := NewManager(config.DefaultConfig())
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+
+	const title = "worker"
+	inst := startedLocalTabInstance(t, manager, repo.ID, repoPath, title, "af_"+title+"_agent")
+	const target = "http://localhost:3000"
+	if _, err := manager.CreateTab(CreateTabRequest{Title: title, RepoID: repo.ID, Kind: "web", URL: target, Name: "webpreview"}); err != nil {
+		t.Fatalf("CreateTab(web): %v", err)
+	}
+
+	key := daemonInstanceKey(repo.ID, title)
+	opLock := manager.opLockFor(key)
+	opLock.Lock()
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := manager.CloseTab(CloseTabRequest{Title: title, RepoID: repo.ID, TabIndex: 1})
+		done <- err
+	}()
+
+	// The close must PARK on the op-lock rather than return: that is what proves it
+	// passed the pre-lock archived check while the session was still live, which is
+	// the only interleaving that can reach the post-lock gate. Without this the test
+	// would pass on the pre-lock check alone and prove nothing.
+	select {
+	case err := <-done:
+		opLock.Unlock()
+		t.Fatalf("CloseTab returned while the op-lock was held (it never raced the archive): %v", err)
+	case <-time.After(150 * time.Millisecond):
+	}
+
+	// The archive commits under the op-lock, leaving the same pointer tracked —
+	// exactly what ArchiveSession does between BeginArchive and releasing the lock.
+	inst.SetStatusForTest(session.Archived)
+	opLock.Unlock()
+
+	err = <-done
+	if err == nil {
+		t.Fatal("CloseTab queued behind an archive returned nil: it deleted the web tab the archive had just preserved")
+	}
+	if !strings.Contains(err.Error(), "archived") {
+		t.Fatalf("CloseTab lost-the-race error = %v, want the same actionable archived rejection an up-front close gets", err)
+	}
+
+	// The preserved URL survived the race — this is the whole point of #1809.
+	tabs := inst.GetTabs()
+	if len(tabs) != 2 {
+		t.Fatalf("archived session tabs = %d, want 2 (agent + the preserved web tab)", len(tabs))
+	}
+	if tabs[1].Kind != session.TabKindWeb || tabs[1].URL != target {
+		t.Fatalf("preserved web tab = {kind:%v url:%q}, want the web tab at %q intact", tabs[1].Kind, tabs[1].URL, target)
+	}
+}
+
 // TestCloseTab_RejectsAgentTabByName verifies the agent tab is unclosable when
 // targeted by its name too, not just by index 0 — the name path is the one
 // `af sessions tab-delete --name` drives (#1021).
