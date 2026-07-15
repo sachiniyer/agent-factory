@@ -1003,6 +1003,9 @@ body {
   outline: 1px dashed var(--af-border);
   outline-offset: -1px;
 }
+.af-dragging-tab .af-pane iframe {
+  pointer-events: none;
+}
 .af-drop-overlay {
   position: absolute;
   display: none;
