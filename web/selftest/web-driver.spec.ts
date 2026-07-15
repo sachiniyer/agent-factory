@@ -1049,6 +1049,89 @@ test("web tab (feat): a surviving web tab that only SHIFTS ordinal is followed, 
   expect(stamp).toBe("af-not-remounted");
 });
 
+// Ordering note: the #1779 test above consumed probe-web's "preview" tab, so the
+// session's tabs here are [Agent, external] and "external" is the non-agent tab these
+// two use as the retained pane.
+
+test("tabs (#1855): re-selecting the SAME session leaves the bar on the tab the pane shows, not Agent", async () => {
+  // Selecting a session asserted `activeTab: 0` about a layout it had already retained:
+  // the tree still pointed at tab N, so the bar highlighted Agent while the pane kept
+  // showing N. Re-selecting the session you are ALREADY on is the shortest proof —
+  // setSession's same-session branch finds nothing changed, so report() (the only
+  // writer of activeTab) never fires and the reset is never undone.
+  await row(page, SESSION_WEB).click();
+  await expect(page.locator(".af-main.af-main-term")).toBeVisible();
+  const tabbar = page.locator(".af-tabbar");
+  const frame = page.locator(".af-term-host .af-pane-host iframe.af-webframe");
+
+  // Park the pane on "external" (index 1) via a REAL index change (0 then 1): clicking
+  // the tab you are already on is itself a no-op report, so it could not establish this
+  // precondition on a desynced store.
+  await tabbar.locator(".af-tab", { hasText: "Agent" }).click();
+  await expect(page.locator(".af-tab.af-tab-active .af-tab-label")).toHaveText("Agent");
+  await tabbar.locator(".af-tab", { hasText: "external" }).click();
+  await expect(page.locator(".af-tab.af-tab-active .af-tab-label")).toHaveText("external");
+  await expect(frame).toHaveCount(1, { timeout: 15_000 });
+
+  // Click the row that is already selected. The pane is untouched (same session, same
+  // tree) — so the bar must still name the tab it is showing.
+  await row(page, SESSION_WEB).click();
+  await expect(frame).toHaveCount(1);
+  await expect(frame).toHaveAttribute("src", WEBTAB_EXTERNAL_URL);
+  await expect(page.locator(".af-tab.af-tab-active .af-tab-label")).toHaveText("external");
+});
+
+test("tabs (#1855): switching away and back keeps activeTab on the visible pane — and the next close doesn't yank it to Agent", async () => {
+  // The issue's own repro. It needs the re-entry to settle on the SAME focused index the
+  // last report carried: report() dedups on (focusedTab, shownTabs, paneCount), so an
+  // identical index makes it early-return and the `activeTab: 0` reset stands
+  // uncorrected. probe-web is re-entered on tab 1 ("external"), so probe-b is parked on
+  // ITS tab 1 to collide.
+  const tabbar = page.locator(".af-tabbar");
+  const frame = page.locator(".af-term-host .af-pane-host iframe.af-webframe");
+
+  // A throwaway terminal tab on probe-web, so there is a tab to close later that is
+  // NEITHER the agent tab nor the active one — closing it must not move the pane.
+  await row(page, SESSION_WEB).click();
+  await expect(page.locator(".af-main.af-main-term")).toBeVisible();
+  await tabbar.locator(".af-tab-new").click();
+  await expect(tabbar.locator(".af-tab")).toHaveCount(3, { timeout: 30_000 });
+
+  // Park probe-web on "external" (index 1) — an index change, so the store is truthful
+  // going in.
+  await tabbar.locator(".af-tab", { hasText: "external" }).click();
+  await expect(page.locator(".af-tab.af-tab-active .af-tab-label")).toHaveText("external");
+  await expect(frame).toHaveCount(1, { timeout: 15_000 });
+
+  // Switch away, and leave probe-b focused on its own tab 1 (+ creates AND attaches),
+  // so the last reported focused tab is 1 — the collision.
+  await row(page, SESSION_B).click();
+  await expect(page.locator(".af-main.af-main-term")).toBeVisible();
+  await tabbar.locator(".af-tab-new").click();
+  await expect(tabbar.locator(".af-tab")).toHaveCount(2, { timeout: 30_000 });
+  await expect(page.locator(".af-tab.af-tab-active .af-tab-label")).toHaveText("Terminal");
+
+  // Back to probe-web: the retained pane still shows "external", so the bar must too.
+  await row(page, SESSION_WEB).click();
+  await expect(frame).toHaveCount(1, { timeout: 15_000 });
+  await expect(frame).toHaveAttribute("src", WEBTAB_EXTERNAL_URL);
+  await expect(page.locator(".af-tab.af-tab-active .af-tab-label")).toHaveText("external");
+
+  // Closing an UNRELATED tab (the throwaway, to the RIGHT of the active one) leaves the
+  // pane where it was. With a stale activeTab the close arithmetic read 0 and re-pointed
+  // the pane at Agent, tearing down the live iframe.
+  await tabbar.locator(".af-tab", { hasText: "Terminal" }).locator(".af-tab-close").click();
+  await expect(tabbar.locator(".af-tab")).toHaveCount(2, { timeout: 30_000 });
+  await expect(page.locator(".af-tab.af-tab-active .af-tab-label")).toHaveText("external");
+  await expect(frame).toHaveCount(1);
+
+  // Restore probe-b's tab set for the flows that follow.
+  await row(page, SESSION_B).click();
+  await expect(tabbar.locator(".af-tab", { hasText: "Terminal" })).toHaveCount(1);
+  await tabbar.locator(".af-tab", { hasText: "Terminal" }).locator(".af-tab-close").click();
+  await expect(tabbar.locator(".af-tab")).toHaveCount(1, { timeout: 30_000 });
+});
+
 test("split panes (feat): logout clears retained trees — a fresh login shows the single-leaf default", async () => {
   // Split A into two panes.
   await row(page, SESSION_A).click();

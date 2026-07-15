@@ -302,11 +302,18 @@ function disconnect(): void {
  *  rail-nav mode. This is the keyboard path (j/k): selecting a row never steals the
  *  keyboard into the terminal — you attach explicitly with Enter. Resetting focus to
  *  "rail" here also clears any stale "terminal" mode left by a since-disposed
- *  terminal, so j/k keep working after the selected session goes away. Selecting a
- *  session always resets the active tab to its agent tab (index 0). */
+ *  terminal, so j/k keep working after the selected session goes away. The active tab
+ *  follows the layout the split view will actually show (settledTab) — a session shown
+ *  before keeps its retained pane, and only one never shown starts on its agent tab. */
 function moveSelection(id: string): void {
   clearTabError();
-  store.set({ selectedId: id, focus: "rail", activeTab: 0 });
+  store.set({
+    selectedId: id,
+    focus: "rail",
+    // Clamped like syncSplit's initialTab, so the store's claim and the pane's binding
+    // are the same statement even if the roster shrank since the tree was retained.
+    activeTab: clampActiveTab(store.get().sessions, id, splitView.settledTab(id)),
+  });
 }
 
 /** The click/Enter path: selects the session AND hands the keyboard to its terminal
@@ -373,7 +380,14 @@ function switchProject(root: string): void {
   const sel = selectedSessionData();
   const keep = sel && sel.worktree?.repo_path === root ? store.get().selectedId : null;
   splitView.blur();
-  store.set({ selectedProject: root, selectedId: keep, focus: "rail", activeTab: 0 });
+  // A KEPT selection keeps its pane too, so its active tab is whatever that pane shows
+  // — not 0, which would desync the bar from it (#1855, same as moveSelection).
+  store.set({
+    selectedProject: root,
+    selectedId: keep,
+    focus: "rail",
+    activeTab: keep ? clampActiveTab(store.get().sessions, keep, splitView.settledTab(keep)) : 0,
+  });
 }
 
 // --- lifecycle actions (modals) --------------------------------------------
@@ -942,7 +956,11 @@ function applySessions(sessions: SessionData[]): void {
       selectedId = null;
     }
   }
-  const activeTab = selectedId === prevSel ? clampActiveTab(sessions, selectedId, store.get().activeTab) : 0;
+  // An unchanged selection keeps its active tab; one the snapshot MOVED (the selected
+  // session was archived/killed, so pickSelection landed elsewhere) takes the tab its
+  // retained layout will settle on rather than asserting 0 (#1855, as moveSelection).
+  const settled = selectedId === prevSel ? store.get().activeTab : splitView.settledTab(selectedId ?? "");
+  const activeTab = clampActiveTab(sessions, selectedId, settled);
   store.set({ sessions, selectedProject, selectedId, activeTab });
 }
 
