@@ -224,7 +224,7 @@ only sessions whose repo root matches the selected project.
 **The rail** mirrors the TUI sidebar. Each row carries the same three signals as
 the TUI:
 
-- a **status dot** (running, waiting on you, hit a usage limit, dead-and-recovering,
+- a **status dot** (waiting on you, hit a usage limit, dead-and-recovering,
   archived),
 - the **title**, with the TUI's `[lost]` / `[deleting]` / `[limit]` / `[remote]`
   prefixes, and
