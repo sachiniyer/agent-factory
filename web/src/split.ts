@@ -42,6 +42,7 @@ import {
   tabsRebound,
   validate,
 } from "./layout.js";
+import { isLoopbackWebUrl, paneAddressUsesOrdinal, webProxyPath } from "./tabaddr.js";
 import { AttachTerminal, type TerminalStatus } from "./terminal.js";
 import { currentXtermTheme } from "./theme.js";
 import { TabKind } from "./types.js";
@@ -91,30 +92,6 @@ function el(tag: string, cls: string): HTMLElement {
   const node = document.createElement(tag);
   node.className = cls;
   return node;
-}
-
-/** Whether a web-tab target points at a loopback host (localhost/127.x/::1) — the
- *  only targets the daemon reverse-proxies. Mirrors session.IsLoopbackWebTarget
- *  (session/weburl.go). A URL that does not parse is treated as non-loopback. */
-export function isLoopbackWebUrl(raw: string): boolean {
-  try {
-    let host = new URL(raw).hostname.toLowerCase();
-    host = host.replace(/^\[|\]$/g, ""); // strip IPv6 brackets
-    return host === "localhost" || host === "::1" || host === "127.0.0.1" || host.startsWith("127.");
-  } catch {
-    return false;
-  }
-}
-
-/** The same-origin daemon proxy path for a loopback web tab, so the iframe hits
- *  the daemon (which shares the machine with the dev server) rather than the
- *  viewer's own machine. The bearer token rides ?access_token= for network peers
- *  (an iframe src can't set the Authorization header); a loopback/tokenless client
- *  sends none. The trailing slash matters — the route requires it, and it makes
- *  the dev app's RELATIVE asset URLs resolve under the proxy prefix. */
-export function webProxyPath(sessionId: string, tabIdx: number, token: string | null): string {
-  const base = `/v1/webtab/${encodeURIComponent(sessionId)}/${tabIdx}/`;
-  return token ? `${base}?access_token=${encodeURIComponent(token)}` : base;
 }
 
 /** The delay before an unresponsive DIRECT external frame reveals its fallback.
@@ -416,15 +393,25 @@ export class SplitView {
         continue;
       }
       const webTarget = this.webTargetAt(leaf.tab);
-      // The identity now living at this leaf's ordinal. A pane is stale when it
-      // differs from what the pane was built against — even at the SAME ordinal
-      // (#1779).
+      // The identity now living at this leaf's ordinal. remapByIdentity has already
+      // moved the leaf to follow its own tab, so a mismatch here means a genuinely
+      // DIFFERENT tab occupies this pane's slot — not merely that ordinals shifted.
       const identity = this.tabIds[leaf.tab] ?? "";
+      const realId = this.tabRealIds[leaf.tab] ?? "";
+      // Rebuild when what the pane ADDRESSES changes — never merely because its tab's
+      // ordinal moved (#1779). A different tab in the slot always rebuilds; a shifted
+      // ordinal rebuilds only when the pane's address actually embeds that ordinal
+      // (see paneAddressUsesOrdinal), which is exactly when the old address would now
+      // point at another tab.
+      const moved = pane.tab !== leaf.tab;
+      const staleAddress = pane.identity !== identity || (moved && paneAddressUsesOrdinal(webTarget, realId));
       if (webTarget !== null) {
-        // A web/iframe tab: mount an iframe instead of an xterm. Rebuild only when
-        // the bound tab, its identity, or its target changed, so a no-op reconcile
-        // never reloads the frame (which would drop the dev server's in-page state).
-        if (pane.term || pane.webUrl !== webTarget || pane.tab !== leaf.tab || pane.identity !== identity) {
+        // A web/iframe tab: mount an iframe instead of an xterm. Rebuilding reloads
+        // the frame and drops the dev server's in-page state, so it happens only on a
+        // real change: a different tab here, a changed target, or a moved PROXIED tab
+        // (whose src is /v1/webtab/{session}/{ordinal}/ and would otherwise proxy the
+        // tab that took its old index).
+        if (pane.term || pane.webUrl !== webTarget || staleAddress) {
           pane.term?.dispose();
           pane.term = null;
           pane.webDispose?.();
@@ -434,8 +421,12 @@ export class SplitView {
           this.mountWebPane(pane, webTarget);
           pane.status = "open";
           this.onPaneStatus(leaf.id, "open");
+        } else if (moved) {
+          // The same tab, merely at a new ordinal, addressed by a URL that does not
+          // encode one: follow it without touching the live frame.
+          pane.tab = leaf.tab;
         }
-      } else if (!pane.term || pane.tab !== leaf.tab || pane.identity !== identity) {
+      } else if (!pane.term || staleAddress) {
         pane.term?.dispose();
         pane.webDispose?.();
         pane.webUrl = null;
@@ -449,11 +440,15 @@ export class SplitView {
         // for an id-less tab, and sending that as ?tab_id= is an unknown id the
         // daemon 404s — breaking a legacy tab that attaches fine by ordinal (#1779).
         // "" is the honest "no id", which makes AttachTerminal fall back to ?tab=.
-        const realId = this.tabRealIds[leaf.tab] ?? "";
         pane.term = new AttachTerminal(pane.host, this.sessionId, this.token, realId, leaf.tab, {
           onStatus: (s) => this.onPaneStatus(leaf.id, s),
           onFocusChange: (f) => this.onPaneFocus(leaf.id, f),
         });
+      } else if (moved) {
+        // The same tab, merely at a new ordinal, streamed by ?tab_id=: the terminal's
+        // captured ordinal is inert (terminal.ts sends tab_id OR tab, never both), so
+        // follow the tab without tearing down a live stream and its scrollback.
+        pane.tab = leaf.tab;
       }
       pane.container.classList.toggle("af-pane-multi", multi);
       pane.label.textContent = `Tab ${leaf.tab + 1}`;

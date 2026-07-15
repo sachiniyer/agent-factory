@@ -837,6 +837,58 @@ test("web tab (feat): a tab with no target URL renders a clean fallback, not a b
   await expect(page.locator(".af-app")).toBeVisible();
 });
 
+test("web tab (feat): a surviving web tab that only SHIFTS ordinal is followed, not remounted (#1779)", async () => {
+  // Ordering note: this consumes probe-web's "preview" tab, so it must stay AFTER the
+  // web-tab tests above that rely on it.
+  //
+  // A pane shows the EXTERNAL web tab (index 2). A lower tab is closed, so the tab it
+  // shows shifts to index 1. Nothing about that tab changed — and an external tab's
+  // iframe src is the target URL, which encodes no ordinal — so the frame must be
+  // FOLLOWED in place. Remounting would reload it and drop its in-page state.
+  //
+  // (A PROXIED tab is the opposite case and MUST remount: its src is
+  // /v1/webtab/{session}/{ordinal}/, so following it in place would silently proxy
+  // whichever tab took the old index. paneAddressUsesOrdinal draws that line; the unit
+  // tests pin both sides.)
+  await row(page, SESSION_WEB).click();
+  await expect(page.locator(".af-main.af-main-term")).toBeVisible();
+  const tabbar = page.locator(".af-tabbar");
+  await expect(tabbar.locator(".af-tab", { hasText: "preview" })).toHaveCount(1, { timeout: 15_000 });
+
+  await tabbar.locator(".af-tab", { hasText: "external" }).click();
+  const frame = page.locator(".af-term-host .af-pane-host iframe.af-webframe");
+  await expect(frame).toHaveCount(1, { timeout: 15_000 });
+  await expect(frame).toHaveAttribute("src", WEBTAB_EXTERNAL_URL);
+
+  // Stamp the live iframe. An expando rides the DOM node itself, so it survives if and
+  // only if this exact element is still mounted — a remount builds a fresh one.
+  await page.evaluate(() => {
+    const f = document.querySelector(".af-term-host .af-pane-host iframe.af-webframe") as
+      | (HTMLIFrameElement & { __afStamp?: string })
+      | null;
+    if (f) {
+      f.__afStamp = "af-not-remounted";
+    }
+  });
+
+  // Close the LOWER "preview" tab: the shown external tab shifts from index 2 to 1.
+  await tabbar.locator(".af-tab", { hasText: "preview" }).locator(".af-tab-close").click();
+  await expect(tabbar.locator(".af-tab", { hasText: "preview" })).toHaveCount(0, { timeout: 30_000 });
+  // The shift really happened — without this the assertion below would prove nothing.
+  await expect(tabbar.locator(".af-tab")).toHaveCount(2, { timeout: 30_000 });
+
+  // The pane still shows the SAME tab, through the SAME iframe element.
+  await expect(frame).toHaveCount(1);
+  await expect(frame).toHaveAttribute("src", WEBTAB_EXTERNAL_URL);
+  const stamp = await page.evaluate(() => {
+    const f = document.querySelector(".af-term-host .af-pane-host iframe.af-webframe") as
+      | (HTMLIFrameElement & { __afStamp?: string })
+      | null;
+    return f?.__afStamp ?? null;
+  });
+  expect(stamp).toBe("af-not-remounted");
+});
+
 test("split panes (feat): logout clears retained trees — a fresh login shows the single-leaf default", async () => {
   // Split A into two panes.
   await row(page, SESSION_A).click();

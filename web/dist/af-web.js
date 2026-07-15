@@ -7185,6 +7185,27 @@ function resolveDragTab(drag, tabRealIds, tabIds, tabCount) {
   return tab;
 }
 
+// src/tabaddr.ts
+function isLoopbackWebUrl(raw) {
+  try {
+    let host = new URL(raw).hostname.toLowerCase();
+    host = host.replace(/^\[|\]$/g, "");
+    return host === "localhost" || host === "::1" || host === "127.0.0.1" || host.startsWith("127.");
+  } catch {
+    return false;
+  }
+}
+function webProxyPath(sessionId, tabIdx, token2) {
+  const base = `/v1/webtab/${encodeURIComponent(sessionId)}/${tabIdx}/`;
+  return token2 ? `${base}?access_token=${encodeURIComponent(token2)}` : base;
+}
+function paneAddressUsesOrdinal(webTarget, realId) {
+  if (webTarget !== null) {
+    return webTarget !== "" && isLoopbackWebUrl(webTarget);
+  }
+  return realId === "";
+}
+
 // src/terminal.ts
 var import_addon_fit = __toESM(require_addon_fit(), 1);
 var import_xterm = __toESM(require_xterm(), 1);
@@ -7644,19 +7665,6 @@ function el(tag, cls) {
   node.className = cls;
   return node;
 }
-function isLoopbackWebUrl(raw) {
-  try {
-    let host = new URL(raw).hostname.toLowerCase();
-    host = host.replace(/^\[|\]$/g, "");
-    return host === "localhost" || host === "::1" || host === "127.0.0.1" || host.startsWith("127.");
-  } catch {
-    return false;
-  }
-}
-function webProxyPath(sessionId, tabIdx, token2) {
-  const base = `/v1/webtab/${encodeURIComponent(sessionId)}/${tabIdx}/`;
-  return token2 ? `${base}?access_token=${encodeURIComponent(token2)}` : base;
-}
 function webFallbackMs() {
   const override = globalThis.__afWebtabFallbackMs;
   return typeof override === "number" ? override : 2500;
@@ -7891,8 +7899,11 @@ var SplitView = class {
       }
       const webTarget = this.webTargetAt(leaf.tab);
       const identity = this.tabIds[leaf.tab] ?? "";
+      const realId = this.tabRealIds[leaf.tab] ?? "";
+      const moved = pane.tab !== leaf.tab;
+      const staleAddress = pane.identity !== identity || moved && paneAddressUsesOrdinal(webTarget, realId);
       if (webTarget !== null) {
-        if (pane.term || pane.webUrl !== webTarget || pane.tab !== leaf.tab || pane.identity !== identity) {
+        if (pane.term || pane.webUrl !== webTarget || staleAddress) {
           pane.term?.dispose();
           pane.term = null;
           pane.webDispose?.();
@@ -7902,8 +7913,10 @@ var SplitView = class {
           this.mountWebPane(pane, webTarget);
           pane.status = "open";
           this.onPaneStatus(leaf.id, "open");
+        } else if (moved) {
+          pane.tab = leaf.tab;
         }
-      } else if (!pane.term || pane.tab !== leaf.tab || pane.identity !== identity) {
+      } else if (!pane.term || staleAddress) {
         pane.term?.dispose();
         pane.webDispose?.();
         pane.webUrl = null;
@@ -7911,11 +7924,12 @@ var SplitView = class {
         pane.tab = leaf.tab;
         pane.identity = identity;
         pane.status = "connecting";
-        const realId = this.tabRealIds[leaf.tab] ?? "";
         pane.term = new AttachTerminal(pane.host, this.sessionId, this.token, realId, leaf.tab, {
           onStatus: (s) => this.onPaneStatus(leaf.id, s),
           onFocusChange: (f) => this.onPaneFocus(leaf.id, f)
         });
+      } else if (moved) {
+        pane.tab = leaf.tab;
       }
       pane.container.classList.toggle("af-pane-multi", multi);
       pane.label.textContent = `Tab ${leaf.tab + 1}`;

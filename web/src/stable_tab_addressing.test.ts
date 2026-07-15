@@ -20,6 +20,7 @@ import { tabBarSig, tabIdentity, tabRealId } from "./ui.js";
 import type { AppState } from "./ui.js";
 import type { SessionData } from "./types.js";
 import { leaves, remapByIdentity, resolveDragTab, tabsRebound } from "./layout.js";
+import { paneAddressUsesOrdinal } from "./tabaddr.js";
 
 // --- tabRealId: the real id, never a synthesized one -----------------------
 
@@ -231,4 +232,68 @@ test("a legacy leaf with a synthesized identity still follows a shift", () => {
   const ids = ["0:agent", "1:shell"];
   const tree = { kind: "leaf", id: "L1", tab: 2 } as const;
   assert.equal(leaves(remapByIdentity(tree, prevIds, ids))[0].tab, 1);
+});
+
+// --- paneAddressUsesOrdinal: rebuild iff the pane's ADDRESS would change -----
+
+test("an id-addressed terminal's ordinal is inert — a move needs no rebuild", () => {
+  // terminal.ts sends ?tab_id= OR ?tab=, never both, so a real id makes the captured
+  // ordinal dead weight: the daemon resolves the id to wherever the tab now sits.
+  assert.equal(paneAddressUsesOrdinal(null, "id-shell"), false);
+});
+
+test("a LEGACY terminal's ordinal IS its address — a move must rebuild", () => {
+  assert.equal(paneAddressUsesOrdinal(null, ""), true);
+});
+
+test("a PROXIED web tab's ordinal is its address, stable id or not — a move must rebuild", () => {
+  // The correction to the suggested "id-addressed ⇒ never remount" rule. A loopback
+  // preview is fetched through /v1/webtab/{session}/{ordinal}/, which is ordinal-keyed
+  // no matter how stable the tab's id is. Following it without a rebuild would leave
+  // the iframe proxying whatever tab took the old index — trading a cosmetic reload
+  // for an actual misroute.
+  assert.equal(paneAddressUsesOrdinal("http://localhost:3000", "id-web"), true);
+  assert.equal(paneAddressUsesOrdinal("http://127.0.0.1:8080/app", "id-web"), true);
+  assert.equal(paneAddressUsesOrdinal("http://[::1]:5173", "id-web"), true);
+});
+
+test("an EXTERNAL web tab's src encodes no ordinal — a move is followed, not remounted", () => {
+  // This is the case the P3 is really about: the iframe src is the target URL itself,
+  // so a shifted ordinal cannot invalidate it and reloading would drop in-page state
+  // for nothing.
+  assert.equal(paneAddressUsesOrdinal("https://example.com/docs", "id-web"), false);
+  assert.equal(paneAddressUsesOrdinal("https://example.com/docs", ""), false);
+});
+
+test("a web tab with NO target has no ordinal-bearing address", () => {
+  // It renders a fallback, not a proxied frame — nothing to invalidate.
+  assert.equal(paneAddressUsesOrdinal("", "id-web"), false);
+});
+
+test("an unparseable web target is treated as non-loopback (never proxied)", () => {
+  assert.equal(paneAddressUsesOrdinal("not a url", "id-web"), false);
+});
+
+// --- the end-to-end property: a shifted tab is still addressed by ITS id -----
+
+test("after a cross-client close+create, the pane's stream id is still the tab it shows", () => {
+  // The user-visible contract behind remapByIdentity, asserted on the value that
+  // actually reaches the wire: pane shows B; another client closes lower tab A and
+  // creates C; the pane must end up addressing B's stable id — NOT C's, which is what
+  // the pre-fix code bound because it resolved by the leaf's stale ordinal.
+  const prevIds = ["id-agent", "id-a", "id-b"];
+  const ids = ["id-agent", "id-b", "id-c"];
+  const realIdsNow = ["id-agent", "id-b", "id-c"];
+
+  const settled = remapByIdentity({ kind: "leaf", id: "L1", tab: 2 }, prevIds, ids);
+  const leaf = leaves(settled)[0];
+
+  // What reconcile would hand AttachTerminal as ?tab_id= for this pane:
+  assert.equal(realIdsNow[leaf.tab], "id-b", "input must be routed to tab B — the tab the pane shows");
+  assert.notEqual(realIdsNow[leaf.tab], "id-c", "binding C's id here is the misroute this PR ends");
+
+  // And because the identity at the settled ordinal still matches what the pane was
+  // built against, the terminal is FOLLOWED rather than torn down and re-dialled.
+  assert.equal(ids[leaf.tab], "id-b");
+  assert.equal(paneAddressUsesOrdinal(null, realIdsNow[leaf.tab]), false, "an id-addressed pane need not rebuild to follow");
 });
