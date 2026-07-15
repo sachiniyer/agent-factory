@@ -535,7 +535,11 @@ export class SplitView {
     const bar = el("div", "af-webpane-bar");
     const reload = document.createElement("button");
     reload.type = "button";
-    reload.className = "af-webpane-reload";
+    // Reload and open are the same KIND of control — a quiet secondary action on a
+    // thin bar — so they share the app's ghost idiom (.af-ghost, as used by the
+    // modal/terminal/task actions) and differ only in their glyph. The semantic
+    // .af-webpane-* class stays as the identity hook for CSS and the driver test.
+    reload.className = "af-ghost af-webpane-reload";
     reload.title = "Reload";
     reload.setAttribute("aria-label", "Reload web tab");
     reload.textContent = "↻"; // ↻
@@ -543,11 +547,11 @@ export class SplitView {
     urlText.textContent = target || "(no URL)";
     urlText.title = target;
     const open = document.createElement("a");
-    open.className = "af-webpane-open";
+    open.className = "af-ghost af-webpane-open";
     open.href = openHref;
     open.target = "_blank";
     open.rel = "noopener noreferrer";
-    open.textContent = "open ↗"; // ↗
+    open.textContent = "Open ↗"; // ↗
     bar.append(reload, urlText, open);
 
     const frame = document.createElement("iframe");

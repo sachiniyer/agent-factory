@@ -261,7 +261,7 @@ func (s *TaskPane) renderEditMode() string {
 	if s.editTriggerIsWatch {
 		s.editPrompt.Placeholder = "(optional) {{line}} expands to the event line"
 	} else {
-		s.editPrompt.Placeholder = "Enter task prompt..."
+		s.editPrompt.Placeholder = "Enter task prompt…"
 	}
 
 	label := func(text string) string {

@@ -44,7 +44,7 @@ func enterScrollWithStaleViewport(p *TabPane, inst *session.Instance) {
 }
 
 // TestPreviewScrollModeThenDeletingFallback: a same-instance Running → Deleting
-// transition while scrolling must show "Tearing down session...", not the
+// transition while scrolling must show "Tearing down session…", not the
 // stale viewport (#940 / #920).
 func TestPreviewScrollModeThenDeletingFallback(t *testing.T) {
 	log.Initialize(false)
@@ -71,7 +71,7 @@ func TestPreviewScrollModeThenDeletingFallback(t *testing.T) {
 		"stale viewport content must be cleared on fallback")
 
 	rendered := p.String()
-	require.Contains(t, rendered, "Tearing down session...",
+	require.Contains(t, rendered, "Tearing down session…",
 		"rendered frame must show the teardown fallback, not stale scroll content")
 	require.NotContains(t, rendered, staleScrollMarker,
 		"rendered frame must not be the stale viewport")
@@ -107,7 +107,7 @@ func TestPreviewScrollModeThenNilInstanceFallback(t *testing.T) {
 }
 
 // TestPreviewScrollModeThenLoadingFallback: a Loading instance while scrolling
-// must show "Setting up workspace...", not the stale viewport.
+// must show "Setting up workspace…", not the stale viewport.
 func TestPreviewScrollModeThenLoadingFallback(t *testing.T) {
 	log.Initialize(false)
 	defer log.Close()
@@ -131,7 +131,7 @@ func TestPreviewScrollModeThenLoadingFallback(t *testing.T) {
 	require.NotContains(t, p.viewport.View(), staleScrollMarker)
 
 	rendered := p.String()
-	require.Contains(t, rendered, "Setting up workspace...",
+	require.Contains(t, rendered, "Setting up workspace…",
 		"rendered frame must show the Loading fallback, not stale scroll content")
 	require.NotContains(t, rendered, staleScrollMarker)
 }
@@ -156,10 +156,10 @@ func TestPreviewScrollEntryDeletingShowsTeardownFallback(t *testing.T) {
 		"deleting agent tab must not enter empty scroll mode")
 	require.True(t, p.content.fallback,
 		"deleting agent tab must enter fallback state when scrolling starts")
-	require.Contains(t, p.content.text, "Tearing down session...")
+	require.Contains(t, p.content.text, "Tearing down session…")
 	require.NotContains(t, p.viewport.View(), scrollFooter(),
 		"scroll footer must not be the only visible content")
-	require.Contains(t, p.String(), "Tearing down session...",
+	require.Contains(t, p.String(), "Tearing down session…",
 		"rendered frame must show the teardown fallback")
 }
 

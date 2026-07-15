@@ -8003,7 +8003,7 @@ var SplitView = class {
     const bar = el("div", "af-webpane-bar");
     const reload = document.createElement("button");
     reload.type = "button";
-    reload.className = "af-webpane-reload";
+    reload.className = "af-ghost af-webpane-reload";
     reload.title = "Reload";
     reload.setAttribute("aria-label", "Reload web tab");
     reload.textContent = "\u21BB";
@@ -8011,11 +8011,11 @@ var SplitView = class {
     urlText.textContent = target || "(no URL)";
     urlText.title = target;
     const open = document.createElement("a");
-    open.className = "af-webpane-open";
+    open.className = "af-ghost af-webpane-open";
     open.href = openHref;
     open.target = "_blank";
     open.rel = "noopener noreferrer";
-    open.textContent = "open \u2197";
+    open.textContent = "Open \u2197";
     bar.append(reload, urlText, open);
     const frame = document.createElement("iframe");
     frame.className = "af-webframe";
@@ -8859,14 +8859,28 @@ var AppShell = class {
   lastLive = null;
   lastKb = null;
   lastError = null;
+  // The last value written to document.title, so an unrelated update doesn't
+  // reassign it (see syncDocumentTitle).
+  lastDocTitle = null;
   // Whether the main pane has been rendered at least once. The constructor leaves it
   // an empty <section>, so the FIRST update must render it even when nothing is
   // selected (selectedId is null before AND after that first update, so the
   // selection-changed guard alone wouldn't fire) — otherwise the pane is blank on
   // load until a select-then-deselect. (#1592 Phase 5 PR9)
   mainRendered = false;
+  /** Points the browser tab at what is on screen, so a pinned/backgrounded tab and the
+   *  history entry name the session and project rather than a static "Agent Factory".
+   *  Assigns only on a real change (a rename, a selection, or a project switch). */
+  syncDocumentTitle(state) {
+    const title = documentTitle(state);
+    if (this.lastDocTitle !== title) {
+      this.lastDocTitle = title;
+      document.title = title;
+    }
+  }
   /** Applies the latest state, touching only what changed. */
   update(state) {
+    this.syncDocumentTitle(state);
     const kb = state.selectedId && state.focus === "terminal" ? "terminal" : "rail";
     if (this.lastKb !== kb) {
       this.lastKb = kb;
@@ -9154,6 +9168,20 @@ var AppShell = class {
     this.headMeta.className = `af-term-meta af-term-${state.termStatus}`;
   }
 };
+var APP_NAME = "Agent Factory";
+function documentTitle(state) {
+  const sel = selectedSession(state);
+  const root2 = sel?.worktree?.repo_path ?? state.selectedProject;
+  const parts = [];
+  if (sel && sel.title !== "") {
+    parts.push(sel.title);
+  }
+  if (root2) {
+    parts.push(projectName(root2));
+  }
+  const lead = parts.join(" \u2014 ");
+  return lead === "" ? APP_NAME : `${lead} \xB7 ${APP_NAME}`;
+}
 function selectedSession(state) {
   return state.selectedId ? state.sessions.find((s) => s.id === state.selectedId) ?? null : null;
 }
