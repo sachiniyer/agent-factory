@@ -250,15 +250,51 @@ func (i *Instance) ShownArchived() bool {
 // of which had a reason to check for archived before.
 //
 // Unlike ShownArchived (a RENDER predicate, which yields the row to the live
-// section the moment a restore starts, #1210) this reads the liveness axis ALONE,
-// so the gate stays shut across the whole restore window — liveness stays
-// LiveArchived until the reconcile's Archived→live rebuild lands a fresh started
-// instance. A gate that opened at OpRestoring would serve a tab whose worktree is
-// mid-move.
+// section the moment a restore starts, #1210) this reads the liveness axis ALONE.
+// It is therefore SETTLED-state only: it does not cover a session mid-archive
+// (OpArchiving, liveness still live) — see WebTabServeBlocked for the serve-side
+// gate that does.
+//
+// It deliberately opens again the moment a restore begins. BeginRestore moves the
+// session to LiveLost + OpRestoring, but both callers (RestoreArchived and
+// undoCommittedArchive) move the worktree back home BEFORE that transition, so an
+// OpRestoring session's worktree is already in place — there is no mid-move window
+// to protect, and the tab it serves is the same one it will serve a moment later
+// when the restore completes.
 func (i *Instance) IsArchived() bool {
 	i.mu.RLock()
 	defer i.mu.RUnlock()
 	return i.liveness == LiveArchived
+}
+
+// WebTabServeBlocked is the serve-side analogue of TabSpawnBlocked: "may this
+// session's preserved web tab be resolved and proxied right now?" It answers no
+// for a settled archive AND for the teardown window that precedes one. The
+// returned error is a REASON fragment, not a sentence: the proxy prefixes it with
+// the session it could not serve, so the two read as one message.
+//
+// The in-flight ops matter here for the same reason they matter to a tab spawn.
+// BeginArchive raises OpArchiving BEFORE tmux comes down and the worktree moves,
+// and leaves liveness live until CommitArchive lands at the very end (#1195 Phase
+// 2d). A gate reading only the settled LiveArchived would keep proxying a
+// preserved loopback URL throughout that teardown — an iframe that was open when
+// the user hit archive would go on reaching a port on the daemon's machine while
+// the session it belongs to is being dismantled. Terminal streams already fence
+// this window via killsInFlight; the proxy route is not serialized with
+// ArchiveSession at all, so it needs the fence on the instance itself.
+//
+// OpKilling rides along for the same reason: a session being removed must not
+// serve. OpRestoring deliberately does NOT — see IsArchived.
+func (i *Instance) WebTabServeBlocked() error {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	if i.liveness == LiveArchived {
+		return fmt.Errorf("it is archived and inert until restored (af sessions restore)")
+	}
+	if i.inFlightOp == OpArchiving || i.inFlightOp == OpKilling {
+		return fmt.Errorf("it is being archived or removed")
+	}
+	return nil
 }
 
 // IsCreating reports whether a create is in flight (the render/gate replacement

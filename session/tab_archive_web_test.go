@@ -111,3 +111,57 @@ func TestArchiveTeardown_AgentOnlyUnchanged(t *testing.T) {
 	assert.Equal(t, TabKindAgent, tabs[0].Kind)
 	assert.NotNil(t, tabs[0].tmux, "the agent tab keeps its tmux name-holder for a rollback Recover")
 }
+
+// TestWebTabServeBlocked_CoversTeardownNotRestore pins the exact shape of the
+// serve-side inert window, both halves of which are deliberate.
+//
+// It is BROADER than the settled LiveArchived on the teardown side: BeginArchive
+// raises OpArchiving before tmux comes down and the worktree moves, and commits
+// the archive only at the end, so a settled-only gate would serve a preserved
+// loopback URL throughout the teardown.
+//
+// It is deliberately NARROWER on the restore side: BeginRestore moves the session
+// to LiveLost + OpRestoring, but both callers move the worktree home BEFORE that
+// transition, so a restoring session's worktree is already in place and the tab it
+// serves is the one it will serve a moment later anyway. Blocking there would only
+// blank a pane that is about to work.
+func TestWebTabServeBlocked_CoversTeardownNotRestore(t *testing.T) {
+	log.Initialize(false)
+	defer log.Close()
+
+	for _, tc := range []struct {
+		name    string
+		arrange func(i *Instance)
+		blocked bool
+		reason  string
+	}{
+		{"live", func(*Instance) {}, false, "a live session serves its web tab"},
+		{"mid-archive", func(i *Instance) {
+			require.NoError(t, i.Transition(BeginArchive()))
+		}, true, "archive must be inert from the moment it starts, not only once it commits"},
+		{"archived", func(i *Instance) {
+			require.NoError(t, i.Transition(BeginArchive()))
+			require.NoError(t, i.Transition(CommitArchive()))
+		}, true, "a settled archive is inert"},
+		{"restoring", func(i *Instance) {
+			require.NoError(t, i.Transition(BeginArchive()))
+			require.NoError(t, i.Transition(CommitArchive()))
+			require.NoError(t, i.Transition(BeginRestore()))
+		}, false, "the worktree is home before OpRestoring is raised, so serving is safe"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			inst := startedMockInstance(t, "af_serve_gate_"+tc.name)
+			_, err := inst.AddWebTab("http://localhost:3000", "webpreview")
+			require.NoError(t, err)
+			tc.arrange(inst)
+
+			err = inst.WebTabServeBlocked()
+			if tc.blocked {
+				require.Error(t, err, tc.reason)
+				assert.Contains(t, err.Error(), "archived", "the refusal must name archive so the proxy message stays actionable")
+			} else {
+				require.NoError(t, err, tc.reason)
+			}
+		})
+	}
+}
