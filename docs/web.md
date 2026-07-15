@@ -350,6 +350,9 @@ af sessions tab-create <title> --kind web --port 5173
 # any URL (localhost or external)
 af sessions tab-create <title> --kind web --url http://localhost:3000
 af sessions tab-create <title> --kind web --url https://example.com/docs
+
+# a target may point at a specific page, not just a server root
+af sessions tab-create <title> --kind web --url http://localhost:8899/viewer.html
 ```
 
 How the target is rendered depends on whether it is **local** or **external**:
@@ -381,6 +384,21 @@ UI or open in a browser") — a terminal can't render a browser. Tab navigation
     them through the proxy — configure the dev server with a matching base path
     (e.g. Vite's `base`) or serve relative asset URLs. WebSocket-based hot reload
     is proxied on a best-effort basis.
+
+    A target that carries a **path** (`http://localhost:8899/viewer.html`) is
+    treated as a **document**, exactly as a browser treats the page a link points
+    at: the tab's root serves that page, and its relative assets resolve next to
+    it (`style.css` → `/style.css`, `assets/x.css` → `/assets/x.css`). To make
+    relative assets resolve *beneath* a directory instead, give the target a
+    trailing slash (`http://localhost:8899/app/` → `assets/x.css` becomes
+    `/app/assets/x.css`).
+
+    The target's **directory** is what the tab's root maps onto, so a target
+    nested in a subdirectory (`…/app/viewer.html`) reaches its siblings and
+    descendants but **not its parents**: a `../shared.css` link, or a cookie the
+    app scopes to `Path=/app`, resolves above the tab's root and won't find the
+    proxy. Point the tab at a target whose directory contains everything the page
+    needs (commonly the server root) if the preview needs either.
 
     Over a **token-protected** network listener, iframe sub-resource requests are
     kept authorized via a path-scoped cookie; if a preview loads only partially
