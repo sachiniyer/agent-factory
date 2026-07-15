@@ -42,17 +42,6 @@ func (b *startBackend) PreviewFullHistory(*session.Instance) (string, error) {
 	return "ready\n❯", nil
 }
 
-func (b *startBackend) Attach(*session.Instance) (chan struct{}, error) {
-	ch := make(chan struct{})
-	close(ch)
-	return ch, nil
-}
-func (b *startBackend) AttachTerminal(*session.Instance, int) (chan struct{}, error) {
-	ch := make(chan struct{})
-	close(ch)
-	return ch, nil
-}
-
 func (b *startBackend) HasUpdated(*session.Instance) (bool, bool, string) { return false, false, "" }
 func (b *startBackend) SendPromptCommand(_ *session.Instance, prompt string) error {
 	b.sentPrompt = prompt

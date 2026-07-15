@@ -552,19 +552,6 @@ func (b *dockerBackend) PreviewFullHistory(i *Instance) (string, error) {
 	return i.AgentServer().Preview(0, true)
 }
 
-// Attach/AttachTerminal: a docker session attaches CLIENT-side over the WS PTY
-// stream (the daemon proxies the container's stream), exactly like a local
-// session — the client's attach dispatch branches on Capabilities().Workspace and
-// never reaches the backend. These satisfy the interface with an explicit
-// routing-invariant error rather than a silent no-op.
-func (b *dockerBackend) Attach(*Instance) (chan struct{}, error) {
-	return nil, fmt.Errorf("docker sessions attach client-side over the WS PTY stream, not through the backend")
-}
-
-func (b *dockerBackend) AttachTerminal(*Instance, int) (chan struct{}, error) {
-	return nil, fmt.Errorf("docker terminal tabs attach client-side over the WS PTY stream, not through the backend")
-}
-
 func (b *dockerBackend) HasUpdated(i *Instance) (updated bool, hasPrompt bool, content string) {
 	obs, err := i.AgentServer().Snapshot()
 	if err != nil {

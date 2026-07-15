@@ -307,19 +307,6 @@ func (b *HookBackend) PreviewFullHistory(i *Instance) (string, error) {
 	return i.AgentServer().Preview(0, true)
 }
 
-// Attach/AttachTerminal: a hook session attaches CLIENT-side over the WS PTY
-// stream (the daemon proxies the sandbox's stream), exactly like a docker/ssh or
-// local session — the client's attach dispatch branches on
-// Capabilities().Workspace and never reaches the backend. These satisfy the
-// interface with an explicit routing-invariant error rather than a silent no-op.
-func (b *HookBackend) Attach(*Instance) (chan struct{}, error) {
-	return nil, fmt.Errorf("hook sessions attach client-side over the WS PTY stream, not through the backend")
-}
-
-func (b *HookBackend) AttachTerminal(*Instance, int) (chan struct{}, error) {
-	return nil, fmt.Errorf("hook terminal tabs attach client-side over the WS PTY stream, not through the backend")
-}
-
 func (b *HookBackend) HasUpdated(i *Instance) (updated bool, hasPrompt bool, content string) {
 	obs, err := i.AgentServer().Snapshot()
 	if err != nil {

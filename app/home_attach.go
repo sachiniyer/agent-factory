@@ -14,10 +14,10 @@ import (
 // remoteDetachTerminalReassert re-establishes the terminal modes bubbletea
 // set at startup (see Run: WithAltScreen + WithMouseCellMotion, plus the
 // hidden cursor and the bracketed paste bubbletea enables by default) after a
-// remote attach stream has scribbled over them. The hook backend's neutral
-// restore (session.hookAttachTerminalRestore) hands the terminal back on the
-// MAIN screen with the cursor visible and all reporting modes off — correct
-// for the CLI attach path, but not the state this TUI runs in.
+// remote attach stream has scribbled over them. The attach driver's neutral
+// restore hands the terminal back on the MAIN screen with the cursor visible
+// and all reporting modes off — correct for the CLI attach path, but not the
+// state this TUI runs in.
 //
 // Hand-rolled rather than bubbletea-native, for two reasons (#845):
 //   - bubbletea cannot re-assert state it believes is already set: the

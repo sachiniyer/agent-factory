@@ -24,7 +24,6 @@
 package store
 
 import (
-	"errors"
 	"fmt"
 	"sort"
 	"sync/atomic"
@@ -276,21 +275,6 @@ func (p *Projection) KillInstance(target *session.Instance) error {
 	p.instances = append(p.instances[:idx], p.instances[idx+1:]...)
 	p.bump()
 	return nil
-}
-
-// AttachInstance attaches to the given instance by pointer identity, but only
-// if it is still present in the projection. Deferred attach flows — the
-// first-time attach help screen, whose onDismiss callback runs after the
-// overlay is dismissed — must capture the instance at key-press time and
-// attach through this method rather than re-reading the live selection: a
-// background refresh can drift the selection onto a different instance while
-// the help overlay is open, so a selection-based attach would connect to the
-// wrong session (#716).
-func (p *Projection) AttachInstance(target *session.Instance) (chan struct{}, error) {
-	if target == nil || !p.ContainsInstance(target) {
-		return nil, errors.New("instance no longer exists")
-	}
-	return target.Attach()
 }
 
 // ReplaceInstance swaps an existing instance for replacement, re-pointing the
