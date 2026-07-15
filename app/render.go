@@ -126,13 +126,75 @@ func (m *home) tasksOverlayContentRect() layout.Rect {
 	return m.modalContentRect(hooksOverlayStyle, m.preferredOverlayWidth(52), m.preferredOverlayHeight())
 }
 
+// modalContentRect sizes a pane-hosted modal — the tasks manager and the hooks
+// editor, the two overlays that frame an existing pane instead of being a
+// ui/overlay type.
+//
+// Presentation is deliberately two-mode (#1821):
+//
+//   - Beside the rail (default): the modal keeps its preferred size and
+//     PlaceOverlay centers it over the frame, exactly like every other modal.
+//   - Full-screen: when the modal can no longer fit beside the rail, it takes
+//     the whole terminal instead.
+//
+// The width floor is what forces the switch. preferredOverlayWidth never
+// yields below its minimum, because a task form narrower than that stops being
+// usable — but that floor ignores the terminal, so on a narrow one the box
+// ends up wider than the workspace, the centered modal lands ON the rail, and
+// the only rail left showing is an unreadable sliver down the side. At 60x20 a
+// 54-column box centers at x=3 over a 22-column rail: 19 of its 22 columns are
+// painted over and the survivors are stubs like `▸`, `Au`, `Pr` (#1821).
+// Full-screen is the deliberate presentation the issue asks for instead — the
+// rail is covered cleanly and completely, no fragments, and the form gets
+// every column the terminal has.
+//
+// Rail-AWARE placement (keeping the modal strictly right of the rail at every
+// size) is deliberately NOT what this does. No overlay here is rail-aware:
+// PlaceOverlay centers over the whole frame, so every modal overlaps the rail
+// once it is wide enough — the narrow ones just don't get wide enough to show
+// it. Making this one modal dodge the rail would single it out for no gain the
+// issue asked for.
 func (m *home) modalContentRect(style lipgloss.Style, preferredW, preferredH int) layout.Rect {
+	if m.modalGoesFullScreen(style, preferredW) {
+		// A non-positive preferred dimension means "use all available space",
+		// so the frame lands on exactly termWidth x termHeight.
+		preferredW, preferredH = 0, 0
+	}
 	return layout.FitContentRect(
 		layout.Rect{W: preferredW, H: preferredH},
 		layout.Rect{W: m.termWidth, H: m.termHeight},
 		style.GetHorizontalBorderSize(),
 		style.GetVerticalBorderSize(),
 	)
+}
+
+// modalGoesFullScreen reports whether the terminal is too narrow for this modal
+// and the rail to COEXIST: whether the modal's floored outer box (content +
+// border) still fits in the workspace the rail leaves behind.
+//
+// This is a narrowness test, not a placement promise. Placement stays centered
+// over the whole frame — a modal that passes this test is NOT moved to sit
+// beside the rail, and at mid widths it still clips the rail's right edge
+// exactly as every other modal does. What the test buys is the point where that
+// stops being a clipped rail and becomes a useless sliver: once the box cannot
+// fit in the workspace at all, centering it can only ever leave fragments, so
+// the modal takes the whole terminal instead.
+//
+// It reads the workspace from the solved layout rather than recomputing
+// termWidth - railWidth, so the rail's own sizing rule (clamped 25%, see
+// Grid.Solve) stays in exactly one place. relayout assigns m.lastLayout before
+// it sizes the overlays, and returns early in Fallback mode (where View()
+// renders the too-small banner and no overlay at all), so the workspace here is
+// always the live one.
+func (m *home) modalGoesFullScreen(style lipgloss.Style, preferredW int) bool {
+	if m.termWidth <= 0 || m.termHeight <= 0 {
+		return false
+	}
+	workspaceW := m.lastLayout.Workspace.W
+	if workspaceW <= 0 {
+		return false
+	}
+	return preferredW+style.GetHorizontalBorderSize() > workspaceW
 }
 
 func (m *home) preferredOverlayWidth(minWidth int) int {
