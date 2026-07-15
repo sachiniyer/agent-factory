@@ -14,27 +14,51 @@ import "path/filepath"
 // key is the repo's absolute main-worktree root (callers resolve it via
 // RepoFromPath first), matching how EnsureRootAgents resolves the map keys.
 //
+// The whole sequence runs under the config file lock (#1838): the persist
+// re-marshals the entire Config, so reading outside the lock would let a
+// concurrent `af config set` land between this load and this write and be
+// silently reverted by our stale snapshot.
+//
 // Registering here does not itself spawn an always-on root agent: the daemon
 // reads root_agents at startup, so the always-ensure behavior only takes effect
 // on the next daemon start. Switching to the repo works immediately regardless,
 // because Snapshot/CreateSession resolve any repo path live.
 func RegisterRootAgent(repoRoot string) (bool, error) {
-	cfg, err := LoadConfig()
+	var added bool
+	err := withGlobalConfigLock(func() error {
+		cfg, err := loadConfigLocked()
+		if err != nil {
+			return err
+		}
+		if _, exists := cfg.RootAgents[repoRoot]; exists {
+			return nil
+		}
+		if cfg.RootAgents == nil {
+			cfg.RootAgents = map[string]RootAgentConfig{}
+		}
+		cfg.RootAgents[repoRoot] = RootAgentConfig{}
+		if rootAgentSaveRaceHookForTest != nil {
+			rootAgentSaveRaceHookForTest()
+		}
+		if err := saveConfigLocked(cfg); err != nil {
+			return err
+		}
+		added = true
+		return nil
+	})
 	if err != nil {
 		return false, err
 	}
-	if _, exists := cfg.RootAgents[repoRoot]; exists {
-		return false, nil
-	}
-	if cfg.RootAgents == nil {
-		cfg.RootAgents = map[string]RootAgentConfig{}
-	}
-	cfg.RootAgents[repoRoot] = RootAgentConfig{}
-	if err := SaveConfig(cfg); err != nil {
-		return false, err
-	}
-	return true, nil
+	return added, nil
 }
+
+// rootAgentSaveRaceHookForTest, when non-nil, runs inside the config file-lock
+// body of RegisterRootAgent, between the re-read and the persist — the window
+// in which an unlocked writer used to be able to land a whole-file write that
+// this function's stale snapshot then reverted (#1838). Tests use it to drive a
+// concurrent `af config set` into exactly that window and pin that the lock now
+// holds it off until the persist completes.
+var rootAgentSaveRaceHookForTest func()
 
 // DeregisterRootAgentsForRepo removes every root_agents opt-in that resolves to
 // repoID and persists the result, returning the config keys it removed. It is
@@ -50,24 +74,34 @@ func RegisterRootAgent(repoRoot string) (bool, error) {
 // cleaned path so a stale entry for a gone repo can still be swept. The write is
 // load-modify-persist over the whole global config (no other key clobbered) and
 // idempotent: no matching key is a clean no-op returning nil, nil.
+//
+// Like RegisterRootAgent, the whole sequence runs under the config file lock
+// (#1838) so a concurrent config writer cannot be reverted by our snapshot. The
+// key→repo resolution runs under the lock too: it decides which keys the write
+// drops, so resolving it against a pre-lock snapshot could drop an entry a
+// racing writer had just added.
 func DeregisterRootAgentsForRepo(repoID string) ([]string, error) {
-	cfg, err := LoadConfig()
-	if err != nil {
-		return nil, err
-	}
 	var removed []string
-	for key := range cfg.RootAgents {
-		if rootAgentKeyMatchesRepo(key, repoID) {
-			removed = append(removed, key)
+	err := withGlobalConfigLock(func() error {
+		cfg, err := loadConfigLocked()
+		if err != nil {
+			return err
 		}
-	}
-	if len(removed) == 0 {
-		return nil, nil
-	}
-	for _, key := range removed {
-		delete(cfg.RootAgents, key)
-	}
-	if err := SaveConfig(cfg); err != nil {
+		removed = nil
+		for key := range cfg.RootAgents {
+			if rootAgentKeyMatchesRepo(key, repoID) {
+				removed = append(removed, key)
+			}
+		}
+		if len(removed) == 0 {
+			return nil
+		}
+		for _, key := range removed {
+			delete(cfg.RootAgents, key)
+		}
+		return saveConfigLocked(cfg)
+	})
+	if err != nil {
 		return nil, err
 	}
 	return removed, nil
