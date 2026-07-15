@@ -113,10 +113,26 @@ function webFallbackMs(): number {
   return typeof override === "number" ? override : 2500;
 }
 
+/** A retained layout, plus the tab identities its leaf ordinals were bound against.
+ *
+ *  The two are inseparable, which is why they are one record. A leaf holds an
+ *  ORDINAL, and an ordinal only names a tab RELATIVE to the identity list current
+ *  when it was bound. Retaining the tree alone leaves a value that silently decays:
+ *  once that session's roster shifts, every ordinal in it points somewhere new.
+ *  The shown session was already remapped on each setSession (#1779), but a session
+ *  the user isn't looking at had no such path — and #1815 made an out-of-band close
+ *  reach the client live, so its retained panes could be rebound to a neighbouring
+ *  tab on return (post-merge Codex finding). Keeping the ids with the tree makes
+ *  "remap before you read it" checkable rather than remembered. */
+interface RetainedLayout {
+  tree: LayoutNode;
+  ids: string[];
+}
+
 export class SplitView {
   // Retained layout per session id (in-memory; a nice-to-have to persist across
   // reload is out of scope for v1). Keyed by the stable session id.
-  private readonly trees = new Map<string, LayoutNode>();
+  private readonly trees = new Map<string, RetainedLayout>();
   private readonly panes = new Map<string, Pane>();
 
   private sessionId: string | null = null;
@@ -218,9 +234,10 @@ export class SplitView {
       // streaming untouched; only a genuinely replaced tab rebuilds.
       const settled = remapByIdentity(this.tree ?? singleLeaf(initialTab), prevIds, tabIds);
       this.tree = validate(settled, tabCount);
-      if (this.trees.get(sessionId) !== this.tree) {
-        this.trees.set(sessionId, this.tree);
-      }
+      // Always re-retain: `ids` must track the roster even when the remap left the
+      // tree identical, or the record would claim ordinals were bound against a list
+      // that has since moved on — the decay the record exists to prevent.
+      this.retain(sessionId, this.tree, tabIds);
       // Reconcile on a changed tab IDENTITY, not just a changed tree (#1779) — see
       // tabsRebound. reconcile() is a no-op per pane whose identity still matches,
       // so an unrelated snapshot still costs nothing. An archive/restore flip (#1809)
@@ -238,9 +255,14 @@ export class SplitView {
     this.teardown();
     this.sessionId = sessionId;
     this.tabCount = tabCount;
-    const retained = this.trees.get(sessionId);
-    this.tree = validate(retained ?? singleLeaf(initialTab), tabCount);
-    this.trees.set(sessionId, this.tree);
+    // Remap the retained tree onto the CURRENT roster before validating it. Its
+    // ordinals were bound against the tab list as it stood when the user last looked
+    // at this session; anything that changed the roster since (an agent's tab-create,
+    // another window's close — now delivered live by #1815) moved the tabs out from
+    // under them. validate() alone only clamps a too-high ordinal, so a pane would
+    // come back bound to whatever tab slid into its slot.
+    this.tree = validate(this.retainedTree(sessionId, tabIds) ?? singleLeaf(initialTab), tabCount);
+    this.retain(sessionId, this.tree, tabIds);
     // Focus the first pane of the newly shown session by default.
     this.focusedId = leaves(this.tree)[0]?.id ?? null;
     this.reconcile();
@@ -259,12 +281,31 @@ export class SplitView {
    *  bar then highlights Agent over a pane showing tab N, and the next close computes
    *  its shift from the stale 0 and yanks the pane to Agent (#1855). Reading the
    *  settled tab keeps the store's claim and the pane's binding the same statement. */
-  settledTab(sessionId: string): number {
+  settledTab(sessionId: string, tabIds: string[]): number {
     if (sessionId === this.sessionId) {
       return this.tree && this.focusedId ? (findLeaf(this.tree, this.focusedId)?.tab ?? 0) : 0;
     }
-    const retained = this.trees.get(sessionId);
+    // Read the REMAPPED tree, exactly as setSession will: this answers "which tab will
+    // that pane show once selected?", and the two must agree or the bar highlights one
+    // tab while the pane binds another (#1855). Passing the same ids setSession gets is
+    // what keeps the answers identical.
+    const retained = this.retainedTree(sessionId, tabIds);
     return retained ? (leaves(retained)[0]?.tab ?? 0) : 0;
+  }
+
+  /** The retained tree for `sessionId`, remapped onto `tabIds` — the only supported
+   *  way to read one. Returns null for a session never shown. */
+  private retainedTree(sessionId: string, tabIds: string[]): LayoutNode | null {
+    const rec = this.trees.get(sessionId);
+    if (!rec) {
+      return null;
+    }
+    return remapByIdentity(rec.tree, rec.ids, tabIds);
+  }
+
+  /** Retains `tree` for `sessionId` together with the identities it is bound against. */
+  private retain(sessionId: string, tree: LayoutNode, ids: string[]): void {
+    this.trees.set(sessionId, { tree, ids });
   }
 
   /** Rebinds the FOCUSED pane to show `tab` (a 1-9 key or a tab-bar click on the
@@ -349,7 +390,8 @@ export class SplitView {
   }
 
   /** How many EXPLICIT layout/focus mutations have been committed — a tab rebind
-   *  (a 1-9 key or a tab-bar click), a drag-drop split, a pane close. Deliberately
+   *  (a 1-9 key or a tab-bar click), a drag-drop split, a pane close, or a change
+   *  of WHICH PANE is focused (a click into another pane, Alt+j/k). Deliberately
    *  NOT bumped by setSession's roster reconcile, which only remaps each pane to
    *  follow its own tab and expresses no user intent.
    *
@@ -358,7 +400,12 @@ export class SplitView {
    *  applies its result only if the value still matches. A slow close then can't
    *  clobber a tab the user selected while it was in flight — their newer intent
    *  wins — while the roster event that races the same close still passes the
-   *  guard, because it bumps nothing. */
+   *  guard, because it bumps nothing.
+   *
+   *  Pane focus counts because the guarded write (setFocusedTab) targets the
+   *  FOCUSED pane: an index computed against the pane that issued the close is
+   *  meaningless once a different pane holds focus, and applying it there would
+   *  rebind the pane the user just picked (post-merge Codex finding on #1815). */
   layoutGeneration(): number {
     return this.layoutGen;
   }
@@ -371,7 +418,7 @@ export class SplitView {
   private commit(): void {
     this.layoutGen++;
     if (this.sessionId && this.tree) {
-      this.trees.set(this.sessionId, this.tree);
+      this.retain(this.sessionId, this.tree, this.tabIds);
     }
     this.reconcile();
     this.report();
@@ -842,7 +889,7 @@ export class SplitView {
         if (this.tree) {
           this.tree = setRatio(this.tree, node.id, node.ratio);
           if (this.sessionId) {
-            this.trees.set(this.sessionId, this.tree);
+            this.retain(this.sessionId, this.tree, this.tabIds);
           }
         }
       };
@@ -967,6 +1014,12 @@ export class SplitView {
       return;
     }
     this.focusedId = leafId;
+    // A focus move is an explicit mutation for the stale-async guard, so count it
+    // (see layoutGeneration). Not via commit(): the TREE is untouched here, and
+    // reconciling/re-persisting it would be wasted work on every pane click. The
+    // early return above means only a REAL change counts — re-focusing the pane
+    // that already holds focus must not invalidate an in-flight close.
+    this.layoutGen++;
     this.applyFocusClass();
     // The focused pane's status becomes the header status.
     const pane = this.panes.get(leafId);

@@ -99,6 +99,30 @@ const (
 	TabKindVSCode
 )
 
+// HasTmux reports whether a tab of this kind owns a tmux PTY session — i.e.
+// whether its persisted TmuxName is expected to be non-empty.
+//
+// Agent, shell, and process tabs run a real process behind a PTY. Web and vscode
+// tabs are pure PROJECTIONS (an iframe target; a daemon-managed per-session
+// code-server resolved at proxy time) and deliberately hold none. That property
+// was stated only in the prose above, so every site that meets a tmux-less tab had
+// to re-derive it from an empty TmuxName — and reading "" as "this tab's session
+// is missing" rather than "this kind never had one" is what made an out-of-band
+// web tab invisible in a running TUI (post-merge Codex finding on #1815). This is
+// the single place that answers it.
+//
+// An unrecognized kind answers true: a tab claiming a process whose session can't
+// be found is skipped by its caller, which is the conservative failure (a tab that
+// doesn't show) rather than materializing a terminal tab with no PTY behind it.
+func (k TabKind) HasTmux() bool {
+	switch k {
+	case TabKindWeb, TabKindVSCode:
+		return false
+	default:
+		return true
+	}
+}
+
 // Tab is one process running in an instance's worktree, backed by a single tmux
 // session. It is an internal wrapper introduced in PR 1 of #930: an instance
 // holds exactly one Agent tab that wraps today's single tmux session, and the

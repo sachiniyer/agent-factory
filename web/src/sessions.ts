@@ -124,3 +124,27 @@ export function clampActiveTab(list: SessionData[], selectedId: string | null, a
   const n = sel.tabs && sel.tabs.length > 0 ? sel.tabs.length : 1;
   return Math.min(Math.max(activeTab, 0), n - 1);
 }
+
+/** The IDENTITY of the tab a pane should end on once the tab at `closedIndex` is
+ *  closed, given the roster (`ids`, from ui.tabIdentity) and active index as they
+ *  stand when the close is ISSUED. Returns "" when there is nothing to follow.
+ *
+ *  Closing a tab shifts every higher tab down by one, and the tempting way to
+ *  re-point the pane is to subtract that shift from the active index. But an
+ *  ordinal only names a tab relative to ONE roster, and a close spans two — the
+ *  pre-close list it is computed against and the post-close list it is applied to.
+ *  Anything else that moves the roster in between (a concurrent close from another
+ *  client, now delivered live by #1815) invalidates the arithmetic silently, and the
+ *  pane lands on a neighbour. Naming the TAB instead survives any reshuffle: the
+ *  caller resolves this identity to its current ordinal in the post-close roster,
+ *  and a -1 there is the honest "it's gone too" rather than a wrong guess.
+ *
+ *  This is the store-side twin of layout.remapByIdentity, which does the same for
+ *  the pane tree (#1779): a pane follows a TAB, never a slot. */
+export function tabToKeepOnClose(ids: string[], closedIndex: number, activeIndex: number): string {
+  // Closing the ACTIVE tab: there is no surviving tab to follow, so fall back to its
+  // left neighbour — picked from the PRE-close list, the only roster in which "the
+  // tab left of the one being closed" is still a well-defined statement.
+  const keepIndex = closedIndex === activeIndex ? activeIndex - 1 : activeIndex;
+  return ids[keepIndex] ?? "";
+}

@@ -7026,6 +7026,10 @@ function clampActiveTab(list, selectedId, activeTab) {
   const n = sel.tabs && sel.tabs.length > 0 ? sel.tabs.length : 1;
   return Math.min(Math.max(activeTab, 0), n - 1);
 }
+function tabToKeepOnClose(ids, closedIndex, activeIndex) {
+  const keepIndex = closedIndex === activeIndex ? activeIndex - 1 : activeIndex;
+  return ids[keepIndex] ?? "";
+}
 
 // src/layout.ts
 var TAB_DND_MIME = "application/x-af-tab";
@@ -7778,9 +7782,7 @@ var SplitView = class {
       const before = this.tree;
       const settled = remapByIdentity(this.tree ?? singleLeaf(initialTab), prevIds, tabIds);
       this.tree = validate(settled, tabCount);
-      if (this.trees.get(sessionId) !== this.tree) {
-        this.trees.set(sessionId, this.tree);
-      }
+      this.retain(sessionId, this.tree, tabIds);
       const rebound = tabsRebound(prevIds, prevKinds, prevTargets, tabIds, tabKinds, tabTargets);
       if (before !== this.tree || rebound || archivedChanged) {
         this.reconcile();
@@ -7791,9 +7793,8 @@ var SplitView = class {
     this.teardown();
     this.sessionId = sessionId;
     this.tabCount = tabCount;
-    const retained = this.trees.get(sessionId);
-    this.tree = validate(retained ?? singleLeaf(initialTab), tabCount);
-    this.trees.set(sessionId, this.tree);
+    this.tree = validate(this.retainedTree(sessionId, tabIds) ?? singleLeaf(initialTab), tabCount);
+    this.retain(sessionId, this.tree, tabIds);
     this.focusedId = leaves(this.tree)[0]?.id ?? null;
     this.reconcile();
     this.report();
@@ -7810,12 +7811,25 @@ var SplitView = class {
    *  bar then highlights Agent over a pane showing tab N, and the next close computes
    *  its shift from the stale 0 and yanks the pane to Agent (#1855). Reading the
    *  settled tab keeps the store's claim and the pane's binding the same statement. */
-  settledTab(sessionId) {
+  settledTab(sessionId, tabIds) {
     if (sessionId === this.sessionId) {
       return this.tree && this.focusedId ? findLeaf(this.tree, this.focusedId)?.tab ?? 0 : 0;
     }
-    const retained = this.trees.get(sessionId);
+    const retained = this.retainedTree(sessionId, tabIds);
     return retained ? leaves(retained)[0]?.tab ?? 0 : 0;
+  }
+  /** The retained tree for `sessionId`, remapped onto `tabIds` — the only supported
+   *  way to read one. Returns null for a session never shown. */
+  retainedTree(sessionId, tabIds) {
+    const rec = this.trees.get(sessionId);
+    if (!rec) {
+      return null;
+    }
+    return remapByIdentity(rec.tree, rec.ids, tabIds);
+  }
+  /** Retains `tree` for `sessionId` together with the identities it is bound against. */
+  retain(sessionId, tree, ids) {
+    this.trees.set(sessionId, { tree, ids });
   }
   /** Rebinds the FOCUSED pane to show `tab` (a 1-9 key or a tab-bar click on the
    *  focused pane). No-op without a focused pane. Does not steal DOM focus. */
@@ -7889,7 +7903,8 @@ var SplitView = class {
     this.lastPaneCount = 0;
   }
   /** How many EXPLICIT layout/focus mutations have been committed — a tab rebind
-   *  (a 1-9 key or a tab-bar click), a drag-drop split, a pane close. Deliberately
+   *  (a 1-9 key or a tab-bar click), a drag-drop split, a pane close, or a change
+   *  of WHICH PANE is focused (a click into another pane, Alt+j/k). Deliberately
    *  NOT bumped by setSession's roster reconcile, which only remaps each pane to
    *  follow its own tab and expresses no user intent.
    *
@@ -7898,7 +7913,12 @@ var SplitView = class {
    *  applies its result only if the value still matches. A slow close then can't
    *  clobber a tab the user selected while it was in flight — their newer intent
    *  wins — while the roster event that races the same close still passes the
-   *  guard, because it bumps nothing. */
+   *  guard, because it bumps nothing.
+   *
+   *  Pane focus counts because the guarded write (setFocusedTab) targets the
+   *  FOCUSED pane: an index computed against the pane that issued the close is
+   *  meaningless once a different pane holds focus, and applying it there would
+   *  rebind the pane the user just picked (post-merge Codex finding on #1815). */
   layoutGeneration() {
     return this.layoutGen;
   }
@@ -7909,7 +7929,7 @@ var SplitView = class {
   commit() {
     this.layoutGen++;
     if (this.sessionId && this.tree) {
-      this.trees.set(this.sessionId, this.tree);
+      this.retain(this.sessionId, this.tree, this.tabIds);
     }
     this.reconcile();
     this.report();
@@ -8226,7 +8246,7 @@ var SplitView = class {
         if (this.tree) {
           this.tree = setRatio(this.tree, node.id, node.ratio);
           if (this.sessionId) {
-            this.trees.set(this.sessionId, this.tree);
+            this.retain(this.sessionId, this.tree, this.tabIds);
           }
         }
       };
@@ -8334,6 +8354,7 @@ var SplitView = class {
       return;
     }
     this.focusedId = leafId;
+    this.layoutGen++;
     this.applyFocusClass();
     const pane = this.panes.get(leafId);
     if (pane) {
@@ -9587,6 +9608,10 @@ function disconnect() {
     tasks: []
   });
 }
+function tabIdsOf(list, id) {
+  const s = id ? list.find((x) => x.id === id) : null;
+  return s ? sessionTabs(s).map(tabIdentity) : [];
+}
 function moveSelection(id) {
   clearTabError();
   store.set({
@@ -9594,7 +9619,7 @@ function moveSelection(id) {
     focus: "rail",
     // Clamped like syncSplit's initialTab, so the store's claim and the pane's binding
     // are the same statement even if the roster shrank since the tree was retained.
-    activeTab: clampActiveTab(store.get().sessions, id, splitView.settledTab(id))
+    activeTab: clampActiveTab(store.get().sessions, id, splitView.settledTab(id, tabIdsOf(store.get().sessions, id)))
   });
 }
 function openFromRail(id) {
@@ -9638,7 +9663,7 @@ function switchProject(root2) {
     selectedProject: root2,
     selectedId: keep,
     focus: "rail",
-    activeTab: keep ? clampActiveTab(store.get().sessions, keep, splitView.settledTab(keep)) : 0
+    activeTab: keep ? clampActiveTab(store.get().sessions, keep, splitView.settledTab(keep, tabIdsOf(store.get().sessions, keep))) : 0
   });
 }
 function selectedSession2() {
@@ -9795,14 +9820,13 @@ function closeSessionTab(index) {
   }
   clearTabError();
   const selId = sel.id ?? "";
-  const cur = store.get().activeTab;
+  const keepId = tabToKeepOnClose(tabs.map(tabIdentity), index, store.get().activeTab);
   const gen = splitView.layoutGeneration();
   void closeTab(selId, sel.title, target.name, tok).then(() => fetchSnapshot(tok)).then((sessions) => {
     const shrunk = sessions.find((s) => s.id === selId);
-    const n = shrunk ? sessionTabs(shrunk).length : 1;
-    const next = Math.min(Math.max(index <= cur ? cur - 1 : cur, 0), n - 1);
+    const next = shrunk ? sessionTabs(shrunk).map(tabIdentity).indexOf(keepId) : -1;
     store.set({ sessions, selectedId: pickSelection(sessions, store.get().selectedId) });
-    if (splitView.layoutGeneration() === gen && store.get().selectedId === selId) {
+    if (next >= 0 && splitView.layoutGeneration() === gen && store.get().selectedId === selId) {
       splitView.setFocusedTab(next);
     }
   }).catch((e) => surfaceTabError(e));
@@ -10000,7 +10024,7 @@ function applySessions(sessions) {
       selectedId = null;
     }
   }
-  const settled = selectedId === prevSel ? store.get().activeTab : splitView.settledTab(selectedId ?? "");
+  const settled = selectedId === prevSel ? store.get().activeTab : splitView.settledTab(selectedId ?? "", tabIdsOf(sessions, selectedId));
   const activeTab = clampActiveTab(sessions, selectedId, settled);
   store.set({ sessions, selectedProject, selectedId, activeTab });
 }

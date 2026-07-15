@@ -528,7 +528,10 @@ func (i *Instance) DropClosedTab(idx int) error {
 // daemon added out-of-band (present in target, absent locally) are reconnected
 // to their EXACT persisted tmux session by name — like restoreLocalTabs — and
 // appended, so an out-of-band tab appears in the running TUI and is immediately
-// previewable/attachable (the #959 "live display" fix); tabs the daemon closed
+// previewable/attachable (the #959 "live display" fix). A tmux-less kind (web,
+// vscode — see TabKind.HasTmux) has no session to reconnect and is appended
+// directly, so it lands in the TUI as its placeholder pane rather than being
+// mistaken for a tab whose tmux session went missing; tabs the daemon closed
 // (absent from target) are dropped locally WITHOUT re-killing their tmux session
 // (the daemon already tore it down — killing again would error on the gone
 // session). The agent tab (index 0) is never added or dropped: it is the
@@ -580,30 +583,42 @@ func (i *Instance) ReconcileTabsFromData(target []TabData) (bool, error) {
 		if td.Kind == TabKindAgent || localNames[td.Name] {
 			continue
 		}
-		if td.TmuxName == "" || worktreePath == "" {
-			continue
-		}
 		kind := tabKindForData(td.Kind)
-		// The sibling inherits the agent session's PTY factory / executor (real
-		// in production, mock in tests), binding to the EXACT persisted name.
-		// ATTACH-ONLY: pass empty workDir so a missing session errors instead of
-		// re-spawning (#1152). Like AttachShellTab, this is a pure TUI-side
-		// projection of daemon-owned tabs; the daemon is the single writer that
-		// owns every spawn (#960). If the daemon killed the session in the race
-		// window, re-spawning here would orphan a tmux session over the deleted
-		// worktree. Skip the tab on failure and let the next snapshot reconcile it.
-		ts := agentTmux.NewSiblingSession(td.TmuxName, tabProgram(kind, td.Command, program))
-		if err := ts.Restore(""); err != nil {
-			if firstErr == nil {
-				firstErr = fmt.Errorf("failed to reconnect tab %q: %w", td.Name, err)
+		// A tmux-less kind (web, vscode) is materialized by the append alone — there
+		// is no session to reconnect, exactly as restoreLocalTabs builds it on load.
+		// Skipping it on its empty TmuxName (as this loop once did) read "" as a
+		// missing session rather than a kind that never has one, so a web/vscode tab
+		// created out-of-band stayed invisible in a running TUI until a full rebuild
+		// — even though #1815 now delivers the roster that carries it, and even though
+		// the DROP side above already removed such a tab by name. See TabKind.HasTmux.
+		var ts *tmux.TmuxSession
+		if kind.HasTmux() {
+			if td.TmuxName == "" || worktreePath == "" {
+				continue
 			}
-			continue
+			// The sibling inherits the agent session's PTY factory / executor (real
+			// in production, mock in tests), binding to the EXACT persisted name.
+			// ATTACH-ONLY: pass empty workDir so a missing session errors instead of
+			// re-spawning (#1152). Like AttachShellTab, this is a pure TUI-side
+			// projection of daemon-owned tabs; the daemon is the single writer that
+			// owns every spawn (#960). If the daemon killed the session in the race
+			// window, re-spawning here would orphan a tmux session over the deleted
+			// worktree. Skip the tab on failure and let the next snapshot reconcile it.
+			ts = agentTmux.NewSiblingSession(td.TmuxName, tabProgram(kind, td.Command, program))
+			if err := ts.Restore(""); err != nil {
+				if firstErr == nil {
+					firstErr = fmt.Errorf("failed to reconnect tab %q: %w", td.Name, err)
+				}
+				continue
+			}
 		}
 		id := td.ID
 		if id == "" {
 			id = newTabID()
 		}
-		tab := &Tab{ID: id, Name: td.Name, Kind: kind, Command: td.Command, tmux: ts}
+		// URL rides along for a web tab (a vscode tab has none by design — its target
+		// is resolved at proxy time), or the pane would have nothing to iframe.
+		tab := &Tab{ID: id, Name: td.Name, Kind: kind, Command: td.Command, URL: td.URL, tmux: ts}
 		i.mu.Lock()
 		// Re-check under the write lock: a concurrent reconcile/AddTab may have
 		// added this name while we reconnected outside the lock.

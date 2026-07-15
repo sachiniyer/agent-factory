@@ -107,6 +107,80 @@ func TestReconcileTabsFromData_DropsClosedTab(t *testing.T) {
 	assert.Equal(t, TabKindAgent, inst.GetTabs()[0].Kind, "the agent tab is never dropped")
 }
 
+// TestReconcileTabsFromData_AddsTmuxlessWebTab is the post-merge Codex finding on
+// #1815: a web tab holds NO tmux session by design, and this loop used to skip
+// every target tab with an empty TmuxName — reading "" as "this tab's session is
+// missing" rather than "this kind never had one". So the headline #1815 case (an
+// agent injecting a live browser view with `tab-create --kind web`) published a
+// roster the TUI then silently discarded: the tab stayed invisible until a full
+// rebuild, even though the DROP side already removed such a tab by name.
+func TestReconcileTabsFromData_AddsTmuxlessWebTab(t *testing.T) {
+	const agentName = "af_snap_web"
+	inst, _ := newReconcileTestInstance(t, agentName, map[string]bool{agentName: true})
+
+	const url = "http://localhost:5173"
+	target := []TabData{
+		{Name: inst.GetTabs()[0].Name, Kind: TabKindAgent, TmuxName: agentName},
+		{Name: "livepreview", Kind: TabKindWeb, URL: url},
+	}
+
+	changed, err := inst.ReconcileTabsFromData(target)
+	require.NoError(t, err)
+	assert.True(t, changed, "an out-of-band web tab is a change")
+
+	tabs := inst.GetTabs()
+	require.Len(t, tabs, 2, "a web tab created out-of-band must appear on the live instance")
+	assert.Equal(t, TabKindWeb, tabs[1].Kind)
+	assert.Equal(t, url, tabs[1].URL, "the web tab's URL must survive the reconcile, or the pane has nothing to show")
+	assert.Nil(t, tabs[1].tmux, "a web tab holds no tmux session")
+	assert.NotEmpty(t, tabs[1].ID, "the reconciled tab must be addressable by a stable id (#1738)")
+
+	changedAgain, err := inst.ReconcileTabsFromData(target)
+	require.NoError(t, err)
+	assert.False(t, changedAgain, "an unchanged snapshot must not report a change")
+	assert.Len(t, inst.GetTabs(), 2, "no duplicate web tab on a repeat reconcile")
+}
+
+// TestReconcileTabsFromData_AddsTmuxlessVSCodeTab: the same gap covered the vscode
+// kind (#1817), which is tmux-less for the same reason and was skipped by the same
+// branch. It carries no URL by design — its code-server target is resolved at proxy
+// time — so an empty URL here is correct, not a dropped field.
+func TestReconcileTabsFromData_AddsTmuxlessVSCodeTab(t *testing.T) {
+	const agentName = "af_snap_code"
+	inst, _ := newReconcileTestInstance(t, agentName, map[string]bool{agentName: true})
+
+	target := []TabData{
+		{Name: inst.GetTabs()[0].Name, Kind: TabKindAgent, TmuxName: agentName},
+		{Name: "vscode", Kind: TabKindVSCode},
+	}
+
+	changed, err := inst.ReconcileTabsFromData(target)
+	require.NoError(t, err)
+	assert.True(t, changed, "an out-of-band vscode tab is a change")
+
+	tabs := inst.GetTabs()
+	require.Len(t, tabs, 2, "a vscode tab created out-of-band must appear on the live instance")
+	assert.Equal(t, TabKindVSCode, tabs[1].Kind)
+	assert.Nil(t, tabs[1].tmux, "a vscode tab holds no tmux session")
+}
+
+// TestReconcileTabsFromData_SkipsTmuxfulTabWithNoSession pins the other half of
+// TabKind.HasTmux: the empty-TmuxName skip must SURVIVE for a kind that is
+// supposed to own a PTY. Such a record is not reconstructable, and materializing
+// it would put a terminal tab with no process behind it in the TUI.
+func TestReconcileTabsFromData_SkipsTmuxfulTabWithNoSession(t *testing.T) {
+	const agentName = "af_snap_noname"
+	inst, _ := newReconcileTestInstance(t, agentName, map[string]bool{agentName: true})
+
+	changed, err := inst.ReconcileTabsFromData([]TabData{
+		{Name: inst.GetTabs()[0].Name, Kind: TabKindAgent, TmuxName: agentName},
+		{Name: "shell", Kind: TabKindShell}, // a PTY kind with no session to bind
+	})
+	require.NoError(t, err)
+	assert.False(t, changed, "a tmux-ful tab with no session must be skipped, not materialized")
+	assert.Len(t, inst.GetTabs(), 1)
+}
+
 // TestReconcileTabsFromData_NotStartedIsNoOp guards the not-started branch: an
 // unstarted instance (e.g. a Loading placeholder) must never attempt a reconnect.
 func TestReconcileTabsFromData_NotStartedIsNoOp(t *testing.T) {

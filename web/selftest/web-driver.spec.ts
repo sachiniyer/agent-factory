@@ -1983,6 +1983,209 @@ test("#1812 review: a close held in flight must not clobber a tab the user picks
   await expect(keeper).toHaveCount(0, { timeout: 15_000 });
 });
 
+// The post-merge Codex findings on #1815. All three are the same shape: #1815 made
+// out-of-band roster changes reach an open client LIVE, which turned three latent
+// ordinal-vs-identity assumptions into reachable misroutes. Each drives the exact
+// scenario Codex described and asserts on the tab the user is actually looking at.
+
+test("#1815 review: a concurrent out-of-band close cannot re-point the pane to a neighbour", async () => {
+  const afBin = process.env.AF_BIN;
+  const mockRepo = process.env.AF_MOCK_REPO;
+  test.skip(!afBin || !mockRepo, "AF_BIN/AF_MOCK_REPO are set only by web-selftest-entry.sh");
+  const { execFileSync } = await import("node:child_process");
+  const af = (...args: string[]): void => {
+    execFileSync(afBin as string, ["--repo", mockRepo as string, "sessions", ...args], { stdio: "pipe" });
+  };
+
+  await row(page, SESSION_A).click();
+  const tabbar = page.locator(".af-tabbar");
+  await expect(tabbar).toBeVisible();
+  const active = page.locator(".af-tab.af-tab-active .af-tab-label");
+  // Earlier flows leave their own tabs on this session, so every count here is
+  // relative to what is already on the bar rather than an absolute the next test to
+  // leave a tab behind would break.
+  const baseline = await tabbar.locator(".af-tab").count();
+
+  // Codex's scenario: this window closes t3 while ANOTHER client closes the LOWER t1
+  // first. The old code re-pointed the pane by subtracting its own close's shift from
+  // the pre-close ordinal — but t1's removal had already shifted t4 down underneath
+  // it, so the result named t5, the neighbour, and the pane the user was reading was
+  // torn down to show the wrong tab.
+  // One at a time, each awaited: the events hub DROPS a publish for a subscriber that
+  // is behind rather than blocking the daemon (clients re-Snapshot to resync), so a
+  // burst of CLI mutations can outrun the browser and lose a roster. Real actors don't
+  // burst, and this test is about ordering, not backpressure.
+  for (const name of ["t1", "t2", "t3", "t4", "t5"]) {
+    af("tab-create", SESSION_A, "--kind", "web", "--url", WEBTAB_EXTERNAL_URL, "--name", name);
+    await expect(tabbar.locator(".af-tab", { hasText: name })).toHaveCount(1, { timeout: 15_000 });
+  }
+
+  // Click the LABEL, not the button. A bar this crowded shrinks each tab until the
+  // button's CENTRE — where a bare .click() lands — is its × rather than its label,
+  // so clicking the button would close the tab instead of selecting it. The label's
+  // click still bubbles to the button's handler, which is the real select path.
+  await tabbar.locator(".af-tab", { hasText: "t4" }).locator(".af-tab-label").click();
+  await expect(active).toHaveText("t4");
+
+  let releaseClose: (() => void) | undefined;
+  const closeHeld = new Promise<void>((resolve) => {
+    releaseClose = resolve;
+  });
+  let closeInFlight = false;
+  await page.unroute("**/v1/CloseTab");
+  await page.route("**/v1/CloseTab", async (route) => {
+    closeInFlight = true;
+    await closeHeld;
+    await route.continue();
+  });
+
+  await tabbar.locator(".af-tab", { hasText: "t3" }).locator(".af-tab-close").click();
+  await expect.poll(() => closeInFlight, { timeout: 15_000 }).toBe(true);
+
+  // The other client closes a LOWER tab mid-flight. Waiting for it to leave the bar
+  // proves the #1815 event landed and the roster shifted BEFORE the close resolves —
+  // which is the whole point: this is the race #1815 itself made reachable.
+  af("tab-delete", SESSION_A, "--name", "t1");
+  await expect(tabbar.locator(".af-tab", { hasText: "t1" })).toHaveCount(0, { timeout: 15_000 });
+
+  releaseClose?.();
+  await expect(tabbar.locator(".af-tab", { hasText: "t3" })).toHaveCount(0, { timeout: 15_000 });
+  await expect(active, "the pane must still show the tab the user was on, not its neighbour").toHaveText("t4");
+
+  await page.unroute("**/v1/CloseTab");
+  for (const name of ["t2", "t4", "t5"]) {
+    af("tab-delete", SESSION_A, "--name", name);
+    await expect(tabbar.locator(".af-tab", { hasText: name })).toHaveCount(0, { timeout: 15_000 });
+  }
+  await expect(tabbar.locator(".af-tab")).toHaveCount(baseline, { timeout: 15_000 });
+});
+
+test("#1815 review: a pane focused mid-close keeps its own tab", async () => {
+  const afBin = process.env.AF_BIN;
+  const mockRepo = process.env.AF_MOCK_REPO;
+  test.skip(!afBin || !mockRepo, "AF_BIN/AF_MOCK_REPO are set only by web-selftest-entry.sh");
+  const { execFileSync } = await import("node:child_process");
+  const af = (...args: string[]): void => {
+    execFileSync(afBin as string, ["--repo", mockRepo as string, "sessions", ...args], { stdio: "pipe" });
+  };
+
+  await row(page, SESSION_A).click();
+  await expect(page.locator(".af-main.af-main-term")).toBeVisible();
+  const tabbar = page.locator(".af-tabbar");
+  const active = page.locator(".af-tab.af-tab-active .af-tab-label");
+
+  // The guard keyed off layoutGeneration, which counted tab rebinds and splits but
+  // NOT a change of which PANE holds focus — and the guarded write (setFocusedTab)
+  // targets the focused pane. So a close held in flight could rebind the pane the
+  // user had just clicked, using an index computed for the pane that issued it.
+  // PROCESS tabs, not web tabs: this test has to move focus BETWEEN panes by clicking
+  // them, and a web tab's pane is an iframe that swallows the mousedown the pane's
+  // focus handler listens for. A PTY pane is the surface a user actually clicks
+  // between, which is the gesture the guard has to survive.
+  const baseline = await tabbar.locator(".af-tab").count();
+  for (const name of ["k1", "k2"]) {
+    af("tab-create", SESSION_A, "--command", "sleep 300", "--name", name);
+    await expect(tabbar.locator(".af-tab", { hasText: name })).toHaveCount(1, { timeout: 30_000 });
+  }
+
+  await tabbar.locator(".af-tab", { hasText: "k2" }).locator(".af-tab-label").click();
+  await expect(active).toHaveText("k2");
+
+  // Split, so there are two panes and "which pane is focused" is a real question. The
+  // agent pane is the one streaming the ready marker; the other is k2's.
+  await dragTabToPane(page, "Agent", "right");
+  await expect(page.locator(".af-term-host .af-pane")).toHaveCount(2, { timeout: 15_000 });
+  await expect(page.locator(".af-term-host")).toContainText(READY_MARKER, { timeout: 15_000 });
+  const agentPane = page.locator(".af-term-host .af-pane", { hasText: READY_MARKER });
+  const k2Pane = page.locator(".af-term-host .af-pane", { hasNotText: READY_MARKER });
+  await expect(agentPane).toHaveCount(1);
+  await expect(k2Pane).toHaveCount(1);
+
+  // Focus the k2 pane — this is the pane the close is issued from, and the one whose
+  // index the close's `next` is computed against.
+  await k2Pane.locator(".af-pane-host").click();
+  await expect(active).toHaveText("k2");
+
+  let releaseClose: (() => void) | undefined;
+  const closeHeld = new Promise<void>((resolve) => {
+    releaseClose = resolve;
+  });
+  let closeInFlight = false;
+  await page.unroute("**/v1/CloseTab");
+  await page.route("**/v1/CloseTab", async (route) => {
+    closeInFlight = true;
+    await closeHeld;
+    await route.continue();
+  });
+
+  await tabbar.locator(".af-tab", { hasText: "k1" }).locator(".af-tab-close").click();
+  await expect.poll(() => closeInFlight, { timeout: 15_000 }).toBe(true);
+
+  // Mid-flight the user clicks the OTHER pane. That is a deliberate move of focus, and
+  // the close's stale index means nothing for the pane they just chose.
+  await agentPane.locator(".af-pane-host").click();
+  await expect(active).toHaveText("Agent");
+
+  releaseClose?.();
+  await expect(tabbar.locator(".af-tab", { hasText: "k1" })).toHaveCount(0, { timeout: 15_000 });
+  await expect(active, "the pane the user focused mid-close must keep its own tab").toHaveText("Agent");
+
+  // Collapse the split and restore A's single-tab baseline for the later flows.
+  await page.unroute("**/v1/CloseTab");
+  await agentPane.locator(".af-pane-close").click();
+  await expect(page.locator(".af-term-host .af-pane")).toHaveCount(1, { timeout: 15_000 });
+  af("tab-delete", SESSION_A, "--name", "k2");
+  await expect(tabbar.locator(".af-tab")).toHaveCount(baseline, { timeout: 15_000 });
+});
+
+test("#1815 review: a retained layout follows its tab when the roster changes while away", async () => {
+  const afBin = process.env.AF_BIN;
+  const mockRepo = process.env.AF_MOCK_REPO;
+  test.skip(!afBin || !mockRepo, "AF_BIN/AF_MOCK_REPO are set only by web-selftest-entry.sh");
+  const { execFileSync } = await import("node:child_process");
+  const af = (...args: string[]): void => {
+    execFileSync(afBin as string, ["--repo", mockRepo as string, "sessions", ...args], { stdio: "pipe" });
+  };
+
+  const tabbar = page.locator(".af-tabbar");
+  const active = page.locator(".af-tab.af-tab-active .af-tab-label");
+
+  // The split view retains a layout per session, but only ever remapped the SHOWN
+  // session's panes onto a changed roster; a session the user had navigated away from
+  // was merely clamped on return. Its leaves hold ORDINALS, so an out-of-band close
+  // while away — which #1815 now delivers live — silently rebound them to whatever
+  // slid into the slot. Tabs [Agent,r1,r2,r3] with the pane on r2 (index 2): drop r1
+  // and the stale ordinal 2 is r3, an entirely different tab.
+  await row(page, SESSION_A).click();
+  await expect(tabbar).toBeVisible();
+  const baseline = await tabbar.locator(".af-tab").count();
+  for (const name of ["r1", "r2", "r3"]) {
+    af("tab-create", SESSION_A, "--kind", "web", "--url", WEBTAB_EXTERNAL_URL, "--name", name);
+    await expect(tabbar.locator(".af-tab", { hasText: name })).toHaveCount(1, { timeout: 15_000 });
+  }
+  await tabbar.locator(".af-tab", { hasText: "r2" }).locator(".af-tab-label").click();
+  await expect(active).toHaveText("r2");
+
+  // Navigate away, so A's layout is only RETAINED — not the live one being reconciled.
+  await row(page, SESSION_B).click();
+  await expect(page.locator(".af-main.af-main-term")).toBeVisible();
+
+  af("tab-delete", SESSION_A, "--name", "r1");
+
+  // Back to A: its pane must still be on r2, which is now index 1.
+  await row(page, SESSION_A).click();
+  await expect(tabbar.locator(".af-tab", { hasText: "r1" })).toHaveCount(0, { timeout: 15_000 });
+  await expect(active, "a retained pane must follow its TAB across an out-of-band close, not its slot").toHaveText(
+    "r2",
+  );
+
+  for (const name of ["r2", "r3"]) {
+    af("tab-delete", SESSION_A, "--name", name);
+    await expect(tabbar.locator(".af-tab", { hasText: name })).toHaveCount(0, { timeout: 15_000 });
+  }
+  await expect(tabbar.locator(".af-tab")).toHaveCount(baseline, { timeout: 15_000 });
+});
+
 test("vscode tab (feat): the ▾ menu creates a VS Code tab and the daemon serves it through the proxy", async () => {
   // End to end, with no seeded fixture: pick VS Code from the tab bar's kind menu,
   // and the daemon spawns a code-server (the FAKE one on PATH — no CI box has a

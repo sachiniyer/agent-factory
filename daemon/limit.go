@@ -75,6 +75,13 @@ func (m *Manager) resolveIdleLiveness(instance *session.Instance, content string
 	}
 }
 
+// testHookPollBeforePublish runs immediately before persistPollChange announces
+// its session.updated, inside the repo start lock it persisted under. Tests
+// substitute it to prove the publish really is in that critical section — the
+// property that keeps an older whole-session payload from landing after a newer
+// tab roster. No-op in production.
+var testHookPollBeforePublish = func() {}
+
 // persistPollChange writes an instance's state to disk when the poll changed
 // something durable this tick (the #960 targeted writer): its LIVENESS
 // transitioned, OR — evaluated INDEPENDENTLY — its usage-limit reset time changed
@@ -108,14 +115,26 @@ func (m *Manager) persistPollChange(repoID string, instance *session.Instance, b
 	repoStartLock.Lock()
 	data := instance.ToInstanceData()
 	err := persistInstanceData(repoID, data)
+	// Push the change onto the events plane (#1592 PR5): this is the single choke
+	// point every liveness/limit transition already flows through, so one publish
+	// here covers session.updated without threading it through each caller.
+	//
+	// Published while STILL HOLDING the repo start lock, in the same critical section
+	// as the persist that produced `data` — matching CreateTab/CloseTab. session.updated
+	// carries a WHOLE InstanceData and every client re-projects the session wholesale
+	// from it, so publish order is not cosmetic: it decides which snapshot wins. Publishing
+	// after the unlock let this poll capture a roster, release the lock, and be preempted
+	// by a tab create/delete that persisted AND announced the grown roster first — then
+	// this older payload landed last and clients re-projected the tab right back out of
+	// existence, until some later update happened to repair it (post-merge Codex finding
+	// on #1815). Serializing publish with persist makes the last event the newest state.
+	// publishEvent is non-blocking (drop-slow), so a wedged subscriber can't stall the poll.
+	testHookPollBeforePublish()
+	m.publishEvent(agentproto.EventSessionUpdated, data)
 	repoStartLock.Unlock()
 	if err != nil {
 		log.WarningLog.Printf("daemon failed to persist status for %q: %v", instance.Title, err)
 	}
-	// Push the change onto the events plane (#1592 PR5): this is the single choke
-	// point every liveness/limit transition already flows through, so one publish
-	// here covers session.updated without threading it through each caller.
-	m.publishEvent(agentproto.EventSessionUpdated, data)
 }
 
 // This file is the daemon side of the usage-limit manual-retry action (#1146
