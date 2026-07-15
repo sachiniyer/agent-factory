@@ -14,12 +14,12 @@ import (
 )
 
 // The daemon is the single always-on host for task schedules (cron and watch
-// scripts) and autoyes mode (#782), and serves the web UI. The af root path
-// starts it only for autoyes or when an enabled task exists
-// (ensureDaemonForTasks), so a fresh install with no enabled tasks has no
-// daemon and no web listener; `af daemon install` registers a user-level
-// autostart unit so schedules and the web UI survive logouts and reboots
-// without ever opening af.
+// scripts) and autoyes mode (#782), and serves the web UI. Launching the TUI
+// starts it: the cold start reads session state through the daemon
+// (coldStartFromSnapshot -> withDaemonHTTP -> daemon.EnsureDaemon), and autoyes
+// and ensureDaemonForTasks cover the other root-path cases. `af daemon install`
+// registers a user-level autostart unit so schedules and the web UI survive
+// logouts and reboots without ever opening af.
 
 var daemonCmd = &cobra.Command{
 	Use:   "daemon",
@@ -28,14 +28,13 @@ var daemonCmd = &cobra.Command{
 watch-task scripts, drives autoyes mode, and serves the bundled WEB UI.
 
 The web UI is part of the daemon — there is no separate web command — so it is
-reachable only while the daemon is running. Merely running af does not start
-one: the daemon comes up for autoyes mode, or when an enabled task exists. On a
-fresh install with no enabled tasks, 'af config list' and the TUI leave the web
-listener down and http://localhost:8443 refuses the connection. To bring it up,
-install the autostart unit (below) or take a daemon-backed action such as
-creating a session.
+served whenever the daemon is running. Running af starts one: the TUI reads
+session state through the daemon and spawns it if none is up, so simply opening
+af serves the web UI. Autoyes mode and any enabled task start one too. Only
+standalone commands that never talk to the daemon (such as 'af config list')
+leave it down.
 
-Once the daemon is running, open:
+With af running, open:
 
     http://localhost:8443
 

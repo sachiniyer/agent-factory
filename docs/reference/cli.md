@@ -563,14 +563,13 @@ The agent-factory daemon runs task cron schedules in-process, supervises
 watch-task scripts, drives autoyes mode, and serves the bundled WEB UI.
 
 The web UI is part of the daemon — there is no separate web command — so it is
-reachable only while the daemon is running. Merely running af does not start
-one: the daemon comes up for autoyes mode, or when an enabled task exists. On a
-fresh install with no enabled tasks, 'af config list' and the TUI leave the web
-listener down and http://localhost:8443 refuses the connection. To bring it up,
-install the autostart unit (below) or take a daemon-backed action such as
-creating a session.
+served whenever the daemon is running. Running af starts one: the TUI reads
+session state through the daemon and spawns it if none is up, so simply opening
+af serves the web UI. Autoyes mode and any enabled task start one too. Only
+standalone commands that never talk to the daemon (such as 'af config list')
+leave it down.
 
-Once the daemon is running, open:
+With af running, open:
 
     http://localhost:8443
 
