@@ -404,6 +404,50 @@ func TestFindSessionReportsAmbiguousTitleAcrossRepos(t *testing.T) {
 	}
 }
 
+// TestNextAvailableTitlePropagatesFatalHookCheckError guards the difference
+// between "this candidate is taken" and "the check could not run". The cross-repo
+// hook-name scan surfaces a corrupted instances.json as an error, and
+// nextAvailableTitleLocked walks candidates treating any error as taken — so
+// without the errTitleCheckFatal marker a title_base create would burn all 10,000
+// suffixes under the manager lock and then report a misleading "could not find an
+// available title", swallowing the actionable corruption message.
+func TestNextAvailableTitlePropagatesFatalHookCheckError(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	repoBPath := setupControlRepo(t)
+	repoB, err := config.RepoFromPath(repoBPath)
+	if err != nil {
+		t.Fatalf("RepoFromPath: %v", err)
+	}
+
+	manager, err := NewManager(config.DefaultConfig())
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+
+	// Another repo's instances.json is corrupted, so the hook-name scan cannot
+	// prove the slug is free.
+	if err := config.SaveRepoInstances("corrupt-repo", json.RawMessage("{not json")); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+
+	manager.mu.Lock()
+	got, err := manager.nextAvailableTitleLocked(repoB.ID, repoB.Root, "base", "claude", true, nil)
+	manager.mu.Unlock()
+
+	if err == nil {
+		t.Fatalf("an unverifiable hook name must not resolve to a suffixed title (%q)", got)
+	}
+	if !errors.Is(err, errTitleCheckFatal) {
+		t.Fatalf("expected the fatal check error to propagate, got: %v", err)
+	}
+	if strings.Contains(err.Error(), "could not find an available title") {
+		t.Errorf("the corruption cause must not be swallowed as exhaustion: %v", err)
+	}
+	if !strings.Contains(err.Error(), "corrupt-repo") {
+		t.Errorf("error should name the corrupted repo so it is actionable, got: %v", err)
+	}
+}
+
 // TestFindSessionAmbiguitySurvivesPartialRestore closes the gap where ONE live
 // match looked like proof of uniqueness. A repo's row is skipped during refresh
 // when it cannot be restored (worktree/tmux gone), so it never reaches

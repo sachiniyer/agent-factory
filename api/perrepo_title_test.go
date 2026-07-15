@@ -146,12 +146,12 @@ func TestFindInstanceByTitle_DuplicateRowsInOneRepoAreNotAmbiguous(t *testing.T)
 	}
 }
 
-// TestResolveRepoID_RemoteIsNotScopedByClientCwd pins the remote rule:
+// TestResolveRepoIDForLookup_RemoteIsNotScopedByClientCwd pins the remote rule:
 // --daemon-url points af at a daemon on ANOTHER machine, where the client's cwd
 // names a repo that exists HERE, not there. Auto-scoping by it would ask the
 // remote for a repo ID it does not have — and the remote read path has no disk
 // fallback — turning a working bare-title lookup into a spurious not-found.
-func TestResolveRepoID_RemoteIsNotScopedByClientCwd(t *testing.T) {
+func TestResolveRepoIDForLookup_RemoteIsNotScopedByClientCwd(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 	// cwd is a real git repo, so CurrentRepo() would happily produce a scope.
 	repo := t.TempDir()
@@ -161,7 +161,7 @@ func TestResolveRepoID_RemoteIsNotScopedByClientCwd(t *testing.T) {
 	t.Chdir(repo)
 
 	// Local target: the cwd repo DOES scope the lookup.
-	local, err := resolveRepoID()
+	local, err := resolveRepoIDForLookup()
 	if err != nil {
 		t.Fatalf("local resolve: %v", err)
 	}
@@ -171,12 +171,28 @@ func TestResolveRepoID_RemoteIsNotScopedByClientCwd(t *testing.T) {
 
 	// Remote target: the client's cwd must NOT scope it.
 	remoteTarget(t)
-	got, err := resolveRepoID()
+	got, err := resolveRepoIDForLookup()
 	if err != nil {
 		t.Fatalf("remote resolve: %v", err)
 	}
 	if got != "" {
 		t.Errorf("a REMOTE lookup must not be scoped by the client's cwd, got repoID %q", got)
+	}
+
+	// But the WRITE-path resolver must STAY cwd-scoped even against a remote:
+	// kill/archive/send-prompt talk to the LOCAL daemon over the control socket
+	// regardless of --daemon-url, so dropping their scope would send an unscoped
+	// destructive request to the local daemon and let it resolve a same-titled
+	// session in a different LOCAL repo.
+	write, err := resolveRepoID()
+	if err != nil {
+		t.Fatalf("write resolve: %v", err)
+	}
+	if write == "" {
+		t.Errorf("resolveRepoID must stay cwd-scoped for a remote target: an unscoped local kill/archive could hit the wrong repo")
+	}
+	if write != local {
+		t.Errorf("write scope changed with the target: got %q want %q", write, local)
 	}
 }
 
@@ -196,7 +212,7 @@ func TestSessionsGet_RemoteSendsUnscopedRequest(t *testing.T) {
 		return []session.InstanceData{{Title: "foo", Path: "/remote/alpha"}}, nil
 	})
 
-	repoID, err := resolveRepoID()
+	repoID, err := resolveRepoIDForLookup()
 	if err != nil {
 		t.Fatalf("resolve: %v", err)
 	}

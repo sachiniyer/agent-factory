@@ -74,21 +74,57 @@ func repoFromFlag() (*config.RepoContext, error) {
 
 // resolveRepoID resolves a repo ID from flags, cwd, or returns "" for all-repo mode.
 //
-// The cwd is only consulted for a LOCAL target. --daemon-url/AF_DAEMON_URL points
-// af at a daemon on another machine, where the client's cwd names a repo that
-// exists HERE, not there: sending that repo ID asks the remote to scope by
-// something it has never seen, so every title lookup and list comes back empty
-// unless the client happens to sit in a checkout at the identical absolute path.
-// Against a remote, only an EXPLICIT --repo scopes; a bare title resolves across
-// the remote's repos and the ambiguity guard stops it from ever landing on the
-// wrong one.
+// This ALWAYS consults the cwd, including when --daemon-url is set. That looks
+// wrong for a remote target — the client's cwd names a repo on this machine —
+// but most callers are write commands (kill/archive/restore/send-prompt, tab
+// mutations) whose transport does NOT honor --daemon-url: daemon.* goes over the
+// local control socket (callDaemon → DaemonSocketPath). Dropping the cwd scope
+// for them would send an UNSCOPED destructive request to the LOCAL daemon, which
+// could then resolve a same-titled session in a different local repo and kill or
+// archive it. Keeping the cwd scope keeps those commands pointed where they
+// already point.
 //
-// Known limitation: --repo is resolved into an ID by hashing the path on THIS
-// machine (config.RepoIDFromRoot), so against a remote it only disambiguates
-// when the daemon has that project checked out at the same absolute path.
-// Scoping a remote by a repo identity the daemon owns needs a daemon-side repo
-// lookup — a separate change; until then, prefer a bare title against a remote.
+// Lookups that genuinely reach the remote (sessions get/preview) use
+// resolveRepoIDForLookup instead.
 func resolveRepoID() (string, error) {
+	if repoFlag != "" {
+		repo, err := repoFromFlag()
+		if err != nil {
+			return "", err
+		}
+		return repo.ID, nil
+	}
+	// Try cwd
+	repo, err := config.CurrentRepo()
+	if err != nil {
+		return "", nil // all-repo mode
+	}
+	return repo.ID, nil
+}
+
+// resolveRepoIDForLookup resolves the repo scope for a READ that is actually
+// served by the targeted daemon — `sessions get` and `sessions preview`, whose
+// reads route through apiclient and so follow --daemon-url/AF_DAEMON_URL to the
+// remote.
+//
+// It differs from resolveRepoID in one way: against a REMOTE target the cwd is
+// ignored. The client's cwd names a repo that exists HERE, not on the daemon's
+// machine, so scoping by it asks the remote for a repo ID it has never seen —
+// and the remote read path has no disk fallback (snapshotRead), so a bare-title
+// lookup that used to succeed would report a spurious not-found. Against a
+// remote only an EXPLICIT --repo scopes; a bare title resolves across the
+// remote's repos, with the ambiguity guard refusing to pick between them.
+//
+// Deliberately NOT shared with the write commands: their transport is the local
+// control socket regardless of --daemon-url, so an unscoped request there is a
+// destructive mis-target rather than a remote lookup (see resolveRepoID).
+//
+// Known limitation: --repo becomes an ID by hashing the path on THIS machine
+// (config.RepoIDFromRoot), so against a remote it only disambiguates when the
+// daemon has that project checked out at the same absolute path. Scoping a
+// remote by a repo identity the daemon owns needs a daemon-side repo lookup — a
+// separate change; until then, prefer a bare title against a remote.
+func resolveRepoIDForLookup() (string, error) {
 	if repoFlag != "" {
 		repo, err := repoFromFlag()
 		if err != nil {
@@ -99,10 +135,9 @@ func resolveRepoID() (string, error) {
 	if apiclient.IsRemoteTarget() {
 		return "", nil // the client's cwd says nothing about the remote's repos
 	}
-	// Try cwd
 	repo, err := config.CurrentRepo()
 	if err != nil {
-		return "", nil // all-repo mode
+		return "", nil // all-repo mode, guarded by the ambiguity check
 	}
 	return repo.ID, nil
 }

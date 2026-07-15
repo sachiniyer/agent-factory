@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -318,8 +319,12 @@ func (m *Manager) uniqueArchivedTitleLocked(repoID, repoPath, base, program stri
 		if i > 1 {
 			candidate = fmt.Sprintf("%s (archived %d)", base, i)
 		}
-		if err := m.validateTitleAvailableLocked(repoID, repoPath, candidate, program, false, false, diskData); err == nil {
+		err := m.validateTitleAvailableLocked(repoID, repoPath, candidate, program, false, false, diskData)
+		if err == nil {
 			return candidate, nil
+		}
+		if errors.Is(err, errTitleCheckFatal) {
+			return "", err
 		}
 	}
 	return "", fmt.Errorf("could not find an available archived name for %q", base)
@@ -331,8 +336,15 @@ func (m *Manager) nextAvailableTitleLocked(repoID, repoPath, baseTitle, program 
 		if i > 1 {
 			candidate = fmt.Sprintf("%s-%d", baseTitle, i)
 		}
-		if err := m.validateTitleAvailableLocked(repoID, repoPath, candidate, program, remote, false, diskData); err == nil {
+		err := m.validateTitleAvailableLocked(repoID, repoPath, candidate, program, remote, false, diskData)
+		if err == nil {
 			return candidate, nil
+		}
+		// A check that could not RUN is not a taken candidate: no suffix would fare
+		// any better, so surface the actionable error instead of spinning through
+		// 10,000 of them under the lock.
+		if errors.Is(err, errTitleCheckFatal) {
+			return "", err
 		}
 	}
 	return "", fmt.Errorf("could not find an available title for %q", baseTitle)
@@ -455,7 +467,7 @@ func (m *Manager) validateTitleAvailableLocked(repoID, repoPath, title, program 
 func hookSlugOwnerInOtherRepos(candidate, repoID string) (string, string, error) {
 	allInstances, err := config.LoadAllRepoInstances()
 	if err != nil {
-		return "", "", fmt.Errorf("failed to check remote hook names across projects: %w", err)
+		return "", "", fmt.Errorf("%w: %v", errTitleCheckFatal, err)
 	}
 	var corrupted []string
 	for rid, raw := range allInstances {
@@ -478,11 +490,23 @@ func hookSlugOwnerInOtherRepos(candidate, repoID string) (string, string, error)
 	}
 	if len(corrupted) > 0 {
 		sort.Strings(corrupted)
-		return "", "", fmt.Errorf("cannot verify remote hook name %q is free: %d repo(s) have a corrupted instances.json that may be hiding a session using it: %s",
-			candidate, len(corrupted), strings.Join(corrupted, ", "))
+		return "", "", fmt.Errorf("%w: cannot verify remote hook name %q is free: %d repo(s) have a corrupted instances.json that may be hiding a session using it: %s",
+			errTitleCheckFatal, candidate, len(corrupted), strings.Join(corrupted, ", "))
 	}
 	return "", "", nil
 }
+
+// errTitleCheckFatal marks a title-availability failure that is NOT "this
+// candidate is taken" but "the check itself could not be completed" — today, a
+// corrupted instances.json that might be hiding a hook session using the name.
+//
+// The distinction is load-bearing for nextAvailableTitleLocked, which walks
+// candidates (base, base-2, base-3 …) and reads ANY error as "taken, try the
+// next". Without the marker a fatal error makes it burn all 10,000 candidates
+// while holding the manager lock and then report a misleading "could not find an
+// available title", swallowing the actionable corruption message. Callers check
+// errors.Is and surface it instead of suffixing around it.
+var errTitleCheckFatal = errors.New("cannot verify title availability")
 
 type titleConflictKind int
 

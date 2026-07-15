@@ -26,7 +26,7 @@ Session titles are unique **within a project, not across projects** — the same
 session "foo" exists in multiple projects: /repos/alpha, /repos/beta — pass --repo to pick one
 ```
 
-Against a remote daemon (`--daemon-url`/`AF_DAEMON_URL`) the current directory is ignored rather than sent as a scope — it names a repo on *your* machine, not the daemon's. Only an explicit `--repo` scopes a remote command, and it does so by hashing the path **as given on this machine**, so it only disambiguates when the daemon has that project checked out at the same absolute path. Against a remote, prefer a bare title and let the ambiguity error tell you when you need to narrow it.
+Against a remote daemon (`--daemon-url`/`AF_DAEMON_URL`), `sessions get` and `sessions preview` ignore the current directory rather than sending it as a scope — it names a repo on *your* machine, not the daemon's — so a bare title resolves across the remote's projects. Two caveats there: `--repo` is turned into an id by hashing the path **as given on this machine**, so it only disambiguates when the daemon has that project checked out at the same absolute path; and the other session commands still reach the *local* daemon regardless of `--daemon-url`, so they stay scoped to the current directory.
 
 One exception to per-project titles: **remote hook** sessions share a global name namespace, because the slug reaches `launch_cmd`/`delete_cmd` verbatim and external provisioners key real sandboxes on it — see [remote-hooks.md](remote-hooks.md#session-names).
 
