@@ -13,7 +13,7 @@ af
 
 ## Layout
 
-- **Sidebar.** Every session, with a live status indicator (running, waiting on
+- **Sidebar.** Every session, with a live status indicator (waiting on
   you, hit a usage limit, dead-and-being-recovered). Sessions are grouped and
   navigable with the arrow keys or `j`/`k`.
 - **Agent tab.** A snapshot of the selected agent's terminal, updated as it
