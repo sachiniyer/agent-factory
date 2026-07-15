@@ -69,8 +69,9 @@ func streamDialer(title, repoID, tabID string, tab int) termpane.Dialer {
 }
 
 // apiStream adapts an apiclient.StreamConn to termpane.Stream using agentproto's
-// codec: PTY_OUT binary frames become EventData, the authoritative resize control
-// frame becomes EventResize, and INPUT/RESIZE go out as binary frames.
+// codec: PTY_OUT binary frames become EventData, HELLO becomes EventCursor, the
+// authoritative resize control frame becomes EventResize, and INPUT/RESIZE go out as
+// binary frames.
 type apiStream struct {
 	sc *apiclient.StreamConn
 }
@@ -94,6 +95,12 @@ func (s *apiStream) Recv(ctx context.Context) (termpane.Event, error) {
 				return termpane.Event{Kind: termpane.EventData, Data: msg.Frame.Data}, nil
 			case agentproto.OpRepaint:
 				return termpane.Event{Kind: termpane.EventRepaint, Data: msg.Frame.Data}, nil
+			case agentproto.OpHello:
+				// The server's authoritative cursor. The opening hello merely restates the
+				// X-Af-Stream-Seq header the pane already adopted (harmlessly idempotent);
+				// a MID-STREAM one is load-bearing — it reports a jump the server made over
+				// evicted/discarded bytes, which our byte-counting cursor cannot see.
+				return termpane.Event{Kind: termpane.EventCursor, Seq: msg.Frame.Seq}, nil
 			}
 			continue // INPUT/RESIZE are client→server; ignore any echoed back
 		}

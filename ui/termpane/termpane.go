@@ -58,7 +58,8 @@ const (
 	reconnectMaxBackoff = 3 * time.Second
 )
 
-// EventKind discriminates a stream Event between output bytes and a resize echo.
+// EventKind discriminates a stream Event between output bytes, a resize echo, a
+// screen repaint, and a cursor re-seed.
 type EventKind int
 
 const (
@@ -72,15 +73,24 @@ const (
 	// output) that must NOT advance the replay cursor — it is per-subscriber and not
 	// part of the server's ring seq, so counting it would desync ?since.
 	EventRepaint
+	// EventCursor carries the server's authoritative replay cursor (Seq), which the
+	// pane adopts verbatim. The server sends it when IT moved the cursor
+	// non-contiguously (a ring eviction or a recovery discard skipped bytes that no
+	// longer exist) — a jump our own start + bytes-received arithmetic cannot see, and
+	// which would otherwise make the next reconnect replay already-rendered bytes.
+	EventCursor
 )
 
-// Event is one inbound stream event: output bytes (Data, when Kind==EventData) or
-// the authoritative size echo (Rows/Cols, when Kind==EventResize).
+// Event is one inbound stream event, selected by Kind: output bytes or a repaint
+// (Data), the authoritative size echo (Rows/Cols), or a cursor re-seed (Seq).
 type Event struct {
 	Kind EventKind
 	Data []byte
 	Rows uint16
 	Cols uint16
+	// Seq is the server's authoritative replay cursor, valid only when
+	// Kind == EventCursor.
+	Seq uint64
 }
 
 // Stream is one open connection to a session tab's PTY stream. The concrete
@@ -266,6 +276,14 @@ func (t *TermPane) readStream(stream Stream) {
 			t.gridMu.Lock()
 			_, _ = t.emu.Write(ev.Data)
 			t.gridMu.Unlock()
+		case EventCursor:
+			// The server moved our cursor over bytes it no longer holds (an eviction or
+			// a recovery discard). Adopt its position verbatim — our own
+			// start + bytes-received count is now stale, and reconnecting on it would ask
+			// to replay bytes we already rendered (§ EventCursor).
+			t.connMu.Lock()
+			t.cursor = ev.Seq
+			t.connMu.Unlock()
 		case EventResize:
 			// Authoritative echo: reflow the emulator to the server's size. We drive
 			// the size, so this normally matches wantCols/wantRows; applying it

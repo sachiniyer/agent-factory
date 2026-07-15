@@ -314,6 +314,14 @@ func writePTYStream(ctx context.Context, sub session.PTYSubscription, conn *webs
 			err = agentproto.WriteFrame(wctx, conn, agentproto.PTYOutFrame(ev.Data))
 		case session.PTYRepaint:
 			err = agentproto.WriteFrame(wctx, conn, agentproto.RepaintFrame(ev.Data))
+		case session.PTYCursor:
+			// The broker fast-forwarded this subscriber over bytes that no longer exist
+			// (a ring eviction or the #1840 recovery discard). Re-seed the client's
+			// cursor with the same OpHello frame the subscription opened with, so its
+			// next ?since matches the server's true position instead of the stale
+			// start + bytes-received arithmetic (which would replay already-rendered
+			// bytes on reconnect — the #1845 follow-up).
+			err = agentproto.WriteFrame(wctx, conn, agentproto.HelloFrame(uint64(ev.Seq)))
 		case session.PTYResize:
 			err = agentproto.WriteControl(wctx, conn, agentproto.NewResizeMessage(ev.Rows, ev.Cols))
 		}

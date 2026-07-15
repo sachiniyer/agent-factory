@@ -75,6 +75,10 @@ func (s *fakeStream) feed(b string) { s.events <- Event{Kind: EventData, Data: [
 // rendered like output but must NOT advance the replay cursor.
 func (s *fakeStream) feedRepaint(b string) { s.events <- Event{Kind: EventRepaint, Data: []byte(b)} }
 
+// feedCursor pushes a cursor re-seed (a server → client OpHello frame): the server
+// announcing that it moved this subscription's cursor over bytes it no longer holds.
+func (s *fakeStream) feedCursor(seq uint64) { s.events <- Event{Kind: EventCursor, Seq: seq} }
+
 func (s *fakeStream) sentInput() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -270,6 +274,43 @@ func TestRepaintRendersWithoutAdvancingCursor(t *testing.T) {
 	second, ok := d.sinceAt(1)
 	require.True(t, ok)
 	assert.Equal(t, uint64(len("AAA")), second, "a repaint must not advance the replay cursor")
+}
+
+// TestCursorEventReseedsReplayCursor pins the client half of the #1845 follow-up: when
+// the SERVER moves this subscription's cursor — a ring eviction, or the post-recovery
+// discard of a dead pane's ring — the pane must adopt the announced cursor VERBATIM
+// rather than keep counting from its own start + bytes-received total, which cannot see
+// a jump it did not receive bytes for.
+//
+// Fail-before/pass-after: without the EventCursor case the pane ignores the
+// announcement and keeps its stale count, so the reconnect requests ?since=6 (3 + 3)
+// instead of 503 — a cursor below the broker's base, which clamps it back up and
+// re-sends bytes the pane already rendered (duplicated terminal output).
+func TestCursorEventReseedsReplayCursor(t *testing.T) {
+	s1 := newFakeStream(0)
+	// s2 replays from the re-seeded cursor plus the bytes rendered since it.
+	s2 := newFakeStream(503)
+	d := &queueDialer{streams: []*fakeStream{s1, s2}}
+	tp := New(d.dial, 40, 6)
+	t.Cleanup(func() { _ = tp.Close() })
+
+	s1.feed("AAA") // EventData: advances the cursor 0 → 3
+	waitForRender(t, tp, 40, 6, "AAA")
+
+	// The server discards its ring and fast-forwards this subscriber to 500 — every
+	// byte below that is gone. It announces the jump; our local count (3) is now stale.
+	s1.feedCursor(500)
+	s1.feed("BBB") // EventData: advances the ADOPTED cursor 500 → 503
+	waitForRender(t, tp, 40, 6, "AAABBB")
+
+	// Drop → reconnect. ?since must be the announced cursor plus what we rendered after
+	// it (500 + 3), not our own byte count (3 + 3).
+	_ = s1.Close()
+	s2.feed("CCC")
+	waitForRender(t, tp, 40, 6, "AAABBBCCC")
+	second, ok := d.sinceAt(1)
+	require.True(t, ok)
+	assert.Equal(t, uint64(503), second, "the pane must adopt the server's announced cursor, not its own byte count")
 }
 
 // TestReconnectReassertsDesiredSize pins that a pane resized while disconnected

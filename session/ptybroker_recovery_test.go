@@ -260,7 +260,20 @@ func TestPTYBrokerRecoveryDoesNotReplayStaleBytes(t *testing.T) {
 	// A repaints the recovered screen...
 	mustRepaintContains(t, a, "SCREEN-AFTER-RECOVERY")
 
-	// ...and must NOT then be handed the dead pane's bytes on top of it.
+	// ...then learns where the discard left its cursor. A was BEHIND at recovery, so
+	// the discard fast-forwarded it over the dead bytes; that jump is the server's and
+	// A's client cannot infer it, so it must be announced (#1845 follow-up) or A's next
+	// reconnect asks to replay bytes it has already rendered.
+	ev, err := nextWithin(t, a, 2*time.Second)
+	if err != nil {
+		t.Fatalf("NextEvent (want the cursor re-seed): %v", err)
+	}
+	if ev.Kind != PTYCursor || ev.Seq != Seq(len(stale)) {
+		t.Fatalf("event = %+v, want PTYCursor Seq=%d (base advanced over the discarded ring)", ev, len(stale))
+	}
+
+	// ...and must NOT be handed the dead pane's bytes on top of the repaint. The
+	// discard dropped them; it did not merely defer them.
 	if ev, err := nextWithin(t, a, 250*time.Millisecond); err == nil {
 		t.Fatalf("after the recovery repaint A got Kind=%d Data=%q, want no event: "+
 			"dead-pane bytes must not overwrite the recovered screen", ev.Kind, ev.Data)
@@ -270,4 +283,165 @@ func TestPTYBrokerRecoveryDoesNotReplayStaleBytes(t *testing.T) {
 	// ring or strand A's cursor above head.
 	ch.emit(t, []byte("post-recovery-output"))
 	mustData(t, a, "post-recovery-output")
+}
+
+// clientCursor models what a REAL client does with the events it receives — the same
+// arithmetic ui/termpane's readStream and web/src/terminal.ts run: adopt the server's
+// cursor whenever it announces one, advance it by each PTYData byte count, and ignore
+// repaints (per-subscriber, outside the ring seq).
+//
+// Modelling it is the point of the tests below: a client knows only what it was TOLD.
+// It cannot see the broker's base/head, so a cursor the SERVER moves without saying so
+// desyncs it silently — and the damage only surfaces one reconnect later, which is
+// exactly why the broker-internal assertions in the other tests missed it.
+type clientCursor struct{ seq Seq }
+
+// applyAll drains every event available within d, folds each into the client's cursor
+// the way a real client would, and returns the PTY bytes the client rendered.
+func (c *clientCursor) applyAll(t *testing.T, sub PTYSubscription, d time.Duration) []byte {
+	t.Helper()
+	var rendered []byte
+	for {
+		ev, err := nextWithin(t, sub, d)
+		if err != nil {
+			return rendered // drained: no event within d
+		}
+		switch ev.Kind {
+		case PTYCursor:
+			c.seq = ev.Seq
+		case PTYData:
+			c.seq += Seq(len(ev.Data))
+			rendered = append(rendered, ev.Data...)
+		}
+	}
+}
+
+// TestPTYBrokerReconnectAfterRecoveryDoesNotReplayRenderedBytes is the first codex P2
+// on the merged #1845: a subscriber that saw post-recovery output and THEN reconnects
+// must not be re-sent the bytes it already rendered.
+//
+// #1845 advances `base` over the discarded dead-pane ring, which fast-forwards a
+// lagging subscriber's server-side cursor through the eviction clamp. That jump is
+// invisible to the client, which derives its own cursor as start + bytes-received: it
+// keeps counting from the pre-recovery value, so its cursor sits BELOW the broker's new
+// base. On reconnect that stale ?since is clamped back up to base and the broker
+// replays post-recovery bytes the client already has — duplicated/corrupt terminal
+// output until something forces a full repaint.
+//
+// Fail-before/pass-after: without the PTYCursor re-seed the client's cursor and the
+// server's diverge by the discarded gap (the first assert), and the reconnect replays
+// POST-RECOVERY-OUTPUT a second time (the last assert).
+func TestPTYBrokerReconnectAfterRecoveryDoesNotReplayRenderedBytes(t *testing.T) {
+	const drain = 250 * time.Millisecond
+	ch := &fakeClientlessChannel{snapshot: []byte("SCREEN-BEFORE-DEATH")}
+	br := newPTYBroker(ch)
+
+	a, err := br.subscribe(0)
+	if err != nil {
+		t.Fatalf("subscribe A: %v", err)
+	}
+	// The client seeds from the opening hello / X-Af-Stream-Seq header, then drains the
+	// initial repaint.
+	client := &clientCursor{seq: a.Seq()}
+	client.applyAll(t, a, drain)
+
+	// A falls behind: its WS write blocked while the dying pane kept producing, so
+	// these bytes sit unread in the ring with A's cursor below head.
+	const stale = "STALE-BYTES-FROM-DEAD-PANE"
+	ch.emit(t, []byte(stale))
+	waitRingHead(t, br, Seq(len(stale)))
+
+	// tmux dies and the daemon re-spawns it: the #1845 discard drops the dead pane's
+	// bytes and advances base over A's cursor.
+	ch.mu.Lock()
+	ch.snapshot = []byte("SCREEN-AFTER-RECOVERY")
+	ch.mu.Unlock()
+	br.resetCapture()
+
+	// A's write unblocks and it drains the recovery repaint + the cursor re-seed.
+	client.applyAll(t, a, drain)
+
+	// The re-spawned pane produces real output, which A receives and renders.
+	const post = "POST-RECOVERY-OUTPUT"
+	ch.emit(t, []byte(post))
+	if got := client.applyAll(t, a, drain); string(got) != post {
+		t.Fatalf("A rendered %q after recovery, want %q", got, post)
+	}
+
+	// The invariant: what the client believes its cursor to be IS what the server knows
+	// it to be. Everything below follows from this.
+	if client.seq != a.Seq() {
+		t.Fatalf("client cursor = %d, server cursor = %d: the recovery jump was never "+
+			"announced, so the client's next ?since is stale by the discarded gap",
+			client.seq, a.Seq())
+	}
+
+	// The user-visible consequence, end to end: A's socket drops and it reconnects with
+	// the cursor it tracked. It has rendered every byte the broker holds, so it must be
+	// handed nothing to replay.
+	_ = a.Close()
+	b, err := br.subscribe(client.seq)
+	if err != nil {
+		t.Fatalf("reconnect subscribe: %v", err)
+	}
+	if ev, err := nextWithin(t, b, drain); err == nil {
+		t.Fatalf("reconnect at cursor %d replayed Kind=%d Data=%q, want no event: the "+
+			"client already rendered those bytes and would render them twice",
+			client.seq, ev.Kind, ev.Data)
+	}
+}
+
+// TestPTYBrokerReconnectRepaintsWhenRecoveryDiscardedItsCursor is the second codex P2
+// on the merged #1845: a reconnect whose cursor the recovery discard skipped must be
+// repainted, because it can get no replay.
+//
+// The path is recovery with NOBODY attached (the last client's keepalive had already
+// lapsed, or it dropped just after `resume` was computed): resetCapture discards the
+// ring and advances base unconditionally, but takes the no-subscriber branch, so no
+// re-seed fans out. The client then reconnects with the cursor it left on — now below
+// base. subscribe clamps it up to base, which yields no replay, and the repaint
+// injection used to be keyed on `since == 0`, so a reconnect got none either. The
+// client is left rendering its pre-death screen until the re-spawned pane happens to
+// emit something on its own.
+//
+// Fail-before/pass-after: before the fix the reconnect receives NO event at all and
+// mustRepaintContains times out.
+func TestPTYBrokerReconnectRepaintsWhenRecoveryDiscardedItsCursor(t *testing.T) {
+	ch := &fakeClientlessChannel{snapshot: []byte("SCREEN-BEFORE-DEATH")}
+	br := newPTYBroker(ch)
+
+	a, err := br.subscribe(0)
+	if err != nil {
+		t.Fatalf("subscribe A: %v", err)
+	}
+	mustRepaintContains(t, a, "SCREEN-BEFORE-DEATH")
+
+	// The client renders some output, so it holds a real (non-zero) replay cursor —
+	// NOT the `since == 0` fresh-subscriber sentinel, which would repaint anyway.
+	ch.emit(t, []byte("seen"))
+	mustData(t, a, "seen")
+	cursor := a.Seq()
+
+	// It then falls behind on bytes it never renders and its socket drops, leaving its
+	// cursor below head. The last subscriber leaving also stops the capture.
+	const unseen = "NEVER-RENDERED"
+	ch.emit(t, []byte(unseen))
+	waitRingHead(t, br, cursor+Seq(len(unseen)))
+	_ = a.Close()
+
+	// tmux dies and is re-spawned while nobody is attached: the discard advances base
+	// past the client's cursor, and there is no subscriber to re-seed.
+	ch.mu.Lock()
+	ch.snapshot = []byte("SCREEN-AFTER-RECOVERY")
+	ch.mu.Unlock()
+	br.resetCapture()
+
+	// The client reconnects on the cursor it left on. The broker cannot serve that
+	// replay — those bytes are gone — so a repaint of the RECOVERED screen is the only
+	// thing that can resync it.
+	b, err := br.subscribe(cursor)
+	if err != nil {
+		t.Fatalf("reconnect subscribe: %v", err)
+	}
+	mustRepaintContains(t, b, "SCREEN-AFTER-RECOVERY")
 }

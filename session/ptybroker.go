@@ -152,6 +152,21 @@ func (b *ptyBroker) subscribe(since Seq) (*ptySub, error) {
 	if cursor < b.base {
 		cursor = b.base
 	}
+	// A repaint is owed when the stream CANNOT rebuild this client's screen from
+	// `cursor` alone: a fresh subscriber (since == 0 — pipe-pane carries no history),
+	// or a reconnect asking for bytes BELOW the retained window, which are provably
+	// gone (#1845 follow-up). The second case is the post-recovery reconnect: the
+	// recovery discard drops the dead pane's ring and advances base past the cursor the
+	// client left on, so the replay it asked for cannot be served. Clamping it up to
+	// base silently would hand it neither the replay nor a repaint — leaving the
+	// pre-death screen frozen on-screen until some unrelated later output arrives. A
+	// ring eviction reaches this the same way, and wants the same repaint.
+	//
+	// Deliberately NOT keyed on "cursor was clamped at all": a `since` PAST head also
+	// clamps (down, to the live tail), but that client is not missing any byte the
+	// broker holds, and repainting it would add flicker to the documented
+	// clamp-to-tail path. Only a cursor below base means bytes are missing.
+	needRepaint := since == 0 || since < b.base
 	b.nextSubID++
 	sub := &ptySub{
 		br:         b,
@@ -173,14 +188,15 @@ func (b *ptyBroker) subscribe(since Seq) (*ptySub, error) {
 		return nil, err
 	}
 
-	// A fresh subscriber (since == 0, the live tail) gets an initial repaint of the
-	// current screen — pipe-pane only streams future output, so without this a
-	// just-opened pane renders blank until the next byte. A reconnecting client
-	// (since > 0) resumes via ?since replay instead, so it is left seamless.
+	// Paint the current screen for a subscriber the replay stream can't reconstruct
+	// (see needRepaint): a fresh one (pipe-pane only streams FUTURE output, so without
+	// this a just-opened pane renders blank until the next byte) or a reconnect whose
+	// cursor was clamped over discarded bytes. A reconnect that lands inside the
+	// retained window resumes via ?since replay instead, so it is left seamless.
 	// Captured AFTER registration (register-first) so no output can slip in between
 	// the snapshot and the cursor: bytes in that tiny window are simply in both the
 	// snapshot and the replayed tail (a harmless double-render), never dropped.
-	if since == 0 {
+	if needRepaint {
 		if snap, err := b.ch.Snapshot(); err == nil && len(snap.Screen) > 0 {
 			rp := buildRepaint(snap)
 			b.mu.Lock()
@@ -370,7 +386,10 @@ func (b *ptyBroker) resetCapture() {
 	// same mechanism a ring overflow already uses.
 	//
 	// Unconditional, including when nobody is attached: a later Subscribe(since) would
-	// otherwise replay the dead pane's tail into a fresh client.
+	// otherwise replay the dead pane's tail into a fresh client. That no-subscriber path
+	// is why subscribe() repaints a reconnect whose `since` lands below base — the
+	// discard leaves it a cursor that can never be replayed, and with nobody attached
+	// there is no re-seed here to cover it.
 	b.mu.Lock()
 	b.base = b.headLocked()
 	b.buf = nil
@@ -600,7 +619,21 @@ func (s *ptySub) NextEvent(ctx context.Context) (PTYEvent, error) {
 		}
 		head := s.br.headLocked()
 		if s.cursor < s.br.base {
-			s.cursor = s.br.base // fell behind eviction: skip the lost gap
+			// Fell behind eviction, or the #1840 recovery discard dropped the dead pane's
+			// ring: the bytes between the cursor and base provably no longer exist, so
+			// skip the lost gap. TELL the client where its cursor landed (#1845
+			// follow-up) — the jump is the SERVER's, and a client that derives its cursor
+			// as start + bytes-received cannot see it. Left silent, the client keeps
+			// counting from its stale cursor, and its next reconnect asks for a ?since
+			// below base, gets clamped back up, and is re-sent bytes it already rendered
+			// — duplicated output on a screen that was correct. Delivered as its own
+			// event (rather than riding the next PTYData) so the re-seed reaches the
+			// client even when the recovered pane stays silent afterward. The clamp is
+			// idempotent — cursor == base now, so this fires once per jump.
+			s.cursor = s.br.base
+			ev := PTYEvent{Kind: PTYCursor, Seq: s.cursor}
+			s.br.mu.Unlock()
+			return ev, nil
 		}
 		if s.cursor < head {
 			off := int(s.cursor - s.br.base)
