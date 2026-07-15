@@ -3,6 +3,7 @@ package session
 import (
 	"crypto/rand"
 	"fmt"
+	"sort"
 	"time"
 
 	"github.com/sachiniyer/agent-factory/session/tmux"
@@ -37,6 +38,11 @@ const shellTabName = "shell"
 // webTabName is the default display label of a web/iframe tab ('web', then
 // 'web-2', … on collision). Created via `af sessions tab-create --kind web`.
 const webTabName = "web"
+
+// vscodeTabName is the default display label of a VS Code tab ('vscode', then
+// 'vscode-2', … on collision). Created via `af sessions tab-create --kind vscode`
+// or the web UI's + New tab flow.
+const vscodeTabName = "vscode"
 
 // shellTmuxSuffix extends an instance's agent tmux session name to derive its
 // shell tab's session name (e.g. af_<repoHash>_<title>__shell). Deterministic
@@ -75,6 +81,22 @@ const (
 	// render a browser). Created only through `af sessions tab-create --kind web`
 	// / the CreateTab API — never a TUI hotkey.
 	TabKindWeb
+	// TabKindVSCode is a VS Code editor tab: a full code-server (or
+	// openvscode-server) editor rooted at the session's WORKTREE, rendered as an
+	// iframe in the web UI and as a placeholder in the TUI.
+	//
+	// Like TabKindWeb it has NO tmux PTY, and — deliberately — no URL either. The
+	// editor process is DAEMON-managed and keyed by SESSION, not by tab: one
+	// code-server per session, shared by every vscode tab in it, spawned lazily on
+	// loopback with an EPHEMERAL port. Persisting a URL would therefore bake in a
+	// port that is stale the moment the daemon restarts, so the target is resolved
+	// dynamically at proxy time (Manager.WebTabTarget), which is also what makes
+	// restore-then-respawn-lazily work with no stored state.
+	//
+	// Created through `af sessions tab-create --kind vscode` / the CreateTab API /
+	// the web UI's + New tab flow — never a TUI hotkey. The target is ALWAYS the
+	// session's worktree, so unlike a web tab it takes no --url/--port.
+	TabKindVSCode
 )
 
 // Tab is one process running in an instance's worktree, backed by a single tmux
@@ -143,12 +165,54 @@ func newWebTab(url string) *Tab {
 	return &Tab{ID: newTabID(), Name: webTabName, Kind: TabKindWeb, URL: url}
 }
 
+// newVSCodeTab returns a TabKindVSCode tab. It carries neither a tmux session nor
+// a URL: the editor is a daemon-managed per-session code-server whose loopback
+// address is resolved at proxy time (see TabKindVSCode). The caller sets a unique
+// display name.
+func newVSCodeTab() *Tab {
+	return &Tab{ID: newTabID(), Name: vscodeTabName, Kind: TabKindVSCode}
+}
+
+// tabKindNames maps the CreateTabRequest.Kind / `--kind` wire value to the
+// TabKind it selects. It is the SINGLE source of truth for that vocabulary: the
+// CLI (api/sessions_tabs.go) validates against it and the daemon
+// (daemon/manager_tabs.go) dispatches on it, so the two can no longer drift into
+// the state where a kind the CLI accepts is one the daemon rejects.
+//
+// An empty kind is deliberately absent: it is not a kind but the DEFAULT
+// (shell-or-process, chosen by the request's Shell flag), so callers handle "" on
+// its own before consulting this map.
+var tabKindNames = map[string]TabKind{
+	"web":    TabKindWeb,
+	"vscode": TabKindVSCode,
+}
+
+// ParseTabKindName resolves a `--kind` / CreateTabRequest.Kind wire value to its
+// TabKind. ok is false for any unknown value AND for the empty string, which is
+// the caller's shell/process default rather than a kind.
+func ParseTabKindName(name string) (kind TabKind, ok bool) {
+	k, ok := tabKindNames[name]
+	return k, ok
+}
+
+// TabKindNameList returns the sorted `--kind` values that select an explicit tab
+// kind, for help text and "expected one of …" error messages, so those strings
+// are generated from the vocabulary rather than hand-maintained beside it.
+func TabKindNameList() []string {
+	names := make([]string, 0, len(tabKindNames))
+	for name := range tabKindNames {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
 // tabKindForData clamps a persisted TabKind to a known value, defaulting to
 // TabKindShell for any unexpected value written by a newer binary so a forward-
 // incompatible record degrades to a plain shell tab rather than an agent tab.
 func tabKindForData(k TabKind) TabKind {
 	switch k {
-	case TabKindAgent, TabKindShell, TabKindProcess, TabKindWeb:
+	case TabKindAgent, TabKindShell, TabKindProcess, TabKindWeb, TabKindVSCode:
 		return k
 	default:
 		return TabKindShell

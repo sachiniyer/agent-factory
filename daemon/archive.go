@@ -128,6 +128,15 @@ func (m *Manager) ArchiveSession(req ArchiveSessionRequest) (string, session.Ins
 		return "", session.InstanceData{}, fmt.Errorf("cannot archive session %q: %w", req.Title, err)
 	}
 
+	// Stop this session's VS Code editor BEFORE the worktree moves. Ordering is
+	// load-bearing for the same reason the pane-exit wait is: the editor's cwd is
+	// the worktree, and moving a directory out from under a live code-server
+	// leaves it serving a path that no longer exists. It is daemon-owned
+	// infrastructure, not a tab, so ArchiveTeardown does not cover it. No-ops when
+	// the session never had a vscode tab; the tab itself persists and lazily
+	// respawns an editor if the session is restored.
+	m.vscode.stopFor(daemonInstanceKey(repoID, req.Title))
+
 	// Tear down tmux and relocate the worktree in one call: the move is folded
 	// into the teardown core immediately after the pane-exit wait (#1195 Ph2b),
 	// so no live pane is cwd'd in the worktree during the move (previously a

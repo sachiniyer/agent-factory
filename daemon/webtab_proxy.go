@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httputil"
@@ -25,12 +26,22 @@ const webtabPathPrefix = "/v1/webtab/"
 // the auth gate then accepts it for FOLLOW-UP requests under that prefix only.
 const webtabTokenCookie = "af_webtab_token" //nolint:gosec // cookie name, not a credential
 
-// WebTabTarget resolves the target URL of the web tab at tabIdx in the session
-// addressed by sessionID (the stable id the web client uses). It errors when the
-// session or tab is missing, or when the tab is not a web tab. The returned URL
-// is the normalized target stored at create time.
+// WebTabTarget resolves the loopback target of the iframe tab at tabIdx in the
+// session addressed by sessionID (the stable id the web client uses). It errors
+// when the session or tab is missing, or when the tab is not an iframe kind.
+//
+// For a web tab the target is the normalized URL stored at create time. For a
+// VSCODE tab there is no stored URL by design: the target is the daemon-managed
+// per-session code-server, ENSURED here — spawned on the first request and
+// respawned if it died. Resolving on every request is what makes the editor
+// self-heal (a crashed editor recovers on the next render or pane reload) and
+// what makes restore work with no stored state: the port is chosen fresh each
+// time, so a persisted URL would only ever be a stale port after a restart.
+//
+// A missing editor binary surfaces as errVSCodeBinaryMissing, which the proxy
+// renders as an install hint rather than an error.
 func (m *Manager) WebTabTarget(sessionID string, tabIdx int) (string, error) {
-	instance, _, _, err := m.resolveStreamSession(sessionID, "")
+	instance, repoID, title, err := m.resolveStreamSession(sessionID, "")
 	if err != nil {
 		return "", err
 	}
@@ -42,13 +53,32 @@ func (m *Manager) WebTabTarget(sessionID string, tabIdx int) (string, error) {
 		return "", fmt.Errorf("session %q has no tab at index %d", sessionID, tabIdx)
 	}
 	tab := tabs[tabIdx]
-	if tab.Kind != session.TabKindWeb {
-		return "", fmt.Errorf("tab %d of session %q is not a web tab", tabIdx, sessionID)
+	switch tab.Kind {
+	case session.TabKindWeb:
+		if strings.TrimSpace(tab.URL) == "" {
+			return "", fmt.Errorf("web tab %d of session %q has no target URL", tabIdx, sessionID)
+		}
+		return tab.URL, nil
+	case session.TabKindVSCode:
+		return m.ensureVSCodeServer(instance, repoID, title)
+	default:
+		return "", fmt.Errorf("tab %d of session %q is not a web or vscode tab", tabIdx, sessionID)
 	}
-	if strings.TrimSpace(tab.URL) == "" {
-		return "", fmt.Errorf("web tab %d of session %q has no target URL", tabIdx, sessionID)
+}
+
+// ensureVSCodeServer returns the loopback base URL of the editor serving
+// instance's worktree, starting it if needed. Keyed by daemonInstanceKey — the
+// same key kill/archive stop it under — so every vscode tab and every pane in a
+// session shares ONE editor.
+func (m *Manager) ensureVSCodeServer(instance *session.Instance, repoID, title string) (string, error) {
+	if m.vscode == nil {
+		return "", fmt.Errorf("daemon has no VS Code supervisor")
 	}
-	return tab.URL, nil
+	worktree := instance.GetWorktreePath()
+	if strings.TrimSpace(worktree) == "" {
+		return "", fmt.Errorf("session %q has no worktree to open in VS Code", title)
+	}
+	return m.vscode.ensureServer(daemonInstanceKey(repoID, title), worktree)
 }
 
 // webTabProxyHandler reverse-proxies GET /v1/webtab/{sessionId}/{tabIdx}/{rest...}
@@ -86,6 +116,22 @@ func (cs *controlServer) webTabProxyHandler(w http.ResponseWriter, r *http.Reque
 
 	target, err := cs.manager.WebTabTarget(sessionID, tabIdx)
 	if err != nil {
+		// A machine with no editor installed is an ordinary, actionable state, not
+		// a failure: render the install hint INTO the pane (the iframe shows this
+		// document) rather than an error page, and log nothing — this resolves on
+		// every request, so an error log here would spam once per asset fetch.
+		if errors.Is(err, errVSCodeBinaryMissing) {
+			writeVSCodeNoticePage(w, vscodeInstallHint)
+			return
+		}
+		// A cold code-server can outrun the start timeout on a slow machine. The
+		// process is still coming up, so show a self-refreshing notice that turns
+		// into the editor once it listens, rather than a dead error page the user
+		// has to react to.
+		if errors.Is(err, errVSCodeStarting) {
+			writeVSCodeNoticePageRetry(w, "VS Code is still starting…", true)
+			return
+		}
 		writeHTTPError(w, http.StatusNotFound, err)
 		return
 	}
@@ -113,7 +159,7 @@ func (cs *controlServer) webTabProxyHandler(w http.ResponseWriter, r *http.Reque
 			Value:    tok,
 			Path:     webtabPathPrefix,
 			HttpOnly: true,
-			Secure:   true,
+			Secure:   requestIsHTTPS(r),
 			SameSite: http.SameSiteStrictMode,
 		})
 	}
@@ -164,6 +210,39 @@ func (cs *controlServer) webTabProxyHandler(w http.ResponseWriter, r *http.Reque
 		},
 	}
 	proxy.ServeHTTP(w, r)
+}
+
+// requestIsHTTPS reports whether the BROWSER's connection to the daemon is
+// encrypted, which decides whether the web-tab token cookie may carry Secure.
+//
+// This has to be measured, not assumed. af terminates no TLS of its own (#1755
+// removed it), so r.TLS is always nil and a hardcoded Secure:true was silently
+// self-defeating: a browser REJECTS a Secure cookie set over a plain-HTTP origin,
+// so on a network listener (a Tailscale IP, say) with require_token=true the
+// cookie was never stored and every iframe sub-resource and WS upgrade — which is
+// all a code-server is — came back 401. Loopback hid it: browsers treat
+// http://localhost as a trustworthy origin and accept the cookie there.
+//
+// X-Forwarded-Proto covers the supported way to actually get HTTPS: a
+// TLS-terminating reverse proxy in front of the daemon. Trusting a client-settable
+// header here is safe because it can only ever HARM the sender — forging "https"
+// onto a plain-HTTP request just marks their own cookie Secure so their own
+// browser withholds it. It grants nothing: the auth gate never reads a header for
+// its decisions (see isLoopbackRequest).
+//
+// Dropping Secure on a plain-HTTP connection concedes nothing either: that
+// connection is already plaintext, and it already carried the same token in the
+// ?access_token query. Transport security is the reverse proxy's or the VPN's job.
+func requestIsHTTPS(r *http.Request) bool {
+	if r.TLS != nil {
+		return true
+	}
+	proto := r.Header.Get("X-Forwarded-Proto")
+	// A proxy chain may append: take the first (the browser-facing) hop.
+	if i := strings.Index(proto, ","); i >= 0 {
+		proto = proto[:i]
+	}
+	return strings.EqualFold(strings.TrimSpace(proto), "https")
 }
 
 // forwardAppCookies forwards the dev app's cookies upstream while stripping the

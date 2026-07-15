@@ -44,6 +44,10 @@ SESSION_A=probe-a
 SESSION_B=probe-b
 SESSION_C=probe-c
 SESSION_WEB=probe-web
+# The vscode tab lives on its OWN session, not on SESSION_WEB: the web-tab tests
+# assert that session's exact tab list (a #1779 case closes a tab and counts what is
+# left), so seeding an extra tab there would silently break them.
+SESSION_VSCODE=probe-vscode
 SEEDED_TASK=probe-task
 # The task-only project's task name (MOCK3), kept distinct from SEEDED_TASK so the
 # scoped Tasks assertions never collide on a substring match.
@@ -54,6 +58,12 @@ TASK3_NAME=mock3-task
 WEBTAB_PORT=8890
 WEBTAB_LOCAL_MARKER=AF_WEBTAB_LOCAL_OK
 WEBTAB_EXTERNAL_URL=https://blocked.example.test/
+# A FAKE code-server placed on PATH under the real binary's name, so the vscode
+# tab exercises the daemon's DETECTION path (the one nearly every user hits)
+# rather than the vscode_server_binary override. af never bundles a real
+# code-server, and the image carries none, so the fake is what makes an
+# end-to-end vscode-tab render testable at all.
+VSCODE_MARKER=AF_VSCODE_TAB_OK
 export AGENT_FACTORY_HOME="$HOME_DIR"
 # A container binary is built at the branch version (typically behind the latest
 # release); without this it would self-update on boot and restart the daemon
@@ -205,6 +215,45 @@ EOF
 node /work/webtab-server.js &
 WEBTAB_SERVER_PID=$!
 
+# --- install the fake code-server (feat: VS Code tabs) ----------------------
+# Named "code-server" on PATH so the daemon DETECTS it exactly as it would a real
+# install. It honors the flags the daemon actually passes (--bind-addr, and the
+# positional worktree) and serves a deterministic marker, so the Playwright test
+# proves the daemon spawned it on loopback, rooted at the session's worktree, and
+# reverse-proxied it into the pane.
+echo ">>> installing the fake code-server on PATH ..."
+cat >/usr/local/bin/code-server <<EOF
+#!/usr/bin/env node
+const http = require("http");
+const args = process.argv.slice(2);
+// Only these flags take a value; a bare word after a boolean flag is the folder.
+const valueFlags = new Set(["--bind-addr", "--auth", "--config"]);
+let addr = "";
+let folder = "";
+for (let i = 0; i < args.length; i++) {
+  if (valueFlags.has(args[i])) {
+    if (args[i] === "--bind-addr") { addr = args[i + 1]; }
+    i++;
+    continue;
+  }
+  if (!args[i].startsWith("--")) { folder = args[i]; }
+}
+if (!addr) { console.error("fake code-server: no --bind-addr"); process.exit(2); }
+const [host, port] = [addr.slice(0, addr.lastIndexOf(":")), addr.slice(addr.lastIndexOf(":") + 1)];
+const server = http.createServer((req, res) => {
+  res.setHeader("content-type", "text/html");
+  res.end(
+    '<!doctype html><html><body><h1 id="marker">$VSCODE_MARKER</h1>' +
+      '<p id="folder">' + folder + "</p><p id=\"path\">" + req.url + "</p></body></html>",
+  );
+});
+// code-server upgrades WebSockets on every path; mirror that so the proxy's WS
+// relay is exercised rather than 404'd.
+server.on("upgrade", (req, socket) => { socket.destroy(); });
+server.listen(Number(port), host);
+EOF
+chmod +x /usr/local/bin/code-server
+
 echo ">>> creating web-tab session $SESSION_WEB ..."
 "$BIN" sessions create --repo "$MOCK" --name "$SESSION_WEB" --program claude >/dev/null
 for i in $(seq 1 30); do
@@ -217,6 +266,20 @@ done
 # "external", so the Playwright test can address each by its tab label.
 "$BIN" sessions tab-create --repo "$MOCK" "$SESSION_WEB" --kind web --port "$WEBTAB_PORT" --name preview >/dev/null
 "$BIN" sessions tab-create --repo "$MOCK" "$SESSION_WEB" --kind web --url "$WEBTAB_EXTERNAL_URL" --name external >/dev/null
+
+# --- seed a vscode-tab session (feat: VS Code tabs) -------------------------
+# The daemon spawns the fake code-server from PATH on the first render, on a
+# loopback port it picks, and proxies it — the same path a real code-server takes.
+# It takes no target: the session's worktree is the target.
+echo ">>> creating vscode-tab session $SESSION_VSCODE ..."
+"$BIN" sessions create --repo "$MOCK" --name "$SESSION_VSCODE" --program claude >/dev/null
+for i in $(seq 1 30); do
+    if "$BIN" sessions get "$SESSION_VSCODE" >/dev/null 2>&1; then
+        break
+    fi
+    sleep 1
+done
+"$BIN" sessions tab-create --repo "$MOCK" "$SESSION_VSCODE" --kind vscode --name editor >/dev/null
 
 # --- run the Playwright harness ---------------------------------------------
 echo ">>> installing web deps + running the Playwright harness ..."
@@ -231,10 +294,12 @@ export AF_WEB_SESSION_A="$SESSION_A"
 export AF_WEB_SESSION_B="$SESSION_B"
 export AF_WEB_SESSION_C="$SESSION_C"
 export AF_WEB_SESSION_WEB="$SESSION_WEB"
+export AF_WEB_SESSION_VSCODE="$SESSION_VSCODE"
 export AF_WEB_READY_MARKER="$READY_MARKER"
 export AF_WEB_TASK_NAME="$SEEDED_TASK"
 export AF_WEB_TASK3_NAME="$TASK3_NAME"
 export AF_WEBTAB_LOCAL_MARKER="$WEBTAB_LOCAL_MARKER"
 export AF_WEBTAB_EXTERNAL_URL="$WEBTAB_EXTERNAL_URL"
+export AF_VSCODE_MARKER="$VSCODE_MARKER"
 
 npx playwright test

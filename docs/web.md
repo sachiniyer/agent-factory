@@ -340,8 +340,10 @@ dev-server preview**: an agent runs a dev server in its worktree and injects a t
 pointing at it, so you watch the app render in the browser as the agent builds it.
 
 Web tabs are created from inside a session (by an agent or by you) with the
-CLI/API — there is no `+`-button for them, because the target comes from whatever
-the agent is running:
+CLI/API — they are not in the tab bar's `+` menu, because their target comes from
+whatever the agent is running rather than from anything the UI could ask you for
+(a [VS Code tab](#vs-code-tabs), which always targets the worktree, *is* in that
+menu):
 
 ```bash
 # a local dev server on port 5173 (Vite/Next/CRA/…)
@@ -408,6 +410,63 @@ UI or open in a browser") — a terminal can't render a browser. Tab navigation
 The iframe is sandboxed (scripts and forms run, but it gets an opaque origin, so a
 proxied preview cannot reach the web UI or read its token). A small **reload**
 control sits above every web tab for dev-preview refreshes.
+
+## VS Code tabs
+
+A **VS Code tab** is a full VS Code editor, in the browser, opened on the
+session's **worktree** — so you can read and edit what an agent is building
+without leaving the web UI. It renders as a pane like any other tab, and works in
+splits and drag/drop.
+
+Unlike a web tab it takes **no target**: the session's worktree is always what it
+opens. That is what makes it offerable from the tab bar's **+** menu, which lists
+**Terminal** and **VS Code**. From the CLI:
+
+```bash
+af sessions tab-create <title> --kind vscode [--name editor]
+```
+
+!!! note "code-server is not bundled — install it yourself"
+    af **detects** an editor rather than shipping one. It looks for
+    [`code-server`](https://github.com/coder/code-server#install) first, then
+    [`openvscode-server`](https://github.com/gitpod-io/openvscode-server), on the
+    daemon's `PATH`. If neither is installed the tab still creates, and the pane
+    shows an install hint instead of an error — install the editor and reload the
+    pane. To point af at a binary outside `PATH` (or under another name), set:
+
+    ```toml
+    # ~/.agent-factory/config.toml
+    vscode_server_binary = "/opt/code-server/bin/code-server"
+    ```
+
+    This key is **global-only**: it names a binary the daemon executes, so a
+    repo's checked-in config can never choose what af runs on your machine.
+
+**How it runs.** The daemon starts **one** code-server per session — shared by
+every VS Code tab and pane in it — the first time a pane renders, bound to
+**loopback** on a port it picks. The editor is reached only through the daemon's
+`/v1/webtab/` proxy, which is what makes it work for a **remote viewer**
+(Tailscale/SSH) and what puts the daemon's auth policy in front of it. On a cold
+start the pane briefly shows "VS Code is still starting…" and resolves itself.
+
+The editor is stopped when its last VS Code tab is closed, and when the session is
+archived or killed — and on daemon shutdown, so nothing is left running. If it
+ever dies, the next render starts a fresh one. Nothing about it is persisted: the
+tab survives a restart and simply starts a new editor when you next open it.
+
+!!! warning "`--auth none`, and why that is safe here"
+    The editor runs with authentication **off**, because it is only ever reachable
+    on loopback through the daemon proxy — the daemon's own auth applies to it. It
+    runs as **you**, with your `PATH` and your code-server settings/extensions.
+
+    Note that a VS Code pane is deliberately **not** origin-sandboxed the way a web
+    tab is: VS Code cannot run under an opaque origin. That is acceptable because
+    the daemon controls what is served there (a code-server it started, on your
+    worktree) — and that editor already gives whoever reaches it a terminal on your
+    machine. Do not expose the daemon's listener to a network you do not trust.
+
+In the **TUI** a VS Code tab shows a placeholder — a terminal can't render an
+editor. Tab navigation (`1`–`9`, the sidebar tree) treats it like any other tab.
 
 ## Keyboard reference
 

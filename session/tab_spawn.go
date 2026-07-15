@@ -195,3 +195,35 @@ func (i *Instance) AddWebTab(url, requestedName string) (*Tab, error) {
 	i.Tabs = append(i.Tabs, tab)
 	return tab, nil
 }
+
+// AddVSCodeTab appends a new VSCode-kind tab to the instance's Tabs and returns
+// it. Like a web tab it spawns nothing here and holds no tmux session, so the
+// append under the single write lock is the whole operation and no orphan window
+// opens. It takes no target: a vscode tab ALWAYS edits this instance's worktree,
+// and the code-server serving it is daemon-managed per session and resolved
+// lazily at proxy time (see TabKindVSCode), so there is no URL to store. The
+// display name is requestedName when non-empty, otherwise "vscode", made unique
+// within the instance ("vscode", "vscode-2", …). Errors when the instance is not
+// started/has no worktree or already holds maxTabs tabs.
+func (i *Instance) AddVSCodeTab(requestedName string) (*Tab, error) {
+	base := vscodeTabName
+	if n := sanitizeTabName(requestedName); n != "" {
+		base = n
+	}
+
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if spawnErr := i.tabSpawnBlockedLocked(); spawnErr != nil {
+		return nil, spawnErr
+	}
+	if !i.started || i.tmuxLocked() == nil || i.gitWorktree == nil {
+		return nil, fmt.Errorf("cannot add a tab to an instance that is not started")
+	}
+	if len(i.Tabs) >= maxTabs {
+		return nil, fmt.Errorf("max %d tabs per session", maxTabs)
+	}
+	tab := newVSCodeTab()
+	tab.Name = uniqueTabName(i.Tabs, base)
+	i.Tabs = append(i.Tabs, tab)
+	return tab, nil
+}

@@ -33,6 +33,12 @@ export const TabKind = {
    *  target is reverse-proxied by the daemon (/v1/webtab/...); an external URL is
    *  iframed directly. Mirrors session.TabKindWeb (session/tab.go). */
   Web: 3,
+  /** A VS Code editor tab (no PTY, and no URL either): a daemon-managed
+   *  per-session code-server rooted at the session's worktree, reachable only
+   *  through the daemon proxy (/v1/webtab/...). Mirrors session.TabKindVSCode
+   *  (session/tab.go) — the kind travels as a bare int, so this MUST stay in
+   *  lockstep with the Go enum. */
+  VSCode: 4,
 } as const;
 
 /** session.InFlightOp (session/liveness.go): the transient client-op axis. */

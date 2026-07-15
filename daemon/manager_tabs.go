@@ -21,16 +21,30 @@ import (
 // commands — a remote session's only terminal tab is the terminal_cmd one), an
 // empty command, or an instance already at the soft cap (maxTabs, enforced by
 // AddProcessTab).
-// webTabKind is the CreateTabRequest.Kind value that selects a URL/iframe tab.
-const webTabKind = "web"
-
 func (m *Manager) CreateTab(req CreateTabRequest) (string, error) {
-	isWeb := req.Kind == webTabKind
-	if !isWeb && req.Kind != "" {
-		return "", fmt.Errorf("unknown tab kind %q (expected %q or empty)", req.Kind, webTabKind)
+	// An empty kind is the default (shell-or-process, per req.Shell), not a kind;
+	// every explicit kind resolves through session.ParseTabKindName, the shared
+	// vocabulary the CLI validates against, so the two can't drift.
+	kind, explicitKind := session.ParseTabKindName(req.Kind)
+	if !explicitKind && req.Kind != "" {
+		return "", fmt.Errorf("unknown tab kind %q (expected one of %s, or empty)",
+			req.Kind, strings.Join(session.TabKindNameList(), ", "))
 	}
-	if !isWeb && !req.Shell && strings.TrimSpace(req.Command) == "" {
+	isWeb := explicitKind && kind == session.TabKindWeb
+	isVSCode := explicitKind && kind == session.TabKindVSCode
+	if !explicitKind && !req.Shell && strings.TrimSpace(req.Command) == "" {
 		return "", fmt.Errorf("a process tab requires a non-empty command (--command)")
+	}
+	// A vscode tab always edits the session's own worktree, so a target is not
+	// just unnecessary but meaningless — reject one rather than silently ignoring
+	// it and leaving the caller thinking it took effect.
+	if isVSCode {
+		if strings.TrimSpace(req.URL) != "" || req.Port != 0 {
+			return "", fmt.Errorf("--url/--port are not valid for a vscode tab (--kind vscode): it always opens the session's worktree")
+		}
+		if strings.TrimSpace(req.Command) != "" {
+			return "", fmt.Errorf("--command is not valid for a vscode tab (--kind vscode)")
+		}
 	}
 	// Resolve the web target up front so an invalid URL/port fails fast, before
 	// any session lookup or lock. Only loopback targets are reverse-proxied
@@ -87,13 +101,16 @@ func (m *Manager) CreateTab(req CreateTabRequest) (string, error) {
 	repoStartLock.Lock()
 	defer repoStartLock.Unlock()
 
-	// A web tab is pure metadata (a URL, no PTY); a shell tab runs $SHELL (the TUI
-	// `t` mutation, #960 PR 2); a process tab runs the requested command (the
-	// CLI/API path, #930 PR 5).
+	// A web tab is pure metadata (a URL, no PTY); a vscode tab is pure metadata
+	// too (not even a URL — its code-server is resolved lazily at proxy time); a
+	// shell tab runs $SHELL (the TUI `t` mutation, #960 PR 2); a process tab runs
+	// the requested command (the CLI/API path, #930 PR 5).
 	var tab *session.Tab
 	switch {
 	case isWeb:
 		tab, err = instance.AddWebTab(webURL, req.Name)
+	case isVSCode:
+		tab, err = instance.AddVSCodeTab(req.Name)
 	case req.Shell:
 		tab, err = instance.AddShellTab()
 	default:
@@ -206,6 +223,8 @@ func (m *Manager) CloseTab(req CloseTabRequest) (string, error) {
 		return "", fmt.Errorf("the agent tab of session %q can't be closed; kill the session instead", title)
 	}
 
+	closedVSCode := tabs[idx].Kind == session.TabKindVSCode
+
 	if err := instance.CloseTab(idx); err != nil {
 		return "", err
 	}
@@ -213,7 +232,26 @@ func (m *Manager) CloseTab(req CloseTabRequest) (string, error) {
 	if err := persistInstanceData(repoID, instance.ToInstanceData()); err != nil {
 		return "", fmt.Errorf("failed to persist tab close: %w", err)
 	}
+
+	// The editor is per SESSION, not per tab, so closing one vscode tab only ends
+	// it when it was the LAST one — a second vscode tab (or another pane on the
+	// same tab) is still using it. Checked after the close so the just-removed tab
+	// can't count itself.
+	if closedVSCode && !instanceHasVSCodeTab(instance) {
+		m.vscode.stopFor(key)
+	}
 	return name, nil
+}
+
+// instanceHasVSCodeTab reports whether any of instance's tabs is still a VS Code
+// tab, i.e. whether its editor is still needed.
+func instanceHasVSCodeTab(instance *session.Instance) bool {
+	for _, tab := range instance.GetTabs() {
+		if tab.Kind == session.TabKindVSCode {
+			return true
+		}
+	}
+	return false
 }
 
 // SetPRInfo records (or clears) the GitHub PR info for the target session and

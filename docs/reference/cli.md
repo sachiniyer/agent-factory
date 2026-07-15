@@ -42,7 +42,7 @@ Run `af <command> --help` for the same information at the terminal. For a narrat
 - [`af sessions preview`](#af-sessions-preview) — Preview a session's terminal content
 - [`af sessions restore`](#af-sessions-restore) — Restore an archived, lost, or dead session
 - [`af sessions send-prompt`](#af-sessions-send-prompt) — Send a prompt to a session (or broadcast to all with --all)
-- [`af sessions tab-create`](#af-sessions-tab-create) — Spawn a process tab (a command) or a web tab (a URL/iframe) in a session
+- [`af sessions tab-create`](#af-sessions-tab-create) — Spawn a process tab (a command), a web tab (a URL/iframe), or a VS Code tab in a session
 - [`af sessions tab-delete`](#af-sessions-tab-delete) — Delete a single tab from a session
 - [`af sessions tabs`](#af-sessions-tabs) — Manage a session's process tabs (create/delete)
 - [`af sessions tabs create`](#af-sessions-tabs-create) — Spawn a process tab (a command) or a web tab (a URL/iframe) in a session
@@ -900,7 +900,7 @@ af sessions
 - [`af sessions preview`](#af-sessions-preview) — Preview a session's terminal content
 - [`af sessions restore`](#af-sessions-restore) — Restore an archived, lost, or dead session
 - [`af sessions send-prompt`](#af-sessions-send-prompt) — Send a prompt to a session (or broadcast to all with --all)
-- [`af sessions tab-create`](#af-sessions-tab-create) — Spawn a process tab (a command) or a web tab (a URL/iframe) in a session
+- [`af sessions tab-create`](#af-sessions-tab-create) — Spawn a process tab (a command), a web tab (a URL/iframe), or a VS Code tab in a session
 - [`af sessions tab-delete`](#af-sessions-tab-delete) — Delete a single tab from a session
 - [`af sessions tabs`](#af-sessions-tabs) — Manage a session's process tabs (create/delete)
 - [`af sessions watch`](#af-sessions-watch) — Block until a session goes idle (ready for review)
@@ -1171,7 +1171,7 @@ af sessions send-prompt <title> <prompt> [flags]
 
 ## af sessions tab-create
 
-Spawn a process tab (a command) or a web tab (a URL/iframe) in a session
+Spawn a process tab (a command), a web tab (a URL/iframe), or a VS Code tab in a session
 
 Create a new tab in an existing session.
 
@@ -1200,9 +1200,9 @@ af sessions tab-create <title> [flags]
 
 | Flag | Type | Description |
 |------|------|-------------|
-| `--command` | `string` | Command to run in a process tab (required unless --kind web) |
-| `--kind` | `string` | Tab kind: empty for a process tab, or "web" for a URL/iframe tab |
-| `--name` | `string` | Tab name (defaults to the command basename, or "web" for a web tab; auto-suffixed on collision) |
+| `--command` | `string` | Command to run in a process tab (required unless --kind web/vscode) |
+| `--kind` | `string` | Tab kind: empty for a process tab, "web" for a URL/iframe tab, or "vscode" for a VS Code editor on the session's worktree |
+| `--name` | `string` | Tab name (defaults to the command basename, or "web"/"vscode" for those kinds; auto-suffixed on collision) |
 | `--port` | `int` | Web tab convenience for --url http://localhost:<port> (with --kind web) (default `0`) |
 | `--url` | `string` | Web tab target URL (with --kind web): a localhost dev-server address or an external https URL |
 
@@ -1292,9 +1292,9 @@ af sessions tabs create <title> [flags]
 
 | Flag | Type | Description |
 |------|------|-------------|
-| `--command` | `string` | Command to run in a process tab (required unless --kind web) |
-| `--kind` | `string` | Tab kind: empty for a process tab, or "web" for a URL/iframe tab |
-| `--name` | `string` | Tab name (defaults to the command basename, or "web" for a web tab; auto-suffixed on collision) |
+| `--command` | `string` | Command to run in a process tab (required unless --kind web/vscode) |
+| `--kind` | `string` | Tab kind: empty for a process tab, "web" for a URL/iframe tab, or "vscode" for a VS Code editor on the session's worktree |
+| `--name` | `string` | Tab name (defaults to the command basename, or "web"/"vscode" for those kinds; auto-suffixed on collision) |
 | `--port` | `int` | Web tab convenience for --url http://localhost:<port> (with --kind web) (default `0`) |
 | `--url` | `string` | Web tab target URL (with --kind web): a localhost dev-server address or an external https URL |
 

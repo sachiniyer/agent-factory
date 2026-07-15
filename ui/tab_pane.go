@@ -402,6 +402,28 @@ func webTabPlaceholder(url string) string {
 	return fmt.Sprintf("%s\n\nweb tab — view in the web UI or open in a browser", url)
 }
 
+// vscodeTabPlaceholder is the TUI content for a VS Code tab. Unlike a web tab
+// there is no URL to show: the editor is a daemon-managed per-session
+// code-server on an ephemeral loopback port, reachable only through the daemon's
+// proxy, so the only meaningful pointer is the web UI itself.
+func vscodeTabPlaceholder() string {
+	return "VS Code tab — view in the web UI\n\nThe editor opens this session's worktree. A terminal can't render it."
+}
+
+// tabPlaceholder returns the TUI placeholder for a tab kind the terminal cannot
+// render, and ok=false for kinds it can (agent/shell/process, which have a PTY).
+// Shared by updateShell and enterScrollModeLocked so the two never diverge.
+func tabPlaceholder(tab *session.Tab) (string, bool) {
+	switch tab.Kind {
+	case session.TabKindWeb:
+		return webTabPlaceholder(tab.URL), true
+	case session.TabKindVSCode:
+		return vscodeTabPlaceholder(), true
+	default:
+		return "", false
+	}
+}
+
 // updateShell reproduces the former TerminalPane.UpdateContent for the
 // shell/process tab at activeTab.
 func (p *TabPane) updateShell(instance *session.Instance, activeTab int, guard contentGuard) error {
@@ -430,14 +452,16 @@ func (p *TabPane) updateShell(instance *session.Instance, activeTab int, guard c
 		return nil
 	}
 
-	// A web tab has no PTY to capture — it is a URL the web UI iframes. The TUI
-	// cannot render a browser, so show a clean placeholder (the target + where to
-	// view it) instead of falling through to the misleading "Terminal session not
-	// available" branch below (a web tab is never TabAlive).
-	if tabs := instance.GetTabs(); activeTab >= 0 && activeTab < len(tabs) && tabs[activeTab].Kind == session.TabKindWeb {
-		p.setFallbackState(webTabPlaceholder(tabs[activeTab].URL))
-		p.mu.Unlock()
-		return nil
+	// A web/vscode tab has no PTY to capture — one is a URL the web UI iframes,
+	// the other a browser-served editor. The TUI cannot render either, so show a
+	// clean placeholder instead of falling through to the misleading "Terminal
+	// session not available" branch below (neither kind is ever TabAlive).
+	if tabs := instance.GetTabs(); activeTab >= 0 && activeTab < len(tabs) {
+		if placeholder, ok := tabPlaceholder(tabs[activeTab]); ok {
+			p.setFallbackState(placeholder)
+			p.mu.Unlock()
+			return nil
+		}
 	}
 
 	// Remote instances have no local shell tab. When terminal_cmd is configured
@@ -637,11 +661,13 @@ func (p *TabPane) enterScrollModeLocked(instance *session.Instance, activeTab in
 		p.setFallbackState("Tearing down session...")
 		return nil
 	}
-	// A web tab has no scrollback (no PTY): keep the placeholder rather than
-	// entering scroll mode over an empty capture. Mirrors updateShell's web branch.
-	if tabs := instance.GetTabs(); activeTab >= 0 && activeTab < len(tabs) && tabs[activeTab].Kind == session.TabKindWeb {
-		p.setFallbackState(webTabPlaceholder(tabs[activeTab].URL))
-		return nil
+	// A web/vscode tab has no scrollback (no PTY): keep the placeholder rather than
+	// entering scroll mode over an empty capture. Mirrors updateShell's branch.
+	if tabs := instance.GetTabs(); activeTab >= 0 && activeTab < len(tabs) {
+		if placeholder, ok := tabPlaceholder(tabs[activeTab]); ok {
+			p.setFallbackState(placeholder)
+			return nil
+		}
 	}
 	// An already-dead shell tab transitions to the fallback rather than entering
 	// scroll mode over stale terminal output: leaving p.content intact with

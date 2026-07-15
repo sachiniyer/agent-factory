@@ -18,9 +18,14 @@ import assert from "node:assert/strict";
 
 import { tabBarSig, tabIdentity, tabRealId } from "./ui.js";
 import type { AppState } from "./ui.js";
-import type { SessionData } from "./types.js";
+import { type SessionData, TabKind } from "./types.js";
 import { leaves, remapByIdentity, resolveDragTab, tabsRebound } from "./layout.js";
-import { paneAddressUsesOrdinal } from "./tabaddr.js";
+import { type IframeSpec, paneAddressUsesOrdinal } from "./tabaddr.js";
+
+/** A web tab's iframe spec, so these cases read as the targets they are about. */
+function webSpec(target: string): IframeSpec {
+  return { kind: TabKind.Web, target };
+}
 
 // --- tabRealId: the real id, never a synthesized one -----------------------
 
@@ -252,26 +257,37 @@ test("a PROXIED web tab's ordinal is its address, stable id or not — a move mu
   // no matter how stable the tab's id is. Following it without a rebuild would leave
   // the iframe proxying whatever tab took the old index — trading a cosmetic reload
   // for an actual misroute.
-  assert.equal(paneAddressUsesOrdinal("http://localhost:3000", "id-web"), true);
-  assert.equal(paneAddressUsesOrdinal("http://127.0.0.1:8080/app", "id-web"), true);
-  assert.equal(paneAddressUsesOrdinal("http://[::1]:5173", "id-web"), true);
+  assert.equal(paneAddressUsesOrdinal(webSpec("http://localhost:3000"), "id-web"), true);
+  assert.equal(paneAddressUsesOrdinal(webSpec("http://127.0.0.1:8080/app"), "id-web"), true);
+  assert.equal(paneAddressUsesOrdinal(webSpec("http://[::1]:5173"), "id-web"), true);
 });
 
 test("an EXTERNAL web tab's src encodes no ordinal — a move is followed, not remounted", () => {
   // This is the case the P3 is really about: the iframe src is the target URL itself,
   // so a shifted ordinal cannot invalidate it and reloading would drop in-page state
   // for nothing.
-  assert.equal(paneAddressUsesOrdinal("https://example.com/docs", "id-web"), false);
-  assert.equal(paneAddressUsesOrdinal("https://example.com/docs", ""), false);
+  assert.equal(paneAddressUsesOrdinal(webSpec("https://example.com/docs"), "id-web"), false);
+  assert.equal(paneAddressUsesOrdinal(webSpec("https://example.com/docs"), ""), false);
 });
 
 test("a web tab with NO target has no ordinal-bearing address", () => {
   // It renders a fallback, not a proxied frame — nothing to invalidate.
-  assert.equal(paneAddressUsesOrdinal("", "id-web"), false);
+  assert.equal(paneAddressUsesOrdinal(webSpec(""), "id-web"), false);
 });
 
 test("an unparseable web target is treated as non-loopback (never proxied)", () => {
-  assert.equal(paneAddressUsesOrdinal("not a url", "id-web"), false);
+  assert.equal(paneAddressUsesOrdinal(webSpec("not a url"), "id-web"), false);
+});
+
+test("a VSCODE tab is always proxied, so its ordinal IS its address — a move must rebuild", () => {
+  // A vscode tab carries no target by design (its code-server is a daemon-managed
+  // per-session process on an ephemeral port), so the empty-target rule that
+  // correctly answers false for a URL-less WEB tab would answer the wrong question
+  // here: a vscode pane is always fetched through /v1/webtab/{session}/{ordinal}/.
+  // Following a moved one without a rebuild would frame ANOTHER tab's editor — the
+  // #1779 misroute, on the surface where it is most alarming.
+  assert.equal(paneAddressUsesOrdinal({ kind: TabKind.VSCode, target: "" }, "id-vscode"), true);
+  assert.equal(paneAddressUsesOrdinal({ kind: TabKind.VSCode, target: "" }, ""), true);
 });
 
 // --- the end-to-end property: a shifted tab is still addressed by ITS id -----

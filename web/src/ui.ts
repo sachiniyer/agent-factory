@@ -27,7 +27,12 @@ import { compareSessionsForRail, isArchived, rowStatus, rowTitle } from "./statu
 import { TasksPane } from "./tasks.js";
 import { type ThemeChoice, THEME_CHOICES } from "./theme.js";
 import type { TerminalStatus } from "./terminal.js";
-import type { SessionData, TaskData } from "./types.js";
+import { type SessionData, type TaskData, TabKind } from "./types.js";
+
+/** The tab kinds the web UI can create with no further input from the user. A
+ *  web tab is deliberately absent: its target comes from whatever an agent is
+ *  running, so it stays CLI/API-created (see docs/web.md). */
+export type NewTabKind = "shell" | "vscode";
 
 /** The whole client state: which view to show, the login details, and — once
  *  authed — the live session projection plus the current selection. */
@@ -112,8 +117,9 @@ export interface Actions {
   /** Switches to a tab AND attaches its terminal (a tab-bar click, mirroring how a
    *  session-row click attaches). */
   openTab(index: number): void;
-  /** Creates a new $SHELL tab on the selected session (the `t` key / + button). */
-  newTab(): void;
+  /** Creates a new tab on the selected session (the `t` key / + menu): a $SHELL
+   *  terminal, or a VS Code editor on the session's worktree. */
+  newTab(kind: NewTabKind): void;
   /** Closes the tab at `index` of the selected session (the `w` key / × button);
    *  the agent tab (index 0) is unclosable. */
   closeTab(index: number): void;
@@ -197,14 +203,17 @@ export function tabRealId(tab: { id?: string }): string {
  *  the agent tab is "Agent", a shell tab is "Terminal", a process tab shows its
  *  name. Keeps the web tab bar TUI-faithful. */
 function tabLabel(tab: { name: string; kind: number }): string {
-  if (tab.kind === 0) {
+  if (tab.kind === TabKind.Agent) {
     return "Agent";
   }
-  if (tab.kind === 1) {
+  if (tab.kind === TabKind.Shell) {
     return "Terminal";
   }
-  if (tab.kind === 3) {
+  if (tab.kind === TabKind.Web) {
     return tab.name || "Web";
+  }
+  if (tab.kind === TabKind.VSCode) {
+    return tab.name || "VS Code";
   }
   return tab.name || "Tab";
 }
@@ -838,6 +847,83 @@ export class AppShell {
     return item;
   }
 
+  /** The `+` button and its kind menu.
+   *
+   *  `+` still creates a terminal tab in ONE click — it is long-established muscle
+   *  memory (and the mouse twin of the TUI's `t`), so making it open a menu would
+   *  tax every existing user to surface a second kind. The `▾` beside it opens the
+   *  picker instead: the same split VS Code itself uses for its terminal + / ▾.
+   *
+   *  Built per render (the tab bar is rebuilt wholesale), so the menu's listeners
+   *  are bound to THIS instance and torn down with it — see the isConnected check
+   *  in onDocMouseDown, which self-cleans if a rerender detaches an open menu. */
+  private newTabControl(): HTMLElement {
+    const wrap = h("div", { class: "af-tab-new-wrap" });
+    const add = h("button", { type: "button", class: "af-tab-new", title: "New terminal tab" }, "+");
+    add.addEventListener("click", (e) => {
+      e.stopPropagation();
+      this.actions.newTab("shell");
+    });
+    const caret = h("button", { type: "button", class: "af-tab-new-kind", title: "New tab of kind…" }, "▾");
+    caret.setAttribute("aria-haspopup", "menu");
+    caret.setAttribute("aria-expanded", "false");
+    caret.setAttribute("aria-label", "Choose a new tab kind");
+    const menu = h("div", { class: "af-tab-menu" });
+    menu.setAttribute("role", "menu");
+    menu.setAttribute("aria-label", "New tab kind");
+    menu.hidden = true;
+
+    const close = (): void => {
+      menu.hidden = true;
+      caret.setAttribute("aria-expanded", "false");
+      document.removeEventListener("mousedown", onDocMouseDown);
+      document.removeEventListener("keydown", onKeyDown);
+    };
+    const onDocMouseDown = (e: MouseEvent): void => {
+      // A rerender can detach this control while the menu is open; closing on a
+      // detached wrap is what unregisters these document listeners, so they can
+      // never accumulate across renders.
+      if (!wrap.isConnected || !wrap.contains(e.target as Node)) {
+        close();
+      }
+    };
+    const onKeyDown = (e: KeyboardEvent): void => {
+      if (e.key === "Escape") {
+        close();
+        caret.focus();
+      }
+    };
+    const open = (): void => {
+      menu.hidden = false;
+      caret.setAttribute("aria-expanded", "true");
+      document.addEventListener("mousedown", onDocMouseDown);
+      document.addEventListener("keydown", onKeyDown);
+    };
+
+    const item = (label: string, kind: NewTabKind): HTMLElement => {
+      const b = h("button", { type: "button", class: "af-tab-menu-item" }, label);
+      b.setAttribute("role", "menuitem");
+      b.addEventListener("click", (e) => {
+        e.stopPropagation();
+        close();
+        this.actions.newTab(kind);
+      });
+      return b;
+    };
+    menu.append(item("Terminal", "shell"), item("VS Code", "vscode"));
+
+    caret.addEventListener("click", (e) => {
+      e.stopPropagation();
+      if (menu.hidden) {
+        open();
+      } else {
+        close();
+      }
+    });
+    wrap.append(add, caret, menu);
+    return wrap;
+  }
+
   private toggleProjectMenu(): void {
     if (this.projectMenuOpen) {
       this.closeProjectMenu();
@@ -941,9 +1027,7 @@ export class AppShell {
       tabButton(tab, i, i === active, shown.has(i), canManage, this.actions),
     );
     if (canManage && tabs.length < MAX_TABS) {
-      const add = h("button", { type: "button", class: "af-tab-new", title: "New tab" }, "+");
-      add.addEventListener("click", () => this.actions.newTab());
-      children.push(add);
+      children.push(this.newTabControl());
     }
     bar.replaceChildren(...children);
     // Rebuilding the bar detaches EVERY tab button — including the source of an
