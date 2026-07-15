@@ -743,7 +743,6 @@ func (b *sshBackend) Type() string { return "ssh" }
 func (b *sshBackend) Capabilities() Capabilities {
 	return Capabilities{
 		Workspace:        WorkspaceRemote,
-		Attach:           true,
 		Archive:          true,
 		Recover:          true,
 		TabManagement:    true,
@@ -817,19 +816,6 @@ func (b *sshBackend) Preview(i *Instance) (string, error) {
 
 func (b *sshBackend) PreviewFullHistory(i *Instance) (string, error) {
 	return i.AgentServer().Preview(0, true)
-}
-
-// Attach/AttachTerminal: an ssh session attaches CLIENT-side over the WS PTY stream
-// (the daemon proxies the remote's stream through the tunnel), exactly like a local
-// session — the client's attach dispatch branches on Capabilities().Workspace and
-// never reaches the backend. These satisfy the interface with an explicit
-// routing-invariant error rather than a silent no-op.
-func (b *sshBackend) Attach(*Instance) (chan struct{}, error) {
-	return nil, fmt.Errorf("ssh sessions attach client-side over the WS PTY stream, not through the backend")
-}
-
-func (b *sshBackend) AttachTerminal(*Instance, int) (chan struct{}, error) {
-	return nil, fmt.Errorf("ssh terminal tabs attach client-side over the WS PTY stream, not through the backend")
 }
 
 func (b *sshBackend) HasUpdated(i *Instance) (updated bool, hasPrompt bool, content string) {

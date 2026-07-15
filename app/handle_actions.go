@@ -776,13 +776,14 @@ func (m *home) attachInstanceTab(instance *session.Instance, tabIdx int, agentLa
 	// locality is the DAEMON's concern and the client needs no branch on it.
 	//
 	// Do not reintroduce a Capabilities().Workspace branch that routes remote
-	// sessions through the Backend (m.store.AttachInstance / ui.AttachTerminalTab
-	// -> backend.Attach): since #1592 Phase 4 PR7 provisioned remote runtimes and
-	// exposed them as agent-servers, every remote backend's Attach/AttachTerminal
-	// returns a routing-invariant error, so that branch broke remote attach
-	// outright (#1837). instance + repoID are captured here at keypress so a
-	// deferred attach (help overlay open) targets the captured session, not a
-	// drifted selection (#716).
+	// sessions through the Backend: that branch is what broke remote attach
+	// outright (#1837), because #1592 Phase 4 PR7 had already turned every remote
+	// backend's attach into a routing-invariant error. #1852 then deleted the
+	// backend attach surface entirely, so there is no longer anything to branch
+	// to — reintroducing one would not compile, which is the point.
+	//
+	// instance + repoID are captured here at keypress so a deferred attach (help
+	// overlay open) targets the captured session, not a drifted selection (#716).
 	repoID := m.repoID
 	attach := func() (chan struct{}, error) {
 		// Address the attach by the tab's stable id (#1738) so a reorder/close can't

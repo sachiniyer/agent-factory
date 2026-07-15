@@ -878,9 +878,10 @@ var sessionsAttachCmd = &cobra.Command{
 		// WS PTY stream (#1592 Phase 2 PR7), the same path the TUI uses: the daemon
 		// resolves the byte source via instance.AgentServer() (a local broker, or a
 		// remoteAgentServer proxy for docker/ssh/hook). A prior
-		// Capabilities().Workspace == WorkspaceRemote branch called
-		// instance.Attach() here, but every remote backend's Attach returns a
-		// routing-invariant error, so it broke remote attach outright (#1837).
+		// Capabilities().Workspace == WorkspaceRemote branch called instance.Attach()
+		// here, aimed at a backend attach that had already become a routing-invariant
+		// error, so it broke remote attach outright (#1837). That surface is now
+		// deleted (#1852) — this stream dial is the only attach there is.
 		//
 		// EnsureDaemon spawns the LOCAL daemon that owns a local session's
 		// clientless broker; a remote target's daemon is already running on the

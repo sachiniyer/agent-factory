@@ -107,24 +107,14 @@ func (b *FakeBackend) CloseAttachOnly(*Instance) error { return nil }
 
 func (b *FakeBackend) Preview(*Instance) (string, error)            { return "", nil }
 func (b *FakeBackend) PreviewFullHistory(*Instance) (string, error) { return "", nil }
-func (b *FakeBackend) Attach(*Instance) (chan struct{}, error) {
-	ch := make(chan struct{})
-	close(ch)
-	return ch, nil
-}
-func (b *FakeBackend) AttachTerminal(*Instance, int) (chan struct{}, error) {
-	ch := make(chan struct{})
-	close(ch)
-	return ch, nil
-}
-func (b *FakeBackend) HasUpdated(*Instance) (bool, bool, string) { return false, false, "" }
-func (b *FakeBackend) SendPromptCommand(*Instance, string) error { return nil }
-func (b *FakeBackend) IsAlive(*Instance) bool                    { return true }
-func (b *FakeBackend) CheckAndHandleTrustPrompt(*Instance) bool  { return false }
-func (b *FakeBackend) TapEnter(*Instance)                        {}
-func (b *FakeBackend) Recover(*Instance) error                   { return nil }
-func (b *FakeBackend) Respawn(*Instance) error                   { return nil }
-func (b *FakeBackend) Type() string                              { return "local" }
+func (b *FakeBackend) HasUpdated(*Instance) (bool, bool, string)    { return false, false, "" }
+func (b *FakeBackend) SendPromptCommand(*Instance, string) error    { return nil }
+func (b *FakeBackend) IsAlive(*Instance) bool                       { return true }
+func (b *FakeBackend) CheckAndHandleTrustPrompt(*Instance) bool     { return false }
+func (b *FakeBackend) TapEnter(*Instance)                           {}
+func (b *FakeBackend) Recover(*Instance) error                      { return nil }
+func (b *FakeBackend) Respawn(*Instance) error                      { return nil }
+func (b *FakeBackend) Type() string                                 { return "local" }
 
 // Capabilities reports local full parity by default, mirroring LocalBackend so
 // the fake stands in for a local session (#1592 Phase 1). Test doubles that
@@ -133,7 +123,6 @@ func (b *FakeBackend) Type() string                              { return "local
 func (b *FakeBackend) Capabilities() Capabilities {
 	return Capabilities{
 		Workspace:        WorkspaceLocalWorktree,
-		Attach:           true,
 		Archive:          true,
 		Recover:          true,
 		TabManagement:    true,

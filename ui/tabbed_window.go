@@ -506,20 +506,6 @@ func (w *TabbedWindow) GetActiveTab() int {
 	return w.activeTab()
 }
 
-// AttachTerminalTab attaches to a terminal (shell) tab of the given instance
-// full-screen. Capturing the instance — rather than re-reading the live
-// selection — keeps deferred attach flows safe from selection drift while the
-// help overlay is open (#716): the shell session belongs to this instance, so
-// there is no title-keyed cache to drift. The local-shell-tab vs
-// remote-terminal_cmd dispatch is the backend's, reached through the uniform
-// Instance.AttachTerminal (#1592 Phase 1 PR5) — no concrete-backend branch here.
-func AttachTerminalTab(instance *session.Instance, tabIdx int) (chan struct{}, error) {
-	if instance == nil {
-		return nil, fmt.Errorf("no terminal session to attach to")
-	}
-	return instance.AttachTerminal(tabIdx)
-}
-
 // IsInScrollMode returns true if the pane's tab view is in scroll mode.
 func (w *TabbedWindow) IsInScrollMode() bool {
 	return w.tab.IsScrolling()
