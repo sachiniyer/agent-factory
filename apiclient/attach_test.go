@@ -235,6 +235,37 @@ func TestAttachStream_EncodedDetachKeyFlushesPrecedingInput(t *testing.T) {
 	waitClosed(t, done)
 }
 
+// TestAttachStream_BatchedKittyEventsDoNotLeakTheDetachKey guards the swallow
+// contract when a pane program turns on kitty's report-event-types flag: one tap
+// of ctrl+w is reported as a press AND a release, and a single stdin read can
+// batch both.
+//
+// The detach key must not reach the agent on its way out. Suffix-matching alone
+// sees only the trailing release, so the press half was forwarded as INPUT first
+// — the swallowed key still mutating the pane (a word-erase in claude) at the
+// moment the user leaves. The whole tap belongs to the detach.
+func TestAttachStream_BatchedKittyEventsDoNotLeakTheDetachKey(t *testing.T) {
+	server, stdinW, _, done := startDriver(t)
+
+	// One tap, batched: press then release, as a terminal with event reporting on
+	// delivers it.
+	if _, err := stdinW.Write([]byte("\x1b[119;5:1u\x1b[119;5:3u")); err != nil {
+		t.Fatalf("write batched press+release: %v", err)
+	}
+	// The very first frame must be the detach: anything before it is the detach
+	// key leaking into the pane.
+	msg := readServerMsg(t, server)
+	if msg.Binary && msg.Frame.Op == agentproto.OpInput {
+		t.Fatalf("the press half of the detach tap leaked to the agent as INPUT %q; "+
+			"one tap is one keypress and must be swallowed whole", msg.Frame.Data)
+	}
+	if typ, _ := agentproto.MessageTypeOf(msg.Text); msg.Binary || typ != agentproto.MsgDetach {
+		t.Fatalf("expected MsgDetach for the batched tap, got %+v", msg)
+	}
+	_ = server.Close(websocket.StatusNormalClosure, "")
+	waitClosed(t, done)
+}
+
 // TestAttachStream_EncodedNonDetachKeyForwards is the other half of the contract:
 // widening detection must not start swallowing keys the agent needs. ctrl+shift+w
 // under the same kitty encoding differs from the detach key only in its modifier

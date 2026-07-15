@@ -109,6 +109,12 @@ just the legacy control byte: an agent CLI that turns on the kitty keyboard
 protocol or `modifyOtherKeys` makes the terminal send `Ctrl-W` as an escape
 sequence instead (#1832). `af_detach` takes an optional raw sequence so a
 scenario can drive those encodings without that terminal.
+
+Detaching also drops those negotiated modes back to legacy, so the terminal you
+land back in reports `Ctrl` keys normally again. On a real kitty terminal this is
+the check the driver cannot make for you: attach to a claude session, detach, and
+confirm `Ctrl-]` and friends still work in the TUI — a terminal left upgraded
+needs a manual reset to recover.
 `←`/`→` switch panes only when a workspace pane has focus; with tree focus they
 keep the tree's collapse/expand behavior.
 

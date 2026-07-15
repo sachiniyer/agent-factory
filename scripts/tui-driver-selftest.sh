@@ -321,6 +321,14 @@ step "attach full-screen (#1832 modifyOtherKeys encoding)"  af_attach
 step "detach via the modifyOtherKeys ctrl+w encoding (#1832)" af_detach $'\e[27;5;119~'
 step "assert selection survived the encoded detaches (#1832)" af_expect_selected beta
 
+# A pane program that also turns on kitty's event-type reporting makes ONE tap of
+# ctrl+w report twice — a press then a release — which a single read batches. Both
+# halves are the same keypress, so the tap must detach and must not leak its press
+# half into the pane on the way out.
+step "attach full-screen (batched kitty press+release tap)" af_attach
+step "detach via a batched press+release ctrl+w tap"        af_detach $'\e[119;5:1u\e[119;5:3u'
+step "assert selection survived the batched tap"            af_expect_selected beta
+
 # --- #1822 regression: af_hide_pane across the multi-pane and single-pane flows ---
 # Runs last: it deliberately ends with an empty workspace.
 step "hide a pane while another remains, then the last (#1822)" _expect_multipane_hide
