@@ -233,6 +233,33 @@ func TestTabTmuxByID_RefusesStaleAndEmpty(t *testing.T) {
 	assert.False(t, ok, "an empty id must resolve to no tmux")
 }
 
+// TestTabTmuxByID_NotStartedIsNotGone pins the distinction the refusal must NOT
+// over-reach into: a tab on a not-yet-started instance is real — it simply has no
+// live PTY yet. It must report exists=true with a nil tmux, so the data plane
+// answers "nothing to stream" rather than ErrTabGone. Calling it gone would 404 the
+// client, telling it to stop addressing a tab that is about to come up.
+func TestTabTmuxByID_NotStartedIsNotGone(t *testing.T) {
+	log.Initialize(false)
+	defer log.Close()
+
+	inst, _ := raceMockInstance(t, "af_stable_notstarted", func() {})
+	b, err := inst.AddProcessTab("b", "b")
+	require.NoError(t, err)
+
+	inst.SetStartedForTest(false)
+
+	ts, exists := inst.TabTmuxByID(b.ID)
+	assert.True(t, exists, "a real tab on a not-started instance EXISTS — it is not gone")
+	assert.Nil(t, ts, "a not-started instance has no live tmux to stream")
+
+	// And the data plane must not call it gone.
+	las := inst.AgentServer().(*localAgentServer)
+	_, err = las.SubscribeTab(b.ID, 0)
+	require.Error(t, err)
+	assert.NotErrorIs(t, err, ErrTabGone,
+		"a not-started tab must not be reported gone — that would 404 a client off a tab that may still come up")
+}
+
 // TestSubscribeTab_RefusesStaleID: the id-native data plane REFUSES a stale/unknown
 // tab id with ErrTabGone instead of serving a positional tab (#1779). Subscribing
 // by a closed tab's id must not hand back the broker of whatever tab shifted into

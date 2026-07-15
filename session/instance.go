@@ -265,27 +265,36 @@ func (i *Instance) TabIDAt(idx int) (string, bool) {
 }
 
 // TabTmuxByID resolves a tab's stable id (#1738) DIRECTLY to the tmux session it
-// currently backs, under a SINGLE lock acquisition, and reports whether such a
-// live tab exists. It is the atomic primitive the id-addressed data plane binds
-// on: resolving an id to an ordinal and then that ordinal to a tmux session takes
-// i.mu twice, and a concurrent close/reorder between the two makes the second
-// lookup land on a DIFFERENT tab — exactly the misroute the stable id exists to
-// prevent (#1779). Resolving both under one lock closes that window. Returns
-// (nil, false) when the instance is not started, the id names no tab, or the tab
-// has no local tmux (a remote runtime).
-func (i *Instance) TabTmuxByID(id string) (*tmux.TmuxSession, bool) {
+// currently backs, under a SINGLE lock acquisition. It is the atomic primitive the
+// id-addressed data plane binds on: resolving an id to an ordinal and then that
+// ordinal to a tmux session takes i.mu twice, and a concurrent close/reorder
+// between the two makes the second lookup land on a DIFFERENT tab — exactly the
+// misroute the stable id exists to prevent (#1779). Resolving both under one lock
+// closes that window.
+//
+// The two return values answer two DIFFERENT questions, and callers must not
+// conflate them:
+//
+//   - exists=false — the id names no tab at all: it was closed, or never minted.
+//     This is the "gone" the id-addressed plane refuses on.
+//   - exists=true, ts=nil — the tab is real but has no local PTY right now: the
+//     instance has not started, or it is a remote runtime with no local tmux. NOT
+//     gone; a caller must not report it as such, since a not-yet-started tab may
+//     still come up and a client should keep addressing it.
+func (i *Instance) TabTmuxByID(id string) (ts *tmux.TmuxSession, exists bool) {
 	if id == "" {
 		return nil, false
 	}
 	i.mu.RLock()
 	defer i.mu.RUnlock()
-	if !i.started {
-		return nil, false
-	}
 	for idx, t := range i.Tabs {
-		if t.ID == id {
-			return i.tabTmuxAtLocked(idx), true
+		if t.ID != id {
+			continue
 		}
+		if !i.started {
+			return nil, true // the tab exists; it just has no live PTY yet
+		}
+		return i.tabTmuxAtLocked(idx), true
 	}
 	return nil, false
 }

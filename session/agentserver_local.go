@@ -238,13 +238,17 @@ func (s *localAgentServer) resetBrokerCaptures() {
 // ErrTabGone — a refusal, never a fall back to a positional tab.
 func (s *localAgentServer) ensureBrokerByID(tabID string) (*ptyBroker, error) {
 	// Resolve under i.mu BEFORE taking s.mu (never nest s.mu → i.mu).
-	ts, ok := s.inst.TabTmuxByID(tabID)
+	ts, exists := s.inst.TabTmuxByID(tabID)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.closed {
 		return nil, fmt.Errorf("session %q is being terminated", s.inst.Title)
 	}
-	if !ok {
+	// GONE and NOT-YET-STREAMABLE are different answers. Only an id that names no
+	// tab is ErrTabGone (the client should stop addressing it); a real tab with no
+	// local PTY — not started, or a remote runtime — keeps the ordinal path's
+	// message, so a client isn't told a tab that may still come up is gone.
+	if !exists {
 		return nil, fmt.Errorf("session %q tab id %q: %w", s.inst.Title, tabID, ErrTabGone)
 	}
 	if ts == nil {
