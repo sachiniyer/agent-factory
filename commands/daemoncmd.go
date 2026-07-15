@@ -25,7 +25,7 @@ var daemonCmd = &cobra.Command{
 	Use:   "daemon",
 	Short: "Manage the background daemon: serves the web UI and schedules tasks",
 	Long: `The agent-factory daemon runs task cron schedules in-process, supervises
-watch-task scripts, drives autoyes mode, and serves the bundled WEB UI.
+watch-task scripts, drives autoyes mode, and serves the bundled web UI.
 
 The web UI is part of the daemon — there is no separate web command — so it is
 served whenever the daemon is running. Running af starts one: the TUI reads
@@ -40,12 +40,21 @@ With af running, open:
 
 It needs no token by default, so the page connects as soon as it loads. Set
 listen_addr to change the address (or to "" to turn the web server off).
-require_token = true demands a bearer token ('af token show') from NETWORK
+require_token = true demands a bearer token ('af token show') from network
 peers; on the default loopback listener same-host callers stay exempt, so the
 UI keeps opening with no login on this machine. Add require_loopback_token =
 true to require the token from localhost as well.
-Note 'af agent-server' does NOT serve the web UI: it is the headless
+Note that 'af agent-server' does not serve the web UI: it is the headless
 per-workspace backend a daemon drives on a remote machine.
+
+Clients reach the daemon over a local Unix socket by default. To drive one from
+another machine, either ssh to that host and run 'af' there, or give listen_addr
+a routable address and point a client at it with the persistent --daemon-url and
+--token flags. Auth is off unless you turn it on: without require_token = true a
+routable listener is open to anyone who can reach it. That listener speaks plain
+HTTP, so put it behind a reverse proxy or a private network (Tailscale/VPN) if
+you need TLS.
+Full guide: https://sachiniyer.github.io/agent-factory/remote-http-auth/
 
 Install the daemon as a user-level autostart unit (systemd user service on
 Linux, launchd agent on macOS) so tasks keep firing and the web UI stays up
