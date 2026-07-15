@@ -444,12 +444,65 @@ af_open_pane() {
     af_wait_for 'hide pane' "$AF_DRIVER_TIMEOUT" 'pane opened/focused' || return 1
 }
 
+# _af_pane_header_row — the one screen line that renders EVERY visible pane's
+# identity, or "" when the workspace draws no pane box.
+#
+# Panes are laid out side by side in a SINGLE horizontal row (ui/layout/grid.go
+# Solve), and each pane's frame puts its ` <title> · <tab> ` header on the
+# first line inside the frame — so all visible pane headers share one screen
+# row, immediately below the workspace box's top border. Anchoring on that
+# border (the first `╭` on screen — the sidebar has no left border, so the
+# workspace box owns the first one) and taking the NEXT line yields the whole
+# visible-pane identity set in one string.
+#
+# `╭` is matched as a literal, not a bracket expression: the sandbox runs a
+# C/POSIX locale where a bracket expression would match only the first byte of
+# the 3-byte glyph (cf. _af_tab_count's `(├|└)` alternation note).
+_af_pane_header_row() {
+    af_capture | awk '/╭/ { if ((getline line) > 0) print line; exit }'
+}
+
 # af_hide_pane — hide the focused pane back to the background (nothing is
-# killed). Precondition: a pane is focused. Syncs on focus returning to the
-# tree (`n new`).
+# killed). Precondition: a pane is focused. Syncs on the visible-pane set
+# CHANGING, captured via the pane header row.
+#
+# It used to wait for the tree menu (`n new`), i.e. it assumed hiding a pane
+# always hands focus back to the tree. It does not: hidePane (app/handle_panes.go)
+# lands focus on the pane that takes the hidden one's slot and only falls back
+# to the tree when the LAST pane goes away. So in any multi-pane flow the first
+# `x` hid the pane correctly, focus advanced to the remaining pane, `n new`
+# never appeared, and the driver reported a false TIMEOUT failure (#1822).
+# Multi-pane is not exotic: below MultiPaneMinWidth (110 cols) only one pane is
+# visible at a time, so at the driver's default 100x30 a second open pane is
+# merely auto-hidden — still open, and it takes focus on the next `x`.
+#
+# Waiting for "the tree menu OR the pane menu" would be worse than useless: the
+# pane menu is ALREADY on screen before `x`, so the wait would return on the
+# first poll and pass even if `x` did nothing.
+#
+# The header row is the right marker because hiding the focused pane ALWAYS
+# mutates the visible pane set — another pane takes the slot (its header
+# replaces the hidden one's) or the workspace empties (the row goes blank) —
+# and it is menu-independent, which matters: `x hide pane` is in the menu's
+# hintDropOrder and disappears on narrow terminals, so any marker built on it
+# would false-FAIL exactly where the layout is tightest, whereas `n new` alone
+# false-FAILS whenever a pane remains.
+#
+# It also closes a false PASS the old marker had: with focus on the TREE, `x`
+# is a no-op and `n new` was already showing, so af_hide_pane returned 0
+# immediately and reported success for a hide that never happened. The header
+# row is unchanged in that case, so the call now fails.
 af_hide_pane() {
+    local before; before="$(_af_pane_header_row)"
     af_send x
-    af_wait_for 'n new' "$AF_DRIVER_TIMEOUT" 'pane hidden' || return 1
+    local deadline; deadline=$(( $(_af_now) + AF_DRIVER_TIMEOUT ))
+    while [ "$(_af_pane_header_row)" = "$before" ]; do
+        if [ "$(_af_now)" -ge "$deadline" ]; then
+            _af_fail "pane not hidden (pane header row still '$before'); is a pane focused?"
+            return 1
+        fi
+        sleep "$AF_DRIVER_POLL"
+    done
 }
 
 # af_enter_interactive — enter the focused pane: every subsequent key forwards
