@@ -393,6 +393,13 @@ UI or open in a browser") — a terminal can't render a browser. Tab navigation
     trailing slash (`http://localhost:8899/app/` → `assets/x.css` becomes
     `/app/assets/x.css`).
 
+    The target's **directory** is what the tab's root maps onto, so a target
+    nested in a subdirectory (`…/app/viewer.html`) reaches its siblings and
+    descendants but **not its parents**: a `../shared.css` link, or a cookie the
+    app scopes to `Path=/app`, resolves above the tab's root and won't find the
+    proxy. Point the tab at a target whose directory contains everything the page
+    needs (commonly the server root) if the preview needs either.
+
     Over a **token-protected** network listener, iframe sub-resource requests are
     kept authorized via a path-scoped cookie; if a preview loads only partially
     over a direct network listener, prefer an **SSH-forwarded loopback** port
