@@ -271,7 +271,7 @@ func (s *stubAgentServer) Launch(bool) error                           { return 
 func (s *stubAgentServer) Expose() (StreamEndpoint, error)             { return StreamEndpoint{}, nil }
 func (s *stubAgentServer) Snapshot() (Observation, error)              { return Observation{}, nil }
 func (s *stubAgentServer) Preview(int, bool) (string, error)           { return "", nil }
-func (s *stubAgentServer) Alive() bool                                 { return false }
+func (s *stubAgentServer) Alive() (bool, error)                        { return false, nil }
 func (s *stubAgentServer) SendPrompt(string) error                     { return nil }
 func (s *stubAgentServer) TapEnter()                                   {}
 func (s *stubAgentServer) Subscribe(int, Seq) (PTYSubscription, error) { return nil, nil }

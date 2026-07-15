@@ -163,7 +163,7 @@ func TestRemoteAgentServerRoundTrip(t *testing.T) {
 	}
 
 	// --- Alive reports the remote workspace is running ----------------------
-	if !as.Alive() {
+	if alive, err := as.Alive(); err != nil || !alive {
 		t.Fatal("expected the remote workspace to report Alive")
 	}
 
@@ -172,6 +172,7 @@ func TestRemoteAgentServerRoundTrip(t *testing.T) {
 		t.Fatalf("Kill over the wire: %v", err)
 	}
 	waitUntil(t, 10*time.Second, "remote workspace reports not-Alive after Kill", func() bool {
-		return !as.Alive()
+		alive, err := as.Alive()
+		return err != nil || !alive
 	})
 }

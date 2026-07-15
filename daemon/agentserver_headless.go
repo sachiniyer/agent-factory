@@ -314,7 +314,17 @@ type agentAliveResponse struct {
 }
 
 func (hs *headlessServer) Alive(_ struct{}, resp *agentAliveResponse) error {
-	resp.Alive = hs.as.Alive()
+	alive, err := hs.as.Alive()
+	if err != nil {
+		// Propagate rather than answering a confident `alive:false`. This is the
+		// SERVER end of the probe the daemon uses to decide whether to re-provision
+		// a sandbox, and the caller must be able to tell "the agent is gone" from
+		// "nobody could tell" — reporting the latter as the former is what
+		// re-provisions over live work (#1794). In practice the in-sandbox server
+		// probes its own tmux in-process and never errors.
+		return err
+	}
+	resp.Alive = alive
 	return nil
 }
 

@@ -134,12 +134,18 @@ func (s *remoteAgentServer) Preview(tab int, full bool) (string, error) {
 	return s.rc.preview(tab, full)
 }
 
-func (s *remoteAgentServer) Alive() bool {
+// Alive asks the in-sandbox agent-server whether its agent is running. The error
+// is the whole point of the signature here: this is a REST call across a real
+// network hop, so it distinguishes "the sandbox answered: the agent is gone"
+// (false, nil — authoritative) from "the sandbox never answered" (false, err —
+// UNKNOWN). Swallowing the error into a bare false made a transport blip
+// indistinguishable from a dead agent, and callers re-provisioned on it (#1794).
+func (s *remoteAgentServer) Alive() (bool, error) {
 	var resp agentAliveResp
 	if err := s.rc.call("/v1/agent/alive", struct{}{}, &resp); err != nil {
-		return false
+		return false, err
 	}
-	return resp.Alive
+	return resp.Alive, nil
 }
 
 func (s *remoteAgentServer) SendPrompt(prompt string) error {
