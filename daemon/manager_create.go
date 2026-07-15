@@ -2,7 +2,10 @@ package daemon
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/sachiniyer/agent-factory/agentproto"
@@ -133,6 +136,23 @@ func (m *Manager) reserveCreate(req CreateSessionRequest) (*config.RepoContext, 
 		return nil, "", nil, nil, err
 	}
 
+	// Whether this create lands on the HOOK backend — the one runtime whose name
+	// is a global namespace. ForceRemote is only ONE of three ways to get there:
+	// `--backend hook` and a repo's `backend = "hook"` config both select it with
+	// ForceRemote false, and gating the hook-name checks on ForceRemote alone let
+	// those creates hand scripts a colliding --name. Ask the factory the same
+	// question it will answer at provision time.
+	usesHook := req.ForceRemote
+	if kind, kerr := session.BackendKindFor(session.InstanceOptions{
+		Backend:     session.BackendKind(req.Backend),
+		ForceRemote: req.ForceRemote,
+	}, repo.Root); kerr == nil {
+		usesHook = kind == session.BackendHook
+	}
+	// A kerr here means an invalid `backend` value; leave usesHook at the legacy
+	// ForceRemote answer and let NewInstance surface the canonical error rather
+	// than duplicating its wording at a different point in the flow.
+
 	var renamedArchived *session.InstanceData
 	title := req.Title
 	if title == "" {
@@ -143,7 +163,7 @@ func (m *Manager) reserveCreate(req CreateSessionRequest) (*config.RepoContext, 
 		// A derived title_base keeps auto-suffixing around every existing session,
 		// archived rows included — the archived-name-reuse rename is reserved for an
 		// EXPLICIT title the caller asked for by name (below).
-		title, err = m.nextAvailableTitleLocked(repo.ID, repo.Root, base, req.Program, req.ForceRemote, diskData)
+		title, err = m.nextAvailableTitleLocked(repo.ID, repo.Root, base, req.Program, usesHook, diskData)
 		if err != nil {
 			return nil, "", nil, nil, err
 		}
@@ -156,14 +176,17 @@ func (m *Manager) reserveCreate(req CreateSessionRequest) (*config.RepoContext, 
 		if err != nil {
 			return nil, "", nil, nil, err
 		}
-		if err := m.validateTitleAvailableLocked(repo.ID, repo.Root, title, req.Program, req.ForceRemote, req.allowReserved, diskData); err != nil {
+		if err := m.validateTitleAvailableLocked(repo.ID, repo.Root, title, req.Program, usesHook, req.allowReserved, diskData); err != nil {
 			return nil, "", nil, nil, err
 		}
 	}
 
 	key := daemonInstanceKey(repo.ID, title)
 	remoteName := ""
-	if req.ForceRemote {
+	if usesHook {
+		// Keyed by the BARE slug on purpose: it is the exact string the hook
+		// scripts receive as --name, and that namespace is global (see
+		// reservedRemoteNames).
 		remoteName = session.Slugify(title)
 		if _, ok := m.reservedRemoteNames[remoteName]; ok {
 			return nil, "", nil, nil, fmt.Errorf("remote hook name %q is already reserved", remoteName)
@@ -199,7 +222,13 @@ func (m *Manager) renameArchivedForReuseLocked(repoID, repoPath, title, program 
 		return nil, nil
 	}
 	oldTitle := archived.Title
-	newTitle, err := m.uniqueArchivedTitleLocked(repoID, repoPath, oldTitle, program, *diskData)
+	// The replacement name must clear the same bar the archived row itself had:
+	// if it is a HOOK session, restoring it later re-provisions with --name
+	// Slugify(newTitle), so that slug has to be free in the GLOBAL hook namespace
+	// too — otherwise the rename quietly parks it on a name another project's
+	// sandbox already owns.
+	archivedIsHook := archived.ToInstanceData().IsRemoteHook()
+	newTitle, err := m.uniqueArchivedTitleLocked(repoID, repoPath, oldTitle, program, archivedIsHook, *diskData)
 	if err != nil {
 		return nil, err
 	}
@@ -290,14 +319,18 @@ func (m *Manager) findArchivedOnlyCollisionLocked(repoID, title string) (*sessio
 // archived session being renamed out of the way: "<base> (archived)", then
 // "<base> (archived 2)", "(archived 3)", … skipping any that collide with an
 // existing live or archived session (feat: reuse archived name). Runs under m.mu.
-func (m *Manager) uniqueArchivedTitleLocked(repoID, repoPath, base, program string, diskData []session.InstanceData) (string, error) {
+func (m *Manager) uniqueArchivedTitleLocked(repoID, repoPath, base, program string, remote bool, diskData []session.InstanceData) (string, error) {
 	for i := 1; i <= 10000; i++ {
 		candidate := fmt.Sprintf("%s (archived)", base)
 		if i > 1 {
 			candidate = fmt.Sprintf("%s (archived %d)", base, i)
 		}
-		if err := m.validateTitleAvailableLocked(repoID, repoPath, candidate, program, false, false, diskData); err == nil {
+		err := m.validateTitleAvailableLocked(repoID, repoPath, candidate, program, remote, false, diskData)
+		if err == nil {
 			return candidate, nil
+		}
+		if errors.Is(err, errTitleCheckFatal) {
+			return "", err
 		}
 	}
 	return "", fmt.Errorf("could not find an available archived name for %q", base)
@@ -309,8 +342,15 @@ func (m *Manager) nextAvailableTitleLocked(repoID, repoPath, baseTitle, program 
 		if i > 1 {
 			candidate = fmt.Sprintf("%s-%d", baseTitle, i)
 		}
-		if err := m.validateTitleAvailableLocked(repoID, repoPath, candidate, program, remote, false, diskData); err == nil {
+		err := m.validateTitleAvailableLocked(repoID, repoPath, candidate, program, remote, false, diskData)
+		if err == nil {
 			return candidate, nil
+		}
+		// A check that could not RUN is not a taken candidate: no suffix would fare
+		// any better, so surface the actionable error instead of spinning through
+		// 10,000 of them under the lock.
+		if errors.Is(err, errTitleCheckFatal) {
+			return "", err
 		}
 	}
 	return "", fmt.Errorf("could not find an available title for %q", baseTitle)
@@ -351,6 +391,12 @@ func (m *Manager) validateTitleAvailableLocked(repoID, repoPath, title, program 
 	}
 	if remote {
 		candidate := session.Slugify(title)
+		// Hook names are the ONE namespace that stays global while titles go
+		// per-repo: launch_cmd/delete_cmd receive `--name <slug>` verbatim, with
+		// no repo component, and external provisioners tag and reap real
+		// VMs/containers by it. Two repos handing scripts the same name would
+		// clobber one sandbox and let either delete reap the other's. So every
+		// check below spans ALL repos, unlike the per-repo title rules above.
 		if _, ok := m.reservedRemoteNames[candidate]; ok {
 			return fmt.Errorf("remote hook name %q is already reserved", candidate)
 		}
@@ -366,9 +412,8 @@ func (m *Manager) validateTitleAvailableLocked(repoID, repoPath, title, program 
 		// (FindSlugCollision over Snapshot()) catches it, but the HTTP
 		// CreateSession path bypasses that, so the daemon-side check must be
 		// complete (#1636).
-		for key, inst := range m.instances {
-			rid, _ := splitDaemonInstanceKey(key)
-			if rid != repoID || inst == nil {
+		for _, inst := range m.instances {
+			if inst == nil {
 				continue
 			}
 			data := inst.ToInstanceData()
@@ -387,6 +432,16 @@ func (m *Manager) validateTitleAvailableLocked(repoID, repoPath, title, program 
 				return fmt.Errorf("remote session titled %q already maps to hook name %q", data.Title, candidate)
 			}
 		}
+		// diskData holds only THIS repo's rows, so a settled hook session in
+		// another repo would otherwise slip through — the hole that let two repos
+		// create the same hook name sequentially (they just could not race).
+		owner, ownerRepo, err := hookSlugOwnerInOtherRepos(candidate, repoID)
+		if err != nil {
+			return err
+		}
+		if owner != "" {
+			return fmt.Errorf("remote session titled %q in project %s already maps to hook name %q; remote hook names are shared across projects because the hook scripts receive them verbatim as --name — pick another title for this remote session", owner, ownerRepo, candidate)
+		}
 		return nil
 	}
 	if tmuxSession := tmux.NewTmuxSessionForRepo(title, repoPath, program); tmuxSession.DoesSessionExist() {
@@ -399,6 +454,65 @@ func (m *Manager) validateTitleAvailableLocked(repoID, repoPath, title, program 
 	}
 	return nil
 }
+
+// hookSlugOwnerInOtherRepos reports the title (and repo path) of a persisted
+// remote-hook session in ANY repo other than repoID whose slug equals candidate,
+// or "" when the hook name is free.
+//
+// The caller already scans this repo's rows and every in-memory instance; this
+// covers the remaining case — a settled hook session in a different repo, whose
+// rows loadRepoInstanceData(repoID) never returns. Without it the global
+// hook-name namespace is only enforced against concurrent creates (the in-flight
+// reservation), so two repos could take the same name sequentially and hand both
+// sandboxes the identical --name.
+//
+// Corrupted per-repo files are surfaced rather than skipped: a hidden hook
+// session would otherwise let a colliding name through, and the cost of a false
+// refusal here is a clear error, while the cost of a miss is two provisioned
+// sandboxes fighting over one name.
+func hookSlugOwnerInOtherRepos(candidate, repoID string) (string, string, error) {
+	allInstances, err := config.LoadAllRepoInstances()
+	if err != nil {
+		return "", "", fmt.Errorf("%w: %v", errTitleCheckFatal, err)
+	}
+	var corrupted []string
+	for rid, raw := range allInstances {
+		if rid == repoID {
+			continue
+		}
+		var rows []session.InstanceData
+		if err := json.Unmarshal(raw, &rows); err != nil {
+			corrupted = append(corrupted, rid)
+			continue
+		}
+		for i := range rows {
+			if !rows[i].IsRemoteHook() {
+				continue
+			}
+			if session.Slugify(rows[i].Title) == candidate {
+				return rows[i].Title, rows[i].Path, nil
+			}
+		}
+	}
+	if len(corrupted) > 0 {
+		sort.Strings(corrupted)
+		return "", "", fmt.Errorf("%w: cannot verify remote hook name %q is free: %d repo(s) have a corrupted instances.json that may be hiding a session using it: %s",
+			errTitleCheckFatal, candidate, len(corrupted), strings.Join(corrupted, ", "))
+	}
+	return "", "", nil
+}
+
+// errTitleCheckFatal marks a title-availability failure that is NOT "this
+// candidate is taken" but "the check itself could not be completed" — today, a
+// corrupted instances.json that might be hiding a hook session using the name.
+//
+// The distinction is load-bearing for nextAvailableTitleLocked, which walks
+// candidates (base, base-2, base-3 …) and reads ANY error as "taken, try the
+// next". Without the marker a fatal error makes it burn all 10,000 candidates
+// while holding the manager lock and then report a misleading "could not find an
+// available title", swallowing the actionable corruption message. Callers check
+// errors.Is and surface it instead of suffixing around it.
+var errTitleCheckFatal = errors.New("cannot verify title availability")
 
 type titleConflictKind int
 

@@ -1,21 +1,23 @@
 package app
 
 import (
+	"context"
 	"io"
 	"os"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/sachiniyer/agent-factory/apiclient"
 	"github.com/sachiniyer/agent-factory/log"
 )
 
 // remoteDetachTerminalReassert re-establishes the terminal modes bubbletea
 // set at startup (see Run: WithAltScreen + WithMouseCellMotion, plus the
 // hidden cursor and the bracketed paste bubbletea enables by default) after a
-// remote attach stream has scribbled over them. The hook backend's neutral
-// restore (session.hookAttachTerminalRestore) hands the terminal back on the
-// MAIN screen with the cursor visible and all reporting modes off — correct
-// for the CLI attach path, but not the state this TUI runs in.
+// remote attach stream has scribbled over them. The attach driver's neutral
+// restore hands the terminal back on the MAIN screen with the cursor visible
+// and all reporting modes off — correct for the CLI attach path, but not the
+// state this TUI runs in.
 //
 // Hand-rolled rather than bubbletea-native, for two reasons (#845):
 //   - bubbletea cannot re-assert state it believes is already set: the
@@ -74,6 +76,26 @@ func (m *home) beginAttachTransition(run func() tea.Cmd) tea.Cmd {
 // it to substitute a hermetic attach func (no real WS PTY stream or remote
 // terminal_cmd PTY) while preserving the call-site behaviour.
 var attachOverlayCallbackFn = (*home).attachOverlayCallback
+
+// attachStreamFn is the indirection attachInstanceTab dials the daemon's WS PTY
+// stream through — the SOLE full-screen attach byte source for every session,
+// local or remote (#1837). Production points it at apiclient; tests swap it to
+// observe the routing without standing up a daemon.
+var attachStreamFn = func(ctx context.Context, title, repoID, tabID string, tabIdx int) (chan struct{}, error) {
+	c, err := apiclient.NewTargeted()
+	if err != nil {
+		return nil, err
+	}
+	return c.AttachStream(ctx, title, repoID, tabID, tabIdx)
+}
+
+// SetAttachStreamFnForTest swaps the WS PTY stream dial and returns a restore
+// func, so a test can pin which attach source attachInstanceTab routes to.
+func SetAttachStreamFnForTest(fn func(context.Context, string, string, string, int) (chan struct{}, error)) func() {
+	prev := attachStreamFn
+	attachStreamFn = fn
+	return func() { attachStreamFn = prev }
+}
 
 // attachOverlayCallback runs the attach-overlay onDismiss lifecycle: emits
 // the detach-trace markers, invokes attach, arms the attached flag for the

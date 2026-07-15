@@ -159,6 +159,17 @@ export function supportsTabManagement(s: SessionData): boolean {
   return s.backend_type !== "remote";
 }
 
+/** Whether the web may offer tab management for a session RIGHT NOW: its backend
+ *  must support it AND it must not be archived. An archived session is inert — the
+ *  daemon refuses both CreateTab (since #1196) and CloseTab (#1809 follow-up) on
+ *  one — so offering a + / × there can only produce a guaranteed-to-fail call, and
+ *  the × specifically would try to strip the web-tab URL that archive preserved for
+ *  the restore. Every site that offers or fires a tab mutation reads THIS, not
+ *  supportsTabManagement, so the affordances and the daemon's answer can't drift. */
+export function canManageTabs(s: SessionData): boolean {
+  return supportsTabManagement(s) && !isArchived(s);
+}
+
 /** The selected session's tabs, always non-empty: a pre-#930 record with no tabs
  *  is shown as a single implicit agent tab so the bar (and index math) never sees
  *  an empty list. */
@@ -474,6 +485,9 @@ export class AppShell {
   private lastLive: EventStreamStatus | null = null;
   private lastKb: KeyboardFocus | null = null;
   private lastError: string | null = null;
+  // The last value written to document.title, so an unrelated update doesn't
+  // reassign it (see syncDocumentTitle).
+  private lastDocTitle: string | null = null;
   // Whether the main pane has been rendered at least once. The constructor leaves it
   // an empty <section>, so the FIRST update must render it even when nothing is
   // selected (selectedId is null before AND after that first update, so the
@@ -608,8 +622,20 @@ export class AppShell {
     this.el = h("main", { class: "af-app" }, header, viewport, this.toast, this.modalHost);
   }
 
+  /** Points the browser tab at what is on screen, so a pinned/backgrounded tab and the
+   *  history entry name the session and project rather than a static "Agent Factory".
+   *  Assigns only on a real change (a rename, a selection, or a project switch). */
+  private syncDocumentTitle(state: AppState): void {
+    const title = documentTitle(state);
+    if (this.lastDocTitle !== title) {
+      this.lastDocTitle = title;
+      document.title = title;
+    }
+  }
+
   /** Applies the latest state, touching only what changed. */
   update(state: AppState): void {
+    this.syncDocumentTitle(state);
     // The keyboard-focus indicator (#1693): a modifier class on the app root that
     // CSS turns into an accent border on whichever pane owns the keyboard. The
     // terminal only "holds" it while a session is actually selected; with none
@@ -1023,7 +1049,7 @@ export class AppShell {
       return;
     }
     const tabs = sessionTabs(selected);
-    const canManage = supportsTabManagement(selected);
+    const canManage = canManageTabs(selected);
     // The active index is clamped: a resync that shrank the list must not leave the
     // highlight (and the streamed tab) pointing past the end.
     const active = Math.min(Math.max(state.activeTab, 0), tabs.length - 1);
@@ -1098,6 +1124,33 @@ export class AppShell {
   }
 }
 
+/** The product name, and the browser-tab title when there is nothing to qualify it. */
+const APP_NAME = "Agent Factory";
+
+/**
+ * The browser-tab title for a state: "‹session› — ‹project› · Agent Factory" while a
+ * session is selected, degrading to "‹project› · Agent Factory" when only a project is
+ * scoped and to the bare app name when neither is. It reads the SELECTED session's own
+ * repo root rather than the scoped project, so the title always names the project the
+ * session actually lives in.
+ *
+ * Pure (state in, string out) and exported so it is unit-testable without a DOM;
+ * AppShell.syncDocumentTitle owns the assignment.
+ */
+export function documentTitle(state: AppState): string {
+  const sel = selectedSession(state);
+  const root = sel?.worktree?.repo_path ?? state.selectedProject;
+  const parts: string[] = [];
+  if (sel && sel.title !== "") {
+    parts.push(sel.title);
+  }
+  if (root) {
+    parts.push(projectName(root));
+  }
+  const lead = parts.join(" — ");
+  return lead === "" ? APP_NAME : `${lead} · ${APP_NAME}`;
+}
+
 /** The currently selected session row, or null. */
 function selectedSession(state: AppState): SessionData | null {
   return state.selectedId ? (state.sessions.find((s) => s.id === state.selectedId) ?? null) : null;
@@ -1124,7 +1177,7 @@ export function tabBarSig(state: AppState): string {
   }
   const tabs = sessionTabs(selected);
   const active = Math.min(Math.max(state.activeTab, 0), tabs.length - 1);
-  const canManage = supportsTabManagement(selected);
+  const canManage = canManageTabs(selected);
   const shown = [...new Set(state.shownTabs)].sort((a, b) => a - b);
   return JSON.stringify([selected.id ?? "", tabs.map((t) => [t.kind, t.name]), active, shown, canManage]);
 }

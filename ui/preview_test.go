@@ -530,7 +530,7 @@ func TestPreviewResetToNormalModeNilInstance(t *testing.T) {
 // {fallback:false, text:""} into previewState — Preview() returns empty
 // content while the workspace is still being set up — so the pane rendered
 // completely blank for at least one frame until the next async UpdateContent
-// tick. ResetToNormalMode must keep the same "Setting up workspace..."
+// tick. ResetToNormalMode must keep the same "Setting up workspace…"
 // fallback that UpdateContent shows for Loading instances.
 func TestPreviewResetToNormalModeLoadingShowsFallback(t *testing.T) {
 	log.Initialize(false)
@@ -557,9 +557,9 @@ func TestPreviewResetToNormalModeLoadingShowsFallback(t *testing.T) {
 		"isScrolling must be false after ResetToNormalMode")
 	require.True(t, p.content.fallback,
 		"exiting scroll mode on a Loading instance must keep the fallback state")
-	require.Contains(t, p.content.text, "Setting up workspace...",
+	require.Contains(t, p.content.text, "Setting up workspace…",
 		"fallback text must be the Loading message")
-	require.Contains(t, p.String(), "Setting up workspace...",
+	require.Contains(t, p.String(), "Setting up workspace…",
 		"rendered frame must show the Loading fallback, not a blank pane")
 }
 
@@ -570,7 +570,7 @@ func TestPreviewResetToNormalModeLoadingShowsFallback(t *testing.T) {
 // Preview() == ("", nil) and Started() == false — fell through to the generic
 // "Please enter a name for the instance." fallback. That message is misleading
 // during teardown and, for remote sessions, can persist for the whole 10-60s
-// delete. UpdateContent must show the "Tearing down session..." fallback for a
+// delete. UpdateContent must show the "Tearing down session…" fallback for a
 // Deleting instance instead.
 func TestPreviewUpdateContentDeletingShowsTeardownFallback(t *testing.T) {
 	log.Initialize(false)
@@ -595,11 +595,11 @@ func TestPreviewUpdateContentDeletingShowsTeardownFallback(t *testing.T) {
 
 	require.True(t, p.content.fallback,
 		"Deleting instance must render a fallback")
-	require.Contains(t, p.content.text, "Tearing down session...",
+	require.Contains(t, p.content.text, "Tearing down session…",
 		"Deleting instance must show the teardown fallback")
 	require.NotContains(t, p.content.text, "Please enter a name",
 		"Deleting instance must NOT show the not-started fallback (#920)")
-	require.Contains(t, p.String(), "Tearing down session...",
+	require.Contains(t, p.String(), "Tearing down session…",
 		"rendered frame must show the teardown fallback")
 }
 
@@ -904,7 +904,7 @@ func TestResetToNormalModeDoesNotClearFallbackFlag(t *testing.T) {
 	// fallback. setFallbackState is the production path that gets us into
 	// fallback==true; isScrolling/viewport mimic ScrollUp's side effects
 	// without depending on tmux capture-pane behavior here.
-	p.setFallbackState("Setting up workspace...")
+	p.setFallbackState("Setting up workspace…")
 	require.True(t, p.content.fallback,
 		"precondition: fallback should be true after setFallbackState")
 	p.isScrolling = true

@@ -66,17 +66,51 @@ func listSessions(repoID string) ([]session.InstanceData, error) {
 	return diskListSessions(repoID)
 }
 
-// getSessionByTitle returns the single session matching title, preferring the
-// daemon's live snapshot and falling back to the disk scan when no daemon is
-// reachable (#1029 PR 2). When a live snapshot is available the daemon is
-// authoritative: a miss returns not-found without re-reading disk.
+// getSessionByTitle returns the single session matching title across ALL repos,
+// preferring the daemon's live snapshot and falling back to the disk scan when no
+// daemon is reachable (#1029 PR 2). When a live snapshot is available the daemon
+// is authoritative: a miss returns not-found without re-reading disk.
+//
+// Titles are unique per-repo, so this unscoped lookup resolves only when exactly
+// one session matches; several matches return ErrAmbiguousTitle. Callers with a
+// repo in hand should use getSessionByTitleInScope instead.
 func getSessionByTitle(title string) (*session.InstanceData, error) {
 	data, fallBack, err := snapshotRead(daemon.SnapshotRequest{})
 	if err == nil {
+		var matches []session.InstanceData
 		for i := range data {
 			if data[i].Title == title {
-				return &data[i], nil
+				matches = append(matches, data[i])
 			}
+		}
+		// Group by repo path, not raw match count: the snapshot carries no
+		// repoID, and only a title held by two distinct PROJECTS is ambiguous.
+		paths := session.DedupeSorted(repoPathsOf(matches))
+		if len(paths) > 1 {
+			return nil, session.AmbiguousTitleError(title, repoPathsOf(matches))
+		}
+		if len(matches) > 0 {
+			// One snapshot match is not proof of uniqueness: the snapshot mirrors
+			// the daemon's m.instances, and refresh SKIPS rows it cannot restore
+			// (worktree/tmux gone). A second repo holding the title on disk only
+			// would be invisible here, so a bare `sessions get foo` would name the
+			// wrong project. Union the local disk rows, mirroring the daemon's own
+			// findSession guard.
+			//
+			// Only for a LOCAL target: a remote's sessions have nothing to do with
+			// this machine's instances.json, and reading it would let a same-titled
+			// local session make a remote lookup spuriously ambiguous. That leaves a
+			// known gap — a REMOTE daemon in the same partial-restore state serves a
+			// lone visible match and this read cannot see its disk to tell. Closing
+			// it needs the guard on the daemon's side of the wire (a resolve-by-title
+			// RPC that runs findSession, or a Snapshot that carries unrestorable
+			// rows); the destructive paths already resolve through findSession.
+			if !apiclient.IsRemoteTarget() {
+				if extra, err := diskRepoPathsForTitle(title, paths); err == nil && len(extra) > 1 {
+					return nil, session.AmbiguousTitleError(title, extra)
+				}
+			}
+			return &matches[0], nil
 		}
 		// Mirror findInstanceByTitle's clean-miss error so output is unchanged.
 		return nil, fmt.Errorf("session %q %w", title, errTitleNotFound)
@@ -144,7 +178,9 @@ var sessionsListCmd = &cobra.Command{
 		log.Initialize(false)
 		defer log.Close()
 
-		repoID, err := resolveRepoID()
+		// Snapshot-based read: it follows --daemon-url to the remote, so it uses
+		// the lookup resolver (which ignores the client's cwd against a remote).
+		repoID, err := resolveRepoIDForLookup()
 		if err != nil {
 			return jsonError(err)
 		}
@@ -168,12 +204,28 @@ var sessionsListCmd = &cobra.Command{
 var sessionsGetCmd = &cobra.Command{
 	Use:   "get <title>",
 	Short: "Get a session by title",
-	Args:  cobra.ExactArgs(1),
+	Long: `Titles are unique within a project, not across projects, so the same
+name can exist in several repos. The title resolves inside the repo given by
+--repo, or the current directory's repo when --repo is omitted.
+
+With no repo context, a title held by exactly one session still resolves; one
+held by sessions in several projects is ambiguous and reports an error naming
+those projects instead of guessing between them.`,
+	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		log.Initialize(false)
 		defer log.Close()
 
-		data, err := getSessionByTitle(args[0])
+		// --repo is accepted on this command; it used to be parsed and then
+		// silently dropped, so `get` always searched every repo and returned
+		// whichever same-titled session the map walk hit first. This read is
+		// served by the TARGETED daemon, so it uses the lookup resolver (which
+		// ignores the client's cwd against a remote).
+		repoID, err := resolveRepoIDForLookup()
+		if err != nil {
+			return jsonError(err)
+		}
+		data, err := getSessionByTitleInScope(repoID, args[0])
 		if err != nil {
 			return jsonError(err)
 		}
@@ -588,12 +640,51 @@ func runBroadcast(prompt string) error {
 var sessionsPreviewCmd = &cobra.Command{
 	Use:   "preview <title>",
 	Short: "Preview a session's terminal content",
-	Args:  cobra.ExactArgs(1),
+	Long: `Titles are unique within a project, not across projects, so the same
+name can exist in several repos. The title resolves inside the repo given by
+--repo, or the current directory's repo when --repo is omitted.
+
+With no repo context, a title held by exactly one session still resolves; one
+held by sessions in several projects is ambiguous and reports an error naming
+those projects instead of guessing between them.`,
+	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		log.Initialize(false)
 		defer log.Close()
 
-		instance, _, err := findLiveInstanceByTitle(args[0])
+		// --repo is accepted on this command; it used to be parsed and then
+		// silently dropped. That was worse here than on `get`: resolving the
+		// wrong repo's session does not just read it, it restores/starts it.
+		repoID, err := resolveRepoIDForLookup()
+		if err != nil {
+			return jsonError(err)
+		}
+
+		// A remote target must be previewed BY the remote daemon. The local path
+		// below reads this machine's instances.json and restores the session to
+		// capture it — against --daemon-url that would preview (and start) a
+		// same-titled LOCAL session, or report not-found even though the remote
+		// holds the session. The daemon resolves {title, repoID} on its own side,
+		// where the sessions actually live.
+		if apiclient.IsRemoteTarget() {
+			client, cerr := apiclient.NewTargeted()
+			if cerr != nil {
+				return jsonError(cerr)
+			}
+			content, gone, perr := client.Preview(daemon.PreviewRequest{Title: args[0], RepoID: repoID})
+			if perr != nil {
+				return jsonError(perr)
+			}
+			if gone {
+				return jsonError(fmt.Errorf("session %q is no longer running", args[0]))
+			}
+			return jsonOut(map[string]string{
+				"title":   args[0],
+				"content": content,
+			})
+		}
+
+		instance, _, err := findLiveInstanceByTitleInScope(repoID, args[0])
 		if err != nil {
 			return jsonError(err)
 		}
@@ -783,19 +874,15 @@ var sessionsAttachCmd = &cobra.Command{
 			return jsonError(err)
 		}
 
-		// A remote session attaches its hook attach_cmd PTY in-process; a local
-		// session attaches CLIENT-side over the daemon's WS PTY stream (#1592
-		// Phase 2 PR7), the same path the TUI uses. Ensure a daemon is up first —
-		// it owns the local session's clientless broker — then dial it.
-		if instance.Capabilities().Workspace == session.WorkspaceRemote {
-			detached, err := instance.Attach()
-			if err != nil {
-				return jsonError(fmt.Errorf("failed to attach: %w", err))
-			}
-			<-detached
-			return nil
-		}
-
+		// EVERY session — local or remote — attaches CLIENT-side over the daemon's
+		// WS PTY stream (#1592 Phase 2 PR7), the same path the TUI uses: the daemon
+		// resolves the byte source via instance.AgentServer() (a local broker, or a
+		// remoteAgentServer proxy for docker/ssh/hook). A prior
+		// Capabilities().Workspace == WorkspaceRemote branch called instance.Attach()
+		// here, aimed at a backend attach that had already become a routing-invariant
+		// error, so it broke remote attach outright (#1837). That surface is now
+		// deleted (#1852) — this stream dial is the only attach there is.
+		//
 		// EnsureDaemon spawns the LOCAL daemon that owns a local session's
 		// clientless broker; a remote target's daemon is already running on the
 		// other machine, so skip the local spawn and dial it directly (#1592

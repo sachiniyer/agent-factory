@@ -26,8 +26,12 @@ type Capabilities struct {
 	// Workspace records where the workspace lives (local worktree vs off-box).
 	Workspace WorkspaceKind
 
-	// Attach: an interactive controller can attach to the agent session.
-	Attach bool
+	// There is deliberately no Attach bit (#1860). Attach is not an optional
+	// capability any more: every runtime attaches client-side over the WS PTY
+	// stream, so the bit was unconditionally true for every backend and no
+	// dispatch ever read it. A capability that cannot be false gates nothing —
+	// it only invites a future attach gate to branch on a constant.
+
 	// Archive: the session can be archived/restored (local-worktree relocation
 	// today; push/pull the branch once every backend clones from GitHub).
 	Archive bool
@@ -91,18 +95,13 @@ type Backend interface {
 	// PreviewFullHistory returns the full scrollback history.
 	PreviewFullHistory(instance *Instance) (string, error)
 
-	// Attach gives the user interactive terminal access to the AGENT session
-	// (tab 0). The returned channel is closed when the user detaches.
-	Attach(instance *Instance) (chan struct{}, error)
-
-	// AttachTerminal gives interactive access to a NON-agent terminal tab
-	// (#1592 Phase 1 PR5): a local shell tab at tabIdx for the local runtime, or
-	// the single terminal_cmd shell for the remote hook runtime (which ignores
-	// tabIdx). Both attach over a PTYStream; the returned channel is closed on
-	// detach. Errors when no such terminal exists (e.g. remote_hooks.terminal_cmd
-	// unset). This is on the interface so callers never type-assert a concrete
-	// backend to reach a remote terminal.
-	AttachTerminal(instance *Instance, tabIdx int) (chan struct{}, error)
+	// There is deliberately no Attach/AttachTerminal here (#1852). Interactive
+	// attach is CLIENT-side for every runtime: the client dials the daemon's WS
+	// PTY stream (apiclient.AttachStream), and the daemon resolves locality via
+	// instance.AgentServer() — a local broker, or a remoteAgentServer proxy for
+	// docker/ssh/hook. A backend-routed attach is therefore not a thing a caller
+	// can express, which is what keeps #1837 (remote attach aimed at an erroring
+	// backend stub) from recurring.
 
 	// HasUpdated reports whether the session output changed since the last
 	// check and whether the program is showing a prompt, and returns the raw

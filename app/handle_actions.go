@@ -7,7 +7,6 @@ import (
 	"runtime"
 	"strings"
 
-	"github.com/sachiniyer/agent-factory/apiclient"
 	"github.com/sachiniyer/agent-factory/keys"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
@@ -770,44 +769,35 @@ func (m *home) attachSelected(selected *session.Instance) (tea.Model, tea.Cmd) {
 }
 
 // attachInstanceTab runs the full-screen attach flow for a captured
-// instance+tab binding. The terminal tab attaches a local tmux session for
-// local instances, but a remote instance's terminal_cmd PTY for remote ones
-// (#843), so the post-detach handling must key off the instance's real
-// remote-ness (#889). Callers pass the tab index captured at keypress time
+// instance+tab binding. Callers pass the tab index captured at keypress time
 // (#716), before help-overlay deferral can let selection or active tab drift.
 func (m *home) attachInstanceTab(instance *session.Instance, tabIdx int, agentLabel, terminalLabel string) (tea.Model, tea.Cmd) {
-	remote := instance.Capabilities().Workspace == session.WorkspaceRemote
 	label := agentLabel
 	if tabIdx != 0 {
 		label = terminalLabel
 	}
-	// Pick the attach byte source by LOCALITY — a capability check, not a
-	// concrete-backend type assertion (#1592 Phase 1). A local session (agent tab
-	// 0 or a shell/process tab) attaches CLIENT-side as a WS PTY subscriber over
-	// the daemon socket (apiclient.AttachStream, #1592 Phase 2 PR7), replacing the
-	// retired tmux-server-mediated attach driver. A remote session attaches its
-	// hook attach_cmd (agent tab) / terminal_cmd (terminal tab) PTY in-process
-	// through the uniform Backend interface. Both return a chan closed on detach,
-	// and both now scribble the terminal (see attachOverlayCallback's uniform
-	// reassert). instance + repoID are captured here at keypress so a deferred
-	// attach (help overlay open) targets the captured session, not a drifted
-	// selection (#716).
+	// EVERY session — local or remote, agent tab 0 or a shell/process tab —
+	// attaches CLIENT-side as a WS PTY subscriber over the daemon socket
+	// (apiclient.AttachStream, #1592 Phase 2 PR7). The daemon resolves the byte
+	// source via instance.AgentServer(), which is a local broker for a local
+	// session and a remoteAgentServer proxy for a docker/ssh/hook one, so
+	// locality is the DAEMON's concern and the client needs no branch on it.
+	//
+	// Do not reintroduce a Capabilities().Workspace branch that routes remote
+	// sessions through the Backend: that branch is what broke remote attach
+	// outright (#1837), because #1592 Phase 4 PR7 had already turned every remote
+	// backend's attach into a routing-invariant error. #1852 then deleted the
+	// backend attach surface entirely, so there is no longer anything to branch
+	// to — reintroducing one would not compile, which is the point.
+	//
+	// instance + repoID are captured here at keypress so a deferred attach (help
+	// overlay open) targets the captured session, not a drifted selection (#716).
 	repoID := m.repoID
 	attach := func() (chan struct{}, error) {
-		if remote {
-			if tabIdx != 0 {
-				return ui.AttachTerminalTab(instance, tabIdx)
-			}
-			return m.store.AttachInstance(instance)
-		}
-		c, err := apiclient.NewTargeted()
-		if err != nil {
-			return nil, err
-		}
 		// Address the attach by the tab's stable id (#1738) so a reorder/close can't
 		// misroute the full-screen stream; empty falls back to the ordinal.
 		tabID, _ := instance.TabIDAt(tabIdx)
-		return c.AttachStream(context.Background(), instance.Title, repoID, tabID, tabIdx)
+		return attachStreamFn(context.Background(), instance.Title, repoID, tabID, tabIdx)
 	}
 	return m.showHelpScreen(helpTypeInstanceAttach{}, func() tea.Cmd {
 		return m.beginAttachTransition(func() tea.Cmd {

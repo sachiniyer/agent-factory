@@ -8,7 +8,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { tabBarSig } from "./ui.js";
+import { canManageTabs, documentTitle, tabBarSig } from "./ui.js";
 import type { AppState } from "./ui.js";
 import { Liveness, type SessionData } from "./types.js";
 
@@ -79,6 +79,35 @@ test("manageability (local vs remote) is part of the sig — the + / × affordan
   );
 });
 
+test("canManageTabs: an archived session is inert — its + / × are withdrawn (#1809)", () => {
+  // Archive PRESERVES web tabs so a restore can render them again, which made an
+  // archived session the first one to carry a closable (non-agent) tab. The daemon
+  // refuses CreateTab/CloseTab on one, and the × specifically would strip the very
+  // URL the archive kept — so the affordances must not be offered at all.
+  assert.equal(canManageTabs(sess({ backend_type: "local" })), true, "a live local session manages tabs");
+  assert.equal(
+    canManageTabs(sess({ backend_type: "local", liveness: Liveness.Archived })),
+    false,
+    "an archived session is inert",
+  );
+  assert.equal(canManageTabs(sess({ backend_type: "remote" })), false, "remote tabs stay config-fixed");
+});
+
+test("archiving the selected session changes the sig — the bar must rebuild to drop the × (#1809)", () => {
+  // The sig gates the rebuild, so if archiving didn't change it the bar would keep
+  // rendering a live × over an archived session's preserved web tab.
+  const tabs = {
+    tabs: [
+      { name: "agent", kind: 0 },
+      { name: "webpreview", kind: 3, url: "http://localhost:3000" },
+    ],
+  };
+  assert.notEqual(
+    tabBarSig(state({ sessions: [sess({ ...tabs, backend_type: "local" })] })),
+    tabBarSig(state({ sessions: [sess({ ...tabs, backend_type: "local", liveness: Liveness.Archived })] })),
+  );
+});
+
 test("no selection collapses to the empty sig", () => {
   assert.equal(tabBarSig(state({ selectedId: null })), "");
 });
@@ -98,4 +127,49 @@ test("the signature is delimiter-safe: a name mimicking the field separators sti
   // active/shown/manageability combination.
   const tricky = state({ sessions: [sess({ tabs: [{ name: 't"::0::[0]::true', kind: 1 }] })] });
   assert.notEqual(tabBarSig(plain), tabBarSig(tricky));
+});
+
+// Unit coverage for documentTitle (#1826 item 2). The browser tab was a static
+// "Agent Factory" on every screen, so a pinned or backgrounded tab said nothing about
+// what it held. The title names the selected session and its project, and degrades
+// cleanly when there is no selection.
+
+/** A session rooted in a repo, the shape documentTitle reads. */
+function inRepo(title: string, root: string): SessionData {
+  return { id: title, title, branch: "b", worktree: { repo_path: root } };
+}
+
+test("documentTitle: a selected session names itself and its project", () => {
+  const s = state({
+    selectedId: "api",
+    sessions: [inRepo("api", "/home/u/code/agent-factory")],
+    selectedProject: "/home/u/code/agent-factory",
+  });
+  assert.equal(documentTitle(s), "api — agent-factory · Agent Factory");
+});
+
+test("documentTitle: with no selection the scoped project still qualifies the tab", () => {
+  const s = state({
+    selectedId: null,
+    sessions: [inRepo("api", "/home/u/code/agent-factory")],
+    selectedProject: "/home/u/code/agent-factory",
+  });
+  assert.equal(documentTitle(s), "agent-factory · Agent Factory");
+});
+
+test("documentTitle: with neither a selection nor a project it is the bare app name", () => {
+  const s = state({ selectedId: null, sessions: [], selectedProject: null });
+  assert.equal(documentTitle(s), "Agent Factory");
+});
+
+// The title must name the project the session actually LIVES in. The two only differ
+// transiently (a selection surviving a project switch), but naming the scope there
+// would caption the session with a repo it isn't in.
+test("documentTitle: the session's own repo wins over the scoped project", () => {
+  const s = state({
+    selectedId: "api",
+    sessions: [inRepo("api", "/home/u/code/agent-factory")],
+    selectedProject: "/home/u/code/other-repo",
+  });
+  assert.equal(documentTitle(s), "api — agent-factory · Agent Factory");
 });

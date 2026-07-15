@@ -48,7 +48,8 @@ const (
 // empty string, and "~user" forms (which the Go standard library cannot
 // resolve). If the home directory cannot be determined, path is returned as-is.
 // filepath.Abs does NOT expand "~", so callers resolving user-entered paths
-// must run them through this helper first (#924).
+// must run them through this helper first (#924) — prefer ResolveUserPath,
+// which pairs the two in the right order.
 func ExpandTilde(path string) string {
 	if path != "~" && !strings.HasPrefix(path, "~/") {
 		return path
@@ -61,6 +62,23 @@ func ExpandTilde(path string) string {
 		return homeDir
 	}
 	return filepath.Join(homeDir, path[2:])
+}
+
+// ResolveUserPath turns a user-supplied path (a CLI flag/arg, a TUI text input)
+// into an absolute one, expanding a leading "~" first. It exists because
+// filepath.Abs alone treats "~" as an ordinary directory name and silently
+// rewrites "~/repo" into "<cwd>/~/repo" — a corrupted path that then surfaces as
+// a confusing "not a valid git repository: <cwd>/~/repo" error, or worse, is
+// stored verbatim and only fails later (#1842). The shell normally expands "~"
+// before we ever see it, so this only matters when it could not: a single-quoted
+// '~/repo', a "$VAR" holding "~/repo", or a non-shell caller of the CLI.
+//
+// Always prefer this over filepath.Abs at the boundary where user input first
+// enters — expanding deeper in the stack lets a raw "~" be logged or persisted
+// on the way down. Pair it with ExpandTilde only when a caller needs expansion
+// without absolutization.
+func ResolveUserPath(path string) (string, error) {
+	return filepath.Abs(ExpandTilde(path))
 }
 
 // GetConfigDir returns the path to the application's configuration directory.

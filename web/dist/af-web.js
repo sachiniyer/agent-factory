@@ -7722,8 +7722,16 @@ var SplitView = class {
   // "kind:name" identity did. webTargetAt reads it to tell a web/iframe tab from a
   // terminal one.
   tabKinds = [];
+  // Whether the shown session is archived (#1809 follow-up). An archived session is
+  // inert: the daemon refuses to proxy its preserved web tab, so the pane renders an
+  // archived placeholder instead of a frame that could only fail — or, worse, could
+  // proxy a stale loopback port that now hosts something else.
+  archived = false;
   tree = null;
   focusedId = null;
+  // Counts explicit layout/focus mutations, for the stale-async guard — see
+  // layoutGeneration(), which is the documented contract.
+  layoutGen = 0;
   // Debounces the "focus left every pane" report so a click that moves focus A→B
   // (blur A, then focus B) doesn't flap the nav mode through rail and back.
   blurTimer = null;
@@ -7738,7 +7746,7 @@ var SplitView = class {
    * fresh single leaf bound to `initialTab`); the SAME session only re-validates the
    * tree against the current tab list (a tab closed elsewhere). Cheap on a no-op.
    */
-  setSession(sessionId, token2, tabIds, initialTab, tabTargets = [], tabKinds = [], tabRealIds = []) {
+  setSession(sessionId, token2, tabIds, initialTab, tabTargets = [], tabKinds = [], tabRealIds = [], archived = false) {
     this.token = token2;
     const prevIds = this.tabIds;
     const prevKinds = this.tabKinds;
@@ -7747,6 +7755,8 @@ var SplitView = class {
     this.tabRealIds = tabRealIds;
     this.tabTargets = tabTargets;
     this.tabKinds = tabKinds;
+    const archivedChanged = archived !== this.archived;
+    this.archived = archived;
     const tabCount = tabIds.length > 0 ? tabIds.length : 1;
     if (sessionId === null || token2 === null) {
       this.teardown();
@@ -7764,7 +7774,7 @@ var SplitView = class {
         this.trees.set(sessionId, this.tree);
       }
       const rebound = tabsRebound(prevIds, prevKinds, prevTargets, tabIds, tabKinds, tabTargets);
-      if (before !== this.tree || rebound) {
+      if (before !== this.tree || rebound || archivedChanged) {
         this.reconcile();
         this.report();
       }
@@ -7779,6 +7789,25 @@ var SplitView = class {
     this.focusedId = leaves(this.tree)[0]?.id ?? null;
     this.reconcile();
     this.report();
+  }
+  /** The tab `sessionId` will actually be shown on once selected: the focused pane's
+   *  tab for the session already on screen, the retained layout's first pane for one
+   *  shown before (setSession focuses exactly that leaf), and 0 for a session never
+   *  shown — it gets a fresh single leaf.
+   *
+   *  Selection asks this instead of asserting 0. Trees are RETAINED across session
+   *  switches, so "reset activeTab to 0 on select" states something about a pane that
+   *  already disagrees — and report(), the only writer of activeTab, dedups on the
+   *  focused tab, so a re-entry that settles on the SAME index never corrects it. The
+   *  bar then highlights Agent over a pane showing tab N, and the next close computes
+   *  its shift from the stale 0 and yanks the pane to Agent (#1855). Reading the
+   *  settled tab keeps the store's claim and the pane's binding the same statement. */
+  settledTab(sessionId) {
+    if (sessionId === this.sessionId) {
+      return this.tree && this.focusedId ? findLeaf(this.tree, this.focusedId)?.tab ?? 0 : 0;
+    }
+    const retained = this.trees.get(sessionId);
+    return retained ? leaves(retained)[0]?.tab ?? 0 : 0;
   }
   /** Rebinds the FOCUSED pane to show `tab` (a 1-9 key or a tab-bar click on the
    *  focused pane). No-op without a focused pane. Does not steal DOM focus. */
@@ -7851,9 +7880,26 @@ var SplitView = class {
     this.lastShown = "";
     this.lastPaneCount = 0;
   }
+  /** How many EXPLICIT layout/focus mutations have been committed — a tab rebind
+   *  (a 1-9 key or a tab-bar click), a drag-drop split, a pane close. Deliberately
+   *  NOT bumped by setSession's roster reconcile, which only remaps each pane to
+   *  follow its own tab and expresses no user intent.
+   *
+   *  That split is the point: an async caller which computes a tab index from a
+   *  PRE-await snapshot (see index.ts closeSessionTab) captures this first and
+   *  applies its result only if the value still matches. A slow close then can't
+   *  clobber a tab the user selected while it was in flight — their newer intent
+   *  wins — while the roster event that races the same close still passes the
+   *  guard, because it bumps nothing. */
+  layoutGeneration() {
+    return this.layoutGen;
+  }
   // --- internal: mutation commit --------------------------------------------
-  /** Persists the current tree for the session, re-renders, and reports the layout. */
+  /** Persists the current tree for the session, re-renders, and reports the layout.
+   *  Every explicit layout/focus mutation funnels through here, which is what makes
+   *  it the one place to count them (see layoutGeneration). */
   commit() {
+    this.layoutGen++;
     if (this.sessionId && this.tree) {
       this.trees.set(this.sessionId, this.tree);
     }
@@ -7927,7 +7973,7 @@ var SplitView = class {
       const moved = pane.tab !== leaf.tab;
       const staleAddress = pane.identity !== identity || moved && paneAddressUsesOrdinal(spec, realId);
       if (spec !== null) {
-        if (pane.term || pane.webUrl !== iframeIdentity(spec) || staleAddress) {
+        if (pane.term || pane.webUrl !== iframeIdentity(spec) || staleAddress || pane.webArchived !== this.archived) {
           pane.term?.dispose();
           pane.term = null;
           pane.webDispose?.();
@@ -7992,7 +8038,8 @@ var SplitView = class {
       identity: "",
       status: "connecting",
       webUrl: null,
-      webDispose: null
+      webDispose: null,
+      webArchived: false
     };
     this.wireDrop(pane);
     return pane;
@@ -8029,15 +8076,16 @@ var SplitView = class {
     const target = spec.target;
     const isVSCode = spec.kind === TabKind.VSCode;
     pane.webUrl = iframeIdentity(spec);
+    pane.webArchived = this.archived;
     const sessionId = this.sessionId ?? "";
     const proxied = iframeIsProxied(spec);
-    const src = proxied ? webProxyPath(sessionId, pane.tab, this.token) : target;
+    const src = this.archived ? "" : proxied ? webProxyPath(sessionId, pane.tab, this.token) : target;
     const openHref = proxied ? webProxyPath(sessionId, pane.tab, this.token) : target;
     const wrap = el("div", "af-webpane");
     const bar = el("div", "af-webpane-bar");
     const reload = document.createElement("button");
     reload.type = "button";
-    reload.className = "af-webpane-reload";
+    reload.className = "af-ghost af-webpane-reload";
     reload.title = "Reload";
     reload.setAttribute("aria-label", isVSCode ? "Reload VS Code" : "Reload web tab");
     reload.textContent = "\u21BB";
@@ -8045,11 +8093,11 @@ var SplitView = class {
     urlText.textContent = isVSCode ? "VS Code \u2014 session worktree" : target || "(no URL)";
     urlText.title = urlText.textContent;
     const open = document.createElement("a");
-    open.className = "af-webpane-open";
+    open.className = "af-ghost af-webpane-open";
     open.href = openHref;
     open.target = "_blank";
     open.rel = "noopener noreferrer";
-    open.textContent = "open \u2197";
+    open.textContent = "Open \u2197";
     bar.append(reload, urlText, open);
     const frame = document.createElement("iframe");
     frame.className = "af-webframe";
@@ -8077,6 +8125,16 @@ var SplitView = class {
     fallback.append(fbMsg, fbLink);
     wrap.append(bar, frame, fallback);
     pane.host.replaceChildren(wrap);
+    if (this.archived) {
+      fallback.classList.add("af-webpane-archived");
+      fbMsg.textContent = isVSCode ? "This session is archived. Restore it to open VS Code." : "This session is archived. Restore it to load this web tab.";
+      fbLink.hidden = true;
+      open.hidden = true;
+      fallback.hidden = false;
+      frame.hidden = true;
+      pane.webDispose = null;
+      return;
+    }
     if (!isVSCode && target.trim() === "") {
       fbMsg.textContent = "This web tab has no URL.";
       fbLink.hidden = true;
@@ -8577,6 +8635,9 @@ var MAX_TABS = 9;
 function supportsTabManagement(s) {
   return s.backend_type !== "remote";
 }
+function canManageTabs(s) {
+  return supportsTabManagement(s) && !isArchived(s);
+}
 function sessionTabs(s) {
   if (s.tabs && s.tabs.length > 0) {
     return s.tabs;
@@ -8902,14 +8963,28 @@ var AppShell = class {
   lastLive = null;
   lastKb = null;
   lastError = null;
+  // The last value written to document.title, so an unrelated update doesn't
+  // reassign it (see syncDocumentTitle).
+  lastDocTitle = null;
   // Whether the main pane has been rendered at least once. The constructor leaves it
   // an empty <section>, so the FIRST update must render it even when nothing is
   // selected (selectedId is null before AND after that first update, so the
   // selection-changed guard alone wouldn't fire) — otherwise the pane is blank on
   // load until a select-then-deselect. (#1592 Phase 5 PR9)
   mainRendered = false;
+  /** Points the browser tab at what is on screen, so a pinned/backgrounded tab and the
+   *  history entry name the session and project rather than a static "Agent Factory".
+   *  Assigns only on a real change (a rename, a selection, or a project switch). */
+  syncDocumentTitle(state) {
+    const title = documentTitle(state);
+    if (this.lastDocTitle !== title) {
+      this.lastDocTitle = title;
+      document.title = title;
+    }
+  }
   /** Applies the latest state, touching only what changed. */
   update(state) {
+    this.syncDocumentTitle(state);
     const kb = state.selectedId && state.focus === "terminal" ? "terminal" : "rail";
     if (this.lastKb !== kb) {
       this.lastKb = kb;
@@ -9216,7 +9291,7 @@ var AppShell = class {
       return;
     }
     const tabs = sessionTabs(selected);
-    const canManage = supportsTabManagement(selected);
+    const canManage = canManageTabs(selected);
     const active = Math.min(Math.max(state.activeTab, 0), tabs.length - 1);
     const shown = new Set(state.shownTabs);
     const children = tabs.map(
@@ -9267,6 +9342,20 @@ var AppShell = class {
     this.headMeta.className = `af-term-meta af-term-${state.termStatus}`;
   }
 };
+var APP_NAME = "Agent Factory";
+function documentTitle(state) {
+  const sel = selectedSession(state);
+  const root2 = sel?.worktree?.repo_path ?? state.selectedProject;
+  const parts = [];
+  if (sel && sel.title !== "") {
+    parts.push(sel.title);
+  }
+  if (root2) {
+    parts.push(projectName(root2));
+  }
+  const lead = parts.join(" \u2014 ");
+  return lead === "" ? APP_NAME : `${lead} \xB7 ${APP_NAME}`;
+}
 function selectedSession(state) {
   return state.selectedId ? state.sessions.find((s) => s.id === state.selectedId) ?? null : null;
 }
@@ -9277,7 +9366,7 @@ function tabBarSig(state) {
   }
   const tabs = sessionTabs(selected);
   const active = Math.min(Math.max(state.activeTab, 0), tabs.length - 1);
-  const canManage = supportsTabManagement(selected);
+  const canManage = canManageTabs(selected);
   const shown = [...new Set(state.shownTabs)].sort((a, b) => a - b);
   return JSON.stringify([selected.id ?? "", tabs.map((t) => [t.kind, t.name]), active, shown, canManage]);
 }
@@ -9491,7 +9580,13 @@ function disconnect() {
 }
 function moveSelection(id) {
   clearTabError();
-  store.set({ selectedId: id, focus: "rail", activeTab: 0 });
+  store.set({
+    selectedId: id,
+    focus: "rail",
+    // Clamped like syncSplit's initialTab, so the store's claim and the pane's binding
+    // are the same statement even if the roster shrank since the tree was retained.
+    activeTab: clampActiveTab(store.get().sessions, id, splitView.settledTab(id))
+  });
 }
 function openFromRail(id) {
   if (store.get().view !== "sessions") {
@@ -9530,7 +9625,12 @@ function switchProject(root2) {
   const sel = selectedSessionData();
   const keep = sel && sel.worktree?.repo_path === root2 ? store.get().selectedId : null;
   splitView.blur();
-  store.set({ selectedProject: root2, selectedId: keep, focus: "rail", activeTab: 0 });
+  store.set({
+    selectedProject: root2,
+    selectedId: keep,
+    focus: "rail",
+    activeTab: keep ? clampActiveTab(store.get().sessions, keep, splitView.settledTab(keep)) : 0
+  });
 }
 function selectedSession2() {
   const { sessions, selectedId } = store.get();
@@ -9659,7 +9759,7 @@ function openTab(index) {
 function createSessionTab(kind = "shell") {
   const sel = selectedSessionData();
   const tok = token;
-  if (!sel || tok === null || !supportsTabManagement(sel)) {
+  if (!sel || tok === null || !canManageTabs(sel)) {
     return;
   }
   clearTabError();
@@ -9676,7 +9776,7 @@ function createSessionTab(kind = "shell") {
 function closeSessionTab(index) {
   const sel = selectedSessionData();
   const tok = token;
-  if (!sel || tok === null || index <= 0 || !supportsTabManagement(sel)) {
+  if (!sel || tok === null || index <= 0 || !canManageTabs(sel)) {
     return;
   }
   const tabs = sessionTabs(sel);
@@ -9686,13 +9786,16 @@ function closeSessionTab(index) {
   }
   clearTabError();
   const selId = sel.id ?? "";
+  const cur = store.get().activeTab;
+  const gen = splitView.layoutGeneration();
   void closeTab(selId, sel.title, target.name, tok).then(() => fetchSnapshot(tok)).then((sessions) => {
-    const cur = store.get().activeTab;
     const shrunk = sessions.find((s) => s.id === selId);
     const n = shrunk ? sessionTabs(shrunk).length : 1;
     const next = Math.min(Math.max(index <= cur ? cur - 1 : cur, 0), n - 1);
     store.set({ sessions, selectedId: pickSelection(sessions, store.get().selectedId) });
-    splitView.setFocusedTab(next);
+    if (splitView.layoutGeneration() === gen && store.get().selectedId === selId) {
+      splitView.setFocusedTab(next);
+    }
   }).catch((e) => surfaceTabError(e));
 }
 function surfaceTabError(e) {
@@ -9837,7 +9940,8 @@ function syncSplit(state) {
   const tabRealIds = selected ? sessionTabs(selected).map(tabRealId) : [""];
   const tabTargets = selected ? sessionTabs(selected).map((t) => t.url) : [];
   const tabKinds = selected ? sessionTabs(selected).map((t) => t.kind) : [];
-  splitView.setSession(tok !== null ? selId : null, tok, tabIds, initialTab, tabTargets, tabKinds, tabRealIds);
+  const archived = selected ? isArchived(selected) : false;
+  splitView.setSession(tok !== null ? selId : null, tok, tabIds, initialTab, tabTargets, tabKinds, tabRealIds, archived);
 }
 function disposeSplit() {
   splitView.dispose();
@@ -9887,7 +9991,8 @@ function applySessions(sessions) {
       selectedId = null;
     }
   }
-  const activeTab = selectedId === prevSel ? clampActiveTab(sessions, selectedId, store.get().activeTab) : 0;
+  const settled = selectedId === prevSel ? store.get().activeTab : splitView.settledTab(selectedId ?? "");
+  const activeTab = clampActiveTab(sessions, selectedId, settled);
   store.set({ sessions, selectedProject, selectedId, activeTab });
 }
 function requestResync() {
@@ -9936,7 +10041,7 @@ function onKeydown(e) {
       selectedId: state.selectedId,
       tabCount: selected ? sessionTabs(selected).length : 1,
       activeTab: state.activeTab,
-      tabManagement: selected ? supportsTabManagement(selected) : false
+      tabManagement: selected ? canManageTabs(selected) : false
     },
     { alt: e.altKey }
   );

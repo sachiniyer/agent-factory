@@ -186,7 +186,7 @@ func TestSSHBackendRoundTrip(t *testing.T) {
 	if !strings.Contains(preview, marker) {
 		t.Fatalf("Preview did not reflect the typed input: %q", preview)
 	}
-	if !as.Alive() {
+	if alive, err := as.Alive(); err != nil || !alive {
 		t.Fatal("expected the remote workspace to report Alive")
 	}
 	t.Logf("preview/liveness reflect the remote workspace over the tunnel")

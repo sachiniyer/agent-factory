@@ -155,7 +155,7 @@ func TestTabPaneShellFallbackStates(t *testing.T) {
 	})
 
 	// #920: a Deleting instance reports Started()==false during teardown. It
-	// must show "Tearing down session..." rather than the not-started fallback.
+	// must show "Tearing down session…" rather than the not-started fallback.
 	t.Run("deleting instance", func(t *testing.T) {
 		inst, err := session.NewInstance(session.InstanceOptions{
 			Title: "deleting", Path: t.TempDir(), Program: "bash",
@@ -167,7 +167,7 @@ func TestTabPaneShellFallbackStates(t *testing.T) {
 		require.NoError(t, p.UpdateContent(inst, 1))
 		p.mu.Lock()
 		require.True(t, p.content.fallback)
-		require.Contains(t, p.content.text, "Tearing down session...")
+		require.Contains(t, p.content.text, "Tearing down session…")
 		require.NotContains(t, p.content.text, "not started",
 			"deleting instance must NOT show the not-started fallback (#920)")
 		p.mu.Unlock()
@@ -591,23 +591,8 @@ func TestTabPaneShellScrollModeAlreadyDead(t *testing.T) {
 // hook attach proxy are deleted. A remote session now carries only its agent tab
 // (docker/ssh baseline), so there is no remote terminal-tab fallback or
 // terminal_cmd attach path to exercise.
-
-// TestTabbedWindowAttachTerminalRefusesNil guards the #716 captured-instance
-// contract: AttachTerminalTab(nil) must error, and an instance with no
-// live shell tab must refuse to attach rather than attaching the wrong session.
-func TestTabbedWindowAttachTerminalRefusesNil(t *testing.T) {
-	log.Initialize(false)
-	defer log.Close()
-
-	_, err := AttachTerminalTab(nil, 1)
-	require.Error(t, err, "AttachTerminalTab(nil) must error, not attach")
-
-	inst, err := session.NewInstance(session.InstanceOptions{
-		Title: "unstarted", Path: t.TempDir(), Program: "claude",
-	})
-	require.NoError(t, err)
-	require.False(t, inst.Started(), "precondition: instance must not be started")
-
-	_, err = AttachTerminalTab(inst, 1)
-	require.Error(t, err, "an instance with no live shell tab must refuse to attach")
-}
+//
+// (removed) TestTabbedWindowAttachTerminalRefusesNil — obsolete after #1852
+// deleted ui.AttachTerminalTab along with the rest of the backend attach surface.
+// Its #716 captured-instance contract now lives on the client's stream attach,
+// covered by app.TestAttachInstanceTab_RoutesEverySessionToStream.

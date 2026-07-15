@@ -46,8 +46,12 @@ func (i *Instance) Respawn() error {
 // best-effort for tmux (a stuck session only logs, mirroring Kill) and:
 //   - keeps the AGENT tab's tmux binding (its session name) so a failed archive
 //     can re-spawn it in place via the Lost-restore loop;
-//   - drops the shell/process tabs entirely — only the agent session is brought
-//     back on un-archive (Sachin's #1028 requirement);
+//   - drops the shell/process tabs entirely — their tmux sessions were just torn
+//     down, so only the agent session is brought back for them (Sachin's #1028
+//     requirement);
+//   - KEEPS the web tabs (#1809): a web tab has no tmux session and no process —
+//     it is just a URL — so nothing was torn down and it round-trips through the
+//     archived record to render again on un-archive;
 //   - leaves gitWorktree and started untouched, so the daemon caller controls
 //     the final state (started=false + Archived on success; Lost on a failed
 //     move — returned here — where started stays true so the loop re-spawns the
@@ -125,8 +129,9 @@ func (i *Instance) RenameArchived(newTitle, dest string) error {
 // Recover failure the instance is dropped to a plain Lost (op cleared), so the
 // daemon's Lost-restore loop keeps retrying — the worktree is already back in
 // place, so the session self-heals rather than stranding as Archived with no
-// tmux. Only the agent tab is restored (shell/process tabs were dropped at
-// archive time, per #1028).
+// tmux. The agent tab and any web tabs are restored; shell/process tabs were
+// dropped at archive time (#1028), while web tabs — pure metadata with no tmux to
+// re-spawn — ride back on the record and render again (#1809).
 //
 // liveness is set to Lost (so Recover's ==Lost gate accepts it) and OpRestoring
 // fences the re-spawn window: the daemon poll skips an instance with an
@@ -162,19 +167,6 @@ func (i *Instance) CloseAttachOnly() error {
 // CheckAndHandleTrustPrompt checks for and dismisses the trust prompt for supported programs.
 func (i *Instance) CheckAndHandleTrustPrompt() bool {
 	return i.backend.CheckAndHandleTrustPrompt(i)
-}
-
-func (i *Instance) Attach() (chan struct{}, error) {
-	return i.backend.Attach(i)
-}
-
-// AttachTerminal opens an interactive terminal tab (a local shell tab at tabIdx,
-// or the remote terminal_cmd shell) through the uniform Backend interface — no
-// concrete-backend type assertion (#1592 Phase 1 PR5, replacing the former
-// AttachRemoteTerminal *HookBackend special-case). The returned channel is
-// closed when the user detaches.
-func (i *Instance) AttachTerminal(tabIdx int) (chan struct{}, error) {
-	return i.backend.AttachTerminal(i, tabIdx)
 }
 
 // Capabilities returns the backing runtime's capability descriptor (#1592

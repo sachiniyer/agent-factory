@@ -113,6 +113,20 @@ func resolveBackendKind(opts InstanceOptions, absPath string) (BackendKind, erro
 	return ParseBackendKind(cfg.Backend)
 }
 
+// BackendKindFor reports which runtime a create with these options against
+// absPath will use, WITHOUT creating anything. It is the same decision (and the
+// same precedence) NewInstance makes internally.
+//
+// The daemon needs this before it provisions: remote hook names are a global
+// namespace (the slug reaches launch_cmd/delete_cmd verbatim), so the hook-name
+// checks must run for every create that will end up on the hook backend — not
+// just the legacy ForceRemote selector. `--backend hook` and a repo's
+// `backend = "hook"` config both reach BackendHook with ForceRemote false, and
+// gating on ForceRemote alone let those creates skip the check entirely.
+func BackendKindFor(opts InstanceOptions, absPath string) (BackendKind, error) {
+	return resolveBackendKind(opts, absPath)
+}
+
 // SetBackendFactoryForTest replaces the backend factory with f and returns a
 // restore function. Intended for use in tests that need to swap in a
 // FakeBackend so NewInstance-driven creation flows stay on the hot path. f

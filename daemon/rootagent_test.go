@@ -379,6 +379,72 @@ func TestEnsureRootAgentsUserKillHealsAfterGraceWindow(t *testing.T) {
 	}
 }
 
+// TestFinishUserKillArmsRootGraceWindow pins #1844: a root kill interrupted
+// after its tombstone write (daemon crash, or a teardown that errored) is
+// completed by the status poll's finish-kill pass, which must arm the same
+// grace window KillSession does. Otherwise the ensure loop, seeing no
+// rootKilledAt, re-creates the root on the very next tick and the user's stop
+// is never honored at all.
+func TestFinishUserKillArmsRootGraceWindow(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	seen := installOptionsRecordingBackend(t)
+	repoPath := setupControlRepo(t)
+	cfg := rootTestConfig(repoPath, config.RootAgentConfig{})
+
+	base := time.Unix(1_700_000_000, 0)
+	clock := base
+	origNow := nowFunc
+	nowFunc = func() time.Time { return clock }
+	t.Cleanup(func() { nowFunc = origNow })
+
+	manager, err := NewManager(cfg)
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	manager.EnsureRootAgents()
+	if len(*seen) != 1 {
+		t.Fatalf("expected initial create, got %d", len(*seen))
+	}
+
+	// Model the #1108 crash window: KillSession persisted the kill-intent
+	// tombstone and then died before it could record the grace window. The
+	// surviving record is provably a user kill, so the poll's finish pass owns
+	// the rest of the teardown.
+	root := findRootInstance(t, manager, repoPath)
+	if root == nil {
+		t.Fatal("root instance must exist before the interrupted kill")
+	}
+	root.MarkUserKilled()
+
+	manager.RefreshStatuses()
+	if findRootInstance(t, manager, repoPath) != nil {
+		t.Fatal("the finish-kill pass must drop the tombstoned root")
+	}
+
+	// Inside the grace window the user's stop is honored, exactly as it is when
+	// KillSession runs to completion uninterrupted.
+	clock = base.Add(rootKillHealDelay - time.Second)
+	manager.EnsureRootAgents()
+	manager.EnsureRootAgents()
+	if len(*seen) != 1 {
+		t.Fatalf("a crash-recovered root kill must honor the grace window, got %d creates", len(*seen))
+	}
+	if findRootInstance(t, manager, repoPath) != nil {
+		t.Fatal("root must stay down inside the grace window")
+	}
+
+	// ...and still self-heals once the window elapses: an explicit kill delays
+	// re-creation, it is never a permanent stop (#1223).
+	clock = base.Add(rootKillHealDelay + time.Second)
+	manager.EnsureRootAgents()
+	if len(*seen) != 2 {
+		t.Fatalf("configured root must self-heal after the grace window, got %d creates", len(*seen))
+	}
+	if findRootInstance(t, manager, repoPath) == nil {
+		t.Fatal("root instance must be back after self-heal")
+	}
+}
+
 // TestKillDeadRootDoesNotDeleteSelfHealedRoot pins #1266: a KillSession that
 // resolved dead root-A must not delete a newly self-healed root-B that reused
 // the reserved title while the stale kill was waiting on the session op lock.

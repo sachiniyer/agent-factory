@@ -93,7 +93,7 @@ func TestLocalAgentServerTapEnter(t *testing.T) {
 
 func TestLocalAgentServerAlive(t *testing.T) {
 	inst, _ := newProbeInstance(t)
-	if inst.AgentServer().Alive() {
+	if alive, _ := inst.AgentServer().Alive(); alive {
 		t.Error("Alive must route to Backend.IsAlive (probe returns false)")
 	}
 }

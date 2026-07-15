@@ -72,7 +72,6 @@ func TestHookBackendType(t *testing.T) {
 func TestBackendCapabilities(t *testing.T) {
 	localCaps := Capabilities{
 		Workspace:        WorkspaceLocalWorktree,
-		Attach:           true,
 		Archive:          true,
 		Recover:          true,
 		TabManagement:    true,
@@ -105,7 +104,6 @@ func TestBackendCapabilities(t *testing.T) {
 			b:    &HookBackend{},
 			want: Capabilities{
 				Workspace:        WorkspaceRemote,
-				Attach:           true,
 				Archive:          true,
 				Recover:          true,
 				TabManagement:    true,
@@ -121,7 +119,6 @@ func TestBackendCapabilities(t *testing.T) {
 			b:    &dockerBackend{},
 			want: Capabilities{
 				Workspace:        WorkspaceRemote,
-				Attach:           true,
 				Archive:          true,
 				Recover:          true,
 				TabManagement:    true,
@@ -134,7 +131,6 @@ func TestBackendCapabilities(t *testing.T) {
 			b:    &sshBackend{},
 			want: Capabilities{
 				Workspace:        WorkspaceRemote,
-				Attach:           true,
 				Archive:          true,
 				Recover:          true,
 				TabManagement:    true,
@@ -196,6 +192,11 @@ func TestBackendComplianceCoversRegistry(t *testing.T) {
 // backend. A regression that flips any bit false (re-introducing a locality
 // gap) fails here.
 //
+// Attach is NOT in this table: #1860 deleted the bit. It was true for every
+// backend and read by no dispatch, because attach is not gated per-backend at
+// all — the client dials the daemon's WS PTY stream for every runtime. A
+// capability that cannot be false has nothing to assert parity over.
+//
 // This runs everywhere (host, no docker/ssh needed): it asserts the descriptor
 // each backend SELF-REPORTS. The availability-gated docker/ssh round-trips
 // (make backend-docker-roundtrip / backend-ssh-roundtrip) additionally prove the
@@ -210,7 +211,6 @@ func TestBackendCapabilityParity(t *testing.T) {
 		name string
 		get  func(Capabilities) bool
 	}{
-		{"Attach", func(c Capabilities) bool { return c.Attach }},
 		{"Archive", func(c Capabilities) bool { return c.Archive }},
 		{"Recover", func(c Capabilities) bool { return c.Recover }},
 		{"TabManagement", func(c Capabilities) bool { return c.TabManagement }},

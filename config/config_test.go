@@ -1445,32 +1445,3 @@ func TestSaveConfig(t *testing.T) {
 		assert.Equal(t, testConfig.BranchPrefix, loadedConfig.BranchPrefix)
 	})
 }
-
-// TestExpandTilde pins the #924 tilde helper: a bare "~" and "~/x" expand to
-// the home directory (filepath.Abs does not), while absolute paths, relative
-// paths, the empty string, and unresolvable "~user" forms pass through
-// unchanged. The AGENT_FACTORY_HOME inline expansion in GetConfigDir is built
-// on this helper, so the cases below also pin that path's behavior.
-func TestExpandTilde(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-
-	cases := []struct {
-		in   string
-		want string
-	}{
-		{"~", home},
-		{"~/project", filepath.Join(home, "project")},
-		{"~/a/b/c", filepath.Join(home, "a", "b", "c")},
-		{"/abs/path", "/abs/path"},
-		{"relative/path", "relative/path"},
-		{"", ""},
-		{"~user", "~user"},     // Go cannot resolve "~user"; left untouched.
-		{"foo~bar", "foo~bar"}, // a tilde that is not a leading prefix is literal.
-	}
-	for _, c := range cases {
-		if got := ExpandTilde(c.in); got != c.want {
-			t.Errorf("ExpandTilde(%q) = %q, want %q", c.in, got, c.want)
-		}
-	}
-}

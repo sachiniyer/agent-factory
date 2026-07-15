@@ -28,7 +28,8 @@ const webtabTokenCookie = "af_webtab_token" //nolint:gosec // cookie name, not a
 
 // WebTabTarget resolves the loopback target of the iframe tab at tabIdx in the
 // session addressed by sessionID (the stable id the web client uses). It errors
-// when the session or tab is missing, or when the tab is not an iframe kind.
+// when the session or tab is missing, when the session is archived, or when the
+// tab is not an iframe kind.
 //
 // For a web tab the target is the normalized URL stored at create time. For a
 // VSCODE tab there is no stored URL by design: the target is the daemon-managed
@@ -47,6 +48,22 @@ func (m *Manager) WebTabTarget(sessionID string, tabIdx int) (string, session.Ta
 	}
 	if instance == nil {
 		return "", 0, fmt.Errorf("session %q not found", sessionID)
+	}
+	// An archived session is INERT, so its preserved web tab must not be served
+	// (#1809 follow-up). Archive keeps the tab's URL so a restore can render it
+	// again, but the target is a bare loopback address captured whenever the tab was
+	// created: the dev server behind it is long gone, and the port may now host
+	// something else entirely. Proxying it would make an archived session reach into
+	// a live port on the daemon's machine — the opposite of inert. The tab starts
+	// resolving again the moment a restore flips liveness back.
+	//
+	// It fences a VSCODE tab too, for a different reason with the same conclusion:
+	// serving one SPAWNS an editor, and an archived session's worktree has been
+	// moved out to the archive dir. (ensureVSCodeServer refuses archived sessions on
+	// its own as well — this just refuses earlier, before any kind lookup.) The
+	// message stays kind-agnostic because this runs before the kind is known.
+	if instance.IsArchived() {
+		return "", 0, fmt.Errorf("cannot open the tab of archived session %q: it is inert until restored (af sessions restore)", sessionID)
 	}
 	tabs := instance.GetTabs()
 	if tabIdx < 0 || tabIdx >= len(tabs) {

@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -61,7 +60,7 @@ var (
 // path is not a git repository" so callers never mislabel a provided-but-invalid
 // --repo as missing (#892). Only call when repoFlag != "".
 func repoFromFlag() (*config.RepoContext, error) {
-	absPath, err := filepath.Abs(repoFlag)
+	absPath, err := config.ResolveUserPath(repoFlag)
 	if err != nil {
 		return nil, fmt.Errorf("failed to resolve --repo path %q: %w", repoFlag, err)
 	}
@@ -73,6 +72,20 @@ func repoFromFlag() (*config.RepoContext, error) {
 }
 
 // resolveRepoID resolves a repo ID from flags, cwd, or returns "" for all-repo mode.
+//
+// This ALWAYS consults the cwd, including when --daemon-url is set. That looks
+// wrong for a remote target — the client's cwd names a repo on this machine —
+// but its callers are the write commands (kill/archive/restore/send-prompt, tab
+// mutations) whose transport does NOT honor --daemon-url: daemon.* goes over the
+// local control socket (callDaemon → DaemonSocketPath). Dropping the cwd scope
+// for them would send an UNSCOPED destructive request to the LOCAL daemon, which
+// could then resolve a same-titled session in a different local repo and kill or
+// archive it. Keeping the cwd scope keeps those commands pointed where they
+// already point.
+//
+// Reads that genuinely reach the targeted daemon (sessions list/get/watch/preview)
+// use resolveRepoIDForLookup instead. If a write command is ever migrated onto the
+// apiclient transport, move it across too.
 func resolveRepoID() (string, error) {
 	if repoFlag != "" {
 		repo, err := repoFromFlag()
@@ -85,6 +98,50 @@ func resolveRepoID() (string, error) {
 	repo, err := config.CurrentRepo()
 	if err != nil {
 		return "", nil // all-repo mode
+	}
+	return repo.ID, nil
+}
+
+// resolveRepoIDForLookup resolves the repo scope for a READ that is actually
+// served by the targeted daemon: the snapshot-based reads (`sessions list`,
+// `get`, `watch`) and `preview`, all of which route through apiclient and so
+// follow --daemon-url/AF_DAEMON_URL to the remote.
+//
+// The dividing line is the TRANSPORT, not the command: a caller belongs here if
+// its request reaches the targeted daemon, and on resolveRepoID if it goes over
+// the local control socket regardless of the target.
+//
+// It differs from resolveRepoID in one way: against a REMOTE target the cwd is
+// ignored. The client's cwd names a repo that exists HERE, not on the daemon's
+// machine, so scoping by it asks the remote for a repo ID it has never seen —
+// and the remote read path has no disk fallback (snapshotRead), so a bare-title
+// lookup that used to succeed would report a spurious not-found. Against a
+// remote only an EXPLICIT --repo scopes; a bare title resolves across the
+// remote's repos, with the ambiguity guard refusing to pick between them.
+//
+// Deliberately NOT shared with the write commands: their transport is the local
+// control socket regardless of --daemon-url, so an unscoped request there is a
+// destructive mis-target rather than a remote lookup (see resolveRepoID).
+//
+// Known limitation: --repo becomes an ID by hashing the path on THIS machine
+// (config.RepoIDFromRoot), so against a remote it only disambiguates when the
+// daemon has that project checked out at the same absolute path. Scoping a
+// remote by a repo identity the daemon owns needs a daemon-side repo lookup — a
+// separate change; until then, prefer a bare title against a remote.
+func resolveRepoIDForLookup() (string, error) {
+	if repoFlag != "" {
+		repo, err := repoFromFlag()
+		if err != nil {
+			return "", err
+		}
+		return repo.ID, nil
+	}
+	if apiclient.IsRemoteTarget() {
+		return "", nil // the client's cwd says nothing about the remote's repos
+	}
+	repo, err := config.CurrentRepo()
+	if err != nil {
+		return "", nil // all-repo mode, guarded by the ambiguity check
 	}
 	return repo.ID, nil
 }
@@ -117,6 +174,11 @@ var errTitleNotFound = errors.New("not found")
 
 // findInstanceByTitle scans all repos for an instance matching the given title.
 // Returns the InstanceData and the repoID it belongs to.
+//
+// Titles are unique per-repo, so an unscoped scan can match several sessions. A
+// single match resolves (the bare-title convenience); several match returns
+// ErrAmbiguousTitle naming each repo rather than picking one, since the map walk
+// below makes "first match" nondeterministic across runs.
 func findInstanceByTitle(title string) (*session.InstanceData, string, error) {
 	allInstances, err := config.LoadAllRepoInstances()
 	if err != nil {
@@ -124,6 +186,8 @@ func findInstanceByTitle(title string) (*session.InstanceData, string, error) {
 	}
 
 	var corrupted []string
+	var matches []session.InstanceData
+	var matchRepoIDs []string
 	for repoID, raw := range allInstances {
 		var instances []session.InstanceData
 		if err := json.Unmarshal(raw, &instances); err != nil {
@@ -136,9 +200,19 @@ func findInstanceByTitle(title string) (*session.InstanceData, string, error) {
 		}
 		for i := range instances {
 			if instances[i].Title == title {
-				return &instances[i], repoID, nil
+				matches = append(matches, instances[i])
+				matchRepoIDs = append(matchRepoIDs, repoID)
 			}
 		}
+	}
+	// Ambiguity is about distinct REPOS, not raw match count: duplicate rows
+	// within one repo's instances.json are a corruption artifact, not a
+	// cross-project collision, and must not be reported as one.
+	if len(session.DedupeSorted(matchRepoIDs)) > 1 {
+		return nil, "", session.AmbiguousTitleError(title, repoPathsOf(matches))
+	}
+	if len(matches) > 0 {
+		return &matches[0], matchRepoIDs[0], nil
 	}
 	if len(corrupted) > 0 {
 		return nil, "", fmt.Errorf("session %q not found; %s", title, corruptedReposSuffix(corrupted))
@@ -146,6 +220,45 @@ func findInstanceByTitle(title string) (*session.InstanceData, string, error) {
 	// Wrap the sentinel so a clean miss stays distinguishable from a
 	// corruption-tainted miss (#861); the user-facing text is unchanged.
 	return nil, "", fmt.Errorf("session %q %w", title, errTitleNotFound)
+}
+
+// repoPathsOf lists the repo paths of matched sessions, for the ambiguous-title
+// error. InstanceData.Path is the repo root, which is what the user passes to
+// --repo — repoIDs are opaque hashes and would not help them disambiguate.
+func repoPathsOf(matches []session.InstanceData) []string {
+	paths := make([]string, 0, len(matches))
+	for i := range matches {
+		paths = append(paths, matches[i].Path)
+	}
+	return paths
+}
+
+// diskRepoPathsForTitle returns the distinct repo paths holding the title across
+// the union of `known` and every PERSISTED row on disk.
+//
+// It backstops the daemon-snapshot read path: the snapshot only mirrors the
+// daemon's in-memory instances, and refresh skips rows it cannot restore, so a
+// lone snapshot match can hide a second repo that also holds the title.
+// Corrupted per-repo files are skipped — this is a best-effort widening of an
+// already-successful lookup, so it must never turn a working read into an error.
+func diskRepoPathsForTitle(title string, known []string) ([]string, error) {
+	allInstances, err := config.LoadAllRepoInstances()
+	if err != nil {
+		return nil, err
+	}
+	paths := append([]string(nil), known...)
+	for _, raw := range allInstances {
+		var rows []session.InstanceData
+		if err := json.Unmarshal(raw, &rows); err != nil {
+			continue
+		}
+		for i := range rows {
+			if rows[i].Title == title {
+				paths = append(paths, rows[i].Path)
+			}
+		}
+	}
+	return session.DedupeSorted(paths), nil
 }
 
 // corruptedReposSuffix builds a sorted, human-readable clause naming the repos
@@ -279,19 +392,6 @@ func loadRepoInstanceData(repoID string) ([]session.InstanceData, error) {
 	return instances, nil
 }
 
-// findLiveInstanceByTitle finds an instance by title and restores it as a live *Instance.
-func findLiveInstanceByTitle(title string) (*session.Instance, string, error) {
-	data, repoID, err := findInstanceByTitle(title)
-	if err != nil {
-		return nil, "", err
-	}
-	instance, err := session.FromInstanceData(*data)
-	if err != nil {
-		return nil, "", fmt.Errorf("failed to restore session %q: %w", title, err)
-	}
-	return instance, repoID, nil
-}
-
 // findInstanceByTitleInScope finds an instance by title within the resolved repo
 // scope (#891). An empty repoID preserves the prior all-repo search; a non-empty
 // one confines the lookup to that repo so a same-titled session in a different
@@ -316,10 +416,10 @@ func findInstanceByTitleInScope(repoID, title string) (*session.InstanceData, st
 }
 
 // findLiveInstanceByTitleInScope finds an instance by title within the resolved
-// repo scope and restores it as a live *Instance (#891). It is the repo-scoped
-// counterpart of findLiveInstanceByTitle, used by attach so `--repo` confines
-// the attach to that repo's session instead of connecting the terminal to a
-// same-titled session in another repo.
+// repo scope and restores it as a live *Instance (#891). Used by attach and
+// preview so `--repo` confines them to that repo's session instead of acting on
+// a same-titled session in another repo. With no repo scope it resolves a unique
+// title and reports ErrAmbiguousTitle when several repos hold it.
 func findLiveInstanceByTitleInScope(repoID, title string) (*session.Instance, string, error) {
 	data, repoID, err := findInstanceByTitleInScope(repoID, title)
 	if err != nil {
@@ -337,8 +437,8 @@ func findLiveInstanceByTitleInScope(repoID, title string) (*session.Instance, st
 // prior all-repo search; a non-empty one confines the check to that repo so a
 // same-titled session in a different repo can never satisfy the pre-check.
 // Mirrors how resolveRepoID() scopes the other sessions subcommands (list,
-// kill). This is a pure existence check: unlike findLiveInstanceByTitle it does
-// not restore (and Start) the instance, since callers only need to know whether
+// kill). This is a pure existence check: unlike findLiveInstanceByTitleInScope it
+// does not restore (and Start) the instance, since callers only need to know whether
 // the title is taken in scope and the daemon does its own session restore on
 // delivery.
 func instanceTitleExistsInScope(repoID, title string) (bool, error) {

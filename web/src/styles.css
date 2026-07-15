@@ -1260,21 +1260,31 @@ body {
   font-size: var(--af-fs-sm);
 }
 
-.af-webpane-reload {
+/* The bar's two controls are both quiet secondary actions, so they take the shared
+ * .af-ghost treatment and only tighten it for the thin bar. The anchor also needs the
+ * button resets .af-ghost assumes (no underline, centered content). */
+.af-webpane-reload,
+.af-webpane-open {
   flex: 0 0 auto;
-  cursor: pointer;
-  background: transparent;
-  color: var(--af-text);
-  border: 1px solid var(--af-border);
-  border-radius: var(--af-r-md);
-  padding: 0 0.4rem;
+  display: inline-flex;
+  align-items: center;
+  padding: 0.1rem 0.4rem;
+  font-size: var(--af-fs-xs);
   line-height: 1.4;
+  text-decoration: none;
 }
 
-.af-webpane-reload:hover {
-  border-color: var(--af-accent);
+/* The `display` above outranks the UA `[hidden]` rule (the same hazard .af-viewport
+ * documents), so without this the two fallbacks that WITHDRAW this link — the
+ * archived placeholder (#1809) and the no-URL panel — would still render an "open ↗"
+ * that goes nowhere. Not hypothetical: the display rule arrived with the #1827 voice
+ * polish and silently un-hid the no-URL case until the #1809 archived test caught it. */
+.af-webpane-open[hidden] {
+  display: none;
 }
 
+/* The URL is machine text, not prose: mono at the bar's smallest step, and the one
+ * element that flexes so a long URL ellipsizes instead of pushing Open off the bar. */
 .af-webpane-url {
   flex: 1 1 auto;
   min-width: 0;
@@ -1282,16 +1292,8 @@ body {
   text-overflow: ellipsis;
   white-space: nowrap;
   color: var(--af-text-2);
-}
-
-.af-webpane-open {
-  flex: 0 0 auto;
-  color: var(--af-accent);
-  text-decoration: none;
-}
-
-.af-webpane-open:hover {
-  text-decoration: underline;
+  font-family: var(--af-font-mono);
+  font-size: var(--af-fs-xs);
 }
 
 .af-webframe {
@@ -1340,6 +1342,17 @@ body {
 .af-dragging-tab .af-pane {
   outline: 1px dashed var(--af-border);
   outline-offset: -1px;
+}
+
+/* A drag over an <iframe> delivers dragover/drop to the FRAMED document, not to this
+ * one, so a web-tab pane would swallow the drag: no drop zone, no drop. Making the
+ * frame inert for the duration of the drag lets the events reach .af-pane, which is
+ * what carries the drop handlers. Terminal panes never needed this — xterm renders in
+ * the parent DOM. Scoped to the body flag, so ordinary iframe interaction (clicking
+ * inside a previewed dev server) is untouched; the flag clears on dragend AND on any
+ * tab-bar rebuild, so a drag that loses its source can't leave a frame dead. */
+.af-dragging-tab .af-pane iframe {
+  pointer-events: none;
 }
 
 /* The drop-zone overlay: an accent wash over the region a drop would fill — an edge

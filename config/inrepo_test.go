@@ -20,6 +20,23 @@ func writeInRepoConfig(t *testing.T, repoRoot, content string) string {
 	return path
 }
 
+// assertInRepoConfigFields keeps the JSON and TOML load tests on one shared
+// field-parity contract. Both formats must populate the same config shape.
+func assertInRepoConfigFields(t *testing.T, cfg *InRepoConfig, raw []byte) {
+	t.Helper()
+	require.NotNil(t, cfg)
+	assert.NotEmpty(t, raw)
+	assert.Equal(t, "aider", cfg.DefaultProgram)
+	assert.Equal(t, "/opt/codex --fast", cfg.ProgramOverrides["codex"])
+	assert.Equal(t, []string{"npm install"}, cfg.PostWorktreeCommands)
+	require.NotNil(t, cfg.RemoteHooks)
+	assert.Equal(t, "l", cfg.RemoteHooks.LaunchCmd)
+	for _, key := range []string{"default_program", "program_overrides", "post_worktree_commands", "remote_hooks"} {
+		assert.True(t, cfg.IsSet(key), "expected %s to be marked set", key)
+	}
+	assert.Equal(t, []string{"post_worktree_commands", "program_overrides", "remote_hooks"}, cfg.CommandBearingFields())
+}
+
 func TestLoadInRepoConfigAbsent(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 	cfg, raw, err := LoadInRepoConfig(t.TempDir())
@@ -40,17 +57,7 @@ func TestLoadInRepoConfigFields(t *testing.T) {
 
 	cfg, raw, err := LoadInRepoConfig(repoRoot)
 	require.NoError(t, err)
-	require.NotNil(t, cfg)
-	assert.NotEmpty(t, raw)
-	assert.Equal(t, "aider", cfg.DefaultProgram)
-	assert.Equal(t, "/opt/codex --fast", cfg.ProgramOverrides["codex"])
-	assert.Equal(t, []string{"npm install"}, cfg.PostWorktreeCommands)
-	require.NotNil(t, cfg.RemoteHooks)
-	assert.Equal(t, "l", cfg.RemoteHooks.LaunchCmd)
-	for _, key := range []string{"default_program", "program_overrides", "post_worktree_commands", "remote_hooks"} {
-		assert.True(t, cfg.IsSet(key), "expected %s to be marked set", key)
-	}
-	assert.Equal(t, []string{"post_worktree_commands", "program_overrides", "remote_hooks"}, cfg.CommandBearingFields())
+	assertInRepoConfigFields(t, cfg, raw)
 }
 
 // TestLoadInRepoConfigBackendKeys covers the Phase 4 PR3 config surface: the

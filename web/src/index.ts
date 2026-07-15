@@ -41,6 +41,7 @@ import { decideKey, type KeyboardFocus, type View } from "./nav.js";
 import { loadProjectChoice, persistProjectChoice, pickerProjects, reconcileProject, scopeToProject } from "./project.js";
 import { applyEvent, clampActiveTab, pickSelection, upsertSession } from "./sessions.js";
 import { SplitView } from "./split.js";
+import { isArchived } from "./status.js";
 import { Store } from "./store.js";
 import { bootStampTheme, persistThemeChoice, stampTheme, type ThemeChoice } from "./theme.js";
 import { addTaskModal, type AddTaskInput, buildTask } from "./tasks.js";
@@ -50,7 +51,7 @@ import {
   orderedSessions,
   renderLogin,
   sessionTabs,
-  supportsTabManagement,
+  canManageTabs,
   tabIdentity,
   tabRealId,
   type AppState,
@@ -304,11 +305,18 @@ function disconnect(): void {
  *  rail-nav mode. This is the keyboard path (j/k): selecting a row never steals the
  *  keyboard into the terminal — you attach explicitly with Enter. Resetting focus to
  *  "rail" here also clears any stale "terminal" mode left by a since-disposed
- *  terminal, so j/k keep working after the selected session goes away. Selecting a
- *  session always resets the active tab to its agent tab (index 0). */
+ *  terminal, so j/k keep working after the selected session goes away. The active tab
+ *  follows the layout the split view will actually show (settledTab) — a session shown
+ *  before keeps its retained pane, and only one never shown starts on its agent tab. */
 function moveSelection(id: string): void {
   clearTabError();
-  store.set({ selectedId: id, focus: "rail", activeTab: 0 });
+  store.set({
+    selectedId: id,
+    focus: "rail",
+    // Clamped like syncSplit's initialTab, so the store's claim and the pane's binding
+    // are the same statement even if the roster shrank since the tree was retained.
+    activeTab: clampActiveTab(store.get().sessions, id, splitView.settledTab(id)),
+  });
 }
 
 /** The click/Enter path: selects the session AND hands the keyboard to its terminal
@@ -375,7 +383,14 @@ function switchProject(root: string): void {
   const sel = selectedSessionData();
   const keep = sel && sel.worktree?.repo_path === root ? store.get().selectedId : null;
   splitView.blur();
-  store.set({ selectedProject: root, selectedId: keep, focus: "rail", activeTab: 0 });
+  // A KEPT selection keeps its pane too, so its active tab is whatever that pane shows
+  // — not 0, which would desync the bar from it (#1855, same as moveSelection).
+  store.set({
+    selectedProject: root,
+    selectedId: keep,
+    focus: "rail",
+    activeTab: keep ? clampActiveTab(store.get().sessions, keep, splitView.settledTab(keep)) : 0,
+  });
 }
 
 // --- lifecycle actions (modals) --------------------------------------------
@@ -564,16 +579,19 @@ function openTab(index: number): void {
 }
 
 /** Creates a $SHELL tab on the selected session (the `t` key / + button), then
- *  resyncs to pull the grown tab list (the daemon emits no event for a tab change),
- *  selects the new tab, and attaches it — mirroring the TUI's `t`, which opens the
- *  fresh tab as a pane. Errors (e.g. a remote session, or the tab cap) surface on
- *  the pane header's status line. */
+ *  resyncs to pull the grown tab list, selects the new tab, and attaches it —
+ *  mirroring the TUI's `t`, which opens the fresh tab as a pane. The resync is
+ *  kept for THIS window's own mutation because it must select+attach the new tab
+ *  synchronously, which needs the tab in hand rather than an event later; a tab
+ *  changed by any OTHER actor now arrives on its own, since CreateTab/CloseTab
+ *  publish session.updated with the refreshed roster (#1812). Errors (e.g. a
+ *  remote session, or the tab cap) surface on the pane header's status line. */
 function createSessionTab(kind: NewTabKind = "shell"): void {
   const sel = selectedSessionData();
   const tok = token;
   // `tok === null` not `!tok`: "" is the authorized-tokenless credential (#1696),
   // so a loopback client can still create tabs.
-  if (!sel || tok === null || !supportsTabManagement(sel)) {
+  if (!sel || tok === null || !canManageTabs(sel)) {
     return;
   }
   clearTabError();
@@ -601,7 +619,7 @@ function closeSessionTab(index: number): void {
   const sel = selectedSessionData();
   const tok = token;
   // `tok === null` not `!tok`: "" is the authorized-tokenless credential (#1696).
-  if (!sel || tok === null || index <= 0 || !supportsTabManagement(sel)) {
+  if (!sel || tok === null || index <= 0 || !canManageTabs(sel)) {
     return;
   }
   const tabs = sessionTabs(sel);
@@ -611,20 +629,40 @@ function closeSessionTab(index: number): void {
   }
   clearTabError();
   const selId = sel.id ?? "";
+  // Read the active index BEFORE the close, not after the awaits: `next` below is
+  // computed RELATIVE to the PRE-close list, so it is only correct against the index
+  // as it stood when this close was issued. The daemon's tab event (#1812) can land
+  // while these awaits are in flight — rerendering with the shrunk roster, which
+  // remaps each pane to follow its own tab and writes the ALREADY-shifted index back
+  // as activeTab. Reading it afterwards would then subtract the shift a SECOND time
+  // and re-point the pane one tab too far left — tearing down a surviving web tab's
+  // iframe to show its neighbour instead (the #1779 guarantee).
+  //
+  // Taking a pre-await snapshot means `next` can go STALE the other way, so pin what
+  // it assumes: this session, and no explicit layout/focus mutation since. A slow
+  // close leaves a wide window in which the user can select another tab, and
+  // re-pointing the pane from an index computed against the old selection would yank
+  // it back (the same stale-async hazard the #1777 scroll-fill token guards). The
+  // roster event races the same window but bumps no generation, so it still passes.
+  const cur = store.get().activeTab;
+  const gen = splitView.layoutGeneration();
   void closeTab(selId, sel.title, target.name, tok)
     .then(() => fetchSnapshot(tok))
     .then((sessions) => {
       // The close shifts every higher tab down by one: if the closed tab was at or
       // before the active one, the active index moves left to keep showing the same
       // tab (or its left neighbor when the active tab itself was closed).
-      const cur = store.get().activeTab;
       const shrunk = sessions.find((s) => s.id === selId);
       const n = shrunk ? sessionTabs(shrunk).length : 1;
       const next = Math.min(Math.max(index <= cur ? cur - 1 : cur, 0), n - 1);
       // Commit the shrunk tab list first (rerender → syncSplit re-validates the tree,
-      // clamping any pane past the new end), then re-point the focused pane.
+      // clamping any pane past the new end), then re-point the focused pane — but only
+      // if `next` still describes anything real: the user must not have moved focus or
+      // switched away to another session while the close was in flight.
       store.set({ sessions, selectedId: pickSelection(sessions, store.get().selectedId) });
-      splitView.setFocusedTab(next);
+      if (splitView.layoutGeneration() === gen && store.get().selectedId === selId) {
+        splitView.setFocusedTab(next);
+      }
     })
     .catch((e) => surfaceTabError(e));
 }
@@ -863,9 +901,13 @@ function syncSplit(state: AppState): void {
   // The kind of each tab, parallel to tabIds — the split view reads it to tell a web
   // tab from a terminal one now that the identity is the opaque stable id (#1738).
   const tabKinds = selected ? sessionTabs(selected).map((t) => t.kind) : [];
+  // Whether the shown session is archived (#1809 follow-up): an archived session's
+  // preserved web tabs render an inert placeholder rather than a live frame, and the
+  // flip re-renders them on archive/restore even when the tab list is unchanged.
+  const archived = selected ? isArchived(selected) : false;
   // `tok !== null` not `tok`: "" is the authorized-tokenless credential (#1696), so a
   // loopback client still attaches its live panes.
-  splitView.setSession(tok !== null ? selId : null, tok, tabIds, initialTab, tabTargets, tabKinds, tabRealIds);
+  splitView.setSession(tok !== null ? selId : null, tok, tabIds, initialTab, tabTargets, tabKinds, tabRealIds, archived);
 }
 
 function disposeSplit(): void {
@@ -945,7 +987,11 @@ function applySessions(sessions: SessionData[]): void {
       selectedId = null;
     }
   }
-  const activeTab = selectedId === prevSel ? clampActiveTab(sessions, selectedId, store.get().activeTab) : 0;
+  // An unchanged selection keeps its active tab; one the snapshot MOVED (the selected
+  // session was archived/killed, so pickSelection landed elsewhere) takes the tab its
+  // retained layout will settle on rather than asserting 0 (#1855, as moveSelection).
+  const settled = selectedId === prevSel ? store.get().activeTab : splitView.settledTab(selectedId ?? "");
+  const activeTab = clampActiveTab(sessions, selectedId, settled);
   store.set({ sessions, selectedProject, selectedId, activeTab });
 }
 
@@ -1030,7 +1076,7 @@ function onKeydown(e: KeyboardEvent): void {
       selectedId: state.selectedId,
       tabCount: selected ? sessionTabs(selected).length : 1,
       activeTab: state.activeTab,
-      tabManagement: selected ? supportsTabManagement(selected) : false,
+      tabManagement: selected ? canManageTabs(selected) : false,
     },
     { alt: e.altKey },
   );

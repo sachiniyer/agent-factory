@@ -3,8 +3,11 @@ package daemon
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	stdlog "log"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -241,6 +244,60 @@ func TestRestoreLostSessions_PersistsAfterFailedRecover(t *testing.T) {
 	}
 	if rec.Worktree.BranchCreatedByUs == nil || !*rec.Worktree.BranchCreatedByUs {
 		t.Fatalf("persisted branchCreatedByUs = %v, want true (the rebuild's flag must survive a failed recover)", rec.Worktree.BranchCreatedByUs)
+	}
+}
+
+// TestRestoreLostSessions_PersistsAfterSuccessfulRecover is the #1841 twin of
+// the failed-recover case above: Recover mutates durable worktree state on the
+// way to SUCCESS too, so the success path must write it back as well.
+//
+// A vanished worktree whose branch is also gone drives Recover into
+// RebuildFreshFromRecordedBase, which recreates the branch and flips
+// branchCreatedByUs true (and rewrites baseCommitSHA) before the tmux spawn
+// succeeds. The poll loop does not cover the gap: Recover's ConfirmLive already
+// left the instance LiveRunning, so a later tick compares LiveRunning against
+// LiveRunning and persistPollChange returns without writing. A daemon restart
+// before an idle transition then reloads a stale branchCreatedByUs=false, the
+// next recovery skips the rebuild (the worktree exists again), and kill never
+// deletes the branch af itself created — leaving it orphaned.
+func TestRestoreLostSessions_PersistsAfterSuccessfulRecover(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	zeroRestoreBackoff(t)
+
+	// Mirrors the failed-recover fixture: the in-memory record carries the
+	// rebuild's branchCreatedByUs=true, while the seeded disk record has no
+	// worktree data at all — so only a persist on the success path can put the
+	// flag on disk.
+	wtPath := filepath.Join(filepath.Dir(repoPath), "repo-1841")
+	branch := "af/persist-1841"
+	if out, err := exec.Command("git", "-C", repoPath, "worktree", "add", "-b", branch, wtPath).CombinedOutput(); err != nil {
+		t.Fatalf("git worktree add: %v\n%s", err, out)
+	}
+	gw, err := sessiongit.NewGitWorktreeFromStorage(repoPath, wtPath, "persist-1841", branch, "", false, true)
+	if err != nil {
+		t.Fatalf("NewGitWorktreeFromStorage: %v", err)
+	}
+
+	backend := &recoverFakeBackend{FakeBackend: session.NewFakeBackend()}
+	inst := registerStarted(t, manager, repoID, repoPath, "persist-1841", backend, true, session.Lost)
+	inst.SetGitWorktreeForTest(gw)
+
+	manager.RestoreLostSessions()
+
+	if got := backend.recoverCalls(); got != 1 {
+		t.Fatalf("recover calls = %d, want 1", got)
+	}
+	rec := recordFor(t, repoID, "persist-1841")
+	if rec == nil {
+		t.Fatal("record must still exist after a successful recover")
+	}
+	if rec.Worktree.BranchCreatedByUs == nil || !*rec.Worktree.BranchCreatedByUs {
+		t.Fatalf("persisted branchCreatedByUs = %v, want true (the rebuild's flag must survive a successful recover)", rec.Worktree.BranchCreatedByUs)
+	}
+	// The recovered branch itself must land on disk too: a restart that reloads a
+	// record with no branch recorded cannot clean up what recovery created.
+	if rec.Worktree.BranchName != branch {
+		t.Fatalf("persisted branch = %q, want %q (a successful recover must persist its worktree record)", rec.Worktree.BranchName, branch)
 	}
 }
 
@@ -619,5 +676,67 @@ func TestRestoreLostSessions_StateCleanedForGoneSessions(t *testing.T) {
 	manager.mu.Unlock()
 	if hasState {
 		t.Fatal("retry state for a gone session must be dropped")
+	}
+}
+
+// TestRestoreLostSessions_AliveRemoteSandboxIsNotReprovisioned is the #1794
+// restore-time guard: the last gate before the irreversible step.
+//
+// A remote Recover is not a reconnect — recoverSandbox provisions a BRAND-NEW
+// sandbox and clones the branch back from origin — so running it against a
+// sandbox that is still up orphans that sandbox and abandons every commit it
+// never pushed. The poll's debounce makes a blip-induced Lost unlikely, but this
+// row may have been marked Lost many ticks ago (restore backs off to 5 minutes)
+// and the transport may have healed since. A stale verdict must not authorize a
+// destructive re-provision, so the loop re-probes against live state first.
+//
+// Here the sandbox answers as alive, so the Lost mark is wrong: no Recover may
+// fire, and the row must heal rather than sit Lost forever.
+func TestRestoreLostSessions_AliveRemoteSandboxIsNotReprovisioned(t *testing.T) {
+	withRemoteLossThresholds(t, 3, time.Minute, time.Second)
+	zeroRestoreBackoff(t)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/v1/agent/alive" {
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"data": map[string]any{"alive": true},
+			})
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer srv.Close()
+
+	manager, repoID, repoPath := newStatusTestManager(t)
+	inst, backend := registerStartedRemote(t, manager, repoID, repoPath, "remote-lost-but-live", srv.URL, session.Lost)
+
+	manager.RestoreLostSessions()
+
+	if got := backend.recoverCalls(); got != 0 {
+		t.Fatalf("Recover calls = %d, want 0 — the sandbox answered as alive, and re-provisioning over a live sandbox orphans it and destroys its unpushed work (#1794)", got)
+	}
+	if got := inst.GetLiveness(); got == session.LiveLost {
+		t.Fatal("liveness is still LiveLost: a sandbox proven alive must have its Lost mark cleared, not be left stranded in a state the loop refuses to act on")
+	}
+}
+
+// TestRestoreLostSessions_UnreachableRemoteSandboxIsReprovisioned is the
+// companion that keeps the #1794 recheck from becoming a blanket "never restore
+// remote sessions". A genuinely gone sandbox (nothing listening, so the probe is
+// refused outright) must still be re-provisioned — that recovery IS the feature
+// (#1108/#1782), and the recheck only exists to veto it when the sandbox proves
+// it is still there.
+func TestRestoreLostSessions_UnreachableRemoteSandboxIsReprovisioned(t *testing.T) {
+	withRemoteLossThresholds(t, 3, time.Minute, time.Second)
+	zeroRestoreBackoff(t)
+
+	manager, repoID, repoPath := newStatusTestManager(t)
+	_, backend := registerStartedRemote(t, manager, repoID, repoPath, "remote-really-gone", "http://127.0.0.1:1", session.Lost)
+
+	manager.RestoreLostSessions()
+
+	if got := backend.recoverCalls(); got != 1 {
+		t.Fatalf("Recover calls = %d, want 1 — an unreachable sandbox must still be recovered; the recheck is a veto on live sandboxes, not a block on remote restore", got)
 	}
 }

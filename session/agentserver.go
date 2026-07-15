@@ -85,11 +85,27 @@ type AgentServer interface {
 	// can't stream live (remote/hook sessions, scroll-mode scrollback, the transient
 	// preview target) — the TUI no longer captures tmux itself (#1592 Phase 2 PR6).
 	Preview(tab int, full bool) (string, error)
-	// Alive reports whether the underlying session process is still running. Kept
-	// separate from Snapshot (rather than folded into Observation) so the daemon
-	// probes liveness ONLY on the idle branch, exactly as before — folding it in
-	// would add a liveness probe to every non-idle tick.
-	Alive() bool
+	// Alive reports whether the underlying session process is still running, and
+	// whether the probe could be ANSWERED at all. Kept separate from Snapshot
+	// (rather than folded into Observation) so the daemon probes liveness ONLY on
+	// the idle branch, exactly as before — folding it in would add a liveness
+	// probe to every non-idle tick.
+	//
+	// A non-nil error means UNKNOWN, not dead: the probe itself failed. For the
+	// remote runtime that is a REST call to the sandbox's agent-server that never
+	// completed — a dropped ssh forward, a docker-proxy hiccup, a blackholed
+	// route. The local runtime probes in-process and never errors.
+	//
+	// The distinction is load-bearing, which is why the error is on the signature
+	// rather than swallowed into a bare bool. "Unreachable" and "reachable, and
+	// the agent is gone" are the same `false` but demand OPPOSITE responses: the
+	// first may be a transient blip that must be waited out, the second is an
+	// authoritative answer that may be acted on at once. Collapsing them is what
+	// let a single transport blip re-provision a live sandbox and destroy its
+	// unpushed work (#1794) — so callers that act destructively on `false` MUST
+	// branch on the error. Callers for whom both cases warrant the same response
+	// may ignore it.
+	Alive() (bool, error)
 
 	// SendPrompt delivers a prompt over the reliable command path (tmux send-keys
 	// for the local runtime) — the path automated/scheduled deliveries use, which

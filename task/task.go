@@ -425,6 +425,7 @@ type TaskUpdate struct {
 	CronExpr      *string `json:"cron_expr,omitempty"`
 	WatchCmd      *string `json:"watch_cmd,omitempty"`
 	TargetSession *string `json:"target_session,omitempty"`
+	ProjectPath   *string `json:"project_path,omitempty"`
 	Program       *string `json:"program,omitempty"`
 	Enabled       *bool   `json:"enabled,omitempty"`
 }
@@ -451,7 +452,8 @@ func (u *TaskUpdate) GobDecode(data []byte) error {
 // writes nothing new.
 func (u TaskUpdate) IsEmpty() bool {
 	return u.Name == nil && u.Prompt == nil && u.CronExpr == nil &&
-		u.WatchCmd == nil && u.TargetSession == nil && u.Program == nil && u.Enabled == nil
+		u.WatchCmd == nil && u.TargetSession == nil && u.ProjectPath == nil &&
+		u.Program == nil && u.Enabled == nil
 }
 
 // apply merges the non-nil fields of u onto t and returns the result. It never
@@ -472,6 +474,9 @@ func (u TaskUpdate) apply(t Task) Task {
 	}
 	if u.TargetSession != nil {
 		t.TargetSession = *u.TargetSession
+	}
+	if u.ProjectPath != nil {
+		t.ProjectPath = *u.ProjectPath
 	}
 	if u.Program != nil {
 		t.Program = *u.Program
@@ -510,6 +515,9 @@ func DiffTask(old, cur Task) TaskUpdate {
 	}
 	if cur.TargetSession != old.TargetSession {
 		u.TargetSession = &cur.TargetSession
+	}
+	if cur.ProjectPath != old.ProjectPath {
+		u.ProjectPath = &cur.ProjectPath
 	}
 	if cur.Program != old.Program {
 		u.Program = &cur.Program

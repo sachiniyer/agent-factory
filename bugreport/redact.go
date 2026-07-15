@@ -387,6 +387,17 @@ var sensitiveJSONKeys = map[string]bool{
 	// including the nested tabs[].tmux_name and worktree.session_name the
 	// recursive walk below reaches (#1680).
 	"tmux_name": true, "session_name": true,
+	// conversation and agent_conversation mirror the typed-path redaction
+	// (redactInstanceData clears Tabs[].Conversation.ID and
+	// AgentConversation.ID): the provider conversation id resumes an agent
+	// session and must not ship in a publicly shared bundle. The whole object
+	// is dropped rather than just its "id" — on this path the shape is by
+	// definition one we could not parse, so a legacy record may carry the id
+	// as a bare string, under a differently-named key, or nested deeper, and
+	// an id-only rule would miss every such variant. The surviving typed
+	// fields (agent, captured_at) are not worth reconstructing a shape
+	// contract for here (#1839).
+	"conversation": true, "agent_conversation": true,
 }
 
 // redactUnknownJSON recursively rebuilds a decoded JSON value, blanking any
