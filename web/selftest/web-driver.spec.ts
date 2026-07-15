@@ -1026,11 +1026,15 @@ test("web tab (feat): a surviving web tab that only SHIFTS ordinal is followed, 
   await tabbar.locator(".af-tab", { hasText: "preview" }).locator(".af-tab-close").click();
   await expect(tabbar.locator(".af-tab", { hasText: "preview" })).toHaveCount(0, { timeout: 30_000 });
   // The shift really happened — without this the assertion below would prove nothing.
-  // The roster is [Agent, preview, external, nourl] before the close and [Agent,
-  // external, nourl] after: the seeded URL-less tab (#1818) is part of probe-web's
-  // real tab list now, so the surviving count is 3, not 2. "external" still shifts
-  // 2 → 1, which is what this test turns on.
-  await expect(tabbar.locator(".af-tab")).toHaveCount(3, { timeout: 30_000 });
+  // Asserted as "external now sits at ordinal 1", not as a roster total (#1863): probe-web
+  // permanently carries the seeded URL-less tab (#1818), and any tab mutation republishes
+  // the roster (#1812), so a total is both bigger than it looks and free to move under the
+  // assertion. The ordinal is the thing this test actually turns on — [Agent, preview,
+  // external, nourl] before the close, [Agent, external, nourl] after, so "external"
+  // shifts 2 → 1. data-tab-index is the roster index the bar rendered it at.
+  await expect(tabbar.locator('.af-tab[data-tab-index="1"] .af-tab-label')).toHaveText("external", {
+    timeout: 30_000,
+  });
 
   // The pane still shows the SAME tab, through the SAME iframe element.
   await expect(frame).toHaveCount(1);
@@ -1087,10 +1091,21 @@ test("tabs (#1855): switching away and back keeps activeTab on the visible pane 
 
   // A throwaway terminal tab on probe-web, so there is a tab to close later that is
   // NEITHER the agent tab nor the active one — closing it must not move the pane.
+  //
+  // Waited on BY NAME, never by a roster total (#1863). probe-web permanently carries the
+  // seeded URL-less tab (#1818), so its roster here is [Agent, external, nourl] and the
+  // old "3 tabs" wait was ALREADY satisfied before the + click even landed — it passed
+  // instantly against the pre-create roster and let the test race ahead of the
+  // precondition it was there to establish. The tab's own name can't be true early, and
+  // it stays true across the session.updated rebuild the create publishes (#1812).
   await row(page, SESSION_WEB).click();
   await expect(page.locator(".af-main.af-main-term")).toBeVisible();
   await tabbar.locator(".af-tab-new").click();
-  await expect(tabbar.locator(".af-tab")).toHaveCount(3, { timeout: 30_000 });
+  const throwaway = tabbar.locator(".af-tab", { hasText: "Terminal" });
+  await expect(throwaway).toHaveCount(1, { timeout: 30_000 });
+  // The create attaches the new tab, so the pane is on it — which is what makes the
+  // "external" click below the real index change this test needs going in.
+  await expect(throwaway).toHaveClass(/af-tab-active/, { timeout: 30_000 });
 
   // Park probe-web on "external" (index 1) — an index change, so the store is truthful
   // going in.
@@ -1115,8 +1130,12 @@ test("tabs (#1855): switching away and back keeps activeTab on the visible pane 
   // Closing an UNRELATED tab (the throwaway, to the RIGHT of the active one) leaves the
   // pane where it was. With a stale activeTab the close arithmetic read 0 and re-pointed
   // the pane at Agent, tearing down the live iframe.
-  await tabbar.locator(".af-tab", { hasText: "Terminal" }).locator(".af-tab-close").click();
-  await expect(tabbar.locator(".af-tab")).toHaveCount(2, { timeout: 30_000 });
+  // (The bar always renders the SELECTED session, and probe-web is selected here, so
+  // `throwaway` resolves against probe-web's Terminal — not the one probe-b grew above.)
+  await throwaway.locator(".af-tab-close").click();
+  // Again by name (#1863): the disappearance of THIS tab is the event being waited on,
+  // and the seeded nourl tab means the surviving total is 3, not 2.
+  await expect(throwaway).toHaveCount(0, { timeout: 30_000 });
   await expect(page.locator(".af-tab.af-tab-active .af-tab-label")).toHaveText("external");
   await expect(frame).toHaveCount(1);
 
