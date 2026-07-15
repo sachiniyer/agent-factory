@@ -699,6 +699,176 @@ func TestWebTabProxy_StripsFramingHeaders(t *testing.T) {
 	}
 }
 
+// redirectingUpstream serves a redirect to loc with the given status on every
+// request, for the Location-rewrite tests (#1843).
+func redirectingUpstream(t *testing.T, status int, loc string) *httptest.Server {
+	t.Helper()
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Location", loc)
+		w.WriteHeader(status)
+	}))
+	t.Cleanup(upstream.Close)
+	return upstream
+}
+
+// TestWebTabProxy_RedirectLocationStaysInPrefix is the #1843 repro: a dev app that
+// 302s to an absolute path (the shape every login flow uses) must land back inside
+// the tab prefix. Un-rewritten, the browser follows "/login" to the daemon's own
+// origin and 404s.
+func TestWebTabProxy_RedirectLocationStaysInPrefix(t *testing.T) {
+	upstream := redirectingUpstream(t, http.StatusFound, "/app/")
+	mux, id, tabID := newWebTabProxyFixture(t, upstream.URL)
+
+	rec := proxyGet(t, mux, id, tabID, "some/path")
+
+	if rec.Code != http.StatusFound {
+		t.Fatalf("status = %d, want 302", rec.Code)
+	}
+	want := fmt.Sprintf("/v1/webtab/%s/%s/app/", id, tabID)
+	if got := rec.Header().Get("Location"); got != want {
+		t.Fatalf("Location = %q, want %q (the redirect escaped the tab prefix)", got, want)
+	}
+}
+
+// TestWebTabProxy_AbsoluteSelfRedirectRewritten covers the app redirecting to its
+// OWN absolute URL — equally common, and equally unreachable for a remote viewer,
+// since the upstream origin is loopback on the daemon's machine. The path is kept
+// verbatim (mirror-path model) and the query rides along.
+func TestWebTabProxy_AbsoluteSelfRedirectRewritten(t *testing.T) {
+	// selfURL is read only from inside the handler, which cannot run until the
+	// server is up and the assignment below has happened.
+	var selfURL string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Location", selfURL+"/dash/?tab=1")
+		w.WriteHeader(http.StatusMovedPermanently)
+	}))
+	defer upstream.Close()
+	selfURL = upstream.URL
+	mux, id, tabID := newWebTabProxyFixture(t, upstream.URL)
+
+	rec := proxyGet(t, mux, id, tabID, "x")
+
+	if rec.Code != http.StatusMovedPermanently {
+		t.Fatalf("status = %d, want 301", rec.Code)
+	}
+	want := fmt.Sprintf("/v1/webtab/%s/%s/dash/?tab=1", id, tabID)
+	if got := rec.Header().Get("Location"); got != want {
+		t.Fatalf("Location = %q, want %q (absolute self-redirect must be re-pathed into the prefix)", got, want)
+	}
+}
+
+// TestWebTabProxy_ForeignRedirectPassesThrough is the other half of the rule: an
+// off-site redirect (an OAuth provider, say) is a REAL navigation away from the
+// frame. Rewriting it would point the browser at a prefix the daemon then refuses
+// to proxy — only loopback targets are proxied — and rehost a foreign origin under
+// ours.
+func TestWebTabProxy_ForeignRedirectPassesThrough(t *testing.T) {
+	const foreign = "https://accounts.example.com/oauth?client_id=abc"
+	upstream := redirectingUpstream(t, http.StatusFound, foreign)
+	mux, id, tabID := newWebTabProxyFixture(t, upstream.URL)
+
+	rec := proxyGet(t, mux, id, tabID, "login")
+
+	if got := rec.Header().Get("Location"); got != foreign {
+		t.Fatalf("Location = %q, want %q untouched", got, foreign)
+	}
+}
+
+// TestWebTabProxy_RefreshHeaderRewritten covers the delayed-redirect spelling of the
+// same escape.
+func TestWebTabProxy_RefreshHeaderRewritten(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Refresh", "5; url=/app/done")
+		fmt.Fprint(w, "ok")
+	}))
+	defer upstream.Close()
+	mux, id, tabID := newWebTabProxyFixture(t, upstream.URL)
+
+	rec := proxyGet(t, mux, id, tabID, "start")
+
+	want := fmt.Sprintf("5; url=/v1/webtab/%s/%s/app/done", id, tabID)
+	if got := rec.Header().Get("Refresh"); got != want {
+		t.Fatalf("Refresh = %q, want %q", got, want)
+	}
+}
+
+// TestWebTabProxy_NonRedirectLocationUntouched pins the status gate: a 2xx Location
+// IDENTIFIES a resource rather than naming somewhere to navigate, so prefixing it
+// would corrupt an id the app's own JS may compare against.
+func TestWebTabProxy_NonRedirectLocationUntouched(t *testing.T) {
+	upstream := redirectingUpstream(t, http.StatusCreated, "/api/items/5")
+	mux, id, tabID := newWebTabProxyFixture(t, upstream.URL)
+
+	rec := proxyGet(t, mux, id, tabID, "api/items")
+
+	if got := rec.Header().Get("Location"); got != "/api/items/5" {
+		t.Fatalf("Location = %q, want %q untouched on a 201", got, "/api/items/5")
+	}
+}
+
+// TestRewriteUpstreamRef pins the rewrite rule itself — the cases the proxy tests
+// above can only reach one at a time.
+func TestRewriteUpstreamRef(t *testing.T) {
+	const prefix = "/v1/webtab/sess/tab-1"
+	const dflt = "http://localhost:3000"
+	cases := []struct {
+		name   string
+		target string // upstream the tab proxies; defaults to dflt
+		ref    string
+		want   string // "" means: passed through untouched
+	}{
+		{name: "absolute path", ref: "/login", want: prefix + "/login"},
+		{name: "absolute path with query and fragment", ref: "/a?b=c#d", want: prefix + "/a?b=c#d"},
+		{name: "root", ref: "/", want: prefix + "/"},
+		{name: "same origin", ref: "http://localhost:3000/app/", want: prefix + "/app/"},
+		{name: "same origin, origin only", ref: "http://localhost:3000?x=1", want: prefix + "/?x=1"},
+		{name: "same origin, host case-insensitive", ref: "http://LOCALHOST:3000/x", want: prefix + "/x"},
+		{name: "protocol relative, same host", ref: "//localhost:3000/x", want: prefix + "/x"},
+		{name: "encoded path kept verbatim", ref: "/a%2Fb", want: prefix + "/a%2Fb"},
+		// The default port is implicit on one side and explicit on the other; they
+		// name the same server either way.
+		{name: "default port explicit matches implicit target",
+			target: "http://localhost", ref: "http://localhost:80/x", want: prefix + "/x"},
+		{name: "implicit ref port matches explicit default target",
+			target: "http://localhost:80", ref: "http://localhost/x", want: prefix + "/x"},
+		{name: "ipv6 loopback same origin",
+			target: "http://[::1]:3000", ref: "http://[::1]:3000/x", want: prefix + "/x"},
+		{name: "relative stays relative", ref: "next/page"},
+		{name: "dot relative stays relative", ref: "../up"},
+		{name: "foreign host", ref: "https://example.com/x"},
+		{name: "loopback alias is not the same host", ref: "http://127.0.0.1:3000/x"},
+		{name: "different port", ref: "http://localhost:3001/x"},
+		{name: "scheme upgrade is not ours", ref: "https://localhost:3000/x"},
+		{name: "mailto", ref: "mailto:dev@example.com"},
+		{name: "empty", ref: ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			raw := tc.target
+			if raw == "" {
+				raw = dflt
+			}
+			target, err := url.Parse(raw)
+			if err != nil {
+				t.Fatalf("parse target %q: %v", raw, err)
+			}
+			got, ok := rewriteUpstreamRef(tc.ref, prefix, target)
+			if tc.want == "" {
+				if ok {
+					t.Fatalf("rewriteUpstreamRef(%q) = %q, true; want pass-through", tc.ref, got)
+				}
+				return
+			}
+			if !ok {
+				t.Fatalf("rewriteUpstreamRef(%q) = _, false; want %q", tc.ref, tc.want)
+			}
+			if got != tc.want {
+				t.Fatalf("rewriteUpstreamRef(%q) = %q, want %q", tc.ref, got, tc.want)
+			}
+		})
+	}
+}
+
 // cookieNamed returns the named cookie from a recorded response, or nil.
 func cookieNamed(rec *httptest.ResponseRecorder, name string) *http.Cookie {
 	for _, c := range rec.Result().Cookies() {
