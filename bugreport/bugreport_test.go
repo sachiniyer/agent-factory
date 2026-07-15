@@ -327,6 +327,55 @@ func TestRedactInstancesFallbackRedactsAllNestedTitleFields(t *testing.T) {
 	}
 }
 
+// TestRedactInstancesFallbackRedactsConversationIDs is the #1839 regression
+// guard. The typed path clears Tabs[].Conversation.ID and
+// AgentConversation.ID (asserted in TestRedactInstanceData) because a provider
+// conversation id resumes an agent session and must not ship in a publicly
+// shared bundle. Before the fix neither `conversation` nor `agent_conversation`
+// was in sensitiveJSONKeys, and `id` is deliberately absent (it is a structural
+// key that must survive), so a record failing the typed decode leaked both ids
+// verbatim.
+//
+// The variants below pin the reason the whole object is dropped rather than
+// just its "id": this path runs precisely because the shape did NOT parse, so
+// a legacy record may carry the id as a bare string or under a different key,
+// and an id-only rule would miss those.
+func TestRedactInstancesFallbackRedactsConversationIDs(t *testing.T) {
+	r := &redactor{}
+	raw := json.RawMessage(`[{
+		"id": "leg-1",
+		"status": "legacy-string-status",
+		"program": "claude",
+		"agent_conversation": {"agent": "claude", "id": "instance-convid-secret"},
+		"worktree": {"branch": "feature/test"},
+		"tabs": [
+			{"conversation": {"agent": "claude", "id": "tab-convid-secret"}},
+			{"conversation": "bare-string-convid-secret"},
+			{"conversation": {"nested": {"session_id": "nested-convid-secret"}}}
+		]
+	}]`)
+
+	out := string(r.redactInstancesJSON(raw))
+
+	// Each id uses a distinct sentinel so a survivor pinpoints the shape that leaked.
+	for _, leak := range []string{
+		"instance-convid-secret",    // top-level agent_conversation.id
+		"tab-convid-secret",         // nested tabs[].conversation.id
+		"bare-string-convid-secret", // legacy shape: conversation is a string
+		"nested-convid-secret",      // legacy shape: id under a different key
+	} {
+		if strings.Contains(out, leak) {
+			t.Errorf("fallback path leaked conversation id %q:\n%s", leak, out)
+		}
+	}
+	// Structural triage fields must still survive: `id` is NOT sensitive, and
+	// blanket-redacting it to fix this bug would gut the bundle's usefulness.
+	if !strings.Contains(out, "leg-1") || !strings.Contains(out, "legacy-string-status") ||
+		!strings.Contains(out, "claude") || !strings.Contains(out, "feature/test") {
+		t.Errorf("fallback dropped safe structural fields:\n%s", out)
+	}
+}
+
 // TestRedactInstancesFallbackNotesTitlesForLogScrub is the #1790 regression
 // guard. #1680 taught the fallback path to redact the title-bearing keys out of
 // the JSON section, but the fallback still never recorded those titles for

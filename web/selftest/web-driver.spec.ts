@@ -62,6 +62,10 @@ const SESSION_WEB = process.env.AF_WEB_SESSION_WEB ?? "probe-web";
 const SESSION_WEB_RESTORED = process.env.AF_WEB_SESSION_WEB_RESTORED ?? "probe-restored";
 // A session the harness left ARCHIVED holding a preserved web tab (#1809 follow-up).
 const SESSION_WEB_SHELVED = process.env.AF_WEB_SESSION_WEB_SHELVED ?? "probe-shelved";
+// The malformed/older web tab (kind=web, no target url) the harness seeds directly
+// into the daemon's store, because every API path refuses to mint one (#1818). It is
+// part of probe-web's REAL roster for the whole run, not a per-test mock.
+const NOURL_TAB = process.env.AF_WEBTAB_NOURL_NAME ?? "nourl";
 const WEBTAB_LOCAL_MARKER = process.env.AF_WEBTAB_LOCAL_MARKER ?? "AF_WEBTAB_LOCAL_OK";
 const WEBTAB_EXTERNAL_URL = process.env.AF_WEBTAB_EXTERNAL_URL ?? "https://blocked.example.test/";
 
@@ -938,31 +942,22 @@ test("web tab (feat): an external URL is iframed directly and shows a fallback w
 });
 
 test("web tab (feat): a tab with no target URL renders a clean fallback, not a blank pane", async () => {
-  // The CLI/API refuse to create a URL-less web tab, so this malformed/older-record
-  // case is injected by rewriting the Snapshot to append a web tab (kind 3) with an
-  // empty url to the web-tab session. The pane must render the fallback, not blank.
-  await page.route("**/v1/Snapshot", async (route) => {
-    const resp = await route.fetch();
-    const body = await resp.json();
-    // The Snapshot envelope is { data: { instances: SessionData[] } }.
-    const snap = body?.data as { instances?: Array<{ title: string; tabs?: Array<{ name: string; kind: number; url?: string }> }> };
-    const web = snap?.instances?.find((s) => s.title === SESSION_WEB);
-    if (web) {
-      web.tabs = web.tabs ?? [];
-      web.tabs.push({ name: "nourl", kind: 3, url: "" });
-    }
-    // Fulfill with a freshly-serialized body — the fetched APIResponse has already
-    // been consumed by .json(), so it can't be reused as `response`.
-    await route.fulfill({ status: resp.status(), contentType: "application/json", body: JSON.stringify(body) });
-  });
-  await page.reload();
-  await expect(page.locator(".af-app")).toBeVisible();
-  await expect(row(page, SESSION_WEB)).toBeVisible({ timeout: 15_000 });
-
+  // The URL-less web tab is a malformed/older record that no API can mint — three
+  // guards refuse an empty target — so the harness writes it the way an older version
+  // would have, straight into the daemon's own store before it boots
+  // (web-selftest-entry.sh). It is therefore REAL here: the daemon serves it on the
+  // Snapshot AND on every session.updated, so nothing can contradict it mid-test.
+  //
+  // This used to rewrite the Snapshot in the browser to inject the tab. That mock
+  // patched only ONE plane, so any session.updated — which a tab change now emits
+  // (#1812) — replaced the projection with the real roster and deleted the injected
+  // tab out from under the assertion below: an intermittent, entirely fictional
+  // failure (#1818). Seeding it for real is what removes the race; there is no reload,
+  // no route, and no retry left to prop it up.
   await row(page, SESSION_WEB).click();
   await expect(page.locator(".af-main.af-main-term")).toBeVisible();
   const tabbar = page.locator(".af-tabbar");
-  const nourlTab = tabbar.locator(".af-tab", { hasText: "nourl" });
+  const nourlTab = tabbar.locator(".af-tab", { hasText: NOURL_TAB });
   await expect(nourlTab).toHaveCount(1, { timeout: 15_000 });
   await nourlTab.click();
 
@@ -976,10 +971,6 @@ test("web tab (feat): a tab with no target URL renders a clean fallback, not a b
   // [hidden] override in styles.css. Without that this link renders and goes nowhere
   // (the state #1827's voice polish silently left it in until #1809 caught it).
   await expect(page.locator(".af-webpane-open:visible")).toHaveCount(0);
-
-  await page.unroute("**/v1/Snapshot");
-  await page.reload();
-  await expect(page.locator(".af-app")).toBeVisible();
 });
 
 test("split panes (fix): a WEB/iframe pane doesn't swallow a tab drag — dropping on its edge splits", async () => {
@@ -1113,7 +1104,11 @@ test("web tab (feat): a surviving web tab that only SHIFTS ordinal is followed, 
   await tabbar.locator(".af-tab", { hasText: "preview" }).locator(".af-tab-close").click();
   await expect(tabbar.locator(".af-tab", { hasText: "preview" })).toHaveCount(0, { timeout: 30_000 });
   // The shift really happened — without this the assertion below would prove nothing.
-  await expect(tabbar.locator(".af-tab")).toHaveCount(2, { timeout: 30_000 });
+  // The roster is [Agent, preview, external, nourl] before the close and [Agent,
+  // external, nourl] after: the seeded URL-less tab (#1818) is part of probe-web's
+  // real tab list now, so the surviving count is 3, not 2. "external" still shifts
+  // 2 → 1, which is what this test turns on.
+  await expect(tabbar.locator(".af-tab")).toHaveCount(3, { timeout: 30_000 });
 
   // The pane still shows the SAME tab, through the SAME iframe element.
   await expect(frame).toHaveCount(1);
@@ -1125,6 +1120,89 @@ test("web tab (feat): a surviving web tab that only SHIFTS ordinal is followed, 
     return f?.__afStamp ?? null;
   });
   expect(stamp).toBe("af-not-remounted");
+});
+
+// Ordering note: the #1779 test above consumed probe-web's "preview" tab, so the
+// session's tabs here are [Agent, external] and "external" is the non-agent tab these
+// two use as the retained pane.
+
+test("tabs (#1855): re-selecting the SAME session leaves the bar on the tab the pane shows, not Agent", async () => {
+  // Selecting a session asserted `activeTab: 0` about a layout it had already retained:
+  // the tree still pointed at tab N, so the bar highlighted Agent while the pane kept
+  // showing N. Re-selecting the session you are ALREADY on is the shortest proof —
+  // setSession's same-session branch finds nothing changed, so report() (the only
+  // writer of activeTab) never fires and the reset is never undone.
+  await row(page, SESSION_WEB).click();
+  await expect(page.locator(".af-main.af-main-term")).toBeVisible();
+  const tabbar = page.locator(".af-tabbar");
+  const frame = page.locator(".af-term-host .af-pane-host iframe.af-webframe");
+
+  // Park the pane on "external" (index 1) via a REAL index change (0 then 1): clicking
+  // the tab you are already on is itself a no-op report, so it could not establish this
+  // precondition on a desynced store.
+  await tabbar.locator(".af-tab", { hasText: "Agent" }).click();
+  await expect(page.locator(".af-tab.af-tab-active .af-tab-label")).toHaveText("Agent");
+  await tabbar.locator(".af-tab", { hasText: "external" }).click();
+  await expect(page.locator(".af-tab.af-tab-active .af-tab-label")).toHaveText("external");
+  await expect(frame).toHaveCount(1, { timeout: 15_000 });
+
+  // Click the row that is already selected. The pane is untouched (same session, same
+  // tree) — so the bar must still name the tab it is showing.
+  await row(page, SESSION_WEB).click();
+  await expect(frame).toHaveCount(1);
+  await expect(frame).toHaveAttribute("src", WEBTAB_EXTERNAL_URL);
+  await expect(page.locator(".af-tab.af-tab-active .af-tab-label")).toHaveText("external");
+});
+
+test("tabs (#1855): switching away and back keeps activeTab on the visible pane — and the next close doesn't yank it to Agent", async () => {
+  // The issue's own repro. It needs the re-entry to settle on the SAME focused index the
+  // last report carried: report() dedups on (focusedTab, shownTabs, paneCount), so an
+  // identical index makes it early-return and the `activeTab: 0` reset stands
+  // uncorrected. probe-web is re-entered on tab 1 ("external"), so probe-b is parked on
+  // ITS tab 1 to collide.
+  const tabbar = page.locator(".af-tabbar");
+  const frame = page.locator(".af-term-host .af-pane-host iframe.af-webframe");
+
+  // A throwaway terminal tab on probe-web, so there is a tab to close later that is
+  // NEITHER the agent tab nor the active one — closing it must not move the pane.
+  await row(page, SESSION_WEB).click();
+  await expect(page.locator(".af-main.af-main-term")).toBeVisible();
+  await tabbar.locator(".af-tab-new").click();
+  await expect(tabbar.locator(".af-tab")).toHaveCount(3, { timeout: 30_000 });
+
+  // Park probe-web on "external" (index 1) — an index change, so the store is truthful
+  // going in.
+  await tabbar.locator(".af-tab", { hasText: "external" }).click();
+  await expect(page.locator(".af-tab.af-tab-active .af-tab-label")).toHaveText("external");
+  await expect(frame).toHaveCount(1, { timeout: 15_000 });
+
+  // Switch away, and leave probe-b focused on its own tab 1 (+ creates AND attaches),
+  // so the last reported focused tab is 1 — the collision.
+  await row(page, SESSION_B).click();
+  await expect(page.locator(".af-main.af-main-term")).toBeVisible();
+  await tabbar.locator(".af-tab-new").click();
+  await expect(tabbar.locator(".af-tab")).toHaveCount(2, { timeout: 30_000 });
+  await expect(page.locator(".af-tab.af-tab-active .af-tab-label")).toHaveText("Terminal");
+
+  // Back to probe-web: the retained pane still shows "external", so the bar must too.
+  await row(page, SESSION_WEB).click();
+  await expect(frame).toHaveCount(1, { timeout: 15_000 });
+  await expect(frame).toHaveAttribute("src", WEBTAB_EXTERNAL_URL);
+  await expect(page.locator(".af-tab.af-tab-active .af-tab-label")).toHaveText("external");
+
+  // Closing an UNRELATED tab (the throwaway, to the RIGHT of the active one) leaves the
+  // pane where it was. With a stale activeTab the close arithmetic read 0 and re-pointed
+  // the pane at Agent, tearing down the live iframe.
+  await tabbar.locator(".af-tab", { hasText: "Terminal" }).locator(".af-tab-close").click();
+  await expect(tabbar.locator(".af-tab")).toHaveCount(2, { timeout: 30_000 });
+  await expect(page.locator(".af-tab.af-tab-active .af-tab-label")).toHaveText("external");
+  await expect(frame).toHaveCount(1);
+
+  // Restore probe-b's tab set for the flows that follow.
+  await row(page, SESSION_B).click();
+  await expect(tabbar.locator(".af-tab", { hasText: "Terminal" })).toHaveCount(1);
+  await tabbar.locator(".af-tab", { hasText: "Terminal" }).locator(".af-tab-close").click();
+  await expect(tabbar.locator(".af-tab")).toHaveCount(1, { timeout: 30_000 });
 });
 
 test("split panes (feat): logout clears retained trees — a fresh login shows the single-leaf default", async () => {
@@ -1654,4 +1732,123 @@ test("theme (redesign PR1): toggling Light vs Dark changes token-driven colors l
     .poll(() => page.evaluate(() => document.documentElement.hasAttribute("data-theme")))
     .toBe(false);
   await page.evaluate(() => localStorage.removeItem("af-theme"));
+});
+
+// The #1812 regression guard: a tab created or deleted by ANY actor other than
+// this browser window — an agent running `af sessions tab-create` inside its own
+// session, the TUI, a script, a second window — must reach an already-open client
+// live. Before the fix the daemon persisted the roster silently, so the SPA (which
+// only re-Snapshots after its OWN mutation, and never polls) stayed stale until the
+// user reloaded or an unrelated session.updated happened to repair it as a
+// side-effect. On a quiet session that repair never comes — which broke the web
+// tab's stated purpose: letting an agent inject a live browser view into the user's
+// screen.
+//
+// The mutation is driven through the real `af` CLI over the control socket, not the
+// HTTP API the SPA uses, so this also proves the event reaches the browser
+// regardless of which transport drove the change (both mutate one Manager).
+test("#1812: a tab created/deleted out-of-band reaches the open client with no reload", async () => {
+  const afBin = process.env.AF_BIN;
+  const mockRepo = process.env.AF_MOCK_REPO;
+  test.skip(!afBin || !mockRepo, "AF_BIN/AF_MOCK_REPO are set only by web-selftest-entry.sh");
+  const { execFileSync } = await import("node:child_process");
+  const af = (...args: string[]): void => {
+    execFileSync(afBin as string, ["--repo", mockRepo as string, ...args], { stdio: "pipe" });
+  };
+  const OOB_TAB = "livepreview";
+
+  await row(page, SESSION_A).click();
+  const tabbar = page.locator(".af-tabbar");
+  await expect(tabbar).toBeVisible();
+  const oob = tabbar.locator(".af-tab", { hasText: OOB_TAB });
+  await expect(oob).toHaveCount(0);
+
+  // Stamp the live document. A reload wipes this, so asserting it survives is what
+  // makes "WITHOUT a reload" a real claim rather than an assumption — the whole
+  // point of #1812 is that the user must not have to refresh.
+  await page.evaluate(() => {
+    (window as Window & { __af1812?: boolean }).__af1812 = true;
+  });
+  const notReloaded = (): Promise<boolean> =>
+    page.evaluate(() => (window as Window & { __af1812?: boolean }).__af1812 === true);
+
+  // Repro A: an agent injects a live browser view mid-work. The tab must land in
+  // this window, which did not create it.
+  af("sessions", "tab-create", SESSION_A, "--kind", "web", "--port", "3200", "--name", OOB_TAB);
+  await expect(oob, "a tab created out-of-band must appear without a reload").toHaveCount(1, {
+    timeout: 15_000,
+  });
+  expect(await notReloaded(), "the tab must arrive on the LIVE page, not via a reload").toBe(true);
+
+  // The delete side: the tab must vanish from a window that did not close it.
+  af("sessions", "tab-delete", SESSION_A, "--name", OOB_TAB);
+  await expect(oob, "a tab deleted out-of-band must disappear without a reload").toHaveCount(0, {
+    timeout: 15_000,
+  });
+  expect(await notReloaded()).toBe(true);
+});
+
+// The #1812 review guard (Codex): a close is async, and `next` is computed from the
+// index that was active when it was ISSUED. A slow CloseTab leaves a window in which
+// the user can select another tab — and re-pointing the pane from that stale index
+// afterwards would yank their selection away. The user's newer intent must win. The
+// roster event races the same window and must still be free to pass the guard, which
+// is why it keys off explicit layout mutations rather than the tab index itself.
+test("#1812 review: a close held in flight must not clobber a tab the user picks meanwhile", async () => {
+  const afBin = process.env.AF_BIN;
+  const mockRepo = process.env.AF_MOCK_REPO;
+  test.skip(!afBin || !mockRepo, "AF_BIN/AF_MOCK_REPO are set only by web-selftest-entry.sh");
+  const { execFileSync } = await import("node:child_process");
+  const af = (...args: string[]): void => {
+    execFileSync(afBin as string, ["--repo", mockRepo as string, ...args], { stdio: "pipe" });
+  };
+
+  await row(page, SESSION_A).click();
+  const tabbar = page.locator(".af-tabbar");
+  await expect(tabbar).toBeVisible();
+  const active = page.locator(".af-tab.af-tab-active .af-tab-label");
+
+  // Two named tabs: "doomed" is closed, "keeper" is focused when the close is issued
+  // (so the stale `next` would point back at it). Named via the CLI so neither the
+  // labels nor the ordinals depend on what earlier tests left behind.
+  af("sessions", "tab-create", SESSION_A, "--kind", "web", "--url", WEBTAB_EXTERNAL_URL, "--name", "doomed");
+  af("sessions", "tab-create", SESSION_A, "--kind", "web", "--url", WEBTAB_EXTERNAL_URL, "--name", "keeper");
+  const doomed = tabbar.locator(".af-tab", { hasText: "doomed" });
+  const keeper = tabbar.locator(".af-tab", { hasText: "keeper" });
+  await expect(doomed).toHaveCount(1, { timeout: 15_000 });
+  await expect(keeper).toHaveCount(1, { timeout: 15_000 });
+
+  await keeper.click();
+  await expect(active).toHaveText("keeper");
+
+  // Hold CloseTab open so the mid-flight window is deterministic rather than a race
+  // against a fast local daemon.
+  let releaseClose: (() => void) | undefined;
+  const closeHeld = new Promise<void>((resolve) => {
+    releaseClose = resolve;
+  });
+  let closeInFlight = false;
+  await page.unroute("**/v1/CloseTab");
+  await page.route("**/v1/CloseTab", async (route) => {
+    closeInFlight = true;
+    await closeHeld;
+    await route.continue();
+  });
+
+  await doomed.locator(".af-tab-close").click();
+  await expect.poll(() => closeInFlight, { timeout: 15_000 }).toBe(true);
+
+  // Mid-flight: the user picks the agent tab. This is the intent the close must respect.
+  await tabbar.locator(".af-tab", { hasText: "Agent" }).first().click();
+  await expect(active).toHaveText("Agent");
+
+  // Let the close land. Its `next` was computed against "keeper" — applying it now
+  // would snap the pane back to "keeper" and lose the user's choice.
+  releaseClose?.();
+  await expect(doomed).toHaveCount(0, { timeout: 15_000 });
+  await expect(active, "the user's mid-flight selection must survive the close").toHaveText("Agent");
+
+  await page.unroute("**/v1/CloseTab");
+  af("sessions", "tab-delete", SESSION_A, "--name", "keeper");
+  await expect(keeper).toHaveCount(0, { timeout: 15_000 });
 });

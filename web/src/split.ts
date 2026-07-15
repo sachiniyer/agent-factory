@@ -141,6 +141,10 @@ export class SplitView {
   private tree: LayoutNode | null = null;
   private focusedId: string | null = null;
 
+  // Counts explicit layout/focus mutations, for the stale-async guard — see
+  // layoutGeneration(), which is the documented contract.
+  private layoutGen = 0;
+
   // Debounces the "focus left every pane" report so a click that moves focus A→B
   // (blur A, then focus B) doesn't flap the nav mode through rail and back.
   private blurTimer: number | null = null;
@@ -243,6 +247,26 @@ export class SplitView {
     this.report();
   }
 
+  /** The tab `sessionId` will actually be shown on once selected: the focused pane's
+   *  tab for the session already on screen, the retained layout's first pane for one
+   *  shown before (setSession focuses exactly that leaf), and 0 for a session never
+   *  shown — it gets a fresh single leaf.
+   *
+   *  Selection asks this instead of asserting 0. Trees are RETAINED across session
+   *  switches, so "reset activeTab to 0 on select" states something about a pane that
+   *  already disagrees — and report(), the only writer of activeTab, dedups on the
+   *  focused tab, so a re-entry that settles on the SAME index never corrects it. The
+   *  bar then highlights Agent over a pane showing tab N, and the next close computes
+   *  its shift from the stale 0 and yanks the pane to Agent (#1855). Reading the
+   *  settled tab keeps the store's claim and the pane's binding the same statement. */
+  settledTab(sessionId: string): number {
+    if (sessionId === this.sessionId) {
+      return this.tree && this.focusedId ? (findLeaf(this.tree, this.focusedId)?.tab ?? 0) : 0;
+    }
+    const retained = this.trees.get(sessionId);
+    return retained ? (leaves(retained)[0]?.tab ?? 0) : 0;
+  }
+
   /** Rebinds the FOCUSED pane to show `tab` (a 1-9 key or a tab-bar click on the
    *  focused pane). No-op without a focused pane. Does not steal DOM focus. */
   setFocusedTab(tab: number): void {
@@ -324,10 +348,28 @@ export class SplitView {
     this.lastPaneCount = 0;
   }
 
+  /** How many EXPLICIT layout/focus mutations have been committed — a tab rebind
+   *  (a 1-9 key or a tab-bar click), a drag-drop split, a pane close. Deliberately
+   *  NOT bumped by setSession's roster reconcile, which only remaps each pane to
+   *  follow its own tab and expresses no user intent.
+   *
+   *  That split is the point: an async caller which computes a tab index from a
+   *  PRE-await snapshot (see index.ts closeSessionTab) captures this first and
+   *  applies its result only if the value still matches. A slow close then can't
+   *  clobber a tab the user selected while it was in flight — their newer intent
+   *  wins — while the roster event that races the same close still passes the
+   *  guard, because it bumps nothing. */
+  layoutGeneration(): number {
+    return this.layoutGen;
+  }
+
   // --- internal: mutation commit --------------------------------------------
 
-  /** Persists the current tree for the session, re-renders, and reports the layout. */
+  /** Persists the current tree for the session, re-renders, and reports the layout.
+   *  Every explicit layout/focus mutation funnels through here, which is what makes
+   *  it the one place to count them (see layoutGeneration). */
   private commit(): void {
+    this.layoutGen++;
     if (this.sessionId && this.tree) {
       this.trees.set(this.sessionId, this.tree);
     }

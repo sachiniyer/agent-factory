@@ -578,13 +578,22 @@ af_attach() {
     sleep "$AF_DRIVER_POLL"
 }
 
-# af_detach — detach from a full-screen attach (Ctrl-W by default) and, the
+# af_detach [raw_sequence] — detach from a full-screen attach and, the
 # anti-#1157-flake part, wait until the attach client is actually reaped (the
 # count returns to the pre-attach baseline). A leaked client fails here.
+#
+# With no argument it presses the configured detach key ($AF_DRIVER_DETACH_KEY,
+# Ctrl-W) ONCE. Sending it once is the point: the key is pressed once by a real
+# user, so a retry here would paper over exactly the #1832 class of bug (a detach
+# key the client never recognizes) and report it green.
+#
+# With an argument, those raw bytes are injected instead — how a terminal whose
+# keyboard mode the pane program has upgraded actually reports the same
+# keypress. See the #1832 selftest steps.
 af_detach() {
-    af_send "$AF_DRIVER_DETACH_KEY"
-    sleep "$AF_DRIVER_POLL"
-    if ! af_capture | grep -q 'Agent Factory'; then
+    if [ $# -gt 0 ]; then
+        af_send_literal "$1" || return 1
+    else
         af_send "$AF_DRIVER_DETACH_KEY"
     fi
     af_wait_for 'Agent Factory' "$AF_DRIVER_TIMEOUT" 'detached back to TUI' || return 1

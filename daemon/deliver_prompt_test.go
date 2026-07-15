@@ -12,6 +12,7 @@ import (
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
 	"github.com/sachiniyer/agent-factory/session"
+	sessiongit "github.com/sachiniyer/agent-factory/session/git"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
@@ -911,6 +912,74 @@ func TestDeliverPrompt_ReservedRootUnconfiguredStillRejected(t *testing.T) {
 	// It must fail fast (the create path), not wait out the root recreation bound.
 	if elapsed > 5*time.Second {
 		t.Errorf("unconfigured reserved-root delivery took %v; must fail fast, not wait for a root that will never come", elapsed)
+	}
+}
+
+// TestDeliverPrompt_DeletedProjectRootStillRejected pins #1835: a project
+// deleted at runtime suppresses its root agent for the rest of the daemon's
+// life, so a delivery to the reserved "root" title must be treated exactly like
+// the unconfigured case above — fail fast with the reserved-name error. The
+// in-memory root_agents config is immutable and still lists the deleted repo, so
+// consulting it alone would wait out the recreation bound for a root the ensure
+// loop will never bring back, then blame the delay on a recreation that is not
+// happening.
+func TestDeliverPrompt_DeletedProjectRootStillRejected(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	installRecordingBackend(t)
+	repoPath := setupControlRepo(t)
+
+	// Bound the wait well under the real 30s: a regression waits it out in full,
+	// so this is what separates a fast rejection from a pointless wait.
+	origWait := targetDeliverWait
+	targetDeliverWait = 2 * time.Second
+	t.Cleanup(func() { targetDeliverWait = origWait })
+
+	manager, err := NewManager(rootTestConfig(repoPath, config.RootAgentConfig{}))
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	manager.EnsureRootAgents()
+	root := findRootInstance(t, manager, repoPath)
+	if root == nil {
+		t.Fatal("root should materialize before the project is deleted")
+	}
+	// The fake backend skips Provision, which is what attaches the in-place
+	// (external) worktree in production. Restore it so DeleteProject routes the
+	// root down its real tear-down path instead of trying to archive it.
+	gw, _, err := sessiongit.NewGitWorktreeInPlace(repoPath)
+	if err != nil {
+		t.Fatalf("NewGitWorktreeInPlace: %v", err)
+	}
+	root.SetGitWorktreeForTest(gw)
+
+	if _, err := manager.DeleteProject(DeleteProjectRequest{RepoPath: repoPath}); err != nil {
+		t.Fatalf("DeleteProject: %v", err)
+	}
+	if findRootInstance(t, manager, repoPath) != nil {
+		t.Fatal("the deleted project's root should be gone before the delivery under test")
+	}
+
+	start := time.Now()
+	_, err = manager.DeliverPrompt(DeliverPromptRequest{
+		Title:    session.RootSessionTitle,
+		RepoPath: repoPath,
+		Program:  "claude",
+		Prompt:   "monitor-event",
+	})
+	elapsed := time.Since(start)
+	if err == nil {
+		t.Fatal("expected the reserved-name error for a deleted project's root target")
+	}
+	if !strings.Contains(err.Error(), "reserved") {
+		t.Fatalf("expected the reserved-name error, got: %v", err)
+	}
+	// The root is permanently suppressed, not coming back — saying otherwise
+	// sends the user looking for a recreation that will never happen.
+	if strings.Contains(err.Error(), "being recreated") {
+		t.Fatalf("a deleted project's root is not being recreated; error must not claim it is, got: %v", err)
+	}
+	if elapsed > targetDeliverWait/2 {
+		t.Errorf("deleted-project root delivery took %v; must fail fast, not wait out the %v recreation bound", elapsed, targetDeliverWait)
 	}
 }
 

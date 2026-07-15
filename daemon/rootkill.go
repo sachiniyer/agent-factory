@@ -58,9 +58,12 @@ func (m *Manager) persistKillTombstone(repoID string, instance *session.Instance
 // finishUserKill completes the teardown of a session whose record carries the
 // kill-intent tombstone (#1108): the previous KillSession was interrupted by a
 // daemon crash or a teardown error after the tombstone write. Mirrors the tail
-// of KillSession — best-effort Kill, targeted record delete, map removal — and
-// retries on the next poll if the record delete fails. Skips while an explicit
-// KillSession for the same session is still in flight.
+// of KillSession — best-effort Kill, targeted record delete, map removal, and
+// the root kill grace window (#1844) — and retries on the next poll if the
+// record delete fails. Skips while an explicit KillSession for the same session
+// is still in flight. Anything KillSession's tail learns to do after the
+// tombstone write belongs here too: the tombstone means the user's kill is
+// already committed, so the two paths must reach the same end state.
 func (m *Manager) finishUserKill(repoID string, instance *session.Instance) {
 	key := daemonInstanceKey(repoID, instance.Title)
 	m.mu.Lock()
@@ -116,6 +119,18 @@ func (m *Manager) finishUserKill(repoID string, instance *session.Instance) {
 	m.mu.Lock()
 	if m.instances[key] == instance {
 		delete(m.instances, key)
+	}
+	if session.IsReservedTitle(instance.Title) {
+		// Arm the grace window the interrupted KillSession never reached
+		// (#1844). Without this the ensure loop sees no rootKilledAt and
+		// re-creates the root on the next tick, so a kill that happened to be
+		// interrupted is honored for zero seconds while an uninterrupted one is
+		// honored for rootKillHealDelay. Timed from the finish, not the
+		// original kill: the tombstone records intent, not when it was formed,
+		// and re-arming here is what the surviving intent is owed. Still only a
+		// delay — the loop self-heals a configured root afterwards (#1223).
+		m.rootKilledAt[repoID] = nowFunc()
+		log.InfoLog.Printf("root agent for repo %s: finished an interrupted user kill; the ensure loop will re-create it in ~%s unless the repo is removed from root_agents", repoID, rootKillHealDelay)
 	}
 	m.mu.Unlock()
 }

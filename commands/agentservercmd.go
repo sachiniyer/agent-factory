@@ -1,8 +1,10 @@
 package commands
 
 import (
+	"fmt"
 	"os"
 
+	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/log"
 
@@ -61,13 +63,9 @@ branch before shutdown), not this server's.`,
 		log.Initialize(false)
 		defer log.Close()
 
-		repo := agentServerRepo
-		if repo == "" {
-			cwd, err := os.Getwd()
-			if err != nil {
-				return err
-			}
-			repo = cwd
+		repo, err := resolveAgentServerRepo(agentServerRepo)
+		if err != nil {
+			return err
 		}
 
 		return daemon.RunAgentServer(daemon.AgentServerOptions{
@@ -78,6 +76,24 @@ branch before shutdown), not this server's.`,
 			AutoYes:    agentServerAutoYes,
 		}, cmd.OutOrStdout())
 	},
+}
+
+// resolveAgentServerRepo resolves the --repo flag to the absolute repository
+// path the workspace runs against, defaulting to the current directory when the
+// flag is unset. A "~/repo" the shell did not expand (single-quoted, or via a
+// variable) would otherwise reach NewInstance verbatim and be absolutized into
+// "<cwd>/~/repo": the server still binds and prints its token, and the corrupted
+// path only surfaces later when the worktree is set up (#1842).
+func resolveAgentServerRepo(repoFlag string) (string, error) {
+	if repoFlag == "" {
+		// os.Getwd is already absolute and cannot contain a leading "~".
+		return os.Getwd()
+	}
+	abs, err := config.ResolveUserPath(repoFlag)
+	if err != nil {
+		return "", fmt.Errorf("failed to resolve --repo path %q: %w", repoFlag, err)
+	}
+	return abs, nil
 }
 
 func init() {

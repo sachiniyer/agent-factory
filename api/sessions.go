@@ -874,19 +874,15 @@ var sessionsAttachCmd = &cobra.Command{
 			return jsonError(err)
 		}
 
-		// A remote session attaches its hook attach_cmd PTY in-process; a local
-		// session attaches CLIENT-side over the daemon's WS PTY stream (#1592
-		// Phase 2 PR7), the same path the TUI uses. Ensure a daemon is up first —
-		// it owns the local session's clientless broker — then dial it.
-		if instance.Capabilities().Workspace == session.WorkspaceRemote {
-			detached, err := instance.Attach()
-			if err != nil {
-				return jsonError(fmt.Errorf("failed to attach: %w", err))
-			}
-			<-detached
-			return nil
-		}
-
+		// EVERY session — local or remote — attaches CLIENT-side over the daemon's
+		// WS PTY stream (#1592 Phase 2 PR7), the same path the TUI uses: the daemon
+		// resolves the byte source via instance.AgentServer() (a local broker, or a
+		// remoteAgentServer proxy for docker/ssh/hook). A prior
+		// Capabilities().Workspace == WorkspaceRemote branch called instance.Attach()
+		// here, aimed at a backend attach that had already become a routing-invariant
+		// error, so it broke remote attach outright (#1837). That surface is now
+		// deleted (#1852) — this stream dial is the only attach there is.
+		//
 		// EnsureDaemon spawns the LOCAL daemon that owns a local session's
 		// clientless broker; a remote target's daemon is already running on the
 		// other machine, so skip the local spawn and dial it directly (#1592

@@ -169,19 +169,6 @@ func (i *Instance) CheckAndHandleTrustPrompt() bool {
 	return i.backend.CheckAndHandleTrustPrompt(i)
 }
 
-func (i *Instance) Attach() (chan struct{}, error) {
-	return i.backend.Attach(i)
-}
-
-// AttachTerminal opens an interactive terminal tab (a local shell tab at tabIdx,
-// or the remote terminal_cmd shell) through the uniform Backend interface — no
-// concrete-backend type assertion (#1592 Phase 1 PR5, replacing the former
-// AttachRemoteTerminal *HookBackend special-case). The returned channel is
-// closed when the user detaches.
-func (i *Instance) AttachTerminal(tabIdx int) (chan struct{}, error) {
-	return i.backend.AttachTerminal(i, tabIdx)
-}
-
 // Capabilities returns the backing runtime's capability descriptor (#1592
 // Phase 1). A nil backend (a not-yet-initialised instance) reports local
 // full parity: the UI treats a backend-less instance as a capable local
