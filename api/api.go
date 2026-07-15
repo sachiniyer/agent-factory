@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -61,7 +60,7 @@ var (
 // path is not a git repository" so callers never mislabel a provided-but-invalid
 // --repo as missing (#892). Only call when repoFlag != "".
 func repoFromFlag() (*config.RepoContext, error) {
-	absPath, err := filepath.Abs(repoFlag)
+	absPath, err := config.ResolveUserPath(repoFlag)
 	if err != nil {
 		return nil, fmt.Errorf("failed to resolve --repo path %q: %w", repoFlag, err)
 	}

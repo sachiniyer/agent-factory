@@ -2,7 +2,6 @@ package ui
 
 import (
 	"fmt"
-	"path/filepath"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -51,7 +50,7 @@ func (s *TaskPane) validateForm() (string, int) {
 	if rawPath == "" {
 		return "project path is required", taskFocusPath
 	}
-	absPath, err := filepath.Abs(config.ExpandTilde(rawPath))
+	absPath, err := config.ResolveUserPath(rawPath)
 	if err != nil {
 		return fmt.Sprintf("invalid path: %v", err), taskFocusPath
 	}
@@ -122,7 +121,7 @@ func (s *TaskPane) handleEditMode(msg tea.KeyMsg) bool {
 			// relative value behaves the same when the scheduler fires
 			// as it does in the TUI trigger (#641, #924). validateForm
 			// already normalized editPath, so this is idempotent.
-			absPath, err := filepath.Abs(config.ExpandTilde(s.editPath.Value()))
+			absPath, err := config.ResolveUserPath(s.editPath.Value())
 			if err != nil {
 				s.editError = fmt.Sprintf("invalid path: %v", err)
 				s.editErrorField = taskFocusPath
