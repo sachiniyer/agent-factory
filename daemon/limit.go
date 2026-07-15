@@ -281,6 +281,21 @@ func (m *Manager) resumeFromLimitLocked(repoID, key string, instance *session.In
 		// endpoint and the resume could never clear the limit (#1786). Inert for local
 		// sessions, whose localAgentServer resolves i.backend per call.
 		as = instance.AgentServer()
+		// Write the respawn's durable state NOW, not at the end of the happy path
+		// (#1854). Respawn shares LocalBackend.respawn, so reaching this line can mean
+		// it rebuilt a vanished worktree — recreating the branch, flipping
+		// branchCreatedByUs and rewriting baseCommitSHA. The SendPrompt below can
+		// fail, and its early return would drop all of that: a restart would reload a
+		// record with no rebuilt branch recorded, and kill would orphan the branch af
+		// itself created (#1841's outcome, same class). The poll does not cover it
+		// either — the respawn already left the instance live, so persistPollChange
+		// sees no liveness change and skips the write.
+		//
+		// AFTER noteRuntimeReplaced, never before: the #1794/#1804 rule keeps every
+		// statement — a disk write above all — out of the window between the runtime
+		// swap and the debounce reset, so a blip there is not judged against the dead
+		// runtime. restore.go resolves the same ordering the same way.
+		m.persistInstance(repoID, instance)
 	}
 
 	prompt := strings.TrimSpace(instance.Prompt)
@@ -294,12 +309,9 @@ func (m *Manager) resumeFromLimitLocked(repoID, key string, instance *session.In
 	}
 	instance.ClearLimitReached()
 
-	repoStartLock := m.startLockForRepo(repoID)
-	repoStartLock.Lock()
-	perr := persistInstanceData(repoID, instance.ToInstanceData())
-	repoStartLock.Unlock()
-	if perr != nil {
-		log.WarningLog.Printf("daemon failed to persist resume for %q: %v", instance.Title, perr)
-	}
+	// The cleared limit is itself durable state worth a checkpoint. On the respawn
+	// arm this is the second write; that is deliberate — the first one is what
+	// survives a failed SendPrompt, this one records the resume that landed.
+	m.persistInstance(repoID, instance)
 	return nil
 }
