@@ -26,10 +26,24 @@ type Manager struct {
 	ready     chan struct{}
 	readyOnce sync.Once
 
-	mu                  sync.Mutex
-	storage             *session.Storage
-	instances           map[string]*session.Instance
-	reservedTitles      map[string]struct{}
+	mu             sync.Mutex
+	storage        *session.Storage
+	instances      map[string]*session.Instance
+	reservedTitles map[string]struct{}
+	// reservedRemoteNames holds in-flight remote-hook slug reservations, keyed by
+	// the BARE slug — deliberately global, unlike every other name a session owns.
+	//
+	// Session titles are unique per-repo, but a remote hook name is not a name af
+	// controls: launch_cmd/delete_cmd receive it verbatim as `--name <slug>` with
+	// no repo component (docs/remote-hooks.md), and external provisioners tag and
+	// reap real VMs/containers by it. Two repos handing scripts the same name
+	// would clobber one sandbox and let either delete reap the other's. So the
+	// hook-name namespace is global for as long as the name scripts see is
+	// title-derived, and this key must match what they actually receive.
+	//
+	// Note this map is IN-FLIGHT only — populated at reserve, dropped in release,
+	// never rebuilt from disk — so it guards concurrent creates. The settled case
+	// is covered by the live/disk slug scans in validateTitleAvailableLocked.
 	reservedRemoteNames map[string]struct{}
 	repoStartLocks      map[string]*sync.Mutex
 	// targetLocks serializes DeliverPrompt per (repo, title) so concurrent
