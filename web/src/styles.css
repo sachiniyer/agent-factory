@@ -1203,6 +1203,15 @@ body {
   text-decoration: none;
 }
 
+/* The `display` above outranks the UA `[hidden]` rule (the same hazard .af-viewport
+ * documents), so without this the two fallbacks that WITHDRAW this link — the
+ * archived placeholder (#1809) and the no-URL panel — would still render an "open ↗"
+ * that goes nowhere. Not hypothetical: the display rule arrived with the #1827 voice
+ * polish and silently un-hid the no-URL case until the #1809 archived test caught it. */
+.af-webpane-open[hidden] {
+  display: none;
+}
+
 /* The URL is machine text, not prose: mono at the bar's smallest step, and the one
  * element that flexes so a long URL ellipsizes instead of pushing Open off the bar. */
 .af-webpane-url {

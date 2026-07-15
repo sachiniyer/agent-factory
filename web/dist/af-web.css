@@ -961,6 +961,9 @@ body {
   line-height: 1.4;
   text-decoration: none;
 }
+.af-webpane-open[hidden] {
+  display: none;
+}
 .af-webpane-url {
   flex: 1 1 auto;
   min-width: 0;

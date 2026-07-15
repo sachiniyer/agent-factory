@@ -970,6 +970,12 @@ test("web tab (feat): a tab with no target URL renders a clean fallback, not a b
   const fallback = page.locator(".af-term-host .af-pane-host .af-webpane-fallback");
   await expect(fallback).toBeVisible({ timeout: 10_000 });
   await expect(fallback).toContainText("no URL");
+  // The "open ↗" link is WITHDRAWN — there is nothing to open. This asserts the
+  // `hidden` actually takes effect: .af-webpane-open carries an author `display`
+  // rule, which outranks the UA [hidden] rule, so hiding it needs an explicit
+  // [hidden] override in styles.css. Without that this link renders and goes nowhere
+  // (the state #1827's voice polish silently left it in until #1809 caught it).
+  await expect(page.locator(".af-webpane-open:visible")).toHaveCount(0);
 
   await page.unroute("**/v1/Snapshot");
   await page.reload();
