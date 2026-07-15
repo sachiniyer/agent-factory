@@ -877,7 +877,7 @@ export class AppShell {
       menu.hidden = true;
       caret.setAttribute("aria-expanded", "false");
       document.removeEventListener("mousedown", onDocMouseDown);
-      document.removeEventListener("keydown", onKeyDown);
+      document.removeEventListener("keydown", onKeyDown, true);
     };
     const onDocMouseDown = (e: MouseEvent): void => {
       // A rerender can detach this control while the menu is open; closing on a
@@ -888,16 +888,27 @@ export class AppShell {
       }
     };
     const onKeyDown = (e: KeyboardEvent): void => {
-      if (e.key === "Escape") {
-        close();
-        caret.focus();
+      if (e.key !== "Escape") {
+        return;
       }
+      // Swallow it: an open menu owns Escape, so closing it must not ALSO detach
+      // the terminal / drop rail focus the way a bare Escape does.
+      e.stopPropagation();
+      close();
+      caret.focus();
     };
     const open = (): void => {
       menu.hidden = false;
       caret.setAttribute("aria-expanded", "true");
       document.addEventListener("mousedown", onDocMouseDown);
-      document.addEventListener("keydown", onKeyDown);
+      // CAPTURE phase, deliberately. The app's own keydown handler is a
+      // capture-phase listener on document that stopPropagation()s Escape (so
+      // detaching can't leak a stray ESC into the PTY), which stops the event
+      // before it can bubble back here — a bubble-phase listener would simply never
+      // see it, and Escape would not close this menu. Same-node listeners are
+      // unaffected by stopPropagation, so registering in capture puts this beside
+      // the app's handler rather than downstream of it.
+      document.addEventListener("keydown", onKeyDown, true);
     };
 
     const item = (label: string, kind: NewTabKind): HTMLElement => {

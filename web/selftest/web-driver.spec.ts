@@ -60,9 +60,11 @@ const READY_MARKER = process.env.AF_WEB_READY_MARKER ?? "AF_SELFTEST_READY";
 const SESSION_WEB = process.env.AF_WEB_SESSION_WEB ?? "probe-web";
 const WEBTAB_LOCAL_MARKER = process.env.AF_WEBTAB_LOCAL_MARKER ?? "AF_WEBTAB_LOCAL_OK";
 const VSCODE_MARKER = process.env.AF_VSCODE_MARKER ?? "AF_VSCODE_TAB_OK";
-// The vscode tab has its OWN session: the web-tab session's exact tab list is
-// asserted by the #1779 case, so an extra tab there would break it.
-const SESSION_VSCODE = process.env.AF_WEB_SESSION_VSCODE ?? "probe-vscode";
+// No vscode session/tab is seeded — the tests below create the tab through the UI.
+// Every seeded session is already spoken for (their tab lists / archive / delete are
+// asserted), and a fifth session made the URL-less-web-tab test flaky: it injects a
+// tab CLIENT-SIDE by rewriting the Snapshot, which any real event for that session
+// then overwrites, so extra session traffic loses it the race.
 const WEBTAB_EXTERNAL_URL = process.env.AF_WEBTAB_EXTERNAL_URL ?? "https://blocked.example.test/";
 
 /** A rail row by its session title. */
@@ -1422,45 +1424,20 @@ test("theme (redesign PR1): toggling Light vs Dark changes token-driven colors l
   await page.evaluate(() => localStorage.removeItem("af-theme"));
 });
 
-test("vscode tab (feat): the daemon spawns code-server on the worktree and proxies it into an iframe", async () => {
-  // The vscode session was seeded (web-selftest-entry.sh) with a vscode tab
-  // "editor" and a FAKE code-server on PATH. Nothing has spawned yet: the editor
-  // starts lazily on this first render.
-  await row(page, SESSION_VSCODE).click();
-  await expect(page.locator(".af-main.af-main-term")).toBeVisible();
-
-  const tabbar = page.locator(".af-tabbar");
-  const editorTab = tabbar.locator(".af-tab", { hasText: "editor" });
-  await expect(editorTab).toHaveCount(1);
-
-  await editorTab.click();
-  const frame = page.locator(".af-term-host .af-pane-host iframe.af-webframe");
-  await expect(frame).toHaveCount(1, { timeout: 15_000 });
-  // A vscode tab is ALWAYS daemon-proxied: its code-server is loopback-only, so
-  // the proxy path is the only address a (possibly remote) browser can reach.
-  await expect(frame).toHaveAttribute("src", /\/v1\/webtab\//);
-  // It is an editor pane, not a terminal.
-  await expect(page.locator(".af-term-host .af-pane-host .xterm")).toHaveCount(0);
-  await expect(page.locator(".af-webpane-reload")).toHaveCount(1);
-
-  // Unlike a web tab, the editor MUST have a real origin: VS Code needs
-  // localStorage/workers, which an opaque origin denies. See mountWebPane.
-  await expect(frame).toHaveAttribute("sandbox", /allow-same-origin/);
-
-  // The daemon really spawned it and really relayed its content. The pane may
-  // show the self-refreshing "starting" notice first on a cold start, so poll.
-  const framed = page.frameLocator(".af-webframe");
-  await expect(framed.locator("#marker")).toHaveText(VSCODE_MARKER, { timeout: 30_000 });
-  // ...rooted at THIS session's worktree, not some other directory.
-  await expect(framed.locator("#folder")).toContainText(SESSION_VSCODE, { timeout: 15_000 });
-});
-
-test("vscode tab (feat): the ▾ beside + offers Terminal and VS Code", async () => {
-  // The kind picker hangs off a SEPARATE caret so that + keeps creating a terminal
-  // tab in one click (long-established, and asserted by the tabs test above).
+test("vscode tab (feat): the ▾ menu creates a VS Code tab and the daemon serves it through the proxy", async () => {
+  // End to end, with no seeded fixture: pick VS Code from the tab bar's kind menu,
+  // and the daemon spawns a code-server (the FAKE one on PATH — no CI box has a
+  // real one) on a loopback port it picks, rooted at THIS session's worktree, and
+  // reverse-proxies it into the pane. Nothing has spawned before this click: the
+  // editor starts lazily on the first render.
+  //
+  // It runs near the end of the file on purpose: it leaves a tab on probe-a, and
+  // the earlier tabs test asserts that session's exact tab count.
   await row(page, SESSION_A).click();
   await expect(page.locator(".af-main.af-main-term")).toBeVisible();
 
+  const tabbar = page.locator(".af-tabbar");
+  // + still creates a terminal in one click; the kind picker is the ▾ beside it.
   await expect(page.locator(".af-tab-new")).toHaveCount(1);
   const caret = page.locator(".af-tab-new-kind");
   await expect(caret).toHaveCount(1);
@@ -1471,7 +1448,36 @@ test("vscode tab (feat): the ▾ beside + offers Terminal and VS Code", async ()
   await expect(menu).toBeVisible();
   await expect(menu.locator(".af-tab-menu-item")).toHaveText(["Terminal", "VS Code"]);
 
-  // Escape closes it without creating anything.
+  await menu.locator(".af-tab-menu-item", { hasText: "VS Code" }).click();
+  await expect(menu).toBeHidden();
+
+  const editorTab = tabbar.locator(".af-tab", { hasText: "vscode" });
+  await expect(editorTab).toHaveCount(1, { timeout: 30_000 });
+  await editorTab.click();
+
+  const frame = page.locator(".af-term-host .af-pane-host iframe.af-webframe");
+  await expect(frame).toHaveCount(1, { timeout: 15_000 });
+  // A vscode tab is ALWAYS daemon-proxied: its code-server is loopback-only, so the
+  // proxy path is the only address a (possibly remote) browser can reach.
+  await expect(frame).toHaveAttribute("src", /\/v1\/webtab\//);
+  // It is an editor pane, not a terminal.
+  await expect(page.locator(".af-term-host .af-pane-host .xterm")).toHaveCount(0);
+  await expect(page.locator(".af-webpane-reload")).toHaveCount(1);
+  // Unlike a web tab, the editor MUST have a real origin: VS Code needs
+  // localStorage/workers, which an opaque origin denies. See mountWebPane.
+  await expect(frame).toHaveAttribute("sandbox", /allow-same-origin/);
+
+  // The daemon really spawned it and really relayed its content. A cold start shows
+  // the self-refreshing "starting" notice first, so poll.
+  const framed = page.frameLocator(".af-webframe");
+  await expect(framed.locator("#marker")).toHaveText(VSCODE_MARKER, { timeout: 30_000 });
+  // ...rooted at THIS session's worktree, not some other directory.
+  await expect(framed.locator("#folder")).toContainText(SESSION_A, { timeout: 15_000 });
+
+  // Escape closes the menu without creating anything (checked after, so a stray
+  // tab from a mis-click can't be mistaken for the one above).
+  await caret.click();
+  await expect(menu).toBeVisible();
   await page.keyboard.press("Escape");
   await expect(menu).toBeHidden();
 });

@@ -9104,7 +9104,7 @@ var AppShell = class {
       menu.hidden = true;
       caret.setAttribute("aria-expanded", "false");
       document.removeEventListener("mousedown", onDocMouseDown);
-      document.removeEventListener("keydown", onKeyDown);
+      document.removeEventListener("keydown", onKeyDown, true);
     };
     const onDocMouseDown = (e) => {
       if (!wrap.isConnected || !wrap.contains(e.target)) {
@@ -9112,16 +9112,18 @@ var AppShell = class {
       }
     };
     const onKeyDown = (e) => {
-      if (e.key === "Escape") {
-        close();
-        caret.focus();
+      if (e.key !== "Escape") {
+        return;
       }
+      e.stopPropagation();
+      close();
+      caret.focus();
     };
     const open = () => {
       menu.hidden = false;
       caret.setAttribute("aria-expanded", "true");
       document.addEventListener("mousedown", onDocMouseDown);
-      document.addEventListener("keydown", onKeyDown);
+      document.addEventListener("keydown", onKeyDown, true);
     };
     const item = (label, kind) => {
       const b = h2("button", { type: "button", class: "af-tab-menu-item" }, label);
