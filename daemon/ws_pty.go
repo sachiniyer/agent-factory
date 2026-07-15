@@ -92,27 +92,24 @@ func (cs *controlServer) streamHandler(w http.ResponseWriter, r *http.Request) {
 		writeHTTPError(w, http.StatusNotFound, err)
 		return
 	}
-	// Address the tab by its STABLE id (#1738) when the client supplies ?tab_id=:
-	// resolveTab maps the id to the tab's CURRENT ordinal on EVERY operation
-	// (initial Subscribe and each later Input/Resize), so a reorder/close on another
-	// client can never make this connection's captured position refer to a different
-	// tab. Without a ?tab_id= (legacy client) it pins the ?tab= ordinal, preserving
-	// the old positional behavior. A ?tab_id= that names no live tab is a 404 up
-	// front rather than a silent fall-through to a stale ordinal.
-	tabID := r.URL.Query().Get("tab_id")
-	resolveTab := staticTabResolver(tab)
-	if tabID != "" {
-		idx, ok := instance.TabIndexByID(tabID)
-		if !ok {
-			writeHTTPError(w, http.StatusNotFound, fmt.Errorf("session %q has no tab with id %q", id, tabID))
-			return
-		}
-		tab = idx
-		resolveTab = func() (int, bool) { return instance.TabIndexByID(tabID) }
-	}
-	sub, err := as.Subscribe(tab, since)
+	// Address the tab by its STABLE id (#1738) when the client supplies ?tab_id=.
+	// The binding resolves the id atomically on EVERY operation — the initial
+	// Subscribe and each later Input/Resize — so a reorder/close on another client
+	// can never make this connection address a different tab. Crucially the id is
+	// NOT converted to an ordinal here: doing that and letting the agent-server map
+	// the ordinal back to an id reopened the very race the id closes, because a
+	// concurrent close between the two steps shifts a different tab under the
+	// ordinal (#1779). Without a ?tab_id= (legacy client) the binding pins the
+	// ?tab= ordinal, preserving the pre-#1738 positional behavior.
+	binding, err := cs.bindTab(as, instance, r.URL.Query().Get("tab_id"), tab)
 	if err != nil {
-		writeHTTPError(w, http.StatusInternalServerError, err)
+		writeHTTPError(w, httpStatusForTab(err), err)
+		return
+	}
+	sub, err := binding.subscribe(since)
+	if err != nil {
+		// A stale/unknown id is a 404 refusal, never a fall back to a positional tab.
+		writeHTTPError(w, httpStatusForTab(err), err)
 		return
 	}
 	// Announce the subscription's starting cursor on the handshake response so the
@@ -127,29 +124,140 @@ func (cs *controlServer) streamHandler(w http.ResponseWriter, r *http.Request) {
 		_ = sub.Close()
 		return // Accept already wrote the error response.
 	}
-	servePTYStream(as, resolveTab, sub, conn)
+	servePTYStream(binding, sub, conn)
 }
 
-// staticTabResolver returns a resolver that always yields the fixed ordinal idx.
-// It is the legacy ?tab=<idx> path: without a stable ?tab_id= there is nothing to
-// re-resolve, so Input/Resize keep addressing the same ordinal for the
+// ptyTabBinding is how ONE connection addresses its tab for the whole of its
+// life. It exists so the addressing decision — stable id (#1738) vs legacy
+// ordinal — is made exactly once, at bind time, instead of being re-derived (and
+// re-raced) at each operation. Every op re-resolves through the same binding, so
+// the initial Subscribe and every later Input/Resize agree on which tab they mean.
+type ptyTabBinding interface {
+	subscribe(since session.Seq) (session.PTYSubscription, error)
+	input(b []byte) error
+	resize(rows, cols uint16) error
+}
+
+// idTabBinding addresses the tab by its STABLE id through the agent-server's
+// id-native plane. The id is resolved to a tmux target atomically inside each
+// operation, so no window exists in which a concurrent close/reorder can shift a
+// different tab under this connection. A closed tab yields ErrTabGone — the op is
+// refused, never re-pointed at whatever tab took its place.
+type idTabBinding struct {
+	as    session.TabAddressableServer
+	tabID string
+}
+
+func (b idTabBinding) subscribe(since session.Seq) (session.PTYSubscription, error) {
+	return b.as.SubscribeTab(b.tabID, since)
+}
+func (b idTabBinding) input(p []byte) error           { return b.as.InputTab(b.tabID, p) }
+func (b idTabBinding) resize(rows, cols uint16) error { return b.as.ResizeTab(b.tabID, rows, cols) }
+
+// ordinalTabBinding is the legacy ?tab=<idx> path: without a stable ?tab_id= there
+// is nothing to re-resolve, so every op addresses the same fixed ordinal for the
 // connection's life (the pre-#1738 positional behavior).
-func staticTabResolver(idx int) func() (int, bool) {
-	return func() (int, bool) { return idx, true }
+type ordinalTabBinding struct {
+	as  session.AgentServer
+	tab int
+}
+
+func (b ordinalTabBinding) subscribe(since session.Seq) (session.PTYSubscription, error) {
+	return b.as.Subscribe(b.tab, since)
+}
+func (b ordinalTabBinding) input(p []byte) error { return b.as.Input(b.tab, p) }
+func (b ordinalTabBinding) resize(rows, cols uint16) error {
+	return b.as.Resize(b.tab, rows, cols)
+}
+
+// resolvingTabBinding carries an id-addressed connection to a runtime with NO
+// id-native plane — the remote agent-server, whose wire protocol is ordinal-shaped
+// (its brokers and channels are keyed by index), so the id cannot be pushed all the
+// way down the way it can locally.
+//
+// It re-resolves the id to a CURRENT ordinal on every operation rather than pinning
+// the one it saw at bind time. Pinning would mean that if the addressed tab shifts
+// mid-connection, later input/resize keep hitting the old index — the positional
+// misroute the stable id exists to prevent, reintroduced on this path (#1779). This
+// still has a narrow window the local path does not (the resolve and the remote
+// server's own ordinal→broker lookup are not one atomic step), but it is the best
+// an ordinal-shaped protocol allows and is strictly better than a fixed ordinal. A
+// tab that no longer resolves is ErrTabGone — the op is refused, not re-pointed.
+type resolvingTabBinding struct {
+	as       session.AgentServer
+	instance *session.Instance
+	tabID    string
+}
+
+func (b resolvingTabBinding) resolve() (int, error) {
+	idx, ok := b.instance.TabIndexByID(b.tabID)
+	if !ok {
+		return 0, fmt.Errorf("session %q tab id %q: %w", b.instance.Title, b.tabID, session.ErrTabGone)
+	}
+	return idx, nil
+}
+
+func (b resolvingTabBinding) subscribe(since session.Seq) (session.PTYSubscription, error) {
+	idx, err := b.resolve()
+	if err != nil {
+		return nil, err
+	}
+	return b.as.Subscribe(idx, since)
+}
+
+func (b resolvingTabBinding) input(p []byte) error {
+	idx, err := b.resolve()
+	if err != nil {
+		return err
+	}
+	return b.as.Input(idx, p)
+}
+
+func (b resolvingTabBinding) resize(rows, cols uint16) error {
+	idx, err := b.resolve()
+	if err != nil {
+		return err
+	}
+	return b.as.Resize(idx, rows, cols)
+}
+
+// bindTab chooses how this connection addresses its tab. A ?tab_id= binds the
+// id-native plane when the runtime has one (the local agent-server), which is the
+// race-free path; a runtime without one re-resolves the id per operation. Either
+// way an id-addressed connection NEVER pins an ordinal. No ?tab_id= at all is a
+// legacy client: pin the ordinal it asked for, exactly as before #1738.
+func (cs *controlServer) bindTab(as session.AgentServer, instance *session.Instance, tabID string, tab int) (ptyTabBinding, error) {
+	if tabID == "" {
+		return ordinalTabBinding{as: as, tab: tab}, nil
+	}
+	if ta, ok := as.(session.TabAddressableServer); ok {
+		return idTabBinding{as: ta, tabID: tabID}, nil
+	}
+	return resolvingTabBinding{as: as, instance: instance, tabID: tabID}, nil
+}
+
+// httpStatusForTab maps a tab-addressing failure to its status: a stale/unknown
+// stable id is a 404 (the tab is GONE — the client should stop addressing it), any
+// other bind/subscribe failure stays a 500.
+func httpStatusForTab(err error) int {
+	if errors.Is(err, session.ErrTabGone) {
+		return http.StatusNotFound
+	}
+	return http.StatusInternalServerError
 }
 
 // servePTYStream runs the three loops of one subscriber's connection until any of
 // them ends: the writer (ring → PTY_OUT / resize-echo), the reader (INPUT/RESIZE/
 // detach → agent-server), and the keepalive pinger. It owns closing the
 // subscription and the socket.
-func servePTYStream(as session.AgentServer, resolveTab func() (int, bool), sub session.PTYSubscription, conn *websocket.Conn) {
+func servePTYStream(binding ptyTabBinding, sub session.PTYSubscription, conn *websocket.Conn) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	defer func() { _ = sub.Close() }()
 
 	var wg sync.WaitGroup
 	wg.Add(2)
-	go func() { defer wg.Done(); defer cancel(); readPTYClient(ctx, as, resolveTab, conn) }()
+	go func() { defer wg.Done(); defer cancel(); readPTYClient(ctx, binding, conn) }()
 	go func() { defer wg.Done(); defer cancel(); keepalivePTY(ctx, conn) }()
 
 	writePTYStream(ctx, sub, conn)
@@ -219,27 +327,23 @@ func writePTYStream(ctx context.Context, sub session.PTYSubscription, conn *webs
 // readPTYClient handles client → server frames: INPUT and RESIZE are applied to
 // the agent-server (multi-writer, from any subscriber); a detach control frame or
 // any read error ends the connection.
-func readPTYClient(ctx context.Context, as session.AgentServer, resolveTab func() (int, bool), conn *websocket.Conn) {
+func readPTYClient(ctx context.Context, binding ptyTabBinding, conn *websocket.Conn) {
 	for {
 		msg, err := agentproto.ReadMessage(ctx, conn)
 		if err != nil {
 			return
 		}
 		if msg.Binary {
-			// Re-resolve the tab ordinal per frame (#1738): for a ?tab_id= connection
-			// this maps the stable id to wherever the tab now sits, so a keystroke or
-			// resize can't land on a different tab after a mid-connection reorder/close.
-			// A tab that has since been closed no longer resolves — drop the frame
-			// rather than routing it to whatever tab now holds the old ordinal.
-			tab, ok := resolveTab()
-			if !ok {
-				continue
-			}
+			// The binding re-resolves the tab per frame (#1738): for a ?tab_id=
+			// connection each keystroke/resize lands on wherever THAT tab now sits, so a
+			// mid-connection reorder/close can't misroute it. A tab that has since been
+			// closed no longer resolves — the op errors (ErrTabGone) and the frame is
+			// dropped rather than routed to whatever tab now holds the old ordinal.
 			switch msg.Frame.Op {
 			case agentproto.OpInput:
-				_ = as.Input(tab, msg.Frame.Data)
+				_ = binding.input(msg.Frame.Data)
 			case agentproto.OpResize:
-				_ = as.Resize(tab, msg.Frame.Rows, msg.Frame.Cols)
+				_ = binding.resize(msg.Frame.Rows, msg.Frame.Cols)
 			}
 			continue
 		}

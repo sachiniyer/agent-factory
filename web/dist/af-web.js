@@ -7130,6 +7130,81 @@ function validate(root2, tabCount) {
   }
   return cur;
 }
+function sameTabs(a, b) {
+  if (a.length !== b.length) {
+    return false;
+  }
+  return a.every((v, i) => v === b[i]);
+}
+function tabsRebound(prevIds, prevKinds, prevTargets, ids, kinds, targets) {
+  return !sameTabs(prevIds, ids) || !sameTabs(prevKinds.map(String), kinds.map(String)) || !sameTabs(
+    prevTargets.map((t) => t ?? ""),
+    targets.map((t) => t ?? "")
+  );
+}
+function remapByIdentity(root2, prevIds, ids) {
+  if (prevIds.length === 0) {
+    return root2;
+  }
+  const moved = /* @__PURE__ */ new Map();
+  const claimed = /* @__PURE__ */ new Set();
+  for (const leaf of leaves(root2)) {
+    const identity = prevIds[leaf.tab];
+    if (identity === void 0 || identity === "") {
+      continue;
+    }
+    const next = ids.indexOf(identity);
+    if (next >= 0) {
+      moved.set(leaf.id, next);
+      claimed.add(next);
+    }
+  }
+  if (moved.size === 0) {
+    return root2;
+  }
+  let cur = mapAllLeaves(root2, (leaf) => {
+    const next = moved.get(leaf.id);
+    return next === void 0 || next === leaf.tab ? leaf : { ...leaf, tab: next };
+  });
+  for (const leaf of leaves(cur)) {
+    if (!moved.has(leaf.id) && claimed.has(leaf.tab)) {
+      cur = closeLeaf(cur, leaf.id) ?? cur;
+    }
+  }
+  return cur;
+}
+function resolveDragTab(drag, tabRealIds, tabIds, tabCount) {
+  if (drag.id) {
+    const tab2 = tabRealIds.indexOf(drag.id);
+    return tab2 < 0 ? null : tab2;
+  }
+  const tab = drag.index;
+  if (tab < 0 || tab >= tabCount || !sameTabs(drag.tabs, tabIds)) {
+    return null;
+  }
+  return tab;
+}
+
+// src/tabaddr.ts
+function isLoopbackWebUrl(raw) {
+  try {
+    let host = new URL(raw).hostname.toLowerCase();
+    host = host.replace(/^\[|\]$/g, "");
+    return host === "localhost" || host === "::1" || host === "127.0.0.1" || host.startsWith("127.");
+  } catch {
+    return false;
+  }
+}
+function webProxyPath(sessionId, tabIdx, token2) {
+  const base = `/v1/webtab/${encodeURIComponent(sessionId)}/${tabIdx}/`;
+  return token2 ? `${base}?access_token=${encodeURIComponent(token2)}` : base;
+}
+function paneAddressUsesOrdinal(webTarget, realId) {
+  if (webTarget !== null) {
+    return webTarget !== "" && isLoopbackWebUrl(webTarget);
+  }
+  return realId === "";
+}
 
 // src/terminal.ts
 var import_addon_fit = __toESM(require_addon_fit(), 1);
@@ -7590,25 +7665,6 @@ function el(tag, cls) {
   node.className = cls;
   return node;
 }
-function sameTabs(a, b) {
-  if (a.length !== b.length) {
-    return false;
-  }
-  return a.every((v, i) => v === b[i]);
-}
-function isLoopbackWebUrl(raw) {
-  try {
-    let host = new URL(raw).hostname.toLowerCase();
-    host = host.replace(/^\[|\]$/g, "");
-    return host === "localhost" || host === "::1" || host === "127.0.0.1" || host.startsWith("127.");
-  } catch {
-    return false;
-  }
-}
-function webProxyPath(sessionId, tabIdx, token2) {
-  const base = `/v1/webtab/${encodeURIComponent(sessionId)}/${tabIdx}/`;
-  return token2 ? `${base}?access_token=${encodeURIComponent(token2)}` : base;
-}
 function webFallbackMs() {
   const override = globalThis.__afWebtabFallbackMs;
   return typeof override === "number" ? override : 2500;
@@ -7629,6 +7685,10 @@ var SplitView = class {
   // store update. A drop compares its drag-time snapshot against this to detect a
   // mid-drag tab-set change (concurrent close/create/reorder) and cancel.
   tabIds = [];
+  // The REAL daemon tab ids ("" where a tab has none), parallel to tabIds. Kept
+  // apart from the identity list because only these may cross the wire as a
+  // ?tab_id= or be trusted as a collision-proof identity (#1779) — see ui.tabRealId.
+  tabRealIds = [];
   // Per-tab-index iframe target for web tabs (TabKind.Web); undefined for a
   // terminal tab. Parallel to the tab list, refreshed on every setSession, so
   // reconcile can mount an iframe for a web leaf without extra plumbing.
@@ -7654,9 +7714,13 @@ var SplitView = class {
    * fresh single leaf bound to `initialTab`); the SAME session only re-validates the
    * tree against the current tab list (a tab closed elsewhere). Cheap on a no-op.
    */
-  setSession(sessionId, token2, tabIds, initialTab, tabTargets = [], tabKinds = []) {
+  setSession(sessionId, token2, tabIds, initialTab, tabTargets = [], tabKinds = [], tabRealIds = []) {
     this.token = token2;
+    const prevIds = this.tabIds;
+    const prevKinds = this.tabKinds;
+    const prevTargets = this.tabTargets;
     this.tabIds = tabIds;
+    this.tabRealIds = tabRealIds;
     this.tabTargets = tabTargets;
     this.tabKinds = tabKinds;
     const tabCount = tabIds.length > 0 ? tabIds.length : 1;
@@ -7670,11 +7734,13 @@ var SplitView = class {
     if (sessionId === this.sessionId) {
       this.tabCount = tabCount;
       const before = this.tree;
-      this.tree = validate(this.tree ?? singleLeaf(initialTab), tabCount);
+      const settled = remapByIdentity(this.tree ?? singleLeaf(initialTab), prevIds, tabIds);
+      this.tree = validate(settled, tabCount);
       if (this.trees.get(sessionId) !== this.tree) {
         this.trees.set(sessionId, this.tree);
       }
-      if (before !== this.tree) {
+      const rebound = tabsRebound(prevIds, prevKinds, prevTargets, tabIds, tabKinds, tabTargets);
+      if (before !== this.tree || rebound) {
         this.reconcile();
         this.report();
       }
@@ -7832,28 +7898,38 @@ var SplitView = class {
         continue;
       }
       const webTarget = this.webTargetAt(leaf.tab);
+      const identity = this.tabIds[leaf.tab] ?? "";
+      const realId = this.tabRealIds[leaf.tab] ?? "";
+      const moved = pane.tab !== leaf.tab;
+      const staleAddress = pane.identity !== identity || moved && paneAddressUsesOrdinal(webTarget, realId);
       if (webTarget !== null) {
-        if (pane.term || pane.webUrl !== webTarget || pane.tab !== leaf.tab) {
+        if (pane.term || pane.webUrl !== webTarget || staleAddress) {
           pane.term?.dispose();
           pane.term = null;
           pane.webDispose?.();
           pane.host.replaceChildren();
           pane.tab = leaf.tab;
+          pane.identity = identity;
           this.mountWebPane(pane, webTarget);
           pane.status = "open";
           this.onPaneStatus(leaf.id, "open");
+        } else if (moved) {
+          pane.tab = leaf.tab;
         }
-      } else if (!pane.term || pane.tab !== leaf.tab) {
+      } else if (!pane.term || staleAddress) {
         pane.term?.dispose();
         pane.webDispose?.();
         pane.webUrl = null;
         pane.host.replaceChildren();
         pane.tab = leaf.tab;
+        pane.identity = identity;
         pane.status = "connecting";
-        pane.term = new AttachTerminal(pane.host, this.sessionId, this.token, this.tabIds[leaf.tab] ?? "", leaf.tab, {
+        pane.term = new AttachTerminal(pane.host, this.sessionId, this.token, realId, leaf.tab, {
           onStatus: (s) => this.onPaneStatus(leaf.id, s),
           onFocusChange: (f) => this.onPaneFocus(leaf.id, f)
         });
+      } else if (moved) {
+        pane.tab = leaf.tab;
       }
       pane.container.classList.toggle("af-pane-multi", multi);
       pane.label.textContent = `Tab ${leaf.tab + 1}`;
@@ -7888,6 +7964,8 @@ var SplitView = class {
       overlay,
       term: null,
       tab: -1,
+      // No tab bound yet; tab:-1 already forces the first reconcile to build one.
+      identity: "",
       status: "connecting",
       webUrl: null,
       webDispose: null
@@ -8098,17 +8176,9 @@ var SplitView = class {
       if (!drag || !this.tree) {
         return;
       }
-      let tab;
-      if (drag.id) {
-        tab = this.tabIds.indexOf(drag.id);
-        if (tab < 0) {
-          return;
-        }
-      } else {
-        tab = drag.index;
-        if (tab < 0 || tab >= this.tabCount || !sameTabs(drag.tabs, this.tabIds)) {
-          return;
-        }
+      const tab = resolveDragTab(drag, this.tabRealIds, this.tabIds, this.tabCount);
+      if (tab === null) {
+        return;
       }
       const zone = this.zoneAt(pane.container, e.clientX, e.clientY);
       this.tree = zone === "center" ? replaceTab(this.tree, pane.leafId, tab) : splitLeaf(this.tree, pane.leafId, zone, tab);
@@ -8476,6 +8546,9 @@ function sessionTabs(s) {
 function tabIdentity(tab) {
   return tab.id && tab.id !== "" ? tab.id : `${tab.kind}:${tab.name}`;
 }
+function tabRealId(tab) {
+  return tab.id && tab.id !== "" ? tab.id : "";
+}
 function tabLabel(tab) {
   if (tab.kind === 0) {
     return "Agent";
@@ -8773,6 +8846,10 @@ var AppShell = class {
   // dragged tab's payload by the delegated dragstart so a drop can detect a mid-drag
   // tab-set change and cancel (see split.ts). Kept live by renderTabBar.
   currentTabIds = [];
+  // The REAL daemon tab ids drawn in the bar at its last render ("" for a tab with
+  // none), parallel to currentTabIds. Separate because only a real id may be
+  // treated as a stable identity by a drop (#1779) — see tabRealId.
+  currentTabRealIds = [];
   // A signature of everything the bar DRAWS (see tabBarSig): the bar is rebuilt only
   // when this changes, so an unrelated status snapshot never churns its DOM (#1737).
   lastTabBarSig = "";
@@ -8851,6 +8928,16 @@ var AppShell = class {
         this.renderTabBar(state);
       }
     }
+    this.syncTabIdentityCaches(state);
+  }
+  /** Refreshes the ordered tab identity + REAL-id caches the delegated dragstart
+   *  stamps into a payload. Cheap (two maps over ≤9 tabs) and pure bookkeeping — it
+   *  touches no DOM, so it is safe to run on every snapshot. */
+  syncTabIdentityCaches(state) {
+    const selected = selectedSession(state);
+    const tabs = selected ? sessionTabs(selected) : [];
+    this.currentTabIds = tabs.map(tabIdentity);
+    this.currentTabRealIds = tabs.map(tabRealId);
   }
   /** Renders the rail SCOPED to the selected project (redesign PR2): only that
    *  project's sessions, never the whole projection. Three states: no project at all
@@ -9017,7 +9104,6 @@ var AppShell = class {
     const canManage = supportsTabManagement(selected);
     const active = Math.min(Math.max(state.activeTab, 0), tabs.length - 1);
     const shown = new Set(state.shownTabs);
-    this.currentTabIds = tabs.map(tabIdentity);
     const children = tabs.map(
       (tab, i) => tabButton(tab, i, i === active, shown.has(i), canManage, this.actions)
     );
@@ -9047,7 +9133,7 @@ var AppShell = class {
       if (!Number.isInteger(index)) {
         return;
       }
-      const id = this.currentTabIds[index] ?? "";
+      const id = this.currentTabRealIds[index] ?? "";
       e.dataTransfer.setData(TAB_DND_MIME, JSON.stringify({ id, index, tabs: this.currentTabIds }));
       e.dataTransfer.effectAllowed = "move";
       document.body.classList.add("af-dragging-tab");
@@ -9634,9 +9720,10 @@ function syncSplit(state) {
   const initialTab = clampActiveTab(state.sessions, selId, state.activeTab);
   const selected = selId ? state.sessions.find((s) => s.id === selId) : null;
   const tabIds = selected ? sessionTabs(selected).map(tabIdentity) : ["0:"];
+  const tabRealIds = selected ? sessionTabs(selected).map(tabRealId) : [""];
   const tabTargets = selected ? sessionTabs(selected).map((t) => t.url) : [];
   const tabKinds = selected ? sessionTabs(selected).map((t) => t.kind) : [];
-  splitView.setSession(tok !== null ? selId : null, tok, tabIds, initialTab, tabTargets, tabKinds);
+  splitView.setSession(tok !== null ? selId : null, tok, tabIds, initialTab, tabTargets, tabKinds, tabRealIds);
 }
 function disposeSplit() {
   splitView.dispose();

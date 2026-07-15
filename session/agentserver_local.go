@@ -229,6 +229,66 @@ func (s *localAgentServer) resetBrokerCaptures() {
 	}
 }
 
+// ensureBrokerByID is ensureBroker addressed by a tab's STABLE id (#1738) — the
+// id-native binding path (TabAddressableServer). It resolves the id to the tmux it
+// currently backs ATOMICALLY (TabTmuxByID, one lock), so unlike the ordinal path
+// there is no window in which a concurrent close/reorder can shift a different tab
+// under the caller's address (#1779). The broker map is already id-keyed, so this
+// is the direct route: no ordinal is involved at any point. A stale/unknown id is
+// ErrTabGone — a refusal, never a fall back to a positional tab.
+func (s *localAgentServer) ensureBrokerByID(tabID string) (*ptyBroker, error) {
+	// Resolve under i.mu BEFORE taking s.mu (never nest s.mu → i.mu).
+	ts, exists := s.inst.TabTmuxByID(tabID)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return nil, fmt.Errorf("session %q is being terminated", s.inst.Title)
+	}
+	// GONE and NOT-YET-STREAMABLE are different answers. Only an id that names no
+	// tab is ErrTabGone (the client should stop addressing it); a real tab with no
+	// local PTY — not started, or a remote runtime — keeps the ordinal path's
+	// message, so a client isn't told a tab that may still come up is gone.
+	if !exists {
+		return nil, fmt.Errorf("session %q tab id %q: %w", s.inst.Title, tabID, ErrTabGone)
+	}
+	if ts == nil {
+		return nil, fmt.Errorf("session %q tab id %q has no local PTY to stream", s.inst.Title, tabID)
+	}
+	if br := s.brokers[tabID]; br != nil {
+		return br, nil
+	}
+	if s.brokers == nil {
+		s.brokers = make(map[string]*ptyBroker)
+	}
+	br := newPTYBroker(newTmuxClientlessChannel(ts))
+	s.brokers[tabID] = br
+	return br, nil
+}
+
+func (s *localAgentServer) SubscribeTab(tabID string, since Seq) (PTYSubscription, error) {
+	br, err := s.ensureBrokerByID(tabID)
+	if err != nil {
+		return nil, err
+	}
+	return br.subscribe(since)
+}
+
+func (s *localAgentServer) InputTab(tabID string, b []byte) error {
+	br, err := s.ensureBrokerByID(tabID)
+	if err != nil {
+		return err
+	}
+	return br.input(b)
+}
+
+func (s *localAgentServer) ResizeTab(tabID string, rows, cols uint16) error {
+	br, err := s.ensureBrokerByID(tabID)
+	if err != nil {
+		return err
+	}
+	return br.resize(rows, cols)
+}
+
 func (s *localAgentServer) Subscribe(tab int, since Seq) (PTYSubscription, error) {
 	br, err := s.ensureBroker(tab)
 	if err != nil {
