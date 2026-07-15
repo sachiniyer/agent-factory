@@ -562,10 +562,13 @@ function openTab(index: number): void {
 }
 
 /** Creates a $SHELL tab on the selected session (the `t` key / + button), then
- *  resyncs to pull the grown tab list (the daemon emits no event for a tab change),
- *  selects the new tab, and attaches it — mirroring the TUI's `t`, which opens the
- *  fresh tab as a pane. Errors (e.g. a remote session, or the tab cap) surface on
- *  the pane header's status line. */
+ *  resyncs to pull the grown tab list, selects the new tab, and attaches it —
+ *  mirroring the TUI's `t`, which opens the fresh tab as a pane. The resync is
+ *  kept for THIS window's own mutation because it must select+attach the new tab
+ *  synchronously, which needs the tab in hand rather than an event later; a tab
+ *  changed by any OTHER actor now arrives on its own, since CreateTab/CloseTab
+ *  publish session.updated with the refreshed roster (#1812). Errors (e.g. a
+ *  remote session, or the tab cap) surface on the pane header's status line. */
 function createSessionTab(): void {
   const sel = selectedSessionData();
   const tok = token;
@@ -608,20 +611,40 @@ function closeSessionTab(index: number): void {
   }
   clearTabError();
   const selId = sel.id ?? "";
+  // Read the active index BEFORE the close, not after the awaits: `next` below is
+  // computed RELATIVE to the PRE-close list, so it is only correct against the index
+  // as it stood when this close was issued. The daemon's tab event (#1812) can land
+  // while these awaits are in flight — rerendering with the shrunk roster, which
+  // remaps each pane to follow its own tab and writes the ALREADY-shifted index back
+  // as activeTab. Reading it afterwards would then subtract the shift a SECOND time
+  // and re-point the pane one tab too far left — tearing down a surviving web tab's
+  // iframe to show its neighbour instead (the #1779 guarantee).
+  //
+  // Taking a pre-await snapshot means `next` can go STALE the other way, so pin what
+  // it assumes: this session, and no explicit layout/focus mutation since. A slow
+  // close leaves a wide window in which the user can select another tab, and
+  // re-pointing the pane from an index computed against the old selection would yank
+  // it back (the same stale-async hazard the #1777 scroll-fill token guards). The
+  // roster event races the same window but bumps no generation, so it still passes.
+  const cur = store.get().activeTab;
+  const gen = splitView.layoutGeneration();
   void closeTab(selId, sel.title, target.name, tok)
     .then(() => fetchSnapshot(tok))
     .then((sessions) => {
       // The close shifts every higher tab down by one: if the closed tab was at or
       // before the active one, the active index moves left to keep showing the same
       // tab (or its left neighbor when the active tab itself was closed).
-      const cur = store.get().activeTab;
       const shrunk = sessions.find((s) => s.id === selId);
       const n = shrunk ? sessionTabs(shrunk).length : 1;
       const next = Math.min(Math.max(index <= cur ? cur - 1 : cur, 0), n - 1);
       // Commit the shrunk tab list first (rerender → syncSplit re-validates the tree,
-      // clamping any pane past the new end), then re-point the focused pane.
+      // clamping any pane past the new end), then re-point the focused pane — but only
+      // if `next` still describes anything real: the user must not have moved focus or
+      // switched away to another session while the close was in flight.
       store.set({ sessions, selectedId: pickSelection(sessions, store.get().selectedId) });
-      splitView.setFocusedTab(next);
+      if (splitView.layoutGeneration() === gen && store.get().selectedId === selId) {
+        splitView.setFocusedTab(next);
+      }
     })
     .catch((e) => surfaceTabError(e));
 }
