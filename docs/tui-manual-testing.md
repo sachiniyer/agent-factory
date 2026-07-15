@@ -160,7 +160,7 @@ compose across `docker exec` invocations.
 | `af_detach` | `Ctrl-W` | TUI chrome back **and** the attach client is reaped (guards #1157) |
 | `af_new_tab` | `t` | tab-child count rises |
 | `af_close_tab` | `w` | tab-child count falls |
-| `af_open_tasks` / `af_close_tasks` | `m` / `Esc` | tasks overlay (`r run now`) appears / gone |
+| `af_open_tasks` / `af_close_tasks` | `m` / `Esc` | tasks overlay (`r run`) appears / gone |
 | `af_click <x> <y>` / `af_click_instance <name>` | SGR mouse | injects a left click at a cell / on an instance row |
 | `af_scroll <up\|down> [x] [y]` | SGR wheel | injects a wheel event |
 | `af_set_config <toml>` + `af_relaunch` | — | rewrites `config.toml` (canonical since #1030) and reboots the TUI |
