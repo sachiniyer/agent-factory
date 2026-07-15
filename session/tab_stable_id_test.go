@@ -177,6 +177,127 @@ func TestEnsureBrokerFollowsTabAcrossClose(t *testing.T) {
 	assert.Equal(t, 1, nAfter, "no stale second broker may be created for the shifted ordinal")
 }
 
+// TestTabTmuxByID_ResolvesTargetAtomically pins the atomic primitive the id-native
+// data plane binds on (#1779): a stable id resolves DIRECTLY to the tmux its tab
+// currently backs, and keeps resolving to that same tmux after an unrelated close
+// shifts the tab's ordinal. Resolving id→ordinal→tmux in two steps is what let a
+// concurrent close land the second step on a different tab; this is the one-step
+// route that has no such window.
+func TestTabTmuxByID_ResolvesTargetAtomically(t *testing.T) {
+	log.Initialize(false)
+	defer log.Close()
+
+	inst, _ := raceMockInstance(t, "af_stable_tmuxbyid", func() {})
+	_, err := inst.AddProcessTab("a", "a")
+	require.NoError(t, err)
+	b, err := inst.AddProcessTab("b", "b")
+	require.NoError(t, err)
+
+	// b sits at ordinal 2; its id resolves to the tmux backing b.
+	tsBefore, ok := inst.TabTmuxByID(b.ID)
+	require.True(t, ok, "a live tab's id must resolve to its tmux")
+	require.NotNil(t, tsBefore)
+
+	// Close the middle tab a; b shifts down to ordinal 1.
+	require.NoError(t, inst.CloseTab(1))
+	requireIndex(t, inst, b.ID, 1)
+
+	// b's id STILL resolves to b's own tmux — it followed the tab, not the ordinal.
+	tsAfter, ok := inst.TabTmuxByID(b.ID)
+	require.True(t, ok)
+	assert.Same(t, tsBefore, tsAfter, "a tab id must resolve to the same tmux across an ordinal shift")
+}
+
+// TestTabTmuxByID_RefusesStaleAndEmpty: an id that names no live tab — closed, or
+// never minted — resolves to nothing rather than to whatever tab now holds its old
+// ordinal. This is the refusal the whole #1779 follow-up rests on: once a caller
+// addresses a tab by id, "gone" must be an answer the plane can give.
+func TestTabTmuxByID_RefusesStaleAndEmpty(t *testing.T) {
+	log.Initialize(false)
+	defer log.Close()
+
+	inst, _ := raceMockInstance(t, "af_stable_tmuxstale", func() {})
+	a, err := inst.AddProcessTab("a", "a")
+	require.NoError(t, err)
+	_, err = inst.AddProcessTab("b", "b")
+	require.NoError(t, err)
+
+	// Close a (ordinal 1). Tab b shifts into the ordinal a used to hold.
+	require.NoError(t, inst.CloseTab(1))
+
+	_, ok := inst.TabTmuxByID(a.ID)
+	assert.False(t, ok, "a closed tab's id must resolve to no tmux, not to the tab that took its ordinal")
+	_, ok = inst.TabTmuxByID("nonexistent-id")
+	assert.False(t, ok, "an unknown id must resolve to no tmux")
+	_, ok = inst.TabTmuxByID("")
+	assert.False(t, ok, "an empty id must resolve to no tmux")
+}
+
+// TestSubscribeTab_RefusesStaleID: the id-native data plane REFUSES a stale/unknown
+// tab id with ErrTabGone instead of serving a positional tab (#1779). Subscribing
+// by a closed tab's id must not hand back the broker of whatever tab shifted into
+// its old ordinal — that misroute is exactly what the stable id exists to prevent.
+func TestSubscribeTab_RefusesStaleID(t *testing.T) {
+	log.Initialize(false)
+	defer log.Close()
+
+	inst, _ := raceMockInstance(t, "af_stable_subrefuse", func() {})
+	a, err := inst.AddProcessTab("a", "a")
+	require.NoError(t, err)
+	b, err := inst.AddProcessTab("b", "b")
+	require.NoError(t, err)
+
+	las := inst.AgentServer().(*localAgentServer)
+
+	// Close a (ordinal 1); b shifts down into ordinal 1.
+	require.NoError(t, inst.CloseTab(1))
+	requireIndex(t, inst, b.ID, 1)
+
+	// Subscribing by the CLOSED tab's id is refused as gone...
+	_, err = las.SubscribeTab(a.ID, 0)
+	require.Error(t, err, "a stale tab id must be refused, not resolved positionally")
+	assert.ErrorIs(t, err, ErrTabGone)
+	// ...and it did NOT bind b's broker (the tab now at a's old ordinal).
+	las.mu.Lock()
+	_, boundB := las.brokers[b.ID]
+	las.mu.Unlock()
+	assert.False(t, boundB, "refusing a stale id must not bind the tab that took its ordinal")
+
+	// An unknown id is likewise gone, and the live tab's own id still works.
+	_, err = las.SubscribeTab("never-minted", 0)
+	assert.ErrorIs(t, err, ErrTabGone)
+	_, err = las.SubscribeTab("", 0)
+	assert.ErrorIs(t, err, ErrTabGone, "an empty id is not addressable by id")
+
+	sub, err := las.SubscribeTab(b.ID, 0)
+	require.NoError(t, err, "a live tab's stable id must still subscribe")
+	require.NotNil(t, sub)
+	_ = sub.Close()
+}
+
+// TestInputResizeTab_RefuseStaleID: the refusal covers the WRITE half of the plane
+// too. A keystroke or resize addressed to a closed tab's id is dropped, never
+// delivered to the tab that inherited its ordinal — the misroute with the worst
+// consequence, since it types into the wrong terminal.
+func TestInputResizeTab_RefuseStaleID(t *testing.T) {
+	log.Initialize(false)
+	defer log.Close()
+
+	inst, _ := raceMockInstance(t, "af_stable_writerefuse", func() {})
+	a, err := inst.AddProcessTab("a", "a")
+	require.NoError(t, err)
+	_, err = inst.AddProcessTab("b", "b")
+	require.NoError(t, err)
+
+	las := inst.AgentServer().(*localAgentServer)
+	require.NoError(t, inst.CloseTab(1)) // close a; b takes ordinal 1
+
+	assert.ErrorIs(t, las.InputTab(a.ID, []byte("rm -rf /\n")), ErrTabGone,
+		"input to a closed tab's id must be refused, not typed into the tab at its old ordinal")
+	assert.ErrorIs(t, las.ResizeTab(a.ID, 40, 100), ErrTabGone,
+		"a resize addressed to a closed tab's id must be refused")
+}
+
 func requireIndex(t *testing.T, inst *Instance, id string, want int) {
 	t.Helper()
 	idx, ok := inst.TabIndexByID(id)

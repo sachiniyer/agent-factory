@@ -264,6 +264,32 @@ func (i *Instance) TabIDAt(idx int) (string, bool) {
 	return i.Tabs[idx].ID, true
 }
 
+// TabTmuxByID resolves a tab's stable id (#1738) DIRECTLY to the tmux session it
+// currently backs, under a SINGLE lock acquisition, and reports whether such a
+// live tab exists. It is the atomic primitive the id-addressed data plane binds
+// on: resolving an id to an ordinal and then that ordinal to a tmux session takes
+// i.mu twice, and a concurrent close/reorder between the two makes the second
+// lookup land on a DIFFERENT tab — exactly the misroute the stable id exists to
+// prevent (#1779). Resolving both under one lock closes that window. Returns
+// (nil, false) when the instance is not started, the id names no tab, or the tab
+// has no local tmux (a remote runtime).
+func (i *Instance) TabTmuxByID(id string) (*tmux.TmuxSession, bool) {
+	if id == "" {
+		return nil, false
+	}
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	if !i.started {
+		return nil, false
+	}
+	for idx, t := range i.Tabs {
+		if t.ID == id {
+			return i.tabTmuxAtLocked(idx), true
+		}
+	}
+	return nil, false
+}
+
 // TabIndexByID returns the CURRENT ordinal of the tab with stable id (#1738),
 // and whether such a tab exists. It is the id→index resolution the stream
 // endpoint runs per operation: a client addresses a tab by its stable id and the

@@ -226,3 +226,90 @@ export function validate(root: LayoutNode, tabCount: number): LayoutNode {
   }
   return cur;
 }
+
+
+/** Whether two ordered tab-identity lists are element-wise equal (the mid-drag
+ *  tab-set-change check). */
+function sameTabs(a: string[], b: string[]): boolean {
+  if (a.length !== b.length) {
+    return false;
+  }
+  return a.every((v, i) => v === b[i]);
+}
+
+/** Whether the tab list was REBOUND between two snapshots — i.e. whether any pane
+ *  might now be showing a different tab than it was built for (#1779).
+ *
+ *  The subtle case this exists for: a resync can change WHICH tab lives at an index
+ *  without changing the tab COUNT, when another client closes a tab and creates a
+ *  replacement before this browser fetches. The layout tree validates on count
+ *  alone, so it comes back structurally identical and a tree-only check concludes
+ *  there is nothing to do — leaving a terminal attached to a tab_id that no longer
+ *  exists, or an iframe pointed at a dead target. Comparing identity/kind/target
+ *  element-wise is what catches it.
+ *
+ *  Exported for direct unit coverage: it is pure, and it is the guard the
+ *  stale-pane bug turns on. */
+export function tabsRebound(
+  prevIds: string[],
+  prevKinds: number[],
+  prevTargets: (string | undefined)[],
+  ids: string[],
+  kinds: number[],
+  targets: (string | undefined)[],
+): boolean {
+  return (
+    !sameTabs(prevIds, ids) ||
+    !sameTabs(prevKinds.map(String), kinds.map(String)) ||
+    !sameTabs(
+      prevTargets.map((t) => t ?? ""),
+      targets.map((t) => t ?? ""),
+    )
+  );
+}
+
+/** Resolves a dropped tab payload to the ordinal it should bind, or null to CANCEL
+ *  the drop (#1738/#1779).
+ *
+ *  Two branches, and which one runs is decided by whether the dragged tab HAS a
+ *  real daemon id — never by whether some identity string happens to be non-empty:
+ *
+ *  - A real stable id is looked up in the CURRENT real-id list. Wherever that exact
+ *    tab now sits is where the pane binds; if it was closed mid-drag it resolves to
+ *    nothing and the drop cancels. A concurrent reorder cannot misroute it.
+ *  - No id (a legacy/pre-#1738 tab) has no collision-proof handle, so its drag-time
+ *    index is only trusted when the whole tab-set snapshot still matches (#1737).
+ *    That guard is the ONLY protection such a tab has, which is why a synthesized
+ *    `kind:name` must never reach the branch above and skip it: a legacy tab closed
+ *    and recreated under the same kind/name mid-drag would otherwise resolve
+ *    straight onto its replacement.
+ *
+ *  Exported for direct unit coverage: it is pure, and it is the misroute fix. */
+export function resolveDragTab(
+  drag: { id?: string; index: number; tabs: string[] },
+  tabRealIds: string[],
+  tabIds: string[],
+  tabCount: number,
+): number | null {
+  if (drag.id) {
+    const tab = tabRealIds.indexOf(drag.id);
+    return tab < 0 ? null : tab; // resolved to nothing → the tab was closed mid-drag
+  }
+  const tab = drag.index;
+  if (tab < 0 || tab >= tabCount || !sameTabs(drag.tabs, tabIds)) {
+    return null;
+  }
+  return tab;
+}
+
+/** The drag payload a tab-bar drag stamps into the dataTransfer (ui.ts): the dragged
+ *  tab's REAL daemon id when it has one (#1738) — what the drop resolves to a current
+ *  ordinal, so a mid-drag reorder/close can't misroute — plus the ordinal index and an
+ *  ordered identity snapshot, the guarded legacy fallback for a tab with no id. `id`
+ *  is EMPTY for an id-less tab and never carries a synthesized identity (#1779): see
+ *  resolveDragTab. */
+export interface DragPayload {
+  id?: string;
+  index: number;
+  tabs: string[];
+}
