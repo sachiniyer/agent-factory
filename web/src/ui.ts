@@ -465,6 +465,9 @@ export class AppShell {
   private lastLive: EventStreamStatus | null = null;
   private lastKb: KeyboardFocus | null = null;
   private lastError: string | null = null;
+  // The last value written to document.title, so an unrelated update doesn't
+  // reassign it (see syncDocumentTitle).
+  private lastDocTitle: string | null = null;
   // Whether the main pane has been rendered at least once. The constructor leaves it
   // an empty <section>, so the FIRST update must render it even when nothing is
   // selected (selectedId is null before AND after that first update, so the
@@ -599,8 +602,20 @@ export class AppShell {
     this.el = h("main", { class: "af-app" }, header, viewport, this.toast, this.modalHost);
   }
 
+  /** Points the browser tab at what is on screen, so a pinned/backgrounded tab and the
+   *  history entry name the session and project rather than a static "Agent Factory".
+   *  Assigns only on a real change (a rename, a selection, or a project switch). */
+  private syncDocumentTitle(state: AppState): void {
+    const title = documentTitle(state);
+    if (this.lastDocTitle !== title) {
+      this.lastDocTitle = title;
+      document.title = title;
+    }
+  }
+
   /** Applies the latest state, touching only what changed. */
   update(state: AppState): void {
+    this.syncDocumentTitle(state);
     // The keyboard-focus indicator (#1693): a modifier class on the app root that
     // CSS turns into an accent border on whichever pane owns the keyboard. The
     // terminal only "holds" it while a session is actually selected; with none
@@ -1001,6 +1016,33 @@ export class AppShell {
     this.headMeta.textContent = parts.join(" · ");
     this.headMeta.className = `af-term-meta af-term-${state.termStatus}`;
   }
+}
+
+/** The product name, and the browser-tab title when there is nothing to qualify it. */
+const APP_NAME = "Agent Factory";
+
+/**
+ * The browser-tab title for a state: "‹session› — ‹project› · Agent Factory" while a
+ * session is selected, degrading to "‹project› · Agent Factory" when only a project is
+ * scoped and to the bare app name when neither is. It reads the SELECTED session's own
+ * repo root rather than the scoped project, so the title always names the project the
+ * session actually lives in.
+ *
+ * Pure (state in, string out) and exported so it is unit-testable without a DOM;
+ * AppShell.syncDocumentTitle owns the assignment.
+ */
+export function documentTitle(state: AppState): string {
+  const sel = selectedSession(state);
+  const root = sel?.worktree?.repo_path ?? state.selectedProject;
+  const parts: string[] = [];
+  if (sel && sel.title !== "") {
+    parts.push(sel.title);
+  }
+  if (root) {
+    parts.push(projectName(root));
+  }
+  const lead = parts.join(" — ");
+  return lead === "" ? APP_NAME : `${lead} · ${APP_NAME}`;
 }
 
 /** The currently selected session row, or null. */

@@ -55,7 +55,7 @@ func TestTinyClipSearchOverlayFitsAtSmallSizes(t *testing.T) {
 			view := h.View()
 			requireViewSized(t, view, size[0], size[1])
 			plain := xansi.Strip(view)
-			assert.Contains(t, plain, "Search Sessions")
+			assert.Contains(t, plain, "Search sessions")
 			assert.Contains(t, plain, "gamma")
 			assert.Contains(t, plain, "esc close")
 		})

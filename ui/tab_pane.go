@@ -287,14 +287,14 @@ func (p *TabPane) updateAgent(instance *session.Instance, guard contentGuard) er
 		p.mu.Unlock()
 		return nil
 	case instance.IsCreating():
-		p.setFallbackState("Setting up workspace...")
+		p.setFallbackState("Setting up workspace…")
 		p.mu.Unlock()
 		return nil
 	case instance.IsTearingDown():
 		// Mirror the creating case for a teardown op (#920/#1195): during
 		// teardown Preview() returns ("", nil) and Started()==false, so without
 		// this the generic name fallback below would claim throughout the delete.
-		p.setFallbackState("Tearing down session...")
+		p.setFallbackState("Tearing down session…")
 		p.mu.Unlock()
 		return nil
 	case instance.GetLiveness() == session.LiveDead:
@@ -399,7 +399,7 @@ func (p *TabPane) updateAgent(instance *session.Instance, guard contentGuard) er
 // cannot render: the target URL plus a pointer to where it can be viewed. Shared
 // by updateShell and enterScrollModeLocked so the two never diverge.
 func webTabPlaceholder(url string) string {
-	return fmt.Sprintf("%s\n\nweb tab — view in the web UI or open in a browser", url)
+	return fmt.Sprintf("%s\n\nWeb tab — view in the web UI or open in a browser", url)
 }
 
 // updateShell reproduces the former TerminalPane.UpdateContent for the
@@ -420,7 +420,7 @@ func (p *TabPane) updateShell(instance *session.Instance, activeTab int, guard c
 	// this it would fall through to the "not started yet" fallback — misleading
 	// while the session is going away (#920/#1195).
 	if instance.IsTearingDown() {
-		p.setFallbackState("Tearing down session...")
+		p.setFallbackState("Tearing down session…")
 		p.mu.Unlock()
 		return nil
 	}
@@ -634,7 +634,7 @@ func (p *TabPane) ScrollDown(instance *session.Instance, activeTab int) error {
 // must hold p.mu. Validation uses in-memory state only, never I/O.
 func (p *TabPane) enterScrollModeLocked(instance *session.Instance, activeTab int) error {
 	if instance.IsTearingDown() {
-		p.setFallbackState("Tearing down session...")
+		p.setFallbackState("Tearing down session…")
 		return nil
 	}
 	// A web tab has no scrollback (no PTY): keep the placeholder rather than
@@ -703,9 +703,9 @@ func (p *TabPane) ResetToNormalMode(instance *session.Instance, activeTab int) e
 	// through to its live screen rather than a fallback.
 	switch {
 	case instance.IsCreating():
-		p.setFallbackState("Setting up workspace...")
+		p.setFallbackState("Setting up workspace…")
 	case instance.IsTearingDown():
-		p.setFallbackState("Tearing down session...")
+		p.setFallbackState("Tearing down session…")
 	case instance.GetLiveness() == session.LiveDead:
 		p.setFallbackState("Session no longer running.")
 	case instance.GetLiveness() == session.LiveLost:

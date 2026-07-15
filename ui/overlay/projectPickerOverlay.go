@@ -219,12 +219,12 @@ func (p *ProjectPickerOverlay) Render() string {
 	cw := textRect.W
 
 	var lines []string
-	lines = append(lines, truncateOverlayLine(titleStyle.Render("Switch Project"), cw))
+	lines = append(lines, truncateOverlayLine(titleStyle.Render("Switch project"), cw))
 	lines = append(lines, "")
 
 	if p.adding {
 		lines = append(lines, truncateOverlayLine(normalStyle.Render("Add project — enter a repo path:"), cw))
-		lines = append(lines, truncateOverlayLine("  "+queryStyle.Render(p.pathInput+"_"), cw))
+		lines = append(lines, truncateOverlayLine("  "+queryStyle.Render(p.pathInput)+ui.InputCaret(), cw))
 		if p.addErr != "" {
 			lines = append(lines, truncateOverlayLine(errStyle.Render("  "+p.addErr), cw))
 		}
@@ -242,13 +242,13 @@ func (p *ProjectPickerOverlay) Render() string {
 	}
 	start, end := p.visibleWindow(avail)
 	if start > 0 {
-		lines = append(lines, truncateOverlayLine(normalStyle.Render(fmt.Sprintf("    ... %d more above", start)), cw))
+		lines = append(lines, truncateOverlayLine(normalStyle.Render(fmt.Sprintf("    … %d more above", start)), cw))
 	}
 	for i := start; i < end; i++ {
 		lines = append(lines, truncateOverlayLine(p.renderRow(i, selectedStyle, normalStyle, countStyle, addStyle), cw))
 	}
 	if end < p.rowCount() {
-		lines = append(lines, truncateOverlayLine(normalStyle.Render(fmt.Sprintf("    ... and %d more below", p.rowCount()-end)), cw))
+		lines = append(lines, truncateOverlayLine(normalStyle.Render(fmt.Sprintf("    … and %d more below", p.rowCount()-end)), cw))
 	}
 
 	lines = append(lines, "")
