@@ -247,6 +247,60 @@ func TestRestoreLostSessions_PersistsAfterFailedRecover(t *testing.T) {
 	}
 }
 
+// TestRestoreLostSessions_PersistsAfterSuccessfulRecover is the #1841 twin of
+// the failed-recover case above: Recover mutates durable worktree state on the
+// way to SUCCESS too, so the success path must write it back as well.
+//
+// A vanished worktree whose branch is also gone drives Recover into
+// RebuildFreshFromRecordedBase, which recreates the branch and flips
+// branchCreatedByUs true (and rewrites baseCommitSHA) before the tmux spawn
+// succeeds. The poll loop does not cover the gap: Recover's ConfirmLive already
+// left the instance LiveRunning, so a later tick compares LiveRunning against
+// LiveRunning and persistPollChange returns without writing. A daemon restart
+// before an idle transition then reloads a stale branchCreatedByUs=false, the
+// next recovery skips the rebuild (the worktree exists again), and kill never
+// deletes the branch af itself created — leaving it orphaned.
+func TestRestoreLostSessions_PersistsAfterSuccessfulRecover(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	zeroRestoreBackoff(t)
+
+	// Mirrors the failed-recover fixture: the in-memory record carries the
+	// rebuild's branchCreatedByUs=true, while the seeded disk record has no
+	// worktree data at all — so only a persist on the success path can put the
+	// flag on disk.
+	wtPath := filepath.Join(filepath.Dir(repoPath), "repo-1841")
+	branch := "af/persist-1841"
+	if out, err := exec.Command("git", "-C", repoPath, "worktree", "add", "-b", branch, wtPath).CombinedOutput(); err != nil {
+		t.Fatalf("git worktree add: %v\n%s", err, out)
+	}
+	gw, err := sessiongit.NewGitWorktreeFromStorage(repoPath, wtPath, "persist-1841", branch, "", false, true)
+	if err != nil {
+		t.Fatalf("NewGitWorktreeFromStorage: %v", err)
+	}
+
+	backend := &recoverFakeBackend{FakeBackend: session.NewFakeBackend()}
+	inst := registerStarted(t, manager, repoID, repoPath, "persist-1841", backend, true, session.Lost)
+	inst.SetGitWorktreeForTest(gw)
+
+	manager.RestoreLostSessions()
+
+	if got := backend.recoverCalls(); got != 1 {
+		t.Fatalf("recover calls = %d, want 1", got)
+	}
+	rec := recordFor(t, repoID, "persist-1841")
+	if rec == nil {
+		t.Fatal("record must still exist after a successful recover")
+	}
+	if rec.Worktree.BranchCreatedByUs == nil || !*rec.Worktree.BranchCreatedByUs {
+		t.Fatalf("persisted branchCreatedByUs = %v, want true (the rebuild's flag must survive a successful recover)", rec.Worktree.BranchCreatedByUs)
+	}
+	// The recovered branch itself must land on disk too: a restart that reloads a
+	// record with no branch recorded cannot clean up what recovery created.
+	if rec.Worktree.BranchName != branch {
+		t.Fatalf("persisted branch = %q, want %q (a successful recover must persist its worktree record)", rec.Worktree.BranchName, branch)
+	}
+}
+
 type failPtyFactory struct{}
 
 func (failPtyFactory) Start(*exec.Cmd) (*os.File, error) {
