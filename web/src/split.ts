@@ -223,6 +223,26 @@ export class SplitView {
     this.report();
   }
 
+  /** The tab `sessionId` will actually be shown on once selected: the focused pane's
+   *  tab for the session already on screen, the retained layout's first pane for one
+   *  shown before (setSession focuses exactly that leaf), and 0 for a session never
+   *  shown — it gets a fresh single leaf.
+   *
+   *  Selection asks this instead of asserting 0. Trees are RETAINED across session
+   *  switches, so "reset activeTab to 0 on select" states something about a pane that
+   *  already disagrees — and report(), the only writer of activeTab, dedups on the
+   *  focused tab, so a re-entry that settles on the SAME index never corrects it. The
+   *  bar then highlights Agent over a pane showing tab N, and the next close computes
+   *  its shift from the stale 0 and yanks the pane to Agent (#1855). Reading the
+   *  settled tab keeps the store's claim and the pane's binding the same statement. */
+  settledTab(sessionId: string): number {
+    if (sessionId === this.sessionId) {
+      return this.tree && this.focusedId ? (findLeaf(this.tree, this.focusedId)?.tab ?? 0) : 0;
+    }
+    const retained = this.trees.get(sessionId);
+    return retained ? (leaves(retained)[0]?.tab ?? 0) : 0;
+  }
+
   /** Rebinds the FOCUSED pane to show `tab` (a 1-9 key or a tab-bar click on the
    *  focused pane). No-op without a focused pane. Does not steal DOM focus. */
   setFocusedTab(tab: number): void {

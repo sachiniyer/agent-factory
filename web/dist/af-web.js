@@ -7756,6 +7756,25 @@ var SplitView = class {
     this.reconcile();
     this.report();
   }
+  /** The tab `sessionId` will actually be shown on once selected: the focused pane's
+   *  tab for the session already on screen, the retained layout's first pane for one
+   *  shown before (setSession focuses exactly that leaf), and 0 for a session never
+   *  shown — it gets a fresh single leaf.
+   *
+   *  Selection asks this instead of asserting 0. Trees are RETAINED across session
+   *  switches, so "reset activeTab to 0 on select" states something about a pane that
+   *  already disagrees — and report(), the only writer of activeTab, dedups on the
+   *  focused tab, so a re-entry that settles on the SAME index never corrects it. The
+   *  bar then highlights Agent over a pane showing tab N, and the next close computes
+   *  its shift from the stale 0 and yanks the pane to Agent (#1855). Reading the
+   *  settled tab keeps the store's claim and the pane's binding the same statement. */
+  settledTab(sessionId) {
+    if (sessionId === this.sessionId) {
+      return this.tree && this.focusedId ? findLeaf(this.tree, this.focusedId)?.tab ?? 0 : 0;
+    }
+    const retained = this.trees.get(sessionId);
+    return retained ? leaves(retained)[0]?.tab ?? 0 : 0;
+  }
   /** Rebinds the FOCUSED pane to show `tab` (a 1-9 key or a tab-bar click on the
    *  focused pane). No-op without a focused pane. Does not steal DOM focus. */
   setFocusedTab(tab) {
@@ -9406,7 +9425,13 @@ function disconnect() {
 }
 function moveSelection(id) {
   clearTabError();
-  store.set({ selectedId: id, focus: "rail", activeTab: 0 });
+  store.set({
+    selectedId: id,
+    focus: "rail",
+    // Clamped like syncSplit's initialTab, so the store's claim and the pane's binding
+    // are the same statement even if the roster shrank since the tree was retained.
+    activeTab: clampActiveTab(store.get().sessions, id, splitView.settledTab(id))
+  });
 }
 function openFromRail(id) {
   if (store.get().view !== "sessions") {
@@ -9445,7 +9470,12 @@ function switchProject(root2) {
   const sel = selectedSessionData();
   const keep = sel && sel.worktree?.repo_path === root2 ? store.get().selectedId : null;
   splitView.blur();
-  store.set({ selectedProject: root2, selectedId: keep, focus: "rail", activeTab: 0 });
+  store.set({
+    selectedProject: root2,
+    selectedId: keep,
+    focus: "rail",
+    activeTab: keep ? clampActiveTab(store.get().sessions, keep, splitView.settledTab(keep)) : 0
+  });
 }
 function selectedSession2() {
   const { sessions, selectedId } = store.get();
@@ -9801,7 +9831,8 @@ function applySessions(sessions) {
       selectedId = null;
     }
   }
-  const activeTab = selectedId === prevSel ? clampActiveTab(sessions, selectedId, store.get().activeTab) : 0;
+  const settled = selectedId === prevSel ? store.get().activeTab : splitView.settledTab(selectedId ?? "");
+  const activeTab = clampActiveTab(sessions, selectedId, settled);
   store.set({ sessions, selectedProject, selectedId, activeTab });
 }
 function requestResync() {
