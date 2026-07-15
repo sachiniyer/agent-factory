@@ -51,6 +51,10 @@ const (
 	// teardown/respawn overlap into a deterministic window instead of a race a
 	// test would only lose sometimes.
 	fakeVSCodeIgnoreTermEnv = "AF_TEST_FAKE_CODE_SERVER_IGNORE_TERM"
+	// fakeVSCodeFlavorEnv carries the name the fake was installed under, so it can
+	// behave like THAT editor. The fake is re-exec'd as the test binary, so it
+	// cannot read its own name from argv the way flavorForBinary reads the path.
+	fakeVSCodeFlavorEnv = "AF_TEST_FAKE_CODE_SERVER_FLAVOR"
 	// fakeVSCodeMarker is served at the root so a test can prove the response
 	// came from the editor and through the proxy.
 	fakeVSCodeMarker = "AF_FAKE_CODE_SERVER_OK"
@@ -81,7 +85,7 @@ func fakeVSCodeServerMain() {
 	// BOOLEAN flag (--disable-telemetry) is correctly read as the worktree.
 	valueFlags := map[string]bool{
 		"--socket": true, "--socket-mode": true, "--auth": true, "--config": true,
-		"--socket-path": true,
+		"--socket-path": true, "--default-folder": true,
 	}
 	socket, socketMode, worktree := "", "", ""
 	for i := 0; i < len(args); i++ {
@@ -92,6 +96,10 @@ func fakeVSCodeServerMain() {
 				socket = args[i+1]
 			case "--socket-mode":
 				socketMode = args[i+1]
+			case "--default-folder":
+				// The openvscode dialect: the folder arrives as a flag value. The
+				// real one reads ONLY this, never a positional path.
+				worktree = args[i+1]
 			}
 			i++
 			continue
@@ -99,7 +107,17 @@ func fakeVSCodeServerMain() {
 		if strings.HasPrefix(a, "--") {
 			continue
 		}
-		worktree = a
+		// A positional worktree — the code-server dialect, and ONLY that dialect.
+		//
+		// openvscode-server must ignore it, exactly as the real one does: its
+		// parser accepts a positional path and never reads it, resolving the
+		// workbench folder from --default-folder alone. Honoring it here would make
+		// the fake more forgiving than the editor it stands in for, and a test that
+		// asserts the worktree is served would then PASS against an argv that opens
+		// a real openvscode on nothing.
+		if !isFakeOpenVSCode() {
+			worktree = a
+		}
 	}
 	if socket == "" {
 		fmt.Fprintln(os.Stderr, "fake code-server: no --socket / --socket-path")
@@ -178,6 +196,10 @@ func writeFakeVSCodeBinary(t *testing.T, name string, env map[string]string) str
 	}
 	var exports strings.Builder
 	exports.WriteString(fakeVSCodeEnv + "=1 ")
+	// Tell the fake which editor it is standing in for: the dialects differ in
+	// ways that matter (openvscode ignores a positional worktree), and a fake that
+	// blurs them would let a broken argv pass.
+	exports.WriteString(fakeVSCodeFlavorEnv + "=" + shellQuote(name) + " ")
 	for k, v := range env {
 		exports.WriteString(k + "=" + shellQuote(v) + " ")
 	}
@@ -186,6 +208,12 @@ func writeFakeVSCodeBinary(t *testing.T, name string, env map[string]string) str
 		t.Fatalf("writing the fake editor: %v", err)
 	}
 	return path
+}
+
+// isFakeOpenVSCode reports whether the fake is standing in for
+// openvscode-server, mirroring flavorForBinary's name test on the daemon side.
+func isFakeOpenVSCode() bool {
+	return strings.Contains(strings.ToLower(os.Getenv(fakeVSCodeFlavorEnv)), "openvscode")
 }
 
 func shellQuote(s string) string {
@@ -664,6 +692,13 @@ func TestVSCodeArgs_FlavorDialects(t *testing.T) {
 	ov := strings.Join(vscodeArgs(flavorOpenVSCode, "/run/af/e.sock", "/wt"), " ")
 	if !strings.Contains(ov, "--socket-path /run/af/e.sock") || !strings.Contains(ov, "--without-connection-token") {
 		t.Errorf("openvscode-server argv = %q", ov)
+	}
+	// The worktree rides --default-folder, never a positional path: openvscode
+	// accepts a positional argument and silently ignores it, so the editor would
+	// open on no folder at all (verified against 1.109.5).
+	if !strings.Contains(ov, "--default-folder /wt") {
+		t.Errorf("openvscode-server argv is missing --default-folder; a positional worktree "+
+			"is accepted and ignored, and the editor opens empty: %q", ov)
 	}
 	// openvscode-server has NO --socket-mode; passing one would abort its startup
 	// on an unknown flag. Its socket is secured by the daemon's own chmod and the

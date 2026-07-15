@@ -225,7 +225,19 @@ func vscodeArgs(flavor vscodeFlavor, socketPath, worktree string) []string {
 			// daemon's auth policy, and the socket's 0600-in-0700 perms restrict
 			// it to the owning user.
 			"--without-connection-token",
-			worktree,
+			// The worktree must be a FLAG, not a positional path: openvscode-server
+			// resolves the workbench folder only from --default-folder, and its
+			// parser ACCEPTS a positional argument while never reading it — so a
+			// positional worktree is silently ignored and the editor opens empty
+			// (cmd.Dir does not rescue it either; the web client server never
+			// derives the folder from cwd). Verified against openvscode-server
+			// 1.109.5: positional → no folderUri in the workbench, --default-folder
+			// → the worktree opens. code-server, by contrast, DOES read a
+			// positional path, which is why the two branches differ.
+			//
+			// Found by the #1817 post-merge review and fixed in flight by #1880;
+			// carried here because this rewrite owns the line.
+			"--default-folder", worktree,
 		}
 	default:
 		return []string{

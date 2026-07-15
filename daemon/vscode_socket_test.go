@@ -454,3 +454,40 @@ func TestVSCodeSocket_SweepsAbandonedSockets(t *testing.T) {
 		t.Errorf("the sweep removed the live editor's own socket: %v", err)
 	}
 }
+
+// TestVSCodeSocket_OpenVSCodeServesTheWorktree: openvscode-server resolves its
+// workbench folder ONLY from --default-folder. Its parser accepts a positional
+// path and never reads it, so passing the worktree positionally is not an error
+// anyone sees — the editor simply opens on no folder, and the pane looks broken
+// for a reason nothing reports. cmd.Dir does not rescue it: the web client server
+// never derives the folder from cwd.
+//
+// The fake mirrors that split (positional for code-server, --default-folder for
+// openvscode), so this fails if the flavor's argv regresses to a positional path.
+// Verified against openvscode-server 1.109.5, where a positional worktree yields
+// no folderUri in the workbench at all.
+func TestVSCodeSocket_OpenVSCodeServesTheWorktree(t *testing.T) {
+	binary := writeFakeVSCodeBinary(t, "openvscode-server", nil)
+	v := newTestVSCodeSupervisor(t, binary)
+
+	worktree := t.TempDir()
+	ep, err := v.ensureServer("repo/session", worktree)
+	if err != nil {
+		t.Fatalf("ensureServer: %v", err)
+	}
+
+	client := &http.Client{Transport: ep.Transport, Timeout: 5 * time.Second}
+	resp, err := client.Get(vscodeUpstreamURL + "/")
+	if err != nil {
+		t.Fatalf("dialing the editor: %v", err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("reading the response: %v", err)
+	}
+	if !strings.Contains(string(body), "worktree="+worktree) {
+		t.Fatalf("the openvscode editor is not serving the session's worktree %s: %q; "+
+			"a positional worktree is accepted and ignored, so the editor opens empty", worktree, body)
+	}
+}
