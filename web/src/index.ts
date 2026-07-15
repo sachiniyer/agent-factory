@@ -342,10 +342,27 @@ function openFromRail(id: string): void {
 
 /** Gives the keyboard to the selected session's FOCUSED pane (attach): keys now reach
  *  the agent. The xterm focus event echoes back through onFocusChange and confirms
- *  the "terminal" mode; setting it here first keeps the indicator immediate. */
+ *  the "terminal" mode.
+ *
+ *  When the focused pane has NO terminal — a web or VS Code tab, which renders an
+ *  iframe — there is nothing to attach to, so we fall back to the rail instead of
+ *  claiming "terminal" mode over a terminal that does not exist. That state strands
+ *  the user: nav.ts resolves every non-Escape key to {kind:"none"} while focus is
+ *  "terminal", so j/k/digits/t/w reach neither an xterm nor the rail handler and are
+ *  silently swallowed until Escape.
+ *
+ *  The decision lives HERE, behind SplitView.focus()'s boolean, rather than at each
+ *  call site: openTab, createSessionTab and openFromRail all route through this
+ *  function, so a new caller (or a new tab kind without a PTY) cannot drift back into
+ *  the bug. The rail — not the iframe — is the fallback because rail keys keep working
+ *  there, and a cross-origin iframe's focus is not reliably observable anyway.
+ *  switchTab already sets focus:"rail" for exactly this reason. */
 function focusTerminal(): void {
+  if (!splitView.focus()) {
+    focusRail();
+    return;
+  }
   store.set({ focus: "terminal" });
-  splitView.focus();
 }
 
 /** Returns the keyboard to the rail (Escape / detach): blurs every pane so

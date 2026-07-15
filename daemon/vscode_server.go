@@ -23,10 +23,24 @@ import (
 
 // The VS Code tab (TabKindVSCode) is served by a code-server / openvscode-server
 // process the DAEMON owns, one per session, rooted at that session's worktree and
-// bound to loopback on an ephemeral port. The browser never reaches it directly:
-// every request arrives through the daemon's /v1/webtab/ reverse proxy, which is
-// what makes the editor visible to a REMOTE viewer (Tailscale/SSH) and what
-// carries the daemon's auth policy in front of an --auth none editor.
+// bound to loopback on an ephemeral port. The BROWSER reaches it only through the
+// daemon's /v1/webtab/ reverse proxy, which is what makes the editor visible to a
+// REMOTE viewer (Tailscale/SSH) and what applies the daemon's auth policy.
+//
+// The proxy is NOT the editor's only route, and nothing here should be read as
+// claiming it is. The editor runs with auth disabled, so its own ephemeral
+// loopback port is a SECOND, UNGUARDED route: any process on the box can connect
+// to it directly and get worktree read/write and terminal execution as the af
+// user. Under af's defaults that is consistent with the daemon rather than a hole
+// in it — require_token and require_loopback_token both default to false, so the
+// daemon itself already serves an unauthenticated control plane, which is strictly
+// more power, to every local process. It becomes a real gap only for an operator
+// who deliberately set BOTH on a shared host to demand a token from local peers:
+// the editor's listener does not honor that, so spawnLocked warns when it sees
+// that configuration. The structural fix — serving both flavors on a 0600 unix
+// socket in the daemon's runtime dir, where file permissions do the authenticating
+// — is tracked as a follow-up; it also removes the port TOCTOU freeLoopbackPort
+// documents.
 //
 // af NEVER bundles or installs the editor: the binary is DETECTED (an explicit
 // vscode_server_binary, else code-server, else openvscode-server on PATH). When
@@ -143,22 +157,38 @@ func resolveVSCodeBinary(configured string) (string, error) {
 // `--abs-proxy-base-path` is NOT that flag — it only prefixes code-server's own
 // /absproxy/<port> feature and has no effect on serving code-server itself under
 // a sub-path (coder/code-server#6770). Passing it here would be a no-op at best.
+// openvscode-server DOES have a real base-path flag (--server-base-path), and it
+// is still the wrong tool: it bakes ONE prefix into the process, while a single
+// per-SESSION editor is reached under a different prefix per tab. The proxy sends
+// X-Forwarded-Prefix instead, which openvscode reads per request (and takes in
+// PRECEDENCE over --server-base-path), so it composes with a shared editor.
+//
+// NOTE on the worktree: the flavors take it DIFFERENTLY, and the difference is
+// invisible if you get it wrong. code-server reads a POSITIONAL path.
+// openvscode-server does not: its webClientServer resolves the workbench folder
+// only from --default-folder / --default-workspace, and although its parser
+// accepts '_', it never reads it — so a positional worktree was ACCEPTED SILENTLY
+// AND IGNORED, and the fallback editor came up empty (or on the last workspace)
+// rather than on the session. cmd.Dir does not rescue it either; the web client
+// server never derives the folder from cwd. ('folder' is a third spelling, but it
+// is deprecated upstream in favor of exactly this one.)
 func vscodeArgs(flavor vscodeFlavor, host string, port int, worktree string) []string {
 	switch flavor {
 	case flavorOpenVSCode:
 		return []string{
 			"--host", host,
 			"--port", strconv.Itoa(port),
-			// openvscode-server's --auth-none equivalent. Safe here for the same
-			// reason as code-server's: loopback-only + daemon-proxied.
+			// openvscode-server's --auth none equivalent: no token on any request.
+			// Same posture, and the same caveat, as code-server's below.
 			"--without-connection-token",
-			worktree,
+			"--default-folder", worktree,
 		}
 	default:
 		return []string{
 			"--bind-addr", net.JoinHostPort(host, strconv.Itoa(port)),
-			// Safe ONLY because the listener is loopback and the sole route to it
-			// is the daemon proxy, which applies the daemon's own auth policy.
+			// No auth on the editor itself. It listens on loopback, but the daemon
+			// proxy is NOT its only route — see this file's header comment for what
+			// that does and does not expose, and for the unix-socket follow-up.
 			"--auth", "none",
 			// code-server AUTO-GENERATES ~/.config/code-server/config.yaml (with a
 			// random password) when no config exists. Point it at /dev/null so a
@@ -241,9 +271,63 @@ type vscodeServer struct {
 	// instead of a 502 from a port that is not listening yet.
 	ready bool
 
-	// exited is closed by the reaping goroutine when the child exits, so alive
-	// can distinguish "running" from "died" without a syscall.
+	// exited is closed by the reaping goroutine once the child has been reaped AND
+	// its process group SIGKILLed, so alive can distinguish "running" from "died"
+	// without a syscall — and so a closed exited means the whole group is gone,
+	// not merely the leader.
 	exited chan struct{}
+
+	// killGroup overrides the process-group signal syscall. Teardown's correctness
+	// is about WHICH signals are sent and WHEN, which a test can only observe by
+	// intercepting them; nil means the real syscall.
+	killGroup func(pgid int, sig syscall.Signal) error
+}
+
+// signalGroup sends sig to the child's process GROUP, through the killGroup seam
+// when one is set.
+func (s *vscodeServer) signalGroup(pgid int, sig syscall.Signal) {
+	if s.killGroup != nil {
+		_ = s.killGroup(pgid, sig)
+		return
+	}
+	_ = syscall.Kill(-pgid, sig)
+}
+
+// reap Waits the child, SIGKILLs its process GROUP, and closes exited — in that
+// order, all three of which are load-bearing. Runs as one goroutine per spawn.
+//
+// Always Wait(): without it an exited editor stays a zombie parented to the daemon
+// for the daemon's whole life (#816).
+//
+// The group SIGKILL lives HERE, not in stop(), because this is the ONLY moment at
+// which -pgid is provably still ours. POSIX XBD 3.297: while a process group with
+// a given id exists, that id is not reused. So any child that outlived the leader
+// — an extension host, a pty host, a terminal that ignored SIGTERM — is itself a
+// group member, and a group member PINS -pgid, so this kill cannot land on
+// anything but our own. Escalating from stop() is what was unsafe: stop() runs at
+// an ARBITRARILY LATER lifecycle event (nothing prunes a dead entry from
+// v.servers, so a tab closed hours after a crash still reaches it), by which time
+// the group is long empty, its id reusable, and kill(-pgid) hits a live, unrelated
+// group. That is not theoretical on macOS — a supported platform, PID_MAX 99999,
+// a busy laptop wraps in hours. It mirrors watcher.go's and hooks.go's group kills
+// (#610/#769), which are safe for exactly this reason: each fires microseconds
+// after its OWN Wait(), never across a later event.
+//
+// Killing here is also strictly stronger than killing in stop(): an editor that
+// crashes on its own has its survivors killed AT CRASH TIME, rather than leaking
+// until some later teardown that may never come.
+//
+// close(exited) goes AFTER the kill. stop() returns the moment exited closes and
+// its callers act immediately — ArchiveSession MOVES the worktree. Closing first
+// would let it move a directory the surviving children still hold open.
+func (s *vscodeServer) reap() {
+	// Read the pgid before the Wait that frees it: after this returns, the leader's
+	// pid is the kernel's to give away, and only a surviving group member keeps it
+	// pinned long enough for the kill below to mean what it says.
+	pgid := s.cmd.Process.Pid
+	_ = s.cmd.Wait()
+	s.signalGroup(pgid, syscall.SIGKILL)
+	close(s.exited)
 }
 
 // alive reports whether the child is still running.
@@ -259,35 +343,43 @@ func (s *vscodeServer) alive() bool {
 	}
 }
 
-// stop SIGTERMs the child's process GROUP, then SIGKILLs the group if it has not
-// exited within vscodeStopGrace. The group (not the pid) is signalled because
-// code-server spawns its own children — an extension host and a Node worker per
-// terminal — and signalling only the leader would strand them.
+// stop tears down a LIVE editor: SIGTERM to the child's process GROUP, then
+// SIGKILL to the group if it has not exited within vscodeStopGrace. The group (not
+// the pid) is signalled because code-server spawns its own children — an extension
+// host, a pty host, a Node worker per terminal — and signalling only the leader
+// would strand them.
+//
+// It signals ONLY while the leader is unreaped. Escalating after the leader exits
+// is reap()'s job, which does it adjacent to cmd.Wait(); see reap's doc for why
+// that is the only safe moment. stop() cannot do it itself: waiting for the exit
+// is what reaps it.
 func (s *vscodeServer) stop() {
 	if s == nil || s.cmd == nil || s.cmd.Process == nil {
 		return
 	}
 	pgid := s.cmd.Process.Pid
-	if s.alive() {
-		_ = syscall.Kill(-pgid, syscall.SIGTERM)
-		select {
-		case <-s.exited:
-		case <-time.After(vscodeStopGrace):
-		}
+	// A reaped leader means the reaper has ALREADY SIGKILLed the group — and that
+	// -pgid is no longer provably ours, since an empty group's id is free for the
+	// kernel to hand to an unrelated new group leader. Nothing left to signal, and
+	// no safe way to signal it.
+	if !s.alive() {
+		return
 	}
-	// SIGKILL the GROUP unconditionally, even once the leader is gone. The leader
-	// exiting proves nothing about the rest of the group: code-server spawns an
-	// extension host, a pty host, and a process per integrated terminal, and any of
-	// them can ignore SIGTERM or outlive their parent — returning at leader-exit
-	// would strand exactly those, which is the leak this whole supervisor exists to
-	// prevent. Mirrors the watcher supervisor's unconditional group kill (#610/#769).
-	//
-	// Signalling the group after the leader is reaped is still safe: a process group
-	// stays allocated while ANY member lives, so -pgid cannot be recycled out from
-	// under us while there is something to kill, and an empty group is a harmless
-	// ESRCH.
-	_ = syscall.Kill(-pgid, syscall.SIGKILL)
-	// Reap so the group-kill can't leave a zombie parented to the daemon (#816).
+	// Alive ⇒ unreaped ⇒ the leader still holds the group id ⇒ -pgid is still ours.
+	// (The alive()→signal gap is a microsecond TOCTOU inherent to POSIX group
+	// signalling: there is no pgid handle to pin, and pidfd is per-process.)
+	s.signalGroup(pgid, syscall.SIGTERM)
+	select {
+	case <-s.exited:
+		// exited closes AFTER the reaper's group SIGKILL, so the group is clean and
+		// there is nothing further to escalate to.
+		return
+	case <-time.After(vscodeStopGrace):
+	}
+	if s.alive() {
+		s.signalGroup(pgid, syscall.SIGKILL)
+	}
+	// Wait for the reap so teardown can't return while the group is still up (#816).
 	select {
 	case <-s.exited:
 	case <-time.After(vscodeStopGrace):
@@ -317,8 +409,10 @@ type vscodeSupervisor struct {
 	stopped  bool
 
 	// Injection points for tests: configuredBinary substitutes the config key
-	// without a config file, and startGrace/cooldown shorten the waits.
+	// without a config file, authPosture substitutes the daemon's auth settings,
+	// and startGrace/cooldown shorten the waits.
 	configuredBinary func() string
+	authPosture      func() (requireToken, requireLoopbackToken bool)
 	startGrace       time.Duration
 	cooldown         time.Duration
 	now              func() time.Time
@@ -340,6 +434,13 @@ func newVSCodeSupervisor() *vscodeSupervisor {
 				return ""
 			}
 			return cfg.VSCodeServerBinary
+		},
+		authPosture: func() (bool, bool) {
+			cfg, err := config.LoadConfig()
+			if err != nil || cfg == nil {
+				return false, false
+			}
+			return cfg.RequireToken, cfg.RequireLoopbackToken
 		},
 		startGrace: vscodeStartGrace,
 		cooldown:   vscodeRespawnCooldown,
@@ -384,7 +485,9 @@ func (v *vscodeSupervisor) ensureServer(key, worktree string) (string, error) {
 			// across the spawn below, so stopping inline would stall every OTHER
 			// session's editor behind this one teardown. It is already unregistered
 			// here, so nothing else can reach it and no one needs to wait for it.
-			// Even a DEAD leader is worth stopping: its children can outlive it.
+			// A DEAD leader needs nothing from stop() — its reaper already killed
+			// the group at the only moment that was safe to — but stop() is correct
+			// and immediate on one, so the branch stays uniform.
 			neverReady := !s.ready && !s.alive()
 			delete(v.servers, key)
 			go s.stop()
@@ -448,6 +551,7 @@ func (v *vscodeSupervisor) probeReady(s *vscodeServer) bool {
 // listen. Callers must hold v.mu.
 func (v *vscodeSupervisor) spawnLocked(binary, worktree string) (*vscodeServer, error) {
 	flavor := flavorForBinary(binary)
+	v.warnIfLocalAuthExpected(worktree)
 	var lastErr error
 	for attempt := 0; attempt < vscodeSpawnAttempts; attempt++ {
 		port, err := freeLoopbackPort()
@@ -463,6 +567,26 @@ func (v *vscodeSupervisor) spawnLocked(binary, worktree string) (*vscodeServer, 
 		return server, nil
 	}
 	return nil, fmt.Errorf("starting %s failed: %w", filepath.Base(binary), lastErr)
+}
+
+// warnIfLocalAuthExpected tells an operator who asked for local-process auth that
+// the editor listener does not provide it.
+//
+// require_token + require_loopback_token together are the documented way to lock
+// down a SHARED machine: they make even loopback peers present a token, closing
+// the gap that af's defaults leave open on purpose. Setting both is an explicit
+// opt-in, and the daemon-spawned editor silently reopens exactly that gap on its
+// own port. Nobody who set them would guess that from the tab, so say it. (Only
+// for that pair: under the defaults there is nothing to bypass, and warning every
+// user about a posture they never asked to change is noise.)
+func (v *vscodeSupervisor) warnIfLocalAuthExpected(worktree string) {
+	if v.authPosture == nil {
+		return
+	}
+	if requireToken, requireLoopbackToken := v.authPosture(); !requireToken || !requireLoopbackToken {
+		return
+	}
+	log.WarningLog.Printf("vscode: require_token and require_loopback_token are set, but the editor for %s listens on loopback with authentication disabled — any local process can reach it without a token. A follow-up moves the editor onto a 0600 unix socket.", worktree)
 }
 
 // startOne execs one editor and waits for its port to accept connections.
@@ -499,12 +623,9 @@ func (v *vscodeSupervisor) startOne(binary string, flavor vscodeFlavor, port int
 		cmd:      cmd,
 		exited:   make(chan struct{}),
 	}
-	// Always Wait() the child: without it an exited editor stays a zombie
-	// parented to the daemon for the daemon's whole life (#816).
-	go func() {
-		_ = cmd.Wait()
-		close(server.exited)
-	}()
+	// Reap the child AND clean up its process group; see reap's doc for why the
+	// group kill belongs there rather than in stop().
+	go server.reap()
 
 	switch err := waitForPort(host, port, server.exited, v.startGrace); {
 	case err == nil:
@@ -524,8 +645,8 @@ func (v *vscodeSupervisor) startOne(binary string, flavor vscodeFlavor, port int
 	}
 }
 
-// vscodeChildEnv builds the editor's environment from the daemon's, with the
-// tmux ancestry markers REMOVED.
+// vscodeChildEnv builds the editor's environment from the daemon's, with the tmux
+// ancestry markers and VSCODE_IPC_HOOK_CLI REMOVED.
 //
 // This is load-bearing, not hygiene. The daemon inherits its environment from
 // whatever autostarted it — often a TUI running inside an af_ tmux pane — so it
@@ -539,16 +660,51 @@ func (v *vscodeSupervisor) startOne(binary string, flavor vscodeFlavor, port int
 // (The tmux teardown reaper is a separate mechanism and never sees this child at
 // all: it captures only a tmux pane's descendants and its pane-SID members, and a
 // daemon child is neither — the daemon is its own session leader via Setsid.)
+//
+// VSCODE_IPC_HOOK_CLI is scrubbed for the same reason and it is just as
+// load-bearing. code-server's shouldOpenInExistingInstance checks it
+// UNCONDITIONALLY, before it starts any server, and when it is set the CLI hands
+// the folder to that existing editor over the IPC socket and EXITS — --bind-addr
+// is never honored. So a daemon started from any VS Code / code-server integrated
+// terminal inherits the var, and then every editor it ever spawns dies during
+// startup (the pane shows a broken-editor notice despite a perfectly good
+// install) while the worktree pops open in the USER's own window instead. The var
+// is fixed in the daemon's environ at exec, so this is sticky for the daemon's
+// whole life — and af's own VS Code tab has an integrated terminal that sets it,
+// which makes `af` run from inside an af VS Code tab poison the daemon.
+//
+// Only what breaks the spawn is scrubbed. The git-askpass family
+// (VSCODE_GIT_ASKPASS_*, VSCODE_GIT_IPC_HANDLE, GIT_ASKPASS) also inherits stale
+// handles, but code-server overwrites those for its own terminals, so removing
+// them buys nothing; the shell-integration markers (VSCODE_INJECTION, VSCODE_PID,
+// TERM_PROGRAM, …) the editor resets itself. Blanket-scrubbing VSCODE_* would
+// trade a filter you can audit against upstream for one that merely looks tidy.
+var vscodeScrubbedEnv = []string{
+	tmux.EnvMarkerSession,
+	tmux.EnvMarkerHome,
+	"VSCODE_IPC_HOOK_CLI",
+}
+
 func vscodeChildEnv() []string {
 	src := os.Environ()
 	out := make([]string, 0, len(src))
 	for _, kv := range src {
-		if strings.HasPrefix(kv, tmux.EnvMarkerSession+"=") || strings.HasPrefix(kv, tmux.EnvMarkerHome+"=") {
+		if hasAnyEnvPrefix(kv, vscodeScrubbedEnv) {
 			continue
 		}
 		out = append(out, kv)
 	}
 	return out
+}
+
+// hasAnyEnvPrefix reports whether the KEY=VALUE entry kv names any of keys.
+func hasAnyEnvPrefix(kv string, keys []string) bool {
+	for _, k := range keys {
+		if strings.HasPrefix(kv, k+"=") {
+			return true
+		}
+	}
+	return false
 }
 
 // freeLoopbackPort asks the kernel for an unused loopback port by binding :0 and
@@ -582,7 +738,10 @@ func waitForPort(host string, port int, exited <-chan struct{}, grace time.Durat
 	for {
 		select {
 		case <-exited:
-			return fmt.Errorf("the VS Code server exited during startup (check that it runs correctly: it was asked to serve %s)", addr)
+			// Wrapped, not bare: this is the errVSCodeStartExited case, and callers
+			// (the proxy's notice page, the respawn cooldown) match the SENTINEL to
+			// render a styled notice rather than surfacing a raw error.
+			return fmt.Errorf("%w (check that it runs correctly: it was asked to serve %s)", errVSCodeStartExited, addr)
 		default:
 		}
 		conn, err := net.DialTimeout("tcp", addr, vscodeProbeInterval)

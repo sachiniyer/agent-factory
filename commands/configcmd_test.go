@@ -6,6 +6,8 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -76,9 +78,36 @@ func TestFormatConfigValue(t *testing.T) {
 	}
 }
 
-// TestConfigEntriesCoverAllKeys guards that configEntries lists exactly the
-// documented top-level global config keys — if a key is added to the Config
-// struct, this fails until the entry (and docs) are updated.
+// configEntriesInternalKeys are the toml-tagged config.Config fields that are
+// deliberately NOT readable through `af config get/list`. Every entry needs a
+// reason: this is the only escape hatch from the reflective coverage check, so
+// an unexplained addition is how the drift starts again.
+var configEntriesInternalKeys = map[string]string{
+	// Written and read by the config loader's migration machinery, not a user
+	// setting: there is nothing for a user to do with the number, and printing
+	// it in `af config list` would invite hand-editing a field that must only
+	// ever be moved by a migration.
+	"schema_version": "internal migration bookkeeping, not a user-settable setting",
+}
+
+// TestConfigEntriesCoverAllKeys guards that configEntries covers every
+// toml-tagged field of config.Config, so a key added to the struct cannot ship
+// unreadable through `af config get/list`.
+//
+// It REFLECTS over config.Config rather than comparing against a hand-written
+// list. The previous hand-written version claimed this same guarantee in its
+// docstring but never consulted the struct at all — it compared two hardcoded
+// lists to each other, so adding a field could never fail it. That tautology
+// silently permitted a 6-key drift (listen_addr, require_loopback_token,
+// cors_allowed_origins, limit_auto_resume, limit_retry_interval and, later,
+// vscode_server_binary were all documented-but-unreadable). Reflection is the
+// point of this test: keep it, and add genuinely-internal keys to
+// configEntriesInternalKeys WITH a reason rather than skipping the check.
+//
+// Only top-level fields are considered, which is the right granularity —
+// configEntries is a top-level key list, and nested tables (root_agents'
+// per-repo program/auto_yes, the theme slots) are surfaced as whole composite
+// values by their parent key.
 func TestConfigEntriesCoverAllKeys(t *testing.T) {
 	got := map[string]bool{}
 	for _, e := range configEntries(config.DefaultConfig()) {
@@ -87,18 +116,124 @@ func TestConfigEntriesCoverAllKeys(t *testing.T) {
 		}
 		got[e.Key] = true
 	}
-	want := []string{
-		"default_program", "program_overrides", "auto_yes", "auto_update", "require_token", "daemon_poll_interval",
-		"log_max_size_mb", "log_max_backups", "branch_prefix", "detach_keys",
-		"worktree_root", "update_channel", "theme", "root_agents", "limit_patterns", "keys",
-	}
-	if len(got) != len(want) {
-		t.Fatalf("configEntries has %d keys, want %d", len(got), len(want))
-	}
-	for _, k := range want {
-		if !got[k] {
-			t.Errorf("configEntries missing key %q", k)
+
+	want := map[string]bool{}
+	rt := reflect.TypeOf(config.Config{})
+	for i := range rt.NumField() {
+		f := rt.Field(i)
+		if !f.IsExported() {
+			continue
 		}
+		tag := f.Tag.Get("toml")
+		if tag == "" || tag == "-" {
+			continue
+		}
+		key, _, _ := strings.Cut(tag, ",")
+		if key == "" || key == "-" {
+			continue
+		}
+		if reason, internal := configEntriesInternalKeys[key]; internal {
+			if got[key] {
+				t.Errorf("config key %q is listed in configEntries but also marked internal (%s) — pick one", key, reason)
+			}
+			continue
+		}
+		want[key] = true
+		if !got[key] {
+			t.Errorf("config.Config field %s (toml:%q) is missing from configEntries: `af config get %s` "+
+				"would fail even though the key configures a real setting. Add {%q, cfg.%s} to configEntries "+
+				"(and document it in docs/configuration.md), or add it to configEntriesInternalKeys with a reason.",
+				f.Name, key, key, key, f.Name)
+		}
+	}
+	if len(want) == 0 {
+		t.Fatal("reflection found no toml-tagged config keys — the test is not exercising config.Config")
+	}
+
+	for key := range got {
+		if !want[key] {
+			t.Errorf("configEntries lists key %q, which is not a toml-tagged field of config.Config "+
+				"(stale entry or typo?)", key)
+		}
+	}
+}
+
+// TestConfigGetReadsEveryEntry drives `af config get` for every key
+// configEntries advertises, so coverage means the key actually READS rather
+// than merely appearing in the list — the value must render without error and
+// print something for a key with a non-zero default. `af config list` must
+// agree with each one.
+func TestConfigGetReadsEveryEntry(t *testing.T) {
+	tempAFHome(t)
+
+	var listOut bytes.Buffer
+	listCmd := &cobra.Command{}
+	listCmd.SetOut(&listOut)
+	if err := configListCmd.RunE(listCmd, nil); err != nil {
+		t.Fatalf("config list: %v", err)
+	}
+	list := listOut.String()
+
+	for _, e := range configEntries(config.DefaultConfig()) {
+		t.Run(e.Key, func(t *testing.T) {
+			var out bytes.Buffer
+			cmd := &cobra.Command{}
+			cmd.SetOut(&out)
+			if err := configGetCmd.RunE(cmd, []string{e.Key}); err != nil {
+				t.Fatalf("config get %s: %v", e.Key, err)
+			}
+			got := strings.TrimSpace(out.String())
+			if !strings.Contains(list, e.Key) {
+				t.Errorf("config list does not mention key %q", e.Key)
+			}
+			// A key whose default is a non-zero scalar must print that value
+			// verbatim: this is what catches a wrong-typed entry (e.g. a bool
+			// rendered through the JSON fallback as "true" is fine, but a
+			// duration or address silently coming back empty is not).
+			switch want := e.Value.(type) {
+			case string:
+				if want != "" && got != want {
+					t.Errorf("config get %s = %q, want %q", e.Key, got, want)
+				}
+			case bool:
+				if got != strconv.FormatBool(want) {
+					t.Errorf("config get %s = %q, want %q", e.Key, got, strconv.FormatBool(want))
+				}
+			case int:
+				if got != strconv.Itoa(want) {
+					t.Errorf("config get %s = %q, want %q", e.Key, got, strconv.Itoa(want))
+				}
+			}
+		})
+	}
+}
+
+// TestConfigGetDocumentedGlobalOnlyKeys pins the specific keys that were
+// documented in docs/configuration.md but unreadable through `af config get`
+// until the reflective coverage test above forced them in. They are asserted
+// by hand, with their real default values, because a caller following the docs
+// runs exactly these commands.
+func TestConfigGetDocumentedGlobalOnlyKeys(t *testing.T) {
+	tempAFHome(t)
+	cases := []struct{ key, want string }{
+		{"listen_addr", "127.0.0.1:8443"},
+		{"require_loopback_token", "false"},
+		{"limit_auto_resume", "false"},
+		{"limit_retry_interval", "30m"},
+		{"vscode_server_binary", ""},
+	}
+	for _, c := range cases {
+		t.Run(c.key, func(t *testing.T) {
+			var out bytes.Buffer
+			cmd := &cobra.Command{}
+			cmd.SetOut(&out)
+			if err := configGetCmd.RunE(cmd, []string{c.key}); err != nil {
+				t.Fatalf("config get %s: %v", c.key, err)
+			}
+			if got := strings.TrimSpace(out.String()); got != c.want {
+				t.Errorf("config get %s = %q, want %q", c.key, got, c.want)
+			}
+		})
 	}
 }
 

@@ -132,7 +132,15 @@ var inRepoGlobalOnlyKeys = map[string]bool{
 	// not be able to recolor a cloned user's TUI (#1389).
 	"theme":          true,
 	"update_channel": true,
-	"worktree_root":  true,
+	// The value names a binary the DAEMON executes, so honoring it from a
+	// repo's checked-in config would let merely cloning a repo choose what af
+	// runs on your machine (#1817). It is already absent from
+	// inRepoAllowedKeys — a repo cannot hijack the binary either way — so
+	// listing it here is purely about the error the user gets: the actionable
+	// "global setting … move it to <global config>" instead of the generic
+	// "unknown key".
+	"vscode_server_binary": true,
+	"worktree_root":        true,
 }
 
 // tomlOnlyGlobalKeys is the subset of inRepoGlobalOnlyKeys that exists only in
