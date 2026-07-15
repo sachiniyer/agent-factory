@@ -144,6 +144,73 @@ async function dropSnapshotOnPane(page: Page, payload: { index: number; tabs: st
   }, payload);
 }
 
+/**
+ * Drags the tab labelled `tabText` onto an `edge` of the pane at `paneIndex`, HIT-TESTING
+ * the drop point the way the browser does instead of dispatching straight at the pane.
+ *
+ * This is what makes it a regression test for the iframe-swallow bug. dragTabToPane above
+ * dispatches directly on .af-pane, which bypasses hit-testing entirely — it would pass
+ * whether or not a frame covers the pane, so it can't see this bug. Here the drop point is
+ * resolved with elementFromPoint (which honours pointer-events, exactly like the browser's
+ * own drag hit-testing). Landing on an <iframe> means the real browser delivers the event
+ * to the FRAMED document and this document sees no dragover/drop at all, so that case
+ * dispatches NOTHING — reproducing the user's "nothing happens". Returns what was hit so a
+ * test can assert on the swallow itself.
+ *
+ * The aim point is the MIDDLE of the edge band, which is where a user actually drags. A few
+ * px from the rim (dragTabToPane's `m = 6`) would land in .af-pane-host's ~10px padding
+ * gutter — parent DOM that never swallowed anything — and would quietly miss the bug.
+ */
+async function dragTabOntoPaneHitTested(
+  page: Page,
+  tabText: string,
+  edge: "left" | "right" | "top" | "bottom" | "center",
+  paneIndex = 0,
+): Promise<{ hitTag: string; swallowed: boolean }> {
+  return await page.evaluate(
+    ({ tabText, edge, paneIndex, band }) => {
+      const tab = [...document.querySelectorAll(".af-tabbar .af-tab")].find((t) => t.textContent?.includes(tabText));
+      const pane = [...document.querySelectorAll(".af-term-host .af-pane")][paneIndex];
+      if (!tab || !pane) {
+        throw new Error("drag source or target pane not found");
+      }
+      const dt = new DataTransfer();
+      // The real delegated dragstart listener stamps the payload AND sets the body flag
+      // the pointer-events rule keys off — so the hit-test below sees true drag state.
+      tab.dispatchEvent(new DragEvent("dragstart", { bubbles: true, cancelable: true, dataTransfer: dt }));
+
+      const r = pane.getBoundingClientRect();
+      let x = r.left + r.width / 2;
+      let y = r.top + r.height / 2;
+      const inset = band / 2; // the middle of the outer band
+      if (edge === "left") {
+        x = r.left + r.width * inset;
+      } else if (edge === "right") {
+        x = r.right - r.width * inset;
+      } else if (edge === "top") {
+        y = r.top + r.height * inset;
+      } else if (edge === "bottom") {
+        y = r.bottom - r.height * inset;
+      }
+
+      const hitEl = document.elementFromPoint(x, y);
+      const swallowed = hitEl instanceof HTMLIFrameElement;
+      const hitTag = hitEl ? hitEl.tagName.toLowerCase() : "none";
+      if (hitEl && !swallowed) {
+        // Dispatch on whatever the pointer really lands on; the pane's handlers catch it
+        // as it bubbles, just as a genuine drag would.
+        const init = { bubbles: true, cancelable: true, dataTransfer: dt, clientX: x, clientY: y };
+        hitEl.dispatchEvent(new DragEvent("dragenter", init));
+        hitEl.dispatchEvent(new DragEvent("dragover", init));
+        hitEl.dispatchEvent(new DragEvent("drop", init));
+      }
+      tab.dispatchEvent(new DragEvent("dragend", { bubbles: true, dataTransfer: dt }));
+      return { hitTag, swallowed };
+    },
+    { tabText, edge, paneIndex, band: 0.3 }, // EDGE_BAND in split.ts
+  );
+}
+
 /** Opens the app on the loopback daemon and asserts the tokenless auto-connect
  *  (#1696): the SPA learns via /v1/auth-info that this loopback client needs no
  *  token, skips the paste-token login entirely, and renders the authed shell with
@@ -835,6 +902,99 @@ test("web tab (feat): a tab with no target URL renders a clean fallback, not a b
   await page.unroute("**/v1/Snapshot");
   await page.reload();
   await expect(page.locator(".af-app")).toBeVisible();
+});
+
+test("split panes (fix): a WEB/iframe pane doesn't swallow a tab drag — dropping on its edge splits", async () => {
+  // The bug: dragover/drop over an <iframe> go to the FRAMED document, so a pane showing a
+  // web tab ate the drag — no drop zone, no split, "nothing happens". The fix makes pane
+  // iframes pointer-events:none for the duration of a drag, so the drag reaches the pane.
+  await row(page, SESSION_WEB).click();
+  await expect(page.locator(".af-main.af-main-term")).toBeVisible();
+
+  const tabbar = page.locator(".af-tabbar");
+  await tabbar.locator(".af-tab", { hasText: "preview" }).click();
+  const frame = page.locator(".af-term-host .af-pane-host iframe.af-webframe");
+  await expect(frame).toHaveCount(1, { timeout: 15_000 });
+  await expect(page.locator(".af-term-host .af-pane")).toHaveCount(1);
+
+  // Drag the Agent tab onto the RIGHT edge of the iframe pane. The drop point is over the
+  // frame, exactly where a user aims.
+  const res = await dragTabOntoPaneHitTested(page, "Agent", "right");
+  // The drag reached the parent document rather than being taken by the frame — the bug
+  // itself, asserted directly. Before the fix this is `true` and the split below never
+  // happens.
+  expect(res.swallowed).toBe(false);
+
+  // The split really happened: two panes, the web tab's iframe alongside a live xterm.
+  await expect(page.locator(".af-term-host .af-pane")).toHaveCount(2, { timeout: 15_000 });
+  await expect(page.locator(".af-term-host .af-pane.af-pane-multi")).toHaveCount(2);
+  await expect(page.locator(".af-term-host iframe.af-webframe")).toHaveCount(1);
+  await expect(page.locator(".af-term-host .xterm")).toHaveCount(1);
+  // The framed content survived the split — still the proxied dev server, not a blank pane.
+  await expect(page.frameLocator(".af-webframe").locator("#marker")).toHaveText(WEBTAB_LOCAL_MARKER, {
+    timeout: 15_000,
+  });
+
+  // Collapse back to a single pane for the flows that follow.
+  const termPane = page.locator(".af-term-host .af-pane", { hasNot: page.locator("iframe.af-webframe") });
+  await termPane.locator(".af-pane-close").click();
+  await expect(page.locator(".af-term-host .af-pane")).toHaveCount(1, { timeout: 15_000 });
+});
+
+test("split panes (fix): the WEB tab itself drags onto a terminal pane edge and splits", async () => {
+  // The mirror of the case above: the web tab as the drag SOURCE, dropped on a terminal
+  // pane. The target isn't framed, so this proves the fix didn't break the ordinary path.
+  await row(page, SESSION_WEB).click();
+  await expect(page.locator(".af-main.af-main-term")).toBeVisible();
+
+  const tabbar = page.locator(".af-tabbar");
+  await tabbar.locator(".af-tab", { hasText: "Agent" }).click();
+  await expect(page.locator(".af-term-host .af-pane")).toHaveCount(1);
+  await expect(page.locator(".af-term-host .xterm")).toHaveCount(1);
+
+  await dragTabOntoPaneHitTested(page, "preview", "right");
+  await expect(page.locator(".af-term-host .af-pane")).toHaveCount(2, { timeout: 15_000 });
+  // One pane is the web tab's iframe, the other the agent's terminal.
+  await expect(page.locator(".af-term-host iframe.af-webframe")).toHaveCount(1, { timeout: 15_000 });
+  await expect(page.locator(".af-term-host .xterm")).toHaveCount(1);
+
+  const webPane = page.locator(".af-term-host .af-pane", { has: page.locator("iframe.af-webframe") });
+  await webPane.locator(".af-pane-close").click();
+  await expect(page.locator(".af-term-host .af-pane")).toHaveCount(1, { timeout: 15_000 });
+});
+
+test("split panes (fix): a pane iframe is inert ONLY while dragging — normal interaction is untouched", async () => {
+  // The fix must not cost the web tab its interactivity: the frame is inert for the drag
+  // and immediately usable again afterwards. Both states are asserted on the live frame.
+  await row(page, SESSION_WEB).click();
+  await expect(page.locator(".af-main.af-main-term")).toBeVisible();
+  await page.locator(".af-tabbar .af-tab", { hasText: "preview" }).click();
+  await expect(page.locator(".af-term-host iframe.af-webframe")).toHaveCount(1, { timeout: 15_000 });
+
+  const framePointerEvents = () =>
+    page.evaluate(() => {
+      const f = document.querySelector(".af-term-host iframe.af-webframe");
+      return f ? getComputedStyle(f).pointerEvents : "missing";
+    });
+
+  // At rest the frame takes the pointer — clicks and scrolls inside the preview work.
+  expect(await framePointerEvents()).toBe("auto");
+
+  // Mid-drag it is inert, which is what lets the drag through to the pane.
+  await page.evaluate(() => {
+    const tab = [...document.querySelectorAll(".af-tabbar .af-tab")].find((t) => t.textContent?.includes("Agent"));
+    tab?.dispatchEvent(new DragEvent("dragstart", { bubbles: true, cancelable: true, dataTransfer: new DataTransfer() }));
+  });
+  expect(await framePointerEvents()).toBe("none");
+
+  // dragend restores it. (A drag whose source is replaced mid-drag is covered by the bar
+  // rebuild clearing the same flag — see the #1737 stuck-state test above — so the frame
+  // can't be left dead either way.)
+  await page.evaluate(() => {
+    const tab = [...document.querySelectorAll(".af-tabbar .af-tab")].find((t) => t.textContent?.includes("Agent"));
+    tab?.dispatchEvent(new DragEvent("dragend", { bubbles: true, dataTransfer: new DataTransfer() }));
+  });
+  expect(await framePointerEvents()).toBe("auto");
 });
 
 test("split panes (feat): logout clears retained trees — a fresh login shows the single-leaf default", async () => {
