@@ -66,15 +66,32 @@ func TestHookBackendType(t *testing.T) {
 // Phase 1). This is the interface-compliance / parity contract: the daemon and
 // UI branch on these bits instead of Type()=="remote", so a regression that
 // silently flips a capability (e.g. a new backend forgetting Archive) is caught
-// here rather than in a lifecycle gate. Since #1592 Phase 4 PR7 the remote-hook
-// backend advertises FULL parity like docker/ssh (its old terminal_cmd-gated
-// TerminalTab and ErrRecoverUnsupported are gone).
+// here rather than in a lifecycle gate.
+//
+// The off-box runtimes (docker/ssh/hook) reach parity on every capability EXCEPT
+// TabManagement, which is false (#1874): the agent-server's tab surface is data
+// plane only, so every Add*Tab path still needs a daemon-side worktree they do
+// not have. See TestSandboxBackendsDoNotAdvertiseTabManagement, which pairs this
+// bit with proof the spawn paths really do reject them.
 func TestBackendCapabilities(t *testing.T) {
 	localCaps := Capabilities{
 		Workspace:        WorkspaceLocalWorktree,
 		Archive:          true,
 		Recover:          true,
 		TabManagement:    true,
+		TerminalTab:      true,
+		InteractiveInput: true,
+	}
+
+	// Every off-box runtime shares one descriptor: a remote workspace with
+	// Archive/Recover via push/pull-branch (no ErrRecoverUnsupported, no locality
+	// special-case) and no user-managed tabs. Shared so a new sandbox runtime
+	// cannot quietly drift from its siblings.
+	sandboxCaps := Capabilities{
+		Workspace:        WorkspaceRemote,
+		Archive:          true,
+		Recover:          true,
+		TabManagement:    false,
 		TerminalTab:      true,
 		InteractiveInput: true,
 	}
@@ -95,48 +112,22 @@ func TestBackendCapabilities(t *testing.T) {
 			want: localCaps,
 		},
 		{
-			// #1592 Phase 4 PR7: the remote-hook backend is migrated to
-			// provision-and-expose and reaches the SAME full parity as docker/ssh —
-			// a remote workspace, but every capability true (Archive/Recover via
-			// push/pull-branch + re-running launch_cmd). No per-config TerminalTab
-			// gating, no ErrRecoverUnsupported.
-			name: "remote hook runtime — full remote parity",
+			// #1592 Phase 4 PR7 migrated the remote-hook backend to
+			// provision-and-expose, reaching the same descriptor as docker/ssh: its
+			// old terminal_cmd-gated TerminalTab and ErrRecoverUnsupported are gone.
+			name: "remote hook runtime — remote parity, no tab management",
 			b:    &HookBackend{},
-			want: Capabilities{
-				Workspace:        WorkspaceRemote,
-				Archive:          true,
-				Recover:          true,
-				TabManagement:    true,
-				TerminalTab:      true,
-				InteractiveInput: true,
-			},
+			want: sandboxCaps,
 		},
 		{
-			// #1592 Phase 4 PR6: the sandbox runtimes reach FULL parity — a remote
-			// workspace, but every capability true (Archive/Recover via
-			// push/pull-branch). No ErrRecoverUnsupported, no locality special-case.
-			name: "docker sandbox runtime — full remote parity",
+			name: "docker sandbox runtime — remote parity, no tab management",
 			b:    &dockerBackend{},
-			want: Capabilities{
-				Workspace:        WorkspaceRemote,
-				Archive:          true,
-				Recover:          true,
-				TabManagement:    true,
-				TerminalTab:      true,
-				InteractiveInput: true,
-			},
+			want: sandboxCaps,
 		},
 		{
-			name: "ssh sandbox runtime — full remote parity",
+			name: "ssh sandbox runtime — remote parity, no tab management",
 			b:    &sshBackend{},
-			want: Capabilities{
-				Workspace:        WorkspaceRemote,
-				Archive:          true,
-				Recover:          true,
-				TabManagement:    true,
-				TerminalTab:      true,
-				InteractiveInput: true,
-			},
+			want: sandboxCaps,
 		},
 	}
 
@@ -181,18 +172,30 @@ func TestBackendComplianceCoversRegistry(t *testing.T) {
 }
 
 // TestBackendCapabilityParity is the epic end-state assertion (#1592 Phase 4,
-// §5.2): EVERY backend implements EVERY optional capability — no backend gates an
+// §5.2): every backend implements every optional capability — no backend gates an
 // operation off behind a "not supported" descriptor bit, and none returns an
 // ErrRecoverUnsupported/ErrArchiveUnsupported sentinel (both are DELETED; a
 // reference would fail to compile). The old locality special-case — a remote
 // backend advertising Archive/Recover=false and returning
-// ErrRecoverUnsupported — is gone. Attach/preview/archive/restore/tab all route
+// ErrRecoverUnsupported — is gone. Attach/preview/archive/restore all route
 // through the uniform agent-server + push/pull-branch contract, so this table
-// asserts the full optional-capability matrix is TRUE for every registered
-// backend. A regression that flips any bit false (re-introducing a locality
-// gap) fails here.
+// asserts those bits are TRUE for every registered backend. A regression that
+// flips any of them false (re-introducing a locality gap) fails here.
 //
-// Attach is NOT in this table: #1860 deleted the bit. It was true for every
+// TabManagement is NOT in this table (#1874). It is the one capability the epic
+// has not actually delivered off-box: the agent-server's tab surface is data
+// plane only (Subscribe/Input/Resize address an EXISTING tab), so there is no
+// create/close tab RPC and every Add*Tab path still requires a daemon-side git
+// worktree the sandbox runtimes do not have. It sat here as an ASPIRATION
+// asserted as fact — the table forced the bit true, the bit made clients offer
+// tab affordances, and every one of them failed. The honest per-runtime split is
+// pinned by TestBackendCapabilities and by
+// TestSandboxBackendsDoNotAdvertiseTabManagement, which pairs each bit with proof
+// the spawn paths agree with it. When tab creation routes through the
+// agent-server, TabManagement returns to this table and those tests flip in the
+// same change.
+//
+// Attach is NOT in this table either: #1860 deleted the bit. It was true for every
 // backend and read by no dispatch, because attach is not gated per-backend at
 // all — the client dials the daemon's WS PTY stream for every runtime. A
 // capability that cannot be false has nothing to assert parity over.
@@ -213,7 +216,6 @@ func TestBackendCapabilityParity(t *testing.T) {
 	}{
 		{"Archive", func(c Capabilities) bool { return c.Archive }},
 		{"Recover", func(c Capabilities) bool { return c.Recover }},
-		{"TabManagement", func(c Capabilities) bool { return c.TabManagement }},
 		{"TerminalTab", func(c Capabilities) bool { return c.TerminalTab }},
 		{"InteractiveInput", func(c Capabilities) bool { return c.InteractiveInput }},
 	}
@@ -227,6 +229,20 @@ func TestBackendCapabilityParity(t *testing.T) {
 					kind, oc.name)
 			}
 		})
+	}
+}
+
+// TestLocalBackendServicesTabManagement keeps the local runtime's TabManagement
+// bit pinned now that it is out of the parity table above. Without this, a
+// regression flipping the LOCAL bit false — which WOULD be a real capability
+// loss, unlike the sandbox runtimes' honest false — would fail no test.
+func TestLocalBackendServicesTabManagement(t *testing.T) {
+	for kind, b := range complianceBackends() {
+		if b.Capabilities().Workspace != WorkspaceLocalWorktree {
+			continue
+		}
+		assert.Truef(t, b.Capabilities().TabManagement,
+			"backend %q has a local worktree and must service TabManagement", kind)
 	}
 }
 

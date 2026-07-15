@@ -82,8 +82,11 @@ func (m *Manager) CreateTab(req CreateTabRequest) (string, error) {
 	if instance == nil {
 		return "", fmt.Errorf("failed to restore instance %q", title)
 	}
+	// The message names the real reason rather than the old
+	// remote_hooks.terminal_cmd knob, which #1592 Phase 4 PR7 deleted — pointing a
+	// user at a setting that no longer exists is worse than no advice (#1874).
 	if !instance.Capabilities().TabManagement {
-		return "", fmt.Errorf("cannot create a tab on remote session %q: remote sessions have no local worktree and the hook protocol can't run arbitrary commands; their terminal tab comes from remote_hooks.terminal_cmd", title)
+		return "", fmt.Errorf("cannot create a tab on session %q: only local sessions support user-managed tabs — this session's workspace runs off-box (docker/ssh/remote), so there is no local worktree to spawn a tab in", title)
 	}
 
 	// Serialize the tab spawn against an archive/kill/restore teardown+move for
@@ -187,7 +190,7 @@ func (m *Manager) CloseTab(req CloseTabRequest) (string, error) {
 		return "", fmt.Errorf("failed to restore instance %q", title)
 	}
 	if !instance.Capabilities().TabManagement {
-		return "", fmt.Errorf("cannot close a tab on remote session %q: its tabs are fixed by remote_hooks config, not user-managed", title)
+		return "", fmt.Errorf("cannot close a tab on session %q: its tab list is fixed by its runtime, not user-managed — this session's workspace runs off-box (docker/ssh/remote)", title)
 	}
 	// An archived session's tabs are not editable (#1809 follow-up). Archive
 	// preserves web tabs so a restore can render them again; without this guard a

@@ -7,6 +7,31 @@ import (
 	"github.com/sachiniyer/agent-factory/log"
 )
 
+// tabSpawnPreconditionErr reports why a tab cannot be spawned into this
+// instance's local workspace, or nil when the preconditions hold. Shared by
+// every Add*Tab path so they cannot drift apart.
+//
+// It separates the two causes the old single guard collapsed into one
+// "…instance that is not started" message (#1874). That message was actively
+// misleading for a sandbox (docker/ssh/hook) session: the instance IS started —
+// its workspace is simply off-box, so there is no daemon-side worktree or tmux
+// to spawn into. The distinction matters to the reader, not just to precision:
+// "not started" reads as a transient state worth retrying, while an off-box
+// workspace is a standing fact no amount of waiting changes.
+//
+// Callers reject backends without the TabManagement capability first
+// (daemon/manager_tabs.go), so a user normally sees that gate's message instead;
+// this is the defense-in-depth check for a direct caller, written to stand alone.
+func tabSpawnPreconditionErr(started, hasTmux, hasWorktree bool) error {
+	if !started {
+		return fmt.Errorf("cannot add a tab to a session that is not started")
+	}
+	if !hasWorktree || !hasTmux {
+		return fmt.Errorf("cannot add a tab to a session with no local workspace: its workspace runs off-box, so there is no worktree to spawn the tab in")
+	}
+	return nil
+}
+
 // AddShellTab spawns a new Shell-kind tab running $SHELL in the instance's
 // worktree, appends it to Tabs, and returns it. Local instances only — remote
 // instances have no local worktree, so callers must reject backends without the
@@ -29,8 +54,8 @@ func (i *Instance) AddShellTab() (*Tab, error) {
 	if spawnErr != nil {
 		return nil, spawnErr
 	}
-	if !started || agentTmux == nil || gw == nil {
-		return nil, fmt.Errorf("cannot add a tab to an instance that is not started")
+	if err := tabSpawnPreconditionErr(started, agentTmux != nil, gw != nil); err != nil {
+		return nil, err
 	}
 	if nTabs >= maxTabs {
 		return nil, fmt.Errorf("max %d tabs per session", maxTabs)
@@ -108,8 +133,8 @@ func (i *Instance) AddProcessTab(command, requestedName string) (*Tab, error) {
 	if spawnErr != nil {
 		return nil, spawnErr
 	}
-	if !started || agentTmux == nil || gw == nil {
-		return nil, fmt.Errorf("cannot add a tab to an instance that is not started")
+	if err := tabSpawnPreconditionErr(started, agentTmux != nil, gw != nil); err != nil {
+		return nil, err
 	}
 	if nTabs >= maxTabs {
 		return nil, fmt.Errorf("max %d tabs per session", maxTabs)
@@ -184,8 +209,8 @@ func (i *Instance) AddWebTab(url, requestedName string) (*Tab, error) {
 	if spawnErr := i.tabSpawnBlockedLocked(); spawnErr != nil {
 		return nil, spawnErr
 	}
-	if !i.started || i.tmuxLocked() == nil || i.gitWorktree == nil {
-		return nil, fmt.Errorf("cannot add a tab to an instance that is not started")
+	if err := tabSpawnPreconditionErr(i.started, i.tmuxLocked() != nil, i.gitWorktree != nil); err != nil {
+		return nil, err
 	}
 	if len(i.Tabs) >= maxTabs {
 		return nil, fmt.Errorf("max %d tabs per session", maxTabs)
@@ -216,8 +241,8 @@ func (i *Instance) AddVSCodeTab(requestedName string) (*Tab, error) {
 	if spawnErr := i.tabSpawnBlockedLocked(); spawnErr != nil {
 		return nil, spawnErr
 	}
-	if !i.started || i.tmuxLocked() == nil || i.gitWorktree == nil {
-		return nil, fmt.Errorf("cannot add a tab to an instance that is not started")
+	if err := tabSpawnPreconditionErr(i.started, i.tmuxLocked() != nil, i.gitWorktree != nil); err != nil {
+		return nil, err
 	}
 	if len(i.Tabs) >= maxTabs {
 		return nil, fmt.Errorf("max %d tabs per session", maxTabs)

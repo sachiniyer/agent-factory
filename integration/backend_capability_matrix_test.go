@@ -15,9 +15,13 @@ import (
 // exercise the full matrix and not just the happy-path round-trip.
 //
 // It proves, for a live instance:
-//   - Descriptor parity: a remote workspace, every optional capability TRUE (no
-//     locality special-case, no unsupported bit) — the same end-state the host
-//     matrix pins, but read off the REAL provisioned backend.
+//   - Descriptor parity: a remote workspace with every optional capability TRUE
+//     (no locality special-case, no unsupported bit) EXCEPT TabManagement, which
+//     is false — the same end-state the host matrix pins, but read off the REAL
+//     provisioned backend. TabManagement is serviced below as a rejection: the
+//     agent-server has no create-tab RPC, so a live sandbox genuinely cannot
+//     spawn one (#1874). It sat in this list as a TRUE bit that nothing here
+//     ever exercised over the wire, which is how the contradiction survived.
 //   - Attach + InteractiveInput serviced: typed input reaches the sandbox agent
 //     and echoes back over the WS PTY stream the client attaches on (a remote
 //     workspace attaches client-side over that stream; #1852 deleted the backend
@@ -45,7 +49,6 @@ func assertLiveCapabilityMatrix(t *testing.T, label string, inst *session.Instan
 	}{
 		{"Archive", caps.Archive},
 		{"Recover", caps.Recover},
-		{"TabManagement", caps.TabManagement},
 		{"TerminalTab", caps.TerminalTab},
 		{"InteractiveInput", caps.InteractiveInput},
 	}
@@ -53,6 +56,18 @@ func assertLiveCapabilityMatrix(t *testing.T, label string, inst *session.Instan
 		if !o.ok {
 			t.Errorf("%s: live backend must advertise capability %s at full parity (#1592 Phase 4 end-state)", label, o.name)
 		}
+	}
+
+	// TabManagement is the one bit that must be FALSE off-box, and it is serviced
+	// here rather than merely asserted: the live sandbox must actually refuse the
+	// spawn. Advertising true while every Add*Tab path needs a daemon-side
+	// worktree is exactly the drift #1874 fixed, so pin BOTH halves — if a future
+	// agent-server grows a create-tab RPC, both flip together in one change.
+	if caps.TabManagement {
+		t.Errorf("%s: live backend advertises TabManagement, but tab creation needs a daemon-side worktree an off-box workspace does not have (#1874)", label)
+	}
+	if _, err := inst.AddShellTab(); err == nil {
+		t.Errorf("%s: AddShellTab unexpectedly succeeded on an off-box workspace; if the agent-server now services tab creation, flip TabManagement true with it (#1874)", label)
 	}
 
 	// Service the streamable capabilities over the wire against the live sandbox:

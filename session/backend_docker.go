@@ -468,17 +468,26 @@ var _ Backend = (*dockerBackend)(nil)
 
 func (b *dockerBackend) Type() string { return "docker" }
 
-// Capabilities advertises FULL parity for docker (#1592 Phase 4 PR6, epic §5):
-// the workspace is off-box, but attach/preview/liveness/prompt/tabs work through
-// the in-container agent-server, and Archive/Recover work by pushing the branch
-// to GitHub and re-provisioning a fresh container that clones it back (§5.1) — so
-// every capability is true, no ErrRecoverUnsupported and no locality special-case.
+// Capabilities advertises docker's parity (#1592 Phase 4 PR6, epic §5): the
+// workspace is off-box, but attach/preview/liveness/prompt work through the
+// in-container agent-server, and Archive/Recover work by pushing the branch to
+// GitHub and re-provisioning a fresh container that clones it back (§5.1) — no
+// ErrRecoverUnsupported and no locality special-case.
+//
+// TabManagement is false (#1874). It is the ONE capability the in-container
+// agent-server does not yet service: the agent-server's tab surface is data
+// plane only (Subscribe/Input/Resize address an EXISTING tab by index or stable
+// id) — there is no create/close tab RPC, so every Add*Tab path still requires a
+// daemon-side git worktree this runtime does not have. Advertising it true
+// offered tab affordances (the web menu's new-tab/VS Code items, the TUI `t`/`w`
+// keys) that could only ever fail. The honest bit is false until tab creation
+// routes through the agent-server; see #1874 for what that needs.
 func (b *dockerBackend) Capabilities() Capabilities {
 	return Capabilities{
 		Workspace:        WorkspaceRemote,
 		Archive:          true,
 		Recover:          true,
-		TabManagement:    true,
+		TabManagement:    false,
 		TerminalTab:      true,
 		InteractiveInput: true,
 	}
