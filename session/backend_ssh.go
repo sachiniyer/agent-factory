@@ -735,17 +735,22 @@ var _ Backend = (*sshBackend)(nil)
 
 func (b *sshBackend) Type() string { return "ssh" }
 
-// Capabilities advertises FULL parity for ssh (#1592 Phase 4 PR6, epic §5): the
-// workspace is off-box, but attach/preview/liveness/prompt/tabs work through the
+// Capabilities advertises ssh's parity (#1592 Phase 4 PR6, epic §5): the
+// workspace is off-box, but attach/preview/liveness/prompt work through the
 // remote agent-server over the tunnel, and Archive/Recover work by pushing the
 // branch to GitHub and re-provisioning a fresh remote that clones it back (§5.1)
-// — every capability true, no ErrRecoverUnsupported and no locality special-case.
+// — no ErrRecoverUnsupported and no locality special-case.
+//
+// TabManagement is false (#1874), for the same reason as docker: the remote
+// agent-server's tab surface is data plane only (Subscribe/Input/Resize address
+// an EXISTING tab), so every Add*Tab path still requires a daemon-side git
+// worktree this runtime does not have. See dockerBackend.Capabilities.
 func (b *sshBackend) Capabilities() Capabilities {
 	return Capabilities{
 		Workspace:        WorkspaceRemote,
 		Archive:          true,
 		Recover:          true,
-		TabManagement:    true,
+		TabManagement:    false,
 		TerminalTab:      true,
 		InteractiveInput: true,
 	}

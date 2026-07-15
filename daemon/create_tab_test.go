@@ -97,6 +97,24 @@ func (remoteTypeBackend) Capabilities() session.Capabilities {
 	return session.Capabilities{Workspace: session.WorkspaceRemote}
 }
 
+// assertTabRejection pins the copy of the no-tab-management rejection (#1874).
+// A bare Contains(err, "remote") passed for years while the message pointed at
+// remote_hooks.terminal_cmd — a knob #1592 Phase 4 PR7 deleted — so match the
+// rule the user can actually act on, and fail loudly if the deleted knob ever
+// comes back into user-facing copy.
+func assertTabRejection(t *testing.T, err error, want string) {
+	t.Helper()
+	if err == nil {
+		t.Fatal("expected a rejection error for an off-box instance, got nil")
+	}
+	if !strings.Contains(err.Error(), want) {
+		t.Fatalf("expected the rejection to say %q, got: %v", want, err)
+	}
+	if strings.Contains(err.Error(), "terminal_cmd") {
+		t.Fatalf("rejection points at the deleted remote_hooks.terminal_cmd knob: %v", err)
+	}
+}
+
 // startedLocalTabInstance builds a started local instance whose agent tab is a
 // mock-backed tmux session, registers it in the manager, and seeds a matching
 // on-disk record so the manager's refresh keeps the live in-memory instance.
@@ -169,12 +187,7 @@ func TestCreateTab_RejectsRemoteInstance(t *testing.T) {
 	manager.mu.Unlock()
 
 	_, err = manager.CreateTab(CreateTabRequest{Title: "rem", RepoID: repo.ID, Command: "btop"})
-	if err == nil {
-		t.Fatal("expected error for remote instance, got nil")
-	}
-	if !strings.Contains(err.Error(), "remote") {
-		t.Fatalf("expected remote-rejection error, got: %v", err)
-	}
+	assertTabRejection(t, err, "only local sessions support user-managed tabs")
 }
 
 // TestCreateTab_SpawnsPersistsAndReturnsName is the headline daemon test: a
@@ -324,10 +337,5 @@ func TestCreateTab_ShellRejectsRemoteInstance(t *testing.T) {
 	manager.mu.Unlock()
 
 	_, err = manager.CreateTab(CreateTabRequest{Title: "rem", RepoID: repo.ID, Shell: true})
-	if err == nil {
-		t.Fatal("expected error for remote instance, got nil")
-	}
-	if !strings.Contains(err.Error(), "remote") {
-		t.Fatalf("expected remote-rejection error, got: %v", err)
-	}
+	assertTabRejection(t, err, "only local sessions support user-managed tabs")
 }

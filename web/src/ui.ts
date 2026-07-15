@@ -152,11 +152,29 @@ export interface Actions {
  *  hides at the cap so the web never fires a guaranteed-to-fail CreateTab. */
 const MAX_TABS = 9;
 
-/** Whether a session supports user tab management: remote-hook sessions have their
- *  tabs fixed by config (daemon Capabilities().TabManagement), so the web hides
- *  their + / × affordances and gates the `t`/`w` keys. */
+/** The backend types whose workspace lives off-box (session/archive_sandbox.go
+ *  backendKindForType: docker, ssh, and "remote" — the hook runtime). None of
+ *  them can service tab management: every Add*Tab path needs a daemon-side git
+ *  worktree they do not have, so the daemon's Capabilities().TabManagement is
+ *  false for all three (#1874).
+ *
+ *  This list is the ONE place the web names backend types. It exists only because
+ *  the session envelope carries `backend_type` but not the daemon's capability
+ *  bits — the honest fix is to serialize the capability so no client re-derives
+ *  it (see #1874). Until then, a NEW off-box runtime must be added here, which is
+ *  what ui.test.ts pins. */
+const OFF_BOX_BACKENDS = new Set(["docker", "ssh", "remote"]);
+
+/** Whether a session supports user tab management. Off-box sessions (docker/ssh/
+ *  remote-hook) have a tab list their runtime fixes at launch — a single agent
+ *  tab — so the web hides their + / × affordances and gates the `t`/`w` keys,
+ *  mirroring the daemon's Capabilities().TabManagement.
+ *
+ *  A record with no backend_type is a pre-#1592 local session (the field is
+ *  omitempty), so it defaults to local — treating it as off-box would strip tab
+ *  management from every legacy row. */
 export function supportsTabManagement(s: SessionData): boolean {
-  return s.backend_type !== "remote";
+  return !OFF_BOX_BACKENDS.has(s.backend_type ?? "local");
 }
 
 /** Whether the web may offer tab management for a session RIGHT NOW: its backend

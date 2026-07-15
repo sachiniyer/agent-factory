@@ -8,7 +8,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { canManageTabs, documentTitle, tabBarSig } from "./ui.js";
+import { canManageTabs, documentTitle, supportsTabManagement, tabBarSig } from "./ui.js";
 import type { AppState } from "./ui.js";
 import { Liveness, type SessionData } from "./types.js";
 
@@ -91,6 +91,28 @@ test("canManageTabs: an archived session is inert — its + / × are withdrawn (
     "an archived session is inert",
   );
   assert.equal(canManageTabs(sess({ backend_type: "remote" })), false, "remote tabs stay config-fixed");
+});
+
+test("supportsTabManagement: every off-box runtime is withdrawn, not just the hook one (#1874)", () => {
+  // This predicate used to read `backend_type !== "remote"`, which named the hook
+  // runtime only — so docker/ssh sessions were offered a + and an "Open in VS
+  // Code" item that could not work: every Add*Tab path needs a daemon-side git
+  // worktree an off-box workspace does not have. The daemon rejects the call, so
+  // the affordance could only ever produce an error toast.
+  for (const backend_type of ["docker", "ssh", "remote"]) {
+    assert.equal(
+      supportsTabManagement(sess({ backend_type })),
+      false,
+      `${backend_type} runs off-box and cannot spawn a tab`,
+    );
+  }
+});
+
+test("supportsTabManagement: local and legacy records keep tab management", () => {
+  assert.equal(supportsTabManagement(sess({ backend_type: "local" })), true, "a local session manages tabs");
+  // backend_type is omitempty, so a pre-#1592 record carries none. It is a local
+  // session; defaulting it to off-box would strip the + from every legacy row.
+  assert.equal(supportsTabManagement(sess({})), true, "a record with no backend_type is local");
 });
 
 test("archiving the selected session changes the sig — the bar must rebuild to drop the × (#1809)", () => {

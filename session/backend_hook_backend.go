@@ -220,20 +220,24 @@ var _ Backend = (*HookBackend)(nil)
 
 func (b *HookBackend) Type() string { return "remote" }
 
-// Capabilities advertises FULL parity for the remote-hook backend (#1592 Phase 4
-// PR7, epic §5) — identical to docker/ssh: the workspace is off-box, but
-// attach/preview/liveness/prompt/tabs work through the user-provisioned
-// agent-server, and Archive/Recover work by pushing the branch to GitHub and
-// re-running launch_cmd to re-provision a fresh sandbox that clones it back
-// (§5.1). Every capability is true — no ErrRecoverUnsupported, no per-config
-// TerminalTab gating (the in-sandbox agent-server manages tabs natively, so the
-// old terminal_cmd bit is gone).
+// Capabilities advertises the remote-hook backend's parity (#1592 Phase 4 PR7,
+// epic §5) — identical to docker/ssh: the workspace is off-box, but
+// attach/preview/liveness/prompt work through the user-provisioned agent-server,
+// and Archive/Recover work by pushing the branch to GitHub and re-running
+// launch_cmd to re-provision a fresh sandbox that clones it back (§5.1). No
+// ErrRecoverUnsupported, and no per-config TerminalTab gating (the in-sandbox
+// agent-server drives the terminal surface, so the old terminal_cmd bit is gone).
+//
+// TabManagement is false (#1874), for the same reason as docker/ssh: the
+// agent-server's tab surface is data plane only, so every Add*Tab path still
+// requires a daemon-side git worktree this runtime does not have. See
+// dockerBackend.Capabilities.
 func (b *HookBackend) Capabilities() Capabilities {
 	return Capabilities{
 		Workspace:        WorkspaceRemote,
 		Archive:          true,
 		Recover:          true,
-		TabManagement:    true,
+		TabManagement:    false,
 		TerminalTab:      true,
 		InteractiveInput: true,
 	}

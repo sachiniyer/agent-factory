@@ -828,7 +828,7 @@ func (m *home) handleNewTab() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	if !selected.Capabilities().TabManagement {
-		return m, m.handleError(fmt.Errorf("remote sessions don't support new process tabs; their terminal tab comes from remote_hooks.terminal_cmd and arbitrary remote processes aren't supported"))
+		return m, m.handleError(fmt.Errorf("only local sessions support new tabs — this session's workspace runs off-box (docker/ssh/remote), so there is no local worktree to spawn a tab in"))
 	}
 
 	name, err := createShellTabThroughDaemon(selected.Title, m.repoID)
@@ -876,7 +876,7 @@ func (m *home) handleCloseTab() (tea.Model, tea.Cmd) {
 		return m, m.handleError(fmt.Errorf("the agent tab can't be closed; use D to kill the session"))
 	}
 	if !selected.Capabilities().TabManagement {
-		return m, m.handleError(fmt.Errorf("remote session tabs can't be closed"))
+		return m, m.handleError(fmt.Errorf("this session's tab list is fixed by its runtime and can't be edited"))
 	}
 	tabs := selected.GetTabs()
 	if idx >= len(tabs) {

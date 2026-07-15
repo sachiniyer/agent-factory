@@ -8641,8 +8641,9 @@ function addTaskModal(projects, defaultProject2, callbacks) {
 
 // src/ui.ts
 var MAX_TABS = 9;
+var OFF_BOX_BACKENDS = /* @__PURE__ */ new Set(["docker", "ssh", "remote"]);
 function supportsTabManagement(s) {
-  return s.backend_type !== "remote";
+  return !OFF_BOX_BACKENDS.has(s.backend_type ?? "local");
 }
 function canManageTabs(s) {
   return supportsTabManagement(s) && !isArchived(s);

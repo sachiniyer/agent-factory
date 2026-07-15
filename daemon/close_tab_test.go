@@ -347,12 +347,7 @@ func TestCloseTab_RejectsRemoteInstance(t *testing.T) {
 	manager.mu.Unlock()
 
 	_, err = manager.CloseTab(CloseTabRequest{Title: "rem", RepoID: repo.ID, TabName: "shell"})
-	if err == nil {
-		t.Fatal("expected error for remote instance, got nil")
-	}
-	if !strings.Contains(err.Error(), "remote") {
-		t.Fatalf("expected remote-rejection error, got: %v", err)
-	}
+	assertTabRejection(t, err, "fixed by its runtime")
 }
 
 func closeBlockingTabExec(alive map[string]bool, blockedKillName string, killStarted chan<- struct{}, releaseKill <-chan struct{}) (cmd_test.MockCmdExec, func(string) bool) {

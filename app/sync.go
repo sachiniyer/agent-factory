@@ -634,9 +634,12 @@ func (m *home) updateInstanceFromSnapshot(inst *session.Instance, d session.Inst
 			changed = true
 		}
 	}
-	// Backends without user-managed tabs (remote hook sessions) derive their tabs
-	// from config (terminal_cmd), not the snapshot, so the backend owns them —
-	// skip the tab reconcile.
+	// Backends without user-managed tabs (the off-box docker/ssh/hook runtimes)
+	// have a tab list their runtime owns — a single agent tab, fixed at Launch —
+	// so there is nothing for the snapshot to reconcile against. Skipping is a
+	// no-op rather than a behavior change: ReconcileTabsFromData already returns
+	// early for an instance with no local worktree, which is every sandbox
+	// instance (#1874).
 	if inst.Capabilities().TabManagement {
 		// Capture the slot→name list before the tab reconcile mutates it: an
 		// out-of-band tab removal (another client, `af sessions tab-delete`,
