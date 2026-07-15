@@ -7700,6 +7700,9 @@ var SplitView = class {
   tabKinds = [];
   tree = null;
   focusedId = null;
+  // Counts explicit layout/focus mutations, for the stale-async guard — see
+  // layoutGeneration(), which is the documented contract.
+  layoutGen = 0;
   // Debounces the "focus left every pane" report so a click that moves focus A→B
   // (blur A, then focus B) doesn't flap the nav mode through rail and back.
   blurTimer = null;
@@ -7846,9 +7849,26 @@ var SplitView = class {
     this.lastShown = "";
     this.lastPaneCount = 0;
   }
+  /** How many EXPLICIT layout/focus mutations have been committed — a tab rebind
+   *  (a 1-9 key or a tab-bar click), a drag-drop split, a pane close. Deliberately
+   *  NOT bumped by setSession's roster reconcile, which only remaps each pane to
+   *  follow its own tab and expresses no user intent.
+   *
+   *  That split is the point: an async caller which computes a tab index from a
+   *  PRE-await snapshot (see index.ts closeSessionTab) captures this first and
+   *  applies its result only if the value still matches. A slow close then can't
+   *  clobber a tab the user selected while it was in flight — their newer intent
+   *  wins — while the roster event that races the same close still passes the
+   *  guard, because it bumps nothing. */
+  layoutGeneration() {
+    return this.layoutGen;
+  }
   // --- internal: mutation commit --------------------------------------------
-  /** Persists the current tree for the session, re-renders, and reports the layout. */
+  /** Persists the current tree for the session, re-renders, and reports the layout.
+   *  Every explicit layout/focus mutation funnels through here, which is what makes
+   *  it the one place to count them (see layoutGeneration). */
   commit() {
+    this.layoutGen++;
     if (this.sessionId && this.tree) {
       this.trees.set(this.sessionId, this.tree);
     }
@@ -9630,13 +9650,16 @@ function closeSessionTab(index) {
   }
   clearTabError();
   const selId = sel.id ?? "";
+  const cur = store.get().activeTab;
+  const gen = splitView.layoutGeneration();
   void closeTab(selId, sel.title, target.name, tok).then(() => fetchSnapshot(tok)).then((sessions) => {
-    const cur = store.get().activeTab;
     const shrunk = sessions.find((s) => s.id === selId);
     const n = shrunk ? sessionTabs(shrunk).length : 1;
     const next = Math.min(Math.max(index <= cur ? cur - 1 : cur, 0), n - 1);
     store.set({ sessions, selectedId: pickSelection(sessions, store.get().selectedId) });
-    splitView.setFocusedTab(next);
+    if (splitView.layoutGeneration() === gen && store.get().selectedId === selId) {
+      splitView.setFocusedTab(next);
+    }
   }).catch((e) => surfaceTabError(e));
 }
 function surfaceTabError(e) {

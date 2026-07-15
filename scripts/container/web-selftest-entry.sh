@@ -54,6 +54,9 @@ TASK3_NAME=mock3-task
 WEBTAB_PORT=8890
 WEBTAB_LOCAL_MARKER=AF_WEBTAB_LOCAL_OK
 WEBTAB_EXTERNAL_URL=https://blocked.example.test/
+# The malformed/older web-tab record (a web tab with NO target url) the harness
+# seeds straight into the daemon's store, since no API can mint one (#1818).
+NOURL_TAB=nourl
 export AGENT_FACTORY_HOME="$HOME_DIR"
 # A container binary is built at the branch version (typically behind the latest
 # release); without this it would self-update on boot and restart the daemon
@@ -103,9 +106,35 @@ for repo in "$MOCK" "$MOCK2" "$MOCK3"; do
 done
 
 # --- start the daemon + wait for the HTTP listener --------------------------
+# Both are functions because the harness restarts the daemon once, to seed a record
+# no API can mint (see the URL-less web tab below); the restart must reuse this exact
+# readiness poll rather than a second, drifting copy of it.
+start_daemon() {
+    "$BIN" --daemon >>/work/daemon.log 2>&1 &
+    DAEMON_PID=$!
+}
+
+# Poll the HTTP port until it serves the SPA shell (200). Once it binds, the token
+# file exists (EnsureToken runs before the port opens).
+wait_for_listener() {
+    for i in $(seq 1 60); do
+        if curl -s -o /dev/null -w '%{http_code}' "$BASE_URL/" 2>/dev/null | grep -q '^200$'; then
+            return 0
+        fi
+        if ! kill -0 "$DAEMON_PID" 2>/dev/null; then
+            echo "daemon exited before binding the listener; see log:" >&2
+            cat /work/daemon.log >&2
+            exit 1
+        fi
+        sleep 1
+    done
+    echo "timed out waiting for $BASE_URL" >&2
+    cat /work/daemon.log >&2
+    exit 1
+}
+
 echo ">>> starting af daemon (listen_addr=$LISTEN) ..."
-"$BIN" --daemon >/work/daemon.log 2>&1 &
-DAEMON_PID=$!
+start_daemon
 WEBTAB_SERVER_PID=""
 
 cleanup() {
@@ -124,25 +153,8 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# Poll the HTTP port until it serves the SPA shell (200). Once it binds, the token
-# file exists (EnsureToken runs before the port opens).
 echo ">>> waiting for the HTTP listener ..."
-for i in $(seq 1 60); do
-    if curl -s -o /dev/null -w '%{http_code}' "$BASE_URL/" 2>/dev/null | grep -q '^200$'; then
-        break
-    fi
-    if ! kill -0 "$DAEMON_PID" 2>/dev/null; then
-        echo "daemon exited before binding the listener; see log:" >&2
-        cat /work/daemon.log >&2
-        exit 1
-    fi
-    sleep 1
-    if [ "$i" -eq 60 ]; then
-        echo "timed out waiting for $BASE_URL" >&2
-        cat /work/daemon.log >&2
-        exit 1
-    fi
-done
+wait_for_listener
 
 # The token file still exists (EnsureToken runs before the port opens) even though
 # the loopback browser never uses it — read it purely as a daemon-health signal.
@@ -218,6 +230,70 @@ done
 "$BIN" sessions tab-create --repo "$MOCK" "$SESSION_WEB" --kind web --port "$WEBTAB_PORT" --name preview >/dev/null
 "$BIN" sessions tab-create --repo "$MOCK" "$SESSION_WEB" --kind web --url "$WEBTAB_EXTERNAL_URL" --name external >/dev/null
 
+# --- seed the URL-less web tab through the daemon's OWN store (#1818) -------
+# A web tab with no target is a MALFORMED/older record, and three live guards
+# refuse to mint one (CreateTab's "requires a target", NormalizeWebTabURL, and
+# AddWebTab's "requires a non-empty URL"), so there is no API/CLI call that can
+# stage it — and weakening a real user-facing validation to let a test in would be
+# the wrong trade. The honest way to stage a legacy record is to write it the way an
+# older version would have and let the daemon load it: `url` is omitempty, so a tab
+# record with no url field IS that shape, and restoreLocalTabs backfills its stable
+# id on load.
+#
+# Seeding it in the daemon's own store — rather than rewriting a Snapshot inside the
+# browser, which is what this used to do — is the point of #1818. The daemon then
+# serves the tab on BOTH planes, so the Snapshot and every session.updated agree
+# about it. The old browser-side mock only patched the Snapshot, so any
+# session.updated (which tab changes now emit, #1812) overwrote the projection with
+# the real roster and silently deleted the injected tab mid-test: a flake. There is
+# nothing left to race here, and no sleep or retry propping it up.
+#
+# The daemon is the single writer of instances.json (#960), so it must be stopped
+# before the file is touched and restarted to pick the record up. `wait` blocks until
+# it is really gone — no sleep. Nothing else is in flight at this point (all seeding
+# is done, Playwright has not started), so this cannot race session creation the way
+# an auto-update restart once did (#1596).
+echo ">>> seeding the URL-less web tab ($NOURL_TAB) into the daemon's store ..."
+kill "$DAEMON_PID" 2>/dev/null || true
+wait "$DAEMON_PID" 2>/dev/null || true
+
+cat >/work/seed-nourl.js <<'EOF'
+const fs = require("fs");
+const path = require("path");
+const [home, title, tab] = process.argv.slice(2);
+// Per-repo store: $AGENT_FACTORY_HOME/instances/<repoID>/instances.json. Find the
+// file holding the session by title rather than deriving the repo id.
+const dir = path.join(home, "instances");
+let patched = false;
+for (const repoID of fs.readdirSync(dir)) {
+  const file = path.join(dir, repoID, "instances.json");
+  if (!fs.existsSync(file)) continue;
+  const raw = JSON.parse(fs.readFileSync(file, "utf8"));
+  // v1 is an envelope ({schema_version, instances}); v0 was a bare array. Keep
+  // whichever shape is on disk so the daemon's own migrator still sees what it wrote.
+  const instances = Array.isArray(raw) ? raw : raw.instances;
+  for (const inst of instances ?? []) {
+    if (inst.title !== title) continue;
+    // kind 3 = TabKindWeb. No `url` key at all — the legacy shape, not url:"".
+    (inst.tabs = inst.tabs ?? []).push({ name: tab, kind: 3 });
+    patched = true;
+  }
+  if (patched) {
+    fs.writeFileSync(file, JSON.stringify(raw));
+    break;
+  }
+}
+if (!patched) {
+  console.error(`seed-nourl: no session titled ${title} under ${dir}`);
+  process.exit(1);
+}
+EOF
+node /work/seed-nourl.js "$HOME_DIR" "$SESSION_WEB" "$NOURL_TAB"
+
+echo ">>> restarting the daemon so it loads the seeded record ..."
+start_daemon
+wait_for_listener
+
 # --- run the Playwright harness ---------------------------------------------
 echo ">>> installing web deps + running the Playwright harness ..."
 cd /work/web
@@ -236,5 +312,12 @@ export AF_WEB_TASK_NAME="$SEEDED_TASK"
 export AF_WEB_TASK3_NAME="$TASK3_NAME"
 export AF_WEBTAB_LOCAL_MARKER="$WEBTAB_LOCAL_MARKER"
 export AF_WEBTAB_EXTERNAL_URL="$WEBTAB_EXTERNAL_URL"
+export AF_WEBTAB_NOURL_NAME="$NOURL_TAB"
+# The af CLI + the mock repo it targets, so a test can mutate state OUT-OF-BAND —
+# as an agent or a script does, from outside the browser — and assert the open SPA
+# reacts to the daemon's event (#1812). AGENT_FACTORY_HOME is already exported
+# above, so the CLI resolves the same throwaway home as the daemon under test.
+export AF_BIN="$BIN"
+export AF_MOCK_REPO="$MOCK"
 
 npx playwright test

@@ -130,6 +130,10 @@ export class SplitView {
   private tree: LayoutNode | null = null;
   private focusedId: string | null = null;
 
+  // Counts explicit layout/focus mutations, for the stale-async guard — see
+  // layoutGeneration(), which is the documented contract.
+  private layoutGen = 0;
+
   // Debounces the "focus left every pane" report so a click that moves focus A→B
   // (blur A, then focus B) doesn't flap the nav mode through rail and back.
   private blurTimer: number | null = null;
@@ -324,10 +328,28 @@ export class SplitView {
     this.lastPaneCount = 0;
   }
 
+  /** How many EXPLICIT layout/focus mutations have been committed — a tab rebind
+   *  (a 1-9 key or a tab-bar click), a drag-drop split, a pane close. Deliberately
+   *  NOT bumped by setSession's roster reconcile, which only remaps each pane to
+   *  follow its own tab and expresses no user intent.
+   *
+   *  That split is the point: an async caller which computes a tab index from a
+   *  PRE-await snapshot (see index.ts closeSessionTab) captures this first and
+   *  applies its result only if the value still matches. A slow close then can't
+   *  clobber a tab the user selected while it was in flight — their newer intent
+   *  wins — while the roster event that races the same close still passes the
+   *  guard, because it bumps nothing. */
+  layoutGeneration(): number {
+    return this.layoutGen;
+  }
+
   // --- internal: mutation commit --------------------------------------------
 
-  /** Persists the current tree for the session, re-renders, and reports the layout. */
+  /** Persists the current tree for the session, re-renders, and reports the layout.
+   *  Every explicit layout/focus mutation funnels through here, which is what makes
+   *  it the one place to count them (see layoutGeneration). */
   private commit(): void {
+    this.layoutGen++;
     if (this.sessionId && this.tree) {
       this.trees.set(this.sessionId, this.tree);
     }
