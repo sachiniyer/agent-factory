@@ -77,7 +77,7 @@ func TestDownloadBinarySuccess(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	got, err := downloadBinary(srv.URL)
+	got, err := downloadBinary(srv.URL, downloadTimeout)
 	if err != nil {
 		t.Fatalf("downloadBinary returned error: %v", err)
 	}
@@ -94,7 +94,7 @@ func TestDownloadBinaryNon200(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	_, err := downloadBinary(srv.URL)
+	_, err := downloadBinary(srv.URL, downloadTimeout)
 	if err == nil || !strings.Contains(err.Error(), "404") {
 		t.Fatalf("expected HTTP 404 error, got %v", err)
 	}
@@ -134,7 +134,7 @@ func TestDownloadBinaryStalled(t *testing.T) {
 	deadline := time.After(3 * time.Second)
 	done := make(chan error, 1)
 	go func() {
-		_, err := downloadBinary(srv.URL)
+		_, err := downloadBinary(srv.URL, downloadTimeout)
 		done <- err
 	}()
 
@@ -181,7 +181,7 @@ func TestDownloadBinaryStalledHeaders(t *testing.T) {
 	deadline := time.After(3 * time.Second)
 	done := make(chan error, 1)
 	go func() {
-		_, err := downloadBinary(srv.URL)
+		_, err := downloadBinary(srv.URL, downloadTimeout)
 		done <- err
 	}()
 

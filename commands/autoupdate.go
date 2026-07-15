@@ -17,9 +17,28 @@ import (
 )
 
 const (
-	autoUpdateCheckInterval = 24 * time.Hour
+	// autoUpdateCheckInterval throttles the launch check. Releases now cut
+	// several times a day, so a day-long window left users pinned to a build
+	// well behind their channel; six hours keeps them close to the tip while
+	// still collapsing a burst of launches into a single GitHub call.
+	autoUpdateCheckInterval = 6 * time.Hour
 	lastCheckFile           = "last_update_check"
 	autoUpdateEnv           = "AGENT_FACTORY_AUTO_UPDATE"
+)
+
+// Timeouts differ by who is waiting. The launch check runs synchronously in
+// front of the TUI, so it is bounded hard enough that a black-holed network
+// costs a blink rather than a stall; `af upgrade` was asked for explicitly
+// and can afford to be patient.
+var (
+	// autoUpdateCheckTimeout bounds the launch-path release lookup.
+	autoUpdateCheckTimeout = 2 * time.Second
+	// manualCheckTimeout bounds the release lookup for `af upgrade`.
+	manualCheckTimeout = 10 * time.Second
+	// autoUpdateDownloadBudget bounds the launch-path download. Release
+	// tarballs are a few MB, so this clears a slow link with room to spare
+	// while capping how long a launch can stall behind a crawling transfer.
+	autoUpdateDownloadBudget = 45 * time.Second
 )
 
 // GitHub API endpoints for release discovery, one per channel (#1041).
@@ -51,46 +70,33 @@ var runtimeGOOS = runtime.GOOS
 // a fake without hitting the network.
 var fetchLatestReleaseTagFn = fetchLatestReleaseTag
 
-// autoUpdateInBackground checks for a newer release and applies it silently.
-// It runs in a goroutine and never blocks the main program.
-func autoUpdateInBackground(cfg *config.Config) {
-	if !autoUpdateEnabled(cfg) {
-		log.InfoLog.Printf("auto-update: disabled")
-		return
-	}
-	channel := config.UpdateChannelStable
-	if cfg != nil {
-		channel = cfg.UpdateChannel
-	}
-	go func() {
-		if err := autoUpdateForChannel(channel); err != nil {
-			log.ErrorLog.Printf("auto-update: %v", err)
-		}
-	}()
-}
-
-func autoUpdate() error {
-	cfg, err := config.LoadConfig()
-	if err != nil || cfg == nil {
-		if !autoUpdateEnabled(nil) {
-			return nil
-		}
-		return autoUpdateForChannel(config.UpdateChannelStable)
-	}
-	if !autoUpdateEnabled(cfg) {
-		return nil
-	}
-	return autoUpdateForChannel(cfg.UpdateChannel)
-}
-
-func autoUpdateForChannel(channel string) error {
+// autoUpdateForChannel runs one auto-update cycle for channel: throttle, then
+// check, then download and install anything newer. It reports the version it
+// installed, or "" when it skipped, found nothing newer, or failed — so the
+// launch path knows whether there is a new binary worth re-execing into.
+//
+// checkTimeout bounds the release lookup and downloadBudget the tarball fetch;
+// both are parameters because `af upgrade` and the launch path have very
+// different patience (see the timeout vars above).
+//
+// The throttle window covers failures as well as successes. This has been
+// argued both ways: #459 throttled failures to stop a host that can't reach
+// api.github.com from burning its 60-req/hr unauthenticated budget on every
+// launch, then #1466 un-throttled them so a blocked API couldn't hide behind
+// the then-24-hour window for a full day. Two things settle it here. The
+// window is now 6h, so a swallowed transient failure costs hours, not a day.
+// And the check moved onto the launch's critical path — an un-throttled
+// failure no longer costs a background goroutine, it costs every single `af`
+// the full checkTimeout before the TUI opens. Retrying that eagerly is worse
+// for the user than being briefly behind, so #459's position wins.
+func autoUpdateForChannel(channel string, checkTimeout, downloadBudget time.Duration) (installed string, err error) {
 	channel = normalizeUpdateChannel(channel)
 	// Auto-update is not supported on Windows, so skip before any network
 	// operations — there is nothing to fetch, download, or install (#1002).
 	// Treat the platform skip as a successful startup decision so Windows
 	// launch loops do not re-enter this branch every time (#262).
 	if runtimeGOOS == "windows" {
-		return withUpdateCheckLock(func(cache *updateCheckCache, now time.Time) error {
+		return "", withUpdateCheckLock(func(cache *updateCheckCache, now time.Time) error {
 			currentVersion := strings.TrimPrefix(version, "v")
 			if !updateCheckDue(cache, channel, currentVersion, now) {
 				return nil
@@ -103,50 +109,71 @@ func autoUpdateForChannel(channel string) error {
 	goos := runtimeGOOS
 	goarch := runtime.GOARCH
 
-	return withUpdateCheckLock(func(cache *updateCheckCache, now time.Time) error {
+	err = withUpdateCheckLock(func(cache *updateCheckCache, now time.Time) error {
 		currentVersion := strings.TrimPrefix(version, "v")
 		if !updateCheckDue(cache, channel, currentVersion, now) {
 			return nil
 		}
+		// Close the throttle window on every outcome below, successful or
+		// not: the record says "we tried at `now`", not "we succeeded".
+		// Recording the *current* version on a failure keeps the entry
+		// truthful — nothing was installed — while still suppressing the
+		// retry until the window rolls over.
+		throttleFailure := func(tag string) {
+			if recErr := recordCheckLocked(cache, channel, tag, currentVersion, now); recErr != nil {
+				log.WarningLog.Printf("auto-update: failed to record check: %v", recErr)
+			}
+		}
 
-		latestTag, downloadURL, err := latestDownloadURL(channel, goos, goarch)
+		latestTag, downloadURL, err := latestDownloadURL(channel, goos, goarch, checkTimeout)
 		if err != nil {
+			throttleFailure("")
 			return err
 		}
 
 		// Strip leading "v" from tags for comparison.
 		latestVersion := strings.TrimPrefix(latestTag, "v")
+		// Never downgrade: a preview user switching back to stable resolves
+		// an older tag here, and installing it would roll them backwards.
 		if !isNewer(latestVersion, currentVersion) {
 			return recordCheckLocked(cache, channel, latestTag, currentVersion, now)
 		}
 
 		log.InfoLog.Printf("auto-update: updating from %s to %s", version, latestVersion)
+		// Say why the launch is pausing before the download stalls it for a
+		// few seconds. An unexplained wait in front of the TUI reads as a
+		// hang; this line is the difference between "af is broken" and "af is
+		// updating".
+		autoUpdateNotice("Updating af to v%s…\n", latestVersion)
 
-		binary, err := downloadBinaryFn(downloadURL)
+		binary, err := downloadBinaryFn(downloadURL, downloadBudget)
 		if err != nil {
+			throttleFailure(latestTag)
 			return err
 		}
 
 		execPath, err := osExecutableFn()
 		if err != nil {
+			throttleFailure(latestTag)
 			return fmt.Errorf("failed to find executable: %w", err)
 		}
 		// Resolve symlinks so we replace the real binary, not the symlink
 		// pointing to it (e.g. on macOS Homebrew installs).
 		resolvedPath, err := filepath.EvalSymlinks(execPath)
 		if err != nil {
+			throttleFailure(latestTag)
 			return fmt.Errorf("failed to resolve executable path: %w", err)
 		}
 
 		if err := config.AtomicWriteFile(resolvedPath, binary, 0755); err != nil {
+			throttleFailure(latestTag)
 			return fmt.Errorf("failed to write new binary: %w", err)
 		}
 
 		// Same rationale as `af upgrade` (#498/#1386): restart the running daemon
 		// immediately from the freshly written binary. Quiet on the no-daemon path
-		// since autoUpdate runs in the background on every launch. Pre-#501
-		// daemons don't speak the Shutdown RPC; RequestShutdown falls back to
-		// PID-file-based SIGTERM (#504).
+		// since this runs on every launch. Pre-#501 daemons don't speak the
+		// Shutdown RPC; RequestShutdown falls back to PID-file-based SIGTERM (#504).
 		result, restartErr := restartDaemonFromPath(resolvedPath)
 		switch {
 		case restartErr != nil:
@@ -156,10 +183,19 @@ func autoUpdateForChannel(channel string) error {
 		case result == daemon.ShutdownViaSIGTERM:
 			log.InfoLog.Printf("auto-update: updated to %s and restarted pre-#501 running daemon via SIGTERM fallback", latestVersion)
 		default:
-			log.InfoLog.Printf("auto-update: updated to %s (effective on next launch)", latestVersion)
+			log.InfoLog.Printf("auto-update: updated to %s", latestVersion)
 		}
+		// The binary on disk is now latestVersion; record it as such so the
+		// re-exec'd process sees a fresh, matching entry and skips its own
+		// check instead of looping back through this path.
+		installed = latestVersion
 		return recordCheckLocked(cache, channel, latestTag, latestVersion, now)
 	})
+	// installed is reported even alongside an error: the only way to reach
+	// here with both set is a successful install whose bookkeeping write
+	// failed, and the new binary is on disk either way. Swallowing that would
+	// strand the user on the old image for no reason.
+	return installed, err
 }
 
 // updateChannel returns the release channel auto-update and `af upgrade`
@@ -179,8 +215,8 @@ func updateChannel() string {
 // and returns its tag plus the tarball URL for goos/goarch. Previews are not
 // served by the releases/latest/download redirect (GitHub pins that to the
 // newest stable), so the download must address the tag directly.
-func latestDownloadURL(channel, goos, goarch string) (tag, url string, err error) {
-	tag, err = fetchLatestReleaseTagFn(channel)
+func latestDownloadURL(channel, goos, goarch string, timeout time.Duration) (tag, url string, err error) {
+	tag, err = fetchLatestReleaseTagFn(channel, timeout)
 	if err != nil {
 		return "", "", fmt.Errorf("failed to fetch latest release: %w", err)
 	}
@@ -201,11 +237,11 @@ type releaseEntry struct {
 // the given channel (#1041): the stable channel resolves directly through
 // /releases/latest, the preview channel through the release list (see the
 // endpoint docs above for why each channel needs its own endpoint).
-func fetchLatestReleaseTag(channel string) (string, error) {
+func fetchLatestReleaseTag(channel string, timeout time.Duration) (string, error) {
 	if channel == config.UpdateChannelPreview {
-		return fetchLatestPreviewChannelTag()
+		return fetchLatestPreviewChannelTag(timeout)
 	}
-	return fetchLatestStableTag()
+	return fetchLatestStableTag(timeout)
 }
 
 // fetchLatestStableTag resolves the newest stable release via
@@ -213,9 +249,9 @@ func fetchLatestReleaseTag(channel string) (string, error) {
 // the shape checks below are a tripwire against a stable release published
 // with an off-scheme tag, which must fail loudly rather than become an
 // update target.
-func fetchLatestStableTag() (string, error) {
+func fetchLatestStableTag(timeout time.Duration) (string, error) {
 	var release releaseEntry
-	if err := getGitHubJSON(githubAPILatestReleaseURL, &release); err != nil {
+	if err := getGitHubJSON(githubAPILatestReleaseURL, timeout, &release); err != nil {
 		return "", err
 	}
 	parsed := parseSemver(strings.TrimPrefix(release.TagName, "v"))
@@ -227,9 +263,9 @@ func fetchLatestStableTag() (string, error) {
 
 // fetchLatestPreviewChannelTag resolves the newest release including
 // prereleases from the release list.
-func fetchLatestPreviewChannelTag() (string, error) {
+func fetchLatestPreviewChannelTag(timeout time.Duration) (string, error) {
 	var releases []releaseEntry
-	if err := getGitHubJSON(githubAPIReleasesURL, &releases); err != nil {
+	if err := getGitHubJSON(githubAPIReleasesURL, timeout, &releases); err != nil {
 		return "", err
 	}
 	tag := pickLatestReleaseTag(config.UpdateChannelPreview, releases)
@@ -240,9 +276,9 @@ func fetchLatestPreviewChannelTag() (string, error) {
 }
 
 // getGitHubJSON fetches url from the GitHub API and decodes the JSON
-// response into out.
-func getGitHubJSON(url string, out any) error {
-	client := &http.Client{Timeout: 10 * time.Second}
+// response into out, giving up after timeout.
+func getGitHubJSON(url string, timeout time.Duration, out any) error {
+	client := &http.Client{Timeout: timeout}
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
 		return err
@@ -403,15 +439,28 @@ type updateCheckRecord struct {
 	CurrentVersion string    `json:"current_version,omitempty"`
 }
 
+// withUpdateCheckLock runs fn against the throttle cache under the update
+// lock. The lock is taken without waiting: when another `af` is already
+// mid-check its peers skip rather than queue, because a second launch has
+// nothing to gain by waiting out someone else's download — and everything to
+// lose, since this now sits in front of the TUI and a blocking wait would read
+// as a hang for as long as that download takes.
 func withUpdateCheckLock(fn func(cache *updateCheckCache, now time.Time) error) error {
 	path := lastCheckPath()
 	if path == "" {
 		return fn(&updateCheckCache{}, time.Now().UTC())
 	}
-	return config.WithFileLock(path, func() error {
+	acquired, err := config.TryWithFileLock(path, func() error {
 		cache := readUpdateCheckCache(path)
 		return fn(cache, time.Now().UTC())
 	})
+	if err != nil {
+		return err
+	}
+	if !acquired {
+		log.InfoLog.Printf("auto-update: another af holds the update lock; skipping this launch")
+	}
+	return nil
 }
 
 func readUpdateCheckCache(path string) *updateCheckCache {

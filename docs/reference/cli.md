@@ -1650,6 +1650,11 @@ Upgrade agent-factory to the latest release on the configured channel
 Upgrade agent-factory to the newest release on the configured update
 channel (stable by default, or preview via the update_channel config key).
 
+You rarely need this: af auto-updates on launch by default, at most once every
+6 hours, and re-launches you into the new version. Disable that with
+auto_update = false in your config to pin the installed version — af upgrade
+keeps working either way.
+
 A manual upgrade never downgrades: if the channel's latest release is older
 than the running binary — which happens when you switch from the preview
 channel back to stable — the upgrade is a no-op with an explanation. Pass
