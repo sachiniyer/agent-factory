@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -27,8 +28,14 @@ import (
 // af DETECTS one), these tests re-exec the test binary itself as the editor: a
 // tiny shell script on PATH execs it with fakeVSCodeEnv set, TestMain routes that
 // to fakeVSCodeServerMain, and it serves real HTTP and real WebSockets on the
-// --bind-addr it was handed. That exercises the actual spawn → probe → proxy
+// unix socket it was handed. That exercises the actual spawn → probe → proxy
 // path, including a genuine WS upgrade, with no external dependency.
+//
+// It mimics BOTH dialects' socket flags (code-server --socket/--socket-mode,
+// openvscode-server --socket-path) and — like the real editors — creates the
+// socket under its own umask, applying --socket-mode only AFTER listening. That
+// is what lets the tests prove the daemon's own 0700 directory and post-listen
+// chmod hold the security property rather than the editor's cooperation (#1873).
 
 const (
 	// fakeVSCodeEnv routes a re-exec of the test binary to fakeVSCodeServerMain.
@@ -39,6 +46,11 @@ const (
 	// fakeVSCodeHangEnv makes the fake start but never listen, standing in for a
 	// cold editor that outruns the start grace.
 	fakeVSCodeHangEnv = "AF_TEST_FAKE_CODE_SERVER_HANG"
+	// fakeVSCodeIgnoreTermEnv makes the fake ignore SIGTERM, so a stop() against
+	// it takes the full stop grace before escalating to SIGKILL. That turns the
+	// teardown/respawn overlap into a deterministic window instead of a race a
+	// test would only lose sometimes.
+	fakeVSCodeIgnoreTermEnv = "AF_TEST_FAKE_CODE_SERVER_IGNORE_TERM"
 	// fakeVSCodeMarker is served at the root so a test can prove the response
 	// came from the editor and through the proxy.
 	fakeVSCodeMarker = "AF_FAKE_CODE_SERVER_OK"
@@ -46,8 +58,8 @@ const (
 
 // fakeVSCodeServerMain is the fake editor's entry point, running in a re-exec of
 // the test binary. It mimics the parts of code-server this feature depends on:
-// it binds the --bind-addr it is given, serves the worktree it is given, and
-// upgrades WebSockets on any path (as code-server does).
+// it binds the socket it is given, serves the worktree it is given, and upgrades
+// WebSockets on any path (as code-server does).
 func fakeVSCodeServerMain() {
 	args := os.Args[1:]
 	if path := os.Getenv(fakeVSCodeArgsEnv); path != "" {
@@ -58,25 +70,28 @@ func fakeVSCodeServerMain() {
 		// not respawn us.
 		select {}
 	}
+	if os.Getenv(fakeVSCodeIgnoreTermEnv) != "" {
+		// Outlive SIGTERM so the supervisor's stop must wait out its grace, the
+		// way a wedged editor would.
+		signal.Ignore(syscall.SIGTERM)
+	}
 
 	// Parse both dialects. valueFlags is what makes the positional worktree
 	// findable: only these consume the next argv entry, so a bare word after a
 	// BOOLEAN flag (--disable-telemetry) is correctly read as the worktree.
 	valueFlags := map[string]bool{
-		"--bind-addr": true, "--auth": true, "--config": true,
-		"--host": true, "--port": true,
+		"--socket": true, "--socket-mode": true, "--auth": true, "--config": true,
+		"--socket-path": true,
 	}
-	addr, host, port, worktree := "", "", "", ""
+	socket, socketMode, worktree := "", "", ""
 	for i := 0; i < len(args); i++ {
 		a := args[i]
 		if valueFlags[a] && i+1 < len(args) {
 			switch a {
-			case "--bind-addr":
-				addr = args[i+1]
-			case "--host":
-				host = args[i+1]
-			case "--port":
-				port = args[i+1]
+			case "--socket", "--socket-path":
+				socket = args[i+1]
+			case "--socket-mode":
+				socketMode = args[i+1]
 			}
 			i++
 			continue
@@ -86,11 +101,8 @@ func fakeVSCodeServerMain() {
 		}
 		worktree = a
 	}
-	if addr == "" && host != "" && port != "" {
-		addr = net.JoinHostPort(host, port) // the openvscode-server dialect
-	}
-	if addr == "" {
-		fmt.Fprintln(os.Stderr, "fake code-server: no --bind-addr / --host+--port")
+	if socket == "" {
+		fmt.Fprintln(os.Stderr, "fake code-server: no --socket / --socket-path")
 		os.Exit(2)
 	}
 
@@ -128,11 +140,27 @@ func fakeVSCodeServerMain() {
 			fakeVSCodeMarker, worktree, r.URL.Path, r.Header.Get("X-Forwarded-Host"),
 			r.Header.Get("X-Forwarded-Prefix"))
 	})
-	srv := &http.Server{Addr: addr, Handler: mux, ReadHeaderTimeout: 5 * time.Second}
-	ln, err := net.Listen("tcp", addr)
+	srv := &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
+	// Bind the socket under the default umask, exactly as the real editors do —
+	// the daemon must not be able to rely on the child for the mode.
+	ln, err := net.Listen("unix", socket)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "fake code-server: listen %s: %v\n", addr, err)
+		fmt.Fprintf(os.Stderr, "fake code-server: listen %s: %v\n", socket, err)
 		os.Exit(2)
+	}
+	// code-server chmods only AFTER it is listening, and openvscode-server has no
+	// --socket-mode at all. Reproduce both faithfully: honor the mode if we were
+	// given one, and otherwise leave whatever umask produced.
+	if socketMode != "" {
+		mode, perr := strconv.ParseUint(socketMode, 8, 32)
+		if perr != nil {
+			fmt.Fprintf(os.Stderr, "fake code-server: bad --socket-mode %q: %v\n", socketMode, perr)
+			os.Exit(2)
+		}
+		if cerr := os.Chmod(socket, os.FileMode(mode)); cerr != nil {
+			fmt.Fprintf(os.Stderr, "fake code-server: chmod %s: %v\n", socket, cerr)
+			os.Exit(2)
+		}
 	}
 	_ = srv.Serve(ln)
 }
@@ -164,12 +192,33 @@ func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
+// shortAFHome points AGENT_FACTORY_HOME at a SHORT temporary directory and
+// returns it.
+//
+// t.TempDir() is not usable for an af home in these tests: it embeds the test's
+// name, which here runs to 40-80 characters, and the editor's socket path is
+// built under the af home. That is enough on its own to blow the ~104-byte
+// sockaddr_un limit and fail a test for a reason unrelated to what it asserts.
+// A real af home (~/.agent-factory/vscode/<hash>.sock is ~50 bytes) is nowhere
+// near the limit, so this keeps the harness from inventing a length problem —
+// while TestVSCodeSocketPath_RejectsOverlongPath still covers the limit itself.
+func shortAFHome(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "af")
+	if err != nil {
+		t.Fatalf("creating a short af home: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	t.Setenv("AGENT_FACTORY_HOME", dir)
+	return dir
+}
+
 // newVSCodeFixture builds a manager with one started local instance holding a
 // vscode tab, wired to the fake editor, and returns the manager, the instance's
 // stable id, the tab index, and the worktree the editor should be serving.
 func newVSCodeFixture(t *testing.T, binary string) (m *Manager, sessionID, tabID, worktree string) {
 	t.Helper()
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	shortAFHome(t)
 	repoPath := setupControlRepo(t)
 	repo, err := config.RepoFromPath(repoPath)
 	if err != nil {
@@ -243,14 +292,20 @@ func TestVSCodeTab_SpawnsEditorAndProxiesIt(t *testing.T) {
 	if !strings.Contains(args, worktree) {
 		t.Errorf("editor argv %q is missing the worktree argument", args)
 	}
-	bindAddr := argvValue(args, "--bind-addr")
-	host, _, err := net.SplitHostPort(bindAddr)
-	if err != nil {
-		t.Fatalf("editor --bind-addr %q is not host:port: %v", bindAddr, err)
+	// The security property: the editor listens on a unix socket and NOTHING else.
+	// A loopback port used to stand here, which is exactly what #1873 removed — an
+	// --auth none editor on a port is a second, unguarded route for any local
+	// process. See vscode_socket_test.go for the perms and no-TCP regressions.
+	socketPath := argvValue(args, "--socket")
+	if socketPath == "" {
+		t.Fatalf("editor argv %q is missing --socket", args)
 	}
-	// The security property: never 0.0.0.0, never a routable interface.
-	if ip := net.ParseIP(host); ip == nil || !ip.IsLoopback() {
-		t.Fatalf("editor bound %q, want a loopback address", bindAddr)
+	fi, err := os.Lstat(socketPath)
+	if err != nil {
+		t.Fatalf("the editor socket %s does not exist: %v", socketPath, err)
+	}
+	if fi.Mode()&os.ModeSocket == 0 {
+		t.Fatalf("editor endpoint %s is not a socket (mode %v)", socketPath, fi.Mode())
 	}
 }
 
@@ -352,7 +407,7 @@ func TestVSCodeSupervisor_ReusesOneEditorPerSession(t *testing.T) {
 		t.Fatalf("second ensureServer: %v", err)
 	}
 	if first != second {
-		t.Fatalf("ensureServer started a second editor (%s != %s); it must reuse one per session", first, second)
+		t.Fatalf("ensureServer started a second editor (%+v != %+v); it must reuse one per session", first, second)
 	}
 	if got := len(v.servers); got != 1 {
 		t.Fatalf("supervisor holds %d editors, want 1", got)
@@ -377,10 +432,14 @@ func TestVSCodeSupervisor_StopForKillsTheChild(t *testing.T) {
 		t.Fatalf("stopFor left the editor registered")
 	}
 	assertProcessGone(t, pid)
-	// The port is released, i.e. nothing is still listening on it.
-	if conn, err := net.DialTimeout("tcp", net.JoinHostPort(server.host, strconv.Itoa(server.port)), 300*time.Millisecond); err == nil {
+	// The endpoint is gone: nothing answers on the socket, and the file itself is
+	// unlinked rather than left as litter in the socket directory.
+	if conn, err := net.DialTimeout("unix", server.socketPath, 300*time.Millisecond); err == nil {
 		conn.Close()
-		t.Fatalf("something is still listening on the stopped editor's port %d", server.port)
+		t.Fatalf("something is still listening on the stopped editor's socket %s", server.socketPath)
+	}
+	if _, err := os.Lstat(server.socketPath); !os.IsNotExist(err) {
+		t.Fatalf("the stopped editor's socket %s was not unlinked (err=%v)", server.socketPath, err)
 	}
 }
 
@@ -416,26 +475,29 @@ func TestVSCodeSupervisor_RespawnsAfterDeath(t *testing.T) {
 	v := newTestVSCodeSupervisor(t, binary)
 	worktree := t.TempDir()
 
-	first, err := v.ensureServer("k", worktree)
-	if err != nil {
+	if _, err := v.ensureServer("k", worktree); err != nil {
 		t.Fatalf("ensureServer: %v", err)
 	}
 	dead := v.servers["k"]
+	deadPid := dead.cmd.Process.Pid
 	// Kill it the way a crash would, out from under the supervisor.
-	_ = syscall.Kill(-dead.cmd.Process.Pid, syscall.SIGKILL)
+	_ = syscall.Kill(-deadPid, syscall.SIGKILL)
 	<-dead.exited
 	// The cooldown gates FAILED spawns, not deaths; make sure it can't mask this.
 	v.cooldown = 0
 
-	second, err := v.ensureServer("k", worktree)
-	if err != nil {
+	if _, err := v.ensureServer("k", worktree); err != nil {
 		t.Fatalf("ensureServer after the editor died: %v", err)
 	}
-	if second == first {
-		t.Fatalf("supervisor reused the dead editor's URL %s", second)
+	// Identity is the PROCESS, not the endpoint: a session's socket path is derived
+	// from its key, so a respawn deliberately reuses the path. Comparing endpoints
+	// would therefore prove nothing about whether anything was actually restarted.
+	revived := v.servers["k"]
+	if revived == nil || !revived.alive() {
+		t.Fatal("the respawned editor is not alive")
 	}
-	if !v.servers["k"].alive() {
-		t.Fatalf("the respawned editor is not alive")
+	if revived.cmd.Process.Pid == deadPid {
+		t.Fatalf("supervisor handed back the dead editor (pid %d) instead of respawning", deadPid)
 	}
 }
 
@@ -583,9 +645,15 @@ func TestVSCodeArgs_FlavorDialects(t *testing.T) {
 		t.Errorf("flavorForBinary(wrapper) = %v, want the code-server dialect", got)
 	}
 
-	cs := strings.Join(vscodeArgs(flavorCodeServer, "127.0.0.1", 1234, "/wt"), " ")
-	if !strings.Contains(cs, "--bind-addr 127.0.0.1:1234") || !strings.Contains(cs, "--auth none") {
+	cs := strings.Join(vscodeArgs(flavorCodeServer, "/run/af/e.sock", "/wt"), " ")
+	if !strings.Contains(cs, "--socket /run/af/e.sock") || !strings.Contains(cs, "--auth none") {
 		t.Errorf("code-server argv = %q", cs)
+	}
+	// code-server has a mode flag; use it. The daemon chmods as well (the flag is
+	// applied only after listen), but dropping it here would leave the socket at
+	// the umask for the whole startup window.
+	if !strings.Contains(cs, "--socket-mode 0600") {
+		t.Errorf("code-server argv is missing --socket-mode 0600: %q", cs)
 	}
 	// --abs-proxy-base-path governs code-server's OWN /absproxy feature and does
 	// nothing for serving it under a sub-path (coder/code-server#6770). Passing it
@@ -593,10 +661,15 @@ func TestVSCodeArgs_FlavorDialects(t *testing.T) {
 	if strings.Contains(cs, "abs-proxy-base-path") {
 		t.Errorf("code-server argv passes --abs-proxy-base-path, which has no effect on sub-path serving: %q", cs)
 	}
-	ov := strings.Join(vscodeArgs(flavorOpenVSCode, "127.0.0.1", 1234, "/wt"), " ")
-	if !strings.Contains(ov, "--host 127.0.0.1") || !strings.Contains(ov, "--port 1234") ||
-		!strings.Contains(ov, "--without-connection-token") {
+	ov := strings.Join(vscodeArgs(flavorOpenVSCode, "/run/af/e.sock", "/wt"), " ")
+	if !strings.Contains(ov, "--socket-path /run/af/e.sock") || !strings.Contains(ov, "--without-connection-token") {
 		t.Errorf("openvscode-server argv = %q", ov)
+	}
+	// openvscode-server has NO --socket-mode; passing one would abort its startup
+	// on an unknown flag. Its socket is secured by the daemon's own chmod and the
+	// 0700 directory instead (#1873).
+	if strings.Contains(ov, "--socket-mode") {
+		t.Errorf("openvscode-server argv passes --socket-mode, which it does not accept: %q", ov)
 	}
 	for _, argv := range []string{cs, ov} {
 		if !strings.HasSuffix(argv, "/wt") {
@@ -609,6 +682,10 @@ func TestVSCodeArgs_FlavorDialects(t *testing.T) {
 
 func newTestVSCodeSupervisor(t *testing.T, binary string) *vscodeSupervisor {
 	t.Helper()
+	// The editor's socket lives under the af home, so every supervisor test needs
+	// one of its own. Without it a test would bind sockets in the REAL
+	// ~/.agent-factory/vscode — the live daemon's directory on a dev box.
+	shortAFHome(t)
 	v := newVSCodeSupervisor()
 	v.configuredBinary = func() string { return binary }
 	v.startGrace = 5 * time.Second
@@ -836,20 +913,22 @@ func TestVSCodeSupervisor_ReadyThenCrashedStillSelfHeals(t *testing.T) {
 	v.cooldown = time.Hour
 	worktree := t.TempDir()
 
-	first, err := v.ensureServer("k", worktree)
-	if err != nil {
+	if _, err := v.ensureServer("k", worktree); err != nil {
 		t.Fatalf("ensureServer: %v", err)
 	}
 	dead := v.servers["k"]
-	_ = syscall.Kill(-dead.cmd.Process.Pid, syscall.SIGKILL)
+	deadPid := dead.cmd.Process.Pid
+	_ = syscall.Kill(-deadPid, syscall.SIGKILL)
 	<-dead.exited
 
-	second, err := v.ensureServer("k", worktree)
-	if err != nil {
+	if _, err := v.ensureServer("k", worktree); err != nil {
 		t.Fatalf("a READY-then-crashed editor must respawn immediately, not wait out the cooldown: %v", err)
 	}
-	if second == first {
-		t.Fatalf("reused the dead editor's URL %s", second)
+	// The socket path is derived from the key and so is reused by design; the
+	// process is what must be new.
+	revived := v.servers["k"]
+	if revived == nil || revived.cmd.Process.Pid == deadPid {
+		t.Fatalf("reused the dead editor (pid %d) instead of respawning", deadPid)
 	}
 }
 
