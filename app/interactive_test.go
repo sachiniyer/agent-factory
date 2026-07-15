@@ -11,6 +11,8 @@ import (
 	"github.com/sachiniyer/agent-factory/keys"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/ui/layout"
+	"github.com/sachiniyer/agent-factory/ui/layout/zones"
+	"github.com/sachiniyer/agent-factory/ui/store"
 )
 
 // ----------------------------------------------------------------------------
@@ -485,4 +487,213 @@ func TestWheelIsInertWhileInteractive(t *testing.T) {
 // first-render bind race to retry — the whole "couldn't open an embedded terminal,
 // try again" class is structurally eliminated. The genuine non-embeddable case
 // (remote/dead panes) still falls back to full-screen attach; that is covered by
-// TestEnterOnRemotePaneFallsBackToFullScreenAttach.
+// TestEnterOnRemotePaneFallsBackToFullScreenAttach. What #1526 did NOT cover —
+// activation reached while a reconcile GATE was closed — is pinned below (#1819).
+
+// ----------------------------------------------------------------------------
+// #1819: activation binds the pane itself. reconcileLiveTermPanes deliberately
+// skips panes whose CONTEXT says "no live grid right now" (an open overlay, an
+// active #1321 preview). Entering a pane is the act that ends those states, so
+// activation must resolve them and bind — never drop an ordinary local, ready,
+// visible pane to the `o` fallback.
+// ----------------------------------------------------------------------------
+
+// previewTestHome is interactiveTestHome plus a second started session that the
+// tree cursor has moved onto, leaving the focused pane rendering a transient
+// #1321 preview of it — the state selectionChanged produces on tree navigation,
+// which also CLOSES the previewing pane's live attachment.
+func previewTestHome(t *testing.T) (h *home, focused, previewed *session.Instance, pane *store.OpenPane) {
+	t.Helper()
+	h, focused, fakes := interactiveTestHome(t)
+	h.syncLiveTermPane()
+	require.Len(t, *fakes, 1, "baseline: the focused local ready pane binds")
+	pane = h.focusedOpenPane()
+	require.NotNil(t, pane)
+
+	previewed = startedLocalInstance(t, "previewed")
+	selectInstance(h, previewed)
+	h.updatePanePreview(previewed, 0, true, false)
+	require.True(t, h.paneIsPreviewing(pane), "tree nav leaves the focused pane previewing")
+	require.Nil(t, h.liveTerms[pane.ID()], "the preview closed the pane's live attachment")
+	return h, focused, previewed, pane
+}
+
+// TestClickToInteractOnPreviewingPaneBindsInsteadOfFallingBack is the #1819
+// regression. Clicking the focused pane's body enters it (§2.5) — but when tree
+// navigation had left that pane previewing another session, the click reached
+// activation with the preview txn still live. reconcileLiveTermPanes refuses to
+// bind a previewing pane, so activation found liveTerms[p] == nil and errored
+// "couldn't open an embedded terminal … press o", for a perfectly ordinary local,
+// Ready, visible pane. Keyboard Enter never hit this because handleEnter commits
+// the preview first; the mouse path had no such funnel.
+func TestClickToInteractOnPreviewingPaneBindsInsteadOfFallingBack(t *testing.T) {
+	h, _, previewed, pane := previewTestHome(t)
+
+	body := zoneRect(t, h, zones.PaneBody(layout.PaneRegion(pane.ID())))
+	require.Equal(t, layout.PaneRegion(pane.ID()), h.ring.Active(),
+		"the pane is already focused, so a body click enters it rather than focusing it")
+	runHermeticCmd(t, h, combineCmds(press(h, body.X+3, body.Y+4), release(h, body.X+3, body.Y+4)), 0)
+
+	require.True(t, h.interactive, "clicking an eligible local pane must enter it, not fall back to `o`")
+	p := h.focusedOpenPane()
+	require.NotNil(t, p)
+	require.NotNil(t, h.liveTerms[p.ID()], "activation must install the live attachment")
+	// The click commits the preview, exactly like keyboard Enter: the user acts on
+	// the content they can SEE, so keystrokes go to the previewed session — never
+	// to the session the pane used to show.
+	assert.Equal(t, previewed, p.Instance(), "the click enters the previewed target")
+	assert.Nil(t, h.panePreviewTxn, "entering a pane resolves its preview")
+}
+
+// TestActivateInteractiveDropsStaleActivationUnderAttachHelp is the #598 fence on
+// the activation path (codex review of #1819). Enter queues an enterInteractiveMsg;
+// if the user presses `o` before it is delivered, showHelpScreen(helpTypeInstanceAttach)
+// closes the live panes to make room for the full-screen attach it runs on dismiss —
+// but attachTransitioning stays false until then. That is the ONE window where an
+// attach is pending yet neither attach flag is set, so an activation that bound here
+// would hand the coming attach a live embedded client to fight over the session size.
+// The stale activation must be dropped: no bind, no interactive mode, and no spurious
+// error toast under the overlay either.
+func TestActivateInteractiveDropsStaleActivationUnderAttachHelp(t *testing.T) {
+	h, inst, fakes := interactiveTestHome(t)
+	h.syncLiveTermPane()
+	p := h.focusedOpenPane()
+	require.NotNil(t, p)
+	require.Len(t, *fakes, 1, "baseline: the pane is bound before the attach help opens")
+
+	// `o` on a first-time attacher: the help closes the live panes for the deferred
+	// attach, and attachTransitioning is still false until dismiss.
+	_, _ = h.showHelpScreen(helpTypeInstanceAttach{}, func() tea.Cmd { return nil })
+	require.Equal(t, stateHelp, h.state)
+	require.False(t, h.attachTransitioning, "the attach is deferred to dismiss, not armed yet")
+	require.False(t, h.attached.Load())
+	require.Nil(t, h.liveTerms[p.ID()], "the attach help closed the embedded attachment (#598)")
+
+	// The Enter queued before `o` now lands.
+	require.Nil(t, h.activateInteractive(p), "a stale activation must be dropped silently")
+
+	assert.Nil(t, h.liveTerms[p.ID()], "must not resurrect the embedded client the attach help closed")
+	assert.False(t, h.interactive, "interactive mode under an overlay is incoherent — the overlay owns the keyboard")
+	assert.Len(t, *fakes, 1, "no second attachment was created for %s", inst.Title)
+}
+
+// TestEnterPaneIgnoredDuringAttachTransition pins the mouse half of the #1530
+// fence (codex review of #1819). handleEnter bails on attachTransitioning at the
+// key handler, but a click routes straight to enterPane — so during the ~20ms
+// beginAttachTransition window (stateDefault, attachTransitioning true) a click
+// would reach the preview commit and REBIND the pane, even though the activation
+// that follows is refused. The user would detach to find the pane showing a
+// different session than the one they attached from.
+func TestEnterPaneIgnoredDuringAttachTransition(t *testing.T) {
+	h, focused, _, pane := previewTestHome(t)
+
+	h.attachTransitioning = true // the 20ms beginAttachTransition window
+
+	_, cmd := h.enterPane(pane, nil)
+	runHermeticCmd(t, h, cmd, 0)
+
+	assert.False(t, h.interactive, "the attach owns the screen: no interactive entry")
+	assert.NotNil(t, h.panePreviewTxn, "the preview must not be committed mid-attach-transition")
+	assert.Equal(t, focused, pane.Instance(), "the pane must not be rebound out from under the attach")
+}
+
+// TestActivateInteractiveFallsBackWhileFullScreenAttached pins the fallback that
+// must SURVIVE #1819: a full-screen attach owns the session's tmux client, so a
+// second embedded stream would fight it over the window size (#598). That pane is
+// genuinely non-embeddable and must still refuse to bind.
+func TestActivateInteractiveFallsBackWhileFullScreenAttached(t *testing.T) {
+	h, _, _ := interactiveTestHome(t)
+	p := h.focusedOpenPane()
+	require.NotNil(t, p)
+
+	h.attached.Store(true)
+
+	require.NotNil(t, h.activateInteractive(p), "an attached session must not also bind an embedded stream")
+	assert.False(t, h.interactive)
+	assert.Nil(t, h.liveTerms[p.ID()])
+}
+
+// TestEnteredPaneRendersTypedInput covers the user-reported presentation of this
+// class: "input is accepted but the display stays stale". A pane is only healthy
+// when the SAME attachment both takes the keystrokes and backs what is rendered —
+// asserting "no error on entry" would pass even if the window rendered a stale
+// capture while SendKey vanished into an attachment nothing draws. So enter a pane
+// whose attachment was MISSING at activation (the #1819 setup) and require the
+// typed text to come back out of the pane's rendered frame.
+func TestEnteredPaneRendersTypedInput(t *testing.T) {
+	h, _, previewed, pane := previewTestHome(t)
+
+	body := zoneRect(t, h, zones.PaneBody(layout.PaneRegion(pane.ID())))
+	runHermeticCmd(t, h, combineCmds(press(h, body.X+3, body.Y+4), release(h, body.X+3, body.Y+4)), 0)
+	require.True(t, h.interactive, "the click must enter the pane")
+
+	p := h.focusedOpenPane()
+	require.NotNil(t, p)
+	require.Equal(t, previewed, p.Instance())
+
+	for _, r := range "hello" {
+		_, _ = h.handleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+	}
+
+	// Input accepted...
+	fake := focusedFake(h)
+	require.NotNil(t, fake, "the entered pane must own the attachment keystrokes route to")
+	assert.Equal(t, []string{"h", "e", "l", "l", "o"}, fake.keys, "keystrokes must reach the pane")
+	// ...AND the display follows it. Both must hold: the window renders through the
+	// very attachment that took the input, so what was typed is on screen.
+	assert.True(t, h.paneWindows[p.ID()].HasLive(), "the window must render through the attachment, not a capture")
+	assert.Contains(t, h.View(), "hello", "the pane must render the typed input, not a stale frame")
+}
+
+// TestClickCommittingWebTabPreviewShowsGuardNotAttach pins the web-tab guard on
+// the pane path (codex review of #1819). A web tab has no PTY, so it can neither
+// embed nor attach — the tree Enter path runs webTabAttachGuard before dispatching.
+// The pane path did not, so committing a previewed web tab rebound the pane and then
+// fell through to liveSessionName == "" → a full-screen attach against a tab the
+// daemon cannot stream. It must surface the "view it in the web UI" message instead.
+func TestClickCommittingWebTabPreviewShowsGuardNotAttach(t *testing.T) {
+	h, _, fakes := interactiveTestHome(t)
+	require.NoError(t, h.appState.SetHelpScreensSeen(
+		helpTypeInteractive{}.mask()|helpTypeInstanceAttach{}.mask()))
+	h.syncLiveTermPane()
+	require.Len(t, *fakes, 1)
+	pane := h.focusedOpenPane()
+	require.NotNil(t, pane)
+
+	// A second session whose tab 1 is a web tab, previewed onto the focused pane.
+	webInst := startedLocalInstance(t, "web-host")
+	webTab, err := webInst.AddWebTab("http://localhost:3000", "")
+	require.NoError(t, err)
+	require.Equal(t, session.TabKindWeb, webTab.Kind)
+	webIdx := len(webInst.GetTabs()) - 1
+	selectInstance(h, webInst)
+	h.updatePanePreview(webInst, webIdx, true, false)
+	require.True(t, h.paneIsPreviewing(pane), "the pane previews the web tab")
+
+	_, _ = h.enterPane(pane, nil)
+
+	// Every signal here is written SYNCHRONOUSLY by enterPane, so the test asserts
+	// without draining cmds. That is deliberate: the returned batch carries
+	// handleError's 3s transient-clear timer, and running it would deliver
+	// hideErrMsg and wipe the very notice under test — the notice would then
+	// survive or not depending on which cmd won, which is exactly the flake this
+	// test first shipped with (green locally, red in CI). beginAttachTransition
+	// likewise arms attachTransitioning synchronously, so a wrongly-dispatched
+	// attach is visible here with no tick to pump.
+	assert.Contains(t, h.errBox.FullError(), "web tab",
+		"the user must get the 'view it in the web UI' message")
+	assert.False(t, h.attachTransitioning,
+		"a web tab has no PTY: it must never start a full-screen attach")
+	assert.False(t, h.interactive, "a web tab cannot embed either")
+}
+
+// TestPaneErrorLabelNamesSessionOrFallsBack covers the cosmetic half of #1819:
+// the fallback error logged the name as an empty pair of quotes whenever the
+// title was unknown, which read as a formatting bug rather than a message.
+func TestPaneErrorLabelNamesSessionOrFallsBack(t *testing.T) {
+	h, inst := liveTestHome(t)
+	p := h.focusedOpenPane()
+	require.NotNil(t, p)
+	assert.Equal(t, "'"+inst.Title+"'", paneErrorLabel(p), "a titled session is named in quotes")
+	assert.Equal(t, "this pane", paneErrorLabel(nil), "an unknown pane never renders empty quotes")
+}

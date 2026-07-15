@@ -743,7 +743,6 @@ func (b *sshBackend) Type() string { return "ssh" }
 func (b *sshBackend) Capabilities() Capabilities {
 	return Capabilities{
 		Workspace:        WorkspaceRemote,
-		Attach:           true,
 		Archive:          true,
 		Recover:          true,
 		TabManagement:    true,
@@ -819,19 +818,6 @@ func (b *sshBackend) PreviewFullHistory(i *Instance) (string, error) {
 	return i.AgentServer().Preview(0, true)
 }
 
-// Attach/AttachTerminal: an ssh session attaches CLIENT-side over the WS PTY stream
-// (the daemon proxies the remote's stream through the tunnel), exactly like a local
-// session — the client's attach dispatch branches on Capabilities().Workspace and
-// never reaches the backend. These satisfy the interface with an explicit
-// routing-invariant error rather than a silent no-op.
-func (b *sshBackend) Attach(*Instance) (chan struct{}, error) {
-	return nil, fmt.Errorf("ssh sessions attach client-side over the WS PTY stream, not through the backend")
-}
-
-func (b *sshBackend) AttachTerminal(*Instance, int) (chan struct{}, error) {
-	return nil, fmt.Errorf("ssh terminal tabs attach client-side over the WS PTY stream, not through the backend")
-}
-
 func (b *sshBackend) HasUpdated(i *Instance) (updated bool, hasPrompt bool, content string) {
 	obs, err := i.AgentServer().Snapshot()
 	if err != nil {
@@ -845,7 +831,14 @@ func (b *sshBackend) SendPromptCommand(i *Instance, prompt string) error {
 }
 
 func (b *sshBackend) IsAlive(i *Instance) bool {
-	return i.AgentServer().Alive()
+	// Backend.IsAlive is bool by contract, so an unanswerable probe collapses to
+	// "not alive" here. That is safe ONLY because this method's callers
+	// (Instance.TmuxAlive, for TUI affordance checks) merely gray out a control.
+	// The daemon's destructive paths — Lost/re-provision/respawn — must NOT come
+	// through here; they call AgentServer().Alive() directly and branch on the
+	// error, because for them "unreachable" and "dead" are not the same (#1794).
+	alive, _ := i.AgentServer().Alive()
+	return alive
 }
 
 // CheckAndHandleTrustPrompt is a daemon-side no-op: the remote agent-server

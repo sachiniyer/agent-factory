@@ -256,6 +256,41 @@ func TestUpdateTaskFieldLevelDoesNotClobber(t *testing.T) {
 	assert.Equal(t, "orig", got.Name)
 }
 
+// TestDiffTaskAndUpdatePersistProjectPath is the regression guard for #1836.
+// The TUI edit form lets a user retarget a task at another repo, and its save
+// path ships a DiffTask patch. While ProjectPath was missing from TaskUpdate the
+// diff came back empty, so the edit was dropped with no error and the old path
+// reappeared on reload — data loss the user had no way to see fail.
+func TestDiffTaskAndUpdatePersistProjectPath(t *testing.T) {
+	setupTestTasks(t, []Task{
+		{ID: "p1", Name: "orig", Prompt: "p", CronExpr: "0 9 * * *", ProjectPath: "/repos/old", Program: "claude", Enabled: true},
+	})
+
+	loaded, err := GetTask("p1")
+	require.NoError(t, err)
+	old := *loaded
+	cur := old
+	cur.ProjectPath = "/repos/new"
+
+	// A ProjectPath-only edit must diff to a real patch; an empty one is the bug.
+	patch := DiffTask(old, cur)
+	require.False(t, patch.IsEmpty(), "a ProjectPath-only edit must produce a non-empty patch")
+	require.NotNil(t, patch.ProjectPath, "the patch must carry the retargeted path")
+	assert.Equal(t, "/repos/new", *patch.ProjectPath)
+
+	merged, err := UpdateTask("p1", patch)
+	require.NoError(t, err)
+	assert.Equal(t, "/repos/new", merged.ProjectPath)
+
+	// What the user sees after saving and reloading.
+	got, err := GetTask("p1")
+	require.NoError(t, err)
+	assert.Equal(t, "/repos/new", got.ProjectPath, "the retargeted path must survive a reload")
+	// Fields the patch never mentioned stay as-stored.
+	assert.Equal(t, "orig", got.Name)
+	assert.Equal(t, "0 9 * * *", got.CronExpr)
+}
+
 // TestTaskUpdateGobRoundTripPreservesZeroPointers guards the net/rpc control
 // socket (the CLI transport): gob elides a struct field at its zero value and
 // follows a *bool→false / *string→"" down to that zero and drops it, decoding the

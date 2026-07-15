@@ -121,7 +121,7 @@ func (s *SelectionOverlay) Render() string {
 	}
 	start, end := selectionWindow(s.selectedIdx, len(s.items), availableItems)
 	if start > 0 {
-		lines = append(lines, truncateOverlayLine(normalStyle.Render("  ... more above"), textRect.W))
+		lines = append(lines, truncateOverlayLine(normalStyle.Render("  … more above"), textRect.W))
 	}
 	for i := start; i < end; i++ {
 		item := s.items[i]
@@ -132,7 +132,7 @@ func (s *SelectionOverlay) Render() string {
 		}
 	}
 	if end < len(s.items) {
-		lines = append(lines, truncateOverlayLine(normalStyle.Render("  ... more below"), textRect.W))
+		lines = append(lines, truncateOverlayLine(normalStyle.Render("  … more below"), textRect.W))
 	}
 
 	if !compact {

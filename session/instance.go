@@ -54,7 +54,8 @@ const (
 	Lost
 	// Archived is the deliberate counterpart of Lost (#1028): the user ran
 	// `af sessions archive`, so the daemon tore down every tmux session (agent
-	// + shell/process tabs) and MOVED the worktree out to the global archive
+	// + shell/process tabs; web tabs have no tmux and survive with their URLs,
+	// #1809) and MOVED the worktree out to the global archive
 	// dir (<AGENT_FACTORY_HOME>/archived/<repoID>/<title>/). Where Lost is a
 	// wanted, actively-self-healing state (tmux vanished under a live record;
 	// the restore loop re-spawns it every poll), Archived is a wanted,

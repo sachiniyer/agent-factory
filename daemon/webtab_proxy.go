@@ -26,8 +26,9 @@ const webtabTokenCookie = "af_webtab_token" //nolint:gosec // cookie name, not a
 
 // WebTabTarget resolves the target URL of the web tab addressed by tabID — the
 // tab's STABLE id (#1738), not its ordinal — in the session addressed by
-// sessionID. It errors when the session or tab is missing, or when the tab is not
-// a web tab. The returned URL is the normalized target stored at create time.
+// sessionID. It errors when the session or tab is missing, when the session is
+// archived, or when the tab is not a web tab. The returned URL is the normalized
+// target stored at create time.
 //
 // Addressing by id is what keeps an open preview pinned to the dev server it was
 // opened on: closing a LOWER tab shifts every higher ordinal down, so an
@@ -41,6 +42,19 @@ func (m *Manager) WebTabTarget(sessionID, tabID string) (string, error) {
 	}
 	if instance == nil {
 		return "", fmt.Errorf("session %q not found", sessionID)
+	}
+	// An archived session is INERT, so its preserved web tab must not be served
+	// (#1809 follow-up). Archive keeps the tab's URL so a restore can render it
+	// again, but the target is a bare loopback address captured whenever the tab was
+	// created: the dev server behind it is long gone, and the port may now host
+	// something else entirely. Proxying it would make an archived session reach into
+	// a live port on the daemon's machine — the opposite of inert. The tab starts
+	// resolving again the moment a restore flips liveness back.
+	//
+	// Checked before the tab lookup: it is a property of the SESSION, so it holds
+	// however the tab is addressed.
+	if instance.IsArchived() {
+		return "", fmt.Errorf("cannot open the web tab of archived session %q: it is inert until restored (af sessions restore)", sessionID)
 	}
 	idx, ok := instance.TabIndexByID(tabID)
 	if !ok {

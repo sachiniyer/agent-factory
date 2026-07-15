@@ -174,10 +174,11 @@ func (teardownReleasePTY) finalize(_ *Instance, closed []closedTab, _ *git.GitWo
 // Phase 2b: the #802 "wait for every pane to exit before touching the worktree"
 // ordering becomes shared code instead of the duplicated prose it was when the
 // move lived in a separate daemon step. It keeps the agent tab's tmux binding as
-// a name-holder (a failed move / un-archive re-spawns it) and drops the
-// shell/process tabs; started is left true (the OpArchiving fence, not the #990
-// started guard, owns the teardown window) so a failed move self-heals via the
-// Lost-restore loop.
+// a name-holder (a failed move / un-archive re-spawns it), keeps the web tabs
+// (pure metadata — nothing was torn down, #1809) and drops the shell/process
+// tabs; started is left true (the OpArchiving fence, not the #990 started guard,
+// owns the teardown window) so a failed move self-heals via the Lost-restore
+// loop.
 type teardownArchive struct{ dest string }
 
 func (teardownArchive) closeTab(ts *tmux.TmuxSession, title, tabName string) error {
@@ -199,14 +200,36 @@ func (m teardownArchive) handleWorktree(gw *git.GitWorktree, title string) error
 func (teardownArchive) clearsStarted() bool { return false }
 
 func (teardownArchive) finalize(i *Instance, _ []closedTab, _ *git.GitWorktree) {
-	// Reduce to the agent tab (i.Tabs[0]) only. Its tmux binding is KEPT (the
+	// Reduce to the tabs an un-archive can actually bring back: the agent tab
+	// (i.Tabs[0]) and every web tab. The agent's tmux binding is KEPT (the
 	// server-side session is gone, but the name-holder lets a rollback Recover
 	// re-spawn it, and a successful archive persists it as an inert name-holder);
-	// the shell/process tabs are dropped — only the agent returns on un-archive
-	// (#1028). gitWorktree is left in place (the move relocated it; it still
-	// points at valid bytes) and started is left as the fence set it, so the
-	// refs are deliberately NOT cleared here.
-	if len(i.Tabs) > 0 {
-		i.Tabs = []*Tab{i.Tabs[0]}
+	// the shell/process tabs are dropped because this teardown just killed the
+	// tmux sessions that WERE them — there is nothing left to restore (#1028).
+	//
+	// Web tabs are different in kind and are kept (#1809): they have no tmux
+	// session and no process — a web tab IS its URL — so teardown destroys nothing
+	// and the record round-trips through TabData.URL exactly as it already does
+	// across a daemon restart. Dropping them was collateral damage from the #1028
+	// rule, written before web tabs existed, and it silently and permanently
+	// erased the URLs on the documented RESTORABLE reap path.
+	//
+	// The filter preserves relative order (the agent stays at 0, web tabs keep
+	// their sequence) rather than re-appending, because tab addressing — panes and
+	// the 1-9 number keys — is position-sensitive today.
+	//
+	// gitWorktree is left in place (the move relocated it; it still points at
+	// valid bytes) and started is left as the fence set it, so the refs are
+	// deliberately NOT cleared here.
+	if len(i.Tabs) == 0 {
+		return
 	}
+	kept := make([]*Tab, 0, len(i.Tabs))
+	kept = append(kept, i.Tabs[0])
+	for _, tab := range i.Tabs[1:] {
+		if tab.Kind == TabKindWeb {
+			kept = append(kept, tab)
+		}
+	}
+	i.Tabs = kept
 }

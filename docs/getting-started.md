@@ -23,11 +23,13 @@ override with `AF_INSTALL_DIR`, or pin a release with `--version`. Make sure
 Run `af doctor --setup` after install to verify tmux, git, your configured
 agent command, git identity, config/state/log storage, and daemon health.
 
-To update later, re-run the script or run `af upgrade`. Installed binaries also
-auto-update on launch along the **stable** channel by default; set
+You rarely need to update by hand: installed binaries auto-update on launch
+along the **stable** channel by default, at most once every 6 hours, and
+relaunch you into the new version on the spot. Set
 `update_channel = "preview"` in your global config to track preview builds
-instead, or set `auto_update = false` to opt out (see the
-[release process](release-process.md)).
+instead, or `auto_update = false` to pin what you have (see the
+[release process](release-process.md)). To update on demand anyway, re-run the
+install script or run `af upgrade`.
 
 Building from source instead? Clone the repo and run `./dev-install.sh` (this
 needs Go).

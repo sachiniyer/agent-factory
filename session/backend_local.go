@@ -68,7 +68,6 @@ func (b *LocalBackend) Type() string { return "local" }
 func (b *LocalBackend) Capabilities() Capabilities {
 	return Capabilities{
 		Workspace:        WorkspaceLocalWorktree,
-		Attach:           true,
 		Archive:          true,
 		Recover:          true,
 		TabManagement:    true,
@@ -598,24 +597,6 @@ func (b *LocalBackend) PreviewFullHistory(i *Instance) (string, error) {
 		return "", nil
 	}
 	return ts.CapturePaneContentWithOptions("-", "-")
-}
-
-// Attach and AttachTerminal are the local runtime's interactive-attach entries
-// on the Backend interface. Since #1592 Phase 2 PR7 a local session attaches
-// CLIENT-side over the daemon's WS PTY stream (apiclient.AttachStream), not
-// through the backend — the tmux-server-mediated attach driver was retired and a
-// session-package backend cannot dial the daemon socket (layering). The client's
-// attach dispatch branches on Capabilities().Workspace and routes a local
-// session to the WS driver, so these methods are never reached for a local
-// instance; they exist to satisfy the interface (whose remote hook backend does
-// attach in-process) and return an explicit routing-invariant error rather than a
-// silent no-op if something ever mis-routes here.
-func (b *LocalBackend) Attach(*Instance) (chan struct{}, error) {
-	return nil, fmt.Errorf("local sessions attach client-side over the WS PTY stream, not through the backend")
-}
-
-func (b *LocalBackend) AttachTerminal(*Instance, int) (chan struct{}, error) {
-	return nil, fmt.Errorf("local terminal tabs attach client-side over the WS PTY stream, not through the backend")
 }
 
 func (b *LocalBackend) HasUpdated(i *Instance) (updated bool, hasPrompt bool, content string) {

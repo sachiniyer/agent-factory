@@ -197,3 +197,77 @@ func TestPTYBrokerResetCaptureJoinsParkedReadLoop(t *testing.T) {
 		t.Fatal("resetCapture blocked — parked readLoop never joined (goroutine leak)")
 	}
 }
+
+// waitRingHead blocks until the broker's ring head reaches want — i.e. feed() has
+// actually appended the emitted bytes. emit()'s Write returns once the readLoop's
+// Read consumed the bytes, which is one step SHORT of them landing in the ring, so a
+// test that must observe a lagging cursor has to synchronise on the ring itself
+// rather than on the write.
+func waitRingHead(t *testing.T, br *ptyBroker, want Seq) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		br.mu.Lock()
+		head := br.headLocked()
+		br.mu.Unlock()
+		if head >= want {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("ring head never reached %d", want)
+}
+
+// TestPTYBrokerRecoveryDoesNotReplayStaleBytes is the #1840 regression: a subscriber
+// that is BEHIND at recovery time must not receive the dead pane's buffered bytes
+// after the recovery repaint.
+//
+// The setup the existing recovery tests never hit: every one of them drains each
+// event as it lands, so the subscriber's cursor is always at the live tail when
+// resetCapture runs and the ring holds nothing to replay. In production a subscriber
+// falls behind whenever its WS write blocks (up to the write timeout) while the pane
+// keeps producing — so at recovery its cursor sits below head with dead-pane bytes in
+// between.
+//
+// Fail-before/pass-after: before the fix, reseed injects the repaint but leaves the
+// ring and cursors untouched, so NextEvent returns the repaint and then — seeing
+// cursor < head — hands back the dead pane's bytes, which overwrite the freshly
+// repainted screen. After the fix resetCapture discards the dead pane's ring bytes at
+// the recovery boundary, so the repaint is the last thing A sees until the re-spawned
+// pane produces real output.
+func TestPTYBrokerRecoveryDoesNotReplayStaleBytes(t *testing.T) {
+	ch := &fakeClientlessChannel{snapshot: []byte("SCREEN-BEFORE-DEATH")}
+	br := newPTYBroker(ch)
+
+	a, err := br.subscribe(0)
+	if err != nil {
+		t.Fatalf("subscribe A: %v", err)
+	}
+	mustRepaintContains(t, a, "SCREEN-BEFORE-DEATH")
+
+	// A falls behind: the dying pane emits bytes A never consumes (its WS write was
+	// blocked). They sit in the ring with A's cursor still behind head.
+	const stale = "STALE-BYTES-FROM-DEAD-PANE"
+	ch.emit(t, []byte(stale))
+	waitRingHead(t, br, Seq(len(stale)))
+
+	// tmux dies and the daemon re-spawns it; the recovered pane shows a new screen.
+	ch.mu.Lock()
+	ch.snapshot = []byte("SCREEN-AFTER-RECOVERY")
+	ch.mu.Unlock()
+	br.resetCapture()
+
+	// A repaints the recovered screen...
+	mustRepaintContains(t, a, "SCREEN-AFTER-RECOVERY")
+
+	// ...and must NOT then be handed the dead pane's bytes on top of it.
+	if ev, err := nextWithin(t, a, 250*time.Millisecond); err == nil {
+		t.Fatalf("after the recovery repaint A got Kind=%d Data=%q, want no event: "+
+			"dead-pane bytes must not overwrite the recovered screen", ev.Kind, ev.Data)
+	}
+
+	// The recovered pane still streams: discarding the dead bytes must not wedge the
+	// ring or strand A's cursor above head.
+	ch.emit(t, []byte("post-recovery-output"))
+	mustData(t, a, "post-recovery-output")
+}

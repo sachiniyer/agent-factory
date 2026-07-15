@@ -951,18 +951,18 @@ body {
   border-bottom: 1px solid var(--af-border-subtle);
   font-size: var(--af-fs-sm);
 }
-.af-webpane-reload {
+.af-webpane-reload,
+.af-webpane-open {
   flex: 0 0 auto;
-  cursor: pointer;
-  background: transparent;
-  color: var(--af-text);
-  border: 1px solid var(--af-border);
-  border-radius: var(--af-r-md);
-  padding: 0 0.4rem;
+  display: inline-flex;
+  align-items: center;
+  padding: 0.1rem 0.4rem;
+  font-size: var(--af-fs-xs);
   line-height: 1.4;
+  text-decoration: none;
 }
-.af-webpane-reload:hover {
-  border-color: var(--af-accent);
+.af-webpane-open[hidden] {
+  display: none;
 }
 .af-webpane-url {
   flex: 1 1 auto;
@@ -971,14 +971,8 @@ body {
   text-overflow: ellipsis;
   white-space: nowrap;
   color: var(--af-text-2);
-}
-.af-webpane-open {
-  flex: 0 0 auto;
-  color: var(--af-accent);
-  text-decoration: none;
-}
-.af-webpane-open:hover {
-  text-decoration: underline;
+  font-family: var(--af-font-mono);
+  font-size: var(--af-fs-xs);
 }
 .af-webframe {
   flex: 1 1 0;
@@ -1011,6 +1005,9 @@ body {
 .af-dragging-tab .af-pane {
   outline: 1px dashed var(--af-border);
   outline-offset: -1px;
+}
+.af-dragging-tab .af-pane iframe {
+  pointer-events: none;
 }
 .af-drop-overlay {
   position: absolute;

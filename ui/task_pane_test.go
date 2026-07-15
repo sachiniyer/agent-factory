@@ -95,6 +95,41 @@ func TestTaskPaneConsumeDirtyTracksOnlyEditedTasks(t *testing.T) {
 	assert.Empty(t, tp.ConsumeDirty(), "ConsumeDirty must clear the dirty set")
 }
 
+// TestTaskPaneEditSavesProjectPath is the pane-level regression guard for
+// #1836. Retargeting a task at another repo through the edit form must reach
+// the save path as a real patch. The form set ProjectPath on the in-memory task
+// and marked it dirty, so the new path showed in the TUI, but the emitted patch
+// dropped the field — the edit was silently lost on the next reload.
+func TestTaskPaneEditSavesProjectPath(t *testing.T) {
+	oldRepo, newRepo := newGitRepo(t), newGitRepo(t)
+	tp := NewTaskPane()
+	tp.SetTasks([]task.Task{{
+		ID:          "abc",
+		Name:        "nightly",
+		Prompt:      "do it",
+		CronExpr:    "* * * * *",
+		ProjectPath: oldRepo,
+		Program:     "claude",
+		Enabled:     true,
+	}})
+	tp.SetFocus(true)
+	tp.EnterEditSelected()
+	require.True(t, tp.IsEditing())
+
+	// Retarget at the other repo and save from a non-prompt field (Enter on the
+	// prompt inserts a newline instead of submitting).
+	tp.editPath.SetValue(newRepo)
+	require.True(t, tp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEnter}))
+	assert.Empty(t, tp.editError, "a valid repo path must not fail validation")
+	assert.False(t, tp.IsEditing(), "a successful save closes the form")
+
+	dirty := tp.ConsumeDirty()
+	require.Len(t, dirty, 1, "the retargeted task must be dirty")
+	assert.Equal(t, "abc", dirty[0].ID)
+	require.NotNil(t, dirty[0].Update.ProjectPath, "the patch must carry the retargeted project path")
+	assert.Equal(t, newRepo, *dirty[0].Update.ProjectPath)
+}
+
 // TestTaskPaneConsumeDirtyExcludesDeletedTask verifies that a task edited and
 // then deleted is not returned by ConsumeDirty — deletion is handled by
 // ConsumeDeleted, and updating a just-removed task would log a spurious

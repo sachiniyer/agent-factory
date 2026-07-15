@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/sachiniyer/agent-factory/agentproto"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/session/git"
@@ -107,7 +108,8 @@ func (m *Manager) CreateTab(req CreateTabRequest) (string, error) {
 	// clobber-safe single-writer direction of #960 — rather than a whole-list
 	// SaveInstances, which would re-serialize the manager's entire view and was
 	// the dual-writer clobber surface PR 4 retires. Mirrors CloseTab/SetPRInfo.
-	if err := persistInstanceData(repoID, instance.ToInstanceData()); err != nil {
+	data := instance.ToInstanceData()
+	if err := persistInstanceData(repoID, data); err != nil {
 		// Roll back the just-spawned tab so a persist failure does not leave a
 		// live tmux session that vanishes from the tab list on restart.
 		if closeErr := instance.CloseTab(instance.TabCount() - 1); closeErr != nil {
@@ -115,6 +117,23 @@ func (m *Manager) CreateTab(req CreateTabRequest) (string, error) {
 		}
 		return "", fmt.Errorf("failed to persist new tab: %w", err)
 	}
+
+	// Announce the grown roster (#1812). A tab created by an agent, the CLI, the
+	// TUI, or another browser window is a state change like any other, and
+	// without this an already-open web client never learns of it: it only
+	// re-Snapshots after its OWN mutation, so a quiet session's tab bar stays
+	// stale indefinitely. That silently broke the web tab's stated purpose —
+	// letting an agent inject a live browser view into the user's screen.
+	//
+	// The refreshed InstanceData rides on session.updated rather than a new tab.*
+	// event: it already carries the full Tabs roster, and every client re-projects
+	// the whole session from it (web's upsertSession, the TUI's
+	// ReconcileTabsFromData), so this needs no client change. Published after the
+	// persist so no client can observe a tab that isn't durable yet, and while
+	// still holding the repo start lock so concurrent tab mutations announce in
+	// the same order they persisted. publishEvent is non-blocking (drop-slow), so
+	// a wedged subscriber can't stall the mutation.
+	m.publishEvent(agentproto.EventSessionUpdated, data)
 	return tab.Name, nil
 }
 
@@ -152,6 +171,16 @@ func (m *Manager) CloseTab(req CloseTabRequest) (string, error) {
 	}
 	if !instance.Capabilities().TabManagement {
 		return "", fmt.Errorf("cannot close a tab on remote session %q: its tabs are fixed by remote_hooks config, not user-managed", title)
+	}
+	// An archived session's tabs are not editable (#1809 follow-up). Archive
+	// preserves web tabs so a restore can render them again; without this guard a
+	// tab-delete (CLI or the web ×) would permanently strip that URL out of the
+	// archived record BEFORE the restore that was supposed to bring it back — the
+	// exact loss the preservation exists to prevent, just moved later. This mirrors
+	// the AddTab side (TabSpawnBlocked), which has refused archived sessions since
+	// #1196: archive is inert in BOTH directions.
+	if instance.IsArchived() {
+		return "", fmt.Errorf("cannot close a tab on archived session %q; restore it first (af sessions restore)", title)
 	}
 
 	// Serialize the tab close against archive/kill/restore teardown for this
@@ -210,9 +239,16 @@ func (m *Manager) CloseTab(req CloseTabRequest) (string, error) {
 		return "", err
 	}
 
-	if err := persistInstanceData(repoID, instance.ToInstanceData()); err != nil {
+	data := instance.ToInstanceData()
+	if err := persistInstanceData(repoID, data); err != nil {
 		return "", fmt.Errorf("failed to persist tab close: %w", err)
 	}
+
+	// Announce the shrunk roster (#1812) — the close-side counterpart of
+	// CreateTab's publish; see there for why this rides on session.updated. A tab
+	// closed out-of-band must disappear from every open client, not just the one
+	// that closed it.
+	m.publishEvent(agentproto.EventSessionUpdated, data)
 	return name, nil
 }
 

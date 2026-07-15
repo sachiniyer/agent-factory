@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -9,9 +10,41 @@ import (
 	"github.com/sachiniyer/agent-factory/log"
 )
 
+// TryWithFileLock is WithFileLock for callers that must not wait: it runs fn
+// under the same exclusive flock, but only if the lock is free right now.
+// It reports whether the lock was acquired; when it was not, fn never runs and
+// the caller should treat the work as already in hand elsewhere rather than
+// queue behind it. Use this on latency-sensitive paths (a user is waiting)
+// where duplicating another process's work is pointless — blocking there turns
+// a peer's slow operation into an unexplained hang of your own.
+func TryWithFileLock(path string, fn func() error) (acquired bool, err error) {
+	lockPath := path + ".lock"
+
+	if err := os.MkdirAll(filepath.Dir(lockPath), 0755); err != nil {
+		return false, fmt.Errorf("failed to create lock directory: %w", err)
+	}
+
+	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0644)
+	if err != nil {
+		return false, fmt.Errorf("failed to open lock file %s: %w", lockPath, err)
+	}
+	defer f.Close()
+
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		if errors.Is(err, syscall.EWOULDBLOCK) {
+			return false, nil
+		}
+		return false, fmt.Errorf("failed to acquire file lock on %s: %w", lockPath, err)
+	}
+	defer syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+
+	return true, fn()
+}
+
 // WithFileLock acquires an exclusive flock on a .lock file adjacent to the target path,
 // executes fn, and releases the lock. This ensures atomic read-modify-write sequences
-// across multiple processes.
+// across multiple processes. It BLOCKS until the lock is free; see
+// TryWithFileLock when a user is waiting on the result.
 func WithFileLock(path string, fn func() error) error {
 	lockPath := path + ".lock"
 

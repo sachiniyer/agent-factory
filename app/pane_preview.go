@@ -109,7 +109,7 @@ func (m *home) updatePanePreview(selected *session.Instance, targetTab int, tabS
 		seq:         seq,
 	}
 	if changed {
-		w.InvalidateContent(target.instance, target.tab, "Loading preview...")
+		w.InvalidateContent(target.instance, target.tab, "Loading preview…")
 		m.lastPaneCapture[owner.ID()] = time.Time{}
 	}
 	return nil
@@ -125,7 +125,7 @@ func (m *home) cancelPanePreview(focusOwner bool) {
 	m.panePreviewTxn = nil
 	if w := m.paneWindows[txn.ownerPaneID]; w != nil {
 		w.ClearPreview()
-		w.InvalidateContent(txn.original.instance, txn.original.tab, "Loading pane...")
+		w.InvalidateContent(txn.original.instance, txn.original.tab, "Loading pane…")
 		m.lastPaneCapture[txn.ownerPaneID] = time.Time{}
 	}
 	if focusOwner {
@@ -201,7 +201,7 @@ func (m *home) commitPanePreviewReplace() (*store.OpenPane, tea.Cmd) {
 	m.panePreviewTxn = nil
 	if w != nil {
 		w.ClearPreview()
-		w.InvalidateContent(txn.target.instance, txn.target.tab, "Loading pane...")
+		w.InvalidateContent(txn.target.instance, txn.target.tab, "Loading pane…")
 	}
 	if !m.store.RebindOpenPane(owner, txn.target.instance, txn.target.tab) {
 		return nil, nil

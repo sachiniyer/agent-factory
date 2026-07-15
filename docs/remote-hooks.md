@@ -54,6 +54,8 @@ The `<name>` passed to hooks via `--name` is a slug derived from the session tit
 
 Examples: `"Fix Auth Bug"` → `fix-auth-bug`, `"my_app"` → `myapp`, `"af-test"` stays `af-test`. Two titles that slugify to the same value are rejected at create time, since `delete_cmd` keys on the slug. There is no hidden hash suffix.
 
+**Hook names are global across projects.** Session titles are otherwise unique only *within* a project — the same title may exist in several repos at once (see [cli.md](cli.md#af-sessions)). Remote hook names are the deliberate exception: the slug reaches your scripts verbatim, with no repo component, and they tag and reap real sandboxes by it. Two projects using one name would let a second `launch_cmd` clobber the first sandbox, and either `delete_cmd` reap the survivor. So a remote-hook session's title must not collide with a remote-hook session in *any* project; af refuses the create and names the project already using it. Local sessions are unaffected — only hook-backed remote sessions share this namespace.
+
 ### `launch_cmd`
 
 Provisions the workspace on your infrastructure, starts an `af agent-server` there, and echoes that server's authed endpoint.

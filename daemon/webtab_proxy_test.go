@@ -6,9 +6,11 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/session"
 )
 
 // newWebTabProxyFixture builds a manager with one started local instance holding a
@@ -17,17 +19,27 @@ import (
 // route's key).
 func newWebTabProxyFixture(t *testing.T, target string) (mux *http.ServeMux, sessionID, tabID string) {
 	t.Helper()
-	m, sessionID, ids, _ := newWebTabProxyFixtureN(t, target)
+	m, _, sessionID, ids, _ := newWebTabProxyFixtureN(t, target)
 	return m, sessionID, ids[0]
 }
 
-// newWebTabProxyFixtureN is newWebTabProxyFixture for N web tabs, returning each
-// tab's stable id in creation order (so tabs sit at ordinals 1..N after the agent
-// tab) plus a closer that closes the Nth web tab. It is what the misroute tests
-// need: they must close a LOWER tab and prove a HIGHER one still resolves to its
-// own dev server.
+// newWebTabProxyFixtureWithInstance is newWebTabProxyFixture plus the tracked
+// instance, for tests that must drive its lifecycle state (archived, #1809).
+func newWebTabProxyFixtureWithInstance(t *testing.T, target string) (
+	mux *http.ServeMux, inst *session.Instance, sessionID, tabID string,
+) {
+	t.Helper()
+	m, inst, sessionID, ids, _ := newWebTabProxyFixtureN(t, target)
+	return m, inst, sessionID, ids[0]
+}
+
+// newWebTabProxyFixtureN is newWebTabProxyFixture for N web tabs, returning the
+// tracked instance plus each tab's stable id in creation order (so tabs sit at
+// ordinals 1..N after the agent tab) and a closer that closes the Nth web tab. It
+// is what the misroute tests need: they must close a LOWER tab and prove a HIGHER
+// one still resolves to its own dev server.
 func newWebTabProxyFixtureN(t *testing.T, targets ...string) (
-	mux *http.ServeMux, sessionID string, tabIDs []string, closeWebTab func(n int),
+	mux *http.ServeMux, inst *session.Instance, sessionID string, tabIDs []string, closeWebTab func(n int),
 ) {
 	t.Helper()
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
@@ -41,7 +53,7 @@ func newWebTabProxyFixtureN(t *testing.T, targets ...string) (
 		t.Fatalf("NewManager: %v", err)
 	}
 	const title = "webproxy"
-	inst := startedLocalTabInstance(t, manager, repo.ID, repoPath, title, "af_"+title+"_agent")
+	inst = startedLocalTabInstance(t, manager, repo.ID, repoPath, title, "af_"+title+"_agent")
 	for i, target := range targets {
 		if _, err := manager.CreateTab(CreateTabRequest{
 			Title: title, RepoID: repo.ID, Kind: "web", URL: target, Name: fmt.Sprintf("web%d", i),
@@ -68,7 +80,7 @@ func newWebTabProxyFixtureN(t *testing.T, targets ...string) (
 			t.Fatalf("CloseTab(web%d): %v", n, err)
 		}
 	}
-	return newHTTPMux(&controlServer{manager: manager}), inst.ID, tabIDs, closeWebTab
+	return newHTTPMux(&controlServer{manager: manager}), inst, inst.ID, tabIDs, closeWebTab
 }
 
 // proxyGet issues a proxied GET for the remainder `sub` under the tab's prefix.
@@ -78,6 +90,51 @@ func proxyGet(t *testing.T, mux *http.ServeMux, sessionID, tabID, sub string) *h
 	req := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/v1/webtab/%s/%s/%s", sessionID, tabID, sub), nil)
 	mux.ServeHTTP(rec, req)
 	return rec
+}
+
+// TestWebTabProxy_RejectsArchivedSession is the #1809 follow-up gate: archive now
+// PRESERVES web tabs, which made an archived session the first one whose web tab
+// the proxy could resolve. An archived session is inert — its stored target is a
+// bare loopback address whose dev server is long gone and whose port may now host
+// something else — so the proxy must refuse until a restore. The tab works again
+// the moment liveness flips back.
+func TestWebTabProxy_RejectsArchivedSession(t *testing.T) {
+	const marker = "AF_WEBTAB_ARCHIVED_GATE"
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprint(w, marker)
+	}))
+	defer upstream.Close()
+
+	mux, inst, id, tabID := newWebTabProxyFixtureWithInstance(t, upstream.URL)
+
+	// Live: the target proxies through (the control — proving the refusal below is
+	// the archived gate and not a broken fixture).
+	if rec := proxyGet(t, mux, id, tabID, ""); rec.Code != http.StatusOK {
+		t.Fatalf("live web tab: status = %d, want 200 (body: %s)", rec.Code, rec.Body.String())
+	}
+
+	// Archived: refused, and the upstream is never reached.
+	inst.SetStatusForTest(session.Archived)
+	rec := proxyGet(t, mux, id, tabID, "")
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("archived web tab: status = %d, want 404", rec.Code)
+	}
+	if body := rec.Body.String(); !strings.Contains(body, "archived") {
+		t.Fatalf("archived web tab: body = %q, want an actionable archived message", body)
+	}
+	if strings.Contains(rec.Body.String(), marker) {
+		t.Fatal("archived web tab: the upstream was proxied; an archived session must be inert")
+	}
+
+	// Restored: the preserved tab serves again — the gate is state, not a tombstone.
+	inst.SetStatusForTest(session.Running)
+	rec = proxyGet(t, mux, id, tabID, "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("restored web tab: status = %d, want 200 (body: %s)", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), marker) {
+		t.Fatalf("restored web tab: body = %q, want the upstream content", rec.Body.String())
+	}
 }
 
 // TestWebTabProxy_ServesLoopbackTarget is the headline proxy test: a web tab
@@ -318,7 +375,7 @@ func TestWebTabProxy_ClosingLowerTabKeepsPreviewOnItsOwnServer(t *testing.T) {
 	}))
 	defer serverB.Close()
 
-	mux, id, ids, closeWebTab := newWebTabProxyFixtureN(t, serverA.URL, serverB.URL)
+	mux, _, id, ids, closeWebTab := newWebTabProxyFixtureN(t, serverA.URL, serverB.URL)
 	tabA, tabB := ids[0], ids[1]
 
 	// Before: webB's id serves B.

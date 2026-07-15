@@ -100,6 +100,19 @@ func newSandboxBackend() *sandboxBackend {
 
 func (b *sandboxBackend) Type() string { return "docker" }
 
+// Capabilities matches what backend_docker.go actually reports: an off-box
+// workspace that advertises Recover. The embedded FakeBackend claims a LOCAL
+// worktree, which would route this double around the remote-only branches the
+// resume path takes (#1794) and quietly test the wrong runtime.
+func (b *sandboxBackend) Capabilities() session.Capabilities {
+	return session.Capabilities{
+		Workspace:        session.WorkspaceRemote,
+		Archive:          true,
+		Recover:          true,
+		InteractiveInput: true,
+	}
+}
+
 func (b *sandboxBackend) Start(*session.Instance, bool) error { return nil }
 
 func (b *sandboxBackend) Respawn(i *session.Instance) error {
@@ -232,5 +245,73 @@ func TestResumeFromLimit_RemoteLiveStallKeepsSandbox(t *testing.T) {
 	}
 	if inst.LimitReached() {
 		t.Error("limit liveness must be cleared after resuming a live stall")
+	}
+}
+
+// TestResumeLimitedSessions_RemoteBlipDoesNotRespawn is codex's #3 on PR #1804:
+// the limit-resume path bypassing the remote-loss debounce.
+//
+// The poll's debounce guards the Lost path. It does NOT guard this one, and this
+// one runs LATER IN THE SAME TICK: RunDaemon calls RefreshStatuses, then
+// RestoreLostSessions, then ResumeLimitedSessions. A limit-parked remote session
+// whose sandbox blips is left at LiveLimitReached by the poll (correctly — one
+// unanswered probe is not death), and then auto-resume picks it up, sees its own
+// probe fail, and takes the re-spawn arm. For docker/ssh/hook that Respawn is
+// recoverSandbox: a brand-new sandbox, the branch cloned from origin, and the
+// original container left running and unreferenced with all its unpushed work.
+// So with limit_auto_resume on and the window due, a single blip re-provisioned
+// anyway and the debounce bought nothing.
+//
+// The fix is the DISTINCTION rather than a second debounce: an unanswered probe
+// (probeUnknown) can never reach the re-spawn arm. Here the sandbox stops
+// answering while its container keeps running — it must not be re-provisioned,
+// and the session must stay parked for a later retry.
+func TestResumeLimitedSessions_RemoteBlipDoesNotRespawn(t *testing.T) {
+	oldSandbox := newMockSandbox(t, true) // stalled at the wall, container alive
+	freshSandbox := newMockSandbox(t, true)
+
+	manager, _, inst, backend := newRemoteLimitedSession(t, oldSandbox, freshSandbox, "keep going")
+	manager.cfg.LimitAutoResume = true
+
+	// The blip: the agent-server stops answering. The sandbox is NOT gone — it is
+	// still running, holding commits that were never pushed.
+	oldSandbox.srv.Close()
+
+	manager.ResumeLimitedSessions()
+
+	if got := backend.respawnCount(); got != 0 {
+		t.Fatalf("respawns = %d, want 0 — a single unanswered probe re-provisioned a limit-parked remote, orphaning its live sandbox and every unpushed commit on it (#1794)", got)
+	}
+	if got := freshSandbox.gotPrompts(); len(got) != 0 {
+		t.Fatalf("a replacement sandbox was provisioned and prompted (%v) on the strength of one blip", got)
+	}
+	if !inst.LimitReached() {
+		t.Error("the session must stay parked at the wall so a later tick can retry once the transport recovers, not be silently resolved by a failed probe")
+	}
+}
+
+// TestResumeLimitedSessions_RemoteDeadAgentStillRespawns fences the fix above
+// from becoming "never re-spawn a remote". The #1786 case must still work: the
+// sandbox ANSWERS that its agent exited while blocked at the wall. That is
+// authoritative, not a blip, so the re-spawn fires immediately with no debounce
+// — and the prompt lands on the fresh sandbox.
+func TestResumeLimitedSessions_RemoteDeadAgentStillRespawns(t *testing.T) {
+	oldSandbox := newMockSandbox(t, false) // answers: the agent exited
+	freshSandbox := newMockSandbox(t, true)
+
+	manager, _, inst, backend := newRemoteLimitedSession(t, oldSandbox, freshSandbox, "finish the migration")
+	manager.cfg.LimitAutoResume = true
+
+	manager.ResumeLimitedSessions()
+
+	if got := backend.respawnCount(); got != 1 {
+		t.Fatalf("respawns = %d, want 1 — an ANSWERED dead-agent report is authoritative and must re-spawn at once; the debounce is only for probes that could not be answered", got)
+	}
+	want := []string{"finish the migration"}
+	if got := freshSandbox.gotPrompts(); len(got) != 1 || got[0] != want[0] {
+		t.Fatalf("fresh sandbox prompts = %v, want %v", got, want)
+	}
+	if inst.LimitReached() {
+		t.Error("the limit must be cleared once the resume lands")
 	}
 }

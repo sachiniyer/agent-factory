@@ -86,6 +86,12 @@ interface Pane {
   // listeners/timers. Both null for a terminal pane.
   webUrl: string | null;
   webDispose: (() => void) | null;
+  // Whether the mounted web pane is the ARCHIVED placeholder rather than a live
+  // frame (#1809 follow-up). reconcile compares it against the session's current
+  // archived state so an archive/restore that leaves the tab list untouched still
+  // swaps the pane — without it, neither the target nor the tab index changes and
+  // the rebuild guard would keep a live iframe on an archived session.
+  webArchived: boolean;
 }
 
 function el(tag: string, cls: string): HTMLElement {
@@ -127,8 +133,17 @@ export class SplitView {
   // "kind:name" identity did. webTargetAt reads it to tell a web/iframe tab from a
   // terminal one.
   private tabKinds: number[] = [];
+  // Whether the shown session is archived (#1809 follow-up). An archived session is
+  // inert: the daemon refuses to proxy its preserved web tab, so the pane renders an
+  // archived placeholder instead of a frame that could only fail — or, worse, could
+  // proxy a stale loopback port that now hosts something else.
+  private archived = false;
   private tree: LayoutNode | null = null;
   private focusedId: string | null = null;
+
+  // Counts explicit layout/focus mutations, for the stale-async guard — see
+  // layoutGeneration(), which is the documented contract.
+  private layoutGen = 0;
 
   // Debounces the "focus left every pane" report so a click that moves focus A→B
   // (blur A, then focus B) doesn't flap the nav mode through rail and back.
@@ -159,6 +174,7 @@ export class SplitView {
     tabTargets: (string | undefined)[] = [],
     tabKinds: number[] = [],
     tabRealIds: string[] = [],
+    archived = false,
   ): void {
     this.token = token;
     // Snapshot what the panes are currently bound to BEFORE overwriting it, so the
@@ -170,6 +186,12 @@ export class SplitView {
     this.tabRealIds = tabRealIds;
     this.tabTargets = tabTargets;
     this.tabKinds = tabKinds;
+    // An archive/restore of the SHOWN session must re-render its web panes even when
+    // the tab list is identical (#1809 follow-up) — archiving a session whose only
+    // extra tab is a web tab leaves the count untouched, so the same-session path
+    // below would otherwise see an unchanged tree and skip the swap.
+    const archivedChanged = archived !== this.archived;
+    this.archived = archived;
     const tabCount = tabIds.length > 0 ? tabIds.length : 1;
     if (sessionId === null || token === null) {
       this.teardown();
@@ -195,9 +217,11 @@ export class SplitView {
       }
       // Reconcile on a changed tab IDENTITY, not just a changed tree (#1779) — see
       // tabsRebound. reconcile() is a no-op per pane whose identity still matches,
-      // so an unrelated snapshot still costs nothing.
+      // so an unrelated snapshot still costs nothing. An archive/restore flip (#1809)
+      // is a third trigger: it changes what a web pane may RENDER without touching
+      // any identity, so neither the tree nor tabsRebound would catch it.
       const rebound = tabsRebound(prevIds, prevKinds, prevTargets, tabIds, tabKinds, tabTargets);
-      if (before !== this.tree || rebound) {
+      if (before !== this.tree || rebound || archivedChanged) {
         this.reconcile();
         this.report();
       }
@@ -215,6 +239,26 @@ export class SplitView {
     this.focusedId = leaves(this.tree)[0]?.id ?? null;
     this.reconcile();
     this.report();
+  }
+
+  /** The tab `sessionId` will actually be shown on once selected: the focused pane's
+   *  tab for the session already on screen, the retained layout's first pane for one
+   *  shown before (setSession focuses exactly that leaf), and 0 for a session never
+   *  shown — it gets a fresh single leaf.
+   *
+   *  Selection asks this instead of asserting 0. Trees are RETAINED across session
+   *  switches, so "reset activeTab to 0 on select" states something about a pane that
+   *  already disagrees — and report(), the only writer of activeTab, dedups on the
+   *  focused tab, so a re-entry that settles on the SAME index never corrects it. The
+   *  bar then highlights Agent over a pane showing tab N, and the next close computes
+   *  its shift from the stale 0 and yanks the pane to Agent (#1855). Reading the
+   *  settled tab keeps the store's claim and the pane's binding the same statement. */
+  settledTab(sessionId: string): number {
+    if (sessionId === this.sessionId) {
+      return this.tree && this.focusedId ? (findLeaf(this.tree, this.focusedId)?.tab ?? 0) : 0;
+    }
+    const retained = this.trees.get(sessionId);
+    return retained ? (leaves(retained)[0]?.tab ?? 0) : 0;
   }
 
   /** Rebinds the FOCUSED pane to show `tab` (a 1-9 key or a tab-bar click on the
@@ -298,10 +342,28 @@ export class SplitView {
     this.lastPaneCount = 0;
   }
 
+  /** How many EXPLICIT layout/focus mutations have been committed — a tab rebind
+   *  (a 1-9 key or a tab-bar click), a drag-drop split, a pane close. Deliberately
+   *  NOT bumped by setSession's roster reconcile, which only remaps each pane to
+   *  follow its own tab and expresses no user intent.
+   *
+   *  That split is the point: an async caller which computes a tab index from a
+   *  PRE-await snapshot (see index.ts closeSessionTab) captures this first and
+   *  applies its result only if the value still matches. A slow close then can't
+   *  clobber a tab the user selected while it was in flight — their newer intent
+   *  wins — while the roster event that races the same close still passes the
+   *  guard, because it bumps nothing. */
+  layoutGeneration(): number {
+    return this.layoutGen;
+  }
+
   // --- internal: mutation commit --------------------------------------------
 
-  /** Persists the current tree for the session, re-renders, and reports the layout. */
+  /** Persists the current tree for the session, re-renders, and reports the layout.
+   *  Every explicit layout/focus mutation funnels through here, which is what makes
+   *  it the one place to count them (see layoutGeneration). */
   private commit(): void {
+    this.layoutGen++;
     if (this.sessionId && this.tree) {
       this.trees.set(this.sessionId, this.tree);
     }
@@ -402,10 +464,14 @@ export class SplitView {
       if (webTarget !== null) {
         // A web/iframe tab: mount an iframe instead of an xterm. Rebuilding reloads
         // the frame and drops the dev server's in-page state, so it happens only on a
-        // real change: a different tab here, or a changed target. A web pane's src
-        // encodes no ordinal any more (proxied → /v1/webtab/{session}/{tabId}/…,
-        // external → the target URL), so a merely-moved tab is followed, never rebuilt.
-        if (pane.term || pane.webUrl !== webTarget || staleAddress) {
+        // real change: a different tab here, a changed target, or a flip of the
+        // session's ARCHIVED state (#1809) — which swaps a live frame for the inert
+        // placeholder and back WITHOUT changing the target, the ordinal, or the
+        // identity, so no other term here would catch it. A merely-MOVED tab is not
+        // a real change any more: a web pane's src encodes no ordinal (proxied →
+        // /v1/webtab/{session}/{tabId}/…, #1810; external → the target URL), so it is
+        // followed rather than rebuilt.
+        if (pane.term || pane.webUrl !== webTarget || staleAddress || pane.webArchived !== this.archived) {
           pane.term?.dispose();
           pane.term = null;
           pane.webDispose?.();
@@ -489,6 +555,7 @@ export class SplitView {
       status: "connecting",
       webUrl: null,
       webDispose: null,
+      webArchived: false,
     };
     this.wireDrop(pane);
     return pane;
@@ -517,6 +584,7 @@ export class SplitView {
    *  fallback when embedding is blocked. */
   private mountWebPane(pane: Pane, target: string, realId: string): void {
     pane.webUrl = target;
+    pane.webArchived = this.archived;
     const sessionId = this.sessionId ?? "";
     // A loopback target is proxied THROUGH the daemon, addressed by the tab's stable
     // id (#1810). realId is required: the proxy route has no ordinal form to fall
@@ -525,17 +593,31 @@ export class SplitView {
     // the target directly is the honest degradation rather than minting a URL the
     // daemon would 404.
     const proxied = target !== "" && realId !== "" && isLoopbackWebUrl(target);
-    const src = proxied ? webProxyPath(sessionId, realId, target, this.token) : target;
+    // An archived session is inert (#1809 follow-up), so the frame is never pointed
+    // at the target: the daemon refuses to proxy an archived session's web tab, and
+    // for a DIRECT external tab there is no daemon in the path to refuse — the frame
+    // would load the live site out of a session the user has shelved. Blanking src
+    // here (rather than only overlaying the placeholder) is what guarantees no
+    // request is issued either way.
+    const src = this.archived ? "" : proxied ? webProxyPath(sessionId, realId, target, this.token) : target;
     // The "open externally" href: for a proxied local preview, the same-origin
     // proxy path (works for the remote viewer); for an external tab, the site URL.
-    const openHref = src;
+    // Computed from the target rather than reused from `src`, which an archived
+    // session deliberately blanks — the two only coincide while the session is live.
+    // The archived branch below withdraws this link outright, so it is never the
+    // thing that reaches an inert session's target.
+    const openHref = proxied ? webProxyPath(sessionId, realId, target, this.token) : target;
 
     const wrap = el("div", "af-webpane");
 
     const bar = el("div", "af-webpane-bar");
     const reload = document.createElement("button");
     reload.type = "button";
-    reload.className = "af-webpane-reload";
+    // Reload and open are the same KIND of control — a quiet secondary action on a
+    // thin bar — so they share the app's ghost idiom (.af-ghost, as used by the
+    // modal/terminal/task actions) and differ only in their glyph. The semantic
+    // .af-webpane-* class stays as the identity hook for CSS and the driver test.
+    reload.className = "af-ghost af-webpane-reload";
     reload.title = "Reload";
     reload.setAttribute("aria-label", "Reload web tab");
     reload.textContent = "↻"; // ↻
@@ -543,11 +625,11 @@ export class SplitView {
     urlText.textContent = target || "(no URL)";
     urlText.title = target;
     const open = document.createElement("a");
-    open.className = "af-webpane-open";
+    open.className = "af-ghost af-webpane-open";
     open.href = openHref;
     open.target = "_blank";
     open.rel = "noopener noreferrer";
-    open.textContent = "open ↗"; // ↗
+    open.textContent = "Open ↗"; // ↗
     bar.append(reload, urlText, open);
 
     const frame = document.createElement("iframe");
@@ -575,6 +657,25 @@ export class SplitView {
 
     wrap.append(bar, frame, fallback);
     pane.host.replaceChildren(wrap);
+
+    // An ARCHIVED session's web tab is preserved but inert (#1809 follow-up): the
+    // URL survives archive so a restore can render it again, but until then there is
+    // nothing legitimate to show. The target is a bare loopback address from
+    // whenever the tab was created — its dev server is long gone and the port may
+    // now host something else — so the pane says so instead of framing it, and the
+    // "open ↗" escape hatch is withdrawn (it would only hit the refusing proxy, or
+    // reach a port that is no longer the preview). Checked before the no-URL case:
+    // "restore it" is the actionable message for either.
+    if (this.archived) {
+      fallback.classList.add("af-webpane-archived");
+      fbMsg.textContent = "This session is archived. Restore it to load this web tab.";
+      fbLink.hidden = true;
+      open.hidden = true;
+      fallback.hidden = false;
+      frame.hidden = true;
+      pane.webDispose = null;
+      return;
+    }
 
     // A web tab with no target (a malformed request, or an older persisted record)
     // renders a clean fallback rather than a blank pane — there is nothing to frame

@@ -52,7 +52,7 @@ func (e *ErrBox) String() string {
 }
 
 func (e *ErrBox) statusLine() string {
-	line := strings.Join(strings.Split(e.FullError(), "\n"), "//")
+	line := strings.Join(strings.Split(e.FullError(), "\n"), " · ")
 	if runewidth.StringWidth(line) <= e.width {
 		return line
 	}

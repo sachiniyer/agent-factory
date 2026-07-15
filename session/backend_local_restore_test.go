@@ -108,37 +108,19 @@ func TestLocalBackendStartRestoreReinjectsSystemPrompt(t *testing.T) {
 
 // --- remote terminal capability (#1592 Phase 4 PR7) ---
 //
-// The per-config terminal_cmd hook and HookBackend.AttachTerminal are DELETED:
-// a remote session's terminal tab is now served by the in-sandbox af agent-server
-// over the WS PTY stream, exactly like docker/ssh, so a hook session always
-// advertises TerminalTab and attaches client-side (never through the backend).
+// The per-config terminal_cmd hook is DELETED: a remote session's terminal tab is
+// now served by the in-sandbox af agent-server over the WS PTY stream, exactly
+// like docker/ssh, so a hook session always advertises TerminalTab and attaches
+// client-side. The former routing-guard subtests here asserted that the backend's
+// Attach/AttachTerminal errored rather than attaching; #1852 deleted that surface
+// outright, so there is nothing left to mis-route and nothing to guard — what
+// remains worth pinning is the capability the client's dispatch reads.
 
 func TestInstanceRemoteTerminalCapability(t *testing.T) {
 	t.Run("remote hook session always advertises the terminal tab", func(t *testing.T) {
 		caps := (&Instance{backend: &HookBackend{}}).Capabilities()
 		assert.True(t, caps.Workspace == WorkspaceRemote && caps.TerminalTab,
 			"a provision-and-expose hook session has full parity, incl. the terminal tab")
-	})
-
-	t.Run("remote hook AttachTerminal is a client-side WS routing guard", func(t *testing.T) {
-		i := &Instance{backend: &HookBackend{}}
-		_, err := i.AttachTerminal(1)
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "attach client-side over the WS PTY stream")
-	})
-
-	t.Run("local backend AttachTerminal is a client-side WS routing guard", func(t *testing.T) {
-		// Since #1592 Phase 2 PR7 a local session's terminal tab attaches
-		// CLIENT-side over the WS PTY stream (apiclient.AttachStream); the client's
-		// locality branch never dispatches a local attach through the backend, so
-		// LocalBackend.AttachTerminal exists only to satisfy the interface and
-		// returns an explicit routing-invariant error rather than a silent no-op.
-		i := &Instance{backend: &LocalBackend{}}
-		caps := i.Capabilities()
-		assert.False(t, caps.Workspace == WorkspaceRemote && caps.TerminalTab)
-		_, err := i.AttachTerminal(1)
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "attach client-side over the WS PTY stream")
 	})
 }
 

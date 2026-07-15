@@ -1,12 +1,16 @@
 package daemon
 
 import (
+	"errors"
 	"fmt"
+	"os/exec"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/sachiniyer/agent-factory/session"
+	sessiongit "github.com/sachiniyer/agent-factory/session/git"
 )
 
 // limitResumeBackend is a FakeBackend instrumented for the usage-limit manual-
@@ -16,13 +20,20 @@ import (
 // the real backend. Respawn — the guard-free re-spawn core the fix uses instead —
 // and SendPromptCommand record their calls so the test can assert which path ran
 // and what prompt was re-delivered.
+//
+// onRespawn stands in for the durable worktree mutation a real respawn can make
+// (RebuildFreshFromRecordedBase recreating the branch); sendPromptErr fails the
+// prompt delivery that follows it. Both are the #1854 fixture and default to
+// inert, so the tests predating it are unaffected.
 type limitResumeBackend struct {
 	*session.FakeBackend
-	mu           sync.Mutex
-	alive        bool
-	recoverCalls int
-	respawnCalls int
-	sentPrompts  []string
+	mu            sync.Mutex
+	alive         bool
+	recoverCalls  int
+	respawnCalls  int
+	sentPrompts   []string
+	onRespawn     func(*session.Instance)
+	sendPromptErr error
 }
 
 func (b *limitResumeBackend) IsAlive(*session.Instance) bool {
@@ -48,7 +59,13 @@ func (b *limitResumeBackend) Recover(i *session.Instance) error {
 func (b *limitResumeBackend) Respawn(i *session.Instance) error {
 	b.mu.Lock()
 	b.respawnCalls++
+	mutate := b.onRespawn
 	b.mu.Unlock()
+	// A real respawn can rebuild the worktree on its way to success, mutating
+	// durable state before anything downstream runs (#1854).
+	if mutate != nil {
+		mutate(i)
+	}
 	// The guard-free core: re-spawn regardless of liveness (matches the real
 	// LocalBackend.respawn, which ends by marking the session live).
 	_ = i.Transition(session.ConfirmLive())
@@ -57,8 +74,11 @@ func (b *limitResumeBackend) Respawn(i *session.Instance) error {
 
 func (b *limitResumeBackend) SendPromptCommand(_ *session.Instance, prompt string) error {
 	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.sendPromptErr != nil {
+		return b.sendPromptErr
+	}
 	b.sentPrompts = append(b.sentPrompts, prompt)
-	b.mu.Unlock()
 	return nil
 }
 
@@ -100,6 +120,68 @@ func TestResumeFromLimit_ExitedAgent_RespawnsNotRecover(t *testing.T) {
 	}
 	if len(prompts) != 1 || prompts[0] != "finish the migration" {
 		t.Fatalf("re-delivered prompts = %v, want [\"finish the migration\"] (a task session resumes its stored prompt)", prompts)
+	}
+}
+
+// TestResumeFromLimit_PersistsRespawnMutationsWhenSendPromptFails is the
+// regression for #1854, the adjacent call-site of #1841: Respawn shares
+// LocalBackend.respawn, so it can rebuild a vanished worktree — recreating the
+// branch, flipping branchCreatedByUs true and rewriting baseCommitSHA — on its
+// way to SUCCESS. resumeFromLimit persisted only at the very end, so a
+// SendPrompt failure after that rebuild returned early and dropped the mutation:
+// a daemon restart reloaded a record with no rebuilt branch recorded and the
+// branch af itself created was orphaned, never cleaned up on kill.
+//
+// The poll does not paper over it — persistPollChange writes only when the
+// liveness or reset time changed, and the respawn already left the instance
+// LiveRunning, so the next tick compares LiveRunning → LiveRunning and skips.
+func TestResumeFromLimit_PersistsRespawnMutationsWhenSendPromptFails(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+
+	// The worktree the rebuild leaves behind, with branchCreatedByUs=true. The
+	// seeded disk record carries no worktree data at all, so anything the respawn
+	// rebuilt exists only in memory until something writes it back.
+	wtPath := filepath.Join(filepath.Dir(repoPath), "repo-1854")
+	branch := "af/persist-1854"
+	if out, err := exec.Command("git", "-C", repoPath, "worktree", "add", "-b", branch, wtPath).CombinedOutput(); err != nil {
+		t.Fatalf("git worktree add: %v\n%s", err, out)
+	}
+	rebuilt, err := sessiongit.NewGitWorktreeFromStorage(repoPath, wtPath, "persist-1854", branch, "", false, true)
+	if err != nil {
+		t.Fatalf("NewGitWorktreeFromStorage: %v", err)
+	}
+
+	// alive=false → probeDead → the respawn arm. The respawn rebuilds the worktree
+	// and succeeds; the SendPrompt that follows it fails.
+	backend := &limitResumeBackend{
+		FakeBackend:   session.NewFakeBackend(),
+		alive:         false,
+		onRespawn:     func(i *session.Instance) { i.SetGitWorktreeForTest(rebuilt) },
+		sendPromptErr: errors.New("agent-server refused the prompt"),
+	}
+	inst := registerStarted(t, manager, repoID, repoPath, "persist-1854", backend, true, session.Running)
+	inst.Prompt = "finish the migration"
+	inst.SetLimitReached(time.Time{})
+
+	if err := manager.resumeFromLimit(ResumeFromLimitRequest{Title: "persist-1854", RepoID: repoID}); err == nil {
+		t.Fatal("resumeFromLimit returned nil; a failed SendPrompt must still surface to the caller")
+	}
+
+	if _, respawnCalls, _ := backend.snapshot(); respawnCalls != 1 {
+		t.Fatalf("Respawn called %d times, want 1 (the fixture must reach the rebuild arm)", respawnCalls)
+	}
+
+	rec := recordFor(t, repoID, "persist-1854")
+	if rec == nil {
+		t.Fatal("record must still exist after a failed resume")
+	}
+	if rec.Worktree.BranchCreatedByUs == nil || !*rec.Worktree.BranchCreatedByUs {
+		t.Fatalf("persisted branchCreatedByUs = %v, want true (the rebuild's flag must survive a failed SendPrompt)", rec.Worktree.BranchCreatedByUs)
+	}
+	// The branch name matters as much as the flag: a restart that reloads a record
+	// with no branch recorded cannot clean up what the rebuild created.
+	if rec.Worktree.BranchName != branch {
+		t.Fatalf("persisted branch = %q, want %q (the rebuilt branch must be recorded or kill orphans it)", rec.Worktree.BranchName, branch)
 	}
 }
 
