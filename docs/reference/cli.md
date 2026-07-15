@@ -560,23 +560,33 @@ af config set <key> <value> [flags]
 Manage the background daemon: serves the web UI and schedules tasks
 
 The agent-factory daemon runs task cron schedules in-process, supervises
-watch-task scripts, drives autoyes mode, and serves the bundled WEB UI. It
-starts automatically when you run af.
+watch-task scripts, drives autoyes mode, and serves the bundled WEB UI.
 
-The web UI is part of the daemon — there is no separate web command. Once the
-daemon is running, open:
+The web UI is part of the daemon — there is no separate web command — so it is
+served whenever the daemon is running. Running af starts one: the TUI reads
+session state through the daemon and spawns it if none is up, so simply opening
+af serves the web UI. Autoyes mode and any enabled task start one too. Only
+standalone commands that never talk to the daemon (such as 'af config list')
+leave it down.
+
+With af running, open:
 
     http://localhost:8443
 
 It needs no token by default, so the page connects as soon as it loads. Set
-listen_addr to change the address (or to "" to turn the web server off), and
-require_token = true to put the UI behind a bearer token ('af token show').
+listen_addr to change the address (or to "" to turn the web server off).
+require_token = true demands a bearer token ('af token show') from NETWORK
+peers; on the default loopback listener same-host callers stay exempt, so the
+UI keeps opening with no login on this machine. Add require_loopback_token =
+true to require the token from localhost as well.
 Note 'af agent-server' does NOT serve the web UI: it is the headless
 per-workspace backend a daemon drives on a remote machine.
 
 Install the daemon as a user-level autostart unit (systemd user service on
 Linux, launchd agent on macOS) so tasks keep firing and the web UI stays up
-after reboots, even when af is never opened.
+after reboots, even when af is never opened:
+
+    af daemon install
 
 ```
 af daemon
