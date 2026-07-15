@@ -14,32 +14,45 @@ import (
 )
 
 // The daemon is the single always-on host for task schedules (cron and watch
-// scripts) and autoyes mode (#782). It starts automatically whenever af runs
-// and an enabled task exists; `af daemon install` additionally registers a
-// user-level autostart unit so schedules survive logouts and reboots without
-// ever opening af.
+// scripts) and autoyes mode (#782), and serves the web UI. The af root path
+// starts it only for autoyes or when an enabled task exists
+// (ensureDaemonForTasks), so a fresh install with no enabled tasks has no
+// daemon and no web listener; `af daemon install` registers a user-level
+// autostart unit so schedules and the web UI survive logouts and reboots
+// without ever opening af.
 
 var daemonCmd = &cobra.Command{
 	Use:   "daemon",
 	Short: "Manage the background daemon: serves the web UI and schedules tasks",
 	Long: `The agent-factory daemon runs task cron schedules in-process, supervises
-watch-task scripts, drives autoyes mode, and serves the bundled WEB UI. It
-starts automatically when you run af.
+watch-task scripts, drives autoyes mode, and serves the bundled WEB UI.
 
-The web UI is part of the daemon — there is no separate web command. Once the
-daemon is running, open:
+The web UI is part of the daemon — there is no separate web command — so it is
+reachable only while the daemon is running. Merely running af does not start
+one: the daemon comes up for autoyes mode, or when an enabled task exists. On a
+fresh install with no enabled tasks, 'af config list' and the TUI leave the web
+listener down and http://localhost:8443 refuses the connection. To bring it up,
+install the autostart unit (below) or take a daemon-backed action such as
+creating a session.
+
+Once the daemon is running, open:
 
     http://localhost:8443
 
 It needs no token by default, so the page connects as soon as it loads. Set
-listen_addr to change the address (or to "" to turn the web server off), and
-require_token = true to put the UI behind a bearer token ('af token show').
+listen_addr to change the address (or to "" to turn the web server off).
+require_token = true demands a bearer token ('af token show') from NETWORK
+peers; on the default loopback listener same-host callers stay exempt, so the
+UI keeps opening with no login on this machine. Add require_loopback_token =
+true to require the token from localhost as well.
 Note 'af agent-server' does NOT serve the web UI: it is the headless
 per-workspace backend a daemon drives on a remote machine.
 
 Install the daemon as a user-level autostart unit (systemd user service on
 Linux, launchd agent on macOS) so tasks keep firing and the web UI stays up
-after reboots, even when af is never opened.`,
+after reboots, even when af is never opened:
+
+    af daemon install`,
 }
 
 var daemonInstallCmd = &cobra.Command{
