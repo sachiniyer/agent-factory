@@ -140,19 +140,23 @@ func TestBindTab_RefusesStaleID(t *testing.T) {
 	cs := &controlServer{manager: manager}
 	as := inst.AgentServer()
 
-	// The local runtime binds the id-native plane, so bindTab itself succeeds and the
-	// refusal surfaces at the atomic subscribe — the point where the id is resolved.
+	// bindTab never resolves an id up front — the refusal surfaces at the operation,
+	// which is the point where the id is resolved atomically.
 	binding, err := cs.bindTab(as, inst, a.ID, 1)
-	if err == nil {
-		if _, serr := binding.subscribe(0); serr == nil {
-			t.Fatal("subscribing by a CLOSED tab's id must be refused, not bound to the tab at its old ordinal")
-		} else if !errors.Is(serr, session.ErrTabGone) {
-			t.Fatalf("a stale tab id must be refused with ErrTabGone, got %v", serr)
-		} else if got := httpStatusForTab(serr); got != 404 {
-			t.Fatalf("a stale tab id must map to HTTP 404, got %d", got)
-		}
-	} else if !errors.Is(err, session.ErrTabGone) {
-		t.Fatalf("a stale tab id must be refused with ErrTabGone, got %v", err)
+	if err != nil {
+		t.Fatalf("bindTab: %v", err)
+	}
+	if _, serr := binding.subscribe(0); serr == nil {
+		t.Fatal("subscribing by a CLOSED tab's id must be refused, not bound to the tab at its old ordinal")
+	} else if !errors.Is(serr, session.ErrTabGone) {
+		t.Fatalf("a stale tab id must be refused with ErrTabGone, got %v", serr)
+	} else if got := httpStatusForTab(serr); got != 404 {
+		t.Fatalf("a stale tab id must map to HTTP 404, got %d", got)
+	}
+	// The WRITE half is refused too — a keystroke must never reach the tab that
+	// inherited the closed tab's ordinal.
+	if werr := binding.input([]byte("x")); !errors.Is(werr, session.ErrTabGone) {
+		t.Fatalf("input to a stale tab id must be refused with ErrTabGone, got %v", werr)
 	}
 
 	// The surviving tab's own id still binds and subscribes.
@@ -239,3 +243,72 @@ func TestBindTab_LiveIDBindsIDNativePlane(t *testing.T) {
 		t.Fatalf("the binding must carry the stable id %q, got %q", b.ID, idb.tabID)
 	}
 }
+
+// TestBindTab_IDAddressedNeverPinsAnOrdinal is the invariant behind the whole
+// follow-up, asserted at the seam where it could regress: an id-addressed
+// connection must NEVER end up on ordinalTabBinding, whatever the runtime shape.
+// A runtime with an id-native plane binds by id; one without (the ordinal-shaped
+// remote wire protocol) re-resolves per operation. Pinning an ordinal at bind time
+// — which an earlier revision of this change did for the remote path — means a tab
+// that shifts mid-connection sends later input to whatever now holds the old index
+// (#1779).
+func TestBindTab_IDAddressedNeverPinsAnOrdinal(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	repoPath := setupControlRepo(t)
+	repo, err := config.RepoFromPath(repoPath)
+	if err != nil {
+		t.Fatalf("RepoFromPath: %v", err)
+	}
+	manager, err := NewManager(config.DefaultConfig())
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+
+	const title = "worker"
+	inst := startedLocalTabInstance(t, manager, repo.ID, repoPath, title, "af_"+title+"_agent")
+	b, err := inst.AddProcessTab("b", "")
+	if err != nil {
+		t.Fatalf("AddProcessTab: %v", err)
+	}
+	cs := &controlServer{manager: manager}
+
+	// The id-native runtime.
+	binding, err := cs.bindTab(inst.AgentServer(), inst, b.ID, 0)
+	if err != nil {
+		t.Fatalf("bindTab: %v", err)
+	}
+	if _, pinned := binding.(ordinalTabBinding); pinned {
+		t.Fatal("an id-addressed connection must never pin a fixed ordinal")
+	}
+
+	// A runtime with NO id-native plane must re-resolve, not pin.
+	binding, err = cs.bindTab(ordinalOnlyServer{}, inst, b.ID, 0)
+	if err != nil {
+		t.Fatalf("bindTab (ordinal-only runtime): %v", err)
+	}
+	if _, pinned := binding.(ordinalTabBinding); pinned {
+		t.Fatal("an id-addressed connection to an ordinal-shaped runtime must re-resolve per op, not pin the bind-time ordinal")
+	}
+	rb, ok := binding.(resolvingTabBinding)
+	if !ok {
+		t.Fatalf("expected a re-resolving binding for an ordinal-only runtime, got %T", binding)
+	}
+	if rb.tabID != b.ID {
+		t.Fatalf("the re-resolving binding must carry the stable id %q, got %q", b.ID, rb.tabID)
+	}
+
+	// It resolves the id to the tab's CURRENT ordinal on every op — so a shift is
+	// followed, not misrouted — and refuses an id that names no live tab.
+	if idx, rerr := rb.resolve(); rerr != nil || idx != 1 {
+		t.Fatalf("re-resolve = (%d, %v), want (1, nil)", idx, rerr)
+	}
+	gone := resolvingTabBinding{as: ordinalOnlyServer{}, instance: inst, tabID: "never-minted"}
+	if _, rerr := gone.resolve(); !errors.Is(rerr, session.ErrTabGone) {
+		t.Fatalf("an unknown id must re-resolve to ErrTabGone, got %v", rerr)
+	}
+}
+
+// ordinalOnlyServer is an AgentServer with NO id-native plane — the shape of the
+// remote agent-server, whose wire protocol is ordinal-keyed. It exists to pin
+// bindTab's runtime-shape branch; none of its methods are driven.
+type ordinalOnlyServer struct{ session.AgentServer }

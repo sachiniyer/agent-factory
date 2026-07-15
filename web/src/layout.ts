@@ -268,6 +268,63 @@ export function tabsRebound(
   );
 }
 
+/** Re-points every leaf at wherever ITS OWN tab now sits, given the tab identity
+ *  list before and after a resync (#1779).
+ *
+ *  A leaf stores an ORDINAL, but what the user put in that pane is a TAB. Those
+ *  agree only until the tab list shifts underneath: if a pane shows tab B at index 2
+ *  and another client closes a lower tab A and creates C, B is now at index 1 while
+ *  the leaf still says 2 — which is C. Reconciling from the leaf's stale ordinal
+ *  therefore rebinds the pane to C: a misroute, and precisely the one the stable id
+ *  exists to prevent. Detecting that the tab set changed is not enough; the leaves
+ *  have to be MOVED before anything reads them.
+ *
+ *  Surviving tabs follow their identity. A leaf whose identity is gone (its tab was
+ *  really closed) keeps its ordinal and lets reconcile rebuild it against whatever
+ *  now occupies that slot — the same degradation as a plain tab-count shrink. The one
+ *  conflict is a dead leaf sitting on an ordinal a survivor has just claimed: the
+ *  survivor wins (it is the pane that actually holds that tab) and the dead leaf is
+ *  closed, since the tab it was showing no longer exists. That priority matters —
+ *  validate() also drops duplicates, but it keeps the FIRST leaf in visual order,
+ *  which would just as easily evict the survivor and keep the pane whose tab died.
+ *
+ *  Node references are preserved when nothing moves, so the common no-op resync does
+ *  not churn a rebuild. */
+export function remapByIdentity(root: LayoutNode, prevIds: string[], ids: string[]): LayoutNode {
+  if (prevIds.length === 0) {
+    return root; // nothing was bound yet — no leaf can be stale
+  }
+  // Where each surviving leaf's tab moved to. An identity absent from `ids` is a tab
+  // that is really gone and gets no claim.
+  const moved = new Map<string, number>();
+  const claimed = new Set<number>();
+  for (const leaf of leaves(root)) {
+    const identity = prevIds[leaf.tab];
+    if (identity === undefined || identity === "") {
+      continue;
+    }
+    const next = ids.indexOf(identity);
+    if (next >= 0) {
+      moved.set(leaf.id, next);
+      claimed.add(next);
+    }
+  }
+  if (moved.size === 0) {
+    return root;
+  }
+  let cur = mapAllLeaves(root, (leaf) => {
+    const next = moved.get(leaf.id);
+    return next === undefined || next === leaf.tab ? leaf : { ...leaf, tab: next };
+  });
+  // Drop a dead-identity leaf that now collides with a survivor's claim.
+  for (const leaf of leaves(cur)) {
+    if (!moved.has(leaf.id) && claimed.has(leaf.tab)) {
+      cur = closeLeaf(cur, leaf.id) ?? cur;
+    }
+  }
+  return cur;
+}
+
 /** Resolves a dropped tab payload to the ordinal it should bind, or null to CANCEL
  *  the drop (#1738/#1779).
  *

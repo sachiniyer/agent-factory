@@ -31,6 +31,7 @@ import {
   type LeafNode,
   leafCount,
   leaves,
+  remapByIdentity,
   replaceTab,
   resolveDragTab,
   setRatio,
@@ -204,7 +205,20 @@ export class SplitView {
       // Same session: reconcile the retained tree against a possibly-changed tab list.
       this.tabCount = tabCount;
       const before = this.tree;
-      this.tree = validate(this.tree ?? singleLeaf(initialTab), tabCount);
+      // Move each leaf to wherever ITS tab now sits BEFORE anything reads the tree
+      // (#1779). A leaf holds an ordinal, but the pane holds a TAB; once the list
+      // shifts, reconciling from the stale ordinal would rebind the pane to whatever
+      // tab took that slot — the misroute this whole change exists to close. A pane
+      // whose tab merely MOVED then finds its identity already matching and is left
+      // streaming untouched; only a genuinely replaced tab rebuilds.
+      // Move each leaf to wherever ITS tab now sits BEFORE anything reads the tree
+      // (#1779). A leaf holds an ordinal, but the pane holds a TAB; once the list
+      // shifts, reconciling from the stale ordinal would rebind the pane to whatever
+      // tab took that slot — the misroute this whole change exists to close. A pane
+      // whose tab merely MOVED then finds its identity already matching and is left
+      // streaming untouched; only a genuinely replaced tab rebuilds.
+      const settled = remapByIdentity(this.tree ?? singleLeaf(initialTab), prevIds, tabIds);
+      this.tree = validate(settled, tabCount);
       if (this.trees.get(sessionId) !== this.tree) {
         this.trees.set(sessionId, this.tree);
       }

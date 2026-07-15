@@ -703,6 +703,28 @@ export class AppShell {
         this.renderTabBar(state);
       }
     }
+
+    // The dragstart caches are refreshed on EVERY snapshot, deliberately outside the
+    // tab-bar's render gate (#1779). The gate keys on tabBarSig, which covers only
+    // what the bar DRAWS — kind/name/active/shown — and so ignores tab IDs. That is
+    // correct for the DOM (an id backfill changes no pixel, and rebuilding the bar
+    // would destroy a button mid-drag, the #1737 regression) but wrong for the
+    // caches: a just-created tab whose id the next snapshot backfills would keep a
+    // stale "" here, and the drag it stamps would fall back to the legacy guard
+    // instead of using the now-known stable id. Adding ids to the signature would fix
+    // the cache by reintroducing exactly the #1737 rebuild — so the cache is synced
+    // independently of the render instead.
+    this.syncTabIdentityCaches(state);
+  }
+
+  /** Refreshes the ordered tab identity + REAL-id caches the delegated dragstart
+   *  stamps into a payload. Cheap (two maps over ≤9 tabs) and pure bookkeeping — it
+   *  touches no DOM, so it is safe to run on every snapshot. */
+  private syncTabIdentityCaches(state: AppState): void {
+    const selected = selectedSession(state);
+    const tabs = selected ? sessionTabs(selected) : [];
+    this.currentTabIds = tabs.map(tabIdentity);
+    this.currentTabRealIds = tabs.map(tabRealId);
   }
 
   /** Renders the rail SCOPED to the selected project (redesign PR2): only that
@@ -911,16 +933,9 @@ export class AppShell {
     // Which tabs are currently rendered in a pane (feat: split tabs), so the bar can
     // mark an already-open tab distinctly from the focused one.
     const shown = new Set(state.shownTabs);
-    // The ordered tab identities at THIS render, kept for the delegated dragstart to
-    // stamp into a dragged tab's payload so the drop can detect a mid-drag tab-set
-    // change and cancel (split.ts).
-    this.currentTabIds = tabs.map(tabIdentity);
-    // The ordered REAL daemon ids ("" where a tab has none), parallel to
-    // currentTabIds. dragstart stamps from THIS, never from the identity list: a
-    // synthesized `kind:name` in drag.id would make the drop treat a legacy tab as
-    // stable-id-addressed and skip the sameTabs guard that is its only protection
-    // (#1779).
-    this.currentTabRealIds = tabs.map(tabRealId);
+    // The dragstart caches are NOT refreshed here: this render is gated on tabBarSig,
+    // which ignores tab ids, so an id backfill would never reach them. update() syncs
+    // them on every snapshot instead — see syncTabIdentityCaches (#1779).
 
     const children: HTMLElement[] = tabs.map((tab, i) =>
       tabButton(tab, i, i === active, shown.has(i), canManage, this.actions),

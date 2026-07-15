@@ -156,10 +156,7 @@ func (b idTabBinding) resize(rows, cols uint16) error { return b.as.ResizeTab(b.
 
 // ordinalTabBinding is the legacy ?tab=<idx> path: without a stable ?tab_id= there
 // is nothing to re-resolve, so every op addresses the same fixed ordinal for the
-// connection's life (the pre-#1738 positional behavior). It also carries a
-// ?tab_id= connection to a runtime with no id-native plane (the remote
-// agent-server, whose wire protocol is ordinal-shaped) — there the id is resolved
-// once, up front, by bindTab.
+// connection's life (the pre-#1738 positional behavior).
 type ordinalTabBinding struct {
 	as  session.AgentServer
 	tab int
@@ -173,12 +170,62 @@ func (b ordinalTabBinding) resize(rows, cols uint16) error {
 	return b.as.Resize(b.tab, rows, cols)
 }
 
+// resolvingTabBinding carries an id-addressed connection to a runtime with NO
+// id-native plane — the remote agent-server, whose wire protocol is ordinal-shaped
+// (its brokers and channels are keyed by index), so the id cannot be pushed all the
+// way down the way it can locally.
+//
+// It re-resolves the id to a CURRENT ordinal on every operation rather than pinning
+// the one it saw at bind time. Pinning would mean that if the addressed tab shifts
+// mid-connection, later input/resize keep hitting the old index — the positional
+// misroute the stable id exists to prevent, reintroduced on this path (#1779). This
+// still has a narrow window the local path does not (the resolve and the remote
+// server's own ordinal→broker lookup are not one atomic step), but it is the best
+// an ordinal-shaped protocol allows and is strictly better than a fixed ordinal. A
+// tab that no longer resolves is ErrTabGone — the op is refused, not re-pointed.
+type resolvingTabBinding struct {
+	as       session.AgentServer
+	instance *session.Instance
+	tabID    string
+}
+
+func (b resolvingTabBinding) resolve() (int, error) {
+	idx, ok := b.instance.TabIndexByID(b.tabID)
+	if !ok {
+		return 0, fmt.Errorf("session %q tab id %q: %w", b.instance.Title, b.tabID, session.ErrTabGone)
+	}
+	return idx, nil
+}
+
+func (b resolvingTabBinding) subscribe(since session.Seq) (session.PTYSubscription, error) {
+	idx, err := b.resolve()
+	if err != nil {
+		return nil, err
+	}
+	return b.as.Subscribe(idx, since)
+}
+
+func (b resolvingTabBinding) input(p []byte) error {
+	idx, err := b.resolve()
+	if err != nil {
+		return err
+	}
+	return b.as.Input(idx, p)
+}
+
+func (b resolvingTabBinding) resize(rows, cols uint16) error {
+	idx, err := b.resolve()
+	if err != nil {
+		return err
+	}
+	return b.as.Resize(idx, rows, cols)
+}
+
 // bindTab chooses how this connection addresses its tab. A ?tab_id= binds the
 // id-native plane when the runtime has one (the local agent-server), which is the
-// race-free path. A runtime without one (remote, ordinal-shaped wire protocol)
-// resolves the id ONCE here and refuses a stale one — strictly better than a
-// silent ordinal fall-through, and the best its protocol allows. No ?tab_id= at
-// all is a legacy client: pin the ordinal it asked for.
+// race-free path; a runtime without one re-resolves the id per operation. Either
+// way an id-addressed connection NEVER pins an ordinal. No ?tab_id= at all is a
+// legacy client: pin the ordinal it asked for, exactly as before #1738.
 func (cs *controlServer) bindTab(as session.AgentServer, instance *session.Instance, tabID string, tab int) (ptyTabBinding, error) {
 	if tabID == "" {
 		return ordinalTabBinding{as: as, tab: tab}, nil
@@ -186,11 +233,7 @@ func (cs *controlServer) bindTab(as session.AgentServer, instance *session.Insta
 	if ta, ok := as.(session.TabAddressableServer); ok {
 		return idTabBinding{as: ta, tabID: tabID}, nil
 	}
-	idx, ok := instance.TabIndexByID(tabID)
-	if !ok {
-		return nil, fmt.Errorf("session %q tab id %q: %w", instance.Title, tabID, session.ErrTabGone)
-	}
-	return ordinalTabBinding{as: as, tab: idx}, nil
+	return resolvingTabBinding{as: as, instance: instance, tabID: tabID}, nil
 }
 
 // httpStatusForTab maps a tab-addressing failure to its status: a stale/unknown

@@ -7142,6 +7142,37 @@ function tabsRebound(prevIds, prevKinds, prevTargets, ids, kinds, targets) {
     targets.map((t) => t ?? "")
   );
 }
+function remapByIdentity(root2, prevIds, ids) {
+  if (prevIds.length === 0) {
+    return root2;
+  }
+  const moved = /* @__PURE__ */ new Map();
+  const claimed = /* @__PURE__ */ new Set();
+  for (const leaf of leaves(root2)) {
+    const identity = prevIds[leaf.tab];
+    if (identity === void 0 || identity === "") {
+      continue;
+    }
+    const next = ids.indexOf(identity);
+    if (next >= 0) {
+      moved.set(leaf.id, next);
+      claimed.add(next);
+    }
+  }
+  if (moved.size === 0) {
+    return root2;
+  }
+  let cur = mapAllLeaves(root2, (leaf) => {
+    const next = moved.get(leaf.id);
+    return next === void 0 || next === leaf.tab ? leaf : { ...leaf, tab: next };
+  });
+  for (const leaf of leaves(cur)) {
+    if (!moved.has(leaf.id) && claimed.has(leaf.tab)) {
+      cur = closeLeaf(cur, leaf.id) ?? cur;
+    }
+  }
+  return cur;
+}
 function resolveDragTab(drag, tabRealIds, tabIds, tabCount) {
   if (drag.id) {
     const tab2 = tabRealIds.indexOf(drag.id);
@@ -7695,7 +7726,8 @@ var SplitView = class {
     if (sessionId === this.sessionId) {
       this.tabCount = tabCount;
       const before = this.tree;
-      this.tree = validate(this.tree ?? singleLeaf(initialTab), tabCount);
+      const settled = remapByIdentity(this.tree ?? singleLeaf(initialTab), prevIds, tabIds);
+      this.tree = validate(settled, tabCount);
       if (this.trees.get(sessionId) !== this.tree) {
         this.trees.set(sessionId, this.tree);
       }
@@ -8882,6 +8914,16 @@ var AppShell = class {
         this.renderTabBar(state);
       }
     }
+    this.syncTabIdentityCaches(state);
+  }
+  /** Refreshes the ordered tab identity + REAL-id caches the delegated dragstart
+   *  stamps into a payload. Cheap (two maps over ≤9 tabs) and pure bookkeeping — it
+   *  touches no DOM, so it is safe to run on every snapshot. */
+  syncTabIdentityCaches(state) {
+    const selected = selectedSession(state);
+    const tabs = selected ? sessionTabs(selected) : [];
+    this.currentTabIds = tabs.map(tabIdentity);
+    this.currentTabRealIds = tabs.map(tabRealId);
   }
   /** Renders the rail SCOPED to the selected project (redesign PR2): only that
    *  project's sessions, never the whole projection. Three states: no project at all
@@ -9048,8 +9090,6 @@ var AppShell = class {
     const canManage = supportsTabManagement(selected);
     const active = Math.min(Math.max(state.activeTab, 0), tabs.length - 1);
     const shown = new Set(state.shownTabs);
-    this.currentTabIds = tabs.map(tabIdentity);
-    this.currentTabRealIds = tabs.map(tabRealId);
     const children = tabs.map(
       (tab, i) => tabButton(tab, i, i === active, shown.has(i), canManage, this.actions)
     );

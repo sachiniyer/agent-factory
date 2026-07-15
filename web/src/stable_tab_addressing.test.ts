@@ -16,8 +16,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { tabIdentity, tabRealId } from "./ui.js";
-import { resolveDragTab, tabsRebound } from "./layout.js";
+import { tabBarSig, tabIdentity, tabRealId } from "./ui.js";
+import type { AppState } from "./ui.js";
+import type { SessionData } from "./types.js";
+import { leaves, remapByIdentity, resolveDragTab, tabsRebound } from "./layout.js";
 
 // --- tabRealId: the real id, never a synthesized one -----------------------
 
@@ -123,4 +125,110 @@ test("tabsRebound treats an undefined target and an empty one as the same", () =
 
 test("tabsRebound is TRUE when the tab count changes", () => {
   assert.equal(tabsRebound(["a"], [0], [""], ["a", "b"], [0, 1], ["", ""]), true);
+});
+
+// --- the drag-id cache must not hide behind the tab-bar render gate ----------
+
+test("an id backfill does NOT change tabBarSig — so the drag-id cache cannot be refreshed by the bar render", () => {
+  // The constraint that forces syncTabIdentityCaches to run outside the render gate
+  // (#1779). tabBarSig covers only what the bar DRAWS (kind/name/active/shown), so a
+  // snapshot that backfills a just-created tab's stable id is signature-identical and
+  // the bar is NOT rebuilt — correctly, since rebuilding would destroy a button held
+  // mid-drag (#1737). A drag-id cache refreshed only by renderTabBar would therefore
+  // stay stale on exactly the tab that just earned an id.
+  //
+  // If this assertion ever flips, the caches could move back into renderTabBar — but
+  // the #1737 drag regression would be back too, so it should not.
+  const sess = (tabs: SessionData["tabs"]): SessionData => ({ id: "a", title: "s", branch: "b", tabs });
+  const st = (tabs: SessionData["tabs"]): AppState =>
+    ({ selectedId: "a", sessions: [sess(tabs)], activeTab: 0, shownTabs: [0] }) as AppState;
+
+  const beforeAdopt = st([
+    { name: "agent", kind: 0, id: "id-agent" },
+    { name: "shell", kind: 1 }, // just created; no id yet
+  ]);
+  const afterAdopt = st([
+    { name: "agent", kind: 0, id: "id-agent" },
+    { name: "shell", kind: 1, id: "id-shell" }, // the snapshot backfilled it
+  ]);
+
+  assert.equal(tabBarSig(beforeAdopt), tabBarSig(afterAdopt), "an id backfill draws no pixel, so the sig must not change");
+
+  // ...and the real id the drag needs DID change across those two snapshots, which is
+  // exactly what the sig cannot see.
+  assert.equal(tabRealId({ name: "shell", kind: 1 } as { id?: string }), "");
+  assert.equal(tabRealId({ id: "id-shell" }), "id-shell");
+});
+
+// --- remapByIdentity: a pane follows its OWN tab across a shift --------------
+
+test("a pane follows its tab when a lower tab is closed and replaced (the codex #1805 repro)", () => {
+  // A leaf holds an ORDINAL but the user put a TAB in that pane. Pane shows B at
+  // index 2; another client closes A and creates C, so the list goes
+  // [agent,A,B] → [agent,B,C] and B is now at index 1. Reconciling from the leaf's
+  // stale 2 would rebind the pane to C. The leaf must move to 1 instead.
+  const prevIds = ["id-agent", "id-a", "id-b"];
+  const ids = ["id-agent", "id-b", "id-c"];
+  const tree = { kind: "leaf", id: "L1", tab: 2 } as const;
+
+  const out = remapByIdentity(tree, prevIds, ids);
+  assert.equal(leaves(out).length, 1);
+  assert.equal(leaves(out)[0].tab, 1, "the pane must follow tab B to its new ordinal, not stay on 2 (now tab C)");
+});
+
+test("a no-op resync preserves the tree REFERENCE — no churn, no rebuild", () => {
+  // Reference stability is load-bearing: setSession re-validates on every store
+  // update, and a fresh tree each time would reconcile (and rebuild terminals) on
+  // every status tick.
+  const ids = ["id-agent", "id-b"];
+  const tree = { kind: "leaf", id: "L1", tab: 1 } as const;
+  assert.equal(remapByIdentity(tree, ids, ids), tree);
+});
+
+test("a leaf whose tab was really closed keeps its ordinal and rebuilds against what is there", () => {
+  // No survivor claims index 1, so the pane degrades to showing the tab that took the
+  // slot — the same behavior as a plain tab-count shrink.
+  const prevIds = ["id-agent", "id-a"];
+  const ids = ["id-agent", "id-c"];
+  const tree = { kind: "leaf", id: "L1", tab: 1 } as const;
+  assert.equal(leaves(remapByIdentity(tree, prevIds, ids))[0].tab, 1);
+});
+
+test("when a dead leaf collides with a survivor's claim, the SURVIVOR keeps the tab", () => {
+  // Two panes: L1 shows A (index 1), L2 shows B (index 2). A is closed, C created:
+  // [agent,A,B] → [agent,B,C]. B survives and moves 2→1, which is where L1 (dead)
+  // sits. L2 actually holds B, so it must win; L1's tab is gone, so it closes.
+  // Note validate() would resolve this collision the OTHER way — it keeps the FIRST
+  // leaf — which is why remapByIdentity settles it first.
+  const prevIds = ["id-agent", "id-a", "id-b"];
+  const ids = ["id-agent", "id-b", "id-c"];
+  const tree = {
+    kind: "split",
+    id: "S1",
+    dir: "row",
+    ratio: 0.5,
+    a: { kind: "leaf", id: "L1", tab: 1 },
+    b: { kind: "leaf", id: "L2", tab: 2 },
+  } as const;
+
+  const out = remapByIdentity(tree, prevIds, ids);
+  const ls = leaves(out);
+  assert.equal(ls.length, 1, "the pane whose tab was closed must go, not the one that still holds B");
+  assert.equal(ls[0].id, "L2", "L2 is the pane that actually holds tab B");
+  assert.equal(ls[0].tab, 1, "and it follows B to its new ordinal");
+});
+
+test("remapByIdentity is a no-op before anything is bound", () => {
+  const tree = { kind: "leaf", id: "L1", tab: 0 } as const;
+  assert.equal(remapByIdentity(tree, [], ["id-agent"]), tree);
+});
+
+test("a legacy leaf with a synthesized identity still follows a shift", () => {
+  // Identity is all a legacy tab has; `1:shell` moving 2→1 is followed on that basis.
+  // This inherits the known kind:name collision hole, exactly like the DnD legacy
+  // branch — it is not made worse here.
+  const prevIds = ["0:agent", "1:other", "1:shell"];
+  const ids = ["0:agent", "1:shell"];
+  const tree = { kind: "leaf", id: "L1", tab: 2 } as const;
+  assert.equal(leaves(remapByIdentity(tree, prevIds, ids))[0].tab, 1);
 });
