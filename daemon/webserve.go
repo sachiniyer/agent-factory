@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -56,6 +57,35 @@ import (
 // URLs the shell may embed. Framed sites are sandboxed (no allow-same-origin) so
 // they get an opaque origin and cannot reach the shell or its token.
 const webCSP = "default-src 'self'; style-src 'self' 'unsafe-inline'; frame-src 'self' https: http:"
+
+// noWebShellMessage is what a listener that serves no frontend answers a browser
+// with. It is the agent-server's side of the "who serves the web UI" boundary: the
+// port exists for a daemon to drive, so a human who lands on it is lost and should
+// be handed the real address rather than a bare 404 or a 401.
+const noWebShellMessage = "this is an af agent-server (a headless single-workspace backend) and it serves no web UI. " +
+	"The web UI is served by the daemon: run 'af daemon' and open http://localhost:8443. " +
+	"This server speaks only the /v1/agent/* API that a daemon drives."
+
+// noWebShellHandler wraps the authed API handler for listeners that serve NO
+// frontend (the agent-server). It answers every non-/v1 path with a plain 404
+// explaining where the web UI actually lives, and routes /v1/... through the authed
+// handler untouched.
+//
+// The explanatory 404 sits OUTSIDE the gate, in the same place webShellHandler
+// serves the shell unauthenticated — a human who opened the wrong port has no token
+// to present, so gating the explanation would leave them staring at a bare 401. It
+// discloses only a fixed string (no state, no token, no workspace detail), and it is
+// strictly LESS exposure than what this listener served before: the entire SPA
+// bundle, unauthenticated, on the same paths.
+func noWebShellHandler(api http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/v1/") {
+			api.ServeHTTP(w, r)
+			return
+		}
+		writeHTTPError(w, http.StatusNotFound, errors.New(noWebShellMessage))
+	})
+}
 
 // webShellHandler wraps the authed API handler so the TCP listener serves the
 // embedded SPA on every non-API path while `/v1/...` keeps flowing through the

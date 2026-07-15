@@ -36,9 +36,10 @@ var agentServerCmd = &cobra.Command{
 the same REST + WebSocket protocol the daemon speaks, behind a plain-HTTP
 listener that requires a bearer token on every request.
 
-This does NOT start the web UI. If you want the browser app, run the daemon —
-any 'af' command starts it — and open http://localhost:8443. The web UI is
-bundled into the daemon and served from its listen_addr; agent-server is only
+This does NOT start the web UI, and serves no frontend at all — opening its port
+in a browser returns a 404 saying so. If you want the browser app, run the
+daemon — any 'af' command starts it — and open http://localhost:8443. The web UI
+is bundled into the daemon and served from its listen_addr; agent-server is only
 the headless per-workspace BACKEND that a daemon drives, and it exists to be
 consumed by a daemon rather than opened by a person.
 

@@ -134,7 +134,7 @@ func startHTTPServer(manager *Manager, scheduler *taskScheduler, watchers *watch
 			// and therefore readable.
 			log.WarningLog.Printf("WARNING: the daemon web API on %q is NETWORK-bound and requires NO token (require_token defaults to false); anyone who can reach it has full control. The listener is plain HTTP (no TLS), so this leaves it fully open. Set require_token = true to require auth, or keep the listener on a private network (Tailscale/VPN) or behind an authenticating proxy.", manager.cfg.ListenAddr)
 		}
-		if closer, info, err := startTCPListener(mux, manager.cfg, policy); err != nil {
+		if closer, info, err := startTCPListener(mux, manager.cfg, policy, withWebShell); err != nil {
 			log.WarningLog.Printf("failed to start daemon HTTP TCP listener on %q: %v", manager.cfg.ListenAddr, err)
 		} else {
 			closeTCP = closer

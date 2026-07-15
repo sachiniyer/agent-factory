@@ -118,18 +118,35 @@ func webListenerPolicy(cfg *config.Config) tokenGatePolicy {
 	}
 }
 
+// webShell selects whether a TCP listener also serves the embedded browser SPA.
+// Only the daemon's own web listener does: the SPA speaks the daemon's REST
+// surface (/v1/Snapshot, /v1/CreateSession, …), which the agent-server does not
+// implement, so serving the shell there would hand a visitor a working-looking
+// login screen that dead-ends on `unknown route "/v1/Snapshot"` the moment they
+// pasted a token. Making this an explicit argument keeps "who serves the
+// frontend" a decision at the call site rather than an accident of sharing
+// startTCPListener.
+type webShell bool
+
+const (
+	// withWebShell serves the browser SPA on every non-/v1 path — the daemon.
+	withWebShell webShell = true
+	// withoutWebShell leaves non-/v1 paths to the mux's own 404 — the agent-server.
+	withoutWebShell webShell = false
+)
+
 // startTCPListener binds the plain-HTTP TCP listener on cfg.ListenAddr and
 // serves mux wrapped in a token-enforcing gate + the CORS allow-list. It
 // returns a cleanup function that shuts the server down and the banner payload
 // the caller logs. policy selects how the gate treats peers (loopback
 // exemption / token disable); its zero value is the strict "token mandatory for
-// everyone" posture.
+// everyone" posture. shell selects whether the browser SPA rides along.
 //
 // It ensures the bearer token exists before opening the port (so an operator
 // enabling the listener always has a credential to present) and reads that
 // token FRESH per auth event through the gate so `af token rotate` takes effect
 // for new connections without a daemon restart.
-func startTCPListener(mux http.Handler, cfg *config.Config, policy tokenGatePolicy) (func() error, tcpListenerInfo, error) {
+func startTCPListener(mux http.Handler, cfg *config.Config, policy tokenGatePolicy, shell webShell) (func() error, tcpListenerInfo, error) {
 	// Generate-if-absent so enabling the listener always yields a usable token;
 	// the gate below re-reads the file per auth event, so rotation stays live.
 	tokenPath, err := TokenPath()
@@ -156,14 +173,21 @@ func startTCPListener(mux http.Handler, cfg *config.Config, policy tokenGatePoli
 		return nil, tcpListenerInfo{}, fmt.Errorf("bind TCP listener on %q: %w", cfg.ListenAddr, err)
 	}
 
-	// The TCP listener also serves the embedded browser SPA (#1592 Phase 5 PR2,
-	// design §1). webShellHandler serves the static shell UNAUTHENTICATED on every
-	// non-/v1 path (you cannot paste a token into a page that won't load) while
-	// routing /v1/... through the token gate below exactly as before. This wrapper
-	// is TCP-only: the unix socket keeps its bare mux (whose `/` still 404s), so
-	// the web assets never appear on the socket path.
+	// The DAEMON's TCP listener also serves the embedded browser SPA (#1592 Phase 5
+	// PR2, design §1). webShellHandler serves the static shell UNAUTHENTICATED on
+	// every non-/v1 path (you cannot paste a token into a page that won't load)
+	// while routing /v1/... through the token gate below exactly as before. This
+	// wrapper is TCP-only: the unix socket keeps its bare mux (whose `/` still
+	// 404s), so the web assets never appear on the socket path. The agent-server
+	// passes withoutWebShell — it cannot back the SPA (see webShell).
+	handler := withAuth(mux, gate, cfg.CORSAllowedOrigins)
+	if shell == withWebShell {
+		handler = webShellHandler(handler)
+	} else {
+		handler = noWebShellHandler(handler)
+	}
 	srv := &http.Server{
-		Handler:           webShellHandler(withAuth(mux, gate, cfg.CORSAllowedOrigins)),
+		Handler:           handler,
 		ReadHeaderTimeout: httpReadHeaderTimeout,
 	}
 	go func() {
