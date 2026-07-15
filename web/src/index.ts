@@ -39,7 +39,7 @@ import { EventStream, type EventStreamStatus } from "./events.js";
 import { confirmDeleteProjectModal, confirmModal, type ModalHandle, newSessionModal, promptModal } from "./modals.js";
 import { decideKey, type KeyboardFocus, type View } from "./nav.js";
 import { loadProjectChoice, persistProjectChoice, pickerProjects, reconcileProject, scopeToProject } from "./project.js";
-import { applyEvent, clampActiveTab, pickSelection, upsertSession } from "./sessions.js";
+import { applyEvent, clampActiveTab, pickSelection, tabToKeepOnClose, upsertSession } from "./sessions.js";
 import { SplitView } from "./split.js";
 import { isArchived } from "./status.js";
 import { Store } from "./store.js";
@@ -301,6 +301,14 @@ function disconnect(): void {
 
 // --- keyboard focus (nav vs terminal, #1693) -------------------------------
 
+/** The ordered tab identities of `id` in `list` — the list a retained layout's leaf
+ *  ordinals mean something relative to. Empty for a session that isn't there (a
+ *  never-shown or just-removed one), which reads as "nothing to remap against". */
+function tabIdsOf(list: SessionData[], id: string | null): string[] {
+  const s = id ? list.find((x) => x.id === id) : null;
+  return s ? sessionTabs(s).map(tabIdentity) : [];
+}
+
 /** Moves the rail selection to a session by its stable id and puts the keyboard in
  *  rail-nav mode. This is the keyboard path (j/k): selecting a row never steals the
  *  keyboard into the terminal — you attach explicitly with Enter. Resetting focus to
@@ -315,7 +323,7 @@ function moveSelection(id: string): void {
     focus: "rail",
     // Clamped like syncSplit's initialTab, so the store's claim and the pane's binding
     // are the same statement even if the roster shrank since the tree was retained.
-    activeTab: clampActiveTab(store.get().sessions, id, splitView.settledTab(id)),
+    activeTab: clampActiveTab(store.get().sessions, id, splitView.settledTab(id, tabIdsOf(store.get().sessions, id))),
   });
 }
 
@@ -389,7 +397,9 @@ function switchProject(root: string): void {
     selectedProject: root,
     selectedId: keep,
     focus: "rail",
-    activeTab: keep ? clampActiveTab(store.get().sessions, keep, splitView.settledTab(keep)) : 0,
+    activeTab: keep
+      ? clampActiveTab(store.get().sessions, keep, splitView.settledTab(keep, tabIdsOf(store.get().sessions, keep)))
+      : 0,
   });
 }
 
@@ -629,38 +639,44 @@ function closeSessionTab(index: number): void {
   }
   clearTabError();
   const selId = sel.id ?? "";
-  // Read the active index BEFORE the close, not after the awaits: `next` below is
-  // computed RELATIVE to the PRE-close list, so it is only correct against the index
-  // as it stood when this close was issued. The daemon's tab event (#1812) can land
-  // while these awaits are in flight — rerendering with the shrunk roster, which
-  // remaps each pane to follow its own tab and writes the ALREADY-shifted index back
-  // as activeTab. Reading it afterwards would then subtract the shift a SECOND time
-  // and re-point the pane one tab too far left — tearing down a surviving web tab's
-  // iframe to show its neighbour instead (the #1779 guarantee).
+  // Decide WHICH TAB the pane should end on by IDENTITY, not by arithmetic on an
+  // index. Closing tab N shifts every higher tab down by one, and the tempting fix is
+  // to subtract that shift — but an ordinal only names a tab relative to one roster,
+  // and this close spans two. Both directions of that arithmetic are wrong:
   //
-  // Taking a pre-await snapshot means `next` can go STALE the other way, so pin what
-  // it assumes: this session, and no explicit layout/focus mutation since. A slow
-  // close leaves a wide window in which the user can select another tab, and
-  // re-pointing the pane from an index computed against the old selection would yank
-  // it back (the same stale-async hazard the #1777 scroll-fill token guards). The
-  // roster event races the same window but bumps no generation, so it still passes.
-  const cur = store.get().activeTab;
+  //  - Reading activeTab AFTER the awaits double-subtracts. The daemon's tab event
+  //    (#1812) can land mid-flight, rerendering with the shrunk roster, remapping each
+  //    pane to follow its own tab (#1779) and writing the ALREADY-shifted index back —
+  //    so subtracting again lands a tab too far left.
+  //  - Subtracting from a PRE-await snapshot instead goes stale the other way: another
+  //    client closing a LOWER tab in the same window shifts the roster underneath, and
+  //    the pre-computed ordinal then names a neighbour. (Roster events deliberately
+  //    bump no generation, so the guard below can't catch that one.)
+  //
+  // Naming the tab itself sidesteps both: whatever the roster does meanwhile, the pane
+  // follows the tab the user was actually looking at — the same principle #1779 put in
+  // the layout tree, applied to the store's index. See sessions.tabToKeepOnClose, which
+  // holds the decision as a pure function so both directions above are unit-tested.
+  const keepId = tabToKeepOnClose(tabs.map(tabIdentity), index, store.get().activeTab);
+  // Pin what the rebind assumes: this session, and no explicit layout/focus mutation
+  // since. A slow close leaves a wide window in which the user can select another tab
+  // or focus another pane, and re-pointing from an intent formed before that would
+  // yank it back (the same stale-async hazard the #1777 scroll-fill token guards).
   const gen = splitView.layoutGeneration();
   void closeTab(selId, sel.title, target.name, tok)
     .then(() => fetchSnapshot(tok))
     .then((sessions) => {
-      // The close shifts every higher tab down by one: if the closed tab was at or
-      // before the active one, the active index moves left to keep showing the same
-      // tab (or its left neighbor when the active tab itself was closed).
+      // Resolve the kept tab's CURRENT ordinal in the post-close roster.
       const shrunk = sessions.find((s) => s.id === selId);
-      const n = shrunk ? sessionTabs(shrunk).length : 1;
-      const next = Math.min(Math.max(index <= cur ? cur - 1 : cur, 0), n - 1);
+      const next = shrunk ? sessionTabs(shrunk).map(tabIdentity).indexOf(keepId) : -1;
       // Commit the shrunk tab list first (rerender → syncSplit re-validates the tree,
       // clamping any pane past the new end), then re-point the focused pane — but only
-      // if `next` still describes anything real: the user must not have moved focus or
-      // switched away to another session while the close was in flight.
+      // if the rebind still describes anything real: the user must not have moved focus
+      // or switched away while the close was in flight, and the kept tab must still
+      // exist (a concurrent close can take it too, in which case syncSplit's remap has
+      // already settled the pane somewhere sane and guessing again would only misroute).
       store.set({ sessions, selectedId: pickSelection(sessions, store.get().selectedId) });
-      if (splitView.layoutGeneration() === gen && store.get().selectedId === selId) {
+      if (next >= 0 && splitView.layoutGeneration() === gen && store.get().selectedId === selId) {
         splitView.setFocusedTab(next);
       }
     })
@@ -990,7 +1006,10 @@ function applySessions(sessions: SessionData[]): void {
   // An unchanged selection keeps its active tab; one the snapshot MOVED (the selected
   // session was archived/killed, so pickSelection landed elsewhere) takes the tab its
   // retained layout will settle on rather than asserting 0 (#1855, as moveSelection).
-  const settled = selectedId === prevSel ? store.get().activeTab : splitView.settledTab(selectedId ?? "");
+  const settled =
+    selectedId === prevSel
+      ? store.get().activeTab
+      : splitView.settledTab(selectedId ?? "", tabIdsOf(sessions, selectedId));
   const activeTab = clampActiveTab(sessions, selectedId, settled);
   store.set({ sessions, selectedProject, selectedId, activeTab });
 }

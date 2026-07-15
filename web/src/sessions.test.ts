@@ -8,7 +8,15 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { applyEvent, clampActiveTab, pickSelection, removeSession, sessionKey, upsertSession } from "./sessions.js";
+import {
+  applyEvent,
+  clampActiveTab,
+  pickSelection,
+  removeSession,
+  sessionKey,
+  tabToKeepOnClose,
+  upsertSession,
+} from "./sessions.js";
 import { orderedSessions } from "./ui.js";
 import { Liveness, type SessionData, type WireEvent } from "./types.js";
 
@@ -163,4 +171,63 @@ test("orderedSessions: title breaks a created_at tie in the archived group (tota
     sess("arch-a", { liveness: Liveness.Archived, created_at: "2026-01-01T00:00:00Z" }),
   ];
   assert.deepEqual(orderedSessions(list).map((s) => s.title), ["arch-a", "arch-b"]);
+});
+
+// --- tabToKeepOnClose: a pane follows a TAB, never a slot -------------------
+//
+// The post-merge Codex finding on #1815. closeSessionTab used to re-point the pane
+// by subtracting the close's shift from the active index. That arithmetic is only
+// valid if the roster it was computed against is the roster it lands on — and #1815
+// made the opposite reachable, by delivering another client's tab changes live and
+// mid-flight. These pin the decision against both rosters.
+
+test("closing a LOWER tab keeps the active tab, by identity", () => {
+  // [Agent, A, B] with B active; A closes. B survives, so the pane follows B —
+  // wherever the shrunk roster puts it.
+  assert.equal(tabToKeepOnClose(["id-agent", "id-a", "id-b"], 1, 2), "id-b");
+});
+
+test("closing a HIGHER tab keeps the active tab, by identity", () => {
+  assert.equal(tabToKeepOnClose(["id-agent", "id-a", "id-b"], 2, 1), "id-a");
+});
+
+test("closing the ACTIVE tab falls back to its LEFT NEIGHBOUR in the pre-close list", () => {
+  // Nothing to follow: the tab the pane was on is the one going away. The neighbour
+  // is named from the pre-close roster, where "left of the closed tab" still means
+  // something — the post-close list no longer contains the closed tab to count from.
+  assert.equal(tabToKeepOnClose(["id-agent", "id-a", "id-b"], 2, 2), "id-a");
+});
+
+test("closing the tab right above Agent falls back to Agent", () => {
+  assert.equal(tabToKeepOnClose(["id-agent", "id-a"], 1, 1), "id-agent");
+});
+
+test("a concurrent out-of-band close cannot re-point the pane to a neighbour (#1815 follow-up)", () => {
+  // Codex's exact scenario: tabs [Agent,A,B,C,D,E,F] with E active; this window
+  // closes D while ANOTHER client closes B first. The old code computed next from
+  // the stale ordinal (cur=5 → 4) and applied it to the post-close roster, landing on
+  // F — a tab the user never picked, tearing down E's pane to show its neighbour.
+  const before = ["id-agent", "id-a", "id-b", "id-c", "id-d", "id-e", "id-f"];
+  const keep = tabToKeepOnClose(before, 4, 5);
+  assert.equal(keep, "id-e");
+
+  // The roster after BOTH closes (B out-of-band, then D). Resolving the identity —
+  // what closeSessionTab does with this value — follows E to its real new index.
+  const after = ["id-agent", "id-a", "id-c", "id-e", "id-f"];
+  assert.equal(after.indexOf(keep), 3, "the pane must follow E, not land on the old ordinal");
+  assert.notEqual(after.indexOf(keep), 4, "index 4 is F — the neighbour the ordinal arithmetic picked");
+});
+
+test("a kept tab closed out-of-band mid-flight resolves to -1, not a guess", () => {
+  // The caller treats -1 as "leave the pane where the roster remap already settled
+  // it": re-pointing from a dead identity could only misroute.
+  const keep = tabToKeepOnClose(["id-agent", "id-a", "id-b"], 1, 2);
+  assert.equal(["id-agent", "id-a"].indexOf(keep), -1);
+});
+
+test("an out-of-range active index yields no tab to follow", () => {
+  assert.equal(tabToKeepOnClose(["id-agent"], 1, 5), "");
+  // Identities are never empty (ui.tabIdentity synthesizes a kind:name fallback), so
+  // "" can't accidentally match a real tab when the caller resolves it.
+  assert.equal(["id-agent", "id-a"].indexOf(""), -1);
 });
