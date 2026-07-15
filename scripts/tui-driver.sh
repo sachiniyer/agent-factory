@@ -262,14 +262,15 @@ af_focus_tree() {
 # Scenario helpers — each encodes the nav/interactive model and self-syncs.
 # ----------------------------------------------------------------------------
 
-# af_reset_sandbox — return the sandbox to a clean, instance-free state so a
-# scenario is deterministic across reruns in a REUSED container (the self-test
-# calls this first). Strictly scoped to the container's own sandbox: it stops
-# the sandbox daemon, kills the af_* instance sessions on THIS
-# container-private tmux server, and wipes the instance store. It never
-# touches the driver's own session and NEVER runs kill-server. Fails closed if
-# AGENT_FACTORY_HOME does not look like a sandbox path, so it can never wipe a
-# real ~/.agent-factory.
+# af_reset_sandbox — return the sandbox to a clean, instance- AND task-free
+# state so a scenario is deterministic across reruns in a REUSED container (the
+# self-test calls this first). Strictly scoped to the container's own sandbox:
+# it stops the sandbox daemon, kills the af_* instance sessions on THIS
+# container-private tmux server, and wipes the session/task state the same way
+# `af reset` defines it (see the rm block below). It never touches the driver's
+# own session and NEVER runs kill-server. Fails closed if AGENT_FACTORY_HOME
+# does not look like a sandbox path, so it can never wipe a real
+# ~/.agent-factory.
 # _af_is_throwaway_sandbox <dir> — POSITIVE proof a path is a disposable driver
 # sandbox before any destructive cleanup runs against it. Fails CLOSED: a real
 # dev checkout (any repo with a remote), or any path missing the scaffolding's
@@ -305,9 +306,38 @@ af_reset_sandbox() {
     for s in $(tmux list-sessions -F '#{session_name}' 2>/dev/null | grep '^af_' || true); do
         tmux kill-session -t "$s" 2>/dev/null || true
     done
-    rm -rf "$AGENT_FACTORY_HOME/instances" 2>/dev/null || true
+    # Session + task state under the sandbox AF home.
+    #
+    # This mirrors `af reset`'s resetWipePaths (commands/reset.go) — the
+    # canonical split between session/task STATE (wiped) and CONFIGURATION
+    # (kept: config.toml, repos/, daemon-token) — plus the daemon runtime files
+    # the sandbox reset owns. `af reset` deliberately preserves daemon.pid/sock
+    # and the token so an already-configured daemon keeps its identity; a
+    # throwaway sandbox has no identity worth keeping, and we just killed its
+    # daemon, so those go too.
+    #
+    # This list used to be just instances/ + state.json, which made the reset a
+    # HALF reset: tasks.json survived it (#1824). The self-test seeds
+    # `selftest-task`, so a REUSED container's second run found that task
+    # already present, `m` dropped into the EDIT form instead of the create
+    # form (#1249/#1757), and af_add_task typed into the existing task and
+    # failed at "seed a task via the create form". One surviving state file is
+    # enough to make a "reset" sandbox non-deterministic — so reset what
+    # `af reset` resets, and keep the two definitions in step.
+    #
+    # The *.lock files (tasks.json.lock, config.toml.lock, daemon-token.lock)
+    # are deliberately kept: they are content-free flock sentinels, they carry
+    # no state that can bleed into the next run, and unlinking one out from
+    # under a starting daemon breaks the lock's mutual exclusion.
+    rm -rf "$AGENT_FACTORY_HOME/instances" \
+           "$AGENT_FACTORY_HOME/worktrees" \
+           "$AGENT_FACTORY_HOME/events" \
+           "$AGENT_FACTORY_HOME/logs" \
+           "$AGENT_FACTORY_HOME/locks" 2>/dev/null || true
     rm -f "$AGENT_FACTORY_HOME/daemon.pid" "$AGENT_FACTORY_HOME/daemon.sock" \
-          "$AGENT_FACTORY_HOME/state.json" 2>/dev/null || true
+          "$AGENT_FACTORY_HOME/state.json" \
+          "$AGENT_FACTORY_HOME/tui-state.json" \
+          "$AGENT_FACTORY_HOME/tasks.json" 2>/dev/null || true
     # Remove leftover instance worktrees + branches in the mock repo, else a
     # re-created instance of the same name collides on the existing branch.
     # DESTRUCTIVE (rm -rf glob + `branch -D` every non-master ref): fail CLOSED,
