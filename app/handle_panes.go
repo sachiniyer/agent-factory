@@ -413,17 +413,35 @@ func (m *home) enterPane(p *store.OpenPane, replayKey *tea.KeyMsg) (tea.Model, t
 	if p == nil {
 		return m, nil
 	}
+	// Entering a pane that owns a transient #1321 preview commits the preview
+	// first, so the pane's binding becomes the target the user can SEE before any
+	// keystroke forwards into it. handleEnter does this for keyboard Enter; doing
+	// it here at the shared chokepoint covers the mouse click-to-interact path,
+	// which reached activation with the preview still live — where the reconcile
+	// refuses to bind a previewing pane, so an ordinary local ready pane dropped
+	// to the `o` fallback (#1819). Idempotent: handleEnter's commit clears the txn,
+	// so this sees nothing to do.
+	var commitCmd tea.Cmd
+	if m.paneIsPreviewing(p) {
+		committed, cmd := m.commitPanePreviewReplace()
+		if committed == nil {
+			return m, cmd
+		}
+		commitCmd, p = cmd, committed
+	}
 	if instErr := interactiveGuard(p.Instance()); instErr != nil {
-		return m, m.handleError(instErr)
+		return m, tea.Batch(commitCmd, m.handleError(instErr))
 	}
 	if p.Instance() == nil || p.Instance().IsCreating() {
-		return m, nil
+		return m, commitCmd
 	}
 	if liveSessionName(p.Instance(), p.Tab()) == "" {
 		// Not embeddable (remote): the full-screen attach of this pane's tab.
-		return m.handleEnterPane(p)
+		mod, attachCmd := m.handleEnterPane(p)
+		return mod, tea.Batch(commitCmd, attachCmd)
 	}
-	return m.requestInteractive(p, replayKey)
+	mod, interactCmd := m.requestInteractive(p, replayKey)
+	return mod, tea.Batch(commitCmd, interactCmd)
 }
 
 // handleEnterPane attaches the focused pane's (instance, tab) full-screen:

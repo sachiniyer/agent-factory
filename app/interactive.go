@@ -83,21 +83,32 @@ func (m *home) activateInteractive(p *store.OpenPane) tea.Cmd {
 	// attachment now (no waiting for the 100ms tick). Unlike the old tmux attach
 	// client, the WS subscription is created immediately and self-heals via
 	// reconnect if the session's pane isn't ready yet (#1526 is structurally gone),
-	// so a single sync binds it — no retry loop.
+	// so a single bind is enough — no retry loop.
 	m.store.TouchOpenPane(p)
 	m.focusRegion(layout.PaneRegion(p.ID()))
 
-	m.syncLiveTermPane()
-	if m.liveTerms[p.ID()] == nil {
-		inst := p.Instance()
-		title := ""
-		if inst != nil {
-			title = inst.Title
-		}
-		return m.handleError(fmt.Errorf("couldn't open an embedded terminal for '%s' — press o to attach full-screen", title))
+	// Bind through ensureLiveTermPaneFor, NOT a bare reconcile: activation is a
+	// deliberate act on THIS pane and must install its attachment itself whenever
+	// the pane can stream, instead of inheriting the reconcile's context gates and
+	// failing to the `o` fallback when one of them happens to be closed (#1819).
+	if !m.ensureLiveTermPaneFor(p) {
+		return m.handleError(fmt.Errorf("couldn't open an embedded terminal for %s — press o to attach full-screen", paneErrorLabel(p)))
 	}
 	m.setInteractive(true)
 	return nil
+}
+
+// paneErrorLabel names pane p's session for a user-facing message, falling back
+// to a generic phrase when the title is unknown. A pane whose instance vanished
+// (or was never titled) used to render the name as an empty pair of quotes,
+// which told the reader nothing and read as a formatting bug (#1819).
+func paneErrorLabel(p *store.OpenPane) string {
+	if p != nil {
+		if inst := p.Instance(); inst != nil && inst.Title != "" {
+			return "'" + inst.Title + "'"
+		}
+	}
+	return "this pane"
 }
 
 // handleInteractiveKey is the whole keyboard while interactive: Ctrl-] pops

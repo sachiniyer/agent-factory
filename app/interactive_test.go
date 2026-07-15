@@ -11,6 +11,8 @@ import (
 	"github.com/sachiniyer/agent-factory/keys"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/ui/layout"
+	"github.com/sachiniyer/agent-factory/ui/layout/zones"
+	"github.com/sachiniyer/agent-factory/ui/store"
 )
 
 // ----------------------------------------------------------------------------
@@ -485,4 +487,108 @@ func TestWheelIsInertWhileInteractive(t *testing.T) {
 // first-render bind race to retry — the whole "couldn't open an embedded terminal,
 // try again" class is structurally eliminated. The genuine non-embeddable case
 // (remote/dead panes) still falls back to full-screen attach; that is covered by
-// TestEnterOnRemotePaneFallsBackToFullScreenAttach.
+// TestEnterOnRemotePaneFallsBackToFullScreenAttach. What #1526 did NOT cover —
+// activation reached while a reconcile GATE was closed — is pinned below (#1819).
+
+// ----------------------------------------------------------------------------
+// #1819: activation binds the pane itself. reconcileLiveTermPanes deliberately
+// skips panes whose CONTEXT says "no live grid right now" (an open overlay, an
+// active #1321 preview). Entering a pane is the act that ends those states, so
+// activation must resolve them and bind — never drop an ordinary local, ready,
+// visible pane to the `o` fallback.
+// ----------------------------------------------------------------------------
+
+// previewTestHome is interactiveTestHome plus a second started session that the
+// tree cursor has moved onto, leaving the focused pane rendering a transient
+// #1321 preview of it — the state selectionChanged produces on tree navigation,
+// which also CLOSES the previewing pane's live attachment.
+func previewTestHome(t *testing.T) (h *home, focused, previewed *session.Instance, pane *store.OpenPane) {
+	t.Helper()
+	h, focused, fakes := interactiveTestHome(t)
+	h.syncLiveTermPane()
+	require.Len(t, *fakes, 1, "baseline: the focused local ready pane binds")
+	pane = h.focusedOpenPane()
+	require.NotNil(t, pane)
+
+	previewed = startedLocalInstance(t, "previewed")
+	selectInstance(h, previewed)
+	h.updatePanePreview(previewed, 0, true, false)
+	require.True(t, h.paneIsPreviewing(pane), "tree nav leaves the focused pane previewing")
+	require.Nil(t, h.liveTerms[pane.ID()], "the preview closed the pane's live attachment")
+	return h, focused, previewed, pane
+}
+
+// TestClickToInteractOnPreviewingPaneBindsInsteadOfFallingBack is the #1819
+// regression. Clicking the focused pane's body enters it (§2.5) — but when tree
+// navigation had left that pane previewing another session, the click reached
+// activation with the preview txn still live. reconcileLiveTermPanes refuses to
+// bind a previewing pane, so activation found liveTerms[p] == nil and errored
+// "couldn't open an embedded terminal … press o", for a perfectly ordinary local,
+// Ready, visible pane. Keyboard Enter never hit this because handleEnter commits
+// the preview first; the mouse path had no such funnel.
+func TestClickToInteractOnPreviewingPaneBindsInsteadOfFallingBack(t *testing.T) {
+	h, _, previewed, pane := previewTestHome(t)
+
+	body := zoneRect(t, h, zones.PaneBody(layout.PaneRegion(pane.ID())))
+	require.Equal(t, layout.PaneRegion(pane.ID()), h.ring.Active(),
+		"the pane is already focused, so a body click enters it rather than focusing it")
+	runHermeticCmd(t, h, combineCmds(press(h, body.X+3, body.Y+4), release(h, body.X+3, body.Y+4)), 0)
+
+	require.True(t, h.interactive, "clicking an eligible local pane must enter it, not fall back to `o`")
+	p := h.focusedOpenPane()
+	require.NotNil(t, p)
+	require.NotNil(t, h.liveTerms[p.ID()], "activation must install the live attachment")
+	// The click commits the preview, exactly like keyboard Enter: the user acts on
+	// the content they can SEE, so keystrokes go to the previewed session — never
+	// to the session the pane used to show.
+	assert.Equal(t, previewed, p.Instance(), "the click enters the previewed target")
+	assert.Nil(t, h.panePreviewTxn, "entering a pane resolves its preview")
+}
+
+// TestActivateInteractiveBindsWhileReconcileCreateGateClosed pins the other half
+// of #1819: activation must not inherit the reconcile's create gate. The tick
+// reconcile refuses to CREATE attachments outside stateDefault (an overlay may
+// have a deferred full-screen attach pending), but activation is a deliberate act
+// on a named pane and is fenced separately by attached/attachTransitioning — so it
+// binds regardless of which overlay state it lands in.
+func TestActivateInteractiveBindsWhileReconcileCreateGateClosed(t *testing.T) {
+	h, _, fakes := interactiveTestHome(t)
+	p := h.focusedOpenPane()
+	require.NotNil(t, p)
+	require.Empty(t, *fakes, "no reconcile has run yet, so the pane is unbound")
+
+	h.state = stateHelp // an overlay is up: the reconcile would skip the create
+	h.reconcileLiveTermPanes()
+	require.Nil(t, h.liveTerms[p.ID()], "the tick reconcile must not create under an overlay")
+
+	require.Nil(t, h.activateInteractive(p), "activation must bind, not error to the `o` fallback")
+	assert.True(t, h.interactive)
+	assert.NotNil(t, h.liveTerms[p.ID()])
+}
+
+// TestActivateInteractiveFallsBackWhileFullScreenAttached pins the fallback that
+// must SURVIVE #1819: a full-screen attach owns the session's tmux client, so a
+// second embedded stream would fight it over the window size (#598). That pane is
+// genuinely non-embeddable and must still refuse to bind.
+func TestActivateInteractiveFallsBackWhileFullScreenAttached(t *testing.T) {
+	h, _, _ := interactiveTestHome(t)
+	p := h.focusedOpenPane()
+	require.NotNil(t, p)
+
+	h.attached.Store(true)
+
+	require.NotNil(t, h.activateInteractive(p), "an attached session must not also bind an embedded stream")
+	assert.False(t, h.interactive)
+	assert.Nil(t, h.liveTerms[p.ID()])
+}
+
+// TestPaneErrorLabelNamesSessionOrFallsBack covers the cosmetic half of #1819:
+// the fallback error logged the name as an empty pair of quotes whenever the
+// title was unknown, which read as a formatting bug rather than a message.
+func TestPaneErrorLabelNamesSessionOrFallsBack(t *testing.T) {
+	h, inst := liveTestHome(t)
+	p := h.focusedOpenPane()
+	require.NotNil(t, p)
+	assert.Equal(t, "'"+inst.Title+"'", paneErrorLabel(p), "a titled session is named in quotes")
+	assert.Equal(t, "this pane", paneErrorLabel(nil), "an unknown pane never renders empty quotes")
+}

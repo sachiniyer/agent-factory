@@ -102,39 +102,13 @@ func (m *home) reconcileLiveTermPanes() {
 		if m.paneIsPreviewing(p) {
 			continue
 		}
-		key, title, repoID, tabID, tab, ok := m.liveBindCandidate(p)
-		if !ok {
-			continue
-		}
-		w := m.paneWindows[p.ID()]
-		if w == nil {
-			continue
-		}
-		width, height := w.GetPreviewSize()
-		if width < 2 || height < 2 {
-			// Not laid out yet (or degenerate): keep any existing attachment but don't
-			// create one at a size that would shrink the session's window.
-			if m.liveTerms[p.ID()] != nil {
-				want[p.ID()] = m.liveKeys[p.ID()]
-			}
-			continue
-		}
-		want[p.ID()] = key
-		if m.liveTerms[p.ID()] != nil && m.liveKeys[p.ID()] == key {
-			continue // already bound; the attachment self-heals, nothing to do
-		}
 		// New attachments are created only from stateDefault: an overlay can have a
 		// deferred full-screen attach pending (the first-time attach help), and
 		// creating a subscription under it would race the attach it made room for.
 		// An existing attachment with a stale key is left alone under overlays.
-		if m.state != stateDefault {
-			continue
+		if key, ok := m.bindLiveTermPaneFor(p, m.state == stateDefault); ok {
+			want[p.ID()] = key
 		}
-		m.closeLiveTermPaneFor(p.ID())
-		tp := newLiveTermPaneFn(title, repoID, tabID, tab, width, height)
-		m.liveTerms[p.ID()] = tp
-		m.liveKeys[p.ID()] = key
-		w.SetLive(tp)
 	}
 
 	// Close attachments for panes no longer wanted (hidden, ineligible, or now
@@ -144,6 +118,103 @@ func (m *home) reconcileLiveTermPanes() {
 			m.closeLiveTermPaneFor(id)
 		}
 	}
+}
+
+// bindLiveTermPaneFor binds pane p to its live attachment and reports the key the
+// pane should be tracked under, or ok=false when p cannot hold one right now
+// (ineligible binding, no window, or a degenerate layout size). It is the single
+// place an attachment is created, shared by the tick-driven reconcile and the
+// interactive-activation path so the two can never disagree about what "bindable"
+// means (#1819).
+//
+// create=false means "resolve the key but don't spawn a new subscription" — the
+// reconcile's under-overlay mode, which keeps tracking an existing attachment
+// without creating one. Callers own the eligibility gates that are about CONTEXT
+// rather than the pane itself (full-screen attach, an active preview); this
+// function only answers whether the pane can stream.
+func (m *home) bindLiveTermPaneFor(p *store.OpenPane, create bool) (string, bool) {
+	key, title, repoID, tabID, tab, ok := m.liveBindCandidate(p)
+	if !ok {
+		return "", false
+	}
+	w := m.paneWindows[p.ID()]
+	if w == nil {
+		return "", false
+	}
+	width, height := w.GetPreviewSize()
+	if width < 2 || height < 2 {
+		// Not laid out yet (or degenerate): keep any existing attachment but don't
+		// create one at a size that would shrink the session's window.
+		if m.liveTerms[p.ID()] != nil {
+			return m.liveKeys[p.ID()], true
+		}
+		return "", false
+	}
+	if m.liveTerms[p.ID()] != nil && m.liveKeys[p.ID()] == key {
+		return key, true // already bound; the attachment self-heals, nothing to do
+	}
+	if !create {
+		return key, true
+	}
+	m.closeLiveTermPaneFor(p.ID())
+	tp := newLiveTermPaneFn(title, repoID, tabID, tab, width, height)
+	m.liveTerms[p.ID()] = tp
+	m.liveKeys[p.ID()] = key
+	w.SetLive(tp)
+	return key, true
+}
+
+// ensureLiveTermPaneFor installs pane p's live attachment for the DELIBERATE
+// interactive-activation path, reporting whether p ended up bound (#1819).
+//
+// Activation must not depend on a reconcile having already run with the right
+// gates open: the tick-driven reconcile deliberately skips panes whose context
+// says "don't paint a live grid right now" (an open overlay, a transient #1321
+// preview), and entering a pane is exactly the act that ends those states. Before
+// this existed, activation only re-ran the reconcile and then failed to the `o`
+// fallback whenever one of those gates happened to be closed — the #1526-class
+// regression, reachable from click-to-interact on a pane the tree cursor had left
+// previewing.
+//
+// The `o` fallback stays for panes that genuinely cannot embed: a full-screen
+// attach owns the session's tmux client, and liveBindCandidate refuses remote,
+// dead/lost, in-flight, and unsized panes.
+func (m *home) ensureLiveTermPaneFor(p *store.OpenPane) bool {
+	if p == nil {
+		return false
+	}
+	// Full-screen attach owns the session: a second client would fight it over the
+	// window size (#598 class). Genuinely non-embeddable while it holds — and this
+	// return is load-bearing, not just an early out: the reconcile below CLOSES
+	// every attachment while attached, so without it the force-bind would turn
+	// around and re-create the very stream #598 forbids.
+	if m.attached.Load() || m.attachTransitioning {
+		return false
+	}
+	// A preview still painting over the pane at activation is a stale tree-nav
+	// artifact — the callers that mean to enter the preview TARGET commit the txn
+	// first (handleEnter, enterPane), which rebinds the pane and clears this. Drop
+	// it rather than skipping the bind: interactive mode forwards keystrokes into
+	// the pane's OWN binding, so the preview must stop rendering over the session
+	// the user is about to type into. updatePanePreview enforces the same exclusion
+	// from the other side (it cancels while m.interactive).
+	if m.paneIsPreviewing(p) {
+		m.suppressActivePanePreview()
+		m.cancelPanePreview(false)
+	}
+	// Reconcile every visible pane exactly as the tick would — each visible pane
+	// owns its own stream (#1592 PR6), so activation must not narrow that to the
+	// entered one — and then guarantee THIS pane is bound even if the reconcile's
+	// create gate was closed by an open overlay.
+	m.syncLiveTermPane()
+	if m.liveTerms[p.ID()] == nil {
+		// Forcing the create is safe for a pane that cannot really stream: an
+		// auto-hidden pane has a relayout-zeroed rect and a remote/dead one has no
+		// bind candidate, so bindLiveTermPaneFor still refuses both and the `o`
+		// fallback stays the honest answer.
+		m.bindLiveTermPaneFor(p, true)
+	}
+	return m.liveTerms[p.ID()] != nil
 }
 
 // paneIsPreviewing reports whether pane p currently owns a transient #1321 preview
