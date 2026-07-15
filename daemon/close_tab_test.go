@@ -105,6 +105,70 @@ func TestCloseTab_RejectsAgentTab(t *testing.T) {
 	}
 }
 
+// TestCloseTab_RejectsArchivedSession is the #1809 follow-up gate: archive now
+// PRESERVES web tabs so a restore can render them again, which made an archived
+// session the first one to carry a closable (non-agent) tab. Without this guard a
+// tab-delete would permanently strip that URL out of the archived record BEFORE
+// the restore that was supposed to bring it back — the very loss the preservation
+// exists to prevent, just moved later. The refusal must be actionable, leave the
+// record intact, and lift on restore.
+func TestCloseTab_RejectsArchivedSession(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	repoPath := setupControlRepo(t)
+	repo, err := config.RepoFromPath(repoPath)
+	if err != nil {
+		t.Fatalf("RepoFromPath: %v", err)
+	}
+
+	manager, err := NewManager(config.DefaultConfig())
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+
+	const title = "worker"
+	inst := startedLocalTabInstance(t, manager, repo.ID, repoPath, title, "af_"+title+"_agent")
+	const target = "http://localhost:3000"
+	if _, err := manager.CreateTab(CreateTabRequest{Title: title, RepoID: repo.ID, Kind: "web", URL: target, Name: "webpreview"}); err != nil {
+		t.Fatalf("CreateTab(web): %v", err)
+	}
+
+	inst.SetStatusForTest(session.Archived)
+
+	// Both addressing modes are refused: `tab-delete --name` drives the name path
+	// (#1021) and the web × drives the index path, so a gate on only one would leave
+	// the other able to strip the URL.
+	for _, req := range []CloseTabRequest{
+		{Title: title, RepoID: repo.ID, TabIndex: 1},
+		{Title: title, RepoID: repo.ID, TabName: "webpreview"},
+	} {
+		_, err = manager.CloseTab(req)
+		if err == nil {
+			t.Fatalf("expected error closing a tab on an archived session (req %+v), got nil", req)
+		}
+		if !strings.Contains(err.Error(), "archived") {
+			t.Fatalf("expected an actionable archived rejection, got: %v", err)
+		}
+	}
+
+	// The preserved tab is still on the record — the refusal didn't half-close it.
+	tabs := inst.GetTabs()
+	if len(tabs) != 2 {
+		t.Fatalf("archived session tabs = %d, want 2 (agent + the preserved web tab)", len(tabs))
+	}
+	if tabs[1].Kind != session.TabKindWeb || tabs[1].URL != target {
+		t.Fatalf("preserved web tab = {kind:%v url:%q}, want the web tab at %q intact", tabs[1].Kind, tabs[1].URL, target)
+	}
+
+	// Restored: the tab is closable again — the gate is state, not a tombstone.
+	inst.SetStatusForTest(session.Running)
+	if _, err := manager.CloseTab(CloseTabRequest{Title: title, RepoID: repo.ID, TabIndex: 1}); err != nil {
+		t.Fatalf("closing the web tab of a restored session: %v", err)
+	}
+	if got := len(inst.GetTabs()); got != 1 {
+		t.Fatalf("restored session tabs after close = %d, want 1", got)
+	}
+}
+
 // TestCloseTab_RejectsAgentTabByName verifies the agent tab is unclosable when
 // targeted by its name too, not just by index 0 — the name path is the one
 // `af sessions tab-delete --name` drives (#1021).

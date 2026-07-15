@@ -382,6 +382,14 @@ back). If the target is down when you restore, the tab renders the same
 unreachable-target fallback it would at any other time — start the dev server
 again and reload.
 
+While a session is **archived** its web tabs are preserved but **inert**: the tab
+shows an "archived — restore it to load this web tab" placeholder instead of
+loading, the daemon refuses to proxy its target, and the tab can't be deleted (so
+the URL is still there when you restore). This is deliberate — the stored target
+is a bare `localhost:PORT` from whenever the tab was created, and by the time you
+come back that port may belong to something else entirely. `af sessions restore`
+brings the tab back to life.
+
 !!! note "Dev-server base path"
     The proxy serves the dev server under `/v1/webtab/<session>/<tab>/`. Apps that
     request assets with **relative** paths resolve correctly under that prefix. An

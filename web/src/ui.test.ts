@@ -8,7 +8,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { tabBarSig } from "./ui.js";
+import { canManageTabs, tabBarSig } from "./ui.js";
 import type { AppState } from "./ui.js";
 import { Liveness, type SessionData } from "./types.js";
 
@@ -76,6 +76,35 @@ test("manageability (local vs remote) is part of the sig — the + / × affordan
   assert.notEqual(
     tabBarSig(state({ sessions: [sess({ ...tabs, backend_type: "local" })] })),
     tabBarSig(state({ sessions: [sess({ ...tabs, backend_type: "remote" })] })),
+  );
+});
+
+test("canManageTabs: an archived session is inert — its + / × are withdrawn (#1809)", () => {
+  // Archive PRESERVES web tabs so a restore can render them again, which made an
+  // archived session the first one to carry a closable (non-agent) tab. The daemon
+  // refuses CreateTab/CloseTab on one, and the × specifically would strip the very
+  // URL the archive kept — so the affordances must not be offered at all.
+  assert.equal(canManageTabs(sess({ backend_type: "local" })), true, "a live local session manages tabs");
+  assert.equal(
+    canManageTabs(sess({ backend_type: "local", liveness: Liveness.Archived })),
+    false,
+    "an archived session is inert",
+  );
+  assert.equal(canManageTabs(sess({ backend_type: "remote" })), false, "remote tabs stay config-fixed");
+});
+
+test("archiving the selected session changes the sig — the bar must rebuild to drop the × (#1809)", () => {
+  // The sig gates the rebuild, so if archiving didn't change it the bar would keep
+  // rendering a live × over an archived session's preserved web tab.
+  const tabs = {
+    tabs: [
+      { name: "agent", kind: 0 },
+      { name: "webpreview", kind: 3, url: "http://localhost:3000" },
+    ],
+  };
+  assert.notEqual(
+    tabBarSig(state({ sessions: [sess({ ...tabs, backend_type: "local" })] })),
+    tabBarSig(state({ sessions: [sess({ ...tabs, backend_type: "local", liveness: Liveness.Archived })] })),
   );
 });
 

@@ -240,6 +240,27 @@ func (i *Instance) ShownArchived() bool {
 	return i.liveness == LiveArchived && i.inFlightOp != OpRestoring
 }
 
+// IsArchived reports whether the session is archived on the liveness axis, i.e.
+// INERT: its tmux is gone and its worktree has been moved out to the archive dir,
+// so nothing may be spawned in it, closed from it, or served out of it until a
+// restore brings it back. It is the gate for interacting with an archived
+// session's PRESERVED tabs (#1809 follow-up): archive now keeps web tabs, which
+// made an archived session the first one to carry a non-agent tab — a tab the
+// web-tab proxy would happily resolve and CloseTab would happily delete, neither
+// of which had a reason to check for archived before.
+//
+// Unlike ShownArchived (a RENDER predicate, which yields the row to the live
+// section the moment a restore starts, #1210) this reads the liveness axis ALONE,
+// so the gate stays shut across the whole restore window — liveness stays
+// LiveArchived until the reconcile's Archived→live rebuild lands a fresh started
+// instance. A gate that opened at OpRestoring would serve a tab whose worktree is
+// mid-move.
+func (i *Instance) IsArchived() bool {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	return i.liveness == LiveArchived
+}
+
 // IsCreating reports whether a create is in flight (the render/gate replacement
 // for the old GetStatus()==Loading check).
 func (i *Instance) IsCreating() bool {

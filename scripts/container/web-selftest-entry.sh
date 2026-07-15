@@ -50,6 +50,10 @@ SESSION_WEB=probe-web
 # containing SESSION_WEB would match probe-web's row too and wedge the web-tab
 # tests on a strict-mode violation.
 SESSION_WEB_RESTORED=probe-restored
+# A session left ARCHIVED with a preserved web tab (#1809 follow-up), so the harness
+# can assert an archived session is inert: its web tab renders a placeholder instead
+# of proxying, and its tab is not deletable. Same substring caveat as above.
+SESSION_WEB_SHELVED=probe-shelved
 SEEDED_TASK=probe-task
 # The task-only project's task name (MOCK3), kept distinct from SEEDED_TASK so the
 # scoped Tasks assertions never collide on a substring match.
@@ -122,6 +126,7 @@ cleanup() {
     "$BIN" sessions kill "$SESSION_C" >/dev/null 2>&1 || true
     "$BIN" sessions kill "$SESSION_WEB" >/dev/null 2>&1 || true
     "$BIN" sessions kill "$SESSION_WEB_RESTORED" >/dev/null 2>&1 || true
+    "$BIN" sessions kill "$SESSION_WEB_SHELVED" >/dev/null 2>&1 || true
     kill "$WEBTAB_SERVER_PID" >/dev/null 2>&1 || true
     kill "$DAEMON_PID" >/dev/null 2>&1 || true
     if [ "$rc" -ne 0 ]; then
@@ -254,6 +259,35 @@ if ! "$BIN" sessions get "$SESSION_WEB_RESTORED" | grep -q webpreview; then
     exit 1
 fi
 
+# --- #1809 follow-up: an ARCHIVED session's preserved web tab is INERT --------
+# A session left ARCHIVED with a preserved web tab, so the harness can assert the
+# two gates the preservation made reachable: the daemon must refuse to proxy the
+# stored loopback URL (an archived session is inert — the port may host something
+# else now), and the tab must not be deletable before the restore that was supposed
+# to bring it back.
+echo ">>> creating archived-web-tab session $SESSION_WEB_SHELVED (#1809 follow-up) ..."
+"$BIN" sessions create --repo "$MOCK" --name "$SESSION_WEB_SHELVED" --program claude >/dev/null
+for i in $(seq 1 30); do
+    if "$BIN" sessions get "$SESSION_WEB_SHELVED" >/dev/null 2>&1; then
+        break
+    fi
+    sleep 1
+done
+"$BIN" sessions tab-create --repo "$MOCK" "$SESSION_WEB_SHELVED" --kind web --port "$WEBTAB_PORT" --name shelvedweb >/dev/null
+"$BIN" sessions archive "$SESSION_WEB_SHELVED" --repo "$MOCK" >/dev/null
+# The CLI half of the tab-delete gate, end to end through the real daemon: deleting
+# the preserved tab while archived must be REFUSED with an actionable message, and
+# the record must still carry the URL afterwards.
+if "$BIN" sessions tab-delete --repo "$MOCK" "$SESSION_WEB_SHELVED" --name shelvedweb >/dev/null 2>&1; then
+    echo "FATAL: tab-delete succeeded on an archived session; the preserved URL is strippable (#1809)" >&2
+    exit 1
+fi
+if ! "$BIN" sessions get "$SESSION_WEB_SHELVED" | grep -q shelvedweb; then
+    echo "FATAL: the archived session's preserved web tab is gone after a refused tab-delete (#1809)" >&2
+    "$BIN" sessions get "$SESSION_WEB_SHELVED" >&2
+    exit 1
+fi
+
 # --- run the Playwright harness ---------------------------------------------
 echo ">>> installing web deps + running the Playwright harness ..."
 cd /work/web
@@ -268,6 +302,7 @@ export AF_WEB_SESSION_B="$SESSION_B"
 export AF_WEB_SESSION_C="$SESSION_C"
 export AF_WEB_SESSION_WEB="$SESSION_WEB"
 export AF_WEB_SESSION_WEB_RESTORED="$SESSION_WEB_RESTORED"
+export AF_WEB_SESSION_WEB_SHELVED="$SESSION_WEB_SHELVED"
 export AF_WEB_READY_MARKER="$READY_MARKER"
 export AF_WEB_TASK_NAME="$SEEDED_TASK"
 export AF_WEB_TASK3_NAME="$TASK3_NAME"
