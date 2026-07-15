@@ -210,12 +210,6 @@ export class SplitView {
       // tab took that slot — the misroute this whole change exists to close. A pane
       // whose tab merely MOVED then finds its identity already matching and is left
       // streaming untouched; only a genuinely replaced tab rebuilds.
-      // Move each leaf to wherever ITS tab now sits BEFORE anything reads the tree
-      // (#1779). A leaf holds an ordinal, but the pane holds a TAB; once the list
-      // shifts, reconciling from the stale ordinal would rebind the pane to whatever
-      // tab took that slot — the misroute this whole change exists to close. A pane
-      // whose tab merely MOVED then finds its identity already matching and is left
-      // streaming untouched; only a genuinely replaced tab rebuilds.
       const settled = remapByIdentity(this.tree ?? singleLeaf(initialTab), prevIds, tabIds);
       this.tree = validate(settled, tabCount);
       if (this.trees.get(sessionId) !== this.tree) {
@@ -470,12 +464,13 @@ export class SplitView {
       if (webTarget !== null) {
         // A web/iframe tab: mount an iframe instead of an xterm. Rebuilding reloads
         // the frame and drops the dev server's in-page state, so it happens only on a
-        // real change: a different tab here, a changed target, a moved PROXIED tab
-        // (whose src is /v1/webtab/{session}/{ordinal}/ and would otherwise proxy the
-        // tab that took its old index), or a flip of the session's ARCHIVED state
-        // (#1809) — which swaps a live frame for the inert placeholder and back
-        // WITHOUT changing the target, the ordinal, or the identity, so no other term
-        // here would catch it.
+        // real change: a different tab here, a changed target, or a flip of the
+        // session's ARCHIVED state (#1809) — which swaps a live frame for the inert
+        // placeholder and back WITHOUT changing the target, the ordinal, or the
+        // identity, so no other term here would catch it. A merely-MOVED tab is not
+        // a real change any more: a web pane's src encodes no ordinal (proxied →
+        // /v1/webtab/{session}/{tabId}/…, #1810; external → the target URL), so it is
+        // followed rather than rebuilt.
         if (pane.term || pane.webUrl !== webTarget || staleAddress || pane.webArchived !== this.archived) {
           pane.term?.dispose();
           pane.term = null;
@@ -483,7 +478,7 @@ export class SplitView {
           pane.host.replaceChildren();
           pane.tab = leaf.tab;
           pane.identity = identity;
-          this.mountWebPane(pane, webTarget);
+          this.mountWebPane(pane, webTarget, realId);
           pane.status = "open";
           this.onPaneStatus(leaf.id, "open");
         } else if (moved) {
@@ -587,21 +582,31 @@ export class SplitView {
    *  directly (best-effort). A reload control and an "open in new tab" affordance
    *  are always present; for a direct external frame a load-timeout reveals a
    *  fallback when embedding is blocked. */
-  private mountWebPane(pane: Pane, target: string): void {
+  private mountWebPane(pane: Pane, target: string, realId: string): void {
     pane.webUrl = target;
     pane.webArchived = this.archived;
     const sessionId = this.sessionId ?? "";
-    const proxied = target !== "" && isLoopbackWebUrl(target);
+    // A loopback target is proxied THROUGH the daemon, addressed by the tab's stable
+    // id (#1810). realId is required: the proxy route has no ordinal form to fall
+    // back to, and every live tab carries an id (the daemon backfills one on load),
+    // so an id-less web tab is unreachable in practice — if it ever occurs, framing
+    // the target directly is the honest degradation rather than minting a URL the
+    // daemon would 404.
+    const proxied = target !== "" && realId !== "" && isLoopbackWebUrl(target);
     // An archived session is inert (#1809 follow-up), so the frame is never pointed
     // at the target: the daemon refuses to proxy an archived session's web tab, and
     // for a DIRECT external tab there is no daemon in the path to refuse — the frame
     // would load the live site out of a session the user has shelved. Blanking src
     // here (rather than only overlaying the placeholder) is what guarantees no
     // request is issued either way.
-    const src = this.archived ? "" : proxied ? webProxyPath(sessionId, pane.tab, this.token) : target;
+    const src = this.archived ? "" : proxied ? webProxyPath(sessionId, realId, target, this.token) : target;
     // The "open externally" href: for a proxied local preview, the same-origin
     // proxy path (works for the remote viewer); for an external tab, the site URL.
-    const openHref = proxied ? webProxyPath(sessionId, pane.tab, this.token) : target;
+    // Computed from the target rather than reused from `src`, which an archived
+    // session deliberately blanks — the two only coincide while the session is live.
+    // The archived branch below withdraws this link outright, so it is never the
+    // thing that reaches an inert session's target.
+    const openHref = proxied ? webProxyPath(sessionId, realId, target, this.token) : target;
 
     const wrap = el("div", "af-webpane");
 

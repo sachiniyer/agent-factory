@@ -20,7 +20,7 @@ import { tabBarSig, tabIdentity, tabRealId } from "./ui.js";
 import type { AppState } from "./ui.js";
 import type { SessionData } from "./types.js";
 import { leaves, remapByIdentity, resolveDragTab, tabsRebound } from "./layout.js";
-import { paneAddressUsesOrdinal } from "./tabaddr.js";
+import { paneAddressUsesOrdinal, webProxyPath } from "./tabaddr.js";
 
 // --- tabRealId: the real id, never a synthesized one -----------------------
 
@@ -234,6 +234,66 @@ test("a legacy leaf with a synthesized identity still follows a shift", () => {
   assert.equal(leaves(remapByIdentity(tree, prevIds, ids))[0].tab, 1);
 });
 
+// --- webProxyPath: id-keyed, and MIRRORS the target's path (#1810, #1811) ----
+
+test("the proxy src is keyed by the tab's STABLE id, never its ordinal", () => {
+  // The client half of #1810: an ordinal in this URL is what let a closed lower tab
+  // silently repoint an open pane at a different dev server.
+  const src = webProxyPath("sess-1", "id-web-b", "http://localhost:3000/", null);
+  assert.equal(src, "/v1/webtab/sess-1/id-web-b/");
+});
+
+test("a root target's proxy path is the bare prefix, with its trailing slash", () => {
+  // The trailing slash is load-bearing: the route requires it, and it keeps the
+  // app's relative URLs resolving UNDER the prefix rather than beside it.
+  assert.equal(webProxyPath("s", "t", "http://localhost:3000", null), "/v1/webtab/s/t/");
+  assert.equal(webProxyPath("s", "t", "http://127.0.0.1:8080/", null), "/v1/webtab/s/t/");
+});
+
+test("the target's own path is MIRRORED into the proxy URL", () => {
+  // The mirror model: the browser-visible depth matches the dev server's, so the
+  // browser resolves the app's relative URLs exactly where the app expects them.
+  assert.equal(
+    webProxyPath("s", "t", "http://localhost:3000/app/viewer.html", null),
+    "/v1/webtab/s/t/app/viewer.html",
+  );
+  assert.equal(
+    webProxyPath("s", "t", "http://localhost:8899/viewer.html", null),
+    "/v1/webtab/s/t/viewer.html",
+  );
+  // A directory-style target keeps its trailing slash.
+  assert.equal(webProxyPath("s", "t", "http://localhost:3000/app/", null), "/v1/webtab/s/t/app/");
+});
+
+test("the mirrored depth is what makes ../ resolve INSIDE the prefix", () => {
+  // The property the whole model exists for, asserted the way a browser computes it:
+  // a parent-relative link on the proxied page must land back inside the tab prefix
+  // (and mirror upstream /shared.css), never escape to the origin root.
+  const src = webProxyPath("s", "t", "http://localhost:3000/app/viewer.html", null);
+  const resolved = new URL("../shared.css", `http://daemon${src}`);
+  assert.equal(resolved.pathname, "/v1/webtab/s/t/shared.css");
+  // A sibling link stays beside the document, mirroring upstream /app/x.css.
+  assert.equal(new URL("x.css", `http://daemon${src}`).pathname, "/v1/webtab/s/t/app/x.css");
+});
+
+test("the token rides ?access_token= (an iframe src cannot set a header)", () => {
+  assert.equal(
+    webProxyPath("s", "t", "http://localhost:3000/app/viewer.html", "tok en"),
+    "/v1/webtab/s/t/app/viewer.html?access_token=tok%20en",
+  );
+  // A tokenless (loopback/exempt) client sends none.
+  assert.equal(webProxyPath("s", "t", "http://localhost:3000/", null), "/v1/webtab/s/t/");
+});
+
+test("session and tab ids are escaped into their path segments", () => {
+  const src = webProxyPath("a/b", "c d", "http://localhost:3000/", null);
+  assert.equal(src, "/v1/webtab/a%2Fb/c%20d/");
+});
+
+test("an unparseable target contributes no path", () => {
+  assert.equal(webProxyPath("s", "t", "not a url", null), "/v1/webtab/s/t/");
+});
+
 // --- paneAddressUsesOrdinal: rebuild iff the pane's ADDRESS would change -----
 
 test("an id-addressed terminal's ordinal is inert — a move needs no rebuild", () => {
@@ -246,15 +306,15 @@ test("a LEGACY terminal's ordinal IS its address — a move must rebuild", () =>
   assert.equal(paneAddressUsesOrdinal(null, ""), true);
 });
 
-test("a PROXIED web tab's ordinal is its address, stable id or not — a move must rebuild", () => {
-  // The correction to the suggested "id-addressed ⇒ never remount" rule. A loopback
-  // preview is fetched through /v1/webtab/{session}/{ordinal}/, which is ordinal-keyed
-  // no matter how stable the tab's id is. Following it without a rebuild would leave
-  // the iframe proxying whatever tab took the old index — trading a cosmetic reload
-  // for an actual misroute.
-  assert.equal(paneAddressUsesOrdinal("http://localhost:3000", "id-web"), true);
-  assert.equal(paneAddressUsesOrdinal("http://127.0.0.1:8080/app", "id-web"), true);
-  assert.equal(paneAddressUsesOrdinal("http://[::1]:5173", "id-web"), true);
+test("a PROXIED web tab is id-keyed since #1810 — a move is followed, not remounted", () => {
+  // This INVERTS the pre-#1810 rule, because the reason for it is gone. A loopback
+  // preview used to be fetched through /v1/webtab/{session}/{ORDINAL}/, so a moved
+  // tab had to be torn down or the iframe would proxy whatever took its old index.
+  // The route is keyed by the stable tab id now, so the src survives a shift and the
+  // frame — with the dev server's in-page state — is kept.
+  assert.equal(paneAddressUsesOrdinal("http://localhost:3000", "id-web"), false);
+  assert.equal(paneAddressUsesOrdinal("http://127.0.0.1:8080/app", "id-web"), false);
+  assert.equal(paneAddressUsesOrdinal("http://[::1]:5173", "id-web"), false);
 });
 
 test("an EXTERNAL web tab's src encodes no ordinal — a move is followed, not remounted", () => {
@@ -265,13 +325,14 @@ test("an EXTERNAL web tab's src encodes no ordinal — a move is followed, not r
   assert.equal(paneAddressUsesOrdinal("https://example.com/docs", ""), false);
 });
 
-test("a web tab with NO target has no ordinal-bearing address", () => {
-  // It renders a fallback, not a proxied frame — nothing to invalidate.
+test("no web target shape embeds an ordinal — none of them force a remount", () => {
+  // Since #1810 this holds for EVERY web pane, whatever the target: a targetless tab
+  // (which renders a fallback, not a frame) and an unparseable one (never proxied)
+  // included. Pinned so a future change that reintroduces an ordinal into any web
+  // address has to come through this assertion.
   assert.equal(paneAddressUsesOrdinal("", "id-web"), false);
-});
-
-test("an unparseable web target is treated as non-loopback (never proxied)", () => {
   assert.equal(paneAddressUsesOrdinal("not a url", "id-web"), false);
+  assert.equal(paneAddressUsesOrdinal("", ""), false);
 });
 
 // --- the end-to-end property: a shifted tab is still addressed by ITS id -----

@@ -393,31 +393,45 @@ is a bare `localhost:PORT` from whenever the tab was created, and by the time yo
 come back that port may belong to something else entirely. `af sessions restore`
 brings the tab back to life.
 
-!!! note "Dev-server base path"
-    The proxy serves the dev server under `/v1/webtab/<session>/<tab>/`. Apps that
-    request assets with **relative** paths resolve correctly under that prefix. An
-    app that hard-codes **absolute** asset paths (`/assets/app.js`) will not find
-    them through the proxy — configure the dev server with a matching base path
-    (e.g. Vite's `base`) or serve relative asset URLs. WebSocket-based hot reload
-    is proxied on a best-effort basis.
+!!! note "How the proxied URL maps to the dev server"
+    The proxy serves the dev server under `/v1/webtab/<session>/<tab>/`, and the
+    browser-visible path **mirrors the dev server's own path** beneath it:
 
-    A target that carries a **path** (`http://localhost:8899/viewer.html`) is
-    treated as a **document**, exactly as a browser treats the page a link points
-    at: the tab's root serves that page, and its relative assets resolve next to
-    it (`style.css` → `/style.css`, `assets/x.css` → `/assets/x.css`). To make
-    relative assets resolve *beneath* a directory instead, give the target a
-    trailing slash (`http://localhost:8899/app/` → `assets/x.css` becomes
-    `/app/assets/x.css`).
+    | target | browser URL | dev server sees |
+    |---|---|---|
+    | `http://localhost:3000` | `/v1/webtab/<s>/<t>/` | `/` |
+    | `http://localhost:8899/viewer.html` | `/v1/webtab/<s>/<t>/viewer.html` | `/viewer.html` |
+    | `http://localhost:8899/app/viewer.html` | `/v1/webtab/<s>/<t>/app/viewer.html` | `/app/viewer.html` |
 
-    The target's **directory** is what the tab's root maps onto, so a target
-    nested in a subdirectory (`…/app/viewer.html`) reaches its siblings and
-    descendants but **not its parents**: a `../shared.css` link, or a cookie the
-    app scopes to `Path=/app`, resolves above the tab's root and won't find the
-    proxy. Point the tab at a target whose directory contains everything the page
-    needs (commonly the server root) if the preview needs either.
+    Because the depth matches, the browser resolves the app's **relative** URLs
+    exactly where the dev server expects them — a sibling (`x.css`), a
+    **parent-relative** one (`../shared.css`), and a **subdirectory target** all
+    work, and a cookie the app scopes to a sub-path (`Path=/app`) rides on the
+    matching proxied requests. Requesting the tab's bare root redirects to the
+    target's path, so the URL mirrors from the first navigation on. WebSocket-based
+    hot reload is proxied on a best-effort basis.
 
+!!! warning "Absolute asset paths are not proxied"
+    An app that hard-codes **absolute** asset paths (`/assets/app.js`,
+    `/static/js/bundle.js`) will not find them through the proxy. An absolute path
+    resolves against the **origin root**, so it escapes the tab's prefix before the
+    daemon ever sees which tab it belongs to. Configure the dev server with a
+    matching base path (**Vite** `base`, **CRA/webpack** `homepage` /
+    `publicPath`, **Next** `basePath`) or serve relative asset URLs.
+
+    Such a request returns a **404** naming the problem. It cannot be rerouted:
+    the preview iframe is sandboxed to an **opaque origin** (so a previewed dev
+    server can never reach the web UI or read its token), and a browser sends no
+    `Referer` from such a frame, leaving nothing to attribute the request by.
+    Answering it with the web UI's own page instead would hand the app HTML where
+    it asked for JavaScript — a silent, unexplained breakage — so it fails loudly
+    instead. Lifting the limitation needs a dedicated preview origin
+    ([#1856](https://github.com/sachiniyer/agent-factory/issues/1856)).
+
+!!! note "Previews over a token-protected listener"
     Over a **token-protected** network listener, iframe sub-resource requests are
-    kept authorized via a path-scoped cookie; if a preview loads only partially
+    kept authorized via a path-scoped cookie (see
+    [Remote HTTP auth](remote-http-auth.md)). If a preview loads only partially
     over a direct network listener, prefer an **SSH-forwarded loopback** port
     (which needs no token) — the common remote-preview path.
 
