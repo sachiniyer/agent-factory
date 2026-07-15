@@ -147,9 +147,40 @@ func (m *Manager) clearRemoteLoss(key string) {
 	m.mu.Unlock()
 }
 
+// remoteSandboxAnswersAlive reports whether a remote session's sandbox answers
+// as alive right now — the veto every re-provision must clear first.
+//
+// A Lost mark is a claim about the past, and it can be minutes stale: restore
+// backs off to 5 minutes, and a user can hit restore by hand at any moment.
+// Transports heal. Re-provisioning is irreversible and destroys everything the
+// sandbox never pushed, so the question that matters is not "was it lost?" but
+// "is it gone NOW?" — asked against live state, immediately before acting.
+//
+// probeAlive, specifically: an ANSWERED alive is proof the sandbox is there and
+// a re-provision would orphan it. probeDead and probeUnknown both fall through
+// to recovery — a sandbox that answers "my agent is gone", and one that answers
+// nothing at all after the debounce already judged it durably unreachable, are
+// both cases where recovery is what the user wants (#1108/#1782).
+//
+// Bounded, so a wedged remote cannot stall the poll goroutine here either.
+func (m *Manager) remoteSandboxAnswersAlive(instance *session.Instance) bool {
+	if !isRemoteWorkspace(instance) {
+		return false // a local session has no sandbox to orphan
+	}
+	return aliveWithin(instance.AgentServer(), remoteLostConfirmTimeout) == probeAlive
+}
+
 // noteRuntimeReplaced resets a session's remote-loss debounce after a lifecycle
 // event that REPLACED the runtime its failures were about: a Recover, a
 // Respawn, an archive-restore's re-provision.
+//
+// Call it the INSTANT the swap succeeds — before any persist, log, or other
+// work. The poll goroutine does not hold the op-lock and does not skip a session
+// whose restore has already cleared OpRestoring, so it can probe the fresh
+// runtime while the caller is still doing its bookkeeping. A blip inside that
+// window would be judged against the OLD sandbox's threshold-satisfying count
+// and mark the new runtime Lost. The window is milliseconds, but closing it
+// costs nothing but statement order.
 //
 // EVERY such site must call this, and the requirement is not obvious, so it is
 // named for the trigger rather than the effect. The accumulated count describes
@@ -172,12 +203,24 @@ func (m *Manager) noteRuntimeReplaced(repoID string, instance *session.Instance)
 	m.clearRemoteLoss(remoteLossKey(repoID, instance))
 }
 
-// sweepRemoteLossStates drops debounce entries whose instance is no longer live
-// under that identity — killed, archived, or replaced by a same-title session
-// with a fresh ID. Keying by instance ID already stops a new session from
-// READING an old one's failures; this is what stops the map from growing, since
-// a session killed mid-episode never gets the answered probe that would clear it.
-// Called from the poll that populates the map. Guarded by m.mu.
+// sweepRemoteLossStates drops debounce entries that no longer describe anything
+// probeable — killed, archived, or replaced by a same-title session with a fresh
+// ID. Keying by instance ID already stops a new session from READING an old
+// one's failures; this is what stops the map from growing, since a session
+// killed or archived mid-episode never gets the answered probe that would clear
+// it. Called from the poll that populates the map. Guarded by m.mu.
+//
+// "Probeable", not merely "present in m.instances": an ARCHIVED session stays in
+// that map under the same stable ID, so presence alone would keep its entry
+// forever. Archiving a remote session tears its sandbox down (Archive pushes the
+// branch, kills the in-sandbox workspace, and resets the remote wiring), which
+// makes the accumulated count definitionally stale — it describes a sandbox that
+// was deliberately destroyed. The poll never probes an archived row either, so
+// nothing would ever clear it. Hence: unstarted or Archived is not live.
+//
+// This cannot substitute for noteRuntimeReplaced. A re-provision keeps the same
+// ID AND stays started, so the entry legitimately looks live — only the site
+// that swapped the runtime can know it did.
 func (m *Manager) sweepRemoteLossStates() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -186,6 +229,9 @@ func (m *Manager) sweepRemoteLossStates() {
 	}
 	live := make(map[string]struct{}, len(m.instances))
 	for key, inst := range m.instances {
+		if !inst.Started() || inst.GetLiveness() == session.LiveArchived {
+			continue // nothing to probe: its entry can never be cleared by an answer
+		}
 		repoID, _ := splitDaemonInstanceKey(key)
 		live[remoteLossKey(repoID, inst)] = struct{}{}
 	}

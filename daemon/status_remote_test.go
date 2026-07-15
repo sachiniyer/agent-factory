@@ -600,3 +600,81 @@ func TestRestoreArchived_RemoteReprovisionClearsDebounce(t *testing.T) {
 		t.Fatalf("Recover calls = %d, want still 1 — the archive-restore left the pre-archive failure count in place, so one blip re-provisioned the restored sandbox away and orphaned it (#1794)", got)
 	}
 }
+
+// TestRestoreSession_AliveRemoteSandboxIsNotReprovisioned is codex's P1 on
+// 2ec7b52: the manual restore path lacked the live recheck the automatic loop
+// has.
+//
+// I had scoped the recheck to the automatic loop on the reasoning that a manual
+// restore is explicit user intent. That reasoning was wrong. "Restore" asks for
+// a working session; it does not ask to destroy a running sandbox and every
+// commit it never pushed. Being user-initiated makes the recheck MORE important,
+// not less — the user is the one most likely to fire it while a transport is
+// healing, precisely because they watched the row go red. And the row's Lost
+// mark can be minutes stale, since the automatic loop backs off to 5 minutes.
+//
+// A sandbox that answers is not lost: heal the row, deliver what was asked for,
+// destroy nothing.
+func TestRestoreSession_AliveRemoteSandboxIsNotReprovisioned(t *testing.T) {
+	withRemoteLossThresholds(t, 3, time.Minute, time.Second)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/v1/agent/alive" {
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"alive": true}})
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer srv.Close()
+
+	manager, repoID, repoPath := newStatusTestManager(t)
+	// Marked Lost during an outage; the transport has since healed.
+	inst, backend := registerStartedRemote(t, manager, repoID, repoPath, "remote-healed", srv.URL, session.Lost)
+
+	if _, err := manager.RestoreSession(RestoreSessionRequest{Title: "remote-healed", RepoID: repoID}); err != nil {
+		t.Fatalf("RestoreSession: %v", err)
+	}
+
+	if got := backend.recoverCalls(); got != 0 {
+		t.Fatalf("Recover calls = %d, want 0 — the sandbox answered as alive, so a manual restore must heal the row rather than provision a replacement over a live sandbox and discard its unpushed work (#1794)", got)
+	}
+	if got := inst.GetLiveness(); got == session.LiveLost {
+		t.Fatal("liveness is still LiveLost: a restore that proves the sandbox alive must clear the mark, not leave the row stranded")
+	}
+}
+
+// TestSweepRemoteLossStates_DropsArchivedRows is codex's P3 on 2ec7b52.
+//
+// The sweep took presence in m.instances as proof of liveness, but an archived
+// session stays in that map under the same stable ID — so its entry was kept
+// forever, contradicting the doc. Archiving a remote session tears its sandbox
+// down (branch pushed, in-sandbox workspace killed, remote wiring reset), which
+// makes the count definitionally stale, and the poll never probes an archived
+// row, so nothing would ever clear it.
+func TestSweepRemoteLossStates_DropsArchivedRows(t *testing.T) {
+	withRemoteLossThresholds(t, 3, time.Minute, time.Second)
+	advance := withFrozenClock(t)
+
+	manager, repoID, repoPath := newStatusTestManager(t)
+	inst, _ := registerStartedRemote(t, manager, repoID, repoPath, "remote-shelved", "http://127.0.0.1:1", session.Running)
+
+	driveDurableRemoteLoss(manager, advance)
+	manager.mu.Lock()
+	before := len(manager.remoteLossStates)
+	manager.mu.Unlock()
+	if before == 0 {
+		t.Fatal("setup: expected accumulated debounce state before the archive")
+	}
+
+	// Archived: the sandbox those failures were about is deliberately destroyed.
+	inst.SetStatusForTest(session.Archived)
+	manager.RefreshStatuses() // runs the sweep
+
+	manager.mu.Lock()
+	after := len(manager.remoteLossStates)
+	manager.mu.Unlock()
+	if after != 0 {
+		t.Fatalf("remoteLossStates still holds %d entry/entries after the row was archived — an archived session keeps its map entry and its stable ID, and is never probed again, so nothing else will ever drop it (#1794)", after)
+	}
+}

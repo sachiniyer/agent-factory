@@ -182,17 +182,19 @@ func (m *Manager) restoreLostSession(key, repoID string, inst *session.Instance)
 	// answers proves the sandbox is there, so heal the row and let the next poll
 	// settle its real liveness. Bounded, so a genuinely wedged remote cannot
 	// stall the poll loop here either.
-	if isRemoteWorkspace(inst) {
-		if aliveWithin(inst.AgentServer(), remoteLostConfirmTimeout) == probeAlive {
-			log.InfoLog.Printf("not re-provisioning lost remote session %q: its sandbox answers as alive (re-provisioning would orphan it and lose unpushed work) — clearing the Lost mark", inst.Title)
-			_ = inst.Transition(session.ObserveLiveness(session.LiveRunning))
-			m.persistInstance(repoID, inst)
-			m.clearRemoteLoss(remoteLossKey(repoID, inst))
-			m.mu.Lock()
-			delete(m.lostRestoreStates, key)
-			m.mu.Unlock()
-			return
-		}
+	if m.remoteSandboxAnswersAlive(inst) {
+		log.InfoLog.Printf("not re-provisioning lost remote session %q: its sandbox answers as alive (re-provisioning would orphan it and lose unpushed work) — clearing the Lost mark", inst.Title)
+		_ = inst.Transition(session.ObserveLiveness(session.LiveRunning))
+		// Clear before the persist, same ordering rule as the recovery path below:
+		// the answered probe already ended the loss episode, and leaving the stale
+		// count in place across a disk write lets a blip in that window re-mark the
+		// very session we just proved alive.
+		m.clearRemoteLoss(remoteLossKey(repoID, inst))
+		m.persistInstance(repoID, inst)
+		m.mu.Lock()
+		delete(m.lostRestoreStates, key)
+		m.mu.Unlock()
+		return
 	}
 
 	if err := inst.Recover(); err != nil {
@@ -210,16 +212,19 @@ func (m *Manager) restoreLostSession(key, repoID string, inst *session.Instance)
 		return
 	}
 
-	log.InfoLog.Printf("restored lost session %q (repo %s): agent re-spawned in its workspace", inst.Title, repoID)
-	// Drop the remote-loss debounce along with the retry state (#1794). Recovery
-	// REPLACED the runtime those failures were about — for a remote session the
-	// sandbox behind them no longer exists — so the accumulated count describes a
-	// thing that is gone. Left behind, it stays threshold-satisfying, and the
-	// first transport blip against the FRESH sandbox would immediately re-satisfy
-	// the debounce and re-provision again, orphaning the sandbox we just built:
-	// the debounce defeated at exactly the moment it matters most. Any lifecycle
-	// event that replaces or revalidates the runtime must reset this counter.
+	// Drop the remote-loss debounce FIRST — before the log and the retry-state
+	// bookkeeping below (#1794). Recovery REPLACED the runtime those failures were
+	// about: for a remote session the sandbox behind them no longer exists, so the
+	// accumulated count describes a thing that is gone. Left behind, it stays
+	// threshold-satisfying, and the first transport blip against the FRESH sandbox
+	// would immediately re-satisfy the debounce and re-provision again, orphaning
+	// the sandbox we just built — the debounce defeated at exactly the moment it
+	// matters most. The poll goroutine takes neither this op-lock nor
+	// killsInFlight, and Recover has already cleared the restore fence, so it can
+	// probe the new sandbox the instant Recover returns; every statement between
+	// the swap and this reset widens that window for nothing.
 	m.noteRuntimeReplaced(repoID, inst)
+	log.InfoLog.Printf("restored lost session %q (repo %s): agent re-spawned in its workspace", inst.Title, repoID)
 	m.mu.Lock()
 	delete(m.lostRestoreStates, key)
 	m.mu.Unlock()

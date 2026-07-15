@@ -3,6 +3,7 @@ package daemon
 import (
 	"fmt"
 
+	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
 )
 
@@ -74,19 +75,41 @@ func (m *Manager) restoreLostOrDeadSession(req RestoreSessionRequest, repoID str
 		return "", fmt.Errorf("session %q changed state before restore could start", req.Title)
 	}
 
+	// The same live recheck the automatic loop runs before re-provisioning
+	// (lostrestore.go), for the same reason: a remote Recover is not a reconnect
+	// but a fresh sandbox cloned from origin, and this row's Lost mark may be
+	// minutes stale — the automatic loop backs off to 5 minutes, and the user can
+	// hit restore at any moment, including while the transport is healing.
+	//
+	// Being user-initiated makes the recheck MORE important, not less. "Restore"
+	// asks for a working session; it does not ask to discard a running sandbox and
+	// everything it never pushed. If the sandbox answers, the session was never
+	// really lost and healing the row delivers exactly what was asked for, without
+	// the destruction. A user who genuinely wants a new sandbox kills and
+	// recreates (#1794).
+	if m.remoteSandboxAnswersAlive(instance) {
+		log.InfoLog.Printf("not re-provisioning session %q: its sandbox answers as alive, so it was never lost — clearing the Lost mark instead (re-provisioning would orphan it and discard unpushed work)", req.Title)
+		_ = instance.Transition(session.ObserveLiveness(session.LiveRunning))
+		m.clearRemoteLoss(remoteLossKey(repoID, instance))
+		m.persistInstance(repoID, instance)
+		m.mu.Lock()
+		delete(m.lostRestoreStates, key)
+		m.mu.Unlock()
+		return instance.GetWorktreePath(), nil
+	}
+
 	if err := instance.Recover(); err != nil {
 		m.persistInstance(repoID, instance)
 		return "", err
 	}
-	m.persistInstance(repoID, instance)
-	// Same lifecycle reset as the automatic loop (lostrestore.go): recovery
-	// REPLACED the runtime the debounce's failures were about, so the count now
-	// describes a sandbox that no longer exists. Left behind it stays
-	// threshold-satisfying, and the first transport blip against the sandbox this
-	// restore just provisioned would re-satisfy it instantly and re-provision
-	// AGAIN — orphaning the one the user just asked for. A manual restore is the
-	// same lifecycle event as an automatic one; only the trigger differs (#1794).
+	// Reset FIRST, before the persist below: recovery replaced the runtime the
+	// debounce's failures were about, and the poll goroutine can probe the fresh
+	// sandbox the moment Recover clears the restore fence — while this call is
+	// still writing to disk. A blip in that window would be judged against the
+	// dead sandbox's count. A manual restore is the same lifecycle event as an
+	// automatic one; only the trigger differs (#1794).
 	m.noteRuntimeReplaced(repoID, instance)
+	m.persistInstance(repoID, instance)
 	m.mu.Lock()
 	delete(m.lostRestoreStates, key)
 	m.mu.Unlock()
