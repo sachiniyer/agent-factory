@@ -24,6 +24,11 @@ jobs:
   auto-gate:
     name: Evaluate auto-merge gate
     runs-on: ubuntu-latest
+    # Late review comments on a merged/closed PR keep re-triggering the gate
+    # against a stale head (#1876). Events that carry no pull_request payload
+    # (check_suite, status) resolve the PR by head SHA and already filter to
+    # open PRs, so they must not be skipped here.
+    if: github.event.pull_request == null || github.event.pull_request.state == 'open'
     steps:
       - name: Check out gate logic
         uses: actions/checkout@v6
