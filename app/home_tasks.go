@@ -2,7 +2,6 @@ package app
 
 import (
 	"fmt"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -36,10 +35,10 @@ func (m *home) handleTaskCreate() tea.Cmd {
 			return m.handleError(fmt.Errorf("invalid cron: %v", err))
 		}
 	}
-	// Expand a leading ~ before resolving to absolute — filepath.Abs does not
-	// expand "~", so "~/project" would otherwise become "<cwd>/~/project"
-	// (#924). validateForm already normalized the field, so this is idempotent.
-	absPath, err := filepath.Abs(config.ExpandTilde(projectPath))
+	// ResolveUserPath expands a leading ~ before absolutizing — filepath.Abs
+	// alone would turn "~/project" into "<cwd>/~/project" (#924). validateForm
+	// already normalized the field, so this is idempotent.
+	absPath, err := config.ResolveUserPath(projectPath)
 	if err != nil {
 		return m.handleError(fmt.Errorf("invalid path: %v", err))
 	}

@@ -77,7 +77,7 @@ func resolveProjectDeleteTarget(args []string) (daemon.DeleteProjectRequest, str
 	if len(args) == 1 {
 		path = args[0]
 	}
-	abs, err := filepath.Abs(path)
+	abs, err := config.ResolveUserPath(path)
 	if err != nil {
 		return daemon.DeleteProjectRequest{}, "", fmt.Errorf("failed to resolve project path %q: %w", path, err)
 	}
