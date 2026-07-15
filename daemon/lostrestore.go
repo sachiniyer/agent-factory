@@ -224,6 +224,17 @@ func (m *Manager) restoreLostSession(key, repoID string, inst *session.Instance)
 	// probe the new sandbox the instant Recover returns; every statement between
 	// the swap and this reset widens that window for nothing.
 	m.noteRuntimeReplaced(repoID, inst)
+	// Then persist, same as the manual restore path (restore.go): Recover mutates
+	// durable worktree state on the way to SUCCESS too, not only before a failure
+	// — a fresh rebuild from the recorded base recreates the branch and flips
+	// branchCreatedByUs, and the orphaned-branch consequence is the one spelled
+	// out on the failure path above (#1841). The poll loop does NOT cover this:
+	// Recover's ConfirmLive already left the instance LiveRunning, so the next
+	// tick compares LiveRunning against LiveRunning and persistPollChange skips
+	// the write for as long as the agent stays busy. Ordering is load-bearing —
+	// this write goes AFTER noteRuntimeReplaced, never before, since a disk write
+	// is exactly the kind of statement the rule above keeps out of that window.
+	m.persistInstance(repoID, inst)
 	log.InfoLog.Printf("restored lost session %q (repo %s): agent re-spawned in its workspace", inst.Title, repoID)
 	m.mu.Lock()
 	delete(m.lostRestoreStates, key)
