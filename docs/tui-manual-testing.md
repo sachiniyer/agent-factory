@@ -103,6 +103,12 @@ it.
 `Enter`, `Tab`, `Shift-Tab`, `Esc`, `Ctrl-]`, and `1`–`9` are **reserved** and
 cannot be rebound (`[keys]` config). `Ctrl-W` is the configurable detach key
 (`detach_keys`); the driver reads it from `AF_DRIVER_DETACH_KEY`.
+
+The detach key is recognized in every encoding a terminal may report it in, not
+just the legacy control byte: an agent CLI that turns on the kitty keyboard
+protocol or `modifyOtherKeys` makes the terminal send `Ctrl-W` as an escape
+sequence instead (#1832). `af_detach` takes an optional raw sequence so a
+scenario can drive those encodings without that terminal.
 `←`/`→` switch panes only when a workspace pane has focus; with tree focus they
 keep the tree's collapse/expand behavior.
 
@@ -157,7 +163,7 @@ compose across `docker exec` invocations.
 | `af_exit_interactive` | `Ctrl-]` | interactive menu gone |
 | `af_send_to_pane <text>` | marker+text,`Enter` | short delivery marker echoes in the pane (then wait for output yourself) |
 | `af_attach` | `o` | TUI chrome gone (full-screen) |
-| `af_detach` | `Ctrl-W` | TUI chrome back **and** the attach client is reaped (guards #1157) |
+| `af_detach [raw_seq]` | `Ctrl-W` (once) | TUI chrome back **and** the attach client is reaped (guards #1157) |
 | `af_new_tab` | `t` | tab-child count rises |
 | `af_close_tab` | `w` | tab-child count falls |
 | `af_open_tasks` / `af_close_tasks` | `m` / `Esc` | tasks overlay (`r run`) appears / gone |
