@@ -149,7 +149,7 @@ func RunAgentServer(opts AgentServerOptions, stdout io.Writer) error {
 	// The zero-value policy is exactly that strict posture; pass it explicitly so
 	// the intent is on the page and a future require_token=false in the host
 	// config can never weaken this listener.
-	closeTCP, tcpInfo, err := startTCPListener(hs.newMux(), cfg, tokenGatePolicy{})
+	closeTCP, tcpInfo, err := startTCPListener(hs.newMux(), cfg, tokenGatePolicy{}, withoutWebShell)
 	if err != nil {
 		return fmt.Errorf("failed to start agent-server listener on %q: %w", opts.ListenAddr, err)
 	}

@@ -21,12 +21,25 @@ import (
 
 var daemonCmd = &cobra.Command{
 	Use:   "daemon",
-	Short: "Manage the background daemon that schedules tasks",
+	Short: "Manage the background daemon: serves the web UI and schedules tasks",
 	Long: `The agent-factory daemon runs task cron schedules in-process, supervises
-watch-task scripts, and drives autoyes mode. It starts automatically when you
-run af and at least one enabled task exists. Install it as a user-level
-autostart unit (systemd user service on Linux, launchd agent on macOS) so
-tasks keep firing after reboots, even when af is never opened.`,
+watch-task scripts, drives autoyes mode, and serves the bundled WEB UI. It
+starts automatically when you run af.
+
+The web UI is part of the daemon — there is no separate web command. Once the
+daemon is running, open:
+
+    http://localhost:8443
+
+It needs no token by default, so the page connects as soon as it loads. Set
+listen_addr to change the address (or to "" to turn the web server off), and
+require_token = true to put the UI behind a bearer token ('af token show').
+Note 'af agent-server' does NOT serve the web UI: it is the headless
+per-workspace backend a daemon drives on a remote machine.
+
+Install the daemon as a user-level autostart unit (systemd user service on
+Linux, launchd agent on macOS) so tasks keep firing and the web UI stays up
+after reboots, even when af is never opened.`,
 }
 
 var daemonInstallCmd = &cobra.Command{

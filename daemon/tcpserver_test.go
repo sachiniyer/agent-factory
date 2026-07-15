@@ -34,7 +34,7 @@ func TestTCPListener_HTTP_TokenRoundTrip(t *testing.T) {
 	// the agent-server posture; it lets a real loopback socket still exercise the
 	// token-enforcement path (the daemon's loopback-exempt policy is covered by
 	// TestTCPListener_LoopbackExempt and the handler-level matrix in httpauth_test).
-	closeTCP, info, err := startTCPListener(newHTTPMux(cs), cfg, tokenGatePolicy{})
+	closeTCP, info, err := startTCPListener(newHTTPMux(cs), cfg, tokenGatePolicy{}, withWebShell)
 	require.NoError(t, err)
 	defer func() { _ = closeTCP() }()
 
@@ -138,7 +138,7 @@ func TestTCPListener_ServesWebShellUnauthed(t *testing.T) {
 	// Strict policy (loopback NOT exempt) so the "/v1 stays token-gated" assertions
 	// below still hold over a real loopback socket — this test's subject is the
 	// UNAUTHENTICATED static shell, which is policy-independent.
-	closeTCP, info, err := startTCPListener(newHTTPMux(cs), cfg, tokenGatePolicy{})
+	closeTCP, info, err := startTCPListener(newHTTPMux(cs), cfg, tokenGatePolicy{}, withWebShell)
 	require.NoError(t, err)
 	defer func() { _ = closeTCP() }()
 
@@ -191,7 +191,7 @@ func TestTCPListener_LoopbackExempt(t *testing.T) {
 	cs := &controlServer{manager: m, scheduler: newTaskScheduler()}
 	// The daemon's real posture: loopback exempt, token still required for the
 	// (here unreachable) network peers.
-	closeTCP, info, err := startTCPListener(newHTTPMux(cs), cfg, tokenGatePolicy{loopbackExempt: true})
+	closeTCP, info, err := startTCPListener(newHTTPMux(cs), cfg, tokenGatePolicy{loopbackExempt: true}, withWebShell)
 	require.NoError(t, err)
 	defer func() { _ = closeTCP() }()
 
@@ -237,7 +237,7 @@ func TestTCPListener_RequireLoopbackToken(t *testing.T) {
 	// require_loopback_token=true ⇒ loopbackExempt=false. Token still enforced
 	// for the (unreachable here) network peers too — this only removes the
 	// loopback shortcut.
-	closeTCP, info, err := startTCPListener(newHTTPMux(cs), cfg, tokenGatePolicy{loopbackExempt: false})
+	closeTCP, info, err := startTCPListener(newHTTPMux(cs), cfg, tokenGatePolicy{loopbackExempt: false}, withWebShell)
 	require.NoError(t, err)
 	defer func() { _ = closeTCP() }()
 	require.NotEmpty(t, info.Token)

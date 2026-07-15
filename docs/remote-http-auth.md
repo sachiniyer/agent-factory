@@ -103,7 +103,13 @@ routable one:
 # ~/.agent-factory/config.toml
 listen_addr = "0.0.0.0:8443"   # routable — reachable from the network (opt-in)
                                # (the default "127.0.0.1:8443" is loopback-only)
+require_token = true           # REQUIRED here: the default is false (no token)
 ```
+
+Set `require_token = true` in the same edit. It defaults to `false`, so a network
+bind without it serves an **unauthenticated** control plane to everyone who can
+route to the port. Omit it only if the network is one you fully trust (a private
+tailnet/VPN) or an authenticating proxy sits in front.
 
 Then restart the daemon so it binds the port:
 
@@ -117,8 +123,12 @@ bearer token — the operator's channel to the freshly generated credential:
 ```
 daemon HTTP TCP listener enabled on 0.0.0.0:8443 (plain HTTP — terminate TLS at a proxy if needed)
   bearer token: kZ9…-…q0
-  loopback peers (127.0.0.1/::1) connect with no token; network peers must present the token above
+  listener is network-bound: every peer must present the token above, INCLUDING loopback-origin requests …
 ```
+
+Had you left `require_token` at its `false` default, that last line would instead
+read `all peers connect with NO token`, and the daemon would log the
+[tokenless network warning](#the-tokenless-network-warning) above it.
 
 ### 2. Read the token
 
@@ -224,21 +234,48 @@ expose `listen_addr` to anything beyond loopback, put encryption in front of it:
 
 ## When is a token required? Loopback vs network
 
-The token is enforced **per connection**, judged from the peer's real transport
-address — never from a header. There are three cases:
+**The token is off by default.** `require_token` defaults to `false`, so a fresh
+daemon serves its web UI and API to every peer with **no token at all**. Auth is
+strictly **opt-in**: set `require_token = true` to turn it on. What keeps that
+default safe is the *other* default — `listen_addr` is loopback-only
+(`127.0.0.1:8443`), so nothing off the machine can reach it until you say so.
 
-| Peer | Default (`require_token` unset/true) | `require_token = false` |
+Once you do enable the token, it is enforced **per connection**, judged from the
+peer's real transport address — never from a header:
+
+| Peer | Default (`require_token` unset/`false`) | `require_token = true` |
 |---|---|---|
-| **Loopback** (`127.0.0.1` / `::1`) — a browser or client on the **same machine** | **No token** — same trust as the local Unix socket | No token |
-| **Network** — any other source address | **Token required** (401 without it) | **No token** — token disabled |
+| **Loopback** (`127.0.0.1` / `::1`) — a browser or client on the **same machine** | **No token** | **No token** on a loopback bind (unless `require_loopback_token = true`) |
+| **Network** — any other source address | **No token** — token disabled | **Token required** (401 without it) |
 
-### Loopback is exempt by default
+> **A network-bound daemon under the default is open to anyone who can route to
+> it.** That combination — `listen_addr` on a routable interface *and* the
+> tokenless default — is an unauthenticated control plane, and the daemon logs a
+> loud startup warning when it sees it. If you bind to the network, either set
+> `require_token = true` or keep the listener on a private network (Tailscale,
+> VPN) or behind an authenticating proxy.
+
+### Why token-less by default
+
+The web UI is bundled into the daemon and served on loopback. Making a
+same-machine browser hunt for `af token show` and paste a credential bought no
+real security — anyone on the box already runs as your user, the same trust the
+`0600` Unix socket grants — and it cost every new user a login screen before
+they saw the product. So the default is: open `http://localhost:8443` and it
+connects. The web client reads the daemon's answer from `/v1/auth-info` and skips
+its login screen whenever no token is required.
+
+The trade-off is deliberate: `af` now ships open rather than closed, and the
+loopback-only `listen_addr` is what bounds the blast radius. Exposing the daemon
+to a network is an explicit act, and the paragraphs below are what you owe
+yourself when you do it.
+
+### Loopback is exempt even with the token on
 
 A browser on the **same machine** as the daemon already has the local trust the
-Unix socket grants (anyone on the box runs as your user), so requiring it to
-paste a token would be friction with no security gain. Loopback peers therefore
-connect with **no token** — the browser web client detects this and skips its
-login screen entirely.
+Unix socket grants, so even with `require_token = true` loopback peers still
+connect with **no token** — the token is asked of network peers only. Set
+`require_loopback_token = true` to close that too (see below).
 
 The exemption applies **only when `listen_addr` is loopback-bound** (the default
 `127.0.0.1:8443`, or `::1`/`localhost`). On a **network** bind (`0.0.0.0`, a
@@ -304,41 +341,62 @@ af daemon restart
 The daemon then logs `require_loopback_token=true: loopback peers … must present
 the token above`, and the browser web client shows its paste-token login for
 same-machine visitors. (To turn the web server off entirely instead, set
-`listen_addr = ""`.) `require_loopback_token` only tightens the loopback path and
-is independent of `require_token`; note that `require_token = false` drops the
-token for **all** peers, loopback included, so it overrides this key.
+`listen_addr = ""`.)
 
-### Network peers still require the token — by default
+> **`require_loopback_token` does nothing on its own.** It only *tightens* the
+> loopback path, so it has effect only while tokens are otherwise enforced — and
+> `require_token` now defaults to `false`, which disables the token for everyone,
+> loopback included. To lock down a shared machine you must set **both**:
+>
+> ```toml
+> require_token = true
+> require_loopback_token = true
+> ```
 
-Enabling `listen_addr` on a LAN, Tailscale, or public interface does **not**
-silently expose an unauthenticated control plane: a non-loopback peer must
-present the token, unchanged. This is the safe default and you should keep it —
-but remember the token travels over plain HTTP, so still front the listener with
-TLS termination or a private network.
+### Turning auth on (`require_token = true`)
 
-### Opting out on a trusted network (`require_token = false`)
-
-On a network you fully trust — a private Tailscale tailnet, a locked-down VPN —
-you can drop the token for network peers too. `require_token` is a
-**global-only** boolean (a cloned repo can never disable your auth), settable
-with `af config set require_token false` or by hand-editing the global config:
+`require_token` is a **global-only** boolean (a cloned repo can never change your
+daemon's auth posture), settable with `af config set require_token true` or by
+hand-editing the global config:
 
 ```toml
-# ~/.agent-factory/config.toml (global-only), default true
-require_token = false
+# ~/.agent-factory/config.toml (global-only), default false
+require_token = true
 ```
 
-When `false`, the daemon logs a loud startup **warning** — anyone who can reach
-`listen_addr` then has full control with no credential:
+Restart the daemon (`af daemon restart`) and network peers must present the token
+(401 without it); loopback peers stay exempt on a loopback bind unless you also
+set `require_loopback_token = true`. The web client picks the change up on its
+next load and shows its paste-token login. Get the credential with
+`af token show`.
+
+Set it whenever `listen_addr` is anything but loopback and the network isn't one
+you fully control. Remember the token still travels over plain HTTP, so pair it
+with TLS termination or a private network.
+
+### The tokenless network warning
+
+Leaving the default `require_token = false` while binding `listen_addr` to a
+routable interface means anyone who can reach the port has full control with no
+credential. The daemon logs a loud startup **warning** on exactly that
+combination:
 
 ```
-WARNING: require_token=false — the daemon web API on "0.0.0.0:8443" accepts
-NETWORK peers with NO token; anyone who can reach it has full control. The
-listener is plain HTTP (no TLS), so this leaves it fully open. Unset
-require_token (or set it true) to re-enable auth.
+WARNING: the daemon web API on "0.0.0.0:8443" is NETWORK-bound and requires NO
+token (require_token defaults to false); anyone who can reach it has full
+control. The listener is plain HTTP (no TLS), so this leaves it fully open. Set
+require_token = true to require auth, or keep the listener on a private network
+(Tailscale/VPN) or behind an authenticating proxy.
 ```
 
-Do not set this on any interface an untrusted party can reach.
+The warning is deliberately scoped to network binds: the ordinary loopback
+default is tokenless too, and warning on *that* every single start would train
+you to ignore the line that matters. If you see this, either set
+`require_token = true` or make sure only trusted peers can route to the port.
+
+On a network you fully trust — a private Tailscale tailnet, a locked-down VPN —
+running tokenless is a legitimate choice. On any interface an untrusted party can
+reach, it is not.
 
 ---
 
@@ -410,13 +468,16 @@ plaintext backend.
 - **Loopback trust is machine-wide, not per-user.** The default loopback web UI
   is reachable with **no token by any local account** — weaker than the Unix
   socket's `0600` owner-only gate. On a **shared / multi-user machine**, set
-  `require_loopback_token = true` (loopback then needs the token too) or
-  `listen_addr = ""` (disable the web server). See
+  **both** `require_token = true` and `require_loopback_token = true` (the latter
+  is inert on its own), or `listen_addr = ""` (disable the web server). See
   [Shared machines](#shared-machines-the-loopback-exemption-is-weaker-than-the-unix-socket).
-- **`require_token = false` disables auth for the whole network.** Use it only on
-  a network where every reachable party is trusted, and never on `0.0.0.0`
-  without a firewall. The startup warning is there to make an accidental setting
-  impossible to miss.
+- **The default is tokenless — auth is opt-in.** `require_token` defaults to
+  `false`, so what protects a stock install is the loopback-only `listen_addr`,
+  not a credential. The moment you point `listen_addr` at a network, you are
+  serving an unauthenticated control plane unless you also set
+  `require_token = true` or put the listener behind a private network/proxy.
+  Never do it on `0.0.0.0` without a firewall. The startup warning fires on
+  exactly that combination.
 - **Rotate on suspected exposure.** `af token rotate` invalidates the old token
   for new connections at once — no restart, no downtime for live sessions.
 

@@ -348,9 +348,10 @@ func TestDefaultConfig(t *testing.T) {
 		assert.Equal(t, tmux.ProgramClaude, cfg.DefaultProgram)
 		assert.False(t, cfg.AutoYes)
 		assert.True(t, cfg.AutoUpdate)
-		// require_token defaults to true — a network daemon is never silently
-		// unauthenticated by omission (#1696).
-		assert.True(t, cfg.RequireToken)
+		// require_token defaults to FALSE — auth is opt-in, so the daemon-bundled
+		// web UI opens with no token to find or paste. The loopback-only
+		// listen_addr default below is what keeps that off the network.
+		assert.False(t, cfg.RequireToken)
 		// The web UI is bundled with the daemon and served on loopback by
 		// default; an absent listen_addr inherits this, an explicit "" opts out.
 		assert.Equal(t, "127.0.0.1:8443", cfg.ListenAddr)
@@ -921,7 +922,9 @@ func TestLoadConfig(t *testing.T) {
 		require.NoError(t, err)
 		assert.Contains(t, string(data), `update_channel = 'stable'`)
 		assert.Contains(t, string(data), `auto_update = true`)
-		assert.Contains(t, string(data), `require_token = true`)
+		// The tokenless default is written out visibly rather than left implicit:
+		// an operator who wants auth finds the key already there to flip.
+		assert.Contains(t, string(data), `require_token = false`)
 		assert.Contains(t, string(data), `worktree_root = 'sibling'`)
 		assert.Contains(t, string(data), `[theme]`)
 		assert.Contains(t, string(data), `accent = '#8CD0D3'`)
@@ -1409,36 +1412,9 @@ auto_yes = false
 	})
 }
 
-// TestRequireTokenLoadSemantics pins the default-true bool behavior for
-// require_token (#1696): an omitted key keeps the fail-safe default (token
-// required), and an explicit false disables it. This is the load-side guarantee
-// behind the daemon gate — a config that never mentions the key must never
-// silently disable auth.
-func TestRequireTokenLoadSemantics(t *testing.T) {
-	cases := []struct {
-		name    string
-		content string
-		want    bool
-	}{
-		{"absent ⇒ default true", "default_program = 'claude'\n", true},
-		{"explicit true", "require_token = true\n", true},
-		{"explicit false", "require_token = false\n", false},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
-			fastShell(t)
-			configDir, err := GetConfigDir()
-			require.NoError(t, err)
-			require.NoError(t, os.MkdirAll(configDir, 0o755))
-			require.NoError(t, os.WriteFile(filepath.Join(configDir, TomlConfigFileName), []byte(tc.content), 0o644))
-
-			cfg, err := LoadConfig()
-			require.NoError(t, err)
-			assert.Equal(t, tc.want, cfg.RequireToken)
-		})
-	}
-}
+// The require_token / require_loopback_token load semantics live in
+// authposture_test.go — they pin the daemon's auth contract and are easier to find
+// under their own name.
 
 func TestSaveConfig(t *testing.T) {
 	t.Run("saves config to file", func(t *testing.T) {

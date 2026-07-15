@@ -15,6 +15,13 @@ containerised session identically to a local one.
 Select a backend per-repo in `.agent-factory/config.json`, or per-session with
 `af sessions create --backend <name>` (the flag overrides the repo config).
 
+!!! note "`af agent-server` is a backend, not the web UI"
+    The non-local backends work by running an **`af agent-server`** in the remote
+    workspace — a headless, single-workspace process that a daemon dials and
+    drives. It serves **no frontend**: opening its port in a browser gets you a
+    404 telling you so. The **web UI is served by the daemon** — run `af daemon`
+    and open <http://localhost:8443>. See [The web client](web.md).
+
 ---
 
 ## Docker backend

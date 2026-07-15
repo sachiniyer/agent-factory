@@ -141,7 +141,7 @@ func TestHeadlessAgentServer_HTTPTokenRoundTrip(t *testing.T) {
 	// The agent-server uses the strict zero-value policy: token mandatory for
 	// every peer, loopback NOT exempt — so "missing token → 401" holds even over
 	// this loopback socket (#1696).
-	closeTCP, info, err := startTCPListener(hs.newMux(), cfg, tokenGatePolicy{})
+	closeTCP, info, err := startTCPListener(hs.newMux(), cfg, tokenGatePolicy{}, withoutWebShell)
 	require.NoError(t, err)
 	defer func() { _ = closeTCP() }()
 	require.NotEmpty(t, info.Token)
@@ -258,4 +258,38 @@ func TestHeadlessAgentServer_HTTPTokenRoundTrip(t *testing.T) {
 		_ = badConn.Close(websocket.StatusNormalClosure, "")
 	}
 	require.Error(t, err, "unauthenticated WS handshake must be rejected")
+}
+
+// TestAgentServerServesNoWebShell pins the frontend boundary in the code, not just
+// in help text: the agent-server must NOT serve the browser SPA. It shares
+// startTCPListener with the daemon, which used to wrap every listener in
+// webShellHandler unconditionally — so opening an agent-server port in a browser
+// rendered the real Agent Factory shell, walked the visitor through a login, and
+// then dead-ended on `unknown route "/v1/Snapshot"` (the SPA speaks the daemon's
+// REST surface, which this server does not implement). Serving a working-looking
+// frontend that cannot work is exactly the confusion the help text now disclaims.
+func TestAgentServerServesNoWebShell(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+
+	cfg := config.DefaultConfig()
+	cfg.ListenAddr = "127.0.0.1:0"
+	hs := &headlessServer{}
+
+	closeTCP, info, err := startTCPListener(hs.newMux(), cfg, tokenGatePolicy{}, withoutWebShell)
+	require.NoError(t, err)
+	defer func() { _ = closeTCP() }()
+
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Get("http://" + info.Addr + "/")
+	require.NoError(t, err)
+	defer func() { _ = resp.Body.Close() }()
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+
+	require.Equal(t, http.StatusNotFound, resp.StatusCode, "agent-server must not serve a page at /")
+	require.NotContains(t, string(body), "<!doctype html>", "agent-server must not serve the SPA shell")
+	require.NotContains(t, string(body), "af-web.js", "agent-server must not serve the SPA bundle")
+	// The 404 must tell a human where the UI actually is, not just "unknown route".
+	require.Contains(t, string(body), "serves no web UI")
+	require.Contains(t, string(body), "http://localhost:8443")
 }

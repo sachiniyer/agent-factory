@@ -200,18 +200,26 @@ type Config struct {
 	// are unaffected. Global-only, like listen_addr.
 	CORSAllowedOrigins []string `json:"cors_allowed_origins,omitempty" toml:"cors_allowed_origins,omitempty"`
 	// RequireToken controls whether the daemon's HTTP TCP listener enforces the
-	// bearer token for NON-loopback (network) peers (#1696). It defaults to true:
-	// a peer that is not 127.0.0.1/::1 must present the token, so enabling
-	// listen_addr on a LAN/Tailscale/public interface never silently exposes an
-	// unauthenticated control plane. Loopback peers are ALWAYS exempt (same trust
-	// as the unix socket) regardless of this key — the token cannot be required
-	// from a browser on the same machine. Set false ONLY on a trusted network to
-	// drop the token for network peers too; the daemon then logs a loud startup
-	// warning. The listener is plain HTTP (no TLS) regardless — this key is only
-	// about the token; the token itself travels over the plaintext connection, so
-	// front a routable listener with a proxy or private network. Global-only
+	// bearer token for NON-loopback (network) peers. It defaults to FALSE: the
+	// token is OFF and auth is strictly OPT-IN — set require_token = true to turn
+	// it on. The default exists so the daemon-served web UI is a no-friction path:
+	// open the URL and it connects, with no token to find or paste, whether the
+	// browser is on this machine or a network peer (the SPA reads that posture
+	// from /v1/auth-info and skips its login screen entirely, #1696).
+	//
+	// The trade-off is deliberate: a daemon bound to a NON-loopback listen_addr
+	// under this default serves an UNAUTHENTICATED control plane to everyone who
+	// can route to it. The default listen_addr is loopback-only (127.0.0.1:8443),
+	// so that exposure requires an explicit opt-in to a network bind. If you take
+	// it, either set require_token = true, or keep the listener on a private
+	// network (Tailscale/VPN) or behind an authenticating proxy. The listener is
+	// plain HTTP (no TLS) regardless — this key is only about the token, and the
+	// token itself travels over the plaintext connection.
+	//
+	// Set true to require the token from network peers; loopback peers stay exempt
+	// on a loopback bind unless require_loopback_token is also true. Global-only
 	// (daemon network surface), like listen_addr: a cloned repo must never be able
-	// to disable auth. See docs/remote-http-auth.md.
+	// to change the daemon's auth posture. See docs/remote-http-auth.md.
 	RequireToken bool `json:"require_token" toml:"require_token"`
 	// RequireLoopbackToken controls whether even LOOPBACK peers (127.0.0.1/::1)
 	// must present the bearer token on the web/TCP listener. It defaults to FALSE:
@@ -220,12 +228,19 @@ type Config struct {
 	// grants every local process/user the same access as the owner — weaker than
 	// the unix control socket, whose 0600 perms restrict it to the owning user —
 	// so on a SHARED/multi-user machine set this TRUE: loopback peers then need
-	// the token too (`af token`), closing the gap. It only tightens the loopback
-	// path and is independent of require_token (which governs network peers);
-	// require_token=false still drops the token for ALL peers, loopback included,
-	// so this key has effect only while tokens are otherwise enforced. Global-only
-	// (daemon network surface), like require_token — a cloned repo must never be
-	// able to flip it. See docs/remote-http-auth.md.
+	// the token too (`af token`), closing the gap.
+	//
+	// It only TIGHTENS the loopback path, so it is meaningless on its own: it has
+	// effect only while tokens are otherwise enforced, and require_token now
+	// defaults to FALSE (tokens off for everyone, loopback included). Setting ONLY
+	// require_loopback_token = true therefore changes NOTHING — to lock down a
+	// shared machine you must set BOTH:
+	//
+	//	require_token = true
+	//	require_loopback_token = true
+	//
+	// Global-only (daemon network surface), like require_token — a cloned repo must
+	// never be able to flip it. See docs/remote-http-auth.md.
 	RequireLoopbackToken bool `json:"require_loopback_token" toml:"require_loopback_token"`
 	// Keys is the raw [keys] rebinding table (#1026): action name → a key
 	// string or list of key strings, replacing that action's default binding
@@ -340,7 +355,7 @@ func DefaultConfig() *Config {
 		DefaultProgram:       defaultProgram,
 		AutoYes:              false,
 		AutoUpdate:           true,
-		RequireToken:         true,
+		RequireToken:         false,
 		RequireLoopbackToken: false,
 		ListenAddr:           defaultListenAddr,
 		DaemonPollInterval:   defaultDaemonPollInterval,

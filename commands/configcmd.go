@@ -195,7 +195,7 @@ Settable keys:
   program_overrides.<agent>  full command string for an agent
   auto_yes                   true | false
   auto_update                true | false
-  require_token              true | false  (web auth for network peers; loopback always exempt)
+  require_token              true | false  (default false: the web UI needs no token; set true to require one from network peers)
   daemon_poll_interval       positive integer (ms)
   log_max_size_mb            positive integer
   log_max_backups            non-negative integer

@@ -34,7 +34,7 @@ token:
 ```
 daemon HTTP TCP listener enabled on 127.0.0.1:8443 (plain HTTP — terminate TLS at a proxy if needed)
   bearer token: kZ9…-…q0
-  loopback peers (127.0.0.1/::1) connect with no token; network peers must present the token above
+  all peers connect with NO token (require_token defaults to false; set require_token = true to require auth)
 ```
 
 ### Loopback (default), the network, or off
@@ -56,14 +56,16 @@ same.
     ```
 
 - **`0.0.0.0:8443` (or a LAN/Tailscale IP) — expose to the network.** The listener
-  is reachable from the network. A browser on another machine is a **network** peer
-  and must present the bearer token by default. Only bind a routable interface when
-  you must, and put it behind a firewall. Hand-edit your global config and restart
-  the daemon:
+  is reachable from the network. Because `require_token` defaults to `false`, a
+  network peer needs **no credential** unless you turn the token on — so set
+  `require_token = true` in the same edit unless the network is one you fully
+  trust. Only bind a routable interface when you must, and put it behind a
+  firewall. Hand-edit your global config and restart the daemon:
 
     ```toml
     # ~/.agent-factory/config.toml
     listen_addr = "0.0.0.0:8443"
+    require_token = true   # the default is false — a network bind without this is open
     ```
 
     ```bash
@@ -121,29 +123,46 @@ Whether the web client asks you for a token depends on **where your browser is**
 judged from the real TCP connection address (never a header — those are
 attacker-controlled and ignored, see [When is a token required?](remote-http-auth.md#when-is-a-token-required-loopback-vs-network)).
 
+**By default, never.** `require_token` defaults to `false`, so the app connects
+with no login screen wherever your browser is. Turning the token on is opt-in:
+
 | Your browser is on… | Token needed? | What you see |
 | --- | --- | --- |
-| **The same machine** as the daemon (loopback), default | **No** | The app loads straight through — no login screen |
-| **The same machine**, `require_loopback_token = true` | **Yes** | A login screen asking you to paste the daemon token |
-| **Another machine** (network peer), default | **Yes** | A login screen asking you to paste the daemon token |
-| **Another machine**, `require_token = false` | No | The app loads straight through |
+| **Anywhere**, default (`require_token = false`) | **No** | The app loads straight through — no login screen |
+| **The same machine** (loopback), `require_token = true` | No | The app loads straight through — loopback stays exempt |
+| **The same machine**, `require_token` **and** `require_loopback_token` both `true` | **Yes** | A login screen asking you to paste the daemon token |
+| **Another machine** (network peer), `require_token = true` | **Yes** | A login screen asking you to paste the daemon token |
 
-### Same machine: no token (by default)
+The web client never guesses: it asks the daemon via `/v1/auth-info` whether
+*this* connection needs a token, and skips the login screen whenever the answer is
+no. That is why the default experience is simply "open the URL and you're in".
 
-A browser on the daemon's own machine already has the same trust the local Unix
-socket grants (anyone on the box runs as your user), so requiring a token would be
-friction with no security gain **on a single-user machine**. The web client detects
-this and **skips the login screen entirely** — you land directly in the app.
+### No token by default
 
-On a **shared / multi-user machine** that assumption breaks: the loopback listener
-has no per-user gating, so every local account can reach it. Set
-`require_loopback_token = true` to require the token from loopback peers too (the
-app then shows the same login screen a network peer sees), or `listen_addr = ""` to
-turn the web server off. See the [Security notes](#security-notes).
+Making a same-machine browser hunt for a token and paste it bought no real
+security — anyone on the box already runs as your user, the same trust the Unix
+socket grants — and it cost every new user a login screen before they saw the
+product. So the token is **off by default** and auth is opt-in. What bounds the
+exposure is the *other* default: `listen_addr` is loopback-only, so nothing off
+the machine can reach the daemon until you change it.
 
-### Another machine: paste the token
+Two cases break that assumption, and both are on you to close:
 
-When a token *is* required, the web client shows a login screen with a single
+- **A shared / multi-user machine**: the loopback listener has no per-user gating,
+  so every local account can reach it. Set **both** `require_token = true` and
+  `require_loopback_token = true` (the latter is inert on its own), or
+  `listen_addr = ""` to turn the web server off.
+- **A network bind**: pointing `listen_addr` at a routable interface while leaving
+  the tokenless default serves an **unauthenticated control plane** to anyone who
+  can route to it. Set `require_token = true`, or keep it on a private network
+  (Tailscale/VPN) or behind an authenticating proxy. The daemon logs a loud
+  startup warning on exactly this combination.
+
+See the [Security notes](#security-notes).
+
+### With `require_token = true`: paste the token
+
+When you turn the token on, the web client shows a login screen with a single
 field. Get the token from the **host**:
 
 ```console
@@ -154,14 +173,12 @@ token: kZ9abc...-...q0
 Paste the `token` value into the field and click **Connect**. The token is stored
 in the browser tab's `sessionStorage`, so a page reload resumes automatically; a
 rejected token shows an actionable error (`That token was rejected. Check
-af token show on the host and try again.`).
+af token show on the host and try again.`), and a connection that fails for any
+other reason reports the daemon's own message rather than a generic failure.
 
-To reach the app from a trusted network without a token at all — a private
-Tailscale tailnet, a locked-down VPN — the daemon supports an opt-in
-`require_token = false`. It disables the token for network peers too and logs a
-loud startup warning (the listener is plain HTTP, so front it with a proxy or a
-private network). See
-[Opting out on a trusted network](remote-http-auth.md#opting-out-on-a-trusted-network-require_token-false).
+See [Turning auth on](remote-http-auth.md#turning-auth-on-require_token-true) for
+the full setup, and the note there on why `require_loopback_token` does nothing
+unless `require_token` is also `true`.
 
 **Disconnect** (top-right) forgets the stored token and returns you to the login
 screen — useful on a shared machine.
@@ -404,9 +421,20 @@ While a terminal is attached, all keys except `Escape` flow to the agent.
     anyone who can run a process as you already has that access. On a
     **shared / multi-user machine**, close the gap one of two ways:
 
-    - `require_loopback_token = true` — loopback peers must present the bearer
-      token too (`af token`), same as network peers; or
+    - `require_token = true` **and** `require_loopback_token = true` — loopback
+      peers must present the bearer token too (`af token show`). Both are needed:
+      `require_token` defaults to `false`, which disables the token for everyone,
+      so `require_loopback_token` alone changes nothing; or
     - `listen_addr = ""` — disable the web server entirely.
+
+!!! warning "A network bind is unauthenticated unless you turn the token on"
+    `require_token` defaults to `false`, so pointing `listen_addr` at a routable
+    interface (`0.0.0.0:8443`, a LAN/Tailscale IP) serves **full control of your
+    daemon to anyone who can reach the port, with no credential**. The daemon logs
+    a loud startup warning on exactly that combination. Set `require_token = true`,
+    or keep the listener on a private network (Tailscale/VPN) or behind an
+    authenticating proxy. This is the deliberate cost of the zero-friction default:
+    a stock install is protected by the loopback bind, not by auth.
 
 - **The token is full access.** Under the single-owner model, one token grants full
   control of the daemon. Treat it like a password; never commit it or paste it into

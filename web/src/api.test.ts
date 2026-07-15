@@ -12,6 +12,7 @@ import {
   archiveSession,
   closeTab,
   createTab,
+  errorText,
   killSession,
   removeTask,
   sendPrompt,
@@ -158,4 +159,136 @@ test("updateTask / triggerTask / removeTask FAIL CLOSED on a missing task id", a
     "removeTask with an empty id must reject",
   );
   assert.equal(cap.calls, 0, "no request may be issued for a task mutation with a missing id");
+});
+
+// --- error rendering ------------------------------------------------------
+//
+// The daemon marshals the envelope's error as an OBJECT ({"message":"..."},
+// apiproto.EnvelopeError), but this client used to type it as a string and pass it
+// straight to `new ApiError(status, env.error)`. That coerced the object via
+// String(), so every error surface — the login screen, the modals, the tab toast —
+// rendered the literal text "[object Object]" instead of what went wrong. These
+// pin the wire shape and the extraction, because the old tests only ever mocked
+// `error: null` and so never touched the error path at all.
+
+/** Stubs fetch with one canned response, for the error paths. */
+function stubFetchResponse(resp: { ok: boolean; status: number; statusText?: string; json: () => Promise<unknown> }): void {
+  (globalThis as { fetch: unknown }).fetch = async (): Promise<Response> =>
+    ({ statusText: "", ...resp }) as unknown as Response;
+}
+
+test("an envelope error object renders its message, never [object Object]", async () => {
+  stubFetchResponse({
+    ok: false,
+    status: 400,
+    statusText: "Bad Request",
+    json: async () => ({ data: null, error: { message: "session \"nope\" not found" } }),
+  });
+  const err = await killSession("id", "nope", "tok").then(
+    () => null,
+    (e: unknown) => e,
+  );
+  assert.ok(err instanceof ApiError);
+  assert.equal(err.status, 400);
+  assert.equal(err.message, 'session "nope" not found');
+  assert.doesNotMatch(err.message, /\[object Object\]/);
+});
+
+test("a 200 carrying an envelope error still surfaces the real message", async () => {
+  stubFetchResponse({
+    ok: true,
+    status: 200,
+    statusText: "OK",
+    json: async () => ({ data: null, error: { message: "tab cap reached" } }),
+  });
+  const err = await createTab("id", "s", "tok").then(
+    () => null,
+    (e: unknown) => e,
+  );
+  assert.ok(err instanceof ApiError);
+  assert.equal(err.message, "tab cap reached");
+});
+
+test("a string-shaped envelope error is still rendered (wire tolerance)", async () => {
+  // Not the daemon's shape, but an older daemon or a proxy could send it. The unwrap
+  // is liberal on purpose — the alternative is an unreadable error surface.
+  stubFetchResponse({
+    ok: false,
+    status: 400,
+    statusText: "Bad Request",
+    json: async () => ({ data: null, error: "legacy string error" }),
+  });
+  const err = await killSession("id", "s", "tok").then(
+    () => null,
+    (e: unknown) => e,
+  );
+  assert.ok(err instanceof ApiError);
+  assert.equal(err.message, "legacy string error");
+});
+
+test("an error with no usable message falls back to the status line", async () => {
+  stubFetchResponse({
+    ok: false,
+    status: 503,
+    statusText: "Service Unavailable",
+    json: async () => ({ data: null, error: {} }),
+  });
+  const err = await killSession("id", "s", "tok").then(
+    () => null,
+    (e: unknown) => e,
+  );
+  assert.ok(err instanceof ApiError);
+  assert.equal(err.message, "503 Service Unavailable");
+  assert.doesNotMatch(err.message, /\[object Object\]|undefined/);
+});
+
+test("a non-JSON error body falls back to the status line", async () => {
+  stubFetchResponse({
+    ok: false,
+    status: 502,
+    statusText: "Bad Gateway",
+    json: async () => {
+      throw new SyntaxError("Unexpected token < in JSON");
+    },
+  });
+  const err = await killSession("id", "s", "tok").then(
+    () => null,
+    (e: unknown) => e,
+  );
+  assert.ok(err instanceof ApiError);
+  assert.equal(err.message, "502 Bad Gateway");
+});
+
+test("a transport failure names the cause and stays readable", async () => {
+  (globalThis as { fetch: unknown }).fetch = async (): Promise<Response> => {
+    throw new TypeError("Failed to fetch");
+  };
+  const err = await killSession("id", "s", "tok").then(
+    () => null,
+    (e: unknown) => e,
+  );
+  assert.ok(err instanceof ApiError);
+  assert.equal(err.status, 0);
+  assert.equal(err.message, "cannot reach the daemon: Failed to fetch");
+  assert.doesNotMatch(err.message, /\[object Object\]|undefined/);
+});
+
+test("errorText extracts a readable string from every throwable shape", () => {
+  assert.equal(errorText(new Error("boom")), "boom");
+  assert.equal(errorText(new ApiError(401, "unauthorized")), "unauthorized");
+  assert.equal(errorText("plain string"), "plain string");
+  // The envelope error object — the exact shape that produced "[object Object]".
+  assert.equal(errorText({ message: "from the envelope" }), "from the envelope");
+  // No message anywhere: JSON is still more useful than "[object Object]".
+  assert.equal(errorText({ code: 7 }), '{"code":7}');
+  // Nothing usable at all falls back rather than rendering "undefined".
+  assert.equal(errorText(undefined), "unknown error");
+  assert.equal(errorText(null), "unknown error");
+  assert.equal(errorText({}), "unknown error");
+  assert.equal(errorText(new Error("")), "unknown error");
+  assert.equal(errorText(undefined, "custom fallback"), "custom fallback");
+  // A circular object cannot be JSON'd — must not throw, must not leak the coercion.
+  const circular: Record<string, unknown> = {};
+  circular.self = circular;
+  assert.equal(errorText(circular), "unknown error");
 });

@@ -9,7 +9,7 @@ Run `af <command> --help` for the same information at the terminal. For a narrat
 ## Commands
 
 - [`af`](#af) — Agent Factory - Manage multiple AI agents like Claude Code, Aider, Codex, Gemini, and Amp.
-- [`af agent-server`](#af-agent-server) — Run a headless single-workspace agent-server over HTTP/WS+token
+- [`af agent-server`](#af-agent-server) — Run a headless single-workspace backend (NOT the web UI — that is 'af daemon')
 - [`af api`](#af-api) — Show the daemon-hosted HTTP/JSON API catalog
 - [`af bug-report`](#af-bug-report) — Bundle logs, versions, tasks, and redacted state for a bug report
 - [`af completion`](#af-completion) — Generate the autocompletion script for the specified shell
@@ -21,7 +21,7 @@ Run `af <command> --help` for the same information at the terminal. For a narrat
 - [`af config get`](#af-config-get) — Print the value of a single global config key
 - [`af config list`](#af-config-list) — Print every global config key and its effective value
 - [`af config set`](#af-config-set) — Set a single settable global config key
-- [`af daemon`](#af-daemon) — Manage the background daemon that schedules tasks
+- [`af daemon`](#af-daemon) — Manage the background daemon: serves the web UI and schedules tasks
 - [`af daemon install`](#af-daemon-install) — Register the daemon to start automatically at login
 - [`af daemon restart`](#af-daemon-restart) — Restart the running daemon without stopping live sessions
 - [`af daemon status`](#af-daemon-status) — Report daemon liveness, sockets, pid, and autostart
@@ -69,13 +69,23 @@ Agent Factory - Manage multiple AI agents like Claude Code, Aider, Codex, Gemini
 Run 'af' with no arguments to open the TUI. The subcommands below drive the
 same daemon non-interactively (`af sessions`, `af tasks` emit JSON).
 
-By default 'af' talks to a daemon on the local machine over a Unix socket. The
-daemon also serves the bundled web UI on loopback (http://127.0.0.1:8443) by
-default. To drive a daemon on ANOTHER machine, SSH to the host and run 'af'
-there, or expose the HTTP+token TCP listener to the network (set a routable
-listen_addr) and point a client at it with the persistent --daemon-url/--token
-flags (see 'af token' for the credential). The listener is plain HTTP — put it
-behind a reverse proxy or a private network (Tailscale/VPN) if you need TLS.
+WEB UI: the daemon serves a browser client with the same rail, terminals, tabs,
+projects, and tasks. Start the daemon (any 'af' command does) and open
+
+    http://localhost:8443
+
+It needs no token by default, so the page just connects. The web UI is part of
+the daemon — 'af agent-server' does NOT serve it (that is the headless
+per-workspace backend a daemon drives on a remote machine).
+
+By default 'af' talks to a daemon on the local machine over a Unix socket. To
+drive a daemon on ANOTHER machine, SSH to the host and run 'af' there, or expose
+the TCP listener to the network (set a routable listen_addr) and point a client
+at it with the persistent --daemon-url/--token flags. Auth is OPT-IN: set
+require_token = true so network peers must present a token (see 'af token' for
+the credential), otherwise a routable listener is open to anyone who can reach
+it. The listener is plain HTTP — put it behind a reverse proxy or a private
+network (Tailscale/VPN) if you need TLS.
 Full guide: https://sachiniyer.github.io/agent-factory/remote-http-auth/
 
 ```
@@ -84,12 +94,12 @@ af [flags]
 
 **Subcommands**
 
-- [`af agent-server`](#af-agent-server) — Run a headless single-workspace agent-server over HTTP/WS+token
+- [`af agent-server`](#af-agent-server) — Run a headless single-workspace backend (NOT the web UI — that is 'af daemon')
 - [`af api`](#af-api) — Show the daemon-hosted HTTP/JSON API catalog
 - [`af bug-report`](#af-bug-report) — Bundle logs, versions, tasks, and redacted state for a bug report
 - [`af completion`](#af-completion) — Generate the autocompletion script for the specified shell
 - [`af config`](#af-config) — Read and write the global agent-factory config
-- [`af daemon`](#af-daemon) — Manage the background daemon that schedules tasks
+- [`af daemon`](#af-daemon) — Manage the background daemon: serves the web UI and schedules tasks
 - [`af debug`](#af-debug) — Print debug information like config paths
 - [`af doctor`](#af-doctor) — Diagnose setup, daemon health, and leaked session resources
 - [`af keys`](#af-keys) — Show the effective TUI key bindings (defaults plus [keys] rebinds)
@@ -112,23 +122,32 @@ af [flags]
 
 ## af agent-server
 
-Run a headless single-workspace agent-server over HTTP/WS+token
+Run a headless single-workspace backend (NOT the web UI — that is 'af daemon')
 
 Run a headless agent-server for exactly one session's workspace, served over
 the same REST + WebSocket protocol the daemon speaks, behind a plain-HTTP
 listener that requires a bearer token on every request.
 
-This is the process that will later run inside a docker container or on an ssh
-remote (#1592 Phase 4): a remote daemon dials the authed URL it exposes and
-drives the workspace exactly as it drives a local in-process session. Run it
-directly to reach one workspace over the network.
+This does NOT start the web UI, and serves no frontend at all — opening its port
+in a browser returns a 404 saying so. If you want the browser app, run the
+daemon — any 'af' command starts it — and open http://localhost:8443. The web UI
+is bundled into the daemon and served from its listen_addr; agent-server is only
+the headless per-workspace BACKEND that a daemon drives, and it exists to be
+consumed by a daemon rather than opened by a person.
+
+This is the process that runs inside a docker container or on an ssh remote
+(#1592 Phase 4): a remote daemon dials the authed URL it exposes and drives the
+workspace exactly as it drives a local in-process session. Run it directly only
+to host one workspace as a backend for a daemon on another machine.
 
 The listener always requires the token and serves plain HTTP (no TLS) — reach it
 over a private network or a tunnel (the docker/ssh runtimes forward a loopback
-port). On startup it prints one JSON line to stdout carrying the bound address
-and the bearer token. On SIGINT/SIGTERM it tears the workspace down (kills tmux,
-removes the worktree) — durability of in-progress work is the driving daemon's
-job (push the branch before shutdown), not this server's.
+port). Its token is mandatory for every peer and is NOT affected by the global
+require_token key, which governs only the daemon's own web listener. On startup
+it prints one JSON line to stdout carrying the bound address and the bearer
+token. On SIGINT/SIGTERM it tears the workspace down (kills tmux, removes the
+worktree) — durability of in-progress work is the driving daemon's job (push the
+branch before shutdown), not this server's.
 
 ```
 af agent-server [flags]
@@ -500,7 +519,7 @@ Settable keys:
   program_overrides.<agent>  full command string for an agent
   auto_yes                   true | false
   auto_update                true | false
-  require_token              true | false  (web auth for network peers; loopback always exempt)
+  require_token              true | false  (default false: the web UI needs no token; set true to require one from network peers)
   daemon_poll_interval       positive integer (ms)
   log_max_size_mb            positive integer
   log_max_backups            non-negative integer
@@ -538,13 +557,26 @@ af config set <key> <value> [flags]
 
 ## af daemon
 
-Manage the background daemon that schedules tasks
+Manage the background daemon: serves the web UI and schedules tasks
 
 The agent-factory daemon runs task cron schedules in-process, supervises
-watch-task scripts, and drives autoyes mode. It starts automatically when you
-run af and at least one enabled task exists. Install it as a user-level
-autostart unit (systemd user service on Linux, launchd agent on macOS) so
-tasks keep firing after reboots, even when af is never opened.
+watch-task scripts, drives autoyes mode, and serves the bundled WEB UI. It
+starts automatically when you run af.
+
+The web UI is part of the daemon — there is no separate web command. Once the
+daemon is running, open:
+
+    http://localhost:8443
+
+It needs no token by default, so the page connects as soon as it loads. Set
+listen_addr to change the address (or to "" to turn the web server off), and
+require_token = true to put the UI behind a bearer token ('af token show').
+Note 'af agent-server' does NOT serve the web UI: it is the headless
+per-workspace backend a daemon drives on a remote machine.
+
+Install the daemon as a user-level autostart unit (systemd user service on
+Linux, launchd agent on macOS) so tasks keep firing and the web UI stays up
+after reboots, even when af is never opened.
 
 ```
 af daemon

@@ -30,10 +30,82 @@ export function clearToken(): void {
   sessionStorage.removeItem(TOKEN_KEY);
 }
 
+/**
+ * The `error` member of the shared envelope. It is an OBJECT, not a string:
+ * apiproto.Failure() marshals `EnvelopeError{Message string}`, so the wire shape
+ * is `{"error":{"message":"..."}}`. Getting this wrong is what rendered
+ * "[object Object]" at every error site — a bare `${env.error}` stringifies the
+ * object. Mirrors apiclient/client.go, which reads env.Error.Message.
+ */
+interface EnvelopeError {
+  message: string;
+}
+
 /** The shared REST envelope every /v1/ route returns (apiproto/envelope.go). */
 interface Envelope<T> {
   data: T | null;
-  error: string | null;
+  error: EnvelopeError | null;
+}
+
+/**
+ * Extracts a human-readable string from ANY thrown value — the single funnel every
+ * error path uses, so no site can reintroduce the "[object Object]" class of bug by
+ * interpolating a non-string into text.
+ *
+ * The cases, in order: a real Error (the common path, incl. ApiError) yields its
+ * message; a bare string is itself; an envelope-shaped `{message}` — or anything
+ * else carrying a string `message` — yields that; everything else falls back to a
+ * JSON rendering, and only then to String(). Never returns "[object Object]" or
+ * "undefined" for a value that carries a message.
+ */
+export function errorText(e: unknown, fallback = "unknown error"): string {
+  if (e instanceof Error) {
+    // Handled entirely here: an Error with an empty message must reach the
+    // fallback, never String(err) — that renders the bare class name ("Error"),
+    // which tells the operator no more than "[object Object]" did.
+    return e.message !== "" ? e.message : fallback;
+  }
+  if (typeof e === "string") {
+    return e !== "" ? e : fallback;
+  }
+  if (e !== null && typeof e === "object") {
+    const msg = (e as { message?: unknown }).message;
+    if (typeof msg === "string" && msg !== "") {
+      return msg;
+    }
+    // A non-Error object with no usable message: JSON beats "[object Object]",
+    // which tells the operator nothing at all.
+    try {
+      const json = JSON.stringify(e);
+      if (json !== undefined && json !== "{}") {
+        return json;
+      }
+    } catch {
+      // Circular or otherwise unserializable — fall through to the fallback.
+    }
+  }
+  if (e === null || e === undefined) {
+    return fallback;
+  }
+  const s = String(e);
+  return s !== "" && s !== "[object Object]" ? s : fallback;
+}
+
+/**
+ * Renders an envelope's error member as a string, falling back to the bare status
+ * line when the daemon sent no usable message.
+ *
+ * Deliberately liberal: the declared type is the daemon's real contract, but a JSON
+ * body is untyped at runtime and could come from an older daemon or a proxy's error
+ * page, so this routes through errorText() and accepts a bare string too. Being
+ * strict here would buy nothing and would re-introduce an unreadable error surface
+ * the moment the wire drifted.
+ */
+function envelopeErrorText(err: EnvelopeError | null | undefined, statusLine: string): string {
+  if (err === null || err === undefined) {
+    return statusLine;
+  }
+  return errorText(err, statusLine);
 }
 
 /**
@@ -73,7 +145,7 @@ export async function af<T>(method: string, body: unknown, token: string): Promi
   } catch (e) {
     // A TypeError from fetch is a transport failure (daemon down, wrong host).
     // Surface it as status 0 with an actionable message.
-    throw new ApiError(0, `cannot reach the daemon: ${(e as Error).message}`);
+    throw new ApiError(0, `cannot reach the daemon: ${errorText(e)}`);
   }
 
   // Parse the envelope regardless of status so a structured error message wins
@@ -85,11 +157,12 @@ export async function af<T>(method: string, body: unknown, token: string): Promi
     // Non-JSON body (unlikely from /v1/): fall through to the status-based error.
   }
 
+  const statusLine = `${resp.status} ${resp.statusText}`.trim();
   if (!resp.ok) {
-    throw new ApiError(resp.status, env?.error ?? `${resp.status} ${resp.statusText}`);
+    throw new ApiError(resp.status, envelopeErrorText(env?.error, statusLine));
   }
-  if (env && env.error !== null) {
-    throw new ApiError(resp.status, env.error);
+  if (env && env.error != null) {
+    throw new ApiError(resp.status, envelopeErrorText(env.error, statusLine));
   }
   return env?.data as T;
 }
@@ -133,7 +206,7 @@ export async function probeAuthRequired(): Promise<boolean> {
   try {
     resp = await fetch("/v1/auth-info", { method: "GET" });
   } catch (e) {
-    throw new ApiError(0, `cannot reach the daemon: ${(e as Error).message}`);
+    throw new ApiError(0, `cannot reach the daemon: ${errorText(e)}`);
   }
   let env: Envelope<{ auth_required?: boolean }> | null = null;
   try {
@@ -142,7 +215,7 @@ export async function probeAuthRequired(): Promise<boolean> {
     // Non-JSON body: fall through to the status check / safe default below.
   }
   if (!resp.ok) {
-    throw new ApiError(resp.status, env?.error ?? `${resp.status} ${resp.statusText}`);
+    throw new ApiError(resp.status, envelopeErrorText(env?.error, `${resp.status} ${resp.statusText}`.trim()));
   }
   return env?.data?.auth_required !== false;
 }
