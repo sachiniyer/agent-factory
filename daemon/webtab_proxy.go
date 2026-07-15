@@ -312,6 +312,29 @@ func (cs *controlServer) webTabProxyHandler(w http.ResponseWriter, r *http.Reque
 		writeHTTPError(w, http.StatusServiceUnavailable, fmt.Errorf("daemon has no session manager"))
 		return
 	}
+	// Refuse until the restore has finished (#1878). The HTTP listener binds long
+	// before it (#829, deliberately), so a stale iframe left open across a daemon
+	// restart starts re-requesting the moment the port answers — and every request
+	// resolves through resolveStreamSession, which calls refreshLocked and REPLACES
+	// the instance map from disk. The proxy was doing lifecycle work that
+	// RestoreInstances documents as its own: "every RPC that mutates it is gated on
+	// Ready". This route is HTTP rather than net/rpc, so it slipped that gate and a
+	// pre-warm-up request drove its own restore.
+	//
+	// It answers a NOTICE rather than writeHTTPError's JSON envelope: the pane
+	// frames this route, so an error body is rendered AT THE USER. A raw envelope in
+	// the iframe is the exact failure the editor's notice pages exist to avoid, and
+	// this reply is the likeliest of all to be seen — a daemon restart points every
+	// open pane at it at once. Retry is set, so a pane caught mid-restore resolves
+	// into its content on its own, with no reload.
+	//
+	// Kind-agnostic by necessity AND by rights: resolving the kind is the very thing
+	// that touches the manager, so it is not known here — and a dev-server preview
+	// must not be told VS Code is starting.
+	if err := cs.requireManagerReady(); err != nil {
+		writeTabNoticePage(w, "Starting up", "af is starting up — this tab will load as soon as the daemon has restored its sessions.", true)
+		return
+	}
 	sessionID := r.PathValue("sessionId")
 	tabID := r.PathValue("tabId")
 	rest := r.PathValue("rest")
