@@ -229,16 +229,24 @@ func (m *Manager) CloseTab(req CloseTabRequest) (string, error) {
 		return "", err
 	}
 
-	if err := persistInstanceData(repoID, instance.ToInstanceData()); err != nil {
-		return "", fmt.Errorf("failed to persist tab close: %w", err)
-	}
-
 	// The editor is per SESSION, not per tab, so closing one vscode tab only ends
 	// it when it was the LAST one — a second vscode tab (or another pane on the
-	// same tab) is still using it. Checked after the close so the just-removed tab
-	// can't count itself.
-	if closedVSCode && !instanceHasVSCodeTab(instance) {
-		m.vscode.stopFor(key)
+	// same tab) is still using it. Evaluated after the close so the just-removed
+	// tab can't count itself, and DEFERRED so it also runs on the persist-failure
+	// path below: CloseTab has already removed the tab from the live instance by
+	// then, so the editor is unreachable either way and would otherwise linger to
+	// daemon shutdown. (If the unpersisted close is undone by a restart, the tab
+	// comes back and lazily starts a fresh editor — nothing is lost by stopping.)
+	if closedVSCode {
+		defer func() {
+			if !instanceHasVSCodeTab(instance) {
+				m.vscode.stopFor(key)
+			}
+		}()
+	}
+
+	if err := persistInstanceData(repoID, instance.ToInstanceData()); err != nil {
+		return "", fmt.Errorf("failed to persist tab close: %w", err)
 	}
 	return name, nil
 }

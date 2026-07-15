@@ -112,8 +112,9 @@ func fakeVSCodeServerMain() {
 		w.Header().Set("Content-Type", "text/html")
 		// Echo back the request path, the worktree served, and the Host the proxy
 		// forwarded — the last is what code-server's origin check reads.
-		fmt.Fprintf(w, "<html><body>%s worktree=%s path=%s xfh=%s</body></html>",
-			fakeVSCodeMarker, worktree, r.URL.Path, r.Header.Get("X-Forwarded-Host"))
+		fmt.Fprintf(w, "<html><body>%s worktree=%s path=%s xfh=%s xfp=%s</body></html>",
+			fakeVSCodeMarker, worktree, r.URL.Path, r.Header.Get("X-Forwarded-Host"),
+			r.Header.Get("X-Forwarded-Prefix"))
 	})
 	srv := &http.Server{Addr: addr, Handler: mux, ReadHeaderTimeout: 5 * time.Second}
 	ln, err := net.Listen("tcp", addr)
@@ -681,4 +682,49 @@ func unixGetsid(pid int) (int, error) {
 		return 0, errno
 	}
 	return int(sid), nil
+}
+
+// TestVSCodeTab_ForwardsProxyPrefix is the codex P2 fix, and it is what makes the
+// ADVERTISED fallback editor work at all.
+//
+// The two editors resolve their base path differently: code-server emits RELATIVE
+// URLs from the request path's depth (so stripping the prefix suffices, and this
+// header is inert to it), while openvscode-server emits ABSOLUTE ones and reads
+// its base from X-Forwarded-Prefix. Without the header, openvscode-server's assets
+// and WebSocket address the daemon's ROOT instead of /v1/webtab/..., and nothing
+// loads — a break that only shows up on machines where code-server is absent.
+//
+// Its --server-base-path flag cannot substitute: that bakes ONE prefix into the
+// process, but a single per-SESSION editor is reached under a different prefix per
+// tab index. Only a per-request header composes with a shared editor.
+func TestVSCodeTab_ForwardsProxyPrefix(t *testing.T) {
+	binary := writeFakeVSCodeBinary(t, "code-server", nil)
+	manager, id, idx, _ := newVSCodeFixture(t, binary)
+
+	mux := newHTTPMux(&controlServer{manager: manager})
+	body := getVSCodeProxy(t, mux, id, idx, "")
+	want := "xfp=/v1/webtab/" + id + "/" + strconv.Itoa(idx)
+	if !strings.Contains(body, want) {
+		t.Fatalf("proxied body %q is missing %q; openvscode-server would resolve its assets against the daemon root and never load", body, want)
+	}
+}
+
+// TestWebTab_DoesNotForwardProxyPrefix: a web tab's target is an ARBITRARY dev
+// server. A framework that honors X-Forwarded-Prefix would start rewriting its
+// URLs — a behavior change to today's previews that belongs in its own change, not
+// smuggled in with this feature.
+func TestWebTab_DoesNotForwardProxyPrefix(t *testing.T) {
+	var got string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r.Header.Get("X-Forwarded-Prefix")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	mux, id, idx := newWebTabProxyFixture(t, upstream.URL)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, vscodeProxyPath(id, idx, ""), nil))
+	if got != "" {
+		t.Fatalf("a web tab's dev server received X-Forwarded-Prefix=%q; only a vscode tab should", got)
+	}
 }

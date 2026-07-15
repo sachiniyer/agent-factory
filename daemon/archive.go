@@ -135,7 +135,16 @@ func (m *Manager) ArchiveSession(req ArchiveSessionRequest) (string, session.Ins
 	// infrastructure, not a tab, so ArchiveTeardown does not cover it. No-ops when
 	// the session never had a vscode tab; the tab itself persists and lazily
 	// respawns an editor if the session is restored.
-	m.vscode.stopFor(daemonInstanceKey(repoID, req.Title))
+	//
+	// The deferred sweep is the belt to that brace: the webtab proxy may spawn an
+	// editor without this op-lock (a spawn is too slow to hold it), so a request
+	// racing this teardown could start one after the stop below. BeginArchive above
+	// already makes ensureVSCodeServer refuse, so this should never fire — it is
+	// here so the "archived ⇒ no editor" invariant does not depend on that being
+	// true forever.
+	vscodeKey := daemonInstanceKey(repoID, req.Title)
+	defer m.vscode.stopFor(vscodeKey)
+	m.vscode.stopFor(vscodeKey)
 
 	// Tear down tmux and relocate the worktree in one call: the move is folded
 	// into the teardown core immediately after the pane-exit wait (#1195 Ph2b),

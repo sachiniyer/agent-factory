@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"os"
 	"strings"
 	"testing"
 
@@ -157,5 +158,40 @@ func TestCloseTab_ShellTabLeavesEditorAlone(t *testing.T) {
 	}
 	if _, ok := manager.vscode.servers[key]; !ok {
 		t.Fatal("closing a shell tab stopped the session's VS Code editor")
+	}
+}
+
+// TestCloseTab_StopsEditorEvenWhenPersistFails is the codex P2 fix. CloseTab
+// removes the tab from the live instance BEFORE persisting, so a persist failure
+// (disk full, permissions) leaves a session with no reachable vscode tab — and,
+// without this, an editor running until daemon shutdown that nothing can ever
+// reach again or clean up.
+func TestCloseTab_StopsEditorEvenWhenPersistFails(t *testing.T) {
+	manager, repoID, title := newVSCodeCreateFixture(t)
+	key := daemonInstanceKey(repoID, title)
+
+	if _, err := manager.CreateTab(CreateTabRequest{Title: title, RepoID: repoID, Kind: "vscode"}); err != nil {
+		t.Fatalf("CreateTab(vscode): %v", err)
+	}
+	manager.vscode.servers[key] = &vscodeServer{worktree: "/nowhere", exited: make(chan struct{})}
+
+	// Force the persist to fail. Corrupting the on-disk JSON (rather than
+	// chmod-ing it read-only) is what makes this deterministic everywhere: the
+	// container suite runs as root, which would sail straight through a permission
+	// bit, and the test would then pass vacuously.
+	path, err := config.RepoInstancesPath(repoID)
+	if err != nil {
+		t.Fatalf("RepoInstancesPath: %v", err)
+	}
+	if err := os.WriteFile(path, []byte("{ not json"), 0o600); err != nil {
+		t.Fatalf("corrupting the instances file: %v", err)
+	}
+
+	_, err = manager.CloseTab(CloseTabRequest{Title: title, RepoID: repoID, TabName: "vscode"})
+	if err == nil {
+		t.Fatal("CloseTab succeeded despite a persist failure; the test's premise is wrong")
+	}
+	if _, ok := manager.vscode.servers[key]; ok {
+		t.Fatal("the editor is still running after its last vscode tab was closed and the persist failed; nothing can reach or reap it until daemon shutdown")
 	}
 }

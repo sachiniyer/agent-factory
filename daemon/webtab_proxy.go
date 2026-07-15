@@ -40,29 +40,30 @@ const webtabTokenCookie = "af_webtab_token" //nolint:gosec // cookie name, not a
 //
 // A missing editor binary surfaces as errVSCodeBinaryMissing, which the proxy
 // renders as an install hint rather than an error.
-func (m *Manager) WebTabTarget(sessionID string, tabIdx int) (string, error) {
+func (m *Manager) WebTabTarget(sessionID string, tabIdx int) (string, session.TabKind, error) {
 	instance, repoID, title, err := m.resolveStreamSession(sessionID, "")
 	if err != nil {
-		return "", err
+		return "", 0, err
 	}
 	if instance == nil {
-		return "", fmt.Errorf("session %q not found", sessionID)
+		return "", 0, fmt.Errorf("session %q not found", sessionID)
 	}
 	tabs := instance.GetTabs()
 	if tabIdx < 0 || tabIdx >= len(tabs) {
-		return "", fmt.Errorf("session %q has no tab at index %d", sessionID, tabIdx)
+		return "", 0, fmt.Errorf("session %q has no tab at index %d", sessionID, tabIdx)
 	}
 	tab := tabs[tabIdx]
 	switch tab.Kind {
 	case session.TabKindWeb:
 		if strings.TrimSpace(tab.URL) == "" {
-			return "", fmt.Errorf("web tab %d of session %q has no target URL", tabIdx, sessionID)
+			return "", tab.Kind, fmt.Errorf("web tab %d of session %q has no target URL", tabIdx, sessionID)
 		}
-		return tab.URL, nil
+		return tab.URL, tab.Kind, nil
 	case session.TabKindVSCode:
-		return m.ensureVSCodeServer(instance, repoID, title)
+		target, err := m.ensureVSCodeServer(instance, repoID, title)
+		return target, tab.Kind, err
 	default:
-		return "", fmt.Errorf("tab %d of session %q is not a web or vscode tab", tabIdx, sessionID)
+		return "", tab.Kind, fmt.Errorf("tab %d of session %q is not a web or vscode tab", tabIdx, sessionID)
 	}
 }
 
@@ -73,6 +74,26 @@ func (m *Manager) WebTabTarget(sessionID string, tabIdx int) (string, error) {
 func (m *Manager) ensureVSCodeServer(instance *session.Instance, repoID, title string) (string, error) {
 	if m.vscode == nil {
 		return "", fmt.Errorf("daemon has no VS Code supervisor")
+	}
+	// Never START an editor for a session that is archived or being torn down.
+	// This route is NOT serialized with KillSession/ArchiveSession — it must not
+	// be, since spawning blocks for seconds and would stall them — so without this
+	// gate a stale iframe refresh (or simply selecting an archived row that still
+	// has a vscode tab) could spawn an editor AFTER teardown already stopped one,
+	// leaving a daemon-owned code-server rooted at a worktree that is being moved
+	// or removed. TabSpawnBlocked is the same predicate CreateTab uses to refuse a
+	// tab on an archived/mid-archive/mid-kill session: "may this session gain a
+	// process right now" is exactly the question being asked here.
+	//
+	// It closes the archive window completely (BeginArchive raises the fence before
+	// teardown) and most of the kill window; the deferred sweep in KillSession /
+	// ArchiveSession catches anything that still races in, so the invariant holds
+	// on timing rather than on luck.
+	if err := instance.TabSpawnBlocked(); err != nil {
+		return "", err
+	}
+	if instance.UserKilled() {
+		return "", fmt.Errorf("session %q has been killed", title)
 	}
 	worktree := instance.GetWorktreePath()
 	if strings.TrimSpace(worktree) == "" {
@@ -114,7 +135,7 @@ func (cs *controlServer) webTabProxyHandler(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	target, err := cs.manager.WebTabTarget(sessionID, tabIdx)
+	target, tabKind, err := cs.manager.WebTabTarget(sessionID, tabIdx)
 	if err != nil {
 		// A machine with no editor installed is an ordinary, actionable state, not
 		// a failure: render the install hint INTO the pane (the iframe shows this
@@ -181,6 +202,27 @@ func (cs *controlServer) webTabProxyHandler(w http.ResponseWriter, r *http.Reque
 			// cookies so cookie-backed dev servers work in the iframe.
 			pr.Out.Header.Del("Authorization")
 			forwardAppCookies(pr.Out)
+			// Tell a VS Code editor which prefix the BROWSER reaches it under.
+			//
+			// The two editors differ here and it decides whether the fallback one
+			// works at all. code-server emits RELATIVE URLs derived from the request
+			// path's depth, so stripping the prefix is enough and this header is inert
+			// to it. openvscode-server emits ABSOLUTE ones, and resolves its base from
+			// X-Forwarded-Prefix — without it, its assets and WS point at the daemon's
+			// ROOT rather than under /v1/webtab/..., and the editor never loads.
+			//
+			// Its --server-base-path flag is the documented alternative, but it cannot
+			// be used here: it bakes ONE prefix into the process, while a single
+			// per-SESSION editor is reached under a DIFFERENT prefix per tab index.
+			// This header is per-request, so it composes with a shared editor.
+			//
+			// Set only for a vscode tab: for a web tab the target is an arbitrary dev
+			// server, and a framework that honors this header would start rewriting its
+			// URLs — a behavior change to today's previews that belongs in its own
+			// change, not smuggled in here.
+			if tabKind == session.TabKindVSCode {
+				pr.Out.Header.Set("X-Forwarded-Prefix", cookiePathPrefix)
+			}
 			if pr.Out.URL.Query().Has(agentproto.AccessTokenQueryParam) {
 				q := pr.Out.URL.Query()
 				q.Del(agentproto.AccessTokenQueryParam)
