@@ -79,6 +79,14 @@ func (m *Manager) restoreLostOrDeadSession(req RestoreSessionRequest, repoID str
 		return "", err
 	}
 	m.persistInstance(repoID, instance)
+	// Same lifecycle reset as the automatic loop (lostrestore.go): recovery
+	// REPLACED the runtime the debounce's failures were about, so the count now
+	// describes a sandbox that no longer exists. Left behind it stays
+	// threshold-satisfying, and the first transport blip against the sandbox this
+	// restore just provisioned would re-satisfy it instantly and re-provision
+	// AGAIN — orphaning the one the user just asked for. A manual restore is the
+	// same lifecycle event as an automatic one; only the trigger differs (#1794).
+	m.noteRuntimeReplaced(repoID, instance)
 	m.mu.Lock()
 	delete(m.lostRestoreStates, key)
 	m.mu.Unlock()

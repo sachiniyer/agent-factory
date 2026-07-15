@@ -273,7 +273,7 @@ func (m *Manager) resumeFromLimitLocked(repoID, key string, instance *session.In
 		}
 		// The runtime this session's failure history was about is gone; the fresh
 		// sandbox must not inherit it (#1794).
-		m.clearRemoteLoss(remoteLossKey(repoID, instance))
+		m.noteRuntimeReplaced(repoID, instance)
 		// Re-fetch: a REMOTE respawn re-provisions a FRESH sandbox and rebinds the
 		// instance to its endpoint (bindProvisionResult swaps remoteClient and clears
 		// the cached agent-server), so the `as` captured above is a client pinned to

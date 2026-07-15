@@ -510,3 +510,93 @@ func TestRefreshStatuses_NewSessionDoesNotInheritDebounceState(t *testing.T) {
 		t.Fatalf("Recover calls on the new session = %d, want 0 — inherited state re-provisioned a sandbox that had never failed a probe", got)
 	}
 }
+
+// TestRestoreSession_PostManualRecoverBlipDoesNotReprovision is the manual-path
+// twin of TestRestoreLostSessions_PostRecoverBlipDoesNotReprovisionAgain.
+//
+// The RestoreSession RPC (`af sessions restore`, the TUI's restore action) runs
+// its own Recover, separate from the automatic loop's. Clearing the debounce in
+// only one of them leaves the other armed with the same trap: recovery replaces
+// the runtime, the stale threshold-satisfying count outlives it, and the first
+// blip against the sandbox the USER just asked for re-provisions it away.
+// Recovery is the lifecycle event that must reset the counter — which trigger
+// pulled it is irrelevant.
+func TestRestoreSession_PostManualRecoverBlipDoesNotReprovision(t *testing.T) {
+	withRemoteLossThresholds(t, 3, time.Minute, time.Second)
+	zeroRestoreBackoff(t)
+	advance := withFrozenClock(t)
+
+	manager, repoID, repoPath := newStatusTestManager(t)
+	inst, backend := registerStartedRemote(t, manager, repoID, repoPath, "remote-manual", "http://127.0.0.1:1", session.Running)
+
+	// A durable outage parks it at Lost with a threshold-satisfying history.
+	driveDurableRemoteLoss(manager, advance)
+	if got := inst.GetLiveness(); got != session.LiveLost {
+		t.Fatalf("setup: liveness = %v, want LiveLost", got)
+	}
+
+	// The user restores it by hand.
+	if _, err := manager.RestoreSession(RestoreSessionRequest{Title: "remote-manual", RepoID: repoID}); err != nil {
+		t.Fatalf("RestoreSession: %v", err)
+	}
+	if got := backend.recoverCalls(); got != 1 {
+		t.Fatalf("setup: Recover calls = %d, want 1", got)
+	}
+
+	// One blip against the sandbox that restore just built.
+	advance(time.Second)
+	manager.RefreshStatuses()
+	manager.RestoreLostSessions()
+
+	if got := backend.recoverCalls(); got != 1 {
+		t.Fatalf("Recover calls = %d, want still 1 — a manual restore left stale debounce state behind, so one blip threw away the sandbox the user just asked for and orphaned it (#1794)", got)
+	}
+	if got := inst.GetLiveness(); got == session.LiveLost {
+		t.Fatal("liveness = LiveLost after a single post-restore blip: the debounce resumed from the dead sandbox's count instead of from zero")
+	}
+}
+
+// TestRestoreArchived_RemoteReprovisionClearsDebounce is the fourth and last
+// re-provision trigger: the archive-restore path.
+//
+// It is the one the sweep provably cannot cover. Kill or archive a session and
+// the sweep drops its entry — but an archive-RESTORE re-provisions onto the SAME
+// instance ID (same session, new sandbox, by design), so the entry stays "live"
+// and perfectly inheritable while the sandbox it describes is destroyed. Only
+// the site that replaced the runtime can know, which is why noteRuntimeReplaced
+// is named for the trigger and why every such site must call it.
+func TestRestoreArchived_RemoteReprovisionClearsDebounce(t *testing.T) {
+	withRemoteLossThresholds(t, 3, time.Minute, time.Second)
+	zeroRestoreBackoff(t)
+	advance := withFrozenClock(t)
+
+	manager, repoID, repoPath := newStatusTestManager(t)
+	inst, backend := registerStartedRemote(t, manager, repoID, repoPath, "remote-archived", "http://127.0.0.1:1", session.Running)
+
+	// A durable outage leaves a threshold-satisfying history on the record.
+	driveDurableRemoteLoss(manager, advance)
+	manager.mu.Lock()
+	stale := len(manager.remoteLossStates)
+	manager.mu.Unlock()
+	if stale == 0 {
+		t.Fatal("setup: expected accumulated debounce state to survive into the archive")
+	}
+
+	// It is archived, then restored — which re-provisions a fresh sandbox.
+	inst.SetStatusForTest(session.Archived)
+	if _, err := manager.RestoreArchived(RestoreArchivedRequest{Title: "remote-archived", RepoID: repoID}); err != nil {
+		t.Fatalf("RestoreArchived: %v", err)
+	}
+	if got := backend.recoverCalls(); got != 1 {
+		t.Fatalf("setup: Recover calls = %d, want 1 (the archive-restore must re-provision once)", got)
+	}
+
+	// One blip against the sandbox the restore just provisioned.
+	advance(time.Second)
+	manager.RefreshStatuses()
+	manager.RestoreLostSessions()
+
+	if got := backend.recoverCalls(); got != 1 {
+		t.Fatalf("Recover calls = %d, want still 1 — the archive-restore left the pre-archive failure count in place, so one blip re-provisioned the restored sandbox away and orphaned it (#1794)", got)
+	}
+}

@@ -147,6 +147,31 @@ func (m *Manager) clearRemoteLoss(key string) {
 	m.mu.Unlock()
 }
 
+// noteRuntimeReplaced resets a session's remote-loss debounce after a lifecycle
+// event that REPLACED the runtime its failures were about: a Recover, a
+// Respawn, an archive-restore's re-provision.
+//
+// EVERY such site must call this, and the requirement is not obvious, so it is
+// named for the trigger rather than the effect. The accumulated count describes
+// a sandbox that no longer exists. Left behind it stays threshold-satisfying and
+// its firstFailureAt stays long past the grace period, so the very first
+// transport blip against the NEW sandbox re-satisfies the debounce instantly and
+// re-provisions AGAIN — orphaning the sandbox just built, and stranding another
+// live container on every cycle. The debounce is defeated precisely where it
+// matters most.
+//
+// Note the sweep cannot cover this: a re-provision keeps the SAME instance ID
+// (that is the point — same session, new sandbox), so the entry stays "live".
+// Only the site that replaced the runtime knows it happened.
+//
+// Missing the call fails silently in production and is caught only by the
+// "post-<trigger> blip does not re-provision again" tests. Known sites:
+// lostrestore.go (automatic Recover), restore.go (manual Recover RPC),
+// limit.go (limit-resume Respawn), archive.go (archive-restore re-provision).
+func (m *Manager) noteRuntimeReplaced(repoID string, instance *session.Instance) {
+	m.clearRemoteLoss(remoteLossKey(repoID, instance))
+}
+
 // sweepRemoteLossStates drops debounce entries whose instance is no longer live
 // under that identity — killed, archived, or replaced by a same-title session
 // with a fresh ID. Keying by instance ID already stops a new session from

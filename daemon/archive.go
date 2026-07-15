@@ -252,6 +252,11 @@ func (m *Manager) restoreRemoteSession(repoID string, instance *session.Instance
 		return "", fmt.Errorf("failed to restore remote session %q (re-provisioning its sandbox): %w", title, err)
 	}
 	m.persistInstance(repoID, instance)
+	// A FRESH sandbox now backs this session, so its accumulated remote-loss
+	// failures describe a sandbox that is gone (#1794). The instance keeps the
+	// same ID across the re-provision — same session, new runtime — so nothing
+	// else can notice; only this site knows the runtime was replaced.
+	m.noteRuntimeReplaced(repoID, instance)
 	log.InfoLog.Printf("restored remote session %q (repo %s): fresh sandbox provisioned, branch cloned back, agent relaunched", title, repoID)
 	return title, nil
 }

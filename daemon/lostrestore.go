@@ -219,7 +219,7 @@ func (m *Manager) restoreLostSession(key, repoID string, inst *session.Instance)
 	// the debounce and re-provision again, orphaning the sandbox we just built:
 	// the debounce defeated at exactly the moment it matters most. Any lifecycle
 	// event that replaces or revalidates the runtime must reset this counter.
-	m.clearRemoteLoss(remoteLossKey(repoID, inst))
+	m.noteRuntimeReplaced(repoID, inst)
 	m.mu.Lock()
 	delete(m.lostRestoreStates, key)
 	m.mu.Unlock()
