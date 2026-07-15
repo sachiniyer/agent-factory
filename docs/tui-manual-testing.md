@@ -152,7 +152,7 @@ compose across `docker exec` invocations.
 | `af_new_instance <name>` | `n`,text,`Enter` | the row shows `<name> … ●` (ready) |
 | `af_select <name>` | `k`×,`j`× | `<name>`'s row shows `▾` |
 | `af_open_pane` | `s` | pane-focus menu (`x hide pane`) |
-| `af_hide_pane` | `x` | focus back on tree (`n new`) |
+| `af_hide_pane` | `x` | visible-pane set changes (pane header row) |
 | `af_enter_interactive` | `Enter` | interactive menu (`ctrl+] nav mode`) |
 | `af_exit_interactive` | `Ctrl-]` | interactive menu gone |
 | `af_send_to_pane <text>` | marker+text,`Enter` | short delivery marker echoes in the pane (then wait for output yourself) |
