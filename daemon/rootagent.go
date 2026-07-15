@@ -233,14 +233,28 @@ func (m *Manager) deliverToReemergingRoot(repo *config.RepoContext, req DeliverP
 
 // repoRootAgentWillMaterialize reports whether the daemon's ensure loop is
 // responsible for (re-)creating the reserved "root" session for this repo: the
-// repo is opted into root_agents. Config is the single source of truth for
-// "root should be running" — a root that is Dead, Lost, or even explicitly
-// killed self-heals (the kill only delays re-creation by rootKillHealDelay,
-// #1223), so a configured root always materializes eventually and a delivery to
-// a momentarily-absent one should wait for the ensure loop rather than
-// auto-create it (which the reserved-name guard would reject). Config is
-// immutable after daemon start, so this needs no lock.
+// repo is opted into root_agents and its project has not been deleted at
+// runtime. Config is the single source of truth for "root should be running" —
+// a root that is Dead, Lost, or even explicitly killed self-heals (the kill only
+// delays re-creation by rootKillHealDelay, #1223), so a configured root always
+// materializes eventually and a delivery to a momentarily-absent one should wait
+// for the ensure loop rather than auto-create it (which the reserved-name guard
+// would reject).
+//
+// A deleted project (#1735) is the one case where the still-immutable m.cfg
+// outlives the truth: DeleteProject removed the opt-in from disk but this
+// in-memory copy keeps listing the repo, and ensureRootAgent skips it for the
+// rest of the daemon's life. Answering from config alone would make callers wait
+// out targetDeliverWait for a root that can never come back, then blame a
+// recreation that is not happening (#1835), so deletion is checked with the same
+// lock+lookup ensureRootAgent uses.
 func (m *Manager) repoRootAgentWillMaterialize(repoID string) bool {
+	m.mu.Lock()
+	_, deleted := m.deletedRootRepos[repoID]
+	m.mu.Unlock()
+	if deleted {
+		return false
+	}
 	for path := range m.cfg.RootAgents {
 		repo, err := config.RepoFromPath(config.ExpandTilde(path))
 		if err != nil {
