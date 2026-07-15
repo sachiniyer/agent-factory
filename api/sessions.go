@@ -196,7 +196,7 @@ those projects instead of guessing between them.`,
 		// --repo is accepted on this command; it used to be parsed and then
 		// silently dropped, so `get` always searched every repo and returned
 		// whichever same-titled session the map walk hit first.
-		repoID, err := resolveRepoID()
+		repoID, err := resolveRepoIDForLookup()
 		if err != nil {
 			return jsonError(err)
 		}
@@ -630,7 +630,7 @@ those projects instead of guessing between them.`,
 		// --repo is accepted on this command; it used to be parsed and then
 		// silently dropped. That was worse here than on `get`: resolving the
 		// wrong repo's session does not just read it, it restores/starts it.
-		repoID, err := resolveRepoID()
+		repoID, err := resolveRepoIDForLookup()
 		if err != nil {
 			return jsonError(err)
 		}

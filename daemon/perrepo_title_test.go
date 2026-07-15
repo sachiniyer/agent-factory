@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -172,13 +173,18 @@ func TestPersistedStateSurvivesDuplicateTitlesAcrossRepos(t *testing.T) {
 	}
 }
 
-// TestCreateSessionAllowsSameRemoteTitleInDifferentRepos is the regression for
-// the ONE check that actually rejected a cross-repo duplicate: the daemon's
-// remote-hook slug reservation was a GLOBAL map keyed by bare slug, so creating
-// remote "foo" in repo A made remote "foo" in repo B fail with
-// `remote hook name "foo" is already reserved`. Reservations are now keyed by
-// (repoID, slug).
-func TestCreateSessionAllowsSameRemoteTitleInDifferentRepos(t *testing.T) {
+// Remote HOOK names are the one namespace that stays global while titles go
+// per-repo: launch_cmd/delete_cmd receive `--name <slug>` verbatim with no repo
+// component, so the slug is what external provisioners tag and reap real
+// VMs/containers by. Two repos handing scripts the same name would clobber one
+// sandbox and let either delete reap the other's.
+//
+// TestHookNameNamespaceIsGlobalAcrossRepos pins that, including the hole this
+// closes: the in-flight reservation map is populated at reserve and dropped at
+// release, so it only ever blocked CONCURRENT creates. The live/disk slug scans
+// were repo-filtered, which let two repos take the same hook name SEQUENTIALLY
+// and hand both sandboxes the identical --name.
+func TestHookNameNamespaceIsGlobalAcrossRepos(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 	repoAPath := setupControlRepo(t)
 	repoBPath := setupControlRepo(t)
@@ -196,37 +202,88 @@ func TestCreateSessionAllowsSameRemoteTitleInDifferentRepos(t *testing.T) {
 		t.Fatalf("NewManager: %v", err)
 	}
 
-	// Use the #1636 title pair so this test exercises the SLUG reservation and
-	// nothing else: "My_App" and "MyApp" derive DISTINCT git branches (Slugify
-	// drops the underscore, branch sanitization keeps it as a dash) so the branch
-	// check cannot fire, but both slugify to the hook name "myapp".
-	const reservedTitle = "My_App"
+	// Use the #1636 title pair so this exercises the SLUG path and nothing else:
+	// "My_App" and "MyApp" derive DISTINCT git branches (Slugify drops the
+	// underscore, branch sanitization keeps it as a dash) so the branch check
+	// cannot fire, but both slugify to the hook name "myapp".
+	const existingTitle = "My_App"
 	const newTitle = "MyApp"
-	if manager.titlesCollide(reservedTitle, newTitle) {
-		t.Fatalf("test premise broken: %q and %q collide on branch, so the slug path is unreachable", reservedTitle, newTitle)
+	if manager.titlesCollide(existingTitle, newTitle) {
+		t.Fatalf("test premise broken: %q and %q collide on branch, so the slug path is unreachable", existingTitle, newTitle)
 	}
-	if session.Slugify(reservedTitle) != session.Slugify(newTitle) {
-		t.Fatalf("test premise broken: %q and %q must slugify to one hook name", reservedTitle, newTitle)
+	if session.Slugify(existingTitle) != session.Slugify(newTitle) {
+		t.Fatalf("test premise broken: %q and %q must slugify to one hook name", existingTitle, newTitle)
 	}
 
-	manager.mu.Lock()
-	// Repo A holds an in-flight remote reservation for the slug "myapp".
-	manager.reservedRemoteNames[daemonInstanceKey(repoA.ID, session.Slugify(reservedTitle))] = struct{}{}
-	// Same slug, DIFFERENT repo: must be available.
-	errOtherRepo := manager.validateTitleAvailableLocked(repoB.ID, repoB.Root, newTitle, "claude", true, false, nil)
-	// Same slug, SAME repo: must still be rejected.
-	errSameRepo := manager.validateTitleAvailableLocked(repoA.ID, repoA.Root, newTitle, "claude", true, false, nil)
-	manager.mu.Unlock()
+	t.Run("concurrent create in another repo is refused", func(t *testing.T) {
+		manager.mu.Lock()
+		manager.reservedRemoteNames[session.Slugify(existingTitle)] = struct{}{}
+		err := manager.validateTitleAvailableLocked(repoB.ID, repoB.Root, newTitle, "claude", true, false, nil)
+		delete(manager.reservedRemoteNames, session.Slugify(existingTitle))
+		manager.mu.Unlock()
+		if err == nil {
+			t.Fatalf("an in-flight hook name in another repo must block the create")
+		}
+		if !strings.Contains(err.Error(), "hook name") {
+			t.Errorf("rejection should name the hook-name clash, got: %v", err)
+		}
+	})
 
-	if errOtherRepo != nil {
-		t.Fatalf("remote hook slug %q in a different repo must be allowed, got: %v", session.Slugify(newTitle), errOtherRepo)
-	}
-	if errSameRepo == nil {
-		t.Fatalf("remote hook slug %q in the SAME repo must still be rejected", session.Slugify(newTitle))
-	}
-	if !strings.Contains(errSameRepo.Error(), "hook name") {
-		t.Errorf("same-repo rejection should name the hook-name collision, got: %v", errSameRepo)
-	}
+	t.Run("settled live session in another repo is refused", func(t *testing.T) {
+		inst, err := session.NewInstance(session.InstanceOptions{Title: existingTitle, Path: repoAPath, Program: "claude"})
+		if err != nil {
+			t.Fatalf("NewInstance: %v", err)
+		}
+		inst.SetBackend(remoteTypeBackend{session.NewFakeBackend()})
+		inst.SetStartedForTest(true)
+		manager.mu.Lock()
+		manager.instances[daemonInstanceKey(repoA.ID, existingTitle)] = inst
+		// No reservation entry — the create in repo A has SETTLED. This is the
+		// sequential case the repo-filtered scan used to let through.
+		err = manager.validateTitleAvailableLocked(repoB.ID, repoB.Root, newTitle, "claude", true, false, nil)
+		delete(manager.instances, daemonInstanceKey(repoA.ID, existingTitle))
+		manager.mu.Unlock()
+		if err == nil {
+			t.Fatalf("a settled hook session in another repo must block the name: both sandboxes would get --name %q", session.Slugify(newTitle))
+		}
+		if !strings.Contains(err.Error(), "hook name") {
+			t.Errorf("rejection should name the hook-name clash, got: %v", err)
+		}
+	})
+
+	t.Run("settled PERSISTED session in another repo is refused", func(t *testing.T) {
+		// Repo A's hook session exists only on disk (daemon restarted, its
+		// worktree/tmux gone so refresh could not restore it).
+		rows, err := json.Marshal([]session.InstanceData{{
+			Title: existingTitle, Path: repoAPath, Program: "claude", BackendType: "remote",
+		}})
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		if err := config.SaveRepoInstances(repoA.ID, rows); err != nil {
+			t.Fatalf("save: %v", err)
+		}
+		t.Cleanup(func() { _ = config.SaveRepoInstances(repoA.ID, json.RawMessage("[]")) })
+
+		manager.mu.Lock()
+		err = manager.validateTitleAvailableLocked(repoB.ID, repoB.Root, newTitle, "claude", true, false, nil)
+		manager.mu.Unlock()
+		if err == nil {
+			t.Fatalf("a persisted hook session in another repo must block the name")
+		}
+		if !strings.Contains(err.Error(), "hook name") || !strings.Contains(err.Error(), repoAPath) {
+			t.Errorf("rejection should name the clash and the owning project, got: %v", err)
+		}
+	})
+
+	t.Run("a free hook name is still allowed", func(t *testing.T) {
+		manager.mu.Lock()
+		err := manager.validateTitleAvailableLocked(repoB.ID, repoB.Root, "totally-unused", "claude", true, false, nil)
+		manager.mu.Unlock()
+		if err != nil {
+			t.Fatalf("an unused hook name must be available: %v", err)
+		}
+	})
 }
 
 // TestCreateSessionStillRejectsSameTitleInSameRepo guards the other side of the
@@ -307,6 +364,59 @@ func TestFindSessionReportsAmbiguousTitleAcrossRepos(t *testing.T) {
 	}
 	if inst == nil || inst.Path != repoBPath {
 		t.Errorf("scoped lookup must return repo B's session, got path %v", inst)
+	}
+}
+
+// TestFindSessionAmbiguitySurvivesPartialRestore closes the gap where ONE live
+// match looked like proof of uniqueness. A repo's row is skipped during refresh
+// when it cannot be restored (worktree/tmux gone), so it never reaches
+// m.instances — and an unscoped kill/archive would then act on the restored repo
+// while the daemon-down disk path would correctly refuse to guess. The in-memory
+// match must be unioned with the persisted rows before resolving.
+func TestFindSessionAmbiguitySurvivesPartialRestore(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	installInstantBackend(t)
+
+	repoAPath := setupControlRepo(t)
+	repoBPath := setupControlRepo(t)
+	repoB, err := config.RepoFromPath(repoBPath)
+	if err != nil {
+		t.Fatalf("RepoFromPath(B): %v", err)
+	}
+
+	manager, err := NewManager(config.DefaultConfig())
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+
+	const title = "foo"
+	// Repo A's session is live and in memory.
+	if _, err := manager.CreateSession(context.Background(), CreateSessionRequest{
+		Title: title, RepoPath: repoAPath, Program: "claude",
+	}); err != nil {
+		t.Fatalf("create in A: %v", err)
+	}
+	// Repo B holds the SAME title, but only on disk — as if its row could not be
+	// restored during refresh. It is deliberately never put into m.instances.
+	rows, err := json.Marshal([]session.InstanceData{{Title: title, Path: repoBPath, Program: "claude"}})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if err := config.SaveRepoInstances(repoB.ID, rows); err != nil {
+		t.Fatalf("save B: %v", err)
+	}
+
+	_, _, _, err = manager.findSession(title, "")
+	if err == nil {
+		t.Fatalf("one live match must not resolve while another repo's row holds the title on disk")
+	}
+	if !errors.Is(err, session.ErrAmbiguousTitle) {
+		t.Fatalf("expected ErrAmbiguousTitle, got: %v", err)
+	}
+	for _, want := range []string{repoAPath, repoBPath} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("ambiguity error must name repo %q, got: %v", want, err)
+		}
 	}
 }
 

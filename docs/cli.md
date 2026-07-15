@@ -26,6 +26,10 @@ Session titles are unique **within a project, not across projects** — the same
 session "foo" exists in multiple projects: /repos/alpha, /repos/beta — pass --repo to pick one
 ```
 
+Against a remote daemon (`--daemon-url`/`AF_DAEMON_URL`) only an explicit `--repo` scopes a lookup: the current directory names a repo on *your* machine, not the daemon's, so it is ignored rather than sent as a scope.
+
+One exception to per-project titles: **remote hook** sessions share a global name namespace, because the slug reaches `launch_cmd`/`delete_cmd` verbatim and external provisioners key real sandboxes on it — see [remote-hooks.md](remote-hooks.md#session-names).
+
 ```bash
 af sessions list                                          # list sessions in the repo
 af sessions get <title>                                   # fetch one session

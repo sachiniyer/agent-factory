@@ -2,7 +2,9 @@ package daemon
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/sachiniyer/agent-factory/agentproto"
@@ -162,26 +164,27 @@ func (m *Manager) reserveCreate(req CreateSessionRequest) (*config.RepoContext, 
 	}
 
 	key := daemonInstanceKey(repo.ID, title)
-	remoteKey := ""
+	remoteName := ""
 	if req.ForceRemote {
-		// Reservations are per-repo: the same remote title in another repo is a
-		// different hook name as far as af is concerned (see reservedRemoteNames).
-		remoteKey = daemonInstanceKey(repo.ID, session.Slugify(title))
-		if _, ok := m.reservedRemoteNames[remoteKey]; ok {
-			return nil, "", nil, nil, fmt.Errorf("remote hook name %q is already reserved in this project", session.Slugify(title))
+		// Keyed by the BARE slug on purpose: it is the exact string the hook
+		// scripts receive as --name, and that namespace is global (see
+		// reservedRemoteNames).
+		remoteName = session.Slugify(title)
+		if _, ok := m.reservedRemoteNames[remoteName]; ok {
+			return nil, "", nil, nil, fmt.Errorf("remote hook name %q is already reserved", remoteName)
 		}
 	}
 
 	m.reservedTitles[key] = struct{}{}
-	if remoteKey != "" {
-		m.reservedRemoteNames[remoteKey] = struct{}{}
+	if remoteName != "" {
+		m.reservedRemoteNames[remoteName] = struct{}{}
 	}
 	release := func() {
 		m.mu.Lock()
 		defer m.mu.Unlock()
 		delete(m.reservedTitles, key)
-		if remoteKey != "" {
-			delete(m.reservedRemoteNames, remoteKey)
+		if remoteName != "" {
+			delete(m.reservedRemoteNames, remoteName)
 		}
 	}
 
@@ -353,8 +356,14 @@ func (m *Manager) validateTitleAvailableLocked(repoID, repoPath, title, program 
 	}
 	if remote {
 		candidate := session.Slugify(title)
-		if _, ok := m.reservedRemoteNames[daemonInstanceKey(repoID, candidate)]; ok {
-			return fmt.Errorf("remote hook name %q is already reserved in this project", candidate)
+		// Hook names are the ONE namespace that stays global while titles go
+		// per-repo: launch_cmd/delete_cmd receive `--name <slug>` verbatim, with
+		// no repo component, and external provisioners tag and reap real
+		// VMs/containers by it. Two repos handing scripts the same name would
+		// clobber one sandbox and let either delete reap the other's. So every
+		// check below spans ALL repos, unlike the per-repo title rules above.
+		if _, ok := m.reservedRemoteNames[candidate]; ok {
+			return fmt.Errorf("remote hook name %q is already reserved", candidate)
 		}
 		// Guard against in-memory remote sessions that are not (yet) on disk.
 		// refreshDaemonInstances preserves a running remote instance in
@@ -368,9 +377,8 @@ func (m *Manager) validateTitleAvailableLocked(repoID, repoPath, title, program 
 		// (FindSlugCollision over Snapshot()) catches it, but the HTTP
 		// CreateSession path bypasses that, so the daemon-side check must be
 		// complete (#1636).
-		for key, inst := range m.instances {
-			rid, _ := splitDaemonInstanceKey(key)
-			if rid != repoID || inst == nil {
+		for _, inst := range m.instances {
+			if inst == nil {
 				continue
 			}
 			data := inst.ToInstanceData()
@@ -389,6 +397,16 @@ func (m *Manager) validateTitleAvailableLocked(repoID, repoPath, title, program 
 				return fmt.Errorf("remote session titled %q already maps to hook name %q", data.Title, candidate)
 			}
 		}
+		// diskData holds only THIS repo's rows, so a settled hook session in
+		// another repo would otherwise slip through — the hole that let two repos
+		// create the same hook name sequentially (they just could not race).
+		owner, ownerRepo, err := hookSlugOwnerInOtherRepos(candidate, repoID)
+		if err != nil {
+			return err
+		}
+		if owner != "" {
+			return fmt.Errorf("remote session titled %q in project %s already maps to hook name %q; remote hook names are shared across projects because the hook scripts receive them verbatim as --name — pick another title for this remote session", owner, ownerRepo, candidate)
+		}
 		return nil
 	}
 	if tmuxSession := tmux.NewTmuxSessionForRepo(title, repoPath, program); tmuxSession.DoesSessionExist() {
@@ -400,6 +418,53 @@ func (m *Manager) validateTitleAvailableLocked(repoID, repoPath, title, program 
 		return fmt.Errorf("conflicting tmux session %q is already running; no agent-factory session owns it. Clean it up with: tmux kill-session -t %s", title, tmuxSession.SanitizedName())
 	}
 	return nil
+}
+
+// hookSlugOwnerInOtherRepos reports the title (and repo path) of a persisted
+// remote-hook session in ANY repo other than repoID whose slug equals candidate,
+// or "" when the hook name is free.
+//
+// The caller already scans this repo's rows and every in-memory instance; this
+// covers the remaining case — a settled hook session in a different repo, whose
+// rows loadRepoInstanceData(repoID) never returns. Without it the global
+// hook-name namespace is only enforced against concurrent creates (the in-flight
+// reservation), so two repos could take the same name sequentially and hand both
+// sandboxes the identical --name.
+//
+// Corrupted per-repo files are surfaced rather than skipped: a hidden hook
+// session would otherwise let a colliding name through, and the cost of a false
+// refusal here is a clear error, while the cost of a miss is two provisioned
+// sandboxes fighting over one name.
+func hookSlugOwnerInOtherRepos(candidate, repoID string) (string, string, error) {
+	allInstances, err := config.LoadAllRepoInstances()
+	if err != nil {
+		return "", "", fmt.Errorf("failed to check remote hook names across projects: %w", err)
+	}
+	var corrupted []string
+	for rid, raw := range allInstances {
+		if rid == repoID {
+			continue
+		}
+		var rows []session.InstanceData
+		if err := json.Unmarshal(raw, &rows); err != nil {
+			corrupted = append(corrupted, rid)
+			continue
+		}
+		for i := range rows {
+			if !rows[i].IsRemoteHook() {
+				continue
+			}
+			if session.Slugify(rows[i].Title) == candidate {
+				return rows[i].Title, rows[i].Path, nil
+			}
+		}
+	}
+	if len(corrupted) > 0 {
+		sort.Strings(corrupted)
+		return "", "", fmt.Errorf("cannot verify remote hook name %q is free: %d repo(s) have a corrupted instances.json that may be hiding a session using it: %s",
+			candidate, len(corrupted), strings.Join(corrupted, ", "))
+	}
+	return "", "", nil
 }
 
 type titleConflictKind int

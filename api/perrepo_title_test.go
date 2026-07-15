@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"errors"
+	"os/exec"
 	"strings"
 	"testing"
 
@@ -142,6 +143,77 @@ func TestFindInstanceByTitle_DuplicateRowsInOneRepoAreNotAmbiguous(t *testing.T)
 	}
 	if repoID != "repo-alpha" || data.Title != "foo" {
 		t.Errorf("resolved wrong session: repo=%q title=%q", repoID, data.Title)
+	}
+}
+
+// TestResolveRepoIDForLookup_RemoteIsNotScopedByClientCwd pins the remote rule:
+// --daemon-url points af at a daemon on ANOTHER machine, where the client's cwd
+// names a repo that exists HERE, not there. Auto-scoping by it would ask the
+// remote for a repo ID it does not have — and the remote read path has no disk
+// fallback — turning a working bare-title lookup into a spurious not-found.
+func TestResolveRepoIDForLookup_RemoteIsNotScopedByClientCwd(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	// cwd is a real git repo, so CurrentRepo() would happily produce a scope.
+	repo := t.TempDir()
+	if err := exec.Command("git", "init", repo).Run(); err != nil {
+		t.Fatalf("git init: %v", err)
+	}
+	t.Chdir(repo)
+
+	// Local target: the cwd repo DOES scope the lookup.
+	local, err := resolveRepoIDForLookup()
+	if err != nil {
+		t.Fatalf("local resolve: %v", err)
+	}
+	if local == "" {
+		t.Fatalf("a LOCAL lookup should still scope by the cwd repo")
+	}
+
+	// Remote target: the client's cwd must NOT scope it.
+	remoteTarget(t)
+	got, err := resolveRepoIDForLookup()
+	if err != nil {
+		t.Fatalf("remote resolve: %v", err)
+	}
+	if got != "" {
+		t.Errorf("a REMOTE lookup must not be scoped by the client's cwd, got repoID %q", got)
+	}
+}
+
+// TestSessionsGet_RemoteSendsUnscopedRequest is the behavioral half of the rule:
+// against a remote daemon the request must carry no RepoID, so a bare title that
+// resolved before this change keeps resolving.
+func TestSessionsGet_RemoteSendsUnscopedRequest(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	repo := t.TempDir()
+	if err := exec.Command("git", "init", repo).Run(); err != nil {
+		t.Fatalf("git init: %v", err)
+	}
+	t.Chdir(repo)
+	remoteTarget(t)
+
+	reqs := stubSnapshot(t, func(req daemon.SnapshotRequest) ([]session.InstanceData, error) {
+		return []session.InstanceData{{Title: "foo", Path: "/remote/alpha"}}, nil
+	})
+
+	repoID, err := resolveRepoIDForLookup()
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	got, err := getSessionByTitleInScope(repoID, "foo")
+	if err != nil {
+		t.Fatalf("remote bare-title lookup must resolve, got: %v", err)
+	}
+	if got.Title != "foo" {
+		t.Errorf("resolved %q", got.Title)
+	}
+	if len(*reqs) == 0 {
+		t.Fatalf("expected a snapshot request")
+	}
+	for _, r := range *reqs {
+		if r.RepoID != "" {
+			t.Errorf("remote request must be unscoped, carried RepoID %q", r.RepoID)
+		}
 	}
 }
 

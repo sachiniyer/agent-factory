@@ -89,6 +89,35 @@ func resolveRepoID() (string, error) {
 	return repo.ID, nil
 }
 
+// resolveRepoIDForLookup resolves the repo scope for a bare-title LOOKUP
+// (sessions get/preview). It differs from resolveRepoID in one way: it never
+// derives a scope from the cwd when the target is a REMOTE daemon.
+//
+// --daemon-url/AF_DAEMON_URL points af at a daemon on another machine, where the
+// client's cwd names a repo that exists HERE, not there. Scoping the request by
+// that client-local repo ID asks the remote for a repo it does not have, and the
+// remote read path has no disk fallback (see snapshotRead), so a bare-title
+// lookup that used to succeed would report a spurious not-found. Against a
+// remote, only an EXPLICIT --repo scopes; a bare title resolves across the remote's
+// repos, still refusing to guess when several of them hold the title.
+func resolveRepoIDForLookup() (string, error) {
+	if repoFlag != "" {
+		repo, err := repoFromFlag()
+		if err != nil {
+			return "", err
+		}
+		return repo.ID, nil
+	}
+	if apiclient.IsRemoteTarget() {
+		return "", nil
+	}
+	repo, err := config.CurrentRepo()
+	if err != nil {
+		return "", nil // cwd is not a repo: all-repo mode, guarded by the ambiguity check
+	}
+	return repo.ID, nil
+}
+
 // resolveRepo resolves a *config.RepoContext for commands that require a repo
 // (sessions create, tasks add). It returns fully-formed, user-facing errors so
 // callers can surface them directly without re-deriving the cause: a provided

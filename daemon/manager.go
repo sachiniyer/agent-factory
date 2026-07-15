@@ -31,13 +31,19 @@ type Manager struct {
 	instances      map[string]*session.Instance
 	reservedTitles map[string]struct{}
 	// reservedRemoteNames holds in-flight remote-hook slug reservations, keyed by
-	// daemonInstanceKey(repoID, slug). The key is repo-scoped because session
-	// titles are unique per-repo, not globally: a bare-slug key made this the one
-	// check in the whole create path that rejected the SAME title in a DIFFERENT
-	// repo ("remote hook name %q is already reserved"), even though every other
-	// name a session owns — branch, tmux name, archive dir, manager key — is
-	// already per-repo. Remote hook names only have to be unique within the repo
-	// whose hook scripts consume them.
+	// the BARE slug — deliberately global, unlike every other name a session owns.
+	//
+	// Session titles are unique per-repo, but a remote hook name is not a name af
+	// controls: launch_cmd/delete_cmd receive it verbatim as `--name <slug>` with
+	// no repo component (docs/remote-hooks.md), and external provisioners tag and
+	// reap real VMs/containers by it. Two repos handing scripts the same name
+	// would clobber one sandbox and let either delete reap the other's. So the
+	// hook-name namespace is global for as long as the name scripts see is
+	// title-derived, and this key must match what they actually receive.
+	//
+	// Note this map is IN-FLIGHT only — populated at reserve, dropped in release,
+	// never rebuilt from disk — so it guards concurrent creates. The settled case
+	// is covered by the live/disk slug scans in validateTitleAvailableLocked.
 	reservedRemoteNames map[string]struct{}
 	repoStartLocks      map[string]*sync.Mutex
 	// targetLocks serializes DeliverPrompt per (repo, title) so concurrent

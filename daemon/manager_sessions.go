@@ -360,6 +360,29 @@ func (m *Manager) findSession(title, repoID string) (*session.Instance, string, 
 		}
 		if matched != nil {
 			m.mu.Unlock()
+			// One live match is NOT proof the title is unique. A second repo's row
+			// is skipped during refresh when it cannot be restored (worktree/tmux
+			// gone), so it never reaches m.instances — and resolving here would let
+			// an unscoped kill/archive hit this repo while the daemon-down disk path
+			// would refuse to guess. Union the persisted rows before resolving.
+			if paths, err := collectTitleRepoPathsOnDisk(title); err != nil {
+				// Could not enumerate repos at all: prefer the live match over
+				// failing a working lookup, but say so — this is the one window
+				// where the ambiguity guard cannot be applied.
+				log.WarningLog.Printf("could not check %q for cross-repo ambiguity, resolving the live match in repo %s: %v", title, matchedRepoID, err)
+			} else {
+				repos := map[string]string{matchedRepoID: matched.Path}
+				for rid, p := range paths {
+					repos[rid] = p
+				}
+				if len(repos) > 1 {
+					all := make([]string, 0, len(repos))
+					for _, p := range repos {
+						all = append(all, p)
+					}
+					return nil, "", nil, session.AmbiguousTitleError(title, all)
+				}
+			}
 			return matched, matchedRepoID, nil, nil
 		}
 	}
