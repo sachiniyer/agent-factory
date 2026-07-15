@@ -135,6 +135,23 @@ func (m *Manager) reserveCreate(req CreateSessionRequest) (*config.RepoContext, 
 		return nil, "", nil, nil, err
 	}
 
+	// Whether this create lands on the HOOK backend — the one runtime whose name
+	// is a global namespace. ForceRemote is only ONE of three ways to get there:
+	// `--backend hook` and a repo's `backend = "hook"` config both select it with
+	// ForceRemote false, and gating the hook-name checks on ForceRemote alone let
+	// those creates hand scripts a colliding --name. Ask the factory the same
+	// question it will answer at provision time.
+	usesHook := req.ForceRemote
+	if kind, kerr := session.BackendKindFor(session.InstanceOptions{
+		Backend:     session.BackendKind(req.Backend),
+		ForceRemote: req.ForceRemote,
+	}, repo.Root); kerr == nil {
+		usesHook = kind == session.BackendHook
+	}
+	// A kerr here means an invalid `backend` value; leave usesHook at the legacy
+	// ForceRemote answer and let NewInstance surface the canonical error rather
+	// than duplicating its wording at a different point in the flow.
+
 	var renamedArchived *session.InstanceData
 	title := req.Title
 	if title == "" {
@@ -145,7 +162,7 @@ func (m *Manager) reserveCreate(req CreateSessionRequest) (*config.RepoContext, 
 		// A derived title_base keeps auto-suffixing around every existing session,
 		// archived rows included — the archived-name-reuse rename is reserved for an
 		// EXPLICIT title the caller asked for by name (below).
-		title, err = m.nextAvailableTitleLocked(repo.ID, repo.Root, base, req.Program, req.ForceRemote, diskData)
+		title, err = m.nextAvailableTitleLocked(repo.ID, repo.Root, base, req.Program, usesHook, diskData)
 		if err != nil {
 			return nil, "", nil, nil, err
 		}
@@ -158,14 +175,14 @@ func (m *Manager) reserveCreate(req CreateSessionRequest) (*config.RepoContext, 
 		if err != nil {
 			return nil, "", nil, nil, err
 		}
-		if err := m.validateTitleAvailableLocked(repo.ID, repo.Root, title, req.Program, req.ForceRemote, req.allowReserved, diskData); err != nil {
+		if err := m.validateTitleAvailableLocked(repo.ID, repo.Root, title, req.Program, usesHook, req.allowReserved, diskData); err != nil {
 			return nil, "", nil, nil, err
 		}
 	}
 
 	key := daemonInstanceKey(repo.ID, title)
 	remoteName := ""
-	if req.ForceRemote {
+	if usesHook {
 		// Keyed by the BARE slug on purpose: it is the exact string the hook
 		// scripts receive as --name, and that namespace is global (see
 		// reservedRemoteNames).

@@ -73,6 +73,21 @@ func repoFromFlag() (*config.RepoContext, error) {
 }
 
 // resolveRepoID resolves a repo ID from flags, cwd, or returns "" for all-repo mode.
+//
+// The cwd is only consulted for a LOCAL target. --daemon-url/AF_DAEMON_URL points
+// af at a daemon on another machine, where the client's cwd names a repo that
+// exists HERE, not there: sending that repo ID asks the remote to scope by
+// something it has never seen, so every title lookup and list comes back empty
+// unless the client happens to sit in a checkout at the identical absolute path.
+// Against a remote, only an EXPLICIT --repo scopes; a bare title resolves across
+// the remote's repos and the ambiguity guard stops it from ever landing on the
+// wrong one.
+//
+// Known limitation: --repo is resolved into an ID by hashing the path on THIS
+// machine (config.RepoIDFromRoot), so against a remote it only disambiguates
+// when the daemon has that project checked out at the same absolute path.
+// Scoping a remote by a repo identity the daemon owns needs a daemon-side repo
+// lookup — a separate change; until then, prefer a bare title against a remote.
 func resolveRepoID() (string, error) {
 	if repoFlag != "" {
 		repo, err := repoFromFlag()
@@ -81,39 +96,13 @@ func resolveRepoID() (string, error) {
 		}
 		return repo.ID, nil
 	}
+	if apiclient.IsRemoteTarget() {
+		return "", nil // the client's cwd says nothing about the remote's repos
+	}
 	// Try cwd
 	repo, err := config.CurrentRepo()
 	if err != nil {
 		return "", nil // all-repo mode
-	}
-	return repo.ID, nil
-}
-
-// resolveRepoIDForLookup resolves the repo scope for a bare-title LOOKUP
-// (sessions get/preview). It differs from resolveRepoID in one way: it never
-// derives a scope from the cwd when the target is a REMOTE daemon.
-//
-// --daemon-url/AF_DAEMON_URL points af at a daemon on another machine, where the
-// client's cwd names a repo that exists HERE, not there. Scoping the request by
-// that client-local repo ID asks the remote for a repo it does not have, and the
-// remote read path has no disk fallback (see snapshotRead), so a bare-title
-// lookup that used to succeed would report a spurious not-found. Against a
-// remote, only an EXPLICIT --repo scopes; a bare title resolves across the remote's
-// repos, still refusing to guess when several of them hold the title.
-func resolveRepoIDForLookup() (string, error) {
-	if repoFlag != "" {
-		repo, err := repoFromFlag()
-		if err != nil {
-			return "", err
-		}
-		return repo.ID, nil
-	}
-	if apiclient.IsRemoteTarget() {
-		return "", nil
-	}
-	repo, err := config.CurrentRepo()
-	if err != nil {
-		return "", nil // cwd is not a repo: all-repo mode, guarded by the ambiguity check
 	}
 	return repo.ID, nil
 }
@@ -203,6 +192,34 @@ func repoPathsOf(matches []session.InstanceData) []string {
 		paths = append(paths, matches[i].Path)
 	}
 	return paths
+}
+
+// diskRepoPathsForTitle returns the distinct repo paths holding the title across
+// the union of `known` and every PERSISTED row on disk.
+//
+// It backstops the daemon-snapshot read path: the snapshot only mirrors the
+// daemon's in-memory instances, and refresh skips rows it cannot restore, so a
+// lone snapshot match can hide a second repo that also holds the title.
+// Corrupted per-repo files are skipped — this is a best-effort widening of an
+// already-successful lookup, so it must never turn a working read into an error.
+func diskRepoPathsForTitle(title string, known []string) ([]string, error) {
+	allInstances, err := config.LoadAllRepoInstances()
+	if err != nil {
+		return nil, err
+	}
+	paths := append([]string(nil), known...)
+	for _, raw := range allInstances {
+		var rows []session.InstanceData
+		if err := json.Unmarshal(raw, &rows); err != nil {
+			continue
+		}
+		for i := range rows {
+			if rows[i].Title == title {
+				paths = append(paths, rows[i].Path)
+			}
+		}
+	}
+	return session.DedupeSorted(paths), nil
 }
 
 // corruptedReposSuffix builds a sorted, human-readable clause naming the repos

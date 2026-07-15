@@ -146,12 +146,12 @@ func TestFindInstanceByTitle_DuplicateRowsInOneRepoAreNotAmbiguous(t *testing.T)
 	}
 }
 
-// TestResolveRepoIDForLookup_RemoteIsNotScopedByClientCwd pins the remote rule:
+// TestResolveRepoID_RemoteIsNotScopedByClientCwd pins the remote rule:
 // --daemon-url points af at a daemon on ANOTHER machine, where the client's cwd
 // names a repo that exists HERE, not there. Auto-scoping by it would ask the
 // remote for a repo ID it does not have — and the remote read path has no disk
 // fallback — turning a working bare-title lookup into a spurious not-found.
-func TestResolveRepoIDForLookup_RemoteIsNotScopedByClientCwd(t *testing.T) {
+func TestResolveRepoID_RemoteIsNotScopedByClientCwd(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 	// cwd is a real git repo, so CurrentRepo() would happily produce a scope.
 	repo := t.TempDir()
@@ -161,7 +161,7 @@ func TestResolveRepoIDForLookup_RemoteIsNotScopedByClientCwd(t *testing.T) {
 	t.Chdir(repo)
 
 	// Local target: the cwd repo DOES scope the lookup.
-	local, err := resolveRepoIDForLookup()
+	local, err := resolveRepoID()
 	if err != nil {
 		t.Fatalf("local resolve: %v", err)
 	}
@@ -171,7 +171,7 @@ func TestResolveRepoIDForLookup_RemoteIsNotScopedByClientCwd(t *testing.T) {
 
 	// Remote target: the client's cwd must NOT scope it.
 	remoteTarget(t)
-	got, err := resolveRepoIDForLookup()
+	got, err := resolveRepoID()
 	if err != nil {
 		t.Fatalf("remote resolve: %v", err)
 	}
@@ -196,7 +196,7 @@ func TestSessionsGet_RemoteSendsUnscopedRequest(t *testing.T) {
 		return []session.InstanceData{{Title: "foo", Path: "/remote/alpha"}}, nil
 	})
 
-	repoID, err := resolveRepoIDForLookup()
+	repoID, err := resolveRepoID()
 	if err != nil {
 		t.Fatalf("resolve: %v", err)
 	}
@@ -214,6 +214,57 @@ func TestSessionsGet_RemoteSendsUnscopedRequest(t *testing.T) {
 		if r.RepoID != "" {
 			t.Errorf("remote request must be unscoped, carried RepoID %q", r.RepoID)
 		}
+	}
+}
+
+// TestGetSessionByTitle_SnapshotUnionsDiskRows closes the read-path twin of the
+// daemon's partial-restore gap: the snapshot only mirrors the daemon's live
+// instances, and refresh SKIPS rows it cannot restore. A lone snapshot match is
+// therefore not proof of uniqueness — a second repo holding the title on disk
+// only would be invisible, and a bare `sessions get foo` would name the wrong
+// project.
+func TestGetSessionByTitle_SnapshotUnionsDiskRows(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	// The daemon can only restore repo alpha's session.
+	stubSnapshot(t, func(daemon.SnapshotRequest) ([]session.InstanceData, error) {
+		return []session.InstanceData{{Title: "foo", Path: "/repos/alpha"}}, nil
+	})
+	// But repo beta holds the same title on disk (its worktree/tmux is gone, so
+	// refresh skipped it and it never reached the snapshot).
+	seedTwoReposSharingTitle(t)
+
+	_, err := getSessionByTitle("foo")
+	if err == nil {
+		t.Fatalf("a lone snapshot match must not resolve while another repo holds the title on disk")
+	}
+	if !errors.Is(err, session.ErrAmbiguousTitle) {
+		t.Fatalf("expected ErrAmbiguousTitle, got: %v", err)
+	}
+	for _, want := range []string{"/repos/alpha", "/repos/beta"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error must name repo %q, got: %v", want, err)
+		}
+	}
+}
+
+// TestGetSessionByTitle_RemoteIgnoresLocalDisk guards the other side: a remote
+// target's sessions have nothing to do with this machine's instances.json, so a
+// same-titled LOCAL session must never make a remote lookup ambiguous.
+func TestGetSessionByTitle_RemoteIgnoresLocalDisk(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	remoteTarget(t)
+	stubSnapshot(t, func(daemon.SnapshotRequest) ([]session.InstanceData, error) {
+		return []session.InstanceData{{Title: "foo", Path: "/remote/alpha"}}, nil
+	})
+	// Local disk also has "foo" in two repos — irrelevant to the remote.
+	seedTwoReposSharingTitle(t)
+
+	got, err := getSessionByTitle("foo")
+	if err != nil {
+		t.Fatalf("local disk must not affect a remote lookup, got: %v", err)
+	}
+	if got.Path != "/remote/alpha" {
+		t.Errorf("resolved %q, want the remote session", got.Path)
 	}
 }
 

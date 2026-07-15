@@ -276,6 +276,43 @@ func TestHookNameNamespaceIsGlobalAcrossRepos(t *testing.T) {
 		}
 	})
 
+	// ForceRemote is only ONE of three ways onto the hook backend: `--backend
+	// hook` and a repo's `backend = "hook"` config both get there with
+	// ForceRemote false. Gating the hook-name checks on ForceRemote alone let
+	// those creates hand launch_cmd/delete_cmd a colliding --name.
+	t.Run("--backend hook create is checked even with ForceRemote false", func(t *testing.T) {
+		// Repo A's hook session is seeded on DISK: this goes through the full
+		// reserveCreate (which refreshes first), and refresh only preserves an
+		// in-memory instance while its repo directory is absent — an on-disk row
+		// is the durable way to express "repo A already owns this hook name".
+		rows, err := json.Marshal([]session.InstanceData{{
+			Title: existingTitle, Path: repoAPath, Program: "claude", BackendType: "remote",
+		}})
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		if err := config.SaveRepoInstances(repoA.ID, rows); err != nil {
+			t.Fatalf("save: %v", err)
+		}
+		t.Cleanup(func() { _ = config.SaveRepoInstances(repoA.ID, json.RawMessage("[]")) })
+
+		// Note ForceRemote is FALSE — the hook backend is selected by --backend.
+		_, _, release, _, err := manager.reserveCreate(CreateSessionRequest{
+			Title:       newTitle,
+			RepoPath:    repoBPath,
+			Program:     "claude",
+			Backend:     string(session.BackendHook),
+			ForceRemote: false,
+		})
+		if err == nil {
+			release()
+			t.Fatalf("a --backend hook create must run the hook-name checks: both sandboxes would get --name %q", session.Slugify(newTitle))
+		}
+		if !strings.Contains(err.Error(), "hook name") {
+			t.Errorf("rejection should name the hook-name clash, got: %v", err)
+		}
+	})
+
 	t.Run("a free hook name is still allowed", func(t *testing.T) {
 		manager.mu.Lock()
 		err := manager.validateTitleAvailableLocked(repoB.ID, repoB.Root, "totally-unused", "claude", true, false, nil)

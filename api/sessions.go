@@ -85,10 +85,23 @@ func getSessionByTitle(title string) (*session.InstanceData, error) {
 		}
 		// Group by repo path, not raw match count: the snapshot carries no
 		// repoID, and only a title held by two distinct PROJECTS is ambiguous.
-		if len(session.DedupeSorted(repoPathsOf(matches))) > 1 {
+		paths := session.DedupeSorted(repoPathsOf(matches))
+		if len(paths) > 1 {
 			return nil, session.AmbiguousTitleError(title, repoPathsOf(matches))
 		}
 		if len(matches) > 0 {
+			// One snapshot match is not proof of uniqueness: the snapshot mirrors
+			// the daemon's m.instances, and refresh SKIPS rows it cannot restore
+			// (worktree/tmux gone). A second repo holding the title on disk only
+			// would be invisible here, so a bare `sessions get foo` would name the
+			// wrong project. Union the local disk rows, mirroring the daemon's own
+			// findSession guard. Skipped for a remote target, whose sessions have
+			// nothing to do with this machine's instances.json.
+			if !apiclient.IsRemoteTarget() {
+				if extra, err := diskRepoPathsForTitle(title, paths); err == nil && len(extra) > 1 {
+					return nil, session.AmbiguousTitleError(title, extra)
+				}
+			}
 			return &matches[0], nil
 		}
 		// Mirror findInstanceByTitle's clean-miss error so output is unchanged.
@@ -196,7 +209,7 @@ those projects instead of guessing between them.`,
 		// --repo is accepted on this command; it used to be parsed and then
 		// silently dropped, so `get` always searched every repo and returned
 		// whichever same-titled session the map walk hit first.
-		repoID, err := resolveRepoIDForLookup()
+		repoID, err := resolveRepoID()
 		if err != nil {
 			return jsonError(err)
 		}
@@ -630,10 +643,35 @@ those projects instead of guessing between them.`,
 		// --repo is accepted on this command; it used to be parsed and then
 		// silently dropped. That was worse here than on `get`: resolving the
 		// wrong repo's session does not just read it, it restores/starts it.
-		repoID, err := resolveRepoIDForLookup()
+		repoID, err := resolveRepoID()
 		if err != nil {
 			return jsonError(err)
 		}
+
+		// A remote target must be previewed BY the remote daemon. The local path
+		// below reads this machine's instances.json and restores the session to
+		// capture it — against --daemon-url that would preview (and start) a
+		// same-titled LOCAL session, or report not-found even though the remote
+		// holds the session. The daemon resolves {title, repoID} on its own side,
+		// where the sessions actually live.
+		if apiclient.IsRemoteTarget() {
+			client, cerr := apiclient.NewTargeted()
+			if cerr != nil {
+				return jsonError(cerr)
+			}
+			content, gone, perr := client.Preview(daemon.PreviewRequest{Title: args[0], RepoID: repoID})
+			if perr != nil {
+				return jsonError(perr)
+			}
+			if gone {
+				return jsonError(fmt.Errorf("session %q is no longer running", args[0]))
+			}
+			return jsonOut(map[string]string{
+				"title":   args[0],
+				"content": content,
+			})
+		}
+
 		instance, _, err := findLiveInstanceByTitleInScope(repoID, args[0])
 		if err != nil {
 			return jsonError(err)
