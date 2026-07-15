@@ -20,6 +20,12 @@ af                 # launch the TUI
 
 All subcommands accept `--repo <path>` to target a repository other than the current directory, and `--json` to wrap output in the shared envelope.
 
+Session titles are unique **within a project, not across projects** — the same name may exist in several repos at once. Every command that takes a `<title>` resolves it inside the repo named by `--repo`, falling back to the current directory's repo. With no repo context (no `--repo`, cwd outside a repo) a title held by exactly one session anywhere still resolves; a title held by sessions in several projects is ambiguous and reports an error naming them rather than picking one:
+
+```
+session "foo" exists in multiple projects: /repos/alpha, /repos/beta — pass --repo to pick one
+```
+
 ```bash
 af sessions list                                          # list sessions in the repo
 af sessions get <title>                                   # fetch one session

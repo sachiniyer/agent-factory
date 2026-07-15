@@ -26,10 +26,18 @@ type Manager struct {
 	ready     chan struct{}
 	readyOnce sync.Once
 
-	mu                  sync.Mutex
-	storage             *session.Storage
-	instances           map[string]*session.Instance
-	reservedTitles      map[string]struct{}
+	mu             sync.Mutex
+	storage        *session.Storage
+	instances      map[string]*session.Instance
+	reservedTitles map[string]struct{}
+	// reservedRemoteNames holds in-flight remote-hook slug reservations, keyed by
+	// daemonInstanceKey(repoID, slug). The key is repo-scoped because session
+	// titles are unique per-repo, not globally: a bare-slug key made this the one
+	// check in the whole create path that rejected the SAME title in a DIFFERENT
+	// repo ("remote hook name %q is already reserved"), even though every other
+	// name a session owns — branch, tmux name, archive dir, manager key — is
+	// already per-repo. Remote hook names only have to be unique within the repo
+	// whose hook scripts consume them.
 	reservedRemoteNames map[string]struct{}
 	repoStartLocks      map[string]*sync.Mutex
 	// targetLocks serializes DeliverPrompt per (repo, title) so concurrent

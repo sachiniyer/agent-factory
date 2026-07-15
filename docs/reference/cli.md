@@ -1017,6 +1017,14 @@ af sessions create [flags]
 
 Get a session by title
 
+Titles are unique within a project, not across projects, so the same
+name can exist in several repos. The title resolves inside the repo given by
+--repo, or the current directory's repo when --repo is omitted.
+
+With no repo context, a title held by exactly one session still resolves; one
+held by sessions in several projects is ambiguous and reports an error naming
+those projects instead of guessing between them.
+
 ```
 af sessions get <title>
 ```
@@ -1084,6 +1092,14 @@ af sessions list
 ## af sessions preview
 
 Preview a session's terminal content
+
+Titles are unique within a project, not across projects, so the same
+name can exist in several repos. The title resolves inside the repo given by
+--repo, or the current directory's repo when --repo is omitted.
+
+With no repo context, a title held by exactly one session still resolves; one
+held by sessions in several projects is ambiguous and reports an error naming
+those projects instead of guessing between them.
 
 ```
 af sessions preview <title>

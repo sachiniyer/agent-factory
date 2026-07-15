@@ -66,17 +66,30 @@ func listSessions(repoID string) ([]session.InstanceData, error) {
 	return diskListSessions(repoID)
 }
 
-// getSessionByTitle returns the single session matching title, preferring the
-// daemon's live snapshot and falling back to the disk scan when no daemon is
-// reachable (#1029 PR 2). When a live snapshot is available the daemon is
-// authoritative: a miss returns not-found without re-reading disk.
+// getSessionByTitle returns the single session matching title across ALL repos,
+// preferring the daemon's live snapshot and falling back to the disk scan when no
+// daemon is reachable (#1029 PR 2). When a live snapshot is available the daemon
+// is authoritative: a miss returns not-found without re-reading disk.
+//
+// Titles are unique per-repo, so this unscoped lookup resolves only when exactly
+// one session matches; several matches return ErrAmbiguousTitle. Callers with a
+// repo in hand should use getSessionByTitleInScope instead.
 func getSessionByTitle(title string) (*session.InstanceData, error) {
 	data, fallBack, err := snapshotRead(daemon.SnapshotRequest{})
 	if err == nil {
+		var matches []session.InstanceData
 		for i := range data {
 			if data[i].Title == title {
-				return &data[i], nil
+				matches = append(matches, data[i])
 			}
+		}
+		// Group by repo path, not raw match count: the snapshot carries no
+		// repoID, and only a title held by two distinct PROJECTS is ambiguous.
+		if len(session.DedupeSorted(repoPathsOf(matches))) > 1 {
+			return nil, session.AmbiguousTitleError(title, repoPathsOf(matches))
+		}
+		if len(matches) > 0 {
+			return &matches[0], nil
 		}
 		// Mirror findInstanceByTitle's clean-miss error so output is unchanged.
 		return nil, fmt.Errorf("session %q %w", title, errTitleNotFound)
@@ -168,12 +181,26 @@ var sessionsListCmd = &cobra.Command{
 var sessionsGetCmd = &cobra.Command{
 	Use:   "get <title>",
 	Short: "Get a session by title",
-	Args:  cobra.ExactArgs(1),
+	Long: `Titles are unique within a project, not across projects, so the same
+name can exist in several repos. The title resolves inside the repo given by
+--repo, or the current directory's repo when --repo is omitted.
+
+With no repo context, a title held by exactly one session still resolves; one
+held by sessions in several projects is ambiguous and reports an error naming
+those projects instead of guessing between them.`,
+	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		log.Initialize(false)
 		defer log.Close()
 
-		data, err := getSessionByTitle(args[0])
+		// --repo is accepted on this command; it used to be parsed and then
+		// silently dropped, so `get` always searched every repo and returned
+		// whichever same-titled session the map walk hit first.
+		repoID, err := resolveRepoID()
+		if err != nil {
+			return jsonError(err)
+		}
+		data, err := getSessionByTitleInScope(repoID, args[0])
 		if err != nil {
 			return jsonError(err)
 		}
@@ -588,12 +615,26 @@ func runBroadcast(prompt string) error {
 var sessionsPreviewCmd = &cobra.Command{
 	Use:   "preview <title>",
 	Short: "Preview a session's terminal content",
-	Args:  cobra.ExactArgs(1),
+	Long: `Titles are unique within a project, not across projects, so the same
+name can exist in several repos. The title resolves inside the repo given by
+--repo, or the current directory's repo when --repo is omitted.
+
+With no repo context, a title held by exactly one session still resolves; one
+held by sessions in several projects is ambiguous and reports an error naming
+those projects instead of guessing between them.`,
+	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		log.Initialize(false)
 		defer log.Close()
 
-		instance, _, err := findLiveInstanceByTitle(args[0])
+		// --repo is accepted on this command; it used to be parsed and then
+		// silently dropped. That was worse here than on `get`: resolving the
+		// wrong repo's session does not just read it, it restores/starts it.
+		repoID, err := resolveRepoID()
+		if err != nil {
+			return jsonError(err)
+		}
+		instance, _, err := findLiveInstanceByTitleInScope(repoID, args[0])
 		if err != nil {
 			return jsonError(err)
 		}

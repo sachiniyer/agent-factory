@@ -180,6 +180,11 @@ func findInstanceDataByTitle(title, repoID string) (*session.InstanceData, strin
 		return nil, "", fmt.Errorf("failed to load instances: %w", err)
 	}
 	var corrupted []string
+	// Titles are unique per-repo: collect all matches so an unscoped lookup
+	// reports ambiguity instead of resolving whichever repo the map walk reached
+	// first (the disk mirror of findSession's unscoped branch).
+	var matches []session.InstanceData
+	var matchRepoIDs []string
 	for rid, raw := range allInstances {
 		var data []session.InstanceData
 		if err := json.Unmarshal(raw, &data); err != nil {
@@ -192,9 +197,22 @@ func findInstanceDataByTitle(title, repoID string) (*session.InstanceData, strin
 		}
 		for i := range data {
 			if data[i].Title == title {
-				return &data[i], rid, nil
+				matches = append(matches, data[i])
+				matchRepoIDs = append(matchRepoIDs, rid)
 			}
 		}
+	}
+	// Only a title held by distinct REPOS is ambiguous; duplicate rows inside one
+	// repo's instances.json are a corruption artifact, not a cross-project clash.
+	if len(session.DedupeSorted(matchRepoIDs)) > 1 {
+		paths := make([]string, 0, len(matches))
+		for i := range matches {
+			paths = append(paths, matches[i].Path)
+		}
+		return nil, "", session.AmbiguousTitleError(title, paths)
+	}
+	if len(matches) > 0 {
+		return &matches[0], matchRepoIDs[0], nil
 	}
 	if len(corrupted) > 0 {
 		sort.Strings(corrupted)

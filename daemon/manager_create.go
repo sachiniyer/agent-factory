@@ -162,24 +162,26 @@ func (m *Manager) reserveCreate(req CreateSessionRequest) (*config.RepoContext, 
 	}
 
 	key := daemonInstanceKey(repo.ID, title)
-	remoteName := ""
+	remoteKey := ""
 	if req.ForceRemote {
-		remoteName = session.Slugify(title)
-		if _, ok := m.reservedRemoteNames[remoteName]; ok {
-			return nil, "", nil, nil, fmt.Errorf("remote hook name %q is already reserved", remoteName)
+		// Reservations are per-repo: the same remote title in another repo is a
+		// different hook name as far as af is concerned (see reservedRemoteNames).
+		remoteKey = daemonInstanceKey(repo.ID, session.Slugify(title))
+		if _, ok := m.reservedRemoteNames[remoteKey]; ok {
+			return nil, "", nil, nil, fmt.Errorf("remote hook name %q is already reserved in this project", session.Slugify(title))
 		}
 	}
 
 	m.reservedTitles[key] = struct{}{}
-	if remoteName != "" {
-		m.reservedRemoteNames[remoteName] = struct{}{}
+	if remoteKey != "" {
+		m.reservedRemoteNames[remoteKey] = struct{}{}
 	}
 	release := func() {
 		m.mu.Lock()
 		defer m.mu.Unlock()
 		delete(m.reservedTitles, key)
-		if remoteName != "" {
-			delete(m.reservedRemoteNames, remoteName)
+		if remoteKey != "" {
+			delete(m.reservedRemoteNames, remoteKey)
 		}
 	}
 
@@ -351,8 +353,8 @@ func (m *Manager) validateTitleAvailableLocked(repoID, repoPath, title, program 
 	}
 	if remote {
 		candidate := session.Slugify(title)
-		if _, ok := m.reservedRemoteNames[candidate]; ok {
-			return fmt.Errorf("remote hook name %q is already reserved", candidate)
+		if _, ok := m.reservedRemoteNames[daemonInstanceKey(repoID, candidate)]; ok {
+			return fmt.Errorf("remote hook name %q is already reserved in this project", candidate)
 		}
 		// Guard against in-memory remote sessions that are not (yet) on disk.
 		// refreshDaemonInstances preserves a running remote instance in

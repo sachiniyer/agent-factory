@@ -117,6 +117,11 @@ var errTitleNotFound = errors.New("not found")
 
 // findInstanceByTitle scans all repos for an instance matching the given title.
 // Returns the InstanceData and the repoID it belongs to.
+//
+// Titles are unique per-repo, so an unscoped scan can match several sessions. A
+// single match resolves (the bare-title convenience); several match returns
+// ErrAmbiguousTitle naming each repo rather than picking one, since the map walk
+// below makes "first match" nondeterministic across runs.
 func findInstanceByTitle(title string) (*session.InstanceData, string, error) {
 	allInstances, err := config.LoadAllRepoInstances()
 	if err != nil {
@@ -124,6 +129,8 @@ func findInstanceByTitle(title string) (*session.InstanceData, string, error) {
 	}
 
 	var corrupted []string
+	var matches []session.InstanceData
+	var matchRepoIDs []string
 	for repoID, raw := range allInstances {
 		var instances []session.InstanceData
 		if err := json.Unmarshal(raw, &instances); err != nil {
@@ -136,9 +143,19 @@ func findInstanceByTitle(title string) (*session.InstanceData, string, error) {
 		}
 		for i := range instances {
 			if instances[i].Title == title {
-				return &instances[i], repoID, nil
+				matches = append(matches, instances[i])
+				matchRepoIDs = append(matchRepoIDs, repoID)
 			}
 		}
+	}
+	// Ambiguity is about distinct REPOS, not raw match count: duplicate rows
+	// within one repo's instances.json are a corruption artifact, not a
+	// cross-project collision, and must not be reported as one.
+	if len(session.DedupeSorted(matchRepoIDs)) > 1 {
+		return nil, "", session.AmbiguousTitleError(title, repoPathsOf(matches))
+	}
+	if len(matches) > 0 {
+		return &matches[0], matchRepoIDs[0], nil
 	}
 	if len(corrupted) > 0 {
 		return nil, "", fmt.Errorf("session %q not found; %s", title, corruptedReposSuffix(corrupted))
@@ -146,6 +163,17 @@ func findInstanceByTitle(title string) (*session.InstanceData, string, error) {
 	// Wrap the sentinel so a clean miss stays distinguishable from a
 	// corruption-tainted miss (#861); the user-facing text is unchanged.
 	return nil, "", fmt.Errorf("session %q %w", title, errTitleNotFound)
+}
+
+// repoPathsOf lists the repo paths of matched sessions, for the ambiguous-title
+// error. InstanceData.Path is the repo root, which is what the user passes to
+// --repo — repoIDs are opaque hashes and would not help them disambiguate.
+func repoPathsOf(matches []session.InstanceData) []string {
+	paths := make([]string, 0, len(matches))
+	for i := range matches {
+		paths = append(paths, matches[i].Path)
+	}
+	return paths
 }
 
 // corruptedReposSuffix builds a sorted, human-readable clause naming the repos
@@ -279,19 +307,6 @@ func loadRepoInstanceData(repoID string) ([]session.InstanceData, error) {
 	return instances, nil
 }
 
-// findLiveInstanceByTitle finds an instance by title and restores it as a live *Instance.
-func findLiveInstanceByTitle(title string) (*session.Instance, string, error) {
-	data, repoID, err := findInstanceByTitle(title)
-	if err != nil {
-		return nil, "", err
-	}
-	instance, err := session.FromInstanceData(*data)
-	if err != nil {
-		return nil, "", fmt.Errorf("failed to restore session %q: %w", title, err)
-	}
-	return instance, repoID, nil
-}
-
 // findInstanceByTitleInScope finds an instance by title within the resolved repo
 // scope (#891). An empty repoID preserves the prior all-repo search; a non-empty
 // one confines the lookup to that repo so a same-titled session in a different
@@ -316,10 +331,10 @@ func findInstanceByTitleInScope(repoID, title string) (*session.InstanceData, st
 }
 
 // findLiveInstanceByTitleInScope finds an instance by title within the resolved
-// repo scope and restores it as a live *Instance (#891). It is the repo-scoped
-// counterpart of findLiveInstanceByTitle, used by attach so `--repo` confines
-// the attach to that repo's session instead of connecting the terminal to a
-// same-titled session in another repo.
+// repo scope and restores it as a live *Instance (#891). Used by attach and
+// preview so `--repo` confines them to that repo's session instead of acting on
+// a same-titled session in another repo. With no repo scope it resolves a unique
+// title and reports ErrAmbiguousTitle when several repos hold it.
 func findLiveInstanceByTitleInScope(repoID, title string) (*session.Instance, string, error) {
 	data, repoID, err := findInstanceByTitleInScope(repoID, title)
 	if err != nil {
@@ -337,8 +352,8 @@ func findLiveInstanceByTitleInScope(repoID, title string) (*session.Instance, st
 // prior all-repo search; a non-empty one confines the check to that repo so a
 // same-titled session in a different repo can never satisfy the pre-check.
 // Mirrors how resolveRepoID() scopes the other sessions subcommands (list,
-// kill). This is a pure existence check: unlike findLiveInstanceByTitle it does
-// not restore (and Start) the instance, since callers only need to know whether
+// kill). This is a pure existence check: unlike findLiveInstanceByTitleInScope it
+// does not restore (and Start) the instance, since callers only need to know whether
 // the title is taken in scope and the daemon does its own session restore on
 // delivery.
 func instanceTitleExistsInScope(repoID, title string) (bool, error) {

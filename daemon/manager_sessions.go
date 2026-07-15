@@ -335,12 +335,32 @@ func (m *Manager) findSession(title, repoID string) (*session.Instance, string, 
 			return instance, repoID, nil, nil
 		}
 	} else {
+		// Unscoped: titles are unique per-repo, so collect every match rather
+		// than returning the first one the map walk happens to reach. One match
+		// resolves; several are ambiguous and must not be silently picked
+		// between — a kill/archive would otherwise hit an arbitrary repo's
+		// session (the collision resolveActionSession's id-first path avoids).
+		var matched *session.Instance
+		var matchedRepoID string
+		var matchRepoIDs, repoPaths []string
 		for key, instance := range m.instances {
-			if instance.Title == title {
-				rid, _ := splitDaemonInstanceKey(key)
-				m.mu.Unlock()
-				return instance, rid, nil, nil
+			if instance == nil || instance.Title != title {
+				continue
 			}
+			rid, _ := splitDaemonInstanceKey(key)
+			if matched == nil {
+				matched, matchedRepoID = instance, rid
+			}
+			matchRepoIDs = append(matchRepoIDs, rid)
+			repoPaths = append(repoPaths, instance.Path)
+		}
+		if len(session.DedupeSorted(matchRepoIDs)) > 1 {
+			m.mu.Unlock()
+			return nil, "", nil, session.AmbiguousTitleError(title, repoPaths)
+		}
+		if matched != nil {
+			m.mu.Unlock()
+			return matched, matchedRepoID, nil, nil
 		}
 	}
 	m.mu.Unlock()
