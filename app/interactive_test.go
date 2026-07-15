@@ -670,18 +670,21 @@ func TestClickCommittingWebTabPreviewShowsGuardNotAttach(t *testing.T) {
 	h.updatePanePreview(webInst, webIdx, true, false)
 	require.True(t, h.paneIsPreviewing(pane), "the pane previews the web tab")
 
-	attached := 0
-	swapAttachOverlayCallbackFn(t, func(m *home, title, label, traceSuffix string, _ func() (chan struct{}, error)) tea.Cmd {
-		attached++
-		return nil
-	})
+	_, _ = h.enterPane(pane, nil)
 
-	_, cmd := h.enterPane(pane, nil)
-	runHermeticCmd(t, h, cmd, 0)
-
-	assert.Zero(t, attached, "a web tab has no PTY: it must never start a full-screen attach")
+	// Every signal here is written SYNCHRONOUSLY by enterPane, so the test asserts
+	// without draining cmds. That is deliberate: the returned batch carries
+	// handleError's 3s transient-clear timer, and running it would deliver
+	// hideErrMsg and wipe the very notice under test — the notice would then
+	// survive or not depending on which cmd won, which is exactly the flake this
+	// test first shipped with (green locally, red in CI). beginAttachTransition
+	// likewise arms attachTransitioning synchronously, so a wrongly-dispatched
+	// attach is visible here with no tick to pump.
+	assert.Contains(t, h.errBox.FullError(), "web tab",
+		"the user must get the 'view it in the web UI' message")
+	assert.False(t, h.attachTransitioning,
+		"a web tab has no PTY: it must never start a full-screen attach")
 	assert.False(t, h.interactive, "a web tab cannot embed either")
-	assert.Contains(t, h.View(), "web tab", "the user must get the 'view it in the web UI' message")
 }
 
 // TestPaneErrorLabelNamesSessionOrFallsBack covers the cosmetic half of #1819:
