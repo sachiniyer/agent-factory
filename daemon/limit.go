@@ -170,6 +170,13 @@ func (s *controlServer) ResumeFromLimit(req ResumeFromLimitRequest, resp *Resume
 // documented). The LimitReached liveness is cleared so the poll re-resolves the
 // real state on the next tick, and the transition is persisted.
 //
+// Delivering that prompt is the ONLY thing that lifts the block: a resume that
+// fails anywhere before the send lands leaves the session parked at the wall,
+// both in memory and on disk, so the manual retry and the auto-resume scheduler
+// (which both gate on the limit still being set) can pick it up again. The
+// respawn arm re-applies the block for that reason — Respawn ends in ConfirmLive,
+// which would otherwise report a session as resumed before its prompt existed.
+//
 // Runs under the per-(repo, title) target lock (like DeliverPrompt) and re-
 // verifies the limit state under it, so it never races a self-recovery, a kill,
 // or a concurrent resume. Rejects a tombstoned / reserved-root session, mirroring
@@ -268,6 +275,12 @@ func (m *Manager) resumeFromLimitLocked(repoID, key string, instance *session.In
 	case probeUnknown:
 		return fmt.Errorf("cannot resume %q: its agent-server did not answer the liveness probe; not re-spawning, because re-provisioning a sandbox that may still be running would orphan it and discard its unpushed work", requestedTitle)
 	case probeDead:
+		// Capture the limit window BEFORE the re-spawn: Respawn ends in ConfirmLive,
+		// which drops both the LiveLimitReached liveness and its reset time, and
+		// LimitResetAt reports (zero, false) once that has happened. Re-applying the
+		// block below has to restore THIS episode's window, not a zeroed one — the
+		// auto-resume scheduler schedules off it (reset + grace).
+		resetAt, _ := instance.LimitResetAt()
 		if rerr := instance.Respawn(); rerr != nil {
 			return fmt.Errorf("failed to re-spawn agent for %q: %w", requestedTitle, rerr)
 		}
@@ -281,6 +294,28 @@ func (m *Manager) resumeFromLimitLocked(repoID, key string, instance *session.In
 		// endpoint and the resume could never clear the limit (#1786). Inert for local
 		// sessions, whose localAgentServer resolves i.backend per call.
 		as = instance.AgentServer()
+		// Re-apply the limit block Respawn's ConfirmLive just cleared. A re-spawned
+		// agent is NOT a resumed one: this session stays parked at the wall until the
+		// SendPrompt below actually delivers its pending prompt, so LiveLimitReached
+		// is the truthful liveness for the whole window between here and there. The
+		// resume's single completion point is ClearLimitReached, after the send lands.
+		//
+		// Without this the arm strands the session on BOTH axes when SendPrompt fails:
+		// in memory the scheduler's `GetLiveness() != LiveLimitReached` guard skips a
+		// LiveRunning row forever, and — since the checkpoint below serializes the
+		// whole instance — that unblocked row reaches disk, so even a restart reloads
+		// it non-limit-blocked and neither the manual `c` retry (its !LimitReached
+		// guard) nor auto-resume ever retries the prompt that never landed. Re-parking
+		// leaves the session exactly where the failed resume found it, which is what
+		// both retry paths already know how to pick up.
+		//
+		// This is also what makes the ClearLimitReached below load-bearing rather than
+		// a no-op on this arm: ConfirmLive used to have already cleared the limit.
+		//
+		// No hot-loop risk from re-parking: the auto-resume scheduler sets its
+		// backoff gate BEFORE firing (limitResumeAttempted), so a resume that keeps
+		// failing here backs off exponentially instead of hammering.
+		instance.SetLimitReached(resetAt)
 		// Write the respawn's durable state NOW, not at the end of the happy path
 		// (#1854). Respawn shares LocalBackend.respawn, so reaching this line can mean
 		// it rebuilt a vanished worktree — recreating the branch, flipping
@@ -288,8 +323,8 @@ func (m *Manager) resumeFromLimitLocked(repoID, key string, instance *session.In
 		// fail, and its early return would drop all of that: a restart would reload a
 		// record with no rebuilt branch recorded, and kill would orphan the branch af
 		// itself created (#1841's outcome, same class). The poll does not cover it
-		// either — the respawn already left the instance live, so persistPollChange
-		// sees no liveness change and skips the write.
+		// either — persistPollChange writes only on a liveness/reset-time change, and
+		// the re-parked row matches the one the poll already knows.
 		//
 		// AFTER noteRuntimeReplaced, never before: the #1794/#1804 rule keeps every
 		// statement — a disk write above all — out of the window between the runtime
@@ -307,11 +342,14 @@ func (m *Manager) resumeFromLimitLocked(repoID, key string, instance *session.In
 	if serr := as.SendPrompt(prompt); serr != nil {
 		return fmt.Errorf("failed to resume %q: %w", requestedTitle, serr)
 	}
+	// The prompt landed: this is the resume's single completion point, and the only
+	// place the limit block is lifted on either arm.
 	instance.ClearLimitReached()
 
 	// The cleared limit is itself durable state worth a checkpoint. On the respawn
-	// arm this is the second write; that is deliberate — the first one is what
-	// survives a failed SendPrompt, this one records the resume that landed.
+	// arm this is the second write; that is deliberate — the first one records the
+	// rebuilt worktree of a session still parked at the wall, this one records the
+	// resume that actually landed.
 	m.persistInstance(repoID, instance)
 	return nil
 }
