@@ -1,6 +1,7 @@
 package app
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -38,9 +39,17 @@ type forwardedMouse struct {
 
 func newFakeLiveTerm() *fakeLiveTerm { return &fakeLiveTerm{} }
 
-func (f *fakeLiveTerm) Render(width, height int, showCursor bool) string { return "FAKE-LIVE-GRID" }
-func (f *fakeLiveTerm) Resize(width, height int)                         {}
-func (f *fakeLiveTerm) Close() error                                     { f.closed = true; return nil }
+// Render stands in for the streamed grid, echoing whatever has been SendKey'd
+// into it. The echo lets a test assert the pane RENDERS what the user typed —
+// not merely that some attachment exists — which is what separates a working
+// pane from the "input accepted, display stale" symptom (a live attachment that
+// takes keystrokes while the window renders something else). With no keys sent
+// it is exactly the old constant, so snapshot expectations are unaffected.
+func (f *fakeLiveTerm) Render(width, height int, showCursor bool) string {
+	return "FAKE-LIVE-GRID" + strings.Join(f.keys, "")
+}
+func (f *fakeLiveTerm) Resize(width, height int) {}
+func (f *fakeLiveTerm) Close() error             { f.closed = true; return nil }
 func (f *fakeLiveTerm) SendKey(msg tea.KeyMsg) bool {
 	f.keys = append(f.keys, msg.String())
 	return true

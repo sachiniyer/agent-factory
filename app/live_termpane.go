@@ -164,56 +164,43 @@ func (m *home) bindLiveTermPaneFor(p *store.OpenPane, create bool) (string, bool
 	return key, true
 }
 
-// ensureLiveTermPaneFor installs pane p's live attachment for the DELIBERATE
-// interactive-activation path, reporting whether p ended up bound (#1819).
+// ensureLiveTermPaneFor installs pane p's live attachment for the interactive-
+// activation path, reporting whether p ended up bound (#1819).
 //
-// Activation must not depend on a reconcile having already run with the right
-// gates open: the tick-driven reconcile deliberately skips panes whose context
-// says "don't paint a live grid right now" (an open overlay, a transient #1321
-// preview), and entering a pane is exactly the act that ends those states. Before
-// this existed, activation only re-ran the reconcile and then failed to the `o`
-// fallback whenever one of those gates happened to be closed — the #1526-class
-// regression, reachable from click-to-interact on a pane the tree cursor had left
-// previewing.
+// Activation must not inherit a reconcile skip it can itself resolve. The
+// tick-driven reconcile passes over panes whose CONTEXT says "no live grid right
+// now", and a transient #1321 preview is exactly such a context that entering the
+// pane ends — tree navigation leaves the last-focused pane previewing and CLOSES
+// its attachment, so a click-to-interact used to reach a reconcile that skipped
+// the pane, find it unbound, and report failure. Resolving the preview here and
+// reconciling is what keeps an ordinary local, ready, visible pane off the `o`
+// fallback.
 //
-// The `o` fallback stays for panes that genuinely cannot embed: a full-screen
-// attach owns the session's tmux client, and liveBindCandidate refuses remote,
-// dead/lost, in-flight, and unsized panes.
+// Deliberately no force-create: this reconciles on the SAME gates as the tick, so
+// the two can never disagree about what is bindable. A pane the reconcile still
+// refuses is one the `o` fallback is the honest answer for — remote, dead/lost,
+// in-flight, unsized/auto-hidden, or mid-full-screen-attach (where the reconcile
+// closes everything, so forcing a bind here would recreate the very stream #598
+// forbids).
 func (m *home) ensureLiveTermPaneFor(p *store.OpenPane) bool {
 	if p == nil {
-		return false
-	}
-	// Full-screen attach owns the session: a second client would fight it over the
-	// window size (#598 class). Genuinely non-embeddable while it holds — and this
-	// return is load-bearing, not just an early out: the reconcile below CLOSES
-	// every attachment while attached, so without it the force-bind would turn
-	// around and re-create the very stream #598 forbids.
-	if m.attached.Load() || m.attachTransitioning {
 		return false
 	}
 	// A preview still painting over the pane at activation is a stale tree-nav
 	// artifact — the callers that mean to enter the preview TARGET commit the txn
 	// first (handleEnter, enterPane), which rebinds the pane and clears this. Drop
-	// it rather than skipping the bind: interactive mode forwards keystrokes into
-	// the pane's OWN binding, so the preview must stop rendering over the session
-	// the user is about to type into. updatePanePreview enforces the same exclusion
-	// from the other side (it cancels while m.interactive).
+	// it rather than letting the reconcile skip the pane: interactive mode forwards
+	// keystrokes into the pane's OWN binding, so the preview must stop rendering
+	// over the session the user is about to type into. updatePanePreview enforces
+	// the same exclusion from the other side (it cancels while m.interactive).
 	if m.paneIsPreviewing(p) {
 		m.suppressActivePanePreview()
 		m.cancelPanePreview(false)
 	}
 	// Reconcile every visible pane exactly as the tick would — each visible pane
 	// owns its own stream (#1592 PR6), so activation must not narrow that to the
-	// entered one — and then guarantee THIS pane is bound even if the reconcile's
-	// create gate was closed by an open overlay.
+	// entered one.
 	m.syncLiveTermPane()
-	if m.liveTerms[p.ID()] == nil {
-		// Forcing the create is safe for a pane that cannot really stream: an
-		// auto-hidden pane has a relayout-zeroed rect and a remote/dead one has no
-		// bind candidate, so bindLiveTermPaneFor still refuses both and the `o`
-		// fallback stays the honest answer.
-		m.bindLiveTermPaneFor(p, true)
-	}
 	return m.liveTerms[p.ID()] != nil
 }
 

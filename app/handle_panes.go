@@ -413,6 +413,17 @@ func (m *home) enterPane(p *store.OpenPane, replayKey *tea.KeyMsg) (tea.Model, t
 	if p == nil {
 		return m, nil
 	}
+	// Ignore the whole verb while a full-screen attach is starting or live, the
+	// same fence handleEnter applies one step earlier at the key handler (#1530).
+	// The mouse needs it stated HERE because a click routes straight to enterPane
+	// without passing through handleEnter: during the ~20ms beginAttachTransition
+	// window (stateDefault, attachTransitioning true) a click would otherwise reach
+	// the preview commit below and REBIND the pane, even though the activation that
+	// follows is refused — so the user detaches to find the pane showing a different
+	// session than the one they attached from.
+	if m.attachTransitioning || m.attached.Load() {
+		return m, nil
+	}
 	// Entering a pane that owns a transient #1321 preview commits the preview
 	// first, so the pane's binding becomes the target the user can SEE before any
 	// keystroke forwards into it. handleEnter does this for keyboard Enter; doing
@@ -434,6 +445,15 @@ func (m *home) enterPane(p *store.OpenPane, replayKey *tea.KeyMsg) (tea.Model, t
 	}
 	if p.Instance() == nil || p.Instance().IsCreating() {
 		return m, commitCmd
+	}
+	// A web tab has no PTY, so it can neither embed nor attach — it is only
+	// viewable in the web UI. The tree Enter path guards this before dispatching;
+	// mirror it here so the pane paths agree. Load-bearing for the commit above: a
+	// body click on a previewed web tab rebinds the pane to it, and without this the
+	// unstreamable tab would fall through to a full-screen attach instead of the
+	// "view it in the web UI" message.
+	if webErr := webTabAttachGuard(p.Instance(), p.Tab()); webErr != nil {
+		return m, tea.Batch(commitCmd, m.handleError(webErr))
 	}
 	if liveSessionName(p.Instance(), p.Tab()) == "" {
 		// Not embeddable (remote): the full-screen attach of this pane's tab.

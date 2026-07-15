@@ -72,6 +72,22 @@ func (m *home) activateInteractive(p *store.OpenPane) tea.Cmd {
 	if !stillOpen {
 		return nil
 	}
+	// An overlay opened between the Enter that captured this pane and this
+	// activation — most importantly, the user pressed `o` and the first-time
+	// ATTACH help is now up. That makes the activation stale, so drop it and let
+	// the later intent win.
+	//
+	// Load-bearing for #598, not just tidiness: showHelpScreen(helpTypeInstanceAttach)
+	// has ALREADY closed the live panes to make room for the full-screen attach it
+	// runs on dismiss, but attachTransitioning stays false until then — so this is
+	// the one window where neither attach flag is set yet an attach is pending, and
+	// binding here would reconnect an embedded client for the attach to fight over
+	// the session size. Interactive mode under an overlay is incoherent anyway: the
+	// overlay owns the keyboard. Every legitimate path arrives at stateDefault (the
+	// help dismiss sets it before firing the deferred cmd), so nothing is lost.
+	if m.state != stateDefault {
+		return nil
+	}
 	// The session may have changed state while the help overlay was up
 	// (e.g. gone Lost, #1108): re-run the Enter guard so the user gets the
 	// same truthful error Enter would give now, not a generic bind failure.

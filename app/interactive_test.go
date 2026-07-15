@@ -545,25 +545,56 @@ func TestClickToInteractOnPreviewingPaneBindsInsteadOfFallingBack(t *testing.T) 
 	assert.Nil(t, h.panePreviewTxn, "entering a pane resolves its preview")
 }
 
-// TestActivateInteractiveBindsWhileReconcileCreateGateClosed pins the other half
-// of #1819: activation must not inherit the reconcile's create gate. The tick
-// reconcile refuses to CREATE attachments outside stateDefault (an overlay may
-// have a deferred full-screen attach pending), but activation is a deliberate act
-// on a named pane and is fenced separately by attached/attachTransitioning — so it
-// binds regardless of which overlay state it lands in.
-func TestActivateInteractiveBindsWhileReconcileCreateGateClosed(t *testing.T) {
-	h, _, fakes := interactiveTestHome(t)
+// TestActivateInteractiveDropsStaleActivationUnderAttachHelp is the #598 fence on
+// the activation path (codex review of #1819). Enter queues an enterInteractiveMsg;
+// if the user presses `o` before it is delivered, showHelpScreen(helpTypeInstanceAttach)
+// closes the live panes to make room for the full-screen attach it runs on dismiss —
+// but attachTransitioning stays false until then. That is the ONE window where an
+// attach is pending yet neither attach flag is set, so an activation that bound here
+// would hand the coming attach a live embedded client to fight over the session size.
+// The stale activation must be dropped: no bind, no interactive mode, and no spurious
+// error toast under the overlay either.
+func TestActivateInteractiveDropsStaleActivationUnderAttachHelp(t *testing.T) {
+	h, inst, fakes := interactiveTestHome(t)
+	h.syncLiveTermPane()
 	p := h.focusedOpenPane()
 	require.NotNil(t, p)
-	require.Empty(t, *fakes, "no reconcile has run yet, so the pane is unbound")
+	require.Len(t, *fakes, 1, "baseline: the pane is bound before the attach help opens")
 
-	h.state = stateHelp // an overlay is up: the reconcile would skip the create
-	h.reconcileLiveTermPanes()
-	require.Nil(t, h.liveTerms[p.ID()], "the tick reconcile must not create under an overlay")
+	// `o` on a first-time attacher: the help closes the live panes for the deferred
+	// attach, and attachTransitioning is still false until dismiss.
+	_, _ = h.showHelpScreen(helpTypeInstanceAttach{}, func() tea.Cmd { return nil })
+	require.Equal(t, stateHelp, h.state)
+	require.False(t, h.attachTransitioning, "the attach is deferred to dismiss, not armed yet")
+	require.False(t, h.attached.Load())
+	require.Nil(t, h.liveTerms[p.ID()], "the attach help closed the embedded attachment (#598)")
 
-	require.Nil(t, h.activateInteractive(p), "activation must bind, not error to the `o` fallback")
-	assert.True(t, h.interactive)
-	assert.NotNil(t, h.liveTerms[p.ID()])
+	// The Enter queued before `o` now lands.
+	require.Nil(t, h.activateInteractive(p), "a stale activation must be dropped silently")
+
+	assert.Nil(t, h.liveTerms[p.ID()], "must not resurrect the embedded client the attach help closed")
+	assert.False(t, h.interactive, "interactive mode under an overlay is incoherent — the overlay owns the keyboard")
+	assert.Len(t, *fakes, 1, "no second attachment was created for %s", inst.Title)
+}
+
+// TestEnterPaneIgnoredDuringAttachTransition pins the mouse half of the #1530
+// fence (codex review of #1819). handleEnter bails on attachTransitioning at the
+// key handler, but a click routes straight to enterPane — so during the ~20ms
+// beginAttachTransition window (stateDefault, attachTransitioning true) a click
+// would reach the preview commit and REBIND the pane, even though the activation
+// that follows is refused. The user would detach to find the pane showing a
+// different session than the one they attached from.
+func TestEnterPaneIgnoredDuringAttachTransition(t *testing.T) {
+	h, focused, _, pane := previewTestHome(t)
+
+	h.attachTransitioning = true // the 20ms beginAttachTransition window
+
+	_, cmd := h.enterPane(pane, nil)
+	runHermeticCmd(t, h, cmd, 0)
+
+	assert.False(t, h.interactive, "the attach owns the screen: no interactive entry")
+	assert.NotNil(t, h.panePreviewTxn, "the preview must not be committed mid-attach-transition")
+	assert.Equal(t, focused, pane.Instance(), "the pane must not be rebound out from under the attach")
 }
 
 // TestActivateInteractiveFallsBackWhileFullScreenAttached pins the fallback that
@@ -580,6 +611,77 @@ func TestActivateInteractiveFallsBackWhileFullScreenAttached(t *testing.T) {
 	require.NotNil(t, h.activateInteractive(p), "an attached session must not also bind an embedded stream")
 	assert.False(t, h.interactive)
 	assert.Nil(t, h.liveTerms[p.ID()])
+}
+
+// TestEnteredPaneRendersTypedInput covers the user-reported presentation of this
+// class: "input is accepted but the display stays stale". A pane is only healthy
+// when the SAME attachment both takes the keystrokes and backs what is rendered —
+// asserting "no error on entry" would pass even if the window rendered a stale
+// capture while SendKey vanished into an attachment nothing draws. So enter a pane
+// whose attachment was MISSING at activation (the #1819 setup) and require the
+// typed text to come back out of the pane's rendered frame.
+func TestEnteredPaneRendersTypedInput(t *testing.T) {
+	h, _, previewed, pane := previewTestHome(t)
+
+	body := zoneRect(t, h, zones.PaneBody(layout.PaneRegion(pane.ID())))
+	runHermeticCmd(t, h, combineCmds(press(h, body.X+3, body.Y+4), release(h, body.X+3, body.Y+4)), 0)
+	require.True(t, h.interactive, "the click must enter the pane")
+
+	p := h.focusedOpenPane()
+	require.NotNil(t, p)
+	require.Equal(t, previewed, p.Instance())
+
+	for _, r := range "hello" {
+		_, _ = h.handleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+	}
+
+	// Input accepted...
+	fake := focusedFake(h)
+	require.NotNil(t, fake, "the entered pane must own the attachment keystrokes route to")
+	assert.Equal(t, []string{"h", "e", "l", "l", "o"}, fake.keys, "keystrokes must reach the pane")
+	// ...AND the display follows it. Both must hold: the window renders through the
+	// very attachment that took the input, so what was typed is on screen.
+	assert.True(t, h.paneWindows[p.ID()].HasLive(), "the window must render through the attachment, not a capture")
+	assert.Contains(t, h.View(), "hello", "the pane must render the typed input, not a stale frame")
+}
+
+// TestClickCommittingWebTabPreviewShowsGuardNotAttach pins the web-tab guard on
+// the pane path (codex review of #1819). A web tab has no PTY, so it can neither
+// embed nor attach — the tree Enter path runs webTabAttachGuard before dispatching.
+// The pane path did not, so committing a previewed web tab rebound the pane and then
+// fell through to liveSessionName == "" → a full-screen attach against a tab the
+// daemon cannot stream. It must surface the "view it in the web UI" message instead.
+func TestClickCommittingWebTabPreviewShowsGuardNotAttach(t *testing.T) {
+	h, _, fakes := interactiveTestHome(t)
+	require.NoError(t, h.appState.SetHelpScreensSeen(
+		helpTypeInteractive{}.mask()|helpTypeInstanceAttach{}.mask()))
+	h.syncLiveTermPane()
+	require.Len(t, *fakes, 1)
+	pane := h.focusedOpenPane()
+	require.NotNil(t, pane)
+
+	// A second session whose tab 1 is a web tab, previewed onto the focused pane.
+	webInst := startedLocalInstance(t, "web-host")
+	webTab, err := webInst.AddWebTab("http://localhost:3000", "")
+	require.NoError(t, err)
+	require.Equal(t, session.TabKindWeb, webTab.Kind)
+	webIdx := len(webInst.GetTabs()) - 1
+	selectInstance(h, webInst)
+	h.updatePanePreview(webInst, webIdx, true, false)
+	require.True(t, h.paneIsPreviewing(pane), "the pane previews the web tab")
+
+	attached := 0
+	swapAttachOverlayCallbackFn(t, func(m *home, title, label, traceSuffix string, _ func() (chan struct{}, error)) tea.Cmd {
+		attached++
+		return nil
+	})
+
+	_, cmd := h.enterPane(pane, nil)
+	runHermeticCmd(t, h, cmd, 0)
+
+	assert.Zero(t, attached, "a web tab has no PTY: it must never start a full-screen attach")
+	assert.False(t, h.interactive, "a web tab cannot embed either")
+	assert.Contains(t, h.View(), "web tab", "the user must get the 'view it in the web UI' message")
 }
 
 // TestPaneErrorLabelNamesSessionOrFallsBack covers the cosmetic half of #1819:
