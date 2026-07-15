@@ -99,7 +99,25 @@ func (m *Manager) ensureVSCodeServer(instance *session.Instance, repoID, title s
 	if strings.TrimSpace(worktree) == "" {
 		return "", fmt.Errorf("session %q has no worktree to open in VS Code", title)
 	}
-	return m.vscode.ensureServer(daemonInstanceKey(repoID, title), worktree)
+	key := daemonInstanceKey(repoID, title)
+	target, err := m.vscode.ensureServer(key, worktree)
+	if err != nil {
+		return "", err
+	}
+	// Re-check that a vscode tab still EXISTS, now that the spawn is done.
+	//
+	// CloseTab stops the editor under the op-lock this route deliberately does not
+	// take, so the tab this request resolved can be closed — and its stopFor can
+	// run — while the spawn is still in flight. The editor started here would then
+	// belong to no tab: nothing renders it, and no close/archive/kill path for a
+	// tab that no longer exists will ever stop it. Checking AFTER the spawn is what
+	// closes that window; checking only before would leave it wide open for exactly
+	// the seconds a spawn takes.
+	if !instanceHasVSCodeTab(instance) {
+		m.vscode.stopFor(key)
+		return "", fmt.Errorf("the VS Code tab of session %q was closed", title)
+	}
+	return target, nil
 }
 
 // webTabProxyHandler reverse-proxies GET /v1/webtab/{sessionId}/{tabIdx}/{rest...}

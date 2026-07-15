@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -17,6 +18,7 @@ import (
 
 	"github.com/coder/websocket"
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
@@ -90,6 +92,16 @@ func fakeVSCodeServerMain() {
 	if addr == "" {
 		fmt.Fprintln(os.Stderr, "fake code-server: no --bind-addr / --host+--port")
 		os.Exit(2)
+	}
+
+	// Optionally fork a child that IGNORES SIGTERM and outlives us, in our process
+	// group — the shape of code-server's extension/pty hosts, and what proves the
+	// teardown escalates to the whole group rather than stopping at the leader.
+	if pidFile := os.Getenv("AF_TEST_ORPHAN_CHILD_PIDFILE"); pidFile != "" {
+		child := exec.Command("sh", "-c", "trap '' TERM; echo $$ > "+pidFile+"; while :; do sleep 0.2; done")
+		if err := child.Start(); err == nil {
+			go func() { _ = child.Wait() }()
+		}
 	}
 
 	mux := http.NewServeMux()
@@ -726,5 +738,157 @@ func TestWebTab_DoesNotForwardProxyPrefix(t *testing.T) {
 	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, vscodeProxyPath(id, idx, ""), nil))
 	if got != "" {
 		t.Fatalf("a web tab's dev server received X-Forwarded-Prefix=%q; only a vscode tab should", got)
+	}
+}
+
+// TestVSCodeServer_StopKillsChildrenThatOutliveTheLeader is codex's P2 teardown
+// finding. code-server is never one process: it spawns an extension host, a pty
+// host, and a process per integrated terminal. Returning as soon as the LEADER
+// exits would strand any of them that ignores SIGTERM or simply outlives it —
+// precisely the leak this supervisor exists to prevent, and invisible to a test
+// that only checks the leader.
+func TestVSCodeServer_StopKillsChildrenThatOutliveTheLeader(t *testing.T) {
+	// The fake editor forks a SIGTERM-ignoring child (see fakeVSCodeServerMain) and
+	// reports its pid here, so teardown can be checked against the whole group.
+	dir := t.TempDir()
+	childPidFile := filepath.Join(dir, "child.pid")
+	binary := writeFakeVSCodeBinary(t, "code-server", map[string]string{
+		"AF_TEST_ORPHAN_CHILD_PIDFILE": childPidFile,
+	})
+	v := newTestVSCodeSupervisor(t, binary)
+	if _, err := v.ensureServer("k", t.TempDir()); err != nil {
+		t.Fatalf("ensureServer: %v", err)
+	}
+	leader := v.servers["k"].cmd.Process.Pid
+
+	// Wait for the fake to have spawned its SIGTERM-ignoring child.
+	var childPid int
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if b, err := os.ReadFile(childPidFile); err == nil {
+			if p, perr := strconv.Atoi(strings.TrimSpace(string(b))); perr == nil && p > 0 {
+				childPid = p
+				break
+			}
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if childPid == 0 {
+		t.Fatal("the fake editor never reported its child pid")
+	}
+
+	v.stopFor("k")
+
+	assertProcessGone(t, leader)
+	// The real assertion: the child went with it.
+	assertProcessGone(t, childPid)
+}
+
+// TestVSCodeSupervisor_CoolsDownAnEditorThatDiesBeforeReady is codex's P3. An
+// editor that outlives the start grace and THEN dies without ever listening is a
+// broken start, not a crash to heal from. Only spawnLocked's own errors used to be
+// recorded, so this path respawned on every auto-refresh of the "starting" notice
+// — a spawn loop driven by our own UI.
+func TestVSCodeSupervisor_CoolsDownAnEditorThatDiesBeforeReady(t *testing.T) {
+	binary := writeFakeVSCodeBinary(t, "code-server", map[string]string{fakeVSCodeHangEnv: "1"})
+	v := newTestVSCodeSupervisor(t, binary)
+	v.startGrace = 100 * time.Millisecond
+	v.cooldown = time.Hour // any respawn inside the window is the bug
+	worktree := t.TempDir()
+
+	if _, err := v.ensureServer("k", worktree); !errors.Is(err, errVSCodeStarting) {
+		t.Fatalf("ensureServer err = %v, want errVSCodeStarting", err)
+	}
+	server := v.servers["k"]
+	if server == nil {
+		t.Fatal("the still-starting editor was not registered")
+	}
+	// It dies without ever having listened.
+	_ = syscall.Kill(-server.cmd.Process.Pid, syscall.SIGKILL)
+	<-server.exited
+
+	_, err := v.ensureServer("k", worktree)
+	if errors.Is(err, errVSCodeStarting) || err == nil {
+		t.Fatalf("ensureServer respawned a never-ready editor that died (err = %v); the notice's refresh would drive a spawn loop", err)
+	}
+	if !errors.Is(err, errVSCodeStartExited) {
+		t.Fatalf("err = %v, want errVSCodeStartExited", err)
+	}
+	if _, registered := v.servers["k"]; registered {
+		t.Fatal("a new editor was spawned despite the cooldown")
+	}
+}
+
+// TestVSCodeSupervisor_ReadyThenCrashedStillSelfHeals is the other half of the
+// rule above: a crash AFTER the editor served requests must still respawn at once.
+// Without this the cooldown would turn self-heal into a stall.
+func TestVSCodeSupervisor_ReadyThenCrashedStillSelfHeals(t *testing.T) {
+	binary := writeFakeVSCodeBinary(t, "code-server", nil)
+	v := newTestVSCodeSupervisor(t, binary)
+	v.cooldown = time.Hour
+	worktree := t.TempDir()
+
+	first, err := v.ensureServer("k", worktree)
+	if err != nil {
+		t.Fatalf("ensureServer: %v", err)
+	}
+	dead := v.servers["k"]
+	_ = syscall.Kill(-dead.cmd.Process.Pid, syscall.SIGKILL)
+	<-dead.exited
+
+	second, err := v.ensureServer("k", worktree)
+	if err != nil {
+		t.Fatalf("a READY-then-crashed editor must respawn immediately, not wait out the cooldown: %v", err)
+	}
+	if second == first {
+		t.Fatalf("reused the dead editor's URL %s", second)
+	}
+}
+
+// TestEnsureVSCodeServer_StopsAnEditorWhoseTabWasClosedMidSpawn is codex's P2
+// race. CloseTab stops the editor under the op-lock this proxy route deliberately
+// does NOT take (a spawn is far too slow to hold it), so a request can resolve a
+// vscode tab, have that tab closed — and its stopFor already run — while the spawn
+// is still in flight, and end up owning an editor that belongs to no tab: nothing
+// renders it, and no close/archive/kill path for a tab that no longer exists will
+// ever stop it. The re-check AFTER the spawn is what closes that window.
+func TestEnsureVSCodeServer_StopsAnEditorWhoseTabWasClosedMidSpawn(t *testing.T) {
+	binary := writeFakeVSCodeBinary(t, "code-server", nil)
+	manager, _, _, _ := newVSCodeFixture(t, binary)
+	const title = "vscodeproxy"
+
+	repo := ""
+	var inst *session.Instance
+	manager.mu.Lock()
+	for key, candidate := range manager.instances {
+		r, tt := splitDaemonInstanceKey(key)
+		if tt == title {
+			repo, inst = r, candidate
+		}
+	}
+	manager.mu.Unlock()
+	if inst == nil {
+		t.Fatal("fixture instance not found")
+	}
+
+	// Close the vscode tab: this is the state an in-flight spawn returns into.
+	if _, err := manager.CloseTab(CloseTabRequest{Title: title, RepoID: repo, TabName: "vscode"}); err != nil {
+		t.Fatalf("CloseTab: %v", err)
+	}
+
+	// The request that resolved BEFORE the close now finishes its spawn.
+	_, err := manager.ensureVSCodeServer(inst, repo, title)
+	if err == nil {
+		t.Fatal("an editor was served for a session whose VS Code tab is gone")
+	}
+	if !strings.Contains(err.Error(), "was closed") {
+		t.Fatalf("err = %v, want one naming the closed tab", err)
+	}
+	// ...and it did not leave the editor it just started running.
+	manager.vscode.mu.Lock()
+	_, registered := manager.vscode.servers[daemonInstanceKey(repo, title)]
+	manager.vscode.mu.Unlock()
+	if registered {
+		t.Fatal("the editor started for a now-closed tab was left running; nothing can reach or reap it until daemon shutdown")
 	}
 }

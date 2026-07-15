@@ -73,6 +73,12 @@ var errVSCodeBinaryMissing = errors.New("no VS Code server binary found")
 // self-refreshing "starting" notice, which resolves into the editor on its own.
 var errVSCodeStarting = errors.New("the VS Code server is still starting")
 
+// errVSCodeStartExited reports an editor that exited without ever serving a
+// request — a broken start rather than a crash to heal from. It is what the
+// respawn cooldown replays, so a broken install cannot be respawned by every
+// auto-refresh of the "starting" notice.
+var errVSCodeStartExited = errors.New("the VS Code server exited before it finished starting")
+
 // vscodeFlavor distinguishes the two supported editors, whose CLIs disagree on
 // every flag that matters (bind address, auth, base path).
 type vscodeFlavor int
@@ -261,21 +267,26 @@ func (s *vscodeServer) stop() {
 	if s == nil || s.cmd == nil || s.cmd.Process == nil {
 		return
 	}
-	// Never signal a child that has already exited. The reaping goroutine Wait()s
-	// it, which RELEASES its pid to the kernel — so a late kill on the remembered
-	// pgid could land on an unrelated, recycled process group. The exited channel
-	// is closed after that Wait, so this check is exactly the "still ours" test.
-	if !s.alive() {
-		return
-	}
 	pgid := s.cmd.Process.Pid
-	_ = syscall.Kill(-pgid, syscall.SIGTERM)
-	select {
-	case <-s.exited:
-		return
-	case <-time.After(vscodeStopGrace):
-		_ = syscall.Kill(-pgid, syscall.SIGKILL)
+	if s.alive() {
+		_ = syscall.Kill(-pgid, syscall.SIGTERM)
+		select {
+		case <-s.exited:
+		case <-time.After(vscodeStopGrace):
+		}
 	}
+	// SIGKILL the GROUP unconditionally, even once the leader is gone. The leader
+	// exiting proves nothing about the rest of the group: code-server spawns an
+	// extension host, a pty host, and a process per integrated terminal, and any of
+	// them can ignore SIGTERM or outlive their parent — returning at leader-exit
+	// would strand exactly those, which is the leak this whole supervisor exists to
+	// prevent. Mirrors the watcher supervisor's unconditional group kill (#610/#769).
+	//
+	// Signalling the group after the leader is reaped is still safe: a process group
+	// stays allocated while ANY member lives, so -pgid cannot be recycled out from
+	// under us while there is something to kill, and an empty group is a harmless
+	// ESRCH.
+	_ = syscall.Kill(-pgid, syscall.SIGKILL)
 	// Reap so the group-kill can't leave a zombie parented to the daemon (#816).
 	select {
 	case <-s.exited:
@@ -368,15 +379,27 @@ func (v *vscodeSupervisor) ensureServer(key, worktree string) (string, error) {
 			// Up, but not listening yet — keep waiting, don't respawn.
 			return "", errVSCodeStarting
 		default:
-			// Dead, or serving a stale worktree: drop it and start clean. A dead
-			// child needs no stop(); a stale-but-live one does — but OUT OF BAND.
-			// stop() blocks for up to the stop grace, and v.mu is held across the
-			// spawn below, so stopping inline would stall every OTHER session's
-			// editor behind this one teardown. It is already unregistered here, so
-			// nothing else can reach it and no one needs to wait for it.
+			// Dead, or serving a stale worktree: drop it and start clean. Stop it
+			// OUT OF BAND — stop() blocks for up to the stop grace, and v.mu is held
+			// across the spawn below, so stopping inline would stall every OTHER
+			// session's editor behind this one teardown. It is already unregistered
+			// here, so nothing else can reach it and no one needs to wait for it.
+			// Even a DEAD leader is worth stopping: its children can outlive it.
+			neverReady := !s.ready && !s.alive()
 			delete(v.servers, key)
-			if s.alive() {
-				go s.stop()
+			go s.stop()
+			// An editor that died having NEVER become ready is a broken start, not a
+			// crash to heal from — record it so the cooldown applies. Without this
+			// only spawnLocked's own errors were recorded, so an editor that outlived
+			// the start grace and THEN died would be respawned by every auto-refresh
+			// of the "starting" notice: a spawn loop driven by our own UI. A server
+			// that WAS ready and then died is the opposite case — a genuine crash —
+			// and must still respawn at once, so it is deliberately not recorded.
+			if neverReady {
+				v.failures[key] = vscodeFailure{
+					err: errVSCodeStartExited,
+					at:  v.now(),
+				}
 			}
 		}
 	}
