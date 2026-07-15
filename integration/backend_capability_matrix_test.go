@@ -20,8 +20,11 @@ import (
 //     matrix pins, but read off the REAL provisioned backend.
 //   - Attach + InteractiveInput serviced: typed input reaches the sandbox agent
 //     and echoes back over the WS PTY stream the client attaches on (a remote
-//     workspace attaches client-side over that stream, dispatched on
-//     Capabilities().Workspace — never through backend.Attach).
+//     workspace attaches client-side over that stream; #1852 deleted the backend
+//     attach surface, so there is no other path it could take). Attach is proven
+//     here by SERVICING it below, not by a descriptor bit — #1860 deleted the
+//     Capabilities.Attach bit, which was true for every backend and read by
+//     nothing.
 //   - Preview + liveness serviced over the wire.
 //
 // Archive + Recover — the two capabilities that need a durable push/pull-branch
@@ -40,7 +43,6 @@ func assertLiveCapabilityMatrix(t *testing.T, label string, inst *session.Instan
 		name string
 		ok   bool
 	}{
-		{"Attach", caps.Attach},
 		{"Archive", caps.Archive},
 		{"Recover", caps.Recover},
 		{"TabManagement", caps.TabManagement},

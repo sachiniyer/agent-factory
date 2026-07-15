@@ -26,8 +26,12 @@ type Capabilities struct {
 	// Workspace records where the workspace lives (local worktree vs off-box).
 	Workspace WorkspaceKind
 
-	// Attach: an interactive controller can attach to the agent session.
-	Attach bool
+	// There is deliberately no Attach bit (#1860). Attach is not an optional
+	// capability any more: every runtime attaches client-side over the WS PTY
+	// stream, so the bit was unconditionally true for every backend and no
+	// dispatch ever read it. A capability that cannot be false gates nothing —
+	// it only invites a future attach gate to branch on a constant.
+
 	// Archive: the session can be archived/restored (local-worktree relocation
 	// today; push/pull the branch once every backend clones from GitHub).
 	Archive bool

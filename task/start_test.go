@@ -65,7 +65,6 @@ func (b *startBackend) Type() string                    { return "local" }
 func (b *startBackend) Capabilities() session.Capabilities {
 	return session.Capabilities{
 		Workspace:        session.WorkspaceLocalWorktree,
-		Attach:           true,
 		Archive:          true,
 		Recover:          true,
 		TabManagement:    true,

@@ -123,7 +123,6 @@ func (b *FakeBackend) Type() string                                 { return "lo
 func (b *FakeBackend) Capabilities() Capabilities {
 	return Capabilities{
 		Workspace:        WorkspaceLocalWorktree,
-		Attach:           true,
 		Archive:          true,
 		Recover:          true,
 		TabManagement:    true,

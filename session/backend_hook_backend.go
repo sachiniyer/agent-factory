@@ -231,7 +231,6 @@ func (b *HookBackend) Type() string { return "remote" }
 func (b *HookBackend) Capabilities() Capabilities {
 	return Capabilities{
 		Workspace:        WorkspaceRemote,
-		Attach:           true,
 		Archive:          true,
 		Recover:          true,
 		TabManagement:    true,

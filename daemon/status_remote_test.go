@@ -30,7 +30,6 @@ func (b *remoteWorkspaceBackend) Type() string { return "docker" }
 func (b *remoteWorkspaceBackend) Capabilities() session.Capabilities {
 	return session.Capabilities{
 		Workspace:        session.WorkspaceRemote,
-		Attach:           true,
 		Archive:          true,
 		Recover:          true,
 		InteractiveInput: true,

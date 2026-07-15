@@ -743,7 +743,6 @@ func (b *sshBackend) Type() string { return "ssh" }
 func (b *sshBackend) Capabilities() Capabilities {
 	return Capabilities{
 		Workspace:        WorkspaceRemote,
-		Attach:           true,
 		Archive:          true,
 		Recover:          true,
 		TabManagement:    true,

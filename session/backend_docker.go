@@ -476,7 +476,6 @@ func (b *dockerBackend) Type() string { return "docker" }
 func (b *dockerBackend) Capabilities() Capabilities {
 	return Capabilities{
 		Workspace:        WorkspaceRemote,
-		Attach:           true,
 		Archive:          true,
 		Recover:          true,
 		TabManagement:    true,
