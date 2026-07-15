@@ -39,17 +39,7 @@ delete_cmd = "d"
 
 	cfg, raw, err := LoadInRepoConfig(repoRoot)
 	require.NoError(t, err)
-	require.NotNil(t, cfg)
-	assert.NotEmpty(t, raw)
-	assert.Equal(t, "aider", cfg.DefaultProgram)
-	assert.Equal(t, "/opt/codex --fast", cfg.ProgramOverrides["codex"])
-	assert.Equal(t, []string{"npm install"}, cfg.PostWorktreeCommands)
-	require.NotNil(t, cfg.RemoteHooks)
-	assert.Equal(t, "l", cfg.RemoteHooks.LaunchCmd)
-	for _, key := range []string{"default_program", "program_overrides", "post_worktree_commands", "remote_hooks"} {
-		assert.True(t, cfg.IsSet(key), "expected %s to be marked set", key)
-	}
-	assert.Equal(t, []string{"post_worktree_commands", "program_overrides", "remote_hooks"}, cfg.CommandBearingFields())
+	assertInRepoConfigFields(t, cfg, raw)
 }
 
 func TestLoadInRepoConfigTOMLEmptyValueIsSet(t *testing.T) {
