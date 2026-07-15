@@ -84,6 +84,10 @@ func (m *Manager) RefreshStatuses() {
 	}
 	m.mu.Unlock()
 
+	// Drop debounce state for sessions that are gone or replaced, colocated with
+	// the pass that creates it (#1794).
+	m.sweepRemoteLossStates()
+
 	for _, e := range entries {
 		m.refreshInstanceStatus(e.repoID, e.instance)
 	}
@@ -114,15 +118,27 @@ func (m *Manager) RefreshStatuses() {
 // the targeted writer persistInstanceData — never a whole-list re-marshal, the
 // dual-writer clobber surface #960 PR 4 retired — so an idle session never churns
 // instances.json.
+//
+// Every early return below SKIPS the probe, and each one therefore breaks the
+// remote-loss debounce's "consecutive" contract: a tick we did not observe tells
+// us nothing, so a failure before the gap and a failure after it are not
+// consecutive and must not be summed (#1794). Each skip clears the episode —
+// a run of unanswerable probes has to be unbroken to mean anything, and the
+// alternative is a stale count that survives an arbitrary blind window and lets
+// ONE later blip tip a healthy session into a destructive re-provision.
 func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instance) {
 	if instance == nil || !instance.Started() {
 		return
 	}
+	// The debounce is keyed by stable instance ID, never repo/title: a same-title
+	// successor must not inherit a dead predecessor's failures (#1794).
+	key := remoteLossKey(repoID, instance)
 	if instance.UserKilled() {
 		// A surviving kill-intent tombstone (#1108) means a previous
 		// KillSession was interrupted after committing to the kill. The only
 		// valid future for this session is finishing that teardown — never
 		// probing it, never marking it Lost, never restoring it.
+		m.clearRemoteLoss(key)
 		m.finishUserKill(repoID, instance)
 		return
 	}
@@ -130,12 +146,15 @@ func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instanc
 		// An op is mid-flight (archive/restore teardown, create/kill overlay): the
 		// poll must not probe a session whose tmux is being spun up/torn down and
 		// mark it Lost — the op's executor writes the settled liveness. Replaces
-		// the old Loading/Deleting skip (#1195).
+		// the old Loading/Deleting skip (#1195). The op may also be REPLACING the
+		// runtime under us, which is the other reason its failure history dies here.
+		m.clearRemoteLoss(key)
 		return
 	}
 	if instance.GetLiveness() == session.LiveArchived {
 		// Archived (#1028): no tmux to probe, inert (started=false) so already
 		// skipped by !Started above — belt-and-suspenders against a future change.
+		m.clearRemoteLoss(key)
 		return
 	}
 	if m.isPollPaused(repoID, instance.Title) {
@@ -148,6 +167,14 @@ func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instanc
 		// pause is lease-bounded (statusPollLease), so a crashed TUI that never
 		// sends Resume auto-resumes within one lease and real death is detected
 		// on the next tick — the pause can never permanently blind the daemon.
+		//
+		// The attach is also positive evidence: the client is streaming this
+		// session's PTY off the sandbox, which no dead sandbox can serve. Dropping
+		// the episode here is not merely conservative, it is what the counter's
+		// definition demands — a pause can outlast remoteLostGracePeriod (the TUI
+		// renews it for the whole attach), so a surviving count would let the first
+		// blip after detach re-provision a sandbox the user was just typing into.
+		m.clearRemoteLoss(key)
 		return
 	}
 
@@ -170,23 +197,18 @@ func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instanc
 		// forward, an agent-server crash.
 		//
 		// A failed probe is not by itself proof of death: a transient blip against
-		// a healthy sandbox errors identically. So confirm with the INDEPENDENT
-		// Alive() probe rather than either trusting or ignoring the error outright.
-		// Alive() is a second REST call that reports false on any transport error,
-		// so a genuinely unreachable agent-server fails both and settles to Lost,
-		// while a one-off Snapshot error against a still-reachable server leaves
-		// the status for the next tick — the conservative behaviour the paused /
-		// in-flight-op early returns above keep.
+		// a healthy sandbox errors identically, and acting on one is destructive —
+		// Lost feeds RestoreLostSessions in this same tick, whose remote Recover
+		// RE-PROVISIONS a fresh sandbox and orphans the running one along with its
+		// unpushed commits (#1794). So require DURABLE failure (see remoteloss.go)
+		// before even considering Lost.
 		//
 		// Lost, not Dead (#1108): no kill intent is on record, so the session
 		// vanished out from under a live record and stays recovery-eligible.
 		// Without this the remote session kept its last-known liveness
 		// (Running/Ready) forever while its agent-server was gone, so the TUI
 		// showed a healthy row for a dead session (#1782).
-		if !as.Alive() {
-			_ = instance.Transition(session.ObserveLiveness(session.LiveLost))
-			m.persistPollChange(repoID, instance, before, beforeReset)
-		}
+		m.settleRemoteProbeFailure(repoID, key, instance, before, beforeReset)
 		return
 	}
 	updated, hasPrompt, content := obs.Updated, obs.HasPrompt, obs.Content
@@ -200,6 +222,10 @@ func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instanc
 		// the next poll — a one-interval AutoYes delay (#992).
 		as.TapEnter()
 	}
+	// The Snapshot answered, so the transport works and any loss episode is over.
+	// This is the ONLY thing the debounce tracks — see remoteloss.go: it counts
+	// unanswerable probes, not "looks dead" observations.
+	m.clearRemoteLoss(key)
 	switch {
 	case updated:
 		_ = instance.Transition(session.ObserveLiveness(session.LiveRunning))
@@ -207,7 +233,7 @@ func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instanc
 		// A waiting prompt with otherwise-unchanged output: leave the status for
 		// the next tick to resolve, exactly as runMetadataTick did. The
 		// prompt-tap already fired above regardless of `updated`.
-	case !as.Alive():
+	default:
 		// Snapshot returned (false,false), which a healthy idle session and a
 		// dead one both produce — indistinguishable on their own. Probe liveness
 		// only on this idle branch so a vanished session is marked Lost and
@@ -216,12 +242,36 @@ func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instanc
 		// intent on record, so the session vanished out from under a live
 		// record — an outage/reboot casualty that is recovery-eligible, not a
 		// corpse the user wanted gone.
-		_ = instance.Transition(session.ObserveLiveness(session.LiveLost))
-	default:
-		// Idle output: settle to Ready, or LimitReached when the pane shows a
-		// usage-limit banner for a claude/codex session (#1146). content is
-		// HasUpdated's capture (no re-capture); see resolveIdleLiveness.
-		m.resolveIdleLiveness(instance, content)
+		switch probe := probeLiveness(instance, as); probe {
+		case probeDead:
+			// AUTHORITATIVE: the agent-server (or local tmux) was asked and
+			// reports the agent gone. No debounce — the evidence is present and
+			// bad, not absent. #935's immediacy is unchanged for both runtimes.
+			_ = instance.Transition(session.ObserveLiveness(session.LiveLost))
+		case probeUnknown:
+			// A REMOTE probe that never answered. It says nothing about the agent,
+			// and Lost here feeds a re-provision that orphans a possibly-live
+			// sandbox, so it only counts toward the debounce (#1794) — never
+			// settles anything by itself.
+			//
+			// Reaching this means the Snapshot answered on this same tick while the
+			// Alive probe did not: the transport worked a moment ago, so this is a
+			// blip between two calls, and the clear above has already reset the
+			// episode. The count therefore cannot climb here on its own — by
+			// design. A real outage takes Snapshot down too, and that path
+			// (settleRemoteProbeFailure) is where an episode accumulates. Recording
+			// it anyway keeps one honest definition of the counter — "probes that
+			// could not be answered" — so a degrading transport starts its episode
+			// at the first unanswered probe rather than the first failed Snapshot.
+			if m.noteRemoteProbeFailure(key, instance.Title) {
+				_ = instance.Transition(session.ObserveLiveness(session.LiveLost))
+			}
+		case probeAlive:
+			// Idle output: settle to Ready, or LimitReached when the pane shows a
+			// usage-limit banner for a claude/codex session (#1146). content is
+			// HasUpdated's capture (no re-capture); see resolveIdleLiveness.
+			m.resolveIdleLiveness(instance, content)
+		}
 	}
 
 	// Persist a liveness OR usage-limit reset-time change (#1146); see limit.go.

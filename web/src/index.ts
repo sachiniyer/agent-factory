@@ -51,6 +51,7 @@ import {
   sessionTabs,
   supportsTabManagement,
   tabIdentity,
+  tabRealId,
   type AppState,
 } from "./ui.js";
 import type { SessionData, TaskData, WireEvent } from "./types.js";
@@ -848,6 +849,11 @@ function syncSplit(state: AppState): void {
   // The ordered tab identities, so the split view can (a) know the live tab count and
   // (b) reject a drop whose drag-time snapshot no longer matches (a mid-drag reorder).
   const tabIds = selected ? sessionTabs(selected).map(tabIdentity) : ["0:"];
+  // The REAL daemon ids ("" where a tab has none), parallel to tabIds. The split view
+  // needs BOTH: tabIds is its local identity/change-detection key (always non-empty,
+  // synthesized when needed), while these are the only values it may send as a
+  // ?tab_id= or trust as collision-proof (#1779).
+  const tabRealIds = selected ? sessionTabs(selected).map(tabRealId) : [""];
   // The per-tab iframe target for web tabs (undefined for terminal tabs), parallel
   // to tabIds, so the split view can iframe a web leaf.
   const tabTargets = selected ? sessionTabs(selected).map((t) => t.url) : [];
@@ -856,7 +862,7 @@ function syncSplit(state: AppState): void {
   const tabKinds = selected ? sessionTabs(selected).map((t) => t.kind) : [];
   // `tok !== null` not `tok`: "" is the authorized-tokenless credential (#1696), so a
   // loopback client still attaches its live panes.
-  splitView.setSession(tok !== null ? selId : null, tok, tabIds, initialTab, tabTargets, tabKinds);
+  splitView.setSession(tok !== null ? selId : null, tok, tabIds, initialTab, tabTargets, tabKinds, tabRealIds);
 }
 
 function disposeSplit(): void {

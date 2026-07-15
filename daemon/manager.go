@@ -26,10 +26,24 @@ type Manager struct {
 	ready     chan struct{}
 	readyOnce sync.Once
 
-	mu                  sync.Mutex
-	storage             *session.Storage
-	instances           map[string]*session.Instance
-	reservedTitles      map[string]struct{}
+	mu             sync.Mutex
+	storage        *session.Storage
+	instances      map[string]*session.Instance
+	reservedTitles map[string]struct{}
+	// reservedRemoteNames holds in-flight remote-hook slug reservations, keyed by
+	// the BARE slug — deliberately global, unlike every other name a session owns.
+	//
+	// Session titles are unique per-repo, but a remote hook name is not a name af
+	// controls: launch_cmd/delete_cmd receive it verbatim as `--name <slug>` with
+	// no repo component (docs/remote-hooks.md), and external provisioners tag and
+	// reap real VMs/containers by it. Two repos handing scripts the same name
+	// would clobber one sandbox and let either delete reap the other's. So the
+	// hook-name namespace is global for as long as the name scripts see is
+	// title-derived, and this key must match what they actually receive.
+	//
+	// Note this map is IN-FLIGHT only — populated at reserve, dropped in release,
+	// never rebuilt from disk — so it guards concurrent creates. The settled case
+	// is covered by the live/disk slug scans in validateTitleAvailableLocked.
 	reservedRemoteNames map[string]struct{}
 	repoStartLocks      map[string]*sync.Mutex
 	// targetLocks serializes DeliverPrompt per (repo, title) so concurrent
@@ -69,6 +83,12 @@ type Manager struct {
 	// auto-resume scheduler (#1146 PR3), keyed by daemon instance key — the
 	// opt-in sibling of lostRestoreStates. Guarded by m.mu.
 	limitResumeStates map[string]*limitResumeState
+	// remoteLossStates debounces the remote Lost transition (#1794), keyed by
+	// daemon instance key. A remote probe failure is transport-shaped — one
+	// blip fails identically to a dead sandbox — so the poll accumulates
+	// consecutive failures here and only settles Lost once they are durable.
+	// Guarded by m.mu; entries are dropped the moment a probe succeeds.
+	remoteLossStates map[string]*remoteLossState
 	// instanceOpLocks serializes the mutually-exclusive per-session
 	// operations — kill teardown and Lost-recovery — by daemon instance key.
 	// killsInFlight alone is a point-in-time signal; this lock is what makes
@@ -141,6 +161,7 @@ func newManagerShell(cfg *config.Config) (*Manager, error) {
 		killsInFlight:       make(map[string]struct{}),
 		lostRestoreStates:   make(map[string]*lostRestoreState),
 		limitResumeStates:   make(map[string]*limitResumeState),
+		remoteLossStates:    make(map[string]*remoteLossState),
 		instanceOpLocks:     make(map[string]*sync.Mutex),
 		pausedPolls:         make(map[string]time.Time),
 		events:              newEventsHub(),

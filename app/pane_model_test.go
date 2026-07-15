@@ -223,7 +223,7 @@ func TestPanePreviewInvalidatesStaleContentSynchronously(t *testing.T) {
 
 	view := h.View()
 	assert.Contains(t, view, "PREVIEW beta · Agent (original alpha · Agent)")
-	assert.Contains(t, view, "Loading preview...")
+	assert.Contains(t, view, "Loading preview…")
 	assert.NotContains(t, view, "ALPHA_PREVIEW_CONTENT",
 		"retargeting preview must clear the original content before async beta capture returns")
 	assert.Same(t, alpha, paneA.Instance(), "preview must not mutate the committed pane binding")
@@ -276,7 +276,7 @@ func TestPanePreviewFastScrollLatestWins(t *testing.T) {
 	require.IsType(t, panesRefreshedMsg{}, refreshPaneBindingCmd(w, beta, 0, betaSeq)())
 	view := h.View()
 	assert.Contains(t, view, "PREVIEW gamma · Agent (original alpha · Agent)")
-	assert.Contains(t, view, "Loading preview...")
+	assert.Contains(t, view, "Loading preview…")
 	assert.NotContains(t, view, "BETA_PREVIEW_CONTENT",
 		"late beta capture must not overwrite the newer gamma preview target")
 

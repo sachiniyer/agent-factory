@@ -266,3 +266,54 @@ func TestQuitClosesLiveAttachment(t *testing.T) {
 	assert.True(t, (*fakes)[0].closed, "quit must not orphan a stream goroutine")
 	assert.Empty(t, h.liveTerms)
 }
+
+// TestLiveBindKeyIncludesTabID is the regression test for the id-adoption rebind
+// (#1779). AttachShellTab opens a pane BEFORE the daemon has minted the tab's
+// stable id, so that pane necessarily connects positionally (?tab=). When the next
+// snapshot adopts the real id, nothing else about the pane changes — same pane id,
+// same ordinal, same tmux name — so a bind key built only from those would be
+// unchanged and the pane would keep its ORDINAL connection for life. It could then
+// send keystrokes to a DIFFERENT tab once another client closes a lower one. The id
+// must therefore be part of the key, so adoption itself forces the rebind that
+// reconnects with ?tab_id=.
+func TestLiveBindKeyIncludesTabID(t *testing.T) {
+	h, inst := liveTestHome(t)
+	p := openTestPane(t, h, inst, 1)
+
+	// The just-created tab whose daemon id has not synced yet: bound positionally.
+	inst.Tabs[1].ID = ""
+	keyBefore, _, _, tabIDBefore, _, ok := h.liveBindCandidate(p)
+	require.True(t, ok)
+	assert.Empty(t, tabIDBefore, "a tab with no adopted id streams by ordinal")
+
+	// The snapshot adopts the daemon-minted id. NOTHING else about the pane changed.
+	inst.Tabs[1].ID = "adopted-stable-id"
+	keyAfter, _, _, tabIDAfter, _, ok := h.liveBindCandidate(p)
+	require.True(t, ok)
+	assert.Equal(t, "adopted-stable-id", tabIDAfter)
+
+	assert.NotEqual(t, keyBefore, keyAfter,
+		"adopting a tab's stable id must change the bind key, or the pane keeps its stale ordinal-addressed connection")
+}
+
+// TestLiveBindKeyChangesWhenTabIdentitySwapsAtSameOrdinal: the same guarantee for
+// the close+recreate case. A different tab arriving at the SAME ordinal (another
+// client closed this one and made a new one) shares the pane id, the ordinal, and
+// even the tmux name — only the stable id differs. The key must still change, or
+// the pane stays attached to the tab that no longer exists.
+func TestLiveBindKeyChangesWhenTabIdentitySwapsAtSameOrdinal(t *testing.T) {
+	h, inst := liveTestHome(t)
+	p := openTestPane(t, h, inst, 1)
+
+	inst.Tabs[1].ID = "tab-a"
+	keyA, _, _, _, _, ok := h.liveBindCandidate(p)
+	require.True(t, ok)
+
+	// Tab a was closed and replaced at the same ordinal by a different tab.
+	inst.Tabs[1].ID = "tab-b"
+	keyB, _, _, _, _, ok := h.liveBindCandidate(p)
+	require.True(t, ok)
+
+	assert.NotEqual(t, keyA, keyB,
+		"a different tab identity at the same ordinal must force a rebind")
+}

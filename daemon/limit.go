@@ -235,9 +235,8 @@ func (m *Manager) resumeFromLimitLocked(repoID, key string, instance *session.In
 		return fmt.Errorf("session %q cannot be resumed", requestedTitle)
 	}
 
-	// Re-spawn only when the agent's tmux session actually exited while blocked
-	// (the edge case where the agent dropped to a shell / the pane vanished). A
-	// live stall — the common claude/codex case — just needs the un-stall prompt.
+	// Re-spawn only when the agent's session actually exited while blocked (the
+	// edge case where the agent dropped to a shell / the pane vanished).
 	//
 	// Respawn, NOT Recover: the session is LiveLimitReached, and Recover's !Lost
 	// guard rejects any non-Lost liveness, so routing a limit retry through Recover
@@ -245,11 +244,36 @@ func (m *Manager) resumeFromLimitLocked(repoID, key string, instance *session.In
 	// (same resumeProgram path: claude --continue, codex resume --last); the
 	// LimitReached/no-tombstone precondition is enforced above under the target
 	// lock.
+	//
+	// The probe decides whether to re-spawn, so an UNANSWERED probe must never
+	// reach that arm (#1794). A remote Respawn is recoverSandbox — provision a
+	// fresh sandbox, clone the branch from origin — so acting on "we could not
+	// tell" re-provisions on a transport blip and orphans a live sandbox with its
+	// unpushed work. This is the poll goroutine and it runs later in the SAME tick
+	// as RefreshStatuses, so it had to be closed here too and not just there: the
+	// poll's debounce protects the Lost path, not this one.
+	//
+	// Note this needs no debounce of its own — it needs the DISTINCTION. A
+	// blip yields probeUnknown and is refused outright; a durable outage is what
+	// the poll's debounce settles to Lost, which drops this session out of
+	// LimitReached and hands it to the Lost-restore loop (the one place remote
+	// re-provision belongs, with its own recheck). What remains is probeDead: the
+	// sandbox answered that its agent exited while blocked — the #1786 case — and
+	// that is authoritative, so it re-spawns at once, exactly as before.
 	as := instance.AgentServer()
-	if !as.Alive() {
+	switch probe := probeLiveness(instance, as); probe {
+	case probeAlive:
+		// A live stall — the common claude/codex case. No re-spawn; the un-stall
+		// prompt below is all it needs.
+	case probeUnknown:
+		return fmt.Errorf("cannot resume %q: its agent-server did not answer the liveness probe; not re-spawning, because re-provisioning a sandbox that may still be running would orphan it and discard its unpushed work", requestedTitle)
+	case probeDead:
 		if rerr := instance.Respawn(); rerr != nil {
 			return fmt.Errorf("failed to re-spawn agent for %q: %w", requestedTitle, rerr)
 		}
+		// The runtime this session's failure history was about is gone; the fresh
+		// sandbox must not inherit it (#1794).
+		m.noteRuntimeReplaced(repoID, instance)
 		// Re-fetch: a REMOTE respawn re-provisions a FRESH sandbox and rebinds the
 		// instance to its endpoint (bindProvisionResult swaps remoteClient and clears
 		// the cached agent-server), so the `as` captured above is a client pinned to

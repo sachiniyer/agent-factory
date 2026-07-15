@@ -24,20 +24,25 @@
 
 import {
   closeLeaf,
+  type DragPayload,
   type Edge,
   findLeaf,
   type LayoutNode,
   type LeafNode,
   leafCount,
   leaves,
+  remapByIdentity,
   replaceTab,
+  resolveDragTab,
   setRatio,
   singleLeaf,
   type SplitNode,
   splitLeaf,
   TAB_DND_MIME,
+  tabsRebound,
   validate,
 } from "./layout.js";
+import { isLoopbackWebUrl, paneAddressUsesOrdinal, webProxyPath } from "./tabaddr.js";
 import { AttachTerminal, type TerminalStatus } from "./terminal.js";
 import { currentXtermTheme } from "./theme.js";
 import { TabKind } from "./types.js";
@@ -68,6 +73,12 @@ interface Pane {
   overlay: HTMLElement;
   term: AttachTerminal | null;
   tab: number;
+  // The tab IDENTITY this pane's terminal/iframe was actually built against. The
+  // ordinal alone is not enough to tell whether a pane is still showing the tab it
+  // was built for: a close+create elsewhere can swap a DIFFERENT tab into the same
+  // index, leaving the pane attached to a dead tab_id (#1779). Reconcile compares
+  // this against the current identity at pane.tab and rebuilds on a mismatch.
+  identity: string;
   status: TerminalStatus;
   // A web/iframe pane (TabKind.Web) has no AttachTerminal: it mounts an iframe in
   // `host` instead. webUrl is the target currently mounted (so reconcile can tell
@@ -83,54 +94,11 @@ function el(tag: string, cls: string): HTMLElement {
   return node;
 }
 
-/** Whether two ordered tab-identity lists are element-wise equal (the mid-drag
- *  tab-set-change check). */
-function sameTabs(a: string[], b: string[]): boolean {
-  if (a.length !== b.length) {
-    return false;
-  }
-  return a.every((v, i) => v === b[i]);
-}
-
-/** Whether a web-tab target points at a loopback host (localhost/127.x/::1) — the
- *  only targets the daemon reverse-proxies. Mirrors session.IsLoopbackWebTarget
- *  (session/weburl.go). A URL that does not parse is treated as non-loopback. */
-export function isLoopbackWebUrl(raw: string): boolean {
-  try {
-    let host = new URL(raw).hostname.toLowerCase();
-    host = host.replace(/^\[|\]$/g, ""); // strip IPv6 brackets
-    return host === "localhost" || host === "::1" || host === "127.0.0.1" || host.startsWith("127.");
-  } catch {
-    return false;
-  }
-}
-
-/** The same-origin daemon proxy path for a loopback web tab, so the iframe hits
- *  the daemon (which shares the machine with the dev server) rather than the
- *  viewer's own machine. The bearer token rides ?access_token= for network peers
- *  (an iframe src can't set the Authorization header); a loopback/tokenless client
- *  sends none. The trailing slash matters — the route requires it, and it makes
- *  the dev app's RELATIVE asset URLs resolve under the proxy prefix. */
-export function webProxyPath(sessionId: string, tabIdx: number, token: string | null): string {
-  const base = `/v1/webtab/${encodeURIComponent(sessionId)}/${tabIdx}/`;
-  return token ? `${base}?access_token=${encodeURIComponent(token)}` : base;
-}
-
 /** The delay before an unresponsive DIRECT external frame reveals its fallback.
  *  Overridable via window.__afWebtabFallbackMs for deterministic tests. */
 function webFallbackMs(): number {
   const override = (globalThis as { __afWebtabFallbackMs?: number }).__afWebtabFallbackMs;
   return typeof override === "number" ? override : 2500;
-}
-
-/** The drag payload a tab-bar drag stamps into the dataTransfer (ui.ts): the dragged
- *  tab's STABLE id (#1738) — what the drop resolves to a current ordinal, so a
- *  mid-drag reorder/close can't misroute — plus the ordinal index and an ordered
- *  identity snapshot as a legacy fallback for a tab with no id. */
-interface DragPayload {
-  id?: string;
-  index: number;
-  tabs: string[];
 }
 
 export class SplitView {
@@ -146,6 +114,10 @@ export class SplitView {
   // store update. A drop compares its drag-time snapshot against this to detect a
   // mid-drag tab-set change (concurrent close/create/reorder) and cancel.
   private tabIds: string[] = [];
+  // The REAL daemon tab ids ("" where a tab has none), parallel to tabIds. Kept
+  // apart from the identity list because only these may cross the wire as a
+  // ?tab_id= or be trusted as a collision-proof identity (#1779) — see ui.tabRealId.
+  private tabRealIds: string[] = [];
   // Per-tab-index iframe target for web tabs (TabKind.Web); undefined for a
   // terminal tab. Parallel to the tab list, refreshed on every setSession, so
   // reconcile can mount an iframe for a web leaf without extra plumbing.
@@ -186,9 +158,16 @@ export class SplitView {
     initialTab: number,
     tabTargets: (string | undefined)[] = [],
     tabKinds: number[] = [],
+    tabRealIds: string[] = [],
   ): void {
     this.token = token;
+    // Snapshot what the panes are currently bound to BEFORE overwriting it, so the
+    // same-session branch can tell an identity change from a no-op (#1779).
+    const prevIds = this.tabIds;
+    const prevKinds = this.tabKinds;
+    const prevTargets = this.tabTargets;
     this.tabIds = tabIds;
+    this.tabRealIds = tabRealIds;
     this.tabTargets = tabTargets;
     this.tabKinds = tabKinds;
     const tabCount = tabIds.length > 0 ? tabIds.length : 1;
@@ -203,11 +182,28 @@ export class SplitView {
       // Same session: reconcile the retained tree against a possibly-changed tab list.
       this.tabCount = tabCount;
       const before = this.tree;
-      this.tree = validate(this.tree ?? singleLeaf(initialTab), tabCount);
+      // Move each leaf to wherever ITS tab now sits BEFORE anything reads the tree
+      // (#1779). A leaf holds an ordinal, but the pane holds a TAB; once the list
+      // shifts, reconciling from the stale ordinal would rebind the pane to whatever
+      // tab took that slot — the misroute this whole change exists to close. A pane
+      // whose tab merely MOVED then finds its identity already matching and is left
+      // streaming untouched; only a genuinely replaced tab rebuilds.
+      // Move each leaf to wherever ITS tab now sits BEFORE anything reads the tree
+      // (#1779). A leaf holds an ordinal, but the pane holds a TAB; once the list
+      // shifts, reconciling from the stale ordinal would rebind the pane to whatever
+      // tab took that slot — the misroute this whole change exists to close. A pane
+      // whose tab merely MOVED then finds its identity already matching and is left
+      // streaming untouched; only a genuinely replaced tab rebuilds.
+      const settled = remapByIdentity(this.tree ?? singleLeaf(initialTab), prevIds, tabIds);
+      this.tree = validate(settled, tabCount);
       if (this.trees.get(sessionId) !== this.tree) {
         this.trees.set(sessionId, this.tree);
       }
-      if (before !== this.tree) {
+      // Reconcile on a changed tab IDENTITY, not just a changed tree (#1779) — see
+      // tabsRebound. reconcile() is a no-op per pane whose identity still matches,
+      // so an unrelated snapshot still costs nothing.
+      const rebound = tabsRebound(prevIds, prevKinds, prevTargets, tabIds, tabKinds, tabTargets);
+      if (before !== this.tree || rebound) {
         this.reconcile();
         this.report();
       }
@@ -397,34 +393,62 @@ export class SplitView {
         continue;
       }
       const webTarget = this.webTargetAt(leaf.tab);
+      // The identity now living at this leaf's ordinal. remapByIdentity has already
+      // moved the leaf to follow its own tab, so a mismatch here means a genuinely
+      // DIFFERENT tab occupies this pane's slot — not merely that ordinals shifted.
+      const identity = this.tabIds[leaf.tab] ?? "";
+      const realId = this.tabRealIds[leaf.tab] ?? "";
+      // Rebuild when what the pane ADDRESSES changes — never merely because its tab's
+      // ordinal moved (#1779). A different tab in the slot always rebuilds; a shifted
+      // ordinal rebuilds only when the pane's address actually embeds that ordinal
+      // (see paneAddressUsesOrdinal), which is exactly when the old address would now
+      // point at another tab.
+      const moved = pane.tab !== leaf.tab;
+      const staleAddress = pane.identity !== identity || (moved && paneAddressUsesOrdinal(webTarget, realId));
       if (webTarget !== null) {
-        // A web/iframe tab: mount an iframe instead of an xterm. Rebuild only when
-        // the bound tab or its target changed, so a no-op reconcile never reloads
-        // the frame (which would drop the dev server's in-page state).
-        if (pane.term || pane.webUrl !== webTarget || pane.tab !== leaf.tab) {
+        // A web/iframe tab: mount an iframe instead of an xterm. Rebuilding reloads
+        // the frame and drops the dev server's in-page state, so it happens only on a
+        // real change: a different tab here, a changed target, or a moved PROXIED tab
+        // (whose src is /v1/webtab/{session}/{ordinal}/ and would otherwise proxy the
+        // tab that took its old index).
+        if (pane.term || pane.webUrl !== webTarget || staleAddress) {
           pane.term?.dispose();
           pane.term = null;
           pane.webDispose?.();
           pane.host.replaceChildren();
           pane.tab = leaf.tab;
+          pane.identity = identity;
           this.mountWebPane(pane, webTarget);
           pane.status = "open";
           this.onPaneStatus(leaf.id, "open");
+        } else if (moved) {
+          // The same tab, merely at a new ordinal, addressed by a URL that does not
+          // encode one: follow it without touching the live frame.
+          pane.tab = leaf.tab;
         }
-      } else if (!pane.term || pane.tab !== leaf.tab) {
+      } else if (!pane.term || staleAddress) {
         pane.term?.dispose();
         pane.webDispose?.();
         pane.webUrl = null;
         pane.host.replaceChildren();
         pane.tab = leaf.tab;
+        pane.identity = identity;
         pane.status = "connecting";
-        // Address the stream by the tab's STABLE id (#1738) at this ordinal, so a
-        // reorder/close resolves to the right PTY server-side; empty (a legacy tab
-        // without an id) makes AttachTerminal fall back to the ordinal ?tab=.
-        pane.term = new AttachTerminal(pane.host, this.sessionId, this.token, this.tabIds[leaf.tab] ?? "", leaf.tab, {
+        // Address the stream by the tab's REAL daemon id (#1738) at this ordinal, so
+        // a reorder/close resolves to the right PTY server-side. It must come from
+        // tabRealIds, NOT tabIds: the identity list carries a synthesized `kind:name`
+        // for an id-less tab, and sending that as ?tab_id= is an unknown id the
+        // daemon 404s — breaking a legacy tab that attaches fine by ordinal (#1779).
+        // "" is the honest "no id", which makes AttachTerminal fall back to ?tab=.
+        pane.term = new AttachTerminal(pane.host, this.sessionId, this.token, realId, leaf.tab, {
           onStatus: (s) => this.onPaneStatus(leaf.id, s),
           onFocusChange: (f) => this.onPaneFocus(leaf.id, f),
         });
+      } else if (moved) {
+        // The same tab, merely at a new ordinal, streamed by ?tab_id=: the terminal's
+        // captured ordinal is inert (terminal.ts sends tab_id OR tab, never both), so
+        // follow the tab without tearing down a live stream and its scrollback.
+        pane.tab = leaf.tab;
       }
       pane.container.classList.toggle("af-pane-multi", multi);
       pane.label.textContent = `Tab ${leaf.tab + 1}`;
@@ -466,6 +490,8 @@ export class SplitView {
       overlay,
       term: null,
       tab: -1,
+      // No tab bound yet; tab:-1 already forces the first reconcile to build one.
+      identity: "",
       status: "connecting",
       webUrl: null,
       webDispose: null,
@@ -509,7 +535,11 @@ export class SplitView {
     const bar = el("div", "af-webpane-bar");
     const reload = document.createElement("button");
     reload.type = "button";
-    reload.className = "af-webpane-reload";
+    // Reload and open are the same KIND of control — a quiet secondary action on a
+    // thin bar — so they share the app's ghost idiom (.af-ghost, as used by the
+    // modal/terminal/task actions) and differ only in their glyph. The semantic
+    // .af-webpane-* class stays as the identity hook for CSS and the driver test.
+    reload.className = "af-ghost af-webpane-reload";
     reload.title = "Reload";
     reload.setAttribute("aria-label", "Reload web tab");
     reload.textContent = "↻"; // ↻
@@ -517,11 +547,11 @@ export class SplitView {
     urlText.textContent = target || "(no URL)";
     urlText.title = target;
     const open = document.createElement("a");
-    open.className = "af-webpane-open";
+    open.className = "af-ghost af-webpane-open";
     open.href = openHref;
     open.target = "_blank";
     open.rel = "noopener noreferrer";
-    open.textContent = "open ↗"; // ↗
+    open.textContent = "Open ↗"; // ↗
     bar.append(reload, urlText, open);
 
     const frame = document.createElement("iframe");
@@ -718,25 +748,11 @@ export class SplitView {
       if (!drag || !this.tree) {
         return;
       }
-      // Resolve the dragged tab by its STABLE id (#1738) to its CURRENT ordinal: this
-      // is the misroute fix. Even if a concurrent client reordered/closed tabs
-      // mid-drag, indexOf lands on wherever the SAME tab now sits (or -1 if it was
-      // closed → cancel), so the drop can never bind the new pane to a different live
-      // tab the way a trusted drag-time index could.
-      let tab: number;
-      if (drag.id) {
-        tab = this.tabIds.indexOf(drag.id);
-        if (tab < 0) {
-          return; // the dragged tab was closed mid-drag — nothing to bind
-        }
-      } else {
-        // Legacy fallback for a payload with no stable id (pre-#1738 tab): trust the
-        // drag-time index but keep the #1737 mid-drag guard — reject if the tab set
-        // changed since dragstart, and reject an out-of-range index.
-        tab = drag.index;
-        if (tab < 0 || tab >= this.tabCount || !sameTabs(drag.tabs, this.tabIds)) {
-          return;
-        }
+      // Resolve the dragged tab to the ordinal it should bind — by its STABLE id when
+      // it has one, else the guarded legacy index. See resolveDragTab; null cancels.
+      const tab = resolveDragTab(drag, this.tabRealIds, this.tabIds, this.tabCount);
+      if (tab === null) {
+        return;
       }
       const zone = this.zoneAt(pane.container, e.clientX, e.clientY);
       this.tree = zone === "center" ? replaceTab(this.tree, pane.leafId, tab) : splitLeaf(this.tree, pane.leafId, zone, tab);

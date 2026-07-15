@@ -8,7 +8,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { tabBarSig } from "./ui.js";
+import { documentTitle, tabBarSig } from "./ui.js";
 import type { AppState } from "./ui.js";
 import { Liveness, type SessionData } from "./types.js";
 
@@ -98,4 +98,49 @@ test("the signature is delimiter-safe: a name mimicking the field separators sti
   // active/shown/manageability combination.
   const tricky = state({ sessions: [sess({ tabs: [{ name: 't"::0::[0]::true', kind: 1 }] })] });
   assert.notEqual(tabBarSig(plain), tabBarSig(tricky));
+});
+
+// Unit coverage for documentTitle (#1826 item 2). The browser tab was a static
+// "Agent Factory" on every screen, so a pinned or backgrounded tab said nothing about
+// what it held. The title names the selected session and its project, and degrades
+// cleanly when there is no selection.
+
+/** A session rooted in a repo, the shape documentTitle reads. */
+function inRepo(title: string, root: string): SessionData {
+  return { id: title, title, branch: "b", worktree: { repo_path: root } };
+}
+
+test("documentTitle: a selected session names itself and its project", () => {
+  const s = state({
+    selectedId: "api",
+    sessions: [inRepo("api", "/home/u/code/agent-factory")],
+    selectedProject: "/home/u/code/agent-factory",
+  });
+  assert.equal(documentTitle(s), "api — agent-factory · Agent Factory");
+});
+
+test("documentTitle: with no selection the scoped project still qualifies the tab", () => {
+  const s = state({
+    selectedId: null,
+    sessions: [inRepo("api", "/home/u/code/agent-factory")],
+    selectedProject: "/home/u/code/agent-factory",
+  });
+  assert.equal(documentTitle(s), "agent-factory · Agent Factory");
+});
+
+test("documentTitle: with neither a selection nor a project it is the bare app name", () => {
+  const s = state({ selectedId: null, sessions: [], selectedProject: null });
+  assert.equal(documentTitle(s), "Agent Factory");
+});
+
+// The title must name the project the session actually LIVES in. The two only differ
+// transiently (a selection surviving a project switch), but naming the scope there
+// would caption the session with a repo it isn't in.
+test("documentTitle: the session's own repo wins over the scoped project", () => {
+  const s = state({
+    selectedId: "api",
+    sessions: [inRepo("api", "/home/u/code/agent-factory")],
+    selectedProject: "/home/u/code/other-repo",
+  });
+  assert.equal(documentTitle(s), "api — agent-factory · Agent Factory");
 });

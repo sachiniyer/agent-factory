@@ -3,8 +3,11 @@ package daemon
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	stdlog "log"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -619,5 +622,67 @@ func TestRestoreLostSessions_StateCleanedForGoneSessions(t *testing.T) {
 	manager.mu.Unlock()
 	if hasState {
 		t.Fatal("retry state for a gone session must be dropped")
+	}
+}
+
+// TestRestoreLostSessions_AliveRemoteSandboxIsNotReprovisioned is the #1794
+// restore-time guard: the last gate before the irreversible step.
+//
+// A remote Recover is not a reconnect — recoverSandbox provisions a BRAND-NEW
+// sandbox and clones the branch back from origin — so running it against a
+// sandbox that is still up orphans that sandbox and abandons every commit it
+// never pushed. The poll's debounce makes a blip-induced Lost unlikely, but this
+// row may have been marked Lost many ticks ago (restore backs off to 5 minutes)
+// and the transport may have healed since. A stale verdict must not authorize a
+// destructive re-provision, so the loop re-probes against live state first.
+//
+// Here the sandbox answers as alive, so the Lost mark is wrong: no Recover may
+// fire, and the row must heal rather than sit Lost forever.
+func TestRestoreLostSessions_AliveRemoteSandboxIsNotReprovisioned(t *testing.T) {
+	withRemoteLossThresholds(t, 3, time.Minute, time.Second)
+	zeroRestoreBackoff(t)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/v1/agent/alive" {
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"data": map[string]any{"alive": true},
+			})
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer srv.Close()
+
+	manager, repoID, repoPath := newStatusTestManager(t)
+	inst, backend := registerStartedRemote(t, manager, repoID, repoPath, "remote-lost-but-live", srv.URL, session.Lost)
+
+	manager.RestoreLostSessions()
+
+	if got := backend.recoverCalls(); got != 0 {
+		t.Fatalf("Recover calls = %d, want 0 — the sandbox answered as alive, and re-provisioning over a live sandbox orphans it and destroys its unpushed work (#1794)", got)
+	}
+	if got := inst.GetLiveness(); got == session.LiveLost {
+		t.Fatal("liveness is still LiveLost: a sandbox proven alive must have its Lost mark cleared, not be left stranded in a state the loop refuses to act on")
+	}
+}
+
+// TestRestoreLostSessions_UnreachableRemoteSandboxIsReprovisioned is the
+// companion that keeps the #1794 recheck from becoming a blanket "never restore
+// remote sessions". A genuinely gone sandbox (nothing listening, so the probe is
+// refused outright) must still be re-provisioned — that recovery IS the feature
+// (#1108/#1782), and the recheck only exists to veto it when the sandbox proves
+// it is still there.
+func TestRestoreLostSessions_UnreachableRemoteSandboxIsReprovisioned(t *testing.T) {
+	withRemoteLossThresholds(t, 3, time.Minute, time.Second)
+	zeroRestoreBackoff(t)
+
+	manager, repoID, repoPath := newStatusTestManager(t)
+	_, backend := registerStartedRemote(t, manager, repoID, repoPath, "remote-really-gone", "http://127.0.0.1:1", session.Lost)
+
+	manager.RestoreLostSessions()
+
+	if got := backend.recoverCalls(); got != 1 {
+		t.Fatalf("Recover calls = %d, want 1 — an unreachable sandbox must still be recovered; the recheck is a veto on live sandboxes, not a block on remote restore", got)
 	}
 }

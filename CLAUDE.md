@@ -143,3 +143,18 @@ new files to dodge the limit — split them. See `docs/file-length-lint.md`.
 - Keep PRs focused and small
 - Run `go build ./...` and `go test ./...` before submitting
 - Version is stored in `main.go` (`version` var) and auto-bumped by CI
+
+## Copy & glyph conventions
+
+Every user-facing surface (TUI, web, CLI help) follows these. New surfaces drift
+otherwise — see #1826.
+
+- **Sentence case** for titles, labels, buttons, and empty states ("Search
+  sessions", not "Search Sessions"). Proper nouns keep their case.
+- **`…`** in literal strings, never `...` ("Setting up workspace…").
+- **` · `** is the separator when joining fragments on one line; `—` sets off a
+  clause.
+- **No caps-shouting** for emphasis — write the emphasis into the sentence. CAPS
+  are reserved for env vars (`AF_HOME`) and literal flag/command names.
+- **No animated indicators** (spinners, blink, pulse) — state reads from a static
+  glyph (#1766).

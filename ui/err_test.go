@@ -229,3 +229,23 @@ func stripANSI(s string) string {
 	}
 	return b.String()
 }
+
+// TestErrBoxJoinsMultiLineErrorsWithSeparator covers the #1826 voice sweep. A
+// multi-line error was flattened onto the status line with "//", which reads as a
+// commented-out fragment or a URL remnant rather than a break between two
+// sentences. " · " is the repo's separator glyph, already used by the pane header
+// and the web term meta.
+func TestErrBoxJoinsMultiLineErrorsWithSeparator(t *testing.T) {
+	e := NewErrBox()
+	// Wide enough that statusLine returns the joined line untruncated.
+	e.SetSize(120, 3)
+	e.SetError(errors.New("push failed\nremote rejected the branch"))
+
+	line := e.statusLine()
+	if !strings.Contains(line, "push failed · remote rejected the branch") {
+		t.Errorf("want the two lines joined by ' · ', got %q", line)
+	}
+	if strings.Contains(line, "//") {
+		t.Errorf("the // joiner must be gone, got %q", line)
+	}
+}

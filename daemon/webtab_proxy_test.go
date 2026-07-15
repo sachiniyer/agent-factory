@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"testing"
 
 	"github.com/sachiniyer/agent-factory/config"
@@ -61,6 +62,103 @@ func TestWebTabProxy_ServesLoopbackTarget(t *testing.T) {
 		// prefix — proof the prefix was stripped before forwarding.
 		if got := string(body); !contains(got, "path=/"+sub) {
 			t.Fatalf("GET sub=%q: upstream saw wrong path in %q", sub, got)
+		}
+	}
+}
+
+// newStaticFileUpstream starts an upstream that behaves like a static file server
+// (python -m http.server): it serves exactly /viewer.html and /assets/x.css and
+// 404s every other path — including the "/viewer.html/" that a directory-style
+// join of a file target would produce.
+func newStaticFileUpstream(t *testing.T, viewerBody, cssBody string) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/viewer.html":
+			fmt.Fprint(w, viewerBody)
+		case "/assets/x.css":
+			fmt.Fprint(w, cssBody)
+		default:
+			http.Error(w, "404 File not found: "+r.URL.Path, http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// TestWebTabProxy_ServesPathBearingTarget is the regression test for the
+// user-reported 404: a web tab whose target carries a PATH (http://…/viewer.html)
+// must proxy that document at the tab's root, rather than fetching
+// "/viewer.html/" (which a static file server 404s), and must resolve a relative
+// sub-resource next to the document so its assets load.
+func TestWebTabProxy_ServesPathBearingTarget(t *testing.T) {
+	const viewerBody = "AF_VIEWER_DOC"
+	const cssBody = "AF_VIEWER_CSS"
+	upstream := newStaticFileUpstream(t, viewerBody, cssBody)
+	mux, id, idx := newWebTabProxyFixture(t, upstream.URL+"/viewer.html")
+
+	cases := []struct {
+		name string
+		sub  string
+		want string
+	}{
+		// The proxy root must fetch the target path EXACTLY — no trailing slash
+		// appended, nothing dropped.
+		{name: "proxy root serves the target document", sub: "", want: viewerBody},
+		// A relative asset resolves against the target document's directory.
+		{name: "relative asset resolves beside the document", sub: "assets/x.css", want: cssBody},
+		// A sibling document (what an in-page link produces) resolves too.
+		{name: "sibling document resolves", sub: "viewer.html", want: viewerBody},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/v1/webtab/%s/%d/%s", id, idx, tc.sub), nil)
+			mux.ServeHTTP(rec, req)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("GET sub=%q: status = %d, want 200 (body: %s)", tc.sub, rec.Code, rec.Body.String())
+			}
+			if got := rec.Body.String(); !contains(got, tc.want) {
+				t.Fatalf("GET sub=%q: body = %q, want it to contain %q", tc.sub, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestResolveUpstreamPath pins the document-reference semantics the proxy resolves
+// upstream paths with, including the root-URL target's unchanged behavior.
+func TestResolveUpstreamPath(t *testing.T) {
+	cases := []struct {
+		target string
+		rest   string
+		want   string
+	}{
+		// Path-bearing (file) target: root fetches it exactly; relatives resolve
+		// against its directory.
+		{target: "http://localhost:8899/viewer.html", rest: "", want: "/viewer.html"},
+		{target: "http://localhost:8899/viewer.html", rest: "assets/x.css", want: "/assets/x.css"},
+		{target: "http://localhost:8899/viewer.html", rest: "style.css", want: "/style.css"},
+		{target: "http://localhost:8899/app/viewer.html", rest: "assets/x.css", want: "/app/assets/x.css"},
+		// Directory-style target (trailing slash): relatives nest beneath it.
+		{target: "http://localhost:8899/app/", rest: "", want: "/app/"},
+		{target: "http://localhost:8899/app/", rest: "assets/x.css", want: "/app/assets/x.css"},
+		// Root-URL targets keep their existing behavior.
+		{target: "http://localhost:8899", rest: "", want: "/"},
+		{target: "http://localhost:8899", rest: "assets/x.css", want: "/assets/x.css"},
+		{target: "http://localhost:8899/", rest: "", want: "/"},
+		{target: "http://localhost:8899/", rest: "assets/x.css", want: "/assets/x.css"},
+		// A leading slash on the remainder never escapes to another host: it stays
+		// a path on the target.
+		{target: "http://localhost:8899/viewer.html", rest: "/assets/x.css", want: "/assets/x.css"},
+	}
+	for _, tc := range cases {
+		u, err := url.Parse(tc.target)
+		if err != nil {
+			t.Fatalf("url.Parse(%q): %v", tc.target, err)
+		}
+		got, _ := resolveUpstreamPath(u, tc.rest)
+		if got != tc.want {
+			t.Errorf("resolveUpstreamPath(%q, %q) = %q, want %q", tc.target, tc.rest, got, tc.want)
 		}
 	}
 }

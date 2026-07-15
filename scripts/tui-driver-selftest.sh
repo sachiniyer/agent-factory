@@ -107,6 +107,65 @@ _enter_interactive_and_probe_literal_send() {
     sleep "$AF_DRIVER_POLL"
 }
 
+# _expect_multipane_hide — regression proof for #1822. Hiding a pane while
+# ANOTHER pane is still open advances focus to the pane that takes its slot, NOT
+# back to the tree; af_hide_pane waited for the tree menu (`n new`) and so
+# false-timed-out on the first `x` of every multi-pane flow even though the pane
+# was hidden correctly.
+#
+# The multi-pane state needs no wide terminal: below MultiPaneMinWidth (110
+# cols) only ONE pane is visible at a time, so at the driver's default 100x30
+# the second pane is merely auto-hidden — still open, and it takes focus on the
+# next `x`. Two af_open_pane calls reach that state deterministically (the `S`
+# split verb in the #1822 report is just one of several ways in; it additionally
+# depends on a live preview transaction, so it is the wrong lever for a
+# regression gate).
+#
+# Both flows are proven here: hide #1 is the multi-pane case (a pane remains),
+# hide #2 is the single-pane case (the workspace empties and the tree takes
+# focus back).
+# shellcheck disable=SC2317  # dispatched indirectly via step(); not dead code.
+_expect_multipane_hide() {
+    af_select alpha || return 1
+    af_open_pane || return 1
+    af_select beta || return 1
+    af_open_pane || return 1
+
+    # #1822 proper: a pane remains, so focus advances to it.
+    af_hide_pane || return 1
+    # Assert the PREMISE actually held — a pane is still focused. If the tree
+    # menu is up here, only one pane was open and this step would be silently
+    # re-testing the single-pane path that already worked.
+    if af_capture | grep -qE 'n new'; then
+        _af_log "#1822: tree menu is up after hiding one of TWO panes — premise broken"
+        return 1
+    fi
+
+    # Single-pane case: the last pane leaves, focus returns to the tree.
+    af_hide_pane || return 1
+    af_assert_screen 'n new' 'focus back on the tree after the last pane is hidden' || return 1
+}
+
+# _expect_hide_pane_rejects_tree_focus — the NEGATIVE check for af_hide_pane
+# (cf. _expect_resize_rejected). With focus on the TREE, `x` is a no-op — and
+# the old tree-menu marker was ALREADY satisfied, so af_hide_pane returned 0 and
+# reported success for a hide that never happened. It must now fail. A short
+# AF_DRIVER_TIMEOUT keeps the negative probe from burning the full 25s.
+# shellcheck disable=SC2317  # dispatched indirectly via step(); not dead code.
+_expect_hide_pane_rejects_tree_focus() {
+    local saved="$AF_DRIVER_TIMEOUT" rc=0
+    af_ensure_nav
+    af_focus_tree || return 1
+    AF_DRIVER_TIMEOUT=3
+    af_hide_pane >/dev/null 2>&1 || rc=$?
+    AF_DRIVER_TIMEOUT="$saved"
+    if [ "$rc" -eq 0 ]; then
+        _af_log "af_hide_pane wrongly SUCCEEDED with focus on the tree (no pane to hide)"
+        return 1
+    fi
+    return 0
+}
+
 # _expect_pane_text_not_counted_as_tabs — regression proof for the #1561
 # review finding. _af_tab_count must count sidebar tab rows (including
 # custom-named ones) but MUST NOT count tree-like text a shell prints inside a
@@ -246,6 +305,11 @@ step "detach (and prove the attach client was reaped)"      af_detach
 step "assert selection survived attach/detach"              af_expect_selected beta
 step "assert no orphan tmux attach clients"                 af_assert_no_orphan_clients
 step "pane text must not inflate the tab count (#1561 review)" _expect_pane_text_not_counted_as_tabs
+
+# --- #1822 regression: af_hide_pane across the multi-pane and single-pane flows ---
+# Runs last: it deliberately ends with an empty workspace.
+step "hide a pane while another remains, then the last (#1822)" _expect_multipane_hide
+step "af_hide_pane fails loudly with no pane focused (#1822)"  _expect_hide_pane_rejects_tree_focus
 
 printf '\n=== SELF-TEST PASSED — %d/%d steps green ===\n' "$PASS" "$PASS"
 printf 'the #1156 mis-drive is now a deterministic scenario.\n'
