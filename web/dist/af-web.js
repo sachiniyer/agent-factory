@@ -9092,13 +9092,13 @@ var AppShell = class {
       e.stopPropagation();
       this.actions.newTab("shell");
     });
-    const caret = h2("button", { type: "button", class: "af-tab-new-kind", title: "New tab of kind\u2026" }, "\u25BE");
+    const caret = h2("button", { type: "button", class: "af-tab-new-kind", title: "New tab\u2026" }, "\u25BE");
     caret.setAttribute("aria-haspopup", "menu");
     caret.setAttribute("aria-expanded", "false");
-    caret.setAttribute("aria-label", "Choose a new tab kind");
+    caret.setAttribute("aria-label", "Choose tab type");
     const menu = h2("div", { class: "af-tab-menu" });
     menu.setAttribute("role", "menu");
-    menu.setAttribute("aria-label", "New tab kind");
+    menu.setAttribute("aria-label", "Tab type");
     menu.hidden = true;
     const close = () => {
       menu.hidden = true;

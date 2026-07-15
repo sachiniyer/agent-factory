@@ -864,13 +864,13 @@ export class AppShell {
       e.stopPropagation();
       this.actions.newTab("shell");
     });
-    const caret = h("button", { type: "button", class: "af-tab-new-kind", title: "New tab of kind…" }, "▾");
+    const caret = h("button", { type: "button", class: "af-tab-new-kind", title: "New tab…" }, "▾");
     caret.setAttribute("aria-haspopup", "menu");
     caret.setAttribute("aria-expanded", "false");
-    caret.setAttribute("aria-label", "Choose a new tab kind");
+    caret.setAttribute("aria-label", "Choose tab type");
     const menu = h("div", { class: "af-tab-menu" });
     menu.setAttribute("role", "menu");
-    menu.setAttribute("aria-label", "New tab kind");
+    menu.setAttribute("aria-label", "Tab type");
     menu.hidden = true;
 
     const close = (): void => {
