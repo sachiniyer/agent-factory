@@ -76,7 +76,7 @@ func repoFromFlag() (*config.RepoContext, error) {
 //
 // This ALWAYS consults the cwd, including when --daemon-url is set. That looks
 // wrong for a remote target — the client's cwd names a repo on this machine —
-// but most callers are write commands (kill/archive/restore/send-prompt, tab
+// but its callers are the write commands (kill/archive/restore/send-prompt, tab
 // mutations) whose transport does NOT honor --daemon-url: daemon.* goes over the
 // local control socket (callDaemon → DaemonSocketPath). Dropping the cwd scope
 // for them would send an UNSCOPED destructive request to the LOCAL daemon, which
@@ -84,8 +84,9 @@ func repoFromFlag() (*config.RepoContext, error) {
 // archive it. Keeping the cwd scope keeps those commands pointed where they
 // already point.
 //
-// Lookups that genuinely reach the remote (sessions get/preview) use
-// resolveRepoIDForLookup instead.
+// Reads that genuinely reach the targeted daemon (sessions list/get/watch/preview)
+// use resolveRepoIDForLookup instead. If a write command is ever migrated onto the
+// apiclient transport, move it across too.
 func resolveRepoID() (string, error) {
 	if repoFlag != "" {
 		repo, err := repoFromFlag()
@@ -103,9 +104,13 @@ func resolveRepoID() (string, error) {
 }
 
 // resolveRepoIDForLookup resolves the repo scope for a READ that is actually
-// served by the targeted daemon — `sessions get` and `sessions preview`, whose
-// reads route through apiclient and so follow --daemon-url/AF_DAEMON_URL to the
-// remote.
+// served by the targeted daemon: the snapshot-based reads (`sessions list`,
+// `get`, `watch`) and `preview`, all of which route through apiclient and so
+// follow --daemon-url/AF_DAEMON_URL to the remote.
+//
+// The dividing line is the TRANSPORT, not the command: a caller belongs here if
+// its request reaches the targeted daemon, and on resolveRepoID if it goes over
+// the local control socket regardless of the target.
 //
 // It differs from resolveRepoID in one way: against a REMOTE target the cwd is
 // ignored. The client's cwd names a repo that exists HERE, not on the daemon's

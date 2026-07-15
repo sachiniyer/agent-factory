@@ -404,6 +404,68 @@ func TestFindSessionReportsAmbiguousTitleAcrossRepos(t *testing.T) {
 	}
 }
 
+// TestArchivedHookRenameChecksGlobalSlug covers the archived-name-reuse path:
+// when a create takes a title held only by an ARCHIVED hook session, that row is
+// renamed to "<title> (archived)" to free the name. Restoring it later
+// re-provisions with --name Slugify(newTitle), so the replacement has to clear
+// the GLOBAL hook namespace too — picking it with remote=false would quietly park
+// the archived row on a slug another project's sandbox already owns.
+func TestArchivedHookRenameChecksGlobalSlug(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	repoAPath := setupControlRepo(t)
+	repoBPath := setupControlRepo(t)
+	repoA, err := config.RepoFromPath(repoAPath)
+	if err != nil {
+		t.Fatalf("RepoFromPath(A): %v", err)
+	}
+	repoB, err := config.RepoFromPath(repoBPath)
+	if err != nil {
+		t.Fatalf("RepoFromPath(B): %v", err)
+	}
+
+	manager, err := NewManager(config.DefaultConfig())
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+
+	// Repo A already owns the hook name the replacement title would slugify to.
+	const base = "foo"
+	replacement := base + " (archived)" // slug: "foo-archived"
+	rows, err := json.Marshal([]session.InstanceData{{
+		Title: replacement, Path: repoAPath, Program: "claude", BackendType: "remote",
+	}})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if err := config.SaveRepoInstances(repoA.ID, rows); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+
+	// Picking a replacement name for an archived HOOK row must consult the global
+	// hook namespace and skip past the slug repo A owns.
+	manager.mu.Lock()
+	got, err := manager.uniqueArchivedTitleLocked(repoB.ID, repoB.Root, base, "claude", true, nil)
+	manager.mu.Unlock()
+	if err != nil {
+		t.Fatalf("uniqueArchivedTitleLocked: %v", err)
+	}
+	if session.Slugify(got) == session.Slugify(replacement) {
+		t.Fatalf("replacement %q reuses hook name %q, which repo A's sandbox already owns", got, session.Slugify(got))
+	}
+
+	// A non-hook archived row is unaffected: titles are per-repo, so it may take
+	// the same name repo A's hook session uses.
+	manager.mu.Lock()
+	local, err := manager.uniqueArchivedTitleLocked(repoB.ID, repoB.Root, base, "claude", false, nil)
+	manager.mu.Unlock()
+	if err != nil {
+		t.Fatalf("local uniqueArchivedTitleLocked: %v", err)
+	}
+	if local != replacement {
+		t.Errorf("a LOCAL archived rename should take %q (titles are per-repo), got %q", replacement, local)
+	}
+}
+
 // TestNextAvailableTitlePropagatesFatalHookCheckError guards the difference
 // between "this candidate is taken" and "the check could not run". The cross-repo
 // hook-name scan surfaces a corrupted instances.json as an error, and

@@ -95,8 +95,16 @@ func getSessionByTitle(title string) (*session.InstanceData, error) {
 			// (worktree/tmux gone). A second repo holding the title on disk only
 			// would be invisible here, so a bare `sessions get foo` would name the
 			// wrong project. Union the local disk rows, mirroring the daemon's own
-			// findSession guard. Skipped for a remote target, whose sessions have
-			// nothing to do with this machine's instances.json.
+			// findSession guard.
+			//
+			// Only for a LOCAL target: a remote's sessions have nothing to do with
+			// this machine's instances.json, and reading it would let a same-titled
+			// local session make a remote lookup spuriously ambiguous. That leaves a
+			// known gap — a REMOTE daemon in the same partial-restore state serves a
+			// lone visible match and this read cannot see its disk to tell. Closing
+			// it needs the guard on the daemon's side of the wire (a resolve-by-title
+			// RPC that runs findSession, or a Snapshot that carries unrestorable
+			// rows); the destructive paths already resolve through findSession.
 			if !apiclient.IsRemoteTarget() {
 				if extra, err := diskRepoPathsForTitle(title, paths); err == nil && len(extra) > 1 {
 					return nil, session.AmbiguousTitleError(title, extra)
@@ -170,7 +178,9 @@ var sessionsListCmd = &cobra.Command{
 		log.Initialize(false)
 		defer log.Close()
 
-		repoID, err := resolveRepoID()
+		// Snapshot-based read: it follows --daemon-url to the remote, so it uses
+		// the lookup resolver (which ignores the client's cwd against a remote).
+		repoID, err := resolveRepoIDForLookup()
 		if err != nil {
 			return jsonError(err)
 		}

@@ -222,7 +222,13 @@ func (m *Manager) renameArchivedForReuseLocked(repoID, repoPath, title, program 
 		return nil, nil
 	}
 	oldTitle := archived.Title
-	newTitle, err := m.uniqueArchivedTitleLocked(repoID, repoPath, oldTitle, program, *diskData)
+	// The replacement name must clear the same bar the archived row itself had:
+	// if it is a HOOK session, restoring it later re-provisions with --name
+	// Slugify(newTitle), so that slug has to be free in the GLOBAL hook namespace
+	// too — otherwise the rename quietly parks it on a name another project's
+	// sandbox already owns.
+	archivedIsHook := archived.ToInstanceData().IsRemoteHook()
+	newTitle, err := m.uniqueArchivedTitleLocked(repoID, repoPath, oldTitle, program, archivedIsHook, *diskData)
 	if err != nil {
 		return nil, err
 	}
@@ -313,13 +319,13 @@ func (m *Manager) findArchivedOnlyCollisionLocked(repoID, title string) (*sessio
 // archived session being renamed out of the way: "<base> (archived)", then
 // "<base> (archived 2)", "(archived 3)", … skipping any that collide with an
 // existing live or archived session (feat: reuse archived name). Runs under m.mu.
-func (m *Manager) uniqueArchivedTitleLocked(repoID, repoPath, base, program string, diskData []session.InstanceData) (string, error) {
+func (m *Manager) uniqueArchivedTitleLocked(repoID, repoPath, base, program string, remote bool, diskData []session.InstanceData) (string, error) {
 	for i := 1; i <= 10000; i++ {
 		candidate := fmt.Sprintf("%s (archived)", base)
 		if i > 1 {
 			candidate = fmt.Sprintf("%s (archived %d)", base, i)
 		}
-		err := m.validateTitleAvailableLocked(repoID, repoPath, candidate, program, false, false, diskData)
+		err := m.validateTitleAvailableLocked(repoID, repoPath, candidate, program, remote, false, diskData)
 		if err == nil {
 			return candidate, nil
 		}

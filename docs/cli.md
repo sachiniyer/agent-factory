@@ -26,7 +26,12 @@ Session titles are unique **within a project, not across projects** — the same
 session "foo" exists in multiple projects: /repos/alpha, /repos/beta — pass --repo to pick one
 ```
 
-Against a remote daemon (`--daemon-url`/`AF_DAEMON_URL`), `sessions get` and `sessions preview` ignore the current directory rather than sending it as a scope — it names a repo on *your* machine, not the daemon's — so a bare title resolves across the remote's projects. Two caveats there: `--repo` is turned into an id by hashing the path **as given on this machine**, so it only disambiguates when the daemon has that project checked out at the same absolute path; and the other session commands still reach the *local* daemon regardless of `--daemon-url`, so they stay scoped to the current directory.
+Against a remote daemon (`--daemon-url`/`AF_DAEMON_URL`), the split follows the transport:
+
+- **Reads served by the targeted daemon** — `list`, `get`, `watch`, `preview` — ignore the current directory rather than sending it as a scope, since it names a repo on *your* machine, not the daemon's. A bare title resolves across the remote's projects.
+- **Everything else** — `kill`, `archive`, `restore`, `send-prompt`, tab create/delete — reaches the *local* daemon regardless of `--daemon-url`, so it stays scoped to the current directory.
+
+Caveat for the reads: `--repo` becomes an id by hashing the path **as given on this machine**, so it only disambiguates when the daemon has that project checked out at the same absolute path. Prefer a bare title against a remote and let the ambiguity error tell you when to narrow it.
 
 One exception to per-project titles: **remote hook** sessions share a global name namespace, because the slug reaches `launch_cmd`/`delete_cmd` verbatim and external provisioners key real sandboxes on it — see [remote-hooks.md](remote-hooks.md#session-names).
 

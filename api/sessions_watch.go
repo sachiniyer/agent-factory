@@ -239,7 +239,9 @@ session record. Honors --repo to scope the title lookup to one repository.`,
 			return jsonError(err)
 		}
 
-		repoID, err := resolveRepoID()
+		// Snapshot-based read (getSessionByTitleInScope -> snapshotRead): it
+		// follows --daemon-url to the remote, so the client's cwd must not scope it.
+		repoID, err := resolveRepoIDForLookup()
 		if err != nil {
 			return jsonError(err)
 		}
