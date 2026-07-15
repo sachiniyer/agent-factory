@@ -374,6 +374,14 @@ In the **TUI** a web tab shows a placeholder (the target URL + "view in the web
 UI or open in a browser") — a terminal can't render a browser. Tab navigation
 (`1`–`9`, the sidebar tree) treats it like any other tab.
 
+A web tab is **pure metadata** — a URL, with no process behind it — so it
+outlives anything that tears processes down: it survives a daemon/`af` restart
+and it survives **archive → restore** with its target intact (unlike
+shell/process tabs, whose processes are torn down at archive time and do not come
+back). If the target is down when you restore, the tab renders the same
+unreachable-target fallback it would at any other time — start the dev server
+again and reload.
+
 !!! note "Dev-server base path"
     The proxy serves the dev server under `/v1/webtab/<session>/<tab>/`. Apps that
     request assets with **relative** paths resolve correctly under that prefix. An

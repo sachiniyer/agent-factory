@@ -58,6 +58,8 @@ const READY_MARKER = process.env.AF_WEB_READY_MARKER ?? "AF_SELFTEST_READY";
 // tab named "preview" pointing at a loopback server the daemon proxies, and an
 // EXTERNAL web tab named "external" whose host this test intercepts.
 const SESSION_WEB = process.env.AF_WEB_SESSION_WEB ?? "probe-web";
+// A session the harness already drove through web tab -> archive -> restore (#1809).
+const SESSION_WEB_RESTORED = process.env.AF_WEB_SESSION_WEB_RESTORED ?? "probe-restored";
 const WEBTAB_LOCAL_MARKER = process.env.AF_WEBTAB_LOCAL_MARKER ?? "AF_WEBTAB_LOCAL_OK";
 const WEBTAB_EXTERNAL_URL = process.env.AF_WEBTAB_EXTERNAL_URL ?? "https://blocked.example.test/";
 
@@ -755,6 +757,38 @@ test("web tab (feat): a local dev-server preview is daemon-proxied and rendered 
 
   // The daemon actually reverse-proxied the loopback server: the framed document
   // shows the marker the server served (proof the proxy relayed real content).
+  await expect(page.frameLocator(".af-webframe").locator("#marker")).toHaveText(WEBTAB_LOCAL_MARKER, {
+    timeout: 15_000,
+  });
+});
+
+test("web tab (#1809): a web tab survives archive -> restore and still renders through the proxy", async () => {
+  // The harness already drove the issue's CLI repro end to end against the real
+  // daemon: this session was given a web tab ("webpreview" -> the loopback server)
+  // plus a process tab ("watcher"), then archived and restored. Archive used to
+  // truncate the tab roster to the agent tab, erasing the URL with no way to get it
+  // back. Assert the restored session is whole and its web tab is LIVE, not just a
+  // surviving row.
+  await row(page, SESSION_WEB_RESTORED).click();
+  await expect(page.locator(".af-main.af-main-term")).toBeVisible();
+
+  const tabbar = page.locator(".af-tabbar");
+  await expect(tabbar).toBeVisible();
+
+  const restoredTab = tabbar.locator(".af-tab", { hasText: "webpreview" });
+  await expect(restoredTab).toHaveCount(1);
+  // The process tab does NOT come back: its tmux was torn down at archive time
+  // (#1028). The fix is kind-aware, not a blanket "keep every tab".
+  await expect(tabbar.locator(".af-tab", { hasText: "watcher" })).toHaveCount(0);
+
+  // The restored web tab renders through the SAME-ORIGIN daemon proxy...
+  await restoredTab.click();
+  const frame = page.locator(".af-term-host .af-pane-host iframe.af-webframe");
+  await expect(frame).toHaveCount(1, { timeout: 15_000 });
+  await expect(frame).toHaveAttribute("src", /\/v1\/webtab\//);
+
+  // ...and the proxy relays real content from the still-live target, so the URL
+  // survived the round trip intact rather than coming back as an empty shell.
   await expect(page.frameLocator(".af-webframe").locator("#marker")).toHaveText(WEBTAB_LOCAL_MARKER, {
     timeout: 15_000,
   });

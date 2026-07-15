@@ -44,6 +44,12 @@ SESSION_A=probe-a
 SESSION_B=probe-b
 SESSION_C=probe-c
 SESSION_WEB=probe-web
+# A session taken through the #1809 repro — web tab → archive → restore — so the
+# harness proves a RESTORED web tab still renders live through the daemon proxy.
+# Deliberately NOT "probe-web-…": the spec's row() filters by substring, so a name
+# containing SESSION_WEB would match probe-web's row too and wedge the web-tab
+# tests on a strict-mode violation.
+SESSION_WEB_RESTORED=probe-restored
 SEEDED_TASK=probe-task
 # The task-only project's task name (MOCK3), kept distinct from SEEDED_TASK so the
 # scoped Tasks assertions never collide on a substring match.
@@ -115,6 +121,7 @@ cleanup() {
     "$BIN" sessions kill "$SESSION_B" >/dev/null 2>&1 || true
     "$BIN" sessions kill "$SESSION_C" >/dev/null 2>&1 || true
     "$BIN" sessions kill "$SESSION_WEB" >/dev/null 2>&1 || true
+    "$BIN" sessions kill "$SESSION_WEB_RESTORED" >/dev/null 2>&1 || true
     kill "$WEBTAB_SERVER_PID" >/dev/null 2>&1 || true
     kill "$DAEMON_PID" >/dev/null 2>&1 || true
     if [ "$rc" -ne 0 ]; then
@@ -218,6 +225,35 @@ done
 "$BIN" sessions tab-create --repo "$MOCK" "$SESSION_WEB" --kind web --port "$WEBTAB_PORT" --name preview >/dev/null
 "$BIN" sessions tab-create --repo "$MOCK" "$SESSION_WEB" --kind web --url "$WEBTAB_EXTERNAL_URL" --name external >/dev/null
 
+# --- #1809: a web tab must survive archive -> restore ------------------------
+# Drive the issue's exact CLI repro against the real daemon: a session with a web
+# tab AND a process tab is archived (the documented restorable reap path) and then
+# restored. Archive used to truncate the roster to the agent tab, silently erasing
+# the web tab's URL with no way to recover it. The Playwright test then proves the
+# restored web tab still renders LIVE through the daemon proxy — not merely that a
+# row survived in JSON.
+echo ">>> creating archive/restore web-tab session $SESSION_WEB_RESTORED (#1809) ..."
+"$BIN" sessions create --repo "$MOCK" --name "$SESSION_WEB_RESTORED" --program claude >/dev/null
+for i in $(seq 1 30); do
+    if "$BIN" sessions get "$SESSION_WEB_RESTORED" >/dev/null 2>&1; then
+        break
+    fi
+    sleep 1
+done
+"$BIN" sessions tab-create --repo "$MOCK" "$SESSION_WEB_RESTORED" --kind web --port "$WEBTAB_PORT" --name webpreview >/dev/null
+# A process tab alongside it: it must NOT come back (its tmux is torn down at
+# archive time, #1028) — the fix is kind-aware, not a blanket "keep everything".
+"$BIN" sessions tab-create --repo "$MOCK" "$SESSION_WEB_RESTORED" --command "sleep 300" --name watcher >/dev/null
+"$BIN" sessions archive "$SESSION_WEB_RESTORED" --repo "$MOCK" >/dev/null
+"$BIN" sessions restore "$SESSION_WEB_RESTORED" --repo "$MOCK" >/dev/null
+# Fail loudly HERE if the roster did not survive, so a regression reads as "the
+# archive dropped the web tab" rather than a downstream Playwright selector miss.
+if ! "$BIN" sessions get "$SESSION_WEB_RESTORED" | grep -q webpreview; then
+    echo "FATAL: the web tab did not survive archive -> restore (#1809)" >&2
+    "$BIN" sessions get "$SESSION_WEB_RESTORED" >&2
+    exit 1
+fi
+
 # --- run the Playwright harness ---------------------------------------------
 echo ">>> installing web deps + running the Playwright harness ..."
 cd /work/web
@@ -231,6 +267,7 @@ export AF_WEB_SESSION_A="$SESSION_A"
 export AF_WEB_SESSION_B="$SESSION_B"
 export AF_WEB_SESSION_C="$SESSION_C"
 export AF_WEB_SESSION_WEB="$SESSION_WEB"
+export AF_WEB_SESSION_WEB_RESTORED="$SESSION_WEB_RESTORED"
 export AF_WEB_READY_MARKER="$READY_MARKER"
 export AF_WEB_TASK_NAME="$SEEDED_TASK"
 export AF_WEB_TASK3_NAME="$TASK3_NAME"
