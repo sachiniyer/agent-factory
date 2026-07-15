@@ -118,15 +118,27 @@ func (m *Manager) RefreshStatuses() {
 // the targeted writer persistInstanceData — never a whole-list re-marshal, the
 // dual-writer clobber surface #960 PR 4 retired — so an idle session never churns
 // instances.json.
+//
+// Every early return below SKIPS the probe, and each one therefore breaks the
+// remote-loss debounce's "consecutive" contract: a tick we did not observe tells
+// us nothing, so a failure before the gap and a failure after it are not
+// consecutive and must not be summed (#1794). Each skip clears the episode —
+// a run of unanswerable probes has to be unbroken to mean anything, and the
+// alternative is a stale count that survives an arbitrary blind window and lets
+// ONE later blip tip a healthy session into a destructive re-provision.
 func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instance) {
 	if instance == nil || !instance.Started() {
 		return
 	}
+	// The debounce is keyed by stable instance ID, never repo/title: a same-title
+	// successor must not inherit a dead predecessor's failures (#1794).
+	key := remoteLossKey(repoID, instance)
 	if instance.UserKilled() {
 		// A surviving kill-intent tombstone (#1108) means a previous
 		// KillSession was interrupted after committing to the kill. The only
 		// valid future for this session is finishing that teardown — never
 		// probing it, never marking it Lost, never restoring it.
+		m.clearRemoteLoss(key)
 		m.finishUserKill(repoID, instance)
 		return
 	}
@@ -134,12 +146,15 @@ func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instanc
 		// An op is mid-flight (archive/restore teardown, create/kill overlay): the
 		// poll must not probe a session whose tmux is being spun up/torn down and
 		// mark it Lost — the op's executor writes the settled liveness. Replaces
-		// the old Loading/Deleting skip (#1195).
+		// the old Loading/Deleting skip (#1195). The op may also be REPLACING the
+		// runtime under us, which is the other reason its failure history dies here.
+		m.clearRemoteLoss(key)
 		return
 	}
 	if instance.GetLiveness() == session.LiveArchived {
 		// Archived (#1028): no tmux to probe, inert (started=false) so already
 		// skipped by !Started above — belt-and-suspenders against a future change.
+		m.clearRemoteLoss(key)
 		return
 	}
 	if m.isPollPaused(repoID, instance.Title) {
@@ -152,6 +167,14 @@ func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instanc
 		// pause is lease-bounded (statusPollLease), so a crashed TUI that never
 		// sends Resume auto-resumes within one lease and real death is detected
 		// on the next tick — the pause can never permanently blind the daemon.
+		//
+		// The attach is also positive evidence: the client is streaming this
+		// session's PTY off the sandbox, which no dead sandbox can serve. Dropping
+		// the episode here is not merely conservative, it is what the counter's
+		// definition demands — a pause can outlast remoteLostGracePeriod (the TUI
+		// renews it for the whole attach), so a surviving count would let the first
+		// blip after detach re-provision a sandbox the user was just typing into.
+		m.clearRemoteLoss(key)
 		return
 	}
 
@@ -160,9 +183,6 @@ func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instanc
 	// poll makes no assumption that the session is local tmux. For the local
 	// runtime the agent-server drives tmux in-process.
 	as := instance.AgentServer()
-	// The debounce is keyed by stable instance ID, never repo/title: a same-title
-	// successor must not inherit a dead predecessor's failures (#1794).
-	key := remoteLossKey(repoID, instance)
 	before := instance.GetLiveness()
 	beforeReset, _ := instance.LimitResetAt()
 	// Snapshot dismisses a pending trust prompt then reads the pane in one probe

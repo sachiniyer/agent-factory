@@ -678,3 +678,54 @@ func TestSweepRemoteLossStates_DropsArchivedRows(t *testing.T) {
 		t.Fatalf("remoteLossStates still holds %d entry/entries after the row was archived — an archived session keeps its map entry and its stable ID, and is never probed again, so nothing else will ever drop it (#1794)", after)
 	}
 }
+
+// TestRefreshStatuses_AttachBreaksTheDebounceRun is codex's finding on 9555b80:
+// a blind window silently kept a failure run "consecutive".
+//
+// While a TUI is attached the poll is paused (#1160), so no probe happens and
+// the clear after Snapshot is never reached. The count and its firstFailureAt
+// therefore survive the whole attach — which the TUI renews for as long as the
+// user stays, easily outlasting remoteLostGracePeriod. Detach, take one blip,
+// and a count sitting just under the threshold tips over with a grace window
+// long since satisfied: Lost, then re-provisioned, orphaning the sandbox the
+// user was typing into seconds earlier.
+//
+// The attach is the proof that makes it absurd — the client streams the PTY off
+// that sandbox, which no dead sandbox can serve. But the general rule is what is
+// implemented: a tick we did not observe breaks the run, because failures either
+// side of a blind window are not consecutive and summing them is a lie.
+func TestRefreshStatuses_AttachBreaksTheDebounceRun(t *testing.T) {
+	withRemoteLossThresholds(t, 3, time.Minute, time.Second)
+	zeroRestoreBackoff(t)
+	advance := withFrozenClock(t)
+
+	manager, repoID, repoPath := newStatusTestManager(t)
+	const title = "remote-attached"
+	inst, backend := registerStartedRemote(t, manager, repoID, repoPath, title, "http://127.0.0.1:1", session.Running)
+
+	// Two failures: one short of the threshold, and already spread past the
+	// grace period so only the count is holding Lost back.
+	for i := 0; i < remoteLostFailureThreshold-1; i++ {
+		manager.RefreshStatuses()
+		advance(remoteLostGracePeriod)
+	}
+	if got := inst.GetLiveness(); got != session.LiveRunning {
+		t.Fatalf("setup: liveness = %v, want LiveRunning (still under the threshold)", got)
+	}
+
+	// The user attaches. The poll is paused for the duration and observes nothing.
+	manager.PauseStatusPoll(repoID, title)
+	manager.RefreshStatuses()
+	manager.ResumeStatusPoll(repoID, title)
+
+	// One blip after detach.
+	manager.RefreshStatuses()
+	manager.RestoreLostSessions()
+
+	if got := inst.GetLiveness(); got != session.LiveRunning {
+		t.Fatalf("liveness = %v, want LiveRunning — the attach was a blind window, so the failure before it and the blip after it are NOT consecutive; summing them let one blip mark a session Lost that was being typed into (#1794)", got)
+	}
+	if got := backend.recoverCalls(); got != 0 {
+		t.Fatalf("Recover calls = %d, want 0 — a single post-attach blip re-provisioned the sandbox and orphaned it", got)
+	}
+}
