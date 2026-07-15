@@ -156,6 +156,7 @@ func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instanc
 	// poll makes no assumption that the session is local tmux. For the local
 	// runtime the agent-server drives tmux in-process.
 	as := instance.AgentServer()
+	key := daemonInstanceKey(repoID, instance.Title)
 	before := instance.GetLiveness()
 	beforeReset, _ := instance.LimitResetAt()
 	// Snapshot dismisses a pending trust prompt then reads the pane in one probe
@@ -170,23 +171,18 @@ func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instanc
 		// forward, an agent-server crash.
 		//
 		// A failed probe is not by itself proof of death: a transient blip against
-		// a healthy sandbox errors identically. So confirm with the INDEPENDENT
-		// Alive() probe rather than either trusting or ignoring the error outright.
-		// Alive() is a second REST call that reports false on any transport error,
-		// so a genuinely unreachable agent-server fails both and settles to Lost,
-		// while a one-off Snapshot error against a still-reachable server leaves
-		// the status for the next tick — the conservative behaviour the paused /
-		// in-flight-op early returns above keep.
+		// a healthy sandbox errors identically, and acting on one is destructive —
+		// Lost feeds RestoreLostSessions in this same tick, whose remote Recover
+		// RE-PROVISIONS a fresh sandbox and orphans the running one along with its
+		// unpushed commits (#1794). So require DURABLE failure (see remoteloss.go)
+		// before even considering Lost.
 		//
 		// Lost, not Dead (#1108): no kill intent is on record, so the session
 		// vanished out from under a live record and stays recovery-eligible.
 		// Without this the remote session kept its last-known liveness
 		// (Running/Ready) forever while its agent-server was gone, so the TUI
 		// showed a healthy row for a dead session (#1782).
-		if !as.Alive() {
-			_ = instance.Transition(session.ObserveLiveness(session.LiveLost))
-			m.persistPollChange(repoID, instance, before, beforeReset)
-		}
+		m.settleRemoteProbeFailure(repoID, key, instance, before, beforeReset)
 		return
 	}
 	updated, hasPrompt, content := obs.Updated, obs.HasPrompt, obs.Content
@@ -200,13 +196,24 @@ func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instanc
 		// the next poll — a one-interval AutoYes delay (#992).
 		as.TapEnter()
 	}
+	// The remote-loss debounce (#1794) counts CONSECUTIVE observations that found
+	// no evidence of life, so each branch below that DID find some clears it. Note
+	// what does not clear it: a merely-successful Snapshot. The agent-server
+	// answering proves the transport works, not that the agent is alive — a
+	// container whose agent died while its agent-server keeps serving returns a
+	// clean idle (false,false) snapshot every tick. Clearing on Snapshot success
+	// would reset the count on exactly those ticks and the Alive-false branch could
+	// never accumulate past one, so that session would never be marked Lost at all
+	// — silently regressing #935/#1108 for remote sessions.
 	switch {
 	case updated:
+		m.clearRemoteLoss(key) // fresh output — the agent is demonstrably alive
 		_ = instance.Transition(session.ObserveLiveness(session.LiveRunning))
 	case hasPrompt:
 		// A waiting prompt with otherwise-unchanged output: leave the status for
 		// the next tick to resolve, exactly as runMetadataTick did. The
 		// prompt-tap already fired above regardless of `updated`.
+		m.clearRemoteLoss(key) // a prompt on screen is the agent waiting, not gone
 	case !as.Alive():
 		// Snapshot returned (false,false), which a healthy idle session and a
 		// dead one both produce — indistinguishable on their own. Probe liveness
@@ -216,11 +223,21 @@ func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instanc
 		// intent on record, so the session vanished out from under a live
 		// record — an outage/reboot casualty that is recovery-eligible, not a
 		// corpse the user wanted gone.
+		//
+		// For a REMOTE session this Alive() is a REST call, so it fails on a
+		// transport blip exactly as the Snapshot path above does — and lands on
+		// the same re-provision-and-orphan hazard. It carries no more authority
+		// here than it does there, so it debounces identically (#1794). A local
+		// tmux probe crosses no network and stays immediate.
+		if isRemoteWorkspace(instance) && !m.noteRemoteProbeFailure(key, instance.Title) {
+			break
+		}
 		_ = instance.Transition(session.ObserveLiveness(session.LiveLost))
 	default:
 		// Idle output: settle to Ready, or LimitReached when the pane shows a
 		// usage-limit banner for a claude/codex session (#1146). content is
 		// HasUpdated's capture (no re-capture); see resolveIdleLiveness.
+		m.clearRemoteLoss(key) // reached only when Alive() answered true
 		m.resolveIdleLiveness(instance, content)
 	}
 

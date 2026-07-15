@@ -69,6 +69,12 @@ type Manager struct {
 	// auto-resume scheduler (#1146 PR3), keyed by daemon instance key — the
 	// opt-in sibling of lostRestoreStates. Guarded by m.mu.
 	limitResumeStates map[string]*limitResumeState
+	// remoteLossStates debounces the remote Lost transition (#1794), keyed by
+	// daemon instance key. A remote probe failure is transport-shaped — one
+	// blip fails identically to a dead sandbox — so the poll accumulates
+	// consecutive failures here and only settles Lost once they are durable.
+	// Guarded by m.mu; entries are dropped the moment a probe succeeds.
+	remoteLossStates map[string]*remoteLossState
 	// instanceOpLocks serializes the mutually-exclusive per-session
 	// operations — kill teardown and Lost-recovery — by daemon instance key.
 	// killsInFlight alone is a point-in-time signal; this lock is what makes
@@ -141,6 +147,7 @@ func newManagerShell(cfg *config.Config) (*Manager, error) {
 		killsInFlight:       make(map[string]struct{}),
 		lostRestoreStates:   make(map[string]*lostRestoreState),
 		limitResumeStates:   make(map[string]*limitResumeState),
+		remoteLossStates:    make(map[string]*remoteLossState),
 		instanceOpLocks:     make(map[string]*sync.Mutex),
 		pausedPolls:         make(map[string]time.Time),
 		events:              newEventsHub(),

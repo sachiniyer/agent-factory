@@ -23,6 +23,13 @@ import (
 // at the cap, never a permanent give-up, one ERROR escalation when the cause
 // looks persistent. The user's off-ramp from a permanently failing restore is
 // killing the session (which tombstones it).
+//
+// REMOTE sessions are not "restored in place" and never were: docker/ssh/hook
+// advertise Recover, but theirs is recoverSandbox — provision a NEW sandbox and
+// clone the branch back from origin, so only PUSHED state survives. That makes
+// recovering a remote session destructive if it was not really lost, which is
+// the asymmetry #1794 addresses: the poll debounces the Lost mark, and this loop
+// re-probes the sandbox before acting on it.
 
 // lostRestoreEscalationThreshold mirrors rootEnsureEscalationThreshold: the
 // consecutive-failure count at which one ERROR log marks the cause as
@@ -82,6 +89,14 @@ func (m *Manager) RestoreLostSessions() {
 			delete(m.lostRestoreStates, key)
 		}
 	}
+	// Same unbounded-growth guard for the remote-loss debounce (#1794): a probe
+	// success drops an entry, but a session killed mid-episode never gets that
+	// success, so sweep entries whose instance is gone.
+	for key := range m.remoteLossStates {
+		if _, live := m.instances[key]; !live {
+			delete(m.remoteLossStates, key)
+		}
+	}
 	m.mu.Unlock()
 
 	// Stable order so multi-session recovery after an outage is deterministic
@@ -93,12 +108,17 @@ func (m *Manager) RestoreLostSessions() {
 }
 
 // restoreLostSession attempts recovery of one session when it is eligible:
-// Lost, local, not tombstoned, not the reserved root (EnsureRootAgents owns
-// that), and no kill in flight. Recover runs under the per-session operation
-// lock KillSession takes, so a kill arriving mid-attempt waits for the
-// attempt and then tears down — the two operations never interleave. This
-// side only TryLocks: the poll goroutine must never stall behind a slow
-// teardown, and the next tick retries.
+// Lost, Recover-capable, not tombstoned, not the reserved root
+// (EnsureRootAgents owns that), and no kill in flight. Recover runs under the
+// per-session operation lock KillSession takes, so a kill arriving mid-attempt
+// waits for the attempt and then tears down — the two operations never
+// interleave. This side only TryLocks: the poll goroutine must never stall
+// behind a slow teardown, and the next tick retries.
+//
+// "Recover-capable", NOT "local": docker/ssh/hook all advertise Recover, so
+// remote sessions DO flow through here — and their Recover re-provisions rather
+// than reconnects. That is why this function re-probes a remote sandbox before
+// recovering it (#1794); see the gate below.
 func (m *Manager) restoreLostSession(key, repoID string, inst *session.Instance) {
 	// Only a Lost session is recovery-eligible. This gate is also what fences
 	// out an Archived session (#1028): Archived != Lost, and an archived
@@ -157,6 +177,30 @@ func (m *Manager) restoreLostSession(key, repoID string, inst *session.Instance)
 	m.mu.Unlock()
 	if killing || current != inst || inst.UserKilled() || inst.GetStatus() != session.Lost {
 		return
+	}
+
+	// Last gate before an IRREVERSIBLE step (#1794). A remote session's Recover
+	// is not a reconnect — recoverSandbox provisions a BRAND-NEW sandbox and
+	// clones the branch back from origin, so running it against a sandbox that
+	// is in fact still up orphans that sandbox and abandons everything it never
+	// pushed. The poll's debounce makes a blip-induced Lost unlikely, but this
+	// row may have gone Lost many ticks ago (restore is backoff-throttled out to
+	// 5 minutes) and the transport may have healed since. Re-probe NOW, against
+	// live state, rather than trusting a stale verdict: an agent-server that
+	// answers proves the sandbox is there, so heal the row and let the next poll
+	// settle its real liveness. Bounded, so a genuinely wedged remote cannot
+	// stall the poll loop here either.
+	if isRemoteWorkspace(inst) {
+		if aliveWithin(inst.AgentServer(), remoteLostConfirmTimeout) {
+			log.InfoLog.Printf("not re-provisioning lost remote session %q: its sandbox answers as alive (re-provisioning would orphan it and lose unpushed work) — clearing the Lost mark", inst.Title)
+			_ = inst.Transition(session.ObserveLiveness(session.LiveRunning))
+			m.persistInstance(repoID, inst)
+			m.clearRemoteLoss(key)
+			m.mu.Lock()
+			delete(m.lostRestoreStates, key)
+			m.mu.Unlock()
+			return
+		}
 	}
 
 	if err := inst.Recover(); err != nil {
