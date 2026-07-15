@@ -20,12 +20,7 @@ import { tabBarSig, tabIdentity, tabRealId } from "./ui.js";
 import type { AppState } from "./ui.js";
 import { type SessionData, TabKind } from "./types.js";
 import { leaves, remapByIdentity, resolveDragTab, tabsRebound } from "./layout.js";
-import { type IframeSpec, paneAddressUsesOrdinal } from "./tabaddr.js";
-
-/** A web tab's iframe spec, so these cases read as the targets they are about. */
-function webSpec(target: string): IframeSpec {
-  return { kind: TabKind.Web, target };
-}
+import { iframeIdentity, iframeIsProxied, paneAddressUsesOrdinal, webProxyPath } from "./tabaddr.js";
 
 // --- tabRealId: the real id, never a synthesized one -----------------------
 
@@ -239,6 +234,66 @@ test("a legacy leaf with a synthesized identity still follows a shift", () => {
   assert.equal(leaves(remapByIdentity(tree, prevIds, ids))[0].tab, 1);
 });
 
+// --- webProxyPath: id-keyed, and MIRRORS the target's path (#1810, #1811) ----
+
+test("the proxy src is keyed by the tab's STABLE id, never its ordinal", () => {
+  // The client half of #1810: an ordinal in this URL is what let a closed lower tab
+  // silently repoint an open pane at a different dev server.
+  const src = webProxyPath("sess-1", "id-web-b", "http://localhost:3000/", null);
+  assert.equal(src, "/v1/webtab/sess-1/id-web-b/");
+});
+
+test("a root target's proxy path is the bare prefix, with its trailing slash", () => {
+  // The trailing slash is load-bearing: the route requires it, and it keeps the
+  // app's relative URLs resolving UNDER the prefix rather than beside it.
+  assert.equal(webProxyPath("s", "t", "http://localhost:3000", null), "/v1/webtab/s/t/");
+  assert.equal(webProxyPath("s", "t", "http://127.0.0.1:8080/", null), "/v1/webtab/s/t/");
+});
+
+test("the target's own path is MIRRORED into the proxy URL", () => {
+  // The mirror model: the browser-visible depth matches the dev server's, so the
+  // browser resolves the app's relative URLs exactly where the app expects them.
+  assert.equal(
+    webProxyPath("s", "t", "http://localhost:3000/app/viewer.html", null),
+    "/v1/webtab/s/t/app/viewer.html",
+  );
+  assert.equal(
+    webProxyPath("s", "t", "http://localhost:8899/viewer.html", null),
+    "/v1/webtab/s/t/viewer.html",
+  );
+  // A directory-style target keeps its trailing slash.
+  assert.equal(webProxyPath("s", "t", "http://localhost:3000/app/", null), "/v1/webtab/s/t/app/");
+});
+
+test("the mirrored depth is what makes ../ resolve INSIDE the prefix", () => {
+  // The property the whole model exists for, asserted the way a browser computes it:
+  // a parent-relative link on the proxied page must land back inside the tab prefix
+  // (and mirror upstream /shared.css), never escape to the origin root.
+  const src = webProxyPath("s", "t", "http://localhost:3000/app/viewer.html", null);
+  const resolved = new URL("../shared.css", `http://daemon${src}`);
+  assert.equal(resolved.pathname, "/v1/webtab/s/t/shared.css");
+  // A sibling link stays beside the document, mirroring upstream /app/x.css.
+  assert.equal(new URL("x.css", `http://daemon${src}`).pathname, "/v1/webtab/s/t/app/x.css");
+});
+
+test("the token rides ?access_token= (an iframe src cannot set a header)", () => {
+  assert.equal(
+    webProxyPath("s", "t", "http://localhost:3000/app/viewer.html", "tok en"),
+    "/v1/webtab/s/t/app/viewer.html?access_token=tok%20en",
+  );
+  // A tokenless (loopback/exempt) client sends none.
+  assert.equal(webProxyPath("s", "t", "http://localhost:3000/", null), "/v1/webtab/s/t/");
+});
+
+test("session and tab ids are escaped into their path segments", () => {
+  const src = webProxyPath("a/b", "c d", "http://localhost:3000/", null);
+  assert.equal(src, "/v1/webtab/a%2Fb/c%20d/");
+});
+
+test("an unparseable target contributes no path", () => {
+  assert.equal(webProxyPath("s", "t", "not a url", null), "/v1/webtab/s/t/");
+});
+
 // --- paneAddressUsesOrdinal: rebuild iff the pane's ADDRESS would change -----
 
 test("an id-addressed terminal's ordinal is inert — a move needs no rebuild", () => {
@@ -251,43 +306,33 @@ test("a LEGACY terminal's ordinal IS its address — a move must rebuild", () =>
   assert.equal(paneAddressUsesOrdinal(null, ""), true);
 });
 
-test("a PROXIED web tab's ordinal is its address, stable id or not — a move must rebuild", () => {
-  // The correction to the suggested "id-addressed ⇒ never remount" rule. A loopback
-  // preview is fetched through /v1/webtab/{session}/{ordinal}/, which is ordinal-keyed
-  // no matter how stable the tab's id is. Following it without a rebuild would leave
-  // the iframe proxying whatever tab took the old index — trading a cosmetic reload
-  // for an actual misroute.
-  assert.equal(paneAddressUsesOrdinal(webSpec("http://localhost:3000"), "id-web"), true);
-  assert.equal(paneAddressUsesOrdinal(webSpec("http://127.0.0.1:8080/app"), "id-web"), true);
-  assert.equal(paneAddressUsesOrdinal(webSpec("http://[::1]:5173"), "id-web"), true);
+test("a PROXIED web tab is id-keyed since #1810 — a move is followed, not remounted", () => {
+  // This INVERTS the pre-#1810 rule, because the reason for it is gone. A loopback
+  // preview used to be fetched through /v1/webtab/{session}/{ORDINAL}/, so a moved
+  // tab had to be torn down or the iframe would proxy whatever took its old index.
+  // The route is keyed by the stable tab id now, so the src survives a shift and the
+  // frame — with the dev server's in-page state — is kept.
+  assert.equal(paneAddressUsesOrdinal("http://localhost:3000", "id-web"), false);
+  assert.equal(paneAddressUsesOrdinal("http://127.0.0.1:8080/app", "id-web"), false);
+  assert.equal(paneAddressUsesOrdinal("http://[::1]:5173", "id-web"), false);
 });
 
 test("an EXTERNAL web tab's src encodes no ordinal — a move is followed, not remounted", () => {
   // This is the case the P3 is really about: the iframe src is the target URL itself,
   // so a shifted ordinal cannot invalidate it and reloading would drop in-page state
   // for nothing.
-  assert.equal(paneAddressUsesOrdinal(webSpec("https://example.com/docs"), "id-web"), false);
-  assert.equal(paneAddressUsesOrdinal(webSpec("https://example.com/docs"), ""), false);
+  assert.equal(paneAddressUsesOrdinal("https://example.com/docs", "id-web"), false);
+  assert.equal(paneAddressUsesOrdinal("https://example.com/docs", ""), false);
 });
 
-test("a web tab with NO target has no ordinal-bearing address", () => {
-  // It renders a fallback, not a proxied frame — nothing to invalidate.
-  assert.equal(paneAddressUsesOrdinal(webSpec(""), "id-web"), false);
-});
-
-test("an unparseable web target is treated as non-loopback (never proxied)", () => {
-  assert.equal(paneAddressUsesOrdinal(webSpec("not a url"), "id-web"), false);
-});
-
-test("a VSCODE tab is always proxied, so its ordinal IS its address — a move must rebuild", () => {
-  // A vscode tab carries no target by design (its code-server is a daemon-managed
-  // per-session process on an ephemeral port), so the empty-target rule that
-  // correctly answers false for a URL-less WEB tab would answer the wrong question
-  // here: a vscode pane is always fetched through /v1/webtab/{session}/{ordinal}/.
-  // Following a moved one without a rebuild would frame ANOTHER tab's editor — the
-  // #1779 misroute, on the surface where it is most alarming.
-  assert.equal(paneAddressUsesOrdinal({ kind: TabKind.VSCode, target: "" }, "id-vscode"), true);
-  assert.equal(paneAddressUsesOrdinal({ kind: TabKind.VSCode, target: "" }, ""), true);
+test("no web target shape embeds an ordinal — none of them force a remount", () => {
+  // Since #1810 this holds for EVERY web pane, whatever the target: a targetless tab
+  // (which renders a fallback, not a frame) and an unparseable one (never proxied)
+  // included. Pinned so a future change that reintroduces an ordinal into any web
+  // address has to come through this assertion.
+  assert.equal(paneAddressUsesOrdinal("", "id-web"), false);
+  assert.equal(paneAddressUsesOrdinal("not a url", "id-web"), false);
+  assert.equal(paneAddressUsesOrdinal("", ""), false);
 });
 
 // --- the end-to-end property: a shifted tab is still addressed by ITS id -----
@@ -312,4 +357,46 @@ test("after a cross-client close+create, the pane's stream id is still the tab i
   // built against, the terminal is FOLLOWED rather than torn down and re-dialled.
   assert.equal(ids[leaf.tab], "id-b");
   assert.equal(paneAddressUsesOrdinal(null, realIdsNow[leaf.tab]), false, "an id-addressed pane need not rebuild to follow");
+});
+
+// --- the vscode pane's addressing (feat: VS Code tabs) ----------------------
+
+test("a VSCODE pane is always proxied — it has no target to classify", () => {
+  // The empty-target test that correctly answers false for a URL-less WEB tab would
+  // answer the wrong question here: a vscode tab carries no target BY DESIGN (its
+  // code-server is a daemon-managed per-session process on an ephemeral port), and
+  // the proxy path is the only address that exists for it.
+  assert.equal(iframeIsProxied({ kind: TabKind.VSCode, target: "" }), true);
+  // A web tab still classifies by its target.
+  assert.equal(iframeIsProxied({ kind: TabKind.Web, target: "http://localhost:3000" }), true);
+  assert.equal(iframeIsProxied({ kind: TabKind.Web, target: "https://example.com" }), false);
+  assert.equal(iframeIsProxied({ kind: TabKind.Web, target: "" }), false);
+});
+
+test("a VSCODE pane's identity is constant, so a reconcile never reloads the editor", () => {
+  // The identity feeds the rebuild guard, and a rebuild reloads the iframe — which
+  // for VS Code means dropping unsaved buffers. A vscode tab has no target to vary,
+  // so its identity must not vary either.
+  const a = iframeIdentity({ kind: TabKind.VSCode, target: "" });
+  const b = iframeIdentity({ kind: TabKind.VSCode, target: "" });
+  assert.equal(a, b);
+  // ...and it can never collide with a real URL identity.
+  assert.notEqual(a, iframeIdentity({ kind: TabKind.Web, target: "" }));
+});
+
+test("a VSCODE pane addresses by tab id, not ordinal — a move never repoints it", () => {
+  // Since #1810 the proxy is id-keyed, so no iframe pane rebuilds on a move. For a
+  // vscode pane that is what stops a moved tab from framing ANOTHER session's editor.
+  assert.equal(paneAddressUsesOrdinal("", "id-vscode"), false);
+});
+
+test("a VSCODE pane's proxy path is the bare tab prefix — there is no target to mirror", () => {
+  // The mirror-path model (#1808) splices the TARGET's path into the URL. A vscode
+  // tab has none, so its src is just the tab prefix — and the trailing slash still
+  // matters: code-server derives its relative asset URLs from the path depth.
+  assert.equal(webProxyPath("sess-1", "id-vscode", "", null), "/v1/webtab/sess-1/id-vscode/");
+  assert.equal(
+    webProxyPath("sess-1", "id-vscode", "", "tok"),
+    "/v1/webtab/sess-1/id-vscode/?access_token=tok",
+  );
 });

@@ -197,7 +197,15 @@ func newHTTPMux(cs *controlServer) *http.ServeMux {
 	// server's raw HTTP/asset/WS traffic), so it is registered directly here like
 	// the stream routes rather than in the httpRoutes catalog. No method filter —
 	// a framed dev app issues GET/POST/WS to its own origin (this proxy path).
-	mux.HandleFunc(webtabPathPrefix+"{sessionId}/{tabIdx}/{rest...}", cs.webTabProxyHandler)
+	//
+	// {tabId} is the tab's STABLE id (#1738), not its ordinal: an ordinal-keyed
+	// route silently repointed an open preview at a different dev server whenever a
+	// LOWER tab was closed (#1810). There is no deprecated ordinal fallback — the
+	// web client ships embedded in this same binary (web/embed.go), so there is no
+	// version skew to bridge, and an ordinal that resolved would be the very
+	// misroute this addresses. A stale id 404s; {rest...} is the mirrored upstream
+	// path (see webTabProxyHandler).
+	mux.HandleFunc(webtabPathPrefix+"{sessionId}/{tabId}/{rest...}", cs.webTabProxyHandler)
 
 	// Catch-all: any other path is an unknown route → 404 with the envelope.
 	// ServeMux routes the longest prefix match, so a real route above always

@@ -14,8 +14,10 @@ import (
 func TestWebTabAwareToken_CookieScopedToWebtabPath(t *testing.T) {
 	cookie := &http.Cookie{Name: webtabTokenCookie, Value: "cookie-tok"}
 
-	// Cookie-only request under the webtab prefix: honored.
-	webReq := httptest.NewRequest(http.MethodGet, "/v1/webtab/sess/1/assets/app.js", nil)
+	// Cookie-only request under the webtab prefix: honored. (The path is
+	// /v1/webtab/<sessionId>/<tabId>/… — the tab segment is a stable id since
+	// #1810; the cookie's scope is a plain prefix match either way.)
+	webReq := httptest.NewRequest(http.MethodGet, "/v1/webtab/sess/a1b2c3d4e5f60718/assets/app.js", nil)
 	webReq.AddCookie(cookie)
 	if got := webTabAwareToken(webReq); got != "cookie-tok" {
 		t.Fatalf("webtab path: token = %q, want cookie-tok", got)

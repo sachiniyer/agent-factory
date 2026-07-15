@@ -167,7 +167,7 @@ func shellQuote(s string) string {
 // newVSCodeFixture builds a manager with one started local instance holding a
 // vscode tab, wired to the fake editor, and returns the manager, the instance's
 // stable id, the tab index, and the worktree the editor should be serving.
-func newVSCodeFixture(t *testing.T, binary string) (m *Manager, sessionID string, tabIdx int, worktree string) {
+func newVSCodeFixture(t *testing.T, binary string) (m *Manager, sessionID, tabID, worktree string) {
 	t.Helper()
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 	repoPath := setupControlRepo(t)
@@ -197,7 +197,14 @@ func newVSCodeFixture(t *testing.T, binary string) (m *Manager, sessionID string
 	if err := os.MkdirAll(wt, 0o755); err != nil {
 		t.Fatalf("creating the fixture worktree: %v", err)
 	}
-	return manager, inst.ID, 1, wt
+	// The proxy is id-keyed (#1810), so hand back the tab's STABLE id, not its
+	// ordinal — the route has no ordinal form to address it by.
+	tabs := inst.GetTabs()
+	vsID := tabs[len(tabs)-1].ID
+	if vsID == "" {
+		t.Fatal("the vscode tab has no stable id; the id-keyed proxy cannot address it")
+	}
+	return manager, inst.ID, vsID, wt
 }
 
 // TestVSCodeTab_SpawnsEditorAndProxiesIt is the headline test: creating a vscode
@@ -206,10 +213,10 @@ func newVSCodeFixture(t *testing.T, binary string) (m *Manager, sessionID string
 func TestVSCodeTab_SpawnsEditorAndProxiesIt(t *testing.T) {
 	argsFile := filepath.Join(t.TempDir(), "argv")
 	binary := writeFakeVSCodeBinary(t, "code-server", map[string]string{fakeVSCodeArgsEnv: argsFile})
-	manager, id, idx, worktree := newVSCodeFixture(t, binary)
+	manager, id, tabID, worktree := newVSCodeFixture(t, binary)
 
 	mux := newHTTPMux(&controlServer{manager: manager})
-	body := getVSCodeProxy(t, mux, id, idx, "")
+	body := getVSCodeProxy(t, mux, id, tabID, "")
 	if !strings.Contains(body, fakeVSCodeMarker) {
 		t.Fatalf("proxied body %q is missing the editor's marker", body)
 	}
@@ -253,15 +260,15 @@ func TestVSCodeTab_SpawnsEditorAndProxiesIt(t *testing.T) {
 // implements no Hijacker), so this drives a real listener end to end.
 func TestVSCodeTab_RelaysWebSocketUpgrade(t *testing.T) {
 	binary := writeFakeVSCodeBinary(t, "code-server", nil)
-	manager, id, idx, _ := newVSCodeFixture(t, binary)
+	manager, id, tabID, _ := newVSCodeFixture(t, binary)
 
 	srv := httptest.NewServer(newHTTPMux(&controlServer{manager: manager}))
 	defer srv.Close()
 
 	// Warm the editor: the first request is what spawns it.
-	waitForVSCodeReady(t, srv.Client(), srv.URL+vscodeProxyPath(id, idx, ""))
+	waitForVSCodeReady(t, srv.Client(), srv.URL+vscodeProxyPath(id, tabID, ""))
 
-	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http") + vscodeProxyPath(id, idx, "ws")
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http") + vscodeProxyPath(id, tabID, "ws")
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	c, _, err := websocket.Dial(ctx, wsURL, nil)
@@ -290,11 +297,11 @@ func TestVSCodeTab_RelaysWebSocketUpgrade(t *testing.T) {
 // until WebSockets stop connecting, hence the explicit lock.
 func TestVSCodeTab_ForwardsHostForOriginCheck(t *testing.T) {
 	binary := writeFakeVSCodeBinary(t, "code-server", nil)
-	manager, id, idx, _ := newVSCodeFixture(t, binary)
+	manager, id, tabID, _ := newVSCodeFixture(t, binary)
 
 	mux := newHTTPMux(&controlServer{manager: manager})
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, vscodeProxyPath(id, idx, ""), nil)
+	req := httptest.NewRequest(http.MethodGet, vscodeProxyPath(id, tabID, ""), nil)
 	req.Host = "af.example.test:8443"
 	mux.ServeHTTP(rec, req)
 	if !strings.Contains(rec.Body.String(), "xfh=af.example.test:8443") {
@@ -306,14 +313,14 @@ func TestVSCodeTab_ForwardsHostForOriginCheck(t *testing.T) {
 // installed is a normal state. Creating the tab still succeeds and the pane
 // renders an actionable install hint — never a crash or a bare error.
 func TestVSCodeTab_MissingBinaryRendersInstallHint(t *testing.T) {
-	manager, id, idx, _ := newVSCodeFixture(t, "")
+	manager, id, tabID, _ := newVSCodeFixture(t, "")
 	// An empty PATH plus no configured binary is "nothing installed". Emptied
 	// AFTER the fixture, which shells out to git to build the repo.
 	t.Setenv("PATH", t.TempDir())
 
 	mux := newHTTPMux(&controlServer{manager: manager})
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, vscodeProxyPath(id, idx, ""), nil)
+	req := httptest.NewRequest(http.MethodGet, vscodeProxyPath(id, tabID, ""), nil)
 	mux.ServeHTTP(rec, req)
 
 	body := rec.Body.String()
@@ -610,24 +617,24 @@ func newTestVSCodeSupervisor(t *testing.T, binary string) *vscodeSupervisor {
 	return v
 }
 
-func vscodeProxyPath(id string, idx int, sub string) string {
-	return fmt.Sprintf("/v1/webtab/%s/%d/%s", id, idx, sub)
+func vscodeProxyPath(sessionID, tabID, sub string) string {
+	return fmt.Sprintf("/v1/webtab/%s/%s/%s", sessionID, tabID, sub)
 }
 
 // getVSCodeProxy issues the proxy request, retrying while the editor reports that
 // it is still starting (the notice page the browser would auto-refresh through).
-func getVSCodeProxy(t *testing.T, mux *http.ServeMux, id string, idx int, sub string) string {
+func getVSCodeProxy(t *testing.T, mux *http.ServeMux, id, tabID, sub string) string {
 	t.Helper()
 	deadline := time.Now().Add(20 * time.Second)
 	for {
 		rec := httptest.NewRecorder()
-		mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, vscodeProxyPath(id, idx, sub), nil))
+		mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, vscodeProxyPath(id, tabID, sub), nil))
 		body := rec.Body.String()
 		if rec.Code == http.StatusOK {
 			return body
 		}
 		if !strings.Contains(body, "still starting") || time.Now().After(deadline) {
-			t.Fatalf("GET %s: status %d, body %s", vscodeProxyPath(id, idx, sub), rec.Code, body)
+			t.Fatalf("GET %s: status %d, body %s", vscodeProxyPath(id, tabID, sub), rec.Code, body)
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
@@ -711,11 +718,11 @@ func unixGetsid(pid int) (int, error) {
 // tab index. Only a per-request header composes with a shared editor.
 func TestVSCodeTab_ForwardsProxyPrefix(t *testing.T) {
 	binary := writeFakeVSCodeBinary(t, "code-server", nil)
-	manager, id, idx, _ := newVSCodeFixture(t, binary)
+	manager, id, tabID, _ := newVSCodeFixture(t, binary)
 
 	mux := newHTTPMux(&controlServer{manager: manager})
-	body := getVSCodeProxy(t, mux, id, idx, "")
-	want := "xfp=/v1/webtab/" + id + "/" + strconv.Itoa(idx)
+	body := getVSCodeProxy(t, mux, id, tabID, "")
+	want := "xfp=/v1/webtab/" + id + "/" + tabID
 	if !strings.Contains(body, want) {
 		t.Fatalf("proxied body %q is missing %q; openvscode-server would resolve its assets against the daemon root and never load", body, want)
 	}
@@ -733,9 +740,10 @@ func TestWebTab_DoesNotForwardProxyPrefix(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	mux, id, idx := newWebTabProxyFixture(t, upstream.URL)
+	// The web-tab fixture is id-keyed too (#1810), so this addresses its tab by id.
+	mux, id, webTabID := newWebTabProxyFixture(t, upstream.URL)
 	rec := httptest.NewRecorder()
-	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, vscodeProxyPath(id, idx, ""), nil))
+	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, vscodeProxyPath(id, webTabID, ""), nil))
 	if got != "" {
 		t.Fatalf("a web tab's dev server received X-Forwarded-Prefix=%q; only a vscode tab should", got)
 	}

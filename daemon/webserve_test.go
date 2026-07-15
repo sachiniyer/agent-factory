@@ -96,6 +96,67 @@ func TestServeSPA_StaticAssetsAndFallback(t *testing.T) {
 	require.Contains(t, string(body), `id="app"`)
 }
 
+// TestServeSPA_EscapedAssetIs404NotTheShell is the #1811 regression test.
+//
+// A previewed dev app's ABSOLUTE-path asset (/assets/app.js — what Vite, CRA,
+// Next and any static site emit) resolves against the ORIGIN ROOT, escaping the
+// /v1/webtab/ prefix entirely and landing here. The SPA history-fallback used to
+// answer it "200 text/html" with af's own shell, so a <script> received an HTML
+// document as JavaScript and a stylesheet was aborted on MIME mismatch — the
+// preview broke with nothing reporting an error anywhere.
+//
+// It cannot be RESCUED (the preview iframe's opaque-origin sandbox means the
+// browser sends no Referer to attribute it by — see serveSPA), so the requirement
+// is that it fails HONESTLY: a 404, never the shell.
+func TestServeSPA_EscapedAssetIs404NotTheShell(t *testing.T) {
+	srv := httptest.NewServer(webShellHandler(&apiSpy{}))
+	defer srv.Close()
+
+	// The exact shapes real dev servers emit.
+	for _, p := range []string{
+		"/assets/app.js",       // Vite build output
+		"/assets/app.css",      // Vite build output
+		"/static/js/bundle.js", // CRA/webpack
+		"/src/main.tsx",        // Vite dev
+		"/favicon.ico",
+		"/img/logo.png",
+	} {
+		t.Run(p, func(t *testing.T) {
+			resp, err := http.Get(srv.URL + p)
+			require.NoError(t, err)
+			body, _ := io.ReadAll(resp.Body)
+			_ = resp.Body.Close()
+
+			require.Equal(t, http.StatusNotFound, resp.StatusCode,
+				"%s must 404, not be answered with the SPA shell", p)
+			require.NotContains(t, string(body), `id="app"`,
+				"%s was answered with the af SPA's own HTML — the #1811 silent failure", p)
+			require.NotContains(t, resp.Header.Get("Content-Type"), "text/html",
+				"%s must not be answered as HTML", p)
+		})
+	}
+}
+
+// TestServeSPA_DeepLinkStillGetsTheShell guards the other side of the #1811 rule:
+// only EXTENSION-BEARING paths are refused. An extension-less path is a real
+// client-side route and must still render the app, so the honest-404 change cannot
+// break deep linking.
+func TestServeSPA_DeepLinkStillGetsTheShell(t *testing.T) {
+	srv := httptest.NewServer(webShellHandler(&apiSpy{}))
+	defer srv.Close()
+
+	for _, p := range []string{"/", "/sessions/deadbeef", "/projects/my-repo", "/tasks"} {
+		t.Run(p, func(t *testing.T) {
+			resp, err := http.Get(srv.URL + p)
+			require.NoError(t, err)
+			body, _ := io.ReadAll(resp.Body)
+			_ = resp.Body.Close()
+			require.Equal(t, http.StatusOK, resp.StatusCode)
+			require.Contains(t, string(body), `id="app"`, "%s is a client route and must render the shell", p)
+		})
+	}
+}
+
 // TestServeSPA_RejectsNonGet pins that the static branch only answers GET/HEAD; a
 // mutating verb on a non-API path is a 405, not a silent index.html.
 func TestServeSPA_RejectsNonGet(t *testing.T) {

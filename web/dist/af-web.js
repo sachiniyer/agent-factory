@@ -7219,13 +7219,21 @@ function isLoopbackWebUrl(raw) {
     return false;
   }
 }
-function webProxyPath(sessionId, tabIdx, token2) {
-  const base = `/v1/webtab/${encodeURIComponent(sessionId)}/${tabIdx}/`;
+function targetPathOf(target) {
+  try {
+    const p = new URL(target).pathname;
+    return p === "/" ? "" : p.replace(/^\//, "");
+  } catch {
+    return "";
+  }
+}
+function webProxyPath(sessionId, tabId, target, token2) {
+  const base = `/v1/webtab/${encodeURIComponent(sessionId)}/${encodeURIComponent(tabId)}/${targetPathOf(target)}`;
   return token2 ? `${base}?access_token=${encodeURIComponent(token2)}` : base;
 }
-function paneAddressUsesOrdinal(spec, realId) {
-  if (spec !== null) {
-    return iframeIsProxied(spec);
+function paneAddressUsesOrdinal(webTarget, realId) {
+  if (webTarget !== null) {
+    return false;
   }
   return realId === "";
 }
@@ -7971,7 +7979,7 @@ var SplitView = class {
       const identity = this.tabIds[leaf.tab] ?? "";
       const realId = this.tabRealIds[leaf.tab] ?? "";
       const moved = pane.tab !== leaf.tab;
-      const staleAddress = pane.identity !== identity || moved && paneAddressUsesOrdinal(spec, realId);
+      const staleAddress = pane.identity !== identity || moved && paneAddressUsesOrdinal(spec ? spec.target : null, realId);
       if (spec !== null) {
         if (pane.term || pane.webUrl !== iframeIdentity(spec) || staleAddress || pane.webArchived !== this.archived) {
           pane.term?.dispose();
@@ -7980,7 +7988,7 @@ var SplitView = class {
           pane.host.replaceChildren();
           pane.tab = leaf.tab;
           pane.identity = identity;
-          this.mountWebPane(pane, spec);
+          this.mountWebPane(pane, spec, realId);
           pane.status = "open";
           this.onPaneStatus(leaf.id, "open");
         } else if (moved) {
@@ -8072,15 +8080,15 @@ var SplitView = class {
    *  directly (best-effort). A reload control and an "open in new tab" affordance
    *  are always present; for a direct external frame a load-timeout reveals a
    *  fallback when embedding is blocked. */
-  mountWebPane(pane, spec) {
+  mountWebPane(pane, spec, realId) {
     const target = spec.target;
     const isVSCode = spec.kind === TabKind.VSCode;
     pane.webUrl = iframeIdentity(spec);
     pane.webArchived = this.archived;
     const sessionId = this.sessionId ?? "";
-    const proxied = iframeIsProxied(spec);
-    const src = this.archived ? "" : proxied ? webProxyPath(sessionId, pane.tab, this.token) : target;
-    const openHref = proxied ? webProxyPath(sessionId, pane.tab, this.token) : target;
+    const proxied = realId !== "" && iframeIsProxied(spec);
+    const src = this.archived ? "" : proxied ? webProxyPath(sessionId, realId, target, this.token) : target;
+    const openHref = proxied ? webProxyPath(sessionId, realId, target, this.token) : target;
     const wrap = el("div", "af-webpane");
     const bar = el("div", "af-webpane-bar");
     const reload = document.createElement("button");
@@ -8135,8 +8143,9 @@ var SplitView = class {
       pane.webDispose = null;
       return;
     }
-    if (!isVSCode && target.trim() === "") {
-      fbMsg.textContent = "This web tab has no URL.";
+    const unaddressable = isVSCode ? realId === "" : target.trim() === "";
+    if (unaddressable) {
+      fbMsg.textContent = isVSCode ? "This VS Code tab can't be addressed yet. Reload the page." : "This web tab has no URL.";
       fbLink.hidden = true;
       open.hidden = true;
       fallback.hidden = false;

@@ -216,12 +216,6 @@ export class SplitView {
       // tab took that slot — the misroute this whole change exists to close. A pane
       // whose tab merely MOVED then finds its identity already matching and is left
       // streaming untouched; only a genuinely replaced tab rebuilds.
-      // Move each leaf to wherever ITS tab now sits BEFORE anything reads the tree
-      // (#1779). A leaf holds an ordinal, but the pane holds a TAB; once the list
-      // shifts, reconciling from the stale ordinal would rebind the pane to whatever
-      // tab took that slot — the misroute this whole change exists to close. A pane
-      // whose tab merely MOVED then finds its identity already matching and is left
-      // streaming untouched; only a genuinely replaced tab rebuilds.
       const settled = remapByIdentity(this.tree ?? singleLeaf(initialTab), prevIds, tabIds);
       this.tree = validate(settled, tabCount);
       if (this.trees.get(sessionId) !== this.tree) {
@@ -472,17 +466,19 @@ export class SplitView {
       // (see paneAddressUsesOrdinal), which is exactly when the old address would now
       // point at another tab.
       const moved = pane.tab !== leaf.tab;
-      const staleAddress = pane.identity !== identity || (moved && paneAddressUsesOrdinal(spec, realId));
+      const staleAddress =
+        pane.identity !== identity || (moved && paneAddressUsesOrdinal(spec ? spec.target : null, realId));
       if (spec !== null) {
         // A web/vscode tab: mount an iframe instead of an xterm. Rebuilding reloads
-        // the frame and drops the dev server's in-page state (or a VS Code pane's
-        // unsaved buffers), so it happens only on a real change: a different tab
-        // here, a changed target, a moved PROXIED tab (whose src is
-        // /v1/webtab/{session}/{ordinal}/ and would otherwise proxy the tab that
-        // took its old index), or a flip of the session's ARCHIVED state (#1809) —
+        // the frame and drops the dev server's in-page state — or a VS Code pane's
+        // unsaved buffers — so it happens only on a real change: a different tab
+        // here, a changed target, or a flip of the session's ARCHIVED state (#1809),
         // which swaps a live frame for the inert placeholder and back WITHOUT
         // changing the target, the ordinal, or the identity, so no other term here
-        // would catch it.
+        // would catch it. A merely-MOVED tab is not a real change any more: an
+        // iframe pane's src encodes no ordinal (proxied → /v1/webtab/{session}/
+        // {tabId}/…, #1810; external → the target URL), so it is followed rather
+        // than rebuilt.
         if (
           pane.term ||
           pane.webUrl !== iframeIdentity(spec) ||
@@ -495,7 +491,7 @@ export class SplitView {
           pane.host.replaceChildren();
           pane.tab = leaf.tab;
           pane.identity = identity;
-          this.mountWebPane(pane, spec);
+          this.mountWebPane(pane, spec, realId);
           pane.status = "open";
           this.onPaneStatus(leaf.id, "open");
         } else if (moved) {
@@ -607,18 +603,23 @@ export class SplitView {
    *  directly (best-effort). A reload control and an "open in new tab" affordance
    *  are always present; for a direct external frame a load-timeout reveals a
    *  fallback when embedding is blocked. */
-  private mountWebPane(pane: Pane, spec: IframeSpec): void {
+  private mountWebPane(pane: Pane, spec: IframeSpec, realId: string): void {
     const target = spec.target;
     const isVSCode = spec.kind === TabKind.VSCode;
     pane.webUrl = iframeIdentity(spec);
     pane.webArchived = this.archived;
     const sessionId = this.sessionId ?? "";
-    // The SAME predicate paneAddressUsesOrdinal uses, so the address this pane
-    // holds and the rule for when that address goes stale can never disagree. (A
-    // vscode tab is always proxied: its code-server is loopback-only and the proxy
-    // path is its only address — there is no target to classify and no
-    // direct-iframe fallback to offer.)
-    const proxied = iframeIsProxied(spec);
+    // Proxied THROUGH the daemon, addressed by the tab's stable id (#1810). realId is
+    // required: the proxy route has no ordinal form to fall back to, and every live
+    // tab carries an id (the daemon backfills one on load), so an id-less tab is
+    // unreachable in practice.
+    //
+    // A vscode tab is always proxied by kind — its code-server is loopback-only and
+    // there is no target to classify — but it needs the id just the same, and unlike
+    // a web tab it has NO direct-frame degradation: with no id there is no address at
+    // all, which the unaddressable branch below renders honestly rather than as a
+    // blank pane.
+    const proxied = realId !== "" && iframeIsProxied(spec);
     // An archived session is inert (#1809 follow-up), so the frame is never pointed
     // at the target: the daemon refuses to proxy an archived session's tab, and for
     // a DIRECT external tab there is no daemon in the path to refuse — the frame
@@ -626,11 +627,14 @@ export class SplitView {
     // here (rather than only overlaying the placeholder) is what guarantees no
     // request is issued either way — including the spawn a vscode tab's first
     // request would otherwise trigger.
-    const src = this.archived ? "" : proxied ? webProxyPath(sessionId, pane.tab, this.token) : target;
+    const src = this.archived ? "" : proxied ? webProxyPath(sessionId, realId, target, this.token) : target;
     // The "open externally" href: for a proxied local preview or editor, the
-    // same-origin proxy path (works for the remote viewer); for an external tab,
-    // the site URL.
-    const openHref = proxied ? webProxyPath(sessionId, pane.tab, this.token) : target;
+    // same-origin proxy path (works for the remote viewer); for an external tab, the
+    // site URL. Computed from the target rather than reused from `src`, which an
+    // archived session deliberately blanks — the two only coincide while the session
+    // is live. The archived branch below withdraws this link outright, so it is never
+    // the thing that reaches an inert session's target.
+    const openHref = proxied ? webProxyPath(sessionId, realId, target, this.token) : target;
 
     const wrap = el("div", "af-webpane");
 
@@ -731,11 +735,16 @@ export class SplitView {
       return;
     }
 
-    // A WEB tab with no target (a malformed request, or an older persisted record)    // renders a clean fallback rather than a blank pane — there is nothing to frame
-    // or open. A vscode tab is exempt: having no target is its normal state, and
-    // its src is the proxy path, which is always well-formed.
-    if (!isVSCode && target.trim() === "") {
-      fbMsg.textContent = "This web tab has no URL.";
+    // Nothing addressable to frame — render a clean fallback rather than a blank
+    // pane. The two kinds fail differently: a WEB tab has no target (a malformed
+    // request, or an older persisted record), while a VSCODE tab has no target BY
+    // DESIGN and instead needs the tab id its proxy path is keyed by (#1810). The id
+    // is backfilled when the daemon loads the record, so a reload is the real fix.
+    const unaddressable = isVSCode ? realId === "" : target.trim() === "";
+    if (unaddressable) {
+      fbMsg.textContent = isVSCode
+        ? "This VS Code tab can't be addressed yet. Reload the page."
+        : "This web tab has no URL.";
       fbLink.hidden = true;
       open.hidden = true;
       fallback.hidden = false;

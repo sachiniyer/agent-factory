@@ -16,9 +16,9 @@ export type IframeSpec =
   | { kind: typeof TabKind.VSCode; target: "" };
 
 /** Whether an iframe pane is served through the daemon proxy (rather than framing
- *  its target directly). This is the single predicate behind BOTH the pane's src
- *  and paneAddressUsesOrdinal, so the address a pane holds and the rule for when
- *  that address goes stale can never disagree.
+ *  its target directly) — i.e. whether its src is a /v1/webtab/ path or the target
+ *  URL itself. (It no longer feeds paneAddressUsesOrdinal: since #1810 the proxy is
+ *  id-keyed, so no iframe pane addresses by ordinal and the question is moot.)
  *
  *  A vscode tab is ALWAYS proxied — its code-server is loopback-only, and it has no
  *  target to classify, so the empty-target test that decides a web tab would answer
@@ -53,18 +53,47 @@ export function isLoopbackWebUrl(raw: string): boolean {
   }
 }
 
+/** The path component of a web-tab target, as the proxy URL must mirror it. Returns
+ *  "" for a root target (or an unparseable one), whose proxy path is just the tab
+ *  prefix. Percent-encoding in the target is preserved verbatim — `pathname` is
+ *  already the escaped form, so it is spliced in without a re-encode. */
+function targetPathOf(target: string): string {
+  try {
+    const p = new URL(target).pathname;
+    return p === "/" ? "" : p.replace(/^\//, "");
+  } catch {
+    return "";
+  }
+}
+
 /** The same-origin daemon proxy path for a loopback web tab, so the iframe hits
  *  the daemon (which shares the machine with the dev server) rather than the
  *  viewer's own machine. The bearer token rides ?access_token= for network peers
  *  (an iframe src can't set the Authorization header); a loopback/tokenless client
- *  sends none. The trailing slash matters — the route requires it, and it makes
- *  the dev app's RELATIVE asset URLs resolve under the proxy prefix.
+ *  sends none.
  *
- *  NOTE the {tabIdx}: this route is ORDINAL-addressed, so unlike a PTY stream a web
- *  tab cannot be addressed by its stable id. That is why paneAddressUsesOrdinal
- *  answers true for a proxied tab however stable its id is. */
-export function webProxyPath(sessionId: string, tabIdx: number, token: string | null): string {
-  const base = `/v1/webtab/${encodeURIComponent(sessionId)}/${tabIdx}/`;
+ *  Two things this URL must get right:
+ *
+ *  - {tabId} is the tab's STABLE id (#1738), never its ordinal. Closing a LOWER tab
+ *    shifts every higher ordinal down, so an ordinal-keyed src left an open frame
+ *    silently proxying a DIFFERENT dev server (#1810). By id, a moved tab keeps
+ *    resolving to itself and a closed one 404s.
+ *  - The target's own path is MIRRORED into the URL, so the browser resolves the
+ *    app's relative URLs at the same depth the dev server serves them at:
+ *    target http://localhost:3000/app/viewer.html → /v1/webtab/<sid>/<id>/app/viewer.html.
+ *    A sibling (x.css) and a PARENT-relative link (../shared.css) then both land
+ *    inside the prefix, and a subdirectory target loads. The daemon forwards the
+ *    remainder verbatim (daemon/webtab_proxy.go).
+ *
+ *  The trailing slash on a root target matters: the route requires it, and it keeps
+ *  the app's relative URLs resolving under the prefix rather than beside it. */
+export function webProxyPath(
+  sessionId: string,
+  tabId: string,
+  target: string,
+  token: string | null,
+): string {
+  const base = `/v1/webtab/${encodeURIComponent(sessionId)}/${encodeURIComponent(tabId)}/${targetPathOf(target)}`;
   return token ? `${base}?access_token=${encodeURIComponent(token)}` : base;
 }
 
@@ -74,29 +103,31 @@ export function webProxyPath(sessionId: string, tabIdx: number, token: string | 
  *  simply be followed.
  *
  *  The question is NOT "does this tab have a stable id" — it is "does the address this
- *  pane already holds still name the right thing". The two come apart:
+ *  pane already holds still name the right thing".
  *
- *  - A terminal streams `?tab_id=<id>` when the tab has a real id and `?tab=<ordinal>`
- *    otherwise — never both (terminal.ts picks one). So an id-addressed terminal's
- *    ordinal is inert and a move needs no rebuild, while a legacy one's ordinal IS the
- *    address.
- *  - A web tab ignores the tab id entirely. A LOOPBACK preview is fetched through the
- *    daemon proxy at /v1/webtab/{session}/{ordinal}/ — ordinal-keyed no matter how
- *    stable the tab's id is — so a moved proxied tab MUST rebuild, or its iframe
- *    silently proxies whatever tab took its old index. An EXTERNAL tab's src is the
- *    target URL itself and encodes no ordinal, so it can be followed.
- *  - A VSCODE tab is always proxied, so it always addresses by ordinal — it has no
- *    target URL to fall back to, so a moved one must rebuild or it frames another
- *    tab's editor.
+ *  Only ONE address form still embeds an ordinal: a legacy terminal streaming
+ *  `?tab=<ordinal>` because its tab has no id. Everything else is ordinal-free and a
+ *  moved tab is simply followed —
  *
- *  Conflating the two either reloads every moved iframe (needless in-page state loss)
- *  or, worse, leaves a proxied frame pointed at a different tab — the misroute this
- *  all exists to end.
+ *  - a terminal with a real id streams `?tab_id=<id>` (terminal.ts sends one or the
+ *    other, never both), so its captured ordinal is inert;
+ *  - a proxied web tab's src is `/v1/webtab/{session}/{tabId}/…` — id-keyed since
+ *    #1810, so a shifted ordinal no longer changes what it fetches;
+ *  - an external web tab's src is the target URL itself and encodes no ordinal;
+ *  - a VSCODE pane is always proxied, so it rides the same id-keyed guarantee: its
+ *    src is /v1/webtab/{session}/{tabId}/, and a move cannot repoint it at another
+ *    session's editor.
  *
- *  `spec` is null for a terminal pane; `realId` is "" for a tab with no daemon id. */
-export function paneAddressUsesOrdinal(spec: IframeSpec | null, realId: string): boolean {
-  if (spec !== null) {
-    return iframeIsProxied(spec); // proxied → /v1/webtab/…/{ordinal}/
+ *  Web panes used to answer true here purely BECAUSE the proxy route was
+ *  ordinal-keyed: a moved tab had to be torn down or its frame would silently proxy
+ *  whoever took its old index. Keying the route by id removed the reason, so a moved
+ *  preview now keeps its live frame — and its dev server's in-page state — instead of
+ *  reloading for nothing.
+ *
+ *  `webTarget` is null for a terminal pane; `realId` is "" for a tab with no daemon id. */
+export function paneAddressUsesOrdinal(webTarget: string | null, realId: string): boolean {
+  if (webTarget !== null) {
+    return false; // proxied → id-keyed (#1810); external → the target URL itself
   }
   return realId === ""; // a legacy terminal streams by ?tab=<ordinal>
 }

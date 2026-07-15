@@ -230,6 +230,40 @@ expose `listen_addr` to anything beyond loopback, put encryption in front of it:
 > even for the proxy's loopback connection — so the proxy must forward the token.
 > A same-host proxy can never silently bypass the token on a network-bound listener.
 
+### The web-tab preview cookie and `X-Forwarded-Proto`
+
+A [web tab](web.md#web-tabs)'s preview is an iframe, and an iframe's sub-resource
+requests can carry neither an `Authorization` header nor an `?access_token` query.
+So when a token authorizes the preview's top-level navigation, the daemon replies
+with a cookie — `af_webtab_token`, `HttpOnly`, `SameSite=Strict`, and scoped to the
+`/v1/webtab/` path — and the gate accepts that cookie **only** under that prefix.
+It is never honored on the RPC surface, so it adds no ambient credential there.
+
+The cookie's **`Secure`** attribute tracks the scheme the request actually arrived
+over, because a browser silently **discards** a `Secure` cookie delivered over
+`http://` to a non-localhost origin:
+
+| how the browser reached af | `Secure` |
+|---|---|
+| plain HTTP straight to `listen_addr` (Tailscale/VPN/LAN) | omitted |
+| HTTPS to a **TLS-terminating proxy** that sets `X-Forwarded-Proto: https` | set |
+| direct TLS (`r.TLS`) | set |
+
+If you front af with a TLS-terminating proxy, **set `X-Forwarded-Proto`** — nginx
+and Caddy do by default (`proxy_set_header X-Forwarded-Proto $scheme;`). Without
+it the cookie is issued without `Secure`; it still works, but it loses the
+downgrade protection your `https://` origin could have given it.
+
+The header is only ever trusted to *add* the flag, never to remove one: a peer
+that forges it merely asks for a stricter cookie its own plain-HTTP browser then
+refuses to store, so the failure is a broken preview rather than a weakened one.
+The token itself is always verified by the gate regardless.
+
+> On a plain-HTTP listener the token traverses the wire in the clear either way —
+> the `?access_token` query that bootstraps the preview shares that hop. `Secure`
+> is not what protects it; [terminating TLS](#transport-encryption-terminate-tls-yourself)
+> or using a private overlay is.
+
 ---
 
 ## When is a token required? Loopback vs network

@@ -71,6 +71,17 @@ const VSCODE_MARKER = process.env.AF_VSCODE_MARKER ?? "AF_VSCODE_TAB_OK";
 // No vscode session/tab is seeded — the test below creates its tab through the +
 // menu, which needs no fixture and covers the real create flow.
 const WEBTAB_EXTERNAL_URL = process.env.AF_WEBTAB_EXTERNAL_URL ?? "https://blocked.example.test/";
+// The mirror-path session (#1806/#1811): one web tab targeting a SUBDIRECTORY
+// document with sibling, parent-relative and absolute-path assets — the shape the
+// original single-document fixture had no sub-resources to express.
+const SESSION_VITE = process.env.AF_WEB_SESSION_VITE ?? "probe-vite";
+const VITE_MARKER = process.env.AF_VITE_MARKER ?? "AF_VITE_OK";
+const VITE_ABS_TITLE = process.env.AF_VITE_ABS_TITLE ?? "AF_ABS_ASSET_EXECUTED";
+// The #1810 misroute session — tabs [agent, lower, mis, after], where "mis" is the
+// vite-shaped server and "lower"/"after" are the plain one. Visited by exactly one
+// test, so its close-a-tab assertions are independent of what an earlier test left
+// selected. See web-selftest-entry.sh for why that tab layout is load-bearing.
+const SESSION_MIS = process.env.AF_WEB_SESSION_MIS ?? "probe-misroute";
 
 /** A rail row by its session title. */
 function row(page: Page, title: string): Locator {
@@ -838,6 +849,103 @@ test("web tab (feat): a local dev-server preview is daemon-proxied and rendered 
   });
 });
 
+test("web tab (#1806/#1811): a Vite-shaped subdirectory app previews, and its absolute-path asset 404s instead of getting the SPA shell", async () => {
+  // The fixture is the shape the old single-document fixture structurally could not
+  // fail on: a document under /app/ referencing a SIBLING (x.css), a PARENT-relative
+  // (../shared.css) and an ABSOLUTE (/assets/app.js) asset.
+  await row(page, SESSION_VITE).click();
+  await expect(page.locator(".af-main.af-main-term")).toBeVisible();
+  const tabbar = page.locator(".af-tabbar");
+  await tabbar.locator(".af-tab", { hasText: "vite" }).click();
+
+  const frame = page.locator(".af-term-host .af-pane-host iframe.af-webframe");
+  await expect(frame).toHaveCount(1, { timeout: 15_000 });
+  // The src MIRRORS the target's path and is keyed by the tab's stable id — not an
+  // ordinal (#1810), not a bare prefix that drops the target's path (#1806).
+  await expect(frame).toHaveAttribute("src", /\/v1\/webtab\/[^/]+\/[^/]+\/app\/viewer\.html/);
+
+  const framed = page.frameLocator(".af-webframe");
+  // 1. The SUBDIRECTORY target document itself loads. This is what #1806 documented
+  //    as a known limit; the mirror model removes it.
+  await expect(framed.locator("#marker")).toHaveText(VITE_MARKER, { timeout: 15_000 });
+  // 2. A SIBLING asset resolves beside the document (/app/x.css upstream).
+  await expect(framed.locator("#sib")).toHaveCSS("color", "rgb(1, 2, 3)", { timeout: 15_000 });
+  // 3. A PARENT-relative asset resolves INSIDE the prefix (/shared.css upstream).
+  //    This is the one only a depth-mirroring URL can serve: with a flat prefix,
+  //    "../" climbs out of the tab entirely.
+  await expect(framed.locator("#par")).toHaveCSS("color", "rgb(4, 5, 6)", { timeout: 15_000 });
+
+  // 4. The ABSOLUTE-path asset escaped the prefix and hit the daemon ROOT. The page
+  //    above really did request it (the framed document carries the <script>), but an
+  //    opaque-origin subframe's escaped request is not reported to page.on("response")
+  //    — so ask the daemon for that exact URL directly instead, which is the contract
+  //    that matters: it must fail HONESTLY rather than silently, with a 404 and never
+  //    "200 text/html" handing af's own SPA shell to a <script>.
+  const abs = await page.request.get("/assets/app.js");
+  expect(abs.status(), "/assets/app.js must 404, not be answered with the SPA shell").toBe(404);
+  expect(abs.headers()["content-type"] ?? "", "/assets/app.js must not be answered as HTML").not.toContain(
+    "text/html",
+  );
+  expect(await abs.text(), "the af SPA's own HTML was served as the app's JavaScript").not.toContain(
+    'id="app"',
+  );
+
+  // 5. And nothing executed: the framed document's title is untouched, so the shell
+  //    was never run as the app's script.
+  const viteFrame = page.frames().find((f) => f.url().includes("/app/viewer.html"));
+  expect(viteFrame, "the previewed frame should be attached").toBeTruthy();
+  expect(await viteFrame!.title()).not.toContain(VITE_ABS_TITLE);
+});
+
+test("web tab (#1810): closing a LOWER tab leaves an open preview on its OWN dev server", async () => {
+  // The #1810 misroute, end to end. This session's tabs are [agent, lower, mis,
+  // after]; a pane opens on "mis" (index 2, the vite-shaped server). Closing "lower"
+  // shifts mis 2->1 and after 3->2, so an ORDINAL-keyed iframe would start serving
+  // "after" — the OTHER dev server, at HTTP 200, with no error and no reload. The
+  // stable-id route makes that impossible.
+  await row(page, SESSION_MIS).click();
+  await expect(page.locator(".af-main.af-main-term")).toBeVisible();
+  const tabbar = page.locator(".af-tabbar");
+  await expect(tabbar.locator(".af-tab", { hasText: "lower" })).toHaveCount(1, { timeout: 15_000 });
+
+  await tabbar.locator(".af-tab", { hasText: "mis" }).click();
+  const frame = page.locator(".af-term-host .af-pane-host iframe.af-webframe");
+  await expect(frame).toHaveCount(1, { timeout: 15_000 });
+  const framed = page.frameLocator(".af-webframe");
+  await expect(framed.locator("#marker")).toHaveText(VITE_MARKER, { timeout: 15_000 });
+
+  // Stamp the live iframe: the expando survives only if this exact element stays
+  // mounted. Id-keying means a mere ordinal shift no longer forces a remount, so the
+  // dev server's in-page state is kept too.
+  await page.evaluate(() => {
+    const f = document.querySelector(".af-term-host .af-pane-host iframe.af-webframe") as
+      | (HTMLIFrameElement & { __afStamp?: string })
+      | null;
+    if (f) {
+      f.__afStamp = "af-not-remounted";
+    }
+  });
+
+  // The developer closes an UNRELATED, LOWER tab.
+  await tabbar.locator(".af-tab", { hasText: "lower" }).locator(".af-tab-close").click();
+  await expect(tabbar.locator(".af-tab", { hasText: "lower" })).toHaveCount(0, { timeout: 30_000 });
+  // The shift really happened — without this the assertion below proves nothing.
+  await expect(tabbar.locator(".af-tab")).toHaveCount(3, { timeout: 30_000 });
+
+  // THE ASSERTION: the pane still shows mis's OWN dev server. Under the ordinal route
+  // this read WEBTAB_LOCAL_MARKER — a different app, silently.
+  await expect(framed.locator("#marker")).toHaveText(VITE_MARKER, { timeout: 15_000 });
+  await expect(framed.locator("#marker")).not.toHaveText(WEBTAB_LOCAL_MARKER);
+  // Still the same frame element: followed, not torn down.
+  const stamp = await page.evaluate(() => {
+    const f = document.querySelector(".af-term-host .af-pane-host iframe.af-webframe") as
+      | (HTMLIFrameElement & { __afStamp?: string })
+      | null;
+    return f?.__afStamp ?? null;
+  });
+  expect(stamp).toBe("af-not-remounted");
+});
+
 test("web tab (#1809): a web tab survives archive -> restore and still renders through the proxy", async () => {
   // The harness already drove the issue's CLI repro end to end against the real
   // daemon: this session was given a web tab ("webpreview" -> the loopback server)
@@ -1078,10 +1186,10 @@ test("web tab (feat): a surviving web tab that only SHIFTS ordinal is followed, 
   // iframe src is the target URL, which encodes no ordinal — so the frame must be
   // FOLLOWED in place. Remounting would reload it and drop its in-page state.
   //
-  // (A PROXIED tab is the opposite case and MUST remount: its src is
-  // /v1/webtab/{session}/{ordinal}/, so following it in place would silently proxy
-  // whichever tab took the old index. paneAddressUsesOrdinal draws that line; the unit
-  // tests pin both sides.)
+  // (A PROXIED tab used to be the opposite case and had to remount, because its src
+  // was /v1/webtab/{session}/{ORDINAL}/. Since #1810 keyed that route by the stable
+  // tab id, no web pane's address embeds an ordinal and both kinds are followed —
+  // see the #1810 test above, which asserts it on a proxied pane.)
   await row(page, SESSION_WEB).click();
   await expect(page.locator(".af-main.af-main-term")).toBeVisible();
   const tabbar = page.locator(".af-tabbar");
