@@ -153,6 +153,17 @@ export function supportsTabManagement(s: SessionData): boolean {
   return s.backend_type !== "remote";
 }
 
+/** Whether the web may offer tab management for a session RIGHT NOW: its backend
+ *  must support it AND it must not be archived. An archived session is inert — the
+ *  daemon refuses both CreateTab (since #1196) and CloseTab (#1809 follow-up) on
+ *  one — so offering a + / × there can only produce a guaranteed-to-fail call, and
+ *  the × specifically would try to strip the web-tab URL that archive preserved for
+ *  the restore. Every site that offers or fires a tab mutation reads THIS, not
+ *  supportsTabManagement, so the affordances and the daemon's answer can't drift. */
+export function canManageTabs(s: SessionData): boolean {
+  return supportsTabManagement(s) && !isArchived(s);
+}
+
 /** The selected session's tabs, always non-empty: a pre-#930 record with no tabs
  *  is shown as a single implicit agent tab so the bar (and index math) never sees
  *  an empty list. */
@@ -941,7 +952,7 @@ export class AppShell {
       return;
     }
     const tabs = sessionTabs(selected);
-    const canManage = supportsTabManagement(selected);
+    const canManage = canManageTabs(selected);
     // The active index is clamped: a resync that shrank the list must not leave the
     // highlight (and the streamed tab) pointing past the end.
     const active = Math.min(Math.max(state.activeTab, 0), tabs.length - 1);
@@ -1071,7 +1082,7 @@ export function tabBarSig(state: AppState): string {
   }
   const tabs = sessionTabs(selected);
   const active = Math.min(Math.max(state.activeTab, 0), tabs.length - 1);
-  const canManage = supportsTabManagement(selected);
+  const canManage = canManageTabs(selected);
   const shown = [...new Set(state.shownTabs)].sort((a, b) => a - b);
   return JSON.stringify([selected.id ?? "", tabs.map((t) => [t.kind, t.name]), active, shown, canManage]);
 }

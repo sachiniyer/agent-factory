@@ -172,6 +172,16 @@ func (m *Manager) CloseTab(req CloseTabRequest) (string, error) {
 	if !instance.Capabilities().TabManagement {
 		return "", fmt.Errorf("cannot close a tab on remote session %q: its tabs are fixed by remote_hooks config, not user-managed", title)
 	}
+	// An archived session's tabs are not editable (#1809 follow-up). Archive
+	// preserves web tabs so a restore can render them again; without this guard a
+	// tab-delete (CLI or the web ×) would permanently strip that URL out of the
+	// archived record BEFORE the restore that was supposed to bring it back — the
+	// exact loss the preservation exists to prevent, just moved later. This mirrors
+	// the AddTab side (TabSpawnBlocked), which has refused archived sessions since
+	// #1196: archive is inert in BOTH directions.
+	if instance.IsArchived() {
+		return "", fmt.Errorf("cannot close a tab on archived session %q; restore it first (af sessions restore)", title)
+	}
 
 	// Serialize the tab close against archive/kill/restore teardown for this
 	// session. Those paths hold the same op-lock while closing every tab's tmux

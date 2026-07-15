@@ -208,3 +208,13 @@ func (i *Instance) AddTabForTest(name string, kind TabKind) {
 	defer i.mu.Unlock()
 	i.Tabs = append(i.Tabs, &Tab{Name: name, Kind: kind})
 }
+
+// AddWebTabForTest appends a web tab carrying url. Test-only: the URL is the
+// whole payload of a web tab, so tests that assert it survives a lifecycle step
+// (archive → restore, #1809) need to seed one. It bypasses AddWebTab's started /
+// tmux-bound preconditions, which a fake-backend instance cannot satisfy.
+func (i *Instance) AddWebTabForTest(name, url string) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	i.Tabs = append(i.Tabs, &Tab{ID: newTabID(), Name: name, Kind: TabKindWeb, URL: url})
+}

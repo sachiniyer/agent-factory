@@ -7698,6 +7698,11 @@ var SplitView = class {
   // "kind:name" identity did. webTargetAt reads it to tell a web/iframe tab from a
   // terminal one.
   tabKinds = [];
+  // Whether the shown session is archived (#1809 follow-up). An archived session is
+  // inert: the daemon refuses to proxy its preserved web tab, so the pane renders an
+  // archived placeholder instead of a frame that could only fail — or, worse, could
+  // proxy a stale loopback port that now hosts something else.
+  archived = false;
   tree = null;
   focusedId = null;
   // Counts explicit layout/focus mutations, for the stale-async guard — see
@@ -7717,7 +7722,7 @@ var SplitView = class {
    * fresh single leaf bound to `initialTab`); the SAME session only re-validates the
    * tree against the current tab list (a tab closed elsewhere). Cheap on a no-op.
    */
-  setSession(sessionId, token2, tabIds, initialTab, tabTargets = [], tabKinds = [], tabRealIds = []) {
+  setSession(sessionId, token2, tabIds, initialTab, tabTargets = [], tabKinds = [], tabRealIds = [], archived = false) {
     this.token = token2;
     const prevIds = this.tabIds;
     const prevKinds = this.tabKinds;
@@ -7726,6 +7731,8 @@ var SplitView = class {
     this.tabRealIds = tabRealIds;
     this.tabTargets = tabTargets;
     this.tabKinds = tabKinds;
+    const archivedChanged = archived !== this.archived;
+    this.archived = archived;
     const tabCount = tabIds.length > 0 ? tabIds.length : 1;
     if (sessionId === null || token2 === null) {
       this.teardown();
@@ -7743,7 +7750,7 @@ var SplitView = class {
         this.trees.set(sessionId, this.tree);
       }
       const rebound = tabsRebound(prevIds, prevKinds, prevTargets, tabIds, tabKinds, tabTargets);
-      if (before !== this.tree || rebound) {
+      if (before !== this.tree || rebound || archivedChanged) {
         this.reconcile();
         this.report();
       }
@@ -7942,7 +7949,7 @@ var SplitView = class {
       const moved = pane.tab !== leaf.tab;
       const staleAddress = pane.identity !== identity || moved && paneAddressUsesOrdinal(webTarget, realId);
       if (webTarget !== null) {
-        if (pane.term || pane.webUrl !== webTarget || staleAddress) {
+        if (pane.term || pane.webUrl !== webTarget || staleAddress || pane.webArchived !== this.archived) {
           pane.term?.dispose();
           pane.term = null;
           pane.webDispose?.();
@@ -8007,7 +8014,8 @@ var SplitView = class {
       identity: "",
       status: "connecting",
       webUrl: null,
-      webDispose: null
+      webDispose: null,
+      webArchived: false
     };
     this.wireDrop(pane);
     return pane;
@@ -8034,9 +8042,10 @@ var SplitView = class {
    *  fallback when embedding is blocked. */
   mountWebPane(pane, target) {
     pane.webUrl = target;
+    pane.webArchived = this.archived;
     const sessionId = this.sessionId ?? "";
     const proxied = target !== "" && isLoopbackWebUrl(target);
-    const src = proxied ? webProxyPath(sessionId, pane.tab, this.token) : target;
+    const src = this.archived ? "" : proxied ? webProxyPath(sessionId, pane.tab, this.token) : target;
     const openHref = proxied ? webProxyPath(sessionId, pane.tab, this.token) : target;
     const wrap = el("div", "af-webpane");
     const bar = el("div", "af-webpane-bar");
@@ -8076,6 +8085,16 @@ var SplitView = class {
     fallback.append(fbMsg, fbLink);
     wrap.append(bar, frame, fallback);
     pane.host.replaceChildren(wrap);
+    if (this.archived) {
+      fallback.classList.add("af-webpane-archived");
+      fbMsg.textContent = "This session is archived. Restore it to load this web tab.";
+      fbLink.hidden = true;
+      open.hidden = true;
+      fallback.hidden = false;
+      frame.hidden = true;
+      pane.webDispose = null;
+      return;
+    }
     if (target.trim() === "") {
       fbMsg.textContent = "This web tab has no URL.";
       fbLink.hidden = true;
@@ -8575,6 +8594,9 @@ function addTaskModal(projects, defaultProject2, callbacks) {
 var MAX_TABS = 9;
 function supportsTabManagement(s) {
   return s.backend_type !== "remote";
+}
+function canManageTabs(s) {
+  return supportsTabManagement(s) && !isArchived(s);
 }
 function sessionTabs(s) {
   if (s.tabs && s.tabs.length > 0) {
@@ -9154,7 +9176,7 @@ var AppShell = class {
       return;
     }
     const tabs = sessionTabs(selected);
-    const canManage = supportsTabManagement(selected);
+    const canManage = canManageTabs(selected);
     const active = Math.min(Math.max(state.activeTab, 0), tabs.length - 1);
     const shown = new Set(state.shownTabs);
     const children = tabs.map(
@@ -9231,7 +9253,7 @@ function tabBarSig(state) {
   }
   const tabs = sessionTabs(selected);
   const active = Math.min(Math.max(state.activeTab, 0), tabs.length - 1);
-  const canManage = supportsTabManagement(selected);
+  const canManage = canManageTabs(selected);
   const shown = [...new Set(state.shownTabs)].sort((a, b) => a - b);
   return JSON.stringify([selected.id ?? "", tabs.map((t) => [t.kind, t.name]), active, shown, canManage]);
 }
@@ -9624,7 +9646,7 @@ function openTab(index) {
 function createSessionTab() {
   const sel = selectedSessionData();
   const tok = token;
-  if (!sel || tok === null || !supportsTabManagement(sel)) {
+  if (!sel || tok === null || !canManageTabs(sel)) {
     return;
   }
   clearTabError();
@@ -9640,7 +9662,7 @@ function createSessionTab() {
 function closeSessionTab(index) {
   const sel = selectedSessionData();
   const tok = token;
-  if (!sel || tok === null || index <= 0 || !supportsTabManagement(sel)) {
+  if (!sel || tok === null || index <= 0 || !canManageTabs(sel)) {
     return;
   }
   const tabs = sessionTabs(sel);
@@ -9804,7 +9826,8 @@ function syncSplit(state) {
   const tabRealIds = selected ? sessionTabs(selected).map(tabRealId) : [""];
   const tabTargets = selected ? sessionTabs(selected).map((t) => t.url) : [];
   const tabKinds = selected ? sessionTabs(selected).map((t) => t.kind) : [];
-  splitView.setSession(tok !== null ? selId : null, tok, tabIds, initialTab, tabTargets, tabKinds, tabRealIds);
+  const archived = selected ? isArchived(selected) : false;
+  splitView.setSession(tok !== null ? selId : null, tok, tabIds, initialTab, tabTargets, tabKinds, tabRealIds, archived);
 }
 function disposeSplit() {
   splitView.dispose();
@@ -9904,7 +9927,7 @@ function onKeydown(e) {
       selectedId: state.selectedId,
       tabCount: selected ? sessionTabs(selected).length : 1,
       activeTab: state.activeTab,
-      tabManagement: selected ? supportsTabManagement(selected) : false
+      tabManagement: selected ? canManageTabs(selected) : false
     },
     { alt: e.altKey }
   );

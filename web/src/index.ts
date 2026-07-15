@@ -40,6 +40,7 @@ import { decideKey, type KeyboardFocus, type View } from "./nav.js";
 import { loadProjectChoice, persistProjectChoice, pickerProjects, reconcileProject, scopeToProject } from "./project.js";
 import { applyEvent, clampActiveTab, pickSelection, upsertSession } from "./sessions.js";
 import { SplitView } from "./split.js";
+import { isArchived } from "./status.js";
 import { Store } from "./store.js";
 import { bootStampTheme, persistThemeChoice, stampTheme, type ThemeChoice } from "./theme.js";
 import { addTaskModal, type AddTaskInput, buildTask } from "./tasks.js";
@@ -49,7 +50,7 @@ import {
   orderedSessions,
   renderLogin,
   sessionTabs,
-  supportsTabManagement,
+  canManageTabs,
   tabIdentity,
   tabRealId,
   type AppState,
@@ -588,7 +589,7 @@ function createSessionTab(): void {
   const tok = token;
   // `tok === null` not `!tok`: "" is the authorized-tokenless credential (#1696),
   // so a loopback client can still create tabs.
-  if (!sel || tok === null || !supportsTabManagement(sel)) {
+  if (!sel || tok === null || !canManageTabs(sel)) {
     return;
   }
   clearTabError();
@@ -615,7 +616,7 @@ function closeSessionTab(index: number): void {
   const sel = selectedSessionData();
   const tok = token;
   // `tok === null` not `!tok`: "" is the authorized-tokenless credential (#1696).
-  if (!sel || tok === null || index <= 0 || !supportsTabManagement(sel)) {
+  if (!sel || tok === null || index <= 0 || !canManageTabs(sel)) {
     return;
   }
   const tabs = sessionTabs(sel);
@@ -897,9 +898,13 @@ function syncSplit(state: AppState): void {
   // The kind of each tab, parallel to tabIds — the split view reads it to tell a web
   // tab from a terminal one now that the identity is the opaque stable id (#1738).
   const tabKinds = selected ? sessionTabs(selected).map((t) => t.kind) : [];
+  // Whether the shown session is archived (#1809 follow-up): an archived session's
+  // preserved web tabs render an inert placeholder rather than a live frame, and the
+  // flip re-renders them on archive/restore even when the tab list is unchanged.
+  const archived = selected ? isArchived(selected) : false;
   // `tok !== null` not `tok`: "" is the authorized-tokenless credential (#1696), so a
   // loopback client still attaches its live panes.
-  splitView.setSession(tok !== null ? selId : null, tok, tabIds, initialTab, tabTargets, tabKinds, tabRealIds);
+  splitView.setSession(tok !== null ? selId : null, tok, tabIds, initialTab, tabTargets, tabKinds, tabRealIds, archived);
 }
 
 function disposeSplit(): void {
@@ -1068,7 +1073,7 @@ function onKeydown(e: KeyboardEvent): void {
       selectedId: state.selectedId,
       tabCount: selected ? sessionTabs(selected).length : 1,
       activeTab: state.activeTab,
-      tabManagement: selected ? supportsTabManagement(selected) : false,
+      tabManagement: selected ? canManageTabs(selected) : false,
     },
     { alt: e.altKey },
   );

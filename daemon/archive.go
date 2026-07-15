@@ -15,7 +15,8 @@ import (
 )
 
 // ArchiveSession archives a session (#1028): it tears down the session's tmux
-// (agent + shell/process tabs) while PRESERVING the record, relocates the
+// (agent + shell/process tabs; web tabs have none and are preserved with their
+// URLs, #1809) while PRESERVING the record, relocates the
 // worktree to the global archive dir (<AF_HOME>/archived/<repoID>/<title>/), and
 // marks the instance Archived. The instance stays in the manager map as an inert
 // row (unlike Kill, which deletes it); a later RestoreArchived brings it back.
@@ -271,8 +272,10 @@ func (m *Manager) restoreRemoteSession(repoID string, instance *session.Instance
 // back to where session creation would place it under the configured
 // worktree_root (a free sibling path, or under $AF_HOME/worktrees for
 // subdirectory users — #1540), re-registers it, re-spawns the agent, and marks
-// the instance Running. Only the agent session is brought back — shell/process
-// tabs were dropped at archive time. Returns the restored worktree path.
+// the instance Running. The agent session is brought back, as are any web tabs
+// (pure metadata: they were never torn down, so their URLs ride back on the
+// record and render again, #1809); shell/process tabs were dropped at archive
+// time. Returns the restored worktree path.
 //
 // Concurrency mirrors ArchiveSession/KillSession (killsInFlight + op-lock). On a
 // repo-gone failure the archive is left intact with an actionable error; on a

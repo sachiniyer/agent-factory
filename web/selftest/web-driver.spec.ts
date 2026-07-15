@@ -58,6 +58,10 @@ const READY_MARKER = process.env.AF_WEB_READY_MARKER ?? "AF_SELFTEST_READY";
 // tab named "preview" pointing at a loopback server the daemon proxies, and an
 // EXTERNAL web tab named "external" whose host this test intercepts.
 const SESSION_WEB = process.env.AF_WEB_SESSION_WEB ?? "probe-web";
+// A session the harness already drove through web tab -> archive -> restore (#1809).
+const SESSION_WEB_RESTORED = process.env.AF_WEB_SESSION_WEB_RESTORED ?? "probe-restored";
+// A session the harness left ARCHIVED holding a preserved web tab (#1809 follow-up).
+const SESSION_WEB_SHELVED = process.env.AF_WEB_SESSION_WEB_SHELVED ?? "probe-shelved";
 // The malformed/older web tab (kind=web, no target url) the harness seeds directly
 // into the daemon's store, because every API path refuses to mint one (#1818). It is
 // part of probe-web's REAL roster for the whole run, not a per-test mock.
@@ -831,6 +835,74 @@ test("web tab (feat): a local dev-server preview is daemon-proxied and rendered 
   });
 });
 
+test("web tab (#1809): a web tab survives archive -> restore and still renders through the proxy", async () => {
+  // The harness already drove the issue's CLI repro end to end against the real
+  // daemon: this session was given a web tab ("webpreview" -> the loopback server)
+  // plus a process tab ("watcher"), then archived and restored. Archive used to
+  // truncate the tab roster to the agent tab, erasing the URL with no way to get it
+  // back. Assert the restored session is whole and its web tab is LIVE, not just a
+  // surviving row.
+  await row(page, SESSION_WEB_RESTORED).click();
+  await expect(page.locator(".af-main.af-main-term")).toBeVisible();
+
+  const tabbar = page.locator(".af-tabbar");
+  await expect(tabbar).toBeVisible();
+
+  const restoredTab = tabbar.locator(".af-tab", { hasText: "webpreview" });
+  await expect(restoredTab).toHaveCount(1);
+  // The process tab does NOT come back: its tmux was torn down at archive time
+  // (#1028). The fix is kind-aware, not a blanket "keep every tab".
+  await expect(tabbar.locator(".af-tab", { hasText: "watcher" })).toHaveCount(0);
+
+  // The restored web tab renders through the SAME-ORIGIN daemon proxy...
+  await restoredTab.click();
+  const frame = page.locator(".af-term-host .af-pane-host iframe.af-webframe");
+  await expect(frame).toHaveCount(1, { timeout: 15_000 });
+  await expect(frame).toHaveAttribute("src", /\/v1\/webtab\//);
+
+  // ...and the proxy relays real content from the still-live target, so the URL
+  // survived the round trip intact rather than coming back as an empty shell.
+  await expect(page.frameLocator(".af-webframe").locator("#marker")).toHaveText(WEBTAB_LOCAL_MARKER, {
+    timeout: 15_000,
+  });
+});
+
+test("web tab (#1809 follow-up): an ARCHIVED session's preserved web tab is inert — placeholder, no proxy, no ×", async () => {
+  // The harness left this session archived holding a preserved web tab (and already
+  // proved the CLI refuses to delete it). Preserving the URL must not make an
+  // archived session live again: the target is a loopback address whose dev server
+  // is gone and whose port may now host something else.
+  await row(page, SESSION_WEB_SHELVED).click();
+  await expect(page.locator(".af-main.af-main-term")).toBeVisible();
+
+  const tabbar = page.locator(".af-tabbar");
+  const shelvedTab = tabbar.locator(".af-tab", { hasText: "shelvedweb" });
+  await expect(shelvedTab).toHaveCount(1, { timeout: 15_000 });
+
+  // The × is withdrawn: clicking it would strip the very URL the archive preserved,
+  // and the daemon would refuse anyway — so the affordance must not be offered.
+  await expect(shelvedTab.locator(".af-tab-close")).toHaveCount(0);
+  // ...and so is the + (an archived session can't gain tabs either).
+  await expect(tabbar.locator(".af-tab-new")).toHaveCount(0);
+
+  await shelvedTab.click();
+
+  // The pane shows the archived placeholder instead of a frame...
+  const archived = page.locator(".af-webpane-fallback.af-webpane-archived");
+  await expect(archived).toBeVisible({ timeout: 15_000 });
+  await expect(archived).toContainText("archived");
+  // ...the iframe is hidden and never had a src assigned at all, so no proxy request
+  // is issued — this is the assertion that would fail if the pane merely overlaid a
+  // loaded frame with the placeholder.
+  const frame = page.locator(".af-term-host .af-pane-host iframe.af-webframe");
+  await expect(frame).toBeHidden();
+  expect(await frame.getAttribute("src")).toBeNull();
+  // ...and the live target's content is nowhere on the page.
+  await expect(page.locator(".af-term-host")).not.toContainText(WEBTAB_LOCAL_MARKER);
+  // The "open ↗" escape hatch is withdrawn too: it would only hit the refusing proxy.
+  await expect(page.locator(".af-webpane-open:visible")).toHaveCount(0);
+});
+
 test("web tab (feat): an external URL is iframed directly and shows a fallback when embedding is blocked", async () => {
   // Speed up the fallback timeout for a deterministic assertion, and make the
   // external host HANG (intercept the request and never resolve it) so no load
@@ -893,6 +965,12 @@ test("web tab (feat): a tab with no target URL renders a clean fallback, not a b
   const fallback = page.locator(".af-term-host .af-pane-host .af-webpane-fallback");
   await expect(fallback).toBeVisible({ timeout: 10_000 });
   await expect(fallback).toContainText("no URL");
+  // The "open ↗" link is WITHDRAWN — there is nothing to open. This asserts the
+  // `hidden` actually takes effect: .af-webpane-open carries an author `display`
+  // rule, which outranks the UA [hidden] rule, so hiding it needs an explicit
+  // [hidden] override in styles.css. Without that this link renders and goes nowhere
+  // (the state #1827's voice polish silently left it in until #1809 caught it).
+  await expect(page.locator(".af-webpane-open:visible")).toHaveCount(0);
 });
 
 test("split panes (fix): a WEB/iframe pane doesn't swallow a tab drag — dropping on its edge splits", async () => {
