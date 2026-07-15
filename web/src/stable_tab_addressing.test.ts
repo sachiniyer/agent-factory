@@ -276,6 +276,45 @@ test("the mirrored depth is what makes ../ resolve INSIDE the prefix", () => {
   assert.equal(new URL("x.css", `http://daemon${src}`).pathname, "/v1/webtab/s/t/app/x.css");
 });
 
+test("the target's own QUERY is mirrored into the proxy URL", () => {
+  // The post-#1858 regression: the mirror was built from the target's pathname
+  // alone, so a tab pointed at a query-addressed view lost it on the way in. The
+  // daemon strips only access_token before forwarding, so it never re-added what
+  // the client dropped — the dev server just saw /viewer.html and opened its
+  // default view, with nothing reporting a problem.
+  assert.equal(
+    webProxyPath("s", "t", "http://localhost:3000/viewer.html?doc=123", null),
+    "/v1/webtab/s/t/viewer.html?doc=123",
+  );
+  // Storybook addresses a story entirely by query — the whole target IS the view.
+  assert.equal(
+    webProxyPath("s", "t", "http://localhost:6006/?path=/story/button--primary", null),
+    "/v1/webtab/s/t/?path=/story/button--primary",
+  );
+  // A target with no query is untouched (no stray "?").
+  assert.equal(webProxyPath("s", "t", "http://localhost:3000/app/", null), "/v1/webtab/s/t/app/");
+});
+
+test("the target's query and the daemon's token coexist", () => {
+  // They address different layers — the app's view and the daemon's credential —
+  // so neither may displace the other. The target's own query goes FIRST, leaving
+  // the daemon's parameter last and separable.
+  assert.equal(
+    webProxyPath("s", "t", "http://localhost:3000/viewer.html?doc=123&page=2", "tok"),
+    "/v1/webtab/s/t/viewer.html?doc=123&page=2&access_token=tok",
+  );
+});
+
+test("the target's query keeps its own escaping, unnormalized", () => {
+  // Passed through raw rather than re-encoded through URLSearchParams: a dev
+  // server that reads its query by hand (or signs it) must see what the tab's
+  // target actually said, not a canonicalized rewrite of it.
+  assert.equal(
+    webProxyPath("s", "t", "http://localhost:3000/x?a=1&b=%2Fnested%2Fpath", null),
+    "/v1/webtab/s/t/x?a=1&b=%2Fnested%2Fpath",
+  );
+});
+
 test("the token rides ?access_token= (an iframe src cannot set a header)", () => {
   assert.equal(
     webProxyPath("s", "t", "http://localhost:3000/app/viewer.html", "tok en"),

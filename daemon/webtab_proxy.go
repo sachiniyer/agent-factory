@@ -127,35 +127,34 @@ func (m *Manager) WebTabTarget(sessionID, tabID string) (webTabTarget, error) {
 	if blocked := instance.WebTabServeBlocked(); blocked != nil {
 		return webTabTarget{}, fmt.Errorf("cannot open the tab of session %q: %w", sessionID, blocked)
 	}
-	idx, ok := instance.TabIndexByID(tabID)
+	// Resolved under ONE lock: id→ordinal then ordinal→tab takes the instance lock
+	// twice, and a tab closing between the two shifts a LOWER ordinal away, leaving
+	// the captured index in range but pointing at a different tab — which would
+	// serve that tab's dev server under this id, the very misroute id-keying (#1810)
+	// exists to prevent. A bounds check cannot see it; single-lock resolution can.
+	kind, tabURL, ok := instance.TabTargetByID(tabID)
 	if !ok {
 		return webTabTarget{}, fmt.Errorf("session %q has no tab with id %q (it may have been closed)", sessionID, tabID)
 	}
-	tabs := instance.GetTabs()
-	if idx < 0 || idx >= len(tabs) {
-		// TabIndexByID resolved against a tab list that changed under us.
-		return webTabTarget{}, fmt.Errorf("session %q has no tab with id %q (it may have been closed)", sessionID, tabID)
-	}
-	tab := tabs[idx]
-	switch tab.Kind {
+	switch kind {
 	case session.TabKindWeb:
-		if strings.TrimSpace(tab.URL) == "" {
-			return webTabTarget{Kind: tab.Kind}, fmt.Errorf("web tab %q of session %q has no target URL", tabID, sessionID)
+		if strings.TrimSpace(tabURL) == "" {
+			return webTabTarget{Kind: kind}, fmt.Errorf("web tab %q of session %q has no target URL", tabID, sessionID)
 		}
-		return webTabTarget{URL: tab.URL, Kind: tab.Kind}, nil
+		return webTabTarget{URL: tabURL, Kind: kind}, nil
 	case session.TabKindVSCode:
 		endpoint, err := m.ensureVSCodeServer(instance, repoID, title)
 		if err != nil {
-			return webTabTarget{Kind: tab.Kind}, err
+			return webTabTarget{Kind: kind}, err
 		}
 		return webTabTarget{
 			URL:        vscodeUpstreamURL,
 			SocketPath: endpoint.SocketPath,
 			Transport:  endpoint.Transport,
-			Kind:       tab.Kind,
+			Kind:       kind,
 		}, nil
 	default:
-		return webTabTarget{Kind: tab.Kind}, fmt.Errorf("tab %q of session %q is not a web or vscode tab", tabID, sessionID)
+		return webTabTarget{Kind: kind}, fmt.Errorf("tab %q of session %q is not a web or vscode tab", tabID, sessionID)
 	}
 }
 
@@ -316,10 +315,29 @@ func (cs *controlServer) webTabProxyHandler(w http.ResponseWriter, r *http.Reque
 	sessionID := r.PathValue("sessionId")
 	tabID := r.PathValue("tabId")
 	rest := r.PathValue("rest")
-	// Defense in depth: the stdlib ServeMux already cleans "." / ".." out of the
-	// path before matching, but reject any residue so a crafted request can never
-	// escape the proxied prefix.
+	// Defense in depth: ServeMux cleans a LITERAL ".." out of the path (an
+	// unescaped /../ is redirected away before any handler sees it), but an ENCODED
+	// one — %2E%2E%2F — is NOT cleaned: it decodes on the way into rest and arrives
+	// here intact. Reject the residue so a crafted request can never escape the
+	// proxied prefix. rest is the decoded view of the remainder, so testing it here
+	// covers the escaped form the proxy actually forwards.
 	if strings.Contains(rest, "..") {
+		writeHTTPError(w, http.StatusBadRequest, fmt.Errorf("invalid web tab path"))
+		return
+	}
+	// The remainder in the request's OWN encoding, which rest cannot express: the
+	// forwarded path is built from this so an encoded slash survives the hop.
+	escapedRest, ok := escapedRestOf(r.URL.EscapedPath())
+	if !ok {
+		writeHTTPError(w, http.StatusBadRequest, fmt.Errorf("invalid web tab path"))
+		return
+	}
+	upstreamEscaped := "/" + strings.TrimLeft(escapedRest, "/")
+	upstreamPath, err := url.PathUnescape(upstreamEscaped)
+	if err != nil {
+		// Unreachable via a real request (net/http rejects a malformed escape while
+		// parsing the request line), but fail closed rather than forward a path
+		// whose two encodings disagree.
 		writeHTTPError(w, http.StatusBadRequest, fmt.Errorf("invalid web tab path"))
 		return
 	}
@@ -433,13 +451,19 @@ func (cs *controlServer) webTabProxyHandler(w http.ResponseWriter, r *http.Reque
 			pr.Out.URL.Host = targetURL.Host
 			pr.Out.Host = targetURL.Host
 			// The browser path mirrors the upstream path, so the remainder under
-			// the tab prefix IS the upstream path: forward it verbatim. rest
-			// arrives percent-DECODED from the "{rest...}" wildcard and is assigned
-			// as Path (not parsed), so net/url re-encodes it canonically and a
-			// literal "?"/"#"/"%" in a filename cannot be misread as a
-			// query/fragment/escape.
-			pr.Out.URL.Path = "/" + strings.TrimLeft(rest, "/")
-			pr.Out.URL.RawPath = ""
+			// the tab prefix IS the upstream path: forward it VERBATIM, in the
+			// browser's own encoding. Path and RawPath are set TOGETHER — decoded
+			// and escaped views of one string — so url.String() reproduces that
+			// encoding instead of re-canonicalizing it, and a %2F that is data
+			// inside a segment reaches the dev server as %2F rather than turning
+			// into a path separator that names a different route.
+			//
+			// Deriving both from the escaped path also keeps the property the
+			// decoded wildcard gave for free: a literal "?"/"#"/"%" in a filename
+			// arrives already escaped (%3F/%23/%25) and stays that way, so it can
+			// never be misread as a query/fragment/escape.
+			pr.Out.URL.Path = upstreamPath
+			pr.Out.URL.RawPath = upstreamEscaped
 			// Never leak the daemon credential upstream: drop the Authorization
 			// header and the daemon's own token cookie, but FORWARD the dev app's
 			// cookies so cookie-backed dev servers work in the iframe.
@@ -472,6 +496,32 @@ func (cs *controlServer) webTabProxyHandler(w http.ResponseWriter, r *http.Reque
 				pr.Out.URL.RawQuery = q.Encode()
 			}
 			pr.SetXForwarded()
+			// SetXForwarded derives X-Forwarded-Proto from the DAEMON-facing hop,
+			// which OVERWRITES what the client's own hop reported (#1875). The
+			// daemon's listener is plain HTTP by design, so behind a TLS-terminating
+			// front proxy — the recommended network deployment — an inbound
+			// "X-Forwarded-Proto: https" became "http" on the way upstream, and the
+			// dev server was told an https:// page was plain HTTP. An app that builds
+			// absolute URLs or a WS endpoint from that header then emits http://ws://
+			// under an https:// page, which the browser blocks as mixed content.
+			//
+			// The ORIGINAL client's scheme is the honest answer, so it is restored
+			// here — for BOTH tab kinds, since one Rewrite serves them and a plain dev
+			// server reads this header exactly as an editor does.
+			//
+			// Resolved to a single value rather than forwarding the chain verbatim:
+			// requestIsHTTPS already applies the first-entry rule (a chain may read
+			// "https, http"), and plenty of upstreams test this header by exact match,
+			// so handing them "https, http" would read as not-https and fix nothing.
+			// The first entry IS the value every reader wants.
+			//
+			// Trusted only to UPGRADE, matching the reasoning on requestIsHTTPS: a
+			// forged header buys a peer nothing but http:// links from an https:// page
+			// for itself, and authenticates nothing — the auth gate still verifies the
+			// token.
+			if requestIsHTTPS(pr.In) {
+				pr.Out.Header.Set("X-Forwarded-Proto", "https")
+			}
 		},
 		ModifyResponse: func(resp *http.Response) error {
 			// The proxied preview is served same-origin as the SPA, so a dev server
@@ -893,18 +943,73 @@ func requestIsHTTPS(r *http.Request) bool {
 // once: the destination's remainder is non-empty, so the follow-up request takes
 // the proxy path rather than returning here.
 //
-// The query (which carries ?access_token for a network peer's top-level
-// navigation) rides along, so the redirected request authorizes even if the
-// browser has not yet stored the token cookie.
+// BOTH queries ride along. The incoming one carries ?access_token for a network
+// peer's top-level navigation, so the redirected request authorizes even before
+// the browser has stored the token cookie; the TARGET's own query is what the tab
+// was pointed at (?doc=123) and dropping it would land the app on a different view
+// than the tab names. They address different layers, so neither may displace the
+// other.
+//
+// The path is carried in the target's own escaping, for the reason spelled out on
+// escapedRestOf: a %2F inside a segment is data, and re-canonicalizing it here
+// would redirect to a route the dev server does not serve.
 func mirrorRootRedirect(prefix string, target *url.URL, rawQuery string) (string, bool) {
 	if target.Path == "" || target.Path == "/" {
 		return "", false
 	}
 	dest := &url.URL{
-		Path:     prefix + "/" + strings.TrimLeft(target.Path, "/"),
-		RawQuery: rawQuery,
+		Path:     joinURLPath(prefix, target.Path),
+		RawPath:  joinURLPath(prefix, target.EscapedPath()),
+		RawQuery: mergeRawQueries(target.RawQuery, rawQuery),
 	}
 	return dest.String(), true
+}
+
+// mergeRawQueries concatenates two raw query strings, dropping empties. Raw
+// concatenation rather than parse-and-re-encode, so each side's escaping and
+// parameter order survive exactly as written — a dev server that reads its query
+// by hand (or signs it) sees what the tab's target actually said.
+func mergeRawQueries(a, b string) string {
+	switch {
+	case a == "":
+		return b
+	case b == "":
+		return a
+	default:
+		return a + "&" + b
+	}
+}
+
+// escapedRestOf returns the {rest...} remainder of a proxy request path in the
+// request's OWN percent-encoding — the one thing r.PathValue("rest") cannot give.
+//
+// The mux hands a wildcard back DECODED, so a path that legitimately carries an
+// encoded slash — /files/a%2Fb, where %2F is DATA inside ONE segment rather than a
+// separator — arrives as "files/a/b", indistinguishable from a real two-segment
+// path. Rebuilding the upstream path from that would send the dev server
+// /files/a/b: a different route, which lands on a different handler or 404s.
+// Forwarding this escaped form keeps a %2F a %2F across the hop — the same
+// encoding-preserving property rewriteUpstreamRef already holds for redirects
+// coming back the other way.
+//
+// It SPLITS the escaped path rather than trimming the tab prefix off it, because
+// the prefix is assembled from the DECODED sessionId/tabId while this string still
+// carries them encoded (the client mints them with encodeURIComponent), so the two
+// need not match textually. Splitting is safe for exactly the reason the bug
+// exists: in an escaped path a %2F is never a separator, so no id can smuggle one
+// in and shift the leading segments.
+//
+// ok is false only for a path with fewer segments than the route guarantees — not
+// reachable through a matched request, but it fails closed rather than assume.
+func escapedRestOf(escapedPath string) (string, bool) {
+	// "" / "v1" / "webtab" / {sessionId} / {tabId} / {rest...} — one leading empty
+	// from the rooted path, the prefix's own segments, then the two ids.
+	lead := len(strings.Split(strings.Trim(webtabPathPrefix, "/"), "/")) + 3
+	parts := strings.Split(escapedPath, "/")
+	if len(parts) < lead {
+		return "", false
+	}
+	return strings.Join(parts[lead:], "/"), true
 }
 
 // joinURLPath joins a base path and a sub path with exactly one slash between

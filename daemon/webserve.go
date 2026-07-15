@@ -149,8 +149,8 @@ func serveSPA(assets fs.FS, w http.ResponseWriter, r *http.Request) {
 	// HTML to a <script>, so the preview breaks with NOTHING reporting an error.
 	// 404 makes that failure visible and honest instead.
 	//
-	// Only extension-bearing paths are refused; an extension-less deep link is a
-	// real client route and still renders the shell.
+	// An extension-less deep link is a real client route and still renders the
+	// shell — with one exception, spelled out on isEscapedAssetName.
 	//
 	// This does not RESCUE the asset: attributing it back to its tab would need the
 	// request's Referer, and the preview iframe is sandboxed WITHOUT
@@ -159,7 +159,7 @@ func serveSPA(assets fs.FS, w http.ResponseWriter, r *http.Request) {
 	// origin would let a previewed dev server read the SPA's bearer token, which is
 	// a far worse trade. An app whose assets are absolute must be served from its
 	// own root (see docs/web.md); a dedicated preview origin is the only real fix (#1856).
-	if path.Ext(name) != "" {
+	if isEscapedAssetName(name) {
 		writeHTTPError(w, http.StatusNotFound,
 			fmt.Errorf("no asset %q; if this is a web-tab preview's absolute-path asset, "+
 				"it escaped the tab's proxy prefix — see docs/web.md (absolute-path assets)", r.URL.Path))
@@ -168,6 +168,28 @@ func serveSPA(assets fs.FS, w http.ResponseWriter, r *http.Request) {
 	// SPA fallback: the path names no embedded asset, so serve the app shell for
 	// client-side routing.
 	serveAsset(assets, "index.html", w, r)
+}
+
+// isEscapedAssetName reports whether a name that matched no embedded asset is a
+// previewed dev app's escaped ASSET rather than one of our own client routes —
+// i.e. whether the honest answer is 404 instead of the SPA shell.
+//
+// A file extension is the usual tell (/assets/app.js). It is not the only one: a
+// bundler serves part of its runtime from a reserved "@" NAMESPACE with no
+// extension at all, and Vite injects exactly such a script — <script type="module"
+// src="/@vite/client"> — into every page it serves, so it is the FIRST thing an
+// escaped Vite preview asks us for. On the extension test alone it read as a deep
+// link and got index.html back with 200 text/html, leaving the browser to parse
+// our HTML as an ES module — the silent breakage #1811 set out to make honest, on
+// the single most common preview stack. /@id/, /@fs/ and /@react-refresh ride the
+// same namespace.
+//
+// A leading "@" is safe to claim: it is a bundler convention, never a route this
+// app mints, and this runs only AFTER a real embedded asset failed to match — so
+// a future asset actually named "@…" would have been served already and never
+// reaches here.
+func isEscapedAssetName(name string) bool {
+	return path.Ext(name) != "" || strings.HasPrefix(name, "@")
 }
 
 // contentTypeByExt pins the media type for extensions http.ServeContent would

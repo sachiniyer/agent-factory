@@ -138,10 +138,46 @@ func TestServeSPA_EscapedAssetIs404NotTheShell(t *testing.T) {
 	}
 }
 
+// TestServeSPA_EscapedBundlerAssetIs404NotTheShell is the post-#1858 regression
+// test: the honest-404 rule was written as an EXTENSION test, and a bundler's
+// reserved "@" namespace carries no extension.
+//
+// It matters because /@vite/client is not an exotic path — Vite injects
+// <script type="module" src="/@vite/client"> into every page it dev-serves, so an
+// escaped Vite preview asks for it FIRST. Falling through to the shell handed that
+// module tag an HTML document and reproduced the exact #1811 silent break on the
+// most common preview stack of all.
+func TestServeSPA_EscapedBundlerAssetIs404NotTheShell(t *testing.T) {
+	srv := httptest.NewServer(webShellHandler(&apiSpy{}))
+	defer srv.Close()
+
+	// Extension-less paths Vite really serves out of its "@" namespace.
+	for _, p := range []string{
+		"/@vite/client",    // injected into every dev page
+		"/@react-refresh",  // the react plugin's HMR runtime
+		"/@id/virtual:foo", // a resolved virtual module
+		"/@fs/home/u/proj", // an out-of-root file
+	} {
+		t.Run(p, func(t *testing.T) {
+			resp, err := http.Get(srv.URL + p)
+			require.NoError(t, err)
+			body, _ := io.ReadAll(resp.Body)
+			_ = resp.Body.Close()
+
+			require.Equal(t, http.StatusNotFound, resp.StatusCode,
+				"%s is a bundler asset and must 404, not be answered with the SPA shell", p)
+			require.NotContains(t, string(body), `id="app"`,
+				"%s was answered with the af SPA's own HTML — the #1811 silent failure, via the extensionless path", p)
+			require.NotContains(t, resp.Header.Get("Content-Type"), "text/html",
+				"%s must not be answered as HTML", p)
+		})
+	}
+}
+
 // TestServeSPA_DeepLinkStillGetsTheShell guards the other side of the #1811 rule:
-// only EXTENSION-BEARING paths are refused. An extension-less path is a real
-// client-side route and must still render the app, so the honest-404 change cannot
-// break deep linking.
+// a path is refused only when it reads as an ASSET (an extension, or a bundler's
+// "@" namespace). An ordinary extension-less path is a real client-side route and
+// must still render the app, so neither honest-404 rule can break deep linking.
 func TestServeSPA_DeepLinkStillGetsTheShell(t *testing.T) {
 	srv := httptest.NewServer(webShellHandler(&apiSpy{}))
 	defer srv.Close()

@@ -66,6 +66,23 @@ function targetPathOf(target: string): string {
   }
 }
 
+/** The query of a web-tab target, WITHOUT its leading "?" ("" when it has none, or
+ *  does not parse). The mirror is of the whole address, not just its path: a target
+ *  is stored exactly as the user gave it (NormalizeWebTabURL keeps the query), and
+ *  for plenty of dev servers the query IS the address — Storybook's ?path=/story/…,
+ *  a viewer's ?doc=123. Dropping it opens the app's default view instead of the one
+ *  the tab names.
+ *
+ *  Returned raw, not re-encoded through URLSearchParams, so the target's own
+ *  escaping and parameter order reach the dev server exactly as written. */
+function targetQueryOf(target: string): string {
+  try {
+    return new URL(target).search.replace(/^\?/, "");
+  } catch {
+    return "";
+  }
+}
+
 /** The same-origin daemon proxy path for a loopback web tab, so the iframe hits
  *  the daemon (which shares the machine with the dev server) rather than the
  *  viewer's own machine. The bearer token rides ?access_token= for network peers
@@ -85,6 +102,12 @@ function targetPathOf(target: string): string {
  *    inside the prefix, and a subdirectory target loads. The daemon forwards the
  *    remainder verbatim (daemon/webtab_proxy.go).
  *
+ *  - The target's own QUERY is mirrored too, for the same reason as its path: the
+ *    tab's address is the whole URL. The daemon strips only `access_token` before
+ *    forwarding, so the app's own parameters ride through untouched. The target's
+ *    query goes FIRST — a dev server reading `?doc=` positionally sees what it
+ *    would have without us, and the daemon's credential stays last and separable.
+ *
  *  The trailing slash on a root target matters: the route requires it, and it keeps
  *  the app's relative URLs resolving under the prefix rather than beside it. */
 export function webProxyPath(
@@ -94,7 +117,10 @@ export function webProxyPath(
   token: string | null,
 ): string {
   const base = `/v1/webtab/${encodeURIComponent(sessionId)}/${encodeURIComponent(tabId)}/${targetPathOf(target)}`;
-  return token ? `${base}?access_token=${encodeURIComponent(token)}` : base;
+  const query = [targetQueryOf(target), token ? `access_token=${encodeURIComponent(token)}` : ""]
+    .filter((part) => part !== "")
+    .join("&");
+  return query ? `${base}?${query}` : base;
 }
 
 /** Whether a pane's live address for its tab EMBEDS that tab's ordinal — i.e. whether
