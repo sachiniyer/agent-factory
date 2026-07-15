@@ -323,7 +323,9 @@ func (b *ptyBroker) maybeStopCapture() {
 //
 //  1. Stops the stale capture — unblocking and JOINING the parked readLoop (no
 //     goroutine leak) — and clears the capturing latch.
-//  2. If subscribers are STILL attached (a web/TUI client that stayed connected
+//  2. Discards the dead pane's still-buffered ring bytes, so a subscriber that was
+//     lagging at recovery cannot be handed them after the repaint (#1840).
+//  3. If subscribers are STILL attached (a web/TUI client that stayed connected
 //     across the respawn — the common case), restarts the capture against the fresh
 //     pane and re-seeds each subscriber with a repaint of the recovered screen, so it
 //     resumes output on its OWN rather than hanging until some unrelated later
@@ -355,9 +357,25 @@ func (b *ptyBroker) resetCapture() {
 		stop()
 	}
 
+	// Discard the dead pane's buffered output (#1840). This is the ONLY point where
+	// that is race-free: the old readLoop has been joined by the stop above and the
+	// fresh one is not started until below, so the ring provably holds dead-pane bytes
+	// and nothing else, and no feed can interleave. Dropping the bytes while KEEPING
+	// the seq monotonic (base jumps to head over an emptied ring) means a lagging
+	// subscriber — one whose WS write blocked while the dying pane kept producing —
+	// hits the existing `cursor < base` eviction clamp in NextEvent and fast-forwards
+	// to the live tail. Without this it would take the recovery repaint and THEN the
+	// pre-recovery bytes, overwriting the recovered screen with the dead pane's
+	// content. Nothing needs to touch subscriber cursors directly; the clamp is the
+	// same mechanism a ring overflow already uses.
+	//
+	// Unconditional, including when nobody is attached: a later Subscribe(since) would
+	// otherwise replay the dead pane's tail into a fresh client.
+	b.mu.Lock()
+	b.base = b.headLocked()
+	b.buf = nil
 	// Re-read the subscriber count AFTER the teardown drained: nobody left → just the
 	// lazy re-arm, the next Subscribe restarts a fresh capture.
-	b.mu.Lock()
 	resume := !b.closed && len(b.subs) != 0
 	b.mu.Unlock()
 	if !resume {
