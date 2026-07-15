@@ -12,6 +12,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/daemon"
@@ -58,11 +59,25 @@ func TestMain(m *testing.M) {
 	os.Exit(code)
 }
 
+// runAutoUpdate drives one auto-update cycle on the stable channel with the
+// launch-path timeouts — i.e. what autoUpdateOnLaunch runs once its gates
+// pass. Tests of the update *mechanics* use this so they can assert on the
+// error and installed version directly; tests of the *gates* drive
+// autoUpdateOnLaunch instead.
+func runAutoUpdate() (string, error) {
+	return autoUpdateForChannel(config.UpdateChannelStable, autoUpdateCheckTimeout, autoUpdateDownloadBudget)
+}
+
 // withTestHome points config.GetConfigDir at a temp dir for the duration of
-// the test and restores AGENT_FACTORY_HOME on cleanup.
+// the test and restores AGENT_FACTORY_HOME on cleanup. It also silences the
+// launch-path notice so update tests don't scribble on the test runner's
+// stdout; a test asserting on the notice re-stubs it afterwards.
 func withTestHome(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
+	prevNotice := autoUpdateNotice
+	autoUpdateNotice = func(string, ...any) {}
+	t.Cleanup(func() { autoUpdateNotice = prevNotice })
 	prev, had := os.LookupEnv("AGENT_FACTORY_HOME")
 	prevAutoUpdate, hadAutoUpdate := os.LookupEnv(autoUpdateEnv)
 	if err := os.Setenv("AGENT_FACTORY_HOME", dir); err != nil {
@@ -109,12 +124,12 @@ func TestAutoUpdateWindowsRecordsCheckWhenUpdateAvailable(t *testing.T) {
 	runtimeGOOS = "windows"
 	version = "1.0.0"
 	fetchCalls := 0
-	fetchLatestReleaseTagFn = func(string) (string, error) {
+	fetchLatestReleaseTagFn = func(string, time.Duration) (string, error) {
 		fetchCalls++
 		return "v1.0.1", nil
 	}
 
-	if err := autoUpdate(); err != nil {
+	if _, err := runAutoUpdate(); err != nil {
 		t.Fatalf("autoUpdate returned error: %v", err)
 	}
 
@@ -158,12 +173,12 @@ func TestAutoUpdateWindowsSkipsNetworkRegardlessOfVersion(t *testing.T) {
 
 	runtimeGOOS = "windows"
 	version = "1.0.1"
-	fetchLatestReleaseTagFn = func(string) (string, error) {
+	fetchLatestReleaseTagFn = func(string, time.Duration) (string, error) {
 		t.Fatalf("fetchLatestReleaseTagFn must not be called on Windows (#1002)")
 		return "", nil
 	}
 
-	if err := autoUpdate(); err != nil {
+	if _, err := runAutoUpdate(); err != nil {
 		t.Fatalf("autoUpdate returned error: %v", err)
 	}
 
@@ -202,7 +217,7 @@ func TestAutoUpdateEnvOffSwitchShortCircuits(t *testing.T) {
 	runtimeGOOS = "linux"
 	version = "0.0.1"
 	fetchCalls := 0
-	fetchLatestReleaseTagFn = func(string) (string, error) {
+	fetchLatestReleaseTagFn = func(string, time.Duration) (string, error) {
 		fetchCalls++
 		return "v99.0.0", nil
 	}
@@ -212,9 +227,7 @@ func TestAutoUpdateEnvOffSwitchShortCircuits(t *testing.T) {
 		t.Run("off_"+val, func(t *testing.T) {
 			t.Setenv(autoUpdateEnv, val)
 			fetchCalls = 0
-			if err := autoUpdate(); err != nil {
-				t.Fatalf("autoUpdate returned error with %s=%q: %v", autoUpdateEnv, val, err)
-			}
+			launchWithTTY(t, nil)
 			if fetchCalls != 0 {
 				t.Fatalf("fetchLatestReleaseTagFn called %d times with %s=%q; expected 0 — the env off-switch must short-circuit before any release fetch (#1596)", fetchCalls, autoUpdateEnv, val)
 			}
@@ -230,24 +243,26 @@ func TestAutoUpdateEnvOffSwitchShortCircuits(t *testing.T) {
 			t.Fatalf("unsetenv %s: %v", autoUpdateEnv, err)
 		}
 		version = "99.0.0"
-		fetchLatestReleaseTagFn = func(string) (string, error) {
+		fetchLatestReleaseTagFn = func(string, time.Duration) (string, error) {
 			fetchCalls++
 			return "v1.0.0", nil // not newer than 99.0.0 → records + returns, no download
 		}
 		fetchCalls = 0
-		if err := autoUpdate(); err != nil {
-			t.Fatalf("autoUpdate returned error with %s unset: %v", autoUpdateEnv, err)
-		}
+		launchWithTTY(t, nil)
 		if fetchCalls == 0 {
 			t.Fatalf("fetchLatestReleaseTagFn was not called with %s unset; the off-switch tripwire above would be vacuous", autoUpdateEnv)
 		}
 	})
 }
 
-// TestAutoUpdateDoesNotRecordCheckOnFetchFailure guards #1466: when
-// fetchLatestReleaseTag fails (blocked API, DNS, proxy, rate limit), the
-// 24-hour success throttle must not hide the failure for a full day.
-func TestAutoUpdateDoesNotRecordCheckOnFetchFailure(t *testing.T) {
+// TestAutoUpdateRecordsCheckOnFetchFailure guards the #459 contract, restored
+// now that the check runs synchronously in front of the TUI: when the release
+// lookup fails (blocked API, DNS, proxy, rate limit), the attempt is still
+// recorded so the throttle closes. Otherwise every launch from a host that
+// can't reach api.github.com re-pays the check timeout before the TUI opens,
+// and burns the 60-req/hr unauthenticated budget doing it. (#1466 briefly
+// took the other side; see autoUpdateForChannel's doc comment.)
+func TestAutoUpdateRecordsCheckOnFetchFailure(t *testing.T) {
 	dir := withTestHome(t)
 
 	prevFetch := fetchLatestReleaseTagFn
@@ -255,27 +270,28 @@ func TestAutoUpdateDoesNotRecordCheckOnFetchFailure(t *testing.T) {
 		fetchLatestReleaseTagFn = prevFetch
 	})
 
-	fetchLatestReleaseTagFn = func(string) (string, error) {
+	fetchLatestReleaseTagFn = func(string, time.Duration) (string, error) {
 		return "", errors.New("simulated network failure")
 	}
 
-	if err := autoUpdate(); err == nil {
+	if _, err := runAutoUpdate(); err == nil {
 		t.Fatalf("autoUpdate returned nil error; expected fetch failure")
 	}
 
-	if _, err := os.Stat(filepath.Join(dir, lastCheckFile)); !os.IsNotExist(err) {
-		t.Fatalf("expected %s not to be written after fetch failure, got: %v",
+	if _, err := os.Stat(filepath.Join(dir, lastCheckFile)); err != nil {
+		t.Fatalf("expected %s to be written after fetch failure, got: %v",
 			lastCheckFile, err)
 	}
-	if !shouldCheck(config.UpdateChannelStable) {
-		t.Fatalf("shouldCheck() returned false after fetch failure; failed checks must not be throttled")
+	if shouldCheck(config.UpdateChannelStable) {
+		t.Fatalf("shouldCheck() returned true after a failed check; failures must close the throttle window so a broken network can't re-check on every launch (#459)")
 	}
 }
 
-// TestAutoUpdateDoesNotRecordCheckOnDownloadFailure keeps failed apply
-// attempts retryable: if a newer release exists but the download fails, the
-// next startup should try again instead of being throttled for 24 hours.
-func TestAutoUpdateDoesNotRecordCheckOnDownloadFailure(t *testing.T) {
+// TestAutoUpdateRecordsCheckOnDownloadFailure is the fetch-failure contract
+// one stage later: a newer release that fails to download must also close the
+// throttle window, so a half-broken CDN or a full disk can't turn every
+// launch into a doomed multi-second download attempt.
+func TestAutoUpdateRecordsCheckOnDownloadFailure(t *testing.T) {
 	dir := withTestHome(t)
 
 	prevGOOS := runtimeGOOS
@@ -291,21 +307,21 @@ func TestAutoUpdateDoesNotRecordCheckOnDownloadFailure(t *testing.T) {
 
 	runtimeGOOS = "linux"
 	version = "1.0.0"
-	fetchLatestReleaseTagFn = func(string) (string, error) { return "v1.0.1", nil }
-	downloadBinaryFn = func(string) ([]byte, error) {
+	fetchLatestReleaseTagFn = func(string, time.Duration) (string, error) { return "v1.0.1", nil }
+	downloadBinaryFn = func(string, time.Duration) ([]byte, error) {
 		return nil, errors.New("simulated download failure")
 	}
 
-	if err := autoUpdate(); err == nil {
+	if _, err := runAutoUpdate(); err == nil {
 		t.Fatalf("autoUpdate returned nil error; expected download failure")
 	}
 
-	if _, err := os.Stat(filepath.Join(dir, lastCheckFile)); !os.IsNotExist(err) {
-		t.Fatalf("expected %s not to be written after download failure, got: %v",
+	if _, err := os.Stat(filepath.Join(dir, lastCheckFile)); err != nil {
+		t.Fatalf("expected %s to be written after download failure, got: %v",
 			lastCheckFile, err)
 	}
-	if !shouldCheck(config.UpdateChannelStable) {
-		t.Fatalf("shouldCheck() returned false after download failure; failed applies must not be throttled")
+	if shouldCheck(config.UpdateChannelStable) {
+		t.Fatalf("shouldCheck() returned true after a failed download; failures must close the throttle window (#459)")
 	}
 }
 
@@ -348,9 +364,9 @@ func TestAutoUpdateCallsShutdownAfterBinarySwap(t *testing.T) {
 
 	runtimeGOOS = "linux"
 	version = "1.0.0"
-	fetchLatestReleaseTagFn = func(string) (string, error) { return "v1.0.1", nil }
+	fetchLatestReleaseTagFn = func(string, time.Duration) (string, error) { return "v1.0.1", nil }
 	// Bypass the tarball extract by returning the raw binary directly.
-	downloadBinaryFn = func(string) ([]byte, error) { return []byte("new-binary"), nil }
+	downloadBinaryFn = func(string, time.Duration) ([]byte, error) { return []byte("new-binary"), nil }
 	osExecutableFn = func() (string, error) { return tempBin, nil }
 	shutdownCalls := 0
 	requestDaemonShutdownFn = func() (daemon.ShutdownResult, error) {
@@ -358,7 +374,7 @@ func TestAutoUpdateCallsShutdownAfterBinarySwap(t *testing.T) {
 		return daemon.ShutdownViaRPC, nil
 	}
 
-	if err := autoUpdate(); err != nil {
+	if _, err := runAutoUpdate(); err != nil {
 		t.Fatalf("autoUpdate: %v", err)
 	}
 	if shutdownCalls != 1 {
@@ -424,14 +440,14 @@ func TestAutoUpdateSucceedsWhenShutdownErrors(t *testing.T) {
 
 	runtimeGOOS = "linux"
 	version = "1.0.0"
-	fetchLatestReleaseTagFn = func(string) (string, error) { return "v1.0.1", nil }
-	downloadBinaryFn = func(string) ([]byte, error) { return []byte("new-binary"), nil }
+	fetchLatestReleaseTagFn = func(string, time.Duration) (string, error) { return "v1.0.1", nil }
+	downloadBinaryFn = func(string, time.Duration) ([]byte, error) { return []byte("new-binary"), nil }
 	osExecutableFn = func() (string, error) { return tempBin, nil }
 	requestDaemonShutdownFn = func() (daemon.ShutdownResult, error) {
 		return daemon.ShutdownNoDaemon, errors.New("simulated rpc failure")
 	}
 
-	if err := autoUpdate(); err != nil {
+	if _, err := runAutoUpdate(); err != nil {
 		t.Fatalf("autoUpdate should not fail when Shutdown errors, got: %v", err)
 	}
 	if respawnCalls != 0 {
@@ -637,7 +653,7 @@ func TestFetchLatestReleaseTagChannels(t *testing.T) {
 		githubAPIReleasesURL = prevListURL
 	})
 
-	tag, err := fetchLatestReleaseTag(config.UpdateChannelStable)
+	tag, err := fetchLatestReleaseTag(config.UpdateChannelStable, manualCheckTimeout)
 	if err != nil {
 		t.Fatalf("stable channel: %v", err)
 	}
@@ -648,7 +664,7 @@ func TestFetchLatestReleaseTagChannels(t *testing.T) {
 		t.Fatalf("stable channel hit the paginated /releases list %d times; it must use /releases/latest only", listCalls)
 	}
 
-	tag, err = fetchLatestReleaseTag(config.UpdateChannelPreview)
+	tag, err = fetchLatestReleaseTag(config.UpdateChannelPreview, manualCheckTimeout)
 	if err != nil {
 		t.Fatalf("preview channel: %v", err)
 	}
@@ -680,7 +696,7 @@ func TestFetchLatestStableTagRejectsOffSchemeTag(t *testing.T) {
 	githubAPILatestReleaseURL = srv.URL + "/releases/latest"
 	t.Cleanup(func() { githubAPILatestReleaseURL = prevLatestURL })
 
-	if _, err := fetchLatestReleaseTag(config.UpdateChannelStable); err == nil {
+	if _, err := fetchLatestReleaseTag(config.UpdateChannelStable, manualCheckTimeout); err == nil {
 		t.Fatalf("expected error for off-scheme releases/latest tag, got nil")
 	}
 }
@@ -737,15 +753,13 @@ func TestAutoUpdateChannelFromConfig(t *testing.T) {
 			runtimeGOOS = "linux"
 			version = "1.0.0"
 			gotChannel := ""
-			fetchLatestReleaseTagFn = func(channel string) (string, error) {
+			fetchLatestReleaseTagFn = func(channel string, _ time.Duration) (string, error) {
 				gotChannel = channel
 				// Same version as current: no download or install follows.
 				return "v1.0.0", nil
 			}
 
-			if err := autoUpdate(); err != nil {
-				t.Fatalf("autoUpdate: %v", err)
-			}
+			launchWithTTY(t, nil)
 			if gotChannel != c.wantChannel {
 				t.Fatalf("channel = %q, want %q", gotChannel, c.wantChannel)
 			}
@@ -786,12 +800,12 @@ func TestAutoUpdatePreviewCheckRunsAfterStableThrottleRecord(t *testing.T) {
 	recordCheck(config.UpdateChannelStable, "v1.0.0", "1.0.0")
 
 	var gotChannel string
-	fetchLatestReleaseTagFn = func(channel string) (string, error) {
+	fetchLatestReleaseTagFn = func(channel string, _ time.Duration) (string, error) {
 		gotChannel = channel
 		return "v1.0.0", nil
 	}
 
-	if err := autoUpdateForChannel(config.UpdateChannelPreview); err != nil {
+	if _, err := autoUpdateForChannel(config.UpdateChannelPreview, autoUpdateCheckTimeout, autoUpdateDownloadBudget); err != nil {
 		t.Fatalf("autoUpdateForChannel: %v", err)
 	}
 	if gotChannel != config.UpdateChannelPreview {
@@ -835,9 +849,9 @@ func TestAutoUpdateRecordsChannelTagAndInstalledVersionAfterSuccessfulCheck(t *t
 
 	runtimeGOOS = "linux"
 	version = "1.0.0"
-	fetchLatestReleaseTagFn = func(string) (string, error) { return "v1.0.0", nil }
+	fetchLatestReleaseTagFn = func(string, time.Duration) (string, error) { return "v1.0.0", nil }
 
-	if err := autoUpdateForChannel(config.UpdateChannelPreview); err != nil {
+	if _, err := autoUpdateForChannel(config.UpdateChannelPreview, autoUpdateCheckTimeout, autoUpdateDownloadBudget); err != nil {
 		t.Fatalf("autoUpdateForChannel: %v", err)
 	}
 
@@ -914,14 +928,12 @@ func TestAutoUpdateConfigAndEnvOptOut(t *testing.T) {
 			runtimeGOOS = "linux"
 			version = "1.0.0"
 			fetchCalls := 0
-			fetchLatestReleaseTagFn = func(string) (string, error) {
+			fetchLatestReleaseTagFn = func(string, time.Duration) (string, error) {
 				fetchCalls++
 				return "v1.0.0", nil
 			}
 
-			if err := autoUpdate(); err != nil {
-				t.Fatalf("autoUpdate: %v", err)
-			}
+			launchWithTTY(t, nil)
 			if gotFetch := fetchCalls > 0; gotFetch != tc.wantFetch {
 				t.Fatalf("fetch called = %v, want %v", gotFetch, tc.wantFetch)
 			}
@@ -965,9 +977,9 @@ func TestAutoUpdateDownloadsByTag(t *testing.T) {
 
 	runtimeGOOS = "linux"
 	version = "1.0.137"
-	fetchLatestReleaseTagFn = func(string) (string, error) { return "v1.0.138-preview-2", nil }
+	fetchLatestReleaseTagFn = func(string, time.Duration) (string, error) { return "v1.0.138-preview-2", nil }
 	var gotURL string
-	downloadBinaryFn = func(url string) ([]byte, error) {
+	downloadBinaryFn = func(url string, _ time.Duration) ([]byte, error) {
 		gotURL = url
 		return []byte("new-binary"), nil
 	}
@@ -977,7 +989,7 @@ func TestAutoUpdateDownloadsByTag(t *testing.T) {
 	}
 	respawnDaemonFn = func(string) error { return nil }
 
-	if err := autoUpdate(); err != nil {
+	if _, err := runAutoUpdate(); err != nil {
 		t.Fatalf("autoUpdate: %v", err)
 	}
 	wantURL := fmt.Sprintf(

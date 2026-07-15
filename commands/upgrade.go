@@ -47,12 +47,20 @@ var (
 
 // newDownloadClient builds an *http.Client suitable for fetching a release
 // tarball, with both an overall request timeout and a header timeout so a
-// stalled server can't hang the upgrade indefinitely (#471).
-func newDownloadClient() *http.Client {
+// stalled server can't hang the upgrade indefinitely (#471). The overall
+// budget is a parameter: a launch-path auto-update gives up far sooner than
+// a `af upgrade` the user is sitting and watching.
+func newDownloadClient(timeout time.Duration) *http.Client {
+	// A header timeout longer than the whole budget would never fire; keep it
+	// under the budget so a silent server still fails fast on short budgets.
+	headerTimeout := downloadResponseHeaderTimeout
+	if timeout < headerTimeout {
+		headerTimeout = timeout
+	}
 	return &http.Client{
-		Timeout: downloadTimeout,
+		Timeout: timeout,
 		Transport: &http.Transport{
-			ResponseHeaderTimeout: downloadResponseHeaderTimeout,
+			ResponseHeaderTimeout: headerTimeout,
 		},
 	}
 }
@@ -64,8 +72,8 @@ var downloadBinaryFn = downloadBinary
 // downloadBinary fetches the release tarball at url and returns the embedded
 // `agent-factory` binary bytes. It uses newDownloadClient() to bound the
 // fetch with a timeout.
-func downloadBinary(url string) ([]byte, error) {
-	resp, err := newDownloadClient().Get(url)
+func downloadBinary(url string, timeout time.Duration) ([]byte, error) {
+	resp, err := newDownloadClient(timeout).Get(url)
 	if err != nil {
 		return nil, fmt.Errorf("download failed: %w", err)
 	}
@@ -100,6 +108,11 @@ var upgradeCmd = &cobra.Command{
 	Long: `Upgrade agent-factory to the newest release on the configured update
 channel (stable by default, or preview via the update_channel config key).
 
+You rarely need this: af auto-updates on launch by default, at most once every
+6 hours, and re-launches you into the new version. Disable that with
+auto_update = false in your config to pin the installed version — af upgrade
+keeps working either way.
+
 A manual upgrade never downgrades: if the channel's latest release is older
 than the running binary — which happens when you switch from the preview
 channel back to stable — the upgrade is a no-op with an explanation. Pass
@@ -124,7 +137,7 @@ channel back to stable — the upgrade is a no-op with an explanation. Pass
 		// stable channel; a preview-channel user upgraded through it would
 		// silently downgrade back to the older stable.
 		channel := updateChannel()
-		latestTag, downloadURL, err := latestDownloadURL(channel, goos, goarch)
+		latestTag, downloadURL, err := latestDownloadURL(channel, goos, goarch, manualCheckTimeout)
 		if err != nil {
 			return err
 		}
@@ -194,7 +207,7 @@ func shouldUpgrade(latestTag, current, channel string, allowDowngrade bool) (pro
 // daemon to exit so users actually pick up the new image. Extracted from
 // upgradeCmd.RunE so tests can drive it without going through Cobra.
 func runUpgrade(downloadURL string) error {
-	binary, err := downloadBinaryFn(downloadURL)
+	binary, err := downloadBinaryFn(downloadURL, downloadTimeout)
 	if err != nil {
 		return err
 	}
