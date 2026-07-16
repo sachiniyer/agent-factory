@@ -6,8 +6,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sachiniyer/agent-factory/session/tmux"
 	"github.com/stretchr/testify/require"
+
+	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
 func writeCodexRolloutFile(t *testing.T, codexHome, name string) string {

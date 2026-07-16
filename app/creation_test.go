@@ -15,6 +15,7 @@ import (
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/daemon"
+	"github.com/sachiniyer/agent-factory/internal/testguard"
 	"github.com/sachiniyer/agent-factory/session"
 	sessiongit "github.com/sachiniyer/agent-factory/session/git"
 	"github.com/sachiniyer/agent-factory/session/tmux"
@@ -30,7 +31,7 @@ import (
 // the user's real config dir.
 func newTestHome(t *testing.T) *home {
 	t.Helper()
-	tmp := t.TempDir()
+	tmp := testguard.SocketTempDir(t)
 	t.Setenv("AGENT_FACTORY_HOME", tmp)
 
 	// TUI task CRUD routes through the daemon (#1029 PR 6). Point the write

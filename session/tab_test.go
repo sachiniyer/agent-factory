@@ -3,9 +3,10 @@ package session
 import (
 	"testing"
 
-	"github.com/sachiniyer/agent-factory/session/tmux"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
 // TestNewAgentTab_WrapsSession confirms the agent-tab constructor produces an

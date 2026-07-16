@@ -9,10 +9,11 @@ import (
 	"syscall"
 	"testing"
 
-	"github.com/sachiniyer/agent-factory/config"
-	aflog "github.com/sachiniyer/agent-factory/log"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/sachiniyer/agent-factory/config"
+	aflog "github.com/sachiniyer/agent-factory/log"
 )
 
 // archiveTestWorktree creates a real git repo with one commit and a registered

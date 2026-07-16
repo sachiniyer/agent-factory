@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
+
+	"github.com/sachiniyer/agent-factory/internal/testguard"
 )
 
 // TestEnsurePluginDir_ConcurrentStalePrune is a regression test for issues
@@ -17,7 +19,7 @@ import (
 // (!os.IsNotExist guard), every concurrent caller succeeds even when stale
 // files race to be pruned.
 func TestEnsurePluginDir_ConcurrentStalePrune(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := testguard.SocketTempDir(t)
 	t.Setenv("AGENT_FACTORY_HOME", tmpDir)
 
 	// Seed many stale .md files so concurrent prune calls reliably collide

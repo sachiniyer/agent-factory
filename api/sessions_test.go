@@ -21,7 +21,7 @@ import (
 )
 
 func TestRepoHasInstanceTitleScopedToRepo(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testguard.SocketTempDir(t)
 	t.Setenv("AGENT_FACTORY_HOME", tmp)
 
 	repoA := "repo-a"
@@ -63,7 +63,7 @@ func TestRepoHasInstanceTitleScopedToRepo(t *testing.T) {
 // (#960 PR 6): an unknown title comes back as the daemon's not-found error,
 // which the CLI must forward verbatim instead of reporting success.
 func TestSessionsKill_UnknownTitle(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testguard.SocketTempDir(t)
 	t.Setenv("AGENT_FACTORY_HOME", tmp)
 	prevKill := killSessionViaDaemon
 	killSessionViaDaemon = func(req daemon.KillSessionRequest) error {
@@ -96,7 +96,7 @@ func TestSessionsKill_UnknownTitle(t *testing.T) {
 // Previously the --repo flag was dropped on the floor, so the kill ran in
 // all-repo mode and could destroy the wrong repo's session.
 func TestSessionsKill_HonorsRepoScoping(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testguard.SocketTempDir(t)
 	t.Setenv("AGENT_FACTORY_HOME", tmp)
 
 	// Repo A is a real git repo so resolveRepoID(--repo) can compute its ID
@@ -266,7 +266,7 @@ func TestSessionsKill_ForceFlagAcceptedButNotForwarded(t *testing.T) {
 // real terminal. The bug lived entirely in title selection — which repo's
 // instance is chosen — so pinning the data-level scoped lookup pins the fix.
 func TestSessionsAttach_HonorsRepoScoping(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testguard.SocketTempDir(t)
 	t.Setenv("AGENT_FACTORY_HOME", tmp)
 
 	// Repo A is a real git repo so resolveRepoID(--repo) can compute its ID
@@ -365,7 +365,7 @@ func TestSessionsAttach_HonorsRepoScoping(t *testing.T) {
 // can never receive the prompt. Previously --repo was dropped on the floor and
 // the all-repo search could deliver to the wrong repo.
 func TestSessionsSendPrompt_HonorsRepoScoping(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testguard.SocketTempDir(t)
 	t.Setenv("AGENT_FACTORY_HOME", tmp)
 
 	// Repo A is a real git repo so resolveRepoID(--repo) can compute its ID
@@ -533,7 +533,7 @@ func TestSessionsSendPrompt_CreateRoutesThroughDeliverPrompt(t *testing.T) {
 // TestSessionsTabCreate_RequiresCommand verifies tab-create rejects an empty
 // --command before reaching the daemon.
 func TestSessionsTabCreate_RequiresCommand(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testguard.SocketTempDir(t)
 	t.Setenv("AGENT_FACTORY_HOME", tmp)
 
 	prevRepoFlag, prevCmd := repoFlag, tabCreateCommandFlag
@@ -572,7 +572,7 @@ func TestSessionsTabCreate_RequiresCommand(t *testing.T) {
 // passes the resolved RepoID (--repo scoping, #891 class), the title, and the
 // command to the daemon, and prints the resolved tab name as JSON.
 func TestSessionsTabCreate_HonorsRepoScopingAndReturnsName(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testguard.SocketTempDir(t)
 	t.Setenv("AGENT_FACTORY_HOME", tmp)
 
 	repoRoot := filepath.Join(tmp, "repo-a")
@@ -645,7 +645,7 @@ func TestSessionsTabCreate_HonorsRepoScopingAndReturnsName(t *testing.T) {
 // TestSessionsTabDelete_RequiresName verifies tab-delete rejects an empty
 // --name before reaching the daemon.
 func TestSessionsTabDelete_RequiresName(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testguard.SocketTempDir(t)
 	t.Setenv("AGENT_FACTORY_HOME", tmp)
 
 	prevRepoFlag, prevName := repoFlag, tabDeleteNameFlag
@@ -685,7 +685,7 @@ func TestSessionsTabDelete_RequiresName(t *testing.T) {
 // tab name to the daemon's CloseTab RPC, and prints the deleted tab's name as
 // JSON.
 func TestSessionsTabDelete_HonorsRepoScopingAndReturnsName(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testguard.SocketTempDir(t)
 	t.Setenv("AGENT_FACTORY_HOME", tmp)
 
 	repoRoot := filepath.Join(tmp, "repo-a")
@@ -756,7 +756,7 @@ func TestSessionsTabDelete_HonorsRepoScopingAndReturnsName(t *testing.T) {
 // (unknown session, unknown tab, agent tab) is reported as an error — not a
 // panic and not a silent success.
 func TestSessionsTabDelete_SurfacesDaemonError(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testguard.SocketTempDir(t)
 	t.Setenv("AGENT_FACTORY_HOME", tmp)
 
 	prevRepoFlag, prevName := repoFlag, tabDeleteNameFlag
@@ -836,7 +836,7 @@ func runBroadcastCmd(t *testing.T, args []string) (broadcastResult, error) {
 // repo. A broadcast that ignored --repo would blast every repo's sessions — the
 // exact wrong-repo hazard the send-prompt scoping was built to prevent.
 func TestSessionsSendPrompt_BroadcastHonorsRepoScoping(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testguard.SocketTempDir(t)
 	t.Setenv("AGENT_FACTORY_HOME", tmp)
 	resetBroadcastFlags(t)
 
@@ -911,7 +911,7 @@ func TestSessionsSendPrompt_BroadcastHonorsRepoScoping(t *testing.T) {
 // the reserved root session by default (#1106) and includes it only when
 // --include-root is passed.
 func TestSessionsSendPrompt_BroadcastExcludesRoot(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testguard.SocketTempDir(t)
 	t.Setenv("AGENT_FACTORY_HOME", tmp)
 
 	repoRoot := filepath.Join(tmp, "repo")
@@ -1009,7 +1009,7 @@ func TestSessionsSendPrompt_BroadcastExcludesRoot(t *testing.T) {
 // session send failure is recorded, and neither aborts the rest of the
 // broadcast — the command still exits 0 with a full per-session summary.
 func TestSessionsSendPrompt_BroadcastToleratesLost(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testguard.SocketTempDir(t)
 	t.Setenv("AGENT_FACTORY_HOME", tmp)
 	resetBroadcastFlags(t)
 
@@ -1083,7 +1083,7 @@ func TestSessionsSendPrompt_BroadcastToleratesLost(t *testing.T) {
 // command or attempting a daemon send that can only return "instance not
 // started" (#1328).
 func TestSessionsSendPrompt_BroadcastSkipsArchived(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testguard.SocketTempDir(t)
 	t.Setenv("AGENT_FACTORY_HOME", tmp)
 	resetBroadcastFlags(t)
 
@@ -1150,7 +1150,7 @@ func TestSessionsSendPrompt_BroadcastSkipsArchived(t *testing.T) {
 // to guess its scope: with no current repo, no --repo, and no --all-repos it
 // errors instead of silently blasting every repo (the #761 hazard).
 func TestSessionsSendPrompt_BroadcastRequiresScope(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testguard.SocketTempDir(t)
 	t.Setenv("AGENT_FACTORY_HOME", tmp)
 	resetBroadcastFlags(t)
 
@@ -1197,7 +1197,7 @@ func TestSessionsSendPrompt_BroadcastRequiresScope(t *testing.T) {
 // delivers to every repo's sessions, and that --all-repos with --repo is a
 // clean mutual-exclusion error.
 func TestSessionsSendPrompt_BroadcastAllReposSpansRepos(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testguard.SocketTempDir(t)
 	t.Setenv("AGENT_FACTORY_HOME", tmp)
 	resetBroadcastFlags(t)
 
@@ -1313,7 +1313,7 @@ func TestSessionsSendPrompt_BroadcastFlagWithoutAll(t *testing.T) {
 // tests, which must pass a resolvable --repo so resolveRepoID yields a repo ID.
 func setupRepoForCmd(t *testing.T) string {
 	t.Helper()
-	tmp := t.TempDir()
+	tmp := testguard.SocketTempDir(t)
 	t.Setenv("AGENT_FACTORY_HOME", tmp)
 	repoRoot := filepath.Join(tmp, "repo-a")
 	if err := os.MkdirAll(repoRoot, 0755); err != nil {

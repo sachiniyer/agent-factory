@@ -11,8 +11,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sachiniyer/agent-factory/config"
 	"github.com/stretchr/testify/require"
+
+	"github.com/sachiniyer/agent-factory/config"
 )
 
 // TestHookCancellation_ChildProcessOrphaned is the regression test for #610.

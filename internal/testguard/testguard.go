@@ -347,13 +347,24 @@ const maxUnixSocketPathLen = 103
 func SocketTempDir(t *testing.T) string {
 	t.Helper()
 	// MkdirTemp("") honors $TMPDIR — long on macOS, but without the test name it
-	// leaves ~20 bytes of headroom under the cap. assertFits keeps that honest.
+	// leaves headroom under the cap. SocketPath's check keeps that honest.
 	dir, err := os.MkdirTemp("", "af-")
 	if err != nil {
 		t.Fatalf("testguard: creating a socket-safe temp dir: %v", err)
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(dir) })
-	return dir
+	// Canonicalize: macOS hands out /var/folders/…, and /var is a symlink to
+	// /private/var. Production resolves what it is given to the physical path, so
+	// an unresolved home makes every assertion about a path derived from it
+	// compare /var/… against /private/var/… — the #1918 class, which cost this
+	// package a second round of macOS failures after the socket fix landed. The
+	// resolved spelling is the one production will report, so hand that out and
+	// the class cannot recur through this helper. No-op on Linux.
+	resolved, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatalf("testguard: canonicalizing socket temp dir: %v", err)
+	}
+	return resolved
 }
 
 // SocketPath joins name onto a SocketTempDir and fails the test up front if the

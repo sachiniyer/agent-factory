@@ -31,7 +31,7 @@ func seedDisabledTask(id string) error {
 // without validating taskID, so an ID like "foo/../../rogue/pwned" produced a
 // lock file in an arbitrary writable directory.
 func TestRunTask_PathTraversalCreatesLockOutsideLocksDir(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testguard.SocketTempDir(t)
 	t.Setenv("AGENT_FACTORY_HOME", tmp)
 
 	// Pre-create the rogue parent so an unchecked OpenFile would succeed:

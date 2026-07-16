@@ -71,7 +71,7 @@ func processAlive(pid int) bool {
 // command line does not match an agent-factory daemon. Regression test for issue #264.
 func TestStopDaemon_DoesNotKillUnrelatedPID(t *testing.T) {
 	// Redirect config dir to a scratch location so we don't touch the user's real daemon.pid.
-	tmpHome := t.TempDir()
+	tmpHome := testguard.SocketTempDir(t)
 	t.Setenv("AGENT_FACTORY_HOME", tmpHome)
 
 	pidFile := filepath.Join(tmpHome, "daemon.pid")
@@ -119,7 +119,7 @@ func TestStopDaemon_DoesNotKillUnrelatedPID(t *testing.T) {
 // exactly the case `af reset` must not describe as "daemon has been stopped".
 // Hermetic: a fresh temp config dir, no real daemon involved, nothing signaled.
 func TestStopDaemon_NoPIDFile(t *testing.T) {
-	tmpHome := t.TempDir()
+	tmpHome := testguard.SocketTempDir(t)
 	t.Setenv("AGENT_FACTORY_HOME", tmpHome)
 
 	stopped, err := StopDaemon()
@@ -134,7 +134,7 @@ func TestStopDaemon_NoPIDFile(t *testing.T) {
 // TestStopDaemon_NonExistentPID verifies that StopDaemon treats a PID file pointing at a dead
 // process as stale and removes it instead of returning an error or killing a reused PID.
 func TestStopDaemon_NonExistentPID(t *testing.T) {
-	tmpHome := t.TempDir()
+	tmpHome := testguard.SocketTempDir(t)
 	t.Setenv("AGENT_FACTORY_HOME", tmpHome)
 	pidFile := filepath.Join(tmpHome, "daemon.pid")
 
@@ -336,7 +336,7 @@ func TestIsAgentFactoryDaemon_RequiresBinaryName(t *testing.T) {
 // before the fix this called proc.Kill() unconditionally, bypassing the
 // daemon's state-save path.
 func TestStopDaemon_SIGTERMFirst(t *testing.T) {
-	tmpHome := t.TempDir()
+	tmpHome := testguard.SocketTempDir(t)
 	t.Setenv("AGENT_FACTORY_HOME", tmpHome)
 
 	// Spawn a process that responds to SIGTERM by exiting (bash re-raises the
@@ -410,7 +410,7 @@ func TestStopDaemon_SIGTERMFirst(t *testing.T) {
 // when the daemon ignores SIGTERM, StopDaemon must wait stopDaemonGrace and
 // then SIGKILL the process. Companion to TestStopDaemon_SIGTERMFirst.
 func TestStopDaemon_EscalatesToSIGKILL(t *testing.T) {
-	tmpHome := t.TempDir()
+	tmpHome := testguard.SocketTempDir(t)
 	t.Setenv("AGENT_FACTORY_HOME", tmpHome)
 
 	// Shorten the grace so the test runs in ~300ms instead of ~5s.
@@ -723,7 +723,7 @@ func TestFindInstanceDataByTitle_NamesCorruptedRepoOnNotFound(t *testing.T) {
 // TestStopDaemon_RefusesSelfPID verifies that StopDaemon refuses to kill the current test process
 // even if the PID file points at it.
 func TestStopDaemon_RefusesSelfPID(t *testing.T) {
-	tmpHome := t.TempDir()
+	tmpHome := testguard.SocketTempDir(t)
 	t.Setenv("AGENT_FACTORY_HOME", tmpHome)
 	pidFile := filepath.Join(tmpHome, "daemon.pid")
 

@@ -20,6 +20,7 @@ import (
 	"github.com/coder/websocket"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/testguard"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
@@ -207,7 +208,7 @@ func fakeVSCodeServerMain() {
 // is what flavorForBinary reads to pick the CLI dialect.
 func writeFakeVSCodeBinary(t *testing.T, name string, env map[string]string) string {
 	t.Helper()
-	dir := t.TempDir()
+	dir := testguard.SocketTempDir(t)
 	path := filepath.Join(dir, name)
 	self, err := os.Executable()
 	if err != nil {
@@ -645,7 +646,7 @@ func TestVSCodeSupervisor_ReaperCannotSeeTheEditor(t *testing.T) {
 // TestResolveVSCodeBinary_PrefersConfigThenPath covers the detection order and
 // the deliberate refusal to silently fall back from a configured path.
 func TestResolveVSCodeBinary_PrefersConfigThenPath(t *testing.T) {
-	dir := t.TempDir()
+	dir := testguard.SocketTempDir(t)
 	openv := filepath.Join(dir, "openvscode-server")
 	if err := os.WriteFile(openv, []byte("#!/bin/sh\n"), 0o700); err != nil {
 		t.Fatal(err)
@@ -913,7 +914,7 @@ func TestVSCodeServer_StopSignalsWhileTheLeaderIsUnreaped(t *testing.T) {
 func TestVSCodeSupervisor_StartupExitIsTheSentinel(t *testing.T) {
 	// A binary that starts fine and exits at once, without ever listening — a
 	// broken install, in one line.
-	dir := t.TempDir()
+	dir := testguard.SocketTempDir(t)
 	binary := filepath.Join(dir, "code-server")
 	if err := os.WriteFile(binary, []byte("#!/bin/sh\nexit 1\n"), 0o700); err != nil {
 		t.Fatalf("writing the exiting fake: %v", err)
@@ -1165,7 +1166,7 @@ func TestWebTab_DoesNotForwardProxyPrefix(t *testing.T) {
 func TestVSCodeServer_StopKillsChildrenThatOutliveTheLeader(t *testing.T) {
 	// The fake editor forks a SIGTERM-ignoring child (see fakeVSCodeServerMain) and
 	// reports its pid here, so teardown can be checked against the whole group.
-	dir := t.TempDir()
+	dir := testguard.SocketTempDir(t)
 	childPidFile := filepath.Join(dir, "child.pid")
 	binary := writeFakeVSCodeBinary(t, "code-server", map[string]string{
 		"AF_TEST_ORPHAN_CHILD_PIDFILE": childPidFile,

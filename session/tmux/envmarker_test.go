@@ -10,6 +10,7 @@ import (
 
 	cmd2 "github.com/sachiniyer/agent-factory/cmd"
 	"github.com/sachiniyer/agent-factory/cmd/cmd_test"
+	"github.com/sachiniyer/agent-factory/internal/testguard"
 )
 
 // forceNewSessionEnvMarkers pins the `-e` support probe for the duration of
@@ -50,7 +51,7 @@ func TestVersionSupportsNewSessionEnv(t *testing.T) {
 
 func TestSessionEnvFlagsIncludeMarkers(t *testing.T) {
 	forceNewSessionEnvMarkers(t, true)
-	home := t.TempDir()
+	home := testguard.SocketTempDir(t)
 	t.Setenv("AGENT_FACTORY_HOME", home)
 
 	flags := sessionEnvFlags("af_abc_mysession")
@@ -70,7 +71,7 @@ func TestSessionEnvFlagsEmptyWhenUnsupported(t *testing.T) {
 // orphaned pane descendant back to its session after teardown.
 func TestStartInjectsEnvMarkers(t *testing.T) {
 	forceNewSessionEnvMarkers(t, true)
-	home := t.TempDir()
+	home := testguard.SocketTempDir(t)
 	t.Setenv("AGENT_FACTORY_HOME", home)
 
 	ptyFactory := NewMockPtyFactory(t)

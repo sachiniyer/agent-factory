@@ -7,9 +7,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/sachiniyer/agent-factory/config"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/sachiniyer/agent-factory/config"
 )
 
 // writeInRepoConfig drops a .agent-factory/config.json with the given fields at
