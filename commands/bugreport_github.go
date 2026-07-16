@@ -6,65 +6,56 @@ import (
 	"fmt"
 	"net/url"
 	"os/exec"
-	"regexp"
 	"runtime"
 	"strings"
 	"time"
 )
 
 // The GitHub issue-draft flow for `af bug-report`: after the redacted bundle is
-// written, open a PRE-FILLED new-issue draft in the browser for the current
-// repo. It NEVER auto-creates the issue — it opens `issues/new` (or `gh issue
-// create --web`) with a templated title/body for the user to review and submit
-// by hand. The full redacted bundle never rides in the URL (it is far past
-// GitHub's ~8KB query cap); it reaches the issue as the file the user attaches.
+// written, open a PRE-FILLED new-issue draft in the browser AGAINST THE AGENT
+// FACTORY PROJECT REPO. It NEVER auto-creates the issue — it opens `issues/new`
+// (or `gh issue create --web`) with a templated title/body for the user to
+// review and submit by hand. The full redacted bundle never rides in the URL (it
+// is far past GitHub's ~8KB query cap); a bounded, redacted excerpt of the key
+// diagnostics does (see bugreport.buildIssueDraft), and the complete bundle
+// reaches the issue as the file the user attaches.
 //
-// Every helper here is best-effort and side-effect-scoped: if no github.com
-// origin remote exists, or no browser/gh opener is available, openGitHubIssueDraft
-// reports (false, reason) and the caller falls back to file-only — the command
-// always succeeds and always leaves the bundle on disk.
+// The target is a CONSTANT, deliberately independent of the user's cwd and git
+// remotes. It used to be resolved from `.`'s origin remote, which assumed the
+// reporter was sitting inside a clone of agent-factory: every external user
+// running `af` inside their own project got a bug-report draft filed against
+// THEIR repo (#1914). A bug in af is a bug in af no matter where it is reported
+// from, so there is nothing about the local checkout worth consulting.
+//
+// The remaining fallback is opener-only: gh, then the browser, then (if neither
+// works) the caller degrades to file-only — the command always succeeds and
+// always leaves the bundle on disk.
 
-// scpLikeRemote matches the scp-style git remote form git@host:owner/repo(.git).
-var scpLikeRemote = regexp.MustCompile(`^[A-Za-z0-9._-]+@([A-Za-z0-9._-]+):(.+)$`)
+const (
+	// afIssueRepoOwner / afIssueRepoName are the agent-factory project repo —
+	// where `af bug-report` files, always.
+	afIssueRepoOwner = "sachiniyer"
+	afIssueRepoName  = "agent-factory"
+	// afIssueRepoSlug is the owner/repo form gh's --repo flag takes.
+	afIssueRepoSlug = afIssueRepoOwner + "/" + afIssueRepoName
+)
 
-// parseGitHubRepo extracts owner/repo from a git remote URL, returning ok=false
-// for anything that is not a github.com remote (enterprise hosts and other
-// forges fall back to the file-only path). It handles the scp-like
-// (git@github.com:owner/repo.git), https, and ssh:// forms.
-func parseGitHubRepo(remote string) (owner, repo string, ok bool) {
-	remote = strings.TrimSpace(remote)
-	if remote == "" {
-		return "", "", false
-	}
-
-	var host, path string
-	if m := scpLikeRemote.FindStringSubmatch(remote); m != nil {
-		host, path = m[1], m[2]
-	} else {
-		u, err := url.Parse(remote)
-		if err != nil || u.Hostname() == "" {
-			return "", "", false
-		}
-		host, path = u.Hostname(), u.Path
-	}
-
-	host = strings.TrimPrefix(strings.ToLower(host), "www.")
-	if host != "github.com" {
-		return "", "", false
-	}
-
-	path = strings.TrimSuffix(strings.Trim(path, "/"), ".git")
-	parts := strings.Split(path, "/")
-	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
-		return "", "", false
-	}
-	return parts[0], parts[1], true
-}
+// Test seams for the opener SIDE EFFECTS. Production wires these to the real
+// exec/browser calls; tests swap in recorders so the draft flow can be exercised
+// without spawning gh or launching a browser. Only the side effects are
+// injectable — the target repo is a constant and deliberately is not, so no test
+// can pass by pointing the draft somewhere other than agent-factory.
+var (
+	draftLookPath      = exec.LookPath
+	openDraftViaGh     = openViaGh
+	openDraftInBrowser = openInBrowser
+)
 
 // githubIssueNewURL builds a pre-filled issues/new URL. The title/body are
-// query-encoded; the caller keeps the body short so the URL stays under
-// GitHub's length cap. Opening this URL only DRAFTS the issue — GitHub does not
-// submit it until the user clicks the button.
+// query-encoded; the body arrives pre-bounded to fit GitHub's ~8KB URL cap —
+// bugreport.buildIssueDraft budgets it against the ENCODED length, which is what
+// lands here. Opening this URL only DRAFTS the issue — GitHub does not submit it
+// until the user clicks the button.
 func githubIssueNewURL(owner, repo, title, body string) string {
 	q := url.Values{}
 	q.Set("title", title)
@@ -82,30 +73,33 @@ func ghIssueCreateWebArgs(repoSlug, title, body string) []string {
 	return []string{"issue", "create", "--repo", repoSlug, "--web", "--title", title, "--body", body}
 }
 
-// openGitHubIssueDraft opens a pre-filled, DRAFT-ONLY GitHub issue for the repo
-// at repoPath. It prefers `gh issue create --web` (a clean browser draft) and
-// falls back to opening the issues/new URL directly. It returns opened=false
-// with a human-readable reason when there is no github.com origin remote or no
-// working opener, so the caller can degrade to the file-only path. It never
-// creates the issue.
-func openGitHubIssueDraft(repoPath, title, body string) (opened bool, reason string) {
-	remote, err := gitRemoteURL(repoPath, "origin")
-	if err != nil || strings.TrimSpace(remote) == "" {
-		return false, "no 'origin' git remote for this repo"
-	}
-	owner, repo, ok := parseGitHubRepo(remote)
-	if !ok {
-		return false, "origin remote is not a github.com repository"
-	}
+// openGitHubIssueDraft opens a pre-filled, DRAFT-ONLY GitHub issue against the
+// agent-factory project repo, regardless of where the user ran `af`. It prefers
+// `gh issue create --web` (a clean browser draft) and falls back to opening the
+// issues/new URL directly. It returns opened=false with a human-readable reason
+// only when NO opener works at all, so the caller can degrade to the file-only
+// path. It never creates the issue.
+//
+// The gh failure now falls through to the browser rather than giving up: with
+// the target pinned to a constant, a gh that is installed-but-unauthenticated
+// says nothing about whether the plain issues/new URL would open, and the URL
+// path needs no auth at all.
+func openGitHubIssueDraft(title, body string) (opened bool, reason string) {
+	var reasons []string
 
 	// Prefer gh when present — it opens a clean, repo-pinned browser draft.
-	if _, err := exec.LookPath("gh"); err == nil {
-		return openViaGh(repoPath, owner+"/"+repo, title, body)
+	if _, err := draftLookPath("gh"); err == nil {
+		opened, ghReason := openDraftViaGh(afIssueRepoSlug, title, body)
+		if opened {
+			return true, ""
+		}
+		reasons = append(reasons, ghReason)
 	}
 
-	// gh absent: open the pre-filled issues/new URL in the browser directly.
-	if err := openInBrowser(githubIssueNewURL(owner, repo, title, body)); err != nil {
-		return false, fmt.Sprintf("no browser opener available (%v)", err)
+	// No gh, or gh could not open one: open the pre-filled issues/new URL directly.
+	if err := openDraftInBrowser(githubIssueNewURL(afIssueRepoOwner, afIssueRepoName, title, body)); err != nil {
+		reasons = append(reasons, fmt.Sprintf("no browser opener available (%v)", err))
+		return false, strings.Join(reasons, "; ")
 	}
 	return true, ""
 }
@@ -114,15 +108,17 @@ func openGitHubIssueDraft(repoPath, title, body string) (opened bool, reason str
 // actually exits 0. `--web` builds the issues/new URL and launches the browser
 // without waiting, so gh returns promptly; we wait (not fire-and-forget) so an
 // auth/remote/browser failure surfaces as opened=false — letting the caller fall
-// back to the file path — instead of a false "draft opened". A timeout guards
+// back to the browser path — instead of a false "draft opened". A timeout guards
 // the (unexpected) case where gh blocks, and nil stdin means any prompt EOFs out
 // rather than hanging.
-func openViaGh(repoPath, repoSlug, title, body string) (opened bool, reason string) {
+//
+// No working directory is set: --repo pins the target, so gh needs no local
+// repo context and must not pick any up from one.
+func openViaGh(repoSlug, title, body string) (opened bool, reason string) {
 	ctx, cancel := context.WithTimeout(context.Background(), ghDraftTimeout)
 	defer cancel()
 
 	c := exec.CommandContext(ctx, "gh", ghIssueCreateWebArgs(repoSlug, title, body)...)
-	c.Dir = repoPath
 	var errBuf bytes.Buffer
 	c.Stderr = &errBuf
 	if err := c.Run(); err != nil {
@@ -146,15 +142,6 @@ func firstLine(s string) string {
 		return s[:i]
 	}
 	return s
-}
-
-// gitRemoteURL returns the configured URL of the named remote in repoPath.
-func gitRemoteURL(repoPath, name string) (string, error) {
-	out, err := exec.Command("git", "-C", repoPath, "remote", "get-url", name).Output()
-	if err != nil {
-		return "", err
-	}
-	return strings.TrimSpace(string(out)), nil
 }
 
 // openInBrowser launches the platform browser opener for target and reaps it so

@@ -2,6 +2,7 @@ package bugreport
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -708,6 +709,20 @@ func TestBuildEndToEnd(t *testing.T) {
 	mustContain(t, "draft body", res.Body,
 		"## Environment", "af: 9.9.9", "sessions:", "tasks:", BundlePathPlaceholder,
 		"Attach that file")
+	// #1914: the body must carry the bounded diagnostics excerpt ITSELF — before
+	// the fix it only named a file on the reporter's own machine, so a filed
+	// issue arrived with no diagnostics unless the user hand-attached ~1MB.
+	mustContain(t, "draft body", res.Body,
+		"<details>", issueSummaryLabel,
+		"### Daemon status", "daemon: not running",
+		"### Daemon log tail",
+		"~/.agent-factory/daemon.sock", // daemon status inlined, home collapsed
+		testSHA,                        // the real log tail rode in (and stayed structural)
+	)
+	// The redaction assertion below is only meaningful because the planted log
+	// line and daemon status actually reached the body — assert the scrubbed
+	// forms of both, so this can't pass by inlining nothing.
+	mustContain(t, "draft body", res.Body, "boot at ~/Desktop", "[redacted-secret]")
 	mustNotContain(t, "draft body", res.Body, planted...)
 
 	// --- json manifest assertions ---
@@ -721,6 +736,78 @@ func TestBuildEndToEnd(t *testing.T) {
 	mustNotContain(t, "json", string(res.JSON), planted...)
 	// Structural fields survive into the manifest too.
 	mustContain(t, "json", string(res.JSON), "abc123", "9.9.9", testSHA)
+}
+
+// TestBuildIssueDraftBoundsBodyToURLCap is the guard on the inline summary's
+// core risk: the draft reaches GitHub as an issues/new URL, and a body past the
+// cap yields a dead link (or a 414) instead of a draft. A pathological bundle —
+// a megabyte of log, a verbose daemon status, a pile of collection errors — must
+// still produce a body that fits ONCE PERCENT-ENCODED, which is the length that
+// actually matters: these log lines are newline- and space-dense, so the encoded
+// form is far larger than the raw one.
+func TestBuildIssueDraftBoundsBodyToURLCap(t *testing.T) {
+	r := &redactor{home: "/home/tester", users: []string{"tester"}}
+
+	var hugeLog strings.Builder
+	for i := 0; i < 20000; i++ {
+		fmt.Fprintf(&hugeLog, "2026-01-01 12:00:00 daemon: reconciled session %d of many, state=Ready\n", i)
+	}
+	b := Bundle{
+		Versions:    Versions{AF: "9.9.9", Go: "go1.25.0", OS: "linux", Arch: "amd64"},
+		daemonHuman: strings.Repeat("daemon: running with a very verbose status line\n", 200),
+		Log:         logSection{Contents: hugeLog.String()},
+	}
+	for i := 0; i < 50; i++ {
+		b.Errors = append(b.Errors, fmt.Sprintf("section %d: could not be collected", i))
+	}
+
+	_, body := buildIssueDraft(r, b)
+
+	if n := encodedLen(body); n > maxIssueBodyEncodedBytes {
+		t.Errorf("encoded body is %d bytes, past the %d cap", n, maxIssueBodyEncodedBytes)
+	}
+	// Capped hard — but never silently: the elision is stated, and the reader is
+	// pointed at the complete bundle.
+	mustContain(t, "capped body", body,
+		"Earlier lines elided", "…(truncated; see the attached bundle)",
+		"and 40 more (see the attached bundle)", BundlePathPlaceholder)
+	// The newest lines are what explain a bug, so those are the ones kept.
+	mustContain(t, "capped body", body, "session 19999 of many")
+	mustNotContain(t, "capped body", body, "session 0 of many")
+}
+
+// TestFitLogTailKeepsNewestWithinBudget pins the tail-fitting rules: newest
+// lines win, both caps bind, and a budget too small for even one line yields
+// nothing rather than a misleading fragment.
+func TestFitLogTailKeepsNewestWithinBudget(t *testing.T) {
+	contents := "alpha\nbravo\ncharlie\ndelta\n"
+
+	// Roomy budget, line cap binds: keep the newest 2.
+	text, elided := fitLogTail(contents, 2, 10000)
+	if text != "charlie\ndelta" || !elided {
+		t.Errorf("line cap: got %q elided=%v, want newest 2 + elided", text, elided)
+	}
+
+	// Roomy caps: everything fits, nothing elided.
+	if text, elided := fitLogTail(contents, 100, 10000); text != "alpha\nbravo\ncharlie\ndelta" || elided {
+		t.Errorf("roomy: got %q elided=%v, want all + not elided", text, elided)
+	}
+
+	// Byte budget binds before the line cap.
+	text, elided = fitLogTail(contents, 100, encodedLen("delta\n"))
+	if text != "delta" || !elided {
+		t.Errorf("byte budget: got %q elided=%v, want newest line only + elided", text, elided)
+	}
+
+	// Not even one line fits: no fragment.
+	if text, elided := fitLogTail(contents, 100, 1); text != "" || !elided {
+		t.Errorf("tiny budget: got %q elided=%v, want empty + elided", text, elided)
+	}
+
+	// An empty log is not an elision.
+	if text, elided := fitLogTail("   \n", 10, 100); text != "" || elided {
+		t.Errorf("empty log: got %q elided=%v, want empty + not elided", text, elided)
+	}
 }
 
 func writeFile(t *testing.T, path, content string) {

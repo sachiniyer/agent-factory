@@ -13,11 +13,13 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
 	"sort"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/sachiniyer/agent-factory/config"
 	aflog "github.com/sachiniyer/agent-factory/log"
@@ -111,11 +113,12 @@ type Bundle struct {
 // Result is what Build returns: a rendered text bundle (the file the user
 // attaches), the JSON manifest payload (the `--json` data member), and the
 // pre-filled GitHub issue-draft title/body the default flow opens in the
-// browser. Title/Body are short, already-redacted (built only from redacted
-// Bundle facts + a static template), and safe to inline in an issues/new URL —
-// the full bundle never rides in the URL; it reaches the issue as the attached
-// file. Body carries BundlePathPlaceholder for the command layer to replace with
-// the written bundle's path.
+// browser. Title/Body are already-redacted (built only from redacted Bundle
+// facts + a static template) and bounded to fit an issues/new URL — the FULL
+// bundle still never rides in the URL, but a bounded excerpt of the key
+// diagnostics does, so a submitted draft carries triage signal even when the
+// user never attaches the file. Body carries BundlePathPlaceholder for the
+// command layer to replace with the written bundle's path.
 type Result struct {
 	Text  string
 	JSON  []byte
@@ -161,42 +164,192 @@ func Build(in Inputs) (Result, error) {
 	jsonBytes = []byte(r.scrub(string(jsonBytes)))
 
 	text := r.scrub(renderText(b))
-	title, body := buildIssueDraft(b)
+	title, body := buildIssueDraft(r, b)
 
 	return Result{Text: text, JSON: jsonBytes, Title: title, Body: body}, nil
 }
 
+// Issue-draft size budget.
+//
+// The draft reaches GitHub as an issues/new URL — built by the command layer,
+// or by `gh --web`, which constructs the same URL — and GitHub rejects one past
+// roughly 8KB. The body rides in the query string, so what has to fit is the
+// PERCENT-ENCODED body, not its raw length: a newline costs 3 bytes encoded and
+// a log tail is newline-dense, so a raw cap would silently overshoot the URL.
+//
+// url.QueryEscape maps each byte independently, so encoded length is additive
+// over concatenation — the fixed template can be measured first and the log tail
+// handed exactly the remainder (see fitLogTail). maxIssueBodyEncodedBytes leaves
+// ~2KB of the ~8KB for the scheme, host, path, and the encoded title.
+const maxIssueBodyEncodedBytes = 6000
+
+const (
+	// issueDaemonMaxBytes bounds the daemon-status block. The human status is
+	// ~6 lines today; the cap is a guard against a future verbose status
+	// crowding out the log tail, not an expected trim.
+	issueDaemonMaxBytes = 700
+	// issueErrorsMax bounds how many collection errors inline. The errors
+	// section is the highest-signal part of a broken-install report, so it is
+	// inlined before the log tail claims the remaining budget.
+	issueErrorsMax = 10
+	// issueLogMaxLines bounds the inlined log tail by lines as well as bytes:
+	// the byte budget alone would inline hundreds of short lines, which reads
+	// as noise in an issue. The full tail is in the attached bundle.
+	issueLogMaxLines = 40
+)
+
+// logElidedNote is appended to the inlined log tail whenever lines were dropped
+// to fit the budget. Its cost is always reserved, so the note can never be what
+// pushes the body over the cap.
+const logElidedNote = "\n_Earlier lines elided to fit the issue URL — the attached bundle has the full tail._\n"
+
 // buildIssueDraft renders the pre-filled GitHub issue-draft title and body from
-// the already-redacted Bundle. It is deliberately short (the full 2MiB bundle
-// cannot inline in an issues/new URL — it reaches the issue as the attached
-// file) and carries only redacted, structural facts plus a bug-report template
-// stub. BundlePathPlaceholder marks the attach-path the command layer fills in.
-func buildIssueDraft(b Bundle) (title, body string) {
+// the already-redacted Bundle.
+//
+// The full bundle (a megabyte of log + session state) cannot inline in an
+// issues/new URL, and before #1914 that meant the draft carried NO diagnostics
+// at all — only counts plus a path to a file on the reporter's own machine,
+// which is useless to a triager unless the user hand-attaches it. So the body
+// now embeds a BOUNDED excerpt of the highest-signal sections (daemon status,
+// collection errors, the newest log lines) in a <details> block, and still
+// points at the complete bundle on disk.
+//
+// Everything inlined is scrubbed HERE, at the point of inlining: the Bundle's
+// own log/config/instances arrive pre-redacted from their collectors, but
+// daemonHuman and Errors come straight from the caller/collection and are only
+// scrubbed by the text renderer's final pass — which this body never goes
+// through. Scrubbing each component also keeps the byte budget exact, since
+// nothing downstream can grow the assembled body (a whole-body re-scrub could:
+// "[user]" is longer than the username it replaced).
+//
+// BundlePathPlaceholder marks the attach-path the command layer fills in.
+func buildIssueDraft(r *redactor, b Bundle) (title, body string) {
 	title = fmt.Sprintf("af bug-report: %s on %s/%s", b.Versions.AF, b.Versions.OS, b.Versions.Arch)
 
-	daemon := "running"
-	if strings.Contains(strings.ToLower(b.daemonHuman), "not running") {
-		daemon = "not running"
+	// The daemon state is read off the human status text the command layer
+	// pre-renders. With no status text there is nothing to read, so say so
+	// rather than defaulting to "running" and asserting a health the bundle
+	// never established.
+	daemonHuman := strings.TrimSpace(r.scrub(b.daemonHuman))
+	daemonState := "running"
+	switch {
+	case daemonHuman == "":
+		daemonState = "unknown"
+		daemonHuman = "(status unavailable)"
+	case strings.Contains(strings.ToLower(daemonHuman), "not running"):
+		daemonState = "not running"
 	}
 
-	var sb strings.Builder
-	fmt.Fprintf(&sb, "<!-- Opened by `af bug-report`. This is a DRAFT — review it, attach the bundle below, then submit. -->\n\n")
-	fmt.Fprintf(&sb, "## Environment\n")
-	fmt.Fprintf(&sb, "- af: %s\n", b.Versions.AF)
-	fmt.Fprintf(&sb, "- go: %s\n", b.Versions.Go)
-	fmt.Fprintf(&sb, "- os/arch: %s/%s\n", b.Versions.OS, b.Versions.Arch)
-	fmt.Fprintf(&sb, "- daemon: %s\n", daemon)
-	fmt.Fprintf(&sb, "- sessions: %d across %d repo(s)\n", countInstances(b.Instances), len(b.Instances))
-	fmt.Fprintf(&sb, "- tasks: %d\n\n", len(b.Tasks))
-	fmt.Fprintf(&sb, "## What happened\n<!-- Describe the bug. -->\n\n")
-	fmt.Fprintf(&sb, "## What you expected\n\n")
-	fmt.Fprintf(&sb, "## Steps to reproduce\n\n")
-	fmt.Fprintf(&sb, "---\n")
-	fmt.Fprintf(&sb, "A best-effort **redacted** diagnostics bundle was written to:\n\n")
-	fmt.Fprintf(&sb, "    %s\n\n", BundlePathPlaceholder)
-	fmt.Fprintf(&sb, "**Attach that file to this issue** (drag-and-drop) before submitting. "+
+	var head strings.Builder
+	fmt.Fprintf(&head, "<!-- Opened by `af bug-report`. This is a DRAFT — review it, attach the bundle below, then submit. -->\n\n")
+	fmt.Fprintf(&head, "## Environment\n")
+	fmt.Fprintf(&head, "- af: %s\n", b.Versions.AF)
+	fmt.Fprintf(&head, "- go: %s\n", b.Versions.Go)
+	fmt.Fprintf(&head, "- os/arch: %s/%s\n", b.Versions.OS, b.Versions.Arch)
+	fmt.Fprintf(&head, "- daemon: %s\n", daemonState)
+	fmt.Fprintf(&head, "- sessions: %d across %d repo(s)\n", countInstances(b.Instances), len(b.Instances))
+	fmt.Fprintf(&head, "- tasks: %d\n\n", len(b.Tasks))
+	fmt.Fprintf(&head, "## What happened\n<!-- Describe the bug. -->\n\n")
+	fmt.Fprintf(&head, "## What you expected\n\n")
+	fmt.Fprintf(&head, "## Steps to reproduce\n\n")
+	fmt.Fprintf(&head, "---\n\n")
+	fmt.Fprintf(&head, "<details>\n<summary>%s</summary>\n\n", issueSummaryLabel)
+	fmt.Fprintf(&head, "### Daemon status\n\n```\n%s\n```\n\n", truncateBytes(daemonHuman, issueDaemonMaxBytes))
+	if len(b.Errors) > 0 {
+		fmt.Fprintf(&head, "### Collection errors\n\n")
+		for i, e := range b.Errors {
+			if i == issueErrorsMax {
+				fmt.Fprintf(&head, "- …and %d more (see the attached bundle)\n", len(b.Errors)-issueErrorsMax)
+				break
+			}
+			fmt.Fprintf(&head, "- %s\n", r.scrub(e))
+		}
+		head.WriteByte('\n')
+	}
+
+	var foot strings.Builder
+	fmt.Fprintf(&foot, "</details>\n\n---\n\n")
+	fmt.Fprintf(&foot, "The summary above is a bounded excerpt. The COMPLETE best-effort **redacted** "+
+		"bundle (full log tail, sessions, tasks, config) was written to:\n\n")
+	fmt.Fprintf(&foot, "    %s\n\n", BundlePathPlaceholder)
+	fmt.Fprintf(&foot, "**Attach that file to this issue** (drag-and-drop) before submitting. "+
 		"Open and review it first — redaction is best-effort and cannot catch everything.\n")
+
+	// Hand the log tail whatever encoded budget the rest of the body leaves,
+	// always reserving the elision note so appending it can't bust the cap.
+	logHeader := "### Daemon log tail (newest lines, redacted)\n\n```\n"
+	logFooter := "\n```\n\n"
+	budget := maxIssueBodyEncodedBytes -
+		encodedLen(head.String()) - encodedLen(foot.String()) -
+		encodedLen(logHeader) - encodedLen(logFooter) - encodedLen(logElidedNote)
+
+	var sb strings.Builder
+	sb.WriteString(head.String())
+	logText, elided := fitLogTail(b.Log.Contents, issueLogMaxLines, budget)
+	if logText != "" {
+		sb.WriteString(logHeader)
+		sb.WriteString(logText)
+		sb.WriteString(logFooter)
+	}
+	if elided {
+		sb.WriteString(logElidedNote)
+	}
+	sb.WriteString(foot.String())
 	return title, sb.String()
+}
+
+// issueSummaryLabel names the collapsible diagnostics block. Tests key on it to
+// assert the summary actually reached the draft.
+const issueSummaryLabel = "Diagnostics summary (auto-generated, redacted, bounded excerpt)"
+
+// fitLogTail returns the newest lines of the (already redacted) log tail that
+// fit within both maxLines and budget encoded bytes, reporting whether any
+// earlier line was dropped. It walks from the END because the lines nearest the
+// failure are the ones that explain a bug, and stops at the first line that
+// would overflow — a hard cap, never a best-effort overshoot. A budget too small
+// for even one line yields no tail at all (elided=true) rather than a truncated,
+// misleading fragment.
+func fitLogTail(contents string, maxLines, budget int) (text string, elided bool) {
+	contents = strings.TrimRight(contents, "\n")
+	if strings.TrimSpace(contents) == "" {
+		return "", false
+	}
+	lines := strings.Split(contents, "\n")
+	if len(lines) > maxLines {
+		lines = lines[len(lines)-maxLines:]
+		elided = true
+	}
+	used, kept := 0, 0
+	for i := len(lines) - 1; i >= 0; i-- {
+		cost := encodedLen(lines[i]) + encodedLen("\n")
+		if used+cost > budget {
+			elided = true
+			break
+		}
+		used += cost
+		kept++
+	}
+	if kept == 0 {
+		return "", true
+	}
+	return strings.Join(lines[len(lines)-kept:], "\n"), elided
+}
+
+// encodedLen reports how many bytes s costs once percent-encoded into the
+// issues/new query string — the only length that matters for the URL cap.
+func encodedLen(s string) int { return len(url.QueryEscape(s)) }
+
+// truncateBytes caps s at max bytes on a rune boundary, marking the cut so a
+// trimmed block never reads as complete.
+func truncateBytes(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	cut := s[:max]
+	for len(cut) > 0 && !utf8.ValidString(cut) {
+		cut = cut[:len(cut)-1]
+	}
+	return cut + "\n…(truncated; see the attached bundle)"
 }
 
 // countInstances totals the session records across every repo's redacted

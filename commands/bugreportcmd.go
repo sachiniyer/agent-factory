@@ -47,11 +47,17 @@ var bugReportCmd = &cobra.Command{
 
 By default the redacted bundle is written to a single text file
 (~/af-bug-report-<ts>.txt) and a pre-filled GitHub issue DRAFT is opened in your
-browser for this repo — with a templated title and body. The draft is never
-submitted for you: review it, drag the bundle file onto the issue, and click
-Submit yourself. If this repo has no github.com remote, or no browser/gh is
-available, the command falls back to just writing the bundle file and printing
-where it is so you can attach it to an issue by hand.
+browser. The draft ALWAYS targets the agent-factory project
+(github.com/sachiniyer/agent-factory) — never whatever repo you happen to be
+in — because it reports a bug in af itself.
+
+The draft body carries a bounded, redacted summary of the key diagnostics
+(versions, daemon status, counts, and the newest log lines) so the report is
+useful even as filed; the complete bundle is too large for a URL, so it stays on
+disk for you to attach. The draft is never submitted for you: review it, drag the
+bundle file onto the issue, and click Submit yourself. If neither gh nor a
+browser opener is available, the command falls back to just writing the bundle
+file and printing where it is so you can attach it to an issue by hand.
 
 Use -o/--output <path> or --file to skip GitHub and only write the bundle file.
 
@@ -109,13 +115,15 @@ envelope) to stdout instead of writing a file or opening a draft.`,
 			return nil
 		}
 
-		// Default: open a pre-filled GitHub issue DRAFT for this repo. The bundle
-		// is attached by the user; nothing is submitted automatically. The path is
-		// redacted ($HOME→~ / username→[user]) before it goes into the draft body
-		// so the public draft can't leak it, while stdout still prints the real
-		// local path.
+		// Default: open a pre-filled GitHub issue DRAFT against the agent-factory
+		// project repo — never the user's own repo, wherever they ran `af` from.
+		// The body carries a bounded, redacted diagnostics excerpt; the complete
+		// bundle is attached by the user. Nothing is submitted automatically. The
+		// path is redacted ($HOME→~ / username→[user]) before it goes into the
+		// draft body so the public draft can't leak it, while stdout still prints
+		// the real local path.
 		body := strings.Replace(result.Body, bugreport.BundlePathPlaceholder, bugreport.RedactPath(outPath), 1)
-		opened, reason := openGitHubIssueDraft(".", result.Title, body)
+		opened, reason := openGitHubIssueDraft(result.Title, body)
 		if !opened {
 			fmt.Fprintf(w, "Couldn't open a GitHub issue draft (%s).\n", reason)
 			fmt.Fprintf(w, "Wrote the redacted bug-report bundle to %s\n", outPath)
