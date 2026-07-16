@@ -14,10 +14,19 @@
 // copied here, and the worker's cache name is a hash of bytes this build just
 // produced, so the same source always yields the same dist.
 import { build } from "esbuild";
-import { copyFile, mkdir, readdir, readFile, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { join } from "node:path";
 
+// Rebuild dist/ from scratch. The committed dist/ is ENTIRELY generated, so wiping it
+// first is what makes the output a pure function of src/: a renamed or deleted source
+// — an icon especially, since the icon set is discovered by readdir rather than a
+// fixed list — would otherwise leave its stale output orphaned in dist/, embedded and
+// served forever, and the committed bytes would depend on what the previous checkout
+// left behind instead of on src/ alone. That is exactly the reproducibility contract
+// this build exists to hold (a rebuild reproduces the committed bytes), and copying
+// over a dirty dist/ silently breaks it.
+await rm("dist", { recursive: true, force: true });
 await mkdir("dist", { recursive: true });
 
 await build({
@@ -44,9 +53,11 @@ await copyFile("src/index.html", "dist/index.html");
 await copyFile("src/manifest.webmanifest", "dist/manifest.webmanifest");
 
 // The icon set: the three SVG sources plus the PNGs gen-icons.mjs rendered from
-// them. Copied wholesale rather than named individually so adding a size is a
-// gen-icons.mjs edit and nothing else — icons.test.ts is what pins the set that
-// index.html and the manifest actually reference.
+// them. Copied wholesale (the whole src/icons dir) rather than named individually, so
+// adding a size is a gen-icons.mjs edit and nothing else — icons.test.ts is what pins
+// the set that index.html and the manifest actually reference. This copies INTO the
+// freshly-wiped dist/ above, so a size that was renamed or dropped from src/ does not
+// linger here from a prior build.
 await mkdir("dist/icons", { recursive: true });
 for (const name of await readdir("src/icons")) {
   await copyFile(join("src/icons", name), join("dist/icons", name));

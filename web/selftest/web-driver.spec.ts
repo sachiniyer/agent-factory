@@ -2672,15 +2672,47 @@ test("the service worker registers, controls the page, and caches the static she
   // bypass against an idle worker would prove nothing.
   expect(await p.evaluate(() => navigator.serviceWorker.controller !== null)).toBe(true);
 
-  // Polled, because the worker caches with a deliberately un-awaited cache.put — the
-  // response is returned to the page first and stashed after, so the entry lands
-  // shortly AFTER the asset itself has finished loading.
+  // Polled because the cache write rides event.waitUntil — it completes within the
+  // fetch event's lifetime but not necessarily before the response reaches the page,
+  // so the entry lands shortly after the asset finishes loading.
   await expect
     .poll(async () => (await cacheContents(p)).names.filter((n) => /^af-shell-[0-9a-f]{12}$/.test(n)).length)
     .toBeGreaterThan(0);
-  // The shell is cached, which is what makes the worker worth having: a daemon that
-  // goes away yields the app's own error screen instead of the browser's.
+  // Two things must be cached, and they warm by different paths: the bundle as a
+  // sub-resource (networkFirst), and the shell under /index.html as a NAVIGATION
+  // (handleNavigation, warmed by the openControlledByWorker reload). The latter is
+  // what a deep-route offline fallback resolves to, so assert it explicitly here.
   await expect.poll(async () => (await cacheContents(p)).urls.some((u) => u.endsWith("/af-web.js"))).toBe(true);
+  await expect.poll(async () => (await cacheContents(p)).urls.some((u) => u.endsWith("/index.html"))).toBe(true);
+  await ctx.close();
+});
+
+test("offline, a client-routed deep link serves the cached app shell, not a browser error", async ({ browser }) => {
+  const ctx = await browser.newContext();
+  const p = await ctx.newPage();
+  await openControlledByWorker(p);
+  // The offline fallback resolves to the cached /index.html, so it must be warm before
+  // we cut the network — otherwise this would fail for want of a cache rather than for
+  // the behaviour under test.
+  await expect.poll(async () => (await cacheContents(p)).urls.some((u) => u.endsWith("/index.html"))).toBe(true);
+
+  await ctx.setOffline(true);
+
+  // /tasks is a route the app never fetched or cached by name — serveSPA answers it
+  // with the shell for client-side routing. Offline, the worker must do the same, or a
+  // refresh/bookmark of a deep route shows the browser's network-error page instead of
+  // the app booting and rendering its own daemon-unreachable state. Before the
+  // navigation fallback existed, this passed straight through and failed offline.
+  const resp = await p.goto("/tasks");
+  expect(resp?.status(), "the deep-link navigation must be answered, not a network failure").toBe(200);
+  expect(resp?.fromServiceWorker(), "offline, only the worker could have answered — proving the shell fallback").toBe(
+    true,
+  );
+  // It is the app shell that came back (its module bundle tag), not some other cached
+  // response. The bundle then boots from cache and takes over the route client-side.
+  expect(await p.evaluate(() => !!document.querySelector('script[src="/af-web.js"]'))).toBe(true);
+
+  await ctx.setOffline(false);
   await ctx.close();
 });
 
