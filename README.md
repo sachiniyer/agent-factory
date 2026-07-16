@@ -133,9 +133,10 @@ claude = "/home/me/.local/bin/claude --dangerously-skip-permissions"
 Linux and macOS are supported; Windows works through WSL2 (keep repos on the
 Linux filesystem). Native Windows is not a target. tmux is required everywhere.
 A fresh install has no autostart unit — run `af daemon install` to register one
-(a systemd user service on Linux, a launchd agent on macOS) so tasks keep firing
-and the web UI stays up across logouts and reboots. `af daemon status` reports
-whether it's installed.
+(a systemd user service on Linux, a launchd agent on macOS) so the daemon starts
+at login and task schedules keep running across reboots. Both are user-level
+units, so they cover login and reboot, not running while you are logged out.
+`af daemon status` reports whether one is installed.
 
 ## Documentation
 
