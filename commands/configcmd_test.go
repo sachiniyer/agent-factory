@@ -379,6 +379,82 @@ func TestConfigSetWritesAndReflects(t *testing.T) {
 	}
 }
 
+// TestConfigSetEchoesKeyValueAndRoundTrips is the end-to-end contract the config
+// agent's briefing is written against, driven through the cobra commands against
+// a throwaway AGENT_FACTORY_HOME.
+//
+// Three things are pinned, and each one is load-bearing for the walkthrough:
+//
+//  1. The echo line contains `key = value`. The briefing tells the agent to echo
+//     exactly that after every set so the user can see what changed; the CLI
+//     already prints it, which makes the shape a contract rather than a detail.
+//  2. `af config set` prints the restart note itself. The briefing tells the
+//     agent NOT to repeat it — an instruction that only makes sense while the CLI
+//     still prints it, so if this line ever disappears the briefing silently
+//     becomes wrong and the user stops being told to restart at all.
+//  3. The value round-trips through `af config get`, the file still loads, and
+//     the atomic write leaves no partial or temp file behind.
+func TestConfigSetEchoesKeyValueAndRoundTrips(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	path := filepath.Join(home, "config.toml")
+
+	setCmd := &cobra.Command{}
+	var setOut bytes.Buffer
+	setCmd.SetOut(&setOut)
+	if err := configSetCmd.RunE(setCmd, []string{"daemon_poll_interval", "2500"}); err != nil {
+		t.Fatalf("config set: %v", err)
+	}
+
+	echo := setOut.String()
+	if !strings.Contains(echo, "daemon_poll_interval = 2500") {
+		t.Errorf("`af config set` must echo the change as `key = value` (the shape the config agent mirrors), got: %q", echo)
+	}
+	if !strings.Contains(echo, "restart") {
+		t.Errorf("`af config set` must print the restart note itself — the config agent's briefing tells the "+
+			"agent not to repeat it, so dropping it here means nobody tells the user. Got: %q", echo)
+	}
+
+	// Round-trip: the value comes back through the read side.
+	getCmd := &cobra.Command{}
+	var getOut bytes.Buffer
+	getCmd.SetOut(&getOut)
+	if err := configGetCmd.RunE(getCmd, []string{"daemon_poll_interval"}); err != nil {
+		t.Fatalf("config get: %v", err)
+	}
+	if got := strings.TrimSpace(getOut.String()); got != "2500" {
+		t.Errorf("`af config get daemon_poll_interval` = %q, want %q", got, "2500")
+	}
+
+	// The written file is complete and still loads — a partial write would show
+	// up here rather than at the user's next startup.
+	if _, err := os.ReadFile(path); err != nil {
+		t.Fatalf("config.toml unreadable after set: %v", err)
+	}
+	cfg, err := config.LoadConfig()
+	if err != nil {
+		t.Fatalf("config written by set does not load: %v", err)
+	}
+	if cfg.DaemonPollInterval != 2500 {
+		t.Errorf("loaded daemon_poll_interval = %d, want 2500", cfg.DaemonPollInterval)
+	}
+
+	// The atomic write must not strand its temp file next to the real one.
+	// AtomicWriteFile stages through "<name>.tmp.*" (config/filelock.go) and
+	// renames; a surviving stage file means the rename never happened. The
+	// config lock file and the relocated application log are expected
+	// neighbours in an AGENT_FACTORY_HOME, so only the stage pattern is checked.
+	entries, err := os.ReadDir(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if strings.Contains(e.Name(), ".tmp.") {
+			t.Errorf("atomic write left the staging file %q behind — the rename did not complete", e.Name())
+		}
+	}
+}
+
 // TestConfigSetBadValueJSONEnvelope pins that a failed `config set --json`
 // emits the shared failure envelope on stderr, consistent with config get.
 func TestConfigSetBadValueJSONEnvelope(t *testing.T) {
