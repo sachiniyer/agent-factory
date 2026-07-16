@@ -105,8 +105,18 @@ func ensureDaemonWithLauncher(launch func() error) error {
 }
 
 func pingDaemon() error {
+	_, err := pingDaemonResponse()
+	return err
+}
+
+// pingDaemonResponse pings the daemon and returns its full reply, so callers
+// that need the reported version (`af doctor`'s skew check) read it from the
+// same probe that establishes liveness. Never ensures a daemon: doctor is
+// read-only and must not spawn the thing it is diagnosing.
+func pingDaemonResponse() (PingResponse, error) {
 	var resp PingResponse
-	return callDaemonNoEnsure("Ping", PingRequest{}, &resp)
+	err := callDaemonNoEnsure("Ping", PingRequest{}, &resp)
+	return resp, err
 }
 
 // daemonWarmupWait bounds how long RPC clients wait for a warming daemon

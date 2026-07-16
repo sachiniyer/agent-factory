@@ -3,7 +3,13 @@ package doctor
 import (
 	"fmt"
 	"io"
+	"os"
 	"strings"
+
+	"github.com/charmbracelet/lipgloss"
+	"golang.org/x/term"
+
+	"github.com/sachiniyer/agent-factory/ui"
 )
 
 const (
@@ -72,13 +78,14 @@ func Render(w io.Writer, r *Report, fixMode, verbose bool) {
 	}
 
 	rows := renderRows(r, fixMode, verbose)
+	color := colorEnabled(w)
 	for _, section := range orderedSections(rows) {
 		fmt.Fprintf(w, "\n%s\n", section)
 		for _, row := range rows {
 			if row.section != section {
 				continue
 			}
-			fmt.Fprintf(w, "  %-5s %-24s %s\n", row.status, row.name+":", row.detail)
+			fmt.Fprintf(w, "  %s %-24s %s\n", renderStatus(row.status, color), row.name+":", row.detail)
 			if row.remediation != "" && row.status != StatusPass && row.status != StatusFixed {
 				fmt.Fprintf(w, "        fix: %s\n", row.remediation)
 			}
@@ -87,6 +94,42 @@ func Render(w io.Writer, r *Report, fixMode, verbose bool) {
 
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, summaryLine(r, rows, fixMode))
+}
+
+// renderStatus renders the status column, padded to a fixed width so check
+// names stay aligned down the page. The padding goes inside the styled span:
+// ANSI codes have no display width, but %-5s would count them, so padding a
+// pre-colored string is what breaks the column.
+func renderStatus(s CheckStatus, color bool) string {
+	text := fmt.Sprintf("%-5s", string(s))
+	if !color {
+		return text
+	}
+	theme := ui.CurrentTheme()
+	var c lipgloss.Color
+	switch s {
+	case StatusPass, StatusFixed:
+		c = theme.Success
+	case StatusWarn:
+		c = theme.Warning
+	case StatusFail:
+		c = theme.Error
+	default:
+		return text
+	}
+	return lipgloss.NewStyle().Foreground(c).Render(text)
+}
+
+// colorEnabled reports whether w is a terminal that should receive color.
+// Deciding from the writer — rather than from the ambient color profile — is
+// what keeps `af doctor > file`, `| grep`, and the tests byte-identical and
+// free of escape codes, while an interactive run still gets color.
+func colorEnabled(w io.Writer) bool {
+	f, ok := w.(*os.File)
+	if !ok {
+		return false
+	}
+	return term.IsTerminal(int(f.Fd()))
 }
 
 type renderRow struct {

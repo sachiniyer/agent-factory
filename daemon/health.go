@@ -18,6 +18,13 @@ type HealthStatus struct {
 	SocketExists bool
 	// PingErr is nil when a daemon answered the control-socket ping.
 	PingErr error
+	// DaemonVersion is the af version the responding daemon reported. It is
+	// empty when nothing answered (PingErr != nil), and — importantly — also
+	// when a daemon answered but predates version reporting. Read it together
+	// with PingErr: answered-but-empty means the daemon is older than any
+	// client that can ask, which is exactly the skew that makes a newer
+	// client's requests fail with "unknown field <name>" (#1044).
+	DaemonVersion string
 	// AutostartUnit reports whether the supervised autostart unit (systemd
 	// user service / launchd agent) is installed — i.e. whether a running
 	// daemon is expected to be unit-managed rather than an ad-hoc child.
@@ -45,7 +52,11 @@ func Health() HealthStatus {
 			h.SocketExists = true
 		}
 	}
-	h.PingErr = pingDaemon()
+	ping, pingErr := pingDaemonResponse()
+	h.PingErr = pingErr
+	if pingErr == nil {
+		h.DaemonVersion = ping.Version
+	}
 	h.AutostartUnit = AutostartInstalled()
 
 	pidPath, err := daemonPIDFilePath()
@@ -65,6 +76,18 @@ func Health() HealthStatus {
 		}
 	}
 	return h
+}
+
+// DaemonSocketNames returns the file names of the Unix sockets a daemon binds
+// inside an agent-factory home. Exported so `af doctor` can look for sockets
+// left behind in a home it was pointed at, rather than only the active one,
+// and so its idea of "a daemon socket" cannot drift from the daemon's own.
+//
+// Names, not paths: a caller joins them onto the home it is inspecting. Callers
+// must also verify the entry really is a socket before acting on it — a name
+// alone proves nothing about the file (see isAbandonedVSCodeSocket).
+func DaemonSocketNames() []string {
+	return []string{daemonSocketFileName, daemonHTTPSocketFileName}
 }
 
 // LooksLikeDaemonArgv reports whether argv names an agent-factory daemon

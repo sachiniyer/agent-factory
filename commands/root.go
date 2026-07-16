@@ -231,6 +231,12 @@ func NewRootCommand(opts Options) *cobra.Command {
 	// TUI, every CLI subcommand, and `af --daemon` all pass through — app.Version
 	// is set inside the TUI's RunE and would miss the CLI entirely.
 	apiclient.SetClientVersion(version)
+	// The same invocation, viewed from the other end: when this process is the
+	// one serving (`af --daemon`), this is the version it reports over Ping for
+	// `af doctor` to compare against (#1044). The two are complements — the line
+	// above tells the daemon who is calling, this one lets a caller learn who
+	// answered.
+	daemon.SetVersion(version)
 	// Setting Version makes cobra provide `af --version` (and -v) for free,
 	// instead of erroring with a usage dump (#1749). The `version` subcommand is
 	// kept; both share this format so they never drift.

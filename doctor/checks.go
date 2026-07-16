@@ -96,9 +96,9 @@ func killFix(ctx *scanContext, p proctree.Process) func() error {
 
 // checkDaemonHealth reports on the active install's daemon: socket, ping,
 // autostart unit, pid file, and binary freshness. Read-only; never fixable
-// (restarting the daemon is a user decision).
-func checkDaemonHealth(ctx *scanContext, report *Report) {
-	h := daemon.Health()
+// (restarting the daemon is a user decision). Takes the run's shared health
+// probe so every daemon check reasons about one consistent observation.
+func checkDaemonHealth(ctx *scanContext, report *Report, h daemon.HealthStatus) {
 	if h.SocketErr != nil {
 		report.Fail(sectionDaemon, "daemon", fmt.Sprintf("cannot resolve daemon socket path: %v", h.SocketErr),
 			"fix AGENT_FACTORY_HOME and rerun `af doctor`")
@@ -640,31 +640,15 @@ func checkForeignDaemons(ctx *scanContext, report *Report) {
 	if ctx.snap == nil {
 		return
 	}
-	defaultHome := ""
-	if home, err := os.UserHomeDir(); err == nil {
-		defaultHome = filepath.Join(home, ".agent-factory")
-	}
 	activeHome := filepath.Clean(ctx.opts.ConfigDir)
 
-	pids := make([]int, 0, len(ctx.snap))
-	for pid := range ctx.snap {
-		pids = append(pids, pid)
-	}
-	sort.Ints(pids)
-	for _, pid := range pids {
-		if ctx.selfAncestors[pid] {
-			continue
-		}
-		p := ctx.snap[pid]
-		args := daemonProcessArgv(pid)
-		if len(args) == 0 || !daemon.LooksLikeDaemonArgv(args) {
-			continue
-		}
-		home, ok := proctree.EnvValue(pid, "AGENT_FACTORY_HOME")
-		if !ok || home == "" {
-			home = defaultHome
-		}
-		home = filepath.Clean(home)
+	// Shares the run's one daemon scan with checkDuplicateDaemons, which
+	// classifies this home's daemons — the two must agree on which process
+	// serves which home.
+	for _, d := range ctx.daemonProcs() {
+		p := d.proc
+		pid := p.PID
+		home := d.home
 		if home == activeHome || home == "" {
 			continue // this install's daemon; covered by checkDaemonHealth
 		}

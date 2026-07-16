@@ -26,6 +26,7 @@ type controlServer struct {
 
 func (s *controlServer) Ping(_ PingRequest, resp *PingResponse) error {
 	resp.OK = true
+	resp.Version = Version()
 	return nil
 }
 

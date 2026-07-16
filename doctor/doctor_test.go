@@ -2,6 +2,7 @@ package doctor
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/sachiniyer/agent-factory/cmd"
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/internal/proctree"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
 )
@@ -76,8 +78,23 @@ func testOptionsWithHome(t *testing.T, home string, fix bool, pids ...int) Optio
 		// hermetic (no git shell-out, no reading the real repo's in-repo
 		// config). The remote tests below inject their own resolver.
 		remoteConfig: func() (*config.RemoteHooks, string, error) { return nil, "", nil },
+		// The skew checks (#1044) all reach for real machine state, so they
+		// are defaulted here to inert fakes: "nothing answered, no unit
+		// installed, no af binaries to compare". Without this the suite would
+		// ping whatever daemon is live on the developer's box and execute the
+		// real `af` binaries found on PATH. The skew tests inject their own.
+		daemonHealth:         func() daemon.HealthStatus { return daemon.HealthStatus{PingErr: errNoDaemon} },
+		autostartUnit:        func() daemon.AutostartUnitInfo { return daemon.AutostartUnitInfo{Supported: true} },
+		autostartSupervision: func() daemon.SupervisionInfo { return daemon.SupervisionInfo{Supported: true} },
+		selfBinary:           func() (string, error) { return filepath.Join(home, "bin", "af"), nil },
+		binaryCandidates:     func() []string { return nil },
+		binaryVersion:        func(string) (string, error) { return "", errNoDaemon },
 	}
 }
+
+// errNoDaemon stands in for "nothing answered" in tests that must never touch
+// a real daemon.
+var errNoDaemon = errors.New("no daemon (test fake)")
 
 // snapshotOf builds a snapshot function restricted to the given pids (read
 // from the real /proc), so Run can never act outside the test's processes.
