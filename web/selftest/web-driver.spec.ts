@@ -1968,6 +1968,106 @@ test("#1812: a tab created/deleted out-of-band reaches the open client with no r
   expect(await notReloaded()).toBe(true);
 });
 
+// The other half of #1812/#1815's bill: the event must arrive WITHOUT disturbing
+// what the user is doing. Delivering a tab into the open window is only half the
+// feature if it rips the pane they are reading out from under them.
+//
+// The regression: reconcile re-inserted the split DOM on every resync, and
+// re-inserting a pane container detaches it — even when it goes straight back into
+// the same parent. The browser drops the scroll offset of every scrollable
+// descendant on detach, so the xterm viewport rewound to 0 while xterm's own scroll
+// position (ydisp) stayed put. That desync is what killed the WHEEL: a viewport
+// pinned at 0 has nothing left to scroll up, emits no scroll event, and xterm never
+// moves. It looked like "scrolling is broken", and it healed on the next chunk of
+// output (which resyncs scrollTop) — so it bit hardest on a QUIET pane, which is
+// exactly the pane someone is scrolled up reading.
+//
+// Driven through the real `af` CLI, like the #1812 test above: a tab created by
+// someone else, on the session being watched, while its scrollback is parked.
+test("#1815: a tab created out-of-band must not rewind the scrolled terminal", async () => {
+  const afBin = process.env.AF_BIN;
+  const mockRepo = process.env.AF_MOCK_REPO;
+  test.skip(!afBin || !mockRepo, "AF_BIN/AF_MOCK_REPO are set only by web-selftest-entry.sh");
+  const { execFileSync } = await import("node:child_process");
+  const af = (...args: string[]): void => {
+    execFileSync(afBin as string, ["--repo", mockRepo as string, ...args], { stdio: "pipe" });
+  };
+  const SCROLL_TAB = "scrollprobe";
+  const SHELL_TAB = "scrollshell";
+
+  await row(page, SESSION_A).click();
+  await expect(page.locator(".af-main.af-main-term")).toBeVisible();
+  await expect(page.locator(".af-term-host")).toContainText(READY_MARKER);
+
+  // Scrollback needs a real PTY: the seeded agent tab is a fake agent that only
+  // echoes. Create a shell tab under a name of our own rather than clicking + — the
+  // suite is serial and "Terminal" is the default name every other tab test uses,
+  // so a leaked one would make this ambiguous.
+  const tabbar = page.locator(".af-tabbar");
+  // Whatever this serial suite has left on the session — restored at the end, since
+  // the tests after this one inherit it.
+  const tabsBefore = await tabbar.locator(".af-tab").count();
+  af("sessions", "tab-create", SESSION_A, "--command", "bash", "--name", SHELL_TAB);
+  const shell = tabbar.locator(".af-tab", { hasText: SHELL_TAB });
+  await expect(shell).toHaveCount(1, { timeout: 15_000 });
+  await shell.click();
+  await expect(shell).toHaveClass(/af-tab-active/);
+  await expect(page.locator(".af-term-meta")).toContainText("Live");
+
+  // More than one screen of numbered output, so which line is on screen is exact.
+  // xterm renders only the VISIBLE rows, so the pane's text IS its viewport.
+  const host = page.locator(".af-term-host");
+  await page.keyboard.type("for i in $(seq 1 200); do echo scrollback-line-$i; done");
+  await page.keyboard.press("Enter");
+  await expect(host).toContainText("scrollback-line-200", { timeout: 15_000 });
+
+  // Park the view up in the scrollback, the way a user reads back through output.
+  await host.hover();
+  await page.mouse.wheel(0, -900);
+  await expect(host, "the wheel must move the viewport off the bottom").not.toContainText(
+    "scrollback-line-200",
+  );
+  const viewport = page.locator(".af-term-host .xterm-viewport");
+  const parked = await viewport.evaluate((el) => el.scrollTop);
+  expect(parked, "a scrolled-up viewport sits off 0").toBeGreaterThan(0);
+  const reading = await host.textContent();
+
+  // Someone else adds a tab to the session being watched. #1815 fans the
+  // session.updated out to this window, which re-projects the whole session.
+  const probe = page.locator(".af-tabbar .af-tab", { hasText: SCROLL_TAB });
+  af("sessions", "tab-create", SESSION_A, "--kind", "web", "--port", "3201", "--name", SCROLL_TAB);
+  // The event really landed here — otherwise the assertions below would pass on a
+  // client that never re-projected, proving nothing.
+  await expect(probe, "the out-of-band tab must reach this window").toHaveCount(1, {
+    timeout: 15_000,
+  });
+
+  // The pane is untouched: same shell tab, same line, same viewport offset.
+  await expect(host).not.toContainText("scrollback-line-200");
+  expect(await viewport.evaluate((el) => el.scrollTop), "the viewport must not rewind").toBe(parked);
+  expect(await host.textContent(), "the parked view must not move").toBe(reading);
+
+  // ...and the wheel still WORKS afterwards, which is the symptom that was reported:
+  // the rewound viewport had nothing left to scroll, so wheel-up went dead.
+  await page.mouse.wheel(0, -300);
+  await expect
+    .poll(async () => viewport.evaluate((el) => el.scrollTop), {
+      message: "wheel-up must still scroll after an out-of-band resync",
+    })
+    .toBeLessThan(parked);
+
+  // Put the roster back: this suite is serial, so both tabs would otherwise leak
+  // into every test after this one.
+  af("sessions", "tab-delete", SESSION_A, "--name", SCROLL_TAB);
+  await expect(probe).toHaveCount(0, { timeout: 15_000 });
+  af("sessions", "tab-delete", SESSION_A, "--name", SHELL_TAB);
+  await expect(shell).toHaveCount(0, { timeout: 15_000 });
+  // The roster this test perturbed is back as it found it. Which tab the pane FALLS
+  // BACK to once its own tab is deleted out from under it is a separate contract
+  // (the tab tests above own it), so this stops at the roster.
+  await expect(tabbar.locator(".af-tab")).toHaveCount(tabsBefore, { timeout: 15_000 });
+});
+
 // The #1812 review guard (Codex): a close is async, and `next` is computed from the
 // index that was active when it was ISSUED. A slow CloseTab leaves a window in which
 // the user can select another tab — and re-pointing the pane from that stale index
@@ -2320,3 +2420,4 @@ test("vscode tab (feat): the ▾ menu creates a VS Code tab and the daemon serve
   await page.keyboard.press("Escape");
   await expect(menu).toBeHidden();
 });
+

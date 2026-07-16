@@ -7741,6 +7741,23 @@ var SplitView = class {
   archived = false;
   tree = null;
   focusedId = null;
+  // The tree the CURRENT split DOM was built from, so reconcile can tell a real
+  // layout change from a resync that left the layout alone (#1815 scroll fix).
+  //
+  // Re-inserting a pane's container — even the very same element, into the very
+  // same parent — detaches it, and the browser drops the scroll offset of every
+  // scrollable descendant on detach. xterm keeps its own scroll position (ydisp)
+  // but its .xterm-viewport silently rewinds to 0, and a viewport pinned at the
+  // top emits no scroll event, so wheel-up goes dead until the next chunk of
+  // output resyncs it — i.e. exactly while a quiet pane is being read.
+  //
+  // The tree nodes are reference-stable by construction (see mapAllLeaves), so a
+  // resync that changed nothing hands back the identical root and the built DOM
+  // is already correct. Comparing the ROOT REFERENCE rather than a structural
+  // signature is also what keeps the divider closures honest: they capture their
+  // SplitNode, so any tree that allocated fresh nodes must rebuild or a drag
+  // would mutate a node no longer in the tree.
+  builtTree = null;
   // Counts explicit layout/focus mutations, for the stale-async guard — see
   // layoutGeneration(), which is the documented contract.
   layoutGen = 0;
@@ -7985,6 +8002,7 @@ var SplitView = class {
     this.host.replaceChildren();
     this.host.classList.remove("af-split-multi");
     this.focusedId = null;
+    this.builtTree = null;
   }
   /** Brings the live panes + DOM in line with the current tree: disposes gone panes,
    *  (re)creates terminals whose tab changed, rebuilds the split wrappers (reusing
@@ -8011,9 +8029,12 @@ var SplitView = class {
     if (!this.focusedId || !wanted.has(this.focusedId)) {
       this.focusedId = desired[0]?.id ?? null;
     }
-    const rootEl = this.buildNode(this.tree);
-    rootEl.style.flex = "1 1 0";
-    this.host.replaceChildren(rootEl);
+    if (this.tree !== this.builtTree) {
+      const rootEl = this.buildNode(this.tree);
+      rootEl.style.flex = "1 1 0";
+      this.host.replaceChildren(rootEl);
+      this.builtTree = this.tree;
+    }
     const multi = desired.length > 1;
     this.host.classList.toggle("af-split-multi", multi);
     for (const leaf of desired) {
