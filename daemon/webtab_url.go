@@ -305,9 +305,23 @@ func mergeRawQueries(a, b string) string {
 // query string WITHOUT parsing and re-encoding the rest, so every surviving
 // segment keeps its exact bytes and position. url.Values.Encode would sort the
 // keys and rewrite escaping (a literal space re-encodes to +), silently changing
-// an order- or signature-sensitive query; this touches only the removed key. The
-// key is compared against each segment's name in its raw, still-escaped form,
-// which is exact for the ASCII daemon param names this is used with.
+// an order- or signature-sensitive query; this touches only the removed key.
+//
+// THE MATCH IS ON THE DECODED KEY, and that is a security property, not a nicety:
+// the STRIPPED set must cover everything the AUTH GATE would ACCEPT. The gate reads
+// the token through r.URL.Query(), i.e. url.ParseQuery, which QueryUnescapes key
+// NAMES — so "?af%5Fwebtab%5Ftoken=<tok>" authorizes exactly like the plain
+// spelling. Matching the raw bytes here accepted that request and then forwarded it
+// with the daemon's bearer token STILL IN THE QUERY, handing the credential to the
+// previewed dev server: arbitrary user code that has no business holding it, and
+// could drive the whole daemon API with it. Decoding each key closes the gap by
+// construction, and errs the safe way — it strips anything the gate could read as
+// the daemon key, in any spelling.
+//
+// Unescaping is what makes the two sets agree, so it mirrors ParseQuery exactly: a
+// key that fails to unescape is left alone precisely BECAUSE ParseQuery drops that
+// segment too, so the gate can never read the token out of it and it is ordinary
+// app data.
 func stripRawQueryParam(raw, key string) string {
 	if raw == "" {
 		return ""
@@ -315,11 +329,8 @@ func stripRawQueryParam(raw, key string) string {
 	segments := strings.Split(raw, "&")
 	kept := make([]string, 0, len(segments))
 	for _, seg := range segments {
-		name := seg
-		if i := strings.IndexByte(seg, '='); i >= 0 {
-			name = seg[:i]
-		}
-		if name == key {
+		name, _, _ := strings.Cut(seg, "=")
+		if decoded, err := url.QueryUnescape(name); err == nil && decoded == key {
 			continue
 		}
 		kept = append(kept, seg)

@@ -162,6 +162,66 @@ func TestWebTabProxy_AppAccessTokenAuthorizesOnBothPostures(t *testing.T) {
 	})
 }
 
+// TestWebTabProxy_EncodedTokenKeyIsAuthedAndStripped is the token-LEAK regression
+// test, and it asserts the two halves that must agree.
+//
+// The auth gate reads the daemon token through r.URL.Query() — url.ParseQuery,
+// which unescapes key NAMES — so "?af%5Fwebtab%5Ftoken=<tok>" AUTHORIZES exactly
+// like the plain spelling. The raw-bytes strip did not recognize that spelling, so
+// the request was authorized and then forwarded with the daemon's bearer token
+// still in the query: handed to the previewed dev server, which is arbitrary user
+// code that could turn around and drive the whole daemon API with it.
+//
+// The invariant is the point: whatever the gate ACCEPTS as the daemon credential,
+// the proxy must STRIP. Both spellings are tested through the real gate, so the
+// test fails if either half drifts.
+func TestWebTabProxy_EncodedTokenKeyIsAuthedAndStripped(t *testing.T) {
+	upstream := newEchoPathUpstream(t)
+	mux, id, tabID := newWebTabProxyFixture(t, upstream.URL)
+
+	// A NETWORK peer with require_token: the posture the query token exists for.
+	gate := &authGate{
+		expectedToken:  func() (string, error) { return "secret-tok", nil },
+		loopbackExempt: true,
+	}
+	authed := withAuth(mux, gate, nil)
+
+	cases := []struct{ name, spelling string }{
+		{name: "plain key", spelling: "af_webtab_token=secret-tok"},
+		{name: "percent-encoded key", spelling: "af%5Fwebtab%5Ftoken=secret-tok"},
+		{name: "percent-encoded key, lowercase hex", spelling: "af%5fwebtab%5ftoken=secret-tok"},
+		{name: "fully encoded key", spelling: "%61%66%5F%77%65%62%74%61%62%5F%74%6F%6B%65%6E=secret-tok"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodGet,
+				fmt.Sprintf("/v1/webtab/%s/%s/api?doc=123&%s", id, tabID, tc.spelling), nil)
+			req.RemoteAddr = "172.17.0.4:54321"
+			authed.ServeHTTP(rec, req)
+
+			// Every spelling the gate accepts must reach the upstream at all...
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status = %d, want 200 — this spelling authorizes, so it must be served (body: %s)",
+					rec.Code, rec.Body.String())
+			}
+			got := rec.Body.String()
+			// ...and must arrive with the credential GONE. This is the leak.
+			if contains(got, "secret-tok") {
+				t.Fatalf("upstream saw %q — the daemon's bearer token LEAKED to the dev server: "+
+					"the gate accepted this spelling but the strip did not recognize it", got)
+			}
+			if contains(got, "af_webtab_token") || contains(got, "af%5F") || contains(got, "af%5f") {
+				t.Fatalf("upstream saw %q — the daemon's token param survived the hop", got)
+			}
+			// The app's own query still rides through untouched.
+			if !contains(got, "doc=123") {
+				t.Fatalf("upstream saw %q, want the app's own doc=123 forwarded", got)
+			}
+		})
+	}
+}
+
 // TestWebTabProxy_PreservesSignedQueryByteForByte is the P2 fix: stripping the
 // daemon credential must not parse-and-re-encode the rest of the query. A
 // signature or an order-sensitive endpoint depends on the exact bytes, and
@@ -266,6 +326,23 @@ func TestStripRawQueryParam(t *testing.T) {
 		// A bare valueless segment with the key name is still removed.
 		{name: "bare valueless key is removed", raw: "af_webtab_token&keep=1", want: "keep=1"},
 		{name: "no daemon token present", raw: "a=1&b=2", want: "a=1&b=2"},
+
+		// --- the stripped set must cover the ACCEPTED set (token-leak fix) ---
+		//
+		// The gate reads the token through url.ParseQuery, which unescapes key NAMES,
+		// so these spellings authorize exactly like the plain one. A raw-bytes match
+		// left them in the forwarded query — authorized AND leaked to the dev server.
+		{name: "percent-encoded key is stripped", raw: "af%5Fwebtab%5Ftoken=secret", want: ""},
+		{name: "percent-encoded key with lowercase hex is stripped", raw: "af%5fwebtab%5ftoken=secret", want: ""},
+		{name: "encoded key beside app params is stripped", raw: "doc=123&af%5Fwebtab%5Ftoken=secret", want: "doc=123"},
+		{name: "fully encoded key is stripped", raw: "%61%66%5F%77%65%62%74%61%62%5F%74%6F%6B%65%6E=secret", want: ""},
+		// The mirror of the rule: a key ParseQuery CANNOT read is left alone, because
+		// the gate drops that segment too — it is app data, never a token carrier.
+		{name: "an undecodable key is app data, not the token", raw: "af%ZZwebtab=x&keep=1", want: "af%ZZwebtab=x&keep=1"},
+		// Case-sensitive, like the gate's map lookup.
+		{name: "a differently-cased key is not the daemon key", raw: "AF%5Fwebtab%5Ftoken=1", want: "AF%5Fwebtab%5Ftoken=1"},
+		// "+" decodes to a space, so this names a different key entirely.
+		{name: "a plus-spelled key is not the daemon key", raw: "af+webtab+token=1", want: "af+webtab+token=1"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
