@@ -7195,6 +7195,22 @@ function splitLeaf(root2, leafId, edge, tab) {
   });
   return dedupeExcept(grown, tab, fresh.id);
 }
+function companionTab(root2, leafId, tab, tabCount, prefer = []) {
+  const shownElsewhere = new Set(leaves(root2).filter((l) => l.id !== leafId).map((l) => l.tab));
+  const usable = (c) => c !== tab && c >= 0 && c < tabCount && !shownElsewhere.has(c);
+  for (const p of prefer) {
+    if (usable(p)) {
+      return p;
+    }
+  }
+  for (let i = 1; i <= tabCount; i++) {
+    const c = (tab % tabCount + i) % tabCount;
+    if (usable(c)) {
+      return c;
+    }
+  }
+  return null;
+}
 function replaceTab(root2, leafId, tab) {
   const target = findLeaf(root2, leafId);
   if (!target || target.tab === tab) {
@@ -7880,6 +7896,19 @@ var SplitView = class {
   lastFocusedTab = -1;
   lastShown = "";
   lastPaneCount = 0;
+  // The tabs this session's focus has passed through, most-recent FIRST, as stable
+  // daemon ids — what a self-split prefers to open in its new half (#1901), so the
+  // pane you get back is the tab you were last on rather than an arbitrary neighbour.
+  //
+  // By id, never ordinal: the roster shifts underneath (#1779), so an ordinal
+  // remembered across a close would name a different tab by the time it is read — the
+  // misroute the stable id exists to prevent. A tab with no daemon id simply never
+  // enters the list; the next-in-order fallback still covers it.
+  tabMru = [];
+  // The stable id of the tab lastFocusedTab named WHEN IT WAS RECORDED. Resolving that
+  // ordinal later would ask the current roster about a past position and get the wrong
+  // tab, so the id is captured at the same moment as the ordinal.
+  lastFocusedTabId = "";
   /**
    * Shows `sessionId`'s layout, building/rebuilding terminals as needed. Called on
    * every selection/tab change: a NEW session rebuilds from its retained tree (or a
@@ -7902,6 +7931,7 @@ var SplitView = class {
       this.teardown();
       this.sessionId = null;
       this.tree = null;
+      this.forgetFocusHistory();
       this.report();
       return;
     }
@@ -7919,6 +7949,7 @@ var SplitView = class {
       return;
     }
     this.teardown();
+    this.forgetFocusHistory();
     this.sessionId = sessionId;
     this.tabCount = tabCount;
     this.tree = validate(this.retainedTree(sessionId, tabIds) ?? singleLeaf(initialTab), tabCount);
@@ -8055,6 +8086,7 @@ var SplitView = class {
     this.lastFocusedTab = -1;
     this.lastShown = "";
     this.lastPaneCount = 0;
+    this.forgetFocusHistory();
   }
   /** How many EXPLICIT layout/focus mutations have been committed — a tab rebind
    *  (a 1-9 key or a tab-bar click), a drag-drop split, a pane close, or a change
@@ -8188,6 +8220,7 @@ var SplitView = class {
         pane.tab = leaf.tab;
       }
       pane.container.classList.toggle("af-pane-multi", multi);
+      pane.container.setAttribute("data-tab-id", realId);
       pane.label.textContent = `Tab ${leaf.tab + 1}`;
     }
     this.applyFocusClass();
@@ -8466,8 +8499,13 @@ var SplitView = class {
         return;
       }
       const zone = this.zoneAt(pane.container, e.clientX, e.clientY);
-      this.tree = zone === "center" ? replaceTab(this.tree, pane.leafId, tab) : splitLeaf(this.tree, pane.leafId, zone, tab);
-      const landed = leaves(this.tree).find((l) => l.tab === tab);
+      const onItsOwnPane = zone !== "center" && findLeaf(this.tree, pane.leafId)?.tab === tab;
+      const opened = onItsOwnPane ? companionTab(this.tree, pane.leafId, tab, this.tabCount, this.preferredTabs()) : tab;
+      if (opened === null) {
+        return;
+      }
+      this.tree = zone === "center" ? replaceTab(this.tree, pane.leafId, tab) : splitLeaf(this.tree, pane.leafId, zone, opened);
+      const landed = leaves(this.tree).find((l) => l.tab === opened);
       if (landed) {
         this.focusedId = landed.id;
       }
@@ -8561,6 +8599,7 @@ var SplitView = class {
   /** Fires onLayout when the focused tab, the shown-tab set, or the pane count
    *  changed — never on a no-op, so writing the store from it can't loop. */
   report() {
+    this.syncFocusedTabId();
     const shownTabs = this.tree ? leaves(this.tree).map((l) => l.tab) : [];
     const focusedTab = this.focusedId ? findLeaf(this.tree ?? { kind: "leaf", id: "", tab: 0 }, this.focusedId)?.tab ?? 0 : 0;
     const paneCount = shownTabs.length;
@@ -8572,6 +8611,50 @@ var SplitView = class {
     this.lastShown = shownKey;
     this.lastPaneCount = paneCount;
     this.cb.onLayout({ focusedTab, shownTabs, paneCount });
+  }
+  /** Recomputes the focused pane's CURRENT tab id (by stable daemon id) and records the
+   *  tab focus is LEAVING onto the MRU. THE funnel for keeping the focused-tab-id
+   *  accurate, run at the TOP of report() — before its dedup guard — so it fires on
+   *  every path report() covers: an explicit focus move (focusPane), a same-shape
+   *  session switch, an in-place tab-identity update, and a tab change whose onLayout is
+   *  deduped.
+   *
+   *  Recording only AFTER the dedup guard (the original #1901 code) saw just the first
+   *  case. report() dedups on the focused ORDINAL, and a session switch or an identity
+   *  swap leaves the ordinal put while the tab beneath it changes — so the id went stale
+   *  and a self-split's "other side" pick read a neighbour, or a foreign session's tab
+   *  (#1901 Codex findings 1-5). Reading the id from the live tree+roster here, every
+   *  time, is what makes a stale value unrepresentable.
+   *
+   *  It is self-contained (reads the tree, not a passed ordinal) so a session switch's
+   *  forgetFocusHistory()+reconcile()+report() reinitializes lastFocusedTabId to the NEW
+   *  session's focused tab: the cleared "" makes the first sync a fresh start, never
+   *  recorded as if the new tab were previously focused. */
+  syncFocusedTabId() {
+    const focusedTab = this.focusedId ? findLeaf(this.tree ?? { kind: "leaf", id: "", tab: 0 }, this.focusedId)?.tab ?? -1 : -1;
+    const current = focusedTab >= 0 ? this.tabRealIds[focusedTab] ?? "" : "";
+    if (current === this.lastFocusedTabId) {
+      return;
+    }
+    if (this.lastFocusedTabId !== "") {
+      this.tabMru = [this.lastFocusedTabId, ...this.tabMru.filter((id) => id !== this.lastFocusedTabId)];
+    }
+    if (current !== "") {
+      this.tabMru = this.tabMru.filter((id) => id !== current);
+    }
+    this.lastFocusedTabId = current;
+  }
+  /** The recently-focused tabs as CURRENT ordinals, most-recent first. An id that no
+   *  longer resolves (its tab was closed) drops out rather than binding a stranger. */
+  preferredTabs() {
+    return this.tabMru.map((id) => this.tabRealIds.indexOf(id)).filter((i) => i >= 0);
+  }
+  /** Clears the focus history (a session switch, or a logout). Deliberately does NOT
+   *  touch lastFocusedTab: that one is report()'s dedup key, and resetting it would
+   *  re-fire onLayout for an unchanged layout — the store write #1855 turns on. */
+  forgetFocusHistory() {
+    this.tabMru = [];
+    this.lastFocusedTabId = "";
   }
 };
 
