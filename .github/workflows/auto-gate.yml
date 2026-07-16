@@ -25,10 +25,15 @@ jobs:
     name: Evaluate auto-merge gate
     runs-on: ubuntu-latest
     # Late review comments on a merged/closed PR keep re-triggering the gate
-    # against a stale head (#1876). Events that carry no pull_request payload
-    # (check_suite, status) resolve the PR by head SHA and already filter to
-    # open PRs, so they must not be skipped here.
-    if: github.event.pull_request == null || github.event.pull_request.state == 'open'
+    # against a stale head (#1876). Drafts are never merge-eligible, so review
+    # traffic on a held-open draft is pure evaluation waste (#1907) — the helper
+    # blocks them anyway, this just skips before the checkout and API calls.
+    # Events that carry no pull_request payload (check_suite, status) resolve the
+    # PR by head SHA and already filter to open PRs, so they must not be skipped
+    # here; the helper's own isDraft check remains the backstop for those.
+    if: >-
+      github.event.pull_request == null ||
+      (github.event.pull_request.state == 'open' && github.event.pull_request.draft != true)
     steps:
       - name: Check out gate logic
         uses: actions/checkout@v6

@@ -168,6 +168,37 @@ test("merge pins the squash merge to the evaluated head SHA", async () => {
   assert.equal(github.mergedWith.sha, "sha-that-passed");
 });
 
+// The workflow-level guard skips drafts for events carrying a pull_request
+// payload, but check_suite/status events carry none and still reach the helper,
+// so this block is the only thing stopping a draft from auto-merging (#1907).
+test("an otherwise-mergeable PR is blocked for being a draft", async () => {
+  const result = await autoGate.evaluate({
+    github: fakeMergeGithub({ headSha: "abc123", isDraft: true }),
+    context: fakeContext(),
+    core: fakeCore(),
+    prNumber: 1465,
+    setOutputs: false,
+  });
+
+  assert.equal(result.shouldMerge, false);
+  assert.match(result.reasons.join("\n"), /PR is a draft/);
+});
+
+// Pins the control: the same fixture merges when isDraft flips off, so the test
+// above can only fail for the draft reason and not some unrelated block.
+test("the same PR is mergeable once it is not a draft", async () => {
+  const result = await autoGate.evaluate({
+    github: fakeMergeGithub({ headSha: "abc123", isDraft: false }),
+    context: fakeContext(),
+    core: fakeCore(),
+    prNumber: 1465,
+    setOutputs: false,
+  });
+
+  assert.deepEqual(result.reasons, []);
+  assert.equal(result.shouldMerge, true);
+});
+
 function fakeGithub({ checkRuns, issueComments, reviewComments }) {
   const listForRef = function listForRef() {};
   const listComments = function listComments() {};
@@ -188,7 +219,7 @@ function fakeGithub({ checkRuns, issueComments, reviewComments }) {
   };
 }
 
-function fakeMergeGithub({ headSha }) {
+function fakeMergeGithub({ headSha, isDraft = false }) {
   const listFiles = function listFiles() {};
   const listForRef = function listForRef() {};
   const listComments = function listComments() {};
@@ -223,7 +254,7 @@ function fakeMergeGithub({ headSha }) {
             url: "https://example.invalid/pr/1465",
             baseRefName: "master",
             headRefOid: headSha,
-            isDraft: false,
+            isDraft,
             mergeable: "MERGEABLE",
             mergeStateStatus: "CLEAN",
             author: { login: "sachiniyer" },
