@@ -310,6 +310,22 @@ func TestMirrorRootRedirect_CarriesTargetQueryAndEncoding(t *testing.T) {
 			target: "http://localhost:8899/files/a%2Fb",
 			want:   prefix + "/files/a%2Fb",
 		},
+		{
+			// The LEADING-position case, which is its own bug: url.Parse gives this
+			// target Path "//foo" and EscapedPath "/%2Ffoo", so joining the two
+			// independently let TrimLeft eat both decoded slashes but only the one
+			// real escaped slash. Path and RawPath then disagreed, net/url dropped
+			// the raw form, and the redirect flattened %2Ffoo to foo — the mirror
+			// corrupting the very first segment.
+			name:   "encoded slash in the FIRST segment stays encoded",
+			target: "http://localhost:8899/%2Ffoo",
+			want:   prefix + "/%2Ffoo",
+		},
+		{
+			name:   "encoded slash leading a deeper path stays encoded",
+			target: "http://localhost:8899/%2Fa/b.css",
+			want:   prefix + "/%2Fa/b.css",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

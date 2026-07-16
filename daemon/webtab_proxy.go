@@ -1004,12 +1004,41 @@ func mirrorRootRedirect(prefix string, target *url.URL, rawQuery string) (string
 	if target.Path == "" || target.Path == "/" {
 		return "", false
 	}
+	path, rawPath := joinMirrorPath(prefix, target)
 	dest := &url.URL{
-		Path:     joinURLPath(prefix, target.Path),
-		RawPath:  joinURLPath(prefix, target.EscapedPath()),
+		Path:     path,
+		RawPath:  rawPath,
 		RawQuery: mergeRawQueries(target.RawQuery, rawQuery),
 	}
 	return dest.String(), true
+}
+
+// joinMirrorPath prefixes an upstream URL's path under the tab prefix, returning
+// the decoded Path and the escaped RawPath as a CONSISTENT pair — the decoded one
+// DERIVED from the escaped join rather than computed beside it.
+//
+// Deriving is what keeps the escaping. net/url honors RawPath only while it
+// unescapes to exactly Path; the moment the two disagree it silently falls back to
+// re-encoding Path, dropping the raw form. Joining each independently desyncs them
+// for a path whose FIRST segment carries an encoded slash: the target
+// http://host/%2Ffoo has Path "//foo" and EscapedPath "/%2Ffoo", and joinURLPath's
+// TrimLeft eats BOTH leading slashes of the decoded form but only the one real
+// slash of the escaped one — so Path said ".../foo" while RawPath said
+// ".../%2Ffoo", they failed the equality check, and the redirect flattened the
+// segment the mirror exists to preserve. Unescaping the joined escaped path makes
+// the pair agree by construction, for any encoding.
+//
+// It is behavior-identical for every canonical path (unescape of an unescaped join
+// is itself), so it only ever rescues the case the independent join corrupted.
+func joinMirrorPath(prefix string, u *url.URL) (path, rawPath string) {
+	rawPath = joinURLPath(prefix, u.EscapedPath())
+	decoded, err := url.PathUnescape(rawPath)
+	if err != nil {
+		// Unreachable: EscapedPath only ever emits valid escapes. Fall back to the
+		// escaped form as the literal path rather than invent one.
+		return rawPath, rawPath
+	}
+	return decoded, rawPath
 }
 
 // mergeRawQueries concatenates two raw query strings, dropping empties. Raw
