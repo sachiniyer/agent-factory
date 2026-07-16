@@ -292,9 +292,18 @@ func (m *Manager) reapDeadRoot(repoID string, inst *session.Instance) (bool, err
 	}
 
 	// Best-effort by design (#478): tmux is already gone and an in-place
-	// worktree's Cleanup is a no-op, so failures here only log inside Kill.
+	// worktree's Cleanup is a no-op, so failures Kill can ANSWER for only log
+	// inside Kill and never surface here.
+	//
+	// An error that does reach us therefore means the teardown could not complete
+	// SAFELY — tmux never confirmed the pane dead, or a worktree removal was cut off
+	// mid-delete — so the workspace is still there. Deleting the record would orphan
+	// it and leave nothing pointing at it. Keep the record; this loop runs every
+	// tick, so it IS the retry (#1917: found by auditing every record delete against
+	// the invariant, not reported).
 	if err := inst.Kill(); err != nil {
-		log.WarningLog.Printf("reaping dead root for repo %s: kill reported: %v", repoID, err)
+		log.WarningLog.Printf("reaping dead root for repo %s: teardown could not complete safely; keeping the record and retrying next tick: %v", repoID, err)
+		return false, nil
 	}
 	storage, err := session.NewStorage(config.LoadState(), repoID)
 	if err != nil {

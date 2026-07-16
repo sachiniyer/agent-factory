@@ -1,7 +1,6 @@
 package session
 
 import (
-	"context"
 	"errors"
 	"fmt"
 
@@ -99,6 +98,16 @@ const (
 // that is still writing to it destroys the user's work on a guess. Callers must
 // treat this as "retry later", never as "the tmux part failed, carry on".
 var ErrPaneMayBeLive = errors.New("tmux did not confirm the session is dead; its pane may still be running")
+
+// ErrWorkspaceLeftBehind reports that a session was abandoned while its worktree
+// was still (partly) on disk, because the cleanup that should have removed it was
+// cut off by its own deadline.
+//
+// It exists for the paths that DISCARD an instance rather than tear one down — a
+// failed create, whose instance was never registered or persisted. Those paths have
+// no record to keep, so the leftovers have no handle at all: the caller must at
+// least refuse to hand the title back out over them (#1917).
+var ErrWorkspaceLeftBehind = errors.New("the session's workspace was left on disk: its cleanup was cut off by a deadline")
 
 // ErrWorkspaceStateUnknown reports that a worktree action was cut off by its own
 // deadline, so the workspace may be half-removed and is still (partly) on disk.
@@ -236,22 +245,22 @@ func (teardownKill) handleWorktree(gw *git.GitWorktree, title string) (teardownS
 	if gw == nil {
 		return stateKnown, nil
 	}
-	err := gw.Cleanup()
-	if err == nil {
-		return stateKnown, nil
-	}
-	// Same rule as closeTab, one layer down (#1917). A git command that ANSWERED
-	// with a failure leaves Cleanup's #802/#726 decision tree in charge and stays
-	// best-effort, so a stuck-but-diagnosed worktree never blocks dropping the
+	cleanupState, err := gw.Cleanup()
+	// Same rule as closeTab, one layer down (#1917), and read off Cleanup's own
+	// reported STATE rather than re-derived from its error here. A git command that
+	// ANSWERED with a failure leaves Cleanup's #802/#726 decision tree in charge and
+	// stays best-effort, so a stuck-but-diagnosed worktree never blocks dropping the
 	// record. A TIMEOUT is different in kind: git was SIGKILLed mid-delete, so the
 	// worktree directory and its registration may both still be there. Reporting it
 	// keeps the record — and with it the user's handle on the session — so the
 	// cleanup can be retried, instead of orphaning a registered worktree whose
 	// session row we just deleted.
-	if errors.Is(err, context.DeadlineExceeded) {
+	if cleanupState == git.CleanupStateUnknown {
 		return stateUnknown, fmt.Errorf("kill %q: git worktree cleanup: %w", title, err)
 	}
-	log.WarningLog.Printf("kill %q: git worktree cleanup failed: %v", title, err)
+	if err != nil {
+		log.WarningLog.Printf("kill %q: git worktree cleanup failed: %v", title, err)
+	}
 	return stateKnown, nil
 }
 

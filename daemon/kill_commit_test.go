@@ -2,13 +2,17 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/session"
+	"github.com/sachiniyer/agent-factory/session/git"
+	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
 // installFailKillTombstoned builds a session whose teardown always fails, then
@@ -257,5 +261,161 @@ func TestRefreshInstanceStatus_TombstonedAfterTeardown_StillFinishesTheKill(t *t
 	manager.mu.Unlock()
 	if tracked {
 		t.Fatal("the finished kill left the instance tracked in the manager")
+	}
+}
+
+// TestPersistKillTombstone_ConcurrentPollWrite_TombstoneSurvives is round-3
+// finding (1): the commit point must not be silently roll-back-able.
+//
+// The tombstone write and the in-memory mark used to straddle a repoStartLock
+// release. A status poll (which serializes instance.ToInstanceData() under that
+// same lock) could land in the gap, read userKilled still false, and write the
+// tombstone straight back out. A teardown timeout or crash afterwards then leaves
+// a surviving NON-tombstoned record, which the next daemon reads as Lost and
+// RESTORES — the killed session comes back. Same outcome as the round-2 finding,
+// different route.
+//
+// killTombstonePersist is the exact gap: it runs INSIDE the lock, so a poll racing
+// from here reproduces the real window rather than approximating it.
+//
+// PRE-FIX BEHAVIOR THIS REPRODUCES: the poll's write wins and the record ends up
+// with UserKilled=false.
+func TestPersistKillTombstone_ConcurrentPollWrite_TombstoneSurvives(t *testing.T) {
+	backend := &raceBackend{}
+	manager, repoID, inst := installRaceBackend(t, backend, "clobbered")
+
+	// Race a poll persist at the precise moment the tombstone write completes —
+	// i.e. while persistKillTombstone still holds (or has just held) the repo lock.
+	prev := killTombstonePersist
+	var once sync.Once
+	killTombstonePersist = func(rid string, d session.InstanceData) error {
+		err := prev(rid, d)
+		once.Do(func() {
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				// The poll's own persist: it takes repoStartLock and serializes the
+				// instance under it, exactly as refreshInstanceStatus does.
+				manager.persistInstance(rid, inst)
+			}()
+			// Give the racing writer time to block on (or take) the lock.
+			time.Sleep(50 * time.Millisecond)
+			t.Cleanup(func() { <-done })
+		})
+		return err
+	}
+	t.Cleanup(func() { killTombstonePersist = prev })
+
+	if err := manager.persistKillTombstone(repoID, inst, nil); err != nil {
+		t.Fatalf("persistKillTombstone: %v", err)
+	}
+	// Let the racing poll write land.
+	time.Sleep(200 * time.Millisecond)
+
+	rec := recordFor(t, repoID, "clobbered")
+	if rec == nil {
+		t.Fatal("the record vanished")
+	}
+	if !rec.UserKilled {
+		t.Fatal("a concurrent poll write erased the kill tombstone: the kill is no longer durable, " +
+			"so a teardown timeout or crash leaves a non-tombstoned record that the next daemon " +
+			"treats as Lost and RESTORES — resurrecting a session the user explicitly killed (#1917). " +
+			"A commit point another writer can roll back is not a commit point.")
+	}
+}
+
+// TestGhostCleanup_WorktreeTimeout_RetainsTheRecord is round-3 finding (2): the
+// third instance of the orphaning class.
+//
+// A ghost session's worktree removal hits the local-git deadline. The cleanup only
+// LOGGED it, so ghostCleanup returned nil and KillSession deleted the tombstoned
+// record — leaving a partially-removed workspace with no record and no retry path.
+//
+// PRE-FIX BEHAVIOR THIS REPRODUCES: ghostCleanup returns nil.
+func TestGhostCleanup_WorktreeTimeout_RetainsTheRecord(t *testing.T) {
+	prevWT, prevTmux := ghostCleanupWorktree, ghostKillTmuxByName
+	ghostKillTmuxByName = func(string) (tmux.PaneState, error) { return tmux.PaneStateKnown, nil }
+	ghostCleanupWorktree = func(*session.InstanceData, string) (git.CleanupState, error) {
+		return git.CleanupStateUnknown, context.DeadlineExceeded
+	}
+	t.Cleanup(func() { ghostCleanupWorktree, ghostKillTmuxByName = prevWT, prevTmux })
+
+	data := &session.InstanceData{Title: "ghost", TmuxName: "af_ghost"}
+	err := ghostCleanup(data, "ghost")
+
+	if err == nil {
+		t.Fatal("ghostCleanup reported success though the worktree removal was cut off mid-delete: " +
+			"KillSession then deletes the record, leaving a partially-removed workspace with NO " +
+			"record and NO retry path — the exact orphaning the timeout work exists to prevent (#1917)")
+	}
+	if !errors.Is(err, session.ErrWorkspaceStateUnknown) {
+		t.Fatalf("the error must identify an unknown workspace state so the caller keeps the record, got: %v", err)
+	}
+}
+
+// unsafeKillBackend fails to START and cannot clean up safely afterwards: its Kill
+// reports the shape a wedged tmux / cut-off worktree removal produces, so the
+// create's cleanup leaves the workspace on disk.
+type unsafeKillBackend struct{ readyFakeBackend }
+
+func (b unsafeKillBackend) Start(*session.Instance, bool) error {
+	return fmt.Errorf("agent program exited immediately")
+}
+
+func (b unsafeKillBackend) Kill(*session.Instance) error {
+	return fmt.Errorf("%w: leaving the workspace untouched", session.ErrPaneMayBeLive)
+}
+
+// TestCreateSession_UnsafeCleanup_KeepsTheRecordAndTheTitle is round-3 finding (3).
+//
+// A failed create discards its instance and releases the title — correct, because
+// the cleanup removed what the create built. When the cleanup could NOT complete,
+// that same release puts the title back in circulation on top of live leftovers no
+// record points at, so the next create under that name collides with or removes
+// them.
+//
+// PRE-FIX BEHAVIOR THIS REPRODUCES: `_ = instance.Kill()` discarded the error, no
+// record was kept, and the title was free.
+func TestCreateSession_UnsafeCleanup_KeepsTheRecordAndTheTitle(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	restore := session.SetBackendFactoryForTest(func(session.InstanceOptions, string) (session.Backend, error) {
+		fake := session.NewFakeBackend()
+		fake.CompleteStart()
+		return unsafeKillBackend{readyFakeBackend{fake}}, nil
+	})
+	t.Cleanup(restore)
+
+	repoPath := setupControlRepo(t)
+	repo, err := config.RepoFromPath(repoPath)
+	if err != nil {
+		t.Fatalf("RepoFromPath: %v", err)
+	}
+	manager, err := NewManager(config.DefaultConfig())
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+
+	_, cerr := manager.CreateSession(context.Background(), CreateSessionRequest{
+		Title: "leftover", RepoPath: repoPath, Program: "claude",
+	})
+	if cerr == nil {
+		t.Fatal("CreateSession reported success though its start failed")
+	}
+	if !strings.Contains(cerr.Error(), "kept") {
+		t.Fatalf("the error must tell the user the session was preserved so they can act on it: %v", cerr)
+	}
+
+	// The leftovers must be addressable: a record holds the title, so the next
+	// create with this name collides loudly instead of landing on top of them.
+	if rec := recordFor(t, repo.ID, "leftover"); rec == nil {
+		t.Fatal("a create whose cleanup could not complete safely released its title and kept NO " +
+			"record: its tmux/worktree are still on disk with nothing pointing at them, and the " +
+			"next create under this title collides with or deletes them (#1917)")
+	}
+	manager.mu.Lock()
+	_, tracked := manager.instances[daemonInstanceKey(repo.ID, "leftover")]
+	manager.mu.Unlock()
+	if !tracked {
+		t.Fatal("the preserved session is not tracked, so the user cannot kill it through the product")
 	}
 }

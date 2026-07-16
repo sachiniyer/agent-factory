@@ -297,11 +297,23 @@ func (b *LocalBackend) Launch(i *Instance, firstTimeSetup bool) error {
 
 		// Create new session
 		if err := tmuxSession.Start(gw.GetWorktreePath()); err != nil {
-			// Cleanup git worktree if tmux session creation fails
-			if cleanupErr := gw.Cleanup(); cleanupErr != nil {
+			// Cleanup git worktree if tmux session creation fails. The tmux session
+			// never came up, so there is no live pane to race the removal.
+			//
+			// A cleanup cut off by its own deadline is surfaced as ErrWorkspaceLeftBehind
+			// rather than folded into a prose message (#1917): the worktree is still
+			// (partly) on disk, and this instance is about to be discarded by a create
+			// that never registered or persisted it — so the caller must be able to see
+			// that it is discarding a session over a workspace that still exists,
+			// instead of releasing the title on top of it.
+			cleanupState, cleanupErr := gw.Cleanup()
+			if cleanupErr != nil {
 				err = fmt.Errorf("%v (cleanup error: %v)", err, cleanupErr)
 			}
 			setupErr = fmt.Errorf("failed to start new session: %w", err)
+			if cleanupState == git.CleanupStateUnknown {
+				setupErr = fmt.Errorf("%w: %w at %s", setupErr, ErrWorkspaceLeftBehind, gw.GetWorktreePath())
+			}
 			return setupErr
 		}
 	}

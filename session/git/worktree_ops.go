@@ -264,9 +264,35 @@ func (g *GitWorktree) setupNewWorktree() error {
 	return nil
 }
 
-// Cleanup removes the worktree and associated branch.
+// CleanupState is what Cleanup could ESTABLISH about the worktree it was asked to
+// remove, returned SEPARATELY from the error for the same reason tmux.PaneState is
+// (#1917).
+//
+// Bounding the git commands gave Cleanup a third answer next to "removed" and
+// "refused to remove": "git was SIGKILLed mid-delete, so the workspace may be half
+// gone and still registered". That answer has to reach whoever deletes the session
+// record — it is the only handle left on the leftovers. Returned as an error it did
+// not: three separate callers logged it and dropped the record anyway, orphaning
+// the workspace. An error can be swallowed by accident; a second return value
+// cannot.
+type CleanupState int
+
+const (
+	// CleanupSettled: every git command ANSWERED. The worktree is gone, or Cleanup's
+	// #802/#726 decision tree deliberately left it and said why — either way the
+	// outcome is established and the caller's best-effort contract governs.
+	CleanupSettled CleanupState = iota
+	// CleanupStateUnknown: a bounded git command tripped its deadline mid-removal.
+	// The workspace may be partially removed and still registered. Callers MUST keep
+	// the session record so the cleanup can be retried.
+	CleanupStateUnknown
+)
+
+// Cleanup removes the worktree and associated branch. It reports whether it
+// ESTABLISHED the outcome (see CleanupState) alongside any error: callers that go
+// on to delete the session's record MUST gate on the state, not on the error.
 // If the worktree was not created by agent-factory (externalWorktree), only prune is done.
-func (g *GitWorktree) Cleanup() error {
+func (g *GitWorktree) Cleanup() (CleanupState, error) {
 	// Cancel any in-flight post-worktree hooks before removing the worktree.
 	if g.hooksCancel != nil {
 		g.hooksCancel()
@@ -274,19 +300,21 @@ func (g *GitWorktree) Cleanup() error {
 
 	// For external worktrees, don't remove the worktree or delete the branch
 	if g.externalWorktree {
-		return nil
+		return CleanupSettled, nil
 	}
 
 	// Guard against empty paths that would cause git commands to fail or
-	// operate on unintended directories.
+	// operate on unintended directories. Nothing was attempted, so nothing is
+	// unknown.
 	if g.repoPath == "" {
-		return fmt.Errorf("cannot clean up worktree: repo path is empty")
+		return CleanupSettled, fmt.Errorf("cannot clean up worktree: repo path is empty")
 	}
 	if g.worktreePath == "" {
-		return fmt.Errorf("cannot clean up worktree: worktree path is empty")
+		return CleanupSettled, fmt.Errorf("cannot clean up worktree: worktree path is empty")
 	}
 
 	var errs []error
+	state := CleanupSettled
 
 	// Check if worktree path exists before attempting removal
 	if _, err := os.Stat(g.worktreePath); err == nil {
@@ -323,6 +351,14 @@ func (g *GitWorktree) Cleanup() error {
 				}
 			} else {
 				errs = append(errs, err)
+			}
+			// A tripped deadline is the one failure where the outcome is genuinely
+			// UNKNOWN rather than decided: git was SIGKILLed part-way through a
+			// recursive delete, so the workspace may be half-removed and still
+			// registered. Every other branch above is git ANSWERING, which the
+			// #802/#726 tree resolves. Callers must keep the record on this.
+			if errors.Is(err, context.DeadlineExceeded) {
+				state = CleanupStateUnknown
 			}
 		}
 	} else if !os.IsNotExist(err) {
@@ -361,10 +397,10 @@ func (g *GitWorktree) Cleanup() error {
 	}
 
 	if len(errs) > 0 {
-		return errors.Join(errs...)
+		return state, errors.Join(errs...)
 	}
 
-	return nil
+	return state, nil
 }
 
 // shouldRemoveWorktreeDir decides whether Cleanup may delete the worktree

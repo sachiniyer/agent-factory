@@ -20,6 +20,7 @@ import (
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
 	"github.com/sachiniyer/agent-factory/session"
+	"github.com/sachiniyer/agent-factory/session/git"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
@@ -670,11 +671,12 @@ func stubGhostCleanup(t *testing.T) (wtCalls *[]string, tmuxCalls *[]string) {
 	var wt, tm []string
 	prevWT := ghostCleanupWorktree
 	prevTmux := ghostKillTmuxByName
-	ghostCleanupWorktree = func(data *session.InstanceData, title string) {
+	ghostCleanupWorktree = func(data *session.InstanceData, title string) (git.CleanupState, error) {
 		if data.Worktree.RepoPath == "" || data.Worktree.WorktreePath == "" || data.Worktree.ExternalWorktree {
-			return
+			return git.CleanupSettled, nil
 		}
 		wt = append(wt, title)
+		return git.CleanupSettled, nil
 	}
 	ghostKillTmuxByName = func(name string) (tmux.PaneState, error) {
 		tm = append(tm, name)
@@ -763,8 +765,9 @@ func TestGhostCleanup_TmuxBeforeWorktree(t *testing.T) {
 	var order []string
 	prevWT := ghostCleanupWorktree
 	prevTmux := ghostKillTmuxByName
-	ghostCleanupWorktree = func(data *session.InstanceData, title string) {
+	ghostCleanupWorktree = func(data *session.InstanceData, title string) (git.CleanupState, error) {
 		order = append(order, "worktree")
+		return git.CleanupSettled, nil
 	}
 	ghostKillTmuxByName = func(name string) (tmux.PaneState, error) {
 		order = append(order, "tmux")

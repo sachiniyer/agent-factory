@@ -73,7 +73,7 @@ func TestCleanup_DoesNotWedgeOnStalledGit(t *testing.T) {
 
 	done := make(chan error, 1)
 	start := time.Now()
-	go func() { done <- gw.Cleanup() }()
+	go func() { _, err := gw.Cleanup(); done <- err }()
 
 	select {
 	case err := <-done:
@@ -123,7 +123,7 @@ func TestCleanup_StalledRemoveDoesNotDeleteTheDirectory(t *testing.T) {
 	shortenLocalTimeout(t, 200*time.Millisecond)
 
 	done := make(chan error, 1)
-	go func() { done <- gw.Cleanup() }()
+	go func() { _, err := gw.Cleanup(); done <- err }()
 
 	select {
 	case err := <-done:
@@ -164,7 +164,9 @@ func TestCleanup_HealthyWorktreeStillSucceeds(t *testing.T) {
 	// Long enough that real git never trips it, short enough to keep the test fast.
 	shortenLocalTimeout(t, 30*time.Second)
 
-	require.NoError(t, gw.Cleanup(), "a healthy teardown must not be affected by the bound")
+	state, cleanupErr := gw.Cleanup()
+	require.NoError(t, cleanupErr, "a healthy teardown must not be affected by the bound")
+	require.Equal(t, CleanupSettled, state, "a healthy teardown establishes its outcome")
 	assert.NoDirExists(t, worktreePath, "the worktree directory must still be removed")
 
 	out, err := (&GitWorktree{}).runGitCommand(repoRoot, "branch", "--list", "af-healthy-1917")

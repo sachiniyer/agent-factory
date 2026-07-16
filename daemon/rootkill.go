@@ -67,17 +67,31 @@ func (m *Manager) persistKillTombstone(repoID string, instance *session.Instance
 	default:
 		return nil
 	}
+	// The write and the in-memory mark happen under ONE hold of the repo lock, and
+	// that atomicity is the whole point (#1917).
+	//
+	// Every other writer of this repo's records — the status poll's persist above
+	// all — takes this same lock and serializes instance.ToInstanceData() under it.
+	// Marking AFTER the unlock left a window where a poll could acquire the lock,
+	// read the instance while userKilled was still false, and write the tombstone
+	// straight back out. A teardown timeout or a crash after that would then leave a
+	// surviving record with NO tombstone, which the next daemon reads as Lost and
+	// RESTORES — resurrecting a session the user explicitly killed, exactly the
+	// outcome the tombstone exists to prevent.
+	//
+	// Marking inside the hold closes it: a poll either lands before (and we
+	// overwrite its record with the tombstone) or after (and it reads userKilled
+	// true). A commit point another writer can silently roll back is not one.
 	repoStartLock := m.startLockForRepo(repoID)
 	repoStartLock.Lock()
 	err := killTombstonePersist(repoID, d)
+	if err == nil && instance != nil {
+		instance.MarkUserKilled()
+	}
 	repoStartLock.Unlock()
 	if err != nil {
 		log.WarningLog.Printf("failed to persist kill tombstone for %q: %v", d.Title, err)
 		return err
-	}
-	// Durable now: the kill is committed, so the in-memory flag can safely follow.
-	if instance != nil {
-		instance.MarkUserKilled()
 	}
 	return nil
 }

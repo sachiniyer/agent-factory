@@ -67,7 +67,8 @@ func TestNewGitWorktreeInPlace(t *testing.T) {
 
 	// Cleanup (the kill path) must leave the user's working tree and branch
 	// intact — exactly the legacy external-worktree behavior.
-	require.NoError(t, gw.Cleanup())
+	_, cleanupErrX := gw.Cleanup()
+	require.NoError(t, cleanupErrX)
 	_, statErr := os.Stat(repoRoot)
 	require.NoError(t, statErr, "Cleanup must NOT remove the repo working tree")
 	_, statErr = os.Stat(filepath.Join(repoRoot, ".git"))

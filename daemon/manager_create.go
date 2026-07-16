@@ -86,7 +86,25 @@ func (m *Manager) CreateSession(ctx context.Context, req CreateSessionRequest) (
 	// marked external — not the flow itself. finishCreateStart marks the instance
 	// live, PARKS it at a usage-limit wall (#1146 PR4), or returns a fatal error.
 	if serr := finishCreateStart(instance, req.Prompt, task.StartAndSendPrompt(ctx, instance, req.Prompt)); serr != nil {
-		_ = instance.Kill()
+		// The create failed, so this instance is about to be discarded — it was never
+		// registered or persisted, and the deferred release() hands its title straight
+		// back out. That is only safe if the cleanup below actually removed what the
+		// create built (#1917).
+		//
+		// Kill swallows everything tmux and git ANSWER for, so an error here means it
+		// could NOT: a pane whose liveness is unknown, or a worktree removal cut off
+		// mid-delete. Releasing the title over those leftovers means the next create
+		// with this name collides with — or removes — a workspace nobody can address,
+		// since no record points at it. So keep the record instead: it holds the title
+		// and gives the user something to inspect and kill.
+		if killErr := instance.Kill(); killErr != nil {
+			if keepErr := m.keepFailedCreate(repo.ID, title, instance); keepErr != nil {
+				return session.InstanceData{}, fmt.Errorf("failed to start instance %q, and its cleanup could not complete safely — its workspace may still be on disk at %s and could not be recorded, so it must be cleaned up by hand: %w",
+					title, instance.GetWorktreePath(), errors.Join(serr, killErr, keepErr))
+			}
+			return session.InstanceData{}, fmt.Errorf("failed to start instance %q, and its cleanup could not complete safely, so its workspace was left in place; the session has been kept so you can inspect or kill it: %w",
+				title, errors.Join(serr, killErr))
+		}
 		return session.InstanceData{}, fmt.Errorf("failed to start instance: %w", serr)
 	}
 	data := instance.ToInstanceData()
@@ -110,7 +128,13 @@ func (m *Manager) CreateSession(ctx context.Context, req CreateSessionRequest) (
 		return nil
 	}()
 	if persistErr != nil {
-		_ = instance.Kill()
+		// Same rule as the start-failure path above, minus the remedy: the record
+		// write is what just failed, so keeping a record is not available. Report the
+		// leftovers loudly instead of silently releasing the title over them (#1917).
+		if killErr := instance.Kill(); killErr != nil {
+			return session.InstanceData{}, fmt.Errorf("failed to record session %q, and its cleanup could not complete safely — its workspace may still be on disk at %s and must be cleaned up by hand: %w",
+				title, instance.GetWorktreePath(), errors.Join(persistErr, killErr))
+		}
 		return session.InstanceData{}, persistErr
 	}
 	m.captureAgentConversationAsync(repo.ID, key, instance, conversationCapture)
@@ -604,4 +628,30 @@ func (m *Manager) titlesCollide(a, b string) bool {
 // detect branch collisions before worktree setup runs.
 func (m *Manager) branchForTitle(title string) string {
 	return git.BranchForTitle(m.cfg.BranchPrefix, title)
+}
+
+// keepFailedCreate registers and persists an instance whose create FAILED but
+// whose cleanup could not complete safely, so its tmux and/or worktree are still
+// on disk (#1917).
+//
+// A create normally discards a failed instance and lets reserveCreate's release()
+// hand the title back out — correct, because the cleanup removed everything the
+// create built. When the cleanup could NOT complete, that same release puts the
+// title back in circulation on top of live leftovers that no record points at, so
+// the next create under that name collides with or deletes them. Keeping the record
+// makes the leftovers addressable (the user can see and kill the session) and holds
+// the title against reuse. Mirrors the register-then-persist ordering of the success
+// path: the map entry goes in first so the refresh loop cannot build a duplicate
+// Instance from disk, and is rolled back if the write fails. The caller holds the
+// repo start lock.
+func (m *Manager) keepFailedCreate(repoID, title string, instance *session.Instance) error {
+	key := daemonInstanceKey(repoID, title)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.instances[key] = instance
+	if err := appendInstanceData(repoID, instance.ToInstanceData()); err != nil {
+		delete(m.instances, key)
+		return err
+	}
+	return nil
 }
