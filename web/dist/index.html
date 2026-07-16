@@ -6,7 +6,33 @@
     <title>Agent Factory</title>
     <!-- Same-origin bundle only: the daemon serves this shell with a strict
          `Content-Security-Policy: default-src 'self'` (#1592 Phase 5 PR2), so the
-         stylesheet and script are loaded from the origin, never a CDN. -->
+         stylesheet, script, icons, and manifest are all loaded from the origin,
+         never a CDN. manifest-src and worker-src carry no explicit directive because
+         both fall back to default-src, which already says 'self' — the manifest and
+         the service worker are same-origin, so the existing policy covers them and
+         needed no relaxation to ship this. -->
+
+    <!-- theme-color paints the browser/OS chrome that sits directly ABOVE the app, so
+         the value is --af-bg-surface (the appbar's fill) and NOT --af-bg-canvas: the
+         appbar is what the chrome actually abuts, and matching the canvas would leave
+         a visible seam against it. Two metas, because the browser takes the first
+         whose media matches — that covers the Auto default before any JS runs. When a
+         user picks an explicit Light/Dark, theme.ts overwrites BOTH contents with the
+         chosen colour so the chrome follows the APP rather than the OS; see
+         themeColorMetaContents. -->
+    <meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)" />
+    <meta name="theme-color" content="#141a22" media="(prefers-color-scheme: dark)" />
+
+    <!-- The SVG is the real favicon — it scales, and it is the source every PNG here
+         is rendered from. The PNGs are the fallback for browsers that won't take an
+         SVG favicon: Chrome/Firefox prefer the SVG, Safari takes a PNG. -->
+    <link rel="icon" href="/icons/icon.svg" type="image/svg+xml" />
+    <link rel="icon" href="/icons/favicon-32.png" sizes="32x32" type="image/png" />
+    <link rel="icon" href="/icons/favicon-16.png" sizes="16x16" type="image/png" />
+    <!-- iOS ignores the manifest's icons for add-to-home-screen and reads only this. -->
+    <link rel="apple-touch-icon" href="/icons/apple-touch-icon-180.png" sizes="180x180" />
+
+    <link rel="manifest" href="/manifest.webmanifest" />
     <link rel="stylesheet" href="/af-web.css" />
   </head>
   <body>

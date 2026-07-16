@@ -482,6 +482,28 @@ body {
   color: var(--af-text);
   border-color: var(--af-border-strong);
 }
+.af-install {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.15rem;
+}
+.af-install[hidden] {
+  display: none;
+}
+.af-install__dismiss {
+  padding: 0 0.3rem;
+  background: transparent;
+  color: var(--af-text-3);
+  border: none;
+  border-radius: var(--af-r-sm);
+  font: inherit;
+  font-size: var(--af-fs-sm);
+  line-height: 1;
+  cursor: pointer;
+}
+.af-install__dismiss:hover {
+  color: var(--af-text);
+}
 .af-theme-toggle {
   display: inline-flex;
   align-items: center;

@@ -6601,6 +6601,87 @@ function projectLabel(root2) {
   return parent ? `${base}  (${parent}/${base})` : base;
 }
 
+// src/install.ts
+var DISMISS_KEY = "af-install-dismissed";
+function shouldShowInstall(state) {
+  return state.stashed && !state.dismissed && !state.installed;
+}
+function readInstallDismissed() {
+  try {
+    return localStorage.getItem(DISMISS_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+function persistInstallDismissed() {
+  try {
+    localStorage.setItem(DISMISS_KEY, "1");
+  } catch {
+  }
+}
+var InstallAffordance = class {
+  /** The mountable root. Hidden until a beforeinstallprompt says otherwise. */
+  el;
+  stashed = null;
+  dismissed = readInstallDismissed();
+  installed = false;
+  constructor() {
+    const go = document.createElement("button");
+    go.type = "button";
+    go.className = "af-ghost af-install__go";
+    go.textContent = "Install app";
+    go.addEventListener("click", () => void this.promptNow());
+    const dismiss = document.createElement("button");
+    dismiss.type = "button";
+    dismiss.className = "af-install__dismiss";
+    dismiss.textContent = "\xD7";
+    dismiss.setAttribute("aria-label", "Dismiss install");
+    dismiss.title = "Dismiss";
+    dismiss.addEventListener("click", () => this.dismiss());
+    this.el = document.createElement("div");
+    this.el.className = "af-install";
+    this.el.append(go, dismiss);
+    this.sync();
+    window.addEventListener("beforeinstallprompt", (event) => {
+      event.preventDefault();
+      this.stashed = event;
+      this.sync();
+    });
+    window.addEventListener("appinstalled", () => {
+      this.installed = true;
+      this.stashed = null;
+      this.sync();
+    });
+  }
+  /** Shows the browser's install dialog for the stashed event, then retires it. */
+  async promptNow() {
+    const event = this.stashed;
+    if (!event) {
+      return;
+    }
+    this.stashed = null;
+    this.sync();
+    try {
+      await event.prompt();
+      await event.userChoice;
+    } catch {
+    }
+  }
+  /** The user closed our affordance: hide it and remember, so it never nags again. */
+  dismiss() {
+    this.dismissed = true;
+    persistInstallDismissed();
+    this.sync();
+  }
+  sync() {
+    this.el.hidden = !shouldShowInstall({
+      stashed: this.stashed !== null,
+      dismissed: this.dismissed,
+      installed: this.installed
+    });
+  }
+};
+
 // src/nav.ts
 var VIEWS = ["sessions", "tasks"];
 function cycleView(current, delta) {
@@ -7354,6 +7435,22 @@ function persistThemeChoice(choice) {
   } catch {
   }
 }
+var THEME_COLOR_LIGHT = "#ffffff";
+var THEME_COLOR_DARK = "#141a22";
+function themeColorMetaContents(choice) {
+  if (choice === "auto") {
+    return { light: THEME_COLOR_LIGHT, dark: THEME_COLOR_DARK };
+  }
+  const forced = choice === "dark" ? THEME_COLOR_DARK : THEME_COLOR_LIGHT;
+  return { light: forced, dark: forced };
+}
+function syncThemeColorMeta(choice) {
+  const { light, dark } = themeColorMetaContents(choice);
+  for (const meta of document.querySelectorAll('meta[name="theme-color"]')) {
+    const isDark = (meta.getAttribute("media") ?? "").includes("dark");
+    meta.setAttribute("content", isDark ? dark : light);
+  }
+}
 function stampTheme(choice) {
   const root2 = document.documentElement;
   if (choice === "auto") {
@@ -7361,6 +7458,7 @@ function stampTheme(choice) {
   } else {
     root2.setAttribute("data-theme", choice);
   }
+  syncThemeColorMeta(choice);
 }
 function bootStampTheme() {
   const choice = readThemeChoice();
@@ -8504,6 +8602,17 @@ var Store = class {
   }
 };
 
+// src/serviceworker.ts
+function registerServiceWorker() {
+  if (!("serviceWorker" in navigator)) {
+    return;
+  }
+  window.addEventListener("load", () => {
+    navigator.serviceWorker.register("/sw.js").catch(() => {
+    });
+  });
+}
+
 // src/tasks.ts
 function genTaskId() {
   const b = new Uint8Array(4);
@@ -8894,10 +9003,11 @@ function termStatusLabel(s) {
   }
 }
 var AppShell = class {
-  constructor(actions2, termHost2, modalHost2) {
+  constructor(actions2, termHost2, modalHost2, installEl) {
     this.actions = actions2;
     this.termHost = termHost2;
     this.modalHost = modalHost2;
+    this.installEl = installEl;
     this.pip = h2("span", { class: "af-live-pip" });
     this.pip.setAttribute("aria-hidden", "true");
     this.pipLabel = h2("span", { class: "af-live-label" });
@@ -8963,6 +9073,7 @@ var AppShell = class {
       viewNav,
       this.projectSwitchWrap,
       live,
+      ...this.installEl ? [this.installEl] : [],
       themeToggle,
       disconnect2
     );
@@ -9511,6 +9622,7 @@ function sessionRow(s, selected, actions2) {
 
 // src/index.ts
 var initialThemeChoice = bootStampTheme();
+registerServiceWorker();
 var store = new Store({
   phase: "login",
   view: "sessions",
@@ -9546,6 +9658,7 @@ termHost.className = "af-term-host";
 var modalHost = document.createElement("div");
 modalHost.className = "af-modal-host";
 var modal = null;
+var installAffordance = new InstallAffordance();
 var splitView = new SplitView(termHost, {
   onStatus: (s) => store.set({ termStatus: s }),
   // Keep the nav-vs-terminal mode (#1693) in sync with real xterm focus across every
@@ -9604,7 +9717,7 @@ function rerender() {
     return;
   }
   if (!shell) {
-    shell = new AppShell(actions, termHost, modalHost);
+    shell = new AppShell(actions, termHost, modalHost, installAffordance.el);
     root.replaceChildren(shell.el);
   }
   shell.update(state);

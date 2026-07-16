@@ -2498,6 +2498,381 @@ test("#1815 review: a retained layout follows its tab when the roster changes wh
   await expect(tabbar.locator(".af-tab")).toHaveCount(baseline, { timeout: 15_000 });
 });
 
+// --- PWA: favicon, theme-color, manifest, service worker, install (feat) --------
+//
+// These run in their OWN context rather than on the shared serial `page`, because a
+// service worker and a localStorage dismissal are per-origin state that would leak
+// into every test after them. A fresh context each time also means each test starts
+// from "never registered, never dismissed", which is the state a real first visit has.
+//
+// Worth stating plainly: the SPA registers the worker on EVERY load, so every other
+// test in this file already runs with it active. The suite staying green is itself
+// the broadest evidence the worker doesn't disturb the app — these tests are the
+// specific, deliberate proofs on top of that.
+
+/**
+ * Opens the app in a fresh page and returns once a service worker is not merely
+ * registered but actually CONTROLLING it — the state in which it could do damage, and
+ * therefore the only state worth asserting a bypass against.
+ *
+ * The reload is not defensive padding, it is the point. On a FIRST visit the shell
+ * (page, bundle, CSS) is fetched before the worker exists, so those requests never
+ * pass through it and nothing is cached; the worker only takes over via clients.claim
+ * once everything is already on screen. It is the SECOND load whose requests actually
+ * reach the fetch handler. So this reloads to reach the steady state a returning user
+ * is in, which is the state worth testing — a first-load-only check would assert the
+ * worker does nothing, which is true and useless.
+ */
+async function openControlledByWorker(page: Page): Promise<void> {
+  await page.goto("/");
+  await expect(page.locator(".af-app")).toBeVisible();
+  await page.evaluate(async () => {
+    await navigator.serviceWorker.ready;
+    if (navigator.serviceWorker.controller) {
+      return;
+    }
+    // clients.claim() takes control of an already-open page asynchronously, so the
+    // controller may land just after `ready`.
+    await new Promise<void>((resolve) => {
+      navigator.serviceWorker.addEventListener("controllerchange", () => resolve(), { once: true });
+    });
+  });
+  await page.reload();
+  await expect(page.locator(".af-app")).toBeVisible();
+}
+
+/** Every URL currently held in every Cache Storage bucket, with the bucket names. */
+async function cacheContents(page: Page): Promise<{ names: string[]; urls: string[] }> {
+  return page.evaluate(async () => {
+    const names = await caches.keys();
+    const urls: string[] = [];
+    for (const name of names) {
+      const cache = await caches.open(name);
+      for (const request of await cache.keys()) {
+        urls.push(request.url);
+      }
+    }
+    return { names, urls };
+  });
+}
+
+test("the shell links an SVG favicon, PNG fallbacks, an apple-touch icon, and the manifest", async ({ browser }) => {
+  const ctx = await browser.newContext();
+  const p = await ctx.newPage();
+  await p.goto("/");
+
+  await expect(p.locator('link[rel="icon"][type="image/svg+xml"]')).toHaveAttribute("href", "/icons/icon.svg");
+  await expect(p.locator('link[rel="icon"][sizes="32x32"]')).toHaveAttribute("href", "/icons/favicon-32.png");
+  await expect(p.locator('link[rel="icon"][sizes="16x16"]')).toHaveAttribute("href", "/icons/favicon-16.png");
+  await expect(p.locator('link[rel="apple-touch-icon"]')).toHaveAttribute("href", "/icons/apple-touch-icon-180.png");
+  await expect(p.locator('link[rel="manifest"]')).toHaveAttribute("href", "/manifest.webmanifest");
+
+  // Linking them is half the claim; the daemon actually serving them is the other
+  // half, and a link to a 404 looks identical in the DOM.
+  const results = await p.evaluate(async () => {
+    const hrefs = [...document.querySelectorAll('link[rel="icon"], link[rel="apple-touch-icon"]')].map(
+      (l) => (l as HTMLLinkElement).getAttribute("href") ?? "",
+    );
+    return Promise.all(
+      hrefs.map(async (href) => {
+        const res = await fetch(href);
+        return { href, status: res.status, type: res.headers.get("content-type") ?? "" };
+      }),
+    );
+  });
+  expect(results.length).toBeGreaterThanOrEqual(4);
+  for (const r of results) {
+    expect(r.status, `${r.href} must be served`).toBe(200);
+    expect(r.type, `${r.href} must carry an image type`).toMatch(/^image\/(png|svg\+xml)/);
+  }
+  await ctx.close();
+});
+
+test("theme-color is declared per scheme, and an explicit theme choice repoints the chrome (#1826)", async ({
+  browser,
+}) => {
+  const ctx = await browser.newContext();
+  const p = await ctx.newPage();
+  await p.goto("/");
+  await expect(p.locator(".af-app")).toBeVisible();
+
+  const metas = p.locator('meta[name="theme-color"]');
+  await expect(metas).toHaveCount(2);
+  await expect(p.locator('meta[name="theme-color"][media*="light"]')).toHaveAttribute("content", "#ffffff");
+  await expect(p.locator('meta[name="theme-color"][media*="dark"]')).toHaveAttribute("content", "#141a22");
+
+  // The audit item is "the chrome matches the app theme", and per-scheme metas alone
+  // don't deliver that: they follow the OS, so an explicit Dark on a light OS would
+  // leave a white chrome over a dark app. Picking Dark must collapse BOTH metas.
+  await p.locator('.af-theme-opt[data-theme-opt="dark"]').click();
+  await expect(p.locator("html")).toHaveAttribute("data-theme", "dark");
+  await expect(p.locator('meta[name="theme-color"][media*="light"]')).toHaveAttribute("content", "#141a22");
+  await expect(p.locator('meta[name="theme-color"][media*="dark"]')).toHaveAttribute("content", "#141a22");
+
+  await p.locator('.af-theme-opt[data-theme-opt="light"]').click();
+  await expect(p.locator('meta[name="theme-color"][media*="dark"]')).toHaveAttribute("content", "#ffffff");
+
+  // Back to Auto and the metas go per-scheme again, handing the decision back to the
+  // media queries.
+  await p.locator('.af-theme-opt[data-theme-opt="auto"]').click();
+  await expect(p.locator('meta[name="theme-color"][media*="light"]')).toHaveAttribute("content", "#ffffff");
+  await expect(p.locator('meta[name="theme-color"][media*="dark"]')).toHaveAttribute("content", "#141a22");
+  await ctx.close();
+});
+
+test("the manifest is fetched by the browser, typed application/manifest+json, and install-complete", async ({
+  browser,
+}) => {
+  const ctx = await browser.newContext();
+  const p = await ctx.newPage();
+  await p.goto("/");
+
+  const manifest = await p.evaluate(async () => {
+    const res = await fetch("/manifest.webmanifest");
+    return { status: res.status, type: res.headers.get("content-type"), body: await res.json() };
+  });
+  expect(manifest.status).toBe(200);
+  // Go has no .webmanifest in its MIME table and we serve nosniff, so without the
+  // daemon's explicit override this arrives as text/plain.
+  expect(manifest.type).toBe("application/manifest+json");
+  expect(manifest.body).toMatchObject({
+    name: "Agent Factory",
+    short_name: "af",
+    start_url: "/",
+    scope: "/",
+    display: "standalone",
+  });
+  expect(manifest.body.description).toBeTruthy();
+  expect(manifest.body.theme_color).toBeTruthy();
+  expect(manifest.body.background_color).toBeTruthy();
+
+  // Every icon the manifest promises must actually be served — Chrome silently drops
+  // an install offer over a manifest whose icons 404.
+  const icons = await p.evaluate(async () => {
+    const res = await fetch("/manifest.webmanifest");
+    const m = (await res.json()) as { icons: { src: string; purpose: string }[] };
+    return Promise.all(
+      m.icons.map(async (i) => ({ src: i.src, purpose: i.purpose, status: (await fetch(i.src)).status })),
+    );
+  });
+  for (const icon of icons) {
+    expect(icon.status, `${icon.src} must be served`).toBe(200);
+  }
+  expect(icons.some((i) => i.purpose === "maskable")).toBe(true);
+  await ctx.close();
+});
+
+test("the service worker registers, controls the page, and caches the static shell", async ({ browser }) => {
+  const ctx = await browser.newContext();
+  const p = await ctx.newPage();
+  await openControlledByWorker(p);
+
+  // Controlling the page is the precondition for every claim below: an installed
+  // worker that never took control could not intercept anything, so proving the
+  // bypass against an idle worker would prove nothing.
+  expect(await p.evaluate(() => navigator.serviceWorker.controller !== null)).toBe(true);
+
+  // Polled because the cache write rides event.waitUntil — it completes within the
+  // fetch event's lifetime but not necessarily before the response reaches the page,
+  // so the entry lands shortly after the asset finishes loading.
+  await expect
+    .poll(async () => (await cacheContents(p)).names.filter((n) => /^af-shell-[0-9a-f]{12}$/.test(n)).length)
+    .toBeGreaterThan(0);
+  // Two things must be cached, and they warm by different paths: the bundle as a
+  // sub-resource (networkFirst), and the shell under /index.html as a NAVIGATION
+  // (handleNavigation, warmed by the openControlledByWorker reload). The latter is
+  // what a deep-route offline fallback resolves to, so assert it explicitly here.
+  await expect.poll(async () => (await cacheContents(p)).urls.some((u) => u.endsWith("/af-web.js"))).toBe(true);
+  await expect.poll(async () => (await cacheContents(p)).urls.some((u) => u.endsWith("/index.html"))).toBe(true);
+  await ctx.close();
+});
+
+test("offline, a client-routed deep link serves the cached app shell, not a browser error", async ({ browser }) => {
+  const ctx = await browser.newContext();
+  const p = await ctx.newPage();
+  await openControlledByWorker(p);
+  // The offline fallback resolves to the cached /index.html, so it must be warm before
+  // we cut the network — otherwise this would fail for want of a cache rather than for
+  // the behaviour under test.
+  await expect.poll(async () => (await cacheContents(p)).urls.some((u) => u.endsWith("/index.html"))).toBe(true);
+
+  await ctx.setOffline(true);
+
+  // /tasks is a route the app never fetched or cached by name — serveSPA answers it
+  // with the shell for client-side routing. Offline, the worker must do the same, or a
+  // refresh/bookmark of a deep route shows the browser's network-error page instead of
+  // the app booting and rendering its own daemon-unreachable state. Before the
+  // navigation fallback existed, this passed straight through and failed offline.
+  const resp = await p.goto("/tasks");
+  expect(resp?.status(), "the deep-link navigation must be answered, not a network failure").toBe(200);
+  expect(resp?.fromServiceWorker(), "offline, only the worker could have answered — proving the shell fallback").toBe(
+    true,
+  );
+  // It is the app shell that came back (its module bundle tag), not some other cached
+  // response. The bundle then boots from cache and takes over the route client-side.
+  expect(await p.evaluate(() => !!document.querySelector('script[src="/af-web.js"]'))).toBe(true);
+
+  await ctx.setOffline(false);
+  await ctx.close();
+});
+
+test("the service worker NEVER caches /v1 — not the API, not the stream (the bypass allowlist)", async ({
+  browser,
+}) => {
+  const ctx = await browser.newContext();
+  const p = await ctx.newPage();
+  await openControlledByWorker(p);
+
+  // By now the app has made real /v1 traffic on this page: the auth-info probe and
+  // the Snapshot fetch both ran to render the rail, and the events WS is open. That
+  // matters — a worker that cached indiscriminately would have caught them, so the
+  // absence below is a real result rather than an absence of opportunity.
+  await expect(p.locator(".af-live-pip.af-live-open")).toBeVisible();
+  await p.evaluate(() => fetch("/v1/auth-info"));
+
+  const { urls } = await cacheContents(p);
+  const v1 = urls.filter((u) => new URL(u).pathname.startsWith("/v1/"));
+  expect(v1, "the worker must never cache anything under /v1").toEqual([]);
+  await ctx.close();
+});
+
+test("the service worker does not SERVE /v1: offline, the shell survives from cache but /v1 fails", async ({
+  browser,
+}) => {
+  const ctx = await browser.newContext();
+  const p = await ctx.newPage();
+  await openControlledByWorker(p);
+  // Warm the shell cache and make the /v1 requests the app makes on any load. The
+  // offline assertions below are only meaningful once the shell is actually cached —
+  // otherwise "the shell survives offline" could fail for want of a cache rather than
+  // for the reason under test.
+  await expect(p.locator(".af-live-pip.af-live-open")).toBeVisible();
+  await expect.poll(async () => (await cacheContents(p)).urls.some((u) => u.endsWith("/af-web.js"))).toBe(true);
+
+  // Offline is the sharpest discriminator available, and the reason this test exists
+  // rather than relying on the cache enumeration alone: with the network gone, a path
+  // the worker serves still resolves and a path it merely passes through cannot. So
+  // this separates "we didn't happen to cache /v1" from "the worker will never answer
+  // for /v1", which is the actual guarantee the PTY stream depends on.
+  await ctx.setOffline(true);
+
+  const shellOffline = await p.evaluate(async () => (await caches.match("/af-web.js")) !== undefined);
+  expect(shellOffline, "the shell must still be answerable offline — proving the worker does serve it").toBe(true);
+
+  const apiOffline = await p.evaluate(async () => {
+    try {
+      const res = await fetch("/v1/auth-info");
+      return { served: true, status: res.status };
+    } catch {
+      return { served: false, status: 0 };
+    }
+  });
+  expect(
+    apiOffline.served,
+    "/v1 resolved with the network offline — the worker is answering for the API, which would put the PTY stream and the whole data plane behind a cache",
+  ).toBe(false);
+
+  await ctx.setOffline(false);
+  await ctx.close();
+});
+
+test("a live PTY stream and the events WS survive the service worker controlling the page", async ({ browser }) => {
+  const ctx = await browser.newContext();
+  const p = await ctx.newPage();
+  await openControlledByWorker(p);
+
+  // The functional half of the bypass, and the one that matters to a user: with the
+  // worker in control, attach and watch real PTY frames arrive. A worker that
+  // intercepted or delayed the stream would show up here as an empty pane.
+  await expect(p.locator(".af-live-pip.af-live-open")).toBeVisible();
+  await row(p, SESSION_A).click();
+  await expect(p.locator(".af-term-host .xterm")).toBeVisible();
+  await expect(p.locator(".af-term-host")).toContainText(READY_MARKER);
+  await expect(p.locator(".af-term-meta")).toContainText("Live");
+  await ctx.close();
+});
+
+/** Fires a synthetic beforeinstallprompt and reports whether our handler took it.
+ *
+ *  Headless Chromium will not fire the real event, so the flow is driven with a
+ *  stand-in carrying the only surface install.ts touches: preventDefault, prompt(),
+ *  and userChoice. That still exercises the real listener, the real visibility rule,
+ *  and the real DOM — only the browser's own decision to offer is stubbed. */
+async function fireInstallOffer(page: Page): Promise<void> {
+  await page.evaluate(() => {
+    const event = new Event("beforeinstallprompt", { cancelable: true }) as Event & {
+      prompt: () => Promise<void>;
+      userChoice: Promise<{ outcome: string; platform: string }>;
+    };
+    const w = window as unknown as { __afPromptCalls: number };
+    w.__afPromptCalls = 0;
+    event.prompt = () => {
+      w.__afPromptCalls++;
+      return Promise.resolve();
+    };
+    event.userChoice = Promise.resolve({ outcome: "accepted", platform: "web" });
+    window.dispatchEvent(event);
+  });
+}
+
+test("the install affordance stays hidden until the browser offers an install", async ({ browser }) => {
+  const ctx = await browser.newContext();
+  const p = await ctx.newPage();
+  await p.goto("/");
+  await expect(p.locator(".af-app")).toBeVisible();
+
+  // Nothing has offered an install, so there is nothing to offer the user. This is a
+  // real assertion, not a stubbed one: headless Chromium genuinely does not fire
+  // beforeinstallprompt here, which is the same reason the button correctly never
+  // appears over plain-HTTP Tailscale — no event, no button (see install.ts).
+  await expect(p.locator(".af-install")).toBeHidden();
+
+  await fireInstallOffer(p);
+  await expect(p.locator(".af-install")).toBeVisible();
+  await expect(p.locator(".af-install__go")).toHaveText("Install app");
+  await ctx.close();
+});
+
+test("the install button prompts once and then retires the spent offer", async ({ browser }) => {
+  const ctx = await browser.newContext();
+  const p = await ctx.newPage();
+  await p.goto("/");
+  await expect(p.locator(".af-app")).toBeVisible();
+  await fireInstallOffer(p);
+
+  await p.locator(".af-install__go").click();
+  // The stashed event's prompt() ran — the browser's install dialog was asked for.
+  await expect
+    .poll(() => p.evaluate(() => (window as unknown as { __afPromptCalls: number }).__afPromptCalls))
+    .toBe(1);
+  // A beforeinstallprompt event is single-use: prompt() throws if called twice. The
+  // affordance retires with the offer it was showing, so there is no second click to
+  // make.
+  await expect(p.locator(".af-install")).toBeHidden();
+  await ctx.close();
+});
+
+test("dismissing the install affordance sticks across reloads — it must never nag", async ({ browser }) => {
+  const ctx = await browser.newContext();
+  const p = await ctx.newPage();
+  await p.goto("/");
+  await expect(p.locator(".af-app")).toBeVisible();
+  await fireInstallOffer(p);
+  await expect(p.locator(".af-install")).toBeVisible();
+
+  await p.locator(".af-install__dismiss").click();
+  await expect(p.locator(".af-install")).toBeHidden();
+
+  // The whole point of persisting the dismissal: a reload that gets a FRESH offer
+  // must still stay quiet. Without the localStorage flag this is exactly where the
+  // button would come back and start nagging.
+  await p.reload();
+  await expect(p.locator(".af-app")).toBeVisible();
+  await fireInstallOffer(p);
+  await expect(p.locator(".af-install")).toBeHidden();
+  await ctx.close();
+});
+
 test("vscode tab (feat): the ▾ menu creates a VS Code tab and the daemon serves it through the proxy", async () => {
   // End to end, with no seeded fixture: pick VS Code from the tab bar's kind menu,
   // and the daemon spawns a code-server (the FAKE one on PATH — no CI box has a

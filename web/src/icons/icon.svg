@@ -1,0 +1,47 @@
+<!--
+  The Agent Factory app mark: a sawtooth-roofed factory with a smokestack, knocked
+  out of a rounded accent tile. Source of truth for the SVG favicon, the PNG favicon
+  fallbacks, and the manifest's "any" icons — the PNGs are RENDERED from this file
+  (`npm run icons`), never drawn by hand, so the mark cannot drift between sizes.
+
+  Three decisions are load-bearing and easy to undo by accident.
+
+  1. SOLID ACCENT TILE, WHITE KNOCKOUT — not a bare silhouette. A tab strip is
+     either near-white or near-black depending on the browser theme, and no single
+     ink reads on both. The tile sidesteps that: on a light tab the accent field
+     carries the mark, on a dark tab the white knockout does. It also gives the
+     maskable variant a field to bleed, which a silhouette has no way to do.
+
+  2. NO prefers-color-scheme SWITCH inside the SVG. An SVG favicon can adapt to the
+     OS theme, but the PNG fallbacks (16/32, apple-touch) and every manifest icon
+     physically cannot. A theming SVG would make Chrome and iOS show different marks
+     for the same app. Parity across the icon set beats adaptivity in one member of
+     it, so the tile is one fixed accent everywhere.
+
+  3. EVERY COORDINATE IS A MULTIPLE OF 32 in this 512 viewBox = a whole unit on a
+     16px grid. This is the whole reason the mark survives as a favicon: at 16px
+     each edge lands on a pixel boundary instead of straddling one and going soft.
+     It was measured, not assumed — an earlier draft inset the chimney by a half
+     unit and it rendered visibly blurry at 16px while everything else stayed sharp.
+     The rendered-at-16px proof sheet is the gate for any edit here; do not nudge a
+     coordinate off the grid because it looks better at 512.
+
+  The proportions are likewise 16px-first. The roof has TWO teeth, not three:
+  three teeth are 2.6px wide at favicon size and mud into a grey smear (measured),
+  while these are 3px and stay legible. The 2-unit flat roof between the stack and
+  the first tooth is not padding — without that gap the stack fuses into the roof
+  slope and the whole mark reads as an arrow rather than a factory (also measured).
+  The mark is deliberately coarse: it is a favicon first and a 512 app icon second.
+
+  On the 16-unit grid the outline is: stack x3..5 rising to y3, flat roof x5..7,
+  two teeth x7..10 and x10..13 peaking at y6, body down to the y13 baseline. The
+  stack is flush with the body's left edge, which is what lets the union close as
+  one simple polygon. The `d` is byte-identical across all three icon SVGs, and
+  icons.test.ts fails if that ever stops being true.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="Agent Factory">
+  <title>Agent Factory</title>
+  <!-- rx 112 ≈ 22% of the tile: the modern app-tile radius, and 3.5px at 16px. -->
+  <rect width="512" height="512" rx="112" fill="#2f5fd8"/>
+  <path d="M96 416 L96 96 L160 96 L160 288 L224 288 L224 192 L320 288 L320 192 L416 288 L416 416 Z" fill="#ffffff"/>
+</svg>

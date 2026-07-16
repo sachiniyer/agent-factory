@@ -578,6 +578,39 @@ body {
   border-color: var(--af-border-strong);
 }
 
+/* Install affordance (feat: PWA): the "Install app" button plus its own dismiss,
+ * shown in the appbar only while the browser reports the app installable. The button
+ * itself is a plain .af-ghost — install is an ordinary offer, not a call to action,
+ * and giving it an accent fill would make it the loudest thing in a bar full of live
+ * session state. install.ts toggles `hidden` on the wrapper. */
+.af-install {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.15rem;
+}
+
+/* Beats the .af-install display above on specificity (class + attribute), so the
+ * `hidden` install.ts sets actually hides it. */
+.af-install[hidden] {
+  display: none;
+}
+
+.af-install__dismiss {
+  padding: 0 0.3rem;
+  background: transparent;
+  color: var(--af-text-3);
+  border: none;
+  border-radius: var(--af-r-sm);
+  font: inherit;
+  font-size: var(--af-fs-sm);
+  line-height: 1;
+  cursor: pointer;
+}
+
+.af-install__dismiss:hover {
+  color: var(--af-text);
+}
+
 /* Theme toggle: a compact Auto/Light/Dark segmented control in the appbar. The
  * active option carries an accent-tinted chip; theme.ts persists the choice and
  * stamps data-theme on <html>. */

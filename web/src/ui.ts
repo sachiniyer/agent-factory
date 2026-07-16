@@ -517,6 +517,11 @@ export class AppShell {
     private readonly actions: Actions,
     private readonly termHost: HTMLElement,
     private readonly modalHost: HTMLElement,
+    /** The "Install app" affordance's root, mounted into the appbar (feat: PWA).
+     *  Owned by index.ts rather than built here — it must outlive the shell, which is
+     *  rebuilt on every logout/login. Optional so a caller that does not care about
+     *  install (a harness) can leave it out. */
+    private readonly installEl?: HTMLElement,
   ) {
     this.pip = h("span", { class: "af-live-pip" });
     this.pip.setAttribute("aria-hidden", "true");
@@ -598,6 +603,10 @@ export class AppShell {
       viewNav,
       this.projectSwitchWrap,
       live,
+      // Install sits with the other trailing appbar controls. It carries `hidden`
+      // unless the browser reports the app installable, which on most loads (and
+      // always over plain-HTTP Tailscale) means it contributes nothing to the bar.
+      ...(this.installEl ? [this.installEl] : []),
       themeToggle,
       disconnect,
     );

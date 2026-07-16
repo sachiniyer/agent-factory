@@ -54,9 +54,57 @@ export function persistThemeChoice(choice: ThemeChoice): void {
   }
 }
 
+// --- browser chrome (theme-color) ------------------------------------------
+//
+// index.html ships two <meta name="theme-color"> tags, one per scheme, and the
+// browser paints its chrome with the first whose media matches. That is exactly
+// right for Auto, and exactly WRONG the moment a user overrides the OS with the
+// appbar toggle: the media queries still follow the OS, so picking Dark on a
+// light OS leaves a white chrome capping a dark app.
+//
+// The fix keeps the media attributes untouched and instead makes the CONTENTS
+// agree: under an explicit choice both metas carry the chosen colour, so whichever
+// one the browser matches it paints the same thing. Auto restores the per-scheme
+// pair and the media queries do their job again.
+//
+// The values are --af-bg-surface (the appbar's fill), matching index.html — see
+// the comment there for why it is the surface token and not the canvas.
+
+/** --af-bg-surface, light. The colour of the appbar the browser chrome abuts. */
+const THEME_COLOR_LIGHT = "#ffffff";
+/** --af-bg-surface, dark. */
+const THEME_COLOR_DARK = "#141a22";
+
+/** The `content` each per-scheme theme-color meta should carry for a choice: Auto
+ *  keeps them per-scheme so the media queries decide, while an explicit choice
+ *  collapses both to one colour so the chrome follows the APP, not the OS. Pure so
+ *  the collapse rule is unit-testable without a DOM (theme.test.ts). */
+export function themeColorMetaContents(choice: ThemeChoice): { light: string; dark: string } {
+  if (choice === "auto") {
+    return { light: THEME_COLOR_LIGHT, dark: THEME_COLOR_DARK };
+  }
+  const forced = choice === "dark" ? THEME_COLOR_DARK : THEME_COLOR_LIGHT;
+  return { light: forced, dark: forced };
+}
+
+/** Writes themeColorMetaContents onto the two metas index.html declares. Best-effort:
+ *  a shell without them (a test harness mounting the app into a bare document) is a
+ *  no-op rather than a crash, since the chrome colour is decoration and must never
+ *  take the app down with it. */
+function syncThemeColorMeta(choice: ThemeChoice): void {
+  const { light, dark } = themeColorMetaContents(choice);
+  for (const meta of document.querySelectorAll('meta[name="theme-color"]')) {
+    // The pair is distinguished by its media attribute, not an id — that keeps
+    // index.html free of markup that exists only for JS to grab.
+    const isDark = (meta.getAttribute("media") ?? "").includes("dark");
+    meta.setAttribute("content", isDark ? dark : light);
+  }
+}
+
 /** Stamps `data-theme` on <html> for a choice: an explicit light/dark sets the
  *  attribute so its :root[data-theme=…] block wins over the media query; Auto
- *  removes the attribute so the media query decides. */
+ *  removes the attribute so the media query decides. Also points the browser
+ *  chrome at the same resolved theme, so the two can never disagree. */
 export function stampTheme(choice: ThemeChoice): void {
   const root = document.documentElement;
   if (choice === "auto") {
@@ -64,6 +112,7 @@ export function stampTheme(choice: ThemeChoice): void {
   } else {
     root.setAttribute("data-theme", choice);
   }
+  syncThemeColorMeta(choice);
 }
 
 /** The earliest boot stamp: read the saved choice and apply it before first paint
