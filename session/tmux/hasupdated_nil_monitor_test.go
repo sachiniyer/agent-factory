@@ -4,8 +4,9 @@ import (
 	"os/exec"
 	"testing"
 
-	"github.com/sachiniyer/agent-factory/cmd/cmd_test"
 	"github.com/stretchr/testify/assert"
+
+	"github.com/sachiniyer/agent-factory/cmd/cmd_test"
 )
 
 // TestHasUpdated_NilMonitor pins the #999 fix at its source. A TmuxSession that

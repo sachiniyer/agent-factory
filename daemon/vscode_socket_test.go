@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/sachiniyer/agent-factory/internal/testguard"
 )
 
 // The #1873 regression suite: the editor is reachable ONLY over a 0600 unix
@@ -119,7 +121,7 @@ func TestVSCodeSocket_ModeIsOwnerOnly(t *testing.T) {
 // that already exists. A dir left loose by an older build or a permissive umask
 // must be tightened, not inherited.
 func TestVSCodeSocketDir_TightensLoosePermissions(t *testing.T) {
-	home := t.TempDir()
+	home := testguard.SocketTempDir(t)
 	t.Setenv("AGENT_FACTORY_HOME", home)
 
 	loose := filepath.Join(home, vscodeSocketDirName)

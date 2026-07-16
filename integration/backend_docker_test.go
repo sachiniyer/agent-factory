@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sachiniyer/agent-factory/internal/testguard"
 	"github.com/sachiniyer/agent-factory/session"
 )
 
@@ -40,7 +41,7 @@ func TestDockerBackendRoundTrip(t *testing.T) {
 	requireDocker(t)
 	requireTool(t, "git")
 
-	home := t.TempDir()
+	home := testguard.SocketTempDir(t)
 	t.Setenv("AGENT_FACTORY_HOME", home)
 
 	// A static `af` binary the runtime copies into the container (musl-compatible;

@@ -6,8 +6,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/sachiniyer/agent-factory/cmd/cmd_test"
 	"github.com/stretchr/testify/require"
+
+	"github.com/sachiniyer/agent-factory/cmd/cmd_test"
 )
 
 // errExit1 stands in for tmux's "can't find session" failure, which exits with

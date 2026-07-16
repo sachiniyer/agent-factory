@@ -6,9 +6,10 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/stretchr/testify/require"
+
 	cmd2 "github.com/sachiniyer/agent-factory/cmd"
 	"github.com/sachiniyer/agent-factory/cmd/cmd_test"
-	"github.com/stretchr/testify/require"
 )
 
 // forceNewSessionEnvMarkers pins the `-e` support probe for the duration of

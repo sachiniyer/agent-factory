@@ -7,9 +7,10 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/session/tmux"
-	"github.com/stretchr/testify/require"
 )
 
 func TestSetupDoctorHealthy(t *testing.T) {

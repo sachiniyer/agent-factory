@@ -56,7 +56,7 @@ func TestRemoteHookRoundTripMockRemote(t *testing.T) {
 	requireTool(t, "tmux")
 	testguard.IsolateTmux(t)
 
-	home := t.TempDir()
+	home := testguard.SocketTempDir(t)
 	t.Setenv("AGENT_FACTORY_HOME", home)
 
 	afBin := buildBinary(t)

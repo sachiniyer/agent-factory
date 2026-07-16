@@ -9,10 +9,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
+
 	cmdpkg "github.com/sachiniyer/agent-factory/cmd"
 	"github.com/sachiniyer/agent-factory/cmd/cmd_test"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
-	"github.com/stretchr/testify/require"
 )
 
 // recordedCmd is a captured tmux invocation: the argv plus, for `load-buffer -`,

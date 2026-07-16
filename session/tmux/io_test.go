@@ -6,8 +6,9 @@ import (
 	"strings"
 	"testing"
 
-	cmd_test "github.com/sachiniyer/agent-factory/cmd/cmd_test"
 	"github.com/stretchr/testify/require"
+
+	cmd_test "github.com/sachiniyer/agent-factory/cmd/cmd_test"
 )
 
 // TapEnter / TapDAndEnter moved off the attach PTY onto clientless `send-keys`

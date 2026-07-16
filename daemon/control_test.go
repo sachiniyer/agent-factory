@@ -532,7 +532,7 @@ func TestRequestShutdownNoDaemon(t *testing.T) {
 // socket file with no listener as "no daemon" (connection refused) rather
 // than propagating the transport error to callers.
 func TestRequestShutdownStaleSocket(t *testing.T) {
-	home := t.TempDir()
+	home := testguard.SocketTempDir(t)
 	t.Setenv("AGENT_FACTORY_HOME", home)
 
 	socketPath, err := DaemonSocketPath()

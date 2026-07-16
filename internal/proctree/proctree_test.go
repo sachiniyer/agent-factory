@@ -4,37 +4,13 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"runtime"
 	"strings"
 	"syscall"
 	"testing"
 	"time"
-)
 
-// requireProcFS skips a test on any OS without /proc.
-//
-// THIS SKIP HIDES A REAL DEFECT (#1939) — it is not a harness quirk. This whole
-// package reads Linux's /proc with no darwin fallback and no build tag, so on
-// macOS Snapshot() always fails with "reading /proc: no such file or directory".
-// Its callers swallow that (session/tmux/reap.go:61-64 returns nil on any error),
-// which means tmux orphan reaping and `af doctor`'s process mapping silently do
-// NOTHING on macOS — permanently, not intermittently.
-//
-// The tests are skipped rather than deleted or weakened so the darwin CI job can
-// go green on the failures that ARE fixable, while this one stays visible and
-// attributable. Compare daemon/daemon.go:781, which hits the same /proc problem
-// and does fall back to `ps` on macOS: darwin was handled there and missed here.
-//
-// Delete this helper — do not extend it to new tests — when #1939 lands a darwin
-// process-table backend.
-func requireProcFS(t *testing.T) {
-	t.Helper()
-	if _, err := os.Stat("/proc"); err != nil {
-		t.Skipf("no /proc on %s: proctree is Linux-only and af's orphan reaping + doctor "+
-			"process mapping are silently broken on this platform — see #1939 (REAL DEFECT, "+
-			"not a test-harness assumption)", runtime.GOOS)
-	}
-}
+	"github.com/sachiniyer/agent-factory/internal/testguard"
+)
 
 // startSleeper spawns a `sleep` child owned by this test and returns its
 // Process entry. The child is killed on cleanup regardless of test outcome.
@@ -52,7 +28,7 @@ func startSleeper(t *testing.T) *exec.Cmd {
 }
 
 func TestSnapshotIncludesSelfAndChild(t *testing.T) {
-	requireProcFS(t)
+	testguard.RequireProcFS(t)
 	child := startSleeper(t)
 	snap, err := Snapshot()
 	if err != nil {
@@ -78,7 +54,7 @@ func TestSnapshotIncludesSelfAndChild(t *testing.T) {
 }
 
 func TestTreeOfFindsGrandchild(t *testing.T) {
-	requireProcFS(t)
+	testguard.RequireProcFS(t)
 	// sh -c spawns sleep as a grandchild of the test process.
 	cmd := exec.Command("sh", "-c", "sleep 300 & wait")
 	if err := cmd.Start(); err != nil {
@@ -125,7 +101,7 @@ func TestTreeOfFindsGrandchild(t *testing.T) {
 }
 
 func TestTreeOfMissingRoot(t *testing.T) {
-	requireProcFS(t)
+	testguard.RequireProcFS(t)
 	snap := map[int]Process{2: {PID: 2, PPID: 1}}
 	if tree := TreeOf(snap, 999999); tree != nil {
 		t.Errorf("TreeOf(missing root) = %v, want nil", tree)
@@ -133,7 +109,7 @@ func TestTreeOfMissingRoot(t *testing.T) {
 }
 
 func TestSessionMembers(t *testing.T) {
-	requireProcFS(t)
+	testguard.RequireProcFS(t)
 	snap := map[int]Process{
 		10: {PID: 10, PPID: 1, SID: 10},
 		11: {PID: 11, PPID: 1, SID: 10}, // reparented but same kernel session
@@ -151,7 +127,7 @@ func TestSessionMembers(t *testing.T) {
 }
 
 func TestSignalVerifiesIdentity(t *testing.T) {
-	requireProcFS(t)
+	testguard.RequireProcFS(t)
 	child := startSleeper(t)
 	snap, err := Snapshot()
 	if err != nil {
@@ -185,7 +161,7 @@ func TestSignalVerifiesIdentity(t *testing.T) {
 // returns ESRCH for the kill. Signal must map that to ErrIdentityChanged so
 // callers treat "already gone" as success, not a warnable failure (#1151).
 func TestSignalReapedInTOCTOUWindow(t *testing.T) {
-	requireProcFS(t)
+	testguard.RequireProcFS(t)
 	child := startSleeper(t)
 	snap, err := Snapshot()
 	if err != nil {
@@ -208,7 +184,7 @@ func TestSignalReapedInTOCTOUWindow(t *testing.T) {
 // TestSignalPropagatesNonESRCHErrors makes sure the ESRCH coercion does not
 // swallow genuine signal failures (e.g. EPERM): those must still surface.
 func TestSignalPropagatesNonESRCHErrors(t *testing.T) {
-	requireProcFS(t)
+	testguard.RequireProcFS(t)
 	child := startSleeper(t)
 	snap, err := Snapshot()
 	if err != nil {
@@ -229,7 +205,7 @@ func TestSignalPropagatesNonESRCHErrors(t *testing.T) {
 // survivor is reaped in the TOCTOU window, KillEscalating must not log a
 // "failed to" warning for it (#1151).
 func TestKillEscalatingNoWarnOnTOCTOUExit(t *testing.T) {
-	requireProcFS(t)
+	testguard.RequireProcFS(t)
 	child := startSleeper(t)
 	snap, err := Snapshot()
 	if err != nil {
@@ -257,7 +233,7 @@ func TestKillEscalatingNoWarnOnTOCTOUExit(t *testing.T) {
 }
 
 func TestSignalRefusesSelfAndInit(t *testing.T) {
-	requireProcFS(t)
+	testguard.RequireProcFS(t)
 	if err := Signal(Process{PID: 1}, syscall.SIGTERM); err == nil {
 		t.Errorf("Signal(pid 1) succeeded, want refusal")
 	}
@@ -267,7 +243,7 @@ func TestSignalRefusesSelfAndInit(t *testing.T) {
 }
 
 func TestEnvValue(t *testing.T) {
-	requireProcFS(t)
+	testguard.RequireProcFS(t)
 	cmd := exec.Command("sleep", "300")
 	cmd.Env = append(os.Environ(), "AF_TEST_MARKER=hello")
 	if err := cmd.Start(); err != nil {
@@ -296,7 +272,7 @@ func TestEnvValue(t *testing.T) {
 }
 
 func TestCPUFractionIdleSleeper(t *testing.T) {
-	requireProcFS(t)
+	testguard.RequireProcFS(t)
 	child := startSleeper(t)
 	snap, err := Snapshot()
 	if err != nil {
@@ -312,7 +288,7 @@ func TestCPUFractionIdleSleeper(t *testing.T) {
 }
 
 func TestCmdline(t *testing.T) {
-	requireProcFS(t)
+	testguard.RequireProcFS(t)
 	child := startSleeper(t)
 	// /proc/<pid>/cmdline is empty in the window between fork and exec;
 	// poll briefly rather than racing it.

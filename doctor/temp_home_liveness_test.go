@@ -10,9 +10,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/sachiniyer/agent-factory/cmd/cmd_test"
 	"github.com/sachiniyer/agent-factory/internal/proctree"
-	"github.com/stretchr/testify/require"
 )
 
 func makeOldTempAFHome(t *testing.T, tempRoot, name string) string {

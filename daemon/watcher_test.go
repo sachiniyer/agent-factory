@@ -358,7 +358,7 @@ func TestWatcherStderrGoesToTaskLog(t *testing.T) {
 // and no line is lost across the rotation. Hermetic per the #1057/#1061
 // pattern: the rotation policy is read from a sandboxed AGENT_FACTORY_HOME.
 func TestWatcherTaskLogRotates(t *testing.T) {
-	home := t.TempDir()
+	home := testguard.SocketTempDir(t)
 	t.Setenv("AGENT_FACTORY_HOME", home)
 	if err := os.WriteFile(filepath.Join(home, "config.json"), []byte(`{"log_max_size_mb": 1, "log_max_backups": 1}`), 0644); err != nil {
 		t.Fatalf("write config.json: %v", err)

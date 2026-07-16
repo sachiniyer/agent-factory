@@ -11,11 +11,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/sachiniyer/agent-factory/cmd"
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/proctree"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
-	"github.com/stretchr/testify/require"
 )
 
 // Every test here is hermetic by construction (#1104 hard rules): the AF
@@ -171,6 +172,7 @@ func findCheckRows(r *Report, name string) []CheckResult {
 // regression: a process whose AF_SESSION marker names a dead session is a
 // verified orphan — reported without --fix, killed with it.
 func TestOrphanedProcessDetectedAndFixed(t *testing.T) {
+	testguard.RequireProcFS(t)
 	testguard.IsolateTmux(t) // private server: the marked session is dead by construction
 
 	// The orphan's AF_HOME must match the run's ConfigDir — a kill requires
@@ -208,6 +210,7 @@ func TestOrphanedProcessDetectedAndFixed(t *testing.T) {
 // live on a private `tmux -L` server and are invisible here) and a missing
 // home marker (pre-marker spawn, unreadable environ) are both report-only.
 func TestOrphanWithoutProvenHomeSurvivesFix(t *testing.T) {
+	testguard.RequireProcFS(t)
 	testguard.IsolateTmux(t)
 
 	foreign := spawnWithEnv(t, "sh", nil, map[string]string{
@@ -246,6 +249,7 @@ func TestOrphanWithoutProvenHomeSurvivesFix(t *testing.T) {
 // session means the process escaped its pane but the session still owns it —
 // report-only even under --fix.
 func TestMarkedProcessOfLiveSessionIsNeverKilled(t *testing.T) {
+	testguard.RequireProcFS(t)
 	testguard.IsolateTmux(t)
 
 	const name = "af_doctor-live-session"
@@ -464,6 +468,7 @@ func TestTmuxServerDeadParsing(t *testing.T) {
 // TestOrphanSignalIdentityGuard: even a fixable finding must refuse to fire
 // when the pid has been recycled (the fix closure re-verifies identity).
 func TestOrphanSignalIdentityGuard(t *testing.T) {
+	testguard.RequireProcFS(t)
 	testguard.IsolateTmux(t)
 	home := t.TempDir()
 	orphan := spawnWithEnv(t, "sh", nil, map[string]string{

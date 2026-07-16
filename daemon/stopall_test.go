@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/testguard"
 )
 
 // These tests cover the scoping that makes `af reset` safe to point at a
@@ -162,7 +163,7 @@ func TestVerifyScopedDaemon_NonDaemonNeverMatches(t *testing.T) {
 		t.Skip("needs /proc")
 	}
 	uid := os.Getuid()
-	home := t.TempDir()
+	home := testguard.SocketTempDir(t)
 	want, err := canonicalDir(home)
 	if err != nil {
 		t.Fatal(err)
