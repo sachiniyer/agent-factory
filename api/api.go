@@ -569,8 +569,14 @@ func init() {
 	// --repo flag on each top-level subcommand. The flag name stays --repo (a
 	// technical git term), but the help reads "project" — the user-facing noun
 	// the TUI and web share for a repo's session grouping (#1749).
-	SessionsCmd.PersistentFlags().StringVar(&repoFlag, "repo", "", "Path to the project's git repository")
-	TasksCmd.PersistentFlags().StringVar(&repoFlag, "repo", "", "Path to the project's git repository")
+	//
+	// The usage states the DEFAULT, not just the flag: every session and task
+	// command resolves the current directory's project unless --repo names one
+	// (#1893), and that default is the thing a reader needs to know before
+	// deciding whether they need the flag at all.
+	const repoFlagUsage = "Path to the project's git repository (default: the current directory's project)"
+	SessionsCmd.PersistentFlags().StringVar(&repoFlag, "repo", "", repoFlagUsage)
+	TasksCmd.PersistentFlags().StringVar(&repoFlag, "repo", "", repoFlagUsage)
 
 	// Opt-in envelope output. Defaults OFF so existing scripts keep parsing the
 	// bare payload; --json wraps stdout/stderr in the {data,error} Envelope that
@@ -641,6 +647,13 @@ func init() {
 	tasksAddCmd.Flags().IntVar(&taskAddMaxConcurrentRunsFlag, "max-concurrent-runs", 0, "Cap how many sessions this watch task may have in flight at once; excess events are queued in order instead of spawning runs, subject to the durable queue's retention limits (0 = unlimited; --watch-cmd tasks without --target-session only)")
 	tasksAddCmd.Flags().StringVar(&taskAddProgramFlag, "program", "", "Program to run (one of: "+tmux.SupportedProgramsString()+"; defaults to config default)")
 	tasksAddCmd.MarkFlagRequired("name")
+
+	// --all is the explicit opt-in to cross-project breadth for the one
+	// read-only listing command that has a project default (#1893). It is
+	// deliberately NOT offered on the id-taking commands: widening a mutation
+	// to "every project" is never what a caller means — they mean one other
+	// project, which --repo names precisely.
+	tasksListCmd.Flags().BoolVar(&tasksListAllFlag, "all", false, "List tasks across every project instead of only the current one")
 
 	tasksUpdateCmd.Flags().StringVar(&taskUpdateNameFlag, "name", "", "New task name")
 	tasksUpdateCmd.Flags().StringVar(&taskUpdatePromptFlag, "prompt", "", "New prompt")

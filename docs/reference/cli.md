@@ -50,12 +50,12 @@ Run `af <command> --help` for the same information at the terminal. For a narrat
 - [`af sessions watch`](#af-sessions-watch) — Block until a session goes idle (ready for review)
 - [`af sessions whoami`](#af-sessions-whoami) — Identify the current Agent Factory session
 - [`af tasks`](#af-tasks) — Manage tasks
-- [`af tasks add`](#af-tasks-add) — Add a new task
-- [`af tasks get`](#af-tasks-get) — Get a task by ID
-- [`af tasks list`](#af-tasks-list) — List tasks
-- [`af tasks remove`](#af-tasks-remove) — Remove a task
-- [`af tasks trigger`](#af-tasks-trigger) — Trigger a task to run immediately
-- [`af tasks update`](#af-tasks-update) — Update a task's properties
+- [`af tasks add`](#af-tasks-add) — Add a new task bound to the current project
+- [`af tasks get`](#af-tasks-get) — Get a task in the current project by ID
+- [`af tasks list`](#af-tasks-list) — List tasks in the current project
+- [`af tasks remove`](#af-tasks-remove) — Remove a task in the current project
+- [`af tasks trigger`](#af-tasks-trigger) — Trigger a task in the current project to run immediately
+- [`af tasks update`](#af-tasks-update) — Update a task in the current project
 - [`af token`](#af-token) — Manage the daemon's bearer token for the direct-TCP API
 - [`af token rotate`](#af-token-rotate) — Replace the bearer token with a fresh one and print it
 - [`af token show`](#af-token-show) — Print the bearer token (generating it if absent)
@@ -947,7 +947,7 @@ af sessions
 | Flag | Type | Description |
 |------|------|-------------|
 | `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload) |
-| `--repo` | `string` | Path to the project's git repository |
+| `--repo` | `string` | Path to the project's git repository (default: the current directory's project) |
 
 **Global flags**
 
@@ -991,7 +991,7 @@ af sessions archive [title] [flags]
 |------|------|-------------|
 | `--daemon-url` | `string` | Target a REMOTE daemon at this http:// or ws:// URL instead of the local unix socket (env: AF_DAEMON_URL). The daemon is HTTP-only; terminate TLS at your own proxy if needed. |
 | `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload) |
-| `--repo` | `string` | Path to the project's git repository |
+| `--repo` | `string` | Path to the project's git repository (default: the current directory's project) |
 | `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
 
 ## af sessions attach
@@ -1010,7 +1010,7 @@ af sessions attach <title>
 |------|------|-------------|
 | `--daemon-url` | `string` | Target a REMOTE daemon at this http:// or ws:// URL instead of the local unix socket (env: AF_DAEMON_URL). The daemon is HTTP-only; terminate TLS at your own proxy if needed. |
 | `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload) |
-| `--repo` | `string` | Path to the project's git repository |
+| `--repo` | `string` | Path to the project's git repository (default: the current directory's project) |
 | `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
 
 ## af sessions create
@@ -1046,7 +1046,7 @@ af sessions create [flags]
 |------|------|-------------|
 | `--daemon-url` | `string` | Target a REMOTE daemon at this http:// or ws:// URL instead of the local unix socket (env: AF_DAEMON_URL). The daemon is HTTP-only; terminate TLS at your own proxy if needed. |
 | `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload) |
-| `--repo` | `string` | Path to the project's git repository |
+| `--repo` | `string` | Path to the project's git repository (default: the current directory's project) |
 | `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
 
 ## af sessions get
@@ -1071,7 +1071,7 @@ af sessions get <title>
 |------|------|-------------|
 | `--daemon-url` | `string` | Target a REMOTE daemon at this http:// or ws:// URL instead of the local unix socket (env: AF_DAEMON_URL). The daemon is HTTP-only; terminate TLS at your own proxy if needed. |
 | `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload) |
-| `--repo` | `string` | Path to the project's git repository |
+| `--repo` | `string` | Path to the project's git repository (default: the current directory's project) |
 | `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
 
 ## af sessions kill
@@ -1105,7 +1105,7 @@ af sessions kill <title> [flags]
 |------|------|-------------|
 | `--daemon-url` | `string` | Target a REMOTE daemon at this http:// or ws:// URL instead of the local unix socket (env: AF_DAEMON_URL). The daemon is HTTP-only; terminate TLS at your own proxy if needed. |
 | `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload) |
-| `--repo` | `string` | Path to the project's git repository |
+| `--repo` | `string` | Path to the project's git repository (default: the current directory's project) |
 | `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
 
 ## af sessions list
@@ -1122,7 +1122,7 @@ af sessions list
 |------|------|-------------|
 | `--daemon-url` | `string` | Target a REMOTE daemon at this http:// or ws:// URL instead of the local unix socket (env: AF_DAEMON_URL). The daemon is HTTP-only; terminate TLS at your own proxy if needed. |
 | `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload) |
-| `--repo` | `string` | Path to the project's git repository |
+| `--repo` | `string` | Path to the project's git repository (default: the current directory's project) |
 | `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
 
 ## af sessions preview
@@ -1147,7 +1147,7 @@ af sessions preview <title>
 |------|------|-------------|
 | `--daemon-url` | `string` | Target a REMOTE daemon at this http:// or ws:// URL instead of the local unix socket (env: AF_DAEMON_URL). The daemon is HTTP-only; terminate TLS at your own proxy if needed. |
 | `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload) |
-| `--repo` | `string` | Path to the project's git repository |
+| `--repo` | `string` | Path to the project's git repository (default: the current directory's project) |
 | `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
 
 ## af sessions restore
@@ -1174,7 +1174,7 @@ af sessions restore <title>
 |------|------|-------------|
 | `--daemon-url` | `string` | Target a REMOTE daemon at this http:// or ws:// URL instead of the local unix socket (env: AF_DAEMON_URL). The daemon is HTTP-only; terminate TLS at your own proxy if needed. |
 | `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload) |
-| `--repo` | `string` | Path to the project's git repository |
+| `--repo` | `string` | Path to the project's git repository (default: the current directory's project) |
 | `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
 
 ## af sessions send-prompt
@@ -1218,7 +1218,7 @@ af sessions send-prompt <title> <prompt> [flags]
 |------|------|-------------|
 | `--daemon-url` | `string` | Target a REMOTE daemon at this http:// or ws:// URL instead of the local unix socket (env: AF_DAEMON_URL). The daemon is HTTP-only; terminate TLS at your own proxy if needed. |
 | `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload) |
-| `--repo` | `string` | Path to the project's git repository |
+| `--repo` | `string` | Path to the project's git repository (default: the current directory's project) |
 | `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
 
 ## af sessions tab-create
@@ -1264,7 +1264,7 @@ af sessions tab-create <title> [flags]
 |------|------|-------------|
 | `--daemon-url` | `string` | Target a REMOTE daemon at this http:// or ws:// URL instead of the local unix socket (env: AF_DAEMON_URL). The daemon is HTTP-only; terminate TLS at your own proxy if needed. |
 | `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload) |
-| `--repo` | `string` | Path to the project's git repository |
+| `--repo` | `string` | Path to the project's git repository (default: the current directory's project) |
 | `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
 
 ## af sessions tab-delete
@@ -1299,7 +1299,7 @@ af sessions tab-delete <title> [flags]
 |------|------|-------------|
 | `--daemon-url` | `string` | Target a REMOTE daemon at this http:// or ws:// URL instead of the local unix socket (env: AF_DAEMON_URL). The daemon is HTTP-only; terminate TLS at your own proxy if needed. |
 | `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload) |
-| `--repo` | `string` | Path to the project's git repository |
+| `--repo` | `string` | Path to the project's git repository (default: the current directory's project) |
 | `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
 
 ## af sessions tabs
@@ -1327,7 +1327,7 @@ af sessions tabs
 |------|------|-------------|
 | `--daemon-url` | `string` | Target a REMOTE daemon at this http:// or ws:// URL instead of the local unix socket (env: AF_DAEMON_URL). The daemon is HTTP-only; terminate TLS at your own proxy if needed. |
 | `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload) |
-| `--repo` | `string` | Path to the project's git repository |
+| `--repo` | `string` | Path to the project's git repository (default: the current directory's project) |
 | `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
 
 ## af sessions tabs create
@@ -1356,7 +1356,7 @@ af sessions tabs create <title> [flags]
 |------|------|-------------|
 | `--daemon-url` | `string` | Target a REMOTE daemon at this http:// or ws:// URL instead of the local unix socket (env: AF_DAEMON_URL). The daemon is HTTP-only; terminate TLS at your own proxy if needed. |
 | `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload) |
-| `--repo` | `string` | Path to the project's git repository |
+| `--repo` | `string` | Path to the project's git repository (default: the current directory's project) |
 | `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
 
 ## af sessions tabs delete
@@ -1381,7 +1381,7 @@ af sessions tabs delete <title> [flags]
 |------|------|-------------|
 | `--daemon-url` | `string` | Target a REMOTE daemon at this http:// or ws:// URL instead of the local unix socket (env: AF_DAEMON_URL). The daemon is HTTP-only; terminate TLS at your own proxy if needed. |
 | `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload) |
-| `--repo` | `string` | Path to the project's git repository |
+| `--repo` | `string` | Path to the project's git repository (default: the current directory's project) |
 | `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
 
 ## af sessions watch
@@ -1420,7 +1420,7 @@ af sessions watch <title> [flags]
 |------|------|-------------|
 | `--daemon-url` | `string` | Target a REMOTE daemon at this http:// or ws:// URL instead of the local unix socket (env: AF_DAEMON_URL). The daemon is HTTP-only; terminate TLS at your own proxy if needed. |
 | `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload) |
-| `--repo` | `string` | Path to the project's git repository |
+| `--repo` | `string` | Path to the project's git repository (default: the current directory's project) |
 | `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
 
 ## af sessions whoami
@@ -1428,6 +1428,8 @@ af sessions watch <title> [flags]
 Identify the current Agent Factory session
 
 Returns the session info for the current tmux session by matching the tmux session name against stored sessions.
+
+Identity is not scoped: you are the session you are, in whatever project it belongs to. --repo therefore acts as an assertion — it checks that the resolved session really is in that project, and errors if it is not.
 
 ```
 af sessions whoami
@@ -1439,7 +1441,7 @@ af sessions whoami
 |------|------|-------------|
 | `--daemon-url` | `string` | Target a REMOTE daemon at this http:// or ws:// URL instead of the local unix socket (env: AF_DAEMON_URL). The daemon is HTTP-only; terminate TLS at your own proxy if needed. |
 | `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload) |
-| `--repo` | `string` | Path to the project's git repository |
+| `--repo` | `string` | Path to the project's git repository (default: the current directory's project) |
 | `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
 
 ## af tasks
@@ -1452,19 +1454,19 @@ af tasks
 
 **Subcommands**
 
-- [`af tasks add`](#af-tasks-add) — Add a new task
-- [`af tasks get`](#af-tasks-get) — Get a task by ID
-- [`af tasks list`](#af-tasks-list) — List tasks
-- [`af tasks remove`](#af-tasks-remove) — Remove a task
-- [`af tasks trigger`](#af-tasks-trigger) — Trigger a task to run immediately
-- [`af tasks update`](#af-tasks-update) — Update a task's properties
+- [`af tasks add`](#af-tasks-add) — Add a new task bound to the current project
+- [`af tasks get`](#af-tasks-get) — Get a task in the current project by ID
+- [`af tasks list`](#af-tasks-list) — List tasks in the current project
+- [`af tasks remove`](#af-tasks-remove) — Remove a task in the current project
+- [`af tasks trigger`](#af-tasks-trigger) — Trigger a task in the current project to run immediately
+- [`af tasks update`](#af-tasks-update) — Update a task in the current project
 
 **Flags**
 
 | Flag | Type | Description |
 |------|------|-------------|
 | `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload) |
-| `--repo` | `string` | Path to the project's git repository |
+| `--repo` | `string` | Path to the project's git repository (default: the current directory's project) |
 
 **Global flags**
 
@@ -1475,7 +1477,13 @@ af tasks
 
 ## af tasks add
 
-Add a new task
+Add a new task bound to the current project
+
+Add a new task bound to the current project.
+
+A task is bound to exactly one project, and every run's worktree is created inside it. The binding comes from --repo when given, otherwise from the current directory's git repository (a linked worktree resolves to its main repository). The resolved project is echoed back as `project_path` so the binding is visible at creation rather than inferred later.
+
+Outside a git repository, --repo is required — the binding is never guessed. A current directory that resolves to a clone inside af's own home is refused as a stray checkout (#1891); pass --repo to name the intended project.
 
 ```
 af tasks add [flags]
@@ -1499,12 +1507,16 @@ af tasks add [flags]
 |------|------|-------------|
 | `--daemon-url` | `string` | Target a REMOTE daemon at this http:// or ws:// URL instead of the local unix socket (env: AF_DAEMON_URL). The daemon is HTTP-only; terminate TLS at your own proxy if needed. |
 | `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload) |
-| `--repo` | `string` | Path to the project's git repository |
+| `--repo` | `string` | Path to the project's git repository (default: the current directory's project) |
 | `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
 
 ## af tasks get
 
-Get a task by ID
+Get a task in the current project by ID
+
+Get a task in the current project by ID.
+
+The task must belong to the resolved project: --repo when given, otherwise the current directory's project. Inspecting another project's task requires naming it with --repo. Outside a git repository there is no project context and the id resolves globally.
 
 ```
 af tasks get <id>
@@ -1516,16 +1528,28 @@ af tasks get <id>
 |------|------|-------------|
 | `--daemon-url` | `string` | Target a REMOTE daemon at this http:// or ws:// URL instead of the local unix socket (env: AF_DAEMON_URL). The daemon is HTTP-only; terminate TLS at your own proxy if needed. |
 | `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload) |
-| `--repo` | `string` | Path to the project's git repository |
+| `--repo` | `string` | Path to the project's git repository (default: the current directory's project) |
 | `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
 
 ## af tasks list
 
-List tasks
+List tasks in the current project
+
+List tasks in the current project.
+
+Scope follows the shared project-context contract: --repo names a project, otherwise the current directory's project is used, and --all spans every project. Run from outside a git repository with no --repo, there is no project context and every project's tasks are listed.
+
+This default changed in #1893: `af tasks list` inside a repository used to list every project's tasks. Pass --all for the old behavior.
 
 ```
-af tasks list
+af tasks list [flags]
 ```
+
+**Flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--all` |  | List tasks across every project instead of only the current one |
 
 **Global flags**
 
@@ -1533,12 +1557,16 @@ af tasks list
 |------|------|-------------|
 | `--daemon-url` | `string` | Target a REMOTE daemon at this http:// or ws:// URL instead of the local unix socket (env: AF_DAEMON_URL). The daemon is HTTP-only; terminate TLS at your own proxy if needed. |
 | `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload) |
-| `--repo` | `string` | Path to the project's git repository |
+| `--repo` | `string` | Path to the project's git repository (default: the current directory's project) |
 | `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
 
 ## af tasks remove
 
-Remove a task
+Remove a task in the current project
+
+Remove a task in the current project.
+
+The task must belong to the resolved project: --repo when given, otherwise the current directory's project. Removing another project's task requires naming it with --repo. Outside a git repository there is no project context and the id resolves globally.
 
 ```
 af tasks remove <id>
@@ -1550,12 +1578,16 @@ af tasks remove <id>
 |------|------|-------------|
 | `--daemon-url` | `string` | Target a REMOTE daemon at this http:// or ws:// URL instead of the local unix socket (env: AF_DAEMON_URL). The daemon is HTTP-only; terminate TLS at your own proxy if needed. |
 | `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload) |
-| `--repo` | `string` | Path to the project's git repository |
+| `--repo` | `string` | Path to the project's git repository (default: the current directory's project) |
 | `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
 
 ## af tasks trigger
 
-Trigger a task to run immediately
+Trigger a task in the current project to run immediately
+
+Trigger a task in the current project to run immediately.
+
+The task must belong to the resolved project: --repo when given, otherwise the current directory's project. Triggering another project's task requires naming it with --repo. Outside a git repository there is no project context and the id resolves globally.
 
 ```
 af tasks trigger <id>
@@ -1567,12 +1599,18 @@ af tasks trigger <id>
 |------|------|-------------|
 | `--daemon-url` | `string` | Target a REMOTE daemon at this http:// or ws:// URL instead of the local unix socket (env: AF_DAEMON_URL). The daemon is HTTP-only; terminate TLS at your own proxy if needed. |
 | `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload) |
-| `--repo` | `string` | Path to the project's git repository |
+| `--repo` | `string` | Path to the project's git repository (default: the current directory's project) |
 | `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
 
 ## af tasks update
 
-Update a task's properties
+Update a task in the current project
+
+Update a task in the current project.
+
+The task must belong to the resolved project: --repo when given, otherwise the current directory's project. Updating another project's task requires naming it with --repo. Outside a git repository there is no project context and the id resolves globally.
+
+--repo only scopes which task may be updated; it never re-binds one. A task's project is fixed at creation.
 
 ```
 af tasks update <id> [flags]
@@ -1597,7 +1635,7 @@ af tasks update <id> [flags]
 |------|------|-------------|
 | `--daemon-url` | `string` | Target a REMOTE daemon at this http:// or ws:// URL instead of the local unix socket (env: AF_DAEMON_URL). The daemon is HTTP-only; terminate TLS at your own proxy if needed. |
 | `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload) |
-| `--repo` | `string` | Path to the project's git repository |
+| `--repo` | `string` | Path to the project's git repository (default: the current directory's project) |
 | `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
 
 ## af token

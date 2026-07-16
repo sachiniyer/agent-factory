@@ -912,7 +912,10 @@ var sessionsAttachCmd = &cobra.Command{
 var sessionsWhoamiCmd = &cobra.Command{
 	Use:   "whoami",
 	Short: "Identify the current Agent Factory session",
-	Long:  "Returns the session info for the current tmux session by matching the tmux session name against stored sessions.",
+	Long: "Returns the session info for the current tmux session by matching the tmux session name against stored sessions.\n\n" +
+		"Identity is not scoped: you are the session you are, in whatever project it " +
+		"belongs to. --repo therefore acts as an assertion — it checks that the " +
+		"resolved session really is in that project, and errors if it is not.",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		log.Initialize(false)
 		defer log.Close()
@@ -923,6 +926,27 @@ var sessionsWhoamiCmd = &cobra.Command{
 		data, err := resolveSelfSession()
 		if err != nil {
 			return jsonError(err)
+		}
+
+		// whoami inherits the persistent --repo but used to parse and drop it —
+		// the same silent mis-resolution #1814 fixed for get/preview. It cannot
+		// SCOPE the lookup (the caller's tmux name already names exactly one
+		// session, repo hash included), so an explicit --repo is checked instead
+		// of ignored: a caller who names the wrong project learns that rather
+		// than receiving another project's answer with no signal (#1893).
+		if repoFlag != "" && data.Path != "" {
+			// data.Path is empty for sessions that record no local repo root
+			// (some remote-backed rows). There is nothing to compare against
+			// then, and asserting on a value we do not have would fail a caller
+			// who IS in the named project — so only a known-mismatched project
+			// is an error, never an unknown one.
+			repo, err := repoFromFlag()
+			if err != nil {
+				return jsonError(err)
+			}
+			if config.RepoIDFromRoot(data.Path) != repo.ID {
+				return jsonError(fmt.Errorf("this session belongs to project %s, not --repo %s", data.Path, repo.Root))
+			}
 		}
 		return jsonOut(*data)
 	},

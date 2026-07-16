@@ -4,6 +4,32 @@ Everything the TUI does is also scriptable. The `af sessions` and `af tasks` com
 
 Run `af <command> --help` for the authoritative flag list of any command.
 
+## Project scoping
+
+Like the TUI and the web UI, **every `af sessions` and `af tasks` command is scoped to one project**. The rules are the same for all of them:
+
+1. `--repo <path>` names the project explicitly, and always wins.
+2. Otherwise the current directory's git repository is the project. A linked worktree resolves to its main repository, so a command run from inside a session's worktree still acts on the real project.
+3. Outside a git repository there is no project context:
+    - `sessions create` and `tasks add` **require** `--repo` — a new binding is never guessed.
+    - Listing spans every project.
+    - A `<title>` or task `<id>` resolves across projects, but a title held by several projects is ambiguous and errors rather than picking one.
+
+Acting on another project always takes an explicit `--repo`. The one exception is `af tasks list --all`, a read-only opt-in that spans every project.
+
+```bash
+af tasks list                 # this project's tasks
+af tasks list --all           # every project's tasks
+af tasks list --repo /repos/beta
+```
+
+!!! warning "These defaults changed (#1893)"
+    `af tasks list` used to list **every** project's tasks; from inside a repository it now lists only that project's. Pass `--all` for the old behavior.
+
+    `af tasks get`, `update`, `remove`, and `trigger` used to accept `--repo` and silently ignore it, so an id reached any project's task from anywhere. They now refuse an id owned by a different project and name the `--repo` that would reach it.
+
+Against a remote daemon (`--daemon-url`/`AF_DAEMON_URL`) rule 2 does not apply: your current directory names a repository on *this* machine, which says nothing about the daemon's projects, so only an explicit `--repo` scopes a remote lookup.
+
 ## `af` — the TUI
 
 ```bash
@@ -18,7 +44,7 @@ af                 # launch the TUI
 
 ## `af sessions`
 
-All subcommands accept `--repo <path>` to target a repository other than the current directory, and `--json` to wrap output in the shared envelope.
+All subcommands honor `--repo <path>` to target a project other than the current directory's (see [Project scoping](#project-scoping)), and `--json` to wrap output in the shared envelope.
 
 Session titles are unique **within a project, not across projects** — the same name may exist in several repos at once. Every command that takes a `<title>` resolves it inside the repo named by `--repo`, falling back to the current directory's repo. With no repo context (no `--repo`, cwd outside a repo) a title held by exactly one session anywhere still resolves; a title held by sessions in several projects is ambiguous and reports an error naming them rather than picking one:
 
@@ -70,10 +96,10 @@ Flags:
 
 ## `af tasks`
 
-Tasks deliver a prompt to an agent automatically — on a cron schedule or whenever a long-running watch script emits a stdout line. Full semantics (trigger × delivery matrix, watch-script contract, status model) live in [tasks.md](tasks.md). All subcommands accept `--repo <path>` and `--json`.
+Tasks deliver a prompt to an agent automatically — on a cron schedule or whenever a long-running watch script emits a stdout line. Full semantics (trigger × delivery matrix, watch-script contract, status model) live in [tasks.md](tasks.md). All subcommands honor `--repo <path>` and `--json`, and follow the shared [project scoping](#project-scoping) rules.
 
 ```bash
-af tasks list
+af tasks list [--all]
 af tasks add --name <n> --prompt <p> --cron "0 9 * * *" [--target-session <title>] [--program <agent>]
 af tasks add --name <n> --watch-cmd <cmd> [--prompt "... {{line}} ..."] [--target-session <title>]
 af tasks get <id>
@@ -83,6 +109,22 @@ af tasks remove <id>
 ```
 
 Exactly one of `--cron` / `--watch-cmd` per task. On `update`, setting one trigger clears the other. `--target-session ""` explicitly reverts to create-a-session-per-run; omitting the flag leaves it untouched. `--program` accepts the same agent enum as `tasks add`; omitting it keeps the task's current program.
+
+### Project binding
+
+A task is bound to exactly one project when it is created, and every run's worktree is created inside it. The binding comes from `--repo`, or from the current directory's project. It is fixed at creation: `--repo` on `update` scopes *which* task may be edited, and never re-binds one.
+
+`tasks add` reports the resolved binding, so you can check it is the project you meant:
+
+```console
+$ af tasks add --name nightly --prompt "sweep" --cron "0 3 * * *"
+{
+  "id": "a1b2c3d4",
+  "project_path": "/repos/alpha"
+}
+```
+
+Because the binding is inherited from the current directory, running `tasks add` inside a **throwaway clone** of a repository binds the automation to the clone rather than to the real project — the task's sessions then appear under a project nobody looks at. Creating a task from a clone that lives inside `AGENT_FACTORY_HOME` is refused for that reason; pass `--repo` to name the intended project. Session worktrees under `AGENT_FACTORY_HOME` are unaffected: a linked worktree resolves to its main repository, so an agent adding a task from inside its own session binds to the real project.
 
 ## `af daemon`
 

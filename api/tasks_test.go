@@ -573,6 +573,12 @@ func TestTasksRemove_MissingTaskErrors(t *testing.T) {
 func TestTasksTrigger_RunsThroughDaemon(t *testing.T) {
 	useTempConfig(t)
 	calls := stubDaemon(t)
+	// The task must exist to be triggered: trigger resolves it to check it
+	// belongs to the current project (#1893). It used to fire the RPC for an id
+	// that was never stored — the daemon rejected it, so nothing reached a
+	// scheduler, but the CLI dispatched blind. The seed keeps this test about
+	// the RPC dispatch it is named for.
+	seedTask(t, task.Task{ID: "t6abcd", Name: "n", Prompt: "p", CronExpr: "0 9 * * *", Enabled: true})
 
 	err := tasksRunCmd.RunE(tasksRunCmd, []string{"t6abcd"})
 	require.NoError(t, err)

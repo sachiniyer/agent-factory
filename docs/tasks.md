@@ -136,7 +136,7 @@ Versions before #791 installed one systemd timer / launchd plist **per task** (`
 ## CLI quick reference
 
 ```bash
-af tasks list
+af tasks list [--all]
 af tasks add --name <n> --prompt <p> --cron "0 9 * * *" [--target-session <title>] [--program <agent>]
 af tasks add --name <n> --watch-cmd <cmd> [--prompt "… {{line}} …"] [--target-session <title>] [--max-concurrent-runs <n>]
 af tasks get <id>
@@ -144,6 +144,8 @@ af tasks update <id> [--cron …|--watch-cmd …] [--prompt …] [--target-sessi
 af tasks trigger <id>          # cron tasks only
 af tasks remove <id>
 ```
+
+Every subcommand is scoped to one project — the current directory's, or the one `--repo` names — so `tasks list` shows this project's tasks (`--all` spans every project) and an id belonging to another project is refused rather than acted on. `tasks add` binds the task to the resolved project and reports it as `project_path`. See [Project scoping](cli.md#project-scoping) for the full contract.
 
 On `update`, setting one trigger clears the other (switching watch→cron requires a prompt when the resulting cron task is enabled). `--target-session ""` explicitly reverts to create-per-run; omitting the flag leaves it untouched. `--max-concurrent-runs 0` explicitly reverts to unlimited; omitting the flag leaves the current cap untouched. `--program` accepts the same agent enum as `tasks add`; omitting it keeps the task's current program.
 
