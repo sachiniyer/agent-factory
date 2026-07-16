@@ -55,24 +55,42 @@ func createdTaskStatus(data session.InstanceData) string {
 	return "started"
 }
 
-// resolveIdleLiveness settles a session whose pane went idle this tick (#1146):
-// it sets LimitReached when the captured content shows a usage-limit banner for
-// the resolved agent (only claude/codex ever match), else the plain Ready
-// liveness. A limit session must never render Ready, which is why the detector
-// runs before the Ready fallback. Self-recovery (the banner scrolls away) or
-// resumed work (the `updated` branch → Running) clears the limit liveness on its
-// own later tick, so no explicit clear is needed here. Split from
-// refreshInstanceStatus so control.go stays under its length ceiling (#1145).
+// resolveIdleLiveness settles a session whose pane DID NOT CHANGE this tick
+// (#1146): it sets LimitReached when the captured content shows a usage-limit
+// banner for the resolved agent (only claude/codex ever match), else Running when
+// the agent is visibly still mid-turn, else the plain Ready liveness. A limit
+// session must never render Ready, which is why the detector runs before the
+// Ready fallback. Self-recovery (the banner scrolls away) or resumed work (the
+// `updated` branch → Running) clears the limit liveness on its own later tick, so
+// no explicit clear is needed here. Split from refreshInstanceStatus so control.go
+// stays under its length ceiling (#1145).
+//
+// "Did not change" is NOT the same as "is idle", which is the whole reason the
+// working check sits here. The caller reaches this branch on pane STILLNESS, and
+// stillness is only evidence of idleness for agents that repaint while they work
+// (claude/codex animate a spinner + elapsed timer; amp does not — it holds a
+// static frame through every quiet gap in a turn). So before settling Ready, ask
+// the agent: a pane that says it is working IS working, and stays Running. See
+// task.IsWorkingContent for why a debounce cannot stand in for this.
 func (m *Manager) resolveIdleLiveness(instance *session.Instance, content string) {
-	if hit, resetAt, _ := m.limitDetector.Check(content, instance.ResolvedAgent(), time.Now()); hit {
+	agent := instance.ResolvedAgent()
+	if hit, resetAt, _ := m.limitDetector.Check(content, agent, time.Now()); hit {
 		instance.SetLimitReached(resetAt)
-	} else {
-		// Plain idle: settle to Ready. On the two-axis model (#1195) SetLiveness
-		// writes only the liveness axis and never clobbers an in-flight op, so it
-		// needs no "if not deleting" guard — this is exactly what the poll's Ready
-		// fallback does inline in refreshInstanceStatus.
-		_ = instance.Transition(session.ObserveLiveness(session.LiveReady))
+		return
 	}
+	if task.IsWorkingContent(content, agent) {
+		// Still mid-turn behind a still pane: hold Running so the #1766 status dot
+		// stays dark. Settling Ready here is the green flash (#1766 says green ==
+		// waiting for you), and it is not merely cosmetic — a Ready amp is what
+		// `af sessions watch` unblocks on and what tells a user their turn is done.
+		_ = instance.Transition(session.ObserveLiveness(session.LiveRunning))
+		return
+	}
+	// Plain idle: settle to Ready. On the two-axis model (#1195) SetLiveness
+	// writes only the liveness axis and never clobbers an in-flight op, so it
+	// needs no "if not deleting" guard — this is exactly what the poll's Ready
+	// fallback does inline in refreshInstanceStatus.
+	_ = instance.Transition(session.ObserveLiveness(session.LiveReady))
 }
 
 // testHookPollBeforePublish runs immediately before persistPollChange announces
