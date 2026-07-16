@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	cmdutil "github.com/sachiniyer/agent-factory/cmd"
@@ -42,8 +43,13 @@ var resetForceFlag bool
 //     re-register from config on the next start).
 //   - repos/ — per-repo config (e.g. remote_hooks provisioner commands), which
 //     is user configuration, not session state.
-//   - daemon.pid/sock, daemon-token, daemon-tls.* — daemon runtime identity;
-//     wiping them would needlessly break already-configured remote clients.
+//   - daemon-token, daemon-tls.* — daemon runtime IDENTITY; wiping it would
+//     needlessly break already-configured remote clients.
+//
+// The daemon SOCKETS are not listed here but are still removed — in runReset,
+// not this list. They are ORDERED, not unordered: they may only be unlinked
+// once every daemon is stopped (#767), whereas everything in this list can be
+// removed at any point in the wipe.
 //
 // NOTE: "archived" is deliberately NOT here — archived worktrees are removed
 // per-repo (removeArchivedDirs) so a preserved (corrupt/unreadable) record is
@@ -122,6 +128,13 @@ Removes every AF-created resource — all sessions (live and archived), all
 scheduled cron/watch tasks, all AF worktrees, the AF session branches AF
 created, and all stored state — returning AF to a clean slate.
 
+Stops every af daemon running for this AF home — the managed one and any
+orphan left behind by an upgrade or a source build — and removes the daemon
+sockets, so a stale daemon or socket cannot serve the next af you start. Only
+daemons owned by you AND using this AGENT_FACTORY_HOME are stopped, and the
+autostart unit is only paused when it serves this AGENT_FACTORY_HOME; a daemon
+or unit for a different AF home is never touched.
+
 KEEPS your real git repositories (working tree, .git, and your own branches),
 and KEEPS the daemon configuration (config.toml: listen_addr, defaults,
 root_agents, update_channel, and per-repo config). After the wipe the
@@ -146,13 +159,17 @@ func init() {
 // systemctl/launchctl unit, or killing real tmux sessions. autostartInstalledFn
 // (daemoncmd.go) is shared.
 var (
-	pauseAutostartUnitFn  = daemon.PauseAutostartUnit
-	resumeAutostartUnitFn = daemon.ResumeAutostartUnit
-	stopDaemonFn          = daemon.StopDaemon
-	cleanupTmuxSessionsFn = func() error { return tmux.CleanupSessions(cmdutil.MakeExecutor()) }
+	pauseAutostartUnitFn      = daemon.PauseAutostartUnit
+	resumeAutostartUnitFn     = daemon.ResumeAutostartUnit
+	autostartUnitServesHomeFn = daemon.AutostartUnitServesHome
+	stopDaemonFn              = daemon.StopDaemon
+	stopOrphanDaemonsFn       = daemon.StopOrphanDaemons
+	assertNoLiveDaemonFn      = daemon.AssertNoLiveDaemon
+	removeRuntimeSocketFn     = daemon.RemoveRuntimeSockets
+	cleanupTmuxSessionsFn     = func() error { return tmux.CleanupSessions(cmdutil.MakeExecutor()) }
 )
 
-func runReset(cmd *cobra.Command, _ []string) error {
+func runReset(cmd *cobra.Command, _ []string) (err error) {
 	log.Initialize(false)
 	defer log.Close()
 
@@ -193,30 +210,25 @@ func runReset(cmd *cobra.Command, _ []string) error {
 	//    is the restart the summary promises. A pause failure only warns: the
 	//    wipe is the user's explicit, confirmed intent, and the pre-pause
 	//    behavior it degrades to is a narrow race, not a certain failure.
-	paused := false
-	if autostartInstalledFn() {
-		if err := pauseAutostartUnitFn(); err != nil {
-			fmt.Fprintf(out, "warning: could not pause the daemon autostart unit (%v) — if the daemon restarts mid-reset, re-run `af reset`\n", err)
-		} else {
-			paused = true
-			fmt.Fprintln(out, "Daemon autostart paused for the wipe")
-			defer func() {
-				if err := resumeAutostartUnitFn(); err != nil {
-					fmt.Fprintf(out, "warning: could not resume the daemon autostart unit (%v) — run `af daemon install` to re-arm it\n", err)
-					return
-				}
-				fmt.Fprintln(out, "Daemon autostart resumed")
-			}()
-		}
+	//
+	//    The unit is only ever touched when it serves THE HOME BEING RESET.
+	//    Gating on "a unit file exists" would make a reset of a throwaway
+	//    AGENT_FACTORY_HOME stop the developer's real daemon, because the unit
+	//    bakes its own home at install time and has nothing to do with ours.
+	paused, resumeUnit := pauseAutostartForReset(out, plan.configDir)
+	if paused {
+		// Deferred so the unit is re-armed on EVERY exit — including the abort
+		// below. A reset that bails must leave the machine as it found it.
+		defer resumeUnit(&err)
 	}
 
 	//    StopDaemon covers any daemon the unit did not own (ad hoc, or no unit
 	//    installed). It only finds daemons that wrote a PID file; a pre-1.0.69
 	//    daemon leaves none, so only claim success when we actually stopped
 	//    one (#937).
-	stopped, err := stopDaemonFn()
-	if err != nil {
-		return err
+	stopped, stopErr := stopDaemonFn()
+	if stopErr != nil {
+		return stopErr
 	}
 	switch {
 	case stopped:
@@ -225,9 +237,62 @@ func runReset(cmd *cobra.Command, _ []string) error {
 		// The unit stop above already took the supervised daemon down; a
 		// no-op StopDaemon is the expected outcome, not a stray-daemon hint.
 	default:
-		fmt.Fprintln(out, "No managed daemon was stopped (no PID file, or the recorded process was already gone). "+
-			"If an old daemon is still running (e.g. one built from source as `agent-factory --daemon`), "+
-			"stop it with: pkill -f -- '--daemon'")
+		fmt.Fprintln(out, "No managed daemon was stopped (no PID file, or the recorded process was already gone)")
+	}
+
+	// 4b. Wait for the shutdown to COMPLETE, not merely to be requested. The
+	//     daemon persists its whole in-memory session set on the way out
+	//     (RunDaemon's final SaveInstances) and only closes the control socket
+	//     afterwards, on the deferred teardown — so a socket that still answers
+	//     is a daemon that may still flush. Deleting instances.json while that
+	//     is pending is how a "factory reset" hands the user their sessions
+	//     back.
+	if waitErr := waitForShutdownCompletionFn(); waitErr != nil {
+		err = fmt.Errorf("the daemon did not finish shutting down: %w", waitErr)
+		fmt.Fprintln(out, "\nNothing was removed.")
+		return err
+	}
+
+	// 4c. Stop daemons the PID file never knew about — the leftover old binary
+	//     after an upgrade, a second daemon that lost the singleton race, a
+	//     source-built `agent-factory --daemon`. Scoped to this uid AND this
+	//     home, for the same reason the unit is: a reset of one home must never
+	//     stop another home's daemon.
+	stoppedPIDs, unverified, orphanErr := stopOrphanDaemonsFn(plan.configDir)
+	if orphanErr != nil {
+		fmt.Fprintf(out, "Some daemons could not be stopped (%v).\n", orphanErr)
+	}
+	if len(stoppedPIDs) > 0 {
+		fmt.Fprintf(out, "Stopped %d additional af daemon(s) for this AF home: %s\n",
+			len(stoppedPIDs), formatPIDs(stoppedPIDs))
+	}
+	if len(unverified) > 0 {
+		// Never signaled: we could not prove these serve THIS home, and a reset
+		// must not kill another home's daemon. Name them so the user can act.
+		fmt.Fprintf(out, "Left %d af daemon process(es) running because their AF home could not be verified: %s\n",
+			len(unverified), formatPIDs(unverified))
+	}
+
+	// 4d. Prove the field is clear. Everything above reports rather than fails;
+	//     THIS is the gate. The daemon is the single writer (#960), so a wipe
+	//     that races one does not half-work — the daemon re-persists from memory
+	//     and the reset silently undoes itself. Aborting costs the user one
+	//     command; guessing costs them a half-wiped home.
+	if assertErr := assertNoLiveDaemonFn(plan.configDir); assertErr != nil {
+		err = fmt.Errorf("refusing to wipe: %w", assertErr)
+		fmt.Fprintln(out, "\nNothing was removed.")
+		return err
+	}
+
+	// 4e. Sockets, now that nothing is left to be serving them. A socket that
+	//     outlives its daemon points the next client at a dead endpoint; but
+	//     unlinking a LIVE daemon's socket is the #767 failure, which the assert
+	//     above has just ruled out.
+	switch removed, sockErr := removeRuntimeSocketFn(plan.configDir); {
+	case sockErr != nil:
+		fmt.Fprintf(out, "Could not remove the daemon sockets (%v).\n", sockErr)
+	case len(removed) > 0:
+		fmt.Fprintf(out, "Removed %d stale daemon socket(s): %s\n", len(removed), strings.Join(removed, ", "))
 	}
 
 	// 5. Clean up tmux sessions before deleting the records that name them.
@@ -250,6 +315,86 @@ func runReset(cmd *cobra.Command, _ []string) error {
 		return resetErr
 	}
 	return nil
+}
+
+// autostartResumeAttempts is how many times a resume is retried before the
+// reset gives up and shouts. A pause that is never resumed leaves a REAL daemon
+// stopped — the supervisor will not bring it back until the next login — so one
+// failed systemctl call must not be the end of the story.
+const autostartResumeAttempts = 3
+
+// pauseAutostartForReset stops the autostart unit for the duration of the wipe,
+// but ONLY when that unit serves configDir — the home actually being reset.
+//
+// The gate is the point (#1916 P2). The unit bakes its AGENT_FACTORY_HOME at
+// install time, so it has no relationship to the AGENT_FACTORY_HOME the current
+// process carries. Pausing on "a unit file exists" means
+// `AGENT_FACTORY_HOME=/tmp/sandbox af reset` reaches out and stops the
+// developer's real daemon — a reset of a throwaway home taking down a live one
+// it was never asked to touch. Same bug class as signalling a daemon without
+// checking whose home it serves; both are gated the same way here.
+//
+// Returns whether the unit was paused, and the resume to defer.
+func pauseAutostartForReset(out io.Writer, configDir string) (bool, func(*error)) {
+	noop := func(*error) {}
+	if !autostartInstalledFn() {
+		return false, noop
+	}
+
+	serves, _, err := autostartUnitServesHomeFn(configDir)
+	if err != nil {
+		// Cannot tell whose unit it is → do not touch it. Same rule as an
+		// unverifiable daemon: "I could not tell" never resolves to "stop it".
+		fmt.Fprintf(out, "warning: could not determine which AF home the autostart unit serves (%v); "+
+			"leaving it alone. If a supervised daemon for this home restarts mid-reset, re-run `af reset`\n", err)
+		return false, noop
+	}
+	if !serves {
+		fmt.Fprintln(out, "Autostart unit serves a different AF home — leaving it running")
+		return false, noop
+	}
+
+	if err := pauseAutostartUnitFn(); err != nil {
+		fmt.Fprintf(out, "warning: could not pause the daemon autostart unit (%v) — if the daemon restarts mid-reset, re-run `af reset`\n", err)
+		return false, noop
+	}
+	fmt.Fprintln(out, "Daemon autostart paused for the wipe")
+
+	return true, func(errp *error) {
+		var lastErr error
+		for i := 0; i < autostartResumeAttempts; i++ {
+			if lastErr = resumeAutostartUnitFn(); lastErr == nil {
+				fmt.Fprintln(out, "Daemon autostart resumed")
+				return
+			}
+		}
+		// We stopped a real, supervised daemon and could not start it back.
+		// Saying this quietly would leave the user's daemon down until their
+		// next login with only a warning line to explain it, so it is loud AND
+		// it fails the command: a scripted caller must see a non-zero exit.
+		fmt.Fprintf(out, "\nACTION REQUIRED: the daemon autostart unit was paused for the wipe and could NOT be "+
+			"resumed after %d attempts (%v).\nYour daemon is STOPPED. Run `systemctl --user start %s` "+
+			"(or `af daemon install`) to bring it back.\n", autostartResumeAttempts, lastErr, daemonUnitName)
+		if errp != nil && *errp == nil {
+			*errp = fmt.Errorf("the daemon autostart unit was paused but could not be resumed: %w", lastErr)
+		}
+	}
+}
+
+// daemonUnitName is the systemd unit the resume hint names. It is duplicated
+// from the daemon package rather than exported: the string is user-facing copy
+// in a recovery hint, not a contract between the packages.
+const daemonUnitName = "agent-factory-daemon.service"
+
+// formatPIDs renders PIDs for the reset's user-facing report. Reset prints the
+// PIDs it signalled rather than a count alone: it is the only record the user
+// has of what an irreversible command did to their process table.
+func formatPIDs(pids []int) string {
+	parts := make([]string, len(pids))
+	for i, p := range pids {
+		parts[i] = strconv.Itoa(p)
+	}
+	return strings.Join(parts, ", ")
 }
 
 // resetConfirmed decides whether the destructive wipe may proceed.

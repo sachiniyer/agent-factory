@@ -528,18 +528,11 @@ func TestFactoryReset_ResilientPartialFailure(t *testing.T) {
 // "resume runs only after the wipe" — the whole point of pausing.
 func stubResetDaemonHandling(t *testing.T, home string, installed bool, pauseErr error) *[]string {
 	t.Helper()
-	prevInstalled := autostartInstalledFn
-	prevPause := pauseAutostartUnitFn
-	prevResume := resumeAutostartUnitFn
-	prevStop := stopDaemonFn
-	prevTmux := cleanupTmuxSessionsFn
-	t.Cleanup(func() {
-		autostartInstalledFn = prevInstalled
-		pauseAutostartUnitFn = prevPause
-		resumeAutostartUnitFn = prevResume
-		stopDaemonFn = prevStop
-		cleanupTmuxSessionsFn = prevTmux
-	})
+	// fakeDaemonSeams neutralises EVERY daemon/autostart/tmux boundary (and
+	// restores them), so the seams this helper does not care about can never
+	// fall through to the real thing — notably stopOrphanDaemonsFn, which
+	// otherwise runs a host-wide process scan from a unit test.
+	fakeDaemonSeams(t)
 
 	var events []string
 	stateFile := filepath.Join(home, config.StateFileName)
@@ -550,6 +543,9 @@ func stubResetDaemonHandling(t *testing.T, home string, installed bool, pauseErr
 		return "unwiped"
 	}
 	autostartInstalledFn = func() bool { return installed }
+	// The unit under test is the one for THIS home; the cross-home case has its
+	// own test (TestFactoryReset_LeavesOtherHomesAutostartUnitAlone).
+	autostartUnitServesHomeFn = func(string) (bool, bool, error) { return installed, installed, nil }
 	pauseAutostartUnitFn = func() error {
 		events = append(events, "pause:"+wiped())
 		return pauseErr

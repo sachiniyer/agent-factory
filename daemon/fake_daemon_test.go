@@ -31,6 +31,24 @@ func shSingleQuote(s string) string {
 // group.
 func spawnFakeDaemonProc(t *testing.T, argv0, script string, extraArgs ...string) *exec.Cmd {
 	t.Helper()
+	cmd := fakeDaemonCmd(t, argv0, script, extraArgs...)
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start fake daemon proc: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		_, _ = cmd.Process.Wait()
+	})
+	return cmd
+}
+
+// fakeDaemonCmd builds (but does not start) the fake-daemon command described
+// by spawnFakeDaemonProc. It is split out so a caller that must set the child's
+// ENVIRONMENT before it execs can do so: AF-home scoping reads a daemon's
+// AGENT_FACTORY_HOME from /proc/<pid>/environ, which is fixed at exec and
+// cannot be set afterwards.
+func fakeDaemonCmd(t *testing.T, argv0, script string, extraArgs ...string) *exec.Cmd {
+	t.Helper()
 	if _, err := exec.LookPath("bash"); err != nil {
 		t.Skipf("bash not available: %v", err)
 	}
@@ -41,15 +59,8 @@ func spawnFakeDaemonProc(t *testing.T, argv0, script string, extraArgs ...string
 		parts = append(parts, shSingleQuote(a))
 	}
 	cmd := exec.Command("bash", "-c", strings.Join(parts, " "))
-	// Put the process (and its children) in their own group so cleanup reaps
-	// any orphaned `sleep` child left behind when bash dies by signal.
+	// Put the process (and its children) in their own group so cleanup can reap
+	// the whole tree — bash dies by signal, orphaning any `sleep` child.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	if err := cmd.Start(); err != nil {
-		t.Fatalf("start fake daemon proc: %v", err)
-	}
-	t.Cleanup(func() {
-		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-		_, _ = cmd.Process.Wait()
-	})
 	return cmd
 }
