@@ -1,9 +1,12 @@
 # Backends (runtimes)
 
 A session's **backend** decides *where* its workspace and agent run. Every
-backend exposes the exact same session surface — attach, preview, prompt
-delivery, the live PTY stream, tabs — so the TUI, CLI, and daemon drive a
-containerised session identically to a local one.
+backend exposes the same session surface — attach, preview, prompt delivery, the
+live PTY stream — so the TUI, CLI, and daemon drive a containerised session much
+like a local one. The one difference is **tab management**: only a local session
+has a daemon-side worktree to spawn tabs into, so adding/closing tabs (`t`/`w`,
+`af sessions tab-create`) is local-only; docker, ssh, and hook sessions carry a
+fixed single agent tab.
 
 | Backend | Where the agent runs | Selected with |
 |---------|----------------------|---------------|
@@ -220,9 +223,10 @@ Since **#1592 Phase 4 PR7** the hook backend follows the **same
 provision-and-expose contract** as `docker`/`ssh`. Your `launch_cmd` clones the
 repo on your infra, starts an **`af agent-server`** there, and echoes that
 server's authed endpoint (`{url, token}`); the daemon then
-drives the session over that `ws://` stream — so a hook session is
-behaviorally identical to a local, docker, or ssh one (attach, type, resize,
-tabs, preview, archive/restore, kill).
+drives the session over that `ws://` stream — so a hook session matches a local,
+docker, or ssh one on attach, type, resize, preview, archive/restore, and kill.
+Like the other off-box backends it does not support adding or closing tabs (no
+daemon-side worktree).
 
 ```json
 {

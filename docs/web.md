@@ -371,8 +371,10 @@ pane header and the terminal:
 
 Tabs labelled **Agent** / **Terminal** / a process name mirror the TUI's labels. A
 failed tab op (e.g. hitting the nine-tab cap) surfaces as a brief toast rather than
-a modal. **Remote-hook sessions** have their tabs fixed by their hook config, so
-their `+` / `×` affordances and the `t` / `w` keys are disabled.
+a modal. **Off-box sessions** (docker, ssh, and remote-hook) run their workspace on
+another host, so there is no daemon-side worktree to spawn a tab in — their `+` /
+`×` affordances and the `t` / `w` keys are disabled, and the tab list is fixed by
+the runtime (a single agent tab).
 
 ### Project switcher
 
