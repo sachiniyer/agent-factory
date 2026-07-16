@@ -577,13 +577,42 @@ func (i *Instance) ReconcileTabsFromData(target []TabData) (bool, error) {
 	// id empty on purpose, so this is the bootstrap that makes the tab addressable
 	// by id at all. Runs FIRST so the id-keyed passes below see it. Not a visible
 	// change: the id is internal addressing, not display state.
+	//
+	// The AGENT tab additionally adopts over a NON-EMPTY local id, because it is the
+	// only row the id-keyed passes below can never repair: it is never dropped or
+	// re-added (it is the instance's own session, always at index 0), so the
+	// close+recreate that heals a diverged id for every other kind cannot reach it,
+	// and a stale id would stick FOREVER. That divergence is ordinary, not exotic:
+	// restoreLocalTabs MINTS an id for a legacy pre-#1738 row, so a TUI and a daemon
+	// loading the same id-less record independently mint DIFFERENT ids — one plain
+	// daemon restart (every upgrade does one) over a not-yet-persisted backfill is
+	// enough. From then on every preview/live/attach addresses the agent by an id the
+	// daemon cannot resolve, and because the caller DID supply a tab_id there is no
+	// ordinal fallback — it is ErrTabGone (see TabAddressableServer), i.e. a blank,
+	// unattachable agent pane with no way out.
+	//
+	// Name is the right join key here precisely where id is not: both sides derive
+	// the agent tab's name from the SAME persisted record, so it agrees even when the
+	// independently-minted ids do not. The pane layer is deliberately blind to this
+	// heal — paneTabKeys keys the agent slot by name, so correcting the id does not
+	// read as "the tab vanished" and close the pane — while liveBindCandidate keys
+	// the live stream ON the id, so the adoption itself re-dials the pane onto the
+	// working id. That is the self-heal.
 	i.mu.Lock()
 	for _, td := range target {
 		if td.ID == "" {
 			continue
 		}
 		for idx, t := range i.Tabs {
-			if t.ID == "" && t.Name == td.Name {
+			if t.Name != td.Name || t.ID == td.ID {
+				continue
+			}
+			// Guard the adopt-over-non-empty to the agent row on BOTH sides, and to
+			// index 0 — the position that defines the agent tab here. For every other
+			// kind a local id matching no target id is ambiguous (legacy mismatch vs
+			// close+recreate), and the drop+add below deliberately owns that case.
+			agentRow := idx == 0 && t.Kind == TabKindAgent && td.Kind == TabKindAgent
+			if t.ID == "" || agentRow {
 				i.replaceTabFieldLocked(idx, func(c *Tab) { c.ID = td.ID })
 			}
 		}

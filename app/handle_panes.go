@@ -363,7 +363,19 @@ func paneTabKeys(instance *session.Instance) []tabSlotKey {
 	tabs := instance.GetTabs()
 	keys := make([]tabSlotKey, len(tabs))
 	for i, tab := range tabs {
-		keys[i] = tabSlotKey{id: tab.ID, name: tab.Name}
+		id := tab.ID
+		// The agent tab is the one slot whose id is NOT its identity. It is a
+		// positional singleton — always index 0, never added, dropped, or recreated
+		// — so "which tab is this" is answered by the slot itself, and its id is
+		// mutable addressing that the snapshot reconcile CORRECTS in place when a
+		// locally-minted id diverges from the daemon's (see ReconcileTabsFromData).
+		// Keyed by id, that heal would read as "the tab vanished" and close the agent
+		// pane — swapping a blank pane for a disappearing one. Keyed by name, the pane
+		// stays bound to its slot and liveBindCandidate re-dials it on the new id.
+		if tab.Kind == session.TabKindAgent {
+			id = ""
+		}
+		keys[i] = tabSlotKey{id: id, name: tab.Name}
 	}
 	return keys
 }

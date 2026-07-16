@@ -316,3 +316,53 @@ func TestReconcileTabsFromData_CloseRecreateSameNameIsIDKeyed(t *testing.T) {
 	require.NoError(t, err)
 	assert.False(t, changedAgain, "a settled roster must not churn on the next poll")
 }
+
+// TestReconcileTabsFromData_AgentTabAdoptsDaemonIDOverStaleID is the agent-tab
+// self-heal. The agent row is the one tab the id-keyed reconcile can never
+// repair by drop+add — it is a positional singleton that is never closed — so an
+// id that diverged from the daemon's would stick forever, and because the TUI
+// DOES send a tab_id, every later preview/live/attach resolves to ErrTabGone
+// rather than falling back to the ordinal: a blank, unattachable agent pane with
+// no way out. The divergence is ordinary, not exotic: restoreLocalTabs mints an
+// id for a legacy pre-#1738 row, so a TUI and a daemon that load the same id-less
+// record independently mint different ones — a plain daemon restart (every
+// upgrade) is enough. Name is the join key precisely because both sides read it
+// from the SAME record, so it agrees when the minted ids do not.
+func TestReconcileTabsFromData_AgentTabAdoptsDaemonIDOverStaleID(t *testing.T) {
+	const agentName = "af_snap_agentid"
+	inst, _ := newReconcileTestInstance(t, agentName, map[string]bool{agentName: true})
+
+	// The local agent tab holds a NON-EMPTY id minted here (the restoreLocalTabs
+	// backfill), which the daemon never saw.
+	agentTab := inst.GetTabs()[0]
+	require.NotEmpty(t, agentTab.ID, "precondition: the agent tab's id is locally minted, not empty")
+	staleID := agentTab.ID
+	agentTmux := agentTab.tmux
+	require.NotNil(t, agentTmux, "precondition: the agent tab has a live tmux session")
+
+	// The daemon's authoritative roster carries a DIFFERENT id for the same agent row.
+	changed, err := inst.ReconcileTabsFromData([]TabData{
+		{ID: "daemon-agent-id", Name: agentTabName, Kind: TabKindAgent, TmuxName: agentName},
+	})
+	require.NoError(t, err)
+
+	tabs := inst.GetTabs()
+	require.Len(t, tabs, 1, "the agent tab is never dropped or re-added — it heals in place")
+	gotID, ok := inst.TabIDAt(0)
+	require.True(t, ok)
+	assert.Equal(t, "daemon-agent-id", gotID,
+		"the agent tab must adopt the daemon's id; keeping the stale one makes every attach ErrTabGone")
+	assert.NotEqual(t, staleID, gotID)
+	assert.Same(t, agentTmux, tabs[0].tmux,
+		"the heal is an id correction, not a re-add: the live agent session survives")
+	assert.False(t, changed,
+		"an id adoption is internal addressing, not display state — it must not report a visible change")
+
+	// The heal settles: the next poll finds the ids equal and does nothing.
+	changedAgain, err := inst.ReconcileTabsFromData([]TabData{
+		{ID: "daemon-agent-id", Name: agentTabName, Kind: TabKindAgent, TmuxName: agentName},
+	})
+	require.NoError(t, err)
+	assert.False(t, changedAgain, "a healed roster must not churn on the next poll")
+	assert.Same(t, tabs[0], inst.GetTabs()[0], "a settled agent tab is not copy-on-written again")
+}

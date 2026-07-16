@@ -187,19 +187,28 @@ func (m *home) suppressPanePreview(original, target paneBinding) {
 // tree-cursor previews.
 func (m *home) bumpSelectionEpochIfMoved(sel ui.SidebarItem) {
 	title := ""
+	instID := ""
 	if inst := m.sidebar.GetSelectedInstance(); inst != nil {
 		title = inst.Title
+		// Titles are not identity. A same-title kill/recreate swaps in an ENTIRELY
+		// NEW session object under an unchanged cursor row and an unchanged title, so
+		// a title-only key reads the swap as "nothing moved" and never stales a pinned
+		// pane jump — leaving the stale pin cancelling previews for the REPLACEMENT
+		// session until the user happens to navigate away. The stable id (#1195) makes
+		// the swap the logical selection change it actually is. Legacy pre-#1195 rows
+		// carry no id and fall back to the title, exactly as the reconcile does.
+		instID = inst.ID
 	}
 	// Identity of the selection: the selected row (section/header/instance/tab
-	// position) plus the instance title, so an out-of-band instance reorder under
+	// position) plus the instance title AND its stable id, so an out-of-band instance reorder under
 	// a fixed cursor position still reads as a move — AND store.ActiveTab(), which
 	// is a selection change the CURSOR does not show. A tree-focus number key
 	// retargets the active tab while SyncCursorToActiveTab deliberately leaves the
 	// cursor on the instance row; without the active tab in the key that gesture
 	// looked like "nothing moved", so a stale pane pin kept cancelling the very
 	// preview the user just asked for (the invariant-eats-the-gesture class).
-	key := fmt.Sprintf("%d/%t/%d/%t/%d/%s/%d",
-		sel.Kind, sel.IsHeader, sel.ItemIndex, sel.IsTab, sel.TabIndex, title, m.store.ActiveTab())
+	key := fmt.Sprintf("%d/%t/%d/%t/%d/%s/%s/%d",
+		sel.Kind, sel.IsHeader, sel.ItemIndex, sel.IsTab, sel.TabIndex, title, instID, m.store.ActiveTab())
 	if key == m.lastSelectionKey {
 		return
 	}

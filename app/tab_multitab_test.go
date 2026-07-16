@@ -500,3 +500,126 @@ func TestSnapshot_ClosesPaneWhenTabIDChanges(t *testing.T) {
 	assert.Equal(t, 0, h.store.NumOpenPanes(),
 		"the pane's tab id left the roster: it must CLOSE, never keep rendering the imposter tab (#1886)")
 }
+
+// TestSnapshot_AgentIDHealKeepsPaneOpen is the pane-layer half of the agent-tab
+// self-heal, driven through the real production path. The agent tab is a
+// positional singleton whose id is mutable addressing, not identity: the snapshot
+// CORRECTS a locally-minted id that diverged from the daemon's. Keyed by id like
+// every other slot, that heal would read as "the tab vanished" and close the agent
+// pane — trading a blank pane for a disappearing one. paneTabKeys keys the agent
+// slot by name so the pane rides through, and liveBindCandidate (which keys the
+// live stream ON the id) re-dials it onto the working id.
+func TestSnapshot_AgentIDHealKeepsPaneOpen(t *testing.T) {
+	h := newTestHome(t)
+	inst := startedLocalInstance(t, "heal")
+	selectInstance(h, inst)
+	resizeHome(h, 200, 40)
+
+	pane := openTestPane(t, h, inst, 0) // pane on the AGENT tab
+	require.Equal(t, 1, h.store.NumOpenPanes())
+	staleAgentID := inst.GetTabs()[0].ID
+	require.NotEmpty(t, staleAgentID, "precondition: the agent id is locally minted")
+
+	// The daemon's roster carries a different id for the agent row — the ordinary
+	// legacy/restart divergence, not an exotic one.
+	data := inst.ToInstanceData()
+	data.Tabs[0].ID = "daemon-agent-id"
+	h.updateInstanceFromSnapshot(inst, data)
+
+	healed, ok := inst.TabIDAt(0)
+	require.True(t, ok)
+	require.Equal(t, "daemon-agent-id", healed, "precondition: the agent tab healed its id")
+	assert.Equal(t, 1, h.store.NumOpenPanes(),
+		"the agent tab did not go anywhere — correcting its id must NOT close its pane")
+	assert.Same(t, pane, h.store.FindOpenPane(inst, 0),
+		"the agent pane stays bound to slot 0 across the heal")
+}
+
+// TestCloseTab_IDLessTreeTabTracksByOrdinal covers the id-less window. A tab the
+// user just created is ID-LESS by design (AttachShellTab leaves Tab.ID empty
+// until the next snapshot backfills the daemon's), so the tree's tab cannot be
+// found by id at all. With the id lookup skipped, `next` fell back to idx-1 —
+// where idx is the FOCUSED PANE's closed tab, not the tree's — so a pane-focused
+// close of a DIFFERENT tab jumped the tree to a neighbour of the wrong tab, even
+// though the tree's own tab survived and merely shifted. The ordinal is the only
+// key available in that window, so every id lookup needs an ordinal fallback.
+func TestCloseTab_IDLessTreeTabTracksByOrdinal(t *testing.T) {
+	h, alpha := multiTabHome(t)
+
+	// The freshly-created tabs are id-less, exactly as AttachShellTab leaves them
+	// before the daemon's snapshot backfills their ids.
+	for _, tab := range alpha.GetTabs() {
+		tab.ID = ""
+	}
+
+	// The tree sits on shell-3 (slot 3) — the newest tab.
+	h.store.SetActiveTab(3)
+	h.menu.SetActiveTab(3)
+
+	// The focused pane is jumped BACK to an older tab, shell (slot 1), and closes it.
+	pane := openTestPane(t, h, alpha, 3)
+	_, _ = h.handleTabJump(2)
+	require.Equal(t, 1, pane.Tab(), "precondition: the focused pane shows the older tab (slot 1)")
+	require.Equal(t, 3, h.store.ActiveTab(), "precondition: the tree is still on shell-3 (slot 3)")
+
+	recordCloseTab(t, h)
+	_, _ = h.handleCloseTab()
+
+	// shell (slot 1) died, so the tree's shell-3 shifted 3 → 2. It must FOLLOW its
+	// own tab, not land on a neighbour of the pane's closed tab.
+	require.Equal(t, 3, alpha.TabCount(), "precondition: the pane's tab was the one closed")
+	assert.Equal(t, "shell-3", alpha.GetTabs()[h.store.ActiveTab()].Name,
+		"the tree's own tab survived the pane-focused close — it must still be selected, merely shifted")
+	assert.Equal(t, 2, h.store.ActiveTab(),
+		"shell-3 shifted 3 → 2 when the lower tab closed; the tree must track it by ordinal in the id-less window")
+}
+
+// TestSwapSameTitle_StalesPinnedPaneJump is the selection-epoch half of the
+// same-title trap. Titles are not identity: a kill/recreate swaps in an ENTIRELY
+// NEW session object while the cursor row and the title stay put, so a
+// title-only selection key reads the swap as "nothing moved" and never advances
+// the epoch. A pane jump pinned against the CORPSE then stays live over the
+// replacement, cancelling its previews until the user happens to navigate away.
+// The stable session id makes the swap the logical selection change it is.
+func TestSwapSameTitle_StalesPinnedPaneJump(t *testing.T) {
+	h := newTestHome(t)
+	stale := instanceWithFakeBackend(t, "dup")
+	stale.AddTabForTest("agent", session.TabKindAgent)
+	stale.AddTabForTest("shell", session.TabKindShell)
+	for i, tab := range stale.GetTabs() {
+		tab.ID = []string{"stale-agent", "stale-shell"}[i]
+	}
+	h.store.AddInstance(stale)
+	h.sidebar.SetSelectedInstance(0)
+	_ = h.selectionChanged()
+	resizeHome(h, 200, 40)
+
+	// A pinned pane jump on the corpse — the state the stale pin lives in.
+	pane := openTestPane(t, h, stale, 0)
+	_, _ = h.handleTabJump(2)
+	require.Equal(t, 1, pane.Tab(), "precondition: the pane jumped to the shell tab")
+	require.True(t, h.paneJumpIntentPinned(pane.ID()), "precondition: the jump is pinned")
+	epochBefore := h.selectionEpoch
+
+	// The recreated session: same title, same tab names, a DIFFERENT stable id —
+	// and the sidebar cursor never moves.
+	recreated := instanceWithFakeBackend(t, "dup")
+	recreated.AddTabForTest("agent", session.TabKindAgent)
+	recreated.AddTabForTest("shell", session.TabKindShell)
+	for i, tab := range recreated.GetTabs() {
+		tab.ID = []string{"fresh-agent", "fresh-shell"}[i]
+	}
+	require.NotEqual(t, stale.ID, recreated.ID, "precondition: the replacement is a different session")
+	require.Equal(t, stale.Title, recreated.Title, "precondition: under an unchanged title")
+	t.Cleanup(SetInstanceBuilderForTest(func(d session.InstanceData) (*session.Instance, error) {
+		return recreated, nil
+	}))
+	require.True(t, h.swapInstanceFromSnapshot(recreated.ToInstanceData()))
+
+	// The swap is a logical selection change: the next selectionChanged must see it.
+	_ = h.selectionChanged()
+	assert.Greater(t, h.selectionEpoch, epochBefore,
+		"a same-title swap replaced the selected session — the epoch must advance like any other selection change")
+	assert.False(t, h.paneJumpIntentPinned(pane.ID()),
+		"the pin was made against the corpse: it must not keep cancelling previews for the replacement session")
+}

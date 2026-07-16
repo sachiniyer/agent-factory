@@ -110,10 +110,16 @@ func (m *home) handleCloseTab() (tea.Model, tea.Cmd) {
 	// remove a tab that is NOT the tree's active tab, and the tree must keep
 	// pointing at its own tab across the shift (#1884 follow-up) — resolving it by
 	// id afterwards is what keeps the arithmetic from guessing.
+	// The ordinal rides along with the id: a freshly-created tab is ID-LESS by
+	// design (AttachShellTab leaves Tab.ID empty until the next snapshot backfills
+	// the daemon's), so there is a real window where the tree's tab cannot be found
+	// by id at all and the ordinal is the only key it has.
 	treeActiveID := ""
+	treeActiveIdx := -1
 	treeIsSelected := inst == m.sidebar.GetSelectedInstance()
 	if treeIsSelected {
 		if a := m.store.ActiveTab(); a >= 0 && a < len(tabs) {
+			treeActiveIdx = a
 			treeActiveID = tabs[a].ID
 		}
 	}
@@ -143,7 +149,21 @@ func (m *home) handleCloseTab() (tea.Model, tea.Cmd) {
 	// below it still follows the shift. Only when the tree's own tab is the one
 	// that died does it fall back to the left/previous neighbour (#930 PR 4).
 	if treeIsSelected {
-		next := idx - 1
+		// Adjust the tree's OWN ordinal for the closed slot first. This is the answer
+		// during the id-less window, and it is why `idx - 1` cannot be the fallback:
+		// idx is the FOCUSED PANE's closed tab, so on a pane-focused close of some
+		// other tab it names a neighbour of the wrong tab entirely — the tree would
+		// jump even though its tab merely shifted (or did not move at all).
+		next := treeActiveIdx
+		switch {
+		case treeActiveIdx == idx:
+			next = idx - 1 // the tree's own tab is the one that died
+		case treeActiveIdx > idx:
+			next = treeActiveIdx - 1 // it shifted down one
+		}
+		// The id is authoritative whenever there IS one: it survives the reorder a
+		// concurrent snapshot could apply between the capture and here, which the
+		// ordinal arithmetic above cannot see.
 		if treeActiveID != "" {
 			if at, ok := inst.TabIndexByID(treeActiveID); ok {
 				next = at
