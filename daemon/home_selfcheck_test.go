@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/testguard"
 )
 
 // The tests in this file cover the #1093 abandoned-daemon self-check: a daemon
@@ -20,9 +21,15 @@ import (
 // exists, delete the home, and assert RunDaemon returns within a bounded time
 // without recreating the deleted directory.
 func TestRunDaemon_ExitsWhenHomeDeleted(t *testing.T) {
-	// The home lives one level below t.TempDir() so deleting it cannot break
-	// the testing package's own tempdir cleanup.
-	home := filepath.Join(t.TempDir(), "af-home")
+	// The home lives one level below a temp dir so deleting it cannot break that
+	// dir's own cleanup.
+	//
+	// SocketTempDir, not t.TempDir: this daemon binds daemon.sock inside this home,
+	// and t.TempDir's test-name-bearing path put the socket at 125 bytes — 22 over
+	// sun_path's ceiling — so the daemon never bound and never reported ready. The
+	// failure surfaced 20s later as "daemon ready" never holding, nowhere near the
+	// home-deletion this test is actually about (#1931).
+	home := filepath.Join(testguard.SocketTempDir(t), "af-home")
 	if err := os.MkdirAll(home, 0755); err != nil {
 		t.Fatalf("mkdir home: %v", err)
 	}
