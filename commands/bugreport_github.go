@@ -32,12 +32,25 @@ import (
 // always leaves the bundle on disk.
 
 const (
+	// afIssueRepoHost is the host the project lives on. It is part of the target,
+	// not an assumption: gh resolves a bare OWNER/REPO against GH_HOST, so on a
+	// GitHub Enterprise install a hostless slug silently retargets the draft at
+	// the employer's tracker — and this command, having no repo context, has
+	// nothing to correct it with. If that host happens to carry a matching repo
+	// or mirror, `gh --web` SUCCEEDS against the wrong issue tracker, the browser
+	// fallback never runs, and a diagnostics bundle meant for a public project
+	// lands somewhere it was never meant to go.
+	afIssueRepoHost = "github.com"
 	// afIssueRepoOwner / afIssueRepoName are the agent-factory project repo —
 	// where `af bug-report` files, always.
 	afIssueRepoOwner = "sachiniyer"
 	afIssueRepoName  = "agent-factory"
-	// afIssueRepoSlug is the owner/repo form gh's --repo flag takes.
+	// afIssueRepoSlug is the owner/repo form, for display and URL building.
 	afIssueRepoSlug = afIssueRepoOwner + "/" + afIssueRepoName
+	// afIssueRepoTarget is the FULLY-QUALIFIED [HOST/]OWNER/REPO form gh's --repo
+	// flag takes. Always pass this to gh, never afIssueRepoSlug: the host is what
+	// makes the documented target enforceable regardless of the environment.
+	afIssueRepoTarget = afIssueRepoHost + "/" + afIssueRepoSlug
 )
 
 // Test seams for the opener SIDE EFFECTS. Production wires these to the real
@@ -60,17 +73,19 @@ func githubIssueNewURL(owner, repo, title, body string) string {
 	q := url.Values{}
 	q.Set("title", title)
 	q.Set("body", body)
-	return fmt.Sprintf("https://github.com/%s/%s/issues/new?%s", owner, repo, q.Encode())
+	return fmt.Sprintf("https://%s/%s/%s/issues/new?%s", afIssueRepoHost, owner, repo, q.Encode())
 }
 
 // ghIssueCreateWebArgs builds the `gh` arguments that open a pre-filled browser
-// draft. `--repo <owner/repo>` pins the target so gh cannot resolve to the wrong
-// repo via GH_REPO / a stray gh remote config; `--web` is what keeps this
-// draft-only: gh constructs the issues/new URL and opens the browser instead of
-// creating the issue over the API, so there is no auto-submit and no
-// confirmation flag.
-func ghIssueCreateWebArgs(repoSlug, title, body string) []string {
-	return []string{"issue", "create", "--repo", repoSlug, "--web", "--title", title, "--body", body}
+// draft. `--repo <HOST/OWNER/REPO>` pins the target so gh cannot resolve it
+// elsewhere via GH_REPO, GH_HOST, or a stray gh remote config — pass the
+// fully-qualified afIssueRepoTarget, since a hostless slug is resolved against
+// GH_HOST and would follow an enterprise install to the wrong tracker. `--web` is
+// what keeps this draft-only: gh constructs the issues/new URL and opens the
+// browser instead of creating the issue over the API, so there is no auto-submit
+// and no confirmation flag.
+func ghIssueCreateWebArgs(repoTarget, title, body string) []string {
+	return []string{"issue", "create", "--repo", repoTarget, "--web", "--title", title, "--body", body}
 }
 
 // openGitHubIssueDraft opens a pre-filled, DRAFT-ONLY GitHub issue against the
@@ -89,7 +104,7 @@ func openGitHubIssueDraft(title, body string) (opened bool, reason string) {
 
 	// Prefer gh when present — it opens a clean, repo-pinned browser draft.
 	if _, err := draftLookPath("gh"); err == nil {
-		opened, ghReason := openDraftViaGh(afIssueRepoSlug, title, body)
+		opened, ghReason := openDraftViaGh(afIssueRepoTarget, title, body)
 		if opened {
 			return true, ""
 		}

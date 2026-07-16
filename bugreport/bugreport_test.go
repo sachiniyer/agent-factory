@@ -628,6 +628,66 @@ func TestScrubDoesNotSkipSecretsThatResembleMarkers(t *testing.T) {
 	}
 }
 
+// TestScrubMarkerFastPathCoversEveryValueForm is the case-by-case proof that a
+// value which merely BEGINS with a marker cannot reach the already-redacted
+// fast-path — for every one of the six value forms the fast-path recognizes.
+//
+// This is the shape that got through three times: the bare-value regex used to
+// stop before `]`, so `api_key=[redacted-secret]actualcredential` was captured as
+// just `[redacted-secret` — indistinguishable from a marker this redactor wrote —
+// and the credential rode out behind it. The comparison was never the problem;
+// the capture boundary was. Each form below is asserted twice: the genuine marker
+// (with a real terminator) survives untouched, and the same marker followed by a
+// credential is redacted with nothing of the tail surviving.
+func TestScrubMarkerFastPathCoversEveryValueForm(t *testing.T) {
+	const tail = "actualcredential"
+	forms := []struct {
+		name string
+		// redacted is a value this redactor genuinely emitted: it must be left
+		// exactly as-is (idempotence).
+		redacted string
+		// impostor is a real credential that merely begins with that marker: it
+		// must be redacted, tail and all.
+		impostor string
+	}{
+		{"bare secret marker", "api_key=" + secretMarker, "api_key=" + secretMarker + tail},
+		{"bare redacted marker", "api_key=" + redactedMarker, "api_key=" + redactedMarker + tail},
+		{"double-quoted secret marker", `api_key="` + secretMarker + `"`, `api_key="` + secretMarker + tail + `"`},
+		{"single-quoted secret marker", `api_key='` + secretMarker + `'`, `api_key='` + secretMarker + tail + `'`},
+		{"double-quoted redacted marker", `api_key="` + redactedMarker + `"`, `api_key="` + redactedMarker + tail + `"`},
+		{"single-quoted redacted marker", `api_key='` + redactedMarker + `'`, `api_key='` + redactedMarker + tail + `'`},
+	}
+	r := &redactor{home: "/home/tester", users: []string{"tester"}}
+
+	for _, tc := range forms {
+		t.Run(tc.name+"/genuine marker survives", func(t *testing.T) {
+			if got := r.scrub(tc.redacted); got != tc.redacted {
+				t.Errorf("already-redacted value was re-wrapped:\n  in:  %q\n  out: %q", tc.redacted, got)
+			}
+		})
+		t.Run(tc.name+"/impostor is redacted", func(t *testing.T) {
+			got := r.scrub(tc.impostor)
+			if strings.Contains(got, tail) {
+				t.Errorf("CREDENTIAL LEAKED past the fast-path:\n  in:  %q\n  out: %q", tc.impostor, got)
+			}
+			if !strings.Contains(got, secretMarker) {
+				t.Errorf("value not redacted:\n  in:  %q\n  out: %q", tc.impostor, got)
+			}
+		})
+	}
+
+	// A marker sitting mid-value is not a marker this redactor wrote either.
+	for _, in := range []string{
+		"password = hunter2" + secretMarker,
+		"password = hunter2" + redactedMarker + "more",
+		`password = "hunter2` + secretMarker + `"`,
+	} {
+		if got := r.scrub(in); strings.Contains(got, "hunter2") {
+			t.Errorf("mid-value marker let a credential through:\n  in:  %q\n  out: %q", in, got)
+		}
+	}
+}
+
 // TestScrubIsIdempotent pins the property the fast-path exists for: scrub runs
 // over the same text more than once by design (per section, again over the
 // assembled text/JSON, and again on each component the issue draft inlines), so

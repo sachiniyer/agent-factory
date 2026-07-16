@@ -164,9 +164,9 @@ func TestOpenGitHubIssueDraftAlwaysTargetsAgentFactory(t *testing.T) {
 			if !opened {
 				t.Fatalf("no draft opened from a repo with origin %q: %s", tc.origin, reason)
 			}
-			if rec.ghSlug != afIssueRepoSlug {
+			if rec.ghSlug != afIssueRepoTarget {
 				t.Errorf("gh targeted %q, want %q (origin %q must not influence the target)",
-					rec.ghSlug, afIssueRepoSlug, tc.origin)
+					rec.ghSlug, afIssueRepoTarget, tc.origin)
 			}
 
 			// Browser path (no gh installed).
@@ -181,6 +181,48 @@ func TestOpenGitHubIssueDraftAlwaysTargetsAgentFactory(t *testing.T) {
 			if want := "/" + afIssueRepoSlug + "/issues/new"; u.Host != "github.com" || u.Path != want {
 				t.Errorf("browser draft targeted %s%s, want github.com%s (origin %q)",
 					u.Host, u.Path, want, tc.origin)
+			}
+		})
+	}
+}
+
+// TestOpenGitHubIssueDraftIgnoresGHHost pins the target against the environment.
+// gh resolves a bare OWNER/REPO against GH_HOST, so on a GitHub Enterprise
+// install a hostless slug silently retargets the draft at the employer's tracker
+// — and if that host carries a matching repo or mirror, `gh --web` SUCCEEDS
+// there, the browser fallback never runs, and the diagnostics bundle goes with
+// it. The target must be fully qualified so the documented destination holds
+// whatever the environment says.
+func TestOpenGitHubIssueDraftIgnoresGHHost(t *testing.T) {
+	for _, host := range []string{"github.enterprise.example", "ghe.acme-corp.internal"} {
+		t.Run(host, func(t *testing.T) {
+			t.Setenv("GH_HOST", host)
+			t.Setenv("GH_REPO", "acme-corp/secret-product")
+			initRepo(t, "https://"+host+"/acme-corp/secret-product.git")
+
+			rec := stubDraftOpeners(t, true, true, true)
+			if opened, reason := openGitHubIssueDraft("t", "b"); !opened {
+				t.Fatalf("no draft opened with GH_HOST=%s: %s", host, reason)
+			}
+			if rec.ghSlug != afIssueRepoTarget {
+				t.Errorf("GH_HOST=%s retargeted gh to %q, want %q", host, rec.ghSlug, afIssueRepoTarget)
+			}
+			// The host must be carried IN the target, not left for gh to infer.
+			if !strings.HasPrefix(rec.ghSlug, "github.com/") {
+				t.Errorf("gh target is not fully qualified, so GH_HOST can still resolve it: %q", rec.ghSlug)
+			}
+
+			// The browser path builds its own absolute URL; it must not drift either.
+			rec = stubDraftOpeners(t, false, false, true)
+			if opened, reason := openGitHubIssueDraft("t", "b"); !opened {
+				t.Fatalf("no browser draft with GH_HOST=%s: %s", host, reason)
+			}
+			u, err := url.Parse(rec.browserURL)
+			if err != nil {
+				t.Fatalf("browser URL does not parse: %v", err)
+			}
+			if u.Host != "github.com" {
+				t.Errorf("GH_HOST=%s moved the browser draft to %q", host, u.Host)
 			}
 		})
 	}
@@ -253,7 +295,7 @@ func TestGithubIssueNewURL(t *testing.T) {
 // with the templated title/body, and must NOT carry any non-interactive submit
 // flag.
 func TestGhIssueCreateWebArgs(t *testing.T) {
-	args := ghIssueCreateWebArgs("sachiniyer/agent-factory", "my title", "my body")
+	args := ghIssueCreateWebArgs(afIssueRepoTarget, "my title", "my body")
 	joined := strings.Join(args, " ")
 
 	if args[0] != "issue" || args[1] != "create" {
@@ -263,8 +305,10 @@ func TestGhIssueCreateWebArgs(t *testing.T) {
 		t.Errorf("draft flow must use --web (browser draft, no auto-submit): %v", args)
 	}
 	// The target repo must be pinned so gh can't resolve to the wrong repo.
-	if !containsArgValue(args, "--repo", "sachiniyer/agent-factory") {
-		t.Errorf("gh target not pinned to the parsed repo: %v", args)
+	// Fully qualified, not a bare slug: gh resolves a hostless OWNER/REPO
+	// against GH_HOST, which on an enterprise install is the wrong tracker.
+	if !containsArgValue(args, "--repo", "github.com/sachiniyer/agent-factory") {
+		t.Errorf("gh target not pinned to the fully-qualified AF repo: %v", args)
 	}
 	if !containsArgValue(args, "--title", "my title") || !containsArgValue(args, "--body", "my body") {
 		t.Errorf("title/body not templated into gh args: %v", args)
