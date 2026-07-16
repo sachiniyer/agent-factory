@@ -11,7 +11,6 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strings"
 	"testing"
 )
 
@@ -38,16 +37,10 @@ type ledger struct {
 	WebRPCs     map[string]string `json:"web_rpcs"`
 }
 
-type createOptions struct {
-	Route       string            `json:"route"`
-	WebSends    []string          `json:"web_sends"`
-	UnsentByWeb map[string]string `json:"unsent_by_web"`
-}
-
 type inventory struct {
 	Capabilities  []capability  `json:"capabilities"`
 	Ledger        ledger        `json:"ledger"`
-	CreateOptions createOptions `json:"create_options"`
+	FieldCoverage fieldCoverage `json:"field_coverage"`
 }
 
 func loadInventory(t *testing.T) inventory {
@@ -222,61 +215,6 @@ func TestCapabilitiesAreWellFormed(t *testing.T) {
 		}
 		if c.Verdict == "real-gap" && c.Issue == "" {
 			t.Errorf("%s: verdict 'real-gap' requires an issue reference (use TBD while filing)", c.ID)
-		}
-	}
-}
-
-// TestCreateOptionParity is the targeted check for the option dimension — the
-// axis the owner's remote-instance report lives on. "Create a session" being
-// present on all three surfaces hides the fact that they accept different
-// options, so the fields are pinned explicitly.
-func TestCreateOptionParity(t *testing.T) {
-	inv := loadInventory(t)
-	routes := deriveRoutes(t)
-
-	r, ok := routes[inv.CreateOptions.Route]
-	if !ok {
-		t.Fatalf("inventory's create route %q is not in the daemon catalog", inv.CreateOptions.Route)
-	}
-
-	// What the web actually sends today, straight from its call site.
-	got := webCallBody(t, "CreateSession")
-	want := append([]string(nil), inv.CreateOptions.WebSends...)
-	sort.Strings(want)
-	if strings.Join(got, ",") != strings.Join(want, ",") {
-		t.Errorf("web's CreateSession body changed.\n  sends now: %v\n  inventory: %v\n\n"+
-			"If the web gained a create option, update create_options.web_sends AND the "+
-			"matching session.create.opt.* verdict — that is the whole point of this row.",
-			got, want)
-	}
-
-	// Every field the route accepts is either sent by the web or declared as a
-	// known gap. A NEW field on the wire struct lands here first.
-	sends := map[string]bool{}
-	for _, f := range got {
-		sends[f] = true
-	}
-	for _, f := range r.Fields {
-		if sends[f] {
-			continue
-		}
-		capID, declared := inv.CreateOptions.UnsentByWeb[f]
-		if !declared {
-			t.Errorf("CreateSession accepts %q but the web never sends it, and the inventory "+
-				"does not declare it as a gap.%s", f, fixHint)
-			continue
-		}
-		if _, ok := inv.byID()[capID]; !ok {
-			t.Errorf("create_options.unsent_by_web[%q] names unknown capability %q", f, capID)
-		}
-	}
-
-	// And nothing is declared a gap that the web has quietly started sending —
-	// that would mean a gap got fixed and the table still calls it broken.
-	for f := range inv.CreateOptions.UnsentByWeb {
-		if sends[f] {
-			t.Errorf("inventory declares %q unsent by the web, but the web now sends it: "+
-				"update create_options and the capability's verdict.", f)
 		}
 	}
 }

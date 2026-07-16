@@ -169,17 +169,41 @@ func readWebAPI(t *testing.T) string {
 	return string(b)
 }
 
-// webCallBody returns the object-literal body the web sends for one RPC, as the
-// set of JSON keys it sets. Used to audit the OPTION dimension (which fields of
-// a request struct a surface can actually populate), not just verb reachability.
+// webCallBody returns the JSON keys the web can set on one RPC, unioned across
+// EVERY call site for that method. The union matters: CreateTab has two sites
+// (a shell tab and a VS Code tab, web/src/api.ts:339 and :355) and only the
+// second sets `kind`, so reading just the first call site would wrongly report
+// `kind` as unreachable from the web.
+//
+// Used to audit the OPTION dimension — which fields of a request a surface can
+// actually populate — not just verb reachability.
 func webCallBody(t *testing.T, method string) []string {
 	t.Helper()
 	src := readWebAPI(t)
-	idx := strings.Index(src, `"`+method+`"`)
-	if idx < 0 {
-		return nil
+	seen := map[string]bool{}
+	needle := `"` + method + `"`
+	for off := 0; ; {
+		i := strings.Index(src[off:], needle)
+		if i < 0 {
+			break
+		}
+		at := off + i
+		off = at + len(needle)
+		for _, f := range objectLiteralAfter(src[at:]) {
+			seen[f] = true
+		}
 	}
-	rest := src[idx:]
+	var out []string
+	for f := range seen {
+		out = append(out, f)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// objectLiteralAfter returns the top-level keys of the first object literal that
+// follows s's start.
+func objectLiteralAfter(rest string) []string {
 	open := strings.Index(rest, "{")
 	if open < 0 {
 		return nil

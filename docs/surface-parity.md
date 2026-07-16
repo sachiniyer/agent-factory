@@ -73,18 +73,70 @@ A hand-maintained table would drift, which is the failure this exists to catch.
 So the only hand-maintained part is the **verdict** — the judgment a machine
 cannot make. Everything else is read out of the code at test time.
 
+## Two levels: verbs and options
+
+A verb-level check alone is not enough, and that is not a theory — it is how
+[#1948](https://github.com/sachiniyer/agent-factory/issues/1948) got missed.
+`af sessions preview` exists, so "preview a session" looked like parity. But
+`PreviewRequest` carries `Tab`, `TabID`, and `Full`; the TUI sends all three and
+the CLI sends none, so the CLI can only ever see tab 0. The verb was present and
+the **options** were not. It was found by someone using the product, not by this
+check.
+
+So the check works at two levels:
+
+| Level | Question | Derived from |
+|---|---|---|
+| **Verb** | can this surface do X at all? | the cobra tree, the route catalog, the binding table, the web's RPC call sites |
+| **Option** | can it do X with the options the daemon accepts? | the wire structs by reflection, vs the AST of `api/`+`app/` and the web's request bodies |
+
+The option level is where the interesting gaps live, because they hide behind a
+verb that looks present. Three of the same shape so far — a field the daemon
+accepts that a surface never sends:
+
+- [#1933](https://github.com/sachiniyer/agent-factory/issues/1933) — the TUI
+  never sets `CreateSessionRequest.Backend`
+- [#1948](https://github.com/sachiniyer/agent-factory/issues/1948) — the CLI
+  never sets `PreviewRequest.Tab` / `TabID` / `Full`
+
+Every field a surface does not send must be declared in `field_coverage` as
+either `{"gap": "<capability-id>"}` (a tracked divergence) or `{"ok": "<reason>"}`
+(its absence is correct, and why). The field lists are derived, so **a new field
+on any request forces a decision on every surface that builds it** — nobody has
+to remember.
+
 ## What the check enforces
 
 - Every CLI verb, daemon route, TUI binding, and web RPC has an inventory entry.
   Adding one without an entry fails the build.
 - Nothing is inventoried that no longer exists, so the table cannot advertise a
   capability af has lost.
-- Every `CreateSession` field the daemon accepts is either sent by the web or
-  declared a known gap. This is the **option dimension**: "create a session" is
-  at parity as a verb while the three surfaces accept different options, and
-  that is exactly where the reported remote-instance gap lives.
+- Every field of every audited request is either reachable from a surface or
+  declared, in both directions — a field a surface has quietly *started* sending
+  also fails, so a fixed gap cannot keep being described as broken.
 - Quality bar: a surface marked `yes`/`partial` must cite code, a `deliberate`
   verdict must explain itself, and a `real-gap` must name an issue.
+
+## Known blind spots
+
+Stated so nobody mistakes a passing check for total coverage:
+
+- **Go field derivation reads composite literals.** A surface that built a
+  request field-by-field (`var r daemon.PreviewRequest; r.Tab = 1`) would read as
+  setting nothing. Every current site is a named composite literal; `minGoLiterals`
+  trips if that stops being true.
+- **Reachable ≠ user-settable.** The AST proves a construction site *sets* a
+  field, not that a user can *choose* its value. `session.create.opt.prompt`
+  (#1936) is exactly this: `app/session_control.go:106` sets `Prompt`, so the
+  field looks covered, while the TUI's naming flow never populates it upstream.
+  A field-level pass does not excuse reading the flow.
+- **Internal routes are not in the verb-level route check.** `daemon.HTTPRoutes()`
+  is the public catalog; `Preview` and `ResumeFromLimit` live in
+  `internalHTTPRoutes`. They are covered at the option level via
+  `auditedRequests`, but a new internal route reaching no surface would not trip
+  the route check.
+- **The web's TS types are not derived.** `web/src/types.ts` omitting a field
+  (as `TaskUpdate` omits `project_path`) is invisible here.
 
 ## Verdicts
 

@@ -187,6 +187,53 @@
       "notes": "The CLI uses the internal Preview RPC; the UIs get the same content off the live stream."
     },
     {
+      "id": "session.preview-tab",
+      "title": "Preview a specific tab (by ordinal or stable id)",
+      "tui": { "status": "yes", "pointer": "app/live_stream.go:35 sends Tab + TabID" },
+      "web": { "status": "yes", "pointer": "web/src/terminal.ts:205-223 streams any tab via tab_id" },
+      "cli": { "status": "no", "pointer": "api/sessions.go:674 sends only {Title, RepoID}; no --tab flag" },
+      "verdict": "real-gap",
+      "issue": "#1948",
+      "notes": "The substrate supports it and one surface does not expose it: PreviewRequest carries Tab (ordinal) and TabID (stable id, #1738), the TUI drives both, and `af sessions preview <title>` can only ever see tab 0. Absurd in practice because the CLI can CREATE a tab (`af sessions tab-create --name x --command …`) and then has no way to read it — create without read. Found by dogfooding, not by the verb-level check, which is why field_coverage now exists."
+    },
+    {
+      "id": "session.preview-full",
+      "title": "Preview a tab's full scrollback rather than the visible screen",
+      "tui": { "status": "yes", "pointer": "app/live_stream.go:35 sends Full" },
+      "web": { "status": "yes", "pointer": "web/src/terminal.ts (xterm holds its own scrollback)" },
+      "cli": { "status": "no", "pointer": "api/sessions.go:674 never sets Full" },
+      "verdict": "real-gap",
+      "issue": "#1948",
+      "notes": "PreviewRequest.Full selects PreviewFullHistory over the visible capture (daemon/preview.go:80 -> session/agentserver_local.go:122-130). `af sessions preview` can only ever show the visible screen, never scrollback — the same unexposed-field shape as session.preview-tab, on the same request, so it is tracked by the same issue."
+    },
+    {
+      "id": "session.tab.create.options",
+      "title": "Choose a new tab's command, name, or kind at create time",
+      "tui": { "status": "no", "pointer": "app/session_control.go:286 sends only {Title, RepoID, Shell:true}" },
+      "web": { "status": "partial", "pointer": "web/src/api.ts:339,355 sets shell/kind but never command/name" },
+      "cli": { "status": "yes", "pointer": "api/sessions_tabs.go:112 sends Command, Name, Kind, URL, Port" },
+      "verdict": "unclear",
+      "notes": "The TUI's `t` always spawns a bare $SHELL: it cannot name a tab or run a command. Overlaps the open tab-UX work in #1813 (tabs labelled 'Tab N', no rename), so it wants triaging with that rather than a fresh issue. Distinct from session.tab.create.web, which is a deliberate omission."
+    },
+    {
+      "id": "session.tab.create.shell",
+      "title": "Spawn a bare $SHELL tab with no command",
+      "tui": { "status": "yes", "pointer": "app/session_control.go:286 Shell:true" },
+      "web": { "status": "yes", "pointer": "web/src/api.ts:342 shell:true" },
+      "cli": { "status": "no", "pointer": "api/sessions_tabs.go:98-100 requires --command; no --shell flag, never sets Shell" },
+      "verdict": "unclear",
+      "notes": "Both UIs open a shell tab in one gesture; the CLI must be told a command. `--command $SHELL` is a plausible workaround but is NOT verified equivalent — Shell:true is a distinct wire field the daemon may treat differently (naming, kind resolution). Needs an owner call, and checking that equivalence, before filing."
+    },
+    {
+      "id": "wire.id-addressing",
+      "title": "Address a session by its stable id rather than by title",
+      "tui": { "status": "no", "pointer": "app/session_control.go:139 et al send {Title, RepoID}" },
+      "web": { "status": "yes", "pointer": "web/src/api.ts:281 et al send id" },
+      "cli": { "status": "no", "pointer": "api/sessions.go:733 et al send {Title, RepoID}" },
+      "verdict": "deliberate",
+      "notes": "Documented at daemon/control_types.go:226-230 and :48-54: 'TUI/CLI callers omit it and resolve by {Title, RepoID}'. The web sends the stable id because it is an all-repos client where a duplicate title across repos could target the wrong session; the TUI and CLI are repo-scoped (--repo / the focused project) so title resolution is unambiguous for them. The ID field being unset by the Go surfaces is by design, not drift."
+    },
+    {
       "id": "session.watch",
       "title": "Block until a session goes idle",
       "tui": { "status": "n/a", "pointer": "" },
@@ -619,21 +666,97 @@
     }
   },
 
-  "create_options": {
+  "field_coverage": {
     "_comment": [
-      "The option dimension of CreateSession, pinned field-by-field. This is where",
-      "the owner-reported remote-instance gap actually lives: the verb is at parity",
-      "but the options are not. web_sends is checked against the live web call site",
-      "and route_fields against the daemon's reflected wire struct, so adding a",
-      "field to either side without a decision here fails the drift check."
+      "The OPTION dimension: a surface can call the right verb while silently",
+      "declining half its request. That is where real gaps live — #1933 (the TUI",
+      "never sets CreateSessionRequest.Backend) and #1948 (the CLI never sets",
+      "PreviewRequest.Tab/TabID/Full) are the same shape.",
+      "",
+      "Every field a surface does not send must be declared with exactly one of:",
+      "  {\"gap\": \"<capability-id>\"}  - a real divergence, tracked by that capability",
+      "  {\"ok\": \"<reason>\"}          - its absence is correct, and here is why",
+      "",
+      "The field LISTS are derived from code, never hand-kept: wire structs by",
+      "reflection, the CLI/TUI by walking the AST of api/ and app/ for",
+      "daemon.XxxRequest composite literals, and the web from its call sites. So a",
+      "new field on any request forces a decision on every surface that builds it.",
+      "",
+      "requests: keyed by daemon request TYPE -> surface (cli/tui) -> json field.",
+      "web_rpcs: keyed by RPC method -> json field."
     ],
-    "route": "POST /v1/CreateSession",
-    "web_sends": ["auto_yes", "program", "prompt", "repo_path", "title_base"],
-    "unsent_by_web": {
-      "title": "session.create.opt.title",
-      "in_place": "session.create.opt.inplace",
-      "force_remote": "session.create.opt.remote",
-      "backend": "session.create.opt.backend"
+
+    "requests": {
+      "PreviewRequest": {
+        "cli": {
+          "tab": { "gap": "session.preview-tab" },
+          "tab_id": { "gap": "session.preview-tab" },
+          "full": { "gap": "session.preview-full" }
+        }
+      },
+      "CreateSessionRequest": {
+        "cli": {
+          "title_base": { "ok": "The CLI sends Title and errors on a duplicate rather than auto-suffixing; title_base is the UIs' friendly-collision path. See session.create.opt.title." },
+          "force_remote": { "ok": "The CLI reaches the hook backend explicitly via --backend hook, which wins over the legacy ForceRemote selector (session/instance_factory.go:102-108). Setting both would be redundant." }
+        },
+        "tui": {
+          "backend": { "gap": "session.create.opt.backend" },
+          "in_place": { "gap": "session.create.opt.inplace" }
+        }
+      },
+      "CreateTabRequest": {
+        "cli": {
+          "id": { "gap": "wire.id-addressing" },
+          "shell": { "gap": "session.tab.create.shell" }
+        },
+        "tui": {
+          "id": { "gap": "wire.id-addressing" },
+          "command": { "gap": "session.tab.create.options" },
+          "name": { "gap": "session.tab.create.options" },
+          "kind": { "gap": "session.tab.create.options" },
+          "url": { "gap": "session.tab.create.web" },
+          "port": { "gap": "session.tab.create.web" }
+        }
+      },
+      "CloseTabRequest": {
+        "cli": {
+          "id": { "gap": "wire.id-addressing" },
+          "tab_index": { "ok": "The CLI addresses the tab by --name; tab_index is the ordinal fallback the daemon only consults when TabName is empty (daemon/control_types.go:248)." }
+        },
+        "tui": {
+          "id": { "gap": "wire.id-addressing" },
+          "tab_index": { "ok": "Same as the CLI: the TUI passes TabName, which is the daemon's preferred lookup key." }
+        }
+      },
+      "KillSessionRequest": {
+        "cli": { "id": { "gap": "wire.id-addressing" } },
+        "tui": { "id": { "gap": "wire.id-addressing" } }
+      },
+      "ArchiveSessionRequest": {
+        "cli": { "id": { "gap": "wire.id-addressing" } },
+        "tui": { "id": { "gap": "wire.id-addressing" } }
+      },
+      "SendPromptRequest": {
+        "cli": { "id": { "gap": "wire.id-addressing" } }
+      },
+      "DeliverPromptRequest": {
+        "cli": {
+          "defer_while_attached": { "ok": "A scheduler concern, not a user option: it holds a send while a TUI is attached full-screen (daemon/control_types.go:167). The daemon's own task delivery sets it; a human running `af sessions send-prompt --create` wants the prompt delivered now." }
+        }
+      }
+    },
+
+    "web_rpcs": {
+      "CreateSession": {
+        "title": { "ok": "The web sends title_base so the daemon auto-suffixes a collision and returns the resolved title (web/src/api.ts:236-238) — the TUI's friendly behavior. See session.create.opt.title." },
+        "in_place": { "gap": "session.create.opt.inplace" },
+        "force_remote": { "gap": "session.create.opt.remote" },
+        "backend": { "gap": "session.create.opt.backend" }
+      },
+      "CreateTab": {
+        "url": { "gap": "session.tab.create.web" },
+        "port": { "gap": "session.tab.create.web" }
+      }
     }
   }
 }
