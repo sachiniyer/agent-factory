@@ -58,16 +58,52 @@ type settableKeySpec struct {
 	validate func(leaf, value string) error
 }
 
-// settableKeySpecs is the allowlist. Scalars + the two simple string maps only;
-// root_agents (nested table) and [keys] (array-capable rebinds) are
-// intentionally excluded from v1 and stay hand-edited.
+// settableKeySpecs is the allowlist. Scalars + the two simple string maps only.
+//
+// Every EXCLUSION is deliberate and stated here, because an unexplained gap is
+// indistinguishable from drift — and was: listen_addr, require_loopback_token,
+// vscode_server_binary, limit_auto_resume and limit_retry_interval were all
+// missing for no stated reason, which left the config agent unable
+// to set two of the keys a new user most needs (listen_addr,
+// require_loopback_token). TestManifestAgreesWithSettableKeys now pins this map
+// against the config manifest, so a key can no longer go missing quietly: adding
+// a Settable entry to the manifest without an entry here fails the test, and
+// vice versa.
+//
+// Structural values stay hand-edited, and the manifest marks them Settable:false:
+//   - root_agents — a nested table (path → {program, auto_yes}); no scalar shape.
+//   - theme — a 19-slot color table; setting one slot at a time through the CLI
+//     is not how anyone edits a palette.
+//   - keys — array-capable rebinds (an action may map to a list of keys).
+//   - cors_allowed_origins — a LIST of origins, and the only excluded key that is
+//     otherwise scalar-ish. It needs real design first, not a spec entry: this
+//     file's machinery is scalar-only end to end (cfgValueKind has no list kind,
+//     canonicalizeScalar returns one encoded scalar, setTOMLScalar writes one
+//     `key = value` line), and a list also needs a decided WRITE SEMANTIC —
+//     whether `set` replaces the whole list, appends to it, or gets add/remove
+//     verbs — which is a CLI contract choice, not an implementation detail.
+//     Deferred rather than guessed.
 var settableKeySpecs = map[string]settableKeySpec{
 	"default_program": {kind: cfgString, validate: func(_, v string) error {
 		return ValidateProgramEnum("default_program", "default_program", v, "")
 	}},
-	"auto_yes":             {kind: cfgBool},
-	"auto_update":          {kind: cfgBool},
-	"require_token":        {kind: cfgBool},
+	"auto_yes":               {kind: cfgBool},
+	"auto_update":            {kind: cfgBool},
+	"require_token":          {kind: cfgBool},
+	"require_loopback_token": {kind: cfgBool},
+	"listen_addr": {kind: cfgString, validate: func(_, v string) error {
+		return validateListenAddrValue(v)
+	}},
+	// Empty is meaningful (detect code-server/openvscode-server on PATH) and any
+	// non-empty value is a path the daemon resolves — including a "~" it expands
+	// and a binary that may not exist yet — so there is nothing to validate here
+	// that would not reject a legitimate value. The executability check belongs
+	// where the binary is actually run, and already lives there.
+	"vscode_server_binary": {kind: cfgString},
+	"limit_auto_resume":    {kind: cfgBool},
+	"limit_retry_interval": {kind: cfgString, validate: func(_, v string) error {
+		return validateLimitRetryIntervalValue(v)
+	}},
 	"daemon_poll_interval": {kind: cfgInt, validate: func(_, v string) error { return requirePositiveInt("daemon_poll_interval", v) }},
 	"log_max_size_mb":      {kind: cfgInt, validate: func(_, v string) error { return requirePositiveInt("log_max_size_mb", v) }},
 	"log_max_backups":      {kind: cfgInt, validate: func(_, v string) error { return requireNonNegativeInt("log_max_backups", v) }},
