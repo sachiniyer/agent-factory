@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"errors"
 	"fmt"
 
 	"github.com/sachiniyer/agent-factory/config"
@@ -56,10 +57,36 @@ func (m *Manager) KillSession(req KillSessionRequest) (session.InstanceData, err
 	// never an interleaved teardown-vs-respawn. killsInFlight is registered
 	// BEFORE this acquire, so the restore loop's in-lock re-check sees the
 	// kill intent and aborts instead of racing to go first.
+	//
+	// BOUNDED, not blocking (#1917). The exclusion above is kept exactly — this
+	// is still a real mutex, and a kill still never interleaves with a respawn —
+	// but the wait now has a deadline. An unbounded Lock() here sits inside the
+	// killsInFlight guard, so a peer operation that wedges (a stuck Recover, a
+	// hung tmux/git subprocess under it) does not just delay this kill: it makes
+	// the session permanently undeletable, since every retry is then rejected by
+	// the guard this call is holding. Failing cleanly is strictly better than
+	// waiting forever, and it is safe to fail HERE specifically because we have
+	// not committed to anything yet — the tombstone below is the commit point, so
+	// a timeout at this line leaves the session bit-for-bit unchanged and the
+	// retry the error asks for is a true retry.
 	opLock := m.opLockFor(key)
-	opLock.Lock()
+	if !lockWithin(opLock, opLockTimeout) {
+		log.WarningLog.Printf("kill of session %q could not acquire its operation lock within %s; another operation on this session is not releasing it", req.Title, opLockTimeout)
+		return session.InstanceData{}, errKillBusy(req.Title, opLockTimeout)
+	}
 	defer opLock.Unlock()
 
+	// From here the kill is COMMITTED: the tombstone below is durable and the
+	// teardown mutates the workspace. Every remaining step is individually
+	// bounded (the instances flock, and the tmux/git subprocesses under
+	// instance.Kill), so this function terminates without needing to abandon work
+	// mid-flight. The watchdog only reports a stage — and stacks — if a step
+	// somehow outlives its own bound, so the next occurrence names its wedge
+	// point instead of leaving it to be inferred from logs (#1917).
+	stage := &killStage{}
+	defer watchKill(req.Title, stage)()
+
+	stage.set("checking instance identity")
 	if m.currentInstanceReplaced(key, instance, targetID) {
 		log.InfoLog.Printf("kill of session %q skipped: current instance identity changed before teardown", req.Title)
 		return resolved, nil
@@ -71,6 +98,7 @@ func (m *Manager) KillSession(req KillSessionRequest) (session.InstanceData, err
 	// teardown instead of classifying the vanished session Lost and restoring
 	// it. Best-effort: a failed tombstone write degrades to today's crash
 	// window, which must not block the kill itself.
+	stage.set("persisting kill tombstone")
 	m.persistKillTombstone(repoID, instance, data)
 
 	// Stop this session's VS Code editor before the worktree goes away: it is
@@ -86,16 +114,20 @@ func (m *Manager) KillSession(req KillSessionRequest) (session.InstanceData, err
 	// editor" holds on ordering rather than on timing.
 	vscodeKey := daemonInstanceKey(repoID, req.Title)
 	defer m.vscode.stopFor(vscodeKey)
+	stage.set("stopping vscode editor")
 	m.vscode.stopFor(vscodeKey)
 
 	if instance != nil {
+		stage.set("tearing down tmux + worktree")
 		if err := instance.Kill(); err != nil {
 			return session.InstanceData{}, fmt.Errorf("failed to kill instance: %w", err)
 		}
 	} else if data != nil {
+		stage.set("cleaning up ghost record")
 		ghostCleanup(data, req.Title)
 	}
 
+	stage.set("deleting record from storage")
 	state := config.LoadState()
 	storage, err := session.NewStorage(state, repoID)
 	if err != nil {
@@ -103,6 +135,17 @@ func (m *Manager) KillSession(req KillSessionRequest) (session.InstanceData, err
 	}
 	deleted, err := storage.DeleteInstanceByStableID(req.Title, targetID)
 	if err != nil {
+		// A contended instances flock is retryable and must SAY so (#1917): the
+		// tombstone is already durable, so the kill is committed and will be
+		// finished either by the user's retry or — with no further input — by
+		// finishUserKill on the next poll, which reaches this same delete once
+		// this call returns and releases killsInFlight. What must not happen is
+		// this call never returning: that is what starved the finisher and made
+		// the session undeletable until a daemon restart.
+		if errors.Is(err, config.ErrLockTimeout) {
+			log.WarningLog.Printf("kill of session %q: the instances record is locked by another agent-factory process; the kill is committed and the daemon will finish it on a later poll: %v", req.Title, err)
+			return session.InstanceData{}, fmt.Errorf("kill of session %q could not update its record because another agent-factory process is holding the repo's instances lock; the session is already marked killed and will be reaped automatically — retry if it lingers: %w", req.Title, err)
+		}
 		return session.InstanceData{}, fmt.Errorf("failed to delete instance from storage: %w", err)
 	}
 	if !deleted {

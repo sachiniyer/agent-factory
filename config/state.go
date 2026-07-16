@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/sachiniyer/agent-factory/log"
 )
@@ -349,13 +350,29 @@ func RepoInstancesPath(repoID string) (string, error) {
 	return repoInstancesPath(repoID)
 }
 
-// UpdateRepoInstances loads instances under a file lock, applies fn, and saves atomically.
+// RepoInstancesLockTimeout bounds how long UpdateRepoInstances waits for a repo's
+// instances flock. A var so tests can shorten it; production never reassigns.
+//
+// This lock is held only across a read-modify-write of one small JSON file, so
+// waiting seconds for it already means a peer is wedged rather than busy — and
+// the daemon holds much bigger things while it waits. A kill holds its session's
+// kill guard and op lock across this write, and the Lost-restore loop holds the
+// same op lock across its own; an unbounded wait there does not stall one write,
+// it makes the session permanently undeletable and starves the tombstone finisher
+// that would otherwise heal it (#1917). Failing with a retryable error is always
+// better than a daemon that cannot be asked to stop.
+var RepoInstancesLockTimeout = 10 * time.Second
+
+// UpdateRepoInstances loads instances under a file lock, applies fn, and saves
+// atomically. The lock is taken with a DEADLINE (see RepoInstancesLockTimeout):
+// contention surfaces as a retryable ErrLockTimeout rather than parking the
+// caller — and every caller here is the daemon, holding session-wide locks.
 func UpdateRepoInstances(repoID string, fn func(raw json.RawMessage) (json.RawMessage, error)) error {
 	path, err := repoInstancesPath(repoID)
 	if err != nil {
 		return err
 	}
-	return WithFileLock(path, func() error {
+	return WithFileLockTimeout(path, RepoInstancesLockTimeout, func() error {
 		raw, err := LoadRepoInstances(repoID)
 		if err != nil {
 			return err

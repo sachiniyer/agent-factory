@@ -350,11 +350,29 @@ func (s *Storage) DeleteInstance(title string) error {
 	return nil
 }
 
+// InstanceDeleteLockTimeout bounds how long DeleteInstanceByStableID waits for
+// the per-repo instances flock. A var so tests can shorten it; production never
+// reassigns.
+//
+// The delete is the LAST step of a session kill, and the daemon runs it holding
+// that session's kill guard, so an unbounded wait here does not just stall one
+// write — it strands a session whose kill-intent tombstone is already on disk,
+// leaving it undeletable for the daemon's whole lifetime (#1917). The budget is
+// generous: this lock is held only across a read-modify-write of one small JSON
+// file, so exceeding it means a peer is genuinely wedged, not merely slow.
+var InstanceDeleteLockTimeout = 10 * time.Second
+
 // DeleteInstanceByStableID removes an instance from storage only when the
 // record still matches the stable session identity captured by the caller. A
 // false nil result means a same-titled record exists but belongs to a different
 // instance, so the caller must treat the delete as stale and leave it alone.
 // Empty IDs are legacy-compatible and fall back to title matching.
+//
+// It takes the instances flock with a DEADLINE (config.WithFileLockTimeout), not
+// the blocking WithFileLock every other Storage writer uses: a contended lock
+// surfaces as a retryable config.ErrLockTimeout instead of parking the caller
+// forever. See InstanceDeleteLockTimeout for why this writer in particular
+// cannot afford an unbounded wait.
 func (s *Storage) DeleteInstanceByStableID(title, id string) (bool, error) {
 	path, pathErr := config.RepoInstancesPath(s.repoID)
 	if pathErr != nil {
@@ -362,7 +380,7 @@ func (s *Storage) DeleteInstanceByStableID(title, id string) (bool, error) {
 	}
 	deleted := false
 	sameTitleDifferentID := false
-	if err := config.WithFileLock(path, func() error {
+	if err := config.WithFileLockTimeout(path, InstanceDeleteLockTimeout, func() error {
 		raw, err := s.state.GetInstances(s.repoID)
 		if err != nil {
 			return err

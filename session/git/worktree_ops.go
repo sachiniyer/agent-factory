@@ -1,13 +1,15 @@
 package git
 
 import (
+	"context"
 	"errors"
 	"fmt"
-	"github.com/sachiniyer/agent-factory/log"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+
+	"github.com/sachiniyer/agent-factory/log"
 )
 
 // Setup creates a new worktree for the session
@@ -288,8 +290,11 @@ func (g *GitWorktree) Cleanup() error {
 
 	// Check if worktree path exists before attempting removal
 	if _, err := os.Stat(g.worktreePath); err == nil {
-		// Remove the worktree using git command
-		if _, err := g.runGitCommand(g.repoPath, "worktree", "remove", "-f", g.worktreePath); err != nil {
+		// Remove the worktree using git command. Bounded by localGitTimeout
+		// (#1917): this recursive delete is the one local git command that
+		// genuinely stalls forever (hung mount, D-state process in the tree), and
+		// Cleanup runs inside the daemon's kills-in-flight guard.
+		if _, err := g.runGitLocalCommand(g.repoPath, "worktree", "remove", "-f", g.worktreePath); err != nil {
 			log.ErrorLog.Printf("failed to remove worktree %s: %v", g.worktreePath, err)
 			// A failed `git worktree remove -f` may still have released the
 			// registration. Decide whether the directory is ours to delete
@@ -311,16 +316,8 @@ func (g *GitWorktree) Cleanup() error {
 			//     know why removal failed — surface the error instead of
 			//     deleting data (preserves the best-effort Kill behavior of
 			//     #478).
-			removeDir := false
-			if registered, listErr := g.isWorktreeRegistered(); listErr == nil && !registered {
-				removeDir = true
-			} else if strings.Contains(err.Error(), "validation failed") {
-				// Also the path taken when `worktree list` itself failed
-				// (listErr != nil): without a readable registration we fall
-				// back to the conservative #726 string gate.
-				removeDir = true
-			}
-			if removeDir {
+			//   - Timed out: never ours to delete (#1917, see the helper).
+			if g.shouldRemoveWorktreeDir(err) {
 				if removeErr := os.RemoveAll(g.worktreePath); removeErr != nil {
 					errs = append(errs, fmt.Errorf("failed to remove worktree directory %s: %w", g.worktreePath, removeErr))
 				}
@@ -348,7 +345,8 @@ func (g *GitWorktree) Cleanup() error {
 	// reused a pre-existing branch via setupFromExistingBranch(), the branch
 	// may contain unrelated user work and must be preserved.
 	if g.branchCreatedByUs {
-		if _, err := g.runGitCommand(g.repoPath, "branch", "-D", g.branchName); err != nil {
+		// Bounded (#1917): teardown path — see runGitLocalCommand.
+		if _, err := g.runGitLocalCommand(g.repoPath, "branch", "-D", g.branchName); err != nil {
 			// Only log if it's not a "branch not found" error
 			if !strings.Contains(err.Error(), "not found") {
 				errs = append(errs, fmt.Errorf("failed to remove branch %s: %w", g.branchName, err))
@@ -369,13 +367,43 @@ func (g *GitWorktree) Cleanup() error {
 	return nil
 }
 
+// shouldRemoveWorktreeDir decides whether Cleanup may delete the worktree
+// directory itself after `git worktree remove -f` returned removeErr. It is the
+// #802/#726 decision tree documented at the call site, plus the #1917 timeout
+// guard below.
+func (g *GitWorktree) shouldRemoveWorktreeDir(removeErr error) bool {
+	if errors.Is(removeErr, context.DeadlineExceeded) {
+		// The removal did not FAIL, it never FINISHED: git was SIGKILLed
+		// mid-delete on localGitTimeout. Two reasons that is not a verdict we
+		// may act on. First, the registration state is a snapshot of a half-done
+		// operation rather than git's considered answer. Second — and decisive —
+		// whatever stalled git (a hung mount, a D-state process holding a file in
+		// the tree) will stall os.RemoveAll on the very same paths, and
+		// os.RemoveAll takes no context, so it would hang FOREVER and defeat the
+		// bound we just added. This is tmuxTimeoutContext's rule one layer up:
+		// after a tripped deadline, never re-probe the thing that just wedged.
+		// Surfacing the timeout leaves the directory for a later kill to retry,
+		// which is the recoverable outcome.
+		return false
+	}
+	if registered, listErr := g.isWorktreeRegistered(); listErr == nil && !registered {
+		return true
+	}
+	// Also the path taken when `worktree list` itself failed (listErr != nil):
+	// without a readable registration we fall back to the conservative #726
+	// string gate.
+	return strings.Contains(removeErr.Error(), "validation failed")
+}
+
 // isWorktreeRegistered reports whether git still lists g.worktreePath as a
 // registered worktree of the repo. Used after a failed `git worktree remove`
 // to distinguish "git released the worktree but the directory survived"
 // (safe to delete manually, #802) from "git still owns the path" (not ours
 // to second-guess).
 func (g *GitWorktree) isWorktreeRegistered() (bool, error) {
-	output, err := g.runGitCommand(g.repoPath, "worktree", "list", "--porcelain")
+	// Bounded (#1917): this is Cleanup's error-path probe, so it must not be the
+	// step that hangs the kill the bounded `worktree remove` above just rescued.
+	output, err := g.runGitLocalCommand(g.repoPath, "worktree", "list", "--porcelain")
 	if err != nil {
 		return false, err
 	}
@@ -402,9 +430,10 @@ func normalizeWorktreePath(p string) string {
 	return p
 }
 
-// Prune removes all working tree administrative files and directories
+// Prune removes all working tree administrative files and directories.
+// Bounded by localGitTimeout (#1917): both callers are on Cleanup's teardown path.
 func (g *GitWorktree) Prune() error {
-	if _, err := g.runGitCommand(g.repoPath, "worktree", "prune"); err != nil {
+	if _, err := g.runGitLocalCommand(g.repoPath, "worktree", "prune"); err != nil {
 		return fmt.Errorf("failed to prune worktrees: %w", err)
 	}
 	return nil

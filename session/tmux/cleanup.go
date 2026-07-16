@@ -21,10 +21,42 @@ func (t *TmuxSession) DoesSessionExist() bool {
 // sessionExists reports whether a tmux session with the exact name `name`
 // currently exists. Shared by DoesSessionExist and the receiver-less
 // CleanupSessions path so both probe identically.
+//
+// Bounded by tmuxCommandTimeout (#1917): has-session against a wedged server
+// parks forever, and this probe is the fallback on nearly every tmux error path
+// in the package — including Close's, on the daemon's undeletable-session
+// teardown.
+//
+// A tripped deadline reports TRUE (exists). The bool cannot express "unknown",
+// so the answer has to be the one that is safe to be wrong about, and every
+// caller that acts destructively acts on FALSE: Close reaps the session's
+// process trees, and io.go/clientless.go raise ErrSessionGone, which the daemon
+// reads as a confirmed death. A false "gone" against a server that is merely
+// wedged would SIGKILL a live agent's process tree and tear down a session that
+// is still running — the exact mistake tmuxTimeoutContext exists to prevent. A
+// false "exists" only costs a best-effort skip, so it is the conservative lie.
+//
+// Callers that must not paper over the difference do not use this probe at all:
+// they check ctx.Err() on their own bounded command and skip it entirely (see
+// tmuxTimeoutContext, and Close's kill-session timeout branch).
+//
+// A non-timeout failure — the usual `has-session` exit 1 for "no such session",
+// or any other tmux error — still reports false, preserving the pre-#1917
+// conflation callers already relied on.
 func sessionExists(cmdExec cmd.Executor, name string) bool {
+	ctx, cancel := tmuxTimeoutContext()
+	defer cancel()
 	// Using "-t name" does a prefix match, which is wrong. `-t=` does an exact match.
-	existsCmd := exec.Command("tmux", "has-session", fmt.Sprintf("-t=%s", name))
-	return cmdExec.Run(existsCmd) == nil
+	err := runTmuxBoundedWith(ctx, cmdExec, "has-session", fmt.Sprintf("-t=%s", name))
+	if err == nil {
+		return true
+	}
+	if ctx.Err() != nil {
+		log.WarningLog.Printf("tmux has-session for %s timed out after %s; the server is wedged, so "+
+			"reporting the session as still present rather than risk a false teardown", name, tmuxCommandTimeout)
+		return true
+	}
+	return false
 }
 
 // exactTarget builds an exact-match `-t` target spec for the named session.

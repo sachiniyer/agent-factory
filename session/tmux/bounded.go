@@ -7,6 +7,8 @@ import (
 	"os/exec"
 	"syscall"
 	"time"
+
+	"github.com/sachiniyer/agent-factory/cmd"
 )
 
 // Bounded tmux control commands (#1787).
@@ -31,6 +33,14 @@ import (
 // captureMu hold finite, so no lock restructuring is needed. CapturePaneContentContext
 // already established the exec.CommandContext pattern here; this generalizes it
 // for the commands that had no context to thread.
+//
+// #1917 extended the same treatment to the TEARDOWN commands (kill-session,
+// has-session, display-message #{pane_pid}, list-panes), which had stayed on bare
+// exec.Command. daemon.KillSession runs the whole teardown with no deadline of its
+// own while holding a per-session kills-in-flight guard, so a single unbounded tmux
+// call there does not merely stall one kill: it makes that session permanently
+// undeletable for the daemon's entire lifetime. Every tmux command in this package
+// is now bounded; new ones must be too.
 //
 // A var (not a const) only so tests can shorten it; production never reassigns.
 var tmuxCommandTimeout = 10 * time.Second
@@ -87,20 +97,33 @@ func reapTmuxGroup(cmd *exec.Cmd) {
 	}
 }
 
+// runTmuxBoundedWith runs a tmux command under ctx against an explicit executor,
+// discarding output. The receiver-less teardown helpers (sessionExists,
+// SessionProcessTrees) are handed a cmd.Executor rather than a TmuxSession, so
+// they cannot use the methods below; this is the same body they share.
+func runTmuxBoundedWith(ctx context.Context, cmdExec cmd.Executor, args ...string) error {
+	c := boundedTmuxCommand(ctx, args...)
+	err := cmdExec.Run(c)
+	reapTmuxGroup(c)
+	return normalizeWaitDelay(err)
+}
+
+// outputTmuxBoundedWith is outputTmuxBounded against an explicit executor.
+func outputTmuxBoundedWith(ctx context.Context, cmdExec cmd.Executor, args ...string) ([]byte, error) {
+	c := boundedTmuxCommand(ctx, args...)
+	out, err := cmdExec.Output(c)
+	reapTmuxGroup(c)
+	return out, normalizeWaitDelay(err)
+}
+
 // runTmuxBounded runs a tmux command under tmuxCommandTimeout, discarding output.
 func (t *TmuxSession) runTmuxBounded(ctx context.Context, args ...string) error {
-	cmd := boundedTmuxCommand(ctx, args...)
-	err := t.cmdExec.Run(cmd)
-	reapTmuxGroup(cmd)
-	return normalizeWaitDelay(err)
+	return runTmuxBoundedWith(ctx, t.cmdExec, args...)
 }
 
 // outputTmuxBounded runs a tmux command under tmuxCommandTimeout and returns stdout.
 func (t *TmuxSession) outputTmuxBounded(ctx context.Context, args ...string) ([]byte, error) {
-	cmd := boundedTmuxCommand(ctx, args...)
-	out, err := t.cmdExec.Output(cmd)
-	reapTmuxGroup(cmd)
-	return out, normalizeWaitDelay(err)
+	return outputTmuxBoundedWith(ctx, t.cmdExec, args...)
 }
 
 // normalizeWaitDelay converts an exec.ErrWaitDelay into success: tmux itself

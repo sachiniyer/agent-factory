@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"strconv"
 	"strings"
 	"syscall"
@@ -27,15 +26,29 @@ func (t *TmuxSession) Close() error {
 	// (#1104).
 	leaked := SessionProcessTrees(t.cmdExec, t.sanitizedName)
 
-	cmd := exec.Command("tmux", "kill-session", "-t", exactTarget(t.sanitizedName))
-	if err := t.cmdExec.Run(cmd); err != nil {
-		// Idempotent teardown (#967): a kill-session that fails because the
-		// session is already gone has achieved Close's goal — a dead session
-		// is the desired end state. Only a session that survives the kill is a
-		// genuine failure. Probe has-session rather than matching tmux's bare
-		// "exit status 1", which it reuses for unrelated errors. Mirrors the
-		// `_`-ignored cleanup kill in Start (above).
-		if t.DoesSessionExist() {
+	// Bounded by tmuxCommandTimeout (#1917): an unbounded kill-session against a
+	// wedged server blocks daemon.KillSession forever behind its kills-in-flight
+	// guard, leaving the session undeletable until the daemon restarts.
+	ctx, cancel := tmuxTimeoutContext()
+	defer cancel()
+	if err := t.runTmuxBounded(ctx, "kill-session", "-t", exactTarget(t.sanitizedName)); err != nil {
+		switch {
+		case ctx.Err() != nil:
+			// The deadline tripped, so the session's real state is UNKNOWN. Do
+			// NOT probe has-session: it would spawn another tmux command against
+			// the same wedged server and hang identically, defeating the bound we
+			// just came here for (see tmuxTimeoutContext). Report the timeout and
+			// take the conservative branch — a session we cannot confirm dead may
+			// well be alive, and its processes are then not leaks.
+			errs = append(errs, fmt.Errorf("%w: kill-session after %s", ErrTmuxTimeout, tmuxCommandTimeout))
+			leaked = nil
+		case t.DoesSessionExist():
+			// Idempotent teardown (#967): a kill-session that fails because the
+			// session is already gone has achieved Close's goal — a dead session
+			// is the desired end state. Only a session that survives the kill is a
+			// genuine failure. Probe has-session rather than matching tmux's bare
+			// "exit status 1", which it reuses for unrelated errors. Mirrors the
+			// `_`-ignored cleanup kill in Start (above).
 			errs = append(errs, fmt.Errorf("error killing tmux session: %w", err))
 			// The session survived — its processes are not leaks. Do not reap.
 			leaked = nil
@@ -92,6 +105,14 @@ const paneExitWait = 3 * time.Second
 // any directory removal that follows and leaves a half-deleted worktree
 // behind ("Directory not empty", #802). Callers that delete the session's
 // worktree right after teardown must use this instead of Close.
+//
+// paneExitWait bounds ONLY the waitForPIDExit poll below, NOT the whole call —
+// a distinction #1917 was misread on. The tmux commands are what a wedged server
+// stalls, and each carries its own tmuxCommandTimeout: display-message (panePID),
+// then Close's list-panes, kill-session, and at most one has-session probe. So the
+// real worst case is ~4×tmuxCommandTimeout + paneExitWait, all of it finite —
+// which is the property daemon.KillSession needs, since it holds a per-session
+// kills-in-flight guard across this call with no deadline of its own.
 func (t *TmuxSession) CloseAndWaitForPaneExit() error {
 	pid, pidErr := t.panePID()
 	closeErr := t.Close()
@@ -113,9 +134,17 @@ func (t *TmuxSession) panePID() (int, error) {
 	// exactTarget forces an exact session match, mirroring DoesSessionExist.
 	// (The bare `=name` form returns an empty pane_pid for display-message —
 	// the trailing `:` in exactTarget is what makes the pid resolve. See #1006.)
-	cmd := exec.Command("tmux", "display-message", "-p", "-t", exactTarget(t.sanitizedName), "#{pane_pid}")
-	output, err := t.cmdExec.Output(cmd)
+	//
+	// Bounded by tmuxCommandTimeout (#1917): this is the FIRST tmux command on
+	// the kill teardown, so an unbounded stall here wedges the kill before
+	// kill-session is even attempted.
+	ctx, cancel := tmuxTimeoutContext()
+	defer cancel()
+	output, err := t.outputTmuxBounded(ctx, "display-message", "-p", "-t", exactTarget(t.sanitizedName), "#{pane_pid}")
 	if err != nil {
+		if ctx.Err() != nil {
+			return 0, fmt.Errorf("%w: display-message pane_pid after %s", ErrTmuxTimeout, tmuxCommandTimeout)
+		}
 		return 0, fmt.Errorf("failed to query pane pid: %w", err)
 	}
 	pid, err := strconv.Atoi(strings.TrimSpace(string(output)))

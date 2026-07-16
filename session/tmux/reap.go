@@ -1,7 +1,6 @@
 package tmux
 
 import (
-	"os/exec"
 	"strconv"
 	"strings"
 	"time"
@@ -52,9 +51,17 @@ var (
 // teardown paths call it BEFORE kill-session; `af doctor` uses it to map a
 // live session's legitimate processes. Returns nil on any failure — callers
 // treat it as strictly best-effort.
+//
+// The list-panes probe is bounded by tmuxCommandTimeout (#1917): it runs first
+// on the kill teardown, so an unbounded stall here wedges the kill before
+// kill-session is even attempted. A tripped deadline degrades to the existing
+// nil (best-effort) result — nothing is reaped, which is the safe direction: a
+// wedged server has told us nothing about which processes are actually leaked.
 func SessionProcessTrees(cmdExec cmd.Executor, sanitizedName string) []proctree.Process {
-	out, err := cmdExec.Output(exec.Command(
-		"tmux", "list-panes", "-s", "-t", exactTarget(sanitizedName), "-F", "#{pane_pid}"))
+	ctx, cancel := tmuxTimeoutContext()
+	defer cancel()
+	out, err := outputTmuxBoundedWith(ctx, cmdExec,
+		"list-panes", "-s", "-t", exactTarget(sanitizedName), "-F", "#{pane_pid}")
 	if err != nil {
 		return nil
 	}

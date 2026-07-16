@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"time"
 
 	"github.com/pelletier/go-toml/v2"
 )
@@ -163,8 +164,28 @@ func MigrateSchemaBytes(raw []byte, plan SchemaMigrationPlan) ([]byte, SchemaMig
 	return upgraded, result, nil
 }
 
+// SchemaMigrationLockTimeout bounds how long LoadAndMigrateSchemaFile waits for a
+// schema-versioned file's flock. A var so tests can shorten it; production never
+// reassigns.
+//
+// This is the most dangerous unbounded flock in the tree, because of WHERE it is
+// called from rather than what it does: the daemon reaches it on every instance
+// refresh (refreshDaemonInstances -> MigrateAllRepoInstancesForDaemonLoad) while
+// holding the manager's global lock, and a session kill reaches that refresh
+// before it has done anything else. Parking here therefore does not stall one
+// migration — it freezes the whole daemon, including the RPC that would report
+// the problem and the shutdown that would clear it (#1917: a wedged daemon also
+// failed to exit on SIGTERM and had to be SIGKILLed).
+//
+// The lock is held across a read + in-place migrate + atomic write of one small
+// file, so a wait beyond this budget means a peer is wedged, not slow.
+var SchemaMigrationLockTimeout = 10 * time.Second
+
 // LoadAndMigrateSchemaFile reads, migrates, validates, backs up, and atomically
-// writes back one schema-versioned file under its file lock.
+// writes back one schema-versioned file under its file lock. The lock is taken
+// with a DEADLINE (see SchemaMigrationLockTimeout): contention surfaces as a
+// retryable ErrLockTimeout instead of freezing the caller — which, on the daemon's
+// refresh path, means freezing the daemon.
 func LoadAndMigrateSchemaFile(plan SchemaMigrationPlan) ([]byte, SchemaMigrationResult, error) {
 	if plan.Path == "" {
 		return nil, SchemaMigrationResult{}, fmt.Errorf("schema migration path is required")
@@ -176,7 +197,7 @@ func LoadAndMigrateSchemaFile(plan SchemaMigrationPlan) ([]byte, SchemaMigration
 
 	var migrated []byte
 	var result SchemaMigrationResult
-	err := WithFileLock(plan.Path, func() error {
+	err := WithFileLockTimeout(plan.Path, SchemaMigrationLockTimeout, func() error {
 		raw, err := os.ReadFile(plan.Path)
 		if err != nil {
 			return fmt.Errorf("%s: read: %w", describeSchemaStore(plan.StoreName, plan.Path), err)

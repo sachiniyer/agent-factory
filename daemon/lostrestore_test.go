@@ -80,11 +80,17 @@ func zeroRestoreBackoff(t *testing.T) {
 
 // TestRestoreLostSessions_RecoversLostInstance: the core loop — a Lost local
 // session gets exactly one Recover, comes back Running, and its retry state is
-// dropped.
+// dropped once the recovery is CONFIRMED.
 func TestRestoreLostSessions_RecoversLostInstance(t *testing.T) {
 	manager, repoID, repoPath := newStatusTestManager(t)
 	backend := &recoverFakeBackend{FakeBackend: session.NewFakeBackend()}
 	inst := registerStarted(t, manager, repoID, repoPath, "stranded", backend, true, session.Lost)
+
+	// Settle immediately, so "recovered" resolves within this test. The confirmation
+	// window itself is covered by the #1910 tests in lostrestore_confirm_test.go.
+	prevSettle := lostRestoreConfirmSettle
+	lostRestoreConfirmSettle = 0
+	t.Cleanup(func() { lostRestoreConfirmSettle = prevSettle })
 
 	manager.RestoreLostSessions()
 
@@ -94,11 +100,17 @@ func TestRestoreLostSessions_RecoversLostInstance(t *testing.T) {
 	if got := inst.GetStatus(); got != session.Running {
 		t.Fatalf("status = %v, want Running after recovery", got)
 	}
+	// A second pass is what CONFIRMS the runtime: it observes the row still
+	// non-Lost past the settle interval and only then forgets the episode. This
+	// assertion used to run against the first pass and require the state to be gone
+	// the instant the spawn returned — which is exactly the #1910 bug, since a spawn
+	// returning proves nothing about whether the runtime survives.
+	manager.RestoreLostSessions()
 	manager.mu.Lock()
 	_, hasState := manager.lostRestoreStates[daemonInstanceKey(repoID, "stranded")]
 	manager.mu.Unlock()
 	if hasState {
-		t.Fatal("successful recovery must drop the retry state")
+		t.Fatal("a confirmed-alive recovery must drop the retry state")
 	}
 
 	// A healed session must not be touched again.

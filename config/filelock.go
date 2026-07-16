@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"syscall"
+	"time"
 
 	"github.com/sachiniyer/agent-factory/log"
 )
@@ -41,10 +42,74 @@ func TryWithFileLock(path string, fn func() error) (acquired bool, err error) {
 	return true, fn()
 }
 
+// ErrLockTimeout is returned by WithFileLockTimeout when the flock could not be
+// acquired within the caller's budget. Callers match on it (errors.Is) to tell a
+// contended lock — retryable, the work never ran — from a real failure of fn.
+var ErrLockTimeout = errors.New("timed out waiting for file lock")
+
+// WithFileLockTimeout is WithFileLock bounded by a deadline: it runs fn under the
+// same exclusive flock, but gives up with ErrLockTimeout rather than waiting
+// forever. fn is never run unless the lock was actually held.
+//
+// It is the third point on the line TryWithFileLock and WithFileLock already
+// stake out, and it exists for callers who must genuinely DO the work (so
+// TryWithFileLock's "assume a peer has it in hand" contract is wrong for them)
+// but who must also never hang (so WithFileLock is wrong too). The daemon's kill
+// path is the motivating case: it must delete the record, and it holds a
+// session-wide guard while doing it, so an unbounded wait here does not merely
+// stall one write — it makes the session permanently undeletable (#1917).
+//
+// Acquisition polls LOCK_NB rather than parking in LOCK_EX because flock offers
+// no timed acquire: a blocking Flock cannot be interrupted or given a deadline.
+// Polling costs a wakeup every lockPollInterval while contended and trades away
+// flock's (already unspecified) queueing fairness; the caller's budget bounds how
+// long that lasts. The fd is opened ONCE and reused across attempts so a
+// contended retry does not churn the lock file.
+func WithFileLockTimeout(path string, timeout time.Duration, fn func() error) error {
+	lockPath := path + ".lock"
+
+	if err := os.MkdirAll(filepath.Dir(lockPath), 0755); err != nil {
+		return fmt.Errorf("failed to create lock directory: %w", err)
+	}
+
+	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0644)
+	if err != nil {
+		return fmt.Errorf("failed to open lock file %s: %w", lockPath, err)
+	}
+	defer f.Close()
+
+	deadline := time.Now().Add(timeout)
+	for {
+		err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+		if err == nil {
+			defer syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+			return fn()
+		}
+		if !errors.Is(err, syscall.EWOULDBLOCK) {
+			return fmt.Errorf("failed to acquire file lock on %s: %w", lockPath, err)
+		}
+		if !time.Now().Before(deadline) {
+			return fmt.Errorf("%w on %s after %s (another agent-factory process is holding it)", ErrLockTimeout, lockPath, timeout)
+		}
+		// Sleep no longer than the remaining budget, so the effective wait
+		// matches the caller's timeout instead of overshooting by up to a poll.
+		wait := lockPollInterval
+		if remaining := time.Until(deadline); remaining < wait {
+			wait = remaining
+		}
+		time.Sleep(wait)
+	}
+}
+
+// lockPollInterval is how often WithFileLockTimeout re-attempts a contended
+// flock. A var so tests can shorten it; production never reassigns.
+var lockPollInterval = 20 * time.Millisecond
+
 // WithFileLock acquires an exclusive flock on a .lock file adjacent to the target path,
 // executes fn, and releases the lock. This ensures atomic read-modify-write sequences
 // across multiple processes. It BLOCKS until the lock is free; see
-// TryWithFileLock when a user is waiting on the result.
+// TryWithFileLock when a user is waiting on the result, or WithFileLockTimeout
+// when the caller must do the work but must not hang (#1917).
 func WithFileLock(path string, fn func() error) error {
 	lockPath := path + ".lock"
 
