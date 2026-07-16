@@ -1,6 +1,7 @@
 package apiclient
 
 import (
+	"context"
 	"encoding/json"
 	"net"
 	"net/http"
@@ -87,7 +88,7 @@ func TestControlRoundTrips(t *testing.T) {
 		c := routeServer(t, "KillSession", func([]byte) apiproto.Envelope {
 			return apiproto.Success(daemon.KillSessionResponse{OK: true})
 		})
-		if err := c.KillSession(daemon.KillSessionRequest{Title: "alpha"}); err != nil {
+		if err := c.KillSession(context.Background(), daemon.KillSessionRequest{Title: "alpha"}); err != nil {
 			t.Fatalf("KillSession: %v", err)
 		}
 	})
@@ -142,7 +143,7 @@ func TestControlError_SurfacesEnvelopeMessage(t *testing.T) {
 	c := routeServer(t, "KillSession", func([]byte) apiproto.Envelope {
 		return apiproto.Failure("session \"ghost\" not found")
 	})
-	err := c.KillSession(daemon.KillSessionRequest{Title: "ghost"})
+	err := c.KillSession(context.Background(), daemon.KillSessionRequest{Title: "ghost"})
 	if err == nil || err.Error() != "session \"ghost\" not found" {
 		t.Fatalf("want verbatim daemon message, got %v", err)
 	}
@@ -156,7 +157,7 @@ func TestControlError_SurfacesEnvelopeMessage(t *testing.T) {
 // just-spawned daemon's HTTP socket finishes binding.
 func TestTransportError_OnUnreachableSocket(t *testing.T) {
 	c := NewWithSocket(filepath.Join(t.TempDir(), "does-not-exist.sock"))
-	err := c.KillSession(daemon.KillSessionRequest{Title: "x"})
+	err := c.KillSession(context.Background(), daemon.KillSessionRequest{Title: "x"})
 	if err == nil {
 		t.Fatal("want an error dialing a dead socket")
 	}

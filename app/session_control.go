@@ -1,6 +1,9 @@
 package app
 
 import (
+	"context"
+	"errors"
+	"fmt"
 	"time"
 
 	"github.com/sachiniyer/agent-factory/apiclient"
@@ -67,7 +70,17 @@ var withDaemonHTTP = func(fn func(*apiclient.Client) error) error {
 // failure while its HTTP socket finishes binding. A daemon application error
 // (session not found, invalid repo) comes back as an envelope message — never a
 // TransportError — so it is never retried and surfaces to the caller at once.
+//
+// A cancelled or expired context is NOT warming, even though it arrives dressed
+// as a TransportError (http.Client reports it through the round-trip, which this
+// package tags). It means the CALLER gave up, so every retry re-issues the call
+// with the same dead context and fails instantly: a bounded call (killRPCTimeout)
+// would burn its entire warm-up window spinning on a request that cannot
+// succeed, and would report the deadline seconds after it actually fired.
 func httpCallWarming(err error) bool {
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+		return false
+	}
 	return daemon.IsDaemonStartingErr(err) || apiclient.IsTransportError(err)
 }
 
@@ -102,10 +115,41 @@ var startSessionThroughDaemon = func(_ *session.Instance, req sessionStartReques
 	return session.FromInstanceData(*data)
 }
 
+// killRPCTimeout bounds the kill round-trip so the TUI can never wedge on a
+// daemon that accepts the request and then never answers — the failure that
+// stranded rows in `Deleting` forever with no error shown. It is deliberately
+// generous: a kill tears down tmux, removes a worktree, and prunes a branch, so
+// seconds are normal and only a genuinely stuck daemon reaches a minute.
+//
+// This bound is scoped to the kill rather than applied to every local call on
+// purpose. The local socket has no overall deadline BY DESIGN (apiclient.Client's
+// requestTimeout doc): a local CreateSession legitimately runs long provisioning a
+// worktree and waiting for agent readiness, and a blanket timeout would sever it.
+// Kill is different only in that its caller holds a fence that nothing else can
+// clear.
+//
+// A var, not a const, so the regression test can shorten it and assert the bound
+// actually fires rather than waiting a real minute.
+var killRPCTimeout = 60 * time.Second
+
 var killSessionThroughDaemon = func(title, repoID string) error {
-	return withDaemonHTTP(func(c *apiclient.Client) error {
-		return c.KillSession(daemon.KillSessionRequest{Title: title, RepoID: repoID})
+	ctx, cancel := context.WithTimeout(context.Background(), killRPCTimeout)
+	defer cancel()
+	err := withDaemonHTTP(func(c *apiclient.Client) error {
+		return c.KillSession(ctx, daemon.KillSessionRequest{Title: title, RepoID: repoID})
 	})
+	// A deadline here means the daemon took the request and went quiet, so this
+	// client genuinely does not know whether the teardown happened — say exactly
+	// that instead of implying the kill failed. The row reverts to its real
+	// liveness and the next daemon snapshot reconciles whichever way it went, so a
+	// teardown that did complete still lands.
+	if errors.Is(err, context.DeadlineExceeded) {
+		return fmt.Errorf(
+			"daemon did not respond within %s — it may be wedged or busy recovering this session; "+
+				"the teardown may still finish in the background. Check `af sessions list`, "+
+				"or restart the daemon with `af daemon restart`", killRPCTimeout)
+	}
+	return err
 }
 
 // archiveSessionThroughDaemon / restoreSessionThroughDaemon route archive and
