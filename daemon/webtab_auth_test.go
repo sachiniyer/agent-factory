@@ -37,3 +37,35 @@ func TestWebTabAwareToken_CookieScopedToWebtabPath(t *testing.T) {
 		t.Fatalf("header token: got %q, want header-tok", got)
 	}
 }
+
+// TestWebTabAwareToken_UsesPrivateQueryParam is the P1 token-conflation guard at
+// the auth layer: under the webtab path the daemon's credential rides its OWN
+// query param, and a proxied app's ?access_token= must NOT be read as it — that
+// misread is exactly what 401'd the iframe before the fix.
+func TestWebTabAwareToken_UsesPrivateQueryParam(t *testing.T) {
+	// The daemon's private param authorizes.
+	r := httptest.NewRequest(http.MethodGet, "/v1/webtab/sess/tab/index.html?af_webtab_token=daemon-tok", nil)
+	if got := webTabAwareToken(r); got != "daemon-tok" {
+		t.Fatalf("webtab af_webtab_token: got %q, want daemon-tok", got)
+	}
+
+	// A proxied app's OWN access_token is invisible to the gate — never mistaken
+	// for the daemon credential.
+	app := httptest.NewRequest(http.MethodGet, "/v1/webtab/sess/tab/api?access_token=app-value", nil)
+	if got := webTabAwareToken(app); got != "" {
+		t.Fatalf("webtab app access_token: got %q, want empty (it is the app's, not the daemon's)", got)
+	}
+
+	// Both present, app's first: the daemon still reads its own, so auth holds even
+	// when the app puts its token in the leading position.
+	both := httptest.NewRequest(http.MethodGet, "/v1/webtab/sess/tab/api?access_token=app-value&af_webtab_token=daemon-tok", nil)
+	if got := webTabAwareToken(both); got != "daemon-tok" {
+		t.Fatalf("webtab both tokens: got %q, want daemon-tok", got)
+	}
+
+	// Off the webtab path, ?access_token= is still the general browser/WS fallback.
+	gen := httptest.NewRequest(http.MethodGet, "/v1/agent/stream?access_token=general-tok", nil)
+	if got := webTabAwareToken(gen); got != "general-tok" {
+		t.Fatalf("general access_token: got %q, want general-tok", got)
+	}
+}

@@ -248,12 +248,22 @@ func writeVSCodeNoticePage(w http.ResponseWriter, message string) {
 }
 
 func writeVSCodeNoticePageRetry(w http.ResponseWriter, message string, retry bool) {
+	writeTabNoticePage(w, "VS Code", message, retry)
+}
+
+// writeTabNoticePage is writeVSCodeNoticePage's kind-agnostic form: the same
+// notice, under a caller-chosen title. A web tab frames the SAME route as an
+// editor, so a notice that can be reached before the tab's kind is known (the
+// warm-up gate, #1878) must not announce itself as VS Code to someone previewing
+// their dev server. title is escaped like the message — no caller can inject
+// markup through it.
+func writeTabNoticePage(w http.ResponseWriter, title, message string, retry bool) {
 	refresh := ""
 	if retry {
 		refresh = `<meta http-equiv="refresh" content="2">`
 	}
 	body := fmt.Sprintf(`<!doctype html>
-<html><head><meta charset="utf-8"><title>VS Code</title>%s
+<html><head><meta charset="utf-8"><title>%s</title>%s
 <style>
  html,body{margin:0;height:100%%}
  body{display:flex;align-items:center;justify-content:center;
@@ -262,7 +272,7 @@ func writeVSCodeNoticePageRetry(w http.ResponseWriter, message string, retry boo
  .m{max-width:46rem}
  a{color:#4daafc}
 </style></head>
-<body><div class="m">%s</div></body></html>`, refresh, htmlLinkify(message))
+<body><div class="m">%s</div></body></html>`, html.EscapeString(title), refresh, htmlLinkify(message))
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	// Never cache a notice: the very next request may be the running editor.
 	w.Header().Set("Cache-Control", "no-store")

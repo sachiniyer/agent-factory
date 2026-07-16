@@ -1,6 +1,7 @@
 package session
 
 import (
+	"sync"
 	"testing"
 
 	"github.com/sachiniyer/agent-factory/log"
@@ -330,4 +331,101 @@ func requireIndex(t *testing.T, inst *Instance, id string, want int) {
 	idx, ok := inst.TabIndexByID(id)
 	require.Truef(t, ok, "tab id %q must resolve to a live tab", id)
 	assert.Equalf(t, want, idx, "tab id %q must resolve to ordinal %d", id, want)
+}
+
+// webTabRaceInstance builds [agent, a, b, c] — three web tabs, each with its own
+// target — and returns it plus b's stable id. Constructed inline rather than
+// through raceMockInstance: id→target resolution touches nothing but i.mu and
+// i.Tabs, so a tmux/worktree fixture would only add setup cost to a test that
+// needs to run its window thousands of times.
+func webTabRaceInstance() (inst *Instance, bID string) {
+	inst = &Instance{Tabs: []*Tab{{ID: newTabID(), Name: "agent"}}}
+	inst.AddWebTabForTest("a", "http://a.invalid")
+	inst.AddWebTabForTest("b", "http://b.invalid")
+	inst.AddWebTabForTest("c", "http://c.invalid")
+	return inst, inst.Tabs[2].ID
+}
+
+// TestTabTargetByID_ResolvesByIdentityAfterClose is the contract half of the
+// single-lock primitive: with [agent, a, b, c], closing a shifts b and c down, and
+// each surviving id must still name ITS OWN target — not whatever slid into its
+// old ordinal. The closed id resolves to nothing at all.
+func TestTabTargetByID_ResolvesByIdentityAfterClose(t *testing.T) {
+	log.Initialize(false)
+	defer log.Close()
+
+	inst, bID := webTabRaceInstance()
+	aID, cID := inst.Tabs[1].ID, inst.Tabs[3].ID
+
+	require.NoError(t, inst.CloseTab(1)) // close a; b and c shift down one
+
+	kind, url, ok := inst.TabTargetByID(bID)
+	require.True(t, ok, "b's id must still resolve after a lower tab closed")
+	assert.Equal(t, TabKindWeb, kind)
+	assert.Equal(t, "http://b.invalid", url, "b's id must name b's own dev server")
+
+	_, url, ok = inst.TabTargetByID(cID)
+	require.True(t, ok)
+	assert.Equal(t, "http://c.invalid", url)
+
+	_, _, ok = inst.TabTargetByID(aID)
+	assert.False(t, ok, "a closed tab's id must resolve to no tab, never to its successor")
+}
+
+// TestTabTargetByID_ConcurrentCloseNeverResolvesToAnotherTabsTarget is the
+// post-#1858 race regression test.
+//
+// Keying the proxy route by stable id (#1810) was supposed to end ordinal-shift
+// misroutes, but resolving that id in TWO steps — id→ordinal, then ordinal→tab —
+// took the instance lock twice and reopened the same hole between them. With
+// [agent, a, b, c], a request for b resolves to ordinal 2; if a closes before the
+// second lookup, the list is [agent, b, c] and ordinal 2 is now C. A bounds check
+// waves that through — the index is in range, just wrong — and the proxy relays
+// C's dev server under b's id: the exact silent misroute the id exists to prevent.
+//
+// Resolving under ONE lock is what closes it, and the window is only a few
+// instructions wide, so this hunts it across many fresh iterations rather than
+// trusting a single pass to land in it.
+//
+// Its teeth are under -race, which CI runs (.github/workflows/pr.yml): the
+// detector's instrumentation spaces the two lookups far enough apart that the
+// two-lock version resolves b to C's dev server within a couple hundred
+// iterations (measured against that version — this is a test that was watched to
+// FAIL before it was kept). Uninstrumented, the window is too tight to land in
+// reliably, so a green bare `go test` here proves nothing on its own.
+func TestTabTargetByID_ConcurrentCloseNeverResolvesToAnotherTabsTarget(t *testing.T) {
+	log.Initialize(false)
+	defer log.Close()
+
+	const iterations = 2000
+	for i := 0; i < iterations; i++ {
+		inst, bID := webTabRaceInstance()
+
+		var (
+			wg    sync.WaitGroup
+			start = make(chan struct{})
+			url   string
+			ok    bool
+		)
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			<-start
+			_ = inst.CloseTab(1) // an UNRELATED, lower tab closes
+		}()
+		go func() {
+			defer wg.Done()
+			<-start
+			_, url, ok = inst.TabTargetByID(bID)
+		}()
+		close(start)
+		wg.Wait()
+
+		// b either resolves to B or (never, here — b is not the tab closing) to
+		// nothing. What it must NEVER do is resolve to another tab's target.
+		if ok && url != "http://b.invalid" {
+			t.Fatalf("iteration %d: b's stable id resolved to %q, want http://b.invalid — "+
+				"a concurrent close repointed it at another tab's dev server", i, url)
+		}
+	}
 }

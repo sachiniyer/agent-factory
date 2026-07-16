@@ -300,12 +300,47 @@ func (i *Instance) TabTmuxByID(id string) (ts *tmux.TmuxSession, exists bool) {
 	return nil, false
 }
 
+// TabTargetByID resolves a tab's stable id (#1738) DIRECTLY to what the web-tab
+// proxy addresses it by — its kind, and the target URL a TabKindWeb tab stores —
+// under a SINGLE lock acquisition. It is TabTmuxByID's counterpart for the iframe
+// plane, and exists for the same reason: id→ordinal followed by ordinal→tab takes
+// i.mu TWICE, and a concurrent close between the two lands the second lookup on a
+// DIFFERENT tab.
+//
+// A bounds check does not close that window, because the racing list is SHORTER,
+// not out of range: with tabs [agent, A, B, C], resolving B yields ordinal 2, and
+// a close of A before the second lookup leaves [agent, B, C] — where ordinal 2 is
+// now C, in range and wrong. The proxy would then serve C's dev server under B's
+// stable id, which is the exact misroute keying the route by id (#1810) exists to
+// prevent.
+//
+// url is "" for every kind but TabKindWeb; a VSCODE tab deliberately stores none
+// (its editor is resolved per request), so callers must not read absence of a URL
+// as absence of a tab — that is what exists is for.
+func (i *Instance) TabTargetByID(id string) (kind TabKind, url string, exists bool) {
+	if id == "" {
+		return 0, "", false
+	}
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	for _, t := range i.Tabs {
+		if t.ID == id {
+			return t.Kind, t.URL, true
+		}
+	}
+	return 0, "", false
+}
+
 // TabIndexByID returns the CURRENT ordinal of the tab with stable id (#1738),
 // and whether such a tab exists. It is the id→index resolution the stream
 // endpoint runs per operation: a client addresses a tab by its stable id and the
 // daemon maps it to wherever that tab now sits, so a reorder/close on another
 // client can never make the client's captured position refer to a different tab.
 // An empty id never matches (a legacy/absent id is not addressable by id).
+//
+// Prefer a single-lock primitive (TabTmuxByID, TabTargetByID) where one exists
+// for what the caller actually needs: an ordinal handed back to a SECOND lookup
+// reopens the close/reorder window this resolution is meant to close.
 func (i *Instance) TabIndexByID(id string) (int, bool) {
 	if id == "" {
 		return 0, false

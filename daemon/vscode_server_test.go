@@ -168,11 +168,13 @@ func fakeVSCodeServerMain() {
 	})
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html")
-		// Echo back the request path, the worktree served, and the Host the proxy
-		// forwarded — the last is what code-server's origin check reads.
-		fmt.Fprintf(w, "<html><body>%s worktree=%s path=%s xfh=%s xfp=%s</body></html>",
+		// Echo back the request path, the worktree served, and the forwarded
+		// headers: Host is what code-server's origin check reads, Prefix is what
+		// openvscode-server resolves its base from, and Proto is the scheme an
+		// editor builds absolute URLs and its WebSocket endpoint against (#1875).
+		fmt.Fprintf(w, "<html><body>%s worktree=%s path=%s xfh=%s xfp=%s xfproto=%s</body></html>",
 			fakeVSCodeMarker, worktree, r.URL.Path, r.Header.Get("X-Forwarded-Host"),
-			r.Header.Get("X-Forwarded-Prefix"))
+			r.Header.Get("X-Forwarded-Prefix"), r.Header.Get("X-Forwarded-Proto"))
 	})
 	srv := &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
 	// Bind the socket under the default umask, exactly as the real editors do —
