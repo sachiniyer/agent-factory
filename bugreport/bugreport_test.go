@@ -583,6 +583,77 @@ func TestScrubLogRedactsTitlesEndingInNonWordChars(t *testing.T) {
 	}
 }
 
+// TestScrubDoesNotSkipSecretsThatResembleMarkers is the regression for a leak the
+// idempotence fast-path introduced: it treated any value STARTING WITH the marker
+// text as already-redacted, so a real credential that merely began with those
+// characters was emitted verbatim — into the bundle and into the public issue
+// draft. The fast-path must recognize exactly what the redactor emits, never a
+// prefix or a substring.
+func TestScrubDoesNotSkipSecretsThatResembleMarkers(t *testing.T) {
+	r := &redactor{home: "/home/tester", users: []string{"tester"}}
+	cases := []struct {
+		name, in, secret string
+	}{
+		{
+			name:   "value merely starting with the marker text",
+			in:     "api_key=[redactedButActualSecret]",
+			secret: "redactedButActualSecret",
+		},
+		{
+			name:   "quoted value starting with the marker text",
+			in:     `github_token = "[redacted-secretly-this-is-real]"`,
+			secret: "redacted-secretly-this-is-real",
+		},
+		{
+			name:   "value carrying the marker text mid-string",
+			in:     "password = hunter2[redacted]",
+			secret: "hunter2",
+		},
+		{
+			name:   "value that is nearly the marker",
+			in:     "api_key=[redacted-secretz",
+			secret: "[redacted-secretz",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := r.scrub(tc.in)
+			if strings.Contains(got, tc.secret) {
+				t.Errorf("SECRET LEAKED past the already-redacted fast-path:\n  in:  %q\n  out: %q", tc.in, got)
+			}
+			if !strings.Contains(got, secretMarker) {
+				t.Errorf("value was not redacted at all:\n  in:  %q\n  out: %q", tc.in, got)
+			}
+		})
+	}
+}
+
+// TestScrubIsIdempotent pins the property the fast-path exists for: scrub runs
+// over the same text more than once by design (per section, again over the
+// assembled text/JSON, and again on each component the issue draft inlines), so
+// a second pass must be a no-op. It was not — the bare-value alternative
+// re-matched the marker's own text and grew a bracket per pass, and a real
+// bundle shipped 28 `[redacted-secret]]`.
+func TestScrubIsIdempotent(t *testing.T) {
+	r := &redactor{home: "/home/tester", users: []string{"tester"}}
+	for _, in := range []string{
+		"bearer token: sk-ABCDEFGHIJKLMNOP0123",       // bare marker after one pass
+		`github_token = "ghp_AAAAAAAAAAAAAAAAAAAA"`,   // double-quoted marker
+		"internal_api_key = 'company-internal-value'", // single-quoted marker
+		"path /home/tester/x by tester",               // home + username
+		"nothing sensitive here",
+	} {
+		once := r.scrub(in)
+		twice := r.scrub(once)
+		if once != twice {
+			t.Errorf("scrub is not idempotent:\n  in:    %q\n  once:  %q\n  twice: %q", in, once, twice)
+		}
+		if strings.Contains(twice, secretMarker+"]") {
+			t.Errorf("marker grew a bracket on re-scrub: %q", twice)
+		}
+	}
+}
+
 // TestIssueDraftCollapsesBundlePath guards the fix for the raw-home-path leak:
 // the bundle path inlined into the (public) GitHub issue-draft body must have
 // $HOME collapsed to ~ so it never leaks the user's home/username. The draft

@@ -313,13 +313,34 @@ func redactKeyValueSecret(match string) string {
 	return prefix + secretMarker
 }
 
-// isRedactionMarker reports whether a matched value is (the start of) a marker a
-// previous scrub pass wrote — `[redacted]`, `[redacted-secret]`, or either still
-// wrapped in the quotes the value carried. The prefix test is deliberate: the
-// bare-value alternative stops at the marker's closing `]`, so the value seen
-// here is the marker minus its final bracket.
+// redactionMarkerValues are the EXACT value forms this redactor emits, and
+// nothing else. isRedactionMarker is a fast-path AROUND the scrub, and a
+// fast-path around a redactor is sound only if it recognizes precisely what that
+// redactor produces — anything looser is a way for a real credential to reach a
+// public bundle unscrubbed. A prefix test was exactly that mistake:
+// `api_key=[redactedButActualSecret]` merely started with the marker text, so it
+// was waved through verbatim.
+//
+// The bare entries carry no closing bracket on purpose: the bare-value
+// alternative excludes `]`, so what the regex hands back for `key =
+// [redacted-secret]` is `[redacted-secret`. The quoted alternatives capture the
+// whole literal, quotes included. Both are derived from the markers themselves so
+// they cannot drift if a marker is ever reworded.
+var redactionMarkerValues = map[string]bool{
+	strings.TrimSuffix(secretMarker, "]"):   true, // bare `[redacted-secret`
+	strings.TrimSuffix(redactedMarker, "]"): true, // bare `[redacted`
+	`"` + secretMarker + `"`:                true,
+	`'` + secretMarker + `'`:                true,
+	`"` + redactedMarker + `"`:              true,
+	`'` + redactedMarker + `'`:              true,
+}
+
+// isRedactionMarker reports whether value is EXACTLY a marker an earlier scrub
+// pass wrote, so re-scrubbing it would only re-wrap it. Exact match, never a
+// prefix or substring: a value that merely starts with or contains the marker
+// text is a value this redactor did not write, and must take the normal path.
 func isRedactionMarker(value string) bool {
-	return strings.HasPrefix(strings.Trim(value, `"'`), "[redacted")
+	return redactionMarkerValues[value]
 }
 
 // unparsedInstancesNote is emitted (as a JSON string) when instances.json is
