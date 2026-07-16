@@ -389,6 +389,19 @@ func (s *vscodeServer) reap() {
 	close(s.exited)
 }
 
+// alive reports whether the child is still running.
+func (s *vscodeServer) alive() bool {
+	if s == nil || s.cmd == nil || s.cmd.Process == nil {
+		return false
+	}
+	select {
+	case <-s.exited:
+		return false
+	default:
+		return true
+	}
+}
+
 // stop tears down a LIVE editor: SIGTERM to the child's process GROUP, then
 // SIGKILL to the group if it has not exited within vscodeStopGrace. The group (not
 // the pid) is signalled because code-server spawns its own children — an extension

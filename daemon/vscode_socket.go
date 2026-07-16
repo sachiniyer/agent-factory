@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
@@ -36,8 +37,10 @@ import (
 // sockaddr_un path limit (see vscodeSocketPath).
 const vscodeSocketDirName = "vscode"
 
-// vscodeSocketExt is the socket file's extension. The sweep matches on it, so a
-// file the daemon did not create is never removed.
+// vscodeSocketExt is the socket file's extension. It is only a suffix, NOT the
+// sweep's test: an extension is something any file can wear, so the sweep matches
+// the full minted name and checks the file really is a socket
+// (vscodeSocketNamePattern, isAbandonedVSCodeSocket).
 const vscodeSocketExt = ".sock"
 
 // vscodeSocketMode is the socket's file mode, passed to code-server's
@@ -138,19 +141,6 @@ func (s *vscodeServer) endpoint() vscodeEndpoint {
 	return vscodeEndpoint{SocketPath: s.socketPath, Transport: s.transport}
 }
 
-// alive reports whether the child is still running.
-func (s *vscodeServer) alive() bool {
-	if s == nil || s.cmd == nil || s.cmd.Process == nil {
-		return false
-	}
-	select {
-	case <-s.exited:
-		return false
-	default:
-		return true
-	}
-}
-
 // secureVSCodeSocket forces socketPath to 0600.
 //
 // Neither flavor can be trusted to have done it: code-server applies
@@ -182,7 +172,28 @@ func vscodeSocketDir() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	sockDir := filepath.Join(dir, vscodeSocketDirName)
+	// ABSOLUTE, always, and resolved HERE — before the path is handed to a child
+	// that does not share our working directory.
+	//
+	// GetConfigDir returns AGENT_FACTORY_HOME as the operator wrote it, tilde
+	// expanded but NOT absolutized, so a relative home ("af-home", "./state")
+	// yields a relative socket path. The daemon would then dial it against the
+	// DAEMON's cwd while the editor bound it against cmd.Dir — the session's
+	// worktree — which is a different file, in a directory that does not exist
+	// there. The child fails to bind and the pane never comes up. A port number
+	// was immune to this, which is why it only appeared once the endpoint became a
+	// path (#1873).
+	//
+	// Absolutizing at the boundary is the fix rather than at the config layer:
+	// GetConfigDir feeds callers that resolve in-process, where a relative path
+	// works fine, and changing it for everyone belongs in its own change.
+	// The rule this file must keep is narrower — a path crossing into a child with
+	// a different cwd must be absolute before it is written into argv.
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		return "", fmt.Errorf("resolving the af home %q to an absolute path failed: %w", dir, err)
+	}
+	sockDir := filepath.Join(abs, vscodeSocketDirName)
 	if err := os.MkdirAll(sockDir, 0o700); err != nil {
 		return "", fmt.Errorf("creating the VS Code socket directory failed: %w", err)
 	}
@@ -192,8 +203,52 @@ func vscodeSocketDir() (string, error) {
 	return sockDir, nil
 }
 
+// vscodeSocketNamePattern matches the socket names vscodeSocketPath mints, and
+// ONLY those: two 8-character hex fields (the session hash and the process nonce)
+// joined by a hyphen. It is anchored, so it cannot match a longer name that merely
+// contains one.
+//
+// The sweep deletes files, so it must recognize its own work rather than trust the
+// directory to hold nothing else. Keep this in lockstep with vscodeSocketPath — a
+// name that stops matching stops being swept, and leaks instead.
+var vscodeSocketNamePattern = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{8}\.sock$`)
+
+// isAbandonedVSCodeSocket reports whether e is one of OUR editor sockets, left in
+// dir by a previous daemon and safe to unlink.
+//
+// Two independent checks, because the sweep's only job is deletion and a blanket
+// "*.sock" glob is the wrong instrument:
+//
+//   - the NAME must be one this daemon could have minted. The directory is af's,
+//     but "af owns the directory" is an assumption about the world, not a fact the
+//     sweep can verify — an operator can point AGENT_FACTORY_HOME anywhere,
+//     including somewhere already in use, and a future af feature may put its own
+//     sockets here. Matching our pattern means a foreign `agent.sock` survives.
+//   - the ENTRY must actually be a socket. A regular file, a directory, or a
+//     symlink can carry a .sock name; only a socket can be one of ours. Info() is
+//     lstat semantics, so a symlink reports as a symlink and is skipped rather
+//     than followed — the sweep can never delete through a link.
+//
+// A vanished entry (err from Info) is skipped: it is already gone.
+func isAbandonedVSCodeSocket(dir string, e os.DirEntry) bool {
+	if !vscodeSocketNamePattern.MatchString(e.Name()) {
+		return false
+	}
+	info, err := e.Info()
+	if err != nil {
+		if !os.IsNotExist(err) {
+			log.WarningLog.Printf("vscode: stat %s failed: %v", filepath.Join(dir, e.Name()), err)
+		}
+		return false
+	}
+	return info.Mode()&os.ModeSocket != 0
+}
+
 // vscodeSocketPath returns a FRESH socket path for key: a hash of the key, to
 // identify the session, plus a random nonce, to identify the process.
+//
+// The name's SHAPE is load-bearing beyond readability: the startup sweep deletes
+// by it (see vscodeSocketNamePattern), so any change here must change that too.
 //
 // The key is hashed rather than used directly because a session key carries a
 // repo id and a user-chosen title — long, possibly non-ASCII, possibly holding a
@@ -263,7 +318,7 @@ func (v *vscodeSupervisor) sweepAbandonedSockets() {
 			return
 		}
 		for _, e := range entries {
-			if filepath.Ext(e.Name()) != vscodeSocketExt {
+			if !isAbandonedVSCodeSocket(dir, e) {
 				continue
 			}
 			path := filepath.Join(dir, e.Name())

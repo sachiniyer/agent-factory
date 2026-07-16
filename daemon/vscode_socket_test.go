@@ -506,3 +506,143 @@ func TestVSCodeSocket_OpenVSCodeServesTheWorktree(t *testing.T) {
 			"a positional worktree is accepted and ignored, so the editor opens empty", worktree, body)
 	}
 }
+
+// TestVSCodeSocket_RelativeAFHomeStillReachable is the codex P1 on #1883, and the
+// bug is one the socket transport introduced: the endpoint became a PATH, and a
+// path is meaningless without the cwd it is resolved against.
+//
+// GetConfigDir hands back AGENT_FACTORY_HOME as written — tilde expanded, not
+// absolutized — so a relative home yields a relative socket path. The daemon would
+// dial it against the DAEMON's cwd while the editor bound it against cmd.Dir, the
+// session's worktree: two different files, and the child's parent directory does
+// not exist there, so it dies on bind and the pane never comes up. A port number
+// was immune, which is why nothing caught this before the endpoint moved.
+//
+// The test's own cwd is deliberately NOT the worktree — that separation is the
+// whole point, and without it the bug hides.
+func TestVSCodeSocket_RelativeAFHomeStillReachable(t *testing.T) {
+	t.Chdir(t.TempDir())                      // the daemon's cwd
+	t.Setenv("AGENT_FACTORY_HOME", "af-home") // relative, as an operator may write it
+
+	binary := writeFakeVSCodeBinary(t, "code-server", nil)
+	v := newVSCodeSupervisor()
+	v.configuredBinary = func() string { return binary }
+	v.startGrace = 10 * time.Second
+	v.cooldown = 10 * time.Millisecond
+	t.Cleanup(v.Stop)
+
+	worktree := t.TempDir() // NOT the daemon's cwd
+	ep, err := v.ensureServer("repo/session", worktree)
+	if err != nil {
+		t.Fatalf("the editor would not start under a relative AGENT_FACTORY_HOME: %v", err)
+	}
+	if !filepath.IsAbs(ep.SocketPath) {
+		t.Fatalf("the editor endpoint %q is relative; the daemon and the child resolve it "+
+			"against different directories", ep.SocketPath)
+	}
+	// The endpoint is real and OURS: dial it the way the proxy does.
+	client := &http.Client{Transport: ep.Transport, Timeout: 5 * time.Second}
+	resp, err := client.Get(vscodeUpstreamURL + "/")
+	if err != nil {
+		t.Fatalf("the editor is unreachable on %s: %v", ep.SocketPath, err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("reading the response: %v", err)
+	}
+	if !strings.Contains(string(body), fakeVSCodeMarker) {
+		t.Fatalf("the endpoint is not served by our editor: %q", body)
+	}
+}
+
+// TestVSCodeSocket_SweepSparesForeignSockets is the codex P2 on #1883. The sweep
+// DELETES, so "everything in this directory is af's" must be something it verifies
+// rather than something it assumes: an operator can point AGENT_FACTORY_HOME at a
+// directory already in use, and a later af feature may put its own sockets here.
+//
+// Both halves of the check are exercised — a real socket under a foreign NAME, and
+// our own name worn by something that is not a socket. Either one deleted would be
+// the daemon destroying a file it did not create.
+func TestVSCodeSocket_SweepSparesForeignSockets(t *testing.T) {
+	binary := writeFakeVSCodeBinary(t, "code-server", nil)
+	v := newTestVSCodeSupervisor(t, binary)
+
+	dir, err := vscodeSocketDir()
+	if err != nil {
+		t.Fatalf("vscodeSocketDir: %v", err)
+	}
+
+	// A genuine socket, but not one we could have minted: someone else's.
+	foreign := filepath.Join(dir, "agent.sock")
+	ln, err := net.Listen("unix", foreign)
+	if err != nil {
+		t.Fatalf("planting a foreign socket: %v", err)
+	}
+	ln.(*net.UnixListener).SetUnlinkOnClose(false)
+	_ = ln.Close()
+
+	// Our naming, but a regular file — an extension is not evidence.
+	notASocket := filepath.Join(dir, "deadbeef-12345678.sock")
+	if err := os.WriteFile(notASocket, []byte("not a socket"), 0o600); err != nil {
+		t.Fatalf("planting a decoy file: %v", err)
+	}
+
+	// A real abandoned editor socket: this one MUST go.
+	abandoned := filepath.Join(dir, "cafebabe-87654321.sock")
+	aln, err := net.Listen("unix", abandoned)
+	if err != nil {
+		t.Fatalf("planting an abandoned socket: %v", err)
+	}
+	aln.(*net.UnixListener).SetUnlinkOnClose(false)
+	_ = aln.Close()
+
+	if _, err := v.ensureServer("repo/session", t.TempDir()); err != nil {
+		t.Fatalf("ensureServer: %v", err)
+	}
+
+	if _, err := os.Lstat(foreign); err != nil {
+		t.Errorf("the sweep deleted a foreign socket the daemon never created: %v", err)
+	}
+	if _, err := os.Lstat(notASocket); err != nil {
+		t.Errorf("the sweep deleted a regular file that merely wore a .sock name: %v", err)
+	}
+	if _, err := os.Lstat(abandoned); !os.IsNotExist(err) {
+		t.Errorf("the abandoned editor socket survived the sweep (err=%v); the directory "+
+			"would accumulate one per session across daemon restarts", err)
+	}
+}
+
+// TestVSCodeSocketName_MatchesOnlyOurMintedNames pins the sweep's delete predicate
+// against the minter. They are a pair: a name vscodeSocketPath produces must match
+// (or it leaks), and nothing else may (or the sweep deletes a stranger's file).
+func TestVSCodeSocketName_MatchesOnlyOurMintedNames(t *testing.T) {
+	shortAFHome(t)
+
+	// Whatever the minter actually produces, today, must match.
+	minted, err := vscodeSocketPath("repo/session")
+	if err != nil {
+		t.Fatalf("vscodeSocketPath: %v", err)
+	}
+	if !vscodeSocketNamePattern.MatchString(filepath.Base(minted)) {
+		t.Fatalf("the sweep does not recognize the name the minter produced (%q); "+
+			"every abandoned socket would leak", filepath.Base(minted))
+	}
+
+	for _, name := range []string{
+		"agent.sock",                 // someone else's socket
+		"af.sock",                    // ditto
+		"deadbeef.sock",              // one field, not two
+		"deadbeef-cafebabe.sock.bak", // suffixed
+		"xdeadbeef-cafebabe.sock",    // over-long field
+		"deadbee-cafebabe.sock",      // short field
+		"DEADBEEF-CAFEBABE.sock",     // hex is lowercase; this is not ours
+		"deadbeef-cafebabg.sock",     // not hex
+		"pre-deadbeef-cafebabe.sock", // prefixed
+		"deadbeef-cafebabe.socket",   // wrong extension
+	} {
+		if vscodeSocketNamePattern.MatchString(name) {
+			t.Errorf("the sweep would delete %q, which the daemon never minted", name)
+		}
+	}
+}
