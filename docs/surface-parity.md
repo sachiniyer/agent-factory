@@ -11,6 +11,47 @@ In practice capabilities drift. One surface gains a verb, an option, or a
 button; the others silently fall behind; nobody notices until a user hits the
 missing thing. That is a bug class, not a one-off — so it has a detector.
 
+## Drift is bidirectional — do not assume the web is the laggard
+
+The obvious story is that the TUI is the mature surface and the web is playing
+catch-up. **That story is wrong, and believing it will make you read this table
+incorrectly.**
+
+Capabilities land wherever the implementer happened to be standing. The first
+audit (#1937) found gaps pointing in every direction:
+
+- **The web is ahead of both others** on per-session auto-yes: it is the *only*
+  surface that can set it per session. The TUI inherits one process-wide `-y`
+  flag for every session it creates; the CLI reads the repo config and
+  `af sessions create --autoyes` is an unknown-flag error.
+- **The TUI is behind the other two** on create-time prompts: the web modal and
+  `af sessions create --prompt` both send one, and the TUI cannot
+  ([#1936](https://github.com/sachiniyer/agent-factory/issues/1936)). The
+  `Prompt` field is plumbed end-to-end to the daemon
+  (`app/session_control.go:106`) and its only construction site never populates
+  it — the plumbing is finished and simply never fed.
+- **The CLI is behind both UIs** on limit-retry: resuming a usage-limit-blocked
+  session is TUI-only, and the CLI has no verb for it at all
+  ([#1934](https://github.com/sachiniyer/agent-factory/issues/1934)).
+- **Only the CLI** can choose a backend per session
+  ([#1933](https://github.com/sachiniyer/agent-factory/issues/1933)).
+
+The sharpest way to hold this: on `CreateSession`, **no surface is a superset of
+another**. All three accept different subsets of the same nine-field request.
+
+| Create option | TUI | Web | CLI |
+|---|---|---|---|
+| Title, program | yes | yes | yes |
+| Initial prompt | **no** | yes | yes |
+| Auto-yes per session | **no** | **yes** | **no** |
+| Backend (docker/ssh/hook) | **no** | **no** | yes |
+| Force-remote (hook) | partial | **no** | yes |
+| In-place (`--here`) | **no** | **no** | yes |
+
+So when this check fails, the question is never "does the web need to catch up?"
+It is "which surfaces should have this, and which deliberately should not?" —
+asked in all three directions.
+
 ## The two pieces
 
 **`parity/inventory.json`** — every user-facing capability and which surfaces
