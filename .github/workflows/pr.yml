@@ -78,10 +78,52 @@ jobs:
       - name: Run tests
         run: go test -v -race -count=1 ./...
 
+  # We cross-compile and ship darwin/arm64 and darwin/amd64 binaries from
+  # stable-release.yml, but every job in this repo ran on ubuntu — so no test had
+  # ever executed on the OS we ship to. macOS-only defects reached users instead
+  # of CI (#1918, #1916). This job closes that gap.
+  #
+  # Core Go suite only: the *-container targets need Docker, which GitHub's macOS
+  # runners do not have. Those stay on Linux.
+  #
+  # ./daemon is deliberately NOT excluded. It spawns real af daemons, which is
+  # forbidden on the shared dev box but is exactly what we want exercised here on
+  # a throwaway runner — the launchd paths live in that package and are the point.
+  test-macos:
+    name: Test (macOS)
+    runs-on: macos-latest
+    # macOS runner minutes bill at 10x Linux; a hung PTY/daemon test must not burn
+    # a six-hour default. The Linux suite finishes well inside this.
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: "1.25"
+          cache: true
+
+      # tmux is preinstalled on the ubuntu runners but NOT on the macOS ones, and
+      # a dozen packages (session, daemon, config, app, ui, …) shell out to it.
+      # Without this the suite fails at "executable file not found in $PATH"
+      # rather than on anything real.
+      - name: Install tmux
+        run: brew install tmux
+
+      - name: Run tests
+        run: go test -v -race -count=1 ./...
+
   build:
     name: Build
     runs-on: ubuntu-latest
-    needs: [lint, test]
+    # "Build" and "Lint" are this repo's only required checks (ruleset 14851503);
+    # "Test" gates merges transitively by being a `needs` of Build, since a failed
+    # dependency leaves Build skipped and the required check never green. Hanging
+    # the macOS job here gates it the same way, from the moment it lands — a new
+    # standalone job would gate nothing until someone edited the ruleset (see the
+    # same note on the auto-gate helper test above).
+    needs: [lint, test, test-macos]
     steps:
       - uses: actions/checkout@v6
 
