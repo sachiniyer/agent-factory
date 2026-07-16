@@ -427,7 +427,7 @@ scenario_b() {
     # fails on a loaded CI runner. Same rule the TUI driver follows (#1161):
     # wait on the condition, never on a sleep.
     local before_sessions before_pid before_daemon_ver
-    before_sessions="$(lc_wait_session_count "$bin" 2 30)"
+    before_sessions="$(lc_wait_session_count "$bin" "$repo" 2 30)"
     before_pid="$(lc_daemon_pids "$home" | head -1)"
     if [ -z "$before_pid" ]; then
         lc_fail "scenario-b/$mode: no daemon came up on the old release; nothing to upgrade"
@@ -445,7 +445,7 @@ scenario_b() {
         lc_say "what 'sessions create' actually said:"
         printf '%s' "$create_log" | sed 's/^/[lifecycle]   | /' >&2
         lc_say "session list was:"
-        "$bin" sessions list 2>&1 | head -5 | sed 's/^/[lifecycle]   | /' >&2
+        "$bin" sessions list --repo "$repo" 2>&1 | head -5 | sed 's/^/[lifecycle]   | /' >&2
         lc_say "config.toml [program_overrides] (config get does not know this key on older releases):"
         grep -A2 'program_overrides' "$home/config.toml" 2>/dev/null |
             head -3 | sed 's/^/[lifecycle]   | /' >&2
@@ -521,10 +521,10 @@ scenario_b() {
     fi
 
     # 5. pre-existing sessions survive.
-    after_sessions="$(lc_session_count "$bin")"
+    after_sessions="$(lc_wait_session_count "$bin" "$repo" "$before_sessions" 30)"
     lc_assert_eq "$before_sessions" "$after_sessions" "assertion 5: sessions survive the upgrade"
     local lost
-    lost="$(lc_lost_session_count "$bin")"
+    lost="$(lc_lost_session_count "$bin" "$repo")"
     lc_assert_eq "0" "$lost" "assertion 5: no session went Lost across the upgrade"
 
     # 6. doctor is the oracle: zero FAILs on the upgraded machine.
@@ -607,15 +607,26 @@ lc_do_upgrade() {
     esac
 }
 
-# lc_session_count <bin> — sessions the daemon knows about.
+# lc_session_count <bin> <repo> — sessions the daemon knows about FOR THIS REPO.
+#
+# `--repo` is not decoration. `af sessions list` resolves its project from the
+# CURRENT DIRECTORY when the flag is absent, and this script runs from the af
+# checkout — so an unscoped list asks "what sessions exist in agent-factory?",
+# gets the correct answer [], and reports zero sessions on a machine that has
+# two. That read cost a whole debugging cycle: it passed locally, where /src is
+# an af WORKTREE whose .git file points outside the container, so git fails,
+# no project resolves, and af falls back to listing everything — the right
+# number for the wrong reason. On a clean CI checkout the resolution works and
+# the bug appears. The flag exists on both sides of the upgrade boundary
+# (verified against v1.0.193), so scope it explicitly and depend on nothing.
 #
 # Prints "unreadable" rather than 0 when the list cannot be parsed. A silent 0
-# fallback here would be indistinguishable from a real empty machine, which
-# would turn assertion 5 into "0 sessions survived: PASS" — the exact vacuous
-# green this gate exists to prevent.
+# fallback would be indistinguishable from a real empty machine, turning
+# assertion 5 into "0 sessions survived: PASS" — the vacuous green this gate
+# exists to prevent.
 lc_session_count() {
-    local out n
-    out="$("$1" sessions list 2>/dev/null)" || {
+    local bin="$1" repo="$2" out n
+    out="$("$bin" sessions list --repo "$repo" 2>/dev/null)" || {
         printf 'unreadable\n'
         return 0
     }
@@ -634,21 +645,33 @@ lc_session_count() {
 # <want> sessions, then print the count (or the last count seen on timeout, so
 # the caller reports what was actually there rather than a fabricated number).
 lc_wait_session_count() {
-    local bin="$1" want="$2" timeout="${3:-30}" i n=""
+    local bin="$1" repo="$2" want="$3" timeout="${4:-30}" i n=""
     for ((i = 0; i < timeout * 2; i++)); do
-        n="$(lc_session_count "$bin")"
+        n="$(lc_session_count "$bin" "$repo")"
         [ "$n" = "$want" ] && break
         sleep 0.5
     done
     printf '%s\n' "$n"
 }
 
-# lc_lost_session_count <bin> — sessions whose worktree/tmux vanished. An
+# lc_lost_session_count <bin> <repo> — sessions whose worktree/tmux vanished. An
 # upgrade that strands sessions is a data-loss bug, not a cosmetic one.
 lc_lost_session_count() {
-    "$1" sessions list 2>/dev/null |
-        jq -r '[.[]? | select((.status|tostring) == "4" or (.liveness|tostring) == "4")] | length' 2>/dev/null ||
-        printf '0\n'
+    local bin="$1" repo="$2" out n
+    out="$("$bin" sessions list --repo "$repo" 2>/dev/null)" || {
+        printf 'unreadable\n'
+        return 0
+    }
+    n="$(printf '%s' "$out" |
+        jq -r '[.[]? | select((.status|tostring) == "4" or (.liveness|tostring) == "4")] | length' 2>/dev/null)" || {
+        printf 'unreadable\n'
+        return 0
+    }
+    [ -n "$n" ] || {
+        printf 'unreadable\n'
+        return 0
+    }
+    printf '%s\n' "$n"
 }
 
 # lc_teardown_home <home> [supervised] — stop what this scenario started so the
