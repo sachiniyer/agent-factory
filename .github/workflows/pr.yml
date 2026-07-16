@@ -54,6 +54,15 @@ jobs:
       - name: Check file lengths
         run: scripts/lint-file-length.sh
 
+      # The auto-gate helper decides what auto-merges, but nothing ran its tests
+      # in CI — they only ever ran by hand (#1907). Lives in the Lint job because
+      # Lint is a required check, so this gates from the moment it lands; a
+      # dedicated job would need a ruleset edit before it gated anything. Uses the
+      # runner's preinstalled Node and the built-in node:test — no package.json,
+      # no install step.
+      - name: Test auto-gate helper
+        run: node --test .github/scripts/auto-gate.test.js
+
   test:
     name: Test
     runs-on: ubuntu-latest
