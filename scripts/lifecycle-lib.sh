@@ -59,19 +59,44 @@ lc_assert_ne() {
     fi
 }
 
+# lc_summary — the run's verdict.
+#
+# A SKIP is NOT a pass. A run that skipped the supervision assertion and then
+# reported green would manufacture exactly the confidence this gate exists to
+# destroy: the one regression we know shipped (an upgrade demoting the daemon
+# off its unit, #796) is invisible to every OTHER assertion, because the
+# demoted daemon keeps running and keeps answering. So an incomplete run exits
+# NON-ZERO unless the operator explicitly acknowledges partial coverage with
+# AF_LIFECYCLE_ALLOW_PARTIAL=1 (which `make lifecycle-container` sets, because a
+# dev box's container genuinely cannot host a service manager — the CI leg is
+# the authority for those checks and fails if they ever stop running).
 lc_summary() {
     printf '\n[lifecycle] ===== summary =====\n' >&2
     printf '[lifecycle] %d PASS, %d FAIL, %d SKIP\n' "$LC_PASS" "$LC_FAIL" "$LC_SKIP" >&2
-    if [ "$LC_SKIP" -gt 0 ]; then
-        printf '[lifecycle] NOTE: %d check(s) were SKIPPED — this run did not cover them.\n' "$LC_SKIP" >&2
-    fi
+
+    local rc=0
     if [ "$LC_FAIL" -gt 0 ]; then
         printf '[lifecycle] failed checks:\n' >&2
         local n
         for n in "${LC_FAILED_NAMES[@]}"; do printf '[lifecycle]   - %s\n' "$n" >&2; done
-        return 1
+        rc=1
     fi
-    return 0
+
+    if [ "$LC_SKIP" -gt 0 ]; then
+        printf '[lifecycle]\n' >&2
+        printf '[lifecycle] *** PARTIAL COVERAGE: %d check(s) did NOT run. ***\n' "$LC_SKIP" >&2
+        printf '[lifecycle] This run proves nothing about them. Supervision-across-upgrade\n' >&2
+        printf '[lifecycle] (#796) is invisible to every other assertion here: a demoted\n' >&2
+        printf '[lifecycle] daemon still runs and still answers.\n' >&2
+        if [ "${AF_LIFECYCLE_ALLOW_PARTIAL:-}" = "1" ]; then
+            printf '[lifecycle] AF_LIFECYCLE_ALLOW_PARTIAL=1 — not failing the run, but this is\n' >&2
+            printf '[lifecycle] NOT full coverage. The CI leg (real systemd) is the authority.\n' >&2
+        else
+            printf '[lifecycle] Failing the run: a skipped check must never read as a pass.\n' >&2
+            rc=1
+        fi
+    fi
+    return "$rc"
 }
 
 # ----------------------------------------------------------------------------
@@ -248,6 +273,11 @@ lc_doctor_dump() {
 # Service manager (assertion #4).
 # ----------------------------------------------------------------------------
 LC_UNIT_NAME="agent-factory-daemon.service"
+# launchd's equivalent (daemon/autostart.go: autostartLaunchdLabel). af restarts
+# it as gui/<uid>/<label>, so that is the domain to interrogate — a launchd
+# agent loaded OUTSIDE that domain is one of the ways supervision silently
+# stops being real (#1920 checks the same thing).
+LC_LAUNCHD_LABEL="com.agent-factory.daemon"
 
 # lc_supervisor_available — can this environment actually supervise a daemon?
 #
@@ -271,8 +301,30 @@ lc_supervisor_available() {
 }
 
 # lc_unit_active — is the autostart unit currently supervising anything?
+# Prints "active" when it is, anything else when it is not, on BOTH platforms —
+# so assertion #4 asserts one property, not one per OS.
 lc_unit_active() {
-    systemctl --user is-active "$LC_UNIT_NAME" 2>/dev/null
+    case "$(uname -s)" in
+    Linux)
+        systemctl --user is-active "$LC_UNIT_NAME" 2>/dev/null
+        ;;
+    Darwin)
+        # `launchctl print` succeeding is NOT "running" — it prints happily for a
+        # loaded-but-stopped agent. The state field is the answer (the same trap
+        # #1920 hit: split Loaded from Active).
+        local out
+        out="$(launchctl print "gui/$(id -u)/$LC_LAUNCHD_LABEL" 2>/dev/null)" || {
+            printf 'inactive\n'
+            return 0
+        }
+        if printf '%s' "$out" | grep -qE '^[[:space:]]*state = running'; then
+            printf 'active\n'
+        else
+            printf 'inactive\n'
+        fi
+        ;;
+    *) printf 'unsupported\n' ;;
+    esac
 }
 
 # lc_unit_main_pid — the pid systemd believes it supervises, or 0.
@@ -284,5 +336,16 @@ lc_unit_active() {
 # running" against "the daemon systemd owns" is the only way to tell a
 # supervised daemon from an orphan that happens to work.
 lc_unit_main_pid() {
-    systemctl --user show -p MainPID --value "$LC_UNIT_NAME" 2>/dev/null | tr -d ' '
+    case "$(uname -s)" in
+    Linux)
+        systemctl --user show -p MainPID --value "$LC_UNIT_NAME" 2>/dev/null | tr -d ' '
+        ;;
+    Darwin)
+        # launchctl print emits "pid = 1234" for a running job; absent when the
+        # job is loaded but not running — which is precisely the demoted case.
+        launchctl print "gui/$(id -u)/$LC_LAUNCHD_LABEL" 2>/dev/null |
+            sed -n 's/^[[:space:]]*pid = \([0-9][0-9]*\).*/\1/p' | head -1
+        ;;
+    *) printf '' ;;
+    esac
 }

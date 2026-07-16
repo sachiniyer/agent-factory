@@ -221,6 +221,7 @@ lifecycle)
         --name "$LIFECYCLE_NAME" \
         -e "GITHUB_TOKEN=${GITHUB_TOKEN:-}" \
         -e "AF_LIFECYCLE_INJECT=${AF_LIFECYCLE_INJECT:-}" \
+        -e "AF_LIFECYCLE_ALLOW_PARTIAL=${AF_LIFECYCLE_ALLOW_PARTIAL:-1}" \
         "$IMAGE" bash /src/scripts/container/lifecycle-entry.sh "$@" || rc=$?
     exit "$rc"
     ;;

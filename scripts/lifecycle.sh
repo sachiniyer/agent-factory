@@ -407,14 +407,17 @@ scenario_b() {
     # Errors are surfaced, not swallowed: if the sessions never get created the
     # rest of this scenario is vacuous ("0 sessions survived the upgrade" is a
     # PASS that tested nothing), so this has to be loud and fatal.
-    local n
+    # Capture create output unconditionally. `af sessions create` can report a
+    # refusal in its JSON body ({"error": "... is not installed or not on
+    # PATH"}) — so an exit status alone is not evidence that a session exists,
+    # and a diagnostic that only fires on a non-zero exit prints nothing at all
+    # in exactly the case you need it.
+    local n rc create_log=""
     for n in pre1 pre2; do
-        local out rc=0
+        local out
+        rc=0
         out="$(cd "$repo" && "$bin" sessions create --name "$n" 2>&1)" || rc=$?
-        if [ "$rc" != 0 ]; then
-            lc_say "session create '$n' failed (rc=$rc):"
-            printf '%s\n' "$out" | head -5 | sed 's/^/[lifecycle]   | /' >&2
-        fi
+        create_log+="[$n rc=$rc] $(printf '%s' "$out" | head -3)"$'\n'
     done
 
     local before_sessions before_pid before_daemon_ver
@@ -433,8 +436,12 @@ scenario_b() {
     # between a gate and a green light.
     if [ "$before_sessions" != "2" ]; then
         lc_fail "scenario-b/$mode: expected 2 sessions before the upgrade, got '$before_sessions' — aborting (assertion 5 would be vacuous)"
+        lc_say "what 'sessions create' actually said:"
+        printf '%s' "$create_log" | sed 's/^/[lifecycle]   | /' >&2
         lc_say "session list was:"
-        "$bin" sessions list 2>&1 | head -10 | sed 's/^/[lifecycle]   | /' >&2
+        "$bin" sessions list 2>&1 | head -5 | sed 's/^/[lifecycle]   | /' >&2
+        lc_say "configured program_overrides:"
+        "$bin" config get program_overrides.claude 2>&1 | head -3 | sed 's/^/[lifecycle]   | /' >&2
         lc_teardown_home "$home" "$supervised"
         return 1
     fi
