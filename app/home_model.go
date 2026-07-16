@@ -212,6 +212,24 @@ type home struct {
 	// panePreviewSuppression remembers a user-dismissed preview target so the
 	// 100ms preview tick does not recreate it until the sidebar target changes.
 	panePreviewSuppression *panePreviewSuppression
+	// selectionEpoch bumps every time the tree selection genuinely moves to a
+	// different row. It is the TUI twin of the web's layoutGeneration (#1862): an
+	// explicit pane mutation pins the epoch it happened in, and a tree-cursor
+	// preview that would move that pane is held off while the epoch is unchanged —
+	// so a pane-focused 1-9 jump is a COMMIT the trailing selectionChanged /
+	// background tick cannot repaint away (#1885). A real navigation bumps the
+	// epoch, staling the pin, and previews resume.
+	selectionEpoch uint64
+	// lastSelectionKey is the identity of the tree row selectionChanged last saw,
+	// used to decide whether the selection genuinely moved (and so whether to bump
+	// selectionEpoch). The jump's own selectionChanged leaves the cursor put, so
+	// the key is unchanged and the pin survives.
+	lastSelectionKey string
+	// paneJumpIntent records, per pane id, the selectionEpoch at which the pane
+	// was last explicitly jumped (1-9). While the entry equals the current
+	// selectionEpoch the pane's committed tab is pinned intent: updatePanePreview
+	// refuses to preview it onto the tree cursor's divergent tab (#1885).
+	paneJumpIntent map[int]uint64
 	// inPreviewTick is set while a BACKGROUND REFRESH drives selectionChanged —
 	// the idle 100ms preview tick (#1558) or a daemon snapshot poll (#1603). It
 	// gates the one side effect that must never fire from a background refresh:
@@ -383,6 +401,7 @@ func newHome(ctx context.Context, program string, autoYes bool, repo *config.Rep
 		errBox:           errBox,
 		paneWindows:      make(map[int]*ui.TabbedWindow),
 		lastPaneCapture:  make(map[int]time.Time),
+		paneJumpIntent:   make(map[int]uint64),
 		liveTerms:        make(map[int]liveTermAttachment),
 		liveKeys:         make(map[int]string),
 		automations:      ui.NewAutomationsPane(proj),

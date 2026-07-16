@@ -6,6 +6,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/sachiniyer/agent-factory/session"
+	"github.com/sachiniyer/agent-factory/ui"
 	"github.com/sachiniyer/agent-factory/ui/layout"
 	"github.com/sachiniyer/agent-factory/ui/store"
 	"github.com/sachiniyer/agent-factory/ui/tree"
@@ -65,6 +66,19 @@ func (m *home) updatePanePreview(selected *session.Instance, targetTab int, tabS
 	// target, so preview and commit cannot diverge (#1415, #1289 class).
 	if (!tabSpecific && original.instance == target.instance) ||
 		(tabSpecific && samePaneBinding(original, target)) {
+		m.cancelPanePreview(false)
+		return nil
+	}
+	// An explicit 1-9 jump pins the owner pane's committed tab as intent for the
+	// current selection epoch: a tree-cursor preview that would move THIS pane
+	// onto a different tab is held off until the user navigates (#1885). Mirrors
+	// the web #1862 layoutGeneration guard — the jump is a commit, not a peek, so
+	// the trailing selectionChanged and any background tick keep rendering the
+	// committed tab instead of repainting to the tree cursor's tab. The block
+	// above already handled the agree case, so reaching here means the preview
+	// genuinely diverges from the committed binding.
+	committed := paneBinding{instance: owner.Instance(), tab: owner.Tab()}
+	if m.paneJumpIntentPinned(owner.ID()) && !samePaneBinding(committed, target) {
 		m.cancelPanePreview(false)
 		return nil
 	}
@@ -163,6 +177,47 @@ func (m *home) suppressPanePreview(original, target paneBinding) {
 		original: original,
 		target:   target,
 	}
+}
+
+// bumpSelectionEpochIfMoved advances selectionEpoch when the tree selection has
+// moved to a different row since the last selectionChanged, staling any pane
+// jump intent pinned in the prior epoch (#1885). The jump's own selectionChanged
+// leaves the sidebar cursor put, so the key is unchanged and the pin survives
+// the trailing repaint; a real navigation changes the key and re-enables
+// tree-cursor previews.
+func (m *home) bumpSelectionEpochIfMoved(sel ui.SidebarItem) {
+	title := ""
+	if inst := m.sidebar.GetSelectedInstance(); inst != nil {
+		title = inst.Title
+	}
+	// Identity of the selected row: section/header/instance/tab position plus the
+	// instance title, so an out-of-band instance reorder under a fixed cursor
+	// position still reads as a move.
+	key := fmt.Sprintf("%d/%t/%d/%t/%d/%s",
+		sel.Kind, sel.IsHeader, sel.ItemIndex, sel.IsTab, sel.TabIndex, title)
+	if key == m.lastSelectionKey {
+		return
+	}
+	m.lastSelectionKey = key
+	m.selectionEpoch++
+}
+
+// pinPaneJumpIntent marks a pane's committed tab as explicit intent for the
+// current selection epoch: an explicit 1-9 jump is a commit that a tree-cursor
+// preview must not repaint away until the user navigates (#1885).
+func (m *home) pinPaneJumpIntent(paneID int) {
+	if m.paneJumpIntent == nil {
+		m.paneJumpIntent = make(map[int]uint64)
+	}
+	m.paneJumpIntent[paneID] = m.selectionEpoch
+}
+
+// paneJumpIntentPinned reports whether the pane still holds an explicit jump
+// intent for the current selection epoch. A navigation bumps the epoch and
+// stales the pin, so this reads false again once the user has moved on.
+func (m *home) paneJumpIntentPinned(paneID int) bool {
+	gen, ok := m.paneJumpIntent[paneID]
+	return ok && gen == m.selectionEpoch
 }
 
 func (m *home) isPanePreviewSuppressed(original, target paneBinding) bool {

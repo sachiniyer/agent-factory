@@ -582,19 +582,19 @@ func (m *home) swapInstanceFromSnapshot(d session.InstanceData) bool {
 	}
 	// ReplaceInstance re-points any open panes at the rebuilt instance, but
 	// the recreated session's tab SET may differ from the corpse's — capture
-	// the outgoing slot→name list so the shared pane reconcile can close
-	// panes whose tab didn't come back and re-bind ones whose slot moved
-	// (#1088).
-	var oldNames []string
+	// the outgoing slot→identity list so the shared pane reconcile can close
+	// panes whose tab didn't come back and re-bind ones whose slot moved by
+	// stable id (#1088/#1886).
+	var oldKeys []tabSlotKey
 	if old := m.store.GetInstanceByTitle(d.Title); old != nil {
-		oldNames = paneTabNames(old)
+		oldKeys = paneTabKeys(old)
 	}
 	if !m.store.ReplaceInstanceByTitle(d.Title, inst) {
 		// The row vanished between read and swap; add it fresh.
 		m.store.AddInstance(inst)()
 	}
 	inst.SetAutoYes(m.autoYes)
-	if m.reconcilePanesForTabs(inst, oldNames) {
+	if m.reconcilePanesForTabs(inst, oldKeys) {
 		m.relayout()
 	}
 	return true
@@ -641,19 +641,22 @@ func (m *home) updateInstanceFromSnapshot(inst *session.Instance, d session.Inst
 	// early for an instance with no local worktree, which is every sandbox
 	// instance (#1874).
 	if inst.Capabilities().TabManagement {
-		// Capture the slot→name list before the tab reconcile mutates it: an
-		// out-of-band tab removal (another client, `af sessions tab-delete`,
-		// daemon-side) must apply the SAME pane close/rebind semantics as the
-		// TUI `w` kill, or an open pane is left showing a shifted/stale tab
-		// (#1088 + #960 — the daemon is the source of truth for tabs).
-		oldNames := paneTabNames(inst)
+		// Capture the slot→identity list before the tab reconcile mutates it: an
+		// out-of-band tab change (another client, `af sessions tab-delete` /
+		// `tab-rename`, daemon-side) must apply the SAME pane close/rebind
+		// semantics as the TUI `w` kill, or an open pane is left showing a
+		// shifted/stale tab — or, keyed by name, HIJACKED onto a different tab
+		// that reused the freed name (#1088 + #960 + #1886/#1905). The stable id
+		// in each key is what lets a pane follow its own tab across a rename or
+		// close+recreate.
+		oldKeys := paneTabKeys(inst)
 		tabsChanged, err := inst.ReconcileTabsFromData(d.Tabs)
 		if err != nil {
 			log.WarningLog.Printf("failed to reconcile tabs for %q from snapshot: %v", d.Title, err)
 		}
 		if tabsChanged {
 			changed = true
-			if m.reconcilePanesForTabs(inst, oldNames) {
+			if m.reconcilePanesForTabs(inst, oldKeys) {
 				m.relayout()
 			}
 		}

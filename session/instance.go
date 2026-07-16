@@ -547,10 +547,6 @@ func (i *Instance) ReconcileTabsFromData(target []TabData) (bool, error) {
 	agentTmux := i.tmuxLocked()
 	gw := i.gitWorktree
 	program := i.Program
-	localNames := make(map[string]bool, len(i.Tabs))
-	for _, t := range i.Tabs {
-		localNames[t.Name] = true
-	}
 	i.mu.RUnlock()
 
 	if !started || agentTmux == nil || gw == nil {
@@ -558,12 +554,38 @@ func (i *Instance) ReconcileTabsFromData(target []TabData) (bool, error) {
 	}
 	worktreePath := gw.GetWorktreePath()
 
+	changed := false
+
+	// Rename in place by stable id (#1905): a tab whose id is unchanged but whose
+	// display name changed out-of-band (a rename on another client, #1813) keeps
+	// its live tmux session, its slot, and any open pane bound to it — only the
+	// label changes. This runs BEFORE the name-keyed drop/add below so those see
+	// the post-rename names; without it a rename reads as "old name gone, new name
+	// added", which drops the tab and re-adds it at the END of the roster,
+	// blipping its PTY and reordering it. A legacy id-less local tab has no stable
+	// identity to match on and still reconciles by name.
+	i.mu.Lock()
+	for _, td := range target {
+		if td.ID == "" {
+			continue
+		}
+		for _, t := range i.Tabs {
+			if t.ID == td.ID && t.Name != td.Name {
+				t.Name = td.Name
+				changed = true
+			}
+		}
+	}
+	localNames := make(map[string]bool, len(i.Tabs))
+	for _, t := range i.Tabs {
+		localNames[t.Name] = true
+	}
+	i.mu.Unlock()
+
 	targetNames := make(map[string]bool, len(target))
 	for _, td := range target {
 		targetNames[td.Name] = true
 	}
-
-	changed := false
 
 	// Drop local non-agent tabs the daemon no longer lists. No kill: the daemon
 	// owns the teardown and already closed the tmux session (#960 PR 3).

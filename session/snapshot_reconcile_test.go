@@ -217,3 +217,50 @@ func TestReconcileTabsFromData_NotStartedIsNoOp(t *testing.T) {
 	require.NoError(t, rerr)
 	assert.False(t, changed, "a not-started instance reconcile is a no-op")
 }
+
+// TestReconcileTabsFromData_RenamesInPlaceByID is the #1905 fix at the roster
+// layer: when the snapshot renames a tab (same stable id, new display name), the
+// reconcile must relabel the SAME tab object in place — keeping its slot and its
+// live tmux session — rather than reading the changed name as "old tab gone, new
+// tab added" and dropping+re-adding it at the end of the roster (which would blip
+// the PTY, reorder the tab, and close any pane bound to it).
+func TestReconcileTabsFromData_RenamesInPlaceByID(t *testing.T) {
+	const agentName = "af_snap_rename"
+	shellName := agentName + shellTmuxSuffix
+	inst, _ := newReconcileTestInstance(t, agentName, map[string]bool{agentName: true, shellName: true})
+
+	// Add a shell tab carrying a stable id (the daemon owns the id).
+	add := []TabData{
+		{Name: inst.GetTabs()[0].Name, Kind: TabKindAgent, TmuxName: agentName},
+		{ID: "sid-1", Name: "shell", Kind: TabKindShell, TmuxName: shellName},
+	}
+	changed, err := inst.ReconcileTabsFromData(add)
+	require.NoError(t, err)
+	require.True(t, changed)
+	require.Len(t, inst.GetTabs(), 2)
+	shellTab := inst.GetTabs()[1]
+	shellTmux := shellTab.tmux
+	require.Equal(t, "sid-1", shellTab.ID)
+	require.NotNil(t, shellTmux, "precondition: the shell tab has a live tmux session")
+
+	// Rename: same id, new name.
+	renamed := []TabData{
+		{Name: inst.GetTabs()[0].Name, Kind: TabKindAgent, TmuxName: agentName},
+		{ID: "sid-1", Name: "editor", Kind: TabKindShell, TmuxName: shellName},
+	}
+	changed, err = inst.ReconcileTabsFromData(renamed)
+	require.NoError(t, err)
+	assert.True(t, changed, "a rename is a change (the label moved)")
+
+	tabs := inst.GetTabs()
+	require.Len(t, tabs, 2, "a rename must NOT add or drop a tab — the roster length is unchanged")
+	assert.Same(t, shellTab, tabs[1], "the SAME tab object must be relabelled in its slot")
+	assert.Equal(t, "editor", tabs[1].Name, "the tab now shows the new name")
+	assert.Equal(t, "sid-1", tabs[1].ID, "the stable id is unchanged")
+	assert.Same(t, shellTmux, tabs[1].tmux, "the live tmux session must be preserved (no PTY blip)")
+
+	// Reconciling the renamed roster again is a no-op.
+	changedAgain, err := inst.ReconcileTabsFromData(renamed)
+	require.NoError(t, err)
+	assert.False(t, changedAgain, "a settled rename must not report a change on the next poll")
+}
