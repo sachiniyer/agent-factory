@@ -170,6 +170,22 @@ func serveSPA(assets fs.FS, w http.ResponseWriter, r *http.Request) {
 	serveAsset(assets, "index.html", w, r)
 }
 
+// contentTypeByExt pins the media type for extensions http.ServeContent would
+// otherwise get wrong for us. It is consulted before ServeContent, which honors a
+// Content-Type we set ourselves and only guesses when we don't.
+//
+// .webmanifest is the whole list, and it needs pinning for a specific reason: Go's
+// built-in table doesn't carry it, so ServeContent would fall through to sniffing
+// the bytes — and a manifest sniffs as text/plain, because it IS just JSON. Pair
+// that with the X-Content-Type-Options: nosniff we set on every asset and the
+// browser is told, authoritatively, that the web app manifest is a text file.
+// Registering it in the global mime table instead would work but is worse: it is
+// process-wide mutable state that any package could stomp, whereas this is local to
+// the handler that depends on it.
+var contentTypeByExt = map[string]string{
+	".webmanifest": "application/manifest+json",
+}
+
 // serveAsset writes the embedded file named `name` and returns true, or returns
 // false without writing if the name does not resolve to a regular file (missing,
 // or a directory) so the caller can fall back to the shell. The asset bytes are
@@ -190,6 +206,9 @@ func serveAsset(assets fs.FS, name string, w http.ResponseWriter, r *http.Reques
 	data, err := io.ReadAll(f)
 	if err != nil {
 		return false
+	}
+	if ct, ok := contentTypeByExt[path.Ext(name)]; ok {
+		w.Header().Set("Content-Type", ct)
 	}
 	// Zero modtime → ServeContent emits no Last-Modified and does no caching
 	// negotiation; it still infers Content-Type from the extension and handles

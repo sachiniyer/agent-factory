@@ -1,0 +1,22 @@
+<!--
+  The full-bleed variant: icon.svg's tile with the corner radius removed. This is
+  the apple-touch-icon source.
+
+  iOS applies its OWN squircle mask to a home-screen icon and offers no way to
+  decline it. Handing it the rounded icon.svg would round an already-rounded tile —
+  the mask cuts inside our corner arc and leaves dark slivers where the two radii
+  disagree. So the corners are square here and iOS supplies the only rounding.
+
+  The mark keeps its FULL size, unlike icon-maskable.svg which shrinks it: iOS's
+  squircle only clips the corners, and the mark's own 3-unit padding already clears
+  them, so there is nothing to shrink away from.
+
+  See icon.svg for why the mark is shaped and aligned the way it is. The `d` below
+  is byte-identical to the other two icon SVGs on purpose, and icons.test.ts fails
+  if that ever stops being true.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="Agent Factory">
+  <title>Agent Factory</title>
+  <rect width="512" height="512" fill="#2f5fd8"/>
+  <path d="M96 416 L96 96 L160 96 L160 288 L224 288 L224 192 L320 288 L320 192 L416 288 L416 416 Z" fill="#ffffff"/>
+</svg>

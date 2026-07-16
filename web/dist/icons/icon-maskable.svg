@@ -1,0 +1,34 @@
+<!--
+  The maskable variant: a full-bleed field with the mark shrunk into the safe zone.
+
+  A `purpose: "maskable"` icon hands the platform a field it may crop HARD — up to
+  20% off every edge, in whatever shape it likes (circle, squircle, teardrop,
+  rounded rect). Only the centred circle of 80% diameter is guaranteed to survive.
+  That is why this variant exists at all: feed the rounded icon.svg to a maskable
+  slot and Android crops the tile's own corners off, leaving a blue shape with the
+  rounding chewed away.
+
+  So the field bleeds to all four edges (no radius — the mask supplies the shape),
+  and the mark is scaled to 0.8 about the centre. The arithmetic that matters: the
+  mark spans 96..416 on both axes, so it is already centred on 256 and its farthest
+  corners sit 226px away (√(160² + 160²)); the safe-zone radius is 204.8, so at full
+  size those corners poke OUT of the guarantee by ~21px and a circular mask would
+  clip them. 0.8 pulls them in to 181px — inside the guarantee with margin to spare
+  for a mask more aggressive than the spec's floor. translate(51.2) is just
+  scale-about-centre folded into one transform: 256 − 0.8 × 256.
+
+  Sub-pixel coordinates are fine here where they would be a bug in icon.svg: this
+  variant is only ever rendered at 512, never at 16, so there is no pixel grid to
+  land on.
+
+  See icon.svg for why the mark is shaped the way it is. The `d` below is
+  byte-identical to the other two icon SVGs on purpose, and icons.test.ts fails if
+  that ever stops being true.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="Agent Factory">
+  <title>Agent Factory</title>
+  <rect width="512" height="512" fill="#2f5fd8"/>
+  <g transform="translate(51.2 51.2) scale(0.8)">
+    <path d="M96 416 L96 96 L160 96 L160 288 L224 288 L224 192 L320 288 L320 192 L416 288 L416 416 Z" fill="#ffffff"/>
+  </g>
+</svg>
