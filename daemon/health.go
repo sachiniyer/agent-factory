@@ -90,6 +90,11 @@ func DaemonSocketNames() []string {
 	return []string{daemonSocketFileName, daemonHTTPSocketFileName}
 }
 
+// ControlSocketName is the file name of the control socket — the one Health
+// pings. Exported so a caller enumerating DaemonSocketNames can tell which
+// entry Health already speaks for and avoid reporting it twice.
+func ControlSocketName() string { return daemonSocketFileName }
+
 // LooksLikeDaemonArgv reports whether argv names an agent-factory daemon
 // process (an `af`/`agent-factory` binary carrying a discrete --daemon flag).
 // It takes real argv elements (boundaries preserved) so a daemon installed

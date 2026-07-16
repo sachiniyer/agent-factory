@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
 	"github.com/stretchr/testify/require"
@@ -88,6 +89,24 @@ func stubForeignProcess(t *testing.T, pid int) {
 			return os.Getuid() + 1, true
 		}
 		return prevUID(p)
+	}
+}
+
+// stubProcessHomes makes doctor read a chosen AGENT_FACTORY_HOME for the given
+// pids, leaving every other pid's real environ alone.
+//
+// Injected rather than inherited: /proc/<pid>/environ reflects a process's
+// INITIAL environment, so neither t.Setenv nor spawnWithEnv can give a running
+// process a home spelled the way a test needs (a raw tilde, say).
+func stubProcessHomes(t *testing.T, homes map[int]string) {
+	t.Helper()
+	prev := daemonProcessEnvLookup
+	t.Cleanup(func() { daemonProcessEnvLookup = prev })
+	daemonProcessEnvLookup = func(pid int, key string) (string, bool, error) {
+		if home, ok := homes[pid]; ok && key == "AGENT_FACTORY_HOME" {
+			return home, true, nil
+		}
+		return prev(pid, key)
 	}
 }
 
@@ -171,6 +190,27 @@ func TestVersionSkew_DevClient_Warns(t *testing.T) {
 	require.False(t, c.Problem, "an unjudgeable dev build must not fail the run")
 }
 
+// A daemon built from source reports "dev", which identifies no release and so
+// is neither equal nor unequal to a client version in any way that predicts
+// compatibility. Failing here would tell everyone running a self-built daemon to
+// restart it, forever.
+func TestVersionSkew_DevDaemon_WarnsNotFails(t *testing.T) {
+	testguard.IsolateTmux(t)
+
+	opts := testOptions(t, false)
+	opts.Version = "1.0.192"
+	opts.daemonHealth = respondingDaemon(devVersion)
+
+	report, err := Run(opts)
+	require.NoError(t, err)
+
+	c := findCheck(t, report, "daemon version")
+	require.Equal(t, StatusWarn, c.Status, "an unjudgeable version must not FAIL")
+	require.Contains(t, c.Detail, "cannot be judged", "the row must say why it is not a verdict")
+	require.False(t, c.Problem, "an unjudgeable version must not drive a nonzero exit")
+	require.Zero(t, report.UnresolvedCount(), "a dev daemon on a dev box must exit 0")
+}
+
 // With no daemon answering there is no version to compare, and claiming skew
 // would be a lie — checkDaemonHealth owns that state.
 func TestVersionSkew_NoDaemon_NoRow(t *testing.T) {
@@ -205,6 +245,63 @@ func TestDuplicateDaemons_TwoOnThisHome_Fails(t *testing.T) {
 	require.Contains(t, c.Detail, "pid "+strconv.Itoa(second.PID))
 	require.Contains(t, c.Remediation, "af reset")
 	require.True(t, c.Problem)
+}
+
+// The false negative, which is the same lie told the other way round: run
+// `af doctor` from a daemon-spawned child (a watch task's shell) and the real
+// serving daemon is an ancestor. Dropping ancestors from the scan left the stale
+// EXTRA daemon looking like the single legitimate one — PASS on a split-brained
+// box.
+//
+// This test's own process stands in for the ancestor daemon: it is in
+// selfAncestors by construction, which is exactly the condition under test.
+func TestDuplicateDaemons_AncestorDaemonIsCounted(t *testing.T) {
+	testguard.IsolateTmux(t)
+
+	home := t.TempDir()
+	stubDaemonProcessProbe(t,
+		func(int) bool { return true },
+		func(int) []string { return []string{"af", "--daemon"} })
+
+	stale := spawnWithEnv(t, "af", []string{"--daemon"}, map[string]string{"AGENT_FACTORY_HOME": home})
+	// Both the ancestor (us) and the stale extra serve this home.
+	stubProcessHomes(t, map[int]string{os.Getpid(): home, stale.PID: home})
+
+	opts := testOptionsWithHome(t, home, false, os.Getpid(), stale.PID)
+	report, err := Run(opts)
+	require.NoError(t, err)
+
+	c := findCheck(t, report, "daemon instances")
+	require.Equal(t, StatusFail, c.Status,
+		"a duplicate must be found even when the real daemon is our own ancestor")
+	require.Contains(t, c.Detail, "2 daemons")
+	require.Contains(t, c.Detail, "pid "+strconv.Itoa(stale.PID))
+	require.Contains(t, c.Detail, "pid "+strconv.Itoa(os.Getpid()))
+}
+
+// Counting an ancestor is safe; killing one is not. --fix must never offer to
+// kill the daemon that is running this very command.
+func TestForeignDaemons_AncestorNeverOfferedForKill(t *testing.T) {
+	testguard.IsolateTmux(t)
+
+	home := t.TempDir()
+	stubDaemonProcessProbe(t,
+		func(int) bool { return true },
+		func(int) []string { return []string{"af", "--daemon"} })
+	// Our own process, presented as an ancestor daemon serving ANOTHER home —
+	// the shape that would otherwise reach the foreign-daemon kill path.
+	otherHome := t.TempDir()
+	stubProcessHomes(t, map[int]string{os.Getpid(): otherHome})
+
+	report, err := Run(testOptionsWithHome(t, home, true, os.Getpid()))
+	require.NoError(t, err)
+
+	for _, f := range report.Findings {
+		require.NotContains(t, f.FixAction, strconv.Itoa(os.Getpid()),
+			"doctor must never offer to kill its own ancestor")
+	}
+	require.False(t, hasFinding(report, "foreign-daemon"),
+		"an ancestor is not a foreign daemon to reap")
 }
 
 func TestDuplicateDaemons_SingleDaemon_NoRow(t *testing.T) {
@@ -314,14 +411,74 @@ func TestDaemonProcessHome_ReadableEnvironIsKnown(t *testing.T) {
 	require.Equal(t, explicit, home)
 }
 
-func TestAutostartPath_UnitLaunchesDifferentBinary_Fails(t *testing.T) {
+// Two spellings of one home must compare equal, or the duplicate check reads a
+// real duplicate as a daemon on some other home and stays silent. The tilde is
+// the case that actually ships: config.GetConfigDir expands AGENT_FACTORY_HOME
+// while a daemon's environ preserves the raw "~/af-home" it was launched with.
+func TestDuplicateDaemons_HomeSpellingsCompareEqual(t *testing.T) {
+	testguard.IsolateTmux(t)
+
+	realHome := t.TempDir()
+	t.Setenv("HOME", filepath.Dir(realHome))
+	tildeSpelling := filepath.Join("~", filepath.Base(realHome))
+	require.Equal(t, realHome, config.ExpandTilde(tildeSpelling), "test premise: the two spell one dir")
+
+	stubDaemonProcessProbe(t,
+		func(int) bool { return true },
+		func(int) []string { return []string{"af", "--daemon"} })
+
+	first := spawnWithEnv(t, "af", []string{"--daemon"}, nil)
+	second := spawnWithEnv(t, "af", []string{"--daemon"}, nil)
+	// One daemon spells the home with a tilde, the other with a trailing slash.
+	// Both serve the very home doctor is inspecting.
+	stubProcessHomes(t, map[int]string{
+		first.PID:  tildeSpelling,
+		second.PID: realHome + "/",
+	})
+
+	opts := testOptionsWithHome(t, realHome, false, first.PID, second.PID)
+	report, err := Run(opts)
+	require.NoError(t, err)
+
+	c := findCheck(t, report, "daemon instances")
+	require.Equal(t, StatusFail, c.Status,
+		"two spellings of this home are two daemons on this home")
+	require.Contains(t, c.Detail, "2 daemons")
+	require.False(t, hasFinding(report, "foreign-daemon"),
+		"a differently-spelled home is not a foreign home")
+}
+
+func TestNormalizeHome_EquatesSpellings(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", filepath.Dir(dir))
+	tilde := filepath.Join("~", filepath.Base(dir))
+
+	want := normalizeHome(dir)
+	require.Equal(t, want, normalizeHome(tilde), "tilde vs expanded")
+	require.Equal(t, want, normalizeHome(dir+"/"), "trailing slash")
+	require.Equal(t, want, normalizeHome(dir+"/./"), "unclean path")
+
+	// A symlinked home is the same home (on macOS /var vs /private/var is this
+	// exact case, #1918).
+	link := filepath.Join(t.TempDir(), "link")
+	require.NoError(t, os.Symlink(dir, link))
+	require.Equal(t, want, normalizeHome(link), "symlinked home")
+
+	require.NotEqual(t, want, normalizeHome(t.TempDir()), "genuinely different homes stay different")
+}
+
+// A different path AND a different version: the unit respawns a binary that is
+// not the one you run, so no restart can fix it. This is the real stranding.
+func TestAutostartPath_DifferentBinaryAndVersion_Fails(t *testing.T) {
 	testguard.IsolateTmux(t)
 
 	opts := testOptions(t, false)
+	opts.Version = "1.0.192"
 	opts.autostartUnit = func() daemon.AutostartUnitInfo {
 		return daemon.AutostartUnitInfo{Supported: true, Exists: true, Path: "/fake/unit.service", ExecPath: "/usr/local/bin/af"}
 	}
 	opts.selfBinary = func() (string, error) { return "/home/dev/.local/bin/af", nil }
+	opts.binaryVersion = func(string) (string, error) { return "1.0.180", nil }
 
 	report, err := Run(opts)
 	require.NoError(t, err)
@@ -330,8 +487,77 @@ func TestAutostartPath_UnitLaunchesDifferentBinary_Fails(t *testing.T) {
 	require.Equal(t, StatusFail, c.Status)
 	require.Contains(t, c.Detail, "/usr/local/bin/af")
 	require.Contains(t, c.Detail, "/home/dev/.local/bin/af")
+	require.Contains(t, c.Detail, "1.0.180")
 	require.Contains(t, c.Remediation, "af daemon install")
 	require.True(t, c.Problem)
+}
+
+// The dev-box false positive this check must not have: running a binary you
+// just built while the unit points at your installed af is normal, correct, and
+// nothing to fix. The paths differ; the versions do not.
+func TestAutostartPath_DifferentPathSameVersion_AdvisoryOnly(t *testing.T) {
+	testguard.IsolateTmux(t)
+
+	opts := testOptions(t, false)
+	opts.Version = "1.0.192"
+	opts.autostartUnit = func() daemon.AutostartUnitInfo {
+		return daemon.AutostartUnitInfo{Supported: true, Exists: true, ExecPath: "/home/dev/.local/bin/af"}
+	}
+	opts.selfBinary = func() (string, error) { return "/tmp/go-build123/af", nil }
+	opts.binaryVersion = func(string) (string, error) { return "1.0.192", nil }
+
+	report, err := Run(opts)
+	require.NoError(t, err)
+
+	c := findCheck(t, report, "autostart path")
+	require.Equal(t, StatusWarn, c.Status, "same version at two paths is a note, not a verdict")
+	require.Contains(t, c.Detail, "nothing is skewed today")
+	require.False(t, c.Problem, "a scratch build must not make a healthy box exit nonzero")
+	require.Zero(t, report.UnresolvedCount())
+}
+
+// A unit pointing at something that is not a readable af binary (a deleted
+// path, say) cannot start a daemon at all — worth acting on, but it is not
+// evidence of version skew, so it warns rather than asserting one.
+func TestAutostartPath_UnitBinaryUnidentifiable_Warns(t *testing.T) {
+	testguard.IsolateTmux(t)
+
+	opts := testOptions(t, false)
+	opts.Version = "1.0.192"
+	opts.autostartUnit = func() daemon.AutostartUnitInfo {
+		return daemon.AutostartUnitInfo{Supported: true, Exists: true, ExecPath: "/gone/af"}
+	}
+	opts.selfBinary = func() (string, error) { return "/home/dev/.local/bin/af", nil }
+	opts.binaryVersion = func(string) (string, error) { return "", errNoDaemon }
+
+	report, err := Run(opts)
+	require.NoError(t, err)
+
+	c := findCheck(t, report, "autostart path")
+	require.Equal(t, StatusWarn, c.Status)
+	require.Contains(t, c.Detail, "not a readable af binary")
+	require.True(t, c.Problem, "a unit that cannot launch af is still a real problem")
+}
+
+// An unreleased client cannot be compared, so the path difference is unjudgeable.
+func TestAutostartPath_DevClient_AdvisoryOnly(t *testing.T) {
+	testguard.IsolateTmux(t)
+
+	opts := testOptions(t, false)
+	opts.Version = devVersion
+	opts.autostartUnit = func() daemon.AutostartUnitInfo {
+		return daemon.AutostartUnitInfo{Supported: true, Exists: true, ExecPath: "/home/dev/.local/bin/af"}
+	}
+	opts.selfBinary = func() (string, error) { return "/tmp/af", nil }
+	opts.binaryVersion = func(string) (string, error) { return "1.0.192", nil }
+
+	report, err := Run(opts)
+	require.NoError(t, err)
+
+	c := findCheck(t, report, "autostart path")
+	require.Equal(t, StatusWarn, c.Status)
+	require.Contains(t, c.Detail, "cannot be judged")
+	require.False(t, c.Problem)
 }
 
 func TestAutostartPath_Matching_Passes(t *testing.T) {
@@ -487,6 +713,20 @@ func TestSplitBrainBinaries_ForeignAfBinaryIgnored(t *testing.T) {
 	require.Zero(t, report.UnresolvedCount())
 }
 
+// The candidate list is INSTALL locations. The binary you happen to be running
+// is not one: a scratch build out of a temp dir or worktree — routine on a dev
+// box — would otherwise read as a rogue install at a different version, and the
+// remedy ("remove the stale install") would be actively wrong advice.
+func TestDefaultBinaryCandidates_ExcludesRunningBinary(t *testing.T) {
+	self, err := os.Executable()
+	require.NoError(t, err)
+
+	for _, c := range defaultBinaryCandidates() {
+		require.NotEqual(t, resolvePath(self), resolvePath(c),
+			"the running test binary is not an af install")
+	}
+}
+
 func TestParseAFVersion_ShapeIsRequired(t *testing.T) {
 	// Accepted: our real output, including the released two-line form and an
 	// unreleased build.
@@ -509,21 +749,57 @@ func TestParseAFVersion_ShapeIsRequired(t *testing.T) {
 	}
 }
 
-func TestStaleSocket_NoDaemonAnswering_Warns(t *testing.T) {
+// One condition, one finding. A stale control socket is already
+// checkDaemonHealth's FAIL, with the same remedy; billing it again here would
+// inflate the issue count and hand a script two actionable rows for one fix.
+func TestStaleSocket_ControlSocketNotDoubleCounted(t *testing.T) {
 	testguard.IsolateTmux(t)
 
 	home := t.TempDir()
-	sockPath := abandonedSocket(t, filepath.Join(home, "daemon.sock"))
-	require.FileExists(t, sockPath)
+	// ONLY the control socket is stale.
+	abandonedSocket(t, filepath.Join(home, daemon.ControlSocketName()))
 
 	opts := testOptionsWithHome(t, home, false)
+	opts.daemonHealth = func() daemon.HealthStatus {
+		return daemon.HealthStatus{
+			SocketPath:   filepath.Join(home, daemon.ControlSocketName()),
+			SocketExists: true,
+			PingErr:      errNoDaemon,
+		}
+	}
+
 	report, err := Run(opts)
+	require.NoError(t, err)
+
+	// checkDaemonHealth owns it and reports it.
+	require.Equal(t, StatusFail, findCheck(t, report, "daemon").Status)
+	require.False(t, hasCheck(report, "stale sockets"),
+		"the control socket is checkDaemonHealth's row; a second row is the same issue billed twice")
+
+	actionable := 0
+	for _, c := range BuildJSONReport(report, false, false).Checks {
+		if c.Actionable {
+			actionable++
+		}
+	}
+	require.Equal(t, 1, actionable, "one stale control socket must produce exactly one actionable row")
+}
+
+// The HTTP socket is nobody else's job: health never probes it, so if this check
+// stayed quiet about it, nothing would mention it at all.
+func TestStaleSocket_HTTPSocketStillReported(t *testing.T) {
+	testguard.IsolateTmux(t)
+
+	home := t.TempDir()
+	abandonedSocket(t, filepath.Join(home, "daemon-http.sock"))
+
+	report, err := Run(testOptionsWithHome(t, home, false))
 	require.NoError(t, err)
 
 	c := findCheck(t, report, "stale sockets")
 	require.Equal(t, StatusWarn, c.Status)
-	require.Contains(t, c.Detail, "daemon.sock")
-	require.Contains(t, c.Remediation, "af reset")
+	require.Contains(t, c.Detail, "daemon-http.sock")
+	require.NotContains(t, c.Detail, daemon.ControlSocketName())
 	require.True(t, c.Problem)
 }
 
@@ -533,7 +809,7 @@ func TestStaleSocket_RegularFileWithSocketName_NoRow(t *testing.T) {
 	testguard.IsolateTmux(t)
 
 	home := t.TempDir()
-	require.NoError(t, os.WriteFile(filepath.Join(home, "daemon.sock"), []byte("not a socket"), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(home, "daemon-http.sock"), []byte("not a socket"), 0o600))
 
 	report, err := Run(testOptionsWithHome(t, home, false))
 	require.NoError(t, err)
@@ -597,6 +873,31 @@ func TestAutostartSupervision_UnitPresentButInactive_Warns(t *testing.T) {
 	c := findCheck(t, report, "autostart supervision")
 	require.Equal(t, StatusWarn, c.Status)
 	require.Contains(t, c.Detail, "not running it")
+	require.True(t, c.Problem)
+}
+
+// Loaded is not running: the agent is installed and launchd knows it, so
+// everything looks configured while no daemon is actually up. Reporting PASS
+// here is a false all-clear on the platform where this was hit.
+func TestAutostartSupervision_LoadedButNotRunning_Warns(t *testing.T) {
+	testguard.IsolateTmux(t)
+
+	opts := testOptions(t, false)
+	opts.autostartSupervision = func() daemon.SupervisionInfo {
+		return daemon.SupervisionInfo{
+			Supported: true, UnitPresent: true, Enabled: true,
+			Loaded: true, Active: false,
+			Domain: "gui/501/com.agent-factory.daemon",
+			Detail: "loaded in gui/501/com.agent-factory.daemon but no daemon process is running",
+		}
+	}
+
+	report, err := Run(opts)
+	require.NoError(t, err)
+
+	c := findCheck(t, report, "autostart supervision")
+	require.Equal(t, StatusWarn, c.Status, "a loaded-but-dead agent must never read as PASS")
+	require.Contains(t, c.Detail, "no daemon process is running")
 	require.True(t, c.Problem)
 }
 
@@ -730,7 +1031,7 @@ func TestRenderJSON_AdvisoryWarnDistinguishableFromActionableWarn(t *testing.T) 
 	testguard.IsolateTmux(t)
 
 	home := t.TempDir()
-	abandonedSocket(t, filepath.Join(home, "daemon.sock"))
+	abandonedSocket(t, filepath.Join(home, "daemon-http.sock"))
 
 	opts := testOptionsWithHome(t, home, false)
 	report, err := Run(opts)

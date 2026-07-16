@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/internal/proctree"
 )
@@ -53,6 +54,16 @@ func checkDaemonVersionSkew(ctx *scanContext, report *Report, h daemon.HealthSta
 			fmt.Sprintf("daemon reports %s; this client is an unreleased build, so skew cannot be judged",
 				describeVersion(served)),
 			"compare against a released af build if the UI misbehaves", false)
+	case served == devVersion:
+		// A dev daemon's version identifies no release, so it is neither equal
+		// nor unequal to ours in any way that predicts compatibility. Failing
+		// here would tell everyone running a daemon they built from source to
+		// restart it, forever — the exact cry-wolf that teaches users to ignore
+		// doctor.
+		report.Warn(sectionDaemon, "daemon version",
+			fmt.Sprintf("the daemon is an unreleased build and your af client is %s; "+
+				"an unreleased version identifies no release, so skew cannot be judged", client),
+			"if the UI misbehaves, restart the daemon onto a released build: af daemon restart", false)
 	case served == "":
 		// A daemon that answers but reports no version predates version
 		// reporting itself, which places it strictly older than this client.
@@ -121,6 +132,9 @@ type daemonProc struct {
 	homeKnown bool
 	// ownedByUs reports whether this process runs under the uid running doctor.
 	ownedByUs bool
+	// isSelfAncestor reports whether this process is us or one of our
+	// ancestors. Counting it is fine — killing it is not.
+	isSelfAncestor bool
 }
 
 // scanDaemons returns every agent-factory daemon in the snapshot paired with
@@ -136,14 +150,18 @@ type daemonProc struct {
 // either accuses the user of a problem or (with --fix) kills something. A
 // process is attributed to a home only when we positively read that home out of
 // its environ; anything unreadable stays unattributed. See daemonProcessHome.
+//
+// Our own ancestors are INCLUDED, and flagged rather than dropped. Dropping them
+// is what the kill paths want, but counting is not killing: `af doctor` run from
+// a daemon-spawned child (a watch task's shell) has the real serving daemon as
+// an ancestor, so excluding it leaves a stale second daemon looking like the one
+// legitimate daemon — doctor reporting PASS on a split-brained box, which is the
+// same lie as a false alarm, told the other way round (#1044).
 func scanDaemons(ctx *scanContext) []daemonProc {
 	defaultHome := defaultAFHome()
 	self := selfUID()
 	var out []daemonProc
 	for pid, p := range ctx.snap {
-		if ctx.selfAncestors[pid] {
-			continue
-		}
 		args := daemonProcessArgv(pid)
 		if len(args) == 0 || !daemon.LooksLikeDaemonArgv(args) {
 			continue
@@ -151,10 +169,11 @@ func scanDaemons(ctx *scanContext) []daemonProc {
 		home, known := daemonProcessHome(pid, defaultHome)
 		uid, uidKnown := daemonProcessOwnerUID(pid)
 		out = append(out, daemonProc{
-			proc:      p,
-			home:      home,
-			homeKnown: known,
-			ownedByUs: uidKnown && uid == self,
+			proc:           p,
+			home:           home,
+			homeKnown:      known,
+			ownedByUs:      uidKnown && uid == self,
+			isSelfAncestor: ctx.selfAncestors[pid],
 		})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].proc.PID < out[j].proc.PID })
@@ -179,7 +198,7 @@ func (c *scanContext) daemonProcs() []daemonProc {
 // anything we cannot confirm is somebody else's business, and a diagnostic that
 // accuses the user based on a guess is worse than one that stays quiet.
 func activeHomeDaemons(ctx *scanContext) []proctree.Process {
-	activeHome := filepath.Clean(ctx.opts.ConfigDir)
+	activeHome := normalizeHome(ctx.opts.ConfigDir)
 	var out []proctree.Process
 	for _, d := range ctx.daemonProcs() {
 		if d.ownedByUs && d.homeKnown && d.home == activeHome {
@@ -220,7 +239,25 @@ func daemonProcessHome(pid int, defaultHome string) (string, bool) {
 	if home == "" {
 		return "", false
 	}
-	return filepath.Clean(home), true
+	return normalizeHome(home), true
+}
+
+// normalizeHome canonicalizes an agent-factory home for comparison, so two
+// spellings of one directory compare equal.
+//
+// Every home comparison here decides whether a daemon is ours, so a spelling
+// difference reads as a different home and the duplicate/split-brain verdicts
+// invert: a real duplicate goes unreported, or a sibling gets called foreign.
+// The spellings that actually occur:
+//
+//   - a daemon's environ holds the RAW AGENT_FACTORY_HOME ("~/af-home"), while
+//     config.GetConfigDir has already expanded the active home — so the tilde
+//     must be expanded on both sides;
+//   - a trailing slash, or a relative path, from a hand-written unit;
+//   - a symlinked home, and on macOS /var vs /private/var, where the same
+//     directory has two absolute spellings (#1918).
+func normalizeHome(home string) string {
+	return resolvePath(config.ExpandTilde(home))
 }
 
 // daemonProcSummary identifies a daemon process by pid and age, which is what
@@ -265,10 +302,45 @@ func checkAutostartPath(ctx *scanContext, report *Report) {
 		report.Pass(sectionDaemon, "autostart path", "launches this af binary ("+selfPath+")")
 		return
 	}
-	report.Fail(sectionDaemon, "autostart path",
-		fmt.Sprintf("your autostart daemon runs %s but your af is %s; upgrades won't reach the supervised daemon",
-			unitPath, selfPath),
-		"reinstall autostart: af daemon install")
+
+	// A differing path alone does not prove a problem, and treating it as one
+	// cries wolf on an ordinary dev box: anyone running a binary they just
+	// built has a unit pointing at their installed af, which is correct and
+	// intended. Nor can the two be told apart by version — a `go build` of this
+	// tree reports the same number as the release.
+	//
+	// What actually strands a daemon is the two binaries being different
+	// VERSIONS: then whatever the unit respawns is not what you are running,
+	// and no restart fixes it. Same version at two paths is worth a note, not a
+	// verdict.
+	client := strings.TrimSpace(ctx.opts.Version)
+	unitVersion, err := ctx.opts.binaryVersion(info.ExecPath)
+	switch {
+	case err != nil || unitVersion == "":
+		// The unit launches something we cannot identify as an af binary —
+		// including a path that no longer exists, in which case the unit cannot
+		// start a daemon at all. That is worth acting on.
+		report.Warn(sectionDaemon, "autostart path",
+			fmt.Sprintf("your autostart daemon runs %s, which is not a readable af binary; your af is %s",
+				unitPath, selfPath),
+			"reinstall autostart so it launches your af: af daemon install", true)
+	case client == "" || client == devVersion:
+		report.Warn(sectionDaemon, "autostart path",
+			fmt.Sprintf("your autostart daemon runs %s (%s) and your af is %s; this client is an unreleased build, so skew cannot be judged",
+				unitPath, unitVersion, selfPath),
+			"if the UI misbehaves, reinstall autostart: af daemon install", false)
+	case unitVersion != client:
+		report.Fail(sectionDaemon, "autostart path",
+			fmt.Sprintf("your autostart daemon runs %s (%s) but your af is %s (%s); "+
+				"upgrades won't reach the supervised daemon, and restarting it respawns the old one",
+				unitPath, unitVersion, selfPath, client),
+			"reinstall autostart: af daemon install")
+	default:
+		report.Warn(sectionDaemon, "autostart path",
+			fmt.Sprintf("your autostart daemon runs %s and your af is %s — same version (%s), so nothing is skewed today",
+				unitPath, selfPath, unitVersion),
+			"if you upgrade one path, reinstall autostart so both stay in step: af daemon install", false)
+	}
 }
 
 // checkSplitBrainBinaries finds af binaries at different versions in the usual
@@ -313,12 +385,22 @@ func checkSplitBrainBinaries(ctx *scanContext, report *Report) {
 // checkStaleSockets reports daemon sockets left in the home with no daemon
 // answering. The socket is what makes the failure quiet: clients find it,
 // connect, and wait, instead of starting a daemon that would work.
+//
+// The CONTROL socket is deliberately not ours to report: checkDaemonHealth
+// pings it, and a present-but-silent control socket is already its FAIL, with
+// the same remedy. Reporting it here too would bill one condition to two
+// actionable rows — inflating the issue count and handing scripts two rows for
+// one fix. This check covers the sockets health does not probe (the HTTP
+// socket), which otherwise nothing would mention.
 func checkStaleSockets(ctx *scanContext, report *Report, h daemon.HealthStatus) {
 	if h.PingErr == nil {
 		return // a daemon is answering; the sockets are live by definition
 	}
 	var stale []string
 	for _, name := range daemon.DaemonSocketNames() {
+		if name == daemon.ControlSocketName() {
+			continue // checkDaemonHealth owns this one
+		}
 		path := filepath.Join(ctx.opts.ConfigDir, name)
 		info, err := os.Lstat(path)
 		if err != nil {
@@ -363,6 +445,13 @@ func checkAutostartSupervision(ctx *scanContext, report *Report) {
 			fmt.Sprintf("the launchd agent is loaded outside %s, where af's restarts are sent (%s)",
 				info.Domain, info.Detail),
 			"reload it in the right domain: af daemon install", true)
+	case info.Loaded && !info.Active:
+		// Everything looks configured — the agent is installed and launchd
+		// knows it — while no daemon is actually running.
+		report.Warn(sectionDaemon, "autostart supervision",
+			fmt.Sprintf("the launchd agent is loaded in %s but no daemon process is running (%s)",
+				info.Domain, info.Detail),
+			"start it: af daemon restart", true)
 	case !info.Active:
 		report.Warn(sectionDaemon, "autostart supervision",
 			fmt.Sprintf("a unit file is installed but the service manager is not running it (%s)", info.Detail),
@@ -398,16 +487,20 @@ func resolvedSelfBinary() (string, error) {
 	return os.Executable()
 }
 
-// defaultBinaryCandidates lists the paths an af install plausibly occupies:
-// whatever PATH resolves, this binary itself, and the fixed locations the
-// installer and the common package managers use. Deduped by resolved path so a
-// symlink chain to one binary is one install, not several.
+// defaultBinaryCandidates lists the paths an af INSTALL plausibly occupies:
+// whatever PATH resolves, plus the fixed locations the installer and the common
+// package managers use. Deduped by resolved path so a symlink chain to one
+// binary is one install, not several.
+//
+// os.Executable is deliberately absent. A binary someone just built and ran out
+// of a temp dir or a worktree is not an install, and including it made a routine
+// dev-box workflow — run a scratch build whose version differs from the one on
+// disk — report a split-brain install and advise removing it. The real
+// split brain this check exists for (an old /usr/local/bin/af beside a new
+// ~/.local/bin/af) lives entirely in the paths below.
 func defaultBinaryCandidates() []string {
 	var candidates []string
 	if p, err := exec.LookPath("af"); err == nil {
-		candidates = append(candidates, p)
-	}
-	if p, err := os.Executable(); err == nil {
 		candidates = append(candidates, p)
 	}
 	fixed := []string{

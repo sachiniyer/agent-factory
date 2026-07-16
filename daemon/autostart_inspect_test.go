@@ -214,6 +214,50 @@ func TestAutostartSupervision_DarwinLoadedOutsideGUIDomain(t *testing.T) {
 	require.Equal(t, launchdDomainTarget(), info.Domain)
 }
 
+// launchctl print succeeds for a job launchd KNOWS, including one whose process
+// has stopped — it reports the service's properties, not an is-running answer.
+// Equating the two reports a dead daemon as healthy supervision, on the platform
+// where that failure was actually hit.
+func TestAutostartSupervision_DarwinLoadedButNotRunning(t *testing.T) {
+	dir := withAutostartTestEnv(t, "darwin")
+	writeUnitFile(t, filepath.Join(dir, autostartLaunchdLabel+".plist"),
+		launchdAutostartPlist("/usr/local/bin/af", "", "", "", "/tmp/af.log"))
+
+	// A real loaded-but-stopped print block: no pid, and a state that merely
+	// contains the word "running".
+	withUnitCommand(t, func(_ string, args ...string) ([]byte, error) {
+		if args[0] == "print" {
+			return []byte("com.agent-factory.daemon = {\n" +
+				"\tactive count = 0\n" +
+				"\tstate = not running\n" +
+				"\tlast exit code = 1\n" +
+				"}\n"), nil
+		}
+		return nil, errFake
+	})
+
+	info := AutostartSupervision()
+	require.True(t, info.UnitPresent)
+	require.True(t, info.Loaded, "launchd knows the job")
+	require.False(t, info.Active, "but no daemon process is running")
+	require.False(t, info.LoadedElsewhere, "it is loaded in the right domain, just not running")
+	require.Contains(t, info.Detail, "no daemon process is running")
+}
+
+func TestLaunchdJobRunning_ReadsState(t *testing.T) {
+	// A live job: launchd prints a pid only for a process it is running.
+	require.True(t, launchdJobRunning("\tstate = running\n\tpid = 4321\n"))
+	require.True(t, launchdJobRunning("\tpid = 4321\n"))
+	require.True(t, launchdJobRunning("\tstate = running\n"))
+
+	// Loaded but stopped. "not running" contains "running", which is why this
+	// compares the whole value instead of searching for a substring.
+	require.False(t, launchdJobRunning("\tstate = not running\n\tlast exit code = 1\n"))
+	require.False(t, launchdJobRunning("\tactive count = 0\n"))
+	require.False(t, launchdJobRunning(""))
+	require.False(t, launchdJobRunning("\tpid = \n"), "an empty pid is not a pid")
+}
+
 func TestAutostartSupervision_DarwinLoadedInGUIDomain(t *testing.T) {
 	dir := withAutostartTestEnv(t, "darwin")
 	writeUnitFile(t, filepath.Join(dir, autostartLaunchdLabel+".plist"),
@@ -223,12 +267,13 @@ func TestAutostartSupervision_DarwinLoadedInGUIDomain(t *testing.T) {
 		if args[0] == "print" {
 			require.Equal(t, launchdDomainTarget(), args[1],
 				"doctor must probe the same domain the restart path kickstarts")
-			return []byte("state = running\n"), nil
+			return []byte("\tstate = running\n\tpid = 4321\n"), nil
 		}
 		return nil, errFake
 	})
 
 	info := AutostartSupervision()
+	require.True(t, info.Loaded)
 	require.True(t, info.Active)
 	require.False(t, info.LoadedElsewhere)
 }

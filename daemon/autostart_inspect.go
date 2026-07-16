@@ -162,9 +162,14 @@ type SupervisionInfo struct {
 	// Enabled is systemd's is-enabled; always true on macOS, where RunAtLoad
 	// in the plist plays that role.
 	Enabled bool
-	// Active reports whether the service manager currently runs the unit —
-	// systemd is-active, or a launchd agent loaded in the expected domain.
+	// Active reports whether the service manager is currently RUNNING the
+	// daemon — systemd is-active, or a launchd job with a live process.
 	Active bool
+	// Loaded reports that launchd knows the job in Domain. Loaded without
+	// Active is a real and quiet state: the agent is installed and registered,
+	// so everything looks configured, while no daemon process is running.
+	// Always false on Linux, where is-active answers the question directly.
+	Loaded bool
 	// Domain is the launchd domain target the restart path uses (gui/<uid>);
 	// empty on Linux.
 	Domain string
@@ -205,9 +210,19 @@ func AutostartSupervision() SupervisionInfo {
 	case "darwin":
 		info.Enabled = true // RunAtLoad; launchd has no separate enable state
 		info.Domain = launchdDomainTarget()
-		if _, err := autostartUnitCommand("launchctl", "print", info.Domain); err == nil {
-			info.Active = true
-			info.Detail = "loaded in " + info.Domain
+		if out, err := autostartUnitCommand("launchctl", "print", info.Domain); err == nil {
+			// print succeeding means launchd KNOWS the job, not that the daemon
+			// is alive: it reports the service's properties, including a state
+			// and last exit status, for a loaded job whose process has stopped.
+			// Equating the two reports a dead daemon as healthy supervision —
+			// on the platform where that failure was actually hit.
+			info.Loaded = true
+			info.Active = launchdJobRunning(string(out))
+			if info.Active {
+				info.Detail = "loaded and running in " + info.Domain
+			} else {
+				info.Detail = "loaded in " + info.Domain + " but no daemon process is running"
+			}
 			return info
 		}
 		// Not in the domain the restart path targets. A legacy-domain load
@@ -227,6 +242,32 @@ func AutostartSupervision() SupervisionInfo {
 // Kept here so doctor reports the same domain the restart actually kickstarts.
 func launchdDomainTarget() string {
 	return fmt.Sprintf("gui/%d/%s", os.Getuid(), autostartLaunchdLabel)
+}
+
+// launchdJobRunning reports whether a `launchctl print` block describes a job
+// with a live process.
+//
+// Two independent signals, because either can be missing:
+//   - a "pid = N" line is conclusive — launchd only prints it for a job it is
+//     currently running;
+//   - otherwise "state = running" answers it. Note "state = not running" also
+//     contains the word "running", so this compares the whole value rather than
+//     searching for a substring.
+//
+// Neither present means launchd knows the job but is not running it, which is
+// exactly the loaded-but-dead state this exists to catch.
+func launchdJobRunning(out string) bool {
+	running := false
+	for _, line := range strings.Split(out, "\n") {
+		field := strings.TrimSpace(line)
+		if pid, ok := strings.CutPrefix(field, "pid = "); ok && strings.TrimSpace(pid) != "" {
+			return true
+		}
+		if state, ok := strings.CutPrefix(field, "state = "); ok {
+			running = strings.TrimSpace(state) == "running"
+		}
+	}
+	return running
 }
 
 // autostartUnitStateOK runs `systemctl --user <verb>` and reports whether it

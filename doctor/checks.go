@@ -647,7 +647,10 @@ func checkForeignDaemons(ctx *scanContext, report *Report) {
 	if ctx.snap == nil {
 		return
 	}
-	activeHome := filepath.Clean(ctx.opts.ConfigDir)
+	// Normalized on both sides (see normalizeHome): a daemon that spells the
+	// active home differently is ours, and calling it foreign would offer a
+	// --fix kill of the live daemon serving this very run.
+	activeHome := normalizeHome(ctx.opts.ConfigDir)
 
 	// Shares the run's one daemon scan with checkDuplicateDaemons, which
 	// classifies this home's daemons — the two must agree on which process
@@ -656,6 +659,12 @@ func checkForeignDaemons(ctx *scanContext, report *Report) {
 		p := d.proc
 		pid := p.PID
 		home := d.home
+		if d.isSelfAncestor {
+			// Our own ancestor daemon (doctor launched from a watch task, say).
+			// checkDuplicateDaemons still counts it, but it must never be
+			// offered for a kill: that is the daemon running this command.
+			continue
+		}
 		if !d.ownedByUs {
 			// Another user's daemon is not ours to report or reap: --fix would
 			// offer a kill that can only fail with EPERM, and on a shared box
