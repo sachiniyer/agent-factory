@@ -786,14 +786,12 @@ success.`,
 			// session — scoping by cwd would archive a same-titled namesake in
 			// the wrong repo, or fail "instance not found" while leaving the
 			// caller's real session alive. Mirror Storage's root→repoID
-			// derivation (#667): fall back to Path when no worktree RepoPath.
+			// derivation (#667), shared with whoami via sessionRepoRoot so the
+			// two cannot drift.
 			// A worktree-less session (remote backend) leaves repoID empty so
 			// the resolved title is matched all-repo and the daemon's remote
 			// guard still fires with its own clear message.
-			root := data.Worktree.RepoPath
-			if root == "" {
-				root = data.Path
-			}
+			root := sessionRepoRoot(data)
 			if root != "" {
 				repoID = config.RepoIDFromRoot(root)
 			}
@@ -934,18 +932,21 @@ var sessionsWhoamiCmd = &cobra.Command{
 		// session, repo hash included), so an explicit --repo is checked instead
 		// of ignored: a caller who names the wrong project learns that rather
 		// than receiving another project's answer with no signal (#1893).
-		if repoFlag != "" && data.Path != "" {
-			// data.Path is empty for sessions that record no local repo root
-			// (some remote-backed rows). There is nothing to compare against
-			// then, and asserting on a value we do not have would fail a caller
-			// who IS in the named project — so only a known-mismatched project
-			// is an error, never an unknown one.
+		if root := sessionRepoRoot(data); repoFlag != "" && root != "" {
+			// A session that records no repo root at all (some remote-backed
+			// rows) has nothing to compare against: asserting on a value we do
+			// not have would fail a caller who IS in the named project, so an
+			// unknown project is never an error — only a known-mismatched one.
 			repo, err := repoFromFlag()
 			if err != nil {
 				return jsonError(err)
 			}
-			if config.RepoIDFromRoot(data.Path) != repo.ID {
-				return jsonError(fmt.Errorf("this session belongs to project %s, not --repo %s", data.Path, repo.Root))
+			// Resolve the session's root through git rather than hashing it
+			// raw: a stored root that was never git-resolved would otherwise
+			// hash differently from the canonical --repo naming the same
+			// project, rejecting a caller who is exactly where they claim.
+			if newProjectIDCache().idFor(root) != repo.ID {
+				return jsonError(fmt.Errorf("this session belongs to project %s, not --repo %s", root, repo.Root))
 			}
 		}
 		return jsonOut(*data)

@@ -28,7 +28,11 @@ af tasks list --repo /repos/beta
 
     `af tasks get`, `update`, `remove`, and `trigger` used to accept `--repo` and silently ignore it, so an id reached any project's task from anywhere. They now refuse an id owned by a different project and name the `--repo` that would reach it.
 
-Against a remote daemon (`--daemon-url`/`AF_DAEMON_URL`) rule 2 does not apply: your current directory names a repository on *this* machine, which says nothing about the daemon's projects, so only an explicit `--repo` scopes a remote lookup.
+### Remote daemons
+
+For the **session reads** that follow `--daemon-url`/`AF_DAEMON_URL` (`sessions list`, `get`, `watch`, `preview`), rule 2 does not apply: your current directory names a repository on *this* machine, which says nothing about the daemon's projects, so only an explicit `--repo` scopes a remote lookup.
+
+**`af tasks` is not remote-targeted at all.** Every task command talks to the local daemon over its control socket, whatever `--daemon-url`/`AF_DAEMON_URL` is set to — so `af tasks list` scopes by your local current directory and lists *local* tasks, and `af tasks remove` removes a local one. There is no way to manage a remote daemon's tasks from here today.
 
 ## `af` — the TUI
 

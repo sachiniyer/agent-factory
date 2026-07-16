@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/task"
 )
 
@@ -148,6 +149,23 @@ func (c *projectIDCache) idFor(projectPath string) string {
 	}
 	c.ids[projectPath] = id
 	return id
+}
+
+// sessionRepoRoot derives the root of the project a session belongs to FROM THE
+// SESSION'S OWN RECORD, mirroring Storage's root→repoID derivation (#667): the
+// worktree's RepoPath is the canonical root (sessions create stores the
+// git-resolved repo.Root there), and Path is the fallback for worktree-less
+// rows (remote backends). Returns "" when neither is known.
+//
+// Shared by `archive --self` and `whoami` so the two cannot drift. Hashing
+// data.Path directly is the trap this exists to prevent: Path is stored as
+// entered and may never have been git-resolved, so RepoIDFromRoot(data.Path)
+// can differ from the canonical ID of the very same project.
+func sessionRepoRoot(data *session.InstanceData) string {
+	if data.Worktree.RepoPath != "" {
+		return data.Worktree.RepoPath
+	}
+	return data.Path
 }
 
 // requireTaskInScope enforces the contract on a task command that takes an id.

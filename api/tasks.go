@@ -297,17 +297,21 @@ var tasksGetCmd = &cobra.Command{
 			return jsonError(err)
 		}
 
+		// Resolve the scope BEFORE the lookup so an invalid --repo reports the
+		// path it could not resolve rather than being masked by a not-found for
+		// the id (#892 semantics, and what "an explicit --repo always wins"
+		// means). The other id-taking commands get this ordering from
+		// enforceTaskScope; `get` checks inline to reuse the record it loads.
+		scope, err := resolveProjectScope(false)
+		if err != nil {
+			return jsonError(err)
+		}
+
 		s, err := getTaskByID(args[0])
 		if err != nil {
 			return jsonError(fmt.Errorf("failed to get task: %w", err))
 		}
 
-		// Scope the read against the already-loaded record rather than
-		// re-fetching through enforceTaskScope.
-		scope, err := resolveProjectScope(false)
-		if err != nil {
-			return jsonError(err)
-		}
 		if scope.Repo != nil {
 			if err := requireTaskInScope(s, scope); err != nil {
 				return jsonError(err)

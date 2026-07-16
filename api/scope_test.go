@@ -476,3 +476,66 @@ func TestWhoami_MatchingRepoFlagPasses(t *testing.T) {
 	repoFlag = mine
 	require.NoError(t, sessionsWhoamiCmd.RunE(sessionsWhoamiCmd, nil))
 }
+
+// TestWhoami_NonCanonicalSessionPathStillMatches covers the Codex P2 on this
+// PR: a session's stored Path is kept as ENTERED and may never have been
+// git-resolved, while --repo is resolved through git. Hashing Path raw made a
+// blanket `whoami --repo <canonical root>` reject the caller's OWN session.
+// The comparison resolves the session's root the same way, so the two agree.
+func TestWhoami_NonCanonicalSessionPathStillMatches(t *testing.T) {
+	useTempConfig(t)
+	resetScopeFlags(t)
+
+	repo := mkRepo(t, "proj")
+	// A non-canonical spelling of the very same project: trailing slash and a
+	// "." segment. RepoIDFromRoot would hash this differently from repo.ID.
+	noisy := filepath.Join(repo, ".") + string(filepath.Separator)
+	require.NotEqual(t, config.RepoIDFromRoot(noisy), config.RepoIDFromRoot(repo),
+		"fixture must actually be a different raw hash, else the test proves nothing")
+
+	stubCurrentTmuxName(t, func() (string, error) { return "af_me_agent", nil })
+	stubSnapshot(t, func(daemon.SnapshotRequest) ([]session.InstanceData, error) {
+		return []session.InstanceData{{Title: "me", TmuxName: "af_me_agent", Path: noisy}}, nil
+	})
+
+	repoFlag = repo
+	require.NoError(t, sessionsWhoamiCmd.RunE(sessionsWhoamiCmd, nil),
+		"a non-canonically-stored path must still match its own project")
+}
+
+// TestWhoami_PrefersWorktreeRepoPath pins the #667 derivation sessionRepoRoot
+// shares with `archive --self`: the worktree's RepoPath is the canonical root,
+// and Path is only the fallback.
+func TestWhoami_PrefersWorktreeRepoPath(t *testing.T) {
+	useTempConfig(t)
+	resetScopeFlags(t)
+
+	real := mkRepo(t, "real")
+	stubCurrentTmuxName(t, func() (string, error) { return "af_me_agent", nil })
+	stubSnapshot(t, func(daemon.SnapshotRequest) ([]session.InstanceData, error) {
+		return []session.InstanceData{{
+			Title: "me", TmuxName: "af_me_agent",
+			Path:     "/some/stale/entered/path",
+			Worktree: session.GitWorktreeData{RepoPath: real},
+		}}, nil
+	})
+
+	repoFlag = real
+	require.NoError(t, sessionsWhoamiCmd.RunE(sessionsWhoamiCmd, nil),
+		"the worktree RepoPath is the canonical root and must win over Path")
+}
+
+// TestTasksGet_InvalidRepoReportedBeforeNotFound covers the Codex P3: an
+// invalid --repo must name the path it could not resolve rather than being
+// masked by a not-found for the id.
+func TestTasksGet_InvalidRepoReportedBeforeNotFound(t *testing.T) {
+	useTempConfig(t)
+	resetScopeFlags(t)
+	stubDaemon(t)
+
+	repoFlag = filepath.Join(t.TempDir(), "not-a-git-repo")
+	err := tasksGetCmd.RunE(tasksGetCmd, []string{"missing1"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not a valid git repository",
+		"a bad --repo must be reported, not masked by the missing id")
+}
