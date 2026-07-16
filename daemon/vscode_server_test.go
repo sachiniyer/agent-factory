@@ -74,7 +74,29 @@ func fakeVSCodeServerMain() {
 	if os.Getenv(fakeVSCodeHangEnv) != "" {
 		// Never listen: the supervisor must report "starting", leave us alive, and
 		// not respawn us.
-		select {}
+		//
+		// A long sleep, NOT select{}. This runs in TestMain's re-exec branch BEFORE
+		// m.Run(), so no -test.timeout alarm is armed and no other goroutine is
+		// alive — and a bare select{} with nothing runnable is not a portable "block
+		// forever". Go's deadlock detector (runtime/proc.go checkdead) kills the
+		// process: `select {}` alone exits 2 with "all goroutines are asleep".
+		//
+		// It only survived here by ACCIDENT of the platform. Under -race on Linux,
+		// runtime/race pulls in runtime/cgo, whose pthread-based thread creation
+		// leaves a permanently non-idle M, so checkdead never fires and select{}
+		// hangs as intended. Darwin's -race build deliberately excludes that path
+		// (runtime/race/race.go's build tag omits darwin, so -race works on Macs
+		// with no C toolchain) — verified with `go list -tags race -deps
+		// runtime/race`: runtime/cgo is present for linux/amd64 and absent for
+		// darwin/arm64. So on macOS this fixture really did deadlock-panic and exit,
+		// and the supervisor correctly reported "exited before it finished starting"
+		// — failing four tests over a fixture bug, not a product one (#1931).
+		//
+		// checkdead scans every P's timer heap and stands down if a timer is
+		// pending, on every platform, so a sleep blocks reliably with or without
+		// cgo/-race. Teardown SIGKILLs the process group long before this wakes.
+		time.Sleep(24 * time.Hour)
+		return
 	}
 	if os.Getenv(fakeVSCodeIgnoreTermEnv) != "" {
 		// Outlive SIGTERM so the supervisor's stop must wait out its grace, the
