@@ -177,6 +177,50 @@ export function splitLeaf(root: LayoutNode, leafId: string, edge: Edge, tab: num
   return dedupeExcept(grown, tab, fresh.id);
 }
 
+/**
+ * The tab a NEW half should open when the pane's OWN tab is dragged onto its edge —
+ * i.e. when the dragged tab is already what the target pane displays (#1901).
+ *
+ * Such a split cannot show the dragged tab twice: `splitLeaf` dedupes it right back
+ * out (one tab, one pane), collapsing the split and making the drag read as a no-op,
+ * which is the reported bug. So the new half opens a DIFFERENT tab and the dragged
+ * one stays put — two distinct tabs side by side, never A|A.
+ *
+ * A candidate is any OTHER tab that is not already shown in another pane. Excluding
+ * the ones on screen is what keeps this non-destructive: binding a tab that is live
+ * elsewhere would MOVE it here (the same dedupe), closing a pane the user opened on
+ * purpose to gain nothing. Preference order: `prefer` (the recently-focused tabs,
+ * most-recent first), then the next tab in order, wrapping — which IS "the first
+ * other tab" once the dragged tab is the last one.
+ *
+ * Returns null when there is no other tab to show — a single-tab session, or one
+ * whose every other tab is already visible. The caller then leaves the layout
+ * untouched: nothing can fill the new half, and duplicating the tab is the exact
+ * outcome this exists to prevent.
+ */
+export function companionTab(
+  root: LayoutNode,
+  leafId: string,
+  tab: number,
+  tabCount: number,
+  prefer: number[] = [],
+): number | null {
+  const shownElsewhere = new Set(leaves(root).filter((l) => l.id !== leafId).map((l) => l.tab));
+  const usable = (c: number) => c !== tab && c >= 0 && c < tabCount && !shownElsewhere.has(c);
+  for (const p of prefer) {
+    if (usable(p)) {
+      return p;
+    }
+  }
+  for (let i = 1; i <= tabCount; i++) {
+    const c = ((tab % tabCount) + i) % tabCount;
+    if (usable(c)) {
+      return c;
+    }
+  }
+  return null;
+}
+
 /** Rebinds the pane `leafId` to show `tab` (a center-drop, a tab-bar click, or a 1-9
  *  key on the focused pane). Moves the tab here if it was shown elsewhere. */
 export function replaceTab(root: LayoutNode, leafId: string, tab: number): LayoutNode {

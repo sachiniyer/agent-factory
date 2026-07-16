@@ -139,6 +139,34 @@ async function dragTabToPane(page: Page, tabText: string, edge: "left" | "right"
 }
 
 /**
+ * Reduces the shown session's tab bar to its single unclosable Agent tab, whatever the
+ * previous test left behind — and with it the layout, since dropping to one tab
+ * validates every pane back down to one.
+ *
+ * The suite is serial against one daemon, so a test that fails BEFORE its own cleanup
+ * hands the next test a stray tab. That next test then either quietly exercises a
+ * different path than it claims, or reds out on a precondition — a second failure
+ * pointing at the wrong subject, which is exactly what makes a red suite hard to read
+ * (#1897). Asserting the state you need is cheaper than inheriting it.
+ *
+ * The agent tab (index 0) renders no ×, so closing every × converges on it. Bounded by
+ * af's 9-tab-per-session ceiling.
+ */
+async function resetToAgentTab(page: Page): Promise<void> {
+  const tabbar = page.locator(".af-tabbar");
+  for (let guard = 0; guard < 9; guard++) {
+    const closable = tabbar.locator(".af-tab-close");
+    if ((await closable.count()) === 0) {
+      break;
+    }
+    const before = await tabbar.locator(".af-tab").count();
+    await closable.first().click();
+    await expect(tabbar.locator(".af-tab")).toHaveCount(before - 1, { timeout: 30_000 });
+  }
+  await expect(tabbar.locator(".af-tab")).toHaveCount(1, { timeout: 30_000 });
+}
+
+/**
  * Dispatches a drop carrying a HAND-CRAFTED drag payload ({index, tabs}) onto the
  * (single) current pane — bypassing the real tab buttons so a stale / out-of-range /
  * mid-drag-reorder snapshot can be injected. Used to prove the drop handler validates
@@ -855,6 +883,92 @@ test("split panes (feat): a mid-drag tab-set change cancels the drop — no misb
   await expect(page.locator(".af-term-host .af-pane")).toHaveCount(1, { timeout: 15_000 });
   await tabbar.locator(".af-tab", { hasText: "Terminal" }).locator(".af-tab-close").click();
   await expect(tabbar.locator(".af-tab")).toHaveCount(1, { timeout: 30_000 });
+});
+
+test("split panes (#1901): dragging the ACTIVE tab splits and opens a DIFFERENT tab beside it", async () => {
+  // The regression: the tab a pane already shows could not be dragged into a split. The
+  // drop bound that tab to BOTH halves, so the one-tab-one-pane dedupe closed the
+  // original and the split collapsed back — the drag read as a dead gesture. The new
+  // half must open one of the session's OTHER tabs instead, so the user gets two
+  // different tabs side by side, never A|A.
+  await row(page, SESSION_A).click();
+  await expect(page.locator(".af-main.af-main-term")).toBeVisible();
+  await expect(page.locator(".af-term-host")).toContainText(READY_MARKER);
+
+  const tabbar = page.locator(".af-tabbar");
+  await resetToAgentTab(page);
+  await tabbar.locator(".af-tab-new").click();
+  await expect(tabbar.locator(".af-tab")).toHaveCount(2, { timeout: 30_000 });
+  await expect(page.locator(".af-term-meta")).toContainText("Live");
+  // Creating a tab switches to it: the pane now shows Terminal, and Terminal is the tab
+  // the bar marks active. That is the gesture's precondition — the dragged tab and the
+  // target pane's tab are THE SAME.
+  await expect(tabbar.locator(".af-tab.af-tab-active")).toContainText("Terminal");
+  const paneTabId = async (nth: number) =>
+    await page.locator(".af-term-host .af-pane").nth(nth).getAttribute("data-tab-id");
+  await expect(page.locator(".af-term-host .af-pane")).toHaveCount(1);
+  const beforeId = await paneTabId(0);
+
+  // Drag the ACTIVE tab onto the pane's own right edge.
+  await dragTabToPane(page, "Terminal", "right");
+
+  // It splits — the assertion that fails outright against the bug (one pane, unchanged).
+  await expect(page.locator(".af-term-host .af-pane")).toHaveCount(2, { timeout: 15_000 });
+  await expect(page.locator(".af-term-host .xterm")).toHaveCount(2);
+
+  // The two halves are bound to DIFFERENT tabs — the point of the fix. Read the stable
+  // tab id each pane binds, not its label: the label is an ordinal and would still read
+  // as two different panes if both were on one tab.
+  const leftId = await paneTabId(0);
+  const rightId = await paneTabId(1);
+  expect(leftId, "the left pane binds a real tab id").toBeTruthy();
+  expect(rightId, "the right pane binds a real tab id").toBeTruthy();
+  expect(rightId, "the two halves must bind DIFFERENT tabs — never A|A").not.toBe(leftId);
+  // The dragged tab stayed put and the new half (on the dragged edge) took the other
+  // tab — here the Agent tab, the one focus was last on.
+  expect(leftId, "the dragged tab keeps its original half").toBe(beforeId);
+
+  // Both halves are LIVE, each on its own stream. The Agent tab streams the ready
+  // marker; the Terminal half echoes what we type into its own PTY.
+  const agentPane = page.locator(".af-term-host .af-pane", { hasText: READY_MARKER });
+  await expect(agentPane).toHaveCount(1, { timeout: 15_000 });
+  await expect(agentPane, "the new half is the Agent tab").toHaveAttribute("data-tab-id", rightId ?? "");
+  const termPane = page.locator(".af-term-host .af-pane", { hasNotText: READY_MARKER });
+  await termPane.locator(".af-pane-host").click();
+  await expect(page.locator(".af-term-meta")).toContainText("Live");
+  await page.keyboard.type("echo AF_SELFSPLIT_OK");
+  await page.keyboard.press("Enter");
+  await expect(termPane).toContainText("AF_SELFSPLIT_OK", { timeout: 15_000 });
+
+  // Restore A to one pane and one tab for the flows that follow.
+  await agentPane.locator(".af-pane-close").click();
+  await expect(page.locator(".af-term-host .af-pane")).toHaveCount(1, { timeout: 15_000 });
+  await tabbar.locator(".af-tab", { hasText: "Terminal" }).locator(".af-tab-close").click();
+  await expect(tabbar.locator(".af-tab")).toHaveCount(1, { timeout: 30_000 });
+});
+
+test("split panes (#1901): dragging the only tab of a ONE-tab session is an inert no-op", async () => {
+  // The documented degradation: with no other tab to put in the new half, the drag does
+  // NOTHING — it does not split, and it does not duplicate the tab into two panes. A
+  // duplicate would be the very A|A the dedupe exists to prevent, and it would collapse
+  // on the next reconcile anyway. Nothing here may throw.
+  await row(page, SESSION_A).click();
+  await expect(page.locator(".af-main.af-main-term")).toBeVisible();
+  // Assert the one-tab precondition rather than inherit it — it IS the subject here.
+  await resetToAgentTab(page);
+  await expect(page.locator(".af-term-host .af-pane")).toHaveCount(1);
+  await expect(page.locator(".af-term-host")).toContainText(READY_MARKER);
+  const before = await page.locator(".af-term-host .af-pane").getAttribute("data-tab-id");
+
+  await dragTabToPane(page, "Agent", "right");
+
+  // Still exactly one pane, still on the same tab, still live.
+  await expect(page.locator(".af-term-host .af-pane")).toHaveCount(1);
+  await expect(page.locator(".af-term-host .xterm")).toHaveCount(1);
+  await expect(page.locator(".af-term-host .af-pane")).toHaveAttribute("data-tab-id", before ?? "");
+  // The pane is untouched, not merely present: its stream still carries the session.
+  await page.locator(".af-term-host .af-pane-host").click();
+  await expect(page.locator(".af-term-meta")).toContainText("Live");
 });
 
 test("web tab (feat): a local dev-server preview is daemon-proxied and rendered in an iframe", async () => {

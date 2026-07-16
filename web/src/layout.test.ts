@@ -8,6 +8,7 @@ import assert from "node:assert/strict";
 
 import {
   closeLeaf,
+  companionTab,
   findLeaf,
   type LayoutNode,
   leafCount,
@@ -162,4 +163,73 @@ test("findLeaf: locates a leaf by id, or null", () => {
   const id = leaves(two)[1].id;
   assert.equal(findLeaf(two, id)?.tab, 1);
   assert.equal(findLeaf(two, "nope"), null);
+});
+
+// --- companionTab: the self-split (#1901) ------------------------------------
+//
+// The bug: splitting a pane with the tab it ALREADY shows binds that tab to both
+// halves, so the one-tab-one-pane dedupe closes the original and the split collapses
+// back — the drag reads as a no-op. companionTab is what the drop asks for a
+// DIFFERENT tab to put in the new half.
+
+test("companionTab: the self-split reproduces as a no-op without it (#1901 repro)", () => {
+  resetIds();
+  // A single pane on tab 1, in a 2-tab session. Splitting it with its OWN tab is the
+  // gesture the user makes — and this is what it does unaided.
+  const root = singleLeaf(1);
+  const collapsed = splitLeaf(root, root.id, "right", 1);
+  assert.equal(leafCount(collapsed), 1, "the dedupe collapses the self-split — the reported no-op");
+  assert.deepEqual(tabs(collapsed), [1]);
+
+  // With a companion, the same gesture splits into two DISTINCT tabs.
+  const companion = companionTab(root, root.id, 1, 2);
+  assert.equal(companion, 0);
+  const split = splitLeaf(root, root.id, "right", companion ?? -1);
+  assert.equal(leafCount(split), 2);
+  assert.deepEqual(tabs(split), [1, 0], "the dragged tab stays put; the new right half opens the other tab");
+});
+
+test("companionTab: prefers the recently-focused tab over the next in order", () => {
+  resetIds();
+  // A 4-tab session showing tab 0; focus last passed through tab 2.
+  const root = singleLeaf(0);
+  assert.equal(companionTab(root, root.id, 0, 4, [2]), 2);
+  // The preference is ordered, most-recent first.
+  assert.equal(companionTab(root, root.id, 0, 4, [3, 2]), 3);
+  // A stale preference (the dragged tab itself, or out of range) is skipped, not bound.
+  assert.equal(companionTab(root, root.id, 0, 4, [0, 9, -1, 2]), 2);
+});
+
+test("companionTab: with no preference it walks to the next tab in order, wrapping", () => {
+  resetIds();
+  const root = singleLeaf(0);
+  assert.equal(companionTab(root, root.id, 0, 3), 1, "next in order");
+  // From the LAST tab the walk wraps — which is "the first other tab".
+  const last = singleLeaf(2);
+  assert.equal(companionTab(last, last.id, 2, 3), 0, "wraps to the first other tab");
+});
+
+test("companionTab: never steals a tab that another pane is already showing", () => {
+  resetIds();
+  // Two panes in a 3-tab session: 0 | 1. Self-split the left pane (tab 0).
+  const root = singleLeaf(0);
+  const two = splitLeaf(root, root.id, "right", 1);
+  const leftId = leaves(two)[0].id;
+  // Tab 1 is live in the right pane, so the walk skips it and lands on tab 2. Binding 1
+  // would MOVE it here and collapse the pane the user opened it in.
+  assert.equal(companionTab(two, leftId, 0, 3, [1]), 2, "a preferred-but-visible tab is skipped");
+  const split = splitLeaf(two, leftId, "bottom", 2);
+  assert.equal(leafCount(split), 3, "the existing tab-1 pane survives");
+  assert.deepEqual(tabs(split).slice().sort(), [0, 1, 2]);
+});
+
+test("companionTab: null when the session has no other tab to show", () => {
+  resetIds();
+  // A single-tab session: there is nothing else to open, so the drag stays a no-op.
+  const only = singleLeaf(0);
+  assert.equal(companionTab(only, only.id, 0, 1), null);
+  // And when every other tab is ALREADY on screen: 0 | 1 in a 2-tab session.
+  const two = splitLeaf(only, only.id, "right", 1);
+  const leftId = leaves(two)[0].id;
+  assert.equal(companionTab(two, leftId, 0, 2), null);
 });

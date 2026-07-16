@@ -11,7 +11,10 @@
 //     subscribers, so this is purely a client-side layout feature.
 //   - drag-and-drop splitting: dropping a tab (dragged from the tab bar) on a pane's
 //     edge splits in that direction with the dragged tab in the new pane; dropping on
-//     the center replaces the pane's tab. Drop zones are shown on dragover.
+//     the center replaces the pane's tab. Drop zones are shown on dragover. Dropping a
+//     pane's OWN tab on its edge is the one exception: the dragged tab stays put and
+//     the new half opens a DIFFERENT tab (companionTab), because one tab cannot fill
+//     both halves — see the drop handler (#1901).
 //   - a draggable divider per split to resize (persists the ratio), a × to close a
 //     pane (collapsing its split so the sibling fills), and click-to-focus.
 //
@@ -24,6 +27,7 @@
 
 import {
   closeLeaf,
+  companionTab,
   type DragPayload,
   type Edge,
   findLeaf,
@@ -177,6 +181,20 @@ export class SplitView {
   private lastShown = "";
   private lastPaneCount = 0;
 
+  // The tabs this session's focus has passed through, most-recent FIRST, as stable
+  // daemon ids — what a self-split prefers to open in its new half (#1901), so the
+  // pane you get back is the tab you were last on rather than an arbitrary neighbour.
+  //
+  // By id, never ordinal: the roster shifts underneath (#1779), so an ordinal
+  // remembered across a close would name a different tab by the time it is read — the
+  // misroute the stable id exists to prevent. A tab with no daemon id simply never
+  // enters the list; the next-in-order fallback still covers it.
+  private tabMru: string[] = [];
+  // The stable id of the tab lastFocusedTab named WHEN IT WAS RECORDED. Resolving that
+  // ordinal later would ask the current roster about a past position and get the wrong
+  // tab, so the id is captured at the same moment as the ordinal.
+  private lastFocusedTabId = "";
+
   constructor(
     private readonly host: HTMLElement,
     private readonly cb: SplitCallbacks,
@@ -253,6 +271,11 @@ export class SplitView {
     // A different session: drop the old session's live terminals (its tree stays
     // retained) and build the new one's.
     this.teardown();
+    // The focus history describes the session being LEFT: its ids name that session's
+    // tabs, so carrying them over would have the new session's first self-split prefer
+    // a tab that isn't its own (preferredTabs would resolve them against the wrong
+    // roster). "Previously focused" is scoped to the session, so it starts empty here.
+    this.forgetFocusHistory();
     this.sessionId = sessionId;
     this.tabCount = tabCount;
     // Remap the retained tree onto the CURRENT roster before validating it. Its
@@ -414,6 +437,7 @@ export class SplitView {
     this.lastFocusedTab = -1;
     this.lastShown = "";
     this.lastPaneCount = 0;
+    this.forgetFocusHistory();
   }
 
   /** How many EXPLICIT layout/focus mutations have been committed — a tab rebind
@@ -598,6 +622,13 @@ export class SplitView {
         pane.tab = leaf.tab;
       }
       pane.container.classList.toggle("af-pane-multi", multi);
+      // Publish WHAT this pane is bound to, alongside data-leaf's WHERE. The label's
+      // ordinal cannot answer it: ordinals shift with the roster (#1779), so two panes
+      // reading "Tab 1" and "Tab 2" may be the same tab mid-remap, and the one question
+      // a split has to settle — are these two halves on DIFFERENT tabs? (#1901) — is not
+      // observable without this. "" for a legacy tab with no daemon id: the honest
+      // answer, and the same one AttachTerminal falls back on.
+      pane.container.setAttribute("data-tab-id", realId);
       pane.label.textContent = `Tab ${leaf.tab + 1}`;
     }
 
@@ -989,9 +1020,22 @@ export class SplitView {
         return;
       }
       const zone = this.zoneAt(pane.container, e.clientX, e.clientY);
-      this.tree = zone === "center" ? replaceTab(this.tree, pane.leafId, tab) : splitLeaf(this.tree, pane.leafId, zone, tab);
-      // Focus the pane now showing the dropped tab (VS Code focuses the new split).
-      const landed = leaves(this.tree).find((l) => l.tab === tab);
+      // Dragging the pane's OWN tab onto its edge still splits — but the new half must
+      // open a DIFFERENT tab (#1901). Binding the dragged tab on both sides is what the
+      // one-tab-one-pane dedupe undoes, collapsing the split back to where it started.
+      const onItsOwnPane = zone !== "center" && findLeaf(this.tree, pane.leafId)?.tab === tab;
+      const opened = onItsOwnPane
+        ? companionTab(this.tree, pane.leafId, tab, this.tabCount, this.preferredTabs())
+        : tab;
+      if (opened === null) {
+        return; // no other tab to fill the new half — leave the layout as it stands
+      }
+      this.tree = zone === "center" ? replaceTab(this.tree, pane.leafId, tab) : splitLeaf(this.tree, pane.leafId, zone, opened);
+      // Focus the pane holding the tab that just landed — the NEW half (VS Code focuses
+      // the new split). On a self-split that half holds the COMPANION: the dragged tab
+      // never moved, so focusing it would hand focus back to the pane the user started
+      // from and the new pane would open unfocused.
+      const landed = leaves(this.tree).find((l) => l.tab === opened);
       if (landed) {
         this.focusedId = landed.id;
       }
@@ -1110,9 +1154,44 @@ export class SplitView {
     if (focusedTab === this.lastFocusedTab && shownKey === this.lastShown && paneCount === this.lastPaneCount) {
       return;
     }
+    this.noteFocusedTab(focusedTab);
     this.lastFocusedTab = focusedTab;
     this.lastShown = shownKey;
     this.lastPaneCount = paneCount;
     this.cb.onLayout({ focusedTab, shownTabs, paneCount });
+  }
+
+  /** Pushes the tab that HELD focus onto the MRU, just before `focusedTab` replaces it.
+   *  Every path that changes which tab is focused — a pane click, Alt+j/k, a 1-9 key, a
+   *  tab-bar click that rebinds the pane in place — lands in report(), which is why the
+   *  history is recorded here and not in focusPane(): focusPane sees a change of PANE,
+   *  and the most ordinary way to change the focused TAB never moves the pane at all. */
+  private noteFocusedTab(focusedTab: number): void {
+    if (focusedTab !== this.lastFocusedTab && this.lastFocusedTabId !== "") {
+      this.tabMru = [this.lastFocusedTabId, ...this.tabMru.filter((id) => id !== this.lastFocusedTabId)];
+    }
+    const current = this.tabRealIds[focusedTab] ?? "";
+    if (current !== "") {
+      // A tab is not part of its own history: leaving it here would offer the tab the
+      // pane already shows as that pane's own companion. companionTab rejects it on the
+      // way out, but a preference list holding the CURRENT tab is a trap for the next
+      // reader of preferredTabs, which reads as "where focus has been".
+      this.tabMru = this.tabMru.filter((id) => id !== current);
+    }
+    this.lastFocusedTabId = current;
+  }
+
+  /** The recently-focused tabs as CURRENT ordinals, most-recent first. An id that no
+   *  longer resolves (its tab was closed) drops out rather than binding a stranger. */
+  private preferredTabs(): number[] {
+    return this.tabMru.map((id) => this.tabRealIds.indexOf(id)).filter((i) => i >= 0);
+  }
+
+  /** Clears the focus history (a session switch, or a logout). Deliberately does NOT
+   *  touch lastFocusedTab: that one is report()'s dedup key, and resetting it would
+   *  re-fire onLayout for an unchanged layout — the store write #1855 turns on. */
+  private forgetFocusHistory(): void {
+    this.tabMru = [];
+    this.lastFocusedTabId = "";
   }
 }
