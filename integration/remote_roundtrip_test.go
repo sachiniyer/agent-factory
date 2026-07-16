@@ -215,7 +215,15 @@ LOG="$DIR/agent-server.log"
 : > "$BANNER"
 ARGS="agent-server --listen 127.0.0.1:0 --repo $DIR/workspace --title $TITLE"
 [ -n "$PROGRAM" ] && ARGS="$ARGS --program $PROGRAM"
-AGENT_FACTORY_HOME="$DIR/home" TERM=xterm setsid "$AF_BIN" $ARGS >"$BANNER" 2>"$LOG" &
+# setsid is util-linux and does not exist on macOS, where this died with
+# "setsid: command not found" and the launch reported "printed no banner" —
+# blaming af for a missing coreutil (#1931). Use it where it exists so the Linux
+# behaviour is unchanged; elsewhere the trailing & still backgrounds the server,
+# and this script exits immediately after, so it is orphaned and survives either
+# way. That is all this fixture needs from the detach.
+SETSID=""
+command -v setsid >/dev/null 2>&1 && SETSID="setsid"
+AGENT_FACTORY_HOME="$DIR/home" TERM=xterm $SETSID "$AF_BIN" $ARGS >"$BANNER" 2>"$LOG" &
 echo $! > "$DIR/pid"
 i=0
 while [ $i -lt 200 ]; do

@@ -105,7 +105,13 @@ func snapshotOf(t *testing.T, pids ...int) func() (map[int]proctree.Process, err
 // cleanup Kill can never orphan anything (a forked `sleep` here once leaked
 // the very orphans this suite hunts). Waits until the child's /proc environ
 // is readable (the fork→exec window would otherwise race the scan).
+// It reads the child's environ through proctree, so it — and therefore every
+// test built on it — cannot run without /proc. Guarding here rather than at each
+// caller keeps the reason in ONE place: see #1939 (REAL DEFECT — proctree has no
+// darwin backend, so doctor's process mapping is silently broken on macOS, which
+// is exactly what these tests exist to prove works).
 func spawnWithEnv(t *testing.T, argv0 string, extraArgs []string, env map[string]string) proctree.Process {
+	testguard.RequireProcFS(t)
 	t.Helper()
 	stdinR, stdinW, err := os.Pipe()
 	require.NoError(t, err)
