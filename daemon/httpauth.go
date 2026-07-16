@@ -94,23 +94,37 @@ func (g *authGate) authorize(r *http.Request) bool {
 	return ConstantTimeEqual(webTabAwareToken(r), want)
 }
 
-// webTabAwareToken returns the request's bearer token, extended for the web-tab
-// proxy path ONLY. An iframe's sub-resource GETs can carry neither the
-// Authorization header nor the ?access_token query, so under webtabPathPrefix the
-// scoped af_webtab_token cookie — set by the proxy handler after a header/query
-// token first authorized the top-level navigation — is also accepted. The cookie
-// is NEVER honored for any other route, so it adds no ambient credential to the
+// webTabAwareToken returns the request's bearer token, resolved differently under
+// the web-tab proxy path than on the general API.
+//
+// The Authorization header wins on every route (a direct API/CLI client). Off the
+// webtab path, the ?access_token= query is the browser/WS fallback, as before.
+//
+// UNDER webtabPathPrefix the daemon's own credential rides a PRIVATE query param
+// (webtabTokenQueryParam), never ?access_token= — because the proxy forwards the
+// framed app's whole query, and an app that uses its own ?access_token= would
+// otherwise be read here as the daemon token and 401'd. A sub-resource GET carries
+// neither header nor query, so the scoped af_webtab_token cookie — set by the proxy
+// after the top-level navigation authorized — is accepted too. The cookie is NEVER
+// honored off the webtab path, so it adds no ambient credential to the
 // state-changing API surface (no CSRF vector on the RPC endpoints).
 func webTabAwareToken(r *http.Request) string {
-	if tok := agentproto.TokenFromRequest(r); tok != "" {
+	if tok := agentproto.BearerToken(r.Header.Get(agentproto.AuthHeader)); tok != "" {
 		return tok
 	}
-	if r.URL != nil && strings.HasPrefix(r.URL.Path, webtabPathPrefix) {
+	if r.URL == nil {
+		return ""
+	}
+	if strings.HasPrefix(r.URL.Path, webtabPathPrefix) {
+		if tok := r.URL.Query().Get(webtabTokenQueryParam); tok != "" {
+			return tok
+		}
 		if c, err := r.Cookie(webtabTokenCookie); err == nil {
 			return c.Value
 		}
+		return ""
 	}
-	return ""
+	return agentproto.AccessTokenFromQuery(r.URL.Query())
 }
 
 // isLoopbackRequest reports whether the request's peer is a loopback address,

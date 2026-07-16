@@ -323,20 +323,20 @@ func TestWebTabProxy_MirrorsSubdirectoryTarget(t *testing.T) {
 // TestWebTabProxy_RootRedirectsToTargetPath verifies the other half of the mirror
 // model: a bare hit on the tab root is redirected to the target's own path, so the
 // browser's URL starts mirroring upstream from the first navigation and the
-// ?access_token that authorized it survives the hop.
+// ?af_webtab_token that authorized it survives the hop.
 func TestWebTabProxy_RootRedirectsToTargetPath(t *testing.T) {
 	upstream := newStaticFileUpstream(t, "doc", "css", "shared")
 	mux, id, tabID := newWebTabProxyFixture(t, upstream.URL+"/app/viewer.html")
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet,
-		fmt.Sprintf("/v1/webtab/%s/%s/?access_token=tok", id, tabID), nil)
+		fmt.Sprintf("/v1/webtab/%s/%s/?af_webtab_token=tok", id, tabID), nil)
 	mux.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusFound {
 		t.Fatalf("root: status = %d, want 302 (body: %s)", rec.Code, rec.Body.String())
 	}
-	want := fmt.Sprintf("/v1/webtab/%s/%s/app/viewer.html?access_token=tok", id, tabID)
+	want := fmt.Sprintf("/v1/webtab/%s/%s/app/viewer.html?af_webtab_token=tok", id, tabID)
 	if got := rec.Header().Get("Location"); got != want {
 		t.Fatalf("root: Location = %q, want %q", got, want)
 	}
@@ -383,8 +383,8 @@ func TestMirrorRootRedirect(t *testing.T) {
 		{target: "http://localhost:8899/", wantRedir: false},
 		// The token that authorized the top-level navigation rides along.
 		{
-			target: "http://localhost:8899/app/viewer.html", rawQuery: "access_token=tok",
-			want: prefix + "/app/viewer.html?access_token=tok", wantRedir: true,
+			target: "http://localhost:8899/app/viewer.html", rawQuery: "af_webtab_token=tok",
+			want: prefix + "/app/viewer.html?af_webtab_token=tok", wantRedir: true,
 		},
 	}
 	for _, tc := range cases {
@@ -511,8 +511,9 @@ func TestWebTabProxy_UnknownTabID404s(t *testing.T) {
 }
 
 // TestWebTabProxy_SetsScopedTokenCookie verifies that when a bearer token
-// authorizes the request (via ?access_token=), the handler sets the path-scoped
-// af_webtab_token cookie so an iframe's sub-resource GETs stay authorized.
+// authorizes the request (via the daemon-private ?af_webtab_token=), the handler
+// sets the path-scoped af_webtab_token cookie so an iframe's sub-resource GETs stay
+// authorized.
 func TestWebTabProxy_SetsScopedTokenCookie(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		fmt.Fprint(w, "ok")
@@ -520,7 +521,7 @@ func TestWebTabProxy_SetsScopedTokenCookie(t *testing.T) {
 	defer upstream.Close()
 	mux, id, tabID := newWebTabProxyFixture(t, upstream.URL)
 
-	rec := proxyGet(t, mux, id, tabID, "?access_token=secret-tok")
+	rec := proxyGet(t, mux, id, tabID, "?af_webtab_token=secret-tok")
 
 	found := cookieNamed(rec, webtabTokenCookie)
 	if found == nil {
@@ -569,7 +570,7 @@ func TestWebTabProxy_TokenCookieSecureTracksScheme(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			rec := httptest.NewRecorder()
 			req := httptest.NewRequest(http.MethodGet,
-				fmt.Sprintf("/v1/webtab/%s/%s/?access_token=tok", id, tabID), nil)
+				fmt.Sprintf("/v1/webtab/%s/%s/?af_webtab_token=tok", id, tabID), nil)
 			// A NETWORK peer (not loopback) — the only case the cookie exists for.
 			req.RemoteAddr = "172.17.0.4:54321"
 			if tc.fwdProto != "" {
@@ -594,7 +595,7 @@ func TestWebTabProxy_TokenCookieSecureTracksScheme(t *testing.T) {
 
 // TestWebTabProxy_RemotePeerSubResourcesAuthorize is the end-to-end #1808 proof at
 // the gate: a NETWORK peer over plain HTTP with require_token=true authorizes the
-// top-level navigation with ?access_token, and the cookie it gets back then
+// top-level navigation with ?af_webtab_token, and the cookie it gets back then
 // authorizes the iframe's sub-resource GETs — which carry neither header nor query.
 // Before the fix the cookie was Secure, the browser dropped it, and every one of
 // those 401'd.
@@ -613,11 +614,11 @@ func TestWebTabProxy_RemotePeerSubResourcesAuthorize(t *testing.T) {
 	}
 	authed := withAuth(mux, gate, nil)
 
-	// 1. The top-level navigation authorizes via ?access_token (an iframe src cannot
-	//    set a header) and gets the cookie back.
+	// 1. The top-level navigation authorizes via ?af_webtab_token (an iframe src
+	//    cannot set a header) and gets the cookie back.
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet,
-		fmt.Sprintf("/v1/webtab/%s/%s/?access_token=secret-tok", id, tabID), nil)
+		fmt.Sprintf("/v1/webtab/%s/%s/?af_webtab_token=secret-tok", id, tabID), nil)
 	req.RemoteAddr = "172.17.0.4:54321"
 	authed.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
@@ -632,7 +633,7 @@ func TestWebTabProxy_RemotePeerSubResourcesAuthorize(t *testing.T) {
 	}
 
 	// 2. The framed app's sub-resource GET: no Authorization header, no
-	//    ?access_token — only the cookie the browser stored. It must be authorized.
+	//    ?af_webtab_token — only the cookie the browser stored. It must be authorized.
 	sub := httptest.NewRecorder()
 	subReq := httptest.NewRequest(http.MethodGet,
 		fmt.Sprintf("/v1/webtab/%s/%s/rel.css", id, tabID), nil)

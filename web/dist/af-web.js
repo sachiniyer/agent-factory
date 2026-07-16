@@ -7347,9 +7347,10 @@ function targetQueryOf(target) {
     return "";
   }
 }
+var webtabTokenParam = "af_webtab_token";
 function webProxyPath(sessionId, tabId, target, token2) {
   const base = `/v1/webtab/${encodeURIComponent(sessionId)}/${encodeURIComponent(tabId)}/${targetPathOf(target)}`;
-  const query = [targetQueryOf(target), token2 ? `access_token=${encodeURIComponent(token2)}` : ""].filter((part) => part !== "").join("&");
+  const query = [targetQueryOf(target), token2 ? `${webtabTokenParam}=${encodeURIComponent(token2)}` : ""].filter((part) => part !== "").join("&");
   return query ? `${base}?${query}` : base;
 }
 function paneAddressUsesOrdinal(webTarget, realId) {

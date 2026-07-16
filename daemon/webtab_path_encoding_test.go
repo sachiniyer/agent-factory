@@ -86,13 +86,18 @@ func TestWebTabProxy_PreservesEscapedSpecialChars(t *testing.T) {
 
 // TestWebTabProxy_ForwardsQueryButNotTheDaemonToken pins the query half of the
 // mirror: the app's own parameters reach the dev server untouched, while the
-// daemon's credential — which authorized the iframe's navigation and means
-// nothing upstream — is stripped before the hop.
+// daemon's credential — which authorized the iframe's navigation and means nothing
+// upstream — is stripped before the hop. The daemon's credential rides its OWN
+// param (af_webtab_token), so the app's params are stripped-proof even when one of
+// them is literally named access_token (the P1 token-conflation fix).
 func TestWebTabProxy_ForwardsQueryButNotTheDaemonToken(t *testing.T) {
 	upstream := newEchoPathUpstream(t)
 	mux, id, tabID := newWebTabProxyFixture(t, upstream.URL)
 
-	rec := proxyGet(t, mux, id, tabID, "viewer.html?doc=123&access_token=tok")
+	// The target carries its OWN access_token — a real case (a dev app that proxies
+	// an authenticated API, or signs its asset URLs) — alongside doc, and the daemon
+	// appends its own af_webtab_token last.
+	rec := proxyGet(t, mux, id, tabID, "viewer.html?doc=123&access_token=app-value&af_webtab_token=daemon-tok")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200 (body: %s)", rec.Code, rec.Body.String())
 	}
@@ -100,8 +105,82 @@ func TestWebTabProxy_ForwardsQueryButNotTheDaemonToken(t *testing.T) {
 	if !contains(got, "doc=123") {
 		t.Fatalf("upstream saw %q, want the app's own query (doc=123) forwarded", got)
 	}
-	if contains(got, "access_token") {
+	// The app's OWN access_token must survive — the daemon strips only its private
+	// param, never the app's like-named one.
+	if !contains(got, "access_token=app-value") {
+		t.Fatalf("upstream saw %q, want the app's own access_token=app-value preserved", got)
+	}
+	// The daemon's credential must never leak upstream.
+	if contains(got, "af_webtab_token") || contains(got, "daemon-tok") {
 		t.Fatalf("upstream saw %q — the daemon's credential must never leak upstream", got)
+	}
+}
+
+// TestWebTabProxy_AppAccessTokenAuthorizesOnBothPostures is the P1 auth half of
+// the token-conflation fix: a target that carries its OWN ?access_token= must not
+// be mistaken for the daemon credential — neither on a network peer (where the
+// daemon reads its own token to authorize) nor on a loopback-exempt peer (where no
+// daemon token is presented at all).
+func TestWebTabProxy_AppAccessTokenAuthorizesOnBothPostures(t *testing.T) {
+	upstream := newEchoPathUpstream(t)
+	mux, id, tabID := newWebTabProxyFixture(t, upstream.URL)
+
+	t.Run("network peer: daemon token authorizes, app token rides through", func(t *testing.T) {
+		gate := &authGate{
+			expectedToken:  func() (string, error) { return "secret-tok", nil },
+			loopbackExempt: true,
+		}
+		authed := withAuth(mux, gate, nil)
+
+		rec := httptest.NewRecorder()
+		// The app's access_token comes FIRST — the position that made TokenFromRequest
+		// read it as the daemon credential and 401 the iframe before the fix.
+		req := httptest.NewRequest(http.MethodGet,
+			fmt.Sprintf("/v1/webtab/%s/%s/api?access_token=app-value&af_webtab_token=secret-tok", id, tabID), nil)
+		req.RemoteAddr = "172.17.0.4:54321"
+		authed.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200 — the app's own access_token was read as the daemon credential (body: %s)",
+				rec.Code, rec.Body.String())
+		}
+		if got := rec.Body.String(); !contains(got, "access_token=app-value") {
+			t.Fatalf("upstream saw %q, want the app's access_token=app-value forwarded", got)
+		}
+	})
+
+	t.Run("exempt peer: app token is preserved, not stripped as the daemon's", func(t *testing.T) {
+		// A loopback-exempt peer presents no daemon token, so the URL carries only the
+		// app's access_token. The strip must leave it alone.
+		rec := proxyGet(t, mux, id, tabID, "api?access_token=app-value")
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200 (body: %s)", rec.Code, rec.Body.String())
+		}
+		if got := rec.Body.String(); !contains(got, "access_token=app-value") {
+			t.Fatalf("upstream saw %q — an exempt peer's app access_token was stripped as if it were the daemon's", got)
+		}
+	})
+}
+
+// TestWebTabProxy_PreservesSignedQueryByteForByte is the P2 fix: stripping the
+// daemon credential must not parse-and-re-encode the rest of the query. A
+// signature or an order-sensitive endpoint depends on the exact bytes, and
+// url.Values.Encode would sort the keys and turn %20 into + — a different URL
+// despite targetQueryOf promising raw preservation.
+func TestWebTabProxy_PreservesSignedQueryByteForByte(t *testing.T) {
+	upstream := newEchoPathUpstream(t)
+	mux, id, tabID := newWebTabProxyFixture(t, upstream.URL)
+
+	// Keys deliberately NOT in sorted order, a %20 that must not become +, and the
+	// daemon token wedged in the MIDDLE to prove the strip is positional-safe.
+	rec := proxyGet(t, mux, id, tabID, "sign?z=1&af_webtab_token=tok&a=hello%20world&sig=abc")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body: %s)", rec.Code, rec.Body.String())
+	}
+	// Byte-for-byte: original order (z,a,sig), %20 intact, daemon token gone.
+	if want := "QUERY=z=1&a=hello%20world&sig=abc"; !contains(rec.Body.String(), want) {
+		t.Fatalf("upstream saw %q, want it to contain %q — the query was re-encoded, not string-stripped",
+			rec.Body.String(), want)
 	}
 }
 
@@ -166,6 +245,37 @@ func TestEscapedRestOf(t *testing.T) {
 	}
 }
 
+// TestStripRawQueryParam is the P2 primitive: remove one key from a raw query
+// while every surviving segment keeps its exact bytes and position.
+func TestStripRawQueryParam(t *testing.T) {
+	const key = "af_webtab_token"
+	cases := []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{name: "empty stays empty", raw: "", want: ""},
+		{name: "only the daemon token", raw: "af_webtab_token=tok", want: ""},
+		{name: "daemon token is a suffix", raw: "doc=123&af_webtab_token=tok", want: "doc=123"},
+		{name: "daemon token in the middle", raw: "a=1&af_webtab_token=tok&b=2", want: "a=1&b=2"},
+		{name: "order and escaping preserved verbatim", raw: "z=1&af_webtab_token=t&a=hello%20world", want: "z=1&a=hello%20world"},
+		// The app's own like-named param is a DIFFERENT key and must survive.
+		{name: "app access_token is not the daemon key", raw: "access_token=app&af_webtab_token=daemon", want: "access_token=app"},
+		// Exact key match only — a param that merely contains the name is kept.
+		{name: "a superstring key is left alone", raw: "xaf_webtab_token=1", want: "xaf_webtab_token=1"},
+		// A bare valueless segment with the key name is still removed.
+		{name: "bare valueless key is removed", raw: "af_webtab_token&keep=1", want: "keep=1"},
+		{name: "no daemon token present", raw: "a=1&b=2", want: "a=1&b=2"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := stripRawQueryParam(tc.raw, key); got != tc.want {
+				t.Fatalf("stripRawQueryParam(%q) = %q, want %q", tc.raw, got, tc.want)
+			}
+		})
+	}
+}
+
 // TestMirrorRootRedirect_CarriesTargetQueryAndEncoding covers the same two
 // findings on the OTHER entry point: the redirect that starts the mirror.
 //
@@ -188,11 +298,12 @@ func TestMirrorRootRedirect_CarriesTargetQueryAndEncoding(t *testing.T) {
 		},
 		{
 			// Both queries matter and neither may displace the other: the target's
-			// names the view, the incoming one authorizes the navigation.
-			name:     "target query and access token both survive",
+			// names the view, the incoming one carries the daemon token that
+			// authorizes the redirected navigation.
+			name:     "target query and daemon token both survive",
 			target:   "http://localhost:8899/index.html?path=/story/button",
-			rawQuery: "access_token=tok",
-			want:     prefix + "/index.html?path=/story/button&access_token=tok",
+			rawQuery: "af_webtab_token=tok",
+			want:     prefix + "/index.html?path=/story/button&af_webtab_token=tok",
 		},
 		{
 			name:   "encoded slash in the target path stays encoded",

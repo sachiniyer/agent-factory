@@ -83,11 +83,20 @@ function targetQueryOf(target: string): string {
   }
 }
 
+/** The query param the daemon's OWN credential rides on a proxied web tab —
+ *  deliberately NOT `access_token`. The proxy forwards the framed target's whole
+ *  query to the dev server, so a daemon token under `access_token` would collide
+ *  with a target that carries its own `access_token`: the daemon would read the
+ *  app's value as its credential (401), or strip the app's value on the way
+ *  upstream. A private name keeps them apart. Mirrors
+ *  daemon/webtab_proxy.go `webtabTokenQueryParam`. */
+const webtabTokenParam = "af_webtab_token";
+
 /** The same-origin daemon proxy path for a loopback web tab, so the iframe hits
  *  the daemon (which shares the machine with the dev server) rather than the
- *  viewer's own machine. The bearer token rides ?access_token= for network peers
- *  (an iframe src can't set the Authorization header); a loopback/tokenless client
- *  sends none.
+ *  viewer's own machine. The bearer token rides the daemon-private
+ *  ?af_webtab_token= for network peers (an iframe src can't set the Authorization
+ *  header); a loopback/tokenless client sends none.
  *
  *  Two things this URL must get right:
  *
@@ -103,10 +112,11 @@ function targetQueryOf(target: string): string {
  *    remainder verbatim (daemon/webtab_proxy.go).
  *
  *  - The target's own QUERY is mirrored too, for the same reason as its path: the
- *    tab's address is the whole URL. The daemon strips only `access_token` before
- *    forwarding, so the app's own parameters ride through untouched. The target's
- *    query goes FIRST — a dev server reading `?doc=` positionally sees what it
- *    would have without us, and the daemon's credential stays last and separable.
+ *    tab's address is the whole URL. The daemon strips only its own
+ *    ?af_webtab_token= before forwarding, so the app's own parameters — including
+ *    an `access_token` of its own — ride through untouched. The target's query goes
+ *    FIRST, so a dev server reading `?doc=` positionally sees what it would have
+ *    without us, and the daemon's credential stays last and separable.
  *
  *  The trailing slash on a root target matters: the route requires it, and it keeps
  *  the app's relative URLs resolving under the prefix rather than beside it. */
@@ -117,7 +127,7 @@ export function webProxyPath(
   token: string | null,
 ): string {
   const base = `/v1/webtab/${encodeURIComponent(sessionId)}/${encodeURIComponent(tabId)}/${targetPathOf(target)}`;
-  const query = [targetQueryOf(target), token ? `access_token=${encodeURIComponent(token)}` : ""]
+  const query = [targetQueryOf(target), token ? `${webtabTokenParam}=${encodeURIComponent(token)}` : ""]
     .filter((part) => part !== "")
     .join("&");
   return query ? `${base}?${query}` : base;

@@ -26,6 +26,19 @@ const webtabPathPrefix = "/v1/webtab/"
 // the auth gate then accepts it for FOLLOW-UP requests under that prefix only.
 const webtabTokenCookie = "af_webtab_token" //nolint:gosec // cookie name, not a credential
 
+// webtabTokenQueryParam is the query param the daemon's OWN credential rides on a
+// web-tab iframe's top-level navigation. It is deliberately DISTINCT from the
+// general agentproto.AccessTokenQueryParam ("access_token"): the proxy mirrors the
+// framed target's WHOLE query to the dev server, so if the daemon also rode
+// ?access_token= it would collide with a target that uses its own ?access_token=.
+// The collision is not cosmetic — the daemon would read the app's value as its
+// credential and 401 the iframe (auth reads the first value), and the exempt-peer
+// strip would remove the app's value instead of the daemon's. A private name keeps
+// the two credentials from ever meeting. Mirrored in web/src/tabaddr.ts
+// (webProxyPath); shares the cookie's string because it is the same credential on
+// a different transport.
+const webtabTokenQueryParam = "af_webtab_token" //nolint:gosec // query-param name, not a credential
+
 // webTabTarget is where one iframe tab's traffic is sent. The two tab kinds reach
 // their upstream over DIFFERENT transports, and this is what carries the
 // difference to the proxy.
@@ -425,15 +438,22 @@ func (cs *controlServer) webTabProxyHandler(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	// On the TCP listener a network peer authorized this top-level request via
-	// the ?access_token query (an iframe src cannot set the Authorization header).
-	// Persist that token as a path-scoped cookie so the framed app's sub-resource
-	// GETs — which carry neither header nor query — stay authorized. Loopback peers
-	// present no token and need none, so nothing is set for them.
-	if tok := agentproto.TokenFromRequest(r); tok != "" {
+	// On the TCP listener a network peer authorized this top-level request via the
+	// af_webtab_token query (an iframe src cannot set the Authorization header).
+	// Persist the credential it PRESENTED — the header or that private query param,
+	// never an existing cookie — as a path-scoped cookie, so the framed app's
+	// sub-resource GETs, which carry neither header nor query, stay authorized.
+	// Reading only the presented credential keeps this from re-issuing Set-Cookie on
+	// every cookie-authorized sub-resource. Loopback peers present none and need
+	// none, so nothing is set for them.
+	presented := agentproto.BearerToken(r.Header.Get(agentproto.AuthHeader))
+	if presented == "" {
+		presented = r.URL.Query().Get(webtabTokenQueryParam)
+	}
+	if presented != "" {
 		http.SetCookie(w, &http.Cookie{
 			Name:     webtabTokenCookie,
-			Value:    tok,
+			Value:    presented,
 			Path:     webtabPathPrefix,
 			HttpOnly: true,
 			Secure:   requestIsHTTPS(r),
@@ -513,11 +533,15 @@ func (cs *controlServer) webTabProxyHandler(w http.ResponseWriter, r *http.Reque
 			if tabKind == session.TabKindVSCode {
 				pr.Out.Header.Set("X-Forwarded-Prefix", tabPathPrefix)
 			}
-			if pr.Out.URL.Query().Has(agentproto.AccessTokenQueryParam) {
-				q := pr.Out.URL.Query()
-				q.Del(agentproto.AccessTokenQueryParam)
-				pr.Out.URL.RawQuery = q.Encode()
-			}
+			// Strip ONLY the daemon's own credential, and do it at the STRING level
+			// so the target's query survives byte-for-byte. Parsing and re-encoding
+			// (url.Values.Encode) would sort the params and rewrite escaping (a
+			// literal space becomes %20→+), silently changing an order- or
+			// signature-sensitive dev endpoint — the exact preservation targetQueryOf
+			// promises on the client. The app's own params, including its own
+			// ?access_token= (a DIFFERENT name from the daemon's), ride through
+			// untouched.
+			pr.Out.URL.RawQuery = stripRawQueryParam(pr.Out.URL.RawQuery, webtabTokenQueryParam)
 			pr.SetXForwarded()
 			// SetXForwarded derives X-Forwarded-Proto from the DAEMON-facing hop,
 			// which OVERWRITES what the client's own hop reported (#1875). The
@@ -1001,6 +1025,32 @@ func mergeRawQueries(a, b string) string {
 	default:
 		return a + "&" + b
 	}
+}
+
+// stripRawQueryParam removes every "key=…" (or bare "key") segment from a raw
+// query string WITHOUT parsing and re-encoding the rest, so every surviving
+// segment keeps its exact bytes and position. url.Values.Encode would sort the
+// keys and rewrite escaping (a literal space re-encodes to +), silently changing
+// an order- or signature-sensitive query; this touches only the removed key. The
+// key is compared against each segment's name in its raw, still-escaped form,
+// which is exact for the ASCII daemon param names this is used with.
+func stripRawQueryParam(raw, key string) string {
+	if raw == "" {
+		return ""
+	}
+	segments := strings.Split(raw, "&")
+	kept := make([]string, 0, len(segments))
+	for _, seg := range segments {
+		name := seg
+		if i := strings.IndexByte(seg, '='); i >= 0 {
+			name = seg[:i]
+		}
+		if name == key {
+			continue
+		}
+		kept = append(kept, seg)
+	}
+	return strings.Join(kept, "&")
 }
 
 // escapedRestOf returns the {rest...} remainder of a proxy request path in the
