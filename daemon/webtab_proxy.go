@@ -26,7 +26,49 @@ const webtabPathPrefix = "/v1/webtab/"
 // the auth gate then accepts it for FOLLOW-UP requests under that prefix only.
 const webtabTokenCookie = "af_webtab_token" //nolint:gosec // cookie name, not a credential
 
-// WebTabTarget resolves the loopback target of the iframe tab addressed by tabID —
+// webTabTarget is where one iframe tab's traffic is sent. The two tab kinds reach
+// their upstream over DIFFERENT transports, and this is what carries the
+// difference to the proxy.
+//
+// A WEB tab names a real loopback dev server: URL is its address and the proxy
+// dials TCP. A VSCODE tab is served over a unix socket the daemon owns (#1873):
+// SocketPath is the real endpoint and URL is a dummy http://vscode.invalid that
+// exists only because HTTP needs a host — the transport dials the socket and the
+// host never reaches the wire.
+type webTabTarget struct {
+	// URL is the upstream base URL. Real for a web tab; a dummy for vscode.
+	URL string
+	// SocketPath, when non-empty, is the unix socket to dial INSTEAD of URL's
+	// host. It is set only for a daemon-owned editor.
+	SocketPath string
+	// Transport dials SocketPath. It belongs to the editor process and outlives
+	// the request, so it must be used rather than rebuilt here — see the field
+	// comment on vscodeServer.transport for why per-request or shared would both
+	// be wrong. Nil for a web tab, which leaves the proxy on http.DefaultTransport.
+	Transport *http.Transport
+	Kind      session.TabKind
+}
+
+// isUnixSocket reports whether this target is reached over a unix socket rather
+// than TCP — the predicate that decides both the dialer and which safety check
+// applies (loopback for TCP, the socket's own 0600-in-0700 perms for a socket).
+func (t webTabTarget) isUnixSocket() bool { return t.SocketPath != "" }
+
+// roundTripper is the proxy's transport for this target: the editor's socket
+// dialer, or nil to leave httputil.ReverseProxy on http.DefaultTransport.
+//
+// It returns an INTERFACE, so a nil *http.Transport must become a nil
+// RoundTripper explicitly — assigning a typed nil pointer to the interface field
+// would make it non-nil, and ReverseProxy would call it and panic instead of
+// falling back to the default.
+func (t webTabTarget) roundTripper() http.RoundTripper {
+	if t.Transport == nil {
+		return nil
+	}
+	return t.Transport
+}
+
+// WebTabTarget resolves the target of the iframe tab addressed by tabID —
 // the tab's STABLE id (#1738), not its ordinal — in the session addressed by
 // sessionID. It errors when the session or tab is missing, when the session is
 // archived, or when the tab is not an iframe kind. It also returns the tab's kind,
@@ -45,18 +87,19 @@ const webtabTokenCookie = "af_webtab_token" //nolint:gosec // cookie name, not a
 // per-session code-server, ENSURED here — spawned on the first request and
 // respawned if it died. Resolving on every request is what makes the editor
 // self-heal (a crashed editor recovers on the next render or pane reload) and
-// what makes restore work with no stored state: the port is chosen fresh each
-// time, so a persisted URL would only ever be a stale port after a restart.
+// what makes restore work with no stored state: the editor's socket is live only
+// while its process is, so a persisted target could only ever be a dead endpoint
+// after a restart.
 //
 // A missing editor binary surfaces as errVSCodeBinaryMissing, which the proxy
 // renders as an install hint rather than an error.
-func (m *Manager) WebTabTarget(sessionID, tabID string) (string, session.TabKind, error) {
+func (m *Manager) WebTabTarget(sessionID, tabID string) (webTabTarget, error) {
 	instance, repoID, title, err := m.resolveStreamSession(sessionID, "")
 	if err != nil {
-		return "", 0, err
+		return webTabTarget{}, err
 	}
 	if instance == nil {
-		return "", 0, fmt.Errorf("session %q not found", sessionID)
+		return webTabTarget{}, fmt.Errorf("session %q not found", sessionID)
 	}
 	// An archived session is INERT, so its preserved web tab must not be served
 	// (#1809 follow-up). Archive keeps the tab's URL so a restore can render it
@@ -82,39 +125,47 @@ func (m *Manager) WebTabTarget(sessionID, tabID string) (string, session.TabKind
 	// TabSpawnBlocked — this just refuses earlier, before any kind lookup.) The
 	// message stays kind-agnostic because this runs before the kind is known.
 	if blocked := instance.WebTabServeBlocked(); blocked != nil {
-		return "", 0, fmt.Errorf("cannot open the tab of session %q: %w", sessionID, blocked)
+		return webTabTarget{}, fmt.Errorf("cannot open the tab of session %q: %w", sessionID, blocked)
 	}
 	idx, ok := instance.TabIndexByID(tabID)
 	if !ok {
-		return "", 0, fmt.Errorf("session %q has no tab with id %q (it may have been closed)", sessionID, tabID)
+		return webTabTarget{}, fmt.Errorf("session %q has no tab with id %q (it may have been closed)", sessionID, tabID)
 	}
 	tabs := instance.GetTabs()
 	if idx < 0 || idx >= len(tabs) {
 		// TabIndexByID resolved against a tab list that changed under us.
-		return "", 0, fmt.Errorf("session %q has no tab with id %q (it may have been closed)", sessionID, tabID)
+		return webTabTarget{}, fmt.Errorf("session %q has no tab with id %q (it may have been closed)", sessionID, tabID)
 	}
 	tab := tabs[idx]
 	switch tab.Kind {
 	case session.TabKindWeb:
 		if strings.TrimSpace(tab.URL) == "" {
-			return "", tab.Kind, fmt.Errorf("web tab %q of session %q has no target URL", tabID, sessionID)
+			return webTabTarget{Kind: tab.Kind}, fmt.Errorf("web tab %q of session %q has no target URL", tabID, sessionID)
 		}
-		return tab.URL, tab.Kind, nil
+		return webTabTarget{URL: tab.URL, Kind: tab.Kind}, nil
 	case session.TabKindVSCode:
-		target, err := m.ensureVSCodeServer(instance, repoID, title)
-		return target, tab.Kind, err
+		endpoint, err := m.ensureVSCodeServer(instance, repoID, title)
+		if err != nil {
+			return webTabTarget{Kind: tab.Kind}, err
+		}
+		return webTabTarget{
+			URL:        vscodeUpstreamURL,
+			SocketPath: endpoint.SocketPath,
+			Transport:  endpoint.Transport,
+			Kind:       tab.Kind,
+		}, nil
 	default:
-		return "", tab.Kind, fmt.Errorf("tab %q of session %q is not a web or vscode tab", tabID, sessionID)
+		return webTabTarget{Kind: tab.Kind}, fmt.Errorf("tab %q of session %q is not a web or vscode tab", tabID, sessionID)
 	}
 }
 
-// ensureVSCodeServer returns the loopback base URL of the editor serving
+// ensureVSCodeServer returns the unix-socket endpoint of the editor serving
 // instance's worktree, starting it if needed. Keyed by daemonInstanceKey — the
 // same key kill/archive stop it under — so every vscode tab and every pane in a
 // session shares ONE editor.
-func (m *Manager) ensureVSCodeServer(instance *session.Instance, repoID, title string) (string, error) {
+func (m *Manager) ensureVSCodeServer(instance *session.Instance, repoID, title string) (vscodeEndpoint, error) {
 	if m.vscode == nil {
-		return "", fmt.Errorf("daemon has no VS Code supervisor")
+		return vscodeEndpoint{}, fmt.Errorf("daemon has no VS Code supervisor")
 	}
 	// Never START an editor for a session that is archived or being torn down.
 	// This route is NOT serialized with KillSession/ArchiveSession — it must not
@@ -131,17 +182,17 @@ func (m *Manager) ensureVSCodeServer(instance *session.Instance, repoID, title s
 	// ArchiveSession catches anything that still races in, so the invariant holds
 	// on timing rather than on luck.
 	if err := instance.TabSpawnBlocked(); err != nil {
-		return "", err
+		return vscodeEndpoint{}, err
 	}
 	if instance.UserKilled() {
-		return "", fmt.Errorf("session %q has been killed", title)
+		return vscodeEndpoint{}, fmt.Errorf("session %q has been killed", title)
 	}
 	worktree := instance.GetWorktreePath()
 	if strings.TrimSpace(worktree) == "" {
-		return "", fmt.Errorf("session %q has no worktree to open in VS Code", title)
+		return vscodeEndpoint{}, fmt.Errorf("session %q has no worktree to open in VS Code", title)
 	}
 	key := daemonInstanceKey(repoID, title)
-	target, err := m.vscode.ensureServer(key, worktree)
+	endpoint, err := m.vscode.ensureServer(key, worktree)
 	// The post-spawn recheck below must run on errVSCodeStarting too, NOT just on
 	// success. ensureServer REGISTERS the server in v.servers before returning that
 	// sentinel, so a cold spawn that merely outran the start grace has left a LIVE,
@@ -156,16 +207,16 @@ func (m *Manager) ensureVSCodeServer(instance *session.Instance, repoID, title s
 	// Every OTHER error means no server was registered, so there is nothing to
 	// reclaim and the recheck would be pointless work.
 	if err != nil && !errors.Is(err, errVSCodeStarting) {
-		return "", err
+		return vscodeEndpoint{}, err
 	}
 	if unwanted := m.stopVSCodeIfUnwanted(instance, key, title); unwanted != nil {
-		return "", unwanted
+		return vscodeEndpoint{}, unwanted
 	}
 	if err != nil {
 		// Still starting, and still wanted: let the caller render the retry notice.
-		return "", err
+		return vscodeEndpoint{}, err
 	}
-	return target, nil
+	return endpoint, nil
 }
 
 // stopVSCodeIfUnwanted re-checks, AFTER a spawn, that the editor still has a
@@ -275,7 +326,8 @@ func (cs *controlServer) webTabProxyHandler(w http.ResponseWriter, r *http.Reque
 
 	// Addressed by the tab's STABLE id: a stale id (its tab was closed) is a clean
 	// 404 here, never a silent bind to whatever tab took its old ordinal (#1810).
-	target, tabKind, err := cs.manager.WebTabTarget(sessionID, tabID)
+	target, err := cs.manager.WebTabTarget(sessionID, tabID)
+	tabKind := target.Kind
 	if err != nil {
 		// A machine with no editor installed is an ordinary, actionable state, not
 		// a failure: render the install hint INTO the pane (the iframe shows this
@@ -312,12 +364,21 @@ func (cs *controlServer) webTabProxyHandler(w http.ResponseWriter, r *http.Reque
 	}
 	// Only loopback targets are proxied. An external target must never be fetched
 	// by the daemon (open-proxy / SSRF) — the web UI iframes those directly.
-	if !session.IsLoopbackWebTarget(target) {
+	//
+	// A unix-socket target is exempt because the check does not APPLY to it, not
+	// because it is trusted less carefully. IsLoopbackWebTarget asks "does this
+	// name a host off this machine?", and a socket names no host at all: it is a
+	// path the daemon itself chose inside a directory only the daemon can write
+	// (#1873). There is no address for an attacker to point anywhere, which is a
+	// stronger guarantee than the string check the TCP path settles for — under
+	// which the old editor target passed precisely because it WAS loopback, the
+	// confused-deputy hole this transport closes.
+	if !target.isUnixSocket() && !session.IsLoopbackWebTarget(target.URL) {
 		writeHTTPError(w, http.StatusBadRequest,
-			fmt.Errorf("web tab target %q is not loopback; external URLs are iframed directly, not proxied", target))
+			fmt.Errorf("web tab target %q is not loopback; external URLs are iframed directly, not proxied", target.URL))
 		return
 	}
-	targetURL, err := url.Parse(target)
+	targetURL, err := url.Parse(target.URL)
 	if err != nil {
 		writeHTTPError(w, http.StatusInternalServerError, fmt.Errorf("invalid web tab target: %w", err))
 		return
@@ -358,6 +419,15 @@ func (cs *controlServer) webTabProxyHandler(w http.ResponseWriter, r *http.Reque
 	}
 
 	proxy := &httputil.ReverseProxy{
+		// A socket-bound editor is reached by DIALING THE PATH: the URL's host is
+		// the dummy vscode.invalid and never resolves, so the transport must
+		// replace the dial rather than the address. Everything above the dial —
+		// the path mirror, the cookie and Location rewrites, the WS upgrade — is
+		// unchanged, which is the point: only the transport moved (#1873).
+		//
+		// nil Transport (a web tab) keeps http.DefaultTransport, whose connection
+		// pooling and proxy env handling this must not disturb.
+		Transport: target.roundTripper(),
 		Rewrite: func(pr *httputil.ProxyRequest) {
 			pr.Out.URL.Scheme = targetURL.Scheme
 			pr.Out.URL.Host = targetURL.Host

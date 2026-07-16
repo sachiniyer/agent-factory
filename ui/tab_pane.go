@@ -404,8 +404,8 @@ func webTabPlaceholder(url string) string {
 
 // vscodeTabPlaceholder is the TUI content for a VS Code tab. Unlike a web tab
 // there is no URL to show: the editor is a daemon-managed per-session
-// code-server on an ephemeral loopback port, reachable only through the daemon's
-// proxy, so the only meaningful pointer is the web UI itself.
+// code-server on a 0600 unix socket, reachable only through the daemon's proxy
+// (#1873), so the only meaningful pointer is the web UI itself.
 func vscodeTabPlaceholder() string {
 	return "VS Code tab — view in the web UI\n\nThe editor opens this session's worktree. A terminal can't render it."
 }

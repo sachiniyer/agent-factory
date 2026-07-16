@@ -10,7 +10,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -23,24 +22,38 @@ import (
 
 // The VS Code tab (TabKindVSCode) is served by a code-server / openvscode-server
 // process the DAEMON owns, one per session, rooted at that session's worktree and
-// bound to loopback on an ephemeral port. The BROWSER reaches it only through the
-// daemon's /v1/webtab/ reverse proxy, which is what makes the editor visible to a
-// REMOTE viewer (Tailscale/SSH) and what applies the daemon's auth policy.
+// bound to a 0600 UNIX SOCKET in a 0700 directory. The browser never reaches it
+// directly: every request arrives through the daemon's /v1/webtab/ reverse proxy,
+// which is what makes the editor visible to a REMOTE viewer (Tailscale/SSH) and
+// what carries the daemon's auth policy in front of an --auth none editor.
 //
-// The proxy is NOT the editor's only route, and nothing here should be read as
-// claiming it is. The editor runs with auth disabled, so its own ephemeral
-// loopback port is a SECOND, UNGUARDED route: any process on the box can connect
-// to it directly and get worktree read/write and terminal execution as the af
-// user. Under af's defaults that is consistent with the daemon rather than a hole
-// in it — require_token and require_loopback_token both default to false, so the
-// daemon itself already serves an unauthenticated control plane, which is strictly
-// more power, to every local process. It becomes a real gap only for an operator
-// who deliberately set BOTH on a shared host to demand a token from local peers:
-// the editor's listener does not honor that, so spawnLocked warns when it sees
-// that configuration. The structural fix — serving both flavors on a 0600 unix
-// socket in the daemon's runtime dir, where file permissions do the authenticating
-// — is tracked as a follow-up; it also removes the port TOCTOU freeLoopbackPort
-// documents.
+// THE SOCKET IS THE AUTH (#1873). The editor runs with authentication disabled,
+// so whatever can reach its listener has worktree read/write and terminal exec as
+// the af user. It used to listen on a loopback TCP port, which made it a SECOND,
+// UNGUARDED route: any local process could scan the port and connect. That is a
+// real bypass for the operator who sets require_token + require_loopback_token —
+// config_types.go documents those as exactly the control that makes local peers
+// authenticate — because a daemon-spawned editor silently reopened the gap they
+// closed. Filesystem permissions on a unix socket are the fix, and they give the
+// editor precisely the posture af's own control socket already has: 0600, so only
+// the owning user can connect.
+//
+// It also removes the port TOCTOU BY CONSTRUCTION. Choosing a TCP port meant
+// bind(:0) → read → close → hand the number to the child, a window in which
+// another process could take the port; the readiness probe would then dial the
+// FOREIGN listener, latch ready, and the proxy would relay a stranger's service
+// into the editor iframe under af's auth. There is no bind-close-rebind here.
+// The daemon names the socket itself — unguessably, and inside a directory only
+// it can write — then unlinks the path before the child binds it, so a dial can
+// only ever reach our own child. The readiness probe did not get smarter (it
+// still cannot tell who is behind a path); the race it could lose stopped
+// existing.
+//
+// THIS FILE owns the supervisor's LIFECYCLE: spawn, readiness, respawn, teardown.
+// vscode_socket.go owns the transport those steps act on — how the socket is
+// named, secured, dialed, and swept. The one cross-file rule worth carrying in
+// your head: socket names are per-PROCESS, not per session (vscodeSocketPath), so
+// releasing a socket is always safe and never races the respawn.
 //
 // af NEVER bundles or installs the editor: the binary is DETECTED (an explicit
 // vscode_server_binary, else code-server, else openvscode-server on PATH). When
@@ -63,19 +76,13 @@ const vscodeStartGrace = 3 * time.Second
 // the cooldown the recorded error is replayed instead of spawning again.
 const vscodeRespawnCooldown = 5 * time.Second
 
-// vscodeProbeInterval is how often ensureServer re-probes the port while waiting
-// for a starting editor to accept connections.
+// vscodeProbeInterval is how often ensureServer re-probes the socket while
+// waiting for a starting editor to accept connections.
 const vscodeProbeInterval = 100 * time.Millisecond
 
 // vscodeStopGrace is how long a stopping editor gets to exit on SIGTERM before
 // the process GROUP is SIGKILLed, mirroring the watcher supervisor's escalation.
 const vscodeStopGrace = 5 * time.Second
-
-// vscodeSpawnAttempts bounds the port-race retry. The port is chosen by binding
-// :0, reading the kernel's pick, and closing the listener before handing the
-// number to the child — an unavoidable TOCTOU window in which another process can
-// take it. Losing that race is rare and self-correcting: retry with a fresh port.
-const vscodeSpawnAttempts = 3
 
 // errVSCodeBinaryMissing reports that no editor binary could be found. It is a
 // SENTINEL, not a failure: callers render the install hint for it and must not
@@ -98,10 +105,11 @@ var errVSCodeStartExited = errors.New("the VS Code server exited before it finis
 type vscodeFlavor int
 
 const (
-	// flavorCodeServer is coder/code-server: `--bind-addr host:port`, `--auth none`.
+	// flavorCodeServer is coder/code-server: `--socket`/`--socket-mode`,
+	// `--auth none`.
 	flavorCodeServer vscodeFlavor = iota
-	// flavorOpenVSCode is gitpod-io/openvscode-server: `--host`/`--port`,
-	// `--without-connection-token`.
+	// flavorOpenVSCode is gitpod-io/openvscode-server: `--socket-path` (no mode
+	// flag), `--without-connection-token`.
 	flavorOpenVSCode
 )
 
@@ -149,7 +157,22 @@ func resolveVSCodeBinary(configured string) (string, error) {
 	return "", errVSCodeBinaryMissing
 }
 
-// vscodeArgs builds the child's argv for flavor, serving worktree at addr.
+// vscodeArgs builds the child's argv for flavor, serving worktree on socketPath.
+//
+// The unix socket is the ONLY listener both dialects agree on, which is why it is
+// the transport (#1873): their auth mechanisms do not converge (code-server's
+// --auth password is cookie-based with no openvscode equivalent; openvscode's
+// --connection-token has no code-server equivalent), but both bind a socket.
+//
+// The two differ on MODE, and it decides how the socket gets its permissions:
+// code-server takes --socket-mode and chmods the socket itself (after listen —
+// see the 0700 directory note on vscodeSocketDir), while openvscode-server's
+// --socket-path has NO mode flag at all, so its socket lands under the daemon's
+// umask and could be world-connectable. The 0700 PARENT DIRECTORY is therefore
+// the load-bearing guard for both, not a belt-and-braces extra: it fences the
+// socket regardless of the mode any flavor happens to give it, and it closes the
+// window between the child's bind() and any chmod. startOne additionally chmods
+// the socket to 0600 once it appears, so the mode is right in its own right.
 //
 // NOTE on base paths: code-server ALWAYS listens at the root and emits RELATIVE
 // URLs derived from the request path's depth, so it needs no base-path flag and
@@ -171,24 +194,31 @@ func resolveVSCodeBinary(configured string) (string, error) {
 // AND IGNORED, and the fallback editor came up empty (or on the last workspace)
 // rather than on the session. cmd.Dir does not rescue it either; the web client
 // server never derives the folder from cwd. ('folder' is a third spelling, but it
-// is deprecated upstream in favor of exactly this one.)
-func vscodeArgs(flavor vscodeFlavor, host string, port int, worktree string) []string {
+// is deprecated upstream in favor of exactly this one.) Verified against
+// openvscode-server 1.109.5: positional yields no folderUri in the workbench,
+// --default-folder opens the worktree. (#1880)
+func vscodeArgs(flavor vscodeFlavor, socketPath, worktree string) []string {
 	switch flavor {
 	case flavorOpenVSCode:
 		return []string{
-			"--host", host,
-			"--port", strconv.Itoa(port),
+			"--socket-path", socketPath,
 			// openvscode-server's --auth none equivalent: no token on any request.
-			// Same posture, and the same caveat, as code-server's below.
+			// Same posture, and the same reasoning, as code-server's below: the
+			// socket's 0600-in-0700 perms are what authenticate, and the daemon
+			// proxy is the only route to it.
 			"--without-connection-token",
 			"--default-folder", worktree,
 		}
 	default:
 		return []string{
-			"--bind-addr", net.JoinHostPort(host, strconv.Itoa(port)),
-			// No auth on the editor itself. It listens on loopback, but the daemon
-			// proxy is NOT its only route — see this file's header comment for what
-			// that does and does not expose, and for the unix-socket follow-up.
+			// code-server ignores --bind-addr entirely when --socket is set, so
+			// this replaces the TCP listener rather than adding to it.
+			"--socket", socketPath,
+			"--socket-mode", vscodeSocketMode,
+			// No auth on the editor itself, and unlike before it needs none: the
+			// daemon proxy is the only route to the socket, and the socket's
+			// 0600-in-0700 perms restrict it to the owning user. (Before #1873 this
+			// sat on a loopback port that any local process could reach.)
 			"--auth", "none",
 			// code-server AUTO-GENERATES ~/.config/code-server/config.yaml (with a
 			// random password) when no config exists. Point it at /dev/null so a
@@ -261,14 +291,27 @@ func htmlLinkify(message string) string {
 // vscodeServer is one supervised editor process serving one session's worktree.
 type vscodeServer struct {
 	worktree string
-	baseURL  string
-	host     string
-	port     int
-	cmd      *exec.Cmd
+	// socketPath is the editor's ONLY endpoint: a 0600 unix socket in a 0700
+	// directory. There is no host or port — the proxy's transport dials this.
+	socketPath string
+	// transport dials socketPath, ignoring the dummy host in the URL. It is owned
+	// by THIS server, not shared and not per-request, and that is a correctness
+	// choice at both ends:
+	//
+	//   - per-request would pool nothing (a fresh pool per request) while leaking
+	//     idle sockets, since a zero-value Transport never times an idle conn out;
+	//   - one shared transport would pool by HOST, and every editor presents the
+	//     same dummy host — so a request for one session could be answered over a
+	//     pooled connection to ANOTHER session's editor.
+	//
+	// Tying it to the process also makes respawn clean: a new process gets a new
+	// transport with an empty pool, so no connection to the dead socket survives.
+	transport *http.Transport
+	cmd       *exec.Cmd
 
 	// ready latches once the editor has accepted a connection. Until then the
 	// process is up but must not be proxied to, so callers see errVSCodeStarting
-	// instead of a 502 from a port that is not listening yet.
+	// instead of a 502 from a socket that is not listening yet.
 	ready bool
 
 	// exited is closed by the reaping goroutine once the child has been reaped AND
@@ -301,8 +344,9 @@ func (s *vscodeServer) signalGroup(pgid int, sig syscall.Signal) {
 	_ = syscall.Kill(-pgid, sig)
 }
 
-// reap Waits the child, SIGKILLs its process GROUP, and closes exited — in that
-// order, all three of which are load-bearing. Runs as one goroutine per spawn.
+// reap Waits the child, SIGKILLs its process GROUP, releases its socket, and
+// closes exited — in that order, all four of which are load-bearing. Runs as one
+// goroutine per spawn.
 //
 // Always Wait(): without it an exited editor stays a zombie parented to the daemon
 // for the daemon's whole life (#816).
@@ -325,9 +369,15 @@ func (s *vscodeServer) signalGroup(pgid int, sig syscall.Signal) {
 // crashes on its own has its survivors killed AT CRASH TIME, rather than leaking
 // until some later teardown that may never come.
 //
-// close(exited) goes AFTER the kill. stop() returns the moment exited closes and
-// its callers act immediately — ArchiveSession MOVES the worktree. Closing first
-// would let it move a directory the surviving children still hold open.
+// close(exited) goes LAST, after both the kill and the socket release. stop()
+// returns the moment exited closes and its callers act immediately —
+// ArchiveSession MOVES the worktree. Closing first would let it move a directory
+// the surviving children still hold open, and would let a caller observe teardown
+// as complete while the editor's socket was still on disk.
+//
+// The socket release is here for the same reason the group kill is: this is the one
+// place that always runs, exactly once, at the moment the process is really gone.
+// See releaseSocket for why stop() is the wrong home for it (#1873).
 func (s *vscodeServer) reap() {
 	// Read the pgid before the Wait that frees it: after this returns, the leader's
 	// pid is the kernel's to give away, and only a surviving group member keeps it
@@ -335,6 +385,7 @@ func (s *vscodeServer) reap() {
 	pgid := s.cmd.Process.Pid
 	_ = s.cmd.Wait()
 	s.signalGroup(pgid, syscall.SIGKILL)
+	s.releaseSocket()
 	close(s.exited)
 }
 
@@ -388,6 +439,8 @@ func (s *vscodeServer) stop() {
 		s.signalGroup(pgid, syscall.SIGKILL)
 	}
 	// Wait for the reap so teardown can't return while the group is still up (#816).
+	// The reaper also unlinks the socket before closing exited (releaseSocket), so
+	// a returning stop() leaves neither a live process nor a socket behind.
 	select {
 	case <-s.exited:
 	case <-time.After(vscodeStopGrace):
@@ -405,7 +458,7 @@ func (s *vscodeServer) stop() {
 // authoritative, observable events, and an idle editor costs nothing meanwhile.
 //
 // It carries its OWN mutex rather than reusing Manager.mu: spawning an editor
-// blocks on process start and a port probe for seconds, and Manager.mu is
+// blocks on process start and a socket probe for seconds, and Manager.mu is
 // deliberately never held across slow calls (see the pausedMu precedent).
 type vscodeSupervisor struct {
 	mu      sync.Mutex
@@ -416,11 +469,14 @@ type vscodeSupervisor struct {
 	failures map[string]vscodeFailure
 	stopped  bool
 
+	// sweepOnce gates the one-time cleanup of sockets abandoned by a previous
+	// daemon. It fires on the first spawn, when this daemon owns no editors and
+	// everything in the socket directory is therefore stale.
+	sweepOnce sync.Once
+
 	// Injection points for tests: configuredBinary substitutes the config key
-	// without a config file, authPosture substitutes the daemon's auth settings,
-	// and startGrace/cooldown shorten the waits.
+	// without a config file, and startGrace/cooldown shorten the waits.
 	configuredBinary func() string
-	authPosture      func() (requireToken, requireLoopbackToken bool)
 	startGrace       time.Duration
 	cooldown         time.Duration
 	now              func() time.Time
@@ -451,27 +507,20 @@ func newVSCodeSupervisor() *vscodeSupervisor {
 			}
 			return cfg.VSCodeServerBinary
 		},
-		authPosture: func() (bool, bool) {
-			cfg, err := config.LoadConfig()
-			if err != nil || cfg == nil {
-				return false, false
-			}
-			return cfg.RequireToken, cfg.RequireLoopbackToken
-		},
 		startGrace: vscodeStartGrace,
 		cooldown:   vscodeRespawnCooldown,
 		now:        time.Now,
 	}
 }
 
-// ensureServer returns the loopback base URL of the editor serving worktree for
-// key, spawning it if it is not running and RESPAWNING it if it died — the
-// self-heal that makes a crashed editor recover on the next render rather than
-// needing the tab recreated. It returns errVSCodeBinaryMissing when no editor is
-// installed, which callers render as the install hint.
-func (v *vscodeSupervisor) ensureServer(key, worktree string) (string, error) {
+// ensureServer returns the ENDPOINT of the editor serving worktree for key,
+// spawning it if it is not running and RESPAWNING it if it died — the self-heal
+// that makes a crashed editor recover on the next render rather than needing the
+// tab recreated. It returns errVSCodeBinaryMissing when no editor is installed,
+// which callers render as the install hint.
+func (v *vscodeSupervisor) ensureServer(key, worktree string) (vscodeEndpoint, error) {
 	if strings.TrimSpace(worktree) == "" {
-		return "", fmt.Errorf("session has no worktree to open in VS Code")
+		return vscodeEndpoint{}, fmt.Errorf("session has no worktree to open in VS Code")
 	}
 
 	// Hold the supervisor lock for the whole call. It serializes concurrent
@@ -481,7 +530,7 @@ func (v *vscodeSupervisor) ensureServer(key, worktree string) (string, error) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	if v.stopped {
-		return "", fmt.Errorf("daemon is shutting down")
+		return vscodeEndpoint{}, fmt.Errorf("daemon is shutting down")
 	}
 
 	// Reuse a live editor, but only while it still serves THIS worktree: a session
@@ -491,10 +540,10 @@ func (v *vscodeSupervisor) ensureServer(key, worktree string) (string, error) {
 		switch {
 		case s.alive() && s.worktree == worktree:
 			if s.ready || v.probeReady(s) {
-				return s.baseURL, nil
+				return s.endpoint(), nil
 			}
 			// Up, but not listening yet — keep waiting, don't respawn.
-			return "", errVSCodeStarting
+			return vscodeEndpoint{}, errVSCodeStarting
 		default:
 			// Dead, or serving a stale worktree: drop it and start clean. Stop it
 			// OUT OF BAND — stop() blocks for up to the stop grace, and v.mu is held
@@ -526,88 +575,80 @@ func (v *vscodeSupervisor) ensureServer(key, worktree string) (string, error) {
 	// Replay a recent failure instead of respawning, so the notice page's refresh
 	// can't drive a spawn loop against a broken editor.
 	if f, ok := v.failures[key]; ok && v.now().Sub(f.at) < v.cooldown {
-		return "", f.err
+		return vscodeEndpoint{}, f.err
 	}
 
 	binary, err := resolveVSCodeBinary(v.configuredBinary())
 	if err != nil {
 		// A missing binary is a stable, cheap-to-detect state, not a failed spawn:
 		// recording it would make an install invisible for the cooldown.
-		return "", err
+		return vscodeEndpoint{}, err
 	}
 
-	server, err := v.spawnLocked(binary, worktree)
+	server, err := v.spawnLocked(key, binary, worktree)
 	if err != nil {
 		v.failures[key] = vscodeFailure{err: err, at: v.now()}
-		return "", err
+		return vscodeEndpoint{}, err
 	}
 	delete(v.failures, key)
 	v.servers[key] = server
 	if !server.ready {
-		return "", errVSCodeStarting
+		return vscodeEndpoint{}, errVSCodeStarting
 	}
-	return server.baseURL, nil
+	return server.endpoint(), nil
 }
 
-// probeReady re-checks a not-yet-ready editor's port and latches s.ready on
+// probeReady re-checks a not-yet-ready editor's socket and latches s.ready on
 // success. Callers must hold v.mu. The dial timeout is deliberately tiny: this
 // runs on a proxy request, and "not up yet" must be answered immediately rather
 // than waited out.
 func (v *vscodeSupervisor) probeReady(s *vscodeServer) bool {
-	conn, err := net.DialTimeout("tcp", net.JoinHostPort(s.host, strconv.Itoa(s.port)), vscodeProbeInterval)
+	conn, err := net.DialTimeout("unix", s.socketPath, vscodeProbeInterval)
 	if err != nil {
 		return false
 	}
 	_ = conn.Close()
+	// This is the OTHER path on which a socket first becomes reachable: an editor
+	// that outran the start grace latches ready here, not in startOne, so the mode
+	// has to be forced here too or a slow openvscode-server would keep whatever
+	// mode its umask gave it.
+	//
+	// Unlike startOne this only warns. The socket just accepted a connection, so
+	// it exists and is ours; a chmod that still fails means something is wrong with
+	// the filesystem, not the security posture — and the 0700 directory already
+	// restricts the socket to the owning user either way. Refusing to latch would
+	// wedge the pane on the "starting" notice forever over a condition the
+	// directory has already handled.
+	if err := secureVSCodeSocket(s.socketPath); err != nil {
+		log.WarningLog.Printf("vscode: %v", err)
+	}
 	s.ready = true
 	return true
 }
 
-// spawnLocked starts one editor on a fresh ephemeral port and waits for it to
-// listen. Callers must hold v.mu.
-func (v *vscodeSupervisor) spawnLocked(binary, worktree string) (*vscodeServer, error) {
-	flavor := flavorForBinary(binary)
-	v.warnIfLocalAuthExpected(worktree)
-	var lastErr error
-	for attempt := 0; attempt < vscodeSpawnAttempts; attempt++ {
-		port, err := freeLoopbackPort()
-		if err != nil {
-			lastErr = err
-			continue
-		}
-		server, err := v.startOne(binary, flavor, port, worktree)
-		if err != nil {
-			lastErr = err
-			continue
-		}
-		return server, nil
-	}
-	return nil, fmt.Errorf("starting %s failed: %w", filepath.Base(binary), lastErr)
-}
-
-// warnIfLocalAuthExpected tells an operator who asked for local-process auth that
-// the editor listener does not provide it.
+// spawnLocked starts one editor on key's socket and waits for it to listen.
+// Callers must hold v.mu.
 //
-// require_token + require_loopback_token together are the documented way to lock
-// down a SHARED machine: they make even loopback peers present a token, closing
-// the gap that af's defaults leave open on purpose. Setting both is an explicit
-// opt-in, and the daemon-spawned editor silently reopens exactly that gap on its
-// own port. Nobody who set them would guess that from the tab, so say it. (Only
-// for that pair: under the defaults there is nothing to bypass, and warning every
-// user about a posture they never asked to change is noise.)
-func (v *vscodeSupervisor) warnIfLocalAuthExpected(worktree string) {
-	if v.authPosture == nil {
-		return
+// There is no retry loop. The TCP path needed one to re-roll a lost port race;
+// a socket path is chosen by the daemon inside a directory only the daemon can
+// write, so there is no race to lose and a failure here is a real failure (#1873).
+func (v *vscodeSupervisor) spawnLocked(key, binary, worktree string) (*vscodeServer, error) {
+	// Before the first editor of this daemon's life, clear out any left by the
+	// last one. Safe here precisely because nothing has spawned yet.
+	v.sweepAbandonedSockets()
+	socketPath, err := vscodeSocketPath(key)
+	if err != nil {
+		return nil, err
 	}
-	if requireToken, requireLoopbackToken := v.authPosture(); !requireToken || !requireLoopbackToken {
-		return
+	server, err := v.startOne(binary, flavorForBinary(binary), socketPath, worktree)
+	if err != nil {
+		return nil, fmt.Errorf("starting %s failed: %w", filepath.Base(binary), err)
 	}
-	log.WarningLog.Printf("vscode: require_token and require_loopback_token are set, but the editor for %s listens on loopback with authentication disabled — any local process can reach it without a token. A follow-up moves the editor onto a 0600 unix socket.", worktree)
+	return server, nil
 }
 
-// startOne execs one editor and waits for its port to accept connections.
-func (v *vscodeSupervisor) startOne(binary string, flavor vscodeFlavor, port int, worktree string) (*vscodeServer, error) {
-	const host = "127.0.0.1"
+// startOne execs one editor and waits for its socket to accept connections.
+func (v *vscodeSupervisor) startOne(binary string, flavor vscodeFlavor, socketPath, worktree string) (*vscodeServer, error) {
 	// Check the worktree before exec'ing. os/exec reports a missing cmd.Dir as
 	// ENOENT naming the BINARY ("fork/exec /usr/bin/code-server: no such file or
 	// directory"), which sends the user off debugging a code-server install that
@@ -615,7 +656,16 @@ func (v *vscodeSupervisor) startOne(binary string, flavor vscodeFlavor, port int
 	if fi, err := os.Stat(worktree); err != nil || !fi.IsDir() {
 		return nil, fmt.Errorf("the session worktree %s is not a directory (has it been moved or removed?): %w", worktree, err)
 	}
-	cmd := exec.Command(binary, vscodeArgs(flavor, host, port, worktree)...)
+	// Clear a stale socket before the child binds. A crashed daemon (or a SIGKILL
+	// that outran stop's unlink) leaves the file behind, and bind() on an existing
+	// path is EADDRINUSE — code-server unlinks first itself, but openvscode-server
+	// makes no such promise, so an editor would simply refuse to start until the
+	// file was removed by hand. Removing it here is safe precisely because the
+	// directory is ours alone: the path can only ever hold OUR dead socket.
+	if err := os.Remove(socketPath); err != nil && !os.IsNotExist(err) {
+		return nil, fmt.Errorf("clearing the stale VS Code socket %s failed: %w", socketPath, err)
+	}
+	cmd := exec.Command(binary, vscodeArgs(flavor, socketPath, worktree)...)
 	cmd.Dir = worktree
 	cmd.Env = vscodeChildEnv()
 	// Own process group so the editor's whole tree (extension host, terminal
@@ -632,12 +682,11 @@ func (v *vscodeSupervisor) startOne(binary string, flavor vscodeFlavor, port int
 		return nil, fmt.Errorf("exec %s: %w", binary, err)
 	}
 	server := &vscodeServer{
-		worktree: worktree,
-		baseURL:  "http://" + net.JoinHostPort(host, strconv.Itoa(port)),
-		host:     host,
-		port:     port,
-		cmd:      cmd,
-		exited:   make(chan struct{}),
+		worktree:   worktree,
+		socketPath: socketPath,
+		transport:  newVSCodeTransport(socketPath),
+		cmd:        cmd,
+		exited:     make(chan struct{}),
 		// Copied in HERE, before the reaper below exists to read it — the seam has
 		// to be installed by construction rather than by a later assignment.
 		killGroup: v.killGroup,
@@ -646,9 +695,17 @@ func (v *vscodeSupervisor) startOne(binary string, flavor vscodeFlavor, port int
 	// group kill belongs there rather than in stop().
 	go server.reap()
 
-	switch err := waitForPort(host, port, server.exited, v.startGrace); {
+	switch err := waitForSocket(socketPath, server.exited, v.startGrace); {
 	case err == nil:
 		server.ready = true
+		// Force the mode now that the socket exists. Fatal here, unlike in
+		// probeReady: this is the spawn path, nothing is serving yet, and refusing
+		// to hand back an editor whose socket could not be secured is strictly
+		// better than serving one that might be world-connectable.
+		if err := secureVSCodeSocket(socketPath); err != nil {
+			server.stop()
+			return nil, err
+		}
 		return server, nil
 	case errors.Is(err, errVSCodeStarting):
 		// Still coming up. Hand the caller a live, not-ready server rather than
@@ -656,9 +713,10 @@ func (v *vscodeSupervisor) startOne(binary string, flavor vscodeFlavor, port int
 		// killing it here would restart the clock forever and never start.
 		return server, nil
 	default:
-		// The child exited (bad binary, bad worktree) or the port could not be
-		// probed: never leave it running — it would hold the port and be adopted
-		// by the next ensureServer as if it were healthy.
+		// The child exited (bad binary, bad worktree) or the socket could not be
+		// probed: never leave it running. Its socket carries a nonce, so a later
+		// spawn would not adopt it — but the PROCESS would linger, holding the
+		// worktree open and belonging to nothing.
 		server.stop()
 		return nil, err
 	}
@@ -724,55 +782,6 @@ func hasAnyEnvPrefix(kv string, keys []string) bool {
 		}
 	}
 	return false
-}
-
-// freeLoopbackPort asks the kernel for an unused loopback port by binding :0 and
-// reading back the pick.
-//
-// The listener must be closed before the port is handed to the child, which opens
-// a TOCTOU window where another process can take it. There is no way to avoid it
-// while spawning a child that binds for itself; losing the race surfaces as a
-// failed start, which spawnLocked retries with a fresh port.
-func freeLoopbackPort() (int, error) {
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		return 0, fmt.Errorf("allocating a loopback port failed: %w", err)
-	}
-	port := ln.Addr().(*net.TCPAddr).Port
-	if cerr := ln.Close(); cerr != nil {
-		return 0, fmt.Errorf("releasing the probed loopback port failed: %w", cerr)
-	}
-	return port, nil
-}
-
-// waitForPort blocks until host:port accepts a connection (nil), the child exits
-// (a real error), or grace elapses (errVSCodeStarting — still coming up).
-//
-// Watching exited is what separates the two failure shapes: a child that dies
-// instantly (a bad binary, an unreadable worktree) is reported immediately and
-// accurately instead of being mistaken for a slow start and waited out.
-func waitForPort(host string, port int, exited <-chan struct{}, grace time.Duration) error {
-	addr := net.JoinHostPort(host, strconv.Itoa(port))
-	deadline := time.Now().Add(grace)
-	for {
-		select {
-		case <-exited:
-			// Wrapped, not bare: this is the errVSCodeStartExited case, and callers
-			// (the proxy's notice page, the respawn cooldown) match the SENTINEL to
-			// render a styled notice rather than surfacing a raw error.
-			return fmt.Errorf("%w (check that it runs correctly: it was asked to serve %s)", errVSCodeStartExited, addr)
-		default:
-		}
-		conn, err := net.DialTimeout("tcp", addr, vscodeProbeInterval)
-		if err == nil {
-			_ = conn.Close()
-			return nil
-		}
-		if time.Now().After(deadline) {
-			return errVSCodeStarting
-		}
-		time.Sleep(vscodeProbeInterval)
-	}
 }
 
 // stopFor tears down the editor for key, if any. Safe to call for a session that
