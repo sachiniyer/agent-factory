@@ -260,7 +260,7 @@ refuses to store, so the failure is a broken preview rather than a weakened one.
 The token itself is always verified by the gate regardless.
 
 > On a plain-HTTP listener the token traverses the wire in the clear either way —
-> the `?access_token` query that bootstraps the preview shares that hop. `Secure`
+> the `?af_webtab_token` query that bootstraps the preview shares that hop. `Secure`
 > is not what protects it; [terminating TLS](#transport-encryption-terminate-tls-yourself)
 > or using a private overlay is.
 
