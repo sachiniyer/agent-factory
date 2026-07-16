@@ -231,16 +231,37 @@ const logElidedNote = "\n_Earlier lines elided to fit the issue URL — the atta
 // collection errors, the newest log lines) in a <details> block, and still
 // points at the complete bundle on disk.
 //
+// THE INVARIANT: nothing may change the body's encoded length after the budget
+// is computed.
+//
+// Three separate bugs in this change were one shape — measure, then mutate.
+// Collection errors were written into the head before the budget was computed;
+// the bundle path was substituted after the body was measured; the final scrub
+// expanded prose after the log tail had already spent the budget. Each was
+// "something changes the body after we decided it fits", and patching them one
+// at a time just moved the next one somewhere else.
+//
+// So the order below is the invariant, not a convention:
+//
+//  1. Build every piece.
+//  2. Scrub every piece — head, foot, log, and the log chrome. Nothing reaches
+//     the body unscrubbed, so this doubles as the redaction chokepoint.
+//  3. Measure the scrubbed pieces and hand the log tail the remainder.
+//  4. Concatenate. No transformation runs over the finished body.
+//
+// Step 2 before step 3 is what makes it structurally true rather than checked:
+// there is no later pass left that could grow anything. The returned body is a
+// fixed point of the redactor — scrubbing it again is a no-op — which is exactly
+// the property a test can assert, and does.
+//
 // REDACTION. This body is a SECOND EXIT out of the bundle: unlike the text and
 // JSON renderers it never passes through Build's final catch-all scrub, so
 // anything reaching it must be redacted on the way in — a collector that
 // "usually" scrubs is not enough, and one that missed an exit leaked a real
-// $HOME path into a public draft (the no-log message; see collectLog). Two
-// defenses, deliberately overlapping: every component is scrubbed at the point
-// of inlining (which also keeps the size budget exact, since a scrub that runs
-// later could change lengths), and the assembled body is scrubbed once more at
-// the bottom so a future inline that forgets cannot leak. The second pass is a
-// no-op today precisely because the first exists — scrub is idempotent.
+// $HOME path into a public draft (the no-log message; see collectLog). Step 2
+// above is that guarantee: it scrubs the assembled head/foot wholesale, so an
+// inline that forgets cannot leak, while the per-component scrubs keep the
+// sub-budgets honest.
 //
 // b.bundlePath is measured INTO the body rather than substituted afterwards by
 // the caller: a placeholder swapped out post-measurement made the final body
@@ -266,59 +287,75 @@ func buildIssueDraft(r *redactor, b Bundle) (title, body string) {
 		daemonHuman += "\n" + truncatedNote
 	}
 
-	var head strings.Builder
-	fmt.Fprintf(&head, "<!-- Opened by `af bug-report`. This is a DRAFT — review it, attach the bundle below, then submit. -->\n\n")
-	fmt.Fprintf(&head, "## Environment\n")
-	fmt.Fprintf(&head, "- af: %s\n", r.scrub(b.Versions.AF))
-	fmt.Fprintf(&head, "- go: %s\n", r.scrub(b.Versions.Go))
-	fmt.Fprintf(&head, "- os/arch: %s/%s\n", b.Versions.OS, b.Versions.Arch)
-	fmt.Fprintf(&head, "- daemon: %s\n", daemonState)
-	fmt.Fprintf(&head, "- sessions: %d across %d repo(s)\n", countInstances(b.Instances), len(b.Instances))
-	fmt.Fprintf(&head, "- tasks: %d\n\n", len(b.Tasks))
-	fmt.Fprintf(&head, "## What happened\n<!-- Describe the bug. -->\n\n")
-	fmt.Fprintf(&head, "## What you expected\n\n")
-	fmt.Fprintf(&head, "## Steps to reproduce\n\n")
-	fmt.Fprintf(&head, "---\n\n")
-	fmt.Fprintf(&head, "<details>\n<summary>%s</summary>\n\n", issueSummaryLabel)
-	writeFenced(&head, "### Daemon status", daemonHuman)
-	writeErrors(&head, r, b.Errors)
+	var headRaw strings.Builder
+	fmt.Fprintf(&headRaw, "<!-- Opened by `af bug-report`. This is a DRAFT — review it, attach the bundle below, then submit. -->\n\n")
+	fmt.Fprintf(&headRaw, "## Environment\n")
+	fmt.Fprintf(&headRaw, "- af: %s\n", b.Versions.AF)
+	fmt.Fprintf(&headRaw, "- go: %s\n", b.Versions.Go)
+	fmt.Fprintf(&headRaw, "- os/arch: %s/%s\n", b.Versions.OS, b.Versions.Arch)
+	fmt.Fprintf(&headRaw, "- daemon: %s\n", daemonState)
+	fmt.Fprintf(&headRaw, "- sessions: %d across %d repo(s)\n", countInstances(b.Instances), len(b.Instances))
+	fmt.Fprintf(&headRaw, "- tasks: %d\n\n", len(b.Tasks))
+	fmt.Fprintf(&headRaw, "## What happened\n<!-- Describe the bug. -->\n\n")
+	fmt.Fprintf(&headRaw, "## What you expected\n\n")
+	fmt.Fprintf(&headRaw, "## Steps to reproduce\n\n")
+	fmt.Fprintf(&headRaw, "---\n\n")
+	fmt.Fprintf(&headRaw, "<details>\n<summary>%s</summary>\n\n", issueSummaryLabel)
+	writeFenced(&headRaw, "### Daemon status", daemonHuman)
+	writeErrors(&headRaw, r, b.Errors)
 
-	var foot strings.Builder
-	fmt.Fprintf(&foot, "</details>\n\n---\n\n")
-	fmt.Fprintf(&foot, "The summary above is a bounded excerpt. The COMPLETE best-effort **redacted** "+
+	var footRaw strings.Builder
+	fmt.Fprintf(&footRaw, "</details>\n\n---\n\n")
+	fmt.Fprintf(&footRaw, "The summary above is a bounded excerpt. The COMPLETE best-effort **redacted** "+
 		"bundle (full log tail, sessions, tasks, config) was written to:\n\n")
-	fmt.Fprintf(&foot, "    %s\n\n", r.scrub(b.bundlePath))
-	fmt.Fprintf(&foot, "**Attach that file to this issue** (drag-and-drop) before submitting. "+
+	fmt.Fprintf(&footRaw, "    %s\n\n", b.bundlePath)
+	fmt.Fprintf(&footRaw, "**Attach that file to this issue** (drag-and-drop) before submitting. "+
 		"Open and review it first — redaction is best-effort and cannot catch everything.\n")
 
-	// Size the log fence from the WHOLE tail before budgeting. A fence is closed
-	// by any run of at least its own length, so it must outrun every backtick run
-	// in the text it wraps — but its own cost has to be reserved before the text
-	// is fitted. Sizing it against the full tail sidesteps that circularity: the
-	// fitted tail is a subset, so its longest run can only be shorter, and the
-	// fence stays valid while the budget stays exact.
-	fence := fenceFor(b.Log.Contents)
-	logHeader := "### Daemon log tail (newest lines, redacted)\n\n" + fence + "\n"
-	logFooter := "\n" + fence + "\n\n"
-	budget := maxIssueBodyEncodedBytes -
-		encodedLen(head.String()) - encodedLen(foot.String()) -
-		encodedLen(logHeader) - encodedLen(logFooter) - encodedLen(logElidedNote)
+	// ---- Scrub EVERY piece, then measure. See the invariant note above. ----
+	//
+	// The wholesale head/foot pass is the single redaction chokepoint: it covers
+	// the static template as well as every component, so an inline that forgets
+	// to scrub cannot leak. It runs HERE, before the budget, rather than over the
+	// finished body — over the body it could grow text the budget had already
+	// spent (a username of "the" expands every "the" in the prose above to
+	// "[user]"), and the draft would blow the cap it had just been checked
+	// against. Scrubbing components individually as well keeps the per-section
+	// sub-budgets honest; that is free, because scrub is idempotent.
+	head := r.scrub(headRaw.String())
+	foot := r.scrub(footRaw.String())
+	logAll := r.scrubLog(b.Log.Contents)
 
+	// Size the log fence from the WHOLE (scrubbed) tail before budgeting. A fence
+	// is closed by any run of at least its own length, so it must outrun every
+	// backtick run in the text it wraps — but its own cost has to be reserved
+	// before the text is fitted. Sizing it against the full tail sidesteps that
+	// circularity: the fitted tail is a subset of it, so its longest run can only
+	// be shorter, and the fence stays valid while the budget stays exact.
+	fence := fenceFor(logAll)
+	logHeader := r.scrub("### Daemon log tail (newest lines, redacted)\n\n" + fence + "\n")
+	logFooter := r.scrub("\n" + fence + "\n\n")
+	elidedNote := r.scrub(logElidedNote)
+
+	budget := maxIssueBodyEncodedBytes -
+		encodedLen(head) - encodedLen(foot) -
+		encodedLen(logHeader) - encodedLen(logFooter) - encodedLen(elidedNote)
+	logText, elided := fitLogTail(logAll, issueLogMaxLines, budget)
+
+	// ---- Assembly is pure concatenation of finished pieces. Nothing below may
+	// transform the body: every byte here has already been scrubbed and counted.
 	var sb strings.Builder
-	sb.WriteString(head.String())
-	// Scrubbed here as well as in collectLog: this exit skips the final render
-	// pass, so it must not depend on a collector having covered every path.
-	logText, elided := fitLogTail(r.scrubLog(b.Log.Contents), issueLogMaxLines, budget)
+	sb.WriteString(head)
 	if logText != "" {
 		sb.WriteString(logHeader)
 		sb.WriteString(logText)
 		sb.WriteString(logFooter)
 	}
 	if elided {
-		sb.WriteString(logElidedNote)
+		sb.WriteString(elidedNote)
 	}
-	sb.WriteString(foot.String())
-	return title, r.scrub(sb.String())
+	sb.WriteString(foot)
+	return title, sb.String()
 }
 
 // truncatedNote marks a section the budget cut short, so a trimmed block never

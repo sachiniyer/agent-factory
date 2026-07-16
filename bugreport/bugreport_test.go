@@ -970,6 +970,82 @@ func TestBuildIssueDraftAccountsForBundlePathInBudget(t *testing.T) {
 	mustNotContain(t, "body", body, "{{", "/home/tester")
 }
 
+// TestBuildIssueDraftBodyIsFinalAfterBudgeting pins THE invariant: nothing may
+// change the body's encoded length after the budget is computed.
+//
+// The failure it locks: the final scrub used to run over the FINISHED body, so a
+// username that collides with a word in the static template — a home basename of
+// "the" expands every "the" in the prose to "[user]" — grew the body after the
+// log tail had already spent the budget. With a near-cap elided tail the emitted
+// draft then blew the cap, GitHub rejected the URL, and the user got an error
+// instead of a bug report.
+//
+// This is the third "measure, then mutate" bug in this change, so the assertion
+// is the general property rather than the instance: the returned body is a fixed
+// point of the redactor, meaning no later pass exists that could grow it.
+func TestBuildIssueDraftBodyIsFinalAfterBudgeting(t *testing.T) {
+	// Every one of these usernames collides with a word in the static template
+	// prose ("…attach the bundle below…", "…the attached bundle has the full
+	// tail…"), so a scrub that runs after budgeting expands prose the budget has
+	// already been spent against.
+	for _, user := range []string{"the", "bundle", "and", "issue"} {
+		t.Run("username="+user, func(t *testing.T) {
+			r := &redactor{home: "/tmp/" + user, users: []string{user}}
+
+			// Sweep the log line length. Each collision only grows the body by a
+			// few bytes, while the fitted tail leaves 0..one-line of slack under
+			// the cap — so ANY single log shape overflows only by luck, and a test
+			// pinned to one shape would pass against the broken ordering and prove
+			// nothing. Sweeping makes the near-cap case deterministic: some shape
+			// lands flush against the cap, where the growth has nowhere to go.
+			// Lines are realistically long so the BYTE budget binds rather than
+			// issueLogMaxLines, which would cap the body at ~4.3KB and make every
+			// assertion vacuous.
+			nearCap := 0
+			for lineLen := 60; lineLen <= 260; lineLen += 2 {
+				var log strings.Builder
+				for i := 0; i < 120; i++ {
+					line := fmt.Sprintf("[DAEMON] INFO:2026/07/16 05:03:33 taskrun.go:100: task %06d reconciled session ", i)
+					for len(line) < lineLen {
+						line += "x"
+					}
+					log.WriteString(line[:lineLen] + "\n")
+				}
+				b := Bundle{
+					Versions:   Versions{AF: "9.9.9", Go: "go1.25.0", OS: "linux", Arch: "amd64"},
+					Log:        logSection{Contents: log.String()},
+					bundlePath: "/tmp/" + user + "/af-bug-report-20260716-080519.txt",
+				}
+
+				_, body := buildIssueDraft(r, b)
+
+				if n := encodedLen(body); n > maxIssueBodyEncodedBytes {
+					t.Errorf("lineLen=%d: encoded body is %d bytes, past the %d cap — "+
+						"something changed the body after the budget was computed",
+						lineLen, n, maxIssueBodyEncodedBytes)
+				}
+				// The general invariant, asserted per shape: the returned body is a
+				// fixed point of the redactor, so no later pass — the one that used
+				// to run here, or any a future change adds — can grow it.
+				if again := r.scrub(body); again != body {
+					t.Errorf("lineLen=%d: body is not a redactor fixed point: a further scrub "+
+						"would change it (%d -> %d encoded bytes), so its measured size is not final",
+						lineLen, encodedLen(body), encodedLen(again))
+				}
+				if encodedLen(body) > maxIssueBodyEncodedBytes-40 {
+					nearCap++
+				}
+			}
+			// Proof the sweep actually reached the boundary, so the assertions above
+			// were exercised where they bite rather than passing on slack.
+			if nearCap == 0 {
+				t.Errorf("no log shape landed within 40 bytes of the %d cap — the sweep never "+
+					"reached the boundary, so it is not testing the overflow", maxIssueBodyEncodedBytes)
+			}
+		})
+	}
+}
+
 // TestBuildIssueDraftFenceSurvivesBackticksInLog is the #4 regression: a log line
 // carrying a literal ``` (a failing hook echoing its own output) closed the fixed
 // three-backtick fence early, so the rest of the draft — the closing </details>
