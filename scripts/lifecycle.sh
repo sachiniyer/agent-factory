@@ -420,8 +420,14 @@ scenario_b() {
         create_log+="[$n rc=$rc] $(printf '%s' "$out" | head -3)"$'\n'
     done
 
+    # Wait for the sessions to actually EXIST rather than reading the list the
+    # instant create returns. `sessions create` answers with the record, which
+    # is not the same fact as "the daemon has persisted it and will list it" —
+    # so a read here is a race, and it is the kind that passes on a fast box and
+    # fails on a loaded CI runner. Same rule the TUI driver follows (#1161):
+    # wait on the condition, never on a sleep.
     local before_sessions before_pid before_daemon_ver
-    before_sessions="$(lc_session_count "$bin")"
+    before_sessions="$(lc_wait_session_count "$bin" 2 30)"
     before_pid="$(lc_daemon_pids "$home" | head -1)"
     if [ -z "$before_pid" ]; then
         lc_fail "scenario-b/$mode: no daemon came up on the old release; nothing to upgrade"
@@ -440,8 +446,15 @@ scenario_b() {
         printf '%s' "$create_log" | sed 's/^/[lifecycle]   | /' >&2
         lc_say "session list was:"
         "$bin" sessions list 2>&1 | head -5 | sed 's/^/[lifecycle]   | /' >&2
-        lc_say "configured program_overrides:"
-        "$bin" config get program_overrides.claude 2>&1 | head -3 | sed 's/^/[lifecycle]   | /' >&2
+        lc_say "config.toml [program_overrides] (config get does not know this key on older releases):"
+        grep -A2 'program_overrides' "$home/config.toml" 2>/dev/null |
+            head -3 | sed 's/^/[lifecycle]   | /' >&2
+        # The daemon's own log is the only witness that can explain a session
+        # that was created and then vanished from the list.
+        lc_say "daemon log (tail):"
+        tail -25 "$home/agent-factory.log" 2>/dev/null | sed 's/^/[lifecycle]   | /' >&2
+        lc_say "tmux sessions the daemon owns:"
+        tmux ls 2>&1 | head -5 | sed 's/^/[lifecycle]   | /' >&2
         lc_teardown_home "$home" "$supervised"
         return 1
     fi
@@ -614,6 +627,19 @@ lc_session_count() {
         printf 'unreadable\n'
         return 0
     }
+    printf '%s\n' "$n"
+}
+
+# lc_wait_session_count <bin> <want> <timeout-s> — poll until the daemon lists
+# <want> sessions, then print the count (or the last count seen on timeout, so
+# the caller reports what was actually there rather than a fabricated number).
+lc_wait_session_count() {
+    local bin="$1" want="$2" timeout="${3:-30}" i n=""
+    for ((i = 0; i < timeout * 2; i++)); do
+        n="$(lc_session_count "$bin")"
+        [ "$n" = "$want" ] && break
+        sleep 0.5
+    done
     printf '%s\n' "$n"
 }
 
