@@ -65,10 +65,6 @@ func isAtConcurrencyLimitErr(err error) bool {
 	return err != nil && strings.Contains(err.Error(), atConcurrencyLimitErrText)
 }
 
-// admitTaskRunLocked decides whether a task delivery may spawn another session,
-// and reserves a slot for it when it may. It returns errAtConcurrencyLimit when
-// the task is already at its cap.
-//
 // A slot is held by every session this task spawned that ClassifyActivity calls
 // ActivityPending: mid-create (including while its post-worktree hooks still
 // run), running, or parked at a usage limit the daemon auto-resumes (#1146). It
@@ -87,27 +83,31 @@ func isAtConcurrencyLimitErr(err error) bool {
 // a permanently wedged watcher, strictly worse than the unbounded spawning this
 // limit exists to fix. The agent's own work outlasts the hook in the reported
 // case anyway.
-//
-// Callers hold m.mu and have already called refreshLocked, so m.instances
-// reflects what is on disk — which is what makes the count survive a daemon
-// restart with sessions still live.
-func (m *Manager) admitTaskRunLocked(repoID, taskID string, limit int) error {
-	if taskID == "" || limit <= 0 {
-		// No provenance or no cap: unlimited, exactly as before #1892. Zero is the
-		// default for every task written before this field existed, so an absent
-		// cap can never change an existing task's behavior.
-		return nil
-	}
 
-	inFlight := m.reservedTaskRuns[taskID]
+// taskRunReservationKey scopes an in-flight reservation to the task AND its repo,
+// matching how countTaskRunsLocked filters live sessions. Keying by task id alone
+// would be correct today — task ids are globally unique and a task maps to one
+// repo — but a bare-id key would silently start counting across repos the instant
+// that invariant changed, so the reservation and the live count use the same
+// (repo, task) scope.
+func taskRunReservationKey(repoID, taskID string) string {
+	return repoID + "\x00" + taskID
+}
+
+// countTaskRunsLocked reports how many sessions the task currently has in flight
+// in the repo: reserved creates that have not yet registered an instance, plus
+// live sessions ClassifyActivity calls pending. Callers hold m.mu and have
+// already called refreshLocked, so m.instances reflects what is on disk — which
+// is what makes the count survive a daemon restart with sessions still live.
+func (m *Manager) countTaskRunsLocked(repoID, taskID string) int {
+	inFlight := m.reservedTaskRuns[taskRunReservationKey(repoID, taskID)]
 	for key, inst := range m.instances {
 		if inst == nil || inst.TaskID != taskID {
 			continue
 		}
 		if rid, _ := splitDaemonInstanceKey(key); rid != repoID {
-			// Scoped to the task AND the repo (#1892): the same task id cannot span
-			// repos today, but counting across them would let an unrelated project's
-			// sessions starve this one.
+			// Scoped to the task AND the repo (#1892): counting another project's
+			// sessions would let them starve this one.
 			continue
 		}
 		// Read the two axes directly rather than serializing the whole instance:
@@ -118,27 +118,53 @@ func (m *Manager) admitTaskRunLocked(repoID, taskID string, limit int) error {
 			inFlight++
 		}
 	}
-	if inFlight >= limit {
+	return inFlight
+}
+
+// admitTaskRunLocked refuses a task delivery that would exceed its cap. It is
+// READ-ONLY — it reserves nothing — so it can run early in reserveCreate, before
+// any title mutation (the archived-name-reuse rename), and refuse without
+// leaving a half-applied create behind. reserveTaskRunLocked records the slot
+// only once the create is committed to succeeding. reserveCreate holds m.mu
+// unbroken between the two, so no other create can change the count in the gap.
+func (m *Manager) admitTaskRunLocked(repoID, taskID string, limit int) error {
+	if taskID == "" || limit <= 0 {
+		// No provenance or no cap: unlimited, exactly as before #1892. Zero is the
+		// default for every task written before this field existed, so an absent
+		// cap can never change an existing task's behavior.
+		return nil
+	}
+	if m.countTaskRunsLocked(repoID, taskID) >= limit {
 		return errAtConcurrencyLimit
 	}
-
-	m.reservedTaskRuns[taskID]++
 	return nil
 }
 
-// releaseTaskRunLocked drops a slot reserved by admitTaskRunLocked. It runs from
-// the same release() the title reservation uses, which CreateSession defers —
-// so it fires only after the new instance is registered in m.instances and has
-// begun holding the slot on its own. The momentary overlap (reservation and
-// session both counted) is deliberate: over-counting for an instant refuses one
-// extra event, while a gap would admit one too many. Callers hold m.mu.
-func (m *Manager) releaseTaskRunLocked(taskID string) {
+// reserveTaskRunLocked records an admitted create that has not yet registered its
+// instance in m.instances, so a burst cannot count the same zero N times and
+// admit them all. It runs only on the committed-to-succeed path, after
+// admitTaskRunLocked passed under the same lock hold. Callers hold m.mu.
+func (m *Manager) reserveTaskRunLocked(repoID, taskID string, limit int) {
+	if taskID == "" || limit <= 0 {
+		return
+	}
+	m.reservedTaskRuns[taskRunReservationKey(repoID, taskID)]++
+}
+
+// releaseTaskRunLocked drops a slot reserved by reserveTaskRunLocked. It runs
+// from the same release() the title reservation uses, which CreateSession
+// defers — so it fires only after the new instance is registered in m.instances
+// and has begun holding the slot on its own. The momentary overlap (reservation
+// and session both counted) is deliberate: over-counting for an instant refuses
+// one extra event, while a gap would admit one too many. Callers hold m.mu.
+func (m *Manager) releaseTaskRunLocked(repoID, taskID string) {
 	if taskID == "" {
 		return
 	}
-	if n := m.reservedTaskRuns[taskID]; n > 1 {
-		m.reservedTaskRuns[taskID] = n - 1
+	key := taskRunReservationKey(repoID, taskID)
+	if n := m.reservedTaskRuns[key]; n > 1 {
+		m.reservedTaskRuns[key] = n - 1
 		return
 	}
-	delete(m.reservedTaskRuns, taskID)
+	delete(m.reservedTaskRuns, key)
 }

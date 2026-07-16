@@ -222,6 +222,16 @@ func (i *Instance) GetInFlightOp() InFlightOp {
 	return i.inFlightOp
 }
 
+// activityAxes returns both state axes read under a single lock, so a caller
+// classifying the session (ClassifyInstanceActivity, #1892) never pairs a stale
+// liveness with a freshly-set op — the torn read that would misclassify a
+// mid-transition session as idle and free a concurrency slot it still holds.
+func (i *Instance) activityAxes() (Liveness, InFlightOp) {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	return i.liveness, i.inFlightOp
+}
+
 // ShownArchived reports whether the row belongs in the sidebar's Archived
 // section (#1028): it is archived on the liveness axis AND not mid-restore. An
 // OpRestoring overlay re-homes the row into the live Instances section EAGERLY

@@ -310,8 +310,9 @@ func TestWatchConcurrencyReservationReleasedOnFailedCreate(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 	repoPath := setupControlRepo(t)
 
-	// Fail the create AFTER admission has already reserved a slot: the reservation
-	// happens in reserveCreate, the backend is provisioned after it.
+	// Fail the create AFTER reserveCreate has recorded the slot: the reservation
+	// is taken at the end of reserveCreate, the backend is provisioned after it,
+	// and CreateSession's deferred release() must refund it on that failure.
 	failCreate := true
 	restore := session.SetBackendFactoryForTest(func(opts session.InstanceOptions, absPath string) (session.Backend, error) {
 		if failCreate {
@@ -343,7 +344,7 @@ func TestWatchConcurrencyReservationReleasedOnFailedCreate(t *testing.T) {
 	}
 
 	manager.mu.Lock()
-	leaked := manager.reservedTaskRuns["task1"]
+	leaked := len(manager.reservedTaskRuns)
 	manager.mu.Unlock()
 	if leaked != 0 {
 		t.Fatalf("failed create leaked %d reserved slot(s); the task would wedge at its cap forever", leaked)

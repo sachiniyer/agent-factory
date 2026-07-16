@@ -74,7 +74,7 @@ func ClassifyActivity(data InstanceData) (Activity, string) {
 }
 
 // ClassifyInstanceActivity is ClassifyActivity for a LIVE instance, reading the
-// two axes through their accessors instead of serializing the whole session.
+// two axes instead of serializing the whole session.
 //
 // The distinction is not cosmetic: ToInstanceData walks an instance's tabs,
 // worktree, and PR state, and the daemon's concurrency check runs this over every
@@ -82,18 +82,21 @@ func ClassifyActivity(data InstanceData) (Activity, string) {
 // keeps its serialization outside that lock. Both entry points share the one
 // state machine below, so a live instance and its persisted record can never
 // disagree about whether the session is busy.
+//
+// The two axes are read under a single instance lock (activityAxesLocked), not
+// through separate GetLiveness/GetInFlightOp calls: the status poll can be
+// mutating this instance concurrently, and a torn read that paired a stale
+// LiveReady with a just-set OpNone would misclassify a session that is really
+// mid-transition as idle — freeing a concurrency slot it should still hold. The
+// legacy Status axis is not read at all: a live in-memory instance always has a
+// resolved liveness (NewInstance sets it, FromInstanceData rolls a legacy record
+// forward at load), so ClassifyActivity's LivenessUnset fallback never applies.
 func ClassifyInstanceActivity(i *Instance) Activity {
 	if i == nil {
 		return ActivityTerminal
 	}
-	activity, _ := ClassifyActivity(InstanceData{
-		Liveness:   i.GetLiveness(),
-		InFlightOp: i.GetInFlightOp(),
-		// Carried for the pre-#1195 fallback. A live instance's liveness is always
-		// resolved (FromInstanceData rolls a legacy record forward at load), so this
-		// is belt-and-braces rather than a live path.
-		Status: i.GetStatus(),
-	})
+	liveness, op := i.activityAxes()
+	activity, _ := ClassifyActivity(InstanceData{Liveness: liveness, InFlightOp: op})
 	return activity
 }
 

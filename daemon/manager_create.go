@@ -137,6 +137,20 @@ func (m *Manager) reserveCreate(req CreateSessionRequest) (*config.RepoContext, 
 		return nil, "", nil, nil, err
 	}
 
+	// Admission control for a task's session-per-event deliveries (#1892), read-
+	// only and placed BEFORE any title mutation. refreshLocked above populated
+	// m.instances, so the count sees every session already on disk — which is what
+	// makes the cap survive a daemon restart with sessions still in flight. Running
+	// it here, ahead of the archived-name-reuse rename below, means a refusal never
+	// leaves an archived session renamed for a create that then did not happen. The
+	// matching reserveTaskRunLocked runs only once the create is committed to
+	// succeeding; m.mu is held unbroken between the two, so the count cannot move in
+	// the gap. On refusal the watch-task delivery path parks the event on the
+	// durable queue and retries when a slot frees, so nothing is dropped by the cap.
+	if err := m.admitTaskRunLocked(repo.ID, req.TaskID, req.MaxConcurrentRuns); err != nil {
+		return nil, "", nil, nil, err
+	}
+
 	// Whether this create lands on the HOOK backend — the one runtime whose name
 	// is a global namespace. ForceRemote is only ONE of three ways to get there:
 	// `--backend hook` and a repo's `backend = "hook"` config both select it with
@@ -194,20 +208,16 @@ func (m *Manager) reserveCreate(req CreateSessionRequest) (*config.RepoContext, 
 		}
 	}
 
-	// Admission control for a task's session-per-event deliveries (#1892). Placed
-	// here, after refreshLocked, so the count sees every session already on disk —
-	// and therefore survives a daemon restart with sessions still in flight. A
-	// refusal returns errAtConcurrencyLimit and creates nothing; the watch-task
-	// delivery path parks the event on the durable queue and retries it when a
-	// slot frees, so no event is ever dropped by the cap.
-	if err := m.admitTaskRunLocked(repo.ID, req.TaskID, req.MaxConcurrentRuns); err != nil {
-		return nil, "", nil, nil, err
-	}
-
+	// Everything that could refuse this create has now passed (admission above,
+	// title/remote-name availability). Record the concurrency reservation on the
+	// committed-to-succeed path so no later error return leaks it (reserveCreate
+	// returns the release() only on success); m.mu has been held unbroken since
+	// admitTaskRunLocked, so the count is exactly what admission saw.
 	m.reservedTitles[key] = struct{}{}
 	if remoteName != "" {
 		m.reservedRemoteNames[remoteName] = struct{}{}
 	}
+	m.reserveTaskRunLocked(repo.ID, req.TaskID, req.MaxConcurrentRuns)
 	release := func() {
 		m.mu.Lock()
 		defer m.mu.Unlock()
@@ -219,7 +229,7 @@ func (m *Manager) reserveCreate(req CreateSessionRequest) (*config.RepoContext, 
 		// is registered in m.instances and counts against the cap on its own —
 		// handing the slot over with no gap. On a failed create nothing was
 		// registered, and dropping the reservation is exactly the right refund.
-		m.releaseTaskRunLocked(req.TaskID)
+		m.releaseTaskRunLocked(repo.ID, req.TaskID)
 	}
 
 	return repo, title, release, renamedArchived, nil
