@@ -1,0 +1,639 @@
+{
+  "_readme": [
+    "The cross-surface capability inventory. parity_test.go derives the real TUI,",
+    "web, and CLI surfaces from code and fails when any of them grows a capability",
+    "with no entry here. Adding a CLI verb, a daemon route, a TUI binding, or a web",
+    "RPC therefore forces a deliberate answer to 'what about the other two?'.",
+    "",
+    "status: yes | no | partial | n/a   (n/a = the surface has no analogue by nature)",
+    "verdict: parity | real-gap | deliberate | unclear",
+    "  parity     - all applicable surfaces expose it",
+    "  real-gap   - a surface should have it and does not; 'issue' names the ticket",
+    "  deliberate - the surface legitimately cannot or should not; 'notes' says why,",
+    "               so it is never re-reported as a gap",
+    "  unclear    - needs an owner decision; do not file until triaged",
+    "",
+    "Pointers are file:line into the surface's own code. Keep them accurate: they",
+    "are the difference between an actionable issue and noise."
+  ],
+
+  "capabilities": [
+    {
+      "id": "session.create",
+      "title": "Create a session",
+      "tui": { "status": "yes", "pointer": "keys/keys.go:145 (n) -> app/handle_input.go:181" },
+      "web": { "status": "yes", "pointer": "web/src/api.ts:251 createSession" },
+      "cli": { "status": "yes", "pointer": "api/sessions.go:245 sessionsCreateCmd" },
+      "verdict": "parity",
+      "notes": "The verb is at parity; the OPTIONS are not. See the session.create.opt.* rows — no surface is a superset of another."
+    },
+    {
+      "id": "session.create.opt.title",
+      "title": "Set the new session's title",
+      "tui": { "status": "yes", "pointer": "app/handle_input.go:135-158 (typed during stateNew)" },
+      "web": { "status": "yes", "pointer": "web/src/modals.ts:148 titleInput" },
+      "cli": { "status": "yes", "pointer": "api/api.go:584 --name (required)" },
+      "verdict": "parity",
+      "notes": "TUI/web send title_base so the daemon auto-suffixes collisions; the CLI sends title and errors on collision instead."
+    },
+    {
+      "id": "session.create.opt.program",
+      "title": "Choose the agent program at create time",
+      "tui": { "status": "yes", "pointer": "app/handle_input.go:119-134 (Tab -> stateSelectProgram)" },
+      "web": { "status": "yes", "pointer": "web/src/modals.ts:170-175 programSelect" },
+      "cli": { "status": "yes", "pointer": "api/api.go:586 --program" },
+      "verdict": "parity",
+      "notes": ""
+    },
+    {
+      "id": "session.create.opt.prompt",
+      "title": "Send an initial prompt with the new session",
+      "tui": { "status": "no", "pointer": "app/handle_input.go:103-109 builds sessionStartRequest without Prompt" },
+      "web": { "status": "yes", "pointer": "web/src/modals.ts:177 promptArea -> web/src/api.ts:258" },
+      "cli": { "status": "yes", "pointer": "api/api.go:585 --prompt" },
+      "verdict": "real-gap",
+      "issue": "#1936",
+      "notes": "Inverted gap: the TUI is the surface that lacks this. sessionStartRequest.Prompt exists and is plumbed to the daemon (app/session_control.go:106) but its only construction site never populates it, so the field is dead from the TUI."
+    },
+    {
+      "id": "session.create.opt.autoyes",
+      "title": "Set auto-yes for one session at create time",
+      "tui": { "status": "no", "pointer": "app/handle_input.go:107 sends process-wide m.autoYes (commands/root.go:250 -y)" },
+      "web": { "status": "yes", "pointer": "web/src/modals.ts:180 autoYes checkbox" },
+      "cli": { "status": "no", "pointer": "api/sessions.go:326 sends cfg.AutoYes; no per-create flag (root -y is Flags(), not PersistentFlags())" },
+      "verdict": "unclear",
+      "notes": "The web is the ONLY surface with per-session auto-yes. TUI inherits the launch-time -y flag for every session in the process; the CLI reads the repo config and `af sessions create --autoyes` is an unknown-flag error. Deliberately NOT filed: this is a divergence in MODEL (process-wide vs per-session), and converging on the web's granularity presumes the web is the correct one — the checkbox may equally be the anomaly. Auto-yes is still flagged [experimental] (commands/root.go:251). Owner call."
+    },
+    {
+      "id": "session.create.opt.backend",
+      "title": "Choose the session's backend (local/docker/ssh/hook) per session",
+      "tui": { "status": "no", "pointer": "app/session_control.go:88-95 sessionStartRequest has no Backend field" },
+      "web": { "status": "no", "pointer": "web/src/api.ts:251-264 sends 5 of the route's 9 fields; no backend" },
+      "cli": { "status": "yes", "pointer": "api/sessions.go:242,328 --backend local|docker|ssh|hook" },
+      "verdict": "real-gap",
+      "issue": "#1933",
+      "notes": "The CLI is the only surface that can pick a backend per session. Neither TUI nor web is hard-locked to local: both send backend:\"\", which falls through to the repo's in-repo `backend` config key (session/instance_factory.go:102-114), so in a repo configured backend=ssh their sessions ARE remote. What is missing is per-session CHOICE, not remote sessions outright."
+    },
+    {
+      "id": "session.create.opt.remote",
+      "title": "Force a session onto the remote hook backend",
+      "tui": { "status": "partial", "pointer": "keys/keys.go:153 (N) -> app/handle_input.go:207 ForceRemote" },
+      "web": { "status": "no", "pointer": "web/src/api.ts:251-264 never sends force_remote" },
+      "cli": { "status": "yes", "pointer": "api/api.go:589 --backend hook" },
+      "verdict": "real-gap",
+      "issue": "#1933",
+      "notes": "TUI is 'partial' because ForceRemote resolves to the hook backend ONLY (session/instance_factory.go:106-108) — N cannot reach docker or ssh. The web has no remote affordance at all; this is the gap the owner reported."
+    },
+    {
+      "id": "session.create.opt.inplace",
+      "title": "Attach a session to the repo's existing working tree (--here)",
+      "tui": { "status": "no", "pointer": "no InPlace assignment anywhere in app/ (grep-verified)" },
+      "web": { "status": "no", "pointer": "web/src/api.ts:251-264 never sends in_place" },
+      "cli": { "status": "yes", "pointer": "api/api.go:587-588 --here / --in-place" },
+      "verdict": "unclear",
+      "notes": "CLI-only. Plausibly deliberate: --here is a scripting affordance for 'run an agent right here in my checkout', and the TUI/web are worktree-oriented session managers. Needs an owner call before filing."
+    },
+
+    {
+      "id": "session.list",
+      "title": "List sessions",
+      "tui": { "status": "yes", "pointer": "app/sidebar rail (always rendered)" },
+      "web": { "status": "yes", "pointer": "web/src/api.ts:179 fetchSnapshot" },
+      "cli": { "status": "yes", "pointer": "api/sessions.go:174 sessionsListCmd" },
+      "verdict": "parity",
+      "notes": ""
+    },
+    {
+      "id": "session.get",
+      "title": "Get one session's record",
+      "tui": { "status": "n/a", "pointer": "" },
+      "web": { "status": "n/a", "pointer": "" },
+      "cli": { "status": "yes", "pointer": "api/sessions.go:204 sessionsGetCmd" },
+      "verdict": "deliberate",
+      "notes": "A scripting read-verb. The TUI and web render the whole projection continuously, so 'get one record' has no UI analogue — the row is already on screen."
+    },
+    {
+      "id": "session.send-prompt",
+      "title": "Send a prompt to an existing session",
+      "tui": { "status": "yes", "pointer": "interactive mode types straight into the pane (app/interactive.go:147)" },
+      "web": { "status": "yes", "pointer": "web/src/api.ts:275 sendPrompt" },
+      "cli": { "status": "yes", "pointer": "api/sessions.go:346 sendPromptCmd" },
+      "verdict": "parity",
+      "notes": "The TUI reaches this by typing into the live terminal rather than via the SendPrompt RPC; same user capability, different transport."
+    },
+    {
+      "id": "session.send-prompt.broadcast",
+      "title": "Broadcast one prompt to many sessions (--all/--all-repos)",
+      "tui": { "status": "no", "pointer": "" },
+      "web": { "status": "no", "pointer": "" },
+      "cli": { "status": "yes", "pointer": "api/api.go:594-596 --all/--all-repos/--include-root" },
+      "verdict": "deliberate",
+      "notes": "A fan-out scripting verb with no interactive analogue: broadcasting to every live session is a batch operation, and both UIs are single-selection by construction."
+    },
+    {
+      "id": "session.kill",
+      "title": "Permanently destroy a session",
+      "tui": { "status": "yes", "pointer": "keys/keys.go:146 (D) -> app/handle_actions.go:149" },
+      "web": { "status": "yes", "pointer": "web/src/api.ts:281 killSession" },
+      "cli": { "status": "yes", "pointer": "api/sessions.go:703 sessionsKillCmd" },
+      "verdict": "parity",
+      "notes": ""
+    },
+    {
+      "id": "session.archive",
+      "title": "Archive a session (restorable)",
+      "tui": { "status": "yes", "pointer": "keys/keys.go:147 (a) -> app/handle_actions.go:305" },
+      "web": { "status": "yes", "pointer": "web/src/api.ts:287 archiveSession" },
+      "cli": { "status": "yes", "pointer": "api/sessions.go:741 sessionsArchiveCmd" },
+      "verdict": "parity",
+      "notes": "Reachable everywhere — but see session.restore: on the web this is a one-way door."
+    },
+    {
+      "id": "session.restore",
+      "title": "Restore an archived, Lost, or Dead session",
+      "tui": { "status": "yes", "pointer": "keys/keys.go:148 (r) -> app/session_control.go:172" },
+      "web": { "status": "no", "pointer": "no RestoreSession/RestoreArchived call anywhere in web/src (grep-verified)" },
+      "cli": { "status": "yes", "pointer": "api/sessions.go:823 sessionsRestoreCmd" },
+      "verdict": "real-gap",
+      "issue": "#1932",
+      "notes": "Highest-impact gap found. The web can archive but not restore, so archive is a reachable dead end. Worse, the web already handles the session.restored event (web/src/sessions.ts:85) and its own copy instructs users to do the thing it cannot do: modals.ts:261 'You can restore it later.', modals.ts:292 'restore any of them to bring the project back', split.ts:868 'Restore it to open VS Code.'"
+    },
+    {
+      "id": "session.limit-retry",
+      "title": "Resume a session blocked at a usage-limit wall",
+      "tui": { "status": "yes", "pointer": "keys/keys.go:149 (c) -> app/session_control.go:199" },
+      "web": { "status": "no", "pointer": "renders the limit state (web/src/status.ts:57,137) but never calls ResumeFromLimit" },
+      "cli": { "status": "no", "pointer": "no limit/retry verb in the cobra tree (derived)" },
+      "verdict": "real-gap",
+      "issue": "#1934",
+      "notes": "TUI-only. The route is served but parked in internalHTTPRoutes, and daemon/httproutes.go:185-188 admits this is provisional: 'ResumeFromLimit is a genuine client-facing session verb (the TUI `c` key); it lands here rather than the public catalog only to hold the catalog steady in this PR — promoting it to httpRoutes is a one-line follow-up.' That follow-up never happened. The web shows a session is limit-blocked with no way out."
+    },
+    {
+      "id": "session.attach",
+      "title": "Attach to a session's terminal",
+      "tui": { "status": "yes", "pointer": "keys/keys.go:143 (o) -> app/handle_actions.go:712" },
+      "web": { "status": "yes", "pointer": "web/src/terminal.ts:205-223 (WS /v1/sessions/{id}/stream)" },
+      "cli": { "status": "yes", "pointer": "api/sessions.go:854 sessionsAttachCmd" },
+      "verdict": "parity",
+      "notes": ""
+    },
+    {
+      "id": "session.preview",
+      "title": "Read a session's terminal content without attaching",
+      "tui": { "status": "yes", "pointer": "the rail renders live pane previews continuously" },
+      "web": { "status": "yes", "pointer": "web/src/terminal.ts (xterm renders the live stream)" },
+      "cli": { "status": "yes", "pointer": "api/sessions.go:640 sessionsPreviewCmd" },
+      "verdict": "parity",
+      "notes": "The CLI uses the internal Preview RPC; the UIs get the same content off the live stream."
+    },
+    {
+      "id": "session.watch",
+      "title": "Block until a session goes idle",
+      "tui": { "status": "n/a", "pointer": "" },
+      "web": { "status": "n/a", "pointer": "" },
+      "cli": { "status": "yes", "pointer": "api/sessions_watch.go:214 sessionsWatchCmd" },
+      "verdict": "deliberate",
+      "notes": "A blocking scripting primitive for automation. Both UIs show liveness continuously, so 'block until idle' is meaningless there — you just look."
+    },
+    {
+      "id": "session.whoami",
+      "title": "Identify the current session from inside it",
+      "tui": { "status": "n/a", "pointer": "" },
+      "web": { "status": "n/a", "pointer": "" },
+      "cli": { "status": "yes", "pointer": "api/sessions.go:911 sessionsWhoamiCmd" },
+      "verdict": "deliberate",
+      "notes": "Only meaningful to an agent running INSIDE a session's shell. Neither UI runs inside a session."
+    },
+
+    {
+      "id": "session.tab.create",
+      "title": "Spawn a shell/process tab in a session",
+      "tui": { "status": "yes", "pointer": "keys/keys.go:156 (t) -> app/handle_actions.go:822" },
+      "web": { "status": "yes", "pointer": "web/src/api.ts:339 createTab (shell)" },
+      "cli": { "status": "yes", "pointer": "api/sessions_tabs.go:39 tab-create" },
+      "verdict": "parity",
+      "notes": "All three gate off-box backends: the web hides + / x for docker/ssh/remote (web/src/ui.ts:187-210) mirroring the daemon's Capabilities().TabManagement, and the TUI refuses at app/handle_actions.go:830-832."
+    },
+    {
+      "id": "session.tab.create.vscode",
+      "title": "Spawn a VS Code tab",
+      "tui": { "status": "no", "pointer": "no kind selector on the t binding" },
+      "web": { "status": "yes", "pointer": "web/src/api.ts:355 createVSCodeTab" },
+      "cli": { "status": "yes", "pointer": "api/sessions_tabs.go:27 --kind vscode" },
+      "verdict": "unclear",
+      "notes": "The TUI's t always spawns $SHELL. A VS Code tab is an editor window the TUI cannot render inline, so a TUI affordance may be pointless — but the tab would still exist for web/CLI consumers. Needs an owner call."
+    },
+    {
+      "id": "session.tab.create.web",
+      "title": "Spawn a web tab (URL/port iframe)",
+      "tui": { "status": "no", "pointer": "" },
+      "web": { "status": "no", "pointer": "web/src/ui.ts:41-43 NewTabKind deliberately excludes 'web'" },
+      "cli": { "status": "yes", "pointer": "api/sessions_tabs.go:27-29 --kind web --url/--port" },
+      "verdict": "deliberate",
+      "notes": "Documented in code: 'A web tab is deliberately absent: its target comes from whatever an agent is running, so it stays CLI/API-created' (web/src/ui.ts:41-43, docs/web.md). Both UIs RENDER existing web tabs; only creation is CLI/API-scoped."
+    },
+    {
+      "id": "session.tab.close",
+      "title": "Close a tab",
+      "tui": { "status": "yes", "pointer": "keys/keys.go:157 (w) -> app/handle_actions.go:869" },
+      "web": { "status": "yes", "pointer": "web/src/api.ts:368 closeTab" },
+      "cli": { "status": "yes", "pointer": "api/sessions_tabs.go:129 tab-delete" },
+      "verdict": "parity",
+      "notes": "The agent tab (index 0) is refused on every surface."
+    },
+
+    {
+      "id": "session.pr.set",
+      "title": "Record a session's GitHub PR info",
+      "tui": { "status": "yes", "pointer": "app/session_control.go:308 (auto-fetched on sync, not a user verb)" },
+      "web": { "status": "no", "pointer": "no SetPRInfo call in web/src" },
+      "cli": { "status": "no", "pointer": "no PR verb in the cobra tree (derived)" },
+      "verdict": "unclear",
+      "notes": "Public route, but the TUI's use is background sync (it fetches PR info from git and records it) rather than a user action. Whether the web should also sync PR info — or whether this should be daemon-side for every client — is an owner call, not a filed gap."
+    },
+    {
+      "id": "session.pr.open",
+      "title": "Open / copy a session's PR URL",
+      "tui": { "status": "yes", "pointer": "keys/keys.go:169-170 (p, y)" },
+      "web": { "status": "no", "pointer": "" },
+      "cli": { "status": "no", "pointer": "" },
+      "verdict": "unclear",
+      "notes": "Depends on session.pr.set: no other surface records PR info, so there is nothing for them to open. Triage together."
+    },
+
+    {
+      "id": "project.list",
+      "title": "See the list of projects",
+      "tui": { "status": "yes", "pointer": "keys/keys.go:172 (ctrl+p) -> app/switch_project.go:25" },
+      "web": { "status": "yes", "pointer": "web/src/ui.ts:1047 project switcher" },
+      "cli": { "status": "no", "pointer": "af projects has only `delete` (derived)" },
+      "verdict": "unclear",
+      "notes": "`af projects list` does not exist; projects are derivable from `af sessions list`. Low impact, but the group looks lopsided with a delete-only noun."
+    },
+    {
+      "id": "project.delete",
+      "title": "Delete a project (archive its sessions, drop the grouping)",
+      "tui": { "status": "yes", "pointer": "keys/keys.go:162 (D on projects focus) -> app/switch_project.go:223" },
+      "web": { "status": "yes", "pointer": "web/src/api.ts:304 deleteProject" },
+      "cli": { "status": "yes", "pointer": "api/projects.go:25 projectsDeleteCmd" },
+      "verdict": "parity",
+      "notes": ""
+    },
+    {
+      "id": "project.add",
+      "title": "Register a new project",
+      "tui": { "status": "yes", "pointer": "app/switch_project.go:196-216 (picker '+ Add project…' row)" },
+      "web": { "status": "no", "pointer": "web/src/modals.ts:153-157 'No projects yet — create a session in the TUI first'" },
+      "cli": { "status": "no", "pointer": "a project is implicitly registered by `af sessions create --repo`" },
+      "verdict": "unclear",
+      "notes": "The web's own empty state tells users to go to the TUI, which is an explicit parity admission in copy. But projects are implicit (any repo you create a session in), so 'add project' may not warrant a first-class verb. Owner call."
+    },
+    {
+      "id": "project.switch",
+      "title": "Scope the view to one project",
+      "tui": { "status": "yes", "pointer": "keys/keys.go:172 (ctrl+p)" },
+      "web": { "status": "yes", "pointer": "web/src/ui.ts:1047 switchProject" },
+      "cli": { "status": "yes", "pointer": "api/api.go:572 --repo (per-invocation scoping)" },
+      "verdict": "parity",
+      "notes": "The CLI expresses this as per-command --repo scoping rather than sticky state."
+    },
+
+    {
+      "id": "task.list",
+      "title": "List tasks",
+      "tui": { "status": "yes", "pointer": "keys/keys.go:159 (m) -> app/handle_overlay.go:221" },
+      "web": { "status": "yes", "pointer": "web/src/api.ts:391 listTasks" },
+      "cli": { "status": "yes", "pointer": "api/tasks.go:75 tasksListCmd" },
+      "verdict": "parity",
+      "notes": ""
+    },
+    {
+      "id": "task.add",
+      "title": "Add a task",
+      "tui": { "status": "yes", "pointer": "ui/task_pane.go:370 (n inside the tasks overlay)" },
+      "web": { "status": "yes", "pointer": "web/src/tasks.ts:286-319 -> api.ts:409 addTask" },
+      "cli": { "status": "yes", "pointer": "api/tasks.go:121 tasksAddCmd" },
+      "verdict": "parity",
+      "notes": ""
+    },
+    {
+      "id": "task.edit",
+      "title": "Edit an existing task's name/prompt/trigger/target/program",
+      "tui": { "status": "yes", "pointer": "ui/task_pane.go:362 (enter) -> ui/task_pane_edit.go form" },
+      "web": { "status": "partial", "pointer": "web/src/index.ts:854-865 sends only {enabled}; no edit form exists" },
+      "cli": { "status": "yes", "pointer": "api/tasks.go:270 tasksUpdateCmd (7 fields)" },
+      "verdict": "real-gap",
+      "issue": "#1935",
+      "notes": "The web can create a task but never change it: the only UpdateTask call site is the enable/disable toggle. Its TS TaskUpdate type (web/src/types.ts:174-182) also omits project_path, so that field is unreachable from the web even in principle. To fix a typo'd cron the user must delete and re-add."
+    },
+    {
+      "id": "task.toggle",
+      "title": "Enable / disable a task",
+      "tui": { "status": "yes", "pointer": "ui/task_pane.go:356 (x)" },
+      "web": { "status": "yes", "pointer": "web/src/index.ts:854-865 toggleTask" },
+      "cli": { "status": "yes", "pointer": "api/api.go:649 --enabled" },
+      "verdict": "parity",
+      "notes": ""
+    },
+    {
+      "id": "task.remove",
+      "title": "Remove a task",
+      "tui": { "status": "yes", "pointer": "ui/task_pane.go:359 (D)" },
+      "web": { "status": "yes", "pointer": "web/src/api.ts:436 removeTask" },
+      "cli": { "status": "yes", "pointer": "api/tasks.go:196 tasksRemoveCmd" },
+      "verdict": "parity",
+      "notes": ""
+    },
+    {
+      "id": "task.trigger",
+      "title": "Trigger a task now",
+      "tui": { "status": "yes", "pointer": "ui/task_pane.go:367-369 (r)" },
+      "web": { "status": "yes", "pointer": "web/src/api.ts:429 triggerTask" },
+      "cli": { "status": "yes", "pointer": "api/tasks.go:237 tasksRunCmd" },
+      "verdict": "parity",
+      "notes": "All three refuse watch-backed tasks; the web additionally hides the button (web/src/tasks.ts:92-94)."
+    },
+    {
+      "id": "task.get",
+      "title": "Get one task's record",
+      "tui": { "status": "n/a", "pointer": "" },
+      "web": { "status": "n/a", "pointer": "" },
+      "cli": { "status": "yes", "pointer": "api/tasks.go:216 tasksGetCmd" },
+      "verdict": "deliberate",
+      "notes": "Scripting read-verb; both UIs render the task list continuously."
+    },
+
+    {
+      "id": "config.read",
+      "title": "Read global config",
+      "tui": { "status": "no", "pointer": "" },
+      "web": { "status": "no", "pointer": "" },
+      "cli": { "status": "yes", "pointer": "commands/configcmd.go:140,170 config get/list" },
+      "verdict": "unclear",
+      "notes": "Config is a file the user edits. Whether the UIs should expose a settings view is a product question, not a drift bug — flagging rather than filing."
+    },
+    {
+      "id": "config.write",
+      "title": "Set a global config key",
+      "tui": { "status": "no", "pointer": "" },
+      "web": { "status": "no", "pointer": "" },
+      "cli": { "status": "yes", "pointer": "commands/configcmd.go:193 config set" },
+      "verdict": "unclear",
+      "notes": "See config.read. Note the in-repo `backend`/docker/ssh keys are NOT settable from any surface (config/resolve.go:108-112) — they are checked-in repo config by design."
+    },
+    {
+      "id": "worktree.hooks.edit",
+      "title": "Edit a repo's post-worktree hooks",
+      "tui": { "status": "yes", "pointer": "keys/keys.go:171 (e) -> app/handle_overlay.go:291" },
+      "web": { "status": "no", "pointer": "" },
+      "cli": { "status": "no", "pointer": "" },
+      "verdict": "unclear",
+      "notes": "TUI-only editor over in-repo config. Same question as config.write: is editing repo config a UI concern at all?"
+    },
+
+    {
+      "id": "daemon.lifecycle",
+      "title": "Install / uninstall / restart / status the daemon",
+      "tui": { "status": "n/a", "pointer": "" },
+      "web": { "status": "n/a", "pointer": "" },
+      "cli": { "status": "yes", "pointer": "commands/daemoncmd.go:66,83,189,220" },
+      "verdict": "deliberate",
+      "notes": "Both UIs are clients OF the daemon: the web is served BY it (a web button to stop the daemon would kill the page), and the TUI needs it running to render. Host-lifecycle control belongs to the CLI."
+    },
+    {
+      "id": "daemon.token",
+      "title": "Show / rotate the daemon bearer token",
+      "tui": { "status": "n/a", "pointer": "" },
+      "web": { "status": "n/a", "pointer": "" },
+      "cli": { "status": "yes", "pointer": "commands/tokencmd.go:72,86" },
+      "verdict": "deliberate",
+      "notes": "A credential-bootstrap verb: the web must already HAVE the token to talk to the daemon, so it cannot be where you go to get it. Rotating from the web would sever the rotating client."
+    },
+    {
+      "id": "install.doctor",
+      "title": "Diagnose setup and leaked resources",
+      "tui": { "status": "n/a", "pointer": "" },
+      "web": { "status": "n/a", "pointer": "" },
+      "cli": { "status": "yes", "pointer": "commands/doctorcmd.go:21" },
+      "verdict": "deliberate",
+      "notes": "Diagnoses the host install, including the case where the daemon is down — exactly when neither UI can run."
+    },
+    {
+      "id": "install.upgrade",
+      "title": "Upgrade af",
+      "tui": { "status": "n/a", "pointer": "" },
+      "web": { "status": "n/a", "pointer": "" },
+      "cli": { "status": "yes", "pointer": "commands/upgrade.go:105" },
+      "verdict": "deliberate",
+      "notes": "Replaces the running binary; cannot be driven from a client the binary is serving."
+    },
+    {
+      "id": "install.reset",
+      "title": "Factory-reset af",
+      "tui": { "status": "n/a", "pointer": "" },
+      "web": { "status": "n/a", "pointer": "" },
+      "cli": { "status": "yes", "pointer": "commands/reset.go:122" },
+      "verdict": "deliberate",
+      "notes": "Destroys the state both UIs are rendering, daemon included. Owner-locked as a typed-confirmation CLI op (#1736)."
+    },
+    {
+      "id": "install.bug-report",
+      "title": "Bundle a bug report",
+      "tui": { "status": "n/a", "pointer": "" },
+      "web": { "status": "n/a", "pointer": "" },
+      "cli": { "status": "yes", "pointer": "commands/bugreportcmd.go:35" },
+      "verdict": "deliberate",
+      "notes": "Collects host-side logs and redacted state; must work when af is too broken to render a UI."
+    },
+    {
+      "id": "meta.discovery",
+      "title": "Discover version / keys / API catalog / debug paths",
+      "tui": { "status": "partial", "pointer": "keys/keys.go:150 (?) help overlay" },
+      "web": { "status": "no", "pointer": "" },
+      "cli": { "status": "yes", "pointer": "commands/root.go:139,166,175; api/apicmd.go:25" },
+      "verdict": "deliberate",
+      "notes": "af version/keys/debug/api are introspection verbs for humans and scripts at a shell. The TUI's ? covers the keys half for its own surface."
+    },
+    {
+      "id": "meta.internal",
+      "title": "Internal / non-user commands",
+      "tui": { "status": "n/a", "pointer": "" },
+      "web": { "status": "n/a", "pointer": "" },
+      "cli": { "status": "yes", "pointer": "commands/docs_gen.go:23 (hidden); commands/agentservercmd.go:34" },
+      "verdict": "deliberate",
+      "notes": "af gen-docs is Hidden:true (CI docs generation). af agent-server is daemon-consumed plumbing — its own Long says it 'exists to be consumed by a daemon rather than opened by a person' — and af --daemon is a hidden flag. None are user capabilities."
+    },
+    {
+      "id": "tui.navigation",
+      "title": "Move around the TUI (cursor, focus, sections, scroll, search, help, quit)",
+      "tui": { "status": "yes", "pointer": "keys/keys.go:136-176 (up/down/collapse/expand/focus/sections/scroll/search/help/quit)" },
+      "web": { "status": "partial", "pointer": "web/src/nav.ts:109-200 (its own j/k, [/], 1-9, Enter, Esc, Alt+j/k/w)" },
+      "cli": { "status": "n/a", "pointer": "" },
+      "verdict": "deliberate",
+      "notes": "Navigation is per-surface chrome, not a product capability: each UI navigates its own layout idiomatically and a CLI has nothing to navigate. Deliberately NOT held to key-for-key parity — see docs/surface-parity.md."
+    },
+    {
+      "id": "tui.panes",
+      "title": "Open / split / hide / focus workspace panes",
+      "tui": { "status": "yes", "pointer": "keys/keys.go:163-167 (s, S, x, left/right)" },
+      "web": { "status": "yes", "pointer": "web/src/split.ts (drag-to-split, divider resize, Alt+j/k/w)" },
+      "cli": { "status": "n/a", "pointer": "" },
+      "verdict": "deliberate",
+      "notes": "Both UIs have a pane workspace with surface-idiomatic gestures (the web adds mouse drag-and-drop the TUI cannot express; the TUI has keyboard splits the web reaches via Alt-chords). Layout is client-local and never hits the daemon."
+    }
+  ],
+
+  "ledger": {
+    "_comment": [
+      "Maps every DERIVED surface item to the capability it belongs to. The drift",
+      "check fails on any derived item missing here, which is what forces a new",
+      "verb/route/binding/RPC to get a parity decision at the moment it lands.",
+      "'-' means the item is not a user capability (grouping node, internal route)."
+    ],
+
+    "cli_verbs": {
+      "af": "meta.discovery",
+      "af agent-server": "meta.internal",
+      "af api": "meta.discovery",
+      "af bug-report": "install.bug-report",
+      "af config get": "config.read",
+      "af config list": "config.read",
+      "af config set": "config.write",
+      "af daemon install": "daemon.lifecycle",
+      "af daemon restart": "daemon.lifecycle",
+      "af daemon status": "daemon.lifecycle",
+      "af daemon uninstall": "daemon.lifecycle",
+      "af debug": "meta.discovery",
+      "af doctor": "install.doctor",
+      "af gen-docs": "meta.internal",
+      "af keys": "meta.discovery",
+      "af projects delete": "project.delete",
+      "af reset": "install.reset",
+      "af sessions archive": "session.archive",
+      "af sessions attach": "session.attach",
+      "af sessions create": "session.create",
+      "af sessions get": "session.get",
+      "af sessions kill": "session.kill",
+      "af sessions list": "session.list",
+      "af sessions preview": "session.preview",
+      "af sessions restore": "session.restore",
+      "af sessions send-prompt": "session.send-prompt",
+      "af sessions tab-create": "session.tab.create",
+      "af sessions tab-delete": "session.tab.close",
+      "af sessions tabs create": "session.tab.create",
+      "af sessions tabs delete": "session.tab.close",
+      "af sessions watch": "session.watch",
+      "af sessions whoami": "session.whoami",
+      "af tasks add": "task.add",
+      "af tasks get": "task.get",
+      "af tasks list": "task.list",
+      "af tasks remove": "task.remove",
+      "af tasks trigger": "task.trigger",
+      "af tasks update": "task.edit",
+      "af token rotate": "daemon.token",
+      "af token show": "daemon.token",
+      "af upgrade": "install.upgrade",
+      "af version": "meta.discovery"
+    },
+
+    "routes": {
+      "GET /v1/health": "-",
+      "POST /v1/AddTask": "task.add",
+      "POST /v1/ArchiveSession": "session.archive",
+      "POST /v1/CloseTab": "session.tab.close",
+      "POST /v1/CreateSession": "session.create",
+      "POST /v1/CreateTab": "session.tab.create",
+      "POST /v1/DeleteProject": "project.delete",
+      "POST /v1/DeliverPrompt": "-",
+      "POST /v1/KillSession": "session.kill",
+      "POST /v1/ListTasks": "task.list",
+      "POST /v1/RemoveTask": "task.remove",
+      "POST /v1/RestoreArchived": "session.restore",
+      "POST /v1/RestoreSession": "session.restore",
+      "POST /v1/SendPrompt": "session.send-prompt",
+      "POST /v1/SetPRInfo": "session.pr.set",
+      "POST /v1/Snapshot": "session.list",
+      "POST /v1/TriggerTask": "task.trigger",
+      "POST /v1/UpdateTask": "task.edit"
+    },
+
+    "tui_bindings": {
+      "archive": "session.archive",
+      "attach": "session.attach",
+      "close_tab": "session.tab.close",
+      "collapse": "tui.navigation",
+      "copy_pr": "session.pr.open",
+      "down": "tui.navigation",
+      "error_details": "tui.navigation",
+      "expand": "tui.navigation",
+      "fixed:cancel": "session.create",
+      "fixed:change program": "session.create.opt.program",
+      "fixed:delete project": "project.delete",
+      "fixed:focus": "tui.navigation",
+      "fixed:focus prev": "tui.navigation",
+      "fixed:interact": "session.send-prompt",
+      "fixed:jump": "tui.panes",
+      "fixed:manage": "task.list",
+      "fixed:nav mode": "tui.navigation",
+      "fixed:submit name": "session.create",
+      "fixed:switch": "project.switch",
+      "help": "tui.navigation",
+      "hide_pane": "tui.panes",
+      "hooks": "worktree.hooks.edit",
+      "kill": "session.kill",
+      "limit_retry": "session.limit-retry",
+      "new": "session.create",
+      "new_remote": "session.create.opt.remote",
+      "new_tab": "session.tab.create",
+      "next_section": "tui.navigation",
+      "open_pane": "tui.panes",
+      "open_pr": "session.pr.open",
+      "pane_next": "tui.panes",
+      "pane_prev": "tui.panes",
+      "prev_section": "tui.navigation",
+      "quit": "tui.navigation",
+      "restore": "session.restore",
+      "scroll_down": "tui.navigation",
+      "scroll_up": "tui.navigation",
+      "search": "tui.navigation",
+      "split_pane": "tui.panes",
+      "switch_project": "project.switch",
+      "tasks": "task.list",
+      "up": "tui.navigation"
+    },
+
+    "web_rpcs": {
+      "AddTask": "task.add",
+      "ArchiveSession": "session.archive",
+      "CloseTab": "session.tab.close",
+      "CreateSession": "session.create",
+      "CreateTab": "session.tab.create",
+      "DeleteProject": "project.delete",
+      "KillSession": "session.kill",
+      "ListTasks": "task.list",
+      "RemoveTask": "task.remove",
+      "SendPrompt": "session.send-prompt",
+      "Snapshot": "session.list",
+      "TriggerTask": "task.trigger",
+      "UpdateTask": "task.edit"
+    }
+  },
+
+  "create_options": {
+    "_comment": [
+      "The option dimension of CreateSession, pinned field-by-field. This is where",
+      "the owner-reported remote-instance gap actually lives: the verb is at parity",
+      "but the options are not. web_sends is checked against the live web call site",
+      "and route_fields against the daemon's reflected wire struct, so adding a",
+      "field to either side without a decision here fails the drift check."
+    ],
+    "route": "POST /v1/CreateSession",
+    "web_sends": ["auto_yes", "program", "prompt", "repo_path", "title_base"],
+    "unsent_by_web": {
+      "title": "session.create.opt.title",
+      "in_place": "session.create.opt.inplace",
+      "force_remote": "session.create.opt.remote",
+      "backend": "session.create.opt.backend"
+    }
+  }
+}
