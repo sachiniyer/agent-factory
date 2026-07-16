@@ -442,3 +442,28 @@ func HasProcFS() bool {
 	_, err := os.Stat("/proc")
 	return err == nil
 }
+
+// CanonicalTempDir returns t.TempDir() resolved to its physical path, and is the
+// spelling any test should use for a directory whose path it later compares
+// against something the PRODUCT reports.
+//
+// macOS hands out temp dirs under /var/folders/…, and /var is a symlink to
+// /private/var. Production resolves the paths it is given (git, worktree and repo
+// resolution all report the physical path), so an expectation written in
+// t.TempDir()'s unresolved spelling compares /var/… against /private/var/… and
+// fails — on macOS only, which is why this survived until the suite first ran on
+// darwin (#1918, and its recurrence in #1931).
+//
+// Canonicalizing at the SOURCE is the fix, not canonicalizing at each assertion:
+// the expectation is then simply written in the same spelling production uses, so
+// new assertions are correct by default. That is the precedent tempBinPath set in
+// commands/tempbin_test.go for #1921. EvalSymlinks on an already-canonical path is
+// a no-op, so this is inert on Linux.
+func CanonicalTempDir(t *testing.T) string {
+	t.Helper()
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatalf("testguard: canonicalizing temp dir: %v", err)
+	}
+	return dir
+}

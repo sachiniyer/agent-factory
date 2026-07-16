@@ -319,7 +319,7 @@ func TestRestoreLostSessions_LogsVanishedWorktreeOnce(t *testing.T) {
 	manager, repoID, repoPath := newStatusTestManager(t)
 	zeroRestoreBackoff(t)
 
-	worktreePath := filepath.Join(t.TempDir(), "repo-vanished")
+	worktreePath := filepath.Join(testguard.CanonicalTempDir(t), "repo-vanished")
 	branch := "af/vanished-worktree"
 	if out, err := exec.Command("git", "-C", repoPath, "worktree", "add", "-b", branch, worktreePath).CombinedOutput(); err != nil {
 		t.Fatalf("git worktree add: %v\n%s", err, out)

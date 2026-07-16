@@ -24,7 +24,7 @@ import (
 
 func setupControlRepo(t *testing.T) string {
 	t.Helper()
-	repo := filepath.Join(t.TempDir(), "repo")
+	repo := filepath.Join(testguard.CanonicalTempDir(t), "repo")
 	if err := exec.Command("git", "init", repo).Run(); err != nil {
 		t.Fatalf("git init: %v", err)
 	}
@@ -542,10 +542,32 @@ func TestRequestShutdownStaleSocket(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(socketPath), 0755); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
-	// A regular file at the socket path causes Dial to return ECONNREFUSED
-	// (or an equivalent transport error). RequestShutdown must swallow it.
-	if err := os.WriteFile(socketPath, nil, 0600); err != nil {
-		t.Fatalf("write stale socket placeholder: %v", err)
+	// Leave behind a REAL socket file with no listener — which is what a stale
+	// socket actually is (the daemon died; its bind survives in the filesystem).
+	// Dialing that gives ECONNREFUSED on every platform, which is what
+	// isDaemonAbsentErr keys on.
+	//
+	// This used to write a regular FILE here as a stand-in. That is not a stale
+	// socket, and the substitution only looked right on Linux: dialing a regular
+	// file happens to give ECONNREFUSED there, but macOS returns ENOTSOCK
+	// ("socket operation on non-socket"), which isDaemonAbsentErr does not accept —
+	// so the test failed on darwin over a scenario production does not actually
+	// face. Binding for real reproduces the case this test is named for, on both
+	// platforms, and is strictly closer to what it claims to cover (#1931).
+	ln, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatalf("bind stale socket: %v", err)
+	}
+	// Keep the file after Close: Go unlinks a unix socket on Close by default,
+	// and the whole point is that the file OUTLIVES its listener.
+	if ul, ok := ln.(*net.UnixListener); ok {
+		ul.SetUnlinkOnClose(false)
+	}
+	if err := ln.Close(); err != nil {
+		t.Fatalf("close stale socket listener: %v", err)
+	}
+	if _, err := os.Stat(socketPath); err != nil {
+		t.Fatalf("stale socket file must outlive its listener: %v", err)
 	}
 
 	result, err := RequestShutdown()

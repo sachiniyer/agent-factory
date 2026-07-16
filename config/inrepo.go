@@ -13,9 +13,10 @@ import (
 	"strings"
 
 	"github.com/pelletier/go-toml/v2"
+	"golang.org/x/sys/unix"
+
 	"github.com/sachiniyer/agent-factory/internal/pathutil"
 	"github.com/sachiniyer/agent-factory/log"
-	"golang.org/x/sys/unix"
 )
 
 // InRepoConfigDirName is the directory at a repository root that holds the

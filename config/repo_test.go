@@ -9,28 +9,14 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-)
 
-// canonicalTempDir returns t.TempDir() resolved to its physical path.
-//
-// resolveMainRepoRoot reports what git resolves, which is the physical path. On
-// macOS t.TempDir() sits under /var/folders/…, and /var is a symlink to
-// /private/var — so an expectation written in t.TempDir()'s spelling compares
-// /var/… against /private/var/… and fails there while passing on Linux
-// (#1918). Canonicalizing at the source keeps every assertion below written
-// in the same spelling production uses; it is a no-op on an already-canonical
-// path, so Linux is unaffected.
-func canonicalTempDir(t *testing.T) string {
-	t.Helper()
-	dir, err := filepath.EvalSymlinks(t.TempDir())
-	require.NoError(t, err, "canonicalize temp dir")
-	return dir
-}
+	"github.com/sachiniyer/agent-factory/internal/testguard"
+)
 
 func TestResolveMainRepoRoot_MainRepo(t *testing.T) {
 	// Create a standalone git repo so the test doesn't depend on cwd
 	// (which may itself be a worktree).
-	mainDir := canonicalTempDir(t)
+	mainDir := testguard.CanonicalTempDir(t)
 
 	run := func(dir string, args ...string) {
 		t.Helper()
@@ -57,7 +43,7 @@ func TestResolveMainRepoRoot_MainRepo(t *testing.T) {
 func TestResolveMainRepoRoot_Worktree(t *testing.T) {
 	// Create a temporary git repo and a linked worktree, then verify
 	// that resolveMainRepoRoot from the worktree returns the main repo root.
-	mainDir := canonicalTempDir(t)
+	mainDir := testguard.CanonicalTempDir(t)
 
 	// Initialize a git repo
 	run := func(dir string, args ...string) {
@@ -80,7 +66,7 @@ func TestResolveMainRepoRoot_Worktree(t *testing.T) {
 	run(mainDir, "commit", "-m", "init")
 
 	// Create a linked worktree
-	wtDir := filepath.Join(canonicalTempDir(t), "my-worktree")
+	wtDir := filepath.Join(testguard.CanonicalTempDir(t), "my-worktree")
 	run(mainDir, "worktree", "add", wtDir, "-b", "test-branch")
 
 	// resolveMainRepoRoot from the worktree should return mainDir
@@ -99,7 +85,7 @@ func TestResolveMainRepoRoot_Worktree(t *testing.T) {
 
 func TestResolveMainRepoRoot_Public(t *testing.T) {
 	// Verify the exported wrapper works the same as the internal function.
-	mainDir := canonicalTempDir(t)
+	mainDir := testguard.CanonicalTempDir(t)
 
 	run := func(dir string, args ...string) {
 		t.Helper()
@@ -118,7 +104,7 @@ func TestResolveMainRepoRoot_Public(t *testing.T) {
 	run(mainDir, "commit", "-m", "init")
 
 	// Create a linked worktree
-	wtDir := filepath.Join(canonicalTempDir(t), "wt-public")
+	wtDir := filepath.Join(testguard.CanonicalTempDir(t), "wt-public")
 	run(mainDir, "worktree", "add", wtDir, "-b", "public-test-branch")
 
 	// ResolveMainRepoRoot from the worktree should return mainDir

@@ -767,9 +767,7 @@ func TestGetWorktreeDirectoryForRepo_FromLinkedWorktree(t *testing.T) {
 // which is why this is inert on Linux (#1918).
 func createGitRepo(t *testing.T) string {
 	t.Helper()
-	tempDir, err := filepath.EvalSymlinks(t.TempDir())
-	require.NoError(t, err, "canonicalize temp dir")
-	repoRoot := filepath.Join(tempDir, "repo")
+	repoRoot := filepath.Join(testguard.CanonicalTempDir(t), "repo")
 	require.NoError(t, os.MkdirAll(repoRoot, 0755))
 
 	cmd := exec.Command("git", "init")
