@@ -85,7 +85,24 @@ func ResolveUserPath(path string) (string, error) {
 // If AGENT_FACTORY_HOME is set, it is used as the config directory.
 // Otherwise, defaults to ~/.agent-factory.
 func GetConfigDir() (string, error) {
-	if envDir := os.Getenv("AGENT_FACTORY_HOME"); envDir != "" {
+	return ConfigDirFor(os.Getenv("AGENT_FACTORY_HOME"))
+}
+
+// ConfigDirFor resolves the AF home for an explicit AGENT_FACTORY_HOME value,
+// applying exactly the rules GetConfigDir applies to our own environment. An
+// empty envDir means unset — which GetConfigDir has always treated identically
+// to empty — and resolves to the default ~/.agent-factory.
+//
+// It is separate from GetConfigDir because one caller must resolve a home it
+// did NOT inherit: `af reset` reads AGENT_FACTORY_HOME out of another daemon's
+// /proc/<pid>/environ to decide whether that daemon serves THIS home before it
+// signals it (see daemon.StopOrphanDaemons). Routing that through the same
+// resolver is what keeps the two from drifting apart — a private copy of the
+// tilde handling here would eventually disagree, and disagreeing means either
+// missing the stale daemon we came to kill or signaling a daemon belonging to a
+// different home.
+func ConfigDirFor(envDir string) (string, error) {
+	if envDir != "" {
 		// "~user" forms are unresolvable; reject them explicitly rather than
 		// treating "~user" as a literal directory name.
 		if strings.HasPrefix(envDir, "~") && envDir != "~" && !strings.HasPrefix(envDir, "~/") {

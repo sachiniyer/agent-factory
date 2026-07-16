@@ -293,6 +293,130 @@ func AutostartInstalled() bool {
 	return err == nil
 }
 
+// AutostartUnitServesHome reports whether the INSTALLED autostart unit's daemon
+// would serve configDir. installed is false when no unit file is present.
+//
+// This is the gate every unit operation a reset performs must pass, and it
+// exists because "a unit file exists" and "that unit is the one I am resetting"
+// are different questions (#1916 P2). The unit bakes its AGENT_FACTORY_HOME at
+// install time (InstallAutostart captures os.Getenv), so a developer's unit
+// serves their real home no matter what AGENT_FACTORY_HOME the CURRENT process
+// happens to carry. Gating on file existence alone means `AGENT_FACTORY_HOME=/tmp/sandbox
+// af reset` stops the maintainer's real daemon — the reset of a throwaway home
+// reaching out and taking down a completely unrelated one.
+//
+// A unit installed with NO AGENT_FACTORY_HOME serves the DEFAULT home, which is
+// exactly what ConfigDirFor("") resolves — so the absent case is not "unknown",
+// it is the common case and must compare equal to a default-home reset.
+func AutostartUnitServesHome(configDir string) (serves bool, installed bool, err error) {
+	path, err := autostartUnitFilePath()
+	if err != nil {
+		return false, false, err
+	}
+	if path == "" {
+		return false, false, nil // autostart unsupported on this platform
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, false, nil
+		}
+		return false, false, fmt.Errorf("failed to read the autostart unit %s: %w", path, err)
+	}
+
+	var baked string
+	switch autostartGOOS {
+	case "linux":
+		baked, _ = systemdUnitEnvValue(string(data), "AGENT_FACTORY_HOME")
+	case "darwin":
+		baked, _ = launchdPlistEnvValue(string(data), "AGENT_FACTORY_HOME")
+	default:
+		return false, false, nil
+	}
+
+	// baked == "" means the unit captured no AGENT_FACTORY_HOME → default home.
+	unitHome, err := config.ConfigDirFor(baked)
+	if err != nil {
+		return false, true, fmt.Errorf("the autostart unit's AGENT_FACTORY_HOME %q is unusable: %w", baked, err)
+	}
+	unitCanonical, err := canonicalDir(unitHome)
+	if err != nil {
+		return false, true, err
+	}
+	wantCanonical, err := canonicalDir(configDir)
+	if err != nil {
+		return false, true, err
+	}
+	return unitCanonical == wantCanonical, true, nil
+}
+
+// systemdUnitEnvValue extracts name's value from the unit's Environment= lines.
+//
+// It is the exact inverse of formatSystemdEnvLine and MUST stay in lockstep
+// with it — a renderer change that this does not follow silently turns a
+// same-home reset into a different-home one, which is the bug the gate exists
+// to prevent. TestAutostartUnitHomeRoundTrip pins the pair together.
+func systemdUnitEnvValue(content, name string) (string, bool) {
+	for _, line := range strings.Split(content, "\n") {
+		rest, ok := strings.CutPrefix(strings.TrimSpace(line), "Environment=")
+		if !ok {
+			continue
+		}
+		// formatSystemdEnvLine wraps the WHOLE assignment in quotes when the
+		// value needs it, C-escaping \ and " inside.
+		if len(rest) >= 2 && strings.HasPrefix(rest, `"`) && strings.HasSuffix(rest, `"`) {
+			rest = unescapeSystemdValue(rest[1 : len(rest)-1])
+		}
+		key, value, found := strings.Cut(rest, "=")
+		if !found || key != name {
+			continue
+		}
+		// '%' is doubled unconditionally by the renderer (it is a systemd
+		// specifier), and is not backslash-escaped, so it un-doubles last.
+		return strings.ReplaceAll(value, "%%", "%"), true
+	}
+	return "", false
+}
+
+// unescapeSystemdValue reverses the C-style \\ and \" escaping applied inside a
+// quoted Environment= assignment. It walks the string once rather than running
+// two ReplaceAll passes, which would mis-handle a value containing a literal
+// backslash followed by a quote.
+func unescapeSystemdValue(s string) string {
+	var b strings.Builder
+	for i := 0; i < len(s); i++ {
+		if s[i] == '\\' && i+1 < len(s) {
+			i++
+			b.WriteByte(s[i])
+			continue
+		}
+		b.WriteByte(s[i])
+	}
+	return b.String()
+}
+
+// launchdPlistEnvValue extracts name's value from the plist's
+// EnvironmentVariables dict: the <string> immediately following <key>name</key>.
+// The inverse of launchdAutostartPlist's html.EscapeString; kept in lockstep by
+// the same round-trip test.
+func launchdPlistEnvValue(content, name string) (string, bool) {
+	idx := strings.Index(content, "<key>"+name+"</key>")
+	if idx < 0 {
+		return "", false
+	}
+	rest := content[idx:]
+	start := strings.Index(rest, "<string>")
+	if start < 0 {
+		return "", false
+	}
+	rest = rest[start+len("<string>"):]
+	end := strings.Index(rest, "</string>")
+	if end < 0 {
+		return "", false
+	}
+	return html.UnescapeString(rest[:end]), true
+}
+
 // RestartAutostartUnit restarts the daemon through the OS service manager —
 // `systemctl --user restart` on Linux, `launchctl kickstart -k` on macOS — so
 // the daemon stays supervised. Used by the upgrade/auto-update respawn path

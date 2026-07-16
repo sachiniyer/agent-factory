@@ -849,6 +849,13 @@ Removes every AF-created resource — all sessions (live and archived), all
 scheduled cron/watch tasks, all AF worktrees, the AF session branches AF
 created, and all stored state — returning AF to a clean slate.
 
+Stops every af daemon running for this AF home — the managed one and any
+orphan left behind by an upgrade or a source build — and removes the daemon
+sockets, so a stale daemon or socket cannot serve the next af you start. Only
+daemons owned by you AND using this AGENT_FACTORY_HOME are stopped, and the
+autostart unit is only paused when it serves this AGENT_FACTORY_HOME; a daemon
+or unit for a different AF home is never touched.
+
 KEEPS your real git repositories (working tree, .git, and your own branches),
 and KEEPS the daemon configuration (config.toml: listen_addr, defaults,
 root_agents, update_channel, and per-repo config). After the wipe the
