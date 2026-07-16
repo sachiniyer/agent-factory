@@ -52,6 +52,7 @@ type remoteSnapshotResponse struct {
 // teardown. Run it in the container fence: make remote-roundtrip-container. It
 // needs git + tmux (the in-workspace agent-server runs the local tmux runtime).
 func TestRemoteHookRoundTripMockRemote(t *testing.T) {
+	testguard.SkipDarwinPTYStream(t)
 	requireTool(t, "git")
 	requireTool(t, "tmux")
 	testguard.IsolateTmux(t)

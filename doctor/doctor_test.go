@@ -457,6 +457,7 @@ func TestRenderShapes(t *testing.T) {
 
 // TestTmuxServerDeadParsing pins the conservative TMUX-env heuristics.
 func TestTmuxServerDeadParsing(t *testing.T) {
+	testguard.RequireProcFS(t)
 	self, err := proctree.Snapshot()
 	require.NoError(t, err)
 	ctx := &scanContext{snap: self}
