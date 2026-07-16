@@ -17,7 +17,7 @@ import (
 // webtabPathPrefix is the path all web-tab reverse-proxy requests sit under. It
 // is the one route where the scoped af_webtab_token cookie is honored (see
 // webTabAwareToken) so an iframe's sub-resource requests — which cannot carry the
-// Authorization header or the ?access_token query — still authenticate.
+// Authorization header or a query token — still authenticate.
 const webtabPathPrefix = "/v1/webtab/"
 
 // webtabTokenCookie carries the bearer token for web-tab sub-resource requests on
@@ -990,12 +990,12 @@ func requestIsHTTPS(r *http.Request) bool {
 // once: the destination's remainder is non-empty, so the follow-up request takes
 // the proxy path rather than returning here.
 //
-// BOTH queries ride along. The incoming one carries ?access_token for a network
-// peer's top-level navigation, so the redirected request authorizes even before
-// the browser has stored the token cookie; the TARGET's own query is what the tab
-// was pointed at (?doc=123) and dropping it would land the app on a different view
-// than the tab names. They address different layers, so neither may displace the
-// other.
+// BOTH queries ride along. The incoming one carries the daemon's own
+// ?af_webtab_token for a network peer's top-level navigation, so the redirected
+// request authorizes even before the browser has stored the token cookie; the
+// TARGET's own query is what the tab was pointed at (?doc=123) and dropping it
+// would land the app on a different view than the tab names. They address
+// different layers, so neither may displace the other.
 //
 // The path is carried in the target's own escaping, for the reason spelled out on
 // escapedRestOf: a %2F inside a segment is data, and re-canonicalizing it here
