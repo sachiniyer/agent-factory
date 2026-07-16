@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/sachiniyer/agent-factory/agentproto"
 	"github.com/sachiniyer/agent-factory/apiproto"
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/log"
@@ -294,8 +295,29 @@ func healthHandler(cs *controlServer) http.HandlerFunc {
 // decodeHTTPRequest reads the size-capped body and unmarshals it into dst. An
 // empty body is treated as a zero-value request so no-argument RPCs (ListTasks,
 // an all-repo Snapshot, health) work with `curl -d ”` or no body at all.
-// Unknown fields are rejected so typo'd request keys cannot silently fall back
-// to zero-value RPC semantics such as an empty RepoID meaning all repos.
+//
+// Unknown-field handling depends on WHO sent the request, because the same
+// "unknown field" means opposite things to the two populations of caller:
+//
+//   - HAND-AUTHORED (curl, `af api`, a script): no agentproto.ClientVersionHeader.
+//     An unknown key is almost certainly a typo, and dropping it silently can
+//     WIDEN an RPC — a typo'd `repo_idd` leaves RepoID empty and turns a one-repo
+//     Snapshot into an all-repo Snapshot. These stay STRICT, preserving #1264/#1273
+//     exactly (see TestHTTP_UnknownJSONField_400).
+//   - AN af CLIENT (TUI/CLI/web): carries the header. The daemon is upgraded
+//     INDEPENDENTLY of its clients (#960 makes it the sole writer, and `af upgrade`
+//     restarts it under live TUIs), so a newer client legitimately sends additive
+//     fields this daemon has never heard of. Strict-rejecting them turns every
+//     version skew into a hard failure: shipping `tab_id` on PreviewRequest (#1779)
+//     made a newer TUI's 100ms preview poll 400 against any older daemon with
+//     `unknown field "tab_id"`. Per the #1029 additive-envelope contract those
+//     fields MUST degrade gracefully, so unknown keys are IGNORED here.
+//
+// The header is not trusted input and this is not an auth boundary: a hand-rolled
+// request that sets it merely opts out of typo checking, which is the same deal
+// every af client takes. Note this only helps daemons built from this change
+// onward — an already-deployed older daemon still rejects, which is why the
+// client also self-diagnoses the skew (apiclient.skewError).
 //
 // The cap is enforced with http.MaxBytesReader (NOT io.LimitReader): once the
 // body exceeds maxHTTPBodyBytes the read fails with an *http.MaxBytesError, so an
@@ -314,7 +336,9 @@ func decodeHTTPRequest(w http.ResponseWriter, r *http.Request, dst any) error {
 		return nil
 	}
 	dec := json.NewDecoder(bytes.NewReader(body))
-	dec.DisallowUnknownFields()
+	if r.Header.Get(agentproto.ClientVersionHeader) == "" {
+		dec.DisallowUnknownFields()
+	}
 	if err := dec.Decode(dst); err != nil {
 		return fmt.Errorf("malformed JSON request body: %w", err)
 	}

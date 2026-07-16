@@ -3,7 +3,6 @@ package commands
 import (
 	"errors"
 	"os"
-	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -59,7 +58,7 @@ func launchWith(t *testing.T, isTTY bool, cfg *config.Config) *reexecCapture {
 // Returns the path standing in for the installed binary.
 func seedNewerRelease(t *testing.T, current, latest string) string {
 	t.Helper()
-	tempBin := filepath.Join(t.TempDir(), "agent-factory")
+	tempBin := tempBinPath(t)
 	if err := os.WriteFile(tempBin, []byte("old-binary"), 0o755); err != nil {
 		t.Fatalf("seed binary: %v", err)
 	}

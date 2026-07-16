@@ -1,6 +1,8 @@
 package apiclient
 
 import (
+	"context"
+
 	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/task"
@@ -26,8 +28,14 @@ func (c *Client) CreateSession(req daemon.CreateSessionRequest) (*session.Instan
 }
 
 // KillSession asks the daemon to kill a session and remove it from storage.
-func (c *Client) KillSession(req daemon.KillSessionRequest) error {
-	return c.call("KillSession", req, &daemon.KillSessionResponse{})
+//
+// It takes a ctx — unlike its siblings — because it is the one control call whose
+// caller cannot survive waiting forever: the TUI fences the row with an in-flight
+// OpKilling that only this call's reply clears, so a daemon that accepts the
+// request and never answers strands the row in `Deleting` permanently. See
+// callCtx for why the local socket has no deadline of its own.
+func (c *Client) KillSession(ctx context.Context, req daemon.KillSessionRequest) error {
+	return c.callCtx(ctx, "KillSession", req, &daemon.KillSessionResponse{})
 }
 
 // ArchiveSession asks the daemon to archive a session (#1028) and returns the

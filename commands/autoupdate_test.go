@@ -333,7 +333,7 @@ func TestAutoUpdateCallsShutdownAfterBinarySwap(t *testing.T) {
 	withTestHome(t)
 	infoBuf, errBuf := captureLogs(t)
 
-	tempBin := filepath.Join(t.TempDir(), "agent-factory")
+	tempBin := tempBinPath(t)
 	if err := os.WriteFile(tempBin, []byte("old-binary"), 0755); err != nil {
 		t.Fatalf("seed binary: %v", err)
 	}
@@ -411,7 +411,7 @@ func TestAutoUpdateCallsShutdownAfterBinarySwap(t *testing.T) {
 func TestAutoUpdateSucceedsWhenShutdownErrors(t *testing.T) {
 	withTestHome(t)
 
-	tempBin := filepath.Join(t.TempDir(), "agent-factory")
+	tempBin := tempBinPath(t)
 	if err := os.WriteFile(tempBin, []byte("old-binary"), 0755); err != nil {
 		t.Fatalf("seed binary: %v", err)
 	}
@@ -953,7 +953,7 @@ func TestAutoUpdateDownloadsByTag(t *testing.T) {
 	withTestHome(t)
 	captureLogs(t)
 
-	tempBin := filepath.Join(t.TempDir(), "agent-factory")
+	tempBin := tempBinPath(t)
 	if err := os.WriteFile(tempBin, []byte("old-binary"), 0755); err != nil {
 		t.Fatalf("seed binary: %v", err)
 	}

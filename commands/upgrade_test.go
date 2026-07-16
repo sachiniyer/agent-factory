@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -200,7 +199,7 @@ func TestDownloadBinaryStalledHeaders(t *testing.T) {
 // users actually pick up the version they just downloaded instead of the
 // daemon continuing to run the old image.
 func TestUpgradeCallsShutdownAfterBinarySwap(t *testing.T) {
-	tempBin := filepath.Join(t.TempDir(), "agent-factory")
+	tempBin := tempBinPath(t)
 	if err := os.WriteFile(tempBin, []byte("old-binary"), 0755); err != nil {
 		t.Fatalf("seed binary: %v", err)
 	}
@@ -259,7 +258,7 @@ func TestUpgradeCallsShutdownAfterBinarySwap(t *testing.T) {
 // the common case in CI, fresh installs, and interactive `af upgrade` runs
 // where no daemon is currently active.
 func TestUpgradeSucceedsWhenNoDaemon(t *testing.T) {
-	tempBin := filepath.Join(t.TempDir(), "agent-factory")
+	tempBin := tempBinPath(t)
 	if err := os.WriteFile(tempBin, []byte("old-binary"), 0755); err != nil {
 		t.Fatalf("seed binary: %v", err)
 	}
@@ -309,7 +308,7 @@ func TestUpgradeSucceedsWhenNoDaemon(t *testing.T) {
 // from RequestShutdown is reported to the user but does not roll back the
 // binary swap — the new binary is on disk and will be used next launch.
 func TestUpgradeSucceedsWhenShutdownErrors(t *testing.T) {
-	tempBin := filepath.Join(t.TempDir(), "agent-factory")
+	tempBin := tempBinPath(t)
 	if err := os.WriteFile(tempBin, []byte("old-binary"), 0755); err != nil {
 		t.Fatalf("seed binary: %v", err)
 	}
@@ -355,7 +354,7 @@ func TestUpgradeSucceedsWhenShutdownErrors(t *testing.T) {
 // Users need to see that we used the fallback so support can tell whether
 // the daemon will respawn cleanly.
 func TestUpgradeReportsSIGTERMFallback(t *testing.T) {
-	tempBin := filepath.Join(t.TempDir(), "agent-factory")
+	tempBin := tempBinPath(t)
 	if err := os.WriteFile(tempBin, []byte("old-binary"), 0755); err != nil {
 		t.Fatalf("seed binary: %v", err)
 	}

@@ -101,7 +101,7 @@ Both members always serialize (no `omitempty`), so a consumer can branch on
 | Status | Meaning |
 |--------|---------|
 | `200 OK` | Success. `data` holds the response payload; `error` is `null`. |
-| `400 Bad Request` | The request body was not valid JSON. |
+| `400 Bad Request` | The request body was not valid JSON, or it carried a field this daemon does not recognize (see [Unknown fields](#unknown-fields)). |
 | `404 Not Found` | Unknown route (e.g. `POST /v1/Nope`). |
 | `405 Method Not Allowed` | Wrong verb — RPC routes are POST-only; `/v1/health` is GET-only. |
 | `413 Request Entity Too Large` | The body exceeded the 16 MiB cap. The request is **rejected, never truncated-then-processed** — the daemon is never reached. |
@@ -109,6 +109,49 @@ Both members always serialize (no `omitempty`), so a consumer can branch on
 
 The status maps the *transport* outcome; a business-logic failure (e.g. "session
 not found") is a `500` with a descriptive `error.message`, not a bare status.
+
+## Unknown fields
+
+How the daemon treats a request field it does not recognize depends on whether the
+request identifies itself as an af client, because the same unknown field means
+opposite things to the two kinds of caller.
+
+**Hand-authored requests** (curl, `af api`, your own scripts) are decoded
+**strictly**: an unrecognized key is a `400`. This is deliberate. An unknown key is
+almost always a typo, and dropping it silently can *widen* what an RPC does — a
+typo'd `repo_idd` leaves `repo_id` empty, which turns a one-repo `Snapshot` into an
+all-repo `Snapshot`. Failing loudly is the safer answer:
+
+```console
+$ curl --unix-socket ~/.agent-factory/daemon-http.sock \
+    -X POST http://af/v1/Snapshot -d '{"repo_idd":"typo"}'
+{"data":null,"error":{"message":"malformed JSON request body: json: unknown field \"repo_idd\""}}
+```
+
+**Requests carrying the `X-AF-Client-Version` header** — which the `af` TUI and CLI
+send automatically — are decoded **leniently**: unrecognized keys are ignored. The
+daemon is upgraded independently of its clients, so a client newer than the daemon
+legitimately sends fields the daemon has never heard of. Fields are additive and
+never renamed, so ignoring an unknown one is always safe, whereas rejecting it
+would turn every version skew into a hard failure.
+
+The bundled web UI does not send the header and is decoded strictly. It is always
+served by the daemon it talks to, so it cannot be newer than that daemon and has no
+skew to tolerate.
+
+Setting the header by hand is supported but simply opts you out of typo checking —
+it is not an authentication or trust boundary.
+
+Note this lenient decoding only exists in daemons that ship with it. If a **newer
+client** talks to an **older daemon**, that daemon still rejects the newer field,
+and af clients report it as a version skew:
+
+```text
+daemon is out of date and rejected the "tab_id" field this client sent —
+restart it with `af daemon restart`
+```
+
+Restarting the daemon (so it matches the `af` binary on disk) is the fix.
 
 ## Warm-up behavior
 

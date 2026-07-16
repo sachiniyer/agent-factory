@@ -12,6 +12,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/sachiniyer/agent-factory/agentproto"
 	"github.com/sachiniyer/agent-factory/apiproto"
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/task"
@@ -29,6 +30,18 @@ import (
 // doHTTP dispatches one request through the daemon HTTP mux.
 func doHTTP(cs *controlServer, method, path, body string) *httptest.ResponseRecorder {
 	req := httptest.NewRequest(method, path, strings.NewReader(body))
+	rec := httptest.NewRecorder()
+	newHTTPMux(cs).ServeHTTP(rec, req)
+	return rec
+}
+
+// doHTTPAsClient is doHTTP for a request that identifies itself as a machine-
+// generated af client, the way every apiclient call does. The header is the
+// daemon's discriminator for unknown-field handling, so it is the only difference
+// between this and a hand-authored curl.
+func doHTTPAsClient(cs *controlServer, method, path, body string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(method, path, strings.NewReader(body))
+	req.Header.Set(agentproto.ClientVersionHeader, "9.9.9")
 	rec := httptest.NewRecorder()
 	newHTTPMux(cs).ServeHTTP(rec, req)
 	return rec
@@ -144,6 +157,10 @@ func TestHTTP_MalformedJSON_400(t *testing.T) {
 // TestHTTP_UnknownJSONField_400 covers strict request decoding: a typo like
 // repo_idd must fail as a bad request instead of silently becoming the
 // zero-value RepoID and dispatching an all-repo Snapshot.
+//
+// This request is hand-authored (no client-version header), which is the
+// population that keeps strict decoding — see decodeHTTPRequest. Do not add the
+// header here: that would delete the #1264/#1273 guard this test exists to hold.
 func TestHTTP_UnknownJSONField_400(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 	m, err := NewManager(config.DefaultConfig())
@@ -156,6 +173,53 @@ func TestHTTP_UnknownJSONField_400(t *testing.T) {
 	require.Nil(t, env.Data)
 	require.NotNil(t, env.Error)
 	assert.Contains(t, env.Error.Message, `unknown field "repo_idd"`)
+}
+
+// TestHTTP_AfClientUnknownAdditiveField_Tolerated is the forward-compat lock.
+//
+// The daemon is upgraded independently of its clients (#960), so a client newer
+// than the daemon legitimately sends fields the daemon has never heard of. That
+// is not hypothetical: #1779 added tab_id to PreviewRequest, and every newer TUI
+// then 400'd its 100ms preview poll against any older daemon with
+// `unknown field "tab_id"`. Per the #1029 additive-envelope contract such a field
+// must be IGNORED, not fatal.
+//
+// The unknown field here stands in for a field some FUTURE client will add, which
+// is the only honest way to test forward compatibility from inside the current
+// version.
+func TestHTTP_AfClientUnknownAdditiveField_Tolerated(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	m, err := NewManager(config.DefaultConfig())
+	require.NoError(t, err)
+
+	rec := doHTTPAsClient(&controlServer{manager: m}, http.MethodPost, "/v1/Snapshot",
+		`{"repo_id":"","field_from_a_newer_client":"additive"}`)
+
+	require.Equal(t, http.StatusOK, rec.Code,
+		"an af client's unknown additive field must degrade, not hard-fail: rejecting it makes every daemon/client version skew a hard error")
+	env := decodeEnvelope(t, rec)
+	require.Nil(t, env.Error)
+}
+
+// TestHTTP_AfClientSkewedField_DoesNotRejectByName reproduces the reported
+// incident's exact shape on the exact route: a Preview body carrying a field this
+// daemon does not know, sent by an af client. Whatever else Preview does with an
+// unknown session, it must never fail the request for the FIELD.
+func TestHTTP_AfClientSkewedField_DoesNotRejectByName(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	m, err := NewManager(config.DefaultConfig())
+	require.NoError(t, err)
+
+	rec := doHTTPAsClient(&controlServer{manager: m}, http.MethodPost, "/v1/Preview",
+		`{"title":"alpha","repo_id":"","tab":0,"tab_id":"t-abc","full":false,"field_from_a_newer_client":"additive"}`)
+
+	env := decodeEnvelope(t, rec)
+	if env.Error != nil {
+		assert.NotContains(t, env.Error.Message, "unknown field",
+			"the request must never be rejected for carrying a field a newer client added")
+		assert.NotEqual(t, http.StatusBadRequest, rec.Code,
+			"a skewed additive field must not be a bad request")
+	}
 }
 
 // TestHTTP_OversizeBody_413_NotDispatched covers the body-over-limit → 413
