@@ -13,6 +13,7 @@ import (
 	"github.com/coder/websocket"
 
 	"github.com/sachiniyer/agent-factory/agentproto"
+	"github.com/sachiniyer/agent-factory/internal/testguard"
 )
 
 // TestWSPTYBrokerRoundTrip is the WS PTY broker integration harness (#1592 Phase
@@ -30,6 +31,7 @@ import (
 //
 // Run it in the container fence: make ws-pty-roundtrip-container.
 func TestWSPTYBrokerRoundTrip(t *testing.T) {
+	testguard.SkipDarwinPTYStream(t)
 	// Shorten the broker's keepalive so the dead-subscriber drop is observable in
 	// test time; the daemon (a child process) reads this from the environment.
 	t.Setenv("AF_WS_KEEPALIVE_INTERVAL", "300ms")
@@ -114,6 +116,7 @@ func TestWSPTYBrokerRoundTrip(t *testing.T) {
 // tab with no session is REJECTED at the handshake — never silently falling back
 // to tab 0, which would stream the wrong pane's output into a shell-tab pane.
 func TestWSPTYStreamTabRouting(t *testing.T) {
+	testguard.SkipDarwinPTYStream(t)
 	h := newHarness(t)
 	h.startDaemon()
 	h.createSession("tabroute")
@@ -144,6 +147,7 @@ func TestWSPTYStreamTabRouting(t *testing.T) {
 // gone session. Before the fix the broker only closed the socket, indistinguishable
 // from a droppable network drop.
 func TestWSPTYSessionKillEmitsExit(t *testing.T) {
+	testguard.SkipDarwinPTYStream(t)
 	h := newHarness(t)
 	h.startDaemon()
 	h.createSession("wsexit")

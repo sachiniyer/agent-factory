@@ -111,6 +111,19 @@ jobs:
       - name: Install tmux
         run: brew install tmux
 
+      # The suite shells out to tmux, dd and sh, and darwin's are not the Linux
+      # ones — brew's tmux is typically newer than the ubuntu runner's, and the
+      # userland is BSD. When a macOS-only failure turns out to be environmental,
+      # this is the first thing anyone asks for; record it rather than re-running
+      # the job to find out (#1945).
+      - name: Record the runner's toolchain
+        run: |
+          tmux -V
+          sw_vers
+          echo "shell: ${SHELL:-<unset>} | term: ${TERM:-<unset>} | tmpdir: ${TMPDIR:-<unset>}"
+          command -v dd sh git
+          dd --version 2>&1 | head -1 || echo "dd: BSD (no --version)"
+
       - name: Run tests
         run: go test -v -race -count=1 ./...
 

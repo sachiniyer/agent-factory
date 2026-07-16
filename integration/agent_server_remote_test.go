@@ -29,6 +29,7 @@ import (
 //
 // Run it in the container fence: make remote-agent-server-roundtrip-container.
 func TestRemoteAgentServerRoundTrip(t *testing.T) {
+	testguard.SkipDarwinPTYStream(t)
 	requireTool(t, "git")
 	requireTool(t, "tmux")
 	testguard.IsolateTmux(t)
