@@ -586,7 +586,7 @@ func init() {
 	sessionsCreateCmd.Flags().StringVar(&createProgramFlag, "program", "", "Program to run (one of: "+tmux.SupportedProgramsString()+"; defaults to config default)")
 	sessionsCreateCmd.Flags().BoolVar(&createHereFlag, "here", false, "Run in the repo's existing working tree at its current branch (no new worktree/branch; kill preserves both)")
 	sessionsCreateCmd.Flags().BoolVar(&createInPlaceFlag, "in-place", false, "Alias for --here")
-	sessionsCreateCmd.Flags().StringVar(&createBackendFlag, "backend", "", "Runtime to run the session on (one of: "+config.BackendLocal+", "+config.BackendDocker+", "+config.BackendSSH+", "+config.BackendHook+"; defaults to the repo's backend config, or local). docker runs the session in a container (set docker.image in the repo config); ssh is not yet implemented")
+	sessionsCreateCmd.Flags().StringVar(&createBackendFlag, "backend", "", "Runtime to run the session on (one of: "+config.BackendLocal+", "+config.BackendDocker+", "+config.BackendSSH+", "+config.BackendHook+"; defaults to the repo's backend config, or local). docker runs the session in a container (set docker.image in the repo config); ssh runs it on a remote host (set ssh.host in the repo config)")
 	sessionsCreateCmd.MarkFlagRequired("name")
 
 	sessionsSendPromptCmd.Flags().BoolVar(&sendPromptCreateFlag, "create", false, "Auto-create the session if it doesn't exist")
