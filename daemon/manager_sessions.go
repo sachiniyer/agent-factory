@@ -98,8 +98,19 @@ func (m *Manager) KillSession(req KillSessionRequest) (session.InstanceData, err
 	// teardown instead of classifying the vanished session Lost and restoring
 	// it. Best-effort: a failed tombstone write degrades to today's crash
 	// window, which must not block the kill itself.
+	//
+	// ABORTS the kill when it cannot be recorded (#1917). This is the commit point:
+	// everything above is reversible and nothing has been destroyed yet, so a
+	// failure here costs the user a retry. Proceeding instead would tear the
+	// session down with no durable record that the user asked for it — and a daemon
+	// that then died before the record delete would reload a non-tombstoned row,
+	// call it Lost, and RESTORE the session into the worktree teardown had already
+	// deleted. The bound that makes this write fail (rather than hang) is only safe
+	// because the failure stops here.
 	stage.set("persisting kill tombstone")
-	m.persistKillTombstone(repoID, instance, data)
+	if err := m.persistKillTombstone(repoID, instance, data); err != nil {
+		return session.InstanceData{}, fmt.Errorf("kill of session %q was not started: its kill intent could not be recorded, and tearing the session down without that record risks it being restored later; nothing was changed — retry the kill: %w", req.Title, err)
+	}
 
 	// Stop this session's VS Code editor before the worktree goes away: it is
 	// daemon-owned infrastructure rather than a tab, so no tab teardown covers it,
@@ -119,8 +130,16 @@ func (m *Manager) KillSession(req KillSessionRequest) (session.InstanceData, err
 
 	if instance != nil {
 		stage.set("tearing down tmux + worktree")
+		// Returning here deliberately SKIPS the record delete below (#1917). Kill
+		// only errors when the teardown could not be completed safely — tmux never
+		// confirmed a pane dead, or git was cut off mid-removal — and in both cases
+		// the workspace is still there. Dropping the record would orphan it and take
+		// away the only handle the user has to retry through. The tombstone is
+		// already durable, so the kill stays committed: finishUserKill retries it on
+		// every poll until it succeeds, with no daemon restart needed.
 		if err := instance.Kill(); err != nil {
-			return session.InstanceData{}, fmt.Errorf("failed to kill instance: %w", err)
+			log.WarningLog.Printf("kill of session %q could not complete its teardown; the record is kept and the daemon will retry it: %v", req.Title, err)
+			return session.InstanceData{}, fmt.Errorf("kill of session %q could not finish tearing it down safely, so its workspace was left intact; the kill is recorded and will be retried automatically: %w", req.Title, err)
 		}
 	} else if data != nil {
 		stage.set("cleaning up ghost record")

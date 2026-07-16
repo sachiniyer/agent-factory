@@ -6,6 +6,13 @@ import (
 	"github.com/sachiniyer/agent-factory/session"
 )
 
+// killTombstonePersist is the durable write persistKillTombstone runs. A package
+// var so tests can force the write to fail in isolation — exercising the abort
+// that keeps a kill from destroying a session it could not record (#1917) —
+// without disturbing any other persist. Mirrors archivePersist's precedent.
+// Production points it at the real writer and never reassigns it.
+var killTombstonePersist = persistInstanceData
+
 func killTargetStableID(instance *session.Instance, data *session.InstanceData) string {
 	if instance != nil {
 		return instance.ID
@@ -32,27 +39,47 @@ func stableIDMatchesForDaemon(recordID, expectedID string) bool {
 
 // persistKillTombstone writes the kill-intent tombstone (#1108) for the session
 // KillSession is about to tear down, so a record surviving a crash or teardown
-// failure mid-kill is never classified Lost and restored. Best-effort by
-// design: a failed write only degrades to the pre-tombstone crash window.
-func (m *Manager) persistKillTombstone(repoID string, instance *session.Instance, data *session.InstanceData) {
+// failure mid-kill is never classified Lost and restored. It returns the write
+// error: the tombstone is the kill's COMMIT POINT, so the caller must abort
+// before teardown rather than destroy a session whose kill it could not record.
+//
+// It was best-effort ("a failed write only degrades to the pre-tombstone crash
+// window") — which is no longer a defensible trade now that the write can fail on
+// lock contention rather than only on a disk fault (#1917). Without a durable
+// tombstone, a daemon that dies between teardown and the record delete reloads a
+// non-tombstoned record whose tmux is gone, classifies it Lost, and RESTORES it —
+// resurrecting a session the user explicitly killed, in a worktree that teardown
+// already deleted. Refusing a kill we cannot record is recoverable; that is not.
+//
+// The in-memory flag is set only AFTER the write lands, and the tombstone data is
+// built without mutating the instance. Marking first would leave a session the
+// poll's refreshInstanceStatus routes to finishUserKill — completing, on the next
+// tick, the very kill this function just refused, and defeating the abort.
+func (m *Manager) persistKillTombstone(repoID string, instance *session.Instance, data *session.InstanceData) error {
 	var d session.InstanceData
 	switch {
 	case instance != nil:
-		instance.MarkUserKilled()
 		d = instance.ToInstanceData()
+		d.UserKilled = true
 	case data != nil:
 		d = *data
 		d.UserKilled = true
 	default:
-		return
+		return nil
 	}
 	repoStartLock := m.startLockForRepo(repoID)
 	repoStartLock.Lock()
-	err := persistInstanceData(repoID, d)
+	err := killTombstonePersist(repoID, d)
 	repoStartLock.Unlock()
 	if err != nil {
 		log.WarningLog.Printf("failed to persist kill tombstone for %q: %v", d.Title, err)
+		return err
 	}
+	// Durable now: the kill is committed, so the in-memory flag can safely follow.
+	if instance != nil {
+		instance.MarkUserKilled()
+	}
+	return nil
 }
 
 // finishUserKill completes the teardown of a session whose record carries the
@@ -97,10 +124,16 @@ func (m *Manager) finishUserKill(repoID string, instance *session.Instance) {
 	}
 
 	log.WarningLog.Printf("finishing interrupted kill of session %q (tombstoned record survived its teardown)", instance.Title)
-	// Best-effort: the backing tmux session is typically already gone; Kill
-	// failures here only mean there is less left to tear down.
+	// Kill's own best-effort handling already swallows every failure tmux or git
+	// ANSWERED with, so anything that reaches here is a teardown that could not be
+	// completed SAFELY — a pane whose liveness is unknown, or a worktree whose
+	// removal was cut off mid-delete. Deleting the record anyway would strand the
+	// worktree and take away the user's only handle on it, so keep the record and
+	// let the next poll try again: this loop IS the retry, and it is the reason a
+	// bounded teardown does not need a daemon restart to converge (#1917).
 	if err := instance.Kill(); err != nil {
-		log.WarningLog.Printf("finishing kill of %q: teardown reported: %v", instance.Title, err)
+		log.WarningLog.Printf("finishing kill of %q: teardown could not complete safely; keeping the record and retrying next poll: %v", instance.Title, err)
+		return
 	}
 	storage, err := session.NewStorage(config.LoadState(), repoID)
 	if err != nil {

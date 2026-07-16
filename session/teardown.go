@@ -1,6 +1,7 @@
 package session
 
 import (
+	"context"
 	"errors"
 	"fmt"
 
@@ -33,11 +34,15 @@ type teardownMode interface {
 	// closeTab tears down one tab's tmux session, OUTSIDE i.mu. It returns an
 	// error for the core to join into teardownTabs' result (release-PTY surfaces
 	// its per-tab errors), or nil after best-effort logging (kill/archive only
-	// log a stuck tmux so the record can still be dropped).
+	// log a tmux that ANSWERED with a failure, so the record can still be
+	// dropped). An error wrapping tmux.ErrTmuxTimeout is special: the core reads
+	// it as "this pane may still be alive" and skips the worktree action entirely
+	// (#1917) — so a mode must return, never swallow, a timeout.
 	closeTab(ts *tmux.TmuxSession, title, tabName string) error
-	// handleWorktree performs the mode's worktree action once every pane has
-	// exited: delete (kill), move (archive — returns the move error for the
-	// caller to roll back on), or nothing (release-PTY). gw may be nil.
+	// handleWorktree performs the mode's worktree action once every pane is
+	// CONFIRMED exited: delete (kill), move (archive — returns the move error for
+	// the caller to roll back on), or nothing (release-PTY). gw may be nil. Not
+	// called at all when a closeTab reported a possibly-live pane.
 	handleWorktree(gw *git.GitWorktree, title string) error
 	// clearsStarted reports whether started is set false before teardown. Kill
 	// and release-PTY clear it (so the #990 tab-spawn guard fires); archive keeps
@@ -59,12 +64,31 @@ type closedTab struct {
 	ts  *tmux.TmuxSession
 }
 
+// ErrPaneMayBeLive reports that tmux never confirmed a session dead — the server
+// did not answer within its deadline — so the pane may still be RUNNING.
+//
+// It is the difference between "tmux says the session is gone" and "tmux did not
+// say anything". The first is teardown's goal and is best-effort by design
+// (#478/#967); the second is an unknown, and the worktree step is not safe to run
+// on an unknown: deleting (kill) or moving (archive) the workspace of an agent
+// that is still writing to it destroys the user's work on a guess. Callers must
+// treat this as "retry later", never as "the tmux part failed, carry on".
+var ErrPaneMayBeLive = errors.New("tmux did not confirm the session is dead; its pane may still be running")
+
 // teardownTabs runs the one teardown skeleton for the given mode. It snapshots
 // each tab's tmux under i.mu, tears them down OUTSIDE the lock (closing under
 // i.mu would stall every reader while a pane drains), performs the mode's
 // worktree action while no pane is cwd'd in the worktree, then re-locks and lets
 // the mode finalize the tab/worktree state. Errors from closeTab/handleWorktree
 // are joined and returned.
+//
+// The worktree step is GATED on every pane being confirmed dead (#1917). Bounding
+// the tmux commands means they can now return "I don't know" instead of blocking
+// forever, and an unknown must stop the destructive step rather than be logged
+// and stepped over — otherwise the bound converts a hang (recoverable) into a
+// worktree deleted out from under a live agent (not recoverable). On that path
+// the mode's finalize is skipped too: it clears the tmux refs and the worktree
+// pointer, which are exactly what a retry needs to find intact.
 func (i *Instance) teardownTabs(mode teardownMode) error {
 	i.mu.Lock()
 	closed := make([]closedTab, 0, len(i.Tabs))
@@ -81,10 +105,24 @@ func (i *Instance) teardownTabs(mode teardownMode) error {
 	i.mu.Unlock()
 
 	var errs []error
+	paneMayBeLive := false
 	for _, c := range closed {
-		if err := mode.closeTab(c.ts, title, c.tab.Name); err != nil {
-			errs = append(errs, err)
+		err := mode.closeTab(c.ts, title, c.tab.Name)
+		if err == nil {
+			continue
 		}
+		errs = append(errs, err)
+		if errors.Is(err, tmux.ErrTmuxTimeout) {
+			paneMayBeLive = true
+		}
+	}
+	if paneMayBeLive {
+		// Do NOT touch the worktree and do NOT finalize: a pane we could not
+		// confirm dead may still be running in it. Leaving the refs intact keeps
+		// the session exactly retryable — the caller holds the record so the whole
+		// teardown runs again once tmux answers.
+		errs = append(errs, fmt.Errorf("%w: leaving %q's workspace untouched", ErrPaneMayBeLive, title))
+		return errors.Join(errs...)
 	}
 	if err := mode.handleWorktree(gw, title); err != nil {
 		errs = append(errs, err)
@@ -113,24 +151,54 @@ func clearClosedTmuxRefs(closed []closedTab) {
 // the worktree pointer. started is cleared. Best-effort — a stuck tmux or a
 // failed worktree cleanup only logs, so the caller can still drop the record
 // (#478).
+//
+// "Best-effort" covers failures tmux and git ANSWERED with. It does NOT cover a
+// tripped deadline (#1917): a timeout leaves the pane's liveness or the
+// worktree's removal genuinely unknown, and this mode reports those so the caller
+// keeps the record and retries rather than destroying a workspace on a guess.
 type teardownKill struct{}
 
 func (teardownKill) closeTab(ts *tmux.TmuxSession, title, tabName string) error {
 	// Wait for the pane to exit before the worktree delete in handleWorktree: a
 	// process still flushing state mid-shutdown races git's recursive delete and
 	// leaks a half-deleted directory ("Directory not empty", #802). Best-effort.
-	if err := ts.CloseAndWaitForPaneExit(); err != nil {
-		log.WarningLog.Printf("kill %q: tmux cleanup for tab %q failed: %v", title, tabName, err)
+	err := ts.CloseAndWaitForPaneExit()
+	if err == nil {
+		return nil
 	}
+	// A TIMEOUT is not an ordinary tmux failure and must not be swallowed like one
+	// (#1917). Every other failure here means tmux ANSWERED and the session is
+	// gone or unkillable — teardown's goal either way, so #478's best-effort
+	// contract holds and the kill proceeds. A timeout means the server never
+	// answered, so the pane may still be alive; the core refuses to touch the
+	// worktree on that, and the caller retries.
+	if errors.Is(err, tmux.ErrTmuxTimeout) {
+		return fmt.Errorf("kill %q: tab %q: %w", title, tabName, err)
+	}
+	log.WarningLog.Printf("kill %q: tmux cleanup for tab %q failed: %v", title, tabName, err)
 	return nil
 }
 
 func (teardownKill) handleWorktree(gw *git.GitWorktree, title string) error {
-	if gw != nil {
-		if err := gw.Cleanup(); err != nil {
-			log.WarningLog.Printf("kill %q: git worktree cleanup failed: %v", title, err)
-		}
+	if gw == nil {
+		return nil
 	}
+	err := gw.Cleanup()
+	if err == nil {
+		return nil
+	}
+	// Same rule as closeTab, one layer down (#1917). A git command that ANSWERED
+	// with a failure leaves Cleanup's #802/#726 decision tree in charge and stays
+	// best-effort, so a stuck-but-diagnosed worktree never blocks dropping the
+	// record. A TIMEOUT is different in kind: git was SIGKILLed mid-delete, so the
+	// worktree directory and its registration may both still be there. Reporting it
+	// keeps the record — and with it the user's handle on the session — so the
+	// cleanup can be retried, instead of orphaning a registered worktree whose
+	// session row we just deleted.
+	if errors.Is(err, context.DeadlineExceeded) {
+		return fmt.Errorf("kill %q: git worktree cleanup: %w", title, err)
+	}
+	log.WarningLog.Printf("kill %q: git worktree cleanup failed: %v", title, err)
 	return nil
 }
 

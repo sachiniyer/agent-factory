@@ -238,18 +238,32 @@ func (m *Manager) restoreLostSession(key, repoID string, inst *session.Instance)
 		m.lostRestoreStates[key] = st
 	}
 	// Reaching here means the session is Lost. If a restore was still awaiting
-	// confirmation, its replacement runtime died inside the settle window — so
-	// that restore FAILED, however cleanly its spawn returned (#1910). Record it
-	// against the same retry state (never a fresh episode) so the #1108 backoff
-	// escalates, and skip this tick: the whole point is to stop respawning at poll
-	// cadence into an agent that will not stay up.
+	// confirmation AND its settle window has not elapsed, its replacement runtime
+	// died inside that window — so that restore FAILED, however cleanly its spawn
+	// returned (#1910). Record it against the same retry state (never a fresh
+	// episode) so the #1108 backoff escalates, and skip this tick: the whole point
+	// is to stop respawning at poll cadence into an agent that will not stay up.
+	//
+	// The deadline is load-bearing, not decoration. A runtime that OUTLIVED
+	// confirmBy was confirmed alive by definition, even if no sweep happened to
+	// observe it non-Lost before it died (the sweep only runs while the row reads
+	// non-Lost, so a death right after the window can beat it). Counting that as a
+	// died-before-confirmation failure would saddle a genuinely new loss episode
+	// with the previous one's history and back it off instead of restoring it
+	// promptly. Past the deadline the history is about a runtime that provably
+	// survived, so the episode starts clean.
+	now := time.Now()
+	if st.awaitingConfirm && !now.Before(st.confirmBy) {
+		st = &lostRestoreState{}
+		m.lostRestoreStates[key] = st
+	}
 	diedBeforeConfirm := st.awaitingConfirm
 	if diedBeforeConfirm {
 		st.awaitingConfirm = false
 	}
 	// The backoff gate does not apply to the death itself: recording it is
 	// bookkeeping about an attempt already made, not a new attempt.
-	skip := !diedBeforeConfirm && time.Now().Before(st.nextAttempt)
+	skip := !diedBeforeConfirm && now.Before(st.nextAttempt)
 	m.mu.Unlock()
 	if diedBeforeConfirm {
 		m.lostRestoreFailed(key, st, inst.Title, errRestoreDiedBeforeConfirm)
