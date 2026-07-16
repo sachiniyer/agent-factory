@@ -204,11 +204,17 @@ Collect a single, shareable diagnostics bundle for triage:
 
 By default the redacted bundle is written to a single text file
 (~/af-bug-report-<ts>.txt) and a pre-filled GitHub issue DRAFT is opened in your
-browser for this repo — with a templated title and body. The draft is never
-submitted for you: review it, drag the bundle file onto the issue, and click
-Submit yourself. If this repo has no github.com remote, or no browser/gh is
-available, the command falls back to just writing the bundle file and printing
-where it is so you can attach it to an issue by hand.
+browser. The draft ALWAYS targets the agent-factory project
+(github.com/sachiniyer/agent-factory) — never whatever repo you happen to be
+in — because it reports a bug in af itself.
+
+The draft body carries a bounded, redacted summary of the key diagnostics
+(versions, daemon status, counts, and the newest log lines) so the report is
+useful even as filed; the complete bundle is too large for a URL, so it stays on
+disk for you to attach. The draft is never submitted for you: review it, drag the
+bundle file onto the issue, and click Submit yourself. If neither gh nor a
+browser opener is available, the command falls back to just writing the bundle
+file and printing where it is so you can attach it to an issue by hand.
 
 Use -o/--output <path> or --file to skip GitHub and only write the bundle file.
 

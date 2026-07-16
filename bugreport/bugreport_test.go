@@ -2,6 +2,7 @@ package bugreport
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -582,20 +583,150 @@ func TestScrubLogRedactsTitlesEndingInNonWordChars(t *testing.T) {
 	}
 }
 
-// TestRedactPathCollapsesHome guards the fix for the raw-home-path leak: the
-// bundle path inlined into the (public) GitHub issue-draft body must have $HOME
-// collapsed to ~ so it never leaks the user's home/username.
-func TestRedactPathCollapsesHome(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	p := filepath.Join(home, "af-bug-report-20260710-120000.txt")
-	out := RedactPath(p)
-	if strings.Contains(out, home) {
-		t.Errorf("home path not collapsed in draft-body path: %q -> %q", p, out)
+// TestScrubDoesNotSkipSecretsThatResembleMarkers is the regression for a leak the
+// idempotence fast-path introduced: it treated any value STARTING WITH the marker
+// text as already-redacted, so a real credential that merely began with those
+// characters was emitted verbatim — into the bundle and into the public issue
+// draft. The fast-path must recognize exactly what the redactor emits, never a
+// prefix or a substring.
+func TestScrubDoesNotSkipSecretsThatResembleMarkers(t *testing.T) {
+	r := &redactor{home: "/home/tester", users: []string{"tester"}}
+	cases := []struct {
+		name, in, secret string
+	}{
+		{
+			name:   "value merely starting with the marker text",
+			in:     "api_key=[redactedButActualSecret]",
+			secret: "redactedButActualSecret",
+		},
+		{
+			name:   "quoted value starting with the marker text",
+			in:     `github_token = "[redacted-secretly-this-is-real]"`,
+			secret: "redacted-secretly-this-is-real",
+		},
+		{
+			name:   "value carrying the marker text mid-string",
+			in:     "password = hunter2[redacted]",
+			secret: "hunter2",
+		},
+		{
+			name:   "value that is nearly the marker",
+			in:     "api_key=[redacted-secretz",
+			secret: "[redacted-secretz",
+		},
 	}
-	if !strings.HasPrefix(out, "~/") {
-		t.Errorf("expected the redacted path to start with ~/: %q", out)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := r.scrub(tc.in)
+			if strings.Contains(got, tc.secret) {
+				t.Errorf("SECRET LEAKED past the already-redacted fast-path:\n  in:  %q\n  out: %q", tc.in, got)
+			}
+			if !strings.Contains(got, secretMarker) {
+				t.Errorf("value was not redacted at all:\n  in:  %q\n  out: %q", tc.in, got)
+			}
+		})
 	}
+}
+
+// TestScrubMarkerFastPathCoversEveryValueForm is the case-by-case proof that a
+// value which merely BEGINS with a marker cannot reach the already-redacted
+// fast-path — for every one of the six value forms the fast-path recognizes.
+//
+// This is the shape that got through three times: the bare-value regex used to
+// stop before `]`, so `api_key=[redacted-secret]actualcredential` was captured as
+// just `[redacted-secret` — indistinguishable from a marker this redactor wrote —
+// and the credential rode out behind it. The comparison was never the problem;
+// the capture boundary was. Each form below is asserted twice: the genuine marker
+// (with a real terminator) survives untouched, and the same marker followed by a
+// credential is redacted with nothing of the tail surviving.
+func TestScrubMarkerFastPathCoversEveryValueForm(t *testing.T) {
+	const tail = "actualcredential"
+	forms := []struct {
+		name string
+		// redacted is a value this redactor genuinely emitted: it must be left
+		// exactly as-is (idempotence).
+		redacted string
+		// impostor is a real credential that merely begins with that marker: it
+		// must be redacted, tail and all.
+		impostor string
+	}{
+		{"bare secret marker", "api_key=" + secretMarker, "api_key=" + secretMarker + tail},
+		{"bare redacted marker", "api_key=" + redactedMarker, "api_key=" + redactedMarker + tail},
+		{"double-quoted secret marker", `api_key="` + secretMarker + `"`, `api_key="` + secretMarker + tail + `"`},
+		{"single-quoted secret marker", `api_key='` + secretMarker + `'`, `api_key='` + secretMarker + tail + `'`},
+		{"double-quoted redacted marker", `api_key="` + redactedMarker + `"`, `api_key="` + redactedMarker + tail + `"`},
+		{"single-quoted redacted marker", `api_key='` + redactedMarker + `'`, `api_key='` + redactedMarker + tail + `'`},
+	}
+	r := &redactor{home: "/home/tester", users: []string{"tester"}}
+
+	for _, tc := range forms {
+		t.Run(tc.name+"/genuine marker survives", func(t *testing.T) {
+			if got := r.scrub(tc.redacted); got != tc.redacted {
+				t.Errorf("already-redacted value was re-wrapped:\n  in:  %q\n  out: %q", tc.redacted, got)
+			}
+		})
+		t.Run(tc.name+"/impostor is redacted", func(t *testing.T) {
+			got := r.scrub(tc.impostor)
+			if strings.Contains(got, tail) {
+				t.Errorf("CREDENTIAL LEAKED past the fast-path:\n  in:  %q\n  out: %q", tc.impostor, got)
+			}
+			if !strings.Contains(got, secretMarker) {
+				t.Errorf("value not redacted:\n  in:  %q\n  out: %q", tc.impostor, got)
+			}
+		})
+	}
+
+	// A marker sitting mid-value is not a marker this redactor wrote either.
+	for _, in := range []string{
+		"password = hunter2" + secretMarker,
+		"password = hunter2" + redactedMarker + "more",
+		`password = "hunter2` + secretMarker + `"`,
+	} {
+		if got := r.scrub(in); strings.Contains(got, "hunter2") {
+			t.Errorf("mid-value marker let a credential through:\n  in:  %q\n  out: %q", in, got)
+		}
+	}
+}
+
+// TestScrubIsIdempotent pins the property the fast-path exists for: scrub runs
+// over the same text more than once by design (per section, again over the
+// assembled text/JSON, and again on each component the issue draft inlines), so
+// a second pass must be a no-op. It was not — the bare-value alternative
+// re-matched the marker's own text and grew a bracket per pass, and a real
+// bundle shipped 28 `[redacted-secret]]`.
+func TestScrubIsIdempotent(t *testing.T) {
+	r := &redactor{home: "/home/tester", users: []string{"tester"}}
+	for _, in := range []string{
+		"bearer token: sk-ABCDEFGHIJKLMNOP0123",       // bare marker after one pass
+		`github_token = "ghp_AAAAAAAAAAAAAAAAAAAA"`,   // double-quoted marker
+		"internal_api_key = 'company-internal-value'", // single-quoted marker
+		"path /home/tester/x by tester",               // home + username
+		"nothing sensitive here",
+	} {
+		once := r.scrub(in)
+		twice := r.scrub(once)
+		if once != twice {
+			t.Errorf("scrub is not idempotent:\n  in:    %q\n  once:  %q\n  twice: %q", in, once, twice)
+		}
+		if strings.Contains(twice, secretMarker+"]") {
+			t.Errorf("marker grew a bracket on re-scrub: %q", twice)
+		}
+	}
+}
+
+// TestIssueDraftCollapsesBundlePath guards the fix for the raw-home-path leak:
+// the bundle path inlined into the (public) GitHub issue-draft body must have
+// $HOME collapsed to ~ so it never leaks the user's home/username. The draft
+// redacts the path itself — it is measured into the size-checked body rather
+// than substituted in afterwards, so the caller has no chance to inline it raw.
+func TestIssueDraftCollapsesBundlePath(t *testing.T) {
+	r := &redactor{home: "/home/tester", users: []string{"tester"}}
+	b := Bundle{bundlePath: "/home/tester/af-bug-report-20260710-120000.txt"}
+
+	_, body := buildIssueDraft(r, b)
+
+	mustNotContain(t, "draft body", body, "/home/tester", "tester")
+	mustContain(t, "draft body", body, "~/af-bug-report-20260710-120000.txt")
 }
 
 // TestBuildEndToEnd plants a full temp home with a secret and a home path in
@@ -666,6 +797,7 @@ func TestBuildEndToEnd(t *testing.T) {
 		GeneratedAt:  "2026-07-05 00:00:00 +0000",
 		DaemonStatus: map[string]any{"running": false, "control_socket": home + "/.agent-factory/daemon.sock"},
 		DaemonHuman:  "daemon: not running\n  control socket: " + home + "/.agent-factory/daemon.sock (absent)\n",
+		BundlePath:   filepath.Join(home, "af-bug-report-test.txt"),
 	})
 	if err != nil {
 		t.Fatalf("Build: %v", err)
@@ -703,11 +835,25 @@ func TestBuildEndToEnd(t *testing.T) {
 	// --- GitHub issue-draft assertions ---
 	// The title is a short, templated, redacted summary line.
 	mustContain(t, "draft title", res.Title, "af bug-report:", "9.9.9", "/")
-	// The body carries the environment summary + the attach-path placeholder the
-	// command layer fills in, and never inlines a secret or a session title.
+	// The body carries the environment summary + the redacted path of the bundle
+	// to attach, and never inlines a secret or a session title.
 	mustContain(t, "draft body", res.Body,
-		"## Environment", "af: 9.9.9", "sessions:", "tasks:", BundlePathPlaceholder,
-		"Attach that file")
+		"## Environment", "af: 9.9.9", "sessions:", "tasks:",
+		"~/af-bug-report-test.txt", "Attach that file")
+	// #1914: the body must carry the bounded diagnostics excerpt ITSELF — before
+	// the fix it only named a file on the reporter's own machine, so a filed
+	// issue arrived with no diagnostics unless the user hand-attached ~1MB.
+	mustContain(t, "draft body", res.Body,
+		"<details>", issueSummaryLabel,
+		"### Daemon status", "daemon: not running",
+		"### Daemon log tail",
+		"~/.agent-factory/daemon.sock", // daemon status inlined, home collapsed
+		testSHA,                        // the real log tail rode in (and stayed structural)
+	)
+	// The redaction assertion below is only meaningful because the planted log
+	// line and daemon status actually reached the body — assert the scrubbed
+	// forms of both, so this can't pass by inlining nothing.
+	mustContain(t, "draft body", res.Body, "boot at ~/Desktop", "[redacted-secret]")
 	mustNotContain(t, "draft body", res.Body, planted...)
 
 	// --- json manifest assertions ---
@@ -721,6 +867,303 @@ func TestBuildEndToEnd(t *testing.T) {
 	mustNotContain(t, "json", string(res.JSON), planted...)
 	// Structural fields survive into the manifest too.
 	mustContain(t, "json", string(res.JSON), "abc123", "9.9.9", testSHA)
+}
+
+// TestMissingLogMessageIsRedactedBeforeInlining is the leak regression: when the
+// log file does not exist (logging fell back to stderr because the config dir
+// could not be created — exactly the broken install that files a bug report),
+// collectLog stored "(no log file at <path>)" raw. That message interpolates a
+// real $HOME/config path, and the issue draft inlines log contents directly
+// WITHOUT the final scrub the text/JSON renderers apply, so the path reached a
+// prefilled PUBLIC GitHub draft.
+//
+// Driven through Build (not collectLog) because the leak is a property of the
+// draft body, which is where the scrub was missing.
+func TestMissingLogMessageIsRedactedBeforeInlining(t *testing.T) {
+	home := t.TempDir()
+	afHome := filepath.Join(home, ".agent-factory")
+	t.Setenv("HOME", home)
+	t.Setenv("AGENT_FACTORY_HOME", afHome)
+	if err := os.MkdirAll(afHome, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Deliberately write no log file: collectLog takes the IsNotExist exit.
+
+	res, err := Build(Inputs{
+		AFVersion:   "9.9.9",
+		GeneratedAt: "2026-07-05 00:00:00 +0000",
+		BundlePath:  filepath.Join(home, "af-bug-report-test.txt"),
+	})
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+
+	// The message must still be there — this asserts redaction, not omission.
+	mustContain(t, "draft body", res.Body, "no log file at")
+	// …and it must not carry the raw home path or username into a public draft.
+	mustNotContain(t, "draft body", res.Body, home, filepath.Base(home))
+	// Same for the file bundle and the JSON manifest.
+	mustNotContain(t, "text", res.Text, home)
+	mustNotContain(t, "json", string(res.JSON), home)
+}
+
+// TestBuildIssueDraftBoundsBodyToURLCapWithBrokenInstall is the #2 regression: a
+// broken install's collection errors are long (unreadable config/log paths,
+// parser messages), and they were written into the body in full BEFORE the
+// budget was computed — only the log tail was trimmed afterwards, so the errors
+// alone could push the URL past the cap. Everything variable-length must be
+// fitted by encoded length before it is written.
+func TestBuildIssueDraftBoundsBodyToURLCapWithBrokenInstall(t *testing.T) {
+	r := &redactor{home: "/home/tester", users: []string{"tester"}}
+	longPath := "/var/lib/really/deeply/nested/config/location/" + strings.Repeat("segment/", 20)
+	b := Bundle{
+		Versions:   Versions{AF: "9.9.9", Go: "go1.25.0", OS: "linux", Arch: "amd64"},
+		bundlePath: "/home/tester/af-bug-report-20260716-080519.txt",
+		// No log at all: the errors alone must not bust the cap.
+	}
+	for i := 0; i < 40; i++ {
+		b.Errors = append(b.Errors, fmt.Sprintf(
+			"config %s%d/config.toml: could not be parsed: unexpected token at line %d: %s",
+			longPath, i, i, strings.Repeat("detail ", 30)))
+	}
+
+	_, body := buildIssueDraft(r, b)
+
+	if n := encodedLen(body); n > maxIssueBodyEncodedBytes {
+		t.Errorf("encoded body is %d bytes, past the %d cap (errors were not fitted)", n, maxIssueBodyEncodedBytes)
+	}
+	// Bounded, but the reader is told what was dropped.
+	mustContain(t, "body", body, "### Collection errors", "more (see the attached bundle)")
+}
+
+// TestBuildIssueDraftAccountsForBundlePathInBudget is the #3 regression: the body
+// used to carry a short placeholder that the CALLER swapped for the real path
+// after the size check, so what reached GitHub was longer than what was measured.
+// The path is now measured into the body, leaving nothing to substitute.
+//
+// The path here is long enough to make the overflow deterministic. In the default
+// flow the path is always ~/af-bug-report-<ts>.txt, where substitution grew the
+// body by only ~14 encoded bytes — which still broke the cap whenever the fitted
+// tail landed within 14 bytes of it, as a real run did at 5989/6000.
+func TestBuildIssueDraftAccountsForBundlePathInBudget(t *testing.T) {
+	r := &redactor{home: "/home/tester", users: []string{"tester"}}
+	var hugeLog strings.Builder
+	for i := 0; i < 5000; i++ {
+		fmt.Fprintf(&hugeLog, "2026-01-01 12:00:00 daemon: reconciled session %d, state=Ready\n", i)
+	}
+	nested := strings.Repeat("nested/", 30)
+	b := Bundle{
+		Versions:   Versions{AF: "9.9.9", Go: "go1.25.0", OS: "linux", Arch: "amd64"},
+		Log:        logSection{Contents: hugeLog.String()},
+		bundlePath: "/home/tester/" + nested + "af-bug-report-20260716-080519.txt",
+	}
+
+	_, body := buildIssueDraft(r, b)
+
+	if n := encodedLen(body); n > maxIssueBodyEncodedBytes {
+		t.Errorf("encoded body is %d bytes, past the %d cap (the bundle path was not budgeted for)",
+			n, maxIssueBodyEncodedBytes)
+	}
+	// The real, redacted path is IN the measured body — no placeholder is left
+	// for a caller to swap in afterwards.
+	mustContain(t, "body", body, "~/"+nested+"af-bug-report-20260716-080519.txt")
+	mustNotContain(t, "body", body, "{{", "/home/tester")
+}
+
+// TestBuildIssueDraftBodyIsFinalAfterBudgeting pins THE invariant: nothing may
+// change the body's encoded length after the budget is computed.
+//
+// The failure it locks: the final scrub used to run over the FINISHED body, so a
+// username that collides with a word in the static template — a home basename of
+// "the" expands every "the" in the prose to "[user]" — grew the body after the
+// log tail had already spent the budget. With a near-cap elided tail the emitted
+// draft then blew the cap, GitHub rejected the URL, and the user got an error
+// instead of a bug report.
+//
+// This is the third "measure, then mutate" bug in this change, so the assertion
+// is the general property rather than the instance: the returned body is a fixed
+// point of the redactor, meaning no later pass exists that could grow it.
+func TestBuildIssueDraftBodyIsFinalAfterBudgeting(t *testing.T) {
+	// Every one of these usernames collides with a word in the static template
+	// prose ("…attach the bundle below…", "…the attached bundle has the full
+	// tail…"), so a scrub that runs after budgeting expands prose the budget has
+	// already been spent against.
+	for _, user := range []string{"the", "bundle", "and", "issue"} {
+		t.Run("username="+user, func(t *testing.T) {
+			r := &redactor{home: "/tmp/" + user, users: []string{user}}
+
+			// Sweep the log line length. Each collision only grows the body by a
+			// few bytes, while the fitted tail leaves 0..one-line of slack under
+			// the cap — so ANY single log shape overflows only by luck, and a test
+			// pinned to one shape would pass against the broken ordering and prove
+			// nothing. Sweeping makes the near-cap case deterministic: some shape
+			// lands flush against the cap, where the growth has nowhere to go.
+			// Lines are realistically long so the BYTE budget binds rather than
+			// issueLogMaxLines, which would cap the body at ~4.3KB and make every
+			// assertion vacuous.
+			nearCap := 0
+			for lineLen := 60; lineLen <= 260; lineLen += 2 {
+				var log strings.Builder
+				for i := 0; i < 120; i++ {
+					line := fmt.Sprintf("[DAEMON] INFO:2026/07/16 05:03:33 taskrun.go:100: task %06d reconciled session ", i)
+					for len(line) < lineLen {
+						line += "x"
+					}
+					log.WriteString(line[:lineLen] + "\n")
+				}
+				b := Bundle{
+					Versions:   Versions{AF: "9.9.9", Go: "go1.25.0", OS: "linux", Arch: "amd64"},
+					Log:        logSection{Contents: log.String()},
+					bundlePath: "/tmp/" + user + "/af-bug-report-20260716-080519.txt",
+				}
+
+				_, body := buildIssueDraft(r, b)
+
+				if n := encodedLen(body); n > maxIssueBodyEncodedBytes {
+					t.Errorf("lineLen=%d: encoded body is %d bytes, past the %d cap — "+
+						"something changed the body after the budget was computed",
+						lineLen, n, maxIssueBodyEncodedBytes)
+				}
+				// The general invariant, asserted per shape: the returned body is a
+				// fixed point of the redactor, so no later pass — the one that used
+				// to run here, or any a future change adds — can grow it.
+				if again := r.scrub(body); again != body {
+					t.Errorf("lineLen=%d: body is not a redactor fixed point: a further scrub "+
+						"would change it (%d -> %d encoded bytes), so its measured size is not final",
+						lineLen, encodedLen(body), encodedLen(again))
+				}
+				if encodedLen(body) > maxIssueBodyEncodedBytes-40 {
+					nearCap++
+				}
+			}
+			// Proof the sweep actually reached the boundary, so the assertions above
+			// were exercised where they bite rather than passing on slack.
+			if nearCap == 0 {
+				t.Errorf("no log shape landed within 40 bytes of the %d cap — the sweep never "+
+					"reached the boundary, so it is not testing the overflow", maxIssueBodyEncodedBytes)
+			}
+		})
+	}
+}
+
+// TestBuildIssueDraftFenceSurvivesBackticksInLog is the #4 regression: a log line
+// carrying a literal ``` (a failing hook echoing its own output) closed the fixed
+// three-backtick fence early, so the rest of the draft — the closing </details>
+// and the attach instructions — rendered as code.
+func TestBuildIssueDraftFenceSurvivesBackticksInLog(t *testing.T) {
+	r := &redactor{home: "/home/tester", users: []string{"tester"}}
+	b := Bundle{
+		Versions:   Versions{AF: "9.9.9", Go: "go1.25.0", OS: "linux", Arch: "amd64"},
+		bundlePath: "/home/tester/af-bug-report-test.txt",
+		Log: logSection{Contents: "hook failed, output follows:\n" +
+			"```\nsome fenced output the hook printed\n```\nrun complete\n"},
+	}
+
+	_, body := buildIssueDraft(r, b)
+
+	// The log content rode in verbatim…
+	mustContain(t, "body", body, "some fenced output the hook printed")
+	// …inside a fence that outruns it, so the block cannot close early.
+	if !strings.Contains(body, "````") {
+		t.Errorf("log fence did not outrun the ``` run in the tail:\n%s", body)
+	}
+	// Everything after the log block must still be prose, not code: an unbalanced
+	// fence shows up as an odd number of fence delimiters.
+	if n := strings.Count(body, "\n````"); n%2 != 0 {
+		t.Errorf("unbalanced log fence (%d delimiters):\n%s", n, body)
+	}
+	mustContain(t, "body", body, "</details>", "Attach that file")
+}
+
+// TestFenceForOutrunsLongestRun pins the fence sizing rule directly: a fence is
+// closed by any run of at least its own length, so it must be longer than the
+// longest run in the content it wraps.
+func TestFenceForOutrunsLongestRun(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"plain text", "```"},
+		{"a `code` span", "```"},
+		{"a ``double`` span", "```"},
+		{"fenced ``` block", "````"},
+		{"longer ````` run", "``````"},
+	}
+	for _, tc := range cases {
+		if got := fenceFor(tc.in); got != tc.want {
+			t.Errorf("fenceFor(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+// TestBuildIssueDraftBoundsBodyToURLCap is the guard on the inline summary's
+// core risk: the draft reaches GitHub as an issues/new URL, and a body past the
+// cap yields a dead link (or a 414) instead of a draft. A pathological bundle —
+// a megabyte of log, a verbose daemon status, a pile of collection errors — must
+// still produce a body that fits ONCE PERCENT-ENCODED, which is the length that
+// actually matters: these log lines are newline- and space-dense, so the encoded
+// form is far larger than the raw one.
+func TestBuildIssueDraftBoundsBodyToURLCap(t *testing.T) {
+	r := &redactor{home: "/home/tester", users: []string{"tester"}}
+
+	var hugeLog strings.Builder
+	for i := 0; i < 20000; i++ {
+		fmt.Fprintf(&hugeLog, "2026-01-01 12:00:00 daemon: reconciled session %d of many, state=Ready\n", i)
+	}
+	b := Bundle{
+		Versions:    Versions{AF: "9.9.9", Go: "go1.25.0", OS: "linux", Arch: "amd64"},
+		daemonHuman: strings.Repeat("daemon: running with a very verbose status line\n", 200),
+		Log:         logSection{Contents: hugeLog.String()},
+		bundlePath:  "/home/tester/af-bug-report-20260716-080519.txt",
+	}
+	for i := 0; i < 50; i++ {
+		b.Errors = append(b.Errors, fmt.Sprintf("section %d: could not be collected", i))
+	}
+
+	_, body := buildIssueDraft(r, b)
+
+	if n := encodedLen(body); n > maxIssueBodyEncodedBytes {
+		t.Errorf("encoded body is %d bytes, past the %d cap", n, maxIssueBodyEncodedBytes)
+	}
+	// Capped hard — but never silently: every elision is stated, and the reader
+	// is pointed at the complete bundle.
+	mustContain(t, "capped body", body,
+		"Earlier lines elided", truncatedNote,
+		"more (see the attached bundle)", "~/af-bug-report-20260716-080519.txt")
+	// The newest lines are what explain a bug, so those are the ones kept.
+	mustContain(t, "capped body", body, "session 19999 of many")
+	mustNotContain(t, "capped body", body, "session 0 of many")
+}
+
+// TestFitLogTailKeepsNewestWithinBudget pins the tail-fitting rules: newest
+// lines win, both caps bind, and a budget too small for even one line yields
+// nothing rather than a misleading fragment.
+func TestFitLogTailKeepsNewestWithinBudget(t *testing.T) {
+	contents := "alpha\nbravo\ncharlie\ndelta\n"
+
+	// Roomy budget, line cap binds: keep the newest 2.
+	text, elided := fitLogTail(contents, 2, 10000)
+	if text != "charlie\ndelta" || !elided {
+		t.Errorf("line cap: got %q elided=%v, want newest 2 + elided", text, elided)
+	}
+
+	// Roomy caps: everything fits, nothing elided.
+	if text, elided := fitLogTail(contents, 100, 10000); text != "alpha\nbravo\ncharlie\ndelta" || elided {
+		t.Errorf("roomy: got %q elided=%v, want all + not elided", text, elided)
+	}
+
+	// Byte budget binds before the line cap.
+	text, elided = fitLogTail(contents, 100, encodedLen("delta\n"))
+	if text != "delta" || !elided {
+		t.Errorf("byte budget: got %q elided=%v, want newest line only + elided", text, elided)
+	}
+
+	// Not even one line fits: no fragment.
+	if text, elided := fitLogTail(contents, 100, 1); text != "" || !elided {
+		t.Errorf("tiny budget: got %q elided=%v, want empty + elided", text, elided)
+	}
+
+	// An empty log is not an elision.
+	if text, elided := fitLogTail("   \n", 10, 100); text != "" || elided {
+		t.Errorf("empty log: got %q elided=%v, want empty + not elided", text, elided)
+	}
 }
 
 func writeFile(t *testing.T, path, content string) {

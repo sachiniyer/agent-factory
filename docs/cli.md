@@ -143,6 +143,15 @@ before sharing it publicly**. It is read-only and local (like `af doctor`): it
 never dials the daemon or the network, and is not part of the HTTP `af api`
 surface.
 
+By default it also opens a pre-filled GitHub issue **draft** in your browser,
+always against the agent-factory project — never whatever repo you happen to be
+in, since the report is about `af` itself. The draft body carries a bounded,
+redacted excerpt of the key diagnostics (versions, daemon status, counts, and the
+newest log lines) so the report is useful as filed; the complete bundle is far
+too large for a URL, so it stays on disk for you to attach. Nothing is submitted
+for you — review the draft, drag the bundle onto it, and click Submit yourself.
+Use `-o/--output` or `--file` to skip GitHub and only write the file.
+
 `af doctor --setup` is the first-run profile: it checks AF home/config/state/log
 writability, git and git identity, tmux, configured agent commands, daemon
 health, and remote-hook setup for the current repo when configured.
