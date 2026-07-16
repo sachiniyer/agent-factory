@@ -115,7 +115,7 @@ func (p *hookProvisioner) provision() (ProvisionResult, error) {
 	teardown := p.reap
 	log.InfoLog.Printf("hook runtime: session %q provisioned via launch_cmd, agent-server at %s", p.spec.Title, ep.URL)
 	return ProvisionResult{
-		Backend:  &HookBackend{reap: teardown},
+		Backend:  &HookBackend{remoteAgentBackend: remoteAgentBackend{reap: teardown}},
 		Endpoint: ep,
 		Teardown: teardown,
 	}, nil
@@ -210,142 +210,9 @@ func (p *hookProvisioner) reap() error {
 // FromInstanceData rebuilds for a "remote" record loaded from disk and what
 // restore replaces wholesale via a fresh hookRuntime.Provision.
 type HookBackend struct {
-	// reap runs delete_cmd to tear down the provisioned sandbox; shared with the
-	// runtime's Teardown / the AgentServer Kill path, and idempotent (a sync.Once
-	// behind the closure). nil for an inert backend loaded from disk.
-	reap func() error
+	remoteAgentBackend
 }
 
 var _ Backend = (*HookBackend)(nil)
 
 func (b *HookBackend) Type() string { return "remote" }
-
-// Capabilities advertises the remote-hook backend's parity (#1592 Phase 4 PR7,
-// epic §5) — identical to docker/ssh: the workspace is off-box, but
-// attach/preview/liveness/prompt work through the user-provisioned agent-server,
-// and Archive/Recover work by pushing the branch to GitHub and re-running
-// launch_cmd to re-provision a fresh sandbox that clones it back (§5.1). No
-// ErrRecoverUnsupported, and no per-config TerminalTab gating (the in-sandbox
-// agent-server drives the terminal surface, so the old terminal_cmd bit is gone).
-//
-// TabManagement is false (#1874), for the same reason as docker/ssh: the
-// agent-server's tab surface is data plane only, so every Add*Tab path still
-// requires a daemon-side git worktree this runtime does not have. See
-// dockerBackend.Capabilities.
-func (b *HookBackend) Capabilities() Capabilities {
-	return Capabilities{
-		Workspace:        WorkspaceRemote,
-		Archive:          true,
-		Recover:          true,
-		TabManagement:    false,
-		TerminalTab:      true,
-		InteractiveInput: true,
-	}
-}
-
-// Start provisions then launches the remote workspace. The sandbox +
-// agent-server were established by the runtime (during NewInstance); Start drives
-// the agent-server's own provision/launch over REST, so the in-sandbox LOCAL
-// backend creates the git worktree + branch and spawns the agent.
-func (b *HookBackend) Start(i *Instance, firstTimeSetup bool) error {
-	if err := b.Provision(i, firstTimeSetup); err != nil {
-		return err
-	}
-	return b.Launch(i, firstTimeSetup)
-}
-
-// Provision drives the remote agent-server's Provision over the wire (the clone
-// is already done by launch_cmd; this creates the in-sandbox git worktree).
-func (b *HookBackend) Provision(i *Instance, firstTimeSetup bool) error {
-	return i.AgentServer().Provision(firstTimeSetup)
-}
-
-// Launch drives the remote agent-server's Launch (spawn the agent), sets the
-// started flag, and seeds the daemon-side tab model with the agent tab (the
-// sandbox owns the real tabs; the daemon-side list mirrors the agent tab so the
-// UI renders it, matching the docker/ssh baseline).
-func (b *HookBackend) Launch(i *Instance, firstTimeSetup bool) error {
-	if err := i.AgentServer().Launch(firstTimeSetup); err != nil {
-		return err
-	}
-	i.mu.Lock()
-	i.started = true
-	if len(i.Tabs) == 0 {
-		i.Tabs = []*Tab{newRemoteAgentTab()}
-	}
-	i.mu.Unlock()
-	return nil
-}
-
-// Kill runs the delete_cmd reap. Instance.Kill routes through the AgentServer
-// (which tears the in-sandbox workspace down over REST and then runs the same
-// reap), so this is normally reached only if something calls backend.Kill
-// directly; the shared idempotent reap makes either path safe.
-func (b *HookBackend) Kill(i *Instance) error {
-	i.mu.Lock()
-	i.started = false
-	i.mu.Unlock()
-	if b.reap != nil {
-		return b.reap()
-	}
-	return nil
-}
-
-// CloseAttachOnly discards this instance's local view WITHOUT running delete_cmd
-// — used to drop a duplicate Instance built from disk that lost a race to the
-// canonical one (#867). Reaping here would tear down the sandbox the canonical
-// Instance shares, so it must not run.
-func (b *HookBackend) CloseAttachOnly(i *Instance) error {
-	i.mu.Lock()
-	i.started = false
-	i.mu.Unlock()
-	return nil
-}
-
-func (b *HookBackend) Preview(i *Instance) (string, error) {
-	return i.AgentServer().Preview(0, false)
-}
-
-func (b *HookBackend) PreviewFullHistory(i *Instance) (string, error) {
-	return i.AgentServer().Preview(0, true)
-}
-
-func (b *HookBackend) HasUpdated(i *Instance) (updated bool, hasPrompt bool, content string) {
-	obs, err := i.AgentServer().Snapshot()
-	if err != nil {
-		return false, false, ""
-	}
-	return obs.Updated, obs.HasPrompt, obs.Content
-}
-
-func (b *HookBackend) SendPromptCommand(i *Instance, prompt string) error {
-	return i.AgentServer().SendPrompt(prompt)
-}
-
-func (b *HookBackend) IsAlive(i *Instance) bool {
-	// Backend.IsAlive is bool by contract, so an unanswerable probe collapses to
-	// "not alive" here. That is safe ONLY because this method's callers
-	// (Instance.TmuxAlive, for TUI affordance checks) merely gray out a control.
-	// The daemon's destructive paths — Lost/re-provision/respawn — must NOT come
-	// through here; they call AgentServer().Alive() directly and branch on the
-	// error, because for them "unreachable" and "dead" are not the same (#1794).
-	alive, _ := i.AgentServer().Alive()
-	return alive
-}
-
-// CheckAndHandleTrustPrompt is a daemon-side no-op: the in-sandbox agent-server
-// dismisses trust/permission prompts itself on every Snapshot (its localAgentServer
-// runs CheckAndHandleTrustPrompt before reading the pane), so there is nothing for
-// the daemon to do over the wire.
-func (b *HookBackend) CheckAndHandleTrustPrompt(*Instance) bool { return false }
-
-func (b *HookBackend) TapEnter(i *Instance) { i.AgentServer().TapEnter() }
-
-// Recover/Respawn re-establish a hook session by RE-PROVISIONING via launch_cmd
-// (which clones the session's branch back from origin), then relaunching the
-// agent (#1592 Phase 4 PR7) — the same recoverSandbox docker/ssh use (written
-// once against the Runtime interface). The old HookBackend returned
-// ErrRecoverUnsupported here; provision-and-expose makes recovery a fresh
-// re-provision of the durable branch on GitHub, so hook reaches parity.
-func (b *HookBackend) Recover(i *Instance) error { return recoverSandbox(i) }
-func (b *HookBackend) Respawn(i *Instance) error { return recoverSandbox(i) }

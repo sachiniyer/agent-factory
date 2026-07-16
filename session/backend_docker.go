@@ -206,7 +206,7 @@ func (p *dockerProvisioner) provision() (ProvisionResult, error) {
 	teardown := p.reap
 	log.InfoLog.Printf("docker runtime: session %q running in container %s, agent-server at %s", p.spec.Title, p.shortID(), endpoint.URL)
 	return ProvisionResult{
-		Backend:  &dockerBackend{containerID: p.containerID, reap: teardown},
+		Backend:  &dockerBackend{containerID: p.containerID, remoteAgentBackend: remoteAgentBackend{reap: teardown}},
 		Endpoint: endpoint,
 		Teardown: teardown,
 	}, nil
@@ -451,152 +451,14 @@ func originRemoteURL(repoRoot string) string {
 // to the container. Its ONE local responsibility is reaping the container, which
 // it shares (via the same idempotent closure) with the AgentServer Kill path.
 //
-// The daemon's observation/delivery paths speak to a session ONLY through
-// Instance.AgentServer() (the remoteAgentServer), so most of these methods exist
-// for interface completeness + the create flow (which drives Preview/SendPrompt
-// through the Instance→backend wrappers). None re-enters the backend: the docker
-// instance's AgentServer() is the REMOTE client, not localAgentServer, so a
-// backend→AgentServer call is a network hop, never a loop.
+// Its shared remote-AgentServer behavior lives in remoteAgentBackend; this type
+// retains only Docker-specific provisioning, container identity, and the
+// serialized backend discriminator.
 type dockerBackend struct {
+	remoteAgentBackend
 	containerID string
-	// reap removes the container; shared with the runtime's Teardown / the
-	// AgentServer Kill path, and idempotent (a sync.Once behind the closure).
-	reap func() error
 }
 
 var _ Backend = (*dockerBackend)(nil)
 
 func (b *dockerBackend) Type() string { return "docker" }
-
-// Capabilities advertises docker's parity (#1592 Phase 4 PR6, epic §5): the
-// workspace is off-box, but attach/preview/liveness/prompt work through the
-// in-container agent-server, and Archive/Recover work by pushing the branch to
-// GitHub and re-provisioning a fresh container that clones it back (§5.1) — no
-// ErrRecoverUnsupported and no locality special-case.
-//
-// TabManagement is false (#1874). It is the ONE capability the in-container
-// agent-server does not yet service: the agent-server's tab surface is data
-// plane only (Subscribe/Input/Resize address an EXISTING tab by index or stable
-// id) — there is no create/close tab RPC, so every Add*Tab path still requires a
-// daemon-side git worktree this runtime does not have. Advertising it true
-// offered tab affordances (the web menu's new-tab/VS Code items, the TUI `t`/`w`
-// keys) that could only ever fail. The honest bit is false until tab creation
-// routes through the agent-server; see #1874 for what that needs.
-func (b *dockerBackend) Capabilities() Capabilities {
-	return Capabilities{
-		Workspace:        WorkspaceRemote,
-		Archive:          true,
-		Recover:          true,
-		TabManagement:    false,
-		TerminalTab:      true,
-		InteractiveInput: true,
-	}
-}
-
-// Start provisions then launches the in-container workspace. The container +
-// agent-server were established by the runtime (during NewInstance); Start drives
-// the agent-server's own provision/launch over REST, so the in-container LOCAL
-// backend creates the git worktree + branch and spawns the agent.
-func (b *dockerBackend) Start(i *Instance, firstTimeSetup bool) error {
-	if err := b.Provision(i, firstTimeSetup); err != nil {
-		return err
-	}
-	return b.Launch(i, firstTimeSetup)
-}
-
-// Provision drives the in-container agent-server's Provision over the wire (clone
-// is already done by the runtime; this creates the in-container git worktree).
-func (b *dockerBackend) Provision(i *Instance, firstTimeSetup bool) error {
-	return i.AgentServer().Provision(firstTimeSetup)
-}
-
-// Launch drives the in-container agent-server's Launch (spawn the agent), sets the
-// started flag, and seeds the daemon-side tab model with the agent tab (the
-// container owns the real tabs; the daemon-side list mirrors the agent tab so the
-// UI renders it, matching the remote-hook baseline).
-func (b *dockerBackend) Launch(i *Instance, firstTimeSetup bool) error {
-	if err := i.AgentServer().Launch(firstTimeSetup); err != nil {
-		return err
-	}
-	i.mu.Lock()
-	i.started = true
-	if len(i.Tabs) == 0 {
-		i.Tabs = []*Tab{newRemoteAgentTab()}
-	}
-	i.mu.Unlock()
-	return nil
-}
-
-// Kill reaps the container. Instance.Kill routes through the AgentServer (which
-// tears the in-container workspace down over REST and then runs the same reap), so
-// this is normally reached only if something calls backend.Kill directly; the
-// shared idempotent reap makes either path safe.
-func (b *dockerBackend) Kill(i *Instance) error {
-	i.mu.Lock()
-	i.started = false
-	i.mu.Unlock()
-	if b.reap != nil {
-		return b.reap()
-	}
-	return nil
-}
-
-// CloseAttachOnly discards this instance's local view WITHOUT reaping the
-// container — used to drop a duplicate Instance built from disk that lost a race
-// to the canonical one (#867). Reaping here would tear down the container the
-// canonical Instance shares, so it must not run.
-func (b *dockerBackend) CloseAttachOnly(i *Instance) error {
-	i.mu.Lock()
-	i.started = false
-	i.mu.Unlock()
-	return nil
-}
-
-func (b *dockerBackend) Preview(i *Instance) (string, error) {
-	return i.AgentServer().Preview(0, false)
-}
-
-func (b *dockerBackend) PreviewFullHistory(i *Instance) (string, error) {
-	return i.AgentServer().Preview(0, true)
-}
-
-func (b *dockerBackend) HasUpdated(i *Instance) (updated bool, hasPrompt bool, content string) {
-	obs, err := i.AgentServer().Snapshot()
-	if err != nil {
-		return false, false, ""
-	}
-	return obs.Updated, obs.HasPrompt, obs.Content
-}
-
-func (b *dockerBackend) SendPromptCommand(i *Instance, prompt string) error {
-	return i.AgentServer().SendPrompt(prompt)
-}
-
-func (b *dockerBackend) IsAlive(i *Instance) bool {
-	// Backend.IsAlive is bool by contract, so an unanswerable probe collapses to
-	// "not alive" here. That is safe ONLY because this method's callers
-	// (Instance.TmuxAlive, for TUI affordance checks) merely gray out a control.
-	// The daemon's destructive paths — Lost/re-provision/respawn — must NOT come
-	// through here; they call AgentServer().Alive() directly and branch on the
-	// error, because for them "unreachable" and "dead" are not the same (#1794).
-	alive, _ := i.AgentServer().Alive()
-	return alive
-}
-
-// CheckAndHandleTrustPrompt is a daemon-side no-op: the in-container agent-server
-// dismisses trust/permission prompts itself on every Snapshot (its localAgentServer
-// runs CheckAndHandleTrustPrompt before reading the pane), so there is nothing for
-// the daemon to do over the wire.
-func (b *dockerBackend) CheckAndHandleTrustPrompt(*Instance) bool { return false }
-
-func (b *dockerBackend) TapEnter(i *Instance) { i.AgentServer().TapEnter() }
-
-// Recover/Respawn re-establish a docker session by RE-PROVISIONING a fresh
-// container that clones the session's branch back from origin, then relaunching
-// the agent (#1592 Phase 4 PR6). Both share recoverSandbox with the ssh runtime
-// (written once against the Runtime interface): a disposable container has no
-// in-place session to reconnect, so recovery is always a fresh provision + clone
-// of the durable branch on GitHub. Only the pushed state survives — a session
-// that went Lost without ever pushing recovers to whatever origin last held.
-func (b *dockerBackend) Recover(i *Instance) error { return recoverSandbox(i) }
-func (b *dockerBackend) Respawn(i *Instance) error { return recoverSandbox(i) }

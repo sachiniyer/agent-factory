@@ -221,7 +221,7 @@ func (p *sshProvisioner) provision() (ProvisionResult, error) {
 	teardown := p.reap
 	log.InfoLog.Printf("ssh runtime: session %q running on %s (remote dir %s), agent-server tunneled at %s", p.spec.Title, p.cfg.Host, p.sessionDir, endpoint.URL)
 	return ProvisionResult{
-		Backend:  &sshBackend{reap: teardown},
+		Backend:  &sshBackend{remoteAgentBackend: remoteAgentBackend{reap: teardown}},
 		Endpoint: endpoint,
 		Teardown: teardown,
 	}, nil
@@ -718,147 +718,12 @@ func expandUserPath(path string) string {
 // agent-server, remove the session dir, close the tunnel), which it shares via the
 // same idempotent closure with the AgentServer Kill path.
 //
-// It parallels dockerBackend deliberately (the two runtimes are independent per the
-// plan — either can ship first); the cross-cutting dedup of the two remote backends
-// belongs to PR6, where archive/restore is written once against the Runtime
-// interface. The daemon's observation/delivery paths speak to a session ONLY
-// through Instance.AgentServer() (the remoteAgentServer), so a backend→AgentServer
-// call here is a network hop over the tunnel, never a loop back into the backend.
+// Its shared remote-AgentServer behavior lives in remoteAgentBackend; this type
+// retains only SSH-specific provisioning and the serialized backend discriminator.
 type sshBackend struct {
-	// reap kills the remote agent-server, removes the remote session dir, and
-	// closes the tunnel + ssh connection; shared with the runtime's Teardown / the
-	// AgentServer Kill path, and idempotent (a sync.Once behind the closure).
-	reap func() error
+	remoteAgentBackend
 }
 
 var _ Backend = (*sshBackend)(nil)
 
 func (b *sshBackend) Type() string { return "ssh" }
-
-// Capabilities advertises ssh's parity (#1592 Phase 4 PR6, epic §5): the
-// workspace is off-box, but attach/preview/liveness/prompt work through the
-// remote agent-server over the tunnel, and Archive/Recover work by pushing the
-// branch to GitHub and re-provisioning a fresh remote that clones it back (§5.1)
-// — no ErrRecoverUnsupported and no locality special-case.
-//
-// TabManagement is false (#1874), for the same reason as docker: the remote
-// agent-server's tab surface is data plane only (Subscribe/Input/Resize address
-// an EXISTING tab), so every Add*Tab path still requires a daemon-side git
-// worktree this runtime does not have. See dockerBackend.Capabilities.
-func (b *sshBackend) Capabilities() Capabilities {
-	return Capabilities{
-		Workspace:        WorkspaceRemote,
-		Archive:          true,
-		Recover:          true,
-		TabManagement:    false,
-		TerminalTab:      true,
-		InteractiveInput: true,
-	}
-}
-
-// Start provisions then launches the remote workspace. The remote host +
-// agent-server were established by the runtime (during NewInstance); Start drives
-// the agent-server's own provision/launch over REST, so the remote LOCAL backend
-// creates the git worktree + branch and spawns the agent.
-func (b *sshBackend) Start(i *Instance, firstTimeSetup bool) error {
-	if err := b.Provision(i, firstTimeSetup); err != nil {
-		return err
-	}
-	return b.Launch(i, firstTimeSetup)
-}
-
-// Provision drives the remote agent-server's Provision over the wire (clone is
-// already done by the runtime; this creates the remote git worktree).
-func (b *sshBackend) Provision(i *Instance, firstTimeSetup bool) error {
-	return i.AgentServer().Provision(firstTimeSetup)
-}
-
-// Launch drives the remote agent-server's Launch (spawn the agent), sets the
-// started flag, and seeds the daemon-side tab model with the agent tab (the remote
-// owns the real tabs; the daemon-side list mirrors the agent tab so the UI renders
-// it, matching the docker/remote-hook baseline).
-func (b *sshBackend) Launch(i *Instance, firstTimeSetup bool) error {
-	if err := i.AgentServer().Launch(firstTimeSetup); err != nil {
-		return err
-	}
-	i.mu.Lock()
-	i.started = true
-	if len(i.Tabs) == 0 {
-		i.Tabs = []*Tab{newRemoteAgentTab()}
-	}
-	i.mu.Unlock()
-	return nil
-}
-
-// Kill runs the runtime teardown. Instance.Kill routes through the AgentServer
-// (which tears the remote workspace down over REST and then runs the same reap), so
-// this is normally reached only if something calls backend.Kill directly; the
-// shared idempotent reap makes either path safe.
-func (b *sshBackend) Kill(i *Instance) error {
-	i.mu.Lock()
-	i.started = false
-	i.mu.Unlock()
-	if b.reap != nil {
-		return b.reap()
-	}
-	return nil
-}
-
-// CloseAttachOnly discards this instance's local view WITHOUT tearing the remote
-// down — used to drop a duplicate Instance built from disk that lost a race to the
-// canonical one (#867). Reaping here would tear down the remote workspace the
-// canonical Instance shares, so it must not run.
-func (b *sshBackend) CloseAttachOnly(i *Instance) error {
-	i.mu.Lock()
-	i.started = false
-	i.mu.Unlock()
-	return nil
-}
-
-func (b *sshBackend) Preview(i *Instance) (string, error) {
-	return i.AgentServer().Preview(0, false)
-}
-
-func (b *sshBackend) PreviewFullHistory(i *Instance) (string, error) {
-	return i.AgentServer().Preview(0, true)
-}
-
-func (b *sshBackend) HasUpdated(i *Instance) (updated bool, hasPrompt bool, content string) {
-	obs, err := i.AgentServer().Snapshot()
-	if err != nil {
-		return false, false, ""
-	}
-	return obs.Updated, obs.HasPrompt, obs.Content
-}
-
-func (b *sshBackend) SendPromptCommand(i *Instance, prompt string) error {
-	return i.AgentServer().SendPrompt(prompt)
-}
-
-func (b *sshBackend) IsAlive(i *Instance) bool {
-	// Backend.IsAlive is bool by contract, so an unanswerable probe collapses to
-	// "not alive" here. That is safe ONLY because this method's callers
-	// (Instance.TmuxAlive, for TUI affordance checks) merely gray out a control.
-	// The daemon's destructive paths — Lost/re-provision/respawn — must NOT come
-	// through here; they call AgentServer().Alive() directly and branch on the
-	// error, because for them "unreachable" and "dead" are not the same (#1794).
-	alive, _ := i.AgentServer().Alive()
-	return alive
-}
-
-// CheckAndHandleTrustPrompt is a daemon-side no-op: the remote agent-server
-// dismisses trust/permission prompts itself on every Snapshot (its localAgentServer
-// runs CheckAndHandleTrustPrompt before reading the pane), so there is nothing for
-// the daemon to do over the wire.
-func (b *sshBackend) CheckAndHandleTrustPrompt(*Instance) bool { return false }
-
-func (b *sshBackend) TapEnter(i *Instance) { i.AgentServer().TapEnter() }
-
-// Recover/Respawn re-establish an ssh session by RE-PROVISIONING a fresh remote
-// that clones the session's branch back from origin, then relaunching the agent
-// (#1592 Phase 4 PR6) — the same recoverSandbox the docker runtime uses (written
-// once). A disposable remote dir has no in-place session to reconnect, so
-// recovery is always a fresh provision + clone of the durable branch on GitHub;
-// only the pushed state survives.
-func (b *sshBackend) Recover(i *Instance) error { return recoverSandbox(i) }
-func (b *sshBackend) Respawn(i *Instance) error { return recoverSandbox(i) }
