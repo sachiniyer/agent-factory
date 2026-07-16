@@ -2064,7 +2064,118 @@ test("#1815: a tab created out-of-band must not rewind the scrolled terminal", a
   await expect(shell).toHaveCount(0, { timeout: 15_000 });
   // The roster this test perturbed is back as it found it. Which tab the pane FALLS
   // BACK to once its own tab is deleted out from under it is a separate contract
-  // (the tab tests above own it), so this stops at the roster.
+  // (the tab tests above own it), so this stops at the roster — but the suite is
+  // serial, so park the pane back on the agent tab rather than leave the next test
+  // to inherit whatever the fallback picked.
+  await expect(tabbar.locator(".af-tab")).toHaveCount(tabsBefore, { timeout: 15_000 });
+  await tabbar.locator(".af-tab", { hasText: "Agent" }).click();
+  await expect(page.locator(".af-term-host")).toContainText(READY_MARKER, { timeout: 15_000 });
+});
+
+// The same rewind, one gesture later (local Codex review of #1894).
+//
+// Resizing a divider persists through setRatio, which rebuilds every SplitNode —
+// so the root comes back as a NEW object even though the drag already applied the
+// ratios to the live DOM and nothing structural moved. That left builtTree pointing
+// at the superseded root, and the next roster resync saw tree !== builtTree, took
+// the rebuild branch, and rewound the scrolled terminal exactly as before. The
+// primary fix held right up until the user touched a divider.
+//
+// The resize ITSELF is allowed to move the viewport (a narrower pane reflows, and
+// xterm rewraps), so the baseline is re-read once the resize has settled. What must
+// not move it is the RESYNC that follows.
+test("#1815: a resize must not re-arm the rewind on the next out-of-band resync", async () => {
+  const afBin = process.env.AF_BIN;
+  const mockRepo = process.env.AF_MOCK_REPO;
+  test.skip(!afBin || !mockRepo, "AF_BIN/AF_MOCK_REPO are set only by web-selftest-entry.sh");
+  const { execFileSync } = await import("node:child_process");
+  const af = (...args: string[]): void => {
+    execFileSync(afBin as string, ["--repo", mockRepo as string, ...args], { stdio: "pipe" });
+  };
+  const SHELL_TAB = "resizeshell";
+  const PROBE_TAB = "resizeprobe";
+
+  await row(page, SESSION_A).click();
+  await expect(page.locator(".af-main.af-main-term")).toBeVisible();
+
+  // Park on the agent tab explicitly: layouts are retained per session, so this
+  // pane shows whatever the last test left it on, not necessarily the agent.
+  const tabbar = page.locator(".af-tabbar");
+  const tabsBefore = await tabbar.locator(".af-tab").count();
+  await tabbar.locator(".af-tab", { hasText: "Agent" }).click();
+  await expect(page.locator(".af-term-host")).toContainText(READY_MARKER, { timeout: 15_000 });
+
+  // A shell tab to scroll, and a split so there IS a divider to drag.
+  af("sessions", "tab-create", SESSION_A, "--command", "bash", "--name", SHELL_TAB);
+  const shellTab = tabbar.locator(".af-tab", { hasText: SHELL_TAB });
+  await expect(shellTab).toHaveCount(1, { timeout: 15_000 });
+  await shellTab.click();
+  await expect(shellTab).toHaveClass(/af-tab-active/);
+  await expect(page.locator(".af-term-meta")).toContainText("Live");
+
+  await dragTabToPane(page, "Agent", "right");
+  await expect(page.locator(".af-term-host .af-pane")).toHaveCount(2, { timeout: 15_000 });
+  await expect(page.locator(".af-term-host")).toContainText(READY_MARKER, { timeout: 15_000 });
+  const shellPane = page.locator(".af-term-host .af-pane", { hasNotText: READY_MARKER });
+  await expect(shellPane).toHaveCount(1);
+
+  // Fill the shell pane's scrollback and park the view up in it.
+  await shellPane.locator(".af-pane-host").click();
+  await expect(page.locator(".af-term-meta")).toContainText("Live");
+  await page.keyboard.type("for i in $(seq 1 200); do echo resize-line-$i; done");
+  await page.keyboard.press("Enter");
+  await expect(shellPane).toContainText("resize-line-200", { timeout: 15_000 });
+  await shellPane.hover();
+  await page.mouse.wheel(0, -900);
+  await expect(shellPane).not.toContainText("resize-line-200");
+
+  // Drag the divider — real pointer events, since it captures the pointer.
+  const divider = page.locator(".af-term-host .af-divider").first();
+  const box = await divider.boundingBox();
+  expect(box, "a split must have a divider to drag").toBeTruthy();
+  const bx = (box as { x: number; width: number }).x + (box as { width: number }).width / 2;
+  const by = (box as { y: number; height: number }).y + (box as { height: number }).height / 2;
+  await page.mouse.move(bx, by);
+  await page.mouse.down();
+  await page.mouse.move(bx - 80, by, { steps: 8 });
+  await page.mouse.up();
+
+  // Let the resize settle (the fit is debounced) and take the post-resize baseline:
+  // the reflow above is legitimate, the resync below is not.
+  const viewport = shellPane.locator(".xterm-viewport");
+  await expect
+    .poll(async () => viewport.evaluate((el) => el.scrollTop), {
+      message: "the resized pane must still be parked off the bottom",
+      timeout: 10_000,
+    })
+    .toBeGreaterThan(0);
+  await page.waitForTimeout(500);
+  const parked = await viewport.evaluate((el) => el.scrollTop);
+  const reading = await shellPane.textContent();
+
+  // The resync that used to rewind it: someone else adds a tab.
+  const probe = tabbar.locator(".af-tab", { hasText: PROBE_TAB });
+  af("sessions", "tab-create", SESSION_A, "--kind", "web", "--port", "3202", "--name", PROBE_TAB);
+  await expect(probe, "the out-of-band tab must reach this window").toHaveCount(1, {
+    timeout: 15_000,
+  });
+
+  expect(
+    await viewport.evaluate((el) => el.scrollTop),
+    "a resync after a resize must not rewind the viewport",
+  ).toBe(parked);
+  expect(await shellPane.textContent(), "the parked view must not move").toBe(reading);
+
+  // Put it all back for the serial tests after this one.
+  af("sessions", "tab-delete", SESSION_A, "--name", PROBE_TAB);
+  await expect(probe).toHaveCount(0, { timeout: 15_000 });
+  await page
+    .locator(".af-term-host .af-pane", { hasText: READY_MARKER })
+    .locator(".af-pane-close")
+    .click();
+  await expect(page.locator(".af-term-host .af-pane")).toHaveCount(1, { timeout: 15_000 });
+  af("sessions", "tab-delete", SESSION_A, "--name", SHELL_TAB);
+  await expect(shellTab).toHaveCount(0, { timeout: 15_000 });
   await expect(tabbar.locator(".af-tab")).toHaveCount(tabsBefore, { timeout: 15_000 });
 });
 

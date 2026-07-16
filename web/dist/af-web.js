@@ -7122,6 +7122,18 @@ function replaceTab(root2, leafId, tab) {
   const updated = mapLeaf(root2, leafId, (leaf) => ({ ...leaf, tab }));
   return dedupeExcept(updated, tab, leafId);
 }
+function sameLayout(a, b) {
+  if (a === b) {
+    return true;
+  }
+  if (a === null || b === null) {
+    return false;
+  }
+  if (a.kind === "leaf" || b.kind === "leaf") {
+    return a.kind === "leaf" && b.kind === "leaf" && a.id === b.id;
+  }
+  return a.id === b.id && a.dir === b.dir && a.ratio === b.ratio && sameLayout(a.a, b.a) && sameLayout(a.b, b.b);
+}
 function setRatio(root2, splitId, ratio) {
   const clamped = Math.min(0.9, Math.max(0.1, ratio));
   const rec = (node) => {
@@ -7751,12 +7763,13 @@ var SplitView = class {
   // top emits no scroll event, so wheel-up goes dead until the next chunk of
   // output resyncs it — i.e. exactly while a quiet pane is being read.
   //
-  // The tree nodes are reference-stable by construction (see mapAllLeaves), so a
-  // resync that changed nothing hands back the identical root and the built DOM
-  // is already correct. Comparing the ROOT REFERENCE rather than a structural
-  // signature is also what keeps the divider closures honest: they capture their
-  // SplitNode, so any tree that allocated fresh nodes must rebuild or a drag
-  // would mutate a node no longer in the tree.
+  // Compared with sameLayout, NOT by reference: a fresh root does not imply a
+  // changed layout. setRatio rebuilds every SplitNode it walks, so persisting a
+  // divider drag produces a new root for a layout already on screen, and a
+  // reference check would rebuild on the next resync — the same rewind, one
+  // gesture later. The stale nodes the live dividers still capture are harmless:
+  // a divider resolves its split by ID when it persists, and the only state it
+  // reads back (ratio) is what it wrote during that same drag.
   builtTree = null;
   // Counts explicit layout/focus mutations, for the stale-async guard — see
   // layoutGeneration(), which is the documented contract.
@@ -8029,7 +8042,7 @@ var SplitView = class {
     if (!this.focusedId || !wanted.has(this.focusedId)) {
       this.focusedId = desired[0]?.id ?? null;
     }
-    if (this.tree !== this.builtTree) {
+    if (!sameLayout(this.tree, this.builtTree)) {
       const rootEl = this.buildNode(this.tree);
       rootEl.style.flex = "1 1 0";
       this.host.replaceChildren(rootEl);
