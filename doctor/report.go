@@ -138,6 +138,13 @@ type renderRow struct {
 	status      CheckStatus
 	detail      string
 	remediation string
+	// actionable reports whether this row requires the user to do something —
+	// the same judgement that drives the nonzero exit. It is NOT "status is not
+	// PASS": doctor emits advisory WARNs (no autostart unit installed, a legacy
+	// config that still loads) that carry a helpful remedy while leaving the run
+	// healthy. Without this, a script cannot tell those from a WARN that means
+	// the daemon is broken (#1044).
+	actionable bool
 }
 
 func renderRows(r *Report, fixMode, verbose bool) []renderRow {
@@ -149,6 +156,9 @@ func renderRows(r *Report, fixMode, verbose bool) []renderRow {
 			status:      c.Status,
 			detail:      c.Detail,
 			remediation: c.Remediation,
+			// Mirrors UnresolvedCount's rule for checks, so "actionable" and the
+			// exit code can never disagree.
+			actionable: c.Problem && c.Status != StatusPass && c.Status != StatusFixed,
 		})
 	}
 	if len(r.Checks) == 0 {
@@ -237,6 +247,9 @@ func collapsedProcessRow(check string, findings []Finding, fixMode bool) renderR
 		status:      status,
 		detail:      collapsedProcessDetail(check, total, fixable, fixed, failed, fixMode),
 		remediation: collapsedProcessRemediation(check, fixable, fixMode),
+		// One row standing in for several findings is actionable while any of
+		// them is still unresolved.
+		actionable: fixed < len(findings),
 	}
 }
 
@@ -343,6 +356,9 @@ func findingRow(f Finding, fixMode bool) renderRow {
 		status:      status,
 		detail:      detail,
 		remediation: findingRemediation(f, fixMode),
+		// Mirrors UnresolvedCount's rule for findings: every un-remediated
+		// finding is a real problem — findings are only ever raised for those.
+		actionable: !f.Fixed,
 	}
 }
 

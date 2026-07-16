@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -79,9 +80,14 @@ func describeVersion(v string) string {
 // checkDuplicateDaemons finds more than one daemon serving the active home.
 // The singleton invariant is enforced by a startup lock, so a second daemon
 // here means one escaped it — typically an old binary's daemon that kept the
-// socket while a new one was installed. Scoped to this home: daemons serving
-// other homes are checkForeignDaemons' business, and processes belonging to
-// other users never appear in our snapshot.
+// socket while a new one was installed.
+//
+// Scoped to this user AND this home. Neither half is free: /proc shows every
+// user's processes, and an `af --daemon` run by someone else on a shared box
+// has a world-readable cmdline that matches ours perfectly. Only its owning uid
+// and its (unreadable) environ tell it apart from a genuine duplicate — see
+// activeHomeDaemons. Daemons serving other homes are checkForeignDaemons'
+// business.
 func checkDuplicateDaemons(ctx *scanContext, report *Report) {
 	if ctx.snap == nil {
 		return
@@ -106,7 +112,15 @@ func checkDuplicateDaemons(ctx *scanContext, report *Report) {
 // daemonProc pairs a daemon process with the agent-factory home it serves.
 type daemonProc struct {
 	proc proctree.Process
+	// home is the agent-factory home this daemon serves; only meaningful when
+	// homeKnown, and never guessed.
 	home string
+	// homeKnown reports whether home was positively established. False means
+	// the process's environ could not be read, so which home it serves is
+	// genuinely unknown — not "the default".
+	homeKnown bool
+	// ownedByUs reports whether this process runs under the uid running doctor.
+	ownedByUs bool
 }
 
 // scanDaemons returns every agent-factory daemon in the snapshot paired with
@@ -117,8 +131,14 @@ type daemonProc struct {
 // daemon, and whose?" must have exactly one answer — checkDuplicateDaemons
 // counting a process that checkForeignDaemons would call foreign is a
 // contradiction, not two opinions.
+//
+// Attribution is deliberately conservative, because every consumer of this scan
+// either accuses the user of a problem or (with --fix) kills something. A
+// process is attributed to a home only when we positively read that home out of
+// its environ; anything unreadable stays unattributed. See daemonProcessHome.
 func scanDaemons(ctx *scanContext) []daemonProc {
 	defaultHome := defaultAFHome()
+	self := selfUID()
 	var out []daemonProc
 	for pid, p := range ctx.snap {
 		if ctx.selfAncestors[pid] {
@@ -128,11 +148,21 @@ func scanDaemons(ctx *scanContext) []daemonProc {
 		if len(args) == 0 || !daemon.LooksLikeDaemonArgv(args) {
 			continue
 		}
-		out = append(out, daemonProc{proc: p, home: daemonProcessHome(pid, defaultHome)})
+		home, known := daemonProcessHome(pid, defaultHome)
+		uid, uidKnown := daemonProcessOwnerUID(pid)
+		out = append(out, daemonProc{
+			proc:      p,
+			home:      home,
+			homeKnown: known,
+			ownedByUs: uidKnown && uid == self,
+		})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].proc.PID < out[j].proc.PID })
 	return out
 }
+
+// selfUID is the uid doctor runs as; a var so tests can pin it.
+var selfUID = os.Getuid
 
 // daemonProcs returns the run's daemon scan, computing it at most once. The
 // doctor run is sequential, so a plain memo is enough.
@@ -144,12 +174,15 @@ func (c *scanContext) daemonProcs() []daemonProc {
 	return c.daemons
 }
 
-// activeHomeDaemons returns the daemon processes serving the active home.
+// activeHomeDaemons returns the daemon processes positively established as
+// serving the active home, under our own uid. Both conditions are required:
+// anything we cannot confirm is somebody else's business, and a diagnostic that
+// accuses the user based on a guess is worse than one that stays quiet.
 func activeHomeDaemons(ctx *scanContext) []proctree.Process {
 	activeHome := filepath.Clean(ctx.opts.ConfigDir)
 	var out []proctree.Process
 	for _, d := range ctx.daemonProcs() {
-		if d.home == activeHome {
+		if d.ownedByUs && d.homeKnown && d.home == activeHome {
 			out = append(out, d.proc)
 		}
 	}
@@ -166,13 +199,28 @@ func defaultAFHome() string {
 	return filepath.Join(home, ".agent-factory")
 }
 
-// daemonProcessHome resolves which agent-factory home pid serves.
-func daemonProcessHome(pid int, defaultHome string) string {
-	home, ok := proctree.EnvValue(pid, "AGENT_FACTORY_HOME")
-	if !ok || home == "" {
+// daemonProcessHome resolves which agent-factory home pid serves, reporting
+// whether the answer is known at all.
+//
+// The default-home fallback applies ONLY when we read the environ and found no
+// AGENT_FACTORY_HOME — that genuinely means "this daemon serves the default
+// home". It must never apply when the environ could not be read: on a shared
+// machine /proc/<pid>/cmdline is world-readable while /proc/<pid>/environ is
+// owner-only, so another user's `af --daemon` is fully visible and identifiable
+// yet permanently unreadable. Defaulting there would adopt their process into
+// our home and report a duplicate daemon that does not exist (#1044).
+func daemonProcessHome(pid int, defaultHome string) (string, bool) {
+	home, found, err := daemonProcessEnvLookup(pid, "AGENT_FACTORY_HOME")
+	if err != nil {
+		return "", false // unreadable: unknown, not "the default"
+	}
+	if !found || home == "" {
 		home = defaultHome
 	}
-	return filepath.Clean(home)
+	if home == "" {
+		return "", false
+	}
+	return filepath.Clean(home), true
 }
 
 // daemonProcSummary identifies a daemon process by pid and age, which is what
@@ -196,9 +244,12 @@ func checkAutostartPath(ctx *scanContext, report *Report) {
 		return
 	}
 	if info.Err != nil {
+		// A unit is installed but unreadable. Saying so is the whole job: the
+		// alternative is doctor printing nothing about a unit the user can see
+		// on disk. Counts as a problem — an unreadable unit is not a working one.
 		report.Warn(sectionDaemon, "autostart path",
-			fmt.Sprintf("cannot read the autostart unit: %v", info.Err),
-			"reinstall autostart: af daemon install", false)
+			fmt.Sprintf("an autostart unit is installed at %s but cannot be read: %v", info.Path, info.Err),
+			"fix the unit file's permissions, or reinstall it: af daemon install", true)
 		return
 	}
 	self, err := ctx.opts.selfBinary()
@@ -300,6 +351,13 @@ func checkAutostartSupervision(ctx *scanContext, report *Report) {
 		return
 	}
 	switch {
+	case info.Err != nil && !info.Active:
+		// The unit is installed but unreadable AND the service manager is not
+		// running it. Report the state rather than dropping the check: the
+		// unreadable file is the likely reason nothing is supervising.
+		report.Warn(sectionDaemon, "autostart supervision",
+			fmt.Sprintf("a unit file is installed but cannot be read (%v) and the service manager is not running it", info.Err),
+			"fix the unit file's permissions, or reinstall it: af daemon install", true)
 	case info.LoadedElsewhere:
 		report.Warn(sectionDaemon, "autostart supervision",
 			fmt.Sprintf("the launchd agent is loaded outside %s, where af's restarts are sent (%s)",
@@ -393,17 +451,28 @@ func execBinaryVersion(path string) (string, error) {
 	return parseAFVersion(string(out)), nil
 }
 
+// afVersionPattern is the exact shape `af version` prints. Requiring the full
+// "agent-factory version <semver>" line — rather than "the last word of line 1"
+// — is what keeps an unrelated program that happens to be named `af` from being
+// read as an agent-factory install. Plenty of binaries answer `version` with a
+// zero exit and print something; only ours prints this (#1044).
+//
+// The suffix is permissive after the semver (a `-rc1`/`+dirty` build tag is
+// still our version), but the prefix and the numeric core are not. "dev" is
+// accepted alongside semver because an unreleased build IS one of ours, and a
+// dev binary sitting next to a release is precisely the split brain a developer
+// needs told about — rejecting it would make the check blind to its most likely
+// real case.
+var afVersionPattern = regexp.MustCompile(`^agent-factory version (\d+\.\d+\.\d+\S*|dev)$`)
+
 // parseAFVersion pulls the version out of `af version` output
-// ("agent-factory version 1.0.192").
+// ("agent-factory version 1.0.192"), returning "" for anything that is not an
+// agent-factory binary announcing itself in the expected form.
 func parseAFVersion(out string) string {
 	line, _, _ := strings.Cut(strings.TrimSpace(out), "\n")
-	fields := strings.Fields(line)
-	if len(fields) == 0 {
+	m := afVersionPattern.FindStringSubmatch(strings.TrimSpace(line))
+	if m == nil {
 		return ""
 	}
-	last := fields[len(fields)-1]
-	if last == "version" {
-		return "" // "agent-factory version" with nothing after it
-	}
-	return last
+	return m[1]
 }

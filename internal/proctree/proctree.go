@@ -289,9 +289,50 @@ func CPUFraction(p Process) (frac float64, ageSeconds float64, err error) {
 	return busy / age, age, nil
 }
 
+// EnvLookup reads key from /proc/<pid>/environ, separating "the variable is
+// absent" (false, nil) from "the environ could not be read at all" (false,
+// err).
+//
+// The distinction is load-bearing for any caller that attributes a process to
+// something on the strength of a missing variable. /proc/<pid>/environ is
+// readable only by the process owner, while /proc/<pid>/cmdline is
+// world-readable — so on a shared machine another user's process is visible
+// and identifiable, yet its environ always fails to read. A caller that treats
+// that failure as "the variable is unset" and applies a default silently
+// adopts a stranger's process as its own (#1044). EnvValue cannot express the
+// difference; use this when the answer matters.
+func EnvLookup(pid int, key string) (string, bool, error) {
+	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/environ", pid))
+	if err != nil {
+		return "", false, err
+	}
+	prefix := []byte(key + "=")
+	for _, kv := range bytes.Split(data, []byte{0}) {
+		if bytes.HasPrefix(kv, prefix) {
+			return string(kv[len(prefix):]), true, nil
+		}
+	}
+	return "", false, nil
+}
+
+// OwnerUID returns the uid owning pid, read from /proc/<pid>'s ownership.
+// Reports false when the process is gone or its status cannot be read.
+func OwnerUID(pid int) (int, bool) {
+	info, err := os.Stat(fmt.Sprintf("/proc/%d", pid))
+	if err != nil {
+		return 0, false
+	}
+	st, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return 0, false
+	}
+	return int(st.Uid), true
+}
+
 // EnvValue reads key from /proc/<pid>/environ. Returns ("", false) when the
 // variable is absent or the environ is unreadable (different UID, kernel
-// thread, or the process exited). The environ reflects the process's
+// thread, or the process exited) — callers that must tell those apart want
+// EnvLookup. The environ reflects the process's
 // *initial* environment — exactly what we want for ancestry markers, since a
 // process cannot retroactively lose the marker it inherited.
 func EnvValue(pid int, key string) (string, bool) {

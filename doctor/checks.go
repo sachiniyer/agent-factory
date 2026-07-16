@@ -24,6 +24,13 @@ func tempDirDefault() string { return os.TempDir() }
 var (
 	daemonProcessArgv   = daemon.ProcessArgv
 	daemonPIDLooksAlive = daemon.PIDLooksAlive
+	// The per-process facts that decide whether a daemon is OURS (#1044).
+	// Injectable for the same reason as the two above: the states that matter —
+	// another user's process, an environ we may not read — cannot be staged by
+	// a test without root, and whether they hold for any given pid depends on
+	// the machine (in a container pid 1 is often the test user itself).
+	daemonProcessEnvLookup = proctree.EnvLookup
+	daemonProcessOwnerUID  = proctree.OwnerUID
 )
 
 // runawayCPUFraction and runawayMinAge define "pegging a core for an
@@ -649,6 +656,18 @@ func checkForeignDaemons(ctx *scanContext, report *Report) {
 		p := d.proc
 		pid := p.PID
 		home := d.home
+		if !d.ownedByUs {
+			// Another user's daemon is not ours to report or reap: --fix would
+			// offer a kill that can only fail with EPERM, and on a shared box
+			// their daemon is none of this user's business (#1044).
+			continue
+		}
+		if !d.homeKnown {
+			// The environ was unreadable, so which home this daemon serves is
+			// genuinely unknown. Calling it foreign would be a guess, and --fix
+			// would then offer to kill a process on the strength of that guess.
+			continue
+		}
 		if home == activeHome || home == "" {
 			continue // this install's daemon; covered by checkDaemonHealth
 		}

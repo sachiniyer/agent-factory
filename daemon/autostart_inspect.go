@@ -47,6 +47,12 @@ func InspectAutostart() AutostartUnitInfo {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if !os.IsNotExist(err) {
+			// The unit IS installed — we just cannot read it. Exists must stay
+			// true or callers that gate on it drop both this error and every
+			// check behind it, and doctor silently says nothing about a unit
+			// that is right there (#1044). Absent is the only case that is
+			// legitimately "no unit".
+			info.Exists = true
 			info.Err = err
 		}
 		return info
@@ -162,6 +168,10 @@ type SupervisionInfo struct {
 	// Domain is the launchd domain target the restart path uses (gui/<uid>);
 	// empty on Linux.
 	Domain string
+	// Err records why the installed unit could not be inspected (an unreadable
+	// unit file). The unit is present, so this is a problem to report, never a
+	// reason to skip the check.
+	Err error
 	// LoadedElsewhere reports a launchd agent loaded in some domain other than
 	// Domain, so `launchctl kickstart -k gui/<uid>/...` restarts cannot reach
 	// it (#1044).
@@ -177,9 +187,14 @@ func AutostartSupervision() SupervisionInfo {
 	unit := InspectAutostart()
 	info.Supported = unit.Supported
 	info.UnitPresent = unit.Exists
+	info.Err = unit.Err
 	if !unit.Supported || !unit.Exists {
 		return info
 	}
+	// An unreadable unit file does not stop the service manager from being
+	// asked about it: whether the unit is enabled and running is exactly what
+	// the user needs to know, and systemctl/launchctl answer by unit name, not
+	// by reading the file. Err rides along so the caller can report both.
 
 	switch autostartGOOS {
 	case "linux":

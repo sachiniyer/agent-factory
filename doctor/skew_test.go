@@ -64,6 +64,33 @@ func abandonedSocket(t *testing.T, path string) string {
 	return path
 }
 
+// stubForeignProcess makes pid look, to doctor, like it belongs to another user
+// with an environ we may not read — what a second user's `af --daemon` really is
+// on a shared box. Every other pid keeps its real facts.
+//
+// Staged rather than observed: a test cannot spawn a process as a second user
+// without root, and "some pid has an unreadable environ" is not portable — pid 1
+// is unreadable on the dev box but owned by the test user inside the container.
+func stubForeignProcess(t *testing.T, pid int) {
+	t.Helper()
+	prevEnv, prevUID := daemonProcessEnvLookup, daemonProcessOwnerUID
+	t.Cleanup(func() {
+		daemonProcessEnvLookup, daemonProcessOwnerUID = prevEnv, prevUID
+	})
+	daemonProcessEnvLookup = func(p int, key string) (string, bool, error) {
+		if p == pid {
+			return "", false, os.ErrPermission
+		}
+		return prevEnv(p, key)
+	}
+	daemonProcessOwnerUID = func(p int) (int, bool) {
+		if p == pid {
+			return os.Getuid() + 1, true
+		}
+		return prevUID(p)
+	}
+}
+
 // respondingDaemon is a health probe for a daemon that answers and reports
 // version v.
 func respondingDaemon(v string) func() daemon.HealthStatus {
@@ -207,6 +234,86 @@ func TestDuplicateDaemons_OtherHomeIgnored(t *testing.T) {
 		"a daemon on another home must not count as a duplicate of ours")
 }
 
+// The shared-box false positive, staged against a genuinely foreign process:
+// pid 1 is owned by root and its /proc/1/environ is unreadable to us, while
+// /proc/1/cmdline is world-readable — exactly the asymmetry that makes another
+// user's `af --daemon` visible but unattributable. Only the argv is faked, so
+// nothing but ownership and the unreadable environ can exclude it.
+//
+// The active home must be the DEFAULT home for this to bite: the old code
+// answered "environ unreadable" with "then it must serve the default home", so
+// the foreign process landed on ours and became a second daemon that does not
+// exist.
+func TestDuplicateDaemons_ForeignUserDaemon_NotAttributedHere(t *testing.T) {
+	testguard.IsolateTmux(t)
+
+	// Make every process in the (2-pid) snapshot look like an af daemon, so
+	// only ownership and the unreadable environ can tell them apart.
+	stubDaemonProcessProbe(t,
+		func(int) bool { return true },
+		func(int) []string { return []string{"af", "--daemon"} })
+
+	// defaultAFHome resolves $HOME, which the package sandbox does not
+	// override — leaving it alone would point this test at the developer's real
+	// ~/.agent-factory and read their live daemon's sockets. Pin it.
+	fakeHome := t.TempDir()
+	t.Setenv("HOME", fakeHome)
+	defaultHome := defaultAFHome()
+	require.Equal(t, filepath.Join(fakeHome, ".agent-factory"), defaultHome,
+		"the test must run against its own default home, never the real one")
+	require.NoError(t, os.MkdirAll(defaultHome, 0o755))
+
+	// This user's own daemon, explicitly on the default home, and a second
+	// process standing in for the other user's daemon. Both are real processes
+	// this test owns; only doctor's view of the second one is foreign.
+	mine := spawnWithEnv(t, "af", []string{"--daemon"}, map[string]string{"AGENT_FACTORY_HOME": defaultHome})
+	theirs := spawnWithEnv(t, "af", []string{"--daemon"}, nil)
+	stubForeignProcess(t, theirs.PID)
+
+	opts := testOptionsWithHome(t, defaultHome, false, mine.PID, theirs.PID)
+	report, err := Run(opts)
+	require.NoError(t, err)
+
+	require.False(t, hasCheck(report, "daemon instances"),
+		"another user's daemon must never be counted as a duplicate on this home")
+	require.False(t, hasFinding(report, "foreign-daemon"),
+		"nor may it be reported as a foreign daemon we could kill")
+	require.Zero(t, report.UnresolvedCount(),
+		"a healthy machine that merely shares /proc with another af user must exit 0")
+}
+
+func hasFinding(r *Report, check string) bool {
+	for _, f := range r.Findings {
+		if f.Check == check {
+			return true
+		}
+	}
+	return false
+}
+
+// The same guard one level down: a daemon whose environ cannot be read is
+// unattributed, never assumed to be ours. This is the single line that decides
+// whether another user's daemon becomes our phantom duplicate.
+func TestDaemonProcessHome_UnreadableEnvironIsUnknownNotDefault(t *testing.T) {
+	proc := spawnWithEnv(t, "af", []string{"--daemon"}, nil)
+	stubForeignProcess(t, proc.PID)
+
+	home, known := daemonProcessHome(proc.PID, "/home/dev/.agent-factory")
+	require.False(t, known, "an unreadable environ must not be reported as a known home")
+	require.Empty(t, home, "no home may be guessed from an unreadable environ")
+}
+
+// The other half of the guard: a readable environ still yields a known home.
+// Tightening the unreadable case must not make doctor blind to real daemons.
+func TestDaemonProcessHome_ReadableEnvironIsKnown(t *testing.T) {
+	explicit := t.TempDir()
+	proc := spawnWithEnv(t, "af", []string{"--daemon"}, map[string]string{"AGENT_FACTORY_HOME": explicit})
+
+	home, known := daemonProcessHome(proc.PID, "/home/dev/.agent-factory")
+	require.True(t, known, "our own readable environ yields a known home")
+	require.Equal(t, explicit, home)
+}
+
 func TestAutostartPath_UnitLaunchesDifferentBinary_Fails(t *testing.T) {
 	testguard.IsolateTmux(t)
 
@@ -278,6 +385,49 @@ func TestAutostartPath_NoUnitInstalled_NoRow(t *testing.T) {
 	require.False(t, hasCheck(report, "autostart path"), "no unit means nothing to compare")
 }
 
+// An installed-but-unreadable unit must be reported, never skipped. A
+// diagnostic that silently drops a check when it hits a permissions error tells
+// the user their machine is fine when it is not — the worst thing it can do.
+func TestAutostartPath_UnitPresentButUnreadable_Warns(t *testing.T) {
+	testguard.IsolateTmux(t)
+
+	opts := testOptions(t, false)
+	opts.autostartUnit = func() daemon.AutostartUnitInfo {
+		return daemon.AutostartUnitInfo{
+			Supported: true, Exists: true, Path: "/etc/systemd/user/af.service",
+			Err: os.ErrPermission,
+		}
+	}
+
+	report, err := Run(opts)
+	require.NoError(t, err)
+
+	c := findCheck(t, report, "autostart path")
+	require.Equal(t, StatusWarn, c.Status)
+	require.Contains(t, c.Detail, "cannot be read")
+	require.Contains(t, c.Detail, "/etc/systemd/user/af.service")
+	require.True(t, c.Problem, "an unreadable unit is not a working one")
+}
+
+func TestAutostartSupervision_UnitUnreadableAndInactive_Warns(t *testing.T) {
+	testguard.IsolateTmux(t)
+
+	opts := testOptions(t, false)
+	opts.autostartSupervision = func() daemon.SupervisionInfo {
+		return daemon.SupervisionInfo{
+			Supported: true, UnitPresent: true, Active: false, Err: os.ErrPermission,
+		}
+	}
+
+	report, err := Run(opts)
+	require.NoError(t, err)
+
+	c := findCheck(t, report, "autostart supervision")
+	require.Equal(t, StatusWarn, c.Status)
+	require.Contains(t, c.Detail, "cannot be read")
+	require.True(t, c.Problem)
+}
+
 func TestSplitBrainBinaries_DifferentVersions_Fails(t *testing.T) {
 	testguard.IsolateTmux(t)
 
@@ -310,6 +460,53 @@ func TestSplitBrainBinaries_SameVersion_NoRow(t *testing.T) {
 	report, err := Run(opts)
 	require.NoError(t, err)
 	require.False(t, hasCheck(report, "af binaries"), "installs that agree cannot strand a daemon")
+}
+
+// A foreign binary that happens to be named `af` must never be read as an
+// agent-factory install. Plenty of programs answer `version` with a zero exit
+// and print something; accepting "the last word of line 1" would let any of
+// them fabricate a split-brain install and exit nonzero.
+func TestSplitBrainBinaries_ForeignAfBinaryIgnored(t *testing.T) {
+	testguard.IsolateTmux(t)
+
+	opts := testOptions(t, false)
+	opts.binaryCandidates = func() []string { return []string{"/usr/local/bin/af", "/home/dev/.local/bin/af"} }
+	opts.binaryVersion = func(path string) (string, error) {
+		if path == "/usr/local/bin/af" {
+			// Some other tool called af (an assembler, a fetcher…) answering
+			// `version` perfectly happily.
+			return parseAFVersion("af 4.2.0 (GNU binutils)"), nil
+		}
+		return parseAFVersion("agent-factory version 1.0.192"), nil
+	}
+
+	report, err := Run(opts)
+	require.NoError(t, err)
+	require.False(t, hasCheck(report, "af binaries"),
+		"a non-agent-factory binary named af must not fabricate a split brain")
+	require.Zero(t, report.UnresolvedCount())
+}
+
+func TestParseAFVersion_ShapeIsRequired(t *testing.T) {
+	// Accepted: our real output, including the released two-line form and an
+	// unreleased build.
+	require.Equal(t, "1.0.192", parseAFVersion("agent-factory version 1.0.192"))
+	require.Equal(t, "1.0.192", parseAFVersion("agent-factory version 1.0.192\nhttps://example.com/releases/tag/v1.0.192\n"))
+	require.Equal(t, "1.0.193-rc1", parseAFVersion("agent-factory version 1.0.193-rc1"))
+	require.Equal(t, "dev", parseAFVersion("agent-factory version dev"))
+
+	// Rejected: anything that is not us announcing ourselves.
+	for _, out := range []string{
+		"af 4.2.0 (GNU binutils)",
+		"version 1.0.192",
+		"agent-factory version",
+		"agent-factory version not-a-version",
+		"some-tool version 1.0.192",
+		"AGENT-FACTORY VERSION 1.0.192",
+		"",
+	} {
+		require.Empty(t, parseAFVersion(out), "must reject %q", out)
+	}
 }
 
 func TestStaleSocket_NoDaemonAnswering_Warns(t *testing.T) {
@@ -506,8 +703,6 @@ func TestRenderJSON_EnvelopeShape(t *testing.T) {
 	require.GreaterOrEqual(t, env.Data.Summary.Unresolved, 1)
 }
 
-// Passing checks carry no remedy, so `.remedy != ""` is a usable "needs
-// action" predicate for scripts.
 func TestRenderJSON_PassingCheckHasNoRemedy(t *testing.T) {
 	testguard.IsolateTmux(t)
 
@@ -522,8 +717,72 @@ func TestRenderJSON_PassingCheckHasNoRemedy(t *testing.T) {
 	for _, c := range payload.Checks {
 		if c.Status == string(StatusPass) {
 			require.Empty(t, c.Remedy, "passing check %q must carry no remedy", c.Name)
+			require.False(t, c.Actionable, "passing check %q cannot be actionable", c.Name)
 		}
 	}
+}
+
+// Two WARNs, same status, opposite meanings: "no autostart unit installed" is
+// advisory and leaves the run healthy, while a stale socket means the daemon is
+// broken and drives the nonzero exit. Both carry a remedy, so `remedy != ""`
+// cannot tell them apart — only `actionable` can.
+func TestRenderJSON_AdvisoryWarnDistinguishableFromActionableWarn(t *testing.T) {
+	testguard.IsolateTmux(t)
+
+	home := t.TempDir()
+	abandonedSocket(t, filepath.Join(home, "daemon.sock"))
+
+	opts := testOptionsWithHome(t, home, false)
+	report, err := Run(opts)
+	require.NoError(t, err)
+
+	payload := BuildJSONReport(report, false, false)
+	byName := map[string]JSONCheck{}
+	for _, c := range payload.Checks {
+		byName[c.Name] = c
+	}
+
+	advisory, ok := byName["autostart"]
+	require.True(t, ok)
+	require.Equal(t, string(StatusWarn), advisory.Status)
+	require.NotEmpty(t, advisory.Remedy, "the advisory hint is still worth having")
+	require.False(t, advisory.Actionable, "an advisory warn must not read as needing action")
+
+	actionable, ok := byName["stale sockets"]
+	require.True(t, ok)
+	require.Equal(t, string(StatusWarn), actionable.Status)
+	require.True(t, actionable.Actionable, "a stale socket is a real problem")
+
+	// The contract that makes it usable: actionable rows are exactly what makes
+	// the run exit nonzero, so the two can never disagree.
+	require.Positive(t, payload.Summary.Unresolved)
+	anyActionable := false
+	for _, c := range payload.Checks {
+		if c.Actionable {
+			anyActionable = true
+		}
+	}
+	require.True(t, anyActionable, "a nonzero exit must be explained by at least one actionable row")
+}
+
+// The converse: a run that exits 0 must carry no actionable row, even though it
+// is full of advisory warnings with remedies.
+func TestRenderJSON_HealthyRunHasNoActionableRows(t *testing.T) {
+	testguard.IsolateTmux(t)
+
+	opts := testOptions(t, false)
+	opts.Version = "1.0.192"
+	opts.daemonHealth = respondingDaemon("1.0.192")
+
+	report, err := Run(opts)
+	require.NoError(t, err)
+	require.Zero(t, report.UnresolvedCount())
+
+	payload := BuildJSONReport(report, false, false)
+	for _, c := range payload.Checks {
+		require.False(t, c.Actionable, "check %q must not be actionable in a healthy run", c.Name)
+	}
+	require.Zero(t, payload.Summary.Unresolved)
 }
 
 // Text output must stay byte-clean when it is not going to a terminal —

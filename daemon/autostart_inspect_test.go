@@ -98,6 +98,53 @@ func TestInspectAutostart_NoUnitInstalled(t *testing.T) {
 	require.NoError(t, info.Err, "an absent unit is a normal state, not an error")
 }
 
+// A unit that exists but cannot be read must still report Exists: callers gate
+// their checks on it, so a false here silently drops both the error and every
+// check behind it (#1044).
+func TestInspectAutostart_PresentButUnreadable_StillExists(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("root reads unreadable files, so the permission case cannot be staged")
+	}
+	dir := withAutostartTestEnv(t, "linux")
+	unitPath := filepath.Join(dir, autostartUnitName)
+	writeUnitFile(t, unitPath, systemdAutostartUnit("/usr/local/bin/af", "", "", ""))
+	require.NoError(t, os.Chmod(unitPath, 0o000))
+	t.Cleanup(func() { _ = os.Chmod(unitPath, 0o644) })
+
+	info := InspectAutostart()
+	require.True(t, info.Exists, "the unit is installed; unreadable is not absent")
+	require.Error(t, info.Err, "the read failure must be reported, not swallowed")
+	require.Empty(t, info.ExecPath)
+}
+
+// The supervision probe must run anyway: systemctl answers by unit name, not by
+// reading the file, and whether the unit is active is exactly what the user needs.
+func TestAutostartSupervision_UnreadableUnitStillProbesServiceManager(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("root reads unreadable files, so the permission case cannot be staged")
+	}
+	dir := withAutostartTestEnv(t, "linux")
+	unitPath := filepath.Join(dir, autostartUnitName)
+	writeUnitFile(t, unitPath, systemdAutostartUnit("/usr/local/bin/af", "", "", ""))
+	require.NoError(t, os.Chmod(unitPath, 0o000))
+	t.Cleanup(func() { _ = os.Chmod(unitPath, 0o644) })
+
+	probed := false
+	withUnitCommand(t, func(_ string, args ...string) ([]byte, error) {
+		probed = true
+		if args[1] == "is-enabled" {
+			return []byte("enabled\n"), nil
+		}
+		return []byte("inactive\n"), errFake
+	})
+
+	info := AutostartSupervision()
+	require.True(t, probed, "an unreadable unit file must not skip the service-manager probe")
+	require.True(t, info.UnitPresent)
+	require.Error(t, info.Err, "the read failure rides along for the caller to report")
+	require.False(t, info.Active)
+}
+
 func TestInspectAutostart_UnsupportedPlatform(t *testing.T) {
 	withAutostartTestEnv(t, "plan9")
 	info := InspectAutostart()
