@@ -174,9 +174,9 @@ func (teardownReleasePTY) finalize(_ *Instance, closed []closedTab, _ *git.GitWo
 // Phase 2b: the #802 "wait for every pane to exit before touching the worktree"
 // ordering becomes shared code instead of the duplicated prose it was when the
 // move lived in a separate daemon step. It keeps the agent tab's tmux binding as
-// a name-holder (a failed move / un-archive re-spawns it), keeps the web tabs
-// (pure metadata — nothing was torn down, #1809) and drops the shell/process
-// tabs; started is left true (the OpArchiving fence, not the #990 started guard,
+// a name-holder (a failed move / un-archive re-spawns it), keeps the
+// metadata-only tabs (web and VS Code — nothing was torn down, #1809/#1817) and
+// drops the shell/process tabs; started is left true (the OpArchiving fence, not the #990 started guard,
 // owns the teardown window) so a failed move self-heals via the Lost-restore
 // loop.
 type teardownArchive struct{ dest string }
@@ -207,14 +207,30 @@ func (teardownArchive) finalize(i *Instance, _ []closedTab, _ *git.GitWorktree) 
 	// the shell/process tabs are dropped because this teardown just killed the
 	// tmux sessions that WERE them — there is nothing left to restore (#1028).
 	//
-	// Web tabs are different in kind and are kept (#1809): they have no tmux
-	// session and no process — a web tab IS its URL — so teardown destroys nothing
-	// and the record round-trips through TabData.URL exactly as it already does
+	// Metadata-only tabs are different in kind and are kept (#1809/#1817): they
+	// have no tmux session and no process — a web tab IS its URL, and a VS Code tab
+	// is a pointer to a daemon-managed editor no tab owns — so teardown destroys
+	// nothing and the record round-trips through TabData exactly as it already does
 	// across a daemon restart. Dropping them was collateral damage from the #1028
-	// rule, written before web tabs existed, and it silently and permanently
-	// erased the URLs on the documented RESTORABLE reap path.
+	// rule, written before these kinds existed, and it silently and permanently
+	// erased them on the documented RESTORABLE reap path.
 	//
-	// The filter preserves relative order (the agent stays at 0, web tabs keep
+	// The test is !HasTmux() rather than an enumeration of kinds: this filter read
+	// "== TabKindWeb" while web was the only such kind, so TabKindVSCode was dropped
+	// from both memory and the persisted record the moment it was added (#1817) —
+	// restore could not bring back what was never written. Asking the KIND its own
+	// property keeps the next such kind correct by default.
+	//
+	// THE ASSUMPTION THIS RESTS ON: keep exactly the tabs whose teardown destroyed
+	// nothing, and today that set is exactly the tmux-less kinds — a tab either owns
+	// a PTY this teardown just killed, or it owns nothing at all. HasTmux is
+	// therefore the whole question, not a proxy for it. A future kind that holds NO
+	// tmux but some other teardown-destroyed resource would break the equivalence
+	// and be wrongly kept here; that kind does not exist, and inventing a second
+	// predicate to guard against it is how one idea grows two names. If you are
+	// adding such a kind, this filter is the site to split.
+	//
+	// The filter preserves relative order (the agent stays at 0, kept tabs keep
 	// their sequence) rather than re-appending, because tab addressing — panes and
 	// the 1-9 number keys — is position-sensitive today.
 	//
@@ -227,7 +243,7 @@ func (teardownArchive) finalize(i *Instance, _ []closedTab, _ *git.GitWorktree) 
 	kept := make([]*Tab, 0, len(i.Tabs))
 	kept = append(kept, i.Tabs[0])
 	for _, tab := range i.Tabs[1:] {
-		if tab.Kind == TabKindWeb {
+		if !tab.Kind.HasTmux() {
 			kept = append(kept, tab)
 		}
 	}

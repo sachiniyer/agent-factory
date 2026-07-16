@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -14,6 +15,13 @@ import (
 // The #1873 regression suite: the editor is reachable ONLY over a 0600 unix
 // socket in a 0700 directory, never over TCP, and the readiness probe can no
 // longer adopt a listener the daemon did not start.
+//
+// This supersedes #1880's interim mitigation, which warned an operator with
+// require_token + require_loopback_token set that the editor's own port ignored
+// them. That warning and its test are gone with the port: there is no second
+// route left to disclose, and a warning that still fired would be false. The
+// property it approximated is enforced structurally here instead —
+// NoTCPListenerExists and ModeIsOwnerOnly hold it for both flavors.
 
 // TestVSCodeSocket_NoTCPListenerExists is the headline security regression. The
 // editor runs with authentication disabled, so a TCP listener is a second,
@@ -280,8 +288,15 @@ func TestWaitForSocket_ReportsChildExit(t *testing.T) {
 	if err == nil {
 		t.Fatal("waitForSocket reported ready for an editor that never listened")
 	}
-	if !strings.Contains(err.Error(), "exited during startup") {
-		t.Errorf("waitForSocket error = %q, want the child's exit reported", err)
+	// The SENTINEL, not a substring: the proxy's notice page and the respawn
+	// cooldown both match errVSCodeStartExited to render a styled notice rather
+	// than surface a raw error (#1880), so wrapping it is the contract here.
+	if !errors.Is(err, errVSCodeStartExited) {
+		t.Errorf("waitForSocket error = %q, want one wrapping errVSCodeStartExited", err)
+	}
+	// And it must name the endpoint, so a broken start is debuggable.
+	if !strings.Contains(err.Error(), socketPath) {
+		t.Errorf("waitForSocket error %q does not name the socket it waited on", err)
 	}
 }
 

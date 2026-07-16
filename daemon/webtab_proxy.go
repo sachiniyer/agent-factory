@@ -193,23 +193,78 @@ func (m *Manager) ensureVSCodeServer(instance *session.Instance, repoID, title s
 	}
 	key := daemonInstanceKey(repoID, title)
 	endpoint, err := m.vscode.ensureServer(key, worktree)
-	if err != nil {
+	// The post-spawn recheck below must run on errVSCodeStarting too, NOT just on
+	// success. ensureServer REGISTERS the server in v.servers before returning that
+	// sentinel, so a cold spawn that merely outran the start grace has left a LIVE,
+	// daemon-owned code-server behind — the "error" reports a slow start, not a
+	// failed one. Bare-returning here (as this did) skipped the recheck for exactly
+	// the spawns that take longest, which is precisely when a concurrent
+	// close/archive/kill is most likely to have won the race. The notice page's
+	// auto-refresh cannot heal it either: the retry re-enters WebTabTarget, the tab
+	// id no longer resolves, and it 404s without ever touching the supervisor — so
+	// the editor would live until daemon shutdown.
+	//
+	// Every OTHER error means no server was registered, so there is nothing to
+	// reclaim and the recheck would be pointless work.
+	if err != nil && !errors.Is(err, errVSCodeStarting) {
 		return vscodeEndpoint{}, err
 	}
-	// Re-check that a vscode tab still EXISTS, now that the spawn is done.
-	//
-	// CloseTab stops the editor under the op-lock this route deliberately does not
-	// take, so the tab this request resolved can be closed — and its stopFor can
-	// run — while the spawn is still in flight. The editor started here would then
-	// belong to no tab: nothing renders it, and no close/archive/kill path for a
-	// tab that no longer exists will ever stop it. Checking AFTER the spawn is what
-	// closes that window; checking only before would leave it wide open for exactly
-	// the seconds a spawn takes.
-	if !instanceHasVSCodeTab(instance) {
-		m.vscode.stopFor(key)
-		return vscodeEndpoint{}, fmt.Errorf("the VS Code tab of session %q was closed", title)
+	if unwanted := m.stopVSCodeIfUnwanted(instance, key, title); unwanted != nil {
+		return vscodeEndpoint{}, unwanted
+	}
+	if err != nil {
+		// Still starting, and still wanted: let the caller render the retry notice.
+		return vscodeEndpoint{}, err
 	}
 	return endpoint, nil
+}
+
+// stopVSCodeIfUnwanted re-checks, AFTER a spawn, that the editor still has a
+// reason to exist — stopping it and returning why if not, or nil if it should be
+// served. It is the closing half of the spawn window: this route deliberately
+// does NOT take the op-lock (a spawn blocks for seconds and would stall
+// KillSession/ArchiveSession/CloseTab behind it), so every condition
+// ensureVSCodeServer checked BEFORE the spawn can change during it. Checking only
+// before would leave the window wide open for exactly the seconds a spawn takes.
+//
+// All three questions must be re-asked, because they fail independently:
+//
+//   - TabSpawnBlocked: archive raises its fence (BeginArchive) and then MOVES the
+//     worktree. An editor started against the old path now serves bytes that are
+//     gone. ArchiveTeardown keeps the vscode tab (it is metadata-only, #1817), so
+//     the tab check alone says "still wanted" and cannot catch this. That was
+//     masked while archive still (wrongly) stripped the tab — the tab check
+//     returned false and stopped the editor BY ACCIDENT — so fixing the archive
+//     drop is what makes this check load-bearing rather than theoretical.
+//   - UserKilled: kill does not filter tabs off the stale instance pointer this
+//     request holds, so the tab check passes and the editor would survive against
+//     a REMOVED worktree.
+//   - instanceHasVSCodeTab: CloseTab stops the editor under that same op-lock, so
+//     the tab this request resolved can be closed — and its stopFor already run —
+//     mid-spawn. The editor would then belong to no tab: nothing renders it, and
+//     no close/archive/kill path for a tab that no longer exists will ever stop
+//     it.
+//
+// The deferred sweeps in KillSession/ArchiveSession are the belt to this brace;
+// this keeps the "inert session ⇒ no editor" invariant from resting on which
+// goroutine reaches v.mu first.
+func (m *Manager) stopVSCodeIfUnwanted(instance *session.Instance, key, title string) error {
+	err := func() error {
+		if err := instance.TabSpawnBlocked(); err != nil {
+			return err
+		}
+		if instance.UserKilled() {
+			return fmt.Errorf("session %q has been killed", title)
+		}
+		if !instanceHasVSCodeTab(instance) {
+			return fmt.Errorf("the VS Code tab of session %q was closed", title)
+		}
+		return nil
+	}()
+	if err != nil {
+		m.vscode.stopFor(key)
+	}
+	return err
 }
 
 // webTabProxyHandler reverse-proxies GET /v1/webtab/{sessionId}/{tabId}/{rest...}
@@ -288,6 +343,20 @@ func (cs *controlServer) webTabProxyHandler(w http.ResponseWriter, r *http.Reque
 		// has to react to.
 		if errors.Is(err, errVSCodeStarting) {
 			writeVSCodeNoticePageRetry(w, "VS Code is still starting…", true)
+			return
+		}
+		// An editor that started and then exited without ever listening is a broken
+		// install/config, not a transient state: render it INTO the pane like the
+		// other two, since the iframe shows this document and a raw JSON error
+		// envelope is unreadable there.
+		//
+		// Deliberately NON-retrying, unlike the still-starting notice: the
+		// supervisor records this failure and replays it for a cooldown rather than
+		// respawning, so a self-refreshing page would spend that whole window
+		// re-rendering the same replayed error — the UI fighting the very cooldown
+		// that exists to stop a spawn loop.
+		if errors.Is(err, errVSCodeStartExited) {
+			writeVSCodeNoticePage(w, "VS Code exited while starting. Check that the editor binary runs correctly, then reopen this tab.")
 			return
 		}
 		writeHTTPError(w, http.StatusNotFound, err)

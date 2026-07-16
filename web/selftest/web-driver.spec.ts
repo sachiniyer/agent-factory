@@ -1143,6 +1143,56 @@ test("split panes (fix): the WEB tab itself drags onto a terminal pane edge and 
   await expect(page.locator(".af-term-host .af-pane")).toHaveCount(1, { timeout: 15_000 });
 });
 
+test("split panes (#1817 follow-up): Alt+j onto a WEB pane returns the keyboard to the rail, not the pane you left", async () => {
+  // The cyclePane half of the SplitView.focus() boolean contract. nav.ts resolves Alt+j/k
+  // in EITHER mode, ahead of the terminal branch, so a user ATTACHED to a terminal pane can
+  // cycle onto an iframe pane that has no xterm to receive the keyboard. When cyclePane
+  // ignored the boolean, focus() silently no-opped and the pane the user cycled AWAY from
+  // kept DOM focus: the header highlighted the web pane while keystrokes still went to the
+  // agent — a silent WRONG target, worse than the silent no-target on the create path.
+  await row(page, SESSION_WEB).click();
+  await expect(page.locator(".af-main.af-main-term")).toBeVisible();
+
+  const tabbar = page.locator(".af-tabbar");
+  await tabbar.locator(".af-tab", { hasText: "Agent" }).click();
+  await expect(page.locator(".af-term-host .af-pane")).toHaveCount(1);
+
+  await dragTabOntoPaneHitTested(page, "preview", "right");
+  await expect(page.locator(".af-term-host .af-pane")).toHaveCount(2, { timeout: 15_000 });
+  await expect(page.locator(".af-term-host iframe.af-webframe")).toHaveCount(1, { timeout: 15_000 });
+  await expect(page.locator(".af-term-host .xterm")).toHaveCount(1);
+
+  // The precondition: really attached, with a real xterm holding the keyboard. (Clicking
+  // the terminal directly — rail+Enter would attach the FOCUSED pane, which the drop just
+  // made the web one.)
+  await page.locator(".af-term-host .xterm").click();
+  await expect(page.locator(".af-app.af-kb-terminal")).toBeVisible();
+
+  // Alt+j cycles pane focus onto the web pane. There is no terminal to hand the keyboard
+  // to, so it must come back to the rail rather than stay with the agent behind us.
+  await page.keyboard.press("Alt+j");
+  await expect(
+    page.locator(".af-app.af-kb-rail"),
+    "cycling onto a pane with no terminal must release the keyboard to the rail",
+  ).toBeVisible();
+
+  // Proof the keyboard really is the rail's: a bare j navigates instead of reaching the
+  // agent we cycled away from.
+  await expect(row(page, SESSION_WEB)).toHaveClass(/af-row-selected/);
+  await page.keyboard.press("j");
+  await expect(
+    row(page, SESSION_WEB),
+    "j must navigate the rail, not land in the terminal we cycled away from",
+  ).not.toHaveClass(/af-row-selected/);
+  await page.keyboard.press("k");
+  await expect(row(page, SESSION_WEB)).toHaveClass(/af-row-selected/);
+
+  // Leave one pane behind, exactly as the tests around this one do.
+  const webPane = page.locator(".af-term-host .af-pane", { has: page.locator("iframe.af-webframe") });
+  await webPane.locator(".af-pane-close").click();
+  await expect(page.locator(".af-term-host .af-pane")).toHaveCount(1, { timeout: 15_000 });
+});
+
 test("split panes (fix): a pane iframe is inert ONLY while dragging — normal interaction is untouched", async () => {
   // The fix must not cost the web tab its interactivity: the frame is inert for the drag
   // and immediately usable again afterwards. Both states are asserted on the live frame.
@@ -2215,6 +2265,33 @@ test("vscode tab (feat): the ▾ menu creates a VS Code tab and the daemon serve
 
   const editorTab = tabbar.locator(".af-tab", { hasText: "vscode" });
   await expect(editorTab).toHaveCount(1, { timeout: 30_000 });
+
+  // Creating the tab must NOT strand the keyboard in terminal mode. createSessionTab
+  // points the focused pane at the new tab and then attaches it — but a VS Code pane
+  // is an iframe with no xterm, so there is nothing to attach to. Before the
+  // SplitView.focus() boolean contract, focusTerminal() committed the app to
+  // focus:"terminal" anyway and the xterm focus silently no-opped, leaving nav.ts
+  // resolving every non-Escape key to {kind:"none"}: j/k/digits/t/w reached neither a
+  // terminal nor the rail handler, so the user was stuck until they pressed Escape.
+  // (The same trap predates VS Code — it applies to any web tab opened from the tab
+  // bar — which is why the fallback lives in focusTerminal rather than this path.)
+  await expect(
+    page.locator(".af-app.af-kb-rail"),
+    "creating a tab with no terminal must fall back to rail mode, not claim terminal mode",
+  ).toBeVisible();
+
+  // The real proof is that rail keys still DO something: j moves the selection.
+  await expect(row(page, SESSION_A)).toHaveClass(/af-row-selected/);
+  await page.keyboard.press("j");
+  await expect(
+    row(page, SESSION_A),
+    "j must still navigate the rail right after creating a VS Code tab",
+  ).not.toHaveClass(/af-row-selected/);
+  await expect(page.locator(".af-rail-list .af-row.af-row-selected")).toHaveCount(1);
+  // k back to A so the editor assertions below run against this session.
+  await page.keyboard.press("k");
+  await expect(row(page, SESSION_A)).toHaveClass(/af-row-selected/);
+
   await editorTab.click();
 
   const frame = page.locator(".af-term-host .af-pane-host iframe.af-webframe");

@@ -1,6 +1,8 @@
 package app
 
 import (
+	"context"
+	"fmt"
 	"reflect"
 	"testing"
 
@@ -685,6 +687,94 @@ func TestClickCommittingWebTabPreviewShowsGuardNotAttach(t *testing.T) {
 	assert.False(t, h.attachTransitioning,
 		"a web tab has no PTY: it must never start a full-screen attach")
 	assert.False(t, h.interactive, "a web tab cannot embed either")
+}
+
+// TestAttachFocusedBrowserOnlyPaneShowsGuardNotAttach pins webTabAttachGuard on
+// the FOCUSED-PANE attach path (handleEnterPane, #1817) — the one path into
+// attachInstanceTab that nothing else fences.
+//
+// The other two callers guard on the SELECTED tab before dispatching, and
+// enterPane runs its own guard (TestClickCommittingWebTabPreviewShowsGuardNotAttach
+// covers that one). But `o` on a focused pane routes handleAttach → handleEnterPane
+// directly, and THAT pane's tab — not the tree selection — is what gets attached.
+// So the guard inside handleEnterPane is the only thing between the user and a WS
+// PTY dial for a browser-only tab that has no PTY to stream; delete it and the
+// low-level attach failure surfaces instead of the message saying where to
+// actually view the tab. Both browser-only kinds run the same path, so both are
+// pinned here.
+//
+// Two fixture details are load-bearing for this test's ability to FAIL:
+//   - Marking helpTypeInstanceAttach seen. Otherwise attachInstanceTab parks on
+//     the first-time help overlay and attachTransitioning stays false — the test
+//     would pass with the guard removed, for the wrong reason.
+//   - Opening the browser-only tab as the focused pane, so focusedOpenPane wins
+//     the handleAttach branch and the selection path is never consulted.
+func TestAttachFocusedBrowserOnlyPaneShowsGuardNotAttach(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		addTab  func(t *testing.T, inst *session.Instance) *session.Tab
+		kind    session.TabKind
+		wantErr string
+	}{
+		{
+			name: "vscode",
+			addTab: func(t *testing.T, inst *session.Instance) *session.Tab {
+				tab, err := inst.AddVSCodeTab("")
+				require.NoError(t, err)
+				return tab
+			},
+			kind:    session.TabKindVSCode,
+			wantErr: "VS Code tab",
+		},
+		{
+			name: "web",
+			addTab: func(t *testing.T, inst *session.Instance) *session.Tab {
+				tab, err := inst.AddWebTab("http://localhost:3000", "")
+				require.NoError(t, err)
+				return tab
+			},
+			kind:    session.TabKindWeb,
+			wantErr: "web tab",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h, inst, _ := interactiveTestHome(t)
+			require.NoError(t, h.appState.SetHelpScreensSeen(
+				helpTypeInteractive{}.mask()|helpTypeInstanceAttach{}.mask()))
+			// Safety net on a shared box: a full-screen attach that escapes the guard
+			// must never dial the real daemon socket. The 20ms beginAttachTransition
+			// tick is not pumped below, so this should stay uncalled either way.
+			t.Cleanup(SetAttachStreamFnForTest(
+				func(context.Context, string, string, string, int) (chan struct{}, error) {
+					t.Errorf("a browser-only tab must never dial a WS PTY stream")
+					return nil, fmt.Errorf("unexpected dial")
+				}))
+
+			tab := tc.addTab(t, inst)
+			require.Equal(t, tc.kind, tab.Kind)
+			tabIdx := len(inst.GetTabs()) - 1
+
+			// The browser-only tab IS the focused pane — the handleAttach fast path.
+			p := openTestPane(t, h, inst, tabIdx)
+			require.Same(t, p, h.focusedOpenPane(), "the browser-only tab must own focus")
+			require.Equal(t, tabIdx, p.Tab())
+
+			_, _ = h.handleAttach() // `o`
+
+			// Asserted synchronously, without draining cmds — same discipline as
+			// TestClickCommittingWebTabPreviewShowsGuardNotAttach: the returned batch
+			// carries handleError's 3s transient-clear timer, and running it would
+			// deliver hideErrMsg and wipe the very notice under test.
+			// beginAttachTransition arms attachTransitioning synchronously, so a
+			// wrongly-dispatched attach is visible here with no tick to pump.
+			assert.Contains(t, h.errBox.FullError(), tc.wantErr,
+				"the user must be pointed at the web UI, not handed a PTY-attach failure")
+			assert.False(t, h.attachTransitioning,
+				"a %s tab has no PTY: `o` must never start a full-screen attach", tc.name)
+			assert.False(t, h.attached.Load())
+			assert.False(t, h.interactive, "a browser-only tab cannot embed either")
+		})
+	}
 }
 
 // TestPaneErrorLabelNamesSessionOrFallsBack covers the cosmetic half of #1819:

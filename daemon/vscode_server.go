@@ -1,10 +1,6 @@
 package daemon
 
 import (
-	"context"
-	"crypto/rand"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"html"
@@ -53,8 +49,11 @@ import (
 // still cannot tell who is behind a path); the race it could lose stopped
 // existing.
 //
-// Socket names are per-PROCESS, not per session, and that is load-bearing rather
-// than incidental — see vscodeSocketPath.
+// THIS FILE owns the supervisor's LIFECYCLE: spawn, readiness, respawn, teardown.
+// vscode_socket.go owns the transport those steps act on — how the socket is
+// named, secured, dialed, and swept. The one cross-file rule worth carrying in
+// your head: socket names are per-PROCESS, not per session (vscodeSocketPath), so
+// releasing a socket is always safe and never races the respawn.
 //
 // af NEVER bundles or installs the editor: the binary is DETECTED (an explicit
 // vscode_server_binary, else code-server, else openvscode-server on PATH). When
@@ -77,47 +76,13 @@ const vscodeStartGrace = 3 * time.Second
 // the cooldown the recorded error is replayed instead of spawning again.
 const vscodeRespawnCooldown = 5 * time.Second
 
-// vscodeProbeInterval is how often ensureServer re-probes the port while waiting
-// for a starting editor to accept connections.
+// vscodeProbeInterval is how often ensureServer re-probes the socket while
+// waiting for a starting editor to accept connections.
 const vscodeProbeInterval = 100 * time.Millisecond
 
 // vscodeStopGrace is how long a stopping editor gets to exit on SIGTERM before
 // the process GROUP is SIGKILLed, mirroring the watcher supervisor's escalation.
 const vscodeStopGrace = 5 * time.Second
-
-// vscodeSocketDirName is the directory, under the af home, holding every editor
-// socket. It is kept SHORT deliberately: every byte of it counts against the
-// sockaddr_un path limit (see vscodeSocketPath).
-const vscodeSocketDirName = "vscode"
-
-// vscodeSocketExt is the socket file's extension. The sweep matches on it, so a
-// file the daemon did not create is never removed.
-const vscodeSocketExt = ".sock"
-
-// vscodeSocketMode is the socket's file mode, passed to code-server's
-// --socket-mode and applied by startOne for flavors that have no mode flag. 0600:
-// the owning user only, matching the daemon's own control socket.
-const vscodeSocketMode = "0600"
-
-// maxUnixSocketPathLen bounds a socket path. sockaddr_un.sun_path is 108 bytes on
-// Linux and 104 on macOS; 103 is the portable ceiling once the NUL terminator is
-// counted. Exceeding it fails inside the kernel as an opaque "invalid argument",
-// so the limit is checked up front where the message can name the cause.
-const maxUnixSocketPathLen = 103
-
-// vscodeUpstreamHost is the Host the proxy presents to a socket-bound editor.
-//
-// A unix socket has no host, but HTTP still requires one, and it must be STABLE
-// and ours: the editor echoes it into any self-redirect, and rewriteUpstreamRef
-// only pulls a redirect back under the tab prefix when its host matches the
-// target's. A .invalid name (RFC 2606) can never resolve, so it cannot be
-// confused with a real origin and no stray DNS lookup can escape.
-const vscodeUpstreamHost = "vscode.invalid"
-
-// vscodeUpstreamURL is the dummy base URL of a socket-bound editor. The transport
-// dials the socket and ignores the host entirely; only the path and the Host
-// header survive to the child.
-const vscodeUpstreamURL = "http://" + vscodeUpstreamHost
 
 // errVSCodeBinaryMissing reports that no editor binary could be found. It is a
 // SENTINEL, not a failure: callers render the install hint for it and must not
@@ -215,28 +180,33 @@ func resolveVSCodeBinary(configured string) (string, error) {
 // `--abs-proxy-base-path` is NOT that flag — it only prefixes code-server's own
 // /absproxy/<port> feature and has no effect on serving code-server itself under
 // a sub-path (coder/code-server#6770). Passing it here would be a no-op at best.
+// openvscode-server DOES have a real base-path flag (--server-base-path), and it
+// is still the wrong tool: it bakes ONE prefix into the process, while a single
+// per-SESSION editor is reached under a different prefix per tab. The proxy sends
+// X-Forwarded-Prefix instead, which openvscode reads per request (and takes in
+// PRECEDENCE over --server-base-path), so it composes with a shared editor.
+//
+// NOTE on the worktree: the flavors take it DIFFERENTLY, and the difference is
+// invisible if you get it wrong. code-server reads a POSITIONAL path.
+// openvscode-server does not: its webClientServer resolves the workbench folder
+// only from --default-folder / --default-workspace, and although its parser
+// accepts '_', it never reads it — so a positional worktree was ACCEPTED SILENTLY
+// AND IGNORED, and the fallback editor came up empty (or on the last workspace)
+// rather than on the session. cmd.Dir does not rescue it either; the web client
+// server never derives the folder from cwd. ('folder' is a third spelling, but it
+// is deprecated upstream in favor of exactly this one.) Verified against
+// openvscode-server 1.109.5: positional yields no folderUri in the workbench,
+// --default-folder opens the worktree. (#1880)
 func vscodeArgs(flavor vscodeFlavor, socketPath, worktree string) []string {
 	switch flavor {
 	case flavorOpenVSCode:
 		return []string{
 			"--socket-path", socketPath,
-			// openvscode-server's --auth-none equivalent. Safe here because the
-			// only route to the socket is the daemon proxy, which applies the
-			// daemon's auth policy, and the socket's 0600-in-0700 perms restrict
-			// it to the owning user.
+			// openvscode-server's --auth none equivalent: no token on any request.
+			// Same posture, and the same reasoning, as code-server's below: the
+			// socket's 0600-in-0700 perms are what authenticate, and the daemon
+			// proxy is the only route to it.
 			"--without-connection-token",
-			// The worktree must be a FLAG, not a positional path: openvscode-server
-			// resolves the workbench folder only from --default-folder, and its
-			// parser ACCEPTS a positional argument while never reading it — so a
-			// positional worktree is silently ignored and the editor opens empty
-			// (cmd.Dir does not rescue it either; the web client server never
-			// derives the folder from cwd). Verified against openvscode-server
-			// 1.109.5: positional → no folderUri in the workbench, --default-folder
-			// → the worktree opens. code-server, by contrast, DOES read a
-			// positional path, which is why the two branches differ.
-			//
-			// Found by the #1817 post-merge review and fixed in flight by #1880;
-			// carried here because this rewrite owns the line.
 			"--default-folder", worktree,
 		}
 	default:
@@ -245,9 +215,10 @@ func vscodeArgs(flavor vscodeFlavor, socketPath, worktree string) []string {
 			// this replaces the TCP listener rather than adding to it.
 			"--socket", socketPath,
 			"--socket-mode", vscodeSocketMode,
-			// Safe ONLY because the sole route to the socket is the daemon proxy,
-			// which applies the daemon's own auth policy, and the socket's perms
-			// restrict it to the owning user.
+			// No auth on the editor itself, and unlike before it needs none: the
+			// daemon proxy is the only route to the socket, and the socket's
+			// 0600-in-0700 perms restrict it to the owning user. (Before #1873 this
+			// sat on a loopback port that any local process could reach.)
 			"--auth", "none",
 			// code-server AUTO-GENERATES ~/.config/code-server/config.yaml (with a
 			// random password) when no config exists. Point it at /dev/null so a
@@ -343,108 +314,124 @@ type vscodeServer struct {
 	// instead of a 502 from a socket that is not listening yet.
 	ready bool
 
-	// exited is closed by the reaping goroutine when the child exits, so alive
-	// can distinguish "running" from "died" without a syscall.
+	// exited is closed by the reaping goroutine once the child has been reaped AND
+	// its process group SIGKILLed, so alive can distinguish "running" from "died"
+	// without a syscall — and so a closed exited means the whole group is gone,
+	// not merely the leader.
 	exited chan struct{}
+
+	// killGroup overrides the process-group signal syscall. Teardown's correctness
+	// is about WHICH signals are sent and WHEN, which a test can only observe by
+	// intercepting them; nil means the real syscall.
+	//
+	// Test seam, and it must be in place at CONSTRUCTION, never written after:
+	// reap() runs on its own goroutine from the moment of the spawn and reads this
+	// on its way out, so a later write is an unsynchronized write against an
+	// already-running reader. A spawned server therefore inherits it from
+	// vscodeSupervisor.killGroup, which startOne copies in before it starts the
+	// reaper; only a test that builds a vscodeServer directly — no reaper, no
+	// second goroutine — may set it inline.
+	killGroup func(pgid int, sig syscall.Signal) error
 }
 
-// newVSCodeTransport builds the transport that reaches an editor on socketPath.
+// signalGroup sends sig to the child's process GROUP, through the killGroup seam
+// when one is set.
+func (s *vscodeServer) signalGroup(pgid int, sig syscall.Signal) {
+	if s.killGroup != nil {
+		_ = s.killGroup(pgid, sig)
+		return
+	}
+	_ = syscall.Kill(-pgid, sig)
+}
+
+// reap Waits the child, SIGKILLs its process GROUP, releases its socket, and
+// closes exited — in that order, all four of which are load-bearing. Runs as one
+// goroutine per spawn.
 //
-// DialContext DISCARDS the network and address it is handed: those come from the
-// dummy vscode.invalid URL, which exists only to satisfy HTTP and must never be
-// resolved. The socket path is captured here instead, so the target of every dial
-// is fixed at spawn by the daemon and cannot be influenced by a request.
-func newVSCodeTransport(socketPath string) *http.Transport {
-	return &http.Transport{
-		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-			var d net.Dialer
-			return d.DialContext(ctx, "unix", socketPath)
-		},
-		// A cold editor loads a few hundred assets, so keep-alive matters; the
-		// idle timeout just stops a closed pane holding sockets open forever.
-		MaxIdleConns:    32,
-		IdleConnTimeout: 90 * time.Second,
-	}
+// Always Wait(): without it an exited editor stays a zombie parented to the daemon
+// for the daemon's whole life (#816).
+//
+// The group SIGKILL lives HERE, not in stop(), because this is the ONLY moment at
+// which -pgid is provably still ours. POSIX XBD 3.297: while a process group with
+// a given id exists, that id is not reused. So any child that outlived the leader
+// — an extension host, a pty host, a terminal that ignored SIGTERM — is itself a
+// group member, and a group member PINS -pgid, so this kill cannot land on
+// anything but our own. Escalating from stop() is what was unsafe: stop() runs at
+// an ARBITRARILY LATER lifecycle event (nothing prunes a dead entry from
+// v.servers, so a tab closed hours after a crash still reaches it), by which time
+// the group is long empty, its id reusable, and kill(-pgid) hits a live, unrelated
+// group. That is not theoretical on macOS — a supported platform, PID_MAX 99999,
+// a busy laptop wraps in hours. It mirrors watcher.go's and hooks.go's group kills
+// (#610/#769), which are safe for exactly this reason: each fires microseconds
+// after its OWN Wait(), never across a later event.
+//
+// Killing here is also strictly stronger than killing in stop(): an editor that
+// crashes on its own has its survivors killed AT CRASH TIME, rather than leaking
+// until some later teardown that may never come.
+//
+// close(exited) goes LAST, after both the kill and the socket release. stop()
+// returns the moment exited closes and its callers act immediately —
+// ArchiveSession MOVES the worktree. Closing first would let it move a directory
+// the surviving children still hold open, and would let a caller observe teardown
+// as complete while the editor's socket was still on disk.
+//
+// The socket release is here for the same reason the group kill is: this is the one
+// place that always runs, exactly once, at the moment the process is really gone.
+// See releaseSocket for why stop() is the wrong home for it (#1873).
+func (s *vscodeServer) reap() {
+	// Read the pgid before the Wait that frees it: after this returns, the leader's
+	// pid is the kernel's to give away, and only a surviving group member keeps it
+	// pinned long enough for the kill below to mean what it says.
+	pgid := s.cmd.Process.Pid
+	_ = s.cmd.Wait()
+	s.signalGroup(pgid, syscall.SIGKILL)
+	s.releaseSocket()
+	close(s.exited)
 }
 
-// vscodeEndpoint is how the proxy reaches one running editor: the socket to dial
-// and the transport that dials it. The two travel together because neither is
-// usable alone — the path names an endpoint no URL can express, and the transport
-// is the only thing that knows how to reach it.
-type vscodeEndpoint struct {
-	SocketPath string
-	Transport  *http.Transport
-}
-
-// endpoint is how the proxy reaches this editor.
-func (s *vscodeServer) endpoint() vscodeEndpoint {
-	return vscodeEndpoint{SocketPath: s.socketPath, Transport: s.transport}
-}
-
-// alive reports whether the child is still running.
-func (s *vscodeServer) alive() bool {
-	if s == nil || s.cmd == nil || s.cmd.Process == nil {
-		return false
-	}
-	select {
-	case <-s.exited:
-		return false
-	default:
-		return true
-	}
-}
-
-// stop SIGTERMs the child's process GROUP, then SIGKILLs the group if it has not
-// exited within vscodeStopGrace. The group (not the pid) is signalled because
-// code-server spawns its own children — an extension host and a Node worker per
-// terminal — and signalling only the leader would strand them.
+// stop tears down a LIVE editor: SIGTERM to the child's process GROUP, then
+// SIGKILL to the group if it has not exited within vscodeStopGrace. The group (not
+// the pid) is signalled because code-server spawns its own children — an extension
+// host, a pty host, a Node worker per terminal — and signalling only the leader
+// would strand them.
+//
+// It signals ONLY while the leader is unreaped. Escalating after the leader exits
+// is reap()'s job, which does it adjacent to cmd.Wait(); see reap's doc for why
+// that is the only safe moment. stop() cannot do it itself: waiting for the exit
+// is what reaps it.
 func (s *vscodeServer) stop() {
 	if s == nil || s.cmd == nil || s.cmd.Process == nil {
 		return
 	}
 	pgid := s.cmd.Process.Pid
-	if s.alive() {
-		_ = syscall.Kill(-pgid, syscall.SIGTERM)
-		select {
-		case <-s.exited:
-		case <-time.After(vscodeStopGrace):
-		}
+	// A reaped leader means the reaper has ALREADY SIGKILLed the group — and that
+	// -pgid is no longer provably ours, since an empty group's id is free for the
+	// kernel to hand to an unrelated new group leader. Nothing left to signal, and
+	// no safe way to signal it.
+	if !s.alive() {
+		return
 	}
-	// SIGKILL the GROUP unconditionally, even once the leader is gone. The leader
-	// exiting proves nothing about the rest of the group: code-server spawns an
-	// extension host, a pty host, and a process per integrated terminal, and any of
-	// them can ignore SIGTERM or outlive their parent — returning at leader-exit
-	// would strand exactly those, which is the leak this whole supervisor exists to
-	// prevent. Mirrors the watcher supervisor's unconditional group kill (#610/#769).
-	//
-	// Signalling the group after the leader is reaped is still safe: a process group
-	// stays allocated while ANY member lives, so -pgid cannot be recycled out from
-	// under us while there is something to kill, and an empty group is a harmless
-	// ESRCH.
-	_ = syscall.Kill(-pgid, syscall.SIGKILL)
-	// Reap so the group-kill can't leave a zombie parented to the daemon (#816).
+	// Alive ⇒ unreaped ⇒ the leader still holds the group id ⇒ -pgid is still ours.
+	// (The alive()→signal gap is a microsecond TOCTOU inherent to POSIX group
+	// signalling: there is no pgid handle to pin, and pidfd is per-process.)
+	s.signalGroup(pgid, syscall.SIGTERM)
+	select {
+	case <-s.exited:
+		// exited closes AFTER the reaper's group SIGKILL, so the group is clean and
+		// there is nothing further to escalate to.
+		return
+	case <-time.After(vscodeStopGrace):
+	}
+	if s.alive() {
+		s.signalGroup(pgid, syscall.SIGKILL)
+	}
+	// Wait for the reap so teardown can't return while the group is still up (#816).
+	// The reaper also unlinks the socket before closing exited (releaseSocket), so
+	// a returning stop() leaves neither a live process nor a socket behind.
 	select {
 	case <-s.exited:
 	case <-time.After(vscodeStopGrace):
 		log.WarningLog.Printf("vscode: editor for %s did not exit after SIGKILL", s.worktree)
-	}
-	// Unlink the socket. A SIGKILLed process never cleans up after itself, and an
-	// editor that exits on its own is not guaranteed to either, so without this the
-	// 0700 directory would accumulate a dead socket per session for the daemon's
-	// life. Spawning re-unlinks the path anyway (a stale socket is inert, not a
-	// hazard: nothing listens on it, so a dial gets ECONNREFUSED), which is why the
-	// failure is only logged at debug volume — this is hygiene, not correctness.
-	if s.socketPath != "" {
-		if err := os.Remove(s.socketPath); err != nil && !os.IsNotExist(err) {
-			log.WarningLog.Printf("vscode: removing the editor socket %s failed: %v", s.socketPath, err)
-		}
-	}
-	// Drop pooled connections to the socket we just unlinked. The child is dead so
-	// the kernel has closed them anyway; this releases the descriptors now rather
-	// than leaving them for the transport to discover lazily on a request that
-	// will never come.
-	if s.transport != nil {
-		s.transport.CloseIdleConnections()
 	}
 }
 
@@ -458,7 +445,7 @@ func (s *vscodeServer) stop() {
 // authoritative, observable events, and an idle editor costs nothing meanwhile.
 //
 // It carries its OWN mutex rather than reusing Manager.mu: spawning an editor
-// blocks on process start and a port probe for seconds, and Manager.mu is
+// blocks on process start and a socket probe for seconds, and Manager.mu is
 // deliberately never held across slow calls (see the pausedMu precedent).
 type vscodeSupervisor struct {
 	mu      sync.Mutex
@@ -480,6 +467,14 @@ type vscodeSupervisor struct {
 	startGrace       time.Duration
 	cooldown         time.Duration
 	now              func() time.Time
+
+	// killGroup is the process-group signal seam (see vscodeServer.killGroup),
+	// injected HERE rather than onto the server a spawn hands back because this is
+	// the only place a test can install it safely: startOne copies it into the
+	// server before starting the reaper goroutine that reads it, so the spawn
+	// itself supplies the happens-before edge. Setting it on the returned server
+	// would be a write racing a reader that is already running.
+	killGroup func(pgid int, sig syscall.Signal) error
 }
 
 // vscodeFailure is a remembered spawn failure and when it happened.
@@ -542,7 +537,9 @@ func (v *vscodeSupervisor) ensureServer(key, worktree string) (vscodeEndpoint, e
 			// across the spawn below, so stopping inline would stall every OTHER
 			// session's editor behind this one teardown. It is already unregistered
 			// here, so nothing else can reach it and no one needs to wait for it.
-			// Even a DEAD leader is worth stopping: its children can outlive it.
+			// A DEAD leader needs nothing from stop() — its reaper already killed
+			// the group at the only moment that was safe to — but stop() is correct
+			// and immediate on one, so the branch stays uniform.
 			neverReady := !s.ready && !s.alive()
 			delete(v.servers, key)
 			go s.stop()
@@ -616,21 +613,6 @@ func (v *vscodeSupervisor) probeReady(s *vscodeServer) bool {
 	return true
 }
 
-// secureVSCodeSocket forces socketPath to 0600.
-//
-// Neither flavor can be trusted to have done it: code-server applies
-// --socket-mode only AFTER it finishes listening, and openvscode-server's
-// --socket-path has no mode flag at all, so its socket lands under the daemon's
-// umask. The 0700 parent directory is what makes both gaps harmless; this makes
-// the socket correct in its own right, so the editor's posture does not rest on
-// the directory alone.
-func secureVSCodeSocket(socketPath string) error {
-	if err := os.Chmod(socketPath, 0o600); err != nil {
-		return fmt.Errorf("securing the VS Code socket %s failed: %w", socketPath, err)
-	}
-	return nil
-}
-
 // spawnLocked starts one editor on key's socket and waits for it to listen.
 // Callers must hold v.mu.
 //
@@ -692,13 +674,13 @@ func (v *vscodeSupervisor) startOne(binary string, flavor vscodeFlavor, socketPa
 		transport:  newVSCodeTransport(socketPath),
 		cmd:        cmd,
 		exited:     make(chan struct{}),
+		// Copied in HERE, before the reaper below exists to read it — the seam has
+		// to be installed by construction rather than by a later assignment.
+		killGroup: v.killGroup,
 	}
-	// Always Wait() the child: without it an exited editor stays a zombie
-	// parented to the daemon for the daemon's whole life (#816).
-	go func() {
-		_ = cmd.Wait()
-		close(server.exited)
-	}()
+	// Reap the child AND clean up its process group; see reap's doc for why the
+	// group kill belongs there rather than in stop().
+	go server.reap()
 
 	switch err := waitForSocket(socketPath, server.exited, v.startGrace); {
 	case err == nil:
@@ -718,16 +700,17 @@ func (v *vscodeSupervisor) startOne(binary string, flavor vscodeFlavor, socketPa
 		// killing it here would restart the clock forever and never start.
 		return server, nil
 	default:
-		// The child exited (bad binary, bad worktree) or the port could not be
-		// probed: never leave it running — it would hold the port and be adopted
-		// by the next ensureServer as if it were healthy.
+		// The child exited (bad binary, bad worktree) or the socket could not be
+		// probed: never leave it running. Its socket carries a nonce, so a later
+		// spawn would not adopt it — but the PROCESS would linger, holding the
+		// worktree open and belonging to nothing.
 		server.stop()
 		return nil, err
 	}
 }
 
-// vscodeChildEnv builds the editor's environment from the daemon's, with the
-// tmux ancestry markers REMOVED.
+// vscodeChildEnv builds the editor's environment from the daemon's, with the tmux
+// ancestry markers and VSCODE_IPC_HOOK_CLI REMOVED.
 //
 // This is load-bearing, not hygiene. The daemon inherits its environment from
 // whatever autostarted it — often a TUI running inside an af_ tmux pane — so it
@@ -741,11 +724,36 @@ func (v *vscodeSupervisor) startOne(binary string, flavor vscodeFlavor, socketPa
 // (The tmux teardown reaper is a separate mechanism and never sees this child at
 // all: it captures only a tmux pane's descendants and its pane-SID members, and a
 // daemon child is neither — the daemon is its own session leader via Setsid.)
+//
+// VSCODE_IPC_HOOK_CLI is scrubbed for the same reason and it is just as
+// load-bearing. code-server's shouldOpenInExistingInstance checks it
+// UNCONDITIONALLY, before it starts any server, and when it is set the CLI hands
+// the folder to that existing editor over the IPC socket and EXITS — --bind-addr
+// is never honored. So a daemon started from any VS Code / code-server integrated
+// terminal inherits the var, and then every editor it ever spawns dies during
+// startup (the pane shows a broken-editor notice despite a perfectly good
+// install) while the worktree pops open in the USER's own window instead. The var
+// is fixed in the daemon's environ at exec, so this is sticky for the daemon's
+// whole life — and af's own VS Code tab has an integrated terminal that sets it,
+// which makes `af` run from inside an af VS Code tab poison the daemon.
+//
+// Only what breaks the spawn is scrubbed. The git-askpass family
+// (VSCODE_GIT_ASKPASS_*, VSCODE_GIT_IPC_HANDLE, GIT_ASKPASS) also inherits stale
+// handles, but code-server overwrites those for its own terminals, so removing
+// them buys nothing; the shell-integration markers (VSCODE_INJECTION, VSCODE_PID,
+// TERM_PROGRAM, …) the editor resets itself. Blanket-scrubbing VSCODE_* would
+// trade a filter you can audit against upstream for one that merely looks tidy.
+var vscodeScrubbedEnv = []string{
+	tmux.EnvMarkerSession,
+	tmux.EnvMarkerHome,
+	"VSCODE_IPC_HOOK_CLI",
+}
+
 func vscodeChildEnv() []string {
 	src := os.Environ()
 	out := make([]string, 0, len(src))
 	for _, kv := range src {
-		if strings.HasPrefix(kv, tmux.EnvMarkerSession+"=") || strings.HasPrefix(kv, tmux.EnvMarkerHome+"=") {
+		if hasAnyEnvPrefix(kv, vscodeScrubbedEnv) {
 			continue
 		}
 		out = append(out, kv)
@@ -753,144 +761,14 @@ func vscodeChildEnv() []string {
 	return out
 }
 
-// vscodeSocketDir returns the directory every editor socket lives in, creating it
-// 0700.
-//
-// The 0700 mode is the actual access control (#1873), which is why it is forced
-// on an EXISTING directory too rather than left to MkdirAll (a no-op when the
-// path is already there, so a dir created loose by an older build — or by a
-// permissive umask — would stay loose forever). It fences the socket during the
-// window between the child's bind() and any chmod, and it is the ONLY thing
-// protecting an openvscode-server socket, whose --socket-path has no mode flag.
-// Together with the 0600 socket this gives the editor exactly the posture of the
-// daemon's own control socket: reachable by the owning user, nobody else.
-func vscodeSocketDir() (string, error) {
-	dir, err := config.GetConfigDir()
-	if err != nil {
-		return "", err
-	}
-	sockDir := filepath.Join(dir, vscodeSocketDirName)
-	if err := os.MkdirAll(sockDir, 0o700); err != nil {
-		return "", fmt.Errorf("creating the VS Code socket directory failed: %w", err)
-	}
-	if err := os.Chmod(sockDir, 0o700); err != nil {
-		return "", fmt.Errorf("securing the VS Code socket directory failed: %w", err)
-	}
-	return sockDir, nil
-}
-
-// vscodeSocketPath returns a FRESH socket path for key: a hash of the key, to
-// identify the session, plus a random nonce, to identify the process.
-//
-// The key is hashed rather than used directly because a session key carries a
-// repo id and a user-chosen title — long, possibly non-ASCII, possibly holding a
-// path separator — while a socket path must be one file name inside the socket
-// directory and fits in ~104 bytes.
-//
-// The NONCE is load-bearing, and a key-derived path alone was a bug. Teardown
-// unlinks the socket, and teardown runs CONCURRENTLY with the respawn that
-// replaces it: ensureServer drops a dead-or-stale editor with `go s.stop()` and
-// immediately spawns its replacement under the same key, and stopFor races a
-// concurrent spawn the same way (see the CloseTab window in webtab_proxy.go).
-// With one path per key, the old server's unlink lands AFTER the new server has
-// bound that path and deletes a LIVE editor's socket — leaving it listening on
-// an unnamed socket that no dial can ever reach again. A per-process path makes
-// "unlink my own socket" unconditionally safe, because no other server can ever
-// hold the same one.
-//
-// The length check is a real failure mode, not paranoia: AGENT_FACTORY_HOME can
-// point anywhere (a deep temp dir under CI), and an over-long path fails inside
-// net.Listen as a bare "invalid argument" that names nothing. Fail early instead,
-// naming the directory the operator can move.
-func vscodeSocketPath(key string) (string, error) {
-	dir, err := vscodeSocketDir()
-	if err != nil {
-		return "", err
-	}
-	var nonce [4]byte
-	if _, err := rand.Read(nonce[:]); err != nil {
-		return "", fmt.Errorf("generating the VS Code socket name failed: %w", err)
-	}
-	sum := sha256.Sum256([]byte(key))
-	name := hex.EncodeToString(sum[:4]) + "-" + hex.EncodeToString(nonce[:]) + vscodeSocketExt
-	path := filepath.Join(dir, name)
-	if len(path) > maxUnixSocketPathLen {
-		return "", fmt.Errorf("the VS Code socket path %q is %d bytes, over the %d-byte limit for a unix socket: "+
-			"set AGENT_FACTORY_HOME to a shorter path", path, len(path), maxUnixSocketPathLen)
-	}
-	return path, nil
-}
-
-// sweepAbandonedSockets removes every socket left behind by a PREVIOUS daemon.
-//
-// Socket names carry a nonce, so a dead daemon's sockets are never reused and
-// nothing would otherwise ever remove them — a SIGKILLed daemon would leak one
-// file per session, for the life of the af home. This is the counterpart of that
-// choice, not an extra.
-//
-// It runs once, on the first spawn rather than at construction, and that timing
-// is what makes it safe: a supervisor that has never spawned owns no editors, so
-// every socket in the directory is by definition abandoned. (Waiting for a spawn
-// also means a daemon that never opens an editor neither creates the directory
-// nor touches anything.) The singleton lock guarantees no other daemon owns this
-// af home meanwhile.
-//
-// Best-effort throughout: a failed sweep costs litter, never correctness, and
-// must not stop an editor from starting.
-func (v *vscodeSupervisor) sweepAbandonedSockets() {
-	v.sweepOnce.Do(func() {
-		dir, err := vscodeSocketDir()
-		if err != nil {
-			log.WarningLog.Printf("vscode: %v", err)
-			return
+// hasAnyEnvPrefix reports whether the KEY=VALUE entry kv names any of keys.
+func hasAnyEnvPrefix(kv string, keys []string) bool {
+	for _, k := range keys {
+		if strings.HasPrefix(kv, k+"=") {
+			return true
 		}
-		entries, err := os.ReadDir(dir)
-		if err != nil {
-			log.WarningLog.Printf("vscode: reading the socket directory %s failed: %v", dir, err)
-			return
-		}
-		for _, e := range entries {
-			if filepath.Ext(e.Name()) != vscodeSocketExt {
-				continue
-			}
-			path := filepath.Join(dir, e.Name())
-			if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-				log.WarningLog.Printf("vscode: removing the abandoned socket %s failed: %v", path, err)
-			}
-		}
-	})
-}
-
-// waitForSocket blocks until socketPath accepts a connection (nil), the child
-// exits (a real error), or grace elapses (errVSCodeStarting — still coming up).
-//
-// Watching exited is what separates the two failure shapes: a child that dies
-// instantly (a bad binary, an unreadable worktree) is reported immediately and
-// accurately instead of being mistaken for a slow start and waited out.
-//
-// Unlike the TCP probe this replaces, a successful dial here PROVES the connection
-// is our child (#1873). startOne unlinked the path and only the daemon can write
-// the 0700 directory, so nothing else can have created the socket — where the old
-// waitForPort could dial a foreign listener that won a port race and report it as
-// our ready editor.
-func waitForSocket(socketPath string, exited <-chan struct{}, grace time.Duration) error {
-	deadline := time.Now().Add(grace)
-	for {
-		select {
-		case <-exited:
-			return fmt.Errorf("the VS Code server exited during startup (check that it runs correctly: it was asked to serve %s)", socketPath)
-		default:
-		}
-		conn, err := net.DialTimeout("unix", socketPath, vscodeProbeInterval)
-		if err == nil {
-			_ = conn.Close()
-			return nil
-		}
-		if time.Now().After(deadline) {
-			return errVSCodeStarting
-		}
-		time.Sleep(vscodeProbeInterval)
 	}
+	return false
 }
 
 // stopFor tears down the editor for key, if any. Safe to call for a session that

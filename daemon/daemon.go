@@ -78,6 +78,25 @@ func RunDaemon(cfg *config.Config) error {
 		return err
 	}
 
+	// Stop every daemon-spawned VS Code editor on the way out. Without this a
+	// shutdown would strand a code-server per session, still holding its loopback
+	// port and now reachable by nothing — the leak class this feature must not
+	// introduce. (A SIGKILLed daemon still orphans them; ensureServer's
+	// worktree-checked reuse means a restarted daemon starts fresh editors rather
+	// than adopting the strays.)
+	//
+	// Registered HERE — the instant the supervisor exists, before the control
+	// socket and HTTP server bind — rather than after the instance restore, so the
+	// warm-up exit paths cannot skip it. Both early returns from the restore select
+	// below (SIGTERM and the Shutdown RPC) leave RunDaemon without ever reaching
+	// the post-restore section, and an editor CAN exist by then: the webtab proxy
+	// route is serving from the moment the HTTP server binds, and it resolves its
+	// session through refreshLocked, which loads instances from disk on its own. So
+	// a stale iframe refresh during a slow restore can drive its own restore, spawn
+	// an editor, and a SIGTERM moments later would orphan it. Deferring at the
+	// point of construction makes the stop unconditional on how far startup got.
+	defer manager.vscode.Stop()
+
 	scheduler := newTaskScheduler()
 	watchers := newWatcherSupervisor()
 
@@ -184,14 +203,6 @@ func RunDaemon(cfg *config.Config) error {
 		log.WarningLog.Printf("failed to start task watchers: %v", err)
 	}
 	defer watchers.Stop()
-
-	// Stop every daemon-spawned VS Code editor on the way out. Without this a
-	// shutdown would strand a code-server per session, still holding its loopback
-	// port and now reachable by nothing — the leak class this feature must not
-	// introduce. (A SIGKILLed daemon still orphans them; ensureServer's
-	// worktree-checked reuse means a restarted daemon starts fresh editors rather
-	// than adopting the strays.)
-	defer manager.vscode.Stop()
 
 	pollInterval := time.Duration(cfg.DaemonPollInterval) * time.Millisecond
 

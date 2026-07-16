@@ -318,10 +318,37 @@ export class SplitView {
     this.commit();
   }
 
-  /** Gives the keyboard to the focused pane's terminal (attach). */
-  focus(): void {
+  /** Gives the keyboard to the focused pane's terminal (attach), returning whether
+   *  a terminal actually took it. False means there was nothing to focus: a web or
+   *  VS Code tab renders an iframe and carries no term (mountWebPane leaves
+   *  pane.term null), as does an empty tree. Callers that put the app into
+   *  "terminal" mode MUST honor a false return and fall back — see focusTerminal()
+   *  in index.ts — or the app claims the keyboard is in a terminal that does not
+   *  exist and swallows every rail key until Escape. */
+  focus(): boolean {
     const pane = this.focusedId ? this.panes.get(this.focusedId) : null;
-    pane?.term?.focus();
+    if (!pane?.term) {
+      return false;
+    }
+    pane.term.focus();
+    return true;
+  }
+
+  /** Hands the keyboard to the focused pane, or takes it away from EVERY pane when
+   *  that pane has no terminal to hand it to (a web/VS Code tab is an iframe).
+   *
+   *  The else-branch is load-bearing, and every internal "focus the pane we just moved
+   *  to" site must go through here rather than calling focus() bare. Without it, focus()
+   *  silently no-ops and the PREVIOUSLY focused pane's xterm keeps DOM focus: the header
+   *  highlights the pane the user cycled TO while their keystrokes still reach the agent
+   *  they cycled AWAY from — a silent wrong target, which is worse than the silent
+   *  no-target focusTerminal() used to produce. blur() reports out through
+   *  onFocusChange(false), which is how this class asks index.ts for rail mode: SplitView
+   *  owns no store, so it cannot call focusRail() itself — the callback IS that path. */
+  private refocus(): void {
+    if (!this.focus()) {
+      this.blur();
+    }
   }
 
   /** Takes the keyboard away from every pane (back to rail nav). */
@@ -348,14 +375,14 @@ export class SplitView {
     }
     const ids = leaves(this.tree).map((l) => l.id);
     if (ids.length <= 1) {
-      this.focus();
+      this.refocus();
       return;
     }
     const cur = this.focusedId ? ids.indexOf(this.focusedId) : -1;
     const next = ids[(cur + delta + ids.length) % ids.length];
     if (next) {
       this.focusPane(next);
-      this.focus();
+      this.refocus();
     }
   }
 
@@ -438,7 +465,7 @@ export class SplitView {
       this.focusedId = leaves(this.tree)[0]?.id ?? null;
     }
     this.commit();
-    this.focus();
+    this.refocus();
   }
 
   // --- internal: reconcile tree → DOM + terminals ---------------------------
@@ -969,7 +996,7 @@ export class SplitView {
         this.focusedId = landed.id;
       }
       this.commit();
-      this.focus();
+      this.refocus();
     });
   }
 
