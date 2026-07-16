@@ -141,6 +141,17 @@ func init() {
 		"Alias for --yes: skip the typed WIPE confirmation")
 }
 
+// Indirection points so reset tests can exercise runReset's daemon, autostart,
+// and tmux handling without signaling a real daemon, touching the host's
+// systemctl/launchctl unit, or killing real tmux sessions. autostartInstalledFn
+// (daemoncmd.go) is shared.
+var (
+	pauseAutostartUnitFn  = daemon.PauseAutostartUnit
+	resumeAutostartUnitFn = daemon.ResumeAutostartUnit
+	stopDaemonFn          = daemon.StopDaemon
+	cleanupTmuxSessionsFn = func() error { return tmux.CleanupSessions(cmdutil.MakeExecutor()) }
+)
+
 func runReset(cmd *cobra.Command, _ []string) error {
 	log.Initialize(false)
 	defer log.Close()
@@ -171,23 +182,56 @@ func runReset(cmd *cobra.Command, _ []string) error {
 		return nil
 	}
 
-	// 4. Stop the daemon before touching its state on disk. StopDaemon only
-	//    finds daemons that wrote a PID file; a pre-1.0.69 daemon leaves none,
-	//    so only claim success when we actually stopped one (#937).
-	stopped, err := daemon.StopDaemon()
+	// 4. Stop the daemon before touching its state on disk — and keep it
+	//    stopped. StopDaemon alone is not enough when the autostart unit is
+	//    installed: the service manager relaunches a daemon that exits
+	//    uncleanly, and a daemon relaunched mid-wipe restores sessions from
+	//    the very records the wipe is deleting — re-spawning their tmux
+	//    sessions and hooks, and holding ghost instances with no storage
+	//    backing. Pause the unit first and resume it once the wipe is done;
+	//    the resumed unit starts the daemon again with the clean state, which
+	//    is the restart the summary promises. A pause failure only warns: the
+	//    wipe is the user's explicit, confirmed intent, and the pre-pause
+	//    behavior it degrades to is a narrow race, not a certain failure.
+	paused := false
+	if autostartInstalledFn() {
+		if err := pauseAutostartUnitFn(); err != nil {
+			fmt.Fprintf(out, "warning: could not pause the daemon autostart unit (%v) — if the daemon restarts mid-reset, re-run `af reset`\n", err)
+		} else {
+			paused = true
+			fmt.Fprintln(out, "Daemon autostart paused for the wipe")
+			defer func() {
+				if err := resumeAutostartUnitFn(); err != nil {
+					fmt.Fprintf(out, "warning: could not resume the daemon autostart unit (%v) — run `af daemon install` to re-arm it\n", err)
+					return
+				}
+				fmt.Fprintln(out, "Daemon autostart resumed")
+			}()
+		}
+	}
+
+	//    StopDaemon covers any daemon the unit did not own (ad hoc, or no unit
+	//    installed). It only finds daemons that wrote a PID file; a pre-1.0.69
+	//    daemon leaves none, so only claim success when we actually stopped
+	//    one (#937).
+	stopped, err := stopDaemonFn()
 	if err != nil {
 		return err
 	}
-	if stopped {
+	switch {
+	case stopped:
 		fmt.Fprintln(out, "daemon has been stopped")
-	} else {
+	case paused:
+		// The unit stop above already took the supervised daemon down; a
+		// no-op StopDaemon is the expected outcome, not a stray-daemon hint.
+	default:
 		fmt.Fprintln(out, "No managed daemon was stopped (no PID file, or the recorded process was already gone). "+
 			"If an old daemon is still running (e.g. one built from source as `agent-factory --daemon`), "+
 			"stop it with: pkill -f -- '--daemon'")
 	}
 
 	// 5. Clean up tmux sessions before deleting the records that name them.
-	if err := tmux.CleanupSessions(cmdutil.MakeExecutor()); err != nil {
+	if err := cleanupTmuxSessionsFn(); err != nil {
 		return fmt.Errorf("failed to cleanup tmux sessions: %w", err)
 	}
 	fmt.Fprintln(out, "Tmux sessions have been cleaned up")
