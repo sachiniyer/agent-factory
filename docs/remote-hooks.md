@@ -2,7 +2,7 @@
 
 Agent Factory ships two first-class off-box backends — [`docker` and `ssh`](backends.md) — that need zero scripting. The **remote-hook backend** is the escape hatch for infrastructure those don't model (Kubernetes, Modal, Daytona, a bastion with exotic auth, a bespoke orchestrator): you provide two shell scripts and `af` runs your session on whatever you provision.
 
-Since **#1592 Phase 4 PR7** the hook backend follows the same **provision-and-expose** contract as `docker`/`ssh`: your `launch_cmd` starts an [`af agent-server`](backends.md) in the remote workspace and echoes its authed URL; the daemon then drives the session over that `ws://` stream. A remote-hook session is behaviorally identical to a local one — attach, type, resize, tabs, preview, archive/restore, kill — because it is driven through the exact same agent-server protocol.
+Since **#1592 Phase 4 PR7** the hook backend follows the same **provision-and-expose** contract as `docker`/`ssh`: your `launch_cmd` starts an [`af agent-server`](backends.md) in the remote workspace and echoes its authed URL; the daemon then drives the session over that `ws://` stream. A remote-hook session matches a local one on attach, type, resize, preview, archive/restore, and kill — the one exception is tab management (see [Capabilities & the agent-server](#capabilities--the-agent-server)).
 
 > **Transport:** the `af agent-server` serves **plain HTTP** (no TLS — af terminates none of its own). The URL must be `http://` (or `ws://`), and the bearer token travels over the connection, so your `launch_cmd` must make the agent-server reachable from the daemon over a private network or tunnel it controls (a container's published loopback port, an SSH forward, a tailnet address).
 
@@ -92,11 +92,11 @@ Tears down whatever `launch_cmd` provisioned (the runtime teardown). Runs on kil
 
 ## Capabilities & the agent-server
 
-Because the session is driven through a real `af agent-server`, a remote-hook session has **full parity** with local and docker/ssh:
+Because the session is driven through a real `af agent-server`, a remote-hook session matches local and docker/ssh on every capability **except tab management**:
 
-- **Attach / input / resize / tabs** happen client-side over the agent-server's `ws://` PTY stream — there is no hook attach proxy or preview-capture loop anymore.
+- **Attach / input / resize** happen client-side over the agent-server's `ws://` PTY stream — there is no hook attach proxy or preview-capture loop anymore.
 - **Preview / liveness / prompt delivery** go over the same REST surface.
-- The agent-server manages tabs natively, so a remote session gets its Agent tab (and shell tabs) with no per-config gating.
+- The agent-server drives the terminal surface, so a remote session gets its Agent tab with no per-config gating. **Adding or closing tabs is not supported** off-box: every `Add*Tab` path needs a daemon-side git worktree an off-box workspace does not have, so the tab list is fixed at the single agent tab.
 
 ## Archive & restore
 
