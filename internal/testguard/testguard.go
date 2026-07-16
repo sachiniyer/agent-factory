@@ -392,38 +392,6 @@ func SocketPath(t *testing.T, name string) string {
 	return p
 }
 
-// SkipDarwinFIFOCapture skips a test that drives a real PTY-capture FIFO through
-// its teardown on darwin.
-//
-// THIS SKIP HIDES A REAL DEFECT (#1943) — it is not a harness quirk. Go marks a
-// FIFO opened via os.OpenFile NON-POLLABLE on darwin (golang/go#24164), so its
-// reads issue a genuine blocking syscall.Read that Close() cannot interrupt — the
-// very trick session/ptybroker.go's teardown relies on. On macOS readLoop never
-// returns, stopCapture blocks forever on <-done while holding captureMu, and that
-// broker wedges permanently. The macOS CI run caught it as a 10-minute timeout
-// with the read stuck in syscall.read (internal/poll/fd_unix.go:161 — the
-// non-pollable path), not parked on the poller as it would be on Linux.
-//
-// Confirmed in the wild, not just in CI: #1943 is a user's SIGQUIT dump from a
-// daemon wedged 95 minutes by this exact chain — session delete seizes the whole
-// daemon on macOS because the kill holds the manager lock while this read never
-// returns.
-//
-// Skipped rather than deleted or weakened so the darwin job can go green on what
-// IS fixable while this stays visible and attributable. TO REVERSE: grep for
-// SkipDarwinFIFOCapture, delete this helper and its call sites, and let the macOS
-// job confirm the fix — those tests reproduce the seize deterministically on every
-// darwin run, so they ARE the regression signal and no new test is needed. Delete
-// it — do not extend it to new tests — when #1943 makes these reads interruptible.
-func SkipDarwinFIFOCapture(t *testing.T) {
-	t.Helper()
-	if runtime.GOOS == "darwin" {
-		t.Skip("PTY capture teardown deadlocks on darwin: FIFO reads are non-pollable so " +
-			"Close() never interrupts readLoop — see #1943 (REAL DEFECT, not a test-harness " +
-			"assumption; this test times out rather than fails)")
-	}
-}
-
 // RequireProcFS skips a test whose subject depends on reading Linux's /proc.
 //
 // THIS SKIP HIDES A REAL DEFECT (#1939) — it is not a harness quirk.

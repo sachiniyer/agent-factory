@@ -4,7 +4,6 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/sachiniyer/agent-factory/internal/testguard"
 	"github.com/sachiniyer/agent-factory/log"
 
 	"github.com/stretchr/testify/assert"
@@ -267,7 +266,6 @@ func TestTabTmuxByID_NotStartedIsNotGone(t *testing.T) {
 // by a closed tab's id must not hand back the broker of whatever tab shifted into
 // its old ordinal — that misroute is exactly what the stable id exists to prevent.
 func TestSubscribeTab_RefusesStaleID(t *testing.T) {
-	testguard.SkipDarwinFIFOCapture(t)
 	log.Initialize(false)
 	defer log.Close()
 
