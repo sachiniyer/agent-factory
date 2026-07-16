@@ -4,7 +4,6 @@ import (
 	"context"
 
 	tea "github.com/charmbracelet/bubbletea"
-
 	"github.com/sachiniyer/agent-factory/config"
 )
 

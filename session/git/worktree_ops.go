@@ -3,12 +3,11 @@ package git
 import (
 	"errors"
 	"fmt"
+	"github.com/sachiniyer/agent-factory/log"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
-
-	"github.com/sachiniyer/agent-factory/log"
 )
 
 // Setup creates a new worktree for the session

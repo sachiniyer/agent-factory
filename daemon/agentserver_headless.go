@@ -11,7 +11,6 @@ import (
 	"syscall"
 
 	"github.com/coder/websocket"
-
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"

@@ -3,6 +3,9 @@ package daemon
 import (
 	"encoding/json"
 	"fmt"
+	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/log"
+	"github.com/sachiniyer/agent-factory/session"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -13,10 +16,6 @@ import (
 	"sync"
 	"syscall"
 	"time"
-
-	"github.com/sachiniyer/agent-factory/config"
-	"github.com/sachiniyer/agent-factory/log"
-	"github.com/sachiniyer/agent-factory/session"
 )
 
 // restoreManagerForStartup is the warm-up restore entry point RunDaemon uses.

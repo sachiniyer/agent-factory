@@ -3,10 +3,9 @@ package session
 import (
 	"encoding/json"
 	"fmt"
-	"time"
-
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/log"
+	"time"
 )
 
 // InstanceData represents the serializable data of an Instance
