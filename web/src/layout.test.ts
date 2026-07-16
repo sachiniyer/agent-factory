@@ -12,8 +12,10 @@ import {
   type LayoutNode,
   leafCount,
   leaves,
+  remapByIdentity,
   replaceTab,
   resetIds,
+  sameLayout,
   setRatio,
   singleLeaf,
   splitLeaf,
@@ -162,4 +164,85 @@ test("findLeaf: locates a leaf by id, or null", () => {
   const id = leaves(two)[1].id;
   assert.equal(findLeaf(two, id)?.tab, 1);
   assert.equal(findLeaf(two, "nope"), null);
+});
+
+// sameLayout is the guard that decides whether reconcile re-inserts the split DOM,
+// and re-inserting it detaches every live pane — which drops the scroll offset of a
+// scrolled terminal (#1894). So these pin "would this rebuild?" as a contract, at the
+// layer where it is cheap to check; the Playwright selftest proves the visible effect.
+
+test("sameLayout: a tree is the same layout as itself", () => {
+  resetIds();
+  const root = splitLeaf(singleLeaf(0), leaves(singleLeaf(0))[0].id, "right", 1);
+  assert.equal(sameLayout(root, root), true);
+});
+
+test("sameLayout: null (nothing built yet) is never the same layout", () => {
+  resetIds();
+  const root = singleLeaf(0);
+  assert.equal(sameLayout(root, null), false);
+  assert.equal(sameLayout(null, root), false);
+  assert.equal(sameLayout(null, null), true);
+});
+
+// THE regression (local Codex review of #1894): setRatio rebuilds every SplitNode it
+// walks, so persisting a divider drag returns a fresh root for a layout that is
+// already on screen — the drag applied the ratio to the live DOM as it went. A
+// reference check calls that a change and rebuilds, rewinding the scrolled terminal
+// on the next roster resync. Re-setting the ratio a drag already applied must be a
+// no-op to the DOM.
+test("sameLayout: setRatio to the ratio already in the DOM is not a layout change", () => {
+  resetIds();
+  const one = singleLeaf(0);
+  const root = splitLeaf(one, leaves(one)[0].id, "right", 1);
+  const splitId = root.kind === "split" ? root.id : "";
+  // What the drag does: mutate the live node in place (the DOM follows it live)...
+  if (root.kind === "split") {
+    root.ratio = 0.3;
+  }
+  // ...then persist it on pointer-up, which allocates a whole new node graph.
+  const persisted = setRatio(root, splitId, 0.3);
+  assert.notEqual(persisted, root, "setRatio really does allocate a fresh root");
+  assert.equal(
+    sameLayout(persisted, root),
+    true,
+    "persisting a ratio the DOM already shows must not force a rebuild",
+  );
+});
+
+test("sameLayout: a ratio the DOM has NOT applied is a layout change", () => {
+  resetIds();
+  const one = singleLeaf(0);
+  const root = splitLeaf(one, leaves(one)[0].id, "right", 1);
+  const splitId = root.kind === "split" ? root.id : "";
+  const resized = setRatio(root, splitId, 0.8);
+  assert.equal(sameLayout(resized, root), false, "a real ratio change must rebuild to apply it");
+});
+
+// A leaf's tab is excluded on purpose: the pane CONTAINER is keyed by leaf id, and
+// which tab it streams is settled by reconcile's identity check, which rebuilds the
+// terminal inside the container without disturbing the container. If tab counted here,
+// any out-of-band reorder would re-insert the DOM and re-arm the rewind.
+test("sameLayout: a leaf whose tab merely moved ordinal is not a layout change", () => {
+  resetIds();
+  const one = singleLeaf(0);
+  const root = splitLeaf(one, leaves(one)[0].id, "right", 1);
+  // The roster reorders under it: the same tabs, swapped ordinals.
+  const remapped = remapByIdentity(root, ["a", "b"], ["b", "a"]);
+  assert.deepEqual(tabs(remapped).sort(), tabs(root).sort(), "the same tabs are still shown");
+  assert.equal(
+    sameLayout(remapped, root),
+    true,
+    "a reorder rebinds terminals, it does not re-insert the DOM",
+  );
+});
+
+test("sameLayout: splitting really is a layout change", () => {
+  resetIds();
+  const root = singleLeaf(0);
+  const split = splitLeaf(root, leaves(root)[0].id, "right", 1);
+  assert.equal(sameLayout(split, root), false);
+  // ...and so is closing a pane back down.
+  const closed = closeLeaf(split, leaves(split)[1].id);
+  assert.equal(sameLayout(closed, split), false);
 });

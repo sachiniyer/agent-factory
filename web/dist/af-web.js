@@ -7122,6 +7122,18 @@ function replaceTab(root2, leafId, tab) {
   const updated = mapLeaf(root2, leafId, (leaf) => ({ ...leaf, tab }));
   return dedupeExcept(updated, tab, leafId);
 }
+function sameLayout(a, b) {
+  if (a === b) {
+    return true;
+  }
+  if (a === null || b === null) {
+    return false;
+  }
+  if (a.kind === "leaf" || b.kind === "leaf") {
+    return a.kind === "leaf" && b.kind === "leaf" && a.id === b.id;
+  }
+  return a.id === b.id && a.dir === b.dir && a.ratio === b.ratio && sameLayout(a.a, b.a) && sameLayout(a.b, b.b);
+}
 function setRatio(root2, splitId, ratio) {
   const clamped = Math.min(0.9, Math.max(0.1, ratio));
   const rec = (node) => {
@@ -7741,6 +7753,24 @@ var SplitView = class {
   archived = false;
   tree = null;
   focusedId = null;
+  // The tree the CURRENT split DOM was built from, so reconcile can tell a real
+  // layout change from a resync that left the layout alone (#1815 scroll fix).
+  //
+  // Re-inserting a pane's container — even the very same element, into the very
+  // same parent — detaches it, and the browser drops the scroll offset of every
+  // scrollable descendant on detach. xterm keeps its own scroll position (ydisp)
+  // but its .xterm-viewport silently rewinds to 0, and a viewport pinned at the
+  // top emits no scroll event, so wheel-up goes dead until the next chunk of
+  // output resyncs it — i.e. exactly while a quiet pane is being read.
+  //
+  // Compared with sameLayout, NOT by reference: a fresh root does not imply a
+  // changed layout. setRatio rebuilds every SplitNode it walks, so persisting a
+  // divider drag produces a new root for a layout already on screen, and a
+  // reference check would rebuild on the next resync — the same rewind, one
+  // gesture later. The stale nodes the live dividers still capture are harmless:
+  // a divider resolves its split by ID when it persists, and the only state it
+  // reads back (ratio) is what it wrote during that same drag.
+  builtTree = null;
   // Counts explicit layout/focus mutations, for the stale-async guard — see
   // layoutGeneration(), which is the documented contract.
   layoutGen = 0;
@@ -7985,6 +8015,7 @@ var SplitView = class {
     this.host.replaceChildren();
     this.host.classList.remove("af-split-multi");
     this.focusedId = null;
+    this.builtTree = null;
   }
   /** Brings the live panes + DOM in line with the current tree: disposes gone panes,
    *  (re)creates terminals whose tab changed, rebuilds the split wrappers (reusing
@@ -8011,9 +8042,12 @@ var SplitView = class {
     if (!this.focusedId || !wanted.has(this.focusedId)) {
       this.focusedId = desired[0]?.id ?? null;
     }
-    const rootEl = this.buildNode(this.tree);
-    rootEl.style.flex = "1 1 0";
-    this.host.replaceChildren(rootEl);
+    if (!sameLayout(this.tree, this.builtTree)) {
+      const rootEl = this.buildNode(this.tree);
+      rootEl.style.flex = "1 1 0";
+      this.host.replaceChildren(rootEl);
+      this.builtTree = this.tree;
+    }
     const multi = desired.length > 1;
     this.host.classList.toggle("af-split-multi", multi);
     for (const leaf of desired) {

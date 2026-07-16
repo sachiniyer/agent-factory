@@ -190,6 +190,45 @@ export function replaceTab(root: LayoutNode, leafId: string, tab: number): Layou
   return dedupeExcept(updated, tab, leafId);
 }
 
+/**
+ * Whether two trees would render the SAME split DOM: same shape, the same leaf ids
+ * in the same order, and the same split directions and ratios.
+ *
+ * This is what "does the DOM need rebuilding" actually asks, and it is deliberately
+ * NOT reference identity. Most tree ops here preserve node references when nothing
+ * changed (mapAllLeaves), but not all do: setRatio rebuilds every SplitNode it walks,
+ * so persisting a divider drag hands back a fresh root describing the layout already
+ * on screen — the drag applied the ratio to the live DOM as it went. Treating that as
+ * a change re-inserts every pane container, and re-inserting a container detaches it,
+ * which drops the scroll offset of its descendants and rewinds a scrolled terminal
+ * (#1894, and the resize residual its local Codex review found).
+ *
+ * A leaf's `tab` is excluded on purpose. The DOM keyed off a leaf is its pane
+ * CONTAINER, which is keyed by leaf id; which tab that pane is bound to is settled
+ * separately by reconcile's identity/staleAddress check, and it rebuilds the terminal
+ * inside the container without disturbing the container itself. Comparing tab here
+ * would rebuild the whole DOM whenever a tab merely moved ordinal — re-arming the very
+ * rewind this exists to prevent, on any out-of-band reorder.
+ */
+export function sameLayout(a: LayoutNode | null, b: LayoutNode | null): boolean {
+  if (a === b) {
+    return true; // the common no-op resync settles without a walk
+  }
+  if (a === null || b === null) {
+    return false;
+  }
+  if (a.kind === "leaf" || b.kind === "leaf") {
+    return a.kind === "leaf" && b.kind === "leaf" && a.id === b.id;
+  }
+  return (
+    a.id === b.id &&
+    a.dir === b.dir &&
+    a.ratio === b.ratio &&
+    sameLayout(a.a, b.a) &&
+    sameLayout(a.b, b.b)
+  );
+}
+
 /** Sets the split `splitId`'s divider ratio, clamped to [0.1, 0.9] so a pane can be
  *  shrunk but never collapsed to nothing by a drag. */
 export function setRatio(root: LayoutNode, splitId: string, ratio: number): LayoutNode {

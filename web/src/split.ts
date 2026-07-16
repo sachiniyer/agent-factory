@@ -34,6 +34,7 @@ import {
   remapByIdentity,
   replaceTab,
   resolveDragTab,
+  sameLayout,
   setRatio,
   singleLeaf,
   type SplitNode,
@@ -162,6 +163,25 @@ export class SplitView {
   private archived = false;
   private tree: LayoutNode | null = null;
   private focusedId: string | null = null;
+
+  // The tree the CURRENT split DOM was built from, so reconcile can tell a real
+  // layout change from a resync that left the layout alone (#1815 scroll fix).
+  //
+  // Re-inserting a pane's container — even the very same element, into the very
+  // same parent — detaches it, and the browser drops the scroll offset of every
+  // scrollable descendant on detach. xterm keeps its own scroll position (ydisp)
+  // but its .xterm-viewport silently rewinds to 0, and a viewport pinned at the
+  // top emits no scroll event, so wheel-up goes dead until the next chunk of
+  // output resyncs it — i.e. exactly while a quiet pane is being read.
+  //
+  // Compared with sameLayout, NOT by reference: a fresh root does not imply a
+  // changed layout. setRatio rebuilds every SplitNode it walks, so persisting a
+  // divider drag produces a new root for a layout already on screen, and a
+  // reference check would rebuild on the next resync — the same rewind, one
+  // gesture later. The stale nodes the live dividers still capture are harmless:
+  // a divider resolves its split by ID when it persists, and the only state it
+  // reads back (ratio) is what it wrote during that same drag.
+  private builtTree: LayoutNode | null = null;
 
   // Counts explicit layout/focus mutations, for the stale-async guard — see
   // layoutGeneration(), which is the documented contract.
@@ -479,6 +499,8 @@ export class SplitView {
     this.host.replaceChildren();
     this.host.classList.remove("af-split-multi");
     this.focusedId = null;
+    // The DOM is gone, so the next reconcile must build it whatever the tree says.
+    this.builtTree = null;
   }
 
   /** Brings the live panes + DOM in line with the current tree: disposes gone panes,
@@ -515,9 +537,17 @@ export class SplitView {
 
     // Rebuild the split wrappers, inserting the persistent containers. Containers now
     // in the live DOM have real dimensions for the FitAddon.
-    const rootEl = this.buildNode(this.tree);
-    rootEl.style.flex = "1 1 0";
-    this.host.replaceChildren(rootEl);
+    //
+    // ONLY when the layout actually changed: re-inserting one that is already on
+    // screen would detach every live pane and silently rewind its xterm viewport to
+    // the top, killing wheel-scroll on a session.updated that touched nothing this
+    // pane shows (a tab created in another window, #1812/#1815) — see builtTree.
+    if (!sameLayout(this.tree, this.builtTree)) {
+      const rootEl = this.buildNode(this.tree);
+      rootEl.style.flex = "1 1 0";
+      this.host.replaceChildren(rootEl);
+      this.builtTree = this.tree;
+    }
 
     const multi = desired.length > 1;
     this.host.classList.toggle("af-split-multi", multi);
