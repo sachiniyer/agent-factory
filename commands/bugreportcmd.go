@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
 
 	"github.com/sachiniyer/agent-factory/apiproto"
@@ -80,11 +79,23 @@ envelope) to stdout instead of writing a file or opening a draft.`,
 		humanCmd.SetOut(&daemonHuman)
 		printDaemonStatusHuman(humanCmd, info)
 
+		// Resolve the output path BEFORE building. The issue draft has to fit a
+		// URL length cap, and it names this path — so the builder must measure
+		// the real path into the body it size-checks. Substituting it afterwards
+		// made the body that actually reached GitHub longer than the one that was
+		// checked. Resolving first costs nothing: the path depends on flags and
+		// the clock, never on the bundle.
+		outPath, err := resolveBugReportPath(bugReportOutput)
+		if err != nil {
+			return err
+		}
+
 		result, err := bugreport.Build(bugreport.Inputs{
 			AFVersion:    version,
 			GeneratedAt:  time.Now().Format("2006-01-02 15:04:05 -0700"),
 			DaemonStatus: info,
 			DaemonHuman:  daemonHuman.String(),
+			BundlePath:   outPath,
 		})
 		if err != nil {
 			return err
@@ -97,10 +108,6 @@ envelope) to stdout instead of writing a file or opening a draft.`,
 		// The redacted bundle is always written to disk — in the default flow it
 		// is the file the user drags onto the GitHub draft; in file-only mode it
 		// is the whole output.
-		outPath, err := resolveBugReportPath(bugReportOutput)
-		if err != nil {
-			return err
-		}
 		if err := os.WriteFile(outPath, []byte(result.Text), 0600); err != nil {
 			return fmt.Errorf("write bug report: %w", err)
 		}
@@ -118,12 +125,12 @@ envelope) to stdout instead of writing a file or opening a draft.`,
 		// Default: open a pre-filled GitHub issue DRAFT against the agent-factory
 		// project repo — never the user's own repo, wherever they ran `af` from.
 		// The body carries a bounded, redacted diagnostics excerpt; the complete
-		// bundle is attached by the user. Nothing is submitted automatically. The
-		// path is redacted ($HOME→~ / username→[user]) before it goes into the
-		// draft body so the public draft can't leak it, while stdout still prints
-		// the real local path.
-		body := strings.Replace(result.Body, bugreport.BundlePathPlaceholder, bugreport.RedactPath(outPath), 1)
-		opened, reason := openGitHubIssueDraft(result.Title, body)
+		// bundle is attached by the user. Nothing is submitted automatically.
+		//
+		// result.Body is used verbatim: it is already redacted (including the
+		// bundle path it names, so the public draft can't leak $HOME/username)
+		// and already size-checked. stdout still prints the real local path.
+		opened, reason := openGitHubIssueDraft(result.Title, result.Body)
 		if !opened {
 			fmt.Fprintf(w, "Couldn't open a GitHub issue draft (%s).\n", reason)
 			fmt.Fprintf(w, "Wrote the redacted bug-report bundle to %s\n", outPath)

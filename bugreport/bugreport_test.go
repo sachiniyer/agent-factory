@@ -583,20 +583,19 @@ func TestScrubLogRedactsTitlesEndingInNonWordChars(t *testing.T) {
 	}
 }
 
-// TestRedactPathCollapsesHome guards the fix for the raw-home-path leak: the
-// bundle path inlined into the (public) GitHub issue-draft body must have $HOME
-// collapsed to ~ so it never leaks the user's home/username.
-func TestRedactPathCollapsesHome(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	p := filepath.Join(home, "af-bug-report-20260710-120000.txt")
-	out := RedactPath(p)
-	if strings.Contains(out, home) {
-		t.Errorf("home path not collapsed in draft-body path: %q -> %q", p, out)
-	}
-	if !strings.HasPrefix(out, "~/") {
-		t.Errorf("expected the redacted path to start with ~/: %q", out)
-	}
+// TestIssueDraftCollapsesBundlePath guards the fix for the raw-home-path leak:
+// the bundle path inlined into the (public) GitHub issue-draft body must have
+// $HOME collapsed to ~ so it never leaks the user's home/username. The draft
+// redacts the path itself — it is measured into the size-checked body rather
+// than substituted in afterwards, so the caller has no chance to inline it raw.
+func TestIssueDraftCollapsesBundlePath(t *testing.T) {
+	r := &redactor{home: "/home/tester", users: []string{"tester"}}
+	b := Bundle{bundlePath: "/home/tester/af-bug-report-20260710-120000.txt"}
+
+	_, body := buildIssueDraft(r, b)
+
+	mustNotContain(t, "draft body", body, "/home/tester", "tester")
+	mustContain(t, "draft body", body, "~/af-bug-report-20260710-120000.txt")
 }
 
 // TestBuildEndToEnd plants a full temp home with a secret and a home path in
@@ -667,6 +666,7 @@ func TestBuildEndToEnd(t *testing.T) {
 		GeneratedAt:  "2026-07-05 00:00:00 +0000",
 		DaemonStatus: map[string]any{"running": false, "control_socket": home + "/.agent-factory/daemon.sock"},
 		DaemonHuman:  "daemon: not running\n  control socket: " + home + "/.agent-factory/daemon.sock (absent)\n",
+		BundlePath:   filepath.Join(home, "af-bug-report-test.txt"),
 	})
 	if err != nil {
 		t.Fatalf("Build: %v", err)
@@ -704,11 +704,11 @@ func TestBuildEndToEnd(t *testing.T) {
 	// --- GitHub issue-draft assertions ---
 	// The title is a short, templated, redacted summary line.
 	mustContain(t, "draft title", res.Title, "af bug-report:", "9.9.9", "/")
-	// The body carries the environment summary + the attach-path placeholder the
-	// command layer fills in, and never inlines a secret or a session title.
+	// The body carries the environment summary + the redacted path of the bundle
+	// to attach, and never inlines a secret or a session title.
 	mustContain(t, "draft body", res.Body,
-		"## Environment", "af: 9.9.9", "sessions:", "tasks:", BundlePathPlaceholder,
-		"Attach that file")
+		"## Environment", "af: 9.9.9", "sessions:", "tasks:",
+		"~/af-bug-report-test.txt", "Attach that file")
 	// #1914: the body must carry the bounded diagnostics excerpt ITSELF — before
 	// the fix it only named a file on the reporter's own machine, so a filed
 	// issue arrived with no diagnostics unless the user hand-attached ~1MB.
@@ -738,6 +738,154 @@ func TestBuildEndToEnd(t *testing.T) {
 	mustContain(t, "json", string(res.JSON), "abc123", "9.9.9", testSHA)
 }
 
+// TestMissingLogMessageIsRedactedBeforeInlining is the leak regression: when the
+// log file does not exist (logging fell back to stderr because the config dir
+// could not be created — exactly the broken install that files a bug report),
+// collectLog stored "(no log file at <path>)" raw. That message interpolates a
+// real $HOME/config path, and the issue draft inlines log contents directly
+// WITHOUT the final scrub the text/JSON renderers apply, so the path reached a
+// prefilled PUBLIC GitHub draft.
+//
+// Driven through Build (not collectLog) because the leak is a property of the
+// draft body, which is where the scrub was missing.
+func TestMissingLogMessageIsRedactedBeforeInlining(t *testing.T) {
+	home := t.TempDir()
+	afHome := filepath.Join(home, ".agent-factory")
+	t.Setenv("HOME", home)
+	t.Setenv("AGENT_FACTORY_HOME", afHome)
+	if err := os.MkdirAll(afHome, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Deliberately write no log file: collectLog takes the IsNotExist exit.
+
+	res, err := Build(Inputs{
+		AFVersion:   "9.9.9",
+		GeneratedAt: "2026-07-05 00:00:00 +0000",
+		BundlePath:  filepath.Join(home, "af-bug-report-test.txt"),
+	})
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+
+	// The message must still be there — this asserts redaction, not omission.
+	mustContain(t, "draft body", res.Body, "no log file at")
+	// …and it must not carry the raw home path or username into a public draft.
+	mustNotContain(t, "draft body", res.Body, home, filepath.Base(home))
+	// Same for the file bundle and the JSON manifest.
+	mustNotContain(t, "text", res.Text, home)
+	mustNotContain(t, "json", string(res.JSON), home)
+}
+
+// TestBuildIssueDraftBoundsBodyToURLCapWithBrokenInstall is the #2 regression: a
+// broken install's collection errors are long (unreadable config/log paths,
+// parser messages), and they were written into the body in full BEFORE the
+// budget was computed — only the log tail was trimmed afterwards, so the errors
+// alone could push the URL past the cap. Everything variable-length must be
+// fitted by encoded length before it is written.
+func TestBuildIssueDraftBoundsBodyToURLCapWithBrokenInstall(t *testing.T) {
+	r := &redactor{home: "/home/tester", users: []string{"tester"}}
+	longPath := "/var/lib/really/deeply/nested/config/location/" + strings.Repeat("segment/", 20)
+	b := Bundle{
+		Versions:   Versions{AF: "9.9.9", Go: "go1.25.0", OS: "linux", Arch: "amd64"},
+		bundlePath: "/home/tester/af-bug-report-20260716-080519.txt",
+		// No log at all: the errors alone must not bust the cap.
+	}
+	for i := 0; i < 40; i++ {
+		b.Errors = append(b.Errors, fmt.Sprintf(
+			"config %s%d/config.toml: could not be parsed: unexpected token at line %d: %s",
+			longPath, i, i, strings.Repeat("detail ", 30)))
+	}
+
+	_, body := buildIssueDraft(r, b)
+
+	if n := encodedLen(body); n > maxIssueBodyEncodedBytes {
+		t.Errorf("encoded body is %d bytes, past the %d cap (errors were not fitted)", n, maxIssueBodyEncodedBytes)
+	}
+	// Bounded, but the reader is told what was dropped.
+	mustContain(t, "body", body, "### Collection errors", "more (see the attached bundle)")
+}
+
+// TestBuildIssueDraftAccountsForBundlePathInBudget is the #3 regression: the body
+// used to carry a short placeholder that the CALLER swapped for the real path
+// after the size check, so what reached GitHub was longer than what was measured.
+// The path is now measured into the body, leaving nothing to substitute.
+//
+// The path here is long enough to make the overflow deterministic. In the default
+// flow the path is always ~/af-bug-report-<ts>.txt, where substitution grew the
+// body by only ~14 encoded bytes — which still broke the cap whenever the fitted
+// tail landed within 14 bytes of it, as a real run did at 5989/6000.
+func TestBuildIssueDraftAccountsForBundlePathInBudget(t *testing.T) {
+	r := &redactor{home: "/home/tester", users: []string{"tester"}}
+	var hugeLog strings.Builder
+	for i := 0; i < 5000; i++ {
+		fmt.Fprintf(&hugeLog, "2026-01-01 12:00:00 daemon: reconciled session %d, state=Ready\n", i)
+	}
+	nested := strings.Repeat("nested/", 30)
+	b := Bundle{
+		Versions:   Versions{AF: "9.9.9", Go: "go1.25.0", OS: "linux", Arch: "amd64"},
+		Log:        logSection{Contents: hugeLog.String()},
+		bundlePath: "/home/tester/" + nested + "af-bug-report-20260716-080519.txt",
+	}
+
+	_, body := buildIssueDraft(r, b)
+
+	if n := encodedLen(body); n > maxIssueBodyEncodedBytes {
+		t.Errorf("encoded body is %d bytes, past the %d cap (the bundle path was not budgeted for)",
+			n, maxIssueBodyEncodedBytes)
+	}
+	// The real, redacted path is IN the measured body — no placeholder is left
+	// for a caller to swap in afterwards.
+	mustContain(t, "body", body, "~/"+nested+"af-bug-report-20260716-080519.txt")
+	mustNotContain(t, "body", body, "{{", "/home/tester")
+}
+
+// TestBuildIssueDraftFenceSurvivesBackticksInLog is the #4 regression: a log line
+// carrying a literal ``` (a failing hook echoing its own output) closed the fixed
+// three-backtick fence early, so the rest of the draft — the closing </details>
+// and the attach instructions — rendered as code.
+func TestBuildIssueDraftFenceSurvivesBackticksInLog(t *testing.T) {
+	r := &redactor{home: "/home/tester", users: []string{"tester"}}
+	b := Bundle{
+		Versions:   Versions{AF: "9.9.9", Go: "go1.25.0", OS: "linux", Arch: "amd64"},
+		bundlePath: "/home/tester/af-bug-report-test.txt",
+		Log: logSection{Contents: "hook failed, output follows:\n" +
+			"```\nsome fenced output the hook printed\n```\nrun complete\n"},
+	}
+
+	_, body := buildIssueDraft(r, b)
+
+	// The log content rode in verbatim…
+	mustContain(t, "body", body, "some fenced output the hook printed")
+	// …inside a fence that outruns it, so the block cannot close early.
+	if !strings.Contains(body, "````") {
+		t.Errorf("log fence did not outrun the ``` run in the tail:\n%s", body)
+	}
+	// Everything after the log block must still be prose, not code: an unbalanced
+	// fence shows up as an odd number of fence delimiters.
+	if n := strings.Count(body, "\n````"); n%2 != 0 {
+		t.Errorf("unbalanced log fence (%d delimiters):\n%s", n, body)
+	}
+	mustContain(t, "body", body, "</details>", "Attach that file")
+}
+
+// TestFenceForOutrunsLongestRun pins the fence sizing rule directly: a fence is
+// closed by any run of at least its own length, so it must be longer than the
+// longest run in the content it wraps.
+func TestFenceForOutrunsLongestRun(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"plain text", "```"},
+		{"a `code` span", "```"},
+		{"a ``double`` span", "```"},
+		{"fenced ``` block", "````"},
+		{"longer ````` run", "``````"},
+	}
+	for _, tc := range cases {
+		if got := fenceFor(tc.in); got != tc.want {
+			t.Errorf("fenceFor(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
 // TestBuildIssueDraftBoundsBodyToURLCap is the guard on the inline summary's
 // core risk: the draft reaches GitHub as an issues/new URL, and a body past the
 // cap yields a dead link (or a 414) instead of a draft. A pathological bundle —
@@ -756,6 +904,7 @@ func TestBuildIssueDraftBoundsBodyToURLCap(t *testing.T) {
 		Versions:    Versions{AF: "9.9.9", Go: "go1.25.0", OS: "linux", Arch: "amd64"},
 		daemonHuman: strings.Repeat("daemon: running with a very verbose status line\n", 200),
 		Log:         logSection{Contents: hugeLog.String()},
+		bundlePath:  "/home/tester/af-bug-report-20260716-080519.txt",
 	}
 	for i := 0; i < 50; i++ {
 		b.Errors = append(b.Errors, fmt.Sprintf("section %d: could not be collected", i))
@@ -766,11 +915,11 @@ func TestBuildIssueDraftBoundsBodyToURLCap(t *testing.T) {
 	if n := encodedLen(body); n > maxIssueBodyEncodedBytes {
 		t.Errorf("encoded body is %d bytes, past the %d cap", n, maxIssueBodyEncodedBytes)
 	}
-	// Capped hard — but never silently: the elision is stated, and the reader is
-	// pointed at the complete bundle.
+	// Capped hard — but never silently: every elision is stated, and the reader
+	// is pointed at the complete bundle.
 	mustContain(t, "capped body", body,
-		"Earlier lines elided", "…(truncated; see the attached bundle)",
-		"and 40 more (see the attached bundle)", BundlePathPlaceholder)
+		"Earlier lines elided", truncatedNote,
+		"more (see the attached bundle)", "~/af-bug-report-20260716-080519.txt")
 	// The newest lines are what explain a bug, so those are the ones kept.
 	mustContain(t, "capped body", body, "session 19999 of many")
 	mustNotContain(t, "capped body", body, "session 0 of many")

@@ -4,14 +4,13 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
-
-	"github.com/sachiniyer/agent-factory/bugreport"
 )
 
 // TestBugReportCmdWritesFile drives the command end-to-end against a fresh temp
@@ -291,9 +290,25 @@ func TestGhIssueCreateWebArgs(t *testing.T) {
 // write + reference the complete bundle.
 func TestBugReportDefaultFlowCarriesDiagnostics(t *testing.T) {
 	home := t.TempDir()
+	afHome := filepath.Join(home, ".agent-factory")
 	t.Setenv("HOME", home)
-	t.Setenv("AGENT_FACTORY_HOME", filepath.Join(home, ".agent-factory"))
+	t.Setenv("AGENT_FACTORY_HOME", afHome)
 	initRepo(t, "git@github.com:acme-corp/secret-product.git")
+
+	// Plant a log big enough that the excerpt fills the URL budget. Without it
+	// the body sits near-empty and every size assertion below passes vacuously —
+	// including the one guarding the bundle path, whose whole failure mode is a
+	// body that was already at the cap.
+	if err := os.MkdirAll(afHome, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	var log bytes.Buffer
+	for i := 0; i < 4000; i++ {
+		fmt.Fprintf(&log, "2026-07-16 08:00:00 daemon: reconciled session %d, state=Ready\n", i)
+	}
+	if err := os.WriteFile(filepath.Join(afHome, "agent-factory.log"), log.Bytes(), 0o644); err != nil {
+		t.Fatal(err)
+	}
 
 	// Capture the body the command hands the opener — what GitHub would receive.
 	var gotBody string
@@ -336,9 +351,6 @@ func TestBugReportDefaultFlowCarriesDiagnostics(t *testing.T) {
 	}
 
 	// 3. The body still references the complete bundle, by its REDACTED path.
-	if strings.Contains(gotBody, bugreport.BundlePathPlaceholder) {
-		t.Error("bundle-path placeholder was never substituted")
-	}
 	if !strings.Contains(gotBody, "af-bug-report-") || !strings.Contains(gotBody, "Attach that file") {
 		t.Errorf("issue body does not reference the full bundle to attach:\n%s", gotBody)
 	}
@@ -346,9 +358,19 @@ func TestBugReportDefaultFlowCarriesDiagnostics(t *testing.T) {
 		t.Errorf("issue body leaks the real home path:\n%s", gotBody)
 	}
 
-	// 4. The body fits the issues/new URL cap once percent-encoded.
-	if n := len(url.QueryEscape(gotBody)); n > 6000 {
-		t.Errorf("encoded issue body is %d bytes, past the URL budget", n)
+	// 4. The body the opener ACTUALLY receives fits the issues/new URL cap once
+	// percent-encoded. This asserts the FINAL body, not an intermediate one: the
+	// bundle path used to be substituted in after the size check, so the body
+	// that reached gh/the browser was longer than the one that was measured.
+	encoded := len(url.QueryEscape(gotBody))
+	if encoded > 6000 {
+		t.Errorf("encoded issue body is %d bytes, past the URL budget", encoded)
+	}
+	// …and the budget is actually being spent, so the assertion above is not
+	// passing merely because the body is small.
+	if encoded < 4000 {
+		t.Errorf("encoded body is only %d bytes — the planted log should fill the budget, "+
+			"so the cap assertion is not exercising anything", encoded)
 	}
 }
 

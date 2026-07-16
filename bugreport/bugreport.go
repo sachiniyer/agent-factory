@@ -19,7 +19,6 @@ import (
 	"runtime"
 	"sort"
 	"strings"
-	"unicode/utf8"
 
 	"github.com/sachiniyer/agent-factory/config"
 	aflog "github.com/sachiniyer/agent-factory/log"
@@ -58,6 +57,11 @@ type Inputs struct {
 	// DaemonHuman is the pre-rendered human `af daemon status` text for the
 	// text bundle's daemon section.
 	DaemonHuman string
+	// BundlePath is where the caller will write the text bundle. It is resolved
+	// BEFORE the build so the issue draft can measure the real path into the
+	// body it size-checks, instead of carrying a placeholder the caller swaps
+	// for a longer string afterwards. It is redacted here, not by the caller.
+	BundlePath string
 }
 
 // Versions is the version/platform block of the bundle.
@@ -108,6 +112,10 @@ type Bundle struct {
 	// text renderer. Unexported so it never appears in the JSON manifest (the
 	// structured Daemon snapshot is the machine-readable form there).
 	daemonHuman string
+	// bundlePath is where the caller will write the text bundle, for the issue
+	// draft's attach instructions. Unexported: it is a local path, of no use to
+	// a --json consumer, and the draft is its only reader.
+	bundlePath string
 }
 
 // Result is what Build returns: a rendered text bundle (the file the user
@@ -117,18 +125,14 @@ type Bundle struct {
 // facts + a static template) and bounded to fit an issues/new URL — the FULL
 // bundle still never rides in the URL, but a bounded excerpt of the key
 // diagnostics does, so a submitted draft carries triage signal even when the
-// user never attaches the file. Body carries BundlePathPlaceholder for the
-// command layer to replace with the written bundle's path.
+// user never attaches the file. Body is FINAL: it needs no post-processing by
+// the caller, so nothing can grow it past the size it was checked against.
 type Result struct {
 	Text  string
 	JSON  []byte
 	Title string
 	Body  string
 }
-
-// BundlePathPlaceholder marks where in the issue-draft body the command layer
-// substitutes the written bundle's path (known only once the file is written).
-const BundlePathPlaceholder = "{{BUNDLE_PATH}}"
 
 // Build collects, redacts, and renders the bundle. It never fails on a missing
 // or unreadable section — those are recorded in Bundle.Errors and rendering
@@ -146,6 +150,7 @@ func Build(in Inputs) (Result, error) {
 		},
 		Daemon:      in.DaemonStatus,
 		daemonHuman: in.DaemonHuman,
+		bundlePath:  in.BundlePath,
 	}
 
 	b.Tasks, b.Errors = collectTasks(b.Errors)
@@ -183,15 +188,27 @@ func Build(in Inputs) (Result, error) {
 // ~2KB of the ~8KB for the scheme, host, path, and the encoded title.
 const maxIssueBodyEncodedBytes = 6000
 
+// Per-section sub-budgets. EVERY variable-length section is bounded by ENCODED
+// length before it is written, not after: a section measured only once it is
+// already in the body cannot be un-written, so an unbounded one (a broken
+// install's collection errors, a verbose daemon status) would blow the total cap
+// no matter how hard the log tail is trimmed afterwards. Together with the fixed
+// template these leave the log tail the remainder, and head+foot alone can never
+// reach maxIssueBodyEncodedBytes.
 const (
-	// issueDaemonMaxBytes bounds the daemon-status block. The human status is
-	// ~6 lines today; the cap is a guard against a future verbose status
-	// crowding out the log tail, not an expected trim.
-	issueDaemonMaxBytes = 700
-	// issueErrorsMax bounds how many collection errors inline. The errors
-	// section is the highest-signal part of a broken-install report, so it is
-	// inlined before the log tail claims the remaining budget.
-	issueErrorsMax = 10
+	// issueDaemonEncodedBudget bounds the daemon-status block. The human status
+	// is ~6 lines today; this guards a future verbose status crowding out the
+	// log tail.
+	issueDaemonEncodedBudget = 900
+	// issueErrorsEncodedBudget bounds the whole collection-errors block. The
+	// errors are the highest-signal part of a broken-install report, so they are
+	// fitted before the log tail claims what is left — but a broken install is
+	// exactly where errors are long (unreadable config paths, parser messages),
+	// so the block is bounded, not merely counted.
+	issueErrorsEncodedBudget = 800
+	// issueErrorEncodedMax bounds ONE error, so a single pathological message
+	// cannot consume the whole errors block.
+	issueErrorEncodedMax = 200
 	// issueLogMaxLines bounds the inlined log tail by lines as well as bytes:
 	// the byte budget alone would inline hundreds of short lines, which reads
 	// as noise in an issue. The full tail is in the attached bundle.
@@ -204,25 +221,30 @@ const (
 const logElidedNote = "\n_Earlier lines elided to fit the issue URL — the attached bundle has the full tail._\n"
 
 // buildIssueDraft renders the pre-filled GitHub issue-draft title and body from
-// the already-redacted Bundle.
+// the Bundle.
 //
 // The full bundle (a megabyte of log + session state) cannot inline in an
 // issues/new URL, and before #1914 that meant the draft carried NO diagnostics
 // at all — only counts plus a path to a file on the reporter's own machine,
 // which is useless to a triager unless the user hand-attaches it. So the body
-// now embeds a BOUNDED excerpt of the highest-signal sections (daemon status,
+// embeds a BOUNDED excerpt of the highest-signal sections (daemon status,
 // collection errors, the newest log lines) in a <details> block, and still
 // points at the complete bundle on disk.
 //
-// Everything inlined is scrubbed HERE, at the point of inlining: the Bundle's
-// own log/config/instances arrive pre-redacted from their collectors, but
-// daemonHuman and Errors come straight from the caller/collection and are only
-// scrubbed by the text renderer's final pass — which this body never goes
-// through. Scrubbing each component also keeps the byte budget exact, since
-// nothing downstream can grow the assembled body (a whole-body re-scrub could:
-// "[user]" is longer than the username it replaced).
+// REDACTION. This body is a SECOND EXIT out of the bundle: unlike the text and
+// JSON renderers it never passes through Build's final catch-all scrub, so
+// anything reaching it must be redacted on the way in — a collector that
+// "usually" scrubs is not enough, and one that missed an exit leaked a real
+// $HOME path into a public draft (the no-log message; see collectLog). Two
+// defenses, deliberately overlapping: every component is scrubbed at the point
+// of inlining (which also keeps the size budget exact, since a scrub that runs
+// later could change lengths), and the assembled body is scrubbed once more at
+// the bottom so a future inline that forgets cannot leak. The second pass is a
+// no-op today precisely because the first exists — scrub is idempotent.
 //
-// BundlePathPlaceholder marks the attach-path the command layer fills in.
+// b.bundlePath is measured INTO the body rather than substituted afterwards by
+// the caller: a placeholder swapped out post-measurement made the final body
+// longer than the one that was checked against the cap.
 func buildIssueDraft(r *redactor, b Bundle) (title, body string) {
 	title = fmt.Sprintf("af bug-report: %s on %s/%s", b.Versions.AF, b.Versions.OS, b.Versions.Arch)
 
@@ -239,12 +261,16 @@ func buildIssueDraft(r *redactor, b Bundle) (title, body string) {
 	case strings.Contains(strings.ToLower(daemonHuman), "not running"):
 		daemonState = "not running"
 	}
+	daemonHuman, daemonTruncated := truncateEncoded(daemonHuman, issueDaemonEncodedBudget)
+	if daemonTruncated {
+		daemonHuman += "\n" + truncatedNote
+	}
 
 	var head strings.Builder
 	fmt.Fprintf(&head, "<!-- Opened by `af bug-report`. This is a DRAFT — review it, attach the bundle below, then submit. -->\n\n")
 	fmt.Fprintf(&head, "## Environment\n")
-	fmt.Fprintf(&head, "- af: %s\n", b.Versions.AF)
-	fmt.Fprintf(&head, "- go: %s\n", b.Versions.Go)
+	fmt.Fprintf(&head, "- af: %s\n", r.scrub(b.Versions.AF))
+	fmt.Fprintf(&head, "- go: %s\n", r.scrub(b.Versions.Go))
 	fmt.Fprintf(&head, "- os/arch: %s/%s\n", b.Versions.OS, b.Versions.Arch)
 	fmt.Fprintf(&head, "- daemon: %s\n", daemonState)
 	fmt.Fprintf(&head, "- sessions: %d across %d repo(s)\n", countInstances(b.Instances), len(b.Instances))
@@ -254,38 +280,35 @@ func buildIssueDraft(r *redactor, b Bundle) (title, body string) {
 	fmt.Fprintf(&head, "## Steps to reproduce\n\n")
 	fmt.Fprintf(&head, "---\n\n")
 	fmt.Fprintf(&head, "<details>\n<summary>%s</summary>\n\n", issueSummaryLabel)
-	fmt.Fprintf(&head, "### Daemon status\n\n```\n%s\n```\n\n", truncateBytes(daemonHuman, issueDaemonMaxBytes))
-	if len(b.Errors) > 0 {
-		fmt.Fprintf(&head, "### Collection errors\n\n")
-		for i, e := range b.Errors {
-			if i == issueErrorsMax {
-				fmt.Fprintf(&head, "- …and %d more (see the attached bundle)\n", len(b.Errors)-issueErrorsMax)
-				break
-			}
-			fmt.Fprintf(&head, "- %s\n", r.scrub(e))
-		}
-		head.WriteByte('\n')
-	}
+	writeFenced(&head, "### Daemon status", daemonHuman)
+	writeErrors(&head, r, b.Errors)
 
 	var foot strings.Builder
 	fmt.Fprintf(&foot, "</details>\n\n---\n\n")
 	fmt.Fprintf(&foot, "The summary above is a bounded excerpt. The COMPLETE best-effort **redacted** "+
 		"bundle (full log tail, sessions, tasks, config) was written to:\n\n")
-	fmt.Fprintf(&foot, "    %s\n\n", BundlePathPlaceholder)
+	fmt.Fprintf(&foot, "    %s\n\n", r.scrub(b.bundlePath))
 	fmt.Fprintf(&foot, "**Attach that file to this issue** (drag-and-drop) before submitting. "+
 		"Open and review it first — redaction is best-effort and cannot catch everything.\n")
 
-	// Hand the log tail whatever encoded budget the rest of the body leaves,
-	// always reserving the elision note so appending it can't bust the cap.
-	logHeader := "### Daemon log tail (newest lines, redacted)\n\n```\n"
-	logFooter := "\n```\n\n"
+	// Size the log fence from the WHOLE tail before budgeting. A fence is closed
+	// by any run of at least its own length, so it must outrun every backtick run
+	// in the text it wraps — but its own cost has to be reserved before the text
+	// is fitted. Sizing it against the full tail sidesteps that circularity: the
+	// fitted tail is a subset, so its longest run can only be shorter, and the
+	// fence stays valid while the budget stays exact.
+	fence := fenceFor(b.Log.Contents)
+	logHeader := "### Daemon log tail (newest lines, redacted)\n\n" + fence + "\n"
+	logFooter := "\n" + fence + "\n\n"
 	budget := maxIssueBodyEncodedBytes -
 		encodedLen(head.String()) - encodedLen(foot.String()) -
 		encodedLen(logHeader) - encodedLen(logFooter) - encodedLen(logElidedNote)
 
 	var sb strings.Builder
 	sb.WriteString(head.String())
-	logText, elided := fitLogTail(b.Log.Contents, issueLogMaxLines, budget)
+	// Scrubbed here as well as in collectLog: this exit skips the final render
+	// pass, so it must not depend on a collector having covered every path.
+	logText, elided := fitLogTail(r.scrubLog(b.Log.Contents), issueLogMaxLines, budget)
 	if logText != "" {
 		sb.WriteString(logHeader)
 		sb.WriteString(logText)
@@ -295,7 +318,71 @@ func buildIssueDraft(r *redactor, b Bundle) (title, body string) {
 		sb.WriteString(logElidedNote)
 	}
 	sb.WriteString(foot.String())
-	return title, sb.String()
+	return title, r.scrub(sb.String())
+}
+
+// truncatedNote marks a section the budget cut short, so a trimmed block never
+// reads as complete.
+const truncatedNote = "…(truncated; see the attached bundle)"
+
+// writeErrors writes the collection-errors block, fitted to
+// issueErrorsEncodedBudget. Each error is scrubbed and individually capped, and
+// whatever did not fit is counted rather than dropped silently.
+func writeErrors(sb *strings.Builder, r *redactor, errs []string) {
+	if len(errs) == 0 {
+		return
+	}
+	var block strings.Builder
+	remaining := issueErrorsEncodedBudget
+	shown := 0
+	for _, e := range errs {
+		line, _ := truncateEncoded(r.scrub(e), issueErrorEncodedMax)
+		line = "- " + strings.ReplaceAll(line, "\n", " ") + "\n"
+		cost := encodedLen(line)
+		if cost > remaining {
+			break
+		}
+		block.WriteString(line)
+		remaining -= cost
+		shown++
+	}
+	fmt.Fprintf(sb, "### Collection errors\n\n")
+	sb.WriteString(block.String())
+	if shown < len(errs) {
+		fmt.Fprintf(sb, "- …and %d more (see the attached bundle)\n", len(errs)-shown)
+	}
+	sb.WriteByte('\n')
+}
+
+// writeFenced writes a titled code block whose fence outruns any backtick run in
+// body, so nothing in body can close it early.
+func writeFenced(sb *strings.Builder, title, body string) {
+	fence := fenceFor(body)
+	fmt.Fprintf(sb, "%s\n\n%s\n%s\n%s\n\n", title, fence, body, fence)
+}
+
+// fenceFor returns a backtick fence long enough that nothing in s can close it:
+// CommonMark closes a fence only on a run of at least the same length, so the
+// fence has to outrun the longest run in the content. A log line can carry a
+// literal ``` (a hook echoing its own markdown output), which against a fixed
+// three-backtick fence ended the block early and rendered the rest of the
+// draft — the closing </details> and the attach instructions — as code.
+func fenceFor(s string) string {
+	longest, run := 0, 0
+	for _, c := range s {
+		if c == '`' {
+			run++
+			if run > longest {
+				longest = run
+			}
+			continue
+		}
+		run = 0
+	}
+	if longest < 3 {
+		return "```"
+	}
+	return strings.Repeat("`", longest+1)
 }
 
 // issueSummaryLabel names the collapsible diagnostics block. Tests key on it to
@@ -339,17 +426,24 @@ func fitLogTail(contents string, maxLines, budget int) (text string, elided bool
 // issues/new query string — the only length that matters for the URL cap.
 func encodedLen(s string) int { return len(url.QueryEscape(s)) }
 
-// truncateBytes caps s at max bytes on a rune boundary, marking the cut so a
-// trimmed block never reads as complete.
-func truncateBytes(s string, max int) string {
-	if len(s) <= max {
-		return s
+// truncateEncoded caps s at budget ENCODED bytes, cutting on a rune boundary and
+// reporting whether anything was dropped. It walks runes and accumulates their
+// encoded cost because that cost is wildly uneven — an ASCII letter is 1 byte, a
+// newline 3, a multi-byte rune up to 12 — so a raw-length cap says nothing about
+// how much of the URL budget a string actually spends.
+func truncateEncoded(s string, budget int) (string, bool) {
+	if encodedLen(s) <= budget {
+		return s, false
 	}
-	cut := s[:max]
-	for len(cut) > 0 && !utf8.ValidString(cut) {
-		cut = cut[:len(cut)-1]
+	used := 0
+	for i, c := range s {
+		cost := encodedLen(string(c))
+		if used+cost > budget {
+			return s[:i], true
+		}
+		used += cost
 	}
-	return cut + "\n…(truncated; see the attached bundle)"
+	return s, false
 }
 
 // countInstances totals the session records across every repo's redacted
@@ -433,6 +527,14 @@ func collectConfig(r *redactor, errs []string) (*configSection, []string) {
 }
 
 // collectLog reads and scrubs the bounded tail of the production log.
+//
+// EVERY exit must leave Contents redacted, not just the one that carries log
+// text. The no-log message below interpolates the resolved log path — a real
+// $HOME/config path — and used to be stored raw, surviving only because the text
+// and JSON renderers happened to scrub once more at the end. The issue draft
+// inlines Contents directly and never goes through that final pass, so the raw
+// path reached a PUBLIC prefilled draft. The field is documented as redacted;
+// it now is, on every path, for every consumer.
 func collectLog(r *redactor, errs []string) (logSection, []string) {
 	path := aflog.LogFilePath()
 	sec := logSection{Path: path}
@@ -442,7 +544,7 @@ func collectLog(r *redactor, errs []string) (logSection, []string) {
 	data, truncated, err := tailFile(path, logTailMaxBytes)
 	if err != nil {
 		if os.IsNotExist(err) {
-			sec.Contents = "(no log file at " + path + ")"
+			sec.Contents = r.scrub("(no log file at " + path + ")")
 			return sec, errs
 		}
 		return sec, append(errs, fmt.Sprintf("log %s: %v", path, err))

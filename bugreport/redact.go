@@ -95,15 +95,6 @@ func newRedactor() *redactor {
 	return &redactor{home: home, users: users}
 }
 
-// RedactPath collapses $HOME to ~ and the username to [user] in a single path,
-// using the same rules as the bundle redactor. The command layer runs the
-// written bundle's path through it before inlining the path into the GitHub
-// issue-draft body, so the (public) draft can't leak $HOME/username even though
-// the bundle itself is redacted.
-func RedactPath(p string) string {
-	return newRedactor().scrub(p)
-}
-
 // appendUserToken adds a username token to the scrub list, skipping empties,
 // path-ish junk, and tokens under 3 chars (too short to replace safely without
 // mangling unrelated substrings).
@@ -301,6 +292,18 @@ func redactKeyValueSecret(match string) string {
 	}
 	prefix := match[idx[2]:idx[3]]
 	value := match[idx[3]:]
+	// A value an earlier pass already redacted must survive untouched. scrub is
+	// applied more than once to the same text by design — per section, again
+	// over the assembled text/JSON, and again on each component the issue draft
+	// inlines — so it has to be idempotent. It was not: the bare-value
+	// alternative re-matches the marker's own text (the class excludes `]`, not
+	// `[`, so `[redacted-secret]` re-matches as `[redacted-secret`), and every
+	// extra pass re-wrapped it and grew a bracket. A real bundle shipped 28
+	// `[redacted-secret]]`. Returning the match verbatim leaves the marker — and
+	// the `]` just past it — exactly as the first pass wrote them.
+	if isRedactionMarker(value) {
+		return match
+	}
 	if len(value) >= 2 && value[0] == '"' && value[len(value)-1] == '"' {
 		return prefix + `"` + secretMarker + `"`
 	}
@@ -308,6 +311,15 @@ func redactKeyValueSecret(match string) string {
 		return prefix + `'` + secretMarker + `'`
 	}
 	return prefix + secretMarker
+}
+
+// isRedactionMarker reports whether a matched value is (the start of) a marker a
+// previous scrub pass wrote — `[redacted]`, `[redacted-secret]`, or either still
+// wrapped in the quotes the value carried. The prefix test is deliberate: the
+// bare-value alternative stops at the marker's closing `]`, so the value seen
+// here is the marker minus its final bracket.
+func isRedactionMarker(value string) bool {
+	return strings.HasPrefix(strings.Trim(value, `"'`), "[redacted")
 }
 
 // unparsedInstancesNote is emitted (as a JSON string) when instances.json is
