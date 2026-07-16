@@ -59,13 +59,24 @@ type Task struct {
 	// TargetSession routes deliveries into an existing session by title
 	// (auto-created with ProjectPath/Program if missing). Empty keeps the
 	// historical behavior of creating a fresh session per run.
-	TargetSession string     `json:"target_session,omitempty"`
-	ProjectPath   string     `json:"project_path"`
-	Program       string     `json:"program"`
-	Enabled       bool       `json:"enabled"`
-	CreatedAt     time.Time  `json:"created_at"`
-	LastRunAt     *time.Time `json:"last_run_at,omitempty"`
-	LastRunStatus string     `json:"last_run_status,omitempty"`
+	TargetSession string `json:"target_session,omitempty"`
+	// MaxConcurrentRuns caps how many sessions this watch task may have in flight
+	// at once (#1892). Zero — the default — means unlimited, preserving the
+	// historical behavior for every task written before this field existed; a
+	// cap is opt-in. Events over the cap are queued durably in FIFO order and
+	// delivered as slots free, never dropped.
+	//
+	// It applies only to a watch task that creates a session per event (see
+	// ValidateTrigger): a target_session task delivers into one session, so its
+	// deliveries already serialize, and overlapping cron fires already coalesce on
+	// RunTask's per-task lock. omitempty + additive: no tasks schema bump.
+	MaxConcurrentRuns int        `json:"max_concurrent_runs,omitempty"`
+	ProjectPath       string     `json:"project_path"`
+	Program           string     `json:"program"`
+	Enabled           bool       `json:"enabled"`
+	CreatedAt         time.Time  `json:"created_at"`
+	LastRunAt         *time.Time `json:"last_run_at,omitempty"`
+	LastRunStatus     string     `json:"last_run_status,omitempty"`
 }
 
 // IsWatch reports whether the task is event-triggered (WatchCmd) rather than
@@ -96,6 +107,21 @@ func (t Task) ValidateTrigger() error {
 	}
 	if t.Enabled && hasCron && strings.TrimSpace(t.Prompt) == "" {
 		return fmt.Errorf("task %s is an enabled cron task but has an empty prompt; a prompt is required", t.ID)
+	}
+	// A concurrency cap is meaningful only where sessions can actually pile up:
+	// a watch task that creates one per event (#1892). Rejecting it elsewhere is
+	// deliberate — accepting it would leave a setting that reads as enforced but
+	// silently does nothing, which is the gotcha class this repo designs away.
+	if t.MaxConcurrentRuns < 0 {
+		return fmt.Errorf("task %s has a negative max_concurrent_runs (%d); use 0 for unlimited or a positive cap", t.ID, t.MaxConcurrentRuns)
+	}
+	if t.MaxConcurrentRuns > 0 {
+		if !hasWatch {
+			return fmt.Errorf("task %s sets max_concurrent_runs but is not a watch task; the cap bounds a watch task's in-flight sessions, and overlapping cron fires already coalesce", t.ID)
+		}
+		if strings.TrimSpace(t.TargetSession) != "" {
+			return fmt.Errorf("task %s sets both max_concurrent_runs and target_session; deliveries into one session already serialize, so drop the cap or drop the target session", t.ID)
+		}
 	}
 	return nil
 }
@@ -425,18 +451,24 @@ type TaskUpdate struct {
 	CronExpr      *string `json:"cron_expr,omitempty"`
 	WatchCmd      *string `json:"watch_cmd,omitempty"`
 	TargetSession *string `json:"target_session,omitempty"`
-	ProjectPath   *string `json:"project_path,omitempty"`
-	Program       *string `json:"program,omitempty"`
-	Enabled       *bool   `json:"enabled,omitempty"`
+	// MaxConcurrentRuns patches the watch-task concurrency cap (#1892). A pointer
+	// because 0 is a meaningful value ("unlimited"), not "unchanged" — the same
+	// nil-vs-zero distinction Enabled and TargetSession rely on, and the reason
+	// this type needs the JSON gob codec below.
+	MaxConcurrentRuns *int    `json:"max_concurrent_runs,omitempty"`
+	ProjectPath       *string `json:"project_path,omitempty"`
+	Program           *string `json:"program,omitempty"`
+	Enabled           *bool   `json:"enabled,omitempty"`
 }
 
 // GobEncode/GobDecode route TaskUpdate through JSON on the net/rpc gob control
 // socket the CLI uses (daemon.UpdateTask → callDaemon). This is REQUIRED for
 // correctness, not an optimization: gob elides a struct field holding its zero
-// value, and — fatally here — a *bool pointing at false (or a *string at "") is
-// followed to that zero and dropped, so the pointer decodes back as nil. That
-// would silently turn `af tasks update --enabled false` and the trigger-clearing
-// WatchCmd:"" / CronExpr:"" patches into no-ops. JSON preserves the exact
+// value, and — fatally here — a *bool pointing at false (or a *string at "", or
+// an *int at 0) is followed to that zero and dropped, so the pointer decodes back
+// as nil. That would silently turn `af tasks update --enabled false`, the
+// trigger-clearing WatchCmd:"" / CronExpr:"" patches, and `--max-concurrent-runs
+// 0` (revert to unlimited, #1892) into no-ops. JSON preserves the exact
 // nil-vs-non-nil-zero-pointer distinction (omitempty omits ONLY a nil pointer, so
 // a non-nil &false serializes as `false`), so this round-trip is lossless.
 func (u TaskUpdate) GobEncode() ([]byte, error) {
@@ -452,8 +484,8 @@ func (u *TaskUpdate) GobDecode(data []byte) error {
 // writes nothing new.
 func (u TaskUpdate) IsEmpty() bool {
 	return u.Name == nil && u.Prompt == nil && u.CronExpr == nil &&
-		u.WatchCmd == nil && u.TargetSession == nil && u.ProjectPath == nil &&
-		u.Program == nil && u.Enabled == nil
+		u.WatchCmd == nil && u.TargetSession == nil && u.MaxConcurrentRuns == nil &&
+		u.ProjectPath == nil && u.Program == nil && u.Enabled == nil
 }
 
 // apply merges the non-nil fields of u onto t and returns the result. It never
@@ -474,6 +506,9 @@ func (u TaskUpdate) apply(t Task) Task {
 	}
 	if u.TargetSession != nil {
 		t.TargetSession = *u.TargetSession
+	}
+	if u.MaxConcurrentRuns != nil {
+		t.MaxConcurrentRuns = *u.MaxConcurrentRuns
 	}
 	if u.ProjectPath != nil {
 		t.ProjectPath = *u.ProjectPath
@@ -515,6 +550,9 @@ func DiffTask(old, cur Task) TaskUpdate {
 	}
 	if cur.TargetSession != old.TargetSession {
 		u.TargetSession = &cur.TargetSession
+	}
+	if cur.MaxConcurrentRuns != old.MaxConcurrentRuns {
+		u.MaxConcurrentRuns = &cur.MaxConcurrentRuns
 	}
 	if cur.ProjectPath != old.ProjectPath {
 		u.ProjectPath = &cur.ProjectPath

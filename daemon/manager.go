@@ -45,7 +45,20 @@ type Manager struct {
 	// never rebuilt from disk — so it guards concurrent creates. The settled case
 	// is covered by the live/disk slug scans in validateTitleAvailableLocked.
 	reservedRemoteNames map[string]struct{}
-	repoStartLocks      map[string]*sync.Mutex
+	// reservedTaskRuns counts a task's session creates that have been admitted
+	// against its max_concurrent_runs cap but have not yet registered an instance
+	// in m.instances, keyed by task id (#1892).
+	//
+	// Like reservedRemoteNames it is IN-FLIGHT only — populated at admit, dropped
+	// in release, never rebuilt from disk. It has to exist because a create holds
+	// the manager lock only to reserve, then runs for as long as the agent takes to
+	// come up before its instance appears in m.instances; without the reservation a
+	// burst could count zero in-flight sessions N times over and admit them all.
+	// The settled case needs no reservation: a registered instance is counted
+	// straight off m.instances by admitTaskRunLocked, which is why a daemon restart
+	// cannot lose the count.
+	reservedTaskRuns map[string]int
+	repoStartLocks   map[string]*sync.Mutex
 	// targetLocks serializes DeliverPrompt per (repo, title) so concurrent
 	// deliveries to the same shared target session create it once and deliver
 	// the rest in arrival order instead of racing creation and dropping the
@@ -170,6 +183,7 @@ func newManagerShell(cfg *config.Config) (*Manager, error) {
 		instances:           make(map[string]*session.Instance),
 		reservedTitles:      make(map[string]struct{}),
 		reservedRemoteNames: make(map[string]struct{}),
+		reservedTaskRuns:    make(map[string]int),
 		repoStartLocks:      make(map[string]*sync.Mutex),
 		targetLocks:         make(map[string]*sync.Mutex),
 		rootEnsureStates:    make(map[string]*rootEnsureState),

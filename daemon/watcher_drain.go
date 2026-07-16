@@ -93,6 +93,22 @@ func (w *taskWatcher) drainLoop() {
 		}
 		if err := w.sup.deliver(w.taskID, ev.Line); err != nil {
 			w.recordDeliveryResult(time.Now(), err)
+			if errors.Is(err, errAtConcurrencyLimit) {
+				// The task is at its max_concurrent_runs cap (#1892): nothing was
+				// created and nothing is wrong. Refund the rate slot this attempt
+				// reserved (a refusal delivers nothing, and a long park would
+				// otherwise burn the whole per-minute budget on retries), then poll at
+				// the BASE cadence rather than the growing failure backoff so the
+				// backlog starts moving promptly once a session finishes. The head
+				// event stays at the head, so FIFO holds across the park.
+				w.releaseEventSlot()
+				log.InfoLog.Printf("watch task %s: at its max_concurrent_runs limit; holding %d queued event(s) until a session finishes (#1892)", w.taskID, w.queue.pendingCount())
+				if !w.sleepStopAware(w.sup.drainBaseBackoff) {
+					w.stopDraining()
+					return
+				}
+				continue
+			}
 			if errors.Is(err, errTargetBusy) {
 				// Not a delivery failure: a TUI is attached to the target, so the
 				// backlog is held until detach rather than pasted into live typing

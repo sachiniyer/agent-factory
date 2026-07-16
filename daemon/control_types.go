@@ -19,6 +19,18 @@ type CreateSessionRequest struct {
 	Program   string `json:"program"`
 	Prompt    string `json:"prompt"`
 	AutoYes   bool   `json:"auto_yes"`
+	// TaskID records which task's delivery spawned this session (#1892). Set by
+	// the task delivery path; empty for a user-created session. It is persisted on
+	// the instance so the watch-task concurrency limit can count a task's
+	// in-flight sessions by provenance rather than by a title prefix — and so the
+	// count survives a daemon restart.
+	TaskID string `json:"task_id,omitempty"`
+	// MaxConcurrentRuns is the task's cap on in-flight sessions, carried from the
+	// task record so the manager can decide admission under its own lock — the
+	// only place a burst cannot race the check against the create (#1892). Zero
+	// means unlimited, so every non-task create leaves the gate inert. Ignored
+	// unless TaskID is set.
+	MaxConcurrentRuns int `json:"max_concurrent_runs,omitempty"`
 	// InPlace attaches the session to the repo's existing working tree at its
 	// current branch (`af sessions create --here`) instead of creating a new
 	// git worktree+branch; kill/cleanup leaves the user's tree and branch

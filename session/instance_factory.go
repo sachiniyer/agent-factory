@@ -11,6 +11,10 @@ import (
 type InstanceOptions struct {
 	// Title is the title of the instance.
 	Title string
+	// TaskID marks the session as spawned by a task's delivery (#1892). Empty for
+	// a user-created session. It is what lets the daemon count a task's in-flight
+	// sessions for the watch-task concurrency limit without guessing from titles.
+	TaskID string
 	// Path is the path to the workspace.
 	Path string
 	// Program is the program to run in the instance (e.g. "claude", "aider --model ollama_chat/gemma3:1b")
@@ -211,6 +215,7 @@ func NewInstance(opts InstanceOptions) (*Instance, error) {
 
 	return &Instance{
 		ID:              newSessionID(),
+		TaskID:          opts.TaskID,
 		Title:           opts.Title,
 		liveness:        LiveReady,
 		Path:            absPath,

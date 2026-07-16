@@ -15,7 +15,17 @@ type InstanceData struct {
 	// before #1195 simply have no id, and the reconcile falls back to
 	// title+CreatedAt for them (rollforward, mirroring the BranchCreatedByUs
 	// precedent).
-	ID     string `json:"id,omitempty"`
+	ID string `json:"id,omitempty"`
+	// TaskID is the id of the task whose delivery spawned this session, empty for
+	// a user-created one (#1892). It is the daemon-owned association between a
+	// task delivery and its session: the watch-task concurrency limit counts a
+	// task's in-flight sessions by this field, never by a title prefix. A prefix
+	// scan cannot do the job — nextAvailableTitleLocked auto-suffixes a taken base
+	// to "<base>-2", which is indistinguishable from a session a user named
+	// "<base>-2" themselves, and from a task whose name is another's prefix.
+	// omitempty + additive: records written before #1892 simply have no task_id
+	// and count against no limit (rollforward, mirroring the ID precedent above).
+	TaskID string `json:"task_id,omitempty"`
 	Title  string `json:"title"`
 	Path   string `json:"path"`
 	Branch string `json:"branch"`

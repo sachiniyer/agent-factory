@@ -12,7 +12,11 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// watchOutcome classifies a single session snapshot for `sessions watch`.
+// watchOutcome classifies a single session snapshot for `sessions watch`. The
+// values mirror session.Activity one-for-one; the state machine itself lives in
+// the session package (session.ClassifyActivity) so the watch-task concurrency
+// limit (#1892) decides "is this session still busy?" from the same code rather
+// than a second copy that could drift.
 type watchOutcome int
 
 const (
@@ -33,60 +37,21 @@ var (
 	watchIntervalFlag time.Duration
 )
 
-// classifyWatch maps a session snapshot onto the watch state machine. It reads
-// the canonical two-axis state (#1195): an in-flight client/executor operation
-// means the session is still settling (keep polling), otherwise the liveness
-// axis decides. It falls back to the composed legacy Status only for records
-// that predate the liveness field (LivenessUnset), so pre-#1195 rows still
-// classify. The returned reason is a human clause for the terminal case (and the
-// ready line).
+// classifyWatch maps a session snapshot onto the watch state machine by
+// delegating to session.ClassifyActivity — the shared projection of the
+// canonical two-axis state (#1195), which the daemon's watch-task concurrency
+// limit reads too (#1892). The returned reason is a human clause for the
+// terminal case (and the ready line). The timeout is the backstop if a session
+// never leaves the pending state.
 func classifyWatch(d *session.InstanceData) (watchOutcome, string) {
-	// Any operation in flight (create, kill, archive, restore) means the session
-	// is mid-transition; wait for it to settle rather than reporting the
-	// transient composed status. The timeout is the backstop if it never does.
-	switch d.InFlightOp {
-	case session.OpCreating, session.OpKilling, session.OpArchiving, session.OpRestoring:
-		return watchPending, ""
+	activity, reason := session.ClassifyActivity(*d)
+	switch activity {
+	case session.ActivityIdle:
+		return watchReady, reason
+	case session.ActivityTerminal:
+		return watchTerminal, reason
 	}
-
-	switch d.Liveness {
-	case session.LiveReady:
-		return watchReady, "idle (ready for review)"
-	case session.LiveRunning:
-		return watchPending, ""
-	case session.LiveLimitReached:
-		// Blocked on a provider usage limit; the daemon auto-resumes it (#1146),
-		// so treat it as still-working rather than done.
-		return watchPending, ""
-	case session.LiveLost:
-		return watchTerminal, "session is lost (its backing tmux/worktree vanished); recover it with 'af sessions restore' before watching again"
-	case session.LiveDead:
-		return watchTerminal, "session is dead (its backing tmux/worktree vanished)"
-	case session.LiveArchived:
-		return watchTerminal, "session is archived; restore it with 'af sessions restore' before watching"
-	case session.LivenessUnset:
-		// Pre-#1195 record with no liveness axis: derive from the legacy Status.
-		return classifyWatchByStatus(d.Status)
-	}
-	return watchPending, ""
-}
-
-// classifyWatchByStatus is the legacy-Status fallback for classifyWatch, used
-// only for records written before the liveness axis existed (#1195).
-func classifyWatchByStatus(s session.Status) (watchOutcome, string) {
-	switch s {
-	case session.Ready:
-		return watchReady, "idle (ready for review)"
-	case session.Running, session.Loading, session.Deleting:
-		return watchPending, ""
-	case session.Lost:
-		return watchTerminal, "session is lost (its backing tmux/worktree vanished); recover it with 'af sessions restore' before watching again"
-	case session.Dead:
-		return watchTerminal, "session is dead (its backing tmux/worktree vanished)"
-	case session.Archived:
-		return watchTerminal, "session is archived; restore it with 'af sessions restore' before watching"
-	}
-	return watchPending, ""
+	return watchPending, reason
 }
 
 // watchDeps holds the injectable dependencies of the watch loop so tests can

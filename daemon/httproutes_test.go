@@ -101,7 +101,7 @@ func TestHTTPRoutes_RequestFieldsMatchWireStruct(t *testing.T) {
 	}
 	require.NotNil(t, create)
 	assert.Equal(t,
-		[]string{"title", "title_base", "repo_path", "program", "prompt", "auto_yes", "in_place", "force_remote", "backend"},
+		[]string{"title", "title_base", "repo_path", "program", "prompt", "auto_yes", "task_id", "max_concurrent_runs", "in_place", "force_remote", "backend"},
 		create.RequestFields,
 		"request_fields must mirror CreateSessionRequest's json tags in declaration order")
 }

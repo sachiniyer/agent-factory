@@ -66,6 +66,7 @@ func (m *Manager) CreateSession(ctx context.Context, req CreateSessionRequest) (
 
 	instance, err := session.NewInstance(session.InstanceOptions{
 		Title:       title,
+		TaskID:      req.TaskID,
 		Path:        repo.Root,
 		Program:     req.Program,
 		AutoYes:     req.AutoYes,
@@ -193,6 +194,16 @@ func (m *Manager) reserveCreate(req CreateSessionRequest) (*config.RepoContext, 
 		}
 	}
 
+	// Admission control for a task's session-per-event deliveries (#1892). Placed
+	// here, after refreshLocked, so the count sees every session already on disk —
+	// and therefore survives a daemon restart with sessions still in flight. A
+	// refusal returns errAtConcurrencyLimit and creates nothing; the watch-task
+	// delivery path parks the event on the durable queue and retries it when a
+	// slot frees, so no event is ever dropped by the cap.
+	if err := m.admitTaskRunLocked(repo.ID, req.TaskID, req.MaxConcurrentRuns); err != nil {
+		return nil, "", nil, nil, err
+	}
+
 	m.reservedTitles[key] = struct{}{}
 	if remoteName != "" {
 		m.reservedRemoteNames[remoteName] = struct{}{}
@@ -204,6 +215,11 @@ func (m *Manager) reserveCreate(req CreateSessionRequest) (*config.RepoContext, 
 		if remoteName != "" {
 			delete(m.reservedRemoteNames, remoteName)
 		}
+		// CreateSession defers release(), so this runs only after the new instance
+		// is registered in m.instances and counts against the cap on its own —
+		// handing the slot over with no gap. On a failed create nothing was
+		// registered, and dropping the reservation is exactly the right refund.
+		m.releaseTaskRunLocked(req.TaskID)
 	}
 
 	return repo, title, release, renamedArchived, nil

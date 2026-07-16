@@ -15,6 +15,7 @@ func (i *Instance) ToInstanceData() InstanceData {
 
 	data := InstanceData{
 		ID:     i.ID,
+		TaskID: i.TaskID,
 		Title:  i.Title,
 		Path:   i.Path,
 		Branch: i.Branch,
@@ -125,6 +126,7 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 	inFlightOp := inFlightOpFromData(data)
 	instance := &Instance{
 		ID:           data.ID,
+		TaskID:       data.TaskID,
 		Title:        data.Title,
 		Path:         data.Path,
 		Branch:       data.Branch,

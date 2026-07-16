@@ -786,7 +786,8 @@ func (w *taskWatcher) handleEvent(line string, tail *tailBuffer) {
 	err := w.sup.deliver(w.taskID, line)
 	w.recordDeliveryResult(time.Now(), err)
 	if err != nil {
-		if errors.Is(err, errTargetBusy) {
+		switch {
+		case errors.Is(err, errTargetBusy):
 			// Not a failure: a TUI is attached to the target, so the event is
 			// held and retried after detach rather than pasted into live typing
 			// (#1586). A deferral delivers nothing, so refund the rate slot it
@@ -796,7 +797,17 @@ func (w *taskWatcher) handleEvent(line string, tail *tailBuffer) {
 			// quietly.
 			w.releaseEventSlot()
 			log.InfoLog.Printf("watch task %s: target session attached; deferring event until detach (#1586)", w.taskID)
-		} else {
+		case errors.Is(err, errAtConcurrencyLimit):
+			// Not a failure either: the task is at its max_concurrent_runs cap
+			// (#1892), so nothing was created. Refund the rate slot for the same
+			// reason a deferral does — the event will be delivered by the drainer,
+			// which spends its own slot then, and burning one per refusal would
+			// charge the cap's whole parked period against the per-minute budget.
+			// Queueing it preserves FIFO and is what makes the cap queue rather than
+			// drop; the drainer retries until a session finishes.
+			w.releaseEventSlot()
+			log.InfoLog.Printf("watch task %s: at its max_concurrent_runs limit; queueing event until a session finishes (#1892)", w.taskID)
+		default:
 			log.ErrorLog.Printf("watch task %s: failed to deliver event: %v", w.taskID, err)
 		}
 		w.enqueueEvent(line, tail)
@@ -808,6 +819,16 @@ func (w *taskWatcher) handleEvent(line string, tail *tailBuffer) {
 // deliveries and the drainer's replays reserve through the same window, so
 // combined delivery pressure on the target session never exceeds
 // eventsPerMinute — a burst replay after an outage trickles in.
+//
+// This rate limit and the max_concurrent_runs cap (#1892) are orthogonal and do
+// not double-limit, so neither needs to know about the other. This one is
+// protective policy against a chatty script and DROPS excess events by design;
+// the cap is a resource bound and QUEUES them, never dropping. They compose
+// without any reconciliation because of handleEvent's FIFO gate above: the first
+// event the cap parks creates a backlog, and from then on every new event is
+// enqueued without ever consulting this limiter. So the moment concurrency is the
+// binding constraint, the rate limiter stops dropping — the two are never the
+// binding constraint at the same time.
 func (w *taskWatcher) tryReserveEventSlot() bool {
 	now := time.Now()
 	w.mu.Lock()

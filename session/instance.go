@@ -88,6 +88,13 @@ type Instance struct {
 	// after construction, so cross-goroutine readers may read it without the mutex
 	// (like Title).
 	ID string
+	// TaskID is the id of the task whose delivery spawned this session, empty for
+	// a user-created one (#1892). It is the daemon's association between a task
+	// delivery and its session, replacing title-prefix guessing; the watch-task
+	// concurrency limit counts a task's in-flight sessions by it. Immutable after
+	// construction, so cross-goroutine readers may read it without the mutex
+	// (like ID and Title).
+	TaskID string
 	// Title is the title of the instance.
 	Title string
 	// Path is the path to the workspace.

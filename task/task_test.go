@@ -729,3 +729,90 @@ func TestRenderWatchPrompt(t *testing.T) {
 		})
 	}
 }
+
+// TestValidateTriggerMaxConcurrentRuns covers the watch-task concurrency cap
+// (#1892). The cap is only enforceable where sessions can actually pile up — a
+// watch task that creates one per event — so it is rejected everywhere else
+// rather than silently ignored: a stored setting that reads as enforced but does
+// nothing is worse than an error at the point of configuration.
+func TestValidateTriggerMaxConcurrentRuns(t *testing.T) {
+	cases := []struct {
+		name    string
+		task    Task
+		wantErr string
+	}{
+		{
+			name: "watch task with a cap",
+			task: Task{ID: "t1", WatchCmd: "tail -f log", Enabled: true, MaxConcurrentRuns: 3},
+		},
+		{
+			name: "unset cap is unlimited and always valid",
+			task: Task{ID: "t2", WatchCmd: "tail -f log", Enabled: true},
+		},
+		{
+			name: "a cap on a cron task is refused",
+			task: Task{ID: "t3", CronExpr: "0 3 * * *", Prompt: "p", Enabled: true, MaxConcurrentRuns: 3},
+			// Overlapping cron fires already coalesce on RunTask's lock.
+			wantErr: "not a watch task",
+		},
+		{
+			name:    "a cap with a target session is refused",
+			task:    Task{ID: "t4", WatchCmd: "tail -f log", TargetSession: "shared", Enabled: true, MaxConcurrentRuns: 3},
+			wantErr: "target_session",
+		},
+		{
+			name:    "a negative cap is refused",
+			task:    Task{ID: "t5", WatchCmd: "tail -f log", Enabled: true, MaxConcurrentRuns: -1},
+			wantErr: "negative max_concurrent_runs",
+		},
+		{
+			name: "a disabled watch draft may still carry a cap",
+			task: Task{ID: "t6", WatchCmd: "tail -f log", MaxConcurrentRuns: 2},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.task.ValidateTrigger()
+			if tc.wantErr == "" {
+				assert.NoError(t, err)
+				return
+			}
+			if assert.Error(t, err) {
+				assert.Contains(t, err.Error(), tc.wantErr)
+			}
+		})
+	}
+}
+
+// TestTaskUpdateMaxConcurrentRunsRoundTrip pins the patch semantics for the cap.
+// Zero is a meaningful value ("revert to unlimited"), not "unchanged", so the
+// field is a pointer — and it has to survive the CLI's gob control socket, which
+// elides a pointer to a zero value. TaskUpdate's JSON codec is what saves it, and
+// this is the test that fails if that codec is ever dropped.
+func TestTaskUpdateMaxConcurrentRunsRoundTrip(t *testing.T) {
+	zero := 0
+	three := 3
+
+	// A patch setting the cap to 0 must survive gob as a NON-nil pointer, or
+	// `af tasks update --max-concurrent-runs 0` would silently no-op.
+	var buf bytes.Buffer
+	require.NoError(t, gob.NewEncoder(&buf).Encode(TaskUpdate{MaxConcurrentRuns: &zero}))
+	var back TaskUpdate
+	require.NoError(t, gob.NewDecoder(&buf).Decode(&back))
+	require.NotNil(t, back.MaxConcurrentRuns, "a *int at 0 must not decode back as nil (gob elides zero values)")
+	assert.Equal(t, 0, *back.MaxConcurrentRuns)
+
+	// apply: a nil field leaves the stored cap alone, a non-nil one overwrites it.
+	base := Task{ID: "t1", WatchCmd: "tail -f log", MaxConcurrentRuns: 5}
+	assert.Equal(t, 5, TaskUpdate{}.apply(base).MaxConcurrentRuns, "an absent patch field must not change the cap")
+	assert.Equal(t, 3, TaskUpdate{MaxConcurrentRuns: &three}.apply(base).MaxConcurrentRuns)
+	assert.Equal(t, 0, TaskUpdate{MaxConcurrentRuns: &zero}.apply(base).MaxConcurrentRuns, "0 must revert the cap to unlimited")
+
+	// IsEmpty must see the field, or a cap-only patch would be treated as a no-op.
+	assert.False(t, TaskUpdate{MaxConcurrentRuns: &zero}.IsEmpty())
+
+	// DiffTask must emit it when the user edits it in the TUI.
+	diff := DiffTask(base, Task{ID: "t1", WatchCmd: "tail -f log", MaxConcurrentRuns: 3})
+	require.NotNil(t, diff.MaxConcurrentRuns)
+	assert.Equal(t, 3, *diff.MaxConcurrentRuns)
+}

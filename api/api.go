@@ -638,6 +638,7 @@ func init() {
 	tasksAddCmd.Flags().StringVar(&taskAddCronFlag, "cron", "", "Cron expression (exactly one of --cron / --watch-cmd)")
 	tasksAddCmd.Flags().StringVar(&taskAddWatchCmdFlag, "watch-cmd", "", "Long-running watch command; each stdout line triggers the task (exactly one of --cron / --watch-cmd)")
 	tasksAddCmd.Flags().StringVar(&taskAddTargetSessionFlag, "target-session", "", "Deliver the prompt into this session (auto-created if missing); empty creates a new session per run")
+	tasksAddCmd.Flags().IntVar(&taskAddMaxConcurrentRunsFlag, "max-concurrent-runs", 0, "Cap how many sessions this watch task may have in flight at once; excess events are queued in order, never dropped (0 = unlimited; --watch-cmd tasks without --target-session only)")
 	tasksAddCmd.Flags().StringVar(&taskAddProgramFlag, "program", "", "Program to run (one of: "+tmux.SupportedProgramsString()+"; defaults to config default)")
 	tasksAddCmd.MarkFlagRequired("name")
 
@@ -646,6 +647,7 @@ func init() {
 	tasksUpdateCmd.Flags().StringVar(&taskUpdateCronFlag, "cron", "", "New cron expression (clears watch-cmd)")
 	tasksUpdateCmd.Flags().StringVar(&taskUpdateWatchCmdFlag, "watch-cmd", "", "New watch command (clears cron)")
 	tasksUpdateCmd.Flags().StringVar(&taskUpdateTargetSessionFlag, "target-session", "", "New target session; pass an empty value to revert to a new session per run")
+	tasksUpdateCmd.Flags().IntVar(&taskUpdateMaxConcurrentRunsFlag, "max-concurrent-runs", 0, "New in-flight session cap for this watch task; pass 0 to revert to unlimited")
 	tasksUpdateCmd.Flags().StringVar(&taskUpdateEnabledFlag, "enabled", "", "Enable or disable the task (true/false)")
 	tasksUpdateCmd.Flags().StringVar(&taskUpdateProgramFlag, "program", "", "New program to run (one of: "+tmux.SupportedProgramsString()+"; leave unset to keep the current one)")
 

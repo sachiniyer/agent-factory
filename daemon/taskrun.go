@@ -63,8 +63,23 @@ func deliverTaskPrompt(t *task.Task, prompt string, deferWhileAttached bool) (st
 			Program:   t.Program,
 			Prompt:    prompt,
 			AutoYes:   cfg.AutoYes,
+			// Provenance + the cap the manager admits against (#1892). TaskID is
+			// persisted on the session so the count is by association, never by a
+			// title prefix; MaxConcurrentRuns is zero for every task that has not
+			// opted in, leaving the gate inert.
+			TaskID:            t.ID,
+			MaxConcurrentRuns: t.MaxConcurrentRuns,
 		})
 		if err != nil {
+			// The task is at its cap: nothing was created, and this is not a failure.
+			// Surface the in-process sentinel so the watch paths park the event on the
+			// durable queue and retry it once a session finishes — the same treatment
+			// errTargetBusy gets. The text match is required because the create
+			// reaches the manager over net/rpc, which flattens the sentinel to a
+			// string (see atConcurrencyLimitErrText).
+			if isAtConcurrencyLimitErr(err) {
+				return "", errAtConcurrencyLimit
+			}
 			return "", fmt.Errorf("failed to start task session: %w", err)
 		}
 		// The freshly created session hit a usage-limit wall during startup and
