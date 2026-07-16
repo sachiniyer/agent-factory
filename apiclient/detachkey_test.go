@@ -168,6 +168,18 @@ func TestTrailingDetachKeyLen_RebindableKey(t *testing.T) {
 				t.Fatalf("%q must not detach when ctrl-^ is bound: got %d", in, got)
 			}
 		}
+		// The shift rule belongs to the CODE, not the binding. '6' is the detach
+		// key only WITH shift: unshifted Ctrl+6 is a different key, and swallowing
+		// it would steal a keypress the pane should receive.
+		for _, in := range []string{
+			"\x1b[54;5u",    // kitty: Ctrl+6, no shift
+			"\x1b[27;5;54~", // modifyOtherKeys: Ctrl+6, no shift
+		} {
+			if got := trailingDetachKeyLen([]byte(in)); got != 0 {
+				t.Fatalf("unshifted Ctrl+6 %q must reach the pane, not detach, "+
+					"when ctrl-^ is bound: got %d", in, got)
+			}
+		}
 	})
 
 	t.Run("ctrl-_ matches its shifted physical encoding", func(t *testing.T) {
@@ -176,10 +188,24 @@ func TestTrailingDetachKeyLen_RebindableKey(t *testing.T) {
 			"\x1b[45;6u",    // kitty: unshifted '-' + ctrl|shift
 			"\x1b[45:95;6u", // kitty with report-alternate-keys: shifted slot is '_'
 			"\x1b[95;5u",    // a layout where '_' needs no shift
+			"\x1b[95;6u",    // ...and the same layout with shift held
 			"\x1b[27;6;95~", // modifyOtherKeys: the '_' character + ctrl|shift
 		} {
 			if got := trailingDetachKeyLen([]byte(in)); got != len(in) {
 				t.Fatalf("ctrl-_ encoding %q not matched: got %d, want %d", in, got, len(in))
+			}
+		}
+		// Ctrl+- with no shift is NOT ctrl-_ — it is a distinct keypress (font-size
+		// shortcuts live there) and must reach the pane. Making shift optional for
+		// every code of the binding swallowed it.
+		for _, in := range []string{
+			"\x1b[45;5u",    // kitty: Ctrl+-, no shift
+			"\x1b[27;5;45~", // modifyOtherKeys: Ctrl+-, no shift
+			"\x1b[45;133u",  // Ctrl+- with num-lock on: still no shift
+		} {
+			if got := trailingDetachKeyLen([]byte(in)); got != 0 {
+				t.Fatalf("unshifted Ctrl+- %q must reach the pane, not detach, "+
+					"when ctrl-_ is bound: got %d", in, got)
 			}
 		}
 		if got := trailingDetachKeyLen([]byte("\x1b[54;6u")); got != 0 {

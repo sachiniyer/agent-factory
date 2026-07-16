@@ -65,33 +65,51 @@ const (
 	kbEventRelease = 3
 )
 
-// detachKeyEncoding is how the configured detach key looks once the terminal has
-// left legacy mode: the key codes that identify it, and whether shift may appear
-// alongside ctrl.
-//
-// Both fields exist because the C0 byte a binding parses to is NOT what an
-// upgraded terminal reports. ctrl-w's byte 0x17 collapses key and modifier into
-// one value; kitty reports them separately, as the key the user physically
-// pressed plus a modifier set. For ctrl-^ and ctrl-_ they come apart entirely: on
-// a US layout those characters are typed as Ctrl+Shift+6 and Ctrl+Shift+-, and
-// kitty reports the UNSHIFTED key code with the shift bit set — never codepoint
-// 94/95 with ctrl alone.
-type detachKeyEncoding struct {
-	// codes are the codepoints that can name this key: the character the binding
-	// is written with, plus the unshifted key code for characters that need shift
-	// to type. A terminal reporting either one means the same physical keypress.
-	codes []int
-	// shiftOK admits the shift modifier next to ctrl. It is set only for bindings
-	// whose character REQUIRES shift, where a terminal reporting the unshifted key
-	// code has nowhere else to put it. For every other binding shift is a genuine
-	// modifier difference: ctrl+shift+w is not the ctrl-w detach key.
-	shiftOK bool
+// shiftRule says how the shift modifier relates to one key code. It is a
+// property of the CODE, not of the binding: ctrl-_ is reported as '_' (shift
+// irrelevant — some layouts have it as a base key) or as the unshifted '-' key,
+// which is only the detach key WITH shift, because Ctrl+- unshifted is a
+// different key the pane should receive.
+type shiftRule int
+
+const (
+	// shiftForbidden: the character needs no shift, so a shift bit means the user
+	// pressed something else. ctrl+shift+w is not the ctrl-w detach key.
+	shiftForbidden shiftRule = iota
+	// shiftOptional: the code IS the binding's character, however it was typed —
+	// modifyOtherKeys reports '_' with shift, a layout with underscore as a base
+	// key reports it without.
+	shiftOptional
+	// shiftRequired: the code is the unshifted physical key, which only produces
+	// the binding's character when shifted. Ctrl+Shift+- is ctrl-_; Ctrl+- is not.
+	shiftRequired
+)
+
+// detachKeyCode is one key code that can name the detach key, with the shift
+// rule that makes it that key rather than a neighbouring one.
+type detachKeyCode struct {
+	code  int
+	shift shiftRule
 }
 
-// matches reports whether code names this detach key.
-func (e detachKeyEncoding) matches(code int) bool {
+// detachKeyEncoding is how the configured detach key looks once the terminal has
+// left legacy mode: the codes that identify it, each with its own shift rule.
+//
+// This exists because the C0 byte a binding parses to is NOT what an upgraded
+// terminal reports. ctrl-w's byte 0x17 collapses key and modifier into one value;
+// kitty reports them separately, as the key the user physically pressed plus a
+// modifier set. For ctrl-^ and ctrl-_ they come apart entirely: on a US layout
+// those characters are typed as Ctrl+Shift+6 and Ctrl+Shift+-, and kitty reports
+// the UNSHIFTED key code with the shift bit set — never codepoint 94/95 with ctrl
+// alone.
+type detachKeyEncoding struct {
+	codes []detachKeyCode
+}
+
+// matches reports whether code, pressed with mods, is this detach key.
+func (e detachKeyEncoding) matches(code, mods int, maskLocks bool) bool {
 	for _, c := range e.codes {
-		if code == c {
+		if c.code == code && modsMatch(mods, c.shift, maskLocks) {
 			return true
 		}
 	}
@@ -108,29 +126,42 @@ func (e detachKeyEncoding) matches(code int) bool {
 // CSI 91;5u and bare Esc as CSI 27u, so matching '[' here detaches on the real
 // binding without ever hijacking the Esc the agent needs.
 func detachKeyEncodingFor(b byte) (detachKeyEncoding, bool) {
+	plain := func(code int) (detachKeyEncoding, bool) {
+		return detachKeyEncoding{codes: []detachKeyCode{{code, shiftForbidden}}}, true
+	}
+	// shifted describes a binding whose character needs shift on a US layout:
+	// the character itself (however typed) or the physical key it lives on, which
+	// is only this binding when shifted.
+	shifted := func(char, key int) (detachKeyEncoding, bool) {
+		return detachKeyEncoding{codes: []detachKeyCode{
+			{char, shiftOptional},
+			{key, shiftRequired},
+		}}, true
+	}
+
 	switch {
 	case b >= 1 && b <= 26:
-		return detachKeyEncoding{codes: []int{int(b) + 'a' - 1}}, true // ctrl-a..ctrl-z
+		return plain(int(b) + 'a' - 1) // ctrl-a..ctrl-z
 	case b == 27:
-		return detachKeyEncoding{codes: []int{'['}}, true
+		return plain('[')
 	case b == 28:
-		return detachKeyEncoding{codes: []int{'\\'}}, true
+		return plain('\\')
 	case b == 29:
-		return detachKeyEncoding{codes: []int{']'}}, true
+		return plain(']')
 	case b == 30:
-		return detachKeyEncoding{codes: []int{'^', '6'}, shiftOK: true}, true
+		return shifted('^', '6') // Ctrl+Shift+6 — Ctrl+6 alone is a different key
 	case b == 31:
-		return detachKeyEncoding{codes: []int{'_', '-'}, shiftOK: true}, true
+		return shifted('_', '-') // Ctrl+Shift+- — Ctrl+- alone is a different key
 	default:
 		return detachKeyEncoding{}, false
 	}
 }
 
-// modsMatch reports whether an encoded modifier param is this key's modifier set:
-// ctrl, plus shift where the binding needs it, and nothing else once lock state
-// is masked away. Any other bit (alt, super, hyper, meta) makes it a different
-// key the agent may want, so it must not detach.
-func modsMatch(param int, enc detachKeyEncoding, maskLocks bool) bool {
+// modsMatch reports whether an encoded modifier param is the modifier set for a
+// key code with this shift rule: ctrl, shift exactly as the rule demands, and
+// nothing else once lock state is masked away. Any other bit (alt, super, hyper,
+// meta) makes it a different key the agent may want, so it must not detach.
+func modsMatch(param int, rule shiftRule, maskLocks bool) bool {
 	if param < 1 {
 		return false
 	}
@@ -138,11 +169,18 @@ func modsMatch(param int, enc detachKeyEncoding, maskLocks bool) bool {
 	if maskLocks {
 		bits &^= kbModLockMsk
 	}
-	allowed := kbModCtrl
-	if enc.shiftOK {
-		allowed |= kbModShift
+	if bits&kbModCtrl == 0 || bits&^(kbModCtrl|kbModShift) != 0 {
+		return false
 	}
-	return bits&kbModCtrl != 0 && bits&^allowed == 0
+	hasShift := bits&kbModShift != 0
+	switch rule {
+	case shiftForbidden:
+		return !hasShift
+	case shiftRequired:
+		return hasShift
+	default: // shiftOptional
+		return true
+	}
 }
 
 // csiParams splits the parameter bytes of a CSI sequence into top-level params,
@@ -201,16 +239,17 @@ func matchesEncodedDetachKey(seq []byte, enc detachKeyEncoding) bool {
 	switch final {
 	case 'u':
 		// kitty: CSI <key>[:<shifted>[:<base-layout>]] ; <mods>[:<event>] u
-		if len(params) != 2 || !modsMatch(csiSub(params, 1, 0), enc, true) {
+		if len(params) != 2 {
 			return false
 		}
+		mods := csiSub(params, 1, 0)
 		// Any slot naming the key counts. The base-layout slot is the point: it
 		// reports the PC-101 key for the physical press, and it is the ONLY slot
 		// carrying 'w' for a user typing ctrl+w on a Cyrillic layout, where the
 		// primary slot holds that layout's own codepoint. The shifted slot is what
 		// carries '^' when the user presses Ctrl+Shift+6.
 		for _, code := range params[0] {
-			if enc.matches(code) {
+			if enc.matches(code, mods, true) {
 				return true
 			}
 		}
@@ -221,8 +260,7 @@ func matchesEncodedDetachKey(seq []byte, enc detachKeyEncoding) bool {
 			return false
 		}
 		return csiSub(params, 0, 0) == 27 &&
-			enc.matches(csiSub(params, 2, 0)) &&
-			modsMatch(csiSub(params, 1, 0), enc, false)
+			enc.matches(csiSub(params, 2, 0), csiSub(params, 1, 0), false)
 	default:
 		return false
 	}
