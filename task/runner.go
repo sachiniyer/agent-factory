@@ -51,6 +51,19 @@ var (
 	// accepting input — it excludes amp's blank loading pane and its "Welcome to
 	// Amp" banner, neither of which draws the box (the reason the match is strict).
 	ampPromptFrameBottom = regexp.MustCompile(`╰[─ ].*[─ ]╯`)
+	// ampWorkingIndicator matches the status segment amp draws into the LEFT end
+	// of its prompt frame's bottom rule while a turn is in flight — a spinner
+	// glyph plus a verb, e.g. "╰ ∼ Streaming ────…" or "╰ ∼ Thinking ────…". An
+	// idle frame closes with the rule immediately after the corner ("╰────…"), so
+	// the discriminator is: anything that is not the rule itself sitting between
+	// the corner and the run of "─".
+	//
+	// It is deliberately blind to WHICH verb amp prints. The label vocabulary is
+	// amp's private UI detail (Streaming/Thinking/… today, more tomorrow) and
+	// enumerating it is how #1756's frame regex broke in the first place — a
+	// version bump would silently reopen this bug. Presence of a status segment
+	// AT ALL is the signal; its wording is not.
+	ampWorkingIndicator = regexp.MustCompile(`╰ +[^─\s]`)
 )
 
 // postWorktreeHooksDoneForWait resolves the instance's post-worktree hook
@@ -175,6 +188,23 @@ func isReadyContent(content, agent string) bool {
 // (Greptile P2 on #1756). The capture is visible-only, so a single current box is
 // what a real ready pane shows.
 func isAmpPromptFrame(content string) bool {
+	_, ok := ampFrameBottomRule(content)
+	return ok
+}
+
+// ampFrameBottomRule locates the CURRENT amp prompt frame and returns its bottom
+// rule line (ANSI already stripped), reporting false when the pane shows no such
+// frame. Both amp pane questions reduce to it: "is amp accepting input?" is
+// whether a frame exists at all (isAmpPromptFrame), and "is amp mid-turn?" is
+// what that frame's bottom rule says (IsWorkingContent).
+//
+// Returning the LINE rather than a bool is what keeps the two answers on one
+// contiguity walk. The walk is the load-bearing part: matching a bottom rule
+// anywhere in the pane would pair an old border in scrollback with a newer one
+// (Greptile P2 on #1756), and for the working check that is not just a stale
+// ready signal but a permanent one — a "╰ ∼ Streaming" left above the live frame
+// by a finished turn would hold the session at Running forever.
+func ampFrameBottomRule(content string) (string, bool) {
 	plain := ampAnsiEscape.ReplaceAllString(content, "")
 	lines := strings.Split(plain, "\n")
 	for i, line := range lines {
@@ -187,14 +217,60 @@ func isAmpPromptFrame(content string) bool {
 		// contiguous box, so this top rule is stale scrollback — keep scanning.
 		for j := i + 1; j < len(lines); j++ {
 			if ampPromptFrameBottom.MatchString(lines[j]) {
-				return true
+				return lines[j], true
 			}
 			if !strings.HasPrefix(strings.TrimSpace(lines[j]), "│") {
 				break
 			}
 		}
 	}
-	return false
+	return "", false
+}
+
+// IsWorkingContent reports whether the captured pane shows POSITIVE evidence
+// that the given agent is mid-turn — the agent itself saying "I am busy", not an
+// inference drawn from the pane changing.
+//
+// It exists because the daemon's liveness poll infers "working" from pane CHURN:
+// content changed since the last tick → LiveRunning, unchanged → idle → LiveReady
+// (the green dot). That inference silently assumes an agent REPAINTS CONTINUOUSLY
+// while it works, which claude and codex do (an animated spinner plus an elapsed
+// timer, so their pane can never hold still for a whole poll interval) — and amp
+// does not. amp draws a static frame and repaints only when output actually
+// arrives, so every quiet gap in a turn (between token bursts, during a tool call,
+// while the model thinks) holds the pane byte-identical past the 1s poll and reads
+// as idle. The dot then flips green mid-turn and back on the next burst: the #1766
+// green-dot-means-waiting contract inverted into a flash (Sachin, live repro:
+// three consecutive false-Ready ticks while amp displayed "Thinking").
+//
+// A stability debounce cannot fix this class — it only buys a longer quiet window
+// before the same misread, and amp's quiet gaps are unbounded (a long tool call
+// prints nothing for as long as it runs). Positive evidence is what closes it: an
+// agent that says it is working is working, however still its pane sits.
+//
+// Only agents that actually publish an in-progress indicator can answer here.
+// Everything else returns false and keeps the churn inference verbatim — this is
+// purely an ADDITIONAL "definitely working" signal layered over the poll's idle
+// branch, never a replacement for it, so no existing agent's behavior moves.
+func IsWorkingContent(content, agent string) bool {
+	switch agent {
+	case tmux.ProgramAmp:
+		// Ask the CURRENT frame's bottom rule only (see ampFrameBottomRule): a
+		// stale "╰ ∼ Streaming" left in scrollback by a finished turn must not
+		// pin a genuinely idle session at Running forever — the mirror-image bug
+		// (a dot that never goes green) of the flash this fixes.
+		//
+		// No frame at all means amp is still booting or has died. Neither is
+		// "working": the poll's own liveness probe owns those, and claiming
+		// Running here would paper over a dead pane that must read Lost.
+		rule, ok := ampFrameBottomRule(content)
+		if !ok {
+			return false
+		}
+		return ampWorkingIndicator.MatchString(rule)
+	default:
+		return false
+	}
 }
 
 // isDocTrustPrompt reports whether content shows the documentation-link trust
