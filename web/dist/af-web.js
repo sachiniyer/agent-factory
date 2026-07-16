@@ -6803,12 +6803,20 @@ var Status = {
 };
 
 // src/status.ts
+var ROW_KIND_LABELS = {
+  ready: "Ready",
+  working: "Working",
+  lost: "Lost",
+  dead: "Dead",
+  limit: "Limit reached",
+  archived: "Archived"
+};
 var READY_GLYPH = "\u25CF";
 var DEAD_GLYPH = "\u25CB";
 var LOST_GLYPH = "\u25CC";
 var ARCHIVED_GLYPH = "\u25A7";
 var LIMIT_GLYPH = "\u25C6";
-var WORKING = { glyph: "", kind: null, label: "Working" };
+var WORKING = { glyph: "", kind: null, label: ROW_KIND_LABELS.working };
 function rowStatus(s) {
   const op = s.in_flight_op ?? InFlightOp.None;
   if (op !== InFlightOp.None) {
@@ -6818,6 +6826,9 @@ function rowStatus(s) {
 }
 function isWorking(s) {
   return rowStatus(s).kind === null;
+}
+function rowKind(s) {
+  return rowStatus(s).kind ?? "working";
 }
 function livenessOf(s) {
   const lv = s.liveness ?? Liveness.Unset;
@@ -6842,15 +6853,15 @@ function livenessOf(s) {
 function dotForLiveness(lv) {
   switch (lv) {
     case Liveness.Ready:
-      return { glyph: READY_GLYPH, kind: "ready", label: "Ready" };
+      return { glyph: READY_GLYPH, kind: "ready", label: ROW_KIND_LABELS.ready };
     case Liveness.Lost:
-      return { glyph: LOST_GLYPH, kind: "lost", label: "Lost" };
+      return { glyph: LOST_GLYPH, kind: "lost", label: ROW_KIND_LABELS.lost };
     case Liveness.Dead:
-      return { glyph: DEAD_GLYPH, kind: "dead", label: "Dead" };
+      return { glyph: DEAD_GLYPH, kind: "dead", label: ROW_KIND_LABELS.dead };
     case Liveness.Archived:
-      return { glyph: ARCHIVED_GLYPH, kind: "archived", label: "Archived" };
+      return { glyph: ARCHIVED_GLYPH, kind: "archived", label: ROW_KIND_LABELS.archived };
     case Liveness.LimitReached:
-      return { glyph: LIMIT_GLYPH, kind: "limit", label: "Limit reached" };
+      return { glyph: LIMIT_GLYPH, kind: "limit", label: ROW_KIND_LABELS.limit };
     // LiveRunning and LivenessUnset both render as working (render.go:285, 297).
     case Liveness.Running:
     case Liveness.Unset:
@@ -6913,6 +6924,77 @@ function formatLimitReset(reset, now) {
   }
   const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
   return `${months[reset.getMonth()]} ${reset.getDate()} ${clock}`;
+}
+
+// src/filter.ts
+var FILTER_KEY = "af-status-filter";
+var FILTER_KINDS = ["working", "ready", "lost", "dead", "limit", "archived"];
+var DEFAULTS = {
+  working: true,
+  ready: true,
+  lost: true,
+  dead: true,
+  limit: true,
+  archived: false
+};
+function defaultFilter() {
+  return { ...DEFAULTS };
+}
+function filterLabel(kind) {
+  return ROW_KIND_LABELS[kind];
+}
+function filterSessions(list, filter) {
+  return list.filter((s) => filter[rowKind(s)]);
+}
+function withKind(filter, kind, on) {
+  return { ...filter, [kind]: on };
+}
+function kindCounts(list) {
+  const counts = { working: 0, ready: 0, lost: 0, dead: 0, limit: 0, archived: 0 };
+  for (const s of list) {
+    counts[rowKind(s)]++;
+  }
+  return counts;
+}
+function isDefaultFilter(filter) {
+  return FILTER_KINDS.every((k) => filter[k] === DEFAULTS[k]);
+}
+function hiddenCount(list, filter) {
+  return list.length - filterSessions(list, filter).length;
+}
+function loadFilter() {
+  const filter = defaultFilter();
+  let raw = null;
+  try {
+    raw = localStorage.getItem(FILTER_KEY);
+  } catch {
+    return filter;
+  }
+  if (!raw) {
+    return filter;
+  }
+  let stored;
+  try {
+    stored = JSON.parse(raw);
+  } catch {
+    return filter;
+  }
+  if (!stored || typeof stored !== "object" || Array.isArray(stored)) {
+    return filter;
+  }
+  const rec = stored;
+  for (const kind of FILTER_KINDS) {
+    if (typeof rec[kind] === "boolean") {
+      filter[kind] = rec[kind];
+    }
+  }
+  return filter;
+}
+function persistFilter(filter) {
+  try {
+    localStorage.setItem(FILTER_KEY, JSON.stringify(filter));
+  } catch {
+  }
 }
 
 // src/project.ts
@@ -9172,12 +9254,35 @@ var AppShell = class {
     this.railCount = h2("span", { class: "af-rail-count" }, "0");
     const newBtn = h2("button", { type: "button", class: "af-rail-new", title: "New session" }, "+ New");
     newBtn.addEventListener("click", () => this.actions.newSession());
+    const filterGlyph = h2("span", { class: "af-rail-filter-glyph" }, "\u25A4");
+    filterGlyph.setAttribute("aria-hidden", "true");
+    this.filterDot = h2("span", { class: "af-rail-filter-dot" });
+    this.filterDot.setAttribute("aria-hidden", "true");
+    this.filterBtn = h2("button", { type: "button", class: "af-rail-filter" }, filterGlyph, this.filterDot);
+    this.filterBtn.setAttribute("aria-haspopup", "true");
+    this.filterBtn.setAttribute("aria-expanded", "false");
+    this.filterBtn.setAttribute("aria-label", "Filter sessions");
+    this.filterBtn.setAttribute("title", "Filter sessions");
+    this.filterBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      this.toggleFilterMenu();
+    });
+    this.filterMenu = h2("div", { class: "af-filter-menu" });
+    this.filterMenu.setAttribute("role", "group");
+    this.filterMenu.setAttribute("aria-label", "Filter sessions");
+    this.filterMenu.hidden = true;
+    this.filterWrap = h2("div", { class: "af-rail-filter-wrap" }, this.filterBtn, this.filterMenu);
+    document.addEventListener("click", (e) => {
+      if (this.filterMenuOpen && !this.filterWrap.contains(e.target)) {
+        this.closeFilterMenu();
+      }
+    });
     const railHead = h2(
       "div",
       { class: "af-rail-head" },
       h2("span", { class: "af-rail-title" }, "Sessions"),
       this.railCount,
-      newBtn
+      h2("div", { class: "af-rail-head-actions" }, this.filterWrap, newBtn)
     );
     this.railList = h2("ul", { class: "af-rail-list" });
     this.railList.setAttribute("role", "listbox");
@@ -9233,6 +9338,16 @@ var AppShell = class {
   lastProjectSessions = null;
   lastProjectTasks = null;
   lastSelectedProject = null;
+  // The rail's status filter control (feat: hide archived by default): a rail-head
+  // button + a checkbox menu, one row per session state. Same imperative treatment as
+  // the project switcher above — its open state is UI ephemera, not store state, and
+  // the checked set lives in the store (AppState.statusFilter).
+  filterWrap;
+  filterBtn;
+  filterMenu;
+  filterDot;
+  filterMenuOpen = false;
+  lastStatusFilter = null;
   // Header text nodes for the selected pane, (re)created per selection.
   headTitle = null;
   headMeta = null;
@@ -9328,7 +9443,9 @@ var AppShell = class {
     }
     this.lastSessions = state.sessions;
     this.lastSelectedId = state.selectedId;
-    if (sessionsChanged || selectionChanged || projectChanged) {
+    const filterChanged = this.lastStatusFilter !== state.statusFilter;
+    this.lastStatusFilter = state.statusFilter;
+    if (sessionsChanged || selectionChanged || projectChanged || filterChanged) {
       this.renderRail(state);
     }
     if (selectionChanged || !this.mainRendered) {
@@ -9351,13 +9468,16 @@ var AppShell = class {
     this.currentTabIds = tabs.map(tabIdentity);
     this.currentTabRealIds = tabs.map(tabRealId);
   }
-  /** Renders the rail SCOPED to the selected project (redesign PR2): only that
-   *  project's sessions, never the whole projection. Three states: no project at all
-   *  (nothing created yet) → the "no sessions yet" empty rail; a project with no LIVE
-   *  sessions → the dim one-line per-project empty state; otherwise the scoped rows. */
+  /** Renders the rail SCOPED to the selected project (redesign PR2) and FILTERED by
+   *  the status filter (feat: hide archived by default): only that project's sessions
+   *  in a state the user asked to see, never the whole projection. No project at all
+   *  (nothing created yet) → the "no sessions yet" empty rail; otherwise the visible
+   *  rows, under a notice when there is something worth saying about what's missing. */
   renderRail(state) {
     const scoped = scopeToProject(state.sessions, state.selectedProject);
-    this.railCount.textContent = String(scoped.length);
+    const visible = filterSessions(orderedSessions(scoped), state.statusFilter);
+    this.railCount.textContent = String(visible.length);
+    this.renderFilterMenu(state, scoped);
     const list = this.railList;
     if (!state.selectedProject) {
       list.replaceChildren(
@@ -9371,17 +9491,94 @@ var AppShell = class {
       );
       return;
     }
-    const rows = orderedSessions(scoped).map((s) => sessionRow(s, s.id === state.selectedId, this.actions));
-    const hasLive = scoped.some((s) => !isArchived(s));
-    if (!hasLive) {
-      const name = projectName(state.selectedProject);
+    const rows = visible.map((s) => sessionRow(s, s.id === state.selectedId, this.actions));
+    const notice = this.railNotice(state, scoped, visible);
+    list.replaceChildren(...notice ? [notice, ...rows] : rows);
+  }
+  /**
+   * The dim one-liner above the rows explaining what ISN'T there, or null when the
+   * rail speaks for itself. Three things are worth saying, in precedence order:
+   *
+   *  - the project has no ACTIVE session — the redesign PR2 empty state, now
+   *    accurate about the archive: with archived hidden it names the count sitting
+   *    behind the filter (never silently missing), and offers to reveal it in place.
+   *    It renders ABOVE any archived rows, so "no active sessions" reads as a
+   *    statement about live work, not a contradiction of the rows below.
+   *  - every row is filtered out by a narrowed filter — an honest "nothing matches"
+   *    with the way back, rather than a rail that looks broken.
+   *  - otherwise nothing: rows are showing.
+   */
+  railNotice(state, scoped, visible) {
+    const name = projectName(state.selectedProject ?? "");
+    const hasActive = scoped.some((s) => !isArchived(s));
+    if (!hasActive) {
       const newBtn = h2("button", { type: "button", class: "af-rail-empty-new", title: "New session" }, "+ New");
       newBtn.addEventListener("click", () => this.actions.newSession());
-      const empty = h2("li", { class: "af-rail-empty-project" }, `No sessions in ${name} \u2014 `, newBtn);
-      list.replaceChildren(empty, ...rows);
-      return;
+      const empty = h2("li", { class: "af-rail-empty-project" }, `No active sessions in ${name} \u2014 `, newBtn);
+      const archived = scoped.filter(isArchived).length;
+      if (archived > 0 && !state.statusFilter.archived) {
+        const show = h2("button", { type: "button", class: "af-rail-empty-new af-rail-show-archived" }, "Show archived");
+        show.addEventListener("click", () => this.actions.setStatusFilter("archived", true));
+        empty.append(` \xB7 ${archived} archived hidden `, show);
+      }
+      return empty;
     }
-    list.replaceChildren(...rows);
+    if (visible.length === 0) {
+      const reset = h2("button", { type: "button", class: "af-rail-empty-new af-rail-reset-filter" }, "Reset filter");
+      reset.addEventListener("click", () => this.actions.resetStatusFilter());
+      return h2(
+        "li",
+        { class: "af-rail-empty-project" },
+        `No sessions match the filter \u2014 ${hiddenCount(scoped, state.statusFilter)} hidden `,
+        reset
+      );
+    }
+    return null;
+  }
+  /** (Re)builds the filter menu: one checkbox per session state with its scoped
+   *  count, plus a reset. Counts come from the PROJECT-scoped list (the filter is a
+   *  rail control, and the rail is single-project), so they always describe the rows
+   *  the menu governs. Rebuilt in place — the menu's open state is preserved across
+   *  rebuilds so a live event never snaps it shut mid-narrowing. */
+  renderFilterMenu(state, scoped) {
+    const counts = kindCounts(scoped);
+    const narrowed = !isDefaultFilter(state.statusFilter);
+    this.filterDot.classList.toggle("af-rail-filter-dot-on", narrowed);
+    this.filterBtn.classList.toggle("af-rail-filter-narrowed", narrowed);
+    const children = [h2("div", { class: "af-filter-menu-label" }, "Show sessions")];
+    for (const kind of FILTER_KINDS) {
+      children.push(this.filterItem(kind, state.statusFilter[kind], counts[kind]));
+    }
+    const reset = h2("button", { type: "button", class: "af-ghost af-filter-reset" }, "Reset to default");
+    reset.disabled = !narrowed;
+    reset.addEventListener("click", (e) => {
+      e.stopPropagation();
+      this.actions.resetStatusFilter();
+    });
+    children.push(h2("div", { class: "af-filter-menu-foot" }, reset));
+    this.filterMenu.replaceChildren(...children);
+  }
+  /** One state's checkbox in the filter menu: a check when shown, the state's label
+   *  (the row's own word — status.ts ROW_KIND_LABELS), and how many sessions in this
+   *  project are in it. Clicking toggles just that state and leaves the menu open. */
+  filterItem(kind, on, count) {
+    const check = h2("span", { class: "af-filter-check" }, on ? "\u2713" : "");
+    check.setAttribute("aria-hidden", "true");
+    const item = h2(
+      "button",
+      { type: "button", class: `af-filter-item${on ? " af-filter-item-on" : ""}` },
+      check,
+      h2("span", { class: "af-filter-item-label" }, filterLabel(kind)),
+      h2("span", { class: "af-filter-item-count" }, String(count))
+    );
+    item.dataset.kind = kind;
+    item.setAttribute("role", "checkbox");
+    item.setAttribute("aria-checked", on ? "true" : "false");
+    item.addEventListener("click", (e) => {
+      e.stopPropagation();
+      this.actions.setStatusFilter(kind, !on);
+    });
+    return item;
   }
   /** (Re)builds the project switcher: the button's current-project name and the
    *  dropdown menu of every project with its per-project counts (redesign PR2). The
@@ -9515,6 +9712,19 @@ var AppShell = class {
     });
     wrap.append(add, caret, menu);
     return wrap;
+  }
+  toggleFilterMenu() {
+    this.filterMenuOpen = !this.filterMenuOpen;
+    this.filterMenu.hidden = !this.filterMenuOpen;
+    this.filterBtn.setAttribute("aria-expanded", this.filterMenuOpen ? "true" : "false");
+  }
+  closeFilterMenu() {
+    if (!this.filterMenuOpen) {
+      return;
+    }
+    this.filterMenuOpen = false;
+    this.filterMenu.hidden = true;
+    this.filterBtn.setAttribute("aria-expanded", "false");
   }
   toggleProjectMenu() {
     if (this.projectMenuOpen) {
@@ -9736,7 +9946,12 @@ var store = new Store({
   shownTabs: [0],
   tabError: null,
   tasks: [],
-  themeChoice: initialThemeChoice
+  themeChoice: initialThemeChoice,
+  // Resume the persisted filter (feat: hide archived by default) before first paint,
+  // for the same reason the theme is boot-stamped: rendering the default set first
+  // would flash rows the user has filtered away. Falls back to the default — every
+  // state but archived — when nothing is stored.
+  statusFilter: loadFilter()
 });
 var token = null;
 var stream = null;
@@ -9918,6 +10133,16 @@ function switchView(view) {
   if (view === "tasks") {
     refreshTasks();
   }
+}
+function setStatusFilter(kind, on) {
+  const next = withKind(store.get().statusFilter, kind, on);
+  persistFilter(next);
+  store.set({ statusFilter: next });
+}
+function resetStatusFilter() {
+  const next = defaultFilter();
+  persistFilter(next);
+  store.set({ statusFilter: next });
 }
 function switchProject(root2) {
   if (store.get().selectedProject === root2) {
@@ -10226,6 +10451,8 @@ var actions = {
   closeTab: closeSessionTab,
   switchView,
   switchProject,
+  setStatusFilter,
+  resetStatusFilter,
   addTask: openAddTask,
   toggleTask,
   triggerTask: doTriggerTask,
@@ -10337,9 +10564,16 @@ function onKeydown(e) {
       focus,
       modalOpen: modal !== null,
       view: state.view,
-      // j/k navigate only the SCOPED rail (redesign PR2): the ids in the order the
-      // rail shows them, restricted to the selected project.
-      orderedIds: orderedSessions(scopeToProject(state.sessions, state.selectedProject)).map((s) => s.id ?? "").filter((id) => id !== ""),
+      // j/k navigate only the VISIBLE rail: the ids in the order the rail shows them,
+      // restricted to the selected project (redesign PR2) AND to the states the status
+      // filter shows. Both restrictions are required — j/k must walk exactly the rows
+      // on screen, or the selection lands on a row the user cannot see (the archive is
+      // the whole point: hundreds of hidden rows would otherwise still be in the j/k
+      // path, and holding j would appear to hang on nothing).
+      orderedIds: filterSessions(
+        orderedSessions(scopeToProject(state.sessions, state.selectedProject)),
+        state.statusFilter
+      ).map((s) => s.id ?? "").filter((id) => id !== ""),
       selectedId: state.selectedId,
       tabCount: selected ? sessionTabs(selected).length : 1,
       activeTab: state.activeTab,

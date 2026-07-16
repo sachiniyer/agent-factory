@@ -39,10 +39,11 @@ import { EventStream, type EventStreamStatus } from "./events.js";
 import { confirmDeleteProjectModal, confirmModal, type ModalHandle, newSessionModal, promptModal } from "./modals.js";
 import { InstallAffordance } from "./install.js";
 import { decideKey, type KeyboardFocus, type View } from "./nav.js";
+import { defaultFilter, filterSessions, loadFilter, persistFilter, withKind } from "./filter.js";
 import { loadProjectChoice, persistProjectChoice, pickerProjects, reconcileProject, scopeToProject } from "./project.js";
 import { applyEvent, clampActiveTab, pickSelection, tabToKeepOnClose, upsertSession } from "./sessions.js";
 import { SplitView } from "./split.js";
-import { isArchived } from "./status.js";
+import { isArchived, type RowKind } from "./status.js";
 import { Store } from "./store.js";
 import { registerServiceWorker } from "./serviceworker.js";
 import { bootStampTheme, persistThemeChoice, stampTheme, type ThemeChoice } from "./theme.js";
@@ -94,6 +95,11 @@ const store = new Store<AppState>({
   tabError: null,
   tasks: [],
   themeChoice: initialThemeChoice,
+  // Resume the persisted filter (feat: hide archived by default) before first paint,
+  // for the same reason the theme is boot-stamped: rendering the default set first
+  // would flash rows the user has filtered away. Falls back to the default — every
+  // state but archived — when nothing is stored.
+  statusFilter: loadFilter(),
 });
 
 // The credential and the push stream are process-local singletons: one token
@@ -406,6 +412,30 @@ function switchView(view: View): void {
   if (view === "tasks") {
     refreshTasks();
   }
+}
+
+/**
+ * Shows/hides one session state in the rail (feat: hide archived by default) and
+ * persists the whole filter so the choice sticks per browser.
+ *
+ * The SELECTION is deliberately left alone, even when this hides the selected row.
+ * The filter governs what the rail draws, not what you are attached to: a session's
+ * state changes on its own (a Ready agent starts working the moment it is prompted),
+ * so tying detach to visibility would rip the terminal out from under a user who
+ * filtered to "Ready" and then typed into one. The row leaves the rail; the pane
+ * keeps streaming, and the rail re-highlights it when its state is shown again.
+ */
+function setStatusFilter(kind: RowKind, on: boolean): void {
+  const next = withKind(store.get().statusFilter, kind, on);
+  persistFilter(next);
+  store.set({ statusFilter: next });
+}
+
+/** Restores the default filter — every state but archived. */
+function resetStatusFilter(): void {
+  const next = defaultFilter();
+  persistFilter(next);
+  store.set({ statusFilter: next });
 }
 
 /** Switches the active project (redesign PR2): scope the rail + views to `root`,
@@ -912,6 +942,8 @@ const actions = {
   closeTab: closeSessionTab,
   switchView,
   switchProject,
+  setStatusFilter,
+  resetStatusFilter,
   addTask: openAddTask,
   toggleTask,
   triggerTask: doTriggerTask,
@@ -1119,9 +1151,16 @@ function onKeydown(e: KeyboardEvent): void {
       focus,
       modalOpen: modal !== null,
       view: state.view,
-      // j/k navigate only the SCOPED rail (redesign PR2): the ids in the order the
-      // rail shows them, restricted to the selected project.
-      orderedIds: orderedSessions(scopeToProject(state.sessions, state.selectedProject))
+      // j/k navigate only the VISIBLE rail: the ids in the order the rail shows them,
+      // restricted to the selected project (redesign PR2) AND to the states the status
+      // filter shows. Both restrictions are required — j/k must walk exactly the rows
+      // on screen, or the selection lands on a row the user cannot see (the archive is
+      // the whole point: hundreds of hidden rows would otherwise still be in the j/k
+      // path, and holding j would appear to hang on nothing).
+      orderedIds: filterSessions(
+        orderedSessions(scopeToProject(state.sessions, state.selectedProject)),
+        state.statusFilter,
+      )
         .map((s) => s.id ?? "")
         .filter((id) => id !== ""),
       selectedId: state.selectedId,

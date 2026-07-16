@@ -22,8 +22,17 @@ import type { EventStreamStatus } from "./events.js";
 import type { KeyboardFocus, View } from "./nav.js";
 import { VIEWS } from "./nav.js";
 import { TAB_DND_MIME } from "./layout.js";
+import {
+  FILTER_KINDS,
+  filterLabel,
+  filterSessions,
+  hiddenCount,
+  isDefaultFilter,
+  kindCounts,
+  type StatusFilter,
+} from "./filter.js";
 import { projectMeta, projectName, type ProjectSummary, projectSummaries, scopeToProject } from "./project.js";
-import { compareSessionsForRail, isArchived, rowStatus, rowTitle } from "./status.js";
+import { compareSessionsForRail, isArchived, type RowKind, rowStatus, rowTitle } from "./status.js";
 import { TasksPane } from "./tasks.js";
 import { type ThemeChoice, THEME_CHOICES } from "./theme.js";
 import type { TerminalStatus } from "./terminal.js";
@@ -93,6 +102,12 @@ export interface AppState {
    *  force a mode. The appbar toggle sets it; theme.ts stamps data-theme on <html>
    *  and re-themes the live terminals. */
   themeChoice: ThemeChoice;
+  /** which session states the rail shows (feat: hide archived by default). A pure
+   *  client-side DISPLAY filter over the projection — archived sessions still arrive
+   *  in every Snapshot, the rail just doesn't draw them unless asked. Defaults to
+   *  every state but archived, is set by the rail's filter menu, and is persisted to
+   *  localStorage (filter.ts) so the choice sticks per browser. */
+  statusFilter: StatusFilter;
 }
 
 /** Callbacks the shell invokes; index.ts owns the real behavior. */
@@ -131,6 +146,12 @@ export interface Actions {
    *  here; index.ts scopes the rail + views to `root`, persists it, and drops a
    *  selection that no longer belongs to the new project. */
   switchProject(root: string): void;
+  /** Shows/hides one session state in the rail (feat: hide archived by default): the
+   *  filter menu's checkboxes and the empty state's inline "Show archived" route
+   *  here; index.ts flips the store and persists the whole filter. */
+  setStatusFilter(kind: RowKind, on: boolean): void;
+  /** Restores the default filter — every state but archived. */
+  resetStatusFilter(): void;
   /** Opens the add-task modal (#1592 Phase 5 PR8). */
   addTask(): void;
   /** Enables/disables a task via UpdateTask. */
@@ -478,6 +499,17 @@ export class AppShell {
   private lastProjectTasks: TaskData[] | null = null;
   private lastSelectedProject: string | null = null;
 
+  // The rail's status filter control (feat: hide archived by default): a rail-head
+  // button + a checkbox menu, one row per session state. Same imperative treatment as
+  // the project switcher above — its open state is UI ephemera, not store state, and
+  // the checked set lives in the store (AppState.statusFilter).
+  private readonly filterWrap: HTMLElement;
+  private readonly filterBtn: HTMLButtonElement;
+  private readonly filterMenu: HTMLElement;
+  private readonly filterDot: HTMLElement;
+  private filterMenuOpen = false;
+  private lastStatusFilter: StatusFilter | null = null;
+
   // Header text nodes for the selected pane, (re)created per selection.
   private headTitle: HTMLElement | null = null;
   private headMeta: HTMLElement | null = null;
@@ -614,12 +646,44 @@ export class AppShell {
     this.railCount = h("span", { class: "af-rail-count" }, "0");
     const newBtn = h("button", { type: "button", class: "af-rail-new", title: "New session" }, "+ New");
     newBtn.addEventListener("click", () => this.actions.newSession());
+
+    // The status filter (feat: hide archived by default). A small ▤ glyph button
+    // rather than a word, so the rail head still fits the count + New at 18rem; the
+    // dot beside it lights only when the filter is NARROWED from the default, so the
+    // normal state (archived hidden) never nags.
+    const filterGlyph = h("span", { class: "af-rail-filter-glyph" }, "▤");
+    filterGlyph.setAttribute("aria-hidden", "true");
+    this.filterDot = h("span", { class: "af-rail-filter-dot" });
+    this.filterDot.setAttribute("aria-hidden", "true");
+    this.filterBtn = h("button", { type: "button", class: "af-rail-filter" }, filterGlyph, this.filterDot);
+    this.filterBtn.setAttribute("aria-haspopup", "true");
+    this.filterBtn.setAttribute("aria-expanded", "false");
+    this.filterBtn.setAttribute("aria-label", "Filter sessions");
+    this.filterBtn.setAttribute("title", "Filter sessions");
+    this.filterBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      this.toggleFilterMenu();
+    });
+    this.filterMenu = h("div", { class: "af-filter-menu" });
+    this.filterMenu.setAttribute("role", "group");
+    this.filterMenu.setAttribute("aria-label", "Filter sessions");
+    this.filterMenu.hidden = true;
+    this.filterWrap = h("div", { class: "af-rail-filter-wrap" }, this.filterBtn, this.filterMenu);
+    // Dismiss on any click outside (the button + the checkboxes stopPropagation), so
+    // the menu stays open across several toggles — the common act is narrowing to a
+    // couple of states, not one click.
+    document.addEventListener("click", (e) => {
+      if (this.filterMenuOpen && !this.filterWrap.contains(e.target as Node)) {
+        this.closeFilterMenu();
+      }
+    });
+
     const railHead = h(
       "div",
       { class: "af-rail-head" },
       h("span", { class: "af-rail-title" }, "Sessions"),
       this.railCount,
-      newBtn,
+      h("div", { class: "af-rail-head-actions" }, this.filterWrap, newBtn),
     );
     this.railList = h("ul", { class: "af-rail-list" });
     this.railList.setAttribute("role", "listbox");
@@ -737,10 +801,12 @@ export class AppShell {
     this.lastSessions = state.sessions;
     this.lastSelectedId = state.selectedId;
 
-    // Rebuild the rail when the list, the highlighted row, OR the project scope
-    // changed (switching projects swaps the rail). None touches the terminal host (it
-    // lives in the main pane), so events never blur it.
-    if (sessionsChanged || selectionChanged || projectChanged) {
+    // Rebuild the rail when the list, the highlighted row, the project scope, OR the
+    // status filter changed (each of the four changes which rows show). None touches
+    // the terminal host (it lives in the main pane), so events never blur it.
+    const filterChanged = this.lastStatusFilter !== state.statusFilter;
+    this.lastStatusFilter = state.statusFilter;
+    if (sessionsChanged || selectionChanged || projectChanged || filterChanged) {
       this.renderRail(state);
     }
 
@@ -789,13 +855,19 @@ export class AppShell {
     this.currentTabRealIds = tabs.map(tabRealId);
   }
 
-  /** Renders the rail SCOPED to the selected project (redesign PR2): only that
-   *  project's sessions, never the whole projection. Three states: no project at all
-   *  (nothing created yet) → the "no sessions yet" empty rail; a project with no LIVE
-   *  sessions → the dim one-line per-project empty state; otherwise the scoped rows. */
+  /** Renders the rail SCOPED to the selected project (redesign PR2) and FILTERED by
+   *  the status filter (feat: hide archived by default): only that project's sessions
+   *  in a state the user asked to see, never the whole projection. No project at all
+   *  (nothing created yet) → the "no sessions yet" empty rail; otherwise the visible
+   *  rows, under a notice when there is something worth saying about what's missing. */
   private renderRail(state: AppState): void {
     const scoped = scopeToProject(state.sessions, state.selectedProject);
-    this.railCount.textContent = String(scoped.length);
+    const visible = filterSessions(orderedSessions(scoped), state.statusFilter);
+    // The count is what the rail SHOWS, not what the project holds — a count that
+    // disagrees with the rows under it is just a bug the user has to reconcile. The
+    // filter menu carries the per-state totals for what's hidden.
+    this.railCount.textContent = String(visible.length);
+    this.renderFilterMenu(state, scoped);
     const list = this.railList;
     // No project selected ⇒ there are no projects at all (nothing has been created):
     // the global empty rail, its copy pointing at how to create the first session.
@@ -811,20 +883,97 @@ export class AppShell {
       );
       return;
     }
-    const rows = orderedSessions(scoped).map((s) => sessionRow(s, s.id === state.selectedId, this.actions));
-    // A selected project with no LIVE sessions (all archived / none): a clean, dim
-    // one-liner with a + New affordance rather than a blank rail (redesign PR2). Any
-    // archived rows still render below it so the history stays reachable.
-    const hasLive = scoped.some((s) => !isArchived(s));
-    if (!hasLive) {
-      const name = projectName(state.selectedProject);
+    const rows = visible.map((s) => sessionRow(s, s.id === state.selectedId, this.actions));
+    const notice = this.railNotice(state, scoped, visible);
+    list.replaceChildren(...(notice ? [notice, ...rows] : rows));
+  }
+
+  /**
+   * The dim one-liner above the rows explaining what ISN'T there, or null when the
+   * rail speaks for itself. Three things are worth saying, in precedence order:
+   *
+   *  - the project has no ACTIVE session — the redesign PR2 empty state, now
+   *    accurate about the archive: with archived hidden it names the count sitting
+   *    behind the filter (never silently missing), and offers to reveal it in place.
+   *    It renders ABOVE any archived rows, so "no active sessions" reads as a
+   *    statement about live work, not a contradiction of the rows below.
+   *  - every row is filtered out by a narrowed filter — an honest "nothing matches"
+   *    with the way back, rather than a rail that looks broken.
+   *  - otherwise nothing: rows are showing.
+   */
+  private railNotice(state: AppState, scoped: SessionData[], visible: SessionData[]): HTMLElement | null {
+    const name = projectName(state.selectedProject ?? "");
+    const hasActive = scoped.some((s) => !isArchived(s));
+    if (!hasActive) {
       const newBtn = h("button", { type: "button", class: "af-rail-empty-new", title: "New session" }, "+ New");
       newBtn.addEventListener("click", () => this.actions.newSession());
-      const empty = h("li", { class: "af-rail-empty-project" }, `No sessions in ${name} — `, newBtn);
-      list.replaceChildren(empty, ...rows);
-      return;
+      const empty = h("li", { class: "af-rail-empty-project" }, `No active sessions in ${name} — `, newBtn);
+      const archived = scoped.filter(isArchived).length;
+      if (archived > 0 && !state.statusFilter.archived) {
+        const show = h("button", { type: "button", class: "af-rail-empty-new af-rail-show-archived" }, "Show archived");
+        show.addEventListener("click", () => this.actions.setStatusFilter("archived", true));
+        empty.append(` · ${archived} archived hidden `, show);
+      }
+      return empty;
     }
-    list.replaceChildren(...rows);
+    if (visible.length === 0) {
+      const reset = h("button", { type: "button", class: "af-rail-empty-new af-rail-reset-filter" }, "Reset filter");
+      reset.addEventListener("click", () => this.actions.resetStatusFilter());
+      return h(
+        "li",
+        { class: "af-rail-empty-project" },
+        `No sessions match the filter — ${hiddenCount(scoped, state.statusFilter)} hidden `,
+        reset,
+      );
+    }
+    return null;
+  }
+
+  /** (Re)builds the filter menu: one checkbox per session state with its scoped
+   *  count, plus a reset. Counts come from the PROJECT-scoped list (the filter is a
+   *  rail control, and the rail is single-project), so they always describe the rows
+   *  the menu governs. Rebuilt in place — the menu's open state is preserved across
+   *  rebuilds so a live event never snaps it shut mid-narrowing. */
+  private renderFilterMenu(state: AppState, scoped: SessionData[]): void {
+    const counts = kindCounts(scoped);
+    const narrowed = !isDefaultFilter(state.statusFilter);
+    this.filterDot.classList.toggle("af-rail-filter-dot-on", narrowed);
+    this.filterBtn.classList.toggle("af-rail-filter-narrowed", narrowed);
+    const children: HTMLElement[] = [h("div", { class: "af-filter-menu-label" }, "Show sessions")];
+    for (const kind of FILTER_KINDS) {
+      children.push(this.filterItem(kind, state.statusFilter[kind], counts[kind]));
+    }
+    const reset = h("button", { type: "button", class: "af-ghost af-filter-reset" }, "Reset to default");
+    reset.disabled = !narrowed;
+    reset.addEventListener("click", (e) => {
+      e.stopPropagation();
+      this.actions.resetStatusFilter();
+    });
+    children.push(h("div", { class: "af-filter-menu-foot" }, reset));
+    this.filterMenu.replaceChildren(...children);
+  }
+
+  /** One state's checkbox in the filter menu: a check when shown, the state's label
+   *  (the row's own word — status.ts ROW_KIND_LABELS), and how many sessions in this
+   *  project are in it. Clicking toggles just that state and leaves the menu open. */
+  private filterItem(kind: RowKind, on: boolean, count: number): HTMLElement {
+    const check = h("span", { class: "af-filter-check" }, on ? "✓" : "");
+    check.setAttribute("aria-hidden", "true");
+    const item = h(
+      "button",
+      { type: "button", class: `af-filter-item${on ? " af-filter-item-on" : ""}` },
+      check,
+      h("span", { class: "af-filter-item-label" }, filterLabel(kind)),
+      h("span", { class: "af-filter-item-count" }, String(count)),
+    );
+    item.dataset.kind = kind;
+    item.setAttribute("role", "checkbox");
+    item.setAttribute("aria-checked", on ? "true" : "false");
+    item.addEventListener("click", (e) => {
+      e.stopPropagation();
+      this.actions.setStatusFilter(kind, !on);
+    });
+    return item;
   }
 
   /** (Re)builds the project switcher: the button's current-project name and the
@@ -986,6 +1135,21 @@ export class AppShell {
     });
     wrap.append(add, caret, menu);
     return wrap;
+  }
+
+  private toggleFilterMenu(): void {
+    this.filterMenuOpen = !this.filterMenuOpen;
+    this.filterMenu.hidden = !this.filterMenuOpen;
+    this.filterBtn.setAttribute("aria-expanded", this.filterMenuOpen ? "true" : "false");
+  }
+
+  private closeFilterMenu(): void {
+    if (!this.filterMenuOpen) {
+      return;
+    }
+    this.filterMenuOpen = false;
+    this.filterMenu.hidden = true;
+    this.filterBtn.setAttribute("aria-expanded", "false");
   }
 
   private toggleProjectMenu(): void {

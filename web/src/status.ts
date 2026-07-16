@@ -18,6 +18,24 @@ import { InFlightOp, Liveness, Status, type SessionData } from "./types.js";
  *  A working/busy row has no dot (#1766), so there is no "working" bucket. */
 export type DotKind = "ready" | "lost" | "dead" | "archived" | "limit";
 
+/** The state bucket a row READS AS — every DotKind plus the dotless working row.
+ *  Unlike DotKind this is TOTAL over sessions (rowKind never returns null), which is
+ *  what makes it the key the status filter (filter.ts) partitions the rail by. */
+export type RowKind = DotKind | "working";
+
+/** The one-word state labels, keyed by RowKind. Single source of truth: the row's
+ *  own aria/title label (rowStatus) and the filter menu's checkbox labels both read
+ *  this map, so the two surfaces cannot drift into calling the same state different
+ *  things. Sentence case per the repo copy convention. */
+export const ROW_KIND_LABELS: Record<RowKind, string> = {
+  ready: "Ready",
+  working: "Working",
+  lost: "Lost",
+  dead: "Dead",
+  limit: "Limit reached",
+  archived: "Archived",
+};
+
 /** A fully-resolved status descriptor for one row: the dot to draw and the
  *  human label (used for the row's aria/title so the state is legible to a
  *  screen reader, not only by color — the same intent as the TUI's text prefixes). */
@@ -42,7 +60,7 @@ const LIMIT_GLYPH = "◆";
 // cell for LiveRunning / any in-flight op, and the web omits the dot entirely.
 // Kept as a resolved status (empty glyph, null kind) so rowStatus stays total and
 // callers can still detect the working state (isWorking, the project glance count).
-const WORKING: RowStatus = { glyph: "", kind: null, label: "Working" };
+const WORKING: RowStatus = { glyph: "", kind: null, label: ROW_KIND_LABELS.working };
 
 /**
  * Resolves a session's status dot from its two axes, mirroring render.go exactly:
@@ -67,6 +85,19 @@ export function rowStatus(s: SessionData): RowStatus {
  *  glance count (project.ts) stays derivable now that the dot itself is gone. */
 export function isWorking(s: SessionData): boolean {
   return rowStatus(s).kind === null;
+}
+
+/**
+ * The state bucket a row READS AS, the key the rail's status filter partitions by
+ * (filter.ts). Deliberately derived from rowStatus — the DISPLAYED status — and not
+ * from the raw liveness, because the two genuinely differ: a session with an
+ * in-flight op renders as Working whatever its liveness is (#1766). Filtering on
+ * liveness would hide a row the user is looking at ("Working" unchecked leaves a
+ * dotless working row on screen) and reveal one they are not — the filter must
+ * partition by what the eye sees, so it stays the single mapping in rowStatus.
+ */
+export function rowKind(s: SessionData): RowKind {
+  return rowStatus(s).kind ?? "working";
 }
 
 /** The daemon always emits `liveness`; this only guards a pre-#1195 record by
@@ -96,15 +127,15 @@ function livenessOf(s: SessionData): number {
 function dotForLiveness(lv: number): RowStatus {
   switch (lv) {
     case Liveness.Ready:
-      return { glyph: READY_GLYPH, kind: "ready", label: "Ready" };
+      return { glyph: READY_GLYPH, kind: "ready", label: ROW_KIND_LABELS.ready };
     case Liveness.Lost:
-      return { glyph: LOST_GLYPH, kind: "lost", label: "Lost" };
+      return { glyph: LOST_GLYPH, kind: "lost", label: ROW_KIND_LABELS.lost };
     case Liveness.Dead:
-      return { glyph: DEAD_GLYPH, kind: "dead", label: "Dead" };
+      return { glyph: DEAD_GLYPH, kind: "dead", label: ROW_KIND_LABELS.dead };
     case Liveness.Archived:
-      return { glyph: ARCHIVED_GLYPH, kind: "archived", label: "Archived" };
+      return { glyph: ARCHIVED_GLYPH, kind: "archived", label: ROW_KIND_LABELS.archived };
     case Liveness.LimitReached:
-      return { glyph: LIMIT_GLYPH, kind: "limit", label: "Limit reached" };
+      return { glyph: LIMIT_GLYPH, kind: "limit", label: ROW_KIND_LABELS.limit };
     // LiveRunning and LivenessUnset both render as working (render.go:285, 297).
     case Liveness.Running:
     case Liveness.Unset:

@@ -88,6 +88,46 @@ function row(page: Page, title: string): Locator {
   return page.locator(".af-rail-list .af-row", { hasText: title });
 }
 
+/** One state's checkbox in the rail's filter menu (feat: hide archived by default). */
+function filterItem(page: Page, kind: string): Locator {
+  return page.locator(`.af-filter-item[data-kind="${kind}"]`);
+}
+
+/**
+ * Sets one state's checkbox in the rail filter and closes the menu.
+ *
+ * Idempotent (it clicks only when the box disagrees), because these flows share one
+ * page in serial order and the filter is PERSISTED: a test that assumed a starting
+ * state instead of asserting it would pass or fail on whatever the previous test
+ * left in localStorage. Every test that changes the filter restores it before it
+ * ends, for the same reason.
+ */
+async function setFilter(page: Page, kind: string, on: boolean): Promise<void> {
+  await page.locator(".af-rail-filter").click();
+  const item = filterItem(page, kind);
+  await expect(item).toBeVisible();
+  if ((await item.getAttribute("aria-checked")) !== String(on)) {
+    await item.click();
+  }
+  await expect(item).toHaveAttribute("aria-checked", String(on));
+  // Dismiss by clicking outside the control (the rail title is inert chrome).
+  await page.locator(".af-rail-title").click();
+  await expect(page.locator(".af-filter-menu")).toBeHidden();
+}
+
+/** Restores the default filter — every state but archived — via the menu's own reset,
+ *  so a test leaves the shared page as it found it. */
+async function resetFilter(page: Page): Promise<void> {
+  await page.locator(".af-rail-filter").click();
+  const reset = page.locator(".af-filter-reset");
+  if (await reset.isEnabled()) {
+    await reset.click();
+  }
+  await expect(reset).toBeDisabled();
+  await page.locator(".af-rail-title").click();
+  await expect(page.locator(".af-filter-menu")).toBeHidden();
+}
+
 /** A project switcher menu item by its EXACT repo basename (redesign PR2). Filters on
  *  the name span with an anchored regex so "mock-repo" never also matches
  *  "mock-repo-2" / "mock-repo-3" (they share the prefix). */
@@ -1136,6 +1176,10 @@ test("web tab (#1809 follow-up): an ARCHIVED session's preserved web tab is iner
   // proved the CLI refuses to delete it). Preserving the URL must not make an
   // archived session live again: the target is a loopback address whose dev server
   // is gone and whose port may now host something else.
+  //
+  // Archived rows are hidden by default (feat: hide archived by default), so reveal
+  // them to reach this one — and put the filter back before leaving.
+  await setFilter(page, "archived", true);
   await row(page, SESSION_WEB_SHELVED).click();
   await expect(page.locator(".af-main.af-main-term")).toBeVisible();
 
@@ -1165,6 +1209,8 @@ test("web tab (#1809 follow-up): an ARCHIVED session's preserved web tab is iner
   await expect(page.locator(".af-term-host")).not.toContainText(WEBTAB_LOCAL_MARKER);
   // The "open ↗" escape hatch is withdrawn too: it would only hit the refusing proxy.
   await expect(page.locator(".af-webpane-open:visible")).toHaveCount(0);
+
+  await resetFilter(page);
 });
 
 test("web tab (feat): an external URL is iframed directly and shows a fallback when embedding is blocked", async () => {
@@ -1626,11 +1672,14 @@ test("task-only project (redesign PR2, Fix 1): a repo with a task but no session
   await projectItem(page, "mock-repo-3").click();
   await expect(page.locator(".af-project-switch-name")).toHaveText("mock-repo-3");
 
-  // Its rail is the clean empty state (no sessions), not a blank rail.
+  // Its rail is the clean empty state (no sessions), not a blank rail. It has no
+  // archived sessions either, so the empty state stays a bare one-liner — no
+  // "N archived hidden" hint to explain something that isn't there.
   const empty = page.locator(".af-rail-empty-project");
-  await expect(empty).toContainText("No sessions in");
+  await expect(empty).toContainText("No active sessions in");
   await expect(empty).toContainText("mock-repo-3");
   await expect(empty.locator(".af-rail-empty-new")).toBeVisible();
+  await expect(empty).not.toContainText("archived hidden");
 
   // The delete-project action is DISABLED here — there are no live sessions to archive,
   // so it can never be a silent no-op (Greptile Fix 2). An archived-only repo, by the
@@ -1876,7 +1925,7 @@ test.describe("create → kill (one session, two flows)", () => {
   });
 });
 
-test("archive: the archive confirm moves a session to the archived group", async () => {
+test("archive: the archive confirm retires the session out of the default rail", async () => {
   // Archive session B. Select it (click attaches, which is fine), then archive +
   // confirm.
   await row(page, SESSION_B).click();
@@ -1888,15 +1937,226 @@ test("archive: the archive confirm moves a session to the archived group", async
   await expect(modal).toBeVisible();
   await modal.locator("button.af-primary").click();
 
-  // B is not killed — it stays in the rail, but in the archived group (rendered
-  // with the af-row-archived modifier and sorted last).
+  // B LEAVES the default rail (feat: hide archived by default) — archived sessions are
+  // history, and the rail shows the work you can still act on. This is the real
+  // archive flow, not a filter toggle: the row goes as the daemon's archived event
+  // lands, which is the end-to-end proof the filter reads live projection state.
+  await expect(row(page, SESSION_B)).toHaveCount(0, { timeout: 30_000 });
+
+  // B is NOT killed, though — revealing the archive brings the very same row back,
+  // muted, carrying the static ▧ archived dot (no spinner): the error/terminal states
+  // keep their static glyphs (#1766).
+  await setFilter(page, "archived", true);
   await expect(row(page, SESSION_B)).toHaveClass(/af-row-archived/, { timeout: 30_000 });
-  // The archived row carries the static ▧ archived dot (no spinner) — proof the
-  // error/terminal states keep their static glyphs (#1766).
   const archivedDot = row(page, SESSION_B).locator(".af-dot");
   await expect(archivedDot).toHaveClass(/af-dot-archived/);
   await expect(archivedDot).toHaveText("▧");
   await expect(archivedDot).not.toHaveClass(/af-dot-spin/);
+
+  await resetFilter(page);
+  await expect(row(page, SESSION_B)).toHaveCount(0);
+});
+
+// --- the status filter (feat: hide archived by default) --------------------
+//
+// These run right after the archive flow, which leaves the first project holding both
+// live sessions (A, the web probes) and an archived one (B) — the mix the filter
+// exists to sort out. They restore the default filter before finishing, so the flows
+// that follow see the rail they expect (the filter is persisted, and the page is
+// shared).
+
+test("filter (feat): the default shows every state EXCEPT archived", async () => {
+  // The sane default: archived off, everything else on. Asserted through the menu the
+  // user actually reads, so a default that drifts in filter.ts is caught here too.
+  await page.locator(".af-rail-filter").click();
+  await expect(filterItem(page, "archived")).toHaveAttribute("aria-checked", "false");
+  for (const kind of ["working", "ready", "lost", "dead", "limit"]) {
+    await expect(filterItem(page, kind), `${kind} must be shown by default`).toHaveAttribute("aria-checked", "true");
+  }
+  // The default is NOT a "narrowed" state — it must not nag with an indicator the
+  // user has to go undo, and its reset is inert.
+  await expect(page.locator(".af-rail-filter")).not.toHaveClass(/af-rail-filter-narrowed/);
+  await expect(page.locator(".af-filter-reset")).toBeDisabled();
+  await page.locator(".af-rail-title").click();
+
+  // Live sessions show; the archived one does not.
+  await expect(row(page, SESSION_A)).toBeVisible();
+  await expect(row(page, SESSION_B)).toHaveCount(0);
+  // The count agrees with the rows on screen — it counts what the rail SHOWS, not
+  // what the project holds.
+  const shown = await page.locator(".af-rail-list .af-row").count();
+  await expect(page.locator(".af-rail-count")).toHaveText(String(shown));
+});
+
+test("filter (feat): Show archived reveals the archived row, muted, and hides it again", async () => {
+  await setFilter(page, "archived", true);
+  // The archived row is back and reads as inactive: it reuses the dimmed archived
+  // styling rather than looking like live work.
+  const archived = row(page, SESSION_B);
+  await expect(archived).toBeVisible();
+  await expect(archived).toHaveClass(/af-row-archived/);
+  expect(
+    Number(await archived.evaluate((el) => Number(getComputedStyle(el).opacity))),
+    "the archived row must render de-emphasized",
+  ).toBeLessThan(1);
+  // Revealing the archive IS a departure from the default, so the control says so.
+  await expect(page.locator(".af-rail-filter")).toHaveClass(/af-rail-filter-narrowed/);
+  await expect(page.locator(".af-rail-filter-dot")).toHaveClass(/af-rail-filter-dot-on/);
+
+  // Unchecking puts it away again — the toggle is symmetric, not one-way.
+  await setFilter(page, "archived", false);
+  await expect(row(page, SESSION_B)).toHaveCount(0);
+  await expect(page.locator(".af-rail-filter")).not.toHaveClass(/af-rail-filter-narrowed/);
+});
+
+test("filter (feat): the choice persists across a reload", async () => {
+  await setFilter(page, "archived", true);
+  await expect(row(page, SESSION_B)).toBeVisible();
+
+  await page.reload();
+  await expect(page.locator(".af-app")).toBeVisible();
+
+  // The archived row is there on load with NO interaction — the choice came back from
+  // localStorage, and the menu agrees with what the rail drew.
+  await expect(row(page, SESSION_B)).toHaveClass(/af-row-archived/, { timeout: 30_000 });
+  await page.locator(".af-rail-filter").click();
+  await expect(filterItem(page, "archived")).toHaveAttribute("aria-checked", "true");
+  await page.locator(".af-rail-title").click();
+
+  // ...and so does the default, once restored: the persistence is a round trip, not a
+  // one-way write that can only ever add rows.
+  await resetFilter(page);
+  await page.reload();
+  await expect(page.locator(".af-app")).toBeVisible();
+  await expect(row(page, SESSION_A)).toBeVisible({ timeout: 30_000 });
+  await expect(row(page, SESSION_B)).toHaveCount(0);
+});
+
+test("filter (feat): the default hides ONLY archived, and each state's box hides exactly its own group", async ({
+  browser,
+}) => {
+  // One row per state, SYNTHETIC and in their own context — the #1898 rule: a real
+  // row cannot be pinned to a state (the daemon keeps pushing session.updated deltas
+  // that land straight on top of a Snapshot fixture, and the seeded agent's liveness
+  // flips LiveRunning→LiveReady a beat after seeding). A synthetic id the daemon has
+  // never heard of receives no deltas, so "Ready is unchecked ⇒ the ready row is
+  // gone" is deterministic by construction instead of by out-waiting a race. The
+  // filter is a pure function of the row's state, so these drive the same code path.
+  //
+  // The context is its own for a second reason: the filter is PERSISTED, and toggling
+  // six states on the shared page would leak into the serial flows that follow.
+  const ctx = await browser.newContext();
+  const p = await ctx.newPage();
+  await p.route("**/v1/Snapshot", async (route) => {
+    const resp = await route.fetch();
+    const body = await resp.json();
+    const snap = body?.data as { instances?: Array<Record<string, unknown> & { title: string }> };
+    const list = snap?.instances ?? [];
+    // Clone a REAL record so the synthetic rows land in this project's scoped rail,
+    // and vary only what the filter reads. Distinct branches keep each row's text
+    // free of another's name (row() matches by substring).
+    const proto = { ...(list.find((s) => s.title === SESSION_A) ?? {}) };
+    const synth = (title: string, liveness: number) => ({
+      ...proto,
+      id: `synth-filter-${title}`,
+      title,
+      branch: `synth-filter-${title}`,
+      liveness,
+      in_flight_op: 0,
+    });
+    list.push(
+      synth("filt-working", 1), // LiveRunning
+      synth("filt-ready", 2), // LiveReady
+      synth("filt-lost", 3), // LiveLost
+      synth("filt-dead", 4), // LiveDead
+      synth("filt-archived", 5), // LiveArchived
+      synth("filt-limit", 6), // LiveLimitReached
+    );
+    if (snap) {
+      snap.instances = list;
+    }
+    await route.fulfill({ status: resp.status(), contentType: "application/json", body: JSON.stringify(body) });
+  });
+  await p.goto("/");
+  await expect(p.locator(".af-app")).toBeVisible();
+
+  // Each state's row and the checkbox that governs it, in the menu's own order.
+  const states: Array<{ kind: string; title: string }> = [
+    { kind: "working", title: "filt-working" },
+    { kind: "ready", title: "filt-ready" },
+    { kind: "lost", title: "filt-lost" },
+    { kind: "dead", title: "filt-dead" },
+    { kind: "limit", title: "filt-limit" },
+    { kind: "archived", title: "filt-archived" },
+  ];
+
+  // THE DEFAULT: every state but archived. Asserted per state against a real row, so
+  // a default that hides more than the archive is caught here, not by a user.
+  for (const { kind, title } of states) {
+    const shown = kind !== "archived";
+    await expect(row(p, title), `${title} default visibility`).toHaveCount(shown ? 1 : 0, { timeout: 15_000 });
+  }
+
+  // Each box hides exactly its own group: uncheck it, that row goes and EVERY other
+  // state stays — then recheck and it comes back.
+  for (const { kind, title } of states) {
+    if (kind === "archived") {
+      continue; // already off by default; its reveal is covered above
+    }
+    await setFilter(p, kind, false);
+    await expect(row(p, title), `${kind} unchecked ⇒ its row goes`).toHaveCount(0);
+    for (const other of states) {
+      if (other.kind === kind || other.kind === "archived") {
+        continue;
+      }
+      await expect(row(p, other.title), `${kind} unchecked must not disturb ${other.kind}`).toHaveCount(1);
+    }
+    await setFilter(p, kind, true);
+    await expect(row(p, title), `${kind} rechecked ⇒ its row is back`).toHaveCount(1);
+  }
+
+  // Narrowing to a SINGLE state is the "show me only what's working" case: uncheck
+  // every other state and only that group is left standing.
+  for (const { kind } of states) {
+    if (kind !== "working") {
+      await setFilter(p, kind, false);
+    }
+  }
+  await expect(row(p, "filt-working")).toHaveCount(1);
+  await expect(p.locator(".af-rail-list .af-row-archived")).toHaveCount(0);
+  for (const { kind, title } of states) {
+    if (kind !== "working") {
+      await expect(row(p, title), `${title} must be filtered out`).toHaveCount(0);
+    }
+  }
+
+  await ctx.close();
+});
+
+test("filter (feat): keyboard nav walks the VISIBLE rows — j never lands on a hidden one", async () => {
+  // The rail's j/k order must be the rows on screen. If nav still walked the archived
+  // rows the rail hides, j would select something invisible: the pane would swap to a
+  // session the user cannot see in the rail, with no row highlighted.
+  await setFilter(page, "archived", false);
+  await row(page, SESSION_A).click();
+  await page.keyboard.press("Escape"); // hand the keyboard back to the rail
+
+  const visited: string[] = [];
+  const rows = await page.locator(".af-rail-list .af-row").count();
+  for (let i = 0; i < rows + 2; i++) {
+    await page.keyboard.press("j");
+    const sel = page.locator(".af-row-selected");
+    if ((await sel.count()) === 1) {
+      visited.push((await sel.locator(".af-row-title").innerText()).trim());
+    }
+  }
+  // j walked the rail and never selected the archived session hidden from it.
+  expect(visited.length, "j must move the selection").toBeGreaterThan(0);
+  expect(visited, "j must never select a row the filter hides").not.toContain(SESSION_B);
+  // Every row it did land on is one the rail is actually drawing.
+  for (const title of new Set(visited)) {
+    await expect(row(page, title), `${title} must be a visible row`).toBeVisible();
+  }
 });
 
 test("delete project (#1735, redesign PR2, Fix 2): deleting an archived-only-bound project makes it go away — not a no-op", async () => {
@@ -1981,6 +2241,99 @@ test("empty state (#1592 PR9): an empty Snapshot renders the empty rail + placeh
 
   await page.unroute("**/v1/Snapshot");
   await page.unroute("**/v1/ListTasks");
+});
+
+test("filter (feat): a project whose sessions are ALL archived reads as empty, and the filter still reveals them", async ({
+  browser,
+}) => {
+  // An archived-only project is only reachable when something else keeps the repo a
+  // project: a scheduled task. projectSummaries makes a repo a project if it has a LIVE
+  // session OR a task, so an archived-only repo with no task stops being one and the
+  // switcher drops it entirely (the deliberate #1735 rule — a stale archived-only entry
+  // whose delete is a silent no-op must never list).
+  //
+  // So the fixture is a SYNTHETIC repo: archived sessions + a task to keep it a project.
+  // Synthetic and in its own context for the #1898 reason — flipping the REAL rows to
+  // archived does not hold, because the events plane keeps pushing session.updated for
+  // them and applyEvent lands the daemon's truth straight back on top of the fixture
+  // (an earlier draft of this test did exactly that, and the rail refilled with live
+  // rows before the first assertion). Ids the daemon has never heard of receive no
+  // deltas, so the state is the only state there will ever be.
+  const ARCHIVED_REPO = "/work/mock-archived-only";
+  const ctx = await browser.newContext();
+  const p = await ctx.newPage();
+  await p.route("**/v1/Snapshot", async (route) => {
+    const resp = await route.fetch();
+    const body = await resp.json();
+    const snap = body?.data as { instances?: Array<Record<string, unknown> & { title: string }> };
+    const list = snap?.instances ?? [];
+    const proto = { ...(list.find((s) => s.title === SESSION_A) ?? {}) };
+    const shelved = (title: string) => ({
+      ...proto,
+      id: `synth-shelved-${title}`,
+      title,
+      branch: `synth-shelved-${title}`,
+      liveness: 5, // LiveArchived
+      in_flight_op: 0,
+      worktree: { ...(proto.worktree as Record<string, unknown>), repo_path: ARCHIVED_REPO },
+    });
+    list.push(shelved("shelf-one"), shelved("shelf-two"));
+    if (snap) {
+      snap.instances = list;
+    }
+    await route.fulfill({ status: resp.status(), contentType: "application/json", body: JSON.stringify(body) });
+  });
+  // The task is what keeps the archived-only repo a project at all.
+  await p.route("**/v1/ListTasks", async (route) => {
+    const resp = await route.fetch();
+    const body = await resp.json();
+    const data = body?.data as { tasks?: Array<Record<string, unknown>> };
+    const tasks = data?.tasks ?? [];
+    const proto = { ...(tasks[0] ?? {}) };
+    tasks.push({
+      ...proto,
+      id: "synth-shelved-task",
+      name: "shelf-task",
+      project_path: ARCHIVED_REPO,
+    });
+    if (data) {
+      data.tasks = tasks;
+    }
+    await route.fulfill({ status: resp.status(), contentType: "application/json", body: JSON.stringify(body) });
+  });
+  await p.goto("/");
+  await expect(p.locator(".af-app")).toBeVisible();
+
+  // The archived-only repo IS a project (its task keeps it listed) — select it.
+  await p.locator(".af-project-switch").click();
+  await projectItem(p, "mock-archived-only").click();
+  await expect(p.locator(".af-project-switch-name")).toHaveText("mock-archived-only");
+
+  // The rail is NOT a blank panel: it says the project has no active work, and —
+  // crucially — accounts for what it is hiding rather than leaving the sessions
+  // silently missing.
+  const empty = p.locator(".af-rail-empty-project");
+  await expect(empty).toBeVisible({ timeout: 15_000 });
+  await expect(empty).toContainText("No active sessions in");
+  await expect(empty).toContainText("mock-archived-only");
+  await expect(empty).toContainText("2 archived hidden");
+  await expect(p.locator(".af-rail-list .af-row")).toHaveCount(0);
+  await expect(p.locator(".af-rail-count")).toHaveText("0");
+
+  // The hint's inline "Show archived" is a real control, not decoration: it reveals the
+  // archive in place, from the very empty state that reported it.
+  await empty.locator(".af-rail-show-archived").click();
+  await expect(p.locator(".af-rail-list .af-row")).toHaveCount(2);
+  await expect(p.locator(".af-rail-count")).toHaveText("2");
+  await expect(row(p, "shelf-one")).toHaveClass(/af-row-archived/);
+  await expect(row(p, "shelf-two")).toHaveClass(/af-row-archived/);
+  // The empty state still stands above them, and no longer claims to be hiding
+  // anything: "no active sessions" is a statement about live work, not a claim that
+  // the rail is bare.
+  await expect(empty).toBeVisible();
+  await expect(empty).not.toContainText("archived hidden");
+
+  await ctx.close();
 });
 
 // --- theme (redesign PR1): design tokens + light/dark ----------------------
@@ -2593,8 +2946,13 @@ test("#1815 review: a retained layout follows its tab when the roster changes wh
   await expect(active).toHaveText("r2");
 
   // Navigate away, so A's layout is only RETAINED — not the live one being reconciled.
+  // B is archived by the time this runs, so reveal the archive to reach it (feat: hide
+  // archived by default). B stays the right target for exactly the reason it always
+  // was: an agent-tab-only session no other test has moved off its pane.
+  await setFilter(page, "archived", true);
   await row(page, SESSION_B).click();
   await expect(page.locator(".af-main.af-main-term")).toBeVisible();
+  await resetFilter(page);
 
   af("tab-delete", SESSION_A, "--name", "r1");
 

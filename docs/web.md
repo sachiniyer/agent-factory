@@ -254,7 +254,7 @@ the top bar, the **project switcher** (top-right), or the `[` / `]` keys:
 ┌───────────────────────────────────────────────────────────────────────┐
 │  Agent Factory   [ Sessions ]  Tasks       project ▾   ● Live   Disconnect│  ← app bar
 ├──────────────────────┬────────────────────────────────────────────────┤
-│ Sessions        3 +New│  fix-login-flow · Live · fix/login             │  ← pane header
+│ Sessions      3 ▤ +New│  fix-login-flow · Live · fix/login             │  ← pane header
 │                       │ ┌────────────────────────────────────────────┐ │
 │ ● fix-login-flow      │ │ Agent │ Terminal │ +                       │ │  ← tab bar
 │   ⎇ fix/login         │ ├────────────────────────────────────────────┤ │
@@ -291,9 +291,25 @@ the TUI:
 - the **branch** as a secondary `⎇` line.
 
 Rows are ordered exactly like the TUI: live sessions first (oldest created first),
-the archived group last (newest first). The header shows the session count and a
-**`+ New`** button that opens the new-session modal (its project picker is seeded
-from the repos af has seen).
+the archived group last (newest first). The header shows the count of the sessions
+currently **shown**, the **filter** control (below), and a **`+ New`** button that
+opens the new-session modal (its project picker is seeded from the repos af has
+seen).
+
+#### Filtering by state
+
+The rail shows the work you can still act on: **archived sessions are hidden by
+default**, and every other state is shown. The **▤** control in the rail header
+opens a checkbox per state — Working, Ready, Lost, Dead, Limit reached, Archived —
+so you can reveal the archive or narrow to just one group (only what's working, say).
+Archived rows render dimmed when shown, so they read as inactive.
+
+The filter is a **display filter, applied within the selected project**: the daemon
+still sends every session, the rail just draws the ones you asked for. It also
+governs `j`/`k`, which walk exactly the rows on screen. Your choice is remembered
+per browser (localStorage), and the control shows a dot when it differs from the
+default. When a filter hides everything, the rail says so — and tells you how many
+sessions are behind it rather than looking empty.
 
 #### Selecting vs. attaching (the keyboard model)
 
