@@ -123,20 +123,58 @@ apparently "running"). Assertions 1 and 2 fail and the gate exits non-zero.
 Re-run this whenever you change the harness. An assertion that cannot be watched
 failing is not evidence.
 
+## Where assertion #4 (supervision) actually runs
+
+This is the assertion the gate most needs — an upgrade demoting the daemon off
+its unit (#796) is **invisible to every other check here**, because the demoted
+daemon keeps running and keeps answering. So it gets its own rules.
+
+It runs on the **CI native leg**, against a real systemd user manager, and it
+passes there today:
+
+```
+PASS  assertion 4: the unit is still active (= active)
+PASS  assertion 4: af still sees the autostart unit (= true)
+PASS  assertion 4: the running daemon IS the unit's child (MainPID=7712) — not demoted
+```
+
+That last line is the one that catches the demotion: it compares *the daemon
+that is running* against *the daemon systemd owns*. A demoted daemon still
+answers pings; it just is not the unit's child any more.
+
+It **cannot** run in the test container, and that is not a policy choice:
+
+| approach | verdict |
+|---|---|
+| `systemd --user` standalone in the container | **impossible** — it refuses without PID 1 systemd: *"Trying to run as user instance, but the system has not been booted with systemd."* |
+| full systemd as PID 1 in the container | works, but needs `--privileged` + host cgroups — which dissolves the very fence the container exists to provide on a shared box. Rejected as a default. |
+| assert it at the af layer instead | does not help: with no service manager, `af daemon install` fails outright, so there is no unit to be the supervisor of. The layer was never the problem. |
+| the CI runner | **works** — it is itself a clean, ephemeral machine with a real systemd. This is where it runs. |
+
+Two guards keep that honest:
+
+* a **SKIP is not a pass**: any skipped check exits the run non-zero unless
+  `AF_LIFECYCLE_ALLOW_PARTIAL=1` is set. `make lifecycle-container` sets it (a
+  dev-box container genuinely cannot host a service manager) and prints a
+  PARTIAL COVERAGE banner naming what went untested;
+* the CI native leg **fails the job** if assertion #4 ever silently starts
+  skipping — a green run that quietly stopped testing supervision is the exact
+  lie this gate exists to prevent.
+
 ## What this does NOT cover yet
 
-* **macOS / launchd.** `lc_daemon_version` reads `/proc/<pid>/exe`, which macOS
-  does not have, and `lc_unit_main_pid` asks `systemctl`. Both need a Darwin
-  branch before the `macos-latest` matrix leg is switched on in
-  `.github/workflows/lifecycle.yml`. On macOS the same scenario must cover the
-  launchd path, which is where the real user's bugs live.
-* **Assertion #4 on container runs.** The test container has no systemd (PID 1
-  is `docker-init`), so `af daemon install` fails there outright. The assertion
-  is **SKIPped loudly** and only really runs on the CI runner, which has a real
-  systemd user manager. The workflow fails the native leg if that assertion ever
-  silently starts skipping.
-* **`af reset` racing a supervised relaunch** (#1916) — the scenario upgrades,
-  it does not reset.
+* **macOS / launchd.** `lc_unit_active` and `lc_unit_main_pid` already have
+  Darwin branches, so assertion #4 asserts the *same property* against launchd
+  (`state = running` and `pid = N` in the `gui/<uid>` domain af restarts) rather
+  than a re-invented one. The blocker for the `macos-latest` leg is **assertion
+  2**: `lc_daemon_version` reads `/proc/<pid>/exe`, which macOS has no
+  equivalent of — `ps` would report the path, whose bytes are the NEW binary
+  after an upgrade, i.e. exactly the inference this assertion refuses to make.
+  The macOS leg therefore wants **#1920**'s daemon-reported version. Given
+  #1931 turned on macOS CI and immediately found three real darwin defects
+  (#1939, #1940, #1941), this leg is worth landing soon.
+* **#1916's reset-vs-relaunch race** — this scenario upgrades, it does not
+  reset.
 * **Downgrades and channel switches** (`--allow-downgrade`, preview → stable).
 * **Package-manager installs** (Homebrew, `install.sh`); the gate installs the
   release tarball the way `af upgrade` does.
