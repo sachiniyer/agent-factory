@@ -246,12 +246,37 @@ async function openTokenless(page: Page): Promise<void> {
   await expect(page.locator("#af-token")).toHaveCount(0);
 }
 
-// The flows share one daemon and mutate its session set (create/kill/archive), so
-// they must run in order against a single page.
-test.describe.configure({ mode: "serial" });
+// NO file-wide serial mode, deliberately (#1898).
+//
+// The flows do share one daemon and one page, and they must run IN ORDER — but
+// order is not what serial mode buys. `fullyParallel: false` + `workers: 1`
+// (playwright.config.ts) already run every test sequentially, in declaration
+// order, in one worker. With `retries: 0`, the ONLY thing a file-wide
+// `mode: "serial"` added was this: when any test fails, skip every test after it.
+//
+// That is a gate that blinds itself. A failure is exactly when the rest of the
+// suite most needs to run, and the cost is not hypothetical — a single flake in
+// the status-dots test (#1898) skipped 41 tests, and #1895's fixture drift skipped
+// every test behind it on the branch that found it. A regression in any of them
+// would have been invisible behind an unrelated red.
+//
+// Ordinary test isolation replaces it. Playwright discards the worker process
+// after a failure and starts a new one, so beforeAll re-runs and the next test
+// gets a fresh page, a fresh login, and fresh module state — the page-level
+// pollution serial mode was protecting against cannot cross a failure. What
+// survives a restart is the DAEMON's state, which is why the few tests that hand
+// state to each other are grouped into their own small serial describe (see
+// "create → kill" below): the blast radius of a failure is that group, not the
+// file.
+//
+// So: a new test belongs at the top level unless it consumes state another test
+// produced. If it does, put the pair in their own serial describe — never reach
+// for a file-wide one.
 
 let page: Page;
-// The title of the session the create flow makes, handed to the kill flow.
+// The title of the session the create flow makes, handed to the kill flow. It is
+// module state, so a worker restart resets it — which is exactly why the two flows
+// that share it live in one serial describe rather than at the top level.
 let createdTitle = "";
 
 test.beforeAll(async ({ browser }) => {
@@ -382,33 +407,43 @@ test("sidebar lists the seeded sessions from the Snapshot/events plane", async (
   await expect(page.locator(".af-live-pip.af-live-open")).toBeVisible();
 });
 
-test("status dots (#1766): waiting shows a green dot, working shows none, error states are static — no spin anywhere", async () => {
+test("status dots (#1766): waiting shows a green dot, working shows none, error states are static — no spin anywhere", async ({
+  browser,
+}) => {
   // The daemon can't be coerced to Running/Lost/Dead/Limit on demand, so pin the
-  // states by rewriting the Snapshot: the two real rows get Running (working) and
-  // Ready (waiting); synthetic rows cloned into the same project cover the static
-  // error glyphs. The events plane only pushes future deltas, so the reloaded rail
-  // reflects this Snapshot (the same route-transform pattern the no-url / empty-state
-  // tests use).
-  await page.route("**/v1/Snapshot", async (route) => {
+  // states by rewriting the Snapshot. Every asserted row is SYNTHETIC, and that is
+  // the whole point rather than a convenience (#1898).
+  //
+  // A REAL row cannot be pinned. The Snapshot fixes its liveness exactly once, at
+  // load; the events plane then keeps pushing `session.updated` deltas for it, and
+  // applyEvent upserts them in place with NO resync (web/src/sessions.ts) — so the
+  // daemon's truth lands straight on top of the fixture. The seeded fake agent
+  // prints its marker and then `exec cat`s, so the daemon's pane-churn liveness
+  // flips LiveRunning→LiveReady a beat after seeding. Whenever that beat fell inside
+  // this test, probe-a's pinned "working" row acquired a real green dot and the
+  // "working shows none" assertion failed — a flake that, under the old global
+  // serial mode, took the whole suite behind it down with it.
+  //
+  // A synthetic id the daemon has never heard of receives no deltas, so the pinned
+  // state is the only state there will ever be. That makes this deterministic by
+  // construction rather than by out-waiting a race. It costs nothing in coverage:
+  // the dot is a pure function of liveness, and these rows drive that render path
+  // through exactly the same code.
+  //
+  // Its own context, too: routing Snapshot on the shared page meant a reload in,
+  // a reload out, and a window where a leaked route could color another test.
+  const ctx = await browser.newContext();
+  const p = await ctx.newPage();
+  await p.route("**/v1/Snapshot", async (route) => {
     const resp = await route.fetch();
     const body = await resp.json();
     const snap = body?.data as { instances?: Array<Record<string, unknown> & { title: string }> };
     const list = snap?.instances ?? [];
-    const proto = { ...(list.find((s) => s.title === SESSION_A) ?? {}) };
-    for (const s of list) {
-      if (s.title === SESSION_A) {
-        s.liveness = 1; // Running → working → no dot
-        s.in_flight_op = 0;
-      }
-      if (s.title === SESSION_B) {
-        s.liveness = 2; // Ready → waiting → green dot
-        s.in_flight_op = 0;
-      }
-    }
-    // Clone SESSION_A's record (same worktree/repo_path, so they land in this project's
-    // scoped rail) into inert synthetic rows for the static error glyphs. Give each a
-    // distinct branch so their rendered branch line never contains "probe-a"/"probe-b"
+    // Clone a REAL record (same worktree/repo_path, so the synthetic rows land in
+    // this project's scoped rail) and vary only what the dot reads. Each gets a
+    // distinct branch so its rendered branch line never contains another row's name
     // (the row() locator matches row text by substring).
+    const proto = { ...(list.find((s) => s.title === SESSION_A) ?? {}) };
     const synth = (title: string, liveness: number) => ({
       ...proto,
       id: `synth-${title}`,
@@ -417,38 +452,42 @@ test("status dots (#1766): waiting shows a green dot, working shows none, error 
       liveness,
       in_flight_op: 0,
     });
-    list.push(synth("probe-lost", 3), synth("probe-dead", 4), synth("probe-limit", 6));
+    list.push(
+      synth("probe-working", 1), // Running → working → no dot
+      synth("probe-waiting", 2), // Ready → waiting → green dot
+      synth("probe-lost", 3),
+      synth("probe-dead", 4),
+      synth("probe-limit", 6),
+    );
     if (snap) {
       snap.instances = list;
     }
     await route.fulfill({ status: resp.status(), contentType: "application/json", body: JSON.stringify(body) });
   });
-  await page.reload();
-  await expect(page.locator(".af-app")).toBeVisible();
-  await expect(row(page, SESSION_A)).toBeVisible({ timeout: 15_000 });
+  await p.goto("/");
+  await expect(p.locator(".af-app")).toBeVisible();
 
-  // Working row (A): NO status dot at all — the dot span is omitted entirely.
-  await expect(row(page, SESSION_A).locator(".af-dot")).toHaveCount(0);
-  // Waiting row (B): the static green ● dot, in the ready color bucket, never spinning.
-  const readyDot = row(page, SESSION_B).locator(".af-dot");
+  // Working row: NO status dot at all — the dot span is omitted entirely. The row
+  // must be asserted present FIRST: toHaveCount(0) on a row that never rendered
+  // would pass for the wrong reason.
+  await expect(row(p, "probe-working")).toBeVisible({ timeout: 15_000 });
+  await expect(row(p, "probe-working").locator(".af-dot")).toHaveCount(0);
+  // Waiting row: the static green ● dot, in the ready color bucket, never spinning.
+  const readyDot = row(p, "probe-waiting").locator(".af-dot");
   await expect(readyDot).toHaveClass(/af-dot-ready/);
   await expect(readyDot).toHaveText("●");
   await expect(readyDot).not.toHaveClass(/af-dot-spin/);
   // Error/terminal states keep their STATIC glyphs (◌/○/◆), copied from the TUI.
-  await expect(row(page, "probe-lost").locator(".af-dot")).toHaveText("◌");
-  await expect(row(page, "probe-lost").locator(".af-dot")).toHaveClass(/af-dot-lost/);
-  await expect(row(page, "probe-dead").locator(".af-dot")).toHaveText("○");
-  await expect(row(page, "probe-limit").locator(".af-dot")).toHaveText("◆");
+  await expect(row(p, "probe-lost").locator(".af-dot")).toHaveText("◌");
+  await expect(row(p, "probe-lost").locator(".af-dot")).toHaveClass(/af-dot-lost/);
+  await expect(row(p, "probe-dead").locator(".af-dot")).toHaveText("○");
+  await expect(row(p, "probe-limit").locator(".af-dot")).toHaveText("◆");
   // The animation class is gone from every status row, and the removed "working" dot
   // kind never renders anywhere.
-  await expect(page.locator(".af-dot-spin")).toHaveCount(0);
-  await expect(page.locator(".af-dot-working")).toHaveCount(0);
+  await expect(p.locator(".af-dot-spin")).toHaveCount(0);
+  await expect(p.locator(".af-dot-working")).toHaveCount(0);
 
-  // Restore the real projection for the following flows.
-  await page.unroute("**/v1/Snapshot");
-  await page.reload();
-  await expect(page.locator(".af-app")).toBeVisible();
-  await expect(row(page, SESSION_A)).toBeVisible({ timeout: 15_000 });
+  await ctx.close();
 });
 
 test("click-to-attach opens the xterm terminal and shows live output", async () => {
@@ -1640,75 +1679,87 @@ test("tasks view (#1592 PR8): list the seeded task; add / trigger / remove round
   await expect(page.locator(".af-rail-list")).toBeVisible();
 });
 
-test("create: the + New modal creates a session and its row appears", async () => {
-  const created = `probe-created-${Date.now().toString(36)}`;
+test.describe("create → kill (one session, two flows)", () => {
+  // The ONE genuine ordering dependency in this file, and the only place serial
+  // mode is warranted: create stashes the title it invented and kill consumes it,
+  // so kill cannot run — or mean anything — on its own. Serial keeps the pair
+  // honest: if create fails, kill SKIPS rather than failing a second time for a
+  // reason that is not its own.
+  //
+  // Scoped to these two tests on purpose. This is the blast radius of a failure
+  // here: two tests, not the 41 a file-wide serial took down in #1898.
+  test.describe.configure({ mode: "serial" });
 
-  // Regression guard (#1592 PR7 review): first move the CURRENT session onto a
-  // NON-agent tab, so a create path that wrongly preserved activeTab would build a
-  // ?tab=1 stream URL for the brand-new session (which has only the agent tab).
-  await row(page, SESSION_A).click();
-  await expect(page.locator(".af-main.af-main-term")).toBeVisible();
-  await page.locator(".af-tabbar .af-tab-new").click();
-  await expect(page.locator(".af-tabbar .af-tab")).toHaveCount(2, { timeout: 30_000 });
-  await expect(page.locator(".af-tab.af-tab-active .af-tab-label")).toHaveText("Terminal");
+  test("create: the + New modal creates a session and its row appears", async () => {
+    const created = `probe-created-${Date.now().toString(36)}`;
 
-  // Capture every PTY stream WebSocket opened from here on, so we can assert the
-  // new session's stream carries NO stale tab= selector.
-  const streamUrls: string[] = [];
-  page.on("websocket", (ws) => {
-    if (ws.url().includes("/stream")) {
-      streamUrls.push(ws.url());
-    }
+    // Regression guard (#1592 PR7 review): first move the CURRENT session onto a
+    // NON-agent tab, so a create path that wrongly preserved activeTab would build a
+    // ?tab=1 stream URL for the brand-new session (which has only the agent tab).
+    await row(page, SESSION_A).click();
+    await expect(page.locator(".af-main.af-main-term")).toBeVisible();
+    await page.locator(".af-tabbar .af-tab-new").click();
+    await expect(page.locator(".af-tabbar .af-tab")).toHaveCount(2, { timeout: 30_000 });
+    await expect(page.locator(".af-tab.af-tab-active .af-tab-label")).toHaveText("Terminal");
+
+    // Capture every PTY stream WebSocket opened from here on, so we can assert the
+    // new session's stream carries NO stale tab= selector.
+    const streamUrls: string[] = [];
+    page.on("websocket", (ws) => {
+      if (ws.url().includes("/stream")) {
+        streamUrls.push(ws.url());
+      }
+    });
+
+    await page.locator("button.af-rail-new").click();
+    const modal = page.locator(".af-modal-card");
+    await expect(modal).toBeVisible();
+
+    // Title is required; the project picker defaults to the scoped project (redesign
+    // PR2 — the first mock repo A/B live in), so the created session lands there and is
+    // visible in the scoped rail. Program is left at "Repo default" (claude → the fake
+    // agent). Submit with the modal's Create button.
+    await modal.locator('input[aria-label="Session title"]').fill(created);
+    await modal.locator("button.af-primary").click();
+
+    // The created row lands in the rail (createSession returns the full projection,
+    // which index.ts upserts + selects immediately).
+    await expect(row(page, created)).toBeVisible({ timeout: 30_000 });
+    await expect(modal).toBeHidden();
+
+    // The new session is auto-selected AND attached at its AGENT tab (index 0), not
+    // the tab-2 we were on: its tab bar has just the agent tab, and its terminal
+    // shows the fake agent's ready marker — which it could not if the stream had
+    // dialed a ?tab=<n> the session has no tab for.
+    await expect(page.locator(".af-tabbar .af-tab")).toHaveCount(1);
+    await expect(page.locator(".af-tab.af-tab-active .af-tab-label")).toHaveText("Agent");
+    await expect(page.locator(".af-term-host")).toContainText(READY_MARKER, { timeout: 30_000 });
+
+    // And the new session's stream URL carries no stale tab= selector (the agent tab
+    // is the default, sent only for a non-agent tab).
+    const lastStream = streamUrls[streamUrls.length - 1];
+    expect(lastStream, "a PTY stream WS should have opened for the new session").toBeTruthy();
+    expect(lastStream).not.toContain("tab=");
+
+    // Stash it for the kill flow.
+    createdTitle = created;
   });
 
-  await page.locator("button.af-rail-new").click();
-  const modal = page.locator(".af-modal-card");
-  await expect(modal).toBeVisible();
+  test("kill: the kill confirm removes the session's row", async () => {
+    expect(createdTitle).not.toBe("");
+    // The created session is the current selection, so the pane header shows its
+    // actions. Kill it and confirm.
+    await row(page, createdTitle).click();
+    await expect(page.locator(".af-main.af-main-term")).toBeVisible();
+    await page.locator(".af-term-head button.af-danger").click();
 
-  // Title is required; the project picker defaults to the scoped project (redesign
-  // PR2 — the first mock repo A/B live in), so the created session lands there and is
-  // visible in the scoped rail. Program is left at "Repo default" (claude → the fake
-  // agent). Submit with the modal's Create button.
-  await modal.locator('input[aria-label="Session title"]').fill(created);
-  await modal.locator("button.af-primary").click();
+    const modal = page.locator(".af-modal-card");
+    await expect(modal).toBeVisible();
+    await modal.locator("button.af-danger").click();
 
-  // The created row lands in the rail (createSession returns the full projection,
-  // which index.ts upserts + selects immediately).
-  await expect(row(page, created)).toBeVisible({ timeout: 30_000 });
-  await expect(modal).toBeHidden();
-
-  // The new session is auto-selected AND attached at its AGENT tab (index 0), not
-  // the tab-2 we were on: its tab bar has just the agent tab, and its terminal
-  // shows the fake agent's ready marker — which it could not if the stream had
-  // dialed a ?tab=<n> the session has no tab for.
-  await expect(page.locator(".af-tabbar .af-tab")).toHaveCount(1);
-  await expect(page.locator(".af-tab.af-tab-active .af-tab-label")).toHaveText("Agent");
-  await expect(page.locator(".af-term-host")).toContainText(READY_MARKER, { timeout: 30_000 });
-
-  // And the new session's stream URL carries no stale tab= selector (the agent tab
-  // is the default, sent only for a non-agent tab).
-  const lastStream = streamUrls[streamUrls.length - 1];
-  expect(lastStream, "a PTY stream WS should have opened for the new session").toBeTruthy();
-  expect(lastStream).not.toContain("tab=");
-
-  // Stash it for the kill flow.
-  createdTitle = created;
-});
-
-test("kill: the kill confirm removes the session's row", async () => {
-  expect(createdTitle).not.toBe("");
-  // The created session is the current selection, so the pane header shows its
-  // actions. Kill it and confirm.
-  await row(page, createdTitle).click();
-  await expect(page.locator(".af-main.af-main-term")).toBeVisible();
-  await page.locator(".af-term-head button.af-danger").click();
-
-  const modal = page.locator(".af-modal-card");
-  await expect(modal).toBeVisible();
-  await modal.locator("button.af-danger").click();
-
-  // The killed row disappears from the rail (the killed event removes it).
-  await expect(row(page, createdTitle)).toHaveCount(0, { timeout: 30_000 });
+    // The killed row disappears from the rail (the killed event removes it).
+    await expect(row(page, createdTitle)).toHaveCount(0, { timeout: 30_000 });
+  });
 });
 
 test("archive: the archive confirm moves a session to the archived group", async () => {
