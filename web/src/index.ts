@@ -37,12 +37,14 @@ import {
 } from "./api.js";
 import { EventStream, type EventStreamStatus } from "./events.js";
 import { confirmDeleteProjectModal, confirmModal, type ModalHandle, newSessionModal, promptModal } from "./modals.js";
+import { InstallAffordance } from "./install.js";
 import { decideKey, type KeyboardFocus, type View } from "./nav.js";
 import { loadProjectChoice, persistProjectChoice, pickerProjects, reconcileProject, scopeToProject } from "./project.js";
 import { applyEvent, clampActiveTab, pickSelection, tabToKeepOnClose, upsertSession } from "./sessions.js";
 import { SplitView } from "./split.js";
 import { isArchived } from "./status.js";
 import { Store } from "./store.js";
+import { registerServiceWorker } from "./serviceworker.js";
 import { bootStampTheme, persistThemeChoice, stampTheme, type ThemeChoice } from "./theme.js";
 import { addTaskModal, type AddTaskInput, buildTask } from "./tasks.js";
 import type { TerminalStatus } from "./terminal.js";
@@ -64,6 +66,11 @@ import type { SessionData, TaskData, WireEvent } from "./types.js";
 // is the CSP-safe stamp — it ships in the same-origin bundle, not an inline <script>
 // the daemon's `default-src 'self'` would block. Runs at module top, above the store.
 const initialThemeChoice = bootStampTheme();
+
+// Register the service worker (feat: PWA). Best-effort and side-effect-free for the
+// app: it is what clears Chrome's installability bar, and it deliberately does
+// nothing on an insecure context. See serviceworker.ts and src/sw.js.
+registerServiceWorker();
 
 const store = new Store<AppState>({
   phase: "login",
@@ -127,6 +134,14 @@ termHost.className = "af-term-host";
 const modalHost = document.createElement("div");
 modalHost.className = "af-modal-host";
 let modal: ModalHandle | null = null;
+
+// The appbar's "Install app" affordance (feat: PWA). Built ONCE here, for the same
+// reason termHost and modalHost are: rerender() drops `shell` on logout and builds a
+// fresh AppShell on the next login, so constructing this inside the shell would stack
+// another pair of window listeners on every cycle — and strand the stashed
+// beforeinstallprompt on a discarded copy. It stays hidden unless the browser says
+// the app is installable; see install.ts.
+const installAffordance = new InstallAffordance();
 
 // The split-pane view bound to termHost: it owns the per-instance layout tree and one
 // live AttachTerminal per pane, rebuilt/reconciled as the selection, tab list, or
@@ -217,7 +232,7 @@ function rerender(): void {
     return;
   }
   if (!shell) {
-    shell = new AppShell(actions, termHost, modalHost);
+    shell = new AppShell(actions, termHost, modalHost, installAffordance.el);
     root.replaceChildren(shell.el);
   }
   shell.update(state);

@@ -6601,6 +6601,87 @@ function projectLabel(root2) {
   return parent ? `${base}  (${parent}/${base})` : base;
 }
 
+// src/install.ts
+var DISMISS_KEY = "af-install-dismissed";
+function shouldShowInstall(state) {
+  return state.stashed && !state.dismissed && !state.installed;
+}
+function readInstallDismissed() {
+  try {
+    return localStorage.getItem(DISMISS_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+function persistInstallDismissed() {
+  try {
+    localStorage.setItem(DISMISS_KEY, "1");
+  } catch {
+  }
+}
+var InstallAffordance = class {
+  /** The mountable root. Hidden until a beforeinstallprompt says otherwise. */
+  el;
+  stashed = null;
+  dismissed = readInstallDismissed();
+  installed = false;
+  constructor() {
+    const go = document.createElement("button");
+    go.type = "button";
+    go.className = "af-ghost af-install__go";
+    go.textContent = "Install app";
+    go.addEventListener("click", () => void this.promptNow());
+    const dismiss = document.createElement("button");
+    dismiss.type = "button";
+    dismiss.className = "af-install__dismiss";
+    dismiss.textContent = "\xD7";
+    dismiss.setAttribute("aria-label", "Dismiss install");
+    dismiss.title = "Dismiss";
+    dismiss.addEventListener("click", () => this.dismiss());
+    this.el = document.createElement("div");
+    this.el.className = "af-install";
+    this.el.append(go, dismiss);
+    this.sync();
+    window.addEventListener("beforeinstallprompt", (event) => {
+      event.preventDefault();
+      this.stashed = event;
+      this.sync();
+    });
+    window.addEventListener("appinstalled", () => {
+      this.installed = true;
+      this.stashed = null;
+      this.sync();
+    });
+  }
+  /** Shows the browser's install dialog for the stashed event, then retires it. */
+  async promptNow() {
+    const event = this.stashed;
+    if (!event) {
+      return;
+    }
+    this.stashed = null;
+    this.sync();
+    try {
+      await event.prompt();
+      await event.userChoice;
+    } catch {
+    }
+  }
+  /** The user closed our affordance: hide it and remember, so it never nags again. */
+  dismiss() {
+    this.dismissed = true;
+    persistInstallDismissed();
+    this.sync();
+  }
+  sync() {
+    this.el.hidden = !shouldShowInstall({
+      stashed: this.stashed !== null,
+      dismissed: this.dismissed,
+      installed: this.installed
+    });
+  }
+};
+
 // src/nav.ts
 var VIEWS = ["sessions", "tasks"];
 function cycleView(current, delta) {
@@ -7138,6 +7219,18 @@ function replaceTab(root2, leafId, tab) {
   const updated = mapLeaf(root2, leafId, (leaf) => ({ ...leaf, tab }));
   return dedupeExcept(updated, tab, leafId);
 }
+function sameLayout(a, b) {
+  if (a === b) {
+    return true;
+  }
+  if (a === null || b === null) {
+    return false;
+  }
+  if (a.kind === "leaf" || b.kind === "leaf") {
+    return a.kind === "leaf" && b.kind === "leaf" && a.id === b.id;
+  }
+  return a.id === b.id && a.dir === b.dir && a.ratio === b.ratio && sameLayout(a.a, b.a) && sameLayout(a.b, b.b);
+}
 function setRatio(root2, splitId, ratio) {
   const clamped = Math.min(0.9, Math.max(0.1, ratio));
   const rec = (node) => {
@@ -7358,6 +7451,22 @@ function persistThemeChoice(choice) {
   } catch {
   }
 }
+var THEME_COLOR_LIGHT = "#ffffff";
+var THEME_COLOR_DARK = "#141a22";
+function themeColorMetaContents(choice) {
+  if (choice === "auto") {
+    return { light: THEME_COLOR_LIGHT, dark: THEME_COLOR_DARK };
+  }
+  const forced = choice === "dark" ? THEME_COLOR_DARK : THEME_COLOR_LIGHT;
+  return { light: forced, dark: forced };
+}
+function syncThemeColorMeta(choice) {
+  const { light, dark } = themeColorMetaContents(choice);
+  for (const meta of document.querySelectorAll('meta[name="theme-color"]')) {
+    const isDark = (meta.getAttribute("media") ?? "").includes("dark");
+    meta.setAttribute("content", isDark ? dark : light);
+  }
+}
 function stampTheme(choice) {
   const root2 = document.documentElement;
   if (choice === "auto") {
@@ -7365,6 +7474,7 @@ function stampTheme(choice) {
   } else {
     root2.setAttribute("data-theme", choice);
   }
+  syncThemeColorMeta(choice);
 }
 function bootStampTheme() {
   const choice = readThemeChoice();
@@ -7757,6 +7867,24 @@ var SplitView = class {
   archived = false;
   tree = null;
   focusedId = null;
+  // The tree the CURRENT split DOM was built from, so reconcile can tell a real
+  // layout change from a resync that left the layout alone (#1815 scroll fix).
+  //
+  // Re-inserting a pane's container — even the very same element, into the very
+  // same parent — detaches it, and the browser drops the scroll offset of every
+  // scrollable descendant on detach. xterm keeps its own scroll position (ydisp)
+  // but its .xterm-viewport silently rewinds to 0, and a viewport pinned at the
+  // top emits no scroll event, so wheel-up goes dead until the next chunk of
+  // output resyncs it — i.e. exactly while a quiet pane is being read.
+  //
+  // Compared with sameLayout, NOT by reference: a fresh root does not imply a
+  // changed layout. setRatio rebuilds every SplitNode it walks, so persisting a
+  // divider drag produces a new root for a layout already on screen, and a
+  // reference check would rebuild on the next resync — the same rewind, one
+  // gesture later. The stale nodes the live dividers still capture are harmless:
+  // a divider resolves its split by ID when it persists, and the only state it
+  // reads back (ratio) is what it wrote during that same drag.
+  builtTree = null;
   // Counts explicit layout/focus mutations, for the stale-async guard — see
   // layoutGeneration(), which is the documented contract.
   layoutGen = 0;
@@ -7803,6 +7931,7 @@ var SplitView = class {
       this.teardown();
       this.sessionId = null;
       this.tree = null;
+      this.forgetFocusHistory();
       this.report();
       return;
     }
@@ -8016,6 +8145,7 @@ var SplitView = class {
     this.host.replaceChildren();
     this.host.classList.remove("af-split-multi");
     this.focusedId = null;
+    this.builtTree = null;
   }
   /** Brings the live panes + DOM in line with the current tree: disposes gone panes,
    *  (re)creates terminals whose tab changed, rebuilds the split wrappers (reusing
@@ -8042,9 +8172,12 @@ var SplitView = class {
     if (!this.focusedId || !wanted.has(this.focusedId)) {
       this.focusedId = desired[0]?.id ?? null;
     }
-    const rootEl = this.buildNode(this.tree);
-    rootEl.style.flex = "1 1 0";
-    this.host.replaceChildren(rootEl);
+    if (!sameLayout(this.tree, this.builtTree)) {
+      const rootEl = this.buildNode(this.tree);
+      rootEl.style.flex = "1 1 0";
+      this.host.replaceChildren(rootEl);
+      this.builtTree = this.tree;
+    }
     const multi = desired.length > 1;
     this.host.classList.toggle("af-split-multi", multi);
     for (const leaf of desired) {
@@ -8466,6 +8599,7 @@ var SplitView = class {
   /** Fires onLayout when the focused tab, the shown-tab set, or the pane count
    *  changed — never on a no-op, so writing the store from it can't loop. */
   report() {
+    this.syncFocusedTabId();
     const shownTabs = this.tree ? leaves(this.tree).map((l) => l.tab) : [];
     const focusedTab = this.focusedId ? findLeaf(this.tree ?? { kind: "leaf", id: "", tab: 0 }, this.focusedId)?.tab ?? 0 : 0;
     const paneCount = shownTabs.length;
@@ -8473,22 +8607,38 @@ var SplitView = class {
     if (focusedTab === this.lastFocusedTab && shownKey === this.lastShown && paneCount === this.lastPaneCount) {
       return;
     }
-    this.noteFocusedTab(focusedTab);
     this.lastFocusedTab = focusedTab;
     this.lastShown = shownKey;
     this.lastPaneCount = paneCount;
     this.cb.onLayout({ focusedTab, shownTabs, paneCount });
   }
-  /** Pushes the tab that HELD focus onto the MRU, just before `focusedTab` replaces it.
-   *  Every path that changes which tab is focused — a pane click, Alt+j/k, a 1-9 key, a
-   *  tab-bar click that rebinds the pane in place — lands in report(), which is why the
-   *  history is recorded here and not in focusPane(): focusPane sees a change of PANE,
-   *  and the most ordinary way to change the focused TAB never moves the pane at all. */
-  noteFocusedTab(focusedTab) {
-    if (focusedTab !== this.lastFocusedTab && this.lastFocusedTabId !== "") {
+  /** Recomputes the focused pane's CURRENT tab id (by stable daemon id) and records the
+   *  tab focus is LEAVING onto the MRU. THE funnel for keeping the focused-tab-id
+   *  accurate, run at the TOP of report() — before its dedup guard — so it fires on
+   *  every path report() covers: an explicit focus move (focusPane), a same-shape
+   *  session switch, an in-place tab-identity update, and a tab change whose onLayout is
+   *  deduped.
+   *
+   *  Recording only AFTER the dedup guard (the original #1901 code) saw just the first
+   *  case. report() dedups on the focused ORDINAL, and a session switch or an identity
+   *  swap leaves the ordinal put while the tab beneath it changes — so the id went stale
+   *  and a self-split's "other side" pick read a neighbour, or a foreign session's tab
+   *  (#1901 Codex findings 1-5). Reading the id from the live tree+roster here, every
+   *  time, is what makes a stale value unrepresentable.
+   *
+   *  It is self-contained (reads the tree, not a passed ordinal) so a session switch's
+   *  forgetFocusHistory()+reconcile()+report() reinitializes lastFocusedTabId to the NEW
+   *  session's focused tab: the cleared "" makes the first sync a fresh start, never
+   *  recorded as if the new tab were previously focused. */
+  syncFocusedTabId() {
+    const focusedTab = this.focusedId ? findLeaf(this.tree ?? { kind: "leaf", id: "", tab: 0 }, this.focusedId)?.tab ?? -1 : -1;
+    const current = focusedTab >= 0 ? this.tabRealIds[focusedTab] ?? "" : "";
+    if (current === this.lastFocusedTabId) {
+      return;
+    }
+    if (this.lastFocusedTabId !== "") {
       this.tabMru = [this.lastFocusedTabId, ...this.tabMru.filter((id) => id !== this.lastFocusedTabId)];
     }
-    const current = this.tabRealIds[focusedTab] ?? "";
     if (current !== "") {
       this.tabMru = this.tabMru.filter((id) => id !== current);
     }
@@ -8534,6 +8684,17 @@ var Store = class {
     };
   }
 };
+
+// src/serviceworker.ts
+function registerServiceWorker() {
+  if (!("serviceWorker" in navigator)) {
+    return;
+  }
+  window.addEventListener("load", () => {
+    navigator.serviceWorker.register("/sw.js").catch(() => {
+    });
+  });
+}
 
 // src/tasks.ts
 function genTaskId() {
@@ -8925,10 +9086,11 @@ function termStatusLabel(s) {
   }
 }
 var AppShell = class {
-  constructor(actions2, termHost2, modalHost2) {
+  constructor(actions2, termHost2, modalHost2, installEl) {
     this.actions = actions2;
     this.termHost = termHost2;
     this.modalHost = modalHost2;
+    this.installEl = installEl;
     this.pip = h2("span", { class: "af-live-pip" });
     this.pip.setAttribute("aria-hidden", "true");
     this.pipLabel = h2("span", { class: "af-live-label" });
@@ -8994,6 +9156,7 @@ var AppShell = class {
       viewNav,
       this.projectSwitchWrap,
       live,
+      ...this.installEl ? [this.installEl] : [],
       themeToggle,
       disconnect2
     );
@@ -9542,6 +9705,7 @@ function sessionRow(s, selected, actions2) {
 
 // src/index.ts
 var initialThemeChoice = bootStampTheme();
+registerServiceWorker();
 var store = new Store({
   phase: "login",
   view: "sessions",
@@ -9577,6 +9741,7 @@ termHost.className = "af-term-host";
 var modalHost = document.createElement("div");
 modalHost.className = "af-modal-host";
 var modal = null;
+var installAffordance = new InstallAffordance();
 var splitView = new SplitView(termHost, {
   onStatus: (s) => store.set({ termStatus: s }),
   // Keep the nav-vs-terminal mode (#1693) in sync with real xterm focus across every
@@ -9635,7 +9800,7 @@ function rerender() {
     return;
   }
   if (!shell) {
-    shell = new AppShell(actions, termHost, modalHost);
+    shell = new AppShell(actions, termHost, modalHost, installAffordance.el);
     root.replaceChildren(shell.el);
   }
   shell.update(state);

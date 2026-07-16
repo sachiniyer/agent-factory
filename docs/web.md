@@ -117,6 +117,66 @@ backend — see
 
 ---
 
+## Install it as an app
+
+The web client is a PWA, so you can install it and get an app window with its own
+icon instead of a browser tab — no extra tooling, it's the same daemon and the same
+page.
+
+In a Chromium browser (Chrome, Edge, Brave), open the app and click **Install app**
+in the top bar; you can also use the install icon in the address bar. The button
+carries a **×** — dismiss it and it won't come back.
+
+Firefox and Safari don't offer the button. Use their own add-to-home-screen or
+"Add to Dock" instead; the icons and app name come from the same manifest.
+
+### Why the Install button isn't showing
+
+**A browser will only install a page served from a secure context**, and that rule
+decides everything here:
+
+| Where you opened it | Secure context? | Install button |
+| --- | --- | --- |
+| `http://localhost:8443` / `http://127.0.0.1:8443` | yes — loopback is trusted by definition | **shows** |
+| `https://af.example.ts.net` (behind a TLS proxy) | yes | **shows** |
+| `http://100.x.y.z:8443` (plain HTTP over Tailscale/LAN) | **no** | **hidden** |
+
+So if you reach af over a **plain-HTTP Tailscale or LAN address, there is no Install
+button, and that is correct rather than broken**. The browser never offers an
+install for an insecure origin, so a button there could only fail. Nothing else
+about the app changes — it is fully functional over plain HTTP, install is simply
+not on the menu.
+
+**To install from a remote machine, put the daemon behind HTTPS** — a
+TLS-terminating reverse proxy in front of `listen_addr` — and open the proxy's
+`https://` origin. Tailscale's own HTTPS (`tailscale serve`) works too, since it
+gives you an `https://…ts.net` origin. See
+[Transport encryption](remote-http-auth.md#transport-encryption-terminate-tls-yourself).
+
+### What gets installed
+
+- The **app mark** — a factory on the accent tile — as the favicon, the app icon,
+  and the home-screen icon (including an Android-safe maskable variant).
+- A **standalone window**: no URL bar, its own entry in your launcher/dock.
+- **Browser chrome that matches the app theme**, following the Auto/Light/Dark
+  toggle rather than just your OS.
+
+There is a small **service worker** behind the install. It is worth knowing exactly
+what it does, because the app is a live terminal:
+
+- It **never touches `/v1`** — not the API, not the `/v1/events` socket, not the
+  session PTY streams, not web-tab or VS Code previews. Those are left on the
+  browser's own network path, byte for byte as if no worker existed.
+- It caches **only the static shell** (the page, the bundle, the icons), and
+  **network-first**: a reachable daemon always wins, so an auto-updated af never
+  serves you the old bundle. The cache is only ever consulted when the network has
+  already failed, so a daemon that went away gives you the app's own "can't reach
+  the daemon" screen instead of a browser error page.
+
+Installing is not required for any of this — it's the same app either way.
+
+---
+
 ## The auth model
 
 Whether the web client asks you for a token depends on **where your browser is**,

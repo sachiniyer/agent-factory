@@ -38,6 +38,7 @@ import {
   remapByIdentity,
   replaceTab,
   resolveDragTab,
+  sameLayout,
   setRatio,
   singleLeaf,
   type SplitNode,
@@ -167,6 +168,25 @@ export class SplitView {
   private tree: LayoutNode | null = null;
   private focusedId: string | null = null;
 
+  // The tree the CURRENT split DOM was built from, so reconcile can tell a real
+  // layout change from a resync that left the layout alone (#1815 scroll fix).
+  //
+  // Re-inserting a pane's container — even the very same element, into the very
+  // same parent — detaches it, and the browser drops the scroll offset of every
+  // scrollable descendant on detach. xterm keeps its own scroll position (ydisp)
+  // but its .xterm-viewport silently rewinds to 0, and a viewport pinned at the
+  // top emits no scroll event, so wheel-up goes dead until the next chunk of
+  // output resyncs it — i.e. exactly while a quiet pane is being read.
+  //
+  // Compared with sameLayout, NOT by reference: a fresh root does not imply a
+  // changed layout. setRatio rebuilds every SplitNode it walks, so persisting a
+  // divider drag produces a new root for a layout already on screen, and a
+  // reference check would rebuild on the next resync — the same rewind, one
+  // gesture later. The stale nodes the live dividers still capture are harmless:
+  // a divider resolves its split by ID when it persists, and the only state it
+  // reads back (ratio) is what it wrote during that same drag.
+  private builtTree: LayoutNode | null = null;
+
   // Counts explicit layout/focus mutations, for the stale-async guard — see
   // layoutGeneration(), which is the documented contract.
   private layoutGen = 0;
@@ -237,6 +257,11 @@ export class SplitView {
       this.teardown();
       this.sessionId = null;
       this.tree = null;
+      // Deselect is a session boundary too: the history belongs to the session being
+      // left, so it must not survive to the next selection (which may not go through
+      // the different-session branch first). report() then reinitializes from the empty
+      // tree — lastFocusedTabId back to "".
+      this.forgetFocusHistory();
       this.report();
       return;
     }
@@ -503,6 +528,8 @@ export class SplitView {
     this.host.replaceChildren();
     this.host.classList.remove("af-split-multi");
     this.focusedId = null;
+    // The DOM is gone, so the next reconcile must build it whatever the tree says.
+    this.builtTree = null;
   }
 
   /** Brings the live panes + DOM in line with the current tree: disposes gone panes,
@@ -539,9 +566,17 @@ export class SplitView {
 
     // Rebuild the split wrappers, inserting the persistent containers. Containers now
     // in the live DOM have real dimensions for the FitAddon.
-    const rootEl = this.buildNode(this.tree);
-    rootEl.style.flex = "1 1 0";
-    this.host.replaceChildren(rootEl);
+    //
+    // ONLY when the layout actually changed: re-inserting one that is already on
+    // screen would detach every live pane and silently rewind its xterm viewport to
+    // the top, killing wheel-scroll on a session.updated that touched nothing this
+    // pane shows (a tab created in another window, #1812/#1815) — see builtTree.
+    if (!sameLayout(this.tree, this.builtTree)) {
+      const rootEl = this.buildNode(this.tree);
+      rootEl.style.flex = "1 1 0";
+      this.host.replaceChildren(rootEl);
+      this.builtTree = this.tree;
+    }
 
     const multi = desired.length > 1;
     this.host.classList.toggle("af-split-multi", multi);
@@ -1147,6 +1182,11 @@ export class SplitView {
   /** Fires onLayout when the focused tab, the shown-tab set, or the pane count
    *  changed — never on a no-op, so writing the store from it can't loop. */
   private report(): void {
+    // Keep the focused-tab-id accurate FIRST — before the dedup guard below can bail.
+    // report() follows every reconcile() and is the sole caller of the pure-focus path
+    // (focusPane), so this is the one funnel that sees every way the focused tab can
+    // change (#1901 Codex).
+    this.syncFocusedTabId();
     const shownTabs = this.tree ? leaves(this.tree).map((l) => l.tab) : [];
     const focusedTab = this.focusedId ? (findLeaf(this.tree ?? { kind: "leaf", id: "", tab: 0 }, this.focusedId)?.tab ?? 0) : 0;
     const paneCount = shownTabs.length;
@@ -1154,23 +1194,41 @@ export class SplitView {
     if (focusedTab === this.lastFocusedTab && shownKey === this.lastShown && paneCount === this.lastPaneCount) {
       return;
     }
-    this.noteFocusedTab(focusedTab);
     this.lastFocusedTab = focusedTab;
     this.lastShown = shownKey;
     this.lastPaneCount = paneCount;
     this.cb.onLayout({ focusedTab, shownTabs, paneCount });
   }
 
-  /** Pushes the tab that HELD focus onto the MRU, just before `focusedTab` replaces it.
-   *  Every path that changes which tab is focused — a pane click, Alt+j/k, a 1-9 key, a
-   *  tab-bar click that rebinds the pane in place — lands in report(), which is why the
-   *  history is recorded here and not in focusPane(): focusPane sees a change of PANE,
-   *  and the most ordinary way to change the focused TAB never moves the pane at all. */
-  private noteFocusedTab(focusedTab: number): void {
-    if (focusedTab !== this.lastFocusedTab && this.lastFocusedTabId !== "") {
+  /** Recomputes the focused pane's CURRENT tab id (by stable daemon id) and records the
+   *  tab focus is LEAVING onto the MRU. THE funnel for keeping the focused-tab-id
+   *  accurate, run at the TOP of report() — before its dedup guard — so it fires on
+   *  every path report() covers: an explicit focus move (focusPane), a same-shape
+   *  session switch, an in-place tab-identity update, and a tab change whose onLayout is
+   *  deduped.
+   *
+   *  Recording only AFTER the dedup guard (the original #1901 code) saw just the first
+   *  case. report() dedups on the focused ORDINAL, and a session switch or an identity
+   *  swap leaves the ordinal put while the tab beneath it changes — so the id went stale
+   *  and a self-split's "other side" pick read a neighbour, or a foreign session's tab
+   *  (#1901 Codex findings 1-5). Reading the id from the live tree+roster here, every
+   *  time, is what makes a stale value unrepresentable.
+   *
+   *  It is self-contained (reads the tree, not a passed ordinal) so a session switch's
+   *  forgetFocusHistory()+reconcile()+report() reinitializes lastFocusedTabId to the NEW
+   *  session's focused tab: the cleared "" makes the first sync a fresh start, never
+   *  recorded as if the new tab were previously focused. */
+  private syncFocusedTabId(): void {
+    const focusedTab = this.focusedId
+      ? (findLeaf(this.tree ?? { kind: "leaf", id: "", tab: 0 }, this.focusedId)?.tab ?? -1)
+      : -1;
+    const current = focusedTab >= 0 ? (this.tabRealIds[focusedTab] ?? "") : "";
+    if (current === this.lastFocusedTabId) {
+      return; // the focused tab's identity is unchanged — nothing to record
+    }
+    if (this.lastFocusedTabId !== "") {
       this.tabMru = [this.lastFocusedTabId, ...this.tabMru.filter((id) => id !== this.lastFocusedTabId)];
     }
-    const current = this.tabRealIds[focusedTab] ?? "";
     if (current !== "") {
       // A tab is not part of its own history: leaving it here would offer the tab the
       // pane already shows as that pane's own companion. companionTab rejects it on the

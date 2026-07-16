@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -167,4 +168,116 @@ func TestServeSPA_RejectsNonGet(t *testing.T) {
 	require.NoError(t, err)
 	_ = resp.Body.Close()
 	require.Equal(t, http.StatusMethodNotAllowed, resp.StatusCode)
+}
+
+// TestServeSPA_ManifestContentType pins the one MIME the embedded tree can't get
+// right on its own (feat: PWA). Go's built-in table has no .webmanifest, so
+// ServeContent would sniff the bytes — and a manifest sniffs as text/plain, because
+// it IS just JSON. With nosniff on every asset that mislabelling is authoritative.
+// The manifest must arrive as application/manifest+json, parse, and carry the fields
+// an install actually depends on.
+func TestServeSPA_ManifestContentType(t *testing.T) {
+	srv := httptest.NewServer(webShellHandler(&apiSpy{}))
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL + "/manifest.webmanifest")
+	require.NoError(t, err)
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	_ = resp.Body.Close()
+
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	require.Equal(t, "application/manifest+json", resp.Header.Get("Content-Type"))
+	// nosniff is what makes the Content-Type above load-bearing rather than a hint.
+	require.Equal(t, "nosniff", resp.Header.Get("X-Content-Type-Options"))
+
+	var manifest struct {
+		Name       string `json:"name"`
+		ShortName  string `json:"short_name"`
+		StartURL   string `json:"start_url"`
+		Scope      string `json:"scope"`
+		Display    string `json:"display"`
+		ThemeColor string `json:"theme_color"`
+		Icons      []struct {
+			Src     string `json:"src"`
+			Sizes   string `json:"sizes"`
+			Purpose string `json:"purpose"`
+		} `json:"icons"`
+	}
+	require.NoError(t, json.Unmarshal(body, &manifest), "manifest must be valid JSON")
+	require.Equal(t, "Agent Factory", manifest.Name)
+	require.Equal(t, "af", manifest.ShortName)
+	require.Equal(t, "/", manifest.StartURL)
+	require.Equal(t, "/", manifest.Scope)
+	require.Equal(t, "standalone", manifest.Display)
+	require.NotEmpty(t, manifest.ThemeColor)
+	// A maskable icon is the one Chrome/Android cannot substitute for, so pin it
+	// here as well as in icons.test.ts — this side proves it survives EMBEDDING,
+	// which a Node test reading src/ cannot.
+	var maskable bool
+	for _, icon := range manifest.Icons {
+		if icon.Purpose == "maskable" {
+			maskable = true
+		}
+	}
+	require.True(t, maskable, "manifest must declare a maskable icon")
+}
+
+// TestServeSPA_PWAAssetsAreEmbedded proves the whole install surface actually made it
+// through go:embed and is reachable unauthenticated, which is where it has to be: a
+// browser fetches the manifest, the worker, and the icons with no token, before the
+// app has ever run. The failure this catches is a build that forgot to copy them into
+// dist/ — the Go tests never run `make web-build`, so the embedded tree is whatever
+// was committed.
+func TestServeSPA_PWAAssetsAreEmbedded(t *testing.T) {
+	spy := &apiSpy{}
+	srv := httptest.NewServer(webShellHandler(spy))
+	defer srv.Close()
+
+	for _, tc := range []struct{ path, wantType string }{
+		{"/sw.js", "text/javascript"},
+		{"/icons/icon.svg", "image/svg+xml"},
+		{"/icons/favicon-16.png", "image/png"},
+		{"/icons/favicon-32.png", "image/png"},
+		{"/icons/apple-touch-icon-180.png", "image/png"},
+		{"/icons/icon-192.png", "image/png"},
+		{"/icons/icon-512.png", "image/png"},
+		{"/icons/icon-maskable-512.png", "image/png"},
+	} {
+		t.Run(tc.path, func(t *testing.T) {
+			spy.reached = false
+			resp, err := http.Get(srv.URL + tc.path)
+			require.NoError(t, err)
+			body, err := io.ReadAll(resp.Body)
+			require.NoError(t, err)
+			_ = resp.Body.Close()
+
+			require.Equal(t, http.StatusOK, resp.StatusCode)
+			require.False(t, spy.reached, "a static asset must not reach the authed API handler")
+			require.NotEmpty(t, body)
+			require.Contains(t, resp.Header.Get("Content-Type"), tc.wantType)
+		})
+	}
+}
+
+// TestServeSPA_ServiceWorkerIsStamped guards the cache-busting stamp end to end. A
+// worker shipped with its literal __AF_SHELL_VERSION__ placeholder would name one
+// permanent cache across every future build, so an auto-updated af could keep serving
+// the pre-update shell from it. build.mjs throws if the placeholder goes missing; this
+// is the other half — that the committed dist/ was actually built by it.
+func TestServeSPA_ServiceWorkerIsStamped(t *testing.T) {
+	srv := httptest.NewServer(webShellHandler(&apiSpy{}))
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL + "/sw.js")
+	require.NoError(t, err)
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	_ = resp.Body.Close()
+
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	require.NotContains(t, string(body), "__AF_SHELL_VERSION__",
+		"dist/sw.js still carries the placeholder — run `make web-build`")
+	require.Regexp(t, `af-shell-\$\{VERSION\}`, string(body), "sw.js must name a versioned cache")
+	require.Regexp(t, `const VERSION = "[0-9a-f]{12}"`, string(body), "sw.js must carry a stamped content hash")
 }
