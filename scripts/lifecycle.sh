@@ -404,8 +404,19 @@ scenario_b() {
     fi
 
     # --- put state on the old daemon ----------------------------------------
-    (cd "$repo" && "$bin" sessions create --name pre1 >/dev/null 2>&1)
-    (cd "$repo" && "$bin" sessions create --name pre2 >/dev/null 2>&1)
+    # Errors are surfaced, not swallowed: if the sessions never get created the
+    # rest of this scenario is vacuous ("0 sessions survived the upgrade" is a
+    # PASS that tested nothing), so this has to be loud and fatal.
+    local n
+    for n in pre1 pre2; do
+        local out rc=0
+        out="$(cd "$repo" && "$bin" sessions create --name "$n" 2>&1)" || rc=$?
+        if [ "$rc" != 0 ]; then
+            lc_say "session create '$n' failed (rc=$rc):"
+            printf '%s\n' "$out" | head -5 | sed 's/^/[lifecycle]   | /' >&2
+        fi
+    done
+
     local before_sessions before_pid before_daemon_ver
     before_sessions="$(lc_session_count "$bin")"
     before_pid="$(lc_daemon_pids "$home" | head -1)"
@@ -415,7 +426,19 @@ scenario_b() {
     fi
     before_daemon_ver="$(lc_daemon_version "$before_pid")"
     lc_say "before upgrade: daemon pid=$before_pid version=$before_daemon_ver sessions=$before_sessions"
-    lc_assert_eq "2" "$before_sessions" "two sessions exist before the upgrade"
+
+    # Hard gate. Scenario B's whole premise is "there is state to preserve"; if
+    # we could not put any on the machine, ABORT rather than run assertion 5
+    # against zero sessions and report a vacuous pass. This is the difference
+    # between a gate and a green light.
+    if [ "$before_sessions" != "2" ]; then
+        lc_fail "scenario-b/$mode: expected 2 sessions before the upgrade, got '$before_sessions' — aborting (assertion 5 would be vacuous)"
+        lc_say "session list was:"
+        "$bin" sessions list 2>&1 | head -10 | sed 's/^/[lifecycle]   | /' >&2
+        lc_teardown_home "$home" "$supervised"
+        return 1
+    fi
+    lc_pass "two sessions exist before the upgrade (= $before_sessions)"
 
     local before_unit_pid=""
     if [ "$supervised" = yes ]; then
@@ -565,9 +588,26 @@ lc_do_upgrade() {
 }
 
 # lc_session_count <bin> — sessions the daemon knows about.
+#
+# Prints "unreadable" rather than 0 when the list cannot be parsed. A silent 0
+# fallback here would be indistinguishable from a real empty machine, which
+# would turn assertion 5 into "0 sessions survived: PASS" — the exact vacuous
+# green this gate exists to prevent.
 lc_session_count() {
-    "$1" sessions list 2>/dev/null | jq -r '[.[]?] | length' 2>/dev/null ||
-        printf '0\n'
+    local out n
+    out="$("$1" sessions list 2>/dev/null)" || {
+        printf 'unreadable\n'
+        return 0
+    }
+    n="$(printf '%s' "$out" | jq -r '[.[]?] | length' 2>/dev/null)" || {
+        printf 'unreadable\n'
+        return 0
+    }
+    [ -n "$n" ] || {
+        printf 'unreadable\n'
+        return 0
+    }
+    printf '%s\n' "$n"
 }
 
 # lc_lost_session_count <bin> — sessions whose worktree/tmux vanished. An

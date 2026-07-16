@@ -119,7 +119,13 @@ jobs:
           AF_LIFECYCLE_INJECT: ${{ github.event.inputs.inject }}
           # Raises the release-API rate limit; the API is public either way.
           GITHUB_TOKEN: ${{ github.token }}
-        run: bash scripts/lifecycle.sh all 2>&1 | tee "$RUNNER_TEMP/lifecycle.log"
+        # `set -o pipefail` is load-bearing: without it the exit status of
+        # `lifecycle.sh | tee` is TEE's, so a run with failing assertions
+        # reported success. That is not hypothetical — it happened on the first
+        # run of this workflow, which passed while reporting two FAILs.
+        run: |
+          set -o pipefail
+          bash scripts/lifecycle.sh all 2>&1 | tee "$RUNNER_TEMP/lifecycle.log"
 
       - name: Verify the supervision assertion actually ran
         # The container leg legitimately skips assertion #4. This leg is the ONLY
