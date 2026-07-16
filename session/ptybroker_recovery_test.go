@@ -391,6 +391,66 @@ func TestPTYBrokerReconnectAfterRecoveryDoesNotReplayRenderedBytes(t *testing.T)
 	}
 }
 
+// TestPTYBrokerReconnectDoesNotReplayBytesTheRepaintAlreadyShows is the codex P1 on
+// #1872: a reconnect owed a repaint must NOT then be replayed the retained ring the
+// repaint already reflects.
+//
+// The #1845 follow-up (repaint when since < base) captures a snapshot of the CURRENT
+// screen — which already reflects every retained ring byte [base, head). If the new
+// subscription still starts its replay at base, NextEvent sends the repaint and THEN
+// hands back [base, head) on top of it, rendering that output twice: a command/prompt
+// appended again, up to the whole retained ring on an eviction or post-recovery
+// reconnect.
+//
+// Fail-before/pass-after: before the fix the reconnect's cursor is clamped to base, so
+// after the repaint it receives the retained tail as PTYData (the duplicate); after the
+// fix the cursor starts at the live tail, so the repaint is the last thing it sees until
+// genuinely new output arrives.
+func TestPTYBrokerReconnectDoesNotReplayBytesTheRepaintAlreadyShows(t *testing.T) {
+	ch := &fakeClientlessChannel{snapshot: []byte("CURRENT-SCREEN")}
+	br := newPTYBroker(ch)
+	br.maxBytes = 4 // tiny ring so base advances past 0 while the ring stays NONEMPTY
+
+	a, err := br.subscribe(0)
+	if err != nil {
+		t.Fatalf("subscribe A: %v", err)
+	}
+	mustRepaintContains(t, a, "CURRENT-SCREEN")
+
+	// Fill then overflow the ring: "AAAA" is evicted by "BBBB", so base advances to 4
+	// while the ring still holds [4,8)="BBBB". A stays attached to keep the capture up.
+	ch.emit(t, []byte("AAAA"))
+	mustData(t, a, "AAAA")
+	ch.emit(t, []byte("BBBB"))
+	mustData(t, a, "BBBB")
+	waitRingHead(t, br, 8)
+
+	// A client reconnects with a cursor BELOW base (it fell far behind): the bytes it
+	// asked for are gone, so it is owed a repaint. The repaint reconstructs the whole
+	// current screen, which already reflects the retained ring — so [4,8) must NOT be
+	// replayed on top of it.
+	b, err := br.subscribe(2) // since = 2 < base = 4, ring nonempty
+	if err != nil {
+		t.Fatalf("reconnect subscribe: %v", err)
+	}
+	// The reconnect starts at the live tail, so its ?since seed is head, not base.
+	if got := b.Seq(); got != 8 {
+		t.Fatalf("reconnect cursor = %d, want 8 (the live tail, so the retained ring is not replayed)", got)
+	}
+	mustRepaintContains(t, b, "CURRENT-SCREEN")
+
+	// No PTYData replay of the retained ring after the repaint.
+	if ev, err := nextWithin(t, b, 250*time.Millisecond); err == nil {
+		t.Fatalf("after the repaint B got Kind=%d Data=%q, want no event: the repaint "+
+			"already reflects the retained ring, so replaying it duplicates output",
+			ev.Kind, ev.Data)
+	}
+
+	// Genuinely new output past the snapshot still streams to the reconnect.
+	ch.emit(t, []byte("CCCC"))
+	mustData(t, b, "CCCC")
+}
+
 // TestPTYBrokerReconnectRepaintsWhenRecoveryDiscardedItsCursor is the second codex P2
 // on the merged #1845: a reconnect whose cursor the recovery discard skipped must be
 // repainted, because it can get no replay.

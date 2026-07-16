@@ -143,30 +143,43 @@ func (b *ptyBroker) subscribe(since Seq) (*ptySub, error) {
 		return nil, fmt.Errorf("pty broker closed")
 	}
 	head := b.headLocked()
-	cursor := since
-	// since == 0 means "from the live tail" (the documented default); a real
-	// replay cursor is clamped into the retained window [base, head].
-	if cursor == 0 || cursor > head {
-		cursor = head
-	}
-	if cursor < b.base {
-		cursor = b.base
-	}
-	// A repaint is owed when the stream CANNOT rebuild this client's screen from
-	// `cursor` alone: a fresh subscriber (since == 0 — pipe-pane carries no history),
-	// or a reconnect asking for bytes BELOW the retained window, which are provably
-	// gone (#1845 follow-up). The second case is the post-recovery reconnect: the
-	// recovery discard drops the dead pane's ring and advances base past the cursor the
-	// client left on, so the replay it asked for cannot be served. Clamping it up to
-	// base silently would hand it neither the replay nor a repaint — leaving the
-	// pre-death screen frozen on-screen until some unrelated later output arrives. A
-	// ring eviction reaches this the same way, and wants the same repaint.
+	// A repaint is owed when a ring replay CANNOT rebuild this client's screen: a fresh
+	// subscriber (since == 0 — pipe-pane carries no history), or a reconnect asking for
+	// bytes BELOW the retained window, which are provably gone (#1845 follow-up). The
+	// second case is the post-recovery reconnect: the recovery discard drops the dead
+	// pane's ring and advances base past the cursor the client left on, so the replay it
+	// asked for cannot be served — without a repaint its pre-death screen stays frozen
+	// until some unrelated later output arrives. A ring eviction reaches this the same
+	// way, and wants the same repaint.
 	//
 	// Deliberately NOT keyed on "cursor was clamped at all": a `since` PAST head also
 	// clamps (down, to the live tail), but that client is not missing any byte the
 	// broker holds, and repainting it would add flicker to the documented
 	// clamp-to-tail path. Only a cursor below base means bytes are missing.
 	needRepaint := since == 0 || since < b.base
+	var cursor Seq
+	if needRepaint {
+		// Start at the live tail, NOT at base. The repaint below reconstructs the WHOLE
+		// current screen, so every retained ring byte [base, head) is ALREADY baked into
+		// it. Starting the replay at base would make NextEvent send the repaint and THEN
+		// replay those same bytes on top of it — duplicating output: a command/prompt
+		// appended twice, up to the entire retained ring on an eviction or post-recovery
+		// reconnect (#1872 P1). The tail cursor is exactly what a since == 0 fresh
+		// subscriber already gets; the two paths now share it. Bytes fed between this head
+		// read and the snapshot below land in both the snapshot and the replayed tail —
+		// the same tiny, bounded double-render a fresh subscribe already accepts — never
+		// dropped. The client learns this cursor from the handshake seq / OpHello, so its
+		// ?since stays consistent.
+		cursor = head
+	} else {
+		// A seamless reconnect: since is inside the retained window, so the client's
+		// screen is current up to `since` and replaying [since, head) brings it forward
+		// with no repaint flicker. A since past head clamps down to the live tail.
+		cursor = since
+		if cursor > head {
+			cursor = head
+		}
+	}
 	b.nextSubID++
 	sub := &ptySub{
 		br:         b,
