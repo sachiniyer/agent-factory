@@ -263,29 +263,48 @@ WEBTAB_SERVER_PID=$!
 
 # --- install the fake code-server (feat: VS Code tabs) ----------------------
 # Named "code-server" on PATH so the daemon DETECTS it exactly as it would a real
-# install. It honors the flags the daemon actually passes (--bind-addr, and the
-# positional worktree) and serves a deterministic marker, so the Playwright test
-# proves the daemon spawned it on loopback, rooted at the session's worktree, and
-# reverse-proxied it into the pane.
+# install. It honors the flags the daemon actually passes (--socket/--socket-mode,
+# and the positional worktree) and serves a deterministic marker, so the Playwright
+# test proves the daemon spawned it on ITS socket, rooted at the session's
+# worktree, and reverse-proxied it into the pane.
+#
+# THE SOCKET IS THE CONTRACT, and it is the one thing this fake must not get wrong.
+# The daemon reaches an editor by DIALING the unix socket it named on the child's
+# argv (daemon/vscode_socket.go): a fake that binds anything else is spawned,
+# detected, and never reachable — the proxy dials a socket nobody created and the
+# pane times out 30s later with no error anywhere, because startOne discards the
+# child's stdout/stderr. That is exactly how this fixture broke in #1895: it still
+# demanded the --bind-addr of the pre-#1873 TCP transport and exit(2)'d on a
+# socket-bound spawn, turning a green product into a red gate.
+#
+# So: keep vscodeArgs (daemon/vscode_server.go) and this parser in lockstep. That
+# is not left to review — daemon/vscode_selftest_fixture_test.go derives the
+# contract from vscodeArgs and fails in `go test`, in milliseconds, naming the
+# flag. (The exit(2) below cannot: its message goes to the discarded stderr, which
+# is precisely why #1895 surfaced only as a timeout.)
 echo ">>> installing the fake code-server on PATH ..."
 cat >/usr/local/bin/code-server <<EOF
 #!/usr/bin/env node
 const http = require("http");
-const args = process.argv.slice(2);
+const fs = require("fs");
 // Only these flags take a value; a bare word after a boolean flag is the folder.
-const valueFlags = new Set(["--bind-addr", "--auth", "--config"]);
-let addr = "";
+// --socket/--socket-mode MUST be listed: unlisted, their values parse as the
+// positional worktree and the folder assertion reads a socket path.
+const valueFlags = new Set(["--socket", "--socket-mode", "--auth", "--config"]);
+const args = process.argv.slice(2);
+let socketPath = "";
+let socketMode = "";
 let folder = "";
 for (let i = 0; i < args.length; i++) {
   if (valueFlags.has(args[i])) {
-    if (args[i] === "--bind-addr") { addr = args[i + 1]; }
+    if (args[i] === "--socket") { socketPath = args[i + 1]; }
+    if (args[i] === "--socket-mode") { socketMode = args[i + 1]; }
     i++;
     continue;
   }
   if (!args[i].startsWith("--")) { folder = args[i]; }
 }
-if (!addr) { console.error("fake code-server: no --bind-addr"); process.exit(2); }
-const [host, port] = [addr.slice(0, addr.lastIndexOf(":")), addr.slice(addr.lastIndexOf(":") + 1)];
+if (!socketPath) { console.error("fake code-server: no --socket"); process.exit(2); }
 const server = http.createServer((req, res) => {
   res.setHeader("content-type", "text/html");
   res.end(
@@ -295,8 +314,14 @@ const server = http.createServer((req, res) => {
 });
 // code-server upgrades WebSockets on every path; mirror that so the proxy's WS
 // relay is exercised rather than 404'd.
-server.on("upgrade", (req, socket) => { socket.destroy(); });
-server.listen(Number(port), host);
+server.on("upgrade", (req, sock) => { sock.destroy(); });
+// Bind the socket the daemon named. The daemon unlinked it first (startOne), so
+// there is nothing to clear here; the mode is applied AFTER listen because that is
+// when the file exists — the same order real code-server uses, and the reason the
+// daemon forces 0600 itself rather than trusting the child (vscode_socket.go).
+server.listen(socketPath, () => {
+  if (socketMode) { fs.chmodSync(socketPath, parseInt(socketMode, 8)); }
+});
 EOF
 chmod +x /usr/local/bin/code-server
 # A VITE-SHAPED app: a document under /app/ whose assets are referenced the three

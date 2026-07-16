@@ -2239,9 +2239,9 @@ test("#1815 review: a retained layout follows its tab when the roster changes wh
 test("vscode tab (feat): the ▾ menu creates a VS Code tab and the daemon serves it through the proxy", async () => {
   // End to end, with no seeded fixture: pick VS Code from the tab bar's kind menu,
   // and the daemon spawns a code-server (the FAKE one on PATH — no CI box has a
-  // real one) on a loopback port it picks, rooted at THIS session's worktree, and
-  // reverse-proxies it into the pane. Nothing has spawned before this click: the
-  // editor starts lazily on the first render.
+  // real one) on a 0600 unix socket it names, rooted at THIS session's worktree,
+  // and reverse-proxies it into the pane. Nothing has spawned before this click:
+  // the editor starts lazily on the first render.
   //
   // It runs near the end of the file on purpose: it leaves a tab on probe-a, and
   // the earlier tabs test asserts that session's exact tab count.
@@ -2296,8 +2296,8 @@ test("vscode tab (feat): the ▾ menu creates a VS Code tab and the daemon serve
 
   const frame = page.locator(".af-term-host .af-pane-host iframe.af-webframe");
   await expect(frame).toHaveCount(1, { timeout: 15_000 });
-  // A vscode tab is ALWAYS daemon-proxied: its code-server is loopback-only, so the
-  // proxy path is the only address a (possibly remote) browser can reach.
+  // A vscode tab is ALWAYS daemon-proxied: its code-server listens on a unix socket
+  // no browser can address, so the proxy path is the only route to it (#1873).
   await expect(frame).toHaveAttribute("src", /\/v1\/webtab\//);
   // It is an editor pane, not a terminal.
   await expect(page.locator(".af-term-host .af-pane-host .xterm")).toHaveCount(0);
