@@ -94,11 +94,40 @@ func taskRunReservationKey(repoID, taskID string) string {
 	return repoID + "\x00" + taskID
 }
 
+// holdsTaskRunSlot reports whether one of a task's sessions still occupies a
+// concurrency slot: it is pending (mid-create, working, or parked at a usage
+// limit), or it is Lost and the restore loop can still bring it back.
+//
+// The Lost half is the cap's one deliberate divergence from
+// session.ClassifyActivity, which calls Lost terminal. "Cannot leave this state
+// on its own" is the right question for `af sessions watch` and the wrong one
+// here: RestoreLostSessions revives Lost sessions without anyone asking, so a
+// freed slot lets a capped watcher admit a replacement that puts the task over
+// its cap the moment a retry lands. The verdict is asked of
+// canAutoRestoreLostSession, which lives beside that loop and IS that loop's own
+// gate — not re-derived here, so the two cannot drift apart.
+//
+// The two halves cover the restore cycle with no gap between them: a re-spawned
+// session is Running (pending, slot held) through the window where #1910's
+// confirm-alive settle decides whether it really came back, and if it dies it is
+// Lost again (restorable, slot held). The slot is continuously occupied from
+// create until the session is killed or archived.
+func holdsTaskRunSlot(inst *session.Instance) bool {
+	// Read the two axes directly rather than serializing the whole instance: this
+	// runs under m.mu, and ToInstanceData walks tabs/worktree/PR state per
+	// session. Snapshot keeps its serialize outside the lock for the same reason,
+	// and an AF home can hold hundreds of sessions.
+	if session.ClassifyInstanceActivity(inst) == session.ActivityPending {
+		return true
+	}
+	return canAutoRestoreLostSession(inst)
+}
+
 // countTaskRunsLocked reports how many sessions the task currently has in flight
 // in the repo: reserved creates that have not yet registered an instance, plus
-// live sessions ClassifyActivity calls pending. Callers hold m.mu and have
-// already called refreshLocked, so m.instances reflects what is on disk — which
-// is what makes the count survive a daemon restart with sessions still live.
+// live sessions still holding a slot. Callers hold m.mu and have already called
+// refreshLocked, so m.instances reflects what is on disk — which is what makes
+// the count survive a daemon restart with sessions still live.
 func (m *Manager) countTaskRunsLocked(repoID, taskID string) int {
 	inFlight := m.reservedTaskRuns[taskRunReservationKey(repoID, taskID)]
 	for key, inst := range m.instances {
@@ -110,11 +139,7 @@ func (m *Manager) countTaskRunsLocked(repoID, taskID string) int {
 			// sessions would let them starve this one.
 			continue
 		}
-		// Read the two axes directly rather than serializing the whole instance:
-		// this runs under m.mu, and ToInstanceData walks tabs/worktree/PR state per
-		// session. Snapshot keeps its serialize outside the lock for the same
-		// reason, and an AF home can hold hundreds of sessions.
-		if session.ClassifyInstanceActivity(inst) == session.ActivityPending {
+		if holdsTaskRunSlot(inst) {
 			inFlight++
 		}
 	}

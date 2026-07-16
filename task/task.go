@@ -64,7 +64,8 @@ type Task struct {
 	// at once (#1892). Zero — the default — means unlimited, preserving the
 	// historical behavior for every task written before this field existed; a
 	// cap is opt-in. Events over the cap are queued durably in FIFO order and
-	// delivered as slots free, never dropped.
+	// delivered as slots free rather than dropped on admission — subject to the
+	// event queue's own retention bounds, which every queued event shares.
 	//
 	// It applies only to a watch task that creates a session per event (see
 	// ValidateTrigger): a target_session task delivers into one session, so its
@@ -227,6 +228,10 @@ func AddTask(t Task) error {
 	if err := ValidateTaskID(t.ID); err != nil {
 		return err
 	}
+	// Normalize before validating so validation judges exactly what will be
+	// stored — a whitespace-only target session must not validate as "no target
+	// session" and then behave as one at delivery time (#1892).
+	t.normalizeTargetSession()
 	if err := t.ValidateTrigger(); err != nil {
 		return err
 	}
@@ -506,6 +511,9 @@ func (u TaskUpdate) apply(t Task) Task {
 	}
 	if u.TargetSession != nil {
 		t.TargetSession = *u.TargetSession
+		// Normalize on the way in so the cap rules below, ValidateTrigger, and
+		// deliverTaskPrompt all judge the same value (#1892).
+		t.normalizeTargetSession()
 	}
 	if u.MaxConcurrentRuns != nil {
 		t.MaxConcurrentRuns = *u.MaxConcurrentRuns
@@ -519,7 +527,55 @@ func (u TaskUpdate) apply(t Task) Task {
 	if u.Enabled != nil {
 		t.Enabled = *u.Enabled
 	}
+	// Drop a cap the merged record can no longer carry, unless this patch set it
+	// explicitly (#1892). A partial patch that only moves the trigger or the
+	// delivery mode — which is every non-CLI writer, since DiffTask sends just the
+	// changed fields and the TUI pane has no cap control — would otherwise leave a
+	// positive cap on a cron/target-session task and have ValidateTrigger reject
+	// the whole save. The rule lives here, in the shared merge, so the daemon,
+	// TUI, API, and CLI all get it; an explicitly-patched cap is left alone so a
+	// contradictory request still surfaces as an error instead of being silently
+	// dropped.
+	if u.MaxConcurrentRuns == nil {
+		t.clearInapplicableCap()
+	}
 	return t
+}
+
+// capApplies reports whether this task's shape can carry a concurrency cap: it
+// bounds sessions a watch task spawns per event, so it is meaningful only for a
+// watch task that creates them (#1892). Cron fires already coalesce on RunTask's
+// lock, and target-session deliveries already serialize into one session.
+//
+// The TargetSession test is trimmed to match deliverTaskPrompt's runtime
+// "create a session per event" condition — the two must agree on what an empty
+// target session is, or a cap could validate against one condition and be
+// bypassed at delivery by the other. normalizeTargetSession is what keeps them
+// in sync on the write path.
+func (t Task) capApplies() bool {
+	return t.IsWatch() && strings.TrimSpace(t.TargetSession) == ""
+}
+
+// clearInapplicableCap drops a stale positive cap from a task whose shape can no
+// longer carry one.
+func (t *Task) clearInapplicableCap() {
+	if t.MaxConcurrentRuns > 0 && !t.capApplies() {
+		t.MaxConcurrentRuns = 0
+	}
+}
+
+// normalizeTargetSession trims the stored target session so validation and the
+// runtime agree on what "no target session" means (#1892). ValidateTrigger and
+// capApplies test TrimSpace(TargetSession) == "", but deliverTaskPrompt tests the
+// RAW t.TargetSession == "": a whitespace-only value therefore validated as
+// "creates a session per event" (so a cap was accepted and stored) while delivery
+// took the target-session path and never passed the cap to CreateSession, quietly
+// ignoring it. Normalizing on the write path collapses the two conditions onto one
+// value rather than leaving two call-sites to agree forever. Whitespace-only was
+// never a usable session title anyway — it now means the same thing as empty:
+// create a session per run.
+func (t *Task) normalizeTargetSession() {
+	t.TargetSession = strings.TrimSpace(t.TargetSession)
 }
 
 // TaskEdit pairs a task ID with the field-level patch to apply to it. The TUI's

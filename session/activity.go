@@ -21,9 +21,16 @@ const (
 	// ActivityIdle: the agent went idle and awaits input — done working, ready for
 	// review. Releases a concurrency slot; `sessions watch` exits 0.
 	ActivityIdle
-	// ActivityTerminal: the session reached a state it cannot leave on its own
-	// (lost/dead/archived). Releases a concurrency slot; `sessions watch` exits
-	// non-zero with the reason.
+	// ActivityTerminal: the session reached a state it cannot leave ON ITS OWN
+	// (lost/dead/archived) — it needs a restore, a kill, or the daemon's restore
+	// loop. `sessions watch` exits non-zero with the reason.
+	//
+	// "Cannot leave on its own" is not the same as "gone for good", and consumers
+	// must not read it that way. A LiveLost session in particular is one the
+	// daemon's restore loop may be actively reviving, so the watch-task
+	// concurrency limit (#1892) keeps counting it — see
+	// daemon.canAutoRestoreLostSession, which composes this verdict with that
+	// question rather than changing it here.
 	ActivityTerminal
 )
 

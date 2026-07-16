@@ -816,3 +816,112 @@ func TestTaskUpdateMaxConcurrentRunsRoundTrip(t *testing.T) {
 	require.NotNil(t, diff.MaxConcurrentRuns)
 	assert.Equal(t, 3, *diff.MaxConcurrentRuns)
 }
+
+// TestUpdateTaskClearsStaleCapForNonCLIWriters is the regression for the
+// stale-cap rejection (#1892): the cap-clearing rule has to live in the SHARED
+// merge, because every non-CLI writer (TUI task pane, API, daemon) sends a
+// partial patch built by DiffTask — which carries only the fields that changed,
+// and never max_concurrent_runs, since those surfaces have no cap control. With
+// the rule CLI-side only, those clients could not switch a capped watch task to
+// cron or give it a target session at all: the merged record kept the positive
+// cap and ValidateTrigger rejected the whole save.
+func TestUpdateTaskClearsStaleCapForNonCLIWriters(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+
+	// Exactly the patch a TUI/API edit produces: trigger fields only.
+	seed := Task{ID: "cap1892e", Name: "capped", WatchCmd: "tail -f x", MaxConcurrentRuns: 3, Enabled: true}
+	require.NoError(t, AddTask(seed))
+
+	edited := seed
+	edited.CronExpr = "0 9 * * *"
+	edited.WatchCmd = ""
+	edited.Prompt = "run it"
+	patch := DiffTask(seed, edited)
+	require.Nil(t, patch.MaxConcurrentRuns, "a TUI/API edit never patches the cap; that is the point of this test")
+
+	merged, err := UpdateTask("cap1892e", patch)
+	require.NoError(t, err, "a non-CLI watch→cron edit must succeed, not be rejected for a cap the client never touched")
+	assert.Equal(t, "0 9 * * *", merged.CronExpr)
+	assert.Equal(t, 0, merged.MaxConcurrentRuns, "the now-inapplicable cap must be cleared by the shared merge")
+}
+
+// TestUpdateTaskClearsStaleCapOnDeliveryModeChange: the same rule for the other
+// direction a cap becomes invalid — a target session is added, so deliveries
+// serialize into one session and there is nothing to bound.
+func TestUpdateTaskClearsStaleCapOnDeliveryModeChange(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+
+	seed := Task{ID: "cap1892f", Name: "capped", WatchCmd: "tail -f x", MaxConcurrentRuns: 3, Enabled: true}
+	require.NoError(t, AddTask(seed))
+
+	target := "shared"
+	merged, err := UpdateTask("cap1892f", TaskUpdate{TargetSession: &target})
+	require.NoError(t, err, "adding a target session must not be rejected for a cap the client never touched")
+	assert.Equal(t, "shared", merged.TargetSession)
+	assert.Equal(t, 0, merged.MaxConcurrentRuns)
+}
+
+// TestUpdateTaskKeepsExplicitCapContradiction: an explicitly-patched cap is NOT
+// auto-cleared. Silently dropping a value the caller actually sent would hide
+// their mistake; the contradiction surfaces as a validation error instead.
+func TestUpdateTaskKeepsExplicitCapContradiction(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+
+	require.NoError(t, AddTask(Task{ID: "cap1892g", Name: "w", WatchCmd: "tail -f x", Enabled: true}))
+
+	cron := "0 9 * * *"
+	empty := ""
+	prompt := "p"
+	three := 3
+	_, err := UpdateTask("cap1892g", TaskUpdate{
+		CronExpr: &cron, WatchCmd: &empty, Prompt: &prompt, MaxConcurrentRuns: &three,
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not a watch task")
+}
+
+// TestUpdateTaskKeepsCapWhenStillApplicable: the clearing rule must not be
+// overzealous — a watch task that stays a watch task keeps its cap through an
+// unrelated edit, and reverting a target session to per-run is compatible with
+// one.
+func TestUpdateTaskKeepsCapWhenStillApplicable(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+
+	require.NoError(t, AddTask(Task{ID: "cap1892h", Name: "w", WatchCmd: "tail -f x", MaxConcurrentRuns: 3, Enabled: true}))
+
+	prompt := "new prompt"
+	merged, err := UpdateTask("cap1892h", TaskUpdate{Prompt: &prompt})
+	require.NoError(t, err)
+	assert.Equal(t, 3, merged.MaxConcurrentRuns, "an unrelated edit must not drop the cap")
+
+	empty := ""
+	merged, err = UpdateTask("cap1892h", TaskUpdate{TargetSession: &empty})
+	require.NoError(t, err)
+	assert.Equal(t, 3, merged.MaxConcurrentRuns, "reverting to a session per run keeps the cap applicable")
+}
+
+// TestTargetSessionNormalizedOnWrite is the regression for the whitespace bypass
+// (#1892): validation asked TrimSpace(TargetSession) == "" while deliverTaskPrompt
+// asks the raw TargetSession == "", so a whitespace-only target validated as
+// "creates a session per event" — storing a cap — and then took the
+// target-session path at delivery, silently ignoring that cap. Normalizing on the
+// write path collapses both questions onto one value.
+func TestTargetSessionNormalizedOnWrite(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+
+	require.NoError(t, AddTask(Task{
+		ID: "cap1892i", Name: "w", WatchCmd: "tail -f x",
+		TargetSession: "   ", MaxConcurrentRuns: 3, Enabled: true,
+	}))
+	got, err := GetTask("cap1892i")
+	require.NoError(t, err)
+	assert.Equal(t, "", got.TargetSession, "a whitespace-only target session must normalize to empty on write")
+	assert.Equal(t, 3, got.MaxConcurrentRuns, "with no real target session the cap is applicable and enforced")
+
+	// And through the update path.
+	ws := "  \t "
+	merged, err := UpdateTask("cap1892i", TaskUpdate{TargetSession: &ws})
+	require.NoError(t, err)
+	assert.Equal(t, "", merged.TargetSession)
+	assert.Equal(t, 3, merged.MaxConcurrentRuns, "normalizing to empty keeps the cap applicable rather than silently voiding it")
+}

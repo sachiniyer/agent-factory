@@ -1446,7 +1446,7 @@ af tasks add [flags]
 | Flag | Type | Description |
 |------|------|-------------|
 | `--cron` | `string` | Cron expression (exactly one of --cron / --watch-cmd) |
-| `--max-concurrent-runs` | `int` | Cap how many sessions this watch task may have in flight at once; excess events are queued in order, never dropped (0 = unlimited; --watch-cmd tasks without --target-session only) (default `0`) |
+| `--max-concurrent-runs` | `int` | Cap how many sessions this watch task may have in flight at once; excess events are queued in order instead of spawning runs, subject to the durable queue's retention limits (0 = unlimited; --watch-cmd tasks without --target-session only) (default `0`) |
 | `--name` | `string` | Task name (required) |
 | `--program` | `string` | Program to run (one of: claude, codex, aider, gemini, amp; defaults to config default) |
 | `--prompt` | `string` | Prompt to send (required for --cron tasks; --watch-cmd tasks default to the emitted line, with {{line}} substituted when present) |

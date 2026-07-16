@@ -363,15 +363,11 @@ var tasksUpdateCmd = &cobra.Command{
 			// holds when switching a watch task back to a schedule.
 			patch.CronExpr = strPtr(strings.TrimSpace(taskUpdateCronFlag))
 			patch.WatchCmd = strPtr("")
-			// A cron task cannot carry a concurrency cap (ValidateTrigger rejects
-			// it — overlapping cron fires already coalesce). Clear a stale one so
-			// switching a previously-capped watch task to cron doesn't fail
-			// validation, mirroring how the switch clears the old trigger. An
-			// explicit --max-concurrent-runs in the same command is honored below
-			// (and left to fail if the user genuinely asked for cron + a cap).
-			if !cmd.Flags().Changed("max-concurrent-runs") {
-				patch.MaxConcurrentRuns = intPtr(0)
-			}
+			// A stale concurrency cap on the resulting cron task is dropped by the
+			// shared merge (TaskUpdate.apply), not here — every client makes this
+			// edit, so the rule belongs where they all pass through. An explicit
+			// --max-concurrent-runs below is left alone and fails validation, which
+			// is the right answer for a contradictory request.
 		}
 		if taskUpdateWatchCmdFlag != "" {
 			patch.WatchCmd = strPtr(strings.TrimSpace(taskUpdateWatchCmdFlag))
@@ -382,14 +378,8 @@ var tasksUpdateCmd = &cobra.Command{
 		// "given as empty" instead of treating "" as unchanged.
 		if cmd.Flags().Changed("target-session") {
 			patch.TargetSession = strPtr(taskUpdateTargetSessionFlag)
-			// A non-empty target session serializes deliveries into one session, so
-			// a concurrency cap is meaningless there and ValidateTrigger rejects the
-			// pair. Clear a stale cap so adding a target session to a capped watch
-			// task doesn't fail validation. Reverting to per-run ("") is compatible
-			// with a cap, so it leaves one untouched.
-			if strings.TrimSpace(taskUpdateTargetSessionFlag) != "" && !cmd.Flags().Changed("max-concurrent-runs") {
-				patch.MaxConcurrentRuns = intPtr(0)
-			}
+			// As with the cron switch above, a cap the new delivery mode cannot
+			// carry is dropped by the shared merge rather than patched away here.
 		}
 		// --max-concurrent-runs 0 is a meaningful value (revert to unlimited), not
 		// "unchanged", so gate on the flag being passed rather than on its value —
