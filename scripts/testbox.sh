@@ -9,6 +9,7 @@
 #   scripts/testbox.sh playtest -d             detached; drive via `docker exec`
 #   scripts/testbox.sh selftest                run the TUI driver self-test (#1161)
 #   scripts/testbox.sh drive                   boot af via the driver + attach
+#   scripts/testbox.sh lifecycle [scenario]    clean-install / install->upgrade gate
 #   scripts/testbox.sh build                   (re)build the image only
 #
 # The container gets: its own tmux server, a throwaway AF home, pids/memory
@@ -198,6 +199,31 @@ drive)
     echo "testbox: tear down with: $ENGINE rm -f $PLAYTEST_NAME" >&2
     exec "$ENGINE" exec -it "$PLAYTEST_NAME" tmux attach -t drive
     ;;
+lifecycle)
+    # Clean-environment install + upgrade gate. Unlike every other target here,
+    # this one does not just run this tree's code: it installs REAL published
+    # releases into throwaway machines and upgrades across the version boundary
+    # — the seam #1921/#796 shipped through, which no single-version test can
+    # reach.
+    #
+    # Network is required (it downloads real release tarballs), so this is the
+    # one testbox target that is not hermetic. It is wired nightly rather than
+    # per-PR for that reason — see .github/workflows/lifecycle.yml.
+    #
+    # Runs in an EPHEMERAL uniquely-named container (#1171) so concurrent runs
+    # cannot clobber each other and nothing survives the gate.
+    build_image
+    fix_cache_perms
+    LIFECYCLE_NAME="af-lifecycle-$(_uniq)"
+    rc=0
+    "$ENGINE" run --rm \
+        "${RUN_FLAGS[@]}" \
+        --name "$LIFECYCLE_NAME" \
+        -e "GITHUB_TOKEN=${GITHUB_TOKEN:-}" \
+        -e "AF_LIFECYCLE_INJECT=${AF_LIFECYCLE_INJECT:-}" \
+        "$IMAGE" bash /src/scripts/container/lifecycle-entry.sh "$@" || rc=$?
+    exit "$rc"
+    ;;
 web-selftest)
     # Playwright web-driver-selftest (#1592 Phase 5 PR6): build the dedicated
     # Go+Node+Chromium image, then run the whole harness in ONE ephemeral
@@ -218,7 +244,7 @@ web-selftest)
         "$WEB_IMAGE" bash /src/scripts/container/web-selftest-entry.sh
     ;;
 *)
-    echo "testbox: unknown command '$cmd' (want: test | playtest | selftest | drive | web-selftest | build)" >&2
+    echo "testbox: unknown command '$cmd' (want: test | playtest | selftest | drive | lifecycle | web-selftest | build)" >&2
     exit 1
     ;;
 esac

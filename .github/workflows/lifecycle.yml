@@ -1,0 +1,157 @@
+name: Lifecycle (clean install + upgrade)
+
+# The clean-environment install/upgrade gate. Every other workflow builds THIS
+# TREE and tests it in isolation; this one installs a REAL previous release into
+# a throwaway machine, puts sessions on it, upgrades it the way a user does, and
+# asserts the machine is coherent afterwards.
+#
+# That version boundary is where the bugs users actually hit live — #1921 (a new
+# client against an old daemon), #796 (the daemon demoted from its unit to an
+# ad-hoc child) — and no single-version test can construct it.
+#
+# WHY NIGHTLY, NOT PER-PR:
+#   * it downloads real published release tarballs, so it needs network and is
+#     not hermetic — a GitHub outage or a rate limit would redden unrelated PRs;
+#   * it installs across a RELEASE boundary, so what it tests is "the last two
+#     releases + this tree", which changes when releases cut, not when a PR
+#     lands. A per-PR run would mostly re-test the same boundary all day.
+# Run it on demand from the Actions tab (workflow_dispatch) before anything that
+# touches upgrade, daemon lifecycle, or autostart.
+#
+# NOTE: this file is deliberately separate from pr.yml/build.yml so the macOS
+# matrix leg can be added here without touching the workflows other jobs share.
+
+on:
+  # Self-test: run on a PR ONLY when the gate's own definition changes, so the
+  # PR that touches it proves it still works. Unrelated PRs never pay the cost
+  # and can never be reddened by a GitHub-releases outage.
+  pull_request:
+    branches: [master]
+    paths:
+      - ".github/workflows/lifecycle.yml"
+      - "scripts/lifecycle.sh"
+      - "scripts/lifecycle-lib.sh"
+      - "scripts/container/lifecycle-entry.sh"
+      - "scripts/container/Dockerfile.test"
+      - "scripts/testbox.sh"
+  schedule:
+    # 07:00 UTC daily — after the nightly release cadence has settled.
+    - cron: "0 7 * * *"
+  workflow_dispatch:
+    inputs:
+      inject:
+        description: "Fault injection to prove the gate still detects a bad machine (e.g. skip-daemon-restart)"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: lifecycle-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # The leg that covers assertion #4. A GitHub runner is itself a clean,
+  # ephemeral machine with a real systemd user manager — which the test
+  # container does not have (PID 1 is docker-init, `af daemon install` fails
+  # outright there). So supervision is only really tested here.
+  native:
+    name: Lifecycle (${{ matrix.os }}, native)
+    strategy:
+      fail-fast: false
+      matrix:
+        # macOS leg: add `macos-latest` here once the macos-latest runner job
+        # lands (the ci-macos-runner work). Two helpers in
+        # scripts/lifecycle-lib.sh are Linux-only and must grow a Darwin branch
+        # first — lc_daemon_version reads /proc/<pid>/exe, and lc_unit_main_pid
+        # asks systemctl. On macOS the same scenario must cover the launchd
+        # path, which is where the real user's bugs live.
+        os: [ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: "1.25"
+
+      - name: Install harness dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends tmux jq curl
+
+      - name: Enable the systemd user manager
+        # `af daemon install` registers a user-level unit (systemctl --user), so
+        # the user manager has to be running and reachable. On a GitHub runner
+        # the user has no login session, so enable lingering and point
+        # XDG_RUNTIME_DIR at the resulting runtime dir.
+        #
+        # If this ever stops working the gate does NOT silently pass: the
+        # harness prints "SKIP assertion #4" and the verify step below fails the
+        # job, because a green run that quietly stopped testing supervision is
+        # exactly the lie this whole workflow exists to prevent.
+        run: |
+          sudo loginctl enable-linger "$USER"
+          echo "XDG_RUNTIME_DIR=/run/user/$(id -u)" >> "$GITHUB_ENV"
+          for i in $(seq 1 30); do
+            [ -d "/run/user/$(id -u)" ] && break
+            sleep 1
+          done
+          systemctl --user show-environment >/dev/null 2>&1 \
+            && echo "systemd user manager: reachable" \
+            || echo "::warning::systemd --user is not reachable; the supervision assertion will SKIP and this job will fail"
+
+      - name: Build af from this tree
+        run: |
+          go build -o "$RUNNER_TEMP/bin/af" .
+          "$RUNNER_TEMP/bin/af" version
+
+      - name: Run the lifecycle gate
+        env:
+          # The runner is ephemeral and has no real AF home, so it IS the
+          # throwaway machine this harness requires.
+          AF_LIFECYCLE_DISPOSABLE: "1"
+          AF_LIFECYCLE_AF_BIN: ${{ runner.temp }}/bin/af
+          AF_LIFECYCLE_WORKSPACE: ${{ runner.temp }}/af-lifecycle
+          AF_LIFECYCLE_INJECT: ${{ github.event.inputs.inject }}
+          # Raises the release-API rate limit; the API is public either way.
+          GITHUB_TOKEN: ${{ github.token }}
+        run: bash scripts/lifecycle.sh all 2>&1 | tee "$RUNNER_TEMP/lifecycle.log"
+
+      - name: Verify the supervision assertion actually ran
+        # The container leg legitimately skips assertion #4. This leg is the ONLY
+        # place it runs, so a SKIP here means the job proved nothing about the
+        # thing it exists for.
+        if: ${{ always() && github.event.inputs.inject == '' }}
+        run: |
+          if grep -q 'SKIP.*assertion #4' "$RUNNER_TEMP/lifecycle.log"; then
+            echo "::error::assertion #4 (unit stays the supervisor) was SKIPPED on the native leg — this job exists to cover it. Check the systemd user manager setup."
+            exit 1
+          fi
+          echo "assertion #4 ran on this leg."
+
+      - name: Upload the run log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lifecycle-${{ matrix.os }}-log
+          path: ${{ runner.temp }}/lifecycle.log
+          if-no-files-found: ignore
+
+  # The same gate a maintainer runs on a shared dev box (`make
+  # lifecycle-container`). It covers everything except supervision, and exists
+  # here so the container path itself cannot rot unnoticed.
+  container:
+    name: Lifecycle (container)
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v6
+      - name: Run the containerized lifecycle gate
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          AF_LIFECYCLE_INJECT: ${{ github.event.inputs.inject }}
+        run: make lifecycle-container

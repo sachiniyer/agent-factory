@@ -8,9 +8,12 @@
 FROM golang:1.25-bookworm
 
 # tmux + git are what the suite drives; procps provides pgrep for the
-# daemon's SIGTERM fallback path.
+# daemon's SIGTERM fallback path; zsh is exercised by the shell-suggest lanes
+# (#1990). curl + jq are the lifecycle gate's (scripts/lifecycle.sh): it
+# downloads real release tarballs and reads `af daemon status --json` /
+# `af doctor --json` rather than scraping text.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends tmux git procps zsh \
+    && apt-get install -y --no-install-recommends tmux git procps zsh curl jq \
     && rm -rf /var/lib/apt/lists/*
 
 # Give the container a stable git identity so no test or mock-repo commit

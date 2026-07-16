@@ -93,10 +93,33 @@ assertions. `make tui-driver-selftest` is the acceptance gate; `make
 tui-driver` drops you into a live driven session. See
 [tui-manual-testing.md](tui-manual-testing.md).
 
+## `make lifecycle-container` — clean install + upgrade
+
+```bash
+make lifecycle-container
+make lifecycle-container LIFECYCLE_SCENARIO=scenario-a   # narrow it
+```
+
+The one target here that does **not** just test this tree: it installs a REAL
+previous release into a throwaway machine, puts sessions on it, upgrades it the
+way a user does (`af upgrade` and the launch-time auto-update), and asserts the
+machine is coherent afterwards — daemon restarted onto the new binary, no
+client/daemon version skew, exactly one daemon, sessions survived, `af doctor`
+clean. That version boundary is where #1921 and #796 shipped, and no
+single-version test can construct it.
+
+Two things make it unlike the other targets: it needs **network** (it downloads
+published release tarballs), so it is wired **nightly** rather than per-PR; and
+it **cannot** cover the autostart-supervision assertion here, because there is no
+systemd in the container — that assertion is SKIPped loudly and covered by the
+CI runner leg. See [lifecycle-testing.md](lifecycle-testing.md).
+
 ## Known limitations
 
 - **No systemd inside** — autostart-unit flows (`af daemon install`) still
-  need CI or careful host testing.
+  need CI or careful host testing. It fails outright in the container
+  ("systemctl: executable file not found"), which is why the lifecycle gate
+  SKIPs its supervision assertion here and runs it on the CI runner instead.
 - **Network-dependent flows** (`gh`, pushing branches) need an explicitly
   injected token; the sandbox has none by default, which keeps external
   access opt-in and visible.
