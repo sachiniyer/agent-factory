@@ -583,8 +583,12 @@ func (m *home) swapInstanceFromSnapshot(d session.InstanceData) bool {
 	// ReplaceInstance re-points any open panes at the rebuilt instance, but
 	// the recreated session's tab SET may differ from the corpse's — capture
 	// the outgoing slot→identity list so the shared pane reconcile can close
-	// panes whose tab didn't come back and re-bind ones whose slot moved by
-	// stable id (#1088/#1886).
+	// panes whose tab didn't come back and re-bind ones whose slot moved (#1088).
+	//
+	// This is the REPLACED-session domain: the swap mints an entirely new session,
+	// so every tab id differs from the corpse's by construction. Matching on the
+	// id here would read every tab as missing and close every pane the swap was
+	// supposed to preserve, so the panes follow the equivalent slot by NAME.
 	var oldKeys []tabSlotKey
 	if old := m.store.GetInstanceByTitle(d.Title); old != nil {
 		oldKeys = paneTabKeys(old)
@@ -594,7 +598,7 @@ func (m *home) swapInstanceFromSnapshot(d session.InstanceData) bool {
 		m.store.AddInstance(inst)()
 	}
 	inst.SetAutoYes(m.autoYes)
-	if m.reconcilePanesForTabs(inst, oldKeys) {
+	if m.reconcilePanesForTabs(inst, oldKeys, replacedSessionTabs) {
 		m.relayout()
 	}
 	return true
@@ -656,7 +660,14 @@ func (m *home) updateInstanceFromSnapshot(inst *session.Instance, d session.Inst
 		}
 		if tabsChanged {
 			changed = true
-			if m.reconcilePanesForTabs(inst, oldKeys) {
+		}
+		// Re-bind the panes whenever the tab IDENTITY list moved — NOT merely when
+		// the reconcile reported a visible change. The two are not the same: an id
+		// adoption is deliberately silent, and a pane bound to an id that just left
+		// the roster must still close. Gating this on tabsChanged left panes on dead
+		// ids whenever the roster change didn't register as "visible" (#1886).
+		if !sameTabSlotKeys(oldKeys, paneTabKeys(inst)) {
+			if m.reconcilePanesForTabs(inst, oldKeys, sameSessionTabs) {
 				m.relayout()
 			}
 		}

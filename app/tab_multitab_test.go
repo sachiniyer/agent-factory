@@ -197,7 +197,7 @@ func TestReconcilePanes_FollowsRenamedTabByID(t *testing.T) {
 	// Instance.RenameTab / the daemon roster publish, #1904).
 	alpha.GetTabs()[2].Name = "editor"
 
-	require.False(t, h.reconcilePanesForTabs(alpha, oldKeys),
+	require.False(t, h.reconcilePanesForTabs(alpha, oldKeys, sameSessionTabs),
 		"a pure rename moves no pane slot, so nothing rebinds or closes")
 	require.Same(t, pane, h.store.FindOpenPane(alpha, 2),
 		"the pane must stay open on the SAME tab (id unchanged), now labelled editor (#1905)")
@@ -221,7 +221,7 @@ func TestReconcilePanes_ClosesOnCloseRecreateSameName(t *testing.T) {
 	// free name straight back — session/tab_names.go).
 	alpha.GetTabs()[2].ID = "id-imposter"
 
-	require.True(t, h.reconcilePanesForTabs(alpha, oldKeys),
+	require.True(t, h.reconcilePanesForTabs(alpha, oldKeys, sameSessionTabs),
 		"the pane's own tab id is gone, so the reconcile must act")
 	require.Equal(t, 0, h.store.NumOpenPanes(),
 		"the pane must CLOSE — never hijack onto the same-named imposter tab (#1886)")
@@ -244,7 +244,7 @@ func TestReconcilePanes_ReorderFollowsByID(t *testing.T) {
 	tabs[1].ID, tabs[1].Name, tabs[2].ID, tabs[2].Name =
 		tabs[2].ID, tabs[2].Name, tabs[1].ID, tabs[1].Name
 
-	require.True(t, h.reconcilePanesForTabs(alpha, oldKeys), "the pane's tab moved slots")
+	require.True(t, h.reconcilePanesForTabs(alpha, oldKeys, sameSessionTabs), "the pane's tab moved slots")
 	require.Same(t, pane, h.store.FindOpenPane(alpha, 2),
 		"the pane follows its own id (shell) to its new slot 2, not the neighbor now at slot 1")
 	require.Equal(t, "shell", alpha.GetTabs()[pane.Tab()].Name)
@@ -303,4 +303,200 @@ func TestEnterTabA_Esc_EnterTabB_RoutesAndRenders(t *testing.T) {
 	require.NotNil(t, w)
 	assert.True(t, w.HasLive(), "the pane renders tab B through its live attachment")
 	assert.Contains(t, bFake.Render(80, 24, false), "B", "tab B's grid renders the typed input")
+}
+
+// ----------------------------------------------------------------------------
+// Codex review findings on #1906 — the reconcile edges of the same bug classes.
+// ----------------------------------------------------------------------------
+
+// TestCloseTab_PaneFocusedClosePreservesTreeTab is codex finding 1: a
+// pane-focused close removes a tab the TREE is not on, so the tree must keep
+// pointing at its OWN tab. Closing tab 4 while the tree sits on tab 2 used to
+// slam the tree's active tab to idx-1 (tab 3), so every later tree-driven
+// preview/open targeted the wrong tab.
+func TestCloseTab_PaneFocusedClosePreservesTreeTab(t *testing.T) {
+	h, alpha := multiTabHome(t)
+	h.store.SetActiveTab(1) // tree on shell (slot 1)
+	h.menu.SetActiveTab(1)
+
+	pane := openTestPane(t, h, alpha, 1)
+	_, _ = h.handleTabJump(4) // pane jumps to shell-3 (slot 3); tree stays on slot 1
+	require.Equal(t, 3, pane.Tab())
+	require.Equal(t, 1, h.store.ActiveTab())
+
+	recordCloseTab(t, h)
+	_, _ = h.handleCloseTab()
+
+	require.Equal(t, 3, alpha.TabCount(), "the pane's tab (shell-3) was closed")
+	assert.Equal(t, 1, h.store.ActiveTab(),
+		"the tree was on shell (slot 1) and shell did not move — its active tab must be untouched")
+	assert.Equal(t, "shell", alpha.GetTabs()[h.store.ActiveTab()].Name,
+		"the tree still points at its OWN tab, resolved by id across the close")
+}
+
+// TestCloseTab_ClosingBelowTreeTabShiftsIt is the other half of finding 1: when
+// the closed tab sits BELOW the tree's active tab, every higher slot shifts down
+// and the tree's tab must follow the shift — still landing on the same tab.
+func TestCloseTab_ClosingBelowTreeTabShiftsIt(t *testing.T) {
+	h, alpha := multiTabHome(t)
+	h.store.SetActiveTab(3) // tree on shell-3 (slot 3)
+	h.menu.SetActiveTab(3)
+
+	pane := openTestPane(t, h, alpha, 3)
+	_, _ = h.handleTabJump(2) // pane jumps DOWN to shell (slot 1)
+	require.Equal(t, 1, pane.Tab())
+	require.Equal(t, 3, h.store.ActiveTab())
+
+	recordCloseTab(t, h)
+	_, _ = h.handleCloseTab() // closes shell (slot 1), below the tree's tab
+
+	assert.Equal(t, 2, h.store.ActiveTab(), "the tree's tab shifted down one slot with the close")
+	assert.Equal(t, "shell-3", alpha.GetTabs()[h.store.ActiveTab()].Name,
+		"the tree still shows the SAME tab it was on, at its new slot")
+}
+
+// TestCloseTab_ClosingTheTreesOwnTabFallsBackToNeighbor pins the original #930
+// behavior: when the tab that dies IS the tree's active tab, the tree lands on
+// the left neighbour.
+func TestCloseTab_ClosingTheTreesOwnTabFallsBackToNeighbor(t *testing.T) {
+	h, _ := multiTabHome(t)
+	h.focusRegion(layout.RegionTree)
+	h.store.SetActiveTab(2)
+	h.menu.SetActiveTab(2)
+
+	recordCloseTab(t, h)
+	_, _ = h.handleCloseTab()
+
+	assert.Equal(t, 1, h.store.ActiveTab(), "closing the tree's own tab lands on the left neighbour")
+}
+
+// TestPaneJump_PinSurvivesUnseededEpoch is codex finding 7: on a restored /
+// startup pane the user can press a number BEFORE any selectionChanged has run,
+// so lastSelectionKey is empty. Pinning against that unseeded epoch pinned 0, and
+// the jump's own trailing selectionChanged then read the unchanged cursor as a
+// move and bumped to 1 — staling the pin before the guard checked it and letting
+// the #1885 repaint back in. The jump must seed the epoch before pinning.
+func TestPaneJump_PinSurvivesUnseededEpoch(t *testing.T) {
+	h, alpha := multiTabHome(t)
+	h.store.SetActiveTab(1)
+	h.menu.SetActiveTab(1)
+	pane := openTestPane(t, h, alpha, 1)
+
+	// Simulate the startup / restored-pane window: no selectionChanged has primed
+	// the epoch yet.
+	h.lastSelectionKey = ""
+	h.selectionEpoch = 0
+	h.paneJumpIntent = map[int]uint64{}
+
+	_, _ = h.handleTabJump(4)
+
+	require.Equal(t, 3, pane.Tab(), "the jump commits")
+	assert.True(t, h.paneJumpIntentPinned(pane.ID()),
+		"the pin must still be current after the jump's own selectionChanged (seed before pinning)")
+	assert.Nil(t, h.panePreviewTxn,
+		"an unseeded epoch must not let the tree-cursor preview repaint the committed jump (#1885)")
+}
+
+// TestPaneJump_TreeTabChangeStalesThePin is codex finding 3: after a pane-focused
+// jump pins intent, the user returns focus to the tree and presses a number to
+// change the selected row's active tab. SyncCursorToActiveTab leaves the cursor
+// on the instance row, so the selection key looked unchanged unless it includes
+// store.ActiveTab() — and the stale pin then cancelled the very preview the user
+// asked for (the invariant-eats-the-gesture class).
+func TestPaneJump_TreeTabChangeStalesThePin(t *testing.T) {
+	h, alpha := multiTabHome(t)
+	h.store.SetActiveTab(1)
+	h.menu.SetActiveTab(1)
+	pane := openTestPane(t, h, alpha, 1)
+
+	_, _ = h.handleTabJump(4) // pane-focused: pins intent
+	require.True(t, h.paneJumpIntentPinned(pane.ID()))
+
+	// Back to the tree; a tree-focus number key retargets the row's ACTIVE TAB
+	// without necessarily moving the cursor row.
+	h.focusRegion(layout.RegionTree)
+	_, _ = h.handleTabJump(3)
+
+	require.Equal(t, 2, h.store.ActiveTab(), "the tree-focus jump retargets the active tab")
+	assert.False(t, h.paneJumpIntentPinned(pane.ID()),
+		"an active-tab change is a selection move: it must bump the epoch and stale the pin")
+}
+
+// TestSwapSameTitle_PreservesOpenPanes is codex finding 4 — a regression this
+// PR's id-keying introduced. A same-title kill/recreate swaps in an ENTIRELY NEW
+// session whose tabs carry freshly minted ids, so comparing the corpse's ids
+// against the replacement's reads every tab as missing and closes every pane the
+// swap exists to preserve. The swap is the REPLACED-session domain: panes follow
+// the equivalent slot by name (agent→agent), as they did before #1906.
+func TestSwapSameTitle_PreservesOpenPanes(t *testing.T) {
+	h := newTestHome(t)
+	stale := instanceWithFakeBackend(t, "dup")
+	stale.AddTabForTest("agent", session.TabKindAgent)
+	stale.AddTabForTest("shell", session.TabKindShell)
+	for i, tab := range stale.GetTabs() {
+		tab.ID = []string{"stale-agent", "stale-shell"}[i]
+	}
+	h.store.AddInstance(stale)
+	h.sidebar.SetSelectedInstance(0)
+	_ = h.selectionChanged()
+	resizeHome(h, 200, 40)
+
+	pane := openTestPane(t, h, stale, 1) // a pane on the corpse's shell tab
+	require.Equal(t, 1, h.store.NumOpenPanes())
+
+	// The recreated session: same title, same tab NAMES, brand-new ids.
+	recreated := instanceWithFakeBackend(t, "dup")
+	recreated.AddTabForTest("agent", session.TabKindAgent)
+	recreated.AddTabForTest("shell", session.TabKindShell)
+	for i, tab := range recreated.GetTabs() {
+		tab.ID = []string{"fresh-agent", "fresh-shell"}[i]
+	}
+	t.Cleanup(SetInstanceBuilderForTest(func(d session.InstanceData) (*session.Instance, error) {
+		return recreated, nil
+	}))
+
+	require.True(t, h.swapInstanceFromSnapshot(recreated.ToInstanceData()))
+
+	require.Equal(t, 1, h.store.NumOpenPanes(),
+		"a same-title swap must PRESERVE the open pane — the replacement's ids differ by construction")
+	assert.Same(t, pane, h.store.FindOpenPane(recreated, 1),
+		"the pane follows the equivalent slot (shell) on the replacement session")
+	assert.Same(t, recreated, pane.Instance(), "and is re-pointed at the live row")
+}
+
+// TestSnapshot_ClosesPaneWhenTabIDChanges is codex finding 2, driven through the
+// REAL production path (updateInstanceFromSnapshot), not the reconcile helper in
+// isolation. An out-of-band close+recreate reusing the freed name gives the roster
+// row a NEW id. The name-keyed reconcile called that "unchanged", so the pane
+// reconcile — gated on tabsChanged — never ran and the pane stayed bound to a dead
+// id, silently showing a different process (#1886).
+func TestSnapshot_ClosesPaneWhenTabIDChanges(t *testing.T) {
+	h := newTestHome(t)
+	// A genuinely STARTED instance (worktree + mock tmux): ReconcileTabsFromData
+	// no-ops on a fake-backend row, so only this harness reaches the real path.
+	inst := startedLocalInstance(t, "oob") // agent + shell, real minted ids
+	require.Equal(t, 2, inst.TabCount())
+	selectInstance(h, inst)
+	resizeHome(h, 200, 40)
+
+	pane := openTestPane(t, h, inst, 1) // pane on shell
+	require.Equal(t, 1, h.store.NumOpenPanes())
+	require.Same(t, pane, h.store.FindOpenPane(inst, 1))
+	oldShellID := inst.GetTabs()[1].ID
+	require.NotEmpty(t, oldShellID)
+
+	// The daemon's next snapshot: "shell" is back, but it is a DIFFERENT tab —
+	// another client closed the old one and created a new one that reused the name.
+	data := inst.ToInstanceData()
+	for i := range data.Tabs {
+		if data.Tabs[i].ID == oldShellID {
+			data.Tabs[i].ID = "id-shell-new"
+		}
+	}
+	h.updateInstanceFromSnapshot(inst, data)
+
+	require.Equal(t, "id-shell-new", inst.GetTabs()[1].ID,
+		"the roster now carries the recreated tab's new id")
+	assert.Equal(t, 0, h.store.NumOpenPanes(),
+		"the pane's tab id left the roster: it must CLOSE, never keep rendering the imposter tab (#1886)")
 }

@@ -335,6 +335,27 @@ type tabSlotKey struct {
 	name string
 }
 
+// tabIdentityDomain selects what "the same tab" means for one pane reconcile.
+// The two callers genuinely differ, and using the wrong one is a visible bug in
+// either direction.
+type tabIdentityDomain int
+
+const (
+	// sameSessionTabs: the instance is the SAME session whose tab set changed
+	// (the `w` kill, or a snapshot poll reconciling an out-of-band change). Tab
+	// ids are stable across that, so the id is the identity: a pane follows its
+	// own tab through a rename/reorder and closes when that id is truly gone —
+	// never rebinding onto a different tab that reused the name (#1886/#1905).
+	sameSessionTabs tabIdentityDomain = iota
+	// replacedSessionTabs: a same-title kill/recreate swapped in an ENTIRELY NEW
+	// session (swapInstanceFromSnapshot). Its tabs are freshly minted, so every id
+	// differs by construction and id-keying would close every pane. The user's
+	// panes should keep showing the equivalent slot of the replacement
+	// (agent→agent, shell→shell), which is exactly what the NAME expresses here —
+	// the pre-existing same-title pane-preservation behavior (#1088).
+	replacedSessionTabs
+)
+
 // paneTabKeys captures an instance's tab-slot identities before a tab-set
 // change, for reconcilePanesForTabs. The stable id is what the pane rebind
 // keys on; the name rides along only as the legacy fallback.
@@ -345,6 +366,22 @@ func paneTabKeys(instance *session.Instance) []tabSlotKey {
 		keys[i] = tabSlotKey{id: tab.ID, name: tab.Name}
 	}
 	return keys
+}
+
+// sameTabSlotKeys reports whether two slot→identity captures describe the same
+// roster. The snapshot path re-binds panes on this rather than on the reconcile's
+// "did anything visible change" flag: an id swap under a reused name is invisible
+// by that measure but is exactly the change a pane must follow (#1886).
+func sameTabSlotKeys(a, b []tabSlotKey) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // reconcilePanesForTabs re-binds the instance's open panes after its tab set
@@ -362,11 +399,15 @@ func paneTabKeys(instance *session.Instance) []tabSlotKey {
 // close/close+recreate closes it (its id is truly gone). A legacy id-less slot
 // (empty id) falls back to the name key so pre-#1738 rows still reconcile.
 //
+// domain selects whether the id or the name is the identity — see
+// tabIdentityDomain; a same-title session swap must use replacedSessionTabs or
+// every pane closes.
+//
 // Slots beyond the old real-tab list (the default-padded label slots of a young
 // instance) are left alone — ClampActiveTab keeps them in range. Reports whether
 // any pane closed or re-bound; callers relayout on true so the focus ring and
 // the §2.6 pane-count fitting stay consistent.
-func (m *home) reconcilePanesForTabs(instance *session.Instance, oldKeys []tabSlotKey) bool {
+func (m *home) reconcilePanesForTabs(instance *session.Instance, oldKeys []tabSlotKey, domain tabIdentityDomain) bool {
 	tabs := instance.GetTabs()
 	idxByID := make(map[string]int, len(tabs))
 	idxByName := make(map[string]int, len(tabs))
@@ -390,10 +431,11 @@ func (m *home) reconcilePanesForTabs(instance *session.Instance, oldKeys []tabSl
 			idx int
 			ok  bool
 		)
-		if key.id != "" {
-			idx, ok = idxByID[key.id]
-		} else {
+		switch {
+		case domain == replacedSessionTabs || key.id == "":
 			idx, ok = idxByName[key.name]
+		default:
+			idx, ok = idxByID[key.id]
 		}
 		switch {
 		case !ok:

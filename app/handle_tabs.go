@@ -106,6 +106,17 @@ func (m *home) handleCloseTab() (tea.Model, tea.Cmd) {
 	// Capture the slot→identity list before the drop: reconcilePanesForTabs maps
 	// the open panes' bindings across the change by stable tab id (#1088/#1886).
 	oldKeys := paneTabKeys(inst)
+	// Remember which tab the TREE is on, by identity. A pane-focused close can
+	// remove a tab that is NOT the tree's active tab, and the tree must keep
+	// pointing at its own tab across the shift (#1884 follow-up) — resolving it by
+	// id afterwards is what keeps the arithmetic from guessing.
+	treeActiveID := ""
+	treeIsSelected := inst == m.sidebar.GetSelectedInstance()
+	if treeIsSelected {
+		if a := m.store.ActiveTab(); a >= 0 && a < len(tabs) {
+			treeActiveID = tabs[a].ID
+		}
+	}
 
 	if err := closeTabThroughDaemon(inst.Title, m.repoID, tabName); err != nil {
 		return m, m.handleError(err)
@@ -122,15 +133,26 @@ func (m *home) handleCloseTab() (tea.Model, tea.Cmd) {
 	// leaves the workspace, higher-slot panes re-bind so they keep showing
 	// the same tab. Shared with the daemon-snapshot reconcile, which applies
 	// the identical semantics when a tab disappears out-of-band.
-	if m.reconcilePanesForTabs(inst, oldKeys) {
+	if m.reconcilePanesForTabs(inst, oldKeys, sameSessionTabs) {
 		m.relayout()
 	}
 
-	// Land the selection on the left/previous neighbor (idx >= 1, so idx-1 >= 0)
-	// when the closed tab was the selected instance's active tab. A pane-focused
-	// close of another instance's tab leaves the tree selection untouched.
-	if inst == m.sidebar.GetSelectedInstance() {
-		m.store.SetActiveTab(idx - 1)
+	// Re-point the tree at the tab it was already on, found by its id in the
+	// shrunk roster — so a pane-focused close of a DIFFERENT tab leaves the tree's
+	// tab alone (closing tab 3 must not move a tree sitting on tab 1), and a close
+	// below it still follows the shift. Only when the tree's own tab is the one
+	// that died does it fall back to the left/previous neighbour (#930 PR 4).
+	if treeIsSelected {
+		next := idx - 1
+		if treeActiveID != "" {
+			if at, ok := inst.TabIndexByID(treeActiveID); ok {
+				next = at
+			}
+		}
+		if next < 0 {
+			next = 0
+		}
+		m.store.SetActiveTab(next)
 		m.clampSelectionTab()
 		m.menu.SetActiveTab(m.store.ActiveTab())
 		m.sidebar.SyncCursorToActiveTab()
@@ -158,6 +180,14 @@ func (m *home) handleTabJump(oneBased int) (tea.Model, tea.Cmd) {
 		// (whose tree cursor still points at a different tab) and any background
 		// tick cannot repaint the pane back onto that tab (#1885). Mirrors the web
 		// #1862 layoutGeneration guard.
+		//
+		// Seed the epoch from the CURRENT selection first: on a restored/startup
+		// pane the user can press a number before any selectionChanged has run, so
+		// lastSelectionKey is still empty. Pinning against that unseeded epoch
+		// pinned 0, and the jump's own trailing selectionChanged then read the
+		// unchanged cursor as a move and bumped to 1 — staling the pin before the
+		// guard ever saw it, and letting the repaint back in.
+		m.bumpSelectionEpochIfMoved(m.sidebar.GetSelection())
 		m.pinPaneJumpIntent(p.ID())
 		// The pane's tab changed, so its live binding key changed — rebind it.
 		m.syncLiveTermPane()

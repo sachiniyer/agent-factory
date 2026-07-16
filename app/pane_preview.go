@@ -190,11 +190,16 @@ func (m *home) bumpSelectionEpochIfMoved(sel ui.SidebarItem) {
 	if inst := m.sidebar.GetSelectedInstance(); inst != nil {
 		title = inst.Title
 	}
-	// Identity of the selected row: section/header/instance/tab position plus the
-	// instance title, so an out-of-band instance reorder under a fixed cursor
-	// position still reads as a move.
-	key := fmt.Sprintf("%d/%t/%d/%t/%d/%s",
-		sel.Kind, sel.IsHeader, sel.ItemIndex, sel.IsTab, sel.TabIndex, title)
+	// Identity of the selection: the selected row (section/header/instance/tab
+	// position) plus the instance title, so an out-of-band instance reorder under
+	// a fixed cursor position still reads as a move — AND store.ActiveTab(), which
+	// is a selection change the CURSOR does not show. A tree-focus number key
+	// retargets the active tab while SyncCursorToActiveTab deliberately leaves the
+	// cursor on the instance row; without the active tab in the key that gesture
+	// looked like "nothing moved", so a stale pane pin kept cancelling the very
+	// preview the user just asked for (the invariant-eats-the-gesture class).
+	key := fmt.Sprintf("%d/%t/%d/%t/%d/%s/%d",
+		sel.Kind, sel.IsHeader, sel.ItemIndex, sel.IsTab, sel.TabIndex, title, m.store.ActiveTab())
 	if key == m.lastSelectionKey {
 		return
 	}
