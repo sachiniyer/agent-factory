@@ -17,10 +17,13 @@ export enum Op {
   /** server → client: one-shot fresh-subscriber repaint; rendered but NOT counted
    *  toward the replay cursor. */
   Repaint = 0x03,
-  /** server → client: the subscription's starting seq as a big-endian uint64, sent
-   *  as the FIRST frame so a browser — which cannot read the X-Af-Stream-Seq
-   *  handshake header — learns its absolute cursor to seed `?since` replay
-   *  (#1592 Phase 5 PR1, design §4.3). NOT counted toward the replay cursor. */
+  /** server → client: the subscription's authoritative cursor as a big-endian
+   *  uint64, adopted verbatim. Sent as the FIRST frame so a browser — which cannot
+   *  read the X-Af-Stream-Seq handshake header — learns its absolute cursor to seed
+   *  `?since` replay (#1592 Phase 5 PR1, design §4.3), and RE-sent whenever the
+   *  server moves that cursor over bytes it no longer holds (a ring eviction or a
+   *  recovery discard) — a jump a client counting received bytes cannot otherwise
+   *  see. NOT counted toward the replay cursor. */
   Hello = 0x04,
 }
 

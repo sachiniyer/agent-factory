@@ -535,9 +535,21 @@ func TestPTYBrokerEvictionFastForwards(t *testing.T) {
 		t.Fatalf("subscribe: %v", err)
 	}
 	ch.emit(t, []byte("abcdefgh"))
-	// The ring retains only the last 4 bytes; the cursor fast-forwards past the
-	// lost gap to the oldest retained byte rather than replaying evicted data.
+	// The eviction fast-forwarded this cursor over the lost gap — a jump the SERVER
+	// made, which the client (counting the bytes it received) cannot see. So the gap is
+	// announced as a cursor re-seed BEFORE the retained tail, rather than silently
+	// (#1845 follow-up): a client that kept counting from its stale cursor would
+	// reconnect with a ?since below base and be re-sent bytes it already rendered.
 	ev, err := nextWithin(t, b, 2*time.Second)
+	if err != nil {
+		t.Fatalf("NextEvent (want the cursor re-seed): %v", err)
+	}
+	if ev.Kind != PTYCursor || ev.Seq != 4 {
+		t.Fatalf("event = %+v, want PTYCursor Seq=4 (the oldest retained byte)", ev)
+	}
+	// Then the retained tail: the cursor resumes at the oldest retained byte rather
+	// than replaying evicted data.
+	ev, err = nextWithin(t, b, 2*time.Second)
 	if err != nil {
 		t.Fatalf("NextEvent: %v", err)
 	}

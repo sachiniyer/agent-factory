@@ -31,16 +31,25 @@ const (
 	// is not part of the shared ring's monotonic seq, so counting it would desync the
 	// ?since arithmetic.
 	OpRepaint Opcode = 0x03
-	// OpHello (server → client) is the FIRST frame on every new subscription: an
-	// 8-byte big-endian uint64 carrying the subscription's starting seq. It delivers
-	// in-band the same value the X-Af-Stream-Seq handshake header carries, because a
-	// browser WebSocket cannot read 101-handshake response headers and so cannot
-	// otherwise learn its absolute cursor to seed ?since replay (#1592 Phase 5 PR1,
-	// design §4.3). It carries no PTY bytes and is NOT counted toward the replay
-	// cursor. Strictly additive: appended after OpRepaint, existing ops unchanged.
-	// Stream consumers that don't handle it (the TUI/apiclient path) ignore it — the
-	// opcode decodes cleanly, so ReadMessage never errors and their frame switch
-	// simply skips it (unknown-op tolerance without any client change).
+	// OpHello (server → client) carries the subscription's AUTHORITATIVE output
+	// cursor: an 8-byte big-endian uint64 the client adopts verbatim as its replay
+	// cursor. It is the FIRST frame on every new subscription, delivering in-band the
+	// same value the X-Af-Stream-Seq handshake header carries, because a browser
+	// WebSocket cannot read 101-handshake response headers and so cannot otherwise
+	// learn its absolute cursor to seed ?since replay (#1592 Phase 5 PR1, design
+	// §4.3).
+	//
+	// The server ALSO re-sends it mid-stream whenever it moves that cursor
+	// non-contiguously — a ring eviction or the #1840 recovery discard fast-forwarding
+	// the subscriber over bytes that no longer exist (session.PTYCursor). A client
+	// derives its cursor as start + bytes-received, which cannot see a server-side
+	// jump; left unannounced, its next reconnect asks for a ?since below the broker's
+	// base, gets clamped back up, and is re-sent bytes it already rendered (duplicated
+	// output). So a client MUST treat every hello as "your cursor is now exactly this",
+	// not as a one-shot greeting.
+	//
+	// It carries no PTY bytes and is NOT itself counted toward the replay cursor.
+	// Strictly additive: appended after OpRepaint, existing ops unchanged.
 	OpHello Opcode = 0x04
 )
 

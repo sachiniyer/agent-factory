@@ -220,10 +220,20 @@ const (
 	// subscriber, mapped to an OpRepaint frame — rendered like output but NOT
 	// counted toward the client's replay cursor (it is not part of the ring seq).
 	PTYRepaint
+	// PTYCursor carries this subscription's authoritative cursor (Seq) after the
+	// SERVER moved it non-contiguously — a ring eviction, or the #1840 recovery
+	// discard, fast-forwarded the subscriber over bytes that no longer exist. A
+	// client derives its own replay cursor as start + bytes-received, which silently
+	// desyncs across such a jump: it would then reconnect with a ?since BELOW the
+	// broker's base, get clamped back up, and be re-sent bytes it already rendered
+	// (duplicated output). Mapped to an OpHello frame — the same in-band cursor seed
+	// the subscription opens with — so the client re-seeds instead of counting on.
+	// Carries no PTY bytes and is not itself part of the ring seq.
+	PTYCursor
 )
 
-// PTYEvent is one event delivered to a subscriber: either output bytes or the
-// authoritative resize echo, selected by Kind.
+// PTYEvent is one event delivered to a subscriber: output bytes, the authoritative
+// resize echo, a screen repaint, or a cursor re-seed, selected by Kind.
 type PTYEvent struct {
 	Kind PTYEventKind
 	// Data is the verbatim PTY output, valid only when Kind == PTYData.
@@ -231,4 +241,7 @@ type PTYEvent struct {
 	// Rows/Cols are the authoritative size, valid only when Kind == PTYResize.
 	Rows uint16
 	Cols uint16
+	// Seq is the subscription's authoritative output cursor, valid only when
+	// Kind == PTYCursor.
+	Seq Seq
 }

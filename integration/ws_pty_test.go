@@ -164,15 +164,21 @@ func TestWSPTYSessionKillEmitsExit(t *testing.T) {
 // wsClient is a test subscriber: a coder/websocket connection with a read pump
 // accumulating PTY_OUT bytes and resize echoes.
 type wsClient struct {
-	conn    *websocket.Conn
-	baseSeq uint64
-	ctx     context.Context
-	cancel  context.CancelFunc
+	conn   *websocket.Conn
+	ctx    context.Context
+	cancel context.CancelFunc
 
 	mu      sync.Mutex
 	out     []byte
 	resizes []agentproto.ResizeMessage
 	exited  bool
+	// cursor is the absolute replay cursor, tracked the way a real client tracks it
+	// (ui/termpane, web/src/terminal.ts): seeded from the handshake seq, ADOPTED from
+	// every HELLO frame, and advanced by each PTY_OUT byte. Deliberately NOT
+	// handshake+len(out): the server re-seeds mid-stream when it moves the cursor over
+	// bytes it discarded, and a client that ignored that would reconnect on a stale
+	// ?since and be re-sent bytes it already rendered (the #1845 follow-up).
+	cursor uint64
 }
 
 // dialWS opens a subscriber and starts its read pump.
@@ -180,7 +186,7 @@ func (h *harness) dialWS(t *testing.T, path string) *wsClient {
 	t.Helper()
 	conn, base := h.dialWSConn(t, path)
 	ctx, cancel := context.WithCancel(context.Background())
-	c := &wsClient{conn: conn, baseSeq: base, ctx: ctx, cancel: cancel}
+	c := &wsClient{conn: conn, cursor: base, ctx: ctx, cancel: cancel}
 	go c.readPump()
 	return c
 }
@@ -191,7 +197,7 @@ func (h *harness) dialWSRaw(t *testing.T, path string) *wsClient {
 	t.Helper()
 	conn, base := h.dialWSConn(t, path)
 	ctx, cancel := context.WithCancel(context.Background())
-	return &wsClient{conn: conn, baseSeq: base, ctx: ctx, cancel: cancel}
+	return &wsClient{conn: conn, cursor: base, ctx: ctx, cancel: cancel}
 }
 
 func (h *harness) dialWSConn(t *testing.T, path string) (*websocket.Conn, uint64) {
@@ -218,8 +224,15 @@ func (c *wsClient) readPump() {
 		}
 		c.mu.Lock()
 		if msg.Binary {
-			if msg.Frame.Op == agentproto.OpPTYOut {
+			switch msg.Frame.Op {
+			case agentproto.OpPTYOut:
 				c.out = append(c.out, msg.Frame.Data...)
+				c.cursor += uint64(len(msg.Frame.Data))
+			case agentproto.OpHello:
+				// The server's authoritative cursor — the opening seed, or a mid-stream
+				// re-seed announcing that it moved us over bytes it discarded. Adopt it
+				// verbatim; our own byte count cannot see that jump.
+				c.cursor = msg.Frame.Seq
 			}
 		} else if typ, _ := agentproto.MessageTypeOf(msg.Text); typ == agentproto.MsgResize {
 			var rm agentproto.ResizeMessage
@@ -265,12 +278,13 @@ func (c *wsClient) sawExit() bool {
 	return c.exited
 }
 
-// sinceCursor is the absolute seq this client has consumed: its handshake base
-// seq plus every output byte it has received.
+// sinceCursor is the absolute seq this client has consumed — what it would send as
+// ?since on reconnect. See wsClient.cursor for why it is tracked rather than derived
+// from len(out).
 func (c *wsClient) sinceCursor() uint64 {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return c.baseSeq + uint64(len(c.out))
+	return c.cursor
 }
 
 func (c *wsClient) lastResize() (agentproto.ResizeMessage, bool) {
