@@ -318,6 +318,61 @@ func RestartAutostartUnit() error {
 	}
 }
 
+// PauseAutostartUnit stops the daemon autostart unit — `systemctl --user stop`
+// on Linux, `launchctl unload` on macOS — WITHOUT uninstalling it, so the
+// service manager cannot (re)launch the daemon until ResumeAutostartUnit.
+// Stopping the unit also stops the supervised daemon itself. `af reset` wraps
+// its wipe in this pair: the unit relaunches a daemon that exits uncleanly,
+// and a daemon relaunched mid-wipe restores sessions from the very records
+// the wipe is deleting, ending up holding ghost instances with no storage
+// backing.
+func PauseAutostartUnit() error {
+	switch autostartGOOS {
+	case "linux":
+		if out, err := autostartUnitCommand("systemctl", "--user", "stop", autostartUnitName); err != nil {
+			return fmt.Errorf("systemctl --user stop %s failed: %w\n%s", autostartUnitName, err, strings.TrimSpace(string(out)))
+		}
+		return nil
+	case "darwin":
+		dir, err := autostartLaunchAgentsDir()
+		if err != nil {
+			return fmt.Errorf("failed to resolve LaunchAgents directory: %w", err)
+		}
+		plistPath := filepath.Join(dir, autostartLaunchdLabel+".plist")
+		if out, err := autostartUnitCommand("launchctl", "unload", plistPath); err != nil {
+			return fmt.Errorf("launchctl unload %s failed: %w\n%s", plistPath, err, strings.TrimSpace(string(out)))
+		}
+		return nil
+	default:
+		return fmt.Errorf("daemon autostart is not supported on %s", autostartGOOS)
+	}
+}
+
+// ResumeAutostartUnit re-arms the unit PauseAutostartUnit stopped — `systemctl
+// --user start` on Linux, `launchctl load` on macOS — which also starts the
+// daemon again (the launchd agent is RunAtLoad).
+func ResumeAutostartUnit() error {
+	switch autostartGOOS {
+	case "linux":
+		if out, err := autostartUnitCommand("systemctl", "--user", "start", autostartUnitName); err != nil {
+			return fmt.Errorf("systemctl --user start %s failed: %w\n%s", autostartUnitName, err, strings.TrimSpace(string(out)))
+		}
+		return nil
+	case "darwin":
+		dir, err := autostartLaunchAgentsDir()
+		if err != nil {
+			return fmt.Errorf("failed to resolve LaunchAgents directory: %w", err)
+		}
+		plistPath := filepath.Join(dir, autostartLaunchdLabel+".plist")
+		if out, err := autostartUnitCommand("launchctl", "load", plistPath); err != nil {
+			return fmt.Errorf("launchctl load %s failed: %w\n%s", plistPath, err, strings.TrimSpace(string(out)))
+		}
+		return nil
+	default:
+		return fmt.Errorf("daemon autostart is not supported on %s", autostartGOOS)
+	}
+}
+
 // UninstallAutostart removes the daemon autostart unit installed by
 // InstallAutostart. The daemon itself keeps running until it exits or is
 // stopped; it just no longer restarts at login. Returns the path of the

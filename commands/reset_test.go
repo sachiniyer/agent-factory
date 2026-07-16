@@ -2,15 +2,19 @@ package commands
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/task"
+
+	"github.com/spf13/cobra"
 )
 
 func boolPtr(b bool) *bool { return &b }
@@ -514,6 +518,140 @@ func TestFactoryReset_ResilientPartialFailure(t *testing.T) {
 	}
 	if _, err := executeFactoryReset(plan2); err != nil {
 		t.Fatalf("re-run should complete cleanly, got: %v", err)
+	}
+}
+
+// stubResetDaemonHandling replaces runReset's daemon/tmux/autostart touchpoints
+// with recorders, restoring the production values on cleanup. It returns the
+// recorded event list. The resume recorder also captures whether the wipe had
+// already removed the seeded state file, so tests can pin the ordering
+// "resume runs only after the wipe" — the whole point of pausing.
+func stubResetDaemonHandling(t *testing.T, home string, installed bool, pauseErr error) *[]string {
+	t.Helper()
+	prevInstalled := autostartInstalledFn
+	prevPause := pauseAutostartUnitFn
+	prevResume := resumeAutostartUnitFn
+	prevStop := stopDaemonFn
+	prevTmux := cleanupTmuxSessionsFn
+	t.Cleanup(func() {
+		autostartInstalledFn = prevInstalled
+		pauseAutostartUnitFn = prevPause
+		resumeAutostartUnitFn = prevResume
+		stopDaemonFn = prevStop
+		cleanupTmuxSessionsFn = prevTmux
+	})
+
+	var events []string
+	stateFile := filepath.Join(home, config.StateFileName)
+	wiped := func() string {
+		if _, err := os.Stat(stateFile); os.IsNotExist(err) {
+			return "wiped"
+		}
+		return "unwiped"
+	}
+	autostartInstalledFn = func() bool { return installed }
+	pauseAutostartUnitFn = func() error {
+		events = append(events, "pause:"+wiped())
+		return pauseErr
+	}
+	resumeAutostartUnitFn = func() error {
+		events = append(events, "resume:"+wiped())
+		return nil
+	}
+	stopDaemonFn = func() (bool, error) {
+		events = append(events, "stop:"+wiped())
+		return false, nil
+	}
+	cleanupTmuxSessionsFn = func() error {
+		events = append(events, "tmux:"+wiped())
+		return nil
+	}
+	return &events
+}
+
+// runResetForTest runs runReset with the WIPE prompt force-bypassed against a
+// throwaway cobra command, returning its combined output.
+func runResetForTest(t *testing.T) string {
+	t.Helper()
+	prevForce := resetForceFlag
+	t.Cleanup(func() { resetForceFlag = prevForce })
+	resetForceFlag = true
+
+	var out strings.Builder
+	cmd := &cobra.Command{}
+	cmd.SetOut(&out)
+	if err := runReset(cmd, nil); err != nil {
+		t.Fatalf("runReset: %v\noutput:\n%s", err, out.String())
+	}
+	return out.String()
+}
+
+// TestFactoryReset_PausesAutostartAroundWipe pins the fix for the reset/
+// autostart race: the service manager relaunches a daemon that exits uncleanly,
+// and a daemon relaunched mid-wipe restores sessions from the very records the
+// wipe is deleting, ending up with ghost in-memory instances that have no
+// storage backing. The unit must be paused BEFORE the daemon stop and resumed
+// only AFTER the wipe has finished.
+func TestFactoryReset_PausesAutostartAroundWipe(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	t.Chdir(t.TempDir())
+	writeFile(t, filepath.Join(home, config.StateFileName), `{"schema_version":1}`)
+
+	events := stubResetDaemonHandling(t, home, true, nil)
+	out := runResetForTest(t)
+
+	want := []string{"pause:unwiped", "stop:unwiped", "tmux:unwiped", "resume:wiped"}
+	if !reflect.DeepEqual(*events, want) {
+		t.Errorf("daemon handling order = %v, want %v", *events, want)
+	}
+	// The unit stop already took the supervised daemon down, so the "no managed
+	// daemon" hint (with its pkill suggestion) would be noise here.
+	if strings.Contains(out, "No managed daemon was stopped") {
+		t.Errorf("paused-unit reset must not print the no-managed-daemon hint, got:\n%s", out)
+	}
+}
+
+func TestFactoryReset_NoAutostartUnitInstalled(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	t.Chdir(t.TempDir())
+	writeFile(t, filepath.Join(home, config.StateFileName), `{"schema_version":1}`)
+
+	events := stubResetDaemonHandling(t, home, false, nil)
+	out := runResetForTest(t)
+
+	want := []string{"stop:unwiped", "tmux:unwiped"}
+	if !reflect.DeepEqual(*events, want) {
+		t.Errorf("daemon handling order = %v, want %v", *events, want)
+	}
+	if !strings.Contains(out, "No managed daemon was stopped") {
+		t.Errorf("without a unit, a no-op stop must keep the no-managed-daemon hint, got:\n%s", out)
+	}
+}
+
+// A pause failure must not abort the reset (the wipe is the user's explicit,
+// confirmed intent), must warn, and must not attempt a resume of a unit that
+// was never paused.
+func TestFactoryReset_PauseFailureWarnsAndWipes(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	t.Chdir(t.TempDir())
+	stateFile := filepath.Join(home, config.StateFileName)
+	writeFile(t, stateFile, `{"schema_version":1}`)
+
+	events := stubResetDaemonHandling(t, home, true, errors.New("launchctl went sideways"))
+	out := runResetForTest(t)
+
+	want := []string{"pause:unwiped", "stop:unwiped", "tmux:unwiped"}
+	if !reflect.DeepEqual(*events, want) {
+		t.Errorf("daemon handling order = %v, want %v", *events, want)
+	}
+	if !strings.Contains(out, "launchctl went sideways") {
+		t.Errorf("pause failure must be surfaced as a warning, got:\n%s", out)
+	}
+	if _, err := os.Stat(stateFile); !os.IsNotExist(err) {
+		t.Errorf("wipe must proceed despite a pause failure; %s still exists", stateFile)
 	}
 }
 
