@@ -211,3 +211,51 @@ func TestRestoreLostSessions_SurvivedSettleThenDied_StartsFreshEpisode(t *testin
 		t.Fatalf("recover calls = %d, want 2: a fresh loss episode must attempt a restore, not back off", got)
 	}
 }
+
+// TestRefreshInstanceStatus_TombstonedAfterTeardown_StillFinishesTheKill is
+// review finding (5): the promise of an automatic retry has to be one the code
+// keeps.
+//
+// When the record delete loses a bounded race for the instances lock, the kill
+// returns an error saying it "will be retried automatically" — but Instance.Kill
+// has already set started=false, and refreshInstanceStatus returned at its
+// !Started() check BEFORE it looked for the tombstone. So finishUserKill never
+// ran, the tombstone sat unprocessed for the daemon's whole life, and the session
+// stayed on screen: the #1917 symptom, reached by a new route.
+//
+// This survived the first round because the DISK record still says started=true
+// (the tombstone is written before teardown), so a daemon RESTART reloaded it and
+// finished the kill — which is exactly the "only a restart can reap it" behavior
+// this PR exists to remove.
+//
+// PRE-FIX BEHAVIOR THIS REPRODUCES: the record is never deleted (finishUserKill
+// is unreachable for a torn-down instance).
+func TestRefreshInstanceStatus_TombstonedAfterTeardown_StillFinishesTheKill(t *testing.T) {
+	backend := &raceBackend{}
+	manager, repoID, inst := installRaceBackend(t, backend, "stranded")
+
+	// The exact post-teardown state a lock-timed-out kill leaves behind: the
+	// teardown ran (started=false) and the kill intent is durable.
+	if err := manager.persistKillTombstone(repoID, inst, nil); err != nil {
+		t.Fatalf("persistKillTombstone: %v", err)
+	}
+	inst.SetStartedForTest(false)
+	if rec := recordFor(t, repoID, "stranded"); rec == nil || !rec.UserKilled {
+		t.Fatal("setup: the record must carry a durable tombstone")
+	}
+
+	// One poll, with the contention now gone.
+	manager.refreshInstanceStatus(repoID, inst)
+
+	if rec := recordFor(t, repoID, "stranded"); rec != nil {
+		t.Fatal("the poll never finished the tombstoned kill, so the session stays on screen " +
+			"undeletable until the daemon restarts — the very outcome this PR removes, and the " +
+			"error told the user it would be retried automatically (#1917 review)")
+	}
+	manager.mu.Lock()
+	_, tracked := manager.instances[daemonInstanceKey(repoID, "stranded")]
+	manager.mu.Unlock()
+	if tracked {
+		t.Fatal("the finished kill left the instance tracked in the manager")
+	}
+}

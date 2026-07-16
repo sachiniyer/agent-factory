@@ -35,7 +35,7 @@ func TestTmuxSnapshotRepaintCursorRealTmux(t *testing.T) {
 	if err := ts.Start(t.TempDir()); err != nil {
 		t.Fatalf("start tmux session: %v", err)
 	}
-	t.Cleanup(func() { _ = ts.Close() })
+	t.Cleanup(func() { _, _ = ts.Close() })
 
 	// Narrow the pane so a 25-char line wraps across two physical rows.
 	const paneW, paneH = 20, 8

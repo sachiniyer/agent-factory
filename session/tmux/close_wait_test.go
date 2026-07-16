@@ -63,7 +63,10 @@ func TestCloseAndWaitForPaneExit_QueriesPaneBeforeKill(t *testing.T) {
 	session := newTmuxSession(toTmuxName("close-wait", ""), "claude", NewMockPtyFactory(t), cmdExec)
 
 	start := time.Now()
-	require.NoError(t, session.CloseAndWaitForPaneExit())
+	state, err := session.CloseAndWaitForPaneExit()
+	require.NoError(t, err)
+	require.Equal(t, PaneStateKnown, state,
+		"tmux answered every command, so the pane's fate is established")
 	require.Less(t, time.Since(start), time.Second,
 		"wait on an already-dead agent process must return promptly")
 
@@ -91,7 +94,10 @@ func TestCloseAndWaitForPaneExit_SessionGone(t *testing.T) {
 	session := newTmuxSession(toTmuxName("close-wait-gone", ""), "claude", NewMockPtyFactory(t), cmdExec)
 
 	start := time.Now()
-	require.NoError(t, session.CloseAndWaitForPaneExit())
+	state, err := session.CloseAndWaitForPaneExit()
+	require.NoError(t, err)
+	require.Equal(t, PaneStateKnown, state,
+		"tmux answered every command, so the pane's fate is established")
 	require.Less(t, time.Since(start), time.Second)
 	require.True(t, killed, "kill-session must still run when the pane PID is unqueryable")
 }

@@ -52,7 +52,10 @@ func (t *TmuxSession) Start(workDir string) error {
 			// ever sees it — name the likely cause and the exact command so
 			// the user isn't left with a bare timeout (#1116, #1131).
 			timeoutErr := fmt.Errorf("timed out waiting for tmux session %s; the pane program may have exited immediately after launch — check that it runs and accepts its flags (program: %q)", t.sanitizedName, t.programCmd())
-			if cleanupErr := t.Close(); cleanupErr != nil {
+			// Pane state deliberately ignored: this is the cleanup of a session
+			// that never came up, and Start's failure path touches no worktree —
+			// nothing downstream is destructive, so an unknown state costs nothing.
+			if _, cleanupErr := t.Close(); cleanupErr != nil {
 				timeoutErr = fmt.Errorf("%v (cleanup error: %v)", timeoutErr, cleanupErr)
 			}
 			return timeoutErr
@@ -87,7 +90,9 @@ func (t *TmuxSession) Start(workDir string) error {
 		// pane program exited within milliseconds of launch. Say so instead
 		// of the misleading "session does not exist" (#1116, #1131).
 		vanished := !t.DoesSessionExist()
-		if cleanupErr := t.Close(); cleanupErr != nil {
+		// Pane state deliberately ignored: same as the timeout path above — a
+		// failed Start returns an error and deletes nothing.
+		if _, cleanupErr := t.Close(); cleanupErr != nil {
 			err = fmt.Errorf("%v (cleanup error: %v)", err, cleanupErr)
 		}
 		if vanished {

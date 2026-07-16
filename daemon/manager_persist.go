@@ -262,9 +262,13 @@ func findInstanceDataByTitle(title, repoID string) (*session.InstanceData, strin
 // corrupted store can't make us kill an unrelated tmux session. Mirror of the
 // api/sessions.go helper added in #536 — duplicated here because daemon/
 // cannot import api/ without a cycle.
-var ghostKillTmuxByName = func(sanitizedName string) error {
+// It reports the tmux.PaneState alongside the error for the same reason the
+// teardown modes do (#1917): the caller goes on to DELETE this ghost's worktree,
+// so it must be able to tell "tmux confirmed the session is gone" from "tmux never
+// answered". A refused name never ran a tmux command, so its state is known.
+var ghostKillTmuxByName = func(sanitizedName string) (tmux.PaneState, error) {
 	if !strings.HasPrefix(sanitizedName, tmux.TmuxPrefix) {
-		return fmt.Errorf("refusing to kill tmux session without %q prefix: %q", tmux.TmuxPrefix, sanitizedName)
+		return tmux.PaneStateKnown, fmt.Errorf("refusing to kill tmux session without %q prefix: %q", tmux.TmuxPrefix, sanitizedName)
 	}
 	return tmux.NewTmuxSessionFromSanitizedName(sanitizedName, "").CloseAndWaitForPaneExit()
 }
@@ -313,11 +317,23 @@ var ghostCleanupWorktree = func(data *session.InstanceData, title string) {
 // persisted name is still running, so the two branches share no condition.
 // Tmux goes FIRST: a still-running agent writing into the worktree while git
 // recursively deletes it leaks a half-deleted directory (#802).
-func ghostCleanup(data *session.InstanceData, title string) {
+// It gates the worktree delete on tmux having ANSWERED, and returns an error the
+// caller must not step over (#1917). This path is the ghost twin of teardownKill
+// and had the identical defect the review caught there: it logged the tmux failure
+// and cleaned the worktree regardless, so a wedged server meant deleting the
+// workspace of a session that might still be running. Found by auditing every
+// caller of the bounded teardown rather than by the review itself.
+func ghostCleanup(data *session.InstanceData, title string) error {
 	if data.TmuxName != "" {
-		if killErr := ghostKillTmuxByName(data.TmuxName); killErr != nil {
+		state, killErr := ghostKillTmuxByName(data.TmuxName)
+		if killErr != nil {
 			log.WarningLog.Printf("ghost session %q: tmux cleanup failed: %v", title, killErr)
+		}
+		if state == tmux.PaneStateUnknown {
+			return fmt.Errorf("ghost session %q: %w: leaving its workspace and record intact: %v",
+				title, session.ErrPaneMayBeLive, killErr)
 		}
 	}
 	ghostCleanupWorktree(data, title)
+	return nil
 }

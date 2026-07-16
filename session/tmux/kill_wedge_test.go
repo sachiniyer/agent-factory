@@ -38,9 +38,9 @@ func TestTeardownTmuxCommandsDoNotWedgeTheKill(t *testing.T) {
 		call func(ts *TmuxSession) error
 	}{
 		// The whole teardown call the daemon actually makes (session/teardown.go).
-		{"CloseAndWaitForPaneExit", func(ts *TmuxSession) error { return ts.CloseAndWaitForPaneExit() }},
+		{"CloseAndWaitForPaneExit", func(ts *TmuxSession) error { _, err := ts.CloseAndWaitForPaneExit(); return err }},
 		// Close alone: list-panes + kill-session (+ the has-session probe).
-		{"Close", func(ts *TmuxSession) error { return ts.Close() }},
+		{"Close", func(ts *TmuxSession) error { _, err := ts.Close(); return err }},
 		// The first command on the teardown, and the one whose stall the issue
 		// misread as "capped at 3s" (paneExitWait bounds only waitForPIDExit).
 		{"panePID", func(ts *TmuxSession) error { _, err := ts.panePID(); return err }},
@@ -142,7 +142,7 @@ func TestCloseOnWedgedServerSkipsTheExistenceProbe(t *testing.T) {
 	done := make(chan time.Duration, 1)
 	go func() {
 		start := time.Now()
-		_ = ts.Close()
+		_, _ = ts.Close()
 		done <- time.Since(start)
 	}()
 

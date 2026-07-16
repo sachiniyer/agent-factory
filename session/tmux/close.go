@@ -12,14 +12,47 @@ import (
 	"github.com/sachiniyer/agent-factory/log"
 )
 
-// Close terminates the tmux session and cleans up resources.
+// PaneState is what a bounded teardown could ESTABLISH about a tmux session, and
+// it is returned SEPARATELY from the error on purpose (#1917).
+//
+// Bounding the tmux commands introduced a third answer next to "killed" and
+// "failed to kill": "the server never replied, so I do not know". That answer has
+// to reach the caller who deletes or moves the workspace, and returning it only as
+// an error type did not work — four separate layers reduced it to
+// log-the-error-and-carry-on, which is byte-for-byte identical to having no
+// timeout at all, and each one ended in a destructive step running against a
+// session that might still be alive.
+//
+// An error can be swallowed by accident; a second return value cannot. Every
+// caller must name it, and a caller that wants to ignore it has to write the
+// ignore down. That is the whole point of the type: it makes the unknown case
+// impossible to drop silently rather than merely possible to detect.
+type PaneState int
+
+const (
+	// PaneStateKnown: every tmux command ANSWERED. The session is gone, or it
+	// survived a kill tmux reported on — either way its state was established, and
+	// the caller's own best-effort contract (#478/#967) governs from here.
+	PaneStateKnown PaneState = iota
+	// PaneStateUnknown: a bounded tmux command tripped its deadline, so the server
+	// never answered and the session may still be RUNNING. No caller may take a
+	// destructive step on this — deleting or moving a workspace an agent is still
+	// writing to destroys the user's work on a guess. Retry instead.
+	PaneStateUnknown
+)
+
+// Close terminates the tmux session and cleans up resources. It reports whether
+// tmux actually established the session's fate (see PaneState) alongside any
+// error: callers that go on to touch the session's workspace MUST gate on the
+// state, not on the error.
 //
 // Post-#1592-PR7 a TmuxSession holds no attach PTY or client child (the
 // tmux-server-mediated attach driver was retired), so Close is now just
 // kill-session plus the leaked-process reap — no PTY close, no attach-goroutine
 // drain, no killAttach/termAttach coordination.
-func (t *TmuxSession) Close() error {
+func (t *TmuxSession) Close() (PaneState, error) {
 	var errs []error
+	state := PaneStateKnown
 
 	// Capture the panes' process trees before kill-session — afterwards any
 	// survivor is reparented to init and its ancestry is unrecoverable
@@ -32,8 +65,7 @@ func (t *TmuxSession) Close() error {
 	ctx, cancel := tmuxTimeoutContext()
 	defer cancel()
 	if err := t.runTmuxBounded(ctx, "kill-session", "-t", exactTarget(t.sanitizedName)); err != nil {
-		switch {
-		case ctx.Err() != nil:
+		if ctx.Err() != nil {
 			// The deadline tripped, so the session's real state is UNKNOWN. Do
 			// NOT probe has-session: it would spawn another tmux command against
 			// the same wedged server and hang identically, defeating the bound we
@@ -41,17 +73,35 @@ func (t *TmuxSession) Close() error {
 			// take the conservative branch — a session we cannot confirm dead may
 			// well be alive, and its processes are then not leaks.
 			errs = append(errs, fmt.Errorf("%w: kill-session after %s", ErrTmuxTimeout, tmuxCommandTimeout))
+			state = PaneStateUnknown
 			leaked = nil
-		case t.DoesSessionExist():
-			// Idempotent teardown (#967): a kill-session that fails because the
-			// session is already gone has achieved Close's goal — a dead session
-			// is the desired end state. Only a session that survives the kill is a
-			// genuine failure. Probe has-session rather than matching tmux's bare
-			// "exit status 1", which it reuses for unrelated errors. Mirrors the
-			// `_`-ignored cleanup kill in Start (above).
-			errs = append(errs, fmt.Errorf("error killing tmux session: %w", err))
-			// The session survived — its processes are not leaks. Do not reap.
-			leaked = nil
+		} else {
+			// kill-session ANSWERED with a failure, fast. Ask what actually happened
+			// — but the probe is bounded too, so it has three answers, not two.
+			exists, known := probeSession(t.cmdExec, t.sanitizedName)
+			switch {
+			case !known:
+				// The probe timed out (#1917). Reporting only the original
+				// kill-session error would hand the caller an ordinary failure and
+				// lose the fact that the session's fate is UNKNOWN — and the caller
+				// would then delete the workspace. Surface the timeout instead.
+				errs = append(errs, fmt.Errorf("%w: has-session probe after kill-session failed (%v)", ErrTmuxTimeout, err))
+				state = PaneStateUnknown
+				leaked = nil
+			case exists:
+				// Idempotent teardown (#967): a kill-session that fails because the
+				// session is already gone has achieved Close's goal — a dead session
+				// is the desired end state. Only a session that survives the kill is
+				// a genuine failure. Probe has-session rather than matching tmux's
+				// bare "exit status 1", which it reuses for unrelated errors.
+				//
+				// The state stays KNOWN: tmux answered, and this session is alive.
+				// Callers keep their pre-#1917 best-effort contract here (#478) —
+				// see the note on that trade in teardownKill.
+				errs = append(errs, fmt.Errorf("error killing tmux session: %w", err))
+				// The session survived — its processes are not leaks. Do not reap.
+				leaked = nil
+			}
 		}
 	}
 
@@ -63,17 +113,15 @@ func (t *TmuxSession) Close() error {
 	}
 
 	if len(errs) == 0 {
-		return nil
+		return state, nil
 	}
 	if len(errs) == 1 {
-		return errs[0]
+		return state, errs[0]
 	}
-
-	errMsg := "multiple errors occurred during cleanup:"
-	for _, err := range errs {
-		errMsg += "\n  - " + err.Error()
-	}
-	return errors.New(errMsg)
+	// errors.Join, not a flattened string: the ErrTmuxTimeout sentinel has to stay
+	// reachable through errors.Is for callers that gate on it (#1917). The old
+	// hand-built message erased it.
+	return state, errors.Join(errs...)
 }
 
 // CloseAttachOnly is the non-destructive sibling of Close: it releases whatever
@@ -113,18 +161,34 @@ const paneExitWait = 3 * time.Second
 // real worst case is ~4×tmuxCommandTimeout + paneExitWait, all of it finite —
 // which is the property daemon.KillSession needs, since it holds a per-session
 // kills-in-flight guard across this call with no deadline of its own.
-func (t *TmuxSession) CloseAndWaitForPaneExit() error {
+func (t *TmuxSession) CloseAndWaitForPaneExit() (PaneState, error) {
 	pid, pidErr := t.panePID()
-	closeErr := t.Close()
+	state, closeErr := t.Close()
 	if pidErr != nil {
-		// Session already gone (or unqueryable) — nothing to wait on.
-		return closeErr
+		// A TIMED-OUT panePID is not "nothing to wait on" (#1917). It means the
+		// server never told us which process to wait for — so even if the
+		// kill-session that follows succeeds, we skip the #802 pane-exit wait and
+		// have no way to know the agent stopped writing. Returning the successful
+		// Close's KNOWN state here would tell the caller it may delete the worktree
+		// while the HUP'd agent is still flushing into it. Keep the unknown, and
+		// keep the sentinel reachable.
+		if errors.Is(pidErr, ErrTmuxTimeout) {
+			return PaneStateUnknown, errors.Join(closeErr, pidErr)
+		}
+		// Any other panePID failure means tmux ANSWERED: the session is already
+		// gone or the pane is unqueryable, so there is genuinely nothing to wait on
+		// and Close's own state stands.
+		return state, closeErr
 	}
 	if !waitForPIDExit(pid, paneExitWait) {
+		// Pre-existing #802 behavior, deliberately unchanged: kill-session was
+		// CONFIRMED delivered, so this pane is dying — it is merely slow. Treating a
+		// slow flush as unknown would defer routine kills of any agent that takes
+		// >3s to exit. The unknown cases above are the ones where tmux never spoke.
 		log.WarningLog.Printf("tmux session %s: pane process %d still alive %v after kill-session; "+
 			"worktree cleanup may race with its in-flight writes", t.sanitizedName, pid, paneExitWait)
 	}
-	return closeErr
+	return state, closeErr
 }
 
 // panePID returns the PID of the root process running in the session's pane

@@ -472,7 +472,11 @@ func (i *Instance) CloseTab(idx int) error {
 	if tab.tmux == nil {
 		return nil
 	}
-	if err := tab.tmux.Close(); err != nil {
+	// Pane state deliberately ignored: closing ONE tab touches no worktree, so
+	// nothing destructive follows an unknown here. (A Close that fails after the
+	// tab was already dropped from i.Tabs above leaks the tmux session — true of
+	// every Close failure, not just a timeout, and unchanged by #1917.)
+	if _, err := tab.tmux.Close(); err != nil {
 		return fmt.Errorf("failed to close tab %q: %w", tab.Name, err)
 	}
 	return nil

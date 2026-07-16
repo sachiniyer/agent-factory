@@ -143,7 +143,13 @@ func (m *Manager) KillSession(req KillSessionRequest) (session.InstanceData, err
 		}
 	} else if data != nil {
 		stage.set("cleaning up ghost record")
-		ghostCleanup(data, req.Title)
+		// Same gate as the live-instance branch above: skip the record delete when
+		// the ghost's tmux never confirmed dead, so its workspace and its record
+		// both survive for finishUserKill to retry (#1917).
+		if err := ghostCleanup(data, req.Title); err != nil {
+			log.WarningLog.Printf("kill of session %q could not complete its ghost teardown; the record is kept and the daemon will retry it: %v", req.Title, err)
+			return session.InstanceData{}, fmt.Errorf("kill of session %q could not finish tearing it down safely, so its workspace was left intact; the kill is recorded and will be retried automatically: %w", req.Title, err)
+		}
 	}
 
 	stage.set("deleting record from storage")

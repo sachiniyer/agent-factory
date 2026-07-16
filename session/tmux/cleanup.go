@@ -44,19 +44,39 @@ func (t *TmuxSession) DoesSessionExist() bool {
 // or any other tmux error — still reports false, preserving the pre-#1917
 // conflation callers already relied on.
 func sessionExists(cmdExec cmd.Executor, name string) bool {
+	exists, known := probeSession(cmdExec, name)
+	if !known {
+		log.WarningLog.Printf("tmux has-session for %s timed out after %s; the server is wedged, so "+
+			"reporting the session as still present rather than risk a false teardown", name, tmuxCommandTimeout)
+		return true
+	}
+	return exists
+}
+
+// probeSession is sessionExists WITHOUT the lossy collapse: it reports whether
+// the session exists AND whether tmux actually answered.
+//
+// The two-value form exists because the collapse above, while safe for the
+// probe's many read-only callers, silently destroyed information for the one
+// caller that tears sessions down: Close asked "does it still exist?", got back
+// a `true` synthesized from a TIMEOUT, and reported an ordinary kill failure —
+// so its caller deleted the workspace with the session's fate unknown (#1917).
+// A caller that acts on the answer takes this form and handles !known; a caller
+// that only reads takes the bool and gets the conservative lie.
+func probeSession(cmdExec cmd.Executor, name string) (exists bool, known bool) {
 	ctx, cancel := tmuxTimeoutContext()
 	defer cancel()
 	// Using "-t name" does a prefix match, which is wrong. `-t=` does an exact match.
 	err := runTmuxBoundedWith(ctx, cmdExec, "has-session", fmt.Sprintf("-t=%s", name))
 	if err == nil {
-		return true
+		return true, true
 	}
 	if ctx.Err() != nil {
-		log.WarningLog.Printf("tmux has-session for %s timed out after %s; the server is wedged, so "+
-			"reporting the session as still present rather than risk a false teardown", name, tmuxCommandTimeout)
-		return true
+		return false, false
 	}
-	return false
+	// tmux answered: the usual `has-session` exit 1 for "no such session", or any
+	// other error, which this probe has always conflated with absence.
+	return false, true
 }
 
 // exactTarget builds an exact-match `-t` target spec for the named session.

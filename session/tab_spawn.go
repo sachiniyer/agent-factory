@@ -96,7 +96,9 @@ func (i *Instance) AddShellTab() (*Tab, error) {
 		// Tear down the just-spawned session so it does not outlive the worktree
 		// Kill is removing or archive is moving. Close is best-effort/idempotent
 		// (#967): a kill-session on an already-gone session is not an error.
-		if cerr := shellTmux.Close(); cerr != nil {
+		// Pane state deliberately ignored: this closes a tmux session we just
+		// spawned and are abandoning; no worktree action follows.
+		if _, cerr := shellTmux.Close(); cerr != nil {
 			log.WarningLog.Printf("add shell tab to %q: closing orphaned tmux after kill/archive race: %v", title, cerr)
 		}
 		return nil, fmt.Errorf("session was killed during tab creation")
@@ -170,7 +172,8 @@ func (i *Instance) AddProcessTab(command, requestedName string) (*Tab, error) {
 	i.mu.Unlock()
 	if stale {
 		// Best-effort/idempotent teardown of the orphaned session (#967).
-		if cerr := procTmux.Close(); cerr != nil {
+		// Pane state deliberately ignored: same abandoned-spawn cleanup as above.
+		if _, cerr := procTmux.Close(); cerr != nil {
 			log.WarningLog.Printf("add process tab to %q: closing orphaned tmux after kill/archive race: %v", title, cerr)
 		}
 		return nil, fmt.Errorf("session was killed during tab creation")

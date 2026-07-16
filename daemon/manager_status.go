@@ -213,19 +213,33 @@ func (m *Manager) RefreshStatuses() {
 // alternative is a stale count that survives an arbitrary blind window and lets
 // ONE later blip tip a healthy session into a destructive re-provision.
 func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instance) {
-	if instance == nil || !instance.Started() {
+	if instance == nil {
 		return
 	}
-	// The debounce is keyed by stable instance ID, never repo/title: a same-title
-	// successor must not inherit a dead predecessor's failures (#1794).
+	// The kill-intent tombstone outranks the started fence, and the ORDER of these
+	// two checks is load-bearing (#1917).
+	//
+	// A surviving tombstone (#1108) means a previous KillSession was interrupted
+	// after committing to the kill. The only valid future for this session is
+	// finishing that teardown — never probing it, never marking it Lost, never
+	// restoring it.
+	//
+	// This used to sit BELOW the !Started() return, which was survivable only while
+	// every interrupted kill was interrupted BEFORE its teardown: the tombstone is
+	// written first, so the record on disk still said started=true and a restarted
+	// daemon reloaded it and finished the kill. A kill that now fails AFTER the
+	// teardown — the record delete losing a bounded race for the instances lock —
+	// leaves the live instance with started=false, so the poll returned here and
+	// finishUserKill never ran: the tombstone sat unprocessed for the daemon's whole
+	// life, and the error told the user it would be retried automatically. That was
+	// a promise the code did not keep.
 	key := remoteLossKey(repoID, instance)
 	if instance.UserKilled() {
-		// A surviving kill-intent tombstone (#1108) means a previous
-		// KillSession was interrupted after committing to the kill. The only
-		// valid future for this session is finishing that teardown — never
-		// probing it, never marking it Lost, never restoring it.
 		m.clearRemoteLoss(key)
 		m.finishUserKill(repoID, instance)
+		return
+	}
+	if !instance.Started() {
 		return
 	}
 	if instance.GetInFlightOp() != session.OpNone {
