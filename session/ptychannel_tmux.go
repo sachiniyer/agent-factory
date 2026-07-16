@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 
 	"github.com/sachiniyer/agent-factory/session/tmux"
@@ -21,9 +22,51 @@ type tmuxClientlessChannel struct {
 	ts *tmux.TmuxSession
 
 	mu   sync.Mutex
-	dir  string   // temp dir holding the FIFO, removed on StopCapture
-	fifo string   // FIFO path pipe-pane writes to
-	rc   *os.File // read end of the FIFO
+	dir  string         // temp dir holding the FIFO, removed on StopCapture
+	fifo string         // FIFO path pipe-pane writes to
+	rc   *captureReader // read end of the FIFO
+}
+
+// captureReader wraps the FIFO's read end so Close wakes a Read parked in
+// read(2). The FIFO cannot enter Go's netpoller on darwin (kqueue does not
+// work with fifos — see os/file_unix.go), so the fd is a plain blocking
+// descriptor and close(2) does NOT interrupt an in-flight read: with pipe-pane
+// already gone no byte would ever arrive, and the teardown join in
+// ptyBroker.stopCapture hung forever, wedging session delete and with it the
+// whole daemon (#1943). Close latches stopped, then writes one sentinel byte
+// into the FIFO — the O_RDWR read end keeps a reader registered, so the
+// nonblocking writer open cannot fail with ENXIO — forcing any parked read to
+// return. Read reports io.EOF once stopped, so the sentinel never reaches the
+// broker ring.
+type captureReader struct {
+	f       *os.File
+	fifo    string
+	stopped atomic.Bool
+	once    sync.Once
+	err     error
+}
+
+func (r *captureReader) Read(p []byte) (int, error) {
+	if r.stopped.Load() {
+		return 0, io.EOF
+	}
+	n, err := r.f.Read(p)
+	if r.stopped.Load() {
+		return 0, io.EOF
+	}
+	return n, err
+}
+
+func (r *captureReader) Close() error {
+	r.once.Do(func() {
+		r.stopped.Store(true)
+		if w, err := os.OpenFile(r.fifo, os.O_WRONLY|syscall.O_NONBLOCK, 0); err == nil {
+			_, _ = w.Write([]byte{0})
+			_ = w.Close()
+		}
+		r.err = r.f.Close()
+	})
+	return r.err
 }
 
 var _ clientlessChannel = (*tmuxClientlessChannel)(nil)
@@ -53,16 +96,17 @@ func (c *tmuxClientlessChannel) StartCapture() (io.ReadCloser, error) {
 		_ = os.RemoveAll(dir)
 		return nil, fmt.Errorf("mkfifo pty stream: %w", err)
 	}
-	rc, err := os.OpenFile(fifo, os.O_RDWR, 0600)
+	f, err := os.OpenFile(fifo, os.O_RDWR, 0600)
 	if err != nil {
 		_ = os.RemoveAll(dir)
 		return nil, fmt.Errorf("open pty stream fifo: %w", err)
 	}
 	if err := c.ts.EnablePipePane(pipePaneCommand(fifo)); err != nil {
-		_ = rc.Close()
+		_ = f.Close()
 		_ = os.RemoveAll(dir)
 		return nil, err
 	}
+	rc := &captureReader{f: f, fifo: fifo}
 	c.dir, c.fifo, c.rc = dir, fifo, rc
 	return rc, nil
 }
