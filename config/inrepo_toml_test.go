@@ -91,6 +91,27 @@ func TestLoadInRepoConfigTOMLKeyPolicy(t *testing.T) {
 		assert.Contains(t, err.Error(), ConfigFileName)
 	})
 
+	t.Run("rejects vscode_server_binary as global-only", func(t *testing.T) {
+		// The key names a binary the daemon executes (#1817), so it must earn
+		// the actionable "global setting" rejection rather than the generic
+		// "unknown key" one it got while it was missing from
+		// inRepoGlobalOnlyKeys. It exists in both config.json and config.toml
+		// (unlike [keys]/[theme]), so the message points at the resolved
+		// global config file, not config.toml.
+		home := t.TempDir()
+		t.Setenv("AGENT_FACTORY_HOME", home)
+		repoRoot := t.TempDir()
+		writeInRepoTomlConfig(t, repoRoot, `vscode_server_binary = "/opt/code-server/bin/code-server"`+"\n")
+
+		_, _, err := LoadInRepoConfig(repoRoot)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "vscode_server_binary")
+		assert.Contains(t, err.Error(), "global setting")
+		assert.NotContains(t, err.Error(), "unknown key",
+			"a global-only key must not fall through to the generic unknown-key message")
+		assert.Contains(t, err.Error(), prettyHomePath(filepath.Join(home, ConfigFileName)))
+	})
+
 	t.Run("rejecting the TOML-only keys table points at config.toml", func(t *testing.T) {
 		// #1141 play-test minor 4: the keymap is TOML-only, so the "move it to
 		// the global config" message must name config.toml — a config.json

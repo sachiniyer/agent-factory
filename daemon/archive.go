@@ -134,8 +134,13 @@ func (m *Manager) ArchiveSession(req ArchiveSessionRequest) (string, session.Ins
 	// the worktree, and moving a directory out from under a live code-server
 	// leaves it serving a path that no longer exists. It is daemon-owned
 	// infrastructure, not a tab, so ArchiveTeardown does not cover it. No-ops when
-	// the session never had a vscode tab; the tab itself persists and lazily
-	// respawns an editor if the session is restored.
+	// the session never had a vscode tab.
+	//
+	// The tab itself is KEPT by ArchiveTeardown (it is metadata-only: stopping the
+	// editor destroys nothing the tab holds) and persisted with the archived
+	// record, so a restore renders it again and the next proxy request lazily
+	// respawns an editor on a fresh port. That is what makes stopping here safe —
+	// it is a stop, not a delete.
 	//
 	// The deferred sweep is the belt to that brace: the webtab proxy may spawn an
 	// editor without this op-lock (a spawn is too slow to hold it), so a request

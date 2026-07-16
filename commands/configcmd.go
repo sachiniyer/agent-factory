@@ -60,15 +60,20 @@ type configEntry struct {
 
 // configEntries lists every global config key in a stable order with the
 // effective value from the loaded config (i.e. what a session sees before any
-// in-repo override). Mirrors the settable keys documented in
-// docs/configuration.md; keep the two in sync when a key is added.
+// in-repo override). It must cover every toml-tagged field of config.Config —
+// TestConfigEntriesCoverAllKeys reflects over the struct and fails when a key
+// is missing, so a new config field cannot ship unreadable through
+// `af config get/list`.
 func configEntries(cfg *config.Config) []configEntry {
 	return []configEntry{
 		{"default_program", cfg.DefaultProgram},
 		{"program_overrides", cfg.ProgramOverrides},
 		{"auto_yes", cfg.AutoYes},
 		{"auto_update", cfg.AutoUpdate},
+		{"listen_addr", cfg.ListenAddr},
 		{"require_token", cfg.RequireToken},
+		{"require_loopback_token", cfg.RequireLoopbackToken},
+		{"cors_allowed_origins", cfg.CORSAllowedOrigins},
 		{"daemon_poll_interval", cfg.DaemonPollInterval},
 		{"log_max_size_mb", cfg.LogMaxSizeMB},
 		{"log_max_backups", cfg.LogMaxBackups},
@@ -76,8 +81,11 @@ func configEntries(cfg *config.Config) []configEntry {
 		{"worktree_root", cfg.WorktreeRoot},
 		{"detach_keys", cfg.DetachKeys},
 		{"update_channel", cfg.UpdateChannel},
+		{"vscode_server_binary", cfg.VSCodeServerBinary},
 		{"theme", cfg.Theme},
 		{"root_agents", cfg.RootAgents},
+		{"limit_auto_resume", cfg.LimitAutoResume},
+		{"limit_retry_interval", cfg.LimitRetryInterval},
 		{"limit_patterns", cfg.LimitPatterns},
 		{"keys", cfg.KeymapOverrides()},
 	}

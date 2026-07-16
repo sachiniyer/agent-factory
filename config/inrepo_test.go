@@ -110,8 +110,16 @@ func TestLoadInRepoConfigEmptyValueIsSet(t *testing.T) {
 	assert.False(t, cfg.IsSet("remote_hooks"))
 }
 
+// TestLoadInRepoConfigRejectsGlobalOnlyKeys drives every key in
+// inRepoGlobalOnlyKeys through a real in-repo load and pins the rejection
+// message. It iterates the map itself rather than a hand-copied list so a key
+// added to the map can never go unpinned — the drift that left
+// vscode_server_binary out of the map in the first place (#1817). The written
+// value is always "x": the global-only check scans raw keys before any
+// unmarshal, so the declared type of the key is irrelevant here.
 func TestLoadInRepoConfigRejectsGlobalOnlyKeys(t *testing.T) {
-	for _, key := range []string{"auto_update", "auto_yes", "branch_prefix", "cors_allowed_origins", "daemon_poll_interval", "detach_keys", "keys", "listen_addr", "log_max_backups", "log_max_size_mb", "require_loopback_token", "require_token", "root_agents", "update_channel", "worktree_root"} {
+	require.NotEmpty(t, inRepoGlobalOnlyKeys)
+	for key := range inRepoGlobalOnlyKeys {
 		t.Run(key, func(t *testing.T) {
 			home := t.TempDir()
 			t.Setenv("AGENT_FACTORY_HOME", home)

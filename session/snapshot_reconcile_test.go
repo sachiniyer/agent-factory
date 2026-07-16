@@ -164,6 +164,29 @@ func TestReconcileTabsFromData_AddsTmuxlessVSCodeTab(t *testing.T) {
 	assert.Nil(t, tabs[1].tmux, "a vscode tab holds no tmux session")
 }
 
+// TestReconcileTabsFromData_AdoptsTmuxlessTabID pins that a tmux-less tab keeps the
+// daemon's authoritative stable id (#1738) rather than minting a local one. The
+// sibling tests above assert the id is merely non-empty, which a locally-minted id
+// also satisfies — but the id is what a web-UI stream/pane binding addresses the tab
+// by, so a local mint would resolve to nothing on the daemon. A PTY-backed tab gets
+// this for free by reconnecting to a named session; a tmux-less one has no such
+// anchor, and the append is the only place its identity can come from.
+func TestReconcileTabsFromData_AdoptsTmuxlessTabID(t *testing.T) {
+	const agentName = "af_snap_meta_id"
+	inst, _ := newReconcileTestInstance(t, agentName, map[string]bool{agentName: true})
+
+	target := []TabData{
+		{Name: inst.GetTabs()[0].Name, Kind: TabKindAgent, TmuxName: agentName},
+		{ID: "daemon-id-abc", Name: "editor", Kind: TabKindVSCode},
+	}
+	_, err := inst.ReconcileTabsFromData(target)
+	require.NoError(t, err)
+
+	tabs := inst.GetTabs()
+	require.Len(t, tabs, 2)
+	assert.Equal(t, "daemon-id-abc", tabs[1].ID, "the daemon owns tab identity; the reconcile must adopt its id")
+}
+
 // TestReconcileTabsFromData_SkipsTmuxfulTabWithNoSession pins the other half of
 // TabKind.HasTmux: the empty-TmuxName skip must SURVIVE for a kind that is
 // supposed to own a PTY. Such a record is not reconstructable, and materializing

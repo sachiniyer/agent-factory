@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -18,6 +19,7 @@ import (
 
 	"github.com/coder/websocket"
 	"github.com/sachiniyer/agent-factory/config"
+	aflog "github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
@@ -62,11 +64,18 @@ func fakeVSCodeServerMain() {
 	// Parse both dialects. valueFlags is what makes the positional worktree
 	// findable: only these consume the next argv entry, so a bare word after a
 	// BOOLEAN flag (--disable-telemetry) is correctly read as the worktree.
+	//
+	// The two dialects name the worktree differently, and the fake mimics that
+	// rather than papering over it: code-server takes it POSITIONALLY, while
+	// openvscode-server reads --default-folder and IGNORES a positional entirely
+	// (webClientServer resolves the folder only from that flag). A fake that
+	// accepted a positional for both would have kept passing while the real
+	// openvscode came up on an empty workbench.
 	valueFlags := map[string]bool{
 		"--bind-addr": true, "--auth": true, "--config": true,
-		"--host": true, "--port": true,
+		"--host": true, "--port": true, "--default-folder": true,
 	}
-	addr, host, port, worktree := "", "", "", ""
+	addr, host, port, worktree, defaultFolder := "", "", "", "", ""
 	for i := 0; i < len(args); i++ {
 		a := args[i]
 		if valueFlags[a] && i+1 < len(args) {
@@ -77,6 +86,8 @@ func fakeVSCodeServerMain() {
 				host = args[i+1]
 			case "--port":
 				port = args[i+1]
+			case "--default-folder":
+				defaultFolder = args[i+1]
 			}
 			i++
 			continue
@@ -85,6 +96,9 @@ func fakeVSCodeServerMain() {
 			continue
 		}
 		worktree = a
+	}
+	if defaultFolder != "" {
+		worktree = defaultFolder // the openvscode-server dialect
 	}
 	if addr == "" && host != "" && port != "" {
 		addr = net.JoinHostPort(host, port) // the openvscode-server dialect
@@ -98,7 +112,16 @@ func fakeVSCodeServerMain() {
 	// group — the shape of code-server's extension/pty hosts, and what proves the
 	// teardown escalates to the whole group rather than stopping at the leader.
 	if pidFile := os.Getenv("AF_TEST_ORPHAN_CHILD_PIDFILE"); pidFile != "" {
-		child := exec.Command("sh", "-c", "trap '' TERM; echo $$ > "+pidFile+"; while :; do sleep 0.2; done")
+		// The loop is BOUNDED (~60s), not `while :`. This child ignores SIGTERM by
+		// design, so an unbounded one outlives any run that dies before stopFor can
+		// SIGKILL the group — a panic, a ^C, `go test -timeout`, or the childPid==0
+		// t.Fatal above — and then loops forever on the machine, immune to every
+		// polite kill. (Found live on this box: a stranded child from a run 7.4h
+		// earlier, its TempDir long gone.) The test needs it for ~0.15s; the cap is
+		// pure margin, and it makes the worst case self-healing.
+		script := "trap '' TERM; echo $$ > " + pidFile +
+			"; i=0; while [ $i -lt 300 ]; do sleep 0.2; i=$((i+1)); done"
+		child := exec.Command("sh", "-c", script)
 		if err := child.Start(); err == nil {
 			go func() { _ = child.Wait() }()
 		}
@@ -583,7 +606,8 @@ func TestVSCodeArgs_FlavorDialects(t *testing.T) {
 		t.Errorf("flavorForBinary(wrapper) = %v, want the code-server dialect", got)
 	}
 
-	cs := strings.Join(vscodeArgs(flavorCodeServer, "127.0.0.1", 1234, "/wt"), " ")
+	csArgv := vscodeArgs(flavorCodeServer, "127.0.0.1", 1234, "/wt")
+	cs := strings.Join(csArgv, " ")
 	if !strings.Contains(cs, "--bind-addr 127.0.0.1:1234") || !strings.Contains(cs, "--auth none") {
 		t.Errorf("code-server argv = %q", cs)
 	}
@@ -593,15 +617,256 @@ func TestVSCodeArgs_FlavorDialects(t *testing.T) {
 	if strings.Contains(cs, "abs-proxy-base-path") {
 		t.Errorf("code-server argv passes --abs-proxy-base-path, which has no effect on sub-path serving: %q", cs)
 	}
-	ov := strings.Join(vscodeArgs(flavorOpenVSCode, "127.0.0.1", 1234, "/wt"), " ")
+	// code-server's dialect: the worktree is POSITIONAL.
+	if !strings.HasSuffix(cs, "/wt") {
+		t.Errorf("code-server argv %q does not end with the worktree", cs)
+	}
+
+	ovArgv := vscodeArgs(flavorOpenVSCode, "127.0.0.1", 1234, "/wt")
+	ov := strings.Join(ovArgv, " ")
 	if !strings.Contains(ov, "--host 127.0.0.1") || !strings.Contains(ov, "--port 1234") ||
 		!strings.Contains(ov, "--without-connection-token") {
 		t.Errorf("openvscode-server argv = %q", ov)
 	}
-	for _, argv := range []string{cs, ov} {
-		if !strings.HasSuffix(argv, "/wt") {
-			t.Errorf("argv %q does not end with the worktree", argv)
+	// openvscode-server's dialect, and the whole point of this half: it resolves
+	// the workbench folder ONLY from --default-folder. Its parser accepts '_', so a
+	// positional worktree is taken and then never read — the editor comes up on an
+	// empty workbench and NOTHING reports an error. Lock the named flag...
+	if got := argvValueSpaced(ovArgv, "--default-folder"); got != "/wt" {
+		t.Errorf("openvscode-server argv %q does not pass --default-folder /wt; the workbench would open empty", ov)
+	}
+	// ...and lock the absence of the ignored positional, which is what regressing
+	// back to it would look like.
+	if pos := bareArgs(ovArgv, map[string]bool{"--host": true, "--port": true, "--default-folder": true}); len(pos) != 0 {
+		t.Errorf("openvscode-server argv %q passes positional args %v; openvscode never reads them", ov, pos)
+	}
+	// --server-base-path bakes ONE prefix into a process reached under a different
+	// prefix per tab: it would fix tab 0 and break every other. X-Forwarded-Prefix
+	// (per request, and honored in precedence over the flag) is the mechanism.
+	if strings.Contains(ov, "server-base-path") {
+		t.Errorf("openvscode-server argv passes --server-base-path, which would break every tab but the first: %q", ov)
+	}
+}
+
+// TestVSCodeArgs_ScrubsIPCHookFromChildEnv is codex's [33]. code-server's
+// shouldOpenInExistingInstance reads VSCODE_IPC_HOOK_CLI UNCONDITIONALLY, before
+// it starts any server: when it is set the CLI forwards the folder to that
+// existing editor and exits, and --bind-addr is never honored. A daemon launched
+// from any VS Code / code-server integrated terminal inherits it, and then EVERY
+// editor it spawns dies during startup while the worktree pops open in the user's
+// own window — for the daemon's whole life, since environ is fixed at exec. af's
+// own VS Code tab has an integrated terminal that sets it, so running `af` inside
+// an af VS Code tab is enough to poison the daemon.
+func TestVSCodeArgs_ScrubsIPCHookFromChildEnv(t *testing.T) {
+	t.Setenv("VSCODE_IPC_HOOK_CLI", "/run/user/1000/vscode-ipc-deadbeef.sock")
+
+	env := vscodeChildEnv()
+	if hasEnvKey(env, "VSCODE_IPC_HOOK_CLI") {
+		t.Error("the editor's env carries VSCODE_IPC_HOOK_CLI; code-server would forward the worktree to the inherited editor and exit instead of serving")
+	}
+	// A scrub, not a wipe.
+	if !hasEnvKey(env, "PATH") {
+		t.Error("the editor's env lost PATH")
+	}
+}
+
+// TestVSCodeServer_ReaperKillsTheGroupBeforeClosingExited locks the ordering the
+// teardown fix rests on. exited is what stop() returns on, and its callers act the
+// instant it does — ArchiveSession MOVES the worktree. If exited closed before the
+// group SIGKILL were issued, stop() could return while the editor's children were
+// still alive and holding that directory open.
+func TestVSCodeServer_ReaperKillsTheGroupBeforeClosingExited(t *testing.T) {
+	cmd := exec.Command("/bin/sh", "-c", "exit 0")
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("starting the throwaway leader: %v", err)
+	}
+	pgid := cmd.Process.Pid
+
+	s := &vscodeServer{worktree: "/nowhere", cmd: cmd, exited: make(chan struct{})}
+	var killed []syscall.Signal
+	var killedWhileExitedOpen bool
+	var killedPgid int
+	s.killGroup = func(p int, sig syscall.Signal) error {
+		killed = append(killed, sig)
+		killedPgid = p
+		select {
+		case <-s.exited:
+		default:
+			killedWhileExitedOpen = true
 		}
+		return nil
+	}
+
+	s.reap()
+
+	select {
+	case <-s.exited:
+	default:
+		t.Fatal("reap() returned without closing exited; every waiter would hang")
+	}
+	if len(killed) != 1 || killed[0] != syscall.SIGKILL {
+		t.Fatalf("reap() sent %v to the group, want exactly one SIGKILL — a child that outlived the leader would leak", killed)
+	}
+	if killedPgid != pgid {
+		t.Fatalf("reap() signalled pgid %d, want the leader's own group %d", killedPgid, pgid)
+	}
+	if !killedWhileExitedOpen {
+		t.Fatal("reap() closed exited BEFORE killing the group; stop() could return, and ArchiveSession move the worktree, while the editor's children still held it open")
+	}
+}
+
+// TestVSCodeServer_StopDoesNotSignalAReapedLeadersGroup is codex's [17]/[23], and
+// it is the negative half of the teardown rule: the group kill is safe ONLY while
+// it is adjacent to the reap.
+//
+// POSIX XBD 3.297 pins a pid against reuse exactly while a process group with that
+// id exists — i.e. while there is something to kill. Once the leader is reaped and
+// the group is empty, that guarantee is spent and the kernel is free to hand the
+// id to an unrelated new group leader. Nothing prunes a dead server from v.servers
+// (no ticker, no sweep), so its entry can sit there for days until a tab close
+// calls stop() — and a stop() that signalled -pgid then would SIGKILL whatever
+// group had since been given that id. macOS makes it concrete: PID_MAX is 99999.
+func TestVSCodeServer_StopDoesNotSignalAReapedLeadersGroup(t *testing.T) {
+	// A real leader in its own group, started and then REAPED: exactly the state a
+	// crashed editor's entry sits in until some later lifecycle event reaches it.
+	cmd := exec.Command("/bin/sh", "-c", "exit 0")
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("starting the throwaway leader: %v", err)
+	}
+	_ = cmd.Wait() // reaped — the kernel may hand this pid to anyone now
+
+	s := &vscodeServer{worktree: "/nowhere", cmd: cmd, exited: make(chan struct{})}
+	close(s.exited) // what reap() does once it has killed the group
+	var signalled []syscall.Signal
+	s.killGroup = func(_ int, sig syscall.Signal) error {
+		signalled = append(signalled, sig)
+		return nil
+	}
+
+	s.stop()
+
+	if len(signalled) != 0 {
+		t.Fatalf("stop() sent %v to a REAPED leader's pgid; that id can already belong to an unrelated process group, and this is a SIGKILL at it", signalled)
+	}
+}
+
+// TestVSCodeServer_StopSignalsWhileTheLeaderIsUnreaped is the positive half: the
+// rule above must not be over-applied into a stop() that never signals anything.
+// A LIVE leader is unreaped, which is itself the proof that -pgid is still ours.
+func TestVSCodeServer_StopSignalsWhileTheLeaderIsUnreaped(t *testing.T) {
+	binary := writeFakeVSCodeBinary(t, "code-server", nil)
+	v := newTestVSCodeSupervisor(t, binary)
+
+	// The seam goes on the SUPERVISOR, before the spawn: startOne copies it into
+	// the server it builds, so it is in place before the reaper goroutine that
+	// reads it exists. Setting it on the server ensureServer hands back — the
+	// obvious spelling — is a write racing that already-running reaper, which
+	// signals the group through this same seam on its way out.
+	//
+	// Buffered for every signal this teardown can produce (stop()'s SIGTERM, its
+	// SIGKILL escalation, and the reaper's own SIGKILL) so no send can wedge the
+	// reaper on a channel the assertion below has stopped reading.
+	sigs := make(chan syscall.Signal, 4)
+	v.killGroup = func(pgid int, sig syscall.Signal) error {
+		sigs <- sig
+		return syscall.Kill(-pgid, sig) // still really tear it down
+	}
+
+	if _, err := v.ensureServer("k", t.TempDir()); err != nil {
+		t.Fatalf("ensureServer: %v", err)
+	}
+	if s := v.servers["k"]; s == nil || !s.alive() {
+		t.Fatal("the editor is not alive; the fixture proves nothing")
+	}
+
+	v.stopFor("k")
+
+	// SIGTERM is first by construction, not by scheduling luck: the reaper cannot
+	// signal until cmd.Wait() returns, and the leader only exits because of the
+	// SIGTERM this channel recorded before it was even delivered.
+	select {
+	case got := <-sigs:
+		if got != syscall.SIGTERM {
+			t.Fatalf("stop() opened with %v, want SIGTERM before any escalation", got)
+		}
+	default:
+		t.Fatal("stop() signalled a LIVE editor's group not at all; the editor would be left running")
+	}
+}
+
+// TestVSCodeSupervisor_StartupExitIsTheSentinel is codex's [15] prerequisite. An
+// editor that exits before it listens must surface errVSCodeStartExited through
+// the WRAP, not as a bare error: the proxy matches the sentinel to render a styled
+// notice, and a bare error reaches the pane as a raw JSON 404 instead.
+func TestVSCodeSupervisor_StartupExitIsTheSentinel(t *testing.T) {
+	// A binary that starts fine and exits at once, without ever listening — a
+	// broken install, in one line.
+	dir := t.TempDir()
+	binary := filepath.Join(dir, "code-server")
+	if err := os.WriteFile(binary, []byte("#!/bin/sh\nexit 1\n"), 0o700); err != nil {
+		t.Fatalf("writing the exiting fake: %v", err)
+	}
+	v := newTestVSCodeSupervisor(t, binary)
+	v.startGrace = 2 * time.Second
+	v.cooldown = time.Hour // the replay below must be the recorded error, not a respawn
+	worktree := t.TempDir()
+
+	_, err := v.ensureServer("k", worktree)
+	if err == nil {
+		t.Fatal("an editor that exited before listening was reported as healthy")
+	}
+	if !errors.Is(err, errVSCodeStartExited) {
+		t.Fatalf("ensureServer err = %v, want one wrapping errVSCodeStartExited; the proxy matches the sentinel to render a notice", err)
+	}
+
+	// The cooldown replays the RECORDED error, so the sentinel must survive that
+	// path too — it is the one every auto-refresh of the notice takes.
+	_, replayed := v.ensureServer("k", worktree)
+	if !errors.Is(replayed, errVSCodeStartExited) {
+		t.Fatalf("the cooldown replayed %v, want one wrapping errVSCodeStartExited", replayed)
+	}
+}
+
+// TestVSCodeSupervisor_WarnsWhenLocalAuthIsExpected is the [16] mitigation. The
+// editor runs with auth disabled and its ephemeral loopback port is a second,
+// UNGUARDED route to the worktree. Under af's defaults that matches the daemon's
+// own posture (require_token and require_loopback_token both default false, so the
+// daemon already serves an unauthenticated control plane to every local process)
+// and there is nothing to warn about. An operator who set BOTH on a shared host
+// explicitly opted INTO local-process auth, and the editor silently does not
+// honor it — that one deserves to be told.
+func TestVSCodeSupervisor_WarnsWhenLocalAuthIsExpected(t *testing.T) {
+	binary := writeFakeVSCodeBinary(t, "code-server", nil)
+
+	cases := []struct {
+		name                               string
+		requireToken, requireLoopbackToken bool
+		wantWarning                        bool
+	}{
+		{name: "af defaults", wantWarning: false},
+		{name: "require_token alone", requireToken: true, wantWarning: false},
+		{name: "require_loopback_token alone", requireLoopbackToken: true, wantWarning: false},
+		{name: "both, the documented shared-host pair", requireToken: true, requireLoopbackToken: true, wantWarning: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var logged strings.Builder
+			restore := captureWarningLog(t, &logged)
+			defer restore()
+
+			v := newTestVSCodeSupervisor(t, binary)
+			v.authPosture = func() (bool, bool) { return tc.requireToken, tc.requireLoopbackToken }
+			if _, err := v.ensureServer("k", t.TempDir()); err != nil {
+				t.Fatalf("ensureServer: %v", err)
+			}
+
+			got := strings.Contains(logged.String(), "require_loopback_token")
+			if got != tc.wantWarning {
+				t.Fatalf("warned = %v, want %v (log: %q)", got, tc.wantWarning, logged.String())
+			}
+		})
 	}
 }
 
@@ -670,6 +935,43 @@ func argvValue(argv, flag string) string {
 	return ""
 }
 
+// argvValueSpaced returns the value following flag in an argv SLICE (as opposed to
+// argvValue, which reads the newline-joined argv the fake writes out).
+func argvValueSpaced(argv []string, flag string) string {
+	for i, a := range argv {
+		if a == flag && i+1 < len(argv) {
+			return argv[i+1]
+		}
+	}
+	return ""
+}
+
+// bareArgs returns argv's positional entries: those that neither start with "--"
+// nor are consumed as the value of a flag in valueFlags.
+func bareArgs(argv []string, valueFlags map[string]bool) []string {
+	var bare []string
+	for i := 0; i < len(argv); i++ {
+		if valueFlags[argv[i]] {
+			i++ // skip the value
+			continue
+		}
+		if strings.HasPrefix(argv[i], "--") {
+			continue
+		}
+		bare = append(bare, argv[i])
+	}
+	return bare
+}
+
+// captureWarningLog redirects log.WarningLog into w and returns a restore func.
+// WarningLog is a package global, so this is only safe because these tests do not
+// run in parallel with anything that logs.
+func captureWarningLog(t *testing.T, w io.Writer) func() {
+	t.Helper()
+	aflog.WarningLog.SetOutput(w)
+	return func() { aflog.WarningLog.SetOutput(io.Discard) }
+}
+
 func hasEnvKey(env []string, key string) bool {
 	for _, kv := range env {
 		if strings.HasPrefix(kv, key+"=") {
@@ -679,20 +981,61 @@ func hasEnvKey(env []string, key string) bool {
 	return false
 }
 
-// assertProcessGone waits for pid to disappear. Teardown SIGTERMs then SIGKILLs
-// the group, so a well-behaved child exits promptly; this tolerates the schedule.
+// assertProcessGone waits for pid to stop EXECUTING. Teardown SIGTERMs then
+// SIGKILLs the group, so a well-behaved child exits promptly; this tolerates the
+// schedule.
+//
+// A zombie counts as gone, and that is the honest reading of what the supervisor
+// promises. It Waits its DIRECT child, so the leader's pid really is reaped and
+// signal 0 turns ESRCH. But a process the editor itself spawned is a GRANDchild:
+// nothing on this side can Wait it, so the group SIGKILL leaves it reparented to
+// PID 1 and `<defunct>` until PID 1 reaps it. Signal 0 keeps succeeding for that
+// corpse, so signal 0 ALONE makes this test assert something the supervisor never
+// guaranteed — that somebody reaped the descendant — and it fails wherever PID 1
+// does not reap (a bare `docker run`, whose PID 1 is the test binary itself, since
+// run-tests.sh `exec`s go test; the sanctioned `make test-container` passes only
+// because it runs --init/tini). The supervisor's guarantee is that the descendant
+// stops running, and state Z satisfies it.
+//
+// Contrast TestStartDaemonChildReapsExitedChild (#816), where af IS the parent and
+// must reap: a zombie there is the bug, and signal 0 is the right detector.
 func assertProcessGone(t *testing.T, pid int) {
 	t.Helper()
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
-		// Signal 0 probes existence. The child is reaped by the supervisor's Wait,
-		// so a live pid here is a real leak, not a zombie.
+		// Signal 0 probes existence: it succeeds for a live process AND for a
+		// zombie, so it only rules out a leak together with the Z check below.
 		if err := syscall.Kill(pid, 0); err != nil {
+			return
+		}
+		if processIsZombie(pid) {
 			return
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
 	t.Fatalf("the editor (pid %d) is still running; it leaked", pid)
+}
+
+// processIsZombie reports whether pid is a corpse awaiting a reap (state Z) —
+// dead, executing nothing, holding only its process-table slot.
+//
+// Linux-only, reading the state field of /proc/<pid>/stat. Where /proc is absent
+// this reports false and leaves the signal-0 probe exactly as it was, which is
+// right on those systems: their PID 1 reaps orphans, so the zombie window this
+// exists for does not stay open.
+func processIsZombie(pid int) bool {
+	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
+	if err != nil {
+		return false // raced with the reap, or no /proc; the signal-0 probe decides
+	}
+	// Format: `pid (comm) state ...`. comm can itself contain spaces and ')', so
+	// anchor on the LAST ')' — same parse as internal/proctree.readStat.
+	end := strings.LastIndexByte(string(data), ')')
+	if end < 0 || end+2 > len(data) {
+		return false
+	}
+	fields := strings.Fields(string(data[end+2:]))
+	return len(fields) > 0 && fields[0] == "Z"
 }
 
 func unixGetsid(pid int) (int, error) {
