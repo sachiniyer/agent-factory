@@ -10,6 +10,7 @@ import (
 	"github.com/sachiniyer/agent-factory/apiclient"
 	"github.com/sachiniyer/agent-factory/apiproto"
 	"github.com/sachiniyer/agent-factory/daemon"
+	"github.com/sachiniyer/agent-factory/internal/testguard"
 	"github.com/sachiniyer/agent-factory/session"
 
 	"github.com/stretchr/testify/require"
@@ -76,7 +77,10 @@ func renderListJSON(t *testing.T) string {
 // dials it, decodes, and hands the result to the identical rendering path. Equal
 // stdout bytes prove the transport swap is invisible to the CLI surface.
 func TestSessionsListJSON_ByteParity_APIClientVsNetRPC(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	// SocketTempDir, not t.TempDir: this test binds a real daemon-http.sock inside
+	// this home, and t.TempDir's test-name-bearing path overruns sun_path on macOS
+	// (#1940).
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	canned := parityInstances()
 
 	// --- net/rpc side: SnapshotNoSpawn's success output is exactly its input. ---

@@ -5,12 +5,12 @@ import (
 	"encoding/json"
 	"net"
 	"net/http"
-	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/sachiniyer/agent-factory/apiproto"
 	"github.com/sachiniyer/agent-factory/daemon"
+	"github.com/sachiniyer/agent-factory/internal/testguard"
 	"github.com/sachiniyer/agent-factory/session"
 )
 
@@ -21,7 +21,7 @@ import (
 // than a mock agreeing with itself, exactly like snapshotServer does for reads.
 func routeServer(t *testing.T, method string, handle func(body []byte) apiproto.Envelope) *Client {
 	t.Helper()
-	sockPath := filepath.Join(t.TempDir(), "daemon-http.sock")
+	sockPath := testguard.SocketPath(t, "daemon-http.sock")
 	ln, err := net.Listen("unix", sockPath)
 	if err != nil {
 		t.Fatalf("listen unix: %v", err)
@@ -156,7 +156,7 @@ func TestControlError_SurfacesEnvelopeMessage(t *testing.T) {
 // nothing listening yields a TransportError — the signal the TUI retries while a
 // just-spawned daemon's HTTP socket finishes binding.
 func TestTransportError_OnUnreachableSocket(t *testing.T) {
-	c := NewWithSocket(filepath.Join(t.TempDir(), "does-not-exist.sock"))
+	c := NewWithSocket(testguard.SocketPath(t, "does-not-exist.sock"))
 	err := c.KillSession(context.Background(), daemon.KillSessionRequest{Title: "x"})
 	if err == nil {
 		t.Fatal("want an error dialing a dead socket")

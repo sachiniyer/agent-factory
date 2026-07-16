@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"net"
 	"net/http"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -16,6 +15,7 @@ import (
 	"github.com/sachiniyer/agent-factory/agentproto"
 	"github.com/sachiniyer/agent-factory/apiproto"
 	"github.com/sachiniyer/agent-factory/daemon"
+	"github.com/sachiniyer/agent-factory/internal/testguard"
 )
 
 // previewServer stands up a Unix-socket HTTP server answering POST /v1/Preview
@@ -23,7 +23,7 @@ import (
 // last request it saw (so a test can assert the tab/full/title were carried).
 func previewServer(t *testing.T, handle func(daemon.PreviewRequest) apiproto.Envelope) (*Client, *daemon.PreviewRequest) {
 	t.Helper()
-	sockPath := filepath.Join(t.TempDir(), "daemon-http.sock")
+	sockPath := testguard.SocketPath(t, "daemon-http.sock")
 	ln, err := net.Listen("unix", sockPath)
 	if err != nil {
 		t.Fatalf("listen unix: %v", err)
@@ -86,7 +86,7 @@ func TestPreview_GoneSurfacesFlag(t *testing.T) {
 // header back as the starting cursor. A minimal echo server accepts the WS and
 // replies with a PTY_OUT frame.
 func TestDialStream_HandshakeCarriesQueryAndStartSeq(t *testing.T) {
-	sockPath := filepath.Join(t.TempDir(), "daemon-http.sock")
+	sockPath := testguard.SocketPath(t, "daemon-http.sock")
 	ln, err := net.Listen("unix", sockPath)
 	if err != nil {
 		t.Fatalf("listen unix: %v", err)

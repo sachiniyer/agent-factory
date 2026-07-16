@@ -14,6 +14,7 @@ import (
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/daemon"
+	"github.com/sachiniyer/agent-factory/internal/testguard"
 	"github.com/sachiniyer/agent-factory/session"
 
 	"github.com/spf13/cobra"
@@ -458,7 +459,10 @@ func TestSessionsSendPrompt_HonorsRepoScoping(t *testing.T) {
 // DeliverPrompt path (so a target that pops into existence concurrently is
 // delivered into, not dropped) rather than doing its own check-then-create.
 func TestSessionsSendPrompt_CreateRoutesThroughDeliverPrompt(t *testing.T) {
-	tmp := t.TempDir()
+	// SocketTempDir, not t.TempDir: this test's daemon binds a socket inside this
+	// home, and t.TempDir's test-name-bearing path overruns sun_path on macOS
+	// (#1940).
+	tmp := testguard.SocketTempDir(t)
 	t.Setenv("AGENT_FACTORY_HOME", tmp)
 
 	repoRoot := filepath.Join(tmp, "repo")

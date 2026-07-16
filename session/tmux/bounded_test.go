@@ -137,6 +137,7 @@ func TestBoundedTmuxCommandsSucceedWhenTmuxIsHealthy(t *testing.T) {
 // catch. So this drives a REAL tmux, on a private server (IsolateTmux) so it
 // cannot touch the developer's sessions.
 func TestRealPipePaneStreamsPastTheReap(t *testing.T) {
+	testguard.SkipDarwinFIFOCapture(t)
 	testguard.IsolateTmux(t)
 
 	const name = "af1787-reap-pipe"

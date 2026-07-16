@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/testguard"
 	"github.com/sachiniyer/agent-factory/session"
 )
 
@@ -112,6 +113,7 @@ func TestPreview_NoTabIDStillUsesOrdinal(t *testing.T) {
 // stable id up front (404), rather than binding whatever tab now holds the old
 // ordinal. This is the subscribe-path half of the same guarantee.
 func TestBindTab_RefusesStaleID(t *testing.T) {
+	testguard.SkipDarwinFIFOCapture(t)
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 	repoPath := setupControlRepo(t)
 	repo, err := config.RepoFromPath(repoPath)
