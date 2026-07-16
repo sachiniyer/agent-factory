@@ -817,6 +817,32 @@ func TestWebTabProxy_RedirectLocationStaysInPrefix(t *testing.T) {
 	}
 }
 
+// TestWebTabProxy_RedirectLocationKeepsEncodedLeadingSlash is the end-to-end proof
+// of the leading-%2F fix, on the surface it actually reaches the user: an upstream
+// 302 whose Location's FIRST segment is an encoded slash must arrive at the browser
+// still encoded.
+//
+// Flattening it is not cosmetic — /%2Ffoo and //foo are different upstream routes,
+// so the browser would follow the redirect to a resource the app never named, and
+// the proxy would forward that wrong path back upstream. This is the same bug class
+// the request direction already guards (TestWebTabProxy_PreservesEncodedSlash);
+// this closes it on the response direction.
+func TestWebTabProxy_RedirectLocationKeepsEncodedLeadingSlash(t *testing.T) {
+	upstream := redirectingUpstream(t, http.StatusFound, "/%2Ffoo")
+	mux, id, tabID := newWebTabProxyFixture(t, upstream.URL)
+
+	rec := proxyGet(t, mux, id, tabID, "some/path")
+
+	if rec.Code != http.StatusFound {
+		t.Fatalf("status = %d, want 302", rec.Code)
+	}
+	want := fmt.Sprintf("/v1/webtab/%s/%s/%%2Ffoo", id, tabID)
+	if got := rec.Header().Get("Location"); got != want {
+		t.Fatalf("Location = %q, want %q — the encoded leading slash was flattened, "+
+			"pointing the browser at a route the app never named", got, want)
+	}
+}
+
 // TestWebTabProxy_AbsoluteSelfRedirectRewritten covers the app redirecting to its
 // OWN absolute URL — equally common, and equally unreachable for a remote viewer,
 // since the upstream origin is loopback on the daemon's machine. The path is kept
@@ -986,6 +1012,17 @@ func TestRewriteUpstreamRef(t *testing.T) {
 		{name: "same origin, host case-insensitive", ref: "http://LOCALHOST:3000/x", want: prefix + "/x"},
 		{name: "protocol relative, same host", ref: "//localhost:3000/x", want: prefix + "/x"},
 		{name: "encoded path kept verbatim", ref: "/a%2Fb", want: prefix + "/a%2Fb"},
+		// The LEADING-position encoded slash is its own case, and the one the
+		// side-by-side join got wrong: url.Parse gives "/%2Ffoo" the decoded Path
+		// "//foo", whose TrimLeft eats BOTH slashes while the escaped form loses only
+		// its one real slash. Path and RawPath then disagreed, net/url dropped the raw
+		// form, and the redirect flattened %2Ffoo to foo — silently sending the browser
+		// to a different upstream route than the app named.
+		{name: "encoded leading slash kept verbatim", ref: "/%2Ffoo", want: prefix + "/%2Ffoo"},
+		{name: "encoded leading slash on a deeper path", ref: "/%2Fa/b.css", want: prefix + "/%2Fa/b.css"},
+		{name: "encoded leading slash on an absolute self-redirect",
+			ref: "http://localhost:3000/%2Ffoo", want: prefix + "/%2Ffoo"},
+		{name: "encoded leading slash with a query", ref: "/%2Ffoo?a=1", want: prefix + "/%2Ffoo?a=1"},
 		// The default port is implicit on one side and explicit on the other; they
 		// name the same server either way.
 		{name: "default port explicit matches implicit target",
