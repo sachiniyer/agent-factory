@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/testguard"
 	"github.com/sachiniyer/agent-factory/session"
 )
 
@@ -36,7 +37,7 @@ func loadWebTab(t *testing.T, repoID string) *session.TabData {
 // Kind=web request with a URL creates a PTY-less web tab, returns its name, and
 // persists it (with the URL, no tmux name) so it survives a restart.
 func TestCreateTab_WebSpawnsPersistsAndReturnsName(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	repoPath := setupControlRepo(t)
 	repo, err := config.RepoFromPath(repoPath)
 	if err != nil {
@@ -78,7 +79,7 @@ func TestCreateTab_WebSpawnsPersistsAndReturnsName(t *testing.T) {
 // TestCreateTab_WebPortConvenience verifies --port <n> becomes
 // http://localhost:<n>.
 func TestCreateTab_WebPortConvenience(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	repoPath := setupControlRepo(t)
 	repo, err := config.RepoFromPath(repoPath)
 	if err != nil {
@@ -104,7 +105,7 @@ func TestCreateTab_WebPortConvenience(t *testing.T) {
 // TestCreateTab_WebRejectsMissingTarget verifies a web tab with neither URL nor
 // port is refused.
 func TestCreateTab_WebRejectsMissingTarget(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	manager, err := NewManager(config.DefaultConfig())
 	if err != nil {
 		t.Fatalf("NewManager: %v", err)
@@ -116,7 +117,7 @@ func TestCreateTab_WebRejectsMissingTarget(t *testing.T) {
 
 // TestCreateTab_WebRejectsUnknownKind verifies an unrecognized --kind is refused.
 func TestCreateTab_WebRejectsUnknownKind(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	manager, err := NewManager(config.DefaultConfig())
 	if err != nil {
 		t.Fatalf("NewManager: %v", err)
@@ -129,7 +130,7 @@ func TestCreateTab_WebRejectsUnknownKind(t *testing.T) {
 // TestCreateTab_WebRejectsRemoteInstance verifies a web tab cannot be created on a
 // remote session (no local worktree to persist/rebuild it against).
 func TestCreateTab_WebRejectsRemoteInstance(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	repoPath := setupControlRepo(t)
 	repo, err := config.RepoFromPath(repoPath)
 	if err != nil {

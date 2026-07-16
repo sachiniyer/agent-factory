@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/testguard"
 	"github.com/sachiniyer/agent-factory/session"
 )
 
@@ -60,7 +61,7 @@ func installInstantBackend(t *testing.T) {
 }
 
 func TestManagerCreateSessionPersistsAndRejectsDuplicate(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	installInstantBackend(t)
 	repoPath := setupControlRepo(t)
 	repo, err := config.RepoFromPath(repoPath)
@@ -129,7 +130,7 @@ func TestManagerCreateSessionPersistsAndRejectsDuplicate(t *testing.T) {
 // counter — even in the test environment where the real FromInstanceData
 // would have failed for lack of tmux, the call itself is recorded.
 func TestManagerCreateSessionAtomicWithRefresh(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	installInstantBackend(t)
 	repoPath := setupControlRepo(t)
 	repo, err := config.RepoFromPath(repoPath)
@@ -217,7 +218,7 @@ func TestManagerCreateSessionAtomicWithRefresh(t *testing.T) {
 // in disk-side validation so they no longer block — the next save will
 // reap them.
 func TestManagerCreateSessionIgnoresLoadingGhost(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	installInstantBackend(t)
 	repoPath := setupControlRepo(t)
 	repo, err := config.RepoFromPath(repoPath)
@@ -256,7 +257,7 @@ func TestManagerCreateSessionIgnoresLoadingGhost(t *testing.T) {
 // a cryptic git error. The daemon now rejects the case-variant up front with
 // a clear conflict error before any worktree or tmux setup runs.
 func TestManagerCreateSessionRejectsCaseVariantTitle(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	installInstantBackend(t)
 	repoPath := setupControlRepo(t)
 
@@ -296,7 +297,7 @@ func TestManagerCreateSessionRejectsCaseVariantTitle(t *testing.T) {
 // through, letting the daemon create a session with an effectively blank name.
 // TrimSpace closes the gap and mirrors the TUI naming flow's check.
 func TestValidateTitleAvailableLockedRejectsWhitespace(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	manager, err := newManagerShell(config.DefaultConfig())
 	if err != nil {
 		t.Fatalf("newManagerShell: %v", err)
@@ -320,7 +321,7 @@ func TestValidateTitleAvailableLockedRejectsWhitespace(t *testing.T) {
 // daemon run must still be rejected when the manager loads fresh and a new
 // CreateSession arrives.
 func TestManagerCreateSessionRejectsCaseVariantTitleFromDisk(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	installInstantBackend(t)
 	repoPath := setupControlRepo(t)
 	repo, err := config.RepoFromPath(repoPath)
@@ -365,7 +366,7 @@ func TestManagerCreateSessionRejectsCaseVariantTitleFromDisk(t *testing.T) {
 // fail with a cryptic git error. The daemon now compares the derived branch and
 // rejects the collision up front.
 func TestManagerCreateSessionRejectsSanitizeCollision(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	installInstantBackend(t)
 	repoPath := setupControlRepo(t)
 
@@ -419,7 +420,7 @@ func TestManagerCreateSessionRejectsSanitizeCollision(t *testing.T) {
 }
 
 func TestControlServerCreateAndKillSession(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	installInstantBackend(t)
 	repoPath := setupControlRepo(t)
 	repo, err := config.RepoFromPath(repoPath)
@@ -474,7 +475,7 @@ func TestControlServerCreateAndKillSession(t *testing.T) {
 // acknowledges with OK and closes the supplied shutdownCh exactly once,
 // which is what RunDaemon's main select uses to exit the daemon loop (#498).
 func TestControlServerShutdownClosesChannel(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	installInstantBackend(t)
 
 	manager, err := NewManager(config.DefaultConfig())
@@ -516,7 +517,7 @@ func TestControlServerShutdownClosesChannel(t *testing.T) {
 // no-ops when no daemon socket exists — the case during `af upgrade` on a
 // fresh install or in CI.
 func TestRequestShutdownNoDaemon(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 
 	result, err := RequestShutdown()
 	if err != nil {
@@ -559,7 +560,7 @@ func TestRequestShutdownStaleSocket(t *testing.T) {
 // TestRequestShutdownSuccess starts a real control server and verifies the
 // end-to-end Shutdown flow: client sees OK, server's shutdownCh closes.
 func TestRequestShutdownSuccess(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	installInstantBackend(t)
 
 	manager, err := NewManager(config.DefaultConfig())
@@ -595,7 +596,7 @@ func TestRequestShutdownSuccess(t *testing.T) {
 // when the shutdown was attempted (#978). It is fully hermetic: the listener
 // binds the tempdir socket and never touches a real daemon.
 func TestRequestShutdownContactedButErrored(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 
 	socketPath, err := DaemonSocketPath()
 	if err != nil {

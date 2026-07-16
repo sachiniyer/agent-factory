@@ -14,6 +14,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/sachiniyer/agent-factory/internal/testguard"
 	aflog "github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/task"
 )
@@ -482,7 +483,7 @@ func TestWatcherReloadReconciles(t *testing.T) {
 // the prompt, the rendered prompt is sent to the target session, and the
 // run status lands on the task via the #664 path.
 func TestDeliverWatchEvent_RendersTemplateAndRecordsStatus(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	repo := setupTaskRepo(t)
 	_, sends := stubTaskDelivery(t)
 	seedTargetSession(t, repo, "captain")
@@ -535,7 +536,7 @@ func TestDeliverWatchEvent_RendersTemplateAndRecordsStatus(t *testing.T) {
 // status persist that raced a concurrent deliverWatchEvent could revert the
 // timestamp; persistWatcherStatus now passes nil so LastRunAt is never touched.
 func TestPersistWatcherStatus_PreservesLastRunAt(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	repo := setupTaskRepo(t)
 	_, sends := stubTaskDelivery(t)
 	seedTargetSession(t, repo, "captain")

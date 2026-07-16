@@ -13,6 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/sachiniyer/agent-factory/cmd/cmd_test"
+	"github.com/sachiniyer/agent-factory/internal/testguard"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 	"github.com/sachiniyer/agent-factory/ui/tree"
@@ -109,7 +110,7 @@ func setupGitRepoForTabs(t *testing.T, workdir string) {
 // since #1100: one agent tab, no shell tab until 't'.
 func freshLocalInstance(t *testing.T, title string) *session.Instance {
 	t.Helper()
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	workdir := t.TempDir()
 	setupGitRepoForTabs(t, workdir)
 

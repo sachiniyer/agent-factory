@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/testguard"
 	"github.com/sachiniyer/agent-factory/session"
 )
 
@@ -34,7 +35,7 @@ func setupOriginMasterRepo(t *testing.T) string {
 
 func createRealKillSession(t *testing.T, title string) (*Manager, config.RepoContext, session.InstanceData) {
 	t.Helper()
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 
 	repoPath := setupOriginMasterRepo(t)
 	repo, err := config.RepoFromPath(repoPath)
@@ -185,7 +186,7 @@ func TestKillSessionCleanBranchProceedsWithoutForce(t *testing.T) {
 // deletion gated on branchCreatedByUs), independent of the removed unmerged-work
 // refusal — so dropping the guard must not endanger the user's repo root.
 func TestKillSessionInPlaceDoesNotDeleteRepoRoot(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	repoPath := setupControlRepo(t)
 	repo, err := config.RepoFromPath(repoPath)
 	if err != nil {

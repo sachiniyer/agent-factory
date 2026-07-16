@@ -23,7 +23,7 @@ import (
 // Preview still addressed by a's id must report GONE — not capture b, which is
 // what leaving the request's stale ordinal in place used to do.
 func TestPreview_RefusesStaleTabID(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	repoPath := setupControlRepo(t)
 	repo, err := config.RepoFromPath(repoPath)
 	if err != nil {
@@ -82,7 +82,7 @@ func TestPreview_RefusesStaleTabID(t *testing.T) {
 // tabs positionally, so its ?tab= ordinal is still honored. The refusal keys on a
 // non-empty-but-unresolvable id, not on "no id".
 func TestPreview_NoTabIDStillUsesOrdinal(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	repoPath := setupControlRepo(t)
 	repo, err := config.RepoFromPath(repoPath)
 	if err != nil {
@@ -114,7 +114,7 @@ func TestPreview_NoTabIDStillUsesOrdinal(t *testing.T) {
 // ordinal. This is the subscribe-path half of the same guarantee.
 func TestBindTab_RefusesStaleID(t *testing.T) {
 	testguard.SkipDarwinFIFOCapture(t)
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	repoPath := setupControlRepo(t)
 	repo, err := config.RepoFromPath(repoPath)
 	if err != nil {
@@ -177,7 +177,7 @@ func TestBindTab_RefusesStaleID(t *testing.T) {
 // the pre-#1738 positional behavior — the binding pins the ordinal it asked for
 // and never consults the id map.
 func TestBindTab_NoTabIDPinsOrdinal(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	repoPath := setupControlRepo(t)
 	repo, err := config.RepoFromPath(repoPath)
 	if err != nil {
@@ -214,7 +214,7 @@ func TestBindTab_NoTabIDPinsOrdinal(t *testing.T) {
 // ordinal here is what reopened the race (#1779): a close between the resolution
 // and the subscribe shifts a different tab under the captured index.
 func TestBindTab_LiveIDBindsIDNativePlane(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	repoPath := setupControlRepo(t)
 	repo, err := config.RepoFromPath(repoPath)
 	if err != nil {
@@ -255,7 +255,7 @@ func TestBindTab_LiveIDBindsIDNativePlane(t *testing.T) {
 // that shifts mid-connection sends later input to whatever now holds the old index
 // (#1779).
 func TestBindTab_IDAddressedNeverPinsAnOrdinal(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	repoPath := setupControlRepo(t)
 	repo, err := config.RepoFromPath(repoPath)
 	if err != nil {

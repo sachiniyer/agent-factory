@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/testguard"
 	"github.com/sachiniyer/agent-factory/session"
 )
 
@@ -20,7 +21,7 @@ import (
 // persisted. Here A and B share the title "worker" but carry different ids;
 // persisting A must error and leave B's row untouched.
 func TestPersistInstanceData_RefusesCrossIdentityClobber(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	repoPath := setupControlRepo(t)
 	repo, err := config.RepoFromPath(repoPath)
 	if err != nil {
@@ -82,7 +83,7 @@ func TestPersistInstanceData_RefusesCrossIdentityClobber(t *testing.T) {
 // same-title rows can momentarily coexist, so a valid id-matched persist must
 // still land — updating the correct row and leaving the unrelated one untouched.
 func TestPersistInstanceData_UpdatesIDMatchedRowDespiteEarlierTitleCollision(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	repoPath := setupControlRepo(t)
 	repo, err := config.RepoFromPath(repoPath)
 	if err != nil {
@@ -149,7 +150,7 @@ func TestPersistInstanceData_UpdatesIDMatchedRowDespiteEarlierTitleCollision(t *
 // instance-map and disk access are properly synchronized against the lifecycle
 // ops.
 func TestSetPRInfo_RaceKillRecreateNeverCorruptsIdentity(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	installInstantBackend(t)
 	repoPath := setupControlRepo(t)
 	repo, err := config.RepoFromPath(repoPath)

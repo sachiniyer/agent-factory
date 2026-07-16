@@ -5,8 +5,9 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/sachiniyer/agent-factory/session"
 	"github.com/stretchr/testify/require"
+
+	"github.com/sachiniyer/agent-factory/session"
 )
 
 // TestAttachInstanceTab_RoutesEverySessionToStream is the regression guard for

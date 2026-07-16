@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/testguard"
 )
 
 // startTestControlServer binds a control server on the temp-home socket path
@@ -42,7 +43,7 @@ func startTestControlServer(t *testing.T) {
 // Post-fix, cleanup pings the socket first and leaves the runtime files alone
 // when a live daemon answers.
 func TestStopDaemon_PreservesNewDaemonSocket(t *testing.T) {
-	tmpHome := t.TempDir()
+	tmpHome := testguard.SocketTempDir(t)
 	t.Setenv("AGENT_FACTORY_HOME", tmpHome)
 
 	// Daemon B: a live control server already bound on the socket path.
@@ -98,7 +99,7 @@ func TestStopDaemon_PreservesNewDaemonSocket(t *testing.T) {
 // directly: with a live daemon answering on the socket, cleanup must leave
 // both runtime files in place.
 func TestCleanupDaemonRuntimeFiles_SkipsLiveDaemonFiles(t *testing.T) {
-	tmpHome := t.TempDir()
+	tmpHome := testguard.SocketTempDir(t)
 	t.Setenv("AGENT_FACTORY_HOME", tmpHome)
 
 	startTestControlServer(t)
@@ -130,7 +131,7 @@ func TestCleanupDaemonRuntimeFiles_SkipsLiveDaemonFiles(t *testing.T) {
 // daemon), cleanup must still remove both runtime files — the #767 guard must
 // not suppress legitimate cleanup.
 func TestCleanupDaemonRuntimeFiles_RemovesDeadFiles(t *testing.T) {
-	tmpHome := t.TempDir()
+	tmpHome := testguard.SocketTempDir(t)
 	t.Setenv("AGENT_FACTORY_HOME", tmpHome)
 
 	socketPath, err := DaemonSocketPath()
@@ -167,7 +168,7 @@ func TestCleanupDaemonRuntimeFiles_RemovesDeadFiles(t *testing.T) {
 // The flock is taken on separate file descriptors, so two goroutines in one
 // process contend on it exactly like two processes would.
 func TestBindControlServerExclusive_ExactlyOneBinds(t *testing.T) {
-	tmpHome := t.TempDir()
+	tmpHome := testguard.SocketTempDir(t)
 	t.Setenv("AGENT_FACTORY_HOME", tmpHome)
 
 	// Hold the winner inside the ping→bind window so the loser provably

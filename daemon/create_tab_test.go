@@ -10,6 +10,7 @@ import (
 
 	"github.com/sachiniyer/agent-factory/cmd/cmd_test"
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/testguard"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/session/git"
 	"github.com/sachiniyer/agent-factory/session/tmux"
@@ -149,7 +150,7 @@ func startedLocalTabInstance(t *testing.T, m *Manager, repoID, repoPath, title, 
 // TestCreateTab_RejectsEmptyCommand verifies an empty command is refused before
 // any session lookup or tab spawn.
 func TestCreateTab_RejectsEmptyCommand(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	manager, err := NewManager(config.DefaultConfig())
 	if err != nil {
 		t.Fatalf("NewManager: %v", err)
@@ -163,7 +164,7 @@ func TestCreateTab_RejectsEmptyCommand(t *testing.T) {
 // TestCreateTab_RejectsRemoteInstance verifies a process tab cannot be created on
 // a remote session — it has no local worktree to run a command in.
 func TestCreateTab_RejectsRemoteInstance(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	repoPath := setupControlRepo(t)
 	repo, err := config.RepoFromPath(repoPath)
 	if err != nil {
@@ -194,7 +195,7 @@ func TestCreateTab_RejectsRemoteInstance(t *testing.T) {
 // successful CreateTab spawns a Process tab, returns its resolved name, and
 // persists it to disk (with command + tmux name) so it survives a restart.
 func TestCreateTab_SpawnsPersistsAndReturnsName(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	repoPath := setupControlRepo(t)
 	repo, err := config.RepoFromPath(repoPath)
 	if err != nil {
@@ -256,7 +257,7 @@ func TestCreateTab_SpawnsPersistsAndReturnsName(t *testing.T) {
 // tab running $SHELL (ignoring Command), returns its auto-derived name, and
 // persists it so it survives a restart.
 func TestCreateTab_ShellSpawnsPersistsAndReturnsName(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	repoPath := setupControlRepo(t)
 	repo, err := config.RepoFromPath(repoPath)
 	if err != nil {
@@ -313,7 +314,7 @@ func TestCreateTab_ShellSpawnsPersistsAndReturnsName(t *testing.T) {
 // remote sessions (no local worktree), matching the process path and the TUI's
 // `t` rule.
 func TestCreateTab_ShellRejectsRemoteInstance(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	repoPath := setupControlRepo(t)
 	repo, err := config.RepoFromPath(repoPath)
 	if err != nil {

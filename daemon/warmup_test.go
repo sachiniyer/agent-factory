@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/testguard"
 )
 
 // The tests in this file cover the #829 startup reorder: the control socket
@@ -21,7 +22,7 @@ import (
 // ReloadTasks (RunDaemon reloads tasks.json after the restore anyway). Once
 // RestoreInstances completes, the same RPCs pass the gate.
 func TestControlServer_WarmupGatesStateRPCs(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	installInstantBackend(t)
 	repoPath := setupControlRepo(t)
 
@@ -98,7 +99,7 @@ func TestControlServer_WarmupGatesStateRPCs(t *testing.T) {
 // after boot, task runs after an upgrade respawn — need no retry logic of
 // their own.
 func TestCallDaemon_RetriesThroughWarmup(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	installInstantBackend(t)
 	repoPath := setupControlRepo(t)
 
@@ -141,7 +142,7 @@ func TestCallDaemon_RetriesThroughWarmup(t *testing.T) {
 // not gated: `af upgrade` must be able to stop a daemon that is still
 // restoring instances.
 func TestControlServer_ShutdownWorksDuringWarmup(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 
 	manager, err := newManagerShell(config.DefaultConfig())
 	if err != nil {
@@ -173,7 +174,7 @@ func TestControlServer_ShutdownWorksDuringWarmup(t *testing.T) {
 // EnsureDaemon's ping succeeds, so it must return nil without launching a
 // second daemon process.
 func TestEnsureDaemon_TreatsWarmingDaemonAsRunning(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 
 	var launches atomic.Int32
 	prevLaunch := launchDaemonProcessFn
@@ -211,7 +212,7 @@ func TestEnsureDaemon_TreatsWarmingDaemonAsRunning(t *testing.T) {
 // return the typed starting error, and a Shutdown RPC ends a warming daemon
 // promptly without saving (or wiping) instance state.
 func TestRunDaemon_BindsSocketBeforeRestoreCompletes(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 
 	restoreStarted := make(chan struct{})
 	restoreGate := make(chan struct{})

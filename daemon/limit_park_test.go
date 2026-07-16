@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/testguard"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/task"
 )
@@ -46,7 +47,7 @@ func installLimitBannerBackend(t *testing.T) {
 // the prompt stashed for resume — not an error that kills the session and records
 // the task run as failed.
 func TestCreateSession_ParksOnUsageLimitBanner(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	installLimitBannerBackend(t)
 	repoPath := setupControlRepo(t)
 	repo, err := config.RepoFromPath(repoPath)
@@ -132,7 +133,7 @@ func stubParkedCreate(t *testing.T) {
 // session parks must return the distinct parked status — not "started" and never
 // an "errored:" value.
 func TestDeliverTaskPrompt_ParksOnUsageLimit(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	repo := setupTaskRepo(t)
 	stubParkedCreate(t)
 
@@ -155,7 +156,7 @@ func TestDeliverTaskPrompt_ParksOnUsageLimit(t *testing.T) {
 // failure side-effect occurs. LastRunAt is set so the TUI shows the run
 // happened and is waiting, not stale and not failed.
 func TestRunTask_ParksNotFailedOnUsageLimit(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	repo := setupTaskRepo(t)
 	stubParkedCreate(t)
 

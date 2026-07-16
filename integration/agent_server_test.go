@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+
 	"github.com/sachiniyer/agent-factory/agentproto"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
 	"github.com/sachiniyer/agent-factory/session/tmux"

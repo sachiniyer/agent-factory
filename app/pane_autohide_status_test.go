@@ -3,10 +3,11 @@ package app
 import (
 	"testing"
 
-	"github.com/sachiniyer/agent-factory/session"
-	"github.com/sachiniyer/agent-factory/ui/layout"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/sachiniyer/agent-factory/session"
+	"github.com/sachiniyer/agent-factory/ui/layout"
 )
 
 // TestPane_OpenHiddenThenResizeWideNoDupNoStaleStatus is the #1557 regression:

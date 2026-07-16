@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/testguard"
 	"github.com/sachiniyer/agent-factory/task"
 
 	"github.com/stretchr/testify/assert"
@@ -33,7 +34,7 @@ func enabledCronTask(id, repoPath string) task.Task {
 // full task list read from tasks.json — the read side of the task
 // single-writer model, and the disk fallback the CLI mirrors.
 func TestControlListTasks_ReadsDisk(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	require.NoError(t, task.AddTask(enabledCronTask("aaaa0001", "")))
 	require.NoError(t, task.AddTask(enabledCronTask("aaaa0002", "")))
 
@@ -49,7 +50,7 @@ func TestControlListTasks_ReadsDisk(t *testing.T) {
 // AND re-arms the scheduler in the same call, so no separate ReloadTasks poke is
 // needed — the write and the schedule refresh happen atomically in the daemon.
 func TestControlAddTask_WritesAndArmsSchedule(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	srv := &controlServer{scheduler: newTaskScheduler()}
 
 	var resp AddTaskResponse
@@ -68,7 +69,7 @@ func TestControlAddTask_WritesAndArmsSchedule(t *testing.T) {
 // TestControlUpdateTask_WritesAndRearms pins that UpdateTask persists the edit
 // and re-arms the schedule set.
 func TestControlUpdateTask_WritesAndRearms(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	require.NoError(t, task.AddTask(enabledCronTask("cccc0001", "")))
 
 	srv := &controlServer{scheduler: newTaskScheduler()}
@@ -88,7 +89,7 @@ func TestControlUpdateTask_WritesAndRearms(t *testing.T) {
 // TestControlRemoveTask_WritesAndDisarms pins that RemoveTask deletes the task
 // and drops it from the scheduler in the same call.
 func TestControlRemoveTask_WritesAndDisarms(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	require.NoError(t, task.AddTask(enabledCronTask("dddd0001", "")))
 
 	srv := &controlServer{scheduler: newTaskScheduler()}
@@ -110,7 +111,7 @@ func TestControlRemoveTask_WritesAndDisarms(t *testing.T) {
 // ready) the write still lands but the reload is skipped — RunDaemon reloads
 // from tasks.json right after the restore, so the change is picked up then.
 func TestControlAddTask_WarmupSkipsReload(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	manager, err := newManagerShell(config.DefaultConfig()) // not ready: RestoreInstances not called
 	require.NoError(t, err)
 	require.False(t, manager.Ready())
@@ -132,7 +133,7 @@ func TestControlAddTask_WarmupSkipsReload(t *testing.T) {
 // so a manual trigger goes through the daemon's create-or-deliver path, proven
 // here by the shared createSessionForTask hook receiving the task's details.
 func TestControlTriggerTask_UsesSharedFiringPath(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	repo := setupTaskRepo(t)
 	creates, _ := stubTaskDelivery(t)
 
@@ -158,7 +159,7 @@ func TestControlTriggerTask_UsesSharedFiringPath(t *testing.T) {
 // manually triggered (it fires from its watch command's stdout), and never
 // reaches session creation.
 func TestControlTriggerTask_RefusesWatchTask(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	creates, _ := stubTaskDelivery(t)
 	require.NoError(t, task.AddTask(task.Task{
 		ID:        "ffff0002",
@@ -179,7 +180,7 @@ func TestControlTriggerTask_RefusesWatchTask(t *testing.T) {
 // TestControlTriggerTask_RefusesDisabledTask pins that a disabled task is
 // refused, whichever caller asks.
 func TestControlTriggerTask_RefusesDisabledTask(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	creates, _ := stubTaskDelivery(t)
 	require.NoError(t, seedDisabledTask("ffff0003"))
 

@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/testguard"
 )
 
 // assertBinaryAgnosticDaemonHint checks that a SIGTERM-fallback recovery
@@ -35,7 +36,7 @@ func assertBinaryAgnosticDaemonHint(t *testing.T, msg string) {
 // TestWriteDaemonPIDFile_AtomicAndPermissions verifies that writing the PID
 // file produces a 0600 file containing the current process's PID (#504).
 func TestWriteDaemonPIDFile_AtomicAndPermissions(t *testing.T) {
-	home := t.TempDir()
+	home := testguard.SocketTempDir(t)
 	t.Setenv("AGENT_FACTORY_HOME", home)
 
 	if err := writeDaemonPIDFile(); err != nil {
@@ -78,7 +79,7 @@ func TestWriteDaemonPIDFile_AtomicAndPermissions(t *testing.T) {
 // shut down via the Shutdown RPC, then verify the PID file was removed when
 // the daemon exited (#504).
 func TestRunDaemonPIDFileLifecycle(t *testing.T) {
-	home := t.TempDir()
+	home := testguard.SocketTempDir(t)
 	t.Setenv("AGENT_FACTORY_HOME", home)
 	installInstantBackend(t)
 	// RunDaemon sweeps legacy per-task units at startup (#782); point the
@@ -208,7 +209,7 @@ func spawnFakeDaemonWithDaemonFlag(t *testing.T) *exec.Cmd {
 // when the PID file points at a live process whose cmdline matches
 // `--daemon`, SIGTERM is delivered and the process exits.
 func TestSigtermFallback_KillsPIDFileDaemon(t *testing.T) {
-	home := t.TempDir()
+	home := testguard.SocketTempDir(t)
 	t.Setenv("AGENT_FACTORY_HOME", home)
 
 	cmd := spawnFakeDaemonWithDaemonFlag(t)
@@ -279,7 +280,7 @@ func TestSigtermFallback_KillsPIDFileDaemon(t *testing.T) {
 // the outcome is deterministic: ShutdownFailed, and the unrelated process
 // remains alive.
 func TestSigtermFallback_IgnoresNonMatchingCmdline(t *testing.T) {
-	home := t.TempDir()
+	home := testguard.SocketTempDir(t)
 	t.Setenv("AGENT_FACTORY_HOME", home)
 	stubDaemonScan(t, nil, nil)
 
@@ -322,7 +323,7 @@ func TestSigtermFallback_IgnoresNonMatchingCmdline(t *testing.T) {
 // daemon up. The scan is stubbed to zero candidates so the stale-PID branch
 // is asserted deterministically regardless of host daemons (#793).
 func TestSigtermFallback_DeadPID(t *testing.T) {
-	home := t.TempDir()
+	home := testguard.SocketTempDir(t)
 	t.Setenv("AGENT_FACTORY_HOME", home)
 	stubDaemonScan(t, nil, nil)
 
@@ -353,7 +354,7 @@ func TestSigtermFallback_DeadPID(t *testing.T) {
 // file and a scan returning several candidates, the fallback must refuse to
 // guess, returning ShutdownFailed with an error naming every candidate PID.
 func TestSigtermFallback_AmbiguousCandidates(t *testing.T) {
-	home := t.TempDir()
+	home := testguard.SocketTempDir(t)
 	t.Setenv("AGENT_FACTORY_HOME", home)
 	stubDaemonScan(t, []int{11111, 22222}, nil)
 
@@ -382,7 +383,7 @@ func TestSigtermFallback_AmbiguousCandidates(t *testing.T) {
 // the fix is to return ShutdownFailed with an actionable error pointing at a
 // binary-name-agnostic `pkill -f -- '--daemon'`.
 func TestSigtermFallback_NoPIDFileAndNoPgrep(t *testing.T) {
-	home := t.TempDir()
+	home := testguard.SocketTempDir(t)
 	t.Setenv("AGENT_FACTORY_HOME", home)
 
 	// Force pgrep off PATH for this test only. Using a fresh, empty temp
@@ -492,7 +493,7 @@ func startPreShutdownFakeDaemon(t *testing.T) func() {
 // half: the rpc-method-not-found branch must reach sigtermFallback cleanly,
 // which is the structural precondition for the upgrade flow to recover.
 func TestRequestShutdown_PreShutdownDaemon(t *testing.T) {
-	home := t.TempDir()
+	home := testguard.SocketTempDir(t)
 	t.Setenv("AGENT_FACTORY_HOME", home)
 
 	stop := startPreShutdownFakeDaemon(t)

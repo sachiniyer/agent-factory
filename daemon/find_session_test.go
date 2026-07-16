@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/testguard"
 	"github.com/sachiniyer/agent-factory/session"
 )
 
@@ -84,7 +85,7 @@ func seedDiskInstance(t *testing.T, repoID, title, repoPath string) {
 // assert findSession returns the tracked canonical, discards the duplicate via
 // CloseAttachOnly (not Kill), and never Kills the canonical.
 func TestFindSessionDiscardsDuplicateWhenCanonicalRaced(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	repoPath := setupControlRepo(t)
 	repo, err := config.RepoFromPath(repoPath)
 	if err != nil {
@@ -155,7 +156,7 @@ func TestFindSessionDiscardsDuplicateWhenCanonicalRaced(t *testing.T) {
 // PTY leaks. The restored Instance is left tracked, AutoYes-enabled, and is not
 // torn down.
 func TestFindSessionRegistersRestoredInstanceWhenUntracked(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	repoPath := setupControlRepo(t)
 	repo, err := config.RepoFromPath(repoPath)
 	if err != nil {
@@ -215,7 +216,7 @@ func TestFindSessionRegistersRestoredInstanceWhenUntracked(t *testing.T) {
 // non-racing path is unchanged: when the canonical Instance is already tracked,
 // findSession returns it without ever building an Instance from disk.
 func TestFindSessionReturnsTrackedInstanceWithoutDiskBuild(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	repoPath := setupControlRepo(t)
 	repo, err := config.RepoFromPath(repoPath)
 	if err != nil {

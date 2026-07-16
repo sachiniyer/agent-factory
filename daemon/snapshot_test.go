@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/testguard"
 	"github.com/sachiniyer/agent-factory/session"
 )
 
@@ -12,7 +13,7 @@ import (
 // in-memory instances for the requested repo only (empty = all repos), serialized
 // to InstanceData and ordered by (repo, title) key for a stable, flicker-free diff.
 func TestManagerSnapshot_RepoScopedAndOrdered(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	m, err := NewManager(config.DefaultConfig())
 	if err != nil {
 		t.Fatalf("NewManager: %v", err)
@@ -58,7 +59,7 @@ func TestManagerSnapshot_RepoScopedAndOrdered(t *testing.T) {
 }
 
 func TestManagerSnapshot_CarriesInFlightOp(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	repoPath := setupControlRepo(t)
 	repo, err := config.RepoFromPath(repoPath)
 	if err != nil {

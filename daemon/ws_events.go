@@ -7,6 +7,7 @@ import (
 	"sync"
 
 	"github.com/coder/websocket"
+
 	"github.com/sachiniyer/agent-factory/agentproto"
 	"github.com/sachiniyer/agent-factory/log"
 )

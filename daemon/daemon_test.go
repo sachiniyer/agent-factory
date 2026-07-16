@@ -486,7 +486,7 @@ func TestStopDaemon_EscalatesToSIGKILL(t *testing.T) {
 // across every repo. The fix logs a WARNING and continues, so valid repos
 // still load on startup.
 func TestRefreshDaemonInstances_SkipsCorruptedRepoAtStartup(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 
 	// Capture warning output so we can assert the corrupted repo was named
 	// in the log line — silent skipping would re-introduce a different bug
@@ -551,7 +551,7 @@ func TestRefreshDaemonInstances_SkipsCorruptedRepoAtStartup(t *testing.T) {
 // running sessions on a transient corrupt write" guarantee, the skip path
 // re-hydrates this repo's prior keys from `existing` into the returned map.
 func TestRefreshDaemonInstances_PreservesExistingForCorruptedRepoOnPoll(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 
 	prevOut := log.WarningLog.Writer()
 	log.WarningLog.SetOutput(io.Discard)
@@ -588,7 +588,7 @@ func TestRefreshDaemonInstances_PreservesExistingForCorruptedRepoOnPoll(t *testi
 // the corrupted-JSON path) and log a warning naming the missing repo. Dropping
 // them would silently abandon a running AutoYes session.
 func TestRefreshDaemonInstances_PreservesInstancesForMissingRepoDirectory(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 
 	var warnBuf bytes.Buffer
 	prevOut := log.WarningLog.Writer()
@@ -662,7 +662,7 @@ func TestRefreshDaemonInstances_PreservesInstancesForMissingRepoDirectory(t *tes
 // startup path (existing == nil): there is no prior in-memory state to
 // preserve, so a missing repo must contribute nothing and not panic.
 func TestRefreshDaemonInstances_StartupDoesNotInventMissingRepos(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	prevOut := log.WarningLog.Writer()
 	log.WarningLog.SetOutput(io.Discard)
 	t.Cleanup(func() { log.WarningLog.SetOutput(prevOut) })
@@ -681,7 +681,7 @@ func TestRefreshDaemonInstances_StartupDoesNotInventMissingRepos(t *testing.T) {
 // error instead of silently skipped, so a title that could be hidden in the
 // bad file doesn't surface as a bare "not found."
 func TestFindInstanceDataByTitle_NamesCorruptedRepoOnNotFound(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 
 	var warnBuf bytes.Buffer
 	prevOut := log.WarningLog.Writer()

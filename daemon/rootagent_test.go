@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/testguard"
 	"github.com/sachiniyer/agent-factory/session"
 )
 
@@ -40,7 +41,7 @@ func findRootInstance(t *testing.T, manager *Manager, repoPath string) *session.
 // one created in place, with the default root profile — resolved claude with
 // --dangerously-skip-permissions ensured — and auto_yes on.
 func TestEnsureRootAgentsCreatesInPlaceRoot(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	seen := installOptionsRecordingBackend(t)
 	repoPath := setupControlRepo(t)
 
@@ -74,7 +75,7 @@ func TestEnsureRootAgentsCreatesInPlaceRoot(t *testing.T) {
 // TestEnsureRootAgentsHonorsProfileOverrides: an explicit program is used
 // verbatim and auto_yes=false is respected.
 func TestEnsureRootAgentsHonorsProfileOverrides(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	seen := installOptionsRecordingBackend(t)
 	repoPath := setupControlRepo(t)
 
@@ -124,7 +125,7 @@ func TestRootAgentProgramOverrideMatrix(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+			t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 			repoPath := setupControlRepo(t)
 			// Every row pins an explicit override entry: with none present,
 			// config loading auto-detects a machine-local claude path into
@@ -146,7 +147,7 @@ func TestRootAgentProgramOverrideMatrix(t *testing.T) {
 // whatever created it — ensure is a strict no-op. Never kill/recreate a live
 // root (#1106 adopt-never-clobber rule).
 func TestEnsureRootAgentsAdoptsLiveRoot(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	seen := installOptionsRecordingBackend(t)
 	repoPath := setupControlRepo(t)
 
@@ -178,7 +179,7 @@ func TestEnsureRootAgentsAdoptsLiveRoot(t *testing.T) {
 // TestEnsureRootAgentsHealsDeadRoot: a root whose status went Dead (tmux
 // vanished — the #1104 outage class) is reaped and re-created in place.
 func TestEnsureRootAgentsHealsDeadRoot(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	seen := installOptionsRecordingBackend(t)
 	repoPath := setupControlRepo(t)
 
@@ -234,7 +235,7 @@ func TestEnsureRootAgentsHealsDeadRoot(t *testing.T) {
 // the ensure loop must treat it exactly like Dead — reap and re-create in
 // place — or the #1128 root self-heal would silently regress.
 func TestEnsureRootAgentsHealsLostRoot(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	seen := installOptionsRecordingBackend(t)
 	repoPath := setupControlRepo(t)
 
@@ -272,7 +273,7 @@ func TestEnsureRootAgentsHealsLostRoot(t *testing.T) {
 // is rejected upstream by ArchiveSession, so this is the defensive backstop for
 // the adopt-never-clobber condition.
 func TestEnsureRootAgentsDoesNotAdoptArchivedRoot(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	seen := installOptionsRecordingBackend(t)
 	repoPath := setupControlRepo(t)
 
@@ -313,7 +314,7 @@ func TestEnsureRootAgentsDoesNotAdoptArchivedRoot(t *testing.T) {
 // The outage this fixes: root killed 10:39, dead until an 11:02 daemon restart
 // (~23 min), because the old kill tombstone was permanent.
 func TestEnsureRootAgentsUserKillHealsAfterGraceWindow(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	seen := installOptionsRecordingBackend(t)
 	repoPath := setupControlRepo(t)
 	cfg := rootTestConfig(repoPath, config.RootAgentConfig{})
@@ -386,7 +387,7 @@ func TestEnsureRootAgentsUserKillHealsAfterGraceWindow(t *testing.T) {
 // rootKilledAt, re-creates the root on the very next tick and the user's stop
 // is never honored at all.
 func TestFinishUserKillArmsRootGraceWindow(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	seen := installOptionsRecordingBackend(t)
 	repoPath := setupControlRepo(t)
 	cfg := rootTestConfig(repoPath, config.RootAgentConfig{})
@@ -449,7 +450,7 @@ func TestFinishUserKillArmsRootGraceWindow(t *testing.T) {
 // resolved dead root-A must not delete a newly self-healed root-B that reused
 // the reserved title while the stale kill was waiting on the session op lock.
 func TestKillDeadRootDoesNotDeleteSelfHealedRoot(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	seen := installOptionsRecordingBackend(t)
 	repoPath := setupControlRepo(t)
 	cfg := rootTestConfig(repoPath, config.RootAgentConfig{})
@@ -551,7 +552,7 @@ func TestKillDeadRootDoesNotDeleteSelfHealedRoot(t *testing.T) {
 // ensure must wait for the next tick instead of falling through to CreateSession
 // and recording a backoff-causing create failure against the still-owned title.
 func TestEnsureRootAgentsBusyReapSkipDoesNotCreateOrBackoff(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	seen := installOptionsRecordingBackend(t)
 	repoPath := setupControlRepo(t)
 	cfg := rootTestConfig(repoPath, config.RootAgentConfig{})
@@ -613,7 +614,7 @@ func TestEnsureRootAgentsBusyReapSkipDoesNotCreateOrBackoff(t *testing.T) {
 // stop, and this proves the loop does not spin-spawn roots for unconfigured
 // repos (#1223).
 func TestEnsureRootAgentsDoesNotHealUnconfiguredRoot(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	seen := installOptionsRecordingBackend(t)
 	repoPath := setupControlRepo(t)
 
@@ -656,7 +657,7 @@ func TestEnsureRootAgentsDoesNotHealUnconfiguredRoot(t *testing.T) {
 // the 2026-07-03 tmux-server outage), and the first attempt after the cause
 // clears must heal the root with no daemon restart.
 func TestEnsureRootAgentsKeepsRetryingAndHeals(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	installInstantBackend(t)
 
 	// Zero backoff so every EnsureRootAgents call is an attempt.
@@ -716,7 +717,7 @@ func TestEnsureRootAgentsKeepsRetryingAndHeals(t *testing.T) {
 // TestEnsureRootAgentsBacksOffBetweenFailures: after one failure the next
 // pass inside the backoff window must not attempt again.
 func TestEnsureRootAgentsBacksOffBetweenFailures(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	installInstantBackend(t)
 
 	prevBase := rootEnsureBackoffBase
@@ -745,7 +746,7 @@ func TestEnsureRootAgentsBacksOffBetweenFailures(t *testing.T) {
 // creation surface funnels through (TUI, CLI, API, task spawns, DeliverPrompt
 // auto-creates) rejects the reserved title, case-insensitively.
 func TestCreateSessionRejectsReservedRootTitle(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	installInstantBackend(t)
 	repoPath := setupControlRepo(t)
 
@@ -773,7 +774,7 @@ func TestCreateSessionRejectsReservedRootTitle(t *testing.T) {
 // used by task spawns) never lands on the reserved name — it skips to the
 // next suffix instead of erroring, so a task named "root" still runs.
 func TestCreateSessionTitleBaseRootSkipsReserved(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	installInstantBackend(t)
 	repoPath := setupControlRepo(t)
 
@@ -799,7 +800,7 @@ func TestCreateSessionTitleBaseRootSkipsReserved(t *testing.T) {
 // carries it, so an RPC CreateSession for "root" is rejected even though the
 // in-process ensure path can create it.
 func TestCreateSessionRPCCannotSetAllowReserved(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	installInstantBackend(t)
 	repoPath := setupControlRepo(t)
 
@@ -832,7 +833,7 @@ func TestCreateSessionRPCCannotSetAllowReserved(t *testing.T) {
 // SEND into a live root (that is how tasks reach it) but must not auto-create
 // one where the ensure loop owns creation.
 func TestDeliverPromptCannotAutoCreateRoot(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	installInstantBackend(t)
 	repoPath := setupControlRepo(t)
 
@@ -859,7 +860,7 @@ func TestDeliverPromptCannotAutoCreateRoot(t *testing.T) {
 // loop without any RPC asking for it. Hermetic — temp home, fake backend,
 // stubbed legacy-unit sweep, private socket under the temp home.
 func TestRunDaemonEnsuresRootAgent(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	installInstantBackend(t)
 	stubLegacyUnitSweep(t)
 	repoPath := setupControlRepo(t)
@@ -903,7 +904,7 @@ func TestRunDaemonEnsuresRootAgent(t *testing.T) {
 // root, prompt delivery to it works — the path the captain-events watch task
 // uses.
 func TestDeliverPromptSendsIntoEnsuredRoot(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	installInstantBackend(t)
 	repoPath := setupControlRepo(t)
 

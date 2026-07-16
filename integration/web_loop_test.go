@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+
 	"github.com/sachiniyer/agent-factory/agentproto"
 )
 

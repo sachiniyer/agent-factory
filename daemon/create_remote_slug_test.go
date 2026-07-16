@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/testguard"
 	"github.com/sachiniyer/agent-factory/session"
 )
 
@@ -23,7 +24,7 @@ import (
 // daemon-side validation — the TUI's FindSlugCollision pre-check never runs for
 // it — so the daemon must reject the second create itself.
 func TestCreateSessionRejectsRemoteSlugCollisionWithInMemoryInstance(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	repoPath := setupControlRepo(t)
 	repo, err := config.RepoFromPath(repoPath)
 	if err != nil {

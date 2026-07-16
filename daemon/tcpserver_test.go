@@ -12,9 +12,11 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+	"github.com/stretchr/testify/require"
+
 	"github.com/sachiniyer/agent-factory/agentproto"
 	"github.com/sachiniyer/agent-factory/config"
-	"github.com/stretchr/testify/require"
+	"github.com/sachiniyer/agent-factory/internal/testguard"
 )
 
 // TestTCPListener_HTTP_TokenRoundTrip is the PR3 payoff, now HTTP-only: a real
@@ -22,7 +24,7 @@ import (
 // REST + WS both accept a correct token over http/ws and reject a missing/wrong
 // one, with no TLS anywhere (the client is a bare http.Client).
 func TestTCPListener_HTTP_TokenRoundTrip(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 
 	cfg := config.DefaultConfig()
 	cfg.ListenAddr = "127.0.0.1:0" // :0 ⇒ the kernel picks a free port
@@ -127,7 +129,7 @@ func TestTCPListener_HTTP_TokenRoundTrip(t *testing.T) {
 // page that will not load), while the /v1/ data plane stays token-gated on the
 // exact same listener. It also asserts the strict CSP the static handler sets.
 func TestTCPListener_ServesWebShellUnauthed(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 
 	cfg := config.DefaultConfig()
 	cfg.ListenAddr = "127.0.0.1:0"
@@ -181,7 +183,7 @@ func TestTCPListener_ServesWebShellUnauthed(t *testing.T) {
 // exemption holds through the full webShellHandler + gate stack, not just the
 // handler unit test.
 func TestTCPListener_LoopbackExempt(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 
 	cfg := config.DefaultConfig()
 	cfg.ListenAddr = "127.0.0.1:0"
@@ -226,7 +228,7 @@ func TestTCPListener_LoopbackExempt(t *testing.T) {
 // tighten-up — it proves a local process WITHOUT the token is rejected while the
 // same request WITH the token is allowed, through the full gate stack.
 func TestTCPListener_RequireLoopbackToken(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 
 	cfg := config.DefaultConfig()
 	cfg.ListenAddr = "127.0.0.1:0"
@@ -281,7 +283,7 @@ func TestTCPListener_RequireLoopbackToken(t *testing.T) {
 // DefaultConfig() carries the loopback listen_addr, so startHTTPServer binds the
 // HTTP TCP listener with no config at all — and generates NO cert on disk.
 func TestStartHTTPServer_WebOnByDefault(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	cfg := config.DefaultConfig()
 	require.Equal(t, "127.0.0.1:8443", cfg.ListenAddr,
 		"default config must serve the web UI on loopback")
@@ -306,7 +308,7 @@ func TestStartHTTPServer_WebOnByDefault(t *testing.T) {
 // listen_addr="" leaves ONLY the unix socket bound and opens no TCP port —
 // byte-identical to the pre-Phase-3 daemon.
 func TestStartHTTPServer_NoTCPWhenDisabled(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	cfg := config.DefaultConfig()
 	cfg.ListenAddr = "" // explicit opt-out disables the web server
 	m, err := NewManager(cfg)
@@ -322,7 +324,7 @@ func TestStartHTTPServer_NoTCPWhenDisabled(t *testing.T) {
 // startHTTPServer still returns a live daemon — the web server is skipped, never
 // crashes the control plane. The bound unix socket keeps working.
 func TestStartHTTPServer_BindConflictNonFatal(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 
 	// Occupy a port, then point the daemon's web listener straight at it so the
 	// bind is guaranteed to fail with EADDRINUSE.

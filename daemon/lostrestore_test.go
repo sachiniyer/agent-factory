@@ -18,6 +18,7 @@ import (
 
 	"github.com/sachiniyer/agent-factory/cmd/cmd_test"
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/testguard"
 	aflog "github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
 	sessiongit "github.com/sachiniyer/agent-factory/session/git"
@@ -516,7 +517,7 @@ func (b *raceBackend) counts() (kills, recovers int) {
 // tracked session titled title, returning the manager, repoID, and instance.
 func installRaceBackend(t *testing.T, backend *raceBackend, title string) (*Manager, string, *session.Instance) {
 	t.Helper()
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	restore := session.SetBackendFactoryForTest(func(opts session.InstanceOptions, absPath string) (session.Backend, error) {
 		fake := session.NewFakeBackend()
 		fake.CompleteStart()

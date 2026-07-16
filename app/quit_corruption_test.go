@@ -4,9 +4,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/sachiniyer/agent-factory/config"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/sachiniyer/agent-factory/config"
 )
 
 // TestHandleQuit_ReachesQuitWithCorruptedInstances guards #938 under the

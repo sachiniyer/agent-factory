@@ -7,10 +7,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/testguard"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/session/tmux"
-	"github.com/stretchr/testify/require"
 )
 
 func writeDaemonCodexRolloutFile(t *testing.T, codexHome, name string) {
@@ -21,7 +23,7 @@ func writeDaemonCodexRolloutFile(t *testing.T, codexHome, name string) {
 }
 
 func TestCaptureAgentConversationPersistsCodexRolloutID(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	codexHome := t.TempDir()
 	t.Setenv("CODEX_HOME", codexHome)
 	repoPath := setupControlRepo(t)

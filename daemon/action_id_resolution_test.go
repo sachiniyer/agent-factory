@@ -6,6 +6,7 @@ import (
 
 	"github.com/sachiniyer/agent-factory/agentproto"
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/testguard"
 	"github.com/sachiniyer/agent-factory/session"
 )
 
@@ -18,7 +19,7 @@ import (
 // could hit the wrong repo's session.
 func createDuplicateTitleSessions(t *testing.T, title string) (*Manager, config.RepoContext, session.InstanceData, config.RepoContext, session.InstanceData) {
 	t.Helper()
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 
 	cfg := config.DefaultConfig()
 	cfg.ProgramOverrides = map[string]string{"claude": "sh -c 'echo agent-ready; exec sleep 600'"}

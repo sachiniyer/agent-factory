@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sachiniyer/agent-factory/internal/testguard"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/task"
 )
@@ -180,7 +181,7 @@ func TestDeliverCronTaskPrompt_CatchesUpOnDetach(t *testing.T) {
 	}
 	t.Cleanup(func() { deliverPromptForTask = origDeliver })
 
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	tsk := &task.Task{ID: "aa158601", TargetSession: "captain", ProjectPath: t.TempDir(), Prompt: "cron-event"}
 
 	done := make(chan struct{})
@@ -235,7 +236,7 @@ func TestRunTask_CronFiresCoalesceDuringDefer(t *testing.T) {
 	cronDeferPollInterval = 5 * time.Millisecond
 	t.Cleanup(func() { cronDeferPollInterval = origPoll })
 
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	repo := setupTaskRepo(t)
 	if err := task.AddTask(task.Task{
 		ID:            "cccc1586",
@@ -339,7 +340,7 @@ func TestDeliverCronTaskPrompt_NeverPastesWhileAttached(t *testing.T) {
 	}
 	t.Cleanup(func() { deliverPromptForTask = origDeliver })
 
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	tsk := &task.Task{ID: "aa158602", TargetSession: "captain", ProjectPath: t.TempDir(), Prompt: "cron-event"}
 
 	done := make(chan struct{})

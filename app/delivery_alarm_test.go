@@ -5,8 +5,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/stretchr/testify/require"
+
+	"github.com/sachiniyer/agent-factory/daemon"
 )
 
 // TestApplyDeliveryAlarms_RaisesAndClearsBanner drives the TUI half of #1238

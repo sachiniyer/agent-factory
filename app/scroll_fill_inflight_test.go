@@ -5,9 +5,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/session"
-	"github.com/stretchr/testify/require"
 )
 
 // TestPanesRefreshNoRedundantScrollFillCapture is the #1709 regression: while a

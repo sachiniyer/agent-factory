@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/testguard"
 )
 
 // TestAcquireHomeLock_SecondFailsFastAndFreesOnRelease pins the core singleton
@@ -20,7 +21,7 @@ import (
 // fast with the "already running" *daemonLockHeldError (never blocks), and the
 // lock frees the instant the first holder releases.
 func TestAcquireHomeLock_SecondFailsFastAndFreesOnRelease(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 
 	first, err := acquireHomeLock()
 	if err != nil {
@@ -230,7 +231,7 @@ func TestHelperHoldsHomeLock(t *testing.T) {
 // daemon is already serving the socket, so EnsureDaemon returns immediately
 // without launching a second one.
 func TestEnsureDaemon_NoSpawnWhenLiveDaemonServes(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 
 	startTestControlServer(t)
 	if err := pingDaemon(); err != nil {
