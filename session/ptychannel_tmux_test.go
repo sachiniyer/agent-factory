@@ -97,3 +97,59 @@ func TestTmuxSnapshotRepaintCursorRealTmux(t *testing.T) {
 		t.Fatalf("emulator cursor row %d = %q, want the marker %q (cursor landed on the wrong line)", snap.CursorRow, row, marker)
 	}
 }
+
+// TestClientlessCaptureCloseWakesBlockedRead is the #1943 gate: tearing down the
+// clientless capture must wake a read loop that is parked inside a blocking
+// read(2) on the pipe-pane FIFO. The FIFO is opened O_RDWR and darwin's kqueue
+// cannot poll fifos, so the fd never enters the netpoller and closing it does
+// not interrupt an in-flight read — before the fix, the teardown join below
+// hangs forever, which is exactly how a session delete wedged the daemon
+// (KillSession → ptyBroker.close blocks on captureMu behind the stuck join).
+func TestClientlessCaptureCloseWakesBlockedRead(t *testing.T) {
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skipf("tmux not available: %v", err)
+	}
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skipf("bash not available: %v", err)
+	}
+
+	ts := tmux.NewTmuxSession("fifo-wake-1943", "bash --noprofile --norc -i")
+	if err := ts.Start(t.TempDir()); err != nil {
+		t.Fatalf("start tmux session: %v", err)
+	}
+	t.Cleanup(func() { _ = ts.Close() })
+
+	ch := newTmuxClientlessChannel(ts)
+	rc, err := ch.StartCapture()
+	if err != nil {
+		t.Fatalf("start capture: %v", err)
+	}
+
+	readerDone := make(chan struct{})
+	go func() {
+		defer close(readerDone)
+		buf := make([]byte, 32*1024)
+		for {
+			if _, err := rc.Read(buf); err != nil {
+				return
+			}
+		}
+	}()
+
+	// Let the reader drain the shell's startup output and park inside a
+	// blocking Read with the pane idle — the state a session sits in when the
+	// user deletes it.
+	time.Sleep(300 * time.Millisecond)
+
+	// Mirror ptyBroker's stopCapture teardown: stop the capture, close the
+	// reader, then join the read loop. The join must complete promptly.
+	if err := ch.StopCapture(); err != nil {
+		t.Fatalf("stop capture: %v", err)
+	}
+	_ = rc.Close()
+	select {
+	case <-readerDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("read loop still blocked after StopCapture+Close; capture teardown cannot join a parked FIFO read (#1943)")
+	}
+}
