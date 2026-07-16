@@ -38,12 +38,13 @@ func jsonWrapError(cmd *cobra.Command, jsonMode bool, err error) error {
 	return err
 }
 
-// The `af config` group is a read-only view over the global config
-// (~/.agent-factory/config.toml) so users and scripts can discover the current
-// settings without hand-parsing the TOML (#1192). Writing from the CLI (`config
-// set`) is deliberately not implemented yet: it needs a settable-key allowlist,
-// validation reuse (ValidateProgramEnum et al.), and a comment-preserving TOML
-// write that go-toml/v2's Marshal cannot do — a design pass tracked on #1192.
+// The `af config` group reads and writes the global config
+// (~/.agent-factory/config.toml) so users and scripts can inspect and change
+// settings without hand-parsing the TOML (#1192). `get`/`list` are the read
+// side. `set` is the write side: the settable-key allowlist, the loader's own
+// validation (ValidateProgramEnum et al.), and the surgical in-place edit that
+// preserves comments and ordering (go-toml/v2's Marshal cannot) all live in
+// config/configset.go.
 
 // configJSONFlag switches `af config get/list` from human output to the shared
 // {data,error} envelope. Local to this group (like `af api`'s --json) since
