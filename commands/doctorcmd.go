@@ -12,6 +12,10 @@ var doctorFixFlag bool
 var doctorSetupFlag bool
 var doctorVerboseFlag bool
 
+// doctorJSONFlag switches `af doctor` from the human report to the shared
+// {data,error} envelope, matching `af config`/`af token`'s --json.
+var doctorJSONFlag bool
+
 // doctorCmd is `af doctor` (#1044, #1104): detect orphaned session
 // processes, runaway CPU children, leaked af_ tmux sessions, stale temp
 // agent-factory homes, and daemon problems. Read-only by default; --fix
@@ -40,9 +44,24 @@ accumulate silently on a machine running agent-factory:
   - af_ tmux sessions with no backing session record
   - abandoned agent-factory homes under the temp dir (leaked by tests/debug runs)
   - daemon health: control socket, autostart unit, pid file, binary freshness
+  - client/daemon version skew, and the ways a stale daemon survives an
+    upgrade: a second daemon on this home, an autostart unit launching a
+    different af binary than yours, several af installs at different versions,
+    sockets left behind with no daemon answering, and an autostart unit that
+    is installed but not actually supervising anything
   - remote-hook setup for the current repo: config completeness, hook-script
     presence/executability, and a bounded list_cmd connectivity probe
     (skipped cleanly when no remote backend is configured)
+
+The version-skew check exists because a skewed daemon fails quietly: it keeps
+answering while rejecting fields a newer client sends, which surfaces as
+"unknown field <name>" and a hung UI rather than as an upgrade prompt.
+
+Use --json to emit each check as {name, section, status, detail, remedy,
+actionable} in the shared {data,error} envelope for scripting. Branch on
+"actionable", not on the status: doctor emits advisory warnings (no autostart
+unit, a legacy config that still loads) that carry a remedy while leaving the
+run healthy. Only the actionable rows make it exit nonzero.
 
 High-volume process findings are summarized by default so the actionable
 problem is visible first. Use --verbose to show each process behind those
@@ -60,9 +79,15 @@ Exits 1 when unresolved issues remain, 0 when healthy.`,
 
 		report, err := doctor.Run(doctor.Options{Fix: doctorFixFlag, Setup: doctorSetupFlag, Version: version})
 		if err != nil {
-			return err
+			return jsonWrapError(cmd, doctorJSONFlag, err)
 		}
-		doctor.Render(os.Stdout, report, doctorFixFlag, doctorVerboseFlag)
+		if doctorJSONFlag {
+			if err := doctor.RenderJSON(cmd.OutOrStdout(), report, doctorFixFlag, doctorVerboseFlag); err != nil {
+				return err
+			}
+		} else {
+			doctor.Render(os.Stdout, report, doctorFixFlag, doctorVerboseFlag)
+		}
 		if report.UnresolvedCount() > 0 {
 			// Distinguish "problems found" from cobra usage errors without
 			// printing a redundant error line.
@@ -81,5 +106,7 @@ func init() {
 		"apply safe remediations (kill verified orphans, remove stale temp homes)")
 	doctorCmd.Flags().BoolVar(&doctorVerboseFlag, "verbose", false,
 		"show per-process doctor findings instead of collapsed summaries")
+	doctorCmd.Flags().BoolVar(&doctorJSONFlag, "json", false,
+		"emit each check as JSON in the {data,error} envelope")
 	rootCmd.AddCommand(doctorCmd)
 }

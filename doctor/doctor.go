@@ -28,6 +28,7 @@ import (
 
 	"github.com/sachiniyer/agent-factory/cmd"
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/internal/proctree"
 	"github.com/sachiniyer/agent-factory/log"
 )
@@ -138,6 +139,34 @@ type Options struct {
 	// working directory (defaultRemoteConfig); tests inject a hermetic resolver.
 	remoteConfig func() (*config.RemoteHooks, string, error)
 
+	// The skew checks' injection points (#1044). Every one of them reaches for
+	// real daemon/system state, so each is a func field the tests replace with
+	// a fake: doctor's own tests must never depend on — let alone disturb — the
+	// daemon or the installs on the machine running them.
+	//
+	// daemonHealth resolves daemon liveness and the version it reports;
+	// defaults to daemon.Health.
+	daemonHealth func() daemon.HealthStatus
+	// autostartUnit reads the installed autostart unit; defaults to
+	// daemon.InspectAutostart.
+	autostartUnit func() daemon.AutostartUnitInfo
+	// autostartSupervision probes the service manager; defaults to
+	// daemon.AutostartSupervision.
+	autostartSupervision func() daemon.SupervisionInfo
+	// autostartServesHome reports whether the installed autostart unit's daemon
+	// would serve the home under inspection; defaults to
+	// daemon.AutostartUnitServesHome (#1919).
+	autostartServesHome func(configDir string) (serves bool, installed bool, err error)
+	// selfBinary resolves the path of the binary running this command;
+	// defaults to os.Executable.
+	selfBinary func() (string, error)
+	// binaryCandidates lists af install paths to compare; defaults to
+	// defaultBinaryCandidates.
+	binaryCandidates func() []string
+	// binaryVersion reports the version of the af binary at a path; defaults
+	// to execBinaryVersion.
+	binaryVersion func(path string) (string, error)
+
 	// Escalation windows for --fix kills; default to 2s/2s.
 	killGrace    time.Duration
 	killTermWait time.Duration
@@ -157,6 +186,16 @@ type scanContext struct {
 	// selfAncestors holds our own PID and every ancestor — never proposed
 	// for a kill, no matter what markers they carry.
 	selfAncestors map[int]bool
+	// daemons memoizes the run's daemon scan (see daemonProcs); daemonsScanned
+	// distinguishes "scanned, found none" from "not scanned yet".
+	daemons        []daemonProc
+	daemonsScanned bool
+	// autostart scope memo (see autostartScope): whether the installed unit is
+	// this home's at all.
+	autostartServes    bool
+	autostartInstalled bool
+	autostartScopeErr  error
+	autostartScoped    bool
 }
 
 // applyDefaults resolves every zero-valued option to its production default.
@@ -188,6 +227,27 @@ func (o *Options) applyDefaults() error {
 	}
 	if o.snapshot == nil {
 		o.snapshot = proctree.Snapshot
+	}
+	if o.daemonHealth == nil {
+		o.daemonHealth = daemon.Health
+	}
+	if o.autostartUnit == nil {
+		o.autostartUnit = daemon.InspectAutostart
+	}
+	if o.autostartSupervision == nil {
+		o.autostartSupervision = daemon.AutostartSupervision
+	}
+	if o.autostartServesHome == nil {
+		o.autostartServesHome = daemon.AutostartUnitServesHome
+	}
+	if o.selfBinary == nil {
+		o.selfBinary = resolvedSelfBinary
+	}
+	if o.binaryCandidates == nil {
+		o.binaryCandidates = defaultBinaryCandidates
+	}
+	if o.binaryVersion == nil {
+		o.binaryVersion = execBinaryVersion
 	}
 	return nil
 }
@@ -229,7 +289,18 @@ func Run(opts Options) (*Report, error) {
 		}
 	}
 
-	checkDaemonHealth(ctx, report)
+	// One health probe feeds every daemon check: each call dials the control
+	// socket, and three checks asking the same daemon the same question could
+	// disagree if a restart landed between them.
+	health := ctx.opts.daemonHealth()
+	checkDaemonHealth(ctx, report, health)
+	checkDaemonVersionSkew(ctx, report, health)
+	checkDuplicateDaemons(ctx, report)
+	checkHTTPSocket(ctx, report, health)
+	checkAutostartPath(ctx, report)
+	checkSplitBrainBinaries(ctx, report)
+	checkStaleSockets(ctx, report, health)
+	checkAutostartSupervision(ctx, report)
 	checkOrphanedProcesses(ctx, report)
 	checkRunawayChildren(ctx, report)
 	checkLeakedTmuxSessions(ctx, report)

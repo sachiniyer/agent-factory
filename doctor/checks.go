@@ -25,6 +25,14 @@ func tempDirDefault() string { return os.TempDir() }
 var (
 	daemonProcessArgv   = daemon.ProcessArgv
 	daemonPIDLooksAlive = daemon.PIDLooksAlive
+	// The per-process facts that decide whether a daemon is OURS (#1044).
+	// Injectable for the same reason as the two above: the states that matter —
+	// another user's process, an environ we may not read — cannot be staged by
+	// a test without root, and whether they hold for any given pid depends on
+	// the machine (in a container pid 1 is often the test user itself).
+	daemonProcessEnvLookup = proctree.EnvLookup
+	daemonProcessOwnerUID  = proctree.OwnerUID
+	daemonProcessCwd       = proctree.WorkingDir
 )
 
 // runawayCPUFraction and runawayMinAge define "pegging a core for an
@@ -97,9 +105,9 @@ func killFix(ctx *scanContext, p proctree.Process) func() error {
 
 // checkDaemonHealth reports on the active install's daemon: socket, ping,
 // autostart unit, pid file, and binary freshness. Read-only; never fixable
-// (restarting the daemon is a user decision).
-func checkDaemonHealth(ctx *scanContext, report *Report) {
-	h := daemon.Health()
+// (restarting the daemon is a user decision). Takes the run's shared health
+// probe so every daemon check reasons about one consistent observation.
+func checkDaemonHealth(ctx *scanContext, report *Report, h daemon.HealthStatus) {
 	if h.SocketErr != nil {
 		report.Fail(sectionDaemon, "daemon", fmt.Sprintf("cannot resolve daemon socket path: %v", h.SocketErr),
 			"fix AGENT_FACTORY_HOME and rerun `af doctor`")
@@ -114,11 +122,29 @@ func checkDaemonHealth(ctx *scanContext, report *Report) {
 		report.Fail(sectionDaemon, "daemon", fmt.Sprintf("socket %s exists but the daemon is not responding (%v)", h.SocketPath, h.PingErr),
 			"run `af daemon restart`; if it still fails, remove the stale socket after verifying no daemon is running")
 	}
-	if h.AutostartUnit {
-		report.Pass(sectionDaemon, "autostart", "installed")
-	} else {
+	// "A unit file exists" is not "this home has autostart". There is one unit
+	// per user and it bakes its AGENT_FACTORY_HOME at install time, so under a
+	// non-default AGENT_FACTORY_HOME the installed unit is somebody else's
+	// (#1916/#1919/#1950). h.AutostartUnit only answers the file question, so
+	// the scope gate answers the ownership one.
+	serves, installed, scopeErr := ctx.autostartScope()
+	switch {
+	case scopeErr != nil:
+		report.Warn(sectionDaemon, "autostart", fmt.Sprintf("cannot read the installed autostart unit: %v", scopeErr),
+			"fix the unit file, or reinstall it: af daemon install", true)
+	case !installed:
 		report.Warn(sectionDaemon, "autostart", "not installed",
 			"run `af daemon install` to keep scheduled tasks running across reboots", false)
+	case !serves:
+		// Advisory: running under a non-default AGENT_FACTORY_HOME is a
+		// deliberate act (a sandbox, a second home), and the user is not
+		// obliged to give it autostart.
+		report.Warn(sectionDaemon, "autostart",
+			fmt.Sprintf("the installed autostart unit serves a different agent-factory home, so %s has no supervised daemon",
+				ctx.opts.ConfigDir),
+			"if this home should start at login, install autostart while it is active: af daemon install", false)
+	default:
+		report.Pass(sectionDaemon, "autostart", "installed")
 	}
 	if h.PIDFilePID > 0 && !h.PIDVerified && h.PingErr != nil {
 		report.Warn(sectionDaemon, "daemon.pid", fmt.Sprintf("records pid %d but no agent-factory daemon is running under it", h.PIDFilePID),
@@ -644,31 +670,36 @@ func checkForeignDaemons(ctx *scanContext, report *Report) {
 	if ctx.snap == nil {
 		return
 	}
-	defaultHome := ""
-	if home, err := os.UserHomeDir(); err == nil {
-		defaultHome = filepath.Join(home, ".agent-factory")
-	}
-	activeHome := filepath.Clean(ctx.opts.ConfigDir)
+	// Normalized on both sides (see normalizeHome): a daemon that spells the
+	// active home differently is ours, and calling it foreign would offer a
+	// --fix kill of the live daemon serving this very run.
+	activeHome := normalizeHome(ctx.opts.ConfigDir)
 
-	pids := make([]int, 0, len(ctx.snap))
-	for pid := range ctx.snap {
-		pids = append(pids, pid)
-	}
-	sort.Ints(pids)
-	for _, pid := range pids {
-		if ctx.selfAncestors[pid] {
+	// Shares the run's one daemon scan with checkDuplicateDaemons, which
+	// classifies this home's daemons — the two must agree on which process
+	// serves which home.
+	for _, d := range ctx.daemonProcs() {
+		p := d.proc
+		pid := p.PID
+		home := d.home
+		if d.isSelfAncestor {
+			// Our own ancestor daemon (doctor launched from a watch task, say).
+			// checkDuplicateDaemons still counts it, but it must never be
+			// offered for a kill: that is the daemon running this command.
 			continue
 		}
-		p := ctx.snap[pid]
-		args := daemonProcessArgv(pid)
-		if len(args) == 0 || !daemon.LooksLikeDaemonArgv(args) {
+		if !d.ownedByUs {
+			// Another user's daemon is not ours to report or reap: --fix would
+			// offer a kill that can only fail with EPERM, and on a shared box
+			// their daemon is none of this user's business (#1044).
 			continue
 		}
-		home, ok := proctree.EnvValue(pid, "AGENT_FACTORY_HOME")
-		if !ok || home == "" {
-			home = defaultHome
+		if !d.homeKnown {
+			// The environ was unreadable, so which home this daemon serves is
+			// genuinely unknown. Calling it foreign would be a guess, and --fix
+			// would then offer to kill a process on the strength of that guess.
+			continue
 		}
-		home = filepath.Clean(home)
 		if home == activeHome || home == "" {
 			continue // this install's daemon; covered by checkDaemonHealth
 		}

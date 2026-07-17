@@ -311,6 +311,17 @@ type ResumeStatusPollResponse struct {
 type PingRequest struct{}
 type PingResponse struct {
 	OK bool `json:"ok"`
+	// Version is the af build version the responding daemon is running, so a
+	// client can compare it against its own and detect skew (#1044). It rides
+	// Ping because Ping is the one RPC that answers throughout the daemon's
+	// warm-up, and because Ping already backs GET /v1/health — one field
+	// serves both the control socket and HTTP clients.
+	//
+	// A daemon built before this field existed simply omits it, so a newer
+	// client decodes "". Empty from a *responding* daemon is therefore a
+	// positive skew signal (the daemon predates version reporting, so it is
+	// older than this client), not merely an unknown.
+	Version string `json:"version"`
 }
 
 type ReloadTasksRequest struct{}

@@ -755,9 +755,33 @@ func isAgentFactoryDaemon(pid int) bool {
 // a spaced binary path in argv[0]) can never fabricate or hide a "--daemon" token (#1214).
 func argsHaveDaemonFlag(args []string) bool {
 	for _, a := range args {
-		if a == "--daemon" || strings.HasPrefix(a, "--daemon=") {
+		if a == "--daemon" {
 			return true
 		}
+		value, ok := strings.CutPrefix(a, "--daemon=")
+		if !ok {
+			continue
+		}
+		// `--daemon=false` is a client saying, explicitly, that it is NOT a
+		// daemon. Matching the prefix and calling it one made every such client
+		// a daemon to every caller here: doctor counted it as a duplicate, the
+		// host scan offered it for a kill, and the #1004 pid guard would have
+		// accepted it as ours. The flag's VALUE is the answer; its name is only
+		// where the answer lives.
+		//
+		// Only an explicitly FALSE value flips the answer. An unparseable one
+		// ("--daemon=foo") keeps the long-standing "the form is present, so treat
+		// it as a daemon flag" reading that TestArgsHaveDaemonFlag has pinned
+		// since #342: that case is about recognizing the `--daemon=` FORM (as
+		// against `--daemonize`), and its value is a placeholder, not a boolean.
+		// It is also unobservable in practice — cobra rejects a non-boolean here,
+		// so no such process is ever live to classify — and narrowing a seam that
+		// gates signals on a hypothetical is not worth the blast radius.
+		enabled, err := strconv.ParseBool(value)
+		if err != nil {
+			return true
+		}
+		return enabled
 	}
 	return false
 }

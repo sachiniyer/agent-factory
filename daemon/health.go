@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"fmt"
+	"net"
 	"os"
 	"strconv"
 	"strings"
@@ -18,6 +19,30 @@ type HealthStatus struct {
 	SocketExists bool
 	// PingErr is nil when a daemon answered the control-socket ping.
 	PingErr error
+	// DaemonVersion is the af version the responding daemon reported. It is
+	// empty when nothing answered (PingErr != nil), and — importantly — also
+	// when a daemon answered but predates version reporting. Read it together
+	// with PingErr: answered-but-empty means the daemon is older than any
+	// client that can ask, which is exactly the skew that makes a newer
+	// client's requests fail with "unknown field <name>" (#1044).
+	DaemonVersion string
+	// HTTPSocketPath is the daemon's HTTP/JSON socket location.
+	HTTPSocketPath string
+	// HTTPSocketExists reports whether HTTPSocketPath is present on disk.
+	HTTPSocketExists bool
+	// HTTPListening is whether anything accepts connections on the HTTP socket.
+	//
+	// A ProbeAnswer, not an error, because `err == nil` meant BOTH "the dial
+	// succeeded" and "nobody dialed" — the same ambiguity that let a two-valued
+	// probe fabricate answers, one field over. The zero value is Undetermined,
+	// so a caller that never probed cannot report health it did not observe.
+	//
+	// It is a SEPARATE listener from the control socket, and RunDaemon treats a
+	// failed startHTTPServer as non-fatal — so a daemon can answer the control
+	// socket perfectly while the HTTP socket, which the TUI and every HTTP/web
+	// client dial, is stale or absent. A healthy Ping says nothing about this
+	// (#1044).
+	HTTPListening ProbeAnswer
 	// AutostartUnit reports whether the supervised autostart unit (systemd
 	// user service / launchd agent) is installed — i.e. whether a running
 	// daemon is expected to be unit-managed rather than an ad-hoc child.
@@ -45,7 +70,12 @@ func Health() HealthStatus {
 			h.SocketExists = true
 		}
 	}
-	h.PingErr = pingDaemon()
+	ping, pingErr := pingDaemonResponse()
+	h.PingErr = pingErr
+	if pingErr == nil {
+		h.DaemonVersion = ping.Version
+	}
+	h.HTTPSocketPath, h.HTTPSocketExists, h.HTTPListening = probeHTTPSocket()
 	h.AutostartUnit = AutostartInstalled()
 
 	pidPath, err := daemonPIDFilePath()
@@ -66,6 +96,51 @@ func Health() HealthStatus {
 	}
 	return h
 }
+
+// probeHTTPSocket reports the HTTP socket's path, whether it exists, and
+// whether anything is accepting connections on it.
+//
+// A dial, not a request: it distinguishes the failure that matters — a socket
+// file with no listener behind it, where clients connect and wait — from a
+// healthy listener, without needing a token, a route, or a response body.
+// Bounded by daemonDialTimeout so a wedged listener cannot stall `af doctor`.
+func probeHTTPSocket() (path string, exists bool, listening ProbeAnswer) {
+	path, err := DaemonHTTPSocketPath()
+	if err != nil || path == "" {
+		return "", false, Undetermined(fmt.Errorf("cannot resolve the HTTP socket path: %w", err))
+	}
+	if _, err := os.Stat(path); err != nil {
+		if os.IsNotExist(err) {
+			// Nothing to listen on: a definite answer, not a failure to look.
+			return path, false, AnswerNo()
+		}
+		return path, false, Undetermined(fmt.Errorf("cannot stat %s: %w", path, err))
+	}
+	conn, err := net.DialTimeout("unix", path, daemonDialTimeout)
+	if err != nil {
+		// The socket is there and refused us: nobody is behind it.
+		return path, true, AnswerNo()
+	}
+	_ = conn.Close()
+	return path, true, AnswerYes()
+}
+
+// DaemonSocketNames returns the file names of the Unix sockets a daemon binds
+// inside an agent-factory home. Exported so `af doctor` can look for sockets
+// left behind in a home it was pointed at, rather than only the active one,
+// and so its idea of "a daemon socket" cannot drift from the daemon's own.
+//
+// Names, not paths: a caller joins them onto the home it is inspecting. Callers
+// must also verify the entry really is a socket before acting on it — a name
+// alone proves nothing about the file (see isAbandonedVSCodeSocket).
+func DaemonSocketNames() []string {
+	return []string{daemonSocketFileName, daemonHTTPSocketFileName}
+}
+
+// ControlSocketName is the file name of the control socket — the one Health
+// pings. Exported so a caller enumerating DaemonSocketNames can tell which
+// entry Health already speaks for and avoid reporting it twice.
+func ControlSocketName() string { return daemonSocketFileName }
 
 // LooksLikeDaemonArgv reports whether argv names an agent-factory daemon
 // process (an `af`/`agent-factory` binary carrying a discrete --daemon flag).
