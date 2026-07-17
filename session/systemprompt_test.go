@@ -291,9 +291,24 @@ func TestInjectSystemPrompt_OpencodeRespectsUserConfigEnv(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 	t.Setenv("HOME", t.TempDir())
 
-	resolved := "OPENCODE_CONFIG=/home/me/mine.jsonc opencode"
-	if got := injectSystemPrompt(resolved); got != resolved {
-		t.Errorf("expected a user-set OPENCODE_CONFIG left untouched, got %q", got)
+	for _, resolved := range []string{
+		"OPENCODE_CONFIG=/home/me/mine.jsonc opencode",
+		// `env VAR=v <agent>` is a shape af supports elsewhere (#742), so a user's
+		// OPENCODE_CONFIG can arrive behind an env wrapper too.
+		"env OPENCODE_CONFIG=/home/me/mine.jsonc opencode",
+	} {
+		if got := injectSystemPrompt(resolved); got != resolved {
+			t.Errorf("expected a user-set OPENCODE_CONFIG left untouched, got %q", got)
+		}
+	}
+
+	// The mirror: OPENCODE_CONFIG appearing as an ARGUMENT is not an assignment,
+	// so af must still inject. Guarding this keeps the detector from "fixing" the
+	// case above with a bare strings.Contains, which would silently drop af
+	// guidance for anyone whose prompt mentions the variable.
+	arg := "opencode --prompt 'set OPENCODE_CONFIG=x'"
+	if got := injectSystemPrompt(arg); !strings.HasPrefix(got, "OPENCODE_CONFIG=") {
+		t.Errorf("OPENCODE_CONFIG as an argument is not an assignment; af should still inject, got %q", got)
 	}
 }
 

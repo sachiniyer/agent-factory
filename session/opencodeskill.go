@@ -100,17 +100,34 @@ func ensureOpencodeAfConfig() (string, error) {
 
 // opencodeCarriesConfigEnv reports whether a resolved command already sets
 // OPENCODE_CONFIG itself — e.g. a program_overrides entry like
-// `OPENCODE_CONFIG=~/mine.json opencode`. Shell semantics give the LAST assignment
-// precedence, so prepending af's would be silently overridden by the user's anyway;
-// detecting it lets af say so instead of pretending the guidance landed.
+// `OPENCODE_CONFIG=~/mine.jsonc opencode` or `env OPENCODE_CONFIG=~/mine.jsonc
+// opencode`. Shell semantics give the LAST assignment precedence, so af prepending
+// its own would be overridden by the user's anyway and their config would win
+// either way; detecting it lets af SAY the guidance did not land rather than
+// leaving that silent.
+//
+// The scan stops at the command word, so an OPENCODE_CONFIG=... appearing later as
+// an ARGUMENT (`opencode --prompt 'set OPENCODE_CONFIG=x'`) is correctly not
+// treated as an assignment. A leading `env` is stepped over because `env VAR=v
+// <agent>` is a shape af already supports elsewhere (#742).
+//
+// Accepted limitation: this splits on whitespace rather than shell-tokenizing, so a
+// QUOTED value containing spaces in an assignment BEFORE an OPENCODE_CONFIG one
+// (`FOO='a b' OPENCODE_CONFIG=x opencode`) ends the scan early and misses it. The
+// cost is only the warning: the user's assignment still wins at runtime, so their
+// config is honored regardless. tmux's splitShellTokens would handle it but is
+// package-private, and duplicating a shell tokenizer here to recover a log line is
+// not worth the second parser.
 func opencodeCarriesConfigEnv(resolved string) bool {
 	for _, tok := range strings.Fields(resolved) {
-		if strings.HasPrefix(tok, "OPENCODE_CONFIG=") {
+		switch {
+		case strings.HasPrefix(tok, "OPENCODE_CONFIG="):
 			return true
-		}
-		// Stop at the first non-assignment token: past the command name, an
-		// OPENCODE_CONFIG=... word is an argument, not an env assignment.
-		if !strings.Contains(tok, "=") {
+		case tok == "env" || strings.Contains(tok, "="):
+			// Still in the leading env-assignment run; keep scanning.
+		default:
+			// The command word: anything past here is an argument, not an
+			// assignment.
 			return false
 		}
 	}
