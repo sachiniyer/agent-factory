@@ -1056,7 +1056,7 @@ func TestSkewChecks_HealthyMachine_AllPass(t *testing.T) {
 	}
 	ourAutostartUnit(&opts)
 	opts.autostartSupervision = func() daemon.SupervisionInfo {
-		return daemon.SupervisionInfo{Supported: true, UnitPresent: true, Enabled: daemon.ProbeYes, Active: daemon.ProbeYes}
+		return daemon.SupervisionInfo{Supported: true, UnitPresent: true, Enabled: daemon.AnswerYes(), Active: daemon.AnswerYes()}
 	}
 	opts.selfBinary = func() (string, error) { return bin, nil }
 	opts.binaryCandidates = func() []string { return []string{bin} }

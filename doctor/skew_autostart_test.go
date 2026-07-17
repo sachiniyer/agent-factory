@@ -84,7 +84,7 @@ func TestAutostart_UnitServingAnotherHome_NotTreatedAsOurs(t *testing.T) {
 		return daemon.AutostartUnitInfo{Supported: true, Exists: true, ExecPath: "/usr/local/bin/af"}
 	}
 	opts.autostartSupervision = func() daemon.SupervisionInfo {
-		return daemon.SupervisionInfo{Supported: true, UnitPresent: true, Enabled: daemon.ProbeYes, Active: daemon.ProbeYes}
+		return daemon.SupervisionInfo{Supported: true, UnitPresent: true, Enabled: daemon.AnswerYes(), Active: daemon.AnswerYes()}
 	}
 	opts.selfBinary = func() (string, error) { return "/home/dev/.local/bin/af", nil }
 	opts.binaryVersion = func(string) (string, error) { return "1.0.180", nil }
@@ -113,7 +113,7 @@ func TestAutostart_UnitServingThisHome_IsReported(t *testing.T) {
 	opts.Version = "1.0.192"
 	ourAutostartUnit(&opts)
 	opts.autostartSupervision = func() daemon.SupervisionInfo {
-		return daemon.SupervisionInfo{Supported: true, UnitPresent: true, Enabled: daemon.ProbeYes, Active: daemon.ProbeYes}
+		return daemon.SupervisionInfo{Supported: true, UnitPresent: true, Enabled: daemon.AnswerYes(), Active: daemon.AnswerYes()}
 	}
 
 	report, err := Run(opts)
@@ -304,7 +304,7 @@ func TestAutostartSupervision_UnitUnreadableAndInactive_Warns(t *testing.T) {
 	ourAutostartUnit(&opts)
 	opts.autostartSupervision = func() daemon.SupervisionInfo {
 		return daemon.SupervisionInfo{
-			Supported: true, UnitPresent: true, Active: daemon.ProbeNo, Err: os.ErrPermission,
+			Supported: true, UnitPresent: true, Active: daemon.AnswerNo(), Err: os.ErrPermission,
 		}
 	}
 
@@ -327,8 +327,8 @@ func TestAutostartSupervision_LoadedInWrongDomain_Warns(t *testing.T) {
 	ourAutostartUnit(&opts)
 	opts.autostartSupervision = func() daemon.SupervisionInfo {
 		return daemon.SupervisionInfo{
-			Supported: true, UnitPresent: true, Enabled: daemon.ProbeYes,
-			Domain: "gui/501/com.agent-factory.daemon", LoadedElsewhere: daemon.ProbeYes,
+			Supported: true, UnitPresent: true, Enabled: daemon.AnswerYes(),
+			Domain: "gui/501/com.agent-factory.daemon", LoadedElsewhere: daemon.AnswerYes(),
 			Detail: "loaded outside gui/501/com.agent-factory.daemon",
 		}
 	}
@@ -350,7 +350,7 @@ func TestAutostartSupervision_UnitPresentButInactive_Warns(t *testing.T) {
 	ourAutostartUnit(&opts)
 	opts.autostartSupervision = func() daemon.SupervisionInfo {
 		return daemon.SupervisionInfo{
-			Supported: true, UnitPresent: true, Enabled: daemon.ProbeYes, Active: daemon.ProbeNo,
+			Supported: true, UnitPresent: true, Enabled: daemon.AnswerYes(), Active: daemon.AnswerNo(),
 			Detail: "is-enabled=enabled is-active=inactive",
 		}
 	}
@@ -374,8 +374,8 @@ func TestAutostartSupervision_LoadedButNotRunning_Warns(t *testing.T) {
 	ourAutostartUnit(&opts)
 	opts.autostartSupervision = func() daemon.SupervisionInfo {
 		return daemon.SupervisionInfo{
-			Supported: true, UnitPresent: true, Enabled: daemon.ProbeYes,
-			Loaded: daemon.ProbeYes, Active: daemon.ProbeNo,
+			Supported: true, UnitPresent: true, Enabled: daemon.AnswerYes(),
+			Loaded: daemon.AnswerYes(), Active: daemon.AnswerNo(),
 			Domain: "gui/501/com.agent-factory.daemon",
 			Detail: "loaded in gui/501/com.agent-factory.daemon but no daemon process is running",
 		}
@@ -404,8 +404,8 @@ func TestAutostartSupervision_ProbeFailed_RendersUnknownNotInactive(t *testing.T
 			Supported: true, UnitPresent: true,
 			// Everything unknown, with a cause — what a missing systemctl or a
 			// dead user bus produces.
-			Enabled: daemon.ProbeUnknown, Active: daemon.ProbeUnknown,
-			ProbeErr: errors.New("could not query systemd (is-active): exec: \"systemctl\": executable file not found in $PATH"),
+			Enabled: daemon.Undetermined(errors.New("could not query systemd (is-enabled): exec: \"systemctl\": executable file not found in $PATH")),
+			Active:  daemon.Undetermined(errors.New("could not query systemd (is-active): exec: \"systemctl\": executable file not found in $PATH")),
 		}
 	}
 
@@ -446,10 +446,68 @@ func TestAutostartSupervision_EnabledAndActive_Passes(t *testing.T) {
 	opts := testOptions(t, false)
 	ourAutostartUnit(&opts)
 	opts.autostartSupervision = func() daemon.SupervisionInfo {
-		return daemon.SupervisionInfo{Supported: true, UnitPresent: true, Enabled: daemon.ProbeYes, Active: daemon.ProbeYes}
+		return daemon.SupervisionInfo{Supported: true, UnitPresent: true, Enabled: daemon.AnswerYes(), Active: daemon.AnswerYes()}
 	}
 
 	report, err := Run(opts)
 	require.NoError(t, err)
 	require.Equal(t, StatusPass, findCheck(t, report, "autostart supervision").Status)
+}
+
+// The NOT-FOUND answer must reach the user as its own diagnosis with its own
+// remedy — it is the one the two-valued probe threw away.
+//
+// The unit file is installed but the service manager has no record of it, which
+// means it was never loaded. Reported as "inactive" this sent users to reinstall
+// a unit that was already there; reported as "unknown" it told them nothing. The
+// fix is `systemctl --user daemon-reload`, and only this outcome can say so.
+func TestAutostartSupervision_UnitUnknownToManager_HasItsOwnRemedy(t *testing.T) {
+	testguard.IsolateTmux(t)
+
+	opts := testOptions(t, false)
+	ourAutostartUnit(&opts)
+	opts.autostartSupervision = func() daemon.SupervisionInfo {
+		return daemon.SupervisionInfo{
+			Supported: true, UnitPresent: true,
+			Enabled: daemon.AnswerNotFound(),
+			Active:  daemon.AnswerNotFound(),
+			Detail:  "is-enabled=not-found is-active=not-found",
+		}
+	}
+
+	report, err := Run(opts)
+	require.NoError(t, err)
+
+	c := findCheck(t, report, "autostart supervision")
+	require.Equal(t, StatusWarn, c.Status)
+	require.Contains(t, c.Detail, "no record of it")
+	require.Contains(t, c.Remediation, "daemon-reload",
+		"the fix for a unit systemd never loaded is a reload, not a reinstall")
+	require.NotContains(t, c.Detail, "not running it",
+		"not-found is not the same fact as inactive")
+	require.True(t, c.Problem)
+}
+
+// A daemon that IS running while the manager has no record of the unit: it runs
+// now, but nothing will start it at login.
+func TestAutostartSupervision_RunningButUnitUnknown_StillWarns(t *testing.T) {
+	testguard.IsolateTmux(t)
+
+	opts := testOptions(t, false)
+	ourAutostartUnit(&opts)
+	opts.autostartSupervision = func() daemon.SupervisionInfo {
+		return daemon.SupervisionInfo{
+			Supported: true, UnitPresent: true,
+			Active:  daemon.AnswerYes(),
+			Enabled: daemon.AnswerNotFound(),
+		}
+	}
+
+	report, err := Run(opts)
+	require.NoError(t, err)
+
+	c := findCheck(t, report, "autostart supervision")
+	require.Equal(t, StatusWarn, c.Status)
+	require.Contains(t, c.Detail, "won't start at login")
+	require.True(t, c.Problem)
 }

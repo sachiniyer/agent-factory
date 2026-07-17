@@ -164,17 +164,17 @@ type SupervisionInfo struct {
 	Supported bool
 	// UnitPresent reports whether a unit/plist file exists to supervise.
 	UnitPresent bool
-	// Enabled is systemd's is-enabled; ProbeYes on macOS, where RunAtLoad in
+	// Enabled is systemd's is-enabled; AnswerYes on macOS, where RunAtLoad in
 	// the plist plays that role.
-	Enabled ProbeState
+	Enabled ProbeAnswer
 	// Active reports whether the service manager is currently RUNNING the
 	// daemon — systemd is-active, or a launchd job with a live process.
-	Active ProbeState
+	Active ProbeAnswer
 	// Loaded reports that launchd knows the job in Domain. Loaded without
 	// Active is a real and quiet state: the agent is installed and registered,
 	// so everything looks configured, while no daemon process is running.
-	// ProbeUnknown on Linux, where is-active answers the question directly.
-	Loaded ProbeState
+	// Undetermined on Linux, where is-active answers the question directly.
+	Loaded ProbeAnswer
 	// Domain is the launchd domain target the restart path uses (gui/<uid>);
 	// empty on Linux.
 	Domain string
@@ -182,47 +182,12 @@ type SupervisionInfo struct {
 	// unit file). The unit is present, so this is a problem to report, never a
 	// reason to skip the check.
 	Err error
-	// ProbeErr records why the service manager could not be QUERIED at all —
-	// no binary, no user bus, permission denied, or a manager that never
-	// replied. When set, the states above are ProbeUnknown and must render as
-	// unknown; folding it into a negative is the lie this type exists to stop.
-	ProbeErr error
 	// LoadedElsewhere reports a launchd agent loaded in some domain other than
 	// Domain, so `launchctl kickstart -k gui/<uid>/...` restarts cannot reach
 	// it (#1044).
-	LoadedElsewhere ProbeState
+	LoadedElsewhere ProbeAnswer
 	// Detail carries the service manager's own words for the report.
 	Detail string
-}
-
-// ProbeState is a service-manager answer that can be "we could not ask".
-//
-// Two states are not enough, and the gap is not academic. `systemctl is-active`
-// exits non-zero both when it asked and the answer was "inactive", and when it
-// could not ask at all — no binary, no user bus, permission denied, a wedged
-// manager. Folding the second into the first tells the user their autostart is
-// inert when we have no idea. That is precisely the disease this PR exists to
-// detect — a silent no-op wearing the face of a real answer — so the detector
-// must not have it.
-type ProbeState int
-
-const (
-	// ProbeUnknown is the zero value deliberately: a state nobody managed to
-	// probe reads as unknown, never as a negative.
-	ProbeUnknown ProbeState = iota
-	ProbeYes
-	ProbeNo
-)
-
-func (s ProbeState) String() string {
-	switch s {
-	case ProbeYes:
-		return "yes"
-	case ProbeNo:
-		return "no"
-	default:
-		return "unknown"
-	}
 }
 
 // AutostartSupervision probes the service manager for the installed unit's
@@ -243,152 +208,152 @@ func AutostartSupervision() SupervisionInfo {
 
 	switch autostartGOOS {
 	case "linux":
-		enabled, enabledOut, enabledErr := systemdStateProbe("is-enabled")
-		if enabledErr != nil {
+		enabled, enabledWord := systemdAsk("is-enabled")
+		info.Enabled = enabled
+		if cause := info.Enabled.Cause(); cause != nil {
 			// systemd could not be reached at all, so is-active would fail the
-			// same way for the same reason: asking again buys a second doomed
-			// subprocess and says the same cause twice.
-			info.Enabled, info.Active = ProbeUnknown, ProbeUnknown
-			info.ProbeErr = enabledErr
+			// same way: asking again buys a second doomed subprocess and repeats
+			// one cause. Active stays the zero value — Undetermined — by
+			// construction.
+			info.Active = Undetermined(cause)
 			info.Detail = "is-enabled=unknown is-active=unknown"
 			return info
 		}
-		active, activeOut, activeErr := systemdStateProbe("is-active")
-		info.Enabled, info.Active = enabled, active
-		info.ProbeErr = activeErr
-		info.Detail = fmt.Sprintf("is-enabled=%s is-active=%s", enabledOut, activeOut)
+		active, activeWord := systemdAsk("is-active")
+		info.Active = active
+		// The manager's own words, not our answer names: "failed" and
+		// "inactive" are both No, and the difference is the user's to see.
+		info.Detail = fmt.Sprintf("is-enabled=%s is-active=%s", enabledWord, activeWord)
 	case "darwin":
-		info.Enabled = ProbeYes // RunAtLoad; launchd has no separate enable state
+		info.Enabled = AnswerYes() // RunAtLoad; launchd has no separate enable state
 		info.Domain = launchdDomainTarget()
 
-		out, err := autostartProbeCommand("launchctl", "print", info.Domain)
+		print := autostartProbeCommand("launchctl", "print", info.Domain)
+		out, ok := print.Output()
 		switch {
-		case err == nil:
+		case !ok:
+			// launchctl never answered — missing, killed on the deadline, or
+			// wedged. "Not loaded" is a claim we have not earned.
+			cause := launchdProbeErr("print "+info.Domain, print)
+			info.Loaded, info.LoadedElsewhere, info.Active = Undetermined(cause), Undetermined(cause), Undetermined(cause)
+			info.Detail = "could not query launchd"
+		case print.Succeeded():
 			// print succeeding means launchd KNOWS the job, not that the daemon
 			// is alive: it reports the service's properties, including a state
 			// and last exit status, for a loaded job whose process has stopped.
-			// Equating the two reports a dead daemon as healthy supervision —
-			// on the platform where that failure was actually hit.
-			info.Loaded = ProbeYes
-			info.LoadedElsewhere = ProbeNo
-			if launchdJobRunning(string(out)) {
-				info.Active = ProbeYes
+			info.Loaded, info.LoadedElsewhere = AnswerYes(), AnswerNo()
+			if launchdJobRunning(out) {
+				info.Active = AnswerYes()
 				info.Detail = "loaded and running in " + info.Domain
 			} else {
-				info.Active = ProbeNo
+				info.Active = AnswerNo()
 				info.Detail = "loaded in " + info.Domain + " but no daemon process is running"
 			}
-			return info
-		case !launchdSaysNotFound(string(out), err):
-			// launchctl did not answer — it is missing, it was killed on the
-			// deadline, or it failed for an operational reason. "Not loaded" is
-			// a claim we have not earned.
-			info.ProbeErr = launchdProbeErr("print "+info.Domain, out, err)
-			info.Detail = "could not query launchd"
-			return info
-		}
-
-		// launchd answered: the job is not in the domain the restart path
-		// targets. A legacy-domain load still answers the domain-agnostic
-		// `launchctl list`, which is what distinguishes "loaded somewhere else"
-		// from "not loaded at all".
-		info.Loaded = ProbeNo
-		listOut, listErr := autostartProbeCommand("launchctl", "list", autostartLaunchdLabel)
-		switch {
-		case listErr == nil:
-			info.LoadedElsewhere = ProbeYes
-			info.Active = ProbeUnknown // some other domain runs it; not ours to claim
-			info.Detail = "loaded outside " + info.Domain
-		case launchdSaysNotFound(string(listOut), listErr):
-			info.LoadedElsewhere = ProbeNo
-			info.Active = ProbeNo
-			info.Detail = "not loaded"
+		case launchdSaysNotFound(out, print.ExitCode()):
+			// launchd answered: no such job in the domain af's restarts target.
+			// That is "not loaded HERE" — plain No, not NotFound: launchd has no
+			// "known but unloaded" state for NotFound to mean, unlike systemd,
+			// where a unit file can exist that systemd has never loaded.
+			// A legacy-domain load still answers the domain-agnostic list.
+			info.Loaded = AnswerNo()
+			info.Active, info.LoadedElsewhere, info.Detail = launchdListElsewhere(info.Domain)
 		default:
-			info.ProbeErr = launchdProbeErr("list "+autostartLaunchdLabel, listOut, listErr)
+			// It ran and failed for some other reason (permission denied, bad
+			// request). That is not a not-found answer.
+			cause := launchdProbeErr("print "+info.Domain, print)
+			info.Loaded, info.LoadedElsewhere, info.Active = Undetermined(cause), Undetermined(cause), Undetermined(cause)
 			info.Detail = "could not query launchd"
 		}
 	}
 	return info
 }
 
-// systemdStateProbe runs one `systemctl --user <verb>` and classifies the
-// result into an answer or an inability to ask.
+// launchdListElsewhere asks the domain-agnostic `launchctl list` whether the job
+// is loaded in some OTHER domain, and reports (active, loadedElsewhere, detail).
+func launchdListElsewhere(domain string) (active, elsewhere ProbeAnswer, detail string) {
+	list := autostartProbeCommand("launchctl", "list", autostartLaunchdLabel)
+	out, ok := list.Output()
+	switch {
+	case !ok:
+		cause := launchdProbeErr("list "+autostartLaunchdLabel, list)
+		return Undetermined(cause), Undetermined(cause), "could not query launchd"
+	case list.Succeeded():
+		// Loaded somewhere else. Whether that domain is RUNNING it is not
+		// something `list` establishes, so Active stays undetermined rather than
+		// claiming a liveness we never observed.
+		return Undetermined(errors.New("the job is loaded in another domain, whose liveness launchctl list does not report")),
+			AnswerYes(), "loaded outside " + domain
+	case launchdSaysNotFound(out, list.ExitCode()):
+		return AnswerNo(), AnswerNo(), "not loaded"
+	default:
+		cause := launchdProbeErr("list "+autostartLaunchdLabel, list)
+		return Undetermined(cause), Undetermined(cause), "could not query launchd"
+	}
+}
+
+// systemdAsk runs one `systemctl --user <verb>` and turns it into an answer.
 //
-// systemctl exits non-zero for BOTH "inactive"/"disabled" (a real answer, with
-// the state on stdout) and for "I could not ask" (no user bus, no binary,
-// permission denied — where what it printed is a diagnostic, not a state). The
-// exit code alone cannot tell them apart, so the output must: a recognized
-// state word is an answer, anything else is not.
-func systemdStateProbe(verb string) (state ProbeState, raw string, err error) {
-	out, runErr := autostartProbeCommand("systemctl", "--user", verb, autostartUnitName)
-	raw = strings.TrimSpace(string(out))
-	if runErr == nil {
-		return ProbeYes, raw, nil
+// Every branch here is reachable only from a probe that COMPLETED: the result
+// type does not expose the output of one that did not, so a timeout cannot be
+// classified as a state at all — it leaves through the first branch, as
+// Undetermined, carrying its cause.
+func systemdAsk(verb string) (ProbeAnswer, string) {
+	res := autostartProbeCommand("systemctl", "--user", verb, autostartUnitName)
+	out, ok := res.Output()
+	if !ok {
+		// The state renders as "unknown", never as whatever a dying probe
+		// managed to print: that text is a cause, not a state.
+		return Undetermined(fmt.Errorf("could not query systemd (%s): %w", verb, res.Cause())), "unknown"
 	}
-	if systemdStateWords[firstLine(raw)] {
-		return ProbeNo, raw, nil
+	word := firstLine(strings.TrimSpace(out))
+	switch {
+	case res.Succeeded():
+		return AnswerYes(), word
+	case res.ExitCode() == systemdNoSuchUnitExit, systemdNotFoundWords[word]:
+		// systemd answered that it has no such unit. Definite, and the one that
+		// matters most here: the unit FILE exists (we only probe when it does),
+		// so systemd not knowing it means it was never loaded — a real, fixable
+		// state that neither "inactive" nor "unknown" would have told anyone.
+		return AnswerNotFound(), "not-found"
+	case systemdStateWords[word]:
+		// A recognized state word on a non-zero exit is a real negative answer
+		// ("inactive", "disabled"). The word itself goes to the report: "failed"
+		// and "inactive" are both No, and a user needs to know which.
+		return AnswerNo(), word
+	default:
+		// It ran, exited non-zero, and printed something that is not a state —
+		// "Failed to connect to bus: No medium found". The question never
+		// reached systemd, so there is no answer to report.
+		return Undetermined(systemdProbeErr(verb, out)), "unknown"
 	}
-	// The state is reported as "unknown", not as whatever diagnostic systemctl
-	// printed: that text is a cause, not a state, and rendering it in the state
-	// slot is how a non-answer starts looking like an answer. The cause rides
-	// the error — once, not twice: when the command never ran there is no output
-	// to add, and appending runErr again just says it twice.
-	if raw == "" {
-		return ProbeUnknown, "unknown", fmt.Errorf("could not query systemd (%s): %w", verb, runErr)
+}
+
+func systemdProbeErr(verb, out string) error {
+	if text := strings.TrimSpace(out); text != "" {
+		return fmt.Errorf("could not query systemd (%s): %s", verb, firstLine(text))
 	}
-	return ProbeUnknown, "unknown", fmt.Errorf("could not query systemd (%s): %w: %s", verb, runErr, raw)
+	return fmt.Errorf("could not query systemd (%s): it exited non-zero without a state", verb)
 }
 
 // systemdStateWords are the words systemctl prints when it has actually
-// answered is-enabled/is-active. Anything else on a non-zero exit ("Failed to
-// connect to bus...") means the question never reached systemd.
+// answered is-enabled/is-active in the NEGATIVE. Anything else on a non-zero
+// exit ("Failed to connect to bus...") means the question never reached systemd;
+// "there is no such unit" is a different fact again and lives in
+// systemdNotFoundWords.
 var systemdStateWords = map[string]bool{
 	// is-active
-	"active": true, "inactive": true, "activating": true, "deactivating": true,
-	"failed": true, "reloading": true,
+	"inactive": true, "activating": true, "deactivating": true,
+	"failed": true, "reloading": true, "maintenance": true,
 	// is-enabled
-	"enabled": true, "enabled-runtime": true, "disabled": true, "masked": true,
-	"masked-runtime": true, "static": true, "indirect": true, "linked": true,
+	"disabled": true, "masked": true, "masked-runtime": true,
+	"static": true, "indirect": true, "linked": true,
 	"linked-runtime": true, "generated": true, "transient": true,
-	// systemd's own word for "I know of no such unit" — an answer, not an error.
-	"unknown": true,
+	"enabled-runtime": true,
 }
 
 func firstLine(s string) string {
 	line, _, _ := strings.Cut(s, "\n")
 	return strings.TrimSpace(line)
-}
-
-// launchdProbeErr describes a launchctl query that could not be answered,
-// naming the cause once.
-func launchdProbeErr(what string, out []byte, err error) error {
-	if text := strings.TrimSpace(string(out)); text != "" {
-		return fmt.Errorf("could not query launchd (%s): %w: %s", what, err, text)
-	}
-	return fmt.Errorf("could not query launchd (%s): %w", what, err)
-}
-
-// launchdNotFoundExit is launchctl's exit code for a service target it has no
-// record of.
-const launchdNotFoundExit = 113
-
-// launchdSaysNotFound reports whether launchctl actually answered "no such
-// service", as opposed to failing for any other reason.
-//
-// Only a recognized not-found answer counts. A non-zero exit alone does not: a
-// permission failure or a bad request also exits non-zero, and reading those as
-// "not loaded" is the same conflation this file exists to remove.
-func launchdSaysNotFound(out string, err error) bool {
-	var exitErr *exec.ExitError
-	if !errors.As(err, &exitErr) {
-		return false // never ran, or was killed on the deadline
-	}
-	if exitErr.ExitCode() == launchdNotFoundExit {
-		return true
-	}
-	lower := strings.ToLower(out)
-	return strings.Contains(lower, "could not find service") ||
-		strings.Contains(lower, "no such process")
 }
 
 // autostartProbeTimeout bounds each read-only service-manager query. `af doctor`
@@ -409,6 +374,84 @@ var autostartProbeTimeout = 5 * time.Second
 // gitWaitDelay/tmuxWaitDelay #856/#896).
 const autostartProbeWaitDelay = 2 * time.Second
 
+// launchdNotFoundExit is launchctl's exit code for a service target it has no
+// record of.
+const launchdNotFoundExit = 113
+
+// launchdSaysNotFound reports whether launchctl actually answered "no such
+// service", as opposed to failing for any other reason.
+//
+// Only a recognized not-found answer counts. A non-zero exit alone does not: a
+// permission failure or a bad request also exits non-zero, and reading those as
+// "not loaded" is the same conflation this file exists to remove. It takes an
+// exit code rather than an error because probeResult has already established
+// that the command completed — a probe that did not complete never reaches here.
+func launchdSaysNotFound(out string, exitCode int) bool {
+	if exitCode == launchdNotFoundExit {
+		return true
+	}
+	lower := strings.ToLower(out)
+	return strings.Contains(lower, "could not find service") ||
+		strings.Contains(lower, "no such process")
+}
+
+// launchdProbeErr describes a launchctl query that could not be answered,
+// naming the cause once.
+func launchdProbeErr(what string, res probeResult) error {
+	if cause := res.Cause(); cause != nil {
+		return fmt.Errorf("could not query launchd (%s): %w", what, cause)
+	}
+	if text, _ := res.Output(); strings.TrimSpace(text) != "" {
+		return fmt.Errorf("could not query launchd (%s): %s", what, firstLine(strings.TrimSpace(text)))
+	}
+	return fmt.Errorf("could not query launchd (%s): it exited %d without an answer", what, res.ExitCode())
+}
+
+// systemdNoSuchUnitExit is systemctl's exit code for a unit it has no record of.
+const systemdNoSuchUnitExit = 4
+
+// systemdNotFoundWords are what systemd prints when it knows of no such unit —
+// a DEFINITE answer, not an error, and not the same as "inactive".
+var systemdNotFoundWords = map[string]bool{
+	"not-found": true, // is-enabled
+	"unknown":   true, // is-active
+}
+
+// probeResult is the outcome of running one bounded service-manager command.
+//
+// The output of a command that did NOT complete is deliberately unreachable:
+// Output returns ok=false and an EMPTY string. That is the structural half of
+// the fix, and the half that ordering could not buy. A classifier handed
+// (output, error) can read a state word out of a timed-out probe's partial
+// output and call it an answer — which is exactly the mistake that survived two
+// rounds of patching here, because the data that enables it was reachable. Now
+// it is not: an incomplete probe has nothing to classify, so the only answer
+// that can be built from one is Undetermined.
+type probeResult struct {
+	completed bool
+	output    string
+	exitCode  int
+	cause     error
+}
+
+// Output returns what the manager printed, and true, ONLY if the command ran to
+// completion. A probe that never completed has no output to interpret.
+func (r probeResult) Output() (string, bool) {
+	if !r.completed {
+		return "", false
+	}
+	return r.output, true
+}
+
+// Succeeded reports a completed command that exited 0.
+func (r probeResult) Succeeded() bool { return r.completed && r.exitCode == 0 }
+
+// ExitCode is meaningful only when the command completed.
+func (r probeResult) ExitCode() int { return r.exitCode }
+
+// Cause is why the command did not complete; nil when it did.
+func (r probeResult) Cause() error { return r.cause }
+
 // autostartProbeCommand runs one bounded, read-only service-manager query.
 // Injected in tests; production never reassigns.
 //
@@ -417,7 +460,7 @@ const autostartProbeWaitDelay = 2 * time.Second
 // which are legitimately slower and are not what this deadline is for.
 var autostartProbeCommand = runAutostartProbeCommand
 
-func runAutostartProbeCommand(name string, args ...string) ([]byte, error) {
+func runAutostartProbeCommand(name string, args ...string) probeResult {
 	ctx, cancel := context.WithTimeout(context.Background(), autostartProbeTimeout)
 	defer cancel()
 
@@ -441,25 +484,30 @@ func runAutostartProbeCommand(name string, args ...string) ([]byte, error) {
 	if cmd.Process != nil {
 		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) // reap stragglers
 	}
+
+	// Killed on the deadline: whatever it managed to print is not an answer.
 	if ctx.Err() != nil {
-		// A timeout is an inability to ask, and must never reach the callers'
-		// "did it answer?" classification as if it were an exit status.
-		return out, fmt.Errorf("%s %s timed out after %s: %w",
-			name, strings.Join(args, " "), autostartProbeTimeout, ctx.Err())
+		return probeResult{cause: fmt.Errorf("%s %s timed out after %s: %w",
+			name, strings.Join(args, " "), autostartProbeTimeout, ctx.Err())}
 	}
-	if errors.Is(err, exec.ErrWaitDelay) {
-		// The command itself finished and its answer is in `out` — a non-zero
-		// exit surfaces as an ExitError, never as this. ErrWaitDelay only means
-		// some process that inherited the output pipe outlived it, and the reap
-		// above has just killed it.
-		//
-		// Returning it as an error would be its own version of the bug this file
-		// is about: the callers read "err != nil" plus a state word as "the
-		// manager answered NO", so a perfectly healthy `active` would come back
-		// as inactive. Mirrors normalizeWaitDelay (#676/#914).
-		return out, nil
+	// Never ran, or died on a signal: also not an answer. Only an ExitError
+	// means the command itself decided how to end.
+	var exitErr *exec.ExitError
+	switch {
+	case err == nil, errors.Is(err, exec.ErrWaitDelay):
+		// ErrWaitDelay: the command finished and its answer is in out; only a
+		// straggler held the pipe, and the reap above killed it (#676/#914).
+		return probeResult{completed: true, output: string(out), exitCode: 0}
+	case errors.As(err, &exitErr):
+		if exitErr.ExitCode() < 0 {
+			return probeResult{cause: fmt.Errorf("%s %s was killed before answering: %w",
+				name, strings.Join(args, " "), err)}
+		}
+		return probeResult{completed: true, output: string(out), exitCode: exitErr.ExitCode()}
+	default:
+		return probeResult{cause: fmt.Errorf("could not run %s %s: %w",
+			name, strings.Join(args, " "), err)}
 	}
-	return out, err
 }
 
 // launchdDomainTarget is the gui/<uid>/<label> target the restart path uses.

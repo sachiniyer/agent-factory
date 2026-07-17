@@ -610,50 +610,105 @@ func checkAutostartSupervision(ctx *scanContext, report *Report) {
 	if !info.Supported || !info.UnitPresent {
 		return
 	}
-	switch {
-	case info.ProbeErr != nil:
-		// The service manager could not be asked — no binary, no user bus,
-		// permission denied, or it never replied. Every other branch below is a
-		// claim about what it said; none of them are available here, and
-		// "inactive" is the one thing this must never say.
-		report.Warn(sectionDaemon, "autostart supervision",
-			fmt.Sprintf("could not query the service manager, so supervision is unknown: %s", oneLine(info.ProbeErr)),
-			"check that the service manager is reachable (`systemctl --user status` / `launchctl print`), then rerun `af doctor`", false)
-	case info.Err != nil && info.Active != daemon.ProbeYes:
-		// The unit is installed but unreadable AND it is not running. Report the
-		// state rather than dropping the check: the unreadable file is the likely
-		// reason nothing is supervising.
+
+	// The launchd domain mismatch is its own finding, and only when launchd
+	// actually ANSWERED that the job is elsewhere.
+	elsewhere := false
+	info.LoadedElsewhere.Match(
+		func() {
+			elsewhere = true
+			report.Warn(sectionDaemon, "autostart supervision",
+				fmt.Sprintf("the launchd agent is loaded outside %s, where af's restarts are sent (%s)",
+					info.Domain, info.Detail),
+				"reload it in the right domain: af daemon install", true)
+		},
+		func() {}, func() {}, func(error) {},
+	)
+	if elsewhere {
+		return
+	}
+
+	// Match has no default branch, so the "we could not ask" case cannot be
+	// forgotten here or in any future edit: the compiler demands it.
+	info.Active.Match(
+		func() { supervisionActive(ctx, report, info) },
+		func() { supervisionNotRunning(report, info) },
+		func() { supervisionUnitUnknownToManager(report, info) },
+		func(cause error) {
+			report.Warn(sectionDaemon, "autostart supervision",
+				fmt.Sprintf("could not query the service manager, so supervision is unknown: %s", oneLine(cause)),
+				"check that the service manager is reachable (`systemctl --user status` / `launchctl print`), then rerun `af doctor`", false)
+		},
+	)
+}
+
+// supervisionActive renders the manager's "it is running" answer, which still
+// leaves the is-enabled question to report.
+func supervisionActive(ctx *scanContext, report *Report, info daemon.SupervisionInfo) {
+	_ = ctx
+	info.Enabled.Match(
+		func() { report.Pass(sectionDaemon, "autostart supervision", "unit is enabled and running") },
+		func() {
+			report.Warn(sectionDaemon, "autostart supervision",
+				fmt.Sprintf("the unit is running but not enabled, so it won't start at login (%s)", info.Detail),
+				"enable it: af daemon install", true)
+		},
+		func() {
+			report.Warn(sectionDaemon, "autostart supervision",
+				"the daemon is running but the service manager has no record of the unit, so it won't start at login",
+				"reload the unit: `systemctl --user daemon-reload`, or reinstall it: af daemon install", true)
+		},
+		func(cause error) {
+			report.Warn(sectionDaemon, "autostart supervision",
+				fmt.Sprintf("the daemon is running, but whether it starts at login is unknown: %s", oneLine(cause)),
+				"check the service manager directly, then rerun `af doctor`", false)
+		},
+	)
+}
+
+// supervisionNotRunning renders an answered "it is not running".
+func supervisionNotRunning(report *Report, info daemon.SupervisionInfo) {
+	if info.Err != nil {
+		// The unit is installed but unreadable AND it is not running: the
+		// unreadable file is the likely reason nothing is supervising.
 		report.Warn(sectionDaemon, "autostart supervision",
 			fmt.Sprintf("a unit file is installed but cannot be read (%v) and the service manager is not running it", info.Err),
 			"fix the unit file's permissions, or reinstall it: af daemon install", true)
-	case info.LoadedElsewhere == daemon.ProbeYes:
-		report.Warn(sectionDaemon, "autostart supervision",
-			fmt.Sprintf("the launchd agent is loaded outside %s, where af's restarts are sent (%s)",
-				info.Domain, info.Detail),
-			"reload it in the right domain: af daemon install", true)
-	case info.Loaded == daemon.ProbeYes && info.Active == daemon.ProbeNo:
-		// Everything looks configured — the agent is installed and launchd
-		// knows it — while no daemon is actually running.
-		report.Warn(sectionDaemon, "autostart supervision",
-			fmt.Sprintf("the launchd agent is loaded in %s but no daemon process is running (%s)",
-				info.Domain, info.Detail),
-			"start it: af daemon restart", true)
-	case info.Active == daemon.ProbeNo:
-		report.Warn(sectionDaemon, "autostart supervision",
-			fmt.Sprintf("a unit file is installed but the service manager is not running it (%s)", info.Detail),
-			"reinstall autostart: af daemon install", true)
-	case info.Enabled == daemon.ProbeNo:
-		report.Warn(sectionDaemon, "autostart supervision",
-			fmt.Sprintf("the unit is running but not enabled, so it won't start at login (%s)", info.Detail),
-			"enable it: af daemon install", true)
-	case info.Active == daemon.ProbeYes:
-		report.Pass(sectionDaemon, "autostart supervision", "unit is enabled and running")
-	default:
-		// No probe error, but nothing answered definitively either. Say so.
-		report.Warn(sectionDaemon, "autostart supervision",
-			fmt.Sprintf("the service manager did not report a state, so supervision is unknown (%s)", info.Detail),
-			"check the service manager directly, then rerun `af doctor`", false)
+		return
 	}
+	loadedButDead := false
+	info.Loaded.Match(
+		func() {
+			// Everything looks configured — launchd knows the agent — while no
+			// daemon is actually running.
+			loadedButDead = true
+			report.Warn(sectionDaemon, "autostart supervision",
+				fmt.Sprintf("the launchd agent is loaded in %s but no daemon process is running (%s)",
+					info.Domain, info.Detail),
+				"start it: af daemon restart", true)
+		},
+		func() {}, func() {}, func(error) {},
+	)
+	if loadedButDead {
+		return
+	}
+	report.Warn(sectionDaemon, "autostart supervision",
+		fmt.Sprintf("a unit file is installed but the service manager is not running it (%s)", info.Detail),
+		"reinstall autostart: af daemon install", true)
+}
+
+// supervisionUnitUnknownToManager renders the NOT-FOUND answer: the manager
+// replied that it has no such unit.
+//
+// This is the state a two-valued probe threw away, and it is the most actionable
+// of the lot. The unit FILE is installed — we only probe when it is — so the
+// manager not knowing it means it was never loaded: `systemctl --user
+// daemon-reload` fixes it. Reported as "inactive" it sent users to reinstall
+// something that was already there; reported as "unknown" it told them nothing.
+func supervisionUnitUnknownToManager(report *Report, info daemon.SupervisionInfo) {
+	report.Warn(sectionDaemon, "autostart supervision",
+		fmt.Sprintf("a unit file is installed but the service manager has no record of it (%s), so nothing starts af at login", info.Detail),
+		"load it: `systemctl --user daemon-reload`, or reinstall it: af daemon install", true)
 }
 
 // oneLine flattens a multi-line error (errors.Join separates with newlines) so a
