@@ -604,26 +604,76 @@ test("the #1694 keyboard model: j/k navigate, Enter attaches, Escape returns to 
   await expect(page.locator(".af-app.af-kb-rail")).toBeVisible();
 });
 
-test("the #1694 keyboard model: [ / ] cycle the top-level view (sessions ⇄ tasks)", async () => {
+test("the #1694 keyboard model: [ / ] cycle the top-level view (sessions → tasks → config)", async () => {
   // Rail mode from the previous flow. [ / ] cycle the top-level view; they fire in
   // rail mode only (a modal or focused terminal would swallow them). After Escape
   // the active element is document.body, so the document-level capture-phase keydown
-  // listener (index.ts) handles the press. The Projects view is gone (redesign PR2):
-  // the cycle is just sessions ⇄ tasks now.
+  // listener (index.ts) handles the press. The Projects view is gone (redesign PR2);
+  // the config view joins the cycle with the config editor.
   const active = (view: string) =>
     expect(page.locator(`.af-viewtab[data-view="${view}"]`)).toHaveClass(/af-viewtab-active/);
   await active("sessions");
-  // ] advances sessions -> tasks; ] again wraps tasks -> sessions.
+  // ] advances sessions -> tasks -> config, then wraps config -> sessions.
   await page.keyboard.press("]");
   await active("tasks");
   await page.keyboard.press("]");
+  await active("config");
+  await page.keyboard.press("]");
   await active("sessions");
-  // [ steps the other way, wrapping sessions -> tasks, then back to the start view so
+  // [ steps the other way, wrapping sessions -> config, and back to the start view so
   // the following rail-driven flows still see the sessions rail.
   await page.keyboard.press("[");
+  await active("config");
+  await page.keyboard.press("[");
   await active("tasks");
   await page.keyboard.press("[");
   await active("sessions");
+  await expect(page.locator(".af-rail-list")).toBeVisible();
+});
+
+test("config: the editor renders from the manifest and writes through the real path", async () => {
+  // The config view is rendered entirely from GetConfig (the config manifest zipped
+  // with live values) — the bundle carries no key list of its own. This drives the
+  // real daemon against the container's throwaway AF home, so the write goes through
+  // config.SetGlobalConfigValue: the same validated, file-locked, atomic path
+  // `af config set` uses.
+  await page.locator('.af-viewtab[data-view="config"]').click();
+  const pane = page.locator(".af-config");
+  await expect(pane).toBeVisible();
+
+  // A tier-1 key the manifest always carries, with its purpose line.
+  const row = pane.locator('.af-config-row[data-key="default_program"]');
+  await expect(row).toBeVisible();
+  await expect(row.locator(".af-config-purpose")).not.toBeEmpty();
+
+  // The advanced tier folds until asked for, so the handful of keys that matter
+  // are not buried under twenty.
+  await expect(pane.locator('.af-config-row[data-key="daemon_poll_interval"]')).toHaveCount(0);
+  await pane.locator(".af-config-toggle").click();
+  await expect(pane.locator('.af-config-row[data-key="daemon_poll_interval"]')).toBeVisible();
+
+  // An enumerated key renders a picker built from the manifest's own enum.
+  const channel = pane.locator('.af-config-row[data-key="update_channel"] select');
+  await expect(channel).toBeVisible();
+  await channel.selectOption("preview");
+
+  // The echo names what was WRITTEN, and the restart notice appears at the moment
+  // of the edit naming the command to run — config.toml is read at startup, so an
+  // editor that changed a value the running daemon ignores must say so.
+  const echo = pane.locator('.af-config-row[data-key="update_channel"] .af-config-echo');
+  await expect(echo).toHaveText(/set update_channel = preview/);
+  await expect(pane.locator('.af-config-row[data-key="update_channel"] .af-config-notice')).toContainText(
+    "af daemon restart",
+  );
+
+  // A hand-edited key is shown but never offered as a field whose save could only
+  // be refused.
+  const readOnly = pane.locator('.af-config-row[data-key="theme"] .af-config-readonly');
+  await expect(readOnly).toHaveText(/hand-edited/);
+  await expect(page.locator('.af-config-row[data-key="theme"] input')).toHaveCount(0);
+
+  // Back to the sessions view for the flows that follow.
+  await page.locator('.af-viewtab[data-view="sessions"]').click();
   await expect(page.locator(".af-rail-list")).toBeVisible();
 });
 

@@ -138,18 +138,22 @@ test("terminal mode: tab keys reach the agent, not the tab bar", () => {
 
 // --- view switching (redesign PR2: sessions ⇄ tasks; Projects folded away) --
 
-test("cycleView: ] advances and [ reverses, wrapping the sessions/tasks cycle", () => {
+test("cycleView: ] advances and [ reverses, wrapping the sessions/tasks/config cycle", () => {
   assert.equal(cycleView("sessions", 1), "tasks");
-  assert.equal(cycleView("tasks", 1), "sessions", "] past the last view wraps to the first");
-  assert.equal(cycleView("sessions", -1), "tasks", "[ before the first view wraps to the last");
+  assert.equal(cycleView("tasks", 1), "config");
+  assert.equal(cycleView("config", 1), "sessions", "] past the last view wraps to the first");
+  assert.equal(cycleView("sessions", -1), "config", "[ before the first view wraps to the last");
+  assert.equal(cycleView("config", -1), "tasks");
   assert.equal(cycleView("tasks", -1), "sessions");
 });
 
 test("view switch: ] / [ cycle the top-level view in rail mode of any view", () => {
   assert.deepEqual(decideKey("]", ctx({ view: "sessions" })), { kind: "switchView", view: "tasks" });
-  assert.deepEqual(decideKey("[", ctx({ view: "sessions" })), { kind: "switchView", view: "tasks" });
-  assert.deepEqual(decideKey("]", ctx({ view: "tasks" })), { kind: "switchView", view: "sessions" });
+  assert.deepEqual(decideKey("[", ctx({ view: "sessions" })), { kind: "switchView", view: "config" });
+  assert.deepEqual(decideKey("]", ctx({ view: "tasks" })), { kind: "switchView", view: "config" });
   assert.deepEqual(decideKey("[", ctx({ view: "tasks" })), { kind: "switchView", view: "sessions" });
+  assert.deepEqual(decideKey("]", ctx({ view: "config" })), { kind: "switchView", view: "sessions" });
+  assert.deepEqual(decideKey("[", ctx({ view: "config" })), { kind: "switchView", view: "tasks" });
 });
 
 test("view switch: a focused terminal / an open modal own the keyboard — [ and ] fall through", () => {
@@ -169,6 +173,15 @@ test("non-sessions views: the session keys pass through, only view switching is 
   assert.deepEqual(decideKey("Enter", tasksView), { kind: "none" }, "Enter attaches only in the sessions view");
   assert.deepEqual(decideKey("t", tasksView), { kind: "none" }, "no tab management outside the sessions view");
   assert.deepEqual(decideKey("2", tasksView), { kind: "none" });
-  assert.deepEqual(decideKey("]", tasksView), { kind: "switchView", view: "sessions" });
+  assert.deepEqual(decideKey("]", tasksView), { kind: "switchView", view: "config" });
   assert.deepEqual(decideKey("[", tasksView), { kind: "switchView", view: "sessions" });
+
+  // The config view is the same kind of surface: a mouse/keyboard form, not a
+  // terminal. Its own text fields are real DOM inputs, so the shell's key model
+  // does not need to reserve anything for them here.
+  const configView = ctx({ view: "config", tabCount: 3, activeTab: 0 });
+  assert.deepEqual(decideKey("j", configView), { kind: "none" }, "j is not a config-view key");
+  assert.deepEqual(decideKey("Enter", configView), { kind: "none" }, "Enter attaches only in the sessions view");
+  assert.deepEqual(decideKey("t", configView), { kind: "none" }, "no tab management outside the sessions view");
+  assert.deepEqual(decideKey("]", configView), { kind: "switchView", view: "sessions" });
 });

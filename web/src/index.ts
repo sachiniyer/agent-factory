@@ -25,8 +25,10 @@ import {
   errorText,
   fetchSnapshot,
   killSession,
+  getConfig,
   listBackends,
   listTasks,
+  setConfigValue,
   loadToken,
   probeAuthRequired,
   probeToken,
@@ -77,6 +79,9 @@ registerServiceWorker();
 const store = new Store<AppState>({
   phase: "login",
   view: "sessions",
+  config: [],
+  configPath: "",
+  configStatus: null,
   selectedProject: null,
   authRequired: true,
   // Start in the connecting state: mount() immediately probes /v1/auth-info, and
@@ -412,6 +417,9 @@ function switchView(view: View): void {
   store.set({ view, focus: "rail" });
   if (view === "tasks") {
     refreshTasks();
+  }
+  if (view === "config") {
+    refreshConfig();
   }
 }
 
@@ -788,6 +796,67 @@ function clearTabError(): void {
 /** Refetches the authoritative task list and commits it to the store. Failures are
  *  swallowed: the events plane / a later action retries, exactly like the Snapshot
  *  resync. `=== null` not `!tok`: "" is the authorized-tokenless credential (#1696). */
+/** Re-reads the config manifest and the user's live values.
+ *
+ *  Always from the daemon, never from a cached copy: config.toml is hand-editable
+ *  by design, so it may have changed under us (a hand-edit, `af config set`, the
+ *  config agent). A form rendered from a stale copy would show the user a value the
+ *  file does not hold.
+ *
+ *  A failure leaves the last-known list up and is surfaced in the tab-error line
+ *  rather than swallowed — an empty config screen would read as "you have no
+ *  settings". */
+function refreshConfig(): void {
+  const tok = token;
+  if (tok === null) {
+    return;
+  }
+  void getConfig(tok)
+    .then((resp) => {
+      store.set({ config: resp.entries, configPath: resp.path });
+    })
+    .catch((err: unknown) => {
+      // Surfaced, not swallowed: an empty config screen would read as "you have
+      // no settings" rather than "the read failed".
+      surfaceTabError(err);
+    });
+}
+
+/** Writes one config key and reports the outcome.
+ *
+ *  The value goes to the daemon unvalidated BY DESIGN: it hands it to the same
+ *  validator and the same file-locked atomic writer `af config set` uses, so the
+ *  rules live in exactly one place. A refusal comes back as the validator's own
+ *  message and is shown verbatim under the field.
+ *
+ *  On success the manifest is re-read rather than patched locally, so the form
+ *  shows what the FILE holds (the canonical value the writer chose), not what the
+ *  browser sent. The daemon's restart notice rides along with the echo: config.toml
+ *  is read at startup, and an editor that changed a value the running daemon then
+ *  ignored — without saying so — would be lying by omission. */
+function applyConfigValue(key: string, value: string): void {
+  const tok = token;
+  if (tok === null) {
+    return;
+  }
+  void setConfigValue(key, value, tok)
+    .then((resp) => {
+      store.set({
+        configStatus: {
+          key: resp.result.key,
+          // Echo the CANONICAL value the writer reported, not the one sent.
+          value: resp.result.value,
+          notice: resp.result.requires_restart ? resp.restart_notice : "",
+          error: "",
+        },
+      });
+      refreshConfig();
+    })
+    .catch((err: unknown) => {
+      store.set({ configStatus: { key, value: "", notice: "", error: errorText(err) } });
+    });
+}
+
 function refreshTasks(): void {
   const tok = token;
   if (tok === null) {
@@ -947,6 +1016,7 @@ const actions = {
   newTab: createSessionTab,
   closeTab: closeSessionTab,
   switchView,
+  setConfigValue: applyConfigValue,
   switchProject,
   setStatusFilter,
   resetStatusFilter,

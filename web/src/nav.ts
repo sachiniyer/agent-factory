@@ -25,11 +25,11 @@ export type KeyboardFocus = "rail" | "terminal";
  *  top-right project switcher (the switcher is how you change project now). It is a
  *  HIGHER-level switch than keyboard focus — it selects which surface the body shows
  *  — so it composes with the nav-vs-terminal model rather than replacing it. */
-export type View = "sessions" | "tasks";
+export type View = "sessions" | "tasks" | "config";
 
 /** The view cycle order for the [ / ] view-switch keys, left-to-right the same as
  *  the appbar's view tabs. */
-export const VIEWS: readonly View[] = ["sessions", "tasks"];
+export const VIEWS: readonly View[] = ["sessions", "tasks", "config"];
 
 /** The view `delta` steps from `current`, wrapping around the cycle (so ] past the
  *  last view returns to the first, and [ before the first wraps to the last). */

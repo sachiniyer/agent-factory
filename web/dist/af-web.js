@@ -6304,6 +6304,13 @@ async function removeTask(id, token2) {
   requireTaskID(id, "remove a task");
   await af("RemoveTask", { id }, token2);
 }
+async function getConfig(token2) {
+  const resp = await af("GetConfig", {}, token2);
+  return { entries: resp?.entries ?? [], path: resp?.path ?? "" };
+}
+async function setConfigValue(key, value, token2) {
+  return af("SetConfigValue", { key, value }, token2);
+}
 
 // src/events.ts
 var BACKOFF_BASE_MS = 500;
@@ -6782,7 +6789,7 @@ var InstallAffordance = class {
 };
 
 // src/nav.ts
-var VIEWS = ["sessions", "tasks"];
+var VIEWS = ["sessions", "tasks", "config"];
 function cycleView(current, delta) {
   const i = VIEWS.indexOf(current);
   const n = VIEWS.length;
@@ -9225,6 +9232,189 @@ function addTaskModal(projects, defaultProject2, callbacks) {
   return handle;
 }
 
+// src/config.ts
+function tiersInOrder(entries) {
+  const seen = /* @__PURE__ */ new Map();
+  for (const e of entries) {
+    if (!seen.has(e.tier)) {
+      seen.set(e.tier, e.tier_name);
+    }
+  }
+  return [...seen.entries()].sort((a, b) => a[0] - b[0]).map(([tier, name]) => ({ tier, name }));
+}
+var TIER_ADVANCED = 3;
+function controlKind(e) {
+  if (!e.settable) {
+    return "readonly";
+  }
+  if (e.type === "bool") {
+    return "checkbox";
+  }
+  if (e.enum && e.enum.length > 0 && e.type !== "table") {
+    return "select";
+  }
+  return "text";
+}
+var ConfigPane = class {
+  constructor(actions2) {
+    this.actions = actions2;
+    this.el = h("section", { class: "af-config" });
+    this.el.setAttribute("aria-label", "Config");
+  }
+  el;
+  entries = [];
+  path = "";
+  status = null;
+  showAdvanced = false;
+  /** The key whose field is open, if any. Only one row edits at a time: a config
+   *  write is per-key (like `af config set`), so a multi-row "save all" would
+   *  imply an atomicity across keys that the writer does not offer. */
+  editing = null;
+  draft = "";
+  lastEntries = null;
+  lastStatus = null;
+  /** Feeds the pane fresh manifest rows. Re-rendering is skipped when nothing
+   *  changed, matching the rest of the shell's patch-in-place model. */
+  update(entries, path, status) {
+    if (this.lastEntries === entries && this.lastStatus === status) {
+      return;
+    }
+    this.lastEntries = entries;
+    this.lastStatus = status;
+    this.entries = entries;
+    this.path = path;
+    this.status = status;
+    if (status && !status.error && status.key === this.editing) {
+      this.editing = null;
+    }
+    this.render();
+  }
+  render() {
+    const head = h(
+      "div",
+      { class: "af-config-head" },
+      h("span", { class: "af-config-title" }, "Config"),
+      h("span", { class: "af-view-count" }, String(this.entries.length))
+    );
+    if (this.path !== "") {
+      head.append(h("span", { class: "af-config-path" }, this.path));
+    }
+    const sections = [];
+    for (const { tier, name } of tiersInOrder(this.entries)) {
+      const inTier = this.entries.filter((e) => e.tier === tier);
+      if (inTier.length === 0) {
+        continue;
+      }
+      const folded = tier === TIER_ADVANCED && !this.showAdvanced;
+      const heading = h("div", { class: "af-config-tier" }, h("span", { class: "af-config-tier-name" }, name));
+      if (tier === TIER_ADVANCED) {
+        const toggle = h(
+          "button",
+          { type: "button", class: "af-ghost af-config-toggle" },
+          folded ? `Show ${inTier.length} advanced settings` : "Hide advanced settings"
+        );
+        toggle.addEventListener("click", () => {
+          this.showAdvanced = !this.showAdvanced;
+          this.render();
+        });
+        heading.append(toggle);
+      }
+      sections.push(heading);
+      if (folded) {
+        continue;
+      }
+      for (const e of inTier) {
+        sections.push(this.renderRow(e));
+      }
+    }
+    this.el.replaceChildren(head, h("div", { class: "af-config-list" }, ...sections));
+  }
+  /** One key: its name, purpose, control, and — when it is the row just written
+   *  or just refused — the echo or the error. */
+  renderRow(e) {
+    const row = h("div", { class: "af-config-row" });
+    row.setAttribute("data-key", e.key);
+    const label = h(
+      "div",
+      { class: "af-config-label" },
+      h("span", { class: "af-config-key" }, e.key),
+      h("span", { class: "af-config-purpose" }, e.purpose)
+    );
+    row.append(label);
+    row.append(this.renderControl(e));
+    const status = this.status;
+    if (status && status.key === e.key) {
+      if (status.error !== "") {
+        row.append(h("div", { class: "af-config-error" }, status.error));
+      } else {
+        row.append(h("div", { class: "af-config-echo" }, `set ${status.key} = ${status.value}`));
+        if (status.notice !== "") {
+          row.append(h("div", { class: "af-config-notice" }, status.notice));
+        }
+      }
+    }
+    return row;
+  }
+  /** The control for one key, chosen from the manifest's own description of it:
+   *  a picker when the values are enumerated, a checkbox for a bool, a text
+   *  field otherwise — and a read-only value when `af config set` will not take
+   *  the key at all.
+   *
+   *  The mapping reads `settable` and `enum` from the manifest rather than
+   *  deciding locally, because both are pinned Go-side against the real
+   *  allowlist. A form that offered a field the writer would refuse is a dead
+   *  end the user only discovers by pressing save. */
+  renderControl(e) {
+    const kind = controlKind(e);
+    if (kind === "readonly") {
+      return h(
+        "div",
+        { class: "af-config-control" },
+        h("code", { class: "af-config-value" }, e.value),
+        h("span", { class: "af-config-readonly" }, "hand-edited in config.toml")
+      );
+    }
+    if (kind === "checkbox") {
+      const box = h("input", { type: "checkbox", class: "af-config-check" });
+      box.checked = e.value === "true";
+      box.setAttribute("aria-label", e.key);
+      box.addEventListener("change", () => this.actions.save(e.key, box.checked ? "true" : "false"));
+      return h("div", { class: "af-config-control" }, box);
+    }
+    if (kind === "select") {
+      const select = h("select", { class: "af-input af-config-input" });
+      select.setAttribute("aria-label", e.key);
+      for (const v of e.enum ?? []) {
+        const opt = h("option", { value: v }, v);
+        if (v === e.value) {
+          opt.selected = true;
+        }
+        select.append(opt);
+      }
+      select.addEventListener("change", () => this.actions.save(e.key, select.value));
+      return h("div", { class: "af-config-control" }, select);
+    }
+    const input = h("input", { type: "text", class: "af-input af-config-input", autocomplete: "off" });
+    input.value = this.editing === e.key ? this.draft : e.value;
+    input.setAttribute("aria-label", e.key);
+    input.addEventListener("input", () => {
+      this.editing = e.key;
+      this.draft = input.value;
+      save.disabled = input.value === e.value;
+    });
+    input.addEventListener("keydown", (ev) => {
+      if (ev.key === "Enter") {
+        ev.preventDefault();
+        this.actions.save(e.key, input.value);
+      }
+    });
+    const save = h("button", { type: "button", class: "af-primary af-config-save" }, "Save");
+    save.disabled = this.editing !== e.key || this.draft === e.value;
+    save.addEventListener("click", () => this.actions.save(e.key, input.value));
+    return h("div", { class: "af-config-control" }, input, save);
+  }
+};
+
 // src/ui.ts
 var MAX_TABS = 9;
 var OFF_BOX_BACKENDS = /* @__PURE__ */ new Set(["docker", "ssh", "remote"]);
@@ -9267,6 +9457,8 @@ function viewLabel(view) {
       return "Sessions";
     case "tasks":
       return "Tasks";
+    case "config":
+      return "Config";
   }
 }
 function themeLabel(choice) {
@@ -9518,7 +9710,10 @@ var AppShell = class {
       trigger: (task) => this.actions.triggerTask(task),
       remove: (task) => this.actions.removeTask(task)
     });
-    const viewport = h2("div", { class: "af-viewport" }, this.sessionsBody, this.tasksPane.el);
+    this.configPane = new ConfigPane({
+      save: (key, value) => this.actions.setConfigValue(key, value)
+    });
+    const viewport = h2("div", { class: "af-viewport" }, this.sessionsBody, this.tasksPane.el, this.configPane.el);
     this.toast = h2("div", { class: "af-toast" });
     this.toast.setAttribute("role", "alert");
     this.el = h2("main", { class: "af-app" }, header, viewport, this.toast, this.modalHost);
@@ -9542,6 +9737,7 @@ var AppShell = class {
   lastThemeChoice = null;
   sessionsBody;
   tasksPane;
+  configPane;
   lastView = null;
   lastTasks = null;
   lastTasksProject = null;
@@ -9636,6 +9832,7 @@ var AppShell = class {
       this.lastView = state.view;
       this.sessionsBody.hidden = state.view !== "sessions";
       this.tasksPane.el.hidden = state.view !== "tasks";
+      this.configPane.el.hidden = state.view !== "config";
       for (const [v, tab] of this.viewTabs) {
         tab.classList.toggle("af-viewtab-active", v === state.view);
         tab.setAttribute("aria-selected", v === state.view ? "true" : "false");
@@ -9654,6 +9851,7 @@ var AppShell = class {
       this.lastTasksProject = state.selectedProject;
       this.tasksPane.update(state.tasks, state.selectedProject);
     }
+    this.configPane.update(state.config, state.configPath, state.configStatus);
     const sessionsChanged = this.lastSessions !== state.sessions;
     const selectionChanged = this.lastSelectedId !== state.selectedId;
     const projectChanged = this.lastSelectedProject !== state.selectedProject;
@@ -10150,6 +10348,9 @@ registerServiceWorker();
 var store = new Store({
   phase: "login",
   view: "sessions",
+  config: [],
+  configPath: "",
+  configStatus: null,
   selectedProject: null,
   authRequired: true,
   // Start in the connecting state: mount() immediately probes /v1/auth-info, and
@@ -10354,6 +10555,9 @@ function switchView(view) {
   store.set({ view, focus: "rail" });
   if (view === "tasks") {
     refreshTasks();
+  }
+  if (view === "config") {
+    refreshConfig();
   }
 }
 function setStatusFilter(kind, on) {
@@ -10573,6 +10777,37 @@ function clearTabError() {
     store.set({ tabError: null });
   }
 }
+function refreshConfig() {
+  const tok = token;
+  if (tok === null) {
+    return;
+  }
+  void getConfig(tok).then((resp) => {
+    store.set({ config: resp.entries, configPath: resp.path });
+  }).catch((err) => {
+    surfaceTabError(err);
+  });
+}
+function applyConfigValue(key, value) {
+  const tok = token;
+  if (tok === null) {
+    return;
+  }
+  void setConfigValue(key, value, tok).then((resp) => {
+    store.set({
+      configStatus: {
+        key: resp.result.key,
+        // Echo the CANONICAL value the writer reported, not the one sent.
+        value: resp.result.value,
+        notice: resp.result.requires_restart ? resp.restart_notice : "",
+        error: ""
+      }
+    });
+    refreshConfig();
+  }).catch((err) => {
+    store.set({ configStatus: { key, value: "", notice: "", error: errorText(err) } });
+  });
+}
 function refreshTasks() {
   const tok = token;
   if (tok === null) {
@@ -10677,6 +10912,7 @@ var actions = {
   newTab: createSessionTab,
   closeTab: closeSessionTab,
   switchView,
+  setConfigValue: applyConfigValue,
   switchProject,
   setStatusFilter,
   resetStatusFilter,

@@ -210,3 +210,59 @@ export interface WireEvent {
   type: EventType;
   data?: SessionData;
 }
+
+/**
+ * config.ConfigEntry (config/manifest_value.go): one user-facing global config
+ * key — its purpose, type, default, tier, whether it is settable, and the
+ * user's live value — as returned by GetConfig.
+ *
+ * This is the whole reason the config screen has no key list of its own. The
+ * manifest is derived from config_types.go and pinned to it by a reflective
+ * coverage test, so a key added there arrives here automatically and the web
+ * form renders it with no edit to the bundle. A hand-written form would drift
+ * the moment someone added a key — which is exactly the class the manifest
+ * exists to kill.
+ */
+export interface ConfigEntry {
+  key: string;
+  type: string;
+  default: string;
+  purpose: string;
+  tier: number;
+  tier_name: string;
+  /** False for a key `af config set` will not take (a nested table, a list):
+   *  it is hand-edited in config.toml by design, so the form renders it
+   *  read-only rather than offering a field whose save could only fail. */
+  settable: boolean;
+  /** Present when the value is enumerated; drives a picker instead of a text
+   *  field. For a table it constrains the entry NAMES, not the value. */
+  enum?: string[];
+  value: string;
+  /** True for every key today: config.toml is read at startup, so an edit
+   *  applies when af and the daemon next start. */
+  requires_restart: boolean;
+}
+
+/** GetConfigResponse (daemon/control_types.go). */
+export interface ConfigResponse {
+  entries: ConfigEntry[];
+  /** The config.toml the values were read from, so the UI can name the file it
+   *  is editing rather than leaving an AF_HOME user guessing. */
+  path: string;
+}
+
+/** config.SetResult (config/configset.go), as returned by SetConfigValue. */
+export interface ConfigSetResult {
+  key: string;
+  value: string;
+  path: string;
+  requires_restart: boolean;
+}
+
+/** SetConfigValueResponse (daemon/control_types.go). The restart notice rides
+ *  on the response rather than being duplicated here so the TUI, the web UI,
+ *  and the CLI cannot drift into three accounts of when an edit takes effect. */
+export interface ConfigSetResponse {
+  result: ConfigSetResult;
+  restart_notice: string;
+}
