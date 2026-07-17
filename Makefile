@@ -8,6 +8,7 @@
 	agent-server-roundtrip-container remote-agent-server-roundtrip-container \
 	backend-docker-roundtrip backend-ssh-roundtrip \
 	playtest-container playtest-container-detached tui-driver tui-driver-selftest \
+	lifecycle-container lifecycle-selftest \
 	testbox-image lint-file-length docs web-build web-test web-selftest-container
 
 # Structural-health lint (#1145): fail if any Go file exceeds its line limit
@@ -112,6 +113,32 @@ tui-driver:
 
 tui-driver-selftest:
 	scripts/testbox.sh selftest
+
+# Clean-environment install + upgrade gate. Every other target here tests THIS
+# TREE in isolation; this one installs a REAL previous release into a throwaway
+# machine, puts sessions on it, upgrades it the way a user does, and asserts the
+# machine is coherent afterwards (daemon restarted onto the new binary, no
+# version skew, one daemon, sessions survived, doctor clean).
+#
+# That version boundary is where the bugs users actually hit this week live —
+# #1921 (new client vs old daemon), #796 (daemon demoted from its unit) — and no
+# single-version test can construct it.
+#
+# Needs network: it downloads published release tarballs. Wired nightly rather
+# than per-PR for that reason (.github/workflows/lifecycle.yml). The container
+# has no systemd, so the supervision assertion is SKIPped here and covered by
+# the CI runner leg. Narrow the run with LIFECYCLE_SCENARIO=scenario-a.
+# See docs/lifecycle-testing.md.
+lifecycle-container:
+	scripts/testbox.sh lifecycle $(LIFECYCLE_SCENARIO)
+
+# Tests for the lifecycle harness's OWN safety logic: that a fault injection
+# which cannot execute FAILS rather than passing, that the disposable guard
+# refuses an unrecognized runtime, and that concurrent runs cannot share an
+# image tag. Pure logic — no containers, no daemons, no network, no AF home —
+# so it runs on the host in about a second and gates every PR.
+lifecycle-selftest:
+	bash scripts/lifecycle-selftest.sh
 
 # (Re)build the toolchain image only.
 testbox-image:

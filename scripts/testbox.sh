@@ -9,6 +9,7 @@
 #   scripts/testbox.sh playtest -d             detached; drive via `docker exec`
 #   scripts/testbox.sh selftest                run the TUI driver self-test (#1161)
 #   scripts/testbox.sh drive                   boot af via the driver + attach
+#   scripts/testbox.sh lifecycle [scenario]    clean-install / install->upgrade gate
 #   scripts/testbox.sh build                   (re)build the image only
 #
 # The container gets: its own tmux server, a throwaway AF home, pids/memory
@@ -23,6 +24,23 @@ IMAGE="${AF_TESTBOX_IMAGE:-agent-factory-testbox}"
 # see scripts/container/Dockerfile.web-selftest. Kept distinct so it never bloats
 # the plain testbox image every other gate shares.
 WEB_IMAGE="${AF_WEB_TESTBOX_IMAGE:-agent-factory-web-selftest}"
+# The lifecycle gate's image tag is UNIQUE PER RUN.
+#
+# An image tag is a global name on the docker daemon, and this box runs many
+# worktrees at once. A fixed tag has two failure modes, and we have now eaten
+# both:
+#   * a SIBLING gate rebuilds the shared `agent-factory-testbox` tag from THEIR
+#     checkout's Dockerfile, so whichever build ran last wins — that silently
+#     reverted the image under this gate mid-run ("missing required tool: jq");
+#   * two CONCURRENT lifecycle runs from different worktrees clobber each
+#     other's tag. That is exactly #1171 (the fixed `af-playtest` name), fixed in
+#     #1166 with per-run-unique names. Re-introducing it in the sibling harness
+#     would be repeating a bug we already paid for.
+#
+# So the tag carries the same per-run token the container name does, and is
+# removed on exit. Layer cache is keyed on Dockerfile content, not the tag, so a
+# unique tag costs nothing on a warm cache. Pin AF_LIFECYCLE_IMAGE to reuse one.
+LIFECYCLE_IMAGE="${AF_LIFECYCLE_IMAGE:-}"
 
 # _uniq — a per-invocation token (pid + a little randomness) for container
 # names, so two runs never share a name.
@@ -90,11 +108,14 @@ fi
 # Cache volumes created by older harness versions (or manual root runs)
 # can be root-owned, which the non-root test user can't write to. A
 # one-shot root chown makes the harness self-healing.
+# $1: image to run the chown in (defaults to the shared testbox image). The
+# lifecycle gate passes its own so it never depends on the shared tag existing
+# or being current.
 fix_cache_perms() {
     "$ENGINE" run --rm --user 0 \
         -v af-testbox-gomod:/cache/gomod \
         -v af-testbox-gobuild:/cache/gobuild \
-        "$IMAGE" chown -R dev:dev /cache >/dev/null
+        "${1:-$IMAGE}" chown -R dev:dev /cache >/dev/null
 }
 
 # start_playtest_detached — run the play-test sandbox container detached, so a
@@ -198,6 +219,45 @@ drive)
     echo "testbox: tear down with: $ENGINE rm -f $PLAYTEST_NAME" >&2
     exec "$ENGINE" exec -it "$PLAYTEST_NAME" tmux attach -t drive
     ;;
+lifecycle)
+    # Clean-environment install + upgrade gate. Unlike every other target here,
+    # this one does not just run this tree's code: it installs REAL published
+    # releases into throwaway machines and upgrades across the version boundary
+    # — the seam #1921/#796 shipped through, which no single-version test can
+    # reach.
+    #
+    # Network is required (it downloads real release tarballs), so this is the
+    # one testbox target that is not hermetic. It is wired nightly rather than
+    # per-PR for that reason — see .github/workflows/lifecycle.yml.
+    #
+    # Runs in an EPHEMERAL uniquely-named container AND under a uniquely-named
+    # image tag (#1171/#1166) so concurrent runs cannot clobber each other and
+    # nothing survives the gate. Built from the same Dockerfile as the testbox.
+    lc_token="$(_uniq)"
+    lc_teardown=no
+    if [ -z "$LIFECYCLE_IMAGE" ]; then
+        LIFECYCLE_IMAGE="agent-factory-lifecycle:$lc_token"
+        lc_teardown=yes
+    fi
+    LIFECYCLE_NAME="af-lifecycle-$lc_token"
+    # Remove the per-run tag however we exit; the underlying layers stay cached
+    # for the next run. A pinned AF_LIFECYCLE_IMAGE is the caller's to manage.
+    if [ "$lc_teardown" = yes ]; then
+        # shellcheck disable=SC2064  # expand the tag now, not at trap time
+        trap "\"$ENGINE\" rmi -f \"$LIFECYCLE_IMAGE\" >/dev/null 2>&1 || true" EXIT INT TERM
+    fi
+    "$ENGINE" build -q -t "$LIFECYCLE_IMAGE" - <"$REPO_ROOT/scripts/container/Dockerfile.test" >/dev/null
+    fix_cache_perms "$LIFECYCLE_IMAGE"
+    rc=0
+    "$ENGINE" run --rm \
+        "${RUN_FLAGS[@]}" \
+        --name "$LIFECYCLE_NAME" \
+        -e "GITHUB_TOKEN=${GITHUB_TOKEN:-}" \
+        -e "AF_LIFECYCLE_INJECT=${AF_LIFECYCLE_INJECT:-}" \
+        -e "AF_LIFECYCLE_ALLOW_PARTIAL=${AF_LIFECYCLE_ALLOW_PARTIAL:-1}" \
+        "$LIFECYCLE_IMAGE" bash /src/scripts/container/lifecycle-entry.sh "$@" || rc=$?
+    exit "$rc"
+    ;;
 web-selftest)
     # Playwright web-driver-selftest (#1592 Phase 5 PR6): build the dedicated
     # Go+Node+Chromium image, then run the whole harness in ONE ephemeral
@@ -218,7 +278,7 @@ web-selftest)
         "$WEB_IMAGE" bash /src/scripts/container/web-selftest-entry.sh
     ;;
 *)
-    echo "testbox: unknown command '$cmd' (want: test | playtest | selftest | drive | web-selftest | build)" >&2
+    echo "testbox: unknown command '$cmd' (want: test | playtest | selftest | drive | lifecycle | web-selftest | build)" >&2
     exit 1
     ;;
 esac
