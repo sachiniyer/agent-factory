@@ -95,8 +95,15 @@ func TestArgSurvivesEveryClaimedShell(t *testing.T) {
 	for _, sh := range shellsUnderTest {
 		path, err := exec.LookPath(sh)
 		if err != nil {
-			t.Errorf("%s is not installed, so this run does NOT cover a shell the package claims "+
-				"(add it to scripts/container/Dockerfile.test); saying so rather than skipping quietly", sh)
+			// Fail rather than skip. A skip here would mean the suite silently
+			// covers two of the three shells the package claims, and the one most
+			// likely to go missing (zsh, absent from the ubuntu runner and from a
+			// minimal container) is the one whose bug bash cannot see. Install it:
+			// scripts/container/Dockerfile.test for the local container,
+			// .github/workflows/pr.yml ("Install zsh") for CI. The macOS runner
+			// ships zsh already.
+			t.Errorf("%s is not installed, so this run does NOT cover a shell the package claims; "+
+				"saying so rather than skipping quietly", sh)
 			continue
 		}
 		ran++
