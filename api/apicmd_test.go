@@ -37,7 +37,7 @@ func runAPICmd(t *testing.T, jsonMode bool) string {
 // catalog equals the served mux, so the chain is: `af api` == HTTPRoutes ==
 // served routes.
 func TestAPICmd_ListsEveryRegisteredEndpoint(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	out := runAPICmd(t, false)
 
 	routes := daemon.HTTPRoutes()
@@ -59,7 +59,7 @@ func TestAPICmd_ListsEveryRegisteredEndpoint(t *testing.T) {
 // segment) rather than repeating the endpoint's full description verbatim — the
 // description already appears once in the table above.
 func TestAPICmd_ExamplesUseShortRouteNames(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	out := runAPICmd(t, false)
 
 	idx := strings.Index(out, "Examples:")
@@ -144,7 +144,7 @@ func TestAPICmd_DoesNotSpawnDaemon(t *testing.T) {
 // TestAPICmd_CurlExampleShape checks the curl example distinguishes GET (no
 // body) from POST (empty JSON body), so the printed examples are runnable as-is.
 func TestAPICmd_CurlExampleShape(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	out := runAPICmd(t, false)
 
 	// GET health: no -d body.

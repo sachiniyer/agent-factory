@@ -191,20 +191,43 @@ if [ -n "$BRANCH" ]; then               # restore: bring the archived branch bac
 fi
 
 # Start the agent-server; capture its startup banner (one JSON line on stdout).
+# `nohup … &` detaches it: this script exits as soon as it has the banner, and the
+# server must outlive it. Both redirects are required — they keep the server off
+# this script's stdout/stderr, which af reads to end of file, and they are where
+# the server's own startup errors land.
 BANNER="$WORKDIR/banner.json"
+LOG="$WORKDIR/agent-server.log"
 ARGS=(agent-server --listen 0.0.0.0:0 --repo "$WORKDIR/workspace" --title "$TITLE")
 [ -n "$PROGRAM" ] && ARGS+=(--program "$PROGRAM")
 [ -n "$AUTOYES" ] && ARGS+=("$AUTOYES")
-setsid af "${ARGS[@]}" >"$BANNER" 2>"$WORKDIR/agent-server.log" &
+nohup af "${ARGS[@]}" >"$BANNER" 2>"$LOG" &
 echo $! > "$WORKDIR/pid"
 
 # Wait for the banner, then re-emit it as the endpoint contract.
 for _ in $(seq 1 200); do grep -q '"addr"' "$BANNER" && break; sleep 0.1; done
 ADDR=$(sed -n 's/.*"addr":"\([^"]*\)".*/\1/p' "$BANNER")
 TOKEN=$(sed -n 's/.*"token":"\([^"]*\)".*/\1/p' "$BANNER")
-[ -n "$ADDR" ] || { echo "agent-server did not start" >&2; cat "$WORKDIR/agent-server.log" >&2; exit 1; }
+# Always echo the server's own output on failure. af reports what this script
+# prints, so anything you do not surface here reaches nobody.
+[ -n "$ADDR" ] || { echo "af agent-server printed no banner; its output was:" >&2; cat "$LOG" >&2; exit 1; }
 printf '{"url":"http://%s","token":"%s"}\n' "$ADDR" "$TOKEN"
 ```
+
+> **Why `nohup` and not `setsid`?** `setsid` is part of util-linux and **does not
+> exist on macOS**, so a Mac user copying an earlier version of this recipe got
+> `setsid: command not found` (#1946). `nohup` is POSIX and present on both.
+>
+> What the detach actually needs here is for the server to outlive this script,
+> and the `&` alone already delivers that: the script exits immediately, and the
+> kernel reparents the server to `init`/`launchd`. `nohup` adds immunity to the
+> `SIGHUP` you would get by running this script by hand from a terminal that then
+> closes. `setsid` additionally made the server a session leader, which this
+> recipe never relied on.
+>
+> If you replace this with your own launcher, keep the two properties that matter:
+> the server **survives this script**, and it **does not inherit this script's
+> stdout/stderr**. A launcher that holds those pipes open will hang `launch_cmd`
+> until the server exits, because af reads them to end of file.
 
 The matching `delete.sh`:
 
@@ -218,7 +241,7 @@ WORKDIR="$HOME/.af-hook/$NAME"
 rm -rf "$WORKDIR"
 ```
 
-For a real orchestrator, replace `WORKDIR=…` / `setsid af …` with your provisioning (create a pod, `ssh` to a host, spin up a Modal/Daytona sandbox) and run `af agent-server` there, then surface its banner however you reach it (e.g. read a published address). The daemon only needs the `url` and `token` back — over plain HTTP, so make sure the address you hand back is reachable from the daemon on a private network or tunnel.
+For a real orchestrator, replace `WORKDIR=…` / `nohup af …` with your provisioning (create a pod, `ssh` to a host, spin up a Modal/Daytona sandbox) and run `af agent-server` there, then surface its banner however you reach it (e.g. read a published address). The daemon only needs the `url` and `token` back — over plain HTTP, so make sure the address you hand back is reachable from the daemon on a private network or tunnel.
 
 ## Migrating from the old contract
 

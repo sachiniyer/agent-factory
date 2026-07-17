@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/sockpath"
 	"github.com/sachiniyer/agent-factory/log"
 )
 
@@ -48,11 +49,15 @@ const vscodeSocketExt = ".sock"
 // the owning user only, matching the daemon's own control socket.
 const vscodeSocketMode = "0600"
 
-// maxUnixSocketPathLen bounds a socket path. sockaddr_un.sun_path is 108 bytes on
-// Linux and 104 on macOS; 103 is the portable ceiling once the NUL terminator is
-// counted. Exceeding it fails inside the kernel as an opaque "invalid argument",
-// so the limit is checked up front where the message can name the cause.
-const maxUnixSocketPathLen = 103
+// The socket-path ceiling this file used to define now lives in
+// internal/sockpath, which every socket in af shares. It was defined here, and
+// enforced only here, which is how the daemon's OWN sockets ended up with no
+// check at all: the editor pane failed with a message naming AGENT_FACTORY_HOME
+// while the control plane failed with a bare kernel errno (#1940).
+//
+// sockpath.Max is also the platform's real limit rather than the portable 103
+// this constant hardcoded, so on Linux the bound is now 107 — a loosening, which
+// can only accept paths that previously worked.
 
 // vscodeUpstreamHost is the Host the proxy presents to a socket-bound editor.
 //
@@ -282,9 +287,8 @@ func vscodeSocketPath(key string) (string, error) {
 	sum := sha256.Sum256([]byte(key))
 	name := hex.EncodeToString(sum[:4]) + "-" + hex.EncodeToString(nonce[:]) + vscodeSocketExt
 	path := filepath.Join(dir, name)
-	if len(path) > maxUnixSocketPathLen {
-		return "", fmt.Errorf("the VS Code socket path %q is %d bytes, over the %d-byte limit for a unix socket: "+
-			"set AGENT_FACTORY_HOME to a shorter path", path, len(path), maxUnixSocketPathLen)
+	if err := sockpath.Check("VS Code socket", path); err != nil {
+		return "", err
 	}
 	return path, nil
 }

@@ -2,10 +2,12 @@ package doctor
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -161,7 +163,41 @@ func checkDaemonHealth(ctx *scanContext, report *Report, h daemon.HealthStatus) 
 // marker + live session but outside its pane trees = escaped (report-only);
 // no marker but a TMUX env var pointing at a dead server = possible orphan
 // (report-only — could belong to any tmux, not necessarily agent-factory).
+// checkProcessInspection reports whether doctor can see the process table at
+// all, and it must run BEFORE every check that reads ctx.snap.
+//
+// This is the check that exists because of what its absence did (#1939).
+// proctree was /proc-only with no darwin backend, so on macOS every snapshot
+// failed, Run discarded the error, and the process checks below returned early
+// on a nil snap. Nothing was reported — not a warning, not a note — so `af
+// doctor` printed a clean report on a machine it had never managed to inspect.
+// Every macOS user who ran doctor to ask "are there orphaned processes?" was
+// told "no" by a program that could not have known either way.
+//
+// So blindness gets its own row, and that row is a FAIL: it contributes to the
+// exit code, because "I could not look" is a broken doctor, not a healthy
+// machine. Do not soften this to a Warn, and do not let the process checks
+// below start reporting emptiness as health.
+func checkProcessInspection(ctx *scanContext, report *Report) {
+	if ctx.snap != nil {
+		report.Pass(sectionProcesses, "process-inspection",
+			fmt.Sprintf("read the process table (%d processes)", len(ctx.snap)))
+		return
+	}
+	detail := fmt.Sprintf("cannot read the process table on %s, so the orphan, escaped-process and "+
+		"runaway-CPU checks below could not run: %v", runtime.GOOS, ctx.snapErr)
+	remediation := "the checks that depend on the process table are UNKNOWN, not clean — " +
+		"do not read this report as evidence that no processes leaked"
+	if errors.Is(ctx.snapErr, proctree.ErrUnsupportedPlatform) {
+		remediation = fmt.Sprintf("af has no process-table backend for %s; the process checks cannot run here "+
+			"and this report says nothing about leaked processes", runtime.GOOS)
+	}
+	report.Fail(sectionProcesses, "process-inspection", detail, remediation)
+}
+
 func checkOrphanedProcesses(ctx *scanContext, report *Report) {
+	// Silent only because checkProcessInspection already reported the
+	// blindness as a FAIL. Never make this branch the whole story again.
 	if ctx.snap == nil {
 		return
 	}
@@ -176,11 +212,17 @@ func checkOrphanedProcesses(ctx *scanContext, report *Report) {
 		if ctx.selfAncestors[pid] {
 			continue
 		}
-		if name, ok := proctree.EnvValue(pid, tmux.EnvMarkerSession); ok && name != "" {
+		// EnvUnknown must NOT land in `marked`: that set is the killable
+		// candidate pool, and a process we could not read is a process we
+		// cannot claim is ours. It falls through to the report-only paths
+		// below, which is the safe direction — we under-report an orphan
+		// rather than act on one we never identified.
+		name, nameStatus := proctree.LookupEnv(pid, tmux.EnvMarkerSession)
+		if nameStatus == proctree.EnvFound && name != "" {
 			marked[name] = append(marked[name], p)
 			continue
 		}
-		if tmuxEnv, ok := proctree.EnvValue(pid, "TMUX"); ok && tmuxServerDead(ctx, tmuxEnv) {
+		if tmuxEnv, st := proctree.LookupEnv(pid, "TMUX"); st == proctree.EnvFound && tmuxServerDead(ctx, tmuxEnv) {
 			possibles = append(possibles, p)
 		}
 	}
@@ -212,7 +254,12 @@ func checkOrphanedProcesses(ctx *scanContext, report *Report) {
 			// to this server's live list, so its perfectly healthy processes
 			// would otherwise masquerade as verified orphans here. Foreign
 			// or missing AF_HOME downgrades to report-only.
-			home, hasHome := proctree.EnvValue(p.PID, tmux.EnvMarkerHome)
+			// Only EnvFound may arm the kill. EnvUnknown (a denied or
+			// redacted read) falls to the default arm — report-only —
+			// because "I could not read its home" is not "its home is
+			// mine".
+			home, homeStatus := proctree.LookupEnv(p.PID, tmux.EnvMarkerHome)
+			hasHome := homeStatus == proctree.EnvFound
 			switch {
 			case hasHome && filepath.Clean(home) == filepath.Clean(ctx.opts.ConfigDir):
 				report.Findings = append(report.Findings, Finding{
@@ -305,9 +352,12 @@ func tmuxServerDead(ctx *scanContext, tmuxEnv string) bool {
 // checkRunawayChildren reports (never kills) descendants of live af_
 // sessions that have averaged a pegged core for an extended period.
 func checkRunawayChildren(ctx *scanContext, report *Report) {
+	// See checkOrphanedProcesses: blindness is reported once, by
+	// checkProcessInspection, rather than swallowed here.
 	if ctx.snap == nil {
 		return
 	}
+	unmeasurable := 0
 	for _, name := range listTmuxSessions(ctx) {
 		if !strings.HasPrefix(name, tmux.TmuxPrefix) {
 			continue
@@ -319,6 +369,16 @@ func checkRunawayChildren(ctx *scanContext, report *Report) {
 				continue
 			}
 			frac, age, err := proctree.CPUFraction(p)
+			if errors.Is(err, proctree.ErrCPUUnknown) {
+				// Counted, not swallowed. A check that cannot answer must say
+				// so: silently skipping every process would render "no runaway
+				// processes" — the exact shape of the report this package
+				// exists to stop printing. Reported once below rather than per
+				// process, since the cause is usually systemic (a subset=pid
+				// procfs hides /proc/uptime, so NO process has an age).
+				unmeasurable++
+				continue
+			}
 			if err != nil || frac < runawayCPUFraction || age < runawayMinAge.Seconds() {
 				continue
 			}
@@ -328,6 +388,12 @@ func checkRunawayChildren(ctx *scanContext, report *Report) {
 					"check the session; doctor never kills children of live sessions", describeProc(p), name),
 			})
 		}
+	}
+	if unmeasurable > 0 {
+		report.Warn(sectionProcesses, "runaway-cpu",
+			fmt.Sprintf("could not measure CPU for %s in live sessions, so this check reports nothing "+
+				"about them", plural(unmeasurable, "process", "processes")),
+			"a process pegging a core would not be spotted here; inspect the sessions yourself", false)
 	}
 }
 
@@ -347,7 +413,7 @@ func checkLeakedTmuxSessions(ctx *scanContext, report *Report) {
 	for _, name := range leaked {
 		origin := "no ancestry marker"
 		if procs := tmux.SessionProcessTrees(ctx.opts.Exec, name); len(procs) > 0 {
-			if home, ok := proctree.EnvValue(procs[0].PID, tmux.EnvMarkerHome); ok {
+			if home, st := proctree.LookupEnv(procs[0].PID, tmux.EnvMarkerHome); st == proctree.EnvFound {
 				if filepath.Clean(home) == filepath.Clean(ctx.opts.ConfigDir) {
 					origin = "created by this install"
 				} else {
@@ -424,7 +490,7 @@ var afHomeMarkers = []string{
 func checkStaleTempHomes(ctx *scanContext, report *Report) {
 	tempDir := filepath.Clean(ctx.opts.TempDir)
 	activeHome := filepath.Clean(ctx.opts.ConfigDir)
-	homesInUse := processReferencedHomes(ctx.snap)
+	homesInUse, unreadableProcs := processReferencedHomes(ctx.snap)
 	tmuxHomesInUse := liveTmuxHomes(ctx)
 
 	for _, dir := range candidateTempHomes(tempDir) {
@@ -432,7 +498,7 @@ func checkStaleTempHomes(ctx *scanContext, report *Report) {
 		if dir == activeHome || !isAFHome(dir) {
 			continue
 		}
-		if reason := tempHomeInUseReason(dir, homesInUse, tmuxHomesInUse); reason != "" {
+		if reason := tempHomeInUseReason(dir, homesInUse, tmuxHomesInUse, unreadableProcs); reason != "" {
 			report.Pass(sectionProcesses, "temp home", fmt.Sprintf("%s is in use (%s)", dir, reason))
 			continue
 		}
@@ -440,17 +506,52 @@ func checkStaleTempHomes(ctx *scanContext, report *Report) {
 		if age < ctx.opts.MinTempHomeAge {
 			continue
 		}
-		// Containment re-check before offering an rm -rf.
 		if !pathInside(tempDir, dir) {
 			continue
 		}
-		removeDir := dir
+		// REPORT-ONLY. No FixAction, no fix closure: `af doctor --fix` will
+		// not delete this, and that is deliberate.
+		//
+		// This finding used to carry an rm -rf, gated on "no process
+		// references this home". FOUR consecutive P1 reviews found four
+		// different ways to make that negative false, and every one of them
+		// ended at this same delete:
+		//
+		//   1. darwin redacts a foreign process's environment silently, so an
+		//      unread env read as "references no home".
+		//   2. the permission gate written to fix (1) modelled uid but not
+		//      CS_RESTRICT, which SIP makes ordinary — so a same-uid restricted
+		//      process read as "references no home".
+		//   3. (the gate was deleted; classify the answer instead.)
+		//   4. the uid filter that survived assumed temp homes sit under a
+		//      user-owned root. Linux's /tmp is 01777 and shared, so another
+		//      user's home lives there and their processes read as
+		//      "references no home".
+		//
+		// That is not four bugs. It is one unsound question: "can I prove
+		// nobody is using this?" cannot be answered by inspecting processes.
+		// Process inspection is inference over a surface that is adversarial by
+		// construction — kernels redact, policies grow clauses we did not
+		// model, /proc can be mounted subset=pid, /tmp is shared with users we
+		// cannot see, PIDs recycle. Each of those turns "I saw no user" into
+		// "there is no user", and that negative authorised an rm -rf.
+		//
+		// So the teeth come out until the predicate is a FACT rather than an
+		// inference: a lockfile the owning process holds for its lifetime,
+		// where "is this in use?" is answered by trying to take the lock and
+		// the kernel is the authority (see the follow-up issue; af homes
+		// already have exactly such a lock in daemon/singleton_lock.go).
+		//
+		// Reporting is honest; authorising is dangerous; they are not the same
+		// code path. Doctor still names the directory and still says what it
+		// could not verify — the operator decides.
 		report.Findings = append(report.Findings, Finding{
 			Check: "stale-temp-home",
-			Detail: fmt.Sprintf("abandoned agent-factory home %s (untouched for %s)",
+			Detail: fmt.Sprintf("agent-factory home %s looks abandoned (untouched for %s), but nothing "+
+				"here can PROVE it is unused — inspect it and remove it yourself if it is dead",
 				dir, formatAge(age.Seconds())),
-			FixAction: "remove " + dir,
-			fix:       staleTempHomeRemoveFix(ctx, removeDir),
+			Severity:    StatusWarn,
+			Remediation: "verify nothing is using it, then `rm -rf " + dir + "`",
 		})
 	}
 }
@@ -496,17 +597,67 @@ func isAFHome(dir string) bool {
 	return found >= 2
 }
 
-func processReferencedHomes(snap map[int]proctree.Process) map[string]bool {
-	homes := map[string]bool{}
+// processReferencedHomes returns the AF homes live processes name in their
+// environment, AND the number of processes whose environment could not be read.
+//
+// The second return is the whole point, and dropping it would restore a
+// DESTRUCTIVE bug. This feeds tempHomeInUseReason, whose negative — "no process
+// references this home" — is the predicate for os.RemoveAll. A process whose
+// environment we could not read might be using the home; if its unreadability
+// is silently folded into "does not reference it", doctor --fix deletes a home
+// that is in use, on the strength of a read that was denied.
+//
+// This is not hypothetical on darwin: the kernel redacts a foreign process's
+// environment and the buffer looks identical to one with no variables at all
+// (see internal/proctree's darwin readEnviron). Linux says EACCES honestly, but
+// the caller cannot depend on the platform to be honest for it.
+//
+// Only OUR OWN processes count toward unreadable. A home under this user's
+// 0700 temp dir cannot be in use by another user's process, so a foreign
+// process being unreadable tells us nothing we needed to know — and counting it
+// would make --fix refuse forever on any real machine, where most of the
+// process table belongs to root.
+func processReferencedHomes(snap map[int]proctree.Process) (homes map[string]bool, unreadable int) {
+	homes = map[string]bool{}
 	if snap == nil {
-		return homes
+		return homes, 0
 	}
+	self := os.Getuid()
 	for pid := range snap {
-		if home, ok := proctree.EnvValue(pid, "AGENT_FACTORY_HOME"); ok && home != "" {
-			homes[filepath.Clean(home)] = true
+		home, status := proctree.LookupEnv(pid, "AGENT_FACTORY_HOME")
+		switch status {
+		case proctree.EnvFound:
+			if home != "" {
+				homes[filepath.Clean(home)] = true
+			}
+		case proctree.EnvAbsent:
+			// Read, and it names no home: it cannot be using one.
+		default:
+			// EnvUnknown. Narrow it to the processes whose unreadability
+			// actually costs us knowledge, or --fix would refuse forever:
+			// on a real machine most of the table is root's, and darwin
+			// redacts every one of those environments.
+			uid, ok := proctree.UID(pid)
+			switch {
+			case !ok:
+				// No credentials at all means the process is gone — it was
+				// in the snapshot and has since exited. A dead process uses
+				// nothing, so its silence costs us nothing. (Ownership comes
+				// from the process table, which is readable for ANY process
+				// on both platforms, so a failure here is absence of the
+				// process rather than absence of permission.)
+			case uid != self:
+				// Another user's process. It cannot be using a home under
+				// this user's 0700 temp dir, so whether we can read its
+				// environment is irrelevant to the question being asked.
+			default:
+				// Ours, alive, and unreadable: precisely the case we cannot
+				// rule out.
+				unreadable++
+			}
 		}
 	}
-	return homes
+	return homes, unreadable
 }
 
 func liveTmuxHomes(ctx *scanContext) map[string]bool {
@@ -567,13 +718,22 @@ func tempHomeDaemonLiveness(dir string) tempHomeDaemonStatus {
 	return tempHomeDaemonAbsentOrDead
 }
 
-func tempHomeInUseReason(dir string, processHomes, tmuxHomes map[string]bool) string {
+// tempHomeInUseReason returns why dir must not be removed, or "" when it is
+// provably unused. unreadableProcs is how many of this user's processes have an
+// environment we could not read: each one is a process that MIGHT reference
+// dir, so a non-zero count means "unused" cannot be proven and the directory
+// stays. That mirrors the tempHomeDaemonUnknown arm below — this function
+// already knew that uncertainty is a reason to keep, not to delete.
+func tempHomeInUseReason(dir string, processHomes, tmuxHomes map[string]bool, unreadableProcs int) string {
 	dir = filepath.Clean(dir)
 	switch {
 	case processHomes[dir]:
 		return "live process references it"
 	case tmuxHomes[dir]:
 		return "live tmux session references it"
+	case unreadableProcs > 0:
+		return fmt.Sprintf("%d of this user's processes have an unreadable environment, so nothing proves "+
+			"they are not using it", unreadableProcs)
 	}
 	switch tempHomeDaemonLiveness(dir) {
 	case tempHomeDaemonAlive:
@@ -585,57 +745,20 @@ func tempHomeInUseReason(dir string, processHomes, tmuxHomes map[string]bool) st
 	}
 }
 
-func staleTempHomeRemoveFix(ctx *scanContext, dir string) func() error {
-	return func() error {
-		dir := filepath.Clean(dir)
-		if _, err := os.Stat(dir); err != nil {
-			if os.IsNotExist(err) {
-				return nil
-			}
-			return fmt.Errorf("cannot stat %s before removal: %w", dir, err)
-		}
-		if !pathInside(filepath.Clean(ctx.opts.TempDir), dir) {
-			return fmt.Errorf("refusing to remove %s outside temp dir %s", dir, ctx.opts.TempDir)
-		}
-		if filepath.Clean(ctx.opts.ConfigDir) == dir {
-			return fmt.Errorf("refusing to remove active agent-factory home %s", dir)
-		}
-		if !isAFHome(dir) {
-			return fmt.Errorf("refusing to remove %s: it no longer looks like an agent-factory home", dir)
-		}
-
-		// Re-take the process snapshot at fix time: a home that looked
-		// abandoned during detection may have been claimed since. When the
-		// recheck fails, how we react depends on whether detection had a
-		// working snapshot at all:
-		//   - detection got one (ctx.snap != nil): the process guard was live
-		//     protection we now can't reproduce, and ctx.snap is stale. Fail
-		//     closed rather than delete on stale data — a process that started
-		//     using dir after detection would otherwise lose its home.
-		//   - detection had none (ctx.snap == nil, e.g. no /proc on macOS):
-		//     the process guard is unavailable on this platform and was a
-		//     no-op at detection too. Keep snap nil and fall through to the
-		//     daemon.pid + tmux guards, exactly as before — otherwise --fix
-		//     could never clean a stale temp home on such platforms.
-		snap := ctx.snap
-		if ctx.opts.snapshot == nil {
-			// Unreachable via Run (applyDefaults always installs one). Fail
-			// closed rather than delete on the stale detection snapshot.
-			return fmt.Errorf("refusing to remove %s: no process snapshot available", dir)
-		}
-		fresh, err := ctx.opts.snapshot()
-		switch {
-		case err == nil:
-			snap = fresh
-		case ctx.snap != nil:
-			return fmt.Errorf("refusing to remove %s: process snapshot failed: %w", dir, err)
-		}
-		if reason := tempHomeInUseReason(dir, processReferencedHomes(snap), liveTmuxHomes(ctx)); reason != "" {
-			return fmt.Errorf("refusing to remove %s: %s", dir, reason)
-		}
-		return os.RemoveAll(dir)
-	}
-}
+// staleTempHomeRemoveFix is DELETED. Do not reintroduce it without the lock.
+//
+// It was the --fix closure that rm -rf'd an "abandoned" temp home, and it was
+// careful: containment checks, an active-home check, an isAFHome check, and a
+// fresh snapshot at fix time. None of that was the problem. Its PREDICATE was:
+// it asked "did I see any process referencing this home?" and treated "no" as
+// proof. Four consecutive P1 reviews found four different ways for that "no" to
+// be false (see checkStaleTempHomes), each one ending here, in an rm -rf.
+//
+// The care was real and it did not help, because you cannot make an unsound
+// question safe by validating its inputs harder. The delete returns when the
+// predicate is a fact the kernel guarantees — try to take the home's lock —
+// rather than an inference we assemble from a surface that redacts, restricts
+// and shares. See the follow-up issue.
 
 func pathInside(base, path string) bool {
 	rel, err := filepath.Rel(base, path)
@@ -698,6 +821,14 @@ func checkForeignDaemons(ctx *scanContext, report *Report) {
 			// The environ was unreadable, so which home this daemon serves is
 			// genuinely unknown. Calling it foreign would be a guess, and --fix
 			// would then offer to kill a process on the strength of that guess.
+			//
+			// homeKnown is resolved upstream by daemonProcessHome, which reads
+			// the environ through proctree.EnvLookup — now backed by the
+			// three-valued LookupEnv (this PR), so a redacted or empty darwin
+			// environment lands here as "unknown → skip" rather than a
+			// fabricated default. The inline EnvUnknown/EnvAbsent switch this PR
+			// originally added here is therefore redundant with #1920's refactor
+			// and dropped in its favour.
 			continue
 		}
 		if home == activeHome || home == "" {

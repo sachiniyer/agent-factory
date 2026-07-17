@@ -1,15 +1,14 @@
 package daemon
 
 import (
-	"bytes"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
-	"syscall"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/proctree"
 	"github.com/sachiniyer/agent-factory/log"
 )
 
@@ -260,18 +259,17 @@ func canonicalDir(dir string) (string, error) {
 }
 
 // processUID returns the uid owning pid. The second return is false when
-// ownership cannot be determined (no /proc, or the process exited), which
-// callers must treat as "unknown", never as "ours".
+// ownership cannot be determined (the process exited, or the platform will not
+// say), which callers must treat as "unknown", never as "ours".
+//
+// Through proctree rather than /proc directly: this read had no darwin path, so
+// on macOS it answered "unknown" for every process, and classifyDaemon returned
+// daemonUnverifiable for every daemon — meaning `af reset` could never verify,
+// and therefore never stop, anything. That is the same user-facing breakage as
+// #1942, from the same root (#1939): a Linux-only inspection primitive with no
+// backend for the platform we ship.
 func processUID(pid int) (int, bool) {
-	fi, err := os.Stat(fmt.Sprintf("/proc/%d", pid))
-	if err != nil {
-		return 0, false
-	}
-	st, ok := fi.Sys().(*syscall.Stat_t)
-	if !ok {
-		return 0, false
-	}
-	return int(st.Uid), true
+	return proctree.UID(pid)
 }
 
 // daemonHomeEnv reports the AGENT_FACTORY_HOME a running process was started
@@ -284,24 +282,38 @@ func processUID(pid int) (int, bool) {
 //     COMMON case, since almost nobody sets AGENT_FACTORY_HOME, and treating it
 //     as "unknown" would skip exactly the everyday stale daemon reset exists to
 //     kill.
-//   - ("", false): the environ was UNREADABLE — no /proc (macOS), a foreign
-//     uid, or the process exited. We cannot tell which home it serves, and
-//     must not guess it is the default.
+//   - ("", false): the environ was UNREADABLE — a foreign uid, or the process
+//     exited. We cannot tell which home it serves, and must not guess it is the
+//     default.
 //
 // The environ is fixed at exec and cannot be shed, so what it says about the
 // home a daemon resolved at startup stays true for the life of the process.
+//
+// Read through proctree.Environ rather than /proc directly, which is what makes
+// the first case reachable on darwin at all: before #1939 this was a bare /proc
+// read, so on macOS EVERY daemon landed in the second case and `af reset` left
+// all of them alone. Environ (not EnvValue) precisely because EnvValue folds
+// "absent" and "unreadable" into one false, and the whole point of this
+// function is that those two must not be confused.
 func daemonHomeEnv(pid int) (string, bool) {
-	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/environ", pid))
-	if err != nil {
+	home, status := proctree.LookupEnv(pid, "AGENT_FACTORY_HOME")
+	switch status {
+	case proctree.EnvFound:
+		return home, true
+	case proctree.EnvAbsent:
+		// READ, and the variable genuinely is not set — so this daemon
+		// resolved the DEFAULT home. This is the common case and must keep
+		// working: almost nobody sets AGENT_FACTORY_HOME, and treating it as
+		// unknown would skip exactly the everyday stale daemon reset exists
+		// to kill.
+		return "", true
+	default:
+		// EnvUnknown. NOT "unset": we were not allowed to look. Returning
+		// ("", true) here would resolve the DEFAULT home, and if that happens
+		// to be ours we would SIGTERM a daemon whose home we never read. The
+		// caller turns this into daemonUnverifiable and leaves it alone.
 		return "", false
 	}
-	const key = "AGENT_FACTORY_HOME="
-	for _, kv := range bytes.Split(data, []byte{0}) {
-		if bytes.HasPrefix(kv, []byte(key)) {
-			return string(kv[len(key):]), true
-		}
-	}
-	return "", true
 }
 
 // RemoveRuntimeSockets unlinks the Unix sockets under the AF home that a client

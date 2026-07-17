@@ -171,18 +171,26 @@ type Options struct {
 	killGrace    time.Duration
 	killTermWait time.Duration
 
-	// snapshot overrides the /proc scan; tests inject a snapshot containing
-	// only their own spawned processes so a --fix run can never act on
-	// anything outside the test.
+	// snapshot overrides the process-table scan; tests inject a snapshot
+	// containing only their own spawned processes so a --fix run can never act
+	// on anything outside the test.
 	snapshot func() (map[int]proctree.Process, error)
 }
 
 // scanContext carries the shared, immutable inputs of one run.
 type scanContext struct {
 	opts Options
-	// snap is the /proc snapshot; nil when /proc is unavailable, in which
-	// case the process-based checks degrade to no-ops.
+	// snap is the process-table snapshot, or nil when it could not be read.
+	//
+	// nil means BLIND, not healthy. Every check that consumes it must say so
+	// out loud rather than skipping quietly: a doctor that finds no orphans
+	// because it never looked reports the same clean bill as a machine that
+	// genuinely has none, and the operator cannot tell which one they got.
+	// checkProcessInspection turns that state into a FAIL row; see snapErr.
 	snap map[int]proctree.Process
+	// snapErr is why snap is nil. Held so the report can name the cause
+	// instead of asserting health from an empty table (#1939).
+	snapErr error
 	// selfAncestors holds our own PID and every ancestor — never proposed
 	// for a kill, no matter what markers they carry.
 	selfAncestors map[int]bool
@@ -282,13 +290,22 @@ func Run(opts Options) (*Report, error) {
 	cfg := checkConfigAndStorage(ctx, report)
 	checkEnvironment(ctx, report, cfg)
 
+	// A failed snapshot is recorded, never discarded: checkProcessInspection
+	// reports it as a failure to OBSERVE, and the process checks below stay
+	// silent only because that row already spoke for them (#1939).
 	if snap, err := ctx.opts.snapshot(); err == nil {
 		ctx.snap = snap
 		for pid := range selfAndAncestors(snap) {
 			ctx.selfAncestors[pid] = true
 		}
+	} else {
+		ctx.snapErr = err
 	}
 
+	// Whether doctor can see the process table at all is reported FIRST, before
+	// every check that reads ctx.snap — a failed snapshot is a FAIL row naming
+	// the cause, never a silent omission read as health (#1939).
+	checkProcessInspection(ctx, report)
 	// One health probe feeds every daemon check: each call dials the control
 	// socket, and three checks asking the same daemon the same question could
 	// disagree if a restart landed between them.

@@ -16,6 +16,7 @@ import (
 	"github.com/sachiniyer/agent-factory/agentproto"
 	"github.com/sachiniyer/agent-factory/apiproto"
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/sockpath"
 	"github.com/sachiniyer/agent-factory/log"
 )
 
@@ -51,12 +52,20 @@ var maxHTTPBodyBytes int64 = 16 << 20
 const httpReadHeaderTimeout = 10 * time.Second
 
 // DaemonHTTPSocketPath returns the path of the daemon's HTTP/JSON Unix socket.
+//
+// Length-checked at resolution for the same reason as DaemonSocketPath: see
+// there, and #1940. This name is the longest of the daemon's sockets, so it is
+// the one that overruns first.
 func DaemonHTTPSocketPath() (string, error) {
 	dir, err := config.GetConfigDir()
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(dir, daemonHTTPSocketFileName), nil
+	path := filepath.Join(dir, daemonHTTPSocketFileName)
+	if err := sockpath.Check("daemon HTTP socket", path); err != nil {
+		return "", err
+	}
+	return path, nil
 }
 
 // startHTTPServer binds the HTTP/JSON server on its own Unix socket and serves

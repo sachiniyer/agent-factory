@@ -3,9 +3,6 @@ package daemon
 import (
 	"encoding/json"
 	"fmt"
-	"github.com/sachiniyer/agent-factory/config"
-	"github.com/sachiniyer/agent-factory/log"
-	"github.com/sachiniyer/agent-factory/session"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -16,6 +13,11 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/proctree"
+	"github.com/sachiniyer/agent-factory/log"
+	"github.com/sachiniyer/agent-factory/session"
 )
 
 // restoreManagerForStartup is the warm-up restore entry point RunDaemon uses.
@@ -843,57 +845,22 @@ func argsAreDaemonBinary(args []string) bool {
 	}
 }
 
-// daemonArgs returns the argv of pid with argument boundaries preserved. It prefers
-// /proc/<pid>/cmdline (NUL-separated argv, Linux), the only source that keeps spaces inside an
-// individual argument intact. When /proc is unavailable (macOS and other unixes) it falls back to
-// `ps -p <pid> -o args=`, whose output is already space-joined and therefore CANNOT recover the
-// original argv boundaries for a spaced binary path — the fallback splits on whitespace and is
-// best-effort, so spaced-install detection (#1214) is only fully reliable where /proc exists.
+// daemonArgs returns the argv of pid with argument BOUNDARIES preserved, or nil when no argv is
+// readable (a foreign user's process, a zombie, a kernel thread).
+//
+// The boundaries are the whole contract. This classifies a process by its binary name
+// (argsAreDaemonBinary), so an install path containing a space must arrive as ONE element:
+// "/Users/John Smith/.local/bin/af" has base "af", while the same path re-split on whitespace has
+// base "John" and no longer looks like a daemon at all (#1214).
+//
+// It used to prefer /proc and fall back to `ps -p <pid> -o args=`, whose output is already
+// space-joined — so the fallback could not recover the boundaries it needed and the code said so
+// in a comment: spaced-install detection was "only fully reliable where /proc exists". That
+// caveat was a live bug wearing a disclaimer, and it was worst exactly where it was untested:
+// spaces in paths are ordinary on macOS (/Users/First Last, /Volumes/Macintosh HD, ~/Library/
+// Application Support) and rare on Linux. proctree.Argv now reads real argv on both platforms
+// (/proc/<pid>/cmdline on Linux, KERN_PROCARGS2 on darwin), so there is no lossy path left to
+// fall back to and the caveat is retired (#1942).
 func daemonArgs(pid int) []string {
-	if args := readProcArgv(pid); args != nil {
-		return args
-	}
-	ps := readPsArgs(pid)
-	if ps == "" {
-		return nil
-	}
-	return strings.Fields(ps)
-}
-
-// readProcArgv reads /proc/<pid>/cmdline (Linux) and splits it into argv on the NUL separators,
-// preserving spaces within an individual argument. Returns nil when /proc is unavailable or the
-// process has no cmdline (zombies, kernel threads).
-func readProcArgv(pid int) []string {
-	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/cmdline", pid))
-	if err != nil {
-		return nil
-	}
-	return splitNULArgv(data)
-}
-
-// splitNULArgv splits a /proc cmdline blob on its NUL separators into argv, dropping the trailing
-// empty element left by the final NUL terminator. Returns nil for an empty/whitespace-only blob.
-func splitNULArgv(data []byte) []string {
-	parts := strings.Split(string(data), "\x00")
-	for len(parts) > 0 && parts[len(parts)-1] == "" {
-		parts = parts[:len(parts)-1]
-	}
-	if len(parts) == 0 {
-		return nil
-	}
-	return parts
-}
-
-// readPsArgs returns the full command line for pid via `ps -p <pid> -o args=`. This flag set is
-// portable across Linux and macOS.
-func readPsArgs(pid int) string {
-	psPath, err := exec.LookPath("ps")
-	if err != nil {
-		return ""
-	}
-	out, err := exec.Command(psPath, "-p", fmt.Sprintf("%d", pid), "-o", "args=").Output()
-	if err != nil {
-		return ""
-	}
-	return strings.TrimSpace(string(out))
+	return proctree.Argv(pid)
 }
