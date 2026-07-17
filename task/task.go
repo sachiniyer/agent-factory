@@ -71,13 +71,86 @@ type Task struct {
 	// ValidateTrigger): a target_session task delivers into one session, so its
 	// deliveries already serialize, and overlapping cron fires already coalesce on
 	// RunTask's per-task lock. omitempty + additive: no tasks schema bump.
-	MaxConcurrentRuns int        `json:"max_concurrent_runs,omitempty"`
-	ProjectPath       string     `json:"project_path"`
-	Program           string     `json:"program"`
-	Enabled           bool       `json:"enabled"`
-	CreatedAt         time.Time  `json:"created_at"`
-	LastRunAt         *time.Time `json:"last_run_at,omitempty"`
-	LastRunStatus     string     `json:"last_run_status,omitempty"`
+	MaxConcurrentRuns int    `json:"max_concurrent_runs,omitempty"`
+	ProjectPath       string `json:"project_path"`
+	// RepoID is the owning project's repo ID, resolved ONCE at bind time and
+	// retained. It is derived, never patchable — AddTask sets it and UpdateTask
+	// recomputes it when ProjectPath changes.
+	//
+	// It exists because config.RepoIDFromRoot is sha256(main-repo-root): the ID
+	// is a pure function of a PATH, so it can only be computed while that path
+	// still resolves. A task may record a subdirectory or linked worktree of its
+	// project (the TUI stores the path the user typed); delete that directory
+	// and re-deriving the ID is impossible — the path no longer resolves to any
+	// repo, and hashing the stale leaf invents an ID that matches nothing. This
+	// field snapshots the resolution performed while the path WAS valid, so a
+	// vanished subdirectory can never strand a task outside its own project.
+	//
+	// Empty on rows written before this field existed; scope matching falls back
+	// to resolving ProjectPath for those (see api/scope.go). Not backfilled by a
+	// migration on purpose: the backfill would have to shell out to git for
+	// every task inside the tasks.json load path, and rows pick the field up as
+	// they are next written anyway.
+	RepoID        string     `json:"repo_id,omitempty"`
+	Program       string     `json:"program"`
+	Enabled       bool       `json:"enabled"`
+	CreatedAt     time.Time  `json:"created_at"`
+	LastRunAt     *time.Time `json:"last_run_at,omitempty"`
+	LastRunStatus string     `json:"last_run_status,omitempty"`
+}
+
+// ProjectExpectation is an optional compare-and-swap on a task's recorded
+// ProjectPath, evaluated inside the SAME locked operation that mutates the task.
+//
+// It closes a check-then-act race (#1893 review). The CLI authorizes a task id
+// against the current project client-side, but the mutation is a separate RPC
+// carrying only the id. ProjectPath is a supported patch field (#1836), so
+// another client can rebind the task between the two: the check authorizes the
+// old project and the daemon acts on the newly-rebound task, letting a
+// current-project command mutate ANOTHER project's task — precisely what the
+// scoping exists to prevent. An authorization that is not atomic with the action
+// it authorizes is not an authorization.
+//
+// It compares the recorded path STRING rather than resolving repo identity on
+// the daemon side, for two reasons. Identity resolution shells out to git, and
+// this runs while the tasks.json file lock is held — a subprocess under a held
+// lock is a hazard this repo already knows. And a string compare is the right
+// question here: the caller is asking "is this still the record I authorized?",
+// not "are these the same project". Any rebind changes the string, so it fails
+// closed. A rebind between two DIFFERENT paths naming the SAME project is
+// refused too — a false rejection, but a safe one that a re-run resolves.
+//
+// Zero value = no expectation, which is what a caller with no project context
+// (rule 3) sends and what an older daemon decodes an absent field as. Both
+// fields are plain values, never pointers: net/rpc gob elides zero-value
+// POINTER fields, so a *string would arrive nil and silently disable the check
+// (#1700).
+// The json tags define the HTTP body shape (#1029 PR 4) and must stay
+// snake_case like every other route's fields; gob ignores them entirely.
+type ProjectExpectation struct {
+	// Enforce distinguishes "no expectation" from "expected to be unbound"
+	// (ProjectPath == ""), which an empty ProjectPath alone cannot express.
+	Enforce     bool   `json:"enforce"`
+	ProjectPath string `json:"project_path"`
+}
+
+// Verify reports whether t still matches the expectation. Callers must run it
+// against a FRESHLY loaded record inside the locked operation — verifying a
+// record the caller already held would re-introduce the race it closes.
+func (e ProjectExpectation) Verify(t Task) error {
+	if !e.Enforce || t.ProjectPath == e.ProjectPath {
+		return nil
+	}
+	return fmt.Errorf(
+		"task %q was re-bound to a different project while this command was running (expected %s, now %s) — nothing was changed; re-run the command to act on it in its current project",
+		t.ID, describeProjectPath(e.ProjectPath), describeProjectPath(t.ProjectPath))
+}
+
+func describeProjectPath(path string) string {
+	if strings.TrimSpace(path) == "" {
+		return "no project"
+	}
+	return path
 }
 
 // IsWatch reports whether the task is event-triggered (WatchCmd) rather than
@@ -249,6 +322,12 @@ func AddTask(t Task) error {
 	if err := ensureTasksSchemaMigrated(path); err != nil {
 		return err
 	}
+	// Resolve the owning project's ID now, while ProjectPath is known to
+	// resolve, and retain it — see Task.RepoID. Outside the lock: this shells
+	// out to git. A path that does not resolve leaves RepoID empty rather than
+	// failing the add, so callers that bind a task to a not-yet-existing path
+	// keep working; scope matching falls back to resolving the path for those.
+	t.RepoID = repoIDForPath(t.ProjectPath)
 	return config.WithFileLock(path, func() error {
 		tasks, err := loadTasksLocked(path)
 		if err != nil {
@@ -259,7 +338,25 @@ func AddTask(t Task) error {
 	})
 }
 
-func RemoveTask(id string) error {
+// repoIDForPath resolves a project path to its owning repo's canonical ID,
+// returning "" when the path does not resolve to a repository. It never falls
+// back to hashing the path: an ID that no repo actually has is worse than no ID
+// at all, because a caller cannot tell the two apart.
+func repoIDForPath(projectPath string) string {
+	if strings.TrimSpace(projectPath) == "" {
+		return ""
+	}
+	repo, err := config.RepoFromPath(projectPath)
+	if err != nil {
+		return ""
+	}
+	return repo.ID
+}
+
+// RemoveTask deletes a task. expect optionally asserts, inside the same locked
+// operation, that the task is still bound to the project the caller authorized
+// it against — see ProjectExpectation.
+func RemoveTask(id string, expect ProjectExpectation) error {
 	if err := ValidateTaskID(id); err != nil {
 		return err
 	}
@@ -280,6 +377,11 @@ func RemoveTask(id string) error {
 		found := false
 		for _, t := range tasks {
 			if t.ID == id {
+				// Verify against the record just loaded under the lock, not one
+				// the caller carried in — that freshness is the whole point.
+				if err := expect.Verify(t); err != nil {
+					return err
+				}
 				found = true
 				continue
 			}
@@ -669,7 +771,10 @@ func DiffTask(old, cur Task) TaskUpdate {
 // LastRunStatus) and CreatedAt are never patchable — UpdateTaskStatus remains
 // their canonical writer (#731/#1215). Returns the not-found error when no task
 // with the given id exists.
-func UpdateTask(id string, update TaskUpdate) (Task, error) {
+// UpdateTask applies a field-level patch. expect optionally asserts, inside the
+// same locked operation, that the task is still bound to the project the caller
+// authorized it against — see ProjectExpectation.
+func UpdateTask(id string, update TaskUpdate, expect ProjectExpectation) (Task, error) {
 	if err := ValidateTaskID(id); err != nil {
 		return Task{}, err
 	}
@@ -679,6 +784,13 @@ func UpdateTask(id string, update TaskUpdate) (Task, error) {
 	}
 	if err := ensureTasksSchemaMigrated(path); err != nil {
 		return Task{}, err
+	}
+	// Re-resolve the retained RepoID when the patch rebinds the task, and do it
+	// BEFORE taking the lock: this shells out to git, and holding the tasks.json
+	// lock across a subprocess is the hazard ProjectExpectation's doc calls out.
+	rebindRepoID := ""
+	if update.ProjectPath != nil {
+		rebindRepoID = repoIDForPath(*update.ProjectPath)
 	}
 	var merged Task
 	lockErr := config.WithFileLock(path, func() error {
@@ -690,7 +802,16 @@ func UpdateTask(id string, update TaskUpdate) (Task, error) {
 		found := false
 		for i, existing := range tasks {
 			if existing.ID == id {
+				// Verify against the freshly loaded record, before the patch is
+				// applied — the pre-patch ProjectPath is what the caller
+				// authorized against.
+				if err := expect.Verify(existing); err != nil {
+					return err
+				}
 				merged = update.apply(existing)
+				if update.ProjectPath != nil {
+					merged.RepoID = rebindRepoID
+				}
 				if err := merged.ValidateTrigger(); err != nil {
 					return err
 				}

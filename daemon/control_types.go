@@ -387,9 +387,13 @@ type AddTaskResponse struct {
 // full-struct read-modify-write, which re-applied every user field from the
 // caller's possibly-stale copy. Scheduler-owned fields (LastRunAt/LastRunStatus/
 // CreatedAt) are never patchable — UpdateTaskStatus stays their writer.
+//
+// Expect optionally carries the project the caller authorized the id against,
+// re-verified under the same lock — see task.ProjectExpectation.
 type UpdateTaskRequest struct {
-	ID     string          `json:"id"`
-	Update task.TaskUpdate `json:"update"`
+	ID     string                  `json:"id"`
+	Update task.TaskUpdate         `json:"update"`
+	Expect task.ProjectExpectation `json:"expect,omitempty"`
 }
 
 // UpdateTaskResponse returns the merged record the write produced, so the CLI
@@ -400,8 +404,11 @@ type UpdateTaskResponse struct {
 	Task task.Task `json:"task"`
 }
 
+// Expect optionally carries the project the caller authorized the id against,
+// re-verified under the same lock — see task.ProjectExpectation.
 type RemoveTaskRequest struct {
-	ID string `json:"id"`
+	ID     string                  `json:"id"`
+	Expect task.ProjectExpectation `json:"expect,omitempty"`
 }
 type RemoveTaskResponse struct {
 	OK bool `json:"ok"`
@@ -411,8 +418,12 @@ type RemoveTaskResponse struct {
 // RunTask firing path the in-daemon scheduler uses (#1029 PR 3 / #1169-class
 // fix). The handler preserves RunTask's guards: watch tasks and disabled tasks
 // are refused.
+// Expect optionally carries the project the caller authorized the id against,
+// re-verified against the same load that produces the fired record — see
+// task.ProjectExpectation.
 type TriggerTaskRequest struct {
-	ID string `json:"id"`
+	ID     string                  `json:"id"`
+	Expect task.ProjectExpectation `json:"expect,omitempty"`
 }
 type TriggerTaskResponse struct {
 	OK bool `json:"ok"`

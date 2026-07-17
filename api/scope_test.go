@@ -539,3 +539,249 @@ func TestTasksGet_InvalidRepoReportedBeforeNotFound(t *testing.T) {
 	assert.Contains(t, err.Error(), "not a valid git repository",
 		"a bad --repo must be reported, not masked by the missing id")
 }
+
+// TestTasksRemove_RefusesTaskReboundBetweenCheckAndMutate reproduces the
+// check-then-act race end to end (#1893 review). The CLI's scope check
+// authorizes the id against alpha; the stub then rebinds the task to beta —
+// standing in for a concurrent client, using the supported ProjectPath patch
+// (#1836) — before the delete lands. The delete must be refused: without the
+// expectation threaded through, a command run from alpha silently deletes
+// beta's task, which is the exact harm this PR exists to prevent.
+func TestTasksRemove_RefusesTaskReboundBetweenCheckAndMutate(t *testing.T) {
+	useTempConfig(t)
+	resetScopeFlags(t)
+	stubDaemon(t)
+	_, beta := seedTasksInTwoProjects(t)
+
+	orig := daemonRemoveTask
+	daemonRemoveTask = func(id string, expect task.ProjectExpectation) error {
+		// Between the CLI's check and the daemon's delete, another client
+		// rebinds the task to a different project.
+		_, err := task.UpdateTask(id, task.TaskUpdate{ProjectPath: &beta}, task.ProjectExpectation{})
+		require.NoError(t, err)
+		return orig(id, expect)
+	}
+	t.Cleanup(func() { daemonRemoveTask = orig })
+
+	err := tasksRemoveCmd.RunE(tasksRemoveCmd, []string{"aaaa1111"})
+	require.Error(t, err, "a task rebound between the scope check and the delete must not be deleted")
+
+	got, err := task.GetTask("aaaa1111")
+	require.NoError(t, err, "the refused delete must leave the task on disk")
+	assert.Equal(t, beta, got.ProjectPath)
+}
+
+// TestTasksRemove_CarriesExpectationToDaemon guards the wiring itself. The race
+// test above only fails if the expectation is BOTH produced and threaded
+// through; this pins that the CLI actually sends an enforced one, so dropping it
+// at the call site can never pass silently on the happy path.
+func TestTasksRemove_CarriesExpectationToDaemon(t *testing.T) {
+	useTempConfig(t)
+	resetScopeFlags(t)
+	calls := stubDaemon(t)
+	alpha, _ := seedTasksInTwoProjects(t)
+
+	require.NoError(t, tasksRemoveCmd.RunE(tasksRemoveCmd, []string{"aaaa1111"}))
+	assert.True(t, calls.lastExpect.Enforce, "the CLI must ask the daemon to re-verify the binding under its lock")
+	assert.Equal(t, alpha, calls.lastExpect.ProjectPath)
+}
+
+// TestTasksUpdate_CarriesExpectationToDaemon is the same wiring guard for the
+// patch path.
+func TestTasksUpdate_CarriesExpectationToDaemon(t *testing.T) {
+	useTempConfig(t)
+	resetScopeFlags(t)
+	calls := stubDaemon(t)
+	alpha, _ := seedTasksInTwoProjects(t)
+
+	taskUpdateEnabledFlag = "false"
+	t.Cleanup(func() { taskUpdateEnabledFlag = "" })
+	require.NoError(t, tasksUpdateCmd.RunE(tasksUpdateCmd, []string{"aaaa1111"}))
+	assert.True(t, calls.lastExpect.Enforce)
+	assert.Equal(t, alpha, calls.lastExpect.ProjectPath)
+}
+
+// TestTasksTrigger_CarriesExpectationToDaemon: trigger fires a session, so a
+// stale authorization here starts work in the wrong project rather than merely
+// editing a row.
+func TestTasksTrigger_CarriesExpectationToDaemon(t *testing.T) {
+	useTempConfig(t)
+	resetScopeFlags(t)
+	calls := stubDaemon(t)
+	alpha, _ := seedTasksInTwoProjects(t)
+
+	require.NoError(t, tasksRunCmd.RunE(tasksRunCmd, []string{"aaaa1111"}))
+	assert.True(t, calls.lastExpect.Enforce)
+	assert.Equal(t, alpha, calls.lastExpect.ProjectPath)
+}
+
+// mkTaskInDeletedSubdir binds a task to a subdirectory of alpha and then deletes
+// that subdirectory, leaving the project itself intact — the shape a TUI-created
+// task takes when its recorded path is a subdir or linked worktree that later
+// goes away.
+func mkTaskInDeletedSubdir(t *testing.T) (alpha, sub string) {
+	t.Helper()
+	alpha = mkRepo(t, "alpha")
+	sub = filepath.Join(alpha, "services", "dlq")
+	require.NoError(t, os.MkdirAll(sub, 0o755))
+	seedTask(t, task.Task{
+		ID: "aaaa1111", Name: "alpha-task", Prompt: "p", CronExpr: "0 9 * * *",
+		ProjectPath: sub, Enabled: true,
+	})
+	require.NoError(t, os.RemoveAll(filepath.Join(alpha, "services")))
+	return alpha, sub
+}
+
+// TestTasksList_DeletedSubdirStaysInOwningProject: hashing the stale leaf path
+// produced an ID no project could ever equal, so the task vanished from its own
+// project's list. Resolving through a surviving ancestor keeps it visible.
+func TestTasksList_DeletedSubdirStaysInOwningProject(t *testing.T) {
+	useTempConfig(t)
+	resetScopeFlags(t)
+	stubDaemon(t)
+	alpha, _ := mkTaskInDeletedSubdir(t)
+	t.Chdir(alpha)
+
+	out := captureTasksList(t)
+	require.Len(t, out, 1, "a task whose recorded subdirectory was deleted must stay visible in its owning project")
+	assert.Equal(t, "aaaa1111", out[0].ID)
+}
+
+// TestTasksRemove_DeletedSubdirStillReachable: the other half of the strand —
+// every id-taking command rejected the task, so it could not even be cleaned up.
+func TestTasksRemove_DeletedSubdirStillReachable(t *testing.T) {
+	useTempConfig(t)
+	resetScopeFlags(t)
+	stubDaemon(t)
+	alpha, _ := mkTaskInDeletedSubdir(t)
+	t.Chdir(alpha)
+
+	require.NoError(t, tasksRemoveCmd.RunE(tasksRemoveCmd, []string{"aaaa1111"}),
+		"the owning project must be able to remove a task whose recorded subdir was deleted")
+}
+
+// TestRequireTaskInScope_SuggestsResolvableRepo: the refusal names a --repo to
+// pass. Naming the deleted subdirectory made that suggestion unusable — it reads
+// as the fix and cannot work — so it must name the surviving project root.
+func TestRequireTaskInScope_SuggestsResolvableRepo(t *testing.T) {
+	useTempConfig(t)
+	resetScopeFlags(t)
+	stubDaemon(t)
+	alpha, sub := mkTaskInDeletedSubdir(t)
+	beta := mkRepo(t, "beta")
+	t.Chdir(beta)
+
+	err := tasksRemoveCmd.RunE(tasksRemoveCmd, []string{"aaaa1111"})
+	require.Error(t, err, "beta must not reach alpha's task")
+	// NotContains on the deleted path is the load-bearing half: the subdir path
+	// has alpha as a PREFIX, so a Contains check on alpha alone passes even when
+	// the message suggests the unusable deleted path.
+	assert.NotContains(t, err.Error(), "--repo "+sub,
+		"suggesting the deleted subdirectory reads as a fix but cannot resolve")
+	assert.Contains(t, err.Error(), "--repo "+alpha,
+		"the suggested --repo must name the surviving project root")
+}
+
+// seedTaskRaw writes tasks.json directly, bypassing task.AddTask. AddTask
+// DERIVES RepoID from ProjectPath by design — a client must not be able to
+// inject an id that disagrees with the path it binds — so it is the wrong tool
+// for constructing a record whose retained id and recorded path diverge, which
+// is precisely the state these tests need to exercise.
+func seedTaskRaw(t *testing.T, tasks ...task.Task) {
+	t.Helper()
+	dir, err := config.GetConfigDir()
+	require.NoError(t, err)
+	require.NoError(t, os.MkdirAll(dir, 0o755))
+	data, err := json.Marshal(tasks)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "tasks.json"), data, 0o644))
+}
+
+// TestTasksList_RetainedRepoIDBeatsPathRederivation pins the retained id as
+// authoritative over re-derivation. When the recorded path resolves to a
+// DIFFERENT project than the id captured at bind time — a deleted inner repo
+// whose path an outer repo now covers, or a path since reused — re-deriving
+// produces a confidently wrong answer and silently moves the task between
+// projects. The retained id is what makes that impossible.
+func TestTasksList_RetainedRepoIDBeatsPathRederivation(t *testing.T) {
+	useTempConfig(t)
+	resetScopeFlags(t)
+	stubDaemon(t)
+	alpha := mkRepo(t, "alpha")
+	beta := mkRepo(t, "beta")
+	alphaRepo, err := config.RepoFromPath(alpha)
+	require.NoError(t, err)
+
+	// The recorded path resolves to beta; the id retained at bind time says alpha.
+	seedTaskRaw(t, task.Task{
+		ID: "aaaa1111", Name: "alpha-task", Prompt: "p", CronExpr: "0 9 * * *",
+		ProjectPath: beta, RepoID: alphaRepo.ID, Enabled: true,
+	})
+
+	t.Chdir(alpha)
+	out := captureTasksList(t)
+	require.Len(t, out, 1, "the retained id must keep the task in the project it was bound to")
+
+	t.Chdir(beta)
+	out = captureTasksList(t)
+	require.Empty(t, out, "re-deriving from the recorded path must not move the task into another project")
+}
+
+// TestTasksAdd_RetainsRepoID: the retained id only helps if it is actually
+// written at bind time, while the path still resolves.
+func TestTasksAdd_RetainsRepoID(t *testing.T) {
+	useTempConfig(t)
+	resetScopeFlags(t)
+	stubDaemon(t)
+	alpha := mkRepo(t, "alpha")
+	t.Chdir(alpha)
+
+	taskAddNameFlag = "nightly"
+	taskAddPromptFlag = "sweep"
+	taskAddCronFlag = "0 3 * * *"
+	require.NoError(t, tasksAddCmd.RunE(tasksAddCmd, nil))
+
+	tasks, err := task.LoadTasks()
+	require.NoError(t, err)
+	require.Len(t, tasks, 1)
+	repo, err := config.RepoFromPath(alpha)
+	require.NoError(t, err)
+	assert.Equal(t, repo.ID, tasks[0].RepoID, "tasks add must retain the project's id at bind time")
+}
+
+// TestWhoami_InvalidRepoErrorsOnRootlessRow: a session row with neither
+// Worktree.RepoPath nor Path skipped the --repo block entirely, so an explicitly
+// malformed flag was accepted and session data printed. Validating what the flag
+// NAMES is independent of whether there is anything to compare it against.
+func TestWhoami_InvalidRepoErrorsOnRootlessRow(t *testing.T) {
+	useTempConfig(t)
+	resetScopeFlags(t)
+
+	stubCurrentTmuxName(t, func() (string, error) { return "af_me_agent", nil })
+	stubSnapshot(t, func(daemon.SnapshotRequest) ([]session.InstanceData, error) {
+		// A remote-backed row that records no repo root at all.
+		return []session.InstanceData{{Title: "me", TmuxName: "af_me_agent"}}, nil
+	})
+
+	repoFlag = filepath.Join(t.TempDir(), "not-a-repo")
+	err := sessionsWhoamiCmd.RunE(sessionsWhoamiCmd, nil)
+	require.Error(t, err, "an explicitly malformed --repo must never be silently ignored")
+}
+
+// TestWhoami_RootlessRowStillPassesWithValidRepo keeps the fix from over-
+// correcting: a VALID --repo against a row with no root to compare must still
+// succeed, since asserting on a value we do not have would fail a caller who is
+// exactly where they claim.
+func TestWhoami_RootlessRowStillPassesWithValidRepo(t *testing.T) {
+	useTempConfig(t)
+	resetScopeFlags(t)
+
+	valid := mkRepo(t, "valid")
+	stubCurrentTmuxName(t, func() (string, error) { return "af_me_agent", nil })
+	stubSnapshot(t, func(daemon.SnapshotRequest) ([]session.InstanceData, error) {
+		return []session.InstanceData{{Title: "me", TmuxName: "af_me_agent"}}, nil
+	})
+
+	repoFlag = valid
+	assert.NoError(t, sessionsWhoamiCmd.RunE(sessionsWhoamiCmd, nil))
+}

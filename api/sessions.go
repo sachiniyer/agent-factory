@@ -932,20 +932,29 @@ var sessionsWhoamiCmd = &cobra.Command{
 		// session, repo hash included), so an explicit --repo is checked instead
 		// of ignored: a caller who names the wrong project learns that rather
 		// than receiving another project's answer with no signal (#1893).
-		if root := sessionRepoRoot(data); repoFlag != "" && root != "" {
-			// A session that records no repo root at all (some remote-backed
-			// rows) has nothing to compare against: asserting on a value we do
-			// not have would fail a caller who IS in the named project, so an
-			// unknown project is never an error — only a known-mismatched one.
+		if repoFlag != "" {
+			// Resolve and VALIDATE the flag first, before asking whether there
+			// is anything to compare it against. Gating the whole block on the
+			// session having a root meant a row with neither Worktree.RepoPath
+			// nor Path (some remote-backed rows) skipped this entirely, so
+			// `whoami --repo /not-a-repo` succeeded and printed session data —
+			// an explicitly malformed flag silently ignored (#1893 review). What
+			// the flag NAMES is checkable on its own; whether it MATCHES is the
+			// separate question below.
 			repo, err := repoFromFlag()
 			if err != nil {
 				return jsonError(err)
 			}
+			// A session that records no repo root at all has nothing to compare
+			// against: asserting on a value we do not have would fail a caller
+			// who IS in the named project, so an unknown project is never an
+			// error — only a known-mismatched one.
+			//
 			// Resolve the session's root through git rather than hashing it
 			// raw: a stored root that was never git-resolved would otherwise
 			// hash differently from the canonical --repo naming the same
 			// project, rejecting a caller who is exactly where they claim.
-			if newProjectIDCache().idFor(root) != repo.ID {
+			if root := sessionRepoRoot(data); root != "" && newProjectIDCache().idFor(root) != repo.ID {
 				return jsonError(fmt.Errorf("this session belongs to project %s, not --repo %s", root, repo.Root))
 			}
 		}

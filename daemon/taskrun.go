@@ -177,7 +177,10 @@ func repoHasSessionTitle(repoID, title string) (bool, error) {
 // trigger` CLI both land here. Watch tasks are refused — they fire from
 // their watch command's stdout, and a manual trigger has no event line to
 // render the prompt with.
-func RunTask(taskID string) (err error) {
+// expect optionally asserts that the task is still bound to the project the
+// caller authorized it against; the in-daemon scheduler passes the zero value,
+// having no project context to assert.
+func RunTask(taskID string, expect task.ProjectExpectation) (err error) {
 	// Validate the task ID before it flows into any filesystem path. The
 	// CLI boundary also validates, but this is the shared chokepoint that
 	// protects every caller.
@@ -191,6 +194,13 @@ func RunTask(taskID string) (err error) {
 	t, err := task.GetTask(taskID)
 	if err != nil {
 		return fmt.Errorf("failed to load task: %w", err)
+	}
+
+	// Verify the caller's project expectation against THIS load — the same
+	// record that is about to be fired. Checking a record the CLI loaded in an
+	// earlier RPC would authorize a task that may since have been rebound.
+	if err := expect.Verify(*t); err != nil {
+		return err
 	}
 
 	if !t.Enabled {

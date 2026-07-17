@@ -159,7 +159,7 @@ func TestRemoveTask(t *testing.T) {
 	}
 	setupTestTasks(t, tasks)
 
-	err := RemoveTask("remove")
+	err := RemoveTask("remove", ProjectExpectation{})
 	assert.NoError(t, err)
 
 	loaded, err := LoadTasks()
@@ -171,7 +171,7 @@ func TestRemoveTask(t *testing.T) {
 func TestRemoveTaskNotFound(t *testing.T) {
 	setupTestTasks(t, []Task{{ID: "exists"}})
 
-	err := RemoveTask("nonexistent")
+	err := RemoveTask("nonexistent", ProjectExpectation{})
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "not found")
 }
@@ -211,7 +211,7 @@ func TestUpdateTask(t *testing.T) {
 		Prompt:   ptr("new prompt"),
 		CronExpr: ptr("0 0 * * *"),
 		Enabled:  ptr(false),
-	})
+	}, ProjectExpectation{})
 	assert.NoError(t, err)
 	// UpdateTask returns the authoritative merged record.
 	assert.Equal(t, "New Name", merged.Name)
@@ -236,12 +236,12 @@ func TestUpdateTaskFieldLevelDoesNotClobber(t *testing.T) {
 	})
 
 	// Client B changes the cron and target session out-of-band.
-	_, err := UpdateTask("t1", TaskUpdate{CronExpr: ptr("30 6 * * 1"), TargetSession: ptr("sess-b")})
+	_, err := UpdateTask("t1", TaskUpdate{CronExpr: ptr("30 6 * * 1"), TargetSession: ptr("sess-b")}, ProjectExpectation{})
 	require.NoError(t, err)
 
 	// Client A, holding a copy from BEFORE B's edit, only toggles Enabled off.
 	// It ships just that one field.
-	merged, err := UpdateTask("t1", TaskUpdate{Enabled: ptr(false)})
+	merged, err := UpdateTask("t1", TaskUpdate{Enabled: ptr(false)}, ProjectExpectation{})
 	require.NoError(t, err)
 	assert.False(t, merged.Enabled)
 
@@ -278,7 +278,7 @@ func TestDiffTaskAndUpdatePersistProjectPath(t *testing.T) {
 	require.NotNil(t, patch.ProjectPath, "the patch must carry the retargeted path")
 	assert.Equal(t, "/repos/new", *patch.ProjectPath)
 
-	merged, err := UpdateTask("p1", patch)
+	merged, err := UpdateTask("p1", patch, ProjectExpectation{})
 	require.NoError(t, err)
 	assert.Equal(t, "/repos/new", merged.ProjectPath)
 
@@ -318,7 +318,7 @@ func TestTaskUpdateGobRoundTripPreservesZeroPointers(t *testing.T) {
 func TestUpdateTaskNotFound(t *testing.T) {
 	setupTestTasks(t, []Task{})
 
-	_, err := UpdateTask("missing", TaskUpdate{Name: ptr("x")})
+	_, err := UpdateTask("missing", TaskUpdate{Name: ptr("x")}, ProjectExpectation{})
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "not found")
 }
@@ -349,7 +349,7 @@ func TestUpdateTaskPreservesSchedulerOwnedFields(t *testing.T) {
 		Prompt:   ptr("new prompt"),
 		CronExpr: ptr("0 0 * * *"),
 		Enabled:  ptr(false),
-	})
+	}, ProjectExpectation{})
 	require.NoError(t, err)
 
 	s, err := GetTask("u1")
@@ -432,7 +432,7 @@ func TestUpdateTaskPersistsProgram(t *testing.T) {
 	}
 	setupTestTasks(t, tasks)
 
-	_, err := UpdateTask("p1", TaskUpdate{Program: ptr("amp")})
+	_, err := UpdateTask("p1", TaskUpdate{Program: ptr("amp")}, ProjectExpectation{})
 	require.NoError(t, err)
 
 	got, err := GetTask("p1")
@@ -517,7 +517,7 @@ func TestGetTask_RejectsInvalidID(t *testing.T) {
 func TestRemoveTask_RejectsInvalidID(t *testing.T) {
 	setupTestTasks(t, []Task{{ID: "real"}})
 
-	err := RemoveTask("../etc/passwd")
+	err := RemoveTask("../etc/passwd", ProjectExpectation{})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "invalid task id")
 }
@@ -527,7 +527,7 @@ func TestRemoveTask_RejectsInvalidID(t *testing.T) {
 func TestUpdateTask_RejectsInvalidID(t *testing.T) {
 	setupTestTasks(t, []Task{{ID: "real"}})
 
-	_, err := UpdateTask("../etc/passwd", TaskUpdate{Name: ptr("x")})
+	_, err := UpdateTask("../etc/passwd", TaskUpdate{Name: ptr("x")}, ProjectExpectation{})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "invalid task id")
 }
@@ -601,7 +601,7 @@ func TestUpdateTask_RejectsBadProgram(t *testing.T) {
 	}
 	setupTestTasks(t, stored)
 
-	_, err := UpdateTask("edit1", TaskUpdate{Program: ptr("/home/foo/bin/claude")})
+	_, err := UpdateTask("edit1", TaskUpdate{Program: ptr("/home/foo/bin/claude")}, ProjectExpectation{})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "task program")
 }
@@ -681,7 +681,7 @@ func TestAddTask_EnforcesTriggerContract(t *testing.T) {
 
 	// Patching the watch task to ALSO carry a cron (without clearing watch) must
 	// be refused — the merged record would set both triggers.
-	_, err := UpdateTask("bbbb0003", TaskUpdate{CronExpr: ptr("0 3 * * *")})
+	_, err := UpdateTask("bbbb0003", TaskUpdate{CronExpr: ptr("0 3 * * *")}, ProjectExpectation{})
 	require.Error(t, err)
 }
 
@@ -839,7 +839,7 @@ func TestUpdateTaskClearsStaleCapForNonCLIWriters(t *testing.T) {
 	patch := DiffTask(seed, edited)
 	require.Nil(t, patch.MaxConcurrentRuns, "a TUI/API edit never patches the cap; that is the point of this test")
 
-	merged, err := UpdateTask("cap1892e", patch)
+	merged, err := UpdateTask("cap1892e", patch, ProjectExpectation{})
 	require.NoError(t, err, "a non-CLI watch→cron edit must succeed, not be rejected for a cap the client never touched")
 	assert.Equal(t, "0 9 * * *", merged.CronExpr)
 	assert.Equal(t, 0, merged.MaxConcurrentRuns, "the now-inapplicable cap must be cleared by the shared merge")
@@ -855,7 +855,7 @@ func TestUpdateTaskClearsStaleCapOnDeliveryModeChange(t *testing.T) {
 	require.NoError(t, AddTask(seed))
 
 	target := "shared"
-	merged, err := UpdateTask("cap1892f", TaskUpdate{TargetSession: &target})
+	merged, err := UpdateTask("cap1892f", TaskUpdate{TargetSession: &target}, ProjectExpectation{})
 	require.NoError(t, err, "adding a target session must not be rejected for a cap the client never touched")
 	assert.Equal(t, "shared", merged.TargetSession)
 	assert.Equal(t, 0, merged.MaxConcurrentRuns)
@@ -875,7 +875,7 @@ func TestUpdateTaskKeepsExplicitCapContradiction(t *testing.T) {
 	three := 3
 	_, err := UpdateTask("cap1892g", TaskUpdate{
 		CronExpr: &cron, WatchCmd: &empty, Prompt: &prompt, MaxConcurrentRuns: &three,
-	})
+	}, ProjectExpectation{})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "not a watch task")
 }
@@ -890,12 +890,12 @@ func TestUpdateTaskKeepsCapWhenStillApplicable(t *testing.T) {
 	require.NoError(t, AddTask(Task{ID: "cap1892h", Name: "w", WatchCmd: "tail -f x", MaxConcurrentRuns: 3, Enabled: true}))
 
 	prompt := "new prompt"
-	merged, err := UpdateTask("cap1892h", TaskUpdate{Prompt: &prompt})
+	merged, err := UpdateTask("cap1892h", TaskUpdate{Prompt: &prompt}, ProjectExpectation{})
 	require.NoError(t, err)
 	assert.Equal(t, 3, merged.MaxConcurrentRuns, "an unrelated edit must not drop the cap")
 
 	empty := ""
-	merged, err = UpdateTask("cap1892h", TaskUpdate{TargetSession: &empty})
+	merged, err = UpdateTask("cap1892h", TaskUpdate{TargetSession: &empty}, ProjectExpectation{})
 	require.NoError(t, err)
 	assert.Equal(t, 3, merged.MaxConcurrentRuns, "reverting to a session per run keeps the cap applicable")
 }
@@ -947,7 +947,7 @@ func TestTargetSessionCanonicalizedOnWrite(t *testing.T) {
 
 	// And through the update path.
 	ws := "  \t "
-	merged, err := UpdateTask("cap1892i", TaskUpdate{TargetSession: &ws})
+	merged, err := UpdateTask("cap1892i", TaskUpdate{TargetSession: &ws}, ProjectExpectation{})
 	require.NoError(t, err)
 	assert.Equal(t, "", merged.TargetSession)
 	assert.Equal(t, 3, merged.MaxConcurrentRuns, "canonicalizing to empty keeps the cap applicable rather than silently voiding it")
@@ -968,7 +968,7 @@ func TestPaddedTargetSessionSurvivesWriteVerbatim(t *testing.T) {
 	assert.Equal(t, " build ", got.TargetSession, "a padded title is a legal, distinct session; trimming it would deliver to the wrong session")
 
 	padded := "\tdeploy "
-	merged, err := UpdateTask("cap1892j", TaskUpdate{TargetSession: &padded})
+	merged, err := UpdateTask("cap1892j", TaskUpdate{TargetSession: &padded}, ProjectExpectation{})
 	require.NoError(t, err)
 	assert.Equal(t, "\tdeploy ", merged.TargetSession, "the update path must store the target byte-identically too")
 }
@@ -1002,7 +1002,7 @@ func TestLegacyWhitespaceTargetCanonicalizedByCapOnlyUpdate(t *testing.T) {
 
 	// The cap-only patch: it never mentions TargetSession.
 	cap2 := 2
-	merged, err := UpdateTask("cap1892k", TaskUpdate{MaxConcurrentRuns: &cap2})
+	merged, err := UpdateTask("cap1892k", TaskUpdate{MaxConcurrentRuns: &cap2}, ProjectExpectation{})
 	require.NoError(t, err)
 	assert.Equal(t, 2, merged.MaxConcurrentRuns, "the cap was accepted")
 	assert.Equal(t, "", merged.TargetSession,
@@ -1012,3 +1012,83 @@ func TestLegacyWhitespaceTargetCanonicalizedByCapOnlyUpdate(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "", reloaded.TargetSession, "and the canonical form must reach disk, not just the returned record")
 }
+
+// The tests below cover ProjectExpectation — the compare-and-swap that makes the
+// CLI's project authorization atomic with the mutation it authorizes (#1893
+// review). Without it the CLI checks scope in one RPC and mutates in another,
+// and ProjectPath is patchable (#1836), so a concurrent rebind between the two
+// lets a current-project command mutate another project's task.
+
+// TestRemoveTask_RefusesWhenProjectRebound is the store half of the race guard:
+// the record on disk is bound elsewhere than the caller authorized, so the
+// delete must be refused and the task must survive.
+func TestRemoveTask_RefusesWhenProjectRebound(t *testing.T) {
+	setupTestTasks(t, []Task{{
+		ID: "aaaa1111", Prompt: "p", CronExpr: "0 9 * * *",
+		ProjectPath: "/repos/beta", Enabled: true,
+	}})
+
+	// The caller authorized this id while it was bound to /repos/alpha; it has
+	// since been rebound to /repos/beta.
+	err := RemoveTask("aaaa1111", ProjectExpectation{Enforce: true, ProjectPath: "/repos/alpha"})
+	require.Error(t, err, "a rebound task must not be deleted on a stale authorization")
+	assert.Contains(t, err.Error(), "re-bound")
+
+	tasks, err := LoadTasks()
+	require.NoError(t, err)
+	require.Len(t, tasks, 1, "the refused delete must leave the task intact")
+}
+
+// TestUpdateTask_RefusesWhenProjectRebound mirrors the above for the patch path.
+func TestUpdateTask_RefusesWhenProjectRebound(t *testing.T) {
+	setupTestTasks(t, []Task{{
+		ID: "aaaa1111", Prompt: "p", CronExpr: "0 9 * * *",
+		ProjectPath: "/repos/beta", Enabled: true,
+	}})
+
+	_, err := UpdateTask("aaaa1111", TaskUpdate{Prompt: strPtrT("hijacked")},
+		ProjectExpectation{Enforce: true, ProjectPath: "/repos/alpha"})
+	require.Error(t, err, "a rebound task must not be patched on a stale authorization")
+
+	got, err := GetTask("aaaa1111")
+	require.NoError(t, err)
+	assert.Equal(t, "p", got.Prompt, "the refused patch must not have been applied")
+}
+
+// TestProjectExpectation_UnboundIsDistinctFromNoExpectation pins why Enforce
+// exists as a separate field: an empty ProjectPath is a real expectation
+// ("still unbound"), not the absence of one. Collapsing the two onto the empty
+// string would leave hand-edited unbound tasks unprotected by the CAS.
+func TestProjectExpectation_UnboundIsDistinctFromNoExpectation(t *testing.T) {
+	setupTestTasks(t, []Task{{
+		ID: "aaaa1111", Prompt: "p", CronExpr: "0 9 * * *",
+		ProjectPath: "/repos/beta", Enabled: true,
+	}})
+
+	// Expecting "unbound" against a task now bound to beta must refuse...
+	err := RemoveTask("aaaa1111", ProjectExpectation{Enforce: true, ProjectPath: ""})
+	require.Error(t, err)
+
+	// ...while no expectation at all still deletes, which is what a caller with
+	// no project context (rule 3) sends and what an older daemon decodes.
+	require.NoError(t, RemoveTask("aaaa1111", ProjectExpectation{}))
+	tasks, err := LoadTasks()
+	require.NoError(t, err)
+	assert.Empty(t, tasks)
+}
+
+// TestRemoveTask_MatchingExpectationSucceeds keeps the guard from being a
+// blanket refusal: the ordinary authorized path must still work.
+func TestRemoveTask_MatchingExpectationSucceeds(t *testing.T) {
+	setupTestTasks(t, []Task{{
+		ID: "aaaa1111", Prompt: "p", CronExpr: "0 9 * * *",
+		ProjectPath: "/repos/alpha", Enabled: true,
+	}})
+
+	require.NoError(t, RemoveTask("aaaa1111", ProjectExpectation{Enforce: true, ProjectPath: "/repos/alpha"}))
+	tasks, err := LoadTasks()
+	require.NoError(t, err)
+	assert.Empty(t, tasks)
+}
+
+func strPtrT(s string) *string { return &s }

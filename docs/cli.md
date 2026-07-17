@@ -118,6 +118,19 @@ Exactly one of `--cron` / `--watch-cmd` per task. On `update`, setting one trigg
 
 A task is bound to exactly one project when it is created, and every run's worktree is created inside it. The binding comes from `--repo`, or from the current directory's project. It is fixed at creation: `--repo` on `update` scopes *which* task may be edited, and never re-binds one.
 
+The project a task belongs to is recorded as an id resolved when the task is bound, not re-derived from its path on each read. This is why deleting a directory a task points at — a subdirectory or a linked worktree — never hides the task from its own project.
+
+If another client re-binds a task to a different project while a command is acting on it, the command is refused rather than applied to the moved task:
+
+```console
+$ af tasks remove a1b2c3d4
+{"error":"task \"a1b2c3d4\" was re-bound to a different project while this command was running
+ (expected /repos/alpha, now /repos/beta) — nothing was changed; re-run the command to act on it
+ in its current project"}
+```
+
+Nothing is changed when this happens, and re-running acts on the task where it now lives.
+
 `tasks add` reports the resolved binding, so you can check it is the project you meant:
 
 ```console

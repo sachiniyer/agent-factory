@@ -81,19 +81,30 @@ func getTaskByID(id string) (*task.Task, error) {
 // a no-op: the id still resolves globally, matching the bare-title convenience
 // sessions already grant. That also means the extra lookup only happens when a
 // scope actually exists, so unscoped scripts keep their current failure modes.
-func enforceTaskScope(id string) error {
+//
+// It returns the expectation the CALLER MUST PASS to the mutating RPC. This
+// check is client-side and the mutation is a separate daemon call carrying only
+// the id, so on its own it authorizes a record that may be rebound before the
+// mutation lands. The returned task.ProjectExpectation re-states the binding
+// under the daemon's lock, making the authorization atomic with the action.
+// Discarding it silently reopens the race — every mutating call site must thread
+// it through.
+func enforceTaskScope(id string) (task.ProjectExpectation, error) {
 	scope, err := resolveProjectScope(false)
 	if err != nil {
-		return err
+		return task.ProjectExpectation{}, err
 	}
 	if scope.Repo == nil {
-		return nil
+		return task.ProjectExpectation{}, nil
 	}
 	t, err := getTaskByID(id)
 	if err != nil {
-		return fmt.Errorf("failed to get task: %w", err)
+		return task.ProjectExpectation{}, fmt.Errorf("failed to get task: %w", err)
 	}
-	return requireTaskInScope(t, scope)
+	if err := requireTaskInScope(t, scope); err != nil {
+		return task.ProjectExpectation{}, err
+	}
+	return task.ProjectExpectation{Enforce: true, ProjectPath: t.ProjectPath}, nil
 }
 
 var tasksListAllFlag bool
@@ -125,7 +136,7 @@ var tasksListCmd = &cobra.Command{
 		ids := newProjectIDCache()
 		filtered := []task.Task{}
 		for _, s := range tasks {
-			if scope.scopeMatches(s.ProjectPath, ids) {
+			if scope.matchesTask(&s, ids) {
 				filtered = append(filtered, s)
 			}
 		}
@@ -268,11 +279,15 @@ var tasksRemoveCmd = &cobra.Command{
 		// Resolve the project BEFORE the destructive call: --repo used to be
 		// accepted and dropped here, so `af tasks remove --repo /a <b-id>`
 		// deleted b's task and reported {"ok":true} (#1893).
-		if err := enforceTaskScope(args[0]); err != nil {
+		expect, err := enforceTaskScope(args[0])
+		if err != nil {
 			return jsonError(err)
 		}
 
-		if err := daemonRemoveTask(args[0]); err != nil {
+		// Pass the expectation through: the check above authorized the record as
+		// it was a moment ago, and only the daemon can re-verify it atomically
+		// with the delete.
+		if err := daemonRemoveTask(args[0], expect); err != nil {
 			return jsonError(fmt.Errorf("failed to remove task: %w", err))
 		}
 
@@ -339,14 +354,17 @@ var tasksRunCmd = &cobra.Command{
 			return jsonError(err)
 		}
 
-		if err := enforceTaskScope(args[0]); err != nil {
+		expect, err := enforceTaskScope(args[0])
+		if err != nil {
 			return jsonError(err)
 		}
 
 		// Fire through the daemon's shared RunTask firing path — the same
 		// entrypoint the cron scheduler uses — instead of the old in-process
-		// daemon.RunTask CLI call (#1029 PR 3 / #1169-class fix).
-		if err := daemonTriggerTask(args[0]); err != nil {
+		// daemon.RunTask CLI call (#1029 PR 3 / #1169-class fix). The
+		// expectation is re-verified against the same load that produces the
+		// fired record.
+		if err := daemonTriggerTask(args[0], expect); err != nil {
 			return jsonError(fmt.Errorf("failed to trigger task: %w", err))
 		}
 
@@ -384,7 +402,8 @@ var tasksUpdateCmd = &cobra.Command{
 			return jsonError(err)
 		}
 
-		if err := enforceTaskScope(args[0]); err != nil {
+		expect, err := enforceTaskScope(args[0])
+		if err != nil {
 			return jsonError(err)
 		}
 
@@ -508,7 +527,7 @@ var tasksUpdateCmd = &cobra.Command{
 			patch.Program = strPtr(taskUpdateProgramFlag)
 		}
 
-		updated, err := daemonUpdateTask(args[0], patch)
+		updated, err := daemonUpdateTask(args[0], patch, expect)
 		if err != nil {
 			return jsonError(fmt.Errorf("failed to update task: %w", err))
 		}

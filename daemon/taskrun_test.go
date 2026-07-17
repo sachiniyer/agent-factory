@@ -46,7 +46,7 @@ func TestRunTask_PathTraversalCreatesLockOutsideLocksDir(t *testing.T) {
 	// Same payload as the issue report.
 	payload := "foo/../../rogue/pwned"
 
-	err := RunTask(payload)
+	err := RunTask(payload, task.ProjectExpectation{})
 	if err == nil {
 		t.Fatalf("expected error when triggering task with path-traversal ID")
 	}
@@ -79,7 +79,7 @@ func TestRunTask_RefusesDisabledTask(t *testing.T) {
 	if err := seedDisabledTask("eeee0001"); err != nil {
 		t.Fatalf("seed task: %v", err)
 	}
-	err := RunTask("eeee0001")
+	err := RunTask("eeee0001", task.ProjectExpectation{})
 	if err == nil {
 		t.Fatalf("expected error running a disabled task")
 	}
@@ -175,7 +175,7 @@ func TestRunTask_RefusesWatchTask(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("seed task: %v", err)
 	}
-	err := RunTask("ffff0001")
+	err := RunTask("ffff0001", task.ProjectExpectation{})
 	if err == nil {
 		t.Fatalf("expected error running a watch task manually")
 	}
@@ -299,7 +299,7 @@ func TestRunTask_CronTaskHonorsTargetSession(t *testing.T) {
 		t.Fatalf("seed task: %v", err)
 	}
 
-	if err := RunTask("ffff0005"); err != nil {
+	if err := RunTask("ffff0005", task.ProjectExpectation{}); err != nil {
 		t.Fatalf("RunTask: %v", err)
 	}
 	if len(*delivers) != 1 || (*delivers)[0].Prompt != "scheduled check-in" {
@@ -341,7 +341,7 @@ func TestRunTask_PersistsFailureStatusOnBadRepo(t *testing.T) {
 		t.Fatalf("seed task: %v", err)
 	}
 
-	err := RunTask("dddd0001")
+	err := RunTask("dddd0001", task.ProjectExpectation{})
 	if err == nil {
 		t.Fatalf("expected RunTask to fail on a non-git project path")
 	}

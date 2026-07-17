@@ -270,7 +270,7 @@ func TestRunTask_CronFiresCoalesceDuringDefer(t *testing.T) {
 
 	// Fire #1 parks in the defer wait, holding the per-task flock.
 	firstDone := make(chan error, 1)
-	go func() { firstDone <- RunTask("cccc1586") }()
+	go func() { firstDone <- RunTask("cccc1586", task.ProjectExpectation{}) }()
 	select {
 	case <-firstAttempt:
 	case <-time.After(5 * time.Second):
@@ -280,7 +280,7 @@ func TestRunTask_CronFiresCoalesceDuringDefer(t *testing.T) {
 	// Subsequent cron ticks during the attach are coalesced away by LOCK_NB.
 	const overlaps = 5
 	for i := 0; i < overlaps; i++ {
-		err := RunTask("cccc1586")
+		err := RunTask("cccc1586", task.ProjectExpectation{})
 		if err == nil || !strings.Contains(err.Error(), "another run is already active") {
 			t.Fatalf("overlapping fire %d must be rejected while one is parked, got err=%v", i, err)
 		}

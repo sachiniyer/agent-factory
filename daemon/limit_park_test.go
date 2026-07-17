@@ -172,7 +172,7 @@ func TestRunTask_ParksNotFailedOnUsageLimit(t *testing.T) {
 		t.Fatalf("seed task: %v", err)
 	}
 
-	if err := RunTask("ffff0011"); err != nil {
+	if err := RunTask("ffff0011", task.ProjectExpectation{}); err != nil {
 		t.Fatalf("RunTask must not error on a parked run: %v", err)
 	}
 

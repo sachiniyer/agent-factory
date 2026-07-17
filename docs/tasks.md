@@ -27,6 +27,7 @@ Tasks live in `~/.agent-factory/tasks.json`. Manage them via `af tasks` (JSON CL
 | `target_session` | Deliver into this session by title (auto-created if missing). Empty = create a new session per fire |
 | `max_concurrent_runs` | Cap on how many sessions this watch task may have in flight at once. `0` (the default) = unlimited. Excess events are queued in order and delivered as sessions finish, rather than spawning more runs (subject to the durable queue's retention limits). Watch tasks with an empty `target_session` only (see [Limiting concurrent sessions](#limiting-concurrent-sessions)) |
 | `project_path` | Repo the task operates on; also the watch script's working directory |
+| `repo_id` | The owning project's id, resolved once when the task is bound and retained. Derived, not editable — it is recomputed only when `project_path` changes. It exists so that deleting the recorded directory cannot strand the task outside its own project; rows created before this field fall back to resolving `project_path` |
 | `program` | Agent to run (`claude`, `codex`, `aider`, `gemini`, `amp`, `opencode`). Empty = configured `default_program` |
 | `enabled` | Disabled tasks never fire; their watch script is stopped |
 | `last_run_at` / `last_run_status` | Set by the daemon: `started` (session created), `sent` (prompt delivered into a session), `parked: usage limit` (the session hit a plan usage-limit wall at startup and is parked, not failed — see [usage-limits.md](usage-limits.md#task-runs-park-dont-fail)), and for watch tasks `stopped` / `errored` (see below) |

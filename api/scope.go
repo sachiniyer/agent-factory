@@ -113,42 +113,92 @@ func resolveProjectScope(allFlag bool) (projectScope, error) {
 // Scoping such a task OUT would strand it: hidden from every project's list and
 // refused by remove, leaving no way to clean it up. Matching everywhere keeps it
 // visible and deletable, and there is no binding for a scope to protect.
-func (s projectScope) scopeMatches(projectPath string, ids *projectIDCache) bool {
+func (s projectScope) matchesTask(t *task.Task, ids *projectIDCache) bool {
 	if s.All || s.Repo == nil {
 		return true // no project context: nothing to filter against
 	}
-	if strings.TrimSpace(projectPath) == "" {
+	// The RETAINED id wins when present: it was resolved at bind time, while the
+	// recorded path was known to resolve, so it survives that path being deleted
+	// or moved. Re-deriving would be strictly worse information.
+	if t.RepoID != "" {
+		return t.RepoID == s.Repo.ID
+	}
+	if strings.TrimSpace(t.ProjectPath) == "" {
 		return true // unbound: nothing to violate, and must stay reachable
 	}
-	return ids.idFor(projectPath) == s.Repo.ID
+	return ids.idFor(t.ProjectPath) == s.Repo.ID
 }
 
-// projectIDCache memoizes path→repoID resolution for one command invocation.
+// resolvedProject is a project path resolved to its owning repository. root is
+// "" when nothing could be resolved, which is what makes an invented identity
+// distinguishable from a real one.
+type resolvedProject struct {
+	id   string
+	root string
+}
+
+// projectIDCache memoizes path→repo resolution for one command invocation.
 // config.RepoFromPath shells out to git, and a scoped list resolves every
 // task's project, so without this a list of N tasks costs N git invocations —
 // most of them for the same handful of paths.
 type projectIDCache struct {
-	ids map[string]string
+	resolved map[string]resolvedProject
 }
 
 func newProjectIDCache() *projectIDCache {
-	return &projectIDCache{ids: map[string]string{}}
+	return &projectIDCache{resolved: map[string]resolvedProject{}}
 }
 
 func (c *projectIDCache) idFor(projectPath string) string {
-	if id, ok := c.ids[projectPath]; ok {
-		return id
+	return c.resolve(projectPath).id
+}
+
+// resolve maps a recorded project path to its owning repository.
+//
+// An EXISTING path — including a subdirectory or a linked worktree — resolves
+// through git to the main repo root, which is why identity matching (rather than
+// path-string equality) sees TUI-created tasks in their own project.
+//
+// A path that no longer exists is the hard case. Hashing the stale leaf, as this
+// used to, invents an ID that equals nothing: the surviving project's ID is
+// sha256 of ITS root, never of a deleted child. That stranded the task — hidden
+// from its project's list, refused by every id-taking command, and the --repo we
+// suggested could not resolve either. So walk up to the nearest ANCESTOR that
+// still resolves: a deleted subdirectory of a surviving project resolves back to
+// that project, which is the reported case (#1893 review).
+//
+// The walk answers what git itself would say about the path if it existed, so it
+// cannot be more wrong than the path is. When nothing up the chain resolves,
+// fall back to the leaf hash — path equality, which at least keeps an orphan
+// addressable in its own recorded path — and report root "" so callers can tell
+// this identity is derived rather than real.
+//
+// Retaining the id at bind time (task.Task.RepoID) is the durable fix and takes
+// precedence; this path is the fallback for rows written before that field, and
+// for paths that never resolved.
+func (c *projectIDCache) resolve(projectPath string) resolvedProject {
+	if got, ok := c.resolved[projectPath]; ok {
+		return got
 	}
-	id := ""
+	got := resolveProjectPath(projectPath)
+	c.resolved[projectPath] = got
+	return got
+}
+
+func resolveProjectPath(projectPath string) resolvedProject {
 	if repo, err := config.RepoFromPath(projectPath); err == nil {
-		id = repo.ID
-	} else {
-		// Not a repo (any more): degrade to path equality rather than
-		// matching everything or nothing.
-		id = config.RepoIDFromRoot(filepath.Clean(projectPath))
+		return resolvedProject{id: repo.ID, root: repo.Root}
 	}
-	c.ids[projectPath] = id
-	return id
+	cleaned := filepath.Clean(projectPath)
+	for dir := filepath.Dir(cleaned); ; dir = filepath.Dir(dir) {
+		if repo, err := config.RepoFromPath(dir); err == nil {
+			return resolvedProject{id: repo.ID, root: repo.Root}
+		}
+		if parent := filepath.Dir(dir); parent == dir {
+			break // reached the filesystem root
+		}
+	}
+	return resolvedProject{id: config.RepoIDFromRoot(cleaned)}
 }
 
 // sessionRepoRoot derives the root of the project a session belongs to FROM THE
@@ -179,11 +229,19 @@ func sessionRepoRoot(data *session.InstanceData) string {
 // The error names the owning project AND the --repo that would authorize the
 // action, so the fix is copy-pasteable rather than a hunt.
 func requireTaskInScope(t *task.Task, scope projectScope) error {
-	if scope.scopeMatches(t.ProjectPath, newProjectIDCache()) {
+	ids := newProjectIDCache()
+	if scope.matchesTask(t, ids) {
 		return nil
 	}
+	// Suggest a --repo that RESOLVES. The recorded path may be a subdirectory
+	// that no longer exists, and telling a user to pass a path we would reject
+	// is worse than not suggesting one: it reads as a fix and cannot work.
+	suggest := ids.resolve(t.ProjectPath).root
+	if suggest == "" {
+		suggest = t.ProjectPath
+	}
 	return fmt.Errorf("task %q belongs to project %s, not the current project %s — pass --repo %s to act on it",
-		t.ID, t.ProjectPath, scope.Repo.Root, t.ProjectPath)
+		t.ID, t.ProjectPath, scope.Repo.Root, suggest)
 }
 
 // guardProjectBinding refuses to BIND a new session or task to a project that

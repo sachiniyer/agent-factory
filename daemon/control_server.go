@@ -125,7 +125,7 @@ func (s *controlServer) AddTask(req AddTaskRequest, resp *AddTaskResponse) error
 }
 
 func (s *controlServer) UpdateTask(req UpdateTaskRequest, resp *UpdateTaskResponse) error {
-	merged, err := task.UpdateTask(req.ID, req.Update)
+	merged, err := task.UpdateTask(req.ID, req.Update, req.Expect)
 	if err != nil {
 		return err
 	}
@@ -141,7 +141,7 @@ func (s *controlServer) UpdateTask(req UpdateTaskRequest, resp *UpdateTaskRespon
 }
 
 func (s *controlServer) RemoveTask(req RemoveTaskRequest, resp *RemoveTaskResponse) error {
-	if err := task.RemoveTask(req.ID); err != nil {
+	if err := task.RemoveTask(req.ID, req.Expect); err != nil {
 		return err
 	}
 	if err := s.reloadTaskSchedules(); err != nil {
@@ -159,7 +159,7 @@ func (s *controlServer) RemoveTask(req RemoveTaskRequest, resp *RemoveTaskRespon
 // (#1169-class fix). RunTask preserves the guards: watch tasks and disabled
 // tasks are refused.
 func (s *controlServer) TriggerTask(req TriggerTaskRequest, resp *TriggerTaskResponse) error {
-	if err := RunTask(req.ID); err != nil {
+	if err := RunTask(req.ID, req.Expect); err != nil {
 		return err
 	}
 	resp.OK = true

@@ -684,7 +684,7 @@ func TestSaveContentPaneState_DoesNotClobberUneditedTask(t *testing.T) {
 
 	// The CLI changes Task B on disk while the pane is open, holding a stale B.
 	newPrompt := "CLI MODIFIED"
-	_, err = task.UpdateTask("task-b-1213", task.TaskUpdate{Prompt: &newPrompt})
+	_, err = task.UpdateTask("task-b-1213", task.TaskUpdate{Prompt: &newPrompt}, task.ProjectExpectation{})
 	require.NoError(t, err)
 
 	// Esc releases focus → the overlay closes and saveContentPaneState runs.

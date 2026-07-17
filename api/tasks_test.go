@@ -34,6 +34,11 @@ type daemonCalls struct {
 	// UpdateTask dispatch (#1700), so tests can assert `af tasks update` ships
 	// ONLY the flags the user passed and never a full-struct copy.
 	lastUpdate task.TaskUpdate
+	// lastExpect records the project expectation the CLI sent on the most recent
+	// mutating dispatch, so tests can assert the client-side scope check is
+	// carried to the daemon rather than dropped (#1893 review). A dropped
+	// expectation is invisible on the happy path and silently reopens the race.
+	lastExpect task.ProjectExpectation
 }
 
 // stubDaemon swaps the daemon task-RPC indirections for in-memory stubs and
@@ -64,11 +69,12 @@ func stubDaemon(t *testing.T) *daemonCalls {
 		calls.writes++
 		return nil
 	}
-	daemonUpdateTask = func(id string, update task.TaskUpdate) (task.Task, error) {
+	daemonUpdateTask = func(id string, update task.TaskUpdate, expect task.ProjectExpectation) (task.Task, error) {
+		calls.lastExpect = expect
 		if calls.updateErr != nil {
 			return task.Task{}, calls.updateErr
 		}
-		merged, err := task.UpdateTask(id, update)
+		merged, err := task.UpdateTask(id, update, expect)
 		if err != nil {
 			return task.Task{}, err
 		}
@@ -76,18 +82,20 @@ func stubDaemon(t *testing.T) *daemonCalls {
 		calls.lastUpdate = update
 		return merged, nil
 	}
-	daemonRemoveTask = func(id string) error {
+	daemonRemoveTask = func(id string, expect task.ProjectExpectation) error {
+		calls.lastExpect = expect
 		if calls.removeErr != nil {
 			return calls.removeErr
 		}
-		if err := task.RemoveTask(id); err != nil {
+		if err := task.RemoveTask(id, expect); err != nil {
 			return err
 		}
 		calls.writes++
 		return nil
 	}
-	daemonTriggerTask = func(id string) error {
+	daemonTriggerTask = func(id string, expect task.ProjectExpectation) error {
 		calls.triggered = append(calls.triggered, id)
+		calls.lastExpect = expect
 		return calls.runErr
 	}
 	daemonListTasksNoSpawn = func() ([]task.Task, error) {
