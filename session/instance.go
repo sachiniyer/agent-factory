@@ -268,9 +268,29 @@ func (i *Instance) shellTabLocked() *Tab {
 }
 
 // GetTabs returns a snapshot of the instance's tab list under the instance
-// mutex. The returned slice is a copy so callers (the UI tab bar) can iterate
-// without racing concurrent tab mutation; the *Tab elements' Name/Kind are set
-// once at creation and never mutated, so they are safe to read.
+// mutex. The returned slice is a copy, so callers (the UI tab bar) can iterate
+// it without racing concurrent tab mutation.
+//
+// The *Tab elements are the LIVE pointers, not copies, and callers read their
+// Name/Kind/ID off-lock (tree.TabLabels on the render path, the TUI's
+// tabNameAt/tabIndexByName). That is safe because those fields are never
+// assigned in place once a tab is in i.Tabs: a tab's name can change, but the
+// writers that change it — RenameTab and ReconcileTabsFromData — swap in a
+// COPY carrying the new value (replaceTabFieldLocked) instead of writing the
+// object a reader is already holding. So a snapshot keeps reading the values it
+// was taken with, and the next GetTabs observes the new ones. Anything that
+// wants to change one of those fields must go through replaceTabFieldLocked;
+// assigning to a handed-out tab's Name is a data race, not a stale read (#1930).
+//
+// This does NOT extend to the whole struct: tmux and Conversation are still
+// assigned IN PLACE under i.mu (setTmuxLocked, setupTabs' dead-shell
+// replacement, teardown's ref clearing). The package does read those off a
+// snapshot in places — setupTabs and teardownTabs both capture tabs under the
+// lock and work outside it — and that is safe only because the daemon's
+// per-instance op-lock serializes start/teardown against every other mutation.
+// That discipline lives in the daemon, not in this type: prefer the locking
+// accessors (TabTmuxByID, ToInstanceData), and if you read tmux/Conversation off
+// a snapshot, know that is what you are leaning on.
 func (i *Instance) GetTabs() []*Tab {
 	i.mu.RLock()
 	defer i.mu.RUnlock()
@@ -836,6 +856,14 @@ func (i *Instance) ReconcileTabsFromData(target []TabData) (bool, error) {
 			changed = true
 		}
 		i.mu.Unlock()
+	}
+
+	// Reorder LAST, once the local set matches the daemon's. A pure reorder leaves
+	// every id and name unchanged, so every pass above is a no-op for it and the
+	// order would never reach a running TUI until restart (#1813). Permuting to the
+	// daemon's authoritative order here is what closes that gap.
+	if i.reorderTabsFromData(target) {
+		changed = true
 	}
 
 	return changed, firstErr

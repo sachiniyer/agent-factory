@@ -311,9 +311,13 @@ export function validate(root: LayoutNode, tabCount: number): LayoutNode {
 }
 
 
-/** Whether two ordered tab-identity lists are element-wise equal (the mid-drag
- *  tab-set-change check). */
-function sameTabs(a: string[], b: string[]): boolean {
+/** Whether two ordered per-tab lists are element-wise equal — the primitive behind
+ *  every "did the tab list change out from under us" check: the mid-drag
+ *  tab-set-change guard (resolveDragTab), the rebind detector (tabsRebound), and
+ *  split.ts's rename detector, which compares tab NAMES to decide whether the pane
+ *  headers need repainting (#1813). Exported for that last caller and for direct
+ *  unit coverage. */
+export function sameTabs(a: string[], b: string[]): boolean {
   if (a.length !== b.length) {
     return false;
   }

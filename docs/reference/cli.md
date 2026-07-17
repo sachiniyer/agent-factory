@@ -44,9 +44,13 @@ Run `af <command> --help` for the same information at the terminal. For a narrat
 - [`af sessions send-prompt`](#af-sessions-send-prompt) — Send a prompt to a session (or broadcast to all with --all)
 - [`af sessions tab-create`](#af-sessions-tab-create) — Spawn a process tab (a command), a web tab (a URL/iframe), or a VS Code tab in a session
 - [`af sessions tab-delete`](#af-sessions-tab-delete) — Delete a single tab from a session
-- [`af sessions tabs`](#af-sessions-tabs) — Manage a session's process tabs (create/delete)
+- [`af sessions tab-rename`](#af-sessions-tab-rename) — Rename a tab of a session
+- [`af sessions tab-reorder`](#af-sessions-tab-reorder) — Move a tab within a session's tab order
+- [`af sessions tabs`](#af-sessions-tabs) — Manage a session's tabs (create/delete/rename/reorder)
 - [`af sessions tabs create`](#af-sessions-tabs-create) — Spawn a process tab (a command) or a web tab (a URL/iframe) in a session
 - [`af sessions tabs delete`](#af-sessions-tabs-delete) — Delete a single tab from a session
+- [`af sessions tabs rename`](#af-sessions-tabs-rename) — Rename a tab of a session
+- [`af sessions tabs reorder`](#af-sessions-tabs-reorder) — Move a tab within a session's tab order
 - [`af sessions watch`](#af-sessions-watch) — Block until a session goes idle (ready for review)
 - [`af sessions whoami`](#af-sessions-whoami) — Identify the current Agent Factory session
 - [`af tasks`](#af-tasks) — Manage tasks
@@ -938,7 +942,9 @@ af sessions
 - [`af sessions send-prompt`](#af-sessions-send-prompt) — Send a prompt to a session (or broadcast to all with --all)
 - [`af sessions tab-create`](#af-sessions-tab-create) — Spawn a process tab (a command), a web tab (a URL/iframe), or a VS Code tab in a session
 - [`af sessions tab-delete`](#af-sessions-tab-delete) — Delete a single tab from a session
-- [`af sessions tabs`](#af-sessions-tabs) — Manage a session's process tabs (create/delete)
+- [`af sessions tab-rename`](#af-sessions-tab-rename) — Rename a tab of a session
+- [`af sessions tab-reorder`](#af-sessions-tab-reorder) — Move a tab within a session's tab order
+- [`af sessions tabs`](#af-sessions-tabs) — Manage a session's tabs (create/delete/rename/reorder)
 - [`af sessions watch`](#af-sessions-watch) — Block until a session goes idle (ready for review)
 - [`af sessions whoami`](#af-sessions-whoami) — Identify the current Agent Factory session
 
@@ -1302,15 +1308,97 @@ af sessions tab-delete <title> [flags]
 | `--repo` | `string` | Path to the project's git repository (default: the current directory's project) |
 | `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
 
+## af sessions tab-rename
+
+Rename a tab of a session
+
+Rename an existing tab — the fix for a name you have to live with all day,
+typically one an agent picked when it created the tab.
+
+Only web, process and VS Code tabs can be renamed: those are the tabs that
+display their name. The agent tab always shows "Agent" and shell tabs always show
+"Terminal" on every surface, so renaming them would change nothing and is refused.
+
+--new-name follows the same rules as tab-create's --name: characters outside
+[A-Za-z0-9_-] become "-", and the name is made unique within the session
+(auto-suffixed -2, -3, …). A name that sanitizes away to nothing is an error
+rather than a silent fall back to a default. The resolved name is printed on
+success — that is what the tab is actually called, and what the other tab verbs
+now address it by.
+
+The rename persists across a daemon/af restart and does not disturb the tab's
+running process. Not available for remote sessions (their tabs are fixed by
+remote_hooks config) or archived sessions (restore them first).
+
+```
+af sessions tab-rename <title> [flags]
+```
+
+**Flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--name` | `string` | Name of the tab to rename (required) |
+| `--new-name` | `string` | New name for the tab (required; sanitized and auto-suffixed on collision) |
+
+**Global flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http:// or ws:// URL instead of the local unix socket (env: AF_DAEMON_URL). The daemon is HTTP-only; terminate TLS at your own proxy if needed. |
+| `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload) |
+| `--repo` | `string` | Path to the project's git repository (default: the current directory's project) |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
+
+## af sessions tab-reorder
+
+Move a tab within a session's tab order
+
+Move a tab to a different slot, so the tab order is yours rather than whatever
+order the tabs happened to be created in.
+
+--index is the destination slot, 0-based, counting the tab bar left to right,
+and read as the tab's FINAL position: moving a tab to --index 3 of a 4-tab
+session puts it last.
+
+Slot 0 is reserved for the agent tab: the agent tab can't be moved, and no tab
+can be moved in front of it. That is structural, not cosmetic — the agent tab is
+identified by its position throughout a session's lifecycle.
+
+The new order persists across a daemon/af restart and does not disturb any tab's
+running process. Not available for remote sessions (their tabs are fixed by
+remote_hooks config) or archived sessions (restore them first).
+
+```
+af sessions tab-reorder <title> [flags]
+```
+
+**Flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--index` | `int` | Destination slot, 0-based, as the tab bar reads left to right (required; slot 0 is the agent tab and can't be targeted) (default `0`) |
+| `--name` | `string` | Name of the tab to move (required) |
+
+**Global flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http:// or ws:// URL instead of the local unix socket (env: AF_DAEMON_URL). The daemon is HTTP-only; terminate TLS at your own proxy if needed. |
+| `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload) |
+| `--repo` | `string` | Path to the project's git repository (default: the current directory's project) |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
+
 ## af sessions tabs
 
-Manage a session's process tabs (create/delete)
+Manage a session's tabs (create/delete/rename/reorder)
 
-Noun-subcommand aliases for the tab-create/tab-delete verbs.
+Noun-subcommand aliases for the tab-create/tab-delete/tab-rename/tab-reorder
+verbs.
 
-"sessions tabs create" is identical to "sessions tab-create" and "sessions tabs
-delete" is identical to "sessions tab-delete"; the hyphen verbs remain supported
-for existing scripts. To list a session's tabs, use "sessions get <title>".
+"sessions tabs create" is identical to "sessions tab-create", and the same holds
+for delete, rename and reorder; the hyphen verbs remain supported for existing
+scripts. To list a session's tabs, use "sessions get <title>".
 
 ```
 af sessions tabs
@@ -1320,6 +1408,8 @@ af sessions tabs
 
 - [`af sessions tabs create`](#af-sessions-tabs-create) — Spawn a process tab (a command) or a web tab (a URL/iframe) in a session
 - [`af sessions tabs delete`](#af-sessions-tabs-delete) — Delete a single tab from a session
+- [`af sessions tabs rename`](#af-sessions-tabs-rename) — Rename a tab of a session
+- [`af sessions tabs reorder`](#af-sessions-tabs-reorder) — Move a tab within a session's tab order
 
 **Global flags**
 
@@ -1374,6 +1464,58 @@ af sessions tabs delete <title> [flags]
 | Flag | Type | Description |
 |------|------|-------------|
 | `--name` | `string` | Name of the tab to delete (required) |
+
+**Global flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http:// or ws:// URL instead of the local unix socket (env: AF_DAEMON_URL). The daemon is HTTP-only; terminate TLS at your own proxy if needed. |
+| `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload) |
+| `--repo` | `string` | Path to the project's git repository (default: the current directory's project) |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
+
+## af sessions tabs rename
+
+Rename a tab of a session
+
+Alias for "sessions tab-rename". See "af sessions tab-rename --help" for details.
+
+```
+af sessions tabs rename <title> [flags]
+```
+
+**Flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--name` | `string` | Name of the tab to rename (required) |
+| `--new-name` | `string` | New name for the tab (required; sanitized and auto-suffixed on collision) |
+
+**Global flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http:// or ws:// URL instead of the local unix socket (env: AF_DAEMON_URL). The daemon is HTTP-only; terminate TLS at your own proxy if needed. |
+| `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload) |
+| `--repo` | `string` | Path to the project's git repository (default: the current directory's project) |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
+
+## af sessions tabs reorder
+
+Move a tab within a session's tab order
+
+Alias for "sessions tab-reorder". See "af sessions tab-reorder --help" for details.
+
+```
+af sessions tabs reorder <title> [flags]
+```
+
+**Flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--index` | `int` | Destination slot, 0-based, as the tab bar reads left to right (required; slot 0 is the agent tab and can't be targeted) (default `0`) |
+| `--name` | `string` | Name of the tab to move (required) |
 
 **Global flags**
 

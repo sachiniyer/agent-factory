@@ -36,6 +36,8 @@ var (
 	deliverPromptViaDaemon  = daemon.DeliverPrompt
 	createTabViaDaemon      = daemon.CreateTab
 	closeTabViaDaemon       = daemon.CloseTab
+	renameTabViaDaemon      = daemon.RenameTab
+	reorderTabViaDaemon     = daemon.ReorderTab
 	preflightLocalSession   = preflight.LocalSessionPrereqs
 	// snapshotViaDaemon is the non-spawning read path for list/get/whoami
 	// (#1029 PR 2). It reflects the daemon's authoritative in-memory state when

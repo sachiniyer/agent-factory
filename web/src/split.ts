@@ -39,6 +39,7 @@ import {
   replaceTab,
   resolveDragTab,
   sameLayout,
+  sameTabs,
   setRatio,
   singleLeaf,
   type SplitNode,
@@ -47,13 +48,20 @@ import {
   tabsRebound,
   validate,
 } from "./layout.js";
+import { probeWebTab } from "./api.js";
+// isLoopbackWebUrl is deliberately NOT imported any more: #1817 folded that test into
+// iframeIsProxied, which also answers it for a vscode tab (always proxied, and with no
+// target to classify). Calling it directly here would re-fork the question.
 import {
+  cacheBustedWebSrc,
   iframeIdentity,
   iframeIsProxied,
   type IframeSpec,
+  nextReloadNonce,
   paneAddressUsesOrdinal,
   webProxyPath,
 } from "./tabaddr.js";
+import { tabGlyph, tabLabel } from "./tablabel.js";
 import { AttachTerminal, type TerminalStatus } from "./terminal.js";
 import { currentXtermTheme } from "./theme.js";
 import { TabKind } from "./types.js";
@@ -81,6 +89,9 @@ interface Pane {
   container: HTMLElement;
   host: HTMLElement;
   label: HTMLElement;
+  /** The decorative kind glyph beside the label (#1813) — the same pair the tab bar
+   *  draws, from the same two functions (tablabel.ts). */
+  glyph: HTMLElement;
   overlay: HTMLElement;
   term: AttachTerminal | null;
   tab: number;
@@ -134,6 +145,18 @@ interface RetainedLayout {
   ids: string[];
 }
 
+/** The host[:port] of a web-tab target ("localhost:3300"), for the dead-server
+ *  message (#1813) — the part a developer acts on. Falls back to the raw target if
+ *  it does not parse; the daemon normalizes every URL it stores, so that cannot
+ *  reach here, but an error message is the wrong place to throw. */
+function hostLabel(target: string): string {
+  try {
+    return new URL(target).host;
+  } catch {
+    return target;
+  }
+}
+
 export class SplitView {
   // Retained layout per session id (in-memory; a nice-to-have to persist across
   // reload is out of scope for v1). Keyed by the stable session id.
@@ -160,6 +183,11 @@ export class SplitView {
   // "kind:name" identity did. webTargetAt reads it to tell a web/iframe tab from a
   // terminal one.
   private tabKinds: number[] = [];
+  // Each tab's NAME, parallel to tabIds — what the pane headers render (with the
+  // kind, through tablabel.ts). Before #1813 the panes had no access to this at all
+  // and drew a positional "Tab N" instead: an ordinal that says nothing when several
+  // panes are open, which is the only time a pane header is read.
+  private tabNames: string[] = [];
   // Whether the shown session is archived (#1809 follow-up). An archived session is
   // inert: the daemon refuses to proxy its preserved web tab, so the pane renders an
   // archived placeholder instead of a frame that could only fail — or, worse, could
@@ -235,6 +263,7 @@ export class SplitView {
     tabKinds: number[] = [],
     tabRealIds: string[] = [],
     archived = false,
+    tabNames: string[] = [],
   ): void {
     this.token = token;
     // Snapshot what the panes are currently bound to BEFORE overwriting it, so the
@@ -242,10 +271,12 @@ export class SplitView {
     const prevIds = this.tabIds;
     const prevKinds = this.tabKinds;
     const prevTargets = this.tabTargets;
+    const prevNames = this.tabNames;
     this.tabIds = tabIds;
     this.tabRealIds = tabRealIds;
     this.tabTargets = tabTargets;
     this.tabKinds = tabKinds;
+    this.tabNames = tabNames;
     // An archive/restore of the SHOWN session must re-render its web panes even when
     // the tab list is identical (#1809 follow-up) — archiving a session whose only
     // extra tab is a web tab leaves the count untouched, so the same-session path
@@ -287,7 +318,16 @@ export class SplitView {
       // is a third trigger: it changes what a web pane may RENDER without touching
       // any identity, so neither the tree nor tabsRebound would catch it.
       const rebound = tabsRebound(prevIds, prevKinds, prevTargets, tabIds, tabKinds, tabTargets);
-      if (before !== this.tree || rebound || archivedChanged) {
+      // A RENAME (#1813) is the fourth trigger, and it is its own case for the same
+      // reason the archive flip is: it changes what a pane RENDERS while touching
+      // nothing any other check looks at. The tree is identical, no identity or
+      // target moved, so both `before !== this.tree` and tabsRebound say "nothing to
+      // do" — and the header would keep the old name until something unrelated
+      // happened to force a reconcile. Reconciling here is cheap and rebuilds
+      // nothing: every pane's identity still matches, so the pass falls through to
+      // the label refresh at the end and stops.
+      const renamed = !sameTabs(prevNames, tabNames);
+      if (before !== this.tree || rebound || archivedChanged || renamed) {
         this.reconcile();
         this.report();
       }
@@ -657,14 +697,21 @@ export class SplitView {
         pane.tab = leaf.tab;
       }
       pane.container.classList.toggle("af-pane-multi", multi);
-      // Publish WHAT this pane is bound to, alongside data-leaf's WHERE. The label's
-      // ordinal cannot answer it: ordinals shift with the roster (#1779), so two panes
-      // reading "Tab 1" and "Tab 2" may be the same tab mid-remap, and the one question
-      // a split has to settle — are these two halves on DIFFERENT tabs? (#1901) — is not
-      // observable without this. "" for a legacy tab with no daemon id: the honest
-      // answer, and the same one AttachTerminal falls back on.
+      // Publish WHAT this pane is bound to, alongside data-leaf's WHERE. The header
+      // cannot answer it, before #1813 or after: an ordinal shifted with the roster
+      // (#1779), and a name is a display string a rename can change out from under an
+      // assertion — so the one question a split has to settle, are these two halves on
+      // DIFFERENT tabs? (#1901), stays unobservable without this. "" for a legacy tab
+      // with no daemon id: the honest answer, and the same one AttachTerminal falls
+      // back on.
       pane.container.setAttribute("data-tab-id", realId);
-      pane.label.textContent = `Tab ${leaf.tab + 1}`;
+      // The header names the TAB, not its position (#1813). Refreshed on EVERY
+      // reconcile rather than only when a pane is created or rebound: a rename
+      // changes this string and nothing else, so a label written once at build time
+      // would keep showing the old name for the life of the pane.
+      const named = { name: this.tabNames[leaf.tab] ?? "", kind: this.tabKinds[leaf.tab] ?? TabKind.Agent };
+      pane.glyph.textContent = tabGlyph(named.kind);
+      pane.label.textContent = tabLabel(named);
     }
 
     this.applyFocusClass();
@@ -674,6 +721,10 @@ export class SplitView {
     const container = el("div", "af-pane");
     container.setAttribute("data-leaf", leaf.id);
     const head = el("div", "af-pane-head");
+    // The kind glyph is a decorative sibling of the label, exactly as in the tab bar
+    // (#1813): same two functions, same pair, so the two surfaces cannot drift.
+    const glyph = el("span", "af-pane-glyph");
+    glyph.setAttribute("aria-hidden", "true");
     const label = el("span", "af-pane-label");
     const closeBtn = document.createElement("button");
     closeBtn.type = "button";
@@ -685,7 +736,7 @@ export class SplitView {
       e.stopPropagation();
       this.closePane(leaf.id);
     });
-    head.append(label, closeBtn);
+    head.append(glyph, label, closeBtn);
 
     const paneHost = el("div", "af-pane-host");
     const overlay = el("div", "af-drop-overlay");
@@ -700,6 +751,7 @@ export class SplitView {
       container,
       host: paneHost,
       label,
+      glyph,
       overlay,
       term: null,
       tab: -1,
@@ -833,9 +885,8 @@ export class SplitView {
       frame.setAttribute("allow", "clipboard-read; clipboard-write");
     }
     frame.setAttribute("referrerpolicy", "no-referrer");
-    if (src !== "") {
-      frame.src = src;
-    }
+    // The src is assigned by load() below, never here: a PROXIED frame must not be
+    // pointed at its target until the probe says the target is alive (#1813).
 
     const fallback = el("div", "af-webpane-fallback");
     fallback.hidden = true;
@@ -847,7 +898,15 @@ export class SplitView {
     fbLink.target = "_blank";
     fbLink.rel = "noopener noreferrer";
     fbLink.textContent = "Open in a new tab ↗";
-    fallback.append(fbMsg, fbLink);
+    // The retry affordance, shown ONLY in the dead-server state (#1813) — the other
+    // fallbacks (archived, no-URL, blocked embedding) have nothing to retry: they
+    // resolve by restoring a session, fixing a record, or leaving the frame.
+    const fbRetry = document.createElement("button");
+    fbRetry.type = "button";
+    fbRetry.className = "af-ghost af-webpane-fallback-retry";
+    fbRetry.textContent = "Retry";
+    fbRetry.hidden = true;
+    fallback.append(fbMsg, fbLink, fbRetry);
 
     wrap.append(bar, frame, fallback);
     pane.host.replaceChildren(wrap);
@@ -869,6 +928,15 @@ export class SplitView {
         : "This session is archived. Restore it to load this web tab.";
       fbLink.hidden = true;
       open.hidden = true;
+      // ↻ is withdrawn wherever it cannot act, on the same principle as the links
+      // above: a control that is present and does nothing teaches the user the app is
+      // broken and gives them nothing to act on. Here there is deliberately nothing to
+      // reload — src is blanked above and the frame is never pointed anywhere — and
+      // this branch returns before the click listener is even attached, so the button
+      // is inert in the most literal sense. This hides rather than disables because
+      // the message right above already carries the real next step ("Restore it"); a
+      // disabled button could only repeat it somewhere less discoverable.
+      reload.hidden = true;
       fallback.hidden = false;
       frame.hidden = true;
       pane.webDispose = null;
@@ -887,53 +955,204 @@ export class SplitView {
         : "This web tab has no URL.";
       fbLink.hidden = true;
       open.hidden = true;
+      // Nothing addressable ⇒ nothing to reload, and (as in the archived branch) no
+      // listener is attached past this return anyway. Note the VS Code message asks
+      // for a reload of the PAGE, not of this pane: ↻ re-runs load() with the same
+      // captured — still empty — id, so it could never be the fix it appears to
+      // offer. The page reload is what re-fetches a snapshot with the id backfilled.
+      reload.hidden = true;
       fallback.hidden = false;
       frame.hidden = true;
       pane.webDispose = null;
       return;
     }
 
+    // --- load + health -------------------------------------------------------
+    //
+    // A PROXIED tab is health-checked from the PARENT before the frame is pointed at
+    // it (#1813). The frame's origin is opaque (no allow-same-origin, above), so this
+    // document can read neither its content nor its status, and `load` fires even for
+    // a 502 — which is exactly how a dead dev server came to render the daemon's raw
+    // JSON error envelope as the "preview". Probing first means the frame is never
+    // pointed at a target already known to be down, so there is no JSON to paint
+    // over: the failure state is structural. The probe is one same-origin request to
+    // a loopback dev server, so the healthy path pays an RTT of single-digit ms.
+    //
+    // A DIRECT external tab cannot be probed — it is cross-origin, and a no-cors
+    // fetch would hide the status anyway — so it keeps the load-timeout it has always
+    // had, and only that.
+    // Both are WEB-tab concerns and deliberately skip a VS CODE pane, which #1817
+    // already owns end to end — I looked before wiring, and it needs neither:
+    //
+    //   - The dead-server PROBE exists for a race a vscode tab does not have. A web
+    //     tab points at a dev server someone else started, so "the tab exists before
+    //     the port answers" is its normal first state. A vscode tab's editor is spawned
+    //     BY the daemon, on demand, and ensureVSCodeServer blocks until it is up.
+    //   - #1817's failure states are already DESIGNED and already render in the pane:
+    //     the daemon serves an HTML notice (install hint / "VS Code is still starting…"
+    //     with a self-refresh / exited-while-starting) at 503. 503 is not in the probe's
+    //     dead set {502,504}, so those pass through untouched even where the probe does
+    //     run — but probing first would still delay them behind a round trip for no gain.
+    //   - showDead() names a host taken from the target, and a vscode tab has NO target
+    //     by design (its editor is an ephemeral loopback port resolved at proxy time).
+    //     Pointing this at one renders "answering at  yet" — an empty host.
+    //
+    // The residue is a vscode socket that dies AFTER a successful spawn: the proxy's
+    // ErrorHandler is kind-agnostic, so that 502s into the frame as a raw envelope —
+    // #1817's pre-existing behavior, not something this change introduces or should
+    // silently redesign mid-rebase. Reported as a follow-up.
+    const webProxied = proxied && !isVSCode;
+    const probePath = webProxied ? webProxyPath(sessionId, realId, target, null) : "";
+    let disposed = false;
+    // Supersedes an in-flight probe: a slow answer from an earlier attempt must never
+    // overwrite what a later Retry concluded.
+    let probeSeq = 0;
+
+    const showDead = (): void => {
+      fallback.classList.add("af-webpane-dead");
+      fbMsg.textContent = `No dev server is answering at ${hostLabel(target)} yet.`;
+      // BOTH open links are withdrawn in the dead state — they point at the same
+      // proxied URL the probe just found 502ing, so following either would open a new
+      // tab showing the daemon's raw 502 JSON, the exact thing this fallback replaces
+      // (Codex P3). The bar's `open` is the one the fallback's fbLink already hides for
+      // its own reason; the two must move together here. Retry stands in for both.
+      fbLink.hidden = true;
+      open.hidden = true;
+      fbRetry.hidden = false;
+      fallback.hidden = false;
+      frame.hidden = true;
+      // Drop the src so a frame from an earlier healthy load isn't left mounted (and
+      // still fetching) behind the fallback after its server dies.
+      frame.removeAttribute("src");
+    };
+
+    const showFrame = (): void => {
+      fallback.classList.remove("af-webpane-dead");
+      fallback.hidden = true;
+      fbRetry.hidden = true;
+      // Restore the bar's open link showDead withdrew: a live frame's proxied URL is
+      // now worth opening again.
+      open.hidden = false;
+      frame.hidden = false;
+    };
+
+    // The external-tab surface (item A / Sachin): a direct external target is never
+    // shown inline. We cannot tell a working embed from the browser's own
+    // X-Frame-Options refusal — both fire the iframe `load` event and the frame's
+    // opaque origin is unreadable — and the refusal page is the one thing Sachin ruled
+    // out ("NEVER the browser's raw refusal"). So the designed fallback IS the surface:
+    // a calm one-liner plus a WORKING open link, shown persistently, with the frame
+    // never given a src. The bar's `open` link stays live too — here it is the GOOD
+    // escape, not a route to a 502 — so this deliberately does not touch it.
+    const showExternalFallback = (): void => {
+      fallback.classList.add("af-webpane-external");
+      fbMsg.textContent = "This site may block embedding.";
+      fbLink.hidden = false;
+      fbLink.textContent = "Open it in a new tab ↗"; // ↗
+      fbRetry.hidden = true;
+      // ↻ is withdrawn here for the same reason fbRetry is, and it is the same
+      // judgement: this state is not a failure to recover from but the DESIGNED
+      // surface, and the frame is deliberately never navigated — so "reload" names
+      // nothing. Pressing it re-ran load(), which landed right back on this card:
+      // no fetch, no navigation, no visible change, no explanation. The escape that
+      // does work is the open link (this card's, and the bar's `open` — which this
+      // branch deliberately leaves live, unlike showDead).
+      //
+      // Never restored: `external` is fixed for the life of this render (a target is
+      // proxied or it is not), so this state never transitions to a live frame. The
+      // pane is rebuilt from scratch if the tab's address ever changes.
+      reload.hidden = true;
+      fallback.hidden = false;
+      frame.hidden = true;
+    };
+
+    // A direct external target (non-loopback web) is never proxied, so it is the one
+    // case where the browser's own X-Frame-Options refusal could reach the pane.
+    // Item A routes it to the persistent fallback instead of the frame.
+    const external = !proxied;
+
+    const load = async (bust = false): Promise<void> => {
+      const seq = ++probeSeq;
+      if (webProxied) {
+        const health = await probeWebTab(probePath, this.token ?? "", webFallbackMs());
+        if (disposed || seq !== probeSeq) {
+          return; // torn down, or a newer Retry owns this pane now
+        }
+        if (health === "dead") {
+          showDead();
+          return;
+        }
+      }
+      if (external) {
+        // Never point an external frame at its target (item A): a browser refusal and
+        // a working embed are indistinguishable here, and only the refusal is
+        // forbidden, so the fallback is the whole surface and no external request is
+        // made. The frame keeps no src.
+        showExternalFallback();
+        return;
+      }
+      showFrame();
+      // A user-initiated reload of a PROXIED target is cache-busted (#1900): without
+      // it, re-assigning the same URL may be answered from the browser's HTTP cache
+      // (or an intermediary's) with exactly the stale page ↻ exists to escape. Built
+      // from the pristine `src` each time, so the param is replaced, not accumulated.
+      //
+      // The value comes from the module-scope nextReloadNonce(), never a counter local
+      // to this mount: the browser's cache outlives the pane, so a per-mount sequence
+      // re-issues `_afreload=1` after every remount and gets answered from the entry the
+      // FIRST ↻ of the previous mount created. The INITIAL mount still never busts —
+      // that is `bust`, an argument, not the counter's starting value — so a fresh
+      // preview's address stays clean.
+      //
+      // External targets are deliberately excluded — a presigned / CDN-token URL signs
+      // over its query string, so a param would break the signature and 403 a preview
+      // that works today. They fall back to the re-assign trick below, which is all
+      // they ever had.
+      //
+      // A VS CODE pane is excluded for its own reason (see webProxied): the param buys
+      // nothing there — the editor is not the thing a developer is iterating on, and
+      // its notices are already served no-store — while code-server does read its own
+      // query string (?folder=…), so injecting one is unforced risk for no gain.
+      const next = bust && webProxied ? cacheBustedWebSrc(src, nextReloadNonce()) : src;
+      // Re-assigning src is what forces a reload (contentWindow.reload throws
+      // cross-origin), but assigning a URL the frame ALREADY holds does not navigate —
+      // so clear it first in exactly that case. A cache-busted URL always differs, so
+      // it navigates on its own; this is the external/initial path. Never clear a
+      // fresh frame: assigning "" resolves against the document's base URL and would
+      // load the SPA into itself.
+      if (frame.getAttribute("src") === next) {
+        frame.src = "";
+      }
+      frame.src = next;
+    };
+
     reload.addEventListener("click", (e) => {
       e.stopPropagation();
       if (src === "") {
         return;
       }
-      fallback.hidden = true;
-      frame.hidden = false;
-      // Reassign src to force a reload (contentWindow.reload throws cross-origin).
-      // Clear it first so re-setting the same URL still triggers a navigation.
-      frame.src = "";
-      frame.src = src;
+      // re-probes (↻ is the natural "is it up yet?" after a dead state) and
+      // cache-busts (#1900) — the two halves of "give me the CURRENT page".
+      void load(true);
+    });
+    fbRetry.addEventListener("click", (e) => {
+      e.stopPropagation();
+      void load(true);
     });
 
-    let settled = false;
-    const onLoad = (): void => {
-      settled = true;
-      fallback.hidden = true;
-      frame.hidden = false;
-    };
-    frame.addEventListener("load", onLoad);
-
-    // Only a DIRECT external frame can be blocked by X-Frame-Options; a same-origin
-    // proxied preview always loads. Arm a load-timeout that reveals the fallback if
-    // no load event arrives (refused / blocked). Best-effort: some blocked frames
-    // still fire load, so the always-present "open" link is the guaranteed escape.
-    let timer: ReturnType<typeof setTimeout> | null = null;
-    if (!proxied && src !== "") {
-      timer = setTimeout(() => {
-        if (!settled) {
-          fallback.hidden = false;
-          frame.hidden = true;
-        }
-      }, webFallbackMs());
-    }
-
+    // No iframe `load` listener and no load-timeout any more (item A). Both existed
+    // only for a direct external frame: the timeout revealed the fallback when no load
+    // arrived, and onLoad hid it when one did. But an X-Frame-Options block page FIRES
+    // load, so onLoad was exactly what un-hid the fallback and showed the browser's raw
+    // refusal — the bug Sachin filed. External tabs now show the fallback outright and
+    // never point the frame at a target, so there is no load event to interpret and
+    // nothing to time out. Proxied web/vscode frames never used either (the probe, and
+    // the daemon's own 503 notice, are their liveness signals).
     pane.webDispose = (): void => {
-      if (timer !== null) {
-        clearTimeout(timer);
-      }
-      frame.removeEventListener("load", onLoad);
+      disposed = true;
     };
+
+    void load();
   }
 
   private buildNode(node: LayoutNode): HTMLElement {

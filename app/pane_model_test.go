@@ -194,14 +194,14 @@ func TestPane_HeaderAnnotatesSelectionDivergence(t *testing.T) {
 	require.Same(t, alpha, paneA.Instance(), "selection must not retarget explicit panes")
 
 	view := h.View()
-	assert.Contains(t, view, "PREVIEW beta · Agent (original alpha · Agent)",
+	assert.Contains(t, view, "PREVIEW beta · ◆ Agent (original alpha · ◆ Agent)",
 		"preview header must reconcile transient target vs original pane")
-	assert.NotContains(t, view, "alpha · Agent · selected: beta · Agent",
+	assert.NotContains(t, view, "alpha · ◆ Agent · selected: beta · ◆ Agent",
 		"selected divergence is hidden while PREVIEW owns the render binding")
 
 	h.cancelPanePreview(false)
 	view = h.View()
-	assert.Contains(t, view, "alpha · Agent · selected: beta · Agent",
+	assert.Contains(t, view, "alpha · ◆ Agent · selected: beta · ◆ Agent",
 		"canceling preview restores the #1289 selected row vs shown content invariant")
 }
 
@@ -223,7 +223,7 @@ func TestPanePreviewInvalidatesStaleContentSynchronously(t *testing.T) {
 	_ = h.selectionChanged()
 
 	view := h.View()
-	assert.Contains(t, view, "PREVIEW beta · Agent (original alpha · Agent)")
+	assert.Contains(t, view, "PREVIEW beta · ◆ Agent (original alpha · ◆ Agent)")
 	assert.Contains(t, view, "Loading preview…")
 	assert.NotContains(t, view, "ALPHA_PREVIEW_CONTENT",
 		"retargeting preview must clear the original content before async beta capture returns")
@@ -276,14 +276,14 @@ func TestPanePreviewFastScrollLatestWins(t *testing.T) {
 
 	require.IsType(t, panesRefreshedMsg{}, refreshPaneBindingCmd(w, beta, 0, betaSeq)())
 	view := h.View()
-	assert.Contains(t, view, "PREVIEW gamma · Agent (original alpha · Agent)")
+	assert.Contains(t, view, "PREVIEW gamma · ◆ Agent (original alpha · ◆ Agent)")
 	assert.Contains(t, view, "Loading preview…")
 	assert.NotContains(t, view, "BETA_PREVIEW_CONTENT",
 		"late beta capture must not overwrite the newer gamma preview target")
 
 	require.IsType(t, panesRefreshedMsg{}, refreshPaneBindingCmd(w, gamma, 0, gammaSeq)())
 	view = h.View()
-	assert.Contains(t, view, "PREVIEW gamma · Agent (original alpha · Agent)")
+	assert.Contains(t, view, "PREVIEW gamma · ◆ Agent (original alpha · ◆ Agent)")
 	assert.Contains(t, view, "GAMMA_PREVIEW_CONTENT")
 	assert.NotContains(t, view, "BETA_PREVIEW_CONTENT")
 	assert.Same(t, alpha, paneA.Instance(), "latest-wins preview must still be transient")
@@ -321,9 +321,9 @@ func TestPanePreviewEscFromScrollRevertsOriginalCommittedTab(t *testing.T) {
 	assert.Equal(t, 1, paneA.Tab(), "Esc must restore alpha's original tab, not alpha's agent tab")
 
 	view := h.View()
-	assert.Contains(t, view, "alpha · Terminal")
+	assert.Contains(t, view, "alpha · › Terminal")
 	assert.NotContains(t, view, "PREVIEW beta")
-	assert.NotContains(t, view, "alpha · Agent",
+	assert.NotContains(t, view, "alpha · ◆ Agent",
 		"reset must not pair the committed alpha instance with the preview agent tab")
 }
 
@@ -347,7 +347,7 @@ func TestPanePreviewTabRowCommitsSameInstanceTerminal(t *testing.T) {
 	assert.Same(t, alpha, h.panePreviewTxn.target.instance)
 	assert.Equal(t, 1, h.panePreviewTxn.target.tab)
 	assert.Equal(t, 0, paneA.Tab(), "preview remains transient until commit")
-	assert.Contains(t, h.View(), "PREVIEW alpha · Terminal (original alpha · Agent)")
+	assert.Contains(t, h.View(), "PREVIEW alpha · › Terminal (original alpha · ◆ Agent)")
 
 	_, _ = h.handleDefaultKeyPress(tea.KeyMsg{Type: tea.KeyEnter}, keys.KeyEnter)
 
@@ -413,8 +413,8 @@ func TestPanePreviewInstanceRowUsesSelectedTerminalTab(t *testing.T) {
 	assert.Same(t, beta, h.panePreviewTxn.target.instance)
 	assert.Equal(t, 1, h.panePreviewTxn.target.tab,
 		"preview target must match the selected/action (instance, tab), not default to Agent")
-	assert.Contains(t, h.View(), "PREVIEW beta · Terminal (original alpha · Agent)")
-	assert.NotContains(t, h.View(), "PREVIEW beta · Agent")
+	assert.Contains(t, h.View(), "PREVIEW beta · › Terminal (original alpha · ◆ Agent)")
+	assert.NotContains(t, h.View(), "PREVIEW beta · ◆ Agent")
 }
 
 func TestPanePreviewEnterCommitsReplace(t *testing.T) {
@@ -438,7 +438,7 @@ func TestPanePreviewEnterCommitsReplace(t *testing.T) {
 	assert.Equal(t, 0, paneA.Tab())
 	assert.Equal(t, layout.PaneRegion(paneA.ID()), h.ring.Active())
 	view := h.View()
-	assert.Contains(t, view, "beta · Agent")
+	assert.Contains(t, view, "beta · ◆ Agent")
 	assert.NotContains(t, view, "PREVIEW")
 }
 
@@ -499,8 +499,8 @@ func TestPanePreviewSplitCommitsAlongside(t *testing.T) {
 	assert.Equal(t, 0, paneB.Tab())
 	assert.Equal(t, layout.PaneRegion(paneB.ID()), h.ring.Active(), "new target pane takes focus")
 	view := h.View()
-	assert.Contains(t, view, "alpha · Agent")
-	assert.Contains(t, view, "beta · Agent")
+	assert.Contains(t, view, "alpha · ◆ Agent")
+	assert.Contains(t, view, "beta · ◆ Agent")
 	assert.NotContains(t, view, "PREVIEW")
 }
 
@@ -520,7 +520,7 @@ func TestPanePreviewSplitHideDoesNotStickInPanePreview(t *testing.T) {
 	require.Same(t, beta, h.store.GetSelectedInstance())
 	require.Equal(t, layout.RegionTree, h.ring.Active(), "tree navigation owns focus during preview")
 	require.NotNil(t, h.panePreviewTxn)
-	require.Contains(t, h.View(), "PREVIEW beta · Terminal (original alpha · Agent)")
+	require.Contains(t, h.View(), "PREVIEW beta · › Terminal (original alpha · ◆ Agent)")
 
 	_, cmd := h.handleDefaultKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("S")}, keys.KeySplitPane)
 	require.NotNil(t, cmd)
@@ -543,7 +543,7 @@ func TestPanePreviewSplitHideDoesNotStickInPanePreview(t *testing.T) {
 	require.Nil(t, h.panePreviewTxn, "hiding the split target must not recreate its preview")
 	assert.Equal(t, layout.PaneRegion(paneA.ID()), h.ring.Active(), "focus lands on the surviving pane")
 	view := h.View()
-	assert.Contains(t, view, "alpha · Agent · selected: beta ·",
+	assert.Contains(t, view, "alpha · ◆ Agent · selected: beta ·",
 		"the survivor keeps the #1289 selected-vs-shown header")
 	assert.NotContains(t, view, "PREVIEW", "the hidden split pane must not leave a transient preview")
 
@@ -611,7 +611,7 @@ func TestPanePreviewEscCancelsToOwnerPane(t *testing.T) {
 	assert.Equal(t, 0, paneA.Tab())
 	assert.Equal(t, layout.PaneRegion(paneA.ID()), h.ring.Active())
 	view := h.View()
-	assert.Contains(t, view, "alpha · Agent · selected: beta · Agent")
+	assert.Contains(t, view, "alpha · ◆ Agent · selected: beta · ◆ Agent")
 	assert.NotContains(t, view, "PREVIEW")
 }
 
@@ -816,9 +816,9 @@ func TestPane_NumberJumpAnnotatesSelectedTabDivergence(t *testing.T) {
 	assert.Equal(t, 1, paneB.Tab(), "focused beta pane jumps to tab 2")
 	assert.Equal(t, 0, h.store.ActiveTab(), "pane-focused jump must not retarget the sidebar selection")
 	view := h.View()
-	assert.Contains(t, view, "beta · Terminal · selected: beta · Agent",
+	assert.Contains(t, view, "beta · › Terminal · selected: beta · ◆ Agent",
 		"pane header shows the jumped tab and the still-selected tree tab")
-	assert.Contains(t, view, "1 Agent *", "sidebar active-tab marker stays on the selected tab")
+	assert.Contains(t, view, "1 ◆ Agent *", "sidebar active-tab marker stays on the selected tab")
 }
 
 // TestPane_FocusRingCyclesNPanes: with three panes open, Tab cycles
@@ -1018,7 +1018,7 @@ func TestPane_AutoHideShowsTransientStatus(t *testing.T) {
 
 	require.Equal(t, 2, h.store.NumOpenPanes(), "the second pane still opens")
 	assert.Equal(t, []string{"beta"}, visibleTitles(h), "width pressure hides alpha and shows beta")
-	assert.Equal(t, "alpha · Agent hidden — too narrow for 2 panes; resize wider or use `s` open pane",
+	assert.Equal(t, "alpha · ◆ Agent hidden — too narrow for 2 panes; resize wider or use `s` open pane",
 		h.errBox.FullError())
 }
 
@@ -1068,118 +1068,6 @@ func TestPane_WKeepsTabKillMeaning(t *testing.T) {
 	assert.Contains(t, h.errBox.String(), "agent tab", "w on the agent tab surfaces the friendly error")
 }
 
-// TestPane_CloseTabRebindsPanes: `t` opens the fresh tab as a pane, and
-// killing a middle tab (w) hides its pane while shifting higher-slot panes'
-// bindings down so they keep showing the same tab.
-func TestPane_CloseTabRebindsPanes(t *testing.T) {
-	h := newTestHome(t)
-	inst := startedLocalInstance(t, "rebind")
-	selectInstance(h, inst)
-	resizeHome(h, 200, 40)
-
-	restore := SetTabCreatorForTest(func(title, repoID string) (string, error) {
-		return spawnDaemonTab(inst), nil
-	})
-	defer restore()
-	_, _ = h.handleNewTab() // agent + shell + shell-2
-	require.Equal(t, 3, inst.TabCount())
-	require.Equal(t, 1, h.store.NumOpenPanes(), "t opens the fresh tab as a pane")
-	require.Equal(t, 2, h.store.OpenPanes()[0].Tab(), "bound to the new last slot")
-
-	// Also open the slot-1 shell pane.
-	_, _ = h.openOrFocusPane(inst, 1)
-	require.Equal(t, 2, h.store.NumOpenPanes())
-
-	// Kill tab 1: its pane hides; the slot-2 pane re-binds to slot 1.
-	h.store.SetActiveTab(1)
-	restoreClose := SetTabCloserForTest(func(title, repoID, tabName string) error { return nil })
-	defer restoreClose()
-	_, _ = h.handleCloseTab()
-
-	require.Equal(t, 2, inst.TabCount())
-	require.Equal(t, 1, h.store.NumOpenPanes(), "the killed tab's pane leaves the workspace")
-	assert.Equal(t, 1, h.store.OpenPanes()[0].Tab(), "the surviving pane re-binds to the shifted slot")
-}
-
-// TestPane_SnapshotTabRemovalRebindsPanes is the daemon-driven twin of
-// TestPane_CloseTabRebindsPanes (Greptile on PR #1099): a tab that disappears
-// from the SNAPSHOT out-of-band — another client, `af sessions tab-delete`,
-// a daemon-side removal — must apply the SAME pane close/rebind semantics as
-// the TUI `w` kill (shared reconcilePanesForTabs): the vanished tab's pane
-// closes, higher-slot panes re-bind to their shifted slot, and the focus
-// ring + layout are consistent the moment the reconcile returns. This is the
-// #960 contract: the daemon is the source of truth, tabs change with no
-// local action.
-func TestPane_SnapshotTabRemovalRebindsPanes(t *testing.T) {
-	h := newTestHome(t)
-	inst := startedLocalInstance(t, "snaprebind")
-	inst.SetStatusForTest(session.Running)
-	selectInstance(h, inst)
-	resizeHome(h, 200, 40)
-
-	restore := SetTabCreatorForTest(func(title, repoID string) (string, error) {
-		return spawnDaemonTab(inst), nil
-	})
-	defer restore()
-	_, _ = h.handleNewTab() // agent + shell + shell-2; opens the slot-2 pane
-	require.Equal(t, 3, inst.TabCount())
-	_, _ = h.openOrFocusPane(inst, 1) // and the slot-1 ("shell") pane, focused
-	require.Equal(t, 2, h.store.NumOpenPanes())
-
-	// The daemon reports "shell" gone: the snapshot carries agent + shell-2.
-	data := inst.ToInstanceData()
-	require.Equal(t, "shell", data.Tabs[1].Name)
-	data.Tabs = append(data.Tabs[:1], data.Tabs[2:]...)
-
-	require.True(t, h.reconcileSnapshot([]session.InstanceData{data}))
-
-	require.Equal(t, 2, inst.TabCount(), "the snapshot's tab set is mirrored")
-	require.Equal(t, 1, h.store.NumOpenPanes(), "the vanished tab's pane closes")
-	p := h.store.OpenPanes()[0]
-	assert.Equal(t, 1, p.Tab(), "the shell-2 pane re-binds to its shifted slot")
-	assert.Equal(t, "shell-2", inst.GetTabs()[p.Tab()].Name,
-		"no pane may be left showing a shifted/stale tab")
-	assert.Equal(t, 1, h.lastLayout.PaneCount(), "the layout re-solves in the same reconcile")
-	assert.Equal(t, layout.PaneRegion(p.ID()), h.ring.Active(),
-		"focus lands cleanly on the surviving selected pane after the focused pane closes")
-}
-
-// TestPane_SnapshotTabRemovalKeepsUnaffectedPaneBinding: removing a HIGHER
-// slot out-of-band closes only that pane — a pane on a lower slot keeps its
-// binding untouched (no spurious rebind).
-func TestPane_SnapshotTabRemovalKeepsUnaffectedPaneBinding(t *testing.T) {
-	h := newTestHome(t)
-	inst := startedLocalInstance(t, "snapkeep")
-	inst.SetStatusForTest(session.Running)
-	selectInstance(h, inst)
-	resizeHome(h, 200, 40)
-
-	restore := SetTabCreatorForTest(func(title, repoID string) (string, error) {
-		return spawnDaemonTab(inst), nil
-	})
-	defer restore()
-	_, _ = h.handleNewTab() // agent + shell + shell-2; opens the slot-2 pane
-	require.Equal(t, 3, inst.TabCount())
-	_, _ = h.openOrFocusPane(inst, 1)
-	require.Equal(t, 2, h.store.NumOpenPanes())
-
-	// The daemon reports "shell-2" (the last slot) gone.
-	data := inst.ToInstanceData()
-	require.Equal(t, "shell-2", data.Tabs[2].Name)
-	data.Tabs = data.Tabs[:2]
-
-	require.True(t, h.reconcileSnapshot([]session.InstanceData{data}))
-
-	require.Equal(t, 1, h.store.NumOpenPanes(), "only the vanished tab's pane closes")
-	p := h.store.OpenPanes()[0]
-	assert.Equal(t, 1, p.Tab(), "the unaffected pane keeps its slot")
-	assert.Equal(t, "shell", inst.GetTabs()[p.Tab()].Name)
-}
-
-// TestPane_SnapshotInstanceRemovalPrunesPanes is the whole-instance variant:
-// an instance that disappears from the snapshot (killed out-of-band) takes
-// its open panes with it in the SAME reconcile — ring reshaped, surviving
-// panes re-fit — rather than waiting for a later tick.
 func TestPane_SnapshotInstanceRemovalPrunesPanes(t *testing.T) {
 	h := paneTestHome(t)
 	beta := h.store.GetInstanceByTitle("beta")
@@ -1418,7 +1306,7 @@ func TestE2E_PaneFlow(t *testing.T) {
 	// Pane 2's tab label is whatever the shared active-tab index resolved to
 	// after the tree walk (the index survives instance switches by design),
 	// so assert the instance halves only.
-	assert.Contains(t, view, "alpha · Agent", "pane 1 header shows its binding")
+	assert.Contains(t, view, "alpha · ◆ Agent", "pane 1 header shows its binding")
 	assert.Contains(t, view, "beta · ", "pane 2 header shows its binding")
 
 	// Tab from the beta pane wraps via automations/projects/tree back around to

@@ -33,6 +33,8 @@ import {
   probeAuthRequired,
   probeToken,
   removeTask,
+  renameTab,
+  reorderTab,
   sendPrompt,
   storeToken,
   triggerTask,
@@ -48,6 +50,7 @@ import { loadProjectChoice, persistProjectChoice, pickerProjects, reconcileProje
 import { applyEvent, clampActiveTab, pickSelection, tabToKeepOnClose, upsertSession } from "./sessions.js";
 import { SplitView } from "./split.js";
 import { isArchived, type RowKind } from "./status.js";
+import { isRenameableTab } from "./tablabel.js";
 import { Store } from "./store.js";
 import { registerServiceWorker } from "./serviceworker.js";
 import { bootStampTheme, persistThemeChoice, stampTheme, type ThemeChoice } from "./theme.js";
@@ -740,7 +743,12 @@ function closeSessionTab(index: number): void {
   // or focus another pane, and re-pointing from an intent formed before that would
   // yank it back (the same stale-async hazard the #1777 scroll-fill token guards).
   const gen = splitView.layoutGeneration();
-  void closeTab(selId, sel.title, target.name, tok)
+  // tabRealId, NOT tabIdentity: this crosses the wire, so it must be an id the DAEMON
+  // can resolve — never the synthesized kind:name tabIdentity falls back to for a
+  // pre-#1738 record (see renameSessionTab). The keepId above is the opposite case,
+  // local bookkeeping, which is why the two helpers appear within a few lines of each
+  // other here and are not interchangeable.
+  void closeTab(selId, sel.title, target.name, tabRealId(target), tok)
     .then(() => fetchSnapshot(tok))
     .then((sessions) => {
       // Resolve the kept tab's CURRENT ordinal in the post-close roster.
@@ -756,6 +764,128 @@ function closeSessionTab(index: number): void {
       if (next >= 0 && splitView.layoutGeneration() === gen && store.get().selectedId === selId) {
         splitView.setFocusedTab(next);
       }
+    })
+    .catch((e) => surfaceTabError(e));
+}
+
+/**
+ * Renames the tab with the stable IDENTITY `id` on the selected session (#1813) — the
+ * commit of the tab bar's inline edit.
+ *
+ * Resolved by IDENTITY, not by the ordinal the edit began at, for the reason
+ * closeSessionTab spells out at length: an ordinal names a tab only relative to one
+ * roster, and this op spans two. The window is not a narrow race but the ORDINARY
+ * path — another window reordering or closing a lower tab publishes session.updated,
+ * whose repaint is itself what ends the edit and fires this commit — so an ordinal
+ * would reliably name whichever tab had shifted into the slot, and rename THAT.
+ * An identity survives the shift; if it resolves to nothing the tab was closed while
+ * being edited, and renaming nothing is the right answer (falling back to the ordinal
+ * would be precisely the bug).
+ *
+ * The tab is handed to the DAEMON by its stable id, with its current name alongside as
+ * the fallback (#1929). The id is what closes the residual this comment used to
+ * describe: when the RPC was name-only, another client could free the name between the
+ * read here and the daemon's handling, and the request would land on whatever tab had
+ * taken it. Now an id that no longer resolves is refused outright — a tab that went
+ * away reads as an error, never as a silent wrong-tab rename.
+ *
+ * Nothing is applied optimistically: the daemon decides the final name (it sanitizes
+ * and dup-suffixes exactly as a create does, `dup` → `dup-2`), so the authoritative
+ * Snapshot is what repaints the bar and the pane headers, never the string that was
+ * typed. Other windows learn of it from the session.updated the daemon publishes
+ * (#1812); the resync here is only so THIS window doesn't depend on its own event
+ * round trip.
+ */
+function renameSessionTab(id: string, name: string, editedSessionId: string): void {
+  const sel = selectedSessionData();
+  const tok = token;
+  // `tok === null` not `!tok`: "" is the authorized-tokenless credential (#1696).
+  if (!sel || tok === null || !canManageTabs(sel)) {
+    return;
+  }
+  // The edit spanned a session switch: the input opened on `editedSessionId` and the
+  // render that reparented the bar to a DIFFERENT session blurred it, firing this commit
+  // against the now-selected one. The user navigated away — abandon the half-typed rename
+  // silently. Reporting a miss here would be the lie this whole surface exists to prevent:
+  // the edited tab is not gone, it is still in the session they left. Only a miss WITHIN
+  // the same session is a genuine vanish worth surfacing.
+  if ((sel.id ?? "") !== editedSessionId) {
+    return;
+  }
+  // tabIdentity, not tabRealId: this is LOCAL bookkeeping (re-find the edited tab in
+  // the CURRENT roster), never an id handed to the daemon — so the synthesized
+  // kind:name of a pre-#1738 record is a usable key here, and still names the tab
+  // across a reorder that an ordinal would not survive. Its documented residual (a
+  // close+recreate of the same name) is the same one #1738 closes everywhere else.
+  const target = sessionTabs(sel).find((t) => tabIdentity(t) === id);
+  if (!target) {
+    // The tab the edit was OPENED on is no longer in the roster — closed by another
+    // client (and possibly replaced by a same-named tab, which is invisible to the bar's
+    // render signature) while the input was open, WITHIN the same session (the switch
+    // case returned above). Reported rather than resolved to whatever now holds that
+    // slot: landing the rename on a tab the user never edited is the failure the
+    // id-keying exists to prevent, and dropping it in silence is one the user would
+    // answer by retyping into the same void. There is no third option worth having —
+    // an ordinal fallback is the first failure with a friendlier face.
+    surfaceTabError(new Error("That tab is gone — nothing was renamed."));
+    return;
+  }
+  // Re-checked here and not merely at the affordance: an agent/shell tab renders a
+  // fixed label and ignores its name, so the daemon refuses the rename — firing one
+  // anyway could only produce a guaranteed-to-fail call (see isRenameableTab).
+  if (!isRenameableTab(target.kind)) {
+    return;
+  }
+  clearTabError();
+  const selId = sel.id ?? "";
+  // tabRealId, NOT tabIdentity: this one crosses the wire, so it must be an id the
+  // DAEMON can resolve — never the synthesized kind:name tabIdentity falls back to for
+  // a pre-#1738 record. An empty id sends no tab_id and the daemon resolves by name,
+  // which is the documented fallback for a roster that has no ids to key on (#1929).
+  void renameTab(selId, sel.title, target.name, name, tabRealId(target), tok)
+    .then(() => fetchSnapshot(tok))
+    .then((sessions) => {
+      store.set({ sessions, selectedId: pickSelection(sessions, store.get().selectedId) });
+    })
+    .catch((e) => surfaceTabError(e));
+}
+
+/**
+ * Moves the tab at `from` to the 0-based `to` (#1813) — the commit of a drag within
+ * the tab bar.
+ *
+ * Neither index may be 0: Go's Tabs[0] is a load-bearing invariant (archive and the
+ * agent's own conversation/tmux all index it), so the agent tab can neither move nor
+ * be displaced, and the daemon refuses both. The bar already declines to offer such a
+ * drop; this is the backstop, on the same principle as closeSessionTab's `index <= 0`.
+ *
+ * No pane is re-pointed afterwards, and that is the assertion rather than an
+ * omission: panes are bound to tab IDENTITIES, so the resync alone re-points each one
+ * at wherever its OWN tab now sits (split.ts remapByIdentity) and a pane whose tab
+ * merely moved is followed, not rebuilt — its stream and scrollback survive. Anything
+ * this function did with an ordinal here could only fight that.
+ */
+function reorderSessionTab(from: number, to: number): void {
+  const sel = selectedSessionData();
+  const tok = token;
+  if (!sel || tok === null || !canManageTabs(sel)) {
+    return;
+  }
+  const tabs = sessionTabs(sel);
+  const target = tabs[from];
+  if (!target || from <= 0 || to <= 0 || to >= tabs.length || from === to) {
+    return;
+  }
+  clearTabError();
+  const selId = sel.id ?? "";
+  // The id names WHICH tab moves; `to` is only WHERE it lands. A reorder is the verb
+  // most likely to be racing another client's, so resolving the mover by id rather
+  // than by a name/ordinal read from a roster that may already have shifted is the
+  // whole point (#1929). See renameSessionTab for why tabRealId and not tabIdentity.
+  void reorderTab(selId, sel.title, target.name, to, tabRealId(target), tok)
+    .then(() => fetchSnapshot(tok))
+    .then((sessions) => {
+      store.set({ sessions, selectedId: pickSelection(sessions, store.get().selectedId) });
     })
     .catch((e) => surfaceTabError(e));
 }
@@ -1024,6 +1154,8 @@ const actions = {
   openTab,
   newTab: createSessionTab,
   closeTab: closeSessionTab,
+  renameTab: renameSessionTab,
+  reorderTab: reorderSessionTab,
   switchView,
   setConfigValue: applyConfigValue,
   switchProject,
@@ -1066,13 +1198,27 @@ function syncSplit(state: AppState): void {
   // The kind of each tab, parallel to tabIds — the split view reads it to tell a web
   // tab from a terminal one now that the identity is the opaque stable id (#1738).
   const tabKinds = selected ? sessionTabs(selected).map((t) => t.kind) : [];
+  // Each tab's NAME, parallel to tabIds — what the pane headers render, with the kind,
+  // through the same tablabel.ts derivation the tab bar uses (#1813). Before this the
+  // panes had no name to render and drew a positional "Tab N" instead.
+  const tabNames = selected ? sessionTabs(selected).map((t) => t.name) : [];
   // Whether the shown session is archived (#1809 follow-up): an archived session's
   // preserved web tabs render an inert placeholder rather than a live frame, and the
   // flip re-renders them on archive/restore even when the tab list is unchanged.
   const archived = selected ? isArchived(selected) : false;
   // `tok !== null` not `tok`: "" is the authorized-tokenless credential (#1696), so a
   // loopback client still attaches its live panes.
-  splitView.setSession(tok !== null ? selId : null, tok, tabIds, initialTab, tabTargets, tabKinds, tabRealIds, archived);
+  splitView.setSession(
+    tok !== null ? selId : null,
+    tok,
+    tabIds,
+    initialTab,
+    tabTargets,
+    tabKinds,
+    tabRealIds,
+    archived,
+    tabNames,
+  );
 }
 
 function disposeSplit(): void {

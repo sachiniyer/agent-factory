@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/charmbracelet/lipgloss"
+	"github.com/mattn/go-runewidth"
 	"github.com/muesli/termenv"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -592,6 +593,128 @@ func TestTabRowForegroundMatchesAgentTab(t *testing.T) {
 		"selected tab rows keep their highlight background")
 }
 
+// activeMarkerVisible reports whether a rendered tab row still carries its " *"
+// active marker. lipgloss.Place pads the row out to the full width, so the
+// marker is the last NON-SPACE cell rather than the last cell.
+func activeMarkerVisible(row string) bool {
+	return strings.HasSuffix(strings.TrimRight(ansiEscape.ReplaceAllString(row, ""), " "), "*")
+}
+
+// TestRenderTab_ActiveMarkerSurvivesTruncation is the regression for #1983: a
+// truncated tab name ate the active-tab marker.
+//
+// The " *" marker is the ONLY active cue — tabRowActiveStyle is deliberately
+// identical to tabRowStyle — but it was appended as the row's RIGHTMOST
+// characters and the row was then truncated right-to-left, so the marker was the
+// first thing dropped. An active tab whose name overflowed rendered with no
+// marker anywhere while the tab bar's header still said it was active: the tree
+// and the header disagreed about which tab you were looking at.
+//
+// The name must lose the characters, not the marker. Widths here bracket the
+// real terminal sizes the sidebar renders at (the 80x24 case in the report).
+func TestRenderTab_ActiveMarkerSurvivesTruncation(t *testing.T) {
+	r := NewInstanceRenderer()
+	// Labels carry a kind glyph since #1813 ("◱ name"), which is what the
+	// renderer actually receives — and what pushed these rows 2 cells wider.
+	label := WebTabGlyph + " a-very-long-web-tab-name-that-overflows"
+
+	for _, width := range []int{20, 24, 30, 40} {
+		r.SetWidth(width)
+		row := r.RenderTab(label, 2, false, false, true)
+		clean := ansiEscape.ReplaceAllString(row, "")
+
+		require.Greater(t, runewidth.StringWidth(label), width,
+			"the label must actually overflow for this case to test anything")
+		assert.True(t, activeMarkerVisible(row),
+			"width %d: the active tab lost its * marker to truncation — no cue is left that it is active (row: %q)",
+			width, clean)
+		assert.LessOrEqual(t, lipgloss.Width(row), width+2,
+			"width %d: reserving the marker must not push the row past the container", width)
+	}
+}
+
+// TestRenderTab_ActiveMarkerSurvivesWideRuneTruncation covers the runewidth half
+// of #1983. A tab name may hold double-width runes — a process tab takes its name
+// from the command and a web tab from a session title, neither of which is
+// guaranteed ASCII — so reserving the marker by COUNTING runes rather than
+// measuring cells would still overflow and re-eat the marker.
+func TestRenderTab_ActiveMarkerSurvivesWideRuneTruncation(t *testing.T) {
+	r := NewInstanceRenderer()
+	r.SetWidth(20)
+
+	// Each CJK rune is 2 cells wide: 12 runes = 24 cells, past the 20-cell row.
+	row := r.RenderTab(WebTabGlyph+" 日本語日本語日本語日本語", 2, false, false, true)
+	assert.True(t, activeMarkerVisible(row),
+		"a wide-rune tab name ate the active marker (row: %q)", ansiEscape.ReplaceAllString(row, ""))
+	assert.LessOrEqual(t, lipgloss.Width(row), 22,
+		"a wide-rune row must still fit the container")
+}
+
+// TestIndicatorsSurviveTruncation is the generalized #1983 lock: content elides,
+// indicators don't. The sidebar's two RIGHT-anchored indicators are the tab row's
+// active marker and the instance row's status glyph — right-anchored is what puts
+// an indicator in front of right-to-left truncation, so these are the two that
+// need an explicit width reservation. (Every other affordance — the ⎇ icon, the
+// [limit] badge, the ▲/▼ arrow, the kind glyph, the slot number — is
+// left-anchored and elides its content first by construction.)
+//
+// Asserted on the RENDERED row: the model always knew which tab was active, and
+// the rendering is what lied.
+func TestIndicatorsSurviveTruncation(t *testing.T) {
+	longTitle := "a-long-session-title-that-definitely-truncates"
+
+	// The instance row's status glyph, reserved via Render's width-3 placement.
+	inst, err := session.NewInstance(session.InstanceOptions{
+		Title: longTitle, Path: t.TempDir(), Program: "test",
+	})
+	require.NoError(t, err)
+	require.NoError(t, inst.Transition(session.ObserveLiveness(session.LiveLimitReached)))
+
+	for _, width := range []int{14, 20, 30, 44} {
+		r := NewInstanceRenderer()
+		r.SetWidth(width)
+		row := ansiEscape.ReplaceAllString(r.Render(inst, 1, false, false, true), "")
+		assert.Contains(t, row, "◆",
+			"width %d: the instance row's status glyph must survive a truncated title (row: %q)", width, row)
+
+		// The tab row's active marker, reserved by RenderTab.
+		tab := r.RenderTab(WebTabGlyph+" "+longTitle, 2, false, false, true)
+		assert.True(t, activeMarkerVisible(tab),
+			"width %d: the tab row's active marker must survive a truncated label", width)
+	}
+}
+
+// nameShown returns the name region of a rendered tab row: the text after the
+// slot number, minus the active marker and the row padding. Measured in CELLS,
+// since the glyph and the "…" tail are multi-byte and byte length would compare
+// encodings rather than what the user sees.
+func nameShown(row string) string {
+	clean := strings.TrimRight(ansiEscape.ReplaceAllString(row, ""), " ")
+	clean = strings.TrimSuffix(clean, " *")
+	_, name, _ := strings.Cut(clean, "2 ")
+	return name
+}
+
+// TestRenderTab_InactiveRowsUnaffected: reserving the marker's width must be a
+// no-op for rows that have no marker, which are most of them. An inactive tab
+// gives its full width to the name, and the active row buys its marker with
+// exactly the marker's own 2 cells of name — no more.
+func TestRenderTab_InactiveRowsUnaffected(t *testing.T) {
+	r := NewInstanceRenderer()
+	r.SetWidth(24)
+	label := WebTabGlyph + " a-very-long-web-tab-name-that-overflows"
+
+	inactive := r.RenderTab(label, 2, false, false, false)
+	assert.NotContains(t, ansiEscape.ReplaceAllString(inactive, ""), "*",
+		"inactive tabs carry no active marker")
+
+	active := r.RenderTab(label, 2, false, false, true)
+	assert.Equal(t,
+		runewidth.StringWidth(nameShown(inactive))-runewidth.StringWidth(activeTabMarker),
+		runewidth.StringWidth(nameShown(active)),
+		"the active row must spend exactly the marker's width of name, and the inactive row none of it")
+}
+
 // TestFlatten pins the tree flattening order: each instance row immediately
 // followed by its tab children when expanded.
 func TestFlatten(t *testing.T) {
@@ -616,25 +739,25 @@ func TestFlatten(t *testing.T) {
 // mid-start) the placeholder is the single guaranteed slot, never a padded
 // two-slot bar that would advertise a phantom Terminal target.
 func TestTabLabelsMirrorRealTabs(t *testing.T) {
-	assert.Equal(t, []string{"Agent"}, TabLabels(nil),
+	assert.Equal(t, []string{"◆ Agent"}, TabLabels(nil),
 		"nil instance: single-slot placeholder, no phantom Terminal")
 
 	inst, err := session.NewInstance(session.InstanceOptions{
 		Title: "labeled", Path: t.TempDir(), Program: "test",
 	})
 	require.NoError(t, err)
-	assert.Equal(t, []string{"Agent"}, TabLabels(inst),
+	assert.Equal(t, []string{"◆ Agent"}, TabLabels(inst),
 		"mid-start (no tabs yet): single-slot placeholder")
 
 	inst.AddTabForTest("agent", session.TabKindAgent)
-	assert.Equal(t, []string{"Agent"}, TabLabels(inst),
+	assert.Equal(t, []string{"◆ Agent"}, TabLabels(inst),
 		"fresh instance (#1100): exactly one real slot, no padding to two")
 
 	inst.AddTabForTest("shell", session.TabKindShell)
-	assert.Equal(t, []string{"Agent", "Terminal"}, TabLabels(inst),
+	assert.Equal(t, []string{"◆ Agent", "› Terminal"}, TabLabels(inst),
 		"after t: the on-demand terminal is the second slot")
 
 	inst.AddTabForTest("btop", session.TabKindProcess)
-	assert.Equal(t, []string{"Agent", "Terminal", "btop"}, TabLabels(inst),
+	assert.Equal(t, []string{"◆ Agent", "› Terminal", "› btop"}, TabLabels(inst),
 		"process tabs extend the list under their own names")
 }

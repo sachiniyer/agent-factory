@@ -27,10 +27,20 @@ type PreviewRequest struct {
 	RepoID string `json:"repo_id"`
 	Tab    int    `json:"tab"`
 	// TabID addresses the tab by its stable id (#1738) rather than its ordinal
-	// Tab. When set and it resolves against the session's live tab list it wins
-	// over Tab, so a capture can't grab the wrong tab after a reorder/close; when
-	// empty (or it no longer resolves) the handler falls back to the ordinal Tab
-	// for backward compatibility.
+	// Tab. When set it wins over Tab, so a capture can't grab the wrong tab after a
+	// reorder/close.
+	//
+	// A TabID that no longer resolves answers Gone=true — it does NOT fall back to
+	// the ordinal Tab, which is what the handler actually does (#1779) and the
+	// opposite of what this comment claimed until #1904. The fallback previewed
+	// whatever tab had shifted into the stale ordinal: the exact misroute the id
+	// exists to prevent, wearing a backward-compatible face. The ordinal is used
+	// ONLY when no id was supplied at all — a legacy client that never had one.
+	//
+	// This is the repo-wide rule for every tab verb, stated in
+	// tab_id_addressing_test.go and shared by Rename/Reorder/CloseTab's
+	// resolveTabTarget (#1929): once a client addresses a tab by its stable id, no
+	// daemon path may fall back to a positional one.
 	TabID string `json:"tab_id,omitempty"`
 	Full  bool   `json:"full"`
 }

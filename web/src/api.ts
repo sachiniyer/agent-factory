@@ -388,12 +388,179 @@ export async function createVSCodeTab(id: string, title: string, token: string):
   return resp.name;
 }
 
-/** Closes a non-agent tab by name (mirrors the TUI `w` key). The agent tab
- *  (index 0) is refused daemon-side — kill the session to tear it down. Refuses a
- *  session with no stable id, before issuing the request. */
-export async function closeTab(id: string, title: string, tabName: string, token: string): Promise<void> {
+/** Closes a non-agent tab (mirrors the TUI `w` key). The agent tab (index 0) is
+ *  refused daemon-side — kill the session to tear it down. Refuses a session with no
+ *  stable id, before issuing the request.
+ *
+ *  The tab is resolved by `tabId` FIRST, with `tabName` as the daemon's fallback
+ *  (#1971) — the same contract as renameTab/reorderTab, and the one place it is worth
+ *  more than either. A name is REUSABLE: the daemon hands a freed name straight back
+ *  to the next tab that asks for it, so a name-keyed close racing another window's
+ *  close+create resolves to a tab this user never looked at — and unlike a misrouted
+ *  rename, that is not a wrong label but a killed tmux session with whatever was
+ *  running in it. Callers pass tabRealId (ui.ts), never tabIdentity: the daemon
+ *  refuses an unknown non-empty id, so a synthesized `kind:name` must not be sent.
+ *  "" is the honest "no id" that keeps a pre-#1738 legacy tab on the name-keyed
+ *  path. */
+export async function closeTab(
+  id: string,
+  title: string,
+  tabName: string,
+  tabId: string,
+  token: string,
+): Promise<void> {
   requireSessionID(id, "close a tab");
-  await af("CloseTab", { id, title, repo_id: "", tab_name: tabName, tab_index: 0 }, token);
+  await af("CloseTab", { id, title, repo_id: "", tab_id: tabId, tab_name: tabName, tab_index: 0 }, token);
+}
+
+/** Renames a tab and returns the name the daemon actually settled on (#1813). That
+ *  return value is the point: the daemon applies the same sanitize + dup-suffix rules a
+ *  create goes through (`dup` → `dup-2`), so what a user typed and what the tab is now
+ *  called are not the same string, and the UI must render the latter. Only web/process
+ *  tabs are renameable — an agent/shell tab's label ignores its name — and the daemon
+ *  refuses the rest. Refuses a session with no stable id, before issuing the request.
+ *
+ *  The tab is resolved by `tabId` FIRST, with `tabName` as the daemon's fallback
+ *  (#1929). Identity is the honest key for the same reason it is on the session: a name
+ *  is not one. It is the very thing a rename CHANGES, so a concurrent rename from
+ *  another window or the CLI leaves this request naming a tab that no longer exists —
+ *  or a DIFFERENT tab that has since taken the name, which is a silent wrong-tab rename
+ *  rather than an error. Callers pass tabRealId (ui.ts): the daemon 404s an unknown
+ *  non-empty id, so a synthesized `kind:name` must never be sent. "" is the honest "no
+ *  id" that keeps a pre-#1738 legacy tab on today's name-keyed path. */
+export async function renameTab(
+  id: string,
+  title: string,
+  tabName: string,
+  newName: string,
+  tabId: string,
+  token: string,
+): Promise<string> {
+  requireSessionID(id, "rename a tab");
+  const resp = await af<{ name: string }>(
+    "RenameTab",
+    { id, title, repo_id: "", tab_id: tabId, tab_name: tabName, new_name: newName },
+    token,
+  );
+  return resp.name;
+}
+
+/** Moves a tab to the 0-based `index`, read in the FINAL roster (#1813): moving tab 1
+ *  to index 3 of a 4-tab session leaves it last. Returns the daemon's resolved
+ *  {name, index}.
+ *
+ *  The agent tab is pinned at 0 — Go's Tabs[0] is a load-bearing invariant, indexed
+ *  positionally by archive teardown and the agent's own conversation/tmux — so the
+ *  daemon rejects index 0 in BOTH directions. The bar declines to offer such a drop;
+ *  this is the backstop. Refuses a session with no stable id, before the request.
+ *
+ *  Resolved by `tabId` first, `tabName` as the fallback (#1929) — see renameTab. A
+ *  reorder is if anything the more exposed of the two: it is the operation that makes
+ *  the ordinals move, so a name-keyed request racing another reorder is resolved
+ *  against a roster this client has already stopped mirroring. */
+export async function reorderTab(
+  id: string,
+  title: string,
+  tabName: string,
+  index: number,
+  tabId: string,
+  token: string,
+): Promise<{ name: string; index: number }> {
+  requireSessionID(id, "reorder a tab");
+  // The wire field is `new_index` (daemon.ReorderTabRequest); `index` is what comes
+  // BACK. They are deliberately not the same name — don't "fix" one to match.
+  return af("ReorderTab", { id, title, repo_id: "", tab_id: tabId, tab_name: tabName, new_index: index }, token);
+}
+
+// --- web-tab health (#1813) -------------------------------------------------
+
+/** Whether a web tab's upstream is answering, as seen from the PARENT document. */
+export type WebTabHealth = "ok" | "dead";
+
+/**
+ * The marker the daemon's proxy sets on a 502 IT generated — i.e. the dev server never
+ * answered at all (daemon/webtab_proxy.go webtabErrorHeader). Mirrored here; the daemon
+ * is the contract.
+ *
+ * It is what makes af's own failure distinguishable from the app's (#1909). The proxy
+ * relays upstream statuses unchanged, so an app that serves its OWN 502 — a framework
+ * proxy whose backend is down, a local gateway error page — is identical by status to
+ * af's "nothing is listening". Keying on the bare status suppressed the app's real page
+ * and showed af's dead-server fallback over it.
+ *
+ * Trustworthy because the daemon strips this header from every upstream response before
+ * its ErrorHandler can set it, so an upstream cannot forge af's verdict about itself.
+ *
+ * Read case-insensitively (Headers.get is), and keyed on PRESENCE, not value: a future
+ * af-generated reason needs no change here.
+ */
+const WEBTAB_ERROR_HEADER = "x-af-webtab-error";
+
+/**
+ * Probes a proxied web tab's mirror path and reports whether its dev server is up.
+ *
+ * This exists because the pane's iframe is sandboxed WITHOUT allow-same-origin
+ * (split.ts, deliberate: an opaque frame origin is what stops a previewed dev server
+ * reaching the SPA's bearer token). The parent therefore cannot read the frame's
+ * document or its HTTP status, and `load` fires even for a 502 — which is why a dead
+ * dev server rendered the daemon's raw JSON error envelope as the "preview" (#1813).
+ * The status has to be learned out of band, and it can be: the proxy mirror path is
+ * same-origin to the SPA, so the parent may just fetch it.
+ *
+ * The credential rides the Authorization HEADER, never the ?access_token query the
+ * iframe's own src is stuck with (an iframe src cannot set headers). This request is
+ * the PARENT's, so it uses the parent's route and keeps the token out of a URL — and
+ * out of the frame.
+ *
+ * Only a transport failure or a 502/504 the DAEMON ITSELF generated counts as dead, and
+ * the marker header — not the status — is what identifies af's own (#1909). Every other
+ * answer means the dev server ANSWERED: a 404, a 500, or its own 502 is its page to
+ * render, and the frame renders it, exactly as a browser would.
+ *
+ * Redirects are NOT followed (`redirect: "manual"`). fetch follows them by default,
+ * which made this probe steerable by the very server it probes: a preview that redirects
+ * cross-origin (an OAuth/SSO login is the everyday case) dragged the PARENT document's
+ * request off-origin, subverting the same-origin assumption the probe rests on — and if
+ * the destination disallowed CORS the fetch rejected and we called a perfectly live dev
+ * server dead, though the frame would have followed that redirect happily. A redirect is
+ * an ANSWERING server: it is reported ok and the frame follows it on its own. The opaque
+ * response manual mode yields (status 0, no headers) falls out as ok for free.
+ *
+ * `timeoutMs` bounds the wait (Codex P2): a loopback target that ACCEPTS the
+ * connection but never sends headers would otherwise leave this awaiting forever, and
+ * the pane blank with no fallback and no Retry. An AbortController fires at the
+ * deadline; a timed-out probe is treated as dead, exactly like a transport failure —
+ * a target that cannot answer within the window is not answering. The caller passes
+ * the same tunable the fallback UI uses (webFallbackMs), so a test can shrink it.
+ */
+export async function probeWebTab(path: string, token: string, timeoutMs: number): Promise<WebTabHealth> {
+  const headers: Record<string, string> = {};
+  if (token !== "") {
+    headers.Authorization = `Bearer ${token}`;
+  }
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const resp = await fetch(path, {
+      method: "GET",
+      headers,
+      cache: "no-store",
+      redirect: "manual",
+      signal: controller.signal,
+    });
+    if (resp.status !== 502 && resp.status !== 504) {
+      return "ok";
+    }
+    // A 502/504 — but whose? Only af's own carries the marker; the app's own gateway
+    // error is its page to render (#1909).
+    return resp.headers.get(WEBTAB_ERROR_HEADER) !== null ? "dead" : "ok";
+  } catch {
+    // A transport failure (daemon down) OR our own abort (the target accepted but
+    // stalled past the deadline): either way nothing usable answered — dead.
+    return "dead";
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 // --- task mutations (#1592 Phase 5 PR8) ------------------------------------

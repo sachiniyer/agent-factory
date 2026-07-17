@@ -17,7 +17,10 @@ import {
   errorText,
   killSession,
   listBackends,
+  probeWebTab,
   removeTask,
+  renameTab,
+  reorderTab,
   sendPrompt,
   triggerTask,
   updateTask,
@@ -137,7 +140,7 @@ test("createTab / closeTab post the stable id alongside the title", async () => 
   assert.equal(cap.body.repo_id, "");
   assert.equal(cap.body.shell, true, "the web `t` creates a $SHELL tab, like the TUI");
 
-  await closeTab("id-repoB", "feature", "shell", "tok");
+  await closeTab("id-repoB", "feature", "shell", "tab-abc", "tok");
   assert.equal(cap.url, "/v1/CloseTab");
   assert.equal(cap.body.id, "id-repoB");
   assert.equal(cap.body.tab_name, "shell");
@@ -155,11 +158,78 @@ test("createTab / closeTab FAIL CLOSED on a missing id — no title-scoped reque
     "createTab with an empty id must reject",
   );
   await assert.rejects(
-    () => closeTab("", "feature", "shell", "tok"),
+    () => closeTab("", "feature", "shell", "tab-abc", "tok"),
     (e: unknown) => e instanceof ApiError && /no stable id/.test((e as ApiError).message),
     "closeTab with an empty id must reject",
   );
   assert.equal(cap.calls, 0, "no request may be issued for a tab op with a missing id");
+});
+
+// --- tab rename/reorder/close carry the STABLE tab id (#1929, #1971) -------
+//
+// The daemon resolves the tab id-first and falls back to the name/index path, so these
+// send `tab_id` alongside the name the fallback still needs. Name-keying alone is what
+// makes a rename/reorder racy: the name is the very thing a rename CHANGES, and a
+// concurrent one from another window (or the CLI) leaves this request naming a tab that
+// no longer exists — or, worse, a different tab that has since taken the name.
+//
+// Close carries it for the same reason and one more: it is the DESTRUCTIVE verb, so its
+// misroute kills a tmux session rather than mislabelling a tab (#1971).
+
+test("renameTab posts the stable tab id alongside the current name (#1929)", async () => {
+  const cap = stubFetch();
+  await renameTab("id-repoB", "feature", "alpha", "storefront", "tab-abc", "tok");
+  assert.equal(cap.url, "/v1/RenameTab");
+  assert.equal(cap.body.id, "id-repoB");
+  assert.equal(cap.body.tab_id, "tab-abc", "the daemon must be able to resolve the tab by identity, not name");
+  assert.equal(cap.body.tab_name, "alpha", "the name stays for the daemon's documented fallback path");
+  assert.equal(cap.body.new_name, "storefront");
+});
+
+test("reorderTab posts the stable tab id alongside the current name (#1929)", async () => {
+  const cap = stubFetch();
+  await reorderTab("id-repoB", "feature", "alpha", 3, "tab-abc", "tok");
+  assert.equal(cap.url, "/v1/ReorderTab");
+  assert.equal(cap.body.id, "id-repoB");
+  assert.equal(cap.body.tab_id, "tab-abc");
+  assert.equal(cap.body.tab_name, "alpha");
+  assert.equal(cap.body.new_index, 3, "the wire field is new_index; `index` is what comes BACK");
+});
+
+test("renameTab / reorderTab omit tab_id for a legacy tab that has none (#1929)", async () => {
+  // A pre-#1738 record carries no stable id. Sending "" is the documented fallback —
+  // the daemon resolves by name/index exactly as it does today — NOT a bug, and NOT a
+  // reason to refuse: unlike the session id (whose absence is the #1678 cross-repo
+  // landmine that makes closeTab fail closed), a tab name is only ever resolved WITHIN
+  // an already-id-resolved session, so the blast radius is that one session's own bar.
+  const cap = stubFetch();
+  await renameTab("id-repoB", "feature", "alpha", "storefront", "", "tok");
+  assert.equal(cap.body.tab_id, "", "an absent tab id is the empty string — the daemon's name fallback");
+  assert.equal(cap.body.tab_name, "alpha", "…and the name path still carries the rename");
+  assert.equal(cap.calls, 1, "a legacy tab is still renameable — the missing id must not refuse it");
+
+  await reorderTab("id-repoB", "feature", "alpha", 3, "", "tok");
+  assert.equal(cap.body.tab_id, "");
+  assert.equal(cap.body.tab_name, "alpha");
+  assert.equal(cap.calls, 2);
+
+  await closeTab("id-repoB", "feature", "alpha", "", "tok");
+  assert.equal(cap.body.tab_id, "", "a legacy tab must still be closable by name");
+  assert.equal(cap.body.tab_name, "alpha");
+  assert.equal(cap.calls, 3);
+});
+
+test("closeTab posts the stable tab id alongside the current name (#1971)", async () => {
+  const cap = stubFetch();
+  await closeTab("id-repoB", "feature", "alpha", "tab-abc", "tok");
+  assert.equal(cap.url, "/v1/CloseTab");
+  assert.equal(cap.body.id, "id-repoB");
+  assert.equal(
+    cap.body.tab_id,
+    "tab-abc",
+    "close must resolve by identity: a freed name is reissued to the next tab, so name-keying kills the wrong tmux session",
+  );
+  assert.equal(cap.body.tab_name, "alpha", "the name stays for the daemon's documented fallback path");
 });
 
 // --- task mutations (#1592 Phase 5 PR8) ------------------------------------
@@ -340,4 +410,121 @@ test("errorText extracts a readable string from every throwable shape", () => {
   const circular: Record<string, unknown> = {};
   circular.self = circular;
   assert.equal(errorText(circular), "unknown error");
+});
+
+// --- probeWebTab: the out-of-band web-tab health probe (#1813 / Codex P2) ------
+//
+// It reports "dead" for exactly the states the designed fallback exists for — a 502/504
+// the DAEMON generated (marked as its own, #1909), a transport failure, and (Codex P2) a
+// probe that never answers within the timeout — and "ok" for everything else, since any
+// other answer means the dev server itself answered and its page should render.
+
+/** Stubs global.fetch with one that resolves to `status` plus `headers`, honoring an
+ *  abort signal. Real `Response`s always carry a Headers object, so the stub does too:
+ *  the probe reads the #1909 marker off it. */
+function stubProbeStatus(status: number, headers: Record<string, string> = {}): void {
+  (globalThis as { fetch: unknown }).fetch = async (_url: string, init: RequestInit): Promise<Response> => {
+    if (init.signal?.aborted) {
+      throw new DOMException("aborted", "AbortError");
+    }
+    return { status, headers: new Headers(headers) } as unknown as Response;
+  };
+}
+
+/** The marker the daemon sets on a 502 IT generated (daemon/webtab_proxy.go). */
+const AF_ERR = { "x-af-webtab-error": "upstream-unreachable" };
+
+test("probeWebTab: a 502/504 the DAEMON generated is dead (#1909)", async () => {
+  // Marked = af's own ErrorHandler replaced the response because the dev server never
+  // answered. This is the state the dead-server fallback exists for.
+  for (const s of [502, 504]) {
+    stubProbeStatus(s, AF_ERR);
+    assert.equal(await probeWebTab("/v1/webtab/s/t/", "", 1000), "dead", `af-generated ${s} must be dead`);
+  }
+});
+
+test("probeWebTab: an UPSTREAM's own 502/504 means the app answered — render its page (#1909)", async () => {
+  // The #1909 bug: the proxy forwards upstream statuses unchanged, so an app that
+  // serves its own 502 (a framework proxy whose backend is down, a gateway error page)
+  // looked exactly like af's. Keying on the bare status suppressed the app's real page
+  // and showed af's dead-server fallback instead. The marker's ABSENCE is what says
+  // "the app answered".
+  for (const s of [502, 504]) {
+    stubProbeStatus(s); // no marker: af did not generate this
+    assert.equal(await probeWebTab("/v1/webtab/s/t/", "", 1000), "ok", `upstream-generated ${s} must render`);
+  }
+});
+
+test("probeWebTab: the marker is keyed on presence, not value, and read case-insensitively", async () => {
+  // The daemon may add a second failure reason without a client change, and header
+  // names are case-insensitive on the wire — a probe that matched one exact spelling
+  // would silently stop recognizing af's own failures.
+  stubProbeStatus(502, { "X-AF-Webtab-Error": "some-future-reason" });
+  assert.equal(await probeWebTab("/v1/webtab/s/t/", "", 1000), "dead");
+});
+
+test("probeWebTab: any other status means the dev server answered — render it", async () => {
+  for (const s of [200, 204, 404, 500, 503]) {
+    stubProbeStatus(s);
+    assert.equal(await probeWebTab("/v1/webtab/s/t/", "", 1000), "ok", `status ${s} must be ok`);
+  }
+});
+
+test("probeWebTab: the probe does not follow redirects — it cannot be steered off-origin", async () => {
+  // fetch FOLLOWS redirects by default, so a preview that answers with a redirect to a
+  // cross-origin destination (an OAuth/SSO login is the everyday case) made the PARENT
+  // document's probe follow it off-origin — the probe steerable by the very thing it
+  // probes, subverting the same-origin assumption it rests on. Worse, if the final
+  // origin disallows CORS the fetch rejects and we report the dev server dead, though
+  // the frame would have followed that redirect happily.
+  let seenRedirect: RequestRedirect | undefined;
+  (globalThis as { fetch: unknown }).fetch = async (_url: string, init: RequestInit): Promise<Response> => {
+    seenRedirect = init.redirect;
+    return { status: 200, headers: new Headers() } as unknown as Response;
+  };
+  await probeWebTab("/v1/webtab/s/t/", "", 1000);
+  assert.equal(seenRedirect, "manual", "the probe must not follow a redirect the probed server chose");
+});
+
+test("probeWebTab: a redirect is an ANSWERING server — ok, and the frame follows it itself", async () => {
+  // Under redirect:"manual" the browser hands back an opaque-redirect response: status
+  // 0, empty headers. It is not a failure — the server answered — and the frame is
+  // entitled to follow the redirect on its own, which is what a real preview does.
+  (globalThis as { fetch: unknown }).fetch = async (): Promise<Response> =>
+    ({ status: 0, type: "opaqueredirect", headers: new Headers() }) as unknown as Response;
+  assert.equal(await probeWebTab("/v1/webtab/s/t/", "", 1000), "ok", "a redirecting server is alive");
+});
+
+test("probeWebTab: a transport failure is dead", async () => {
+  (globalThis as { fetch: unknown }).fetch = async (): Promise<Response> => {
+    throw new TypeError("Failed to fetch");
+  };
+  assert.equal(await probeWebTab("/v1/webtab/s/t/", "", 1000), "dead");
+});
+
+test("probeWebTab: a fetch that never resolves is aborted at the timeout and reported dead (Codex P2)", async () => {
+  // The exact bug: a target that ACCEPTS the connection but never sends headers. The
+  // stub honors the AbortController signal the probe arms; without the timeout this
+  // promise would hang forever (and the pane would stay blank).
+  (globalThis as { fetch: unknown }).fetch = (_url: string, init: RequestInit): Promise<Response> =>
+    new Promise((_resolve, reject) => {
+      init.signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")));
+      // never resolves otherwise
+    });
+  const started = Date.now();
+  assert.equal(await probeWebTab("/v1/webtab/s/t/", "", 30), "dead");
+  assert.ok(Date.now() - started < 2000, "must resolve at the timeout, not hang");
+});
+
+test("probeWebTab: the token rides the Authorization header, never the URL", async () => {
+  let seenAuth: string | undefined;
+  let seenUrl = "";
+  (globalThis as { fetch: unknown }).fetch = async (url: string, init: RequestInit): Promise<Response> => {
+    seenUrl = url;
+    seenAuth = (init.headers as Record<string, string>).Authorization;
+    return { status: 200 } as unknown as Response;
+  };
+  await probeWebTab("/v1/webtab/s/t/", "secret-tok", 1000);
+  assert.equal(seenAuth, "Bearer secret-tok", "the probe is the parent's request — header, not ?access_token");
+  assert.ok(!seenUrl.includes("secret-tok"), "the token must never appear in the probe URL");
 });

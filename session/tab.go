@@ -44,11 +44,19 @@ const webTabName = "web"
 // or the web UI's + New tab flow.
 const vscodeTabName = "vscode"
 
+// tmuxTabSeparator joins an instance's agent tmux session name to a tab's name
+// to derive that tab's own tmux session name (af_<repoHash>_<title>__<tab>).
+// Deterministic so a tab's session is collision-free across instances and
+// restorable by exact name across a restart. It is also the token boundary
+// tabTmuxToken splits on to recover the name a live session was derived from,
+// which a rename decouples from the tab's current display name.
+const tmuxTabSeparator = "__"
+
 // shellTmuxSuffix extends an instance's agent tmux session name to derive its
 // shell tab's session name (e.g. af_<repoHash>_<title>__shell). Deterministic
 // so the shell session is collision-free across instances and restorable by
 // exact name across a restart.
-const shellTmuxSuffix = "__shell"
+const shellTmuxSuffix = tmuxTabSeparator + shellTabName
 
 // maxTabs is the soft cap on tabs per instance (#930 PR 4). It matches the 1-9
 // number-key jump range: a session can hold the agent tab plus up to eight

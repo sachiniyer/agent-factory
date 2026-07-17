@@ -322,6 +322,37 @@ func (s *controlServer) CloseTab(req CloseTabRequest, resp *CloseTabResponse) er
 	return nil
 }
 
+func (s *controlServer) RenameTab(req RenameTabRequest, resp *RenameTabResponse) error {
+	if err := s.requireManagerReady(); err != nil {
+		return err
+	}
+	if err := validateRPCRepoID(req.RepoID); err != nil {
+		return err
+	}
+	name, err := s.manager.RenameTab(req)
+	if err != nil {
+		return err
+	}
+	resp.Name = name
+	return nil
+}
+
+func (s *controlServer) ReorderTab(req ReorderTabRequest, resp *ReorderTabResponse) error {
+	if err := s.requireManagerReady(); err != nil {
+		return err
+	}
+	if err := validateRPCRepoID(req.RepoID); err != nil {
+		return err
+	}
+	name, index, err := s.manager.ReorderTab(req)
+	if err != nil {
+		return err
+	}
+	resp.Name = name
+	resp.Index = index
+	return nil
+}
+
 func (s *controlServer) SetPRInfo(req SetPRInfoRequest, resp *SetPRInfoResponse) error {
 	if err := s.requireManagerReady(); err != nil {
 		return err

@@ -450,10 +450,26 @@ func (r *InstanceRenderer) Render(i *session.Instance, _ int, selected bool, has
 	return text
 }
 
+// activeTabMarker is the tmux-style cue RenderTab appends to the tab row the
+// content pane is showing. It is the ONLY thing that marks a tab active —
+// tabRowActiveStyle is deliberately the same as tabRowStyle — which is why
+// RenderTab reserves its width before truncating rather than letting it be
+// truncated away (#1983).
+//
+// The reservation became load-bearing when #1813 gave every tab label a kind
+// glyph: labelForTab returned "Agent" and now returns "◆ Agent", so every label
+// is 2 cells wider and the truncation that drops this marker bites 2 columns
+// earlier on every row. The renderer's arithmetic did not change; its input did.
+const activeTabMarker = " *"
+
 // RenderTab renders one tab child row of an expanded instance: an indented
 // ├/└ connector, the 1-based slot number (matching the 1-9 jump keys), the
-// tab's label, and a tmux-style " *" marker on the tab the content pane is
+// tab's label, and the activeTabMarker on the tab the content pane is
 // showing. selected highlights the row under the tree cursor.
+//
+// When the row overflows, the LABEL is what gets truncated: the marker is
+// reserved so an active tab always reads as active. See the truncation comment
+// below.
 func (r *InstanceRenderer) RenderTab(label string, oneBased int, isLast, selected, active bool) string {
 	connector := "├"
 	if isLast {
@@ -461,11 +477,12 @@ func (r *InstanceRenderer) RenderTab(label string, oneBased int, isLast, selecte
 	}
 	marker := ""
 	if active {
-		marker = " *"
+		marker = activeTabMarker
 	}
-	text := fmt.Sprintf("%s%s %d %s%s",
+	prefix := fmt.Sprintf("%s%s %d ",
 		strings.Repeat(" ", runewidth.StringWidth(instancePrefix(expandedArrow, r.width))),
-		connector, oneBased, label, marker)
+		connector, oneBased)
+	text := prefix + label + marker
 	if r.width > 0 && runewidth.StringWidth(text) > r.width {
 		// Same narrow-width handling as the instance rows: drop the "…" tail
 		// when it would itself overflow, since lipgloss.Place won't clip
@@ -474,7 +491,35 @@ func (r *InstanceRenderer) RenderTab(label string, oneBased int, isLast, selecte
 		if r.width < runewidth.StringWidth(tail) {
 			tail = ""
 		}
-		text = runewidth.Truncate(text, r.width, tail)
+		// Spend the overflow on the NAME, not on the marker (#1983): content
+		// elides, indicators don't. Truncating the whole row right-to-left dropped
+		// the trailing " *" first, and that marker is the only thing distinguishing
+		// an active tab — tabRowActiveStyle is deliberately identical to
+		// tabRowStyle — so an active tab with a long name rendered byte-identically
+		// to an inactive one while the tab bar's header still called it active. The
+		// marker is not decoration; it is the answer to "which tab am I on?".
+		//
+		// This row is the one place in the sidebar that puts an indicator to the
+		// RIGHT of elastic content, which is why it is the one that broke. Every
+		// other affordance is either left-anchored, so right-to-left truncation eats
+		// the content first (the ⎇ branch icon, the [limit] title badge, the ▲/▼
+		// "N more" arrow, the tab-kind glyph, this row's own slot number), or is
+		// right-anchored but explicitly reserved — the instance row's status glyph,
+		// which Render keeps by placing the title in width-3 and joining the glyph
+		// after. Reserve the width here for the same reason.
+		//
+		// Measured in cells, not runes: a tab name may hold double-width runes (a
+		// process tab is named after its command, a web tab after a session title;
+		// neither is guaranteed ASCII).
+		if avail := r.width - runewidth.StringWidth(prefix) - runewidth.StringWidth(marker); avail > 0 {
+			text = prefix + runewidth.Truncate(label, avail, tail) + marker
+		}
+		// Below that the row is narrower than its own connector and marker, so
+		// there is no name left to spend and the marker goes too: clamp the row to
+		// the container and let it degrade, exactly as it did before.
+		if runewidth.StringWidth(text) > r.width {
+			text = runewidth.Truncate(text, r.width, tail)
+		}
 	}
 	style := tabRowStyle
 	if active {

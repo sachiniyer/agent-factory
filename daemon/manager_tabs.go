@@ -157,123 +157,44 @@ func (m *Manager) CreateTab(req CreateTabRequest) (string, error) {
 	return tab.Name, nil
 }
 
-// errCloseTabArchived is the refusal CloseTab returns for an archived session.
-// It is shared by the pre-lock fast path and the post-lock gate so a close that
-// loses the race to an archive is indistinguishable — to a CLI user or the web ×
-// — from one that arrived after it: same refusal, same advice, tab intact.
-func errCloseTabArchived(title string) error {
-	return fmt.Errorf("cannot close a tab on archived session %q; restore it first (af sessions restore)", title)
-}
-
 // CloseTab closes a non-agent tab of the target session, kills its tmux
 // session, and persists the shrunk tab list (#960 PR 1). It is the close-side
-// counterpart of CreateTab and mirrors its discipline: find the session, run
-// take the per-session op-lock so a concurrent kill/archive teardown can't
-// close the same tmux session, run the mutate+persist under the per-repo start
-// lock so a concurrent CreateSession/CreateTab/CloseTab on the same repo can't
-// interleave with the tab-list write, and persist through the targeted per-repo
-// writer
-// (persistInstanceData) rather than a whole-list SaveInstances — the
-// clobber-safe single-writer direction of #960.
+// counterpart of CreateTab. Session resolution, the remote/archived/stale-
+// instance guards and the op + repo start locks are tabMutationTarget's — the
+// sequence shared with RenameTab/ReorderTab; the persist goes through the
+// targeted per-repo writer (persistInstanceData) rather than a whole-list
+// SaveInstances, the clobber-safe single-writer direction of #960.
 //
-// The tab is resolved by TabName when set, otherwise by TabIndex. The agent
-// tab (index 0) is unclosable (KillSession tears down the whole session
-// instead) and remote sessions' tabs are fixed by their hook config, matching
-// the TUI's `w` rule (handleCloseTab). Returns the resolved name of the closed
-// tab. Unlike CreateTab there is no rollback on persist failure: CloseTab has
-// already killed the tab's tmux session, so there is nothing live left to
+// Two of those shared steps carry weight specific to closing. The op-lock:
+// archive/kill/restore hold it while closing every tab's tmux session, so
+// without it CloseTab can call TmuxSession.Close on the same object concurrently
+// (#1434). The archived guard: archive preserves web tabs so a restore can
+// render them again, and a tab-delete against an archived session would strip
+// that URL out of the record BEFORE the restore meant to bring it back — the
+// very loss the preservation exists to prevent, just moved later (#1809).
+//
+// The tab is resolved by resolveTabTarget, the same precedence every tab verb
+// uses: the stable TabID first, then TabName, then TabIndex (#1971). Close is
+// where that id earns the most — it is the only DESTRUCTIVE tab verb, so a
+// resolve onto a reused name doesn't mislabel a tab, it kills the wrong tmux
+// session. The agent tab (index 0) is unclosable — KillSession tears down the
+// whole session instead — matching the TUI's `w` rule (handleCloseTab). Returns
+// the resolved name of the closed tab. Unlike CreateTab there is no rollback on persist failure: CloseTab
+// has already killed the tab's tmux session, so there is nothing live left to
 // orphan — the in-memory list (tab removed) is the more accurate state, and the
 // stale disk record is harmless (its session is dead and won't reconnect).
 func (m *Manager) CloseTab(req CloseTabRequest) (string, error) {
-	// Resolve by stable id first (req.ID), falling back to {Title, RepoID} — the
-	// same id-preferring resolution kill/archive/prompt use, so a web tab-close
-	// under a cross-repo title collision can't hit the wrong session (#1592 Phase
-	// 5 PR7 / the #1678 class). All downstream lock keys and messages use the
-	// RESOLVED title, not the (possibly ambiguous) request title.
-	instance, repoID, title, _, _, err := m.resolveActionSession(req.ID, req.Title, req.RepoID)
+	instance, repoID, title, release, err := m.tabMutationTarget(req.ID, req.Title, req.RepoID,
+		tabMutationLabels{action: "close a tab", op: "tab close"})
 	if err != nil {
 		return "", err
 	}
-	if instance == nil {
-		return "", fmt.Errorf("failed to restore instance %q", title)
-	}
-	if !instance.Capabilities().TabManagement {
-		return "", fmt.Errorf("cannot close a tab on session %q: its tab list is fixed by its runtime, not user-managed — this session's workspace runs off-box (docker/ssh/remote)", title)
-	}
-	// An archived session's tabs are not editable (#1809 follow-up). Archive
-	// preserves web tabs so a restore can render them again; without this guard a
-	// tab-delete (CLI or the web ×) would permanently strip that URL out of the
-	// archived record BEFORE the restore that was supposed to bring it back — the
-	// exact loss the preservation exists to prevent, just moved later. This mirrors
-	// the AddTab side (TabSpawnBlocked), which has refused archived sessions since
-	// #1196: archive is inert in BOTH directions.
-	//
-	// This is the FAST path only — it rejects an already-archived session without
-	// making the caller wait on the op-lock. It is not the real gate: the session
-	// can still archive between here and the lock. The authoritative check is the
-	// post-lock one below.
-	if instance.IsArchived() {
-		return "", errCloseTabArchived(title)
-	}
+	defer release()
 
-	// Serialize the tab close against archive/kill/restore teardown for this
-	// session. Those paths hold the same op-lock while closing every tab's tmux
-	// session; without this CloseTab can concurrently call TmuxSession.Close on
-	// the same object (#1434). Take this before the repo start lock, matching
-	// CreateTab and the kill/archive persist ordering.
-	key := daemonInstanceKey(repoID, title)
-	opLock := m.opLockFor(key)
-	opLock.Lock()
-	defer opLock.Unlock()
-
-	// resolveActionSession runs before the op-lock is acquired. If a kill/archive
-	// won the lock first, it may have deleted or replaced the tracked instance
-	// while we waited; never mutate or re-persist a stale pointer after teardown.
-	m.mu.Lock()
-	current := m.instances[key]
-	m.mu.Unlock()
-	if current != instance || instance.UserKilled() {
-		return "", fmt.Errorf("session %q changed state before tab close could start", title)
-	}
-	// Re-check archived UNDER the lock, because the pointer check above cannot see
-	// an archive: ArchiveSession holds this same op-lock, commits LiveArchived, and
-	// leaves the SAME instance in m.instances (an archived row stays tracked — it is
-	// still listed and restorable). So a close that resolved a live session and then
-	// queued behind an archive arrives here with current == instance and
-	// UserKilled() false — both checks pass — and would delete the web tab the
-	// archive just preserved, then persist the loss. That is the #1809 URL loss
-	// exactly, reached through the race instead of through the front door.
-	if instance.IsArchived() {
-		return "", errCloseTabArchived(title)
-	}
-
-	// Serialize against other create/tab mutations on this repo, mirroring
-	// CreateTab, so the tab-list mutate+persist never interleaves with another
-	// save on the same repo.
-	repoStartLock := m.startLockForRepo(repoID)
-	repoStartLock.Lock()
-	defer repoStartLock.Unlock()
-
-	// Resolve the target tab. TabName takes precedence; otherwise TabIndex.
 	tabs := instance.GetTabs()
-	idx := req.TabIndex
-	name := req.TabName
-	if name != "" {
-		idx = -1
-		for i, tab := range tabs {
-			if tab.Name == name {
-				idx = i
-				break
-			}
-		}
-		if idx < 0 {
-			return "", fmt.Errorf("session %q has no tab named %q", title, name)
-		}
-	} else {
-		if idx < 0 || idx >= len(tabs) {
-			return "", fmt.Errorf("session %q has no tab at index %d", title, idx)
-		}
-		name = tabs[idx].Name
+	idx, name, err := resolveTabTarget(tabs, title, req.TabID, req.TabName, req.TabIndex)
+	if err != nil {
+		return "", err
 	}
 	if idx == 0 {
 		return "", fmt.Errorf("the agent tab of session %q can't be closed; kill the session instead", title)
@@ -294,6 +215,10 @@ func (m *Manager) CloseTab(req CloseTabRequest) (string, error) {
 	// daemon shutdown. (If the unpersisted close is undone by a restart, the tab
 	// comes back and lazily starts a fresh editor — nothing is lost by stopping.)
 	if closedVSCode {
+		// The same key tabMutationTarget took its op-lock on: a pure function of the
+		// RESOLVED repoID/title it returned, never the request's, so there is exactly
+		// one correct value to recompute here.
+		key := daemonInstanceKey(repoID, title)
 		defer func() {
 			if !instanceHasVSCodeTab(instance) {
 				m.vscode.stopFor(key)

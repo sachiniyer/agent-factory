@@ -5,6 +5,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/ui"
 	"github.com/sachiniyer/agent-factory/ui/layout"
 	"github.com/sachiniyer/agent-factory/ui/layout/zones"
@@ -42,8 +43,17 @@ const tabDragThresholdCells = 2
 type tabDragState struct {
 	title string
 	tab   int
-	label string
-	zone  string
+	// tabID is the grabbed tab's stable id (#1738) — the drag's real identity.
+	// tab rides along as the ordinal fallback for the windows where there is no id
+	// to key on; see dragTabIndex.
+	tabID string
+	// instance is the session pressed on, held ONLY to compare against the one the
+	// drop re-resolves by title — never dereferenced, so it may safely dangle. A
+	// same-title swap replaces the session between press and release, and that is
+	// what tells the id apart from a stale pointer: see dragTabIndex.
+	instance *session.Instance
+	label    string
+	zone     string
 
 	startX int
 	startY int
@@ -144,17 +154,63 @@ func (m *home) handleTabDragPress(msg tea.MouseMsg) bool {
 	if inst == nil || idx < 0 || idx >= len(tree.TabLabels(inst)) {
 		return false
 	}
+	tabID, _ := inst.TabIDAt(idx)
 	m.tabDrag = &tabDragState{
-		title:  title,
-		tab:    idx,
-		label:  paneBindingLabel(paneBinding{instance: inst, tab: idx}),
-		zone:   id,
-		startX: msg.X,
-		startY: msg.Y,
-		x:      msg.X,
-		y:      msg.Y,
+		title:    title,
+		tab:      idx,
+		tabID:    tabID,
+		instance: inst,
+		label:    paneBindingLabel(paneBinding{instance: inst, tab: idx}),
+		zone:     id,
+		startX:   msg.X,
+		startY:   msg.Y,
+		x:        msg.X,
+		y:        msg.Y,
 	}
 	return true
+}
+
+// dragTabIndex resolves the grabbed tab to its CURRENT slot. A drag captures its
+// target at press and acts on it at release — a human-time window in which
+// another client can permute the roster underneath the gesture. That window is
+// newly reachable: #1813 is what first lets an out-of-band reorder reach a
+// running TUI at all, and there is no TUI reorder gesture, so every reorder a
+// drag sees is out-of-band. Keyed by the captured ORDINAL, the drop opens
+// whatever slid into that slot while the drag ghost still renders the label of
+// the tab the user actually grabbed.
+//
+// Keyed by the tab's stable id (#1738), the drag follows its own tab wherever it
+// moved — the same identity the pane rebind and the tree's selection use, and the
+// other half of the instance-by-title re-resolution this gesture already does.
+//
+// An id that resolves to nothing within that session means the grabbed tab is
+// GONE (a concurrent close), and the answer is no target: falling back to the
+// ordinal there would act on a different tab under the guise of being helpful,
+// which is the exact failure this exists to prevent.
+//
+// The id is the identity only WITHIN the session that was pressed — the same
+// split tabIdentityDomain draws for the pane rebind. A same-title kill/recreate
+// (#765) can swap in an ENTIRELY NEW session mid-drag, whose tabs are freshly
+// minted, so every id differs by construction; keyed by id the drop would resolve
+// nothing and silently do away with the gesture. There the equivalent SLOT of the
+// replacement is the right target — the drop's pre-existing, tested behavior
+// (TestMouse_DragDropReresolvesInstanceAfterProjectionSwap), preserved by falling
+// through to the ordinal.
+//
+// The ordinal is likewise the key where there is simply no id to key on: an
+// AttachShellTab tab before the snapshot backfills the daemon's id, or a
+// pre-#1738 roster row. Both fall-throughs keep the caller's original range guard.
+func dragTabIndex(inst *session.Instance, drag *tabDragState) (int, bool) {
+	if inst == nil || drag == nil {
+		return 0, false
+	}
+	if drag.tabID != "" && inst == drag.instance {
+		return inst.TabIndexByID(drag.tabID)
+	}
+	if drag.tab < 0 || drag.tab >= len(tree.TabLabels(inst)) {
+		return 0, false
+	}
+	return drag.tab, true
 }
 
 func (m *home) handleTabDragMotion(msg tea.MouseMsg) bool {
@@ -186,7 +242,13 @@ func (m *home) handleTabDragRelease(msg tea.MouseMsg) (bool, tea.Cmd) {
 			m.lastClickZone = drag.zone
 			m.lastClickAt = now
 		}
-		return true, m.handleTreeTabClick(drag.title, drag.tab, double)
+		// A click is a short drag, so it carries the same staleness — the press
+		// captured the target and this release acts on it. Same identity rule.
+		idx, ok := dragTabIndex(m.store.GetInstanceByTitle(drag.title), drag)
+		if !ok {
+			return true, nil
+		}
+		return true, m.handleTreeTabClick(drag.title, idx, double)
 	}
 	drag = m.clearDragState()
 	region := m.tabDragDropRegion(msg.X, msg.Y)
@@ -224,12 +286,13 @@ func (m *home) dropTabOnPane(drag *tabDragState) tea.Cmd {
 		return nil
 	}
 	inst := m.store.GetInstanceByTitle(drag.title)
-	if inst == nil || drag.tab < 0 || drag.tab >= len(tree.TabLabels(inst)) {
+	idx, ok := dragTabIndex(inst, drag)
+	if !ok {
 		return nil
 	}
 	m.focusRegionClick(layout.RegionTree)
-	m.sidebar.SelectTabRow(drag.title, drag.tab)
-	_, openCmd := m.openOrFocusPane(inst, drag.tab)
+	m.sidebar.SelectTabRow(drag.title, idx)
+	_, openCmd := m.openOrFocusPane(inst, idx)
 	return openCmd
 }
 

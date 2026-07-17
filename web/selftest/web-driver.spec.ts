@@ -82,6 +82,17 @@ const VITE_ABS_TITLE = process.env.AF_VITE_ABS_TITLE ?? "AF_ABS_ASSET_EXECUTED";
 // test, so its close-a-tab assertions are independent of what an earlier test left
 // selected. See web-selftest-entry.sh for why that tab layout is load-bearing.
 const SESSION_MIS = process.env.AF_WEB_SESSION_MIS ?? "probe-misroute";
+// The dead-dev-server session (#1813): one web tab pointing at DEAD_PORT, which
+// NOTHING listens on. The daemon proxies it, gets ECONNREFUSED, and answers 502 with
+// the {data,error} envelope — the state the pane used to render as raw text.
+// NOT "probe-dead": the status-dot tests mock a rail row by that name, and row()
+// filters by substring, so a real session called that wedges them on two matches.
+const SESSION_DEAD = process.env.AF_WEB_SESSION_DEAD ?? "probe-noserver";
+const DEAD_PORT = process.env.AF_WEB_DEAD_PORT ?? "8892";
+// The rename/reorder session (#1813): tabs [agent, alpha(web), beta(process),
+// gamma(process)] in creation order. The tests below permute and rename these, so
+// they run in file order against the state the previous one left.
+const SESSION_ORDER = process.env.AF_WEB_SESSION_ORDER ?? "probe-order";
 
 /** A rail row by its session title. */
 function row(page: Page, title: string): Locator {
@@ -1275,25 +1286,24 @@ test("web tab (#1809 follow-up): an ARCHIVED session's preserved web tab is iner
   await expect(page.locator(".af-term-host")).not.toContainText(WEBTAB_LOCAL_MARKER);
   // The "open ↗" escape hatch is withdrawn too: it would only hit the refusing proxy.
   await expect(page.locator(".af-webpane-open:visible")).toHaveCount(0);
+  // ...as is ↻: an archived session is inert by design, so the frame is never
+  // pointed anywhere and there is nothing to refetch. Restoring the session is the
+  // real next step, which is what the placeholder above says.
+  await expect(
+    page.locator(".af-term-host .af-webpane-reload:visible"),
+    "an archived pane must not offer a ↻ that cannot reload",
+  ).toHaveCount(0);
 
   await resetFilter(page);
 });
 
-test("web tab (feat): an external URL is iframed directly and shows a fallback when embedding is blocked", async () => {
-  // Speed up the fallback timeout for a deterministic assertion, and make the
-  // external host HANG (intercept the request and never resolve it) so no load
-  // event ever arrives — the reliable "didn't load in time" signal the load-timeout
-  // detects. af never tries to defeat framing protections, so a fast-but-blocked
-  // (X-Frame-Options) load isn't auto-detected; the always-present "open ↗" link is
-  // the guaranteed escape hatch, asserted below.
-  await page.evaluate(() => {
-    (window as unknown as { __afWebtabFallbackMs: number }).__afWebtabFallbackMs = 400;
-  });
-  await page.route("**/blocked.example.test/**", () => {
-    // Intentionally never fulfill/abort: the iframe request hangs, so no load event
-    // fires and the fallback timeout wins.
-  });
-
+test("web tab (item A / Sachin): an external tab shows af's fallback + a working open link, NEVER the browser's raw refusal", async () => {
+  // The bug: an external site that sends X-Frame-Options renders the BROWSER'S OWN
+  // "refused to connect" page inside the iframe — and that block page FIRES the iframe
+  // `load` event, so the old onLoad hid the fallback and revealed the raw refusal. The
+  // frame's opaque origin is unreadable, so a working embed and a block page are
+  // indistinguishable, and only the refusal is forbidden. So af no longer frames an
+  // external target at all: the designed fallback is the whole surface.
   await row(page, SESSION_WEB).click();
   await expect(page.locator(".af-main.af-main-term")).toBeVisible();
   const tabbar = page.locator(".af-tabbar");
@@ -1301,20 +1311,40 @@ test("web tab (feat): an external URL is iframed directly and shows a fallback w
   await expect(externalTab).toHaveCount(1);
   await externalTab.click();
 
-  // The external tab iframes the URL DIRECTLY (not through the daemon proxy).
-  const frame = page.locator(".af-term-host .af-pane-host iframe.af-webframe");
-  await expect(frame).toHaveCount(1, { timeout: 15_000 });
-  await expect(frame).toHaveAttribute("src", WEBTAB_EXTERNAL_URL);
-  // The always-present escape hatch: an "open in a new tab" link at the external URL.
-  await expect(page.locator("a.af-webpane-open")).toHaveAttribute("href", WEBTAB_EXTERNAL_URL);
-
-  // A site that doesn't load in time surfaces the clean fallback with its own
-  // open-in-new-tab link.
-  const fallback = page.locator(".af-webpane-fallback");
-  await expect(fallback).toBeVisible({ timeout: 10_000 });
+  // af's calm fallback is the persistent, primary state — shown at once, not after a
+  // timeout, and not gated on any load.
+  const fallback = page.locator(".af-term-host .af-webpane-fallback.af-webpane-external");
+  await expect(fallback).toBeVisible({ timeout: 15_000 });
+  await expect(fallback).toContainText("This site may block embedding.");
+  // ...with a WORKING open link at the external URL (the fallback's own, and the bar's).
   await expect(fallback.locator("a.af-webpane-fallback-link")).toHaveAttribute("href", WEBTAB_EXTERNAL_URL);
+  await expect(page.locator("a.af-webpane-open")).toHaveAttribute("href", WEBTAB_EXTERNAL_URL);
+  await expect(page.locator("a.af-webpane-open")).toBeVisible();
 
-  await page.unroute("**/blocked.example.test/**");
+  // ...and NO ↻, because this pane has nothing it could reload. The frame is never
+  // navigated here by design, so pressing it re-ran load() straight back onto this
+  // same card: no fetch, no navigation, no change, no explanation — a control that is
+  // present and does nothing, which reads as af being broken and offers no next step.
+  // The working escape is the open link asserted just above; that is the whole point
+  // of withdrawing this one rather than leaving it to be discovered as inert.
+  await expect(
+    page.locator(".af-term-host .af-webpane-reload:visible"),
+    "an external pane must not offer a ↻ that cannot reload",
+  ).toHaveCount(0);
+
+  // The frame is never pointed at the target — so the browser can never render a
+  // refusal page in it. This is the structural guarantee: no src, no navigation, no
+  // raw refusal possible, no request made to the external host at all.
+  const frame = page.locator(".af-term-host .af-pane-host iframe.af-webframe");
+  await expect(frame).toBeHidden();
+  expect(await frame.getAttribute("src"), "an external frame must never be navigated").toBeNull();
+
+  // The regression itself: a block page fires `load`. Dispatch one and prove it can no
+  // longer reveal the frame — there is no onLoad left to un-hide the fallback.
+  await frame.dispatchEvent("load");
+  await expect(fallback, "a synthetic load must not reveal a bare frame").toBeVisible();
+  await expect(frame).toBeHidden();
+  expect(await frame.getAttribute("src")).toBeNull();
 });
 
 test("web tab (feat): a tab with no target URL renders a clean fallback, not a blank pane", async () => {
@@ -1347,6 +1377,13 @@ test("web tab (feat): a tab with no target URL renders a clean fallback, not a b
   // [hidden] override in styles.css. Without that this link renders and goes nowhere
   // (the state #1827's voice polish silently left it in until #1809 caught it).
   await expect(page.locator(".af-webpane-open:visible")).toHaveCount(0);
+  // ↻ is withdrawn for the same reason and with the same CSS caveat: with no target
+  // there is nothing to reload, and this branch returns before the click listener is
+  // even attached — so the button was not merely useless, it was unwired.
+  await expect(
+    page.locator(".af-term-host .af-webpane-reload:visible"),
+    "a URL-less pane must not offer a ↻ that cannot reload",
+  ).toHaveCount(0);
 });
 
 test("split panes (fix): a WEB/iframe pane doesn't swallow a tab drag — dropping on its edge splits", async () => {
@@ -1513,10 +1550,16 @@ test("web tab (feat): a surviving web tab that only SHIFTS ordinal is followed, 
   await tabbar.locator(".af-tab", { hasText: "external" }).click();
   const frame = page.locator(".af-term-host .af-pane-host iframe.af-webframe");
   await expect(frame).toHaveCount(1, { timeout: 15_000 });
-  await expect(frame).toHaveAttribute("src", WEBTAB_EXTERNAL_URL);
+  // An external tab is now frameless (item A): its pane shows af's fallback, not the
+  // site. But the no-remount property this test turns on is unchanged — the iframe
+  // ELEMENT still lives in the pane (hidden, no src), so stamping it and watching the
+  // stamp survive an ordinal shift proves the pane was FOLLOWED, not rebuilt, exactly
+  // as before. The external fallback's presence is what marks it as the external tab.
+  const externalFallback = page.locator(".af-term-host .af-webpane-fallback.af-webpane-external");
+  await expect(externalFallback).toBeVisible();
 
-  // Stamp the live iframe. An expando rides the DOM node itself, so it survives if and
-  // only if this exact element is still mounted — a remount builds a fresh one.
+  // Stamp the iframe element. An expando rides the DOM node itself, so it survives if
+  // and only if this exact element is still mounted — a remount builds a fresh one.
   await page.evaluate(() => {
     const f = document.querySelector(".af-term-host .af-pane-host iframe.af-webframe") as
       | (HTMLIFrameElement & { __afStamp?: string })
@@ -1542,7 +1585,7 @@ test("web tab (feat): a surviving web tab that only SHIFTS ordinal is followed, 
 
   // The pane still shows the SAME tab, through the SAME iframe element.
   await expect(frame).toHaveCount(1);
-  await expect(frame).toHaveAttribute("src", WEBTAB_EXTERNAL_URL);
+  await expect(externalFallback).toBeVisible();
   const stamp = await page.evaluate(() => {
     const f = document.querySelector(".af-term-host .af-pane-host iframe.af-webframe") as
       | (HTMLIFrameElement & { __afStamp?: string })
@@ -1577,10 +1620,12 @@ test("tabs (#1855): re-selecting the SAME session leaves the bar on the tab the 
   await expect(frame).toHaveCount(1, { timeout: 15_000 });
 
   // Click the row that is already selected. The pane is untouched (same session, same
-  // tree) — so the bar must still name the tab it is showing.
+  // tree) — so the bar must still name the tab it is showing. External tabs are
+  // frameless (item A), so the external fallback's presence is the "pane still shows
+  // external" signal, and the active label is the bar's claim under test.
   await row(page, SESSION_WEB).click();
   await expect(frame).toHaveCount(1);
-  await expect(frame).toHaveAttribute("src", WEBTAB_EXTERNAL_URL);
+  await expect(page.locator(".af-term-host .af-webpane-fallback.af-webpane-external")).toBeVisible();
   await expect(page.locator(".af-tab.af-tab-active .af-tab-label")).toHaveText("external");
 });
 
@@ -1626,9 +1671,10 @@ test("tabs (#1855): switching away and back keeps activeTab on the visible pane 
   await expect(page.locator(".af-tab.af-tab-active .af-tab-label")).toHaveText("Terminal");
 
   // Back to probe-web: the retained pane still shows "external", so the bar must too.
+  // External is frameless (item A); the external fallback marks the shown tab.
   await row(page, SESSION_WEB).click();
   await expect(frame).toHaveCount(1, { timeout: 15_000 });
-  await expect(frame).toHaveAttribute("src", WEBTAB_EXTERNAL_URL);
+  await expect(page.locator(".af-term-host .af-webpane-fallback.af-webpane-external")).toBeVisible();
   await expect(page.locator(".af-tab.af-tab-active .af-tab-label")).toHaveText("external");
 
   // Closing an UNRELATED tab (the throwaway, to the RIGHT of the active one) leaves the
@@ -3575,3 +3621,1157 @@ test("vscode tab (feat): the ▾ menu creates a VS Code tab and the daemon serve
   await expect(menu).toBeHidden();
 });
 
+// ===========================================================================
+// #1813 — the tab UX pass: real pane labels, a designed dead-server state,
+// rename, and reorder. Each of the four was an observation from the same
+// exploratory play-test, and each is asserted here against the real daemon.
+// ===========================================================================
+
+/** A tab-bar tab by its EXACT label, anchored so "storefront" never also matches
+ *  "storefront-2" — which the dup-suffix test below deliberately creates. */
+function tabByLabel(page: Page, label: string): Locator {
+  return page
+    .locator(".af-tabbar .af-tab")
+    .filter({ has: page.locator(".af-tab-label", { hasText: new RegExp(`^${label}$`) }) });
+}
+
+/** The tab bar's labels, left to right — the order a reorder permutes. */
+function tabLabels(page: Page): Promise<string[]> {
+  return page.locator(".af-tabbar .af-tab .af-tab-label").allTextContents();
+}
+
+/** Drives the bar's inline rename end to end: double-click the tab, replace the
+ *  text, commit with Enter. Returns once the edit input is gone. */
+async function renameTabViaUI(page: Page, label: string, newName: string): Promise<void> {
+  await tabByLabel(page, label).dblclick();
+  const input = page.locator(".af-tabbar .af-tab-edit");
+  await expect(input, "a double-click on a renameable tab must open an inline edit").toBeVisible();
+  await input.fill(newName);
+  await input.press("Enter");
+  await expect(input).toHaveCount(0);
+}
+
+/**
+ * Simulates dragging the tab labelled `label` to a drop point WITHIN THE TAB BAR —
+ * the reorder gesture, as opposed to dragTabToPane's drag-to-split.
+ *
+ * Same synthetic-DnD approach and same reason as dragTabToPane (Playwright's
+ * mouse-based dragTo doesn't drive HTML5 drag-and-drop reliably): one shared
+ * DataTransfer across dragstart/dragover/drop, so the real delegated listeners stamp
+ * and read the payload exactly as a genuine drag would.
+ *
+ * The events are dispatched ON THE TARGET TAB and left to bubble to the bar, which is
+ * where the handlers live — the same path a real drag takes — rather than fired at the
+ * bar directly. The aim point is `side` of the target tab's CENTRE, because the centre
+ * is what the insertion math resolves against (tabreorder.ts insertionIndexAt).
+ *
+ * Returns what the bar showed and whether it accepted the drop, so a test can assert
+ * the REFUSAL of a drag (the pinned agent tab) rather than only its acceptance:
+ * dragover going unprevented is precisely "this is not a drop target".
+ */
+async function dragTabWithinBar(
+  page: Page,
+  label: string,
+  targetLabel: string,
+  side: "before" | "after",
+): Promise<{ markerShown: boolean; dropAllowed: boolean }> {
+  return await page.evaluate(
+    ({ label, targetLabel, side }) => {
+      const byLabel = (want: string): Element | undefined =>
+        [...document.querySelectorAll(".af-tabbar .af-tab")].find(
+          (t) => t.querySelector(".af-tab-label")?.textContent === want,
+        );
+      const tab = byLabel(label);
+      const target = byLabel(targetLabel);
+      const marker = document.querySelector<HTMLElement>(".af-tab-insert");
+      if (!tab || !target || !marker) {
+        throw new Error(`drag source ${label} / target ${targetLabel} / marker not found`);
+      }
+      const dt = new DataTransfer();
+      // The real delegated dragstart stamps the payload AND records the source index
+      // the bar's dragover consults to refuse the pinned agent tab.
+      tab.dispatchEvent(new DragEvent("dragstart", { bubbles: true, cancelable: true, dataTransfer: dt }));
+
+      const r = target.getBoundingClientRect();
+      // Just inside the target's far/near edge — unambiguously past / before its
+      // centre, which is the gap the insertion math resolves to.
+      const x = side === "after" ? r.right - 2 : r.left + 2;
+      const y = r.top + r.height / 2;
+      const init = { bubbles: true, cancelable: true, dataTransfer: dt, clientX: x, clientY: y };
+      target.dispatchEvent(new DragEvent("dragenter", init));
+      const over = new DragEvent("dragover", init);
+      target.dispatchEvent(over);
+      // preventDefault on dragover IS the "I accept a drop here" signal; without it a
+      // real browser fires no drop at all, which is how the agent tab is refused.
+      const dropAllowed = over.defaultPrevented;
+      const markerShown = !marker.hidden;
+      if (dropAllowed) {
+        target.dispatchEvent(new DragEvent("drop", init));
+      }
+      tab.dispatchEvent(new DragEvent("dragend", { bubbles: true, dataTransfer: dt }));
+      return { markerShown, dropAllowed };
+    },
+    { label, targetLabel, side },
+  );
+}
+
+test("#1813: a pane header names its TAB — glyph + name — not a positional 'Tab N'", async () => {
+  // The bug: every pane header read `Tab ${leaf.tab + 1}`, so at the exact moment the
+  // label matters — several panes open, which is the whole point of splits — it told
+  // you nothing, and it silently meant a different tab after a close.
+  await row(page, SESSION_ORDER).click();
+  await expect(page.locator(".af-main.af-main-term")).toBeVisible();
+  await expect(tabByLabel(page, "alpha")).toHaveCount(1, { timeout: 15_000 });
+
+  // Two panes: the agent tab and the web tab beside it.
+  await dragTabToPane(page, "alpha", "right");
+  await expect(page.locator(".af-term-host .af-pane")).toHaveCount(2);
+
+  // Each header names its own tab, in pane order.
+  await expect(page.locator(".af-term-host .af-pane-label")).toHaveText(["Agent", "alpha"]);
+  // ...with the kind glyph beside it, the same mark the tab bar draws (ui/tree/labels.go).
+  await expect(page.locator(".af-term-host .af-pane-glyph")).toHaveText(["◆", "◱"]);
+  // The positional label is GONE — the assertion that would have failed before #1813.
+  // Scoped to the pane host, which holds the panes and nothing else (the tab bar is
+  // its sibling), and asserted on that single container rather than on the two
+  // .af-pane-head nodes, which a negative match can't address without strict mode.
+  await expect(page.locator(".af-term-host")).not.toContainText("Tab 1");
+  await expect(page.locator(".af-term-host")).not.toContainText("Tab 2");
+
+  // The tab bar carries the same glyphs, so the two surfaces agree.
+  await expect(tabByLabel(page, "alpha").locator(".af-tab-glyph")).toHaveText("◱");
+  await expect(tabByLabel(page, "Agent").locator(".af-tab-glyph")).toHaveText("◆");
+  await expect(tabByLabel(page, "beta").locator(".af-tab-glyph")).toHaveText("›");
+});
+
+test("#1813: dragging a tab within the bar reorders it, and the order survives a reload", async () => {
+  // Reordering is a drag over the BAR; splitting is a drag over a PANE. Same payload,
+  // disjoint drop regions — this asserts the bar half exists at all, which it did not
+  // before #1813 (the strip had dragstart but no dragover/drop).
+  await row(page, SESSION_ORDER).click();
+  expect(await tabLabels(page)).toEqual(["Agent", "alpha", "beta", "gamma"]);
+
+  // Move gamma up in front of beta.
+  const res = await dragTabWithinBar(page, "gamma", "beta", "before");
+  expect(res.dropAllowed, "the bar must accept a reorder drop").toBe(true);
+  expect(res.markerShown, "an insertion indicator must show where the drop lands").toBe(true);
+  await expect(page.locator(".af-tabbar .af-tab .af-tab-label")).toHaveText(["Agent", "alpha", "gamma", "beta"]);
+
+  // The daemon persisted it: a reload re-reads the roster from the Snapshot, so the
+  // new order surviving proves it is real state and not a local DOM shuffle.
+  await page.reload();
+  await row(page, SESSION_ORDER).click();
+  await expect(page.locator(".af-tabbar .af-tab .af-tab-label")).toHaveText(["Agent", "alpha", "gamma", "beta"], {
+    timeout: 15_000,
+  });
+});
+
+test("#1813: a reorder does not misroute an OPEN pane — panes are pinned by tab id", async () => {
+  // The #1810 guarantee, now reachable from the client for the first time: before
+  // #1813 no client could produce a reorder at all, so the id-keyed pane binding had
+  // never actually been driven by one. Moving a tab must move the PANE's tab with it,
+  // never rebind the pane to whoever takes the vacated ordinal.
+  await row(page, SESSION_ORDER).click();
+  await dragTabToPane(page, "alpha", "right");
+  await expect(page.locator(".af-term-host .af-pane")).toHaveCount(2);
+
+  const frame = page.locator(".af-term-host .af-pane-host iframe.af-webframe");
+  await expect(frame).toHaveCount(1, { timeout: 15_000 });
+  await expect(page.frameLocator(".af-webframe").locator("#marker")).toHaveText(WEBTAB_LOCAL_MARKER, {
+    timeout: 15_000,
+  });
+  const srcBefore = await frame.getAttribute("src");
+
+  // Move alpha from index 1 to the end: its ORDINAL changes, which is exactly the
+  // condition an ordinal-keyed pane would misroute on.
+  const res = await dragTabWithinBar(page, "alpha", "beta", "after");
+  expect(res.dropAllowed).toBe(true);
+  await expect(page.locator(".af-tabbar .af-tab .af-tab-label")).toHaveText(["Agent", "gamma", "beta", "alpha"]);
+
+  // The pane still shows ALPHA's own dev server...
+  await expect(page.locator(".af-term-host .af-pane-label")).toHaveText(["Agent", "alpha"]);
+  await expect(page.frameLocator(".af-webframe").locator("#marker")).toHaveText(WEBTAB_LOCAL_MARKER, {
+    timeout: 15_000,
+  });
+  // ...addressed by the SAME stable tab id as before the move. The src is id-keyed
+  // (#1810), so an unchanged src is the proof the pane followed its tab rather than
+  // being rebound to the tab that took index 1.
+  expect(await frame.getAttribute("src"), "the pane must still address alpha's own tab id").toBe(srcBefore);
+});
+
+test("#1813: the agent tab can't be reordered, but still drags onto a pane to split", async () => {
+  // Go's Tabs[0] is a load-bearing invariant (archive teardown and the agent's own
+  // conversation/tmux all index it), so the daemon refuses to move it or to move
+  // anything in front of it. The bar refuses up front — but it must refuse ONLY the
+  // reorder: dragging the agent tab into a pane is the oldest gesture this feature
+  // has, and pinning the tab at the DROP rather than at the source is what keeps it.
+  await row(page, SESSION_ORDER).click();
+  const before = await tabLabels(page);
+
+  // Refused over the bar: no drop target, no indicator, no request.
+  const onBar = await dragTabWithinBar(page, "Agent", "gamma", "after");
+  expect(onBar.dropAllowed, "the bar must not accept the pinned agent tab").toBe(false);
+  expect(onBar.markerShown, "no insertion indicator for a drop that cannot happen").toBe(false);
+  expect(await tabLabels(page), "the roster must be untouched").toEqual(before);
+
+  // ...and nothing may drop in FRONT of it either: aim at the agent tab's left half
+  // with a movable tab, and the drop resolves to the gap AFTER the agent tab rather
+  // than to index 0. Asserted through a retrying locator, not a tabLabels() snapshot:
+  // the drop fires an RPC + resync, so a point-read races the repaint.
+  const inFront = await dragTabWithinBar(page, "beta", "Agent", "before");
+  expect(inFront.dropAllowed).toBe(true);
+  await expect(
+    page.locator(".af-tabbar .af-tab .af-tab-label"),
+    "beta lands just AFTER the pinned agent tab, never in front of it",
+  ).toHaveText(["Agent", "beta", "gamma", "alpha"]);
+
+  // The split gesture still works for the agent tab — the regression this guards, and
+  // the reason the tab stays draggable and is pinned at the DROP instead.
+  //
+  // Reload first, for a single-pane layout (the retained trees are in-memory). Both
+  // ends of that matter: dragging the agent tab onto a pane it ALREADY occupies is a
+  // no-op under the one-tab-one-pane rule, and starting from two panes would end at
+  // two panes whether or not the drag did anything — so neither would fail if the tab
+  // were undraggable. Point the single pane at another tab first, then drag the agent
+  // tab in beside it: 1 → 2 panes is the assertion that can actually fail.
+  await page.reload();
+  await row(page, SESSION_ORDER).click();
+  await expect(page.locator(".af-term-host .af-pane")).toHaveCount(1, { timeout: 15_000 });
+  await tabByLabel(page, "alpha").click();
+  await dragTabToPane(page, "Agent", "right");
+  await expect(page.locator(".af-term-host .af-pane")).toHaveCount(2);
+  await expect(page.locator(".af-term-host .af-pane-label")).toHaveText(["alpha", "Agent"]);
+});
+
+test("#1813: renaming from the UI repaints the tab bar AND an open pane, live", async () => {
+  await row(page, SESSION_ORDER).click();
+  // Put alpha in its own pane, so the rename has an open pane header to repaint —
+  // the case reconcile() used to miss entirely (it set a pane's label only when the
+  // pane was created or rebound, and a rename does neither).
+  await dragTabToPane(page, "alpha", "right");
+  await expect(page.locator(".af-term-host .af-pane-label")).toContainText(["alpha"]);
+
+  await renameTabViaUI(page, "alpha", "storefront");
+
+  // The bar renames...
+  await expect(tabByLabel(page, "storefront")).toHaveCount(1, { timeout: 15_000 });
+  await expect(tabByLabel(page, "alpha")).toHaveCount(0);
+  // ...and so does the OPEN pane's header, without a reload and without the pane's
+  // iframe being torn down (a rename changes no address, so the live preview stays).
+  await expect(page.locator(".af-term-host .af-pane-label")).toContainText(["storefront"], { timeout: 15_000 });
+  await expect(page.frameLocator(".af-webframe").locator("#marker")).toHaveText(WEBTAB_LOCAL_MARKER);
+});
+
+test("#1813: the daemon's RESOLVED name is rendered, not the one that was typed", async () => {
+  // The daemon applies the same sanitize + dup-suffix rules a create goes through, so
+  // what a user types and what the tab is called are different strings. Renaming beta
+  // to a name that is already taken must land as "storefront-2" — rendering the typed
+  // string would show two identical tabs and silently disagree with the daemon.
+  await row(page, SESSION_ORDER).click();
+  await renameTabViaUI(page, "beta", "storefront");
+
+  await expect(tabByLabel(page, "storefront-2"), "the dup-suffixed name the daemon returned").toHaveCount(1, {
+    timeout: 15_000,
+  });
+  // Exactly one tab is called "storefront" — the original.
+  await expect(tabByLabel(page, "storefront")).toHaveCount(1);
+  await expect(tabByLabel(page, "beta")).toHaveCount(0);
+});
+
+test("#1813: Escape cancels a rename, and an agent tab offers no rename at all", async () => {
+  await row(page, SESSION_ORDER).click();
+
+  // Escape abandons the edit — and the blur it causes must not commit it instead.
+  await tabByLabel(page, "gamma").dblclick();
+  const input = page.locator(".af-tabbar .af-tab-edit");
+  await expect(input).toBeVisible();
+  await input.fill("thrown-away");
+  await input.press("Escape");
+  await expect(input).toHaveCount(0);
+  await expect(tabByLabel(page, "gamma"), "Escape must leave the name alone").toHaveCount(1);
+  await expect(tabByLabel(page, "thrown-away")).toHaveCount(0);
+
+  // The agent tab renders a FIXED label and ignores its name (ui/tree/labels.go), so
+  // renaming it would change nothing visible — the daemon refuses, and the affordance
+  // is never offered rather than being offered and failing.
+  await tabByLabel(page, "Agent").dblclick();
+  await expect(page.locator(".af-tabbar .af-tab-edit"), "no rename affordance on the agent tab").toHaveCount(0);
+});
+
+test("#1813 (#1812 path): a CLI rename reaches a SECOND open window with no reload", async ({ browser }) => {
+  // The event half: a rename is published as session.updated, so a window that did
+  // not make the change still repaints. This is the shape a real user hits — an agent
+  // renames a tab from inside its own session while the browser sits open.
+  const afBin = process.env.AF_BIN;
+  const mockRepo = process.env.AF_MOCK_REPO;
+  test.skip(!afBin || !mockRepo, "AF_BIN/AF_MOCK_REPO are set only by web-selftest-entry.sh");
+  const { execFileSync } = await import("node:child_process");
+  const af = (...args: string[]): void => {
+    execFileSync(afBin as string, ["--repo", mockRepo as string, ...args], { stdio: "pipe" });
+  };
+
+  // A genuinely separate window, not a second tab of the same page.
+  const ctx = await browser.newContext();
+  const second = await ctx.newPage();
+  try {
+    await openTokenless(second);
+    await row(second, SESSION_ORDER).click();
+    await expect(tabByLabel(second, "gamma")).toHaveCount(1, { timeout: 15_000 });
+
+    // Stamp the live document: a reload wipes this, so asserting it survives is what
+    // makes "with no reload" a claim rather than an assumption.
+    await second.evaluate(() => {
+      (window as Window & { __af1813?: boolean }).__af1813 = true;
+    });
+
+    af("sessions", "tab-rename", SESSION_ORDER, "--name", "gamma", "--new-name", "renamed-by-cli");
+
+    await expect(tabByLabel(second, "renamed-by-cli"), "a CLI rename must reach an open window").toHaveCount(1, {
+      timeout: 15_000,
+    });
+    await expect(tabByLabel(second, "gamma")).toHaveCount(0);
+    expect(
+      await second.evaluate(() => (window as Window & { __af1813?: boolean }).__af1813 === true),
+      "the rename must arrive on the LIVE page, not via a reload",
+    ).toBe(true);
+  } finally {
+    await second.close();
+    await ctx.close();
+  }
+});
+
+test("#1813: a roster change mid-edit renames the EDITED tab, not whatever slid into its slot", async () => {
+  // The stale-ordinal bug, driven through the path that makes it ordinary rather than
+  // rare. An inline edit captured the ordinal it was opened at and dereferenced it at
+  // COMMIT — against a roster that another client may have permuted meanwhile. What
+  // makes that reachable is not a narrow race: the session.updated serving the change
+  // repaints the bar, the repaint evicts the focused input, and evicting a focused
+  // input FIRES ITS BLUR — which is itself the commit. So the roster change and the
+  // commit are the same event, and the tab that slid into the slot got renamed.
+  const afBin = process.env.AF_BIN;
+  const mockRepo = process.env.AF_MOCK_REPO;
+  test.skip(!afBin || !mockRepo, "AF_BIN/AF_MOCK_REPO are set only by web-selftest-entry.sh");
+  const { execFileSync } = await import("node:child_process");
+  const af = (...args: string[]): void => {
+    execFileSync(afBin as string, ["--repo", mockRepo as string, ...args], { stdio: "pipe" });
+  };
+  const EDITED_TO = "edited-tab-wins";
+
+  await row(page, SESSION_ORDER).click();
+  // Assert the roster this needs rather than inherit it (see resetToAgentTab): the
+  // slots are load-bearing here, and reading the names keeps the test honest if an
+  // earlier one renames them.
+  await expect(page.locator(".af-tabbar .af-tab"), "the four-tab roster this permutes").toHaveCount(4, {
+    timeout: 15_000,
+  });
+  const [, pinned, edited, mover] = await tabLabels(page);
+
+  // Open an edit on slot 2 and type a name — WITHOUT committing it. The input stays
+  // focused, which is what makes the repaint below blur it.
+  await tabByLabel(page, edited).dblclick();
+  const input = page.locator(".af-tabbar .af-tab-edit");
+  await expect(input, "a double-click on a renameable tab must open an inline edit").toBeVisible();
+  await input.fill(EDITED_TO);
+
+  // The SECOND defect on this path, which the assertions below cannot see because it
+  // heals itself. Chromium fires a focused node's blur while it is still CONNECTED, so
+  // an input evicted by the bar's replaceChildren() runs its handler — and that
+  // handler's own input.replaceWith(btn) mutates the very child list replaceChildren is
+  // walking, which throws NotFoundError and aborts the repaint half-built. The bar is
+  // left holding a partial tab list, and renderTabBar's signature is never updated. It
+  // survives only because the rename's own resync repaints it a moment later, so the
+  // bar below converges and every text assertion passes either way; the throw is the
+  // one durable trace. renderTabBar settles an open edit through its own blur path
+  // BEFORE rebuilding (settleTabEdit), so the commit is identical but the child list is
+  // quiescent. Collected from here — the reorder is what triggers the repaint.
+  const pageErrors: string[] = [];
+  page.on("pageerror", (e) => pageErrors.push(e.message));
+
+  // Another client moves `mover` INTO the edited tab's slot. `edited` shifts right.
+  af("sessions", "tab-reorder", SESSION_ORDER, "--name", mover, "--index", "2");
+
+  // The commit lands on the tab whose input was edited, wherever it now sits — and the
+  // tab that took its slot keeps its name. Asserted as the whole bar, left to right, so
+  // it pins the pairing of name to POSITION: renaming the right tab but drawing it in
+  // the wrong slot, or renaming `mover` (the bug: it now occupies the captured ordinal),
+  // both fail here. Under the bug this read [Agent, pinned, EDITED_TO, edited].
+  await expect(page.locator(".af-tabbar .af-tab .af-tab-label")).toHaveText(["Agent", pinned, mover, EDITED_TO], {
+    timeout: 15_000,
+  });
+  await expect(input, "the edit is settled by the repaint, not left orphaned in the bar").toHaveCount(0);
+  expect(pageErrors, "the repaint that ends an edit must not throw — see settleTabEdit").toEqual([]);
+  // Nothing was renamed twice: exactly one tab answers to the typed name.
+  await expect(tabByLabel(page, EDITED_TO)).toHaveCount(1);
+});
+
+test("#1813: a close+recreate of the same name mid-edit renames NOTHING — never the replacement", async ({
+  browser,
+}) => {
+  // The same class as the spec above, one layer in from the ordinal. Keying the commit
+  // on an identity fixes the reorder — but only if the identity is the one the user
+  // OPENED the edit on. Re-reading it at commit asks a different question ("who is at
+  // this position NOW?"), and tabBarSig covers only what the bar DRAWS (kind/name/
+  // active/shown), so a close plus a recreate of the SAME name in the same slot is
+  // signature-identical: the bar is never rebuilt, the input survives, and the
+  // per-snapshot identity cache underneath it has been restamped with the REPLACEMENT's
+  // id. The commit then lands on a tab the user never edited.
+  //
+  // The snapshot gap that fuses the two is DESIGNED, not exotic: events published while
+  // the socket is down are dropped rather than replayed, so the reconnect's single
+  // re-Snapshot (events.ts) is exactly where a close and a recreate arrive as one roster
+  // change. This test opens that gap the way an outage does — it blocks the events
+  // endpoint and drops the live socket — because the fusion is the whole point:
+  // delivered as two live events the close and the recreate would each repaint the bar
+  // and settle the edit early, which is the path the spec above already covers.
+  const afBin = process.env.AF_BIN;
+  const mockRepo = process.env.AF_MOCK_REPO;
+  test.skip(!afBin || !mockRepo, "AF_BIN/AF_MOCK_REPO are set only by web-selftest-entry.sh");
+  const { execFileSync } = await import("node:child_process");
+  const af = (...args: string[]): void => {
+    execFileSync(afBin as string, ["--repo", mockRepo as string, ...args], { stdio: "pipe" });
+  };
+  const VICTIM = "victim-of-recreate";
+  const TYPED = "typed-into-a-dead-tab";
+
+  // Driven in its OWN window: the gap is opened by holding this client's event stream
+  // DOWN, and the shared `page` must not inherit that — a socket left blocked by a
+  // failing assertion would fail every spec after this one rather than just this one.
+  const ctx = await browser.newContext();
+  const win = await ctx.newPage();
+  try {
+    // A handle on the SPA's event socket, so the test can drop it. Recording only — the
+    // constructor is not otherwise altered, so the app connects exactly as it always
+    // does. Needed because closing the LIVE socket is the one thing network emulation
+    // will not do for us: going offline blocks new traffic but leaves an established
+    // WebSocket open, so the client never notices, never reconnects, and never
+    // re-Snapshots (measured — the first cut of this test timed out waiting for it).
+    await win.addInitScript(() => {
+      const w = window as unknown as { __afEventSockets: WebSocket[] };
+      w.__afEventSockets = [];
+      const Native = WebSocket;
+      window.WebSocket = new Proxy(Native, {
+        construct(target, args: [string, (string | string[])?]) {
+          const ws = new target(...args);
+          if (String(args[0]).includes("/v1/events")) {
+            w.__afEventSockets.push(ws);
+          }
+          return ws;
+        },
+      });
+    });
+    // Block the events endpoint at the NETWORK layer, so every reconnect ATTEMPT fails
+    // for as long as the flag is set. Together with the close below this reproduces a
+    // real outage: the socket drops, retries fail, and the events published meanwhile
+    // are dropped by the daemon's hub rather than queued (events.ts) — which is exactly
+    // why the reconnect must re-Snapshot, and why that one Snapshot carries a close and
+    // a recreate FUSED into a single roster change.
+    const cdp = await ctx.newCDPSession(win);
+    await cdp.send("Network.enable");
+
+    await openTokenless(win);
+    await row(win, SESSION_ORDER).click();
+    await expect(win.locator(".af-tabbar .af-tab")).toHaveCount(4, { timeout: 15_000 });
+    // A tab of this test's OWN, appended LAST: a recreate appends, so closing and
+    // recreating the last tab restores the roster exactly — same kinds, same names, same
+    // order — which is what makes the signature identical and the bar hold still. Owning
+    // it also keeps this test independent of whatever the specs above renamed.
+    af("sessions", "tab-create", SESSION_ORDER, "--command", "sleep 300", "--name", VICTIM);
+    await expect(tabByLabel(win, VICTIM)).toHaveCount(1, { timeout: 15_000 });
+    const roster = await tabLabels(win);
+    // The bar WHILE the edit is open: the input REPLACES the edited tab's button, so
+    // that tab draws no label until the edit is settled.
+    const editing = roster.filter((label) => label !== VICTIM);
+
+    // Open an edit on it and type a new name, WITHOUT committing.
+    await tabByLabel(win, VICTIM).dblclick();
+    const input = win.locator(".af-tabbar .af-tab-edit");
+    await expect(input, "a double-click on a renameable tab must open an inline edit").toBeVisible();
+    await input.fill(TYPED);
+
+    // The gap: retries are refused, then the live socket is dropped. Neither the close
+    // nor the recreate below is delivered as an event — delivered live they would each
+    // repaint the bar and settle the edit early, which is the (already-covered) path
+    // above, not this one.
+    await cdp.send("Network.setBlockedURLs", { urls: ["*/v1/events*"] });
+    await win.evaluate(() => {
+      const w = window as unknown as { __afEventSockets: WebSocket[] };
+      for (const ws of w.__afEventSockets) {
+        ws.close();
+      }
+    });
+    af("sessions", "tab-delete", SESSION_ORDER, "--name", VICTIM);
+    af("sessions", "tab-create", SESSION_ORDER, "--command", "sleep 300", "--name", VICTIM);
+
+    // Unblocked: the next retry opens, and an open re-Snapshots. THAT single roster change
+    // carries both. Waited on explicitly, because committing before it lands would make
+    // the assertions below pass against the bug too — the commit would then miss on an id
+    // that simply has not been replaced yet, which is the one way this test could rot
+    // into proving nothing.
+    const resync = win.waitForResponse((r) => r.url().includes("/v1/Snapshot") && r.status() === 200, {
+      timeout: 30_000,
+    });
+    await cdp.send("Network.setBlockedURLs", { urls: [] });
+    await resync;
+    // ...and the fetch's own promise chain (body read → store.set → update) has run, so
+    // the identity cache really does hold the replacement by the time Enter commits.
+    await win.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(() => r(null)))));
+
+    // The bar held still across all of it — the precondition the bug needs, asserted
+    // rather than assumed: had the roster change repainted, the input would be gone and
+    // this test would be exercising the (already-covered) settle path instead of this one.
+    await expect(input, "a same-name close+recreate must be invisible to tabBarSig").toBeVisible();
+    await expect(win.locator(".af-tabbar .af-tab .af-tab-label")).toHaveText(editing);
+
+    await input.press("Enter");
+    await expect(input).toHaveCount(0);
+
+    // The miss is REPORTED — and this assertion comes FIRST because it is the only one
+    // here that is deterministic. Resolving the miss is synchronous (no request is made
+    // at all), so the toast is up within a frame of Enter; a regression that renamed the
+    // replacement instead would issue a request, succeed, and never raise it, failing
+    // here rather than racing. The two assertions below are the user-visible outcome,
+    // but on their own they would also pass against the bug simply by being evaluated
+    // before its rename round-tripped — see the note above about proving nothing.
+    await expect(win.locator(".af-toast"), "an unresolvable rename must say so").toContainText("nothing was renamed");
+    // NOTHING was renamed: no tab answers to what was typed, and the replacement keeps
+    // the name it was created with.
+    await expect(tabByLabel(win, TYPED), "the rename must land on nothing, never on the replacement").toHaveCount(0);
+    await expect(
+      win.locator(".af-tabbar .af-tab .af-tab-label"),
+      "the replacement must NOT inherit the edit",
+    ).toHaveText(roster);
+  } finally {
+    // Restore the roster for the specs below, whatever happened above. Best-effort: the
+    // tab may already be gone, and a teardown failure must not mask the real one.
+    try {
+      af("sessions", "tab-delete", SESSION_ORDER, "--name", VICTIM);
+    } catch {
+      /* already gone */
+    }
+    await win.close();
+    await ctx.close();
+  }
+});
+
+test("#1813: a double-click renames an INACTIVE tab, not only the active one", async () => {
+  // The first click of a double-click switches tabs, which changes tabBarSig (active)
+  // and so REPLACES the very button the gesture began on — a shape that has broken real
+  // gestures here before (#1737). It does not break this one: Chromium targets dblclick
+  // at the node both halves of the SECOND click hit, which is the fresh button, and
+  // tabButton binds the listener on every button it builds. So rename-by-double-click
+  // works from any tab, active or not.
+  //
+  // Pinned because the reasoning is not local to this file — it is a property of how
+  // Blink resolves a click target across a DOM swap — and because the specs above all
+  // happen to double-click tabs without pinning which one is ACTIVE, so none of them
+  // would notice if this stopped working.
+  await row(page, SESSION_ORDER).click();
+  await expect(page.locator(".af-tabbar .af-tab"), "the seeded roster").toHaveCount(4, { timeout: 15_000 });
+  const [, , , victim] = await tabLabels(page);
+
+  // Make the target provably INACTIVE, rather than inheriting whatever the spec above
+  // left active — the whole point of the test is the state it is exercised from.
+  await tabByLabel(page, "Agent").click();
+  await expect(page.locator(".af-tabbar .af-tab.af-tab-active"), "the agent tab holds the highlight").toContainText(
+    "Agent",
+  );
+  await expect(tabByLabel(page, victim), "the tab under test must not be the active one").not.toHaveClass(
+    /af-tab-active/,
+  );
+
+  await tabByLabel(page, victim).dblclick();
+  await expect(
+    page.locator(".af-tabbar .af-tab-edit"),
+    "a double-click on an INACTIVE tab must open its rename input",
+  ).toBeVisible();
+  await page.locator(".af-tabbar .af-tab-edit").press("Escape");
+});
+
+test("#1738 invariant: every tab the daemon serves carries a stable id — the premise the bar's rename rests on", async () => {
+  // A tab BUTTON outlives every snapshot that leaves tabBarSig unchanged: the
+  // signature covers only what the bar DRAWS (kind/name/active/shown) and is
+  // deliberately blind to tab IDS, because rebuilding on an id change would destroy a
+  // button held mid-drag — the #1737 regression. So a button can in principle hold a
+  // tab object whose id has since been restamped, and since #1904 made the rename
+  // id-keyed, committing that stale identity against the CURRENT roster would resolve
+  // to nothing and SILENTLY DO NOTHING.
+  //
+  // What keeps that off the reachable path is this invariant: every Tab constructor
+  // mints an id (session/tab.go) and restoreLocalTabs backfills a legacy pre-#1738
+  // record on load (session/instance_data.go), while ToInstanceData copies it
+  // verbatim — so the SPA is never served an id-less tab, never synthesizes the
+  // kind:name fallback, and the "" → real backfill a stale identity would need simply
+  // never happens here. (ui.ts no longer DEPENDS on that: liveTabIdentity resolves an
+  // identity from the per-snapshot cache at commit rather than trusting the object the
+  // button was built with. This asserts the premise anyway, because it is enforced two
+  // layers away in another language and nothing on the web side would notice it bend.)
+  //
+  // The proxy has no such slack and is why this matters beyond rename: a web/vscode
+  // pane's src is /v1/webtab/{session}/{tabId}/, id-keyed since #1810 with no ordinal
+  // form to fall back on, so an id-less tab is simply unaddressable (split.ts).
+  const res = await page.request.post("/v1/Snapshot", { data: { repo_id: "" } });
+  expect(res.status(), "the Snapshot route must answer the tokenless loopback client").toBe(200);
+  const env = (await res.json()) as {
+    data?: { instances?: { title?: string; tabs?: { id?: string; name?: string }[] }[] } | null;
+  };
+  const instances = env.data?.instances ?? [];
+
+  // Name every offender rather than asserting a count, so a failure says WHICH tab.
+  const idless = instances.flatMap((inst) =>
+    (inst.tabs ?? []).filter((t) => (t.id ?? "") === "").map((t) => `${inst.title ?? "?"}/${t.name ?? "?"}`),
+  );
+  expect(idless, "every tab the SPA is served must carry a stable id (#1738)").toEqual([]);
+  // ...and the roster really had tabs to check: an empty tab list would make the
+  // assertion above vacuously true, which is the one way this test could rot into
+  // proving nothing.
+  const total = instances.flatMap((inst) => inst.tabs ?? []).length;
+  expect(total, "the seeded sessions must actually carry tabs for the check to mean anything").toBeGreaterThan(0);
+});
+
+test("#1813: a dead dev server shows the designed fallback — never the raw JSON envelope", async () => {
+  // The most common failure in the loop web tabs exist for: the port isn't up yet, or
+  // the server crashed. An agent creating a preview tab and a dev server finishing
+  // boot are inherently racy, so "the tab exists before the port answers" is the
+  // NORMAL first state — and it used to render the daemon's 502 envelope as text.
+  await row(page, SESSION_DEAD).click();
+  await expect(page.locator(".af-main.af-main-term")).toBeVisible();
+  const deadTab = tabByLabel(page, "deadport");
+  await expect(deadTab).toHaveCount(1, { timeout: 15_000 });
+  await deadTab.click();
+
+  // The designed state, named for the port a developer has to go fix.
+  const fallback = page.locator(".af-term-host .af-webpane-fallback.af-webpane-dead");
+  await expect(fallback).toBeVisible({ timeout: 15_000 });
+  await expect(fallback).toContainText(`No dev server is answering at localhost:${DEAD_PORT} yet.`);
+
+  // No raw JSON, anywhere. The parent probed out of band and never pointed the frame
+  // at a target it knew was down, so there is no 502 body in the DOM to leak — the
+  // assertion is structural, not a claim that something is merely covered up.
+  const host = page.locator(".af-term-host");
+  await expect(host, "the API envelope must not be rendered as the preview").not.toContainText("unreachable");
+  await expect(host).not.toContainText("connection refused");
+  await expect(host).not.toContainText('"error"');
+  const frame = page.locator(".af-term-host .af-pane-host iframe.af-webframe");
+  await expect(frame).toBeHidden();
+  expect(await frame.getAttribute("src"), "the frame must never be pointed at a dead target").toBeNull();
+
+  // Item B (Codex P3): the BAR's "Open ↗" is withdrawn too, not just the fallback's
+  // link. It points at the same proxied URL the probe found 502ing, so clicking it
+  // would open a new tab showing the daemon's raw 502 JSON — the exact thing this
+  // state exists to hide. Retry is the only offered action.
+  await expect(page.locator("a.af-webpane-open"), "the bar's Open ↗ must not route to the 502").toBeHidden();
+
+  // The fallback carries its own retry, and it really re-probes: while the port is
+  // still dead, a retry must land back in the same state rather than flashing a frame.
+  const retry = fallback.locator(".af-webpane-fallback-retry");
+  await expect(retry).toBeVisible();
+  await retry.click();
+  await expect(fallback).toBeVisible();
+  await expect(frame).toBeHidden();
+
+  // ...and when the server finally comes up, the SAME retry recovers into a live
+  // preview. This is what makes the state actionable rather than terminal — and it
+  // proves the probe is a real request each time, not a one-shot verdict cached at
+  // mount. The server is bound here, in the test, precisely because the fixture's
+  // whole point is that nothing listens on this port for the rest of the run.
+  const { createServer } = await import("node:http");
+  const server = createServer((_req, res) => {
+    res.setHeader("content-type", "text/html");
+    res.end('<!doctype html><html><body><h1 id="marker">AF_DEADPORT_REVIVED</h1></body></html>');
+  });
+  try {
+    await new Promise<void>((resolve) => server.listen(DEAD_PORT, "127.0.0.1", resolve));
+    await retry.click();
+    await expect(page.frameLocator(".af-webframe").locator("#marker")).toHaveText("AF_DEADPORT_REVIVED", {
+      timeout: 15_000,
+    });
+    await expect(fallback).toBeHidden();
+    // ...and item B in reverse: a live frame's Open ↗ is worth opening again, so
+    // showFrame restores the bar link showDead withdrew.
+    await expect(page.locator("a.af-webpane-open"), "Open ↗ returns once the frame is live").toBeVisible();
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+});
+
+test("item C (Codex P2): a probe that never resolves reaches the fallback within the timeout, not a blank pane", async () => {
+  // The bug: probeWebTab's fetch had no client timeout, so a loopback target that
+  // ACCEPTS the connection but never sends headers left load() awaiting forever — the
+  // pane blank, no fallback, no Retry. The fix bounds the probe with an AbortController
+  // and treats a timeout like a transport failure: dead.
+  //
+  // Simulated by routing the proxy path to HANG (never fulfilled), which is exactly
+  // "accepts but never answers" from the parent's side. The shrunk fallback ms is also
+  // the probe's abort deadline (the caller passes webFallbackMs into the probe), so the
+  // abort fires fast and deterministically.
+  await page.evaluate(() => {
+    (window as unknown as { __afWebtabFallbackMs: number }).__afWebtabFallbackMs = 500;
+  });
+  // Hang every webtab request — the PROBE (no token) and, were it ever reached, the
+  // frame src. Never fulfilled: the connection is open but no response ever comes.
+  await page.route("**/v1/webtab/**", () => {
+    /* intentionally never fulfill/abort — the fetch hangs until the client aborts it */
+  });
+  try {
+    await row(page, SESSION_DEAD).click();
+    await expect(page.locator(".af-main.af-main-term")).toBeVisible();
+    const deadTab = tabByLabel(page, "deadport");
+    await expect(deadTab).toHaveCount(1, { timeout: 15_000 });
+    await deadTab.click();
+
+    // Force a fresh probe through the ↻ control rather than relying on the tab
+    // mounting fresh: the preceding test leaves this exact tab mounted, so a re-select
+    // alone re-runs nothing. ↻ always calls load(), which arms a new probe — and the
+    // route hangs it, so only the AbortController's timeout can end it.
+    await page.locator(".af-term-host .af-webpane-reload").click();
+
+    // With the fix, the abort fires at ~500ms and the designed fallback appears. If the
+    // probe were still unbounded (the bug) the pane would stay blank forever and this
+    // would time out — which is exactly the failure the fix prevents.
+    const fallback = page.locator(".af-term-host .af-webpane-fallback.af-webpane-dead");
+    await expect(fallback, "a hung probe must reach the fallback, not hang the pane").toBeVisible({ timeout: 10_000 });
+    await expect(fallback.locator(".af-webpane-fallback-retry")).toBeVisible();
+    // And no frame is left navigated (the probe never returned ok — showDead drops src).
+    const frame = page.locator(".af-term-host .af-pane-host iframe.af-webframe");
+    await expect(frame).toBeHidden();
+    expect(await frame.getAttribute("src")).toBeNull();
+  } finally {
+    await page.unroute("**/v1/webtab/**");
+    // Restore the default probe/timeout window so a later test's proxied probe isn't
+    // held to this test's deliberately-tiny deadline.
+    await page.evaluate(() => {
+      delete (window as unknown as { __afWebtabFallbackMs?: number }).__afWebtabFallbackMs;
+    });
+  }
+});
+
+test("#1813: a refused rename surfaces the daemon's OWN message, verbatim, in the toast", async () => {
+  // The daemon's refusals (agent/shell rename, new_index 0, archived, remote) are all
+  // UNREACHABLE through this UI by construction: the affordance is withheld for a tab
+  // the daemon would refuse, and the insertion math clamps a reorder off slot 0. That
+  // gating is the feature — but it also means the error path has no natural trigger,
+  // so the envelope is forced here instead. What is under test is THIS client's
+  // surfacing, not the daemon's validation (which its own Go tests cover): a tab op
+  // has no modal, so a swallowed error would leave a rename that silently did nothing.
+  //
+  // The literal that matters is "[object Object]": the {data,error} envelope carries
+  // error as an OBJECT, and interpolating it directly is the repo's own historical bug
+  // (see api.ts errorText). This asserts the real message wins instead.
+  const REFUSAL = "cannot rename a tab on archived session \"probe-order\"; restore it first (af sessions restore)";
+  await page.unroute("**/v1/RenameTab");
+  await page.route("**/v1/RenameTab", (route) =>
+    route.fulfill({
+      status: 400,
+      contentType: "application/json",
+      body: JSON.stringify({ data: null, error: { message: REFUSAL } }),
+    }),
+  );
+
+  await row(page, SESSION_ORDER).click();
+  await expect(tabByLabel(page, "storefront")).toHaveCount(1, { timeout: 15_000 });
+  await renameTabViaUI(page, "storefront", "doesnt-matter");
+
+  // The daemon's sentence, not a generic "rename failed" and not "[object Object]".
+  const toast = page.locator(".af-toast.af-toast-show");
+  await expect(toast).toContainText(REFUSAL);
+  await expect(toast).not.toContainText("[object Object]");
+  // A refused rename leaves the tab exactly as it was — nothing was applied
+  // optimistically, so there is no wrong name to roll back.
+  await expect(tabByLabel(page, "storefront")).toHaveCount(1);
+  await expect(tabByLabel(page, "doesnt-matter")).toHaveCount(0);
+
+  await page.unroute("**/v1/RenameTab");
+});
+
+test("#1900: ↻ cache-busts a PROXIED preview; an external frame's URL is left untouched", async () => {
+  // Re-assigning the same URL is not a guarantee of fresh content — the browser's HTTP
+  // cache, or any intermediary, may answer from a stale entry, which is exactly the
+  // page ↻ exists to escape. A URL that differs per attempt cannot be.
+  // probe-vite's tab, NOT probe-web's "preview": the #1779 ordinal-shift test above
+  // deletes "preview" (the tab-consuming order the entry script warns about), so it no
+  // longer exists by the time this runs. probe-vite is kept separate precisely to be
+  // immune to that, and its target is proxied all the same.
+  await row(page, SESSION_VITE).click();
+  await expect(page.locator(".af-main.af-main-term")).toBeVisible();
+  await tabByLabel(page, "vite").click();
+
+  const frame = page.locator(".af-term-host .af-pane-host iframe.af-webframe");
+  await expect(frame).toHaveCount(1, { timeout: 15_000 });
+  // The INITIAL mount stays CLEAN: a fresh preview has nothing stale to escape, and
+  // the normal address should read as the normal address.
+  await expect(frame).toHaveAttribute("src", /\/v1\/webtab\//);
+  expect(await frame.getAttribute("src"), "a first mount must not be cache-busted").not.toContain("_afreload");
+
+  // ↻ once: the URL changes — that difference IS the mechanism.
+  await page.locator(".af-webpane-reload").click();
+  await expect(frame).toHaveAttribute("src", /_afreload=\d+/, { timeout: 15_000 });
+  const first = await frame.getAttribute("src");
+  // ...and the busted URL still really resolves through the proxy to the dev server,
+  // so the param buys freshness without costing the preview. This is the half that
+  // would catch an `_afreload` the daemon or the upstream chokes on.
+  await expect(page.frameLocator(".af-webframe").locator("#marker")).toHaveText(VITE_MARKER, {
+    timeout: 15_000,
+  });
+
+  // ↻ again: the param is REPLACED, not accumulated. A URL that grew an extra
+  // _afreload per press would still load fine, so only counting them catches it.
+  await page.locator(".af-webpane-reload").click();
+  await expect.poll(() => frame.getAttribute("src"), { timeout: 15_000 }).not.toBe(first);
+  const second = (await frame.getAttribute("src")) ?? "";
+  expect(second.match(/_afreload=/g)?.length, "one _afreload param, not one per press").toBe(1);
+  expect(second).toContain("/v1/webtab/");
+
+  // The EXTERNAL case: cache-busting was always excluded for external targets (a
+  // presigned / CDN-token URL signs over its query string, so a param would 403 it).
+  // Item A made that exclusion structural — an external target is never framed inline
+  // at all — which is the strongest possible form of "never busted": there is no
+  // framed URL to append a param to.
+  //
+  // This half used to PRESS ↻ here and assert the src stayed null. It no longer can,
+  // and that is the point rather than an inconvenience: ↻ is not offered on an
+  // external pane at all now. It used to sit there and, when pressed, re-show this
+  // same fallback — no fetch, no navigation, no change, no explanation — which reads
+  // as af being broken and gives the user nothing to act on. Withdrawing it makes
+  // "never busted" visible rather than merely true, and the gesture this asserted is
+  // gone with it. The escape that DOES work (the open link) is asserted by the item A
+  // test above.
+  // probe-web's "external" tab is never closed by any test, unlike its "preview".
+  await row(page, SESSION_WEB).click();
+  await expect(page.locator(".af-main.af-main-term")).toBeVisible();
+  await tabByLabel(page, "external").click();
+  const externalFallback = page.locator(".af-term-host .af-webpane-fallback.af-webpane-external");
+  await expect(externalFallback).toBeVisible({ timeout: 15_000 });
+  expect(await frame.getAttribute("src"), "an external target is never framed, so never busted").toBeNull();
+  await expect(
+    page.locator(".af-term-host .af-webpane-reload:visible"),
+    "an external pane must not offer a ↻ that cannot reload",
+  ).toHaveCount(0);
+  // ...and with no ↻ to press and no src to bust, the fallback simply remains the
+  // surface. Re-asserted after the check above so this still pins the end state.
+  await expect(externalFallback).toBeVisible();
+  expect(await frame.getAttribute("src")).toBeNull();
+});
+
+test("#1900: the cache-buster is unique across a pane REMOUNT — ↻ never re-issues a URL the cache already holds", async () => {
+  // The sibling of the dead-↻ bug, and the same shape: the control looks like it
+  // worked and didn't. #1900 shipped the buster as a counter local to the pane MOUNT,
+  // but the browser's HTTP cache outlives the pane — so a remount reset it to 0 and
+  // the next ↻ re-requested a URL the cache still had an entry for, serving exactly
+  // the stale page ↻ exists to escape.
+  //
+  // The essential property, and the only thing this asserts: two reloads separated by
+  // a pane recreate must not produce the same URL.
+  await row(page, SESSION_VITE).click();
+  await expect(page.locator(".af-main.af-main-term")).toBeVisible();
+  await tabByLabel(page, "vite").click();
+
+  const frame = page.locator(".af-term-host .af-pane-host iframe.af-webframe");
+  await expect(frame).toHaveCount(1, { timeout: 15_000 });
+
+  // ↻ once. This is the URL the browser has now actually fetched — and cached.
+  await page.locator(".af-webpane-reload").click();
+  await expect(frame).toHaveAttribute("src", /_afreload=\d+/, { timeout: 15_000 });
+  const first = (await frame.getAttribute("src")) ?? "";
+
+  // REMOUNT the pane, by binding it to the agent tab (a terminal) and back. This is a
+  // real mountWebPane teardown+rebuild — the same one a target change, an archive flip
+  // (#1809) or a session switch performs — and it is what reset the per-mount counter.
+  // Driven through tab clicks rather than by calling the mount, so the production gate
+  // that decides WHETHER to remount (reconcile's staleAddress/pane.term test) is part
+  // of what is under test: a test that reached past it could pass on code where no
+  // remount ever happens.
+  await page.locator(".af-tabbar .af-tab").first().click();
+  await expect(frame).toHaveCount(0, { timeout: 15_000 });
+  await tabByLabel(page, "vite").click();
+  await expect(frame).toHaveCount(1, { timeout: 15_000 });
+  // A remount is a fresh mount, so its address is clean again — the same rule as a
+  // first mount, and the reason the reset LOOKED harmless.
+  expect(await frame.getAttribute("src"), "a remount must not be cache-busted").not.toContain("_afreload");
+
+  // ↻ after the remount: the URL must be one this browser has never fetched. A counter
+  // scoped to the mount restarts and re-issues `first` VERBATIM here, which the cache
+  // can answer from the entry the first ↻ created.
+  await page.locator(".af-webpane-reload").click();
+  await expect(frame).toHaveAttribute("src", /_afreload=\d+/, { timeout: 15_000 });
+  const second = (await frame.getAttribute("src")) ?? "";
+  expect(second, "a reload after a remount must not re-issue the first reload's URL").not.toBe(first);
+  // Still exactly one param, and still the same tab's proxied address — the nonce is
+  // the only thing that moved.
+  expect(second.match(/_afreload=/g)?.length, "one _afreload param, not one per press").toBe(1);
+  expect(second).toContain("/v1/webtab/");
+
+  // ...and the busted URL still really resolves through the proxy to the dev server.
+  // A nonce the daemon or the upstream chokes on would be a different — and worse —
+  // bug than the one this fixes, so freshness is asserted together with the preview
+  // surviving, never alone.
+  await expect(page.frameLocator(".af-webframe").locator("#marker")).toHaveText(VITE_MARKER, {
+    timeout: 15_000,
+  });
+});
+
+// ===========================================================================
+// #1909: whose 502 is it? The probe's verdict must follow the ANSWER, not the
+// status — and must not be steerable by the server it is probing.
+//
+// Both tests reuse the dead-port fixture's tab by BINDING a real server on
+// DEAD_PORT for their duration. That is the point: the tab, the daemon proxy and
+// the client are all the real ones, and the only variable is what the dev server
+// says. Each closes its server in a finally, restoring the "nothing listens on
+// DEAD_PORT" absence the earlier fixtures depend on.
+// ===========================================================================
+
+/** Binds `handler` on DEAD_PORT for the duration of `body`, then restores the port's
+ *  emptiness — which is itself the fixture every other SESSION_DEAD test rests on. */
+async function withDeadPortServer(
+  handler: (req: import("node:http").IncomingMessage, res: import("node:http").ServerResponse) => void,
+  body: () => Promise<void>,
+): Promise<void> {
+  const { createServer } = await import("node:http");
+  const server = createServer(handler);
+  await new Promise<void>((resolve) => server.listen(Number(DEAD_PORT), "127.0.0.1", resolve));
+  try {
+    await body();
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+}
+
+/** Selects the dead-port tab and forces a FRESH probe through ↻. The tab is left
+ *  mounted by earlier tests, so a re-select alone re-probes nothing — only ↻ calls
+ *  load() again, which is what these tests need to observe. */
+async function reprobeDeadTab(page: Page): Promise<void> {
+  await row(page, SESSION_DEAD).click();
+  await expect(page.locator(".af-main.af-main-term")).toBeVisible();
+  const deadTab = tabByLabel(page, "deadport");
+  await expect(deadTab).toHaveCount(1, { timeout: 15_000 });
+  await deadTab.click();
+  await page.locator(".af-term-host .af-webpane-reload").click();
+}
+
+test("#1909: an UPSTREAM's own 502 renders the app's page — only af's own 502 shows the fallback", async () => {
+  // The bug: the daemon proxy forwards upstream statuses UNCHANGED, so an app that
+  // answers 502 on its own (a framework proxy whose backend is down, a local gateway
+  // error page) was byte-identical, by status, to af's "nothing is listening" 502. The
+  // client keyed on the bare status and suppressed both — hiding a page the app really
+  // served behind af's dead-server fallback, and telling the developer their dev server
+  // was down when it was answering.
+  //
+  // The marker header separates them: af's ErrorHandler REPLACES the response when the
+  // upstream never answered, so it is set exactly when af generated the failure.
+  //
+  // Both halves run here, back to back, against the SAME tab and the SAME port. That
+  // is what makes it a real test of the distinction rather than of two situations: the
+  // only thing that changes between them is who produced the 502.
+  const APP_502_MARKER = "AF_APP_OWN_502_PAGE";
+  const fallback = page.locator(".af-term-host .af-webpane-fallback.af-webpane-dead");
+  const frame = page.locator(".af-term-host .af-pane-host iframe.af-webframe");
+
+  await withDeadPortServer(
+    (_req, res) => {
+      // The app ANSWERED — with its own gateway error page. This is a page to render.
+      res.statusCode = 502;
+      res.setHeader("content-type", "text/html");
+      res.end(`<!doctype html><html><body><h1 id="marker">${APP_502_MARKER}</h1></body></html>`);
+    },
+    async () => {
+      await reprobeDeadTab(page);
+      // THE ASSERTION: the app's own error page is rendered. Before the marker, this
+      // 502 was read as af's and the pane showed the fallback instead.
+      await expect(
+        page.frameLocator(".af-webframe").locator("#marker"),
+        "an upstream 502 is the APP's page to render",
+      ).toHaveText(APP_502_MARKER, { timeout: 15_000 });
+      await expect(fallback, "af must not claim the dev server is dead when it answered").toBeHidden();
+    },
+  );
+
+  // The other half, same tab, same port: with nothing listening the 502 is AF's own,
+  // it carries the marker, and the fallback is exactly right. This is what proves the
+  // fix narrowed the verdict rather than simply disabling it.
+  await reprobeDeadTab(page);
+  await expect(fallback, "an af-generated 502 must still reach the dead-server fallback").toBeVisible({
+    timeout: 15_000,
+  });
+  await expect(fallback).toContainText(`No dev server is answering at localhost:${DEAD_PORT} yet.`);
+  await expect(frame).toBeHidden();
+  expect(await frame.getAttribute("src"), "the frame must never be pointed at a dead target").toBeNull();
+});
+
+test("#1909/probe: a preview that redirects CROSS-ORIGIN cannot steer the probe off-origin", async () => {
+  // fetch follows redirects by DEFAULT, so the health probe — a request the PARENT
+  // document makes — could be sent wherever the probed server pointed it. An OAuth/SSO
+  // login is the everyday shape: the dev server 302s to an identity provider on another
+  // origin, and the proxy passes a foreign Location through untouched (it rewrites only
+  // refs naming the upstream it proxies).
+  //
+  // Two things were wrong with following it. The probe rests on being same-origin to
+  // the SPA, and the very thing it probes got to choose otherwise — a probe steerable
+  // by its subject. And if the destination disallows CORS the fetch REJECTS, so we
+  // called a perfectly live dev server dead and hid it behind the fallback, though the
+  // frame would have followed that redirect happily and rendered the login page.
+  //
+  // The login server here is cross-ORIGIN by port (127.0.0.1:<free>, not :8892) and
+  // sends no Access-Control-Allow-Origin — exactly the everyday case, and entirely
+  // local, so nothing here touches the network.
+  const LOGIN_MARKER = "AF_CROSS_ORIGIN_LOGIN_PAGE";
+  const { createServer } = await import("node:http");
+
+  // Every request the off-origin server sees, tagged with what the browser was
+  // fetching FOR. The distinction is the whole assertion: a `document`/`iframe` hit is
+  // the frame legitimately following the redirect itself, which is correct and
+  // expected; an `empty` hit is fetch() — the PROBE — and means it was steered.
+  const offOriginHits: string[] = [];
+  const login = createServer((req, res) => {
+    offOriginHits.push(String(req.headers["sec-fetch-dest"] ?? "unknown"));
+    // No CORS headers, deliberately: a followed probe fails here, which is the bug.
+    res.setHeader("content-type", "text/html");
+    res.end(`<!doctype html><html><body><h1 id="marker">${LOGIN_MARKER}</h1></body></html>`);
+  });
+  await new Promise<void>((resolve) => login.listen(0, "127.0.0.1", resolve));
+  const loginPort = (login.address() as import("node:net").AddressInfo).port;
+
+  try {
+    await withDeadPortServer(
+      (_req, res) => {
+        // A live dev server whose answer is "go log in over there".
+        res.statusCode = 302;
+        res.setHeader("location", `http://127.0.0.1:${loginPort}/login`);
+        res.end();
+      },
+      async () => {
+        await reprobeDeadTab(page);
+
+        // THE ASSERTION: the dev server is alive and redirecting, so the pane must NOT
+        // show the dead-server fallback. Before the fix the probe followed the 302,
+        // the cross-origin response failed the CORS check, the fetch rejected, and this
+        // live server was reported dead.
+        const fallback = page.locator(".af-term-host .af-webpane-fallback.af-webpane-dead");
+        await expect(fallback, "a redirecting dev server is answering — it is not dead").toBeHidden({
+          timeout: 15_000,
+        });
+
+        // ...and the frame followed the redirect ITSELF, which is what a preview does.
+        await expect(page.frameLocator(".af-webframe").locator("#marker")).toHaveText(LOGIN_MARKER, {
+          timeout: 15_000,
+        });
+
+        // The steering claim, asserted directly rather than inferred from the outcome:
+        // the parent's probe never reached the foreign origin. Only the frame did.
+        expect(
+          offOriginHits.filter((dest) => dest !== "iframe" && dest !== "document"),
+          `the probe must not be steerable off-origin; off-origin server saw ${JSON.stringify(offOriginHits)}`,
+        ).toEqual([]);
+        expect(offOriginHits.length, "the FRAME is entitled to follow the redirect").toBeGreaterThan(0);
+      },
+    );
+  } finally {
+    await new Promise<void>((resolve) => login.close(() => resolve()));
+  }
+});
+
+test("#1929/#1971: a rename, a reorder and a close from the web carry the tab's STABLE id", async () => {
+  // The web client already HOLDS the stable tab id (#1738) and threw it away, resolving
+  // the tab locally and then sending only its NAME. A name is not an identity — it is
+  // the very thing a rename changes — so a request racing a rename from another window
+  // or the CLI could name a tab that no longer exists, or one that has since taken the
+  // name. The daemon now resolves tab_id first and keeps the name as its fallback.
+  //
+  // Asserted against the daemon's OWN projection of the id, not merely "non-empty": the
+  // failure this guards against is sending a plausible-but-wrong key (a synthesized
+  // `kind:name` identity is exactly that, and would 404 a legacy tab), which any
+  // non-empty check would wave through.
+  await row(page, SESSION_ORDER).click();
+  await expect(page.locator(".af-main.af-main-term")).toBeVisible();
+  await expect(page.locator(".af-tabbar .af-tab")).not.toHaveCount(0, { timeout: 15_000 });
+
+  /** The daemon's real id for the tab named `name` in SESSION_ORDER, read from the
+   *  Snapshot the SPA itself mirrors (loopback is tokenless here, #1696). */
+  const realTabId = async (name: string): Promise<string> =>
+    page.evaluate(
+      async ({ title, tabName }) => {
+        const resp = await fetch("/v1/Snapshot", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ repo_id: "" }),
+        });
+        const env = (await resp.json()) as {
+          data: { instances: { title: string; tabs?: { name: string; id?: string }[] }[] };
+        };
+        const inst = env.data.instances.find((i) => i.title.includes(title));
+        return inst?.tabs?.find((t) => t.name === tabName)?.id ?? "";
+      },
+      { title: SESSION_ORDER, tabName: name },
+    );
+
+  // The bar's first non-agent tab: whatever the preceding rename/reorder tests left,
+  // every non-agent tab in this session is a renameable (web/process) kind.
+  const labels = await tabLabels(page);
+  const victim = labels[1];
+  expect(victim, "SESSION_ORDER must still have a non-agent tab to rename").toBeTruthy();
+  const victimId = await realTabId(victim);
+  expect(victimId, "the fixture tab must have a stable id (#1738) — otherwise this proves nothing").not.toBe("");
+
+  // --- rename ---
+  let renameBody: Record<string, unknown> = {};
+  await page.route("**/v1/RenameTab", async (route) => {
+    renameBody = route.request().postDataJSON() as Record<string, unknown>;
+    await route.continue(); // let the REAL daemon apply it — the id must work end to end
+  });
+  const renamed = `idcarry-${Date.now()}`;
+  await renameTabViaUI(page, victim, renamed);
+  // It really renamed — so the id the client sent is one the daemon resolved, not just
+  // a string that rode along in an ignored field.
+  await expect(tabByLabel(page, renamed), "the rename must take effect through the real daemon").toHaveCount(1, {
+    timeout: 15_000,
+  });
+  await page.unroute("**/v1/RenameTab");
+  expect(renameBody.tab_id, "a rename must carry the tab's stable id").toBe(victimId);
+  expect(renameBody.tab_name, "…and the name, which is the daemon's documented fallback").toBe(victim);
+  expect(renameBody.new_name).toBe(renamed);
+
+  // --- reorder ---
+  // The id must survive the gesture too: the drag reports ORDINALS, and turning an
+  // ordinal back into the right tab is precisely what the id is for.
+  const after = await tabLabels(page);
+  expect(after.length, "a reorder needs at least two non-agent tabs to permute").toBeGreaterThan(2);
+  const moverId = await realTabId(after[1]);
+  let reorderBody: Record<string, unknown> = {};
+  await page.route("**/v1/ReorderTab", async (route) => {
+    reorderBody = route.request().postDataJSON() as Record<string, unknown>;
+    await route.continue();
+  });
+  const res = await dragTabWithinBar(page, after[1], after[2], "after");
+  expect(res.dropAllowed, "the bar must accept a reorder drop").toBe(true);
+  await expect
+    .poll(() => tabLabels(page), { timeout: 15_000 })
+    .toEqual([after[0], after[2], after[1], ...after.slice(3)]);
+  await page.unroute("**/v1/ReorderTab");
+  expect(reorderBody.tab_id, "a reorder must carry the MOVED tab's stable id").toBe(moverId);
+  expect(reorderBody.tab_name, "…alongside the name fallback").toBe(after[1]);
+  expect(reorderBody.new_index, "the wire field is new_index, read in the FINAL roster").toBe(2);
+
+  // --- close (#1971) ---
+  // The verb that needs the id most: rename and reorder misroute into a wrong label or
+  // a wrong slot, both undoable, while close kills the tab's tmux session and whatever
+  // was running in it. The daemon reissues a freed name to the next tab that asks for
+  // one, so a name-keyed close racing another window's close+create destroys a tab this
+  // user never addressed.
+  const beforeClose = await tabLabels(page);
+  const doomed = beforeClose[1];
+  const doomedId = await realTabId(doomed);
+  expect(doomedId, "the tab being closed must have a stable id — otherwise this proves nothing").not.toBe("");
+  let closeBody: Record<string, unknown> = {};
+  await page.route("**/v1/CloseTab", async (route) => {
+    closeBody = route.request().postDataJSON() as Record<string, unknown>;
+    await route.continue(); // the REAL daemon must resolve the id, not just receive it
+  });
+  await tabByLabel(page, doomed).locator(".af-tab-close").click();
+  // It really closed — and only it. A close that resolved the wrong tab would still
+  // shrink the bar by one, so assert the surviving ROSTER, not just the count.
+  await expect
+    .poll(() => tabLabels(page), { timeout: 15_000 })
+    .toEqual(beforeClose.filter((l) => l !== doomed));
+  await page.unroute("**/v1/CloseTab");
+  expect(closeBody.tab_id, "a close must carry the CLOSED tab's stable id").toBe(doomedId);
+  expect(closeBody.tab_name, "…alongside the name fallback").toBe(doomed);
+});

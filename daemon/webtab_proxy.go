@@ -38,6 +38,27 @@ const webtabTokenCookie = "af_webtab_token" //nolint:gosec // cookie name, not a
 // a different transport.
 const webtabTokenQueryParam = "af_webtab_token" //nolint:gosec // query-param name, not a credential
 
+// webtabErrorHeader marks a proxy failure response the DAEMON generated, as opposed
+// to one the dev server itself answered with (#1909).
+//
+// It exists because status alone cannot tell the two apart. The proxy relays upstream
+// statuses unchanged, so an app that serves its own 502 — a framework proxy whose
+// backend is down, a local gateway error page — is byte-for-byte indistinguishable
+// from af's own "the dev server never answered" 502. The web client suppressed both
+// and showed the dead-server fallback, hiding a page the app really served.
+//
+// The ErrorHandler REPLACES the response when the upstream never answered, and runs
+// only then, so a marker set there is present exactly when af generated the failure.
+// It is STRIPPED from every upstream response (see ModifyResponse) so the upstream
+// cannot forge it: the client trusts this header, and what the client trusts the
+// proxy must control (#1879).
+const webtabErrorHeader = "X-AF-Webtab-Error"
+
+// webtabErrorUpstreamUnreachable is the only reason af generates a failure for today:
+// the transport never got an answer. The client keys on the header's PRESENCE, not
+// this value, so a future reason needs no client change.
+const webtabErrorUpstreamUnreachable = "upstream-unreachable"
+
 // webTabTarget is where one iframe tab's traffic is sent. The two tab kinds reach
 // their upstream over DIFFERENT transports, and this is what carries the
 // difference to the proxy.
@@ -577,6 +598,17 @@ func (cs *controlServer) webTabProxyHandler(w http.ResponseWriter, r *http.Reque
 			// viewed through their own daemon.
 			resp.Header.Del("X-Frame-Options")
 			stripFrameAncestors(resp.Header)
+			// The upstream ANSWERED, so whatever it says, this is not an af-generated
+			// failure — strip any marker it set before the client can read it as one
+			// (#1909). Without this an app could forge af's own dead-server verdict
+			// against itself: its answered 502 would suppress its page and show the
+			// fallback, the very bug the marker fixes, in reverse.
+			//
+			// This is the STRIP half of the #1879 rule — what the client trusts, the
+			// proxy must control — and the two halves cannot collide: ModifyResponse
+			// runs only when the upstream answered, the ErrorHandler only when it did
+			// not. Del is canonical-key based, so a lowercase forgery is caught too.
+			resp.Header.Del(webtabErrorHeader)
 			// Relay the dev app's Set-Cookie back to the browser, re-scoped under
 			// this tab's proxy path (and Domain dropped so it defaults to the daemon
 			// host) so the cookie lands on the right path and coexists with the
@@ -591,6 +623,16 @@ func (cs *controlServer) webTabProxyHandler(w http.ResponseWriter, r *http.Reque
 		},
 		ErrorHandler: func(w http.ResponseWriter, _ *http.Request, err error) {
 			log.WarningLog.Printf("web tab proxy to %s failed: %v", targetURL.Redacted(), err)
+			// Mark this 502 as AF's OWN before writing it (#1909). Reaching here means
+			// the upstream never answered — the transport failed, or ModifyResponse
+			// rejected the response — so no upstream header has been copied to w and
+			// this marker cannot be an upstream's. That is precisely what makes it
+			// trustworthy: the client renders its dead-server fallback for a marked
+			// 502 and the app's own page for an unmarked one.
+			//
+			// Set before writeHTTPError: that writes the status, after which headers
+			// no longer reach the client.
+			w.Header().Set(webtabErrorHeader, webtabErrorUpstreamUnreachable)
 			writeHTTPError(w, r, http.StatusBadGateway,
 				fmt.Errorf("web tab dev server at %s is unreachable: %w", targetURL.Host, err))
 		},

@@ -163,7 +163,7 @@ func TestPane_AutoHideStatusNamesDisplacedTab(t *testing.T) {
 			name:              "terminal displaces agent",
 			openOrder:         []int{0, 1},
 			wantVisibleTab:    1,
-			wantHiddenNamedAs: "alpha · Agent hidden",
+			wantHiddenNamedAs: "alpha · ◆ Agent hidden",
 		},
 		{
 			// The reverse: the displaced pane is NOT slot 0, so a toast that
@@ -171,7 +171,7 @@ func TestPane_AutoHideStatusNamesDisplacedTab(t *testing.T) {
 			name:              "agent displaces terminal",
 			openOrder:         []int{1, 0},
 			wantVisibleTab:    0,
-			wantHiddenNamedAs: "alpha · Terminal hidden",
+			wantHiddenNamedAs: "alpha · › Terminal hidden",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

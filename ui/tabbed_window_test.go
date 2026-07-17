@@ -83,7 +83,7 @@ func TestTabbedWindowResetPreviewScrollUsesCommittedBinding(t *testing.T) {
 	setWindowSize(w, 100, 30)
 	require.True(t, w.JumpToTab(1), "precondition: original pane is alpha's terminal tab")
 
-	w.SetPreview(beta, 0, "alpha · Terminal")
+	w.SetPreview(beta, 0, "alpha · › Terminal")
 	w.InvalidateContent(beta, 0, "Loading preview…")
 	w.ScrollUp()
 	require.True(t, w.IsInScrollMode(), "precondition: preview target is scrolled")
@@ -123,7 +123,7 @@ func TestTabbedWindowHeaderEllipsizesAtNarrowWidth(t *testing.T) {
 	w := newTestTabbedWindow()
 	setWindowInstance(w, inst)
 
-	// " remote-tabbar · Agent " needs 23 cells; give it 16.
+	// " remote-tabbar · ◆ Agent " needs 25 cells; give it 16.
 	header := w.renderHeader(16)
 	assert.LessOrEqual(t, lipgloss.Width(header), 16, "header must fit the pane width")
 	assert.Contains(t, header, "…", "the cut must be marked with an ellipsis")

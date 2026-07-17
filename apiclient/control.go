@@ -95,6 +95,16 @@ func (c *Client) CloseTab(req daemon.CloseTabRequest) (string, error) {
 	return resp.Name, nil
 }
 
+// There is deliberately no RenameTab/ReorderTab here (#1813). This is the Go
+// HTTP client, and its only consumer is the TUI; the tab rename/reorder verbs
+// are driven by the web client, which is TypeScript and calls the daemon's
+// /v1/RenameTab and /v1/ReorderTab routes directly (web/src/api.ts), and by the
+// CLI, which goes over the gob control socket (daemon.RenameTab). Adding
+// wrappers here purely for symmetry with CreateTab/CloseTab — which exist
+// because the TUI genuinely calls them (app/session_control.go) — would be dead
+// code whose only caller was its own test. Add them the day the TUI grows a
+// rename/reorder surface.
+
 // SetPRInfo asks the daemon to record (or clear) a session's GitHub PR info.
 func (c *Client) SetPRInfo(req daemon.SetPRInfoRequest) error {
 	return c.call("SetPRInfo", req, &daemon.SetPRInfoResponse{})
