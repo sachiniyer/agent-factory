@@ -686,3 +686,135 @@ func TestProbeAnswer_UndeterminedAlwaysHasACause(t *testing.T) {
 	require.Error(t, Undetermined(nil).Cause())
 	require.Equal(t, "unknown", Undetermined(nil).String())
 }
+
+// EXIT 0 IS NOT AN ANSWER. `systemctl is-enabled` exits 0 for six words that do
+// NOT mean "this starts at login", and reading the exit code instead of the word
+// reported broken autostart as healthy.
+//
+// This is the opposite polarity to the timeout bugs, and worse for this feature:
+// a false negative sends someone to fix a working system, but a false POSITIVE
+// leaves their daemon dead after the next reboot with doctor having said
+// everything was fine — the exact failure #1920 exists to prevent.
+func TestSystemdIsEnabled_ExitZeroWordsThatAreNotEnabled(t *testing.T) {
+	// Every word systemctl(1) documents as exiting 0 for is-enabled, and what it
+	// means for AF's question.
+	for _, tc := range []struct {
+		word string
+		want string
+	}{
+		{"enabled", "yes"},        // the only one that means what we ask
+		{"enabled-runtime", "no"}, // enabled in /run only — gone after a reboot
+		{"static", "no"},          // no [Install]; cannot be enabled
+		{"indirect", "no"},        // only triggered by another unit
+		{"generated", "no"},       // generator-made, not a persistent install
+		{"transient", "no"},       // runtime unit; will not survive a reboot
+		{"alias", "unknown"},      // describes the NAME, not our question
+	} {
+		t.Run(tc.word, func(t *testing.T) {
+			dir := withAutostartTestEnv(t, "linux")
+			writeUnitFile(t, filepath.Join(dir, autostartUnitName), systemdAutostartUnit("/usr/local/bin/af", "", "", ""))
+			withProbeCommand(t, func(_ string, args ...string) probeResult {
+				if args[1] == systemdIsEnabled {
+					return answered(tc.word+"\n", 0) // EXIT 0, every time
+				}
+				return answered("active\n", 0)
+			})
+
+			info := AutostartSupervision()
+			requireAnswer(t, tc.want, info.Enabled,
+				"is-enabled=%s exits 0; only the WORD says what it means", tc.word)
+			require.Contains(t, info.Detail, tc.word,
+				"the manager's own word must reach the report")
+		})
+	}
+}
+
+// The non-zero-exit is-enabled words are definite answers too, not errors.
+func TestSystemdIsEnabled_NonZeroExitWordsAreDefinite(t *testing.T) {
+	for _, word := range []string{"disabled", "masked", "masked-runtime", "linked", "linked-runtime", "bad"} {
+		t.Run(word, func(t *testing.T) {
+			dir := withAutostartTestEnv(t, "linux")
+			writeUnitFile(t, filepath.Join(dir, autostartUnitName), systemdAutostartUnit("/usr/local/bin/af", "", "", ""))
+			withProbeCommand(t, func(_ string, args ...string) probeResult {
+				if args[1] == systemdIsEnabled {
+					return answered(word+"\n", 1)
+				}
+				return answered("active\n", 0)
+			})
+
+			info := AutostartSupervision()
+			requireAnswer(t, "no", info.Enabled, "%s is a definite no, not an error", word)
+			require.NoError(t, info.Enabled.Cause())
+		})
+	}
+}
+
+// is-active's vocabulary is disjoint from is-enabled's, and "reloading" means
+// RUNNING — it was in the old flat negative table, which only worked by accident
+// because exit 0 short-circuited to Yes.
+func TestSystemdIsActive_WordsPerVerb(t *testing.T) {
+	for _, tc := range []struct {
+		word string
+		exit int
+		want string
+	}{
+		{"active", 0, "yes"},
+		{"reloading", 0, "yes"}, // running, re-reading config
+		{"inactive", 3, "no"},
+		{"failed", 3, "no"},
+		{"activating", 3, "no"}, // not up YET is not up
+		{"deactivating", 3, "no"},
+		{"maintenance", 3, "no"},
+		{"unknown", 4, "not-found"},
+	} {
+		t.Run(tc.word, func(t *testing.T) {
+			dir := withAutostartTestEnv(t, "linux")
+			writeUnitFile(t, filepath.Join(dir, autostartUnitName), systemdAutostartUnit("/usr/local/bin/af", "", "", ""))
+			withProbeCommand(t, func(_ string, args ...string) probeResult {
+				if args[1] == systemdIsEnabled {
+					return answered("enabled\n", 0)
+				}
+				return answered(tc.word+"\n", tc.exit)
+			})
+
+			info := AutostartSupervision()
+			requireAnswer(t, tc.want, info.Active, "is-active=%s", tc.word)
+		})
+	}
+}
+
+// A word systemd never documents for this verb is not an answer in EITHER
+// direction — guessing yes is how the false positive happened.
+func TestSystemdAsk_UnrecognizedWordOnExitZeroIsUndetermined(t *testing.T) {
+	dir := withAutostartTestEnv(t, "linux")
+	writeUnitFile(t, filepath.Join(dir, autostartUnitName), systemdAutostartUnit("/usr/local/bin/af", "", "", ""))
+	withProbeCommand(t, func(string, ...string) probeResult {
+		return answered("something-systemd-invented-in-2027\n", 0) // exit 0!
+	})
+
+	info := AutostartSupervision()
+	requireAnswer(t, "unknown", info.Enabled, "exit 0 with a word we do not know is not a yes")
+	require.Error(t, info.Enabled.Cause())
+}
+
+// An "alias" answer must NOT suppress the is-active probe: systemd is perfectly
+// reachable, only our enablement question is unanswerable. Only an UNREACHABLE
+// manager justifies skipping the second query.
+func TestSystemdAsk_AliasStillProbesIsActive(t *testing.T) {
+	dir := withAutostartTestEnv(t, "linux")
+	writeUnitFile(t, filepath.Join(dir, autostartUnitName), systemdAutostartUnit("/usr/local/bin/af", "", "", ""))
+	asked := map[string]bool{}
+	withProbeCommand(t, func(_ string, args ...string) probeResult {
+		asked[args[1]] = true
+		if args[1] == systemdIsEnabled {
+			return answered("alias\n", 0)
+		}
+		return answered("active\n", 0)
+	})
+
+	info := AutostartSupervision()
+	require.True(t, asked[systemdIsActive],
+		"systemd answered; an unmappable answer is not a reason to stop asking it things")
+	requireAnswer(t, "unknown", info.Enabled)
+	requireAnswer(t, "yes", info.Active, "and the answer we CAN have must be kept")
+}

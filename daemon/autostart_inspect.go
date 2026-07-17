@@ -208,18 +208,22 @@ func AutostartSupervision() SupervisionInfo {
 
 	switch autostartGOOS {
 	case "linux":
-		enabled, enabledWord := systemdAsk("is-enabled")
+		enabled, enabledWord := systemdAsk(systemdIsEnabled)
 		info.Enabled = enabled
-		if cause := info.Enabled.Cause(); cause != nil {
-			// systemd could not be reached at all, so is-active would fail the
-			// same way: asking again buys a second doomed subprocess and repeats
-			// one cause. Active stays the zero value — Undetermined — by
-			// construction.
+		if cause := info.Enabled.Cause(); errors.Is(cause, errSystemdUnreachable) {
+			// systemd could not be reached AT ALL, so is-active would fail the
+			// same way: asking again buys a second doomed subprocess (a second
+			// full timeout, if it is hanging) and repeats one cause.
+			//
+			// Gated on unreachability specifically, NOT on "Enabled is
+			// undetermined": systemd answering "alias" is undetermined for our
+			// question while systemd is perfectly reachable, and skipping
+			// is-active there would throw away an answer we could have had.
 			info.Active = Undetermined(cause)
 			info.Detail = "is-enabled=unknown is-active=unknown"
 			return info
 		}
-		active, activeWord := systemdAsk("is-active")
+		active, activeWord := systemdAsk(systemdIsActive)
 		info.Active = active
 		// The manager's own words, not our answer names: "failed" and
 		// "inactive" are both No, and the difference is the user's to see.
@@ -303,29 +307,105 @@ func systemdAsk(verb string) (ProbeAnswer, string) {
 	if !ok {
 		// The state renders as "unknown", never as whatever a dying probe
 		// managed to print: that text is a cause, not a state.
-		return Undetermined(fmt.Errorf("could not query systemd (%s): %w", verb, res.Cause())), "unknown"
+		return Undetermined(fmt.Errorf("could not query systemd (%s): %w: %w",
+			verb, errSystemdUnreachable, res.Cause())), "unknown"
 	}
 	word := firstLine(strings.TrimSpace(out))
-	switch {
-	case res.Succeeded():
-		return AnswerYes(), word
-	case res.ExitCode() == systemdNoSuchUnitExit, systemdNotFoundWords[word]:
-		// systemd answered that it has no such unit. Definite, and the one that
-		// matters most here: the unit FILE exists (we only probe when it does),
-		// so systemd not knowing it means it was never loaded — a real, fixable
-		// state that neither "inactive" nor "unknown" would have told anyone.
+
+	// systemd's exit code is a TRANSPORT fact — "the command ran, and roughly
+	// how it feels about it". The ANSWER is the word. Trusting exit 0 to mean
+	// "yes" is the same mistake as trusting an error to mean "no", one layer up:
+	// `systemctl is-enabled` exits 0 for static, indirect, alias, generated,
+	// transient and enabled-runtime, none of which mean "this starts at login".
+	// Reading exit 0 as enabled reported BROKEN autostart as healthy — and an
+	// unwarned user whose daemon never comes back after a reboot is the exact
+	// failure this whole feature exists to prevent.
+	//
+	// So the word decides, per verb (the vocabularies are disjoint: "static" is
+	// meaningless for is-active, "active" for is-enabled). The exit code gets
+	// exactly one job, below: systemd's not-found signal.
+	if res.ExitCode() == systemdNoSuchUnitExit {
 		return AnswerNotFound(), "not-found"
-	case systemdStateWords[word]:
-		// A recognized state word on a non-zero exit is a real negative answer
-		// ("inactive", "disabled"). The word itself goes to the report: "failed"
-		// and "inactive" are both No, and a user needs to know which.
-		return AnswerNo(), word
-	default:
-		// It ran, exited non-zero, and printed something that is not a state —
-		// "Failed to connect to bus: No medium found". The question never
-		// reached systemd, so there is no answer to report.
-		return Undetermined(systemdProbeErr(verb, out)), "unknown"
 	}
+	answers := systemdEnabledAnswers
+	if verb == systemdIsActive {
+		answers = systemdActiveAnswers
+	}
+	if answer, known := answers[word]; known {
+		return answer, word
+	}
+	// A word systemd never documents for this verb, or a diagnostic where a
+	// state belongs ("Failed to connect to bus..."). Either way we do not know
+	// what it means, and guessing in EITHER direction is how this bug family
+	// works.
+	return Undetermined(systemdProbeErr(verb, out)), "unknown"
+}
+
+const (
+	systemdIsEnabled = "is-enabled"
+	systemdIsActive  = "is-active"
+)
+
+// errSystemdAlias is why "alias" is not an answer to our question: it describes
+// the NAME we asked about, not whether af starts at login. Whether the unit it
+// aliases is enabled is a different query we did not make.
+var errSystemdAlias = errors.New("the unit name is an alias for another unit, so its enablement is that unit's, not this one's")
+
+// errSystemdUnreachable marks the causes where systemd itself could not be
+// asked — no binary, no bus, a timeout — as opposed to an answer we simply
+// cannot map to our question.
+//
+// The distinction is load-bearing: only the first justifies skipping the second
+// probe. Treating every Undetermined as "unreachable" would let an ALIAS answer
+// (systemd replying perfectly well) suppress the is-active query, which is the
+// same over-reading of a signal this file keeps being about.
+var errSystemdUnreachable = errors.New("systemd could not be queried")
+
+// systemdEnabledAnswers maps every word `systemctl is-enabled` documents
+// (systemctl(1)) to the answer it gives AF's actual question: WILL THE DAEMON
+// START AT LOGIN?
+//
+// That question is narrower than "did systemctl exit 0", and the difference is
+// the bug: six of these words exit 0 while meaning "no".
+var systemdEnabledAnswers = map[string]ProbeAnswer{
+	// The one word that means what we are asking. Exits 0.
+	"enabled": AnswerYes(),
+
+	// Exit 0, and NOT what we are asking:
+	"enabled-runtime": AnswerNo(), // enabled only in /run — gone after a reboot
+	"static":          AnswerNo(), // no [Install] section; cannot be enabled
+	"indirect":        AnswerNo(), // not enabled itself; only triggered by another
+	"generated":       AnswerNo(), // conjured by a generator, not a persistent install
+	"transient":       AnswerNo(), // created at runtime; will not survive a reboot
+	"alias":           Undetermined(errSystemdAlias),
+
+	// Exit non-zero, and definite:
+	"linked":         AnswerNo(), // symlinked into place but not enabled
+	"linked-runtime": AnswerNo(),
+	"masked":         AnswerNo(), // disabled entirely
+	"masked-runtime": AnswerNo(),
+	"disabled":       AnswerNo(),
+	"bad":            AnswerNo(), // the unit file is invalid, so nothing starts it
+
+	"not-found": AnswerNotFound(),
+}
+
+// systemdActiveAnswers maps every word `systemctl is-active` documents to the
+// answer for: IS THE DAEMON RUNNING NOW?
+var systemdActiveAnswers = map[string]ProbeAnswer{
+	// Running. Both exit 0.
+	"active":    AnswerYes(),
+	"reloading": AnswerYes(), // running; re-reading its config
+
+	// Not running, definitively. Exit non-zero.
+	"inactive":     AnswerNo(),
+	"failed":       AnswerNo(),
+	"activating":   AnswerNo(), // not up YET — a real answer, and not "up"
+	"deactivating": AnswerNo(),
+	"maintenance":  AnswerNo(),
+
+	// systemd's word for "I have no record of this unit".
+	"unknown": AnswerNotFound(),
 }
 
 func systemdProbeErr(verb, out string) error {
@@ -333,22 +413,6 @@ func systemdProbeErr(verb, out string) error {
 		return fmt.Errorf("could not query systemd (%s): %s", verb, firstLine(text))
 	}
 	return fmt.Errorf("could not query systemd (%s): it exited non-zero without a state", verb)
-}
-
-// systemdStateWords are the words systemctl prints when it has actually
-// answered is-enabled/is-active in the NEGATIVE. Anything else on a non-zero
-// exit ("Failed to connect to bus...") means the question never reached systemd;
-// "there is no such unit" is a different fact again and lives in
-// systemdNotFoundWords.
-var systemdStateWords = map[string]bool{
-	// is-active
-	"inactive": true, "activating": true, "deactivating": true,
-	"failed": true, "reloading": true, "maintenance": true,
-	// is-enabled
-	"disabled": true, "masked": true, "masked-runtime": true,
-	"static": true, "indirect": true, "linked": true,
-	"linked-runtime": true, "generated": true, "transient": true,
-	"enabled-runtime": true,
 }
 
 func firstLine(s string) string {
@@ -409,13 +473,6 @@ func launchdProbeErr(what string, res probeResult) error {
 
 // systemdNoSuchUnitExit is systemctl's exit code for a unit it has no record of.
 const systemdNoSuchUnitExit = 4
-
-// systemdNotFoundWords are what systemd prints when it knows of no such unit —
-// a DEFINITE answer, not an error, and not the same as "inactive".
-var systemdNotFoundWords = map[string]bool{
-	"not-found": true, // is-enabled
-	"unknown":   true, // is-active
-}
 
 // probeResult is the outcome of running one bounded service-manager command.
 //

@@ -511,3 +511,66 @@ func TestAutostartSupervision_RunningButUnitUnknown_StillWarns(t *testing.T) {
 	require.Contains(t, c.Detail, "won't start at login")
 	require.True(t, c.Problem)
 }
+
+// The user-visible verdict is what lied, so that is what this asserts.
+//
+// `systemctl is-enabled` exits 0 for "static", and doctor said "unit is enabled
+// and running" — a PASS. The user's daemon does not come back after a reboot and
+// doctor told them everything was fine. That is worse than any false negative
+// this PR has fixed: a false negative sends someone to poke a working system,
+// but this one leaves them broken and unwarned, which is the failure #1920
+// exists to prevent.
+func TestAutostartSupervision_ExitZeroButNotEnabled_IsNotHealthy(t *testing.T) {
+	testguard.IsolateTmux(t)
+
+	for _, word := range []string{"static", "indirect", "enabled-runtime", "generated", "transient"} {
+		t.Run(word, func(t *testing.T) {
+			opts := testOptions(t, false)
+			ourAutostartUnit(&opts)
+			opts.autostartSupervision = func() daemon.SupervisionInfo {
+				// What the classifier now yields for these: running, but not
+				// enabled to start at login.
+				return daemon.SupervisionInfo{
+					Supported: true, UnitPresent: true,
+					Active:  daemon.AnswerYes(),
+					Enabled: daemon.AnswerNo(),
+					Detail:  "is-enabled=" + word + " is-active=active",
+				}
+			}
+
+			report, err := Run(opts)
+			require.NoError(t, err)
+
+			c := findCheck(t, report, "autostart supervision")
+			require.NotEqual(t, StatusPass, c.Status,
+				"is-enabled=%s exits 0 but nothing starts af at login — this must never read as healthy", word)
+			require.Contains(t, c.Detail, "won't start at login")
+			require.Contains(t, c.Detail, word, "and the user must see WHICH state systemd reported")
+			require.True(t, c.Problem, "an autostart that will not autostart is a real problem")
+		})
+	}
+}
+
+// The alias case, end to end: unknowable enablement must not read as healthy
+// either — but it is advisory, because we did not observe a fault.
+func TestAutostartSupervision_AliasEnablement_IsUnknownNotHealthy(t *testing.T) {
+	testguard.IsolateTmux(t)
+
+	opts := testOptions(t, false)
+	ourAutostartUnit(&opts)
+	opts.autostartSupervision = func() daemon.SupervisionInfo {
+		return daemon.SupervisionInfo{
+			Supported: true, UnitPresent: true,
+			Active:  daemon.AnswerYes(),
+			Enabled: daemon.Undetermined(errors.New("the unit name is an alias for another unit")),
+		}
+	}
+
+	report, err := Run(opts)
+	require.NoError(t, err)
+
+	c := findCheck(t, report, "autostart supervision")
+	require.Equal(t, StatusWarn, c.Status)
+	require.Contains(t, c.Detail, "unknown")
+	require.False(t, c.Problem, "we did not observe a fault, so we do not assert one")
+}
