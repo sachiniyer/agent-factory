@@ -239,11 +239,22 @@ func (m *home) showTasksOverlay() (tea.Model, tea.Cmd) {
 // edit isn't silent. The configured quit key is root-routed before the task
 // form can type it into an input, and ctrl+c still quits from normal mode.
 func (m *home) handleStateTasks(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	if msg.String() == "ctrl+c" || key.Matches(msg, keys.GlobalKeyBindings[keys.KeyQuit]) {
+	sp := m.automations.TaskPane()
+
+	// ctrl+c is unconditional: the form consumes it as "cancel", so routing it
+	// here is the only thing that keeps a hard exit available from inside a
+	// focused field (#1727).
+	if msg.String() == "ctrl+c" {
+		return m.handleQuit()
+	}
+	// The CONFIGURED quit key is gated on focus (#1961). It used to be routed
+	// unconditionally alongside ctrl+c, which made "q" untypeable in a task name
+	// or prompt — and a quit key is an ordinary character to a text field. The
+	// user is not wedged: ctrl+c above still quits, and esc closes the form.
+	if !sp.IsEditing() && !sp.IsCreating() && key.Matches(msg, keys.GlobalKeyBindings[keys.KeyQuit]) {
 		return m.handleQuit()
 	}
 
-	sp := m.automations.TaskPane()
 	consumed := sp.HandleKeyPress(msg)
 
 	if !sp.HasFocus() {
@@ -356,7 +367,12 @@ func (m *home) handleStateConfigEditor(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // configured quit key is root-routed before the pane can type it into an edit
 // field, and ctrl+c still quits from normal mode.
 func (m *home) handleStateHooks(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	if msg.String() == "ctrl+c" || key.Matches(msg, keys.GlobalKeyBindings[keys.KeyQuit]) {
+	// ctrl+c is unconditional (#1727); the configured quit key is gated on a
+	// focused field (#1961). See handleStateTasks for the full argument.
+	if msg.String() == "ctrl+c" {
+		return m.handleQuit()
+	}
+	if !m.hooksPane.IsEditing() && key.Matches(msg, keys.GlobalKeyBindings[keys.KeyQuit]) {
 		return m.handleQuit()
 	}
 

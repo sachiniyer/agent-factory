@@ -50,7 +50,22 @@ func TestHandleStateSelectProgramSwitchesAgent(t *testing.T) {
 	assert.Equal(t, tmux.ProgramCodex, h.pendingProgram)
 }
 
-func TestPaneOverlaysQuitWithReboundKeyBeforeEditFieldsConsumeIt(t *testing.T) {
+// TestPaneOverlaysTypeTheReboundQuitKeyIntoFocusedEditFields is the #1961 fix,
+// and it INVERTS what this test asserted before.
+//
+// It used to pin that a rebound quit key ("Q") quits even while a form field is
+// focused — so "Q" could not be typed into a task name or a hook command at all.
+// That came from #1727, whose actual concern was ctrl+c: the form consumes
+// ctrl+c as "cancel", so the hard exit had to be routed before the pane saw it.
+// Hoisting the check took the CONFIGURED quit key along with it, and that half
+// was never independently argued for.
+//
+// It is wrong. A quit key is an ordinary character to a text field: "q" appears
+// in sqlite, in any URL with a query string, in /home/quentin. #1961.
+//
+// The user is not wedged: ctrl+c still quits from anywhere (pinned below), and
+// esc closes the form, after which the quit key quits normally.
+func TestPaneOverlaysTypeTheReboundQuitKeyIntoFocusedEditFields(t *testing.T) {
 	require.NoError(t, keys.ApplyOverrides(map[string][]string{"quit": {"Q"}}))
 	t.Cleanup(func() { require.NoError(t, keys.ApplyOverrides(nil)) })
 
@@ -63,7 +78,8 @@ func TestPaneOverlaysQuitWithReboundKeyBeforeEditFieldsConsumeIt(t *testing.T) {
 
 		_, cmd := h.handleStateTasks(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("Q")})
 
-		assert.True(t, reachesQuit(cmd), "rebound quit must quit before the task form types it")
+		assert.False(t, reachesQuit(cmd), "the rebound quit key must reach the task form, not quit af (#1961)")
+		assert.True(t, tp.IsCreating(), "typing must not tear down the form")
 	})
 
 	t.Run("hooks add form", func(t *testing.T) {
@@ -74,66 +90,110 @@ func TestPaneOverlaysQuitWithReboundKeyBeforeEditFieldsConsumeIt(t *testing.T) {
 
 		_, cmd := h.handleStateHooks(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("Q")})
 
-		assert.True(t, reachesQuit(cmd), "rebound quit must quit before the hooks form types it")
+		assert.False(t, reachesQuit(cmd), "the rebound quit key must reach the hooks form, not quit af (#1961)")
+		assert.True(t, h.hooksPane.IsEditing(), "typing must not tear down the form")
 	})
 }
 
-// TestHooksOverlayQuitKeysBypassFocusedEditForm is the regression guard for
-// #1727: in the hooks add/edit form the pane consumes ctrl+c as "cancel form",
-// so handleStateHooks must route ctrl+c (and the configured quit key) to the
-// hard-quit path before the pane sees it — matching handleStateTasks.
-func TestHooksOverlayQuitKeysBypassFocusedEditForm(t *testing.T) {
+// TestPaneOverlaysQuitKeyStillQuitsOutsideAFocusedField is the other half of the
+// #1961 contract: the gate is on the FIELD, not on the overlay. With no field
+// taking runes, these overlays are ordinary lists and the quit key quits.
+func TestPaneOverlaysQuitKeyStillQuitsOutsideAFocusedField(t *testing.T) {
 	require.NoError(t, keys.ApplyOverrides(nil))
 	t.Cleanup(func() { require.NoError(t, keys.ApplyOverrides(nil)) })
 
-	for _, tc := range []struct {
-		name string
-		msg  tea.KeyMsg
-	}{
-		{name: "configured quit", msg: tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")}},
-		{name: "ctrl+c hard quit", msg: tea.KeyMsg{Type: tea.KeyCtrlC}},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			h := newTestHome(t)
-			h.hooksPane.SetFocus(true)
-			h.state = stateHooks
+	t.Run("tasks list mode", func(t *testing.T) {
+		h := newTestHome(t)
+		tp := h.automations.TaskPane()
+		tp.SetFocus(true)
+		h.state = stateTasks
+		require.False(t, tp.IsEditing() || tp.IsCreating(), "precondition: no field open")
 
-			// Enter the add form and type into it, then attempt to quit.
-			_, _ = h.handleStateHooks(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("n")})
-			_, _ = h.handleStateHooks(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("draft")})
-			_, cmd := h.handleStateHooks(tc.msg)
+		_, cmd := h.handleStateTasks(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")})
 
-			assert.True(t, reachesQuit(cmd), "%s must quit before the hooks form consumes it", tc.name)
-			assert.True(t, h.hooksPane.HasFocus(), "quit routing must not first cancel the form and drop focus")
-		})
-	}
+		assert.True(t, reachesQuit(cmd), "with no field open, the quit key must quit")
+	})
+
+	t.Run("hooks list mode", func(t *testing.T) {
+		h := newTestHome(t)
+		h.hooksPane.SetFocus(true)
+		h.state = stateHooks
+		require.False(t, h.hooksPane.IsEditing(), "precondition: no field open")
+
+		_, cmd := h.handleStateHooks(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")})
+
+		assert.True(t, reachesQuit(cmd), "with no field open, the quit key must quit")
+	})
 }
 
-func TestTaskOverlayQuitKeysBypassFocusedCreateForm(t *testing.T) {
+// TestHooksOverlayCtrlCBypassesFocusedEditForm is the regression guard for
+// #1727, narrowed to what #1727 is actually about.
+//
+// In the hooks add/edit form the pane consumes ctrl+c as "cancel form" and
+// returns true, so the trailing !consumed fallback never fires. handleStateHooks
+// must therefore route ctrl+c to the hard-quit path before the pane sees it, or
+// a user can be wedged inside the form.
+//
+// It no longer covers the CONFIGURED quit key: that half was carried along by
+// #1727 without its own argument, and it made "q" untypeable in a hook command
+// (#1961). ctrl+c staying unconditional is exactly what makes gating the quit key
+// on focus safe — there is always a hard exit.
+func TestHooksOverlayCtrlCBypassesFocusedEditForm(t *testing.T) {
 	require.NoError(t, keys.ApplyOverrides(nil))
 	t.Cleanup(func() { require.NoError(t, keys.ApplyOverrides(nil)) })
 
-	for _, tc := range []struct {
-		name string
-		msg  tea.KeyMsg
-	}{
-		{name: "configured quit", msg: tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")}},
-		{name: "ctrl+c hard quit", msg: tea.KeyMsg{Type: tea.KeyCtrlC}},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			h := newTestHome(t)
-			tp := h.automations.TaskPane()
-			tp.SetFocus(true)
-			tp.EnterCreateMode("/tmp/repo")
-			h.state = stateTasks
+	h := newTestHome(t)
+	h.hooksPane.SetFocus(true)
+	h.state = stateHooks
 
-			_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("draft")})
-			_, cmd := h.handleStateTasks(tc.msg)
+	// Enter the add form and type into it, then attempt the hard exit.
+	_, _ = h.handleStateHooks(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("n")})
+	_, _ = h.handleStateHooks(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("draft")})
+	_, cmd := h.handleStateHooks(tea.KeyMsg{Type: tea.KeyCtrlC})
 
-			assert.True(t, reachesQuit(cmd), "%s must quit before the form consumes it", tc.name)
-			assert.True(t, tp.IsCreating(), "quit routing must not first cancel the form")
-		})
-	}
+	assert.True(t, reachesQuit(cmd), "ctrl+c must quit before the hooks form consumes it (#1727)")
+}
+
+// TestTaskOverlayCtrlCBypassesFocusedCreateForm is the tasks-side #1727 guard,
+// narrowed to ctrl+c for the reason #1961 gives: the configured quit key is a
+// character to a focused field, ctrl+c is not. ctrl+c staying unconditional is
+// what keeps a hard exit available from inside the form, and therefore what makes
+// gating the quit key on focus safe.
+func TestTaskOverlayCtrlCBypassesFocusedCreateForm(t *testing.T) {
+	require.NoError(t, keys.ApplyOverrides(nil))
+	t.Cleanup(func() { require.NoError(t, keys.ApplyOverrides(nil)) })
+
+	h := newTestHome(t)
+	tp := h.automations.TaskPane()
+	tp.SetFocus(true)
+	tp.EnterCreateMode("/tmp/repo")
+	h.state = stateTasks
+
+	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("draft")})
+	_, cmd := h.handleStateTasks(tea.KeyMsg{Type: tea.KeyCtrlC})
+
+	assert.True(t, reachesQuit(cmd), "ctrl+c must quit before the form consumes it (#1727)")
+	assert.True(t, tp.IsCreating(), "quit routing must not first cancel the form")
+}
+
+// TestTaskOverlayConfiguredQuitKeyTypesIntoFocusedCreateForm is the tasks-side
+// #1961 fix: "q" is a character here. A task prompt is English text — "query the
+// API", "quit early if…" — and a task name can be anything.
+func TestTaskOverlayConfiguredQuitKeyTypesIntoFocusedCreateForm(t *testing.T) {
+	require.NoError(t, keys.ApplyOverrides(nil))
+	t.Cleanup(func() { require.NoError(t, keys.ApplyOverrides(nil)) })
+
+	h := newTestHome(t)
+	tp := h.automations.TaskPane()
+	tp.SetFocus(true)
+	tp.EnterCreateMode("/tmp/repo")
+	h.state = stateTasks
+
+	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("draft")})
+	_, cmd := h.handleStateTasks(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")})
+
+	assert.False(t, reachesQuit(cmd), "the quit key must reach the focused form, not quit af (#1961)")
+	assert.True(t, tp.IsCreating(), "typing must not tear down the form")
 }
 
 // TestHandleStateTasks_PendingCreateFlushesDirtyTaskState is the regression

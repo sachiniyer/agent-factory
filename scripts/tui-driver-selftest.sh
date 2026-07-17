@@ -376,7 +376,12 @@ _expect_config_editor_writes() {
     af_send Enter
 
     af_wait_for 'set default_program = codex' "$AF_DRIVER_TIMEOUT" 'config write echo' || return 1
-    af_wait_for 'af daemon restart' "$AF_DRIVER_TIMEOUT" 'config restart notice' || return 1
+    # Match a fragment that survives the overlay's line wrap. The notice reads
+    # "… run `af daemon restart` and restart af to apply", and at the driver's
+    # fixed 100x30 the wrap falls between "af" and "daemon restart" — so the full
+    # phrase is NOT greppable on one line. Verified against a real capture rather
+    # than guessed; the fixed terminal size is what makes it deterministic.
+    af_wait_for 'daemon restart' "$AF_DRIVER_TIMEOUT" 'config restart notice' || return 1
     af_close_config || return 1
 
     # It reached the real file, through the real writer.
@@ -399,7 +404,11 @@ _expect_config_editor_rejects() {
     af_send_literal 'emacs' || return 1
     af_send Enter
 
-    af_wait_for 'default_program' "$AF_DRIVER_TIMEOUT" 'validator error' || return 1
+    # The validator's own message, not one the pane invented: "default_program
+    # must be one of [claude, codex, aider, gemini, amp], got "emacs"…".
+    # Waiting on 'default_program' here would be VACUOUS — the key is on screen
+    # whether or not the value was refused.
+    af_wait_for 'must be one of' "$AF_DRIVER_TIMEOUT" 'validator error' || return 1
     af_refute_screen 'set default_program = emacs' 'a rejected value must not echo as written' || return 1
     grep -q "default_program = 'emacs'" "$AGENT_FACTORY_HOME/config.toml" && {
         printf 'a REJECTED value reached config.toml\n'
@@ -415,6 +424,9 @@ step "close the tasks overlay after create"                 af_close_tasks
 step "reopen tasks — edit-mode overlay recognized (#1757)"  af_open_tasks
 step "assert the task editor shows the run action"          af_assert_screen "$_AF_TASKS_RUN_HINT" 'task-overlay run action'
 step "close the tasks overlay"                              af_close_tasks
+
+step "open the config editor (,) and write through the real path"  _expect_config_editor_writes
+step "config editor refuses an invalid value with the CLI error"   _expect_config_editor_rejects
 
 step "open beta's tab as a pane"                            af_open_pane
 step "enter interactive mode and probe literal send"         _enter_interactive_and_probe_literal_send

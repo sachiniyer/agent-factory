@@ -48,6 +48,14 @@ func (h *HooksPane) IsDirty() bool {
 	return h.dirty
 }
 
+// IsEditing reports whether a text field is focused and taking runes (the add
+// form or an inline edit).
+//
+// The app asks before root-routing the configured quit key (#1961): while a hook
+// command is being typed, "q" is a character, not an exit. ctrl+c still quits
+// unconditionally, which is what #1727 is actually about.
+func (h *HooksPane) IsEditing() bool { return h.editing || h.adding }
+
 func (h *HooksPane) HasFocus() bool {
 	return h.hasFocus
 }

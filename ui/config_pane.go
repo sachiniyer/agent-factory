@@ -471,3 +471,10 @@ func (c *ConfigPane) renderHints() string {
 	}
 	return configHintStyle.Render("\n↑/↓ move · ↵ edit · " + advanced + " · esc close")
 }
+
+// SetEditValueForTest and EditValueForTest expose the value field's buffer to
+// the app package's tests, which drive the REAL handleStateConfigEditor (where
+// the #1961 quit-key bug class lives) and must assert what actually reached the
+// field. The pane's own tests reach c.input directly; app's cannot.
+func (c *ConfigPane) SetEditValueForTest(v string) { c.input.SetValue(v) }
+func (c *ConfigPane) EditValueForTest() string     { return c.input.Value() }
