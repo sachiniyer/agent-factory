@@ -1104,6 +1104,25 @@
       },
       "verdict": "deliberate",
       "notes": "A shell integration emitted for the user's shell rc. There is nothing to complete in a TUI or a browser, so the other surfaces have no analogue. Added by cobra lazily at Execute() time, which is why the derivation must init cobra's defaults before walking the tree — otherwise this surface exists and the inventory cannot see it."
+    },
+    {
+      "id": "enum.agent-programs",
+      "title": "Offer the full set of agent programs af supports",
+      "tui": {
+        "status": "yes",
+        "pointer": "app/handle_input.go:121-123 reads tmux.SupportedPrograms"
+      },
+      "web": {
+        "status": "partial",
+        "pointer": "web/src/modals.ts:173 hardcodes a COPY of the list"
+      },
+      "cli": {
+        "status": "yes",
+        "pointer": "commands/root.go:246 + api/api.go:586 advertise tmux.SupportedProgramsString()"
+      },
+      "verdict": "real-gap",
+      "issue": "#1970",
+      "notes": "A third drift dimension under verbs and fields: the VALUES a surface offers for a field. The TUI and CLI read tmux.SupportedPrograms (session/tmux/session.go:22); the web keeps its own copy. The lists MATCH today, so this is a live hazard rather than a live divergence — add a sixth agent server-side and the web silently never offers it while every field-level check stays green (the web does send `program`, so coverage calls it covered). Reported by the #1933 session, which found the same shape one level down. TestWebProgramEnumMatchesWire makes the drift loud in the meantime; the structural fix is to SERVE the enum, per the ListBackends reference implementation in #1968."
     }
   ],
   "ledger": {

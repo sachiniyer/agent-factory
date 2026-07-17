@@ -73,7 +73,7 @@ A hand-maintained table would drift, which is the failure this exists to catch.
 So the only hand-maintained part is the **verdict** — the judgment a machine
 cannot make. Everything else is read out of the code at test time.
 
-## Two levels: verbs and options
+## Three levels: verbs, options, enums
 
 A verb-level check alone is not enough, and that is not a theory — it is how
 [#1948](https://github.com/sachiniyer/agent-factory/issues/1948) got missed.
@@ -83,12 +83,13 @@ the CLI sends none, so the CLI can only ever see tab 0. The verb was present and
 the **options** were not. It was found by someone using the product, not by this
 check.
 
-So the check works at two levels:
+So the check works at three levels, each blind to the one below it:
 
 | Level | Question | Derived from |
 |---|---|---|
 | **Verb** | can this surface do X at all? | the cobra tree, the route catalog, the binding table, the web's RPC call sites |
 | **Option** | can it do X with the options the daemon accepts? | CLI flags off the cobra tree; the wire structs by reflection, vs the AST of `api/`+`app/` and the web's request bodies |
+| **Enum** | does it offer the same VALUES for those options? | the canonical Go enum, vs what a surface actually lists |
 
 The option level is where the interesting gaps live, because they hide behind a
 verb that looks present. Three of the same shape so far — a field the daemon
@@ -98,6 +99,17 @@ accepts that a surface never sends:
   never sets `CreateSessionRequest.Backend`
 - [#1948](https://github.com/sachiniyer/agent-factory/issues/1948) — the CLI
   never sets `PreviewRequest.Tab` / `TabID` / `Full`
+
+The **enum** level is the newest and the easiest to miss, because the other two
+both pass while it drifts. `web/src/modals.ts:173` hardcodes a copy of
+`tmux.SupportedPrograms` ([#1970](https://github.com/sachiniyer/agent-factory/issues/1970)):
+the web *does* send `program`, so field coverage calls it covered, and adding a
+sixth agent server-side would leave the web silently unable to offer it with the
+whole suite green. A surface serving a stale copy of something the daemon owns is
+the #1933 shape one level down, so it gets the same answer — derive both sides
+and compare, rather than trusting a copy to stay in step. The structural fix is
+to SERVE the enum (the `ListBackends` pattern), at which point the check is
+deleted and the row flips to `parity`.
 
 Every field a surface does not send must be declared in `field_coverage` as
 either `{"gap": "<capability-id>"}` (a tracked divergence) or `{"ok": "<reason>"}`
