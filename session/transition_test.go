@@ -27,13 +27,58 @@ func swapIllegalHook(t *testing.T, h func(string)) {
 // TestTransitionTable_EveryKindHasSpec is the table-exhaustiveness guard: every
 // transitionKind must have a fully-populated edge spec. A new event added
 // without a table row fails here instead of silently no-op'ing at runtime.
+//
+// It also requires an explicit runEffect (#1892). The task-run marker was wrong
+// four times — at completion, archive-failure, the Lost→Running race, and
+// archive-commit — and every one was a transition nobody had asked "does the run
+// still own a slot here?" about. A fact is only as good as the coverage of its
+// lifecycle, so omission fails here rather than defaulting to "keep" and becoming
+// the fifth door.
 func TestTransitionTable_EveryKindHasSpec(t *testing.T) {
 	for k := transitionKind(0); k < numTransitionKinds; k++ {
 		spec, ok := transitionTable[k]
 		require.Truef(t, ok, "transition kind %s has no table entry", k)
 		require.NotNilf(t, spec.allowedFrom, "transition kind %s: nil allowedFrom", k)
 		require.NotNilf(t, spec.target, "transition kind %s: nil target", k)
+		require.NotEqualf(t, runEffectUnset, spec.run,
+			"transition kind %s does not declare a runEffect: say whether a task run is still in flight "+
+				"after this transition (#1892). If you are unsure, that uncertainty is the bug.", k)
 	}
+}
+
+// TestTransitionTable_RunEffectsAreTheAgreedTable pins the enumeration itself, so
+// a silent re-answer of any one edge is a failing test rather than a review catch.
+// The reasoning for each lives on the table rows; this is the ledger.
+func TestTransitionTable_RunEffectsAreTheAgreedTable(t *testing.T) {
+	want := map[transitionKind]runEffect{
+		// Opening/booting the session: the run is under way.
+		tkBeginCreate: runKeep,
+		tkConfirmLive: runKeep,
+		// The only edge that can settle the agent idle, which is what ends a run.
+		tkObserveLiveness: runEndsOnIdleEdge,
+		// Kill overlays: revertible, so they decide nothing. The tombstone and the
+		// record deletion release the slot on their own.
+		tkBeginKill:  runKeep,
+		tkRevertKill: runKeep,
+		// Archive: only the OUTCOME answers. Commit ends the run for good; abort
+		// leaves it exactly as interrupted as it was.
+		tkBeginArchive:       runKeep,
+		tkCommitArchive:      runEnds,
+		tkAbortArchiveToLost: runKeep,
+		// Restore: un-shelving returns a workspace to a user; it never re-opens a
+		// task's run (and cannot — the marker is already false after the commit).
+		tkBeginRestore:       runKeep,
+		tkAbortRestoreToLost: runKeep,
+		tkMarkRestoring:      runKeep,
+		// Dropping an overlay reveals liveness; it does not change the agent's work.
+		tkClearOp: runKeep,
+	}
+	for k := transitionKind(0); k < numTransitionKinds; k++ {
+		w, ok := want[k]
+		require.Truef(t, ok, "transition kind %s is missing from the run-effect ledger", k)
+		require.Equalf(t, w, transitionTable[k].run, "transition kind %s changed its run effect", k)
+	}
+	require.Len(t, want, int(numTransitionKinds), "the ledger must cover every kind, and only real kinds")
 }
 
 // TestTransition_LegalEdgesApply drives one canonical legal transition per event

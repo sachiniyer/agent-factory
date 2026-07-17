@@ -18,6 +18,81 @@ import (
 // blow past max_concurrent_runs when RestoreLostSessions revived the originals —
 // exactly the breach #1892 exists to prevent, arriving through the back door.
 
+// bootedTaskSession builds a task-spawned session in the state a REAL one reaches
+// once its create completes: started, and Running because CreateSession's spawn
+// ends in ConfirmLive.
+//
+// Booting through Running matters and is not ceremony. A session is born
+// LiveReady — before its agent has run — so the run ends on the EDGE into idle,
+// not on the state. A hand-built instance left at its birth Ready never crosses
+// that edge, so it would never look finished no matter how many times the poll
+// observed it idle. That is a property of the fixture, not of production: every
+// real session passes through Running first (see
+// TestBirthReadyIsNotAFinishedRun, which pins the distinction).
+func bootedTaskSession(t *testing.T, title string) *session.Instance {
+	t.Helper()
+	inst, err := session.NewInstance(session.InstanceOptions{
+		Title: title, TaskID: "task1", Path: t.TempDir(), Program: "claude",
+	})
+	if err != nil {
+		t.Fatalf("NewInstance: %v", err)
+	}
+	inst.SetStartedForTest(true)
+	if err := inst.Transition(session.ObserveLiveness(session.LiveRunning)); err != nil {
+		t.Fatalf("boot to running: %v", err)
+	}
+	return inst
+}
+
+// TestBirthReadyIsNotAFinishedRun pins the edge semantics that bootedTaskSession
+// depends on, in both directions.
+//
+// A session is constructed LiveReady before its agent exists, so "the agent is
+// idle" cannot mean "liveness == Ready" — that would end every task run at birth,
+// the moment it was created, and a capped task would never count anything. The run
+// ends on the TRANSITION into Ready from somewhere else, which is an agent
+// finishing a turn.
+func TestBirthReadyIsNotAFinishedRun(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	installInstantBackend(t)
+
+	newborn, err := session.NewInstance(session.InstanceOptions{
+		Title: "newborn", TaskID: "task1", Path: t.TempDir(), Program: "claude",
+	})
+	if err != nil {
+		t.Fatalf("NewInstance: %v", err)
+	}
+	if !newborn.TaskRunActive() {
+		t.Fatal("a task session's run opens at creation")
+	}
+
+	// The create fence goes up. The session is still sitting at its birth Ready,
+	// but its run has not started, let alone finished.
+	if err := newborn.Transition(session.BeginCreate()); err != nil {
+		t.Fatalf("begin create: %v", err)
+	}
+	if !newborn.TaskRunActive() {
+		t.Fatal("raising the create fence must not end the run")
+	}
+	if !holdsTaskRunSlot(newborn.LifecycleView()) {
+		t.Fatal("a mid-create session holds its slot — this is the window the whole cap exists for")
+	}
+
+	// The agent comes up, then finishes. NOW the run is over.
+	if err := newborn.Transition(session.ConfirmLive()); err != nil {
+		t.Fatalf("confirm live: %v", err)
+	}
+	if !newborn.TaskRunActive() {
+		t.Fatal("a spawn completing says the agent is up, not that its work is done")
+	}
+	if err := newborn.Transition(session.ObserveLiveness(session.LiveReady)); err != nil {
+		t.Fatalf("ready: %v", err)
+	}
+	if newborn.TaskRunActive() {
+		t.Fatal("the agent transitioned into idle: the run is over")
+	}
+}
+
 // markLost drives a session to Lost through the same daemon-truth edge the status
 // poll uses when it finds the backing tmux gone.
 func markLost(t *testing.T, m *Manager, repoID, title string) *session.Instance {
@@ -337,15 +412,11 @@ func TestTaskRunActiveSurvivesRestart(t *testing.T) {
 
 	newLostFrom := func(t *testing.T, title string, from session.Liveness) session.InstanceData {
 		t.Helper()
-		inst, err := session.NewInstance(session.InstanceOptions{
-			Title: title, TaskID: "task1", Path: t.TempDir(), Program: "claude",
-		})
-		if err != nil {
-			t.Fatalf("NewInstance: %v", err)
-		}
-		inst.SetStartedForTest(true)
-		if err := inst.Transition(session.ObserveLiveness(from)); err != nil {
-			t.Fatalf("transition to %v: %v", from, err)
+		inst := bootedTaskSession(t, title)
+		if from != session.LiveRunning {
+			if err := inst.Transition(session.ObserveLiveness(from)); err != nil {
+				t.Fatalf("transition to %v: %v", from, err)
+			}
 		}
 		if err := inst.Transition(session.ObserveLiveness(session.LiveLost)); err != nil {
 			t.Fatalf("transition to lost: %v", err)
@@ -425,6 +496,125 @@ func TestFailedArchiveOfCompletedRunDoesNotReclaimSlot(t *testing.T) {
 	// The consequence that matters: new events still land.
 	if _, err := createForTask(manager, repoPath, "task1", "archived", limit); err != nil {
 		t.Fatalf("a new event must not be parked behind a completed run whose archive failed: %v", err)
+	}
+}
+
+// TestRestoredArchiveDoesNotReclaimSlot is the regression for the marker
+// surviving an archive (#1892).
+//
+// Archiving a session releases its slot even mid-run — the user parked it
+// deliberately. But CommitArchive lands on Archived, which is terminal rather than
+// idle, so a rule that only ends a run when the agent goes idle left the marker
+// TRUE on a shelved session. Another event then takes the freed slot, and when the
+// user later RESTORES the archive, BeginRestore/ConfirmLive brings the old run
+// back — now the task has two runs against a cap of one.
+//
+// This is the fourth door onto the same question, which is why the answer now
+// lives per-transition in the table rather than being re-derived at each one.
+func TestRestoredArchiveDoesNotReclaimSlot(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	installInstantBackend(t)
+	repoPath := setupControlRepo(t)
+	repo, err := config.RepoFromPath(repoPath)
+	if err != nil {
+		t.Fatalf("RepoFromPath: %v", err)
+	}
+	manager, err := NewManager(config.DefaultConfig())
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+
+	const limit = 1
+	data, err := createForTask(manager, repoPath, "task1", "shelved", limit)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	manager.mu.Lock()
+	first := manager.instances[daemonInstanceKey(repo.ID, data.Title)]
+	manager.mu.Unlock()
+
+	// Archived while STILL BUSY — the run never finished, which is what makes this
+	// the hard case: "the agent went idle" never happened.
+	if err := first.Transition(session.ObserveLiveness(session.LiveRunning)); err != nil {
+		t.Fatalf("running: %v", err)
+	}
+	if err := first.Transition(session.BeginArchive()); err != nil {
+		t.Fatalf("begin archive: %v", err)
+	}
+	if err := first.Transition(session.CommitArchive()); err != nil {
+		t.Fatalf("commit archive: %v", err)
+	}
+	if holdsTaskRunSlot(first.LifecycleView()) {
+		t.Fatal("an archived session holds no slot: the user parked it, and holding until someone restored it would wedge the task")
+	}
+
+	// The freed slot is taken by the next event.
+	if _, err := createForTask(manager, repoPath, "task1", "shelved", limit); err != nil {
+		t.Fatalf("the archived session freed its slot, so the next event must land: %v", err)
+	}
+
+	// The user restores the archived session. Its old run must NOT come back — the
+	// task is already at its cap with the replacement.
+	if err := first.Transition(session.BeginRestore()); err != nil {
+		t.Fatalf("begin restore: %v", err)
+	}
+	if holdsTaskRunSlot(first.LifecycleView()) {
+		t.Fatal("restoring an archived session must not resurrect its task run; the slot it once held is gone")
+	}
+	if err := first.Transition(session.ConfirmLive()); err != nil {
+		t.Fatalf("confirm live: %v", err)
+	}
+	if holdsTaskRunSlot(first.LifecycleView()) {
+		t.Fatal("a restored archive that comes back Running must not re-take the task's slot")
+	}
+
+	// The consequence: exactly one run is counted — the replacement — not two.
+	manager.mu.Lock()
+	n := manager.countTaskRunsLocked(repo.ID, "task1")
+	manager.mu.Unlock()
+	if n != 1 {
+		t.Fatalf("the cap is 1 and one replacement run is live; counted %d (a restored archive re-took a slot it had given up)", n)
+	}
+}
+
+// TestAgentIdleDuringArchiveEndsTheRun: the agent can finish its turn WHILE the
+// daemon is archiving the session. The run ends there — the agent is idle,
+// whatever the daemon is busy doing — so a subsequent archive failure rolling back
+// to Lost must not present it as an interrupted run.
+//
+// This is the archive-abort door reached one step earlier, and it is why the idle
+// edge reads the LIVENESS axis rather than ClassifyActivity, which calls any
+// in-flight op pending and would miss the agent settling.
+func TestAgentIdleDuringArchiveEndsTheRun(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	installInstantBackend(t)
+
+	inst, err := session.NewInstance(session.InstanceOptions{
+		Title: "idle-mid-archive", TaskID: "task1", Path: t.TempDir(), Program: "claude",
+	})
+	if err != nil {
+		t.Fatalf("NewInstance: %v", err)
+	}
+	inst.SetStartedForTest(true)
+	if err := inst.Transition(session.ObserveLiveness(session.LiveRunning)); err != nil {
+		t.Fatalf("running: %v", err)
+	}
+	if err := inst.Transition(session.BeginArchive()); err != nil {
+		t.Fatalf("begin archive: %v", err)
+	}
+	// The agent finishes its turn mid-teardown.
+	if err := inst.Transition(session.ObserveLiveness(session.LiveReady)); err != nil {
+		t.Fatalf("ready during archive: %v", err)
+	}
+	if inst.TaskRunActive() {
+		t.Fatal("the agent went idle: the run is over, even though the daemon is mid-archive")
+	}
+	// The archive then fails.
+	if err := inst.Transition(session.AbortArchiveToLost()); err != nil {
+		t.Fatalf("abort archive: %v", err)
+	}
+	if holdsTaskRunSlot(inst.LifecycleView()) {
+		t.Fatal("a run that finished mid-archive must not hold a slot after the archive fails")
 	}
 }
 
@@ -601,22 +791,12 @@ func TestHoldsTaskRunSlot(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 	installInstantBackend(t)
 
-	newInst := func(t *testing.T, title string) *session.Instance {
-		t.Helper()
-		inst, err := session.NewInstance(session.InstanceOptions{
-			Title: title, TaskID: "task1", Path: t.TempDir(), Program: "claude",
-		})
-		if err != nil {
-			t.Fatalf("NewInstance: %v", err)
-		}
-		inst.SetStartedForTest(true)
-		return inst
-	}
+	// Every fixture boots through Running, as a real session does — see
+	// bootedTaskSession. The run ends on the EDGE into idle, so a session parked at
+	// its birth Ready has not finished anything.
+	newInst := bootedTaskSession
 
 	working := newInst(t, "working")
-	if err := working.Transition(session.ObserveLiveness(session.LiveRunning)); err != nil {
-		t.Fatalf("transition: %v", err)
-	}
 	if !holdsTaskRunSlot(working.LifecycleView()) {
 		t.Fatal("a working session holds its slot")
 	}
@@ -630,12 +810,9 @@ func TestHoldsTaskRunSlot(t *testing.T) {
 	}
 
 	// Lost splits on whether the RUN was still in flight — the two rows are
-	// indistinguishable by their current state, which is the whole reason the
-	// verdict is captured on the edge into Lost.
+	// indistinguishable by their current state, which is the whole reason the run's
+	// own lifetime is recorded rather than inferred here.
 	lostBusy := newInst(t, "lost-busy")
-	if err := lostBusy.Transition(session.ObserveLiveness(session.LiveRunning)); err != nil {
-		t.Fatalf("transition: %v", err)
-	}
 	if err := lostBusy.Transition(session.ObserveLiveness(session.LiveLost)); err != nil {
 		t.Fatalf("transition: %v", err)
 	}
