@@ -339,12 +339,61 @@ pointing at one).`,
 }
 
 var (
-	sendPromptCreateFlag      bool
-	sendPromptProgramFlag     string
+	sendPromptCreateFlag  bool
+	sendPromptProgramFlag string
+	// sendPromptPromptFlag is an ALIAS for the positional <prompt>, not a
+	// replacement: its sibling `sessions create` takes the prompt as --prompt,
+	// so a user who learned that verb hit "unknown flag: --prompt" here — same
+	// concept, two shapes, two siblings in one noun group. Accepting both means
+	// either spelling works and no existing caller changes.
+	sendPromptPromptFlag      string
 	sendPromptAllFlag         bool
 	sendPromptAllReposFlag    bool
 	sendPromptIncludeRootFlag bool
 )
+
+// sendPromptArgCount is how many positionals send-prompt expects in the current
+// mode. The prompt comes from --prompt or the last positional, and --all drops
+// the <title>, so the arity is a 2x2 rather than a constant.
+func sendPromptArgCount() int {
+	want := 2 // <title> <prompt>
+	if sendPromptAllFlag {
+		want-- // broadcast has no target title
+	}
+	if sendPromptPromptFlag != "" {
+		want-- // the prompt came from the flag
+	}
+	return want
+}
+
+// sendPromptUsage names the exact invocation the current flags imply, so an
+// arity error tells the user what to type instead of just counting (#658/#734:
+// a public CLI owes actionable errors).
+func sendPromptUsage() string {
+	switch {
+	case sendPromptAllFlag && sendPromptPromptFlag != "":
+		return "af sessions send-prompt --all --prompt <prompt> (no positional arguments)"
+	case sendPromptAllFlag:
+		return "af sessions send-prompt --all <prompt>"
+	case sendPromptPromptFlag != "":
+		return "af sessions send-prompt <title> --prompt <prompt>"
+	default:
+		return "af sessions send-prompt <title> <prompt>"
+	}
+}
+
+// resolveSendPrompt returns the prompt for this invocation and the positionals
+// with it removed, so callers read the title from a consistent place regardless
+// of which spelling the user chose.
+func resolveSendPrompt(args []string) (prompt string, rest []string) {
+	if sendPromptPromptFlag != "" {
+		return sendPromptPromptFlag, args
+	}
+	if len(args) == 0 {
+		return "", args
+	}
+	return args[len(args)-1], args[:len(args)-1]
+}
 
 var sessionsSendPromptCmd = &cobra.Command{
 	Use:   "send-prompt <title> <prompt>",
@@ -375,13 +424,11 @@ results.`,
 		if err := validateSendPromptFlags(); err != nil {
 			return jsonError(err)
 		}
-		if sendPromptAllFlag {
-			if len(args) != 1 {
-				return jsonError(fmt.Errorf("--all broadcast takes exactly one argument (the prompt to broadcast); got %d", len(args)))
-			}
-			return nil
+		if want := sendPromptArgCount(); len(args) != want {
+			return jsonError(fmt.Errorf("%s takes exactly %d positional argument(s); got %d",
+				sendPromptUsage(), want, len(args)))
 		}
-		return cobra.ExactArgs(2)(cmd, args)
+		return nil
 	},
 	RunE: func(cmd *cobra.Command, args []string) error {
 		log.Initialize(false)
@@ -393,12 +440,19 @@ results.`,
 		if err := validateSendPromptFlags(); err != nil {
 			return jsonError(err)
 		}
-		if sendPromptAllFlag {
-			return runBroadcast(args[0])
+		// Re-check arity here too: unit tests drive RunE directly (bypassing
+		// Args), so indexing rest[0] below must not depend on Args having run.
+		if len(args) != sendPromptArgCount() {
+			return jsonError(fmt.Errorf("%s takes exactly %d positional argument(s); got %d",
+				sendPromptUsage(), sendPromptArgCount(), len(args)))
 		}
 
-		title := args[0]
-		prompt := args[1]
+		prompt, rest := resolveSendPrompt(args)
+		if sendPromptAllFlag {
+			return runBroadcast(prompt)
+		}
+
+		title := rest[0]
 
 		// Honor --repo scoping (#776, follow-up to #761/#775). An empty repoID
 		// preserves the prior all-repo search; a non-empty one confines both

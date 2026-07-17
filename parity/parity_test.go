@@ -42,10 +42,22 @@ type ledger struct {
 	WebRPCs     map[string]string `json:"web_rpcs"`
 }
 
+// argumentShapes covers the CLI-vs-CLI axis: within a noun group, does the same
+// concept take the same shape across sibling verbs?
+type argumentShapes struct {
+	// Synonyms maps a concept spelling to its canonical name — the one judgment
+	// a machine cannot make (that create's --name and its siblings' <title> are
+	// the same concept).
+	Synonyms map[string]string `json:"synonyms"`
+	// Declared is keyed "<group> <concept>", e.g. "af sessions title".
+	Declared map[string]fieldDecl `json:"declared"`
+}
+
 type inventory struct {
-	Capabilities  []capability  `json:"capabilities"`
-	Ledger        ledger        `json:"ledger"`
-	FieldCoverage fieldCoverage `json:"field_coverage"`
+	Capabilities   []capability   `json:"capabilities"`
+	Ledger         ledger         `json:"ledger"`
+	FieldCoverage  fieldCoverage  `json:"field_coverage"`
+	ArgumentShapes argumentShapes `json:"argument_shapes"`
 }
 
 func loadInventory(t *testing.T) inventory {

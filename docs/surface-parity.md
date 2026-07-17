@@ -117,6 +117,36 @@ either `{"gap": "<capability-id>"}` (a tracked divergence) or `{"ok": "<reason>"
 on any request forces a decision on every surface that builds it** — nobody has
 to remember.
 
+## The CLI-vs-CLI axis: argument shape
+
+Parity is not only between surfaces. Within one noun group, does the same
+CONCEPT take the same SHAPE across sibling verbs? It is the same failure — a user
+who learned one verb cannot predict its sibling — and it was found the same way,
+by someone driving the CLI and getting stuck.
+
+`af sessions create --prompt X` takes the prompt as a flag; `af sessions
+send-prompt <title> <prompt>` took it positionally and hard-errored with
+**"unknown flag: --prompt"** — naming the flag as wrong without mentioning that
+the positional is what it wants. Two siblings, one concept, two shapes.
+
+Both halves are derived: flags from the cobra tree, positionals from each
+command's `Use` line. The check is a non-empty **intersection** of accepted
+forms, not identical sets — a verb that accepts both forms is compatible with
+either neighbour, which is why the fix is always **additive**: teach one verb the
+other's form and keep the old one. `send-prompt` now accepts `--prompt` as an
+alias and its positional still works, so nothing breaks and the shapes reconcile.
+
+The one hand-maintained part is `synonyms`, and it is keyed **per verb** on
+purpose: `--name` on `create` means the session title, but `--name` on
+`tab-create <title> --name <tabname>` means the tab. A global `name → title` rule
+invents a divergence that is not there.
+
+Still open and declared, not silent:
+[#1972](https://github.com/sachiniyer/agent-factory/issues/1972) — `af sessions
+create --name` is the only sessions verb taking the title as a flag, and the only
+one calling it *name* rather than *title*, while ten siblings take `<title>`
+positionally.
+
 ## What the check enforces
 
 - Every CLI verb, **CLI flag**, daemon route, TUI binding, and web RPC has an

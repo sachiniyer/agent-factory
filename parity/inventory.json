@@ -1123,6 +1123,25 @@
       "verdict": "real-gap",
       "issue": "#1970",
       "notes": "A third drift dimension under verbs and fields: the VALUES a surface offers for a field. The TUI and CLI read tmux.SupportedPrograms (session/tmux/session.go:22); the web keeps its own copy. The lists MATCH today, so this is a live hazard rather than a live divergence — add a sixth agent server-side and the web silently never offers it while every field-level check stays green (the web does send `program`, so coverage calls it covered). Reported by the #1933 session, which found the same shape one level down. TestWebProgramEnumMatchesWire makes the drift loud in the meantime; the structural fix is to SERVE the enum, per the ListBackends reference implementation in #1968."
+    },
+    {
+      "id": "cli.argshape.session-title",
+      "title": "Name a session the same way across the sessions verbs",
+      "tui": {
+        "status": "n/a",
+        "pointer": ""
+      },
+      "web": {
+        "status": "n/a",
+        "pointer": ""
+      },
+      "cli": {
+        "status": "partial",
+        "pointer": "api/api.go:584,590 create --name (required flag) vs <title> positional on its 10 sibling verbs"
+      },
+      "verdict": "real-gap",
+      "issue": "#1972",
+      "notes": "The CLI-vs-CLI axis: `af sessions create --name X` is the only sessions verb that takes the title as a FLAG, and the only one that calls the concept `name` rather than `title`. Ten siblings take `<title>` positionally. A user who learns one cannot predict the other — the same failure as the --prompt trap, which is fixed in this PR. Filed rather than fixed to keep #1937 to the audit plus one fix. tui/web are n/a: this is about CLI argument shape, and neither UI has arguments."
     }
   ],
   "ledger": {
@@ -1342,6 +1361,7 @@
       "af sessions send-prompt --help": "meta.discovery",
       "af sessions send-prompt --include-root": "session.send-prompt.broadcast",
       "af sessions send-prompt --program": "session.send-prompt",
+      "af sessions send-prompt --prompt": "session.send-prompt",
       "af sessions tab-create --command": "session.tab.create.options",
       "af sessions tab-create --help": "meta.discovery",
       "af sessions tab-create --kind": "session.tab.create.options",
@@ -1611,6 +1631,34 @@
         "update.project_path": {
           "gap": "task.edit.project-path"
         }
+      }
+    }
+  },
+  "argument_shapes": {
+    "_comment": [
+      "The CLI-vs-CLI axis: within a noun group, does the same concept take the same",
+      "shape across sibling verbs? A user who learned `af sessions create --prompt X`",
+      "could not predict `af sessions send-prompt <title> <prompt>` — same concept, two",
+      "shapes, two siblings — and got 'unknown flag: --prompt', which names the flag as",
+      "wrong without saying the positional is what it wants.",
+      "",
+      "Flags come from the cobra tree, positionals from each command's Use line. The",
+      "only hand-maintained part is `synonyms`: that create's --name and its siblings'",
+      "<title> are one concept is a judgment, not a derivable fact.",
+      "",
+      "A verb accepting BOTH forms is compatible with either neighbour, so the fix is",
+      "A verb accepting BOTH forms is compatible with either neighbour, so the fix is",
+      "always additive — teach one verb the other's form, never migrate.",
+      "",
+      "synonyms are keyed per VERB, not globally: `tab-create <title> --name <tabname>`",
+      "uses --name for the TAB, so a global name->title rule would invent a divergence."
+    ],
+    "synonyms": {
+      "af sessions create name": "title"
+    },
+    "declared": {
+      "af sessions title": {
+        "gap": "cli.argshape.session-title"
       }
     }
   }

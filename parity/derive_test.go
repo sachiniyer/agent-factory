@@ -43,6 +43,10 @@ type cliVerb struct {
 	Path   string   // full invocation, e.g. "af sessions create"
 	Flags  []string // sorted long flag names declared at this command
 	Hidden bool
+	// Use is cobra's usage line ("send-prompt <title> <prompt>"), which is where
+	// the POSITIONAL arguments are declared — the other half of a verb's
+	// argument shape, invisible in the flag set.
+	Use string
 	// Runnable distinguishes an invocable verb from a grouping node like
 	// `af sessions`, which is not a capability itself but can declare flags.
 	Runnable bool
@@ -75,6 +79,7 @@ func deriveCLI(t *testing.T) map[string]cliVerb {
 			Path:     path,
 			Flags:    flags,
 			Hidden:   c.Hidden,
+			Use:      c.Use,
 			Runnable: c.RunE != nil || c.Run != nil,
 		}
 		for _, sub := range c.Commands() {
