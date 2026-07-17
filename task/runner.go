@@ -291,6 +291,50 @@ func isDocTrustPrompt(content string) bool {
 // pinning the daemon indefinitely (the amp hang). A nil ctx is treated as
 // context.Background() so the internal timeout still governs.
 func WaitForReady(ctx context.Context, instance *session.Instance) error {
+	return WaitForReadyOn(ctx, instanceReadinessTarget{inst: instance})
+}
+
+// ReadinessTarget is the narrow contract WaitForReadyOn polls. It exists so the
+// readiness logic — the per-agent isReadyContent matching, the usage-limit park,
+// the hook-aware budget — has exactly ONE implementation, shared by a full
+// session.Instance and by a bare tmux session that has no Instance behind it
+// (the config agent, which must never become a row in the session list).
+//
+// Forking a second copy of this loop was the obvious alternative and would have
+// been a mistake: isReadyContent is per-agent, heuristic, and already on the
+// regression-prone list, so two copies would drift and only one of them would
+// get the next fix.
+type ReadinessTarget interface {
+	// ResolvedAgent names the agent the pane ACTUALLY runs, detected from its
+	// command rather than a config enum, so an override pointing "claude" at
+	// something else gets that program's readiness heuristic (#1116, #1131).
+	ResolvedAgent() string
+	// PreviewContent captures the pane, abandoning the capture when ctx is done.
+	PreviewContent(ctx context.Context) (string, error)
+	// HooksDone is closed when post-worktree provisioning finishes, or nil when
+	// none is in flight (no worktree, an external one, or no hooks configured) —
+	// in which case the readiness budget is armed immediately.
+	HooksDone() <-chan struct{}
+}
+
+// instanceReadinessTarget adapts a full session.Instance to ReadinessTarget.
+// Keeping the adapter here (rather than changing WaitForReady's signature) means
+// every existing caller and test is untouched by the split.
+type instanceReadinessTarget struct{ inst *session.Instance }
+
+func (t instanceReadinessTarget) ResolvedAgent() string { return t.inst.ResolvedAgent() }
+
+func (t instanceReadinessTarget) PreviewContent(ctx context.Context) (string, error) {
+	return capturePreview(ctx, t.inst)
+}
+
+func (t instanceReadinessTarget) HooksDone() <-chan struct{} {
+	return postWorktreeHooksDoneForWait(t.inst)
+}
+
+// WaitForReadyOn is WaitForReady against any ReadinessTarget — the seam a bare
+// tmux session uses. See WaitForReady for the cancellation contract.
+func WaitForReadyOn(ctx context.Context, target ReadinessTarget) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -300,7 +344,7 @@ func WaitForReady(ctx context.Context, instance *session.Instance) error {
 	// program_overrides entry pointing at a different program gets that
 	// program's readiness heuristic, and a non-agent override gets the
 	// generic one instead of waiting 60s for a claude glyph (#1116, #1131).
-	agent := instance.ResolvedAgent()
+	agent := target.ResolvedAgent()
 	// Resolve the usage-limit detector once so a claude/codex pane that shows a
 	// limit banner mid-startup is recognized and PARKED, not spun into a failure
 	// (#1146 PR4). Only claude/codex ever match; other agents never park here.
@@ -317,7 +361,7 @@ func WaitForReady(ctx context.Context, instance *session.Instance) error {
 	// immediately from the ticker branch below, and when no hooks are in flight
 	// (hooksDone == nil — no worktree, external worktree, or no hooks configured)
 	// the timeout is armed right away, exactly as before.
-	hooksDone := postWorktreeHooksDoneForWait(instance)
+	hooksDone := target.HooksDone()
 	var timeout <-chan time.Time
 	var hookGrace <-chan time.Time
 	if hooksDone == nil {
@@ -360,7 +404,7 @@ func WaitForReady(ctx context.Context, instance *session.Instance) error {
 			hooksDone, hookGrace = nil, nil
 			timeout = time.After(waitForReadyTimeout)
 		case <-timeout:
-			content, err := capturePreview(ctx, instance)
+			content, err := target.PreviewContent(ctx)
 			if err != nil {
 				// Mirror the ticker case: ErrSessionGone is a definitive,
 				// non-retryable death, so surface the actionable "session died"
@@ -394,7 +438,7 @@ func WaitForReady(ctx context.Context, instance *session.Instance) error {
 			log.ErrorLog.Printf("waitForReady timed out. Last pane content: %s", content)
 			return formatWaitForReadyTimeoutError(waitForReadyTimeout, content)
 		case <-ticker.C:
-			content, err := capturePreview(ctx, instance)
+			content, err := target.PreviewContent(ctx)
 			if err != nil {
 				// A cancelled/timed-out create surfaces here as context.Canceled /
 				// DeadlineExceeded: return at once (the top-of-loop check would
