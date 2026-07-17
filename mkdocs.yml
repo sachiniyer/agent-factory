@@ -1,7 +1,7 @@
 site_name: Agent Factory
 site_description: >-
   Terminal UI for running many AI coding agents — Claude Code, Codex, Aider,
-  Gemini, and Amp — each in its own isolated git worktree.
+  Gemini, Amp, and opencode — each in its own isolated git worktree.
 site_url: https://sachiniyer.github.io/agent-factory/
 repo_url: https://github.com/sachiniyer/agent-factory
 repo_name: sachiniyer/agent-factory

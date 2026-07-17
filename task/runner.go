@@ -28,15 +28,20 @@ var (
 	// misconfigured non-terminating hook; real provisioning builds finish far
 	// inside it, so it is generous rather than tight.
 	waitForReadyHookGrace = 10 * time.Minute
-	// ampAnsiEscape strips the ANSI CSI/OSC escape sequences tmux's capture
-	// (capture-pane -e keeps them) leaves in the pane so amp's prompt frame can be
-	// matched on its plain-text skeleton. amp wraps the mode label in a truecolor
-	// escape ("\x1b[38;2;61;255;166mmedium\x1b[39m") and the repo/branch in a dim
-	// escape, both sitting *between* the box-drawing glyphs — which is exactly why
-	// the old box regex never matched in the wild and amp creates spun the full
-	// readiness timeout. Covers CSI (ESC [ … final byte) and OSC (ESC ] … ST/BEL);
-	// amp's banner uses an OSC-8 hyperlink.
-	ampAnsiEscape = regexp.MustCompile("\x1b\\[[0-9;?]*[ -/]*[@-~]|\x1b\\][^\x07\x1b]*(?:\x07|\x1b\\\\)")
+	// paneAnsiEscape strips the ANSI CSI/OSC escape sequences tmux's capture
+	// (capture-pane -e keeps them) leaves in the pane so an agent's prompt frame
+	// can be matched on its plain-text skeleton. amp wraps the mode label in a
+	// truecolor escape ("\x1b[38;2;61;255;166mmedium\x1b[39m") and the repo/branch
+	// in a dim escape, both sitting *between* the box-drawing glyphs — which is
+	// exactly why the old box regex never matched in the wild and amp creates spun
+	// the full readiness timeout. Covers CSI (ESC [ … final byte) and OSC (ESC ] …
+	// ST/BEL); amp's banner uses an OSC-8 hyperlink.
+	//
+	// Shared by amp and opencode: opencode colorizes its status bar word-by-word
+	// ("ctrl+p \x1b[38;2;128;128;128mcommands", "esc \x1b[…minterrupt"), so its
+	// indicator strings are NOT contiguous in a raw capture either and must be
+	// matched on the stripped skeleton for the same reason.
+	paneAnsiEscape = regexp.MustCompile("\x1b\\[[0-9;?]*[ -/]*[@-~]|\x1b\\][^\x07\x1b]*(?:\x07|\x1b\\\\)")
 	// ampPromptFrameTop matches the top rule of amp's input-prompt frame: a
 	// box-drawing top run carrying the mode label near its right end, e.g.
 	// "╭──── medium ────╮" (matched after ANSI stripping). The left side is
@@ -64,6 +69,27 @@ var (
 	// version bump would silently reopen this bug. Presence of a status segment
 	// AT ALL is the signal; its wording is not.
 	ampWorkingIndicator = regexp.MustCompile(`╰ +[^─\s]`)
+	// opencodeFrameBottomRule matches the bottom rule of opencode's composer:
+	// a "╹" (U+2579) corner immediately followed by a run of "▀" (U+2580), e.g.
+	// "╹▀▀▀▀▀▀▀▀…" (matched after ANSI stripping).
+	//
+	// "╹" is the load-bearing glyph. opencode's startup ASCII-art banner is drawn
+	// out of "█"/"▀"/"▄" ("█▀▀█ █▀▀█ █▀▀█ …"), so a bare "▀" check false-positives
+	// on the banner — and the banner is on screen while opencode is still booting,
+	// which is precisely when a false ready signal does damage. "╹" appears
+	// nowhere in the banner; it is drawn only as the composer's corner.
+	opencodeFrameBottomRule = regexp.MustCompile(`╹▀▀+`)
+	// opencodeWorkingIndicator matches the "esc interrupt" hint opencode prints
+	// into its status bar while a turn is in flight, and removes when the turn
+	// ends. Matched only against the status bar BELOW the composer (see
+	// IsWorkingContent), never the whole pane.
+	//
+	// Deliberately NOT the braille spinner (⠋⠙⠹…): that is animated, so which
+	// frame a capture lands on is timing-dependent. Deliberately NOT "▣"/"Build ·":
+	// a FINISHED turn leaves a static "▣  Build · Claude Opus 4.5 (latest) · 30.2s"
+	// line in the transcript forever, and "Build ·" also sits inside the live
+	// composer — keying on either would pin an idle session at Running permanently.
+	opencodeWorkingIndicator = regexp.MustCompile(`esc +interrupt`)
 )
 
 // postWorktreeHooksDoneForWait resolves the instance's post-worktree hook
@@ -162,6 +188,18 @@ func isReadyContent(content, agent string) bool {
 		// accepting input.
 		return isAmpPromptFrame(content) ||
 			isDocTrustPrompt(content)
+	case tmux.ProgramOpencode:
+		// opencode is ready when its composer frame is visible (see
+		// isOpencodePromptFrame for why the escapes-only boot window makes this
+		// case load-bearing rather than cosmetic).
+		//
+		// opencode has NO trust/onboarding gate — a fresh `git init` repo goes
+		// straight to the composer (verified on 0.0.0-main-202604230742) — so the
+		// isDocTrustPrompt arm never fires for it in practice. It is kept for
+		// consistency with the other agents: it costs nothing and means a future
+		// opencode doc-link dialog degrades the same way theirs does.
+		return isOpencodePromptFrame(content) ||
+			isDocTrustPrompt(content)
 	case tmux.ProgramClaude:
 		if strings.Contains(content, "❯") ||
 			strings.Contains(content, "Do you trust") ||
@@ -204,8 +242,50 @@ func isAmpPromptFrame(content string) bool {
 // (Greptile P2 on #1756), and for the working check that is not just a stale
 // ready signal but a permanent one — a "╰ ∼ Streaming" left above the live frame
 // by a finished turn would hold the session at Running forever.
+// opencodeFrameLines locates opencode's CURRENT composer frame and returns the
+// ANSI-stripped pane lines alongside the index of the frame's bottom rule,
+// reporting false when the pane shows no such frame. Both opencode pane
+// questions reduce to it, the same way ampFrameBottomRule serves both amp
+// questions: "is opencode accepting input?" is whether the frame exists at all,
+// and "is opencode mid-turn?" is what the status bar BELOW that frame says.
+//
+// opencode's composer has no labeled top rule (unlike amp's "╭──── medium ────╮"),
+// so the walk anchors on the distinctive bottom rule and steps UP one line: a real
+// composer always has a "┃" box-interior row directly above its rule. Requiring
+// that pairing rather than matching a lone "╹" anywhere is what keeps a stray
+// glyph in agent output from reading as a live composer.
+func opencodeFrameLines(content string) (lines []string, ruleIdx int, ok bool) {
+	plain := paneAnsiEscape.ReplaceAllString(content, "")
+	lines = strings.Split(plain, "\n")
+	for i, line := range lines {
+		if !opencodeFrameBottomRule.MatchString(line) {
+			continue
+		}
+		if i > 0 && strings.Contains(lines[i-1], "┃") {
+			return lines, i, true
+		}
+	}
+	return lines, -1, false
+}
+
+// isOpencodePromptFrame reports whether content shows opencode's composer, i.e.
+// opencode has finished booting and is accepting input.
+//
+// This case is load-bearing rather than cosmetic. Without it opencode would fall
+// to isReadyContent's default branch ("the pane printed anything non-blank"), and
+// opencode's boot has a window — measured at ~2.8-3.2s on
+// 0.0.0-main-202604230742 — where the pane holds ~3.9KB of pure colour-setup
+// escapes and NOTHING else: no banner, no composer. strings.TrimSpace does not
+// treat ESC as whitespace, so the default branch calls that pane ready roughly a
+// third of a second before the composer paints, and af types the first prompt
+// into a TUI that is not listening yet.
+func isOpencodePromptFrame(content string) bool {
+	_, _, ok := opencodeFrameLines(content)
+	return ok
+}
+
 func ampFrameBottomRule(content string) (string, bool) {
-	plain := ampAnsiEscape.ReplaceAllString(content, "")
+	plain := paneAnsiEscape.ReplaceAllString(content, "")
 	lines := strings.Split(plain, "\n")
 	for i, line := range lines {
 		if !ampPromptFrameTop.MatchString(line) {
@@ -268,6 +348,36 @@ func IsWorkingContent(content, agent string) bool {
 			return false
 		}
 		return ampWorkingIndicator.MatchString(rule)
+	case tmux.ProgramOpencode:
+		// opencode prints "esc interrupt" into the status bar for exactly the
+		// duration of a turn, so unlike amp this is not repairing a broken churn
+		// inference: opencode repaints continuously while working (its spinner
+		// ticks ~600ms — a 25s silent tool call still changed the pane hash every
+		// second in testing), so the poll's churn signal happens to be correct for
+		// it. We read opencode's own indicator anyway because an agent stating
+		// that it is busy is strictly better evidence than inferring it from
+		// pixels moving, and it stays correct if opencode ever adds a quiet
+		// render path — the #1890 trap amp fell into.
+		//
+		// Scope the match to the status bar BELOW the composer rather than the
+		// whole pane. The transcript sits ABOVE the composer, so a whole-pane
+		// substring check would read an agent that merely PRINTS the words "esc
+		// interrupt" (entirely possible in a repo whose agents discuss af's own
+		// key hints) as working forever — the same permanent-Running failure that
+		// keying on the stale "▣ … 30.2s" line would cause.
+		lines, ruleIdx, ok := opencodeFrameLines(content)
+		if !ok {
+			// No composer: opencode is still booting or has died. Neither is
+			// "working" — the poll's own liveness probe owns those, and claiming
+			// Running here would paper over a dead pane that must read Lost.
+			return false
+		}
+		for _, line := range lines[ruleIdx+1:] {
+			if opencodeWorkingIndicator.MatchString(line) {
+				return true
+			}
+		}
+		return false
 	default:
 		return false
 	}

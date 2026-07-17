@@ -6534,7 +6534,7 @@ function newSessionModal(projects, defaultProject2, callbacks) {
   const programSelect = h("select", { class: "af-input" });
   programSelect.setAttribute("aria-label", "Program");
   programSelect.append(h("option", { value: "" }, "Repo default"));
-  for (const prog of ["claude", "codex", "aider", "gemini", "amp"]) {
+  for (const prog of ["claude", "codex", "aider", "gemini", "amp", "opencode"]) {
     programSelect.append(h("option", { value: prog }, prog));
   }
   const backendSelect = h("select", { class: "af-input" });
@@ -9050,7 +9050,7 @@ function addTaskModal(projects, defaultProject2, callbacks) {
   const programSelect = h("select", { class: "af-input" });
   programSelect.setAttribute("aria-label", "Program");
   programSelect.append(h("option", { value: "" }, "Repo default"));
-  for (const prog of ["claude", "codex", "aider", "gemini", "amp"]) {
+  for (const prog of ["claude", "codex", "aider", "gemini", "amp", "opencode"]) {
     programSelect.append(h("option", { value: prog }, prog));
   }
   body.append(

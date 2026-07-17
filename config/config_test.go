@@ -463,8 +463,12 @@ func TestValidateProgramEnum(t *testing.T) {
 			assert.Contains(t, err.Error(), "default_program")
 			assert.Contains(t, err.Error(), "program_overrides")
 			// Enum must render comma-separated so the message is readable
-			// when Cobra prefixes it with "Error: " (see #661).
-			assert.Contains(t, err.Error(), "[claude, codex, aider, gemini, amp]")
+			// when Cobra prefixes it with "Error: " (see #661). Derived from
+			// tmux.SupportedPrograms rather than hardcoded: the list is the
+			// enum's source of truth, and a hardcoded copy of it goes stale
+			// (and red) the moment an agent is added — as it did for opencode.
+			// The separator, not the membership, is what #661 was about.
+			assert.Contains(t, err.Error(), "["+strings.Join(tmux.SupportedPrograms, ", ")+"]")
 			// Leading "\n\n" + trailing "\n" pair with Cobra's "Error: "
 			// prefix and Println-added newline to produce a blank line on
 			// both sides of the message body.
@@ -481,6 +485,24 @@ func TestValidateProgramEnum(t *testing.T) {
 			}
 		})
 	}
+
+	// The accepts-loop above is data-driven off tmux.SupportedPrograms, so it
+	// covers opencode automatically — and would keep passing (vacuously) if
+	// opencode ever fell out of that list. These two assertions are what the loop
+	// cannot make: that opencode is really IN the enum, and that a user who
+	// mistypes an agent name is told opencode is one of their choices.
+	t.Run("accepts opencode", func(t *testing.T) {
+		assert.Contains(t, tmux.SupportedPrograms, tmux.ProgramOpencode,
+			"opencode must be in the supported enum for ValidateProgramEnum to accept it")
+		assert.NoError(t, ValidateProgramEnum("field", "field", tmux.ProgramOpencode, ""))
+	})
+
+	t.Run("offers opencode in the rejection message", func(t *testing.T) {
+		err := ValidateProgramEnum("default_program", "default_program", "notanagent", "")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "opencode",
+			"the enum message must offer opencode by name, or users cannot discover it")
+	})
 
 	// program_overrides-style: name is the map key (an invalid agent name)
 	// and exampleValue is the user's full command. The example must preserve
@@ -572,6 +594,28 @@ func TestResolveProgram(t *testing.T) {
 		assert.Equal(t, "/home/me/claude", ResolveProgram(cfg, tmux.ProgramClaude))
 		assert.Equal(t, tmux.ProgramCodex, ResolveProgram(cfg, tmux.ProgramCodex))
 		assert.Equal(t, tmux.ProgramAider, ResolveProgram(cfg, tmux.ProgramAider))
+		assert.Equal(t, tmux.ProgramOpencode, ResolveProgram(cfg, tmux.ProgramOpencode))
+	})
+
+	// opencode installs to ~/.opencode/bin/opencode by default, which is not on
+	// every user's PATH — so program_overrides is the path that makes opencode
+	// usable at all for them, not a power-user nicety. These pin both halves.
+	t.Run("returns opencode override when set", func(t *testing.T) {
+		const command = "/home/me/.opencode/bin/opencode --model anthropic/claude-opus-4-5"
+		cfg := &Config{
+			DefaultProgram: tmux.ProgramOpencode,
+			ProgramOverrides: map[string]string{
+				tmux.ProgramOpencode: command,
+			},
+		}
+		assert.Equal(t, command, ResolveProgram(cfg, tmux.ProgramOpencode))
+	})
+
+	t.Run("returns bare opencode when no override", func(t *testing.T) {
+		cfg := &Config{
+			DefaultProgram: tmux.ProgramOpencode,
+		}
+		assert.Equal(t, tmux.ProgramOpencode, ResolveProgram(cfg, tmux.ProgramOpencode))
 	})
 }
 

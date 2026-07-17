@@ -243,6 +243,13 @@ func TestResolveLimitMatchers(t *testing.T) {
 	if _, ok := base[tmux.ProgramAmp]; ok {
 		t.Fatalf("amp should have no matcher in v1")
 	}
+	// opencode is API-key metered (Anthropic/OpenAI keys), so it never stalls at
+	// a dead prompt behind a plan-reset banner — see limit.go's scope note. A
+	// "limit" there is a transient API failure carrying no reset timestamp to
+	// schedule an auto-resume against, so it gets no matcher.
+	if _, ok := base[tmux.ProgramOpencode]; ok {
+		t.Fatalf("opencode is API-key metered and has no plan-reset banner to parse; it should have no matcher")
+	}
 
 	// An override for an agent with no built-in matcher is ignored (there is
 	// no reset parser to pair a detection-only override with yet).
@@ -253,6 +260,10 @@ func TestResolveLimitMatchers(t *testing.T) {
 	withAmp := resolveLimitMatchers(map[string]string{tmux.ProgramAmp: `whatever`})
 	if _, ok := withAmp[tmux.ProgramAmp]; ok {
 		t.Fatalf("override for amp should be ignored until amp has a built-in matcher")
+	}
+	withOpencode := resolveLimitMatchers(map[string]string{tmux.ProgramOpencode: `whatever`})
+	if _, ok := withOpencode[tmux.ProgramOpencode]; ok {
+		t.Fatalf("override for opencode should be ignored until opencode has a built-in matcher")
 	}
 
 	// An uncompilable regex is dropped and the built-in default stands: the

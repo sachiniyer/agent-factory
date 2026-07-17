@@ -19,7 +19,7 @@ Sessions (one agent per isolated worktree):
   af sessions whoami                                   Identify your own session
   af sessions list                                     List sessions
   af sessions get <title>                              Fetch one session
-  af sessions create --name <title> [--prompt <p>] [--program claude|codex|aider|gemini|amp]
+  af sessions create --name <title> [--prompt <p>] [--program claude|codex|aider|gemini|amp|opencode]
   af sessions send-prompt <title> <prompt> [--create]  Send a prompt (--create makes the session first if missing)
   af sessions preview <title>                          Snapshot another session's terminal output
   af sessions watch <title>                            Block until the session goes idle (agent done, ready for review); exits 0 when ready, non-zero on lost/dead/archived or --timeout (default 30m)
@@ -84,6 +84,12 @@ func shellQuote(s string) string {
 //   - Gemini: file seam — the af skill written to gemini's user skills folder
 //     (~/.gemini/skills, 0.42.0+), auto-discovered and enabled at session start.
 //   - Amp: file seam — the af skill written to amp's home skills dir (#1582).
+//   - opencode: ENV seam — OPENCODE_CONFIG points at an af-OWNED config (under af's
+//     own config dir) whose `instructions` key adds an af-owned markdown file.
+//     opencode MERGES that config with the user's own rather than replacing it, so
+//     their settings survive. af writes NOTHING into ~/.config/opencode: the
+//     guidance exists only while af launches the process, and running `opencode` by
+//     hand later sees no trace of af — see ensureOpencodeAfConfig.
 //   - Aider: --read flag pointing at an af-owned context file. Aider has NO
 //     auto-discovered global skills folder, so it takes a flag (like claude);
 //     --read is a known, repeatable, additive aider flag.
@@ -125,6 +131,29 @@ func injectSystemPrompt(resolved string) string {
 			log.WarningLog.Printf("failed to set up amp af skill, af guidance unavailable to amp: %v", err)
 		}
 		return resolved
+	case tmux.ProgramOpencode:
+		// opencode has no instructions FLAG, so this is an env seam: af points
+		// OPENCODE_CONFIG at an af-OWNED config that adds af's instructions file.
+		// opencode MERGES it with the user's own config (verified), so their
+		// settings survive, and af writes nothing into ~/.config/opencode.
+		if opencodeCarriesConfigEnv(resolved) {
+			log.WarningLog.Printf("opencode command already sets OPENCODE_CONFIG; leaving it alone (af guidance not injected for opencode)")
+			return resolved
+		}
+		path, err := ensureOpencodeAfConfig()
+		if err != nil {
+			log.WarningLog.Printf("failed to set up opencode af instructions, af guidance unavailable to opencode: %v", err)
+			return resolved
+		}
+		if path == "" {
+			return resolved
+		}
+		// Prefix, not append: an env assignment must precede the command. tmux
+		// runs the program string through a shell, and both DetectAgentFromCommand
+		// and preflight's firstExecutable already skip leading VAR=VALUE words
+		// (the `env FOO=1 <agent>` wrapper case, #742), so the agent is still
+		// detected at the right token.
+		return "OPENCODE_CONFIG=" + shellQuote(path) + " " + resolved
 	case tmux.ProgramAider:
 		// Aider takes a flag, not a file drop: it has no auto-discovered global
 		// skills folder. A write failure (or a non-af file at our path) yields an

@@ -1,6 +1,6 @@
 # Agent Factory
 
-Terminal UI for managing multiple AI coding agents (Claude Code, Aider, Codex, Gemini) in isolated git worktrees.
+Terminal UI for managing multiple AI coding agents (Claude Code, Aider, Codex, Gemini, Amp, opencode) in isolated git worktrees.
 
 ## Repo ownership & comms
 

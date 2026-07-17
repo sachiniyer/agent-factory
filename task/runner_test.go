@@ -122,6 +122,20 @@ func TestIsReadyContent(t *testing.T) {
 		{"amp doc trust prompt", "amp", "Open documentation url for more info.\n(D)on't ask again", true},
 		{"amp not ready on arbitrary output", "amp", "loading settings", false},
 
+		// opencode — the composer frame is the ready signal. The real-capture
+		// coverage lives in opencode_ready_test.go; these rows pin the
+		// isReadyContent branch itself, and in particular that no other agent's
+		// prompt glyph leaks into it.
+		{"opencode empty", "opencode", "", false},
+		{"opencode blank pane", "opencode", "\n   \n\n", false},
+		{"opencode composer frame", "opencode", "┃  Ask anything…\n╹▀▀▀▀▀▀▀▀▀▀", true},
+		// opencode's startup banner is ASCII art drawn from "█"/"▀", and it is on
+		// screen while opencode is still booting — a bare "▀" check would call that
+		// pane ready and af would type into a TUI that is not listening.
+		{"opencode banner art is not a composer", "opencode", "█▀▀█ █▀▀█ █▀▀█\n▀▀▀▀ ▀▀▀▀ ▀▀▀▀", false},
+		{"opencode not ready on claude glyph", "opencode", "rendering\n❯ ", false},
+		{"opencode not ready on codex glyph", "opencode", "rendering\n› ", false},
+
 		// shared doc-trust guard: both substrings required.
 		{"only open documentation url without confirm", "claude", "See Open documentation url for details.", false},
 		{"only dont ask again without doc url", "aider", "Some prompt asking (D)on't ask again", false},

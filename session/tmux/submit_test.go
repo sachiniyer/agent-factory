@@ -129,7 +129,7 @@ func TestCodexSubmitUsesBracketedPaste(t *testing.T) {
 // submit_bracketed_test.go for the gate that asserts what the pane RECEIVES —
 // the property this argv-level test cannot see (#1956).
 func TestEveryAgentSubmitUsesBracketedPasteBuffer(t *testing.T) {
-	for _, program := range []string{"claude", "aider", "gemini", "amp", "some-custom-shell"} {
+	for _, program := range []string{"claude", "aider", "gemini", "amp", "opencode", "some-custom-shell"} {
 		t.Run(program, func(t *testing.T) {
 			const prompt = "hello"
 			cmds := recordTmuxCommands(t, program, prompt)

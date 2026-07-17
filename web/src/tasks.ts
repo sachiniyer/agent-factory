@@ -267,7 +267,7 @@ export function addTaskModal(
   const programSelect = h("select", { class: "af-input" });
   programSelect.setAttribute("aria-label", "Program");
   programSelect.append(h("option", { value: "" }, "Repo default"));
-  for (const prog of ["claude", "codex", "aider", "gemini", "amp"]) {
+  for (const prog of ["claude", "codex", "aider", "gemini", "amp", "opencode"]) {
     programSelect.append(h("option", { value: prog }, prog));
   }
 

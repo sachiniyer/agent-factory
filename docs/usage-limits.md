@@ -19,6 +19,10 @@ its own once the window elapses. This page covers the whole flow end to end.
   "limit" there is a transient HTTP 429 the CLI already retries, with no plan
   reset time to schedule against. They are surface-only in the sense that
   nothing special happens — no badge, no auto-resume.
+- **`opencode`** — **not** detected, deliberately. It is API-key-metered against
+  your own Anthropic/OpenAI credentials, and its TUI reports spend (`$0.10
+  spent`) rather than a plan wall — there is no plan-reset banner to match and no
+  reset window to schedule against, so af ships no usage-limit matcher for it.
 
 Detection runs on captured pane content, so it needs no agent cooperation. You
 can tune the detection regex per agent with
@@ -110,6 +114,7 @@ failure even though nothing was actually wrong — you'd just hit your plan limi
 | `gemini` | — | — | — | — | — |
 | `aider` | — | — | — | — | — |
 | `amp` | — | — | — | — | — |
+| `opencode` | — | — | — | — | — |
 
 Auto-resume covers `claude`/`codex` because their banners carry a parseable
 reset window; other supported agents either do not expose a known plan-reset
@@ -127,8 +132,8 @@ claude = "Claude usage limit reached\\."
 codex  = "You've hit your usage limit"
 ```
 
-Keys must be a supported agent (`claude`, `codex`, `aider`, `gemini`, `amp`);
-an override for an agent with no built-in matcher (`aider`/`gemini`/`amp`
-today) is ignored, and an uncompilable regex warns and falls back to the
-built-in default.
+Keys must be a supported agent (`claude`, `codex`, `aider`, `gemini`, `amp`,
+`opencode`); an override for an agent with no built-in matcher
+(`aider`/`gemini`/`amp`/`opencode` today) is ignored, and an uncompilable regex
+warns and falls back to the built-in default.
 See [configuration.md](configuration.md#custom-usage-limit-detection-limit_patterns).

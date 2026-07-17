@@ -128,6 +128,12 @@ func agentDisplayName(agent string) string {
 		return "Gemini"
 	case tmux.ProgramAmp:
 		return "Amp"
+	case tmux.ProgramOpencode:
+		// Lowercase on purpose: the project styles itself "opencode", and its
+		// binary and docs render it that way. Listed explicitly even though the
+		// default arm would return the same string, so this reads as a decision
+		// rather than an omission a later reader "fixes" to "OpenCode".
+		return "opencode"
 	default:
 		if agent == "" {
 			return "the configured agent"

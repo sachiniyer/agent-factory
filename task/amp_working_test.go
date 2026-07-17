@@ -69,15 +69,35 @@ func TestIsWorkingContentAmpReadinessUnaffected(t *testing.T) {
 	}
 }
 
-// TestIsWorkingContentOtherAgents pins the blast radius. Only amp publishes an
-// in-progress indicator this can read, so every other agent must answer false and
-// keep the poll's pane-churn inference exactly as it was — including the ""
-// (non-agent program_overrides, #1131) case.
+// TestIsWorkingContentOtherAgents pins the blast radius. Only amp and opencode
+// publish an in-progress indicator this can read, so every OTHER agent must answer
+// false and keep the poll's pane-churn inference exactly as it was — including the
+// "" (non-agent program_overrides, #1131) case.
+//
+// The agents list is therefore the set with genuinely no case in IsWorkingContent.
+// opencode is deliberately absent from it: it grew a case, and the fixture guards
+// below assert that positively rather than leaving its removal from this list
+// looking like an oversight.
 func TestIsWorkingContentOtherAgents(t *testing.T) {
 	ampWorking, err := os.ReadFile("testdata/amp_working_streaming.ansi")
 	if err != nil {
 		t.Fatalf("read fixture: %v", err)
 	}
+	opencodeWorking, err := os.ReadFile("testdata/opencode_working.ansi")
+	if err != nil {
+		t.Fatalf("read fixture: %v", err)
+	}
+
+	// Both fixtures must read as working for THEIR OWN agent, or every negative
+	// below would pass for the wrong reason — a truncated or stale fixture that
+	// shows no indicator at all reads false for everyone, including its owner.
+	if !IsWorkingContent(string(ampWorking), tmux.ProgramAmp) {
+		t.Fatal("amp working fixture no longer reads as working for amp; the negatives below would prove nothing")
+	}
+	if !IsWorkingContent(string(opencodeWorking), tmux.ProgramOpencode) {
+		t.Fatal("opencode working fixture no longer reads as working for opencode; the negatives below would prove nothing")
+	}
+
 	agents := []string{
 		tmux.ProgramClaude, tmux.ProgramCodex, tmux.ProgramAider, tmux.ProgramGemini, "",
 	}
@@ -87,11 +107,15 @@ func TestIsWorkingContentOtherAgents(t *testing.T) {
 			name = "<no known agent>"
 		}
 		t.Run(name, func(t *testing.T) {
-			// Even handed amp's own working pane, a non-amp agent must not claim
-			// to be working: the indicator is amp's UI, and no other agent's pane
-			// is being interpreted here.
+			// Even handed the working pane of an agent that DOES publish an
+			// indicator, a caseless agent must not claim to be working: the
+			// indicator is that agent's own UI, and no other agent's pane is being
+			// interpreted here.
 			if IsWorkingContent(string(ampWorking), agent) {
 				t.Errorf("IsWorkingContent(amp working pane, %q) = true, want false", name)
+			}
+			if IsWorkingContent(string(opencodeWorking), agent) {
+				t.Errorf("IsWorkingContent(opencode working pane, %q) = true, want false", name)
 			}
 			if IsWorkingContent("some busy looking output\n", agent) {
 				t.Errorf("IsWorkingContent(arbitrary content, %q) = true, want false", name)

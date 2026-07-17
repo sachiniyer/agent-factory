@@ -45,6 +45,26 @@ func resolveProgramForInstance(i *Instance) string {
 	// Key the claude-only flag off the agent the RESOLVED command actually
 	// runs, not the config-name enum: an override may point "claude" at a
 	// different program, which would exit on the unknown flag (#1116).
+	//
+	// opencode has NO auto-approve flag on the TUI to wire, so instead of joining
+	// codex/amp as a SILENT AutoYes no-op (#1963) it says so out loud — see
+	// warnIfAutoYesUnsupported below.
+	//
+	// Its whole TUI flag set is -h -v --print-logs --log-level --pure --port
+	// --hostname --mdns --mdns-domain --cors -m/--model -c/--continue -s/--session
+	// --fork --prompt --agent: no permission/approval knob among them. Both
+	// candidate flags were tested against the real binary
+	// (0.0.0-main-202604230742) and BOTH are rejected by the TUI, producing output
+	// byte-identical to a nonsense flag (help text, then exit):
+	//   --dangerously-skip-permissions  real, but only on the `opencode run`
+	//                                   SUBCOMMAND — not on the TUI af launches
+	//   --auto                          not a flag at all (it appears in the
+	//                                   binary's strings only as vendored library
+	//                                   data alongside --autocorrect/--auto-fill)
+	// Note opencode's arg parser is NON-STRICT, so exit codes prove nothing here;
+	// only a real launch distinguishes a valid flag from a bogus one. Injecting
+	// either would kill every AutoYes opencode spawn as an opaque readiness
+	// timeout — the #1043/#1116/#1131 class this block exists to prevent.
 	if i.AutoYes && tmux.DetectAgentFromCommand(resolved) == tmux.ProgramClaude &&
 		// Sessions persisted by pre-#659 binaries got the flag appended at
 		// create-time in main.go (19c0dd9), so legacy Instance.Program values
@@ -55,7 +75,52 @@ func resolveProgramForInstance(i *Instance) string {
 		!strings.Contains(resolved, "--permission-mode") {
 		resolved = resolved + " --permission-mode bypassPermissions"
 	}
+	if i.AutoYes {
+		warnIfAutoYesUnsupported(tmux.DetectAgentFromCommand(resolved), i.Title)
+	}
 	return resolved
+}
+
+// autoYesUnsupported explains, per agent, why AutoYes cannot be honored — and is
+// the list of agents for which af must NOT pretend it was.
+//
+// AutoYes reaches an agent by exactly two routes, and an agent needs at least one:
+// a launch flag (claude's --permission-mode bypassPermissions) or TapEnter, which
+// the daemon only fires when tmux/io.go can recognize that agent's confirmation
+// dialog. codex and amp have NEITHER, so `auto_yes` has silently done nothing for
+// them for as long as they have been supported (#1963). opencode joins them, but
+// loudly: a setting the user turned on that quietly does nothing is the actual
+// defect, so at minimum af says so.
+//
+// This is intentionally a per-agent REASON, not a bool: "af cannot do this and
+// here is what to do instead" is actionable; "unsupported" is not. Fixing #1963
+// means deleting entries from this map, and the map makes the gap impossible to
+// add a new agent without noticing.
+// Every reason is VERSION-SCOPED: it describes the build af tested, and names the
+// escape hatch that works regardless of version. af deliberately does NOT probe
+// the installed binary for the flag, because for opencode specifically that probe
+// cannot be trusted: opencode HIDES real flags from its help
+// (--dangerously-skip-permissions is genuine on `opencode run` yet absent from
+// `--help`), so a help-grep yields false negatives, and its parser is non-strict,
+// so an exit code cannot tell a real flag from a bogus one either. The only
+// reliable oracle is launching the binary — ~1.4s per session create, on a path
+// that must not hang. Naming program_overrides in the reason gives the user a
+// version-proof answer without af guessing at their build.
+var autoYesUnsupported = map[string]string{
+	tmux.ProgramCodex: "codex exposes --dangerously-bypass-approvals-and-sandbox; set it via program_overrides.codex if you want unattended approval",
+	tmux.ProgramAmp:   "amp exposes an amp.dangerouslyAllowAll setting; set it in amp's own settings if you want unattended approval",
+	tmux.ProgramOpencode: "the opencode build af was verified against (0.0.0-main-202604230742) has no auto-approve flag on its TUI " +
+		"(--dangerously-skip-permissions is `opencode run`-only and makes the TUI print help and exit); " +
+		"opencode's default config already auto-approves tool calls, so sessions are unlikely to stall. " +
+		"If your opencode exposes one, set it via program_overrides.opencode",
+}
+
+// warnIfAutoYesUnsupported tells the user when auto_yes will not be honored for the
+// agent they picked, instead of ignoring the setting in silence (#1963).
+func warnIfAutoYesUnsupported(agent, title string) {
+	if reason, ok := autoYesUnsupported[agent]; ok {
+		log.WarningLog.Printf("auto_yes has no effect for %s (session %q): %s", agent, title, reason)
+	}
 }
 
 // LocalBackend implements Backend using local tmux sessions and git worktrees.
@@ -654,8 +719,14 @@ func (b *LocalBackend) CheckAndHandleTrustPrompt(i *Instance) bool {
 	// regression as #677. Codex was added in #729: it was previously excluded
 	// here, so a codex trust/confirmation dialog was never dismissed even
 	// though isReadyContent could surface it.
+	// opencode has NO trust gate of its own (a fresh `git init` repo goes straight
+	// to its composer, verified on 0.0.0-main-202604230742), so it lands in
+	// CheckAndHandleTrustPrompt's generic doc-trust branch and no-ops harmlessly.
+	// It is listed anyway: this is the one site enumerating every agent, and an
+	// agent silently missing from it is the #729 defect (codex was excluded here,
+	// so its dialog was surfaced by isReadyContent but never dismissed).
 	switch i.ResolvedAgent() {
-	case tmux.ProgramClaude, tmux.ProgramCodex, tmux.ProgramAider, tmux.ProgramGemini, tmux.ProgramAmp:
+	case tmux.ProgramClaude, tmux.ProgramCodex, tmux.ProgramAider, tmux.ProgramGemini, tmux.ProgramAmp, tmux.ProgramOpencode:
 		return ts.CheckAndHandleTrustPrompt()
 	}
 	return false

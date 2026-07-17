@@ -122,6 +122,12 @@ func (t *TmuxSession) HasUpdated() (updated bool, hasPrompt bool, content string
 	// Only set hasPrompt for agents with a known confirmation dialog, keyed
 	// off the agent actually running in the pane (a non-agent override or a
 	// substring-matching path must not get an agent's prompt heuristic).
+	//
+	// opencode has no case because it showed no confirmation dialog to detect:
+	// on 0.0.0-main-202604230742 its default permission config auto-approves, and
+	// it ran a destructive `rm README.md` with no prompt at all. Inventing a
+	// matcher for a dialog we have never observed would be the gemini "╰"
+	// TODO(#714) mistake — an unverified best guess that reads as verified.
 	switch DetectAgentFromCommand(t.programCmd()) {
 	case ProgramClaude:
 		hasPrompt = strings.Contains(content, "No, and tell Claude what to do differently")

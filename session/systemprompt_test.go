@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/sachiniyer/agent-factory/internal/testguard"
+	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
 func TestShellQuote(t *testing.T) {
@@ -188,6 +189,155 @@ func TestInjectSystemPrompt_Amp(t *testing.T) {
 	}
 }
 
+// TestInjectSystemPrompt_Opencode pins opencode's ENV seam.
+//
+// opencode has no instructions flag, so af points OPENCODE_CONFIG at an af-OWNED
+// config that adds an af-owned instructions file. Verified against
+// 0.0.0-main-202604230742: opencode MERGES that config with the user's own (with
+// `instructions` set in both, the resolved config listed both entries), and the
+// af-owned instructions really do reach the model.
+func TestInjectSystemPrompt_Opencode(t *testing.T) {
+	afHome := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", afHome)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	result := injectSystemPrompt("opencode")
+
+	// The command word must survive verbatim; only an env assignment leads it.
+	if !strings.HasSuffix(result, " opencode") {
+		t.Errorf("expected the opencode command preserved verbatim, got %q", result)
+	}
+	if !strings.HasPrefix(result, "OPENCODE_CONFIG=") {
+		t.Errorf("expected OPENCODE_CONFIG env prefix, got %q", result)
+	}
+
+	configPath := filepath.Join(afHome, "opencode", "af-config.jsonc")
+	raw, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("expected af-owned opencode config at %s: %v", configPath, err)
+	}
+	cfg := string(raw)
+	if !strings.Contains(result, configPath) {
+		t.Errorf("expected OPENCODE_CONFIG to point at %q, got %q", configPath, result)
+	}
+	if !strings.Contains(cfg, afSkillMarker) {
+		t.Errorf("expected af-managed marker in the config, got %q", cfg)
+	}
+	// The marker MUST be a jsonc comment, never a JSON key: opencode validates its
+	// config and rejects unrecognized keys ("Unrecognized key: \"//\""), so a key
+	// marker would make every opencode session start on a config error.
+	if !strings.Contains(cfg, "// "+afSkillMarker) {
+		t.Errorf("marker must ride as a jsonc comment (opencode rejects unknown keys), got %q", cfg)
+	}
+
+	instructionsPath := filepath.Join(afHome, "opencode", "af-skill.md")
+	doc, err := os.ReadFile(instructionsPath)
+	if err != nil {
+		t.Fatalf("expected af instructions at %s: %v", instructionsPath, err)
+	}
+	if !strings.Contains(string(doc), "af sessions whoami") {
+		t.Errorf("expected afUsageReference in opencode instructions, got %q", doc)
+	}
+	// Plain instructions, not a skill: opencode's `instructions` key takes markdown
+	// files, so name/description frontmatter would be stray context.
+	if strings.HasPrefix(string(doc), "---\n") {
+		t.Errorf("opencode instructions must not carry skill frontmatter, got %q", doc)
+	}
+}
+
+// TestInjectSystemPrompt_OpencodeWritesNothingOutsideAf is the whole point of the
+// env seam, and the property most worth locking.
+//
+// af must not modify a user's GLOBAL tool configuration as a side effect of them
+// creating a session. Anything written to ~/.config/opencode would outlive the
+// session, survive archive and uninstall, and still load when the user ran
+// `opencode` by hand tomorrow with no af involved. af's files live in af's own
+// directory and are invisible to opencode unless af itself sets OPENCODE_CONFIG.
+func TestInjectSystemPrompt_OpencodeWritesNothingOutsideAf(t *testing.T) {
+	afHome := t.TempDir()
+	home := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", afHome)
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+
+	injectSystemPrompt("opencode")
+
+	// Nothing may appear in the user's opencode config dir — under either the
+	// XDG path or the $HOME/.config fallback.
+	for _, dir := range []string{
+		filepath.Join(home, ".config", "opencode"),
+		filepath.Join(home, ".opencode"),
+	} {
+		if entries, err := os.ReadDir(dir); err == nil && len(entries) > 0 {
+			var names []string
+			for _, e := range entries {
+				names = append(names, e.Name())
+			}
+			t.Errorf("af wrote into the user's opencode config dir %s: %v — af must not touch a user's global tool config", dir, names)
+		}
+	}
+	// af's own dir is where the files belong.
+	if _, err := os.Stat(filepath.Join(afHome, "opencode", "af-config.jsonc")); err != nil {
+		t.Errorf("expected af's opencode config under AGENT_FACTORY_HOME: %v", err)
+	}
+}
+
+// TestInjectSystemPrompt_OpencodeRespectsUserConfigEnv pins that af does not fight
+// a user who points opencode at their own config. Shell semantics give the LAST
+// assignment precedence, so prepending af's would be silently overridden — af
+// detects that and says so rather than pretending the guidance landed.
+func TestInjectSystemPrompt_OpencodeRespectsUserConfigEnv(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("HOME", t.TempDir())
+
+	for _, resolved := range []string{
+		"OPENCODE_CONFIG=/home/me/mine.jsonc opencode",
+		// `env VAR=v <agent>` is a shape af supports elsewhere (#742), so a user's
+		// OPENCODE_CONFIG can arrive behind an env wrapper too.
+		"env OPENCODE_CONFIG=/home/me/mine.jsonc opencode",
+	} {
+		if got := injectSystemPrompt(resolved); got != resolved {
+			t.Errorf("expected a user-set OPENCODE_CONFIG left untouched, got %q", got)
+		}
+	}
+
+	// The mirror: OPENCODE_CONFIG appearing as an ARGUMENT is not an assignment,
+	// so af must still inject. Guarding this keeps the detector from "fixing" the
+	// case above with a bare strings.Contains, which would silently drop af
+	// guidance for anyone whose prompt mentions the variable.
+	arg := "opencode --prompt 'set OPENCODE_CONFIG=x'"
+	if got := injectSystemPrompt(arg); !strings.HasPrefix(got, "OPENCODE_CONFIG=") {
+		t.Errorf("OPENCODE_CONFIG as an argument is not an assignment; af should still inject, got %q", got)
+	}
+}
+
+// TestInjectSystemPrompt_OpencodeDoesNotClobberAfOwnedFiles keeps the marker guard
+// honest: a non-af file at af's own path is left alone and injection is skipped
+// rather than pointing opencode at a file af does not own.
+func TestInjectSystemPrompt_OpencodeDoesNotClobberAfOwnedFiles(t *testing.T) {
+	afHome := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", afHome)
+	t.Setenv("HOME", t.TempDir())
+
+	instructionsPath := filepath.Join(afHome, "opencode", "af-skill.md")
+	if err := os.MkdirAll(filepath.Dir(instructionsPath), 0755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	userContent := "# not af's file\n"
+	if err := os.WriteFile(instructionsPath, []byte(userContent), 0644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	if got := injectSystemPrompt("opencode"); got != "opencode" {
+		t.Errorf("expected no injection when our path holds a non-af file, got %q", got)
+	}
+	back, err := os.ReadFile(instructionsPath)
+	if err != nil || string(back) != userContent {
+		t.Errorf("non-af file must be left untouched, got %q (err %v)", back, err)
+	}
+}
+
 // TestInjectSystemPrompt_ResolvedCommandMatrix pins #1116/#1131: which seam is
 // used is decided by the agent the RESOLVED command actually runs — through every
 // override shape (bare name, absolute path, path+flags, redirect to a different
@@ -199,7 +349,9 @@ func TestInjectSystemPrompt_Amp(t *testing.T) {
 func TestInjectSystemPrompt_ResolvedCommandMatrix(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 	// The file-seam rows write under $HOME (~/.config/amp, ~/.codex, ~/.gemini);
-	// keep them off the real home, and force the HOME fallbacks.
+	// keep them off the real home, and force the HOME fallbacks. opencode's seam
+	// writes under AGENT_FACTORY_HOME instead — af's own dir, never the user's
+	// opencode config.
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("CODEX_HOME", "")
 	t.Setenv("GEMINI_CLI_HOME", "")
@@ -208,29 +360,39 @@ func TestInjectSystemPrompt_ResolvedCommandMatrix(t *testing.T) {
 		name     string
 		resolved string
 		want     string // "" = resolved must come back unchanged (file seam / no agent)
+		// envPrefix marks the one seam shape that PREPENDS rather than appends:
+		// an env assignment is only honored before the command word, so opencode's
+		// resolved form is preserved as a SUFFIX. Everything else appends, and the
+		// #640 "original preserved verbatim as a prefix" guarantee still holds for
+		// them.
+		envPrefix bool
 	}{
 		// name→name (no override) for all supported agents.
-		{"claude bare", "claude", "--plugin-dir"},
-		{"codex bare", "codex", ""},
-		{"aider bare", "aider", "--read"},
-		{"gemini bare", "gemini", ""},
-		{"amp bare", "amp", ""},
+		{name: "claude bare", resolved: "claude", want: "--plugin-dir"},
+		{name: "codex bare", resolved: "codex", want: ""},
+		{name: "aider bare", resolved: "aider", want: "--read"},
+		{name: "gemini bare", resolved: "gemini", want: ""},
+		{name: "amp bare", resolved: "amp", want: ""},
+		{name: "opencode bare", resolved: "opencode", want: "OPENCODE_CONFIG=", envPrefix: true},
 
 		// name→path and name→path+flags overrides.
-		{"claude override path", "/opt/claude-next/bin/claude", "--plugin-dir"},
-		{"claude override path with flags", "/opt/claude-next/bin/claude --model opus", "--plugin-dir"},
-		{"codex override path with flags", "/usr/local/bin/codex --full-auto", ""},
-		{"aider override path", "/usr/local/bin/aider --no-auto-commits", "--read"},
-		{"gemini override path", "/usr/local/bin/gemini", ""},
-		{"amp override path", "/home/me/.amp/bin/amp --no-ide", ""},
+		{name: "claude override path", resolved: "/opt/claude-next/bin/claude", want: "--plugin-dir"},
+		{name: "claude override path with flags", resolved: "/opt/claude-next/bin/claude --model opus", want: "--plugin-dir"},
+		{name: "codex override path with flags", resolved: "/usr/local/bin/codex --full-auto", want: ""},
+		{name: "aider override path", resolved: "/usr/local/bin/aider --no-auto-commits", want: "--read"},
+		{name: "gemini override path", resolved: "/usr/local/bin/gemini", want: ""},
+		{name: "amp override path", resolved: "/home/me/.amp/bin/amp --no-ide", want: ""},
+		// opencode's default install path — the common case, not an exotic one.
+		{name: "opencode override path", resolved: "/home/me/.opencode/bin/opencode", want: "OPENCODE_CONFIG=", envPrefix: true},
+		{name: "opencode override path with flags", resolved: "/home/me/.opencode/bin/opencode --model anthropic/claude-opus-4-5", want: "OPENCODE_CONFIG=", envPrefix: true},
 
 		// name→other-agent: the RESOLVED agent's seam, not the key's.
-		{"claude key resolved to codex is file seam", "codex --full-auto", ""},
-		{"codex key resolved to claude gets claude flag", "/usr/bin/claude", "--plugin-dir"},
+		{name: "claude key resolved to codex is file seam", resolved: "codex --full-auto", want: ""},
+		{name: "codex key resolved to claude gets claude flag", resolved: "/usr/bin/claude", want: "--plugin-dir"},
 
 		// name→non-agent binary: no injection at all (#1116, #1131).
-		{"claude key resolved to bash (#1131)", "bash", ""},
-		{"claude key resolved to unknown tool (#1116)", "/usr/bin/some-other-tool --foo", ""},
+		{name: "claude key resolved to bash (#1131)", resolved: "bash", want: ""},
+		{name: "claude key resolved to unknown tool (#1116)", resolved: "/usr/bin/some-other-tool --foo", want: ""},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -238,6 +400,22 @@ func TestInjectSystemPrompt_ResolvedCommandMatrix(t *testing.T) {
 			if tt.want == "" {
 				if got != tt.resolved {
 					t.Errorf("expected %q unchanged, got %q", tt.resolved, got)
+				}
+				return
+			}
+			if tt.envPrefix {
+				// The command must survive VERBATIM after the assignment: an env
+				// prefix that mangled the user's quoting/$VARs would be #640 again.
+				if !strings.HasSuffix(got, " "+tt.resolved) {
+					t.Errorf("expected resolved form preserved verbatim after the env prefix, got %q", got)
+				}
+				if !strings.HasPrefix(got, tt.want) {
+					t.Errorf("expected %q to lead the command (env assignments only apply before it), got %q", tt.want, got)
+				}
+				// The agent must still be detected THROUGH the prefix, or the whole
+				// per-agent machinery (resume, readiness) silently unbinds.
+				if agent := tmux.DetectAgentFromCommand(got); agent != tmux.ProgramOpencode {
+					t.Errorf("DetectAgentFromCommand(%q) = %q, want opencode — the env prefix broke agent detection", got, agent)
 				}
 				return
 			}
