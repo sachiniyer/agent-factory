@@ -66,13 +66,17 @@ Three ideas carry the whole tool.
   git artifact you can diff, push, or open a PR from. Pass `--here` when you
   deliberately want the agent in your current checkout instead.
 - **Tabs — more than one thing per session.** Every session has its agent tab,
-  and you can open more beside it in the same worktree: a shell with `t`, or —
-  via `af sessions tab-create` — a long-running command, a web view, or a
-  VS Code editor.
+  and a local session can open more beside it in the same worktree: a shell with
+  `t`, or — via `af sessions tab-create` — a long-running command, a web view, or
+  a VS Code editor. Sessions on the docker, ssh, and hook backends run off-box,
+  so their tab list is fixed by the runtime; adding tabs to them isn't supported
+  yet.
 - **Daemon — the thing that actually owns state.** A background daemon runs the
   sessions, schedules tasks, serves the web UI, and is the single source of
-  truth. Any `af` command starts it. The TUI, the browser, and the CLI are all
-  thin clients reading the same state, so they never disagree.
+  truth. Opening the TUI starts one, as do autoyes mode and any enabled task;
+  read-only commands like `af config list` and `af tasks list` leave it down. The
+  TUI, the browser, and the CLI are all thin clients reading the same state, so
+  they never disagree.
 
 ## Three ways to drive it
 
@@ -128,7 +132,11 @@ claude = "/home/me/.local/bin/claude --dangerously-skip-permissions"
 
 Linux and macOS are supported; Windows works through WSL2 (keep repos on the
 Linux filesystem). Native Windows is not a target. tmux is required everywhere.
-The daemon autostarts via systemd on Linux and launchd on macOS.
+A fresh install has no autostart unit — run `af daemon install` to register one
+(a systemd user service on Linux, a launchd agent on macOS) so the daemon starts
+at login and task schedules keep running across reboots. Both are user-level
+units, so they cover login and reboot, not running while you are logged out.
+`af daemon status` reports whether one is installed.
 
 ## Documentation
 
