@@ -80,7 +80,7 @@ Provisions the workspace on your infrastructure, starts an `af agent-server` the
 - `url` (**required**) — the `af agent-server`'s base URL (`http://host:port` or `ws://host:port`), reachable from the daemon. It must be plain HTTP — a `wss://`/`https://` URL is rejected (af serves no TLS).
 - `token` (**required**) — the bearer token the server printed on startup.
 
-These values are the `af agent-server` startup banner (`addr`/`token`). A legacy `tls_fingerprint` field is accepted-and-ignored, so an old script keeps parsing, but it does nothing — drop it. If `launch_cmd` exits 0 but echoes no parseable endpoint JSON, `af` runs `delete_cmd --name <slug>` best-effort to avoid orphaning whatever was provisioned, then surfaces the error — so keep non-JSON output on stderr.
+These values are the `af agent-server` startup banner (`addr`/`token`). A legacy `tls_fingerprint` field is accepted-and-ignored, so an old script keeps parsing, but it does nothing — drop it. Keep non-JSON output on stderr. If `launch_cmd` fails in any way after it has started, af runs `delete_cmd` to reap whatever it may have provisioned — see [`delete_cmd` runs on any failed launch](#delete_cmd-runs-on-any-failed-launch).
 
 ### `delete_cmd`
 
@@ -89,6 +89,47 @@ Tears down whatever `launch_cmd` provisioned (the runtime teardown). Runs on kil
 **Arguments:** `--name <slug>`
 
 **stdout:** anything (a `{"deleted": true}` acknowledgement is conventional but not required).
+
+#### `delete_cmd` runs on any failed launch
+
+Once `launch_cmd` has **started**, af treats the sandbox as possibly-existing and runs `delete_cmd --name <slug>` on every provisioning failure — including when `launch_cmd`:
+
+- exited 0 but echoed no parseable endpoint JSON,
+- exited **non-zero**, at any point,
+- **timed out** and was killed (see [Script timeouts](#script-timeouts)).
+
+A failed `launch_cmd` is not evidence that nothing was created. A script that creates a VM and then dies has left a VM billing to your account, and because the session never finished provisioning, af keeps **no record** of it — nothing else will ever clean it up. So af reaps on the weaker signal ("the script ran") rather than the stronger one ("the script succeeded").
+
+This means your `delete_cmd` must **tolerate being called for a sandbox that was never fully built, or never built at all**: a slug it has never seen, a half-created VM, a resource still coming up. Make it slug-deterministic and idempotent, and treat a missing resource as success rather than an error — the [reference implementation](#migration-recipe) already does this (`|| true`, `2>/dev/null`). If yours would fail or exit non-zero on an unknown slug, fix that.
+
+af does **not** run `delete_cmd` when `launch_cmd` could not start at all — a missing file, a file that is not executable, a bad shebang. Nothing ran, so nothing was provisioned.
+
+If `delete_cmd` itself fails, af cannot clean up and does not retry. It reports the slug and the exact command to run by hand, both on the session-create error and at error level in the log:
+
+```
+A sandbox may still be running on your infrastructure — delete_cmd could not reap it, and af will not retry.
+launch_cmd ran for session "fix auth bug" (hook name "fix-auth-bug"), so it may hold real resources: a VM, a pod, a cloud sandbox.
+Reap it by hand, then check your provider for anything still running:
+    ./.agent-factory/hooks/delete.sh --name fix-auth-bug
+delete_cmd error: …
+```
+
+The same warning is logged whenever `delete_cmd` fails on a kill or an archive, where the sandbox certainly did exist.
+
+### Script timeouts
+
+| Script | Budget |
+|---|---|
+| `launch_cmd` | 5 minutes |
+| `delete_cmd` | 60 seconds |
+
+A script that exceeds its budget is killed and the operation fails.
+
+**A timed-out `launch_cmd` is reaped, not left running.** When the budget expires af kills the script, so it will never return an endpoint and af will never dial whatever it was building. Any sandbox it did create is already orphaned at that moment — leaving it alone would not preserve a resource you could still use, only one you would still pay for. So a timeout is treated as a failure that reaps.
+
+**af kills only the script itself, not the processes it spawned.** If your `launch_cmd` shells out to a provisioner that keeps running after the script is killed, that provisioner may still create infrastructure *after* `delete_cmd` has already run. af cannot close that race from the outside — it is another reason to make `delete_cmd` idempotent and safe to re-run, and to prefer a `launch_cmd` that cleans up after itself on `EXIT`/`TERM`.
+
+If `launch_cmd` exits 0 but leaves a background process holding its stdout (a tunnel or port-forward, say), af stops reading output shortly after the script exits and parses what it captured. The **exit status** is what decides success, so a session like this still comes up normally — but echo the endpoint JSON before exiting, not from the background process.
 
 ## Capabilities & the agent-server
 

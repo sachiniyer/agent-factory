@@ -3,6 +3,7 @@ package session
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os/exec"
 	"strings"
@@ -37,7 +38,10 @@ import (
 //	    token travels over the plaintext connection, so the launch_cmd must reach
 //	    the agent-server over a private network / tunnel it controls.
 //	delete_cmd --name <slug>
-//	    reaps whatever launch_cmd provisioned (the runtime teardown).
+//	    reaps whatever launch_cmd provisioned (the runtime teardown). Best-effort
+//	    by contract: it also runs after a launch_cmd that STARTED and then failed
+//	    or timed out, which may have left a half-built sandbox — or none at all —
+//	    so it must tolerate a slug it cannot find (#1955).
 //
 // This is the most direct provision-and-expose runtime: no container/tunnel of
 // our own, just the user's script handing us a URL. GitHub is still the durable
@@ -45,13 +49,29 @@ import (
 // re-runs launch_cmd to re-provision + re-clone), so hook reaches FULL capability
 // parity like docker/ssh — no ErrRecoverUnsupported, no locality special-case.
 
-const (
-	// hookLaunchTimeout / hookDeleteTimeout bound the user-provided provisioning
-	// and teardown scripts. launch_cmd may pull an image, spin up a VM, or clone a
-	// large repo, so it gets a generous budget; delete_cmd is bounded tighter so a
-	// kill never hangs on an unreachable provisioner.
-	hookLaunchTimeout = 5 * time.Minute
-	hookDeleteTimeout = 60 * time.Second
+// The bounds on the user-provided provisioning and teardown scripts. Vars (not
+// consts) so a test can shrink them to prove each bound fires.
+//
+//   - hookLaunchTimeout: launch_cmd may pull an image, spin up a VM, or clone a
+//     large repo, so it gets a generous budget.
+//   - hookDeleteTimeout: bounded tighter so a kill never hangs on an unreachable
+//     provisioner.
+//   - hookOutputDrainGrace: how long to wait for a script's output pipe to drain
+//     AFTER the script itself has exited or been killed. Without it the two
+//     timeouts above bound NOTHING: CombinedOutput waits for the output pipe to
+//     close, any process the script leaves behind inherits that pipe and holds it
+//     open, and exec.CommandContext kills only the script, not its children. So a
+//     launch_cmd that provisions and then hangs would block Provision forever
+//     rather than for hookLaunchTimeout — and the #1955 reap could never run at
+//     all, because launch() would never return to trigger it. Bounding the drain
+//     is what turns "launch_cmd timed out" into an event the reap can react to.
+//     The hook scripts are the last exec surface that lacked this bound; it
+//     mirrors gitWaitDelay and tmuxWaitDelay (#856/#896), and a user-authored
+//     provisioner is the likeliest of all of them to leave a child behind.
+var (
+	hookLaunchTimeout    = 5 * time.Minute
+	hookDeleteTimeout    = 60 * time.Second
+	hookOutputDrainGrace = 5 * time.Second
 )
 
 // hookRuntime provisions a session on user-provided infrastructure via the
@@ -66,15 +86,66 @@ func (hookRuntime) Provision(spec ProvisionSpec) (ProvisionResult, error) {
 		return ProvisionResult{}, fmt.Errorf("backend=hook: %w", err)
 	}
 	p := &hookProvisioner{hooks: hooks, spec: spec, slug: Slugify(spec.Title)}
+	return p.provisionOrReap()
+}
+
+// provisionOrReap provisions and, on ANY failure, reaps whatever launch_cmd may
+// have created before it failed. It is the whole of hookRuntime.Provision below
+// the config load, split out so a test can drive the real reap-on-failure gate
+// with a hand-built provisioner — the gate is the thing #1955 was about, and a
+// test that re-implemented it would prove nothing about this path.
+func (p *hookProvisioner) provisionOrReap() (ProvisionResult, error) {
 	res, err := p.provision()
-	if err != nil {
-		// launch_cmd may have provisioned a sandbox before failing to hand back a
-		// usable endpoint (e.g. it started the af agent-server but printed no/bad
-		// JSON); reap it via delete_cmd so nothing leaks on a partial failure.
-		p.reap()
-		return ProvisionResult{}, err
+	if err == nil {
+		return res, nil
 	}
-	return res, nil
+	// launch_cmd may have provisioned a sandbox before failing to hand back a
+	// usable endpoint: it can exit 0 having printed no/bad JSON, exit non-zero
+	// after creating a VM, or be killed at the timeout mid-provision. Reap via
+	// delete_cmd so nothing leaks on a partial failure (#1955).
+	if reapErr := p.reap(); reapErr != nil {
+		// The reap failed too, so something on the user's account may still be
+		// running and billing with no record of it on our side. That has to reach
+		// the person creating the session, not just the log.
+		return ProvisionResult{}, fmt.Errorf("%w\n\n%s", err, p.orphanWarning(reapErr))
+	}
+	return ProvisionResult{}, err
+}
+
+// orphanWarning is what a user sees when delete_cmd could not reap a sandbox that
+// launch_cmd may have provisioned. A leak the user knows about is survivable; a
+// silent one is not (#1955) — so it names the session and its slug, says plainly
+// that real infrastructure may still be running, and gives the exact command to
+// reap it by hand. It goes to ErrorLog AND into the returned provision error,
+// since someone creating a session is not reading the daemon log.
+//
+// Worded to hold on EVERY reap path, not just the provisioning failure that
+// motivated it: reap also backs Kill and archive, where launch_cmd succeeded and
+// the sandbox certainly existed. "launch_cmd ran, so a sandbox may still be out
+// there" is the claim common to all three.
+func (p *hookProvisioner) orphanWarning(reapErr error) string {
+	return fmt.Sprintf(
+		"A sandbox may still be running on your infrastructure — delete_cmd could not reap it, and af will not retry.\n"+
+			"launch_cmd ran for session %q (hook name %q), so it may hold real resources: a VM, a pod, a cloud sandbox.\n"+
+			"Reap it by hand, then check your provider for anything still running:\n"+
+			"    %s --name %s\n"+
+			"delete_cmd error: %v",
+		p.spec.Title, p.slug, p.hooks.DeleteCmd, p.slug, reapErr)
+}
+
+// normalizeHookWaitDelay converts an exec.ErrWaitDelay into success: the hook
+// script itself exited 0 (a non-zero exit surfaces as an ExitError, and a
+// timeout kill as a signal — never as ErrWaitDelay), and only a process it left
+// behind held the output pipe open past hookOutputDrainGrace. A launch_cmd that
+// backgrounds a tunnel to make the agent-server reachable is a documented
+// pattern, so this is not a failure — and treating it as one would reap a
+// sandbox that came up fine. Success is the script's EXIT STATUS, never
+// `err == nil`. Mirrors tmux's normalizeWaitDelay (#676/#914 precedent).
+func normalizeHookWaitDelay(err error) error {
+	if errors.Is(err, exec.ErrWaitDelay) {
+		return nil
+	}
+	return err
 }
 
 // hookProvisioner holds the state of one hook provisioning so its launch step
@@ -85,8 +156,12 @@ type hookProvisioner struct {
 	spec  ProvisionSpec
 	slug  string
 
-	launched bool
-	reapOnce sync.Once
+	// launchStarted records that the kernel spawned launch_cmd — NOT that it
+	// succeeded. It gates the delete_cmd reap, so it must stay the weaker of the
+	// two claims: a launch that started and then failed may have provisioned
+	// infrastructure, and only delete_cmd can reap it (#1955).
+	launchStarted bool
+	reapOnce      sync.Once
 }
 
 // hookEndpointJSON is the object launch_cmd echoes: the authed `af agent-server`
@@ -143,13 +218,36 @@ func (p *hookProvisioner) launch() (*AgentServerEndpoint, error) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), hookLaunchTimeout)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, p.hooks.LaunchCmd, args...).CombinedOutput()
-	if err != nil {
+	cmd := exec.CommandContext(ctx, p.hooks.LaunchCmd, args...)
+	cmd.WaitDelay = hookOutputDrainGrace
+	out, err := cmd.CombinedOutput()
+
+	// Gate the reap on whether launch_cmd STARTED, not on whether it succeeded
+	// (#1955). A script that creates a VM and then times out or exits non-zero
+	// has provisioned real infrastructure on the user's account that only
+	// delete_cmd can reap: "it failed" is not evidence that nothing exists, and
+	// af keeps no record of a session whose Provision failed, so an unreaped
+	// sandbox bills forever with nothing pointing at it.
+	//
+	// cmd.Process is non-nil exactly when the kernel spawned the process, which
+	// is that question answered directly. Do NOT infer it from the error type:
+	// only a BARE command name goes through exec.LookPath and yields *exec.Error,
+	// and the documented launch_cmd is a path ("./.agent-factory/hooks/launch.sh"),
+	// so a missing or non-executable script surfaces as *fs.PathError instead — an
+	// *exec.Error check would read "never ran" as "ran" and fire delete_cmd for a
+	// typo'd path.
+	p.launchStarted = cmd.Process != nil
+
+	if errors.Is(err, exec.ErrWaitDelay) {
+		// Exited 0 but left a process holding the output pipe, so the drain grace
+		// cut the read short. The endpoint JSON is normally already written, so
+		// parse what we captured rather than failing (and reaping) a sandbox that
+		// is very likely up.
+		log.WarningLog.Printf("hook runtime: launch_cmd for %q exited 0 but left its output pipe open; parsing the output captured so far", p.spec.Title)
+	}
+	if err := normalizeHookWaitDelay(err); err != nil {
 		return nil, fmt.Errorf("launch_cmd failed: %s: %w", strings.TrimSpace(string(out)), err)
 	}
-	// launch_cmd exited 0, so it may have provisioned a sandbox; from here any
-	// failure must trigger the delete_cmd reap (via the caller's p.reap()).
-	p.launched = true
 
 	jsonStr := extractJSON(string(out))
 	if jsonStr == "" {
@@ -171,23 +269,35 @@ func (p *hookProvisioner) launch() (*AgentServerEndpoint, error) {
 }
 
 // reap runs delete_cmd to tear down whatever launch_cmd provisioned, idempotently
-// and only if launch_cmd actually ran (nothing to delete otherwise). It backs the
-// session's Kill (after the in-sandbox workspace is torn down over REST), a
-// provisioning failure, and a bad-endpoint NewInstance failure — so a provisioned
-// sandbox is never leaked. The sync.Once collapses the repeated Kill retries and
-// the Kill-vs-provision-failure races to one delete_cmd.
+// and only if launch_cmd actually STARTED — if it never ran, nothing was
+// provisioned and there is nothing to delete. It backs the session's Kill (after
+// the in-sandbox workspace is torn down over REST), a provisioning failure, and a
+// bad-endpoint NewInstance failure — so a provisioned sandbox is never leaked. The
+// sync.Once collapses the repeated Kill retries and the Kill-vs-provision-failure
+// races to one delete_cmd.
+//
+// This is best-effort by contract: it may be called for a sandbox that was never
+// fully built, so delete_cmd must tolerate a slug it cannot find (documented in
+// docs/remote-hooks.md).
 func (p *hookProvisioner) reap() error {
 	var reapErr error
 	p.reapOnce.Do(func() {
-		if !p.launched {
+		if !p.launchStarted {
 			return
 		}
+		// context.Background(), NEVER a caller's context. reap's whole job is to
+		// run on the failure path, where the launch context is already cancelled or
+		// expired — and a WithTimeout derived from a dead parent is born expired,
+		// so delete_cmd would never spawn and the sandbox would leak in silence.
+		// That is the exact failure #1955 is about, reintroduced by the cleanup.
 		ctx, cancel := context.WithTimeout(context.Background(), hookDeleteTimeout)
 		defer cancel()
-		out, err := exec.CommandContext(ctx, p.hooks.DeleteCmd, "--name", p.slug).CombinedOutput()
-		if err != nil {
+		cmd := exec.CommandContext(ctx, p.hooks.DeleteCmd, "--name", p.slug)
+		cmd.WaitDelay = hookOutputDrainGrace
+		out, err := cmd.CombinedOutput()
+		if err := normalizeHookWaitDelay(err); err != nil {
 			reapErr = fmt.Errorf("backend=hook: delete_cmd failed for %q: %s: %w", p.slug, strings.TrimSpace(string(out)), err)
-			log.WarningLog.Printf("%v", reapErr)
+			log.ErrorLog.Printf("%s", p.orphanWarning(reapErr))
 			return
 		}
 		log.InfoLog.Printf("hook runtime: reaped remote session %q via delete_cmd", p.slug)
