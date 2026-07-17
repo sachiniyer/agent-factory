@@ -498,7 +498,17 @@ func planFactoryReset() (*resetPlan, error) {
 			// Prune ONLY branches AF created for its sessions — never a branch
 			// the session merely reused (--here), and never a branch with no
 			// record (the user's own master/main/feature branches).
-			if branchCreatedByAF(r.Worktree) && r.Worktree.BranchName != "" {
+			//
+			// The !ExternalWorktree guard mirrors the worktree pass above and is
+			// independent of the flag, deliberately (#1953). An external session
+			// IS the user's live tree, so AF never created its branch no matter
+			// what the record claims — and a legacy external record can claim
+			// wrongly: ToInstanceData always writes the flag, so any legacy nil
+			// record that a post-2026-04-17 daemon loaded and saved had the old
+			// nil→true default LAUNDERED into an explicit true on disk. Fixing
+			// the default cannot un-write those records; this structural guard is
+			// what actually protects them.
+			if !r.Worktree.ExternalWorktree && branchCreatedByAF(r.Worktree) && r.Worktree.BranchName != "" {
 				plan.branches[root] = append(plan.branches[root], r.Worktree.BranchName)
 			}
 		}
@@ -542,13 +552,23 @@ func planFactoryReset() (*resetPlan, error) {
 	return plan, nil
 }
 
-// branchCreatedByAF reports whether AF created this session's branch itself.
-// A nil BranchCreatedByUs means the record predates the flag; those were always
-// AF-created branches, so nil is treated as true (rollforward). An explicit
-// false means the session reused a pre-existing branch, which must NOT be
-// pruned.
+// branchCreatedByAF reports whether AF created this session's branch itself —
+// the sole authorization for `git branch -D` in the reset (see
+// git.DeleteLocalBranch). It requires POSITIVE EVIDENCE: only an explicit true
+// authorizes deletion.
+//
+// A nil BranchCreatedByUs means the record predates the flag (2026-04-17) and we
+// CANNOT determine who created the branch, so we do not prune it — the same rule
+// the corrupt-record path fifteen lines up already applies to records it cannot
+// read, now applied consistently to a field it cannot read (#1953). The old
+// nil→true reading assumed legacy records were always AF-created; they were not
+// (a pre-flag Setup on an existing branch, or an attach-to-existing-worktree
+// session, both persisted no flag over a branch the user owned).
+//
+// An explicit false means the session reused a pre-existing branch, which must
+// NOT be pruned.
 func branchCreatedByAF(w session.GitWorktreeData) bool {
-	return w.BranchCreatedByUs == nil || *w.BranchCreatedByUs
+	return w.BranchCreatedByUs != nil && *w.BranchCreatedByUs
 }
 
 // executeFactoryReset performs the destructive wipe described by plan. It is

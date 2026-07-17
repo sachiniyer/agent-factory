@@ -279,7 +279,13 @@ var ghostCleanupWorktree = func(data *session.InstanceData, title string) {
 	if data.Worktree.RepoPath == "" || data.Worktree.WorktreePath == "" || data.Worktree.ExternalWorktree {
 		return
 	}
-	branchCreatedByUs := true
+	// Unknown provenance means KEEP (#1953): a nil flag predates 2026-04-17 and
+	// cannot establish that AF created the branch, and the only thing this
+	// authorizes downstream is Cleanup()'s `git branch -D`. Mirrors the default in
+	// session.FromInstanceData. (The ExternalWorktree bail above already covers
+	// external records; this covers a legacy linked worktree that Setup built on
+	// a branch the user already had.)
+	branchCreatedByUs := false
 	if data.Worktree.BranchCreatedByUs != nil {
 		branchCreatedByUs = *data.Worktree.BranchCreatedByUs
 	}
