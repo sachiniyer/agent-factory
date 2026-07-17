@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os/exec"
 	"runtime"
-	"strings"
 
 	"github.com/sachiniyer/agent-factory/keys"
 	"github.com/sachiniyer/agent-factory/log"
@@ -183,17 +182,60 @@ func (m *home) handleKill() (tea.Model, tea.Cmd) {
 		return nil
 	}
 
-	// Check for uncommitted changes in the worktree (skip for backends without a
-	// local worktree, e.g. remote hook sessions).
-	warning := ""
+	// Assess what killing this session would destroy. Two independent losses,
+	// each with its own copy: a dirty worktree (uncommitted changes, #815) and
+	// local-only commits (committed-but-unmerged-and-unpushed work, #2022). The
+	// second is unrecoverable — kill force-deletes the branch with `git branch
+	// -D` — so it escalates the confirmation to the critical-content guarantee
+	// (#1973) AND a distinct confirm key, exactly as the reserved-root kill
+	// (#1238) does. A session can be both dirty and carry unmerged commits, so
+	// the warnings accumulate rather than replace one another. Both checks skip
+	// for backends without a local worktree (e.g. remote hook sessions).
+	var warnings []string
+	severeLine := ""
 	if selected.Capabilities().Workspace == session.WorkspaceLocalWorktree {
 		if wt := selected.GetWorktreePath(); wt != "" {
-			warning = killConfirmationWarning(wt)
+			if w := killConfirmationWarning(wt); w != "" {
+				warnings = append(warnings, w)
+			}
+		}
+		// GetGitWorktree is gated on the session being started, which is the case
+		// for the #2022 target: a live session whose agent has committed work.
+		if gw, err := selected.GetGitWorktree(); err == nil && gw != nil {
+			prState := ""
+			if pr := selected.GetPRInfo(); pr != nil {
+				prState = pr.State
+			}
+			if line, severe := unmergedCommitWarning(gw.GetWorktreePath(), gw.GetBaseCommitSHA(), prState); line != "" {
+				if severe {
+					severeLine = line
+				} else {
+					// Fail-closed (unverifiable): warn, but do not force the extra
+					// keystroke — we have not established that work is being lost.
+					warnings = append(warnings, line)
+				}
+			}
 		}
 	}
 
 	reserved := session.IsReservedTitle(selectedTitle)
-	message := killConfirmMessage(selectedTitle, warning, reserved)
+
+	if severeLine != "" {
+		// The severe consequence and any dirty-worktree warning are the critical
+		// content the user is consenting to; they must render in full or the
+		// overlay refuses the confirm (#1973). Only the recovery hint — genuine
+		// elaboration — goes in the clippable detail.
+		critical := killConfirmMessage(selectedTitle, joinWarnings(append([]string{severeLine}, warnings...)), reserved)
+		archiveKey := keys.GlobalKeyBindings[keys.KeyArchive].Help().Key
+		detail := fmt.Sprintf("Archive (%s) keeps the branch to restore later — kill removes it for good.", archiveKey)
+		cmd := m.confirmActionWithDetail(critical, detail, killAction)
+		if m.confirmationOverlay != nil {
+			m.confirmationOverlay.SetConfirmKey(unmergedKillConfirmKey)
+		}
+		return m, cmd
+	}
+
+	message := killConfirmMessage(selectedTitle, joinWarnings(warnings), reserved)
 	cmd := m.confirmAction(message, killAction)
 	if reserved && m.confirmationOverlay != nil {
 		// Break the muscle-memory D+y reflex on the daemon-managed singleton
@@ -203,38 +245,6 @@ func (m *home) handleKill() (tea.Model, tea.Cmd) {
 		m.confirmationOverlay.SetConfirmKey(rootKillConfirmKey)
 	}
 	return m, cmd
-}
-
-// rootKillConfirmKey is the confirm key the kill dialog demands for the reserved
-// root agent (#1238). Deliberately NOT the ordinary 'y' so an inattentive D+y —
-// the exact gesture that silently decapitated root's event pipeline on
-// 2026-07-05 — cannot dispatch the kill; the key is surfaced in the rendered
-// prompt ("Press k to confirm").
-const rootKillConfirmKey = "k"
-
-// killConfirmMessage builds the kill-confirmation copy for a session. The
-// reserved root agent (#1238) gets distinct, consequence-bearing copy instead of
-// the generic "[!] Kill session 'root'?" that killing any throwaway worktree
-// shows: killing root stops every scheduled/watch-task delivery to it (the
-// inbound event pipeline) until it self-heals or the daemon is restarted. This
-// mirrors the reserved-title guard the create path already applies
-// (app/handle_input.go). #1237 made root self-heal ~2 min after a kill, so the
-// copy names that recovery rather than the pre-#1237 "until the daemon restarts".
-func killConfirmMessage(title, warning string, reserved bool) string {
-	var message string
-	if reserved {
-		message = fmt.Sprintf(
-			"[!] '%s' is the daemon-managed root agent, not a scratch session.\n"+
-				"Killing it stops scheduled and watch-task delivery to '%s' until it\n"+
-				"self-heals (~2 min) or you restart the daemon.\n\n"+
-				"Kill the root agent anyway?", title, title)
-	} else {
-		message = fmt.Sprintf("[!] Kill session '%s'?", title)
-	}
-	if warning != "" {
-		message += "\n\n" + warning
-	}
-	return message
 }
 
 // killInstanceCmd returns a tea.Cmd that performs the actual session teardown
@@ -550,25 +560,6 @@ func (m *home) handleInstanceRestored(msg instanceRestoredMsg) (tea.Model, tea.C
 		break
 	}
 	return m, m.selectionChanged()
-}
-
-// killConfirmationWarning returns the data-loss warning line for the kill
-// confirmation dialog, or "" if the worktree at wt is verifiably clean. Kill
-// tears the worktree down with `git worktree remove -f`, which bypasses git's
-// own refusal to delete a dirty worktree, so this check is the only warning
-// the user gets. If `git status` itself fails we cannot prove the worktree is
-// clean — fail closed and warn that changes may be lost rather than silently
-// skipping the warning (#815).
-func killConfirmationWarning(wt string) string {
-	out, err := exec.Command("git", "-C", wt, "status", "--porcelain").Output()
-	if err != nil {
-		log.WarningLog.Printf("could not verify worktree status for %s before kill: %v", wt, err)
-		return fmt.Sprintf("WARNING: Could not verify worktree status (%v); it may contain uncommitted changes that will be lost!", err)
-	}
-	if len(strings.TrimSpace(string(out))) > 0 {
-		return "WARNING: This worktree has uncommitted changes that will be lost!"
-	}
-	return ""
 }
 
 // handleEnter is the Enter verb (#1089 PR 2, RFC §2.3): enter INTERACTIVE
