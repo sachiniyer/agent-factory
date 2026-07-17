@@ -80,3 +80,34 @@ func TestProgramErrorDisplaysAmp(t *testing.T) {
 		t.Fatalf("ProgramError() = %q, want Amp display name", err.Error())
 	}
 }
+
+// TestProgramErrorDisplaysOpencode pins opencode's display name to the LOWERCASE
+// "opencode". The project styles itself that way, so title-casing it to "OpenCode"
+// would be wrong copy — and the default arm of agentDisplayName happens to return
+// the same string, which is exactly why the explicit case is easy to "tidy away".
+// This test makes that a failure rather than a silent copy regression.
+//
+// It also asserts opencode takes the SUPPORTED-agent branch of ProgramError: the
+// remediation must name program_overrides.opencode. If opencode ever fell out of
+// tmux.SupportedPrograms, isSupportedAgent would send it to the generic
+// `program "opencode" is not installed` fallback, which offers no fix — so this
+// doubles as the first-class-agent lock.
+func TestProgramErrorDisplaysOpencode(t *testing.T) {
+	err := ProgramError(tmux.ProgramOpencode, "opencode", errors.New("missing"))
+
+	if !strings.Contains(err.Error(), "opencode is not installed") {
+		t.Fatalf("ProgramError() = %q, want lowercase opencode display name", err.Error())
+	}
+	for _, wrong := range []string{"OpenCode", "Opencode", "OPENCODE"} {
+		if strings.Contains(err.Error(), wrong) {
+			t.Errorf("ProgramError() = %q, must style the agent as lowercase %q, not %q",
+				err.Error(), "opencode", wrong)
+		}
+	}
+	if !strings.Contains(err.Error(), "program_overrides.opencode") {
+		t.Errorf("ProgramError() = %q, want the supported-agent remediation naming program_overrides.opencode", err.Error())
+	}
+	if strings.Contains(err.Error(), `program "opencode" is not installed`) {
+		t.Errorf("ProgramError() = %q, took the unsupported-agent fallback — opencode must be in tmux.SupportedPrograms", err.Error())
+	}
+}

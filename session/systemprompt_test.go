@@ -188,6 +188,145 @@ func TestInjectSystemPrompt_Amp(t *testing.T) {
 	}
 }
 
+// TestInjectSystemPrompt_Opencode pins opencode's file seam. The launch command
+// must come back byte-identical: opencode's TUI rejects unknown flags by printing
+// its help and exiting (verified — `opencode --dangerously-skip-permissions` and
+// `opencode --bogus-flag` produce identical help output and never start the TUI),
+// so any injected flag would kill the spawn as an opaque readiness timeout
+// (#1043/#1116/#1131).
+func TestInjectSystemPrompt_Opencode(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	// Explicitly clear XDG_CONFIG_HOME so this case exercises the $HOME/.config
+	// fallback — and, just as importantly, so a dev box that happens to export
+	// XDG_CONFIG_HOME cannot make this test write into the real user's config.
+	t.Setenv("XDG_CONFIG_HOME", "")
+
+	result := injectSystemPrompt("opencode")
+
+	if result != "opencode" {
+		t.Errorf("expected opencode command unchanged (file seam, no flag), got %q", result)
+	}
+
+	agentsPath := filepath.Join(home, ".config", "opencode", "AGENTS.md")
+	content, err := os.ReadFile(agentsPath)
+	if err != nil {
+		t.Fatalf("expected af instructions written to %s: %v", agentsPath, err)
+	}
+	if !strings.Contains(string(content), "af sessions whoami") {
+		t.Errorf("expected afUsageReference in opencode AGENTS.md, got %q", content)
+	}
+	if !strings.Contains(string(content), afSkillMarker) {
+		t.Errorf("expected opencode AGENTS.md to carry the af-managed marker, got %q", content)
+	}
+	// AGENTS.md is plain instructions, NOT a name+description skill: opencode
+	// discovers the file itself rather than a skill registry, so skill frontmatter
+	// would just be stray text in the model's context.
+	if strings.HasPrefix(string(content), "---\n") {
+		t.Errorf("opencode AGENTS.md must not carry skill frontmatter, got %q", content)
+	}
+}
+
+// TestInjectSystemPrompt_OpencodeHonorsXDGConfigHome pins the one place opencode's
+// seam deliberately DIVERGES from amp's.
+//
+// ampSkillsBaseDir ignores XDG_CONFIG_HOME because amp itself ignores it. opencode
+// does NOT: it resolves its config dir through XDG_CONFIG_HOME, verified by
+// experiment — with a marker file at BOTH $HOME/.config/opencode/AGENTS.md and
+// $XDG_CONFIG_HOME/opencode/AGENTS.md, `opencode run` reported the XDG one. So
+// hardcoding $HOME/.config here would write af guidance where opencode never looks
+// for every user who sets XDG_CONFIG_HOME — a silent miss with no error.
+func TestInjectSystemPrompt_OpencodeHonorsXDGConfigHome(t *testing.T) {
+	home := t.TempDir()
+	xdg := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", xdg)
+
+	if result := injectSystemPrompt("opencode"); result != "opencode" {
+		t.Errorf("expected opencode command unchanged, got %q", result)
+	}
+
+	xdgPath := filepath.Join(xdg, "opencode", "AGENTS.md")
+	if _, err := os.ReadFile(xdgPath); err != nil {
+		t.Fatalf("expected af instructions at XDG_CONFIG_HOME path %s: %v", xdgPath, err)
+	}
+	// And NOT at the $HOME fallback, which opencode would not read in this config.
+	homePath := filepath.Join(home, ".config", "opencode", "AGENTS.md")
+	if _, err := os.Stat(homePath); !os.IsNotExist(err) {
+		t.Errorf("must not write to %s when XDG_CONFIG_HOME is set — opencode reads the XDG path", homePath)
+	}
+}
+
+// TestInjectSystemPrompt_OpencodeDoesNotClobberUserAgentsFile pins the caveat that
+// makes opencode's seam riskier than every other agent's.
+//
+// amp/codex/gemini get an af-exclusive "agent-factory" SKILL.md subdirectory and
+// aider gets a file under af's own config dir — nobody else writes there. But
+// ~/.config/opencode/AGENTS.md is opencode's ONE global instructions file, and it
+// is exactly where a user keeps their own standing instructions. Silently
+// overwriting it would destroy user content af never owned.
+//
+// The contract: a file without the af marker is left byte-for-byte untouched, af
+// guidance is simply not injected, and the launch still proceeds normally.
+func TestInjectSystemPrompt_OpencodeDoesNotClobberUserAgentsFile(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", "")
+
+	agentsPath := filepath.Join(home, ".config", "opencode", "AGENTS.md")
+	if err := os.MkdirAll(filepath.Dir(agentsPath), 0755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	userContent := "# My own instructions\nAlways write tests first.\n"
+	if err := os.WriteFile(agentsPath, []byte(userContent), 0644); err != nil {
+		t.Fatalf("seed user file: %v", err)
+	}
+
+	// The spawn must still proceed unchanged; losing af guidance is not fatal.
+	if result := injectSystemPrompt("opencode"); result != "opencode" {
+		t.Errorf("expected opencode command unchanged, got %q", result)
+	}
+
+	got, err := os.ReadFile(agentsPath)
+	if err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if string(got) != userContent {
+		t.Errorf("af overwrote the user's own AGENTS.md.\n got: %q\nwant: %q", got, userContent)
+	}
+}
+
+// TestInjectSystemPrompt_OpencodeRewritesItsOwnFile is the other half of the
+// non-clobber contract: a file af DOES own must be regenerated, so edits to
+// afUsageReference reach opencode on the next launch instead of going stale.
+func TestInjectSystemPrompt_OpencodeRewritesItsOwnFile(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", "")
+
+	agentsPath := filepath.Join(home, ".config", "opencode", "AGENTS.md")
+	if err := os.MkdirAll(filepath.Dir(agentsPath), 0755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	stale := "<!-- " + afSkillMarker + " -->\n\nstale af content from an older version\n"
+	if err := os.WriteFile(agentsPath, []byte(stale), 0644); err != nil {
+		t.Fatalf("seed af-owned file: %v", err)
+	}
+
+	injectSystemPrompt("opencode")
+
+	got, err := os.ReadFile(agentsPath)
+	if err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if strings.Contains(string(got), "stale af content") {
+		t.Error("af-owned AGENTS.md must be regenerated, not left stale")
+	}
+	if !strings.Contains(string(got), "af sessions whoami") {
+		t.Errorf("regenerated AGENTS.md must carry afUsageReference, got %q", got)
+	}
+}
+
 // TestInjectSystemPrompt_ResolvedCommandMatrix pins #1116/#1131: which seam is
 // used is decided by the agent the RESOLVED command actually runs — through every
 // override shape (bare name, absolute path, path+flags, redirect to a different
@@ -198,11 +337,15 @@ func TestInjectSystemPrompt_Amp(t *testing.T) {
 // exit instantly and the spawn dies as an opaque timeout).
 func TestInjectSystemPrompt_ResolvedCommandMatrix(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
-	// The file-seam rows write under $HOME (~/.config/amp, ~/.codex, ~/.gemini);
-	// keep them off the real home, and force the HOME fallbacks.
+	// The file-seam rows write under $HOME (~/.config/amp, ~/.codex, ~/.gemini,
+	// ~/.config/opencode); keep them off the real home, and force the HOME
+	// fallbacks. XDG_CONFIG_HOME must be cleared too: opencode's seam honors it
+	// (unlike amp's), so a dev box exporting it would send this test's writes into
+	// the real user config.
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("CODEX_HOME", "")
 	t.Setenv("GEMINI_CLI_HOME", "")
+	t.Setenv("XDG_CONFIG_HOME", "")
 
 	tests := []struct {
 		name     string
@@ -215,6 +358,7 @@ func TestInjectSystemPrompt_ResolvedCommandMatrix(t *testing.T) {
 		{"aider bare", "aider", "--read"},
 		{"gemini bare", "gemini", ""},
 		{"amp bare", "amp", ""},
+		{"opencode bare", "opencode", ""},
 
 		// name→path and name→path+flags overrides.
 		{"claude override path", "/opt/claude-next/bin/claude", "--plugin-dir"},
@@ -223,6 +367,9 @@ func TestInjectSystemPrompt_ResolvedCommandMatrix(t *testing.T) {
 		{"aider override path", "/usr/local/bin/aider --no-auto-commits", "--read"},
 		{"gemini override path", "/usr/local/bin/gemini", ""},
 		{"amp override path", "/home/me/.amp/bin/amp --no-ide", ""},
+		// opencode's default install path — the common case, not an exotic one.
+		{"opencode override path", "/home/me/.opencode/bin/opencode", ""},
+		{"opencode override path with flags", "/home/me/.opencode/bin/opencode --model anthropic/claude-opus-4-5", ""},
 
 		// name→other-agent: the RESOLVED agent's seam, not the key's.
 		{"claude key resolved to codex is file seam", "codex --full-auto", ""},

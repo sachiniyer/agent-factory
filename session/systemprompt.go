@@ -19,7 +19,7 @@ Sessions (one agent per isolated worktree):
   af sessions whoami                                   Identify your own session
   af sessions list                                     List sessions
   af sessions get <title>                              Fetch one session
-  af sessions create --name <title> [--prompt <p>] [--program claude|codex|aider|gemini|amp]
+  af sessions create --name <title> [--prompt <p>] [--program claude|codex|aider|gemini|amp|opencode]
   af sessions send-prompt <title> <prompt> [--create]  Send a prompt (--create makes the session first if missing)
   af sessions preview <title>                          Snapshot another session's terminal output
   af sessions watch <title>                            Block until the session goes idle (agent done, ready for review); exits 0 when ready, non-zero on lost/dead/archived or --timeout (default 30m)
@@ -84,6 +84,11 @@ func shellQuote(s string) string {
 //   - Gemini: file seam — the af skill written to gemini's user skills folder
 //     (~/.gemini/skills, 0.42.0+), auto-discovered and enabled at session start.
 //   - Amp: file seam — the af skill written to amp's home skills dir (#1582).
+//   - opencode: file seam — af guidance written to opencode's global instructions
+//     file (~/.config/opencode/AGENTS.md), which opencode auto-discovers with no
+//     flag. Unlike the skills dirs above this path is SHARED and user-owned, so a
+//     user's own AGENTS.md is left untouched and af guidance is skipped — see
+//     ensureOpencodeAgentsFile.
 //   - Aider: --read flag pointing at an af-owned context file. Aider has NO
 //     auto-discovered global skills folder, so it takes a flag (like claude);
 //     --read is a known, repeatable, additive aider flag.
@@ -123,6 +128,11 @@ func injectSystemPrompt(resolved string) string {
 	case tmux.ProgramAmp:
 		if _, err := ensureAmpSkillDir(); err != nil {
 			log.WarningLog.Printf("failed to set up amp af skill, af guidance unavailable to amp: %v", err)
+		}
+		return resolved
+	case tmux.ProgramOpencode:
+		if _, err := ensureOpencodeAgentsFile(); err != nil {
+			log.WarningLog.Printf("failed to set up opencode af instructions, af guidance unavailable to opencode: %v", err)
 		}
 		return resolved
 	case tmux.ProgramAider:

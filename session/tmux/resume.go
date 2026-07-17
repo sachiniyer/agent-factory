@@ -34,6 +34,10 @@ import (
 //   - amp: insert "threads continue --last" after any leading Amp global
 //     options. Amp's resume path is a subcommand; explicit user subcommands
 //     like "amp review" are left unchanged.
+//   - opencode: append --continue at the end. opencode's TUI is its DEFAULT
+//     command ("opencode [project]"), and --continue is a position-independent
+//     boolean flag on it, so this is a tail append like claude/gemini/aider —
+//     NOT a codex/amp-style subcommand splice.
 //
 // The latest-session paths above either fall back to a fresh session when no
 // prior session exists or are left unchanged when af cannot identify a safe
@@ -108,8 +112,44 @@ func resumeProgram(program string) string {
 		}
 		off := ends[insertAt-1]
 		return program[:off] + " threads continue --last" + program[off:]
+	case ProgramOpencode:
+		// Only scan tokens after the agent token so wrapper-command flags
+		// (e.g. `ionice -c 3 opencode`, whose "-c" is ionice's class flag and
+		// not opencode's --continue) can't false-positive the already-has-resume
+		// check (#742).
+		for _, tok := range tokens[agentIdx+1:] {
+			if isOpencodeResumeFlag(tok) {
+				return program
+			}
+		}
+		return program + " --continue"
 	}
 	return program
+}
+
+// isOpencodeResumeFlag reports whether tok already expresses a resume intent to
+// opencode — either "continue the last session" (-c/--continue) or "continue
+// this exact session" (-s/--session). Both forms are checked because appending
+// --continue on top of an explicit --session would hand opencode two conflicting
+// session selectors.
+//
+// "-s" is opencode's only "-s"-prefixed short flag (per `opencode --help` on
+// 0.0.0-main-202604230742: -h, -v, -m, -c, -s), so an "-s"-prefixed token
+// carrying an attached value ("-sses_091dbcc") is unambiguously a session
+// selector — the same reasoning isShortResumeWithAttachedValue applies to "-r"
+// for claude/gemini.
+func isOpencodeResumeFlag(tok string) bool {
+	switch {
+	case tok == "-c" || tok == "--continue":
+		return true
+	case tok == "-s" || tok == "--session":
+		return true
+	case strings.HasPrefix(tok, "--session=") || strings.HasPrefix(tok, "-s="):
+		return true
+	case strings.HasPrefix(tok, "-s") && len(tok) > 2:
+		return true
+	}
+	return false
 }
 
 // ResumeProgramWithConversationID derives a "resume this exact conversation"

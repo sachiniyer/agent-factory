@@ -13,7 +13,7 @@ af                 # launch the TUI
 
 | Flag | Description |
 |------|-------------|
-| `-p`, `--program` | Agent to run in new sessions, one of `claude`, `codex`, `aider`, `gemini`, `amp`. To pass custom paths or flags, use `program_overrides` in the config instead — see [configuration.md](configuration.md#choosing-the-agent). |
+| `-p`, `--program` | Agent to run in new sessions, one of `claude`, `codex`, `aider`, `gemini`, `amp`, `opencode`. To pass custom paths or flags, use `program_overrides` in the config instead — see [configuration.md](configuration.md#choosing-the-agent). |
 | `-y`, `--autoyes` | Experimental: automatically accept agent prompts in all sessions. |
 
 ## `af sessions`

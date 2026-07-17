@@ -21,13 +21,13 @@ team board, a hosted cloud agent, or a manual shell setup.
 
 | Tool family | Examples | Best center of gravity | Agent Factory contrast |
 |---|---|---|---|
-| **Agent Factory** | `af` | One task becomes one branch/worktree, supervised from a TUI, CLI, daemon, and local API. | Git review, cron/watch automation, remote hooks, usage-limit recovery, and recoverable lifecycle are the core product. Supports Claude Code, Codex, Aider, Gemini, and Amp through named agent choices. |
+| **Agent Factory** | `af` | One task becomes one branch/worktree, supervised from a TUI, CLI, daemon, and local API. | Git review, cron/watch automation, remote hooks, usage-limit recovery, and recoverable lifecycle are the core product. Supports Claude Code, Codex, Aider, Gemini, Amp, and opencode through named agent choices. |
 | **Agent terminal multiplexers** | Herdr, Agent Deck, Claude Squad | Keep many live terminal agents visible, switchable, and persistent. | Agent Factory is more opinionated about repo-scoped sessions, worktree ownership, task scheduling, and archive/restore semantics. |
 | **Desktop worktree apps** | Conductor, Superset, Nimbalyst, Crystal | Visual workspace management, built-in diff review, and local parallel branches. | Agent Factory keeps the primary interface in the terminal and hands review back to normal git/PR tools. |
 | **Kanban/review boards** | Vibe Kanban | Plan, dispatch, review, and track many agent tasks as team work items. | Agent Factory is lighter and repo-local, with cron/watch automation instead of a shared planning board. |
-| **Built-in agent dashboards** | Claude Code Agent View, Codex in ChatGPT | Native multi-session surfaces for one agent ecosystem. | Agent Factory is agent-agnostic across Claude Code, Codex, Aider, Gemini, and Amp, with one lifecycle around all of them. |
+| **Built-in agent dashboards** | Claude Code Agent View, Codex in ChatGPT | Native multi-session surfaces for one agent ecosystem. | Agent Factory is agent-agnostic across Claude Code, Codex, Aider, Gemini, Amp, and opencode, with one lifecycle around all of them. |
 | **Cloud coding agents** | Codex cloud, Copilot cloud agent, Cursor Cloud Agents, Jules, Devin | Delegate work to hosted environments and return for review or PRs. | Agent Factory keeps work local by default and gives you direct terminal/process control. |
-| **Single-agent CLIs** | Claude Code, Codex CLI, OpenCode, Aider, Gemini CLI, Amp, Crush | One focused coding loop in a terminal or editor. | Agent Factory runs and supervises those tools as fleet members rather than replacing their agent loop. |
+| **Single-agent CLIs** | Claude Code, Codex CLI, opencode, Aider, Gemini CLI, Amp, Crush | One focused coding loop in a terminal or editor. | Agent Factory runs and supervises those tools as fleet members rather than replacing their agent loop. |
 | **Manual stack** | tmux/Zellij, git worktree, cron, shell scripts | Maximum control with the fewest product assumptions. | Flexible but self-managed: naming, scheduling, cleanup, restore, and safety checks are yours. |
 
 </div>
@@ -42,7 +42,7 @@ team board, a hosted cloud agent, or a manual shell setup.
 | **Herdr** | Agent terminal multiplexer | Terminal panes, mouse/keyboard UI, CLI/socket API | Persistent real PTYs and agent state; worktree workflow can sit around the terminal runtime. | People who want a true terminal multiplexer redesigned around agents. | Herdr is stronger as a general live terminal runtime; Agent Factory is stronger as a repo/worktree/task lifecycle manager. |
 | **Agent Deck** | Agent terminal manager | Terminal dashboard | Groups, search, forking, worktrees, cost tracking, and phone-controlled conductor workflows. | Managing many terminal-agent sessions across projects. | Agent Deck is broader fleet management; Agent Factory is narrower around repo-scoped daemon state, tasks, and branch lifecycle. |
 | **Claude Squad** | Terminal worktree manager | TUI | Multiple AI terminal agents in isolated git workspaces with review/check-out flows. | Lightweight terminal management for local agents. | Agent Factory is a fork that adds per-repo scoping, daemon-owned state, tasks, remote hooks, JSON CLI, HTTP API, archive/restore, and generated docs. |
-| **Conductor** | Desktop worktree app | macOS desktop app | Each task gets a workspace, branch, files, terminal, diff, and review path. | Visual local workflow for parallel Claude Code, Codex, Cursor, and OpenCode work. | Conductor has a stronger visual review surface; Agent Factory stays terminal-native and scriptable. |
+| **Conductor** | Desktop worktree app | macOS desktop app | Each task gets a workspace, branch, files, terminal, diff, and review path. | Visual local workflow for parallel Claude Code, Codex, Cursor, and opencode work. | Conductor has a stronger visual review surface; Agent Factory stays terminal-native and scriptable. |
 | **Superset** | Desktop/workspace app | Desktop app | Runs many coding agents in parallel and emphasizes ready-for-review diffs. | Users who want visual parallel execution and review queues on one machine. | Superset is more GUI/review-board oriented; Agent Factory is CLI/API/daemon oriented. |
 | **Nimbalyst** | Visual agent workspace | Desktop/web-style visual workspace | Kanban, worktrees, inline AI diffs, and Claude Code/Codex workflows. | Teams or individuals wanting an integrated visual workspace around agent output. | Nimbalyst is a broader visual environment; Agent Factory is a small terminal control plane. |
 | **Crystal** | Desktop worktree app | Electron desktop app | Parallel Claude Code/Codex sessions against git worktrees. | People who liked the original Crystal multi-session local workflow. | Crystal is now positioned as Nimbalyst's predecessor; Agent Factory keeps the terminal-first version of this pattern. |
@@ -55,7 +55,7 @@ team board, a hosted cloud agent, or a manual shell setup.
 | **Cursor Cloud Agents** | Hosted/editor-adjacent agent | Cursor cloud/editor workflow | Runs Cursor Agent in cloud environments for continuous assistance. | Cursor users who want background cloud tasks tied to their editor workflow. | Cursor owns the editor/cloud experience; Agent Factory owns a terminal daemon and local worktrees. |
 | **Google Jules** | Hosted coding agent | Web, GitHub, CLI/API | Clones a repo into a Cloud VM, develops a plan, and can work asynchronously. | GitHub-connected cloud coding tasks with Google/Gemini infrastructure. | Jules is hosted and task-oriented; Agent Factory keeps the working processes on your local or hook-defined backend. |
 | **Devin** | Autonomous cloud engineer | Devin web app, integrations, API | Cloud-based engineer that can write, run, test code, create PRs, and participate in review workflows. | Larger delegated engineering tasks and review workflows managed in Devin. | Devin is an autonomous hosted teammate; Agent Factory is a local supervisor for agent CLIs you already run. |
-| **OpenCode** | Single-agent CLI/editor/desktop agent | Terminal, IDE, desktop | Open source coding agent with multi-session support and session sharing. | Users who want an open source agent loop across terminal/editor/desktop. | OpenCode is the agent; Agent Factory can make many OpenCode-like sessions observable and isolated. |
+| **opencode** | Single-agent CLI/editor/desktop agent | Terminal, IDE, desktop | Open source coding agent with multi-session support and session sharing. | Users who want an open source agent loop across terminal/editor/desktop. | opencode is the agent; Agent Factory runs it as one session type and adds worktree isolation, session lifecycle, and task orchestration around many of them. |
 | **Aider** | Single-agent CLI pair programmer | Terminal REPL | Edits local git repos directly and supports many model providers. | Model-flexible terminal pair programming, especially in existing git repos. | Aider is one excellent worker; Agent Factory gives many workers isolated worktrees and shared lifecycle. |
 | **Gemini CLI** | Single-agent CLI | Terminal | Open source Gemini-powered ReAct loop over local tools and MCP servers. | Terminal users in the Google/Gemini ecosystem. | Agent Factory can run Gemini CLI as one session type but adds worktree/session/task orchestration around it. |
 | **Amp** | Single-agent terminal/editor agent | Terminal and editor | Frontier coding agent with threads and multi-model behavior. | People who want a polished, fast-moving agent CLI/editor loop. | Amp is the coding agent; Agent Factory is the terminal control plane around many agent processes. |
@@ -120,8 +120,11 @@ Choose **Codex cloud**, **GitHub Copilot cloud agent**, **Cursor Cloud Agents**,
 **Jules**, or **Devin** when you want hosted background execution and a
 review/PR handoff instead of local terminal control.
 
-Choose a **single-agent CLI** such as Claude Code, Codex CLI, OpenCode, Aider,
-Gemini CLI, Amp, or Crush when you only need one focused agent loop.
+Choose a **single-agent CLI** such as Claude Code, Codex CLI, opencode, Aider,
+Gemini CLI, Amp, or Crush when you only need one focused agent loop. Most of
+these are agents Agent Factory can run for you — reach for the CLI on its own
+when one loop is all you want, and for Agent Factory once you want several of
+them isolated, supervised, and reviewable.
 
 Choose **tmux/Zellij + manual worktrees** when you want the fewest moving parts
 and are comfortable owning all lifecycle policy yourself.
@@ -153,7 +156,7 @@ and are comfortable owning all lifecycle policy yourself.
   [Google Jules](https://jules.google/docs/), and
   [Devin docs](https://docs.devin.ai/get-started/devin-intro).
 - Single-agent CLIs: [Codex CLI](https://developers.openai.com/codex/cli),
-  [OpenCode](https://opencode.ai/), [Aider](https://aider.chat/),
+  [opencode](https://opencode.ai/), [Aider](https://aider.chat/),
   [Gemini CLI](https://developers.google.com/gemini-code-assist/docs/gemini-cli),
   [Amp](https://ampcode.com/manual), and
   [Crush](https://github.com/charmbracelet/crush).

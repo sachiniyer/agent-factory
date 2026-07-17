@@ -155,7 +155,7 @@ fi
 case ":$PATH:" in
 	*":$INSTALL_DIR:"*)
 		echo "Next:"
-		echo "  1. Make sure tmux, git, and an agent CLI (Claude Code, Codex, Aider, or Gemini) are installed."
+		echo "  1. Make sure tmux, git, and an agent CLI (Claude Code, Codex, Aider, Gemini, Amp, or opencode) are installed."
 		echo "  2. Run: af doctor --setup"
 		echo "  3. In a git repository, run: af"
 		;;

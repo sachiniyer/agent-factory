@@ -133,7 +133,8 @@ func ConfigDirFor(envDir string) (string, error) {
 type Config struct {
 	SchemaVersion int `json:"schema_version" toml:"schema_version"`
 	// DefaultProgram is the default agent program name. Must be one of
-	// tmux.SupportedPrograms (e.g. "claude", "codex", "aider", "gemini", "amp").
+	// tmux.SupportedPrograms (e.g. "claude", "codex", "aider", "gemini", "amp",
+	// "opencode").
 	DefaultProgram string `json:"default_program" toml:"default_program"`
 	// ProgramOverrides maps an agent name (key) to the full command string
 	// (value) used when invoking that agent under tmux. Keys must be in

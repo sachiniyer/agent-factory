@@ -45,6 +45,17 @@ func resolveProgramForInstance(i *Instance) string {
 	// Key the claude-only flag off the agent the RESOLVED command actually
 	// runs, not the config-name enum: an override may point "claude" at a
 	// different program, which would exit on the unknown flag (#1116).
+	//
+	// opencode is deliberately NOT wired here, despite owning an obvious-looking
+	// analog. Its --dangerously-skip-permissions flag belongs to the `opencode
+	// run` SUBCOMMAND, not to the bare TUI command af launches; passing it to the
+	// TUI makes opencode print its help and exit — byte-identical to passing a
+	// nonsense flag (both verified against 0.0.0-main-202604230742). Wiring it
+	// would kill every AutoYes opencode spawn as an opaque readiness timeout,
+	// which is exactly the #1043/#1116/#1131 class this comment block exists to
+	// prevent. opencode's TUI also auto-approves tools in its default config
+	// (it ran `rm README.md` unprompted), so there is nothing for AutoYes to
+	// dismiss today.
 	if i.AutoYes && tmux.DetectAgentFromCommand(resolved) == tmux.ProgramClaude &&
 		// Sessions persisted by pre-#659 binaries got the flag appended at
 		// create-time in main.go (19c0dd9), so legacy Instance.Program values
@@ -654,8 +665,14 @@ func (b *LocalBackend) CheckAndHandleTrustPrompt(i *Instance) bool {
 	// regression as #677. Codex was added in #729: it was previously excluded
 	// here, so a codex trust/confirmation dialog was never dismissed even
 	// though isReadyContent could surface it.
+	// opencode has NO trust gate of its own (a fresh `git init` repo goes straight
+	// to its composer, verified on 0.0.0-main-202604230742), so it lands in
+	// CheckAndHandleTrustPrompt's generic doc-trust branch and no-ops harmlessly.
+	// It is listed anyway: this is the one site enumerating every agent, and an
+	// agent silently missing from it is the #729 defect (codex was excluded here,
+	// so its dialog was surfaced by isReadyContent but never dismissed).
 	switch i.ResolvedAgent() {
-	case tmux.ProgramClaude, tmux.ProgramCodex, tmux.ProgramAider, tmux.ProgramGemini, tmux.ProgramAmp:
+	case tmux.ProgramClaude, tmux.ProgramCodex, tmux.ProgramAider, tmux.ProgramGemini, tmux.ProgramAmp, tmux.ProgramOpencode:
 		return ts.CheckAndHandleTrustPrompt()
 	}
 	return false

@@ -5,7 +5,7 @@
 - **tmux** and **git** on your `PATH`.
 - At least one AI coding agent installed — e.g.
   [Claude Code](https://docs.anthropic.com/en/docs/claude-code), Codex, Aider,
-  Gemini, or Amp.
+  Gemini, Amp, or opencode.
 - Linux or macOS. On Windows, run it inside WSL2.
 
 No Go toolchain is required to install `af` — releases ship prebuilt binaries.

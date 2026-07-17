@@ -90,6 +90,40 @@ func TestDoctorAgentBinaryScanIncludesAmp(t *testing.T) {
 	require.True(t, okContains(report, "amp"), "amp pass row should be recorded")
 }
 
+// TestDoctorAgentBinaryScanIncludesOpencode is the opencode twin: `af doctor` must
+// scan for the opencode binary and report it in the agents header like every other
+// supported agent. checkAgentBinaries iterates tmux.SupportedPrograms, so this is a
+// regression lock on opencode staying in that list — if it dropped out, doctor would
+// silently stop diagnosing it and a user with a broken opencode install would get a
+// clean bill of health.
+//
+// The override points at a fake binary rather than relying on PATH because
+// opencode's default install path (~/.opencode/bin/opencode) is not on PATH for
+// every user — program_overrides is the documented fix, and this exercises it.
+func TestDoctorAgentBinaryScanIncludesOpencode(t *testing.T) {
+	binDir := t.TempDir()
+	fakeOpencode := writeExecutable(t, binDir, "opencode", "#!/bin/sh\nexit 0\n")
+	t.Setenv("PATH", binDir)
+
+	cfg := &config.Config{
+		DefaultProgram:   tmux.ProgramOpencode,
+		ProgramOverrides: map[string]string{tmux.ProgramOpencode: fakeOpencode},
+	}
+	report := &Report{}
+	checkAgentBinaries(cfg, report)
+
+	var agentsHeader string
+	for _, h := range report.Header {
+		if h.Label == "agents" {
+			agentsHeader = h.Value
+			break
+		}
+	}
+
+	require.Contains(t, agentsHeader, "opencode=present")
+	require.True(t, okContains(report, "opencode"), "opencode pass row should be recorded")
+}
+
 func setupDoctorRepo(t *testing.T) string {
 	t.Helper()
 	repo := filepath.Join(t.TempDir(), "repo")

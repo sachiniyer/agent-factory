@@ -352,6 +352,59 @@ func TestResumeProgram(t *testing.T) {
 			"ionice -c 3 amp --no-ide threads continue --last",
 		},
 
+		// opencode: append --continue at the end. opencode's TUI is its DEFAULT
+		// command ("opencode [project]") and --continue is a position-independent
+		// boolean on it, so this is a tail append like claude/gemini/aider — NOT a
+		// codex/amp-style subcommand splice.
+		{"opencode bare", "opencode", "opencode --continue"},
+		{"opencode with flag", "opencode --model anthropic/claude-opus-4-5", "opencode --model anthropic/claude-opus-4-5 --continue"},
+		// opencode takes the project dir as a positional arg; the tail append must
+		// not disturb it.
+		{"opencode with project positional", "opencode /src/repo", "opencode /src/repo --continue"},
+		{
+			// The default install path, so this shape is the common case.
+			"opencode absolute path",
+			"/home/user/.opencode/bin/opencode --model anthropic/claude-opus-4-5",
+			"/home/user/.opencode/bin/opencode --model anthropic/claude-opus-4-5 --continue",
+		},
+		{
+			"opencode quoted path with spaces",
+			`"/path with spaces/opencode" --model $MODEL`,
+			`"/path with spaces/opencode" --model $MODEL --continue`,
+		},
+
+		// Already carrying a resume intent: leave the command untouched rather than
+		// hand opencode two conflicting session selectors.
+		{"opencode already --continue", "opencode --continue", "opencode --continue"},
+		{"opencode already -c", "opencode -c", "opencode -c"},
+		{"opencode already --session", "opencode --session ses_091dbcc41ffe", "opencode --session ses_091dbcc41ffe"},
+		{"opencode already -s", "opencode -s ses_091dbcc41ffe", "opencode -s ses_091dbcc41ffe"},
+		{"opencode already --session=", "opencode --session=ses_091dbcc41ffe", "opencode --session=ses_091dbcc41ffe"},
+		{"opencode already -s=", "opencode -s=ses_091dbcc41ffe", "opencode -s=ses_091dbcc41ffe"},
+		{"opencode already -s attached value", "opencode -sses_091dbcc41ffe", "opencode -sses_091dbcc41ffe"},
+		{"opencode --continue --fork", "opencode --continue --fork", "opencode --continue --fork"},
+
+		// #742: tokens BEFORE the agent token belong to a wrapper command, and
+		// ionice/taskset's own "-c" must never be mistaken for opencode's
+		// --continue. Scanning the whole token list would return these unchanged
+		// and silently break opencode resume behind a wrapper.
+		{
+			"opencode ionice wrapper (-c is ionice's, not opencode's)",
+			"ionice -c 3 opencode",
+			"ionice -c 3 opencode --continue",
+		},
+		{
+			"opencode taskset wrapper (-c is taskset's)",
+			"taskset -c 0-3 opencode",
+			"taskset -c 0-3 opencode --continue",
+		},
+		{"opencode env wrapper", "env FOO=bar opencode", "env FOO=bar opencode --continue"},
+		{
+			"opencode ionice wrapper with real --continue still idempotent",
+			"ionice -c 3 opencode --continue",
+			"ionice -c 3 opencode --continue",
+		},
+
 		// Unknown programs are passed through unchanged so unrelated CLIs
 		// aren't accidentally rewritten.
 		{"unknown program", "mytool --bar", "mytool --bar"},
@@ -433,6 +486,18 @@ func TestResumeProgramWithConversationID(t *testing.T) {
 		{"amp explicit command", ProgramAmp, "amp review", "amp review", false},
 		{"provider mismatch", ProgramClaude, "codex --model gpt-5", "codex --model gpt-5", false},
 		{"unsupported provider", ProgramGemini, "gemini", "gemini", false},
+		// opencode CAN resume an explicit id (`opencode --session <id>`), but af
+		// never learns one: CaptureAgentConversation only implements codex (whose
+		// rollout files expose an id on disk), and opencode has no --session-id
+		// equivalent that would let af CHOOSE the id up front the way
+		// ClaudeProgramWithSessionID does. With no id to pass, opencode
+		// deliberately falls through to ok=false and Restore uses the
+		// latest-session path (resumeProgram's --continue) — the same degradation
+		// gemini and aider get. If opencode id capture is ever implemented, add a
+		// ProgramOpencode case returning `program + " --session " + shellQuoteArg(id)`
+		// and flip this row.
+		{"opencode has no id-resume path in af", ProgramOpencode, "opencode", "opencode", false},
+		{"opencode with flag still no id-resume", ProgramOpencode, "opencode --model anthropic/claude-opus-4-5", "opencode --model anthropic/claude-opus-4-5", false},
 		{"empty id", ProgramCodex, "codex", "codex", false},
 	}
 
@@ -535,6 +600,21 @@ func TestResumeProgram_Idempotent(t *testing.T) {
 		"ionice -c 3 amp --no-ide",
 		"amp threads continue --last",
 		"amp review",
+		"opencode",
+		"opencode --model anthropic/claude-opus-4-5",
+		"opencode /src/repo",
+		"opencode --continue",
+		"opencode -c",
+		"opencode --session ses_091dbcc41ffe",
+		"opencode -s ses_091dbcc41ffe",
+		"opencode --session=ses_091dbcc41ffe",
+		"opencode -s=ses_091dbcc41ffe",
+		"opencode -sses_091dbcc41ffe",
+		"opencode --continue --fork",
+		"ionice -c 3 opencode",
+		"taskset -c 0-3 opencode",
+		"env FOO=bar opencode",
+		`"/path with spaces/opencode" --model $MODEL`,
 	} {
 		once := resumeProgram(in)
 		twice := resumeProgram(once)

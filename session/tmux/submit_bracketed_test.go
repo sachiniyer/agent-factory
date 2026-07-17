@@ -199,11 +199,18 @@ func TestSendKeysCommandDeliversPromptAsPasteNotKeystrokes(t *testing.T) {
 // silently for months while codex was fine, so an agent added later must not be
 // able to opt out by omission.
 func TestSendKeysCommandBracketsForEveryAgent(t *testing.T) {
-	for _, program := range []string{
-		"claude", "codex", "aider", "gemini", "amp",
+	// Derived from SupportedPrograms, not hand-listed: this test's whole claim is
+	// that "an agent added later must not be able to opt out by omission", and a
+	// hardcoded list is precisely how such an agent opts out — it was already
+	// missing opencode, added as the 6th agent in #1959, at the moment this comment
+	// was written. Iterating the canonical enum means the next agent is covered the
+	// day it is added, with no one having to remember this file.
+	programs := append([]string{}, SupportedPrograms...)
+	programs = append(programs,
 		"bash",                 // program_overrides / __shell panes
 		"/home/foo/bin/claude", // legacy free-form persisted Program (#677)
-	} {
+	)
+	for _, program := range programs {
 		t.Run(program, func(t *testing.T) {
 			cmds := recordTmuxCommands(t, program, "sentinel-alpha")
 

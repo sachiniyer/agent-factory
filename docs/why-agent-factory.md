@@ -81,7 +81,7 @@ coding agents and you care about the path from prompt to reviewable branch.
 
 It is especially useful when:
 
-- you run Claude Code, Codex, Aider, Gemini, or Amp from the command line;
+- you run Claude Code, Codex, Aider, Gemini, Amp, or opencode from the command line;
 - you want each task isolated in a git worktree by default;
 - you prefer a TUI and scriptable CLI over a desktop GUI;
 - recurring prompts, watch scripts, or remote backends are part of your flow;
