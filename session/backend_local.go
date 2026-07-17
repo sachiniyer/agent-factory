@@ -650,15 +650,24 @@ func (b *LocalBackend) SendPromptCommand(i *Instance, prompt string) error {
 	return ts.SendKeysCommand(prompt)
 }
 
-func (b *LocalBackend) IsAlive(i *Instance) bool {
+func (b *LocalBackend) IsAlive(i *Instance) (bool, error) {
 	i.mu.RLock()
 	ts := i.tmuxLocked()
 	i.mu.RUnlock()
 
 	if ts == nil {
-		return false
+		// No binding at all: an answer, not a guess.
+		return false, nil
 	}
-	return ts.DoesSessionExist()
+	// ProbeSession, not DoesSessionExist (#1917 round 8): this result is EVIDENCE —
+	// the daemon's poll turns it into probeAlive, which clears a session's restore
+	// history and marks it Ready. DoesSessionExist reports a timed-out probe as
+	// "exists", so taking it here would report a wedged server as a live agent.
+	exists, known := ts.ProbeSession()
+	if !known {
+		return false, fmt.Errorf("%w: has-session while probing liveness", tmux.ErrTmuxTimeout)
+	}
+	return exists, nil
 }
 
 func (b *LocalBackend) CheckAndHandleTrustPrompt(i *Instance) bool {

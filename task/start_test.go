@@ -49,7 +49,7 @@ func (b *startBackend) SendPromptCommand(_ *session.Instance, prompt string) err
 }
 func (b *startBackend) SendKeys(*session.Instance, string) error         { return nil }
 func (b *startBackend) SetPreviewSize(*session.Instance, int, int) error { return nil }
-func (b *startBackend) IsAlive(*session.Instance) bool                   { return true }
+func (b *startBackend) IsAlive(*session.Instance) (bool, error)          { return true, nil }
 func (b *startBackend) CheckAndHandleTrustPrompt(*session.Instance) bool {
 	b.trustChecks++
 	if b.trustPrompts <= 0 {

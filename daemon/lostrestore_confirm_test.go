@@ -1,11 +1,13 @@
 package daemon
 
 import (
+	"fmt"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/sachiniyer/agent-factory/session"
+	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
 // The #1910 regression lock: a Lost session whose recovery spawn SUCCEEDS but
@@ -261,8 +263,8 @@ type deadPaneBackend struct{ *session.FakeBackend }
 func (b *deadPaneBackend) HasUpdated(*session.Instance) (bool, bool, string) {
 	return false, false, "" // what a DEAD session's suppressed capture returns
 }
-func (b *deadPaneBackend) IsAlive(*session.Instance) bool { return false } // probeDead
-func (b *deadPaneBackend) Type() string                   { return "local" }
+func (b *deadPaneBackend) IsAlive(*session.Instance) (bool, error) { return false, nil } // probeDead
+func (b *deadPaneBackend) Type() string                            { return "local" }
 
 // TestRefreshInstanceStatus_SnapshotNilErrorOnDeadSession_IsNotAnObservation is
 // round-7 finding (1), and it is the counter being fooled by the same disease it
@@ -316,5 +318,66 @@ func TestRefreshInstanceStatus_LiveSessionIsObserved(t *testing.T) {
 	if count == 0 {
 		t.Fatal("a live session produced no liveness observation: confirmation would never happen " +
 			"and every restored session would be charged a failure it did not earn")
+	}
+}
+
+// wedgedProbeBackend models #1917 round 8's ROOT: a primitive that cannot say "I
+// don't know". Its liveness probe TIMED OUT — tmux never answered — which
+// sessionExists laundered into `true` and Alive reported as (true, nil).
+//
+// The Snapshot is deliberately the same (false,false,"") a dead session gives, so
+// the poll takes its idle branch and asks the liveness probe. Everything then hinges
+// on what that probe is ALLOWED to say.
+type wedgedProbeBackend struct{ *session.FakeBackend }
+
+func (b *wedgedProbeBackend) HasUpdated(*session.Instance) (bool, bool, string) {
+	return false, false, ""
+}
+
+func (b *wedgedProbeBackend) IsAlive(*session.Instance) (bool, error) {
+	// The tri-state: could not ask. Before round 8 this signature was `bool`, so
+	// this exact situation was FORCED to be reported as `true`.
+	return false, fmt.Errorf("%w: has-session while probing liveness", tmux.ErrTmuxTimeout)
+}
+
+func (b *wedgedProbeBackend) Type() string { return "local" }
+
+// TestRefreshInstanceStatus_WedgedProbe_IsNotAnObservation is round-8 finding (2) —
+// the same disease as round 7, one primitive over.
+//
+// A timed-out `tmux has-session` became `true` via sessionExists; Alive reported
+// (true, nil); the poll recorded a positive liveness observation though tmux NEVER
+// ANSWERED — which after a Lost recovery clears lostRestoreStates, resets the
+// backoff, and can mark a wedged pane READY.
+//
+// Fixing it at the counter would have made the next caller round 9's finding. It is
+// fixed at the PRIMITIVE: Backend.IsAlive returns (bool, error), so "could not ask"
+// is sayable and probeLiveness maps it to probeUnknown.
+//
+// PRE-FIX BEHAVIOR THIS REPRODUCES: aliveObservations advances for a server that
+// never answered.
+func TestRefreshInstanceStatus_WedgedProbe_IsNotAnObservation(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	backend := &wedgedProbeBackend{FakeBackend: session.NewFakeBackend()}
+	inst := registerStarted(t, manager, repoID, repoPath, "wedged", backend, true, session.Running)
+
+	obsKey := remoteLossKey(repoID, inst)
+	manager.refreshInstanceStatus(repoID, inst)
+
+	manager.mu.Lock()
+	count := manager.aliveObservations[obsKey]
+	manager.mu.Unlock()
+
+	if count != 0 {
+		t.Fatal("a liveness probe that TIMED OUT was counted as affirmative evidence: a bool cannot " +
+			"say 'I don't know', so sessionExists laundered the timeout into `true` and Alive " +
+			"reported (true, nil) — and the restore loop then clears the failure history and can " +
+			"mark a wedged pane Ready (#1917 round 8). The fix is the primitive's type, not this " +
+			"caller: the next caller would have been round 9's finding.")
+	}
+	// Nor may it be marked Lost: an unanswered probe is not evidence of death
+	// either — that is what the debounce is for.
+	if got := inst.GetStatus(); got == session.Lost {
+		t.Fatal("an unanswerable probe marked the session Lost: silence is not death either")
 	}
 }

@@ -32,7 +32,7 @@ func (b *probeBackend) HasUpdated(*Instance) (bool, bool, string) {
 
 func (b *probeBackend) TapEnter(*Instance) { b.tapped = true }
 
-func (b *probeBackend) IsAlive(*Instance) bool { return false }
+func (b *probeBackend) IsAlive(*Instance) (bool, error) { return false, nil }
 
 func (b *probeBackend) Preview(*Instance) (string, error) { return "short", nil }
 

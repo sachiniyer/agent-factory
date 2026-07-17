@@ -3,6 +3,7 @@ package git
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -66,5 +67,69 @@ exit 0
 	if state2 != CleanupStateUnknown {
 		t.Fatal("the retry reported a SETTLED cleanup while the directory is still on disk: the " +
 			"caller would drop the record and orphan it")
+	}
+}
+
+// TestCleanup_StalledRemove_DoesNotDeleteTheRetainedWorkspacesBranch is #1917
+// round-8 finding (1), and it is the worst outcome in this PR's history: we save
+// the files and destroy the only pointer to them.
+//
+// `git worktree remove -f` times out AFTER deregistering the checkout but BEFORE
+// deleting its files. removeDir correctly preserves the directory — and then
+// `git branch -D` SUCCEEDS, precisely BECAUSE the checkout is now unregistered, so
+// git raises no "branch is checked out" objection. The retained workspace loses its
+// only ref and its unique commits become unreachable.
+//
+// Refusing the file deletion while destroying the metadata is worse than either
+// alone: the workspace survives and nothing can find it.
+//
+// PRE-FIX BEHAVIOR THIS REPRODUCES: `branch -D` is issued for a workspace the same
+// run just decided to retain.
+func TestCleanup_StalledRemove_DoesNotDeleteTheRetainedWorkspacesBranch(t *testing.T) {
+	dir := t.TempDir()
+	log := filepath.Join(dir, "issued")
+	// `remove` stalls (after "deregistering"); every other verb answers instantly,
+	// so branch -D would sail through. Each invocation is recorded.
+	script := `#!/bin/sh
+echo "$@" >> ` + log + `
+for a in "$@"; do
+  case "$a" in
+    remove) exec sleep 300 ;;
+  esac
+done
+exit 0
+`
+	bin := t.TempDir()
+	if err := os.WriteFile(filepath.Join(bin, "git"), []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake git: %v", err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	prev := localGitTimeout
+	localGitTimeout = 300 * time.Millisecond
+	t.Cleanup(func() { localGitTimeout = prev })
+
+	gw, wt := worktreeForCleanup(t)
+	state, _ := gw.Cleanup()
+
+	if state != CleanupStateUnknown {
+		t.Fatalf("setup: a stalled remove must report unknown, got %v", state)
+	}
+	if _, err := os.Stat(wt); err != nil {
+		t.Fatalf("setup: the workspace must be retained: %v", err)
+	}
+
+	issued, err := os.ReadFile(log)
+	if err != nil {
+		t.Fatalf("read issued log: %v", err)
+	}
+	if strings.Contains(string(issued), "branch -D") {
+		t.Fatal("cleanup deleted the BRANCH of a workspace it had just decided to RETAIN: the " +
+			"timed-out remove deregistered the checkout, so branch -D no longer errors and the " +
+			"retained files lose their only ref — unique commits become unreachable. Saving the " +
+			"files and destroying the pointer to them is worse than either alone (#1917 round 8). " +
+			"Unknown must gate EVERY destructive act in the run, not only the file deletion.")
+	}
+	if strings.Contains(string(issued), "worktree prune") {
+		t.Fatal("cleanup pruned worktree metadata for a workspace it had just decided to retain")
 	}
 }

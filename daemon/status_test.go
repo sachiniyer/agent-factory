@@ -26,7 +26,7 @@ type deadTmuxBackend struct {
 	*session.FakeBackend
 }
 
-func (deadTmuxBackend) IsAlive(*session.Instance) bool { return false }
+func (deadTmuxBackend) IsAlive(*session.Instance) (bool, error) { return false, nil }
 
 // promptTapBackend is a FakeBackend that always reports a waiting prompt and
 // counts TapEnter calls, so the AutoYes path the status pass now subsumes can be
@@ -175,7 +175,9 @@ type nilMonitorBackend struct {
 func (b nilMonitorBackend) HasUpdated(*session.Instance) (bool, bool, string) {
 	return b.ts.HasUpdated()
 }
-func (b nilMonitorBackend) IsAlive(*session.Instance) bool { return b.ts.DoesSessionExist() }
+func (b nilMonitorBackend) IsAlive(*session.Instance) (bool, error) {
+	return b.ts.DoesSessionExist(), nil
+}
 
 // TestRefreshStatuses_DeadNilMonitorDoesNotPanic is the #999 regression at the
 // daemon poll layer: a persisted Dead/Lost instance whose TmuxSession has a nil

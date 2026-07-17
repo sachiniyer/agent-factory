@@ -53,6 +53,20 @@ func sessionExists(cmdExec cmd.Executor, name string) bool {
 	return exists
 }
 
+// ProbeSession reports whether this session exists AND whether tmux actually
+// ANSWERED — the tri-state a bool cannot express (#1917 round 8).
+//
+// DoesSessionExist has to pick yes or no, so a timed-out probe becomes "yes": the
+// conservative lie, safe for the read-only callers that only ever act on "no". But
+// it launders UNKNOWN into AFFIRMATIVE at the bottom of the stack, and every caller
+// above is then downstream of a lie it cannot detect — which is how a wedged tmux
+// server came to be reported as a live agent, and how a liveness counter built on
+// affirmative evidence got fooled anyway. Callers that treat "alive" as EVIDENCE
+// must take this form; callers that merely need a bool keep the lie, knowingly.
+func (t *TmuxSession) ProbeSession() (exists bool, known bool) {
+	return probeSession(t.cmdExec, t.sanitizedName)
+}
+
 // probeSession is sessionExists WITHOUT the lossy collapse: it reports whether
 // the session exists AND whether tmux actually answered.
 //

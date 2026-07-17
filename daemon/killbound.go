@@ -92,10 +92,32 @@ func lockWithin(mu *sync.Mutex, d time.Duration) bool {
 }
 
 // killWatchdogDelay is how long a kill may run before the watchdog reports the
-// stage it is stuck on. Comfortably above a slow-but-healthy teardown (the tmux
-// and git bounds below it are seconds each, and a pane-exit wait alone is 3s) so
-// a normal kill never logs. A var so tests can shorten it.
-var killWatchdogDelay = 45 * time.Second
+// stage it is stuck on. It must sit BEYOND every bound a legitimate teardown may
+// legally spend, or it cries wolf and its diagnostics become noise — a watchdog
+// that fires on healthy work is worse than none, because the next real wedge is
+// read as another false positive (#1917 round 8).
+//
+// The budget, summed from the bounds this PR put in place:
+//
+//	per tab   10s panePID + 10s list-panes + 10s kill-session + 10s has-session
+//	          + 3s pane-exit wait                                          =  43s
+//	× maxTabs (9)                                                          = 387s
+//	Cleanup   5 bounded git commands × 60s (remove, list, prune,
+//	          branch -D, prune)                                            = 300s
+//	vscode    2 × (5s SIGTERM grace + 5s SIGKILL grace)                    =  20s
+//	flocks    tombstone write 10s + record delete 10s                      =  20s
+//	                                                                        ------
+//	worst-case LEGITIMATE teardown                                          ≈ 727s
+//
+// 45s — the old value — fired on any wedged-tmux teardown with two or more tabs,
+// all of it bounded and correct. 15 minutes clears the sum with headroom, and that
+// is the right shape for what this actually watches: every KNOWN wait is now
+// bounded, so the watchdog exists for the unknown-unknowns. Exceeding every bound
+// we know of is precisely the wedge worth dumping stacks for. Firing late costs
+// only a later log; firing early costs the signal itself.
+//
+// If any bound above grows, this must grow with it. A var so tests can shorten it.
+var killWatchdogDelay = 15 * time.Minute
 
 // killStageDumpsStacks controls whether the watchdog appends goroutine stacks to
 // its report. The stacks are the evidence #1917 could not get from the field —

@@ -307,8 +307,13 @@ func (m *Manager) reapDeadRoot(repoID string, inst *session.Instance) (bool, err
 	// exhaustive — which is the argument for there being exactly one place to call.
 	deleted, err := m.deleteSessionRecord(repoID, session.RootSessionTitle, inst.ID, teardownErr)
 	if err != nil {
-		log.WarningLog.Printf("reaping dead root for repo %s: not deleting the record yet (will retry next tick): %v", repoID, err)
-		return false, nil
+		// Return the ERROR, not (false, nil) (#1917 round 8). "No, but fine" is
+		// absence-of-error wearing a different hat: the caller reads it as "nothing to
+		// reap" and skips rootEnsureFailed, so a persistent tmux/file-lock timeout
+		// re-runs this whole bounded teardown on EVERY tick — occupying the single
+		// status/restore poll loop and spamming warnings — instead of backing off.
+		// A failure has to look like one for the retry cadence to see it.
+		return false, fmt.Errorf("reaping dead root for repo %s: %w", repoID, err)
 	}
 	if !deleted {
 		log.InfoLog.Printf("dead root reap for repo %s skipped storage delete: current root record has a different instance identity", repoID)

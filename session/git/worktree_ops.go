@@ -325,6 +325,38 @@ func (r *cleanupRun) git(args ...string) (string, error) {
 	return out, err
 }
 
+// destructive runs a git command that DESTROYS something, and refuses once the run
+// is unknown (#1917 round 8).
+//
+// Every destructive act in the run must be gated, not just the file deletion. When
+// `git worktree remove -f` times out AFTER deregistering the checkout but BEFORE
+// deleting its files, removeDir correctly preserved the directory — and cleanup
+// then went on to `git branch -D`, which SUCCEEDED precisely because the checkout
+// was now unregistered, deleting the retained workspace's only ref and making its
+// unique commits unreachable. Saving the files and destroying the only pointer to
+// them is worse than either alone: the workspace survives and nothing can find it.
+//
+// So the rule is the run's, not each step's: once anything here is unknown, nothing
+// else may destroy.
+func (r *cleanupRun) destructive(what string, args ...string) (string, error) {
+	if r.unknown || r.g.cleanupHasStalled() {
+		err := fmt.Errorf("%w: refusing to %s: a cleanup command timed out against this workspace, so it is being retained — destroying its metadata would leave the files with nothing pointing at them", errRefusedDestructive, what)
+		r.errs = append(r.errs, err)
+		r.unknown = true
+		return "", err
+	}
+	return r.git(args...)
+}
+
+// errRefusedDestructive marks an act this run DECLINED because the workspace's
+// state is unknown — as opposed to one that RAN and failed.
+//
+// Callers must tell them apart. destructive() has already recorded a refusal, so
+// re-reporting it duplicates; but a command that ran and TIMED OUT sets r.unknown
+// itself, and suppressing that on an "is the run unknown?" test would swallow the
+// very deadline the caller needs to see. That mistake is easy and was made here.
+var errRefusedDestructive = errors.New("refused: the workspace's state is unknown")
+
 // removeDir is the choke point for the one destructive act Cleanup performs
 // directly. It REFUSES while the run is unknown: whatever stalled git (a hung
 // mount, a D-state process holding the tree) stalls os.RemoveAll on the very same
@@ -352,8 +384,14 @@ func (r *cleanupRun) removeDir(path string) {
 
 // prune runs `git worktree prune` through the run, so its deadline counts.
 func (r *cleanupRun) prune() {
-	if _, err := r.git("worktree", "prune"); err != nil {
-		r.errs = append(r.errs, fmt.Errorf("failed to prune worktrees: %w", err))
+	// Destructive metadata: prune drops git's record of worktrees it believes are
+	// gone. Gated like every other destructive step.
+	if _, err := r.destructive("prune worktree metadata", "worktree", "prune"); err != nil {
+		// Same rule as branch -D: a refusal recorded itself, a real failure is the
+		// caller's to see.
+		if !errors.Is(err, errRefusedDestructive) {
+			r.errs = append(r.errs, fmt.Errorf("failed to prune worktrees: %w", err))
+		}
 	}
 }
 
@@ -473,9 +511,16 @@ func (g *GitWorktree) Cleanup() (CleanupState, error) {
 	// reused a pre-existing branch via setupFromExistingBranch(), the branch
 	// may contain unrelated user work and must be preserved.
 	if g.branchCreatedByUs {
-		if _, err := r.git("branch", "-D", g.branchName); err != nil {
-			// Only log if it's not a "branch not found" error
-			if !strings.Contains(err.Error(), "not found") {
+		// THE branch delete. Gated (#1917 round 8): a timed-out `worktree remove`
+		// deregisters before it stalls, which is exactly what makes this succeed —
+		// so an ungated branch -D destroys the ref of the workspace the same run just
+		// decided to keep, and its unique commits become unreachable.
+		if _, err := r.destructive("delete branch "+g.branchName, "branch", "-D", g.branchName); err != nil {
+			// A REFUSAL already recorded itself. Anything else RAN — including a
+			// deadline, which the caller must still see — and "branch not found" is
+			// success (#478). Testing r.unknown here instead would swallow the branch
+			// delete's own timeout, since that timeout is what set it.
+			if !errors.Is(err, errRefusedDestructive) && !strings.Contains(err.Error(), "not found") {
 				r.errs = append(r.errs, fmt.Errorf("failed to remove branch %s: %w", g.branchName, err))
 			}
 		}

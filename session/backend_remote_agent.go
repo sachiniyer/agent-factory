@@ -96,9 +96,10 @@ func (b *remoteAgentBackend) SendPromptCommand(i *Instance, prompt string) error
 // its callers only use it for non-destructive TUI affordances. Destructive
 // recovery paths call AgentServer.Alive directly so they can distinguish an
 // unreachable remote from a dead one (#1794).
-func (b *remoteAgentBackend) IsAlive(i *Instance) bool {
-	alive, _ := i.AgentServer().Alive()
-	return alive
+func (b *remoteAgentBackend) IsAlive(i *Instance) (bool, error) {
+	// The error is now carried, not discarded: an unanswerable sandbox is unknown,
+	// and the debounce (#1794) is what turns a run of those into a conclusion.
+	return i.AgentServer().Alive()
 }
 
 // CheckAndHandleTrustPrompt is a daemon-side no-op: each remote AgentServer

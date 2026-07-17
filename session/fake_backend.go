@@ -109,7 +109,7 @@ func (b *FakeBackend) Preview(*Instance) (string, error)            { return "",
 func (b *FakeBackend) PreviewFullHistory(*Instance) (string, error) { return "", nil }
 func (b *FakeBackend) HasUpdated(*Instance) (bool, bool, string)    { return false, false, "" }
 func (b *FakeBackend) SendPromptCommand(*Instance, string) error    { return nil }
-func (b *FakeBackend) IsAlive(*Instance) bool                       { return true }
+func (b *FakeBackend) IsAlive(*Instance) (bool, error)              { return true, nil }
 func (b *FakeBackend) CheckAndHandleTrustPrompt(*Instance) bool     { return false }
 func (b *FakeBackend) TapEnter(*Instance)                           {}
 func (b *FakeBackend) Recover(*Instance) error                      { return nil }
