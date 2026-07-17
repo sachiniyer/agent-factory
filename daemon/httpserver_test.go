@@ -414,3 +414,43 @@ func TestHTTP_SuccessBodyUsesSharedEnvelopeWriter(t *testing.T) {
 	require.Equal(t, want.String(), rec.Body.String(),
 		"HTTP body must be the shared envelope writer's bytes (identical to CLI --json)")
 }
+
+// TestHTTP_RemoveTask_HonorsProjectExpectation proves the ROUTE honors the
+// `expect` field documented in docs/http-api.md, not merely that the struct
+// decodes. The body below is the documented shape verbatim: if the field is ever
+// renamed or dropped from the request type, the route silently stops enforcing
+// and this is what notices — a scope check that decodes but is never applied
+// looks exactly like one that passed.
+func TestHTTP_RemoveTask_HonorsProjectExpectation(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	bound := enabledCronTask("dddd1001", "/repos/beta")
+	require.NoError(t, task.AddTask(bound))
+
+	rec := doHTTP(&controlServer{scheduler: newTaskScheduler()}, http.MethodPost, "/v1/RemoveTask",
+		`{"id":"dddd1001","expect":{"enforce":true,"project_path":"/repos/alpha"}}`)
+	require.Equal(t, http.StatusInternalServerError, rec.Code)
+
+	env := decodeEnvelope(t, rec)
+	require.NotNil(t, env.Error)
+	assert.Contains(t, env.Error.Message, "re-bound")
+
+	tasks, err := task.LoadTasks()
+	require.NoError(t, err)
+	require.Len(t, tasks, 1, "a refused delete must leave the task intact")
+}
+
+// TestHTTP_RemoveTask_OmittedExpectationStillRemoves pins the compatibility half
+// the docs promise: `expect` is optional, so a client that has never heard of it
+// keeps working unchanged.
+func TestHTTP_RemoveTask_OmittedExpectationStillRemoves(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	require.NoError(t, task.AddTask(enabledCronTask("dddd1002", "/repos/beta")))
+
+	rec := doHTTP(&controlServer{scheduler: newTaskScheduler()}, http.MethodPost, "/v1/RemoveTask",
+		`{"id":"dddd1002"}`)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	tasks, err := task.LoadTasks()
+	require.NoError(t, err)
+	assert.Empty(t, tasks, "an omitted expectation must not gate the delete")
+}

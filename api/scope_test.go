@@ -785,3 +785,24 @@ func TestWhoami_RootlessRowStillPassesWithValidRepo(t *testing.T) {
 	repoFlag = valid
 	assert.NoError(t, sessionsWhoamiCmd.RunE(sessionsWhoamiCmd, nil))
 }
+
+// TestTasksList_RelativeProjectPathIsNotAdoptedByCwd guards the ancestor walk
+// against inventing an identity. Climbing a RELATIVE recorded path reaches ".",
+// which resolves to whatever repository the caller is standing in — so a task
+// with a hand-edited relative path would silently appear in (and be mutable
+// from) every project it was listed in. A relative path is not evidence of
+// belonging anywhere, so it degrades to path equality instead.
+func TestTasksList_RelativeProjectPathIsNotAdoptedByCwd(t *testing.T) {
+	useTempConfig(t)
+	resetScopeFlags(t)
+	stubDaemon(t)
+	alpha := mkRepo(t, "alpha")
+	seedTaskRaw(t, task.Task{
+		ID: "aaaa1111", Name: "x", Prompt: "p", CronExpr: "0 9 * * *",
+		ProjectPath: "nope/gone", Enabled: true,
+	})
+	t.Chdir(alpha)
+
+	out := captureTasksList(t)
+	assert.Empty(t, out, "a relative recorded path must not adopt the current directory's project")
+}

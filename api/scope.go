@@ -190,12 +190,21 @@ func resolveProjectPath(projectPath string) resolvedProject {
 		return resolvedProject{id: repo.ID, root: repo.Root}
 	}
 	cleaned := filepath.Clean(projectPath)
-	for dir := filepath.Dir(cleaned); ; dir = filepath.Dir(dir) {
-		if repo, err := config.RepoFromPath(dir); err == nil {
-			return resolvedProject{id: repo.ID, root: repo.Root}
-		}
-		if parent := filepath.Dir(dir); parent == dir {
-			break // reached the filesystem root
+	// Only walk an ABSOLUTE path. A relative one has no meaning independent of
+	// the current directory, so climbing it reaches "." and resolves to whatever
+	// repository the caller happens to be standing in — adopting a task into the
+	// current project on no evidence at all. That is the same invented identity
+	// the leaf hash produced, just harder to spot, so a relative path degrades to
+	// path equality instead. No supported writer records one (the CLI stores
+	// repo.Root, the TUI an absolute path), so this only guards hand-edited rows.
+	if filepath.IsAbs(cleaned) {
+		for dir := filepath.Dir(cleaned); ; dir = filepath.Dir(dir) {
+			if repo, err := config.RepoFromPath(dir); err == nil {
+				return resolvedProject{id: repo.ID, root: repo.Root}
+			}
+			if parent := filepath.Dir(dir); parent == dir {
+				break // reached the filesystem root
+			}
 		}
 	}
 	return resolvedProject{id: config.RepoIDFromRoot(cleaned)}
