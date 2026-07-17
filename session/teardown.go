@@ -122,6 +122,31 @@ var ErrWorkspaceLeftBehind = errors.New("the session's workspace was left on dis
 // worktree with nothing left pointing at it.
 var ErrWorkspaceStateUnknown = errors.New("the worktree action was cut off by its deadline; the workspace may be partially removed")
 
+// TeardownStateUnknown reports whether err means "we do not know whether this
+// session's workspace still exists" — as opposed to any other teardown failure.
+//
+// This distinction is the whole taxonomy, and getting it wrong inverts the design
+// (#1917 round 5). A caller that blocks the record delete on ANY teardown error
+// turns safe-by-default into STUCK-by-default: a remote session whose sandbox was
+// successfully reaped but whose in-sandbox /kill call failed reports an error whose
+// subject is a dead HTTP endpoint, not the workspace — the workspace is provably
+// gone. Refusing to delete that record makes the finisher retry a dead endpoint
+// forever, and the tombstone never clears.
+//
+// So only these two block, and they exist for exactly one reason each: the pane's
+// liveness was never established, or a worktree removal was cut off mid-flight.
+// Both mean the workspace may still be on disk with this record as its only handle.
+// Everything else — an endpoint that did not answer, a tmux that answered with a
+// failure, a sandbox reap that reported a problem — is a teardown that TOLD us
+// something, and the record may go.
+//
+// It lives here, beside the sentinels, because the teardown choke points are their
+// only producers: teardownTabs raises them, ghostCleanup forwards them, and no
+// other code constructs them. One producer, one predicate, one place to change.
+func TeardownStateUnknown(err error) bool {
+	return errors.Is(err, ErrPaneMayBeLive) || errors.Is(err, ErrWorkspaceStateUnknown)
+}
+
 // closeTabForDestructiveTeardown is the shared close-and-classify for the two
 // modes that go on to touch the workspace (kill and archive).
 //

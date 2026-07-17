@@ -102,7 +102,7 @@ func (m *Manager) CreateSession(ctx context.Context, req CreateSessionRequest) (
 				return session.InstanceData{}, fmt.Errorf("failed to start instance %q, and its cleanup could not complete safely — its workspace may still be on disk at %s and could not be recorded, so it must be cleaned up by hand: %w",
 					title, instance.GetWorktreePath(), errors.Join(serr, killErr, keepErr))
 			}
-			return session.InstanceData{}, fmt.Errorf("failed to start instance %q, and its cleanup could not complete safely, so its workspace was left in place; the session has been kept so you can inspect or kill it: %w",
+			return session.InstanceData{}, fmt.Errorf("failed to start instance %q, and its cleanup could not complete safely, so its workspace was left in place; the session is recorded and the daemon will keep retrying the cleanup — it will clear once that succeeds: %w",
 				title, errors.Join(serr, killErr))
 		}
 		return session.InstanceData{}, fmt.Errorf("failed to start instance: %w", serr)
@@ -638,13 +638,30 @@ func (m *Manager) branchForTitle(title string) string {
 // hand the title back out — correct, because the cleanup removed everything the
 // create built. When the cleanup could NOT complete, that same release puts the
 // title back in circulation on top of live leftovers that no record points at, so
-// the next create under that name collides with or deletes them. Keeping the record
-// makes the leftovers addressable (the user can see and kill the session) and holds
-// the title against reuse. Mirrors the register-then-persist ordering of the success
-// path: the map entry goes in first so the refresh loop cannot build a duplicate
-// Instance from disk, and is rolled back if the write fails. The caller holds the
-// repo start lock.
+// the next create under that name collides with or deletes them.
+//
+// The record is TOMBSTONED, not merely written. Retention is a claim on two other
+// layers, and a row that just sits there satisfies neither (#1917 round 5):
+//
+//   - SaveInstances drops any non-started, non-Archived instance on the next
+//     wholesale checkpoint — which fires whenever ANY other started session in the
+//     repo is saved. An untombstoned row here would be silently erased, orphaning
+//     the leftovers it exists to hold. The tombstone is what makes that writer keep
+//     it.
+//   - Nothing else would ever finish the cleanup. refreshInstanceStatus routes a
+//     tombstoned record to finishUserKill on every poll, which retries the teardown
+//     and drops the record once it completes safely — so the leftovers are reaped
+//     when the cause clears, rather than waiting on the user.
+//
+// The tombstone is honest here: it records "a teardown is committed for this
+// record; finish it, never restore it", which is exactly what a failed create's
+// cleanup is. Mirrors the register-then-persist ordering of the success path — the
+// map entry goes in first so the refresh loop cannot build a duplicate Instance from
+// disk, and is rolled back if the write fails. The caller holds the repo start lock,
+// so this appends directly rather than going through persistKillTombstone (which
+// takes that same non-reentrant lock).
 func (m *Manager) keepFailedCreate(repoID, title string, instance *session.Instance) error {
+	instance.MarkUserKilled()
 	key := daemonInstanceKey(repoID, title)
 	m.mu.Lock()
 	defer m.mu.Unlock()

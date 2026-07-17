@@ -252,7 +252,17 @@ func (s *Storage) SaveInstances(instances []*Instance) error {
 		// per-repo checkpoint save — triggered whenever ANY started instance in
 		// the same repo is saved — would silently orphan the archived worktree.
 		// (Lost is unaffected: it loads started=true, so it already survives.)
-		if !inst.Started() && status != Archived {
+		//
+		// A TOMBSTONED instance is the same shape and is kept for the same reason
+		// (#1917). A kill clears started BEFORE teardown, so a teardown that could
+		// not complete safely — tmux never confirmed the pane dead, or a worktree
+		// removal was cut off — leaves exactly this: started=false, not Archived,
+		// workspace still on disk, and the record deliberately RETAINED as its only
+		// handle. Without this clause the next checkpoint triggered by any other
+		// started session in the repo would silently drop it, undoing the retention
+		// in a layer that never heard of it, and orphaning the very workspace the
+		// retention exists to protect. Retention is a claim on this writer too.
+		if !inst.Started() && status != Archived && !inst.UserKilled() {
 			continue
 		}
 		root := inst.GetRepoPath()

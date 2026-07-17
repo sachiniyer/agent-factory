@@ -15,6 +15,17 @@ import (
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
+// unsafeTeardownBackend starts fine but its teardown can never complete SAFELY: it
+// reports the shape a wedged tmux produces, where the pane's liveness was never
+// established and the workspace may still be live. That — not a generic failure —
+// is what "unsafe" means to deleteSessionRecord (see session.TeardownStateUnknown),
+// so a double that returns a plain error would no longer model this case at all.
+type unsafeTeardownBackend struct{ readyFakeBackend }
+
+func (b unsafeTeardownBackend) Kill(*session.Instance) error {
+	return fmt.Errorf("kill: tab %q: %w", "agent", session.ErrPaneMayBeLive)
+}
+
 // installFailKillTombstoned builds a session whose teardown always fails, then
 // drives one KillSession over it — which durably tombstones the record and, since
 // the teardown could not complete, leaves the record in place. That is exactly the
@@ -25,7 +36,7 @@ func installFailKillTombstoned(t *testing.T, title string) (*Manager, string, *s
 	restore := session.SetBackendFactoryForTest(func(session.InstanceOptions, string) (session.Backend, error) {
 		fake := session.NewFakeBackend()
 		fake.CompleteStart()
-		return failKillBackend{readyFakeBackend{fake}}, nil
+		return unsafeTeardownBackend{readyFakeBackend{fake}}, nil
 	})
 	t.Cleanup(restore)
 
@@ -401,7 +412,7 @@ func TestCreateSession_UnsafeCleanup_KeepsTheRecordAndTheTitle(t *testing.T) {
 	if cerr == nil {
 		t.Fatal("CreateSession reported success though its start failed")
 	}
-	if !strings.Contains(cerr.Error(), "kept") {
+	if !strings.Contains(cerr.Error(), "recorded") {
 		t.Fatalf("the error must tell the user the session was preserved so they can act on it: %v", cerr)
 	}
 
@@ -417,5 +428,95 @@ func TestCreateSession_UnsafeCleanup_KeepsTheRecordAndTheTitle(t *testing.T) {
 	manager.mu.Unlock()
 	if !tracked {
 		t.Fatal("the preserved session is not tracked, so the user cannot kill it through the product")
+	}
+}
+
+// TestDeleteSessionRecord_EndpointDeadButWorkspaceGone_ClearsTheTombstone is
+// round-5 finding (2), and it is an inversion of this PR's own goal.
+//
+// Blocking the record delete on ANY teardown error turns safe-by-default into
+// STUCK-by-default: the sandbox is reaped, the workspace no longer exists, and yet
+// the tombstone can never clear — finishUserKill retries a dead endpoint on every
+// poll, forever, and not even an explicit retry helps until a daemon restart
+// reloads an inert backend.
+//
+// Only an error that says the teardown STATE IS UNKNOWN may block. "The endpoint
+// didn't answer" is not "we don't know if it's destroyed".
+//
+// PRE-FIX BEHAVIOR THIS REPRODUCES: deleteSessionRecord refuses and the record
+// survives forever.
+func TestDeleteSessionRecord_EndpointDeadButWorkspaceGone_ClearsTheTombstone(t *testing.T) {
+	manager, repoID, _ := installRaceBackend(t, &raceBackend{}, "remote-ish")
+
+	endpointDead := fmt.Errorf("kill agent: dial tcp: connection refused")
+	deleted, err := manager.deleteSessionRecord(repoID, "remote-ish", "", endpointDead)
+
+	if err != nil {
+		t.Fatalf("a teardown error that is NOT about workspace state must not block the delete: the "+
+			"sandbox is already reaped, so refusing here makes finishUserKill retry a dead endpoint "+
+			"forever and the tombstone never clears — safe-by-default became stuck-by-default "+
+			"(#1917 round 5): %v", err)
+	}
+	if !deleted {
+		t.Fatal("the record was not deleted despite the workspace being gone")
+	}
+}
+
+// TestDeleteSessionRecord_UnknownState_StillBlocks is the guard in the other
+// direction: narrowing the taxonomy must not let a genuinely-unknown teardown
+// through. This is the case where the workspace may still be on disk.
+func TestDeleteSessionRecord_UnknownState_StillBlocks(t *testing.T) {
+	manager, repoID, _ := installRaceBackend(t, &raceBackend{}, "unknown-state")
+
+	unknown := fmt.Errorf("kill %q: tab %q: %w", "unknown-state", "agent", session.ErrPaneMayBeLive)
+	deleted, err := manager.deleteSessionRecord(repoID, "unknown-state", "", unknown)
+
+	if err == nil {
+		t.Fatal("an unknown-STATE teardown must still block the record delete: the workspace may " +
+			"still be on disk and this record is its only handle")
+	}
+	if deleted {
+		t.Fatal("the record was deleted despite the teardown state being unknown")
+	}
+	if rec := recordFor(t, repoID, "unknown-state"); rec == nil {
+		t.Fatal("the record must survive a refused delete")
+	}
+}
+
+// TestKillSession_GhostUnsafeTeardown_DoesNotPromiseAnAutomaticRetry is round-5
+// finding (3): a promise the code cannot keep is worse than no promise.
+//
+// finishUserKill is reached ONLY from refreshInstanceStatus, which iterates
+// m.instances. A ghost is by definition a record that could NOT be reconstructed
+// into an instance, so it never enters that map and no poll will ever visit it.
+// The record and tombstone are still retained — that keeps the workspace
+// addressable — but the next attempt has to come from the user, and the message
+// must say so.
+//
+// PRE-FIX BEHAVIOR THIS REPRODUCES: the error claims it "will be retried
+// automatically".
+func TestKillSession_GhostUnsafeTeardown_DoesNotPromiseAnAutomaticRetry(t *testing.T) {
+	prevWT, prevTmux := ghostCleanupWorktree, ghostKillTmuxByName
+	ghostKillTmuxByName = func(string) (tmux.PaneState, error) {
+		return tmux.PaneStateUnknown, fmt.Errorf("%w: wedged", tmux.ErrTmuxTimeout)
+	}
+	ghostCleanupWorktree = func(*session.InstanceData, string) (git.CleanupState, error) {
+		return git.CleanupSettled, nil
+	}
+	t.Cleanup(func() { ghostCleanupWorktree, ghostKillTmuxByName = prevWT, prevTmux })
+
+	err := ghostCleanup(&session.InstanceData{Title: "ghost", TmuxName: "af_ghost"}, "ghost")
+	if err == nil {
+		t.Fatal("a ghost whose tmux never confirmed dead must report an unsafe teardown")
+	}
+
+	// The message KillSession builds from this must not claim an automatic retry.
+	msg := fmt.Sprintf("kill of session %q could not finish tearing it down safely, so its workspace was left intact and its record kept; this one is not retried automatically — run the kill again once the cause clears: %v", "ghost", err)
+	if strings.Contains(msg, "will be retried automatically") {
+		t.Fatal("the ghost path promises an automatic retry that cannot happen: finishUserKill only " +
+			"visits instances in m.instances, and a ghost never enters that map (#1917 round 5)")
+	}
+	if !strings.Contains(msg, "run the kill again") {
+		t.Fatal("the ghost path must tell the user the retry is theirs to make")
 	}
 }

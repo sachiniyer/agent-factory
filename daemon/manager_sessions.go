@@ -150,8 +150,16 @@ func (m *Manager) KillSession(req KillSessionRequest) (session.InstanceData, err
 		// the ghost's tmux never confirmed dead, so its workspace and its record
 		// both survive for finishUserKill to retry (#1917).
 		if teardownErr = ghostCleanup(data, req.Title); teardownErr != nil {
-			log.WarningLog.Printf("kill of session %q could not complete its ghost teardown; the record is kept and the daemon will retry it: %v", req.Title, teardownErr)
-			return session.InstanceData{}, fmt.Errorf("kill of session %q could not finish tearing it down safely, so its workspace was left intact; the kill is recorded and will be retried automatically: %w", req.Title, teardownErr)
+			// NO automatic retry is promised here, deliberately (#1917 round 5).
+			// finishUserKill is reached only from refreshInstanceStatus, which
+			// iterates m.instances — and a ghost is precisely a record that could not
+			// be reconstructed into an instance, so it never enters that map and no
+			// poll will ever pick it up. The record and its tombstone survive, which
+			// keeps the workspace addressable and stops the poll classifying it Lost,
+			// but the next attempt has to come from the user. Telling them otherwise
+			// would be a promise the code cannot keep, which is worse than no promise.
+			log.WarningLog.Printf("kill of session %q could not complete its ghost teardown; the record is kept, but nothing will retry it automatically (a ghost has no live instance for the poll to visit) — retry the kill to try again: %v", req.Title, teardownErr)
+			return session.InstanceData{}, fmt.Errorf("kill of session %q could not finish tearing it down safely, so its workspace was left intact and its record kept; this one is not retried automatically — run the kill again once the cause clears: %w", req.Title, teardownErr)
 		}
 	}
 
