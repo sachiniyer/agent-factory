@@ -116,12 +116,30 @@ the machine so the assertions can be watched failing:
 AF_LIFECYCLE_INJECT=skip-daemon-restart make lifecycle-container LIFECYCLE_SCENARIO=scenario-b
 ```
 
-`skip-daemon-restart` swaps the binary to N and never restarts the daemon —
-reconstructing the #1921 machine exactly (new client, old daemon, everything
-apparently "running"). Assertions 1 and 2 fail and the gate exits non-zero.
+| injection | reconstructs | must fail |
+|---|---|---|
+| `skip-daemon-restart` | the #1921 machine: binary swapped to N, daemon never restarted — new client, old daemon, everything apparently "running" | assertions 1 and 2 |
+| `unhealthy-session` | a session left in a non-healthy state across the upgrade (`Archived(6)/LiveArchived(5)`) | assertion 5 |
 
-Re-run this whenever you change the harness. An assertion that cannot be watched
-failing is not evidence.
+Re-run these whenever you change the harness. **An assertion that cannot be
+watched failing is not evidence** — and this gate has caught itself twice on
+exactly that:
+
+* the Lost check tested `status/liveness == 4` (`Dead`/`LiveDead`), both
+  **write-never** since #1108 — deaths record `Lost`, and persisted `Dead` is
+  rewritten to `Lost` on load. It could not match anything on any machine, and
+  reported "0 sessions Lost: PASS" forever. It is now **fail-closed**: it asks
+  "is every session in a state I recognise as healthy?", so an unknown or
+  drifted enum value fails LOUDLY instead of quietly matching nothing;
+* an unscoped `sessions list` counted the wrong project's sessions and passed
+  locally by accident (see the `--repo` note above).
+
+Why `unhealthy-session` archives rather than killing a pane: **it can't be Lost
+on demand.** Killing a session's tmux does not strand it — the daemon restores it
+within ~4s (measured: Running→Ready, and it heals even with the worktree
+deleted, #1108's restore loop). So an injection built on that would quietly
+inject nothing, which is the same vacuity in a different hat. Archive is durable
+and lands on a real non-healthy state.
 
 ## Where assertion #4 (supervision) actually runs
 

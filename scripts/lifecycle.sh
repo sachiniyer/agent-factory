@@ -40,12 +40,26 @@
 #
 # WHAT THIS DOES NOT COVER YET
 #
-#   * macOS/launchd. lc_daemon_version reads /proc/<pid>/exe, which macOS does
-#     not have, and the supervision assertion would need launchctl. A macOS
-#     matrix leg lands once the macos-latest CI job does; the scenarios are
-#     written to be OS-agnostic apart from those two helpers.
+#   * macOS/launchd. Assertion #4 is already written for it (lc_unit_active /
+#     lc_unit_main_pid have Darwin branches, so the mac leg asserts the SAME
+#     property against launchd). The blocker for turning on the macos-latest leg
+#     is assertion 2: lc_daemon_version reads /proc/<pid>/exe, which macOS has no
+#     equivalent of — `ps` reports the path, whose bytes are the NEW binary after
+#     an upgrade, i.e. exactly the inference that assertion refuses to make. That
+#     leg wants #1920's daemon-reported version.
 #   * Assertion #4 (supervision) on container runs: no systemd inside, so it is
-#     SKIPped loudly there and only really runs on the CI runner.
+#     SKIPped there and only really runs on the CI runner. A SKIP is not a pass —
+#     the run exits non-zero unless AF_LIFECYCLE_ALLOW_PARTIAL=1 acknowledges it.
+#
+# A NOTE ON ASSERTIONS THAT CANNOT FAIL
+#
+# This gate's whole thesis is that a green run which proves nothing is worse than
+# no run. That standard applies to the gate itself, and it has already caught
+# itself twice: an unscoped `sessions list` counted the wrong project's sessions
+# and passed locally by accident, and the Lost check tested a write-never enum
+# value so it could never match. Both are fixed. Every assertion here must be
+# demonstrable via AF_LIFECYCLE_INJECT — if you add one, add the injection that
+# makes it fail, and watch it fail.
 #
 # Usage:
 #   AF_LIFECYCLE_DISPOSABLE=1 scripts/lifecycle.sh [scenario-a|scenario-b|all]
@@ -76,6 +90,10 @@ LC_DL="https://github.com/$LC_REPO_SLUG/releases/download"
 #   skip-daemon-restart  swap the binary to N but never restart the daemon —
 #                        exactly the #1921 skew condition (new client, old
 #                        daemon). Assertions 1 and 2 must FAIL.
+#   unhealthy-session    leave a session in a non-healthy state (archive it →
+#                        Archived(6)/LiveArchived(5)). Assertion 5 must FAIL.
+#                        NOT "kill its tmux": the daemon restores a killed pane
+#                        within ~4s (#1108), so that injects nothing.
 LC_INJECT="${AF_LIFECYCLE_INJECT:-}"
 
 # ----------------------------------------------------------------------------
@@ -472,6 +490,32 @@ scenario_b() {
         return 1
     }
 
+    # Fault injection: leave a session in a state that is NOT healthy, to prove
+    # assertion 5 can actually FIRE. The check it replaced tested status/liveness
+    # == 4 (Dead/LiveDead) — both write-never since #1108 — so it matched nothing
+    # on any machine and passed forever. An assertion nobody has watched fail is
+    # not evidence, so this is the fire-drill for it.
+    #
+    # Archive rather than "kill the tmux and call it Lost": a killed pane does
+    # NOT produce Lost, because the daemon RESTORES it within ~4s (measured:
+    # Running→Ready, and it heals even with the worktree deleted — #1108's
+    # restore loop). Lost is therefore not artificially reachable against a live
+    # daemon, and an injection that quietly fails to inject would be the very
+    # vacuity this gate exists to prevent. Archive is durable, and it lands on
+    # Archived(6)/LiveArchived(5) — a real non-healthy state the predicate must
+    # catch, which also confirms the enum ordinals end-to-end.
+    if [ "$LC_INJECT" = "unhealthy-session" ]; then
+        lc_say "INJECT: archiving 'pre1' so it is no longer in a healthy state"
+        "$bin" sessions archive pre1 --repo "$repo" >/dev/null 2>&1 ||
+            "$bin" sessions archive pre1 >/dev/null 2>&1
+        local j
+        for ((j = 0; j < 40; j++)); do
+            [ "$(lc_unhealthy_session_count "$bin" "$repo")" != "0" ] && break
+            sleep 0.5
+        done
+        lc_say "INJECT: session states now: $(lc_session_states "$bin" "$repo")"
+    fi
+
     # --- assertions ----------------------------------------------------------
     local after_pid after_daemon_ver client_ver after_sessions
     after_pid="$(lc_daemon_pids "$home" | head -1)"
@@ -523,9 +567,12 @@ scenario_b() {
     # 5. pre-existing sessions survive.
     after_sessions="$(lc_wait_session_count "$bin" "$repo" "$before_sessions" 30)"
     lc_assert_eq "$before_sessions" "$after_sessions" "assertion 5: sessions survive the upgrade"
-    local lost
-    lost="$(lc_lost_session_count "$bin" "$repo")"
-    lc_assert_eq "0" "$lost" "assertion 5: no session went Lost across the upgrade"
+    local unhealthy
+    unhealthy="$(lc_unhealthy_session_count "$bin" "$repo")"
+    lc_assert_eq "0" "$unhealthy" "assertion 5: every session is still healthy (none Lost/Dead) across the upgrade"
+    if [ "$unhealthy" != "0" ]; then
+        lc_say "session states: $(lc_session_states "$bin" "$repo")"
+    fi
 
     # 6. doctor is the oracle: zero FAILs on the upgraded machine.
     local fails
@@ -588,16 +635,42 @@ lc_do_upgrade() {
             tmux kill-session -t lc-b 2>/dev/null
             return 1
         fi
-        # The re-exec'd TUI must actually come back up.
+        # The re-exec'd TUI must actually come back up. A wait that merely
+        # stops waiting is not an assertion: if the re-exec left the user with
+        # no TUI, giving up quietly here would let every downstream check run
+        # against a machine we never verified and report green.
+        ok=1
         for ((i = 0; i < 120; i++)); do
-            lc_capture lc-b | grep -q 'Agent Factory' && break
+            if lc_capture lc-b | grep -q 'Agent Factory'; then
+                ok=0
+                break
+            fi
             sleep 0.5
         done
-        # Give the restart-daemon step room to finish before we measure it.
+        if [ "$ok" != 0 ]; then
+            lc_say "the re-exec'd TUI never rendered after the launch-time update; screen was:"
+            lc_capture lc-b | sed 's/^/[lifecycle]   | /' >&2
+            tmux kill-session -t lc-b 2>/dev/null
+            return 1
+        fi
+
+        # The daemon must come back. Timing out here means the launch path left
+        # the machine with NO daemon — the loudest possible outcome, not a
+        # reason to proceed and measure nothing.
+        ok=1
         for ((i = 0; i < 60; i++)); do
-            [ "$(lc_status_field "$bin" '.data.running')" = "true" ] && break
+            if [ "$(lc_status_field "$bin" '.data.running')" = "true" ]; then
+                ok=0
+                break
+            fi
             sleep 0.5
         done
+        if [ "$ok" != 0 ]; then
+            lc_say "no daemon is running 30s after the launch-time update finished"
+            "$bin" daemon status 2>&1 | head -5 | sed 's/^/[lifecycle]   | /' >&2
+            tmux kill-session -t lc-b 2>/dev/null
+            return 1
+        fi
         tmux kill-session -t lc-b 2>/dev/null
         ;;
     *)
@@ -654,16 +727,44 @@ lc_wait_session_count() {
     printf '%s\n' "$n"
 }
 
-# lc_lost_session_count <bin> <repo> — sessions whose worktree/tmux vanished. An
-# upgrade that strands sessions is a data-loss bug, not a cosmetic one.
-lc_lost_session_count() {
+# The enum ordinals af serializes, from session/instance.go and
+# session/liveness.go. Status: Running=0 Ready=1 Loading=2 Deleting=3 Dead=4
+# Lost=5 Archived=6. Liveness: Unset=0 LiveRunning=1 LiveReady=2 LiveLost=3
+# LiveDead=4 LiveArchived=5 LiveLimitReached=6.
+#
+# These are safe to hardcode: Status serializes as an int, and the enum's own
+# contract is "appending, never renumbering, is what keeps old records
+# readable" (session/instance.go). They are NOT safe to guess — the first cut of
+# this helper tested 4 on both axes, which is Dead/LiveDead, and #1108 made BOTH
+# of those write-never (observed deaths record Lost; FromInstanceData rewrites
+# persisted Dead to Lost on load). So the check could not match anything, ever:
+# a vacuous assertion reporting "0 sessions Lost: PASS" on any machine at all,
+# including one where every session had been destroyed.
+LC_STATUS_HEALTHY='0,1'   # Running, Ready
+LC_LIVENESS_HEALTHY='1,2' # LiveRunning, LiveReady
+
+# lc_unhealthy_session_count <bin> <repo> — sessions NOT in a healthy state.
+#
+# Deliberately fail-CLOSED: it counts anything that is not provably healthy,
+# rather than enumerating the bad values. Enumerating bad values fails OPEN — if
+# the enum ever shifts, or a state we never thought of appears, a
+# "select(status == 5)" check silently matches nothing and passes. Asking "is
+# every session in a state I recognise as healthy?" turns that same drift into a
+# LOUD failure instead of a quiet green. Lost(5) is the state this is really
+# hunting (an upgrade that strands sessions is data loss, not cosmetics), but it
+# is caught as "not healthy", not as "== 5".
+lc_unhealthy_session_count() {
     local bin="$1" repo="$2" out n
     out="$("$bin" sessions list --repo "$repo" 2>/dev/null)" || {
         printf 'unreadable\n'
         return 0
     }
-    n="$(printf '%s' "$out" |
-        jq -r '[.[]? | select((.status|tostring) == "4" or (.liveness|tostring) == "4")] | length' 2>/dev/null)" || {
+    # `. as $r` is load-bearing: inside `$st | index(.status)` the dot rebinds to
+    # $st, so the row has to be captured before the pipe or jq errors out.
+    n="$(printf '%s' "$out" | jq -r --argjson st "[$LC_STATUS_HEALTHY]" \
+        --argjson lv "[$LC_LIVENESS_HEALTHY]" \
+        '[.[]? | . as $r | select(($st | index($r.status)) == null or ($lv | index($r.liveness)) == null)] | length' \
+        2>/dev/null)" || {
         printf 'unreadable\n'
         return 0
     }
@@ -672,6 +773,14 @@ lc_lost_session_count() {
         return 0
     }
     printf '%s\n' "$n"
+}
+
+# lc_session_states <bin> <repo> — "title:status/liveness" per session, for the
+# log when the check above trips. A bare count cannot tell you WHICH state.
+lc_session_states() {
+    "$1" sessions list --repo "$2" 2>/dev/null |
+        jq -r '.[]? | "\(.title):status=\(.status)/liveness=\(.liveness)"' 2>/dev/null |
+        tr '\n' ' '
 }
 
 # lc_teardown_home <home> [supervised] — stop what this scenario started so the
