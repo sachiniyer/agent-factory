@@ -52,6 +52,22 @@ func hasCheck(r *Report, name string) bool {
 	return false
 }
 
+// socketTempHome is t.TempDir() for tests that must bind a Unix socket inside
+// the home.
+//
+// A socket path is capped at sun_path — 104 bytes on darwin, 108 on Linux — and
+// macOS puts TMPDIR under /var/folders/<32 chars>/T/, so t.TempDir() plus a test
+// name plus "daemon-http.sock" overflows it and bind fails with "invalid
+// argument". Linux's short /tmp hides the limit entirely, which is why this only
+// surfaced on the macOS runner. /tmp is short on both.
+func socketTempHome(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("/tmp", "afdoc")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	return dir
+}
+
 // abandonedSocket leaves a real Unix socket at path with nothing listening —
 // the state a killed daemon leaves behind. SetUnlinkOnClose(false) is the whole
 // point: Go unlinks the socket on Close by default, which would clean up
@@ -366,7 +382,7 @@ func TestForeignDaemons_AncestorNeverOfferedForKill(t *testing.T) {
 func TestRemedies_NeverRecommendDestructiveResetForDaemonProblems(t *testing.T) {
 	testguard.IsolateTmux(t)
 
-	home := t.TempDir()
+	home := socketTempHome(t)
 	// Stage every daemon-lifecycle problem at once: two daemons, a stale HTTP
 	// socket, a skewed daemon, and a mismatched autostart unit.
 	stubDaemonProcessProbe(t,
@@ -992,7 +1008,7 @@ func TestParseAFVersion_ShapeIsRequired(t *testing.T) {
 func TestStaleSocket_ControlSocketNotDoubleCounted(t *testing.T) {
 	testguard.IsolateTmux(t)
 
-	home := t.TempDir()
+	home := socketTempHome(t)
 	// ONLY the control socket is stale.
 	abandonedSocket(t, filepath.Join(home, daemon.ControlSocketName()))
 
@@ -1027,7 +1043,7 @@ func TestStaleSocket_ControlSocketNotDoubleCounted(t *testing.T) {
 func TestStaleSocket_HTTPSocketStillReported(t *testing.T) {
 	testguard.IsolateTmux(t)
 
-	home := t.TempDir()
+	home := socketTempHome(t)
 	abandonedSocket(t, filepath.Join(home, "daemon-http.sock"))
 
 	report, err := Run(testOptionsWithHome(t, home, false))
@@ -1153,7 +1169,7 @@ func TestStaleSocket_RegularFileWithSocketName_NoRow(t *testing.T) {
 func TestStaleSocket_DaemonAnswering_NoRow(t *testing.T) {
 	testguard.IsolateTmux(t)
 
-	home := t.TempDir()
+	home := socketTempHome(t)
 	abandonedSocket(t, filepath.Join(home, "daemon.sock"))
 
 	opts := testOptionsWithHome(t, home, false)
@@ -1281,8 +1297,19 @@ func TestSkewChecks_HealthyMachine_AllPass(t *testing.T) {
 	for _, name := range []string{"daemon version", "autostart path", "autostart supervision"} {
 		require.Equal(t, StatusPass, findCheck(t, report, name).Status, "check %q", name)
 	}
-	for _, name := range []string{"daemon instances", "af binaries", "stale sockets"} {
+	for _, name := range []string{"af binaries", "stale sockets"} {
 		require.False(t, hasCheck(report, name), "healthy machine must not report %q", name)
+	}
+	// "daemon instances" is platform-dependent, and honestly so: proctree is
+	// /proc-only, so on darwin the scan cannot run and the check says it did not
+	// (#1939) rather than passing. Either way it must not make a healthy machine
+	// exit nonzero.
+	if hasCheck(report, "daemon instances") {
+		c := findCheck(t, report, "daemon instances")
+		require.Equal(t, StatusWarn, c.Status)
+		require.Contains(t, c.Detail, "cannot scan processes",
+			"the only reason to report on a healthy machine is being unable to look")
+		require.False(t, c.Problem)
 	}
 	require.Zero(t, report.UnresolvedCount(), "a healthy machine must exit 0")
 }
@@ -1370,7 +1397,7 @@ func TestRenderJSON_PassingCheckHasNoRemedy(t *testing.T) {
 func TestRenderJSON_AdvisoryWarnDistinguishableFromActionableWarn(t *testing.T) {
 	testguard.IsolateTmux(t)
 
-	home := t.TempDir()
+	home := socketTempHome(t)
 	abandonedSocket(t, filepath.Join(home, "daemon-http.sock"))
 
 	opts := testOptionsWithHome(t, home, false)
