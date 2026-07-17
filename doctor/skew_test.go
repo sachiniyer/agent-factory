@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/daemon"
@@ -270,6 +271,31 @@ func TestVersionSkew_DevDaemon_WarnsNotFails(t *testing.T) {
 	require.Contains(t, c.Detail, "cannot be judged", "the row must say why it is not a verdict")
 	require.False(t, c.Problem, "an unjudgeable version must not drive a nonzero exit")
 	require.Zero(t, report.UnresolvedCount(), "a dev daemon on a dev box must exit 0")
+}
+
+// A versionless daemon is a DEFINITE verdict, even for a dev client, and must
+// be judged before the "cannot judge an unreleased build" catch-all.
+//
+// An empty version means the daemon predates the Ping field entirely, so it is
+// older than any client that can ask — a source-built client included, since it
+// carries the very field it is asking with. Letting the dev case swallow this
+// hides real skew from exactly the people running dev builds.
+func TestVersionSkew_DevClientVersionlessDaemon_StillFails(t *testing.T) {
+	testguard.IsolateTmux(t)
+
+	opts := testOptions(t, false)
+	opts.Version = devVersion
+	opts.daemonHealth = respondingDaemon("") // predates version reporting
+
+	report, err := Run(opts)
+	require.NoError(t, err)
+
+	c := findCheck(t, report, "daemon version")
+	require.Equal(t, StatusFail, c.Status,
+		"a daemon older than the version field is skew we can prove, dev client or not")
+	require.Contains(t, c.Detail, "predates version reporting")
+	require.True(t, c.Problem)
+	require.Positive(t, report.UnresolvedCount())
 }
 
 // With no daemon answering there is no version to compare, and claiming skew
@@ -711,6 +737,53 @@ func TestDefaultBinaryCandidates_ExcludesRunningBinary(t *testing.T) {
 		require.NotEqual(t, resolvePath(self), resolvePath(c),
 			"the running test binary is not an af install")
 	}
+}
+
+// fakeAFBinary writes an executable that behaves like `af version` per the
+// given script body, and returns its path.
+func fakeAFBinary(t *testing.T, body string) string {
+	t.Helper()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "af")
+	require.NoError(t, os.WriteFile(path, []byte("#!/bin/sh\n"+body), 0o755))
+	return path
+}
+
+// The version probe runs a binary doctor merely FOUND on a PATH entry — it may
+// be a wrapper, a stale build, or not af at all. If it wedges holding stdout,
+// an exec.CommandContext deadline does not bound Output(): the direct child is
+// killed and the call still waits on pipe EOF. That hangs `af doctor`, the one
+// command a user runs because things are already wedged (#1967).
+//
+// A real hanging binary through the real probe, so the bound is actually
+// exercised.
+func TestExecBinaryVersion_HangIsBounded(t *testing.T) {
+	// Prints nothing and never exits; a child holds stdout past the kill.
+	bin := fakeAFBinary(t, "sleep 300 &\nsleep 300\n")
+
+	done := make(chan error, 1)
+	start := time.Now()
+	go func() { _, err := execBinaryVersion(bin); done <- err }()
+
+	select {
+	case err := <-done:
+		require.Error(t, err, "a killed probe is not an answer")
+		require.Contains(t, err.Error(), "timed out")
+	case <-time.After(30 * time.Second):
+		t.Fatal("execBinaryVersion never returned: its deadline does not bound it")
+	}
+	require.Less(t, time.Since(start), 25*time.Second, "the deadline must bound the call")
+}
+
+// The mirror image: a binary that ANSWERED but left a straggler holding the pipe
+// must still yield its version. Reporting a failure there would drop a real
+// install out of the split-brain comparison.
+func TestExecBinaryVersion_StragglerStillYieldsTheAnswer(t *testing.T) {
+	bin := fakeAFBinary(t, "echo 'agent-factory version 1.0.192'\nsleep 60 &\n")
+
+	got, err := execBinaryVersion(bin)
+	require.NoError(t, err, "the binary answered; a lingering pipe-holder is not a failure")
+	require.Equal(t, "1.0.192", got)
 }
 
 func TestParseAFVersion_ShapeIsRequired(t *testing.T) {

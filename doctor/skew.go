@@ -2,6 +2,7 @@ package doctor
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -9,6 +10,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
@@ -49,6 +51,18 @@ func checkDaemonVersionSkew(ctx *scanContext, report *Report, h daemon.HealthSta
 	served := strings.TrimSpace(h.DaemonVersion)
 
 	switch {
+	case served == "":
+		// Judged BEFORE the dev-client case on purpose. An empty version is not
+		// an unjudgeable mismatch: it means the daemon predates the Ping version
+		// field entirely, so it is older than ANY client that can ask — a
+		// source-built client included, since it carries the field it is asking
+		// with. Letting the dev catch-all swallow this would hide real skew from
+		// exactly the people running a dev build.
+		report.Fail(sectionDaemon, "daemon version",
+			fmt.Sprintf("the running daemon predates version reporting but your af client is %s; "+
+				"a version-skewed daemon rejects newer requests (e.g. \"unknown field\") and can hang the UI",
+				describeClient(client)),
+			"restart it: af daemon restart")
 	case client == "" || client == devVersion:
 		report.Warn(sectionDaemon, "daemon version",
 			fmt.Sprintf("daemon reports %s; this client is an unreleased build, so skew cannot be judged",
@@ -64,13 +78,6 @@ func checkDaemonVersionSkew(ctx *scanContext, report *Report, h daemon.HealthSta
 			fmt.Sprintf("the daemon is an unreleased build and your af client is %s; "+
 				"an unreleased version identifies no release, so skew cannot be judged", client),
 			"if the UI misbehaves, restart the daemon onto a released build: af daemon restart", false)
-	case served == "":
-		// A daemon that answers but reports no version predates version
-		// reporting itself, which places it strictly older than this client.
-		report.Fail(sectionDaemon, "daemon version",
-			fmt.Sprintf("the running daemon predates version reporting but your af client is %s; "+
-				"a version-skewed daemon rejects newer requests (e.g. \"unknown field\") and can hang the UI", client),
-			"restart it: af daemon restart")
 	case served != client:
 		report.Fail(sectionDaemon, "daemon version",
 			fmt.Sprintf("daemon is running %s but your af client is %s; "+
@@ -79,6 +86,15 @@ func checkDaemonVersionSkew(ctx *scanContext, report *Report, h daemon.HealthSta
 	default:
 		report.Pass(sectionDaemon, "daemon version", "matches this client ("+client+")")
 	}
+}
+
+// describeClient names the client in a verdict, including the unreleased case:
+// "your af client is dev" is still the fact the user needs.
+func describeClient(v string) string {
+	if v == "" {
+		return "an unversioned build"
+	}
+	return v
 }
 
 func describeVersion(v string) string {
@@ -716,14 +732,53 @@ func defaultBinaryCandidates() []string {
 	return out
 }
 
-// execBinaryVersion asks the af binary at path for its version. Bounded by
-// binaryProbeTimeout, and `version` is a pure print — it neither reads the
-// home nor contacts, let alone starts, a daemon.
+// binaryProbeWaitDelay bounds how long Wait blocks after a version probe is
+// killed on its deadline, before the inherited pipes are force-closed. Same
+// reason as autostartProbeWaitDelay: without it the deadline is a comment, not
+// a bound (#1967).
+const binaryProbeWaitDelay = 2 * time.Second
+
+// execBinaryVersion asks the af binary at path for its version. `version` is a
+// pure print — it neither reads the home nor contacts, let alone starts, a
+// daemon.
+//
+// Really bounded, not decoratively. This runs a binary doctor found lying on a
+// PATH entry: it may be a wrapper script, a stale build, or something that is
+// not af at all, and if it forks a child that inherits stdout and wedges, then
+// exec.CommandContext kills only the direct process and Output() waits on pipe
+// EOF regardless of the deadline — hanging the one command a user runs BECAUSE
+// things are wedged. The autostart probe got this treatment; this one asserted
+// it in a comment and did not have it (#1967).
 func execBinaryVersion(path string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), binaryProbeTimeout)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, path, "version").Output()
-	if err != nil {
+
+	cmd := exec.CommandContext(ctx, path, "version")
+	// Its own process group, so the deadline tears down the whole tree rather
+	// than orphaning a child that still holds the pipe (#610/#769/#856).
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); err != nil {
+			if errors.Is(err, syscall.ESRCH) {
+				return os.ErrProcessDone
+			}
+			return err
+		}
+		return nil
+	}
+	cmd.WaitDelay = binaryProbeWaitDelay
+
+	out, err := cmd.Output()
+	if cmd.Process != nil {
+		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) // reap stragglers
+	}
+	if ctx.Err() != nil {
+		return "", fmt.Errorf("%s version timed out after %s: %w", path, binaryProbeTimeout, ctx.Err())
+	}
+	if err != nil && !errors.Is(err, exec.ErrWaitDelay) {
+		// ErrWaitDelay alone means the binary answered and only a straggler held
+		// the pipe — the answer is in `out`, and the reap above killed the
+		// straggler. A real failure surfaces as an ExitError instead.
 		return "", err
 	}
 	return parseAFVersion(string(out)), nil
