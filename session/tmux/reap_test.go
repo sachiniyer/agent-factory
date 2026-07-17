@@ -120,7 +120,8 @@ func TestCloseReapsEscapedPaneProcesses(t *testing.T) {
 	require.True(t, proctree.AliveSame(escapee), "escapee must be alive before Close")
 
 	session := NewTmuxSessionFromSanitizedName(name, "sh")
-	require.NoError(t, session.Close())
+	_, closeErr := session.Close()
+	require.NoError(t, closeErr)
 	require.False(t, session.DoesSessionExist(), "session must be gone after Close")
 
 	// Close reaps asynchronously; the escapee ignores SIGHUP, so only the
@@ -210,7 +211,8 @@ func TestCloseDoesNotReapWhenSessionSurvives(t *testing.T) {
 		},
 	}
 	session := newTmuxSession("af_survivor", "sh", NewMockPtyFactory(t), cmdExec)
-	require.Error(t, session.Close(), "a surviving session must surface the kill failure")
+	_, survErr := session.Close()
+	require.Error(t, survErr, "a surviving session must surface the kill failure")
 
 	time.Sleep(3 * reapGraceWait)
 	require.NoError(t, child.Process.Signal(syscall.Signal(0)),

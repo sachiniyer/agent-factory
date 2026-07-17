@@ -75,7 +75,11 @@ func TestLegacyNilProvenance_CleanupPreservesReusedUserBranch(t *testing.T) {
 	require.NotNil(t, restored.gitWorktree)
 
 	// The kill/archive teardown step, verbatim (teardownKill.handleWorktree).
-	require.NoError(t, restored.gitWorktree.Cleanup())
+	// Cleanup reports a CleanupState alongside its error in this branch (#1917):
+	// the state is irrelevant to #1953's provenance question — nothing here stalls,
+	// so it is trivially settled — but the error still is.
+	_, cleanupErr := restored.gitWorktree.Cleanup()
+	require.NoError(t, cleanupErr)
 
 	assert.True(t, legacyBranchExists(t, repoRoot, "user-feature"),
 		"#1953: kill/archive force-deleted the user's pre-existing branch %q "+

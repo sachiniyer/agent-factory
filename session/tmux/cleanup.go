@@ -21,10 +21,76 @@ func (t *TmuxSession) DoesSessionExist() bool {
 // sessionExists reports whether a tmux session with the exact name `name`
 // currently exists. Shared by DoesSessionExist and the receiver-less
 // CleanupSessions path so both probe identically.
+//
+// Bounded by tmuxCommandTimeout (#1917): has-session against a wedged server
+// parks forever, and this probe is the fallback on nearly every tmux error path
+// in the package — including Close's, on the daemon's undeletable-session
+// teardown.
+//
+// A tripped deadline reports TRUE (exists). The bool cannot express "unknown",
+// so the answer has to be the one that is safe to be wrong about, and every
+// caller that acts destructively acts on FALSE: Close reaps the session's
+// process trees, and io.go/clientless.go raise ErrSessionGone, which the daemon
+// reads as a confirmed death. A false "gone" against a server that is merely
+// wedged would SIGKILL a live agent's process tree and tear down a session that
+// is still running — the exact mistake tmuxTimeoutContext exists to prevent. A
+// false "exists" only costs a best-effort skip, so it is the conservative lie.
+//
+// Callers that must not paper over the difference do not use this probe at all:
+// they check ctx.Err() on their own bounded command and skip it entirely (see
+// tmuxTimeoutContext, and Close's kill-session timeout branch).
+//
+// A non-timeout failure — the usual `has-session` exit 1 for "no such session",
+// or any other tmux error — still reports false, preserving the pre-#1917
+// conflation callers already relied on.
 func sessionExists(cmdExec cmd.Executor, name string) bool {
+	exists, known := probeSession(cmdExec, name)
+	if !known {
+		log.WarningLog.Printf("tmux has-session for %s timed out after %s; the server is wedged, so "+
+			"reporting the session as still present rather than risk a false teardown", name, tmuxCommandTimeout)
+		return true
+	}
+	return exists
+}
+
+// ProbeSession reports whether this session exists AND whether tmux actually
+// ANSWERED — the tri-state a bool cannot express (#1917 round 8).
+//
+// DoesSessionExist has to pick yes or no, so a timed-out probe becomes "yes": the
+// conservative lie, safe for the read-only callers that only ever act on "no". But
+// it launders UNKNOWN into AFFIRMATIVE at the bottom of the stack, and every caller
+// above is then downstream of a lie it cannot detect — which is how a wedged tmux
+// server came to be reported as a live agent, and how a liveness counter built on
+// affirmative evidence got fooled anyway. Callers that treat "alive" as EVIDENCE
+// must take this form; callers that merely need a bool keep the lie, knowingly.
+func (t *TmuxSession) ProbeSession() (exists bool, known bool) {
+	return probeSession(t.cmdExec, t.sanitizedName)
+}
+
+// probeSession is sessionExists WITHOUT the lossy collapse: it reports whether
+// the session exists AND whether tmux actually answered.
+//
+// The two-value form exists because the collapse above, while safe for the
+// probe's many read-only callers, silently destroyed information for the one
+// caller that tears sessions down: Close asked "does it still exist?", got back
+// a `true` synthesized from a TIMEOUT, and reported an ordinary kill failure —
+// so its caller deleted the workspace with the session's fate unknown (#1917).
+// A caller that acts on the answer takes this form and handles !known; a caller
+// that only reads takes the bool and gets the conservative lie.
+func probeSession(cmdExec cmd.Executor, name string) (exists bool, known bool) {
+	ctx, cancel := tmuxTimeoutContext()
+	defer cancel()
 	// Using "-t name" does a prefix match, which is wrong. `-t=` does an exact match.
-	existsCmd := exec.Command("tmux", "has-session", fmt.Sprintf("-t=%s", name))
-	return cmdExec.Run(existsCmd) == nil
+	err := runTmuxBoundedWith(ctx, cmdExec, "has-session", fmt.Sprintf("-t=%s", name))
+	if err == nil {
+		return true, true
+	}
+	if ctx.Err() != nil {
+		return false, false
+	}
+	// tmux answered: the usual `has-session` exit 1 for "no such session", or any
+	// other error, which this probe has always conflated with absence.
+	return false, true
 }
 
 // exactTarget builds an exact-match `-t` target spec for the named session.

@@ -252,7 +252,17 @@ func (s *Storage) SaveInstances(instances []*Instance) error {
 		// per-repo checkpoint save — triggered whenever ANY started instance in
 		// the same repo is saved — would silently orphan the archived worktree.
 		// (Lost is unaffected: it loads started=true, so it already survives.)
-		if !inst.Started() && status != Archived {
+		//
+		// A TOMBSTONED instance is the same shape and is kept for the same reason
+		// (#1917). A kill clears started BEFORE teardown, so a teardown that could
+		// not complete safely — tmux never confirmed the pane dead, or a worktree
+		// removal was cut off — leaves exactly this: started=false, not Archived,
+		// workspace still on disk, and the record deliberately RETAINED as its only
+		// handle. Without this clause the next checkpoint triggered by any other
+		// started session in the repo would silently drop it, undoing the retention
+		// in a layer that never heard of it, and orphaning the very workspace the
+		// retention exists to protect. Retention is a claim on this writer too.
+		if !inst.Started() && status != Archived && !inst.UserKilled() {
 			continue
 		}
 		root := inst.GetRepoPath()
@@ -350,11 +360,29 @@ func (s *Storage) DeleteInstance(title string) error {
 	return nil
 }
 
+// InstanceDeleteLockTimeout bounds how long DeleteInstanceByStableID waits for
+// the per-repo instances flock. A var so tests can shorten it; production never
+// reassigns.
+//
+// The delete is the LAST step of a session kill, and the daemon runs it holding
+// that session's kill guard, so an unbounded wait here does not just stall one
+// write — it strands a session whose kill-intent tombstone is already on disk,
+// leaving it undeletable for the daemon's whole lifetime (#1917). The budget is
+// generous: this lock is held only across a read-modify-write of one small JSON
+// file, so exceeding it means a peer is genuinely wedged, not merely slow.
+var InstanceDeleteLockTimeout = 10 * time.Second
+
 // DeleteInstanceByStableID removes an instance from storage only when the
 // record still matches the stable session identity captured by the caller. A
 // false nil result means a same-titled record exists but belongs to a different
 // instance, so the caller must treat the delete as stale and leave it alone.
 // Empty IDs are legacy-compatible and fall back to title matching.
+//
+// It takes the instances flock with a DEADLINE (config.WithFileLockTimeout), not
+// the blocking WithFileLock every other Storage writer uses: a contended lock
+// surfaces as a retryable config.ErrLockTimeout instead of parking the caller
+// forever. See InstanceDeleteLockTimeout for why this writer in particular
+// cannot afford an unbounded wait.
 func (s *Storage) DeleteInstanceByStableID(title, id string) (bool, error) {
 	path, pathErr := config.RepoInstancesPath(s.repoID)
 	if pathErr != nil {
@@ -362,7 +390,7 @@ func (s *Storage) DeleteInstanceByStableID(title, id string) (bool, error) {
 	}
 	deleted := false
 	sameTitleDifferentID := false
-	if err := config.WithFileLock(path, func() error {
+	if err := config.WithFileLockTimeout(path, InstanceDeleteLockTimeout, func() error {
 		raw, err := s.state.GetInstances(s.repoID)
 		if err != nil {
 			return err

@@ -80,7 +80,7 @@ func zeroRestoreBackoff(t *testing.T) {
 
 // TestRestoreLostSessions_RecoversLostInstance: the core loop — a Lost local
 // session gets exactly one Recover, comes back Running, and its retry state is
-// dropped.
+// dropped once the recovery is CONFIRMED.
 func TestRestoreLostSessions_RecoversLostInstance(t *testing.T) {
 	manager, repoID, repoPath := newStatusTestManager(t)
 	backend := &recoverFakeBackend{FakeBackend: session.NewFakeBackend()}
@@ -94,11 +94,18 @@ func TestRestoreLostSessions_RecoversLostInstance(t *testing.T) {
 	if got := inst.GetStatus(); got != session.Running {
 		t.Fatalf("status = %v, want Running after recovery", got)
 	}
+	// What CONFIRMS the runtime is a poll getting an ANSWER out of it, and only then
+	// is the episode forgotten. This assertion used to run against the first pass and
+	// require the state to be gone the instant the spawn returned — which is exactly
+	// the #1910 bug, since a spawn returning proves nothing about whether the runtime
+	// survives. Nor does elapsed time (#1917 round 6): only an observation does.
+	observeAlive(manager, repoID, inst)
+	manager.RestoreLostSessions()
 	manager.mu.Lock()
 	_, hasState := manager.lostRestoreStates[daemonInstanceKey(repoID, "stranded")]
 	manager.mu.Unlock()
 	if hasState {
-		t.Fatal("successful recovery must drop the retry state")
+		t.Fatal("a confirmed-alive recovery must drop the retry state")
 	}
 
 	// A healed session must not be touched again.

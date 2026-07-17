@@ -118,7 +118,13 @@ type Backend interface {
 	SendPromptCommand(instance *Instance, prompt string) error
 
 	// IsAlive returns true if the underlying session is still running.
-	IsAlive(instance *Instance) bool
+	// IsAlive reports whether the instance's agent is running, and returns an
+	// error when the runtime could not be ASKED (#1917 round 8). The error is the
+	// tri-state: a bool alone forces a timed-out probe to pick yes or no, and the
+	// convenient pick — "yes" — is what let a wedged tmux server be counted as
+	// affirmative proof of life all the way up in the daemon's poll. An
+	// implementation that cannot answer must say so rather than guess.
+	IsAlive(instance *Instance) (bool, error)
 
 	// CheckAndHandleTrustPrompt auto-dismisses trust/permission prompts
 	// for supported programs.

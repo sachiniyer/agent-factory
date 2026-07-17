@@ -71,6 +71,12 @@ type Manager struct {
 	// licence to exceed max_concurrent_runs after every restart.
 	ghostTaskRuns  map[string]int
 	repoStartLocks map[string]*sync.Mutex
+	// aliveObservations counts POSITIVE liveness observations per session (keyed by
+	// remoteLossKey, so a same-title successor never inherits its predecessor's).
+	// Incremented only where the poll actually gets an answer OUT of a runtime; read
+	// by the Lost-restore loop, which may only clear a session's failure history when
+	// this has advanced past the spawn. Guarded by mu.
+	aliveObservations map[string]uint64
 	// targetLocks serializes DeliverPrompt per (repo, title) so concurrent
 	// deliveries to the same shared target session create it once and deliver
 	// the rest in arrival order instead of racing creation and dropping the
@@ -210,6 +216,7 @@ func newManagerShell(cfg *config.Config) (*Manager, error) {
 		reservedTaskRuns:    make(map[string]int),
 		ghostTaskRuns:       make(map[string]int),
 		repoStartLocks:      make(map[string]*sync.Mutex),
+		aliveObservations:   make(map[string]uint64),
 		targetLocks:         make(map[string]*sync.Mutex),
 		rootEnsureStates:    make(map[string]*rootEnsureState),
 		rootKilledAt:        make(map[string]time.Time),

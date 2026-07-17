@@ -213,19 +213,33 @@ func (m *Manager) RefreshStatuses() {
 // alternative is a stale count that survives an arbitrary blind window and lets
 // ONE later blip tip a healthy session into a destructive re-provision.
 func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instance) {
-	if instance == nil || !instance.Started() {
+	if instance == nil {
 		return
 	}
-	// The debounce is keyed by stable instance ID, never repo/title: a same-title
-	// successor must not inherit a dead predecessor's failures (#1794).
+	// The kill-intent tombstone outranks the started fence, and the ORDER of these
+	// two checks is load-bearing (#1917).
+	//
+	// A surviving tombstone (#1108) means a previous KillSession was interrupted
+	// after committing to the kill. The only valid future for this session is
+	// finishing that teardown — never probing it, never marking it Lost, never
+	// restoring it.
+	//
+	// This used to sit BELOW the !Started() return, which was survivable only while
+	// every interrupted kill was interrupted BEFORE its teardown: the tombstone is
+	// written first, so the record on disk still said started=true and a restarted
+	// daemon reloaded it and finished the kill. A kill that now fails AFTER the
+	// teardown — the record delete losing a bounded race for the instances lock —
+	// leaves the live instance with started=false, so the poll returned here and
+	// finishUserKill never ran: the tombstone sat unprocessed for the daemon's whole
+	// life, and the error told the user it would be retried automatically. That was
+	// a promise the code did not keep.
 	key := remoteLossKey(repoID, instance)
 	if instance.UserKilled() {
-		// A surviving kill-intent tombstone (#1108) means a previous
-		// KillSession was interrupted after committing to the kill. The only
-		// valid future for this session is finishing that teardown — never
-		// probing it, never marking it Lost, never restoring it.
 		m.clearRemoteLoss(key)
 		m.finishUserKill(repoID, instance)
+		return
+	}
+	if !instance.Started() {
 		return
 	}
 	if instance.GetInFlightOp() != session.OpNone {
@@ -325,10 +339,33 @@ func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instanc
 	// This is the ONLY thing the debounce tracks — see remoteloss.go: it counts
 	// unanswerable probes, not "looks dead" observations.
 	m.clearRemoteLoss(key)
+
+	// AFFIRMATIVE liveness evidence for this tick, decided in ONE place and only
+	// where the poll actually learned something (#1917 round 7).
+	//
+	// It is NOT "Snapshot did not error". localAgentServer.Snapshot returns a nil
+	// error unconditionally — it wraps HasUpdated, which SUPPRESSES capture and
+	// session-gone failures and reports (false,false,"") for a session that is
+	// already dead. Counting that as proof of life let the Lost-restore loop read
+	// "previously confirmed", clear the failure history, and respawn with no backoff:
+	// #1910's hot loop, rebuilt out of an absent error. Absence of an error is not
+	// evidence; only something that can say YES is.
+	//
+	// The three yeses below are exactly the branches that carry one, and the comment
+	// on the idle branch names the reason the fourth cannot: (false,false) "a healthy
+	// idle session and a dead one both produce — indistinguishable on their own".
+	observedAlive := false
 	switch {
 	case updated:
+		// Fresh output. Only a live pane produces bytes, and a dead one yields "" —
+		// so this is affirmative on its own, no probe needed.
+		observedAlive = true
 		_ = instance.Transition(session.ObserveLiveness(session.LiveRunning))
 	case hasPrompt:
+		// A matched prompt means the CAPTURE SUCCEEDED: hasPrompt is a substring test
+		// over content, and every failure path in HasUpdated returns content "". So
+		// non-empty matched content is itself an answer from a live pane.
+		observedAlive = true
 		// A waiting prompt with otherwise-unchanged output: leave the status for
 		// the next tick to resolve, exactly as runMetadataTick did. The
 		// prompt-tap already fired above regardless of `updated`.
@@ -366,11 +403,17 @@ func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instanc
 				_ = instance.Transition(session.ObserveLiveness(session.LiveLost))
 			}
 		case probeAlive:
+			// The agent-server was asked and reports its agent RUNNING — the
+			// codebase's own affirmative signal, sitting one file away the whole time.
+			observedAlive = true
 			// Idle output: settle to Ready, or LimitReached when the pane shows a
 			// usage-limit banner for a claude/codex session (#1146). content is
 			// HasUpdated's capture (no re-capture); see resolveIdleLiveness.
 			m.resolveIdleLiveness(instance, content)
 		}
+	}
+	if observedAlive {
+		m.noteAliveObservation(key)
 	}
 
 	// Persist a liveness OR usage-limit reset-time change (#1146); see limit.go.

@@ -36,10 +36,10 @@ type limitResumeBackend struct {
 	sendPromptErr error
 }
 
-func (b *limitResumeBackend) IsAlive(*session.Instance) bool {
+func (b *limitResumeBackend) IsAlive(*session.Instance) (bool, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	return b.alive
+	return b.alive, nil
 }
 
 func (b *limitResumeBackend) Recover(i *session.Instance) error {

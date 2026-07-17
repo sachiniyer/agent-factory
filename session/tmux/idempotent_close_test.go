@@ -56,8 +56,11 @@ func TestClose_AlreadyDeadSession_ReturnsNil(t *testing.T) {
 	exec := killSessionProbeExec(false /* session gone */, &killCalls)
 	session := NewTmuxSessionFromSanitizedNameWithDeps("af_dead", "claude", NewMockPtyFactory(t), exec)
 
-	require.NoError(t, session.Close(),
+	state, err := session.Close()
+	require.NoError(t, err,
 		"a kill-session on an already-dead session is success, not an error (#967)")
+	require.Equal(t, PaneStateKnown, state,
+		"the has-session probe ANSWERED, so the session's fate is established")
 	require.Equal(t, 1, killCalls, "Close must still attempt the kill-session")
 }
 
@@ -69,8 +72,11 @@ func TestClose_SessionSurvivesKill_StillErrors(t *testing.T) {
 	exec := killSessionProbeExec(true /* session still present */, nil)
 	session := NewTmuxSessionFromSanitizedNameWithDeps("af_stuck", "claude", NewMockPtyFactory(t), exec)
 
-	err := session.Close()
+	state, err := session.Close()
 	require.Error(t, err, "a session that survives kill-session is a real failure")
+	require.Equal(t, PaneStateKnown, state,
+		"tmux ANSWERED (the probe found the session alive), so the state is known and the "+
+			"caller's pre-#1917 best-effort contract still governs")
 	require.Contains(t, err.Error(), "error killing tmux session")
 }
 

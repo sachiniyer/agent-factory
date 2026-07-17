@@ -62,7 +62,7 @@ func startReceiverPane(t *testing.T, name string) (*TmuxSession, string) {
 	out := filepath.Join(dir, "received.bin")
 	ts := NewTmuxSession(name, receiverProgram(out))
 	require.NoError(t, ts.Start(dir))
-	t.Cleanup(func() { _ = ts.Close() })
+	t.Cleanup(func() { _, _ = ts.Close() })
 
 	// Wait for the marker the RECEIVER prints, never for the pane merely being
 	// non-empty. `capture-pane` on a completely blank pane returns one newline per

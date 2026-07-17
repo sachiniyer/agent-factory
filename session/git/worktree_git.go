@@ -30,18 +30,67 @@ var networkGitTimeout = 60 * time.Second
 // timeout above (the #856 lesson from the claude shell probe).
 const gitWaitDelay = 2 * time.Second
 
+// localGitTimeout bounds the local git commands on the session-TEARDOWN path
+// (#1917). It is deliberately far larger than networkGitTimeout's sibling
+// reasoning would suggest: the command it really exists for is
+// `git worktree remove -f`, which recursively deletes a whole checkout —
+// legitimately slow on a large tree over a cold cache, and NOT something we want
+// to abort early. It only trips when removal makes no progress at all.
+//
+// A var (not a const) only so tests can shorten it; production never reassigns.
+var localGitTimeout = 60 * time.Second
+
 // runGitCommand executes a local git command and returns any error.
 // Only stdout is returned on success so callers parsing the output (e.g. SHAs
 // or porcelain status) are not corrupted by warnings git emits on stderr.
 // On error, stderr is folded into the returned error for diagnostics.
 //
-// It runs with a background context, so it is effectively unbounded. That is
-// intentional: every caller of runGitCommand performs a local-only operation
-// (rev-parse, show-ref, worktree add/remove/prune, branch -D, merge-base),
-// none of which touches the network and so cannot stall the way a fetch can.
-// Network operations must use runGitNetworkCommand instead (#896).
+// It runs with a background context, so it is UNBOUNDED. This used to be
+// justified as "local-only operations cannot stall the way a fetch can", which
+// is false — see runGitLocalCommand, which bounds the teardown-path callers that
+// disproved it. The remaining callers here are pure metadata reads (rev-parse,
+// show-ref, merge-base) plus `worktree add`, which stay unbounded on purpose:
+// `worktree add` runs the repo's post-checkout hook, i.e. arbitrary user code
+// whose legitimate runtime (a big install step) has no defensible upper bound,
+// and it is on the session-CREATE path, where a stall is visible and cancellable
+// rather than wedging a kill forever.
+//
+// Network operations must use runGitNetworkCommand instead (#896); local
+// operations on a teardown path must use runGitLocalCommand (#1917).
 func (g *GitWorktree) runGitCommand(path string, args ...string) (string, error) {
 	return g.runGitCommandContext(context.Background(), path, args...)
+}
+
+// runGitLocalCommand runs a local git command under localGitTimeout, so a step
+// that makes no progress surfaces an actionable timeout error instead of hanging
+// the caller forever (#1917). Like runGitNetworkCommand, the underlying process
+// group is SIGKILLed on the deadline.
+//
+// This exists because the "local git cannot stall" assumption above does not
+// survive contact with teardown: `git worktree remove -f` recursively unlinks a
+// tree and blocks indefinitely on a hung network mount or a D-state process
+// holding a file in it. Unbounded, that stalls GitWorktree.Cleanup, which stalls
+// the daemon's KillSession while it holds a per-session kills-in-flight guard —
+// and the session becomes permanently undeletable for the daemon's lifetime.
+//
+// Bounding is a real improvement but not a total one, and the limit is worth
+// naming: the deadline works by SIGKILLing git, so it only rescues stalls where
+// git is actually killable. A process wedged in an uninterruptible (D-state)
+// syscall against a dead mount ignores SIGKILL, and no in-process deadline can
+// fix that.
+func (g *GitWorktree) runGitLocalCommand(path string, args ...string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), localGitTimeout)
+	defer cancel()
+	output, err := g.runGitCommandContext(ctx, path, args...)
+	// Only treat a tripped deadline as a timeout when the command actually
+	// failed — runGitCommandContext maps a bare exec.ErrWaitDelay to nil, and
+	// without the err != nil guard that race would surface as a false timeout on
+	// a command that in fact succeeded (#914, same guard as runGitNetworkCommand).
+	if err != nil && errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return output, fmt.Errorf("git %s timed out after %s (no progress; a stalled filesystem or an unkillable process holding the worktree): %w",
+			strings.Join(args, " "), localGitTimeout, ctx.Err())
+	}
+	return output, err
 }
 
 // runGitNetworkCommand runs a git command that performs network I/O under

@@ -162,7 +162,11 @@ func (s *localAgentServer) PreviewContext(ctx context.Context, tab int, full boo
 // server that could leave liveness UNKNOWN. The error exists for the remote
 // runtime; see the AgentServer interface.
 func (s *localAgentServer) Alive() (bool, error) {
-	return s.inst.backend.IsAlive(s.inst), nil
+	// Forward the backend's error rather than hardcoding nil (#1917 round 8): nil
+	// here meant "the probe answered", which was never checked and often false.
+	// probeLiveness maps a non-nil error to probeUnknown, so this is the hop that
+	// lets an unanswerable tmux stop being counted as alive.
+	return s.inst.backend.IsAlive(s.inst)
 }
 
 func (s *localAgentServer) SendPrompt(prompt string) error {

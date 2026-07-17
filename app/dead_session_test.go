@@ -17,7 +17,7 @@ type deadBackend struct {
 	*session.FakeBackend
 }
 
-func (b *deadBackend) IsAlive(*session.Instance) bool { return false }
+func (b *deadBackend) IsAlive(*session.Instance) (bool, error) { return false, nil }
 
 // newDeadInstance returns a started instance backed by deadBackend with the
 // given starting status. It does not spin up tmux/git, so it is hermetic.

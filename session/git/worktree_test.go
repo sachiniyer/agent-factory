@@ -243,7 +243,8 @@ func TestSetupFromExistingBranch_SetsBaseCommitSHA(t *testing.T) {
 	assert.Equal(t, headSHA, gw.GetBaseCommitSHA(), "baseCommitSHA should equal the HEAD commit")
 
 	// Clean up
-	require.NoError(t, gw.Cleanup())
+	_, cleanupErrX := gw.Cleanup()
+	require.NoError(t, cleanupErrX)
 }
 
 // TestSetupFromExistingBranch_RecreatesAfterExternalDeletion is a regression
@@ -303,7 +304,8 @@ func TestSetupFromExistingBranch_RecreatesAfterExternalDeletion(t *testing.T) {
 	_, err = os.Stat(worktreePath)
 	require.NoError(t, err, "worktree directory should be recreated")
 
-	require.NoError(t, gw.Cleanup())
+	_, cleanupErrX := gw.Cleanup()
+	require.NoError(t, cleanupErrX)
 }
 
 // TestCleanup_PreservesPreExistingBranch verifies that when Setup() reuses a
@@ -342,7 +344,8 @@ func TestCleanup_PreservesPreExistingBranch(t *testing.T) {
 		"BranchCreatedByUs should be false when Setup reused an existing branch")
 
 	// Cleanup should remove the worktree but NOT delete the branch.
-	require.NoError(t, gw.Cleanup())
+	_, cleanupErrX := gw.Cleanup()
+	require.NoError(t, cleanupErrX)
 
 	// Verify the branch still exists in the repo.
 	verifyCmd := exec.Command("git", "-C", repoRoot, "show-ref", "--verify", "refs/heads/test/preexisting")
@@ -380,7 +383,8 @@ func TestCleanup_DeletesBranchWeCreated(t *testing.T) {
 	assert.True(t, gw.BranchCreatedByUs(),
 		"BranchCreatedByUs should be true when Setup created a new branch")
 
-	require.NoError(t, gw.Cleanup())
+	_, cleanupErrX := gw.Cleanup()
+	require.NoError(t, cleanupErrX)
 
 	// Branch should be gone.
 	verifyCmd := exec.Command("git", "-C", repoRoot, "show-ref", "--verify", "refs/heads/test/brand-new")
@@ -434,7 +438,8 @@ func TestCleanup_LegacyExternalWorktreeIsPreserved(t *testing.T) {
 	require.True(t, gw.IsExternalWorktree(), "restored legacy worktree must report external")
 
 	// Cleanup must be a no-op for an external worktree.
-	require.NoError(t, gw.Cleanup())
+	_, cleanupErrX := gw.Cleanup()
+	require.NoError(t, cleanupErrX)
 
 	// The worktree directory must still exist.
 	_, statErr := os.Stat(externalWtPath)
@@ -488,7 +493,7 @@ func TestCleanup_PrunesBeforeBranchDelete(t *testing.T) {
 
 	// Cleanup may return errors from the failed `worktree remove`, but it
 	// must still delete the branch — that's the user-visible regression.
-	_ = gw.Cleanup()
+	_, _ = gw.Cleanup()
 
 	// The branch should be gone — this is what regresses without the prune
 	// before `git branch -D`.
@@ -541,7 +546,7 @@ func TestCleanup_RemovesOrphanedDirectory(t *testing.T) {
 	require.NoError(t, os.Remove(filepath.Join(worktreePath, ".git")))
 
 	// Cleanup may report errors, but it must remove the on-disk directory.
-	_ = gw.Cleanup()
+	_, _ = gw.Cleanup()
 
 	_, err = os.Stat(worktreePath)
 	assert.True(t, os.IsNotExist(err),
@@ -597,7 +602,8 @@ func TestCleanup_RemovesDirWhenGitDeregistered(t *testing.T) {
 	require.NoError(t, err)
 
 	// Full recovery is expected: no error, directory gone, branch gone.
-	require.NoError(t, gw.Cleanup())
+	_, cleanupErrX := gw.Cleanup()
+	require.NoError(t, cleanupErrX)
 
 	_, err = os.Stat(worktreePath)
 	assert.True(t, os.IsNotExist(err),
@@ -644,7 +650,7 @@ func TestCleanup_SurfacesErrorWhenGitStillOwnsWorktree(t *testing.T) {
 	out, err = lockCmd.CombinedOutput()
 	require.NoError(t, err, string(out))
 
-	err = gw.Cleanup()
+	_, err = gw.Cleanup()
 	require.Error(t, err,
 		"Cleanup() must surface the failure when git still owns the worktree and the cause is unknown")
 	assert.Contains(t, err.Error(), "locked")
@@ -686,7 +692,7 @@ func TestCleanup_EmptyRepoPath(t *testing.T) {
 	require.NoError(t, err)
 	// Simulate a corrupted state by zeroing out repoPath
 	gw.repoPath = ""
-	err = gw.Cleanup()
+	_, err = gw.Cleanup()
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "repo path is empty")
 }
@@ -696,7 +702,7 @@ func TestCleanup_EmptyWorktreePath(t *testing.T) {
 	require.NoError(t, err)
 	// Simulate a corrupted state by zeroing out worktreePath
 	gw.worktreePath = ""
-	err = gw.Cleanup()
+	_, err = gw.Cleanup()
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "worktree path is empty")
 }

@@ -88,7 +88,10 @@ func (c *configAgentSupervisor) reap(name string) error {
 	if !ok {
 		return nil
 	}
-	if err := ts.Close(); err != nil {
+	// Pane state deliberately ignored (#1917): a config agent has no worktree (see
+	// HooksDone above), so Close's PaneState cannot gate any destructive step —
+	// there is nothing to delete under a possibly-live pane.
+	if _, err := ts.Close(); err != nil {
 		return fmt.Errorf("failed to close config-agent session %s: %w", name, err)
 	}
 	return nil
@@ -111,7 +114,8 @@ func (c *configAgentSupervisor) Stop() {
 		wg.Add(1)
 		go func(ts *tmux.TmuxSession) {
 			defer wg.Done()
-			if err := ts.Close(); err != nil {
+			// Pane state ignored: config agents have no worktree (see HooksDone).
+			if _, err := ts.Close(); err != nil {
 				log.WarningLog.Printf("config agent: closing session failed during shutdown: %v", err)
 			}
 		}(ts)
@@ -180,8 +184,9 @@ func (m *Manager) SpawnConfigAgent(ctx context.Context, req SpawnConfigAgentRequ
 		return "", fmt.Errorf("config agent: failed to start tmux session: %w", err)
 	}
 	if !m.configAgents.track(name, ts) {
-		// The daemon is shutting down; do not leak the session we just made.
-		_ = ts.Close()
+		// The daemon is shutting down; do not leak the session we just made. Pane
+		// state ignored: no worktree, so nothing destructive follows (see HooksDone).
+		_, _ = ts.Close()
 		return "", fmt.Errorf("config agent: the daemon is shutting down")
 	}
 	// Any failure past this point tears the session down rather than leaving a

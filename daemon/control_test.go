@@ -20,6 +20,8 @@ import (
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
 	"github.com/sachiniyer/agent-factory/session"
+	"github.com/sachiniyer/agent-factory/session/git"
+	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
 func setupControlRepo(t *testing.T) string {
@@ -669,15 +671,16 @@ func stubGhostCleanup(t *testing.T) (wtCalls *[]string, tmuxCalls *[]string) {
 	var wt, tm []string
 	prevWT := ghostCleanupWorktree
 	prevTmux := ghostKillTmuxByName
-	ghostCleanupWorktree = func(data *session.InstanceData, title string) {
+	ghostCleanupWorktree = func(data *session.InstanceData, title string) (git.CleanupState, error) {
 		if data.Worktree.RepoPath == "" || data.Worktree.WorktreePath == "" || data.Worktree.ExternalWorktree {
-			return
+			return git.CleanupSettled, nil
 		}
 		wt = append(wt, title)
+		return git.CleanupSettled, nil
 	}
-	ghostKillTmuxByName = func(name string) error {
+	ghostKillTmuxByName = func(name string) (tmux.PaneState, error) {
 		tm = append(tm, name)
-		return nil
+		return tmux.PaneStateKnown, nil
 	}
 	t.Cleanup(func() {
 		ghostCleanupWorktree = prevWT
@@ -699,7 +702,7 @@ func TestGhostCleanup_TmuxOrphan(t *testing.T) {
 		Program:  "claude",
 		TmuxName: "af_ghost",
 	}
-	ghostCleanup(data, "ghost")
+	_ = ghostCleanup(data, "ghost")
 
 	if len(*wtCalls) != 0 {
 		t.Fatalf("expected worktree cleanup skipped, got: %v", *wtCalls)
@@ -725,7 +728,7 @@ func TestGhostCleanup_BothPopulated(t *testing.T) {
 			BranchName:   "af/ghost",
 		},
 	}
-	ghostCleanup(data, "ghost")
+	_ = ghostCleanup(data, "ghost")
 
 	if len(*wtCalls) != 1 || (*wtCalls)[0] != "ghost" {
 		t.Fatalf("expected worktree cleanup, got: %v", *wtCalls)
@@ -744,7 +747,7 @@ func TestGhostCleanup_AllEmpty(t *testing.T) {
 		Title:   "ghost",
 		Program: "claude",
 	}
-	ghostCleanup(data, "ghost")
+	_ = ghostCleanup(data, "ghost")
 
 	if len(*wtCalls) != 0 {
 		t.Fatalf("expected no worktree cleanup, got: %v", *wtCalls)
@@ -762,12 +765,13 @@ func TestGhostCleanup_TmuxBeforeWorktree(t *testing.T) {
 	var order []string
 	prevWT := ghostCleanupWorktree
 	prevTmux := ghostKillTmuxByName
-	ghostCleanupWorktree = func(data *session.InstanceData, title string) {
+	ghostCleanupWorktree = func(data *session.InstanceData, title string) (git.CleanupState, error) {
 		order = append(order, "worktree")
+		return git.CleanupSettled, nil
 	}
-	ghostKillTmuxByName = func(name string) error {
+	ghostKillTmuxByName = func(name string) (tmux.PaneState, error) {
 		order = append(order, "tmux")
-		return nil
+		return tmux.PaneStateKnown, nil
 	}
 	t.Cleanup(func() {
 		ghostCleanupWorktree = prevWT
@@ -785,7 +789,7 @@ func TestGhostCleanup_TmuxBeforeWorktree(t *testing.T) {
 			BranchName:   "af/ghost",
 		},
 	}
-	ghostCleanup(data, "ghost")
+	_ = ghostCleanup(data, "ghost")
 
 	if len(order) != 2 || order[0] != "tmux" || order[1] != "worktree" {
 		t.Fatalf("expected tmux teardown before worktree cleanup (#802), got: %v", order)
@@ -797,8 +801,14 @@ func TestGhostCleanup_TmuxBeforeWorktree(t *testing.T) {
 // only appear via storage corruption, and silently killing whatever tmux
 // session it names could destroy unrelated work.
 func TestGhostKillTmuxByName_RefusesNonAfPrefix(t *testing.T) {
-	if err := ghostKillTmuxByName("not-ours"); err == nil {
+	state, err := ghostKillTmuxByName("not-ours")
+	if err == nil {
 		t.Fatalf("expected refusal for non-af prefix, got nil")
+	}
+	// A refusal runs no tmux command, so nothing is unknown — the caller must be
+	// free to go on cleaning up a ghost whose tmux name it declined to touch.
+	if state != tmux.PaneStateKnown {
+		t.Fatalf("a refused name must report a KNOWN state, got %v", state)
 	}
 }
 

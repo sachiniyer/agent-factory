@@ -86,7 +86,34 @@ func (m *Manager) CreateSession(ctx context.Context, req CreateSessionRequest) (
 	// marked external — not the flow itself. finishCreateStart marks the instance
 	// live, PARKS it at a usage-limit wall (#1146 PR4), or returns a fatal error.
 	if serr := finishCreateStart(instance, req.Prompt, task.StartAndSendPrompt(ctx, instance, req.Prompt)); serr != nil {
-		_ = instance.Kill()
+		// The create failed, so this instance is about to be discarded — it was never
+		// registered or persisted, and the deferred release() hands its title straight
+		// back out. That is only safe if the cleanup below actually removed what the
+		// create built (#1917).
+		//
+		// Kill swallows everything tmux and git ANSWER for, so an error here means it
+		// could NOT: a pane whose liveness is unknown, or a worktree removal cut off
+		// mid-delete. Releasing the title over those leftovers means the next create
+		// with this name collides with — or removes — a workspace nobody can address,
+		// since no record points at it. So keep the record instead: it holds the title
+		// and gives the user something to inspect and kill.
+		// The SAME classifier deleteSessionRecord uses (#1917 round 7). A non-nil
+		// Kill is not enough: a remote create failure returns the in-sandbox
+		// endpoint's error even when the sandbox teardown SUCCEEDED, so the
+		// workspace is already gone — tombstoning a row, holding the title and
+		// telling the user a workspace may remain would all be false.
+		killErr := instance.Kill()
+		if killErr != nil && !session.TeardownStateUnknown(killErr) {
+			log.WarningLog.Printf("create of session %q: cleanup reported an error that does not leave its workspace state unknown; discarding the session as normal: %v", title, killErr)
+		}
+		if session.TeardownStateUnknown(killErr) {
+			if keepErr := m.keepFailedCreate(repo.ID, title, instance); keepErr != nil {
+				return session.InstanceData{}, fmt.Errorf("failed to start instance %q, and its cleanup could not complete safely — its workspace may still be on disk at %s and could not be recorded, so it must be cleaned up by hand: %w",
+					title, instance.GetWorktreePath(), errors.Join(serr, killErr, keepErr))
+			}
+			return session.InstanceData{}, fmt.Errorf("failed to start instance %q, and its cleanup could not complete safely, so its workspace was left in place; the session is recorded and the daemon will keep retrying the cleanup — it will clear once that succeeds: %w",
+				title, errors.Join(serr, killErr))
+		}
 		return session.InstanceData{}, fmt.Errorf("failed to start instance: %w", serr)
 	}
 	data := instance.ToInstanceData()
@@ -110,7 +137,13 @@ func (m *Manager) CreateSession(ctx context.Context, req CreateSessionRequest) (
 		return nil
 	}()
 	if persistErr != nil {
-		_ = instance.Kill()
+		// Same rule as the start-failure path above, minus the remedy: the record
+		// write is what just failed, so keeping a record is not available. Report the
+		// leftovers loudly instead of silently releasing the title over them (#1917).
+		if killErr := instance.Kill(); session.TeardownStateUnknown(killErr) {
+			return session.InstanceData{}, fmt.Errorf("failed to record session %q, and its cleanup could not complete safely — its workspace may still be on disk at %s and must be cleaned up by hand: %w",
+				title, instance.GetWorktreePath(), errors.Join(persistErr, killErr))
+		}
 		return session.InstanceData{}, persistErr
 	}
 	m.captureAgentConversationAsync(repo.ID, key, instance, conversationCapture)
@@ -604,4 +637,47 @@ func (m *Manager) titlesCollide(a, b string) bool {
 // detect branch collisions before worktree setup runs.
 func (m *Manager) branchForTitle(title string) string {
 	return git.BranchForTitle(m.cfg.BranchPrefix, title)
+}
+
+// keepFailedCreate registers and persists an instance whose create FAILED but
+// whose cleanup could not complete safely, so its tmux and/or worktree are still
+// on disk (#1917).
+//
+// A create normally discards a failed instance and lets reserveCreate's release()
+// hand the title back out — correct, because the cleanup removed everything the
+// create built. When the cleanup could NOT complete, that same release puts the
+// title back in circulation on top of live leftovers that no record points at, so
+// the next create under that name collides with or deletes them.
+//
+// The record is TOMBSTONED, not merely written. Retention is a claim on two other
+// layers, and a row that just sits there satisfies neither (#1917 round 5):
+//
+//   - SaveInstances drops any non-started, non-Archived instance on the next
+//     wholesale checkpoint — which fires whenever ANY other started session in the
+//     repo is saved. An untombstoned row here would be silently erased, orphaning
+//     the leftovers it exists to hold. The tombstone is what makes that writer keep
+//     it.
+//   - Nothing else would ever finish the cleanup. refreshInstanceStatus routes a
+//     tombstoned record to finishUserKill on every poll, which retries the teardown
+//     and drops the record once it completes safely — so the leftovers are reaped
+//     when the cause clears, rather than waiting on the user.
+//
+// The tombstone is honest here: it records "a teardown is committed for this
+// record; finish it, never restore it", which is exactly what a failed create's
+// cleanup is. Mirrors the register-then-persist ordering of the success path — the
+// map entry goes in first so the refresh loop cannot build a duplicate Instance from
+// disk, and is rolled back if the write fails. The caller holds the repo start lock,
+// so this appends directly rather than going through persistKillTombstone (which
+// takes that same non-reentrant lock).
+func (m *Manager) keepFailedCreate(repoID, title string, instance *session.Instance) error {
+	instance.MarkUserKilled()
+	key := daemonInstanceKey(repoID, title)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.instances[key] = instance
+	if err := appendInstanceData(repoID, instance.ToInstanceData()); err != nil {
+		delete(m.instances, key)
+		return err
+	}
+	return nil
 }

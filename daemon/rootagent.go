@@ -292,17 +292,28 @@ func (m *Manager) reapDeadRoot(repoID string, inst *session.Instance) (bool, err
 	}
 
 	// Best-effort by design (#478): tmux is already gone and an in-place
-	// worktree's Cleanup is a no-op, so failures here only log inside Kill.
-	if err := inst.Kill(); err != nil {
-		log.WarningLog.Printf("reaping dead root for repo %s: kill reported: %v", repoID, err)
-	}
-	storage, err := session.NewStorage(config.LoadState(), repoID)
+	// worktree's Cleanup is a no-op, so failures Kill can ANSWER for only log
+	// inside Kill and never surface here.
+	//
+	// An error that does reach us therefore means the teardown could not complete
+	// SAFELY — tmux never confirmed the pane dead, or a worktree removal was cut off
+	// mid-delete — so the workspace is still there. Deleting the record would orphan
+	// it and leave nothing pointing at it. Keep the record; this loop runs every
+	// tick, so it IS the retry (#1917: found by auditing every record delete against
+	// the invariant, not reported).
+	teardownErr := inst.Kill()
+	// Through the one choke point (#1917): it refuses while the teardown's outcome
+	// is unknown. This site was still log-and-delete after two audits I called
+	// exhaustive — which is the argument for there being exactly one place to call.
+	deleted, err := m.deleteSessionRecord(repoID, session.RootSessionTitle, inst.ID, teardownErr)
 	if err != nil {
-		return false, err
-	}
-	deleted, err := storage.DeleteInstanceByStableID(session.RootSessionTitle, inst.ID)
-	if err != nil {
-		return false, err
+		// Return the ERROR, not (false, nil) (#1917 round 8). "No, but fine" is
+		// absence-of-error wearing a different hat: the caller reads it as "nothing to
+		// reap" and skips rootEnsureFailed, so a persistent tmux/file-lock timeout
+		// re-runs this whole bounded teardown on EVERY tick — occupying the single
+		// status/restore poll loop and spamming warnings — instead of backing off.
+		// A failure has to look like one for the retry cadence to see it.
+		return false, fmt.Errorf("reaping dead root for repo %s: %w", repoID, err)
 	}
 	if !deleted {
 		log.InfoLog.Printf("dead root reap for repo %s skipped storage delete: current root record has a different instance identity", repoID)

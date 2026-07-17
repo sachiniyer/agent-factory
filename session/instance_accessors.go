@@ -157,8 +157,14 @@ func (i *Instance) SetTitle(title string) error {
 
 // TmuxAlive returns true if the underlying session is alive.
 // For remote backends this delegates to IsAlive.
+//
+// It collapses IsAlive's tri-state to a bool, treating "could not ask" as NOT
+// alive. That is safe for its callers — the TUI's attach/pane guards, which only
+// refuse to attach — but it must never be used as evidence of liveness: take
+// IsAlive directly for that (#1917 round 8).
 func (i *Instance) TmuxAlive() bool {
-	return i.backend.IsAlive(i)
+	alive, err := i.backend.IsAlive(i)
+	return err == nil && alive
 }
 
 // ResolvedAgent returns the canonical agent (one of tmux.SupportedPrograms)
