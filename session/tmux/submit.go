@@ -41,26 +41,40 @@ func pasteBufferName(processToken, sanitizedName string, seq uint64) string {
 // SendKeysCommand sends text to the tmux pane using tmux commands instead of
 // writing to the PTY. This is more reliable for headless/scheduled runs where
 // the PTY connection may not persist. Text is loaded into a tmux paste buffer,
-// pasted into the pane, followed by a pause to let terminal control sequences
-// drain, then Enter to submit.
+// pasted into the pane as a BRACKETED paste, followed by a pause to let terminal
+// control sequences drain, then Enter to submit.
 //
-// Most panes receive a plain paste. Codex is the exception: its composer runs
-// paste-burst detection, so it needs explicit bracketed-paste boundaries before
-// the following Enter is unambiguously a submit (#1254/#1256). Submit handling
-// is keyed off the agent actually running in the pane (DetectAgentFromCommand),
-// mirroring HasUpdated's per-agent prompt heuristics, so a program_overrides
-// redirect can't misclassify the pane.
+// Every pane gets the bracketed paste — there is no per-agent exception list.
+// See sendKeysPasteBuffer for why that is both necessary and safe (#1956).
 func (t *TmuxSession) SendKeysCommand(text string) error {
-	return t.sendKeysPasteBuffer(text, DetectAgentFromCommand(t.programCmd()) == ProgramCodex)
+	return t.sendKeysPasteBuffer(text)
 }
 
-// sendKeysPasteBuffer delivers text to the pane through a tmux paste buffer
-// (`load-buffer` + `paste-buffer`) and then sends Enter to submit. This avoids
-// the literal `send-keys -l` text path whose per-character delivery can leave a
-// duplicated wrapped prefix in bash/readline panes (#1292). Text is streamed via
-// stdin rather than an argv argument so arbitrarily large prompts are not
-// bounded by ARG_MAX.
-func (t *TmuxSession) sendKeysPasteBuffer(text string, bracketed bool) error {
+// sendKeysPasteBuffer delivers text to the pane through a BRACKETED tmux paste
+// buffer (`load-buffer` + `paste-buffer -p`) and then sends Enter to submit.
+// Text is streamed via stdin rather than an argv argument so arbitrarily large
+// prompts are not bounded by ARG_MAX.
+//
+// The paste MUST be bracketed (`-p`), for every pane. A plain paste is delivered
+// to the application as ordinary KEYSTROKES, indistinguishable from typing, so an
+// agent whose composer is modal executes the prompt as EDITOR COMMANDS instead of
+// inserting it as text (#1956). With claude's `editorMode: "vim"` the composer
+// rests in NORMAL mode, where a prompt beginning "status check…" loses its leading
+// `s` to the substitute command, and one beginning "deploy…" runs `d` as the delete
+// operator — the prompt mangles the box rather than filling it. Bracketing tells the
+// application the bytes are pasted data, not commands. It also stops every `\n` in a
+// multi-line prompt from acting as its own Enter, which submitted long prompts in
+// fragments.
+//
+// Unconditional is safe: tmux only emits the bracketed-paste markers when the
+// application has itself requested the mode (DECSET 2004), so `-p` is a literal
+// no-op for panes that never enabled it. Panes that DO enable it (bash/readline,
+// and the agent composers) are precisely the ones that must not be typed at.
+// Codex reached this path first for a different reason — its paste-burst detection
+// needs an explicit end-of-paste marker before the trailing Enter counts as a
+// submit (#1254/#1256) — and keeps working unchanged; it was never special, it was
+// just the only agent whose breakage was loud enough to notice.
+func (t *TmuxSession) sendKeysPasteBuffer(text string) error {
 	// A per-call unique buffer name: two concurrent deliveries to the same
 	// session must not share a buffer, or one call's load-buffer could overwrite
 	// the other's content between its load and paste and corrupt the submit. The
@@ -75,20 +89,11 @@ func (t *TmuxSession) sendKeysPasteBuffer(text string, bracketed bool) error {
 		return fmt.Errorf("error loading paste buffer: %w", err)
 	}
 
-	// `-d` deletes the buffer after pasting, `=` forces an exact session match
-	// so input never reaches a prefix-matched sibling session (#1006).
-	//
-	// Codex additionally needs `-p`: tmux inserts bracketed-paste markers (when
-	// the app requested the mode), giving codex an end-of-paste marker so the
-	// following Enter submits instead of being swallowed by paste-burst
-	// detection (#1254/#1256). Other panes intentionally use a plain paste to
-	// preserve their pre-existing raw-input newline behavior while still
-	// avoiding the wrapped-prefix redraw issue (#1292).
-	args := []string{"paste-buffer", "-d"}
-	if bracketed {
-		args = append(args, "-p")
-	}
-	args = append(args, "-b", buf, "-t", exactTarget(t.sanitizedName))
+	// `-d` deletes the buffer after pasting, `-p` brackets it (see the doc
+	// comment: prompts are pasted DATA, never keystrokes), and `=` forces an
+	// exact session match so input never reaches a prefix-matched sibling
+	// session (#1006).
+	args := []string{"paste-buffer", "-d", "-p", "-b", buf, "-t", exactTarget(t.sanitizedName)}
 	pasteCmd := exec.Command("tmux", args...)
 	if err := t.cmdExec.Run(pasteCmd); err != nil {
 		// `-d` only deletes the buffer once the paste succeeds; a failed paste
@@ -104,6 +109,14 @@ func (t *TmuxSession) sendKeysPasteBuffer(text string, bracketed bool) error {
 
 	// Wait for terminal control sequences (e.g. OSC color responses) and the
 	// paste to drain before sending Enter, otherwise they can corrupt the input.
+	//
+	// Bracketing (above) may make this unnecessary for apps that requested the
+	// mode: the `\x1b[201~` end-of-paste marker tells them the paste is complete,
+	// which is the whole reason codex needed `-p` rather than a longer sleep
+	// (#1254/#1256). It cannot go away unconditionally, though — `-p` is a no-op
+	// for apps that never enabled the mode, and those get no marker and still
+	// need the drain. Removing it is a separate change with its own evidence;
+	// left alone here deliberately (#1956 follow-up).
 	time.Sleep(500 * time.Millisecond)
 
 	// Send Enter separately to submit.

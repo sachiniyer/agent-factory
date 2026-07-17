@@ -115,33 +115,40 @@ func TestCodexSubmitUsesBracketedPaste(t *testing.T) {
 	}
 }
 
-// TestNonCodexSubmitUsesPlainPasteBuffer guards against regressing the agents
-// that do not need bracketed-paste submit semantics
-// (claude/aider/gemini/amp and unknown/override panes): they use tmux's plain
-// paste-buffer path plus Enter.
-// This keeps codex's #1256 bracketed-paste behavior scoped to codex while
-// avoiding the literal `send-keys -l` wrapped-redraw issue seen in bash-backed
-// sessions (#1292).
-func TestNonCodexSubmitUsesPlainPasteBuffer(t *testing.T) {
+// TestEveryAgentSubmitUsesBracketedPasteBuffer guards the delivery shape shared
+// by every pane: load-buffer (payload on stdin) → bracketed paste-buffer → a
+// separate Enter to submit.
+//
+// This test used to be TestNonCodexSubmitUsesPlainPasteBuffer and asserted the
+// OPPOSITE — that claude/aider/gemini/amp/overrides must NOT get `-p`. It passed
+// continuously while #1956 corrupted real dispatches, because a plain paste is
+// delivered to the pane as KEYSTROKES: a claude composer in vim NORMAL mode
+// (`editorMode: "vim"`) executed each prompt's leading character as an editor
+// command instead of inserting it. The assertion was inverted, not merely
+// incomplete, so it is replaced rather than relaxed. See
+// submit_bracketed_test.go for the gate that asserts what the pane RECEIVES —
+// the property this argv-level test cannot see (#1956).
+func TestEveryAgentSubmitUsesBracketedPasteBuffer(t *testing.T) {
 	for _, program := range []string{"claude", "aider", "gemini", "amp", "some-custom-shell"} {
 		t.Run(program, func(t *testing.T) {
 			const prompt = "hello"
 			cmds := recordTmuxCommands(t, program, prompt)
 			joined := joinedArgs(cmds)
 
-			require.Len(t, cmds, 3, "plain paste path is load-buffer, paste-buffer, send-keys Enter; got %v", joined)
+			require.Len(t, cmds, 3, "paste path is load-buffer, paste-buffer, send-keys Enter; got %v", joined)
 			require.Contains(t, joined[0], "load-buffer", "first command must load the paste buffer; got %v", joined)
 			require.Equal(t, prompt, cmds[0].stdin, "paste text must be streamed on stdin")
 			require.Contains(t, joined[1], "paste-buffer", "second command must paste the buffer; got %v", joined)
 			require.Contains(t, joined[1], "-d", "paste must delete the buffer afterward (-d)")
-			require.False(t, hasArg(cmds[1].args, "-p"),
-				"non-codex panes must use plain paste, not bracketed paste; got %v", joined)
+			require.True(t, hasArg(cmds[1].args, "-p"),
+				"every pane must receive a BRACKETED paste: a plain paste arrives as keystrokes "+
+					"and a modal composer executes it as commands (#1956); got %v", joined)
 			require.Contains(t, joined[2], "send-keys", "last command must send Enter; got %v", joined)
 			require.Contains(t, joined[2], "Enter", "last command must submit with Enter; got %v", joined)
 
 			for _, j := range joined {
 				require.NotContains(t, j, "send-keys -t =af_proj: -l",
-					"non-codex must not use the literal send-keys path that redraws wrapped bash input (#1292); got %v", joined)
+					"no pane may use the literal send-keys path that redraws wrapped bash input (#1292); got %v", joined)
 			}
 
 			loadBuf, pasteBuf := bufferOf(cmds[0].args), bufferOf(cmds[1].args)
@@ -151,7 +158,7 @@ func TestNonCodexSubmitUsesPlainPasteBuffer(t *testing.T) {
 			for _, c := range cmds {
 				if tgt := targetOf(c.args); tgt != "" {
 					require.Equal(t, "=af_proj:", tgt,
-						"plain paste submit commands must target by exact match (#1006); got %q in %v", tgt, joined)
+						"submit commands must target by exact match (#1006); got %q in %v", tgt, joined)
 				}
 			}
 		})
