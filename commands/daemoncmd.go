@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 
 	"github.com/sachiniyer/agent-factory/apiproto"
+	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/task"
@@ -274,37 +275,185 @@ var respawnDaemonFn = respawnDaemonAfterUpgrade
 
 // Indirection points so respawnDaemonAfterUpgrade tests can observe which
 // branch ran without touching the real systemctl/launchctl or spawning a
-// daemon process.
+// daemon process. autostartUnitServesHomeFn (reset.go) is shared.
 var (
 	autostartInstalledFn        = daemon.AutostartInstalled
 	restartAutostartUnitFn      = daemon.RestartAutostartUnit
 	ensureDaemonFromPathFn      = daemon.EnsureDaemonFromPath
 	waitForShutdownCompletionFn = daemon.WaitForShutdownCompletion
+	autostartUnitExecPathFn     = daemon.AutostartUnitExecPath
+	configDirFn                 = config.GetConfigDir
 )
 
+// respawnResult reports the ways a respawn can succeed and still leave the
+// user worse off than they think, so callers can say so instead of assuming
+// the restart landed the way they asked. Both were log-only warnings printed
+// underneath an unqualified "Restarted the running daemon from the new binary"
+// (#1947). The zero value is the good outcome: the daemon came back, on the
+// binary we just wrote, however it was started.
+type respawnResult struct {
+	// UnitErr is set when a unit restart was attempted and failed, so the
+	// daemon was demoted to the ad-hoc fallback: running and on the new
+	// binary, but unsupervised — it dies with the session and skips the next
+	// login. Nil when no unit was restarted because none serves this home,
+	// which is not a degradation.
+	UnitErr error
+	// UnitGateErr is set when we could not TELL whether the installed unit
+	// serves this home, so we conservatively did not restart it and spawned an
+	// ad-hoc daemon instead. That is the safe call, but it is a real
+	// degradation the user has to hear about: if the unit was in fact theirs,
+	// their supervised daemon just became an unsupervised one. Distinct from
+	// the quiet, correct "no unit serves this home" case, which is not an
+	// error and must stay silent.
+	UnitGateErr error
+	// StaleUnitExec is the binary the restarted unit launches, set only when
+	// that is NOT the binary the upgrade just wrote. The unit bakes its
+	// program path at install time, so a second install on the box brings the
+	// OLD image straight back up — the restart lands, and changes nothing.
+	StaleUnitExec string
+}
+
+// restartPhase names the step of the shutdown-then-respawn sequence that
+// failed. The two failures are OPPOSITE states and must never share a message:
+//
+//   - restartPhaseShutdown: the old daemon would not stop, so it is STILL
+//     RUNNING THE OLD BINARY. That is #1947's own symptom — the upgrade did not
+//     reach the daemon.
+//   - restartPhaseRespawn: the old daemon stopped but no new one came up, so
+//     NOTHING IS RUNNING. Task schedules, watch scripts and autoyes are all
+//     stopped until something starts a daemon.
+//
+// "Still on the old code" and "no daemon at all" need opposite remedies, and
+// telling them apart by reading the wrapped error's text is exactly the
+// guessing this PR exists to delete. The phase is carried, not inferred.
+type restartPhase int
+
+const (
+	// restartPhaseNone: nothing failed. The zero value, valid only alongside a
+	// nil error.
+	restartPhaseNone restartPhase = iota
+	restartPhaseShutdown
+	restartPhaseRespawn
+)
+
+// restartOutcome is the whole story of a shutdown-then-respawn: how the old
+// daemon was stopped, and how (or whether) a new one came back.
+type restartOutcome struct {
+	Shutdown daemon.ShutdownResult
+	// Respawned is false when no daemon was running, so nothing was respawned.
+	Respawned bool
+	Respawn   respawnResult
+	// FailedPhase is restartPhaseNone unless the accompanying error is
+	// non-nil, and names which half of the sequence broke.
+	FailedPhase restartPhase
+}
+
+// restartDaemonFromPath keeps the (result, error) shape the auto-update path
+// and `af daemon restart` are written against. Callers that must report on the
+// restart's fidelity — `af upgrade` — use restartDaemonFromPathDetailed.
 func restartDaemonFromPath(execPath string) (daemon.ShutdownResult, error) {
+	outcome, err := restartDaemonFromPathDetailed(execPath)
+	return outcome.Shutdown, err
+}
+
+func restartDaemonFromPathDetailed(execPath string) (restartOutcome, error) {
 	result, shutdownErr := requestDaemonShutdownFn()
+	outcome := restartOutcome{Shutdown: result}
 	if shutdownErr != nil {
-		return result, fmt.Errorf("failed to stop running daemon: %w", shutdownErr)
+		outcome.FailedPhase = restartPhaseShutdown
+		return outcome, fmt.Errorf("failed to stop running daemon: %w", shutdownErr)
 	}
 	if result == daemon.ShutdownNoDaemon {
-		return result, nil
+		return outcome, nil
 	}
-	if err := respawnDaemonFn(execPath); err != nil {
-		return result, fmt.Errorf("failed to restart daemon: %w", err)
+	respawn, err := respawnDaemonFn(execPath)
+	outcome.Respawn = respawn
+	if err != nil {
+		outcome.FailedPhase = restartPhaseRespawn
+		return outcome, fmt.Errorf("failed to restart daemon: %w", err)
 	}
-	return result, nil
+	outcome.Respawned = true
+	return outcome, nil
+}
+
+// unitRestartTarget decides whether the post-upgrade respawn may restart the
+// installed autostart unit, and reports the binary that unit would launch.
+//
+// "A unit file exists" and "that unit is the daemon I just stopped" are
+// different questions (#1916/#1919, and #1950 for this path). The unit bakes
+// its AGENT_FACTORY_HOME at install time, so `AGENT_FACTORY_HOME=/tmp/sandbox
+// af upgrade` gating on existence alone restarts the developer's REAL daemon
+// and returns — leaving the sandbox it was actually upgrading with no daemon
+// at all. Anything short of proof that the unit serves this home means we do
+// not touch it and spawn an ad-hoc daemon for the home in front of us.
+// gateErr is returned (not just logged) when the decision could not be made:
+// skipping the unit is the safe call, but it silently costs a supervised
+// daemon its supervision, and this whole path exists because degradations that
+// only reach the log are degradations nobody fixes.
+func unitRestartTarget() (useUnit bool, unitExec string, gateErr error) {
+	configDir, err := configDirFn()
+	if err != nil {
+		return false, "", fmt.Errorf("cannot resolve the config dir to check whether the autostart unit serves this home: %w", err)
+	}
+	serves, installed, err := autostartUnitServesHomeFn(configDir)
+	if err != nil {
+		return false, "", fmt.Errorf("cannot tell whether the autostart unit serves %s: %w", configDir, err)
+	}
+	if !installed || !serves {
+		// The ordinary answer for an ad-hoc install, and for any upgrade run
+		// against a home the installed unit does not serve. Not an error.
+		return false, "", nil
+	}
+	// Best-effort, and log-only on purpose: the unit restart below is the
+	// authority on whether the daemon came back, and it is about to run either
+	// way. An unreadable program path costs only the staleness check — no
+	// behavior changes — so it does not warrant a line the user must act on.
+	unitExec, _, err = autostartUnitExecPathFn()
+	if err != nil {
+		log.WarningLog.Printf("post-upgrade respawn: cannot read the autostart unit's program path, so cannot check it launches the upgraded binary: %v", err)
+	}
+	return true, unitExec, nil
+}
+
+// staleUnitExec reports the unit's program path when it is NOT the binary the
+// upgrade just wrote, and "" when they agree (or when it cannot be told).
+// Both sides are resolved through symlinks first: the unit is routinely
+// installed with a symlinked path (~/.local/bin/af) while the upgrade resolves
+// to the real file, and those are the same binary.
+func staleUnitExec(unitExec, upgradedPath string) string {
+	if unitExec == "" {
+		return ""
+	}
+	if canonicalExec(unitExec) == canonicalExec(upgradedPath) {
+		return ""
+	}
+	return unitExec
+}
+
+// canonicalExec resolves p through symlinks, falling back to the input when it
+// cannot be resolved (the unit may name a binary that no longer exists — which
+// is itself worth reporting as a mismatch rather than swallowing).
+func canonicalExec(p string) string {
+	if resolved, err := filepath.EvalSymlinks(p); err == nil {
+		return resolved
+	}
+	return p
 }
 
 // respawnDaemonAfterUpgrade restores the daemon that the upgrade/auto-update
 // path just stopped. The Shutdown RPC is a clean exit, and the autostart unit
 // uses Restart=on-failure (deliberately — Restart=always would make the
 // daemon unstoppable via RPC), so the service manager will not bring the
-// daemon back on its own. When the unit is installed, restart it through
-// systemctl/launchctl so the daemon stays supervised instead of being demoted
-// to an ad-hoc child that dies with the session and skips the next reboot
-// (#796). Without a unit, or when the service manager call fails, spawn an
-// ad-hoc daemon.
+// daemon back on its own. When the unit is installed AND SERVES THIS HOME,
+// restart it through systemctl/launchctl so the daemon stays supervised
+// instead of being demoted to an ad-hoc child that dies with the session and
+// skips the next reboot (#796). Without such a unit, or when the service
+// manager call fails, spawn an ad-hoc daemon.
+//
+// The returned respawnResult says which of those actually happened. Callers
+// must report a degraded respawn rather than printing plain success over it:
+// silently demoting to an ad-hoc daemon under a "Restarted the running daemon"
+// line is half of #1947.
 //
 // Both branches respawn unconditionally: callers only reach this function
 // after stopping a running daemon, and that daemon may have been serving
@@ -312,7 +461,7 @@ func restartDaemonFromPath(execPath string) (daemon.ShutdownResult, error) {
 // left autoyes-only users without a daemon until the next af run (#813). The
 // task gate belongs only on the cold-start path (ensureDaemonForTasks), where
 // nothing was running and "no enabled tasks" means there is nothing to start.
-func respawnDaemonAfterUpgrade(execPath string) error {
+func respawnDaemonAfterUpgrade(execPath string) (respawnResult, error) {
 	// The Shutdown RPC acks before the daemon tears down, so the old daemon's
 	// control socket can still answer pings here. Respawning into that window
 	// makes EnsureDaemon — or the unit-restarted daemon's own startup ping
@@ -326,11 +475,15 @@ func respawnDaemonAfterUpgrade(execPath string) error {
 		log.WarningLog.Printf("post-upgrade respawn: %v; respawning anyway, but the new daemon may see the old one as alive and exit — run af again if schedules stay dark", err)
 	}
 	var unitErr error
-	if autostartInstalledFn() {
+	useUnit, unitExec, gateErr := unitRestartTarget()
+	if gateErr != nil {
+		log.WarningLog.Printf("post-upgrade respawn: not restarting the autostart unit: %v", gateErr)
+	}
+	if useUnit {
 		err := restartAutostartUnitFn()
 		if err == nil {
 			log.InfoLog.Printf("restarted the daemon autostart unit from the new binary")
-			return nil
+			return respawnResult{StaleUnitExec: staleUnitExec(unitExec, execPath)}, nil
 		}
 		unitErr = err
 		log.WarningLog.Printf("failed to restart the daemon autostart unit; falling back to an ad-hoc daemon: %v", err)
@@ -338,11 +491,12 @@ func respawnDaemonAfterUpgrade(execPath string) error {
 	if err := ensureDaemonFromPathFn(execPath); err != nil {
 		log.ErrorLog.Printf("failed to respawn daemon after upgrade: %v", err)
 		if unitErr != nil {
-			return fmt.Errorf("unit restart failed: %w; ad-hoc fallback failed: %v", unitErr, err)
+			return respawnResult{UnitErr: unitErr, UnitGateErr: gateErr},
+				fmt.Errorf("unit restart failed: %w; ad-hoc fallback failed: %v", unitErr, err)
 		}
-		return err
+		return respawnResult{UnitGateErr: gateErr}, err
 	}
-	return nil
+	return respawnResult{UnitErr: unitErr, UnitGateErr: gateErr}, nil
 }
 
 // ensureDaemonForTasks starts the daemon when any enabled task exists, so

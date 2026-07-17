@@ -77,7 +77,7 @@ func seedNewerRelease(t *testing.T, current, latest string) string {
 	downloadBinaryFn = func(string, time.Duration) ([]byte, error) { return []byte("new-binary"), nil }
 	osExecutableFn = func() (string, error) { return tempBin, nil }
 	requestDaemonShutdownFn = func() (daemon.ShutdownResult, error) { return daemon.ShutdownNoDaemon, nil }
-	respawnDaemonFn = func(string) error { return nil }
+	respawnDaemonFn = func(string) (respawnResult, error) { return respawnResult{}, nil }
 	return tempBin
 }
 

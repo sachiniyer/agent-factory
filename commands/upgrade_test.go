@@ -219,10 +219,10 @@ func TestUpgradeCallsShutdownAfterBinarySwap(t *testing.T) {
 	prevRespawn := respawnDaemonFn
 	respawnCalls := 0
 	var respawnPath string
-	respawnDaemonFn = func(path string) error {
+	respawnDaemonFn = func(path string) (respawnResult, error) {
 		respawnCalls++
 		respawnPath = path
-		return nil
+		return respawnResult{}, nil
 	}
 	t.Cleanup(func() { respawnDaemonFn = prevRespawn })
 	osExecutableFn = func() (string, error) { return tempBin, nil }
@@ -232,7 +232,8 @@ func TestUpgradeCallsShutdownAfterBinarySwap(t *testing.T) {
 		return daemon.ShutdownViaRPC, nil
 	}
 
-	if err := runUpgrade(srv.URL); err != nil {
+	stubDaemonHealth(t, daemon.HealthStatus{})
+	if err := runUpgrade(io.Discard, io.Discard, srv.URL, false); err != nil {
 		t.Fatalf("runUpgrade: %v", err)
 	}
 	if shutdownCalls != 1 {
@@ -277,9 +278,9 @@ func TestUpgradeSucceedsWhenNoDaemon(t *testing.T) {
 	})
 	prevRespawn := respawnDaemonFn
 	respawnCalls := 0
-	respawnDaemonFn = func(string) error {
+	respawnDaemonFn = func(string) (respawnResult, error) {
 		respawnCalls++
-		return nil
+		return respawnResult{}, nil
 	}
 	t.Cleanup(func() { respawnDaemonFn = prevRespawn })
 	osExecutableFn = func() (string, error) { return tempBin, nil }
@@ -289,7 +290,8 @@ func TestUpgradeSucceedsWhenNoDaemon(t *testing.T) {
 		return daemon.ShutdownNoDaemon, nil
 	}
 
-	if err := runUpgrade(srv.URL); err != nil {
+	stubDaemonHealth(t, daemon.HealthStatus{})
+	if err := runUpgrade(io.Discard, io.Discard, srv.URL, false); err != nil {
 		t.Fatalf("runUpgrade with absent daemon failed: %v", err)
 	}
 	if respawnCalls != 0 {
@@ -327,9 +329,9 @@ func TestUpgradeSucceedsWhenShutdownErrors(t *testing.T) {
 	})
 	prevRespawn := respawnDaemonFn
 	respawnCalls := 0
-	respawnDaemonFn = func(string) error {
+	respawnDaemonFn = func(string) (respawnResult, error) {
 		respawnCalls++
-		return nil
+		return respawnResult{}, nil
 	}
 	t.Cleanup(func() { respawnDaemonFn = prevRespawn })
 	osExecutableFn = func() (string, error) { return tempBin, nil }
@@ -337,7 +339,8 @@ func TestUpgradeSucceedsWhenShutdownErrors(t *testing.T) {
 		return daemon.ShutdownNoDaemon, errors.New("simulated rpc failure")
 	}
 
-	if err := runUpgrade(srv.URL); err != nil {
+	stubDaemonHealth(t, daemon.HealthStatus{})
+	if err := runUpgrade(io.Discard, io.Discard, srv.URL, false); err != nil {
 		t.Fatalf("runUpgrade should not fail when Shutdown errors, got: %v", err)
 	}
 	got, err := os.ReadFile(tempBin)
@@ -374,10 +377,10 @@ func TestUpgradeReportsSIGTERMFallback(t *testing.T) {
 	prevRespawn := respawnDaemonFn
 	respawnCalls := 0
 	var respawnPath string
-	respawnDaemonFn = func(path string) error {
+	respawnDaemonFn = func(path string) (respawnResult, error) {
 		respawnCalls++
 		respawnPath = path
-		return nil
+		return respawnResult{}, nil
 	}
 	t.Cleanup(func() { respawnDaemonFn = prevRespawn })
 	osExecutableFn = func() (string, error) { return tempBin, nil }
@@ -385,25 +388,13 @@ func TestUpgradeReportsSIGTERMFallback(t *testing.T) {
 		return daemon.ShutdownViaSIGTERM, nil
 	}
 
-	// Capture stdout so we can assert on the user-visible message.
-	origStdout := os.Stdout
-	r, w, err := os.Pipe()
-	if err != nil {
-		t.Fatalf("pipe: %v", err)
-	}
-	os.Stdout = w
-	defer func() { os.Stdout = origStdout }()
-
-	if err := runUpgrade(srv.URL); err != nil {
+	stubDaemonHealth(t, daemon.HealthStatus{})
+	var out, errOut bytes.Buffer
+	if err := runUpgrade(&out, &errOut, srv.URL, false); err != nil {
 		t.Fatalf("runUpgrade: %v", err)
 	}
-	w.Close()
-	captured, err := io.ReadAll(r)
-	if err != nil {
-		t.Fatalf("read captured stdout: %v", err)
-	}
 
-	got := string(captured)
+	got := out.String()
 	want := "Upgraded successfully! Stopped the running daemon (pre-fix; used SIGTERM)"
 	if !strings.Contains(got, want) {
 		t.Fatalf("runUpgrade stdout missing SIGTERM-fallback message.\n got=%q\nwant substring=%q", got, want)

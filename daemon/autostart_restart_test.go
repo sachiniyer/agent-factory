@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -120,7 +121,8 @@ func TestInstallAutostartEnablesUnitWhenStopDaemonFailsLinux(t *testing.T) {
 }
 
 // TestInstallAutostartLoadsAgentWhenStopDaemonFailsDarwin is the macOS variant:
-// a stop failure must not block the launchctl load that makes autostart real.
+// a stop failure must not block the launchctl bootstrap that makes autostart
+// real.
 func TestInstallAutostartLoadsAgentWhenStopDaemonFailsDarwin(t *testing.T) {
 	dir := withAutostartTestEnv(t, "darwin")
 	calls := stubAutostartUnitCommand(t, nil)
@@ -139,8 +141,8 @@ func TestInstallAutostartLoadsAgentWhenStopDaemonFailsDarwin(t *testing.T) {
 	if !AutostartInstalled() {
 		t.Fatalf("AutostartInstalled() = false after a successful install")
 	}
-	if !calledWith(*calls, "launchctl", "load", plistPath) {
-		t.Fatalf("load did not run after the stop failure; calls = %v", *calls)
+	if !calledWith(*calls, "launchctl", "bootstrap", launchdGUIDomain(), plistPath) {
+		t.Fatalf("bootstrap did not run after the stop failure; calls = %v", *calls)
 	}
 }
 
@@ -169,19 +171,19 @@ func TestInstallAutostartRemovesUnitWhenEnableFailsLinux(t *testing.T) {
 }
 
 // TestInstallAutostartRemovesPlistWhenLoadFailsDarwin is the macOS cleanup
-// variant: a hard launchctl load failure must not leave an orphaned plist.
+// variant: a hard launchctl bootstrap failure must not leave an orphaned plist.
 func TestInstallAutostartRemovesPlistWhenLoadFailsDarwin(t *testing.T) {
 	dir := withAutostartTestEnv(t, "darwin")
 	stubAutostartStopDaemon(t, true, nil)
 	stubAutostartUnitCommandFunc(t, func(name string, args ...string) ([]byte, error) {
-		if len(args) > 0 && args[0] == "load" {
-			return []byte("load failed"), errors.New("exit status 1")
+		if len(args) > 0 && args[0] == "bootstrap" {
+			return []byte("bootstrap failed"), errors.New("exit status 1")
 		}
 		return nil, nil
 	})
 
 	if _, err := InstallAutostart(); err == nil {
-		t.Fatalf("InstallAutostart succeeded despite a failing load")
+		t.Fatalf("InstallAutostart succeeded despite a failing bootstrap")
 	}
 	if _, statErr := os.Stat(filepath.Join(dir, autostartLaunchdLabel+".plist")); !os.IsNotExist(statErr) {
 		t.Fatalf("plist should be cleaned up after load failure; stat err = %v", statErr)
@@ -250,6 +252,64 @@ func TestRestartAutostartUnitDarwin(t *testing.T) {
 	want := []string{"launchctl", "kickstart", "-k", wantTarget}
 	if len(*calls) != 1 || strings.Join((*calls)[0], " ") != strings.Join(want, " ") {
 		t.Fatalf("unit commands = %v, want [%v]", *calls, want)
+	}
+}
+
+// TestAutostartLaunchdCallsShareOneDomain is the #1947 mechanism-3 repro:
+// every launchctl verb af issues must name the SAME launchd domain.
+//
+// InstallAutostart used the legacy `launchctl load`, which takes no domain and
+// bootstraps into the CALLING session's — user/<uid> over ssh, gui/<uid> from a
+// Terminal window — while RestartAutostartUnit has always kicked gui/<uid>
+// explicitly. When they disagree, the kickstart cannot find the job: the
+// post-upgrade restart silently no-ops, the stale daemon keeps serving the old
+// binary, and `af upgrade` prints success anyway. That is the macOS half of the
+// stale-daemon report, and #1920 independently found the same case.
+//
+// Asserting exact argv (rather than "contains gui/") is the point: a legacy
+// verb passes any domain-substring check by simply having no domain at all.
+func TestAutostartLaunchdCallsShareOneDomain(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	dir := withAutostartTestEnv(t, "darwin")
+	stubAutostartStopDaemon(t, true, nil)
+	calls := stubAutostartUnitCommand(t, nil)
+	plist := filepath.Join(dir, autostartLaunchdLabel+".plist")
+
+	if _, err := InstallAutostart(); err != nil {
+		t.Fatalf("InstallAutostart: %v", err)
+	}
+	if err := RestartAutostartUnit(); err != nil {
+		t.Fatalf("RestartAutostartUnit: %v", err)
+	}
+	if err := PauseAutostartUnit(); err != nil {
+		t.Fatalf("PauseAutostartUnit: %v", err)
+	}
+	if err := ResumeAutostartUnit(); err != nil {
+		t.Fatalf("ResumeAutostartUnit: %v", err)
+	}
+	if _, err := UninstallAutostart(); err != nil {
+		t.Fatalf("UninstallAutostart: %v", err)
+	}
+
+	// Computed here rather than via the production helpers, so a change to
+	// those cannot silently redefine what this test is checking.
+	domain := fmt.Sprintf("gui/%d", os.Getuid())
+	target := domain + "/" + autostartLaunchdLabel
+	want := [][]string{
+		{"launchctl", "bootout", target},          // install: displace any previous agent
+		{"launchctl", "bootstrap", domain, plist}, // install
+		{"launchctl", "kickstart", "-k", target},  // restart
+		{"launchctl", "bootout", target},          // pause
+		{"launchctl", "bootstrap", domain, plist}, // resume
+		{"launchctl", "bootout", target},          // uninstall
+	}
+	if !reflect.DeepEqual(*calls, want) {
+		t.Fatalf("launchctl calls must all target %s.\n got=%v\nwant=%v", domain, *calls, want)
+	}
+	for _, c := range *calls {
+		if len(c) > 1 && (c[1] == "load" || c[1] == "unload") {
+			t.Fatalf("launchctl %s takes no domain and lands in the caller's session domain, which kickstart gui/<uid> may never see: %v", c[1], c)
+		}
 	}
 }
 
@@ -359,7 +419,7 @@ func TestUninstallAutostartDarwin(t *testing.T) {
 	if _, statErr := os.Stat(plistPath); !os.IsNotExist(statErr) {
 		t.Fatalf("plist should be gone after uninstall; stat err = %v", statErr)
 	}
-	if !calledWith(*calls, "launchctl", "unload", plistPath) {
-		t.Fatalf("uninstall did not unload the agent; calls = %v", *calls)
+	if !calledWith(*calls, "launchctl", "bootout", launchdServiceTarget()) {
+		t.Fatalf("uninstall did not boot the agent out; calls = %v", *calls)
 	}
 }

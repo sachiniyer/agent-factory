@@ -50,6 +50,69 @@ func TestAutostartUnitHomeRoundTrip(t *testing.T) {
 	}
 }
 
+// TestAutostartUnitExecPathRoundTrip pins the program-path renderers and their
+// parsers together, for the same reason the home round trip exists: the
+// upgrade path decides whether the restarted unit will relaunch the binary it
+// just wrote by READING BACK the ExecStart/ProgramArguments that
+// InstallAutostart baked in (#1947). A renderer change the parser does not
+// follow reports a mismatch that is not there — and a warning that cries wolf
+// on every ordinary upgrade is one users stop reading.
+//
+// The awkward values are the point: quoteExecStartPath escapes backslashes and
+// quotes, and doubles systemd's '$' and '%' specifiers, none of which appear in
+// the happy path (#1214 is the spaced-path precedent).
+func TestAutostartUnitExecPathRoundTrip(t *testing.T) {
+	paths := []string{
+		"/usr/local/bin/af",
+		"/opt/homebrew/bin/af",
+		"/home/John Smith/bin/af",
+		`/tmp/pct%bin/af`,
+		`/tmp/dollar$bin/af`,
+		`/tmp/quote"bin/af`,
+		`/tmp/back\slash/af`,
+		`/tmp/back\"both/af`,
+	}
+	for _, path := range paths {
+		t.Run(path, func(t *testing.T) {
+			unit := systemdAutostartUnit(path, "/usr/bin:/bin", "/bin/zsh", "/home/u/.agent-factory")
+			got, found := systemdUnitExecStart(unit)
+			if !found {
+				t.Fatalf("systemd unit for %q exposes no ExecStart:\n%s", path, unit)
+			}
+			if got != path {
+				t.Errorf("systemd round trip = %q, want %q\nunit:\n%s", got, path, unit)
+			}
+
+			plist := launchdAutostartPlist(path, "/usr/bin:/bin", "/bin/zsh", "", "/tmp/af.log")
+			got, found = launchdPlistProgramPath(plist)
+			if !found {
+				t.Fatalf("launchd plist for %q exposes no ProgramArguments:\n%s", path, plist)
+			}
+			if got != path {
+				t.Errorf("launchd round trip = %q, want %q", got, path)
+			}
+		})
+	}
+}
+
+// TestAutostartUnitExecPath_StopsAtTheProgram: the parser must return the
+// program alone, never the --daemon argument that follows it. A value of
+// `/usr/local/bin/af --daemon` compares unequal to every real binary path, so
+// the staleness check would warn on every single upgrade.
+func TestAutostartUnitExecPath_StopsAtTheProgram(t *testing.T) {
+	unit := systemdAutostartUnit("/usr/local/bin/af", "/usr/bin", "/bin/zsh", "")
+	got, found := systemdUnitExecStart(unit)
+	if !found || got != "/usr/local/bin/af" {
+		t.Errorf("ExecStart round trip = %q found=%v, want /usr/local/bin/af", got, found)
+	}
+
+	plist := launchdAutostartPlist("/usr/local/bin/af", "/usr/bin", "/bin/zsh", "", "/tmp/af.log")
+	got, found = launchdPlistProgramPath(plist)
+	if !found || got != "/usr/local/bin/af" {
+		t.Errorf("ProgramArguments round trip = %q found=%v, want /usr/local/bin/af", got, found)
+	}
+}
+
 // TestAutostartUnitHome_AbsentMeansDefault: a unit installed WITHOUT
 // AGENT_FACTORY_HOME serves the DEFAULT home. Reporting that as "no home found"
 // and treating it as unknown would make the gate skip the ordinary supervised

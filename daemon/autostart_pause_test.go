@@ -44,10 +44,13 @@ func TestPauseAndResumeAutostartUnitDarwin(t *testing.T) {
 		t.Fatalf("ResumeAutostartUnit: %v", err)
 	}
 
+	// Pause boots the job OUT of the same gui/<uid> domain the install
+	// bootstrapped it into, and resume bootstraps it back there — so a paused
+	// unit is one RestartAutostartUnit's kickstart can still find (#1947).
 	plist := filepath.Join(dir, autostartLaunchdLabel+".plist")
 	want := [][]string{
-		{"launchctl", "unload", plist},
-		{"launchctl", "load", plist},
+		{"launchctl", "bootout", launchdServiceTarget()},
+		{"launchctl", "bootstrap", launchdGUIDomain(), plist},
 	}
 	if !reflect.DeepEqual(*calls, want) {
 		t.Errorf("unit commands = %v, want %v", *calls, want)

@@ -14,27 +14,45 @@ const testUpgradeDaemonPath = "/tmp/af-upgraded"
 // touches the real systemctl/launchctl or spawns a daemon process — a real
 // supervised daemon may be running on the machine executing these tests.
 
-// stubRespawnCollaborators replaces the autostart-detection, unit-restart,
-// ad-hoc-spawn, and shutdown-wait hooks used by respawnDaemonAfterUpgrade,
-// restoring them on cleanup. The shutdown wait is stubbed to an immediate nil
-// so no test here pings the host's control socket — a real supervised daemon
-// answering it would stall the wait for its full grace. It returns counters
-// for the restart and ad-hoc paths.
+// stubRespawnCollaborators replaces the autostart-detection, home-gate,
+// unit-restart, ad-hoc-spawn, and shutdown-wait hooks used by
+// respawnDaemonAfterUpgrade, restoring them on cleanup. The shutdown wait is
+// stubbed to an immediate nil so no test here pings the host's control socket —
+// a real supervised daemon answering it would stall the wait for its full
+// grace. The home gate and unit-path reader are stubbed for the same reason:
+// unstubbed they read the REAL host's autostart unit and config dir. It
+// returns counters for the restart and ad-hoc paths.
+//
+// The stubbed unit serves THIS home and launches the very binary the upgrade
+// wrote, so tests using this helper keep asserting what they always asserted:
+// the unit-vs-ad-hoc branch. The cross-home gate (#1950) and the stale-binary
+// check (#1947) are exercised by their own tests, which override these.
 func stubRespawnCollaborators(t *testing.T, installed bool, restartErr error) (restartCalls, ensureCalls *int) {
 	t.Helper()
 	prevInstalled := autostartInstalledFn
 	prevRestart := restartAutostartUnitFn
 	prevEnsure := ensureDaemonFromPathFn
 	prevWait := waitForShutdownCompletionFn
+	prevServes := autostartUnitServesHomeFn
+	prevUnitExec := autostartUnitExecPathFn
+	prevConfigDir := configDirFn
 	t.Cleanup(func() {
 		autostartInstalledFn = prevInstalled
 		restartAutostartUnitFn = prevRestart
 		ensureDaemonFromPathFn = prevEnsure
 		waitForShutdownCompletionFn = prevWait
+		autostartUnitServesHomeFn = prevServes
+		autostartUnitExecPathFn = prevUnitExec
+		configDirFn = prevConfigDir
 	})
 	restartCalls = new(int)
 	ensureCalls = new(int)
 	autostartInstalledFn = func() bool { return installed }
+	autostartUnitServesHomeFn = func(string) (serves bool, isInstalled bool, err error) {
+		return installed, installed, nil
+	}
+	autostartUnitExecPathFn = func() (string, bool, error) { return testUpgradeDaemonPath, installed, nil }
+	configDirFn = func() (string, error) { return "/tmp/af-test-home", nil }
 	restartAutostartUnitFn = func() error {
 		*restartCalls++
 		return restartErr
@@ -54,7 +72,7 @@ func stubRespawnCollaborators(t *testing.T, installed bool, restartErr error) (r
 func TestRespawnAfterUpgradeRestartsInstalledUnit(t *testing.T) {
 	restartCalls, ensureCalls := stubRespawnCollaborators(t, true, nil)
 
-	if err := respawnDaemonAfterUpgrade(testUpgradeDaemonPath); err != nil {
+	if _, err := respawnDaemonAfterUpgrade(testUpgradeDaemonPath); err != nil {
 		t.Fatalf("respawnDaemonAfterUpgrade: %v", err)
 	}
 
@@ -71,7 +89,7 @@ func TestRespawnAfterUpgradeRestartsInstalledUnit(t *testing.T) {
 func TestRespawnAfterUpgradeWithoutUnitSpawnsAdHoc(t *testing.T) {
 	restartCalls, ensureCalls := stubRespawnCollaborators(t, false, nil)
 
-	if err := respawnDaemonAfterUpgrade(testUpgradeDaemonPath); err != nil {
+	if _, err := respawnDaemonAfterUpgrade(testUpgradeDaemonPath); err != nil {
 		t.Fatalf("respawnDaemonAfterUpgrade: %v", err)
 	}
 
@@ -89,7 +107,7 @@ func TestRespawnAfterUpgradeWithoutUnitSpawnsAdHoc(t *testing.T) {
 func TestRespawnAfterUpgradeFallsBackWhenRestartFails(t *testing.T) {
 	restartCalls, ensureCalls := stubRespawnCollaborators(t, true, errors.New("systemctl exited 1"))
 
-	if err := respawnDaemonAfterUpgrade(testUpgradeDaemonPath); err != nil {
+	if _, err := respawnDaemonAfterUpgrade(testUpgradeDaemonPath); err != nil {
 		t.Fatalf("respawnDaemonAfterUpgrade: %v", err)
 	}
 
@@ -112,7 +130,7 @@ func TestRespawnAfterUpgradeSpawnsWithZeroEnabledTasks(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 	_, ensureCalls := stubRespawnCollaborators(t, false, nil)
 
-	if err := respawnDaemonAfterUpgrade(testUpgradeDaemonPath); err != nil {
+	if _, err := respawnDaemonAfterUpgrade(testUpgradeDaemonPath); err != nil {
 		t.Fatalf("respawnDaemonAfterUpgrade: %v", err)
 	}
 
@@ -129,7 +147,7 @@ func TestRespawnAfterUpgradeSpawnsAdHocFromProvidedPath(t *testing.T) {
 		return nil
 	}
 
-	if err := respawnDaemonAfterUpgrade("/opt/af/new"); err != nil {
+	if _, err := respawnDaemonAfterUpgrade("/opt/af/new"); err != nil {
 		t.Fatalf("respawnDaemonAfterUpgrade: %v", err)
 	}
 
@@ -173,7 +191,7 @@ func TestRespawnAfterUpgradeWaitsForShutdownFirst(t *testing.T) {
 				return prevEnsure(path)
 			}
 
-			if err := respawnDaemonAfterUpgrade(testUpgradeDaemonPath); err != nil {
+			if _, err := respawnDaemonAfterUpgrade(testUpgradeDaemonPath); err != nil {
 				t.Fatalf("respawnDaemonAfterUpgrade: %v", err)
 			}
 
@@ -194,9 +212,9 @@ func TestRestartDaemonFromPathNoDaemonIsNoOp(t *testing.T) {
 	requestDaemonShutdownFn = func() (daemon.ShutdownResult, error) {
 		return daemon.ShutdownNoDaemon, nil
 	}
-	respawnDaemonFn = func(string) error {
+	respawnDaemonFn = func(string) (respawnResult, error) {
 		t.Fatalf("respawn must not run when no daemon is present")
-		return nil
+		return respawnResult{}, nil
 	}
 
 	result, err := restartDaemonFromPath(testUpgradeDaemonPath)
@@ -219,9 +237,9 @@ func TestRestartDaemonFromPathRespawnsStoppedDaemon(t *testing.T) {
 		return daemon.ShutdownViaRPC, nil
 	}
 	var gotPath string
-	respawnDaemonFn = func(path string) error {
+	respawnDaemonFn = func(path string) (respawnResult, error) {
 		gotPath = path
-		return nil
+		return respawnResult{}, nil
 	}
 
 	result, err := restartDaemonFromPath("/opt/af/current")
