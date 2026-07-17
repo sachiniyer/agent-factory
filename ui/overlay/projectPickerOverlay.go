@@ -18,6 +18,12 @@ type Project struct {
 	Name         string
 	Root         string
 	SessionCount int
+	// InPlaceCount is how many of SessionCount's live sessions sit on an
+	// in-place/external worktree (`af sessions create --here`, the root agent).
+	// Delete-project cannot archive those — it tears them down (#1973) — so the
+	// confirmation must state the real archived-vs-torn-down split before the
+	// user consents. Derived from the same cross-repo snapshot as SessionCount.
+	InPlaceCount int
 }
 
 // ProjectPickerOverlay is the project switcher (#1461). It navigates like the
