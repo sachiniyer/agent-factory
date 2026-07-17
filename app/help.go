@@ -141,6 +141,7 @@ func (h helpTypeGeneral) toContent() string {
 			{helpKey(keys.KeyRight), "Expand the selected instance's tabs"},
 		}},
 		{title: "Configuration:", rows: []helpRow{
+			{helpKey(keys.KeyConfigAgent), "Open the config agent to change your settings"},
 			{helpKey(keys.KeyHooks), "Open the worktree hooks editor"},
 		}},
 		{title: "GitHub PR:", rows: []helpRow{
