@@ -359,21 +359,85 @@ func TestAutostartProbe_HangIsBoundedAndReportsTimeout(t *testing.T) {
 		"the deadline must bound the call; without WaitDelay the held pipe defeats it")
 }
 
-// A timeout is an inability to ask. It must surface as UNKNOWN with its cause —
-// never as "inactive", which would tell the user their autostart is off when we
-// have no idea.
-func TestAutostartSupervision_ProbeTimeout_IsUnknownNotInactive(t *testing.T) {
+// withBlockingServiceManager puts a FAKE systemctl on PATH that never returns,
+// so the probe's deadline is the only thing that can end the call.
+//
+// A fake binary, not a fake function: the timeout path lives in the real runner
+// (fork, deadline, kill, pipe), and a stub that returns an error exercises none
+// of it.
+func withBlockingServiceManager(t *testing.T, name string) {
+	t.Helper()
+	dir := t.TempDir()
+	// Prints first, THEN blocks — and blocks in a CHILD that inherits stdout, so
+	// the output pipe stays open after the direct child is killed. That is
+	// #1967's shape: without WaitDelay the deadline kills systemctl and the call
+	// still waits on the pipe.
+	script := "#!/bin/sh\necho starting\nsleep 300 &\nsleep 300\n"
+	path := filepath.Join(dir, name)
+	require.NoError(t, os.WriteFile(path, []byte(script), 0o755))
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+// A probe that HANGS must come back UNKNOWN with its cause, promptly — never
+// "inactive", and never not at all.
+//
+// This drives a real blocking service-manager binary through the real runner, so
+// the timeout path is genuinely executed. An earlier version of this test called
+// the real runner against a `systemctl` that does not exist in the container: it
+// returned instantly via ErrNotFound and passed on the missing-binary path while
+// claiming to test the timeout — green whether or not the bound worked, which is
+// this PR's own disease wearing a test's clothes.
+func TestAutostartSupervision_ProbeHangs_IsUnknownNotInactive(t *testing.T) {
 	dir := withAutostartTestEnv(t, "linux")
 	writeUnitFile(t, filepath.Join(dir, autostartUnitName), systemdAutostartUnit("/usr/local/bin/af", "", "", ""))
-	withProbeTimeout(t, 200*time.Millisecond)
-	// The real runner against a real hang, so the whole path is exercised.
+	withBlockingServiceManager(t, "systemctl")
+	withProbeTimeout(t, 300*time.Millisecond)
+	withProbeCommand(t, runAutostartProbeCommand) // the real, bounded runner
+
+	done := make(chan SupervisionInfo, 1)
+	start := time.Now()
+	go func() { done <- AutostartSupervision() }()
+
+	var info SupervisionInfo
+	select {
+	case info = <-done:
+	case <-time.After(20 * time.Second):
+		t.Fatal("af doctor's autostart probe never returned: the deadline does not bound it")
+	}
+	elapsed := time.Since(start)
+
+	require.Less(t, elapsed, 15*time.Second,
+		"the probe must be bounded by its deadline, not by the child exiting")
+	require.True(t, info.UnitPresent)
+	require.Error(t, info.ProbeErr, "a probe that never answered must say why")
+	require.Contains(t, info.ProbeErr.Error(), "timed out", "and the cause must name the timeout")
+	require.Equal(t, ProbeUnknown, info.Active, "a hang is not an answer of 'inactive'")
+	require.Equal(t, ProbeUnknown, info.Enabled)
+}
+
+// The same, on darwin: a wedged launchctl is unknown, never "not loaded".
+func TestAutostartSupervision_DarwinProbeHangs_IsUnknownNotNotLoaded(t *testing.T) {
+	dir := withAutostartTestEnv(t, "darwin")
+	writeUnitFile(t, filepath.Join(dir, autostartLaunchdLabel+".plist"),
+		launchdAutostartPlist("/usr/local/bin/af", "", "", "", "/tmp/af.log"))
+	withBlockingServiceManager(t, "launchctl")
+	withProbeTimeout(t, 300*time.Millisecond)
 	withProbeCommand(t, runAutostartProbeCommand)
 
-	info := AutostartSupervision()
-	require.True(t, info.UnitPresent)
-	require.Error(t, info.ProbeErr, "a probe that never answered must report why")
-	require.Equal(t, ProbeUnknown, info.Active, "a timeout is not an answer of 'inactive'")
-	require.Equal(t, ProbeUnknown, info.Enabled)
+	done := make(chan SupervisionInfo, 1)
+	go func() { done <- AutostartSupervision() }()
+
+	var info SupervisionInfo
+	select {
+	case info = <-done:
+	case <-time.After(20 * time.Second):
+		t.Fatal("the launchd probe never returned: the deadline does not bound it")
+	}
+
+	require.Error(t, info.ProbeErr)
+	require.Contains(t, info.ProbeErr.Error(), "timed out")
+	require.Equal(t, ProbeUnknown, info.Loaded, "a hang is not an answer of 'not loaded'")
+	require.Equal(t, ProbeUnknown, info.Active)
 }
 
 // The service manager binary missing is an inability to ask, not an answer.
@@ -477,4 +541,43 @@ func TestAutostartSupervision_DarwinGenuineNotLoaded_IsAnswered(t *testing.T) {
 	require.Equal(t, ProbeNo, info.LoadedElsewhere)
 	require.Equal(t, ProbeNo, info.Active)
 	require.Equal(t, "not loaded", info.Detail)
+}
+
+// A probe whose command finished but whose output pipe was held open by a
+// straggler must still be an ANSWER, not a failure.
+//
+// This is the bug's mirror image, and it bit my own bounded runner: the shell
+// exits 0 having printed "active", a backgrounded child keeps stdout open past
+// WaitDelay, and Go reports exec.ErrWaitDelay. The callers read "error + a state
+// word" as "the manager answered no" — so a perfectly healthy unit would come
+// back inactive. The command's work is done; only a straggler lingered, and the
+// reap kills it (#676/#914 normalizeWaitDelay precedent).
+func TestAutostartProbe_WaitDelayStragglerIsStillAnAnswer(t *testing.T) {
+	// The deadline must NOT fire here: this is about the pipe, not the timeout.
+	withProbeTimeout(t, 30*time.Second)
+
+	// sh exits immediately; the backgrounded sleep inherits stdout and holds it.
+	out, err := runAutostartProbeCommand("sh", "-c", "echo active; sleep 30 &")
+
+	require.NoError(t, err, "the command answered; a lingering pipe-holder is not a failure")
+	require.Contains(t, string(out), "active", "and its answer must survive")
+}
+
+// The same shape, all the way through the classifier: a straggler must not turn
+// "active" into "inactive".
+func TestAutostartSupervision_WaitDelayStragglerDoesNotInvertTheAnswer(t *testing.T) {
+	dir := withAutostartTestEnv(t, "linux")
+	writeUnitFile(t, filepath.Join(dir, autostartUnitName), systemdAutostartUnit("/usr/local/bin/af", "", "", ""))
+	withProbeCommand(t, func(_ string, args ...string) ([]byte, error) {
+		// What CombinedOutput returns when the answer arrived but a child held
+		// the pipe past WaitDelay — after runAutostartProbeCommand normalizes it.
+		if args[1] == "is-enabled" {
+			return []byte("enabled\n"), nil
+		}
+		return []byte("active\n"), nil
+	})
+
+	info := AutostartSupervision()
+	require.NoError(t, info.ProbeErr)
+	require.Equal(t, ProbeYes, info.Active, "a straggler must never invert a healthy answer")
 }

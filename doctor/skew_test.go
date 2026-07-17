@@ -886,6 +886,58 @@ func TestDuplicateDaemons_NoProcessSnapshot_SaysSoRatherThanPassing(t *testing.T
 	require.False(t, c.Problem, "the user cannot fix their platform; this is advisory")
 }
 
+// "The control socket did not answer" is not evidence about a DIFFERENT
+// listener. They are separate binds, and RunDaemon keeps one when the other
+// fails — so a live HTTP listener must never be called debris and swept up on
+// the strength of the control socket's silence. Same principle as the probe fix:
+// I did not get an answer is not nobody is there.
+func TestStaleSocket_LiveListenerIsNotStale(t *testing.T) {
+	testguard.IsolateTmux(t)
+
+	home := socketTempHome(t)
+	sockPath := filepath.Join(home, "daemon-http.sock")
+	// A REAL listener, actually accepting connections.
+	l, err := net.Listen("unix", sockPath)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = l.Close() })
+
+	opts := testOptionsWithHome(t, home, false)
+	opts.daemonHealth = func() daemon.HealthStatus {
+		return daemon.HealthStatus{
+			PingErr:          errNoDaemon, // the control socket is silent...
+			HTTPSocketPath:   sockPath,
+			HTTPSocketExists: true,
+			HTTPDialErr:      nil, // ...but this listener answers.
+		}
+	}
+
+	report, err := Run(opts)
+	require.NoError(t, err)
+	require.False(t, hasCheck(report, "stale sockets"),
+		"a socket something is listening on is not stale, whatever the control socket is doing")
+}
+
+// A socket nobody dialed is not claimed either: absence of evidence is not
+// evidence of death.
+func TestStaleSocket_UnprobedSocketNotClaimed(t *testing.T) {
+	testguard.IsolateTmux(t)
+
+	home := socketTempHome(t)
+	abandonedSocket(t, filepath.Join(home, "daemon-http.sock"))
+
+	opts := testOptionsWithHome(t, home, false)
+	opts.daemonHealth = func() daemon.HealthStatus {
+		// Nothing answered the control socket, and the HTTP socket was never
+		// probed at all (no path, no dial result).
+		return daemon.HealthStatus{PingErr: errNoDaemon}
+	}
+
+	report, err := Run(opts)
+	require.NoError(t, err)
+	require.False(t, hasCheck(report, "stale sockets"),
+		"without a dial that failed, doctor has not earned the claim")
+}
+
 // The name is a convention, not proof: a plain file that borrowed the name is
 // not a socket, and telling the user to `af reset` over it would be wrong.
 func TestStaleSocket_RegularFileWithSocketName_NoRow(t *testing.T) {

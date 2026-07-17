@@ -83,7 +83,20 @@ func testOptionsWithHome(t *testing.T, home string, fix bool, pids ...int) Optio
 		// installed, no af binaries to compare". Without this the suite would
 		// ping whatever daemon is live on the developer's box and execute the
 		// real `af` binaries found on PATH. The skew tests inject their own.
-		daemonHealth:         func() daemon.HealthStatus { return daemon.HealthStatus{PingErr: errNoDaemon} },
+		// Mirrors what real Health() reports for a home with no daemon: nothing
+		// answers the control socket, and nothing is listening on the HTTP one
+		// either. HTTPSocketExists tracks the real file so a test that stages a
+		// socket gets a truthful probe rather than an assumed one.
+		daemonHealth: func() daemon.HealthStatus {
+			httpSock := filepath.Join(home, "daemon-http.sock")
+			_, statErr := os.Stat(httpSock)
+			return daemon.HealthStatus{
+				PingErr:          errNoDaemon,
+				HTTPSocketPath:   httpSock,
+				HTTPSocketExists: statErr == nil,
+				HTTPDialErr:      errNoDaemon,
+			}
+		},
 		autostartUnit:        func() daemon.AutostartUnitInfo { return daemon.AutostartUnitInfo{Supported: true} },
 		autostartSupervision: func() daemon.SupervisionInfo { return daemon.SupervisionInfo{Supported: true} },
 		// No autostart unit for this home by default, matching the two fakes

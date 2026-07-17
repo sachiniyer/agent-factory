@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/sachiniyer/agent-factory/daemon"
@@ -119,6 +120,39 @@ func TestAutostart_UnitServingThisHome_IsReported(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, StatusPass, findCheck(t, report, "autostart").Status)
 	require.Equal(t, StatusPass, findCheck(t, report, "autostart supervision").Status)
+}
+
+// One condition, one row. Both autostart checks ask whether the unit is ours, so
+// a scope failure reported by the asker would print twice for a single cause —
+// and checkDaemonHealth's "autostart" row already owns every one of these states.
+func TestAutostart_ScopeFailure_ReportedExactlyOnce(t *testing.T) {
+	testguard.IsolateTmux(t)
+
+	opts := testOptions(t, false)
+	opts.autostartServesHome = func(string) (bool, bool, error) { return false, false, os.ErrPermission }
+	// Both checks would speak if they could.
+	opts.autostartUnit = func() daemon.AutostartUnitInfo {
+		return daemon.AutostartUnitInfo{Supported: true, Exists: true, ExecPath: "/usr/local/bin/af"}
+	}
+	opts.autostartSupervision = func() daemon.SupervisionInfo {
+		return daemon.SupervisionInfo{Supported: true, UnitPresent: true}
+	}
+
+	report, err := Run(opts)
+	require.NoError(t, err)
+
+	rows := 0
+	for _, c := range report.Checks {
+		if strings.Contains(c.Detail, "autostart unit") && c.Status != StatusPass {
+			rows++
+		}
+	}
+	require.Equal(t, 1, rows,
+		"one unreadable unit must produce one row, not one per check that asked")
+
+	// And it is checkDaemonHealth's row that owns it.
+	require.Equal(t, StatusWarn, findCheck(t, report, "autostart").Status)
+	require.False(t, hasCheck(report, "autostart scope"), "the asker must not report on its own")
 }
 
 // Whether the unit is ours must be established, not assumed: if the question

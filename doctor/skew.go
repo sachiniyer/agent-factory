@@ -353,23 +353,17 @@ func (c *scanContext) autostartScope() (serves, installed bool, err error) {
 }
 
 // autostartUnitIsOurs reports whether the autostart checks may speak about the
-// installed unit, emitting the row that explains any refusal. A false return
-// means the caller must stay silent: the unit is absent, someone else's, or
-// unestablished — and doctor does not guess.
-func autostartUnitIsOurs(ctx *scanContext, report *Report) bool {
+// installed unit. A false return means the caller must stay silent: the unit is
+// absent, someone else's, or unestablished — and doctor does not guess.
+//
+// It reports nothing itself, deliberately. Both autostart checks call it, so a
+// row emitted here would appear twice for one condition; and checkDaemonHealth
+// already renders every one of these states on its "autostart" row — absent,
+// serving another home, or unreadable. One condition, one row, one place that
+// owns it.
+func autostartUnitIsOurs(ctx *scanContext) bool {
 	serves, installed, err := ctx.autostartScope()
-	switch {
-	case err != nil:
-		report.Warn(sectionDaemon, "autostart scope",
-			fmt.Sprintf("cannot tell whether the installed autostart unit serves this home: %v", err),
-			"fix the autostart unit, or reinstall it for this home: af daemon install", true)
-		return false
-	case !installed:
-		return false // checkDaemonHealth's "autostart: not installed" covers it
-	case !serves:
-		return false // checkDaemonHealth explains it; the rest must not assert
-	}
-	return true
+	return err == nil && installed && serves
 }
 
 // checkAutostartPath compares the binary the autostart unit launches against
@@ -378,7 +372,7 @@ func autostartUnitIsOurs(ctx *scanContext, report *Report) bool {
 // so the skew survives restarts and reboots, and `af daemon restart` never
 // fixes it.
 func checkAutostartPath(ctx *scanContext, report *Report) {
-	if !autostartUnitIsOurs(ctx, report) {
+	if !autostartUnitIsOurs(ctx) {
 		return
 	}
 	info := ctx.opts.autostartUnit()
@@ -488,19 +482,26 @@ func checkSplitBrainBinaries(ctx *scanContext, report *Report) {
 		"remove the stale install, or make sure PATH prefers the one you upgrade")
 }
 
-// checkStaleSockets reports daemon sockets left in the home with no daemon
-// answering. The socket is what makes the failure quiet: clients find it,
+// checkStaleSockets reports daemon sockets left in the home that nothing is
+// listening on. The socket is what makes the failure quiet: clients find it,
 // connect, and wait, instead of starting a daemon that would work.
 //
-// The CONTROL socket is deliberately not ours to report: checkDaemonHealth
-// pings it, and a present-but-silent control socket is already its FAIL, with
-// the same remedy. Reporting it here too would bill one condition to two
-// actionable rows — inflating the issue count and handing scripts two rows for
-// one fix. This check covers the sockets health does not probe (the HTTP
-// socket), which otherwise nothing would mention.
+// Two things it deliberately does NOT do.
+//
+// It does not report the CONTROL socket: checkDaemonHealth pings it, and a
+// present-but-silent control socket is already its FAIL with the same remedy.
+// Billing one condition to two actionable rows inflates the issue count and
+// hands scripts two rows for one fix.
+//
+// And it does not call a socket stale on the strength of the control socket's
+// silence. "The control socket did not answer" is not evidence about a
+// DIFFERENT listener — they are separate binds, and RunDaemon keeps one when the
+// other fails. Telling a user to restart over a live listener is the same
+// mistake as reading a probe failure as a negative answer: a claim we have not
+// earned. A socket is stale here only when its own dial failed (#1044).
 func checkStaleSockets(ctx *scanContext, report *Report, h daemon.HealthStatus) {
 	if h.PingErr == nil {
-		return // a daemon is answering; the sockets are live by definition
+		return // a daemon is answering; checkHTTPSocket owns the HTTP probe
 	}
 	var stale []string
 	for _, name := range daemon.DaemonSocketNames() {
@@ -517,18 +518,38 @@ func checkStaleSockets(ctx *scanContext, report *Report, h daemon.HealthStatus) 
 		if info.Mode()&os.ModeSocket == 0 {
 			continue
 		}
+		if !socketProvenDead(name, h) {
+			// Either something is accepting on it, or nobody dialed it. Neither
+			// is grounds for calling it debris.
+			continue
+		}
 		stale = append(stale, name)
 	}
 	if len(stale) == 0 {
 		return
 	}
 	report.Warn(sectionDaemon, "stale sockets",
-		fmt.Sprintf("%s present in %s but no daemon is answering",
+		fmt.Sprintf("%s present in %s but nothing is listening on %s",
 			plural(len(stale), "daemon socket", "daemon sockets")+" ("+strings.Join(stale, ", ")+")",
-			ctx.opts.ConfigDir),
+			ctx.opts.ConfigDir, plural(len(stale), "it", "them")),
 		// A restart rebinds these; nothing here justifies touching the user's
 		// sessions or state.
 		"run `af daemon restart` to rebind them", true)
+}
+
+// socketProvenDead reports whether we have POSITIVE evidence that nothing is
+// accepting on the named socket — a dial of that socket that failed.
+//
+// Absence of evidence is not evidence here: a socket nobody probed stays
+// unreported rather than being assumed dead. Today Health dials exactly one
+// non-control socket (the HTTP one); a future socket added to DaemonSocketNames
+// without a matching probe will simply not be claimed, which is the safe way to
+// be incomplete.
+func socketProvenDead(name string, h daemon.HealthStatus) bool {
+	if filepath.Base(h.HTTPSocketPath) == name {
+		return h.HTTPSocketExists && h.HTTPDialErr != nil
+	}
+	return false
 }
 
 // checkHTTPSocket reports the HTTP/JSON listener's health independently of the
@@ -566,7 +587,7 @@ func checkHTTPSocket(ctx *scanContext, report *Report, h daemon.HealthStatus) {
 // domain other than the gui/<uid> the restart path targets: restarts silently
 // miss it, so an old daemon keeps serving and skew never clears.
 func checkAutostartSupervision(ctx *scanContext, report *Report) {
-	if !autostartUnitIsOurs(ctx, report) {
+	if !autostartUnitIsOurs(ctx) {
 		return
 	}
 	info := ctx.opts.autostartSupervision()

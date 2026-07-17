@@ -447,6 +447,18 @@ func runAutostartProbeCommand(name string, args ...string) ([]byte, error) {
 		return out, fmt.Errorf("%s %s timed out after %s: %w",
 			name, strings.Join(args, " "), autostartProbeTimeout, ctx.Err())
 	}
+	if errors.Is(err, exec.ErrWaitDelay) {
+		// The command itself finished and its answer is in `out` — a non-zero
+		// exit surfaces as an ExitError, never as this. ErrWaitDelay only means
+		// some process that inherited the output pipe outlived it, and the reap
+		// above has just killed it.
+		//
+		// Returning it as an error would be its own version of the bug this file
+		// is about: the callers read "err != nil" plus a state word as "the
+		// manager answered NO", so a perfectly healthy `active` would come back
+		// as inactive. Mirrors normalizeWaitDelay (#676/#914).
+		return out, nil
+	}
 	return out, err
 }
 
