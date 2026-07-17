@@ -297,6 +297,30 @@ a client that never sends a field still passes.
 with six options it cannot reach and reported parity over them. Reading the
 values it actually passes reports them as the gaps they are (#1935).
 
+## "Could not check" is a third answer
+
+Worth stating because this package learned it twice, independently, and it
+generalises past parity.
+
+The `ListBackends` contract (#1968) returns three outcomes, not two:
+**available**, **unavailable + reason**, and **unknown + reason** — where
+*unknown* means the daemon could not check (a repo config that would not parse),
+which is a different answer from yes and from no. Collapsing it into either one
+invents a fact. The same PR found the related trap: **configured is not
+available** — the hook backend was reported available without checking its
+commands were runnable.
+
+This audit has exactly that shape and resolves it the same way. A request the
+analyzer cannot read is not "reached" and not "unreached" — it is **unanalyzable**,
+and it is a finding:
+
+> `cli builds PreviewRequest in a shape this analyzer cannot read … its field
+> coverage is therefore UNVERIFIED`
+
+Before that existed, an unreadable construct simply vanished from the derived
+set — *unknown* collapsing into *fine*, which is how a checker reports green over
+code it never understood. If you add a dimension here, give it three answers.
+
 ## Known blind spots
 
 Stated so nobody mistakes a passing check for total coverage. Note which way each

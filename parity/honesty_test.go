@@ -82,17 +82,32 @@ func TestDerivationSeesLazyCobraSurface(t *testing.T) {
 // TestDerivationSeesWebBackendGap pins #1933 through the WEB body parser: the
 // daemon accepts nine CreateSession fields and the web sends five.
 //
-// COORDINATION: a fix for #1933 is in flight. When the web starts sending
+// COORDINATION: a fix for #1933 is in flight (#1968). When the web starts sending
 // `backend`, THIS TEST FAILS BY DESIGN — it is the fixture doing its job, not a
 // broken test. Retiring it is three edits, and they belong to the PR that
 // lands the fix:
 //  1. drop "backend" (and any other now-sent field) from the list below;
-//  2. in parity/inventory.json, flip session.create.opt.backend's web cell to
-//     yes with a pointer at the new call site, and re-verdict the row;
+//  2. in parity/inventory.json, update session.create.opt.backend's web cell —
+//     but see the WARNING below on what it may honestly claim;
 //  3. drop the matching entry from field_coverage.web_rpcs.CreateSession.
 //
 // TestWebFieldCoverage will refuse to pass until (2) and (3) agree, so the
 // inventory cannot be left claiming a gap that was fixed.
+//
+// WARNING — do not record the stronger claim. This test only proves what the web
+// SENDS. That is not the same as what a user can DO, and #1968's author could not
+// prove end-to-end that a working remote session is creatable from the browser:
+// provisioning was observed (launch_cmd ran, a real agent-server came up) but the
+// session then timed out waiting for its program, cause unresolved. So on landing,
+// `partial` with that caveat in notes is the honest cell; `yes` requires someone
+// to have created a working remote session from the browser and said so.
+//
+// This distinction is this package's oldest blind spot, stated under Known blind
+// spots as "reachable != user-settable" — the derivation reads call sites, not
+// outcomes. #1936 is the same trap from the other side: app/session_control.go:106
+// DOES set Prompt, so the field reads as covered while the TUI's flow never
+// populates it. A field-level pass is evidence about the wire, never about the
+// user's experience.
 func TestDerivationSeesWebBackendGap(t *testing.T) {
 	sent := webCallBody(t, "CreateSession")
 	if len(sent) == 0 {
