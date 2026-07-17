@@ -3,6 +3,7 @@ package tmux
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -32,11 +33,23 @@ const receiverReadyMarker = "AF-RECEIVER-READY"
 // that pastes before the DECSET lands would get an unbracketed paste for a
 // legitimate reason and blame the code under test.
 //
-// Only sh/stty/cat are used — all present in the toolchain image — so this test
-// never skips in CI for want of an agent binary.
+// outPath is shell-quoted (shellQuoteArg, the package's existing POSIX quoter):
+// t.TempDir() inherits TMPDIR, so the path can hold a space or a metacharacter
+// even though Go sanitizes the subtest name out of it. Unquoted, `cat > /tmp/af
+// space dir/received.bin` redirects to `/tmp/af` — the fixture breaks, and it
+// breaks as "the submit test failed", sending the reader after the paste logic
+// instead of the harness (#1978 class).
+//
+// tmux runs the command string through a shell itself, so there is deliberately
+// no `sh -c '…'` wrapper here: that second level of quoting is what would make a
+// correctly-quoted path unquotable (its single quotes would close the wrapper's).
+// One shell, one level of quoting, one correct answer.
+//
+// Only stty/printf/cat are used — all present in the toolchain image — so this
+// test never skips in CI for want of an agent binary.
 func receiverProgram(outPath string) string {
-	return fmt.Sprintf(`sh -c 'stty raw -echo; printf "\033[?2004h%s\r\n"; cat > %s'`,
-		receiverReadyMarker, outPath)
+	return fmt.Sprintf(`stty raw -echo; printf "\033[?2004h%s\r\n"; cat > %s`,
+		receiverReadyMarker, shellQuoteArg(outPath))
 }
 
 // startReceiverPane brings up a real tmux session running the receiver and
@@ -102,6 +115,40 @@ func readReceived(t *testing.T, path string, want string) string {
 		return strings.Contains(got, want)
 	}, fmt.Sprintf("receiver never saw %q; got %q", want, got))
 	return got
+}
+
+// TestReceiverProgramQuotesOutputPath keeps the fixture honest about its own
+// input. t.TempDir() inherits TMPDIR, so the receiver's output path can contain a
+// space or a shell metacharacter on a perfectly ordinary machine. Unquoted, the
+// redirect splits and the fixture dies — reported as "the submit test failed",
+// which sends the reader hunting the paste logic instead of the harness.
+//
+// That failure mode is this PR's own headline finding in miniature: a test whose
+// breakage teaches people to distrust the test rather than the code. The submit
+// path's test must not be the least reliable thing on the submit path (#1978 class).
+func TestReceiverProgramQuotesOutputPath(t *testing.T) {
+	for _, path := range []string{
+		"/tmp/af space dir/received.bin",
+		"/tmp/semi;colon/received.bin",
+		"/tmp/it's/received.bin",
+		"/tmp/dollar$VAR/received.bin",
+	} {
+		t.Run(path, func(t *testing.T) {
+			prog := receiverProgram(path)
+			// The redirect target must survive as ONE shell word. Round-trip it
+			// through a real shell rather than asserting on the string: `sh -c`
+			// echoing the quoted arg answers the only question that matters —
+			// what the shell resolves it to.
+			out, err := exec.Command("sh", "-c", "printf %s "+shellQuoteArg(path)).Output()
+			require.NoError(t, err)
+			require.Equal(t, path, string(out),
+				"shell must resolve the quoted path back to exactly one intact word")
+			require.Contains(t, prog, shellQuoteArg(path),
+				"receiver program must embed the QUOTED path, never the raw one")
+			require.NotContains(t, prog, "cat > "+path,
+				"receiver program must not splice the raw path into the redirect")
+		})
+	}
 }
 
 // TestSendKeysCommandDeliversPromptAsPasteNotKeystrokes is the #1956 regression
