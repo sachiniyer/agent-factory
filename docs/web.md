@@ -551,11 +551,12 @@ af sessions tab-create <title> --kind vscode [--name editor]
     repo's checked-in config can never choose what af runs on your machine.
 
 **How it runs.** The daemon starts **one** code-server per session — shared by
-every VS Code tab and pane in it — the first time a pane renders, bound to
-**loopback** on a port it picks. The editor is reached only through the daemon's
-`/v1/webtab/` proxy, which is what makes it work for a **remote viewer**
-(Tailscale/SSH) and what puts the daemon's auth policy in front of it. On a cold
-start the pane briefly shows "VS Code is still starting…" and resolves itself.
+every VS Code tab and pane in it — the first time a pane renders, listening on
+a **0600 unix socket** in a `0700` directory under the af home (no TCP listener
+at all). The browser reaches the editor through the daemon's `/v1/webtab/` proxy,
+which is what makes it work for a **remote viewer** (Tailscale/SSH) and what puts
+the daemon's auth policy in front of that route. On a cold start the pane briefly
+shows "VS Code is still starting…" and resolves itself.
 
 The editor is stopped when its last VS Code tab is closed, and when the session is
 archived or killed — and on daemon shutdown, so nothing is left running. If it
@@ -563,8 +564,12 @@ ever dies, the next render starts a fresh one. Nothing about it is persisted: th
 tab survives a restart and simply starts a new editor when you next open it.
 
 !!! warning "`--auth none`, and why that is safe here"
-    The editor runs with authentication **off**, because it is only ever reachable
-    on loopback through the daemon proxy — the daemon's own auth applies to it. It
+    The editor runs with authentication **off**, because it is only ever
+    reachable through its 0600 unix socket, which is gated to **your** account by
+    filesystem permissions — the same posture the daemon's own control socket
+    has. Anything running as you can dial that socket; that same-user boundary is
+    the protection, not the proxy. Your browser reaches it through the daemon's
+    `/v1/webtab/` proxy, so the daemon's auth policy applies to that route. It
     runs as **you**, with your `PATH` and your code-server settings/extensions.
 
     Note that a VS Code pane is deliberately **not** origin-sandboxed the way a web
