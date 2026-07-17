@@ -21,6 +21,7 @@ import (
 	"github.com/sachiniyer/agent-factory/ui/layout/zones"
 	"github.com/sachiniyer/agent-factory/ui/overlay"
 	"github.com/sachiniyer/agent-factory/ui/store"
+	"github.com/sachiniyer/agent-factory/ui/tree"
 )
 
 type state int
@@ -603,12 +604,29 @@ func newlyAutoHiddenPane(previousVisible, nextVisible, openPanes []*store.OpenPa
 	return nil
 }
 
+// setPaneAutoHideStatus reports the pane the terminal could not fit. It names
+// the pane that was ACTUALLY displaced — `instance · tab`, the same identity the
+// pane's own header shows — or says nothing about which pane when it cannot name
+// one. The instance title alone is not a pane identity: since #930 an instance
+// can own several panes, so "docs hidden" while a second `docs` pane is on
+// screen tells the user something they can see is false (#1997).
+//
+// The reason clause drops the word "terminal" to pay for the tab name: at 80
+// columns the old line already sat one cell under the limit, and the bar
+// truncates from the RIGHT, so a longer line silently eats the recovery hint
+// (#1973). Long instance titles still overflow — nothing can fit an unbounded
+// title — but the fragments are ordered worst-first, so what survives the
+// truncation is the half that matters: which pane went away.
 func (m *home) setPaneAutoHideStatus(p *store.OpenPane, paneCount int) {
 	if p == nil || paneCount <= 1 {
 		return
 	}
-	msg := fmt.Sprintf("%s hidden: terminal too narrow for %d panes; resize wider%s",
-		paneStatusTitle(p), paneCount, paneRecoveryStatusHint())
+	subject := "a pane is hidden"
+	if label, ok := paneStatusLabel(p); ok {
+		subject = label + " hidden"
+	}
+	msg := fmt.Sprintf("%s — too narrow for %d panes; resize wider%s",
+		subject, paneCount, paneRecoveryStatusHint())
 	m.pendingPaneAutoHideStatus = msg
 	m.paneAutoHideNoticeID = m.setTransientNotice(errors.New(msg))
 }
@@ -631,11 +649,25 @@ func (m *home) clearStaleAutoHideStatus() {
 	m.pendingPaneAutoHideStatus = ""
 }
 
-func paneStatusTitle(p *store.OpenPane) string {
+// paneStatusLabel names a pane for a user-facing message the way the pane's own
+// header names it — `instance · tab` (ui.TabbedWindow.renderHeader), reading the
+// tab through the same tree label source so the toast and the header can never
+// disagree about what a pane is called.
+//
+// It reports false rather than guessing. An instance title alone is not a pane
+// identity (#930), and tree.TabLabels answers with a placeholder "Agent" slot
+// for an instance whose tabs have not materialized — so the tab is read through
+// TabLabelAt, which distinguishes a real tab from "no tab list yet". A caller
+// that cannot name the pane must say so instead of naming the wrong one (#1997).
+func paneStatusLabel(p *store.OpenPane) (string, bool) {
 	if p == nil || p.Instance() == nil || p.Instance().Title == "" {
-		return "pane"
+		return "", false
 	}
-	return p.Instance().Title
+	label, ok := tree.TabLabelAt(p.Instance(), p.Tab())
+	if !ok {
+		return "", false
+	}
+	return fmt.Sprintf("%s · %s", p.Instance().Title, label), true
 }
 
 func paneRecoveryStatusHint() string {

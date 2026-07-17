@@ -38,6 +38,24 @@ func TabLabels(instance *session.Instance) []string {
 	return append([]string(nil), placeholderTabLabels...)
 }
 
+// TabLabelAt returns the display label for the instance's tab at idx, reporting
+// false when the instance's real tab list cannot answer: no tabs have
+// materialized yet, or idx is out of range. Unlike TabLabels it never falls
+// back to the placeholder slot — a caller that names a pane TO THE USER must be
+// able to tell "this is the Agent tab" from "no tab list exists yet", because
+// the placeholder's "Agent" is a guess and naming the wrong pane is worse than
+// not naming one (#1997).
+func TabLabelAt(instance *session.Instance, idx int) (string, bool) {
+	if instance == nil {
+		return "", false
+	}
+	tabs := instance.GetTabs()
+	if idx < 0 || idx >= len(tabs) {
+		return "", false
+	}
+	return labelForTab(tabs[idx]), true
+}
+
 func labelForTab(tab *session.Tab) string {
 	switch tab.Kind {
 	case session.TabKindAgent:

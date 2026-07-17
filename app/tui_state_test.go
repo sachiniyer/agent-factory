@@ -129,7 +129,7 @@ func TestTUIViewStateRestoredPanesAutoHideShowsStatus(t *testing.T) {
 	require.Equal(t, 1, h.lastLayout.PaneCount())
 	require.Equal(t, 2, h.store.NumOpenPanes(), "auto-hide retains both bindings")
 	assert.Empty(t, h.restoredPaneBaseline, "the sized relayout consumes the baseline")
-	assert.Contains(t, h.errBox.FullError(), "hidden: terminal too narrow for 2 panes",
+	assert.Contains(t, h.errBox.FullError(), "hidden — too narrow for 2 panes",
 		"a pane hidden on the first post-restore relayout must still surface the status (#1535)")
 }
 
