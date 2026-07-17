@@ -229,8 +229,8 @@ func AutostartSupervision() SupervisionInfo {
 		// "inactive" are both No, and the difference is the user's to see.
 		info.Detail = fmt.Sprintf("is-enabled=%s is-active=%s", enabledWord, activeWord)
 	case "darwin":
-		info.Enabled = AnswerYes() // RunAtLoad; launchd has no separate enable state
 		info.Domain = launchdDomainTarget()
+		info.Enabled = launchdEnabled()
 
 		print := autostartProbeCommand("launchctl", "print", info.Domain)
 		out, ok := print.Output()
@@ -270,6 +270,79 @@ func AutostartSupervision() SupervisionInfo {
 		}
 	}
 	return info
+}
+
+// launchdEnabled asks launchd whether our agent is DISABLED, rather than
+// assuming that a plist on disk means "starts at login".
+//
+// This is "exit 0 is transport, the word is the answer" one platform over: the
+// FILE is transport — it says what would run — and launchd's own state is the
+// answer to whether it will. A plist can sit in ~/Library/LaunchAgents while
+// `launchctl disable` has overridden it, and nothing about the file says so.
+// Assuming Yes here was a fabricated positive on the platform that REPORTED the
+// bug this PR serves (#1947): a mac user with a disabled agent would have been
+// told autostart was healthy, and their daemon would not come back after a
+// reboot.
+//
+// The domain matters and is deliberate. InstallAutostart still uses the legacy
+// `launchctl load <plist>`, while RestartAutostartUnit uses the modern
+// `kickstart -k gui/<uid>/<label>`. This asks about gui/<uid> — the SAME domain
+// the restart path targets — because that is the domain whose answer predicts
+// whether af's own restarts and logins reach the agent. Asking a third domain
+// would answer about nothing.
+func launchdEnabled() ProbeAnswer {
+	res := autostartProbeCommand("launchctl", "print-disabled", launchdUserDomain())
+	out, ok := res.Output()
+	if !ok {
+		return Undetermined(launchdProbeErr("print-disabled "+launchdUserDomain(), res))
+	}
+	if !res.Succeeded() {
+		return Undetermined(launchdProbeErr("print-disabled "+launchdUserDomain(), res))
+	}
+	disabled, listed := launchdDisabledFor(out, autostartLaunchdLabel)
+	switch {
+	case listed && disabled:
+		// launchd holds an explicit override: this agent will not start.
+		return AnswerNo()
+	case listed:
+		// Explicitly enabled.
+		return AnswerYes()
+	default:
+		// Not in the disabled store at all. That store is an OVERRIDE list, so
+		// absence means "no override" — the plist's own RunAtLoad governs, and
+		// InstallAutostart writes RunAtLoad=true. This is the one inference
+		// here, and it is launchd's documented default rather than a guess about
+		// a file we did not read.
+		return AnswerYes()
+	}
+}
+
+// launchdDisabledFor reads `launchctl print-disabled` output, which prints a
+// block of `"label" => true|false` entries. Reports whether the label is listed
+// and, if so, whether it is disabled.
+func launchdDisabledFor(out, label string) (disabled, listed bool) {
+	quoted := `"` + label + `"`
+	for _, line := range strings.Split(out, "\n") {
+		field := strings.TrimSpace(line)
+		if !strings.HasPrefix(field, quoted) {
+			continue
+		}
+		value := strings.ToLower(strings.TrimSpace(field[len(quoted):]))
+		value = strings.TrimSpace(strings.TrimPrefix(value, "=>"))
+		switch {
+		case strings.HasPrefix(value, "true"):
+			return true, true
+		case strings.HasPrefix(value, "false"):
+			return false, true
+		}
+	}
+	return false, false
+}
+
+// launchdUserDomain is the gui/<uid> domain target — the same domain
+// launchdDomainTarget's service target lives in, and the one af's restarts use.
+func launchdUserDomain() string {
+	return fmt.Sprintf("gui/%d", os.Getuid())
 }
 
 // launchdListElsewhere asks the domain-agnostic `launchctl list` whether the job

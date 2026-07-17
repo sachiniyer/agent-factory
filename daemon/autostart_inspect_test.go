@@ -214,6 +214,8 @@ func TestAutostartSupervision_DarwinLoadedOutsideGUIDomain(t *testing.T) {
 
 	withProbeCommand(t, func(_ string, args ...string) probeResult {
 		switch args[0] {
+		case "print-disabled":
+			return answered("disabled services = {\n}\n", 0)
 		case "print":
 			// launchd answered: not in gui/<uid>.
 			return answered("Could not find service", launchdNotFoundExit)
@@ -247,6 +249,9 @@ func TestAutostartSupervision_DarwinLoadedButNotRunning(t *testing.T) {
 	// A real loaded-but-stopped print block: no pid, and a state that merely
 	// contains the word "running".
 	withProbeCommand(t, func(_ string, args ...string) probeResult {
+		if args[0] == "print-disabled" {
+			return answered("disabled services = {\n}\n", 0)
+		}
 		if args[0] == "print" {
 			return answered("com.agent-factory.daemon = {\n"+
 				"\tactive count = 0\n"+
@@ -285,6 +290,9 @@ func TestAutostartSupervision_DarwinLoadedInGUIDomain(t *testing.T) {
 		launchdAutostartPlist("/usr/local/bin/af", "", "", "", "/tmp/af.log"))
 
 	withProbeCommand(t, func(_ string, args ...string) probeResult {
+		if args[0] == "print-disabled" {
+			return answered("disabled services = {\n}\n", 0)
+		}
 		if args[0] == "print" {
 			require.Equal(t, launchdDomainTarget(), args[1],
 				"doctor must probe the same domain the restart path kickstarts")
@@ -306,7 +314,10 @@ func TestAutostartSupervision_DarwinNotLoaded(t *testing.T) {
 
 	// launchd's real "no such service" answer, not a generic failure: a generic
 	// failure means we could not ask, which is a different fact entirely.
-	withProbeCommand(t, func(string, ...string) probeResult {
+	withProbeCommand(t, func(_ string, args ...string) probeResult {
+		if args[0] == "print-disabled" {
+			return answered("disabled services = {\n}\n", 0)
+		}
 		return answered("Could not find service", launchdNotFoundExit)
 	})
 
@@ -520,7 +531,10 @@ func TestAutostartSupervision_DarwinProbeDenied_IsUnknownNotNotLoaded(t *testing
 	dir := withAutostartTestEnv(t, "darwin")
 	writeUnitFile(t, filepath.Join(dir, autostartLaunchdLabel+".plist"),
 		launchdAutostartPlist("/usr/local/bin/af", "", "", "", "/tmp/af.log"))
-	withProbeCommand(t, func(string, ...string) probeResult {
+	withProbeCommand(t, func(_ string, args ...string) probeResult {
+		if args[0] == "print-disabled" {
+			return answered("disabled services = {\n}\n", 0)
+		}
 		return answered("Operation not permitted", 1)
 	})
 
@@ -817,4 +831,108 @@ func TestSystemdAsk_AliasStillProbesIsActive(t *testing.T) {
 		"systemd answered; an unmappable answer is not a reason to stop asking it things")
 	requireAnswer(t, "unknown", info.Enabled)
 	requireAnswer(t, "yes", info.Active, "and the answer we CAN have must be kept")
+}
+
+// A PLIST ON DISK IS NOT "ENABLED". launchd's own state is the answer; the file
+// only says what WOULD run.
+//
+// This is the darwin half of "exit 0 is transport, the word is the answer" — and
+// it is the half that matters most, because #1947 was reported on macOS. A mac
+// user with a `launchctl disable`d agent would have been told autostart was
+// healthy and found their daemon gone after the next reboot.
+func TestLaunchdEnabled_DisabledAgentIsNotEnabled(t *testing.T) {
+	withAutostartTestEnv(t, "darwin")
+	withProbeCommand(t, func(_ string, args ...string) probeResult {
+		require.Equal(t, "print-disabled", args[0])
+		require.Equal(t, launchdUserDomain(), args[1],
+			"must ask the SAME domain af's restarts target, or the answer is about nothing")
+		return answered("disabled services = {\n\t\""+autostartLaunchdLabel+"\" => true\n}\n", 0)
+	})
+
+	requireAnswer(t, "no", launchdEnabled(), "launchd holds a disable override; the plist does not overrule it")
+}
+
+func TestLaunchdEnabled_ExplicitlyEnabled(t *testing.T) {
+	withAutostartTestEnv(t, "darwin")
+	withProbeCommand(t, func(string, ...string) probeResult {
+		return answered("disabled services = {\n\t\""+autostartLaunchdLabel+"\" => false\n}\n", 0)
+	})
+	requireAnswer(t, "yes", launchdEnabled())
+}
+
+// Absent from the disabled store means no override, which is launchd's
+// documented default — the plist's RunAtLoad governs.
+func TestLaunchdEnabled_NotOverriddenIsEnabled(t *testing.T) {
+	withAutostartTestEnv(t, "darwin")
+	withProbeCommand(t, func(string, ...string) probeResult {
+		return answered("disabled services = {\n\t\"com.someone.else\" => true\n}\n", 0)
+	})
+	requireAnswer(t, "yes", launchdEnabled())
+}
+
+// launchd that cannot be asked is Undetermined — never "enabled".
+func TestLaunchdEnabled_ProbeFailsIsUndeterminedNotEnabled(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		res  probeResult
+	}{
+		{"binary missing", neverAnswered(exec.ErrNotFound)},
+		{"timed out", neverAnswered(errors.New("launchctl print-disabled timed out after 5s"))},
+		{"permission denied", answered("Operation not permitted", 1)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			withAutostartTestEnv(t, "darwin")
+			withProbeCommand(t, func(string, ...string) probeResult { return tc.res })
+
+			got := launchdEnabled()
+			requireAnswer(t, "unknown", got, "an unaskable launchd is not an enabled one")
+			require.Error(t, got.Cause(), "and it must say why")
+		})
+	}
+}
+
+// End to end: a disabled agent must not report supervision as enabled.
+func TestAutostartSupervision_DarwinDisabledAgent_IsNotEnabled(t *testing.T) {
+	dir := withAutostartTestEnv(t, "darwin")
+	writeUnitFile(t, filepath.Join(dir, autostartLaunchdLabel+".plist"),
+		launchdAutostartPlist("/usr/local/bin/af", "", "", "", "/tmp/af.log"))
+	withProbeCommand(t, func(_ string, args ...string) probeResult {
+		switch args[0] {
+		case "print-disabled":
+			return answered("disabled services = {\n\t\""+autostartLaunchdLabel+"\" => true\n}\n", 0)
+		case "print":
+			return answered("\tstate = running\n\tpid = 4321\n", 0)
+		}
+		return neverAnswered(errFake)
+	})
+
+	info := AutostartSupervision()
+	requireAnswer(t, "no", info.Enabled, "the plist exists and it is running — but it is DISABLED")
+	requireAnswer(t, "yes", info.Active, "running now says nothing about starting at login")
+}
+
+// `--daemon=false` is a client saying it is NOT a daemon. Counting it as one
+// makes every caller's answer about the wrong population — doctor's duplicate
+// scan, the host-wide kill scan, and the #1004 pid guard alike.
+func TestLooksLikeDaemonArgv_DaemonFalseIsNotADaemon(t *testing.T) {
+	for _, tc := range []struct {
+		args []string
+		want bool
+	}{
+		{[]string{"af", "--daemon"}, true},
+		{[]string{"af", "--daemon=true"}, true},
+		{[]string{"af", "--daemon=1"}, true},
+		{[]string{"af", "--daemon=t"}, true},
+		{[]string{"af", "--daemon=false"}, false},
+		{[]string{"af", "--daemon=0"}, false},
+		{[]string{"af", "--daemon=f"}, false},
+		{[]string{"af", "--daemon=FALSE"}, false},
+		// An unparseable value keeps the pre-existing "the form is present"
+		// reading (TestArgsHaveDaemonFlag pins it since #342); cobra rejects a
+		// non-boolean, so no such process is ever live to classify.
+		{[]string{"af", "--daemon=maybe"}, true},
+		{[]string{"af", "sessions", "list"}, false},
+	} {
+		require.Equal(t, tc.want, LooksLikeDaemonArgv(tc.args), "argv %v", tc.args)
+	}
 }

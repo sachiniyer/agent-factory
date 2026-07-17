@@ -94,7 +94,7 @@ func testOptionsWithHome(t *testing.T, home string, fix bool, pids ...int) Optio
 				PingErr:          errNoDaemon,
 				HTTPSocketPath:   httpSock,
 				HTTPSocketExists: statErr == nil,
-				HTTPDialErr:      errNoDaemon,
+				HTTPListening:    daemon.AnswerNo(),
 			}
 		},
 		autostartUnit:        func() daemon.AutostartUnitInfo { return daemon.AutostartUnitInfo{Supported: true} },

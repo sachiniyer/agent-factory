@@ -175,7 +175,7 @@ func respondingDaemon(v string) func() daemon.HealthStatus {
 			SocketPath: "/fake/daemon.sock", SocketExists: true, DaemonVersion: v,
 			// A healthy daemon has a healthy HTTP listener too; tests that care
 			// about the HTTP socket override these.
-			HTTPSocketPath: "/fake/daemon-http.sock", HTTPSocketExists: true, HTTPDialErr: nil,
+			HTTPSocketPath: "/fake/daemon-http.sock", HTTPSocketExists: true, HTTPListening: daemon.AnswerYes(),
 		}
 	}
 }
@@ -876,7 +876,7 @@ func TestHTTPSocket_StaleWhileControlHealthy_Warns(t *testing.T) {
 			SocketPath: "/fake/daemon.sock", SocketExists: true, DaemonVersion: "1.0.192",
 			// Control socket perfectly healthy (PingErr nil)...
 			HTTPSocketPath: "/fake/daemon-http.sock", HTTPSocketExists: true,
-			HTTPDialErr: errNoDaemon, // ...but nothing answers on HTTP.
+			HTTPListening: daemon.AnswerNo(), // ...but nothing answers on HTTP.
 		}
 	}
 
@@ -903,7 +903,7 @@ func TestHTTPSocket_MissingWhileDaemonRuns_Warns(t *testing.T) {
 		return daemon.HealthStatus{
 			SocketPath: "/fake/daemon.sock", SocketExists: true, DaemonVersion: "1.0.192",
 			HTTPSocketPath: "/fake/daemon-http.sock", HTTPSocketExists: false,
-			HTTPDialErr: os.ErrNotExist,
+			HTTPListening: daemon.AnswerNo(),
 		}
 	}
 
@@ -980,7 +980,7 @@ func TestStaleSocket_LiveListenerIsNotStale(t *testing.T) {
 			PingErr:          errNoDaemon, // the control socket is silent...
 			HTTPSocketPath:   sockPath,
 			HTTPSocketExists: true,
-			HTTPDialErr:      nil, // ...but this listener answers.
+			HTTPListening:    daemon.AnswerYes(), // ...but this listener answers.
 		}
 	}
 
@@ -1240,4 +1240,50 @@ func TestRender_NonTerminalWriterHasNoANSI(t *testing.T) {
 	Render(&buf, report, false, false)
 	require.NotContains(t, buf.String(), "\x1b[", "no escape codes when the writer is not a terminal")
 	require.Contains(t, buf.String(), "FAIL")
+}
+
+// "I did not verify" is not "it is fine". A nil error used to mean both "the
+// dial succeeded" and "nobody dialed", and PASS fell out of the second one — a
+// fabricated positive about the surface the web UI and every HTTP client use.
+func TestHTTPSocket_NeverProbed_IsUnknownNotHealthy(t *testing.T) {
+	testguard.IsolateTmux(t)
+
+	opts := testOptions(t, false)
+	opts.Version = "1.0.192"
+	opts.daemonHealth = func() daemon.HealthStatus {
+		// A daemon answering the control socket, and an HTTP socket nobody
+		// probed: HTTPListening is the zero value.
+		return daemon.HealthStatus{
+			SocketPath: "/fake/daemon.sock", SocketExists: true, DaemonVersion: "1.0.192",
+			HTTPSocketPath: "/fake/daemon-http.sock", HTTPSocketExists: true,
+		}
+	}
+
+	report, err := Run(opts)
+	require.NoError(t, err)
+
+	c := findCheck(t, report, "http socket")
+	require.NotEqual(t, StatusPass, c.Status, "an unprobed listener must never read as healthy")
+	require.Contains(t, c.Detail, "unknown")
+	require.False(t, c.Problem, "we did not observe a fault, so we do not assert one")
+}
+
+// A client that says it is NOT a daemon must not be counted as one: the scan's
+// answer would be about the wrong population.
+func TestDuplicateDaemons_DaemonFalseClientIsNotCounted(t *testing.T) {
+	testguard.IsolateTmux(t)
+
+	home := t.TempDir()
+	// One real daemon, and one client explicitly opting out.
+	real := spawnWithEnv(t, "af", []string{"--daemon"}, map[string]string{"AGENT_FACTORY_HOME": home})
+	client := spawnWithEnv(t, "af", []string{"--daemon=false"}, map[string]string{"AGENT_FACTORY_HOME": home})
+	stubProcessHomes(t, map[int]string{real.PID: home, client.PID: home})
+
+	report, err := Run(testOptionsWithHome(t, home, false, real.PID, client.PID))
+	require.NoError(t, err)
+
+	require.False(t, hasCheck(report, "daemon instances"),
+		"one daemon and one --daemon=false client is one daemon, not two")
+	require.False(t, hasFinding(report, "foreign-daemon"),
+		"nor is the client something to reap")
 }

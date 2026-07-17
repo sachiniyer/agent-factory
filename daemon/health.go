@@ -30,13 +30,19 @@ type HealthStatus struct {
 	HTTPSocketPath string
 	// HTTPSocketExists reports whether HTTPSocketPath is present on disk.
 	HTTPSocketExists bool
-	// HTTPDialErr is nil when something is accepting connections on the HTTP
-	// socket. It is a SEPARATE listener from the control socket, and
-	// RunDaemon treats a failed startHTTPServer as non-fatal — so a daemon can
-	// answer the control socket perfectly while the HTTP socket, which the TUI
-	// and every HTTP/web client dial, is stale or absent. A healthy Ping says
-	// nothing about this (#1044).
-	HTTPDialErr error
+	// HTTPListening is whether anything accepts connections on the HTTP socket.
+	//
+	// A ProbeAnswer, not an error, because `err == nil` meant BOTH "the dial
+	// succeeded" and "nobody dialed" — the same ambiguity that let a two-valued
+	// probe fabricate answers, one field over. The zero value is Undetermined,
+	// so a caller that never probed cannot report health it did not observe.
+	//
+	// It is a SEPARATE listener from the control socket, and RunDaemon treats a
+	// failed startHTTPServer as non-fatal — so a daemon can answer the control
+	// socket perfectly while the HTTP socket, which the TUI and every HTTP/web
+	// client dial, is stale or absent. A healthy Ping says nothing about this
+	// (#1044).
+	HTTPListening ProbeAnswer
 	// AutostartUnit reports whether the supervised autostart unit (systemd
 	// user service / launchd agent) is installed — i.e. whether a running
 	// daemon is expected to be unit-managed rather than an ad-hoc child.
@@ -69,7 +75,7 @@ func Health() HealthStatus {
 	if pingErr == nil {
 		h.DaemonVersion = ping.Version
 	}
-	h.HTTPSocketPath, h.HTTPSocketExists, h.HTTPDialErr = probeHTTPSocket()
+	h.HTTPSocketPath, h.HTTPSocketExists, h.HTTPListening = probeHTTPSocket()
 	h.AutostartUnit = AutostartInstalled()
 
 	pidPath, err := daemonPIDFilePath()
@@ -98,20 +104,25 @@ func Health() HealthStatus {
 // file with no listener behind it, where clients connect and wait — from a
 // healthy listener, without needing a token, a route, or a response body.
 // Bounded by daemonDialTimeout so a wedged listener cannot stall `af doctor`.
-func probeHTTPSocket() (path string, exists bool, dialErr error) {
+func probeHTTPSocket() (path string, exists bool, listening ProbeAnswer) {
 	path, err := DaemonHTTPSocketPath()
 	if err != nil || path == "" {
-		return "", false, err
+		return "", false, Undetermined(fmt.Errorf("cannot resolve the HTTP socket path: %w", err))
 	}
 	if _, err := os.Stat(path); err != nil {
-		return path, false, err
+		if os.IsNotExist(err) {
+			// Nothing to listen on: a definite answer, not a failure to look.
+			return path, false, AnswerNo()
+		}
+		return path, false, Undetermined(fmt.Errorf("cannot stat %s: %w", path, err))
 	}
 	conn, err := net.DialTimeout("unix", path, daemonDialTimeout)
 	if err != nil {
-		return path, true, err
+		// The socket is there and refused us: nobody is behind it.
+		return path, true, AnswerNo()
 	}
 	_ = conn.Close()
-	return path, true, nil
+	return path, true, AnswerYes()
 }
 
 // DaemonSocketNames returns the file names of the Unix sockets a daemon binds

@@ -562,10 +562,17 @@ func checkStaleSockets(ctx *scanContext, report *Report, h daemon.HealthStatus) 
 // without a matching probe will simply not be claimed, which is the safe way to
 // be incomplete.
 func socketProvenDead(name string, h daemon.HealthStatus) bool {
-	if filepath.Base(h.HTTPSocketPath) == name {
-		return h.HTTPSocketExists && h.HTTPDialErr != nil
+	if filepath.Base(h.HTTPSocketPath) != name {
+		return false
 	}
-	return false
+	// Only a dial that ANSWERED "nothing is there" counts. Undetermined — the
+	// probe never ran — is not evidence of death, which is the whole point of
+	// the answer type.
+	dead := false
+	h.HTTPListening.Match(
+		func() {}, func() { dead = h.HTTPSocketExists }, func() { dead = false }, func(error) {},
+	)
+	return dead
 }
 
 // checkHTTPSocket reports the HTTP/JSON listener's health independently of the
@@ -582,20 +589,37 @@ func checkHTTPSocket(ctx *scanContext, report *Report, h daemon.HealthStatus) {
 		// leftover file is checkStaleSockets' story.
 		return
 	}
-	switch {
-	case !h.HTTPSocketExists:
-		report.Warn(sectionDaemon, "http socket",
-			fmt.Sprintf("the daemon is running but its HTTP socket (%s) is not there, "+
-				"so the web UI and HTTP clients have nothing to dial", h.HTTPSocketPath),
-			"run `af daemon restart` and check the daemon log for an HTTP listener error", true)
-	case h.HTTPDialErr != nil:
-		report.Warn(sectionDaemon, "http socket",
-			fmt.Sprintf("the daemon is running but nothing answers on its HTTP socket %s (%v); "+
-				"the web UI and HTTP clients will hang or fail", h.HTTPSocketPath, h.HTTPDialErr),
-			"run `af daemon restart` to rebind it", true)
-	default:
-		report.Pass(sectionDaemon, "http socket", "accepting connections on "+h.HTTPSocketPath)
-	}
+	// Match has no default, so "healthy" cannot be reported without an answer
+	// that says so. A nil error used to mean both "the dial succeeded" and
+	// "nobody dialed", and PASS fell out of the second one.
+	h.HTTPListening.Match(
+		func() {
+			report.Pass(sectionDaemon, "http socket", "accepting connections on "+h.HTTPSocketPath)
+		},
+		func() {
+			if !h.HTTPSocketExists {
+				report.Warn(sectionDaemon, "http socket",
+					fmt.Sprintf("the daemon is running but its HTTP socket (%s) is not there, "+
+						"so the web UI and HTTP clients have nothing to dial", h.HTTPSocketPath),
+					"run `af daemon restart` and check the daemon log for an HTTP listener error", true)
+				return
+			}
+			report.Warn(sectionDaemon, "http socket",
+				fmt.Sprintf("the daemon is running but nothing answers on its HTTP socket %s; "+
+					"the web UI and HTTP clients will hang or fail", h.HTTPSocketPath),
+				"run `af daemon restart` to rebind it", true)
+		},
+		func() {
+			report.Warn(sectionDaemon, "http socket",
+				fmt.Sprintf("the daemon is running but its HTTP socket (%s) does not exist", h.HTTPSocketPath),
+				"run `af daemon restart` and check the daemon log for an HTTP listener error", true)
+		},
+		func(cause error) {
+			report.Warn(sectionDaemon, "http socket",
+				fmt.Sprintf("could not probe the daemon's HTTP socket, so the web/API surface is unknown: %s", oneLine(cause)),
+				"check the daemon log, then rerun `af doctor`", false)
+		},
+	)
 }
 
 // checkAutostartSupervision reports an autostart unit that exists but is not
