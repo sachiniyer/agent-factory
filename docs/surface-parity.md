@@ -88,7 +88,7 @@ So the check works at two levels:
 | Level | Question | Derived from |
 |---|---|---|
 | **Verb** | can this surface do X at all? | the cobra tree, the route catalog, the binding table, the web's RPC call sites |
-| **Option** | can it do X with the options the daemon accepts? | the wire structs by reflection, vs the AST of `api/`+`app/` and the web's request bodies |
+| **Option** | can it do X with the options the daemon accepts? | CLI flags off the cobra tree; the wire structs by reflection, vs the AST of `api/`+`app/` and the web's request bodies |
 
 The option level is where the interesting gaps live, because they hide behind a
 verb that looks present. Three of the same shape so far — a field the daemon
@@ -107,13 +107,21 @@ to remember.
 
 ## What the check enforces
 
-- Every CLI verb, daemon route, TUI binding, and web RPC has an inventory entry.
-  Adding one without an entry fails the build.
+- Every CLI verb, **CLI flag**, daemon route, TUI binding, and web RPC has an
+  inventory entry. Adding one without an entry fails the build. Flags count
+  because a flag is a capability — `af sessions create` existing says nothing
+  about whether it can pass `--backend`.
 - Nothing is inventoried that no longer exists, so the table cannot advertise a
   capability af has lost.
 - Every field of every audited request is either reachable from a surface or
   declared, in both directions — a field a surface has quietly *started* sending
   also fails, so a fixed gap cannot keep being described as broken.
+- **The table cannot contradict itself.** A ledger mapping proves a surface
+  reaches a capability, so the row cannot still say that surface is `no`; and a
+  verdict cannot say `parity` while a surface is missing it, or `real-gap` once
+  every surface has it. Otherwise "add the ledger entry" would be enough to make
+  the check pass while the table went stale — which would make the inventory
+  lie in exactly the way it exists to prevent.
 - Quality bar: a surface marked `yes`/`partial` must cite code, a `deliberate`
   verdict must explain itself, and a `real-gap` must name an issue.
 

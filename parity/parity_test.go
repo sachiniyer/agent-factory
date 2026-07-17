@@ -31,7 +31,12 @@ type capability struct {
 }
 
 type ledger struct {
-	CLIVerbs    map[string]string `json:"cli_verbs"`
+	CLIVerbs map[string]string `json:"cli_verbs"`
+	// CLIFlags is keyed "af sessions create --backend". A flag IS a capability:
+	// the option dimension of a verb. Without this, a new flag on an existing
+	// command ships with no parity decision — the same hole that let #1948
+	// through at the field level.
+	CLIFlags    map[string]string `json:"cli_flags"`
 	Routes      map[string]string `json:"routes"`
 	TUIBindings map[string]string `json:"tui_bindings"`
 	WebRPCs     map[string]string `json:"web_rpcs"`
@@ -111,6 +116,29 @@ func TestCLIVerbsAreInventoried(t *testing.T) {
 	}
 }
 
+// TestCLIFlagsAreInventoried fails when a cobra command grows a flag with no
+// inventory entry. A flag is a capability — it is the option dimension of a
+// verb, and the verb-level check above is blind to it: `af sessions create`
+// existing says nothing about whether it can pass --backend.
+func TestCLIFlagsAreInventoried(t *testing.T) {
+	inv := loadInventory(t)
+
+	var derived []string
+	for path, v := range deriveCLI(t) {
+		for _, f := range v.Flags {
+			derived = append(derived, path+" --"+f)
+		}
+	}
+	sort.Strings(derived)
+
+	if missing := diff(derived, keysOf(inv.Ledger.CLIFlags)); len(missing) > 0 {
+		t.Errorf("CLI flags with no inventory entry: %v%s", missing, fixHint)
+	}
+	if stale := diff(keysOf(inv.Ledger.CLIFlags), derived); len(stale) > 0 {
+		t.Errorf("inventory lists CLI flags that no longer exist: %v", stale)
+	}
+}
+
 // TestRoutesAreInventoried fails when the daemon's public catalog grows a route
 // with no inventory entry. The catalog is the shared substrate all three
 // surfaces sit on, so a new route is the earliest signal of a coming divergence.
@@ -172,9 +200,76 @@ func TestLedgerPointsAtRealCapabilities(t *testing.T) {
 		}
 	}
 	check("cli_verbs", inv.Ledger.CLIVerbs)
+	check("cli_flags", inv.Ledger.CLIFlags)
 	check("routes", inv.Ledger.Routes)
 	check("tui_bindings", inv.Ledger.TUIBindings)
 	check("web_rpcs", inv.Ledger.WebRPCs)
+}
+
+// TestLedgerAgreesWithSurfaceStatus closes the gap between "it is mapped" and
+// "the table says it exists". Mapping an item into the ledger is otherwise
+// enough to make every drift test pass while the capability row still claims
+// that surface does not have it — so wiring a web restore button and adding the
+// ledger entry would leave session.restore reading "web: no, real-gap" forever.
+//
+// The ledger is derived-truth ("this surface reaches this capability"), so it is
+// the side that wins: a mapping proves the surface HAS it.
+func TestLedgerAgreesWithSurfaceStatus(t *testing.T) {
+	inv := loadInventory(t)
+	caps := inv.byID()
+
+	check := func(surface string, m map[string]string, status func(capability) string) {
+		for item, capID := range m {
+			if capID == "-" {
+				continue
+			}
+			c, ok := caps[capID]
+			if !ok {
+				continue // TestLedgerPointsAtRealCapabilities reports this
+			}
+			if s := status(c); s == "no" || s == "n/a" {
+				t.Errorf("%s reaches %q (mapped to capability %q), but that capability's "+
+					"%s status is %q. Either the mapping is wrong or the surface gained the "+
+					"capability and the row is stale — if it was just implemented, update the "+
+					"status, the pointer, and the verdict.", surface, item, capID, surface, s)
+			}
+		}
+	}
+	check("cli", inv.Ledger.CLIVerbs, func(c capability) string { return c.CLI.Status })
+	check("tui", inv.Ledger.TUIBindings, func(c capability) string { return c.TUI.Status })
+	check("web", inv.Ledger.WebRPCs, func(c capability) string { return c.Web.Status })
+}
+
+// TestVerdictAgreesWithStatuses stops a stale verdict outliving the statuses it
+// was derived from: a row cannot claim "parity" while an applicable surface is
+// still missing it, and cannot claim "real-gap" once every surface has it.
+func TestVerdictAgreesWithStatuses(t *testing.T) {
+	inv := loadInventory(t)
+
+	for _, c := range inv.Capabilities {
+		statuses := map[string]string{"tui": c.TUI.Status, "web": c.Web.Status, "cli": c.CLI.Status}
+
+		var missing []string
+		for name, s := range statuses {
+			if s == "no" || s == "partial" {
+				missing = append(missing, name+"="+s)
+			}
+		}
+		sort.Strings(missing)
+
+		switch c.Verdict {
+		case "parity":
+			if len(missing) > 0 {
+				t.Errorf("%s: verdict 'parity' but %v. An applicable surface is missing it — "+
+					"the verdict should be real-gap, deliberate, or unclear.", c.ID, missing)
+			}
+		case "real-gap", "unclear":
+			if len(missing) == 0 {
+				t.Errorf("%s: verdict %q but every surface reports yes/n-a. If the gap was "+
+					"closed, flip the verdict to 'parity' and close %s.", c.ID, c.Verdict, c.Issue)
+			}
+		}
+	}
 }
 
 // TestCapabilitiesAreWellFormed pins the quality bar: a row with a gap but no

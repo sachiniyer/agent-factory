@@ -130,10 +130,15 @@ func deriveTUI(t *testing.T) map[string]binding {
 // with the literal on the same line or the next.
 var webCallRe = regexp.MustCompile(`(?s)\baf(?:<[^>]*>)?\(\s*"([A-Za-z0-9_]+)"\s*,`)
 
-// webAPISource is the single file the web's daemon calls must live in. If the
-// client is ever refactored to call the daemon from elsewhere, minWebCalls
-// below trips and forces this parser to be updated rather than silently
-// passing on an empty match set.
+// webSrcDir is scanned WHOLE rather than just api.ts: af<T>() is exported
+// (web/src/api.ts:130), so any module can import it and reach a new daemon RPC
+// directly. Parsing only api.ts would leave that call invisible while the
+// existing call count kept minWebCalls satisfied — a silent blind spot rather
+// than a loud failure.
+const webSrcDir = "web/src"
+
+// webAPISource is where the af() chokepoint itself lives; readWebAPI still reads
+// it for the request-body parse, which is keyed to that file's call shape.
 const webAPISource = "web/src/api.ts"
 
 // minWebCalls guards against a vacuous pass: if api.ts is restructured such
@@ -142,20 +147,47 @@ const webAPISource = "web/src/api.ts"
 const minWebCalls = 10
 
 // deriveWebRPCs returns the set of daemon RPC method names the web client can
-// reach, read from its call sites.
+// reach, read from its call sites across the whole of web/src — not just
+// api.ts, since af() is exported and any module may call it.
 func deriveWebRPCs(t *testing.T) map[string]bool {
 	t.Helper()
-	src := readWebAPI(t)
 	out := map[string]bool{}
-	for _, m := range webCallRe.FindAllStringSubmatch(src, -1) {
-		out[m[1]] = true
+	for _, path := range webSourceFiles(t) {
+		b, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		for _, m := range webCallRe.FindAllStringSubmatch(string(b), -1) {
+			out[m[1]] = true
+		}
 	}
 	if len(out) < minWebCalls {
-		t.Fatalf("web RPC parse found only %d call sites in %s (expected >= %d): the af() "+
+		t.Fatalf("web RPC parse found only %d call sites under %s (expected >= %d): the af() "+
 			"chokepoint or its call shape changed, so this parser is now blind. Fix "+
-			"webCallRe/webAPISource in derive_test.go rather than lowering minWebCalls.",
-			len(out), webAPISource, minWebCalls)
+			"webCallRe in derive_test.go rather than lowering minWebCalls.",
+			len(out), webSrcDir, minWebCalls)
 	}
+	return out
+}
+
+// webSourceFiles lists the web client's non-test TypeScript sources. Tests are
+// excluded: a mock or fixture naming an RPC is not the client reaching it.
+func webSourceFiles(t *testing.T) []string {
+	t.Helper()
+	dir := filepath.Join(repoRoot(t), webSrcDir)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("read %s: %v", dir, err)
+	}
+	var out []string
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || !strings.HasSuffix(name, ".ts") || strings.HasSuffix(name, ".test.ts") {
+			continue
+		}
+		out = append(out, filepath.Join(dir, name))
+	}
+	sort.Strings(out)
 	return out
 }
 
