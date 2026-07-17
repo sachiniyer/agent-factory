@@ -13,6 +13,7 @@ import (
 	"github.com/sachiniyer/agent-factory/ui"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/sachiniyer/agent-factory/internal/shellsuggest"
 )
 
 // handleDefaultKeyPress handles key events in stateDefault (main interaction state).
@@ -685,10 +686,10 @@ func interactiveGuard(inst *session.Instance) error {
 		// record. Entering or attaching is impossible right now; say what
 		// happened — same explicit-feedback contract as the Deleting path
 		// (#935). Checked before TmuxAlive so the specific message wins.
-		return fmt.Errorf("session '%s' was lost — restore it first (af sessions restore %s)", inst.Title, inst.Title)
+		return fmt.Errorf("session '%s' was lost — restore it first (%s)", inst.Title, shellsuggest.Command("af", "sessions", "restore", inst.Title))
 	}
 	if inst.GetLiveness() == session.LiveDead {
-		return fmt.Errorf("session '%s' is no longer running — restore it first (af sessions restore %s)", inst.Title, inst.Title)
+		return fmt.Errorf("session '%s' is no longer running — restore it first (%s)", inst.Title, shellsuggest.Command("af", "sessions", "restore", inst.Title))
 	}
 	if inst.GetLiveness() == session.LiveArchived {
 		// Archived (#1028): the user tore the session down and its worktree was
@@ -696,7 +697,7 @@ func interactiveGuard(inst *session.Instance) error {
 		// Point at the off-ramp (restore) rather than a bare "not running" —
 		// same explicit-feedback contract as Lost/Deleting. Checked before
 		// TmuxAlive so the specific message wins.
-		return fmt.Errorf("session '%s' is archived — restore it first (af sessions restore %s)", inst.Title, inst.Title)
+		return fmt.Errorf("session '%s' is archived — restore it first (%s)", inst.Title, shellsuggest.Command("af", "sessions", "restore", inst.Title))
 	}
 	if !inst.TmuxAlive() {
 		return fmt.Errorf("session '%s' is no longer running", inst.Title)

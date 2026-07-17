@@ -9,6 +9,7 @@ import (
 	"syscall"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/shellsuggest"
 	"github.com/sachiniyer/agent-factory/log"
 )
 
@@ -175,11 +176,14 @@ func (g *GitWorktree) relocateWorktreeTo(dest string) error {
 		if sErr := worktreeRepairSubmodules(g, dest); sErr != nil {
 			log.WarningLog.Printf(
 				"submodule gitdir repair failed after moving worktree to %s; "+
-					"run `git -C %q submodule absorbgitdirs` "+
-					"(or `git -C %q submodule update --init --recursive`) "+
+					"run `%s` "+
+					"(or `%s`) "+
 					"to fix submodule status; continuing because the worktree move "+
 					"and registration repair already succeeded: %v",
-				dest, dest, dest, sErr,
+				dest,
+				shellsuggest.Command("git", "-C", dest, "submodule", "absorbgitdirs"),
+				shellsuggest.Command("git", "-C", dest, "submodule", "update", "--init", "--recursive"),
+				sErr,
 			)
 		}
 		if sourceCleanupErr != nil {

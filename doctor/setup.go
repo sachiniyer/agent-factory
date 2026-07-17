@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/shellsuggest"
 	aflog "github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/preflight"
 	"github.com/sachiniyer/agent-factory/session/tmux"
@@ -107,7 +108,7 @@ func checkConfig(_ *scanContext, report *Report) *config.Config {
 	if _, statErr := os.Stat(path); statErr != nil {
 		report.Findings = append(report.Findings, Finding{
 			Check:  "config",
-			Detail: fmt.Sprintf("config loaded in memory but %s is not materialized on disk — run `af config set default_program %s` or fix AF home permissions: %v", path, cfg.DefaultProgram, statErr),
+			Detail: fmt.Sprintf("config loaded in memory but %s is not materialized on disk — run `%s` or fix AF home permissions: %v", path, shellsuggest.Command("af", "config", "set", "default_program", cfg.DefaultProgram), statErr),
 		})
 		return cfg
 	}

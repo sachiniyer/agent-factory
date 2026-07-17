@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/shellsuggest"
 )
 
 // defaultRemoteConfig resolves the remote-hook backend for the repository
@@ -177,8 +178,8 @@ func hookExecIssue(field, cmd, configHint string) string {
 				"executable — check the path %s", field, cmd, configHint)
 		}
 		if info.Mode().Perm()&0o111 == 0 {
-			return fmt.Sprintf("remote_hooks.%s script %s is not executable — run: chmod +x %s",
-				field, cmd, cmd)
+			return fmt.Sprintf("remote_hooks.%s script %s is not executable — run: %s",
+				field, cmd, shellsuggest.Command("chmod", "+x", cmd))
 		}
 		return ""
 	}

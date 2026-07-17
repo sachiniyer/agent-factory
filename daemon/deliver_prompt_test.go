@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/shellsuggest"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
 	"github.com/sachiniyer/agent-factory/session"
 	sessiongit "github.com/sachiniyer/agent-factory/session/git"
@@ -389,20 +390,26 @@ func TestDeliverPrompt_RefusesArchivedTargetBeforeTmuxSend(t *testing.T) {
 
 // TestPromptTargetLivenessError_ArchivedQuotesRestoreCommand pins that the
 // suggested `af sessions restore <title>` command is shell-safe (#1529): a
-// title with a space or shell metacharacter must be single-quoted so a
-// copy-pasted command restores the intended session and cannot smuggle a second
-// shell command. A plain title stays unquoted so the common case reads cleanly.
+// title with a space or shell metacharacter must be quoted so a copy-pasted
+// command restores the intended session and cannot smuggle a second shell
+// command. A plain title stays unquoted so the common case reads cleanly.
+//
+// It asserts this site routes through the shellsuggest seam rather than pinning
+// a literal quoting idiom (#1978): the idiom is the seam's business, and
+// shellsuggest's own tests prove it by EXECUTING the result in a real shell —
+// which is the property that matters and which a string comparison here could
+// never establish. What stays local is the check that carries the value: the
+// raw, unquoted form must not appear.
 func TestPromptTargetLivenessError_ArchivedQuotesRestoreCommand(t *testing.T) {
 	cases := []struct {
 		name     string
 		title    string
-		wantCmd  string
 		unwanted string // a raw, unquoted form that must NOT appear
 	}{
-		{"plain title unquoted", "captain", "af sessions restore captain", ""},
-		{"space quoted", "my session", "af sessions restore 'my session'", "restore my session)"},
-		{"semicolon quoted", "a;rm -rf ~", "af sessions restore 'a;rm -rf ~'", "restore a;rm -rf ~"},
-		{"embedded quote escaped", "it's", `af sessions restore 'it'"'"'s'`, ""},
+		{"plain title unquoted", "captain", ""},
+		{"space quoted", "my session", "restore my session)"},
+		{"semicolon quoted", "a;rm -rf ~", "restore a;rm -rf ~"},
+		{"embedded quote escaped", "it's", ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -410,13 +417,20 @@ func TestPromptTargetLivenessError_ArchivedQuotesRestoreCommand(t *testing.T) {
 			if err == nil {
 				t.Fatalf("expected an Archived liveness error for %q", tc.title)
 			}
-			if !strings.Contains(err.Error(), tc.wantCmd) {
-				t.Fatalf("expected restore command %q in error, got: %v", tc.wantCmd, err)
+			wantCmd := shellsuggest.Command("af", "sessions", "restore", tc.title)
+			if !strings.Contains(err.Error(), wantCmd) {
+				t.Fatalf("expected restore command %q in error, got: %v", wantCmd, err)
 			}
 			if tc.unwanted != "" && strings.Contains(err.Error(), tc.unwanted) {
 				t.Fatalf("error must not contain the unquoted command %q (shell-injection risk), got: %v", tc.unwanted, err)
 			}
 		})
+	}
+
+	// The readable common case is a real requirement, not an accident of the
+	// seam: a suggestion exists to be read, so pin it literally here.
+	if got := shellsuggest.Command("af", "sessions", "restore", "captain"); got != "af sessions restore captain" {
+		t.Errorf("plain title must stay unquoted for readability, got %q", got)
 	}
 }
 
