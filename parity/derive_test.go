@@ -61,7 +61,7 @@ type cliVerb struct {
 // one ledger entry instead of repeating it under every child.
 func deriveCLI(t *testing.T) map[string]cliVerb {
 	t.Helper()
-	root := commands.NewRootCommand(commands.Options{Version: "0.0.0-parity"})
+	root := initCobraDefaults(commands.NewRootCommand(commands.Options{Version: "0.0.0-parity"}))
 	out := map[string]cliVerb{}
 
 	var walk func(c *cobra.Command, path string)
@@ -83,6 +83,38 @@ func deriveCLI(t *testing.T) map[string]cliVerb {
 	}
 	walk(root, "af")
 	return out
+}
+
+// initCobraDefaults finishes building the command tree the way running the
+// binary would, BEFORE anything walks it.
+//
+// Cobra adds `completion` (and its per-shell subcommands), `help`, `--help` on
+// every command, and `--version` on root LAZILY — inside Execute(), not when the
+// tree is constructed. A walk of the freshly-built tree therefore misses real,
+// user-visible surface: `af completion bash` and `af help` are commands a user
+// can run, and `af version --help` is a flag they can pass.
+//
+// That omission is not a cosmetic gap. This package's whole claim is that the
+// inventory cannot quietly disagree with what af ships, and for those commands
+// it silently did — the derivation reported green while the surface existed.
+// Deriving after init is what makes the claim true rather than nearly true.
+func initCobraDefaults(root *cobra.Command) *cobra.Command {
+	// Order matters: these add SUBCOMMANDS, so they run before the per-command
+	// flag init below walks the tree.
+	root.InitDefaultCompletionCmd()
+	root.InitDefaultHelpCmd()
+
+	var initFlags func(c *cobra.Command)
+	initFlags = func(c *cobra.Command) {
+		c.InitDefaultHelpFlag()
+		// Only adds --version where Version is set (root), matching Execute().
+		c.InitDefaultVersionFlag()
+		for _, sub := range c.Commands() {
+			initFlags(sub)
+		}
+	}
+	initFlags(root)
+	return root
 }
 
 // cliVerbs returns just the invocable commands — the verb-level view.

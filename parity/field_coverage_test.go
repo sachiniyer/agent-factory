@@ -233,3 +233,77 @@ func TestFieldCoverageHasNoStaleTypes(t *testing.T) {
 		}
 	}
 }
+
+// TestFieldCoverageDeclarationsAreLive catches a surface DROPPING a request,
+// which every other check is blind to.
+//
+// TestGoFieldCoverage iterates the DERIVED requests, so it can only notice a
+// surface that is missing a declaration. If a surface stops constructing a
+// request another surface still uses — the CLI dropping PreviewRequest while the
+// TUI keeps it — that type simply vanishes from the derived set for the CLI, its
+// declarations are never visited, and they rot in place while the suite stays
+// green. The inventory would keep describing a gap on a call site that no longer
+// exists.
+//
+// So the declarations are walked from the OTHER direction: every declared
+// (type, surface) must still be a thing that surface really does.
+func TestFieldCoverageDeclarationsAreLive(t *testing.T) {
+	inv := loadInventory(t)
+
+	// One derivation per surface: the AST walk is the expensive part.
+	use := map[string]map[string]*requestUse{}
+	for _, surface := range []string{"cli", "tui"} {
+		use[surface] = deriveGoRequestUse(t, surface)
+	}
+
+	for typeName, bySurface := range inv.FieldCoverage.Requests {
+		for surface, decls := range bySurface {
+			derived, known := use[surface]
+			if !known {
+				t.Errorf("field_coverage declares %s for unknown surface %q", typeName, surface)
+				continue
+			}
+			u, constructs := derived[typeName]
+			if !constructs {
+				t.Errorf("field_coverage declares %d field(s) on %s for the %s surface, but %s "+
+					"no longer constructs %s anywhere. Either the surface dropped the call "+
+					"(remove the declarations, and re-check the capability's %s cell — it may "+
+					"have become a gap) or the derivation lost sight of the call site.",
+					len(decls), typeName, surface, surface, typeName, surface)
+				continue
+			}
+			// A declared field that is not a real field of the request is dead
+			// too: the wire struct renamed or dropped it and the note stayed.
+			paths := map[string]bool{}
+			for _, jsonPath := range jsonFieldPaths(auditedRequests[typeName]) {
+				paths[jsonPath] = true
+			}
+			for field := range decls {
+				if !paths[field] {
+					t.Errorf("field_coverage declares %s.%s for %s, but %s has no such field "+
+						"(sites: %v). The wire struct changed and the declaration was left behind.",
+						typeName, field, surface, typeName, u.Sites)
+				}
+			}
+		}
+	}
+
+	// Same for the web: a declared field must still be a field of the route.
+	for rpc, decls := range inv.FieldCoverage.WebRPCs {
+		rt, audited := auditedRequests[rpc+"Request"]
+		if !audited {
+			continue
+		}
+		paths := map[string]bool{}
+		for _, jsonPath := range jsonFieldPaths(rt) {
+			paths[jsonPath] = true
+		}
+		for field := range decls {
+			if !paths[field] {
+				t.Errorf("field_coverage.web_rpcs declares %s.%s, but %sRequest has no such "+
+					"field — the wire struct changed and the declaration was left behind.",
+					rpc, field, rpc)
+			}
+		}
+	}
+}

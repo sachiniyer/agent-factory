@@ -64,7 +64,7 @@ The check is deliberately code-derived on all four halves:
 
 | Surface | Derived from |
 |---|---|
-| CLI | `commands.NewRootCommand()` — the real cobra tree, walked for verbs and flags |
+| CLI | `commands.NewRootCommand()` — the real cobra tree, walked for verbs and flags **after `initCobraDefaults` finishes building it** (see below) |
 | API | `daemon.HTTPRoutes()` — the same table that builds the live mux, with request fields reflected off the wire structs |
 | TUI | `keys.EffectiveBindings(nil)` — the canonical binding table |
 | Web | the `af<T>(method, body, token)` call sites in `web/src/api.ts`, the single chokepoint through which the SPA reaches the daemon |
@@ -141,6 +141,7 @@ know are real, filed, and field-level — as fixtures, not aspirations:
 
 | Fixture | Derivation path it proves |
 |---|---|
+| cobra's lazy surface — `af completion bash`, `af help`, `--help`, `--version` | the tree is walked **after** cobra finishes building it |
 | [#1933](https://github.com/sachiniyer/agent-factory/issues/1933) — the web never sends `CreateSession.backend` | the web request-body parser |
 | #1933 (TUI half) — `sessionStartRequest` has no `Backend` | the Go AST walk |
 | [#1948](https://github.com/sachiniyer/agent-factory/issues/1948) — the CLI never sets `Preview.Tab/TabID/Full` | the AST **on an internal route**, invisible to the public catalog |
@@ -184,6 +185,25 @@ only the second is dangerous.
   `T{Field: …}` and `var x T; x.Field = …`. A request built some third way would
   read as setting nothing — over-reporting, and `minGoLiterals` trips if the
   surfaces move wholesale to another style.
+
+## Two things that must stay true
+
+Both were once false, both reported green, and both are now fixtures:
+
+**Walk the tree only after cobra has finished building it.** cobra adds
+`completion`, `help`, `--help` and `--version` lazily inside `Execute()`, so a
+walk of the freshly-constructed tree omits commands users can actually run.
+`initCobraDefaults` runs them first; `TestDerivationSeesLazyCobraSurface` fails
+if it is ever removed.
+
+**Declarations are validated from both ends.** Walking only the *derived*
+requests catches a surface that is missing a declaration, but not a surface that
+**drops** a request another still uses — the CLI dropping `PreviewRequest` while
+the TUI keeps it would simply vanish from the derived set, leaving its
+declarations to rot while the suite stayed green.
+`TestFieldCoverageDeclarationsAreLive` walks the declarations the other way, so
+every declared `(type, surface)` must still be something that surface really
+does, and every declared field must still exist on the wire struct.
 
 ## Verdicts
 

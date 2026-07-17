@@ -39,8 +39,58 @@ func contains(unreached []string, field string) bool {
 	return false
 }
 
+// TestDerivationSeesLazyCobraSurface pins that the tree is walked AFTER cobra
+// finishes building it.
+//
+// cobra adds `completion` (and its per-shell subcommands), `help`, `--help` and
+// `--version` lazily inside Execute(). Walking the freshly-constructed tree
+// omits all of it — real commands a user can run — so the inventory silently
+// disagreed with what af ships, which is the one thing this package claims
+// cannot happen. Drop initCobraDefaults and this fixture fails.
+func TestDerivationSeesLazyCobraSurface(t *testing.T) {
+	derived := deriveCLI(t)
+
+	for _, path := range []string{"af completion bash", "af completion zsh", "af help"} {
+		if _, ok := derived[path]; !ok {
+			t.Errorf("%q is not derived — cobra's lazily-added commands are invisible to the "+
+				"walk, so the inventory omits real CLI surface. Restore initCobraDefaults "+
+				"(parity/derive_test.go).", path)
+		}
+	}
+
+	hasFlag := func(path, flag string) bool {
+		for _, f := range derived[path].Flags {
+			if f == flag {
+				return true
+			}
+		}
+		return false
+	}
+	if !hasFlag("af", "version") {
+		t.Error("`af --version` is not derived — InitDefaultVersionFlag did not run before the walk.")
+	}
+	for _, path := range []string{"af", "af version", "af sessions create"} {
+		if !hasFlag(path, "help") {
+			t.Errorf("%q has no derived --help — InitDefaultHelpFlag did not run for it, so "+
+				"every command's help flag is missing from the inventory.", path)
+		}
+	}
+}
+
 // TestDerivationSeesWebBackendGap pins #1933 through the WEB body parser: the
 // daemon accepts nine CreateSession fields and the web sends five.
+//
+// COORDINATION: a fix for #1933 is in flight. When the web starts sending
+// `backend`, THIS TEST FAILS BY DESIGN — it is the fixture doing its job, not a
+// broken test. Retiring it is three edits, and they belong to the PR that
+// lands the fix:
+//  1. drop "backend" (and any other now-sent field) from the list below;
+//  2. in parity/inventory.json, flip session.create.opt.backend's web cell to
+//     yes with a pointer at the new call site, and re-verdict the row;
+//  3. drop the matching entry from field_coverage.web_rpcs.CreateSession.
+//
+// TestWebFieldCoverage will refuse to pass until (2) and (3) agree, so the
+// inventory cannot be left claiming a gap that was fixed.
 func TestDerivationSeesWebBackendGap(t *testing.T) {
 	sent := webCallBody(t, "CreateSession")
 	if len(sent) == 0 {
@@ -48,8 +98,9 @@ func TestDerivationSeesWebBackendGap(t *testing.T) {
 	}
 	for _, f := range []string{"backend", "force_remote", "in_place"} {
 		if contains(sent, f) {
-			t.Errorf("the web now sends CreateSession.%s. If #1933 was fixed, update the "+
-				"inventory verdict and retire this fixture; if not, the parser is wrong.", f)
+			t.Errorf("the web now sends CreateSession.%s — see the COORDINATION note above this "+
+				"test: if #1933 was fixed, retire the fixture and flip the inventory cell in the "+
+				"same PR; if it was not, the body parser is wrong.", f)
 		}
 	}
 	// And prove the parser is not simply blind to every field.
