@@ -75,6 +75,18 @@ jobs:
           go-version: "1.25"
           cache: true
 
+      # internal/shellsuggest builds the shell commands we PRINT for a user to
+      # paste, and claims correctness in sh, bash AND zsh — so its tests execute
+      # under each. zsh is the one that matters most: it has been macOS's default
+      # login shell since Catalina, so it is what most readers actually paste
+      # into, and it is the ONLY one of the three where a leading '=' expands
+      # (#1978). The ubuntu runner ships sh and bash but not zsh; without this the
+      # suite would cover two of the three shells it claims, and a zsh-only defect
+      # would reach users with CI green — the same gap test-macos exists to close,
+      # one layer down. The macOS runner already ships zsh, so this is Linux-only.
+      - name: Install zsh
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends zsh
+
       - name: Run tests
         run: go test -v -race -count=1 ./...
 

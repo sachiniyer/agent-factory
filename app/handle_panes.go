@@ -12,6 +12,7 @@ import (
 	"github.com/sachiniyer/agent-factory/ui/tree"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/sachiniyer/agent-factory/internal/shellsuggest"
 )
 
 // This file hosts the N-pane verbs (#1088, RFC §2.3, replacing the PR-5 A/B
@@ -567,10 +568,10 @@ func (m *home) handleEnterPane(p *store.OpenPane) (tea.Model, tea.Cmd) {
 		return m, m.handleError(fmt.Errorf("session '%s' is being restored", instance.Title))
 	}
 	if instance.GetLiveness() == session.LiveLost {
-		return m, m.handleError(fmt.Errorf("session '%s' was lost — restore it first (af sessions restore %s)", instance.Title, instance.Title))
+		return m, m.handleError(fmt.Errorf("session '%s' was lost — restore it first (%s)", instance.Title, shellsuggest.Command("af", "sessions", "restore", instance.Title)))
 	}
 	if instance.GetLiveness() == session.LiveDead {
-		return m, m.handleError(fmt.Errorf("session '%s' is no longer running — restore it first (af sessions restore %s)", instance.Title, instance.Title))
+		return m, m.handleError(fmt.Errorf("session '%s' is no longer running — restore it first (%s)", instance.Title, shellsuggest.Command("af", "sessions", "restore", instance.Title)))
 	}
 	if !instance.TmuxAlive() {
 		return m, m.handleError(fmt.Errorf("session '%s' is no longer running", instance.Title))

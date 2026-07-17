@@ -14,6 +14,7 @@ import (
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/internal/proctree"
+	"github.com/sachiniyer/agent-factory/internal/shellsuggest"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
@@ -331,7 +332,10 @@ func checkLeakedTmuxSessions(ctx *scanContext, report *Report) {
 		report.Findings = append(report.Findings, Finding{
 			Check: "leaked-tmux-session",
 			Detail: fmt.Sprintf("tmux session %s has no backing record in %s (%s); "+
-				"kill it with: tmux kill-session -t '=%s:'", name, ctx.opts.ConfigDir, origin, name),
+				"kill it with: %s", name, ctx.opts.ConfigDir, origin,
+				// "=name:" is tmux's exact-match target syntax — one argument, so
+				// it is one piece the seam quotes as a whole.
+				shellsuggest.Command("tmux", "kill-session", "-t", "="+name+":")),
 		})
 	}
 }

@@ -10,6 +10,7 @@ import (
 
 	"github.com/sachiniyer/agent-factory/cmd"
 	"github.com/sachiniyer/agent-factory/internal/proctree"
+	"github.com/sachiniyer/agent-factory/internal/shellsuggest"
 	"github.com/sachiniyer/agent-factory/log"
 )
 
@@ -87,7 +88,8 @@ func CleanupSessions(cmdExec cmd.Executor) error {
 		home, ok := sessionHomeMarker(cmdExec, match)
 		switch {
 		case !ok:
-			log.InfoLog.Printf("leaving tmux session %s: no AF_HOME ownership marker (pre-marker build or tmux <3.2); kill manually with: tmux kill-session -t '=%s'", match, match)
+			log.InfoLog.Printf("leaving tmux session %s: no AF_HOME ownership marker (pre-marker build or tmux <3.2); kill manually with: %s", match,
+				shellsuggest.Command("tmux", "kill-session", "-t", "="+match))
 		case filepath.Clean(home) != filepath.Clean(ownHome):
 			log.InfoLog.Printf("leaving tmux session %s: owned by another agent-factory home (%s)", match, home)
 		default:

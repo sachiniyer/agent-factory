@@ -9,6 +9,7 @@ import (
 	"unicode"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/shellsuggest"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
@@ -79,7 +80,7 @@ func CheckCommand(command string) (*ProgramCheck, error) {
 			return check, fmt.Errorf("executable %q is a directory", exe)
 		}
 		if info.Mode().Perm()&0o111 == 0 {
-			return check, fmt.Errorf("executable %q is not executable; run: chmod +x %s", exe, path)
+			return check, fmt.Errorf("executable %q is not executable; run: %s", exe, shellsuggest.Command("chmod", "+x", path))
 		}
 		check.Path = path
 		return check, nil

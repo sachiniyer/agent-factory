@@ -13,6 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/shellsuggest"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
 	aflog "github.com/sachiniyer/agent-factory/log"
 )
@@ -252,8 +253,12 @@ func TestRestoreWorktreeTo_SubmoduleRepairFailureIsBestEffort(t *testing.T) {
 	assert.False(t, pathExists(archiveDest), "the archive directory must be gone after restore")
 	assertLiveWorktreeAt(t, gw, restoreDest)
 	assert.Contains(t, warnings.String(), "submodule gitdir repair failed after moving worktree")
-	assert.Contains(t, warnings.String(), "git -C \""+restoreDest+"\" submodule absorbgitdirs")
-	assert.Contains(t, warnings.String(), "git -C \""+restoreDest+"\" submodule update --init --recursive")
+	// The advice is a command a human pastes, so it goes through the shellsuggest
+	// seam (#1978). It used to be built with %q — Go quoting, which renders a
+	// double-quoted string a shell still expands `$` and backticks inside, so it
+	// LOOKED quoted and was not.
+	assert.Contains(t, warnings.String(), shellsuggest.Command("git", "-C", restoreDest, "submodule", "absorbgitdirs"))
+	assert.Contains(t, warnings.String(), shellsuggest.Command("git", "-C", restoreDest, "submodule", "update", "--init", "--recursive"))
 }
 
 // TestRestoreWorktreePath_SiblingCollisionAndSanitize: in the default sibling

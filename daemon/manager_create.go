@@ -10,6 +10,7 @@ import (
 
 	"github.com/sachiniyer/agent-factory/agentproto"
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/shellsuggest"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/session/git"
@@ -450,7 +451,7 @@ func (m *Manager) validateTitleAvailableLocked(repoID, repoPath, title, program 
 		// No creator will ever finish it, so this stays a plain error (not
 		// errConcurrentCreate): DeliverPrompt must fail fast with cleanup
 		// guidance rather than wait out waitForTargetSession's timeout (#916).
-		return fmt.Errorf("conflicting tmux session %q is already running; no agent-factory session owns it. Clean it up with: tmux kill-session -t %s", title, tmuxSession.SanitizedName())
+		return fmt.Errorf("conflicting tmux session %q is already running; no agent-factory session owns it. Clean it up with: %s", title, shellsuggest.Command("tmux", "kill-session", "-t", tmuxSession.SanitizedName()))
 	}
 	return nil
 }

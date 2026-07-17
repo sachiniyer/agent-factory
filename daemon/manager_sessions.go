@@ -2,9 +2,9 @@ package daemon
 
 import (
 	"fmt"
-	"strings"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/shellsuggest"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
 )
@@ -199,26 +199,9 @@ func promptTargetLivenessError(title string, liveness session.Liveness) error {
 		// restore command embeds the title, so shell-quote it — a title with
 		// spaces or shell metacharacters must not turn a copy-pasted
 		// `af sessions restore ...` into the wrong target or a second command.
-		return fmt.Errorf("target session %q is Archived; prompt not delivered; restore it first (af sessions restore %s)", title, shellQuoteArg(title))
+		return fmt.Errorf("target session %q is Archived; prompt not delivered; restore it first (%s)", title, shellsuggest.Command("af", "sessions", "restore", title))
 	}
 	return nil
-}
-
-// shellQuoteArg makes s safe to paste as a single shell argument: already-safe
-// strings pass through unquoted (so the common `restore captain` stays clean),
-// and anything with whitespace/metacharacters is single-quoted with embedded
-// quotes escaped. Mirrors the sibling copies in session/tmux/resume.go and
-// api/apicmd.go (a shared util is a separate consolidation, #1529).
-func shellQuoteArg(s string) string {
-	if s != "" && strings.IndexFunc(s, func(r rune) bool {
-		return !((r >= 'a' && r <= 'z') ||
-			(r >= 'A' && r <= 'Z') ||
-			(r >= '0' && r <= '9') ||
-			strings.ContainsRune("_@%+=:,./-", r))
-	}) == -1 {
-		return s
-	}
-	return "'" + strings.ReplaceAll(s, "'", `'"'"'`) + "'"
 }
 
 // agentServerForStream resolves the /v1/sessions/{id}/stream target to its cached

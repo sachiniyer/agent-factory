@@ -16,6 +16,7 @@ import (
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/session/git"
 
+	"github.com/sachiniyer/agent-factory/internal/shellsuggest"
 	"github.com/spf13/cobra"
 )
 
@@ -459,7 +460,7 @@ results.`,
 			return jsonError(err)
 		}
 		if !exists {
-			return jsonError(fmt.Errorf("session %q not found. Use --create to auto-create the session, or run: af sessions create --name %q --prompt <prompt>", title, title))
+			return jsonError(fmt.Errorf("session %q not found. Use --create to auto-create the session, or run: %s --prompt <prompt>", title, shellsuggest.Command("af", "sessions", "create", "--name", title)))
 		}
 
 		if err := sendPromptViaDaemon(daemon.SendPromptRequest{Title: title, RepoID: repoID, Prompt: prompt}); err != nil {
