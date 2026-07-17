@@ -37,7 +37,10 @@ import (
 //   - opencode: append --continue at the end. opencode's TUI is its DEFAULT
 //     command ("opencode [project]"), and --continue is a position-independent
 //     boolean flag on it, so this is a tail append like claude/gemini/aider —
-//     NOT a codex/amp-style subcommand splice.
+//     NOT a codex/amp-style subcommand splice. KNOWN, MEASURED WART: when no
+//     opencode session exists for the cwd yet, --continue does fall back to a
+//     fresh session (the same contract aider/gemini have above) but announces it
+//     with a transient error overlay first — see opencodeResumePrecondition.
 //
 // The latest-session paths above either fall back to a fresh session when no
 // prior session exists or are left unchanged when af cannot identify a safe
@@ -126,6 +129,43 @@ func resumeProgram(program string) string {
 	}
 	return program
 }
+
+// KNOWN LIMITATION — opencode resume precondition.
+//
+// af does NOT check that a session exists before asking opencode to continue one.
+//
+// Measured against 0.0.0-main-202604230742 with a 2x2 control — the error appears
+// ONLY in (no prior session + --continue); (prior session + --continue) and (no
+// prior session + no flag) are both clean:
+//
+//	opencode --continue, no session for this cwd
+//	  → a validation error overlay ("sessionID": "dummy", code "invalid_format")
+//	    is drawn ~3.5s-7.5s into boot, and opencode then runs a FRESH session.
+//
+// Why af ships this rather than gating on the precondition:
+//
+//   - The end state is USABLE, which is the bar. The overlay is NON-MODAL and does
+//     not capture input: a prompt delivered while it is up still reaches the
+//     composer, submits, and is answered (verified end-to-end). Falling back to a
+//     fresh session when there is nothing to resume is exactly the contract aider
+//     and gemini already have; opencode's fallback is merely NOISY rather than
+//     silent, which is an opencode-side defect (it synthesizes a "dummy" sessionID
+//     that then fails its own validation) and not a wrong flag choice by af.
+//   - Checking is not cheap or stable. opencode keeps sessions in SQLite under its
+//     data dir, not in a per-project path af could stat; `opencode session list`
+//     answers but costs ~1.4s, which would land on EVERY restore, in a function
+//     that is deliberately pure (no I/O, no subprocesses that can hang the
+//     daemon's restore path). Deriving the db filename instead would couple af to
+//     an undocumented internal naming scheme.
+//   - Suppressing readiness until the overlay clears was considered and REJECTED:
+//     it trades a cosmetic wart for a create failure. The overlay was observed
+//     still present long after the ~8s self-clear once the pane had been
+//     interacted with, so gating on it risks WaitForReady spinning its full 60s
+//     timeout and failing the create outright.
+//
+// Left as a named limitation rather than a silent one. If opencode fixes the
+// fallback, or exposes a cheap "has a session for this cwd" probe, this becomes
+// deletable.
 
 // isOpencodeResumeFlag reports whether tok already expresses a resume intent to
 // opencode — either "continue the last session" (-c/--continue) or "continue

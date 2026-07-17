@@ -96,11 +96,23 @@ func resolveProgramForInstance(i *Instance) string {
 // here is what to do instead" is actionable; "unsupported" is not. Fixing #1963
 // means deleting entries from this map, and the map makes the gap impossible to
 // add a new agent without noticing.
+// Every reason is VERSION-SCOPED: it describes the build af tested, and names the
+// escape hatch that works regardless of version. af deliberately does NOT probe
+// the installed binary for the flag, because for opencode specifically that probe
+// cannot be trusted: opencode HIDES real flags from its help
+// (--dangerously-skip-permissions is genuine on `opencode run` yet absent from
+// `--help`), so a help-grep yields false negatives, and its parser is non-strict,
+// so an exit code cannot tell a real flag from a bogus one either. The only
+// reliable oracle is launching the binary — ~1.4s per session create, on a path
+// that must not hang. Naming program_overrides in the reason gives the user a
+// version-proof answer without af guessing at their build.
 var autoYesUnsupported = map[string]string{
 	tmux.ProgramCodex: "codex exposes --dangerously-bypass-approvals-and-sandbox; set it via program_overrides.codex if you want unattended approval",
 	tmux.ProgramAmp:   "amp exposes an amp.dangerouslyAllowAll setting; set it in amp's own settings if you want unattended approval",
-	tmux.ProgramOpencode: "opencode's TUI has no auto-approve flag (--dangerously-skip-permissions is `opencode run`-only and kills the TUI spawn); " +
-		"opencode's default config already auto-approves tool calls, so sessions are unlikely to stall",
+	tmux.ProgramOpencode: "the opencode build af was verified against (0.0.0-main-202604230742) has no auto-approve flag on its TUI " +
+		"(--dangerously-skip-permissions is `opencode run`-only and makes the TUI print help and exit); " +
+		"opencode's default config already auto-approves tool calls, so sessions are unlikely to stall. " +
+		"If your opencode exposes one, set it via program_overrides.opencode",
 }
 
 // warnIfAutoYesUnsupported tells the user when auto_yes will not be honored for the
