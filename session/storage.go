@@ -44,6 +44,19 @@ type InstanceData struct {
 	// at disk write/load boundaries: in-flight operations are process-local and
 	// must not be resurrected after a daemon restart.
 	InFlightOp InFlightOp `json:"in_flight_op,omitempty"`
+	// LostWhileBusy records whether the session was still working at the instant it
+	// went Lost (#1892). Persisted because the fact exists only on that edge and is
+	// unrecoverable afterwards — a Lost session that finished hours ago and one
+	// interrupted mid-run are identical from their current state — and because an
+	// outage that loses sessions is exactly the event that also restarts the daemon,
+	// so an in-memory-only answer would be gone precisely when it is needed. The
+	// watch-task concurrency cap holds a Lost session's slot only when this is true;
+	// without it a COMPLETED task session (whose TaskID lives on forever) would
+	// reacquire a slot on the next tmux outage and park the task's events behind
+	// finished work. omitempty + additive: records written before #1892 decode to
+	// false, which is the safe default — an unknown-provenance Lost session frees
+	// its slot (refusing one extra event is recoverable; a wedged task is not).
+	LostWhileBusy bool `json:"lost_while_busy,omitempty"`
 	// LimitResetAt is the parsed usage-limit reset time (#1146), display-only:
 	// written (and carried in the daemon snapshot to the read-only TUI) only for a
 	// LiveLimitReached row so the sidebar [limit] badge can show "resets <t>" and

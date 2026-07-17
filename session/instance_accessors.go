@@ -62,6 +62,16 @@ func (i *Instance) UserKilled() bool {
 	return i.userKilled
 }
 
+// LostWhileBusy reports whether the session was still working at the instant it
+// went Lost (#1892). Meaningful only while the session is Lost — it is recorded
+// on the edge into that state and is stale otherwise; callers gate on the
+// liveness first (see daemon.holdsTaskRunSlot).
+func (i *Instance) LostWhileBusy() bool {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	return i.lostWhileBusy
+}
+
 // GetGitWorktree returns the git worktree for the instance
 func (i *Instance) GetGitWorktree() (*git.GitWorktree, error) {
 	i.mu.RLock()

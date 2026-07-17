@@ -165,8 +165,200 @@ func TestCanAutoRestoreLostSession(t *testing.T) {
 	})
 }
 
+// TestCompletedRunDoesNotReacquireSlotWhenLost is the regression for the
+// reacquire wedge (#1892). A task-spawned session keeps its TaskID for life, long
+// after its run finished. When it goes idle its slot is released — but a later
+// tmux outage marks that finished session Lost, and a Lost session is restorable,
+// so a naive "Lost holds its slot" rule hands a slot back to a run that ended
+// hours ago.
+//
+// A cap of 1 is the sharpest case: the finished session would consume the task's
+// only slot, and every new event would park behind completed work while the
+// restore loop retried it — the durable queue wedged indefinitely. The cap must
+// follow the RUN, not the row.
+func TestCompletedRunDoesNotReacquireSlotWhenLost(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	installInstantBackend(t)
+	repoPath := setupControlRepo(t)
+	repo, err := config.RepoFromPath(repoPath)
+	if err != nil {
+		t.Fatalf("RepoFromPath: %v", err)
+	}
+	manager, err := NewManager(config.DefaultConfig())
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+
+	const limit = 1
+	data, err := createForTask(manager, repoPath, "task1", "done", limit)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	// The run finishes: the agent goes idle, which releases the slot.
+	manager.mu.Lock()
+	finished := manager.instances[daemonInstanceKey(repo.ID, data.Title)]
+	manager.mu.Unlock()
+	if err := finished.Transition(session.ObserveLiveness(session.LiveReady)); err != nil {
+		t.Fatalf("transition to ready: %v", err)
+	}
+	manager.mu.Lock()
+	err = manager.admitTaskRunLocked(repo.ID, "task1", limit)
+	manager.mu.Unlock()
+	if err != nil {
+		t.Fatalf("a finished run must release its slot: %v", err)
+	}
+
+	// The outage: the finished session's tmux vanishes. It is now Lost and the
+	// restore loop will happily retry it — but its work is long done.
+	if err := finished.Transition(session.ObserveLiveness(session.LiveLost)); err != nil {
+		t.Fatalf("transition to lost: %v", err)
+	}
+	if !canAutoRestoreLostSession(finished) {
+		t.Fatal("precondition: the restore loop does retry this session, which is exactly why the cap must ask a second question")
+	}
+	if holdsTaskRunSlot(finished) {
+		t.Fatal("a run that already finished must not reacquire a slot when a later outage marks it Lost")
+	}
+
+	// The real assertion: a new event still gets its session. With the wedge live,
+	// this refuses forever.
+	if _, err := createForTask(manager, repoPath, "task1", "done", limit); err != nil {
+		t.Fatalf("a new event must not be parked behind a completed run: %v", err)
+	}
+}
+
+// TestInterruptedRunKeepsSlotWhenLost is the converse, and the reason the fix
+// cannot simply be "Lost never holds a slot": a session lost mid-run CAN come
+// back Running, so freeing its slot lets the task exceed its cap the moment the
+// restore lands. That is the original #1892 breach.
+func TestInterruptedRunKeepsSlotWhenLost(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	installInstantBackend(t)
+	repoPath := setupControlRepo(t)
+	repo, err := config.RepoFromPath(repoPath)
+	if err != nil {
+		t.Fatalf("RepoFromPath: %v", err)
+	}
+	manager, err := NewManager(config.DefaultConfig())
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+
+	const limit = 1
+	data, err := createForTask(manager, repoPath, "task1", "busy", limit)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	manager.mu.Lock()
+	inst := manager.instances[daemonInstanceKey(repo.ID, data.Title)]
+	manager.mu.Unlock()
+
+	// Working, then the outage hits mid-run.
+	if err := inst.Transition(session.ObserveLiveness(session.LiveRunning)); err != nil {
+		t.Fatalf("transition to running: %v", err)
+	}
+	if err := inst.Transition(session.ObserveLiveness(session.LiveLost)); err != nil {
+		t.Fatalf("transition to lost: %v", err)
+	}
+	if !holdsTaskRunSlot(inst) {
+		t.Fatal("a run interrupted mid-flight keeps its slot: the restore loop can bring it back Running and blow the cap")
+	}
+	if _, err := createForTask(manager, repoPath, "task1", "busy", limit); !isAtConcurrencyLimitErr(err) {
+		t.Fatalf("create while an interrupted run is restorable: want the at-limit refusal, got %v", err)
+	}
+}
+
+// TestLostWhileBusyRecomputedPerEpisode: the verdict is recorded on each edge INTO
+// Lost, so a session that is lost mid-run, restored, finishes, and is lost again
+// is judged idle the second time. A sticky verdict would wedge the task exactly as
+// the reacquire bug does, just one restore later.
+func TestLostWhileBusyRecomputedPerEpisode(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	installInstantBackend(t)
+
+	inst, err := session.NewInstance(session.InstanceOptions{
+		Title: "cycle", TaskID: "task1", Path: t.TempDir(), Program: "claude",
+	})
+	if err != nil {
+		t.Fatalf("NewInstance: %v", err)
+	}
+	inst.SetStartedForTest(true)
+
+	// Lost mid-run: the slot is held.
+	if err := inst.Transition(session.ObserveLiveness(session.LiveRunning)); err != nil {
+		t.Fatalf("running: %v", err)
+	}
+	if err := inst.Transition(session.ObserveLiveness(session.LiveLost)); err != nil {
+		t.Fatalf("lost: %v", err)
+	}
+	if !holdsTaskRunSlot(inst) {
+		t.Fatal("lost mid-run holds its slot")
+	}
+
+	// A repeated Lost observation must not overwrite the verdict by reading the
+	// Lost state itself — that would silently free every held slot on the next poll.
+	if err := inst.Transition(session.ObserveLiveness(session.LiveLost)); err != nil {
+		t.Fatalf("lost again: %v", err)
+	}
+	if !holdsTaskRunSlot(inst) {
+		t.Fatal("a repeated Lost observation must not flip the verdict loose")
+	}
+
+	// Restored, then the run finishes, then a second outage: now it is idle work.
+	if err := inst.Transition(session.ObserveLiveness(session.LiveRunning)); err != nil {
+		t.Fatalf("restored: %v", err)
+	}
+	if err := inst.Transition(session.ObserveLiveness(session.LiveReady)); err != nil {
+		t.Fatalf("ready: %v", err)
+	}
+	if err := inst.Transition(session.ObserveLiveness(session.LiveLost)); err != nil {
+		t.Fatalf("lost after finishing: %v", err)
+	}
+	if holdsTaskRunSlot(inst) {
+		t.Fatal("after the run finished, a later loss must not re-hold the slot")
+	}
+}
+
+// TestLostWhileBusySurvivesRestart: an outage that loses sessions is the same
+// event that restarts the daemon, so the verdict has to come back from disk — a
+// reload that re-decided it from the Lost state alone could not tell a finished
+// run from an interrupted one.
+func TestLostWhileBusySurvivesRestart(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	installInstantBackend(t)
+
+	newLostFrom := func(t *testing.T, title string, from session.Liveness) session.InstanceData {
+		t.Helper()
+		inst, err := session.NewInstance(session.InstanceOptions{
+			Title: title, TaskID: "task1", Path: t.TempDir(), Program: "claude",
+		})
+		if err != nil {
+			t.Fatalf("NewInstance: %v", err)
+		}
+		inst.SetStartedForTest(true)
+		if err := inst.Transition(session.ObserveLiveness(from)); err != nil {
+			t.Fatalf("transition to %v: %v", from, err)
+		}
+		if err := inst.Transition(session.ObserveLiveness(session.LiveLost)); err != nil {
+			t.Fatalf("transition to lost: %v", err)
+		}
+		return inst.ToInstanceData()
+	}
+
+	busy := newLostFrom(t, "busy", session.LiveRunning)
+	if !busy.LostWhileBusy {
+		t.Fatal("a session lost mid-run must persist that it was busy")
+	}
+	idle := newLostFrom(t, "idle", session.LiveReady)
+	if idle.LostWhileBusy {
+		t.Fatal("a session lost after finishing must persist that it was not busy")
+	}
+}
+
 // TestHoldsTaskRunSlot: the cap's slot predicate is the shared activity
-// projection OR an auto-restorable Lost session. Idle and archived release.
+// projection OR an interrupted, still-restorable Lost run. Idle and archived
+// release.
 func TestHoldsTaskRunSlot(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 	installInstantBackend(t)
@@ -199,12 +391,29 @@ func TestHoldsTaskRunSlot(t *testing.T) {
 		t.Fatal("an idle session releases its slot")
 	}
 
-	lost := newInst(t, "lost")
-	if err := lost.Transition(session.ObserveLiveness(session.LiveLost)); err != nil {
+	// Lost splits on whether the RUN was still in flight — the two rows are
+	// indistinguishable by their current state, which is the whole reason the
+	// verdict is captured on the edge into Lost.
+	lostBusy := newInst(t, "lost-busy")
+	if err := lostBusy.Transition(session.ObserveLiveness(session.LiveRunning)); err != nil {
 		t.Fatalf("transition: %v", err)
 	}
-	if !holdsTaskRunSlot(lost) {
-		t.Fatal("a restorable lost session holds its slot")
+	if err := lostBusy.Transition(session.ObserveLiveness(session.LiveLost)); err != nil {
+		t.Fatalf("transition: %v", err)
+	}
+	if !holdsTaskRunSlot(lostBusy) {
+		t.Fatal("a run interrupted mid-flight holds its slot: restoring it can blow the cap")
+	}
+
+	lostIdle := newInst(t, "lost-idle")
+	if err := lostIdle.Transition(session.ObserveLiveness(session.LiveReady)); err != nil {
+		t.Fatalf("transition: %v", err)
+	}
+	if err := lostIdle.Transition(session.ObserveLiveness(session.LiveLost)); err != nil {
+		t.Fatalf("transition: %v", err)
+	}
+	if holdsTaskRunSlot(lostIdle) {
+		t.Fatal("a run that had already finished must not reacquire a slot when a later outage marks it Lost")
 	}
 
 	archived := newInst(t, "archived")

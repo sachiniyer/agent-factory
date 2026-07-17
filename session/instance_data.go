@@ -48,6 +48,15 @@ func (i *Instance) ToInstanceData() InstanceData {
 		data.LimitResetAt = i.limitResetAt
 	}
 
+	// Persist "was it still working when it went Lost" only while the session is
+	// actually Lost (#1892) — the same gate, for the same reason, as the reset time
+	// above. The field is meaningless on a healthy row, and a stale true carried to
+	// disk would be read as fact by the concurrency cap if that session later went
+	// Lost, holding a slot for a run that had already finished.
+	if i.liveness == LiveLost {
+		data.LostWhileBusy = i.lostWhileBusy
+	}
+
 	// Persist each tab so the full agent+shell tab list survives a restart
 	// (Sachin's hard requirement for #930): on reload FromInstanceData restores
 	// each local tab's tmux session by its exact persisted name, reconnecting
@@ -125,22 +134,27 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 	// must round-trip the exact op (#1436).
 	inFlightOp := inFlightOpFromData(data)
 	instance := &Instance{
-		ID:           data.ID,
-		TaskID:       data.TaskID,
-		Title:        data.Title,
-		Path:         data.Path,
-		Branch:       data.Branch,
-		liveness:     liveness,
-		inFlightOp:   inFlightOp,
-		limitResetAt: data.LimitResetAt,
-		Height:       data.Height,
-		Width:        data.Width,
-		CreatedAt:    data.CreatedAt,
-		UpdatedAt:    data.UpdatedAt,
-		Program:      data.Program,
-		AutoYes:      data.AutoYes,
-		Prompt:       data.Prompt,
-		userKilled:   data.UserKilled,
+		ID:         data.ID,
+		TaskID:     data.TaskID,
+		Title:      data.Title,
+		Path:       data.Path,
+		Branch:     data.Branch,
+		liveness:   liveness,
+		inFlightOp: inFlightOp,
+		// Carried across the restart (#1892). An outage that loses sessions is the
+		// same event that restarts the daemon, so this fact has to come back from
+		// disk or the cap would re-decide it from a Lost state that cannot tell a
+		// finished run from an interrupted one.
+		lostWhileBusy: data.LostWhileBusy,
+		limitResetAt:  data.LimitResetAt,
+		Height:        data.Height,
+		Width:         data.Width,
+		CreatedAt:     data.CreatedAt,
+		UpdatedAt:     data.UpdatedAt,
+		Program:       data.Program,
+		AutoYes:       data.AutoYes,
+		Prompt:        data.Prompt,
+		userKilled:    data.UserKilled,
 	}
 
 	// Pick backend based on persisted BackendType.

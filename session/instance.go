@@ -110,6 +110,25 @@ type Instance struct {
 	// liveness.go. Both are mutex-protected.
 	liveness   Liveness
 	inFlightOp InFlightOp
+	// lostWhileBusy records whether this session was still WORKING at the instant
+	// it went Lost (#1892). It is recorded by Transition on the edge INTO LiveLost
+	// and persisted, because it is a fact that exists only at that instant and is
+	// unrecoverable afterwards: a Lost session that finished its work hours ago and
+	// one that was interrupted mid-run look identical from their current state.
+	//
+	// The watch-task concurrency cap needs the distinction. It keeps a Lost
+	// session's slot held, since the restore loop can bring it back Running and
+	// blow the cap — but ONLY for a run that was actually in flight. A task-spawned
+	// session keeps its TaskID forever, so without this a session that COMPLETED
+	// long ago would silently reacquire a slot the moment a tmux outage marked it
+	// Lost, and with a cap of 1 one finished session would park every new event
+	// behind work that ended hours earlier.
+	//
+	// Recomputed on every edge into Lost (never on Lost→Lost, which would overwrite
+	// the original verdict with a reading of the Lost state itself), so a session
+	// that is lost, restored, finishes, and is lost again is correctly judged idle
+	// the second time. Meaningless while not Lost, and read only then.
+	lostWhileBusy bool
 	// limitResetAt is the parsed usage-limit reset time (#1146), display-only in
 	// PR2: set alongside liveness == LiveLimitReached when the pane shows a limit
 	// banner carrying a parseable reset time (zero when it carried none). Read

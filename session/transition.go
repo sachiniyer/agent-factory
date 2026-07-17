@@ -306,6 +306,19 @@ func (i *Instance) Transition(ev TransitionEvent) error {
 	}
 
 	to := spec.target(from, ev)
+	// Capture "was this run still in flight?" on the edge INTO Lost — the one
+	// instant the fact exists (#1892). Afterwards it is unrecoverable: a session
+	// that finished its work and one that was interrupted mid-run are both just
+	// LiveLost, indistinguishable from their current state. The watch-task cap
+	// holds a Lost session's slot only when the answer is yes.
+	//
+	// Guarded on from.liveness != LiveLost so a repeated Lost observation cannot
+	// overwrite the verdict with a reading of the Lost state itself (which is never
+	// pending, and would silently flip every held slot loose on the next poll).
+	if to.liveness == LiveLost && from.liveness != LiveLost {
+		activity, _ := ClassifyActivity(InstanceData{Liveness: from.liveness, InFlightOp: from.op})
+		i.lostWhileBusy = activity == ActivityPending
+	}
 	i.liveness = to.liveness
 	i.inFlightOp = to.op
 	switch spec.started {
