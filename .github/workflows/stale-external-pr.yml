@@ -1,0 +1,76 @@
+name: Stale external PRs
+
+# Auto-closes stale EXTERNAL-contributor (fork) PRs: when a maintainer has
+# requested changes and the contributor has gone quiet for 12h+, close with a
+# warm note inviting them to reopen. The decision logic (fork-only, 12h clock,
+# ball-in-court) lives in .github/scripts/stale-external-pr.js and is unit
+# tested in stale-external-pr.test.js (run in the Lint job of pr.yml).
+#
+# Safety:
+#   * Repo variable STALE_EXTERNAL_PR_ENABLED is the master kill-switch. Until
+#     it is set to 'true', every run is DRY-RUN only — scheduled runs stay
+#     auditable and harmless, so Sachin can watch the logs before arming it.
+#   * The workflow_dispatch `dry_run` input forces a preview even when enabled.
+#   * The built-in GITHUB_TOKEN is scoped to just comment + label + close.
+
+on:
+  schedule:
+    # Every 4 hours (within the 3–6h window).
+    - cron: "0 */4 * * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Only log what would be closed; never comment/label/close"
+        type: boolean
+        required: false
+        default: false
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+
+concurrency:
+  group: stale-external-pr
+  cancel-in-progress: false
+
+jobs:
+  sweep:
+    name: Close stale external PRs
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out helper
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+
+      - name: Evaluate and close
+        uses: actions/github-script@v8
+        env:
+          # Master kill-switch. Anything other than the exact string 'true'
+          # keeps the sweep in dry-run.
+          ENABLED: ${{ vars.STALE_EXTERNAL_PR_ENABLED }}
+          INPUT_DRY_RUN: ${{ github.event.inputs.dry_run }}
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const path = require("path");
+            const helperPath = path.join(
+              process.env.GITHUB_WORKSPACE,
+              ".github/scripts/stale-external-pr.js",
+            );
+            const { run } = require(helperPath);
+
+            const enabled = process.env.ENABLED === "true";
+            const forcedDryRun = process.env.INPUT_DRY_RUN === "true";
+            const dryRun = forcedDryRun || !enabled;
+
+            if (!enabled) {
+              core.notice(
+                "STALE_EXTERNAL_PR_ENABLED is not 'true' — running in dry-run. Set the repo variable to 'true' to arm real closes.",
+              );
+            } else if (forcedDryRun) {
+              core.notice("dry_run input is set — running in dry-run.");
+            }
+
+            await run({ github, context, core, dryRun });
