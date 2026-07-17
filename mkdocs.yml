@@ -133,6 +133,7 @@ nav:
           - Lifecycle testing: lifecycle-testing.md
           - Web client selftest: web-selftest.md
           - File-length lint: file-length-lint.md
+          - Surface parity: surface-parity.md
           - Release process: release-process.md
           - Release notes: release-notes.md
           - Release testing plan: release-testing-plan.md

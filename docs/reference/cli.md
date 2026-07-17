@@ -1217,6 +1217,7 @@ af sessions send-prompt <title> <prompt> [flags]
 | `--create` |  | Auto-create the session if it doesn't exist |
 | `--include-root` |  | With --all, also deliver to the reserved root session (excluded by default) |
 | `--program` | `string` | Program to run when creating a new session (one of: claude, codex, aider, gemini, amp, opencode; defaults to config default) |
+| `--prompt` | `string` | The prompt to send (alias for the positional <prompt>, matching 'sessions create --prompt') |
 
 **Global flags**
 

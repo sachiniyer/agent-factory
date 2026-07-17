@@ -595,6 +595,10 @@ func init() {
 	sessionsCreateCmd.Flags().StringVar(&createBackendFlag, "backend", "", "Runtime to run the session on (one of: "+config.SupportedBackendsString()+"; defaults to the repo's backend config, or local). docker runs the session in a container (set docker.image in the repo config); ssh runs it on a remote host (set ssh.host in the repo config)")
 	sessionsCreateCmd.MarkFlagRequired("name")
 
+	// --prompt is an ALIAS for the positional <prompt>, mirroring `sessions
+	// create --prompt` so the two sibling verbs take the same concept the same
+	// way. The positional stays supported: this is additive, not a migration.
+	sessionsSendPromptCmd.Flags().StringVar(&sendPromptPromptFlag, "prompt", "", "The prompt to send (alias for the positional <prompt>, matching 'sessions create --prompt')")
 	sessionsSendPromptCmd.Flags().BoolVar(&sendPromptCreateFlag, "create", false, "Auto-create the session if it doesn't exist")
 	sessionsSendPromptCmd.Flags().StringVar(&sendPromptProgramFlag, "program", "", "Program to run when creating a new session (one of: "+tmux.SupportedProgramsString()+"; defaults to config default)")
 	sessionsSendPromptCmd.Flags().BoolVar(&sendPromptAllFlag, "all", false, "Broadcast the prompt to every live session in scope (current repo by default; excludes the reserved root session)")
