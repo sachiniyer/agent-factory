@@ -49,6 +49,13 @@ jobs:
           fi
         fi
 
+    # The preflight runs the full suite, and internal/shellsuggest FAILS rather
+    # than skips when a shell it claims (sh/bash/zsh) is absent (#1978/#1988).
+    # Without zsh the preflight cannot pass, so a release would be unable to cut.
+    - name: Install zsh
+      if: steps.check.outputs.should_release == 'true'
+      run: sudo apt-get update && sudo apt-get install -y --no-install-recommends zsh
+
     - name: Release preflight
       if: steps.check.outputs.should_release == 'true'
       run: |
