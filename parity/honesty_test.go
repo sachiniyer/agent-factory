@@ -24,6 +24,8 @@ package parity
 // correct: the fixture has to be retired deliberately, not silently.
 
 import (
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"testing"
@@ -233,6 +235,38 @@ func TestDerivationSeesNestedProjectPathGap(t *testing.T) {
 	if !fields["Name"] {
 		t.Error("derivation says the CLI never sets TaskUpdate.Name, but api/tasks.go does " +
 			"(`patch.Name = strPtr(...)`) — under-reporting.")
+	}
+}
+
+// TestReturnedLiteralsAreBounded locks a parser bug found by reading this
+// package's own unreviewed diff: objectLiteralsReturnedBy searched from a
+// function's declaration to the END OF THE FILE, so asked for a function that
+// returns a string it returned the NEXT function's object literal.
+//
+// It matters more than a bug in ordinary code. An over-credited payload reach
+// makes a real gap read as parity — the analyzer launders its own defect into a
+// green check, which is the failure this package exists to prevent.
+func TestReturnedLiteralsAreBounded(t *testing.T) {
+	b, err := os.ReadFile(filepath.Join(repoRoot(t), "web/src/tasks.ts"))
+	if err != nil {
+		t.Fatalf("read tasks.ts: %v", err)
+	}
+	src := string(b)
+
+	// buildTask really does return an object literal — if this is 0 the parser
+	// is blind and every assertion below is vacuous.
+	if got := objectLiteralsReturnedBy(src, "buildTask"); len(got) != 1 {
+		t.Fatalf("buildTask should return exactly 1 object literal, got %d — the parser is blind", len(got))
+	}
+	// These return strings. Any literal here leaked from a neighbouring
+	// function, which is the unbounded-search bug.
+	for _, fn := range []string{"genTaskId", "triggerSummary", "lastRunSummary"} {
+		if got := objectLiteralsReturnedBy(src, fn); len(got) != 0 {
+			t.Errorf("%s() returns a string, but the parser attributed %d object literal(s) to "+
+				"it — the search is reaching past the function body into a neighbour, which "+
+				"over-credits a payload's reach and turns a real gap into a green check.",
+				fn, len(got))
+		}
 	}
 }
 

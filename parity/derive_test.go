@@ -543,20 +543,49 @@ func isBuilderCall(arg string, builders map[string]bool) bool {
 }
 
 // objectLiteralsReturnedBy returns the object literals a named function returns.
+//
+// The search is bounded to the function's OWN body. An unbounded scan from the
+// declaration reads on into the rest of the file and steals the next function's
+// literal: asked for genTaskId (which returns a string), it happily returned
+// buildTask's TaskData literal. That over-credits a payload's reach, which is the
+// under-reporting failure this package exists to prevent — a parser bug in the
+// tool is worth more than a bug in the code it audits, because it silently
+// launders itself into a green check.
 func objectLiteralsReturnedBy(src, fn string) []string {
-	var out []string
 	re := regexp.MustCompile(`function\s+` + regexp.QuoteMeta(fn) + `\s*\(`)
 	loc := re.FindStringIndex(src)
 	if loc == nil {
 		return nil
 	}
-	body := src[loc[1]:]
-	i := strings.Index(body, "return {")
-	if i < 0 {
+	// Step over the parameter list (which may itself contain braces, e.g. a
+	// destructured argument) to reach the body brace.
+	parenAt := loc[1] - 1
+	params := balancedFrom(src[parenAt:])
+	if params == "" {
 		return nil
 	}
-	if lit := balancedFrom(body[i+len("return "):]); lit != "" {
-		out = append(out, lit)
+	after := src[parenAt+len(params):]
+	bi := strings.Index(after, "{")
+	if bi < 0 {
+		return nil
+	}
+	body := balancedFrom(after[bi:])
+	if body == "" {
+		return nil
+	}
+
+	var out []string
+	for off := 0; ; {
+		i := strings.Index(body[off:], "return {")
+		if i < 0 {
+			break
+		}
+		at := off + i + len("return ")
+		off = at
+		if lit := balancedFrom(body[at:]); lit != "" {
+			out = append(out, lit)
+			off = at + len(lit)
+		}
 	}
 	return out
 }
