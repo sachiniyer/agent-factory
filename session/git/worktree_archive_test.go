@@ -9,10 +9,12 @@ import (
 	"syscall"
 	"testing"
 
-	"github.com/sachiniyer/agent-factory/config"
-	aflog "github.com/sachiniyer/agent-factory/log"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/testguard"
+	aflog "github.com/sachiniyer/agent-factory/log"
 )
 
 // archiveTestWorktree creates a real git repo with one commit and a registered
@@ -127,7 +129,7 @@ func assertSubmoduleIntactAt(t *testing.T, path string) {
 // leaves git's registration pointing at the new path.
 func TestMoveWorktree_FastPathPreservesTreeAndReregisters(t *testing.T) {
 	gw, _, srcPath := archiveTestWorktree(t)
-	dest := filepath.Join(t.TempDir(), "archived", "repoid", "arch")
+	dest := filepath.Join(testguard.CanonicalTempDir(t), "archived", "repoid", "arch")
 
 	require.NoError(t, gw.MoveWorktree(dest))
 
@@ -146,7 +148,7 @@ func TestMoveWorktree_FallbackRepairsRegistration(t *testing.T) {
 	t.Cleanup(func() { worktreeMoveFast = prev })
 
 	gw, _, srcPath := archiveTestWorktree(t)
-	dest := filepath.Join(t.TempDir(), "archived", "repoid", "arch")
+	dest := filepath.Join(testguard.CanonicalTempDir(t), "archived", "repoid", "arch")
 
 	require.NoError(t, gw.MoveWorktree(dest))
 
@@ -172,7 +174,7 @@ func TestMoveWorktree_CrossDeviceCopyCleanupFailureCommitsCopiedLocation(t *test
 	t.Cleanup(func() { renamePath = prevRename })
 
 	gw, _, srcPath := archiveTestWorktree(t)
-	dest := filepath.Join(t.TempDir(), "archived", "repoid", "arch")
+	dest := filepath.Join(testguard.CanonicalTempDir(t), "archived", "repoid", "arch")
 
 	cleanupErr := errors.New("forced source cleanup failure")
 	prevRemoveAll := removeAllPath
@@ -204,14 +206,14 @@ func TestRestoreWorktreeTo_FallbackRepairsSubmoduleGitdirs(t *testing.T) {
 	t.Cleanup(func() { worktreeMoveFast = prev })
 
 	gw, _, srcPath := archiveTestWorktreeWithSubmodule(t)
-	archiveDest := filepath.Join(t.TempDir(), "archived", "repoid", "arch")
+	archiveDest := filepath.Join(testguard.CanonicalTempDir(t), "archived", "repoid", "arch")
 	require.NoError(t, gw.MoveWorktree(archiveDest))
 
 	assert.False(t, pathExists(srcPath), "the source directory must be gone after archive")
 	assertLiveWorktreeAt(t, gw, archiveDest)
 	assertSubmoduleIntactAt(t, archiveDest)
 
-	restoreDest := filepath.Join(t.TempDir(), "restored", "repo-arch-sub-restored")
+	restoreDest := filepath.Join(testguard.CanonicalTempDir(t), "restored", "repo-arch-sub-restored")
 	require.NoError(t, gw.RestoreWorktreeTo(restoreDest))
 
 	assert.False(t, pathExists(archiveDest), "the archive directory must be gone after restore")
@@ -240,11 +242,11 @@ func TestRestoreWorktreeTo_SubmoduleRepairFailureIsBestEffort(t *testing.T) {
 	t.Cleanup(func() { aflog.WarningLog = origWarning })
 
 	gw, _, _ := archiveTestWorktree(t)
-	archiveDest := filepath.Join(t.TempDir(), "archived", "repoid", "arch")
+	archiveDest := filepath.Join(testguard.CanonicalTempDir(t), "archived", "repoid", "arch")
 	require.NoError(t, gw.MoveWorktree(archiveDest))
 	assertLiveWorktreeAt(t, gw, archiveDest)
 
-	restoreDest := filepath.Join(t.TempDir(), "restored", "repo-arch-restored")
+	restoreDest := filepath.Join(testguard.CanonicalTempDir(t), "restored", "repo-arch-restored")
 	require.NoError(t, gw.RestoreWorktreeTo(restoreDest))
 
 	assert.False(t, pathExists(archiveDest), "the archive directory must be gone after restore")
@@ -363,7 +365,7 @@ func TestMoveWorktree_RepairFailureStillCommitsLocation(t *testing.T) {
 	t.Cleanup(func() { worktreeRepair = prevRepair })
 
 	gw, _, srcPath := archiveTestWorktree(t)
-	dest := filepath.Join(t.TempDir(), "archived", "repoid", "arch")
+	dest := filepath.Join(testguard.CanonicalTempDir(t), "archived", "repoid", "arch")
 
 	err := gw.MoveWorktree(dest)
 	require.Error(t, err, "a repair failure must surface to the caller")
@@ -383,11 +385,11 @@ func TestMoveWorktree_RepairFailureStillCommitsLocation(t *testing.T) {
 // location is a valid, registered worktree.
 func TestRestoreWorktreeTo_RoundTripPreservesUncommitted(t *testing.T) {
 	gw, _, _ := archiveTestWorktree(t)
-	archiveDest := filepath.Join(t.TempDir(), "archived", "repoid", "arch")
+	archiveDest := filepath.Join(testguard.CanonicalTempDir(t), "archived", "repoid", "arch")
 	require.NoError(t, gw.MoveWorktree(archiveDest))
 	assertLiveWorktreeAt(t, gw, archiveDest)
 
-	restoreDest := filepath.Join(t.TempDir(), "restored", "repo-arch")
+	restoreDest := filepath.Join(testguard.CanonicalTempDir(t), "restored", "repo-arch")
 	require.NoError(t, gw.RestoreWorktreeTo(restoreDest))
 
 	assert.False(t, pathExists(archiveDest), "the archive directory must be gone after restore")
@@ -399,12 +401,12 @@ func TestRestoreWorktreeTo_RoundTripPreservesUncommitted(t *testing.T) {
 // salvage.
 func TestRestoreWorktreeTo_RepoGone(t *testing.T) {
 	gw, repoRoot, _ := archiveTestWorktree(t)
-	archiveDest := filepath.Join(t.TempDir(), "archived", "repoid", "arch")
+	archiveDest := filepath.Join(testguard.CanonicalTempDir(t), "archived", "repoid", "arch")
 	require.NoError(t, gw.MoveWorktree(archiveDest))
 
 	require.NoError(t, os.RemoveAll(repoRoot), "simulate the origin repo being deleted")
 
-	err := gw.RestoreWorktreeTo(filepath.Join(t.TempDir(), "restored", "repo-arch"))
+	err := gw.RestoreWorktreeTo(filepath.Join(testguard.CanonicalTempDir(t), "restored", "repo-arch"))
 	require.Error(t, err)
 	assert.True(t, errors.Is(err, ErrRepoGone), "a deleted origin repo must surface as ErrRepoGone, got %v", err)
 	assert.True(t, pathExists(archiveDest), "the archived worktree must be left intact when the repo is gone")

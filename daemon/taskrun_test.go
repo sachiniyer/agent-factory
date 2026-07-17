@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/testguard"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/task"
 )
@@ -30,7 +31,7 @@ func seedDisabledTask(id string) error {
 // without validating taskID, so an ID like "foo/../../rogue/pwned" produced a
 // lock file in an arbitrary writable directory.
 func TestRunTask_PathTraversalCreatesLockOutsideLocksDir(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testguard.SocketTempDir(t)
 	t.Setenv("AGENT_FACTORY_HOME", tmp)
 
 	// Pre-create the rogue parent so an unchecked OpenFile would succeed:
@@ -73,7 +74,7 @@ func TestRunTask_PathTraversalCreatesLockOutsideLocksDir(t *testing.T) {
 // TestRunTask_RefusesDisabledTask pins that a disabled task can never fire,
 // whichever caller (scheduler or `af tasks trigger`) asks.
 func TestRunTask_RefusesDisabledTask(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 
 	if err := seedDisabledTask("eeee0001"); err != nil {
 		t.Fatalf("seed task: %v", err)
@@ -164,7 +165,7 @@ func seedTargetSession(t *testing.T, repoPath, title string) {
 // TestRunTask_RefusesWatchTask pins that a watch task can never be fired
 // manually: there is no event line to render the prompt with.
 func TestRunTask_RefusesWatchTask(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 
 	if err := task.AddTask(task.Task{
 		ID:        "ffff0001",
@@ -187,7 +188,7 @@ func TestRunTask_RefusesWatchTask(t *testing.T) {
 // delivery mode: no target_session means a fresh session per run, titled from
 // the task name.
 func TestDeliverTaskPrompt_CreatesSessionWithoutTarget(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	repo := setupTaskRepo(t)
 	creates, delivers := stubTaskDelivery(t)
 
@@ -218,7 +219,7 @@ func TestDeliverTaskPrompt_CreatesSessionWithoutTarget(t *testing.T) {
 // delivery mode: with target_session set and the session present, the prompt
 // is sent into it (repo-scoped) instead of creating a session.
 func TestDeliverTaskPrompt_SendsIntoExistingTargetSession(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	repo := setupTaskRepo(t)
 	creates, delivers := stubTaskDelivery(t)
 	seedTargetSession(t, repo, "captain")
@@ -249,7 +250,7 @@ func TestDeliverTaskPrompt_SendsIntoExistingTargetSession(t *testing.T) {
 // missing target_session is auto-created and the prompt delivered as its
 // initial prompt, mirroring `af sessions send-prompt --create`.
 func TestDeliverTaskPrompt_AutoCreatesMissingTargetSession(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	repo := setupTaskRepo(t)
 	creates, delivers := stubTaskDelivery(t)
 
@@ -280,7 +281,7 @@ func TestDeliverTaskPrompt_AutoCreatesMissingTargetSession(t *testing.T) {
 // end to end through RunTask: a cron task with target_session sends its
 // prompt into the live session and records the "sent" status.
 func TestRunTask_CronTaskHonorsTargetSession(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	repo := setupTaskRepo(t)
 	_, delivers := stubTaskDelivery(t)
 	seedTargetSession(t, repo, "captain")
@@ -319,7 +320,7 @@ func TestRunTask_CronTaskHonorsTargetSession(t *testing.T) {
 // the TUI showed a stale LastRunStatus forever. RunTask must now record an
 // "errored" status on every failure that occurs once it owns the task's run.
 func TestRunTask_PersistsFailureStatusOnBadRepo(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 
 	// A real directory that is deliberately NOT a git repo. A prior successful
 	// run is simulated by seeding LastRunStatus so we can prove it is replaced,

@@ -11,10 +11,12 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+	"github.com/stretchr/testify/require"
+
 	"github.com/sachiniyer/agent-factory/agentproto"
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/testguard"
 	"github.com/sachiniyer/agent-factory/session"
-	"github.com/stretchr/testify/require"
 )
 
 // fakeHeadlessAgentServer is an in-memory session.AgentServer for the headless
@@ -131,7 +133,7 @@ func (s *fakeSub) Close() error     { return nil }
 // the single AgentServer and gated exactly like the daemon surface — without a
 // real session or a spawned daemon.
 func TestHeadlessAgentServer_HTTPTokenRoundTrip(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 
 	fake := newFakeHeadlessAgentServer()
 	hs := &headlessServer{as: fake, title: "probe", events: newEventsHub()}
@@ -269,7 +271,7 @@ func TestHeadlessAgentServer_HTTPTokenRoundTrip(t *testing.T) {
 // REST surface, which this server does not implement). Serving a working-looking
 // frontend that cannot work is exactly the confusion the help text now disclaims.
 func TestAgentServerServesNoWebShell(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 
 	cfg := config.DefaultConfig()
 	cfg.ListenAddr = "127.0.0.1:0"

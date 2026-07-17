@@ -124,7 +124,7 @@ func installRecordingBackend(t *testing.T) *promptRecorder {
 // path let the loser of the creation race surface "already reserved" and
 // dropped its prompt entirely.
 func TestDeliverPrompt_ConcurrentDeliveriesCreateOnceDeliverAll(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	rec := installRecordingBackend(t)
 	repoPath := setupControlRepo(t)
 	repo, err := config.RepoFromPath(repoPath)
@@ -213,7 +213,7 @@ func TestDeliverPrompt_ConcurrentDeliveriesCreateOnceDeliverAll(t *testing.T) {
 // prompt, the second sends into it, and the prompts land in lock-acquisition
 // order rather than interleaving.
 func TestDeliverPrompt_SerializesDeliveryInOrder(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	rec := &promptRecorder{}
 
 	// One create happens (the winner); its Start blocks until we release it so
@@ -283,7 +283,7 @@ func TestDeliverPrompt_SerializesDeliveryInOrder(t *testing.T) {
 // that is mid-teardown is surfaced as an error rather than silently dropped or
 // delivered into a dying session (#847 must be respected).
 func TestDeliverPrompt_RefusesDeletingTarget(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	rec := installRecordingBackend(t)
 	repoPath := setupControlRepo(t)
 	repo, err := config.RepoFromPath(repoPath)
@@ -463,7 +463,7 @@ func TestSendPrompt_RefusesLostAndDeadTargetsBeforeBackendSend(t *testing.T) {
 // not set OpKilling on the instance, so SendPrompt must check the daemon kill
 // marker instead of writing into a session that is already being torn down.
 func TestSendPrompt_RefusesKillInFlightTarget(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	rec := &promptRecorder{}
 	backend := &slowRecordingKillBackend{
 		killStarted: make(chan struct{}),
@@ -538,7 +538,7 @@ func TestSendPrompt_RefusesKillInFlightTarget(t *testing.T) {
 }
 
 func TestSendPrompt_DeliversBeforeLaterKillStartsTeardown(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	rec := &promptRecorder{}
 	backend := &blockingSendKillBackend{
 		rec:         rec,
@@ -647,7 +647,7 @@ func TestSendPrompt_DeliversBeforeLaterKillStartsTeardown(t *testing.T) {
 // DeliverPrompt must consult the manager's in-flight kill marker and reject
 // instead of reporting success for a prompt that may be lost mid-kill (#1333).
 func TestDeliverPrompt_RefusesKillInFlightTarget(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	rec := &promptRecorder{}
 	backend := &slowRecordingKillBackend{
 		killStarted: make(chan struct{}),
@@ -726,7 +726,7 @@ func TestDeliverPrompt_RefusesKillInFlightTarget(t *testing.T) {
 // fallback's wait: a session that materializes after a brief delay is picked up
 // rather than timing out, while a Deleting one is surfaced as an error.
 func TestWaitForTargetSession_ReturnsWhenSessionAppears(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	installRecordingBackend(t)
 	repoPath := setupControlRepo(t)
 	repo, err := config.RepoFromPath(repoPath)
@@ -790,7 +790,7 @@ func TestIsConcurrentCreateErr(t *testing.T) {
 // for root to come back and then send into it, mirroring the concurrent-create
 // retry.
 func TestDeliverPrompt_RootTargetWaitsForRecreationThenSends(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	rec := installRecordingBackend(t)
 	repoPath := setupControlRepo(t)
 	// The repo is opted into a root agent, so the ensure loop owns "root".
@@ -843,7 +843,7 @@ func TestDeliverPrompt_RootTargetWaitsForRecreationThenSends(t *testing.T) {
 // the delivery surfaces a "being recreated" error rather than the misleading
 // reserved-name / "pick another name" one, and no event is delivered.
 func TestDeliverPrompt_RootTargetAbsentSurfacesAccurateError(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	rec := installRecordingBackend(t)
 	repoPath := setupControlRepo(t)
 
@@ -885,7 +885,7 @@ func TestDeliverPrompt_RootTargetAbsentSurfacesAccurateError(t *testing.T) {
 // ensure loop will never materialize a root there, so waiting would be pointless
 // and the actionable "add it to root_agents" guidance must remain.
 func TestDeliverPrompt_ReservedRootUnconfiguredStillRejected(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	installRecordingBackend(t)
 	repoPath := setupControlRepo(t)
 
@@ -924,7 +924,7 @@ func TestDeliverPrompt_ReservedRootUnconfiguredStillRejected(t *testing.T) {
 // loop will never bring back, then blame the delay on a recreation that is not
 // happening.
 func TestDeliverPrompt_DeletedProjectRootStillRejected(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	installRecordingBackend(t)
 	repoPath := setupControlRepo(t)
 
@@ -997,7 +997,7 @@ func TestDeliverPrompt_TmuxOrphanReturnsImmediatelyWithError(t *testing.T) {
 	// #1056: private tmux server so the raw orphan session below dies with
 	// the test even when the kill-session cleanup fails.
 	testguard.IsolateTmux(t)
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 
 	repoPath := setupControlRepo(t)
 	repo, err := config.RepoFromPath(repoPath)

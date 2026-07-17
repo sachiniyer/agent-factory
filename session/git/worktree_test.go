@@ -11,11 +11,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
 	"github.com/sachiniyer/agent-factory/log"
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 )
 
 func TestMain(m *testing.M) {
@@ -753,9 +754,20 @@ func TestGetWorktreeDirectoryForRepo_FromLinkedWorktree(t *testing.T) {
 		"new worktrees should be placed next to the main repo, not next to a linked worktree")
 }
 
+// createGitRepo builds a throwaway git repo and returns its CANONICAL root.
+//
+// The path is canonicalized for the same reason tempBinPath is in
+// commands/tempbin_test.go (#1918/#1921): macOS hands out temp dirs under
+// /var/folders/…, and /var is a symlink to /private/var. The production code
+// resolves what git reports to the physical path, so an expectation written in
+// t.TempDir()'s unresolved spelling compares /var/… against /private/var/… and
+// fails — on macOS only. Canonicalizing at the source fixes the cause once, so
+// every assertion downstream is written in the same spelling production uses and
+// is correct by default. EvalSymlinks is a no-op on an already-canonical path,
+// which is why this is inert on Linux (#1918).
 func createGitRepo(t *testing.T) string {
 	t.Helper()
-	repoRoot := filepath.Join(t.TempDir(), "repo")
+	repoRoot := filepath.Join(testguard.CanonicalTempDir(t), "repo")
 	require.NoError(t, os.MkdirAll(repoRoot, 0755))
 
 	cmd := exec.Command("git", "init")

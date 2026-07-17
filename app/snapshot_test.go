@@ -5,10 +5,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sachiniyer/agent-factory/daemon"
-	"github.com/sachiniyer/agent-factory/session"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/sachiniyer/agent-factory/daemon"
+	"github.com/sachiniyer/agent-factory/session"
 )
 
 // newSnapshotTestInstance builds an unstarted, non-transient sidebar instance.

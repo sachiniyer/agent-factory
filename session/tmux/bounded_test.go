@@ -137,6 +137,12 @@ func TestBoundedTmuxCommandsSucceedWhenTmuxIsHealthy(t *testing.T) {
 // catch. So this drives a REAL tmux, on a private server (IsolateTmux) so it
 // cannot touch the developer's sessions.
 func TestRealPipePaneStreamsPastTheReap(t *testing.T) {
+	// This is the MINIMAL repro of #1945 — raw mkfifo + pipe-pane + dd + one read,
+	// no agent-server, no daemon, no broker. If #1945 is real then bytes never
+	// arrive here either, and whoever picks it up gets a 20-line reproduction
+	// instead of a full round-trip to bisect. (#1943's teardown wedge, which this
+	// used to be skipped for, is FIXED by #1944 — this skip is about delivery.)
+	testguard.SkipDarwinPTYStream(t)
 	testguard.IsolateTmux(t)
 
 	const name = "af1787-reap-pipe"
@@ -166,13 +172,31 @@ func TestRealPipePaneStreamsPastTheReap(t *testing.T) {
 	if err := ts.SendRawKeys([]byte("echo AF1787MARKER\n")); err != nil {
 		t.Fatalf("SendRawKeys: %v", err)
 	}
+	// Bound the read from OUTSIDE rather than with SetReadDeadline. A FIFO opened
+	// via os.OpenFile is non-pollable on darwin (golang/go#24164), so SetReadDeadline
+	// there returns "file type does not support deadline" and the bound never arms —
+	// it can never work for this fd type by Go's own design, on the very platform
+	// this fixture mirrors. A goroutine plus a timeout arms identically everywhere.
+	// The buffered channel keeps the reader from blocking on send if it does return
+	// after the timeout.
 	buf := make([]byte, 4096)
-	if err := rc.SetReadDeadline(time.Now().Add(10 * time.Second)); err != nil {
-		t.Fatalf("set deadline: %v", err)
+	type readResult struct {
+		n   int
+		err error
 	}
-	n, err := rc.Read(buf)
-	if err != nil || n == 0 {
-		t.Fatalf("no bytes streamed after EnablePipePane — did the reap kill pipe-pane's own dd? err=%v n=%d", err, n)
+	done := make(chan readResult, 1)
+	go func() {
+		n, err := rc.Read(buf)
+		done <- readResult{n, err}
+	}()
+	var res readResult
+	select {
+	case res = <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatalf("no bytes streamed within 10s after EnablePipePane — did the reap kill pipe-pane's own dd?")
+	}
+	if res.err != nil || res.n == 0 {
+		t.Fatalf("no bytes streamed after EnablePipePane — did the reap kill pipe-pane's own dd? err=%v n=%d", res.err, res.n)
 	}
 	if err := ts.DisablePipePane(); err != nil {
 		t.Fatalf("DisablePipePane: %v", err)

@@ -15,6 +15,7 @@ import (
 	"github.com/sachiniyer/agent-factory/agentproto"
 	"github.com/sachiniyer/agent-factory/apiproto"
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/testguard"
 	"github.com/sachiniyer/agent-factory/task"
 
 	"github.com/stretchr/testify/assert"
@@ -65,7 +66,7 @@ func dataInto(t *testing.T, env apiproto.Envelope, dst any) {
 // TestHTTP_ListTasks_ReadRoute covers a read route: POST /v1/ListTasks returns
 // 200 with the task list read from disk, wrapped in the success envelope.
 func TestHTTP_ListTasks_ReadRoute(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	require.NoError(t, task.AddTask(enabledCronTask("aaaa1001", "")))
 	require.NoError(t, task.AddTask(enabledCronTask("aaaa1002", "")))
 
@@ -85,7 +86,7 @@ func TestHTTP_ListTasks_ReadRoute(t *testing.T) {
 // TestHTTP_Snapshot_ReadRoute covers the sessions read route against a ready
 // manager: an all-repo Snapshot with no sessions returns an empty list.
 func TestHTTP_Snapshot_ReadRoute(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	m, err := NewManager(config.DefaultConfig())
 	require.NoError(t, err)
 
@@ -102,7 +103,7 @@ func TestHTTP_Snapshot_ReadRoute(t *testing.T) {
 // TestHTTP_AddTask_MutationRoute covers a create/mutation route: POST /v1/AddTask
 // persists the task through the shared core and re-arms the scheduler.
 func TestHTTP_AddTask_MutationRoute(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	cs := &controlServer{scheduler: newTaskScheduler()}
 
 	body, err := json.Marshal(AddTaskRequest{Task: enabledCronTask("bbbb1001", "")})
@@ -128,7 +129,7 @@ func TestHTTP_AddTask_MutationRoute(t *testing.T) {
 // handler-error → 500 mapping: RunTask refuses a disabled task, and the envelope
 // still carries the error message.
 func TestHTTP_TriggerTask_HandlerError(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	disabled := enabledCronTask("cccc1001", "")
 	disabled.Enabled = false
 	require.NoError(t, task.AddTask(disabled))
@@ -144,7 +145,7 @@ func TestHTTP_TriggerTask_HandlerError(t *testing.T) {
 
 // TestHTTP_MalformedJSON_400 covers the malformed-body → 400 mapping.
 func TestHTTP_MalformedJSON_400(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	rec := doHTTP(&controlServer{scheduler: newTaskScheduler()}, http.MethodPost, "/v1/AddTask", `{not json`)
 	require.Equal(t, http.StatusBadRequest, rec.Code)
 
@@ -162,7 +163,7 @@ func TestHTTP_MalformedJSON_400(t *testing.T) {
 // population that keeps strict decoding — see decodeHTTPRequest. Do not add the
 // header here: that would delete the #1264/#1273 guard this test exists to hold.
 func TestHTTP_UnknownJSONField_400(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	m, err := NewManager(config.DefaultConfig())
 	require.NoError(t, err)
 
@@ -188,7 +189,7 @@ func TestHTTP_UnknownJSONField_400(t *testing.T) {
 // is the only honest way to test forward compatibility from inside the current
 // version.
 func TestHTTP_AfClientUnknownAdditiveField_Tolerated(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	m, err := NewManager(config.DefaultConfig())
 	require.NoError(t, err)
 
@@ -206,7 +207,7 @@ func TestHTTP_AfClientUnknownAdditiveField_Tolerated(t *testing.T) {
 // daemon does not know, sent by an af client. Whatever else Preview does with an
 // unknown session, it must never fail the request for the FIELD.
 func TestHTTP_AfClientSkewedField_DoesNotRejectByName(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	m, err := NewManager(config.DefaultConfig())
 	require.NoError(t, err)
 
@@ -228,7 +229,7 @@ func TestHTTP_AfClientSkewedField_DoesNotRejectByName(t *testing.T) {
 // (shrunk) cap, nothing is persisted and the scheduler is untouched — the
 // manager was never reached.
 func TestHTTP_OversizeBody_413_NotDispatched(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	orig := maxHTTPBodyBytes
 	maxHTTPBodyBytes = 64
 	t.Cleanup(func() { maxHTTPBodyBytes = orig })
@@ -256,7 +257,7 @@ func TestHTTP_OversizeBody_413_NotDispatched(t *testing.T) {
 // TestHTTP_BodyUnderLimit_Succeeds covers the boundary from the other side: a
 // body that fits under the cap still decodes and dispatches normally.
 func TestHTTP_BodyUnderLimit_Succeeds(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	cs := &controlServer{scheduler: newTaskScheduler()}
 	body, err := json.Marshal(AddTaskRequest{Task: enabledCronTask("ffff2001", "")})
 	require.NoError(t, err)
@@ -289,7 +290,7 @@ func TestHTTP_UnknownRoute_404(t *testing.T) {
 // TestHTTP_WrongVerb_405 covers the wrong-verb → 405 mapping: RPC routes are
 // POST-only, health is GET-only.
 func TestHTTP_WrongVerb_405(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 
 	rec := doHTTP(&controlServer{}, http.MethodGet, "/v1/ListTasks", "")
 	require.Equal(t, http.StatusMethodNotAllowed, rec.Code)
@@ -316,7 +317,7 @@ func TestHTTP_Health(t *testing.T) {
 // the net/rpc handler (the controlServer method called directly) return
 // equivalent results because they ARE the same method.
 func TestHTTP_SharedCore_MatchesRPCTwin(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	require.NoError(t, task.AddTask(enabledCronTask("dddd1001", "")))
 	require.NoError(t, task.AddTask(enabledCronTask("dddd1002", "")))
 	cs := &controlServer{}
@@ -340,7 +341,7 @@ func TestHTTP_SharedCore_MatchesRPCTwin(t *testing.T) {
 // health and ListTasks routes — the `curl --unix-socket` path from the PR. It
 // also asserts the socket is torn down on close.
 func TestHTTP_UnixSocket_EndToEnd(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	m, err := NewManager(config.DefaultConfig())
 	require.NoError(t, err)
 	require.NoError(t, task.AddTask(enabledCronTask("eeee1001", "")))
@@ -397,7 +398,7 @@ func TestHTTP_UnixSocket_EndToEnd(t *testing.T) {
 // produced by the SAME apiproto.WriteEnvelope the CLI's --json path uses, so the
 // two surfaces are byte-for-byte identical and can never drift.
 func TestHTTP_SuccessBodyUsesSharedEnvelopeWriter(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	m, err := NewManager(config.DefaultConfig())
 	require.NoError(t, err)
 	cs := &controlServer{manager: m}

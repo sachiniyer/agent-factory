@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/testguard"
 	"github.com/sachiniyer/agent-factory/session"
 )
 
@@ -18,7 +19,7 @@ import (
 // lease before sending, exactly like the fast "exists" path. Before the fix it
 // sent unconditionally, pasting an automated prompt into the attached pane.
 func TestDeliverPrompt_ReemergingRootDefersWhileAttached(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	rec := installRecordingBackend(t)
 	repoPath := setupControlRepo(t)
 	repo, err := config.RepoFromPath(repoPath)
@@ -76,7 +77,7 @@ func TestDeliverPrompt_ReemergingRootDefersWhileAttached(t *testing.T) {
 // can attach during that wait, so the retry path must re-check the defer lease
 // before sending. Before the fix it sent unconditionally.
 func TestDeliverPrompt_ConcurrentCreateDefersWhileAttached(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	rec := installRecordingBackend(t)
 	repoPath := setupControlRepo(t)
 	repo, err := config.RepoFromPath(repoPath)

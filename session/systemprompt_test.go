@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/sachiniyer/agent-factory/internal/testguard"
 )
 
 func TestShellQuote(t *testing.T) {
@@ -26,7 +28,7 @@ func TestShellQuote(t *testing.T) {
 }
 
 func TestInjectSystemPrompt_Claude(t *testing.T) {
-	dir := t.TempDir()
+	dir := testguard.SocketTempDir(t)
 	t.Setenv("AGENT_FACTORY_HOME", dir)
 
 	result := injectSystemPrompt("claude")
@@ -43,7 +45,7 @@ func TestInjectSystemPrompt_Claude(t *testing.T) {
 }
 
 func TestInjectSystemPrompt_ClaudeWithResolvedFlags(t *testing.T) {
-	dir := t.TempDir()
+	dir := testguard.SocketTempDir(t)
 	t.Setenv("AGENT_FACTORY_HOME", dir)
 
 	// The resolved form (from program_overrides) carries the path-and-flags;
@@ -102,7 +104,7 @@ func TestInjectSystemPrompt_CodexWithResolvedFlags(t *testing.T) {
 // Aider has no auto-discovered skills folder, so it keeps a FLAG seam: af points a
 // --read at an af-owned context file carrying afUsageReference.
 func TestInjectSystemPrompt_Aider(t *testing.T) {
-	dir := t.TempDir()
+	dir := testguard.SocketTempDir(t)
 	t.Setenv("AGENT_FACTORY_HOME", dir)
 
 	result := injectSystemPrompt("aider")
@@ -521,7 +523,7 @@ func TestWriteAfMarkedFile_NonDestructive(t *testing.T) {
 // The aider context file is written under the af config dir and carries the
 // marker; a user's un-marked file at that path is preserved and --read is skipped.
 func TestEnsureAiderReadFile(t *testing.T) {
-	dir := t.TempDir()
+	dir := testguard.SocketTempDir(t)
 	t.Setenv("AGENT_FACTORY_HOME", dir)
 
 	path, err := ensureAiderReadFile()
@@ -565,7 +567,7 @@ func TestEnsureAiderReadFile(t *testing.T) {
 }
 
 func TestEnsurePluginDir(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := testguard.SocketTempDir(t)
 	t.Setenv("AGENT_FACTORY_HOME", tmpDir)
 
 	pluginDir, err := ensurePluginDir()
@@ -604,7 +606,7 @@ func TestEnsurePluginDir(t *testing.T) {
 }
 
 func TestEnsurePluginDir_Idempotent(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := testguard.SocketTempDir(t)
 	t.Setenv("AGENT_FACTORY_HOME", tmpDir)
 
 	dir1, err := ensurePluginDir()
@@ -623,7 +625,7 @@ func TestEnsurePluginDir_Idempotent(t *testing.T) {
 }
 
 func TestEnsurePluginDir_PrunesStaleFiles(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := testguard.SocketTempDir(t)
 	t.Setenv("AGENT_FACTORY_HOME", tmpDir)
 
 	pluginDir, err := ensurePluginDir()

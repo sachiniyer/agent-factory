@@ -12,6 +12,7 @@ import (
 
 	"github.com/sachiniyer/agent-factory/cmd/cmd_test"
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/testguard"
 	"github.com/sachiniyer/agent-factory/session"
 	sessiongit "github.com/sachiniyer/agent-factory/session/git"
 	"github.com/sachiniyer/agent-factory/session/tmux"
@@ -22,7 +23,7 @@ import (
 // in-memory tab list shrinks back to the agent tab, and the persisted record
 // no longer carries the closed tab so it does not reappear on restart.
 func TestCloseTab_RemovesNonAgentTabAndPersists(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	repoPath := setupControlRepo(t)
 	repo, err := config.RepoFromPath(repoPath)
 	if err != nil {
@@ -81,7 +82,7 @@ func TestCloseTab_RemovesNonAgentTabAndPersists(t *testing.T) {
 // TestCloseTab_RejectsAgentTab verifies the agent tab (index 0) cannot be
 // closed — KillSession tears down the whole session instead.
 func TestCloseTab_RejectsAgentTab(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	repoPath := setupControlRepo(t)
 	repo, err := config.RepoFromPath(repoPath)
 	if err != nil {
@@ -113,7 +114,7 @@ func TestCloseTab_RejectsAgentTab(t *testing.T) {
 // exists to prevent, just moved later. The refusal must be actionable, leave the
 // record intact, and lift on restore.
 func TestCloseTab_RejectsArchivedSession(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	repoPath := setupControlRepo(t)
 	repo, err := config.RepoFromPath(repoPath)
 	if err != nil {
@@ -180,7 +181,7 @@ func TestCloseTab_RejectsArchivedSession(t *testing.T) {
 // persist the loss — the #1809 URL loss reached through the race rather than the
 // front door.
 func TestCloseTab_ArchiveWinningOpLockRaceKeepsWebTab(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	repoPath := setupControlRepo(t)
 	repo, err := config.RepoFromPath(repoPath)
 	if err != nil {
@@ -246,7 +247,7 @@ func TestCloseTab_ArchiveWinningOpLockRaceKeepsWebTab(t *testing.T) {
 // targeted by its name too, not just by index 0 — the name path is the one
 // `af sessions tab-delete --name` drives (#1021).
 func TestCloseTab_RejectsAgentTabByName(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	repoPath := setupControlRepo(t)
 	repo, err := config.RepoFromPath(repoPath)
 	if err != nil {
@@ -277,7 +278,7 @@ func TestCloseTab_RejectsAgentTabByName(t *testing.T) {
 // TestCloseTab_RejectsUnknownSession verifies targeting a session that doesn't
 // exist is a clear error, not a panic or silent success (#1021).
 func TestCloseTab_RejectsUnknownSession(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 
 	manager, err := NewManager(config.DefaultConfig())
 	if err != nil {
@@ -296,7 +297,7 @@ func TestCloseTab_RejectsUnknownSession(t *testing.T) {
 // TestCloseTab_RejectsUnknownTab verifies a name that matches no tab is
 // rejected rather than silently closing the wrong tab.
 func TestCloseTab_RejectsUnknownTab(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	repoPath := setupControlRepo(t)
 	repo, err := config.RepoFromPath(repoPath)
 	if err != nil {
@@ -323,7 +324,7 @@ func TestCloseTab_RejectsUnknownTab(t *testing.T) {
 // TestCloseTab_RejectsRemoteInstance verifies remote sessions' tabs (fixed by
 // their hook config) cannot be closed, mirroring the TUI's `w` rule.
 func TestCloseTab_RejectsRemoteInstance(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	repoPath := setupControlRepo(t)
 	repo, err := config.RepoFromPath(repoPath)
 	if err != nil {
@@ -512,7 +513,7 @@ func TestCloseTab_SerializedWithInFlightKillDoesNotCloseStaleTab(t *testing.T) {
 // warming (not-ready) manager fails fast with the typed starting error, and a
 // traversal RepoID is rejected at the network boundary.
 func TestControlServer_CloseTab_GatedAndValidated(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 
 	shell, err := newManagerShell(config.DefaultConfig())
 	if err != nil {
@@ -545,7 +546,7 @@ func TestControlServer_CloseTab_GatedAndValidated(t *testing.T) {
 // ping race can never fork the real daemon, and the socket lives under the test
 // temp HOME.
 func TestRPCClients_CloseTab_RoundTrip(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 
 	prevLaunch := launchDaemonProcessFn
 	launchDaemonProcessFn = func() error { return fmt.Errorf("test must not spawn a real daemon") }

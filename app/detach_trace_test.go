@@ -6,8 +6,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sachiniyer/agent-factory/log"
 	"github.com/stretchr/testify/require"
+
+	"github.com/sachiniyer/agent-factory/log"
 )
 
 // captureWarningLog redirects log.WarningLog into a buffer for the duration

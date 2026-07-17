@@ -5,8 +5,9 @@ import (
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/sachiniyer/agent-factory/session"
 	"github.com/stretchr/testify/require"
+
+	"github.com/sachiniyer/agent-factory/session"
 )
 
 // TestBeginAttachTransition_SecondCallIgnoredWhileInFlight pins the #1530

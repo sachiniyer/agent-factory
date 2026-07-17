@@ -4,9 +4,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sachiniyer/agent-factory/session"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/sachiniyer/agent-factory/session"
 )
 
 // TestSessionAutoYesAuthoritative is a regression test for issue #326.

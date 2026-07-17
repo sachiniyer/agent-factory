@@ -3,8 +3,9 @@ package app
 import (
 	"testing"
 
-	"github.com/sachiniyer/agent-factory/session"
 	"github.com/stretchr/testify/require"
+
+	"github.com/sachiniyer/agent-factory/session"
 )
 
 // TestPreviewCommitErrorRejectsArchived pins #1633: previewCommitError gates

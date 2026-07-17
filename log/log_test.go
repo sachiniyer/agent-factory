@@ -93,8 +93,15 @@ func TestLogFilePathPreInitFallsBackFromUncreatableHome(t *testing.T) {
 
 	// Deterministic UserConfigDir under a temp dir so the fallback path is
 	// predictable and the test never touches the developer's real config.
-	xdg := t.TempDir()
-	t.Setenv("XDG_CONFIG_HOME", xdg)
+	//
+	// HOME as well as XDG_CONFIG_HOME: os.UserConfigDir consults XDG_CONFIG_HOME
+	// only on unix-likes. On darwin it is unconditionally
+	// $HOME/Library/Application Support and never reads XDG at all, so pinning
+	// XDG alone left the fallback resolving against the runner's REAL home and
+	// the assertion below comparing two unrelated paths (#1931).
+	cfgHome := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", cfgHome)
+	t.Setenv("HOME", cfgHome)
 
 	blocker := filepath.Join(t.TempDir(), "blockdir")
 	if err := os.WriteFile(blocker, []byte("x"), 0o600); err != nil {
@@ -108,7 +115,18 @@ func TestLogFilePathPreInitFallsBackFromUncreatableHome(t *testing.T) {
 	if got == afHomeLog {
 		t.Fatalf("pre-Initialize LogFilePath returned the uncreatable home path %q instead of the fallback", afHomeLog)
 	}
-	if want := filepath.Join(xdg, "agent-factory", "agent-factory.log"); got != want {
+	// Re-derive the expected path from the OS's own config dir rather than
+	// hard-coding the unix layout. This still pins the concrete shape the
+	// fallback must produce — <config dir>/agent-factory/agent-factory.log — so a
+	// regression to the dead override path (or anywhere else) still fails; only
+	// the platform-chosen base is delegated. Deliberately NOT compared against
+	// defaultLogPath(): asserting the fallback equals the function it calls would
+	// pass no matter what that function returned.
+	base, err := os.UserConfigDir()
+	if err != nil {
+		t.Fatalf("os.UserConfigDir: %v", err)
+	}
+	if want := filepath.Join(base, "agent-factory", "agent-factory.log"); got != want {
 		t.Fatalf("pre-Initialize LogFilePath=%q, want resolved fallback %q", got, want)
 	}
 }

@@ -11,11 +11,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/sachiniyer/agent-factory/cmd"
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/proctree"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
-	"github.com/stretchr/testify/require"
 )
 
 // Every test here is hermetic by construction (#1104 hard rules): the AF
@@ -104,7 +105,13 @@ func snapshotOf(t *testing.T, pids ...int) func() (map[int]proctree.Process, err
 // cleanup Kill can never orphan anything (a forked `sleep` here once leaked
 // the very orphans this suite hunts). Waits until the child's /proc environ
 // is readable (the fork→exec window would otherwise race the scan).
+// It reads the child's environ through proctree, so it — and therefore every
+// test built on it — cannot run without /proc. Guarding here rather than at each
+// caller keeps the reason in ONE place: see #1939 (REAL DEFECT — proctree has no
+// darwin backend, so doctor's process mapping is silently broken on macOS, which
+// is exactly what these tests exist to prove works).
 func spawnWithEnv(t *testing.T, argv0 string, extraArgs []string, env map[string]string) proctree.Process {
+	testguard.RequireProcFS(t)
 	t.Helper()
 	stdinR, stdinW, err := os.Pipe()
 	require.NoError(t, err)
@@ -171,6 +178,7 @@ func findCheckRows(r *Report, name string) []CheckResult {
 // regression: a process whose AF_SESSION marker names a dead session is a
 // verified orphan — reported without --fix, killed with it.
 func TestOrphanedProcessDetectedAndFixed(t *testing.T) {
+	testguard.RequireProcFS(t)
 	testguard.IsolateTmux(t) // private server: the marked session is dead by construction
 
 	// The orphan's AF_HOME must match the run's ConfigDir — a kill requires
@@ -208,6 +216,7 @@ func TestOrphanedProcessDetectedAndFixed(t *testing.T) {
 // live on a private `tmux -L` server and are invisible here) and a missing
 // home marker (pre-marker spawn, unreadable environ) are both report-only.
 func TestOrphanWithoutProvenHomeSurvivesFix(t *testing.T) {
+	testguard.RequireProcFS(t)
 	testguard.IsolateTmux(t)
 
 	foreign := spawnWithEnv(t, "sh", nil, map[string]string{
@@ -246,6 +255,7 @@ func TestOrphanWithoutProvenHomeSurvivesFix(t *testing.T) {
 // session means the process escaped its pane but the session still owns it —
 // report-only even under --fix.
 func TestMarkedProcessOfLiveSessionIsNeverKilled(t *testing.T) {
+	testguard.RequireProcFS(t)
 	testguard.IsolateTmux(t)
 
 	const name = "af_doctor-live-session"
@@ -447,6 +457,7 @@ func TestRenderShapes(t *testing.T) {
 
 // TestTmuxServerDeadParsing pins the conservative TMUX-env heuristics.
 func TestTmuxServerDeadParsing(t *testing.T) {
+	testguard.RequireProcFS(t)
 	self, err := proctree.Snapshot()
 	require.NoError(t, err)
 	ctx := &scanContext{snap: self}
@@ -464,6 +475,7 @@ func TestTmuxServerDeadParsing(t *testing.T) {
 // TestOrphanSignalIdentityGuard: even a fixable finding must refuse to fire
 // when the pid has been recycled (the fix closure re-verifies identity).
 func TestOrphanSignalIdentityGuard(t *testing.T) {
+	testguard.RequireProcFS(t)
 	testguard.IsolateTmux(t)
 	home := t.TempDir()
 	orphan := spawnWithEnv(t, "sh", nil, map[string]string{

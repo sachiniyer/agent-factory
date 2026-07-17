@@ -9,12 +9,14 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/sachiniyer/agent-factory/internal/testguard"
 )
 
 func TestResolveMainRepoRoot_MainRepo(t *testing.T) {
 	// Create a standalone git repo so the test doesn't depend on cwd
 	// (which may itself be a worktree).
-	mainDir := t.TempDir()
+	mainDir := testguard.CanonicalTempDir(t)
 
 	run := func(dir string, args ...string) {
 		t.Helper()
@@ -41,7 +43,7 @@ func TestResolveMainRepoRoot_MainRepo(t *testing.T) {
 func TestResolveMainRepoRoot_Worktree(t *testing.T) {
 	// Create a temporary git repo and a linked worktree, then verify
 	// that resolveMainRepoRoot from the worktree returns the main repo root.
-	mainDir := t.TempDir()
+	mainDir := testguard.CanonicalTempDir(t)
 
 	// Initialize a git repo
 	run := func(dir string, args ...string) {
@@ -64,7 +66,7 @@ func TestResolveMainRepoRoot_Worktree(t *testing.T) {
 	run(mainDir, "commit", "-m", "init")
 
 	// Create a linked worktree
-	wtDir := filepath.Join(t.TempDir(), "my-worktree")
+	wtDir := filepath.Join(testguard.CanonicalTempDir(t), "my-worktree")
 	run(mainDir, "worktree", "add", wtDir, "-b", "test-branch")
 
 	// resolveMainRepoRoot from the worktree should return mainDir
@@ -83,7 +85,7 @@ func TestResolveMainRepoRoot_Worktree(t *testing.T) {
 
 func TestResolveMainRepoRoot_Public(t *testing.T) {
 	// Verify the exported wrapper works the same as the internal function.
-	mainDir := t.TempDir()
+	mainDir := testguard.CanonicalTempDir(t)
 
 	run := func(dir string, args ...string) {
 		t.Helper()
@@ -102,7 +104,7 @@ func TestResolveMainRepoRoot_Public(t *testing.T) {
 	run(mainDir, "commit", "-m", "init")
 
 	// Create a linked worktree
-	wtDir := filepath.Join(t.TempDir(), "wt-public")
+	wtDir := filepath.Join(testguard.CanonicalTempDir(t), "wt-public")
 	run(mainDir, "worktree", "add", wtDir, "-b", "public-test-branch")
 
 	// ResolveMainRepoRoot from the worktree should return mainDir

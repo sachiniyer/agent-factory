@@ -7,10 +7,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sachiniyer/agent-factory/config"
-	"github.com/sachiniyer/agent-factory/session/git"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/session/git"
 )
 
 // mockInstanceStorage is a simple in-memory implementation of config.InstanceStorage.

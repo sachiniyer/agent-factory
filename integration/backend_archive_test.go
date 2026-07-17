@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sachiniyer/agent-factory/internal/testguard"
 	"github.com/sachiniyer/agent-factory/session"
 )
 
@@ -34,7 +35,7 @@ func TestDockerBackendArchiveRestore(t *testing.T) {
 	requireDocker(t)
 	requireTool(t, "git")
 
-	home := t.TempDir()
+	home := testguard.SocketTempDir(t)
 	t.Setenv("AGENT_FACTORY_HOME", home)
 
 	afBin := buildStaticBinary(t)
@@ -171,7 +172,7 @@ func TestSSHBackendArchiveRestore(t *testing.T) {
 	requireTool(t, "ssh-keygen")
 	requireTool(t, "ssh-keyscan")
 
-	home := t.TempDir()
+	home := testguard.SocketTempDir(t)
 	t.Setenv("AGENT_FACTORY_HOME", home)
 
 	afBin := buildStaticBinary(t)

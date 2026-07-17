@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/testguard"
 	"github.com/sachiniyer/agent-factory/session"
 )
 
@@ -28,7 +29,7 @@ import (
 //
 // Everything the joint design promised, observable in one pane capture.
 func TestOutageEndToEnd_LostRestoreAndReplay(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	repoPath := setupControlRepo(t)
 	repo, err := config.RepoFromPath(repoPath)
 	if err != nil {

@@ -8,6 +8,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/sachiniyer/agent-factory/internal/testguard"
 )
 
 // startSleeper spawns a `sleep` child owned by this test and returns its
@@ -26,6 +28,7 @@ func startSleeper(t *testing.T) *exec.Cmd {
 }
 
 func TestSnapshotIncludesSelfAndChild(t *testing.T) {
+	testguard.RequireProcFS(t)
 	child := startSleeper(t)
 	snap, err := Snapshot()
 	if err != nil {
@@ -51,6 +54,7 @@ func TestSnapshotIncludesSelfAndChild(t *testing.T) {
 }
 
 func TestTreeOfFindsGrandchild(t *testing.T) {
+	testguard.RequireProcFS(t)
 	// sh -c spawns sleep as a grandchild of the test process.
 	cmd := exec.Command("sh", "-c", "sleep 300 & wait")
 	if err := cmd.Start(); err != nil {
@@ -97,6 +101,7 @@ func TestTreeOfFindsGrandchild(t *testing.T) {
 }
 
 func TestTreeOfMissingRoot(t *testing.T) {
+	testguard.RequireProcFS(t)
 	snap := map[int]Process{2: {PID: 2, PPID: 1}}
 	if tree := TreeOf(snap, 999999); tree != nil {
 		t.Errorf("TreeOf(missing root) = %v, want nil", tree)
@@ -104,6 +109,7 @@ func TestTreeOfMissingRoot(t *testing.T) {
 }
 
 func TestSessionMembers(t *testing.T) {
+	testguard.RequireProcFS(t)
 	snap := map[int]Process{
 		10: {PID: 10, PPID: 1, SID: 10},
 		11: {PID: 11, PPID: 1, SID: 10}, // reparented but same kernel session
@@ -121,6 +127,7 @@ func TestSessionMembers(t *testing.T) {
 }
 
 func TestSignalVerifiesIdentity(t *testing.T) {
+	testguard.RequireProcFS(t)
 	child := startSleeper(t)
 	snap, err := Snapshot()
 	if err != nil {
@@ -154,6 +161,7 @@ func TestSignalVerifiesIdentity(t *testing.T) {
 // returns ESRCH for the kill. Signal must map that to ErrIdentityChanged so
 // callers treat "already gone" as success, not a warnable failure (#1151).
 func TestSignalReapedInTOCTOUWindow(t *testing.T) {
+	testguard.RequireProcFS(t)
 	child := startSleeper(t)
 	snap, err := Snapshot()
 	if err != nil {
@@ -176,6 +184,7 @@ func TestSignalReapedInTOCTOUWindow(t *testing.T) {
 // TestSignalPropagatesNonESRCHErrors makes sure the ESRCH coercion does not
 // swallow genuine signal failures (e.g. EPERM): those must still surface.
 func TestSignalPropagatesNonESRCHErrors(t *testing.T) {
+	testguard.RequireProcFS(t)
 	child := startSleeper(t)
 	snap, err := Snapshot()
 	if err != nil {
@@ -196,6 +205,7 @@ func TestSignalPropagatesNonESRCHErrors(t *testing.T) {
 // survivor is reaped in the TOCTOU window, KillEscalating must not log a
 // "failed to" warning for it (#1151).
 func TestKillEscalatingNoWarnOnTOCTOUExit(t *testing.T) {
+	testguard.RequireProcFS(t)
 	child := startSleeper(t)
 	snap, err := Snapshot()
 	if err != nil {
@@ -223,6 +233,7 @@ func TestKillEscalatingNoWarnOnTOCTOUExit(t *testing.T) {
 }
 
 func TestSignalRefusesSelfAndInit(t *testing.T) {
+	testguard.RequireProcFS(t)
 	if err := Signal(Process{PID: 1}, syscall.SIGTERM); err == nil {
 		t.Errorf("Signal(pid 1) succeeded, want refusal")
 	}
@@ -232,6 +243,7 @@ func TestSignalRefusesSelfAndInit(t *testing.T) {
 }
 
 func TestEnvValue(t *testing.T) {
+	testguard.RequireProcFS(t)
 	cmd := exec.Command("sleep", "300")
 	cmd.Env = append(os.Environ(), "AF_TEST_MARKER=hello")
 	if err := cmd.Start(); err != nil {
@@ -260,6 +272,7 @@ func TestEnvValue(t *testing.T) {
 }
 
 func TestCPUFractionIdleSleeper(t *testing.T) {
+	testguard.RequireProcFS(t)
 	child := startSleeper(t)
 	snap, err := Snapshot()
 	if err != nil {
@@ -275,6 +288,7 @@ func TestCPUFractionIdleSleeper(t *testing.T) {
 }
 
 func TestCmdline(t *testing.T) {
+	testguard.RequireProcFS(t)
 	child := startSleeper(t)
 	// /proc/<pid>/cmdline is empty in the window between fork and exec;
 	// poll briefly rather than racing it.

@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/testguard"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
@@ -23,7 +24,7 @@ import (
 // same local title creates cleanly in two repos and the two sessions stay
 // distinct in every structure that names them.
 func TestCreateSessionAllowsSameTitleInDifferentRepos(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	installInstantBackend(t)
 
 	repoAPath := setupControlRepo(t)
@@ -96,7 +97,7 @@ func TestCreateSessionAllowsSameTitleInDifferentRepos(t *testing.T) {
 // disk lookup resolves each to its OWN repo, and that stable ids (#1741) stay
 // distinct across the duplicate titles.
 func TestPersistedStateSurvivesDuplicateTitlesAcrossRepos(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	installInstantBackend(t)
 
 	repoAPath := setupControlRepo(t)
@@ -185,7 +186,7 @@ func TestPersistedStateSurvivesDuplicateTitlesAcrossRepos(t *testing.T) {
 // were repo-filtered, which let two repos take the same hook name SEQUENTIALLY
 // and hand both sandboxes the identical --name.
 func TestHookNameNamespaceIsGlobalAcrossRepos(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	repoAPath := setupControlRepo(t)
 	repoBPath := setupControlRepo(t)
 	repoA, err := config.RepoFromPath(repoAPath)
@@ -326,7 +327,7 @@ func TestHookNameNamespaceIsGlobalAcrossRepos(t *testing.T) {
 // TestCreateSessionStillRejectsSameTitleInSameRepo guards the other side of the
 // change: per-repo uniqueness is still uniqueness.
 func TestCreateSessionStillRejectsSameTitleInSameRepo(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	installInstantBackend(t)
 	repoPath := setupControlRepo(t)
 
@@ -354,7 +355,7 @@ func TestCreateSessionStillRejectsSameTitleInSameRepo(t *testing.T) {
 // pick one (the map walk made the winner nondeterministic) — it must name the
 // candidate repos so the caller can disambiguate with --repo.
 func TestFindSessionReportsAmbiguousTitleAcrossRepos(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	installInstantBackend(t)
 
 	repoAPath := setupControlRepo(t)
@@ -411,7 +412,7 @@ func TestFindSessionReportsAmbiguousTitleAcrossRepos(t *testing.T) {
 // the GLOBAL hook namespace too — picking it with remote=false would quietly park
 // the archived row on a slug another project's sandbox already owns.
 func TestArchivedHookRenameChecksGlobalSlug(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	repoAPath := setupControlRepo(t)
 	repoBPath := setupControlRepo(t)
 	repoA, err := config.RepoFromPath(repoAPath)
@@ -474,7 +475,7 @@ func TestArchivedHookRenameChecksGlobalSlug(t *testing.T) {
 // suffixes under the manager lock and then report a misleading "could not find an
 // available title", swallowing the actionable corruption message.
 func TestNextAvailableTitlePropagatesFatalHookCheckError(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	repoBPath := setupControlRepo(t)
 	repoB, err := config.RepoFromPath(repoBPath)
 	if err != nil {
@@ -517,7 +518,7 @@ func TestNextAvailableTitlePropagatesFatalHookCheckError(t *testing.T) {
 // while the daemon-down disk path would correctly refuse to guess. The in-memory
 // match must be unioned with the persisted rows before resolving.
 func TestFindSessionAmbiguitySurvivesPartialRestore(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	installInstantBackend(t)
 
 	repoAPath := setupControlRepo(t)
@@ -566,7 +567,7 @@ func TestFindSessionAmbiguitySurvivesPartialRestore(t *testing.T) {
 // TestFindSessionResolvesUniqueTitleUnscoped keeps the bare-title convenience:
 // a title held by exactly ONE session anywhere still resolves with no --repo.
 func TestFindSessionResolvesUniqueTitleUnscoped(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	installInstantBackend(t)
 
 	repoAPath := setupControlRepo(t)

@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+
 	"github.com/sachiniyer/agent-factory/agentproto"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
 	"github.com/sachiniyer/agent-factory/session/tmux"
@@ -41,11 +42,12 @@ type agentServerBanner struct {
 //
 // Run it in the container fence: make agent-server-roundtrip-container.
 func TestAgentServerRoundTrip(t *testing.T) {
+	testguard.SkipDarwinPTYStream(t)
 	requireTool(t, "git")
 	requireTool(t, "tmux")
 	testguard.IsolateTmux(t)
 
-	home := t.TempDir()
+	home := testguard.SocketTempDir(t)
 	t.Setenv("AGENT_FACTORY_HOME", home)
 	// The fake agent pane runs `cat` (echoes input) behind a wrapper that prints a
 	// ready prompt and swallows the agent-specific flags injectSystemPrompt adds —

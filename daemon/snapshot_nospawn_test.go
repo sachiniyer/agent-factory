@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/testguard"
 )
 
 // TestSnapshotNoSpawn_NoDaemonReturnsUnavailable verifies the CLI read path's
@@ -14,7 +15,7 @@ import (
 // unlike the EnsureDaemon-backed paths, it never launches a process.
 func TestSnapshotNoSpawn_NoDaemonReturnsUnavailable(t *testing.T) {
 	// Fresh home => no daemon.sock exists, so the dial fails fast.
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 
 	// Guard against an accidental spawn: if SnapshotNoSpawn ever reached the
 	// EnsureDaemon path, launchDaemonProcessFn would fire. Make that a test
@@ -39,7 +40,7 @@ func TestSnapshotNoSpawn_NoDaemonReturnsUnavailable(t *testing.T) {
 // repo-scoped request also degrades to ErrDaemonUnavailable with no daemon (the
 // scoping is enforced server-side; the client just forwards RepoID).
 func TestSnapshotNoSpawn_RepoScopedRequest(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	rid := config.RepoIDFromRoot("/tmp/nospawn-repo")
 	if _, err := SnapshotNoSpawn(SnapshotRequest{RepoID: rid}); !errors.Is(err, ErrDaemonUnavailable) {
 		t.Fatalf("repo-scoped SnapshotNoSpawn with no daemon: want ErrDaemonUnavailable, got %v", err)

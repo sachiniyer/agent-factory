@@ -10,8 +10,12 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/daemon"
+	"github.com/sachiniyer/agent-factory/internal/testguard"
 	"github.com/sachiniyer/agent-factory/session"
 	sessiongit "github.com/sachiniyer/agent-factory/session/git"
 	"github.com/sachiniyer/agent-factory/session/tmux"
@@ -20,8 +24,6 @@ import (
 	"github.com/sachiniyer/agent-factory/ui/layout"
 	"github.com/sachiniyer/agent-factory/ui/layout/zones"
 	"github.com/sachiniyer/agent-factory/ui/store"
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 )
 
 // newTestHome builds a minimal home with real UI components and a tempdir-
@@ -29,7 +31,7 @@ import (
 // the user's real config dir.
 func newTestHome(t *testing.T) *home {
 	t.Helper()
-	tmp := t.TempDir()
+	tmp := testguard.SocketTempDir(t)
 	t.Setenv("AGENT_FACTORY_HOME", tmp)
 
 	// TUI task CRUD routes through the daemon (#1029 PR 6). Point the write

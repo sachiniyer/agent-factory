@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/testguard"
 	"github.com/sachiniyer/agent-factory/session"
 )
 
@@ -41,7 +42,7 @@ func recordFor(t *testing.T, repoID, title string) *session.InstanceData {
 // leaves a record that is provably a user kill — never a Lost session the
 // restore loop would resurrect.
 func TestKillSession_TombstoneSurvivesFailedTeardown(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	restore := session.SetBackendFactoryForTest(func(opts session.InstanceOptions, absPath string) (session.Backend, error) {
 		backend := session.NewFakeBackend()
 		backend.CompleteStart()
@@ -111,7 +112,7 @@ func TestRefreshStatuses_FinishesTombstonedKill(t *testing.T) {
 // is in flight, a second KillSession for the same session is rejected instead
 // of running a concurrent double-teardown (#1108 killsInFlight guard).
 func TestKillSession_RejectsConcurrentDuplicate(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	backend := &slowKillBackend{
 		killStarted: make(chan struct{}),
 		killBlock:   make(chan struct{}),

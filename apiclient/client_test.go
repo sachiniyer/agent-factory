@@ -5,13 +5,13 @@ import (
 	"errors"
 	"net"
 	"net/http"
-	"path/filepath"
 	"reflect"
 	"testing"
 	"time"
 
 	"github.com/sachiniyer/agent-factory/apiproto"
 	"github.com/sachiniyer/agent-factory/daemon"
+	"github.com/sachiniyer/agent-factory/internal/testguard"
 	"github.com/sachiniyer/agent-factory/session"
 )
 
@@ -58,7 +58,7 @@ func richInstances() []session.InstanceData {
 // genuine parity proof rather than a mock agreeing with itself.
 func snapshotServer(t *testing.T, handle func(daemon.SnapshotRequest) apiproto.Envelope) *Client {
 	t.Helper()
-	sockPath := filepath.Join(t.TempDir(), "daemon-http.sock")
+	sockPath := testguard.SocketPath(t, "daemon-http.sock")
 	ln, err := net.Listen("unix", sockPath)
 	if err != nil {
 		t.Fatalf("listen unix: %v", err)

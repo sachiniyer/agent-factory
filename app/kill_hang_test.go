@@ -6,12 +6,12 @@ import (
 	"net"
 	"net/http"
 	"net/url"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/sachiniyer/agent-factory/apiclient"
+	"github.com/sachiniyer/agent-factory/internal/testguard"
 )
 
 // wedgedDaemonSocket binds a Unix-socket HTTP server that accepts every
@@ -20,7 +20,7 @@ import (
 // withDaemonHTTP seam below, so this test can never touch the box's daemon.
 func wedgedDaemonSocket(t *testing.T) string {
 	t.Helper()
-	sockPath := filepath.Join(t.TempDir(), "daemon-http.sock")
+	sockPath := testguard.SocketPath(t, "daemon-http.sock")
 	ln, err := net.Listen("unix", sockPath)
 	if err != nil {
 		t.Fatalf("listen unix: %v", err)
@@ -129,7 +129,7 @@ func TestHTTPCallWarming_ContextErrorsAreNotRetryable(t *testing.T) {
 // not swallow or reshape ordinary failures: a daemon that answers with an error
 // still surfaces that error's own text promptly.
 func TestKillSessionThroughDaemon_DaemonError_SurfacesVerbatim(t *testing.T) {
-	sockPath := filepath.Join(t.TempDir(), "daemon-http.sock")
+	sockPath := testguard.SocketPath(t, "daemon-http.sock")
 	ln, err := net.Listen("unix", sockPath)
 	if err != nil {
 		t.Fatalf("listen unix: %v", err)

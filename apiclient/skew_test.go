@@ -5,7 +5,6 @@ import (
 	"errors"
 	"net"
 	"net/http"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -13,6 +12,7 @@ import (
 	"github.com/sachiniyer/agent-factory/agentproto"
 	"github.com/sachiniyer/agent-factory/apiproto"
 	"github.com/sachiniyer/agent-factory/daemon"
+	"github.com/sachiniyer/agent-factory/internal/testguard"
 )
 
 // wedgedServer stands up a Unix-socket HTTP server that ACCEPTS every connection
@@ -23,7 +23,7 @@ import (
 // session's op lock behind a Lost-recovery — presents identically.
 func wedgedServer(t *testing.T) *Client {
 	t.Helper()
-	sockPath := filepath.Join(t.TempDir(), "daemon-http.sock")
+	sockPath := testguard.SocketPath(t, "daemon-http.sock")
 	ln, err := net.Listen("unix", sockPath)
 	if err != nil {
 		t.Fatalf("listen unix: %v", err)
@@ -138,7 +138,7 @@ func TestEnvelopeError_NonSkew_StaysVerbatim(t *testing.T) {
 // newer client while still strict-decoding hand-authored curl requests (#1264).
 func TestCall_SendsClientVersionHeader(t *testing.T) {
 	got := make(chan string, 1)
-	sockPath := filepath.Join(t.TempDir(), "daemon-http.sock")
+	sockPath := testguard.SocketPath(t, "daemon-http.sock")
 	ln, err := net.Listen("unix", sockPath)
 	if err != nil {
 		t.Fatalf("listen unix: %v", err)

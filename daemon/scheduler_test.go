@@ -10,6 +10,7 @@ import (
 
 	cron "github.com/robfig/cron/v3"
 
+	"github.com/sachiniyer/agent-factory/internal/testguard"
 	aflog "github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/task"
 )
@@ -53,7 +54,7 @@ func TestSchedulerReloadRegistersEnabledValidTasks(t *testing.T) {
 // task store: add, disable, and remove operations followed by a Reload must
 // be reflected in the schedule set without a daemon restart (#782).
 func TestSchedulerReloadFollowsTaskCRUD(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 
 	s := newTaskScheduler()
 

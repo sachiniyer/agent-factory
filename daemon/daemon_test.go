@@ -71,7 +71,7 @@ func processAlive(pid int) bool {
 // command line does not match an agent-factory daemon. Regression test for issue #264.
 func TestStopDaemon_DoesNotKillUnrelatedPID(t *testing.T) {
 	// Redirect config dir to a scratch location so we don't touch the user's real daemon.pid.
-	tmpHome := t.TempDir()
+	tmpHome := testguard.SocketTempDir(t)
 	t.Setenv("AGENT_FACTORY_HOME", tmpHome)
 
 	pidFile := filepath.Join(tmpHome, "daemon.pid")
@@ -119,7 +119,7 @@ func TestStopDaemon_DoesNotKillUnrelatedPID(t *testing.T) {
 // exactly the case `af reset` must not describe as "daemon has been stopped".
 // Hermetic: a fresh temp config dir, no real daemon involved, nothing signaled.
 func TestStopDaemon_NoPIDFile(t *testing.T) {
-	tmpHome := t.TempDir()
+	tmpHome := testguard.SocketTempDir(t)
 	t.Setenv("AGENT_FACTORY_HOME", tmpHome)
 
 	stopped, err := StopDaemon()
@@ -134,7 +134,7 @@ func TestStopDaemon_NoPIDFile(t *testing.T) {
 // TestStopDaemon_NonExistentPID verifies that StopDaemon treats a PID file pointing at a dead
 // process as stale and removes it instead of returning an error or killing a reused PID.
 func TestStopDaemon_NonExistentPID(t *testing.T) {
-	tmpHome := t.TempDir()
+	tmpHome := testguard.SocketTempDir(t)
 	t.Setenv("AGENT_FACTORY_HOME", tmpHome)
 	pidFile := filepath.Join(tmpHome, "daemon.pid")
 
@@ -298,11 +298,26 @@ func TestIsAgentFactoryDaemon_RequiresBinaryName(t *testing.T) {
 	// space-joined and re-split, so filepath.Base saw "John" (not "af") and the
 	// daemon was undetectable — breaking `af reset`, health, and foreign-daemon
 	// scans for every spaced install path. It must now validate true.
-	spacedPID := spawn("/home/John Smith/.local/bin/af")
-	if !isAgentFactoryDaemon(spacedPID) {
-		t.Errorf("isAgentFactoryDaemon(pid with argv %q) = false; "+
-			"want true — an af daemon installed under a spaced path must validate (#1214)",
-			daemonArgs(spacedPID))
+	//
+	// Guarded on /proc because THIS ASSERTION CANNOT HOLD ON darwin — a REAL
+	// DEFECT (#1942), not a harness quirk: daemonArgs recovers argv boundaries
+	// from /proc/<pid>/cmdline, and macOS's `ps -p <pid> -o args=` fallback is
+	// already space-joined, so #1214's fix is Linux-only and af's daemon really
+	// is undetectable under a spaced install path there. Only this assertion is
+	// guarded — the #1004 binary-name gates around it hold on darwin and must
+	// keep running, which skipping the whole test would throw away. Remove the
+	// guard when #1942 lands KERN_PROCARGS2-based argv on darwin.
+	if testguard.HasProcFS() {
+		spacedPID := spawn("/home/John Smith/.local/bin/af")
+		if !isAgentFactoryDaemon(spacedPID) {
+			t.Errorf("isAgentFactoryDaemon(pid with argv %q) = false; "+
+				"want true — an af daemon installed under a spaced path must validate (#1214)",
+				daemonArgs(spacedPID))
+		}
+	} else {
+		t.Logf("skipping the #1214 spaced-install assertion: no /proc, so argv boundaries " +
+			"are unrecoverable and af's daemon is genuinely undetectable under a spaced " +
+			"path here — see #1942 (REAL DEFECT)")
 	}
 
 	// A non-af binary under a spaced path carrying --daemon must still be
@@ -321,7 +336,7 @@ func TestIsAgentFactoryDaemon_RequiresBinaryName(t *testing.T) {
 // before the fix this called proc.Kill() unconditionally, bypassing the
 // daemon's state-save path.
 func TestStopDaemon_SIGTERMFirst(t *testing.T) {
-	tmpHome := t.TempDir()
+	tmpHome := testguard.SocketTempDir(t)
 	t.Setenv("AGENT_FACTORY_HOME", tmpHome)
 
 	// Spawn a process that responds to SIGTERM by exiting (bash re-raises the
@@ -395,7 +410,7 @@ func TestStopDaemon_SIGTERMFirst(t *testing.T) {
 // when the daemon ignores SIGTERM, StopDaemon must wait stopDaemonGrace and
 // then SIGKILL the process. Companion to TestStopDaemon_SIGTERMFirst.
 func TestStopDaemon_EscalatesToSIGKILL(t *testing.T) {
-	tmpHome := t.TempDir()
+	tmpHome := testguard.SocketTempDir(t)
 	t.Setenv("AGENT_FACTORY_HOME", tmpHome)
 
 	// Shorten the grace so the test runs in ~300ms instead of ~5s.
@@ -486,7 +501,7 @@ func TestStopDaemon_EscalatesToSIGKILL(t *testing.T) {
 // across every repo. The fix logs a WARNING and continues, so valid repos
 // still load on startup.
 func TestRefreshDaemonInstances_SkipsCorruptedRepoAtStartup(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 
 	// Capture warning output so we can assert the corrupted repo was named
 	// in the log line — silent skipping would re-introduce a different bug
@@ -551,7 +566,7 @@ func TestRefreshDaemonInstances_SkipsCorruptedRepoAtStartup(t *testing.T) {
 // running sessions on a transient corrupt write" guarantee, the skip path
 // re-hydrates this repo's prior keys from `existing` into the returned map.
 func TestRefreshDaemonInstances_PreservesExistingForCorruptedRepoOnPoll(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 
 	prevOut := log.WarningLog.Writer()
 	log.WarningLog.SetOutput(io.Discard)
@@ -588,7 +603,7 @@ func TestRefreshDaemonInstances_PreservesExistingForCorruptedRepoOnPoll(t *testi
 // the corrupted-JSON path) and log a warning naming the missing repo. Dropping
 // them would silently abandon a running AutoYes session.
 func TestRefreshDaemonInstances_PreservesInstancesForMissingRepoDirectory(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 
 	var warnBuf bytes.Buffer
 	prevOut := log.WarningLog.Writer()
@@ -662,7 +677,7 @@ func TestRefreshDaemonInstances_PreservesInstancesForMissingRepoDirectory(t *tes
 // startup path (existing == nil): there is no prior in-memory state to
 // preserve, so a missing repo must contribute nothing and not panic.
 func TestRefreshDaemonInstances_StartupDoesNotInventMissingRepos(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	prevOut := log.WarningLog.Writer()
 	log.WarningLog.SetOutput(io.Discard)
 	t.Cleanup(func() { log.WarningLog.SetOutput(prevOut) })
@@ -681,7 +696,7 @@ func TestRefreshDaemonInstances_StartupDoesNotInventMissingRepos(t *testing.T) {
 // error instead of silently skipped, so a title that could be hidden in the
 // bad file doesn't surface as a bare "not found."
 func TestFindInstanceDataByTitle_NamesCorruptedRepoOnNotFound(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 
 	var warnBuf bytes.Buffer
 	prevOut := log.WarningLog.Writer()
@@ -708,7 +723,7 @@ func TestFindInstanceDataByTitle_NamesCorruptedRepoOnNotFound(t *testing.T) {
 // TestStopDaemon_RefusesSelfPID verifies that StopDaemon refuses to kill the current test process
 // even if the PID file points at it.
 func TestStopDaemon_RefusesSelfPID(t *testing.T) {
-	tmpHome := t.TempDir()
+	tmpHome := testguard.SocketTempDir(t)
 	t.Setenv("AGENT_FACTORY_HOME", tmpHome)
 	pidFile := filepath.Join(tmpHome, "daemon.pid")
 

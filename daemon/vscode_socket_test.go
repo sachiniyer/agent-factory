@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/sachiniyer/agent-factory/internal/testguard"
 )
 
 // The #1873 regression suite: the editor is reachable ONLY over a 0600 unix
@@ -119,7 +121,7 @@ func TestVSCodeSocket_ModeIsOwnerOnly(t *testing.T) {
 // that already exists. A dir left loose by an older build or a permissive umask
 // must be tightened, not inherited.
 func TestVSCodeSocketDir_TightensLoosePermissions(t *testing.T) {
-	home := t.TempDir()
+	home := testguard.SocketTempDir(t)
 	t.Setenv("AGENT_FACTORY_HOME", home)
 
 	loose := filepath.Join(home, vscodeSocketDirName)
@@ -521,7 +523,12 @@ func TestVSCodeSocket_OpenVSCodeServesTheWorktree(t *testing.T) {
 // The test's own cwd is deliberately NOT the worktree — that separation is the
 // whole point, and without it the bug hides.
 func TestVSCodeSocket_RelativeAFHomeStillReachable(t *testing.T) {
-	t.Chdir(t.TempDir())                      // the daemon's cwd
+	// SocketTempDir, not t.TempDir, for the cwd: the relative home resolves
+	// AGAINST it, so a long cwd pushes the socket past sun_path and the editor's
+	// own length guard (correctly) rejects it before this test can exercise what
+	// it is actually about — that a relative home resolves to an absolute path.
+	// The cwd's length is incidental here; its separation from the worktree is not.
+	t.Chdir(testguard.SocketTempDir(t))       // the daemon's cwd
 	t.Setenv("AGENT_FACTORY_HOME", "af-home") // relative, as an operator may write it
 
 	binary := writeFakeVSCodeBinary(t, "code-server", nil)

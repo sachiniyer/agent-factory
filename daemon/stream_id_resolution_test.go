@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/testguard"
 )
 
 // The /v1/sessions/{id}/stream route resolves its {id} segment by the session's
@@ -16,7 +17,7 @@ import (
 // returns the instance's own repoID and title (so the killsInFlight gate keys off
 // the real title even when the caller addressed the session by id).
 func TestResolveStreamSessionByID(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	repoPath := setupControlRepo(t)
 	repo, err := config.RepoFromPath(repoPath)
 	if err != nil {
@@ -55,7 +56,7 @@ func TestResolveStreamSessionByID(t *testing.T) {
 // ambiguous, but each id names exactly one. Resolving by the second session's id
 // must return THAT session (its repo), never the first same-titled one.
 func TestResolveStreamSessionIDBeatsCrossRepoTitleCollision(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	repoA := setupControlRepo(t)
 	repoB := setupControlRepo(t)
 	ra, err := config.RepoFromPath(repoA)
@@ -99,7 +100,7 @@ func TestResolveStreamSessionIDBeatsCrossRepoTitleCollision(t *testing.T) {
 // matches no instance id falls back to title resolution, returning the passed
 // string as the title (what the killsInFlight gate and error messages use).
 func TestResolveStreamSessionTitleFallback(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	repoPath := setupControlRepo(t)
 	repo, err := config.RepoFromPath(repoPath)
 	if err != nil {

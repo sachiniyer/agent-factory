@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/testguard"
 )
 
 // TestValidateRPCRepoID covers the daemon-side gate that drops malicious
@@ -58,7 +59,7 @@ func TestValidateRPCRepoID(t *testing.T) {
 // TestControlServer_KillSession_RejectsTraversal goes through the actual
 // RPC handler entrypoint to lock in the network-boundary defense.
 func TestControlServer_KillSession_RejectsTraversal(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	installInstantBackend(t)
 
 	manager, err := NewManager(config.DefaultConfig())
@@ -83,7 +84,7 @@ func TestControlServer_KillSession_RejectsTraversal(t *testing.T) {
 // TestControlServer_SendPrompt_RejectsTraversal covers the other RPC entry
 // that accepts a RepoID over the wire.
 func TestControlServer_SendPrompt_RejectsTraversal(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	installInstantBackend(t)
 
 	manager, err := NewManager(config.DefaultConfig())

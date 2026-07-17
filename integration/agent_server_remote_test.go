@@ -29,11 +29,12 @@ import (
 //
 // Run it in the container fence: make remote-agent-server-roundtrip-container.
 func TestRemoteAgentServerRoundTrip(t *testing.T) {
+	testguard.SkipDarwinPTYStream(t)
 	requireTool(t, "git")
 	requireTool(t, "tmux")
 	testguard.IsolateTmux(t)
 
-	home := t.TempDir()
+	home := testguard.SocketTempDir(t)
 	t.Setenv("AGENT_FACTORY_HOME", home)
 	// The fake agent pane runs `cat` (echoes input) behind a wrapper that prints a
 	// ready prompt and swallows the agent-specific flags injectSystemPrompt adds.

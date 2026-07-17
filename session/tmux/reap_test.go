@@ -12,12 +12,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/sachiniyer/agent-factory/cmd"
 	"github.com/sachiniyer/agent-factory/cmd/cmd_test"
 	"github.com/sachiniyer/agent-factory/internal/proctree"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
 	"github.com/sachiniyer/agent-factory/log"
-	"github.com/stretchr/testify/require"
 )
 
 // shrinkReapWaits lowers the grace periods so reap tests finish in
@@ -71,6 +72,7 @@ func spawnSessionWithEscapee(t *testing.T, name string) proctree.Process {
 // where its `%d`/`%s`/`%n` sequences would be interpreted and corrupt the log
 // with `%!s(MISSING)` / `%!d(...)` garbage.
 func TestReapLogsSessionNameLiterally(t *testing.T) {
+	testguard.RequireProcFS(t)
 	// Redirect the WARNING logger to a buffer for the duration of this test.
 	var buf bytes.Buffer
 	oldOut, oldFlags := log.WarningLog.Writer(), log.WarningLog.Flags()
@@ -109,6 +111,7 @@ func TestReapLogsSessionNameLiterally(t *testing.T) {
 // TestCloseReapsEscapedPaneProcesses is the end-to-end #1104 regression
 // test: a pane child that ignores SIGHUP must not survive Close().
 func TestCloseReapsEscapedPaneProcesses(t *testing.T) {
+	testguard.RequireProcFS(t)
 	testguard.IsolateTmux(t)
 	shrinkReapWaits(t)
 
@@ -130,6 +133,7 @@ func TestCloseReapsEscapedPaneProcesses(t *testing.T) {
 // TestCleanupSessionsReapsEscapedProcesses covers the `af reset` sweep: it
 // must reap synchronously (the CLI process exits right after).
 func TestCleanupSessionsReapsEscapedProcesses(t *testing.T) {
+	testguard.RequireProcFS(t)
 	testguard.IsolateTmux(t)
 	shrinkReapWaits(t)
 

@@ -5,8 +5,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sachiniyer/agent-factory/config"
 	"github.com/stretchr/testify/require"
+
+	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/testguard"
 )
 
 // registerFailingWatcher inserts a taskWatcher directly into the supervisor's
@@ -118,7 +120,7 @@ func TestRecordDeliveryResult_FailureRunLifecycle(t *testing.T) {
 // (#1238): the controlServer folds the supervisor's persistent delivery
 // failures into resp.DeliveryAlarms, scoped to the request's repo.
 func TestControlServerSnapshot_ProjectsDeliveryAlarms(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	m, err := NewManager(config.DefaultConfig())
 	require.NoError(t, err)
 	s := newWatcherSupervisor()

@@ -8,8 +8,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sachiniyer/agent-factory/cmd/cmd_test"
 	"github.com/stretchr/testify/require"
+
+	"github.com/sachiniyer/agent-factory/cmd/cmd_test"
 )
 
 // deadPID returns a PID that is guaranteed to have exited and been reaped:

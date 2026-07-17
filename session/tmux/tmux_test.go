@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
-	cmd2 "github.com/sachiniyer/agent-factory/cmd"
 	"math/rand"
 	"os"
 	"os/exec"
@@ -12,6 +11,8 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+
+	cmd2 "github.com/sachiniyer/agent-factory/cmd"
 
 	"github.com/sachiniyer/agent-factory/cmd/cmd_test"
 	"github.com/sachiniyer/agent-factory/internal/testguard"

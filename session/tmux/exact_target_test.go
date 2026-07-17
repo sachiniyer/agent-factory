@@ -6,8 +6,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/sachiniyer/agent-factory/cmd/cmd_test"
 	"github.com/stretchr/testify/require"
+
+	"github.com/sachiniyer/agent-factory/cmd/cmd_test"
 )
 
 // #1006: tmux resolves `-t name` by exact match first, then falls back to a

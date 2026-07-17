@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/testguard"
 )
 
 // The warm-up contract (#1878): the web-tab proxy must not serve — or touch
@@ -82,7 +83,7 @@ func TestWebTabProxy_WarmUpRequestDoesNotDriveItsOwnRestore(t *testing.T) {
 // already exist to avoid, and a daemon restart points every open pane here at
 // once, making this the likeliest error body in the whole surface to be seen.
 func TestWebTabProxy_WarmUpRendersARetryingNotice(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	m := warmingManager(t)
 	mux := newHTTPMux(&controlServer{manager: m})
 

@@ -11,10 +11,11 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/sachiniyer/agent-factory/cmd/cmd_test"
-	"github.com/sachiniyer/agent-factory/session/tmux"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/sachiniyer/agent-factory/cmd/cmd_test"
+	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
 // inPlaceTmuxWorld is a hermetic tmux double for full first-time-start flows:

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/testguard"
 	"github.com/sachiniyer/agent-factory/session"
 )
 
@@ -30,7 +31,7 @@ func (b *slowKillBackend) Kill(inst *session.Instance) error {
 // its record stays on disk, so a CreateSession reusing the title must be
 // rejected. Only after the teardown completes may the title be reused.
 func TestKillSessionBlocksTitleReuseDuringTeardown(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	repoPath := setupControlRepo(t)
 	repo, err := config.RepoFromPath(repoPath)
 	if err != nil {

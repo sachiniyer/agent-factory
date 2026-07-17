@@ -35,7 +35,7 @@ func TestCLICreateCodexSessionBecomesReady(t *testing.T) {
 	// leak af_ sessions onto the developer's server.
 	testguard.IsolateTmux(t)
 
-	home := t.TempDir()
+	home := testguard.SocketTempDir(t)
 	repo := setupGitRepo(t)
 
 	// printf interprets the \n (backslash-n) into a newline; the "›" is the
@@ -130,7 +130,7 @@ func TestCLICreateCodexWaitsPastTrustPrompt(t *testing.T) {
 	// leak af_ sessions onto the developer's server.
 	testguard.IsolateTmux(t)
 
-	home := t.TempDir()
+	home := testguard.SocketTempDir(t)
 	repo := setupGitRepo(t)
 
 	// The wrapper prints codex's workspace-trust dialog (no "›"), holds it for

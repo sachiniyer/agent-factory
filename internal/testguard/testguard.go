@@ -24,6 +24,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"testing"
@@ -319,4 +320,163 @@ func IsolateTmux(t testing.TB) {
 		_ = exec.Command("tmux", "kill-server").Run()
 		_ = os.RemoveAll(dir)
 	})
+}
+
+// maxUnixSocketPathLen is the portable ceiling for a Unix socket path.
+// sockaddr_un.sun_path is 108 bytes on Linux but only 104 on macOS; 103 is what
+// survives on both once the NUL terminator is counted. It mirrors the product's
+// own constant in daemon/vscode_socket.go — duplicated rather than imported
+// because testguard stays dependency-free.
+const maxUnixSocketPathLen = 103
+
+// SocketTempDir returns a fresh temp dir short enough to hold a Unix socket, and
+// removes it when the test ends.
+//
+// Prefer it over t.TempDir() for any directory that will hold a .sock — whether
+// that is the socket's own dir or an AGENT_FACTORY_HOME the daemon derives one
+// from. t.TempDir() embeds the TEST'S NAME in the path, and on macOS it hangs
+// that off a base that is already ~48 bytes (/var/folders/<hash>/T/). A
+// descriptively-named test therefore lands ~140 bytes — past sun_path's 104 —
+// and net.Listen fails with a bare "invalid argument" that names nothing (#1940).
+// Linux hides this completely: its cap is 108 AND its base is /tmp, so the same
+// path fits with room to spare. That is why it survived until the suite first ran
+// on darwin.
+//
+// This is a harness concern, not a product one: af's real sockets live in
+// AGENT_FACTORY_HOME (~/.agent-factory/daemon.sock), which is short by default.
+func SocketTempDir(t *testing.T) string {
+	t.Helper()
+	// /tmp rather than $TMPDIR. macOS's $TMPDIR canonicalizes to a 56-byte
+	// /private/var/folders/<hash>/T, which leaves too little room once a caller
+	// appends its own structure: a vscode socket (…/af-home/vscode/<hash>.sock)
+	// lands at 107 bytes and trips the editor's own guard even with no test name in
+	// the path. /tmp canonicalizes to /private/tmp — 12 bytes — buying 44 bytes of
+	// headroom and turning knife-edge margins into comfortable ones (that same
+	// vscode socket: 63). Linux's /tmp is already the default, so nothing changes
+	// there.
+	dir, err := os.MkdirTemp("/tmp", "af-")
+	if err != nil {
+		// A sandbox with no writable /tmp: fall back to $TMPDIR rather than fail.
+		// SocketPath's length check still catches an overrun loudly if one follows.
+		dir, err = os.MkdirTemp("", "af-")
+	}
+	if err != nil {
+		t.Fatalf("testguard: creating a socket-safe temp dir: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	// Canonicalize: macOS hands out /var/folders/…, and /var is a symlink to
+	// /private/var. Production resolves what it is given to the physical path, so
+	// an unresolved home makes every assertion about a path derived from it
+	// compare /var/… against /private/var/… — the #1918 class, which cost this
+	// package a second round of macOS failures after the socket fix landed. The
+	// resolved spelling is the one production will report, so hand that out and
+	// the class cannot recur through this helper. No-op on Linux.
+	resolved, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatalf("testguard: canonicalizing socket temp dir: %v", err)
+	}
+	return resolved
+}
+
+// SocketPath joins name onto a SocketTempDir and fails the test up front if the
+// result would not fit in sun_path. Without the check the bind fails later as an
+// opaque "invalid argument", which is exactly the diagnosis this helper exists to
+// spare the next person.
+func SocketPath(t *testing.T, name string) string {
+	t.Helper()
+	p := filepath.Join(SocketTempDir(t), name)
+	if len(p) > maxUnixSocketPathLen {
+		t.Fatalf("testguard: socket path %q is %d bytes, over the %d-byte sun_path ceiling; "+
+			"shorten the socket name", p, len(p), maxUnixSocketPathLen)
+	}
+	return p
+}
+
+// RequireProcFS skips a test whose subject depends on reading Linux's /proc.
+//
+// THIS SKIP HIDES A REAL DEFECT (#1939) — it is not a harness quirk.
+// internal/proctree reads /proc with no darwin fallback and no build tag, so on
+// macOS Snapshot() always fails and its callers swallow that
+// (session/tmux/reap.go:61-64 returns nil on any error). tmux orphan reaping and
+// af doctor's process mapping therefore do NOTHING on macOS — permanently, not
+// intermittently. The tests guarded by this are exactly the ones that prove that
+// functionality works; on darwin they fail because the PRODUCT is broken there.
+//
+// Skipped rather than deleted or weakened so the darwin job can go green on what
+// IS fixable while this stays visible and attributable. Compare daemon/daemon.go:781
+// and daemon/stopall.go:287, which both hit /proc and DO handle macOS: darwin was
+// considered there and missed in proctree.
+//
+// Delete this helper — do not extend it to new tests — when #1939 lands a darwin
+// process-table backend.
+func RequireProcFS(t *testing.T) {
+	t.Helper()
+	if !HasProcFS() {
+		t.Skipf("no /proc on %s: proctree is Linux-only, so af's orphan reaping and doctor "+
+			"process mapping are silently broken here — see #1939 (REAL DEFECT, not a "+
+			"test-harness assumption)", runtime.GOOS)
+	}
+}
+
+// HasProcFS reports whether Linux's /proc is present.
+//
+// Use it to guard a single ASSERTION that /proc makes possible, where the
+// surrounding test still has real coverage to offer without it — guarding the
+// assertion keeps the rest of the test running on darwin, which RequireProcFS
+// (which skips the whole test) would throw away. Same defect, same caveat: see
+// #1939, and #1942 for argv-boundary recovery specifically.
+func HasProcFS() bool {
+	_, err := os.Stat("/proc")
+	return err == nil
+}
+
+// CanonicalTempDir returns t.TempDir() resolved to its physical path, and is the
+// spelling any test should use for a directory whose path it later compares
+// against something the PRODUCT reports.
+//
+// macOS hands out temp dirs under /var/folders/…, and /var is a symlink to
+// /private/var. Production resolves the paths it is given (git, worktree and repo
+// resolution all report the physical path), so an expectation written in
+// t.TempDir()'s unresolved spelling compares /var/… against /private/var/… and
+// fails — on macOS only, which is why this survived until the suite first ran on
+// darwin (#1918, and its recurrence in #1931).
+//
+// Canonicalizing at the SOURCE is the fix, not canonicalizing at each assertion:
+// the expectation is then simply written in the same spelling production uses, so
+// new assertions are correct by default. That is the precedent tempBinPath set in
+// commands/tempbin_test.go for #1921. EvalSymlinks on an already-canonical path is
+// a no-op, so this is inert on Linux.
+func CanonicalTempDir(t *testing.T) string {
+	t.Helper()
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatalf("testguard: canonicalizing temp dir: %v", err)
+	}
+	return dir
+}
+
+// SkipDarwinPTYStream skips a test that asserts bytes flow through the clientless
+// PTY stream (tmux pipe-pane -> dd -> FIFO -> ptyBroker.readLoop).
+//
+// THIS SKIP HIDES A REAL GAP (#1945) — it is not a harness quirk. On the darwin CI
+// runner that path delivers NO bytes: typed input never reaches the stream, and
+// preview renders blank. It is not the transport (tests that never touch the
+// agent-server fail identically), not tmux itself (capture-pane-based tests pass
+// on the same runner), and not BSD dd buffering (dd write()s each partial read —
+// which is why ptychannel_tmux.go picked it over cat).
+//
+// Read #1945 before acting on this: it is NOT established that live panes are
+// broken for every macOS user — a real darwin user's panes work, so this may be
+// environmental to the runner. What IS established is that these tests cannot run
+// there, which is why they are skipped rather than deleted.
+//
+// TO REVERSE: grep for SkipDarwinPTYStream, delete this helper and its call sites,
+// and let the macOS job confirm. Do not extend it to new tests.
+func SkipDarwinPTYStream(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS == "darwin" {
+		t.Skip("clientless PTY streaming delivers no bytes on the darwin runner: typed input " +
+			"never reaches the stream — see #1945 (REAL DEFECT, not a test-harness assumption; " +
+			"this test times out rather than fails)")
+	}
 }

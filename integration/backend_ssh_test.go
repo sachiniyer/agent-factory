@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sachiniyer/agent-factory/internal/testguard"
 	"github.com/sachiniyer/agent-factory/session"
 )
 
@@ -40,7 +41,7 @@ func TestSSHBackendRoundTrip(t *testing.T) {
 	requireTool(t, "ssh-keygen")
 	requireTool(t, "ssh-keyscan")
 
-	home := t.TempDir()
+	home := testguard.SocketTempDir(t)
 	t.Setenv("AGENT_FACTORY_HOME", home)
 
 	// A static `af` the runtime streams onto the remote (musl-compatible; the

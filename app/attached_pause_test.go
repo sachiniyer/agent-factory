@@ -8,9 +8,10 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/sachiniyer/agent-factory/session/git"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/sachiniyer/agent-factory/session/git"
 )
 
 // assertPostDetachRepaintSequence pins that a post-detach cmd is the uniform

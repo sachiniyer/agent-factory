@@ -8,8 +8,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sachiniyer/agent-factory/config"
 	"github.com/stretchr/testify/require"
+
+	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/testguard"
 )
 
 // TestIsLoopbackListenAddr pins the bind classification that governs the
@@ -71,7 +73,7 @@ func TestWebListenerPolicy(t *testing.T) {
 // allowed. The policy is derived from config via webListenerPolicy, so this
 // exercises the full bind→policy→gate wiring, not a hand-set exemption.
 func TestTCPListener_NetworkBindDeniesLoopbackWithoutToken(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 
 	cfg := config.DefaultConfig()
 	cfg.ListenAddr = "0.0.0.0:0" // NETWORK bind (all interfaces), reachable via loopback
@@ -135,7 +137,7 @@ func TestTCPListener_NetworkBindDeniesLoopbackWithoutToken(t *testing.T) {
 // require_token=true deliberately — under the default (false) the gate is off for
 // everyone, so the request would pass without exercising the exemption at all.
 func TestTCPListener_LoopbackBindStillExemptViaPolicy(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 
 	cfg := config.DefaultConfig()
 	cfg.ListenAddr = "127.0.0.1:0" // loopback bind
@@ -166,7 +168,7 @@ func TestTCPListener_LoopbackBindStillExemptViaPolicy(t *testing.T) {
 // and it connects" path; if it regresses, the web UI grows a login screen it can
 // never satisfy on a fresh install.
 func TestTCPListener_DefaultConfigIsTokenless(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 
 	cfg := config.DefaultConfig()
 	require.False(t, cfg.RequireToken, "require_token must default to false — auth is opt-in")
@@ -209,7 +211,7 @@ func TestTCPListener_DefaultConfigIsTokenless(t *testing.T) {
 // this off the network in practice; an operator who opts into a network bind must
 // set require_token=true or front the listener with a private network/proxy.
 func TestTCPListener_DefaultConfigServesNetworkPeersTokenless(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 
 	cfg := config.DefaultConfig()
 	cfg.ListenAddr = "0.0.0.0:0" // operator opts into a network bind

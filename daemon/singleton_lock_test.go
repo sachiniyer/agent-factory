@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/testguard"
 )
 
 // TestAcquireHomeLock_SecondFailsFastAndFreesOnRelease pins the core singleton
@@ -20,7 +21,7 @@ import (
 // fast with the "already running" *daemonLockHeldError (never blocks), and the
 // lock frees the instant the first holder releases.
 func TestAcquireHomeLock_SecondFailsFastAndFreesOnRelease(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 
 	first, err := acquireHomeLock()
 	if err != nil {
@@ -62,7 +63,7 @@ func TestAcquireHomeLock_SecondFailsFastAndFreesOnRelease(t *testing.T) {
 // A: flock contends across open-file-descriptions the same in one process as
 // across two.
 func TestRunDaemon_SecondStartFailsFastWithoutTouchingRuntimeFiles(t *testing.T) {
-	home := t.TempDir()
+	home := testguard.SocketTempDir(t)
 	t.Setenv("AGENT_FACTORY_HOME", home)
 
 	// Daemon A holds the lock and owns its runtime files.
@@ -123,7 +124,7 @@ func TestRunDaemon_SecondStartFailsFastWithoutTouchingRuntimeFiles(t *testing.T)
 // (kill -9, no chance to clean up), and the lock is then free for a new start —
 // no stale-lock pid guessing needed. This is the crash-recovery path.
 func TestHomeLock_FreesAfterHolderKilledDashNine(t *testing.T) {
-	home := t.TempDir()
+	home := testguard.SocketTempDir(t)
 	t.Setenv("AGENT_FACTORY_HOME", home)
 
 	// Spawn a child (this test binary re-invoked) that acquires the lock, writes
@@ -230,7 +231,7 @@ func TestHelperHoldsHomeLock(t *testing.T) {
 // daemon is already serving the socket, so EnsureDaemon returns immediately
 // without launching a second one.
 func TestEnsureDaemon_NoSpawnWhenLiveDaemonServes(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 
 	startTestControlServer(t)
 	if err := pingDaemon(); err != nil {

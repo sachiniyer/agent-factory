@@ -11,6 +11,7 @@ import (
 
 	"github.com/sachiniyer/agent-factory/apiproto"
 	"github.com/sachiniyer/agent-factory/daemon"
+	"github.com/sachiniyer/agent-factory/internal/testguard"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -94,7 +95,7 @@ func TestRouteName(t *testing.T) {
 // shared {data,error} envelope wrapping the endpoint catalog, and the endpoints
 // match daemon.HTTPRoutes exactly.
 func TestAPICmd_JSONEmitsEnvelopeCatalog(t *testing.T) {
-	home := t.TempDir()
+	home := testguard.SocketTempDir(t)
 	t.Setenv("AGENT_FACTORY_HOME", home)
 	out := runAPICmd(t, true)
 
@@ -128,7 +129,7 @@ func TestAPICmd_JSONEmitsEnvelopeCatalog(t *testing.T) {
 // the control socket exists — the command resolved the path and printed the
 // static catalog without binding, dialing, or spawning anything.
 func TestAPICmd_DoesNotSpawnDaemon(t *testing.T) {
-	home := t.TempDir()
+	home := testguard.SocketTempDir(t)
 	t.Setenv("AGENT_FACTORY_HOME", home)
 
 	_ = runAPICmd(t, false)

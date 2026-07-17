@@ -78,11 +78,82 @@ jobs:
       - name: Run tests
         run: go test -v -race -count=1 ./...
 
+  # We cross-compile and ship darwin/arm64 and darwin/amd64 binaries from
+  # stable-release.yml, but every job in this repo ran on ubuntu — so no test had
+  # ever executed on the OS we ship to. macOS-only defects reached users instead
+  # of CI (#1918, #1916). This job closes that gap.
+  #
+  # Core Go suite only: the *-container targets need Docker, which GitHub's macOS
+  # runners do not have. Those stay on Linux.
+  #
+  # ./daemon is deliberately NOT excluded. It spawns real af daemons, which is
+  # forbidden on the shared dev box but is exactly what we want exercised here on
+  # a throwaway runner — the launchd paths live in that package and are the point.
+  test-macos:
+    name: Test (macOS)
+    runs-on: macos-latest
+    # macOS runner minutes bill at 10x Linux; a hung PTY/daemon test must not burn
+    # a six-hour default. The Linux suite finishes well inside this.
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: "1.25"
+          cache: true
+
+      # tmux is preinstalled on the ubuntu runners but NOT on the macOS ones, and
+      # a dozen packages (session, daemon, config, app, ui, …) shell out to it.
+      # Without this the suite fails at "executable file not found in $PATH"
+      # rather than on anything real.
+      - name: Install tmux
+        run: brew install tmux
+
+      # The suite shells out to tmux, dd and sh, and darwin's are not the Linux
+      # ones — brew's tmux is typically newer than the ubuntu runner's, and the
+      # userland is BSD. When a macOS-only failure turns out to be environmental,
+      # this is the first thing anyone asks for; record it rather than re-running
+      # the job to find out (#1945).
+      - name: Record the runner's toolchain
+        run: |
+          tmux -V
+          sw_vers
+          echo "shell: ${SHELL:-<unset>} | term: ${TERM:-<unset>} | tmpdir: ${TMPDIR:-<unset>}"
+          command -v dd sh git
+          dd --version 2>&1 | head -1 || echo "dd: BSD (no --version)"
+
+      - name: Run tests
+        run: go test -v -race -count=1 ./...
+
   build:
     name: Build
     runs-on: ubuntu-latest
-    needs: [lint, test]
+    # "Build" and "Lint" are this repo's only required checks (ruleset 14851503),
+    # so Build is where Test and Test (macOS) get their teeth — a new standalone
+    # job would gate nothing until someone edited the ruleset (see the same note on
+    # the auto-gate helper test above).
+    #
+    # `needs` ALONE is not enough, and this is the trap: a failed dependency leaves
+    # Build SKIPPED, and a skipped required check does not fail — GitHub's docs are
+    # explicit that dependent jobs "are skipped and do not report a failure", so the
+    # required check never goes red and the merge button stays live. (auto-gate.js
+    # blocks anyway, since it demands conclusion === "success", but the native path
+    # would not.) So: run ALWAYS, and fail loudly on any unsuccessful need. Now a
+    # red macOS job turns the REQUIRED check red instead of quietly skipping it.
+    needs: [lint, test, test-macos]
+    if: always()
     steps:
+      - name: Gate on the jobs this check stands in for
+        if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')
+        run: |
+          echo "::error::A required job failed — failing Build so the required check goes RED rather than skipping."
+          # needs['test-macos'], not needs.test-macos: a hyphen in a property path is
+          # parsed as subtraction, so the dotted form silently yields an empty string.
+          echo "lint=${{ needs.lint.result }} test=${{ needs.test.result }} test-macos=${{ needs['test-macos'].result }}"
+          exit 1
+
       - uses: actions/checkout@v6
 
       - name: Set up Go

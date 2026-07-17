@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/testguard"
 	"github.com/sachiniyer/agent-factory/session"
 )
 
@@ -31,7 +32,7 @@ func installOptionsRecordingBackend(t *testing.T) *[]session.InstanceOptions {
 // session.NewInstance so the instance attaches to the repo working tree
 // instead of cutting a fresh worktree.
 func TestManagerCreateSessionCarriesInPlace(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	seen := installOptionsRecordingBackend(t)
 	repoPath := setupControlRepo(t)
 
@@ -71,7 +72,7 @@ func TestManagerCreateSessionCarriesInPlace(t *testing.T) {
 // a remote session has no local worktree, so combining it with --here must
 // fail instead of silently ignoring one of the flags.
 func TestManagerCreateSessionRejectsInPlaceRemote(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	repoPath := setupControlRepo(t)
 
 	manager, err := NewManager(config.DefaultConfig())
@@ -98,7 +99,7 @@ func TestManagerCreateSessionRejectsInPlaceRemote(t *testing.T) {
 // against a RUNNING daemon carries the flag across the wire — not just the
 // in-process Manager path.
 func TestCreateSessionRPCCarriesInPlace(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	seen := installOptionsRecordingBackend(t)
 	repoPath := setupControlRepo(t)
 

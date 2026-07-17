@@ -6,7 +6,6 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -15,6 +14,7 @@ import (
 	"github.com/coder/websocket"
 
 	"github.com/sachiniyer/agent-factory/agentproto"
+	"github.com/sachiniyer/agent-factory/internal/testguard"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
@@ -43,7 +43,7 @@ func (s *syncBuffer) String() string {
 // cleanup so the socket stays open for the driver's lifetime.
 func attachWSServer(t *testing.T) (*Client, <-chan *websocket.Conn) {
 	t.Helper()
-	sockPath := filepath.Join(t.TempDir(), "daemon-http.sock")
+	sockPath := testguard.SocketPath(t, "daemon-http.sock")
 	ln, err := net.Listen("unix", sockPath)
 	if err != nil {
 		t.Fatalf("listen unix: %v", err)

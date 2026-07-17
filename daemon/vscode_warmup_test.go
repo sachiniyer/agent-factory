@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/testguard"
 )
 
 // TestRunDaemon_StopsVSCodeEditorsOnWarmUpShutdown pins the ONE thing that makes
@@ -30,7 +31,7 @@ import (
 // it without paying for a process start. vscode_server_test.go covers really
 // killing a child.
 func TestRunDaemon_StopsVSCodeEditorsOnWarmUpShutdown(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 
 	restoreStarted := make(chan struct{})
 	restoreGate := make(chan struct{})

@@ -4,9 +4,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/ui/layout"
-	"github.com/stretchr/testify/require"
 )
 
 // fireIdlePreviewTick drives the real 100ms preview tick through Update, so the

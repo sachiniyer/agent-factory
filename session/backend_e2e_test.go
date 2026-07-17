@@ -6,9 +6,11 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/sachiniyer/agent-factory/config"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/testguard"
 )
 
 // Backend-resolution E2E for the remote-hook backend (#1592 Phase 4 PR7). The
@@ -33,7 +35,7 @@ func writeE2EScript(t *testing.T, dir, name, body string) string {
 }
 
 func TestE2ELocalBackendStillWorks(t *testing.T) {
-	afHome := t.TempDir()
+	afHome := testguard.SocketTempDir(t)
 	t.Setenv("AGENT_FACTORY_HOME", afHome)
 
 	// Create a git repo with NO remote_hooks config.
@@ -61,7 +63,7 @@ func TestE2ELocalBackendStillWorks(t *testing.T) {
 // at backend resolution with an actionable error naming the field, rather than
 // constructing a backend that later dies with exec's cryptic "exec: no command".
 func TestE2EBackendResolutionRejectsEmptyHookCommands(t *testing.T) {
-	afHome := t.TempDir()
+	afHome := testguard.SocketTempDir(t)
 	t.Setenv("AGENT_FACTORY_HOME", afHome)
 
 	repoDir := t.TempDir()
@@ -95,7 +97,7 @@ func TestE2EBackendResolutionRejectsEmptyHookCommands(t *testing.T) {
 func setupE2ERelativeHooksRepo(t *testing.T) string {
 	t.Helper()
 
-	afHome := t.TempDir()
+	afHome := testguard.SocketTempDir(t)
 	t.Setenv("AGENT_FACTORY_HOME", afHome)
 
 	repoDir := t.TempDir()
@@ -171,7 +173,7 @@ func TestE2ERemoteHooksRelativePathsLinkedWorktree(t *testing.T) {
 // reads the in-repo .agent-factory/config.json (#800) and that it shadows the
 // legacy per-repo location.
 func TestE2EBackendResolutionWithInRepoConfig(t *testing.T) {
-	afHome := t.TempDir()
+	afHome := testguard.SocketTempDir(t)
 	t.Setenv("AGENT_FACTORY_HOME", afHome)
 
 	repoDir := t.TempDir()

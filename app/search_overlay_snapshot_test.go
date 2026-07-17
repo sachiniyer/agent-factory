@@ -4,9 +4,10 @@ import (
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/sachiniyer/agent-factory/session"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/sachiniyer/agent-factory/session"
 )
 
 // TestShowSearchOverlay_StableAcrossSnapshotRemoval is the #1008 regression.

@@ -233,7 +233,9 @@ func newHarness(t *testing.T) *harness {
 	// when per-session cleanup below fails.
 	testguard.IsolateTmux(t)
 
-	home := t.TempDir()
+	// SocketTempDir, not t.TempDir: the daemon derives daemon.sock from this home,
+	// and t.TempDir's test-name-bearing path overruns sun_path on macOS (#1940).
+	home := testguard.SocketTempDir(t)
 	// t.Setenv (not os.Setenv) so the variable is restored when the test
 	// ends; an unrestored value leaks the previous test's (deleted) tempdir
 	// into every later test in the package (#837 audit).

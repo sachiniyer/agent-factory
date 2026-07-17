@@ -3,6 +3,8 @@ package daemon
 import (
 	"testing"
 	"time"
+
+	"github.com/sachiniyer/agent-factory/internal/testguard"
 )
 
 // Tests for WaitForShutdownCompletion and the #854 upgrade-respawn race: the
@@ -16,7 +18,7 @@ import (
 // fallback path, or a daemon that already finished tearing down), the wait
 // must return nil on its first ping rather than burning the grace.
 func TestWaitForShutdownCompletionNoDaemon(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 
 	start := time.Now()
 	if err := WaitForShutdownCompletion(); err != nil {
@@ -35,7 +37,7 @@ func TestWaitForShutdownCompletionNoDaemon(t *testing.T) {
 // without the wait, pinged the still-alive socket, and returned without
 // spawning anything.
 func TestUpgradeRespawnWaitsForDelayedTeardown(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 
 	shutdownCh := make(chan struct{})
 	closeFn, err := startControlServer(nil, nil, nil, shutdownCh)
@@ -105,7 +107,7 @@ func TestUpgradeRespawnWaitsForDelayedTeardown(t *testing.T) {
 // (wedged teardown) must produce an error at the grace deadline so the caller
 // can warn — not hang forever or silently report success.
 func TestWaitForShutdownCompletionTimesOut(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 
 	closeFn, err := startControlServer(nil, nil, nil, nil)
 	if err != nil {

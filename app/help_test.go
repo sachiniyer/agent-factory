@@ -5,8 +5,9 @@ import (
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/sachiniyer/agent-factory/keys"
 	"github.com/stretchr/testify/require"
+
+	"github.com/sachiniyer/agent-factory/keys"
 )
 
 // TestHelpReflectsKeymapRebinds is the regression guard for the #1141

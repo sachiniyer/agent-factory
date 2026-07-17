@@ -6,13 +6,14 @@ import (
 	"testing"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/testguard"
 	"github.com/sachiniyer/agent-factory/session"
 )
 
 // TestSetPRInfo_SetsAndPersists verifies SetPRInfo records the PR info on the
 // live instance and persists it so it round-trips through a reload.
 func TestSetPRInfo_SetsAndPersists(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	repoPath := setupControlRepo(t)
 	repo, err := config.RepoFromPath(repoPath)
 	if err != nil {
@@ -61,7 +62,7 @@ func TestSetPRInfo_SetsAndPersists(t *testing.T) {
 // TestSetPRInfo_ClearsWithZeroValue verifies a zero-value PRInfo (Number 0)
 // clears previously-recorded info, both in memory and on disk.
 func TestSetPRInfo_ClearsWithZeroValue(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	repoPath := setupControlRepo(t)
 	repo, err := config.RepoFromPath(repoPath)
 	if err != nil {
@@ -103,7 +104,7 @@ func TestSetPRInfo_ClearsWithZeroValue(t *testing.T) {
 // warming (not-ready) manager fails fast with the typed starting error, and a
 // traversal RepoID is rejected at the network boundary.
 func TestControlServer_SetPRInfo_GatedAndValidated(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 
 	shell, err := newManagerShell(config.DefaultConfig())
 	if err != nil {

@@ -5,8 +5,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/sachiniyer/agent-factory/cmd/cmd_test"
 	"github.com/stretchr/testify/require"
+
+	"github.com/sachiniyer/agent-factory/cmd/cmd_test"
 )
 
 // TestCleanupSessionsOnlyKillsPrefixedSessions guards against #613: an
