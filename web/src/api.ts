@@ -11,6 +11,7 @@
 // request. The WS `?access_token=` fallback (browsers cannot set WS headers) is
 // used by the /v1/events subscriber (events.ts) and, in PR4, the PTY stream.
 
+import type { BackendCatalog } from "./backends.js";
 import type { SessionData, SnapshotResponse, TaskData, TasksResponse, TaskUpdate } from "./types.js";
 
 const TOKEN_KEY = "af.token";
@@ -244,22 +245,41 @@ export interface CreateSessionInput {
   prompt: string;
   /** Whether to run the session in auto-yes mode. */
   autoYes: boolean;
+  /** The runtime to create the session on (#1933) — a name from ListBackends,
+   *  mirroring `af sessions create --backend`. Empty means the user did not
+   *  choose, and createSession then sends NO backend so the repo's own config
+   *  decides. */
+  backend?: string;
+}
+
+/** Lists the runtimes a session in this repo can be created on, whether the repo's
+ *  config supports each, and the backend an unspecified create defaults to
+ *  (#1933). The daemon owns the enum; the web renders whatever it returns and
+ *  hard-codes no backend names of its own. */
+export async function listBackends(repoPath: string, token: string): Promise<BackendCatalog> {
+  return af<BackendCatalog>("ListBackends", { repo_path: repoPath }, token);
 }
 
 /** Creates a session and returns the daemon's authoritative projection of it (the
  *  resolved title + stable id). The created row also arrives via /v1/events. */
 export async function createSession(input: CreateSessionInput, token: string): Promise<SessionData> {
-  const resp = await af<{ instance: SessionData }>(
-    "CreateSession",
-    {
-      title_base: input.title,
-      repo_path: input.repoPath,
-      program: input.program,
-      prompt: input.prompt,
-      auto_yes: input.autoYes,
-    },
-    token,
-  );
+  const body: Record<string, unknown> = {
+    title_base: input.title,
+    repo_path: input.repoPath,
+    program: input.program,
+    prompt: input.prompt,
+    auto_yes: input.autoYes,
+  };
+  // `backend` is sent ONLY when the user picked one. Sending "local" for an
+  // unspecified choice would look equivalent and is not: an explicit backend wins
+  // over the repo's `backend` config key, so it would silently override the repo
+  // default that `af sessions create` (with no --backend) honours. Absent is the
+  // only way to mean "let the repo decide" (#1933).
+  const backend = (input.backend ?? "").trim();
+  if (backend !== "") {
+    body.backend = backend;
+  }
+  const resp = await af<{ instance: SessionData }>("CreateSession", body, token);
   return resp.instance;
 }
 

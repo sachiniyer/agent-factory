@@ -60,6 +60,13 @@ var httpRoutes = []HTTPRoute{
 	},
 	{
 		Method:        http.MethodPost,
+		Path:          "/v1/ListBackends",
+		Description:   "List the runtimes a session in this repo can be created on, whether the repo's config supports each, and the backend an unspecified create defaults to.",
+		RequestFields: jsonFields(reflect.TypeOf(ListBackendsRequest{})),
+		handler:       func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.ListBackends) },
+	},
+	{
+		Method:        http.MethodPost,
 		Path:          "/v1/Snapshot",
 		Description:   "List sessions from the daemon's authoritative in-memory state (empty repo_id = all repos).",
 		RequestFields: jsonFields(reflect.TypeOf(SnapshotRequest{})),

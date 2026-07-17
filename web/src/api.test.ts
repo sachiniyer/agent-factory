@@ -11,9 +11,12 @@ import {
   ApiError,
   archiveSession,
   closeTab,
+  createSession,
+  type CreateSessionInput,
   createTab,
   errorText,
   killSession,
+  listBackends,
   removeTask,
   sendPrompt,
   triggerTask,
@@ -48,6 +51,52 @@ function stubFetch(): Captured {
 
 afterEach(() => {
   delete (globalThis as { fetch?: unknown }).fetch;
+});
+
+// The backend-on-create contract (#1933). The daemon already accepted `backend`;
+// these pin that the web now sends it — and, just as load-bearing, that it stays
+// ABSENT when the user made no choice.
+
+/** A create form submission with no backend chosen (the default state). */
+function createInput(over: Partial<CreateSessionInput> = {}): CreateSessionInput {
+  return { title: "feature", repoPath: "/repos/af", program: "", prompt: "", autoYes: false, ...over };
+}
+
+for (const backend of ["local", "docker", "ssh", "hook"]) {
+  test(`createSession sends backend=${backend} when the user picks it`, async () => {
+    const cap = stubFetch();
+    await createSession(createInput({ backend }), "tok");
+    assert.equal(cap.url, "/v1/CreateSession");
+    assert.equal(cap.body.backend, backend, "an explicit choice must reach the daemon verbatim, as `af sessions create --backend` does");
+    assert.equal(cap.body.repo_path, "/repos/af");
+  });
+}
+
+test("createSession omits backend entirely when the user chose the repo default", async () => {
+  // This is the subtle half. Sending "local" here would look equivalent and is
+  // not: an explicit backend WINS over the repo's `backend` config key, so a repo
+  // configured for docker would silently create local sessions from the web while
+  // the CLI honoured docker. Absent is the only encoding of "let the repo decide".
+  const cap = stubFetch();
+  await createSession(createInput({ backend: "" }), "tok");
+
+  assert.equal("backend" in cap.body, false, "no choice must send NO backend key, not an explicit local");
+});
+
+test("createSession omits backend when the field is absent altogether", async () => {
+  const cap = stubFetch();
+  await createSession(createInput(), "tok");
+
+  assert.equal("backend" in cap.body, false, "an undefined backend is the same 'let the repo decide' as an empty one");
+});
+
+test("listBackends asks the daemon for the picked repo's catalog", async () => {
+  const cap = stubFetch();
+  await listBackends("/repos/af", "tok");
+
+  assert.equal(cap.url, "/v1/ListBackends");
+  assert.equal(cap.auth, "Bearer tok");
+  assert.equal(cap.body.repo_path, "/repos/af", "availability and the default are per-repo facts");
 });
 
 test("killSession posts the stable id as the primary key alongside the title", async () => {

@@ -1878,6 +1878,33 @@ test.describe("create → kill (one session, two flows)", () => {
     const modal = page.locator(".af-modal-card");
     await expect(modal).toBeVisible();
 
+    // #1933 end-to-end: the backend picker is populated by the DAEMON (ListBackends
+    // against the picked project), not by a list in the web. This is the only test
+    // that proves the whole chain — enum → RPC → rendered options — through a real
+    // daemon; the unit tests either side of it both stub their counterpart.
+    const backendSelect = modal.locator('select[aria-label="Backend"]');
+    await expect(backendSelect).toBeVisible();
+    // Populated asynchronously, so wait for the daemon's answer rather than the
+    // "repo default"-only placeholder the field is built with.
+    await expect(backendSelect.locator("option")).not.toHaveCount(1, { timeout: 30_000 });
+    await expect(backendSelect.locator("option")).toHaveText(
+      [/^Repo default \(local\)$/, "local", "docker", "ssh", "hook"],
+      { timeout: 30_000 },
+    );
+    // The mock repo configures no docker.image. Picking docker must state the missing
+    // key AND block Create — the choose-time message standing in for the create-time
+    // failure this issue is about. The reason is the daemon's own text, so this also
+    // proves the CLI and the web say the same thing.
+    await backendSelect.selectOption("docker");
+    await expect(modal.locator(".af-modal-hint")).toHaveText(/docker\.image/);
+    await expect(modal.locator("button.af-primary")).toBeDisabled();
+
+    // Back to the repo default: the notice clears, Create is live again, and the
+    // submit below sends NO backend — so this create stays local.
+    await backendSelect.selectOption("");
+    await expect(modal.locator(".af-modal-hint")).toHaveText("");
+    await expect(modal.locator("button.af-primary")).toBeEnabled();
+
     // Title is required; the project picker defaults to the scoped project (redesign
     // PR2 — the first mock repo A/B live in), so the created session lands there and is
     // visible in the scoped rail. Program is left at "Repo default" (claude → the fake

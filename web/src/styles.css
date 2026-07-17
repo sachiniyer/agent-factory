@@ -1748,6 +1748,22 @@ body {
   line-height: 1.4;
 }
 
+/* A field-level advisory (#1933: why a backend is not selectable, or why a repo's
+ * default backend cannot run). Muted, not --af-danger: nothing has failed and the
+ * user has done nothing wrong — it states a repo-config fact at choose time. The
+ * meaning is carried by the words, so it stays legible in both themes with no
+ * color-only signal. */
+.af-modal-hint {
+  margin: 0;
+  color: var(--af-text-2);
+  font-size: var(--af-fs-sm);
+  line-height: 1.4;
+}
+
+.af-modal-hint:empty {
+  display: none;
+}
+
 .af-modal-foot {
   display: flex;
   justify-content: flex-end;

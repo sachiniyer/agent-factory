@@ -6223,18 +6223,22 @@ async function probeAuthRequired() {
   }
   return env?.data?.auth_required !== false;
 }
+async function listBackends(repoPath, token2) {
+  return af("ListBackends", { repo_path: repoPath }, token2);
+}
 async function createSession(input, token2) {
-  const resp = await af(
-    "CreateSession",
-    {
-      title_base: input.title,
-      repo_path: input.repoPath,
-      program: input.program,
-      prompt: input.prompt,
-      auto_yes: input.autoYes
-    },
-    token2
-  );
+  const body = {
+    title_base: input.title,
+    repo_path: input.repoPath,
+    program: input.program,
+    prompt: input.prompt,
+    auto_yes: input.autoYes
+  };
+  const backend = (input.backend ?? "").trim();
+  if (backend !== "") {
+    body.backend = backend;
+  }
+  const resp = await af("CreateSession", body, token2);
   return resp.instance;
 }
 async function sendPrompt(id, title, prompt, token2) {
@@ -6394,6 +6398,51 @@ var EventStream = class {
   }
 };
 
+// src/backends.ts
+var REPO_DEFAULT = "";
+function backendChoices(catalog) {
+  if (catalog === null) {
+    return [{ value: REPO_DEFAULT, label: "Repo default", available: true, reason: "" }];
+  }
+  const reason = defaultReason(catalog);
+  const choices = [
+    {
+      value: REPO_DEFAULT,
+      label: catalog.default === "" ? "Repo default" : `Repo default (${catalog.default})`,
+      // A repo whose declared default is unconfigured is genuinely unusable: that
+      // create resolves to the broken backend and fails. Reporting it as such
+      // surfaces the config bug at choose time instead of at create time — which is
+      // the whole point of #1933 — and is why this is computed, not hardcoded true.
+      available: reason === "",
+      reason
+    }
+  ];
+  for (const opt of catalog.backends) {
+    choices.push({
+      value: opt.name,
+      label: opt.name,
+      available: opt.available,
+      reason: opt.available ? "" : opt.reason ?? ""
+    });
+  }
+  return choices;
+}
+function defaultReason(catalog) {
+  const resolved = catalog.backends.find((b) => b.name === catalog.default);
+  if (resolved === void 0 || resolved.available) {
+    return "";
+  }
+  return resolved.reason ?? "";
+}
+function backendNotice(choices, selected) {
+  const choice = choices.find((c) => c.value === selected);
+  return choice === void 0 ? "" : choice.reason;
+}
+function backendSelectable(choices, selected) {
+  const choice = choices.find((c) => c.value === selected);
+  return choice === void 0 || choice.available;
+}
+
 // src/modals.ts
 function h(tag, props = {}, ...children) {
   const el2 = document.createElement(tag);
@@ -6494,6 +6543,48 @@ function newSessionModal(projects, defaultProject2, callbacks) {
   for (const prog of ["claude", "codex", "aider", "gemini", "amp"]) {
     programSelect.append(h("option", { value: prog }, prog));
   }
+  const backendSelect = h("select", { class: "af-input" });
+  backendSelect.setAttribute("aria-label", "Backend");
+  const backendHint = h("p", { class: "af-modal-hint" });
+  backendHint.setAttribute("role", "status");
+  let choices = backendChoices(null);
+  const syncSelection = () => {
+    backendHint.textContent = backendNotice(choices, backendSelect.value);
+    confirmBtn.disabled = projects.length === 0 || !backendSelectable(choices, backendSelect.value);
+  };
+  const renderChoices = () => {
+    const previous = backendSelect.value;
+    backendSelect.replaceChildren();
+    for (const choice of choices) {
+      backendSelect.append(h("option", { value: choice.value }, choice.label));
+    }
+    backendSelect.value = choices.some((c) => c.value === previous) ? previous : REPO_DEFAULT;
+    syncSelection();
+  };
+  backendSelect.addEventListener("change", syncSelection);
+  let loadSeq = 0;
+  const loadBackendsFor = (repoPath) => {
+    const seq = ++loadSeq;
+    if (repoPath === "") {
+      choices = backendChoices(null);
+      renderChoices();
+      return;
+    }
+    void callbacks.loadBackends(repoPath).then((catalog) => {
+      if (seq !== loadSeq) {
+        return;
+      }
+      choices = backendChoices(catalog);
+      renderChoices();
+    }).catch(() => {
+      if (seq !== loadSeq) {
+        return;
+      }
+      choices = backendChoices(null);
+      renderChoices();
+    });
+  };
+  projectSelect.addEventListener("change", () => loadBackendsFor(projectSelect.value));
   const promptArea = h("textarea", { class: "af-input af-textarea", placeholder: "Initial prompt (optional)", rows: 3 });
   promptArea.setAttribute("aria-label", "Initial prompt");
   const autoYes = h("input", { type: "checkbox", id: "af-autoyes" });
@@ -6502,9 +6593,13 @@ function newSessionModal(projects, defaultProject2, callbacks) {
     field("Title", titleInput),
     field("Project", projectSelect),
     field("Program", programSelect),
+    field("Backend", backendSelect),
+    backendHint,
     field("Prompt", promptArea),
     autoYesRow
   );
+  renderChoices();
+  loadBackendsFor(projectSelect.value);
   const card = handle.el.firstElementChild;
   asForm(card, () => {
     const title = titleInput.value.trim();
@@ -6518,7 +6613,10 @@ function newSessionModal(projects, defaultProject2, callbacks) {
       repoPath: projectSelect.value,
       program: programSelect.value,
       prompt: promptArea.value,
-      autoYes: autoYes.checked
+      autoYes: autoYes.checked,
+      // REPO_DEFAULT ("") when the user did not choose — createSession then omits
+      // `backend` entirely and the repo's config decides (#1933).
+      backend: backendSelect.value
     });
   });
   queueMicrotask(() => titleInput.focus());
@@ -10180,6 +10278,11 @@ function newSession() {
   const projects = pickerProjects(store.get().sessions, store.get().tasks);
   openModal(
     newSessionModal(projects, store.get().selectedProject, {
+      // The backend catalog is per-repo and read at choose time (#1933), so the
+      // modal asks for the picked project's on open and on every project change.
+      // Tokenless ("") is a valid credential (#1696), so a null token — not a
+      // falsy one — is the "not authorized yet" case.
+      loadBackends: (repoPath) => token === null ? Promise.reject(new Error("not authorized")) : listBackends(repoPath, token),
       onSubmit: (values) => {
         const tok = token;
         if (tok === null || !modal) {
