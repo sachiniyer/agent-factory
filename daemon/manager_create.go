@@ -97,7 +97,16 @@ func (m *Manager) CreateSession(ctx context.Context, req CreateSessionRequest) (
 		// with this name collides with — or removes — a workspace nobody can address,
 		// since no record points at it. So keep the record instead: it holds the title
 		// and gives the user something to inspect and kill.
-		if killErr := instance.Kill(); killErr != nil {
+		// The SAME classifier deleteSessionRecord uses (#1917 round 7). A non-nil
+		// Kill is not enough: a remote create failure returns the in-sandbox
+		// endpoint's error even when the sandbox teardown SUCCEEDED, so the
+		// workspace is already gone — tombstoning a row, holding the title and
+		// telling the user a workspace may remain would all be false.
+		killErr := instance.Kill()
+		if killErr != nil && !session.TeardownStateUnknown(killErr) {
+			log.WarningLog.Printf("create of session %q: cleanup reported an error that does not leave its workspace state unknown; discarding the session as normal: %v", title, killErr)
+		}
+		if session.TeardownStateUnknown(killErr) {
 			if keepErr := m.keepFailedCreate(repo.ID, title, instance); keepErr != nil {
 				return session.InstanceData{}, fmt.Errorf("failed to start instance %q, and its cleanup could not complete safely — its workspace may still be on disk at %s and could not be recorded, so it must be cleaned up by hand: %w",
 					title, instance.GetWorktreePath(), errors.Join(serr, killErr, keepErr))
@@ -131,7 +140,7 @@ func (m *Manager) CreateSession(ctx context.Context, req CreateSessionRequest) (
 		// Same rule as the start-failure path above, minus the remedy: the record
 		// write is what just failed, so keeping a record is not available. Report the
 		// leftovers loudly instead of silently releasing the title over them (#1917).
-		if killErr := instance.Kill(); killErr != nil {
+		if killErr := instance.Kill(); session.TeardownStateUnknown(killErr) {
 			return session.InstanceData{}, fmt.Errorf("failed to record session %q, and its cleanup could not complete safely — its workspace may still be on disk at %s and must be cleaned up by hand: %w",
 				title, instance.GetWorktreePath(), errors.Join(persistErr, killErr))
 		}

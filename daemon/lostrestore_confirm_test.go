@@ -248,3 +248,73 @@ func TestRestoreLostSessions_ObservationConfirms_NotElapsedTime(t *testing.T) {
 		t.Fatal("an observed-alive runtime must have its retry history cleared")
 	}
 }
+
+// deadPaneBackend models the exact trap of #1917 round 7: the agent-server's
+// Snapshot reports (false,false,"") with a NIL ERROR — which localAgentServer does
+// unconditionally, because it wraps HasUpdated and HasUpdated suppresses
+// capture/session-gone failures — while the liveness probe correctly answers DEAD.
+//
+// Absence of an error is not evidence of life. A counter that advances on "the call
+// didn't error" is fooled by exactly this.
+type deadPaneBackend struct{ *session.FakeBackend }
+
+func (b *deadPaneBackend) HasUpdated(*session.Instance) (bool, bool, string) {
+	return false, false, "" // what a DEAD session's suppressed capture returns
+}
+func (b *deadPaneBackend) IsAlive(*session.Instance) bool { return false } // probeDead
+func (b *deadPaneBackend) Type() string                   { return "local" }
+
+// TestRefreshInstanceStatus_SnapshotNilErrorOnDeadSession_IsNotAnObservation is
+// round-7 finding (1), and it is the counter being fooled by the same disease it
+// was built to cure.
+//
+// The poll's Snapshot returns nil for a session that is already dead, and the very
+// next probe marks it Lost. If that nil error counted as a liveness observation,
+// RestoreLostSessions would read "previously confirmed", clear the failure history,
+// and respawn with no backoff — #1910's hot loop, rebuilt out of an absent error.
+//
+// PRE-FIX BEHAVIOR THIS REPRODUCES: aliveObservations advances for a session the
+// same tick marks Lost.
+func TestRefreshInstanceStatus_SnapshotNilErrorOnDeadSession_IsNotAnObservation(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	backend := &deadPaneBackend{FakeBackend: session.NewFakeBackend()}
+	inst := registerStarted(t, manager, repoID, repoPath, "corpse", backend, true, session.Running)
+
+	obsKey := remoteLossKey(repoID, inst)
+	manager.refreshInstanceStatus(repoID, inst)
+
+	manager.mu.Lock()
+	count := manager.aliveObservations[obsKey]
+	manager.mu.Unlock()
+
+	if got := inst.GetStatus(); got != session.Lost {
+		t.Fatalf("setup: the probe must mark this dead session Lost, got %v", got)
+	}
+	if count != 0 {
+		t.Fatal("a Snapshot that returned NIL for a session this very tick marked Lost was counted " +
+			"as a liveness observation: localAgentServer.Snapshot never errors (it wraps HasUpdated, " +
+			"which suppresses capture/session-gone failures), so absence of an error masqueraded as " +
+			"evidence — and the restore loop then clears the failure history and respawns with no " +
+			"backoff, rebuilding #1910's hot loop (#1917 round 7)")
+	}
+}
+
+// TestRefreshInstanceStatus_LiveSessionIsObserved is the positive guard: requiring
+// affirmative evidence must not mean nothing ever confirms. A session whose pane
+// produces output IS affirmative — a dead pane cannot.
+func TestRefreshInstanceStatus_LiveSessionIsObserved(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	backend := &recoverFakeBackend{FakeBackend: session.NewFakeBackend()}
+	inst := registerStarted(t, manager, repoID, repoPath, "busy", backend, true, session.Running)
+
+	obsKey := remoteLossKey(repoID, inst)
+	manager.refreshInstanceStatus(repoID, inst)
+
+	manager.mu.Lock()
+	count := manager.aliveObservations[obsKey]
+	manager.mu.Unlock()
+	if count == 0 {
+		t.Fatal("a live session produced no liveness observation: confirmation would never happen " +
+			"and every restored session would be charged a failure it did not earn")
+	}
+}

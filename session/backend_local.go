@@ -2,6 +2,7 @@ package session
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -297,8 +298,19 @@ func (b *LocalBackend) Launch(i *Instance, firstTimeSetup bool) error {
 
 		// Create new session
 		if err := tmuxSession.Start(gw.GetWorktreePath()); err != nil {
-			// Cleanup git worktree if tmux session creation fails. The tmux session
-			// never came up, so there is no live pane to race the removal.
+			// A Start that could not establish the session's fate must NOT lead to a
+			// worktree delete (#1917 round 7). The claim that used to stand here —
+			// "the tmux session never came up, so there is no live pane to race the
+			// removal" — is false against a wedged server: Start's own cleanup Close
+			// reports PaneStateUnknown precisely because a detached session may exist
+			// with its pane still running in this worktree. Deleting it then destroys
+			// live work on a guess, which is the whole thing this PR exists to stop.
+			if errors.Is(err, tmux.ErrTmuxTimeout) {
+				return fmt.Errorf("failed to start new session: %w: %w: leaving its workspace at %s in place",
+					err, ErrPaneMayBeLive, gw.GetWorktreePath())
+			}
+			// Cleanup git worktree if tmux session creation fails. tmux ANSWERED, so
+			// the session is confirmed not running and the worktree is ours to remove.
 			//
 			// A cleanup cut off by its own deadline is surfaced as ErrWorkspaceLeftBehind
 			// rather than folded into a prose message (#1917): the worktree is still

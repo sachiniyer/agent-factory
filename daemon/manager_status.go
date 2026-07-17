@@ -303,13 +303,6 @@ func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instanc
 	// HasUpdated). Content is the capture handed back so the idle branch runs the
 	// usage-limit detector (#1146) without a second capture-pane.
 	obs, err := as.Snapshot()
-	if err == nil {
-		// The runtime ANSWERED. This is the only positive liveness observation in the
-		// daemon, and the Lost-restore loop's confirmation is defined in terms of it
-		// (#1910/#1917 round 6): elapsed time without an answer proves nothing, so a
-		// clock must never stand in for this.
-		m.noteAliveObservation(key)
-	}
 	if err != nil {
 		// The observation probe failed. The local agent-server never errors here,
 		// so this is the REMOTE runtime's path (#1592 Phase 4): the REST call to
@@ -346,10 +339,33 @@ func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instanc
 	// This is the ONLY thing the debounce tracks — see remoteloss.go: it counts
 	// unanswerable probes, not "looks dead" observations.
 	m.clearRemoteLoss(key)
+
+	// AFFIRMATIVE liveness evidence for this tick, decided in ONE place and only
+	// where the poll actually learned something (#1917 round 7).
+	//
+	// It is NOT "Snapshot did not error". localAgentServer.Snapshot returns a nil
+	// error unconditionally — it wraps HasUpdated, which SUPPRESSES capture and
+	// session-gone failures and reports (false,false,"") for a session that is
+	// already dead. Counting that as proof of life let the Lost-restore loop read
+	// "previously confirmed", clear the failure history, and respawn with no backoff:
+	// #1910's hot loop, rebuilt out of an absent error. Absence of an error is not
+	// evidence; only something that can say YES is.
+	//
+	// The three yeses below are exactly the branches that carry one, and the comment
+	// on the idle branch names the reason the fourth cannot: (false,false) "a healthy
+	// idle session and a dead one both produce — indistinguishable on their own".
+	observedAlive := false
 	switch {
 	case updated:
+		// Fresh output. Only a live pane produces bytes, and a dead one yields "" —
+		// so this is affirmative on its own, no probe needed.
+		observedAlive = true
 		_ = instance.Transition(session.ObserveLiveness(session.LiveRunning))
 	case hasPrompt:
+		// A matched prompt means the CAPTURE SUCCEEDED: hasPrompt is a substring test
+		// over content, and every failure path in HasUpdated returns content "". So
+		// non-empty matched content is itself an answer from a live pane.
+		observedAlive = true
 		// A waiting prompt with otherwise-unchanged output: leave the status for
 		// the next tick to resolve, exactly as runMetadataTick did. The
 		// prompt-tap already fired above regardless of `updated`.
@@ -387,11 +403,17 @@ func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instanc
 				_ = instance.Transition(session.ObserveLiveness(session.LiveLost))
 			}
 		case probeAlive:
+			// The agent-server was asked and reports its agent RUNNING — the
+			// codebase's own affirmative signal, sitting one file away the whole time.
+			observedAlive = true
 			// Idle output: settle to Ready, or LimitReached when the pane shows a
 			// usage-limit banner for a claude/codex session (#1146). content is
 			// HasUpdated's capture (no re-capture); see resolveIdleLiveness.
 			m.resolveIdleLiveness(instance, content)
 		}
+	}
+	if observedAlive {
+		m.noteAliveObservation(key)
 	}
 
 	// Persist a liveness OR usage-limit reset-time change (#1146); see limit.go.
