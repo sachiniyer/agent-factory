@@ -97,6 +97,7 @@ How it behaves:
 - **The cap counts runs, not sessions.** A run starts when an event creates its session and ends when the agent goes idle. Nothing that happens to the session afterwards — an outage, a failed archive, work you start in it yourself — puts it back under the task's cap.
 - **A run interrupted mid-flight keeps its slot** while the daemon is still trying to restore it. The restore loop never gives up on a recoverable session, so freeing the slot would let the task admit replacements and then exceed its cap once the originals came back. If a session is lost for good, `af sessions kill` releases its slot — the same off-ramp that clears a permanently failing restore.
 - **Archiving a session releases its slot**, even mid-run: you parked it deliberately, and holding the slot until someone restored it would wedge the task.
+- **A session that fails to load still counts.** If the daemon restarts and cannot rebuild a session (its worktree vanished, say), the agent may still be running — so its run keeps its slot rather than quietly freeing one. `af sessions kill` on the broken session releases it. The log names the task and session when this happens.
 - **The cap is scoped to the task and its repo**, keyed on the task id recorded on each session it spawns — not on a session-title prefix.
 - **A parked task is healthy**, not failing: it logs quietly and never raises the delivery-failure alarm.
 

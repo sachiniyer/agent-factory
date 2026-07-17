@@ -153,13 +153,34 @@ func holdsTaskRunSlot(v session.LifecycleView) bool {
 	return v.Activity() == session.ActivityPending || canAutoRestoreLostSession(v)
 }
 
-// countTaskRunsLocked reports how many sessions the task currently has in flight
-// in the repo: reserved creates that have not yet registered an instance, plus
-// live sessions still holding a slot. Callers hold m.mu and have already called
-// refreshLocked, so m.instances reflects what is on disk — which is what makes
-// the count survive a daemon restart with sessions still live.
+// countTaskRunsLocked reports how many runs the task currently has in flight in
+// the repo. Callers hold m.mu and have already called refreshLocked, so both
+// projections below reflect what is on disk — which is what makes the count
+// survive a daemon restart with sessions still live.
+//
+// THE COUNTER'S UNIVERSE, stated explicitly because getting it wrong is a silent
+// cap bypass rather than a visible error. A run is in flight if it is in ANY of
+// three places, and m.instances is only one of them:
+//
+//  1. m.reservedTaskRuns — admitted creates that have not yet registered an
+//     instance. In-memory only, and necessarily so: the session does not exist
+//     anywhere else yet.
+//  2. m.instances — the sessions the daemon successfully loaded and manages.
+//  3. m.ghostTaskRuns — rows that are ON DISK with their run still in flight but
+//     which FAILED to materialize (a vanished worktree, an unresolvable backend, a
+//     wedged tmux name). refreshDaemonInstances logs and skips them, so they are
+//     invisible to (2) — but a row we could not load is not a run that stopped;
+//     its agent may still be up, and the persisted marker is the authority on
+//     whether its run is in flight. Counting only (2) made a failed LOAD into a
+//     licence to exceed the cap on every restart.
+//
+// The transition table (session/transition.go) covers what a run does as a
+// session MOVES. This covers where a run can BE. A row that never becomes an
+// Instance makes no transitions at all, so the table cannot see it — which is
+// exactly how it got missed.
 func (m *Manager) countTaskRunsLocked(repoID, taskID string) int {
-	inFlight := m.reservedTaskRuns[taskRunReservationKey(repoID, taskID)]
+	key := taskRunReservationKey(repoID, taskID)
+	inFlight := m.reservedTaskRuns[key] + m.ghostTaskRuns[key]
 	for key, inst := range m.instances {
 		if inst == nil || inst.TaskID != taskID {
 			continue

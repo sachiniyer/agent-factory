@@ -58,7 +58,19 @@ type Manager struct {
 	// straight off m.instances by admitTaskRunLocked, which is why a daemon restart
 	// cannot lose the count.
 	reservedTaskRuns map[string]int
-	repoStartLocks   map[string]*sync.Mutex
+	// ghostTaskRuns counts a task's in-flight runs that exist ON DISK but could not
+	// be materialized into an Instance, keyed the same way (#1892). Rebuilt from
+	// disk on every refresh — the exact opposite of reservedTaskRuns above, and for
+	// the opposite reason: these are runs the in-memory map cannot see, so they must
+	// come from the projection, not from bookkeeping.
+	//
+	// It exists because m.instances is not the universe. refreshDaemonInstances
+	// skips a row it cannot load, and everything that walks the map — including the
+	// cap's count — then behaves as if that session does not exist. Its agent may
+	// still be running, so the cap must keep counting it or a failed LOAD becomes a
+	// licence to exceed max_concurrent_runs after every restart.
+	ghostTaskRuns  map[string]int
+	repoStartLocks map[string]*sync.Mutex
 	// targetLocks serializes DeliverPrompt per (repo, title) so concurrent
 	// deliveries to the same shared target session create it once and deliver
 	// the rest in arrival order instead of racing creation and dropping the
@@ -184,6 +196,7 @@ func newManagerShell(cfg *config.Config) (*Manager, error) {
 		reservedTitles:      make(map[string]struct{}),
 		reservedRemoteNames: make(map[string]struct{}),
 		reservedTaskRuns:    make(map[string]int),
+		ghostTaskRuns:       make(map[string]int),
 		repoStartLocks:      make(map[string]*sync.Mutex),
 		targetLocks:         make(map[string]*sync.Mutex),
 		rootEnsureStates:    make(map[string]*rootEnsureState),
@@ -208,12 +221,13 @@ func newManagerShell(cfg *config.Config) (*Manager, error) {
 // mutates it is gated on Ready, and the refresh poll loop starts after the
 // restore completes.
 func (m *Manager) RestoreInstances() error {
-	instances, err := refreshDaemonInstances(nil)
+	instances, ghosts, err := refreshDaemonInstances(nil)
 	if err != nil {
 		return err
 	}
 	m.mu.Lock()
 	m.instances = instances
+	m.ghostTaskRuns = ghosts
 	m.mu.Unlock()
 	m.readyOnce.Do(func() { close(m.ready) })
 	return nil
@@ -283,11 +297,16 @@ func (m *Manager) Snapshot(repoID string) []session.InstanceData {
 }
 
 func (m *Manager) refreshLocked() error {
-	refreshed, err := refreshDaemonInstances(m.instances)
+	refreshed, ghosts, err := refreshDaemonInstances(m.instances)
 	if err != nil {
 		return err
 	}
 	m.instances = refreshed
+	// Replaced wholesale, never merged: the ghost set is a projection of what is on
+	// disk RIGHT NOW (#1892). A row that starts loading again must stop being a
+	// ghost, or its slot would be held twice — once by the ghost and once by the
+	// instance it became.
+	m.ghostTaskRuns = ghosts
 	return nil
 }
 
