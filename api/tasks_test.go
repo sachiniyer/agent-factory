@@ -34,6 +34,11 @@ type daemonCalls struct {
 	// UpdateTask dispatch (#1700), so tests can assert `af tasks update` ships
 	// ONLY the flags the user passed and never a full-struct copy.
 	lastUpdate task.TaskUpdate
+	// lastExpect records the project expectation the CLI sent on the most recent
+	// mutating dispatch, so tests can assert the client-side scope check is
+	// carried to the daemon rather than dropped (#1893 review). A dropped
+	// expectation is invisible on the happy path and silently reopens the race.
+	lastExpect task.ProjectExpectation
 }
 
 // stubDaemon swaps the daemon task-RPC indirections for in-memory stubs and
@@ -64,11 +69,12 @@ func stubDaemon(t *testing.T) *daemonCalls {
 		calls.writes++
 		return nil
 	}
-	daemonUpdateTask = func(id string, update task.TaskUpdate) (task.Task, error) {
+	daemonUpdateTask = func(id string, update task.TaskUpdate, expect task.ProjectExpectation) (task.Task, error) {
+		calls.lastExpect = expect
 		if calls.updateErr != nil {
 			return task.Task{}, calls.updateErr
 		}
-		merged, err := task.UpdateTask(id, update)
+		merged, err := task.UpdateTask(id, update, expect)
 		if err != nil {
 			return task.Task{}, err
 		}
@@ -76,18 +82,20 @@ func stubDaemon(t *testing.T) *daemonCalls {
 		calls.lastUpdate = update
 		return merged, nil
 	}
-	daemonRemoveTask = func(id string) error {
+	daemonRemoveTask = func(id string, expect task.ProjectExpectation) error {
+		calls.lastExpect = expect
 		if calls.removeErr != nil {
 			return calls.removeErr
 		}
-		if err := task.RemoveTask(id); err != nil {
+		if err := task.RemoveTask(id, expect); err != nil {
 			return err
 		}
 		calls.writes++
 		return nil
 	}
-	daemonTriggerTask = func(id string) error {
+	daemonTriggerTask = func(id string, expect task.ProjectExpectation) error {
 		calls.triggered = append(calls.triggered, id)
+		calls.lastExpect = expect
 		return calls.runErr
 	}
 	daemonListTasksNoSpawn = func() ([]task.Task, error) {
@@ -176,7 +184,19 @@ func seedTask(t *testing.T, tsk task.Task) {
 }
 
 // setupAddRepo creates a throwaway git repo so resolveRepo() inside
-// tasksAddCmd succeeds. Returns the repo path.
+// tasksAddCmd succeeds. Returns the repo's CANONICAL path.
+//
+// Canonicalized because of the #1918 class: production resolves a repo path to
+// its physical location (config.resolveMainRepoRoot shells out to `git rev-parse
+// --show-toplevel`), so a helper handing out an unresolved path makes every
+// assertion about a path derived from it compare /var/… against /private/var/…
+// on macOS, where t.TempDir() sits under a symlinked /var. The resolved spelling
+// is the one production reports, so hand that out and the class cannot recur
+// through this helper — the same reasoning as testguard.SocketTempDir, and what
+// mkRepo already does. A no-op on Linux, which is exactly why this hid.
+//
+// repoFlag deliberately keeps the UNRESOLVED path: passing a symlinked --repo is
+// a real thing users do, and resolving it is the command's job to demonstrate.
 func setupAddRepo(t *testing.T) string {
 	t.Helper()
 	repo := filepath.Join(t.TempDir(), "repo")
@@ -185,7 +205,9 @@ func setupAddRepo(t *testing.T) string {
 	require.NoError(t, exec.Command("git", "-C", repo, "config", "user.name", "Test User").Run())
 	require.NoError(t, exec.Command("git", "-C", repo, "commit", "--allow-empty", "-m", "init").Run())
 	repoFlag = repo
-	return repo
+	real, err := filepath.EvalSymlinks(repo)
+	require.NoError(t, err)
+	return real
 }
 
 func TestTasksAdd_PersistsTaskViaDaemon(t *testing.T) {
@@ -573,6 +595,12 @@ func TestTasksRemove_MissingTaskErrors(t *testing.T) {
 func TestTasksTrigger_RunsThroughDaemon(t *testing.T) {
 	useTempConfig(t)
 	calls := stubDaemon(t)
+	// The task must exist to be triggered: trigger resolves it to check it
+	// belongs to the current project (#1893). It used to fire the RPC for an id
+	// that was never stored — the daemon rejected it, so nothing reached a
+	// scheduler, but the CLI dispatched blind. The seed keeps this test about
+	// the RPC dispatch it is named for.
+	seedTask(t, task.Task{ID: "t6abcd", Name: "n", Prompt: "p", CronExpr: "0 9 * * *", Enabled: true})
 
 	err := tasksRunCmd.RunE(tasksRunCmd, []string{"t6abcd"})
 	require.NoError(t, err)

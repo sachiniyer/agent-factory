@@ -196,6 +196,16 @@ unspecified field — and the scheduler-owned fields — as-stored, so a single-
 edit cannot clobber a concurrent edit another client made (#1700). See
 [tasks.md](tasks.md) for the task shape.
 
+`UpdateTask`, `RemoveTask`, and `TriggerTask` also accept an optional `expect`
+object — `{ "enforce": true, "project_path": "/repos/alpha" }` — asserting the
+project the task was bound to when the caller authorized it. The daemon
+re-checks it against the freshly-loaded record inside the same locked operation
+and refuses the write if the task has since been re-bound, so a client that
+checks scope in one request and mutates in another cannot act on a task that
+moved projects in between. Omitting `expect` (or sending `enforce: false`) skips
+the check, which is what a caller with no project context does — existing
+clients are unaffected.
+
 ## Examples
 
 Health check:

@@ -43,10 +43,14 @@ func newTestHome(t *testing.T) *home {
 	// task.UpdateTask returns the merged record; the seam only needs the error,
 	// so adapt it to the field-level updater signature (#1700).
 	t.Cleanup(SetTaskUpdaterForTest(func(id string, update task.TaskUpdate) error {
-		_, err := task.UpdateTask(id, update)
+		_, err := task.UpdateTask(id, update, task.ProjectExpectation{})
 		return err
 	}))
-	t.Cleanup(SetTaskRemoverForTest(task.RemoveTask))
+	// The TUI's remove seam takes no project expectation: the CLI's client-side
+	// scope check is what an expectation re-verifies, and the TUI has none.
+	t.Cleanup(SetTaskRemoverForTest(func(id string) error {
+		return task.RemoveTask(id, task.ProjectExpectation{})
+	}))
 	t.Cleanup(SetLocalSessionPreflightForTest(func(*config.Config, string) error { return nil }))
 
 	// The tab + PR-info mutations now route through daemon RPCs (#960 PR 2).

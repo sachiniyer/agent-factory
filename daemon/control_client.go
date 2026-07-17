@@ -318,27 +318,27 @@ func AddTask(t task.Task) error {
 // given id and re-arm its schedule, returning the merged record (#1700). Only
 // the patch's non-nil fields are written, so a single-field edit never clobbers
 // a concurrent edit another client made to a different field.
-func UpdateTask(id string, update task.TaskUpdate) (task.Task, error) {
+func UpdateTask(id string, update task.TaskUpdate, expect task.ProjectExpectation) (task.Task, error) {
 	var resp UpdateTaskResponse
-	if err := callDaemon("UpdateTask", UpdateTaskRequest{ID: id, Update: update}, &resp); err != nil {
+	if err := callDaemon("UpdateTask", UpdateTaskRequest{ID: id, Update: update, Expect: expect}, &resp); err != nil {
 		return task.Task{}, err
 	}
 	return resp.Task, nil
 }
 
 // RemoveTask asks the daemon to delete a task and re-arm its schedule.
-func RemoveTask(id string) error {
+func RemoveTask(id string, expect task.ProjectExpectation) error {
 	var resp RemoveTaskResponse
-	return callDaemon("RemoveTask", RemoveTaskRequest{ID: id}, &resp)
+	return callDaemon("RemoveTask", RemoveTaskRequest{ID: id, Expect: expect}, &resp)
 }
 
 // TriggerTask asks the daemon to fire a task now through the shared RunTask
 // firing path (the same entrypoint the in-daemon scheduler uses). Replaces the
 // old in-process daemon.RunTask CLI call so CLI, TUI, and scheduler triggers all
 // converge on one daemon-owned firing path (#1169-class fix).
-func TriggerTask(id string) error {
+func TriggerTask(id string, expect task.ProjectExpectation) error {
 	var resp TriggerTaskResponse
-	return callDaemon("TriggerTask", TriggerTaskRequest{ID: id}, &resp)
+	return callDaemon("TriggerTask", TriggerTaskRequest{ID: id, Expect: expect}, &resp)
 }
 
 // SpawnConfigAgent asks the daemon to start a config agent in a bare tmux session

@@ -35,7 +35,7 @@ func newTaskScheduler() *taskScheduler {
 		loadTasks: task.LoadTasks,
 		parse:     task.ParseCron,
 		runTask: func(taskID string) {
-			if err := RunTask(taskID); err != nil {
+			if err := RunTask(taskID, task.ProjectExpectation{}); err != nil {
 				log.WarningLog.Printf("scheduled task %s failed to run: %v", taskID, err)
 			}
 		},

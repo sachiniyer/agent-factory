@@ -78,7 +78,7 @@ func TestSchedulerReloadFollowsTaskCRUD(t *testing.T) {
 
 	// Disable one.
 	disabledEnabled := false
-	if _, err := task.UpdateTask("bbbb0001", task.TaskUpdate{Enabled: &disabledEnabled}); err != nil {
+	if _, err := task.UpdateTask("bbbb0001", task.TaskUpdate{Enabled: &disabledEnabled}, task.ProjectExpectation{}); err != nil {
 		t.Fatalf("UpdateTask: %v", err)
 	}
 	if err := s.Reload(); err != nil {
@@ -89,7 +89,7 @@ func TestSchedulerReloadFollowsTaskCRUD(t *testing.T) {
 	}
 
 	// Remove the other.
-	if err := task.RemoveTask("bbbb0002"); err != nil {
+	if err := task.RemoveTask("bbbb0002", task.ProjectExpectation{}); err != nil {
 		t.Fatalf("RemoveTask: %v", err)
 	}
 	if err := s.Reload(); err != nil {

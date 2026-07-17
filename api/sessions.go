@@ -786,14 +786,12 @@ success.`,
 			// session — scoping by cwd would archive a same-titled namesake in
 			// the wrong repo, or fail "instance not found" while leaving the
 			// caller's real session alive. Mirror Storage's root→repoID
-			// derivation (#667): fall back to Path when no worktree RepoPath.
+			// derivation (#667), shared with whoami via sessionRepoRoot so the
+			// two cannot drift.
 			// A worktree-less session (remote backend) leaves repoID empty so
 			// the resolved title is matched all-repo and the daemon's remote
 			// guard still fires with its own clear message.
-			root := data.Worktree.RepoPath
-			if root == "" {
-				root = data.Path
-			}
+			root := sessionRepoRoot(data)
 			if root != "" {
 				repoID = config.RepoIDFromRoot(root)
 			}
@@ -912,7 +910,10 @@ var sessionsAttachCmd = &cobra.Command{
 var sessionsWhoamiCmd = &cobra.Command{
 	Use:   "whoami",
 	Short: "Identify the current Agent Factory session",
-	Long:  "Returns the session info for the current tmux session by matching the tmux session name against stored sessions.",
+	Long: "Returns the session info for the current tmux session by matching the tmux session name against stored sessions.\n\n" +
+		"Identity is not scoped: you are the session you are, in whatever project it " +
+		"belongs to. --repo therefore acts as an assertion — it checks that the " +
+		"resolved session really is in that project, and errors if it is not.",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		log.Initialize(false)
 		defer log.Close()
@@ -923,6 +924,39 @@ var sessionsWhoamiCmd = &cobra.Command{
 		data, err := resolveSelfSession()
 		if err != nil {
 			return jsonError(err)
+		}
+
+		// whoami inherits the persistent --repo but used to parse and drop it —
+		// the same silent mis-resolution #1814 fixed for get/preview. It cannot
+		// SCOPE the lookup (the caller's tmux name already names exactly one
+		// session, repo hash included), so an explicit --repo is checked instead
+		// of ignored: a caller who names the wrong project learns that rather
+		// than receiving another project's answer with no signal (#1893).
+		if repoFlag != "" {
+			// Resolve and VALIDATE the flag first, before asking whether there
+			// is anything to compare it against. Gating the whole block on the
+			// session having a root meant a row with neither Worktree.RepoPath
+			// nor Path (some remote-backed rows) skipped this entirely, so
+			// `whoami --repo /not-a-repo` succeeded and printed session data —
+			// an explicitly malformed flag silently ignored (#1893 review). What
+			// the flag NAMES is checkable on its own; whether it MATCHES is the
+			// separate question below.
+			repo, err := repoFromFlag()
+			if err != nil {
+				return jsonError(err)
+			}
+			// A session that records no repo root at all has nothing to compare
+			// against: asserting on a value we do not have would fail a caller
+			// who IS in the named project, so an unknown project is never an
+			// error — only a known-mismatched one.
+			//
+			// Resolve the session's root through git rather than hashing it
+			// raw: a stored root that was never git-resolved would otherwise
+			// hash differently from the canonical --repo naming the same
+			// project, rejecting a caller who is exactly where they claim.
+			if root := sessionRepoRoot(data); root != "" && newProjectIDCache().idFor(root) != repo.ID {
+				return jsonError(fmt.Errorf("this session belongs to project %s, not --repo %s", root, repo.Root))
+			}
 		}
 		return jsonOut(*data)
 	},
