@@ -131,6 +131,102 @@ func TestPane_OpenFocusRefreshProducedStatusStillClears(t *testing.T) {
 		"openOrFocusPane returns a clear-timer cmd so the late notice auto-clears (#1685)")
 }
 
+// TestPane_AutoHideStatusNamesDisplacedTab is the #1997 regression, at the exact
+// size the play-test found it (80x24, where only one pane fits). Two panes are
+// open on the SAME instance — `alpha · Agent` and `alpha · Terminal` — so the
+// instance title alone names BOTH of them and cannot say which one went away.
+// Naming only the instance made the toast read "alpha hidden" while
+// `alpha · Terminal` was visibly on screen: the UI contradicting what the user
+// can see. Since #930 a pane is identified by instance AND tab, so the toast
+// must name the displaced TAB.
+//
+// The assertion is on the RENDERED status line — the clipped text the user
+// actually reads — because FullError() is the un-truncated string we passed in
+// and never shows what the 80-column bar does to it (#1973).
+//
+// BOTH displacement directions are driven, and that is the point rather than
+// symmetry for its own sake: with only the agent-displaced case, an
+// implementation that hard-coded "Agent" — or read the wrong pane's tab and hit
+// slot 0 by luck — passes while still being unable to name what it evicted. The
+// terminal-displaced case is what forces the label to come from the displaced
+// pane. (Verified by mutation: naming tab 0 unconditionally survives the first
+// case and fails the second.)
+func TestPane_AutoHideStatusNamesDisplacedTab(t *testing.T) {
+	for _, tc := range []struct {
+		name              string
+		openOrder         []int // tabs opened, in order; the LAST one stays visible
+		wantVisibleTab    int
+		wantHiddenNamedAs string
+	}{
+		{
+			// The issue's own repro: docs · Agent open, `t` opens docs · Terminal.
+			name:              "terminal displaces agent",
+			openOrder:         []int{0, 1},
+			wantVisibleTab:    1,
+			wantHiddenNamedAs: "alpha · Agent hidden",
+		},
+		{
+			// The reverse: the displaced pane is NOT slot 0, so a toast that
+			// cannot really name what it evicted has nothing to fall back on.
+			name:              "agent displaces terminal",
+			openOrder:         []int{1, 0},
+			wantVisibleTab:    0,
+			wantHiddenNamedAs: "alpha · Terminal hidden",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := paneTestHome(t)
+			resizeHome(h, 80, 24) // the play-test size: below MultiPaneMinWidth, one pane fits
+
+			alpha := h.store.GetInstanceByTitle("alpha")
+			require.NotNil(t, alpha)
+
+			// Two panes on the SAME instance: the second displaces the first.
+			for _, tab := range tc.openOrder {
+				_, _ = h.openOrFocusPane(alpha, tab)
+			}
+
+			require.Equal(t, 2, h.store.NumOpenPanes(), "both of alpha's tabs are open as panes")
+			require.Equal(t, 1, len(h.visiblePanes), "only one pane fits at 80 columns")
+			require.Equal(t, tc.wantVisibleTab, h.visiblePanes[0].Tab(),
+				"the last-opened pane is the visible one, so the other is the displaced one")
+
+			rendered := h.errBox.String()
+			assert.Contains(t, rendered, tc.wantHiddenNamedAs,
+				"the toast names the tab that was actually displaced (#1997)")
+			assert.Contains(t, rendered, "resize wider",
+				"naming the tab must not push the recovery hint off the 80-column bar (#1973)")
+		})
+	}
+}
+
+// TestPane_AutoHideStatusUnnamableTabMakesNoClaim covers the other half of the
+// #1997 contract: when the pane's tab cannot be named, the toast says a pane is
+// hidden rather than naming the wrong one. An instance whose tabs have not
+// materialized yet has no real tab list to read, and tree.TabLabels answers
+// with the placeholder "Agent" slot — so naming the tab from it would present a
+// guess as a fact. The toast must decline to name instead.
+func TestPane_AutoHideStatusUnnamableTabMakesNoClaim(t *testing.T) {
+	h := paneTestHome(t)
+	resizeHome(h, 80, 24)
+
+	// An instance with no materialized tabs: nothing can say what its tab 0 is.
+	blank := instanceWithFakeBackend(t, "blank")
+	h.store.AddInstance(blank)
+	require.Empty(t, blank.GetTabs(), "the fixture instance has no materialized tabs")
+
+	alpha := h.store.GetInstanceByTitle("alpha")
+	require.NotNil(t, alpha)
+	_, _ = h.openOrFocusPane(blank, 0)
+	_, _ = h.openOrFocusPane(alpha, 0)
+
+	rendered := h.errBox.String()
+	assert.Contains(t, rendered, "a pane is hidden",
+		"an unnamable pane is reported without a name (#1997)")
+	assert.NotContains(t, rendered, "blank · Agent",
+		"the placeholder tab slot must never be presented as the displaced tab's real name")
+}
+
 // TestPane_OpenPaneWindowIsIdempotent proves the (instance, tab) →
 // at-most-one-pane invariant is enforced at the openPaneWindow chokepoint, so
 // the callers that skip the FindOpenPane pre-check (auto-open, restore) cannot

@@ -1018,7 +1018,7 @@ func TestPane_AutoHideShowsTransientStatus(t *testing.T) {
 
 	require.Equal(t, 2, h.store.NumOpenPanes(), "the second pane still opens")
 	assert.Equal(t, []string{"beta"}, visibleTitles(h), "width pressure hides alpha and shows beta")
-	assert.Equal(t, "alpha hidden: terminal too narrow for 2 panes; resize wider or use `s` open pane",
+	assert.Equal(t, "alpha · Agent hidden — too narrow for 2 panes; resize wider or use `s` open pane",
 		h.errBox.FullError())
 }
 
