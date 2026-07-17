@@ -13,16 +13,30 @@ import (
 	"github.com/sachiniyer/agent-factory/internal/testguard"
 )
 
+// receiverReadyMarker is printed by the receiver AFTER it has put the tty in raw
+// mode and emitted DECSET 2004. Seeing it on the pane is proof from the receiver
+// itself that both happened — and, because tmux renders the pane in order, proof
+// that tmux PROCESSED the DECSET before the marker. That is exactly the
+// precondition a bracketed paste depends on, so it is the only sound thing to
+// wait for.
+const receiverReadyMarker = "AF-RECEIVER-READY"
+
 // receiverProgram builds a pane program that stands in for an agent composer at
 // the only level that matters here: it requests bracketed-paste mode (DECSET
-// 2004) exactly as claude/codex do, and records the RAW bytes the pane actually
-// delivers to it. `stty raw -echo` keeps the tty from line-buffering or echoing,
-// so the capture is byte-for-byte what the application's stdin saw.
+// 2004) exactly as claude/codex/aider/gemini/amp/opencode do, and records the RAW
+// bytes the pane actually delivers to it. `stty raw -echo` keeps the tty from
+// line-buffering or echoing, so the capture is byte-for-byte what the
+// application's stdin saw.
+//
+// The order is load-bearing: raw mode, then the DECSET, then the marker. A test
+// that pastes before the DECSET lands would get an unbracketed paste for a
+// legitimate reason and blame the code under test.
 //
 // Only sh/stty/cat are used — all present in the toolchain image — so this test
 // never skips in CI for want of an agent binary.
 func receiverProgram(outPath string) string {
-	return fmt.Sprintf(`sh -c 'stty raw -echo; printf "\033[?2004h"; cat > %s'`, outPath)
+	return fmt.Sprintf(`sh -c 'stty raw -echo; printf "\033[?2004h%s\r\n"; cat > %s'`,
+		receiverReadyMarker, outPath)
 }
 
 // startReceiverPane brings up a real tmux session running the receiver and
@@ -37,14 +51,28 @@ func startReceiverPane(t *testing.T, name string) (*TmuxSession, string) {
 	require.NoError(t, ts.Start(dir))
 	t.Cleanup(func() { _ = ts.Close() })
 
-	// Let the pane program reach its read loop and emit ?2004h before pasting;
-	// a paste that lands before the app requests the mode would legitimately
-	// arrive unbracketed and make this test lie.
+	// Wait for the marker the RECEIVER prints, never for the pane merely being
+	// non-empty. `capture-pane` on a completely blank pane returns one newline per
+	// row — 24 bytes of "\n" for a 24-row pane — so a `content != ""` check is true
+	// the instant tmux has a pane at all, before the receiver has run a single
+	// line. That check plus a fixed sleep is a race that passes locally and flakes
+	// in CI, and a flake HERE reads as "the paste logic is broken" and sends the
+	// next person hunting the wrong thing.
+	//
+	// It is also the very mistake this file exists to catch, one level up: the bug
+	// under test is af sending input before establishing that the receiver would
+	// take it as text. Waiting on a signal only a live receiver can emit is the
+	// structural fix; "the buffer is not empty" is an artifact of tmux, not a fact
+	// about the receiver.
+	//
+	// The marker proves raw mode is set and the DECSET is processed. `cat` may not
+	// have been exec'd yet at that instant, which is harmless: the tty input queue
+	// holds the pasted bytes until it starts reading. Nothing is lost, and the
+	// bracketing decision — the thing under test — is already settled.
 	waitFor(t, func() bool {
 		content, err := ts.CapturePaneContent()
-		return err == nil && content != ""
-	}, "receiver pane did not start")
-	time.Sleep(300 * time.Millisecond)
+		return err == nil && strings.Contains(content, receiverReadyMarker)
+	}, "receiver never printed "+receiverReadyMarker+": the pane program did not start")
 	return ts, out
 }
 
