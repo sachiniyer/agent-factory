@@ -39,6 +39,7 @@
 import { FitAddon } from "@xterm/addon-fit";
 import { type ITheme, Terminal } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
+import { handleClipboardKeydown } from "./clipboard.js";
 import { decode, encode, inputFrame, Op, resizeFrame } from "./frame.js";
 import { currentXtermTheme } from "./theme.js";
 
@@ -147,7 +148,21 @@ export class AttachTerminal {
     // Keystrokes → OpInput. xterm hands us the terminal's outgoing byte string
     // (regular chars and key escape sequences alike); UTF-8 encode it so a typed
     // multibyte char reaches the PTY as the same bytes a real terminal would send.
-    this.term.onData((data) => this.send(encode(inputFrame(this.enc.encode(data)))));
+    this.term.onData((data) => this.sendInput(data));
+
+    // Clipboard vs. interrupt (Sachin's decision — see clipboard.ts): intercept the
+    // key BEFORE xterm turns it into input. Ctrl+C copies a present selection (else
+    // interrupts), Ctrl+Shift+C is an explicit always-copy, and Ctrl+V defers to
+    // xterm's native browser paste. Returning false suppresses xterm's own handling.
+    this.term.attachCustomKeyEventHandler((ev) =>
+      handleClipboardKeydown(ev, {
+        hasSelection: () => this.term.hasSelection(),
+        getSelection: () => this.term.getSelection(),
+        clearSelection: () => this.term.clearSelection(),
+        copy: (text) => this.copyToClipboard(text),
+        sendInput: (text) => this.sendInput(text),
+      }),
+    );
 
     // Re-fit + re-announce size whenever the container changes (window resize,
     // rail collapse, devtools). Debounced; the server echo reconciles multi-writer.
@@ -395,6 +410,95 @@ export class AttachTerminal {
     const ws = this.ws;
     if (ws && ws.readyState === WebSocket.OPEN) {
       ws.send(bytes);
+    }
+  }
+
+  // --- input & clipboard -----------------------------------------------------
+
+  /** Sends text to the PTY as OpInput — the single input path shared by typed
+   *  keys (onData) and the Ctrl+C interrupt (clipboard.ts). UTF-8 encoded so a
+   *  multibyte char reaches the PTY as the same bytes a real terminal would send. */
+  private sendInput(text: string): void {
+    this.send(encode(inputFrame(this.enc.encode(text))));
+  }
+
+  /** Copies text to the system clipboard, never silently. localhost is a secure
+   *  context, so navigator.clipboard.writeText works; but if it is missing (a
+   *  non-secure origin behind a proxy) or rejects, fall back to the legacy
+   *  execCommand path, and only if THAT fails surface a visible hint — a copy that
+   *  silently fails is worse than none (the user pastes stale content unaware). */
+  private copyToClipboard(text: string): void {
+    if (text === "") {
+      return; // nothing selected — an explicit copy of nothing is a no-op
+    }
+    const clip = navigator.clipboard;
+    if (clip && typeof clip.writeText === "function") {
+      // The .catch fallback runs after the async rejection, i.e. outside the key
+      // gesture, so execCommand may itself fail there; the hint is the backstop.
+      clip.writeText(text).catch(() => {
+        if (!this.execCommandCopy(text)) {
+          this.flashCopyHint();
+        }
+      });
+      return;
+    }
+    if (!this.execCommandCopy(text)) {
+      this.flashCopyHint();
+    }
+  }
+
+  /** Legacy clipboard write via a throwaway off-screen textarea. Returns whether the
+   *  copy reported success. Requires a user gesture, which the key handler provides. */
+  private execCommandCopy(text: string): boolean {
+    try {
+      const ta = document.createElement("textarea");
+      ta.value = text;
+      // Off-screen but still selectable; readonly stops a mobile keyboard popping up.
+      ta.setAttribute("readonly", "");
+      ta.style.position = "fixed";
+      ta.style.top = "0";
+      ta.style.left = "0";
+      ta.style.width = "1px";
+      ta.style.height = "1px";
+      ta.style.opacity = "0";
+      document.body.appendChild(ta);
+      ta.select();
+      ta.setSelectionRange(0, text.length);
+      const ok = document.execCommand("copy");
+      ta.remove();
+      this.term.focus(); // the temp textarea stole focus; hand it back to the terminal
+      return ok;
+    } catch {
+      return false;
+    }
+  }
+
+  /** Last-resort visible cue when BOTH clipboard paths fail, so the copy is never
+   *  silently dropped. An app-level "clipboard unavailable" condition (not
+   *  pane-specific), so it is a viewport-fixed toast appended to document.body —
+   *  matching the app's own af-toast pattern and, by living outside the pane tree,
+   *  never clipped by a split pane's overflow:hidden or anchored to a transformed
+   *  ancestor. Styled inline so it needs no stylesheet plumbing and no <style>
+   *  element under the CSP. */
+  private flashCopyHint(): void {
+    try {
+      const hint = document.createElement("div");
+      hint.textContent = "Copy failed — clipboard unavailable";
+      hint.setAttribute("role", "alert");
+      hint.style.position = "fixed";
+      hint.style.bottom = "12px";
+      hint.style.right = "12px";
+      hint.style.zIndex = "9999";
+      hint.style.padding = "4px 10px";
+      hint.style.borderRadius = "4px";
+      hint.style.font = "12px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace";
+      hint.style.background = "rgba(0, 0, 0, 0.82)";
+      hint.style.color = "#fff";
+      hint.style.pointerEvents = "none";
+      document.body.appendChild(hint);
+      window.setTimeout(() => hint.remove(), 2500);
+    } catch {
+      // If even the DOM cue fails there is nothing further to do.
     }
   }
 }
