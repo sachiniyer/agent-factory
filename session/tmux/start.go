@@ -131,9 +131,25 @@ func (t *TmuxSession) CheckAndHandleTrustPrompt() bool {
 }
 
 // DocTrustPromptPresent reports whether content shows the documentation-link
-// trust dialog shared by aider/gemini. Both substrings are required: the prose
-// line alone is not evidence a dialog is up, and the "(D)on't ask again"
-// affordance alone belongs to every aider confirmation prompt, not just this one.
+// trust dialog shared by aider/gemini:
+//
+//	Open documentation url for more info? (Y)es/(N)o/(D)on't ask again [Yes]:
+//
+// BOTH the full prose question and the "(D)on't ask again" affordance are
+// required, and NEITHER is redundant:
+//
+//   - The affordance is not a discriminator. aider renders "(D)on't ask again"
+//     on EVERY confirmation it asks ("Add src/main.go to the chat?", …). It only
+//     tells us some prompt is up — not which one. It is the weaker anchor.
+//   - The prose is the discriminator, and only at FULL length. Do not shorten it
+//     to a prefix like "Open documentation url": the prefix plus an affordance
+//     that is nearly always present means an unrelated confirmation gets answered
+//     'D' whenever that string is anywhere on screen — including in a source file
+//     the agent has open. This repo is self-hosted, so that is not hypothetical.
+//
+// The full prose is also the ORIGINAL observed string (2b23c52); the shorter form
+// was a later paraphrase introduced for readiness detection (7d78ee6), not an
+// observation of the dialog. Match what the dialog actually renders.
 //
 // ACTION HERE REQUIRES POSITIVE EVIDENCE, because the two ways to be wrong do not
 // cost the same:
@@ -149,10 +165,17 @@ func (t *TmuxSession) CheckAndHandleTrustPrompt() bool {
 //     breaks the loop — it re-fires every tick the phrase stays on screen (#1952).
 //
 // So this is deliberately conservative BY CONSTRUCTION, and the asymmetry above is
-// the reason. If you are here to "loosen this so it catches more cases": that
-// trade buys back a keypress the user can supply themselves, and pays for it in
-// keystrokes injected into live agents. Prefer adding a NEW anchored predicate for
-// a specific dialog you can identify over widening this one.
+// the reason. When the match is ambiguous the answer is DO NOTHING. If you are here
+// to "loosen this so it catches more cases": that trade buys back a keypress the
+// user can supply themselves, and pays for it in keystrokes injected into live
+// agents. Prefer adding a NEW anchored predicate for a specific dialog you can
+// identify over widening this one.
+//
+// Before changing this predicate, answer: what does the new one ADMIT that the old
+// one did not? Not what it rejects — what it lets through. Adding a conjunct while
+// quietly weakening another term reads as tightening and is not; that is how the
+// #1952 fix itself first shipped a NEW false-positive path. The tests only exercise
+// the real dialogs, so they will not catch it for you.
 //
 // The match runs against a visible-only capture (CapturePaneContent), so content
 // is whatever is on screen right now — including the agent's own output, a log
@@ -165,7 +188,7 @@ func (t *TmuxSession) CheckAndHandleTrustPrompt() bool {
 // #1952 happened. It lives here because task already imports session/tmux; the
 // reverse edge would be an import cycle.
 func DocTrustPromptPresent(content string) bool {
-	return strings.Contains(content, "Open documentation url") &&
+	return strings.Contains(content, "Open documentation url for more info") &&
 		strings.Contains(content, "(D)on't ask again")
 }
 

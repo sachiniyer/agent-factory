@@ -105,6 +105,39 @@ func TestCheckAndHandleTrustPrompt_BareDialogMarkerInjectsNothing(t *testing.T) 
 	require.Empty(t, sentKeystrokes(cmds), "got %v", cmds)
 }
 
+// The marker is NOT a sufficient second anchor on its own, because aider prints
+// "(D)on't ask again" on EVERY confirmation it asks (see the test above). So the
+// only thing separating the doc-trust dialog from every other aider prompt is the
+// full prose question. A predicate that requires the marker plus a mere PREFIX of
+// the prose is satisfied by: an unrelated confirmation that is up right now, plus
+// the shorter string sitting anywhere on screen — in ordinary output, or in a
+// source file the agent has open.
+//
+// That combination answers 'D' ("don't ask again") to a question we never read.
+// This repo is self-hosted, so the shorter string is literally on screen whenever
+// an agent has this file or task/runner.go open — which is how a real aider
+// session hits it.
+func TestCheckAndHandleTrustPrompt_DocPrefixPlusUnrelatedConfirmInjectsNothing(t *testing.T) {
+	// The agent has this very file open (the short string is source text here),
+	// and aider independently asks an ordinary confirmation.
+	content := `	return strings.Contains(content, "Open documentation url") &&
+		strings.Contains(content, "(D)on't ask again")
+
+Add src/main.go to the chat?
+(Y)es/(N)o/(D)on't ask again [Yes]:`
+
+	for _, program := range []string{ProgramAider, ProgramGemini} {
+		t.Run(program, func(t *testing.T) {
+			handled, cmds := runTrustPromptCheck(t, program, content)
+			require.Empty(t, sentKeystrokes(cmds),
+				"the doc-trust prose PREFIX plus a marker that every aider confirmation "+
+					"renders is not evidence the doc dialog is up — tapping 'D' here answers an "+
+					"unrelated question; got %v", cmds)
+			require.False(t, handled)
+		})
+	}
+}
+
 // The Claude branch is a separate gate and must keep its own behavior: the doc
 // phrase never routes a claude pane into the 'D'+Enter path.
 func TestCheckAndHandleTrustPrompt_ClaudeBranchUnaffectedByDocPhrase(t *testing.T) {
