@@ -33,10 +33,11 @@ import {
 } from "./filter.js";
 import { projectMeta, projectName, type ProjectSummary, projectSummaries, scopeToProject } from "./project.js";
 import { compareSessionsForRail, isArchived, type RowKind, rowStatus, rowTitle } from "./status.js";
+import { ConfigPane, type ConfigStatus } from "./config.js";
 import { TasksPane } from "./tasks.js";
 import { type ThemeChoice, THEME_CHOICES } from "./theme.js";
 import type { TerminalStatus } from "./terminal.js";
-import { type SessionData, type TaskData, TabKind } from "./types.js";
+import { type ConfigEntry, type SessionData, type TaskData, TabKind } from "./types.js";
 
 /** The tab kinds the web UI can create with no further input from the user. A
  *  web tab is deliberately absent: its target comes from whatever an agent is
@@ -98,6 +99,16 @@ export interface AppState {
   tabError: string | null;
   /** the live task projection (ListTasks + task.* events), the tasks view's data. */
   tasks: TaskData[];
+  /** the config manifest zipped with the user's live values (GetConfig), the config
+   *  view's data. There is no local key list: this IS the description of config, so
+   *  a key added to config_types.go arrives here with no change to the bundle. */
+  config: ConfigEntry[];
+  /** the config.toml the values were read from, named in the config view so an
+   *  AF_HOME user knows which file they are editing. */
+  configPath: string;
+  /** the outcome of the last config write — the daemon's echo and restart notice,
+   *  or the validator's message when it refused — or null when there is none. */
+  configStatus: ConfigStatus | null;
   /** the persisted theme preference (redesign PR1): Auto follows the OS, Light/Dark
    *  force a mode. The appbar toggle sets it; theme.ts stamps data-theme on <html>
    *  and re-themes the live terminals. */
@@ -138,6 +149,12 @@ export interface Actions {
   /** Closes the tab at `index` of the selected session (the `w` key / × button);
    *  the agent tab (index 0) is unclosable. */
   closeTab(index: number): void;
+  /** Sets one global config key. index.ts POSTs SetConfigValue (the same validated,
+   *  locked, atomic writer `af config set` uses), then re-reads the manifest so the
+   *  form shows what the file actually holds. Validation is deliberately NOT done
+   *  in the browser: a second copy of the rules is how a UI accepts a value the
+   *  loader later rejects at startup. */
+  setConfigValue(key: string, value: string): void;
   /** Switches the top-level view: the appbar view tabs and the [ / ] keys route
    *  here; index.ts flips the store and hands the keyboard back to the rail (blurring
    *  the terminal) when leaving the sessions view. */
@@ -275,6 +292,8 @@ function viewLabel(view: View): string {
       return "Sessions";
     case "tasks":
       return "Tasks";
+    case "config":
+      return "Config";
   }
 }
 
@@ -479,6 +498,7 @@ export class AppShell {
   private lastThemeChoice: ThemeChoice | null = null;
   private readonly sessionsBody: HTMLElement;
   private readonly tasksPane: TasksPane;
+  private readonly configPane: ConfigPane;
   private lastView: View | null = null;
   private lastTasks: TaskData[] | null = null;
   private lastTasksProject: string | null = null;
@@ -702,7 +722,10 @@ export class AppShell {
       trigger: (task: TaskData) => this.actions.triggerTask(task),
       remove: (task: TaskData) => this.actions.removeTask(task),
     });
-    const viewport = h("div", { class: "af-viewport" }, this.sessionsBody, this.tasksPane.el);
+    this.configPane = new ConfigPane({
+      save: (key: string, value: string) => this.actions.setConfigValue(key, value),
+    });
+    const viewport = h("div", { class: "af-viewport" }, this.sessionsBody, this.tasksPane.el, this.configPane.el);
 
     // A transient toast for failed tab ops: a fixed-position banner that fades in
     // only while `tabError` is set (index.ts clears it on a timer / selection change).
@@ -759,6 +782,7 @@ export class AppShell {
       this.lastView = state.view;
       this.sessionsBody.hidden = state.view !== "sessions";
       this.tasksPane.el.hidden = state.view !== "tasks";
+      this.configPane.el.hidden = state.view !== "config";
       for (const [v, tab] of this.viewTabs) {
         tab.classList.toggle("af-viewtab-active", v === state.view);
         tab.setAttribute("aria-selected", v === state.view ? "true" : "false");
@@ -783,6 +807,11 @@ export class AppShell {
       this.lastTasksProject = state.selectedProject;
       this.tasksPane.update(state.tasks, state.selectedProject);
     }
+
+    // The config pane mirrors the manifest. Global config is NOT project-scoped —
+    // config.toml applies to every repo — so unlike the tasks pane it re-renders on
+    // the data alone, with no project in the change check.
+    this.configPane.update(state.config, state.configPath, state.configStatus);
 
     const sessionsChanged = this.lastSessions !== state.sessions;
     const selectionChanged = this.lastSelectedId !== state.selectedId;

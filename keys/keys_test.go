@@ -53,6 +53,7 @@ func TestDefaultMapsMatchApprovedKeymap(t *testing.T) {
 		"y":         KeyCopyPR,
 		"e":         KeyHooks,
 		"C":         KeyConfigAgent,
+		",":         KeyConfigEditor,
 		"ctrl+p":    KeySwitchProject,
 		"h":         KeyLeft,
 		"left":      KeyLeft,

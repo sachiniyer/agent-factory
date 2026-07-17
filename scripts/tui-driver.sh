@@ -721,6 +721,40 @@ af_close_tasks() {
     af_wait_gone "$_AF_TASKS_RUN_HINT" 8 'tasks overlay closed' || return 1
 }
 
+# The config editor's own marker. Anchored on the hint row rather than a key
+# name so it cannot match arbitrary pane text (the #1757 lesson): "esc close" is
+# the editor's last footer fragment, and the leading separator keeps it from
+# matching a session whose output happens to contain the words.
+: "${_AF_CONFIG_HINT:=(^|[^[:alnum:]])esc close}"
+
+# af_open_config — open the global config editor overlay (","). Syncs on the
+# editor's footer hint rather than sleeping.
+af_open_config() {
+    af_ensure_nav
+    af_send ','
+    af_wait_for "$_AF_CONFIG_HINT" "$AF_DRIVER_TIMEOUT" 'config editor' || return 1
+}
+
+# af_close_config — dismiss the config editor (Escape). When a value field is
+# open the first Escape only abandons the edit (the editor stays up, still
+# showing its hints), so a second Escape closes it — the same two-level escape
+# af_close_tasks handles.
+af_close_config() {
+    local deadline screen
+    af_send Escape
+    deadline=$(( $(_af_now) + 4 ))
+    while :; do
+        screen="$(af_capture)"
+        if ! printf '%s\n' "$screen" | grep -qE -- "$_AF_CONFIG_HINT"; then
+            return 0
+        fi
+        [ "$(_af_now)" -ge "$deadline" ] && break
+        sleep "$AF_DRIVER_POLL"
+    done
+    af_send Escape
+    af_wait_gone "$_AF_CONFIG_HINT" 8 'config editor closed' || return 1
+}
+
 # af_add_task <name> — seed a minimal valid cron task through the overlay's
 # create form, so a later af_open_tasks lands on the EDIT-mode overlay whose
 # narrow footer shows `r run` (the #1757 flow). Opens the tasks overlay (list

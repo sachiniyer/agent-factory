@@ -352,11 +352,81 @@ step "af_select evaluates the boundary step (#1759)"        _expect_af_select_bo
 # `m` drops straight into the selected task's EDIT form when a task exists, and
 # at 80x24 its footer collapses `r run now` to `r run`. af_open_tasks used to
 # wait for the stale `run now` and time out here; it now syncs on `r run`.
+# shellcheck disable=SC2317  # dispatched indirectly via step(); not dead code.
+# _expect_config_editor_writes — the config editor's end-to-end flow against the
+# sandbox's throwaway AF home: open it, assert it rendered a tier-1 key FROM THE
+# MANIFEST, edit a value through the real write path, and assert the editor
+# echoed the write AND told the user the change is not live until a restart.
+#
+# The restart notice is the assertion that matters most here. config.toml is read
+# at startup, so an editor that changed a value the running daemon then ignored —
+# without saying so — would be lying by omission. This pins that it says so at the
+# moment of the edit, and names the command.
+_expect_config_editor_writes() {
+    af_open_config || return 1
+    # The manifest's tier-1 keys lead; the editor holds no key list of its own.
+    af_assert_screen 'default_program' 'config editor renders a manifest key' || return 1
+
+    # Edit the selected (first) key: Enter opens the value field pre-filled with
+    # the live value, so clear it before typing.
+    af_send Enter
+    local i
+    for i in $(seq 1 32); do af_send BSpace; done
+    af_send_literal 'codex' || return 1
+    af_send Enter
+
+    af_wait_for 'set default_program = codex' "$AF_DRIVER_TIMEOUT" 'config write echo' || return 1
+    # Match a fragment that survives the overlay's line wrap. The notice reads
+    # "… run `af daemon restart` and restart af to apply", and at the driver's
+    # fixed 100x30 the wrap falls between "af" and "daemon restart" — so the full
+    # phrase is NOT greppable on one line. Verified against a real capture rather
+    # than guessed; the fixed terminal size is what makes it deterministic.
+    af_wait_for 'daemon restart' "$AF_DRIVER_TIMEOUT" 'config restart notice' || return 1
+    af_close_config || return 1
+
+    # It reached the real file, through the real writer.
+    grep -q "default_program = 'codex'" "$AGENT_FACTORY_HOME/config.toml" || {
+        printf 'config.toml does not hold the edited value:\n'
+        cat "$AGENT_FACTORY_HOME/config.toml"
+        return 1
+    }
+}
+
+# shellcheck disable=SC2317  # dispatched indirectly via step(); not dead code.
+# _expect_config_editor_rejects — an invalid value is refused by the SAME
+# validation the CLI uses, in the UI, with the validator's own message, and the
+# field stays open to correct. Nothing reaches the file.
+_expect_config_editor_rejects() {
+    af_open_config || return 1
+    af_send Enter
+    local i
+    for i in $(seq 1 32); do af_send BSpace; done
+    af_send_literal 'emacs' || return 1
+    af_send Enter
+
+    # The validator's own message, not one the pane invented: "default_program
+    # must be one of [claude, codex, aider, gemini, amp], got "emacs"…".
+    # Waiting on 'default_program' here would be VACUOUS — the key is on screen
+    # whether or not the value was refused.
+    af_wait_for 'must be one of' "$AF_DRIVER_TIMEOUT" 'validator error' || return 1
+    af_refute_screen 'set default_program = emacs' 'a rejected value must not echo as written' || return 1
+    grep -q "default_program = 'emacs'" "$AGENT_FACTORY_HOME/config.toml" && {
+        printf 'a REJECTED value reached config.toml\n'
+        return 1
+    }
+    af_close_config || return 1
+    af_close_config 2>/dev/null || true
+    return 0
+}
+
 step "seed a task via the create form"                      af_add_task selftest-task
 step "close the tasks overlay after create"                 af_close_tasks
 step "reopen tasks — edit-mode overlay recognized (#1757)"  af_open_tasks
 step "assert the task editor shows the run action"          af_assert_screen "$_AF_TASKS_RUN_HINT" 'task-overlay run action'
 step "close the tasks overlay"                              af_close_tasks
+
+step "open the config editor (,) and write through the real path"  _expect_config_editor_writes
+step "config editor refuses an invalid value with the CLI error"   _expect_config_editor_rejects
 
 step "open beta's tab as a pane"                            af_open_pane
 step "enter interactive mode and probe literal send"         _enter_interactive_and_probe_literal_send

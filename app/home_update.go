@@ -499,6 +499,8 @@ func (m *home) handleKeyPress(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 		return m.handleStateHooks(msg)
 	case stateTasks:
 		return m.handleStateTasks(msg)
+	case stateConfigEditor:
+		return m.handleStateConfigEditor(msg)
 	}
 
 	// The focused in-rail automations section owns its cursor keys; Enter/Esc

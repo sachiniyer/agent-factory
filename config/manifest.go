@@ -315,3 +315,24 @@ func Manifest() []ManifestEntry {
 // ManifestTiers is the tier order a briefing (and any future `af config`
 // surface) walks.
 var ManifestTiers = []ConfigTier{TierCore, TierCommon, TierAdvanced}
+
+// TierName is the short one-word label for a tier ("core", "common",
+// "advanced"), for a UI section heading and the config editor's wire payload
+// (ConfigEntry.TierName).
+//
+// It is deliberately NOT the briefing's tierHeading ("Core settings"), which is
+// full-sentence prose for an agent to read. An editor wants a compact section
+// label; the two surfaces legitimately want different words for the same tier,
+// which is why this is its own accessor rather than a reuse.
+func TierName(t ConfigTier) string {
+	switch t {
+	case TierCore:
+		return "core"
+	case TierCommon:
+		return "common"
+	case TierAdvanced:
+		return "advanced"
+	default:
+		return "other"
+	}
+}

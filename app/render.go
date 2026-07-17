@@ -27,6 +27,16 @@ func (m *home) renderHooksOverlay() string {
 	)
 }
 
+// renderConfigOverlay frames the global config editor, using the same
+// pane-hosted modal framing as the hooks and tasks overlays.
+func (m *home) renderConfigOverlay() string {
+	return m.renderFittedPaneOverlay(
+		m.configOverlayContentRect(),
+		func(w, h int) { m.configPane.SetSize(w, h) },
+		m.configPane.String,
+	)
+}
+
 // renderTasksOverlay frames the task manager (list + create/edit form) as the
 // centered modal it lives in (#1087 play-test): the manager needs real
 // width/height for its form, which the narrow left rail cannot provide.
@@ -116,6 +126,18 @@ func (m *home) layoutPaneOverlays() {
 	taskRect := m.tasksOverlayContentRect()
 	taskContent := paneOverlayContentRect(taskRect)
 	m.automations.TaskPane().SetSize(taskContent.W, taskContent.H)
+
+	configRect := m.configOverlayContentRect()
+	configContent := paneOverlayContentRect(configRect)
+	m.configPane.SetSize(configContent.W, configContent.H)
+}
+
+// configOverlayContentRect sizes the config editor. It asks for more width than
+// the hooks and tasks modals (64 vs 50/52) because a config row carries a key, a
+// value, and a one-line purpose — a narrower box wraps the purpose into noise.
+// The same #1821 full-screen fallback applies on a terminal too narrow for that.
+func (m *home) configOverlayContentRect() layout.Rect {
+	return m.modalContentRect(hooksOverlayStyle, m.preferredOverlayWidth(64), m.preferredOverlayHeight())
 }
 
 func (m *home) hooksOverlayContentRect() layout.Rect {

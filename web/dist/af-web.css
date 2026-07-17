@@ -1552,6 +1552,146 @@ body {
     border-bottom: 1px solid var(--af-border);
   }
 }
+.af-config {
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+}
+.af-config-head {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.6rem var(--af-sp-4);
+  border-bottom: 1px solid var(--af-border);
+  background: var(--af-bg-surface);
+  position: sticky;
+  top: 0;
+  z-index: 1;
+}
+.af-config-title {
+  font-size: var(--af-fs-xs);
+  text-transform: uppercase;
+  letter-spacing: var(--af-track);
+  color: var(--af-text-2);
+}
+.af-config-path {
+  margin-left: auto;
+  font-family: var(--af-font-mono);
+  font-size: var(--af-fs-2xs);
+  color: var(--af-text-3);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 50%;
+}
+.af-config-list {
+  display: flex;
+  flex-direction: column;
+  padding: var(--af-sp-3) var(--af-sp-4) var(--af-sp-6);
+  gap: var(--af-sp-2);
+}
+.af-config-tier {
+  display: flex;
+  align-items: center;
+  gap: var(--af-sp-3);
+  margin-top: var(--af-sp-4);
+  padding-bottom: var(--af-sp-1);
+  border-bottom: 1px solid var(--af-border-subtle);
+}
+.af-config-tier-name {
+  font-size: var(--af-fs-xs);
+  text-transform: uppercase;
+  letter-spacing: var(--af-track);
+  color: var(--af-text-2);
+}
+.af-config-toggle {
+  margin-left: auto;
+  font-size: var(--af-fs-xs);
+  padding: 0.2rem 0.5rem;
+}
+.af-config-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 22rem);
+  align-items: start;
+  gap: var(--af-sp-3);
+  padding: var(--af-sp-2) 0;
+}
+.af-config-label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  min-width: 0;
+}
+.af-config-key {
+  font-family: var(--af-font-mono);
+  font-size: var(--af-fs-sm);
+  color: var(--af-text);
+}
+.af-config-purpose {
+  font-size: var(--af-fs-xs);
+  color: var(--af-text-3);
+}
+.af-config-control {
+  display: flex;
+  align-items: center;
+  gap: var(--af-sp-2);
+  min-width: 0;
+}
+.af-config-input {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--af-font-mono);
+  font-size: var(--af-fs-sm);
+}
+.af-config-save {
+  flex: none;
+}
+.af-config-check {
+  width: 1rem;
+  height: 1rem;
+  accent-color: var(--af-accent);
+}
+.af-config-value {
+  font-family: var(--af-font-mono);
+  font-size: var(--af-fs-xs);
+  color: var(--af-text-2);
+  background: var(--af-bg-inset);
+  border-radius: var(--af-r-sm);
+  padding: 0.15rem 0.35rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.af-config-readonly {
+  font-size: var(--af-fs-2xs);
+  color: var(--af-text-3);
+  white-space: nowrap;
+}
+.af-config-echo,
+.af-config-error,
+.af-config-notice {
+  grid-column: 1 / -1;
+  font-size: var(--af-fs-xs);
+  padding: 0.15rem 0;
+}
+.af-config-echo {
+  font-family: var(--af-font-mono);
+  color: var(--af-text-2);
+}
+.af-config-error {
+  color: var(--af-danger);
+}
+.af-config-notice {
+  color: var(--af-text-2);
+  background: var(--af-accent-subtle);
+  border-radius: var(--af-r-sm);
+  padding: 0.3rem 0.45rem;
+}
+@media (max-width: 40rem) {
+  .af-config-row {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
 
 /* node_modules/@xterm/xterm/css/xterm.css */
 .xterm {

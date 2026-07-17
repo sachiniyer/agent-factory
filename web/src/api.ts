@@ -12,7 +12,15 @@
 // used by the /v1/events subscriber (events.ts) and, in PR4, the PTY stream.
 
 import type { BackendCatalog } from "./backends.js";
-import type { SessionData, SnapshotResponse, TaskData, TasksResponse, TaskUpdate } from "./types.js";
+import type {
+  ConfigResponse,
+  ConfigSetResponse,
+  SessionData,
+  SnapshotResponse,
+  TaskData,
+  TasksResponse,
+  TaskUpdate,
+} from "./types.js";
 
 const TOKEN_KEY = "af.token";
 
@@ -454,4 +462,27 @@ export async function triggerTask(id: string, token: string): Promise<void> {
 export async function removeTask(id: string, token: string): Promise<void> {
   requireTaskID(id, "remove a task");
   await af("RemoveTask", { id }, token);
+}
+
+/** Fetches the config manifest zipped with the user's live values: every
+ *  user-facing global key, what it means, and what it is set to now. Returns an
+ *  empty list rather than null for a daemon that somehow reports none; throws
+ *  ApiError on transport/auth failure so callers share one error path.
+ *
+ *  The manifest is the ONLY description of config the web UI has — there is no
+ *  local key list to fall behind config_types.go. */
+export async function getConfig(token: string): Promise<ConfigResponse> {
+  const resp = await af<ConfigResponse>("GetConfig", {}, token);
+  return { entries: resp?.entries ?? [], path: resp?.path ?? "" };
+}
+
+/** Sets one global config key, exactly as `af config set key value` does: the
+ *  daemon hands the value to the same validator and the same file-locked atomic
+ *  writer, so an invalid value is rejected here with the CLI's own message
+ *  rather than being written and discovered at the next startup.
+ *
+ *  Throws ApiError carrying the validator's message on a rejected value — the
+ *  form shows it verbatim rather than substituting its own wording. */
+export async function setConfigValue(key: string, value: string, token: string): Promise<ConfigSetResponse> {
+  return af<ConfigSetResponse>("SetConfigValue", { key, value }, token);
 }

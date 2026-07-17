@@ -143,6 +143,24 @@ var httpRoutes = []HTTPRoute{
 		handler:       func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.SetPRInfo) },
 	},
 
+	// Config. The read/write pair behind the web config editor; both are thin
+	// wrappers over the same config package calls the TUI and `af config set`
+	// make in-process, so the three surfaces cannot validate or write differently.
+	{
+		Method:        http.MethodPost,
+		Path:          "/v1/GetConfig",
+		Description:   "List every user-facing global config key with its purpose, type, default, and current value.",
+		RequestFields: jsonFields(reflect.TypeOf(GetConfigRequest{})),
+		handler:       func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.GetConfig) },
+	},
+	{
+		Method:        http.MethodPost,
+		Path:          "/v1/SetConfigValue",
+		Description:   "Set one global config key, exactly as `af config set` does (validated, locked, atomic).",
+		RequestFields: jsonFields(reflect.TypeOf(SetConfigValueRequest{})),
+		handler:       func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.SetConfigValue) },
+	},
+
 	// Tasks.
 	{
 		Method:        http.MethodPost,

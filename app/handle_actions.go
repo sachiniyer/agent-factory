@@ -89,6 +89,10 @@ func (m *home) handleDefaultKeyPress(msg tea.KeyMsg, name keys.KeyName) (tea.Mod
 	case keys.KeyConfigAgent:
 		return m.handleConfigAgent()
 
+	// Global config editor (",")
+	case keys.KeyConfigEditor:
+		return m.showConfigEditor()
+
 	// PR actions
 	case keys.KeyOpenPR:
 		return m.handleOpenPR()
