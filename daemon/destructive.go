@@ -34,8 +34,10 @@ import (
 // never clear, not even by explicit retry, until a daemon restart reloaded an inert
 // backend. Safe-by-default must not become stuck-by-default.
 //
-// Returns deleted=false with a nil error when the delete was correctly skipped, so
-// callers can distinguish "refused" from "failed".
+// A refusal is returned as an ERROR wrapping the teardown's own cause, not as a
+// quiet (false, nil): callers must not read a refusal as "nothing to delete". That
+// distinction is what arms reapDeadRoot's backoff and what makes KillSession report
+// something actionable rather than success.
 func (m *Manager) deleteSessionRecord(repoID, title, stableID string, teardownErr error) (bool, error) {
 	if session.TeardownStateUnknown(teardownErr) {
 		return false, fmt.Errorf("refusing to delete the record for session %q: its teardown did not complete safely, so its workspace is still on disk and this record is the only handle left on it: %w", title, teardownErr)

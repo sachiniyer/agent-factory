@@ -55,15 +55,7 @@ func stableIDMatchesForDaemon(recordID, expectedID string) bool {
 // poll's refreshInstanceStatus routes to finishUserKill — completing, on the next
 // tick, the very kill this function just refused, and defeating the abort.
 func (m *Manager) persistKillTombstone(repoID string, instance *session.Instance, data *session.InstanceData) error {
-	var d session.InstanceData
-	switch {
-	case instance != nil:
-		d = instance.ToInstanceData()
-		d.UserKilled = true
-	case data != nil:
-		d = *data
-		d.UserKilled = true
-	default:
+	if instance == nil && data == nil {
 		return nil
 	}
 	// The write and the in-memory mark happen under ONE hold of the repo lock, and
@@ -83,6 +75,19 @@ func (m *Manager) persistKillTombstone(repoID string, instance *session.Instance
 	// true). A commit point another writer can silently roll back is not one.
 	repoStartLock := m.startLockForRepo(repoID)
 	repoStartLock.Lock()
+	// The SNAPSHOT is taken under the lock too, not just the mark. Reading it
+	// outside would leave the same window one step earlier: a poll could persist
+	// between the read and this acquire, and our write would clobber its record with
+	// a stale copy. The comment above claimed every writer serializes
+	// ToInstanceData() under this lock — true of the others, and it had to be made
+	// true of this one.
+	var d session.InstanceData
+	if instance != nil {
+		d = instance.ToInstanceData()
+	} else {
+		d = *data
+	}
+	d.UserKilled = true
 	err := killTombstonePersist(repoID, d)
 	if err == nil && instance != nil {
 		instance.MarkUserKilled()

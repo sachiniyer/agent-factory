@@ -549,9 +549,20 @@ func (g *GitWorktree) Cleanup() (CleanupState, error) {
 func (r *cleanupRun) shouldRemoveWorktreeDir(removeErr error) bool {
 	registered, ok := r.registered()
 	if !ok {
-		// The probe did not answer. Never take the string-matching fallback on a
-		// verdict we could not obtain.
-		return false
+		// The probe could not be read — but WHY matters, and conflating the two
+		// reasons was itself a bug (found reviewing this PR's own diff).
+		if r.unknown {
+			// It TIMED OUT. Never act on a verdict we could not obtain, and never
+			// re-enter the unbounded delete on a filesystem that just stalled. The run
+			// is already unknown, so the record is retained and a retry can finish.
+			return false
+		}
+		// It ANSWERED with an error (a corrupted repo, not a stall). Nothing is
+		// unknown here, so refusing would report a SETTLED cleanup while leaving the
+		// directory on disk — the caller would then drop the record and orphan it,
+		// which is the outcome this whole PR exists to prevent. Fall back to the
+		// conservative #726 string gate, exactly as before this PR (#719/#726).
+		return strings.Contains(removeErr.Error(), "validation failed")
 	}
 	if !registered {
 		return true

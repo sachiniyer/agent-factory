@@ -133,3 +133,42 @@ exit 0
 		t.Fatal("cleanup pruned worktree metadata for a workspace it had just decided to retain")
 	}
 }
+
+// TestCleanup_CorruptRepoWithUnreadableRegistration_StillDeletesTheDirectory is a
+// regression I introduced and caught reviewing my own diff (the GitHub bot has not
+// looked at this PR since round 1).
+//
+// The #726 shape: `git worktree remove -f` fails FAST with "validation failed" (a
+// corrupted .git pointer) AND `git worktree list` also fails FAST — an ANSWERED
+// error, not a stall. Before this PR, Cleanup fell back to the conservative string
+// gate and deleted the directory ("Also the path taken when `worktree list` itself
+// failed"). Round 4's fix made the probe refuse on ANY unreadable registration,
+// which conflated "could not ask" with "asked and got an error" — so nothing was
+// deleted, yet no deadline tripped, so the run reported SETTLED and the caller
+// dropped the record. The workspace is left on disk with nothing pointing at it:
+// the exact orphaning this PR exists to prevent, caused by its own fix.
+func TestCleanup_CorruptRepoWithUnreadableRegistration_StillDeletesTheDirectory(t *testing.T) {
+	// Every git command ANSWERS with a failure, instantly. Nothing stalls.
+	bin := t.TempDir()
+	script := "#!/bin/sh\necho 'fatal: validation failed' >&2\nexit 128\n"
+	if err := os.WriteFile(filepath.Join(bin, "git"), []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake git: %v", err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	prev := localGitTimeout
+	localGitTimeout = 5 * time.Second // generous: nothing here should ever reach it
+	t.Cleanup(func() { localGitTimeout = prev })
+
+	gw, wt := worktreeForCleanup(t)
+	state, _ := gw.Cleanup()
+
+	if _, err := os.Stat(wt); err == nil {
+		t.Fatal("a corrupted worktree whose registration could not be READ (an answered error, " +
+			"not a stall) was left on disk while the run reported its outcome as settled — so the " +
+			"caller deletes the record and orphans it. 'Could not ask' and 'asked and got an error' " +
+			"are different: only the first is unknown (#726 regression).")
+	}
+	if state != CleanupSettled {
+		t.Fatalf("nothing timed out, so the run's outcome is established: want CleanupSettled, got %v", state)
+	}
+}
