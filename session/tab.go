@@ -250,3 +250,68 @@ func tabKindForData(k TabKind) TabKind {
 		return TabKindShell
 	}
 }
+
+// TabLabel returns the string a user SEES for a tab.
+//
+// It lives beside the Tab type rather than in the TUI because a label a user can
+// read off the screen is, in practice, an identifier they will type — and until
+// #1984 the two disagreed: the TUI showed "Terminal" while the only accepted
+// name was "shell", so `af sessions tab-delete alpha --name Terminal` reported
+// that the tab did not exist while it sat visible in the tab bar. Keeping the
+// rule here lets every surface that ACCEPTS a tab name honour what the TUI
+// SHOWS, from one definition.
+//
+// Note Tab.Name's doc calls itself "the display label"; it is not, and that
+// confusion is the bug. Name is the canonical identifier; this is the label.
+func TabLabel(t *Tab) string {
+	if t == nil {
+		return ""
+	}
+	switch t.Kind {
+	case TabKindAgent:
+		return "Agent"
+	case TabKindShell:
+		return "Terminal"
+	case TabKindWeb:
+		if t.Name != "" {
+			return t.Name
+		}
+		return "Web"
+	case TabKindVSCode:
+		if t.Name != "" {
+			return t.Name
+		}
+		return "VS Code"
+	default:
+		if t.Name != "" {
+			return t.Name
+		}
+		return "Tab"
+	}
+}
+
+// TabMatches reports whether token identifies this tab, by its canonical Name or
+// by the label the UI displays for it.
+//
+// The label is accepted as an ALIAS: `--name shell` keeps working for every
+// script that already uses it, and `--name Terminal` now works for the person
+// who read it off the screen. Nothing is renamed and no display changes.
+func TabMatches(t *Tab, token string) bool {
+	if t == nil || token == "" {
+		return false
+	}
+	return t.Name == token || TabLabel(t) == token
+}
+
+// TabIdentifiers renders a tab as the strings a user may type for it: its name,
+// plus its label when that differs. Used to make "no tab named X" list the valid
+// options instead of asserting an absence the user can see is false.
+func TabIdentifiers(t *Tab) string {
+	if t == nil {
+		return ""
+	}
+	if label := TabLabel(t); label != t.Name {
+		return fmt.Sprintf("%q (shown as %q)", t.Name, label)
+	}
+	return fmt.Sprintf("%q", t.Name)
+}

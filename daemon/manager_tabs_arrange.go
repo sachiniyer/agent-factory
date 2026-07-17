@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/sachiniyer/agent-factory/agentproto"
 	"github.com/sachiniyer/agent-factory/log"
@@ -153,12 +154,32 @@ func resolveTabTarget(tabs []*session.Tab, title, tabID, tabName string, tabInde
 		return 0, "", fmt.Errorf("session %q has no tab with id %q; it may have been closed — reload the session's tabs and retry", title, tabID)
 	}
 	if tabName != "" {
+		// Match the canonical Name first, then the label the UI DISPLAYS
+		// (session.TabMatches, #1984). The TUI shows "Terminal" for a tab named
+		// "shell", so a user reading the bar and typing what they saw was told
+		// the tab did not exist while it sat on screen. Accepting the label is
+		// additive: every script passing "shell" keeps working, nothing is
+		// renamed, no display changes — and because this is the shared resolver
+		// (#1971), close, rename, and reorder all gain it at once.
 		for i, tab := range tabs {
-			if tab.Name == tabName {
-				return i, tabName, nil
+			if session.TabMatches(tab, tabName) {
+				// Return the CANONICAL name, not the input: the label is an input
+				// spelling only. Otherwise a caller passing "Terminal" gets
+				// {"name":"Terminal"} back — a string that is not any tab's
+				// identity, and a lie to any script that captures it.
+				return i, tab.Name, nil
 			}
 		}
-		return 0, "", fmt.Errorf("session %q has no tab named %q", title, tabName)
+		// Name the tabs that DO exist, with their labels where the two differ.
+		// The old error asserted an absence and left the user to guess the
+		// mapping; listing the valid options turns a dead end into a fix, and
+		// still fires correctly for a real typo.
+		ids := make([]string, 0, len(tabs))
+		for _, tab := range tabs {
+			ids = append(ids, session.TabIdentifiers(tab))
+		}
+		return 0, "", fmt.Errorf("session %q has no tab named %q; its tabs are: %s",
+			title, tabName, strings.Join(ids, ", "))
 	}
 	if tabIndex < 0 || tabIndex >= len(tabs) {
 		return 0, "", fmt.Errorf("session %q has no tab at index %d", title, tabIndex)

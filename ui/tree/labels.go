@@ -134,26 +134,13 @@ func labelForTab(tab *session.Tab) string {
 	return TabGlyph(tab.Kind) + " " + textForTab(tab)
 }
 
+// textForTab delegates to session.TabLabel, the single definition of what a user
+// SEES for a tab's text (#1984). It moved beside the Tab type because the
+// surfaces that ACCEPT a tab name must honour the same rule — the text a user
+// reads is an identifier they will type — and a second copy here would let the
+// two drift apart, the bug that made `--name Terminal` report a visible tab as
+// nonexistent. session.TabMatches accepts this same string as a name alias, and
+// session.TabLabel returns exactly what this switch used to (Agent/Terminal/name).
 func textForTab(tab *session.Tab) string {
-	switch tab.Kind {
-	case session.TabKindAgent:
-		return "Agent"
-	case session.TabKindShell:
-		return "Terminal"
-	case session.TabKindWeb:
-		if tab.Name != "" {
-			return tab.Name
-		}
-		return "Web"
-	case session.TabKindVSCode:
-		if tab.Name != "" {
-			return tab.Name
-		}
-		return "VS Code"
-	default:
-		if tab.Name != "" {
-			return tab.Name
-		}
-		return "Tab"
-	}
+	return session.TabLabel(tab)
 }

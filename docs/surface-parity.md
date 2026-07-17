@@ -73,7 +73,7 @@ A hand-maintained table would drift, which is the failure this exists to catch.
 So the only hand-maintained part is the **verdict** — the judgment a machine
 cannot make. Everything else is read out of the code at test time.
 
-## Three levels: verbs, options, enums
+## Four levels: verbs, options, enums, identifiers
 
 A verb-level check alone is not enough, and that is not a theory — it is how
 [#1948](https://github.com/sachiniyer/agent-factory/issues/1948) got missed.
@@ -83,13 +83,14 @@ the CLI sends none, so the CLI can only ever see tab 0. The verb was present and
 the **options** were not. It was found by someone using the product, not by this
 check.
 
-So the check works at three levels, each blind to the one below it:
+So the check works at four levels, each blind to the one below it:
 
 | Level | Question | Derived from |
 |---|---|---|
 | **Verb** | can this surface do X at all? | the cobra tree, the route catalog, the binding table, the web's RPC call sites |
 | **Option** | can it do X with the options the daemon accepts? | CLI flags off the cobra tree; the wire structs by reflection, vs the AST of `api/`+`app/` and the web's request bodies |
 | **Enum** | does it offer the same VALUES for those options? | the canonical Go enum, vs what a surface actually lists |
+| **Identifier** | is the string we SHOW the string we ACCEPT? | the display rule (`session.TabLabel`) vs the resolver (`session.TabMatches`) |
 
 The option level is where the interesting gaps live, because they hide behind a
 verb that looks present. Three of the same shape so far — a field the daemon
@@ -116,6 +117,43 @@ either `{"gap": "<capability-id>"}` (a tracked divergence) or `{"ok": "<reason>"
 (its absence is correct, and why). The field lists are derived, so **a new field
 on any request forces a decision on every surface that builds it** — nobody has
 to remember.
+
+## The identifier axis: what we show vs what we take
+
+The nastiest of the four, because it is invisible until someone types it
+([#1984](https://github.com/sachiniyer/agent-factory/issues/1984)):
+
+```
+$ af sessions tab-delete alpha --name Terminal
+session "alpha" has no tab named "Terminal"      # the TUI tab bar says "Terminal"
+$ af sessions tab-delete alpha --name shell
+# works
+```
+
+The TUI rendered a **label** and the CLI demanded a **name**, so the error
+asserted a tab was absent while the user could see it on screen — and left them
+to discover the mapping. One concept, two representations: the same disease as
+#1972 and #1970.
+
+The rule now lives beside the `Tab` type, not in the TUI, because **a label a
+user can read is an identifier they will type**:
+
+- `session.TabLabel` — the one definition of what a user SEES. `ui/tree` delegates
+  to it, so display cannot drift from what is accepted.
+- `session.TabMatches` — accepts the canonical name **or** the label. Additive:
+  `--name shell` keeps working for every script, nothing is renamed, no display
+  changes.
+- `session.TabIdentifiers` — renders a tab as both spellings, so *"no tab named
+  X"* lists the valid options instead of asserting an absence. That is worth more
+  than the alias: it still fires for a real typo, but turns a dead end into a fix.
+
+The label is an **input** spelling only — the resolver canonicalises before
+returning, or `tab-delete --name Terminal` would answer `{"name":"Terminal"}`, a
+string that is not any tab's identity.
+
+`TestDisplayedTabIdentifiersAreAccepted` enforces the invariant for every
+`TabKind`, including kinds with no UI yet, so a new kind cannot ship a label its
+own CLI rejects.
 
 ## The CLI-vs-CLI axis: argument shape
 

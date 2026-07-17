@@ -591,3 +591,119 @@ func TestRPCClients_CloseTab_RoundTrip(t *testing.T) {
 	// CloseTab alone. The controlServer.SetPRInfo handler stays covered by
 	// set_prinfo_test.go.
 }
+
+// TestCloseTab_AcceptsTheLabelTheTUIDisplays is #1984, reported by hand:
+//
+//	$ af sessions tab-delete alpha --name Terminal
+//	session "alpha" has no tab named "Terminal"      # the tab bar SAYS "Terminal"
+//	$ af sessions tab-delete alpha --name shell
+//	# works
+//
+// The TUI renders a LABEL and CloseTab demanded the canonical NAME, so a user
+// read "Terminal" off the screen, typed it, and was told a tab they could see
+// did not exist. The label is now accepted as an alias.
+func TestCloseTab_AcceptsTheLabelTheTUIDisplays(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	repoPath := setupControlRepo(t)
+	repo, err := config.RepoFromPath(repoPath)
+	if err != nil {
+		t.Fatalf("RepoFromPath: %v", err)
+	}
+	manager, err := NewManager(config.DefaultConfig())
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+
+	const title = "alpha"
+	inst := startedLocalTabInstance(t, manager, repo.ID, repoPath, title, "af_"+title+"_agent")
+	shell, err := inst.AddShellTab()
+	if err != nil {
+		t.Fatalf("AddShellTab: %v", err)
+	}
+	// The premise: the canonical name and what the TUI shows really do differ.
+	if shell.Name != "shell" || session.TabLabel(shell) != "Terminal" {
+		t.Fatalf("premise changed: shell tab name=%q label=%q, want %q/%q",
+			shell.Name, session.TabLabel(shell), "shell", "Terminal")
+	}
+
+	name, err := manager.CloseTab(CloseTabRequest{Title: title, RepoID: repo.ID, TabName: "Terminal"})
+	if err != nil {
+		t.Fatalf("CloseTab by the displayed label %q failed: %v\n"+
+			"This is the #1984 report: the tab bar shows \"Terminal\" and the user typed it.", "Terminal", err)
+	}
+	// The daemon reports the CANONICAL name back, not the alias the user typed.
+	if name != "shell" {
+		t.Fatalf("closed tab name = %q, want the canonical %q", name, "shell")
+	}
+	if inst.TabCount() != 1 {
+		t.Fatalf("expected 1 tab after CloseTab, got %d", inst.TabCount())
+	}
+}
+
+// TestCloseTab_StillAcceptsTheCanonicalName pins that the label alias is
+// ADDITIVE: every script already passing "shell" must keep working.
+func TestCloseTab_StillAcceptsTheCanonicalName(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	repoPath := setupControlRepo(t)
+	repo, err := config.RepoFromPath(repoPath)
+	if err != nil {
+		t.Fatalf("RepoFromPath: %v", err)
+	}
+	manager, err := NewManager(config.DefaultConfig())
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+
+	const title = "beta"
+	inst := startedLocalTabInstance(t, manager, repo.ID, repoPath, title, "af_"+title+"_agent")
+	if _, err := inst.AddShellTab(); err != nil {
+		t.Fatalf("AddShellTab: %v", err)
+	}
+
+	name, err := manager.CloseTab(CloseTabRequest{Title: title, RepoID: repo.ID, TabName: "shell"})
+	if err != nil {
+		t.Fatalf("CloseTab by the canonical name %q failed: %v\n"+
+			"The label alias must ADD a spelling, never replace one — scripts depend on this.", "shell", err)
+	}
+	if name != "shell" {
+		t.Fatalf("closed tab name = %q, want %q", name, "shell")
+	}
+}
+
+// TestCloseTab_UnknownNameListsTheValidOnes is the half worth more than the
+// alias: a real typo still errors, but the error names the tabs that exist with
+// BOTH spellings, instead of asserting an absence and leaving the user to guess
+// the mapping.
+func TestCloseTab_UnknownNameListsTheValidOnes(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	repoPath := setupControlRepo(t)
+	repo, err := config.RepoFromPath(repoPath)
+	if err != nil {
+		t.Fatalf("RepoFromPath: %v", err)
+	}
+	manager, err := NewManager(config.DefaultConfig())
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+
+	const title = "gamma"
+	inst := startedLocalTabInstance(t, manager, repo.ID, repoPath, title, "af_"+title+"_agent")
+	if _, err := inst.AddShellTab(); err != nil {
+		t.Fatalf("AddShellTab: %v", err)
+	}
+
+	_, err = manager.CloseTab(CloseTabRequest{Title: title, RepoID: repo.ID, TabName: "Termnial"})
+	if err == nil {
+		t.Fatal("CloseTab with a typo'd name should fail")
+	}
+	msg := err.Error()
+	// It must name the tabs that DO exist, with both spellings where they differ:
+	// a user who saw "Terminal" cannot guess "shell" from an error listing only
+	// the canonical name.
+	for _, want := range []string{`"shell"`, `shown as "Terminal"`, `"agent"`, `shown as "Agent"`} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("error %q does not mention %s — an error that names the valid options "+
+				"turns a dead end into a fix; one that only asserts an absence does not.", msg, want)
+		}
+	}
+}
