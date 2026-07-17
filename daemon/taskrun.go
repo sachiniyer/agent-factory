@@ -56,15 +56,41 @@ func deliverTaskPrompt(t *task.Task, prompt string, deferWhileAttached bool) (st
 		return "", fmt.Errorf("failed to load config: %w", err)
 	}
 
-	if t.TargetSession == "" {
+	// Ask the SAME question the cap was validated against (#1892). Reading the raw
+	// field here while task.ValidateTrigger/capApplies read the canonical form is
+	// what let a whitespace-only target accept a cap and then bypass it: this
+	// branch is the only one that passes MaxConcurrentRuns to the manager, so
+	// taking the target-session path below dropped the cap on the floor. The write
+	// path canonicalizes too, but a record written before that rule can still be on
+	// disk — a canonical read is what makes the legacy row behave.
+	//
+	// A nonempty target survives byte-identical, so the lookup below is unchanged:
+	// only an all-whitespace value moves, and it moves to "no target session".
+	target := task.CanonicalTargetSession(t.TargetSession)
+	if target == "" {
 		data, err := createSessionForTask(CreateSessionRequest{
 			TitleBase: task.TaskRunBaseTitle(*t),
 			RepoPath:  t.ProjectPath,
 			Program:   t.Program,
 			Prompt:    prompt,
 			AutoYes:   cfg.AutoYes,
+			// Provenance + the cap the manager admits against (#1892). TaskID is
+			// persisted on the session so the count is by association, never by a
+			// title prefix; MaxConcurrentRuns is zero for every task that has not
+			// opted in, leaving the gate inert.
+			TaskID:            t.ID,
+			MaxConcurrentRuns: t.MaxConcurrentRuns,
 		})
 		if err != nil {
+			// The task is at its cap: nothing was created, and this is not a failure.
+			// Surface the in-process sentinel so the watch paths park the event on the
+			// durable queue and retry it once a session finishes — the same treatment
+			// errTargetBusy gets. The text match is required because the create
+			// reaches the manager over net/rpc, which flattens the sentinel to a
+			// string (see atConcurrencyLimitErrText).
+			if isAtConcurrencyLimitErr(err) {
+				return "", errAtConcurrencyLimit
+			}
 			return "", fmt.Errorf("failed to start task session: %w", err)
 		}
 		// The freshly created session hit a usage-limit wall during startup and
@@ -84,7 +110,11 @@ func deliverTaskPrompt(t *task.Task, prompt string, deferWhileAttached bool) (st
 	// and delivers every prompt in order instead of dropping the losers of the
 	// creation race (#865). A Deleting target is surfaced, not silently dropped.
 	status, err := deliverPromptForTask(DeliverPromptRequest{
-		Title:    t.TargetSession,
+		// The canonical target, which for a nonempty value IS the raw field
+		// byte-for-byte. Titles are not canonicalized globally and the daemon keys
+		// instances on exact bytes, so this lookup must never be trimmed: a task
+		// aimed at the legal title " build " has to keep looking for " build ".
+		Title:    target,
 		RepoPath: t.ProjectPath,
 		Program:  t.Program,
 		Prompt:   prompt,
@@ -95,9 +125,9 @@ func deliverTaskPrompt(t *task.Task, prompt string, deferWhileAttached bool) (st
 		DeferWhileAttached: deferWhileAttached,
 	})
 	if err != nil {
-		return "", fmt.Errorf("failed to deliver prompt to target session %q: %w", t.TargetSession, err)
+		return "", fmt.Errorf("failed to deliver prompt to target session %q: %w", target, err)
 	}
-	log.InfoLog.Printf("task %s delivered prompt to target session %q (%s)", t.ID, t.TargetSession, status)
+	log.InfoLog.Printf("task %s delivered prompt to target session %q (%s)", t.ID, target, status)
 	return status, nil
 }
 

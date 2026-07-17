@@ -59,13 +59,25 @@ type Task struct {
 	// TargetSession routes deliveries into an existing session by title
 	// (auto-created with ProjectPath/Program if missing). Empty keeps the
 	// historical behavior of creating a fresh session per run.
-	TargetSession string     `json:"target_session,omitempty"`
-	ProjectPath   string     `json:"project_path"`
-	Program       string     `json:"program"`
-	Enabled       bool       `json:"enabled"`
-	CreatedAt     time.Time  `json:"created_at"`
-	LastRunAt     *time.Time `json:"last_run_at,omitempty"`
-	LastRunStatus string     `json:"last_run_status,omitempty"`
+	TargetSession string `json:"target_session,omitempty"`
+	// MaxConcurrentRuns caps how many sessions this watch task may have in flight
+	// at once (#1892). Zero — the default — means unlimited, preserving the
+	// historical behavior for every task written before this field existed; a
+	// cap is opt-in. Events over the cap are queued durably in FIFO order and
+	// delivered as slots free rather than dropped on admission — subject to the
+	// event queue's own retention bounds, which every queued event shares.
+	//
+	// It applies only to a watch task that creates a session per event (see
+	// ValidateTrigger): a target_session task delivers into one session, so its
+	// deliveries already serialize, and overlapping cron fires already coalesce on
+	// RunTask's per-task lock. omitempty + additive: no tasks schema bump.
+	MaxConcurrentRuns int        `json:"max_concurrent_runs,omitempty"`
+	ProjectPath       string     `json:"project_path"`
+	Program           string     `json:"program"`
+	Enabled           bool       `json:"enabled"`
+	CreatedAt         time.Time  `json:"created_at"`
+	LastRunAt         *time.Time `json:"last_run_at,omitempty"`
+	LastRunStatus     string     `json:"last_run_status,omitempty"`
 }
 
 // IsWatch reports whether the task is event-triggered (WatchCmd) rather than
@@ -96,6 +108,21 @@ func (t Task) ValidateTrigger() error {
 	}
 	if t.Enabled && hasCron && strings.TrimSpace(t.Prompt) == "" {
 		return fmt.Errorf("task %s is an enabled cron task but has an empty prompt; a prompt is required", t.ID)
+	}
+	// A concurrency cap is meaningful only where sessions can actually pile up:
+	// a watch task that creates one per event (#1892). Rejecting it elsewhere is
+	// deliberate — accepting it would leave a setting that reads as enforced but
+	// silently does nothing, which is the gotcha class this repo designs away.
+	if t.MaxConcurrentRuns < 0 {
+		return fmt.Errorf("task %s has a negative max_concurrent_runs (%d); use 0 for unlimited or a positive cap", t.ID, t.MaxConcurrentRuns)
+	}
+	if t.MaxConcurrentRuns > 0 {
+		if !hasWatch {
+			return fmt.Errorf("task %s sets max_concurrent_runs but is not a watch task; the cap bounds a watch task's in-flight sessions, and overlapping cron fires already coalesce", t.ID)
+		}
+		if CanonicalTargetSession(t.TargetSession) != "" {
+			return fmt.Errorf("task %s sets both max_concurrent_runs and target_session; deliveries into one session already serialize, so drop the cap or drop the target session", t.ID)
+		}
 	}
 	return nil
 }
@@ -201,6 +228,10 @@ func AddTask(t Task) error {
 	if err := ValidateTaskID(t.ID); err != nil {
 		return err
 	}
+	// Canonicalize before validating so validation judges exactly what will be
+	// stored — a whitespace-only target session must not validate as "no target
+	// session" and then behave as one at delivery time (#1892).
+	t.canonicalizeTargetSession()
 	if err := t.ValidateTrigger(); err != nil {
 		return err
 	}
@@ -425,18 +456,24 @@ type TaskUpdate struct {
 	CronExpr      *string `json:"cron_expr,omitempty"`
 	WatchCmd      *string `json:"watch_cmd,omitempty"`
 	TargetSession *string `json:"target_session,omitempty"`
-	ProjectPath   *string `json:"project_path,omitempty"`
-	Program       *string `json:"program,omitempty"`
-	Enabled       *bool   `json:"enabled,omitempty"`
+	// MaxConcurrentRuns patches the watch-task concurrency cap (#1892). A pointer
+	// because 0 is a meaningful value ("unlimited"), not "unchanged" — the same
+	// nil-vs-zero distinction Enabled and TargetSession rely on, and the reason
+	// this type needs the JSON gob codec below.
+	MaxConcurrentRuns *int    `json:"max_concurrent_runs,omitempty"`
+	ProjectPath       *string `json:"project_path,omitempty"`
+	Program           *string `json:"program,omitempty"`
+	Enabled           *bool   `json:"enabled,omitempty"`
 }
 
 // GobEncode/GobDecode route TaskUpdate through JSON on the net/rpc gob control
 // socket the CLI uses (daemon.UpdateTask → callDaemon). This is REQUIRED for
 // correctness, not an optimization: gob elides a struct field holding its zero
-// value, and — fatally here — a *bool pointing at false (or a *string at "") is
-// followed to that zero and dropped, so the pointer decodes back as nil. That
-// would silently turn `af tasks update --enabled false` and the trigger-clearing
-// WatchCmd:"" / CronExpr:"" patches into no-ops. JSON preserves the exact
+// value, and — fatally here — a *bool pointing at false (or a *string at "", or
+// an *int at 0) is followed to that zero and dropped, so the pointer decodes back
+// as nil. That would silently turn `af tasks update --enabled false`, the
+// trigger-clearing WatchCmd:"" / CronExpr:"" patches, and `--max-concurrent-runs
+// 0` (revert to unlimited, #1892) into no-ops. JSON preserves the exact
 // nil-vs-non-nil-zero-pointer distinction (omitempty omits ONLY a nil pointer, so
 // a non-nil &false serializes as `false`), so this round-trip is lossless.
 func (u TaskUpdate) GobEncode() ([]byte, error) {
@@ -452,8 +489,8 @@ func (u *TaskUpdate) GobDecode(data []byte) error {
 // writes nothing new.
 func (u TaskUpdate) IsEmpty() bool {
 	return u.Name == nil && u.Prompt == nil && u.CronExpr == nil &&
-		u.WatchCmd == nil && u.TargetSession == nil && u.ProjectPath == nil &&
-		u.Program == nil && u.Enabled == nil
+		u.WatchCmd == nil && u.TargetSession == nil && u.MaxConcurrentRuns == nil &&
+		u.ProjectPath == nil && u.Program == nil && u.Enabled == nil
 }
 
 // apply merges the non-nil fields of u onto t and returns the result. It never
@@ -475,6 +512,9 @@ func (u TaskUpdate) apply(t Task) Task {
 	if u.TargetSession != nil {
 		t.TargetSession = *u.TargetSession
 	}
+	if u.MaxConcurrentRuns != nil {
+		t.MaxConcurrentRuns = *u.MaxConcurrentRuns
+	}
 	if u.ProjectPath != nil {
 		t.ProjectPath = *u.ProjectPath
 	}
@@ -484,7 +524,91 @@ func (u TaskUpdate) apply(t Task) Task {
 	if u.Enabled != nil {
 		t.Enabled = *u.Enabled
 	}
+	// Canonicalize the MERGED target, unconditionally — never gated on
+	// u.TargetSession != nil (#1892). Gating it there left the original defect live
+	// on the legacy path: a task written before this rule can hold a whitespace-only
+	// target on disk, and a patch that touches only the cap never enters the branch
+	// that would fix it. ValidateTrigger would then read the target as empty and
+	// accept the cap, while delivery read the raw value, took the target-session
+	// path, and never passed the cap to CreateSession — the silently-ignored cap
+	// this PR exists to close, reachable by simply not mentioning the field. Every
+	// write now canonicalizes what it is about to store, so the record cannot
+	// persist a value the two sides would read differently.
+	t.canonicalizeTargetSession()
+	// Drop a cap the merged record can no longer carry, unless this patch set it
+	// explicitly (#1892). A partial patch that only moves the trigger or the
+	// delivery mode — which is every non-CLI writer, since DiffTask sends just the
+	// changed fields and the TUI pane has no cap control — would otherwise leave a
+	// positive cap on a cron/target-session task and have ValidateTrigger reject
+	// the whole save. The rule lives here, in the shared merge, so the daemon,
+	// TUI, API, and CLI all get it; an explicitly-patched cap is left alone so a
+	// contradictory request still surfaces as an error instead of being silently
+	// dropped. It runs AFTER the canonicalization above, which decides what
+	// capApplies sees.
+	if u.MaxConcurrentRuns == nil {
+		t.clearInapplicableCap()
+	}
 	return t
+}
+
+// capApplies reports whether this task's shape can carry a concurrency cap: it
+// bounds sessions a watch task spawns per event, so it is meaningful only for a
+// watch task that creates them (#1892). Cron fires already coalesce on RunTask's
+// lock, and target-session deliveries already serialize into one session.
+//
+// The TargetSession test goes through CanonicalTargetSession, the same function
+// deliverTaskPrompt's runtime "create a session per event" condition uses — the
+// two must agree on what an empty target session is, or a cap could validate
+// against one condition and be bypassed at delivery by the other.
+func (t Task) capApplies() bool {
+	return t.IsWatch() && CanonicalTargetSession(t.TargetSession) == ""
+}
+
+// clearInapplicableCap drops a stale positive cap from a task whose shape can no
+// longer carry one.
+func (t *Task) clearInapplicableCap() {
+	if t.MaxConcurrentRuns > 0 && !t.capApplies() {
+		t.MaxConcurrentRuns = 0
+	}
+}
+
+// CanonicalTargetSession is THE canonical form of a target session title, and the
+// single answer to "does this task have a target session?" (#1892). Every side
+// must ask it — the write path, ValidateTrigger, capApplies, and
+// deliverTaskPrompt — because a cap is accepted based on this question and then
+// enforced based on it again. Two call-sites answering it differently is exactly
+// the defect this function exists to remove: validation once read
+// TrimSpace(TargetSession) == "" while delivery read the RAW TargetSession == "",
+// so a whitespace-only target validated as "creates a session per event" (cap
+// accepted and stored) and then took the target-session path at delivery, which
+// never passes the cap to CreateSession. The cap was silently ignored.
+//
+// The rule:
+//
+//   - An ALL-WHITESPACE value means no target session. It was never a usable
+//     title — validateTitleAvailableLocked rejects TrimSpace(title) == "" on
+//     every creation path — so it can only ever have been a typo for empty.
+//
+//   - Any other value is returned BYTE-IDENTICAL. It is NOT trimmed, and this is
+//     the load-bearing half. A session title may legally contain leading or
+//     trailing spaces: title validation rejects only all-whitespace, and the
+//     daemon keys its instances on the exact title bytes. Trimming a nonempty
+//     target would therefore silently REDIRECT the task to a different session —
+//     a task aimed at " build " would look up "build", miss it, and then fail on
+//     auto-create, because " build " and "build" sanitize to the same git branch
+//     and collide. Titles are not canonicalized globally, so the stored target
+//     must stay byte-identical to what delivery looks up.
+func CanonicalTargetSession(target string) string {
+	if strings.TrimSpace(target) == "" {
+		return ""
+	}
+	return target
+}
+
+// canonicalizeTargetSession puts the stored target into canonical form. Applied
+// on every write, unconditionally — see apply.
+func (t *Task) canonicalizeTargetSession() {
+	t.TargetSession = CanonicalTargetSession(t.TargetSession)
 }
 
 // TaskEdit pairs a task ID with the field-level patch to apply to it. The TUI's
@@ -515,6 +639,9 @@ func DiffTask(old, cur Task) TaskUpdate {
 	}
 	if cur.TargetSession != old.TargetSession {
 		u.TargetSession = &cur.TargetSession
+	}
+	if cur.MaxConcurrentRuns != old.MaxConcurrentRuns {
+		u.MaxConcurrentRuns = &cur.MaxConcurrentRuns
 	}
 	if cur.ProjectPath != old.ProjectPath {
 		u.ProjectPath = &cur.ProjectPath

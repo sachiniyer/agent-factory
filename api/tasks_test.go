@@ -120,11 +120,14 @@ func resetUpdateFlags(t *testing.T) {
 		taskUpdateCronFlag = ""
 		taskUpdateWatchCmdFlag = ""
 		taskUpdateTargetSessionFlag = ""
+		taskUpdateMaxConcurrentRunsFlag = 0
 		taskUpdateEnabledFlag = ""
 		taskUpdateProgramFlag = ""
-		// --target-session uses Changed() semantics ("" is a meaningful
-		// value), so the cobra-level Changed marker must reset too.
+		// --target-session and --max-concurrent-runs use Changed() semantics
+		// ("" / 0 are meaningful values), so the cobra-level Changed markers
+		// must reset too.
 		tasksUpdateCmd.Flags().Lookup("target-session").Changed = false
+		tasksUpdateCmd.Flags().Lookup("max-concurrent-runs").Changed = false
 	}
 	t.Cleanup(reset)
 	reset()
@@ -140,6 +143,7 @@ func resetAddFlags(t *testing.T) {
 		taskAddCronFlag = ""
 		taskAddWatchCmdFlag = ""
 		taskAddTargetSessionFlag = ""
+		taskAddMaxConcurrentRunsFlag = 0
 		taskAddProgramFlag = ""
 		repoFlag = ""
 	}
@@ -879,4 +883,145 @@ func TestTasksGet_PrefersDaemonSnapshot(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "not found",
 		"a reachable daemon's miss is authoritative; get must not re-read disk")
+}
+
+// TestTasksUpdate_SwitchCappedWatchToCronClearsCap covers the trigger-switch
+// regression Codex flagged (#1892): a watch task with a concurrency cap that is
+// switched to cron must have the now-invalid cap cleared automatically, exactly
+// as the switch clears the old trigger. Otherwise the merged record is a cron
+// task with a positive cap and ValidateTrigger rejects the whole update.
+func TestTasksUpdate_SwitchCappedWatchToCronClearsCap(t *testing.T) {
+	useTempConfig(t)
+	resetUpdateFlags(t)
+	calls := stubDaemon(t)
+
+	seedTask(t, task.Task{
+		ID:                "cap1892a",
+		Name:              "capped",
+		WatchCmd:          "tail -f events.log",
+		MaxConcurrentRuns: 3,
+		Enabled:           true,
+	})
+
+	taskUpdateCronFlag = "0 9 * * *"
+	taskUpdatePromptFlag = "run it"
+	require.NoError(t, tasksUpdateCmd.RunE(tasksUpdateCmd, []string{"cap1892a"}))
+
+	got, err := task.GetTask("cap1892a")
+	require.NoError(t, err)
+	assert.Equal(t, "0 9 * * *", got.CronExpr)
+	assert.Empty(t, got.WatchCmd)
+	assert.Equal(t, 0, got.MaxConcurrentRuns, "switching to cron must clear the now-invalid cap")
+	assert.Equal(t, 1, calls.writes)
+}
+
+// TestTasksUpdate_AddTargetSessionToCappedWatchClearsCap: setting a target
+// session on a capped watch task serializes its deliveries, so the cap is
+// meaningless and ValidateTrigger rejects the pair. The update must clear the cap
+// rather than fail.
+func TestTasksUpdate_AddTargetSessionToCappedWatchClearsCap(t *testing.T) {
+	useTempConfig(t)
+	resetUpdateFlags(t)
+	calls := stubDaemon(t)
+
+	seedTask(t, task.Task{
+		ID:                "cap1892b",
+		Name:              "capped",
+		WatchCmd:          "tail -f events.log",
+		MaxConcurrentRuns: 2,
+		Enabled:           true,
+	})
+
+	taskUpdateTargetSessionFlag = "shared"
+	tasksUpdateCmd.Flags().Lookup("target-session").Changed = true
+	require.NoError(t, tasksUpdateCmd.RunE(tasksUpdateCmd, []string{"cap1892b"}))
+
+	got, err := task.GetTask("cap1892b")
+	require.NoError(t, err)
+	assert.Equal(t, "shared", got.TargetSession)
+	assert.Equal(t, 0, got.MaxConcurrentRuns, "adding a target session must clear the now-invalid cap")
+	assert.Equal(t, 1, calls.writes)
+}
+
+// TestTasksUpdate_ExplicitCapWithCronIsRejected: an explicit --max-concurrent-runs
+// alongside --cron is a contradictory request and must be surfaced as an error,
+// not silently cleared. Only an untouched stale cap is auto-cleared.
+func TestTasksUpdate_ExplicitCapWithCronIsRejected(t *testing.T) {
+	useTempConfig(t)
+	resetUpdateFlags(t)
+	stubDaemon(t)
+
+	seedTask(t, task.Task{ID: "cap1892c", Name: "w", WatchCmd: "tail -f x", Enabled: true})
+
+	taskUpdateCronFlag = "0 9 * * *"
+	taskUpdatePromptFlag = "p"
+	taskUpdateMaxConcurrentRunsFlag = 3
+	tasksUpdateCmd.Flags().Lookup("max-concurrent-runs").Changed = true
+	err := tasksUpdateCmd.RunE(tasksUpdateCmd, []string{"cap1892c"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not a watch task")
+}
+
+// TestTasksUpdate_SetCapOnWatchTask: the normal case still works — setting a cap
+// on a plain watch task persists it.
+func TestTasksUpdate_SetCapOnWatchTask(t *testing.T) {
+	useTempConfig(t)
+	resetUpdateFlags(t)
+	calls := stubDaemon(t)
+
+	seedTask(t, task.Task{ID: "cap1892d", Name: "w", WatchCmd: "tail -f x", Enabled: true})
+
+	taskUpdateMaxConcurrentRunsFlag = 4
+	tasksUpdateCmd.Flags().Lookup("max-concurrent-runs").Changed = true
+	require.NoError(t, tasksUpdateCmd.RunE(tasksUpdateCmd, []string{"cap1892d"}))
+
+	got, err := task.GetTask("cap1892d")
+	require.NoError(t, err)
+	assert.Equal(t, 4, got.MaxConcurrentRuns)
+	assert.Equal(t, 1, calls.writes)
+}
+
+// TestTasksAdd_RejectsCapOnCronTask: the add path rejects an unenforceable cap
+// up front (ValidateTrigger), so a cron task never persists a stored-but-ignored
+// cap (#1892).
+func TestTasksAdd_RejectsCapOnCronTask(t *testing.T) {
+	useTempConfig(t)
+	resetAddFlags(t)
+	stubDaemon(t)
+	setupAddRepo(t)
+
+	taskAddNameFlag = "cron-cap"
+	taskAddPromptFlag = "p"
+	taskAddCronFlag = "0 9 * * *"
+	taskAddMaxConcurrentRunsFlag = 3
+
+	err := tasksAddCmd.RunE(tasksAddCmd, nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not a watch task")
+
+	tasks, lerr := task.LoadTasks()
+	require.NoError(t, lerr)
+	assert.Empty(t, tasks, "an unenforceable cap must not persist a task")
+}
+
+// TestTasksAdd_WatchTaskWithCapPersists: the happy path — a watch task with a
+// cap is accepted and stores the cap.
+func TestTasksAdd_WatchTaskWithCapPersists(t *testing.T) {
+	useTempConfig(t)
+	resetAddFlags(t)
+	calls := stubDaemon(t)
+	setupAddRepo(t)
+
+	taskAddNameFlag = "dlq"
+	taskAddWatchCmdFlag = "./poll.sh"
+	taskAddPromptFlag = "Triage: {{line}}"
+	taskAddMaxConcurrentRunsFlag = 3
+
+	require.NoError(t, tasksAddCmd.RunE(tasksAddCmd, nil))
+
+	tasks, err := task.LoadTasks()
+	require.NoError(t, err)
+	require.Len(t, tasks, 1)
+	assert.Equal(t, 3, tasks[0].MaxConcurrentRuns)
+	assert.Equal(t, 1, calls.writes)
 }

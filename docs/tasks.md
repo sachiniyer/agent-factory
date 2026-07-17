@@ -25,12 +25,17 @@ Tasks live in `~/.agent-factory/tasks.json`. Manage them via `af tasks` (JSON CL
 | `cron_expr` | Time trigger — 5-field cron expression (exactly one of `cron_expr` / `watch_cmd`) |
 | `watch_cmd` | Event trigger — long-running command; each stdout line fires the task (exactly one of `cron_expr` / `watch_cmd`) |
 | `target_session` | Deliver into this session by title (auto-created if missing). Empty = create a new session per fire |
+| `max_concurrent_runs` | Cap on how many sessions this watch task may have in flight at once. `0` (the default) = unlimited. Excess events are queued in order and delivered as sessions finish, rather than spawning more runs (subject to the durable queue's retention limits). Watch tasks with an empty `target_session` only (see [Limiting concurrent sessions](#limiting-concurrent-sessions)) |
 | `project_path` | Repo the task operates on; also the watch script's working directory |
 | `program` | Agent to run (`claude`, `codex`, `aider`, `gemini`, `amp`). Empty = configured `default_program` |
 | `enabled` | Disabled tasks never fire; their watch script is stopped |
 | `last_run_at` / `last_run_status` | Set by the daemon: `started` (session created), `sent` (prompt delivered into a session), `parked: usage limit` (the session hit a plan usage-limit wall at startup and is parked, not failed — see [usage-limits.md](usage-limits.md#task-runs-park-dont-fail)), and for watch tasks `stopped` / `errored` (see below) |
 
 A task with both triggers set is always invalid. An enabled task must have exactly one; a disabled task with neither is tolerated as a draft. An enabled cron task must carry a non-empty prompt — there is no event line to fall back to. Watch tasks are exempt (empty prompt defaults to the emitted line). Disabled drafts are tolerated regardless of prompt.
+
+`max_concurrent_runs` is rejected on a cron task or one with a `target_session` set, rather than stored and ignored: overlapping cron fires already coalesce, and deliveries into a single target session already serialize, so there would be nothing for the cap to bound.
+
+An **all-whitespace** `target_session` means the same thing as an empty one — create a session per fire — and is stored as empty. A session title is otherwise kept **exactly** as written, including any leading or trailing spaces: titles are matched byte-for-byte at delivery, so a task targeting `" build "` keeps looking for `" build "` and is never silently re-pointed at `"build"`.
 
 ## Cron tasks
 
@@ -61,7 +66,7 @@ af tasks add --name "gh-issues" --watch-cmd "./watch-issues.sh" \
 - **Exit 0 = intentional stop.** The task's status becomes `stopped` and the script is not restarted until the next daemon start, task edit, or re-enable.
 - **Non-zero exit = failure.** The script is restarted with exponential backoff, 1s doubling to a 5-minute cap. A run that stays healthy for 10 minutes resets the backoff.
 - **Crash-loop breaker**: 5 or more non-zero exits within 10 minutes set the status to `errored` and stop restarts. Re-arm by editing the task, toggling it, or restarting the daemon.
-- **Rate limit**: at most 10 events per minute per task. Excess events are dropped — never silently: a warning is logged with a running drop counter. Rate-dropped events are not queued for replay (the limit is protective policy, not an outage signal).
+- **Rate limit**: at most 10 events per minute per task. Excess events are dropped — never silently: a warning is logged with a running drop counter. Rate-dropped events are not queued for replay (the limit is protective policy against a chatty script, not an outage signal). This is a limit on the event *rate*, and is independent of `max_concurrent_runs`, which bounds in-flight *sessions* and queues rather than drops — the two are never the binding constraint at the same time (see [Limiting concurrent sessions](#limiting-concurrent-sessions)).
 - **Prompt rendering**: an empty `prompt` delivers the raw line; otherwise `{{line}}` is substituted. An event whose rendered prompt is empty is dropped with an error log.
 - **Ordering**: deliveries are serialized per task in emission order. A slow delivery backpressures the script's stdout rather than reordering events, and replayed events (below) land before newer live ones.
 - **Process tree**: each script runs in its own process group. On stop the group gets SIGTERM, then SIGKILL after 5 seconds — backgrounded children do not outlive the watcher. Scripts should treat SIGTERM as "clean up and exit".
@@ -71,6 +76,32 @@ af tasks add --name "gh-issues" --watch-cmd "./watch-issues.sh" \
   - **Disabled vs deleted**: a disabled task keeps its backlog and replays it on re-enable; a deleted task's queue is removed.
 
 Edits to delivery fields (`prompt`, `target_session`, `program`) apply from the next event without restarting the script; edits to `watch_cmd`, `project_path`, or `name` restart it.
+
+### Limiting concurrent sessions
+
+A watch task that creates a session per event has no bound on how many of those sessions run at once — a burst of events means a burst of agents, each starting up, running its `post_worktree_commands`, and working in parallel. `max_concurrent_runs` bounds it:
+
+```bash
+af tasks add --name "DLQ triage" \
+  --watch-cmd ./poll-dlq.sh --prompt "Triage: {{line}}" \
+  --max-concurrent-runs 3
+```
+
+The default is `0` — unlimited, which is exactly the historical behavior. A cap is opt-in; existing tasks are unaffected.
+
+How it behaves:
+
+- **A session counts against the cap from the moment its create begins** — before the agent is up, and while its `post_worktree_commands` are still running. This is the window an external monitor cannot see, and why one that lists sessions and matches titles overshoots its own cap.
+- **Events over the cap are queued, never dropped on the admission path.** They land in the same durable per-task queue as a failed delivery (above), replay **in emission order**, and survive daemon restarts. They share that queue's retention bounds: a task that stays at its cap past the 72h age limit, or accumulates more than the 500-event / 256KB backlog, expires or drops its *oldest* parked events exactly as the delivery-failure path does — the bound exists so a permanently-saturated cap cannot grow the queue without limit. In normal use sessions finish and the backlog drains long before that.
+- **A slot frees when the session goes idle** — the agent finished the work the event asked for — or when it is archived or killed. It does *not* wait for you to archive the session: a cap that only freed on archive would stall the task until a human intervened, and the backlog would age out. It also does not wait for `post_worktree_commands` to finish, so a hung hook cannot wedge the task permanently.
+- **The cap counts runs, not sessions.** A run starts when an event creates its session and ends when the agent goes idle. Nothing that happens to the session afterwards — an outage, a failed archive, work you start in it yourself — puts it back under the task's cap.
+- **A run interrupted mid-flight keeps its slot** while the daemon is still trying to restore it. The restore loop never gives up on a recoverable session, so freeing the slot would let the task admit replacements and then exceed its cap once the originals came back. If a session is lost for good, `af sessions kill` releases its slot — the same off-ramp that clears a permanently failing restore.
+- **Archiving a session releases its slot**, even mid-run: you parked it deliberately, and holding the slot until someone restored it would wedge the task.
+- **A session that fails to load still counts.** If the daemon restarts and cannot rebuild a session (its worktree vanished, say), the agent may still be running — so its run keeps its slot rather than quietly freeing one. `af sessions kill` on the broken session releases it. The log names the task and session when this happens.
+- **The cap is scoped to the task and its repo**, keyed on the task id recorded on each session it spawns — not on a session-title prefix.
+- **A parked task is healthy**, not failing: it logs quietly and never raises the delivery-failure alarm.
+
+Pick the cap from what a run actually costs. If each event triggers an expensive post-worktree build, a low cap keeps the machine usable; if runs are cheap, leave it unlimited and let the 10/min rate limit be the only bound.
 
 ### Watch-task status
 
@@ -100,21 +131,21 @@ Versions before #791 installed one systemd timer / launchd plist **per task** (`
 
 - The daemon evaluates cron expressions directly; the autostart unit registered by `af daemon install` is the only OS-level unit left.
 - On first start, the daemon **sweeps** any leftover per-task units from older versions (disabled, deleted, logged) so tasks cannot double-fire.
-- `tasks.json` is unchanged — existing tasks work as-is, and the new `watch_cmd` / `target_session` fields are optional extensions.
+- `tasks.json` is unchanged — existing tasks work as-is, and the new `watch_cmd` / `target_session` / `max_concurrent_runs` fields are optional extensions.
 
 ## CLI quick reference
 
 ```bash
 af tasks list
 af tasks add --name <n> --prompt <p> --cron "0 9 * * *" [--target-session <title>] [--program <agent>]
-af tasks add --name <n> --watch-cmd <cmd> [--prompt "… {{line}} …"] [--target-session <title>]
+af tasks add --name <n> --watch-cmd <cmd> [--prompt "… {{line}} …"] [--target-session <title>] [--max-concurrent-runs <n>]
 af tasks get <id>
-af tasks update <id> [--cron …|--watch-cmd …] [--prompt …] [--target-session …] [--program <agent>] [--enabled true|false]
+af tasks update <id> [--cron …|--watch-cmd …] [--prompt …] [--target-session …] [--max-concurrent-runs <n>] [--program <agent>] [--enabled true|false]
 af tasks trigger <id>          # cron tasks only
 af tasks remove <id>
 ```
 
-On `update`, setting one trigger clears the other (switching watch→cron requires a prompt when the resulting cron task is enabled). `--target-session ""` explicitly reverts to create-per-run; omitting the flag leaves it untouched. `--program` accepts the same agent enum as `tasks add`; omitting it keeps the task's current program.
+On `update`, setting one trigger clears the other (switching watch→cron requires a prompt when the resulting cron task is enabled). `--target-session ""` explicitly reverts to create-per-run; omitting the flag leaves it untouched. `--max-concurrent-runs 0` explicitly reverts to unlimited; omitting the flag leaves the current cap untouched. `--program` accepts the same agent enum as `tasks add`; omitting it keeps the task's current program.
 
 ## Examples
 

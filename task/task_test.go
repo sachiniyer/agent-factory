@@ -729,3 +729,286 @@ func TestRenderWatchPrompt(t *testing.T) {
 		})
 	}
 }
+
+// TestValidateTriggerMaxConcurrentRuns covers the watch-task concurrency cap
+// (#1892). The cap is only enforceable where sessions can actually pile up — a
+// watch task that creates one per event — so it is rejected everywhere else
+// rather than silently ignored: a stored setting that reads as enforced but does
+// nothing is worse than an error at the point of configuration.
+func TestValidateTriggerMaxConcurrentRuns(t *testing.T) {
+	cases := []struct {
+		name    string
+		task    Task
+		wantErr string
+	}{
+		{
+			name: "watch task with a cap",
+			task: Task{ID: "t1", WatchCmd: "tail -f log", Enabled: true, MaxConcurrentRuns: 3},
+		},
+		{
+			name: "unset cap is unlimited and always valid",
+			task: Task{ID: "t2", WatchCmd: "tail -f log", Enabled: true},
+		},
+		{
+			name: "a cap on a cron task is refused",
+			task: Task{ID: "t3", CronExpr: "0 3 * * *", Prompt: "p", Enabled: true, MaxConcurrentRuns: 3},
+			// Overlapping cron fires already coalesce on RunTask's lock.
+			wantErr: "not a watch task",
+		},
+		{
+			name:    "a cap with a target session is refused",
+			task:    Task{ID: "t4", WatchCmd: "tail -f log", TargetSession: "shared", Enabled: true, MaxConcurrentRuns: 3},
+			wantErr: "target_session",
+		},
+		{
+			name:    "a negative cap is refused",
+			task:    Task{ID: "t5", WatchCmd: "tail -f log", Enabled: true, MaxConcurrentRuns: -1},
+			wantErr: "negative max_concurrent_runs",
+		},
+		{
+			name: "a disabled watch draft may still carry a cap",
+			task: Task{ID: "t6", WatchCmd: "tail -f log", MaxConcurrentRuns: 2},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.task.ValidateTrigger()
+			if tc.wantErr == "" {
+				assert.NoError(t, err)
+				return
+			}
+			if assert.Error(t, err) {
+				assert.Contains(t, err.Error(), tc.wantErr)
+			}
+		})
+	}
+}
+
+// TestTaskUpdateMaxConcurrentRunsRoundTrip pins the patch semantics for the cap.
+// Zero is a meaningful value ("revert to unlimited"), not "unchanged", so the
+// field is a pointer — and it has to survive the CLI's gob control socket, which
+// elides a pointer to a zero value. TaskUpdate's JSON codec is what saves it, and
+// this is the test that fails if that codec is ever dropped.
+func TestTaskUpdateMaxConcurrentRunsRoundTrip(t *testing.T) {
+	zero := 0
+	three := 3
+
+	// A patch setting the cap to 0 must survive gob as a NON-nil pointer, or
+	// `af tasks update --max-concurrent-runs 0` would silently no-op.
+	var buf bytes.Buffer
+	require.NoError(t, gob.NewEncoder(&buf).Encode(TaskUpdate{MaxConcurrentRuns: &zero}))
+	var back TaskUpdate
+	require.NoError(t, gob.NewDecoder(&buf).Decode(&back))
+	require.NotNil(t, back.MaxConcurrentRuns, "a *int at 0 must not decode back as nil (gob elides zero values)")
+	assert.Equal(t, 0, *back.MaxConcurrentRuns)
+
+	// apply: a nil field leaves the stored cap alone, a non-nil one overwrites it.
+	base := Task{ID: "t1", WatchCmd: "tail -f log", MaxConcurrentRuns: 5}
+	assert.Equal(t, 5, TaskUpdate{}.apply(base).MaxConcurrentRuns, "an absent patch field must not change the cap")
+	assert.Equal(t, 3, TaskUpdate{MaxConcurrentRuns: &three}.apply(base).MaxConcurrentRuns)
+	assert.Equal(t, 0, TaskUpdate{MaxConcurrentRuns: &zero}.apply(base).MaxConcurrentRuns, "0 must revert the cap to unlimited")
+
+	// IsEmpty must see the field, or a cap-only patch would be treated as a no-op.
+	assert.False(t, TaskUpdate{MaxConcurrentRuns: &zero}.IsEmpty())
+
+	// DiffTask must emit it when the user edits it in the TUI.
+	diff := DiffTask(base, Task{ID: "t1", WatchCmd: "tail -f log", MaxConcurrentRuns: 3})
+	require.NotNil(t, diff.MaxConcurrentRuns)
+	assert.Equal(t, 3, *diff.MaxConcurrentRuns)
+}
+
+// TestUpdateTaskClearsStaleCapForNonCLIWriters is the regression for the
+// stale-cap rejection (#1892): the cap-clearing rule has to live in the SHARED
+// merge, because every non-CLI writer (TUI task pane, API, daemon) sends a
+// partial patch built by DiffTask — which carries only the fields that changed,
+// and never max_concurrent_runs, since those surfaces have no cap control. With
+// the rule CLI-side only, those clients could not switch a capped watch task to
+// cron or give it a target session at all: the merged record kept the positive
+// cap and ValidateTrigger rejected the whole save.
+func TestUpdateTaskClearsStaleCapForNonCLIWriters(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+
+	// Exactly the patch a TUI/API edit produces: trigger fields only.
+	seed := Task{ID: "cap1892e", Name: "capped", WatchCmd: "tail -f x", MaxConcurrentRuns: 3, Enabled: true}
+	require.NoError(t, AddTask(seed))
+
+	edited := seed
+	edited.CronExpr = "0 9 * * *"
+	edited.WatchCmd = ""
+	edited.Prompt = "run it"
+	patch := DiffTask(seed, edited)
+	require.Nil(t, patch.MaxConcurrentRuns, "a TUI/API edit never patches the cap; that is the point of this test")
+
+	merged, err := UpdateTask("cap1892e", patch)
+	require.NoError(t, err, "a non-CLI watch→cron edit must succeed, not be rejected for a cap the client never touched")
+	assert.Equal(t, "0 9 * * *", merged.CronExpr)
+	assert.Equal(t, 0, merged.MaxConcurrentRuns, "the now-inapplicable cap must be cleared by the shared merge")
+}
+
+// TestUpdateTaskClearsStaleCapOnDeliveryModeChange: the same rule for the other
+// direction a cap becomes invalid — a target session is added, so deliveries
+// serialize into one session and there is nothing to bound.
+func TestUpdateTaskClearsStaleCapOnDeliveryModeChange(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+
+	seed := Task{ID: "cap1892f", Name: "capped", WatchCmd: "tail -f x", MaxConcurrentRuns: 3, Enabled: true}
+	require.NoError(t, AddTask(seed))
+
+	target := "shared"
+	merged, err := UpdateTask("cap1892f", TaskUpdate{TargetSession: &target})
+	require.NoError(t, err, "adding a target session must not be rejected for a cap the client never touched")
+	assert.Equal(t, "shared", merged.TargetSession)
+	assert.Equal(t, 0, merged.MaxConcurrentRuns)
+}
+
+// TestUpdateTaskKeepsExplicitCapContradiction: an explicitly-patched cap is NOT
+// auto-cleared. Silently dropping a value the caller actually sent would hide
+// their mistake; the contradiction surfaces as a validation error instead.
+func TestUpdateTaskKeepsExplicitCapContradiction(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+
+	require.NoError(t, AddTask(Task{ID: "cap1892g", Name: "w", WatchCmd: "tail -f x", Enabled: true}))
+
+	cron := "0 9 * * *"
+	empty := ""
+	prompt := "p"
+	three := 3
+	_, err := UpdateTask("cap1892g", TaskUpdate{
+		CronExpr: &cron, WatchCmd: &empty, Prompt: &prompt, MaxConcurrentRuns: &three,
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not a watch task")
+}
+
+// TestUpdateTaskKeepsCapWhenStillApplicable: the clearing rule must not be
+// overzealous — a watch task that stays a watch task keeps its cap through an
+// unrelated edit, and reverting a target session to per-run is compatible with
+// one.
+func TestUpdateTaskKeepsCapWhenStillApplicable(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+
+	require.NoError(t, AddTask(Task{ID: "cap1892h", Name: "w", WatchCmd: "tail -f x", MaxConcurrentRuns: 3, Enabled: true}))
+
+	prompt := "new prompt"
+	merged, err := UpdateTask("cap1892h", TaskUpdate{Prompt: &prompt})
+	require.NoError(t, err)
+	assert.Equal(t, 3, merged.MaxConcurrentRuns, "an unrelated edit must not drop the cap")
+
+	empty := ""
+	merged, err = UpdateTask("cap1892h", TaskUpdate{TargetSession: &empty})
+	require.NoError(t, err)
+	assert.Equal(t, 3, merged.MaxConcurrentRuns, "reverting to a session per run keeps the cap applicable")
+}
+
+// TestCanonicalTargetSession pins the canonical form itself: all-whitespace
+// collapses to empty, everything else survives BYTE-IDENTICAL (#1892).
+//
+// The byte-identity half is the load-bearing one. A session title may legally
+// contain leading/trailing spaces — validateTitleAvailableLocked rejects only
+// TrimSpace(title) == "" — and the daemon keys instances on exact title bytes, so
+// trimming a nonempty target would silently redirect the task at a DIFFERENT
+// session: " build " would look up "build", miss it, and then fail on auto-create
+// because the two sanitize to the same git branch and collide.
+func TestCanonicalTargetSession(t *testing.T) {
+	for _, tc := range []struct {
+		name, in, want string
+	}{
+		{"empty stays empty", "", ""},
+		{"spaces collapse to no target", "   ", ""},
+		{"mixed whitespace collapses to no target", " \t\n ", ""},
+		{"a plain title is untouched", "build", "build"},
+		{"a padded title keeps its bytes", " build ", " build "},
+		{"an inner space is untouched", "my build", "my build"},
+		{"a tab-padded title keeps its bytes", "\tbuild", "\tbuild"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, CanonicalTargetSession(tc.in))
+		})
+	}
+}
+
+// TestTargetSessionCanonicalizedOnWrite is the regression for the whitespace
+// bypass (#1892): validation asked TrimSpace(TargetSession) == "" while
+// deliverTaskPrompt asks the raw TargetSession == "", so a whitespace-only target
+// validated as "creates a session per event" — storing a cap — and then took the
+// target-session path at delivery, silently ignoring that cap. One canonical form
+// on both sides collapses the two questions onto one value.
+func TestTargetSessionCanonicalizedOnWrite(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+
+	require.NoError(t, AddTask(Task{
+		ID: "cap1892i", Name: "w", WatchCmd: "tail -f x",
+		TargetSession: "   ", MaxConcurrentRuns: 3, Enabled: true,
+	}))
+	got, err := GetTask("cap1892i")
+	require.NoError(t, err)
+	assert.Equal(t, "", got.TargetSession, "a whitespace-only target session must canonicalize to empty on write")
+	assert.Equal(t, 3, got.MaxConcurrentRuns, "with no real target session the cap is applicable and enforced")
+
+	// And through the update path.
+	ws := "  \t "
+	merged, err := UpdateTask("cap1892i", TaskUpdate{TargetSession: &ws})
+	require.NoError(t, err)
+	assert.Equal(t, "", merged.TargetSession)
+	assert.Equal(t, 3, merged.MaxConcurrentRuns, "canonicalizing to empty keeps the cap applicable rather than silently voiding it")
+}
+
+// TestPaddedTargetSessionSurvivesWriteVerbatim: the write path must NOT trim a
+// nonempty target. Trimming would redirect the task to a different session than
+// the user named — the defect a plain "normalize the field" fix introduces.
+func TestPaddedTargetSessionSurvivesWriteVerbatim(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+
+	require.NoError(t, AddTask(Task{
+		ID: "cap1892j", Name: "w", WatchCmd: "tail -f x",
+		TargetSession: " build ", Enabled: true,
+	}))
+	got, err := GetTask("cap1892j")
+	require.NoError(t, err)
+	assert.Equal(t, " build ", got.TargetSession, "a padded title is a legal, distinct session; trimming it would deliver to the wrong session")
+
+	padded := "\tdeploy "
+	merged, err := UpdateTask("cap1892j", TaskUpdate{TargetSession: &padded})
+	require.NoError(t, err)
+	assert.Equal(t, "\tdeploy ", merged.TargetSession, "the update path must store the target byte-identically too")
+}
+
+// TestLegacyWhitespaceTargetCanonicalizedByCapOnlyUpdate is the regression for
+// the cap breach surviving on the legacy path (#1892). A task written before the
+// canonical rule can hold a whitespace-only target on disk. A patch that touches
+// ONLY the cap never mentions TargetSession, so canonicalization gated on
+// "u.TargetSession != nil" would skip it entirely: ValidateTrigger then reads the
+// target as empty and accepts the cap, while deliverTaskPrompt reads the raw
+// value, takes the target-session path, and never passes the cap to
+// CreateSession. The cap is silently ignored — reachable by simply not mentioning
+// the field.
+func TestLegacyWhitespaceTargetCanonicalizedByCapOnlyUpdate(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+
+	// A legacy record: whitespace-only target, no cap. Written past AddTask's
+	// canonicalization to reproduce what is already on disk for pre-upgrade users.
+	require.NoError(t, AddTask(Task{ID: "cap1892k", Name: "w", WatchCmd: "tail -f x", Enabled: true}))
+	tasks, err := LoadTasks()
+	require.NoError(t, err)
+	for i := range tasks {
+		if tasks[i].ID == "cap1892k" {
+			tasks[i].TargetSession = "   "
+		}
+	}
+	require.NoError(t, saveTasks(tasks))
+	stored, err := GetTask("cap1892k")
+	require.NoError(t, err)
+	require.Equal(t, "   ", stored.TargetSession, "the legacy record must start out un-canonical for this to test anything")
+
+	// The cap-only patch: it never mentions TargetSession.
+	cap2 := 2
+	merged, err := UpdateTask("cap1892k", TaskUpdate{MaxConcurrentRuns: &cap2})
+	require.NoError(t, err)
+	assert.Equal(t, 2, merged.MaxConcurrentRuns, "the cap was accepted")
+	assert.Equal(t, "", merged.TargetSession,
+		"a cap-only patch must still canonicalize the merged target: left as \"   \", validation accepts the cap while delivery takes the target-session path and drops it")
+
+	reloaded, err := GetTask("cap1892k")
+	require.NoError(t, err)
+	assert.Equal(t, "", reloaded.TargetSession, "and the canonical form must reach disk, not just the returned record")
+}

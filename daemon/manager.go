@@ -45,7 +45,32 @@ type Manager struct {
 	// never rebuilt from disk — so it guards concurrent creates. The settled case
 	// is covered by the live/disk slug scans in validateTitleAvailableLocked.
 	reservedRemoteNames map[string]struct{}
-	repoStartLocks      map[string]*sync.Mutex
+	// reservedTaskRuns counts a task's session creates that have been admitted
+	// against its max_concurrent_runs cap but have not yet registered an instance
+	// in m.instances, keyed by task id (#1892).
+	//
+	// Like reservedRemoteNames it is IN-FLIGHT only — populated at admit, dropped
+	// in release, never rebuilt from disk. It has to exist because a create holds
+	// the manager lock only to reserve, then runs for as long as the agent takes to
+	// come up before its instance appears in m.instances; without the reservation a
+	// burst could count zero in-flight sessions N times over and admit them all.
+	// The settled case needs no reservation: a registered instance is counted
+	// straight off m.instances by admitTaskRunLocked, which is why a daemon restart
+	// cannot lose the count.
+	reservedTaskRuns map[string]int
+	// ghostTaskRuns counts a task's in-flight runs that exist ON DISK but could not
+	// be materialized into an Instance, keyed the same way (#1892). Rebuilt from
+	// disk on every refresh — the exact opposite of reservedTaskRuns above, and for
+	// the opposite reason: these are runs the in-memory map cannot see, so they must
+	// come from the projection, not from bookkeeping.
+	//
+	// It exists because m.instances is not the universe. refreshDaemonInstances
+	// skips a row it cannot load, and everything that walks the map — including the
+	// cap's count — then behaves as if that session does not exist. Its agent may
+	// still be running, so the cap must keep counting it or a failed LOAD becomes a
+	// licence to exceed max_concurrent_runs after every restart.
+	ghostTaskRuns  map[string]int
+	repoStartLocks map[string]*sync.Mutex
 	// targetLocks serializes DeliverPrompt per (repo, title) so concurrent
 	// deliveries to the same shared target session create it once and deliver
 	// the rest in arrival order instead of racing creation and dropping the
@@ -112,6 +137,13 @@ type Manager struct {
 	// can never permanently blind the daemon.
 	pausedMu    sync.Mutex
 	pausedPolls map[string]time.Time
+	// taskRunProbeDue schedules the backstop observation for a PAUSED session whose
+	// task run is still in flight (#1892), keyed like pausedPolls and guarded by the
+	// same pausedMu. An attach suppresses the liveness probe, and the cap's slot is
+	// released by observing the agent go idle — so without a bounded backstop a user
+	// watching their own task run silently stalls the task. Entries exist only while
+	// such a session is attached; ResumeStatusPoll drops them with the pause.
+	taskRunProbeDue map[string]time.Time
 
 	// events is the WS events-plane fan-out (#1592 Phase 2 PR5): every session/
 	// task mutation the daemon owns publishes here, and GET /v1/events streams it
@@ -175,6 +207,8 @@ func newManagerShell(cfg *config.Config) (*Manager, error) {
 		instances:           make(map[string]*session.Instance),
 		reservedTitles:      make(map[string]struct{}),
 		reservedRemoteNames: make(map[string]struct{}),
+		reservedTaskRuns:    make(map[string]int),
+		ghostTaskRuns:       make(map[string]int),
 		repoStartLocks:      make(map[string]*sync.Mutex),
 		targetLocks:         make(map[string]*sync.Mutex),
 		rootEnsureStates:    make(map[string]*rootEnsureState),
@@ -186,6 +220,7 @@ func newManagerShell(cfg *config.Config) (*Manager, error) {
 		remoteLossStates:    make(map[string]*remoteLossState),
 		instanceOpLocks:     make(map[string]*sync.Mutex),
 		pausedPolls:         make(map[string]time.Time),
+		taskRunProbeDue:     make(map[string]time.Time),
 		events:              newEventsHub(),
 		vscode:              vscode,
 		configAgents:        configAgents,
@@ -200,12 +235,13 @@ func newManagerShell(cfg *config.Config) (*Manager, error) {
 // mutates it is gated on Ready, and the refresh poll loop starts after the
 // restore completes.
 func (m *Manager) RestoreInstances() error {
-	instances, err := refreshDaemonInstances(nil)
+	instances, ghosts, err := refreshDaemonInstances(nil)
 	if err != nil {
 		return err
 	}
 	m.mu.Lock()
 	m.instances = instances
+	m.ghostTaskRuns = ghosts
 	m.mu.Unlock()
 	m.readyOnce.Do(func() { close(m.ready) })
 	return nil
@@ -275,11 +311,16 @@ func (m *Manager) Snapshot(repoID string) []session.InstanceData {
 }
 
 func (m *Manager) refreshLocked() error {
-	refreshed, err := refreshDaemonInstances(m.instances)
+	refreshed, ghosts, err := refreshDaemonInstances(m.instances)
 	if err != nil {
 		return err
 	}
 	m.instances = refreshed
+	// Replaced wholesale, never merged: the ghost set is a projection of what is on
+	// disk RIGHT NOW (#1892). A row that starts loading again must stop being a
+	// ghost, or its slot would be held twice — once by the ghost and once by the
+	// instance it became.
+	m.ghostTaskRuns = ghosts
 	return nil
 }
 

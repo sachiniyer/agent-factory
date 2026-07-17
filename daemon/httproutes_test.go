@@ -100,6 +100,9 @@ func TestHTTPRoutes_RequestFieldsMatchWireStruct(t *testing.T) {
 		}
 	}
 	require.NotNil(t, create)
+	// task_id / max_concurrent_runs are deliberately absent: they are `json:"-"`
+	// so the HTTP plane can neither set nor advertise task provenance (#1892) —
+	// only the daemon's own gob delivery loopback carries them.
 	assert.Equal(t,
 		[]string{"title", "title_base", "repo_path", "program", "prompt", "auto_yes", "in_place", "force_remote", "backend"},
 		create.RequestFields,

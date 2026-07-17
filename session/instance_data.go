@@ -15,6 +15,7 @@ func (i *Instance) ToInstanceData() InstanceData {
 
 	data := InstanceData{
 		ID:     i.ID,
+		TaskID: i.TaskID,
 		Title:  i.Title,
 		Path:   i.Path,
 		Branch: i.Branch,
@@ -46,6 +47,12 @@ func (i *Instance) ToInstanceData() InstanceData {
 	if i.liveness == LiveLimitReached {
 		data.LimitResetAt = i.limitResetAt
 	}
+
+	// Unlike the reset time above, this is NOT gated on a liveness: whether the run
+	// is still in flight is meaningful in every state (#1892), and gating it would
+	// reintroduce the bug it fixes — a session whose run is live must read as active
+	// whether it is Running, limit-parked, mid-archive, or Lost.
+	data.TaskRunActive = i.taskRunActive
 
 	// Persist each tab so the full agent+shell tab list survives a restart
 	// (Sachin's hard requirement for #930): on reload FromInstanceData restores
@@ -124,21 +131,27 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 	// must round-trip the exact op (#1436).
 	inFlightOp := inFlightOpFromData(data)
 	instance := &Instance{
-		ID:           data.ID,
-		Title:        data.Title,
-		Path:         data.Path,
-		Branch:       data.Branch,
-		liveness:     liveness,
-		inFlightOp:   inFlightOp,
-		limitResetAt: data.LimitResetAt,
-		Height:       data.Height,
-		Width:        data.Width,
-		CreatedAt:    data.CreatedAt,
-		UpdatedAt:    data.UpdatedAt,
-		Program:      data.Program,
-		AutoYes:      data.AutoYes,
-		Prompt:       data.Prompt,
-		userKilled:   data.UserKilled,
+		ID:         data.ID,
+		TaskID:     data.TaskID,
+		Title:      data.Title,
+		Path:       data.Path,
+		Branch:     data.Branch,
+		liveness:   liveness,
+		inFlightOp: inFlightOp,
+		// Carried across the restart (#1892). An outage that loses sessions is the
+		// same event that restarts the daemon, so this fact has to come back from
+		// disk or the cap would re-decide it from a Lost state that cannot tell a
+		// finished run from an interrupted one.
+		taskRunActive: data.TaskRunActive,
+		limitResetAt:  data.LimitResetAt,
+		Height:        data.Height,
+		Width:         data.Width,
+		CreatedAt:     data.CreatedAt,
+		UpdatedAt:     data.UpdatedAt,
+		Program:       data.Program,
+		AutoYes:       data.AutoYes,
+		Prompt:        data.Prompt,
+		userKilled:    data.UserKilled,
 	}
 
 	// Pick backend based on persisted BackendType.

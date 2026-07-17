@@ -372,16 +372,34 @@ func applyHomeCheck(homeDir string, misses int) (int, bool) {
 // duplicate Instance from disk.
 var fromInstanceDataForRefresh = session.FromInstanceData
 
-func refreshDaemonInstances(existing map[string]*session.Instance) (map[string]*session.Instance, error) {
+// refreshDaemonInstances materializes the daemon's in-memory instance map from
+// disk. It ALSO returns the ghost task runs: persisted rows whose task run is
+// still in flight but which could not be turned into an Instance (#1892).
+//
+// The second return exists because m.instances is NOT the universe. A row that
+// fails to materialize is skipped here and is invisible to anything that walks the
+// map — but the agent it describes may well still be running, and the run it
+// belongs to is still in flight by the only definition that matters (the
+// persisted marker says so). The watch-task concurrency cap counts by walking
+// m.instances, so without this a task whose sessions failed to load would admit
+// replacements past max_concurrent_runs on every daemon restart, which is exactly
+// the restart-survival guarantee the cap is built on.
+//
+// Keyed by taskRunReservationKey(repoID, taskID) → count, so the cap can add them
+// to its projection without re-reading disk. Recomputed on every refresh, so a
+// row that starts loading again stops being a ghost — the same self-healing
+// projection discipline as the rest of the count.
+func refreshDaemonInstances(existing map[string]*session.Instance) (map[string]*session.Instance, map[string]int, error) {
 	if err := config.MigrateAllRepoInstancesForDaemonLoad(); err != nil {
-		return existing, err
+		return existing, nil, err
 	}
 	allInstances, err := config.LoadAllRepoInstances()
 	if err != nil {
-		return existing, err
+		return existing, nil, err
 	}
 
 	next := make(map[string]*session.Instance)
+	ghostTaskRuns := make(map[string]int)
 	for repoID, raw := range allInstances {
 		if raw == nil || string(raw) == "[]" || string(raw) == "null" {
 			continue
@@ -397,6 +415,14 @@ func refreshDaemonInstances(existing map[string]*session.Instance) (map[string]*
 			// transient/persistent corruption doesn't silently drop
 			// already-running sessions — matching the pre-fix semantics
 			// of returning `existing` on parse failure.
+			//
+			// A corrupt file yields NO rows, so its task runs cannot be counted as
+			// ghosts either — there is nothing to read a task_id out of. On the poll
+			// path the re-hydrated instances above keep counting; at startup
+			// (existing==nil) this repo's runs are genuinely unknowable until the file
+			// is repaired, and a capped task there may over-admit. That is the one hole
+			// the ghost count cannot close, and it is bounded by the same corruption
+			// that already costs the repo its whole session list.
 			log.WarningLog.Printf("daemon skipping repo %s: corrupted instances.json: %v", repoID, err)
 			if existing != nil {
 				keyPrefix := repoID + "\x00"
@@ -421,6 +447,15 @@ func refreshDaemonInstances(existing map[string]*session.Instance) (map[string]*
 			instance, err := fromInstanceDataForRefresh(item)
 			if err != nil {
 				log.WarningLog.Printf("daemon skipping instance %q: %v", item.Title, err)
+				// The row is invisible to everything that walks m.instances from here on
+				// — but its agent may still be running, and its task run is still in
+				// flight if the persisted marker says so. Keep it counted against the
+				// task's cap (#1892), or a session we merely failed to LOAD would let the
+				// task admit a replacement beyond its limit.
+				if item.TaskID != "" && item.TaskRunActive {
+					ghostTaskRuns[taskRunReservationKey(repoID, item.TaskID)]++
+					log.WarningLog.Printf("watch task %s: session %q failed to load but its run is still counted against max_concurrent_runs (#1892); kill or repair the session to release its slot", item.TaskID, item.Title)
+				}
 				continue
 			}
 			// Assume AutoYes is true if the daemon is running.
@@ -453,7 +488,7 @@ func refreshDaemonInstances(existing map[string]*session.Instance) (map[string]*
 		}
 	}
 
-	return next, nil
+	return next, ghostTaskRuns, nil
 }
 
 func daemonInstanceKey(repoID, title string) string {

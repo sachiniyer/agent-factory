@@ -62,6 +62,16 @@ func (i *Instance) UserKilled() bool {
 	return i.userKilled
 }
 
+// TaskRunActive reports whether this session's task run is still in flight
+// (#1892). Prefer LifecycleView when the answer is combined with any other piece
+// of state: a verdict assembled from separate accessor calls can straddle a
+// concurrent transition.
+func (i *Instance) TaskRunActive() bool {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	return i.taskRunActive
+}
+
 // GetGitWorktree returns the git worktree for the instance
 func (i *Instance) GetGitWorktree() (*git.GitWorktree, error) {
 	i.mu.RLock()

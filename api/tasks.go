@@ -42,6 +42,7 @@ var (
 // and can never clobber a concurrent edit to the prompt/trigger/target.
 func strPtr(s string) *string { return &s }
 func boolPtr(b bool) *bool    { return &b }
+func intPtr(i int) *int       { return &i }
 
 // listTasks returns the full task list, preferring the daemon's authoritative
 // snapshot and falling back to a disk read when no daemon is reachable (#1029
@@ -110,12 +111,13 @@ var tasksListCmd = &cobra.Command{
 }
 
 var (
-	taskAddNameFlag          string
-	taskAddPromptFlag        string
-	taskAddCronFlag          string
-	taskAddWatchCmdFlag      string
-	taskAddTargetSessionFlag string
-	taskAddProgramFlag       string
+	taskAddNameFlag              string
+	taskAddPromptFlag            string
+	taskAddCronFlag              string
+	taskAddWatchCmdFlag          string
+	taskAddTargetSessionFlag     string
+	taskAddMaxConcurrentRunsFlag int
+	taskAddProgramFlag           string
 )
 
 var tasksAddCmd = &cobra.Command{
@@ -170,16 +172,23 @@ var tasksAddCmd = &cobra.Command{
 			return jsonError(fmt.Errorf("failed to generate task id: %w", err))
 		}
 		s := task.Task{
-			ID:            id,
-			Name:          taskAddNameFlag,
-			Prompt:        taskAddPromptFlag,
-			CronExpr:      strings.TrimSpace(taskAddCronFlag),
-			WatchCmd:      strings.TrimSpace(taskAddWatchCmdFlag),
-			TargetSession: taskAddTargetSessionFlag,
-			ProjectPath:   repo.Root,
-			Program:       program,
-			Enabled:       true,
-			CreatedAt:     time.Now(),
+			ID:                id,
+			Name:              taskAddNameFlag,
+			Prompt:            taskAddPromptFlag,
+			CronExpr:          strings.TrimSpace(taskAddCronFlag),
+			WatchCmd:          strings.TrimSpace(taskAddWatchCmdFlag),
+			TargetSession:     taskAddTargetSessionFlag,
+			MaxConcurrentRuns: taskAddMaxConcurrentRunsFlag,
+			ProjectPath:       repo.Root,
+			Program:           program,
+			Enabled:           true,
+			CreatedAt:         time.Now(),
+		}
+		// Reject an unenforceable cap here rather than letting the daemon store it:
+		// ValidateTrigger owns the rule (a cap needs a watch trigger and no target
+		// session), so the CLI surfaces the same wording the API does.
+		if err := s.ValidateTrigger(); err != nil {
+			return jsonError(err)
 		}
 
 		// Route the write through the daemon: it owns scheduling and reloads its
@@ -258,13 +267,14 @@ var tasksRunCmd = &cobra.Command{
 }
 
 var (
-	taskUpdateNameFlag          string
-	taskUpdatePromptFlag        string
-	taskUpdateCronFlag          string
-	taskUpdateWatchCmdFlag      string
-	taskUpdateTargetSessionFlag string
-	taskUpdateEnabledFlag       string
-	taskUpdateProgramFlag       string
+	taskUpdateNameFlag              string
+	taskUpdatePromptFlag            string
+	taskUpdateCronFlag              string
+	taskUpdateWatchCmdFlag          string
+	taskUpdateTargetSessionFlag     string
+	taskUpdateMaxConcurrentRunsFlag int
+	taskUpdateEnabledFlag           string
+	taskUpdateProgramFlag           string
 )
 
 var tasksUpdateCmd = &cobra.Command{
@@ -353,6 +363,11 @@ var tasksUpdateCmd = &cobra.Command{
 			// holds when switching a watch task back to a schedule.
 			patch.CronExpr = strPtr(strings.TrimSpace(taskUpdateCronFlag))
 			patch.WatchCmd = strPtr("")
+			// A stale concurrency cap on the resulting cron task is dropped by the
+			// shared merge (TaskUpdate.apply), not here — every client makes this
+			// edit, so the rule belongs where they all pass through. An explicit
+			// --max-concurrent-runs below is left alone and fails validation, which
+			// is the right answer for a contradictory request.
 		}
 		if taskUpdateWatchCmdFlag != "" {
 			patch.WatchCmd = strPtr(strings.TrimSpace(taskUpdateWatchCmdFlag))
@@ -363,6 +378,15 @@ var tasksUpdateCmd = &cobra.Command{
 		// "given as empty" instead of treating "" as unchanged.
 		if cmd.Flags().Changed("target-session") {
 			patch.TargetSession = strPtr(taskUpdateTargetSessionFlag)
+			// As with the cron switch above, a cap the new delivery mode cannot
+			// carry is dropped by the shared merge rather than patched away here.
+		}
+		// --max-concurrent-runs 0 is a meaningful value (revert to unlimited), not
+		// "unchanged", so gate on the flag being passed rather than on its value —
+		// same reasoning as --target-session above. The *int survives the gob
+		// control socket because TaskUpdate round-trips through JSON (#1700).
+		if cmd.Flags().Changed("max-concurrent-runs") {
+			patch.MaxConcurrentRuns = intPtr(taskUpdateMaxConcurrentRunsFlag)
 		}
 
 		// Only patch Enabled when --enabled was passed: an absent flag must

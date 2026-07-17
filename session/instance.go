@@ -88,6 +88,13 @@ type Instance struct {
 	// after construction, so cross-goroutine readers may read it without the mutex
 	// (like Title).
 	ID string
+	// TaskID is the id of the task whose delivery spawned this session, empty for
+	// a user-created one (#1892). It is the daemon's association between a task
+	// delivery and its session, replacing title-prefix guessing; the watch-task
+	// concurrency limit counts a task's in-flight sessions by it. Immutable after
+	// construction, so cross-goroutine readers may read it without the mutex
+	// (like ID and Title).
+	TaskID string
 	// Title is the title of the instance.
 	Title string
 	// Path is the path to the workspace.
@@ -103,6 +110,35 @@ type Instance struct {
 	// liveness.go. Both are mutex-protected.
 	liveness   Liveness
 	inFlightOp InFlightOp
+	// taskRunActive is THE fact the watch-task concurrency cap is about (#1892):
+	// has this session's task run finished yet? It is true from creation for a
+	// task-spawned session and flips false — once, permanently — the first time the
+	// AGENT goes idle, which is the definition of the run being done.
+	//
+	// It is a stored fact rather than something derived at read time because every
+	// neighbouring signal answers a DIFFERENT question, and reconstructing the run
+	// from them is what produced two separate cap breaches:
+	//
+	//   - liveness says whether the daemon can SEE the session. Lost is
+	//     indistinguishable between a run that finished hours ago and one
+	//     interrupted mid-flight, so deciding at the Lost edge let a completed run
+	//     reacquire a slot from the grave.
+	//   - inFlightOp says the DAEMON is doing something — and archiving or killing a
+	//     session is teardown, not the agent working. Reading "any op ⇒ busy" made a
+	//     finished session that failed to archive (LiveReady + OpArchiving →
+	//     AbortArchiveToLost) look like an interrupted run and claim a slot.
+	//
+	// So the run's own lifetime is recorded on the run's own edges: it begins when
+	// the session is created for a delivery and ends when the agent goes idle.
+	// Neither of those is ambiguous, and neither has to be inferred later from a
+	// state that means something else. Persisted, because an outage that loses
+	// sessions is the same event that restarts the daemon.
+	//
+	// It never flips back to true: a capped task creates one session per event (a
+	// cap and a target_session are mutually exclusive — see task.ValidateTrigger),
+	// so a session has exactly one run. Work a user starts in that session
+	// afterwards is theirs, not the task's, and must not consume the task's cap.
+	taskRunActive bool
 	// limitResetAt is the parsed usage-limit reset time (#1146), display-only in
 	// PR2: set alongside liveness == LiveLimitReached when the pane shows a limit
 	// banner carrying a parseable reset time (zero when it carried none). Read

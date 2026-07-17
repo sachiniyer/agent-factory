@@ -99,6 +99,62 @@ func (m *Manager) RestoreLostSessions() {
 	}
 }
 
+// lostSessionWantsRestore reports whether a session is one this loop wants back:
+// Lost, started, not tombstoned, not the reserved root. It is the loop's own
+// entry gate, factored out because the watch-task concurrency cap (#1892) has to
+// ask the same question — see canAutoRestoreLostSession.
+//
+// The Recover capability is deliberately NOT part of this: restoreLostSession
+// checks it separately, after the retry state exists, so it can log the
+// "not auto-restoring a remote session" note once per episode rather than every
+// tick. canAutoRestoreLostSession composes the two for callers that just want
+// the verdict.
+//
+// Only a Lost session is recovery-eligible. This gate is also what fences out an
+// Archived session (#1028): Archived != Lost, and an archived instance
+// additionally loads with started=false, so the !Started() check short-circuits
+// first — the restore loop never moves its worktree back or re-spawns its tmux.
+// Restoring an archive is an explicit user action only. A UserKilled record
+// means "finish this kill", never "restore this".
+// It takes a LifecycleView, not an *Instance, so every field of the verdict comes
+// from ONE consistent snapshot. Reading a live instance twice inside a predicate
+// is a race here specifically: this loop mutates sessions without the manager
+// lock, so a caller could see Lost on one read and Running on the next and fall
+// through every arm (#1892).
+func lostSessionWantsRestore(v session.LifecycleView) bool {
+	if !v.Started || v.Status != session.Lost {
+		return false
+	}
+	return !v.UserKilled && !session.IsReservedTitle(v.Title)
+}
+
+// canAutoRestoreLostSession reports whether RestoreLostSessions will keep trying
+// to revive this session — i.e. whether restoration is still possible at all.
+//
+// This exists for the watch-task concurrency cap (#1892), which must keep
+// counting a Lost session against max_concurrent_runs for exactly as long as this
+// loop can bring it back Running. The cap cannot ask session.ClassifyActivity,
+// which calls Lost TERMINAL: that verdict is right for `af sessions watch` (tell
+// the user their session is lost and exit rather than poll forever) and wrong for
+// the cap, because freeing the slot of a session this loop is actively retrying
+// lets a capped watcher admit replacements — and when the retries then land, the
+// task runs over its cap.
+//
+// It lives here, next to the loop whose behavior it describes, so there is ONE
+// definition of restore eligibility. A copy in the cap's file would be a second
+// one, free to drift the moment the gates below change.
+//
+// The answer is stable in the direction that matters: this loop never gives up on
+// a recoverable session (#1128 — an outage is indistinguishable from a broken
+// worktree while it lasts), so a slot held on this verdict is held until the
+// session is restored, killed, or archived. That is the same off-ramp the loop
+// itself documents. A backend that cannot be revived in place returns false
+// instead: it is logged as "kill it to clear the row" and never retried, so
+// restoration is genuinely not possible and the slot frees.
+func canAutoRestoreLostSession(v session.LifecycleView) bool {
+	return lostSessionWantsRestore(v) && v.Recoverable
+}
+
 // restoreLostSession attempts recovery of one session when it is eligible:
 // Lost, Recover-capable, not tombstoned, not the reserved root
 // (EnsureRootAgents owns that), and no kill in flight. Recover runs under the
@@ -112,15 +168,7 @@ func (m *Manager) RestoreLostSessions() {
 // than reconnects. That is why this function re-probes a remote sandbox before
 // recovering it (#1794); see the gate below.
 func (m *Manager) restoreLostSession(key, repoID string, inst *session.Instance) {
-	// Only a Lost session is recovery-eligible. This gate is also what fences
-	// out an Archived session (#1028): Archived != Lost, and an archived
-	// instance additionally loads with started=false, so the !Started() check
-	// short-circuits first — the restore loop never moves its worktree back or
-	// re-spawns its tmux. Restoring an archive is an explicit user action only.
-	if inst == nil || !inst.Started() || inst.GetStatus() != session.Lost {
-		return
-	}
-	if inst.UserKilled() || session.IsReservedTitle(inst.Title) {
+	if inst == nil || !lostSessionWantsRestore(inst.LifecycleView()) {
 		return
 	}
 
