@@ -95,49 +95,62 @@ func taskRunReservationKey(repoID, taskID string) string {
 }
 
 // holdsTaskRunSlot reports whether one of a task's sessions still occupies a
-// concurrency slot: it is pending (mid-create, working, or parked at a usage
-// limit), or it is an INTERRUPTED run that is Lost and still restorable.
+// concurrency slot.
 //
-// The Lost half is the cap's one deliberate divergence from
-// session.ClassifyActivity, which calls Lost terminal. "Cannot leave this state
-// on its own" is the right question for `af sessions watch` and the wrong one
-// here: RestoreLostSessions revives Lost sessions without anyone asking, so a
-// freed slot lets a capped watcher admit a replacement that puts the task over
-// its cap the moment a retry lands. Whether the loop will still try is asked of
-// canAutoRestoreLostSession, which lives beside that loop and IS that loop's own
-// gate — not re-derived here, so the two cannot drift apart.
+// The cap bounds RUNS, not session records, and the question it asks is exactly
+// that: is this run still in flight, and can the session it lives in still get
+// there? So the predicate reads the run's own recorded fact
+// (session.TaskRunActive) and consults the lifecycle state only for the second
+// half — whether the session is still around, or can come back.
 //
-// But "the loop will restore it" is not sufficient, and this is the subtle half.
-// A task-spawned session keeps its TaskID for its whole life, long after the run
-// that created it finished. Its slot is released when it goes idle — and if that
-// finished session is later caught by a tmux outage, it becomes Lost and
-// restorable just like an interrupted one. Holding a slot for it would let a run
-// that ended hours ago reacquire one from the grave: with a cap of 1, a single
-// stale idle session would park every new event indefinitely while the restore
-// loop retried it, wedging the durable queue behind completed work.
+// This shape is the third attempt, and the two it replaces are worth keeping
+// visible, because both failed the same way — deriving "does this run own a slot"
+// from a neighbour that answers something else:
 //
-// So the slot follows the RUN, not the row: it is held only for a session that
-// was still working when it was lost. That fact cannot be inferred from the
-// current state — a finished Lost session and an interrupted Lost session are
-// byte-for-byte identical — so it is captured on the edge into Lost and persisted
-// (session.LostWhileBusy). It is the same shape as the rest of this PR: the
-// information exists at one instant and is gone by the time the decision needs
-// it, so it is put in a lifetime that outlives the transition.
+//   - Reading the Lost edge: a task-spawned session keeps its TaskID for life, so
+//     when an outage marked a session that had FINISHED hours ago as Lost, it
+//     looked exactly like one interrupted mid-run and reclaimed a slot. With a cap
+//     of 1 that parks every future event forever — worse than the unbounded
+//     spawning the cap exists to fix.
+//   - Reading the in-flight op as "busy": archiving or killing is the DAEMON
+//     working, not the agent. A completed session whose archive failed
+//     (LiveReady + OpArchiving → AbortArchiveToLost → Lost) was never busy in the
+//     sense the cap means, but read as busy and reclaimed a slot the same way.
 //
-// The halves cover the restore cycle with no gap: a re-spawned session is Running
-// (pending, slot held) through the window where #1910's confirm-alive settle
-// decides whether it really came back, and if it dies mid-run it is Lost-while-busy
-// (slot held). The slot is occupied from create until the run finishes, the
-// session is killed, or it is archived.
-func holdsTaskRunSlot(inst *session.Instance) bool {
-	// Read the two axes directly rather than serializing the whole instance: this
-	// runs under m.mu, and ToInstanceData walks tabs/worktree/PR state per
-	// session. Snapshot keeps its serialize outside the lock for the same reason,
-	// and an AF home can hold hundreds of sessions.
-	if session.ClassifyInstanceActivity(inst) == session.ActivityPending {
-		return true
+// Neither could be fixed by another condition, because both were reconstructions
+// of a fact that already exists at a well-defined moment. The run begins at
+// creation and ends when the agent goes idle; recording that directly makes both
+// questions disappear rather than trading one for the next.
+//
+// The lifecycle half stays a projection, because it genuinely is one:
+//
+//   - Pending (mid-create, working, limit-parked) — the session is right here.
+//   - Lost — gone from view, but RestoreLostSessions revives it without anyone
+//     asking, so an in-flight run still owns its slot; freeing it lets a capped
+//     watcher admit a replacement that blows the cap the moment a retry lands.
+//     Whether the loop will still try is asked of canAutoRestoreLostSession, which
+//     lives beside that loop and IS its gate, so the two cannot drift apart.
+//   - Anything else (Ready, Dead, Archived, tombstoned, unrecoverable) — the run
+//     cannot resume, so the slot frees. Note an archived-mid-run session releases
+//     here even though its run never finished: the user parked it, and holding a
+//     slot until someone un-archived would wedge the task.
+//
+// It judges ONE LifecycleView, which is load-bearing rather than tidiness. The
+// arms are complementary only against a SINGLE view of the state. Asking the live
+// instance twice let the restore loop — which mutates without the manager lock —
+// land between the reads: the first saw LiveLost (not pending), the second saw
+// LiveRunning (not Lost), and the session fell through both arms. Counted by
+// neither, the cap undercounted and admitted a run over the limit: the same breach,
+// through the gap between two reads. A predicate that consults state twice is only
+// correct if nothing can move in between, and here something is designed to.
+func holdsTaskRunSlot(v session.LifecycleView) bool {
+	if !v.TaskRunActive {
+		// The run finished. Nothing that happens to the session afterwards — an
+		// outage, a failed archive, a user re-prompting it — is this task's run, and
+		// none of it may reclaim the slot.
+		return false
 	}
-	return canAutoRestoreLostSession(inst) && inst.LostWhileBusy()
+	return v.Activity() == session.ActivityPending || canAutoRestoreLostSession(v)
 }
 
 // countTaskRunsLocked reports how many sessions the task currently has in flight
@@ -156,7 +169,10 @@ func (m *Manager) countTaskRunsLocked(repoID, taskID string) int {
 			// sessions would let them starve this one.
 			continue
 		}
-		if holdsTaskRunSlot(inst) {
+		// One snapshot per session, taken once and judged once: the restore loop
+		// mutates instances without m.mu, so re-reading the instance inside the
+		// predicate would let a session slip between its arms and go uncounted.
+		if holdsTaskRunSlot(inst.LifecycleView()) {
 			inFlight++
 		}
 	}

@@ -116,11 +116,16 @@ func (m *Manager) RestoreLostSessions() {
 // first — the restore loop never moves its worktree back or re-spawns its tmux.
 // Restoring an archive is an explicit user action only. A UserKilled record
 // means "finish this kill", never "restore this".
-func lostSessionWantsRestore(inst *session.Instance) bool {
-	if inst == nil || !inst.Started() || inst.GetStatus() != session.Lost {
+// It takes a LifecycleView, not an *Instance, so every field of the verdict comes
+// from ONE consistent snapshot. Reading a live instance twice inside a predicate
+// is a race here specifically: this loop mutates sessions without the manager
+// lock, so a caller could see Lost on one read and Running on the next and fall
+// through every arm (#1892).
+func lostSessionWantsRestore(v session.LifecycleView) bool {
+	if !v.Started || v.Status != session.Lost {
 		return false
 	}
-	return !inst.UserKilled() && !session.IsReservedTitle(inst.Title)
+	return !v.UserKilled && !session.IsReservedTitle(v.Title)
 }
 
 // canAutoRestoreLostSession reports whether RestoreLostSessions will keep trying
@@ -146,8 +151,8 @@ func lostSessionWantsRestore(inst *session.Instance) bool {
 // itself documents. A backend that cannot be revived in place returns false
 // instead: it is logged as "kill it to clear the row" and never retried, so
 // restoration is genuinely not possible and the slot frees.
-func canAutoRestoreLostSession(inst *session.Instance) bool {
-	return lostSessionWantsRestore(inst) && inst.Capabilities().Recover
+func canAutoRestoreLostSession(v session.LifecycleView) bool {
+	return lostSessionWantsRestore(v) && v.Recoverable
 }
 
 // restoreLostSession attempts recovery of one session when it is eligible:
@@ -163,7 +168,7 @@ func canAutoRestoreLostSession(inst *session.Instance) bool {
 // than reconnects. That is why this function re-probes a remote sandbox before
 // recovering it (#1794); see the gate below.
 func (m *Manager) restoreLostSession(key, repoID string, inst *session.Instance) {
-	if !lostSessionWantsRestore(inst) {
+	if inst == nil || !lostSessionWantsRestore(inst.LifecycleView()) {
 		return
 	}
 

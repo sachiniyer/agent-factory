@@ -80,30 +80,78 @@ func ClassifyActivity(data InstanceData) (Activity, string) {
 	return ActivityPending, ""
 }
 
-// ClassifyInstanceActivity is ClassifyActivity for a LIVE instance, reading the
-// two axes instead of serializing the whole session.
+// LifecycleView is a CONSISTENT snapshot of one session's lifecycle state, taken
+// under a single instance lock. It exists because a predicate that reads a live
+// Instance more than once is not a predicate — it is a race.
 //
-// The distinction is not cosmetic: ToInstanceData walks an instance's tabs,
-// worktree, and PR state, and the daemon's concurrency check runs this over every
-// session in a repo while holding the manager lock — the same reason Snapshot
-// keeps its serialization outside that lock. Both entry points share the one
-// state machine below, so a live instance and its persisted record can never
-// disagree about whether the session is busy.
+// The daemon's Lost-restore loop mutates a session WITHOUT holding the manager
+// lock (restoreLostSession releases m.mu before calling Recover, which ends in
+// Transition(ConfirmLive) → LiveRunning). So a caller that asked "is it busy?" and
+// then "is it a restorable lost run?" through two separate accessors could have
+// the restore land between them: the first read sees LiveLost (not busy), the
+// second sees LiveRunning (not Lost), and the session falls through BOTH arms —
+// counted by neither, which silently undercounts the watch-task concurrency cap
+// and admits a run over the limit (#1892). More checks cannot fix that; only one
+// snapshot can.
 //
-// The two axes are read under a single instance lock (activityAxesLocked), not
-// through separate GetLiveness/GetInFlightOp calls: the status poll can be
-// mutating this instance concurrently, and a torn read that paired a stale
-// LiveReady with a just-set OpNone would misclassify a session that is really
-// mid-transition as idle — freeing a concurrency slot it should still hold. The
-// legacy Status axis is not read at all: a live in-memory instance always has a
+// It is deliberately narrow rather than reusing ToInstanceData, which walks an
+// instance's tabs, worktree, and PR state: the cap classifies every session in a
+// repo while holding the manager lock, the same reason Snapshot keeps its
+// serialization outside that lock.
+type LifecycleView struct {
+	// Title and TaskID are immutable after construction; carried so a caller can
+	// judge a session entirely from the view.
+	Title  string
+	TaskID string
+	// Liveness and InFlightOp are the two canonical axes (#1195); Status is their
+	// composed legacy value, resolved under the same lock so a caller reading the
+	// composed form cannot disagree with one reading the axes.
+	Liveness   Liveness
+	InFlightOp InFlightOp
+	Status     Status
+	Started    bool
+	UserKilled bool
+	// TaskRunActive is whether this session's task run is still in flight — the one
+	// fact the concurrency cap counts. See Instance.taskRunActive.
+	TaskRunActive bool
+	// Recoverable is the backend's Recover capability: whether a lost session can
+	// be revived in place at all.
+	Recoverable bool
+}
+
+// LifecycleView snapshots the session's lifecycle state under ONE lock. Every
+// field a caller needs to reach a verdict must come from here rather than from a
+// follow-up accessor call, or the verdict spans a window the restore loop can
+// move through.
+func (i *Instance) LifecycleView() LifecycleView {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	return LifecycleView{
+		Title:      i.Title,
+		TaskID:     i.TaskID,
+		Liveness:   i.liveness,
+		InFlightOp: i.inFlightOp,
+		Status:     i.statusLocked(),
+		Started:    i.started,
+		UserKilled: i.userKilled,
+		// Capabilities() takes no lock of its own (it reads the immutable backend
+		// and returns a static struct), so calling it here cannot deadlock — and
+		// reading the backend under the instance lock is strictly more correct than
+		// the bare read it does elsewhere.
+		Recoverable:   i.Capabilities().Recover,
+		TaskRunActive: i.taskRunActive,
+	}
+}
+
+// Activity classifies a snapshot through the same state machine ClassifyActivity
+// runs, so a live instance and its persisted record can never disagree about
+// whether a session is busy.
+//
+// The legacy Status axis is not consulted: a live in-memory instance always has a
 // resolved liveness (NewInstance sets it, FromInstanceData rolls a legacy record
 // forward at load), so ClassifyActivity's LivenessUnset fallback never applies.
-func ClassifyInstanceActivity(i *Instance) Activity {
-	if i == nil {
-		return ActivityTerminal
-	}
-	liveness, op := i.activityAxes()
-	activity, _ := ClassifyActivity(InstanceData{Liveness: liveness, InFlightOp: op})
+func (v LifecycleView) Activity() Activity {
+	activity, _ := ClassifyActivity(InstanceData{Liveness: v.Liveness, InFlightOp: v.InFlightOp})
 	return activity
 }
 

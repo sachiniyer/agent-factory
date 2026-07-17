@@ -214,9 +214,13 @@ func NewInstance(opts InstanceOptions) (*Instance, error) {
 	}
 
 	return &Instance{
-		ID:              newSessionID(),
-		TaskID:          opts.TaskID,
-		Title:           opts.Title,
+		ID:     newSessionID(),
+		TaskID: opts.TaskID,
+		Title:  opts.Title,
+		// A task delivery's run begins here and ends when the agent goes idle
+		// (#1892). Only a task-spawned session has a run to bound; a user's session
+		// is never counted against a cap.
+		taskRunActive:   opts.TaskID != "",
 		liveness:        LiveReady,
 		Path:            absPath,
 		Program:         opts.Program,

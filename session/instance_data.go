@@ -48,14 +48,11 @@ func (i *Instance) ToInstanceData() InstanceData {
 		data.LimitResetAt = i.limitResetAt
 	}
 
-	// Persist "was it still working when it went Lost" only while the session is
-	// actually Lost (#1892) — the same gate, for the same reason, as the reset time
-	// above. The field is meaningless on a healthy row, and a stale true carried to
-	// disk would be read as fact by the concurrency cap if that session later went
-	// Lost, holding a slot for a run that had already finished.
-	if i.liveness == LiveLost {
-		data.LostWhileBusy = i.lostWhileBusy
-	}
+	// Unlike the reset time above, this is NOT gated on a liveness: whether the run
+	// is still in flight is meaningful in every state (#1892), and gating it would
+	// reintroduce the bug it fixes — a session whose run is live must read as active
+	// whether it is Running, limit-parked, mid-archive, or Lost.
+	data.TaskRunActive = i.taskRunActive
 
 	// Persist each tab so the full agent+shell tab list survives a restart
 	// (Sachin's hard requirement for #930): on reload FromInstanceData restores
@@ -145,7 +142,7 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 		// same event that restarts the daemon, so this fact has to come back from
 		// disk or the cap would re-decide it from a Lost state that cannot tell a
 		// finished run from an interrupted one.
-		lostWhileBusy: data.LostWhileBusy,
+		taskRunActive: data.TaskRunActive,
 		limitResetAt:  data.LimitResetAt,
 		Height:        data.Height,
 		Width:         data.Width,

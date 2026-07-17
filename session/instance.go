@@ -110,25 +110,35 @@ type Instance struct {
 	// liveness.go. Both are mutex-protected.
 	liveness   Liveness
 	inFlightOp InFlightOp
-	// lostWhileBusy records whether this session was still WORKING at the instant
-	// it went Lost (#1892). It is recorded by Transition on the edge INTO LiveLost
-	// and persisted, because it is a fact that exists only at that instant and is
-	// unrecoverable afterwards: a Lost session that finished its work hours ago and
-	// one that was interrupted mid-run look identical from their current state.
+	// taskRunActive is THE fact the watch-task concurrency cap is about (#1892):
+	// has this session's task run finished yet? It is true from creation for a
+	// task-spawned session and flips false — once, permanently — the first time the
+	// AGENT goes idle, which is the definition of the run being done.
 	//
-	// The watch-task concurrency cap needs the distinction. It keeps a Lost
-	// session's slot held, since the restore loop can bring it back Running and
-	// blow the cap — but ONLY for a run that was actually in flight. A task-spawned
-	// session keeps its TaskID forever, so without this a session that COMPLETED
-	// long ago would silently reacquire a slot the moment a tmux outage marked it
-	// Lost, and with a cap of 1 one finished session would park every new event
-	// behind work that ended hours earlier.
+	// It is a stored fact rather than something derived at read time because every
+	// neighbouring signal answers a DIFFERENT question, and reconstructing the run
+	// from them is what produced two separate cap breaches:
 	//
-	// Recomputed on every edge into Lost (never on Lost→Lost, which would overwrite
-	// the original verdict with a reading of the Lost state itself), so a session
-	// that is lost, restored, finishes, and is lost again is correctly judged idle
-	// the second time. Meaningless while not Lost, and read only then.
-	lostWhileBusy bool
+	//   - liveness says whether the daemon can SEE the session. Lost is
+	//     indistinguishable between a run that finished hours ago and one
+	//     interrupted mid-flight, so deciding at the Lost edge let a completed run
+	//     reacquire a slot from the grave.
+	//   - inFlightOp says the DAEMON is doing something — and archiving or killing a
+	//     session is teardown, not the agent working. Reading "any op ⇒ busy" made a
+	//     finished session that failed to archive (LiveReady + OpArchiving →
+	//     AbortArchiveToLost) look like an interrupted run and claim a slot.
+	//
+	// So the run's own lifetime is recorded on the run's own edges: it begins when
+	// the session is created for a delivery and ends when the agent goes idle.
+	// Neither of those is ambiguous, and neither has to be inferred later from a
+	// state that means something else. Persisted, because an outage that loses
+	// sessions is the same event that restarts the daemon.
+	//
+	// It never flips back to true: a capped task creates one session per event (a
+	// cap and a target_session are mutually exclusive — see task.ValidateTrigger),
+	// so a session has exactly one run. Work a user starts in that session
+	// afterwards is theirs, not the task's, and must not consume the task's cap.
+	taskRunActive bool
 	// limitResetAt is the parsed usage-limit reset time (#1146), display-only in
 	// PR2: set alongside liveness == LiveLimitReached when the pane shows a limit
 	// banner carrying a parseable reset time (zero when it carried none). Read

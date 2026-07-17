@@ -306,18 +306,27 @@ func (i *Instance) Transition(ev TransitionEvent) error {
 	}
 
 	to := spec.target(from, ev)
-	// Capture "was this run still in flight?" on the edge INTO Lost — the one
-	// instant the fact exists (#1892). Afterwards it is unrecoverable: a session
-	// that finished its work and one that was interrupted mid-run are both just
-	// LiveLost, indistinguishable from their current state. The watch-task cap
-	// holds a Lost session's slot only when the answer is yes.
+	// A task run ends the first time its AGENT goes idle (#1892) — the work the
+	// event asked for is done, and the session stops counting against the task's
+	// cap from here on, permanently.
 	//
-	// Guarded on from.liveness != LiveLost so a repeated Lost observation cannot
-	// overwrite the verdict with a reading of the Lost state itself (which is never
-	// pending, and would silently flip every held slot loose on the next poll).
-	if to.liveness == LiveLost && from.liveness != LiveLost {
-		activity, _ := ClassifyActivity(InstanceData{Liveness: from.liveness, InFlightOp: from.op})
-		i.lostWhileBusy = activity == ActivityPending
+	// The test is the AGENT's own state, deliberately: liveness LiveReady with NO
+	// operation in flight. It is NOT "any state that isn't busy" and NOT the edge
+	// into Lost. Both of those read a neighbouring signal that answers a different
+	// question and get it wrong in the same direction — a finished run reclaiming a
+	// slot. In particular OpArchiving over a LiveReady session is the daemon tearing
+	// down work that ALREADY finished; ending the run here, on the idle edge, means
+	// that session's run was over long before the archive began and a failed archive
+	// (AbortArchiveToLost) cannot resurrect its claim.
+	//
+	// Only ever true→false: a capped task creates one session per event, so a
+	// session has exactly one run, and anything a user does in it afterwards is not
+	// the task's.
+	if i.taskRunActive {
+		activity, _ := ClassifyActivity(InstanceData{Liveness: to.liveness, InFlightOp: to.op})
+		if activity == ActivityIdle {
+			i.taskRunActive = false
+		}
 	}
 	i.liveness = to.liveness
 	i.inFlightOp = to.op

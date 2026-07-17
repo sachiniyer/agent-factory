@@ -118,29 +118,72 @@ func TestClassifyActivityTerminalReasons(t *testing.T) {
 	}
 }
 
-// TestClassifyInstanceActivity: the live-instance entry point must agree with the
+// TestLifecycleViewActivity: the live-instance entry point must agree with the
 // record one. It exists to avoid serializing every session under the daemon's
 // manager lock, and an accessor-vs-record disagreement would mean a session that
 // holds a concurrency slot as an instance but frees it as a record (or the
 // reverse) — the drift the shared state machine exists to prevent.
-func TestClassifyInstanceActivity(t *testing.T) {
+func TestLifecycleViewActivity(t *testing.T) {
 	i, err := NewInstance(InstanceOptions{Title: "live", TaskID: "t1", Path: t.TempDir(), Program: "claude"})
 	require.NoError(t, err)
 
 	// A fresh instance is idle (NewInstance starts at LiveReady).
-	require.Equal(t, ActivityIdle, ClassifyInstanceActivity(i))
+	require.Equal(t, ActivityIdle, i.LifecycleView().Activity())
 	fromRecord, _ := ClassifyActivity(i.ToInstanceData())
-	require.Equal(t, fromRecord, ClassifyInstanceActivity(i), "the live and record paths must agree")
+	require.Equal(t, fromRecord, i.LifecycleView().Activity(), "the live and record paths must agree")
 
 	require.NoError(t, i.Transition(ObserveLiveness(LiveRunning)))
-	require.Equal(t, ActivityPending, ClassifyInstanceActivity(i), "a working agent holds its slot")
+	require.Equal(t, ActivityPending, i.LifecycleView().Activity(), "a working agent holds its slot")
 	fromRecord, _ = ClassifyActivity(i.ToInstanceData())
-	require.Equal(t, fromRecord, ClassifyInstanceActivity(i), "the live and record paths must agree")
+	require.Equal(t, fromRecord, i.LifecycleView().Activity(), "the live and record paths must agree")
 
 	require.NoError(t, i.Transition(ObserveLiveness(LiveReady)))
-	require.Equal(t, ActivityIdle, ClassifyInstanceActivity(i), "an idle agent releases its slot")
+	require.Equal(t, ActivityIdle, i.LifecycleView().Activity(), "an idle agent releases its slot")
+}
 
-	// A nil instance releases rather than holds: a phantom slot would wedge a
-	// capped task forever, which is worse than admitting one extra session.
-	require.Equal(t, ActivityTerminal, ClassifyInstanceActivity(nil))
+// TestLifecycleViewIsInternallyConsistent: the whole point of the view is that
+// every field describes the SAME instant. A caller reaching a verdict from two
+// accessor calls can have a concurrent restore land between them and see a state
+// that never existed — Lost on one read, Running on the next — which is how the
+// #1892 cap undercounted. Pin that the composed Status and the axes agree, since
+// those are the two forms the cap and the restore loop read.
+func TestLifecycleViewIsInternallyConsistent(t *testing.T) {
+	i, err := NewInstance(InstanceOptions{Title: "view", TaskID: "t1", Path: t.TempDir(), Program: "claude"})
+	require.NoError(t, err)
+	i.SetStartedForTest(true)
+
+	for _, lv := range []Liveness{LiveRunning, LiveReady, LiveLost} {
+		require.NoError(t, i.Transition(ObserveLiveness(lv)))
+		v := i.LifecycleView()
+		require.Equal(t, lv, v.Liveness)
+		require.Equal(t, i.GetStatus(), v.Status, "the composed status must match the axes it was composed from")
+		require.True(t, v.Started)
+		require.Equal(t, "view", v.Title)
+		require.Equal(t, "t1", v.TaskID)
+		require.True(t, v.Recoverable, "a local session is recoverable in place")
+	}
+}
+
+// TestLifecycleViewRaceFree drives LifecycleView against a concurrent mutator: the
+// -race detector must see no torn read, and every snapshot must be a state the
+// session actually passed through rather than a mix of two.
+func TestLifecycleViewRaceFree(t *testing.T) {
+	i, err := NewInstance(InstanceOptions{Title: "racy", TaskID: "t1", Path: t.TempDir(), Program: "claude"})
+	require.NoError(t, err)
+	i.SetStartedForTest(true)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for n := 0; n < 500; n++ {
+			_ = i.Transition(ObserveLiveness(LiveLost))
+			_ = i.Transition(ObserveLiveness(LiveRunning))
+		}
+	}()
+	for n := 0; n < 500; n++ {
+		v := i.LifecycleView()
+		require.Equal(t, composeStatus(v.Liveness, v.InFlightOp), v.Status,
+			"a snapshot must never pair a status with axes it does not compose from")
+	}
+	<-done
 }

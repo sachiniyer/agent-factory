@@ -44,19 +44,24 @@ type InstanceData struct {
 	// at disk write/load boundaries: in-flight operations are process-local and
 	// must not be resurrected after a daemon restart.
 	InFlightOp InFlightOp `json:"in_flight_op,omitempty"`
-	// LostWhileBusy records whether the session was still working at the instant it
-	// went Lost (#1892). Persisted because the fact exists only on that edge and is
-	// unrecoverable afterwards — a Lost session that finished hours ago and one
-	// interrupted mid-run are identical from their current state — and because an
-	// outage that loses sessions is exactly the event that also restarts the daemon,
-	// so an in-memory-only answer would be gone precisely when it is needed. The
-	// watch-task concurrency cap holds a Lost session's slot only when this is true;
-	// without it a COMPLETED task session (whose TaskID lives on forever) would
-	// reacquire a slot on the next tmux outage and park the task's events behind
-	// finished work. omitempty + additive: records written before #1892 decode to
-	// false, which is the safe default — an unknown-provenance Lost session frees
-	// its slot (refusing one extra event is recoverable; a wedged task is not).
-	LostWhileBusy bool `json:"lost_while_busy,omitempty"`
+	// TaskRunActive records whether this session's task run is still in flight
+	// (#1892) — true from creation, false once the agent goes idle. It is the one
+	// fact the watch-task concurrency cap counts, and it is stored rather than
+	// re-derived because every neighbouring signal answers a different question:
+	// Lost cannot tell a finished run from an interrupted one, and an in-flight op
+	// means the DAEMON is busy (archiving a completed session is teardown, not
+	// work). Both of those, read as "is the run in flight", let a run that already
+	// finished reclaim a cap slot and park a task's events behind it.
+	//
+	// Persisted because an outage that loses sessions is the same event that
+	// restarts the daemon, so an in-memory answer would be gone exactly when it is
+	// needed. omitempty + additive: a record written without it decodes to false —
+	// the session is treated as finished and holds no slot. That is the safe
+	// direction for the one-time upgrade window (a daemon replaced mid-run reads its
+	// in-flight sessions as done and may admit one extra event, which self-heals as
+	// they finish); defaulting true would let a fleet of completed sessions load as
+	// active and wedge a capped task permanently.
+	TaskRunActive bool `json:"task_run_active,omitempty"`
 	// LimitResetAt is the parsed usage-limit reset time (#1146), display-only:
 	// written (and carried in the daemon snapshot to the read-only TUI) only for a
 	// LiveLimitReached row so the sidebar [limit] badge can show "resets <t>" and

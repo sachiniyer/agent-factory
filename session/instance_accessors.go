@@ -62,14 +62,14 @@ func (i *Instance) UserKilled() bool {
 	return i.userKilled
 }
 
-// LostWhileBusy reports whether the session was still working at the instant it
-// went Lost (#1892). Meaningful only while the session is Lost — it is recorded
-// on the edge into that state and is stale otherwise; callers gate on the
-// liveness first (see daemon.holdsTaskRunSlot).
-func (i *Instance) LostWhileBusy() bool {
+// TaskRunActive reports whether this session's task run is still in flight
+// (#1892). Prefer LifecycleView when the answer is combined with any other piece
+// of state: a verdict assembled from separate accessor calls can straddle a
+// concurrent transition.
+func (i *Instance) TaskRunActive() bool {
 	i.mu.RLock()
 	defer i.mu.RUnlock()
-	return i.lostWhileBusy
+	return i.taskRunActive
 }
 
 // GetGitWorktree returns the git worktree for the instance
