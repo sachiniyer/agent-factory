@@ -6,6 +6,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/sachiniyer/agent-factory/session"
+	"github.com/sachiniyer/agent-factory/ui"
 	"github.com/sachiniyer/agent-factory/ui/layout"
 	"github.com/sachiniyer/agent-factory/ui/store"
 	"github.com/sachiniyer/agent-factory/ui/tree"
@@ -68,6 +69,19 @@ func (m *home) updatePanePreview(selected *session.Instance, targetTab int, tabS
 		m.cancelPanePreview(false)
 		return nil
 	}
+	// An explicit 1-9 jump pins the owner pane's committed tab as intent for the
+	// current selection epoch: a tree-cursor preview that would move THIS pane
+	// onto a different tab is held off until the user navigates (#1885). Mirrors
+	// the web #1862 layoutGeneration guard — the jump is a commit, not a peek, so
+	// the trailing selectionChanged and any background tick keep rendering the
+	// committed tab instead of repainting to the tree cursor's tab. The block
+	// above already handled the agree case, so reaching here means the preview
+	// genuinely diverges from the committed binding.
+	committed := paneBinding{instance: owner.Instance(), tab: owner.Tab()}
+	if m.paneJumpIntentPinned(owner.ID()) && !samePaneBinding(committed, target) {
+		m.cancelPanePreview(false)
+		return nil
+	}
 	if existing := m.store.FindOpenPane(target.instance, target.tab); existing != nil && existing != owner {
 		m.cancelPanePreview(false)
 		// Landing on an already-open tab focuses its pane — the open-or-focus
@@ -113,6 +127,32 @@ func (m *home) updatePanePreview(selected *session.Instance, targetTab int, tabS
 		m.lastPaneCapture[owner.ID()] = time.Time{}
 	}
 	return nil
+}
+
+// effectivePaneBinding resolves what a pane is ACTUALLY SHOWING — the single
+// source of truth for "which (instance, tab) is this pane displaying". A pane
+// that owns a transient preview renders the preview's TARGET, while
+// p.Instance()/p.Tab() keep reporting the committed binding underneath it. Any
+// verb that acts on "the thing on screen" must read this, never the raw binding.
+//
+// Those two being separate sources of truth is the same wrong-target class this
+// PR exists to close, one layer down: `w` read the committed tab and destroyed a
+// tab the user could not see. The gesture is ordinary — a pane-header click
+// focuses a previewing pane without committing or cancelling the preview (Tab
+// dismisses it, enterPane commits it; the header click does neither, the
+// keyboard-works/mouse-doesn't signature of #1819).
+//
+// Note the instance can differ too, not just the tab: a preview target is the
+// TREE's selection, so a previewing pane can be showing another session
+// entirely — which is why this returns a full binding rather than an index.
+func (m *home) effectivePaneBinding(p *store.OpenPane) paneBinding {
+	if p == nil {
+		return paneBinding{}
+	}
+	if m.paneIsPreviewing(p) {
+		return m.panePreviewTxn.target
+	}
+	return paneBinding{instance: p.Instance(), tab: p.Tab()}
 }
 
 func (m *home) cancelPanePreview(focusOwner bool) {
@@ -163,6 +203,61 @@ func (m *home) suppressPanePreview(original, target paneBinding) {
 		original: original,
 		target:   target,
 	}
+}
+
+// bumpSelectionEpochIfMoved advances selectionEpoch when the tree selection has
+// moved to a different row since the last selectionChanged, staling any pane
+// jump intent pinned in the prior epoch (#1885). The jump's own selectionChanged
+// leaves the sidebar cursor put, so the key is unchanged and the pin survives
+// the trailing repaint; a real navigation changes the key and re-enables
+// tree-cursor previews.
+func (m *home) bumpSelectionEpochIfMoved(sel ui.SidebarItem) {
+	title := ""
+	instID := ""
+	if inst := m.sidebar.GetSelectedInstance(); inst != nil {
+		title = inst.Title
+		// Titles are not identity. A same-title kill/recreate swaps in an ENTIRELY
+		// NEW session object under an unchanged cursor row and an unchanged title, so
+		// a title-only key reads the swap as "nothing moved" and never stales a pinned
+		// pane jump — leaving the stale pin cancelling previews for the REPLACEMENT
+		// session until the user happens to navigate away. The stable id (#1195) makes
+		// the swap the logical selection change it actually is. Legacy pre-#1195 rows
+		// carry no id and fall back to the title, exactly as the reconcile does.
+		instID = inst.ID
+	}
+	// Identity of the selection: the selected row (section/header/instance/tab
+	// position) plus the instance title AND its stable id, so an out-of-band instance reorder under
+	// a fixed cursor position still reads as a move — AND store.ActiveTab(), which
+	// is a selection change the CURSOR does not show. A tree-focus number key
+	// retargets the active tab while SyncCursorToActiveTab deliberately leaves the
+	// cursor on the instance row; without the active tab in the key that gesture
+	// looked like "nothing moved", so a stale pane pin kept cancelling the very
+	// preview the user just asked for (the invariant-eats-the-gesture class).
+	key := fmt.Sprintf("%d/%t/%d/%t/%d/%s/%s/%d",
+		sel.Kind, sel.IsHeader, sel.ItemIndex, sel.IsTab, sel.TabIndex, title, instID, m.store.ActiveTab())
+	if key == m.lastSelectionKey {
+		return
+	}
+	m.lastSelectionKey = key
+	m.selectionEpoch++
+}
+
+// pinPaneJumpIntent marks a pane's committed tab as explicit intent for the
+// current selection epoch: an explicit 1-9 jump is a commit that a tree-cursor
+// preview must not repaint away until the user navigates (#1885).
+func (m *home) pinPaneJumpIntent(paneID int) {
+	if m.paneJumpIntent == nil {
+		m.paneJumpIntent = make(map[int]uint64)
+	}
+	m.paneJumpIntent[paneID] = m.selectionEpoch
+}
+
+// paneJumpIntentPinned reports whether the pane still holds an explicit jump
+// intent for the current selection epoch. A navigation bumps the epoch and
+// stales the pin, so this reads false again once the user has moved on.
+func (m *home) paneJumpIntentPinned(paneID int) bool {
+	gen, ok := m.paneJumpIntent[paneID]
+	return ok && gen == m.selectionEpoch
 }
 
 func (m *home) isPanePreviewSuppressed(original, target paneBinding) bool {

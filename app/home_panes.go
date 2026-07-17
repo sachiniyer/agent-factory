@@ -26,6 +26,10 @@ func (m *home) selectionChanged() tea.Cmd {
 	selectionStart := time.Now()
 	detachTraceMark("selectionChanged-entry")
 	sel := m.sidebar.GetSelection()
+	// Advance the selection epoch when the cursor genuinely moved, so an explicit
+	// pane jump's pinned intent survives its own trailing selectionChanged (the
+	// cursor is unchanged) but stales the moment the user navigates (#1885).
+	m.bumpSelectionEpochIfMoved(sel)
 
 	// While attached, the workspace is hidden behind the tmux client and the
 	// panes will be repainted by repaintAfterDetachMsg as soon as the user

@@ -232,6 +232,80 @@ _expect_af_select_boundary() {
     )
 }
 
+# --- #1884/#1885 multi-tab pane cycling ---
+# The tab-cycling play-test that found #1884/#1885/#1886: on one instance with
+# several tabs, a pane-focused number key (1-9) jumps THAT pane, and the pane
+# layer keys on the FOCUSED PANE + the STABLE TAB ID rather than the tree's
+# active tab. These helpers drive that flow end to end with per-tab content
+# markers so the rendered tab is unambiguous (shell tabs all render "Terminal").
+
+# _cycle_plant <tabnum> <marker> — pane-focused jump to tab <tabnum> (#1885),
+# then type a unique marker into that tab's shell so later jumps can tell the
+# tabs apart by content. Precondition: a pane is focused.
+# shellcheck disable=SC2317  # dispatched indirectly via step(); not dead code.
+_cycle_plant() {
+    local tabnum="$1" marker="$2"
+    af_ensure_nav
+    af_send "$tabnum"                     # pane-focused jump to tab N
+    af_enter_interactive || return 1
+    af_send_to_pane "echo $marker"
+    af_wait_for "$marker" 10 "tab $tabnum planted $marker" || return 1
+    af_exit_interactive || return 1
+}
+
+# _expect_cycle_jumps_land — plant markers in tabs 2 and 3, then prove a
+# pane-focused number jump LANDS on the addressed tab and STAYS there: the pane
+# renders that tab's own marker, never the other tab's (the #1885 repaint
+# symptom — "press 4, see tab 2"). Precondition: cycle selected, a pane focused,
+# tabs = agent + shell + shell-2.
+# shellcheck disable=SC2317  # dispatched indirectly via step(); not dead code.
+_expect_cycle_jumps_land() {
+    _cycle_plant 2 AF_CYCLE_T2 || return 1
+    _cycle_plant 3 AF_CYCLE_T3 || return 1
+
+    af_ensure_nav
+    af_send 2
+    af_wait_for 'AF_CYCLE_T2' 10 'pane jump to tab 2 shows the shell marker' || return 1
+    af_refute_screen 'AF_CYCLE_T3' 'tab-2 jump must NOT render shell-2 (no repaint #1885)' || return 1
+
+    af_send 3
+    af_wait_for 'AF_CYCLE_T3' 10 'pane jump to tab 3 shows the shell-2 marker' || return 1
+    af_refute_screen 'AF_CYCLE_T2' 'tab-3 jump must NOT render shell (no repaint #1885)' || return 1
+}
+
+# _expect_cycle_w_closes_viewed — the #1884 destructive divergence: the tree's
+# active tab is shell-2 (last created), but the FOCUSED pane is jumped to shell.
+# w must close the tab the user is VIEWING (shell), leaving shell-2 — not the
+# tree's active tab. Verified by content: after w, tab 2 is now shell-2 (its
+# marker), and shell's marker is gone. The old bug closed shell-2 and left shell
+# here, which the refute would catch.
+# shellcheck disable=SC2317  # dispatched indirectly via step(); not dead code.
+_expect_cycle_w_closes_viewed() {
+    # Pane-focused jump to shell (tab 2); the tree's active tab stays shell-2.
+    af_ensure_nav
+    af_send 2
+    af_wait_for 'AF_CYCLE_T2' 10 'pane viewing shell (tab 2) before close' || return 1
+
+    local before; before="$(_af_tab_count)"
+    af_send w                             # closes the FOCUSED pane's tab (#1884)
+    local deadline; deadline=$(( $(_af_now) + AF_DRIVER_TIMEOUT ))
+    while [ "$(_af_tab_count)" -ge "$before" ]; do
+        if [ "$(_af_now)" -ge "$deadline" ]; then
+            _af_fail "w did not close a tab (still $before)"; return 1
+        fi
+        sleep "$AF_DRIVER_POLL"
+    done
+
+    # Reopen a pane and land on tab 2: it must now be shell-2 (its marker), proof
+    # that w closed the VIEWED shell tab and left shell-2 alive.
+    af_ensure_nav
+    af_focus_tree || return 1
+    af_open_pane || return 1
+    af_send 2
+    af_wait_for 'AF_CYCLE_T3' 10 'surviving tab 2 is shell-2 — w closed the VIEWED tab (#1884)' || return 1
+    af_refute_screen 'AF_CYCLE_T2' 'the viewed shell tab was closed, so its marker is gone' || return 1
+}
+
 printf '=== tui-driver self-test (#1161) ===\n'
 printf 'session=%s size=%sx%s home=%s\n' \
     "$AF_DRIVER_SESSION" "$AF_DRIVER_COLS" "$AF_DRIVER_ROWS" "$AGENT_FACTORY_HOME"
@@ -330,9 +404,18 @@ step "detach via a batched press+release ctrl+w tap"        af_detach $'\e[119;5
 step "assert selection survived the batched tap"            af_expect_selected beta
 
 # --- #1822 regression: af_hide_pane across the multi-pane and single-pane flows ---
-# Runs last: it deliberately ends with an empty workspace.
 step "hide a pane while another remains, then the last (#1822)" _expect_multipane_hide
 step "af_hide_pane fails loudly with no pane focused (#1822)"  _expect_hide_pane_rejects_tree_focus
+
+# --- #1884/#1885 multi-tab pane cycling: number jumps land + w closes the viewed tab ---
+# Runs last: it creates its own 'cycle' instance and ends with a pane open.
+step "cycle: create a multi-tab instance"                   af_new_instance cycle
+step "cycle: select it"                                     af_select cycle
+step "cycle: add a shell tab (t)"                           af_new_tab
+step "cycle: add a shell-2 tab (t)"                         af_new_tab
+step "cycle: open the active tab as a pane"                 af_open_pane
+step "cycle: pane number-jumps land and STAY (#1885)"       _expect_cycle_jumps_land
+step "cycle: w closes the VIEWED tab, not the tree's (#1884)" _expect_cycle_w_closes_viewed
 
 printf '\n=== SELF-TEST PASSED — %d/%d steps green ===\n' "$PASS" "$PASS"
 printf 'the #1156 mis-drive is now a deterministic scenario.\n'

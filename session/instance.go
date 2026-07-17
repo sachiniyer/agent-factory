@@ -582,10 +582,6 @@ func (i *Instance) ReconcileTabsFromData(target []TabData) (bool, error) {
 	agentTmux := i.tmuxLocked()
 	gw := i.gitWorktree
 	program := i.Program
-	localNames := make(map[string]bool, len(i.Tabs))
-	for _, t := range i.Tabs {
-		localNames[t.Name] = true
-	}
 	i.mu.RUnlock()
 
 	if !started || agentTmux == nil || gw == nil {
@@ -593,30 +589,159 @@ func (i *Instance) ReconcileTabsFromData(target []TabData) (bool, error) {
 	}
 	worktreePath := gw.GetWorktreePath()
 
-	targetNames := make(map[string]bool, len(target))
+	changed := false
+
+	// The reconcile keys on the STABLE TAB ID (#1738), not the display name
+	// (#1886/#1905). Names are reused on close+recreate, so a name-keyed reconcile
+	// reported "unchanged" for an out-of-band close+recreate and then silently
+	// re-pointed the local tab's id at the NEW tab — leaving an open pane bound to
+	// a tab that no longer exists, showing a different process. Keyed on the id,
+	// that is a drop of the old id plus an add of the new one, which reports a
+	// change and lets the pane layer close the orphaned pane.
+	//
+	// Name remains the join key ONLY where there is no id to key on: a local tab
+	// materialized by AttachShellTab carries an empty id on purpose and adopts the
+	// daemon's below, and a legacy roster row written before #1738 has none.
+	// A local id that matches NO target id is treated as a different tab (drop +
+	// add) rather than adopting the target's id: those two cases are
+	// indistinguishable from here, and re-pointing the id is the silent-wrong-target
+	// failure #1886 is about, whereas drop+add is a visible, self-healing blip.
+
+	// Adopt the daemon's authoritative id for ID-LESS local tabs, by name-join. The
+	// daemon is the single owner of tab identity (#960); AttachShellTab leaves the
+	// id empty on purpose, so this is the bootstrap that makes the tab addressable
+	// by id at all. Runs FIRST so the id-keyed passes below see it. Not a visible
+	// change: the id is internal addressing, not display state.
+	//
+	// The AGENT tab additionally adopts over a NON-EMPTY local id, because it is the
+	// only row the id-keyed passes below can never repair: it is never dropped or
+	// re-added (it is the instance's own session, always at index 0), so the
+	// close+recreate that heals a diverged id for every other kind cannot reach it,
+	// and a stale id would stick FOREVER. That divergence is ordinary, not exotic:
+	// restoreLocalTabs MINTS an id for a legacy pre-#1738 row, so a TUI and a daemon
+	// loading the same id-less record independently mint DIFFERENT ids — one plain
+	// daemon restart (every upgrade does one) over a not-yet-persisted backfill is
+	// enough. From then on every preview/live/attach addresses the agent by an id the
+	// daemon cannot resolve, and because the caller DID supply a tab_id there is no
+	// ordinal fallback — it is ErrTabGone (see TabAddressableServer), i.e. a blank,
+	// unattachable agent pane with no way out.
+	//
+	// Name is the right join key here precisely where id is not: both sides derive
+	// the agent tab's name from the SAME persisted record, so it agrees even when the
+	// independently-minted ids do not. The pane layer is deliberately blind to this
+	// heal — paneTabKeys keys the agent slot by name, so correcting the id does not
+	// read as "the tab vanished" and close the pane — while liveBindCandidate keys
+	// the live stream ON the id, so the adoption itself re-dials the pane onto the
+	// working id. That is the self-heal.
+	i.mu.Lock()
 	for _, td := range target {
+		if td.ID == "" {
+			continue
+		}
+		for idx, t := range i.Tabs {
+			if t.Name != td.Name || t.ID == td.ID {
+				continue
+			}
+			// Guard the adopt-over-non-empty to the agent row on BOTH sides, and to
+			// index 0 — the position that defines the agent tab here. For every other
+			// kind a local id matching no target id is ambiguous (legacy mismatch vs
+			// close+recreate), and the drop+add below deliberately owns that case.
+			agentRow := idx == 0 && t.Kind == TabKindAgent && td.Kind == TabKindAgent
+			if t.ID == "" || agentRow {
+				i.replaceTabFieldLocked(idx, func(c *Tab) { c.ID = td.ID })
+			}
+		}
+	}
+	// Rename in place by stable id (#1905): a tab whose id is unchanged but whose
+	// display name changed out-of-band (a rename on another client, #1813) keeps
+	// its live tmux session, its slot, and any open pane bound to it — only the
+	// label changes. Without this a rename reads as "old name gone, new name
+	// added", which drops the tab and re-adds it at the END of the roster,
+	// blipping its PTY and reordering it.
+	for _, td := range target {
+		if td.ID == "" {
+			continue
+		}
+		for idx, t := range i.Tabs {
+			if t.ID == td.ID && t.Name != td.Name {
+				i.replaceTabFieldLocked(idx, func(c *Tab) { c.Name = td.Name })
+				changed = true
+			}
+		}
+	}
+	i.mu.Unlock()
+
+	targetIDs := make(map[string]bool, len(target))
+	targetNames := make(map[string]bool, len(target))
+	// Names of target rows carrying NO id — a legacy roster written before #1738.
+	// Such a row cannot be id-matched, so name is the only key it has, and a local
+	// tab it covers must survive on the name alone. Without this the local tab
+	// (whose id was minted on add) is dropped and re-added on EVERY poll.
+	targetNamesWithoutID := make(map[string]bool, len(target))
+	for _, td := range target {
+		if td.ID != "" {
+			targetIDs[td.ID] = true
+		} else {
+			targetNamesWithoutID[td.Name] = true
+		}
 		targetNames[td.Name] = true
 	}
 
-	changed := false
-
-	// Drop local non-agent tabs the daemon no longer lists. No kill: the daemon
-	// owns the teardown and already closed the tmux session (#960 PR 3).
-	for name := range localNames {
-		if targetNames[name] {
-			continue
+	// Drop local non-agent tabs the daemon no longer lists. A tab survives if the
+	// daemon still lists its stable id, or — only when the daemon's row for that
+	// name carries no id at all — its name. No kill: the daemon owns the teardown
+	// and already closed the tmux session (#960 PR 3).
+	i.mu.RLock()
+	var dropIDs, dropNames []string
+	for idx := 1; idx < len(i.Tabs); idx++ {
+		switch t := i.Tabs[idx]; {
+		case t.ID != "":
+			if !targetIDs[t.ID] && !targetNamesWithoutID[t.Name] {
+				dropIDs = append(dropIDs, t.ID)
+			}
+		case !targetNames[t.Name]:
+			dropNames = append(dropNames, t.Name)
 		}
+	}
+	i.mu.RUnlock()
+	for _, id := range dropIDs {
+		if i.dropTabByID(id) {
+			changed = true
+		}
+	}
+	for _, name := range dropNames {
 		if i.dropTabByName(name) {
 			changed = true
 		}
 	}
 
+	// Snapshot what survived: the add pass keys "already present" on the id, so it
+	// must be read AFTER the drops above (a close+recreate frees the reused name
+	// there, and only then may the new id be added).
+	i.mu.RLock()
+	localIDs := make(map[string]bool, len(i.Tabs))
+	localNames := make(map[string]bool, len(i.Tabs))
+	for _, t := range i.Tabs {
+		if t.ID != "" {
+			localIDs[t.ID] = true
+		}
+		localNames[t.Name] = true
+	}
+	i.mu.RUnlock()
+
 	// Add daemon-listed tabs missing locally, reconnecting each to its exact
 	// persisted tmux session by name so it is immediately attachable.
 	var firstErr error
 	for _, td := range target {
-		if td.Kind == TabKindAgent || localNames[td.Name] {
+		if td.Kind == TabKindAgent {
 			continue
+		}
+		if td.ID != "" {
+			if localIDs[td.ID] {
+				continue
+			}
+		} else if localNames[td.Name] {
+			continue // legacy roster row: the name is the only key it has
 		}
 		kind := tabKindForData(td.Kind)
 		// A tmux-less kind (web, vscode) is materialized by the append alone — there
@@ -656,10 +781,12 @@ func (i *Instance) ReconcileTabsFromData(target []TabData) (bool, error) {
 		tab := &Tab{ID: id, Name: td.Name, Kind: kind, Command: td.Command, URL: td.URL, tmux: ts}
 		i.mu.Lock()
 		// Re-check under the write lock: a concurrent reconcile/AddTab may have
-		// added this name while we reconnected outside the lock.
+		// added this tab while we reconnected outside the lock. Keyed on the id
+		// (name for an id-less roster row) to match the presence test above — a
+		// name re-check would wrongly skip a recreated tab whose new id must land.
 		exists := false
 		for _, t := range i.Tabs {
-			if t.Name == td.Name {
+			if (td.ID != "" && t.ID == td.ID) || (td.ID == "" && t.Name == td.Name) {
 				exists = true
 				break
 			}
@@ -671,26 +798,6 @@ func (i *Instance) ReconcileTabsFromData(target []TabData) (bool, error) {
 		i.mu.Unlock()
 	}
 
-	// Adopt the daemon's authoritative stable tab id (#1738) for every name-matched
-	// local tab. The daemon is the single owner of tab identity (#960); a local tab
-	// materialized out-of-band — AttachShellTab leaves its id empty on purpose, and
-	// a legacy record may carry an id minted on an earlier load — must key on the
-	// daemon's id so a TUI-side stream/pane binding addresses the SAME id the daemon
-	// resolves. Names are unique per instance, so name is a safe join key. Not
-	// counted as a visible change: the id is internal addressing, not display state.
-	i.mu.Lock()
-	for _, td := range target {
-		if td.ID == "" {
-			continue
-		}
-		for _, t := range i.Tabs {
-			if t.Name == td.Name && t.ID != td.ID {
-				t.ID = td.ID
-			}
-		}
-	}
-	i.mu.Unlock()
-
 	return changed, firstErr
 }
 
@@ -700,10 +807,26 @@ func (i *Instance) ReconcileTabsFromData(target []TabData) (bool, error) {
 // PR 3). Returns whether a tab was removed. The agent tab (index 0) is never
 // dropped.
 func (i *Instance) dropTabByName(name string) bool {
+	return i.dropTabWhere(func(t *Tab) bool { return t.Name == name }, "name "+name)
+}
+
+// dropTabByID is dropTabByName keyed on the stable id (#1738) — what the
+// id-keyed snapshot reconcile drops on, so a tab whose id left the daemon's
+// roster goes even when a NEW tab has already reused its display name (#1886).
+func (i *Instance) dropTabByID(id string) bool {
+	if id == "" {
+		return false
+	}
+	return i.dropTabWhere(func(t *Tab) bool { return t.ID == id }, "id "+id)
+}
+
+// dropTabWhere removes the first non-agent tab matching pred and releases its
+// TUI-side attach PTY. label names the match for the log line only.
+func (i *Instance) dropTabWhere(pred func(*Tab) bool, label string) bool {
 	i.mu.Lock()
 	var dropped *Tab
 	for idx := 1; idx < len(i.Tabs); idx++ {
-		if i.Tabs[idx].Name == name {
+		if pred(i.Tabs[idx]) {
 			dropped = i.Tabs[idx]
 			i.Tabs = append(i.Tabs[:idx], i.Tabs[idx+1:]...)
 			break
@@ -720,10 +843,27 @@ func (i *Instance) dropTabByName(name string) bool {
 	// never runs while holding i.mu.
 	if dropped.tmux != nil {
 		if err := dropped.tmux.CloseAttachOnly(); err != nil {
-			log.WarningLog.Printf("dropTabByName %q: releasing attach client: %v", name, err)
+			log.WarningLog.Printf("dropTab (%s): releasing attach client: %v", label, err)
 		}
 	}
 	return true
+}
+
+// replaceTabFieldLocked swaps the tab at idx for a COPY carrying the mutation f
+// applies, instead of writing the field in place. Callers must hold i.mu for
+// writing.
+//
+// GetTabs copies only the SLICE and hands out the same *Tab pointers, which
+// callers (tree.TabLabels on the render path, the pane refresh) then read
+// without holding i.mu — so assigning to a live tab's Name/ID races those
+// readers. Copy-on-write keeps the readers race-free: a reader that already
+// holds the old pointer keeps reading a consistent old value, and the next
+// GetTabs hands out the new one. The tmux pointer rides along on the copy, so
+// the tab's live session is preserved across the swap (no PTY blip).
+func (i *Instance) replaceTabFieldLocked(idx int, f func(*Tab)) {
+	cp := *i.Tabs[idx]
+	f(&cp)
+	i.Tabs[idx] = &cp
 }
 
 // setTmuxLocked stores ts as the agent tab's tmux session, materializing the
