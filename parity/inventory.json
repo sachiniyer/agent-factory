@@ -1453,6 +1453,7 @@
       "af tasks add --target-session": "task.add",
       "af tasks add --watch-cmd": "task.add",
       "af tasks get --help": "meta.discovery",
+      "af tasks list --all": "task.list",
       "af tasks list --help": "meta.discovery",
       "af tasks remove --help": "meta.discovery",
       "af tasks trigger --help": "meta.discovery",
@@ -1620,6 +1621,9 @@
           },
           "task.last_run_status": {
             "ok": "Scheduler-owned, never a client input: the daemon stamps it after a run (task.Task last_run_at/last_run_status). A surface setting it would be lying about history."
+          },
+          "task.repo_id": {
+            "ok": "Daemon-resolved at bind time (#1893): task.RepoID is sha256 of the main repo root, computed by the daemon when the task binds to a project, never a client input — like created_at/last_run_at."
           }
         },
         "tui": {
@@ -1631,6 +1635,9 @@
           },
           "task.max_concurrent_runs": {
             "gap": "task.max-concurrent-runs"
+          },
+          "task.repo_id": {
+            "ok": "Daemon-resolved at bind time (#1893): task.RepoID is sha256 of the main repo root, computed by the daemon when the task binds to a project, never a client input — like created_at/last_run_at."
           }
         }
       },
@@ -1667,6 +1674,41 @@
           },
           "update.max_concurrent_runs": {
             "gap": "task.max-concurrent-runs"
+          },
+          "expect": {
+            "ok": "A CLI-side compare-and-swap guard (#1891): api/tasks.go enforceTaskScope authorizes a task mutation against the project the CLI resolved via --repo, so a stale id cannot hit a task that moved projects. The TUI and web operate within an already-selected project and set no expectation — it is the stateless CLI's safety mechanism, not a user option."
+          },
+          "expect.enforce": {
+            "ok": "A CLI-side compare-and-swap guard (#1891): api/tasks.go enforceTaskScope authorizes a task mutation against the project the CLI resolved via --repo, so a stale id cannot hit a task that moved projects. The TUI and web operate within an already-selected project and set no expectation — it is the stateless CLI's safety mechanism, not a user option."
+          },
+          "expect.project_path": {
+            "ok": "A CLI-side compare-and-swap guard (#1891): api/tasks.go enforceTaskScope authorizes a task mutation against the project the CLI resolved via --repo, so a stale id cannot hit a task that moved projects. The TUI and web operate within an already-selected project and set no expectation — it is the stateless CLI's safety mechanism, not a user option."
+          }
+        }
+      },
+      "RemoveTaskRequest": {
+        "tui": {
+          "expect": {
+            "ok": "A CLI-side compare-and-swap guard (#1891): api/tasks.go enforceTaskScope authorizes a task mutation against the project the CLI resolved via --repo, so a stale id cannot hit a task that moved projects. The TUI and web operate within an already-selected project and set no expectation — it is the stateless CLI's safety mechanism, not a user option."
+          },
+          "expect.enforce": {
+            "ok": "A CLI-side compare-and-swap guard (#1891): api/tasks.go enforceTaskScope authorizes a task mutation against the project the CLI resolved via --repo, so a stale id cannot hit a task that moved projects. The TUI and web operate within an already-selected project and set no expectation — it is the stateless CLI's safety mechanism, not a user option."
+          },
+          "expect.project_path": {
+            "ok": "A CLI-side compare-and-swap guard (#1891): api/tasks.go enforceTaskScope authorizes a task mutation against the project the CLI resolved via --repo, so a stale id cannot hit a task that moved projects. The TUI and web operate within an already-selected project and set no expectation — it is the stateless CLI's safety mechanism, not a user option."
+          }
+        }
+      },
+      "TriggerTaskRequest": {
+        "tui": {
+          "expect": {
+            "ok": "A CLI-side compare-and-swap guard (#1891): api/tasks.go enforceTaskScope authorizes a task mutation against the project the CLI resolved via --repo, so a stale id cannot hit a task that moved projects. The TUI and web operate within an already-selected project and set no expectation — it is the stateless CLI's safety mechanism, not a user option."
+          },
+          "expect.enforce": {
+            "ok": "A CLI-side compare-and-swap guard (#1891): api/tasks.go enforceTaskScope authorizes a task mutation against the project the CLI resolved via --repo, so a stale id cannot hit a task that moved projects. The TUI and web operate within an already-selected project and set no expectation — it is the stateless CLI's safety mechanism, not a user option."
+          },
+          "expect.project_path": {
+            "ok": "A CLI-side compare-and-swap guard (#1891): api/tasks.go enforceTaskScope authorizes a task mutation against the project the CLI resolved via --repo, so a stale id cannot hit a task that moved projects. The TUI and web operate within an already-selected project and set no expectation — it is the stateless CLI's safety mechanism, not a user option."
           }
         }
       }
@@ -1715,6 +1757,15 @@
         },
         "update.max_concurrent_runs": {
           "gap": "task.max-concurrent-runs"
+        },
+        "expect": {
+          "ok": "A CLI-side compare-and-swap guard (#1891): api/tasks.go enforceTaskScope authorizes a task mutation against the project the CLI resolved via --repo, so a stale id cannot hit a task that moved projects. The TUI and web operate within an already-selected project and set no expectation — it is the stateless CLI's safety mechanism, not a user option."
+        },
+        "expect.enforce": {
+          "ok": "A CLI-side compare-and-swap guard (#1891): api/tasks.go enforceTaskScope authorizes a task mutation against the project the CLI resolved via --repo, so a stale id cannot hit a task that moved projects. The TUI and web operate within an already-selected project and set no expectation — it is the stateless CLI's safety mechanism, not a user option."
+        },
+        "expect.project_path": {
+          "ok": "A CLI-side compare-and-swap guard (#1891): api/tasks.go enforceTaskScope authorizes a task mutation against the project the CLI resolved via --repo, so a stale id cannot hit a task that moved projects. The TUI and web operate within an already-selected project and set no expectation — it is the stateless CLI's safety mechanism, not a user option."
         }
       },
       "AddTask": {
@@ -1726,6 +1777,31 @@
         },
         "task.max_concurrent_runs": {
           "gap": "task.max-concurrent-runs"
+        },
+        "task.repo_id": {
+          "ok": "Daemon-resolved at bind time (#1893): task.RepoID is sha256 of the main repo root, computed by the daemon when the task binds to a project, never a client input — like created_at/last_run_at."
+        }
+      },
+      "RemoveTask": {
+        "expect": {
+          "ok": "A CLI-side compare-and-swap guard (#1891): api/tasks.go enforceTaskScope authorizes a task mutation against the project the CLI resolved via --repo, so a stale id cannot hit a task that moved projects. The TUI and web operate within an already-selected project and set no expectation — it is the stateless CLI's safety mechanism, not a user option."
+        },
+        "expect.enforce": {
+          "ok": "A CLI-side compare-and-swap guard (#1891): api/tasks.go enforceTaskScope authorizes a task mutation against the project the CLI resolved via --repo, so a stale id cannot hit a task that moved projects. The TUI and web operate within an already-selected project and set no expectation — it is the stateless CLI's safety mechanism, not a user option."
+        },
+        "expect.project_path": {
+          "ok": "A CLI-side compare-and-swap guard (#1891): api/tasks.go enforceTaskScope authorizes a task mutation against the project the CLI resolved via --repo, so a stale id cannot hit a task that moved projects. The TUI and web operate within an already-selected project and set no expectation — it is the stateless CLI's safety mechanism, not a user option."
+        }
+      },
+      "TriggerTask": {
+        "expect": {
+          "ok": "A CLI-side compare-and-swap guard (#1891): api/tasks.go enforceTaskScope authorizes a task mutation against the project the CLI resolved via --repo, so a stale id cannot hit a task that moved projects. The TUI and web operate within an already-selected project and set no expectation — it is the stateless CLI's safety mechanism, not a user option."
+        },
+        "expect.enforce": {
+          "ok": "A CLI-side compare-and-swap guard (#1891): api/tasks.go enforceTaskScope authorizes a task mutation against the project the CLI resolved via --repo, so a stale id cannot hit a task that moved projects. The TUI and web operate within an already-selected project and set no expectation — it is the stateless CLI's safety mechanism, not a user option."
+        },
+        "expect.project_path": {
+          "ok": "A CLI-side compare-and-swap guard (#1891): api/tasks.go enforceTaskScope authorizes a task mutation against the project the CLI resolved via --repo, so a stale id cannot hit a task that moved projects. The TUI and web operate within an already-selected project and set no expectation — it is the stateless CLI's safety mechanism, not a user option."
         }
       }
     }
