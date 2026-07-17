@@ -2,9 +2,12 @@ package daemon
 
 import (
 	"errors"
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -12,13 +15,24 @@ import (
 // errFake stands in for a non-zero exit from systemctl/launchctl.
 var errFake = errors.New("fake unit command failure")
 
-// withUnitCommand replaces the external service-manager runner for one test, so
-// nothing here can shell out to the real systemctl/launchctl.
-func withUnitCommand(t *testing.T, fn func(string, ...string) ([]byte, error)) {
+// withProbeCommand replaces the bounded read-only probe runner. Separate from
+// withUnitCommand because the probes are what carry the deadline and the
+// answered/could-not-ask distinction.
+func withProbeCommand(t *testing.T, fn func(string, ...string) ([]byte, error)) {
 	t.Helper()
-	prev := autostartUnitCommand
-	t.Cleanup(func() { autostartUnitCommand = prev })
-	autostartUnitCommand = fn
+	prev := autostartProbeCommand
+	t.Cleanup(func() { autostartProbeCommand = prev })
+	autostartProbeCommand = fn
+}
+
+// exitErr builds a real *exec.ExitError with the given code, which is what
+// distinguishes "the service manager answered" from "it never ran".
+func exitErr(t *testing.T, code int) error {
+	t.Helper()
+	err := exec.Command("sh", "-c", fmt.Sprintf("exit %d", code)).Run()
+	var ee *exec.ExitError
+	require.ErrorAs(t, err, &ee)
+	return ee
 }
 
 func writeUnitFile(t *testing.T, path, content string) {
@@ -130,7 +144,7 @@ func TestAutostartSupervision_UnreadableUnitStillProbesServiceManager(t *testing
 	t.Cleanup(func() { _ = os.Chmod(unitPath, 0o644) })
 
 	probed := false
-	withUnitCommand(t, func(_ string, args ...string) ([]byte, error) {
+	withProbeCommand(t, func(_ string, args ...string) ([]byte, error) {
 		probed = true
 		if args[1] == "is-enabled" {
 			return []byte("enabled\n"), nil
@@ -142,7 +156,7 @@ func TestAutostartSupervision_UnreadableUnitStillProbesServiceManager(t *testing
 	require.True(t, probed, "an unreadable unit file must not skip the service-manager probe")
 	require.True(t, info.UnitPresent)
 	require.Error(t, info.Err, "the read failure rides along for the caller to report")
-	require.False(t, info.Active)
+	require.Equal(t, ProbeNo, info.Active)
 }
 
 func TestInspectAutostart_UnsupportedPlatform(t *testing.T) {
@@ -155,7 +169,7 @@ func TestAutostartSupervision_LinuxEnabledActive(t *testing.T) {
 	dir := withAutostartTestEnv(t, "linux")
 	writeUnitFile(t, filepath.Join(dir, autostartUnitName), systemdAutostartUnit("/usr/local/bin/af", "", "", ""))
 
-	withUnitCommand(t, func(name string, args ...string) ([]byte, error) {
+	withProbeCommand(t, func(name string, args ...string) ([]byte, error) {
 		require.Equal(t, "systemctl", name)
 		switch args[1] {
 		case "is-enabled":
@@ -168,15 +182,15 @@ func TestAutostartSupervision_LinuxEnabledActive(t *testing.T) {
 
 	info := AutostartSupervision()
 	require.True(t, info.UnitPresent)
-	require.True(t, info.Enabled)
-	require.True(t, info.Active)
+	require.Equal(t, ProbeYes, info.Enabled)
+	require.Equal(t, ProbeYes, info.Active)
 }
 
 func TestAutostartSupervision_LinuxInactive(t *testing.T) {
 	dir := withAutostartTestEnv(t, "linux")
 	writeUnitFile(t, filepath.Join(dir, autostartUnitName), systemdAutostartUnit("/usr/local/bin/af", "", "", ""))
 
-	withUnitCommand(t, func(_ string, args ...string) ([]byte, error) {
+	withProbeCommand(t, func(_ string, args ...string) ([]byte, error) {
 		if args[1] == "is-enabled" {
 			return []byte("enabled\n"), nil
 		}
@@ -184,8 +198,8 @@ func TestAutostartSupervision_LinuxInactive(t *testing.T) {
 	})
 
 	info := AutostartSupervision()
-	require.True(t, info.Enabled)
-	require.False(t, info.Active)
+	require.Equal(t, ProbeYes, info.Enabled)
+	require.Equal(t, ProbeNo, info.Active)
 	require.Contains(t, info.Detail, "inactive")
 }
 
@@ -197,10 +211,11 @@ func TestAutostartSupervision_DarwinLoadedOutsideGUIDomain(t *testing.T) {
 	writeUnitFile(t, filepath.Join(dir, autostartLaunchdLabel+".plist"),
 		launchdAutostartPlist("/usr/local/bin/af", "", "", "", "/tmp/af.log"))
 
-	withUnitCommand(t, func(_ string, args ...string) ([]byte, error) {
+	withProbeCommand(t, func(_ string, args ...string) ([]byte, error) {
 		switch args[0] {
 		case "print":
-			return nil, errFake // not in gui/<uid>
+			// launchd answered: not in gui/<uid>.
+			return []byte("Could not find service"), exitErr(t, launchdNotFoundExit)
 		case "list":
 			return []byte("12345\t0\t" + autostartLaunchdLabel + "\n"), nil
 		}
@@ -209,9 +224,14 @@ func TestAutostartSupervision_DarwinLoadedOutsideGUIDomain(t *testing.T) {
 
 	info := AutostartSupervision()
 	require.True(t, info.UnitPresent)
-	require.True(t, info.LoadedElsewhere)
-	require.False(t, info.Active)
+	require.NoError(t, info.ProbeErr, "launchd answered both questions")
+	require.Equal(t, ProbeYes, info.LoadedElsewhere)
 	require.Equal(t, launchdDomainTarget(), info.Domain)
+	// Whether that other domain is actually RUNNING it is not something
+	// `launchctl list` establishes — it reports that the label is known. The
+	// finding is the domain mismatch; claiming a liveness we never observed
+	// would be the same overreach this file exists to remove.
+	require.Equal(t, ProbeUnknown, info.Active)
 }
 
 // launchctl print succeeds for a job launchd KNOWS, including one whose process
@@ -225,7 +245,7 @@ func TestAutostartSupervision_DarwinLoadedButNotRunning(t *testing.T) {
 
 	// A real loaded-but-stopped print block: no pid, and a state that merely
 	// contains the word "running".
-	withUnitCommand(t, func(_ string, args ...string) ([]byte, error) {
+	withProbeCommand(t, func(_ string, args ...string) ([]byte, error) {
 		if args[0] == "print" {
 			return []byte("com.agent-factory.daemon = {\n" +
 				"\tactive count = 0\n" +
@@ -238,9 +258,9 @@ func TestAutostartSupervision_DarwinLoadedButNotRunning(t *testing.T) {
 
 	info := AutostartSupervision()
 	require.True(t, info.UnitPresent)
-	require.True(t, info.Loaded, "launchd knows the job")
-	require.False(t, info.Active, "but no daemon process is running")
-	require.False(t, info.LoadedElsewhere, "it is loaded in the right domain, just not running")
+	require.Equal(t, ProbeYes, info.Loaded, "launchd knows the job")
+	require.Equal(t, ProbeNo, info.Active, "but no daemon process is running")
+	require.Equal(t, ProbeNo, info.LoadedElsewhere, "it is loaded in the right domain, just not running")
 	require.Contains(t, info.Detail, "no daemon process is running")
 }
 
@@ -263,7 +283,7 @@ func TestAutostartSupervision_DarwinLoadedInGUIDomain(t *testing.T) {
 	writeUnitFile(t, filepath.Join(dir, autostartLaunchdLabel+".plist"),
 		launchdAutostartPlist("/usr/local/bin/af", "", "", "", "/tmp/af.log"))
 
-	withUnitCommand(t, func(_ string, args ...string) ([]byte, error) {
+	withProbeCommand(t, func(_ string, args ...string) ([]byte, error) {
 		if args[0] == "print" {
 			require.Equal(t, launchdDomainTarget(), args[1],
 				"doctor must probe the same domain the restart path kickstarts")
@@ -273,9 +293,9 @@ func TestAutostartSupervision_DarwinLoadedInGUIDomain(t *testing.T) {
 	})
 
 	info := AutostartSupervision()
-	require.True(t, info.Loaded)
-	require.True(t, info.Active)
-	require.False(t, info.LoadedElsewhere)
+	require.Equal(t, ProbeYes, info.Loaded)
+	require.Equal(t, ProbeYes, info.Active)
+	require.Equal(t, ProbeNo, info.LoadedElsewhere)
 }
 
 func TestAutostartSupervision_DarwinNotLoaded(t *testing.T) {
@@ -283,12 +303,17 @@ func TestAutostartSupervision_DarwinNotLoaded(t *testing.T) {
 	writeUnitFile(t, filepath.Join(dir, autostartLaunchdLabel+".plist"),
 		launchdAutostartPlist("/usr/local/bin/af", "", "", "", "/tmp/af.log"))
 
-	withUnitCommand(t, func(string, ...string) ([]byte, error) { return nil, errFake })
+	// launchd's real "no such service" answer, not a generic failure: a generic
+	// failure means we could not ask, which is a different fact entirely.
+	withProbeCommand(t, func(string, ...string) ([]byte, error) {
+		return []byte("Could not find service"), exitErr(t, launchdNotFoundExit)
+	})
 
 	info := AutostartSupervision()
 	require.True(t, info.UnitPresent)
-	require.False(t, info.Active)
-	require.False(t, info.LoadedElsewhere)
+	require.NoError(t, info.ProbeErr)
+	require.Equal(t, ProbeNo, info.Active)
+	require.Equal(t, ProbeNo, info.LoadedElsewhere)
 	require.Equal(t, "not loaded", info.Detail)
 }
 
@@ -296,11 +321,160 @@ func TestAutostartSupervision_DarwinNotLoaded(t *testing.T) {
 // be consulted.
 func TestAutostartSupervision_NoUnitSkipsProbe(t *testing.T) {
 	withAutostartTestEnv(t, "linux")
-	withUnitCommand(t, func(string, ...string) ([]byte, error) {
+	withProbeCommand(t, func(string, ...string) ([]byte, error) {
 		t.Fatal("must not probe the service manager when no unit is installed")
 		return nil, nil
 	})
 
 	info := AutostartSupervision()
 	require.False(t, info.UnitPresent)
+}
+
+// withProbeTimeout shortens the probe deadline for one test.
+func withProbeTimeout(t *testing.T, d time.Duration) {
+	t.Helper()
+	prev := autostartProbeTimeout
+	t.Cleanup(func() { autostartProbeTimeout = prev })
+	autostartProbeTimeout = d
+}
+
+// The probe must be really bounded, not decoratively. This drives the PRODUCTION
+// runner against #1967's exact shape: a command that writes output and then
+// leaves a child holding the pipe open. CommandContext alone kills the direct
+// child and then CombinedOutput blocks on pipe EOF anyway — measured at "did not
+// return at all" in #1967 — so only WaitDelay makes the deadline real.
+//
+// `af doctor` is the command a user runs BECAUSE things are wedged; it must not
+// be the thing that hangs.
+func TestAutostartProbe_HangIsBoundedAndReportsTimeout(t *testing.T) {
+	withProbeTimeout(t, 300*time.Millisecond)
+
+	start := time.Now()
+	_, err := runAutostartProbeCommand("sh", "-c", "echo hi; sleep 30")
+	elapsed := time.Since(start)
+
+	require.Error(t, err, "a killed probe is not a successful answer")
+	require.Contains(t, err.Error(), "timed out")
+	require.Less(t, elapsed, 10*time.Second,
+		"the deadline must bound the call; without WaitDelay the held pipe defeats it")
+}
+
+// A timeout is an inability to ask. It must surface as UNKNOWN with its cause —
+// never as "inactive", which would tell the user their autostart is off when we
+// have no idea.
+func TestAutostartSupervision_ProbeTimeout_IsUnknownNotInactive(t *testing.T) {
+	dir := withAutostartTestEnv(t, "linux")
+	writeUnitFile(t, filepath.Join(dir, autostartUnitName), systemdAutostartUnit("/usr/local/bin/af", "", "", ""))
+	withProbeTimeout(t, 200*time.Millisecond)
+	// The real runner against a real hang, so the whole path is exercised.
+	withProbeCommand(t, runAutostartProbeCommand)
+
+	info := AutostartSupervision()
+	require.True(t, info.UnitPresent)
+	require.Error(t, info.ProbeErr, "a probe that never answered must report why")
+	require.Equal(t, ProbeUnknown, info.Active, "a timeout is not an answer of 'inactive'")
+	require.Equal(t, ProbeUnknown, info.Enabled)
+}
+
+// The service manager binary missing is an inability to ask, not an answer.
+func TestAutostartSupervision_ProbeBinaryMissing_IsUnknownNotInactive(t *testing.T) {
+	dir := withAutostartTestEnv(t, "linux")
+	writeUnitFile(t, filepath.Join(dir, autostartUnitName), systemdAutostartUnit("/usr/local/bin/af", "", "", ""))
+	withProbeCommand(t, func(string, ...string) ([]byte, error) {
+		return nil, exec.ErrNotFound // no systemctl on this box
+	})
+
+	info := AutostartSupervision()
+	require.True(t, info.UnitPresent)
+	require.Error(t, info.ProbeErr)
+	require.Contains(t, info.ProbeErr.Error(), "could not query systemd")
+	require.Equal(t, ProbeUnknown, info.Active, "no systemctl is not 'inactive'")
+	require.Equal(t, ProbeUnknown, info.Enabled)
+}
+
+// A user bus that is down exits non-zero with a diagnostic, not a state word.
+// The exit code alone cannot tell it from "inactive" — the output must.
+func TestAutostartSupervision_BusUnavailable_IsUnknownNotInactive(t *testing.T) {
+	dir := withAutostartTestEnv(t, "linux")
+	writeUnitFile(t, filepath.Join(dir, autostartUnitName), systemdAutostartUnit("/usr/local/bin/af", "", "", ""))
+	withProbeCommand(t, func(string, ...string) ([]byte, error) {
+		return []byte("Failed to connect to bus: No medium found"), exitErr(t, 1)
+	})
+
+	info := AutostartSupervision()
+	require.Error(t, info.ProbeErr)
+	require.Equal(t, ProbeUnknown, info.Active,
+		"a non-zero exit whose output is not a state word means the question never reached systemd")
+	require.Contains(t, info.Detail, "unknown")
+}
+
+// The other half: a genuine "inactive" still reads as a real answer. Making the
+// probe honest must not make it blind.
+func TestAutostartSupervision_GenuineInactive_IsAnswered(t *testing.T) {
+	dir := withAutostartTestEnv(t, "linux")
+	writeUnitFile(t, filepath.Join(dir, autostartUnitName), systemdAutostartUnit("/usr/local/bin/af", "", "", ""))
+	withProbeCommand(t, func(_ string, args ...string) ([]byte, error) {
+		if args[1] == "is-enabled" {
+			return []byte("enabled\n"), nil
+		}
+		return []byte("inactive\n"), exitErr(t, 3) // systemctl's real inactive exit
+	})
+
+	info := AutostartSupervision()
+	require.NoError(t, info.ProbeErr, "systemd answered; there is nothing unknown here")
+	require.Equal(t, ProbeYes, info.Enabled)
+	require.Equal(t, ProbeNo, info.Active)
+}
+
+// DARWIN gets the same treatment: launchctl missing or wedged is unknown, never
+// "not loaded". macOS is where the skew bug actually bites (#1947), so a
+// Linux-only honest probe would be exactly the wrong half.
+func TestAutostartSupervision_DarwinProbeBinaryMissing_IsUnknownNotNotLoaded(t *testing.T) {
+	dir := withAutostartTestEnv(t, "darwin")
+	writeUnitFile(t, filepath.Join(dir, autostartLaunchdLabel+".plist"),
+		launchdAutostartPlist("/usr/local/bin/af", "", "", "", "/tmp/af.log"))
+	withProbeCommand(t, func(string, ...string) ([]byte, error) {
+		return nil, exec.ErrNotFound // no launchctl
+	})
+
+	info := AutostartSupervision()
+	require.True(t, info.UnitPresent)
+	require.Error(t, info.ProbeErr)
+	require.Contains(t, info.ProbeErr.Error(), "could not query launchd")
+	require.Equal(t, ProbeUnknown, info.Loaded, "no launchctl is not 'not loaded'")
+	require.Equal(t, ProbeUnknown, info.LoadedElsewhere)
+	require.Equal(t, ProbeUnknown, info.Active)
+}
+
+// A launchctl failure that is NOT a not-found answer (permission denied, bad
+// request) is also unknown — only a recognized not-found counts as an answer.
+func TestAutostartSupervision_DarwinProbeDenied_IsUnknownNotNotLoaded(t *testing.T) {
+	dir := withAutostartTestEnv(t, "darwin")
+	writeUnitFile(t, filepath.Join(dir, autostartLaunchdLabel+".plist"),
+		launchdAutostartPlist("/usr/local/bin/af", "", "", "", "/tmp/af.log"))
+	withProbeCommand(t, func(string, ...string) ([]byte, error) {
+		return []byte("Operation not permitted"), exitErr(t, 1)
+	})
+
+	info := AutostartSupervision()
+	require.Error(t, info.ProbeErr)
+	require.Equal(t, ProbeUnknown, info.Loaded)
+	require.Equal(t, ProbeUnknown, info.Active)
+}
+
+// And the darwin answer path still works: a real not-found is a real answer.
+func TestAutostartSupervision_DarwinGenuineNotLoaded_IsAnswered(t *testing.T) {
+	dir := withAutostartTestEnv(t, "darwin")
+	writeUnitFile(t, filepath.Join(dir, autostartLaunchdLabel+".plist"),
+		launchdAutostartPlist("/usr/local/bin/af", "", "", "", "/tmp/af.log"))
+	withProbeCommand(t, func(_ string, args ...string) ([]byte, error) {
+		return []byte("Could not find service \"" + autostartLaunchdLabel + "\" in domain"), exitErr(t, launchdNotFoundExit)
+	})
+
+	info := AutostartSupervision()
+	require.NoError(t, info.ProbeErr, "launchd answered; nothing is unknown")
+	require.Equal(t, ProbeNo, info.Loaded)
+	require.Equal(t, ProbeNo, info.LoadedElsewhere)
+	require.Equal(t, ProbeNo, info.Active)
+	require.Equal(t, "not loaded", info.Detail)
 }

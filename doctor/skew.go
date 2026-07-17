@@ -574,36 +574,59 @@ func checkAutostartSupervision(ctx *scanContext, report *Report) {
 		return
 	}
 	switch {
-	case info.Err != nil && !info.Active:
-		// The unit is installed but unreadable AND the service manager is not
-		// running it. Report the state rather than dropping the check: the
-		// unreadable file is the likely reason nothing is supervising.
+	case info.ProbeErr != nil:
+		// The service manager could not be asked — no binary, no user bus,
+		// permission denied, or it never replied. Every other branch below is a
+		// claim about what it said; none of them are available here, and
+		// "inactive" is the one thing this must never say.
+		report.Warn(sectionDaemon, "autostart supervision",
+			fmt.Sprintf("could not query the service manager, so supervision is unknown: %s", oneLine(info.ProbeErr)),
+			"check that the service manager is reachable (`systemctl --user status` / `launchctl print`), then rerun `af doctor`", false)
+	case info.Err != nil && info.Active != daemon.ProbeYes:
+		// The unit is installed but unreadable AND it is not running. Report the
+		// state rather than dropping the check: the unreadable file is the likely
+		// reason nothing is supervising.
 		report.Warn(sectionDaemon, "autostart supervision",
 			fmt.Sprintf("a unit file is installed but cannot be read (%v) and the service manager is not running it", info.Err),
 			"fix the unit file's permissions, or reinstall it: af daemon install", true)
-	case info.LoadedElsewhere:
+	case info.LoadedElsewhere == daemon.ProbeYes:
 		report.Warn(sectionDaemon, "autostart supervision",
 			fmt.Sprintf("the launchd agent is loaded outside %s, where af's restarts are sent (%s)",
 				info.Domain, info.Detail),
 			"reload it in the right domain: af daemon install", true)
-	case info.Loaded && !info.Active:
+	case info.Loaded == daemon.ProbeYes && info.Active == daemon.ProbeNo:
 		// Everything looks configured — the agent is installed and launchd
 		// knows it — while no daemon is actually running.
 		report.Warn(sectionDaemon, "autostart supervision",
 			fmt.Sprintf("the launchd agent is loaded in %s but no daemon process is running (%s)",
 				info.Domain, info.Detail),
 			"start it: af daemon restart", true)
-	case !info.Active:
+	case info.Active == daemon.ProbeNo:
 		report.Warn(sectionDaemon, "autostart supervision",
 			fmt.Sprintf("a unit file is installed but the service manager is not running it (%s)", info.Detail),
 			"reinstall autostart: af daemon install", true)
-	case !info.Enabled:
+	case info.Enabled == daemon.ProbeNo:
 		report.Warn(sectionDaemon, "autostart supervision",
 			fmt.Sprintf("the unit is running but not enabled, so it won't start at login (%s)", info.Detail),
 			"enable it: af daemon install", true)
-	default:
+	case info.Active == daemon.ProbeYes:
 		report.Pass(sectionDaemon, "autostart supervision", "unit is enabled and running")
+	default:
+		// No probe error, but nothing answered definitively either. Say so.
+		report.Warn(sectionDaemon, "autostart supervision",
+			fmt.Sprintf("the service manager did not report a state, so supervision is unknown (%s)", info.Detail),
+			"check the service manager directly, then rerun `af doctor`", false)
 	}
+}
+
+// oneLine flattens a multi-line error (errors.Join separates with newlines) so a
+// row stays one line — the report's columns are the whole point of its
+// scannability.
+func oneLine(err error) string {
+	if err == nil {
+		return ""
+	}
+	return strings.Join(strings.Fields(err.Error()), " ")
 }
 
 // resolvePath canonicalizes p for comparison, resolving symlinks so that a
