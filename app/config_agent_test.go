@@ -2,6 +2,7 @@ package app
 
 import (
 	"errors"
+	"os/exec"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -30,10 +31,10 @@ func TestConfigAgentKeyDispatches(t *testing.T) {
 	var gotMode configagent.Mode
 	var gotRepo string
 	spawned := 0
-	t.Cleanup(SetConfigAgentSpawnerForTest(func(mode configagent.Mode, repoPath string) error {
+	t.Cleanup(SetConfigAgentSpawnerForTest(func(mode configagent.Mode, repoPath string) (string, error) {
 		spawned++
 		gotMode, gotRepo = mode, repoPath
-		return nil
+		return "af-config-1", nil
 	}))
 
 	model, cmd := h.handleDefaultKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'C'}}, name)
@@ -49,7 +50,10 @@ func TestConfigAgentKeyDispatches(t *testing.T) {
 	assert.Equal(t, 1, spawned, "running the command must spawn the config agent exactly once")
 	assert.Equal(t, configagent.ModeChange, gotMode,
 		"the hotkey is the change entry point — a keypress in a running TUI is not a first-run tour")
-	assert.NotEmpty(t, gotRepo, "the spawn must target a repo path")
+	// The repo is a HINT (which agent does this project prefer?), not a
+	// requirement: the config agent edits the global config and runs at AF home,
+	// so an empty repo is a legitimate fall back to the global default_program.
+	_ = gotRepo
 
 	spawnedMsg, isSpawnMsg := msg.(configAgentSpawnedMsg)
 	require.True(t, isSpawnMsg, "the command must report back a configAgentSpawnedMsg, got %T", msg)
@@ -69,7 +73,7 @@ func TestConfigAgentMissingBinaryIsNonFatal(t *testing.T) {
 		Command: "/nonexistent/claude",
 		Err:     errors.New("Claude Code is not installed or not on PATH (resolved command: \"/nonexistent/claude\")"),
 	}
-	t.Cleanup(SetConfigAgentSpawnerForTest(func(configagent.Mode, string) error { return missing }))
+	t.Cleanup(SetConfigAgentSpawnerForTest(func(configagent.Mode, string) (string, error) { return "", missing }))
 
 	_, cmd := h.handleDefaultKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'C'}}, keys.KeyConfigAgent)
 	require.NotNil(t, cmd)
@@ -90,14 +94,68 @@ func TestConfigAgentMissingBinaryIsNonFatal(t *testing.T) {
 		"a failed spawn must leave the user in the normal TUI state — no modal, no takeover")
 }
 
-// TestConfigAgentSpawnSuccessIsQuiet pins that a successful spawn raises no
-// error notice: the daemon's events plane brings the session in on its own, so
-// there is nothing for this handler to announce.
-func TestConfigAgentSpawnSuccessIsQuiet(t *testing.T) {
+// TestConfigAgentSpawnEntersTheTakeover pins what a successful spawn does now:
+// it hands the terminal to the agent's tmux session. It no longer "does nothing
+// quietly" — that was the old Instance-based seam, where the daemon's events
+// plane brought a row in and there was nothing for the TUI to do.
+func TestConfigAgentSpawnEntersTheTakeover(t *testing.T) {
+	h := newTestHome(t)
+
+	var attached string
+	prevExec := execConfigAgentAttach
+	execConfigAgentAttach = func(name string) *exec.Cmd {
+		attached = name
+		return exec.Command("true") // never actually attach in a test
+	}
+	t.Cleanup(func() { execConfigAgentAttach = prevExec })
+
+	model, cmd := h.handleConfigAgentSpawned(configAgentSpawnedMsg{sessionName: "af-config-7"})
+	require.NotNil(t, model)
+	require.NotNil(t, cmd, "a successful spawn must hand the terminal to the config agent")
+	assert.Equal(t, "af-config-7", attached, "the takeover must attach to the session the daemon named")
+}
+
+// TestConfigAgentSpawnWithNoSessionNameIsAnError pins the defensive case: the
+// daemon reporting success but naming no session must surface, not hand the
+// terminal to `tmux attach-session -t ""`.
+func TestConfigAgentSpawnWithNoSessionNameIsAnError(t *testing.T) {
 	h := newTestHome(t)
 	model, cmd := h.handleConfigAgentSpawned(configAgentSpawnedMsg{})
 	require.NotNil(t, model)
-	assert.Nil(t, cmd, "a successful spawn should not raise a notice")
+	require.NotNil(t, cmd, "a nameless session must be reported, not silently ignored")
+	assert.Equal(t, stateDefault, model.(*home).state)
+}
+
+// TestConfigAgentDoneReapsTheSession pins that leaving the takeover tears the
+// bare tmux session down. The daemon reaps on its own shutdown as a backstop, but
+// a session per keypress that only dies with the daemon is a leak in every sense
+// that matters to a long-running TUI.
+func TestConfigAgentDoneReapsTheSession(t *testing.T) {
+	h := newTestHome(t)
+	var reaped string
+	t.Cleanup(SetConfigAgentReaperForTest(func(name string) error { reaped = name; return nil }))
+
+	h.configAgentSpawning = true
+	model, _ := h.handleConfigAgentDone(configAgentDoneMsg{sessionName: "af-config-9"})
+	require.NotNil(t, model)
+	assert.Equal(t, "af-config-9", reaped, "leaving the takeover must reap the config agent's tmux session")
+	assert.False(t, model.(*home).configAgentSpawning,
+		"the re-entry guard must clear when the takeover ends, or C is dead for the rest of the session")
+}
+
+// TestConfigAgentDoneReapsEvenWhenTheAttachFailed pins that a failed attach still
+// reaps. Otherwise a tmux session the user never even saw would survive until the
+// daemon exits.
+func TestConfigAgentDoneReapsEvenWhenTheAttachFailed(t *testing.T) {
+	h := newTestHome(t)
+	var reaped string
+	t.Cleanup(SetConfigAgentReaperForTest(func(name string) error { reaped = name; return nil }))
+
+	model, cmd := h.handleConfigAgentDone(configAgentDoneMsg{sessionName: "af-config-9", err: errors.New("attach blew up")})
+	require.NotNil(t, model)
+	assert.Equal(t, "af-config-9", reaped, "a failed attach must still reap the session")
+	require.NotNil(t, cmd, "the failure must be surfaced to the user")
+	assert.Equal(t, stateDefault, model.(*home).state, "a failed takeover leaves the user in a working TUI")
 }
 
 // TestConfigAgentDoesNotSpawnTwice pins the re-entry guard. The spawn is a
@@ -113,9 +171,9 @@ func TestConfigAgentDoesNotSpawnTwice(t *testing.T) {
 	h := newTestHome(t)
 
 	spawns := 0
-	t.Cleanup(SetConfigAgentSpawnerForTest(func(configagent.Mode, string) error {
+	t.Cleanup(SetConfigAgentSpawnerForTest(func(configagent.Mode, string) (string, error) {
 		spawns++
-		return nil
+		return "af-config-1", nil
 	}))
 
 	pressC := func() tea.Cmd {
@@ -157,7 +215,7 @@ func TestConfigAgentDoesNotSpawnTwice(t *testing.T) {
 // the user had not read yet. Only retract our own, and only if it is still up.
 func TestConfigAgentSpawnClearsOnlyItsOwnNotice(t *testing.T) {
 	h := newTestHome(t)
-	t.Cleanup(SetConfigAgentSpawnerForTest(func(configagent.Mode, string) error { return nil }))
+	t.Cleanup(SetConfigAgentSpawnerForTest(func(configagent.Mode, string) (string, error) { return "af-config-1", nil }))
 
 	_, cmd := h.handleDefaultKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'C'}}, keys.KeyConfigAgent)
 	require.NotNil(t, cmd)
@@ -173,7 +231,7 @@ func TestConfigAgentSpawnClearsOnlyItsOwnNotice(t *testing.T) {
 
 	// The normal case still retracts our own notice.
 	h2 := newTestHome(t)
-	t.Cleanup(SetConfigAgentSpawnerForTest(func(configagent.Mode, string) error { return nil }))
+	t.Cleanup(SetConfigAgentSpawnerForTest(func(configagent.Mode, string) (string, error) { return "af-config-1", nil }))
 	_, cmd2 := h2.handleDefaultKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'C'}}, keys.KeyConfigAgent)
 	own := cmd2().(configAgentSpawnedMsg)
 	require.Contains(t, h2.errBox.FullError(), "Starting the config agent",

@@ -67,24 +67,38 @@ func TestBriefingCarriesCurrentValues(t *testing.T) {
 	}
 }
 
-// TestBriefingStatesTheScopeFence is the load-bearing safety test. Because the
-// config agent rides the in-place seam, its cwd IS the user's real working tree
-// — nothing sandboxes it. The fence is instruction-only, so if this wording goes
-// missing there is no second line of defense.
+// TestBriefingStatesTheScopeFence is the load-bearing safety test.
+//
+// The fence must be both PRESENT and TRUE. It used to open "this session is
+// running in the user's real working tree" — true of the in-place seam, false the
+// moment the agent moved to AF home, and a briefing that misdescribes the agent's
+// own environment is the same defect class as one that names the wrong config
+// file: it is confidently wrong about what it is looking at.
+//
+// Moving to AF home makes the agent safer but does NOT make the fence
+// unnecessary: nothing sandboxes it, and the user's real repositories are still
+// on this machine. The fence is instruction-only, so if this wording goes missing
+// there is no second line of defense.
 func TestBriefingStatesTheScopeFence(t *testing.T) {
 	for _, mode := range []Mode{ModeOnboard, ModeChange} {
 		out := BuildBriefing(mode, briefingConfig(), "/tmp/af/config.toml")
 
 		for _, want := range []string{
-			"real working tree",
-			"Do not read, create, edit, move or delete any file in this repository.",
+			"You are NOT running in the user's project",
+			"Do not read, create, edit, move or delete any file in any repository.",
 			"Do not run git.",
-			"Do not build, test, lint or run the project.",
+			"Do not build, test, lint or run any project.",
 			"Do not create sessions, tabs or tasks.",
 		} {
 			if !strings.Contains(out, want) {
 				t.Errorf("mode %s: briefing is missing scope-fence rule %q", mode, want)
 			}
+		}
+		// The fence must not claim the agent is somewhere it is not.
+		if strings.Contains(out, "real working tree") {
+			t.Errorf("mode %s: the briefing still claims the agent runs in the user's working tree — "+
+				"it runs at AF home. A briefing that misdescribes the agent's own environment is "+
+				"exactly the class of defect the fence exists to prevent.", mode)
 		}
 	}
 }

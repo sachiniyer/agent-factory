@@ -127,6 +127,10 @@ type Manager struct {
 	// Immutable after construction; the supervisor carries its own mutex, so
 	// spawning (seconds) never touches m.mu.
 	vscode *vscodeSupervisor
+	// configAgents owns the bare tmux sessions spawned for config agents. They
+	// have no Instance and so appear in no roster; this is the only thing that
+	// knows they exist, which is why its Stop() is wired into daemon teardown.
+	configAgents *configAgentSupervisor
 }
 
 // NewManager constructs a manager and synchronously restores all persisted
@@ -154,6 +158,7 @@ func newManagerShell(cfg *config.Config) (*Manager, error) {
 		return nil, fmt.Errorf("failed to initialize storage: %w", err)
 	}
 	vscode := newVSCodeSupervisor()
+	configAgents := newConfigAgentSupervisor()
 	// Read the editor override off the manager's own config rather than
 	// re-reading config from disk on every spawn.
 	vscode.configuredBinary = func() string {
@@ -183,6 +188,7 @@ func newManagerShell(cfg *config.Config) (*Manager, error) {
 		pausedPolls:         make(map[string]time.Time),
 		events:              newEventsHub(),
 		vscode:              vscode,
+		configAgents:        configAgents,
 	}, nil
 }
 

@@ -99,12 +99,15 @@ func BuildBriefing(mode Mode, cfg *config.Config, configPath string) string {
 ## Rules you must not break
 
 Scope · you are here to read and write af configuration, and to do nothing else.
-This session is running in the user's real working tree, on their real branch — not
-a scratch copy, not a worktree. Anything you touch, they keep. So:
 
-- Do not read, create, edit, move or delete any file in this repository.
+You are NOT running in the user's project. Your working directory is af's own home
+directory — the one holding the config file you are editing. Nothing stops you
+navigating elsewhere, and the user's real repositories, with their real uncommitted
+work, are on this machine. Do not go looking for them. Specifically:
+
+- Do not read, create, edit, move or delete any file in any repository.
 - Do not run git. Not status, not diff, not log · nothing.
-- Do not build, test, lint or run the project.
+- Do not build, test, lint or run any project.
 - Do not create sessions, tabs or tasks.
 - The only writes you make are ` + "`af config set`" + `. The only reads you need are
   ` + "`af config get`" + ` and ` + "`af config list`" + `.

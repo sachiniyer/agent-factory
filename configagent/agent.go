@@ -5,35 +5,38 @@ import (
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/daemon"
+	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/preflight"
-	"github.com/sachiniyer/agent-factory/session"
 )
 
 // The config agent (phase 2): the user's own default agent, spawned as an
 // ordinary session and pre-briefed with the config manifest, that walks them
 // through configuration and applies each choice with `af config set`.
 //
-// It rides the IN-PLACE (`af sessions create --here`) seam rather than getting a
-// session kind of its own. That is the whole reason this package is small: the
-// daemon already plumbs InPlace end to end (CreateSessionRequest.InPlace →
-// session.NewInstance → git.NewGitWorktreeInPlace), the daemon's own root-agent
-// loop already uses it in-process, and an in-place worktree creates no branch
-// and no worktree — Setup() and Cleanup() are no-ops for it, so a config session
-// cannot remove the user's tree or branch even when killed.
+// It runs as a BARE tmux session owned by the daemon, at AF home, with no
+// session.Instance behind it — so it creates no worktree, no branch, and no row
+// in the session list.
 //
-// The trade-off that buys is real and is NOT hidden: the agent's working
-// directory IS the user's live working tree. Nothing enforces that it only
-// touches config — the scope fence in BuildBriefing is an instruction, not a
-// sandbox. That is the owner's decided trade; the fence is worded accordingly.
+// It is not an Instance because it cannot be: an Instance IS a row. It is
+// persisted to instances.json, Snapshot() builds the session list by iterating
+// the same map the attach route resolves against, and it is restorable and
+// killable from the sidebar. "Reachable by the WS attach route" and "appears in
+// the roster" are literally the same bit, so there is no arrangement where the
+// config agent is an attachable Instance and not a row.
+//
+// The takeover therefore does not use the WS route at all: the TUI hands the
+// terminal to `tmux attach-session` through tea.ExecProcess, which is bubbletea's
+// own primitive for running an interactive child (an editor, a shell) inside a
+// Program. The daemon still owns the session's whole life — it spawns it, waits
+// for readiness, dismisses the trust prompt, delivers the briefing, and reaps it
+// — because a TUI-spawned process is one the daemon cannot clean up if the TUI
+// dies, and this repo has a history of orphaned tmux (#1093, #1104).
+//
+// Running at AF home also fixes what the previous in-place seam could not: the
+// agent's working directory is now the directory whose config it is editing, not
+// the user's live working tree.
 //
 // The hotkey (phase 3) and the first-run trigger (phase 4) are the callers.
-// Until they land, Spawn has no production caller by design.
-
-// configSessionTitleBase is the title new config sessions are derived from. It
-// is a TitleBase rather than a Title so the daemon auto-suffixes on collision
-// (config, config-2, …) instead of failing when one already exists — pressing
-// the phase-3 hotkey twice must not be an error. It is not the reserved "root".
-const configSessionTitleBase = "config"
 
 // ProgramUnavailableError reports that the user's configured agent is not
 // installed or not runnable, so no config session was created.
@@ -68,56 +71,61 @@ type Options struct {
 	// Mode selects the opening behavior: a guided walkthrough (ModeOnboard) or
 	// a targeted change (ModeChange).
 	Mode Mode
-	// RepoPath is the repository the session attaches to in place — the user's
-	// cwd. It must be a git repository: the in-place seam resolves the repo root
-	// and the current branch from it.
+	// RepoPath is the repo whose resolved config picks the agent — the user's
+	// active project. It does NOT become the agent's working directory: the
+	// config agent runs at AF home, so it never sits in the user's tree. It need
+	// not be a git repo; an unresolvable path falls back to the global config.
 	RepoPath string
 }
 
-// createSession is the daemon round trip, as a package var so tests can observe
+// spawnViaDaemon is the daemon round trip, as a package var so tests can observe
 // the request without a daemon. It mirrors api/sessions.go's
 // `createSessionViaDaemon = daemon.CreateSession` — the established idiom for a
-// stubbable daemon call — and routes over the unix control socket, the same path
-// `af sessions create` uses.
-var createSession = daemon.CreateSession
+// stubbable daemon call — and routes over the unix control socket, whose
+// callDaemon already carries the daemon warm-up retry.
+var spawnViaDaemon = daemon.SpawnConfigAgent
+
+// reapViaDaemon tears the config-agent session down once the caller is done with
+// it. A package var for the same reason.
+var reapViaDaemon = daemon.ReapConfigAgent
+
+// Reap tears down a config-agent session by name. The caller invokes it when the
+// user leaves the takeover; the daemon reaps on its own shutdown regardless, so a
+// missed call leaks nothing beyond the daemon's life.
+func Reap(sessionName string) error {
+	if sessionName == "" {
+		return nil
+	}
+	return reapViaDaemon(sessionName)
+}
 
 // resolveConfigForRepo is config.ResolveConfig behind a var, so a test can drive
 // the missing-binary path without materializing a repo. Production always uses
 // the real resolver.
 var resolveConfigForRepo = config.ResolveConfig
 
-// Spawn starts the config agent against repoPath and returns the created
-// session. The flow, and why each step is where it is:
+// Spawn starts the config agent and returns the tmux session name to attach to.
 //
 //  1. Resolve the repo's config — this picks up an in-repo default_program /
-//     program_overrides, so the agent we launch is the one the user actually gets
+//     program_overrides, so the agent launched is the one the user actually gets
 //     in this repo, exactly like `af sessions create` with no -p.
 //  2. Preflight the program. A missing binary returns ProgramUnavailableError and
-//     creates NOTHING — never a spawn that hangs to a readiness timeout.
-//  3. Create the session in place, with the briefing as its Prompt. The daemon
-//     does the rest: NewGitWorktreeInPlace (no branch, no worktree), tmux spawn,
-//     WaitForReady, trust-prompt dismissal, then SendPrompt.
+//     spawns NOTHING — never a spawn that hangs to a readiness timeout.
+//  3. Ask the daemon to run it in a bare tmux session at AF home. The daemon owns
+//     the rest: readiness, trust-prompt dismissal, briefing delivery, and reaping.
 //
-// AutoYes is hard-wired false and must stay that way, for ONE reason: this is an
-// interactive walkthrough, and auto-yes would answer the user's own questions for
-// them.
+// No Instance is created anywhere in this path, which is what keeps the config
+// agent out of instances.json and out of the session list.
 //
-// It is NOT a permission control, and it would be dishonest to imply otherwise.
-// AutoYes=false does keep resolveProgramForInstance from appending claude's
-// `--permission-mode bypassPermissions` — but on a default install that buys
-// nothing, because DefaultConfig() already seeds
-// program_overrides.claude = "<detected claude> --dangerously-skip-permissions"
-// (config_types.go), a strictly broader flag that AutoYes has no say over. So a
-// default claude user's config agent runs with permissions skipped either way.
-//
-// What actually bounds this agent is the scope fence in the briefing — an
-// instruction, not a sandbox. That is the honest posture, and it is why the fence
-// is worded as forcefully as it is.
-func Spawn(opts Options) (*session.InstanceData, error) {
-	if opts.RepoPath == "" {
-		return nil, fmt.Errorf("config agent needs a repository to run in: no repo path given")
-	}
-
+// There is no AutoYes here, and nothing to hard-wire false: auto-yes is an
+// Instance concept, and there is no Instance. The agent runs its command
+// verbatim. Note what that does NOT buy — on a default install
+// program_overrides.claude already carries --dangerously-skip-permissions
+// (config_types.go), so a default claude user's config agent runs with
+// permissions skipped. What actually bounds this agent is the scope fence in the
+// briefing: an instruction, not a sandbox. That is the honest posture, and it is
+// why the fence is worded as forcefully as it is.
+func Spawn(opts Options) (string, error) {
 	// The briefing describes the GLOBAL config, because that is what `af config
 	// set`/`get` read and write — briefing the agent on a repo-resolved view
 	// would show it values it cannot write. The PROGRAM comes from the resolved
@@ -125,60 +133,45 @@ func Spawn(opts Options) (*session.InstanceData, error) {
 	// gets in this repo.
 	globalCfg, err := config.LoadConfig()
 	if err != nil {
-		return nil, fmt.Errorf("cannot read the global config to brief the config agent: %w", err)
+		return "", fmt.Errorf("cannot read the global config to brief the config agent: %w", err)
 	}
 	configPath, pathErr := config.GlobalConfigPath()
 	if pathErr != nil {
-		// Only the path LABEL in the briefing is lost; the briefing still
-		// renders and every `af config` command still resolves the file itself.
+		// Only the path LABEL in the briefing is lost; the briefing still renders
+		// and every `af config` command still resolves the file itself.
 		configPath = ""
 	}
 
-	resolved, err := resolveConfigForRepo(opts.RepoPath)
-	if err != nil {
-		return nil, fmt.Errorf("cannot resolve the config for %s: %w", opts.RepoPath, err)
+	// An unresolvable repo (no path given, or not a repo) is not fatal: the
+	// config agent edits the GLOBAL config, so the global default_program is a
+	// correct answer. It only costs an in-repo default_program override.
+	agentCfg := globalCfg
+	if opts.RepoPath != "" {
+		if resolved, rerr := resolveConfigForRepo(opts.RepoPath); rerr == nil {
+			agentCfg = &resolved.Config
+		} else {
+			log.WarningLog.Printf("config agent: could not resolve the config for %s (%v); using the global config", opts.RepoPath, rerr)
+		}
 	}
-	agent := resolved.DefaultProgram
+	agent := agentCfg.DefaultProgram
+	command := config.ResolveProgram(agentCfg, agent)
 
 	// Check the binary before spending a daemon round trip, a tmux session and a
 	// readiness wait on a program that cannot start.
-	if _, perr := preflight.CheckProgram(&resolved.Config, agent); perr != nil {
-		command := config.ResolveProgram(&resolved.Config, agent)
-		return nil, &ProgramUnavailableError{
+	if _, perr := preflight.CheckProgram(agentCfg, agent); perr != nil {
+		return "", &ProgramUnavailableError{
 			Agent:   agent,
 			Command: command,
 			Err:     preflight.ProgramError(agent, command, perr),
 		}
 	}
 
-	data, err := createSession(daemon.CreateSessionRequest{
-		TitleBase: configSessionTitleBase,
-		RepoPath:  opts.RepoPath,
-		Program:   agent,
-		Prompt:    BuildBriefing(opts.Mode, globalCfg, configPath),
-		AutoYes:   false,
-		InPlace:   true,
-		// Pin the LOCAL runtime explicitly. This is the feature's premise, not a
-		// default worth inheriting: the config agent exists to inspect THE USER'S
-		// machine and fix THEIR config, so it has to run on the machine whose
-		// config it is reading.
-		//
-		// An empty Backend does NOT mean local — it means "daemon, you decide",
-		// and the daemon decides from the repo's config
-		// (session/instance_factory.go resolveBackendKind falls through to
-		// resolveRepoConfig). So in a repo that declares `backend = "docker"` /
-		// `ssh` / `hook`, an unpinned config agent spawns on the REMOTE and then
-		// faithfully inspects the wrong machine, reporting on an environment the
-		// user does not have. Nothing about that failure looks like a failure,
-		// which is what makes it worse than not starting at all.
-		//
-		// A remote config session has no meaningful semantics today. If one ever
-		// does, that should be a deliberate change here, not something a repo's
-		// checked-in config can turn on by accident.
-		Backend: config.BackendLocal,
+	name, err := spawnViaDaemon(daemon.SpawnConfigAgentRequest{
+		Program: command,
+		Prompt:  BuildBriefing(opts.Mode, globalCfg, configPath),
 	})
 	if err != nil {
-		return nil, fmt.Errorf("failed to start the config agent: %w", err)
+		return "", fmt.Errorf("failed to start the config agent: %w", err)
 	}
-	return data, nil
+	return name, nil
 }

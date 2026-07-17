@@ -216,6 +216,31 @@ func (s *controlServer) createSession(ctx context.Context, req CreateSessionRequ
 	return nil
 }
 
+// SpawnConfigAgent starts the config agent and returns its tmux session name.
+// net/rpc gives no per-call context, so it passes Background; the spawn is still
+// bounded by the readiness timeout inside WaitForReadyOn, and any failure tears
+// the session down before returning.
+func (s *controlServer) SpawnConfigAgent(req SpawnConfigAgentRequest, resp *SpawnConfigAgentResponse) error {
+	if err := s.requireManagerReady(); err != nil {
+		return err
+	}
+	name, err := s.manager.SpawnConfigAgent(context.Background(), req)
+	if err != nil {
+		return err
+	}
+	resp.SessionName = name
+	return nil
+}
+
+// ReapConfigAgent tears down a config-agent session. No event is published: a
+// config agent is not a session, so nothing on the events plane models it.
+func (s *controlServer) ReapConfigAgent(req ReapConfigAgentRequest, _ *ReapConfigAgentResponse) error {
+	if err := s.requireManagerReady(); err != nil {
+		return err
+	}
+	return s.manager.ReapConfigAgent(req)
+}
+
 func (s *controlServer) CreateTab(req CreateTabRequest, resp *CreateTabResponse) error {
 	if err := s.requireManagerReady(); err != nil {
 		return err

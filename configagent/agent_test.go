@@ -2,17 +2,17 @@ package configagent
 
 import (
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/daemon"
-	"github.com/sachiniyer/agent-factory/session"
 )
 
-// These tests never reach a daemon: createSession is stubbed, so nothing here
-// dials the control socket, touches the real AF home, or creates a session.
-// AGENT_FACTORY_HOME is pointed at a throwaway dir for every test, so the
+// These tests never reach a daemon: the spawn seam is stubbed, so nothing here
+// dials the control socket, starts a tmux session, or touches the real AF home.
+// AGENT_FACTORY_HOME points at a throwaway dir for every test, so the
 // config.LoadConfig inside Spawn materializes defaults there.
 
 // tempAFHome points AGENT_FACTORY_HOME at a fresh temp dir, so a test can never
@@ -22,13 +22,13 @@ func tempAFHome(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 }
 
-// stubCreate replaces the daemon round trip and returns a pointer to a counter of
-// how many times it was called, plus the last request it saw.
-func stubCreate(t *testing.T, fn func(daemon.CreateSessionRequest) (*session.InstanceData, error)) {
+// stubSpawn replaces the daemon round trip so a test can observe the request
+// without a daemon or a tmux server.
+func stubSpawn(t *testing.T, fn func(daemon.SpawnConfigAgentRequest) (string, error)) {
 	t.Helper()
-	prev := createSession
-	createSession = fn
-	t.Cleanup(func() { createSession = prev })
+	prev := spawnViaDaemon
+	spawnViaDaemon = fn
+	t.Cleanup(func() { spawnViaDaemon = prev })
 }
 
 // stubResolve replaces the repo config resolver so a test can choose the agent
@@ -42,11 +42,65 @@ func stubResolve(t *testing.T, cfg config.Config) {
 	t.Cleanup(func() { resolveConfigForRepo = prev })
 }
 
+// TestSpawnCreatesNoInstance is THE constraint this seam exists to satisfy, and
+// it is enforced structurally rather than by assertion.
+//
+// The config agent must never be a row in the session list. An Instance IS a row:
+// it is persisted to instances.json, and Snapshot() builds the roster by
+// iterating the same map the WS attach route resolves against. So the only way to
+// guarantee "no row" is to never create an Instance — which is what this pins.
+//
+// The proof is the request type itself: it carries a program and a briefing and
+// NOTHING that could make a session — no Title, no TitleBase, no RepoPath, no
+// InPlace, no Backend, no AutoYes. There is no field to get wrong.
+//
+// That also retires a whole class of bug by construction. The old seam needed a
+// test that Backend was pinned to local, because an empty Backend silently
+// inherited the repo's `backend = "docker"` and would have run the config agent
+// on the wrong machine — inspecting an environment the user does not have and
+// reporting success. Here there is no backend to inherit: a bare tmux session is
+// local because there is nowhere else for it to be.
+func TestSpawnCreatesNoInstance(t *testing.T) {
+	tempAFHome(t)
+	stubResolve(t, config.Config{
+		DefaultProgram:   "codex",
+		ProgramOverrides: map[string]string{"codex": "/bin/sh"},
+	})
+
+	var got daemon.SpawnConfigAgentRequest
+	stubSpawn(t, func(req daemon.SpawnConfigAgentRequest) (string, error) {
+		got = req
+		return "af-config-1", nil
+	})
+
+	name, err := Spawn(Options{Mode: ModeOnboard, RepoPath: "/tmp/some-repo"})
+	if err != nil {
+		t.Fatalf("spawn: %v", err)
+	}
+	if name != "af-config-1" {
+		t.Fatalf("spawn should return the tmux session name to attach to, got %q", name)
+	}
+	if got.Program != "/bin/sh" {
+		t.Errorf("Program should be the RESOLVED command (program_overrides applied), got %q", got.Program)
+	}
+
+	// The request must stay incapable of creating a session. If a field is added
+	// that could, this fails and someone has to justify it.
+	rt := reflect.TypeOf(daemon.SpawnConfigAgentRequest{})
+	allowed := map[string]bool{"Program": true, "Prompt": true}
+	for i := range rt.NumField() {
+		if f := rt.Field(i); !allowed[f.Name] {
+			t.Errorf("daemon.SpawnConfigAgentRequest grew field %q. This request must not be able to create a "+
+				"session: an Instance is a row in the session list, and the config agent must never be one.", f.Name)
+		}
+	}
+}
+
 // TestSpawnMissingProgramReturnsTypedErrorAndCreatesNothing is the never-hang
 // guarantee. Spawning a binary that does not exist does not fail fast — it fails
-// as an opaque readiness timeout minutes later, because the agent never reaches
-// a ready prompt. So the check must happen BEFORE the daemon round trip, and the
-// assertion that matters is that createSession was never called.
+// as an opaque readiness timeout minutes later, because the agent never reaches a
+// ready prompt. So the check must happen BEFORE the daemon round trip, and the
+// assertion that matters is that the spawn was never attempted.
 func TestSpawnMissingProgramReturnsTypedErrorAndCreatesNothing(t *testing.T) {
 	tempAFHome(t)
 	stubResolve(t, config.Config{
@@ -54,18 +108,18 @@ func TestSpawnMissingProgramReturnsTypedErrorAndCreatesNothing(t *testing.T) {
 		ProgramOverrides: map[string]string{"claude": "/nonexistent/definitely-not-installed --flag"},
 	})
 
-	created := 0
-	stubCreate(t, func(daemon.CreateSessionRequest) (*session.InstanceData, error) {
-		created++
-		return &session.InstanceData{}, nil
+	spawned := 0
+	stubSpawn(t, func(daemon.SpawnConfigAgentRequest) (string, error) {
+		spawned++
+		return "af-config-1", nil
 	})
 
 	_, err := Spawn(Options{Mode: ModeOnboard, RepoPath: "/tmp/some-repo"})
 	if err == nil {
 		t.Fatal("expected a missing program to be rejected")
 	}
-	if created != 0 {
-		t.Fatalf("no session may be created when the agent binary is missing, got %d create call(s)", created)
+	if spawned != 0 {
+		t.Fatalf("nothing may be spawned when the agent binary is missing, got %d spawn call(s)", spawned)
 	}
 
 	var pe *ProgramUnavailableError
@@ -78,69 +132,16 @@ func TestSpawnMissingProgramReturnsTypedErrorAndCreatesNothing(t *testing.T) {
 	if !strings.Contains(pe.Command, "/nonexistent/definitely-not-installed") {
 		t.Errorf("typed error should carry the resolved command, got %q", pe.Command)
 	}
-	// The message is preflight's, so it stays actionable: what is missing and how to fix it.
 	if !strings.Contains(err.Error(), "not installed or not on PATH") {
 		t.Errorf("error should be preflight's actionable message, got: %v", err)
 	}
 }
 
-// TestSpawnSendsInPlaceRequest pins the create request's load-bearing fields.
-// InPlace=true is what makes a config session create no branch and no worktree;
-// AutoYes=false is what keeps it an interactive walkthrough (and keeps claude's
-// --permission-mode bypassPermissions off, since that append is gated on AutoYes).
-func TestSpawnSendsInPlaceRequest(t *testing.T) {
-	tempAFHome(t)
-	// /bin/sh always exists in the test container, so preflight passes and the
-	// test exercises the request rather than the missing-binary path.
-	stubResolve(t, config.Config{
-		DefaultProgram:   "codex",
-		ProgramOverrides: map[string]string{"codex": "/bin/sh"},
-	})
-
-	var got daemon.CreateSessionRequest
-	stubCreate(t, func(req daemon.CreateSessionRequest) (*session.InstanceData, error) {
-		got = req
-		return &session.InstanceData{Title: "config"}, nil
-	})
-
-	data, err := Spawn(Options{Mode: ModeOnboard, RepoPath: "/tmp/some-repo"})
-	if err != nil {
-		t.Fatalf("spawn: %v", err)
-	}
-	if data == nil || data.Title != "config" {
-		t.Fatalf("spawn should return the created session, got %+v", data)
-	}
-
-	if !got.InPlace {
-		t.Error("InPlace must be true: a config session must create no branch and no worktree")
-	}
-	if got.AutoYes {
-		t.Error("AutoYes must be false: this is an interactive walkthrough, and auto-yes would answer the user's own questions")
-	}
-	if got.Program != "codex" {
-		t.Errorf("Program should be the repo's resolved default_program, got %q", got.Program)
-	}
-	if got.RepoPath != "/tmp/some-repo" {
-		t.Errorf("RepoPath should be the caller's repo, got %q", got.RepoPath)
-	}
-	if got.ForceRemote {
-		t.Error("ForceRemote must be false: in-place is local-only")
-	}
-	// TitleBase (not Title) so a second press auto-suffixes instead of colliding.
-	if got.TitleBase != configSessionTitleBase || got.Title != "" {
-		t.Errorf("expected TitleBase=%q with an empty Title so the daemon can auto-suffix, got Title=%q TitleBase=%q",
-			configSessionTitleBase, got.Title, got.TitleBase)
-	}
-	if session.IsReservedTitle(got.TitleBase) {
-		t.Errorf("config session title base %q collides with the reserved root-agent name", got.TitleBase)
-	}
-}
-
 // TestSpawnDeliversBriefingAsThePrompt pins the delivery seam: the briefing rides
-// in as the session Prompt, which the daemon's create path already hands to
-// task.StartAndSendPrompt (Start → WaitForReady → trust prompt → SendPrompt).
-// If this ever became a flag or a file, an unknown flag would kill the agent at
-// exec and surface as a readiness timeout.
+// in as the request's Prompt, which the daemon delivers over a tmux paste buffer
+// (stdin-streamed, so unbounded) once the agent is ready. If it ever became a CLI
+// flag, an unknown flag would kill the agent at exec and surface as a readiness
+// timeout.
 func TestSpawnDeliversBriefingAsThePrompt(t *testing.T) {
 	tempAFHome(t)
 	stubResolve(t, config.Config{
@@ -148,18 +149,17 @@ func TestSpawnDeliversBriefingAsThePrompt(t *testing.T) {
 		ProgramOverrides: map[string]string{"codex": "/bin/sh"},
 	})
 
-	var got daemon.CreateSessionRequest
-	stubCreate(t, func(req daemon.CreateSessionRequest) (*session.InstanceData, error) {
+	var got daemon.SpawnConfigAgentRequest
+	stubSpawn(t, func(req daemon.SpawnConfigAgentRequest) (string, error) {
 		got = req
-		return &session.InstanceData{}, nil
+		return "af-config-1", nil
 	})
 
 	if _, err := Spawn(Options{Mode: ModeChange, RepoPath: "/tmp/some-repo"}); err != nil {
 		t.Fatalf("spawn: %v", err)
 	}
-
 	if got.Prompt == "" {
-		t.Fatal("the briefing must be delivered as the session Prompt")
+		t.Fatal("the briefing must be delivered as the request Prompt")
 	}
 	for _, want := range []string{
 		"What do you want to change?", // the ModeChange opening
@@ -173,22 +173,31 @@ func TestSpawnDeliversBriefingAsThePrompt(t *testing.T) {
 	}
 }
 
-// TestSpawnRequiresARepoPath pins the in-place precondition: the seam resolves a
-// repo root and current branch from this path, so an empty one must fail with a
-// clear message rather than a git error from three layers down.
-func TestSpawnRequiresARepoPath(t *testing.T) {
+// TestSpawnWithoutARepoFallsBackToGlobal pins that the config agent works outside
+// a repo. It edits the GLOBAL config and runs at AF home, so a repo is only ever
+// a hint about which agent the user prefers here — never a requirement. The old
+// in-place seam DID require one (it resolved a repo root and current branch);
+// this one must not inherit that constraint.
+func TestSpawnWithoutARepoFallsBackToGlobal(t *testing.T) {
 	tempAFHome(t)
-	created := 0
-	stubCreate(t, func(daemon.CreateSessionRequest) (*session.InstanceData, error) {
-		created++
-		return &session.InstanceData{}, nil
+	if _, err := config.SetGlobalConfigValue("default_program", "codex"); err != nil {
+		t.Fatalf("seed global config: %v", err)
+	}
+	if _, err := config.SetGlobalConfigValue("program_overrides.codex", "/bin/sh"); err != nil {
+		t.Fatalf("seed override: %v", err)
+	}
+
+	var got daemon.SpawnConfigAgentRequest
+	stubSpawn(t, func(req daemon.SpawnConfigAgentRequest) (string, error) {
+		got = req
+		return "af-config-1", nil
 	})
 
-	if _, err := Spawn(Options{Mode: ModeOnboard}); err == nil {
-		t.Fatal("expected an empty repo path to be rejected")
+	if _, err := Spawn(Options{Mode: ModeOnboard}); err != nil {
+		t.Fatalf("spawn with no repo path must work: %v", err)
 	}
-	if created != 0 {
-		t.Fatal("no session may be created without a repo path")
+	if got.Program != "/bin/sh" {
+		t.Errorf("with no repo, the agent comes from the global config, got %q", got.Program)
 	}
 }
 
@@ -199,29 +208,25 @@ func TestSpawnRequiresARepoPath(t *testing.T) {
 // agent on repo-resolved values would show it numbers it cannot change.
 func TestSpawnBriefsWithGlobalConfigValues(t *testing.T) {
 	tempAFHome(t)
-
-	// Global config on disk says daemon_poll_interval = 7777.
 	if _, err := config.SetGlobalConfigValue("daemon_poll_interval", "7777"); err != nil {
 		t.Fatalf("seed global config: %v", err)
 	}
-	// The repo-resolved view says the agent is codex.
 	stubResolve(t, config.Config{
 		DefaultProgram:     "codex",
 		ProgramOverrides:   map[string]string{"codex": "/bin/sh"},
 		DaemonPollInterval: 1234, // must NOT be what the briefing shows
 	})
 
-	var got daemon.CreateSessionRequest
-	stubCreate(t, func(req daemon.CreateSessionRequest) (*session.InstanceData, error) {
+	var got daemon.SpawnConfigAgentRequest
+	stubSpawn(t, func(req daemon.SpawnConfigAgentRequest) (string, error) {
 		got = req
-		return &session.InstanceData{}, nil
+		return "af-config-1", nil
 	})
 
 	if _, err := Spawn(Options{Mode: ModeOnboard, RepoPath: "/tmp/some-repo"}); err != nil {
 		t.Fatalf("spawn: %v", err)
 	}
-
-	if got.Program != "codex" {
+	if got.Program != "/bin/sh" {
 		t.Errorf("program should come from the repo-resolved config, got %q", got.Program)
 	}
 	if !strings.Contains(got.Prompt, "current: 7777") {
@@ -232,45 +237,25 @@ func TestSpawnBriefsWithGlobalConfigValues(t *testing.T) {
 	}
 }
 
-// TestSpawnPinsTheLocalBackend is the targeting lock, and it is the whole
-// premise of the feature rather than a default worth inheriting.
-//
-// The config agent exists to inspect THE USER'S OWN machine and fix THEIR
-// configuration. Leaving Backend empty makes the daemon resolve it from the
-// repo's config (session/instance_factory.go resolveBackendKind: empty Backend
-// and no ForceRemote falls through to resolveRepoConfig -> ParseBackendKind), so
-// a repo declaring `backend = "docker"` / `ssh` / `hook` would spawn the config
-// agent on the REMOTE. It would then faithfully inspect the wrong machine and
-// report confidently about an environment the user does not have — worse than
-// failing outright, because nothing about it looks broken.
-//
-// So local is pinned explicitly at the spawn site. A remote config session has no
-// meaningful semantics today; if one ever does, that is a deliberate change, not
-// an inherited one.
-func TestSpawnPinsTheLocalBackend(t *testing.T) {
-	tempAFHome(t)
-	stubResolve(t, config.Config{
-		DefaultProgram:   "codex",
-		ProgramOverrides: map[string]string{"codex": "/bin/sh"},
-	})
+// TestReapIsBestEffort pins that reaping is safe with nothing to reap: the TUI
+// calls it whenever the takeover ends, including on paths where the spawn never
+// produced a session.
+func TestReapIsBestEffort(t *testing.T) {
+	called := 0
+	prev := reapViaDaemon
+	reapViaDaemon = func(string) error { called++; return nil }
+	t.Cleanup(func() { reapViaDaemon = prev })
 
-	var got daemon.CreateSessionRequest
-	stubCreate(t, func(req daemon.CreateSessionRequest) (*session.InstanceData, error) {
-		got = req
-		return &session.InstanceData{}, nil
-	})
-
-	if _, err := Spawn(Options{Mode: ModeOnboard, RepoPath: "/tmp/some-repo"}); err != nil {
-		t.Fatalf("spawn: %v", err)
+	if err := Reap(""); err != nil {
+		t.Errorf("reaping an empty name should be a no-op, got %v", err)
 	}
-
-	if got.Backend != config.BackendLocal {
-		t.Errorf("Backend = %q, want %q. An empty Backend lets the daemon resolve the runtime from the "+
-			"repo's config, so a repo with `backend = \"docker\"` would run the config agent in a container — "+
-			"inspecting the wrong machine and reporting success. Pin local at the spawn site.",
-			got.Backend, config.BackendLocal)
+	if called != 0 {
+		t.Error("an empty session name must not reach the daemon")
 	}
-	if got.ForceRemote {
-		t.Error("ForceRemote must stay false: the config agent is local by premise")
+	if err := Reap("af-config-1"); err != nil {
+		t.Errorf("reap: %v", err)
+	}
+	if called != 1 {
+		t.Errorf("expected one reap call, got %d", called)
 	}
 }
