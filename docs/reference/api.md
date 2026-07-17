@@ -26,6 +26,8 @@ Request fields are the JSON keys of each route's request body; a `—` means the
 | `POST` | `/v1/CreateTab` | `title`, `repo_id`, `command`, `name`, `shell`, `kind`, `url`, `port`, `id` | Spawn a tab in a session: a process tab (command) or shell tab in the worktree, a web tab (kind=web) that iframes a url/port (localhost is daemon-proxied, external is direct), or a VS Code tab (kind=vscode) serving the session's worktree in a daemon-managed code-server (no url/port: the worktree is the target). |
 | `POST` | `/v1/CloseTab` | `title`, `repo_id`, `tab_name`, `tab_index`, `id` | Close a non-agent tab of a session (the agent tab cannot be closed). |
 | `POST` | `/v1/SetPRInfo` | `title`, `repo_id`, `pr_info` | Record or clear the GitHub PR info for a session. |
+| `POST` | `/v1/GetConfig` | — | List every user-facing global config key with its purpose, type, default, and current value. |
+| `POST` | `/v1/SetConfigValue` | `key`, `value` | Set one global config key, exactly as `af config set` does (validated, locked, atomic). |
 | `POST` | `/v1/ListTasks` | — | List every task across all repos. |
 | `POST` | `/v1/AddTask` | `task` | Append a new task and re-arm the scheduler. |
 | `POST` | `/v1/UpdateTask` | `id`, `update`, `expect` | Apply a field-level patch to a task (only the fields in `update` are changed), preserving every unspecified field and the scheduler-owned fields. |
