@@ -405,6 +405,36 @@ func TestResumeProgram(t *testing.T) {
 			"ionice -c 3 opencode --continue",
 		},
 
+		// Restore feeds resumeProgram t.programCmd(), which is the INJECTED form —
+		// and opencode's af-guidance seam is an OPENCODE_CONFIG env PREFIX
+		// (injectSystemPrompt), not a flag. So on every restore of an opencode
+		// session these two rewrites compose, and the resume append must survive the
+		// prefix: the agent token is no longer token 0, and the af config path can
+		// carry spaces (AGENT_FACTORY_HOME is user-controlled). If the prefix threw
+		// the agent scan off, resume would silently drop and the session would come
+		// back with NO context — the failure resume exists to prevent, arriving by a
+		// route neither change owns alone.
+		{
+			"opencode with af's OPENCODE_CONFIG env prefix",
+			"OPENCODE_CONFIG='/home/u/.agent-factory/opencode/af-config.jsonc' opencode",
+			"OPENCODE_CONFIG='/home/u/.agent-factory/opencode/af-config.jsonc' opencode --continue",
+		},
+		{
+			"opencode env prefix with a quoted path containing spaces",
+			"OPENCODE_CONFIG='/af home/opencode/af-config.jsonc' opencode --model anthropic/claude-opus-4-5",
+			"OPENCODE_CONFIG='/af home/opencode/af-config.jsonc' opencode --model anthropic/claude-opus-4-5 --continue",
+		},
+		{
+			"opencode env prefix with an absolute agent path",
+			"OPENCODE_CONFIG='/x/af.jsonc' /home/u/.opencode/bin/opencode",
+			"OPENCODE_CONFIG='/x/af.jsonc' /home/u/.opencode/bin/opencode --continue",
+		},
+		{
+			"opencode env prefix, already resuming, stays idempotent",
+			"OPENCODE_CONFIG='/x/af.jsonc' opencode --continue",
+			"OPENCODE_CONFIG='/x/af.jsonc' opencode --continue",
+		},
+
 		// Unknown programs are passed through unchanged so unrelated CLIs
 		// aren't accidentally rewritten.
 		{"unknown program", "mytool --bar", "mytool --bar"},
@@ -615,6 +645,10 @@ func TestResumeProgram_Idempotent(t *testing.T) {
 		"taskset -c 0-3 opencode",
 		"env FOO=bar opencode",
 		`"/path with spaces/opencode" --model $MODEL`,
+		// The af-injected env-prefix form Restore actually re-spawns.
+		"OPENCODE_CONFIG='/home/u/.agent-factory/opencode/af-config.jsonc' opencode",
+		"OPENCODE_CONFIG='/af home/opencode/af-config.jsonc' opencode --model x",
+		"OPENCODE_CONFIG='/x/af.jsonc' opencode --continue",
 	} {
 		once := resumeProgram(in)
 		twice := resumeProgram(once)
