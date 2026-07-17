@@ -243,6 +243,28 @@ func (p *hookProvisioner) provision() (ProvisionResult, error) {
 	}, nil
 }
 
+// hookOutputSuffix renders a hook script's combined output for an error
+// message, and says so explicitly when there was none.
+//
+// launch_cmd runs on the user's own infrastructure, so its output is the ONLY
+// window onto what went wrong out there — af has no other source. When a Mac
+// user's script died on `setsid: command not found`, that line was the entire
+// diagnosis, and everything af could usefully say was a quote of it (#1946).
+//
+// Empty output gets named rather than left to inference: "launch_cmd failed:
+// exit status 1" with nothing after it reads like af truncated something. Saying
+// the script printed nothing points the reader at their script's own error
+// handling rather than at af. (The timeout case is carried by the wrapped error
+// from runHookScript — "signal: killed" — so it is not re-derived here.)
+func hookOutputSuffix(out []byte) string {
+	trimmed := strings.TrimSpace(string(out))
+	if trimmed == "" {
+		return "; it printed nothing — a hook script must report its own errors, " +
+			"or the cause reaches nobody (see docs/remote-hooks.md)"
+	}
+	return fmt.Sprintf("; its output was:\n%s", trimmed)
+}
+
 // launch runs the user's launch_cmd with the provision spec as flags, then
 // recovers the {url,token} JSON it echoes (stderr may interleave progress, so
 // extractJSON pulls the object out of the combined output, mirroring how
@@ -282,12 +304,18 @@ func (p *hookProvisioner) launch() (*AgentServerEndpoint, error) {
 	p.launchStarted = cmd != nil && cmd.Process != nil
 
 	if err != nil {
-		return nil, fmt.Errorf("launch_cmd failed: %s: %w", strings.TrimSpace(string(out)), err)
+		// "launch_cmd failed" stays a contiguous phrase: #1955's reap tests
+		// assert the original provisioning error is not swallowed by matching on
+		// it. The path is added AFTER, so #1946's diagnostic detail and #1955's
+		// contract both hold.
+		return nil, fmt.Errorf("launch_cmd failed (%s): %w%s", p.hooks.LaunchCmd, err,
+			hookOutputSuffix(out))
 	}
 
 	jsonStr := extractJSON(string(out))
 	if jsonStr == "" {
-		return nil, fmt.Errorf("launch_cmd returned no {\"url\",\"token\"} JSON in its output (see docs/remote-hooks.md for the recipe): %s", strings.TrimSpace(string(out)))
+		return nil, fmt.Errorf("launch_cmd (%s) exited 0 but printed no {\"url\",\"token\"} JSON "+
+			"(see docs/remote-hooks.md for the recipe)%s", p.hooks.LaunchCmd, hookOutputSuffix(out))
 	}
 	var ej hookEndpointJSON
 	if err := json.Unmarshal([]byte(jsonStr), &ej); err != nil {

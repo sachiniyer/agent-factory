@@ -216,15 +216,15 @@ LOG="$DIR/agent-server.log"
 : > "$BANNER"
 ARGS="agent-server --listen 127.0.0.1:0 --repo $DIR/workspace --title $TITLE"
 [ -n "$PROGRAM" ] && ARGS="$ARGS --program $PROGRAM"
-# setsid is util-linux and does not exist on macOS, where this died with
-# "setsid: command not found" and the launch reported "printed no banner" —
-# blaming af for a missing coreutil (#1931). Use it where it exists so the Linux
-# behaviour is unchanged; elsewhere the trailing & still backgrounds the server,
-# and this script exits immediately after, so it is orphaned and survives either
-# way. That is all this fixture needs from the detach.
-SETSID=""
-command -v setsid >/dev/null 2>&1 && SETSID="setsid"
-AGENT_FACTORY_HOME="$DIR/home" TERM=xterm $SETSID "$AF_BIN" $ARGS >"$BANNER" 2>"$LOG" &
+# nohup, matching docs/remote-hooks.md's recipe exactly — this fixture is the
+# doc's script, so the two must not drift (a fixture that detaches differently
+# from the doc tests something no user runs). setsid was the original spelling
+# and is util-linux: it does not exist on macOS, where this died with "setsid:
+# command not found" and the launch reported "printed no banner", blaming af for
+# a missing coreutil (#1931, #1946). nohup is POSIX and on both. The trailing &
+# is what actually makes the server outlive this script; see the doc for why the
+# redirects are not optional.
+AGENT_FACTORY_HOME="$DIR/home" TERM=xterm nohup "$AF_BIN" $ARGS >"$BANNER" 2>"$LOG" &
 echo $! > "$DIR/pid"
 i=0
 while [ $i -lt 200 ]; do

@@ -28,6 +28,8 @@ import (
 	"sort"
 	"strings"
 	"testing"
+
+	"github.com/sachiniyer/agent-factory/internal/sockpath"
 )
 
 // ambientConfigPaths resolves the config files the test process could touch
@@ -322,12 +324,19 @@ func IsolateTmux(t testing.TB) {
 	})
 }
 
-// maxUnixSocketPathLen is the portable ceiling for a Unix socket path.
-// sockaddr_un.sun_path is 108 bytes on Linux but only 104 on macOS; 103 is what
-// survives on both once the NUL terminator is counted. It mirrors the product's
-// own constant in daemon/vscode_socket.go — duplicated rather than imported
-// because testguard stays dependency-free.
-const maxUnixSocketPathLen = 103
+// maxUnixSocketPathLen is the ceiling a TEST's socket path must respect: what
+// fits on every platform we ship, not what fits here.
+//
+// sockpath.Portable rather than sockpath.Max on purpose. Max is this kernel's
+// real limit (107 on Linux), and a harness held to that would let a 105-byte
+// path sail through on Linux and fail on macOS — the exact shape of the bug
+// class this repo keeps rediscovering. Holding tests to the portable floor
+// makes a portability break fail on whichever runner reaches it first.
+//
+// It is imported now rather than duplicated (it used to be a second hardcoded
+// 103): internal/sockpath is a leaf, so it raises none of the config import
+// cycle this package's doc comment warns about.
+const maxUnixSocketPathLen = sockpath.Portable
 
 // SocketTempDir returns a fresh temp dir short enough to hold a Unix socket, and
 // removes it when the test ends.
@@ -392,43 +401,20 @@ func SocketPath(t *testing.T, name string) string {
 	return p
 }
 
-// RequireProcFS skips a test whose subject depends on reading Linux's /proc.
+// RequireProcFS and HasProcFS lived here until #1939 gave proctree a real
+// darwin backend. They are deliberately NOT replaced.
 //
-// THIS SKIP HIDES A REAL DEFECT (#1939) — it is not a harness quirk.
-// internal/proctree reads /proc with no darwin fallback and no build tag, so on
-// macOS Snapshot() always fails and its callers swallow that
-// (session/tmux/reap.go:61-64 returns nil on any error). tmux orphan reaping and
-// af doctor's process mapping therefore do NOTHING on macOS — permanently, not
-// intermittently. The tests guarded by this are exactly the ones that prove that
-// functionality works; on darwin they fail because the PRODUCT is broken there.
+// They existed to skip, on macOS, exactly the tests that prove tmux orphan
+// reaping and `af doctor`'s process mapping work — because on macOS those
+// features did not work, and the tests were right to fail. The skip was honest
+// about that (it said so in capitals), but a skip is still a place where the
+// suite agrees to stop asking, and this one sat over the four tests that would
+// have caught the defect on day one.
 //
-// Skipped rather than deleted or weakened so the darwin job can go green on what
-// IS fixable while this stays visible and attributable. Compare daemon/daemon.go:781
-// and daemon/stopall.go:287, which both hit /proc and DO handle macOS: darwin was
-// considered there and missed in proctree.
-//
-// Delete this helper — do not extend it to new tests — when #1939 lands a darwin
-// process-table backend.
-func RequireProcFS(t *testing.T) {
-	t.Helper()
-	if !HasProcFS() {
-		t.Skipf("no /proc on %s: proctree is Linux-only, so af's orphan reaping and doctor "+
-			"process mapping are silently broken here — see #1939 (REAL DEFECT, not a "+
-			"test-harness assumption)", runtime.GOOS)
-	}
-}
-
-// HasProcFS reports whether Linux's /proc is present.
-//
-// Use it to guard a single ASSERTION that /proc makes possible, where the
-// surrounding test still has real coverage to offer without it — guarding the
-// assertion keeps the rest of the test running on darwin, which RequireProcFS
-// (which skips the whole test) would throw away. Same defect, same caveat: see
-// #1939, and #1942 for argv-boundary recovery specifically.
-func HasProcFS() bool {
-	_, err := os.Stat("/proc")
-	return err == nil
-}
+// If you find yourself wanting a "does this platform have /proc?" helper again,
+// the answer is almost certainly a backend in internal/proctree, not a gate in
+// the test tree. proctree_other.go is where an unsupported platform belongs, and
+// it fails to compile rather than quietly returning nothing.
 
 // CanonicalTempDir returns t.TempDir() resolved to its physical path, and is the
 // spelling any test should use for a directory whose path it later compares

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/sockpath"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/task"
@@ -41,12 +42,23 @@ func IsDaemonStartingErr(err error) bool {
 
 // DaemonSocketPath returns the Unix socket path used by the local control
 // plane.
+//
+// The length check happens HERE, where the path is resolved, rather than at
+// net.Listen: every client and the daemon itself route through this function,
+// so one check covers dialling and binding, and it fires before a listener has
+// half-started. An over-long path otherwise fails inside the kernel as a bare
+// "bind: invalid argument" that names neither the path, the limit, nor
+// AGENT_FACTORY_HOME — the knob that fixes it (#1940).
 func DaemonSocketPath() (string, error) {
 	dir, err := config.GetConfigDir()
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(dir, daemonSocketFileName), nil
+	path := filepath.Join(dir, daemonSocketFileName)
+	if err := sockpath.Check("daemon control socket", path); err != nil {
+		return "", err
+	}
+	return path, nil
 }
 
 // EnsureDaemon starts the daemon if the control socket is not already serving.

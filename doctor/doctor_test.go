@@ -56,7 +56,12 @@ func TestMain(m *testing.M) {
 // scan root, fast kill windows, and a snapshot containing only pids.
 func testOptions(t *testing.T, fix bool, pids ...int) Options {
 	t.Helper()
-	return testOptionsWithHome(t, t.TempDir(), fix, pids...)
+	// SocketTempDir rather than t.TempDir: doctor resolves the daemon socket
+	// paths under this home, and on macOS a t.TempDir() home lands ~107 bytes —
+	// past sun_path, so the #1940 guard rejects it and doctor reports a socket
+	// problem that has nothing to do with what these tests assert. A real home
+	// (~/.agent-factory) is ~50 bytes; this keeps the fixture representative.
+	return testOptionsWithHome(t, testguard.SocketTempDir(t), fix, pids...)
 }
 
 // testOptionsWithHome is testOptions with a caller-chosen home, for tests
@@ -138,13 +143,11 @@ func snapshotOf(t *testing.T, pids ...int) func() (map[int]proctree.Process, err
 // cleanup Kill can never orphan anything (a forked `sleep` here once leaked
 // the very orphans this suite hunts). Waits until the child's /proc environ
 // is readable (the fork→exec window would otherwise race the scan).
-// It reads the child's environ through proctree, so it — and therefore every
-// test built on it — cannot run without /proc. Guarding here rather than at each
-// caller keeps the reason in ONE place: see #1939 (REAL DEFECT — proctree has no
-// darwin backend, so doctor's process mapping is silently broken on macOS, which
-// is exactly what these tests exist to prove works).
+// It reads the child's environ through proctree, which since #1939 has a real
+// backend on both platforms we ship — so this runs on macOS rather than
+// skipping there, which is the whole point: these tests are what prove doctor's
+// process mapping actually works, and on darwin it never did.
 func spawnWithEnv(t *testing.T, argv0 string, extraArgs []string, env map[string]string) proctree.Process {
-	testguard.RequireProcFS(t)
 	t.Helper()
 	stdinR, stdinW, err := os.Pipe()
 	require.NoError(t, err)
@@ -166,14 +169,14 @@ func spawnWithEnv(t *testing.T, argv0 string, extraArgs []string, env map[string
 	go func() { _, _ = c.Process.Wait() }()
 
 	require.Eventually(t, func() bool {
-		_, ok := proctree.EnvValue(c.Process.Pid, "PATH")
+		_, st := proctree.LookupEnv(c.Process.Pid, "PATH")
 		if len(env) > 0 {
 			for k := range env {
-				_, ok2 := proctree.EnvValue(c.Process.Pid, k)
-				return ok2
+				_, st2 := proctree.LookupEnv(c.Process.Pid, k)
+				return st2 == proctree.EnvFound
 			}
 		}
-		return ok
+		return st == proctree.EnvFound
 	}, 5*time.Second, 10*time.Millisecond, "child environ never became readable")
 
 	snap, err := proctree.Snapshot()
@@ -211,12 +214,17 @@ func findCheckRows(r *Report, name string) []CheckResult {
 // regression: a process whose AF_SESSION marker names a dead session is a
 // verified orphan — reported without --fix, killed with it.
 func TestOrphanedProcessDetectedAndFixed(t *testing.T) {
-	testguard.RequireProcFS(t)
 	testguard.IsolateTmux(t) // private server: the marked session is dead by construction
 
 	// The orphan's AF_HOME must match the run's ConfigDir — a kill requires
 	// a proven home match, not just a dead-looking session.
-	home := t.TempDir()
+	//
+	// SocketTempDir, not t.TempDir: doctor resolves the daemon socket under this
+	// home, and t.TempDir() is ~50 bytes on Linux but ~107 on macOS (it embeds
+	// the test name under /var/folders/<hash>/T/). The #1940 guard rightly
+	// rejects the latter, and doctor then reports a daemon-socket FAIL that has
+	// nothing to do with the orphan this test is about. A real home is short.
+	home := testguard.SocketTempDir(t)
 	orphan := spawnWithEnv(t, "sh", nil, map[string]string{
 		"AF_SESSION": "af_doctor-dead-session",
 		"AF_HOME":    home,
@@ -249,7 +257,6 @@ func TestOrphanedProcessDetectedAndFixed(t *testing.T) {
 // live on a private `tmux -L` server and are invisible here) and a missing
 // home marker (pre-marker spawn, unreadable environ) are both report-only.
 func TestOrphanWithoutProvenHomeSurvivesFix(t *testing.T) {
-	testguard.RequireProcFS(t)
 	testguard.IsolateTmux(t)
 
 	foreign := spawnWithEnv(t, "sh", nil, map[string]string{
@@ -288,7 +295,6 @@ func TestOrphanWithoutProvenHomeSurvivesFix(t *testing.T) {
 // session means the process escaped its pane but the session still owns it —
 // report-only even under --fix.
 func TestMarkedProcessOfLiveSessionIsNeverKilled(t *testing.T) {
-	testguard.RequireProcFS(t)
 	testguard.IsolateTmux(t)
 
 	const name = "af_doctor-live-session"
@@ -328,10 +334,21 @@ func TestLeakedTmuxSessionReportedNotKilled(t *testing.T) {
 		"leaked session must survive --fix")
 }
 
-// TestStaleTempHomeRemovedWithFix: an abandoned AF home under the temp root
-// is detected by its structural markers and removed by --fix; a fresh or
-// referenced home is spared.
-func TestStaleTempHomeRemovedWithFix(t *testing.T) {
+// TestStaleTempHomeReportedButNeverRemoved: an abandoned AF home under the temp
+// root is DETECTED by its structural markers and REPORTED — and `--fix` does
+// not remove it. A fresh home, and a plain directory, stay untouched too.
+//
+// This test used to assert the opposite (`require.NoDirExists(stale)`), and the
+// inversion is the point. The removal was gated on "no process references this
+// home", a negative that four consecutive P1 reviews each found a new way to
+// falsify — darwin's silent env redaction, a permission gate that modelled uid
+// but not CS_RESTRICT, and a uid filter that assumed temp roots are
+// user-owned when Linux's /tmp is 01777 and shared. Every one ended at this
+// rm -rf. Process inspection cannot answer "is anything using this?", so it no
+// longer authorises deleting anything; it reports, and the operator decides.
+// The delete returns when the predicate is a lock the kernel guarantees rather
+// than an inference we assemble.
+func TestStaleTempHomeReportedButNeverRemoved(t *testing.T) {
 	testguard.IsolateTmux(t)
 	opts := testOptions(t, true)
 
@@ -355,14 +372,18 @@ func TestStaleTempHomeRemovedWithFix(t *testing.T) {
 	require.NoError(t, os.MkdirAll(notAHome, 0755))
 	require.NoError(t, os.Chtimes(notAHome, old, old))
 
+	// opts has Fix: true — this IS a --fix run.
 	report, err := Run(opts)
 	require.NoError(t, err)
 	findings := findByCheck(report, "stale-temp-home")
 	require.Len(t, findings, 1)
-	require.Contains(t, findings[0].Detail, stale)
-	require.True(t, findings[0].Fixed, "fix outcome: %v", findings[0].FixErr)
+	require.Contains(t, findings[0].Detail, stale, "the operator must still be told which directory")
+	require.Empty(t, findings[0].FixAction,
+		"stale-temp-home must carry NO fix action: process inspection cannot prove a home is unused, "+
+			"so it must not authorise deleting one")
+	require.False(t, findings[0].Fixed, "a --fix run must not have removed anything")
 
-	require.NoDirExists(t, stale, "stale home must be removed by --fix")
+	require.DirExists(t, stale, "a --fix run must NOT delete a home it cannot prove is unused")
 	require.DirExists(t, fresh, "recently-touched home must be spared")
 	require.DirExists(t, notAHome, "a plain directory without AF markers must never be touched")
 }
@@ -490,7 +511,6 @@ func TestRenderShapes(t *testing.T) {
 
 // TestTmuxServerDeadParsing pins the conservative TMUX-env heuristics.
 func TestTmuxServerDeadParsing(t *testing.T) {
-	testguard.RequireProcFS(t)
 	self, err := proctree.Snapshot()
 	require.NoError(t, err)
 	ctx := &scanContext{snap: self}
@@ -508,9 +528,9 @@ func TestTmuxServerDeadParsing(t *testing.T) {
 // TestOrphanSignalIdentityGuard: even a fixable finding must refuse to fire
 // when the pid has been recycled (the fix closure re-verifies identity).
 func TestOrphanSignalIdentityGuard(t *testing.T) {
-	testguard.RequireProcFS(t)
 	testguard.IsolateTmux(t)
-	home := t.TempDir()
+	// Socket-safe home: see TestOrphanedProcessDetectedAndFixed.
+	home := testguard.SocketTempDir(t)
 	orphan := spawnWithEnv(t, "sh", nil, map[string]string{
 		"AF_SESSION": "af_doctor-recycle",
 		"AF_HOME":    home,

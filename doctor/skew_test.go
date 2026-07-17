@@ -601,8 +601,20 @@ func TestDaemonProcessHome_RelativeWithUnreadableCwdIsUnknown(t *testing.T) {
 
 // The other half of the guard: a readable environ still yields a known home.
 // Tightening the unreadable case must not make doctor blind to real daemons.
+//
+// CanonicalTempDir, not t.TempDir: daemonProcessHome resolves the home through
+// resolveHomeIn, which EvalSymlinks it — and on macOS an EXISTING temp dir
+// resolves /var/folders/… to /private/var/folders/… (the #1918 class). This
+// test spawns a real process and reads its environ, so it began RUNNING on macOS
+// only once this PR gave that read a darwin backend AND removed the RequireProcFS
+// skip that spawnWithEnv used to carry — before, it was skipped there. Comparing
+// the resolved home against an unresolved t.TempDir() is the stale assumption
+// that first-ever-macOS-run then exposed; setting the env to the canonical
+// spelling at the source makes the expectation correct on both platforms. The
+// sibling tests above avoid this only because their expected homes are
+// non-existent subdirs, which EvalSymlinks leaves unresolved.
 func TestDaemonProcessHome_ReadableEnvironIsKnown(t *testing.T) {
-	explicit := t.TempDir()
+	explicit := testguard.CanonicalTempDir(t)
 	proc := spawnWithEnv(t, "af", []string{"--daemon"}, map[string]string{"AGENT_FACTORY_HOME": explicit})
 
 	home, known := daemonProcessHome(proc.PID)

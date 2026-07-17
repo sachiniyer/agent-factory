@@ -6,13 +6,18 @@ import (
 	"testing"
 
 	"github.com/spf13/cobra"
+
+	"github.com/sachiniyer/agent-factory/internal/testguard"
 )
 
 // TestCollectDaemonStatusNoDaemon runs the read-only probe against a fresh
 // temp home where no daemon is running: it must report not-running and resolve
 // both socket paths under that home without dialing or spawning anything.
 func TestCollectDaemonStatusNoDaemon(t *testing.T) {
-	home := t.TempDir()
+	// SocketTempDir, not t.TempDir: this resolves the daemon socket paths, and on
+	// macOS a t.TempDir() home is ~107 bytes — past sun_path, so resolution now
+	// fails with the #1940 guard. The real home (~/.agent-factory) is short.
+	home := testguard.SocketTempDir(t)
 	t.Setenv("AGENT_FACTORY_HOME", home)
 
 	info := collectDaemonStatus()

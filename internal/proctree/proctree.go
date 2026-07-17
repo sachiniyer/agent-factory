@@ -1,123 +1,94 @@
-// Package proctree inspects the local process table via /proc. It exists so
-// session teardown can reap every descendant of a tmux pane (#1104) and so
-// `af doctor` can trace leaked processes back to the session that spawned
-// them.
+// Package proctree inspects the local process table. It exists so session
+// teardown can reap every descendant of a tmux pane (#1104) and so `af doctor`
+// can trace leaked processes back to the session that spawned them.
 //
 // Every operation that signals a process guards against PID reuse by pairing
-// the PID with its kernel start time (/proc/<pid>/stat field 22): a
-// (pid, starttime) pair names a process *instance*, not just a slot. A PID
-// that has been recycled since the snapshot fails the identity check and is
-// never signalled.
+// the PID with a platform-defined start identifier: a (pid, StartID) pair names
+// a process *instance*, not just a slot. A PID that has been recycled since the
+// snapshot fails the identity check and is never signalled.
 //
-// On non-Linux platforms (no /proc) Snapshot returns an error and callers
-// degrade to doing nothing — reaping and doctor scans are best-effort
-// diagnostics, never load-bearing for correctness.
+// # Platform support
+//
+// The process table is read through a per-platform backend, selected by build
+// tag: proctree_linux.go reads /proc, proctree_darwin.go reads the kernel's
+// sysctl process table. A platform with neither gets proctree_other.go, whose
+// every entry point fails with ErrUnsupportedPlatform.
+//
+// That structure is the point of this package's shape, not an accident of it.
+// This is a DIAGNOSTIC layer, and the worst thing a diagnostic layer can do is
+// answer "nothing found" when the truth is "I cannot look" — a caller cannot
+// tell the two apart, so blindness reads as health. Before #1939 this package
+// was /proc-only with no build tag: on darwin Snapshot() failed on every call,
+// session/tmux/reap.go swallowed the error, and `af doctor` reported a clean
+// bill from an empty snapshot. It had been shipping that way to every macOS
+// user for as long as we have shipped darwin binaries.
+//
+// Two rules keep that from coming back, and both are load-bearing:
+//
+//  1. A platform we cannot read must not COMPILE, rather than silently no-op.
+//     proctree_other.go exists to be a loud failure on any future GOOS, and its
+//     errors are unconditional — there is no path through it that reports an
+//     empty process table as success.
+//  2. "I cannot see" must be REPORTABLE, so callers can say it out loud.
+//     ErrUnsupportedPlatform is distinguishable with errors.Is, and doctor
+//     renders a failed Snapshot as a FAIL row rather than omitting the check
+//     (doctor/doctor.go). Never reintroduce a caller that maps a Snapshot error
+//     to "no processes".
 package proctree
 
 import (
-	"bytes"
 	"errors"
 	"fmt"
 	"os"
-	"strconv"
 	"strings"
 	"syscall"
 	"time"
 )
 
-// clkTck is the kernel clock-tick rate (_SC_CLK_TCK) used to convert
-// /proc stat fields to seconds. It is 100 on every mainstream Linux
-// configuration; Go's runtime makes the same assumption. Only used for
-// approximate CPU/age reporting, never for identity checks.
-const clkTck = 100
+// ErrUnsupportedPlatform is returned by every read entry point on a platform
+// with no process-table backend. Callers that can degrade must report it —
+// never treat it as an empty result. Test with errors.Is.
+var ErrUnsupportedPlatform = errors.New("proctree: reading the process table is not supported on this platform")
 
 // Process identifies one live process at snapshot time.
 type Process struct {
 	PID  int
 	PPID int
-	// StartTicks is /proc/<pid>/stat field 22 (starttime): clock ticks
-	// between boot and process start. Together with PID it uniquely
-	// identifies a process instance until reboot.
-	StartTicks uint64
-	// SID is the kernel session id (stat field 6). Every process spawned
-	// inside a tmux pane shares the pane root's SID unless it called
-	// setsid, so SID membership proves pane ancestry even after a process
-	// is reparented to init.
+	// StartID is an opaque, platform-defined process start stamp. Together
+	// with PID it uniquely identifies a process instance until reboot; it is
+	// compared for EQUALITY only and its units differ per platform (Linux:
+	// clock ticks since boot, from /proc/<pid>/stat field 22; darwin:
+	// microseconds since the epoch, from kinfo_proc's p_starttime). Never do
+	// arithmetic on it — use StartedAt for anything time-shaped.
+	StartID uint64
+	// StartedAt is when the process started, in wall-clock time. Derived by
+	// the platform backend so age arithmetic is portable.
+	StartedAt time.Time
+	// SID is the kernel session id. Every process spawned inside a tmux pane
+	// shares the pane root's SID unless it called setsid, so SID membership
+	// proves pane ancestry even after a process is reparented to init.
 	SID int
-	// Comm is the kernel task name (stat field 2, max 15 chars).
+	// Comm is the kernel task name (truncated by the kernel: 15 chars on
+	// Linux, 16 on darwin).
 	Comm string
-	// UTicks and STicks are cumulative user/system CPU ticks (stat
-	// fields 14/15) at snapshot time.
-	UTicks uint64
-	STicks uint64
 }
+
+// sidUnknown is the SID of a process whose kernel session id could not be
+// read. It is deliberately not 0: 0 is a real value (kernel threads carry it),
+// so reusing it would make "I could not tell" indistinguishable from a fact,
+// and SessionMembers would then hand every unreadable process to the caller as
+// a session member. See SessionMembers.
+const sidUnknown = -1
 
 // Snapshot reads the whole process table once. The result is a point-in-time
 // view: processes may die (or PIDs be recycled) immediately after. Callers
 // must use Signal/AliveSame — which re-verify identity — before acting on an
 // entry.
+//
+// An error means the table could not be READ, which is never the same fact as
+// "no processes are running": report it, do not treat it as an empty map.
 func Snapshot() (map[int]Process, error) {
-	entries, err := os.ReadDir("/proc")
-	if err != nil {
-		return nil, fmt.Errorf("reading /proc: %w", err)
-	}
-	procs := make(map[int]Process, len(entries))
-	for _, e := range entries {
-		pid, err := strconv.Atoi(e.Name())
-		if err != nil || pid <= 0 {
-			continue
-		}
-		p, err := readStat(pid)
-		if err != nil {
-			// Process exited between ReadDir and the stat read; skip.
-			continue
-		}
-		procs[pid] = p
-	}
-	return procs, nil
-}
-
-// readStat parses /proc/<pid>/stat. Format: `pid (comm) state ppid ...`.
-// Comm may itself contain spaces and ')' — the parse anchors on the LAST ')'.
-func readStat(pid int) (Process, error) {
-	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
-	if err != nil {
-		return Process{}, err
-	}
-	open := bytes.IndexByte(data, '(')
-	close_ := bytes.LastIndexByte(data, ')')
-	if open < 0 || close_ < open || close_+2 > len(data) {
-		return Process{}, fmt.Errorf("malformed stat for pid %d", pid)
-	}
-	comm := string(data[open+1 : close_])
-	fields := strings.Fields(string(data[close_+2:]))
-	// fields[0] is stat field 3 (state); stat field N lives at fields[N-3].
-	const (
-		idxPPID  = 4 - 3
-		idxSID   = 6 - 3
-		idxUtime = 14 - 3
-		idxStime = 15 - 3
-		idxStart = 22 - 3
-	)
-	if len(fields) <= idxStart {
-		return Process{}, fmt.Errorf("truncated stat for pid %d", pid)
-	}
-	ppid, err := strconv.Atoi(fields[idxPPID])
-	if err != nil {
-		return Process{}, fmt.Errorf("bad ppid for pid %d: %w", pid, err)
-	}
-	sid, err := strconv.Atoi(fields[idxSID])
-	if err != nil {
-		return Process{}, fmt.Errorf("bad sid for pid %d: %w", pid, err)
-	}
-	start, err := strconv.ParseUint(fields[idxStart], 10, 64)
-	if err != nil {
-		return Process{}, fmt.Errorf("bad starttime for pid %d: %w", pid, err)
-	}
-	// CPU counters are for reporting only; a parse failure degrades to 0.
-	utime, _ := strconv.ParseUint(fields[idxUtime], 10, 64)
-	stime, _ := strconv.ParseUint(fields[idxStime], 10, 64)
-	return Process{PID: pid, PPID: ppid, SID: sid, StartTicks: start, Comm: comm, UTicks: utime, STicks: stime}, nil
+	return snapshot()
 }
 
 // TreeOf returns root plus every descendant of root present in snap, in BFS
@@ -153,7 +124,16 @@ func TreeOf(snap map[int]Process, root int) []Process {
 // sid. Complements TreeOf: a pane descendant that was reparented to init
 // (its spawner exited first) drops out of the ppid tree but keeps the pane
 // root's SID unless it called setsid.
+//
+// A non-positive sid matches NOTHING, and that is a safety property rather
+// than an edge case. The result of this function flows into KillEscalating
+// (session/tmux/reap.go), so "every process whose session id I could not read"
+// must never be answerable as a set: sidUnknown and 0 (kernel threads) are
+// both excluded, on both platforms.
 func SessionMembers(snap map[int]Process, sid int) []Process {
+	if sid <= 0 {
+		return nil
+	}
 	var members []Process
 	for _, p := range snap {
 		if p.SID == sid {
@@ -163,14 +143,14 @@ func SessionMembers(snap map[int]Process, sid int) []Process {
 	return members
 }
 
-// AliveSame reports whether the same process instance (matching PID and
-// start time) is still running.
+// AliveSame reports whether the same process instance (matching PID and start
+// identifier) is still running.
 func AliveSame(p Process) bool {
-	cur, err := readStat(p.PID)
+	cur, err := readProc(p.PID)
 	if err != nil {
 		return false
 	}
-	return cur.StartTicks == p.StartTicks
+	return cur.StartID == p.StartID
 }
 
 // ErrIdentityChanged is returned by Signal when the PID no longer names the
@@ -264,115 +244,249 @@ func KillEscalating(procs []Process, grace, termWait time.Duration, logf func(fo
 	return remaining
 }
 
+// ErrCPUUnknown is returned by CPUFraction when the kernel would not report
+// the process's CPU time (typically another user's process). It is distinct
+// from a zero fraction: "not measurable" and "idle" are different findings,
+// and only one of them means the caller may stop looking.
+var ErrCPUUnknown = errors.New("proctree: cpu time is not readable for this process")
+
 // CPUFraction returns the process's lifetime-average CPU usage as a fraction
 // of one core (1.0 = a full core since it started), plus its age in seconds.
-// Uses /proc/uptime; returns (0, 0, error) when that is unreadable. A brand
-// new process (age < 1s) reports 0 to avoid a noisy division.
+// A brand new process (age < 1s) reports 0 to avoid a noisy division.
+//
+// The CPU counter is read fresh rather than carried on Process: only doctor
+// asks for it, and making it a snapshot field would charge every teardown reap
+// for a number it never looks at.
+//
+// An unreadable counter is an ERROR (ErrCPUUnknown), never a 0.0 fraction.
+// Doctor uses this to find processes pegging a core, so "I could not measure"
+// and "measured, idle" must not arrive at the caller wearing the same face.
 func CPUFraction(p Process) (frac float64, ageSeconds float64, err error) {
-	data, err := os.ReadFile("/proc/uptime")
+	if p.StartedAt.IsZero() {
+		// No start time means the backend could not establish boot time (a
+		// procfs mounted subset=pid hides /proc/uptime while still serving
+		// /proc/<pid>/stat). Wrapped in ErrCPUUnknown so it classifies exactly
+		// like a refused counter: unmeasurable, NOT idle.
+		return 0, 0, fmt.Errorf("%w: pid %d has no start time, so its age is unknown", ErrCPUUnknown, p.PID)
+	}
+	age := time.Since(p.StartedAt).Seconds()
+	cpu, err := readCPUTime(p.PID)
 	if err != nil {
-		return 0, 0, fmt.Errorf("reading /proc/uptime: %w", err)
+		return 0, age, fmt.Errorf("%w: %v", ErrCPUUnknown, err)
 	}
-	fields := strings.Fields(string(data))
-	if len(fields) == 0 {
-		return 0, 0, errors.New("malformed /proc/uptime")
-	}
-	uptime, err := strconv.ParseFloat(fields[0], 64)
-	if err != nil {
-		return 0, 0, fmt.Errorf("malformed /proc/uptime: %w", err)
-	}
-	age := uptime - float64(p.StartTicks)/clkTck
 	if age < 1 {
 		return 0, age, nil
 	}
-	busy := float64(p.UTicks+p.STicks) / clkTck
-	return busy / age, age, nil
+	return cpu.Seconds() / age, age, nil
 }
 
-// EnvLookup reads key from /proc/<pid>/environ, separating "the variable is
-// absent" (false, nil) from "the environ could not be read at all" (false,
-// err).
+// ErrEnvUnreadable is returned when a process's environment could not be read.
 //
-// The distinction is load-bearing for any caller that attributes a process to
-// something on the strength of a missing variable. /proc/<pid>/environ is
-// readable only by the process owner, while /proc/<pid>/cmdline is
-// world-readable — so on a shared machine another user's process is visible
-// and identifiable, yet its environ always fails to read. A caller that treats
-// that failure as "the variable is unset" and applies a default silently
-// adopts a stranger's process as its own (#1044). EnvValue cannot express the
-// difference; use this when the answer matters.
+// It means "I was not allowed to look", NEVER "the variable is not set". The
+// difference is the whole reason this error exists: see EnvStatus.
+var ErrEnvUnreadable = errors.New("proctree: the process environment could not be read")
+
+// EnvStatus is the outcome of an environment probe. There are THREE, not two,
+// and the third is the point.
+//
+// A (value, bool) probe cannot say "I could not tell you". It can only say
+// found or not-found, so a DENIED read arrives at the caller wearing the same
+// face as a definite negative — and the caller then acts on a fact nobody
+// established. That is how a redacted read becomes a deletion: see
+// doctor/checks.go's processReferencedHomes, where "no process references this
+// home" is the predicate for os.RemoveAll.
+//
+// This is #1962's shape ("a bool cannot say unknown"), on the platform we just
+// gained the ability to test.
+type EnvStatus int
+
+const (
+	// EnvUnknown means the environment could not be read: denied, redacted,
+	// or the process is gone. The variable may or may not be set — we do not
+	// know, and neither does the caller.
+	//
+	// It is the ZERO VALUE deliberately. A forgotten assignment, an
+	// unhandled switch arm, or a zero-valued struct field therefore means
+	// "unknown" rather than "definitely absent", so the failure mode of
+	// sloppiness is caution instead of a fabricated negative.
+	EnvUnknown EnvStatus = iota
+	// EnvFound means the environment was read and the variable is set.
+	EnvFound
+	// EnvAbsent means the environment was READ and the variable is
+	// definitively not in it. Only this justifies acting on the variable's
+	// absence.
+	EnvAbsent
+)
+
+func (s EnvStatus) String() string {
+	switch s {
+	case EnvFound:
+		return "found"
+	case EnvAbsent:
+		return "absent"
+	default:
+		return "unknown"
+	}
+}
+
+// EnvLookup, OwnerUID and WorkingDir are the three-return / two-return process
+// readers #1920's daemon-skew detection depends on (doctor/skew.go). They were
+// added straight onto /proc while this file was still Linux-only; here they are
+// re-expressed as thin wrappers over the platform-backed primitives, so #1920
+// keeps its exact contract AND gains a darwin backend instead of silently
+// failing there. Their signatures are unchanged, so skew.go and skew_test.go
+// are untouched.
+
+// EnvLookup reads key from a process's initial environment, separating "absent"
+// (false, nil) from "could not read" (false, err) — the distinction #1044 turns
+// on. It is the (string, bool, error) spelling of LookupEnv, and it inherits the
+// same three-way honesty: a redacted or empty (indistinguishable) environment is
+// an error, not a definite "unset". Prefer LookupEnv in new code.
 func EnvLookup(pid int, key string) (string, bool, error) {
-	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/environ", pid))
-	if err != nil {
-		return "", false, err
+	switch v, st := LookupEnv(pid, key); st {
+	case EnvFound:
+		return v, true, nil
+	case EnvAbsent:
+		return "", false, nil
+	default:
+		return "", false, fmt.Errorf("%w: pid %d", ErrEnvUnreadable, pid)
 	}
-	prefix := []byte(key + "=")
-	for _, kv := range bytes.Split(data, []byte{0}) {
-		if bytes.HasPrefix(kv, prefix) {
-			return string(kv[len(prefix):]), true, nil
-		}
-	}
-	return "", false, nil
 }
 
-// WorkingDir returns pid's current working directory, read from
-// /proc/<pid>/cwd. Reports false when the link cannot be read (a different
-// user's process, a kernel thread, or a process that has exited).
-//
-// Needed by anything that resolves a RELATIVE path out of another process's
-// configuration: such a path means whatever that process's cwd makes it mean,
-// which is not ours to assume (#1044).
-func WorkingDir(pid int) (string, bool) {
-	dir, err := os.Readlink(fmt.Sprintf("/proc/%d/cwd", pid))
-	if err != nil {
-		return "", false
-	}
-	return dir, true
-}
-
-// OwnerUID returns the uid owning pid, read from /proc/<pid>'s ownership.
-// Reports false when the process is gone or its status cannot be read.
+// OwnerUID returns the uid owning pid; false when it cannot be determined. It is
+// an alias for UID, kept because skew.go injects it by this name.
 func OwnerUID(pid int) (int, bool) {
-	info, err := os.Stat(fmt.Sprintf("/proc/%d", pid))
-	if err != nil {
-		return 0, false
-	}
-	st, ok := info.Sys().(*syscall.Stat_t)
-	if !ok {
-		return 0, false
-	}
-	return int(st.Uid), true
+	return UID(pid)
 }
 
-// EnvValue reads key from /proc/<pid>/environ. Returns ("", false) when the
-// variable is absent or the environ is unreadable (different UID, kernel
-// thread, or the process exited) — callers that must tell those apart want
-// EnvLookup. The environ reflects the process's
-// *initial* environment — exactly what we want for ancestry markers, since a
-// process cannot retroactively lose the marker it inherited.
-func EnvValue(pid int, key string) (string, bool) {
-	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/environ", pid))
+// WorkingDir returns pid's current working directory; false when it cannot be
+// read (a foreign process, a kernel thread, an exited process — or a platform
+// with no backend for it). The bool is an honest unknown channel, not a
+// fabricated fact: skew.go treats false as "I could not resolve a relative home
+// in this frame" and skips, never as a positive claim (#1044).
+func WorkingDir(pid int) (string, bool) {
+	return readWorkingDir(pid)
+}
+
+// LookupEnv reads key from the process's initial environment and reports which
+// of the three things happened. Callers MUST handle EnvUnknown explicitly and
+// must never collapse it into EnvAbsent.
+//
+// The environment reflects the process's *initial* state — exactly what we want
+// for ancestry markers, since a process cannot retroactively lose the marker it
+// inherited.
+func LookupEnv(pid int, key string) (string, EnvStatus) {
+	// Through Environ, so the "did we actually get an answer?" classification
+	// lives in exactly one place and this cannot drift from it.
+	env, err := Environ(pid)
 	if err != nil {
-		return "", false
+		return "", EnvUnknown
 	}
-	prefix := []byte(key + "=")
-	for _, kv := range bytes.Split(data, []byte{0}) {
-		if bytes.HasPrefix(kv, prefix) {
-			return string(kv[len(prefix):]), true
+	prefix := key + "="
+	for _, kv := range env {
+		if strings.HasPrefix(kv, prefix) {
+			return kv[len(prefix):], EnvFound
 		}
 	}
-	return "", false
+	return "", EnvAbsent
+}
+
+// Environ returns the process's initial environment as "KEY=VALUE" strings, or
+// an error wrapping ErrEnvUnreadable when we did not get an answer.
+//
+// # Why an EMPTY environment is an error and not a result
+//
+// This is the one place that decides whether we were told anything, and it does
+// so by looking at what came back rather than by predicting what we are allowed
+// to read. That distinction is the whole design.
+//
+// A withheld environment and an empty one are BYTE-IDENTICAL. darwin's
+// sysctl_procargsx omits the env section from the KERN_PROCARGS2 buffer when it
+// declines, producing exactly what `env -i cmd` produces, and it does not say
+// which happened. So "zero variables" is not a fact about the process — it is
+// the absence of an answer, and it must not be handed to a caller as
+// "AGENT_FACTORY_HOME is not set". Downstream, that negative is the predicate
+// for deleting a directory (doctor's processReferencedHomes → os.RemoveAll).
+//
+// The obvious alternative — work out up front whether the kernel will serve us
+// — is what this replaced, and it was wrong. XNU withholds on at least TWO
+// independent grounds (uid mismatch AND cs_restricted, which SIP makes ordinary
+// on a real Mac), and a gate modelling only ownership let same-uid restricted
+// processes through to be misread. Predicting a policy you do not own means
+// reimplementing it, and a reimplementation is wrong as soon as the real policy
+// grows a clause — entitlements, hardened runtime, platform binaries are all
+// candidates. Classifying the ANSWER collapses every ground, present and
+// future, into this single branch, and it cannot rot when Apple adds one.
+//
+// The cost is precise and acceptable: a process genuinely started with an empty
+// environment (`env -i cmd`) reports unknown rather than absent. We say "I
+// cannot tell" about a process we truly cannot tell apart from a redacted one.
+// That is the honest answer, and the callers that could act on it all treat
+// unknown as a reason not to.
+func Environ(pid int) ([]string, error) {
+	env, err := readEnviron(pid)
+	if err != nil {
+		return nil, err
+	}
+	if len(env) == 0 {
+		return nil, fmt.Errorf("%w: pid %d returned no environment variables at all, which is "+
+			"indistinguishable from an environment the kernel withheld — it does not report which",
+			ErrEnvUnreadable, pid)
+	}
+	return env, nil
+}
+
+// UID returns the uid owning pid. The second return is false when ownership
+// cannot be determined (the process exited, or the platform will not say),
+// which callers MUST treat as "unknown" and never as "ours" — this gates
+// whether `af reset` may signal a process.
+func UID(pid int) (int, bool) {
+	return readUID(pid)
+}
+
+// EnvValue is DELETED, deliberately. Do not reintroduce it.
+//
+// It was `func EnvValue(pid int, key string) (string, bool)`, and the bool was
+// the bug: it collapsed "the variable is not set" and "I was not allowed to
+// read the environment" into one false. Every caller then treated a denied read
+// as a definite negative — including processReferencedHomes, whose negative is
+// the predicate for deleting a directory.
+//
+// A two-valued answer to a three-valued question cannot be used safely, so the
+// fix is not a careful caller: it is the removal of the API that made the
+// mistake expressible. Use LookupEnv and handle EnvUnknown.
+
+// Argv returns the process's argument vector with argument BOUNDARIES intact,
+// or nil when it cannot be read.
+//
+// The boundaries are the whole point: an install path containing a space
+// ("/Users/John Smith/.local/bin/af") is one argv entry, and any source that
+// hands back a pre-joined string has already destroyed the only evidence of
+// that. Re-splitting such a string on whitespace yields argv[0] = "/Users/John"
+// — which is how spaced-install daemon detection broke on darwin (#1942) while
+// working on Linux, where /proc/<pid>/cmdline preserved the NULs. Callers that
+// classify a process by its binary name MUST use this, never Cmdline.
+func Argv(pid int) []string {
+	argv, err := readArgv(pid)
+	if err != nil {
+		return nil
+	}
+	return argv
 }
 
 // Cmdline returns the process's argv joined with spaces, or "" when
-// unreadable. For kernel threads (empty cmdline) it returns "". This is a
-// lossy, display-oriented view: it collapses argv boundaries, so a binary path
+// unreadable. For kernel threads (empty argv) it returns "". This is a lossy,
+// display-oriented view: it collapses argv boundaries, so a binary path
 // containing spaces cannot be recovered from it. Do not use it for
-// classification that depends on argv boundaries (#1214).
+// classification that depends on argv boundaries — use Argv (#1214, #1942).
 func Cmdline(pid int) string {
-	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/cmdline", pid))
-	if err != nil {
+	argv := Argv(pid)
+	if len(argv) == 0 {
 		return ""
 	}
-	return strings.TrimSpace(string(bytes.ReplaceAll(data, []byte{0}, []byte{' '})))
+	out := argv[0]
+	for _, a := range argv[1:] {
+		out += " " + a
+	}
+	return out
 }
