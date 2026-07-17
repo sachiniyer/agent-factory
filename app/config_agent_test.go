@@ -99,3 +99,54 @@ func TestConfigAgentSpawnSuccessIsQuiet(t *testing.T) {
 	require.NotNil(t, model)
 	assert.Nil(t, cmd, "a successful spawn should not raise a notice")
 }
+
+// TestConfigAgentDoesNotSpawnTwice pins the re-entry guard. The spawn is a
+// daemon round trip that waits out the agent's 60s readiness budget with no UI
+// feedback, so a user who thinks the key did nothing WILL press it again. Each
+// press is a real agent: the daemon auto-suffixes the title, so nothing upstream
+// deduplicates them. The attach path guards the identical hazard with
+// attachTransitioning (#1530).
+//
+// In production the gate is handleDefaultKeyPress -> handleConfigAgent, so this
+// drives the real dispatch rather than calling the handler directly.
+func TestConfigAgentDoesNotSpawnTwice(t *testing.T) {
+	h := newTestHome(t)
+
+	spawns := 0
+	t.Cleanup(SetConfigAgentSpawnerForTest(func(configagent.Mode, string) error {
+		spawns++
+		return nil
+	}))
+
+	pressC := func() tea.Cmd {
+		_, cmd := h.handleDefaultKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'C'}}, keys.KeyConfigAgent)
+		return cmd
+	}
+
+	// The guard is armed synchronously inside handleConfigAgent, so the second
+	// press is refused on the event loop — no goroutines or channels needed to
+	// observe it. (An earlier version of this test held the first spawn open on a
+	// channel to simulate a slow agent; that raced, because whichever call
+	// reached the stub first blocked, and when that was the second press the test
+	// deadlocked instead of failing. Deterministic beats realistic here.)
+	cmd1 := pressC()
+	require.NotNil(t, cmd1, "the first C must start a spawn")
+
+	cmd2 := pressC()
+	require.Nil(t, cmd2,
+		"a second C while the first spawn is still in flight must be refused: the spawn waits out a "+
+			"60s readiness budget with no UI feedback, so a user WILL press again, and each press would "+
+			"otherwise create another agent (the daemon auto-suffixes the title, so nothing upstream dedupes)")
+
+	// Only the accepted press does any work.
+	cmd1()
+	if cmd2 != nil {
+		cmd2()
+	}
+	assert.Equal(t, 1, spawns, "exactly one config agent must be spawned for two presses")
+
+	// After the spawn reports back, C works again — a failed or finished spawn
+	// must not disable the hotkey for the rest of the session.
+	h.handleConfigAgentSpawned(configAgentSpawnedMsg{})
+	require.NotNil(t, pressC(), "C must be pressable again once the previous spawn settled")
+}

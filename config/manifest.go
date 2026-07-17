@@ -48,20 +48,6 @@ const (
 	TierAdvanced ConfigTier = 3
 )
 
-// String renders a tier as its briefing section heading.
-func (t ConfigTier) String() string {
-	switch t {
-	case TierCore:
-		return "core"
-	case TierCommon:
-		return "common"
-	case TierAdvanced:
-		return "advanced"
-	default:
-		return "unknown"
-	}
-}
-
 // ManifestEntry describes one user-facing global config key.
 type ManifestEntry struct {
 	// Key is the toml key as written in config.toml (e.g. "default_program").
@@ -302,11 +288,27 @@ var configManifest = []ManifestEntry{
 	},
 }
 
-// Manifest returns every user-facing global config key in tier order. The
-// returned slice is a copy, so a caller cannot mutate the table.
+// Manifest returns every user-facing global config key in tier order.
+//
+// The result is DEEP-copied: the entries and their Enum slices both. A shallow
+// copy would be a trap rather than a nicety — three entries take their Enum
+// straight from tmux.SupportedPrograms (the canonical agent list that
+// ValidateProgramEnum and program resolution read), so a caller that sorted or
+// rewrote the Enum of a returned entry would silently corrupt agent validation
+// process-wide. A picker UI sorting the values it was handed is an entirely
+// reasonable thing to write, so the copy is the manifest's job, not the
+// caller's.
 func Manifest() []ManifestEntry {
 	out := make([]ManifestEntry, len(configManifest))
 	copy(out, configManifest)
+	for i := range out {
+		if out[i].Enum == nil {
+			continue
+		}
+		enum := make([]string, len(out[i].Enum))
+		copy(enum, out[i].Enum)
+		out[i].Enum = enum
+	}
 	return out
 }
 

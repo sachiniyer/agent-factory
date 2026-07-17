@@ -1,6 +1,8 @@
 package app
 
 import (
+	"errors"
+
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/sachiniyer/agent-factory/configagent"
@@ -59,6 +61,15 @@ type configAgentSpawnedMsg struct {
 // "I want to change something" gesture, so the agent opens by asking what to
 // change rather than starting a first-run tour. Onboarding is phase 4's trigger.
 func (m *home) handleConfigAgent() (tea.Model, tea.Cmd) {
+	// Re-entry guard. The spawn below is a daemon round trip that waits out the
+	// agent's readiness budget (60s in task.WaitForReady), and the TUI renders
+	// nothing while it runs — so a user who sees no response and presses C again
+	// would get a SECOND config agent, and a third. The daemon auto-suffixes the
+	// title, so nothing upstream stops it: each press is a real agent. The attach
+	// path guards the identical hazard with attachTransitioning (#1530).
+	if m.configAgentSpawning {
+		return m, nil
+	}
 	// Target the ACTIVE project's repo root, not the process cwd: after an
 	// in-place project switch (#1461) the active repo is m.repoRoot, which may
 	// no longer be where af was launched. Mirrors the session-create path.
@@ -66,6 +77,16 @@ func (m *home) handleConfigAgent() (tea.Model, tea.Cmd) {
 	if repoPath == "" {
 		repoPath = "."
 	}
+	m.configAgentSpawning = true
+	// Acknowledge the keypress. Without this the TUI is silent for as long as the
+	// agent takes to become ready, which reads as a dead key — and a dead-feeling
+	// key plus the guard above would mean C appears to do nothing at all.
+	//
+	// Set synchronously with NO auto-clear, rather than through
+	// showTransientMessage: that clears after 3 seconds, which would expire most
+	// of the way through a 60s readiness wait and put the user back in silence.
+	// This notice stands until the spawn reports back and clears it.
+	m.setTransientNotice(errors.New("Starting the config agent…"))
 	spawn := spawnConfigAgent
 	return m, func() tea.Msg {
 		return configAgentSpawnedMsg{err: spawn(configagent.ModeChange, repoPath)}
@@ -78,9 +99,18 @@ func (m *home) handleConfigAgent() (tea.Model, tea.Cmd) {
 // self-clearing notice every other non-fatal action uses. The user stays in the
 // TUI with their config untouched; nothing is modal and nothing blocks.
 func (m *home) handleConfigAgentSpawned(msg configAgentSpawnedMsg) (tea.Model, tea.Cmd) {
+	// Clear the re-entry guard FIRST, and unconditionally: a failed spawn must
+	// leave C pressable again, or one missing binary would disable the hotkey for
+	// the rest of the session.
+	m.configAgentSpawning = false
 	if msg.err != nil {
 		log.ErrorLog.Printf("could not start the config agent: %v", msg.err)
+		// handleError replaces the "Starting…" notice with the failure, so the
+		// user sees why rather than a notice that just vanishes.
 		return m, m.handleError(msg.err)
 	}
+	// Success: drop the "Starting…" notice. The daemon's events plane brings the
+	// session in on its own, so there is nothing further to announce.
+	m.errBox.Clear()
 	return m, nil
 }

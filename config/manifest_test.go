@@ -4,6 +4,8 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
 // This file guards the config manifest (manifest.go) and its briefing renderer
@@ -393,5 +395,43 @@ func TestRenderBriefingNilConfig(t *testing.T) {
 	}
 	if strings.Contains(out, "current: claude") {
 		t.Error("a nil config must not present defaults as if they were live values")
+	}
+}
+
+// TestManifestDoesNotAliasTheAgentList pins that Manifest() hands back a deep
+// copy. It is not a hypothetical: three entries take their Enum directly from
+// tmux.SupportedPrograms — the canonical agent list ValidateProgramEnum and
+// ResolveProgram read — so under a shallow copy, a caller sorting or rewriting
+// the Enum it was handed would silently corrupt agent validation for the whole
+// process.
+//
+// A picker UI sorting its options is a completely ordinary thing to write, and
+// the manifest exists to be consumed by exactly that kind of surface, so the
+// copy has to be the manifest's job. In production nothing mutates Enum today —
+// this locks the property before the first consumer relies on it.
+func TestManifestDoesNotAliasTheAgentList(t *testing.T) {
+	before := make([]string, len(tmux.SupportedPrograms))
+	copy(before, tmux.SupportedPrograms)
+
+	// A consumer doing something entirely reasonable with what it was handed.
+	for _, e := range Manifest() {
+		for i := range e.Enum {
+			e.Enum[i] = "corrupted"
+		}
+	}
+
+	if !reflect.DeepEqual(tmux.SupportedPrograms, before) {
+		t.Fatalf("mutating a Manifest() entry's Enum corrupted tmux.SupportedPrograms: got %v, want %v — "+
+			"Manifest() must deep-copy Enum, or every agent-name validation in the process is one "+
+			"caller's sort away from breaking", tmux.SupportedPrograms, before)
+	}
+
+	// The manifest's own table must be intact too, not just the package global.
+	for _, e := range Manifest() {
+		for _, v := range e.Enum {
+			if v == "corrupted" {
+				t.Fatalf("manifest entry %q kept a mutated Enum across calls", e.Key)
+			}
+		}
 	}
 }

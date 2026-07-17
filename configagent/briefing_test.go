@@ -125,8 +125,12 @@ func TestBriefingStatesTheApplyRules(t *testing.T) {
 		"shall I apply that?",                  // no confirm-diff step
 		"`key = value`",                        // echo shape
 		"Do not repeat it after every change.", // no duplicated restart note
-		"stays\n  hand-editable",               // undo story
-		"--json",                               // machine-readable reads
+		// The undo story. Matched on a wrap-INDEPENDENT fragment: an earlier
+		// version asserted "stays\n  hand-editable", which pinned the paragraph's
+		// line breaks rather than the rule, and broke the first time the section
+		// was rewrapped for readability.
+		"hand-editable", // undo story
+		"--json",        // machine-readable reads
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("briefing is missing apply rule %q", want)
