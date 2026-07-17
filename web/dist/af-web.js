@@ -6402,37 +6402,31 @@ var EventStream = class {
 var REPO_DEFAULT = "";
 function backendChoices(catalog) {
   if (catalog === null) {
-    return [{ value: REPO_DEFAULT, label: "Repo default", available: true, reason: "" }];
+    return [{ value: REPO_DEFAULT, label: "Repo default", status: "available", reason: "" }];
   }
-  const reason = defaultReason(catalog);
   const choices = [
     {
       value: REPO_DEFAULT,
+      // "Repo default" with no parenthetical when the daemon reports no default:
+      // that is the misconfigured case, where naming a backend would be inventing
+      // one. The reason says what is wrong with the key.
       label: catalog.default === "" ? "Repo default" : `Repo default (${catalog.default})`,
-      // A repo whose declared default is unconfigured is genuinely unusable: that
-      // create resolves to the broken backend and fails. Reporting it as such
-      // surfaces the config bug at choose time instead of at create time — which is
-      // the whole point of #1933 — and is why this is computed, not hardcoded true.
-      available: reason === "",
-      reason
+      // Taken from the daemon, not inferred here. A repo whose declared default is
+      // broken resolves to that broken backend and FAILS — it does not quietly run
+      // local — so the default is not automatically a safe harbour.
+      status: catalog.default_status,
+      reason: catalog.default_status === "available" ? "" : catalog.default_reason ?? ""
     }
   ];
   for (const opt of catalog.backends) {
     choices.push({
       value: opt.name,
       label: opt.name,
-      available: opt.available,
-      reason: opt.available ? "" : opt.reason ?? ""
+      status: opt.status,
+      reason: opt.status === "available" ? "" : opt.reason ?? ""
     });
   }
   return choices;
-}
-function defaultReason(catalog) {
-  const resolved = catalog.backends.find((b) => b.name === catalog.default);
-  if (resolved === void 0 || resolved.available) {
-    return "";
-  }
-  return resolved.reason ?? "";
 }
 function backendNotice(choices, selected) {
   const choice = choices.find((c) => c.value === selected);
@@ -6440,7 +6434,7 @@ function backendNotice(choices, selected) {
 }
 function backendSelectable(choices, selected) {
   const choice = choices.find((c) => c.value === selected);
-  return choice === void 0 || choice.available;
+  return choice === void 0 || choice.status === "available";
 }
 
 // src/modals.ts
@@ -6548,9 +6542,16 @@ function newSessionModal(projects, defaultProject2, callbacks) {
   const backendHint = h("p", { class: "af-modal-hint" });
   backendHint.setAttribute("role", "status");
   let choices = backendChoices(null);
-  const syncSelection = () => {
+  let busy = false;
+  const syncSubmitState = () => {
     backendHint.textContent = backendNotice(choices, backendSelect.value);
-    confirmBtn.disabled = projects.length === 0 || !backendSelectable(choices, backendSelect.value);
+    confirmBtn.disabled = busy || projects.length === 0 || !backendSelectable(choices, backendSelect.value);
+  };
+  const chromeSetBusy = handle.setBusy.bind(handle);
+  handle.setBusy = (b) => {
+    busy = b;
+    chromeSetBusy(b);
+    syncSubmitState();
   };
   const renderChoices = () => {
     const previous = backendSelect.value;
@@ -6559,9 +6560,9 @@ function newSessionModal(projects, defaultProject2, callbacks) {
       backendSelect.append(h("option", { value: choice.value }, choice.label));
     }
     backendSelect.value = choices.some((c) => c.value === previous) ? previous : REPO_DEFAULT;
-    syncSelection();
+    syncSubmitState();
   };
-  backendSelect.addEventListener("change", syncSelection);
+  backendSelect.addEventListener("change", syncSubmitState);
   let loadSeq = 0;
   const loadBackendsFor = (repoPath) => {
     const seq = ++loadSeq;

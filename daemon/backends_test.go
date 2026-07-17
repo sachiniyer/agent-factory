@@ -3,6 +3,7 @@ package daemon
 import (
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 
@@ -21,6 +22,21 @@ func listBackends(t *testing.T, repoPath string) ListBackendsResponse {
 	var resp ListBackendsResponse
 	require.NoError(t, (&controlServer{}).ListBackends(ListBackendsRequest{RepoPath: repoPath}, &resp))
 	return resp
+}
+
+// addOrigin gives a repo an `origin` remote. docker/ssh clone the workspace from
+// origin, so a repo without one genuinely cannot use them — tests that expect those
+// backends to be usable must look like a real repo.
+func addOrigin(t *testing.T, repoRoot string) {
+	t.Helper()
+	require.NoError(t, exec.Command("git", "-C", repoRoot, "remote", "add", "origin", "https://example.invalid/repo.git").Run())
+}
+
+// stubLookPath makes every executable resolve, so a test's expectations do not
+// depend on whether the CI image happens to ship a `docker` binary.
+func stubLookPath(t *testing.T) {
+	t.Helper()
+	t.Cleanup(session.SetLookPathForTest(func(file string) (string, error) { return "/usr/bin/" + file, nil }))
 }
 
 // writeRepoBackendConfig writes an in-repo .agent-factory/config.json carrying the
@@ -61,15 +77,15 @@ func TestListBackends_OffersEverySupportedBackend(t *testing.T) {
 	}
 	assert.Equal(t, config.SupportedBackends, names, "the catalog is the canonical enum, in canonical order")
 
-	assert.True(t, optionByName(t, resp, config.BackendLocal).Available, "local needs no repo config")
+	assert.Equal(t, BackendAvailable, optionByName(t, resp, config.BackendLocal).Status, "local needs no repo config")
 	assert.Empty(t, optionByName(t, resp, config.BackendLocal).Reason)
 
 	// Unavailable, but present and explained — a client that hid these would leave
 	// the user wondering where docker went; the useful answer is the reason.
 	for _, name := range []string{config.BackendDocker, config.BackendSSH, config.BackendHook} {
 		opt := optionByName(t, resp, name)
-		assert.Falsef(t, opt.Available, "%s is unconfigured in this repo and must not be offered as usable", name)
-		assert.NotEmptyf(t, opt.Reason, "%s must carry an actionable reason, not just a disabled flag", name)
+		assert.Equalf(t, BackendUnavailable, opt.Status, "%s is unconfigured in this repo and must not be offered as usable", name)
+		assert.NotEmptyf(t, opt.Reason, "%s must carry an actionable reason, not just a status", name)
 	}
 	assert.Contains(t, optionByName(t, resp, config.BackendDocker).Reason, "docker.image")
 	assert.Contains(t, optionByName(t, resp, config.BackendSSH).Reason, "ssh.host")
@@ -80,7 +96,9 @@ func TestListBackends_OffersEverySupportedBackend(t *testing.T) {
 // with no reason to show.
 func TestListBackends_ReflectsRepoConfig(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	stubLookPath(t)
 	repo := setupControlRepo(t)
+	addOrigin(t, repo)
 	writeRepoBackendConfig(t, repo, map[string]any{
 		"docker": map[string]any{"image": "my-runtime:latest"},
 		"ssh":    map[string]any{"host": "build-box:2222"},
@@ -90,12 +108,12 @@ func TestListBackends_ReflectsRepoConfig(t *testing.T) {
 
 	for _, name := range []string{config.BackendLocal, config.BackendDocker, config.BackendSSH} {
 		opt := optionByName(t, resp, name)
-		assert.Truef(t, opt.Available, "%s is configured in this repo and must be selectable", name)
+		assert.Equalf(t, BackendAvailable, opt.Status, "%s is configured in this repo and must be selectable", name)
 		assert.Emptyf(t, opt.Reason, "%s is available, so there is nothing to explain", name)
 	}
 	// hook was not configured, so it stays unavailable — availability is per
 	// backend, not a single "repo is configured" flag.
-	assert.False(t, optionByName(t, resp, config.BackendHook).Available)
+	assert.Equal(t, BackendUnavailable, optionByName(t, resp, config.BackendHook).Status)
 }
 
 // TestListBackends_DefaultMatchesTheCreatePath pins the contract the web relies on
@@ -110,7 +128,9 @@ func TestListBackends_DefaultMatchesTheCreatePath(t *testing.T) {
 	})
 
 	t.Run("repo backend config is the default", func(t *testing.T) {
+		stubLookPath(t)
 		repo := setupControlRepo(t)
+		addOrigin(t, repo)
 		writeRepoBackendConfig(t, repo, map[string]any{
 			"backend": "docker",
 			"docker":  map[string]any{"image": "my-runtime:latest"},
@@ -135,9 +155,128 @@ func TestListBackends_DefaultMatchesTheCreatePath(t *testing.T) {
 
 		resp := listBackends(t, repo)
 		assert.Equal(t, config.BackendDocker, resp.Default)
-		assert.False(t, optionByName(t, resp, config.BackendDocker).Available)
+		assert.Equal(t, BackendUnavailable, optionByName(t, resp, config.BackendDocker).Status)
 		assert.Contains(t, optionByName(t, resp, config.BackendDocker).Reason, "docker.image")
+		// The DEFAULT itself must carry the problem, not just the docker row: a client
+		// renders the default as its own choice and would otherwise show it as fine.
+		assert.Equal(t, BackendUnavailable, resp.DefaultStatus)
+		assert.Contains(t, resp.DefaultReason, "docker.image")
 	})
+}
+
+// TestListBackends_InvalidConfiguredDefaultIsSurfaced is the regression for the
+// review's finding 1, and the sharpest form of "a probe that cannot answer,
+// answering anyway".
+//
+// A repo whose `backend` key names something unrecognized has NO default: such a
+// create fails outright (session.resolveBackendKind: "misconfiguration should fail
+// the create, not silently run local"). Reporting "local" there told a user with a
+// broken config that everything was normal — and implied their sessions would land
+// on local, a backend they never chose.
+func TestListBackends_InvalidConfiguredDefaultIsSurfaced(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	repo := setupControlRepo(t)
+	writeRepoBackendConfig(t, repo, map[string]any{"backend": "bogus"})
+
+	resp := listBackends(t, repo)
+
+	assert.NotEqual(t, config.BackendLocal, resp.Default, "reporting local here is a lie: this create fails, it does not fall back to local")
+	assert.Empty(t, resp.Default, "there is no default to name when the configured one is not a backend")
+	assert.Equal(t, BackendUnavailable, resp.DefaultStatus)
+	assert.Contains(t, resp.DefaultReason, `"bogus"`, "name the offending value — 'unknown backend' alone leaves the user hunting")
+	assert.Contains(t, resp.DefaultReason, config.InRepoConfigDirName, "name the file the bad value is in")
+	assert.Contains(t, resp.DefaultReason, config.SupportedBackendsString(), "and say what the valid values are")
+
+	// The real create must agree that this is broken — otherwise the catalog is
+	// pessimistic rather than honest.
+	_, err := session.BackendKindFor(session.InstanceOptions{}, repo)
+	assert.Error(t, err, "precondition: a create with no explicit backend genuinely fails for this repo")
+}
+
+// TestListBackends_HookNeedsRunnableCommands is the regression for finding 2:
+// availability must mean "I checked", not "it is configured". A hook whose command
+// does not exist is the worst case in this class — the section IS present, so a
+// config-only check calls it available, the user picks it, and the failure lands
+// later, mid-provision, looking like something else.
+func TestListBackends_HookNeedsRunnableCommands(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	repo := setupControlRepo(t)
+	writeRepoBackendConfig(t, repo, map[string]any{
+		"remote_hooks": map[string]any{
+			"launch_cmd": "af-definitely-not-installed-launch",
+			"delete_cmd": "af-definitely-not-installed-delete",
+		},
+	})
+
+	resp := listBackends(t, repo)
+	opt := optionByName(t, resp, config.BackendHook)
+
+	assert.Equal(t, BackendUnavailable, opt.Status, "remote_hooks is fully configured, but the command does not exist — offering it would be a promise we cannot keep")
+	assert.Contains(t, opt.Reason, "af-definitely-not-installed-launch", "name the command that is missing")
+	assert.Contains(t, opt.Reason, "PATH", "and say why it could not be used, so the user can act")
+}
+
+// TestListBackends_HookAvailableWhenCommandsResolve is the other half: a hook whose
+// commands DO resolve is offered. Without this, "always unavailable" would pass the
+// test above.
+func TestListBackends_HookAvailableWhenCommandsResolve(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	stubLookPath(t)
+	repo := setupControlRepo(t)
+	writeRepoBackendConfig(t, repo, map[string]any{
+		"remote_hooks": map[string]any{"launch_cmd": "af-launch", "delete_cmd": "af-delete"},
+	})
+
+	opt := optionByName(t, listBackends(t, repo), config.BackendHook)
+	assert.Equal(t, BackendAvailable, opt.Status)
+	assert.Empty(t, opt.Reason)
+}
+
+// TestListBackends_EmptyHookCommandIsNotAvailable: remote_hooks present but
+// launch_cmd empty. RemoteHooks.Validate is what create runs, so reusing it here is
+// what stops "configured" from ever again meaning merely "the section exists".
+func TestListBackends_EmptyHookCommandIsNotAvailable(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	stubLookPath(t)
+	repo := setupControlRepo(t)
+	writeRepoBackendConfig(t, repo, map[string]any{
+		"remote_hooks": map[string]any{"launch_cmd": "", "delete_cmd": "af-delete"},
+	})
+
+	opt := optionByName(t, listBackends(t, repo), config.BackendHook)
+	assert.Equal(t, BackendUnavailable, opt.Status)
+	assert.Contains(t, opt.Reason, "launch_cmd")
+}
+
+// TestListBackends_UnreadableConfigIsUnknownNotUnavailable pins the third outcome.
+//
+// A config that will not parse means we cannot tell whether docker.image is set —
+// docker.image might be perfectly fine, in a file with a stray comma elsewhere.
+// Answering "requires docker.image" there would be a fabricated finding pointing at
+// the wrong line; answering "available" would be a promise nobody checked. The only
+// honest answer is "I could not check, and here is what stopped me".
+func TestListBackends_UnreadableConfigIsUnknownNotUnavailable(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	repo := setupControlRepo(t)
+	dir := filepath.Join(repo, config.InRepoConfigDirName)
+	require.NoError(t, os.MkdirAll(dir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "config.json"), []byte("{ this is not json"), 0o644))
+
+	resp := listBackends(t, repo)
+
+	for _, name := range []string{config.BackendDocker, config.BackendSSH, config.BackendHook} {
+		opt := optionByName(t, resp, name)
+		assert.Equalf(t, BackendUnknown, opt.Status, "%s cannot be evaluated against a config that will not parse", name)
+		assert.NotContainsf(t, opt.Reason, "requires", "%s must not invent a missing-key finding it never checked for", name)
+		assert.NotEmptyf(t, opt.Reason, "%s must say what stopped the check", name)
+	}
+
+	// local reads no repo config, and a create with no explicit backend still runs
+	// local through this failure — so calling it unknown would be its own lie, and
+	// the user can still create a session while they fix the file.
+	assert.Equal(t, BackendAvailable, optionByName(t, resp, config.BackendLocal).Status)
+	assert.Equal(t, config.BackendLocal, resp.Default)
+	assert.Equal(t, BackendAvailable, resp.DefaultStatus)
 }
 
 // TestListBackends_NewBackendReachesClientsWithNoClientChange is THE anti-drift
@@ -163,7 +302,7 @@ func TestListBackends_NewBackendReachesClientsWithNoClientChange(t *testing.T) {
 	resp := listBackends(t, repo)
 
 	opt := optionByName(t, resp, "fargate")
-	assert.True(t, opt.Available, "a backend with no repo-config requirement is selectable as soon as it is registered")
+	assert.Equal(t, BackendAvailable, opt.Status, "a backend with no repo-config requirement is selectable as soon as it is registered")
 	assert.Empty(t, opt.Reason)
 	assert.Equal(t, "fargate", resp.Backends[len(resp.Backends)-1].Name, "it lands in enum order, not appended by a special case")
 }

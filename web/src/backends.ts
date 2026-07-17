@@ -11,22 +11,36 @@
 // change to this file — the property web/src/backends.test.ts pins. A label map
 // would look harmless and would silently render a new backend as blank.
 
+/** The daemon's three-outcome availability answer (daemon.BackendAvailability).
+ *
+ *  "unknown" is load-bearing: it means the daemon could NOT check (e.g. the repo's
+ *  config would not parse), which is a different answer from yes and from no. It
+ *  must never be folded into either — an unknown rendered as available is a
+ *  promise nobody verified, and rendered as unavailable it invents a finding. */
+export type BackendAvailability = "available" | "unavailable" | "unknown";
+
 /** One backend as the daemon reports it (daemon.BackendOption). */
 export interface BackendOption {
   /** The wire value sent back as CreateSession's `backend`. */
   name: string;
-  /** False when this repo's config cannot satisfy the backend. */
-  available: boolean;
-  /** Actionable reason when `available` is false — the same text the CLI prints
-   *  at create time. Absent when available. */
+  /** The checked answer for this repo. */
+  status: BackendAvailability;
+  /** Actionable reason whenever `status` is not "available" — the same text the
+   *  CLI prints at create time. Absent when available. */
   reason?: string;
 }
 
 /** The daemon's per-repo backend catalog (daemon.ListBackendsResponse). */
 export interface BackendCatalog {
   backends: BackendOption[];
-  /** The backend a create with no explicit backend resolves to for this repo. */
+  /** The backend a create with no explicit backend resolves to for this repo.
+   *  EMPTY when the repo's `backend` key names something unrecognized: such a
+   *  create fails rather than falling back to local, so there is no default. */
   default: string;
+  /** The checked answer for the repo-default choice itself. */
+  default_status: BackendAvailability;
+  /** Why the default is not usable, naming the offending value and its file. */
+  default_reason?: string;
 }
 
 /** The sentinel value of the "repo default" choice. It is the EMPTY STRING on
@@ -44,13 +58,16 @@ export interface BackendChoice {
    *  NOT looked up in a local name→label map, which is what would silently render
    *  a newly added backend as blank. */
   label: string;
-  /** False when this repo's config cannot satisfy the choice, so creating with it
-   *  would fail. Such a choice stays SELECTABLE: disabling it would hide `reason`,
-   *  which is the actionable half — a greyed-out "docker" tells a user they cannot
-   *  have it, never that one config key would give it to them. Selecting it shows
-   *  the reason and blocks the submit instead. */
-  available: boolean;
-  /** The actionable reason this choice is unusable; "" when it is fine. */
+  /** The daemon's checked answer. Only "available" may be offered as usable: both
+   *  "unavailable" (checked, will fail) and "unknown" (could not be checked) are
+   *  unverified promises, and the picker must not make one.
+   *
+   *  Such a choice stays SELECTABLE: disabling it would hide `reason`, which is the
+   *  actionable half — a greyed-out "docker" tells a user they cannot have it, never
+   *  that one config key would give it to them. Selecting it shows the reason and
+   *  blocks the submit instead. */
+  status: BackendAvailability;
+  /** The actionable reason this choice is not usable; "" when it is fine. */
   reason: string;
 }
 
@@ -67,20 +84,21 @@ export interface BackendChoice {
  */
 export function backendChoices(catalog: BackendCatalog | null): BackendChoice[] {
   if (catalog === null) {
-    return [{ value: REPO_DEFAULT, label: "Repo default", available: true, reason: "" }];
+    return [{ value: REPO_DEFAULT, label: "Repo default", status: "available", reason: "" }];
   }
 
-  const reason = defaultReason(catalog);
   const choices: BackendChoice[] = [
     {
       value: REPO_DEFAULT,
+      // "Repo default" with no parenthetical when the daemon reports no default:
+      // that is the misconfigured case, where naming a backend would be inventing
+      // one. The reason says what is wrong with the key.
       label: catalog.default === "" ? "Repo default" : `Repo default (${catalog.default})`,
-      // A repo whose declared default is unconfigured is genuinely unusable: that
-      // create resolves to the broken backend and fails. Reporting it as such
-      // surfaces the config bug at choose time instead of at create time — which is
-      // the whole point of #1933 — and is why this is computed, not hardcoded true.
-      available: reason === "",
-      reason,
+      // Taken from the daemon, not inferred here. A repo whose declared default is
+      // broken resolves to that broken backend and FAILS — it does not quietly run
+      // local — so the default is not automatically a safe harbour.
+      status: catalog.default_status,
+      reason: catalog.default_status === "available" ? "" : (catalog.default_reason ?? ""),
     },
   ];
 
@@ -88,26 +106,11 @@ export function backendChoices(catalog: BackendCatalog | null): BackendChoice[] 
     choices.push({
       value: opt.name,
       label: opt.name,
-      available: opt.available,
-      reason: opt.available ? "" : (opt.reason ?? ""),
+      status: opt.status,
+      reason: opt.status === "available" ? "" : (opt.reason ?? ""),
     });
   }
   return choices;
-}
-
-/**
- * The reason the "repo default" choice is unusable, when the repo's declared
- * default is itself unconfigured (e.g. `backend = "docker"` with no docker.image).
- *
- * Returns "" when the default is fine, or when it names a backend the daemon did
- * not list — nothing is known about that, so claiming a problem would be a guess.
- */
-function defaultReason(catalog: BackendCatalog): string {
-  const resolved = catalog.backends.find((b) => b.name === catalog.default);
-  if (resolved === undefined || resolved.available) {
-    return "";
-  }
-  return resolved.reason ?? "";
 }
 
 /**
@@ -122,15 +125,20 @@ export function backendNotice(choices: BackendChoice[], selected: string): strin
 }
 
 /**
- * Whether a create with this selection can proceed. False only for a selection the
- * daemon reported unusable — the create would fail, so the form blocks it and
- * `backendNotice` says why.
+ * Whether a create with this selection can proceed. Only an "available" choice may
+ * — a picker is a promise, and both "unavailable" (checked, would fail) and
+ * "unknown" (could not be checked) are promises nobody verified. `backendNotice`
+ * says why, so the block is never a dead end.
  *
- * An unknown selection is allowed through: the daemon is the authority on what it
- * accepts, and a client that vetoed a value it merely does not recognize would be
- * the same hardcoded-enum bug (#1933) wearing a different hat.
+ * Blocking "unknown" cannot lock a user out: the only thing that makes a backend
+ * unknown is an unreadable repo config, and local stays available through that (it
+ * reads no repo config), so a session can still be created while they fix the file.
+ *
+ * A choice the picker does not list at all is allowed through: the daemon is the
+ * authority on what it accepts, and a client that vetoed a value it merely does not
+ * recognize would be the hardcoded-enum bug (#1933) wearing a different hat.
  */
 export function backendSelectable(choices: BackendChoice[], selected: string): boolean {
   const choice = choices.find((c) => c.value === selected);
-  return choice === undefined || choice.available;
+  return choice === undefined || choice.status === "available";
 }

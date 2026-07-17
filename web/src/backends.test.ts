@@ -13,11 +13,12 @@ import { REPO_DEFAULT, type BackendCatalog, backendChoices, backendNotice, backe
 function catalog(over: Partial<BackendCatalog> = {}): BackendCatalog {
   return {
     default: "local",
+    default_status: "available",
     backends: [
-      { name: "local", available: true },
-      { name: "docker", available: false, reason: "backend=docker requires docker.image to be set in this repo's .agent-factory/config.json" },
-      { name: "ssh", available: false, reason: "backend=ssh requires ssh.host to be set in this repo's .agent-factory/config.json" },
-      { name: "hook", available: false, reason: "backend=hook requires remote_hooks to be configured" },
+      { name: "local", status: "available" },
+      { name: "docker", status: "unavailable", reason: "backend=docker requires docker.image to be set in this repo's .agent-factory/config.json" },
+      { name: "ssh", status: "unavailable", reason: "backend=ssh requires ssh.host to be set in this repo's .agent-factory/config.json" },
+      { name: "hook", status: "unavailable", reason: "backend=hook requires remote_hooks to be configured" },
     ],
     ...over,
   };
@@ -42,8 +43,8 @@ test("the picker offers every backend the daemon lists, in the daemon's order", 
 test("a backend the web has never heard of is offered without a web change", () => {
   const withNewBackend = catalog({
     backends: [
-      { name: "local", available: true },
-      { name: "fargate", available: true },
+      { name: "local", status: "available" },
+      { name: "fargate", status: "available" },
     ],
   });
 
@@ -52,7 +53,7 @@ test("a backend the web has never heard of is offered without a web change", () 
   const fargate = choices.find((c) => c.value === "fargate");
   assert.ok(fargate, "a newly supported backend must appear with no change to the web");
   assert.equal(fargate.label, "fargate", "its label comes from the daemon's name, not a local map that would render it blank");
-  assert.equal(fargate.available, true);
+  assert.equal(fargate.status, "available");
   assert.equal(fargate.reason, "");
 });
 
@@ -61,7 +62,7 @@ test("an unconfigured backend is offered, explained, and blocked from submitting
 
   const docker = choices.find((c) => c.value === "docker");
   assert.ok(docker);
-  assert.equal(docker.available, false, "creating with it would fail, so the form must not submit it");
+  assert.equal(docker.status, "unavailable", "creating with it would fail, so the form must not submit it");
   assert.match(docker.reason, /docker\.image/, "the reason names the missing key, so it is actionable");
 
   // Selectable on purpose: a disabled <option> would hide the reason, leaving the
@@ -72,18 +73,18 @@ test("an unconfigured backend is offered, explained, and blocked from submitting
 
 test("a configured backend is selectable with nothing to explain", () => {
   const choices = backendChoices(
-    catalog({ backends: [{ name: "docker", available: true }] }),
+    catalog({ backends: [{ name: "docker", status: "available" }] }),
   );
 
   const docker = choices.find((c) => c.value === "docker");
   assert.ok(docker);
-  assert.equal(docker.available, true);
+  assert.equal(docker.status, "available");
   assert.equal(docker.reason, "");
   assert.equal(backendSelectable(choices, "docker"), true);
 });
 
 test("the repo default is labelled with the backend it resolves to", () => {
-  const choices = backendChoices(catalog({ default: "docker", backends: [{ name: "docker", available: true }] }));
+  const choices = backendChoices(catalog({ default: "docker", backends: [{ name: "docker", status: "available" }] }));
 
   assert.equal(choices[0].value, REPO_DEFAULT, "the default choice always sends nothing");
   assert.equal(choices[0].label, "Repo default (docker)", "a repo that defaults to docker says so, so the user need not pick docker to get it");
@@ -93,7 +94,13 @@ test("a repo whose declared default is unconfigured is explained, not silently b
   // backend = "docker" with no docker.image. Leaving the choice alone still resolves
   // to docker and still fails, so the default is not a safe harbour here — naming the
   // problem while the user is looking at the form is the whole point of #1933.
-  const choices = backendChoices(catalog({ default: "docker" }));
+  const choices = backendChoices(
+    catalog({
+      default: "docker",
+      default_status: "unavailable",
+      default_reason: "backend=docker requires docker.image to be set in this repo's .agent-factory/config.json",
+    }),
+  );
 
   assert.match(choices[0].reason, /docker\.image/, "the broken config is surfaced at choose time");
   assert.equal(
@@ -101,6 +108,44 @@ test("a repo whose declared default is unconfigured is explained, not silently b
     false,
     "this create resolves to the broken docker and WOULD fail, so blocking it beats letting it fail",
   );
+});
+
+// The tri-state's whole reason to exist: "I could not check" is a THIRD answer.
+// Rendering unknown as usable would be a promise nobody verified — the picker
+// telling the user "go ahead" about a backend it knows nothing about.
+test("an unknown backend is never offered as usable, and says why", () => {
+  const choices = backendChoices(
+    catalog({
+      backends: [
+        { name: "local", status: "available" },
+        { name: "docker", status: "unknown", reason: "cannot tell whether this repo can use backend=docker: its .agent-factory/config.toml could not be read (unexpected comma)" },
+      ],
+    }),
+  );
+
+  assert.equal(backendSelectable(choices, "docker"), false, "unknown must not be presented as a working choice");
+  assert.match(backendNotice(choices, "docker"), /could not be read/, "and the user is told what stopped the check, not a made-up requirement");
+
+  // Blocking unknown can never strand the user: local reads no repo config, so it
+  // stays available through exactly the failure that makes the others unknown.
+  assert.equal(backendSelectable(choices, "local"), true, "a session is still creatable while the config is broken");
+});
+
+test("a repo whose configured default is not a known backend reports NO default", () => {
+  // The misconfiguration case: `backend = "bogus"`. There is no default to name —
+  // that create fails rather than falling back to local — so the label must not
+  // invent one, and the reason must carry the misconfiguration.
+  const choices = backendChoices(
+    catalog({
+      default: "",
+      default_status: "unavailable",
+      default_reason: 'this repo\'s .agent-factory/config.json sets backend = "bogus", which is not a known backend (valid: local, docker, ssh, hook)',
+    }),
+  );
+
+  assert.equal(choices[0].label, "Repo default", "no parenthetical: there is no resolved default to claim");
+  assert.match(choices[0].reason, /"bogus"/, "the offending value is named");
+  assert.equal(backendSelectable(choices, REPO_DEFAULT), false, "and the doomed default cannot be submitted");
 });
 
 test("an unrecognized selection is allowed through rather than vetoed locally", () => {

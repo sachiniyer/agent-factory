@@ -140,7 +140,9 @@ func (sshRuntime) Provision(spec ProvisionSpec) (ProvisionResult, error) {
 	// is set here (locked by TestBackendConfigError_ReportsRepoConfigRequirements).
 	sshCfg := *cfg.SSH
 	if spec.CloneURL == "" {
-		return ProvisionResult{}, fmt.Errorf("backend=ssh: repo %q has no `origin` remote to clone the workspace from; add one (GitHub is the durable workspace store) or push the repo first", spec.RepoRoot)
+		// Shared with BackendUnusableReason (#1933) — one wording, choose time and
+		// create time.
+		return ProvisionResult{}, missingOriginError(BackendSSH, spec.RepoRoot)
 	}
 
 	afBin, err := sshSelfBinary()

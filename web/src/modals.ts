@@ -197,18 +197,31 @@ export function newSessionModal(
   backendHint.setAttribute("role", "status");
 
   let choices: BackendChoice[] = backendChoices(null);
+  // Mirrors the chrome's busy flag. An async availability refresh can land at ANY
+  // time — including mid-submit — and it must never be the thing that decides
+  // whether Create is clickable.
+  let busy = false;
 
-  // Reflect the current selection: show its reason (if any) and gate Create on it.
-  // An unconfigured backend stays SELECTABLE — a disabled <option> would hide the
-  // reason, which is the actionable half, and browsers do not reliably surface a
-  // tooltip on one anyway. Picking it explains itself and blocks the submit, so the
-  // user learns the missing key at choose time instead of from a create failure.
-  const syncSelection = (): void => {
+  // The SINGLE writer of confirmBtn.disabled, so no update can clobber another's
+  // reason for disabling it. Every input that gates Create is OR-ed here rather
+  // than assigned from its own call site:
+  //   busy      — a submit is in flight; re-enabling would allow a double-create.
+  //   projects  — nothing to create in (set once, before any catalog lands).
+  //   backend   — the selection is unusable or unverified.
+  // A bare `confirmBtn.disabled = …` anywhere else silently drops the other two.
+  const syncSubmitState = (): void => {
     backendHint.textContent = backendNotice(choices, backendSelect.value);
-    // `projects.length` is re-checked, not assumed: this runs after the no-projects
-    // branch above has already disabled Create, and a bare assignment here would
-    // silently re-enable it for a repo-less client.
-    confirmBtn.disabled = projects.length === 0 || !backendSelectable(choices, backendSelect.value);
+    confirmBtn.disabled = busy || projects.length === 0 || !backendSelectable(choices, backendSelect.value);
+  };
+
+  // Route the chrome's setBusy through the same writer. index.ts drives busy around
+  // the create call; without this, a catalog response arriving mid-create would
+  // re-enable the button underneath it.
+  const chromeSetBusy = handle.setBusy.bind(handle);
+  handle.setBusy = (b: boolean): void => {
+    busy = b;
+    chromeSetBusy(b);
+    syncSubmitState();
   };
 
   const renderChoices = (): void => {
@@ -220,10 +233,10 @@ export function newSessionModal(
     // Re-selecting the prior value keeps a user's pick across a project switch when
     // it is still offered; otherwise fall back to the repo default, which always is.
     backendSelect.value = choices.some((c) => c.value === previous) ? previous : REPO_DEFAULT;
-    syncSelection();
+    syncSubmitState();
   };
 
-  backendSelect.addEventListener("change", syncSelection);
+  backendSelect.addEventListener("change", syncSubmitState);
 
   // A per-load token: a slow catalog for the project the user just left must not
   // overwrite the choices for the one they just picked.

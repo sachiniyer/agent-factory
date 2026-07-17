@@ -130,11 +130,14 @@ func (dockerRuntime) Provision(spec ProvisionSpec) (ProvisionResult, error) {
 	// fails the test rather than panicking the daemon here).
 	image := strings.TrimSpace(cfg.Docker.Image)
 	runArgs := cfg.Docker.RunArgs
+	// Both wordings are shared with BackendUnusableReason (#1933) so the reason the
+	// web gives at choose time is the reason printed here at create time. The check
+	// ORDER is unchanged: origin before the CLI probe.
 	if spec.CloneURL == "" {
-		return ProvisionResult{}, fmt.Errorf("backend=docker: repo %q has no `origin` remote to clone the workspace from; add one (GitHub is the durable workspace store) or push the repo first", spec.RepoRoot)
+		return ProvisionResult{}, missingOriginError(BackendDocker, spec.RepoRoot)
 	}
-	if _, err := exec.LookPath("docker"); err != nil {
-		return ProvisionResult{}, fmt.Errorf("backend=docker: the `docker` CLI is not on PATH; install Docker or select a different backend: %w", err)
+	if _, err := lookPath("docker"); err != nil {
+		return ProvisionResult{}, dockerCLIMissingError(err)
 	}
 
 	afBin, err := dockerSelfBinary()

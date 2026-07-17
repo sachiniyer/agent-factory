@@ -1,103 +1,178 @@
 package daemon
 
 import (
+	"fmt"
+
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/session"
 )
 
 // The backend catalog RPC (#1933). The daemon has always ACCEPTED a backend on
 // create (CreateSessionRequest.Backend, the `--backend` flag), but a client had
-// no way to ask which backends exist or whether a given repo is configured for
-// one. The CLI papered over that by hard-coding the enum in its flag help; the
-// web offered no choice at all, so a remote session could only be started from
-// the TUI/CLI.
+// no way to ask which backends exist or whether a given repo can actually use one.
+// The CLI papered over that by hard-coding the enum in its flag help; the web
+// offered no choice at all, so a remote session could only be started from the
+// TUI/CLI.
 //
 // ListBackends closes that gap by making the daemon the one place a client asks.
-// It answers from config.SupportedBackends and the repo's own config, so a
-// backend added server-side is offered by every client that renders this response
-// — no client-side enum to update, and none to drift.
+// It answers from config.SupportedBackends and the repo's own config + environment,
+// so a backend added server-side is offered by every client that renders this
+// response — no client-side enum to update, and none to drift.
+//
+// The contract that matters most here: a picker built from this response is a
+// PROMISE. Every entry rendered as usable tells the user "choose this and it will
+// work". So this RPC never guesses. Where it cannot verify a precondition it says
+// so, by name, rather than returning a plausible default — an unverified "sure,
+// looks fine" is how a picker becomes the bug it was meant to fix.
+
+// BackendAvailability is the three-outcome answer to "can this repo use this
+// backend?". The third value is the point: "I could not check" is a DIFFERENT
+// answer from "yes" and from "no", and collapsing it into either is how a probe
+// that cannot answer ends up answering anyway. Callers must render all three.
+type BackendAvailability string
+
+const (
+	// BackendAvailable means every precondition that can be checked without side
+	// effects was checked and passed.
+	BackendAvailable BackendAvailability = "available"
+	// BackendUnavailable means a precondition was checked and FAILED: creating on
+	// this backend would fail as the repo is configured right now. Reason says what
+	// to fix.
+	BackendUnavailable BackendAvailability = "unavailable"
+	// BackendUnknown means the preconditions could not be evaluated at all (e.g. the
+	// repo's config could not be read), so neither yes nor no is honest. Reason says
+	// what stopped the check. A client must not present this as usable.
+	BackendUnknown BackendAvailability = "unknown"
+)
 
 // ListBackendsRequest asks which runtimes a create against RepoPath may select.
-// RepoPath is the repo ROOT (or any path inside it — it is resolved the same way
+// RepoPath is the repo ROOT (or any path inside it — resolved the same way
 // CreateSession resolves it), and is required: availability and the default are
-// both properties of a specific repo's config, so there is no repo-less answer.
+// both properties of a specific repo, so there is no repo-less answer.
 type ListBackendsRequest struct {
 	RepoPath string `json:"repo_path"`
 }
 
-// BackendOption is one selectable runtime and whether this repo is configured for
-// it.
-//
-// Available reflects the repo CONFIG preconditions only (session.BackendConfigError):
-// docker.image, ssh.host, remote_hooks. It is a "may the user pick this without a
-// guaranteed config error" signal, NOT a promise that provisioning will succeed —
-// environment preconditions (the `docker` CLI on PATH, an `origin` remote to clone
-// from) are not knowable from config and still surface at create time. Available
-// false is therefore reliable (it WILL fail as configured); available true means
-// "not ruled out".
+// BackendOption is one selectable runtime and whether this repo can use it.
 type BackendOption struct {
 	// Name is the wire value: what a client sends back as CreateSessionRequest.Backend.
 	Name string `json:"name"`
-	// Available is false when this repo's config cannot satisfy the backend.
-	Available bool `json:"available"`
-	// Reason is the actionable, user-facing explanation when Available is false —
-	// the SAME text the CLI prints at create time, because both come from
-	// session.BackendConfigError. Empty when Available is true.
+	// Status is the checked answer; see BackendAvailability.
+	Status BackendAvailability `json:"status"`
+	// Reason is the actionable, user-facing explanation whenever Status is not
+	// available — the SAME text the CLI prints at create time, because both come
+	// from the session package's precondition checks. It names what to fix ("set
+	// docker.image in …"), never merely "unavailable". Empty when available.
 	Reason string `json:"reason,omitempty"`
 }
 
 // ListBackendsResponse is the catalog for one repo.
 type ListBackendsResponse struct {
 	// Backends is every supported backend in canonical presentation order
-	// (config.SupportedBackends), available or not. Unavailable ones are included
-	// deliberately: a client that hid them would leave the user guessing why the
-	// backend they read about is missing, when the useful answer is the Reason.
+	// (config.SupportedBackends). Unusable ones are included deliberately: a client
+	// that hid them would leave the user guessing why the backend they read about is
+	// missing, when the useful answer is the Reason.
 	Backends []BackendOption `json:"backends"`
 	// Default is the backend a create with NO explicit backend resolves to for this
-	// repo — the repo's `backend` config key, else local. Clients render it as the
-	// label of their "repo default" choice and must send NO backend to get it, not
-	// this value echoed back: sending it explicitly would freeze today's default
-	// into the request and silently ignore a later repo-config change.
+	// repo. Clients render it as the label of their "repo default" choice and must
+	// send NO backend to get it, not this value echoed back: sending it explicitly
+	// would freeze today's default into the request and ignore a later config change.
+	//
+	// EMPTY when the repo's `backend` key names something unrecognized — there is no
+	// default to report then, because such a create does not fall back to local, it
+	// FAILS (session.resolveBackendKind: "misconfiguration should fail the create,
+	// not silently run local"). DefaultStatus/DefaultReason carry the misconfiguration.
 	Default string `json:"default"`
+	// DefaultStatus is the checked answer for the repo-default choice itself, so a
+	// client can block a default it knows will fail instead of discovering it at
+	// create time.
+	DefaultStatus BackendAvailability `json:"default_status"`
+	// DefaultReason explains a DefaultStatus that is not available, naming the
+	// offending value and the file it is in.
+	DefaultReason string `json:"default_reason,omitempty"`
 }
 
 // ListBackends reports the selectable runtimes for a repo, and which backend an
 // unspecified create resolves to. It is read-only: it provisions nothing, starts
-// nothing, and touches no session state.
+// nothing, dials nothing, and touches no session state.
 func (s *controlServer) ListBackends(req ListBackendsRequest, resp *ListBackendsResponse) error {
 	repo, err := config.RepoFromPath(req.RepoPath)
 	if err != nil {
 		return err
 	}
 
-	// Resolution mirrors create's precedence exactly (session.resolveBackendKind):
-	// a config that fails to resolve is not fatal there — the create falls back to
-	// local — so it must not be fatal here either, or the web would refuse to offer
-	// a choice for a repo the CLI can still create in. A nil cfg reads as "every
-	// optional section absent", which is the honest answer for both a repo with no
-	// in-repo config and one whose config could not be read.
-	var cfg *config.ResolvedConfig
-	if resolved, rerr := config.ResolveConfig(repo.Root); rerr == nil {
-		cfg = resolved
-	}
-
-	// The default comes from the factory's own decision function rather than a
-	// reimplementation of the precedence here, so this answer cannot disagree with
-	// what a real create actually does.
-	def := string(session.BackendLocal)
-	if kind, kerr := session.BackendKindFor(session.InstanceOptions{}, repo.Root); kerr == nil {
-		def = string(kind)
-	}
-	resp.Default = def
-
+	cfg, cfgErr := config.ResolveConfig(repo.Root)
 	resp.Backends = make([]BackendOption, 0, len(config.SupportedBackends))
 	for _, name := range config.SupportedBackends {
-		opt := BackendOption{Name: name, Available: true}
-		if cerr := session.BackendConfigError(session.BackendKind(name), cfg); cerr != nil {
-			opt.Available = false
-			opt.Reason = cerr.Error()
-		}
-		resp.Backends = append(resp.Backends, opt)
+		resp.Backends = append(resp.Backends, backendOptionFor(session.BackendKind(name), cfg, cfgErr, repo.Root))
 	}
+	resp.Default, resp.DefaultStatus, resp.DefaultReason = defaultFor(resp.Backends, cfg, cfgErr, repo.Root)
 	return nil
+}
+
+// backendOptionFor answers for ONE backend, honestly.
+//
+// The unreadable-config case is why Status is a tri-state. Reporting "docker
+// requires docker.image" for a repo whose config we could not parse would be a
+// fabricated finding: docker.image might be set perfectly well in a file with a
+// stray comma elsewhere. The user needs to hear about the comma.
+func backendOptionFor(kind session.BackendKind, cfg *config.ResolvedConfig, cfgErr error, repoRoot string) BackendOption {
+	opt := BackendOption{Name: string(kind)}
+
+	if cfgErr != nil {
+		// local is the one backend that reads nothing from the repo config, so an
+		// unreadable config genuinely does not affect it — and a create with no
+		// explicit backend still runs local (resolveBackendKind falls back on a
+		// config-resolve failure). Saying "unknown" for it would be its own lie.
+		if kind == session.BackendLocal {
+			opt.Status = BackendAvailable
+			return opt
+		}
+		opt.Status = BackendUnknown
+		opt.Reason = fmt.Sprintf("cannot tell whether this repo can use backend=%s: its %s could not be read (%v). Fix that file, then reopen this form.", kind, config.InRepoConfigFileName(repoRoot), cfgErr)
+		return opt
+	}
+
+	if reason := session.BackendUnusableReason(kind, cfg, repoRoot); reason != nil {
+		opt.Status = BackendUnavailable
+		opt.Reason = reason.Error()
+		return opt
+	}
+	opt.Status = BackendAvailable
+	return opt
+}
+
+// defaultFor reports the backend an unspecified create resolves to, and whether
+// THAT is usable.
+//
+// It asks the factory's own decision function rather than reimplementing the
+// precedence, so this answer cannot disagree with what a real create does — and
+// crucially it propagates the function's ERROR instead of swallowing it. An
+// invalid `backend` value makes a create fail; a catalog that answered "local"
+// there would tell a user with a broken config that everything is normal, and
+// their sessions would land on a backend they never chose.
+func defaultFor(backends []BackendOption, cfg *config.ResolvedConfig, cfgErr error, repoRoot string) (string, BackendAvailability, string) {
+	kind, kerr := session.BackendKindFor(session.InstanceOptions{}, repoRoot)
+	if kerr != nil {
+		// Reached only when the config LOADED and named a backend we do not
+		// recognize (BackendKindFor falls back to local on a resolve failure). Name
+		// the value and the file — "unknown backend" alone leaves the user hunting.
+		raw := ""
+		if cfgErr == nil && cfg != nil {
+			raw = cfg.Backend
+		}
+		return "", BackendUnavailable, fmt.Sprintf("this repo's %s sets backend = %q, which is not a known backend (valid: %s). A session created here fails rather than falling back to local — fix that key, or pick a backend above.", config.InRepoConfigFileName(repoRoot), raw, config.SupportedBackendsString())
+	}
+
+	// The default's usability IS the resolved backend's usability; reuse the answer
+	// already computed for it rather than re-deriving one that could disagree.
+	for _, opt := range backends {
+		if opt.Name == string(kind) {
+			return string(kind), opt.Status, opt.Reason
+		}
+	}
+	// A registered backend missing from the catalog would be an enum/registry drift
+	// the session package's guard test exists to prevent; say so rather than
+	// claiming it is fine.
+	return string(kind), BackendUnknown, fmt.Sprintf("this repo defaults to backend=%s, which is not in the supported list (%s)", kind, config.SupportedBackendsString())
 }
