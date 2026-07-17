@@ -120,11 +120,16 @@ func checkDuplicateDaemons(ctx *scanContext, report *Report) {
 	for _, p := range procs {
 		descs = append(descs, daemonProcSummary(p))
 	}
+	// The remedy must cost no more than the problem. A second daemon is a
+	// daemon-lifecycle problem, and stopping one loses nothing: sessions live
+	// in tmux and on disk, and a daemon is restartable at will. Anything that
+	// touches the user's sessions, tasks or worktrees is out of all proportion
+	// to what this detects.
 	report.Fail(sectionDaemon, "daemon instances",
 		fmt.Sprintf("%d daemons are serving this agent-factory home (%s); "+
 			"a second or stale daemon is a common cause of version skew",
 			len(procs), strings.Join(descs, ", ")),
-		"stop the extras — `af reset` now stops all af daemons — then let one restart")
+		"stop the extra daemon by pid (listed above), then run `af daemon restart`")
 }
 
 // daemonProc pairs a daemon process with the agent-factory home it serves.
@@ -327,12 +332,55 @@ func daemonProcSummary(p proctree.Process) string {
 	return fmt.Sprintf("pid %d", p.PID)
 }
 
+// autostartScope answers "is the installed autostart unit this home's at all?",
+// once per run.
+//
+// There is ONE autostart unit per user, and it bakes its AGENT_FACTORY_HOME at
+// install time — so a unit installed for the developer's real home is still the
+// only unit on the box when doctor runs under AGENT_FACTORY_HOME=/tmp/sandbox.
+// Treating "a unit file exists" as "this home's unit" is the whose-home defect
+// that #1916 and #1950 are, and it makes every autostart row here an assertion
+// about somebody else's daemon. daemon.AutostartUnitServesHome (#1919) is the
+// established answer, including the subtlety that a unit with no baked
+// AGENT_FACTORY_HOME serves the DEFAULT home — absent is a value, not an unknown.
+func (c *scanContext) autostartScope() (serves, installed bool, err error) {
+	if !c.autostartScoped {
+		c.autostartServes, c.autostartInstalled, c.autostartScopeErr =
+			c.opts.autostartServesHome(c.opts.ConfigDir)
+		c.autostartScoped = true
+	}
+	return c.autostartServes, c.autostartInstalled, c.autostartScopeErr
+}
+
+// autostartUnitIsOurs reports whether the autostart checks may speak about the
+// installed unit, emitting the row that explains any refusal. A false return
+// means the caller must stay silent: the unit is absent, someone else's, or
+// unestablished — and doctor does not guess.
+func autostartUnitIsOurs(ctx *scanContext, report *Report) bool {
+	serves, installed, err := ctx.autostartScope()
+	switch {
+	case err != nil:
+		report.Warn(sectionDaemon, "autostart scope",
+			fmt.Sprintf("cannot tell whether the installed autostart unit serves this home: %v", err),
+			"fix the autostart unit, or reinstall it for this home: af daemon install", true)
+		return false
+	case !installed:
+		return false // checkDaemonHealth's "autostart: not installed" covers it
+	case !serves:
+		return false // checkDaemonHealth explains it; the rest must not assert
+	}
+	return true
+}
+
 // checkAutostartPath compares the binary the autostart unit launches against
 // the binary running this command. When they differ, every upgrade that lands
 // on the client's path leaves the supervised daemon respawning the old one —
 // so the skew survives restarts and reboots, and `af daemon restart` never
 // fixes it.
 func checkAutostartPath(ctx *scanContext, report *Report) {
+	if !autostartUnitIsOurs(ctx, report) {
+		return
+	}
 	info := ctx.opts.autostartUnit()
 	if !info.Supported || !info.Exists {
 		// checkDaemonHealth already warns when no unit is installed.
@@ -478,7 +526,9 @@ func checkStaleSockets(ctx *scanContext, report *Report, h daemon.HealthStatus) 
 		fmt.Sprintf("%s present in %s but no daemon is answering",
 			plural(len(stale), "daemon socket", "daemon sockets")+" ("+strings.Join(stale, ", ")+")",
 			ctx.opts.ConfigDir),
-		"run `af reset` to clear them, or `af daemon restart` to start a daemon on them", true)
+		// A restart rebinds these; nothing here justifies touching the user's
+		// sessions or state.
+		"run `af daemon restart` to rebind them", true)
 }
 
 // checkHTTPSocket reports the HTTP/JSON listener's health independently of the
@@ -516,6 +566,9 @@ func checkHTTPSocket(ctx *scanContext, report *Report, h daemon.HealthStatus) {
 // domain other than the gui/<uid> the restart path targets: restarts silently
 // miss it, so an old daemon keeps serving and skew never clears.
 func checkAutostartSupervision(ctx *scanContext, report *Report) {
+	if !autostartUnitIsOurs(ctx, report) {
+		return
+	}
 	info := ctx.opts.autostartSupervision()
 	if !info.Supported || !info.UnitPresent {
 		return

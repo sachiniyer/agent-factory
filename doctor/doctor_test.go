@@ -86,9 +86,12 @@ func testOptionsWithHome(t *testing.T, home string, fix bool, pids ...int) Optio
 		daemonHealth:         func() daemon.HealthStatus { return daemon.HealthStatus{PingErr: errNoDaemon} },
 		autostartUnit:        func() daemon.AutostartUnitInfo { return daemon.AutostartUnitInfo{Supported: true} },
 		autostartSupervision: func() daemon.SupervisionInfo { return daemon.SupervisionInfo{Supported: true} },
-		selfBinary:           func() (string, error) { return filepath.Join(home, "bin", "af"), nil },
-		binaryCandidates:     func() []string { return nil },
-		binaryVersion:        func(string) (string, error) { return "", errNoDaemon },
+		// No autostart unit for this home by default, matching the two fakes
+		// above. Tests that install one declare it with ourAutostartUnit.
+		autostartServesHome: func(string) (bool, bool, error) { return false, false, nil },
+		selfBinary:          func() (string, error) { return filepath.Join(home, "bin", "af"), nil },
+		binaryCandidates:    func() []string { return nil },
+		binaryVersion:       func(string) (string, error) { return "", errNoDaemon },
 	}
 }
 

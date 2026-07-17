@@ -142,6 +142,14 @@ func stubProcessCwd(t *testing.T, cwds map[int]string) {
 	}
 }
 
+// ourAutostartUnit declares that the installed autostart unit is THIS home's,
+// which is the precondition for any autostart row to be about us at all. Tests
+// that inject a unit must say so explicitly — the default is "no unit for this
+// home", because a unit file existing proves nothing about whose home it serves.
+func ourAutostartUnit(opts *Options) {
+	opts.autostartServesHome = func(string) (bool, bool, error) { return true, true, nil }
+}
+
 // respondingDaemon is a health probe for a daemon that answers and reports
 // version v.
 func respondingDaemon(v string) func() daemon.HealthStatus {
@@ -280,7 +288,9 @@ func TestDuplicateDaemons_TwoOnThisHome_Fails(t *testing.T) {
 	require.Contains(t, c.Detail, "2 daemons")
 	require.Contains(t, c.Detail, "pid "+strconv.Itoa(first.PID))
 	require.Contains(t, c.Detail, "pid "+strconv.Itoa(second.PID))
-	require.Contains(t, c.Remediation, "af reset")
+	// The remedy stops a daemon; it must never reach for the user's data.
+	require.Contains(t, c.Remediation, "af daemon restart")
+	require.NotContains(t, c.Remediation, "af reset")
 	require.True(t, c.Problem)
 }
 
@@ -339,6 +349,49 @@ func TestForeignDaemons_AncestorNeverOfferedForKill(t *testing.T) {
 	}
 	require.False(t, hasFinding(report, "foreign-daemon"),
 		"an ancestor is not a foreign daemon to reap")
+}
+
+// A remedy must cost no more than the problem it answers.
+//
+// `af reset` is a factory wipe: it removes ALL sessions (live and archived),
+// all tasks, all AF worktrees and branches, and all state. Doctor is what people
+// reach for when af is already misbehaving, and they follow what it says — so a
+// disproportionate remedy here is worse than none, because they would never have
+// run a wipe on their own. Nothing doctor detects about daemon LIFECYCLE
+// (duplicates, stale sockets, skew, autostart) is answered by destroying the
+// user's work; a daemon costs nothing to restart.
+//
+// This asserts over every row a real run can produce, so a future check cannot
+// quietly reintroduce it.
+func TestRemedies_NeverRecommendDestructiveResetForDaemonProblems(t *testing.T) {
+	testguard.IsolateTmux(t)
+
+	home := t.TempDir()
+	// Stage every daemon-lifecycle problem at once: two daemons, a stale HTTP
+	// socket, a skewed daemon, and a mismatched autostart unit.
+	stubDaemonProcessProbe(t,
+		func(int) bool { return true },
+		func(int) []string { return []string{"af", "--daemon"} })
+	first := spawnWithEnv(t, "af", []string{"--daemon"}, map[string]string{"AGENT_FACTORY_HOME": home})
+	second := spawnWithEnv(t, "af", []string{"--daemon"}, map[string]string{"AGENT_FACTORY_HOME": home})
+	stubProcessHomes(t, map[int]string{first.PID: home, second.PID: home})
+	abandonedSocket(t, filepath.Join(home, "daemon-http.sock"))
+
+	opts := testOptionsWithHome(t, home, false, first.PID, second.PID)
+	opts.Version = "1.0.192"
+	opts.daemonHealth = respondingDaemon("1.0.180")
+
+	report, err := Run(opts)
+	require.NoError(t, err)
+	require.Positive(t, report.UnresolvedCount(), "test premise: real problems were detected")
+
+	for _, c := range BuildJSONReport(report, false, true).Checks {
+		require.NotContains(t, c.Remedy, "af reset",
+			"check %q recommends a factory wipe (all sessions, tasks, worktrees, state) — "+
+				"no daemon-lifecycle problem justifies that", c.Name)
+	}
+	// And the duplicate row must still give an answer that actually works.
+	require.Contains(t, findCheck(t, report, "daemon instances").Remediation, "af daemon restart")
 }
 
 func TestDuplicateDaemons_SingleDaemon_NoRow(t *testing.T) {
@@ -578,6 +631,7 @@ func TestAutostartPath_DifferentBinaryAndVersion_Fails(t *testing.T) {
 
 	opts := testOptions(t, false)
 	opts.Version = "1.0.192"
+	ourAutostartUnit(&opts)
 	opts.autostartUnit = func() daemon.AutostartUnitInfo {
 		return daemon.AutostartUnitInfo{Supported: true, Exists: true, Path: "/fake/unit.service", ExecPath: "/usr/local/bin/af"}
 	}
@@ -604,6 +658,7 @@ func TestAutostartPath_DifferentPathSameVersion_AdvisoryOnly(t *testing.T) {
 
 	opts := testOptions(t, false)
 	opts.Version = "1.0.192"
+	ourAutostartUnit(&opts)
 	opts.autostartUnit = func() daemon.AutostartUnitInfo {
 		return daemon.AutostartUnitInfo{Supported: true, Exists: true, ExecPath: "/home/dev/.local/bin/af"}
 	}
@@ -620,6 +675,78 @@ func TestAutostartPath_DifferentPathSameVersion_AdvisoryOnly(t *testing.T) {
 	require.Zero(t, report.UnresolvedCount())
 }
 
+// There is ONE autostart unit per user, and it bakes its AGENT_FACTORY_HOME at
+// install time. So under AGENT_FACTORY_HOME=/tmp/sandbox, the developer's unit
+// is still the only unit on the box — and it is not this home's. Every autostart
+// row must then be silent rather than assert about somebody else's daemon: the
+// same whose-home defect as #1916's P2 and #1950.
+func TestAutostart_UnitServingAnotherHome_NotTreatedAsOurs(t *testing.T) {
+	testguard.IsolateTmux(t)
+
+	opts := testOptions(t, false)
+	opts.Version = "1.0.192"
+	// A unit IS installed — it simply serves a different home.
+	opts.autostartServesHome = func(string) (bool, bool, error) { return false, true, nil }
+	opts.autostartUnit = func() daemon.AutostartUnitInfo {
+		return daemon.AutostartUnitInfo{Supported: true, Exists: true, ExecPath: "/usr/local/bin/af"}
+	}
+	opts.autostartSupervision = func() daemon.SupervisionInfo {
+		return daemon.SupervisionInfo{Supported: true, UnitPresent: true, Enabled: true, Active: true}
+	}
+	opts.selfBinary = func() (string, error) { return "/home/dev/.local/bin/af", nil }
+	opts.binaryVersion = func(string) (string, error) { return "1.0.180", nil }
+
+	report, err := Run(opts)
+	require.NoError(t, err)
+
+	require.False(t, hasCheck(report, "autostart path"),
+		"another home's unit must not be compared against our binary")
+	require.False(t, hasCheck(report, "autostart supervision"),
+		"nor may its supervision be reported as ours")
+
+	// The health row explains it instead of claiming autostart is installed here.
+	c := findCheck(t, report, "autostart")
+	require.Equal(t, StatusWarn, c.Status)
+	require.Contains(t, c.Detail, "different agent-factory home")
+	require.False(t, c.Problem, "a sandbox home without autostart is a choice, not a fault")
+	require.Zero(t, report.UnresolvedCount())
+}
+
+// A unit that serves this home is ours to report on, as before.
+func TestAutostart_UnitServingThisHome_IsReported(t *testing.T) {
+	testguard.IsolateTmux(t)
+
+	opts := testOptions(t, false)
+	opts.Version = "1.0.192"
+	ourAutostartUnit(&opts)
+	opts.autostartSupervision = func() daemon.SupervisionInfo {
+		return daemon.SupervisionInfo{Supported: true, UnitPresent: true, Enabled: true, Active: true}
+	}
+
+	report, err := Run(opts)
+	require.NoError(t, err)
+	require.Equal(t, StatusPass, findCheck(t, report, "autostart").Status)
+	require.Equal(t, StatusPass, findCheck(t, report, "autostart supervision").Status)
+}
+
+// Whether the unit is ours must be established, not assumed: if the question
+// cannot be answered, say so rather than guessing either way.
+func TestAutostart_ScopeUnreadable_SaysSo(t *testing.T) {
+	testguard.IsolateTmux(t)
+
+	opts := testOptions(t, false)
+	opts.autostartServesHome = func(string) (bool, bool, error) { return false, false, os.ErrPermission }
+
+	report, err := Run(opts)
+	require.NoError(t, err)
+
+	c := findCheck(t, report, "autostart")
+	require.Equal(t, StatusWarn, c.Status)
+	require.Contains(t, c.Detail, "cannot read the installed autostart unit")
+	require.True(t, c.Problem)
+	require.False(t, hasCheck(report, "autostart path"), "an unestablished scope must not be asserted about")
+}
+
 // A unit pointing at something that is not a readable af binary (a deleted
 // path, say) cannot start a daemon at all — worth acting on, but it is not
 // evidence of version skew, so it warns rather than asserting one.
@@ -628,6 +755,7 @@ func TestAutostartPath_UnitBinaryUnidentifiable_Warns(t *testing.T) {
 
 	opts := testOptions(t, false)
 	opts.Version = "1.0.192"
+	ourAutostartUnit(&opts)
 	opts.autostartUnit = func() daemon.AutostartUnitInfo {
 		return daemon.AutostartUnitInfo{Supported: true, Exists: true, ExecPath: "/gone/af"}
 	}
@@ -649,6 +777,7 @@ func TestAutostartPath_DevClient_AdvisoryOnly(t *testing.T) {
 
 	opts := testOptions(t, false)
 	opts.Version = devVersion
+	ourAutostartUnit(&opts)
 	opts.autostartUnit = func() daemon.AutostartUnitInfo {
 		return daemon.AutostartUnitInfo{Supported: true, Exists: true, ExecPath: "/home/dev/.local/bin/af"}
 	}
@@ -674,6 +803,7 @@ func TestAutostartPath_Matching_Passes(t *testing.T) {
 	require.NoError(t, os.WriteFile(bin, []byte("#!/bin/sh\n"), 0o755))
 
 	opts := testOptions(t, false)
+	ourAutostartUnit(&opts)
 	opts.autostartUnit = func() daemon.AutostartUnitInfo {
 		return daemon.AutostartUnitInfo{Supported: true, Exists: true, ExecPath: bin}
 	}
@@ -696,6 +826,7 @@ func TestAutostartPath_SymlinkedInstall_Passes(t *testing.T) {
 	require.NoError(t, os.Symlink(real, link))
 
 	opts := testOptions(t, false)
+	ourAutostartUnit(&opts)
 	opts.autostartUnit = func() daemon.AutostartUnitInfo {
 		return daemon.AutostartUnitInfo{Supported: true, Exists: true, ExecPath: link}
 	}
@@ -722,6 +853,7 @@ func TestAutostartPath_UnitPresentButUnreadable_Warns(t *testing.T) {
 	testguard.IsolateTmux(t)
 
 	opts := testOptions(t, false)
+	ourAutostartUnit(&opts)
 	opts.autostartUnit = func() daemon.AutostartUnitInfo {
 		return daemon.AutostartUnitInfo{
 			Supported: true, Exists: true, Path: "/etc/systemd/user/af.service",
@@ -743,6 +875,7 @@ func TestAutostartSupervision_UnitUnreadableAndInactive_Warns(t *testing.T) {
 	testguard.IsolateTmux(t)
 
 	opts := testOptions(t, false)
+	ourAutostartUnit(&opts)
 	opts.autostartSupervision = func() daemon.SupervisionInfo {
 		return daemon.SupervisionInfo{
 			Supported: true, UnitPresent: true, Active: false, Err: os.ErrPermission,
@@ -1039,6 +1172,7 @@ func TestAutostartSupervision_LoadedInWrongDomain_Warns(t *testing.T) {
 	testguard.IsolateTmux(t)
 
 	opts := testOptions(t, false)
+	ourAutostartUnit(&opts)
 	opts.autostartSupervision = func() daemon.SupervisionInfo {
 		return daemon.SupervisionInfo{
 			Supported: true, UnitPresent: true, Enabled: true,
@@ -1061,6 +1195,7 @@ func TestAutostartSupervision_UnitPresentButInactive_Warns(t *testing.T) {
 	testguard.IsolateTmux(t)
 
 	opts := testOptions(t, false)
+	ourAutostartUnit(&opts)
 	opts.autostartSupervision = func() daemon.SupervisionInfo {
 		return daemon.SupervisionInfo{
 			Supported: true, UnitPresent: true, Enabled: true, Active: false,
@@ -1084,6 +1219,7 @@ func TestAutostartSupervision_LoadedButNotRunning_Warns(t *testing.T) {
 	testguard.IsolateTmux(t)
 
 	opts := testOptions(t, false)
+	ourAutostartUnit(&opts)
 	opts.autostartSupervision = func() daemon.SupervisionInfo {
 		return daemon.SupervisionInfo{
 			Supported: true, UnitPresent: true, Enabled: true,
@@ -1106,6 +1242,7 @@ func TestAutostartSupervision_EnabledAndActive_Passes(t *testing.T) {
 	testguard.IsolateTmux(t)
 
 	opts := testOptions(t, false)
+	ourAutostartUnit(&opts)
 	opts.autostartSupervision = func() daemon.SupervisionInfo {
 		return daemon.SupervisionInfo{Supported: true, UnitPresent: true, Enabled: true, Active: true}
 	}
@@ -1126,9 +1263,11 @@ func TestSkewChecks_HealthyMachine_AllPass(t *testing.T) {
 	opts := testOptions(t, false)
 	opts.Version = "1.0.192"
 	opts.daemonHealth = respondingDaemon("1.0.192")
+	ourAutostartUnit(&opts)
 	opts.autostartUnit = func() daemon.AutostartUnitInfo {
 		return daemon.AutostartUnitInfo{Supported: true, Exists: true, ExecPath: bin}
 	}
+	ourAutostartUnit(&opts)
 	opts.autostartSupervision = func() daemon.SupervisionInfo {
 		return daemon.SupervisionInfo{Supported: true, UnitPresent: true, Enabled: true, Active: true}
 	}

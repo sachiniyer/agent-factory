@@ -153,6 +153,10 @@ type Options struct {
 	// autostartSupervision probes the service manager; defaults to
 	// daemon.AutostartSupervision.
 	autostartSupervision func() daemon.SupervisionInfo
+	// autostartServesHome reports whether the installed autostart unit's daemon
+	// would serve the home under inspection; defaults to
+	// daemon.AutostartUnitServesHome (#1919).
+	autostartServesHome func(configDir string) (serves bool, installed bool, err error)
 	// selfBinary resolves the path of the binary running this command;
 	// defaults to os.Executable.
 	selfBinary func() (string, error)
@@ -186,6 +190,12 @@ type scanContext struct {
 	// distinguishes "scanned, found none" from "not scanned yet".
 	daemons        []daemonProc
 	daemonsScanned bool
+	// autostart scope memo (see autostartScope): whether the installed unit is
+	// this home's at all.
+	autostartServes    bool
+	autostartInstalled bool
+	autostartScopeErr  error
+	autostartScoped    bool
 }
 
 // applyDefaults resolves every zero-valued option to its production default.
@@ -226,6 +236,9 @@ func (o *Options) applyDefaults() error {
 	}
 	if o.autostartSupervision == nil {
 		o.autostartSupervision = daemon.AutostartSupervision
+	}
+	if o.autostartServesHome == nil {
+		o.autostartServesHome = daemon.AutostartUnitServesHome
 	}
 	if o.selfBinary == nil {
 		o.selfBinary = resolvedSelfBinary
