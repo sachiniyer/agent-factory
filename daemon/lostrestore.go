@@ -44,25 +44,21 @@ var (
 	lostRestoreBackoffMax  = 5 * time.Minute
 )
 
-// lostRestoreConfirmSettle is how long a re-spawned runtime must survive before
-// the restore that produced it counts as CONFIRMED ALIVE (#1910).
+// Confirming a recovery is an OBSERVATION, never a clock (#1917 round 6).
 //
-// This is the whole definition of "recovered", and it is deliberately NOT "the
-// spawn returned". Instance.Recover reports success once tmux accepted the
-// new-session and ConfirmLive marked the row live — and ConfirmLive is a pure
-// in-memory state edge, not a liveness probe (session/backend_local.go). So an
-// agent whose command exits immediately still produces a SUCCESSFUL Recover, and
-// the next poll re-marks the session Lost as a brand-new episode. That is why the
-// #1108 backoff never armed: lostRestoreFailed never saw a synchronous error, and
-// the loop respawned at poll cadence for ~28 minutes.
+// There is no settle duration here on purpose. The old fixed 15s window meant
+// "enough seconds passed without anyone looking", which proves nothing and is wrong
+// at both ends: a daemon_poll_interval longer than the window lets a runtime that
+// exited instantly go unseen until after it expires — so its failure history was
+// cleared and the exponential backoff never armed, the very bug #1910 reports — and
+// remoteLostGracePeriod (60s) deliberately keeps an unanswerable remote non-Lost far
+// longer than any short window, with the same result.
 //
-// Sized to span several poll ticks: an agent that fails at startup dies well
-// inside it, while a session that is genuinely up trivially outlives it. Making
-// it longer would delay a real recovery's backoff reset for no benefit; shorter
-// and a slow-dying agent would keep re-arming as a fresh episode.
-//
-// A var so tests can shorten it; production never reassigns.
-var lostRestoreConfirmSettle = 15 * time.Second
+// A restore is confirmed only once the daemon has actually gotten an ANSWER out of
+// the replacement runtime: Manager.aliveObservations, incremented where a poll's
+// probe succeeds and nowhere else. That scales with the real poll interval and the
+// real grace, because it waits for the thing itself rather than for a duration
+// someone guessed.
 
 // errRestoreDiedBeforeConfirm is the synthetic failure recorded when a restore's
 // spawn succeeded but its runtime was Lost again before it could be confirmed
@@ -79,13 +75,17 @@ type lostRestoreState struct {
 	consecutiveFailures int
 	nextAttempt         time.Time
 	// awaitingConfirm marks a restore whose spawn RETURNED SUCCESS but whose
-	// replacement runtime has not yet been observed alive past confirmBy. The
-	// state is deliberately retained across that window (#1910): if the session
-	// goes Lost again while this is set, the "successful" restore is retroactively
-	// counted as a failed attempt and the backoff arms, instead of the loss
-	// re-entering as a fresh episode with a cleared counter.
+	// replacement runtime has not yet been OBSERVED alive. The state is
+	// deliberately retained across that window (#1910): if the session goes Lost
+	// again while this is set, the "successful" restore is retroactively counted as
+	// a failed attempt and the backoff arms, instead of the loss re-entering as a
+	// fresh episode with a cleared counter.
 	awaitingConfirm bool
-	confirmBy       time.Time
+	// observedAtSpawn is Manager.aliveObservations for this session at the moment
+	// the respawn returned. The restore counts as confirmed only once the live
+	// counter has moved PAST it — i.e. a poll actually got an answer out of the new
+	// runtime. Never a timestamp: see the note above the state type.
+	observedAtSpawn uint64
 	// remoteLogged dedupes the "not restoring a remote session" note to once
 	// per Lost episode.
 	remoteLogged bool
@@ -124,13 +124,16 @@ func (m *Manager) RestoreLostSessions() {
 	// poll rather than an escalating backoff. While a restore is awaiting
 	// confirmation, the state is kept until confirmBy passes, so a death inside
 	// that window still lands on the attempt that caused it.
-	now := time.Now()
 	for key, inst := range m.instances {
 		st := m.lostRestoreStates[key]
 		if st == nil || inst.GetStatus() == session.Lost {
 			continue
 		}
-		if st.awaitingConfirm && now.Before(st.confirmBy) {
+		if st.awaitingConfirm && !m.observedAliveSinceSpawnLocked(key, inst, st) {
+			// Not Lost, but nothing has ANSWERED yet either. A row can read non-Lost
+			// for reasons that are not proof of life — a poll that has not run at this
+			// interval, or a remote inside its 60s loss grace — so keep the history
+			// until the runtime speaks for itself.
 			continue
 		}
 		// Either no restore is pending confirmation, or one is and its runtime has
@@ -244,16 +247,13 @@ func (m *Manager) restoreLostSession(key, repoID string, inst *session.Instance)
 	// episode) so the #1108 backoff escalates, and skip this tick: the whole point
 	// is to stop respawning at poll cadence into an agent that will not stay up.
 	//
-	// The deadline is load-bearing, not decoration. A runtime that OUTLIVED
-	// confirmBy was confirmed alive by definition, even if no sweep happened to
-	// observe it non-Lost before it died (the sweep only runs while the row reads
-	// non-Lost, so a death right after the window can beat it). Counting that as a
-	// died-before-confirmation failure would saddle a genuinely new loss episode
-	// with the previous one's history and back it off instead of restoring it
-	// promptly. Past the deadline the history is about a runtime that provably
-	// survived, so the episode starts clean.
-	now := time.Now()
-	if st.awaitingConfirm && !now.Before(st.confirmBy) {
+	// A restore whose runtime was OBSERVED alive and only died later is a genuinely
+	// new loss episode, and must not inherit the previous one's failure history —
+	// that would back off a session that deserves a prompt restore. But the test is
+	// the observation, not a deadline: "confirmBy has passed" merely meant time
+	// elapsed, which a long poll interval or the 60s remote grace can outlast while
+	// the runtime was dead the whole time (#1917 round 6).
+	if st.awaitingConfirm && m.observedAliveSinceSpawnLocked(key, inst, st) {
 		st = &lostRestoreState{}
 		m.lostRestoreStates[key] = st
 	}
@@ -263,7 +263,7 @@ func (m *Manager) restoreLostSession(key, repoID string, inst *session.Instance)
 	}
 	// The backoff gate does not apply to the death itself: recording it is
 	// bookkeeping about an attempt already made, not a new attempt.
-	skip := !diedBeforeConfirm && now.Before(st.nextAttempt)
+	skip := !diedBeforeConfirm && time.Now().Before(st.nextAttempt)
 	m.mu.Unlock()
 	if diedBeforeConfirm {
 		m.lostRestoreFailed(key, st, inst.Title, errRestoreDiedBeforeConfirm)
@@ -379,8 +379,16 @@ func (m *Manager) restoreLostSession(key, repoID string, inst *session.Instance)
 	// session that never stays up look like a first-time loss on every poll.
 	m.mu.Lock()
 	st.awaitingConfirm = true
-	st.confirmBy = time.Now().Add(lostRestoreConfirmSettle)
+	st.observedAtSpawn = m.aliveObservations[remoteLossKey(repoID, inst)]
 	m.mu.Unlock()
+}
+
+// observedAliveSinceSpawnLocked reports whether a poll has gotten an ANSWER out of
+// this session's runtime since its last respawn — the definition of "confirmed
+// alive" (#1917 round 6). Caller holds m.mu.
+func (m *Manager) observedAliveSinceSpawnLocked(key string, inst *session.Instance, st *lostRestoreState) bool {
+	repoID, _ := splitDaemonInstanceKey(key)
+	return m.aliveObservations[remoteLossKey(repoID, inst)] > st.observedAtSpawn
 }
 
 // lostRestoreFailed records a failed restore attempt: exponential backoff to

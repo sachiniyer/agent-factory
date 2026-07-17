@@ -317,6 +317,10 @@ func (r *cleanupRun) git(args ...string) (string, error) {
 	out, err := r.g.runGitLocalCommand(r.g.repoPath, args...)
 	if errors.Is(err, context.DeadlineExceeded) {
 		r.unknown = true
+		// Latch it on the WORKSPACE too: a retry gets a fresh run, and without this
+		// the knowledge that this filesystem stalls would die with the attempt
+		// (#1917 round 6).
+		r.g.markCleanupStalled()
 	}
 	return out, err
 }
@@ -327,8 +331,18 @@ func (r *cleanupRun) git(args ...string) (string, error) {
 // paths, and os.RemoveAll takes no context — so it would hang forever and defeat
 // the bound. Refusing leaves the directory for a later retry, which is recoverable.
 func (r *cleanupRun) removeDir(path string) {
-	if r.unknown {
-		r.errs = append(r.errs, fmt.Errorf("refusing to delete worktree directory %s: a cleanup command timed out, so its state is unknown and an unbounded delete could hang; leaving it for a retry", path))
+	// Consult the WORKSPACE's latch, not just this run's flag. A retry after a
+	// timeout arrives with a clean run, and the git probes it makes can now answer
+	// "not registered" — because the timed-out remove had already deregistered the
+	// checkout before it stalled. Trusting only r.unknown therefore walks straight
+	// back into the unbounded delete on the second attempt (#1917 round 6).
+	if r.unknown || r.g.cleanupHasStalled() {
+		// Refusing IS an unknown outcome: the directory is still there, so the run
+		// must report it and the caller must keep the record. Marking the run here
+		// rather than relying on the caller keeps that from being a fourth thing
+		// someone has to remember.
+		r.unknown = true
+		r.errs = append(r.errs, fmt.Errorf("refusing to delete worktree directory %s: a cleanup command has timed out against this workspace, so an unbounded delete could hang the daemon; leaving it in place — a daemon restart re-probes it", path))
 		return
 	}
 	if err := os.RemoveAll(path); err != nil {
@@ -691,3 +705,12 @@ func CleanupWorktreesForRepo(repoRoot string) error {
 
 	return nil
 }
+
+// markCleanupStalled latches the workspace-level "a cleanup command timed out
+// here" fact (see GitWorktree.cleanupStalled).
+func (g *GitWorktree) markCleanupStalled() { g.cleanupStalled.Store(true) }
+
+// cleanupHasStalled reports whether any cleanup attempt against this workspace has
+// ever tripped a deadline. Consulted by removeDir, which must never enter an
+// unbounded delete on a filesystem that has already proven it can stall.
+func (g *GitWorktree) cleanupHasStalled() bool { return g.cleanupStalled.Load() }

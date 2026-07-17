@@ -366,3 +366,21 @@ func aliveWithin(as session.AgentServer, timeout time.Duration) livenessProbe {
 		return probeUnknown
 	}
 }
+
+// noteAliveObservation records that a poll got an ANSWER out of this session's
+// runtime — the daemon's only positive proof of life.
+//
+// The Lost-restore loop clears a session's failure history only when this counter
+// has advanced past the value captured at its last respawn. That is what makes
+// "confirmed alive" an observation rather than a clock (#1917 round 6): a fixed
+// settle window is wrong at both ends — a daemon_poll_interval longer than the
+// window means a runtime that died instantly is only SEEN Lost after it expires
+// (so its history is wrongly cleared and the backoff never arms), and the 60s
+// remoteLostGracePeriod means an unanswerable remote stays non-Lost long past any
+// short window. Counting answers is immune to both, and scales with whatever the
+// poll interval and grace actually are.
+func (m *Manager) noteAliveObservation(key string) {
+	m.mu.Lock()
+	m.aliveObservations[key]++
+	m.mu.Unlock()
+}

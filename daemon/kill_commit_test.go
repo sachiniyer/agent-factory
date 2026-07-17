@@ -170,47 +170,35 @@ func TestFinishUserKill_UnsafeTeardown_KeepsTheRecordForRetry(t *testing.T) {
 	}
 }
 
-// TestRestoreLostSessions_SurvivedSettleThenDied_StartsFreshEpisode: the settle
-// deadline is load-bearing, not decoration.
+// TestRestoreLostSessions_ObservedAliveThenDied_StartsFreshEpisode: a runtime the
+// daemon actually GOT AN ANSWER OUT OF, which only died later, is a genuinely new
+// loss episode and must not inherit the previous one's failure history — it
+// deserves a prompt restore, not a backoff.
 //
-// A runtime that OUTLIVED confirmBy was confirmed alive by definition, even if no
-// sweep happened to observe it non-Lost first — the sweep only runs while the row
-// reads non-Lost, so a death just after the window can beat it. Treating that as
-// "died before confirmation" saddles a genuinely new loss episode with the
-// previous one's failure history and backs it off instead of restoring it
-// promptly.
-//
-// PRE-FIX BEHAVIOR THIS REPRODUCES: diedBeforeConfirm read st.awaitingConfirm
-// without consulting st.confirmBy, so ANY Lost row with a pending confirmation
-// inherited the old history (failures=1, backed off) no matter how long its
-// runtime had actually survived.
-func TestRestoreLostSessions_SurvivedSettleThenDied_StartsFreshEpisode(t *testing.T) {
+// The test drives the confirmation by observation, never by a clock. That is the
+// #1917 round-6 correction: the old version advanced confirmBy into the past, which
+// asserted that ELAPSED TIME confirms a runtime — and time passing without anyone
+// looking proves nothing.
+func TestRestoreLostSessions_ObservedAliveThenDied_StartsFreshEpisode(t *testing.T) {
 	manager, repoID, repoPath := newStatusTestManager(t)
 	backend := &recoverFakeBackend{FakeBackend: session.NewFakeBackend()}
 	inst := registerStarted(t, manager, repoID, repoPath, "long-lived", backend, true, session.Lost)
 	zeroRestoreBackoff(t)
 
 	key := daemonInstanceKey(repoID, "long-lived")
-	manager.RestoreLostSessions() // recovers; arms the confirmation window
+	manager.RestoreLostSessions() // recovers; arms the confirmation
 	if got := backend.recoverCalls(); got != 1 {
 		t.Fatalf("recover calls = %d, want 1", got)
 	}
 
-	// The runtime survived well past its settle window, then died much later.
-	manager.mu.Lock()
-	st := manager.lostRestoreStates[key]
-	if st == nil || !st.awaitingConfirm {
-		manager.mu.Unlock()
-		t.Fatal("expected a restore awaiting confirmation")
-	}
-	st.confirmBy = time.Now().Add(-time.Hour)
-	manager.mu.Unlock()
+	// A poll ANSWERS: the runtime is confirmed alive. It dies much later.
+	observeAlive(manager, repoID, inst)
 	inst.SetStatusForTest(session.Lost)
 
 	manager.RestoreLostSessions()
 
 	manager.mu.Lock()
-	st = manager.lostRestoreStates[key]
+	st := manager.lostRestoreStates[key]
 	failures := -1
 	if st != nil {
 		failures = st.consecutiveFailures
@@ -218,9 +206,9 @@ func TestRestoreLostSessions_SurvivedSettleThenDied_StartsFreshEpisode(t *testin
 	manager.mu.Unlock()
 
 	if failures > 0 {
-		t.Fatalf("a runtime that outlived its settle window was charged %d failure(s) from the "+
-			"PREVIOUS episode; it was confirmed alive, so this loss must start a fresh episode "+
-			"and be restored promptly rather than backed off (#1910)", failures)
+		t.Fatalf("a runtime that was OBSERVED alive was charged %d failure(s) from the PREVIOUS "+
+			"episode; it was confirmed, so this loss must start fresh and be restored promptly "+
+			"rather than backed off (#1910)", failures)
 	}
 	if got := backend.recoverCalls(); got != 2 {
 		t.Fatalf("recover calls = %d, want 2: a fresh loss episode must attempt a restore, not back off", got)

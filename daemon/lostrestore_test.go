@@ -86,12 +86,6 @@ func TestRestoreLostSessions_RecoversLostInstance(t *testing.T) {
 	backend := &recoverFakeBackend{FakeBackend: session.NewFakeBackend()}
 	inst := registerStarted(t, manager, repoID, repoPath, "stranded", backend, true, session.Lost)
 
-	// Settle immediately, so "recovered" resolves within this test. The confirmation
-	// window itself is covered by the #1910 tests in lostrestore_confirm_test.go.
-	prevSettle := lostRestoreConfirmSettle
-	lostRestoreConfirmSettle = 0
-	t.Cleanup(func() { lostRestoreConfirmSettle = prevSettle })
-
 	manager.RestoreLostSessions()
 
 	if got := backend.recoverCalls(); got != 1 {
@@ -100,11 +94,12 @@ func TestRestoreLostSessions_RecoversLostInstance(t *testing.T) {
 	if got := inst.GetStatus(); got != session.Running {
 		t.Fatalf("status = %v, want Running after recovery", got)
 	}
-	// A second pass is what CONFIRMS the runtime: it observes the row still
-	// non-Lost past the settle interval and only then forgets the episode. This
-	// assertion used to run against the first pass and require the state to be gone
-	// the instant the spawn returned — which is exactly the #1910 bug, since a spawn
-	// returning proves nothing about whether the runtime survives.
+	// What CONFIRMS the runtime is a poll getting an ANSWER out of it, and only then
+	// is the episode forgotten. This assertion used to run against the first pass and
+	// require the state to be gone the instant the spawn returned — which is exactly
+	// the #1910 bug, since a spawn returning proves nothing about whether the runtime
+	// survives. Nor does elapsed time (#1917 round 6): only an observation does.
+	observeAlive(manager, repoID, inst)
 	manager.RestoreLostSessions()
 	manager.mu.Lock()
 	_, hasState := manager.lostRestoreStates[daemonInstanceKey(repoID, "stranded")]

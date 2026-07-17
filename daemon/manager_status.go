@@ -303,6 +303,13 @@ func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instanc
 	// HasUpdated). Content is the capture handed back so the idle branch runs the
 	// usage-limit detector (#1146) without a second capture-pane.
 	obs, err := as.Snapshot()
+	if err == nil {
+		// The runtime ANSWERED. This is the only positive liveness observation in the
+		// daemon, and the Lost-restore loop's confirmation is defined in terms of it
+		// (#1910/#1917 round 6): elapsed time without an answer proves nothing, so a
+		// clock must never stand in for this.
+		m.noteAliveObservation(key)
+	}
 	if err != nil {
 		// The observation probe failed. The local agent-server never errors here,
 		// so this is the REMOTE runtime's path (#1592 Phase 4): the REST call to

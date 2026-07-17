@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/pathutil"
@@ -45,6 +46,26 @@ func getWorktreeDirectoryForRepoWithConfig(cfg *config.Config, repoPath string) 
 
 // GitWorktree manages git worktree operations for a session
 type GitWorktree struct {
+	// cleanupStalled latches once ANY cleanup command has timed out against this
+	// workspace, and it is the reason this fact lives on the WORKTREE rather than
+	// on the per-attempt cleanupRun (#1917 round 6).
+	//
+	// "This filesystem is stalled" is a property of the workspace, not of one
+	// attempt. Stored per-run it died on every retry: a `git worktree remove` that
+	// times out AFTER deregistering the checkout but BEFORE deleting its files
+	// leaves the next attempt's fresh run with unknown=false, its `worktree list`
+	// then answers "not registered" (it was deregistered!), and the unbounded
+	// os.RemoveAll runs against the same stalled filesystem — re-entering the exact
+	// wedge this work exists to remove. Refusing once is not refusing.
+	//
+	// Latched for the daemon's lifetime, deliberately: os.RemoveAll takes no
+	// context, so entering it is a one-way door, and nothing we could ask about the
+	// path is cheaper than the stall itself. A daemon restart re-probes, which is
+	// the one moment there is genuinely new information (the mount may be back).
+	// atomic because the poll's diagnostics read this worktree without the op lock
+	// the cleanup holds.
+	cleanupStalled atomic.Bool
+
 	// Path to the repository
 	repoPath string
 	// Path to the worktree

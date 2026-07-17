@@ -16,6 +16,13 @@ import (
 // ~28 minutes. Recover returned nil every time (the tmux spawn genuinely worked),
 // so lostRestoreFailed never saw an error and the #1108 backoff never armed.
 
+// observeAlive fakes the daemon's one positive liveness observation — a poll whose
+// probe got an ANSWER out of the runtime. Tests drive it explicitly because that,
+// not elapsed time, is what confirms a restore (#1917 round 6).
+func observeAlive(m *Manager, repoID string, inst *session.Instance) {
+	m.noteAliveObservation(remoteLossKey(repoID, inst))
+}
+
 // diesOnSpawnBackend models the reported agent: its Recover SUCCEEDS — the spawn
 // is real and returns nil — but the runtime does not survive, so the row is Lost
 // again by the time the next poll looks. This is the exact case the old code read
@@ -145,20 +152,99 @@ func TestRestoreLostSessions_ConfirmedAliveClearsRetryState(t *testing.T) {
 		t.Fatalf("status = %v, want Running after recovery", got)
 	}
 
-	// The runtime stayed up past the settle interval: the next pass observes it
-	// non-Lost and clears the history.
-	prev := lostRestoreConfirmSettle
-	lostRestoreConfirmSettle = 0
-	t.Cleanup(func() { lostRestoreConfirmSettle = prev })
-	manager.mu.Lock()
-	st.confirmBy = time.Now().Add(-time.Second) // settle window has elapsed
-	manager.mu.Unlock()
-
+	// A poll gets an ANSWER out of the new runtime: THAT is the confirmation. No
+	// clock is advanced anywhere in this test.
+	observeAlive(manager, repoID, inst)
 	manager.RestoreLostSessions()
 	manager.mu.Lock()
 	_, stillTracked := manager.lostRestoreStates[key]
 	manager.mu.Unlock()
 	if stillTracked {
 		t.Fatal("retry state survived a confirmed-alive runtime; it must clear on confirmation")
+	}
+}
+
+// TestRestoreLostSessions_NeverObservedAlive_BacksOffRegardlessOfElapsedTime is
+// #1917 round-6 finding (2): the confirmation was a clock, not an observation.
+//
+// "Elapsed time without a successful liveness observation is not proof that the
+// runtime survived." Two real configurations broke the old fixed 15s window, and
+// this test covers BOTH with one property, because the fix makes them the same
+// case:
+//
+//   - daemon_poll_interval > the window: a restored process exits IMMEDIATELY, but
+//     nothing looks at it until after the window expires — so its history was
+//     cleared and treated as a fresh episode, and #1910's backoff never armed.
+//   - remote at DEFAULT settings: unanswered probes deliberately keep a session
+//     non-Lost for remoteLostGracePeriod (60s), four times the old window, with the
+//     same outcome.
+//
+// In both, the daemon never got an ANSWER out of the runtime. So: no observation,
+// no confirmation, no matter how much time passes.
+//
+// PRE-FIX BEHAVIOR THIS REPRODUCES: the history is cleared and each death re-enters
+// as attempt #1, so consecutiveFailures never climbs.
+func TestRestoreLostSessions_NeverObservedAlive_BacksOffRegardlessOfElapsedTime(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	backend := &diesOnSpawnBackend{FakeBackend: session.NewFakeBackend()}
+	registerStarted(t, manager, repoID, repoPath, "flapper", backend, true, session.Lost)
+	zeroRestoreBackoff(t)
+
+	key := daemonInstanceKey(repoID, "flapper")
+	// Many passes, and NOT ONE observation — exactly what a poll interval longer
+	// than any window, or a remote inside its 60s grace, produces. No clock is
+	// advanced: the point is that time is irrelevant without an answer.
+	for i := 0; i < 6; i++ {
+		manager.RestoreLostSessions()
+	}
+
+	manager.mu.Lock()
+	st := manager.lostRestoreStates[key]
+	failures := 0
+	if st != nil {
+		failures = st.consecutiveFailures
+	}
+	manager.mu.Unlock()
+
+	if st == nil {
+		t.Fatal("the retry history was cleared for a runtime nothing ever observed alive: elapsed " +
+			"time is not proof of survival, so the backoff never arms and the session respawns at " +
+			"poll cadence forever (#1917 round 6)")
+	}
+	if failures < 2 {
+		t.Fatalf("consecutiveFailures = %d after repeated unobserved deaths; each one must count "+
+			"against the SAME episode so the backoff escalates", failures)
+	}
+}
+
+// TestRestoreLostSessions_ObservationConfirms_NotElapsedTime pins the positive half:
+// an ANSWER from the runtime — and only that — clears the history.
+func TestRestoreLostSessions_ObservationConfirms_NotElapsedTime(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	backend := &recoverFakeBackend{FakeBackend: session.NewFakeBackend()}
+	inst := registerStarted(t, manager, repoID, repoPath, "healthy", backend, true, session.Lost)
+	zeroRestoreBackoff(t)
+	key := daemonInstanceKey(repoID, "healthy")
+
+	manager.RestoreLostSessions() // spawn; awaiting confirmation
+
+	// Passes WITHOUT an observation must not confirm, however many there are.
+	manager.RestoreLostSessions()
+	manager.mu.Lock()
+	stillAwaiting := manager.lostRestoreStates[key] != nil
+	manager.mu.Unlock()
+	if !stillAwaiting {
+		t.Fatal("the history was cleared without any observation: a non-Lost row is not proof of " +
+			"life (a remote inside its loss grace reads non-Lost while dead)")
+	}
+
+	// One ANSWER, and it is confirmed.
+	observeAlive(manager, repoID, inst)
+	manager.RestoreLostSessions()
+	manager.mu.Lock()
+	_, tracked := manager.lostRestoreStates[key]
+	manager.mu.Unlock()
+	if tracked {
+		t.Fatal("an observed-alive runtime must have its retry history cleared")
 	}
 }
