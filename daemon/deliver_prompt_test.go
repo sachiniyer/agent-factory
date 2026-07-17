@@ -1039,7 +1039,7 @@ func TestDeliverPrompt_TmuxOrphanReturnsImmediatelyWithError(t *testing.T) {
 	})
 
 	// The orphan must exist in tmux but carry no daemon/disk record.
-	if !tmux.NewTmuxSessionForRepo(orphanTitle, repo.Root, program).DoesSessionExist() {
+	if !tmux.NewTmuxSessionForRepo(orphanTitle, repo.Root, program).ExistsOrUnknown() {
 		t.Fatal("orphan tmux session should exist after creation")
 	}
 	if exists, _, _, err := manager.targetSessionState(repo.ID, orphanTitle); err != nil {

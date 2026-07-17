@@ -14,7 +14,7 @@ import (
 )
 
 // errSessionAbsent makes the mock executor's has-session probe report "no such
-// session", driving DoesSessionExist to false for the #999 nil-monitor test.
+// session", driving ExistsOrUnknown to false for the #999 nil-monitor test.
 var errSessionAbsent = errors.New("no such session")
 
 // deadTmuxBackend is a FakeBackend whose IsAlive reports false, modelling a
@@ -176,7 +176,7 @@ func (b nilMonitorBackend) HasUpdated(*session.Instance) (bool, bool, string) {
 	return b.ts.HasUpdated()
 }
 func (b nilMonitorBackend) IsAlive(*session.Instance) (bool, error) {
-	return b.ts.DoesSessionExist(), nil
+	return b.ts.ExistsOrUnknown(), nil
 }
 
 // TestRefreshStatuses_DeadNilMonitorDoesNotPanic is the #999 regression at the

@@ -235,7 +235,7 @@ func (t *TmuxSession) CloseAndWaitForPaneExit() (PaneState, error) {
 // (the agent program). Must be called before kill-session — afterwards there
 // is nothing left to query.
 func (t *TmuxSession) panePID() (int, error) {
-	// exactTarget forces an exact session match, mirroring DoesSessionExist.
+	// exactTarget forces an exact session match, mirroring ExistsOrUnknown.
 	// (The bare `=name` form returns an empty pane_pid for display-message —
 	// the trailing `:` in exactTarget is what makes the pid resolve. See #1006.)
 	//

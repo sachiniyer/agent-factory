@@ -575,14 +575,24 @@ func (b *LocalBackend) setupTabs(i *Instance) {
 		if err := tab.tmux.Restore(worktreePath); err != nil {
 			log.WarningLog.Printf("restore tab %q for %q failed: %v", tab.Name, i.Title, err)
 		}
-		// Only count a shell tab as live when its tmux session actually exists
-		// server-side after Restore. Restore (and its re-spawn) can fail — e.g.
-		// the worktree was removed so `tmux new-session -c $workdir` errors —
-		// leaving a dead shell tab. Gating on presence alone (the old behavior)
-		// suppressed the fresh-shell fallback below and stranded the user with a
-		// dead terminal (#991).
-		if tab.Kind == TabKindShell && tab.tmux.DoesSessionExist() {
-			hasLiveShell = true
+		// Only count a shell tab as live when a has-session probe ANSWERED that its
+		// tmux session exists server-side after Restore. Restore (and its re-spawn)
+		// can fail — e.g. the worktree was removed so `tmux new-session -c $workdir`
+		// errors — leaving a dead shell tab. Gating on presence alone suppressed the
+		// fresh-shell fallback below and stranded the user with a dead terminal
+		// (#991).
+		//
+		// Existence is EVIDENCE here, so probe the tri-state instead of the lossy
+		// bool (#1962): only known && exists counts as live. A wedged/timed-out
+		// has-session reports "exists" through ExistsOrUnknown, which would suppress
+		// the fallback and re-strand the user with a dead/wedged terminal — the exact
+		// #991 regression. Treating !known as "not confirmed live" means a merely-
+		// wedged server may cost a redundant fresh-shell spawn; a spare shell tab is
+		// strictly better than a dead one, so this is the deliberate tradeoff.
+		if tab.Kind == TabKindShell {
+			if exists, known := tab.tmux.ProbeSession(); known && exists {
+				hasLiveShell = true
+			}
 		}
 	}
 	// No persisted shell tab means a fresh instance (or one whose user closed
@@ -724,9 +734,9 @@ func (b *LocalBackend) IsAlive(i *Instance) (bool, error) {
 		// No binding at all: an answer, not a guess.
 		return false, nil
 	}
-	// ProbeSession, not DoesSessionExist (#1917 round 8): this result is EVIDENCE —
+	// ProbeSession, not ExistsOrUnknown (#1917 round 8): this result is EVIDENCE —
 	// the daemon's poll turns it into probeAlive, which clears a session's restore
-	// history and marks it Ready. DoesSessionExist reports a timed-out probe as
+	// history and marks it Ready. ExistsOrUnknown reports a timed-out probe as
 	// "exists", so taking it here would report a wedged server as a live agent.
 	exists, known := ts.ProbeSession()
 	if !known {

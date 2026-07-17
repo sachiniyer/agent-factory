@@ -14,12 +14,28 @@ import (
 	"github.com/sachiniyer/agent-factory/log"
 )
 
-func (t *TmuxSession) DoesSessionExist() bool {
+// ExistsOrUnknown reports session existence as a deliberately LOSSY bool: it
+// returns true for "the session exists OR tmux could not be reached (a wedged /
+// timed-out has-session)", and false ONLY for "definitively absent" — tmux
+// answered and said no such session. A wedged has-session is laundered into true
+// here (via sessionExists), the conservative lie a bool is forced to tell.
+//
+// The name states the lie so it is visible at every call site. Contract:
+//
+//   - A caller MAY act on !ExistsOrUnknown() ("definitively gone"): classify a
+//     failed command as ErrSessionGone, or skip the idempotent teardown of an
+//     already-absent session. A wedged server reads as "exists", so these callers
+//     never falsely tear down or abandon a session that is merely slow — the safe
+//     direction, and the reason this form is kept.
+//   - A caller MUST NOT read a bare true as proof of life: "true" folds in "I
+//     could not tell". Any site that treats existence as EVIDENCE or as a POSITIVE
+//     gate must call ProbeSession() and handle !known explicitly (#1917/#1962).
+func (t *TmuxSession) ExistsOrUnknown() bool {
 	return sessionExists(t.cmdExec, t.sanitizedName)
 }
 
 // sessionExists reports whether a tmux session with the exact name `name`
-// currently exists. Shared by DoesSessionExist and the receiver-less
+// currently exists. Shared by ExistsOrUnknown and the receiver-less
 // CleanupSessions path so both probe identically.
 //
 // Bounded by tmuxCommandTimeout (#1917): has-session against a wedged server
@@ -56,7 +72,7 @@ func sessionExists(cmdExec cmd.Executor, name string) bool {
 // ProbeSession reports whether this session exists AND whether tmux actually
 // ANSWERED — the tri-state a bool cannot express (#1917 round 8).
 //
-// DoesSessionExist has to pick yes or no, so a timed-out probe becomes "yes": the
+// ExistsOrUnknown has to pick yes or no, so a timed-out probe becomes "yes": the
 // conservative lie, safe for the read-only callers that only ever act on "no". But
 // it launders UNKNOWN into AFFIRMATIVE at the bottom of the stack, and every caller
 // above is then downstream of a lie it cannot detect — which is how a wedged tmux

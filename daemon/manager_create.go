@@ -504,7 +504,18 @@ func (m *Manager) validateTitleAvailableLocked(repoID, repoPath, title, program 
 		}
 		return nil
 	}
-	if tmuxSession := tmux.NewTmuxSessionForRepo(title, repoPath, program); tmuxSession.DoesSessionExist() {
+	tmuxSession := tmux.NewTmuxSessionForRepo(title, repoPath, program)
+	// Existence gates the create here, so read the tri-state, not the lossy bool
+	// (#1962): only a CONFIRMED existing session (known && exists) blocks. A
+	// wedged/timed-out has-session is NOT proof of a name collision — reporting
+	// "exists" through ExistsOrUnknown would refuse a legitimate create against a
+	// merely-wedged server. An unanswered probe (!known) falls through and lets the
+	// create proceed. That never silently clobbers a real orphan: the create's own
+	// `tmux new-session -s <name>` fails on a duplicate name, and Start's existence
+	// check (now ProbeSession too) surfaces it as "already exists" once the server
+	// answers, or as ErrTmuxTimeout while it stays wedged — either way non-
+	// destructive. Blocking here on a guess is the only unsafe option.
+	if exists, known := tmuxSession.ProbeSession(); known && exists {
 		// A tmux session exists with no daemon reservation, in-memory instance,
 		// or disk record — an orphan left by a crash or an external process.
 		// No creator will ever finish it, so this stays a plain error (not

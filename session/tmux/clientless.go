@@ -29,7 +29,7 @@ import "fmt"
 // captureMu, so an unbounded stall would strand that mutex and deadlock every
 // LATER capture start/stop for the session — the deadline is what keeps the
 // lock hold finite. On a tripped deadline it returns ErrTmuxTimeout without
-// probing DoesSessionExist — see tmuxTimeoutContext.
+// probing ExistsOrUnknown — see tmuxTimeoutContext.
 func (t *TmuxSession) EnablePipePane(shellCommand string) error {
 	ctx, cancel := tmuxTimeoutContext()
 	defer cancel()
@@ -37,7 +37,7 @@ func (t *TmuxSession) EnablePipePane(shellCommand string) error {
 		if ctx.Err() != nil {
 			return fmt.Errorf("%w: pipe-pane after %s", ErrTmuxTimeout, tmuxCommandTimeout)
 		}
-		if !t.DoesSessionExist() {
+		if !t.ExistsOrUnknown() {
 			return fmt.Errorf("%w: pipe-pane", ErrSessionGone)
 		}
 		return fmt.Errorf("error enabling pipe-pane: %w", err)
@@ -55,6 +55,11 @@ func (t *TmuxSession) EnablePipePane(shellCommand string) error {
 // the server is wedged, so whether the pipe is actually closed is UNKNOWN, and
 // silently claiming success would let the broker believe it had torn down a pipe
 // that may still be writing.
+//
+// The !ExistsOrUnknown no-op success below is gated on the DEFINITIVELY-absent
+// branch only, and safely (#1962): the timeout is already handled above, so this
+// runs only when pipe-pane answered with a fast error, and a wedged→"exists"
+// keeps that a real error rather than a false no-op — never the other way.
 func (t *TmuxSession) DisablePipePane() error {
 	ctx, cancel := tmuxTimeoutContext()
 	defer cancel()
@@ -62,7 +67,7 @@ func (t *TmuxSession) DisablePipePane() error {
 		if ctx.Err() != nil {
 			return fmt.Errorf("%w: pipe-pane after %s", ErrTmuxTimeout, tmuxCommandTimeout)
 		}
-		if !t.DoesSessionExist() {
+		if !t.ExistsOrUnknown() {
 			return nil
 		}
 		return fmt.Errorf("error disabling pipe-pane: %w", err)
@@ -96,7 +101,7 @@ func (t *TmuxSession) SendRawKeys(b []byte) error {
 		if ctx.Err() != nil {
 			return fmt.Errorf("%w: send-keys after %s", ErrTmuxTimeout, tmuxCommandTimeout)
 		}
-		if !t.DoesSessionExist() {
+		if !t.ExistsOrUnknown() {
 			return fmt.Errorf("%w: send-keys", ErrSessionGone)
 		}
 		return fmt.Errorf("error sending raw keys: %w", err)
@@ -120,7 +125,7 @@ func (t *TmuxSession) ResizeWindow(cols, rows int) error {
 		if ctx.Err() != nil {
 			return fmt.Errorf("%w: resize-window after %s", ErrTmuxTimeout, tmuxCommandTimeout)
 		}
-		if !t.DoesSessionExist() {
+		if !t.ExistsOrUnknown() {
 			return fmt.Errorf("%w: resize-window", ErrSessionGone)
 		}
 		// resize-window fails on tmux servers older than 2.9; surface the error so

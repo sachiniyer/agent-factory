@@ -120,7 +120,7 @@ func TestCloseReapsEscapedPaneProcesses(t *testing.T) {
 	session := NewTmuxSessionFromSanitizedName(name, "sh")
 	_, closeErr := session.Close()
 	require.NoError(t, closeErr)
-	require.False(t, session.DoesSessionExist(), "session must be gone after Close")
+	require.False(t, session.ExistsOrUnknown(), "session must be gone after Close")
 
 	// Close reaps asynchronously; the escapee ignores SIGHUP, so only the
 	// reaper's SIGTERM/SIGKILL can end it.

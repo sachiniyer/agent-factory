@@ -99,7 +99,7 @@ func TestSessionProcessTreesDoesNotWedgeTheKill(t *testing.T) {
 	}
 }
 
-// TestDoesSessionExistOnWedgedServerReportsPresent pins the deliberate choice in
+// TestExistsOrUnknownOnWedgedServerReportsPresent pins the deliberate choice in
 // sessionExists: the bool cannot express "unknown", so a tripped deadline reports
 // TRUE. Every caller that acts destructively acts on FALSE (Close reaps the
 // session's process trees; io.go/clientless.go raise ErrSessionGone, which the
@@ -107,13 +107,13 @@ func TestSessionProcessTreesDoesNotWedgeTheKill(t *testing.T) {
 // server would tear down a live session. A false "exists" only costs a
 // best-effort skip. Returning quickly is the fix; returning TRUE is the safety
 // property that keeps the fix from trading a hang for data loss.
-func TestDoesSessionExistOnWedgedServerReportsPresent(t *testing.T) {
+func TestExistsOrUnknownOnWedgedServerReportsPresent(t *testing.T) {
 	stallingTmuxOnPath(t)
 	shortTmuxTimeout(t, 200*time.Millisecond)
 	ts := NewTmuxSessionWithDeps("wedge-1917-probe", "sh", MakePtyFactory(), cmd.MakeExecutor())
 
 	done := make(chan bool, 1)
-	go func() { done <- ts.DoesSessionExist() }()
+	go func() { done <- ts.ExistsOrUnknown() }()
 
 	select {
 	case exists := <-done:
@@ -122,7 +122,7 @@ func TestDoesSessionExistOnWedgedServerReportsPresent(t *testing.T) {
 				"callers reap process trees and raise ErrSessionGone on false")
 		}
 	case <-time.After(30 * time.Second):
-		t.Fatal("DoesSessionExist hung against a stalled tmux (#1917): it is the fallback probe " +
+		t.Fatal("ExistsOrUnknown hung against a stalled tmux (#1917): it is the fallback probe " +
 			"on nearly every tmux error path in this package, including Close's")
 	}
 }
@@ -152,7 +152,7 @@ func TestCloseOnWedgedServerSkipsTheExistenceProbe(t *testing.T) {
 		// third would mean the has-session probe ran on the timeout path.
 		if max := 3 * bound; elapsed >= max {
 			t.Fatalf("Close took %v (>= %v): kill-session's timeout path appears to have fallen "+
-				"back to a DoesSessionExist probe, which hangs on the same wedged server", elapsed, max)
+				"back to an ExistsOrUnknown probe, which hangs on the same wedged server", elapsed, max)
 		}
 	case <-time.After(30 * time.Second):
 		t.Fatal("Close hung against a stalled tmux (#1917)")

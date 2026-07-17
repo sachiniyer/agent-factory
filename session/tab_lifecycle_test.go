@@ -85,7 +85,7 @@ func TestFreshStart_OnlyAgentTab(t *testing.T) {
 
 	shellTs := tmux.NewTmuxSessionFromSanitizedNameWithDeps(
 		agentName+shellTmuxSuffix, defaultShell(), pty, cmdExec)
-	assert.False(t, shellTs.DoesSessionExist(),
+	assert.False(t, shellTs.ExistsOrUnknown(),
 		"no __shell tmux session may be spawned on a fresh start (#1100)")
 
 	// The terminal tab is still available on demand.
@@ -230,7 +230,7 @@ func TestDropClosedTab_RemovesWithoutKilling(t *testing.T) {
 	tab, err := inst.AddShellTab()
 	require.NoError(t, err)
 	require.Equal(t, 2, inst.TabCount())
-	require.True(t, tab.tmux.DoesSessionExist())
+	require.True(t, tab.tmux.ExistsOrUnknown())
 
 	require.Error(t, inst.DropClosedTab(0), "the agent tab must be undroppable")
 	require.Equal(t, 2, inst.TabCount(), "a rejected drop must not mutate the list")
@@ -238,7 +238,7 @@ func TestDropClosedTab_RemovesWithoutKilling(t *testing.T) {
 
 	require.NoError(t, inst.DropClosedTab(1))
 	require.Equal(t, 1, inst.TabCount(), "drop must remove the tab from the list")
-	require.True(t, tab.tmux.DoesSessionExist(),
+	require.True(t, tab.tmux.ExistsOrUnknown(),
 		"DropClosedTab must NOT kill the tmux session (the daemon owns the kill)")
 }
 

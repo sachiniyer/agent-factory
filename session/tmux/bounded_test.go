@@ -15,7 +15,7 @@ import (
 
 // stallingTmuxOnPath puts a `tmux` earlier on PATH that never exits, standing in
 // for a wedged tmux server: EVERY tmux invocation — including the
-// DoesSessionExist probe the error paths would otherwise fall back to — hangs.
+// ExistsOrUnknown probe the error paths would otherwise fall back to — hangs.
 // The script sleeps in a CHILD process, so it also covers the case that makes a
 // naive deadline useless: killing only the direct tmux process leaves the child
 // holding the inherited capture pipe, and Output()/Run() block on pipe EOF until
