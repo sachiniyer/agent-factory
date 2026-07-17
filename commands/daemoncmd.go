@@ -298,6 +298,14 @@ type respawnResult struct {
 	// login. Nil when no unit was restarted because none serves this home,
 	// which is not a degradation.
 	UnitErr error
+	// UnitGateErr is set when we could not TELL whether the installed unit
+	// serves this home, so we conservatively did not restart it and spawned an
+	// ad-hoc daemon instead. That is the safe call, but it is a real
+	// degradation the user has to hear about: if the unit was in fact theirs,
+	// their supervised daemon just became an unsupervised one. Distinct from
+	// the quiet, correct "no unit serves this home" case, which is not an
+	// error and must stay silent.
+	UnitGateErr error
 	// StaleUnitExec is the binary the restarted unit launches, set only when
 	// that is NOT the binary the upgrade just wrote. The unit bakes its
 	// program path at install time, so a second install on the box brings the
@@ -350,27 +358,33 @@ func restartDaemonFromPathDetailed(execPath string) (restartOutcome, error) {
 // and returns — leaving the sandbox it was actually upgrading with no daemon
 // at all. Anything short of proof that the unit serves this home means we do
 // not touch it and spawn an ad-hoc daemon for the home in front of us.
-func unitRestartTarget() (useUnit bool, unitExec string) {
+// gateErr is returned (not just logged) when the decision could not be made:
+// skipping the unit is the safe call, but it silently costs a supervised
+// daemon its supervision, and this whole path exists because degradations that
+// only reach the log are degradations nobody fixes.
+func unitRestartTarget() (useUnit bool, unitExec string, gateErr error) {
 	configDir, err := configDirFn()
 	if err != nil {
-		log.WarningLog.Printf("post-upgrade respawn: cannot resolve the config dir to check whether the autostart unit serves this home; not restarting it: %v", err)
-		return false, ""
+		return false, "", fmt.Errorf("cannot resolve the config dir to check whether the autostart unit serves this home: %w", err)
 	}
 	serves, installed, err := autostartUnitServesHomeFn(configDir)
 	if err != nil {
-		log.WarningLog.Printf("post-upgrade respawn: cannot tell whether the autostart unit serves %s; not restarting it: %v", configDir, err)
-		return false, ""
+		return false, "", fmt.Errorf("cannot tell whether the autostart unit serves %s: %w", configDir, err)
 	}
 	if !installed || !serves {
-		return false, ""
+		// The ordinary answer for an ad-hoc install, and for any upgrade run
+		// against a home the installed unit does not serve. Not an error.
+		return false, "", nil
 	}
-	// Best-effort: an unreadable program path costs the staleness warning, not
-	// the restart.
+	// Best-effort, and log-only on purpose: the unit restart below is the
+	// authority on whether the daemon came back, and it is about to run either
+	// way. An unreadable program path costs only the staleness check — no
+	// behavior changes — so it does not warrant a line the user must act on.
 	unitExec, _, err = autostartUnitExecPathFn()
 	if err != nil {
-		log.WarningLog.Printf("post-upgrade respawn: cannot read the autostart unit's program path: %v", err)
+		log.WarningLog.Printf("post-upgrade respawn: cannot read the autostart unit's program path, so cannot check it launches the upgraded binary: %v", err)
 	}
-	return true, unitExec
+	return true, unitExec, nil
 }
 
 // staleUnitExec reports the unit's program path when it is NOT the binary the
@@ -433,7 +447,11 @@ func respawnDaemonAfterUpgrade(execPath string) (respawnResult, error) {
 		log.WarningLog.Printf("post-upgrade respawn: %v; respawning anyway, but the new daemon may see the old one as alive and exit — run af again if schedules stay dark", err)
 	}
 	var unitErr error
-	if useUnit, unitExec := unitRestartTarget(); useUnit {
+	useUnit, unitExec, gateErr := unitRestartTarget()
+	if gateErr != nil {
+		log.WarningLog.Printf("post-upgrade respawn: not restarting the autostart unit: %v", gateErr)
+	}
+	if useUnit {
 		err := restartAutostartUnitFn()
 		if err == nil {
 			log.InfoLog.Printf("restarted the daemon autostart unit from the new binary")
@@ -445,12 +463,12 @@ func respawnDaemonAfterUpgrade(execPath string) (respawnResult, error) {
 	if err := ensureDaemonFromPathFn(execPath); err != nil {
 		log.ErrorLog.Printf("failed to respawn daemon after upgrade: %v", err)
 		if unitErr != nil {
-			return respawnResult{UnitErr: unitErr},
+			return respawnResult{UnitErr: unitErr, UnitGateErr: gateErr},
 				fmt.Errorf("unit restart failed: %w; ad-hoc fallback failed: %v", unitErr, err)
 		}
-		return respawnResult{}, err
+		return respawnResult{UnitGateErr: gateErr}, err
 	}
-	return respawnResult{UnitErr: unitErr}, nil
+	return respawnResult{UnitErr: unitErr, UnitGateErr: gateErr}, nil
 }
 
 // ensureDaemonForTasks starts the daemon when any enabled task exists, so

@@ -297,6 +297,18 @@ func reportUpgradeRestart(out, errOut io.Writer, outcome restartOutcome, restart
 		return
 	}
 
+	// The restart landed — but on WHAT? A unit that relaunches another
+	// install's binary brought the daemon back on the OLD image, so the
+	// success line must not go on to claim the new one. stderr is routinely
+	// redirected away; a stdout line that needs stderr to not be a lie is the
+	// same defect in a new place.
+	if stale := outcome.Respawn.StaleUnitExec; stale != "" {
+		fmt.Fprintln(out, "Upgraded successfully!")
+		fmt.Fprintf(errOut, "The daemon was restarted, but the autostart unit launches %s — not the binary this upgrade wrote (%s).\n", stale, upgradedPath)
+		fmt.Fprintln(errOut, "So the daemon is back on that other install's older binary. Re-point the unit at this one with `af daemon install`.")
+		return
+	}
+
 	switch outcome.Shutdown {
 	case daemon.ShutdownViaSIGTERM:
 		fmt.Fprintln(out, "Upgraded successfully! Stopped the running daemon (pre-fix; used SIGTERM) and restarted it from the new binary.")
@@ -304,15 +316,16 @@ func reportUpgradeRestart(out, errOut io.Writer, outcome restartOutcome, restart
 		fmt.Fprintln(out, "Upgraded successfully! Restarted the running daemon from the new binary.")
 	}
 
-	// The restart landed, but on what? Both of these mean the daemon came back
-	// wrong, and neither fails the respawn, so they only ever reached the log.
-	if stale := outcome.Respawn.StaleUnitExec; stale != "" {
-		fmt.Fprintf(errOut, "The daemon autostart unit launches %s, which is not the binary this upgrade wrote (%s).\n", stale, upgradedPath)
-		fmt.Fprintln(errOut, "The restarted daemon is running that other install's older binary. Re-point the unit at this one with `af daemon install`.")
-	}
+	// The daemon IS on the new binary in both cases below — it is the
+	// supervision that was lost, so the success line above stands and these
+	// qualify it.
 	if outcome.Respawn.UnitErr != nil {
 		fmt.Fprintf(errOut, "The daemon autostart unit could not be restarted: %v\n", outcome.Respawn.UnitErr)
 		fmt.Fprintln(errOut, "The daemon was restarted as an ad-hoc process instead: it is on the new binary, but unsupervised and will not return at next login. Re-register it with `af daemon install`.")
+	}
+	if outcome.Respawn.UnitGateErr != nil {
+		fmt.Fprintf(errOut, "The daemon autostart unit was left alone: %v\n", outcome.Respawn.UnitGateErr)
+		fmt.Fprintln(errOut, "Restarting a unit we cannot prove serves this AF home could stop an unrelated daemon, so the daemon was restarted as an unsupervised ad-hoc process instead. If the unit is this home's, restart it yourself with `af daemon restart`.")
 	}
 }
 

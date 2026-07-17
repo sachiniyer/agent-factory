@@ -283,6 +283,63 @@ func TestUpgrade_StaleUnitBinaryIsLoud(t *testing.T) {
 	if !strings.Contains(errOut.String(), "af daemon install") {
 		t.Fatalf("stderr must name the fix.\ngot=%q", errOut.String())
 	}
+	// stdout must not claim the thing stderr is busy denying. stderr is
+	// routinely redirected away, and a success line that is only true when
+	// read together with a warning is the same silent-failure defect wearing a
+	// different hat.
+	if strings.Contains(out.String(), "from the new binary") {
+		t.Fatalf("stdout claims the daemon came back on the new binary when it came back on %s.\ngot=%q", otherInstall, out.String())
+	}
+}
+
+// TestUpgrade_UnprovableUnitGateIsLoud: when we cannot TELL whether the unit
+// serves this home we refuse to restart it — the right call, but it costs a
+// supervised daemon its supervision, so it cannot be a log-only warning. The
+// quiet "no unit serves this home" case is a different thing entirely and is
+// locked below.
+func TestUpgrade_UnprovableUnitGateIsLoud(t *testing.T) {
+	_, url := upgradeHarness(t)
+	stubShutdown(t, daemon.ShutdownViaRPC, nil)
+	stubDaemonHealth(t, daemon.HealthStatus{})
+	stubRespawnCollaborators(t, true, nil)
+	autostartUnitServesHomeFn = func(string) (bool, bool, error) {
+		return false, true, errors.New("permission denied")
+	}
+
+	var out, errOut bytes.Buffer
+	if err := runUpgrade(&out, &errOut, url, false); err != nil {
+		t.Fatalf("runUpgrade: %v", err)
+	}
+
+	if errOut.Len() == 0 {
+		t.Fatalf("an unprovable unit gate demotes a supervised daemon to ad-hoc; that must reach the user.\nstdout=%q", out.String())
+	}
+	if !strings.Contains(errOut.String(), "permission denied") {
+		t.Fatalf("stderr must say why the unit was left alone.\ngot=%q", errOut.String())
+	}
+}
+
+// TestUpgrade_NoUnitForThisHomeIsQuiet locks the ordinary ad-hoc install: no
+// unit serves this home, so there is nothing to restart and nothing to say.
+// Without this, the gate warning above fires on every upgrade on every machine
+// that never ran `af daemon install`.
+func TestUpgrade_NoUnitForThisHomeIsQuiet(t *testing.T) {
+	_, url := upgradeHarness(t)
+	stubShutdown(t, daemon.ShutdownViaRPC, nil)
+	stubDaemonHealth(t, daemon.HealthStatus{})
+	stubRespawnCollaborators(t, false, nil)
+
+	var out, errOut bytes.Buffer
+	if err := runUpgrade(&out, &errOut, url, false); err != nil {
+		t.Fatalf("runUpgrade: %v", err)
+	}
+
+	if errOut.Len() != 0 {
+		t.Fatalf("no unit serving this home is the normal case and must stay quiet.\ngot stderr=%q", errOut.String())
+	}
+	if !strings.Contains(out.String(), "Restarted the running daemon from the new binary") {
+		t.Fatalf("stdout should report the clean ad-hoc restart.\ngot=%q", out.String())
+	}
 }
 
 // TestUpgrade_UnitLaunchingTheUpgradedBinaryIsQuiet locks the staleness check
