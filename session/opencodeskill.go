@@ -1,75 +1,118 @@
 package session
 
 import (
-	"os"
+	"encoding/json"
 	"path/filepath"
+	"strings"
 
+	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/log"
 )
 
-// opencodeAgentsDoc is the af guidance written to opencode's global instructions
-// file. opencode reads AGENTS.md as PLAIN instructions, not as a name+description
-// skill, so this carries no frontmatter — the same shape as aiderReadDoc rather
-// than afSkillDoc. The body is afUsageReference, so opencode's af knowledge cannot
-// drift from the other agents' (#1043).
-var opencodeAgentsDoc = "<!-- " + afSkillMarker + " -->\n\n" + afUsageReference + "\n"
+// opencodeInstructionsDoc is the af guidance opencode loads as plain instructions.
+// It carries no frontmatter: opencode's `instructions` config key takes plain
+// markdown files, not name+description skills, so skill frontmatter would just be
+// stray text in the model's context. Body is afUsageReference, so opencode's af
+// knowledge cannot drift from the other agents' (#1043).
+var opencodeInstructionsDoc = "<!-- " + afSkillMarker + " -->\n\n" + afUsageReference + "\n"
 
-// opencodeAgentsFilePath returns opencode's global instructions file:
-// $XDG_CONFIG_HOME/opencode/AGENTS.md, falling back to $HOME/.config/opencode
-// when XDG_CONFIG_HOME is unset.
+// opencodeAfConfigDoc is the af-owned opencode config: a minimal, schema-valid
+// file whose only job is to point opencode's `instructions` key at
+// opencodeInstructionsDoc.
 //
-// opencode auto-discovers this file with NO flag and NO project file, verified by
-// experiment against 0.0.0-main-202604230742: a marker phrase written here came
-// back verbatim from `opencode run "what is the secret marker phrase?"` under a
-// throwaway HOME.
-//
-// XDG_CONFIG_HOME is honored here, deliberately UNLIKE ampSkillsBaseDir (which
-// ignores it because amp itself does). opencode resolves its config dir through
-// XDG_CONFIG_HOME, so hardcoding $HOME/.config would write where opencode never
-// looks for any user who sets it — a silent miss. os.UserConfigDir() is NOT used:
-// it returns ~/Library/Application Support on macOS, whereas opencode uses
-// ~/.config/opencode on every platform.
-func opencodeAgentsFilePath() (string, error) {
-	if base := os.Getenv("XDG_CONFIG_HOME"); base != "" {
-		return filepath.Join(base, "opencode", "AGENTS.md"), nil
-	}
-	home, err := os.UserHomeDir()
+// It is .jsonc, not .json, for a verified reason: opencode validates its config
+// against a schema and REJECTS unrecognized keys ("Configuration is invalid …
+// Unrecognized key: \"//\""), so the af-managed marker cannot ride as a JSON key
+// the way it does in every other agent's file. opencode does parse jsonc comments,
+// so the marker lives in a leading // comment and writeAfMarkedFile's ownership
+// check still works. Both verified against 0.0.0-main-202604230742.
+func opencodeAfConfigDoc(instructionsPath string) string {
+	// json.Marshal rather than hand-rolled quoting: the af config dir is
+	// user-controlled via AGENT_FACTORY_HOME, so the path can carry quotes or
+	// backslashes that must be escaped correctly or the config fails to parse.
+	quoted, err := json.Marshal(instructionsPath)
 	if err != nil {
-		return "", err
+		// A Go string always marshals; this cannot fail in practice.
+		quoted = []byte(`""`)
 	}
-	return filepath.Join(home, ".config", "opencode", "AGENTS.md"), nil
+	return "{\n" +
+		"  // " + afSkillMarker + "\n" +
+		"  \"$schema\": \"https://opencode.ai/config.json\",\n" +
+		"  \"instructions\": [" + string(quoted) + "]\n" +
+		"}\n"
 }
 
-// ensureOpencodeAgentsFile writes the af guidance into opencode's global
-// instructions file and returns its path. opencode auto-discovers it with no
-// command-line flag, so the launch command stays byte-identical — the file seam
-// the #1043/#1116/#1131 unknown-flag-kills-spawn rule calls for.
+// opencodeAfDir returns af's own opencode directory, under the af config dir.
 //
-// CAVEAT — this path is SHARED and USER-OWNED, unlike every other agent's seam.
-// amp/codex/gemini get an af-exclusive "agent-factory" SKILL.md subdirectory and
-// aider gets a file under af's own config dir; nobody else writes there. But
-// ~/.config/opencode/AGENTS.md is opencode's ONE global instructions file, and it
-// is exactly where a user keeps their own standing instructions. A collision here
-// is therefore far more likely than for any other agent.
-//
-// writeAfMarkedFile is what makes that safe: a file at this path WITHOUT the af
-// marker belongs to the user and is left completely untouched (wrote=false), so we
-// never clobber their instructions. The cost of that choice is that af guidance is
-// then not injected for opencode at all — hence the warning, matching how the
-// other agents report the same condition. We do NOT merge into or append to the
-// user's file: appending would make af a co-author of a file it does not own and
-// leave residue af cannot cleanly remove later.
-func ensureOpencodeAgentsFile() (string, error) {
-	path, err := opencodeAgentsFilePath()
+// Deliberately NOT ~/.config/opencode: that is the USER's global opencode config,
+// and af has no business writing there as a side effect of creating a session.
+// Anything af wrote there would outlive the session, survive archive/uninstall, and
+// still be loaded when the user ran `opencode` by hand tomorrow with no af involved.
+// Keeping af's files in af's own directory means they vanish with af and are
+// invisible to opencode unless af itself points at them (see injectSystemPrompt's
+// OPENCODE_CONFIG). This mirrors the claude (--plugin-dir) and aider (--read)
+// seams, which are af-owned for the same reason.
+func opencodeAfDir() (string, error) {
+	configDir, err := config.GetConfigDir()
 	if err != nil {
 		return "", err
 	}
-	wrote, err := writeAfMarkedFile(path, opencodeAgentsDoc)
+	return filepath.Join(configDir, "opencode"), nil
+}
+
+// ensureOpencodeAfConfig writes af's opencode instructions + the af-owned config
+// that points at them, and returns the CONFIG path for OPENCODE_CONFIG. An empty
+// path (with nil error) means a file at one of our paths is not af-managed, so the
+// caller must skip injection rather than point opencode at a file af does not own.
+//
+// opencode merges OPENCODE_CONFIG with the user's own global config rather than
+// replacing it — verified: with `instructions` set in BOTH, the resolved config
+// listed the user's entry AND af's, and the user's other settings survived. That
+// merge is what makes this seam safe; a replacing env var would have silently
+// discarded the user's model/theme/MCP setup on every af session, which would be a
+// worse violation than writing a file.
+func ensureOpencodeAfConfig() (string, error) {
+	dir, err := opencodeAfDir()
+	if err != nil {
+		return "", err
+	}
+	instructionsPath := filepath.Join(dir, "af-skill.md")
+	wrote, err := writeAfMarkedFile(instructionsPath, opencodeInstructionsDoc)
 	if err != nil {
 		return "", err
 	}
 	if !wrote {
-		log.WarningLog.Printf("af skill: %s exists but is not af-managed; leaving it untouched (af guidance not injected for opencode)", path)
+		log.WarningLog.Printf("af skill: %s exists but is not af-managed; not injecting OPENCODE_CONFIG for opencode", instructionsPath)
+		return "", nil
 	}
-	return path, nil
+
+	configPath := filepath.Join(dir, "af-config.jsonc")
+	wrote, err = writeAfMarkedFile(configPath, opencodeAfConfigDoc(instructionsPath))
+	if err != nil {
+		return "", err
+	}
+	if !wrote {
+		log.WarningLog.Printf("af skill: %s exists but is not af-managed; not injecting OPENCODE_CONFIG for opencode", configPath)
+		return "", nil
+	}
+	return configPath, nil
+}
+
+// opencodeCarriesConfigEnv reports whether a resolved command already sets
+// OPENCODE_CONFIG itself — e.g. a program_overrides entry like
+// `OPENCODE_CONFIG=~/mine.json opencode`. Shell semantics give the LAST assignment
+// precedence, so prepending af's would be silently overridden by the user's anyway;
+// detecting it lets af say so instead of pretending the guidance landed.
+func opencodeCarriesConfigEnv(resolved string) bool {
+	for _, tok := range strings.Fields(resolved) {
+		if strings.HasPrefix(tok, "OPENCODE_CONFIG=") {
+			return true
+		}
+		// Stop at the first non-assignment token: past the command name, an
+		// OPENCODE_CONFIG=... word is an argument, not an env assignment.
+		if !strings.Contains(tok, "=") {
+			return false
+		}
+	}
+	return false
 }

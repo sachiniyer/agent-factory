@@ -46,16 +46,25 @@ func resolveProgramForInstance(i *Instance) string {
 	// runs, not the config-name enum: an override may point "claude" at a
 	// different program, which would exit on the unknown flag (#1116).
 	//
-	// opencode is deliberately NOT wired here, despite owning an obvious-looking
-	// analog. Its --dangerously-skip-permissions flag belongs to the `opencode
-	// run` SUBCOMMAND, not to the bare TUI command af launches; passing it to the
-	// TUI makes opencode print its help and exit — byte-identical to passing a
-	// nonsense flag (both verified against 0.0.0-main-202604230742). Wiring it
-	// would kill every AutoYes opencode spawn as an opaque readiness timeout,
-	// which is exactly the #1043/#1116/#1131 class this comment block exists to
-	// prevent. opencode's TUI also auto-approves tools in its default config
-	// (it ran `rm README.md` unprompted), so there is nothing for AutoYes to
-	// dismiss today.
+	// opencode has NO auto-approve flag on the TUI to wire, so instead of joining
+	// codex/amp as a SILENT AutoYes no-op (#1963) it says so out loud — see
+	// warnIfAutoYesUnsupported below.
+	//
+	// Its whole TUI flag set is -h -v --print-logs --log-level --pure --port
+	// --hostname --mdns --mdns-domain --cors -m/--model -c/--continue -s/--session
+	// --fork --prompt --agent: no permission/approval knob among them. Both
+	// candidate flags were tested against the real binary
+	// (0.0.0-main-202604230742) and BOTH are rejected by the TUI, producing output
+	// byte-identical to a nonsense flag (help text, then exit):
+	//   --dangerously-skip-permissions  real, but only on the `opencode run`
+	//                                   SUBCOMMAND — not on the TUI af launches
+	//   --auto                          not a flag at all (it appears in the
+	//                                   binary's strings only as vendored library
+	//                                   data alongside --autocorrect/--auto-fill)
+	// Note opencode's arg parser is NON-STRICT, so exit codes prove nothing here;
+	// only a real launch distinguishes a valid flag from a bogus one. Injecting
+	// either would kill every AutoYes opencode spawn as an opaque readiness
+	// timeout — the #1043/#1116/#1131 class this block exists to prevent.
 	if i.AutoYes && tmux.DetectAgentFromCommand(resolved) == tmux.ProgramClaude &&
 		// Sessions persisted by pre-#659 binaries got the flag appended at
 		// create-time in main.go (19c0dd9), so legacy Instance.Program values
@@ -66,7 +75,40 @@ func resolveProgramForInstance(i *Instance) string {
 		!strings.Contains(resolved, "--permission-mode") {
 		resolved = resolved + " --permission-mode bypassPermissions"
 	}
+	if i.AutoYes {
+		warnIfAutoYesUnsupported(tmux.DetectAgentFromCommand(resolved), i.Title)
+	}
 	return resolved
+}
+
+// autoYesUnsupported explains, per agent, why AutoYes cannot be honored — and is
+// the list of agents for which af must NOT pretend it was.
+//
+// AutoYes reaches an agent by exactly two routes, and an agent needs at least one:
+// a launch flag (claude's --permission-mode bypassPermissions) or TapEnter, which
+// the daemon only fires when tmux/io.go can recognize that agent's confirmation
+// dialog. codex and amp have NEITHER, so `auto_yes` has silently done nothing for
+// them for as long as they have been supported (#1963). opencode joins them, but
+// loudly: a setting the user turned on that quietly does nothing is the actual
+// defect, so at minimum af says so.
+//
+// This is intentionally a per-agent REASON, not a bool: "af cannot do this and
+// here is what to do instead" is actionable; "unsupported" is not. Fixing #1963
+// means deleting entries from this map, and the map makes the gap impossible to
+// add a new agent without noticing.
+var autoYesUnsupported = map[string]string{
+	tmux.ProgramCodex: "codex exposes --dangerously-bypass-approvals-and-sandbox; set it via program_overrides.codex if you want unattended approval",
+	tmux.ProgramAmp:   "amp exposes an amp.dangerouslyAllowAll setting; set it in amp's own settings if you want unattended approval",
+	tmux.ProgramOpencode: "opencode's TUI has no auto-approve flag (--dangerously-skip-permissions is `opencode run`-only and kills the TUI spawn); " +
+		"opencode's default config already auto-approves tool calls, so sessions are unlikely to stall",
+}
+
+// warnIfAutoYesUnsupported tells the user when auto_yes will not be honored for the
+// agent they picked, instead of ignoring the setting in silence (#1963).
+func warnIfAutoYesUnsupported(agent, title string) {
+	if reason, ok := autoYesUnsupported[agent]; ok {
+		log.WarningLog.Printf("auto_yes has no effect for %s (session %q): %s", agent, title, reason)
+	}
 }
 
 // LocalBackend implements Backend using local tmux sessions and git worktrees.
