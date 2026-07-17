@@ -31,6 +31,14 @@ jobs:
         go-version: '1.25'
         cache: true
 
+    # internal/shellsuggest claims correctness in sh, bash AND zsh, and its tests
+    # FAIL rather than skip when a claimed shell is missing (#1978/#1988). Every
+    # lane that runs `go test` therefore needs zsh, not just pr.yml — this job
+    # runs the suite on the release matrix, and auto-release/stable-release run it
+    # too. The runner is ubuntu regardless of the GOOS/GOARCH it builds for.
+    - name: Install zsh
+      run: sudo apt-get update && sudo apt-get install -y --no-install-recommends zsh
+
     - name: Run tests
       run: go test -v ./...
 
