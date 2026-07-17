@@ -143,28 +143,61 @@ func TestPane_OpenFocusRefreshProducedStatusStillClears(t *testing.T) {
 // The assertion is on the RENDERED status line — the clipped text the user
 // actually reads — because FullError() is the un-truncated string we passed in
 // and never shows what the 80-column bar does to it (#1973).
+//
+// BOTH displacement directions are driven, and that is the point rather than
+// symmetry for its own sake: with only the agent-displaced case, an
+// implementation that hard-coded "Agent" — or read the wrong pane's tab and hit
+// slot 0 by luck — passes while still being unable to name what it evicted. The
+// terminal-displaced case is what forces the label to come from the displaced
+// pane. (Verified by mutation: naming tab 0 unconditionally survives the first
+// case and fails the second.)
 func TestPane_AutoHideStatusNamesDisplacedTab(t *testing.T) {
-	h := paneTestHome(t)
-	resizeHome(h, 80, 24) // the play-test size: below MultiPaneMinWidth, one pane fits
+	for _, tc := range []struct {
+		name              string
+		openOrder         []int // tabs opened, in order; the LAST one stays visible
+		wantVisibleTab    int
+		wantHiddenNamedAs string
+	}{
+		{
+			// The issue's own repro: docs · Agent open, `t` opens docs · Terminal.
+			name:              "terminal displaces agent",
+			openOrder:         []int{0, 1},
+			wantVisibleTab:    1,
+			wantHiddenNamedAs: "alpha · Agent hidden",
+		},
+		{
+			// The reverse: the displaced pane is NOT slot 0, so a toast that
+			// cannot really name what it evicted has nothing to fall back on.
+			name:              "agent displaces terminal",
+			openOrder:         []int{1, 0},
+			wantVisibleTab:    0,
+			wantHiddenNamedAs: "alpha · Terminal hidden",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := paneTestHome(t)
+			resizeHome(h, 80, 24) // the play-test size: below MultiPaneMinWidth, one pane fits
 
-	alpha := h.store.GetInstanceByTitle("alpha")
-	require.NotNil(t, alpha)
+			alpha := h.store.GetInstanceByTitle("alpha")
+			require.NotNil(t, alpha)
 
-	// Open alpha · Agent (tab 0), then alpha · Terminal (tab 1). The second pane
-	// on the same instance displaces the first.
-	_, _ = h.openOrFocusPane(alpha, 0)
-	_, _ = h.openOrFocusPane(alpha, 1)
+			// Two panes on the SAME instance: the second displaces the first.
+			for _, tab := range tc.openOrder {
+				_, _ = h.openOrFocusPane(alpha, tab)
+			}
 
-	require.Equal(t, 2, h.store.NumOpenPanes(), "both of alpha's tabs are open as panes")
-	require.Equal(t, 1, len(h.visiblePanes), "only one pane fits at 80 columns")
-	require.Equal(t, 1, h.visiblePanes[0].Tab(),
-		"alpha · Terminal is the pane left visible, so alpha · Agent is the displaced one")
+			require.Equal(t, 2, h.store.NumOpenPanes(), "both of alpha's tabs are open as panes")
+			require.Equal(t, 1, len(h.visiblePanes), "only one pane fits at 80 columns")
+			require.Equal(t, tc.wantVisibleTab, h.visiblePanes[0].Tab(),
+				"the last-opened pane is the visible one, so the other is the displaced one")
 
-	rendered := h.errBox.String()
-	assert.Contains(t, rendered, "alpha · Agent hidden",
-		"the toast names the tab that was actually displaced (#1997)")
-	assert.Contains(t, rendered, "resize wider",
-		"naming the tab must not push the recovery hint off the 80-column bar (#1973)")
+			rendered := h.errBox.String()
+			assert.Contains(t, rendered, tc.wantHiddenNamedAs,
+				"the toast names the tab that was actually displaced (#1997)")
+			assert.Contains(t, rendered, "resize wider",
+				"naming the tab must not push the recovery hint off the 80-column bar (#1973)")
+		})
+	}
 }
 
 // TestPane_AutoHideStatusUnnamableTabMakesNoClaim covers the other half of the
