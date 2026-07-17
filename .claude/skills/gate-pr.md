@@ -60,8 +60,10 @@ from `app/detail-app` may auto-merge once the gates are clean.
    make -C ../gate-pr-<n> tui-driver-selftest
    ```
 
-   Require the self-test to report `24/24`. If it fails, send the failure back
-   to the authoring session.
+   Require the self-test to report all steps green (the count grows as the
+   suite is extended — match the `N/N` in its final `SELF-TEST PASSED` line,
+   not a hard-coded number). If it fails, send the failure back to the
+   authoring session.
 
 6. **Merge only after all gates pass**:
    ```bash
