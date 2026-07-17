@@ -3,6 +3,8 @@ package session
 import (
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -11,6 +13,7 @@ import (
 	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/shellsuggest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -94,13 +97,11 @@ echo "$name" >> '%s'/delete-ran.log
 
 // shrinkHookTimeouts shrinks the production bounds so a test proves they FIRE
 // without waiting the real budget, restoring them afterwards.
-func shrinkHookTimeouts(t *testing.T, launch, del, drain time.Duration) {
+func shrinkHookTimeouts(t *testing.T, launch, del time.Duration) {
 	t.Helper()
-	ol, od, og := hookLaunchTimeout, hookDeleteTimeout, hookOutputDrainGrace
-	hookLaunchTimeout, hookDeleteTimeout, hookOutputDrainGrace = launch, del, drain
-	t.Cleanup(func() {
-		hookLaunchTimeout, hookDeleteTimeout, hookOutputDrainGrace = ol, od, og
-	})
+	ol, od := hookLaunchTimeout, hookDeleteTimeout
+	hookLaunchTimeout, hookDeleteTimeout = launch, del
+	t.Cleanup(func() { hookLaunchTimeout, hookDeleteTimeout = ol, od })
 }
 
 func newHookProvisioner(h hookState, title string) *hookProvisioner {
@@ -142,7 +143,7 @@ func TestHookProvisionReapsPartiallyProvisionedLaunch(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			shrinkHookTimeouts(t, 300*time.Millisecond, 5*time.Second, 300*time.Millisecond)
+			shrinkHookTimeouts(t, 300*time.Millisecond, 5*time.Second)
 			h := newHookState(t, tc.launchBody, "")
 			p := newHookProvisioner(h, "bills by the hour")
 
@@ -188,7 +189,7 @@ func TestHookProvisionDoesNotReapWhenLaunchNeverStarted(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			shrinkHookTimeouts(t, 300*time.Millisecond, 5*time.Second, 300*time.Millisecond)
+			shrinkHookTimeouts(t, 300*time.Millisecond, 5*time.Second)
 			h := newHookState(t, "exit 0\n", "")
 			p := newHookProvisioner(h, "never started")
 			p.hooks.LaunchCmd = tc.launchCmd(h)
@@ -207,7 +208,7 @@ func TestHookProvisionDoesNotReapWhenLaunchNeverStarted(t *testing.T) {
 // so the failure has to reach the person creating the session, name the orphan,
 // and say how to reap it by hand.
 func TestHookProvisionReportsOrphanWhenDeleteFails(t *testing.T) {
-	shrinkHookTimeouts(t, 300*time.Millisecond, 5*time.Second, 300*time.Millisecond)
+	shrinkHookTimeouts(t, 300*time.Millisecond, 5*time.Second)
 	h := newHookState(t,
 		"echo 'provisioned, then died' >&2\nexit 4\n",
 		"echo 'the VM is still in CREATING state' >&2\nexit 9\n")
@@ -315,7 +316,7 @@ func TestShellQuoteSurvivesARealShell(t *testing.T) {
 func TestHookReapIsBounded(t *testing.T) {
 	// delete_cmd hangs; its `sleep` child outlives the kill holding the output
 	// pipe, which is what defeats the context timeout on its own.
-	shrinkHookTimeouts(t, 300*time.Millisecond, 300*time.Millisecond, 300*time.Millisecond)
+	shrinkHookTimeouts(t, 300*time.Millisecond, 300*time.Millisecond)
 	h := newHookState(t, "exit 0\n", "sleep 30\n")
 	p := newHookProvisioner(h, "wedged delete")
 	p.launchStarted = true
@@ -340,7 +341,7 @@ func TestHookReapIsBounded(t *testing.T) {
 // it would be born expired, delete_cmd would never spawn, and the sandbox would
 // leak in silence — with the reap call still sitting there looking correct.
 func TestHookReapUnaffectedByCancelledCaller(t *testing.T) {
-	shrinkHookTimeouts(t, 50*time.Millisecond, 5*time.Second, 300*time.Millisecond)
+	shrinkHookTimeouts(t, 50*time.Millisecond, 5*time.Second)
 	h := newHookState(t, "sleep 3\n", "")
 	p := newHookProvisioner(h, "dead parent")
 
@@ -361,7 +362,7 @@ func TestHookReapUnaffectedByCancelledCaller(t *testing.T) {
 // that error as failure would reap a sandbox that came up fine, which is exactly
 // the "destroyed a working sandbox" outcome this fix must not cause.
 func TestHookProvisionSucceedsWhenLaunchLeavesOutputPipeOpen(t *testing.T) {
-	shrinkHookTimeouts(t, 5*time.Second, 5*time.Second, 300*time.Millisecond)
+	shrinkHookTimeouts(t, 5*time.Second, 5*time.Second)
 	h := newHookState(t,
 		// The lingering child is the tunnel; the endpoint JSON is printed and the
 		// script exits 0.
@@ -376,11 +377,115 @@ func TestHookProvisionSucceedsWhenLaunchLeavesOutputPipeOpen(t *testing.T) {
 	assert.DirExists(t, h.sandbox(p.slug), "the working sandbox must still exist")
 }
 
+// TestHookProvisionKeepsASuccessfulLaunchsTunnelAlive is the #1966-review P2: a
+// launch_cmd that SUCCEEDS and leaves a tunnel running must end with a REACHABLE
+// endpoint. The tunnel is not a leak — it is the product, the thing making the
+// endpoint dialable — so nothing in the capture path may reap it.
+//
+// It asserts REACHABILITY, not the absence of a kill: the endpoint working is the
+// actual claim, and "we did not send a signal" would not prove it (the tunnel dies
+// of SIGPIPE when our read end closes, no signal from us involved).
+//
+// The stand-in tunnel is a real HTTP server, backgrounded by launch_cmd, holding
+// stdout exactly as a port-forward logging its activity does.
+func TestHookProvisionKeepsASuccessfulLaunchsTunnelAlive(t *testing.T) {
+	shrinkHookTimeouts(t, 10*time.Second, 5*time.Second)
+	dir := t.TempDir()
+
+	// The tunnel must be the thing that ACTUALLY SERVES the endpoint, owned by
+	// launch_cmd — not a server the test holds. A test-owned server would stay up
+	// even when the tunnel is reaped, so the reachability assertion would pass
+	// against the very bug it exists to catch. (It did, on the first draft.)
+	//
+	// So: a real backgrounded HTTP server that ALSO writes to stdout, which is what
+	// makes it a pipe-holder and therefore a target of any drain policy.
+	tunnel := filepath.Join(dir, "tunnel.py")
+	require.NoError(t, os.WriteFile(tunnel, []byte(`
+import http.server, socketserver, sys, threading, time
+class H(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200); self.end_headers(); self.wfile.write(b"agent-server alive")
+    def log_message(self, *a): pass
+srv = socketserver.TCPServer(("127.0.0.1", 0), H)
+open(sys.argv[1], "w").write(str(srv.server_address[1]))
+threading.Thread(target=srv.serve_forever, daemon=True).start()
+while True:                      # holds launch_cmd's stdout, like a forwarder logging
+    print("tunnel forwarding", flush=True)
+    time.sleep(0.05)
+`), 0o644))
+	if _, err := exec.LookPath("python3"); err != nil {
+		t.Fatalf("python3 is not installed, so this test cannot stand up a real tunnel and would " +
+			"assert reachability against a server it owns itself — which passes against the bug. " +
+			"Install python3 rather than weakening this test.")
+	}
+
+	portFile := filepath.Join(dir, "port")
+	h := hookState{dir: dir, launch: filepath.Join(dir, "launch.sh"), delete: filepath.Join(dir, "delete.sh")}
+	writeHookScript(t, h.launch, fmt.Sprintf(`
+python3 %s %s &
+for i in $(seq 1 100); do [ -s %s ] && break; sleep 0.05; done
+echo "{\"url\":\"http://127.0.0.1:$(cat %s)\",\"token\":\"secret\"}"
+exit 0
+`, shellsuggest.Arg(tunnel), shellsuggest.Arg(portFile), shellsuggest.Arg(portFile), shellsuggest.Arg(portFile)))
+	writeHookScript(t, h.delete, fmt.Sprintf(`echo "$name" >> %s/delete-ran.log`, shellsuggest.Arg(dir)))
+
+	p := newHookProvisioner(h, "tunnel holder")
+	res, err := p.provisionOrReap()
+	require.NoError(t, err, "a launch_cmd that exits 0 with a valid endpoint must succeed")
+	require.NotNil(t, res.Endpoint)
+
+	// Give any pipe-holder policy every chance to fire before we check.
+	time.Sleep(400 * time.Millisecond)
+
+	// THE CLAIM: the endpoint we just handed back actually works.
+	resp, err := http.Get(res.Endpoint.URL)
+	require.NoError(t, err,
+		"the provisioned endpoint %s is unreachable — the launch SUCCEEDED and something reaped the tunnel that makes it dialable",
+		res.Endpoint.URL)
+	defer func() { _ = resp.Body.Close() }()
+	body, _ := io.ReadAll(resp.Body)
+	assert.Equal(t, "agent-server alive", string(body), "the endpoint must serve the agent-server, not a corpse")
+
+	assert.False(t, h.deleteRan(t), "a successful provision must never reap")
+}
+
+// TestHookLaunchDoesNotKillBackgroundedChildren is the mechanism behind the test
+// above, pinned separately so a regression names its own cause: the capture must
+// not kill a process launch_cmd deliberately backgrounded. A heartbeat file is the
+// liveness probe — it keeps ticking only while the child lives.
+func TestHookLaunchDoesNotKillBackgroundedChildren(t *testing.T) {
+	shrinkHookTimeouts(t, 5*time.Second, 5*time.Second)
+	dir := t.TempDir()
+	hb := filepath.Join(dir, "heartbeat")
+
+	h := hookState{dir: dir, launch: filepath.Join(dir, "launch.sh"), delete: filepath.Join(dir, "delete.sh")}
+	writeHookScript(t, h.launch, fmt.Sprintf(`
+( for i in $(seq 1 100); do echo "still here"; echo tick >> %s; sleep 0.05; done ) &
+echo '{"url":"http://10.0.0.7:8080","token":"secret"}'
+exit 0
+`, shellsuggest.Arg(hb)))
+	writeHookScript(t, h.delete, "true")
+
+	p := newHookProvisioner(h, "background child")
+	_, err := p.provisionOrReap()
+	require.NoError(t, err)
+
+	// The child must still be ticking well after the script exited.
+	time.Sleep(250 * time.Millisecond)
+	first, err := os.Stat(hb)
+	require.NoError(t, err, "the backgrounded child never ran")
+	time.Sleep(250 * time.Millisecond)
+	second, err := os.Stat(hb)
+	require.NoError(t, err)
+	assert.True(t, second.ModTime().After(first.ModTime()),
+		"the process launch_cmd backgrounded stopped writing — the output capture killed a child that was not ours to kill")
+}
+
 // TestHookLaunchIsBounded proves the launch bound fires at all. It is the
 // precondition for the whole fix: if launch_cmd never returns, Provision hangs
 // and the reap #1955 asks for can never run, no matter how it is gated.
 func TestHookLaunchIsBounded(t *testing.T) {
-	shrinkHookTimeouts(t, 300*time.Millisecond, 5*time.Second, 300*time.Millisecond)
+	shrinkHookTimeouts(t, 300*time.Millisecond, 5*time.Second)
 	h := newHookState(t, "sleep 30\n", "")
 	p := newHookProvisioner(h, "wedged launch")
 

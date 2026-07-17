@@ -3,14 +3,15 @@ package session
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/shellsuggest"
 	"github.com/sachiniyer/agent-factory/log"
 )
 
@@ -56,22 +57,12 @@ import (
 //     large repo, so it gets a generous budget.
 //   - hookDeleteTimeout: bounded tighter so a kill never hangs on an unreachable
 //     provisioner.
-//   - hookOutputDrainGrace: how long to wait for a script's output pipe to drain
-//     AFTER the script itself has exited or been killed. Without it the two
-//     timeouts above bound NOTHING: CombinedOutput waits for the output pipe to
-//     close, any process the script leaves behind inherits that pipe and holds it
-//     open, and exec.CommandContext kills only the script, not its children. So a
-//     launch_cmd that provisions and then hangs would block Provision forever
-//     rather than for hookLaunchTimeout — and the #1955 reap could never run at
-//     all, because launch() would never return to trigger it. Bounding the drain
-//     is what turns "launch_cmd timed out" into an event the reap can react to.
-//     The hook scripts are the last exec surface that lacked this bound; it
-//     mirrors gitWaitDelay and tmuxWaitDelay (#856/#896), and a user-authored
-//     provisioner is the likeliest of all of them to leave a child behind.
+//
+// These bound the SCRIPT, and only the script. Nothing here bounds — or touches
+// — a process the script deliberately leaves running: see runHookScript.
 var (
-	hookLaunchTimeout    = 5 * time.Minute
-	hookDeleteTimeout    = 60 * time.Second
-	hookOutputDrainGrace = 5 * time.Second
+	hookLaunchTimeout = 5 * time.Minute
+	hookDeleteTimeout = 60 * time.Second
 )
 
 // hookRuntime provisions a session on user-provided infrastructure via the
@@ -134,32 +125,74 @@ func (p *hookProvisioner) orphanWarning(reapErr error) string {
 }
 
 // manualReapCommand is the shell command orphanWarning tells the user to paste.
-// Every interpolated value is shell-quoted, because this command has to be
-// correct exactly when things are messy — which is exactly when names are weird.
+// It goes through the shellsuggest seam (#1978), which quotes every piece: this
+// command has to be correct exactly when things are messy, which is exactly when
+// names are weird.
 //
-// delete_cmd is an arbitrary user-configured path: a space, an apostrophe, a `$`
+// delete_cmd is an arbitrary user-configured path — a space, an apostrophe, a `$`
 // or a backtick in it yields a command that fails, or worse, runs something other
 // than what it reads like. The slug is already constrained to [a-z0-9-] by
-// Slugify, so quoting it is belt-and-braces — but it costs nothing and the safety
-// then lives here rather than depending on a caller's charset invariant holding
-// forever.
+// Slugify, so quoting it is belt-and-braces; the seam does it anyway, so the
+// safety lives at the print site rather than depending on a caller's charset
+// invariant holding forever.
 func (p *hookProvisioner) manualReapCommand() string {
-	return fmt.Sprintf("%s --name %s", shellQuote(p.hooks.DeleteCmd), shellQuote(p.slug))
+	return shellsuggest.Command(p.hooks.DeleteCmd, "--name", p.slug)
 }
 
-// normalizeHookWaitDelay converts an exec.ErrWaitDelay into success: the hook
-// script itself exited 0 (a non-zero exit surfaces as an ExitError, and a
-// timeout kill as a signal — never as ErrWaitDelay), and only a process it left
-// behind held the output pipe open past hookOutputDrainGrace. A launch_cmd that
-// backgrounds a tunnel to make the agent-server reachable is a documented
-// pattern, so this is not a failure — and treating it as one would reap a
-// sandbox that came up fine. Success is the script's EXIT STATUS, never
-// `err == nil`. Mirrors tmux's normalizeWaitDelay (#676/#914 precedent).
-func normalizeHookWaitDelay(err error) error {
-	if errors.Is(err, exec.ErrWaitDelay) {
-		return nil
+// runHookScript runs one hook script under a timeout and returns its combined
+// output. It exists to answer a question the obvious CombinedOutput() gets wrong:
+// WHICH CHILDREN ARE OURS TO KILL?
+//
+// Answer: only the script itself. A launch_cmd is DOCUMENTED to leave a tunnel or
+// port-forward running — that background process is not a leak, it is the product,
+// the very thing making the endpoint we just captured reachable. Reaping it would
+// destroy what the launch just built and leave a session that exists and cannot
+// be dialled, with nothing saying why.
+//
+// The pipe is what conflates the two. CombinedOutput gives the script a PIPE, and
+// then:
+//   - anything the script leaves behind inherits that pipe and holds it open, so
+//     Wait blocks on EOF and the timeout above bounds nothing (#1943's class); and
+//   - the cure for that, cmd.WaitDelay, KILLS the pipe-holder. But "still holds
+//     the pipe" is not a criterion for garbage, it is a coincidence — it is
+//     equally true of a stalled child and of a healthy tunnel. Measured: with
+//     WaitDelay, a successful launch_cmd's tunnel is dead within the grace.
+//
+// So do not use a pipe. The script's stdout and stderr go to a real FILE, whose
+// fd exec hands to the child directly — no pipe, no copier goroutine, nothing for
+// a survivor to hold open. Wait returns the moment the SCRIPT exits, the context
+// still kills the script if it hangs (verified: a hanging launch_cmd returns at
+// the deadline with no WaitDelay at all), and a tunnel that outlives it keeps
+// writing to a file nobody is reading. We stop listening; we kill nothing.
+//
+// Reaping a FAILED launch's sandbox is a separate act with a real criterion, and
+// it is delete_cmd's job, not a side effect of how we captured output: see reap.
+func runHookScript(timeout time.Duration, name string, args ...string) ([]byte, *exec.Cmd, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	// A regular file, not a pipe: see the doc comment. Unlinked immediately on
+	// return — a lingering writer keeps its fd valid and simply writes into an
+	// unlinked inode that disappears when it exits.
+	f, err := os.CreateTemp("", "af-hook-out-*")
+	if err != nil {
+		return nil, nil, fmt.Errorf("creating the hook output file failed: %w", err)
 	}
-	return err
+	defer func() {
+		_ = f.Close()
+		_ = os.Remove(f.Name())
+	}()
+
+	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.Stdout = f
+	cmd.Stderr = f
+	runErr := cmd.Run()
+
+	out, readErr := os.ReadFile(f.Name())
+	if readErr != nil && runErr == nil {
+		return nil, cmd, fmt.Errorf("reading the hook output failed: %w", readErr)
+	}
+	return out, cmd, runErr
 }
 
 // hookProvisioner holds the state of one hook provisioning so its launch step
@@ -230,11 +263,7 @@ func (p *hookProvisioner) launch() (*AgentServerEndpoint, error) {
 		args = append(args, "--auto-yes")
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), hookLaunchTimeout)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, p.hooks.LaunchCmd, args...)
-	cmd.WaitDelay = hookOutputDrainGrace
-	out, err := cmd.CombinedOutput()
+	out, cmd, err := runHookScript(hookLaunchTimeout, p.hooks.LaunchCmd, args...)
 
 	// Gate the reap on whether launch_cmd STARTED, not on whether it succeeded
 	// (#1955). A script that creates a VM and then times out or exits non-zero
@@ -250,16 +279,9 @@ func (p *hookProvisioner) launch() (*AgentServerEndpoint, error) {
 	// so a missing or non-executable script surfaces as *fs.PathError instead — an
 	// *exec.Error check would read "never ran" as "ran" and fire delete_cmd for a
 	// typo'd path.
-	p.launchStarted = cmd.Process != nil
+	p.launchStarted = cmd != nil && cmd.Process != nil
 
-	if errors.Is(err, exec.ErrWaitDelay) {
-		// Exited 0 but left a process holding the output pipe, so the drain grace
-		// cut the read short. The endpoint JSON is normally already written, so
-		// parse what we captured rather than failing (and reaping) a sandbox that
-		// is very likely up.
-		log.WarningLog.Printf("hook runtime: launch_cmd for %q exited 0 but left its output pipe open; parsing the output captured so far", p.spec.Title)
-	}
-	if err := normalizeHookWaitDelay(err); err != nil {
+	if err != nil {
 		return nil, fmt.Errorf("launch_cmd failed: %s: %w", strings.TrimSpace(string(out)), err)
 	}
 
@@ -299,17 +321,14 @@ func (p *hookProvisioner) reap() error {
 		if !p.launchStarted {
 			return
 		}
-		// context.Background(), NEVER a caller's context. reap's whole job is to
+		// runHookScript builds its timeout from context.Background(), NEVER a
+		// caller's context — and that is load-bearing here. reap's whole job is to
 		// run on the failure path, where the launch context is already cancelled or
-		// expired — and a WithTimeout derived from a dead parent is born expired,
-		// so delete_cmd would never spawn and the sandbox would leak in silence.
-		// That is the exact failure #1955 is about, reintroduced by the cleanup.
-		ctx, cancel := context.WithTimeout(context.Background(), hookDeleteTimeout)
-		defer cancel()
-		cmd := exec.CommandContext(ctx, p.hooks.DeleteCmd, "--name", p.slug)
-		cmd.WaitDelay = hookOutputDrainGrace
-		out, err := cmd.CombinedOutput()
-		if err := normalizeHookWaitDelay(err); err != nil {
+		// expired, and a WithTimeout derived from a dead parent is born expired:
+		// delete_cmd would never spawn and the sandbox would leak in silence. That
+		// is the exact failure #1955 is about, reintroduced by the cleanup.
+		out, _, err := runHookScript(hookDeleteTimeout, p.hooks.DeleteCmd, "--name", p.slug)
+		if err != nil {
 			reapErr = fmt.Errorf("backend=hook: delete_cmd failed for %q: %s: %w", p.slug, strings.TrimSpace(string(out)), err)
 			log.ErrorLog.Printf("%s", p.orphanWarning(reapErr))
 			return

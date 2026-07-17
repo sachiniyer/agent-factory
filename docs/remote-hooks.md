@@ -131,7 +131,21 @@ A script that exceeds its budget is killed and the operation fails.
 
 **af kills only the script itself, not the processes it spawned.** If your `launch_cmd` shells out to a provisioner that keeps running after the script is killed, that provisioner may still create infrastructure *after* `delete_cmd` has already run. af cannot close that race from the outside — it is another reason to make `delete_cmd` idempotent and safe to re-run, and to prefer a `launch_cmd` that cleans up after itself on `EXIT`/`TERM`.
 
-If `launch_cmd` exits 0 but leaves a background process holding its stdout (a tunnel or port-forward, say), af stops reading output shortly after the script exits and parses what it captured. The **exit status** is what decides success, so a session like this still comes up normally — but echo the endpoint JSON before exiting, not from the background process.
+### Backgrounding a tunnel is supported — you need do nothing
+
+**Nothing to change in your `launch_cmd`.** This documents a behaviour change that only ever *removes* a restriction.
+
+Many `launch_cmd`s must leave a process running to make the agent-server reachable — an `ssh -L` forward, a `kubectl port-forward`, a tunnel client. That process is not a leak: it is the thing af then dials. af treats it as **yours** and never touches it.
+
+- af bounds and kills **the script**, never anything the script left running.
+- The script's stdout/stderr go to a temporary **file**, not a pipe. A background process may inherit them and keep writing as long as it likes: af has already stopped reading, and there is no pipe whose closure could disturb it.
+- af stops reading when the **script** exits, and its **exit status** decides success.
+
+You may redirect a tunnel's output (`>/dev/null 2>&1 &`) or disown it if you prefer tidy logs, but you do not have to — both behave identically.
+
+The one rule: **echo the endpoint JSON from the script itself, before it exits** — not from the background process. af reads what the script had written by the time it exited.
+
+> **Fixed in this release.** A `launch_cmd` that backgrounded a process holding stdout previously **hung the provision**: af waited for the output pipe to close and the tunnel held it open indefinitely, so the 5-minute budget never applied. If you added a `>/dev/null` redirect to work around that, keep it or drop it — both work now.
 
 ## Capabilities & the agent-server
 
