@@ -283,6 +283,7 @@ func Run(opts Options) (*Report, error) {
 	checkDaemonHealth(ctx, report, health)
 	checkDaemonVersionSkew(ctx, report, health)
 	checkDuplicateDaemons(ctx, report)
+	checkHTTPSocket(ctx, report, health)
 	checkAutostartPath(ctx, report)
 	checkSplitBrainBinaries(ctx, report)
 	checkStaleSockets(ctx, report, health)

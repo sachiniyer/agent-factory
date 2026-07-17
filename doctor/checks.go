@@ -31,6 +31,7 @@ var (
 	// the machine (in a container pid 1 is often the test user itself).
 	daemonProcessEnvLookup = proctree.EnvLookup
 	daemonProcessOwnerUID  = proctree.OwnerUID
+	daemonProcessCwd       = proctree.WorkingDir
 )
 
 // runawayCPUFraction and runawayMinAge define "pegging a core for an

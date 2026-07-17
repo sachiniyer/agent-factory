@@ -315,6 +315,21 @@ func EnvLookup(pid int, key string) (string, bool, error) {
 	return "", false, nil
 }
 
+// WorkingDir returns pid's current working directory, read from
+// /proc/<pid>/cwd. Reports false when the link cannot be read (a different
+// user's process, a kernel thread, or a process that has exited).
+//
+// Needed by anything that resolves a RELATIVE path out of another process's
+// configuration: such a path means whatever that process's cwd makes it mean,
+// which is not ours to assume (#1044).
+func WorkingDir(pid int) (string, bool) {
+	dir, err := os.Readlink(fmt.Sprintf("/proc/%d/cwd", pid))
+	if err != nil {
+		return "", false
+	}
+	return dir, true
+}
+
 // OwnerUID returns the uid owning pid, read from /proc/<pid>'s ownership.
 // Reports false when the process is gone or its status cannot be read.
 func OwnerUID(pid int) (int, bool) {

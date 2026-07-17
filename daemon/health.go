@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"fmt"
+	"net"
 	"os"
 	"strconv"
 	"strings"
@@ -25,6 +26,17 @@ type HealthStatus struct {
 	// client that can ask, which is exactly the skew that makes a newer
 	// client's requests fail with "unknown field <name>" (#1044).
 	DaemonVersion string
+	// HTTPSocketPath is the daemon's HTTP/JSON socket location.
+	HTTPSocketPath string
+	// HTTPSocketExists reports whether HTTPSocketPath is present on disk.
+	HTTPSocketExists bool
+	// HTTPDialErr is nil when something is accepting connections on the HTTP
+	// socket. It is a SEPARATE listener from the control socket, and
+	// RunDaemon treats a failed startHTTPServer as non-fatal — so a daemon can
+	// answer the control socket perfectly while the HTTP socket, which the TUI
+	// and every HTTP/web client dial, is stale or absent. A healthy Ping says
+	// nothing about this (#1044).
+	HTTPDialErr error
 	// AutostartUnit reports whether the supervised autostart unit (systemd
 	// user service / launchd agent) is installed — i.e. whether a running
 	// daemon is expected to be unit-managed rather than an ad-hoc child.
@@ -57,6 +69,7 @@ func Health() HealthStatus {
 	if pingErr == nil {
 		h.DaemonVersion = ping.Version
 	}
+	h.HTTPSocketPath, h.HTTPSocketExists, h.HTTPDialErr = probeHTTPSocket()
 	h.AutostartUnit = AutostartInstalled()
 
 	pidPath, err := daemonPIDFilePath()
@@ -76,6 +89,29 @@ func Health() HealthStatus {
 		}
 	}
 	return h
+}
+
+// probeHTTPSocket reports the HTTP socket's path, whether it exists, and
+// whether anything is accepting connections on it.
+//
+// A dial, not a request: it distinguishes the failure that matters — a socket
+// file with no listener behind it, where clients connect and wait — from a
+// healthy listener, without needing a token, a route, or a response body.
+// Bounded by daemonDialTimeout so a wedged listener cannot stall `af doctor`.
+func probeHTTPSocket() (path string, exists bool, dialErr error) {
+	path, err := DaemonHTTPSocketPath()
+	if err != nil || path == "" {
+		return "", false, err
+	}
+	if _, err := os.Stat(path); err != nil {
+		return path, false, err
+	}
+	conn, err := net.DialTimeout("unix", path, daemonDialTimeout)
+	if err != nil {
+		return path, true, err
+	}
+	_ = conn.Close()
+	return path, true, nil
 }
 
 // DaemonSocketNames returns the file names of the Unix sockets a daemon binds

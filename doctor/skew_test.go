@@ -11,6 +11,7 @@ import (
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/daemon"
+	"github.com/sachiniyer/agent-factory/internal/proctree"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
 	"github.com/stretchr/testify/require"
 )
@@ -110,11 +111,47 @@ func stubProcessHomes(t *testing.T, homes map[int]string) {
 	}
 }
 
+// stubProcessEnv gives one pid a complete fake environ, so a test can put a
+// daemon in a frame of reference (its own HOME, its own AGENT_FACTORY_HOME
+// spelling) that differs from doctor's. Other pids keep their real environ.
+//
+// A variable absent from env reads as absent-but-readable — the state that
+// legitimately means "this daemon serves the default home".
+func stubProcessEnv(t *testing.T, pid int, env map[string]string) {
+	t.Helper()
+	prev := daemonProcessEnvLookup
+	t.Cleanup(func() { daemonProcessEnvLookup = prev })
+	daemonProcessEnvLookup = func(p int, key string) (string, bool, error) {
+		if p != pid {
+			return prev(p, key)
+		}
+		v, ok := env[key]
+		return v, ok, nil
+	}
+}
+
+// stubProcessCwd fixes the working directory doctor reads for the given pids;
+// any pid absent from the map reads as unreadable.
+func stubProcessCwd(t *testing.T, cwds map[int]string) {
+	t.Helper()
+	prev := daemonProcessCwd
+	t.Cleanup(func() { daemonProcessCwd = prev })
+	daemonProcessCwd = func(pid int) (string, bool) {
+		dir, ok := cwds[pid]
+		return dir, ok
+	}
+}
+
 // respondingDaemon is a health probe for a daemon that answers and reports
 // version v.
 func respondingDaemon(v string) func() daemon.HealthStatus {
 	return func() daemon.HealthStatus {
-		return daemon.HealthStatus{SocketPath: "/fake/daemon.sock", SocketExists: true, DaemonVersion: v}
+		return daemon.HealthStatus{
+			SocketPath: "/fake/daemon.sock", SocketExists: true, DaemonVersion: v,
+			// A healthy daemon has a healthy HTTP listener too; tests that care
+			// about the HTTP socket override these.
+			HTTPSocketPath: "/fake/daemon-http.sock", HTTPSocketExists: true, HTTPDialErr: nil,
+		}
 	}
 }
 
@@ -350,14 +387,12 @@ func TestDuplicateDaemons_ForeignUserDaemon_NotAttributedHere(t *testing.T) {
 		func(int) bool { return true },
 		func(int) []string { return []string{"af", "--daemon"} })
 
-	// defaultAFHome resolves $HOME, which the package sandbox does not
-	// override — leaving it alone would point this test at the developer's real
+	// $HOME is not sandboxed by the package harness (only AGENT_FACTORY_HOME
+	// is), so leaving it alone would point this test at the developer's real
 	// ~/.agent-factory and read their live daemon's sockets. Pin it.
 	fakeHome := t.TempDir()
 	t.Setenv("HOME", fakeHome)
-	defaultHome := defaultAFHome()
-	require.Equal(t, filepath.Join(fakeHome, ".agent-factory"), defaultHome,
-		"the test must run against its own default home, never the real one")
+	defaultHome := filepath.Join(fakeHome, ".agent-factory")
 	require.NoError(t, os.MkdirAll(defaultHome, 0o755))
 
 	// This user's own daemon, explicitly on the default home, and a second
@@ -395,9 +430,78 @@ func TestDaemonProcessHome_UnreadableEnvironIsUnknownNotDefault(t *testing.T) {
 	proc := spawnWithEnv(t, "af", []string{"--daemon"}, nil)
 	stubForeignProcess(t, proc.PID)
 
-	home, known := daemonProcessHome(proc.PID, "/home/dev/.agent-factory")
+	home, known := daemonProcessHome(proc.PID)
 	require.False(t, known, "an unreadable environ must not be reported as a known home")
 	require.Empty(t, home, "no home may be guessed from an unreadable environ")
+}
+
+// A daemon's home must be resolved in the DAEMON's frame, never ours. This one
+// carries no AGENT_FACTORY_HOME and a HOME of its own, so its home is
+// <its HOME>/.agent-factory — nothing to do with the HOME doctor happens to run
+// under. Using ours attributes a sandbox/debug daemon to the home we are
+// inspecting, or hides a genuinely foreign one.
+func TestDaemonProcessHome_DefaultResolvesAgainstDaemonHOME(t *testing.T) {
+	daemonHome := t.TempDir()
+	ourHome := t.TempDir()
+	require.NotEqual(t, daemonHome, ourHome)
+	t.Setenv("HOME", ourHome) // doctor's frame — deliberately different
+
+	proc := spawnWithEnv(t, "af", []string{"--daemon"}, nil)
+	// The daemon's environ: its own HOME, and no AGENT_FACTORY_HOME at all.
+	stubProcessEnv(t, proc.PID, map[string]string{"HOME": daemonHome})
+
+	home, known := daemonProcessHome(proc.PID)
+	require.True(t, known)
+	require.Equal(t, filepath.Join(daemonHome, ".agent-factory"), home,
+		"the default home must derive from the DAEMON's HOME, not doctor's")
+}
+
+// A tilde in the daemon's AGENT_FACTORY_HOME expands against ITS HOME.
+func TestDaemonProcessHome_TildeExpandsAgainstDaemonHOME(t *testing.T) {
+	daemonHome := t.TempDir()
+	t.Setenv("HOME", t.TempDir()) // doctor's frame — different again
+
+	proc := spawnWithEnv(t, "af", []string{"--daemon"}, nil)
+	stubProcessEnv(t, proc.PID, map[string]string{
+		"HOME":               daemonHome,
+		"AGENT_FACTORY_HOME": "~/af-home",
+	})
+
+	home, known := daemonProcessHome(proc.PID)
+	require.True(t, known)
+	require.Equal(t, filepath.Join(daemonHome, "af-home"), home,
+		"the tilde must expand against the DAEMON's HOME")
+}
+
+// A relative AGENT_FACTORY_HOME (which config.GetConfigDir accepts as-is) means
+// whatever the DAEMON's cwd makes it mean. Resolving against doctor's cwd makes
+// the same daemon classify differently depending on where doctor was invoked.
+func TestDaemonProcessHome_RelativeResolvesAgainstDaemonCwd(t *testing.T) {
+	daemonCwd := t.TempDir()
+	proc := spawnWithEnv(t, "af", []string{"--daemon"}, nil)
+	stubProcessEnv(t, proc.PID, map[string]string{
+		"HOME":               t.TempDir(),
+		"AGENT_FACTORY_HOME": "af-home", // relative
+	})
+	stubProcessCwd(t, map[int]string{proc.PID: daemonCwd})
+
+	home, known := daemonProcessHome(proc.PID)
+	require.True(t, known)
+	require.Equal(t, filepath.Join(daemonCwd, "af-home"), home,
+		"a relative home must resolve against the DAEMON's cwd, not doctor's")
+}
+
+// A relative home whose frame we cannot read is unknown, not guessed.
+func TestDaemonProcessHome_RelativeWithUnreadableCwdIsUnknown(t *testing.T) {
+	proc := spawnWithEnv(t, "af", []string{"--daemon"}, nil)
+	stubProcessEnv(t, proc.PID, map[string]string{
+		"HOME":               t.TempDir(),
+		"AGENT_FACTORY_HOME": "af-home",
+	})
+	stubProcessCwd(t, map[int]string{}) // cwd unreadable for every pid
+
+	_, known := daemonProcessHome(proc.PID)
+	require.False(t, known, "a relative home with no readable cwd cannot be resolved")
 }
 
 // The other half of the guard: a readable environ still yields a known home.
@@ -406,7 +510,7 @@ func TestDaemonProcessHome_ReadableEnvironIsKnown(t *testing.T) {
 	explicit := t.TempDir()
 	proc := spawnWithEnv(t, "af", []string{"--daemon"}, map[string]string{"AGENT_FACTORY_HOME": explicit})
 
-	home, known := daemonProcessHome(proc.PID, "/home/dev/.agent-factory")
+	home, known := daemonProcessHome(proc.PID)
 	require.True(t, known, "our own readable environ yields a known home")
 	require.Equal(t, explicit, home)
 }
@@ -801,6 +905,103 @@ func TestStaleSocket_HTTPSocketStillReported(t *testing.T) {
 	require.Contains(t, c.Detail, "daemon-http.sock")
 	require.NotContains(t, c.Detail, daemon.ControlSocketName())
 	require.True(t, c.Problem)
+}
+
+// A healthy control socket says nothing about the HTTP socket: they are
+// separate listeners, RunDaemon keeps serving the control socket when
+// startHTTPServer fails, and the TUI/web/HTTP clients dial the HTTP one. Gating
+// on the ping let doctor report all-clear over a dead web surface.
+func TestHTTPSocket_StaleWhileControlHealthy_Warns(t *testing.T) {
+	testguard.IsolateTmux(t)
+
+	opts := testOptions(t, false)
+	opts.Version = "1.0.192"
+	opts.daemonHealth = func() daemon.HealthStatus {
+		return daemon.HealthStatus{
+			SocketPath: "/fake/daemon.sock", SocketExists: true, DaemonVersion: "1.0.192",
+			// Control socket perfectly healthy (PingErr nil)...
+			HTTPSocketPath: "/fake/daemon-http.sock", HTTPSocketExists: true,
+			HTTPDialErr: errNoDaemon, // ...but nothing answers on HTTP.
+		}
+	}
+
+	report, err := Run(opts)
+	require.NoError(t, err)
+
+	require.Equal(t, StatusPass, findCheck(t, report, "daemon").Status,
+		"the control socket really is healthy — that is the point")
+	c := findCheck(t, report, "http socket")
+	require.Equal(t, StatusWarn, c.Status)
+	require.Contains(t, c.Detail, "nothing answers")
+	require.True(t, c.Problem, "a dead web surface is a real problem, not advisory")
+	require.Positive(t, report.UnresolvedCount(), "doctor must not report all-clear")
+}
+
+// startHTTPServer failing is non-fatal to RunDaemon, so the socket can simply
+// not be there while the daemon runs happily.
+func TestHTTPSocket_MissingWhileDaemonRuns_Warns(t *testing.T) {
+	testguard.IsolateTmux(t)
+
+	opts := testOptions(t, false)
+	opts.Version = "1.0.192"
+	opts.daemonHealth = func() daemon.HealthStatus {
+		return daemon.HealthStatus{
+			SocketPath: "/fake/daemon.sock", SocketExists: true, DaemonVersion: "1.0.192",
+			HTTPSocketPath: "/fake/daemon-http.sock", HTTPSocketExists: false,
+			HTTPDialErr: os.ErrNotExist,
+		}
+	}
+
+	report, err := Run(opts)
+	require.NoError(t, err)
+
+	c := findCheck(t, report, "http socket")
+	require.Equal(t, StatusWarn, c.Status)
+	require.Contains(t, c.Detail, "not there")
+	require.True(t, c.Problem)
+}
+
+func TestHTTPSocket_Healthy_Passes(t *testing.T) {
+	testguard.IsolateTmux(t)
+
+	opts := testOptions(t, false)
+	opts.Version = "1.0.192"
+	opts.daemonHealth = respondingDaemon("1.0.192")
+
+	report, err := Run(opts)
+	require.NoError(t, err)
+	require.Equal(t, StatusPass, findCheck(t, report, "http socket").Status)
+}
+
+// With no daemon at all, its HTTP socket being gone is expected — the row would
+// be noise, and any leftover file is checkStaleSockets' story.
+func TestHTTPSocket_NoDaemon_NoRow(t *testing.T) {
+	testguard.IsolateTmux(t)
+
+	report, err := Run(testOptions(t, false))
+	require.NoError(t, err)
+	require.False(t, hasCheck(report, "http socket"))
+}
+
+// A diagnostic that cannot see must say so, never PASS. proctree is /proc-only,
+// so on macOS the process scan yields nothing (#1939) and this check never runs
+// — silence would render as a clean bill of health for a check that did not
+// execute.
+func TestDuplicateDaemons_NoProcessSnapshot_SaysSoRatherThanPassing(t *testing.T) {
+	testguard.IsolateTmux(t)
+
+	opts := testOptions(t, false)
+	opts.snapshot = func() (map[int]proctree.Process, error) {
+		return nil, errNoDaemon // what Snapshot() does on darwin
+	}
+
+	report, err := Run(opts)
+	require.NoError(t, err)
+
+	c := findCheck(t, report, "daemon instances")
+	require.Equal(t, StatusWarn, c.Status, "an unrun check must not read as PASS")
+	require.Contains(t, c.Detail, "cannot scan processes")
+	require.False(t, c.Problem, "the user cannot fix their platform; this is advisory")
 }
 
 // The name is a convention, not proof: a plain file that borrowed the name is

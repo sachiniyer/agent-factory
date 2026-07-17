@@ -101,6 +101,13 @@ func describeVersion(v string) string {
 // business.
 func checkDuplicateDaemons(ctx *scanContext, report *Report) {
 	if ctx.snap == nil {
+		// No process snapshot — proctree is /proc-only, so this is every run on
+		// macOS (#1939). Staying silent would render as a clean bill of health
+		// for a check that never executed: a diagnostic that cannot see must
+		// say so, not PASS. Advisory, because the user cannot fix the platform.
+		report.Warn(sectionDaemon, "daemon instances",
+			"cannot scan processes on this platform, so duplicate daemons were not checked",
+			"on macOS this check is unavailable (#1939); check for extra `af --daemon` processes by hand", false)
 		return
 	}
 	procs := activeHomeDaemons(ctx)
@@ -158,7 +165,6 @@ type daemonProc struct {
 // legitimate daemon — doctor reporting PASS on a split-brained box, which is the
 // same lie as a false alarm, told the other way round (#1044).
 func scanDaemons(ctx *scanContext) []daemonProc {
-	defaultHome := defaultAFHome()
 	self := selfUID()
 	var out []daemonProc
 	for pid, p := range ctx.snap {
@@ -166,7 +172,7 @@ func scanDaemons(ctx *scanContext) []daemonProc {
 		if len(args) == 0 || !daemon.LooksLikeDaemonArgv(args) {
 			continue
 		}
-		home, known := daemonProcessHome(pid, defaultHome)
+		home, known := daemonProcessHome(pid)
 		uid, uidKnown := daemonProcessOwnerUID(pid)
 		out = append(out, daemonProc{
 			proc:           p,
@@ -208,57 +214,109 @@ func activeHomeDaemons(ctx *scanContext) []proctree.Process {
 	return out
 }
 
-// defaultAFHome is the home a daemon serves when it carries no explicit
-// AGENT_FACTORY_HOME.
-func defaultAFHome() string {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return ""
-	}
-	return filepath.Join(home, ".agent-factory")
-}
-
 // daemonProcessHome resolves which agent-factory home pid serves, reporting
 // whether the answer is known at all.
 //
-// The default-home fallback applies ONLY when we read the environ and found no
-// AGENT_FACTORY_HOME — that genuinely means "this daemon serves the default
-// home". It must never apply when the environ could not be read: on a shared
-// machine /proc/<pid>/cmdline is world-readable while /proc/<pid>/environ is
-// owner-only, so another user's `af --daemon` is fully visible and identifiable
-// yet permanently unreadable. Defaulting there would adopt their process into
-// our home and report a duplicate daemon that does not exist (#1044).
-func daemonProcessHome(pid int, defaultHome string) (string, bool) {
-	home, found, err := daemonProcessEnvLookup(pid, "AGENT_FACTORY_HOME")
+// Everything here is read in the DAEMON's frame of reference, never ours. The
+// daemon resolved its config dir from its own environment and its own working
+// directory, so that is the only frame in which its AGENT_FACTORY_HOME means
+// what it meant:
+//
+//   - no AGENT_FACTORY_HOME → its home is <its HOME>/.agent-factory. Using our
+//     $HOME instead attributes a daemon started under a different HOME (a
+//     sandbox or debug run) to the home we happen to be inspecting.
+//   - a tilde ("~/af-home") expands against ITS $HOME.
+//   - a relative path ("af-home", which config.GetConfigDir accepts as-is) is
+//     relative to ITS cwd. Absolutizing against ours makes the same daemon
+//     resolve differently depending on where doctor was invoked from.
+//
+// Every home comparison in this file is built on this answer, so getting the
+// frame wrong inverts the verdicts (a real duplicate missed, a sibling called
+// foreign) rather than merely making them noisy. When the daemon's frame cannot
+// be read, the home is unknown — never guessed from ours (#1044).
+func daemonProcessHome(pid int) (string, bool) {
+	raw, found, err := daemonProcessEnvLookup(pid, "AGENT_FACTORY_HOME")
 	if err != nil {
 		return "", false // unreadable: unknown, not "the default"
 	}
-	if !found || home == "" {
-		home = defaultHome
-	}
-	if home == "" {
+	// The daemon's own HOME, needed for both the default and any tilde.
+	daemonHome, _, err := daemonProcessEnvLookup(pid, "HOME")
+	if err != nil {
 		return "", false
 	}
-	return normalizeHome(home), true
+	if !found || raw == "" {
+		if daemonHome == "" {
+			return "", false // no explicit home and no HOME to derive one from
+		}
+		raw = filepath.Join(daemonHome, ".agent-factory")
+	}
+	cwd, _ := daemonProcessCwd(pid)
+	return resolveHomeIn(raw, daemonHome, cwd)
 }
 
-// normalizeHome canonicalizes an agent-factory home for comparison, so two
-// spellings of one directory compare equal.
+// resolveHomeIn canonicalizes a home spelled in the frame of a process whose
+// HOME is homeDir and whose working directory is cwd, so that two spellings of
+// one directory compare equal. Reports false when the spelling cannot be
+// resolved in that frame.
 //
-// Every home comparison here decides whether a daemon is ours, so a spelling
-// difference reads as a different home and the duplicate/split-brain verdicts
-// invert: a real duplicate goes unreported, or a sibling gets called foreign.
-// The spellings that actually occur:
-//
-//   - a daemon's environ holds the RAW AGENT_FACTORY_HOME ("~/af-home"), while
-//     config.GetConfigDir has already expanded the active home — so the tilde
-//     must be expanded on both sides;
-//   - a trailing slash, or a relative path, from a hand-written unit;
-//   - a symlinked home, and on macOS /var vs /private/var, where the same
-//     directory has two absolute spellings (#1918).
-func normalizeHome(home string) string {
-	return resolvePath(config.ExpandTilde(home))
+// The spellings that actually occur: a raw tilde ("~/af-home", which a daemon's
+// environ preserves while config.GetConfigDir has already expanded the active
+// home); a relative path from a hand-written unit; a trailing slash; and a
+// symlinked home — including macOS /var vs /private/var, where one directory has
+// two absolute spellings (#1918).
+func resolveHomeIn(raw, homeDir, cwd string) (string, bool) {
+	if raw == "" {
+		return "", false
+	}
+	switch {
+	case raw == "~" || strings.HasPrefix(raw, "~/"):
+		if homeDir == "" {
+			return "", false // a tilde we cannot expand in that frame
+		}
+		raw = filepath.Join(homeDir, strings.TrimPrefix(strings.TrimPrefix(raw, "~"), "/"))
+	case strings.HasPrefix(raw, "~"):
+		// "~user" — GetConfigDir rejects these outright rather than treating
+		// them as a literal directory, so there is no home to compare.
+		return "", false
+	}
+	if !filepath.IsAbs(raw) {
+		if cwd == "" {
+			return "", false // relative to a working directory we cannot read
+		}
+		raw = filepath.Join(cwd, raw)
+	}
+	if resolved, err := filepath.EvalSymlinks(raw); err == nil {
+		raw = resolved
+	}
+	return filepath.Clean(raw), true
 }
+
+// normalizeHome canonicalizes OUR active home for comparison. Our own frame is
+// the right one here and only here: ConfigDir came from config.GetConfigDir,
+// which resolved it from this process's environment and cwd.
+func normalizeHome(home string) string {
+	resolved, _ := resolveHomeIn(config.ExpandTilde(home), userHomeDir(), workingDir())
+	return resolved
+}
+
+// userHomeDir and workingDir are this process's frame, kept as vars so tests can
+// pin them.
+var (
+	userHomeDir = func() string {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return ""
+		}
+		return home
+	}
+	workingDir = func() string {
+		dir, err := os.Getwd()
+		if err != nil {
+			return ""
+		}
+		return dir
+	}
+)
 
 // daemonProcSummary identifies a daemon process by pid and age, which is what
 // distinguishes the stale daemon from the fresh one at a glance.
@@ -421,6 +479,36 @@ func checkStaleSockets(ctx *scanContext, report *Report, h daemon.HealthStatus) 
 			plural(len(stale), "daemon socket", "daemon sockets")+" ("+strings.Join(stale, ", ")+")",
 			ctx.opts.ConfigDir),
 		"run `af reset` to clear them, or `af daemon restart` to start a daemon on them", true)
+}
+
+// checkHTTPSocket reports the HTTP/JSON listener's health independently of the
+// control socket.
+//
+// They are two listeners, and RunDaemon keeps serving the control socket when
+// startHTTPServer fails. So "the daemon answers" — the thing checkDaemonHealth
+// establishes — is no evidence at all about the socket the TUI, the HTTP API,
+// and the web UI actually dial. Gating this probe on a healthy Ping let doctor
+// report all-clear over a dead web surface (#1044).
+func checkHTTPSocket(ctx *scanContext, report *Report, h daemon.HealthStatus) {
+	if h.PingErr != nil {
+		// No daemon: its HTTP socket is expected to be gone too, and any
+		// leftover file is checkStaleSockets' story.
+		return
+	}
+	switch {
+	case !h.HTTPSocketExists:
+		report.Warn(sectionDaemon, "http socket",
+			fmt.Sprintf("the daemon is running but its HTTP socket (%s) is not there, "+
+				"so the web UI and HTTP clients have nothing to dial", h.HTTPSocketPath),
+			"run `af daemon restart` and check the daemon log for an HTTP listener error", true)
+	case h.HTTPDialErr != nil:
+		report.Warn(sectionDaemon, "http socket",
+			fmt.Sprintf("the daemon is running but nothing answers on its HTTP socket %s (%v); "+
+				"the web UI and HTTP clients will hang or fail", h.HTTPSocketPath, h.HTTPDialErr),
+			"run `af daemon restart` to rebind it", true)
+	default:
+		report.Pass(sectionDaemon, "http socket", "accepting connections on "+h.HTTPSocketPath)
+	}
 }
 
 // checkAutostartSupervision reports an autostart unit that exists but is not
