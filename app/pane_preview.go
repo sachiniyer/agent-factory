@@ -129,6 +129,32 @@ func (m *home) updatePanePreview(selected *session.Instance, targetTab int, tabS
 	return nil
 }
 
+// effectivePaneBinding resolves what a pane is ACTUALLY SHOWING — the single
+// source of truth for "which (instance, tab) is this pane displaying". A pane
+// that owns a transient preview renders the preview's TARGET, while
+// p.Instance()/p.Tab() keep reporting the committed binding underneath it. Any
+// verb that acts on "the thing on screen" must read this, never the raw binding.
+//
+// Those two being separate sources of truth is the same wrong-target class this
+// PR exists to close, one layer down: `w` read the committed tab and destroyed a
+// tab the user could not see. The gesture is ordinary — a pane-header click
+// focuses a previewing pane without committing or cancelling the preview (Tab
+// dismisses it, enterPane commits it; the header click does neither, the
+// keyboard-works/mouse-doesn't signature of #1819).
+//
+// Note the instance can differ too, not just the tab: a preview target is the
+// TREE's selection, so a previewing pane can be showing another session
+// entirely — which is why this returns a full binding rather than an index.
+func (m *home) effectivePaneBinding(p *store.OpenPane) paneBinding {
+	if p == nil {
+		return paneBinding{}
+	}
+	if m.paneIsPreviewing(p) {
+		return m.panePreviewTxn.target
+	}
+	return paneBinding{instance: p.Instance(), tab: p.Tab()}
+}
+
 func (m *home) cancelPanePreview(focusOwner bool) {
 	txn := m.panePreviewTxn
 	if txn == nil {

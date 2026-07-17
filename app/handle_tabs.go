@@ -81,13 +81,33 @@ func (m *home) handleNewTab() (tea.Model, tea.Cmd) {
 // tore the tmux session down.
 func (m *home) handleCloseTab() (tea.Model, tea.Cmd) {
 	// The focused pane owns the close target: w acts on the tab on screen, not
-	// the tree cursor's tab (#1884). Fall back to the sidebar selection + its
+	// the tree cursor's tab (#1884). Fall back to the tree's selection + its
 	// active tab when focus is on the tree.
-	inst := m.sidebar.GetSelectedInstance()
+	//
+	// Both halves read ONE source of truth for their target, because every
+	// wrong-target bug in this verb has been two sources disagreeing about which
+	// tab is on screen:
+	//   - the pane branch reads the EFFECTIVE binding, not p.Tab(): a previewing
+	//     pane renders the preview target while p.Tab() reports the committed tab
+	//     underneath, so the raw binding names a tab the user cannot see.
+	//   - the tree branch reads the STORE's selection, not the sidebar cursor's:
+	//     idx is store.ActiveTab(), which is by definition the active tab OF
+	//     store.GetSelectedInstance(). The sidebar cursor is a DIFFERENT thing —
+	//     it goes nil on a section header (where the store's display selection is
+	//     deliberately sticky) and resolves to the ARCHIVED instance on an
+	//     archived row (which never becomes the store's selection). Pairing this
+	//     idx with that instance is a wrong-target waiting to happen.
+	inst := m.store.GetSelectedInstance()
 	idx := m.store.ActiveTab()
 	if p := m.focusedOpenPane(); p != nil {
-		inst = p.Instance()
-		idx = p.Tab()
+		b := m.effectivePaneBinding(p)
+		inst, idx = b.instance, b.tab
+		// The tab being previewed is about to be destroyed, so the transient
+		// preview must not survive pointing at a dead slot — drop it and let the
+		// pane fall back to its committed binding. Cheap even when a guard below
+		// refuses the close: a preview is re-derived from the tree cursor on the
+		// next tick.
+		m.cancelPanePreview(false)
 	}
 	if inst == nil {
 		return m, nil
@@ -116,7 +136,14 @@ func (m *home) handleCloseTab() (tea.Model, tea.Cmd) {
 	// by id at all and the ordinal is the only key it has.
 	treeActiveID := ""
 	treeActiveIdx := -1
-	treeIsSelected := inst == m.sidebar.GetSelectedInstance()
+	// Whose tab is store.ActiveTab()? The STORE's selected instance's — so that is
+	// what decides whether the tree's active tab needs preserving across this
+	// close, not the sidebar cursor. The cursor is nil on a section header and
+	// points at the archived instance on an archived row, while the store's
+	// display selection stays deliberately sticky on the live instance; reading
+	// the cursor there made this false and left ActiveTab un-shifted, so returning
+	// to the tree landed on a different surviving tab.
+	treeIsSelected := inst == m.store.GetSelectedInstance()
 	if treeIsSelected {
 		if a := m.store.ActiveTab(); a >= 0 && a < len(tabs) {
 			treeActiveIdx = a

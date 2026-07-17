@@ -7,6 +7,7 @@ import (
 	"github.com/sachiniyer/agent-factory/keys"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/ui/layout"
+	"github.com/sachiniyer/agent-factory/ui/layout/zones"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -622,4 +623,140 @@ func TestSwapSameTitle_StalesPinnedPaneJump(t *testing.T) {
 		"a same-title swap replaced the selected session — the epoch must advance like any other selection change")
 	assert.False(t, h.paneJumpIntentPinned(pane.ID()),
 		"the pin was made against the corpse: it must not keep cancelling previews for the replacement session")
+}
+
+// TestCloseTab_PreviewingPaneClosesTheVisibleTab is the preview-vs-committed
+// duality — the SAME wrong-target destruction this PR exists to eliminate, one
+// layer down. A pane owning a transient preview RENDERS panePreviewTxn.target
+// while p.Tab() still reports the committed binding underneath. A pane-header
+// click focuses the pane without committing or cancelling that preview (unlike
+// Tab/cycleFocus, which dismisses it, and unlike enterPane, which commits it —
+// the keyboard-works/mouse-doesn't signature of the #1819 preview-gate class).
+// So `w` read the hidden committed tab and permanently destroyed a tab the user
+// could not see, reachable by an entirely ordinary gesture.
+func TestCloseTab_PreviewingPaneClosesTheVisibleTab(t *testing.T) {
+	h, alpha := multiTabHome(t)
+
+	// A pane committed to shell (slot 1).
+	pane := openTestPane(t, h, alpha, 1)
+	require.Equal(t, 1, pane.Tab())
+
+	// Park the tree cursor on a DIFFERENT tab row (shell-3, slot 3) so the idle
+	// preview binds that tab into the pane — the real state, built by the real
+	// path, not by poking panePreviewTxn.
+	h.sidebar.SelectTabRow(alpha.Title, 3)
+	_ = h.selectionChanged()
+	require.NotNil(t, h.panePreviewTxn, "precondition: a preview is live")
+	require.Equal(t, pane.ID(), h.panePreviewTxn.ownerPaneID, "precondition: this pane owns it")
+	require.Equal(t, 3, h.panePreviewTxn.target.tab, "precondition: the pane RENDERS shell-3")
+	require.Equal(t, 1, pane.Tab(), "precondition: but its committed binding is still shell — the duality")
+	w := h.paneWindows[pane.ID()]
+	require.NotNil(t, w)
+	require.True(t, w.Previewing(), "precondition: the window is showing the preview, not the committed tab")
+
+	// Click the pane's HEADER to focus it — the ordinary gesture. This must not
+	// silently leave the preview live under a focused pane with a stale target.
+	clickZone(t, h, zones.PaneHeader(layout.PaneRegion(pane.ID())))
+	require.Equal(t, pane, h.focusedOpenPane(), "precondition: the header click focused the pane")
+
+	closerCalls := recordCloseTab(t, h)
+	_, _ = h.handleCloseTab()
+
+	assert.Equal(t, []string{"shell-3"}, *closerCalls,
+		"w must close the tab the pane is VISIBLY showing (the preview target shell-3), never the hidden committed tab")
+	assert.NotContains(t, tabNames(alpha), "shell-3", "shell-3 is the tab that was destroyed")
+	assert.Contains(t, tabNames(alpha), "shell",
+		"the hidden committed tab must SURVIVE — destroying it is the wrong-target bug (#1884 class)")
+}
+
+// tabNames lists an instance's tab names, for asserting which tab a destructive
+// verb actually hit.
+func tabNames(inst *session.Instance) []string {
+	var out []string
+	for _, tab := range inst.GetTabs() {
+		out = append(out, tab.Name)
+	}
+	return out
+}
+
+// TestCloseTab_StickySelectionShiftsActiveTab is the sidebar-vs-store duality.
+// store.ActiveTab() is by definition the active tab OF store.GetSelectedInstance()
+// — the DISPLAY selection, which is deliberately sticky while the cursor visits a
+// section header (the sidebar cursor goes nil there). Deciding whether to preserve
+// that active tab by asking the sidebar CURSOR instead made treeIsSelected false,
+// so a pane-focused close of a lower-numbered tab never shifted ActiveTab and
+// expanding the tree again landed on a different surviving tab.
+//
+// The cursor is parked on the header the way a user does it — clicking the
+// Instances header — because headers are not vertical nav stops.
+func TestCloseTab_StickySelectionShiftsActiveTab(t *testing.T) {
+	h, alpha := multiTabHome(t)
+
+	// The tree's active tab is shell-3 (slot 3) — ABOVE the tab about to close.
+	h.store.SetActiveTab(3)
+	h.menu.SetActiveTab(3)
+
+	// A pane on shell (slot 1), the lower-numbered tab that will be closed.
+	pane := openTestPane(t, h, alpha, 1)
+
+	// Park the cursor on the Instances header: the sidebar's cursor-derived
+	// selection goes nil, while the store's display selection stays STICKY on
+	// alpha — the state the old suite never entered.
+	clickZone(t, h, zones.TreeHeader)
+	require.True(t, h.sidebar.GetSelection().IsHeader, "precondition: the cursor is on the header")
+	require.Nil(t, h.sidebar.GetSelectedInstance(), "precondition: the sidebar cursor resolves to no instance")
+	require.Equal(t, alpha, h.store.GetSelectedInstance(), "precondition: the store's selection stays sticky on alpha")
+
+	// Focus alpha's pane and close its tab.
+	h.focusRegion(layout.PaneRegion(pane.ID()))
+	require.Equal(t, pane, h.focusedOpenPane(), "precondition: the pane holds focus")
+
+	recordCloseTab(t, h)
+	_, _ = h.handleCloseTab()
+
+	require.Equal(t, 3, alpha.TabCount(), "precondition: the pane's tab (shell) was closed")
+	// shell (slot 1) died, so the sticky selection's active tab shifted 3 → 2. The
+	// store's ActiveTab describes alpha whether or not the cursor is on its row.
+	assert.Equal(t, "shell-3", alpha.GetTabs()[h.store.ActiveTab()].Name,
+		"the sticky selection's active tab must still name shell-3 — expanding the tree must not land on a different tab")
+	assert.Equal(t, 2, h.store.ActiveTab(),
+		"shell-3 shifted 3 → 2 when the lower tab closed; a header-parked cursor must not stop ActiveTab tracking it")
+}
+
+// TestCloseTab_ArchivedRowCursorDoesNotRetarget is the other half of the
+// sidebar-vs-store duality, and the more dangerous one. An archived row IS an
+// instance row (isInstanceRow accepts SectionArchived), so the sidebar cursor
+// resolves to the ARCHIVED instance — but selectionChanged only syncs the store's
+// selection from SectionInstances rows, so store.ActiveTab() still describes the
+// live sticky instance. Pairing that index with THAT instance aimed a destructive
+// verb at a different session's tab list entirely.
+func TestCloseTab_ArchivedRowCursorDoesNotRetarget(t *testing.T) {
+	h, alpha := multiTabHome(t)
+	h.store.SetActiveTab(2) // the live sticky instance's active tab
+
+	// An archived session carrying its own tabs, selected by the cursor.
+	archived := instanceWithFakeBackend(t, "old")
+	// Distinct tab names: alpha has its own "shell-2", and recordCloseTab records
+	// names only — a collision would make a wrong-target close unprovable.
+	archived.AddTabForTest("agent", session.TabKindAgent)
+	archived.AddTabForTest("old-shell", session.TabKindShell)
+	archived.AddTabForTest("old-shell-2", session.TabKindShell)
+	archived.SetArchived()
+	h.store.AddInstance(archived)
+	_ = h.selectionChanged()
+
+	h.sidebar.SelectInstance(archived)
+	require.Equal(t, archived, h.sidebar.GetSelectedInstance(),
+		"precondition: the cursor resolves to the ARCHIVED instance")
+	require.Equal(t, alpha, h.store.GetSelectedInstance(),
+		"precondition: the store's display selection stays sticky on the LIVE instance")
+	require.Equal(t, 2, h.store.ActiveTab(), "precondition: ActiveTab describes the live instance")
+
+	h.focusRegion(layout.RegionTree)
+	closerCalls := recordCloseTab(t, h)
+	_, _ = h.handleCloseTab()
+
+	assert.NotContains(t, *closerCalls, "old-shell-2",
+		"w must never close a tab on the archived session the cursor happens to rest on — ActiveTab is not its index")
+	assert.Equal(t, 3, archived.TabCount(), "the archived session's tabs are untouched")
 }
