@@ -54,6 +54,14 @@ func (m *home) buildProjectList() []overlay.Project {
 // it already fetched off-loop rather than issuing a second daemon RPC.
 func (m *home) buildProjectListFrom(data []session.InstanceData) []overlay.Project {
 	counts := map[string]int{}
+	// inPlace counts the subset of each repo's live sessions that delete-project
+	// tears down instead of archiving (#1973). Keyed off the SAME predicate the
+	// daemon applies in deleteProject — Instance.IsExternalWorktree(), which is
+	// exactly Worktree.ExternalWorktree on the wire (ToInstanceData sets it from
+	// gitWorktree.IsExternalWorktree(), and both read false when no worktree is
+	// attached). Deriving it here, from the snapshot that already yields the
+	// total, keeps the dialog's split as faithful as the count beside it.
+	inPlace := map[string]int{}
 	var order []string
 	seen := func(root string) {
 		if root == "" {
@@ -80,6 +88,9 @@ func (m *home) buildProjectListFrom(data []session.InstanceData) []overlay.Proje
 		}
 		seen(root)
 		counts[root]++
+		if d.Worktree.ExternalWorktree {
+			inPlace[root]++
+		}
 	}
 
 	if m.appConfig != nil {
@@ -97,6 +108,7 @@ func (m *home) buildProjectListFrom(data []session.InstanceData) []overlay.Proje
 			Name:         filepath.Base(root),
 			Root:         root,
 			SessionCount: counts[root],
+			InPlaceCount: inPlace[root],
 		})
 	}
 	sort.Slice(projects, func(i, j int) bool {
@@ -117,6 +129,7 @@ func (m *home) projectRows(projects []overlay.Project) []ui.SidebarProject {
 			Name:         p.Name,
 			Root:         p.Root,
 			SessionCount: p.SessionCount,
+			InPlaceCount: p.InPlaceCount,
 			Active:       p.Root == m.repoRoot,
 		})
 	}
@@ -215,23 +228,95 @@ func (m *home) handleAddProject(path string) (tea.Model, tea.Cmd) {
 	return m.switchProject(repo)
 }
 
-// handleDeleteProject opens the reversible delete-project confirmation for the
-// cursor's project in the Projects section (#1735). The copy makes the
-// reversibility explicit: sessions are archived (restorable), the real repo is
-// untouched, and restoring any archived session brings the project back. On
-// confirm it dispatches the async daemon archive-then-remove.
+// sessionWord pluralizes "session" for the delete-project copy.
+func sessionWord(n int) string {
+	if n == 1 {
+		return "session"
+	}
+	return "sessions"
+}
+
+// deleteProjectConfirmMessage builds the delete-project confirmation (#1735,
+// corrected in #1973). It returns the copy in two parts, because the overlay
+// clips from the bottom and this dialog's tail was the half that mattered:
+//
+//   - critical — the consequences the user is consenting to, one count per
+//     outcome. The overlay guarantees this renders in full or refuses the
+//     action outright, so it must stay short enough to fit the declared 40x10
+//     floor (ui/layout/grid.go HardMinWidth/HardMinHeight): a ~34-column text
+//     rect leaves four body lines. That budget is why these lines are headlines
+//     rather than prose.
+//   - detail — the elaboration, which may be clipped (and says when it is).
+//
+// The destructive count LEADS. A user who reads exactly one line must read the
+// one that cannot be undone; the reassuring half is what gives ground first.
+//
+// The split is honest in both directions. Tearing down an in-place session does
+// NOT destroy the user's work — the worktree is theirs, and GitWorktree.Cleanup()
+// no-ops for an external worktree, so the branch and uncommitted changes survive.
+// What does not survive is the session: af deletes its record, so `af sessions
+// restore` cannot bring it back. Saying "you lose your work" would be false;
+// saying "restorable" is the bug.
+func deleteProjectConfirmMessage(name string, total, inPlace int, restoreKey string) (critical, detail string) {
+	archived := total - inPlace
+	title := fmt.Sprintf("[!] Delete project '%s'?", name)
+
+	killedLine := fmt.Sprintf("%d in-place %s torn down — not restorable.", inPlace, sessionWord(inPlace))
+	archivedLine := fmt.Sprintf("%d %s archived — restorable.", archived, sessionWord(archived))
+	gone := "Its worktree is yours — the branch and uncommitted changes stay exactly where they are, but the session and its agent are gone."
+	restore := fmt.Sprintf("Restore an archived session (%s, or `af sessions restore`) to bring the project back.", restoreKey)
+	repoSafe := "Your real git repository is untouched."
+
+	switch {
+	case total == 0:
+		return title + "\nIt has no live sessions — it just leaves the projects list.", repoSafe
+	case inPlace == 0:
+		return title + "\n" + archivedLine,
+			"tmux torn down, worktrees moved out — branches and uncommitted work preserved.\n\n" + restore + " " + repoSafe
+	case archived == 0:
+		return title + "\n" + killedLine, gone + " " + repoSafe
+	default:
+		return title + "\n" + killedLine + "\n" + archivedLine,
+			gone + "\n\n" + restore + " " + repoSafe
+	}
+}
+
+// deleteProjectResultMessage reports what delete-project ACTUALLY did, using the
+// daemon's own counts rather than the pre-confirm estimate (#1973), so the split
+// the user consented to is the split they are told about afterward.
+//
+// The torn-down fragment leads on a mixed delete, deliberately. This lands in
+// the one-line transient notice, which the error box clips to the pane width —
+// play-testing an 80-col-ish sidebar cut a killed-last message at "tore down 1
+// in-place se…", losing exactly the half the user needs. The clipped tail must
+// be the reassuring half (what survived), never the consequential one (what did
+// not). The full string stays reachable via the notice's details view.
+func deleteProjectResultMessage(name string, archived, killed int) string {
+	switch {
+	case archived == 0 && killed == 0:
+		return fmt.Sprintf("Deleted project '%s' — no live sessions to remove", name)
+	case killed == 0:
+		return fmt.Sprintf("Deleted project '%s' — archived %d %s (restorable)", name, archived, sessionWord(archived))
+	case archived == 0:
+		return fmt.Sprintf("Deleted project '%s' — tore down %d in-place %s (not restorable, worktree and branch untouched)", name, killed, sessionWord(killed))
+	default:
+		return fmt.Sprintf(
+			"Deleted project '%s' — tore down %d in-place %s (not restorable, worktree and branch untouched) · archived %d %s (restorable)",
+			name, killed, sessionWord(killed), archived, sessionWord(archived),
+		)
+	}
+}
+
+// handleDeleteProject opens the delete-project confirmation for the cursor's
+// project in the Projects section (#1735). The copy states the real split — what
+// is archived and restorable, and what is torn down and is not (#1973) — because
+// this message is the entire basis on which the user consents to a destructive
+// action. On confirm it dispatches the async daemon archive-then-remove.
 func (m *home) handleDeleteProject(proj ui.SidebarProject) (tea.Model, tea.Cmd) {
 	repoID := config.RepoIDFromRoot(proj.Root)
-	sessionWord := "sessions"
-	if proj.SessionCount == 1 {
-		sessionWord = "session"
-	}
 	restoreKey := keys.GlobalKeyBindings[keys.KeyRestore].Help().Key
-	message := fmt.Sprintf(
-		"[!] Delete project '%s'?\n\nIts %d %s are archived (tmux torn down, worktrees moved out — branches and uncommitted work preserved) and it is removed from the projects list. Your real git repository is untouched. Restore any archived session (%s, or `af sessions restore`) to bring the project back.",
-		proj.Name, proj.SessionCount, sessionWord, restoreKey,
-	)
-	return m, m.confirmAction(message, func() tea.Msg {
+	message, detail := deleteProjectConfirmMessage(proj.Name, proj.SessionCount, proj.InPlaceCount, restoreKey)
+	return m, m.confirmActionWithDetail(message, detail, func() tea.Msg {
 		return startDeleteProjectMsg{root: proj.Root, repoID: repoID, name: proj.Name}
 	})
 }
@@ -241,7 +326,18 @@ func (m *home) handleDeleteProject(proj ui.SidebarProject) (tea.Model, tea.Cmd) 
 func (m *home) deleteProjectCmd(msg startDeleteProjectMsg) tea.Cmd {
 	return func() tea.Msg {
 		resp, err := deleteProjectThroughDaemon(msg.root, msg.repoID)
-		return projectDeletedMsg{root: msg.root, repoID: msg.repoID, name: msg.name, archived: resp.ArchivedCount, err: err}
+		return projectDeletedMsg{
+			root:     msg.root,
+			repoID:   msg.repoID,
+			name:     msg.name,
+			archived: resp.ArchivedCount,
+			// KilledCount is the in-place sessions the daemon tore down. Carrying
+			// it is what lets the completion report the same archived-vs-torn-down
+			// split the confirmation promised (#1973); dropping it is how the TUI
+			// came to claim everything was restorable.
+			killed: resp.KilledCount,
+			err:    err,
+		}
 	}
 }
 
@@ -262,11 +358,7 @@ func (m *home) handleProjectDeleted(msg projectDeletedMsg) (tea.Model, tea.Cmd) 
 		}
 	}
 	m.refreshSidebarProjects()
-	sessionWord := "sessions"
-	if msg.archived == 1 {
-		sessionWord = "session"
-	}
-	return m, m.showTransientMessage(fmt.Sprintf("Deleted project '%s' — archived %d %s (restorable)", msg.name, msg.archived, sessionWord))
+	return m, m.showTransientMessage(deleteProjectResultMessage(msg.name, msg.archived, msg.killed))
 }
 
 func (m *home) closeProjectPicker() {

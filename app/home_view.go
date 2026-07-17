@@ -63,8 +63,19 @@ func (m *home) showErrorDetails() (tea.Model, tea.Cmd) {
 }
 
 func (m *home) confirmAction(message string, action tea.Cmd) tea.Cmd {
+	return m.confirmActionWithDetail(message, "", action)
+}
+
+// confirmActionWithDetail is confirmAction for a dialog whose copy splits into
+// consequences (message) and elaboration (detail). The overlay then guarantees
+// the consequences render or refuses the confirm outright, rather than clipping
+// the tail and collecting a 'y' for something it never showed (#1973).
+func (m *home) confirmActionWithDetail(message, detail string, action tea.Cmd) tea.Cmd {
 	m.state = stateConfirm
 	m.confirmationOverlay = overlay.NewConfirmationOverlay(message)
+	if detail != "" {
+		m.confirmationOverlay.SetDetail(detail)
+	}
 	m.confirmationOverlay.SetWidth(50)
 	m.layoutConfirmationOverlay()
 

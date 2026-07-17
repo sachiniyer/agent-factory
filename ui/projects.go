@@ -22,6 +22,11 @@ type SidebarProject struct {
 	Name         string
 	Root         string
 	SessionCount int
+	// InPlaceCount is how many of SessionCount's live sessions sit on an
+	// in-place/external worktree, which delete-project tears down rather than
+	// archives (#1973). Carried so the delete confirmation can state the real
+	// split; the row label itself renders only the total.
+	InPlaceCount int
 	Active       bool
 }
 

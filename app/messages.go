@@ -49,7 +49,12 @@ type projectDeletedMsg struct {
 	repoID   string
 	name     string
 	archived int
-	err      error
+	// killed is how many in-place/external-worktree sessions the daemon tore
+	// down because they cannot be archived (#1973). Reported alongside archived
+	// so the completion states the same split the confirmation promised — a
+	// torn-down session is NOT restorable, and the user must not be told it is.
+	killed int
+	err    error
 }
 
 // instanceArchivedMsg / instanceRestoredMsg report completion of an async
