@@ -355,10 +355,10 @@ func TestAutoUpdateCallsShutdownAfterBinarySwap(t *testing.T) {
 	prevRespawn := respawnDaemonFn
 	respawnCalls := 0
 	var respawnPath string
-	respawnDaemonFn = func(path string) error {
+	respawnDaemonFn = func(path string) (respawnResult, error) {
 		respawnCalls++
 		respawnPath = path
-		return nil
+		return respawnResult{}, nil
 	}
 	t.Cleanup(func() { respawnDaemonFn = prevRespawn })
 
@@ -432,9 +432,9 @@ func TestAutoUpdateSucceedsWhenShutdownErrors(t *testing.T) {
 	})
 	prevRespawn := respawnDaemonFn
 	respawnCalls := 0
-	respawnDaemonFn = func(string) error {
+	respawnDaemonFn = func(string) (respawnResult, error) {
 		respawnCalls++
-		return nil
+		return respawnResult{}, nil
 	}
 	t.Cleanup(func() { respawnDaemonFn = prevRespawn })
 
@@ -987,7 +987,7 @@ func TestAutoUpdateDownloadsByTag(t *testing.T) {
 	requestDaemonShutdownFn = func() (daemon.ShutdownResult, error) {
 		return daemon.ShutdownNoDaemon, nil
 	}
-	respawnDaemonFn = func(string) error { return nil }
+	respawnDaemonFn = func(string) (respawnResult, error) { return respawnResult{}, nil }
 
 	if _, err := runAutoUpdate(); err != nil {
 		t.Fatalf("autoUpdate: %v", err)

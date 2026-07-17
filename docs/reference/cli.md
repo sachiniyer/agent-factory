@@ -1673,6 +1673,12 @@ than the running binary — which happens when you switch from the preview
 channel back to stable — the upgrade is a no-op with an explanation. Pass
 --allow-downgrade to install the older release anyway.
 
+af upgrade restarts the running daemon after the swap, and always has: the
+daemon keeps executing the old code until something restarts it, so a fix that
+does not reach it is not really installed. Live sessions survive — they run in
+tmux and the new daemon re-adopts them. Pass --no-restart to leave the daemon
+on the old binary until you restart it yourself with 'af daemon restart'.
+
 ```
 af upgrade [flags]
 ```
@@ -1682,6 +1688,7 @@ af upgrade [flags]
 | Flag | Type | Description |
 |------|------|-------------|
 | `--allow-downgrade` |  | Install the channel's latest release even if it is older than the current binary (e.g. switching from preview back to stable) |
+| `--no-restart` |  | Leave the running daemon alone (af upgrade restarts it by default so the new binary takes effect) |
 
 **Global flags**
 

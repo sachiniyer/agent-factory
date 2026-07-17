@@ -24,6 +24,33 @@ const (
 	autostartLaunchdLabel = "com.agent-factory.daemon"
 )
 
+// Every launchctl call af makes names the gui/<uid> domain explicitly, and
+// they must all name the SAME one (#1947).
+//
+// The legacy verbs (`launchctl load`/`unload`) take no domain: they bootstrap
+// into the domain of the CALLING session, so an install run over ssh lands the
+// agent in user/<uid> while an install run from a Terminal window lands it in
+// gui/<uid>. RestartAutostartUnit has always kicked gui/<uid> explicitly, so a
+// legacy-loaded agent could sit in a domain our own restart never targets —
+// `launchctl kickstart` then fails to find the job, the upgrade path logs a
+// warning nobody reads, and the stale daemon keeps serving the old binary.
+// That silent no-op is the macOS half of #1947 (#1920 found the same case).
+//
+// The modern verbs take the domain as an argument, so install, pause, resume,
+// restart, and uninstall all target gui/<uid> no matter how af was invoked.
+// Bootstrapping into gui/<uid> requires a GUI login session; without one
+// `bootstrap` fails loudly at install time, which is strictly better than the
+// legacy path's success followed by a restart that silently never lands.
+func launchdGUIDomain() string {
+	return fmt.Sprintf("gui/%d", os.Getuid())
+}
+
+// launchdServiceTarget is the service-target form (`gui/<uid>/<label>`) that
+// bootout and kickstart address the loaded job by.
+func launchdServiceTarget() string {
+	return launchdGUIDomain() + "/" + autostartLaunchdLabel
+}
+
 // quoteExecStartPath quotes a path for use in an ExecStart= line.
 // systemd parses ExecStart= with shell-like quoting, so surrounding the path
 // in double quotes allows spaces. Internal backslashes and double quotes are
@@ -212,8 +239,9 @@ func InstallAutostart() (string, error) {
 		}
 		logPath := filepath.Join(configDir, "daemon-launchd.log")
 		content := launchdAutostartPlist(execPath, os.Getenv("PATH"), os.Getenv("SHELL"), os.Getenv("AGENT_FACTORY_HOME"), logPath)
-		// Unload a previous agent first so launchctl load picks up the new file.
-		_, _ = autostartUnitCommand("launchctl", "unload", plistPath)
+		// Boot out a previous agent first so bootstrap picks up the new file.
+		// Best-effort: it fails when no agent is loaded, which is the norm.
+		_, _ = autostartUnitCommand("launchctl", "bootout", launchdServiceTarget())
 		if err := config.AtomicWriteFile(plistPath, []byte(content), 0644); err != nil {
 			return "", fmt.Errorf("failed to write plist file: %w", err)
 		}
@@ -222,9 +250,9 @@ func InstallAutostart() (string, error) {
 		if _, err := autostartStopDaemon(); err != nil {
 			log.WarningLog.Printf("failed to stop the running daemon before loading the autostart agent; loading anyway: %v", err)
 		}
-		if out, err := autostartUnitCommand("launchctl", "load", plistPath); err != nil {
+		if out, err := autostartUnitCommand("launchctl", "bootstrap", launchdGUIDomain(), plistPath); err != nil {
 			removeAutostartUnitFile(plistPath)
-			return "", fmt.Errorf("failed to load launch agent: %w\n%s", err, strings.TrimSpace(string(out)))
+			return "", fmt.Errorf("failed to bootstrap launch agent into %s: %w\n%s", launchdGUIDomain(), err, strings.TrimSpace(string(out)))
 		}
 		return plistPath, nil
 
@@ -417,6 +445,128 @@ func launchdPlistEnvValue(content, name string) (string, bool) {
 	return html.UnescapeString(rest[:end]), true
 }
 
+// AutostartUnitExecPath returns the binary path the INSTALLED autostart unit
+// launches. installed is false when no unit file is present.
+//
+// The unit bakes its program path at install time (InstallAutostart captures
+// os.Executable), exactly as it bakes AGENT_FACTORY_HOME — and for the upgrade
+// path that is a trap. `af upgrade` overwrites the binary it is CURRENTLY
+// running; restarting the unit then relaunches whatever path the unit was
+// installed with. With two installs on one box (Homebrew /opt/homebrew/bin/af
+// and ~/.local/bin/af), a restart faithfully brings the OLD image back up while
+// the upgrade reports success — the stale daemon of #1947. Callers compare this
+// against the binary they just wrote and say so when they disagree.
+func AutostartUnitExecPath() (execPath string, installed bool, err error) {
+	path, err := autostartUnitFilePath()
+	if err != nil {
+		return "", false, err
+	}
+	if path == "" {
+		return "", false, nil // autostart unsupported on this platform
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", false, nil
+		}
+		return "", false, fmt.Errorf("failed to read the autostart unit %s: %w", path, err)
+	}
+
+	var (
+		baked string
+		found bool
+	)
+	switch autostartGOOS {
+	case "linux":
+		baked, found = systemdUnitExecStart(string(data))
+	case "darwin":
+		baked, found = launchdPlistProgramPath(string(data))
+	default:
+		return "", false, nil
+	}
+	if !found || baked == "" {
+		return "", true, fmt.Errorf("the autostart unit %s does not name a program to launch", path)
+	}
+	return baked, true, nil
+}
+
+// systemdUnitExecStart extracts the program path from the unit's ExecStart=
+// line. The exact inverse of quoteExecStartPath, and must stay in lockstep with
+// it — TestAutostartUnitExecPathRoundTrip pins the pair together.
+func systemdUnitExecStart(content string) (string, bool) {
+	for _, line := range strings.Split(content, "\n") {
+		rest, ok := strings.CutPrefix(strings.TrimSpace(line), "ExecStart=")
+		if !ok {
+			continue
+		}
+		// The renderer always double-quotes the path, so scan to the matching
+		// UNESCAPED quote: cutting at the first space would truncate a path
+		// containing one, and cutting at the first quote would truncate a path
+		// containing an escaped quote.
+		if !strings.HasPrefix(rest, `"`) {
+			// Defensive: a hand-edited unit may leave the path bare. Only then
+			// is a space a field separator.
+			field, _, _ := strings.Cut(rest, " ")
+			return field, field != ""
+		}
+		for i := 1; i < len(rest); i++ {
+			if rest[i] == '\\' {
+				i++
+				continue
+			}
+			if rest[i] == '"' {
+				return unquoteExecStartPath(rest[1:i]), true
+			}
+		}
+		return "", false
+	}
+	return "", false
+}
+
+// unquoteExecStartPath reverses quoteExecStartPath's escaping of an already
+// unwrapped (quotes stripped) value: C-style \\ and \", plus systemd's doubled
+// $$ and %% specifiers. One pass, so a literal backslash followed by a quote
+// survives — two ReplaceAll passes would not.
+func unquoteExecStartPath(s string) string {
+	var b strings.Builder
+	for i := 0; i < len(s); i++ {
+		if s[i] == '\\' && i+1 < len(s) {
+			i++
+			b.WriteByte(s[i])
+			continue
+		}
+		if (s[i] == '$' || s[i] == '%') && i+1 < len(s) && s[i+1] == s[i] {
+			i++
+			b.WriteByte(s[i])
+			continue
+		}
+		b.WriteByte(s[i])
+	}
+	return b.String()
+}
+
+// launchdPlistProgramPath extracts the program from the plist's
+// ProgramArguments array: the first <string> after the key. The inverse of
+// launchdAutostartPlist's html.EscapeString, kept in lockstep by the same
+// round-trip test.
+func launchdPlistProgramPath(content string) (string, bool) {
+	idx := strings.Index(content, "<key>ProgramArguments</key>")
+	if idx < 0 {
+		return "", false
+	}
+	rest := content[idx:]
+	start := strings.Index(rest, "<string>")
+	if start < 0 {
+		return "", false
+	}
+	rest = rest[start+len("<string>"):]
+	end := strings.Index(rest, "</string>")
+	if end < 0 {
+		return "", false
+	}
+	return html.UnescapeString(rest[:end]), true
+}
+
 // RestartAutostartUnit restarts the daemon through the OS service manager —
 // `systemctl --user restart` on Linux, `launchctl kickstart -k` on macOS — so
 // the daemon stays supervised. Used by the upgrade/auto-update respawn path
@@ -432,7 +582,10 @@ func RestartAutostartUnit() error {
 		}
 		return nil
 	case "darwin":
-		target := fmt.Sprintf("gui/%d/%s", os.Getuid(), autostartLaunchdLabel)
+		// The domain here is the one InstallAutostart bootstraps into: they
+		// are the same helper precisely so they cannot drift apart again
+		// (#1947).
+		target := launchdServiceTarget()
 		if out, err := autostartUnitCommand("launchctl", "kickstart", "-k", target); err != nil {
 			return fmt.Errorf("launchctl kickstart -k %s failed: %w\n%s", target, err, strings.TrimSpace(string(out)))
 		}
@@ -458,13 +611,14 @@ func PauseAutostartUnit() error {
 		}
 		return nil
 	case "darwin":
-		dir, err := autostartLaunchAgentsDir()
-		if err != nil {
-			return fmt.Errorf("failed to resolve LaunchAgents directory: %w", err)
-		}
-		plistPath := filepath.Join(dir, autostartLaunchdLabel+".plist")
-		if out, err := autostartUnitCommand("launchctl", "unload", plistPath); err != nil {
-			return fmt.Errorf("launchctl unload %s failed: %w\n%s", plistPath, err, strings.TrimSpace(string(out)))
+		// Addressed by service target, not plist path, so the pause lands in
+		// the same gui/<uid> domain the install bootstrapped into (#1947).
+		// A bootout of a job that is not loaded fails — but a job that is not
+		// loaded is already paused for our purposes, and the caller (`af
+		// reset`) only warns, so the failure is cosmetic where it is possible
+		// at all.
+		if out, err := autostartUnitCommand("launchctl", "bootout", launchdServiceTarget()); err != nil {
+			return fmt.Errorf("launchctl bootout %s failed: %w\n%s", launchdServiceTarget(), err, strings.TrimSpace(string(out)))
 		}
 		return nil
 	default:
@@ -488,8 +642,10 @@ func ResumeAutostartUnit() error {
 			return fmt.Errorf("failed to resolve LaunchAgents directory: %w", err)
 		}
 		plistPath := filepath.Join(dir, autostartLaunchdLabel+".plist")
-		if out, err := autostartUnitCommand("launchctl", "load", plistPath); err != nil {
-			return fmt.Errorf("launchctl load %s failed: %w\n%s", plistPath, err, strings.TrimSpace(string(out)))
+		// bootstrap (not the legacy load) so the resumed agent lands back in
+		// the same gui/<uid> domain the install used and the restart kicks.
+		if out, err := autostartUnitCommand("launchctl", "bootstrap", launchdGUIDomain(), plistPath); err != nil {
+			return fmt.Errorf("launchctl bootstrap %s %s failed: %w\n%s", launchdGUIDomain(), plistPath, err, strings.TrimSpace(string(out)))
 		}
 		return nil
 	default:
@@ -536,7 +692,9 @@ func UninstallAutostart() (string, error) {
 		if _, err := os.Stat(plistPath); os.IsNotExist(err) {
 			return "", nil
 		}
-		_, _ = autostartUnitCommand("launchctl", "unload", plistPath)
+		// Same gui/<uid> domain as the install's bootstrap (#1947). Best-effort:
+		// removing the plist is what makes the uninstall stick across logins.
+		_, _ = autostartUnitCommand("launchctl", "bootout", launchdServiceTarget())
 		if err := os.Remove(plistPath); err != nil && !os.IsNotExist(err) {
 			return "", fmt.Errorf("failed to remove plist file: %w", err)
 		}
