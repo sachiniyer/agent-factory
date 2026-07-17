@@ -265,28 +265,111 @@ func (g *GitWorktree) setupNewWorktree() error {
 }
 
 // CleanupState is what Cleanup could ESTABLISH about the worktree it was asked to
-// remove, returned SEPARATELY from the error for the same reason tmux.PaneState is
-// (#1917).
+// remove, returned SEPARATELY from the error (#1917).
 //
-// Bounding the git commands gave Cleanup a third answer next to "removed" and
-// "refused to remove": "git was SIGKILLed mid-delete, so the workspace may be half
-// gone and still registered". That answer has to reach whoever deletes the session
-// record — it is the only handle left on the leftovers. Returned as an error it did
-// not: three separate callers logged it and dropped the record anyway, orphaning
-// the workspace. An error can be swallowed by accident; a second return value
-// cannot.
+// THE ZERO VALUE IS UNKNOWN, deliberately. Every miss in this PR's review history
+// was the same shape — a bounded call tripped its deadline and something
+// destructive proceeded anyway — because the safe outcome had to be REMEMBERED and
+// the destructive one was the default. Inverting that makes forgetting produce the
+// safe result: a state nobody set, or a struct field nobody filled, refuses to
+// destroy rather than permitting it.
+//
+// Callers must not construct this themselves; it comes from cleanupRun.state(),
+// which reports Settled only if no command in the run tripped its deadline.
 type CleanupState int
 
 const (
-	// CleanupSettled: every git command ANSWERED. The worktree is gone, or Cleanup's
-	// #802/#726 decision tree deliberately left it and said why — either way the
-	// outcome is established and the caller's best-effort contract governs.
-	CleanupSettled CleanupState = iota
-	// CleanupStateUnknown: a bounded git command tripped its deadline mid-removal.
-	// The workspace may be partially removed and still registered. Callers MUST keep
-	// the session record so the cleanup can be retried.
-	CleanupStateUnknown
+	// CleanupStateUnknown (the ZERO VALUE): a bounded git command tripped its
+	// deadline, so the workspace may be partially removed and still registered —
+	// or nobody established the outcome at all. Callers MUST keep the session
+	// record so the cleanup can be retried.
+	CleanupStateUnknown CleanupState = iota
+	// CleanupSettled: every git command in the run ANSWERED. The worktree is gone,
+	// or Cleanup's #802/#726 decision tree deliberately left it and said why —
+	// either way the outcome is established and the caller's best-effort contract
+	// governs.
+	CleanupSettled
 )
+
+// cleanupRun executes ONE Cleanup and OWNS its state.
+//
+// This is the structural half of the #1917 hardening. Cleanup runs five bounded git
+// commands; the state used to be asserted once (`state := CleanupSettled`) and
+// downgraded by hand at ONE of them, so `branch -D`, both `prune`s and the
+// `worktree list` probe could all trip their deadlines and still report Settled —
+// and a timed-out probe could even open the door to an UNBOUNDED os.RemoveAll,
+// reintroducing the very wedge this work removes.
+//
+// The author no longer writes the state at all. Every command goes through run.git,
+// which records a tripped deadline; every destructive act goes through a method that
+// refuses while the run is unknown; state() derives the answer. A command added to
+// Cleanup participates automatically, because using the run is the only way to reach
+// git from here — there is no marking left to forget.
+type cleanupRun struct {
+	g       *GitWorktree
+	errs    []error
+	unknown bool
+}
+
+// git runs one bounded local git command and RECORDS a tripped deadline. This is
+// the only place in the cleanup path that decides what a deadline means.
+func (r *cleanupRun) git(args ...string) (string, error) {
+	out, err := r.g.runGitLocalCommand(r.g.repoPath, args...)
+	if errors.Is(err, context.DeadlineExceeded) {
+		r.unknown = true
+	}
+	return out, err
+}
+
+// removeDir is the choke point for the one destructive act Cleanup performs
+// directly. It REFUSES while the run is unknown: whatever stalled git (a hung
+// mount, a D-state process holding the tree) stalls os.RemoveAll on the very same
+// paths, and os.RemoveAll takes no context — so it would hang forever and defeat
+// the bound. Refusing leaves the directory for a later retry, which is recoverable.
+func (r *cleanupRun) removeDir(path string) {
+	if r.unknown {
+		r.errs = append(r.errs, fmt.Errorf("refusing to delete worktree directory %s: a cleanup command timed out, so its state is unknown and an unbounded delete could hang; leaving it for a retry", path))
+		return
+	}
+	if err := os.RemoveAll(path); err != nil {
+		r.errs = append(r.errs, fmt.Errorf("failed to remove worktree directory %s: %w", path, err))
+	}
+}
+
+// prune runs `git worktree prune` through the run, so its deadline counts.
+func (r *cleanupRun) prune() {
+	if _, err := r.git("worktree", "prune"); err != nil {
+		r.errs = append(r.errs, fmt.Errorf("failed to prune worktrees: %w", err))
+	}
+}
+
+// registered reports whether git still lists the worktree. The bool is only
+// meaningful when ok is true; a timed-out probe reports ok=false AND marks the run
+// unknown via run.git, so no caller can mistake "could not ask" for "not there".
+func (r *cleanupRun) registered() (yes bool, ok bool) {
+	output, err := r.git("worktree", "list", "--porcelain")
+	if err != nil {
+		return false, false
+	}
+	target := normalizeWorktreePath(r.g.worktreePath)
+	for _, line := range strings.Split(output, "\n") {
+		if !strings.HasPrefix(line, "worktree ") {
+			continue
+		}
+		if normalizeWorktreePath(strings.TrimPrefix(line, "worktree ")) == target {
+			return true, true
+		}
+	}
+	return false, true
+}
+
+// state derives the run's outcome. Settled ONLY if nothing tripped a deadline.
+func (r *cleanupRun) state() CleanupState {
+	if r.unknown {
+		return CleanupStateUnknown
+	}
+	return CleanupSettled
+}
 
 // Cleanup removes the worktree and associated branch. It reports whether it
 // ESTABLISHED the outcome (see CleanupState) alongside any error: callers that go
@@ -298,23 +381,26 @@ func (g *GitWorktree) Cleanup() (CleanupState, error) {
 		g.hooksCancel()
 	}
 
+	// The run owns the state from the first line, so even the early returns below
+	// derive it instead of asserting one (#1917). Nothing in this function names a
+	// CleanupState constant: that is the rule that makes the next command added here
+	// safe by default. These early paths run no git at all, so the run is trivially
+	// settled — but that is r.state()'s answer to give, not this function's.
+	r := &cleanupRun{g: g}
+
 	// For external worktrees, don't remove the worktree or delete the branch
 	if g.externalWorktree {
-		return CleanupSettled, nil
+		return r.state(), nil
 	}
 
 	// Guard against empty paths that would cause git commands to fail or
-	// operate on unintended directories. Nothing was attempted, so nothing is
-	// unknown.
+	// operate on unintended directories.
 	if g.repoPath == "" {
-		return CleanupSettled, fmt.Errorf("cannot clean up worktree: repo path is empty")
+		return r.state(), fmt.Errorf("cannot clean up worktree: repo path is empty")
 	}
 	if g.worktreePath == "" {
-		return CleanupSettled, fmt.Errorf("cannot clean up worktree: worktree path is empty")
+		return r.state(), fmt.Errorf("cannot clean up worktree: worktree path is empty")
 	}
-
-	var errs []error
-	state := CleanupSettled
 
 	// Check if worktree path exists before attempting removal
 	if _, err := os.Stat(g.worktreePath); err == nil {
@@ -322,7 +408,7 @@ func (g *GitWorktree) Cleanup() (CleanupState, error) {
 		// (#1917): this recursive delete is the one local git command that
 		// genuinely stalls forever (hung mount, D-state process in the tree), and
 		// Cleanup runs inside the daemon's kills-in-flight guard.
-		if _, err := g.runGitLocalCommand(g.repoPath, "worktree", "remove", "-f", g.worktreePath); err != nil {
+		if _, err := r.git("worktree", "remove", "-f", g.worktreePath); err != nil {
 			log.ErrorLog.Printf("failed to remove worktree %s: %v", g.worktreePath, err)
 			// A failed `git worktree remove -f` may still have released the
 			// registration. Decide whether the directory is ours to delete
@@ -334,7 +420,7 @@ func (g *GitWorktree) Cleanup() (CleanupState, error) {
 			//     Directory not empty") because the dying agent process wrote
 			//     into the tree mid-removal — git deregisters first, then
 			//     fails to finish deleting (#802). RemoveAll the leftovers;
-			//     the Prune() below reconciles any remaining metadata.
+			//     the prune below reconciles any remaining metadata.
 			//   - Still registered + "validation failed": the worktree's
 			//     `.git` pointer is corrupted (#719/#726). git refuses to
 			//     remove it, but it is unambiguously one of our registered
@@ -344,26 +430,20 @@ func (g *GitWorktree) Cleanup() (CleanupState, error) {
 			//     know why removal failed — surface the error instead of
 			//     deleting data (preserves the best-effort Kill behavior of
 			//     #478).
-			//   - Timed out: never ours to delete (#1917, see the helper).
-			if g.shouldRemoveWorktreeDir(err) {
-				if removeErr := os.RemoveAll(g.worktreePath); removeErr != nil {
-					errs = append(errs, fmt.Errorf("failed to remove worktree directory %s: %w", g.worktreePath, removeErr))
-				}
+			//
+			// Every branch here is git ANSWERING. A deadline anywhere in the run —
+			// the remove itself, OR the registration probe below — leaves the state
+			// unknown, and r.removeDir refuses on that, so no timeout can reach the
+			// unbounded os.RemoveAll.
+			if r.shouldRemoveWorktreeDir(err) {
+				r.removeDir(g.worktreePath)
 			} else {
-				errs = append(errs, err)
-			}
-			// A tripped deadline is the one failure where the outcome is genuinely
-			// UNKNOWN rather than decided: git was SIGKILLed part-way through a
-			// recursive delete, so the workspace may be half-removed and still
-			// registered. Every other branch above is git ANSWERING, which the
-			// #802/#726 tree resolves. Callers must keep the record on this.
-			if errors.Is(err, context.DeadlineExceeded) {
-				state = CleanupStateUnknown
+				r.errs = append(r.errs, err)
 			}
 		}
 	} else if !os.IsNotExist(err) {
 		// Only append error if it's not a "not exists" error
-		errs = append(errs, fmt.Errorf("failed to check worktree path: %w", err))
+		r.errs = append(r.errs, fmt.Errorf("failed to check worktree path: %w", err))
 	}
 
 	// Prune stale worktree metadata BEFORE deleting the branch. When the
@@ -373,61 +453,52 @@ func (g *GitWorktree) Cleanup() (CleanupState, error) {
 	// out", leaving an orphaned branch behind. Mirrors the ordering in
 	// CleanupWorktreesForRepo (#330). Best-effort: a prune failure here
 	// should not block the branch-delete attempt.
-	if err := g.Prune(); err != nil {
-		errs = append(errs, err)
-	}
+	r.prune()
 
 	// Only delete the branch if this session actually created it. When we
 	// reused a pre-existing branch via setupFromExistingBranch(), the branch
 	// may contain unrelated user work and must be preserved.
 	if g.branchCreatedByUs {
-		// Bounded (#1917): teardown path — see runGitLocalCommand.
-		if _, err := g.runGitLocalCommand(g.repoPath, "branch", "-D", g.branchName); err != nil {
+		if _, err := r.git("branch", "-D", g.branchName); err != nil {
 			// Only log if it's not a "branch not found" error
 			if !strings.Contains(err.Error(), "not found") {
-				errs = append(errs, fmt.Errorf("failed to remove branch %s: %w", g.branchName, err))
+				r.errs = append(r.errs, fmt.Errorf("failed to remove branch %s: %w", g.branchName, err))
 			}
 		}
 	}
 
 	// Final prune to clean up any remaining references. Usually a no-op
 	// after the prune above, but mirrors CleanupWorktreesForRepo.
-	if err := g.Prune(); err != nil {
-		errs = append(errs, err)
-	}
+	r.prune()
 
-	if len(errs) > 0 {
-		return state, errors.Join(errs...)
+	if len(r.errs) > 0 {
+		return r.state(), errors.Join(r.errs...)
 	}
-
-	return state, nil
+	return r.state(), nil
 }
 
 // shouldRemoveWorktreeDir decides whether Cleanup may delete the worktree
 // directory itself after `git worktree remove -f` returned removeErr. It is the
-// #802/#726 decision tree documented at the call site, plus the #1917 timeout
-// guard below.
-func (g *GitWorktree) shouldRemoveWorktreeDir(removeErr error) bool {
-	if errors.Is(removeErr, context.DeadlineExceeded) {
-		// The removal did not FAIL, it never FINISHED: git was SIGKILLed
-		// mid-delete on localGitTimeout. Two reasons that is not a verdict we
-		// may act on. First, the registration state is a snapshot of a half-done
-		// operation rather than git's considered answer. Second — and decisive —
-		// whatever stalled git (a hung mount, a D-state process holding a file in
-		// the tree) will stall os.RemoveAll on the very same paths, and
-		// os.RemoveAll takes no context, so it would hang FOREVER and defeat the
-		// bound we just added. This is tmuxTimeoutContext's rule one layer up:
-		// after a tripped deadline, never re-probe the thing that just wedged.
-		// Surfacing the timeout leaves the directory for a later kill to retry,
-		// which is the recoverable outcome.
+// #802/#726 decision tree documented at the call site.
+//
+// It no longer needs its own timeout guard: the probe runs through r.git, so a
+// timed-out probe marks the run unknown and r.removeDir refuses regardless of what
+// this returns. That is the point of the run — the safety no longer depends on this
+// function remembering anything. It still refuses on an UNKNOWN registration rather
+// than falling back to the string gate, so a probe that could not be asked is never
+// read as "not ours" (#1917 round 4).
+func (r *cleanupRun) shouldRemoveWorktreeDir(removeErr error) bool {
+	registered, ok := r.registered()
+	if !ok {
+		// The probe did not answer. Never take the string-matching fallback on a
+		// verdict we could not obtain.
 		return false
 	}
-	if registered, listErr := g.isWorktreeRegistered(); listErr == nil && !registered {
+	if !registered {
 		return true
 	}
-	// Also the path taken when `worktree list` itself failed (listErr != nil):
-	// without a readable registration we fall back to the conservative #726
-	// string gate.
+	// Still registered: only the conservative #726 corrupted-pointer gate may
+	// delete.
 	return strings.Contains(removeErr.Error(), "validation failed")
 }
 
@@ -464,15 +535,6 @@ func normalizeWorktreePath(p string) string {
 		return resolved
 	}
 	return p
-}
-
-// Prune removes all working tree administrative files and directories.
-// Bounded by localGitTimeout (#1917): both callers are on Cleanup's teardown path.
-func (g *GitWorktree) Prune() error {
-	if _, err := g.runGitLocalCommand(g.repoPath, "worktree", "prune"); err != nil {
-		return fmt.Errorf("failed to prune worktrees: %w", err)
-	}
-	return nil
 }
 
 // RemoveWorktreeDir removes a SINGLE worktree directory that AF created for a

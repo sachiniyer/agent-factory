@@ -128,6 +128,9 @@ func (m *Manager) KillSession(req KillSessionRequest) (session.InstanceData, err
 	stage.set("stopping vscode editor")
 	m.vscode.stopFor(vscodeKey)
 
+	// Carried to the record delete below, which refuses on a non-nil teardown.
+	var teardownErr error
+
 	if instance != nil {
 		stage.set("tearing down tmux + worktree")
 		// Returning here deliberately SKIPS the record delete below (#1917). Kill
@@ -137,28 +140,25 @@ func (m *Manager) KillSession(req KillSessionRequest) (session.InstanceData, err
 		// away the only handle the user has to retry through. The tombstone is
 		// already durable, so the kill stays committed: finishUserKill retries it on
 		// every poll until it succeeds, with no daemon restart needed.
-		if err := instance.Kill(); err != nil {
-			log.WarningLog.Printf("kill of session %q could not complete its teardown; the record is kept and the daemon will retry it: %v", req.Title, err)
-			return session.InstanceData{}, fmt.Errorf("kill of session %q could not finish tearing it down safely, so its workspace was left intact; the kill is recorded and will be retried automatically: %w", req.Title, err)
+		if teardownErr = instance.Kill(); teardownErr != nil {
+			log.WarningLog.Printf("kill of session %q could not complete its teardown; the record is kept and the daemon will retry it: %v", req.Title, teardownErr)
+			return session.InstanceData{}, fmt.Errorf("kill of session %q could not finish tearing it down safely, so its workspace was left intact; the kill is recorded and will be retried automatically: %w", req.Title, teardownErr)
 		}
 	} else if data != nil {
 		stage.set("cleaning up ghost record")
 		// Same gate as the live-instance branch above: skip the record delete when
 		// the ghost's tmux never confirmed dead, so its workspace and its record
 		// both survive for finishUserKill to retry (#1917).
-		if err := ghostCleanup(data, req.Title); err != nil {
-			log.WarningLog.Printf("kill of session %q could not complete its ghost teardown; the record is kept and the daemon will retry it: %v", req.Title, err)
-			return session.InstanceData{}, fmt.Errorf("kill of session %q could not finish tearing it down safely, so its workspace was left intact; the kill is recorded and will be retried automatically: %w", req.Title, err)
+		if teardownErr = ghostCleanup(data, req.Title); teardownErr != nil {
+			log.WarningLog.Printf("kill of session %q could not complete its ghost teardown; the record is kept and the daemon will retry it: %v", req.Title, teardownErr)
+			return session.InstanceData{}, fmt.Errorf("kill of session %q could not finish tearing it down safely, so its workspace was left intact; the kill is recorded and will be retried automatically: %w", req.Title, teardownErr)
 		}
 	}
 
 	stage.set("deleting record from storage")
-	state := config.LoadState()
-	storage, err := session.NewStorage(state, repoID)
-	if err != nil {
-		return session.InstanceData{}, err
-	}
-	deleted, err := storage.DeleteInstanceByStableID(req.Title, targetID)
+	// Through the one choke point (#1917): it refuses while the teardown's outcome
+	// is unknown, so this call site cannot be the one that forgets.
+	deleted, err := m.deleteSessionRecord(repoID, req.Title, targetID, teardownErr)
 	if err != nil {
 		// A contended instances flock is retryable and must SAY so (#1917): the
 		// tombstone is already durable, so the kill is committed and will be

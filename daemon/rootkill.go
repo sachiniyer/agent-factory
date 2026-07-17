@@ -1,7 +1,6 @@
 package daemon
 
 import (
-	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
 )
@@ -145,18 +144,13 @@ func (m *Manager) finishUserKill(repoID string, instance *session.Instance) {
 	// worktree and take away the user's only handle on it, so keep the record and
 	// let the next poll try again: this loop IS the retry, and it is the reason a
 	// bounded teardown does not need a daemon restart to converge (#1917).
-	if err := instance.Kill(); err != nil {
-		log.WarningLog.Printf("finishing kill of %q: teardown could not complete safely; keeping the record and retrying next poll: %v", instance.Title, err)
-		return
-	}
-	storage, err := session.NewStorage(config.LoadState(), repoID)
+	teardownErr := instance.Kill()
+	// Through the one choke point (#1917): it refuses while the teardown's outcome
+	// is unknown, so this loop keeps the record and retries instead of orphaning the
+	// workspace. This loop IS the retry.
+	deleted, err := m.deleteSessionRecord(repoID, instance.Title, instance.ID, teardownErr)
 	if err != nil {
-		log.WarningLog.Printf("finishing kill of %q: %v", instance.Title, err)
-		return
-	}
-	deleted, err := storage.DeleteInstanceByStableID(instance.Title, instance.ID)
-	if err != nil {
-		log.WarningLog.Printf("finishing kill of %q: failed to delete record (will retry next poll): %v", instance.Title, err)
+		log.WarningLog.Printf("finishing kill of %q: not deleting the record yet (will retry next poll): %v", instance.Title, err)
 		return
 	}
 	if !deleted {

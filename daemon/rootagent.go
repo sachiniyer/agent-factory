@@ -301,17 +301,14 @@ func (m *Manager) reapDeadRoot(repoID string, inst *session.Instance) (bool, err
 	// it and leave nothing pointing at it. Keep the record; this loop runs every
 	// tick, so it IS the retry (#1917: found by auditing every record delete against
 	// the invariant, not reported).
-	if err := inst.Kill(); err != nil {
-		log.WarningLog.Printf("reaping dead root for repo %s: teardown could not complete safely; keeping the record and retrying next tick: %v", repoID, err)
+	teardownErr := inst.Kill()
+	// Through the one choke point (#1917): it refuses while the teardown's outcome
+	// is unknown. This site was still log-and-delete after two audits I called
+	// exhaustive — which is the argument for there being exactly one place to call.
+	deleted, err := m.deleteSessionRecord(repoID, session.RootSessionTitle, inst.ID, teardownErr)
+	if err != nil {
+		log.WarningLog.Printf("reaping dead root for repo %s: not deleting the record yet (will retry next tick): %v", repoID, err)
 		return false, nil
-	}
-	storage, err := session.NewStorage(config.LoadState(), repoID)
-	if err != nil {
-		return false, err
-	}
-	deleted, err := storage.DeleteInstanceByStableID(session.RootSessionTitle, inst.ID)
-	if err != nil {
-		return false, err
 	}
 	if !deleted {
 		log.InfoLog.Printf("dead root reap for repo %s skipped storage delete: current root record has a different instance identity", repoID)

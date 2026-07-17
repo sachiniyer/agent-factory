@@ -80,12 +80,17 @@ type closedTab struct {
 type teardownState int
 
 const (
+	// stateUnknown (the ZERO VALUE): a bound tripped, so what the step did — or
+	// whether the thing it acted on is still live — is genuinely unknown. Nothing
+	// destructive may follow.
+	//
+	// Zero deliberately (#1917): a mode that returns an unset state, or a future
+	// mode whose author forgets the field, refuses to destroy rather than
+	// permitting it. Safe is the lazy outcome.
+	stateUnknown teardownState = iota
 	// stateKnown: the step's effect on the system was established. The mode's own
 	// best-effort contract governs from here.
-	stateKnown teardownState = iota
-	// stateUnknown: a bound tripped, so what the step did — or whether the thing it
-	// acted on is still live — is genuinely unknown. Nothing destructive may follow.
-	stateUnknown
+	stateKnown
 )
 
 // ErrPaneMayBeLive reports that tmux never confirmed a session dead — the server
@@ -127,7 +132,7 @@ var ErrWorkspaceStateUnknown = errors.New("the worktree action was cut off by it
 // Two copies of a safety rule is one copy of a safety rule.
 func closeTabForDestructiveTeardown(ts *tmux.TmuxSession, verb, title, tabName string) (teardownState, error) {
 	state, err := ts.CloseAndWaitForPaneExit()
-	if state == tmux.PaneStateUnknown {
+	if state != tmux.PaneStateKnown {
 		return stateUnknown, fmt.Errorf("%s %q: tab %q: %w", verb, title, tabName, err)
 	}
 	// tmux ANSWERED. Whatever it said, the session's fate is established, so #478's
@@ -175,8 +180,10 @@ func (i *Instance) teardownTabs(mode teardownMode) error {
 			errs = append(errs, err)
 		}
 		// Gate on the STATE, never on the error: a mode that logs-and-returns-nil
-		// still cannot hide an unknown from this check (#1917).
-		if state == stateUnknown {
+		// still cannot hide an unknown from this check. Written as "not proven
+		// known" rather than "== unknown" so an unset/zero state — the state a
+		// future mode forgets to set — lands on the safe side (#1917).
+		if state != stateKnown {
 			paneMayBeLive = true
 		}
 	}
@@ -193,7 +200,7 @@ func (i *Instance) teardownTabs(mode teardownMode) error {
 	if err != nil {
 		errs = append(errs, err)
 	}
-	if wtState == stateUnknown {
+	if wtState != stateKnown {
 		// The worktree action was cut off mid-flight, so the workspace is still
 		// (partly) on disk. finalize would clear the tmux refs and the gitWorktree
 		// pointer — the exact state a retry needs — and a later retry would then
@@ -255,7 +262,7 @@ func (teardownKill) handleWorktree(gw *git.GitWorktree, title string) (teardownS
 	// keeps the record — and with it the user's handle on the session — so the
 	// cleanup can be retried, instead of orphaning a registered worktree whose
 	// session row we just deleted.
-	if cleanupState == git.CleanupStateUnknown {
+	if cleanupState != git.CleanupSettled {
 		return stateUnknown, fmt.Errorf("kill %q: git worktree cleanup: %w", title, err)
 	}
 	if err != nil {

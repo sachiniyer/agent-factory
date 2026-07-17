@@ -311,7 +311,7 @@ func (b *LocalBackend) Launch(i *Instance, firstTimeSetup bool) error {
 				err = fmt.Errorf("%v (cleanup error: %v)", err, cleanupErr)
 			}
 			setupErr = fmt.Errorf("failed to start new session: %w", err)
-			if cleanupState == git.CleanupStateUnknown {
+			if cleanupState != git.CleanupSettled {
 				setupErr = fmt.Errorf("%w: %w at %s", setupErr, ErrWorkspaceLeftBehind, gw.GetWorktreePath())
 			}
 			return setupErr

@@ -338,13 +338,13 @@ func ghostCleanup(data *session.InstanceData, title string) error {
 		if killErr != nil {
 			log.WarningLog.Printf("ghost session %q: tmux cleanup failed: %v", title, killErr)
 		}
-		if state == tmux.PaneStateUnknown {
+		if state != tmux.PaneStateKnown {
 			return fmt.Errorf("ghost session %q: %w: leaving its workspace and record intact: %v",
 				title, session.ErrPaneMayBeLive, killErr)
 		}
 	}
 	state, cleanupErr := ghostCleanupWorktree(data, title)
-	if state == git.CleanupStateUnknown {
+	if state != git.CleanupSettled {
 		return fmt.Errorf("ghost session %q: %w: keeping its record so the cleanup can be retried: %v",
 			title, session.ErrWorkspaceStateUnknown, cleanupErr)
 	}

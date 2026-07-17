@@ -84,8 +84,9 @@ func instanceWithTmuxTab(t *testing.T, ts *tmux.TmuxSession) *Instance {
 // deleting the worktree of an agent that may still have been running in it.
 func TestTeardownTabs_PaneMayBeLive_SkipsTheWorktreeStep(t *testing.T) {
 	mode := &gateStubMode{
-		closeState: stateUnknown,
-		closeErr:   fmt.Errorf("tab %q: %w: kill-session after 10s", "agent", tmux.ErrTmuxTimeout),
+		closeState:    stateUnknown,
+		worktreeState: stateKnown, // irrelevant here: the pane gate must fire first
+		closeErr:      fmt.Errorf("tab %q: %w: kill-session after 10s", "agent", tmux.ErrTmuxTimeout),
 	}
 	inst := instanceWithTmuxTab(t, &tmux.TmuxSession{})
 
@@ -118,7 +119,10 @@ func TestTeardownTabs_PaneMayBeLive_SkipsTheWorktreeStep(t *testing.T) {
 // goal either way — and #478's best-effort contract must still hold, or a stuck
 // session becomes undeletable again.
 func TestTeardownTabs_ConfirmedTmuxFailure_StillProceeds(t *testing.T) {
-	mode := &gateStubMode{closeState: stateKnown, closeErr: nil} // an ANSWERED tmux failure
+	// worktreeState must be set EXPLICITLY: its zero value is stateUnknown now, so a
+	// mode that forgets it refuses to destroy. That default is the point (#1917) —
+	// this stub forgetting it is what a real mode forgetting it would look like.
+	mode := &gateStubMode{closeState: stateKnown, worktreeState: stateKnown, closeErr: nil}
 	inst := instanceWithTmuxTab(t, &tmux.TmuxSession{})
 
 	if err := inst.teardownTabs(mode); err != nil {

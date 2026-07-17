@@ -30,15 +30,19 @@ import (
 type PaneState int
 
 const (
-	// PaneStateKnown: every tmux command ANSWERED. The session is gone, or it
-	// survived a kill tmux reported on — either way its state was established, and
-	// the caller's own best-effort contract (#478/#967) governs from here.
-	PaneStateKnown PaneState = iota
-	// PaneStateUnknown: a bounded tmux command tripped its deadline, so the server
-	// never answered and the session may still be RUNNING. No caller may take a
-	// destructive step on this — deleting or moving a workspace an agent is still
-	// writing to destroys the user's work on a guess. Retry instead.
-	PaneStateUnknown
+	// PaneStateUnknown (the ZERO VALUE): a bounded tmux command tripped its
+	// deadline, so the server never answered and the session may still be RUNNING —
+	// or nobody established its state at all. No caller may take a destructive step
+	// on this: deleting or moving a workspace an agent is still writing to destroys
+	// the user's work on a guess. Retry instead.
+	//
+	// Unknown is the zero value deliberately (#1917). The safe outcome must be the
+	// LAZY outcome: a state nobody set refuses to destroy rather than permitting it.
+	PaneStateUnknown PaneState = iota
+	// PaneStateKnown: every tmux command in the teardown ANSWERED. The session is
+	// gone, or it survived a kill tmux reported on — either way its state was
+	// established, and the caller's own best-effort contract (#478/#967) governs.
+	PaneStateKnown
 )
 
 // Close terminates the tmux session and cleans up resources. It reports whether
@@ -50,55 +54,96 @@ const (
 // tmux-server-mediated attach driver was retired), so Close is now just
 // kill-session plus the leaked-process reap — no PTY close, no attach-goroutine
 // drain, no killAttach/termAttach coordination.
+// closeRun executes ONE Close and OWNS its state, mirroring git's cleanupRun.
+//
+// Close used to assert PaneStateKnown up front and downgrade by hand at each place
+// a deadline could trip — and a missed one (the has-session probe) shipped, letting
+// a caller delete a workspace whose session tmux had never confirmed dead. The
+// author no longer writes the state: every bounded tmux command goes through
+// run.tmux, which records a tripped deadline, and state() derives the answer.
+type closeRun struct {
+	t       *TmuxSession
+	unknown bool
+}
+
+// tmux runs one bounded tmux command and RECORDS a tripped deadline. The only
+// place in the close path that decides what a deadline means.
+func (r *closeRun) tmux(args ...string) error {
+	ctx, cancel := tmuxTimeoutContext()
+	defer cancel()
+	err := r.t.runTmuxBounded(ctx, args...)
+	if err != nil && ctx.Err() != nil {
+		r.unknown = true
+		return fmt.Errorf("%w: %s after %s", ErrTmuxTimeout, args[0], tmuxCommandTimeout)
+	}
+	return err
+}
+
+// probe asks whether the session still exists. A timed-out probe marks the run
+// unknown via the shared probe helper and reports ok=false, so "could not ask" is
+// never read as "not there".
+func (r *closeRun) probe() (exists bool, ok bool) {
+	exists, known := probeSession(r.t.cmdExec, r.t.sanitizedName)
+	if !known {
+		r.unknown = true
+	}
+	return exists, known
+}
+
+func (r *closeRun) state() PaneState {
+	if r.unknown {
+		return PaneStateUnknown
+	}
+	return PaneStateKnown
+}
+
 func (t *TmuxSession) Close() (PaneState, error) {
 	var errs []error
-	state := PaneStateKnown
+	r := &closeRun{t: t}
 
 	// Capture the panes' process trees before kill-session — afterwards any
 	// survivor is reparented to init and its ancestry is unrecoverable
 	// (#1104).
 	leaked := SessionProcessTrees(t.cmdExec, t.sanitizedName)
 
-	// Bounded by tmuxCommandTimeout (#1917): an unbounded kill-session against a
-	// wedged server blocks daemon.KillSession forever behind its kills-in-flight
-	// guard, leaving the session undeletable until the daemon restarts.
-	ctx, cancel := tmuxTimeoutContext()
-	defer cancel()
-	if err := t.runTmuxBounded(ctx, "kill-session", "-t", exactTarget(t.sanitizedName)); err != nil {
-		if ctx.Err() != nil {
-			// The deadline tripped, so the session's real state is UNKNOWN. Do
-			// NOT probe has-session: it would spawn another tmux command against
-			// the same wedged server and hang identically, defeating the bound we
-			// just came here for (see tmuxTimeoutContext). Report the timeout and
-			// take the conservative branch — a session we cannot confirm dead may
+	// Bounded by tmuxCommandTimeout (#1917), through the run so the deadline counts
+	// itself: an unbounded kill-session against a wedged server blocks
+	// daemon.KillSession forever behind its kills-in-flight guard, leaving the
+	// session undeletable until the daemon restarts.
+	if err := r.tmux("kill-session", "-t", exactTarget(t.sanitizedName)); err != nil {
+		switch {
+		case r.unknown:
+			// r.tmux already wrapped this as ErrTmuxTimeout.
+			errs = append(errs, err)
+			// The deadline tripped, so the session's real state is UNKNOWN. Do NOT
+			// probe has-session: it would spawn another tmux command against the same
+			// wedged server and hang identically, defeating the bound we just came
+			// here for (see tmuxTimeoutContext). A session we cannot confirm dead may
 			// well be alive, and its processes are then not leaks.
-			errs = append(errs, fmt.Errorf("%w: kill-session after %s", ErrTmuxTimeout, tmuxCommandTimeout))
-			state = PaneStateUnknown
 			leaked = nil
-		} else {
-			// kill-session ANSWERED with a failure, fast. Ask what actually happened
-			// — but the probe is bounded too, so it has three answers, not two.
-			exists, known := probeSession(t.cmdExec, t.sanitizedName)
+		default:
+			// kill-session ANSWERED with a failure, fast. Ask what actually happened —
+			// but the probe is bounded too, so it has three answers, not two. A
+			// timed-out probe marks the run unknown inside r.probe, so the caller
+			// learns the fate is unknown instead of receiving an ordinary kill error
+			// and deleting the workspace on it.
+			exists, ok := r.probe()
 			switch {
-			case !known:
-				// The probe timed out (#1917). Reporting only the original
-				// kill-session error would hand the caller an ordinary failure and
-				// lose the fact that the session's fate is UNKNOWN — and the caller
-				// would then delete the workspace. Surface the timeout instead.
+			case !ok:
 				errs = append(errs, fmt.Errorf("%w: has-session probe after kill-session failed (%v)", ErrTmuxTimeout, err))
-				state = PaneStateUnknown
 				leaked = nil
 			case exists:
+				errs = append(errs, fmt.Errorf("error killing tmux session: %w", err))
 				// Idempotent teardown (#967): a kill-session that fails because the
-				// session is already gone has achieved Close's goal — a dead session
-				// is the desired end state. Only a session that survives the kill is
-				// a genuine failure. Probe has-session rather than matching tmux's
-				// bare "exit status 1", which it reuses for unrelated errors.
+				// session is already gone has achieved Close's goal — a dead session is
+				// the desired end state. Only a session that survives the kill is a
+				// genuine failure. Probe has-session rather than matching tmux's bare
+				// "exit status 1", which it reuses for unrelated errors.
 				//
 				// The state stays KNOWN: tmux answered, and this session is alive.
-				// Callers keep their pre-#1917 best-effort contract here (#478) —
-				// see the note on that trade in teardownKill.
-				errs = append(errs, fmt.Errorf("error killing tmux session: %w", err))
+				// Callers keep their pre-#1917 best-effort contract here (#478) — see
+				// the note on that trade in teardownKill.
+				//
 				// The session survived — its processes are not leaks. Do not reap.
 				leaked = nil
 			}
@@ -112,16 +157,11 @@ func (t *TmuxSession) Close() (PaneState, error) {
 		go reapLeakedProcesses(t.sanitizedName, leaked, reapGraceWait, reapTermWait)
 	}
 
-	if len(errs) == 0 {
-		return state, nil
-	}
-	if len(errs) == 1 {
-		return state, errs[0]
-	}
 	// errors.Join, not a flattened string: the ErrTmuxTimeout sentinel has to stay
 	// reachable through errors.Is for callers that gate on it (#1917). The old
-	// hand-built message erased it.
-	return state, errors.Join(errs...)
+	// hand-built message erased it. The state is DERIVED from the run — this
+	// function never names a PaneState constant.
+	return r.state(), errors.Join(errs...)
 }
 
 // CloseAttachOnly is the non-destructive sibling of Close: it releases whatever
