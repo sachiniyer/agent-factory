@@ -785,37 +785,37 @@
       "id": "config.read",
       "title": "Read global config",
       "tui": {
-        "status": "no",
-        "pointer": ""
+        "status": "yes",
+        "pointer": "keys/keys.go:198 (,) config_editor -> app/home_model.go:323 config pane reads the manifest"
       },
       "web": {
-        "status": "no",
-        "pointer": ""
+        "status": "yes",
+        "pointer": "web/src/api.ts:475 GetConfig"
       },
       "cli": {
         "status": "yes",
         "pointer": "commands/configcmd.go:140,170 config get/list"
       },
-      "verdict": "unclear",
-      "notes": "Config is a file the user edits. Whether the UIs should expose a settings view is a product question, not a drift bug — flagging rather than filing."
+      "verdict": "parity",
+      "notes": "#1960 added a config editor to the TUI (`,`, over the config manifest) and the web (GetConfig/SetConfigValue), so reading global config is now at parity across all three surfaces — the earlier 'is config a UI concern?' question is answered yes."
     },
     {
       "id": "config.write",
       "title": "Set a global config key",
       "tui": {
-        "status": "no",
-        "pointer": ""
+        "status": "yes",
+        "pointer": "keys/keys.go:198 (,) config_editor writes config.toml via the same path as `af config set` (app/home_model.go:324)"
       },
       "web": {
-        "status": "no",
-        "pointer": ""
+        "status": "yes",
+        "pointer": "web/src/api.ts:487 SetConfigValue"
       },
       "cli": {
         "status": "yes",
         "pointer": "commands/configcmd.go:193 config set"
       },
-      "verdict": "unclear",
-      "notes": "See config.read. Note the in-repo `backend`/docker/ssh keys are NOT settable from any surface (config/resolve.go:108-112) — they are checked-in repo config by design."
+      "verdict": "parity",
+      "notes": "#1960: the TUI config editor (`,`) writes config.toml through the same path `af config set` uses; the web writes via SetConfigValue. Setting a config key is now at parity. (The TUI writes config directly in-process rather than via the SetConfigValue RPC — same capability, different transport, like session.send-prompt.)"
     },
     {
       "id": "worktree.hooks.edit",
@@ -1263,6 +1263,7 @@
       "POST /v1/CreateTab": "session.tab.create",
       "POST /v1/DeleteProject": "project.delete",
       "POST /v1/DeliverPrompt": "-",
+      "POST /v1/GetConfig": "config.read",
       "POST /v1/KillSession": "session.kill",
       "POST /v1/ListBackends": "backend.list",
       "POST /v1/ListTasks": "task.list",
@@ -1270,6 +1271,7 @@
       "POST /v1/RestoreArchived": "session.restore",
       "POST /v1/RestoreSession": "session.restore",
       "POST /v1/SendPrompt": "session.send-prompt",
+      "POST /v1/SetConfigValue": "config.write",
       "POST /v1/SetPRInfo": "session.pr.set",
       "POST /v1/Snapshot": "session.list",
       "POST /v1/TriggerTask": "task.trigger",
@@ -1281,6 +1283,7 @@
       "close_tab": "session.tab.close",
       "collapse": "tui.navigation",
       "config_agent": "config-agent",
+      "config_editor": "config.write",
       "copy_pr": "session.pr.open",
       "down": "tui.navigation",
       "error_details": "tui.navigation",
@@ -1327,11 +1330,13 @@
       "CreateSession": "session.create",
       "CreateTab": "session.tab.create",
       "DeleteProject": "project.delete",
+      "GetConfig": "config.read",
       "KillSession": "session.kill",
       "ListBackends": "backend.list",
       "ListTasks": "task.list",
       "RemoveTask": "task.remove",
       "SendPrompt": "session.send-prompt",
+      "SetConfigValue": "config.write",
       "Snapshot": "session.list",
       "TriggerTask": "task.trigger",
       "UpdateTask": "task.edit"

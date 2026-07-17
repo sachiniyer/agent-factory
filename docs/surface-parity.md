@@ -261,15 +261,15 @@ go test ./parity/ -v -run TestAuditCoverageReport
 
 ```
 === surface-parity audit coverage ===
-  cli.arg-concepts                 ?      go.cli.request-sites   ?
-  cli.commands                     55      go.tui.files           41
-  cli.flags                       138      go.tui.request-sites   ?
-  cli.noun-groups                   ?      inventory.capabilities 65
-  cli.verbs                        47      tui.bindings           43
-  daemon.audited-request-types     ?      web.enum-sites          ?
-  daemon.public-routes             ?      web.rpcs               14
-  go.cli.files                      10      web.source-files       ?
-  verdicts:  parity=18  deliberate=20  real-gap=10  unclear=17
+  cli.arg-concepts                 ? go.cli.request-sites   ?
+  cli.commands                     55 go.tui.files           41
+  cli.flags                       138 go.tui.request-sites   ?
+  cli.noun-groups                   ? inventory.capabilities 65
+  cli.verbs                        47 tui.bindings           44
+  daemon.audited-request-types     ? web.enum-sites          ?
+  daemon.public-routes             ? web.rpcs               16
+  go.cli.files                      10 web.source-files       ?
+  verdicts:  parity=20  deliberate=20  real-gap=10  unclear=15
   SKIPPED: none — every surface above was read
 ```
 
