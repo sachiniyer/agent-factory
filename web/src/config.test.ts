@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { afterEach, test } from "node:test";
 
 import { getConfig, setConfigValue } from "./api.js";
-import { canCommit, controlKind } from "./config.js";
+import { canCommit, controlKind, createKeyedQueue } from "./config.js";
 import type { ConfigEntry } from "./types.js";
 
 // These are the web client's config-editor contracts. They are pure logic +
@@ -169,4 +169,62 @@ test("an unchanged value is not worth writing — the gate both Save and Enter u
   // listen_addr = "" to turn the web server off), not a no-op.
   assert.equal(canCommit("", "claude"), true, "clearing a value is an edit, not a no-op");
   assert.equal(canCommit("", ""), false, "but an already-empty field is still untouched");
+});
+
+// The write race. Two saves of the same key are ordered by the network, not by
+// the user — so a checkbox toggled on→off→on can land "off". Every write
+// succeeds and none is clobbered; the answer is simply not what the user chose
+// last. The daemon's file lock cannot help: it serializes ACCESS, not INTENT.
+test("saves for one key run in the order the user made them, however slow the network", async () => {
+  const started: string[] = [];
+  const finished: string[] = [];
+  const queue = createKeyedQueue();
+
+  // The first save is slow, the second fast — unqueued, the second would finish
+  // first and lose.
+  const delays: Record<string, number> = { off: 30, on: 0 };
+  const save = (v: string) => async () => {
+    started.push(v);
+    await new Promise((r) => setTimeout(r, delays[v]));
+    finished.push(v);
+  };
+
+  queue("auto_yes", save("off"));
+  queue("auto_yes", save("on"));
+  await new Promise((r) => setTimeout(r, 80));
+
+  assert.deepEqual(started, ["off", "on"], "the second save must not start until the first settles");
+  assert.deepEqual(finished, ["off", "on"], "the LAST value the user chose must be the last one written");
+});
+
+test("a rejected save does not wedge the queue for that key", async () => {
+  const finished: string[] = [];
+  const queue = createKeyedQueue();
+
+  queue("update_channel", async () => {
+    throw new Error('update_channel must be one of [stable, preview], got "nightly"');
+  });
+  queue("update_channel", async () => {
+    finished.push("preview");
+  });
+  await new Promise((r) => setTimeout(r, 20));
+
+  assert.deepEqual(finished, ["preview"], "a refused value must not block the user's next attempt on that key");
+});
+
+test("different keys are not queued behind each other", async () => {
+  const finished: string[] = [];
+  const queue = createKeyedQueue();
+
+  // A slow save on one key must not hold up an unrelated one.
+  queue("listen_addr", async () => {
+    await new Promise((r) => setTimeout(r, 40));
+    finished.push("listen_addr");
+  });
+  queue("auto_yes", async () => {
+    finished.push("auto_yes");
+  });
+  await new Promise((r) => setTimeout(r, 80));
+
+  assert.deepEqual(finished, ["auto_yes", "listen_addr"], "keys have no ordering relationship; they must not block each other");
 });

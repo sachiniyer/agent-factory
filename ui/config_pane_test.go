@@ -18,7 +18,12 @@ import (
 func newTestConfigPane(t *testing.T) *ConfigPane {
 	t.Helper()
 	c := NewConfigPane()
-	c.SetSize(100, 40)
+	// Deliberately taller than the list. The window is real and tested
+	// separately (TestConfigPaneKeepsTheSelectionVisible); here it must not be
+	// the thing under test — at a realistic height the anti-drift test would
+	// start failing because a key scrolled off, which reads as "the manifest
+	// drifted" when nothing drifted at all.
+	c.SetSize(100, 200)
 	c.SetEntries(config.ManifestWithValues(config.DefaultConfig()), "/tmp/config.toml")
 	c.SetFocus(true)
 	c.showAdvanced = true
@@ -545,5 +550,200 @@ func TestConfigPaneNeverRendersALineWiderThanThePane(t *testing.T) {
 			}
 		}
 		c.move(1)
+	}
+}
+
+// longConfigValue is longer than any display width and longer than the 512-char
+// CharLimit that used to silently truncate it.
+func longConfigValue() string { return strings.Repeat("/very/long/path/segment", 40) } // ~920 chars
+
+// seedConfigWithLongValue writes a throwaway config.toml holding a >512-char
+// value and returns its path. Never the real AF home.
+func seedConfigWithLongValue(t *testing.T) (path, long string) {
+	t.Helper()
+	long = longConfigValue()
+	home := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	path = filepath.Join(home, "config.toml")
+	body := "# hand-written\ndefault_program = 'claude'\nvscode_server_binary = '" + long + "'\n"
+	if err := os.WriteFile(path, []byte(body), 0644); err != nil {
+		t.Fatal(err)
+	}
+	return path, long
+}
+
+// openPaneOn opens the editor over the config on disk, cursor on `key`.
+func openPaneOn(t *testing.T, path, key string) *ConfigPane {
+	t.Helper()
+	cfg, err := config.LoadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := NewConfigPane()
+	c.SetSize(72, paneHeight)
+	c.SetEntries(config.ManifestWithValues(cfg), path)
+	c.SetFocus(true)
+	c.showAdvanced = true
+	c.rebuildRows()
+	selectKey(t, c, key)
+	return c
+}
+
+// TestEditingOneKeyLeavesALongValueByteIdentical is the user story: you open the
+// editor to change ONE thing, and everything you did not touch is exactly as you
+// left it.
+//
+// It passes because the blast radius of a save is one key's bytes —
+// SetGlobalConfigValue edits the value in place rather than re-marshaling the
+// struct, so a key the user never selected is never rewritten and cannot be
+// mangled by anything this pane does. That is the property worth pinning: it is
+// what makes the editor safe to open at all.
+func TestEditingOneKeyLeavesALongValueByteIdentical(t *testing.T) {
+	path, long := seedConfigWithLongValue(t)
+
+	c := openPaneOn(t, path, "default_program")
+	c.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEnter})
+	c.input.SetValue("codex")
+	c.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEnter})
+	if c.statusIsError {
+		t.Fatalf("save failed: %s", c.status)
+	}
+
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), long) {
+		t.Fatalf("editing default_program mangled vscode_server_binary — a key the user never touched.\n--- file ---\n%s", raw)
+	}
+	if !strings.Contains(string(raw), "# hand-written") {
+		t.Error("the edit destroyed a hand-written comment")
+	}
+	if !strings.Contains(string(raw), "default_program = 'codex'") {
+		t.Error("the edit itself did not land")
+	}
+}
+
+// TestOpeningAndSavingALongValueDoesNotTruncateIt is the loss that was REAL, and
+// the reason the CharLimit is gone.
+//
+// The field carried CharLimit = 512, and textinput.SetValue silently drops
+// everything past it — so pre-filling a 920-character path and pressing enter,
+// WITHOUT typing a character, wrote back 512 and destroyed the rest. The user
+// asked for nothing and lost their value.
+//
+// This drives the real key path (enter to open, enter to commit) rather than
+// calling save directly: the truncation happened in SetValue, so a test that
+// passed the value straight to the writer would have sailed past it.
+func TestOpeningAndSavingALongValueDoesNotTruncateIt(t *testing.T) {
+	path, long := seedConfigWithLongValue(t)
+
+	c := openPaneOn(t, path, "vscode_server_binary")
+	c.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEnter})
+
+	if got := c.input.Value(); got != long {
+		t.Fatalf("the value field truncated on OPEN: %d chars of %d. Saving now writes the short version.", len(got), len(long))
+	}
+
+	c.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEnter})
+
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), long) {
+		t.Fatalf("opening a long value and saving it unchanged DESTROYED it.\n--- file ---\n%s", raw)
+	}
+}
+
+// TestSavingAnUntouchedFieldWritesNothing is the belt-and-braces half: a key
+// nobody edited is never rewritten at all, so no future mangling bug in this pane
+// can reach a value the user only looked at.
+//
+// It asserts on the WRITER, not the file: "the bytes are unchanged" would also
+// hold if we wrote the identical value back, and the point is that we do not
+// write.
+func TestSavingAnUntouchedFieldWritesNothing(t *testing.T) {
+	path, _ := seedConfigWithLongValue(t)
+	c := openPaneOn(t, path, "vscode_server_binary")
+
+	var writes int
+	c.save = func(k, v string) (*config.SetResult, error) {
+		writes++
+		return &config.SetResult{Key: k, Value: v, Path: path, RequiresRestart: true}, nil
+	}
+
+	c.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEnter})
+	c.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEnter}) // commit without typing
+
+	if writes != 0 {
+		t.Errorf("saving an untouched field issued %d write(s); it must issue none", writes)
+	}
+	if c.restartNotice != "" {
+		t.Error("a no-op told the user to restart for a change they did not make")
+	}
+}
+
+// TestConfigPaneWindowsWithAZeroBudget pins the degenerate size. A pane sized
+// before SetSize has run, or squeezed to nothing by a tiny terminal, must not
+// panic or slice out of range — and must still keep the selection on screen when
+// there is any room at all.
+func TestConfigPaneWindowsWithAZeroBudget(t *testing.T) {
+	// Heights that give a REAL but tiny box. h=0 is a different case — SetSize
+	// has not meaningfully run, there is no box to fit, and that is covered by
+	// TestConfigPaneUnsizedRendersEverything below.
+	for _, h := range []int{1, 2, 5, 8} {
+		c := NewConfigPane()
+		c.SetSize(72, h)
+		c.SetEntries(config.ManifestWithValues(config.DefaultConfig()), "/tmp/config.toml")
+		c.SetFocus(true)
+		c.showAdvanced = true
+		c.rebuildRows()
+
+		for step := 0; step < 25; step++ {
+			view := c.String() // must not panic
+			// A real box, however small, must BOUND THE LIST. A non-positive
+			// budget used to mean "render everything", so a 5-line pane emitted
+			// all 38 lines — the window silently switching itself off at exactly
+			// the size where it matters most.
+			//
+			// The bound is on the list, not the render: the chrome (a header, a
+			// footer, and the two cue rows) cannot shrink below itself, so a
+			// 1-line pane still renders ~7 lines. What must not happen is the
+			// twenty-odd ROWS landing in it.
+			const chrome = 4 + cueRows // header(2) + footer(2) + cues
+			budget := h - chrome
+			if budget < 1 {
+				budget = 1
+			}
+			if n := len(strings.Split(view, "\n")); n > chrome+budget+1 {
+				t.Fatalf("height %d: rendered %d lines (chrome %d + budget %d) — a tiny box must still window, not dump the list",
+					h, n, chrome, budget)
+			}
+			if h >= 8 && !strings.Contains(view, "›") {
+				t.Errorf("height %d: the cursor went off screen", h)
+				break
+			}
+			c.move(1)
+		}
+	}
+}
+
+// TestConfigPaneUnsizedRendersEverything pins the OTHER degenerate case, and why
+// it differs from a tiny box: with no size at all there is nothing to fit the
+// list into, so the pane renders it rather than inventing a window from a height
+// of zero. It must not panic, and it must not hide anything.
+func TestConfigPaneUnsizedRendersEverything(t *testing.T) {
+	c := NewConfigPane()
+	c.SetEntries(config.ManifestWithValues(config.DefaultConfig()), "/tmp/config.toml")
+	c.SetFocus(true)
+	c.showAdvanced = true
+	c.rebuildRows()
+
+	view := c.String() // must not panic
+	for _, e := range config.Manifest() {
+		if !strings.Contains(view, e.Key) {
+			t.Errorf("unsized, the pane must render everything; %q is missing", e.Key)
+		}
 	}
 }

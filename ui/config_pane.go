@@ -107,7 +107,16 @@ var (
 // NewConfigPane builds the pane wired to the real write path.
 func NewConfigPane() *ConfigPane {
 	in := textinput.New()
-	in.CharLimit = 512
+	// NO CharLimit. It is a truncating limit, not a validating one: SetValue
+	// silently drops everything past it, so pre-filling a longer value and
+	// pressing enter — without typing a character — wrote the truncated version
+	// back and destroyed the rest. Reproduced at 920 chars → 512.
+	//
+	// An editor's first duty is not to corrupt what it was not asked to change.
+	// Length is the loader's business, not a text field's; the pane never
+	// shortens a value it will write. Display is bounded elsewhere and only for
+	// display: the input scrolls horizontally (in.Width), and the LIST truncates
+	// with displayValue, which never feeds the writer.
 	in.Blur()
 	return &ConfigPane{
 		input: in,
@@ -329,6 +338,20 @@ func (c *ConfigPane) commitEdit() {
 	}
 	value := c.input.Value()
 
+	// An untouched field writes NOTHING. This is belt-and-braces, not an
+	// optimization: a key nobody edited must never be rewritten, so no future
+	// mangling bug in this pane can reach a value the user only looked at. It is
+	// also honest — a no-op write still echoes and still raises the restart
+	// notice, telling the user they changed something when they did not.
+	//
+	// The GUARANTEE against truncation is the absent CharLimit above, not this:
+	// a truncating field would make value != entry.Value, which reads as an edit
+	// and would write straight through this check.
+	if value == entry.Value {
+		c.cancelEdit()
+		return
+	}
+
 	result, err := c.save(entry.Key, value)
 	if err != nil {
 		// Stay in edit mode on a rejection: the bad value is still in the field
@@ -435,9 +458,20 @@ func (c *ConfigPane) renderRowLines() (lines []string, selStart, selEnd int) {
 // centering would shift the whole list on every keypress, which reads as the
 // content moving under the cursor instead of the cursor moving through it.
 func (c *ConfigPane) window(rowLines []string, selStart, selEnd, budget int) (visible []string, above, below int) {
-	if budget <= 0 || len(rowLines) <= budget {
-		// It all fits (or the pane has no size yet — SetSize has not run, as in a
-		// unit test): render everything rather than guessing a window.
+	if c.height <= 0 {
+		// No size yet: SetSize has not run. There is no box to fit, so render
+		// everything rather than inventing a window from a height of zero.
+		c.scrollTop = 0
+		return rowLines, 0, 0
+	}
+	if budget <= 0 {
+		// A real but tiny box: the header and footer already consume it. Show one
+		// row — the selected one — rather than dumping all 38 lines into a 5-line
+		// pane, which is what "budget <= 0 means render everything" used to do.
+		// Degenerate, but bounded: the user still sees where they are.
+		budget = 1
+	}
+	if len(rowLines) <= budget {
 		c.scrollTop = 0
 		return rowLines, 0, 0
 	}

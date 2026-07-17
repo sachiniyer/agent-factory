@@ -115,6 +115,47 @@ export function canCommit(shown: string, current: string): boolean {
   return shown !== current;
 }
 
+/**
+ * Serializes async work per key: a second save for the same key waits for the
+ * first to settle, so the LAST value the user chose is the last one written.
+ *
+ * WHY THE CLIENT AND NOT THE DAEMON. The daemon already owns the part it can
+ * own: config.SetGlobalConfigValue takes a file lock, so concurrent writes
+ * cannot corrupt or interleave, and that holds across the TUI, `af config set`,
+ * and a hand-edit alike (config.toml is deliberately NOT daemon-exclusive state
+ * — see configset.go). What a lock cannot supply is INTENT. Two in-flight POSTs
+ * for the same key are ordered by the network, not by the user, so a checkbox
+ * toggled on→off→on can land off — every write succeeded, none was clobbered,
+ * and the answer is still wrong. Only the side that knows the user pressed off
+ * before on can keep that order.
+ *
+ * Per KEY, not global: two different keys have no ordering relationship, and
+ * queueing them behind each other would make a slow write block an unrelated one
+ * for no gain.
+ */
+export function createKeyedQueue(): (key: string, run: () => Promise<void>) => void {
+  const tails = new Map<string, Promise<void>>();
+  return (key, run) => {
+    const prev = tails.get(key) ?? Promise.resolve();
+    // The chain must never reject, for two reasons: a failed save must not
+    // cancel the next one (one rejected value would wedge that key for the
+    // session), and a rejected tail with nothing queued behind it surfaces as an
+    // unhandled rejection — a red error in the user's console every time the
+    // validator refuses a value. The error is not swallowed: applyConfigValue's
+    // own catch has already put the validator's message on screen. This only
+    // keeps the QUEUE resolvable.
+    const next = prev.then(run, run).catch(() => {});
+    tails.set(key, next);
+    void next.finally(() => {
+      // Drop the entry only if nothing queued behind us, so the map stays the
+      // size of the keys in flight rather than growing forever.
+      if (tails.get(key) === next) {
+        tails.delete(key);
+      }
+    });
+  };
+}
+
 export class ConfigPane {
   readonly el: HTMLElement;
 

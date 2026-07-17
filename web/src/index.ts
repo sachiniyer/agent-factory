@@ -38,6 +38,7 @@ import {
   triggerTask,
   updateTask,
 } from "./api.js";
+import { createKeyedQueue } from "./config.js";
 import { EventStream, type EventStreamStatus } from "./events.js";
 import { confirmDeleteProjectModal, confirmModal, type ModalHandle, newSessionModal, promptModal } from "./modals.js";
 import { InstallAffordance } from "./install.js";
@@ -834,12 +835,20 @@ function refreshConfig(): void {
  *  browser sent. The daemon's restart notice rides along with the echo: config.toml
  *  is read at startup, and an editor that changed a value the running daemon then
  *  ignored — without saying so — would be lying by omission. */
+/** Serializes saves per config key — see createKeyedQueue for why the client is
+ *  the only side that can keep the user's order. */
+const queueConfigSave = createKeyedQueue();
+
 function applyConfigValue(key: string, value: string): void {
   const tok = token;
   if (tok === null) {
     return;
   }
-  void setConfigValue(key, value, tok)
+  queueConfigSave(key, () => applyConfigValueNow(key, value, tok));
+}
+
+function applyConfigValueNow(key: string, value: string, tok: string): Promise<void> {
+  return setConfigValue(key, value, tok)
     .then((resp) => {
       store.set({
         configStatus: {
