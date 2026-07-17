@@ -118,7 +118,11 @@ func TestClientlessCaptureCloseWakesBlockedRead(t *testing.T) {
 	if err := ts.Start(t.TempDir()); err != nil {
 		t.Fatalf("start tmux session: %v", err)
 	}
-	t.Cleanup(func() { _ = ts.Close() })
+	// Pane state deliberately ignored: this is #1944's FIFO-wake regression test
+	// tearing down its own fixture session; nothing destructive follows. The second
+	// return is new in this PR (tmux.PaneState) — the production captureReader from
+	// #1944 is untouched, only this call site acknowledges the added value.
+	t.Cleanup(func() { _, _ = ts.Close() })
 
 	ch := newTmuxClientlessChannel(ts)
 	rc, err := ch.StartCapture()
