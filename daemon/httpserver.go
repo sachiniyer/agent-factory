@@ -219,7 +219,7 @@ func newHTTPMux(cs *controlServer) *http.ServeMux {
 	// to serve the embedded SPA, so the browser sees index.html here instead of
 	// this 404; only genuinely-unknown /v1/ paths still reach it there.
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		writeHTTPError(w, http.StatusNotFound, fmt.Errorf("unknown route %q", r.URL.Path))
+		writeHTTPError(w, r, http.StatusNotFound, fmt.Errorf("unknown route %q", r.URL.Path))
 	})
 
 	return mux
@@ -253,7 +253,7 @@ func rpcHandler[Req any, Resp any](call func(Req, *Resp) error) http.HandlerFunc
 func rpcHandlerCtx[Req any, Resp any](call func(context.Context, Req, *Resp) error) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			writeHTTPError(w, http.StatusMethodNotAllowed,
+			writeHTTPError(w, r, http.StatusMethodNotAllowed,
 				fmt.Errorf("method %s not allowed; use POST", r.Method))
 			return
 		}
@@ -266,15 +266,15 @@ func rpcHandlerCtx[Req any, Resp any](call func(context.Context, Req, *Resp) err
 			if errors.As(err, &maxErr) {
 				status = http.StatusRequestEntityTooLarge
 			}
-			writeHTTPError(w, status, err)
+			writeHTTPError(w, r, status, err)
 			return
 		}
 		var resp Resp
 		if err := call(r.Context(), req, &resp); err != nil {
-			writeHTTPError(w, http.StatusInternalServerError, err)
+			writeHTTPError(w, r, http.StatusInternalServerError, err)
 			return
 		}
-		writeHTTPSuccess(w, resp)
+		writeHTTPSuccess(w, r, resp)
 	}
 }
 
@@ -283,13 +283,13 @@ func rpcHandlerCtx[Req any, Resp any](call func(context.Context, Req, *Resp) err
 func healthHandler(cs *controlServer) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
-			writeHTTPError(w, http.StatusMethodNotAllowed,
+			writeHTTPError(w, r, http.StatusMethodNotAllowed,
 				fmt.Errorf("method %s not allowed; use GET", r.Method))
 			return
 		}
 		var resp PingResponse
 		_ = cs.Ping(PingRequest{}, &resp)
-		writeHTTPSuccess(w, resp)
+		writeHTTPSuccess(w, r, resp)
 	}
 }
 
@@ -353,32 +353,32 @@ func decodeHTTPRequest(w http.ResponseWriter, r *http.Request, dst any) error {
 }
 
 // writeHTTPSuccess encodes data in a success envelope with a 200.
-func writeHTTPSuccess(w http.ResponseWriter, data any) {
-	writeHTTPEnvelope(w, http.StatusOK, apiproto.Success(data))
+func writeHTTPSuccess(w http.ResponseWriter, r *http.Request, data any) {
+	writeHTTPEnvelope(w, r, http.StatusOK, apiproto.Success(data))
 }
 
 // writeHTTPError encodes err in a failure envelope with the given status. The
 // envelope body is always returned on error, never a bare status.
-func writeHTTPError(w http.ResponseWriter, status int, err error) {
-	writeHTTPEnvelope(w, status, apiproto.Failure(err.Error()))
+func writeHTTPError(w http.ResponseWriter, r *http.Request, status int, err error) {
+	writeHTTPEnvelope(w, r, status, apiproto.Failure(err.Error()))
 }
 
 // writeHTTPEnvelope is the single write path for both success and failure so the
 // Content-Type, status, and byte-identical envelope shape stay uniform.
-func writeHTTPEnvelope(w http.ResponseWriter, status int, env apiproto.Envelope) {
+func writeHTTPEnvelope(w http.ResponseWriter, r *http.Request, status int, env apiproto.Envelope) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	if err := apiproto.WriteEnvelope(w, env); err != nil && !httpResponseWriteAbandoned(err) {
+	if err := apiproto.WriteEnvelope(w, env); err != nil && !httpResponseWriteAbandoned(r, err) {
 		log.WarningLog.Printf("failed to write HTTP response envelope: %v", err)
 	}
 }
 
-// httpResponseWriteAbandoned reports errors expected when an HTTP client closes
-// its connection before the daemon finishes writing a response. Those errors are
-// normal during client or session teardown and are not actionable warnings.
-func httpResponseWriteAbandoned(err error) bool {
+// httpResponseWriteAbandoned reports a response write that failed after the
+// client disconnected. Raw socket errors are expected only after the request
+// context has been canceled; otherwise they are warnings worth investigating.
+func httpResponseWriteAbandoned(r *http.Request, err error) bool {
 	return errors.Is(err, context.Canceled) ||
 		errors.Is(err, net.ErrClosed) ||
-		errors.Is(err, syscall.EPIPE) ||
-		errors.Is(err, syscall.ECONNRESET)
+		(r != nil && r.Context().Err() != nil &&
+			(errors.Is(err, syscall.EPIPE) || errors.Is(err, syscall.ECONNRESET)))
 }

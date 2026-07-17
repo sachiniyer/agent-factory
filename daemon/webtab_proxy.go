@@ -321,7 +321,7 @@ func (m *Manager) stopVSCodeIfUnwanted(instance *session.Instance, key, title st
 // sub-resource requests.
 func (cs *controlServer) webTabProxyHandler(w http.ResponseWriter, r *http.Request) {
 	if cs.manager == nil {
-		writeHTTPError(w, http.StatusServiceUnavailable, fmt.Errorf("daemon has no session manager"))
+		writeHTTPError(w, r, http.StatusServiceUnavailable, fmt.Errorf("daemon has no session manager"))
 		return
 	}
 	// Refuse until the restore has finished (#1878). The HTTP listener binds long
@@ -357,14 +357,14 @@ func (cs *controlServer) webTabProxyHandler(w http.ResponseWriter, r *http.Reque
 	// proxied prefix. rest is the decoded view of the remainder, so testing it here
 	// covers the escaped form the proxy actually forwards.
 	if strings.Contains(rest, "..") {
-		writeHTTPError(w, http.StatusBadRequest, fmt.Errorf("invalid web tab path"))
+		writeHTTPError(w, r, http.StatusBadRequest, fmt.Errorf("invalid web tab path"))
 		return
 	}
 	// The remainder in the request's OWN encoding, which rest cannot express: the
 	// forwarded path is built from this so an encoded slash survives the hop.
 	escapedRest, ok := escapedRestOf(r.URL.EscapedPath())
 	if !ok {
-		writeHTTPError(w, http.StatusBadRequest, fmt.Errorf("invalid web tab path"))
+		writeHTTPError(w, r, http.StatusBadRequest, fmt.Errorf("invalid web tab path"))
 		return
 	}
 	upstreamEscaped := "/" + strings.TrimLeft(escapedRest, "/")
@@ -373,7 +373,7 @@ func (cs *controlServer) webTabProxyHandler(w http.ResponseWriter, r *http.Reque
 		// Unreachable via a real request (net/http rejects a malformed escape while
 		// parsing the request line), but fail closed rather than forward a path
 		// whose two encodings disagree.
-		writeHTTPError(w, http.StatusBadRequest, fmt.Errorf("invalid web tab path"))
+		writeHTTPError(w, r, http.StatusBadRequest, fmt.Errorf("invalid web tab path"))
 		return
 	}
 
@@ -412,7 +412,7 @@ func (cs *controlServer) webTabProxyHandler(w http.ResponseWriter, r *http.Reque
 			writeVSCodeNoticePage(w, "VS Code exited while starting. Check that the editor binary runs correctly, then reopen this tab.")
 			return
 		}
-		writeHTTPError(w, http.StatusNotFound, err)
+		writeHTTPError(w, r, http.StatusNotFound, err)
 		return
 	}
 	// Only loopback targets are proxied. An external target must never be fetched
@@ -427,13 +427,13 @@ func (cs *controlServer) webTabProxyHandler(w http.ResponseWriter, r *http.Reque
 	// which the old editor target passed precisely because it WAS loopback, the
 	// confused-deputy hole this transport closes.
 	if !target.isUnixSocket() && !session.IsLoopbackWebTarget(target.URL) {
-		writeHTTPError(w, http.StatusBadRequest,
+		writeHTTPError(w, r, http.StatusBadRequest,
 			fmt.Errorf("web tab target %q is not loopback; external URLs are iframed directly, not proxied", target.URL))
 		return
 	}
 	targetURL, err := url.Parse(target.URL)
 	if err != nil {
-		writeHTTPError(w, http.StatusInternalServerError, fmt.Errorf("invalid web tab target: %w", err))
+		writeHTTPError(w, r, http.StatusInternalServerError, fmt.Errorf("invalid web tab target: %w", err))
 		return
 	}
 
@@ -591,7 +591,7 @@ func (cs *controlServer) webTabProxyHandler(w http.ResponseWriter, r *http.Reque
 		},
 		ErrorHandler: func(w http.ResponseWriter, _ *http.Request, err error) {
 			log.WarningLog.Printf("web tab proxy to %s failed: %v", targetURL.Redacted(), err)
-			writeHTTPError(w, http.StatusBadGateway,
+			writeHTTPError(w, r, http.StatusBadGateway,
 				fmt.Errorf("web tab dev server at %s is unreachable: %w", targetURL.Host, err))
 		},
 	}

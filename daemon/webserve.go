@@ -83,7 +83,7 @@ func noWebShellHandler(api http.Handler) http.Handler {
 			api.ServeHTTP(w, r)
 			return
 		}
-		writeHTTPError(w, http.StatusNotFound, errors.New(noWebShellMessage))
+		writeHTTPError(w, r, http.StatusNotFound, errors.New(noWebShellMessage))
 	})
 }
 
@@ -115,7 +115,7 @@ func webShellHandler(api http.Handler) http.Handler {
 // the self-contained guarantee is enforced by the browser.
 func serveSPA(assets fs.FS, w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
-		writeHTTPError(w, http.StatusMethodNotAllowed,
+		writeHTTPError(w, r, http.StatusMethodNotAllowed,
 			fmt.Errorf("method %s not allowed for %q; use GET", r.Method, r.URL.Path))
 		return
 	}
@@ -160,7 +160,7 @@ func serveSPA(assets fs.FS, w http.ResponseWriter, r *http.Request) {
 	// a far worse trade. An app whose assets are absolute must be served from its
 	// own root (see docs/web.md); a dedicated preview origin is the only real fix (#1856).
 	if isEscapedAssetName(name) {
-		writeHTTPError(w, http.StatusNotFound,
+		writeHTTPError(w, r, http.StatusNotFound,
 			fmt.Errorf("no asset %q; if this is a web-tab preview's absolute-path asset, "+
 				"it escaped the tab's proxy prefix — see docs/web.md (absolute-path assets)", r.URL.Path))
 		return
