@@ -21,6 +21,27 @@ var statusPollLease = 3 * time.Second
 // sleeps.
 var nowFunc = time.Now
 
+// taskRunPollBackstop bounds how long an attached TUI may hide a task run's
+// COMPLETION from the watch-task concurrency cap (#1892).
+//
+// The pause (#1160) exists because a probe is NEEDLESS while a user is looking at
+// the pane: they can see the session, so the status dot does not need refreshing,
+// and capture-pane contends with the attach. The cap broke that premise. A task
+// run's slot is released when its agent goes idle, and the ONLY observer of
+// agent-idleness is the pane — an agent that finishes a turn does not exit, so
+// there is no process/tmux signal to listen for (see tmux HasUpdated: idleness is
+// literally "the pane hash did not change"). So while the poll was paused, the
+// completion was never seen, the slot was never released, and the task quietly
+// stopped launching sessions with no error at all — the cap simply read as full.
+//
+// This is deliberately a backstop, not a return to per-tick probing: the attach
+// keeps its fast path and pays one probe per interval instead of one per tick. It
+// is also self-limiting — it applies ONLY while a task run is in flight, so the
+// probe that observes the run finishing is also the last one it forces.
+//
+// A var so tests can shrink it; production never reassigns.
+var taskRunPollBackstop = 30 * time.Second
+
 // RefreshStatuses recomputes every started instance's status the way the TUI
 // metadata tick used to (#935) and persists each transition through the
 // targeted single-writer path. With the daemon the sole owner of session state
@@ -48,7 +69,30 @@ func (m *Manager) ResumeStatusPoll(repoID, title string) {
 	key := daemonInstanceKey(repoID, title)
 	m.pausedMu.Lock()
 	delete(m.pausedPolls, key)
+	delete(m.taskRunProbeDue, key)
 	m.pausedMu.Unlock()
+}
+
+// taskRunBackstopDue reports whether a PAUSED session with an in-flight task run
+// is due its backstop observation, recording the next one when it is (#1892).
+//
+// The first paused tick only arms the timer, so an attach still gets its quiet
+// window; the completion is then observed within one taskRunPollBackstop. Shares
+// pausedMu with pausedPolls: same lifetime, same lock discipline, and never m.mu
+// (the poll deliberately runs its probes with that released).
+func (m *Manager) taskRunBackstopDue(key string) bool {
+	m.pausedMu.Lock()
+	defer m.pausedMu.Unlock()
+	now := nowFunc()
+	due, armed := m.taskRunProbeDue[key]
+	if !armed || now.Before(due) {
+		if !armed {
+			m.taskRunProbeDue[key] = now.Add(taskRunPollBackstop)
+		}
+		return false
+	}
+	m.taskRunProbeDue[key] = now.Add(taskRunPollBackstop)
+	return true
 }
 
 // isPollPaused reports whether an instance's poll is currently paused (#1160).
@@ -69,6 +113,48 @@ func (m *Manager) isPollPaused(repoID, title string) bool {
 	}
 	delete(m.pausedPolls, key) // lease lapsed — lazy GC, then poll as normal
 	return false
+}
+
+// observeTaskRunWhilePaused runs ONE bounded observation of an attached session
+// whose task run is still in flight, so the concurrency cap learns the run ended
+// even though the poll is paused (#1892). Called only from the pause branch of
+// refreshInstanceStatus, at most once per taskRunPollBackstop.
+//
+// It can END a run and it can never conclude DEATH, and both halves are
+// deliberate:
+//
+//   - It ends a run by resolving the idle branch exactly as the normal poll does
+//     (resolveIdleLiveness → Ready, or LimitReached when the pane shows a limit
+//     banner). That transition is what releases the slot.
+//   - It never marks the session Lost, and never accumulates a remote-loss
+//     failure. The attach is positive evidence of life — a client is streaming
+//     this session's PTY, which no dead session can serve — and #1794's warning
+//     applies with full force here: a pause outlasts remoteLostGracePeriod, so
+//     letting a blip during an attach settle Lost would feed
+//     RestoreLostSessions a session the user is typing into, and a remote Recover
+//     RE-PROVISIONS, orphaning the live sandbox and its unpushed commits. A probe
+//     that cannot answer therefore tells us nothing and is dropped, exactly as the
+//     plain pause does.
+//
+// It also does not TapEnter: AutoYes is the normal poll's business, and a user is
+// attached and can answer their own prompt. Keeping this to the one question the
+// cap needs is what keeps a bounded probe from quietly becoming the whole poll.
+func (m *Manager) observeTaskRunWhilePaused(repoID, key string, instance *session.Instance) {
+	before := instance.GetLiveness()
+	beforeReset, _ := instance.LimitResetAt()
+	obs, err := instance.AgentServer().Snapshot()
+	// Whatever happened, no loss episode survives an attach (see above).
+	m.clearRemoteLoss(key)
+	if err != nil || obs.Updated || obs.HasPrompt {
+		// Unanswerable, still working, or waiting on the user: either way the run
+		// has not finished, so there is nothing for the cap to learn this tick.
+		return
+	}
+	// Idle output. The normal poll would probe liveness here to tell a healthy idle
+	// session from a vanished one; this path deliberately does not, because it must
+	// never conclude death. The attach already answers that question.
+	m.resolveIdleLiveness(instance, obs.Content)
+	m.persistPollChange(repoID, instance, before, beforeReset)
 }
 
 func (m *Manager) RefreshStatuses() {
@@ -158,6 +244,19 @@ func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instanc
 		return
 	}
 	if m.isPollPaused(repoID, instance.Title) {
+		// EXCEPT when a task run is still in flight: the concurrency cap (#1892)
+		// releases that run's slot when the agent goes idle, and this poll is the
+		// only thing that can see that happen. Left un-probed for the whole attach,
+		// a run that finished under the user's eyes never released its slot and the
+		// task silently stopped launching sessions — no error, because the cap just
+		// read as full. Observe on a bounded backstop instead; see
+		// observeTaskRunWhilePaused for why it can end a run but never conclude
+		// death, and taskRunPollBackstop for why this is not a return to per-tick
+		// probing.
+		if instance.TaskRunActive() && m.taskRunBackstopDue(remoteLossKey(repoID, instance)) {
+			m.observeTaskRunWhilePaused(repoID, key, instance)
+			return
+		}
 		// A TUI is attached full-screen to this instance (#1160). It owns the
 		// shared tmux server for the attach duration; the daemon's capture-pane
 		// liveness probe here would needlessly contend with the live attach and

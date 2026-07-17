@@ -137,6 +137,13 @@ type Manager struct {
 	// can never permanently blind the daemon.
 	pausedMu    sync.Mutex
 	pausedPolls map[string]time.Time
+	// taskRunProbeDue schedules the backstop observation for a PAUSED session whose
+	// task run is still in flight (#1892), keyed like pausedPolls and guarded by the
+	// same pausedMu. An attach suppresses the liveness probe, and the cap's slot is
+	// released by observing the agent go idle — so without a bounded backstop a user
+	// watching their own task run silently stalls the task. Entries exist only while
+	// such a session is attached; ResumeStatusPoll drops them with the pause.
+	taskRunProbeDue map[string]time.Time
 
 	// events is the WS events-plane fan-out (#1592 Phase 2 PR5): every session/
 	// task mutation the daemon owns publishes here, and GET /v1/events streams it
@@ -208,6 +215,7 @@ func newManagerShell(cfg *config.Config) (*Manager, error) {
 		remoteLossStates:    make(map[string]*remoteLossState),
 		instanceOpLocks:     make(map[string]*sync.Mutex),
 		pausedPolls:         make(map[string]time.Time),
+		taskRunProbeDue:     make(map[string]time.Time),
 		events:              newEventsHub(),
 		vscode:              vscode,
 	}, nil
