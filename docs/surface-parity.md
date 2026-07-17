@@ -202,6 +202,63 @@ nested recursion, remove the wrapper packages, break the TS parser, or break the
 call-body regex, and the matching fixture reports *"the parser is blind"* rather
 than passing.
 
+## The audit knows its own denominator
+
+The question that comes before "do the surfaces agree?" is **what did the audit
+actually look at?**
+
+An audit that under-covers does not merely miss gaps. It asserts parity over
+surfaces it never opened, and it is believed, because it is a green check — which
+turns *"we have a gap"* into *"we have a gap and a test says we do not"*. Every
+hole found in this package so far had exactly that shape: a walk that ran before
+cobra finished building the tree, a web scan that skipped subdirectories, an enum
+check that read one of two selectors, a request the analyzer dropped instead of
+reporting.
+
+So the audit states its denominator, and **fails closed**:
+
+```
+go test ./parity/ -v -run TestAuditCoverageReport
+```
+
+```
+=== surface-parity audit coverage ===
+  cli.arg-concepts                 66      go.cli.request-sites   23
+  cli.commands                     55      go.tui.files           39
+  cli.flags                       133      go.tui.request-sites   18
+  cli.noun-groups                   9      inventory.capabilities 62
+  cli.verbs                        47      tui.bindings           42
+  daemon.audited-request-types     21      web.enum-sites          2
+  daemon.public-routes             18      web.rpcs               13
+  go.cli.files                      8      web.source-files       21
+  verdicts:  parity=18  deliberate=20  real-gap=10  unclear=14
+  SKIPPED: none — every surface above was read
+```
+
+Three rules make that number honest:
+
+1. **Anything not covered is a finding, not a pass.** A file that will not parse,
+   a construct the analyzer cannot read, a directory not entered — each is
+   reported with its reason and fails the run.
+2. **Unanalyzable is never a shrug.** A request built in a shape the walk cannot
+   read used to vanish from the derived set, taking its declarations with it.
+   Now it is named: *"cli builds PreviewRequest in a shape this analyzer cannot
+   read … its field coverage is therefore UNVERIFIED."*
+3. **The denominator itself has floors.** If `cli.verbs` or `web.rpcs` collapses,
+   the run fails — a shrinking denominator makes every parity claim above it
+   meaningless, and it is exactly what a silently-blinded derivation looks like.
+
+## Reach is derived from values, not types
+
+For a wrapper payload the obvious move is to read its TypeScript interface. That
+is wrong in the dangerous direction: an interface says what is **possible**, and
+a client that never sends a field still passes.
+
+`TaskUpdate` declares seven options; the single call site
+(`web/src/index.ts:862`) sends `{ enabled }`. Reading the type credited the web
+with six options it cannot reach and reported parity over them. Reading the
+values it actually passes reports them as the gaps they are (#1935).
+
 ## Known blind spots
 
 Stated so nobody mistakes a passing check for total coverage. Note which way each

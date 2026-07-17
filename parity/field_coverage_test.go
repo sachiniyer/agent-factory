@@ -113,6 +113,22 @@ func TestGoFieldCoverage(t *testing.T) {
 		for typeName, u := range use {
 			total += len(u.Sites)
 			rt := auditedRequests[typeName]
+
+			// Fail closed. A construction the walk could not read means every
+			// field of that request is unverified, so the coverage below is
+			// fiction. Report it as a finding instead of quietly grading the
+			// part we happened to understand.
+			if len(u.Unanalyzable) > 0 {
+				t.Errorf("%s builds %s in a shape this analyzer cannot read: %v\n\n"+
+					"Its field coverage is therefore UNVERIFIED — the audit must not report "+
+					"parity over a call site it did not understand. Either build the request "+
+					"as a composite literal or `var r T; r.Field = …` (both are analyzed), or "+
+					"teach deriveGoRequestUse the new shape. Do not ignore this: an "+
+					"unanalyzable site used to vanish silently, which is how an audit ends up "+
+					"asserting parity over code it never looked at.",
+					surface, typeName, u.Unanalyzable)
+			}
+
 			unreached := unreachedFields(rt, u, typeUse)
 			decls := inv.FieldCoverage.Requests[typeName][surface]
 			label := fmt.Sprintf("%s (%s, %v)", typeName, surface, u.Sites)
@@ -166,11 +182,18 @@ func TestWebFieldCoverage(t *testing.T) {
 				continue
 			}
 			// A nested payload is sent whole (`{ task }`), so the object parse
-			// only ever sees the wrapper key. The web's TS interface is its real
-			// contract for that payload, so read the reach from there.
+			// only ever sees the wrapper key. Read the reach from the VALUES the
+			// web actually passes — not from the payload's TS interface, which
+			// says what is possible and would credit fields no call site sends.
 			if base, leaf, nested := strings.Cut(f, "."); nested {
-				if reached, known := webNestedReaches(t, rt(rpc), base, leaf); known {
-					if reached {
+				if reach, known := webNestedReach(t, rt(rpc), base); known {
+					if len(reach.Unanalyzable) > 0 {
+						t.Errorf("web %s sends its %q payload from a call site this analyzer "+
+							"cannot read: %v\n\nIts field coverage is UNVERIFIED — the audit "+
+							"must not report parity over a payload it did not understand.",
+							rpc, base, reach.Unanalyzable)
+					}
+					if reach.Fields[leaf] {
 						continue
 					}
 					unreached = append(unreached, f)
@@ -187,13 +210,21 @@ func TestWebFieldCoverage(t *testing.T) {
 // rt resolves an RPC name to its audited request type, or nil.
 func rt(rpc string) reflect.Type { return auditedRequests[rpc+"Request"] }
 
-// webNestedReaches reports whether the web can populate a nested payload's field,
-// read from the TypeScript interface that is its contract. known=false means the
-// payload has no mapped TS type, so the caller must fall back to a declaration.
-func webNestedReaches(t *testing.T, root reflect.Type, goBase, jsonLeaf string) (reached, known bool) {
+// webNestedReach returns what the web can actually put in a nested payload,
+// derived from the VALUES it sends rather than the payload's TypeScript type.
+//
+// The distinction is the whole point. TaskUpdate DECLARES seven options; the one
+// call site (web/src/index.ts:862) sends `{ enabled }`. Reading the interface
+// credits the web with six options it cannot reach and reports parity over them
+// — a field missing from the client passing the audit, which is precisely the
+// failure this package exists to prevent.
+//
+// known=false means the payload has no mapped TS type, so the caller falls back
+// to an explicit declaration.
+func webNestedReach(t *testing.T, root reflect.Type, goBase string) (webValueReach, bool) {
 	t.Helper()
 	if root == nil {
-		return false, false
+		return webValueReach{}, false
 	}
 	// goBase arrives as a JSON name; find the field that carries it.
 	var ft reflect.Type
@@ -205,16 +236,16 @@ func webNestedReaches(t *testing.T, root reflect.Type, goBase, jsonLeaf string) 
 		ft = f.Type
 	}
 	if ft == nil {
-		return false, false
+		return webValueReach{}, false
 	}
 	for ft.Kind() == reflect.Pointer {
 		ft = ft.Elem()
 	}
 	tsName, ok := webTSTypes[ft.String()]
 	if !ok {
-		return false, false
+		return webValueReach{}, false
 	}
-	return webTSInterfaceFields(t, tsName)[jsonLeaf], true
+	return webNestedValueReach(t, tsName), true
 }
 
 // TestFieldCoverageHasNoStaleTypes keeps the declarations honest: a request type

@@ -9,6 +9,7 @@ package parity
 // pure table reads, which is what lets this package run on a shared dev box.
 
 import (
+	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -230,22 +231,33 @@ func deriveWebRPCs(t *testing.T) map[string]bool {
 	return out
 }
 
-// webSourceFiles lists the web client's non-test TypeScript sources. Tests are
-// excluded: a mock or fixture naming an RPC is not the client reaching it.
+// webSourceFiles lists the web client's non-test TypeScript sources, RECURSIVELY.
+//
+// Tests are excluded: a mock or fixture naming an RPC is not the client reaching
+// it. Subdirectories are NOT excluded — a flat read would silently skip any
+// module moved into one, and the audit would keep reporting parity over code it
+// never opened. web/src happens to be flat today (web/src/icons holds only image
+// assets), so this changes nothing right now and prevents everything later.
 func webSourceFiles(t *testing.T) []string {
 	t.Helper()
-	dir := filepath.Join(repoRoot(t), webSrcDir)
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		t.Fatalf("read %s: %v", dir, err)
-	}
+	root := filepath.Join(repoRoot(t), webSrcDir)
 	var out []string
-	for _, e := range entries {
-		name := e.Name()
-		if e.IsDir() || !strings.HasSuffix(name, ".ts") || strings.HasSuffix(name, ".test.ts") {
-			continue
+	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
 		}
-		out = append(out, filepath.Join(dir, name))
+		if d.IsDir() {
+			return nil
+		}
+		name := d.Name()
+		if !strings.HasSuffix(name, ".ts") || strings.HasSuffix(name, ".test.ts") {
+			return nil
+		}
+		out = append(out, path)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walk %s: %v", root, err)
 	}
 	sort.Strings(out)
 	return out
@@ -418,3 +430,247 @@ func webTSInterfaceFields(t *testing.T, name string) map[string]bool {
 	}
 	return out
 }
+
+// --- Web nested payloads: what is SENT, not what is TYPED ---------------------
+
+// A wrapper RPC hands its payload through whole (`{ id, update }`), so the
+// call-body parse only ever sees the wrapper key. The obvious next move — read
+// the payload's TypeScript interface — is WRONG in the dangerous direction: the
+// interface says what is POSSIBLE, and a client that never sends a field still
+// passes. `updateTask` is exactly that trap: TaskUpdate declares seven options
+// and the single call site (web/src/index.ts:862) sends `{ enabled }` alone, so
+// typing-based coverage credits the web with six options it cannot reach.
+//
+// So the reach is derived from VALUES: object literals the web actually passes
+// at a T-typed parameter, or returns from a T-returning builder. Anything else
+// at those positions is reported unanalyzable rather than assumed complete.
+
+var tsParamRe = regexp.MustCompile(`function\s+(\w+)\s*\(([^)]*)\)`)
+var tsReturnsRe = regexp.MustCompile(`function\s+(\w+)\s*\([^)]*\)\s*:\s*(\w+)\s*\{`)
+
+// webValueReach is one TS payload type's derived reach.
+type webValueReach struct {
+	Fields       map[string]bool
+	Sites        []string
+	Unanalyzable []string
+}
+
+// webNestedValueReach returns the keys the web can actually put in a payload of
+// the given TypeScript type.
+func webNestedValueReach(t *testing.T, tsType string) webValueReach {
+	t.Helper()
+	out := webValueReach{Fields: map[string]bool{}}
+
+	type paramPos struct {
+		fn  string
+		idx int
+	}
+	var takers []paramPos
+	builders := map[string]bool{}
+
+	files := webSourceFiles(t)
+	srcs := map[string]string{}
+	for _, p := range files {
+		b, err := os.ReadFile(p)
+		if err != nil {
+			t.Fatalf("read %s: %v", p, err)
+		}
+		srcs[p] = string(b)
+	}
+
+	// Who produces this payload, and who SENDS it to the daemon?
+	//
+	// Only api.ts's wrappers count as senders: they are the layer that reaches
+	// af(). A reader that merely takes a TaskData (tasks.ts's triggerSummary,
+	// canTrigger) is not constructing a payload, and counting it would drown the
+	// real findings in noise about functions that only look at tasks.
+	for path, src := range srcs {
+		for _, m := range tsReturnsRe.FindAllStringSubmatch(src, -1) {
+			if m[2] == tsType {
+				builders[m[1]] = true
+			}
+		}
+		if !strings.HasSuffix(path, webAPIFile) {
+			continue
+		}
+		for _, m := range tsParamRe.FindAllStringSubmatch(src, -1) {
+			for i, param := range strings.Split(m[2], ",") {
+				if _, typ, ok := strings.Cut(param, ":"); ok && strings.TrimSpace(typ) == tsType {
+					takers = append(takers, paramPos{fn: m[1], idx: i})
+				}
+			}
+		}
+	}
+
+	// A builder's returned literal is the payload it produces.
+	for _, src := range srcs {
+		for fn := range builders {
+			for _, lit := range objectLiteralsReturnedBy(src, fn) {
+				for _, k := range objectKeys(lit) {
+					out.Fields[k] = true
+				}
+				out.Sites = append(out.Sites, "builder "+fn)
+			}
+		}
+	}
+
+	// And every literal handed to a T-typed parameter.
+	for path, src := range srcs {
+		for _, tk := range takers {
+			for _, argExpr := range callArgsAt(src, tk.fn, tk.idx) {
+				arg := strings.TrimSpace(argExpr)
+				switch {
+				case strings.HasPrefix(arg, "{"):
+					for _, k := range objectKeys(arg) {
+						out.Fields[k] = true
+					}
+					out.Sites = append(out.Sites, tk.fn+"() in "+relSite(t, path))
+				case isBuilderCall(arg, builders):
+					// Covered by the builder's own literal above.
+				default:
+					out.Unanalyzable = append(out.Unanalyzable,
+						tk.fn+"("+arg+") in "+relSite(t, path))
+				}
+			}
+		}
+	}
+	return out
+}
+
+func isBuilderCall(arg string, builders map[string]bool) bool {
+	name, _, ok := strings.Cut(arg, "(")
+	return ok && builders[strings.TrimSpace(name)]
+}
+
+// objectLiteralsReturnedBy returns the object literals a named function returns.
+func objectLiteralsReturnedBy(src, fn string) []string {
+	var out []string
+	re := regexp.MustCompile(`function\s+` + regexp.QuoteMeta(fn) + `\s*\(`)
+	loc := re.FindStringIndex(src)
+	if loc == nil {
+		return nil
+	}
+	body := src[loc[1]:]
+	i := strings.Index(body, "return {")
+	if i < 0 {
+		return nil
+	}
+	if lit := balancedFrom(body[i+len("return "):]); lit != "" {
+		out = append(out, lit)
+	}
+	return out
+}
+
+// callArgsAt returns the argument expression at index idx for every CALL to fn.
+//
+// Three things are deliberately NOT calls, and treating them as such reports
+// noise where the fail-closed findings should be:
+//   - `function fn(...)` — the declaration; its parameter list is a signature.
+//   - `x.fn(...)` — a method on something else that happens to share the name.
+//   - `fn()` with no arguments — e.g. ui.ts's zero-arg actions member.
+func callArgsAt(src, fn string, idx int) []string {
+	var out []string
+	re := regexp.MustCompile(`\b` + regexp.QuoteMeta(fn) + `\s*\(`)
+	for off := 0; off < len(src); {
+		loc := re.FindStringIndex(src[off:])
+		if loc == nil {
+			break
+		}
+		nameStart, parenAt := off+loc[0], off+loc[1]-1
+		off = parenAt + 1
+
+		before := strings.TrimRight(src[:nameStart], " \t\n")
+		if strings.HasSuffix(before, ".") || strings.HasSuffix(before, "function") {
+			continue
+		}
+		args := splitTopLevel(balancedFrom(src[parenAt:]))
+		if idx >= len(args) || strings.TrimSpace(args[idx]) == "" {
+			continue
+		}
+		out = append(out, args[idx])
+	}
+	return out
+}
+
+// balancedFrom returns the balanced bracketed span starting at s[0].
+func balancedFrom(s string) string {
+	if s == "" {
+		return ""
+	}
+	open := s[0]
+	var close byte
+	switch open {
+	case '{':
+		close = '}'
+	case '(':
+		close = ')'
+	default:
+		return ""
+	}
+	depth := 0
+	var quote byte
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if quote != 0 {
+			if c == '\\' {
+				i++
+			} else if c == quote {
+				quote = 0
+			}
+			continue
+		}
+		switch c {
+		case '"', '\'', '`':
+			quote = c
+		case open:
+			depth++
+		case close:
+			depth--
+			if depth == 0 {
+				return s[:i+1]
+			}
+		}
+	}
+	return ""
+}
+
+// splitTopLevel splits a bracketed arg list on depth-1 commas.
+func splitTopLevel(span string) []string {
+	if len(span) < 2 {
+		return nil
+	}
+	inner := span[1 : len(span)-1]
+	var out []string
+	depth, start := 0, 0
+	var quote byte
+	for i := 0; i < len(inner); i++ {
+		c := inner[i]
+		if quote != 0 {
+			if c == '\\' {
+				i++
+			} else if c == quote {
+				quote = 0
+			}
+			continue
+		}
+		switch c {
+		case '"', '\'', '`':
+			quote = c
+		case '{', '[', '(':
+			depth++
+		case '}', ']', ')':
+			depth--
+		case ',':
+			if depth == 0 {
+				out = append(out, inner[start:i])
+				start = i + 1
+			}
+		}
+	}
+	out = append(out, inner[start:])
+	return out
+}
+
+// webAPIFile is the module holding the af() chokepoint wrappers — the only layer
+// that sends a payload to the daemon.
+const webAPIFile = "api.ts"

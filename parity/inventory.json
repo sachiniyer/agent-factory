@@ -1630,6 +1630,32 @@
       "UpdateTask": {
         "update.project_path": {
           "gap": "task.edit.project-path"
+        },
+        "update.cron_expr": {
+          "gap": "task.edit"
+        },
+        "update.name": {
+          "gap": "task.edit"
+        },
+        "update.program": {
+          "gap": "task.edit"
+        },
+        "update.prompt": {
+          "gap": "task.edit"
+        },
+        "update.target_session": {
+          "gap": "task.edit"
+        },
+        "update.watch_cmd": {
+          "gap": "task.edit"
+        }
+      },
+      "AddTask": {
+        "task.last_run_at": {
+          "ok": "Scheduler-owned, never a client input: the daemon stamps it after a run. A surface setting it would be lying about history."
+        },
+        "task.last_run_status": {
+          "ok": "Scheduler-owned, never a client input: the daemon stamps it after a run. A surface setting it would be lying about history."
         }
       }
     }

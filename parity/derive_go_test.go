@@ -175,6 +175,14 @@ func jsonFieldNames(t reflect.Type) map[string]string {
 type requestUse struct {
 	Fields map[string]bool // json field paths this surface provably sets
 	Sites  []string        // file:line of each construction site
+	// Unanalyzable records sites that MENTION this request type in a shape the
+	// walk cannot read — `var r daemon.PreviewRequest` with later field
+	// assignment, a builder, a value returned from elsewhere. Before this
+	// existed such a site simply vanished: the type dropped out of the derived
+	// set, its declarations were never visited, and the audit reported parity
+	// over a call it had not read. An analyzer that cannot understand a
+	// construct must produce a FINDING, not a shrug.
+	Unanalyzable []string
 }
 
 // goSurfaceFiles expands a surface's configured dirs/files into concrete
@@ -234,6 +242,26 @@ func requestTypeName(lit *ast.CompositeLit, pkgName string) string {
 			return ""
 		}
 		return typ.Name
+	}
+	return ""
+}
+
+// requestTypeExprName renders a type expression as a daemon request type name,
+// or "" when it is not one. Mirrors requestTypeName's rules for the qualified
+// and in-package spellings.
+func requestTypeExprName(e ast.Expr, pkgName string) string {
+	switch t := e.(type) {
+	case *ast.SelectorExpr:
+		pkg, ok := t.X.(*ast.Ident)
+		if !ok || pkg.Name != "daemon" || !strings.HasSuffix(t.Sel.Name, "Request") {
+			return ""
+		}
+		return t.Sel.Name
+	case *ast.Ident:
+		if pkgName != "daemon" || !strings.HasSuffix(t.Name, "Request") {
+			return ""
+		}
+		return t.Name
 	}
 	return ""
 }
@@ -359,6 +387,78 @@ func deriveGoRequestUse(t *testing.T, surface string) map[string]*requestUse {
 			t.Fatalf("parse %s: %v", path, err)
 		}
 		pkgName := file.Name.Name
+
+		// Fail closed on a request BUILT in a shape the composite-literal walk
+		// cannot read: `var r daemon.PreviewRequest` with the fields assigned
+		// afterwards. Those are analyzed where possible (below) and reported as
+		// findings where not — never dropped, which is what used to happen.
+		//
+		// A function PARAMETER or RESULT of a request type is deliberately NOT a
+		// construction: the caller builds the value, and that caller is walked
+		// on its own. Counting signatures would flag every wrapper in
+		// control_client.go and drown the real findings in noise.
+		varRequests := map[string]string{} // var name -> request type
+		ast.Inspect(file, func(n ast.Node) bool {
+			spec, ok := n.(*ast.ValueSpec)
+			if !ok || len(spec.Values) > 0 {
+				return true // `var x = expr` is an initialiser, handled below
+			}
+			typeName := requestTypeExprName(spec.Type, pkgName)
+			if typeName == "" {
+				return true
+			}
+			if _, known := auditedRequests[typeName]; !known {
+				return true
+			}
+			for _, id := range spec.Names {
+				varRequests[id.Name] = typeName
+			}
+			use := out[typeName]
+			if use == nil {
+				use = &requestUse{Fields: map[string]bool{}}
+				out[typeName] = use
+			}
+			use.Sites = append(use.Sites, relSite(t, fset.Position(spec.Pos()).String()))
+			return true
+		})
+
+		// Fold in `r.Field = …` assignments against those vars, so a
+		// field-by-field build is analyzed rather than merely flagged.
+		if len(varRequests) > 0 {
+			ast.Inspect(file, func(n ast.Node) bool {
+				as, ok := n.(*ast.AssignStmt)
+				if !ok {
+					return true
+				}
+				for _, lhs := range as.Lhs {
+					sel, ok := lhs.(*ast.SelectorExpr)
+					if !ok {
+						continue
+					}
+					base, ok := sel.X.(*ast.Ident)
+					if !ok {
+						continue
+					}
+					typeName, known := varRequests[base.Name]
+					if !known {
+						continue
+					}
+					if jsonName, ok := jsonFieldNames(auditedRequests[typeName])[sel.Sel.Name]; ok {
+						out[typeName].Fields[jsonName] = true
+					}
+				}
+				return true
+			})
+			// A var declared and never assigned is a build this walk cannot
+			// read — report it rather than crediting an all-zero request.
+			for name, typeName := range varRequests {
+				if len(out[typeName].Fields) == 0 {
+					out[typeName].Unanalyzable = append(out[typeName].Unanalyzable,
+						relSite(t, fset.Position(file.Pos()).String())+" (var "+name+")")
+				}
+			}
+		}
+
 		ast.Inspect(file, func(n ast.Node) bool {
 			lit, ok := n.(*ast.CompositeLit)
 			if !ok {
