@@ -110,9 +110,11 @@ If `delete_cmd` itself fails, af cannot clean up and does not retry. It reports 
 A sandbox may still be running on your infrastructure — delete_cmd could not reap it, and af will not retry.
 launch_cmd ran for session "fix auth bug" (hook name "fix-auth-bug"), so it may hold real resources: a VM, a pod, a cloud sandbox.
 Reap it by hand, then check your provider for anything still running:
-    ./.agent-factory/hooks/delete.sh --name fix-auth-bug
+    './.agent-factory/hooks/delete.sh' --name 'fix-auth-bug'
 delete_cmd error: …
 ```
+
+That command is shell-quoted and safe to paste as-is, whatever your `delete_cmd` path contains.
 
 The same warning is logged whenever `delete_cmd` fails on a kill or an archive, where the sandbox certainly did exist.
 

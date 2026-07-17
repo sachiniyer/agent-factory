@@ -1,8 +1,10 @@
 package session
 
 import (
+	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -220,11 +222,91 @@ func TestHookProvisionReportsOrphanWhenDeleteFails(t *testing.T) {
 	// ...and so does the orphan warning, with everything needed to act on it.
 	assert.Contains(t, msg, "may still be running on your infrastructure")
 	assert.Contains(t, msg, p.slug, "the warning must name the orphaned sandbox's slug")
-	assert.Contains(t, msg, h.delete+" --name "+p.slug, "the warning must give the exact command to reap by hand")
+	// The command, not a hand-built string: TestHookManualReapCommandIsPasteable
+	// proves this one actually runs in a shell, which is the property that matters.
+	assert.Contains(t, msg, p.manualReapCommand(), "the warning must give the exact command to reap by hand")
+	assert.Contains(t, msg, h.delete, "the reap command must name the configured delete_cmd")
 	assert.Contains(t, msg, "the VM is still in CREATING state", "delete_cmd's own output must be surfaced")
 
 	// The resource really is still there — the message is not crying wolf.
 	assert.DirExists(t, h.sandbox(p.slug))
+}
+
+// TestHookManualReapCommandIsPasteable is the #1966 gate: the reap command we
+// print is one we are telling a user to paste into their shell while they are
+// already cleaning up a failed launch, so it must survive a delete_cmd path with
+// shell metacharacters in it.
+//
+// It asserts the EXECUTED EFFECT, not the printed string. A string assertion
+// would happily bless a command that is wrong in a shell — the unquoted form
+// looks perfectly reasonable printed, and only detonates when run.
+func TestHookManualReapCommandIsPasteable(t *testing.T) {
+	// A delete_cmd living under a path with a space AND an apostrophe: unquoted,
+	// the apostrophe opens a quote the shell never closes.
+	dir := t.TempDir()
+	hookDir := filepath.Join(dir, "sachin's hooks $PATH `x`")
+	require.NoError(t, os.MkdirAll(hookDir, 0o755))
+
+	state := filepath.Join(dir, "state")
+	target := filepath.Join(state, "sandboxes", "bills-by-the-hour")
+	bystander := filepath.Join(state, "sandboxes", "someone-elses-session")
+	for _, d := range []string{target, bystander} {
+		require.NoError(t, os.MkdirAll(d, 0o755))
+		require.NoError(t, os.WriteFile(filepath.Join(d, "resource.txt"), []byte("a VM"), 0o644))
+	}
+
+	del := writeHookScript(t, filepath.Join(hookDir, "delete.sh"),
+		fmt.Sprintf(`rm -rf '%s'/sandboxes/"$name"`, state))
+
+	p := &hookProvisioner{
+		hooks: config.RemoteHooks{DeleteCmd: del},
+		spec:  ProvisionSpec{Title: "bills by the hour"},
+		slug:  Slugify("bills by the hour"),
+	}
+	cmdLine := p.manualReapCommand()
+
+	// Paste it into a real shell, exactly as a user would.
+	out, err := exec.Command("sh", "-c", cmdLine).CombinedOutput()
+	require.NoError(t, err,
+		"the command we told the user to paste does not run: %s\noutput: %s", cmdLine, out)
+
+	// It reaped exactly the target...
+	assert.NoDirExists(t, target, "the pasted command did not reap the orphan it names")
+	// ...and nothing else.
+	assert.DirExists(t, bystander, "the pasted command reaped more than the orphan it names")
+
+	// And the warning the user actually reads carries that same command.
+	assert.Contains(t, p.orphanWarning(errors.New("boom")), cmdLine)
+}
+
+// TestShellQuoteSurvivesARealShell backs the helper manualReapCommand relies on.
+// The existing TestShellQuote asserts the produced STRING; this asserts a real
+// shell round-trips the value back unchanged, which is the property that actually
+// matters and the only way to catch an idiom that merely looks right.
+func TestShellQuoteSurvivesARealShell(t *testing.T) {
+	cases := map[string]string{
+		"space":        "a b",
+		"single quote": "sachin's",
+		"double quote": `say "hi"`,
+		"dollar":       "$HOME and ${x}",
+		"backtick":     "`whoami`",
+		"newline":      "line1\nline2",
+		"everything":   "a b'c\"d $e `f` \n g; echo pwned",
+		"semicolon":    "x; echo pwned",
+		"empty":        "",
+	}
+	// Every payload above is INERT on purpose. These strings are fed to a real
+	// shell, so if shellQuote is broken the payload runs — a destructive one
+	// would make this test's failure mode worse than the bug it guards.
+	for name, raw := range cases {
+		t.Run(name, func(t *testing.T) {
+			// printf %s the quoted value: whatever the shell parses must be the
+			// literal original, byte for byte.
+			out, err := exec.Command("sh", "-c", "printf %s "+shellQuote(raw)).CombinedOutput()
+			require.NoError(t, err, "shellQuote(%q) produced a command the shell rejects: %s", raw, out)
+			assert.Equal(t, raw, string(out), "shellQuote(%q) did not survive the shell verbatim", raw)
+		})
+	}
 }
 
 // TestHookReapIsBounded proves the fix does not trade a leak for a hang. Gating

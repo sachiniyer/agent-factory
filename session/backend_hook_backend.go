@@ -128,9 +128,23 @@ func (p *hookProvisioner) orphanWarning(reapErr error) string {
 		"A sandbox may still be running on your infrastructure — delete_cmd could not reap it, and af will not retry.\n"+
 			"launch_cmd ran for session %q (hook name %q), so it may hold real resources: a VM, a pod, a cloud sandbox.\n"+
 			"Reap it by hand, then check your provider for anything still running:\n"+
-			"    %s --name %s\n"+
+			"    %s\n"+
 			"delete_cmd error: %v",
-		p.spec.Title, p.slug, p.hooks.DeleteCmd, p.slug, reapErr)
+		p.spec.Title, p.slug, p.manualReapCommand(), reapErr)
+}
+
+// manualReapCommand is the shell command orphanWarning tells the user to paste.
+// Every interpolated value is shell-quoted, because this command has to be
+// correct exactly when things are messy — which is exactly when names are weird.
+//
+// delete_cmd is an arbitrary user-configured path: a space, an apostrophe, a `$`
+// or a backtick in it yields a command that fails, or worse, runs something other
+// than what it reads like. The slug is already constrained to [a-z0-9-] by
+// Slugify, so quoting it is belt-and-braces — but it costs nothing and the safety
+// then lives here rather than depending on a caller's charset invariant holding
+// forever.
+func (p *hookProvisioner) manualReapCommand() string {
+	return fmt.Sprintf("%s --name %s", shellQuote(p.hooks.DeleteCmd), shellQuote(p.slug))
 }
 
 // normalizeHookWaitDelay converts an exec.ErrWaitDelay into success: the hook
