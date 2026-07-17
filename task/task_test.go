@@ -900,13 +900,40 @@ func TestUpdateTaskKeepsCapWhenStillApplicable(t *testing.T) {
 	assert.Equal(t, 3, merged.MaxConcurrentRuns, "reverting to a session per run keeps the cap applicable")
 }
 
-// TestTargetSessionNormalizedOnWrite is the regression for the whitespace bypass
-// (#1892): validation asked TrimSpace(TargetSession) == "" while deliverTaskPrompt
-// asks the raw TargetSession == "", so a whitespace-only target validated as
-// "creates a session per event" — storing a cap — and then took the
-// target-session path at delivery, silently ignoring that cap. Normalizing on the
-// write path collapses both questions onto one value.
-func TestTargetSessionNormalizedOnWrite(t *testing.T) {
+// TestCanonicalTargetSession pins the canonical form itself: all-whitespace
+// collapses to empty, everything else survives BYTE-IDENTICAL (#1892).
+//
+// The byte-identity half is the load-bearing one. A session title may legally
+// contain leading/trailing spaces — validateTitleAvailableLocked rejects only
+// TrimSpace(title) == "" — and the daemon keys instances on exact title bytes, so
+// trimming a nonempty target would silently redirect the task at a DIFFERENT
+// session: " build " would look up "build", miss it, and then fail on auto-create
+// because the two sanitize to the same git branch and collide.
+func TestCanonicalTargetSession(t *testing.T) {
+	for _, tc := range []struct {
+		name, in, want string
+	}{
+		{"empty stays empty", "", ""},
+		{"spaces collapse to no target", "   ", ""},
+		{"mixed whitespace collapses to no target", " \t\n ", ""},
+		{"a plain title is untouched", "build", "build"},
+		{"a padded title keeps its bytes", " build ", " build "},
+		{"an inner space is untouched", "my build", "my build"},
+		{"a tab-padded title keeps its bytes", "\tbuild", "\tbuild"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, CanonicalTargetSession(tc.in))
+		})
+	}
+}
+
+// TestTargetSessionCanonicalizedOnWrite is the regression for the whitespace
+// bypass (#1892): validation asked TrimSpace(TargetSession) == "" while
+// deliverTaskPrompt asks the raw TargetSession == "", so a whitespace-only target
+// validated as "creates a session per event" — storing a cap — and then took the
+// target-session path at delivery, silently ignoring that cap. One canonical form
+// on both sides collapses the two questions onto one value.
+func TestTargetSessionCanonicalizedOnWrite(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 
 	require.NoError(t, AddTask(Task{
@@ -915,7 +942,7 @@ func TestTargetSessionNormalizedOnWrite(t *testing.T) {
 	}))
 	got, err := GetTask("cap1892i")
 	require.NoError(t, err)
-	assert.Equal(t, "", got.TargetSession, "a whitespace-only target session must normalize to empty on write")
+	assert.Equal(t, "", got.TargetSession, "a whitespace-only target session must canonicalize to empty on write")
 	assert.Equal(t, 3, got.MaxConcurrentRuns, "with no real target session the cap is applicable and enforced")
 
 	// And through the update path.
@@ -923,5 +950,65 @@ func TestTargetSessionNormalizedOnWrite(t *testing.T) {
 	merged, err := UpdateTask("cap1892i", TaskUpdate{TargetSession: &ws})
 	require.NoError(t, err)
 	assert.Equal(t, "", merged.TargetSession)
-	assert.Equal(t, 3, merged.MaxConcurrentRuns, "normalizing to empty keeps the cap applicable rather than silently voiding it")
+	assert.Equal(t, 3, merged.MaxConcurrentRuns, "canonicalizing to empty keeps the cap applicable rather than silently voiding it")
+}
+
+// TestPaddedTargetSessionSurvivesWriteVerbatim: the write path must NOT trim a
+// nonempty target. Trimming would redirect the task to a different session than
+// the user named — the defect a plain "normalize the field" fix introduces.
+func TestPaddedTargetSessionSurvivesWriteVerbatim(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+
+	require.NoError(t, AddTask(Task{
+		ID: "cap1892j", Name: "w", WatchCmd: "tail -f x",
+		TargetSession: " build ", Enabled: true,
+	}))
+	got, err := GetTask("cap1892j")
+	require.NoError(t, err)
+	assert.Equal(t, " build ", got.TargetSession, "a padded title is a legal, distinct session; trimming it would deliver to the wrong session")
+
+	padded := "\tdeploy "
+	merged, err := UpdateTask("cap1892j", TaskUpdate{TargetSession: &padded})
+	require.NoError(t, err)
+	assert.Equal(t, "\tdeploy ", merged.TargetSession, "the update path must store the target byte-identically too")
+}
+
+// TestLegacyWhitespaceTargetCanonicalizedByCapOnlyUpdate is the regression for
+// the cap breach surviving on the legacy path (#1892). A task written before the
+// canonical rule can hold a whitespace-only target on disk. A patch that touches
+// ONLY the cap never mentions TargetSession, so canonicalization gated on
+// "u.TargetSession != nil" would skip it entirely: ValidateTrigger then reads the
+// target as empty and accepts the cap, while deliverTaskPrompt reads the raw
+// value, takes the target-session path, and never passes the cap to
+// CreateSession. The cap is silently ignored — reachable by simply not mentioning
+// the field.
+func TestLegacyWhitespaceTargetCanonicalizedByCapOnlyUpdate(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+
+	// A legacy record: whitespace-only target, no cap. Written past AddTask's
+	// canonicalization to reproduce what is already on disk for pre-upgrade users.
+	require.NoError(t, AddTask(Task{ID: "cap1892k", Name: "w", WatchCmd: "tail -f x", Enabled: true}))
+	tasks, err := LoadTasks()
+	require.NoError(t, err)
+	for i := range tasks {
+		if tasks[i].ID == "cap1892k" {
+			tasks[i].TargetSession = "   "
+		}
+	}
+	require.NoError(t, saveTasks(tasks))
+	stored, err := GetTask("cap1892k")
+	require.NoError(t, err)
+	require.Equal(t, "   ", stored.TargetSession, "the legacy record must start out un-canonical for this to test anything")
+
+	// The cap-only patch: it never mentions TargetSession.
+	cap2 := 2
+	merged, err := UpdateTask("cap1892k", TaskUpdate{MaxConcurrentRuns: &cap2})
+	require.NoError(t, err)
+	assert.Equal(t, 2, merged.MaxConcurrentRuns, "the cap was accepted")
+	assert.Equal(t, "", merged.TargetSession,
+		"a cap-only patch must still canonicalize the merged target: left as \"   \", validation accepts the cap while delivery takes the target-session path and drops it")
+
+	reloaded, err := GetTask("cap1892k")
+	require.NoError(t, err)
+	assert.Equal(t, "", reloaded.TargetSession, "and the canonical form must reach disk, not just the returned record")
 }

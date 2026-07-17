@@ -35,6 +35,8 @@ A task with both triggers set is always invalid. An enabled task must have exact
 
 `max_concurrent_runs` is rejected on a cron task or one with a `target_session` set, rather than stored and ignored: overlapping cron fires already coalesce, and deliveries into a single target session already serialize, so there would be nothing for the cap to bound.
 
+An **all-whitespace** `target_session` means the same thing as an empty one — create a session per fire — and is stored as empty. A session title is otherwise kept **exactly** as written, including any leading or trailing spaces: titles are matched byte-for-byte at delivery, so a task targeting `" build "` keeps looking for `" build "` and is never silently re-pointed at `"build"`.
+
 ## Cron tasks
 
 `cron_expr` is a standard 5-field expression (`minute hour day-of-month month day-of-week`) with Vixie semantics, including the DOM/DOW OR rule when both fields are restricted. The daemon evaluates expressions in-process — what you write is exactly what is evaluated, with no conversion to OS timer formats.

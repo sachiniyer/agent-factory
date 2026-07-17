@@ -120,7 +120,7 @@ func (t Task) ValidateTrigger() error {
 		if !hasWatch {
 			return fmt.Errorf("task %s sets max_concurrent_runs but is not a watch task; the cap bounds a watch task's in-flight sessions, and overlapping cron fires already coalesce", t.ID)
 		}
-		if strings.TrimSpace(t.TargetSession) != "" {
+		if CanonicalTargetSession(t.TargetSession) != "" {
 			return fmt.Errorf("task %s sets both max_concurrent_runs and target_session; deliveries into one session already serialize, so drop the cap or drop the target session", t.ID)
 		}
 	}
@@ -228,10 +228,10 @@ func AddTask(t Task) error {
 	if err := ValidateTaskID(t.ID); err != nil {
 		return err
 	}
-	// Normalize before validating so validation judges exactly what will be
+	// Canonicalize before validating so validation judges exactly what will be
 	// stored — a whitespace-only target session must not validate as "no target
 	// session" and then behave as one at delivery time (#1892).
-	t.normalizeTargetSession()
+	t.canonicalizeTargetSession()
 	if err := t.ValidateTrigger(); err != nil {
 		return err
 	}
@@ -511,9 +511,6 @@ func (u TaskUpdate) apply(t Task) Task {
 	}
 	if u.TargetSession != nil {
 		t.TargetSession = *u.TargetSession
-		// Normalize on the way in so the cap rules below, ValidateTrigger, and
-		// deliverTaskPrompt all judge the same value (#1892).
-		t.normalizeTargetSession()
 	}
 	if u.MaxConcurrentRuns != nil {
 		t.MaxConcurrentRuns = *u.MaxConcurrentRuns
@@ -527,6 +524,17 @@ func (u TaskUpdate) apply(t Task) Task {
 	if u.Enabled != nil {
 		t.Enabled = *u.Enabled
 	}
+	// Canonicalize the MERGED target, unconditionally — never gated on
+	// u.TargetSession != nil (#1892). Gating it there left the original defect live
+	// on the legacy path: a task written before this rule can hold a whitespace-only
+	// target on disk, and a patch that touches only the cap never enters the branch
+	// that would fix it. ValidateTrigger would then read the target as empty and
+	// accept the cap, while delivery read the raw value, took the target-session
+	// path, and never passed the cap to CreateSession — the silently-ignored cap
+	// this PR exists to close, reachable by simply not mentioning the field. Every
+	// write now canonicalizes what it is about to store, so the record cannot
+	// persist a value the two sides would read differently.
+	t.canonicalizeTargetSession()
 	// Drop a cap the merged record can no longer carry, unless this patch set it
 	// explicitly (#1892). A partial patch that only moves the trigger or the
 	// delivery mode — which is every non-CLI writer, since DiffTask sends just the
@@ -535,7 +543,8 @@ func (u TaskUpdate) apply(t Task) Task {
 	// the whole save. The rule lives here, in the shared merge, so the daemon,
 	// TUI, API, and CLI all get it; an explicitly-patched cap is left alone so a
 	// contradictory request still surfaces as an error instead of being silently
-	// dropped.
+	// dropped. It runs AFTER the canonicalization above, which decides what
+	// capApplies sees.
 	if u.MaxConcurrentRuns == nil {
 		t.clearInapplicableCap()
 	}
@@ -547,13 +556,12 @@ func (u TaskUpdate) apply(t Task) Task {
 // watch task that creates them (#1892). Cron fires already coalesce on RunTask's
 // lock, and target-session deliveries already serialize into one session.
 //
-// The TargetSession test is trimmed to match deliverTaskPrompt's runtime
-// "create a session per event" condition — the two must agree on what an empty
-// target session is, or a cap could validate against one condition and be
-// bypassed at delivery by the other. normalizeTargetSession is what keeps them
-// in sync on the write path.
+// The TargetSession test goes through CanonicalTargetSession, the same function
+// deliverTaskPrompt's runtime "create a session per event" condition uses — the
+// two must agree on what an empty target session is, or a cap could validate
+// against one condition and be bypassed at delivery by the other.
 func (t Task) capApplies() bool {
-	return t.IsWatch() && strings.TrimSpace(t.TargetSession) == ""
+	return t.IsWatch() && CanonicalTargetSession(t.TargetSession) == ""
 }
 
 // clearInapplicableCap drops a stale positive cap from a task whose shape can no
@@ -564,18 +572,43 @@ func (t *Task) clearInapplicableCap() {
 	}
 }
 
-// normalizeTargetSession trims the stored target session so validation and the
-// runtime agree on what "no target session" means (#1892). ValidateTrigger and
-// capApplies test TrimSpace(TargetSession) == "", but deliverTaskPrompt tests the
-// RAW t.TargetSession == "": a whitespace-only value therefore validated as
-// "creates a session per event" (so a cap was accepted and stored) while delivery
-// took the target-session path and never passed the cap to CreateSession, quietly
-// ignoring it. Normalizing on the write path collapses the two conditions onto one
-// value rather than leaving two call-sites to agree forever. Whitespace-only was
-// never a usable session title anyway — it now means the same thing as empty:
-// create a session per run.
-func (t *Task) normalizeTargetSession() {
-	t.TargetSession = strings.TrimSpace(t.TargetSession)
+// CanonicalTargetSession is THE canonical form of a target session title, and the
+// single answer to "does this task have a target session?" (#1892). Every side
+// must ask it — the write path, ValidateTrigger, capApplies, and
+// deliverTaskPrompt — because a cap is accepted based on this question and then
+// enforced based on it again. Two call-sites answering it differently is exactly
+// the defect this function exists to remove: validation once read
+// TrimSpace(TargetSession) == "" while delivery read the RAW TargetSession == "",
+// so a whitespace-only target validated as "creates a session per event" (cap
+// accepted and stored) and then took the target-session path at delivery, which
+// never passes the cap to CreateSession. The cap was silently ignored.
+//
+// The rule:
+//
+//   - An ALL-WHITESPACE value means no target session. It was never a usable
+//     title — validateTitleAvailableLocked rejects TrimSpace(title) == "" on
+//     every creation path — so it can only ever have been a typo for empty.
+//
+//   - Any other value is returned BYTE-IDENTICAL. It is NOT trimmed, and this is
+//     the load-bearing half. A session title may legally contain leading or
+//     trailing spaces: title validation rejects only all-whitespace, and the
+//     daemon keys its instances on the exact title bytes. Trimming a nonempty
+//     target would therefore silently REDIRECT the task to a different session —
+//     a task aimed at " build " would look up "build", miss it, and then fail on
+//     auto-create, because " build " and "build" sanitize to the same git branch
+//     and collide. Titles are not canonicalized globally, so the stored target
+//     must stay byte-identical to what delivery looks up.
+func CanonicalTargetSession(target string) string {
+	if strings.TrimSpace(target) == "" {
+		return ""
+	}
+	return target
+}
+
+// canonicalizeTargetSession puts the stored target into canonical form. Applied
+// on every write, unconditionally — see apply.
+func (t *Task) canonicalizeTargetSession() {
+	t.TargetSession = CanonicalTargetSession(t.TargetSession)
 }
 
 // TaskEdit pairs a task ID with the field-level patch to apply to it. The TUI's
