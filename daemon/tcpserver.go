@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"net"
 	"net/http"
-	"strings"
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/log"
@@ -60,36 +59,6 @@ type tokenGatePolicy struct {
 	loopbackExempt bool
 }
 
-// isLoopbackListenAddr reports whether a listen_addr binds ONLY the loopback
-// interface (127.0.0.1 / ::1 / localhost). It governs the loopback token
-// exemption, and the distinction is load-bearing for security now that the
-// recommended way to add TLS is a same-host reverse proxy:
-//
-// A reverse proxy on the same host (nginx/Caddy terminating TLS) connects to the
-// daemon from 127.0.0.1, so EVERY request it forwards has a loopback RemoteAddr —
-// indistinguishable from a genuine same-machine user. If the loopback exemption
-// applied on a network-bound listener, all proxied traffic would skip the token
-// and reach the control plane unauthenticated. So the exemption is safe ONLY when
-// the listener itself is loopback-bound (where a loopback RemoteAddr truly is a
-// local peer). On a NETWORK bind (0.0.0.0, a routable/Tailscale IP, or an empty
-// host = every interface) the exemption is withheld and the token is required for
-// all peers, loopback-origin included. An unparseable address fails safe to "not
-// loopback" (token enforced).
-func isLoopbackListenAddr(addr string) bool {
-	host, _, err := net.SplitHostPort(strings.TrimSpace(addr))
-	if err != nil {
-		host = strings.TrimSpace(addr)
-	}
-	if host == "" {
-		return false // empty host binds every interface — network-reachable
-	}
-	if strings.EqualFold(host, "localhost") {
-		return true
-	}
-	ip := net.ParseIP(host)
-	return ip != nil && ip.IsLoopback()
-}
-
 // webListenerPolicy is the token-gate posture for the daemon's own listen_addr
 // web listener, derived from config. It relaxes the strict zero value in exactly
 // two ways, and the loopback relaxation is bind-aware:
@@ -114,7 +83,7 @@ func isLoopbackListenAddr(addr string) bool {
 func webListenerPolicy(cfg *config.Config) tokenGatePolicy {
 	return tokenGatePolicy{
 		tokenDisabled:  !cfg.RequireToken,
-		loopbackExempt: isLoopbackListenAddr(cfg.ListenAddr) && !cfg.RequireLoopbackToken,
+		loopbackExempt: config.IsLoopbackListenAddr(cfg.ListenAddr) && !cfg.RequireLoopbackToken,
 	}
 }
 

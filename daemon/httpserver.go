@@ -126,7 +126,7 @@ func startHTTPServer(manager *Manager, scheduler *taskScheduler, watchers *watch
 		// listener never exempts loopback: a same-host reverse proxy connects from
 		// 127.0.0.1, so exempting it would bypass the token (webListenerPolicy).
 		policy := webListenerPolicy(manager.cfg)
-		if policy.tokenDisabled && !isLoopbackListenAddr(manager.cfg.ListenAddr) {
+		if policy.tokenDisabled && !config.IsLoopbackListenAddr(manager.cfg.ListenAddr) {
 			// Tokenless is the DEFAULT (require_token=false), so warning on it alone
 			// would fire on every ordinary loopback start and train operators to
 			// ignore the line. The dangerous combination is tokenless AND
@@ -146,7 +146,7 @@ func startHTTPServer(manager *Manager, scheduler *taskScheduler, watchers *watch
 				log.InfoLog.Printf("  all peers connect with NO token (require_token defaults to false; set require_token = true to require auth)")
 			case policy.loopbackExempt:
 				log.InfoLog.Printf("  loopback peers (127.0.0.1/::1) connect with no token; network peers must present the token above")
-			case isLoopbackListenAddr(manager.cfg.ListenAddr):
+			case config.IsLoopbackListenAddr(manager.cfg.ListenAddr):
 				log.InfoLog.Printf("  require_loopback_token=true: every peer (loopback included) must present the token above")
 			default:
 				log.InfoLog.Printf("  listener is network-bound: every peer must present the token above, INCLUDING loopback-origin requests — a same-host reverse proxy is NOT exempt (front it and let the proxy pass the token, or set require_token=false only on a fully trusted network)")

@@ -96,6 +96,13 @@ func RunDaemon(cfg *config.Config) error {
 	// an editor, and a SIGTERM moments later would orphan it. Deferring at the
 	// point of construction makes the stop unconditional on how far startup got.
 	defer manager.vscode.Stop()
+	// Same reasoning, same place: a config agent is a bare tmux session with no
+	// Instance, so NOTHING else knows it exists — not instances.json, not the
+	// roster, not the restore loop. If this daemon exits without reaping them
+	// they are orphans no future daemon can find, which is the #1093/#1104 class
+	// this repo has already been bitten by. Registered at construction so the
+	// warm-up exit paths (SIGTERM, the Shutdown RPC) cannot skip it.
+	defer manager.configAgents.Stop()
 
 	scheduler := newTaskScheduler()
 	watchers := newWatcherSupervisor()

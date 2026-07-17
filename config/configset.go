@@ -58,16 +58,52 @@ type settableKeySpec struct {
 	validate func(leaf, value string) error
 }
 
-// settableKeySpecs is the allowlist. Scalars + the two simple string maps only;
-// root_agents (nested table) and [keys] (array-capable rebinds) are
-// intentionally excluded from v1 and stay hand-edited.
+// settableKeySpecs is the allowlist. Scalars + the two simple string maps only.
+//
+// Every EXCLUSION is deliberate and stated here, because an unexplained gap is
+// indistinguishable from drift — and was: listen_addr, require_loopback_token,
+// vscode_server_binary, limit_auto_resume and limit_retry_interval were all
+// missing for no stated reason, which left the config agent unable
+// to set two of the keys a new user most needs (listen_addr,
+// require_loopback_token). TestManifestAgreesWithSettableKeys now pins this map
+// against the config manifest, so a key can no longer go missing quietly: adding
+// a Settable entry to the manifest without an entry here fails the test, and
+// vice versa.
+//
+// Structural values stay hand-edited, and the manifest marks them Settable:false:
+//   - root_agents — a nested table (path → {program, auto_yes}); no scalar shape.
+//   - theme — a color table (see ThemeConfig); setting one slot at a time through
+//     the CLI is not how anyone edits a palette.
+//   - keys — array-capable rebinds (an action may map to a list of keys).
+//   - cors_allowed_origins — a LIST of origins, and the only excluded key that is
+//     otherwise scalar-ish. It needs real design first, not a spec entry: this
+//     file's machinery is scalar-only end to end (cfgValueKind has no list kind,
+//     canonicalizeScalar returns one encoded scalar, setTOMLScalar writes one
+//     `key = value` line), and a list also needs a decided WRITE SEMANTIC —
+//     whether `set` replaces the whole list, appends to it, or gets add/remove
+//     verbs — which is a CLI contract choice, not an implementation detail.
+//     Deferred rather than guessed.
 var settableKeySpecs = map[string]settableKeySpec{
 	"default_program": {kind: cfgString, validate: func(_, v string) error {
 		return ValidateProgramEnum("default_program", "default_program", v, "")
 	}},
-	"auto_yes":             {kind: cfgBool},
-	"auto_update":          {kind: cfgBool},
-	"require_token":        {kind: cfgBool},
+	"auto_yes":               {kind: cfgBool},
+	"auto_update":            {kind: cfgBool},
+	"require_token":          {kind: cfgBool},
+	"require_loopback_token": {kind: cfgBool},
+	"listen_addr": {kind: cfgString, validate: func(_, v string) error {
+		return validateListenAddrValue(v)
+	}},
+	// Empty is meaningful (detect code-server/openvscode-server on PATH) and any
+	// non-empty value is a path the daemon resolves — including a "~" it expands
+	// and a binary that may not exist yet — so there is nothing to validate here
+	// that would not reject a legitimate value. The executability check belongs
+	// where the binary is actually run, and already lives there.
+	"vscode_server_binary": {kind: cfgString},
+	"limit_auto_resume":    {kind: cfgBool},
+	"limit_retry_interval": {kind: cfgString, validate: func(_, v string) error {
+		return validateLimitRetryIntervalValue(v)
+	}},
 	"daemon_poll_interval": {kind: cfgInt, validate: func(_, v string) error { return requirePositiveInt("daemon_poll_interval", v) }},
 	"log_max_size_mb":      {kind: cfgInt, validate: func(_, v string) error { return requirePositiveInt("log_max_size_mb", v) }},
 	"log_max_backups":      {kind: cfgInt, validate: func(_, v string) error { return requireNonNegativeInt("log_max_backups", v) }},
@@ -150,6 +186,58 @@ type SetResult struct {
 	// change applies to af and the daemon on their next start, exactly like a
 	// hand-edit.
 	RequiresRestart bool `json:"requires_restart"`
+	// Warnings are non-fatal notes about what the write actually means, printed
+	// after the echo. The write SUCCEEDED — a warning never blocks or changes the
+	// value. Today the only one is the tokenless-network-listener exposure
+	// (exposureWarning).
+	Warnings []string `json:"warnings,omitempty"`
+}
+
+// exposureWarning returns a warning when the config that RESULTS from this set
+// serves an unauthenticated control plane to the network — the combination of a
+// non-loopback listen_addr and require_token = false.
+//
+// It exists because this is now easy to do by accident. Before `listen_addr`
+// became settable, exposing the listener took a deliberate hand-edit; now it is
+// one command that exits 0 and prints nothing. The daemon already knows this
+// pairing is dangerous and warns about exactly it (daemon/httpserver.go) — but
+// only into the log, at the next daemon start, which is neither where nor when
+// the user is looking. This says it at the moment they type it.
+//
+// It WARNS and nothing more: it does not refuse (that would break scripting) and
+// does not auto-set require_token (silently changing a key the user did not name
+// is worse than the surprise it prevents). The user stays in control; they just
+// stop being surprised.
+//
+// Both directions of the pairing are checked, because either key can create the
+// exposure: pointing listen_addr at the network while the token is off, or
+// turning the token off while listen_addr is already on the network.
+//
+// The loopback test is config.IsLoopbackListenAddr — the SAME predicate the
+// daemon's token gate uses. Two definitions of "is this loopback" drifting apart
+// is precisely how a security check rots, so there is only one.
+func exposureWarning(cfg *Config, key, canonical string) string {
+	if cfg == nil {
+		return ""
+	}
+	addr, tokenRequired := cfg.ListenAddr, cfg.RequireToken
+	switch key {
+	case "listen_addr":
+		addr = canonical
+	case "require_token":
+		tokenRequired = canonical == "true"
+	default:
+		return ""
+	}
+	// An empty listen_addr disables the web server outright: nothing is exposed.
+	if addr == "" || tokenRequired || IsLoopbackListenAddr(addr) {
+		return ""
+	}
+	return fmt.Sprintf("WARNING: %s is reachable from the network and require_token is false, so anyone who can "+
+		"reach it has full control of your agents and this machine — af serves a plain-HTTP control plane with no "+
+		"authentication in this configuration. Run `af config set require_token true` to require a token "+
+		"(`af token` prints it), or set listen_addr back to a loopback address such as 127.0.0.1:8443, or \"\" to "+
+		"turn the web server off.", addr)
 }
 
 // resolveSettable maps a user key ("default_program" or "program_overrides.claude")
@@ -192,8 +280,12 @@ func SetGlobalConfigValue(key, rawValue string) (*SetResult, error) {
 
 	// Ensure config.toml exists (migrating a legacy config.json if needed) and
 	// that the current config actually loads, so a later parse failure is
-	// unambiguously our edit's fault, not a pre-existing broken file.
-	if _, err := LoadConfig(); err != nil {
+	// unambiguously our edit's fault, not a pre-existing broken file. The loaded
+	// config is KEPT: exposureWarning needs the values this write lands on to
+	// judge the resulting posture — a listen_addr write is only dangerous in the
+	// company of require_token = false, and vice versa.
+	currentCfg, err := LoadConfig()
+	if err != nil {
 		return nil, fmt.Errorf("refusing to write: the current config does not load: %w", err)
 	}
 	configDir, err := GetConfigDir()
@@ -221,6 +313,9 @@ func SetGlobalConfigValue(key, rawValue string) (*SetResult, error) {
 			return err
 		}
 		result = &SetResult{Key: key, Value: canonical, Path: tomlPath, RequiresRestart: true}
+		if w := exposureWarning(currentCfg, key, canonical); w != "" {
+			result.Warnings = append(result.Warnings, w)
+		}
 		return nil
 	})
 	if writeErr != nil {

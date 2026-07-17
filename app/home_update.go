@@ -264,6 +264,10 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleProjectDeleted(msg)
 	case limitRetriedMsg:
 		return m.handleLimitRetried(msg)
+	case configAgentSpawnedMsg:
+		return m.handleConfigAgentSpawned(msg)
+	case configAgentDoneMsg:
+		return m.handleConfigAgentDone(msg)
 	case repaintAfterDetachMsg:
 		// Trigger an immediate repaint with whatever content is already
 		// cached on the panes (rendered when bubbletea's main loop calls

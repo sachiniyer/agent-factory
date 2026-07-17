@@ -363,3 +363,223 @@ func TestSettableKeysSorted(t *testing.T) {
 		}
 	}
 }
+
+// TestValidateLimitRetryIntervalValue pins the `af config set
+// limit_retry_interval` rule against sanitizeLimitRetryInterval's semantics: an
+// empty value is the meaningful "never retry" setting, and anything else must be
+// a non-negative Go duration. The two differ on purpose in one respect — the
+// loader warns and falls back to the default, set hard-errors — so a typo is
+// reported to the user who typed it instead of silently mis-timing auto-resume.
+func TestValidateLimitRetryIntervalValue(t *testing.T) {
+	cases := []struct {
+		value   string
+		wantErr bool
+	}{
+		{"", false}, // the explicit "never retry" value
+		{"30m", false},
+		{"1h", false},
+		{"90s", false},
+		{"1h30m", false},
+		{"0", false},
+		{"-5m", true},
+		{"30", true}, // no unit: not a Go duration
+		{"soon", true},
+	}
+	for _, c := range cases {
+		err := validateLimitRetryIntervalValue(c.value)
+		if c.wantErr && err == nil {
+			t.Errorf("validateLimitRetryIntervalValue(%q) = nil, want an error", c.value)
+		}
+		if !c.wantErr && err != nil {
+			t.Errorf("validateLimitRetryIntervalValue(%q) = %v, want nil", c.value, err)
+		}
+	}
+}
+
+// TestSetGlobalConfigValueNewlySettableKeys is the end-to-end proof for the five
+// keys added to the allowlist after they had silently drifted out of it.
+// Each must write, survive a real load, and come back as the value that was set
+// — a spec entry alone would not prove the key is reachable through
+// SetGlobalConfigValue.
+//
+// listen_addr and require_loopback_token are the load-bearing pair: they are
+// tier-1 keys the config agent could not previously set at all.
+func TestSetGlobalConfigValueNewlySettableKeys(t *testing.T) {
+	cases := []struct {
+		key   string
+		value string
+		check func(*Config) any
+	}{
+		{"listen_addr", "0.0.0.0:9443", func(c *Config) any { return c.ListenAddr }},
+		// The documented opt-out: "" disables the web server, so it must be
+		// settable, not treated as a missing argument.
+		{"listen_addr", "", func(c *Config) any { return c.ListenAddr }},
+		{"require_loopback_token", "true", func(c *Config) any { return c.RequireLoopbackToken }},
+		{"vscode_server_binary", "/opt/code-server/bin/code-server", func(c *Config) any { return c.VSCodeServerBinary }},
+		// Empty means PATH detection — also a real value.
+		{"vscode_server_binary", "", func(c *Config) any { return c.VSCodeServerBinary }},
+		{"limit_auto_resume", "true", func(c *Config) any { return c.LimitAutoResume }},
+		{"limit_retry_interval", "45m", func(c *Config) any { return c.LimitRetryInterval }},
+	}
+
+	for _, c := range cases {
+		t.Run(c.key+"="+c.value, func(t *testing.T) {
+			writeTempConfig(t, "default_program = 'claude'\n")
+
+			if _, err := SetGlobalConfigValue(c.key, c.value); err != nil {
+				t.Fatalf("set %s=%q: %v", c.key, c.value, err)
+			}
+			cfg, err := LoadConfig()
+			if err != nil {
+				t.Fatalf("config written by set %s=%q does not load: %v", c.key, c.value, err)
+			}
+
+			want := any(c.value)
+			switch c.value {
+			case "true":
+				want = true
+			case "false":
+				want = false
+			}
+			if got := c.check(cfg); got != want {
+				t.Fatalf("after set %s=%q, loaded value = %#v, want %#v", c.key, c.value, got, want)
+			}
+		})
+	}
+}
+
+// TestSetGlobalConfigValueRejectsInvalidNewKeys pins the validators on the newly
+// settable keys, and that a rejection writes nothing.
+func TestSetGlobalConfigValueRejectsInvalidNewKeys(t *testing.T) {
+	cases := []struct{ key, val, wantSub string }{
+		{"listen_addr", "8443", "listen_addr"},            // no port
+		{"listen_addr", "foo:bar", "listen_addr"},         // unknown service
+		{"listen_addr", "127.0.0.1:99999", "listen_addr"}, // port out of range
+		{"limit_retry_interval", "soon", "limit_retry_interval"},
+		{"limit_retry_interval", "-5m", "limit_retry_interval"},
+		{"require_loopback_token", "yesplease", "boolean"},
+		{"limit_auto_resume", "maybe", "boolean"},
+	}
+	for _, c := range cases {
+		t.Run(c.key+"="+c.val, func(t *testing.T) {
+			path := writeTempConfig(t, "default_program = 'claude'\n")
+			before, _ := os.ReadFile(path)
+
+			_, err := SetGlobalConfigValue(c.key, c.val)
+			if err == nil {
+				t.Fatalf("set %s=%q: expected an error", c.key, c.val)
+			}
+			if !strings.Contains(err.Error(), c.wantSub) {
+				t.Errorf("error %q does not mention %q", err.Error(), c.wantSub)
+			}
+			after, _ := os.ReadFile(path)
+			if string(after) != string(before) {
+				t.Fatalf("config must be untouched when %s is invalid.\n before: %q\n after:  %q", c.key, before, after)
+			}
+		})
+	}
+}
+
+// TestSetGlobalConfigValueStillRejectsStructuralKeys locks the deliberate
+// exclusions in place. Widening the allowlist must not have made the
+// structural tables settable by accident: root_agents, [theme] and the [keys]
+// rebinds have no scalar shape, and cors_allowed_origins is a list whose write
+// semantics (replace? append?) are an undecided CLI contract. The manifest marks
+// all four Settable: false, and TestManifestAgreesWithSettableKeys ties that
+// claim to this rejection.
+func TestSetGlobalConfigValueStillRejectsStructuralKeys(t *testing.T) {
+	writeTempConfig(t, "default_program = 'claude'\n")
+	for _, key := range []string{"theme", "root_agents", "keys", "cors_allowed_origins", "schema_version"} {
+		if _, err := SetGlobalConfigValue(key, "x"); err == nil {
+			t.Errorf("`af config set %s` must be rejected — it is not a settable scalar key", key)
+		}
+	}
+}
+
+// TestSetGlobalConfigValueWarnsOnTokenlessNetworkListener is the guardrail for
+// the exposure this PR made easy. Before listen_addr was settable, putting the
+// control plane on the network took a deliberate hand-edit; now it is one
+// command. `af config set listen_addr 0.0.0.0:8443` exits 0, and with
+// require_token defaulting to false the result is a full, unauthenticated,
+// plain-HTTP control plane for anyone who can route to it.
+//
+// The write still SUCCEEDS — this warns, it does not refuse (that would break
+// scripting) and does not auto-set require_token (silently changing a key the
+// user did not name is worse than the surprise it prevents).
+func TestSetGlobalConfigValueWarnsOnTokenlessNetworkListener(t *testing.T) {
+	cases := []struct {
+		name     string
+		seed     string
+		key, val string
+		wantWarn bool
+	}{
+		// The dangerous move, from either direction.
+		{"network listener while token off", "default_program = 'claude'\n", "listen_addr", "0.0.0.0:8443", true},
+		{"token off while listener is network", "default_program = 'claude'\nlisten_addr = '0.0.0.0:8443'\nrequire_token = true\n", "require_token", "false", true},
+		{"routable ip while token off", "default_program = 'claude'\n", "listen_addr", "192.168.1.50:8443", true},
+		{"empty host binds every interface", "default_program = 'claude'\n", "listen_addr", ":8443", true},
+
+		// Safe: loopback stays loopback.
+		{"loopback default", "default_program = 'claude'\n", "listen_addr", "127.0.0.1:8443", false},
+		{"ipv6 loopback", "default_program = 'claude'\n", "listen_addr", "[::1]:8443", false},
+		{"localhost", "default_program = 'claude'\n", "listen_addr", "localhost:9000", false},
+		// Safe: the web server is off entirely.
+		{"empty disables the server", "default_program = 'claude'\n", "listen_addr", "", false},
+		// Safe: network bind but the token is already required.
+		{"network listener with token on", "default_program = 'claude'\nrequire_token = true\n", "listen_addr", "0.0.0.0:8443", false},
+		{"token on while listener is network", "default_program = 'claude'\nlisten_addr = '0.0.0.0:8443'\n", "require_token", "true", false},
+		// Unrelated keys never warn.
+		{"unrelated key", "default_program = 'claude'\nlisten_addr = '0.0.0.0:8443'\n", "auto_yes", "true", false},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			writeTempConfig(t, c.seed)
+			res, err := SetGlobalConfigValue(c.key, c.val)
+			if err != nil {
+				t.Fatalf("set %s=%q: %v", c.key, c.val, err)
+			}
+			gotWarn := len(res.Warnings) > 0
+			if gotWarn != c.wantWarn {
+				t.Fatalf("set %s=%q: warnings=%v, want warning=%v (warnings: %v)",
+					c.key, c.val, gotWarn, c.wantWarn, res.Warnings)
+			}
+			if !c.wantWarn {
+				return
+			}
+			w := res.Warnings[0]
+			// The warning has to say what is wrong AND what to do about it.
+			for _, want := range []string{"require_token", "af config set require_token true"} {
+				if !strings.Contains(w, want) {
+					t.Errorf("warning must mention %q, got: %s", want, w)
+				}
+			}
+		})
+	}
+}
+
+// TestExposureWarningUsesTheDaemonsLoopbackPredicate pins that the set-time
+// warning and the daemon's own token gate agree on what "loopback" means. They
+// call the SAME function (config.IsLoopbackListenAddr, which the daemon's
+// webListenerPolicy also uses); two definitions drifting apart is exactly how a
+// security check rots, so this fails if a second one is ever introduced.
+func TestExposureWarningUsesTheDaemonsLoopbackPredicate(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.RequireToken = false
+	for _, addr := range []string{"127.0.0.1:8443", "[::1]:8443", "localhost:8443"} {
+		if !IsLoopbackListenAddr(addr) {
+			t.Fatalf("precondition: %q should be loopback", addr)
+		}
+		if w := exposureWarning(cfg, "listen_addr", addr); w != "" {
+			t.Errorf("%q is loopback — no exposure warning expected, got: %s", addr, w)
+		}
+	}
+	for _, addr := range []string{"0.0.0.0:8443", ":8443", "10.0.0.5:8443"} {
+		if IsLoopbackListenAddr(addr) {
+			t.Fatalf("precondition: %q should NOT be loopback", addr)
+		}
+		if w := exposureWarning(cfg, "listen_addr", addr); w == "" {
+			t.Errorf("%q is network-reachable with require_token=false — expected a warning", addr)
+		}
+	}
+}

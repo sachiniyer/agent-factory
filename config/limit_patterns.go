@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"regexp"
 	"time"
 
@@ -50,6 +51,31 @@ func sanitizeLimitRetryInterval(raw, prettyConfigPath string) string {
 		return defaultLimitRetryInterval
 	}
 	return raw
+}
+
+// validateLimitRetryIntervalValue applies sanitizeLimitRetryInterval's rules as
+// a hard error, for `af config set limit_retry_interval`: empty is the
+// explicit "never retry" value and is kept; anything else must parse as a
+// non-negative Go duration.
+//
+// It hard-errors where the loader warns-and-defaults, matching how the other
+// settable keys treat their loader rules (worktree_root normalizes on load but
+// rejects on set): a typo the loader would quietly turn into 30m should be told
+// to the user at the moment they typed it, rather than silently mis-timing
+// auto-resume later.
+func validateLimitRetryIntervalValue(value string) error {
+	if value == "" {
+		return nil
+	}
+	d, err := time.ParseDuration(value)
+	if err != nil {
+		return fmt.Errorf("limit_retry_interval must be a duration like %q or \"1h\", or \"\" to never retry, got %q: %w",
+			defaultLimitRetryInterval, value, err)
+	}
+	if d < 0 {
+		return fmt.Errorf("limit_retry_interval must not be negative, got %q", value)
+	}
+	return nil
 }
 
 // sanitizeLimitPatterns validates the limit_patterns override map in place,

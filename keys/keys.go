@@ -100,6 +100,15 @@ const (
 	// root-routed before any key map (handleInteractiveKey), so this name
 	// never appears in GlobalKeyStringsMap.
 	KeyExitInteractive
+
+	// KeyConfigAgent opens the config agent: the user's default agent, briefed
+	// with the config manifest, to walk them through their settings and apply
+	// each choice with `af config set`.
+	//
+	// APPENDED at the end of the block on purpose — this const block is
+	// iota-based, so inserting a name mid-block silently renumbers every
+	// KeyName after it. New names go here.
+	KeyConfigAgent
 )
 
 // spec is one action's canonical binding definition: its default keys, help
@@ -169,6 +178,12 @@ var specs = []spec{
 	{name: KeyOpenPR, configKey: "open_pr", keys: []string{"p"}, desc: "open PR", dispatch: true},
 	{name: KeyCopyPR, configKey: "copy_pr", keys: []string{"y"}, desc: "copy PR URL", dispatch: true},
 	{name: KeyHooks, configKey: "hooks", keys: []string{"e"}, desc: "worktree hooks", dispatch: true},
+	// "C" for configure. Capital because lower-case c is taken (limit_retry) and
+	// because this is a deliberate, infrequent action rather than a navigation
+	// key. Capital defaults are established practice here (D/E/N/S), and the
+	// "capitals left free" note on KeySwitchProject is specifically about P,
+	// where a legacy copy_pr pin was likely.
+	{name: KeyConfigAgent, configKey: "config_agent", keys: []string{"C"}, desc: "config agent", dispatch: true},
 	{name: KeySwitchProject, configKey: "switch_project", keys: []string{"ctrl+p"}, desc: "switch project", dispatch: true},
 	{name: KeyLeft, configKey: "collapse", keys: []string{"h", "left"}, desc: "collapse", dispatch: true},
 	{name: KeyRight, configKey: "expand", keys: []string{"l", "right"}, desc: "expand", dispatch: true},

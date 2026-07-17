@@ -330,3 +330,22 @@ func TriggerTask(id string) error {
 	var resp TriggerTaskResponse
 	return callDaemon("TriggerTask", TriggerTaskRequest{ID: id}, &resp)
 }
+
+// SpawnConfigAgent asks the daemon to start a config agent in a bare tmux session
+// and returns the session name to attach to. callDaemon carries the warm-up
+// retry, so pressing the hotkey while the daemon is still starting waits rather
+// than failing.
+func SpawnConfigAgent(req SpawnConfigAgentRequest) (string, error) {
+	var resp SpawnConfigAgentResponse
+	if err := callDaemon("SpawnConfigAgent", req, &resp); err != nil {
+		return "", err
+	}
+	return resp.SessionName, nil
+}
+
+// ReapConfigAgent tears down a config-agent session once the caller is done with
+// it. The daemon's own shutdown reap is the backstop if this never arrives.
+func ReapConfigAgent(sessionName string) error {
+	var resp ReapConfigAgentResponse
+	return callDaemon("ReapConfigAgent", ReapConfigAgentRequest{SessionName: sessionName}, &resp)
+}

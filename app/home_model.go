@@ -113,6 +113,13 @@ type home struct {
 	// attachTransitioning suppresses the final pre-attach View so Bubble Tea
 	// clears AF chrome before the blocking full-screen tmux attach takes over.
 	attachTransitioning bool
+	// configAgentSpawning is the in-flight guard for the config-agent hotkey.
+	// The spawn is a daemon round trip that waits out the agent's readiness
+	// budget (60s), during which the TUI shows nothing — so without this a user
+	// who presses C again gets a SECOND config agent, and a third. Mirrors the
+	// attachTransitioning re-entry guard (#1530), which exists for exactly this
+	// reason on the attach path. Cleared when the spawn reports back.
+	configAgentSpawning bool
 	// namingInstance is the instance currently being named in stateNew.
 	// Stored as a direct pointer so background sync cannot change which
 	// instance the naming keystrokes target.

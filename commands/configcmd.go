@@ -204,7 +204,14 @@ Settable keys:
   program_overrides.<agent>  full command string for an agent
   auto_yes                   true | false
   auto_update                true | false
+  listen_addr                host:port serving the web UI + API, or "" to turn the web server off.
+                             DANGER: a non-loopback address (0.0.0.0, a LAN/Tailscale IP) puts af's
+                             full control plane on the network, and require_token defaults to FALSE —
+                             set require_token = true in the same breath, or anyone who can reach the
+                             address controls this machine. af serves plain HTTP, so front a routable
+                             listener with a TLS-terminating proxy or a private network.
   require_token              true | false  (default false: the web UI needs no token; set true to require one from network peers)
+  require_loopback_token     true | false  (default false: also require the token from same-machine browsers; only has an effect with require_token = true)
   daemon_poll_interval       positive integer (ms)
   log_max_size_mb            positive integer
   log_max_backups            non-negative integer
@@ -212,10 +219,14 @@ Settable keys:
   worktree_root              subdirectory | sibling
   detach_keys                string (e.g. ctrl-w)
   update_channel             stable | preview
+  vscode_server_binary       path to the binary a VS Code tab runs, or "" to detect one on PATH
+  limit_auto_resume          true | false
+  limit_retry_interval       Go duration (e.g. 30m), or "" to never retry
   limit_patterns.<agent>     usage-limit banner regex for an agent
 
-Structural keys (root_agents, [theme], the [keys] rebind table) are not settable here —
-edit config.toml directly. Changes apply on the next af / daemon start.
+Structural keys (root_agents, [theme], the [keys] rebind table) and the
+cors_allowed_origins list are not settable here — edit config.toml directly.
+Changes apply on the next af / daemon start.
 
 Examples:
   af config set default_program codex
@@ -234,13 +245,31 @@ Examples:
 		if configJSONFlag {
 			return apiproto.WriteEnvelope(cmd.OutOrStdout(), apiproto.Success(res))
 		}
-		fmt.Fprintf(cmd.OutOrStdout(), "set %s = %s in %s\n", res.Key, res.Value, prettyPath(res.Path))
+		fmt.Fprintf(cmd.OutOrStdout(), "set %s = %s in %s\n", res.Key, echoValue(res.Value), prettyPath(res.Path))
+		// Warnings before the restart note: what the value MEANS matters more than
+		// when it takes effect, and the last line is the one that gets read.
+		for _, w := range res.Warnings {
+			fmt.Fprintln(cmd.ErrOrStderr(), w)
+		}
 		if res.RequiresRestart {
 			fmt.Fprintln(cmd.OutOrStdout(),
 				"note: af and the daemon read config.toml at startup — restart them to apply (same as a hand-edit)")
 		}
 		return nil
 	},
+}
+
+// echoValue renders a just-set value for the `set <key> = <value>` echo. An
+// empty string renders as `""` rather than as nothing: `set listen_addr =  in
+// …` is ambiguous (did it clear the value, or did the echo break?), and the
+// manifest already renders an unset value as `""`, so the two surfaces agree.
+// The config agent is told to mirror this echo, which is another reason it must
+// be unambiguous.
+func echoValue(v string) string {
+	if v == "" {
+		return `""`
+	}
+	return v
 }
 
 // prettyPath abbreviates $HOME to ~ for display, matching how the config

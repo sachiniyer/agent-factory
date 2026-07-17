@@ -512,7 +512,14 @@ Settable keys:
   program_overrides.<agent>  full command string for an agent
   auto_yes                   true | false
   auto_update                true | false
+  listen_addr                host:port serving the web UI + API, or "" to turn the web server off.
+                             DANGER: a non-loopback address (0.0.0.0, a LAN/Tailscale IP) puts af's
+                             full control plane on the network, and require_token defaults to FALSE —
+                             set require_token = true in the same breath, or anyone who can reach the
+                             address controls this machine. af serves plain HTTP, so front a routable
+                             listener with a TLS-terminating proxy or a private network.
   require_token              true | false  (default false: the web UI needs no token; set true to require one from network peers)
+  require_loopback_token     true | false  (default false: also require the token from same-machine browsers; only has an effect with require_token = true)
   daemon_poll_interval       positive integer (ms)
   log_max_size_mb            positive integer
   log_max_backups            non-negative integer
@@ -520,10 +527,14 @@ Settable keys:
   worktree_root              subdirectory | sibling
   detach_keys                string (e.g. ctrl-w)
   update_channel             stable | preview
+  vscode_server_binary       path to the binary a VS Code tab runs, or "" to detect one on PATH
+  limit_auto_resume          true | false
+  limit_retry_interval       Go duration (e.g. 30m), or "" to never retry
   limit_patterns.<agent>     usage-limit banner regex for an agent
 
-Structural keys (root_agents, [theme], the [keys] rebind table) are not settable here —
-edit config.toml directly. Changes apply on the next af / daemon start.
+Structural keys (root_agents, [theme], the [keys] rebind table) and the
+cors_allowed_origins list are not settable here — edit config.toml directly.
+Changes apply on the next af / daemon start.
 
 Examples:
   af config set default_program codex

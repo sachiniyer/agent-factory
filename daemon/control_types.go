@@ -389,3 +389,34 @@ type ShutdownRequest struct{}
 type ShutdownResponse struct {
 	OK bool `json:"ok"`
 }
+
+// SpawnConfigAgentRequest asks the daemon to start a config agent in a bare tmux
+// session at AF home — no Instance, no worktree, no branch, and no row in the
+// session list.
+//
+// Every field is a PLAIN VALUE, deliberately. The control socket is net/rpc gob,
+// which elides zero-value fields, so a *bool false or a *string "" would arrive
+// as nil (#1700): optional-pointer fields on this plane need a JSON-backed codec
+// to survive. Nothing here is optional, so the hazard cannot apply.
+type SpawnConfigAgentRequest struct {
+	// Program is the fully resolved command to run (program_overrides already
+	// applied by the caller, which is also what preflighted it).
+	Program string `json:"program"`
+	// Prompt is the briefing, delivered over a tmux paste buffer after the agent
+	// is ready. Unbounded: it is streamed via stdin, not passed as an argument.
+	Prompt string `json:"prompt"`
+}
+
+// SpawnConfigAgentResponse returns the tmux session name the client attaches to.
+type SpawnConfigAgentResponse struct {
+	SessionName string `json:"session_name"`
+}
+
+// ReapConfigAgentRequest tears down a config-agent session once the client is
+// done with it.
+type ReapConfigAgentRequest struct {
+	SessionName string `json:"session_name"`
+}
+
+// ReapConfigAgentResponse is empty: reaping either succeeded or errored.
+type ReapConfigAgentResponse struct{}
