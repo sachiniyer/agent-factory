@@ -1370,6 +1370,15 @@ body {
   font-size: var(--af-fs-sm);
   line-height: 1.4;
 }
+.af-modal-hint {
+  margin: 0;
+  color: var(--af-text-2);
+  font-size: var(--af-fs-sm);
+  line-height: 1.4;
+}
+.af-modal-hint:empty {
+  display: none;
+}
 .af-modal-foot {
   display: flex;
   justify-content: flex-end;

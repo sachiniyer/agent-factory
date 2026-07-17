@@ -17,6 +17,7 @@
 // policy holds.
 
 import type { CreateSessionInput } from "./api.js";
+import { type BackendCatalog, type BackendChoice, REPO_DEFAULT, backendChoices, backendNotice, backendSelectable } from "./backends.js";
 
 /** A live modal: its root element plus in-place patch controls index.ts drives
  *  around the async submit. close() removes it from the DOM. */
@@ -130,13 +131,25 @@ export function asForm(card: HTMLElement, onSubmit: () => void): void {
   });
 }
 
-/** The new-session modal: title, project picker, program, initial prompt, auto-yes.
- *  Projects are the distinct repo roots derived from the current sessions (like the
- *  TUI's zero-config picker). onSubmit fires with the collected form values. */
+/** The new-session modal: title, project picker, program, backend, initial prompt,
+ *  auto-yes. Projects are the distinct repo roots derived from the current sessions
+ *  (like the TUI's zero-config picker). onSubmit fires with the collected form
+ *  values.
+ *
+ *  loadBackends fetches the picked project's backend catalog (#1933). It is passed
+ *  in rather than imported so this module stays free of the API/token layer, and is
+ *  re-run whenever the project changes: availability and the default are per-repo
+ *  facts, so the choices must follow the project picker. If it rejects, the backend
+ *  field degrades to "repo default" alone — the exact behavior before this field
+ *  existed, so a catalog failure can never block a create. */
 export function newSessionModal(
   projects: string[],
   defaultProject: string | null,
-  callbacks: { onSubmit: (values: CreateSessionInput) => void; onCancel: () => void },
+  callbacks: {
+    onSubmit: (values: CreateSessionInput) => void;
+    onCancel: () => void;
+    loadBackends: (repoPath: string) => Promise<BackendCatalog>;
+  },
 ): ModalHandle {
   const { handle, body, confirmBtn } = modalChrome({
     title: "New session",
@@ -174,6 +187,89 @@ export function newSessionModal(
     programSelect.append(h("option", { value: prog }, prog));
   }
 
+  // The backend field (#1933). Its options come from the daemon, never from a list
+  // here, so a backend added server-side shows up with no change to the web.
+  const backendSelect = h("select", { class: "af-input" });
+  backendSelect.setAttribute("aria-label", "Backend");
+  const backendHint = h("p", { class: "af-modal-hint" });
+  // Announce the notice when it changes: the reason a choice is unusable must
+  // reach a screen reader, not only sighted users scanning under the select.
+  backendHint.setAttribute("role", "status");
+
+  let choices: BackendChoice[] = backendChoices(null);
+  // Mirrors the chrome's busy flag. An async availability refresh can land at ANY
+  // time — including mid-submit — and it must never be the thing that decides
+  // whether Create is clickable.
+  let busy = false;
+
+  // The SINGLE writer of confirmBtn.disabled, so no update can clobber another's
+  // reason for disabling it. Every input that gates Create is OR-ed here rather
+  // than assigned from its own call site:
+  //   busy      — a submit is in flight; re-enabling would allow a double-create.
+  //   projects  — nothing to create in (set once, before any catalog lands).
+  //   backend   — the selection is unusable or unverified.
+  // A bare `confirmBtn.disabled = …` anywhere else silently drops the other two.
+  const syncSubmitState = (): void => {
+    backendHint.textContent = backendNotice(choices, backendSelect.value);
+    confirmBtn.disabled = busy || projects.length === 0 || !backendSelectable(choices, backendSelect.value);
+  };
+
+  // Route the chrome's setBusy through the same writer. index.ts drives busy around
+  // the create call; without this, a catalog response arriving mid-create would
+  // re-enable the button underneath it.
+  const chromeSetBusy = handle.setBusy.bind(handle);
+  handle.setBusy = (b: boolean): void => {
+    busy = b;
+    chromeSetBusy(b);
+    syncSubmitState();
+  };
+
+  const renderChoices = (): void => {
+    const previous = backendSelect.value;
+    backendSelect.replaceChildren();
+    for (const choice of choices) {
+      backendSelect.append(h("option", { value: choice.value }, choice.label));
+    }
+    // Re-selecting the prior value keeps a user's pick across a project switch when
+    // it is still offered; otherwise fall back to the repo default, which always is.
+    backendSelect.value = choices.some((c) => c.value === previous) ? previous : REPO_DEFAULT;
+    syncSubmitState();
+  };
+
+  backendSelect.addEventListener("change", syncSubmitState);
+
+  // A per-load token: a slow catalog for the project the user just left must not
+  // overwrite the choices for the one they just picked.
+  let loadSeq = 0;
+  const loadBackendsFor = (repoPath: string): void => {
+    const seq = ++loadSeq;
+    if (repoPath === "") {
+      choices = backendChoices(null);
+      renderChoices();
+      return;
+    }
+    void callbacks
+      .loadBackends(repoPath)
+      .then((catalog) => {
+        if (seq !== loadSeq) {
+          return;
+        }
+        choices = backendChoices(catalog);
+        renderChoices();
+      })
+      .catch(() => {
+        if (seq !== loadSeq) {
+          return;
+        }
+        // Degrade to "repo default" only. The create path is unchanged by an
+        // unknown catalog, so this costs the user the choice, not the session.
+        choices = backendChoices(null);
+        renderChoices();
+      });
+  };
+
+  projectSelect.addEventListener("change", () => loadBackendsFor(projectSelect.value));
+
   const promptArea = h("textarea", { class: "af-input af-textarea", placeholder: "Initial prompt (optional)", rows: 3 });
   promptArea.setAttribute("aria-label", "Initial prompt");
 
@@ -184,9 +280,14 @@ export function newSessionModal(
     field("Title", titleInput),
     field("Project", projectSelect),
     field("Program", programSelect),
+    field("Backend", backendSelect),
+    backendHint,
     field("Prompt", promptArea),
     autoYesRow,
   );
+
+  renderChoices();
+  loadBackendsFor(projectSelect.value);
 
   const card = handle.el.firstElementChild as HTMLElement;
   asForm(card, () => {
@@ -202,6 +303,9 @@ export function newSessionModal(
       program: programSelect.value,
       prompt: promptArea.value,
       autoYes: autoYes.checked,
+      // REPO_DEFAULT ("") when the user did not choose — createSession then omits
+      // `backend` entirely and the repo's config decides (#1933).
+      backend: backendSelect.value,
     });
   });
 

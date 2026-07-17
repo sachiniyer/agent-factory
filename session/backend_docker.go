@@ -118,20 +118,26 @@ func (dockerRuntime) Provision(spec ProvisionSpec) (ProvisionResult, error) {
 	if err != nil {
 		return ProvisionResult{}, fmt.Errorf("backend=docker: cannot resolve repo config for %q: %w", spec.RepoRoot, err)
 	}
-	image := ""
-	var runArgs []string
-	if cfg.Docker != nil {
-		image = strings.TrimSpace(cfg.Docker.Image)
-		runArgs = cfg.Docker.RunArgs
+	// The config precondition is shared with the ListBackends RPC (#1933), so the
+	// web states this requirement at choose time in the same words the CLI prints
+	// here at create time.
+	if err := BackendConfigError(BackendDocker, cfg); err != nil {
+		return ProvisionResult{}, err
 	}
-	if image == "" {
-		return ProvisionResult{}, fmt.Errorf("backend=docker requires docker.image to be set in this repo's .agent-factory/config.json (the container image that carries git + tmux + the agent CLIs; the `af` binary is copied in automatically)")
-	}
+	// Safe to dereference: BackendConfigError returns non-nil for a missing Docker
+	// section, so reaching here means it is set (locked by
+	// TestBackendConfigError_ReportsRepoConfigRequirements — weakening that check
+	// fails the test rather than panicking the daemon here).
+	image := strings.TrimSpace(cfg.Docker.Image)
+	runArgs := cfg.Docker.RunArgs
+	// Both wordings are shared with BackendUnusableReason (#1933) so the reason the
+	// web gives at choose time is the reason printed here at create time. The check
+	// ORDER is unchanged: origin before the CLI probe.
 	if spec.CloneURL == "" {
-		return ProvisionResult{}, fmt.Errorf("backend=docker: repo %q has no `origin` remote to clone the workspace from; add one (GitHub is the durable workspace store) or push the repo first", spec.RepoRoot)
+		return ProvisionResult{}, missingOriginError(BackendDocker, spec.RepoRoot)
 	}
-	if _, err := exec.LookPath("docker"); err != nil {
-		return ProvisionResult{}, fmt.Errorf("backend=docker: the `docker` CLI is not on PATH; install Docker or select a different backend: %w", err)
+	if _, err := lookPath("docker"); err != nil {
+		return ProvisionResult{}, dockerCLIMissingError(err)
 	}
 
 	afBin, err := dockerSelfBinary()

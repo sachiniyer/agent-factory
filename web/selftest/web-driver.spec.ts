@@ -1878,6 +1878,33 @@ test.describe("create → kill (one session, two flows)", () => {
     const modal = page.locator(".af-modal-card");
     await expect(modal).toBeVisible();
 
+    // #1933 end-to-end: the backend picker is populated by the DAEMON (ListBackends
+    // against the picked project), not by a list in the web. This is the only test
+    // that proves the whole chain — enum → RPC → rendered options — through a real
+    // daemon; the unit tests either side of it both stub their counterpart.
+    const backendSelect = modal.locator('select[aria-label="Backend"]');
+    await expect(backendSelect).toBeVisible();
+    // Populated asynchronously, so wait for the daemon's answer rather than the
+    // "repo default"-only placeholder the field is built with.
+    await expect(backendSelect.locator("option")).not.toHaveCount(1, { timeout: 30_000 });
+    await expect(backendSelect.locator("option")).toHaveText(
+      [/^Repo default \(local\)$/, "local", "docker", "ssh", "hook"],
+      { timeout: 30_000 },
+    );
+    // The mock repo configures no docker.image. Picking docker must state the missing
+    // key AND block Create — the choose-time message standing in for the create-time
+    // failure this issue is about. The reason is the daemon's own text, so this also
+    // proves the CLI and the web say the same thing.
+    await backendSelect.selectOption("docker");
+    await expect(modal.locator(".af-modal-hint")).toHaveText(/docker\.image/);
+    await expect(modal.locator("button.af-primary")).toBeDisabled();
+
+    // Back to the repo default: the notice clears, Create is live again, and the
+    // submit below sends NO backend — so this create stays local.
+    await backendSelect.selectOption("");
+    await expect(modal.locator(".af-modal-hint")).toHaveText("");
+    await expect(modal.locator("button.af-primary")).toBeEnabled();
+
     // Title is required; the project picker defaults to the scoped project (redesign
     // PR2 — the first mock repo A/B live in), so the created session lands there and is
     // visible in the scoped rail. Program is left at "Repo default" (claude → the fake
@@ -1955,6 +1982,58 @@ test("archive: the archive confirm retires the session out of the default rail",
 
   await resetFilter(page);
   await expect(row(page, SESSION_B)).toHaveCount(0);
+});
+
+test("#1933: a backend availability refresh must not re-enable Create mid-submit", async () => {
+  // The race: a ListBackends is in flight when the user submits, and its response
+  // lands DURING the create. Re-rendering the choices must not decide, on its own,
+  // whether Create is clickable — the busy state is a separate reason it is
+  // disabled, and clobbering it re-arms the button under an in-flight create (a
+  // double-create is one Enter away).
+  //
+  // Both sides are held with route interception so the ordering is deterministic
+  // rather than a timing hope. The create is aborted, never forwarded, so this test
+  // makes no session.
+  let releaseCatalog: () => void = () => {};
+  const catalogHeld = new Promise<void>((resolve) => {
+    releaseCatalog = resolve;
+  });
+  await page.route("**/v1/ListBackends", async (route) => {
+    await catalogHeld;
+    await route.continue();
+  });
+  await page.route("**/v1/CreateSession", async (route) => {
+    // Held open so the modal stays busy across the assertion, then aborted so the
+    // request never reaches the daemon.
+    await new Promise((resolve) => setTimeout(resolve, 2000));
+    await route.abort();
+  });
+
+  await page.locator("button.af-rail-new").click();
+  const modal = page.locator(".af-modal-card");
+  await expect(modal).toBeVisible();
+  await modal.locator('input[aria-label="Session title"]').fill("probe-busy-race");
+
+  const createBtn = modal.locator("button.af-primary");
+  await expect(createBtn).toBeEnabled();
+  await createBtn.click();
+  await expect(createBtn).toBeDisabled();
+
+  // Let the catalog land mid-create, then look AFTER the re-render has run — the
+  // assertion has to outlast the event, or it would pass on the pre-render state.
+  const catalogResponse = page.waitForResponse("**/v1/ListBackends");
+  releaseCatalog();
+  await catalogResponse;
+  await page.waitForTimeout(300);
+  await expect(createBtn, "an availability refresh must not re-enable Create while a create is in flight").toBeDisabled();
+
+  // And once the create actually fails, the button comes back — the busy gate must
+  // not strand the form either.
+  await expect(createBtn).toBeEnabled({ timeout: 15_000 });
+  await page.keyboard.press("Escape");
+  await expect(modal).toBeHidden();
+  await page.unroute("**/v1/ListBackends");
+  await page.unroute("**/v1/CreateSession");
 });
 
 // --- the status filter (feat: hide archived by default) --------------------

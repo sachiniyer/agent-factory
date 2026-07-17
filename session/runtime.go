@@ -2,6 +2,7 @@ package session
 
 import (
 	"fmt"
+	"slices"
 
 	"github.com/sachiniyer/agent-factory/config"
 )
@@ -33,15 +34,16 @@ const (
 // mirroring RemoteHooks.Validate, this validation runs when a runtime is
 // resolved at create time, not at config load.
 func ParseBackendKind(s string) (BackendKind, error) {
-	switch s {
-	case "":
+	if s == "" {
 		return BackendLocal, nil
-	case config.BackendLocal, config.BackendDocker, config.BackendSSH, config.BackendHook:
-		return BackendKind(s), nil
-	default:
-		return "", fmt.Errorf("unknown backend %q (valid: %s, %s, %s, %s)",
-			s, config.BackendLocal, config.BackendDocker, config.BackendSSH, config.BackendHook)
 	}
+	// Validated against config.SupportedBackends, not a hand-written case list, so
+	// a newly registered backend becomes parseable by appearing in the one
+	// canonical enum (#1933).
+	if slices.Contains(config.SupportedBackends, s) {
+		return BackendKind(s), nil
+	}
+	return "", fmt.Errorf("unknown backend %q (valid: %s)", s, config.SupportedBackendsString())
 }
 
 // ProvisionSpec is the input a Runtime needs to establish a session's execution

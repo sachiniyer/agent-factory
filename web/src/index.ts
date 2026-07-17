@@ -25,6 +25,7 @@ import {
   errorText,
   fetchSnapshot,
   killSession,
+  listBackends,
   listTasks,
   loadToken,
   probeAuthRequired,
@@ -501,6 +502,11 @@ function newSession(): void {
   const projects = pickerProjects(store.get().sessions, store.get().tasks);
   openModal(
     newSessionModal(projects, store.get().selectedProject, {
+      // The backend catalog is per-repo and read at choose time (#1933), so the
+      // modal asks for the picked project's on open and on every project change.
+      // Tokenless ("") is a valid credential (#1696), so a null token — not a
+      // falsy one — is the "not authorized yet" case.
+      loadBackends: (repoPath: string) => (token === null ? Promise.reject(new Error("not authorized")) : listBackends(repoPath, token)),
       onSubmit: (values: CreateSessionInput) => {
         const tok = token;
         // `=== null` not `!tok`: "" is the authorized-tokenless credential (#1696).

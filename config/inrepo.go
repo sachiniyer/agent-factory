@@ -165,6 +165,23 @@ func InRepoTomlConfigPath(repoRoot string) string {
 	return filepath.Join(repoRoot, InRepoConfigDirName, TomlConfigFileName)
 }
 
+// InRepoConfigFileName returns the repo-relative NAME of the in-repo config file
+// a repo actually carries — ".agent-factory/config.toml" or
+// ".agent-factory/config.json" — for user-facing messages that must point the user
+// at the file a bad value came from (#1933). Since either name is valid
+// indefinitely (#1030), a message that guessed one would send half of users to a
+// file that does not exist.
+//
+// Falls back to the config.json spelling when the repo carries neither file (or
+// carries both, which LoadInRepoConfig rejects with its own message): there is no
+// file to name then, and config.json is the spelling the rest of the messages use.
+func InRepoConfigFileName(repoRoot string) string {
+	if path, err := locateInRepoConfigFile(repoRoot); err == nil && path != "" {
+		return filepath.Join(InRepoConfigDirName, filepath.Base(path))
+	}
+	return filepath.Join(InRepoConfigDirName, ConfigFileName)
+}
+
 // locateInRepoConfigFile picks the in-repo config file for a repo root:
 // config.toml or config.json, whichever exists ("" when neither does). A repo
 // carrying BOTH is a hard error rather than a precedence rule: this file

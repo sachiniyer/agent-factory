@@ -132,15 +132,17 @@ func (sshRuntime) Provision(spec ProvisionSpec) (ProvisionResult, error) {
 	if err != nil {
 		return ProvisionResult{}, fmt.Errorf("backend=ssh: cannot resolve repo config for %q: %w", spec.RepoRoot, err)
 	}
-	var sshCfg config.SSHConfig
-	if cfg.SSH != nil {
-		sshCfg = *cfg.SSH
+	// Shared with the ListBackends RPC (#1933) — see BackendConfigError.
+	if err := BackendConfigError(BackendSSH, cfg); err != nil {
+		return ProvisionResult{}, err
 	}
-	if strings.TrimSpace(sshCfg.Host) == "" {
-		return ProvisionResult{}, fmt.Errorf("backend=ssh requires ssh.host to be set in this repo's .agent-factory/config.json (the remote host the session's workspace + agent run on)")
-	}
+	// Safe to dereference: BackendConfigError rejects a missing SSH section, so it
+	// is set here (locked by TestBackendConfigError_ReportsRepoConfigRequirements).
+	sshCfg := *cfg.SSH
 	if spec.CloneURL == "" {
-		return ProvisionResult{}, fmt.Errorf("backend=ssh: repo %q has no `origin` remote to clone the workspace from; add one (GitHub is the durable workspace store) or push the repo first", spec.RepoRoot)
+		// Shared with BackendUnusableReason (#1933) — one wording, choose time and
+		// create time.
+		return ProvisionResult{}, missingOriginError(BackendSSH, spec.RepoRoot)
 	}
 
 	afBin, err := sshSelfBinary()

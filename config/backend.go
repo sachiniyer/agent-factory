@@ -1,5 +1,7 @@
 package config
 
+import "strings"
+
 // Backend selection (#1592 Phase 4 PR3). A repo declares which runtime its
 // sessions run on via the in-repo `backend` key, alongside the docker/ssh
 // sections that parameterize the two sandboxed runtimes. The canonical values
@@ -18,6 +20,27 @@ const (
 	BackendSSH    = "ssh"
 	BackendHook   = "hook"
 )
+
+// SupportedBackends is the canonical, ordered list of the backend values a user
+// may select — the backend analogue of tmux.SupportedPrograms, and the SINGLE
+// SOURCE OF TRUTH every surface renders from: the `--backend` flag help, the
+// ListBackends RPC (and through it the web's create form), and ParseBackend's
+// validation. Order is presentation order: local (the default) first, then the
+// sandboxed runtimes, then the BYO-provisioner escape hatch.
+//
+// Adding a backend means adding it here and registering its runtime; a drift
+// guard test in the session package proves this list and the runtime registry
+// hold the same set, so a backend can never be constructible-but-unofferable (or
+// offered-but-unconstructible). Every client reads the list off the daemon at
+// run time rather than hard-coding it, so a new backend reaches the web without
+// a web change (#1933).
+var SupportedBackends = []string{BackendLocal, BackendDocker, BackendSSH, BackendHook}
+
+// SupportedBackendsString returns the canonical user-facing backend enum list,
+// comma-separated — the string CLI help and error messages interpolate.
+func SupportedBackendsString() string {
+	return strings.Join(SupportedBackends, ", ")
+}
 
 // DockerConfig parameterizes the docker runtime (#1592 Phase 4 PR3 config
 // surface; the runtime that consumes it lands in PR4). A session with
