@@ -265,40 +265,53 @@ scenario_a() {
     }
 
     # Preconditions: prove the environment really is clean before we claim af
-    # coped with a clean one.
-    if [ ! -e "$home" ]; then
-        lc_pass "precondition: no AF home at $home"
-    else
-        lc_fail "precondition: AF home already exists at $home"
-    fi
-    if [ ! -e "$home/config.toml" ]; then
-        lc_pass "precondition: no config.toml"
-    else
-        lc_fail "precondition: config.toml already exists"
-    fi
-    lc_assert_eq "0" "$(lc_daemon_count "$home")" "precondition: no daemon for this home"
+    # coped with a clean one. Machine-level facts here; each probe re-asserts its
+    # OWN home is virgin immediately before touching it (lc_assert_virgin).
     if lc_supervisor_available && [ "$(lc_unit_active)" = "active" ]; then
         lc_fail "precondition: an autostart unit is already active"
     else
         lc_pass "precondition: no active autostart unit"
     fi
 
-    export AGENT_FACTORY_HOME="$home"
     # A fresh home has no throttle record, so the launch path would try to
     # self-update and re-exec mid-scenario. Scenario A is about the clean boot,
     # not the update; scenario B owns that path explicitly.
     export AGENT_FACTORY_AUTO_UPDATE=false
 
-    # 1. af runs at all.
+    # ---- probe 1: doctor, on a machine NOTHING has touched --------------------
+    #
+    # Its own home, because AN OBSERVATION THAT CREATES THE STATE IT OBSERVES IS
+    # NOT AN OBSERVATION. `af doctor` materializes the home directory and
+    # agent-factory.log (measured: `af version` touches nothing, doctor and
+    # `daemon status` both create home/ + the log). Running doctor and then the
+    # TUI against ONE home means the TUI's "virgin home" claim is measuring a
+    # home doctor already built — and the preconditions asserted at the top of
+    # the scenario only ever covered the first probe.
+    #
+    # Two pristine homes, each with its precondition checked IMMEDIATELY before
+    # the probe that depends on it, is the only version of this that cannot rot:
+    # it holds no matter which command materializes what, on either side of the
+    # upgrade boundary.
+    local dhome="$ws/home-doctor"
+    export AGENT_FACTORY_HOME="$dhome"
+    lc_assert_virgin "$dhome" "doctor probe"
+
+    # af version must not even create the home (it is the one command that can
+    # be run before anything exists).
     if "$bin" version >/dev/null 2>&1; then
         lc_pass "af version exits 0 in a virgin environment"
     else
         lc_fail "af version failed in a virgin environment"
     fi
+    if [ ! -e "$dhome" ]; then
+        lc_pass "af version did not materialize the home (nothing to observe yet)"
+    else
+        lc_fail "af version created $dhome — the doctor probe below is no longer virgin"
+    fi
 
-    # 2. doctor is the new user's first stop: it must run, and must not report a
-    #    FAIL that a brand-new user cannot act on. (Missing agents are WARNs
-    #    with a fix line, which is correct — they are not FAILs.)
+    # doctor is the new user's first stop: it must run, and must not report a
+    # FAIL that a brand-new user cannot act on. (Missing agents are WARNs with a
+    # fix line, which is correct — they are not FAILs.)
     local fails
     fails="$(lc_doctor_fail_count "$bin")"
     if [ -z "$fails" ]; then
@@ -307,18 +320,28 @@ scenario_a() {
         lc_assert_eq "0" "$fails" "af doctor reports no FAIL on a brand-new machine"
         [ "$fails" = "0" ] || lc_doctor_dump "$bin" | sed 's/^/[lifecycle]   | /' >&2
     fi
+    lc_teardown_home "$dhome"
 
-    # 3. The TUI itself comes up on a virgin home — no config, no state.json,
-    #    every first-run overlay unseen. This is a new user's literal first act.
+    # ---- probe 2: the TUI, on a SECOND machine nothing has touched ------------
+    #
+    # A new user's literal first act. Pristine again — doctor's home above is
+    # not reused, so "virgin" here is a fact rather than a hope.
+    export AGENT_FACTORY_HOME="$home"
+    lc_assert_virgin "$home" "TUI probe"
     if lc_boot_tui "$bin" "$home" "$repo" lc-a; then
         lc_pass "the TUI renders its first frame on a virgin home"
         local screen
         screen="$(lc_capture lc-a)"
-        if printf '%s' "$screen" | grep -qiE 'panic:|fatal error|runtime error'; then
+        # AUDIT: "grep found no panic" passes on an EMPTY screen — a dead pane
+        # would sail through the no-panic check. Prove there is a screen to
+        # search before concluding anything about what is not on it.
+        if ! printf '%s' "$screen" | grep -q 'Agent Factory'; then
+            lc_fail "no-panic check has nothing to read: the captured screen is empty/not the TUI"
+        elif printf '%s' "$screen" | grep -qiE 'panic:|fatal error|runtime error'; then
             lc_fail "the TUI first frame contains a panic/fatal error"
             printf '%s' "$screen" | sed 's/^/[lifecycle]   | /' >&2
         else
-            lc_pass "no panic on the virgin first frame"
+            lc_pass "no panic on the virgin first frame (searched $(printf '%s' "$screen" | wc -l) captured lines)"
         fi
     else
         lc_fail "the TUI did not boot on a virgin home"
@@ -345,12 +368,19 @@ scenario_a() {
     "$bin" daemon restart >/dev/null 2>&1
     lc_assert_eq "1" "$(lc_daemon_count "$home")" "still exactly one daemon after a config-change restart"
 
-    if (cd "$repo" && "$bin" sessions create --name clean1 >/dev/null 2>&1); then
-        lc_pass "first session created on a clean machine"
+    # AUDIT: an exit status is NOT evidence a session exists. `af sessions create`
+    # can answer 0 while its JSON body carries a refusal ("claude is not
+    # installed…") — observed on this very harness. So assert the OUTCOME: the
+    # daemon lists it.
+    local c_out c_rc=0
+    c_out="$(cd "$repo" && "$bin" sessions create --name clean1 2>&1)" || c_rc=$?
+    local n_after
+    n_after="$(lc_wait_session_count "$bin" "$repo" 1 30)"
+    if [ "$n_after" = "1" ]; then
+        lc_pass "first session created on a clean machine (daemon lists it)"
     else
-        lc_fail "could not create the first session on a clean machine"
-        (cd "$repo" && "$bin" sessions create --name clean1 2>&1 | head -3 |
-            sed 's/^/[lifecycle]   | /' >&2)
+        lc_fail "first session not created on a clean machine (create rc=$c_rc, daemon lists '$n_after')"
+        printf '%s\n' "$c_out" | head -3 | sed 's/^/[lifecycle]   | /' >&2
     fi
 
     # A second client must adopt the running daemon, never race up a rival.
@@ -410,11 +440,16 @@ scenario_b() {
     # --- supervise it, when the environment can ------------------------------
     local supervised=no
     if lc_supervisor_available; then
-        if "$bin" daemon install >/dev/null 2>&1; then
+        # AUDIT: trusting `daemon install`'s exit code would let a no-op install
+        # set supervised=yes, and assertion 4 would then "pass" against a unit
+        # that was never registered. The unit file has to actually exist.
+        if "$bin" daemon install >/dev/null 2>&1 &&
+            [ "$(lc_status_field "$bin" '.data.autostart_unit')" = "true" ]; then
             supervised=yes
             lc_pass "autostart unit installed (this machine can supervise)"
         else
-            lc_fail "af daemon install failed on a machine with a service manager"
+            lc_fail "af daemon install did not register a unit on a machine with a service manager"
+            "$bin" daemon install 2>&1 | head -3 | sed 's/^/[lifecycle]   | /' >&2
         fi
     else
         # Loud, not silent: a container run does NOT cover assertion #4.
@@ -506,14 +541,30 @@ scenario_b() {
     # catch, which also confirms the enum ordinals end-to-end.
     if [ "$LC_INJECT" = "unhealthy-session" ]; then
         lc_say "INJECT: archiving 'pre1' so it is no longer in a healthy state"
-        "$bin" sessions archive pre1 --repo "$repo" >/dev/null 2>&1 ||
-            "$bin" sessions archive pre1 >/dev/null 2>&1
-        local j
+        local arc_out arc_rc=0
+        arc_out="$("$bin" sessions archive pre1 --repo "$repo" 2>&1)" || arc_rc=$?
+        local j applied=1
         for ((j = 0; j < 40; j++)); do
-            [ "$(lc_unhealthy_session_count "$bin" "$repo")" != "0" ] && break
+            [ "$(lc_unhealthy_session_count "$bin" "$repo")" != "0" ] && {
+                applied=0
+                break
+            }
             sleep 0.5
         done
-        lc_say "INJECT: session states now: $(lc_session_states "$bin" "$repo")"
+        # A fault injection whose SETUP silently no-ops is the worst case of all:
+        # every assertion downstream then reports on a scenario that never
+        # existed, and the run looks like proof. errexit is off here (assertions
+        # must accumulate), so the archive's status is checked explicitly rather
+        # than assumed — and the OUTCOME is confirmed, not just the exit code: a
+        # CLI that returns 0 without archiving would still be caught.
+        if [ "$applied" != 0 ]; then
+            lc_fail "INJECT unhealthy-session: the injection DID NOT APPLY (archive rc=$arc_rc) — refusing to report on a scenario that was never set up"
+            printf '%s\n' "$arc_out" | head -3 | sed 's/^/[lifecycle]   | /' >&2
+            lc_say "session states: $(lc_session_states "$bin" "$repo")"
+            lc_teardown_home "$home" "$supervised"
+            return 1
+        fi
+        lc_say "INJECT: applied — session states now: $(lc_session_states "$bin" "$repo")"
     fi
 
     # --- assertions ----------------------------------------------------------
@@ -540,8 +591,18 @@ scenario_b() {
         #    daemon's version comes from the image it is ACTUALLY executing
         #    (/proc/<pid>/exe), so a daemon left on the old bytes cannot hide
         #    behind a new binary on disk. This is the #1921 skew condition.
-        lc_assert_eq "$client_ver" "$after_daemon_ver" \
-            "assertion 2: no version skew (client == daemon)"
+        #
+        #    AUDIT: `lc_assert_eq "" ""` PASSES. If lc_daemon_version could not
+        #    read /proc/<pid>/exe (a permission change, a macOS runner, a dead
+        #    pid) and lc_client_version also came back empty, the single most
+        #    important assertion in this gate would report "no skew" having
+        #    compared nothing against nothing. Both operands must exist first.
+        if [ -z "$after_daemon_ver" ] || [ -z "$client_ver" ]; then
+            lc_fail "assertion 2: cannot compare versions (daemon='$after_daemon_ver', client='$client_ver') — refusing to report 'no skew' from unreadable values"
+        else
+            lc_assert_eq "$client_ver" "$after_daemon_ver" \
+                "assertion 2: no version skew (client == daemon)"
+        fi
 
         # 3. exactly ONE daemon; no orphan/second survived the restart.
         lc_assert_eq "1" "$(lc_daemon_count "$home")" "assertion 3: exactly one daemon afterwards"
@@ -597,7 +658,20 @@ lc_do_upgrade() {
     # the machine #1921 shipped: new client, old daemon, everything "running".
     if [ "$LC_INJECT" = "skip-daemon-restart" ]; then
         lc_say "INJECT: swapping the binary to $new_tag WITHOUT restarting the daemon"
-        lc_install_release "$new_tag" "$bin" || return 1
+        lc_install_release "$new_tag" "$bin" || {
+            lc_fail "INJECT skip-daemon-restart: could not install $new_tag — the injection did not apply"
+            return 1
+        }
+        # Confirm the OUTCOME, not just that the download returned 0: if the
+        # binary on disk is not actually N, there is no skew to detect and every
+        # assertion below would report on a machine that was never broken.
+        local got
+        got="$(lc_client_version "$bin")"
+        if [ "$got" != "${new_tag#v}" ]; then
+            lc_fail "INJECT skip-daemon-restart: binary is '$got', expected '${new_tag#v}' — the injection did not apply"
+            return 1
+        fi
+        lc_say "INJECT: applied — client is now $got, daemon deliberately left on the old image"
         return 0
     fi
 

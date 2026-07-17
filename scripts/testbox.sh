@@ -24,6 +24,15 @@ IMAGE="${AF_TESTBOX_IMAGE:-agent-factory-testbox}"
 # see scripts/container/Dockerfile.web-selftest. Kept distinct so it never bloats
 # the plain testbox image every other gate shares.
 WEB_IMAGE="${AF_WEB_TESTBOX_IMAGE:-agent-factory-web-selftest}"
+# The lifecycle gate gets its OWN tag, even though it builds from the same
+# Dockerfile as the testbox. The tag is a GLOBAL name on the docker daemon, and
+# this box runs many worktrees: a sibling running `make test-container` from a
+# checkout that predates a Dockerfile change rebuilds `agent-factory-testbox`
+# from THEIR Dockerfile and moves the shared tag back, so whichever build ran
+# last wins. That is not theoretical — it silently reverted the image under this
+# gate mid-run ("missing required tool: jq"). A dedicated tag means a concurrent
+# sibling cannot decide what this gate runs against. Same reasoning as WEB_IMAGE.
+LIFECYCLE_IMAGE="${AF_LIFECYCLE_IMAGE:-agent-factory-lifecycle}"
 
 # _uniq — a per-invocation token (pid + a little randomness) for container
 # names, so two runs never share a name.
@@ -91,11 +100,14 @@ fi
 # Cache volumes created by older harness versions (or manual root runs)
 # can be root-owned, which the non-root test user can't write to. A
 # one-shot root chown makes the harness self-healing.
+# $1: image to run the chown in (defaults to the shared testbox image). The
+# lifecycle gate passes its own so it never depends on the shared tag existing
+# or being current.
 fix_cache_perms() {
     "$ENGINE" run --rm --user 0 \
         -v af-testbox-gomod:/cache/gomod \
         -v af-testbox-gobuild:/cache/gobuild \
-        "$IMAGE" chown -R dev:dev /cache >/dev/null
+        "${1:-$IMAGE}" chown -R dev:dev /cache >/dev/null
 }
 
 # start_playtest_detached — run the play-test sandbox container detached, so a
@@ -212,8 +224,10 @@ lifecycle)
     #
     # Runs in an EPHEMERAL uniquely-named container (#1171) so concurrent runs
     # cannot clobber each other and nothing survives the gate.
-    build_image
-    fix_cache_perms
+    # Built from the same Dockerfile as the testbox, but under this gate's own
+    # tag so a concurrent sibling build cannot swap the image mid-run.
+    "$ENGINE" build -q -t "$LIFECYCLE_IMAGE" - <"$REPO_ROOT/scripts/container/Dockerfile.test" >/dev/null
+    fix_cache_perms "$LIFECYCLE_IMAGE"
     LIFECYCLE_NAME="af-lifecycle-$(_uniq)"
     rc=0
     "$ENGINE" run --rm \
@@ -222,7 +236,7 @@ lifecycle)
         -e "GITHUB_TOKEN=${GITHUB_TOKEN:-}" \
         -e "AF_LIFECYCLE_INJECT=${AF_LIFECYCLE_INJECT:-}" \
         -e "AF_LIFECYCLE_ALLOW_PARTIAL=${AF_LIFECYCLE_ALLOW_PARTIAL:-1}" \
-        "$IMAGE" bash /src/scripts/container/lifecycle-entry.sh "$@" || rc=$?
+        "$LIFECYCLE_IMAGE" bash /src/scripts/container/lifecycle-entry.sh "$@" || rc=$?
     exit "$rc"
     ;;
 web-selftest)

@@ -179,6 +179,28 @@ Two guards keep that honest:
   skipping — a green run that quietly stopped testing supervision is the exact
   lie this gate exists to prevent.
 
+## The audit: "what would make this pass without testing anything?"
+
+Asked of every assertion in the script. It is the only question that matters for
+a gate like this, and it found five real holes — four of which would have shipped
+green:
+
+| assertion | what would make it pass vacuously | what stops it now |
+|---|---|---|
+| TUI renders **on a virgin home** | the doctor probe ran first and **created the home + log**, so "virgin" was already false when measured. An observation that creates the state it observes is not an observation. | each probe gets its **own pristine home** and calls `lc_assert_virgin` immediately before touching it — which holds regardless of which command materializes what, on either side of the upgrade |
+| **no panic** on the first frame | an **empty capture**: `grep` finds no panic in a dead pane and passes | require the screen to contain the TUI marker *before* concluding anything about what is not on it (it reports how many lines it searched) |
+| **first session created** | `af sessions create` answering **0 while its JSON body carries a refusal** — observed on this harness | assert the outcome: the daemon must *list* the session |
+| **no version skew** (the #1921 check) | `lc_assert_eq "" ""` — if `/proc/<pid>/exe` were unreadable *and* the client version came back empty, the most important assertion here would compare nothing to nothing and report "no skew" | both operands must be non-empty or it fails |
+| **no session Lost** | testing `status == 4` (`Dead`) — **write-never** since #1108, so it matched nothing on any machine | fail-**closed**: "is every session in a state I recognise as healthy?", so unknown/drifted values fail loudly |
+| **unit installed** | `af daemon install` returning 0 without registering anything | confirm `daemon status --json .autostart_unit` is true |
+| **fault injections** | the injection **silently no-ops** (a CLI change, an RPC error) and the run reports on a scenario that never existed | each injection asserts its **outcome** (not its exit code) and aborts the scenario if it did not apply |
+| **sessions survive** | counting **0 before and 0 after** (`0 == 0`) | scenario B aborts unless exactly 2 sessions exist first |
+| session counts | an unscoped `sessions list` counting **the wrong project** | every query passes `--repo` |
+
+The general rule this settles on: **prefer fail-closed**. Enumerating bad states
+fails open — anything you did not think of passes. Asking "is this provably the
+good state?" turns every surprise into a loud failure instead of a quiet green.
+
 ## What this does NOT cover yet
 
 * **macOS / launchd.** `lc_unit_active` and `lc_unit_main_pid` already have

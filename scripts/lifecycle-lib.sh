@@ -167,6 +167,39 @@ lc_guard_disposable() {
 # never as the only witness for "is there exactly one daemon".
 # ----------------------------------------------------------------------------
 
+# lc_assert_virgin <home> <what> — prove this home is untouched, RIGHT BEFORE the
+# probe that depends on it.
+#
+# Exists because an observation that CREATES the state it observes is not an
+# observation. `af doctor` and `af daemon status` both materialize the home
+# directory and agent-factory.log (measured; `af version` touches nothing) — so a
+# scenario that probes doctor and then claims to boot the TUI "on a virgin home"
+# is measuring a home its own earlier probe built. Asserting virginity once at
+# the top of a scenario only ever covers the FIRST probe.
+#
+# Each probe therefore gets its own pristine home and calls this immediately
+# before touching it, which holds regardless of which command materializes what —
+# including on the far side of an upgrade, where the answer may differ.
+lc_assert_virgin() {
+    local home="$1" what="$2" dirty=""
+    [ -e "$home" ] && dirty="home directory exists"
+    [ -e "$home/config.toml" ] && dirty="${dirty:+$dirty; }config.toml exists"
+    [ -e "$home/state.json" ] && dirty="${dirty:+$dirty; }state.json exists"
+    if [ -n "$dirty" ]; then
+        lc_fail "$what: home '$home' is NOT virgin ($dirty) — this probe's premise is already broken"
+        find "$home" -maxdepth 1 -mindepth 1 2>/dev/null | sed 's/^/[lifecycle]   | /' >&2
+        return 1
+    fi
+    local n
+    n="$(lc_daemon_count "$home")"
+    if [ "$n" != "0" ]; then
+        lc_fail "$what: $n daemon(s) already serve '$home'"
+        return 1
+    fi
+    lc_pass "$what: home is virgin (no dir, no config, no state, no daemon)"
+    return 0
+}
+
 # lc_daemon_pids <home> — pids of af daemons serving exactly this AF home.
 #
 # Three filters, each closing a false positive we actually hit while building
