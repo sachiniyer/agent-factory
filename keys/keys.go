@@ -46,6 +46,17 @@ const (
 	KeyCopyPR // Key for copying PR URL to clipboard
 	KeyHooks  // Key for editing post-worktree hooks
 
+	// KeyConfigEditor opens the global config editor overlay: a form over the
+	// config manifest that writes config.toml through the same path
+	// `af config set` uses.
+	//
+	// "," is the near-universal preferences key (the ctrl+,/cmd+, convention),
+	// and it is deliberately NOT "C": #1928 claims that for the config AGENT,
+	// the conversational path to the same settings. The two are complementary —
+	// one form, one conversation, one manifest behind both — so they must not
+	// fight over a key.
+	KeyConfigEditor
+
 	// KeySwitchProject opens the searchable project-picker overlay to switch the
 	// TUI's active project/repo in place (#1461). ctrl+p rather than P: the
 	// capital keys are deliberately left free so a user can pin the old
@@ -184,6 +195,7 @@ var specs = []spec{
 	// "capitals left free" note on KeySwitchProject is specifically about P,
 	// where a legacy copy_pr pin was likely.
 	{name: KeyConfigAgent, configKey: "config_agent", keys: []string{"C"}, desc: "config agent", dispatch: true},
+	{name: KeyConfigEditor, configKey: "config_editor", keys: []string{","}, desc: "config", dispatch: true},
 	{name: KeySwitchProject, configKey: "switch_project", keys: []string{"ctrl+p"}, desc: "switch project", dispatch: true},
 	{name: KeyLeft, configKey: "collapse", keys: []string{"h", "left"}, desc: "collapse", dispatch: true},
 	{name: KeyRight, configKey: "expand", keys: []string{"l", "right"}, desc: "expand", dispatch: true},

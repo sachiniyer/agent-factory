@@ -50,6 +50,11 @@ const (
 	// summary (#1087 play-test): the full manager gets a centered overlay so
 	// its form is never clamped into the narrow rail.
 	stateTasks
+	// stateConfigEditor is the state when the global config editor overlay is
+	// open (","). Like the hooks and tasks overlays it owns the keyboard while
+	// open, so its value field can take arbitrary text (a listen address, a
+	// branch prefix) without the global key map eating the runes.
+	stateConfigEditor
 )
 
 type home struct {
@@ -315,6 +320,10 @@ type home struct {
 	// hooksPane is the post-worktree hooks editor, hosted as an overlay
 	// (stateHooks)
 	hooksPane *ui.HooksPane
+	// configPane is the global config editor, hosted as an overlay
+	// (stateConfigEditor). It renders from the config manifest and writes
+	// through config.SetGlobalConfigValue — the same path `af config set` uses.
+	configPane *ui.ConfigPane
 	// menu displays the key hints inside the status bar (shared handle for
 	// SetState/keydown callers)
 	menu *ui.Menu
@@ -416,6 +425,7 @@ func newHome(ctx context.Context, program string, autoYes bool, repo *config.Rep
 		projects:         ui.NewProjectsPane(),
 		statusBar:        ui.NewStatusBar(menu, errBox),
 		hooksPane:        ui.NewHooksPane(),
+		configPane:       ui.NewConfigPane(),
 		ring:             layout.NewRing(layout.RegionTree, layout.RegionAutomations, layout.RegionProjects),
 		zones:            zones.NewRegistry(),
 		mouseClock:       time.Now,

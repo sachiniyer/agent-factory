@@ -174,6 +174,7 @@ func wireTestPanes(h *home, proj *store.Projection) {
 	h.projects = ui.NewProjectsPane()
 	h.statusBar = ui.NewStatusBar(h.menu, h.errBox)
 	h.hooksPane = ui.NewHooksPane()
+	h.configPane = ui.NewConfigPane()
 	h.ring = layout.NewRing(layout.RegionTree, layout.RegionAutomations, layout.RegionProjects)
 	h.zones = zones.NewRegistry()
 	h.mouseClock = time.Now

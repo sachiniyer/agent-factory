@@ -94,6 +94,56 @@ func (s *controlServer) ReloadTasks(_ ReloadTasksRequest, resp *ReloadTasksRespo
 	return nil
 }
 
+// GetConfig returns the config manifest zipped with the user's live values: the
+// single description of config that the web editor renders its form from, and
+// the same one config.ManifestWithValues hands the TUI in-process.
+//
+// Like ListTasks, it is deliberately NOT gated on requireManagerReady: config
+// lives on disk and is read fresh here, so the answer is safe and current even
+// while the daemon is warming up. Reading it fresh (rather than returning the
+// manager's startup snapshot, manager.cfg) is the deliberate choice — the
+// snapshot is what the daemon is RUNNING, while the file is what the user is
+// EDITING. An editor must show the file, or a value edited twice in one session
+// would appear to revert.
+//
+// The gap between those two is exactly why every entry carries RequiresRestart.
+func (s *controlServer) GetConfig(_ GetConfigRequest, resp *GetConfigResponse) error {
+	cfg, err := config.LoadConfig()
+	if err != nil {
+		return fmt.Errorf("cannot read config: %w", err)
+	}
+	configDir, err := config.GetConfigDir()
+	if err != nil {
+		return err
+	}
+	resp.Entries = config.ManifestWithValues(cfg)
+	resp.Path = filepath.Join(configDir, config.TomlConfigFileName)
+	return nil
+}
+
+// SetConfigValue writes one config key on the caller's behalf, through
+// config.SetGlobalConfigValue — the identical validated, file-locked, atomic
+// path `af config set` and the TUI editor use. The daemon adds nothing: no
+// second validator, no second writer, no reordering.
+//
+// It exists because a browser cannot write the user's disk, not because the
+// daemon owns config.toml (it does not — see the control_types.go note). The
+// file lock is what makes this safe against a concurrent hand-edit or CLI write,
+// and it is taken inside SetGlobalConfigValue, so this method must not
+// pre-read, cache, or merge anything around it.
+//
+// Errors (unknown key, invalid value) propagate verbatim so the web form shows
+// the validator's own message, which is the one the CLI prints.
+func (s *controlServer) SetConfigValue(req SetConfigValueRequest, resp *SetConfigValueResponse) error {
+	result, err := config.SetGlobalConfigValue(req.Key, req.Value)
+	if err != nil {
+		return err
+	}
+	resp.Result = result
+	resp.RestartNotice = config.RestartNotice
+	return nil
+}
+
 // ListTasks returns the full task list read from tasks.json (#1029 PR 3).
 // Deliberately NOT gated on requireManagerReady: task state lives on disk,
 // independent of the instance restore, so a read is always safe and always

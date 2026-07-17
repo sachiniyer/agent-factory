@@ -204,6 +204,8 @@ func (m *home) View() string {
 		return overlay.PlaceOverlay(0, 0, m.renderHooksOverlay(), mainView, true)
 	} else if m.state == stateTasks {
 		return overlay.PlaceOverlay(0, 0, m.renderTasksOverlay(), mainView, true)
+	} else if m.state == stateConfigEditor {
+		return overlay.PlaceOverlay(0, 0, m.renderConfigOverlay(), mainView, true)
 	}
 
 	return mainView

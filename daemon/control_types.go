@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/task"
 )
@@ -464,3 +465,48 @@ type ReapConfigAgentRequest struct {
 
 // ReapConfigAgentResponse is empty: reaping either succeeded or errored.
 type ReapConfigAgentResponse struct{}
+
+// -- Config (the web config editor's read/write pair) --
+//
+// config.toml is NOT daemon-owned state. Unlike instances.json (the #960
+// single-writer model), it is a file the README tells users to hand-edit, read
+// by af and the daemon at startup and guarded by a file lock rather than by
+// daemon ownership. These RPCs therefore exist for REACH, not for arbitration:
+// the web UI is a browser and cannot touch the user's disk, so it asks the
+// daemon to run the same config.SetGlobalConfigValue call the TUI and
+// `af config set` run in their own process. There is no daemon-side copy of
+// config, no cache to invalidate, and no writer to serialize against beyond the
+// lock every writer already takes.
+
+// GetConfigRequest asks for the config manifest zipped with the user's live
+// values — every user-facing global key, whether it is settable, and what it is
+// set to now. There is no key filter: the manifest is ~20 entries and the editor
+// renders all of them.
+type GetConfigRequest struct{}
+type GetConfigResponse struct {
+	Entries []config.ConfigEntry `json:"entries"`
+	// Path is the config.toml the values were read from, so the UI can tell the
+	// user which file it is editing (a user with AF_HOME set is otherwise left
+	// guessing).
+	Path string `json:"path"`
+}
+
+// SetConfigValueRequest sets one key, exactly as `af config set key value` does.
+// Value is the raw string form; the daemon hands it to the same validator, so an
+// invalid value is rejected here with the identical message rather than being
+// written and discovered at the next startup.
+type SetConfigValueRequest struct {
+	Key   string `json:"key"`
+	Value string `json:"value"`
+}
+type SetConfigValueResponse struct {
+	// Result is config.SetResult verbatim — key, canonical value, path, and
+	// RequiresRestart — so the web UI echoes what was actually written rather
+	// than what it believes it sent.
+	Result *config.SetResult `json:"result"`
+	// RestartNotice is the sentence to show when Result.RequiresRestart is set.
+	// It rides on the response rather than being duplicated in the web bundle so
+	// the TUI, the web UI, and the CLI cannot drift into three different
+	// accounts of when an edit takes effect.
+	RestartNotice string `json:"restart_notice"`
+}

@@ -2,7 +2,9 @@ package app
 
 import (
 	"fmt"
+	"path/filepath"
 
+	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/keys"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 	"github.com/sachiniyer/agent-factory/ui"
@@ -292,6 +294,60 @@ func (m *home) showHooksOverlay() (tea.Model, tea.Cmd) {
 	m.hooksPane.SetFocus(true)
 	m.layoutPaneOverlays()
 	m.state = stateHooks
+	return m, nil
+}
+
+// showConfigEditor opens the global config editor overlay, reading config.toml
+// fresh so the form shows the file as it is NOW — including a hand-edit or an
+// `af config set` made since the TUI started. The pane must never render the
+// TUI's own startup snapshot: config.toml is hand-editable by design, and an
+// editor showing a stale copy would silently overwrite the newer file.
+//
+// A config that will not load is surfaced rather than swallowed: opening an
+// editor onto a broken file and letting the user "fix" one key would write the
+// rest of the broken state back.
+func (m *home) showConfigEditor() (tea.Model, tea.Cmd) {
+	cfg, err := config.LoadConfig()
+	if err != nil {
+		return m, m.handleError(fmt.Errorf("cannot open the config editor: %w", err))
+	}
+	configDir, err := config.GetConfigDir()
+	if err != nil {
+		return m, m.handleError(err)
+	}
+	m.configPane.SetEntries(config.ManifestWithValues(cfg), filepath.Join(configDir, config.TomlConfigFileName))
+	m.configPane.SetFocus(true)
+	m.layoutPaneOverlays()
+	m.state = stateConfigEditor
+	return m, nil
+}
+
+// handleStateConfigEditor routes key events to the config editor overlay. Esc
+// closes it (the pane drops its own focus); each edit is written when it is
+// committed, so there is nothing to flush on close.
+//
+// The quit-key handling deliberately differs from the hooks and tasks overlays
+// above, which root-route the configured quit key unconditionally. Doing that
+// here would make it impossible to TYPE the letter "q" into a value — and config
+// values are arbitrary user strings: a vscode binary at /home/quentin/bin/code,
+// a branch prefix, a detach-key spec. So the quit key is honored only in normal
+// mode, while the value field is not taking runes.
+//
+// ctrl+c still quits unconditionally, which is the part #1727 is about: a text
+// field must never swallow the hard exit, however it is being used.
+func (m *home) handleStateConfigEditor(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if msg.String() == "ctrl+c" {
+		return m.handleQuit()
+	}
+	if !m.configPane.IsEditing() && key.Matches(msg, keys.GlobalKeyBindings[keys.KeyQuit]) {
+		return m.handleQuit()
+	}
+
+	m.configPane.HandleKeyPress(msg)
+	if !m.configPane.HasFocus() {
+		m.state = stateDefault
+		return m, nil
+	}
 	return m, nil
 }
 

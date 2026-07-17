@@ -69,6 +69,89 @@ func CurrentValue(cfg *Config, key string) (string, bool) {
 	return editorValue(field), true
 }
 
+// ConfigEntry is one manifest entry zipped with the user's live value: the form
+// a config EDITOR renders a row from, and the form that crosses the wire to the
+// web UI.
+//
+// It exists so the two editors render from one description of config rather than
+// two. The TUI calls ManifestWithValues in-process; the daemon returns the same
+// slice from GetConfig and the web UI renders that. Neither surface holds a key
+// list, a type switch, or a copy of the defaults, so adding a key to
+// config_types.go reaches both without either UI being touched — which is what
+// TestBothEditorSurfacesRenderEveryManifestKey pins.
+type ConfigEntry struct {
+	Key      string `json:"key"`
+	Type     string `json:"type"`
+	Default  string `json:"default"`
+	Purpose  string `json:"purpose"`
+	Tier     int    `json:"tier"`
+	TierName string `json:"tier_name"`
+	// Settable reports whether this key can be edited from a UI at all. It is
+	// the manifest's own field, pinned against the real `af config set`
+	// allowlist by TestManifestAgreesWithSettableKeys — so a surface may trust
+	// it rather than re-deriving one. A false renders read-only, with Purpose
+	// explaining that the key is hand-edited.
+	Settable bool `json:"settable"`
+	// Enum drives a picker instead of a free-text field when non-empty. For a
+	// table it constrains the entry NAMES, not the value (see the briefing's
+	// same distinction), which is why a UI must not offer it as a value picker
+	// for Type "table".
+	Enum []string `json:"enum,omitempty"`
+	// Value is the user's live value in editor form (see CurrentValue).
+	Value string `json:"value"`
+	// RequiresRestart reports that a change to this key reaches af and the
+	// daemon only when they next start.
+	//
+	// It is true for EVERY key, which is not laziness: config.toml is read at
+	// startup, so this mirrors SetResult.RequiresRestart and the note
+	// `af config set` already prints. It is carried per-entry rather than as one
+	// banner because the honest per-key answer is not uniform — some keys are
+	// re-read per use (worktree_root, via LoadConfig on each worktree create),
+	// while the daemon's own listener keys are captured once into manager.cfg at
+	// startup and cannot change without a restart. Claiming the former apply
+	// "live" would be the lie this field exists to avoid, and nothing pins such
+	// a claim today, so every key reports the conservative truth. Over-warning
+	// costs a needless restart; under-warning silently ignores the user's edit.
+	RequiresRestart bool `json:"requires_restart"`
+}
+
+// ManifestWithValues returns the manifest zipped with cfg's live values: the
+// single description of config that BOTH editor surfaces render from.
+//
+// A nil cfg (or a key that will not resolve) yields an empty Value rather than a
+// default, for the reason CurrentValue documents: an editor that pre-filled a
+// default as though it were the user's setting invites saving it back.
+func ManifestWithValues(cfg *Config) []ConfigEntry {
+	entries := Manifest()
+	out := make([]ConfigEntry, 0, len(entries))
+	for _, e := range entries {
+		value, _ := CurrentValue(cfg, e.Key)
+		out = append(out, ConfigEntry{
+			Key:      e.Key,
+			Type:     e.Type,
+			Default:  e.Default,
+			Purpose:  e.Purpose,
+			Tier:     int(e.Tier),
+			TierName: TierName(e.Tier),
+			Settable: e.Settable,
+			Enum:     e.Enum,
+			Value:    value,
+			// Uniformly true — see the field's comment.
+			RequiresRestart: true,
+		})
+	}
+	return out
+}
+
+// RestartNotice is the one sentence every surface uses to tell a user their edit
+// is not live yet, and what to do about it.
+//
+// It names `af daemon restart` because "restart them to apply" (what the CLI
+// prints) leaves a user to guess the command — and a UI that changes a value the
+// running daemon then ignores, without saying so, is the failure this feature is
+// specifically not allowed to ship.
+const RestartNotice = "af and the daemon read config.toml at startup · run `af daemon restart` and restart af to apply"
+
 // editorValue renders one config field in the editor form. It deliberately does
 // NOT share renderConfigValue's briefing decorations (`""`, "none") — see the
 // file comment.
