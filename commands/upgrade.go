@@ -264,6 +264,45 @@ func runUpgrade(out, errOut io.Writer, downloadURL string, noRestart bool) error
 	return nil
 }
 
+// stopDaemonHint names a command that actually stops a daemon we could not
+// stop over the control socket.
+//
+// It is deliberately NOT `af daemon restart`. Every state this hint fires in
+// is one where the control socket did not answer, and `af daemon restart` goes
+// straight back through it: daemon.RequestShutdown stats the socket and
+// returns (ShutdownNoDaemon, nil) on fs.ErrNotExist or ECONNREFUSED — the
+// SIGTERM fallback fires only for a method-not-found reply on a socket that
+// DID answer — so restartDaemonFromPath returns early and `af daemon restart`
+// prints "no running daemon to restart" and stops nothing. Recommending the
+// thing that just failed is how a user ends up on the old daemon believing
+// they are patched, which is the whole bug.
+//
+// The pid is a fact we already hold, so the hint is built from that instead.
+// `kill` sends SIGTERM, which the daemon handles (daemon.go's signal.Notify),
+// and it names ONE pid: the repo's own pkill -f -- '--daemon' fallback would
+// also kill daemons serving other AF homes.
+func stopDaemonHint(h daemon.HealthStatus) string {
+	if h.PIDVerified && h.PIDFilePID > 0 {
+		return fmt.Sprintf("Stop it with `kill %d`, then run af — the next run starts a fresh daemon from the new binary.", h.PIDFilePID)
+	}
+	// No verified pid to name: point at the command that finds it rather than
+	// guessing one.
+	return "Find its pid with `af daemon status` and stop it, then run af — the next run starts a fresh daemon from the new binary."
+}
+
+// startDaemonHint names what brings a daemon back when none is running.
+//
+// Also NOT `af daemon restart`: with no daemon up there is no socket, so it
+// reports "no running daemon to restart" and starts nothing — it restarts, it
+// does not start. Running af does start one (the TUI cold start calls
+// daemon.EnsureDaemon, as does ensureDaemonForTasks), and `af daemon install`
+// both starts one and re-registers it for this home (systemctl --user enable
+// --now / a RunAtLoad launchd agent), which is the only option here that ends
+// with the daemon supervised.
+func startDaemonHint() string {
+	return "Running af starts one from the new binary; `af daemon install` starts it and keeps it supervised across logins."
+}
+
 // reportUpgradeRestart tells the user what the restart actually did.
 //
 // The rule (#1947): never claim the daemon is on the new binary unless it is.
@@ -273,12 +312,21 @@ func runUpgrade(out, errOut io.Writer, downloadURL string, noRestart bool) error
 // success line is reserved for "the daemon is now running what you installed"
 // and for "there was no daemon to restart", which is not a problem.
 func reportUpgradeRestart(out, errOut io.Writer, outcome restartOutcome, restartErr error, upgradedPath string) {
-	if restartErr != nil {
-		// ShutdownFailed/ShutdownError land here: a daemon was proven to be
-		// listening but we could not stop it (#553/#978).
+	switch outcome.FailedPhase {
+	case restartPhaseShutdown:
+		// The old daemon would not stop, so it is still serving the old
+		// binary: #1947's exact symptom, reached by a different road.
 		fmt.Fprintln(out, "Upgraded successfully!")
-		fmt.Fprintf(errOut, "The daemon was not restarted: %v\n", restartErr)
-		fmt.Fprintln(errOut, "It is still running the old binary. Restart it with `af daemon restart`, or stop the `--daemon` process yourself.")
+		fmt.Fprintf(errOut, "The running daemon could not be stopped: %v\n", restartErr)
+		fmt.Fprintln(errOut, "It is still running the old binary, so this upgrade has not reached it yet.")
+		fmt.Fprintln(errOut, stopDaemonHint(daemonHealthFn()))
+		return
+	case restartPhaseRespawn:
+		// The opposite state: the old daemon is gone and nothing replaced it.
+		fmt.Fprintln(out, "Upgraded successfully!")
+		fmt.Fprintf(errOut, "The old daemon was stopped, but a new one could not be started: %v\n", restartErr)
+		fmt.Fprintln(errOut, "No daemon is running at all right now, so task schedules, watch scripts, and autoyes are stopped.")
+		fmt.Fprintln(errOut, startDaemonHint())
 		return
 	}
 
@@ -289,8 +337,9 @@ func reportUpgradeRestart(out, errOut io.Writer, outcome restartOutcome, restart
 		// which one this is before printing an all-clear.
 		if h := daemonHealthFn(); h.PIDVerified {
 			fmt.Fprintln(out, "Upgraded successfully!")
-			fmt.Fprintf(errOut, "The daemon was not restarted: no daemon answered the control socket, but pid %d is a running af daemon.\n", h.PIDFilePID)
-			fmt.Fprintln(errOut, "It is still running the old binary. Restart it with `af daemon restart`.")
+			fmt.Fprintf(errOut, "No daemon answered the control socket, but pid %d is a running af daemon, so it was not restarted.\n", h.PIDFilePID)
+			fmt.Fprintln(errOut, "It is still running the old binary.")
+			fmt.Fprintln(errOut, stopDaemonHint(h))
 			return
 		}
 		fmt.Fprintln(out, "Upgraded successfully!")
@@ -325,7 +374,14 @@ func reportUpgradeRestart(out, errOut io.Writer, outcome restartOutcome, restart
 	}
 	if outcome.Respawn.UnitGateErr != nil {
 		fmt.Fprintf(errOut, "The daemon autostart unit was left alone: %v\n", outcome.Respawn.UnitGateErr)
-		fmt.Fprintln(errOut, "Restarting a unit we cannot prove serves this AF home could stop an unrelated daemon, so the daemon was restarted as an unsupervised ad-hoc process instead. If the unit is this home's, restart it yourself with `af daemon restart`.")
+		fmt.Fprintln(errOut, "Restarting a unit we cannot prove serves this AF home could stop an unrelated daemon, so the daemon was restarted as an unsupervised ad-hoc process: it will not return at next login.")
+		// NOT `af daemon restart`: that re-enters this same respawn, hits this
+		// same gate, and falls back to an ad-hoc daemon again — it would look
+		// like it worked while leaving supervision just as broken. Only a
+		// reinstall re-registers the unit for THIS home (InstallAutostart
+		// bakes the current AGENT_FACTORY_HOME and starts it), so it is the
+		// only repair that ends with the daemon supervised.
+		fmt.Fprintln(errOut, "Re-register this home's unit with `af daemon install` to restore supervision.")
 	}
 }
 

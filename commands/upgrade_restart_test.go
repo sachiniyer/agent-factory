@@ -317,6 +317,16 @@ func TestUpgrade_UnprovableUnitGateIsLoud(t *testing.T) {
 	if !strings.Contains(errOut.String(), "permission denied") {
 		t.Fatalf("stderr must say why the unit was left alone.\ngot=%q", errOut.String())
 	}
+	// `af daemon restart` re-enters this same respawn, hits this same gate,
+	// and falls back to an ad-hoc daemon AGAIN — it looks like it worked and
+	// leaves supervision just as broken. Only a reinstall re-registers the
+	// unit for this home.
+	if strings.Contains(errOut.String(), "af daemon restart") {
+		t.Fatalf("`af daemon restart` re-hits this gate and silently demotes to ad-hoc again; it does not restore supervision.\ngot=%q", errOut.String())
+	}
+	if !strings.Contains(errOut.String(), "af daemon install") {
+		t.Fatalf("the repair must be the one that restores supervision.\ngot=%q", errOut.String())
+	}
 }
 
 // TestUpgrade_NoUnitForThisHomeIsQuiet locks the ordinary ad-hoc install: no
@@ -385,7 +395,7 @@ func TestUpgrade_NoDaemonButDaemonRunningIsNotUnqualifiedSuccess(t *testing.T) {
 	if errOut.Len() == 0 {
 		t.Fatalf("a running-but-unreachable daemon must be reported, not papered over with success.\nstdout=%q", out.String())
 	}
-	for _, want := range []string{"4242", "old binary", "af daemon restart"} {
+	for _, want := range []string{"4242", "old binary", "kill 4242"} {
 		if !strings.Contains(errOut.String(), want) {
 			t.Fatalf("stderr missing %q.\ngot=%q", want, errOut.String())
 		}
@@ -417,20 +427,154 @@ func TestUpgrade_NoDaemonIsQuietWhenTrulyNoDaemon(t *testing.T) {
 // could not stop (ShutdownFailed/#553, ShutdownError/#978) always arrives with
 // an error. That error used to print to STDOUT prefixed with "Upgraded
 // successfully!" — the user is left on the old daemon either way, so it belongs
-// on stderr with the recovery command.
+// on stderr with a recovery command that works.
 func TestUpgrade_UnreachableDaemonIsLoud(t *testing.T) {
 	_, url := upgradeHarness(t)
 	stubShutdown(t, daemon.ShutdownError, errors.New("dial timeout"))
-	stubDaemonHealth(t, daemon.HealthStatus{})
+	stubDaemonHealth(t, daemon.HealthStatus{PIDFilePID: 7777, PIDVerified: true})
 
 	var out, errOut bytes.Buffer
 	if err := runUpgrade(&out, &errOut, url, false); err != nil {
 		t.Fatalf("runUpgrade must not fail the install when the daemon cannot be stopped: %v", err)
 	}
 
-	for _, want := range []string{"dial timeout", "old binary", "af daemon restart"} {
+	for _, want := range []string{"dial timeout", "still running the old binary", "kill 7777"} {
 		if !strings.Contains(errOut.String(), want) {
 			t.Fatalf("stderr missing %q.\ngot=%q", want, errOut.String())
 		}
+	}
+}
+
+// TestUpgrade_ShutdownAndRespawnFailuresAreOppositeStates is the P1 repro.
+//
+// restartDaemonFromPathDetailed wraps two OPPOSITE failures into a non-nil
+// error: a failed SHUTDOWN means the old daemon is still alive on the old code
+// (#1947's own symptom), and a failed RESPAWN means there is no daemon at all
+// (schedules, watches and autoyes all stopped). Reporting both with one message
+// guarantees it is wrong for one of them — and for the respawn case the old
+// message was actively false: it claimed something was "still running the old
+// binary" when nothing was running, and offered a remedy for a daemon that did
+// not exist. Same disease as the bug being cured: a restart path that cannot
+// tell which state it is in.
+func TestUpgrade_ShutdownAndRespawnFailuresAreOppositeStates(t *testing.T) {
+	t.Run("shutdown failed: the OLD daemon is still alive on the old binary", func(t *testing.T) {
+		_, url := upgradeHarness(t)
+		stubShutdown(t, daemon.ShutdownFailed, errors.New("no PID candidate found"))
+		stubDaemonHealth(t, daemon.HealthStatus{PIDFilePID: 4242, PIDVerified: true})
+
+		var out, errOut bytes.Buffer
+		if err := runUpgrade(&out, &errOut, url, false); err != nil {
+			t.Fatalf("runUpgrade: %v", err)
+		}
+
+		got := errOut.String()
+		if !strings.Contains(got, "could not be stopped") || !strings.Contains(got, "still running the old binary") {
+			t.Fatalf("a failed shutdown must say the old daemon is still on the old binary.\ngot=%q", got)
+		}
+		if !strings.Contains(got, "kill 4242") {
+			t.Fatalf("the remedy must actually stop the daemon we named.\ngot=%q", got)
+		}
+		if strings.Contains(got, "No daemon is running") {
+			t.Fatalf("a daemon IS running here; the message must not claim otherwise.\ngot=%q", got)
+		}
+	})
+
+	t.Run("respawn failed: NOTHING is running", func(t *testing.T) {
+		_, url := upgradeHarness(t)
+		stubShutdown(t, daemon.ShutdownViaRPC, nil)
+		stubDaemonHealth(t, daemon.HealthStatus{})
+		// Drive the real respawn: no unit, and the ad-hoc spawn fails.
+		stubRespawnCollaborators(t, false, nil)
+		ensureDaemonFromPathFn = func(string) error { return errors.New("fork/exec: permission denied") }
+
+		var out, errOut bytes.Buffer
+		if err := runUpgrade(&out, &errOut, url, false); err != nil {
+			t.Fatalf("runUpgrade: %v", err)
+		}
+
+		got := errOut.String()
+		if !strings.Contains(got, "permission denied") {
+			t.Fatalf("stderr must carry why the respawn failed.\ngot=%q", got)
+		}
+		if !strings.Contains(got, "No daemon is running") {
+			t.Fatalf("a failed respawn leaves NOTHING running; the message must say so.\ngot=%q", got)
+		}
+		// The precise lie the old shared message told.
+		if strings.Contains(got, "still running the old binary") {
+			t.Fatalf("nothing is running here — claiming a daemon is on the old binary is false.\ngot=%q", got)
+		}
+		// The state is "no daemon", so a *re*start is not the remedy: with no
+		// socket, `af daemon restart` prints "no running daemon to restart".
+		if strings.Contains(got, "af daemon restart") {
+			t.Fatalf("`af daemon restart` starts nothing when no daemon is running.\ngot=%q", got)
+		}
+		if !strings.Contains(got, "Running af starts one") {
+			t.Fatalf("the message must name what actually starts a daemon.\ngot=%q", got)
+		}
+	})
+}
+
+// TestUpgrade_HintsNeverRouteThroughTheDeadSocket is the P2 repro, as a rule
+// rather than a case: `af daemon restart` reaches the daemon through the
+// control socket, and daemon.RequestShutdown returns (ShutdownNoDaemon, nil)
+// for a missing or refused one — so in every state below, where the socket did
+// not answer, that command no-ops and stops nothing. A hint routed through the
+// thing that just failed is not a remedy.
+func TestUpgrade_HintsNeverRouteThroughTheDeadSocket(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		result daemon.ShutdownResult
+		err    error
+		health daemon.HealthStatus
+	}{
+		{
+			name:   "socket silent but a daemon is verifiably alive",
+			result: daemon.ShutdownNoDaemon,
+			health: daemon.HealthStatus{PIDFilePID: 4242, PIDVerified: true},
+		},
+		{
+			name:   "socket present but unreachable",
+			result: daemon.ShutdownError,
+			err:    errors.New("dial timeout"),
+			health: daemon.HealthStatus{PIDFilePID: 4242, PIDVerified: true},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, url := upgradeHarness(t)
+			stubShutdown(t, tc.result, tc.err)
+			stubDaemonHealth(t, tc.health)
+
+			var out, errOut bytes.Buffer
+			if err := runUpgrade(&out, &errOut, url, false); err != nil {
+				t.Fatalf("runUpgrade: %v", err)
+			}
+
+			if strings.Contains(errOut.String(), "af daemon restart") {
+				t.Fatalf("`af daemon restart` goes back through the socket that just failed, so it does nothing here.\ngot=%q", errOut.String())
+			}
+			if !strings.Contains(errOut.String(), "kill 4242") {
+				t.Fatalf("the remedy must be built from the pid we already hold.\ngot=%q", errOut.String())
+			}
+		})
+	}
+}
+
+// TestUpgrade_NoVerifiedPidPointsAtTheCommandThatFindsOne: with no pid to name,
+// the hint must not invent one — it points at the command that reports it.
+func TestUpgrade_NoVerifiedPidPointsAtTheCommandThatFindsOne(t *testing.T) {
+	_, url := upgradeHarness(t)
+	stubShutdown(t, daemon.ShutdownFailed, errors.New("no PID candidate found"))
+	stubDaemonHealth(t, daemon.HealthStatus{})
+
+	var out, errOut bytes.Buffer
+	if err := runUpgrade(&out, &errOut, url, false); err != nil {
+		t.Fatalf("runUpgrade: %v", err)
+	}
+
+	if !strings.Contains(errOut.String(), "af daemon status") {
+		t.Fatalf("with no verified pid the hint must name the command that finds one.\ngot=%q", errOut.String())
+	}
+	if strings.Contains(errOut.String(), "kill 0") {
+		t.Fatalf("hint invented a pid.\ngot=%q", errOut.String())
 	}
 }

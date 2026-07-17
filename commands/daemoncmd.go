@@ -313,6 +313,29 @@ type respawnResult struct {
 	StaleUnitExec string
 }
 
+// restartPhase names the step of the shutdown-then-respawn sequence that
+// failed. The two failures are OPPOSITE states and must never share a message:
+//
+//   - restartPhaseShutdown: the old daemon would not stop, so it is STILL
+//     RUNNING THE OLD BINARY. That is #1947's own symptom — the upgrade did not
+//     reach the daemon.
+//   - restartPhaseRespawn: the old daemon stopped but no new one came up, so
+//     NOTHING IS RUNNING. Task schedules, watch scripts and autoyes are all
+//     stopped until something starts a daemon.
+//
+// "Still on the old code" and "no daemon at all" need opposite remedies, and
+// telling them apart by reading the wrapped error's text is exactly the
+// guessing this PR exists to delete. The phase is carried, not inferred.
+type restartPhase int
+
+const (
+	// restartPhaseNone: nothing failed. The zero value, valid only alongside a
+	// nil error.
+	restartPhaseNone restartPhase = iota
+	restartPhaseShutdown
+	restartPhaseRespawn
+)
+
 // restartOutcome is the whole story of a shutdown-then-respawn: how the old
 // daemon was stopped, and how (or whether) a new one came back.
 type restartOutcome struct {
@@ -320,6 +343,9 @@ type restartOutcome struct {
 	// Respawned is false when no daemon was running, so nothing was respawned.
 	Respawned bool
 	Respawn   respawnResult
+	// FailedPhase is restartPhaseNone unless the accompanying error is
+	// non-nil, and names which half of the sequence broke.
+	FailedPhase restartPhase
 }
 
 // restartDaemonFromPath keeps the (result, error) shape the auto-update path
@@ -334,6 +360,7 @@ func restartDaemonFromPathDetailed(execPath string) (restartOutcome, error) {
 	result, shutdownErr := requestDaemonShutdownFn()
 	outcome := restartOutcome{Shutdown: result}
 	if shutdownErr != nil {
+		outcome.FailedPhase = restartPhaseShutdown
 		return outcome, fmt.Errorf("failed to stop running daemon: %w", shutdownErr)
 	}
 	if result == daemon.ShutdownNoDaemon {
@@ -342,6 +369,7 @@ func restartDaemonFromPathDetailed(execPath string) (restartOutcome, error) {
 	respawn, err := respawnDaemonFn(execPath)
 	outcome.Respawn = respawn
 	if err != nil {
+		outcome.FailedPhase = restartPhaseRespawn
 		return outcome, fmt.Errorf("failed to restart daemon: %w", err)
 	}
 	outcome.Respawned = true

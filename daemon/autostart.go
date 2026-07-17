@@ -184,7 +184,7 @@ func launchdAutostartPlist(execPath, pathEnv, shellEnv, agentFactoryHome, logPat
 //     daemon is left at worst enabled-but-inactive until the next login — far
 //     better than a present-but-not-enabled unit. (Previously a stop failure
 //     returned early, leaving the file on disk but never enabled.)
-//   - On a hard failure of the reload/enable/load step the just-written unit
+//   - On a hard failure of the reload/enable/bootstrap step the just-written unit
 //     file is removed, so AutostartInstalled — which reports on file existence —
 //     can never misreport a not-enabled unit as installed and mislead the
 //     upgrade respawn path into RestartAutostartUnit on a unit that was never
@@ -246,9 +246,9 @@ func InstallAutostart() (string, error) {
 			return "", fmt.Errorf("failed to write plist file: %w", err)
 		}
 		// Hand any ad-hoc daemon over to the supervised one, but never let a
-		// stop failure block loading — see the function comment (#974).
+		// stop failure block the bootstrap — see the function comment (#974).
 		if _, err := autostartStopDaemon(); err != nil {
-			log.WarningLog.Printf("failed to stop the running daemon before loading the autostart agent; loading anyway: %v", err)
+			log.WarningLog.Printf("failed to stop the running daemon before bootstrapping the autostart agent; bootstrapping anyway: %v", err)
 		}
 		if out, err := autostartUnitCommand("launchctl", "bootstrap", launchdGUIDomain(), plistPath); err != nil {
 			removeAutostartUnitFile(plistPath)
@@ -596,7 +596,7 @@ func RestartAutostartUnit() error {
 }
 
 // PauseAutostartUnit stops the daemon autostart unit — `systemctl --user stop`
-// on Linux, `launchctl unload` on macOS — WITHOUT uninstalling it, so the
+// on Linux, `launchctl bootout gui/<uid>/<label>` on macOS — WITHOUT uninstalling it, so the
 // service manager cannot (re)launch the daemon until ResumeAutostartUnit.
 // Stopping the unit also stops the supervised daemon itself. `af reset` wraps
 // its wipe in this pair: the unit relaunches a daemon that exits uncleanly,
@@ -627,8 +627,8 @@ func PauseAutostartUnit() error {
 }
 
 // ResumeAutostartUnit re-arms the unit PauseAutostartUnit stopped — `systemctl
-// --user start` on Linux, `launchctl load` on macOS — which also starts the
-// daemon again (the launchd agent is RunAtLoad).
+// --user start` on Linux, `launchctl bootstrap gui/<uid>` on macOS — which also
+// starts the daemon again (the launchd agent is RunAtLoad).
 func ResumeAutostartUnit() error {
 	switch autostartGOOS {
 	case "linux":
