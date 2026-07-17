@@ -165,28 +165,22 @@ func briefingSetHint(e ManifestEntry) string {
 	return "`af config set " + e.Key + " <value>`"
 }
 
-// currentConfigValue renders the live value of one toml key from cfg, found by
-// reflecting over Config's toml tags (never a hand-written key → field map, see
-// RenderBriefing). Returns "unknown" for a nil cfg and for a key that names no
-// field — the latter is unreachable while TestManifestCoversEveryConfigKey
-// passes, since it rejects a manifest key with no matching field.
+// currentConfigValue renders the live value of one toml key from cfg in the
+// BRIEFING form, found by reflecting over Config's toml tags (never a
+// hand-written key → field map, see RenderBriefing). Returns "unknown" for a nil
+// cfg and for a key that names no field — the latter is unreachable while
+// TestManifestCoversEveryConfigKey passes, since it rejects a manifest key with
+// no matching field.
+//
+// The field lookup is shared with CurrentValue (manifest_value.go); only the
+// rendering differs, because a briefing and an editable field want different
+// things from an unset value.
 func currentConfigValue(cfg *Config, key string) string {
-	if cfg == nil {
+	field, ok := configFieldByTomlKey(cfg, key)
+	if !ok {
 		return "unknown"
 	}
-	rv := reflect.ValueOf(*cfg)
-	rt := rv.Type()
-	for i := range rt.NumField() {
-		f := rt.Field(i)
-		if !f.IsExported() {
-			continue
-		}
-		if tomlTagName(f.Tag.Get("toml")) != key {
-			continue
-		}
-		return renderConfigValue(rv.Field(i))
-	}
-	return "unknown"
+	return renderConfigValue(field)
 }
 
 // renderConfigValue renders one config field for the briefing: scalars bare, an
