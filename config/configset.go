@@ -72,8 +72,8 @@ type settableKeySpec struct {
 //
 // Structural values stay hand-edited, and the manifest marks them Settable:false:
 //   - root_agents — a nested table (path → {program, auto_yes}); no scalar shape.
-//   - theme — a 19-slot color table; setting one slot at a time through the CLI
-//     is not how anyone edits a palette.
+//   - theme — a color table (see ThemeConfig); setting one slot at a time through
+//     the CLI is not how anyone edits a palette.
 //   - keys — array-capable rebinds (an action may map to a list of keys).
 //   - cors_allowed_origins — a LIST of origins, and the only excluded key that is
 //     otherwise scalar-ish. It needs real design first, not a spec entry: this
@@ -186,6 +186,58 @@ type SetResult struct {
 	// change applies to af and the daemon on their next start, exactly like a
 	// hand-edit.
 	RequiresRestart bool `json:"requires_restart"`
+	// Warnings are non-fatal notes about what the write actually means, printed
+	// after the echo. The write SUCCEEDED — a warning never blocks or changes the
+	// value. Today the only one is the tokenless-network-listener exposure
+	// (exposureWarning).
+	Warnings []string `json:"warnings,omitempty"`
+}
+
+// exposureWarning returns a warning when the config that RESULTS from this set
+// serves an unauthenticated control plane to the network — the combination of a
+// non-loopback listen_addr and require_token = false.
+//
+// It exists because this is now easy to do by accident. Before `listen_addr`
+// became settable, exposing the listener took a deliberate hand-edit; now it is
+// one command that exits 0 and prints nothing. The daemon already knows this
+// pairing is dangerous and warns about exactly it (daemon/httpserver.go) — but
+// only into the log, at the next daemon start, which is neither where nor when
+// the user is looking. This says it at the moment they type it.
+//
+// It WARNS and nothing more: it does not refuse (that would break scripting) and
+// does not auto-set require_token (silently changing a key the user did not name
+// is worse than the surprise it prevents). The user stays in control; they just
+// stop being surprised.
+//
+// Both directions of the pairing are checked, because either key can create the
+// exposure: pointing listen_addr at the network while the token is off, or
+// turning the token off while listen_addr is already on the network.
+//
+// The loopback test is config.IsLoopbackListenAddr — the SAME predicate the
+// daemon's token gate uses. Two definitions of "is this loopback" drifting apart
+// is precisely how a security check rots, so there is only one.
+func exposureWarning(cfg *Config, key, canonical string) string {
+	if cfg == nil {
+		return ""
+	}
+	addr, tokenRequired := cfg.ListenAddr, cfg.RequireToken
+	switch key {
+	case "listen_addr":
+		addr = canonical
+	case "require_token":
+		tokenRequired = canonical == "true"
+	default:
+		return ""
+	}
+	// An empty listen_addr disables the web server outright: nothing is exposed.
+	if addr == "" || tokenRequired || IsLoopbackListenAddr(addr) {
+		return ""
+	}
+	return fmt.Sprintf("WARNING: %s is reachable from the network and require_token is false, so anyone who can "+
+		"reach it has full control of your agents and this machine — af serves a plain-HTTP control plane with no "+
+		"authentication in this configuration. Run `af config set require_token true` to require a token "+
+		"(`af token` prints it), or set listen_addr back to a loopback address such as 127.0.0.1:8443, or \"\" to "+
+		"turn the web server off.", addr)
 }
 
 // resolveSettable maps a user key ("default_program" or "program_overrides.claude")
@@ -228,8 +280,12 @@ func SetGlobalConfigValue(key, rawValue string) (*SetResult, error) {
 
 	// Ensure config.toml exists (migrating a legacy config.json if needed) and
 	// that the current config actually loads, so a later parse failure is
-	// unambiguously our edit's fault, not a pre-existing broken file.
-	if _, err := LoadConfig(); err != nil {
+	// unambiguously our edit's fault, not a pre-existing broken file. The loaded
+	// config is KEPT: exposureWarning needs the values this write lands on to
+	// judge the resulting posture — a listen_addr write is only dangerous in the
+	// company of require_token = false, and vice versa.
+	currentCfg, err := LoadConfig()
+	if err != nil {
 		return nil, fmt.Errorf("refusing to write: the current config does not load: %w", err)
 	}
 	configDir, err := GetConfigDir()
@@ -257,6 +313,9 @@ func SetGlobalConfigValue(key, rawValue string) (*SetResult, error) {
 			return err
 		}
 		result = &SetResult{Key: key, Value: canonical, Path: tomlPath, RequiresRestart: true}
+		if w := exposureWarning(currentCfg, key, canonical); w != "" {
+			result.Warnings = append(result.Warnings, w)
+		}
 		return nil
 	})
 	if writeErr != nil {

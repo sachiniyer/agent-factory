@@ -49,10 +49,6 @@ func (m Mode) String() string {
 	}
 }
 
-// defaultConfigPathLabel is the path named in the briefing when the real one
-// cannot be resolved. It matches the documented default location.
-const defaultConfigPathLabel = "~/.agent-factory/config.toml"
-
 // BuildBriefing renders the full prompt handed to the config agent: its job for
 // this mode, the rules it must not break, and the tier-ordered manifest with the
 // user's current values.
@@ -64,8 +60,12 @@ const defaultConfigPathLabel = "~/.agent-factory/config.toml"
 // still renders (current values read "unknown" rather than panicking), but
 // callers should pass the real one.
 func BuildBriefing(mode Mode, cfg *config.Config, configPath string) string {
+	// One path value for the whole document. It is resolved ONCE here and
+	// interpolated into every mention — including the embedded manifest section,
+	// which used to carry its own hardcoded literal and so named a different file
+	// under a relocated AGENT_FACTORY_HOME.
 	if strings.TrimSpace(configPath) == "" {
-		configPath = defaultConfigPathLabel
+		configPath = config.DefaultConfigPathLabel
 	}
 
 	var b strings.Builder
@@ -142,17 +142,23 @@ One more thing to tell them if they go off this machine: af serves plain HTTP an
 terminates no encryption of its own. Beyond a trusted private network, they want a
 reverse proxy that terminates TLS (nginx, caddy), or a VPN such as Tailscale.
 
-## theme
-
-` + "`theme`" + ` is a table of 19 colors and ` + "`af config set`" + ` cannot write it. Do not try, and
-do not offer to pick hex values in conversation — that is a miserable way to choose
-colors. If the user wants to change them, say what the table does and point them at the
-` + "`[theme]`" + ` section of their config file.
-
 `)
 
+	// The slot count is read from ThemeConfig rather than written here: a slot
+	// added to the struct would otherwise leave this sentence quietly wrong.
+	fmt.Fprintf(&b, `
+## theme
+
+`+"`theme`"+` is a table of %d colors and `+"`af config set`"+` cannot write it. Do not try, and
+do not offer to pick hex values in conversation — that is a miserable way to choose
+colors. If the user wants to change them, say what the table does and point them at the
+`+"`[theme]`"+` section of their config file.
+
+`, config.ThemeSlotCount())
+
 	fmt.Fprintf(&b, "## The settings\n\nEvery setting below is shown with its current value on this machine.\n"+
-		"Recommend from these values · do not guess at what is set.\n\n%s\n", config.RenderBriefing(cfg))
+		"Recommend from these values · do not guess at what is set.\n\n%s\n",
+		config.RenderBriefing(cfg, configPath))
 
 	return b.String()
 }

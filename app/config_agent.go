@@ -48,6 +48,12 @@ func SetConfigAgentSpawnerForTest(f func(configagent.Mode, string) error) func()
 // in, so there is nothing to do on success.
 type configAgentSpawnedMsg struct {
 	err error
+	// noticeID identifies the "Starting…" notice this spawn raised, so the
+	// handler can retract ITS OWN notice and not whatever is on screen by then.
+	// The spawn runs async for up to a minute — ample time for another action to
+	// post its own notice — and the codebase already scopes this with a
+	// generation token (see hideErrMsg in home_update.go).
+	noticeID uint64
 }
 
 // handleConfigAgent is the `C` action: open the config agent.
@@ -86,10 +92,10 @@ func (m *home) handleConfigAgent() (tea.Model, tea.Cmd) {
 	// showTransientMessage: that clears after 3 seconds, which would expire most
 	// of the way through a 60s readiness wait and put the user back in silence.
 	// This notice stands until the spawn reports back and clears it.
-	m.setTransientNotice(errors.New("Starting the config agent…"))
+	noticeID := m.setTransientNotice(errors.New("Starting the config agent…"))
 	spawn := spawnConfigAgent
 	return m, func() tea.Msg {
-		return configAgentSpawnedMsg{err: spawn(configagent.ModeChange, repoPath)}
+		return configAgentSpawnedMsg{err: spawn(configagent.ModeChange, repoPath), noticeID: noticeID}
 	}
 }
 
@@ -109,8 +115,13 @@ func (m *home) handleConfigAgentSpawned(msg configAgentSpawnedMsg) (tea.Model, t
 		// user sees why rather than a notice that just vanishes.
 		return m, m.handleError(msg.err)
 	}
-	// Success: drop the "Starting…" notice. The daemon's events plane brings the
-	// session in on its own, so there is nothing further to announce.
-	m.errBox.Clear()
+	// Success: retract the "Starting…" notice — but ONLY if it is still ours. The
+	// spawn ran async for up to a minute, so another action may have posted its
+	// own notice in the meantime, and clearing unconditionally would wipe a
+	// message the user had not read. The generation token is the same mechanism
+	// hideErrMsg uses (home_update.go).
+	if msg.noticeID == m.transientNoticeID {
+		m.errBox.Clear()
+	}
 	return m, nil
 }

@@ -495,3 +495,91 @@ func TestSetGlobalConfigValueStillRejectsStructuralKeys(t *testing.T) {
 		}
 	}
 }
+
+// TestSetGlobalConfigValueWarnsOnTokenlessNetworkListener is the guardrail for
+// the exposure this PR made easy. Before listen_addr was settable, putting the
+// control plane on the network took a deliberate hand-edit; now it is one
+// command. `af config set listen_addr 0.0.0.0:8443` exits 0, and with
+// require_token defaulting to false the result is a full, unauthenticated,
+// plain-HTTP control plane for anyone who can route to it.
+//
+// The write still SUCCEEDS — this warns, it does not refuse (that would break
+// scripting) and does not auto-set require_token (silently changing a key the
+// user did not name is worse than the surprise it prevents).
+func TestSetGlobalConfigValueWarnsOnTokenlessNetworkListener(t *testing.T) {
+	cases := []struct {
+		name     string
+		seed     string
+		key, val string
+		wantWarn bool
+	}{
+		// The dangerous move, from either direction.
+		{"network listener while token off", "default_program = 'claude'\n", "listen_addr", "0.0.0.0:8443", true},
+		{"token off while listener is network", "default_program = 'claude'\nlisten_addr = '0.0.0.0:8443'\nrequire_token = true\n", "require_token", "false", true},
+		{"routable ip while token off", "default_program = 'claude'\n", "listen_addr", "192.168.1.50:8443", true},
+		{"empty host binds every interface", "default_program = 'claude'\n", "listen_addr", ":8443", true},
+
+		// Safe: loopback stays loopback.
+		{"loopback default", "default_program = 'claude'\n", "listen_addr", "127.0.0.1:8443", false},
+		{"ipv6 loopback", "default_program = 'claude'\n", "listen_addr", "[::1]:8443", false},
+		{"localhost", "default_program = 'claude'\n", "listen_addr", "localhost:9000", false},
+		// Safe: the web server is off entirely.
+		{"empty disables the server", "default_program = 'claude'\n", "listen_addr", "", false},
+		// Safe: network bind but the token is already required.
+		{"network listener with token on", "default_program = 'claude'\nrequire_token = true\n", "listen_addr", "0.0.0.0:8443", false},
+		{"token on while listener is network", "default_program = 'claude'\nlisten_addr = '0.0.0.0:8443'\n", "require_token", "true", false},
+		// Unrelated keys never warn.
+		{"unrelated key", "default_program = 'claude'\nlisten_addr = '0.0.0.0:8443'\n", "auto_yes", "true", false},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			writeTempConfig(t, c.seed)
+			res, err := SetGlobalConfigValue(c.key, c.val)
+			if err != nil {
+				t.Fatalf("set %s=%q: %v", c.key, c.val, err)
+			}
+			gotWarn := len(res.Warnings) > 0
+			if gotWarn != c.wantWarn {
+				t.Fatalf("set %s=%q: warnings=%v, want warning=%v (warnings: %v)",
+					c.key, c.val, gotWarn, c.wantWarn, res.Warnings)
+			}
+			if !c.wantWarn {
+				return
+			}
+			w := res.Warnings[0]
+			// The warning has to say what is wrong AND what to do about it.
+			for _, want := range []string{"require_token", "af config set require_token true"} {
+				if !strings.Contains(w, want) {
+					t.Errorf("warning must mention %q, got: %s", want, w)
+				}
+			}
+		})
+	}
+}
+
+// TestExposureWarningUsesTheDaemonsLoopbackPredicate pins that the set-time
+// warning and the daemon's own token gate agree on what "loopback" means. They
+// call the SAME function (config.IsLoopbackListenAddr, which the daemon's
+// webListenerPolicy also uses); two definitions drifting apart is exactly how a
+// security check rots, so this fails if a second one is ever introduced.
+func TestExposureWarningUsesTheDaemonsLoopbackPredicate(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.RequireToken = false
+	for _, addr := range []string{"127.0.0.1:8443", "[::1]:8443", "localhost:8443"} {
+		if !IsLoopbackListenAddr(addr) {
+			t.Fatalf("precondition: %q should be loopback", addr)
+		}
+		if w := exposureWarning(cfg, "listen_addr", addr); w != "" {
+			t.Errorf("%q is loopback — no exposure warning expected, got: %s", addr, w)
+		}
+	}
+	for _, addr := range []string{"0.0.0.0:8443", ":8443", "10.0.0.5:8443"} {
+		if IsLoopbackListenAddr(addr) {
+			t.Fatalf("precondition: %q should NOT be loopback", addr)
+		}
+		if w := exposureWarning(cfg, "listen_addr", addr); w == "" {
+			t.Errorf("%q is network-reachable with require_token=false — expected a warning", addr)
+		}
+	}
+}

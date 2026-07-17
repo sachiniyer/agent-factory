@@ -8,6 +8,11 @@ import (
 	"strings"
 )
 
+// DefaultConfigPathLabel is the config file location named when the real path
+// cannot be resolved. It matches the documented default; it is a fallback label
+// for prose, never a path anything opens.
+const DefaultConfigPathLabel = "~/.agent-factory/config.toml"
+
 // RenderBriefing renders the config manifest (manifest.go) as markdown for an
 // agent to read: tier by tier, every user-facing global config key with its
 // purpose, type, default, allowed values, current value, and how to set it.
@@ -16,6 +21,18 @@ import (
 // the plain-language Purpose lines, and hence CURRENT values: an agent asked to
 // "turn off the web server" or "make my theme darker" needs to know what the
 // setting is now, not merely what it defaults to.
+//
+// configPath is the config file this describes, and it is a PARAMETER rather
+// than a literal for a reason: this text used to hardcode
+// "~/.agent-factory/config.toml", so under a relocated AGENT_FACTORY_HOME it
+// told the agent to read and edit a file that was not the user's config. An
+// agent that confidently operates on the wrong file is worse than one that
+// fails. There is one path value, supplied by the caller, interpolated
+// everywhere. An empty configPath falls back to the documented default location.
+//
+// It emits NO top-level heading. The sections start at H2 so this can be
+// embedded inside a larger document (configagent.BuildBriefing) without nesting
+// an H1 under an H2, and a standalone caller can title it however it likes.
 //
 // Current values are read by REFLECTION over Config's toml tags rather than a
 // hand-written key → field switch. That is the whole point of this phase: a
@@ -29,11 +46,14 @@ import (
 // substituting defaults — a briefing that quietly showed defaults as if they
 // were the user's live settings would be worse than one that admits it does not
 // know.
-func RenderBriefing(cfg *Config) string {
+func RenderBriefing(cfg *Config, configPath string) string {
 	var b strings.Builder
 
-	b.WriteString("# Global configuration\n\n")
-	b.WriteString("These are the settings in `~/.agent-factory/config.toml`, which apply to every repository. ")
+	if strings.TrimSpace(configPath) == "" {
+		configPath = DefaultConfigPathLabel
+	}
+
+	fmt.Fprintf(&b, "These are the settings in `%s`, which apply to every repository. ", configPath)
 	b.WriteString("Keys are grouped by how likely you are to need them.\n\n")
 	b.WriteString("Most keys can be changed with `af config set <key> <value>`, which edits that one value in place ")
 	b.WriteString("and leaves every comment and the file's ordering untouched. ")

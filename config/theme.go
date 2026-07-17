@@ -86,6 +86,15 @@ func sanitizeThemeColors(config *Config, prettyConfigPath string) {
 	}
 }
 
+// ThemeSlotCount returns how many color slots the [theme] table has, read from
+// ThemeConfig itself. Surfaces that describe the table to a user (the config
+// agent's briefing) must ask rather than hardcode a number: a slot added to
+// ThemeConfig would otherwise silently turn that copy into a lie, and there is
+// nothing else pinning the two together.
+func ThemeSlotCount() int {
+	return reflect.TypeOf(ThemeConfig{}).NumField()
+}
+
 func tomlTagName(tag string) string {
 	for i := range tag {
 		if tag[i] == ',' {

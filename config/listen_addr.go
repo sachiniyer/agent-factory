@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"net"
+	"strings"
 )
 
 // validateListenAddrValue reports whether value is an acceptable listen_addr.
@@ -53,4 +54,34 @@ func validateListenAddrValue(value string) error {
 		return fmt.Errorf("listen_addr port is not valid in %q: %w", value, err)
 	}
 	return nil
+}
+
+// IsLoopbackListenAddr reports whether a listen_addr binds ONLY the loopback
+// interface (127.0.0.1 / ::1 / localhost). It governs the loopback token
+// exemption, and the distinction is load-bearing for security now that the
+// recommended way to add TLS is a same-host reverse proxy:
+//
+// A reverse proxy on the same host (nginx/Caddy terminating TLS) connects to the
+// daemon from 127.0.0.1, so EVERY request it forwards has a loopback RemoteAddr —
+// indistinguishable from a genuine same-machine user. If the loopback exemption
+// applied on a network-bound listener, all proxied traffic would skip the token
+// and reach the control plane unauthenticated. So the exemption is safe ONLY when
+// the listener itself is loopback-bound (where a loopback RemoteAddr truly is a
+// local peer). On a NETWORK bind (0.0.0.0, a routable/Tailscale IP, or an empty
+// host = every interface) the exemption is withheld and the token is required for
+// all peers, loopback-origin included. An unparseable address fails safe to "not
+// loopback" (token enforced).
+func IsLoopbackListenAddr(addr string) bool {
+	host, _, err := net.SplitHostPort(strings.TrimSpace(addr))
+	if err != nil {
+		host = strings.TrimSpace(addr)
+	}
+	if host == "" {
+		return false // empty host binds every interface — network-reachable
+	}
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }

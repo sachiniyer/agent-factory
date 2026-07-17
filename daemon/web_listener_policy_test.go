@@ -19,11 +19,11 @@ import (
 func TestIsLoopbackListenAddr(t *testing.T) {
 	loopback := []string{"127.0.0.1:8443", "127.0.0.1:0", "localhost:8443", "LocalHost:80", "[::1]:8443", "127.0.0.1"}
 	for _, a := range loopback {
-		require.Truef(t, isLoopbackListenAddr(a), "%q must be classified loopback", a)
+		require.Truef(t, config.IsLoopbackListenAddr(a), "%q must be classified loopback", a)
 	}
 	network := []string{"0.0.0.0:8443", ":8443", "192.168.1.5:8443", "100.64.0.1:8443", "[::]:8443", "10.0.0.7:8443", ""}
 	for _, a := range network {
-		require.Falsef(t, isLoopbackListenAddr(a), "%q must be classified network (token enforced)", a)
+		require.Falsef(t, config.IsLoopbackListenAddr(a), "%q must be classified network (token enforced)", a)
 	}
 }
 
@@ -79,7 +79,7 @@ func TestTCPListener_NetworkBindDeniesLoopbackWithoutToken(t *testing.T) {
 	// gate entirely. This test is about the bind-aware loopback exemption, which only
 	// exists once tokens are enforced — so opt in explicitly.
 	cfg.RequireToken = true
-	require.False(t, isLoopbackListenAddr(cfg.ListenAddr), "0.0.0.0 is a network bind")
+	require.False(t, config.IsLoopbackListenAddr(cfg.ListenAddr), "0.0.0.0 is a network bind")
 
 	m, err := NewManager(cfg)
 	require.NoError(t, err)
@@ -213,7 +213,7 @@ func TestTCPListener_DefaultConfigServesNetworkPeersTokenless(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	cfg.ListenAddr = "0.0.0.0:0" // operator opts into a network bind
-	require.False(t, isLoopbackListenAddr(cfg.ListenAddr))
+	require.False(t, config.IsLoopbackListenAddr(cfg.ListenAddr))
 
 	policy := webListenerPolicy(cfg)
 	require.True(t, policy.tokenDisabled, "require_token=false disables the token for network peers too")

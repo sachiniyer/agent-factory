@@ -150,3 +150,34 @@ func TestConfigAgentDoesNotSpawnTwice(t *testing.T) {
 	h.handleConfigAgentSpawned(configAgentSpawnedMsg{})
 	require.NotNil(t, pressC(), "C must be pressable again once the previous spawn settled")
 }
+
+// TestConfigAgentSpawnClearsOnlyItsOwnNotice pins the notice ownership. The spawn
+// runs async for up to a minute — plenty of time for another action to post its
+// own notice — so clearing unconditionally on report-back would wipe a message
+// the user had not read yet. Only retract our own, and only if it is still up.
+func TestConfigAgentSpawnClearsOnlyItsOwnNotice(t *testing.T) {
+	h := newTestHome(t)
+	t.Cleanup(SetConfigAgentSpawnerForTest(func(configagent.Mode, string) error { return nil }))
+
+	_, cmd := h.handleDefaultKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'C'}}, keys.KeyConfigAgent)
+	require.NotNil(t, cmd)
+	msg := cmd().(configAgentSpawnedMsg)
+
+	// Someone else posts a notice while the spawn was in flight.
+	h.setTransientNotice(errors.New("something else the user needs to read"))
+
+	h.handleConfigAgentSpawned(msg)
+	assert.Contains(t, h.errBox.FullError(), "something else the user needs to read",
+		"the spawn must not clear a notice raised by another action after it started — "+
+			"it may be something the user has not read")
+
+	// The normal case still retracts our own notice.
+	h2 := newTestHome(t)
+	t.Cleanup(SetConfigAgentSpawnerForTest(func(configagent.Mode, string) error { return nil }))
+	_, cmd2 := h2.handleDefaultKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'C'}}, keys.KeyConfigAgent)
+	own := cmd2().(configAgentSpawnedMsg)
+	require.Contains(t, h2.errBox.FullError(), "Starting the config agent",
+		"the keypress should have raised a starting notice")
+	h2.handleConfigAgentSpawned(own)
+	assert.Empty(t, h2.errBox.FullError(), "a successful spawn should retract its own starting notice")
+}

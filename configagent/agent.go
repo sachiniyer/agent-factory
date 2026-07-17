@@ -98,10 +98,21 @@ var resolveConfigForRepo = config.ResolveConfig
 //     does the rest: NewGitWorktreeInPlace (no branch, no worktree), tmux spawn,
 //     WaitForReady, trust-prompt dismissal, then SendPrompt.
 //
-// AutoYes is hard-wired false and must stay that way. This is an interactive
-// walkthrough: auto-yes would answer the user's own questions for them. It also
-// keeps resolveProgramForInstance from appending claude's
-// `--permission-mode bypassPermissions`, which is gated on AutoYes.
+// AutoYes is hard-wired false and must stay that way, for ONE reason: this is an
+// interactive walkthrough, and auto-yes would answer the user's own questions for
+// them.
+//
+// It is NOT a permission control, and it would be dishonest to imply otherwise.
+// AutoYes=false does keep resolveProgramForInstance from appending claude's
+// `--permission-mode bypassPermissions` — but on a default install that buys
+// nothing, because DefaultConfig() already seeds
+// program_overrides.claude = "<detected claude> --dangerously-skip-permissions"
+// (config_types.go), a strictly broader flag that AutoYes has no say over. So a
+// default claude user's config agent runs with permissions skipped either way.
+//
+// What actually bounds this agent is the scope fence in the briefing — an
+// instruction, not a sandbox. That is the honest posture, and it is why the fence
+// is worded as forcefully as it is.
 func Spawn(opts Options) (*session.InstanceData, error) {
 	if opts.RepoPath == "" {
 		return nil, fmt.Errorf("config agent needs a repository to run in: no repo path given")
@@ -147,6 +158,24 @@ func Spawn(opts Options) (*session.InstanceData, error) {
 		Prompt:    BuildBriefing(opts.Mode, globalCfg, configPath),
 		AutoYes:   false,
 		InPlace:   true,
+		// Pin the LOCAL runtime explicitly. This is the feature's premise, not a
+		// default worth inheriting: the config agent exists to inspect THE USER'S
+		// machine and fix THEIR config, so it has to run on the machine whose
+		// config it is reading.
+		//
+		// An empty Backend does NOT mean local — it means "daemon, you decide",
+		// and the daemon decides from the repo's config
+		// (session/instance_factory.go resolveBackendKind falls through to
+		// resolveRepoConfig). So in a repo that declares `backend = "docker"` /
+		// `ssh` / `hook`, an unpinned config agent spawns on the REMOTE and then
+		// faithfully inspects the wrong machine, reporting on an environment the
+		// user does not have. Nothing about that failure looks like a failure,
+		// which is what makes it worse than not starting at all.
+		//
+		// A remote config session has no meaningful semantics today. If one ever
+		// does, that should be a deliberate change here, not something a repo's
+		// checked-in config can turn on by accident.
+		Backend: config.BackendLocal,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to start the config agent: %w", err)

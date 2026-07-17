@@ -231,3 +231,46 @@ func TestSpawnBriefsWithGlobalConfigValues(t *testing.T) {
 		t.Error("briefing must not show repo-resolved values the agent cannot write")
 	}
 }
+
+// TestSpawnPinsTheLocalBackend is the targeting lock, and it is the whole
+// premise of the feature rather than a default worth inheriting.
+//
+// The config agent exists to inspect THE USER'S OWN machine and fix THEIR
+// configuration. Leaving Backend empty makes the daemon resolve it from the
+// repo's config (session/instance_factory.go resolveBackendKind: empty Backend
+// and no ForceRemote falls through to resolveRepoConfig -> ParseBackendKind), so
+// a repo declaring `backend = "docker"` / `ssh` / `hook` would spawn the config
+// agent on the REMOTE. It would then faithfully inspect the wrong machine and
+// report confidently about an environment the user does not have — worse than
+// failing outright, because nothing about it looks broken.
+//
+// So local is pinned explicitly at the spawn site. A remote config session has no
+// meaningful semantics today; if one ever does, that is a deliberate change, not
+// an inherited one.
+func TestSpawnPinsTheLocalBackend(t *testing.T) {
+	tempAFHome(t)
+	stubResolve(t, config.Config{
+		DefaultProgram:   "codex",
+		ProgramOverrides: map[string]string{"codex": "/bin/sh"},
+	})
+
+	var got daemon.CreateSessionRequest
+	stubCreate(t, func(req daemon.CreateSessionRequest) (*session.InstanceData, error) {
+		got = req
+		return &session.InstanceData{}, nil
+	})
+
+	if _, err := Spawn(Options{Mode: ModeOnboard, RepoPath: "/tmp/some-repo"}); err != nil {
+		t.Fatalf("spawn: %v", err)
+	}
+
+	if got.Backend != config.BackendLocal {
+		t.Errorf("Backend = %q, want %q. An empty Backend lets the daemon resolve the runtime from the "+
+			"repo's config, so a repo with `backend = \"docker\"` would run the config agent in a container — "+
+			"inspecting the wrong machine and reporting success. Pin local at the spawn site.",
+			got.Backend, config.BackendLocal)
+	}
+	if got.ForceRemote {
+		t.Error("ForceRemote must stay false: the config agent is local by premise")
+	}
+}

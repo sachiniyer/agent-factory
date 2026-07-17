@@ -30,10 +30,23 @@ func manifestKeyIndex(t *testing.T) map[string]ManifestEntry {
 }
 
 // configTomlFields reflects over Config and returns toml key → Go field name for
-// every exported, toml-tagged field. This is the source of truth the manifest is
-// checked against; unexported fields (keyOverrides) are excluded structurally —
-// they carry no toml tag and are not config keys, just the validated in-memory
-// form of one.
+// every exported field that is a config key.
+//
+// The tag handling is the load-bearing part, and it is deliberately strict:
+//
+//   - `toml:"-"` is skipped. That is an explicit, deliberate opt-out — the field
+//     is not config, and someone said so.
+//   - An EMPTY tag is a FAILURE, not a skip. go-toml/v2 binds an untagged
+//     exported field by its field name and marshals it straight back out, so
+//     `DummyUntagged string` really is a live config key that a user can set. The
+//     earlier version of this helper skipped empty tags, which meant a forgotten
+//     tag — exactly the mistake this test exists to catch — sailed through every
+//     manifest check and silently falsified manifest.go's claim that "adding a
+//     config key without touching this file is a test failure". Confirmed by
+//     mutation: an untagged dummy field passed the whole suite.
+//
+// Unexported fields (keyOverrides) are skipped structurally: they carry no tag,
+// but they are also invisible to the decoder, so they are not config keys.
 func configTomlFields(t *testing.T) map[string]string {
 	t.Helper()
 	fields := make(map[string]string)
@@ -44,12 +57,16 @@ func configTomlFields(t *testing.T) map[string]string {
 			continue
 		}
 		tag := f.Tag.Get("toml")
-		if tag == "" || tag == "-" {
-			continue
-		}
 		// tomlTagName strips the ",omitempty" suffix (config/theme.go).
 		key := tomlTagName(tag)
-		if key == "" || key == "-" {
+		if key == "-" {
+			continue // explicit opt-out: deliberately not a config key
+		}
+		if key == "" {
+			t.Errorf("config.Config field %s has no toml key (tag %q): go-toml/v2 binds an untagged exported "+
+				"field by its FIELD NAME and marshals it back out, so this is a live config key a user can set "+
+				"— it just has no name anyone declared, and no manifest entry can cover it. Give it a toml tag, "+
+				"or `toml:\"-\"` if it must not be config at all.", f.Name, tag)
 			continue
 		}
 		fields[key] = f.Name
@@ -210,6 +227,70 @@ func TestManifestDefaultsMatchDefaultConfig(t *testing.T) {
 	}
 }
 
+// expectedManifestType maps a Config field's real Go kind to the Type string the
+// manifest must declare for it.
+func expectedManifestType(k reflect.Kind) string {
+	switch k {
+	case reflect.String:
+		return "string"
+	case reflect.Bool:
+		return "bool"
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		return "int"
+	case reflect.Map, reflect.Struct:
+		return "table"
+	case reflect.Slice, reflect.Array:
+		return "list"
+	default:
+		return ""
+	}
+}
+
+// TestManifestTypeMatchesTheRealField pins each entry's declared Type against the
+// actual Go kind of the field it names.
+//
+// Without this, Type is a hand-written string that NOTHING checks — and it is not
+// decorative: TestManifestDefaultsMatchDefaultConfig switches on Type and skips
+// composites, so mislabeling a scalar as "table" silently disables the only
+// default-drift lock for that key. It also flips the briefing's enum label from
+// "allowed values" to "allowed entry names". Confirmed by mutation: setting
+// listen_addr to Type "table" with Default "TOTALLY WRONG DEFAULT" passed the
+// entire suite.
+//
+// So the two facts are tied together here: a Type that disagrees with the struct
+// is a test failure, which is what makes the Default lock trustworthy.
+func TestManifestTypeMatchesTheRealField(t *testing.T) {
+	rt := reflect.TypeOf(Config{})
+	checked := 0
+	for _, e := range Manifest() {
+		field, ok := rt.FieldByNameFunc(func(name string) bool {
+			f, found := rt.FieldByName(name)
+			return found && tomlTagName(f.Tag.Get("toml")) == e.Key
+		})
+		if !ok {
+			// TestManifestCoversEveryConfigKey owns the phantom-entry failure;
+			// don't double-report it here.
+			continue
+		}
+		want := expectedManifestType(field.Type.Kind())
+		if want == "" {
+			t.Errorf("%s: field %s has kind %s, which no manifest Type describes — teach "+
+				"expectedManifestType about it rather than leaving Type unchecked", e.Key, field.Name, field.Type.Kind())
+			continue
+		}
+		if e.Type != want {
+			t.Errorf("manifest Type for %q is %q, but Config.%s is a %s (so Type must be %q). "+
+				"Type is not decorative: TestManifestDefaultsMatchDefaultConfig skips composites, so a scalar "+
+				"mislabeled as a table silently loses its default-drift lock, and the briefing renders the wrong "+
+				"enum label.", e.Key, e.Type, field.Name, field.Type.Kind(), want)
+		}
+		checked++
+	}
+	if checked == 0 {
+		t.Fatal("no manifest types were compared — this test is not exercising the struct")
+	}
+}
+
 // TestManifestEntriesAreWellFormed holds the entries to the shape and the copy
 // conventions the briefing depends on (CLAUDE.md): a Purpose that is one plain
 // sentence, and the ellipsis character rather than three dots. The manifest is
@@ -292,7 +373,7 @@ func TestManifestTierAssignments(t *testing.T) {
 // purpose — the document is the whole deliverable, so an entry silently dropped
 // from the render would defeat the manifest.
 func TestRenderBriefingCoversEveryTierAndKey(t *testing.T) {
-	out := RenderBriefing(DefaultConfig())
+	out := RenderBriefing(DefaultConfig(), "/tmp/af/config.toml")
 
 	for _, heading := range []string{"## Core settings", "## Common settings", "## Advanced settings"} {
 		if !strings.Contains(out, heading) {
@@ -333,7 +414,7 @@ func TestRenderBriefingShowsCurrentValues(t *testing.T) {
 	cfg.CORSAllowedOrigins = []string{"https://af.example.com"}
 	cfg.RootAgents = map[string]RootAgentConfig{"/home/me/myrepo": {}}
 
-	out := RenderBriefing(cfg)
+	out := RenderBriefing(cfg, "/tmp/af/config.toml")
 
 	for _, want := range []string{
 		"current: codex",
@@ -353,7 +434,7 @@ func TestRenderBriefingShowsCurrentValues(t *testing.T) {
 
 	// An empty value must read as unset, not as a blank.
 	cfg.VSCodeServerBinary = ""
-	if !strings.Contains(RenderBriefing(cfg), `current: ""`) {
+	if !strings.Contains(RenderBriefing(cfg, "/tmp/af/config.toml"), `current: ""`) {
 		t.Error("an empty current value should render as `\"\"`, so it reads as unset rather than missing")
 	}
 }
@@ -363,7 +444,7 @@ func TestRenderBriefingShowsCurrentValues(t *testing.T) {
 // ".<name>" leaf for a dynamic family), and a hand-edited key must say so rather
 // than advertise a command that would be rejected.
 func TestRenderBriefingTellsAgentHowToSet(t *testing.T) {
-	out := RenderBriefing(DefaultConfig())
+	out := RenderBriefing(DefaultConfig(), "/tmp/af/config.toml")
 
 	for _, want := range []string{
 		"`af config set default_program <value>`",
@@ -389,7 +470,7 @@ func TestRenderBriefingTellsAgentHowToSet(t *testing.T) {
 // say so rather than panic, or quietly present defaults as if they were the
 // user's live settings.
 func TestRenderBriefingNilConfig(t *testing.T) {
-	out := RenderBriefing(nil)
+	out := RenderBriefing(nil, "/tmp/af/config.toml")
 	if !strings.Contains(out, "current: unknown") {
 		t.Errorf("a nil config should render current values as \"unknown\":\n%s", out)
 	}
@@ -432,6 +513,47 @@ func TestManifestDoesNotAliasTheAgentList(t *testing.T) {
 			if v == "corrupted" {
 				t.Fatalf("manifest entry %q kept a mutated Enum across calls", e.Key)
 			}
+		}
+	}
+}
+
+// TestRenderBriefingNamesTheCallerSuppliedPath pins that the briefing never
+// hardcodes a config location.
+//
+// It used to open with a literal "~/.agent-factory/config.toml". Under a
+// relocated AGENT_FACTORY_HOME that told the config agent to read and edit a
+// file that was NOT the user's config — and because the agent would then
+// operate confidently on the wrong file and report success, the user has no
+// signal that anything went wrong. One path value, supplied by the caller,
+// interpolated everywhere.
+func TestRenderBriefingNamesTheCallerSuppliedPath(t *testing.T) {
+	const relocated = "/srv/ci/af-home/config.toml"
+	out := RenderBriefing(DefaultConfig(), relocated)
+
+	if !strings.Contains(out, relocated) {
+		t.Errorf("briefing must name the caller-supplied config path %q", relocated)
+	}
+	if strings.Contains(out, DefaultConfigPathLabel) {
+		t.Errorf("briefing hardcodes %q even though it was told the config lives at %q — "+
+			"an agent reading this would edit the wrong file and report success",
+			DefaultConfigPathLabel, relocated)
+	}
+
+	// An empty path falls back to the documented default rather than rendering a
+	// blank location.
+	if !strings.Contains(RenderBriefing(DefaultConfig(), ""), DefaultConfigPathLabel) {
+		t.Error("an empty config path should fall back to the documented default label")
+	}
+}
+
+// TestRenderBriefingEmitsNoTopLevelHeading pins that the manifest render is
+// embeddable: it starts at H2 so configagent.BuildBriefing can place it inside a
+// larger document without nesting an H1 under an H2.
+func TestRenderBriefingEmitsNoTopLevelHeading(t *testing.T) {
+	out := RenderBriefing(DefaultConfig(), "/tmp/af/config.toml")
+	for _, line := range strings.Split(out, "\n") {
+		if strings.HasPrefix(line, "# ") {
+			t.Errorf("briefing must emit no H1 (it is embedded under an H2), got: %q", line)
 		}
 	}
 }

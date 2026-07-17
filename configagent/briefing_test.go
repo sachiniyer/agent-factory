@@ -157,8 +157,8 @@ func TestBriefingNamesTheConfigPath(t *testing.T) {
 	}
 
 	fallback := BuildBriefing(ModeOnboard, briefingConfig(), "  ")
-	if !strings.Contains(fallback, defaultConfigPathLabel) {
-		t.Errorf("an empty config path should fall back to %q", defaultConfigPathLabel)
+	if !strings.Contains(fallback, config.DefaultConfigPathLabel) {
+		t.Errorf("an empty config path should fall back to %q", config.DefaultConfigPathLabel)
 	}
 }
 

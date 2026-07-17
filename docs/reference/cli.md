@@ -506,7 +506,12 @@ Settable keys:
   program_overrides.<agent>  full command string for an agent
   auto_yes                   true | false
   auto_update                true | false
-  listen_addr                host:port serving the web UI + API, or "" to turn the web server off
+  listen_addr                host:port serving the web UI + API, or "" to turn the web server off.
+                             DANGER: a non-loopback address (0.0.0.0, a LAN/Tailscale IP) puts af's
+                             full control plane on the network, and require_token defaults to FALSE —
+                             set require_token = true in the same breath, or anyone who can reach the
+                             address controls this machine. af serves plain HTTP, so front a routable
+                             listener with a TLS-terminating proxy or a private network.
   require_token              true | false  (default false: the web UI needs no token; set true to require one from network peers)
   require_loopback_token     true | false  (default false: also require the token from same-machine browsers; only has an effect with require_token = true)
   daemon_poll_interval       positive integer (ms)
