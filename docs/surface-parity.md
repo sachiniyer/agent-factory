@@ -222,7 +222,7 @@ know are real, filed, and field-level — as fixtures, not aspirations:
 | Fixture | Derivation path it proves |
 |---|---|
 | cobra's lazy surface — `af completion bash`, `af help`, `--help`, `--version` | the tree is walked **after** cobra finishes building it |
-| [#1933](https://github.com/sachiniyer/agent-factory/issues/1933) — the web never sends `CreateSession.backend` | the web request-body parser |
+| [#1933](https://github.com/sachiniyer/agent-factory/issues/1933) — the web now **does** send `CreateSession.backend` (#1968 landed), via a `const body` variable | the web body parser, incl. variable resolution |
 | #1933 (TUI half) — `sessionStartRequest` has no `Backend` | the Go AST walk |
 | [#1948](https://github.com/sachiniyer/agent-factory/issues/1948) — the CLI never sets `Preview.Tab/TabID/Full` | the AST **on an internal route**, invisible to the public catalog |
 | [#1935](https://github.com/sachiniyer/agent-factory/issues/1935) — the web's `TaskUpdate` omits `project_path` | nested recursion **behind a wrapper route**, plus the TS-interface read and the CLI's field-by-field assignment walk |
@@ -261,15 +261,15 @@ go test ./parity/ -v -run TestAuditCoverageReport
 
 ```
 === surface-parity audit coverage ===
-  cli.arg-concepts                 66      go.cli.request-sites   23
-  cli.commands                     55      go.tui.files           39
-  cli.flags                       133      go.tui.request-sites   18
-  cli.noun-groups                   9      inventory.capabilities 62
-  cli.verbs                        47      tui.bindings           42
-  daemon.audited-request-types     21      web.enum-sites          2
-  daemon.public-routes             18      web.rpcs               13
-  go.cli.files                      8      web.source-files       21
-  verdicts:  parity=18  deliberate=20  real-gap=10  unclear=14
+  cli.arg-concepts                 68      go.cli.request-sites   24
+  cli.commands                     55      go.tui.files           41
+  cli.flags                       137      go.tui.request-sites   18
+  cli.noun-groups                   9      inventory.capabilities 65
+  cli.verbs                        47      tui.bindings           43
+  daemon.audited-request-types     22      web.enum-sites          2
+  daemon.public-routes             19      web.rpcs               14
+  go.cli.files                      8      web.source-files       22
+  verdicts:  parity=18  deliberate=20  real-gap=10  unclear=17
   SKIPPED: none — every surface above was read
 ```
 
@@ -285,6 +285,22 @@ Three rules make that number honest:
 3. **The denominator itself has floors.** If `cli.verbs` or `web.rpcs` collapses,
    the run fails — a shrinking denominator makes every parity claim above it
    meaningless, and it is exactly what a silently-blinded derivation looks like.
+
+## The web body parser reads variables, not just literals
+
+The web builds some request bodies as a variable — `const body = {…}; body.x = y;
+af("Method", body, token)` — which #1968 introduced for CreateSession's optional
+`backend`. A parser that only reads an inline literal after the method name goes
+BLIND on that shape and reports the body as empty, which is under-coverage: it
+would have said the web sends nothing for CreateSession and reported false parity
+over every create option.
+
+So the parser resolves the body argument: an inline `{…}` literal, or a plain
+variable traced to its nearest preceding `const|let|var … = {…}` plus any
+`body.field = …` additions. Anything else at the body position — a function call,
+a spread — is reported UNANALYZABLE and fails the RPC's coverage, never dropped.
+This is finding (4)'s web analogue and it is LIVE, not latent: #1968's
+`body.backend = …` is exactly it.
 
 ## Reach is derived from values, not types
 

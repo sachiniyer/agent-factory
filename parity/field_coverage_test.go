@@ -157,8 +157,15 @@ func TestWebFieldCoverage(t *testing.T) {
 			// Not in the public catalog: nothing to compare against here.
 			continue
 		}
+		bodyFields, bodyUnanalyzable := webCallBodyChecked(t, rpc)
+		if len(bodyUnanalyzable) > 0 {
+			t.Errorf("web %s is called with a body this analyzer cannot read: %v\n\nIts field "+
+				"coverage is UNVERIFIED — the audit must not report parity over a call site it "+
+				"did not understand. Teach webCallBody the shape (see resolveWebBodyVar) rather "+
+				"than letting the site drop silently.", rpc, bodyUnanalyzable)
+		}
 		sent := map[string]bool{}
-		for _, f := range webCallBody(t, rpc) {
+		for _, f := range bodyFields {
 			sent[f] = true
 		}
 

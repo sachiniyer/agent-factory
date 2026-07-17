@@ -9,6 +9,7 @@ package parity
 // pure table reads, which is what lets this package run on a shared dev box.
 
 import (
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -263,37 +264,59 @@ func webSourceFiles(t *testing.T) []string {
 	return out
 }
 
-// webCallBody returns the JSON keys the web can set on one RPC, unioned across
-// EVERY call site for that method. The union matters: CreateTab has two sites
-// (a shell tab and a VS Code tab, web/src/api.ts:339 and :355) and only the
-// second sets `kind`, so reading just the first call site would wrongly report
-// `kind` as unreachable from the web.
+// webCallBodyChecked returns the JSON keys the web can set on one RPC, unioned
+// across EVERY call site for that method, plus a fail-closed report of call sites
+// whose body it could not read. The union matters: CreateTab has two sites (a
+// shell tab and a VS Code tab) and only the second sets `kind`, so reading just
+// the first would wrongly report `kind` as unreachable.
 //
-// Used to audit the OPTION dimension — which fields of a request a surface can
-// actually populate — not just verb reachability.
-func webCallBody(t *testing.T, method string) []string {
+// It handles TWO shapes, because #1968 introduced the second and the old parser
+// went blind on it — reading `af("CreateSession", body, token)` as "sends
+// nothing", which is under-coverage, the exact failure this package exists to
+// prevent:
+//
+//	af("Method", { a: 1, b: 2 }, token)   // inline literal
+//	const body = { a: 1 }; body.b = x;    // a body built as a variable, then
+//	af("Method", body, token)             //   the variable passed
+//
+// Anything at the body position that is neither an inline literal nor a
+// resolvable local variable goes into unanalyzable, never silently dropped — a
+// non-empty list means the coverage for this RPC is UNVERIFIED, not complete.
+func webCallBodyChecked(t *testing.T, method string) (fields []string, unanalyzable []string) {
 	t.Helper()
 	seen := map[string]bool{}
-	needle := `"` + method + `"`
-	// Scan every web source, not just api.ts: af<T>() is exported, so a module
-	// that calls it directly and sets a field (say CreateSession with `backend`)
-	// would otherwise be invisible here — and the inventory would keep reporting
-	// a gap that had actually been fixed.
+	callRe := regexp.MustCompile(`\baf(?:<[^>]*>)?\(\s*"` + regexp.QuoteMeta(method) + `"\s*,`)
+	identRe := regexp.MustCompile(`^[A-Za-z_]\w*$`)
+
 	for _, path := range webSourceFiles(t) {
 		b, err := os.ReadFile(path)
 		if err != nil {
 			t.Fatalf("read %s: %v", path, err)
 		}
 		src := string(b)
-		for off := 0; ; {
-			i := strings.Index(src[off:], needle)
-			if i < 0 {
-				break
-			}
-			at := off + i
-			off = at + len(needle)
-			for _, f := range objectLiteralAfter(src[at:]) {
-				seen[f] = true
+		for _, loc := range callRe.FindAllStringIndex(src, -1) {
+			callPos, argStart := loc[0], loc[1]
+			arg := strings.TrimSpace(readOneArg(src[argStart:]))
+			switch {
+			case strings.HasPrefix(arg, "{"):
+				for _, f := range objectKeys(balancedFrom(arg)) {
+					seen[f] = true
+				}
+			case identRe.MatchString(arg):
+				keys, ok := resolveWebBodyVar(src, callPos, arg)
+				if !ok {
+					unanalyzable = append(unanalyzable,
+						fmt.Sprintf("%s(%s) in %s: body variable not resolvable to a literal",
+							method, arg, relSite(t, path)))
+					continue
+				}
+				for f := range keys {
+					seen[f] = true
+				}
+			default:
+				unanalyzable = append(unanalyzable,
+					fmt.Sprintf("%s(%s…) in %s: body is neither an inline literal nor a plain variable",
+						method, truncate(arg, 24), relSite(t, path)))
 			}
 		}
 	}
@@ -302,27 +325,82 @@ func webCallBody(t *testing.T, method string) []string {
 		out = append(out, f)
 	}
 	sort.Strings(out)
-	return out
+	return out, unanalyzable
 }
 
-// objectLiteralAfter returns the top-level keys of the first object literal that
-// follows s's start.
+func truncate(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n]
+}
+
+// readOneArg returns one argument expression from the start of an argument list
+// (positioned just after a comma), stopping at the next top-level comma or the
+// call's closing paren. Quote- and bracket-aware so a comma inside a nested
+// object or string does not split the argument.
+func readOneArg(s string) string {
+	depth := 0
+	var quote byte
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if quote != 0 {
+			if c == '\\' {
+				i++
+			} else if c == quote {
+				quote = 0
+			}
+			continue
+		}
+		switch c {
+		case '"', '\'', '`':
+			quote = c
+		case '{', '[', '(':
+			depth++
+		case '}', ']', ')':
+			if depth == 0 {
+				return s[:i]
+			}
+			depth--
+		case ',':
+			if depth == 0 {
+				return s[:i]
+			}
+		}
+	}
+	return s
+}
+
+// resolveWebBodyVar resolves the keys a body variable carries at a call site: the
+// keys of its nearest preceding `const|let|var id … = { … }` declaration, plus
+// any `id.key = …` assignments between that declaration and the call.
 //
-// It spans the literal with balancedFrom, which is QUOTE-AWARE: a brace inside a
-// string value (`{ url: "http://x/{id}" }`) must not be counted as structure. A
-// bare depth counter mis-spans on that input; today it under-reports (safe), but
-// the whole point of this package is that coverage is not left to luck of input,
-// so it uses the same span logic as every other literal here.
-func objectLiteralAfter(rest string) []string {
-	open := strings.Index(rest, "{")
-	if open < 0 {
-		return nil
+// "Nearest preceding" is correct because a well-formed function declares the body
+// before passing it, so a same-named local in another function never wins. If the
+// variable has no literal initialiser the parser cannot read it, and the caller
+// reports it unanalyzable rather than crediting an empty body.
+func resolveWebBodyVar(src string, callPos int, id string) (map[string]bool, bool) {
+	declRe := regexp.MustCompile(`(?:const|let|var)\s+` + regexp.QuoteMeta(id) + `\b[^\n=]*=\s*\{`)
+	locs := declRe.FindAllStringIndex(src[:callPos], -1)
+	if len(locs) == 0 {
+		return nil, false
 	}
-	lit := balancedFrom(rest[open:])
+	last := locs[len(locs)-1]
+	lit := balancedFrom(src[last[1]-1:]) // from the '{'
 	if lit == "" {
-		return nil
+		return nil, false
 	}
-	return objectKeys(lit)
+	keys := map[string]bool{}
+	for _, k := range objectKeys(lit) {
+		keys[k] = true
+	}
+	// Conditional additions: `id.field = …` between the declaration and the call.
+	region := src[last[0]:callPos]
+	asgn := regexp.MustCompile(`\b` + regexp.QuoteMeta(id) + `\.(\w+)\s*=[^=]`)
+	for _, m := range asgn.FindAllStringSubmatch(region, -1) {
+		keys[m[1]] = true
+	}
+	return keys, true
 }
 
 // leadingIdentRe pulls the property name off one object-literal entry, covering

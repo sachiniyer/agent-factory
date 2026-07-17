@@ -79,52 +79,51 @@ func TestDerivationSeesLazyCobraSurface(t *testing.T) {
 	}
 }
 
-// TestDerivationSeesWebBackendGap pins #1933 through the WEB body parser: the
-// daemon accepts nine CreateSession fields and the web sends five.
+// TestDerivationSeesWebCreateOptions pins the web CreateSession body parser
+// against ground truth. #1968 (the fix for #1933) LANDED: the web now sends
+// `backend` — conditionally, and via a `const body = {…}` variable rather than an
+// inline literal, which is the shape that made the old parser go blind and read
+// the whole body as empty. So this fixture now asserts the reverse of what it did
+// before the rebase: `backend` IS reached, and `force_remote`/`in_place` are
+// still not.
 //
-// COORDINATION: a fix for #1933 is in flight (#1968). When the web starts sending
-// `backend`, THIS TEST FAILS BY DESIGN — it is the fixture doing its job, not a
-// broken test. Retiring it is three edits, and they belong to the PR that
-// lands the fix:
-//  1. drop "backend" (and any other now-sent field) from the list below;
-//  2. in parity/inventory.json, update session.create.opt.backend's web cell —
-//     but see the WARNING below on what it may honestly claim;
-//  3. drop the matching entry from field_coverage.web_rpcs.CreateSession.
-//
-// TestWebFieldCoverage will refuse to pass until (2) and (3) agree, so the
-// inventory cannot be left claiming a gap that was fixed.
-//
-// WARNING — do not record the stronger claim. This test only proves what the web
-// SENDS. That is not the same as what a user can DO, and #1968's author could not
-// prove end-to-end that a working remote session is creatable from the browser:
-// provisioning was observed (launch_cmd ran, a real agent-server came up) but the
-// session then timed out waiting for its program, cause unresolved. So on landing,
-// `partial` with that caveat in notes is the honest cell; `yes` requires someone
-// to have created a working remote session from the browser and said so.
-//
-// This distinction is this package's oldest blind spot, stated under Known blind
-// spots as "reachable != user-settable" — the derivation reads call sites, not
-// outcomes. #1936 is the same trap from the other side: app/session_control.go:106
-// DOES set Prompt, so the field reads as covered while the TUI's flow never
-// populates it. A field-level pass is evidence about the wire, never about the
-// user's experience.
-func TestDerivationSeesWebBackendGap(t *testing.T) {
-	sent := webCallBody(t, "CreateSession")
-	if len(sent) == 0 {
-		t.Fatal("web CreateSession body parsed as empty — the parser is blind")
+// It reads what the web SENDS, which is not the same as what a user can DO. #1968
+// could not prove end-to-end that a working remote session is creatable from the
+// browser — provisioning was observed but the program-start timed out, cause
+// unresolved — so the inventory records session.create.opt.backend's web cell as
+// `partial`, not `yes`. `yes` needs someone to have created a working remote
+// session from a browser and said so. This is the package's oldest blind spot,
+// "reachable != user-settable" under Known blind spots: the derivation reads call
+// sites, not outcomes. #1936 is the same trap mirrored.
+func TestDerivationSeesWebCreateOptions(t *testing.T) {
+	sent, unanalyzable := webCallBodyChecked(t, "CreateSession")
+	if len(unanalyzable) > 0 {
+		t.Fatalf("web CreateSession has a body the parser cannot read: %v — it is blind, so "+
+			"every field claim below is worthless", unanalyzable)
 	}
-	for _, f := range []string{"backend", "force_remote", "in_place"} {
+	if len(sent) == 0 {
+		t.Fatal("web CreateSession body parsed as empty — the parser is blind (this is what the " +
+			"#1968 `const body = {…}` refactor did to the old inline-literal-only parser)")
+	}
+	// #1968 landed: backend is now reached. If it stops being reached, either the
+	// fix was reverted or the parser regressed on the variable-body shape.
+	if !contains(sent, "backend") {
+		t.Error("web CreateSession no longer sends `backend`. #1968 shipped it via a " +
+			"`const body = {…}; body.backend = …` variable — if resolveWebBodyVar regressed the " +
+			"parser is blind again; if the feature was reverted, flip the inventory cell back.")
+	}
+	// Still not sent — the remaining half of the create-option gap.
+	for _, f := range []string{"force_remote", "in_place"} {
 		if contains(sent, f) {
-			t.Errorf("the web now sends CreateSession.%s — see the COORDINATION note above this "+
-				"test: if #1933 was fixed, retire the fixture and flip the inventory cell in the "+
-				"same PR; if it was not, the body parser is wrong.", f)
+			t.Errorf("web CreateSession now sends %q — update session.create.opt.* and "+
+				"field_coverage.web_rpcs.CreateSession in the same change.", f)
 		}
 	}
-	// And prove the parser is not simply blind to every field.
+	// Not blind to the base fields.
 	for _, f := range []string{"program", "prompt", "auto_yes"} {
 		if !contains(sent, f) {
 			t.Errorf("web CreateSession body is missing %q, which it demonstrably sends "+
-				"(web/src/api.ts:251-264) — the body parser is under-reporting.", f)
+				"(web/src/api.ts createSession) — the body parser is under-reporting.", f)
 		}
 	}
 }

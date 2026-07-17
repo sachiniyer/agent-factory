@@ -116,8 +116,8 @@
         "pointer": "app/session_control.go:88-95 sessionStartRequest has no Backend field"
       },
       "web": {
-        "status": "no",
-        "pointer": "web/src/api.ts:251-264 sends 5 of the route's 9 fields; no backend"
+        "status": "partial",
+        "pointer": "web/src/api.ts:265 createSession sends `backend` when picked (via ListBackends), built as a body variable"
       },
       "cli": {
         "status": "yes",
@@ -125,7 +125,7 @@
       },
       "verdict": "real-gap",
       "issue": "#1933",
-      "notes": "The CLI is the only surface that can pick a backend per session. Neither TUI nor web is hard-locked to local: both send backend:\"\", which falls through to the repo's in-repo `backend` config key (session/instance_factory.go:102-114), so in a repo configured backend=ssh their sessions ARE remote. What is missing is per-session CHOICE, not remote sessions outright."
+      "notes": "#1968 landed the web's backend picker: createSession now sends `backend` when the user picks one (absent = let the repo config decide, matching `af sessions create` with no --backend). web is `partial`, NOT `yes`: what is proven is that the web SENDS the field and the daemon offers an honest ListBackends picker; what is NOT proven is that a user can create a WORKING remote session from the browser — #1968 observed provisioning (launch_cmd ran, an agent-server came up) but the session timed out waiting for its program, cause unresolved. The TUI still cannot pick a backend per session (N is hook-only, app/session_control.go has no Backend field), so this stays a real-gap. See docs/surface-parity.md 'reachable != user-settable'."
     },
     {
       "id": "session.create.opt.remote",
@@ -1142,6 +1142,60 @@
       "verdict": "real-gap",
       "issue": "#1972",
       "notes": "The CLI-vs-CLI axis: `af sessions create --name X` is the only sessions verb that takes the title as a FLAG, and the only one that calls the concept `name` rather than `title`. Ten siblings take `<title>` positionally. A user who learns one cannot predict the other — the same failure as the --prompt trap, which is fixed in this PR. Filed rather than fixed to keep #1937 to the audit plus one fix. tui/web are n/a: this is about CLI argument shape, and neither UI has arguments."
+    },
+    {
+      "id": "backend.list",
+      "title": "Discover which backends are available for a repo (with availability + reason)",
+      "tui": {
+        "status": "no",
+        "pointer": ""
+      },
+      "web": {
+        "status": "yes",
+        "pointer": "web/src/api.ts:260 ListBackends -> web/src/backends.ts renders the picker"
+      },
+      "cli": {
+        "status": "no",
+        "pointer": ""
+      },
+      "verdict": "unclear",
+      "notes": "POST /v1/ListBackends (#1968) serves config.SupportedBackends per-repo with a tri-state answer (available / unavailable+reason / unknown+reason). The web needs the round-trip because it cannot import the Go enum; the CLI and TUI read config.SupportedBackends directly and the CLI validates --backend at create time with session.BackendConfigError. So upfront availability DISCOVERY is web-only, while create-time validation is not. Whether the CLI/TUI should also surface availability upfront (vs erroring at create) is an owner call — the #1968/#1970 session owns the serve-the-enum direction. Not filed."
+    },
+    {
+      "id": "config-agent",
+      "title": "Open the config agent (the default agent, briefed to help configure af)",
+      "tui": {
+        "status": "yes",
+        "pointer": "keys/keys.go:186 (C) -> app/config_agent.go:87 handleConfigAgent"
+      },
+      "web": {
+        "status": "no",
+        "pointer": ""
+      },
+      "cli": {
+        "status": "no",
+        "pointer": ""
+      },
+      "verdict": "unclear",
+      "notes": "A TUI affordance (C) that spawns the user's default agent to help set up config. TUI-only today. Whether a config-helper agent belongs on the web/CLI, or is inherently an interactive TUI flow, is an owner call. Its lifecycle reap is the internal ReapConfigAgent RPC (not a public route). Not filed."
+    },
+    {
+      "id": "task.max-concurrent-runs",
+      "title": "Cap a watch task's in-flight session count",
+      "tui": {
+        "status": "no",
+        "pointer": ""
+      },
+      "web": {
+        "status": "no",
+        "pointer": ""
+      },
+      "cli": {
+        "status": "yes",
+        "pointer": "api/api.go:645 af tasks add/update --max-concurrent-runs"
+      },
+      "verdict": "unclear",
+      "notes": "A watch-task concurrency cap (task.Task/TaskUpdate.MaxConcurrentRuns) added on master. The CLI sets it via --max-concurrent-runs; the TUI task form and web do not expose it. Same class as the other task-edit gaps: the TUI can edit tasks (so this is a missing FIELD, #1935-adjacent) and the web cannot edit tasks at all (#1935). Niche enough that whether the UIs should surface it is an owner call. Not filed pending that."
     }
   ],
   "ledger": {
@@ -1210,6 +1264,7 @@
       "POST /v1/DeleteProject": "project.delete",
       "POST /v1/DeliverPrompt": "-",
       "POST /v1/KillSession": "session.kill",
+      "POST /v1/ListBackends": "backend.list",
       "POST /v1/ListTasks": "task.list",
       "POST /v1/RemoveTask": "task.remove",
       "POST /v1/RestoreArchived": "session.restore",
@@ -1225,6 +1280,7 @@
       "attach": "session.attach",
       "close_tab": "session.tab.close",
       "collapse": "tui.navigation",
+      "config_agent": "config-agent",
       "copy_pr": "session.pr.open",
       "down": "tui.navigation",
       "error_details": "tui.navigation",
@@ -1272,6 +1328,7 @@
       "CreateTab": "session.tab.create",
       "DeleteProject": "project.delete",
       "KillSession": "session.kill",
+      "ListBackends": "backend.list",
       "ListTasks": "task.list",
       "RemoveTask": "task.remove",
       "SendPrompt": "session.send-prompt",
@@ -1325,6 +1382,7 @@
       "af debug --help": "meta.discovery",
       "af doctor --fix": "install.doctor",
       "af doctor --help": "meta.discovery",
+      "af doctor --json": "cli.json-envelope",
       "af doctor --setup": "install.doctor",
       "af doctor --verbose": "install.doctor",
       "af gen-docs --help": "meta.discovery",
@@ -1388,6 +1446,7 @@
       "af tasks --repo": "project.switch",
       "af tasks add --cron": "task.add",
       "af tasks add --help": "meta.discovery",
+      "af tasks add --max-concurrent-runs": "task.max-concurrent-runs",
       "af tasks add --name": "task.add",
       "af tasks add --program": "task.add",
       "af tasks add --prompt": "task.add",
@@ -1400,6 +1459,7 @@
       "af tasks update --cron": "task.edit",
       "af tasks update --enabled": "task.toggle",
       "af tasks update --help": "meta.discovery",
+      "af tasks update --max-concurrent-runs": "task.max-concurrent-runs",
       "af tasks update --name": "task.edit",
       "af tasks update --program": "task.edit",
       "af tasks update --prompt": "task.edit",
@@ -1412,6 +1472,7 @@
       "af token show --json": "cli.json-envelope",
       "af upgrade --allow-downgrade": "install.upgrade",
       "af upgrade --help": "meta.discovery",
+      "af upgrade --no-restart": "install.upgrade",
       "af version --help": "meta.discovery"
     }
   },
@@ -1567,6 +1628,9 @@
           },
           "task.last_run_status": {
             "ok": "Scheduler-owned, never a client input: the daemon stamps it after a run (task.Task last_run_at/last_run_status). A surface setting it would be lying about history."
+          },
+          "task.max_concurrent_runs": {
+            "gap": "task.max-concurrent-runs"
           }
         }
       },
@@ -1600,6 +1664,9 @@
           },
           "update.watch_cmd": {
             "ok": "Reached via task.DiffTask over the edited task.Task (ui/task_pane_state.go:91): the TUI never writes a task.TaskUpdate literal, so the AST cannot prove the field statically. Derivation reports it unreached — the SAFE direction, since unprovable forces a declaration rather than a silent pass."
+          },
+          "update.max_concurrent_runs": {
+            "gap": "task.max-concurrent-runs"
           }
         }
       }
@@ -1614,9 +1681,6 @@
         },
         "force_remote": {
           "gap": "session.create.opt.remote"
-        },
-        "backend": {
-          "gap": "session.create.opt.backend"
         }
       },
       "CreateTab": {
@@ -1648,6 +1712,9 @@
         },
         "update.watch_cmd": {
           "gap": "task.edit"
+        },
+        "update.max_concurrent_runs": {
+          "gap": "task.max-concurrent-runs"
         }
       },
       "AddTask": {
@@ -1656,6 +1723,9 @@
         },
         "task.last_run_status": {
           "ok": "Scheduler-owned, never a client input: the daemon stamps it after a run. A surface setting it would be lying about history."
+        },
+        "task.max_concurrent_runs": {
+          "gap": "task.max-concurrent-runs"
         }
       }
     }
