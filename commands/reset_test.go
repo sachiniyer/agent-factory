@@ -651,6 +651,98 @@ func TestFactoryReset_PauseFailureWarnsAndWipes(t *testing.T) {
 	}
 }
 
+// TestFactoryReset_LegacyNilProvenance_PreservesUserBranches is the #1953
+// headline regression: a PRE-EXISTING USER BRANCH SURVIVES RESET.
+//
+// It drives the real reset path (planFactoryReset → executeFactoryReset →
+// git.DeleteLocalBranch) against a real throwaway AGENT_FACTORY_HOME and a real
+// git repo with real branches — not branchCreatedByAF in isolation, which skips
+// the ExternalWorktree/BranchName gates that decide whether the branch ever
+// reaches the deletion plan.
+//
+// Both legacy shapes that predate branch_created_by_us (2026-04-17) are covered:
+//
+//   - external_worktree=true + nil — the issue's shape: a `--here`/attach
+//     session IS the user's live tree, so AF never owned its branch.
+//   - external_worktree=false + nil — the shape the issue does NOT mention: a
+//     normal AF linked worktree built by setupFromExistingBranch on a branch the
+//     user already had. No external flag protects this one anywhere.
+//
+// Neither branch may be touched. The AF-created branches of
+// TestFactoryReset_WipesEverythingKeepsRepoAndConfig (explicit true) are still
+// pruned, which is what keeps this fix from over-correcting into a no-op.
+func TestFactoryReset_LegacyNilProvenance_PreservesUserBranches(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	t.Chdir(t.TempDir())
+	stubResetDaemonHandling(t, home, false, nil)
+
+	repo := t.TempDir()
+	runGit(t, repo, "init", "-q")
+	if err := os.WriteFile(filepath.Join(repo, "README.md"), []byte("hi"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, repo, "add", "-A")
+	runGit(t, repo, "commit", "-q", "-m", "init")
+	runGit(t, repo, "branch", "-M", "master")
+	runGit(t, repo, "branch", "legacy-here")   // user branch an attach/--here session reused
+	runGit(t, repo, "branch", "legacy-reused") // user branch a linked worktree reused
+
+	legacyReusedWT := filepath.Join(home, "worktrees", "legacy-reused")
+	runGit(t, repo, "worktree", "add", "-q", legacyReusedWT, "legacy-reused")
+
+	repoID := config.RepoIDFromRoot(repo)
+	recs := []session.InstanceData{
+		{ // #1953: attach-to-existing-worktree record, Mar 3 – Apr 17 2026.
+			Title:    "legacy-here",
+			Path:     repo,
+			Liveness: session.LiveReady,
+			Worktree: session.GitWorktreeData{
+				RepoPath: repo, WorktreePath: repo, ExternalWorktree: true,
+				BranchName: "legacy-here", BranchCreatedByUs: nil,
+			},
+		},
+		{ // The unmentioned sibling: setupFromExistingBranch record, pre Apr 17 2026.
+			Title:    "legacy-reused",
+			Path:     repo,
+			Liveness: session.LiveReady,
+			Worktree: session.GitWorktreeData{
+				RepoPath: repo, WorktreePath: legacyReusedWT, ExternalWorktree: false,
+				BranchName: "legacy-reused", BranchCreatedByUs: nil,
+			},
+		},
+	}
+	raw, err := json.Marshal(recs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := config.SaveRepoInstances(repoID, raw); err != nil {
+		t.Fatal(err)
+	}
+
+	plan, err := planFactoryReset()
+	if err != nil {
+		t.Fatalf("planFactoryReset: %v", err)
+	}
+	if plan.branchCount() != 0 {
+		t.Errorf("branchCount = %d, want 0: unknown provenance must never plan a branch deletion (planned: %v)",
+			plan.branchCount(), plan.branches)
+	}
+	if _, err := executeFactoryReset(plan); err != nil {
+		t.Fatalf("executeFactoryReset: %v", err)
+	}
+
+	for _, branch := range []string{"legacy-here", "legacy-reused", "master"} {
+		if !branchExists(repo, branch) {
+			t.Errorf("#1953: reset deleted the user-owned branch %q", branch)
+		}
+	}
+	// The external session's "worktree" IS the user's repo — it must survive.
+	if _, err := os.Stat(filepath.Join(repo, "README.md")); err != nil {
+		t.Errorf("reset removed the external session's live repo tree: %v", err)
+	}
+}
+
 func TestResetConfirmed(t *testing.T) {
 	tests := []struct {
 		name     string

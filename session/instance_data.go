@@ -156,12 +156,27 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 	default:
 		instance.backend = &LocalBackend{}
 
-		// Preserve backward compatibility: when the branch_created_by_us
-		// field is missing from persisted data (written before this field
-		// was added), default to true. Old saved sessions were created
-		// under the assumption that the session owned the branch, so
-		// keeping that behavior avoids surprising changes on restore.
-		branchCreatedByUs := true
+		// DESTRUCTION REQUIRES POSITIVE EVIDENCE (#1953). A missing
+		// branch_created_by_us (written before the field landed 2026-04-17)
+		// means we do not know who created the branch — and the only thing
+		// this flag authorizes is `git branch -D`. Unknown provenance
+		// therefore means KEEP: default to false.
+		//
+		// This inverts the original nil→true back-compat default, which
+		// assumed every legacy record was a branch AF had created. It was
+		// wrong for two legacy shapes that both persisted no flag:
+		// attach-to-existing-worktree records (external_worktree=true,
+		// 2026-03-03) and — with nothing external about them — any normal
+		// linked worktree Setup built on a branch the user already had
+		// (setupFromExistingBranch, 2025-07-23). Both are the user's
+		// branches; the old default marked them AF-created and let reset and
+		// kill/archive delete them.
+		//
+		// The cost is the opposite error: a legacy record whose branch AF
+		// really did create is now never pruned, leaking an orphaned af-*
+		// branch. That is deliberate — a leaked branch the user can see and
+		// delete beats a deletion they cannot undo.
+		branchCreatedByUs := false
 		if data.Worktree.BranchCreatedByUs != nil {
 			branchCreatedByUs = *data.Worktree.BranchCreatedByUs
 		}
