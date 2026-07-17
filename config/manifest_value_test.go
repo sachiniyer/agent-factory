@@ -250,3 +250,82 @@ func TestSetResultEchoesKeyAndValue(t *testing.T) {
 		t.Fatal("RequiresRestart must stay true: config.toml is read at startup, and a surface that omits the notice tells the user the change is live when it is not")
 	}
 }
+
+// TestEditableIsNeverAKeyTheWriterWouldRefuse is the honesty lock behind every
+// editable control in both surfaces.
+//
+// The manifest's Settable means "`af config set` accepts this key — or, for a
+// dynamic family, its leaves". An editor cannot use that: program_overrides is
+// Settable, but the BARE key holds a table, and offering it as one field means
+// pre-filling the map's JSON and having the writer refuse it on save — a dead
+// end the user finds by pressing enter.
+//
+// So this asserts the property the UIs actually need: EVERY key marked Editable
+// can be written with the value the editor shows for it, through the real path.
+// It runs over the manifest, so a future key (or a new dynamic family) is
+// covered the day it is added.
+func TestEditableIsNeverAKeyTheWriterWouldRefuse(t *testing.T) {
+	for _, e := range ManifestWithValues(DefaultConfig()) {
+		if !e.Editable {
+			continue
+		}
+		t.Run(e.Key, func(t *testing.T) {
+			writeTempConfig(t, "# hand-written\n")
+			cfg, err := LoadConfig()
+			if err != nil {
+				t.Fatalf("load: %v", err)
+			}
+			shown, ok := CurrentValue(cfg, e.Key)
+			if !ok {
+				t.Fatalf("%s is offered as editable but has no readable value", e.Key)
+			}
+			if _, err := SetGlobalConfigValue(e.Key, shown); err != nil {
+				t.Fatalf("%s is marked Editable, so both editors render a field for it — "+
+					"but saving the value they show is REFUSED: %v", e.Key, err)
+			}
+		})
+	}
+}
+
+// TestDynamicFamiliesAreNotEditableAndSayHow pins the specific case above, and
+// the copy that goes with it.
+//
+// A dynamic family must not be editable — and the hint must NOT say "hand-edit
+// config.toml", because that is false: `af config set program_overrides.claude
+// …` works. Sending a user to a text editor for something af does for them is a
+// smaller lie than the dead-end field, but it is still one.
+func TestDynamicFamiliesAreNotEditableAndSayHow(t *testing.T) {
+	var checked int
+	for _, e := range ManifestWithValues(DefaultConfig()) {
+		spec, ok := settableKeySpecs[e.Key]
+		if !ok || !spec.dynamic {
+			continue
+		}
+		checked++
+		if e.Editable {
+			t.Errorf("%s is a dynamic table: the bare key is not settable, so an editor must not offer it as one value", e.Key)
+		}
+		if !strings.Contains(e.EditHint, "af config set "+e.Key+".<name>") {
+			t.Errorf("%s: the hint must name the command that WORKS, not send the user to a text editor.\n got: %q", e.Key, e.EditHint)
+		}
+	}
+	if checked == 0 {
+		t.Fatal("no dynamic families found — this test is asserting nothing")
+	}
+}
+
+// TestStructuralKeysSayTheyAreHandEdited pins the other read-only case: there is
+// genuinely no command for theme/[keys]/root_agents, so the hint says so.
+func TestStructuralKeysSayTheyAreHandEdited(t *testing.T) {
+	for _, e := range ManifestWithValues(DefaultConfig()) {
+		if e.Settable {
+			continue
+		}
+		if e.Editable {
+			t.Errorf("%s is not settable at all; it must not be editable", e.Key)
+		}
+		if e.EditHint != "hand-edited in config.toml" {
+			t.Errorf("%s: got hint %q", e.Key, e.EditHint)
+		}
+	}
+}

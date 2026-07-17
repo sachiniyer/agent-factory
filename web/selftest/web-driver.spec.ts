@@ -666,6 +666,22 @@ test("config: the editor renders from the manifest and writes through the real p
     "af daemon restart",
   );
 
+  // Enter on an UNTOUCHED field must do nothing. The Save button is disabled
+  // there, and Enter has to honor the same gate: a no-op write still echoes and
+  // still raises the restart notice, telling the user they changed something and
+  // owe a restart when they did neither.
+  const branch = pane.locator('.af-config-row[data-key="branch_prefix"]');
+  await expect(branch.locator("button.af-config-save")).toBeDisabled();
+  await branch.locator("input").press("Enter");
+  await expect(branch.locator(".af-config-echo")).toHaveCount(0);
+
+  // A dynamic table is never offered as one editable value: program_overrides is
+  // settable only through its LEAVES, so a field here could only dead-end at a
+  // save the writer refuses. It names the command that works instead.
+  const overrides = pane.locator('.af-config-row[data-key="program_overrides"]');
+  await expect(overrides.locator("input, select")).toHaveCount(0);
+  await expect(overrides.locator(".af-config-readonly")).toContainText("af config set program_overrides.<name>");
+
   // A hand-edited key is shown but never offered as a field whose save could only
   // be refused.
   const readOnly = pane.locator('.af-config-row[data-key="theme"] .af-config-readonly');

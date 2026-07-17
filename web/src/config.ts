@@ -77,10 +77,11 @@ export type ControlKind = "readonly" | "checkbox" | "select" | "text";
  * locks the REAL decision rather than a copy of it — a copy would drift from
  * renderControl, which is the very failure this whole design is avoiding.
  *
- *  - `settable: false` → read-only. `af config set` refuses the key (it is
- *    hand-edited in config.toml by design), so an editable field could only
- *    dead-end at a rejected save. The flag is pinned Go-side against the real
- *    allowlist, so trusting it here is safe.
+ *  - `editable: false` → read-only, with `edit_hint` saying what to do instead.
+ *    NOT `settable`: that is true for a dynamic family (program_overrides),
+ *    meaning its LEAVES are settable, and offering the bare key as one field
+ *    dead-ends at a save the writer refuses. `editable` is derived Go-side from
+ *    the real allowlist.
  *  - `bool` → checkbox.
  *  - enumerated → picker. Excluded for a table, where the enum constrains entry
  *    NAMES rather than the value; offering it as a value picker would be a small
@@ -88,7 +89,7 @@ export type ControlKind = "readonly" | "checkbox" | "select" | "text";
  *  - anything else → text.
  */
 export function controlKind(e: ConfigEntry): ControlKind {
-  if (!e.settable) {
+  if (!e.editable) {
     return "readonly";
   }
   if (e.type === "bool") {
@@ -98,6 +99,20 @@ export function controlKind(e: ConfigEntry): ControlKind {
     return "select";
   }
   return "text";
+}
+
+/**
+ * Whether a field's current text is worth writing: only when it differs from what
+ * the file already holds.
+ *
+ * A no-op write is not harmless. It still round-trips to the daemon, still prints
+ * `set key = value`, and still raises the restart notice — so it reads as though
+ * the user changed something and now owes a restart. Exported so config.test.ts
+ * locks the REAL rule both the Save button and the Enter key gate on, rather than
+ * a copy of it.
+ */
+export function canCommit(shown: string, current: string): boolean {
+  return shown !== current;
 }
 
 export class ConfigPane {
@@ -234,7 +249,7 @@ export class ConfigPane {
         "div",
         { class: "af-config-control" },
         h("code", { class: "af-config-value" }, e.value),
-        h("span", { class: "af-config-readonly" }, "hand-edited in config.toml"),
+        h("span", { class: "af-config-readonly" }, e.edit_hint ?? "hand-edited in config.toml"),
       );
     }
 
@@ -267,23 +282,39 @@ export class ConfigPane {
     const input = h("input", { type: "text", class: "af-input af-config-input", autocomplete: "off" });
     input.value = this.editing === e.key ? this.draft : e.value;
     input.setAttribute("aria-label", e.key);
+
+    const save = h("button", { type: "button", class: "af-primary af-config-save" }, "Save");
+
+    // ONE gate, both gestures. There are two ways to commit this field — the
+    // button and Enter — and they must agree. Enter used to call save()
+    // unconditionally while the button honored `disabled`, so pressing Enter on
+    // an untouched field wrote it anyway: an echo and a restart notice for a
+    // no-op, telling the user something happened when nothing did. Routing both
+    // through commit() is what keeps a disabled control actually disabled.
+    const commit = () => {
+      if (!canCommit(input.value, e.value)) {
+        return;
+      }
+      this.actions.save(e.key, input.value);
+    };
+
+    const syncSave = () => {
+      save.disabled = !canCommit(input.value, e.value);
+    };
+
     input.addEventListener("input", () => {
       this.editing = e.key;
       this.draft = input.value;
-      save.disabled = input.value === e.value;
+      syncSave();
     });
     input.addEventListener("keydown", (ev: KeyboardEvent) => {
       if (ev.key === "Enter") {
         ev.preventDefault();
-        this.actions.save(e.key, input.value);
+        commit();
       }
     });
-
-    const save = h("button", { type: "button", class: "af-primary af-config-save" }, "Save");
-    // Nothing to save until the value differs: a no-op write would still print
-    // an echo and a restart notice, which reads as though something happened.
-    save.disabled = this.editing !== e.key || this.draft === e.value;
-    save.addEventListener("click", () => this.actions.save(e.key, input.value));
+    save.addEventListener("click", commit);
+    syncSave();
 
     return h("div", { class: "af-config-control" }, input, save);
   }

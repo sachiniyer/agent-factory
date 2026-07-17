@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { afterEach, test } from "node:test";
 
 import { getConfig, setConfigValue } from "./api.js";
-import { controlKind } from "./config.js";
+import { canCommit, controlKind } from "./config.js";
 import type { ConfigEntry } from "./types.js";
 
 // These are the web client's config-editor contracts. They are pure logic +
@@ -49,6 +49,7 @@ const entry = (over: Partial<ConfigEntry> = {}): ConfigEntry => ({
   tier: 1,
   tier_name: "core",
   settable: true,
+  editable: true,
   value: "claude",
   requires_restart: true,
   ...over,
@@ -141,11 +142,31 @@ test("the control for a key is decided by the manifest, so an unknown key still 
   assert.equal(controlFor(entry({ type: "int" })), "text");
   // A hand-edited key is never offered as a field: the write would be refused,
   // so an editable-looking control would be a dead end.
-  assert.equal(controlFor(entry({ settable: false, type: "table" })), "readonly");
-  // For a table the enum constrains entry NAMES, not the value — offering it as
-  // a value picker would be a small lie about what the key takes.
-  assert.equal(controlFor(entry({ type: "table", enum: ["claude", "codex"], settable: true })), "text");
+  assert.equal(controlFor(entry({ settable: false, editable: false, type: "table" })), "readonly");
+  // A DYNAMIC FAMILY is the subtle one, and the reason the control reads
+  // `editable` rather than `settable`. program_overrides is settable — its
+  // LEAVES are (`af config set program_overrides.claude …`) — but the bare key
+  // holds a table the writer refuses. Keyed off `settable` this rendered a text
+  // field pre-filled with the map's JSON that failed on save.
+  assert.equal(
+    controlFor(entry({ key: "program_overrides", type: "table", enum: ["claude", "codex"], settable: true, editable: false })),
+    "readonly",
+    "a dynamic table must never be offered as one editable value",
+  );
   // A key type this bundle has never heard of still gets a usable field rather
   // than disappearing from the form.
   assert.equal(controlFor(entry({ type: "duration-we-have-never-seen" })), "text");
+});
+
+// Both ways to commit a field — the Save button and the Enter key — gate on this
+// one predicate. They used to disagree: the button honored `disabled`, Enter did
+// not, so pressing Enter on an untouched field wrote it anyway and printed an
+// echo plus a restart notice for a no-op.
+test("an unchanged value is not worth writing — the gate both Save and Enter use", () => {
+  assert.equal(canCommit("claude", "claude"), false, "an untouched field must not write");
+  assert.equal(canCommit("codex", "claude"), true);
+  // An emptied field IS a change: "" is a real value (an unset vscode binary,
+  // listen_addr = "" to turn the web server off), not a no-op.
+  assert.equal(canCommit("", "claude"), true, "clearing a value is an edit, not a no-op");
+  assert.equal(canCommit("", ""), false, "but an already-empty field is still untouched");
 });

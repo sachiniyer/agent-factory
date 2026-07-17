@@ -86,12 +86,31 @@ type ConfigEntry struct {
 	Purpose  string `json:"purpose"`
 	Tier     int    `json:"tier"`
 	TierName string `json:"tier_name"`
-	// Settable reports whether this key can be edited from a UI at all. It is
-	// the manifest's own field, pinned against the real `af config set`
-	// allowlist by TestManifestAgreesWithSettableKeys — so a surface may trust
-	// it rather than re-deriving one. A false renders read-only, with Purpose
-	// explaining that the key is hand-edited.
+	// Settable is the MANIFEST's claim: `af config set` accepts this key — or,
+	// for a dynamic family, its LEAVES (`af config set program_overrides.claude
+	// …`). It is pinned against the real allowlist by
+	// TestManifestAgreesWithSettableKeys.
+	//
+	// A UI must NOT drive a control off this field. "The CLI accepts this key's
+	// leaves" is not "this row can be edited as one value", and conflating the
+	// two makes the editor offer program_overrides as a text field pre-filled
+	// with the map's JSON — which the writer then refuses, because the bare key
+	// is not settable. Use Editable.
 	Settable bool `json:"settable"`
+	// Editable is the EDITOR's question: can this row be edited directly, as a
+	// single scalar value the write path will accept?
+	//
+	// It is Settable minus the dynamic families, derived from the real
+	// settableKeySpecs allowlist rather than restated, so it cannot promise a
+	// shape `af config set` does not take. A false renders read-only with
+	// EditHint, which is the honest outcome: an editable-looking field whose save
+	// can only ever be refused is a dead end the user finds by pressing save.
+	Editable bool `json:"editable"`
+	// EditHint says how to change a key that is not directly editable. It is not
+	// always "hand-edit the file": a dynamic family's leaves ARE settable from
+	// the CLI, so the hint names that command instead of sending the user to a
+	// text editor for something af can do.
+	EditHint string `json:"edit_hint,omitempty"`
 	// Enum drives a picker instead of a free-text field when non-empty. For a
 	// table it constrains the entry NAMES, not the value (see the briefing's
 	// same distinction), which is why a UI must not offer it as a value picker
@@ -126,6 +145,7 @@ func ManifestWithValues(cfg *Config) []ConfigEntry {
 	out := make([]ConfigEntry, 0, len(entries))
 	for _, e := range entries {
 		value, _ := CurrentValue(cfg, e.Key)
+		editable, hint := editability(e)
 		out = append(out, ConfigEntry{
 			Key:      e.Key,
 			Type:     e.Type,
@@ -134,6 +154,8 @@ func ManifestWithValues(cfg *Config) []ConfigEntry {
 			Tier:     int(e.Tier),
 			TierName: TierName(e.Tier),
 			Settable: e.Settable,
+			Editable: editable,
+			EditHint: hint,
 			Enum:     e.Enum,
 			Value:    value,
 			// Uniformly true — see the field's comment.
@@ -141,6 +163,36 @@ func ManifestWithValues(cfg *Config) []ConfigEntry {
 		})
 	}
 	return out
+}
+
+// editability answers, for one manifest entry, whether an editor may offer it as
+// a single editable value — and if not, what to tell the user instead.
+//
+// It reads settableKeySpecs (the REAL `af config set` allowlist) rather than
+// restating which keys are dynamic, so it cannot drift from what the writer
+// actually accepts. That matters because the two "not editable" cases are
+// different, and telling a user the wrong one wastes their time:
+//
+//   - A dynamic family (program_overrides, limit_patterns) holds a table. The
+//     bare key is NOT settable, but its leaves are — so the honest hint names
+//     the command that works, rather than sending someone to a text editor for
+//     something af can do for them.
+//   - A structural key (theme, root_agents, keys, cors_allowed_origins) is
+//     hand-edited by design. There is no command; say so.
+func editability(e ManifestEntry) (editable bool, hint string) {
+	if !e.Settable {
+		return false, "hand-edited in config.toml"
+	}
+	spec, ok := settableKeySpecs[e.Key]
+	if !ok {
+		// Unreachable while TestManifestAgreesWithSettableKeys passes; fail
+		// closed rather than offer a field the writer has no spec for.
+		return false, "hand-edited in config.toml"
+	}
+	if spec.dynamic {
+		return false, "set one entry: af config set " + e.Key + ".<name> <value>"
+	}
+	return true, ""
 }
 
 // RestartNotice is the one sentence every surface uses to tell a user their edit

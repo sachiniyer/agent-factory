@@ -46,6 +46,11 @@ type ConfigPane struct {
 	editing bool
 	input   textinput.Model
 
+	// scrollTop is the first row-line rendered, so a list taller than the pane
+	// keeps the selection on screen. It persists between renders: recomputing it
+	// from scratch each frame would snap the view around while the user reads.
+	scrollTop int
+
 	// status is the echo of the last write ("key = value") or the validator's
 	// error. restartNotice rides alongside a successful write.
 	status        string
@@ -73,10 +78,16 @@ type configRow struct {
 }
 
 // isSelectable reports whether the cursor may land on this row. Headings and
-// read-only (hand-edited) keys are skipped: stopping on a row whose only
+// rows that cannot be edited here are skipped: stopping on a row whose only
 // possible action is "you cannot edit this here" wastes the user's keystrokes.
+//
+// It reads Editable, NOT the manifest's Settable. Settable is true for a dynamic
+// family (program_overrides), meaning its LEAVES are settable — the bare key is
+// not. Keying off Settable let the cursor land on program_overrides, opened a
+// field pre-filled with the map's JSON, and had the writer refuse it on save:
+// a dead end the user only discovered by pressing enter.
 func (r configRow) isSelectable() bool {
-	return r.entry != nil && r.entry.Settable
+	return r.entry != nil && r.entry.Editable
 }
 
 var (
@@ -136,8 +147,7 @@ func (c *ConfigPane) SetFocus(focus bool) {
 	c.hasFocus = focus
 	if !focus {
 		c.cancelEdit()
-		c.status = ""
-		c.restartNotice = ""
+		c.clearStatus()
 	}
 }
 
@@ -225,8 +235,13 @@ func (c *ConfigPane) HandleKeyPress(msg tea.KeyMsg) bool {
 	}
 	switch msg.String() {
 	case "esc":
-		// Drop focus; the app reads that as "close the overlay".
-		c.hasFocus = false
+		// Drop focus through SetFocus, NOT by assigning hasFocus: closing must
+		// clear the last write's echo and restart notice, and assigning the field
+		// directly skipped that — so reopening the editor showed "set
+		// default_program = codex" and a restart notice for an edit made minutes
+		// ago, as though it had just happened. Every close funnels through one
+		// place so a future close path cannot miss the reset.
+		c.SetFocus(false)
 		return true
 	case "up", "k":
 		c.move(-1)
@@ -251,7 +266,7 @@ func (c *ConfigPane) HandleKeyPress(msg tea.KeyMsg) bool {
 // so saving an untouched field is a no-op rather than a corruption.
 func (c *ConfigPane) beginEdit() {
 	entry := c.selectedEntry()
-	if entry == nil || !entry.Settable {
+	if entry == nil || !entry.Editable {
 		return
 	}
 	c.editing = true
@@ -260,6 +275,17 @@ func (c *ConfigPane) beginEdit() {
 	c.input.SetValue(entry.Value)
 	c.input.CursorEnd()
 	c.input.Focus()
+}
+
+// clearStatus drops the last write's echo, its restart notice, and any error.
+//
+// All three must go together: leaving statusIsError set while clearing the text
+// would render an empty error line, and leaving the notice would tell a user to
+// restart for an edit they cannot see.
+func (c *ConfigPane) clearStatus() {
+	c.status = ""
+	c.statusIsError = false
+	c.restartNotice = ""
 }
 
 func (c *ConfigPane) cancelEdit() {
@@ -334,29 +360,114 @@ func (c *ConfigPane) commitEdit() {
 	}
 }
 
-// String renders the pane.
+// String renders the pane, windowed so the selected row is always visible.
+//
+// The list is taller than the overlay once the advanced tier is open (~31 lines
+// of rows in a 20-line pane), so without a window the cursor walks off the
+// bottom and the user is editing a row they cannot see — and a selection you
+// cannot see is one you will change by accident.
 func (c *ConfigPane) String() string {
-	var b strings.Builder
+	header := c.renderHeader()
+	footer := c.renderStatus() + c.renderHints()
 
+	rowLines, selStart, selEnd := c.renderRowLines()
+
+	// Reserve the two cue rows unconditionally. Making the budget depend on
+	// whether the cues happen to show is circular — and it would make the list
+	// grow and shrink by a line as the user scrolls past either end.
+	budget := c.height - countLines(header) - countLines(footer) - cueRows
+	visible, above, below := c.window(rowLines, selStart, selEnd, budget)
+
+	var b strings.Builder
+	b.WriteString(header)
+	if above > 0 {
+		b.WriteString(configHintStyle.Render(fmt.Sprintf("  ↑ %d more", above)))
+		b.WriteString("\n")
+	}
+	b.WriteString(strings.Join(visible, "\n"))
+	if len(visible) > 0 {
+		b.WriteString("\n")
+	}
+	if below > 0 {
+		b.WriteString(configHintStyle.Render(fmt.Sprintf("  ↓ %d more", below)))
+		b.WriteString("\n")
+	}
+	b.WriteString(footer)
+	return b.String()
+}
+
+// renderHeader renders the title and the file being edited.
+func (c *ConfigPane) renderHeader() string {
+	var b strings.Builder
 	b.WriteString(configTitleStyle.Render("Config"))
 	if c.path != "" {
 		b.WriteString(configPurposeStyle.Render("  " + c.path))
 	}
 	b.WriteString("\n\n")
+	return b.String()
+}
 
+// renderRowLines renders every row to lines, reporting the line span of the
+// selected row so the window can keep it on screen. A row is not one line: the
+// selected row also shows its purpose and its allowed values, so the span is
+// what must stay visible, not a single index.
+func (c *ConfigPane) renderRowLines() (lines []string, selStart, selEnd int) {
+	selStart, selEnd = -1, -1
 	for i, row := range c.rows {
+		start := len(lines)
 		if row.entry == nil {
-			b.WriteString(configHeadingStyle.Render(strings.ToUpper(row.heading)))
-			b.WriteString("\n")
-			continue
+			lines = append(lines, configHeadingStyle.Render(strings.ToUpper(row.heading)))
+		} else {
+			rendered := c.renderEntryRow(i, row, *row.entry)
+			lines = append(lines, strings.Split(strings.TrimSuffix(rendered, "\n"), "\n")...)
 		}
-		b.WriteString(c.renderEntryRow(i, row, *row.entry))
+		if i == c.selectedIdx {
+			selStart, selEnd = start, len(lines)
+		}
+	}
+	return lines, selStart, selEnd
+}
+
+// window returns the slice of rowLines to render, plus how many lines are hidden
+// above and below, scrolling only as far as it must to reveal the selection.
+//
+// It moves the view by the MINIMUM needed rather than centering the selection:
+// centering would shift the whole list on every keypress, which reads as the
+// content moving under the cursor instead of the cursor moving through it.
+func (c *ConfigPane) window(rowLines []string, selStart, selEnd, budget int) (visible []string, above, below int) {
+	if budget <= 0 || len(rowLines) <= budget {
+		// It all fits (or the pane has no size yet — SetSize has not run, as in a
+		// unit test): render everything rather than guessing a window.
+		c.scrollTop = 0
+		return rowLines, 0, 0
 	}
 
-	b.WriteString("\n")
-	b.WriteString(c.renderStatus())
-	b.WriteString(c.renderHints())
-	return b.String()
+	if selStart >= 0 {
+		if selStart < c.scrollTop {
+			c.scrollTop = selStart
+		}
+		// A selected row taller than the window (a long purpose line) pins to its
+		// top: showing its tail and hiding its key would be worse than clipping.
+		if selEnd > c.scrollTop+budget {
+			c.scrollTop = min(selStart, selEnd-budget)
+		}
+	}
+	maxTop := len(rowLines) - budget
+	c.scrollTop = max(0, min(c.scrollTop, maxTop))
+
+	return rowLines[c.scrollTop : c.scrollTop+budget], c.scrollTop, len(rowLines) - (c.scrollTop + budget)
+}
+
+// cueRows is the vertical space reserved for the "↑ n more" / "↓ n more" cues.
+const cueRows = 2
+
+// countLines counts the rendered lines in a fragment. Exact only because every
+// fragment String() composes ends with a newline.
+func countLines(s string) int {
+	if s == "" {
+		return 0
+	}
+	return strings.Count(s, "\n")
 }
 
 // renderEntryRow renders one key row: cursor, key, value (or the live edit
@@ -381,24 +492,28 @@ func (c *ConfigPane) renderEntryRow(i int, row configRow, e config.ConfigEntry) 
 	switch {
 	case selected && c.editing:
 		b.WriteString(c.input.View())
-	case !e.Settable:
-		// Say WHY it is not editable here, rather than showing a dead row. The
-		// key is real and the file is hand-editable by design.
+	case !e.Editable:
 		b.WriteString(configValueStyle.Render(c.displayValue(e)))
-		b.WriteString(configReadOnlyStyle.Render(" · hand-edited in config.toml"))
 	default:
 		b.WriteString(configValueStyle.Render(c.displayValue(e)))
 	}
 	b.WriteString("\n")
 
+	if !e.Editable && e.EditHint != "" {
+		// Say WHY it cannot be edited here, and what to do instead — on its own
+		// wrapped line, not inline. The hint is derived from the real allowlist,
+		// so for a dynamic family it names the command that DOES work rather than
+		// sending the user to a text editor for something af can do. That makes it
+		// long ("set one entry: af config set program_overrides.<name> <value>"),
+		// and inline it pushed the row to 106 cells in a 72-cell pane — which the
+		// frame would wrap, breaking the height window's line count.
+		b.WriteString(c.wrapIndented("· "+e.EditHint, configReadOnlyStyle))
+	}
+
 	if selected {
-		b.WriteString("    ")
-		b.WriteString(configPurposeStyle.Render(e.Purpose))
-		b.WriteString("\n")
+		b.WriteString(c.wrapIndented(e.Purpose, configPurposeStyle))
 		if len(e.Enum) > 0 && e.Type != "table" {
-			b.WriteString("    ")
-			b.WriteString(configHintStyle.Render("one of: " + strings.Join(e.Enum, " · ")))
-			b.WriteString("\n")
+			b.WriteString(c.wrapIndented("one of: "+strings.Join(e.Enum, " · "), configHintStyle))
 		}
 	}
 	return b.String()
@@ -424,8 +539,9 @@ func (c *ConfigPane) displayValue(e config.ConfigEntry) string {
 	if e.Value == "" {
 		return "(unset)"
 	}
-	// Leave room for the cursor, the key, and the read-only suffix.
-	budget := c.width - len(e.Key) - 34
+	// Leave room for the cursor and the key. The read-only hint no longer shares
+	// this line (it wraps onto its own), so the only competition is the key.
+	budget := c.width - len(e.Key) - 8
 	if budget < 12 {
 		budget = 12
 	}
@@ -434,6 +550,35 @@ func (c *ConfigPane) displayValue(e config.ConfigEntry) string {
 		return e.Value
 	}
 	return string(runes[:budget-1]) + "…"
+}
+
+// wrapIndented renders prose wrapped to the pane's width, indented under its key.
+//
+// Wrapping HERE rather than letting the overlay frame do it is load-bearing, not
+// cosmetic. The window's budget counts the lines renderRowLines produces, so a
+// line the frame later wraps into three physical rows makes that count a lie and
+// the pane overflows its box anyway — the selection scrolls off exactly as it did
+// before the window existed. A purpose line is genuinely long (worktree_root's is
+// 147 characters, over 2x a 72-column pane), so this is the common case, not an
+// edge one.
+//
+// Prose WRAPS rather than truncating, unlike a value (displayValue): a value's
+// tail is usually noise, but a sentence's is the half that says what the setting
+// does.
+func (c *ConfigPane) wrapIndented(text string, style lipgloss.Style) string {
+	const indent = "    "
+	width := c.width - len(indent) - 2
+	if width < 20 {
+		width = 20
+	}
+	wrapped := style.Width(width).Render(text)
+	var b strings.Builder
+	for _, line := range strings.Split(strings.TrimSuffix(wrapped, "\n"), "\n") {
+		b.WriteString(indent)
+		b.WriteString(line)
+		b.WriteString("\n")
+	}
+	return b.String()
 }
 
 // renderStatus renders the echo of the last write, or the validator's error,
@@ -446,30 +591,43 @@ func (c *ConfigPane) renderStatus() string {
 	if c.status == "" {
 		return ""
 	}
+	// Wrapped for the same reason the purpose is: these are the longest strings
+	// on screen (a validator error runs to 200+ characters), and an unwrapped one
+	// makes countLines undercount the footer, which steals the window's budget.
 	var b strings.Builder
 	if c.statusIsError {
-		b.WriteString(configErrorStyle.Render(c.status))
-		b.WriteString("\n")
+		b.WriteString(c.wrap(c.status, configErrorStyle))
 		return b.String()
 	}
-	b.WriteString(configOKStyle.Render(c.status))
-	b.WriteString("\n")
+	b.WriteString(c.wrap(c.status, configOKStyle))
 	if c.restartNotice != "" {
-		b.WriteString(configNoticeStyle.Render(c.restartNotice))
-		b.WriteString("\n")
+		b.WriteString(c.wrap(c.restartNotice, configNoticeStyle))
 	}
 	return b.String()
 }
 
+// wrap renders text wrapped to the pane width, one fragment per line, always
+// ending in a newline so countLines stays exact.
+func (c *ConfigPane) wrap(text string, style lipgloss.Style) string {
+	width := c.width - 2
+	if width < 20 {
+		width = 20
+	}
+	return strings.TrimSuffix(style.Width(width).Render(text), "\n") + "\n"
+}
+
+// renderHints renders the footer. Every fragment String() composes ends with a
+// newline so countLines is an exact line count — the window's budget is computed
+// from it, and an off-by-one there is an overflowing pane.
 func (c *ConfigPane) renderHints() string {
 	if c.editing {
-		return configHintStyle.Render("\n↵ save · esc cancel")
+		return "\n" + configHintStyle.Render("↵ save · esc cancel") + "\n"
 	}
 	advanced := "a show advanced"
 	if c.showAdvanced {
 		advanced = "a hide advanced"
 	}
-	return configHintStyle.Render("\n↑/↓ move · ↵ edit · " + advanced + " · esc close")
+	return "\n" + configHintStyle.Render("↑/↓ move · ↵ edit · "+advanced+" · esc close") + "\n"
 }
 
 // SetEditValueForTest and EditValueForTest expose the value field's buffer to

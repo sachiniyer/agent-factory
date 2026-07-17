@@ -230,10 +230,19 @@ export interface ConfigEntry {
   purpose: string;
   tier: number;
   tier_name: string;
-  /** False for a key `af config set` will not take (a nested table, a list):
-   *  it is hand-edited in config.toml by design, so the form renders it
-   *  read-only rather than offering a field whose save could only fail. */
+  /** The MANIFEST's claim: `af config set` accepts this key — or, for a dynamic
+   *  family, its LEAVES (`af config set program_overrides.claude …`). Do NOT
+   *  drive a control off this: "the CLI takes this key's leaves" is not "this
+   *  row is one editable value". Use `editable`. */
   settable: boolean;
+  /** The EDITOR's question: can this row be edited directly, as a single scalar
+   *  the write path will accept? Settable minus the dynamic families, derived
+   *  Go-side from the real allowlist. False renders read-only with `edit_hint`. */
+  editable: boolean;
+  /** How to change a key that is not directly editable. Not always "hand-edit
+   *  the file" — a dynamic family's leaves ARE settable from the CLI, so the
+   *  hint names that command. */
+  edit_hint?: string;
   /** Present when the value is enumerated; drives a picker instead of a text
    *  field. For a table it constrains the entry NAMES, not the value. */
   enum?: string[];

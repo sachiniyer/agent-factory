@@ -9244,7 +9244,7 @@ function tiersInOrder(entries) {
 }
 var TIER_ADVANCED = 3;
 function controlKind(e) {
-  if (!e.settable) {
+  if (!e.editable) {
     return "readonly";
   }
   if (e.type === "bool") {
@@ -9254,6 +9254,9 @@ function controlKind(e) {
     return "select";
   }
   return "text";
+}
+function canCommit(shown, current) {
+  return shown !== current;
 }
 var ConfigPane = class {
   constructor(actions2) {
@@ -9371,7 +9374,7 @@ var ConfigPane = class {
         "div",
         { class: "af-config-control" },
         h("code", { class: "af-config-value" }, e.value),
-        h("span", { class: "af-config-readonly" }, "hand-edited in config.toml")
+        h("span", { class: "af-config-readonly" }, e.edit_hint ?? "hand-edited in config.toml")
       );
     }
     if (kind === "checkbox") {
@@ -9397,20 +9400,29 @@ var ConfigPane = class {
     const input = h("input", { type: "text", class: "af-input af-config-input", autocomplete: "off" });
     input.value = this.editing === e.key ? this.draft : e.value;
     input.setAttribute("aria-label", e.key);
+    const save = h("button", { type: "button", class: "af-primary af-config-save" }, "Save");
+    const commit = () => {
+      if (!canCommit(input.value, e.value)) {
+        return;
+      }
+      this.actions.save(e.key, input.value);
+    };
+    const syncSave = () => {
+      save.disabled = !canCommit(input.value, e.value);
+    };
     input.addEventListener("input", () => {
       this.editing = e.key;
       this.draft = input.value;
-      save.disabled = input.value === e.value;
+      syncSave();
     });
     input.addEventListener("keydown", (ev) => {
       if (ev.key === "Enter") {
         ev.preventDefault();
-        this.actions.save(e.key, input.value);
+        commit();
       }
     });
-    const save = h("button", { type: "button", class: "af-primary af-config-save" }, "Save");
-    save.disabled = this.editing !== e.key || this.draft === e.value;
-    save.addEventListener("click", () => this.actions.save(e.key, input.value));
+    save.addEventListener("click", commit);
+    syncSave();
     return h("div", { class: "af-config-control" }, input, save);
   }
 };

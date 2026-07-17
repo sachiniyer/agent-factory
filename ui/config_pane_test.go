@@ -1,12 +1,14 @@
 package ui
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 
 	"github.com/sachiniyer/agent-factory/config"
 )
@@ -218,41 +220,72 @@ func TestConfigPaneRejectsInvalidValueWithTheValidatorsOwnError(t *testing.T) {
 	}
 }
 
-// TestConfigPaneCannotEditHandEditedKeys pins that the pane trusts the manifest's
-// Settable flag — which is itself pinned against the real `af config set`
-// allowlist — rather than deriving a second opinion.
+// TestConfigPaneNeverOffersAKeyTheWriterWouldRefuse pins that the pane trusts
+// ConfigEntry.Editable — the honest, allowlist-derived answer — rather than the
+// manifest's Settable.
 //
-// A key the CLI will not set must not be offered as editable here: the write
-// would be rejected, so an editable-looking field would be a dead end. The pane
-// says the key is hand-edited instead, because it is, by design.
-func TestConfigPaneCannotEditHandEditedKeys(t *testing.T) {
+// The distinction is the whole finding: program_overrides is Settable, because
+// its LEAVES are settable. The bare key holds a table. Keying the cursor off
+// Settable let it land there, opened a field pre-filled with the map's JSON, and
+// had the writer refuse it on save — a dead end found only by pressing enter.
+//
+// So: the cursor must never come to rest on a non-editable row, and every such
+// row must say what to do instead.
+//
+// HONEST LIMIT: this test cannot catch the drift itself. It iterates rows that
+// are ALREADY marked non-editable, so a regression that wrongly marks a key
+// editable simply removes it from this loop and the test stays green — watched
+// doing exactly that. What catches the drift is
+// config.TestEditableIsNeverAKeyTheWriterWouldRefuse, which comes from the other
+// direction: it asks the REAL writer to accept the value every Editable key
+// shows, and fails when one is refused. This test's job is narrower and still
+// worth having — it pins that clampSelection and beginEdit actually honor the
+// flag once it is right.
+func TestConfigPaneNeverOffersAKeyTheWriterWouldRefuse(t *testing.T) {
 	c := newTestConfigPane(t)
 
-	var readOnly []string
-	for _, e := range config.Manifest() {
-		if !e.Settable {
-			readOnly = append(readOnly, e.Key)
-		}
-	}
-	if len(readOnly) == 0 {
-		t.Skip("no read-only keys in the manifest")
-	}
-
-	view := c.String()
-	if !strings.Contains(view, "hand-edited in config.toml") {
-		t.Error("a read-only key must say WHY it cannot be edited here")
-	}
-
-	// The cursor must never land on one: enter there could only fail.
+	var readOnly int
 	for i, row := range c.rows {
-		if row.entry != nil && !row.entry.Settable {
-			c.selectedIdx = i
-			c.clampSelection()
-			landed := c.selectedEntry()
-			if landed != nil && !landed.Settable {
-				t.Errorf("the cursor landed on read-only key %q; enter there can only be refused by the writer", landed.Key)
-			}
+		if row.entry == nil || row.entry.Editable {
+			continue
 		}
+		readOnly++
+
+		// Park the cursor on it and let the pane settle: it must move away.
+		c.selectedIdx = i
+		c.clampSelection()
+		if landed := c.selectedEntry(); landed != nil && !landed.Editable {
+			t.Errorf("the cursor rested on %q, which the writer would refuse — enter there can only dead-end", landed.Key)
+		}
+
+		// And pressing enter on it must not open a field.
+		c.selectedIdx = i
+		c.beginEdit()
+		if c.IsEditing() {
+			t.Errorf("enter opened an edit field on %q, whose save the writer would refuse", row.entry.Key)
+			c.cancelEdit()
+		}
+
+		if row.entry.EditHint == "" {
+			t.Errorf("%q is read-only but says nothing about how to change it", row.entry.Key)
+		}
+	}
+	if readOnly == 0 {
+		t.Fatal("no read-only rows found — this test is asserting nothing")
+	}
+}
+
+// TestConfigPaneNamesTheCommandForDynamicTables pins the COPY for a dynamic
+// family. "hand-edited in config.toml" would be false here: `af config set
+// program_overrides.claude …` works, and sending a user to a text editor for
+// something af does for them is a smaller lie than the dead-end field, but still
+// one.
+func TestConfigPaneNamesTheCommandForDynamicTables(t *testing.T) {
+	c := newTestConfigPane(t)
+	view := c.String()
+
+	if !strings.Contains(view, "af config set program_overrides.<name>") {
+		t.Errorf("the editor must name the command that WORKS for a dynamic table.\n--- view ---\n%s", view)
 	}
 }
 
@@ -328,5 +361,189 @@ func TestConfigPaneEscDuringEditCancelsWithoutClosing(t *testing.T) {
 	}
 	if !c.HasFocus() {
 		t.Error("esc during an edit must NOT close the whole editor")
+	}
+}
+
+// errStubRejected stands in for the validator refusing a value.
+var errStubRejected = errors.New(`update_channel must be one of [stable, preview], got "nightly"`)
+
+// paneHeight is a realistic overlay height: the config list is taller than this
+// once the advanced tier is open, which is the whole point.
+const paneHeight = 20
+
+// TestConfigPaneKeepsTheSelectionVisible is the guard for a selection you cannot
+// see — which is a selection you will change by accident.
+//
+// The list runs to ~31 lines with the advanced tier open. In a 20-line pane an
+// unwindowed render walks the cursor off the bottom: the user presses ↓ until the
+// marker is gone, then presses enter and edits a row they cannot see. This walks
+// the whole list, as a user holding ↓ would, and demands the cursor be on screen
+// at every step.
+func TestConfigPaneKeepsTheSelectionVisible(t *testing.T) {
+	c := NewConfigPane()
+	c.SetSize(64, paneHeight)
+	c.SetEntries(config.ManifestWithValues(config.DefaultConfig()), "/tmp/config.toml")
+	c.SetFocus(true)
+	c.showAdvanced = true
+	c.rebuildRows()
+
+	seen := map[string]bool{}
+	for step := 0; step < 40; step++ {
+		sel := c.selectedEntry()
+		if sel == nil {
+			t.Fatalf("step %d: no selectable row", step)
+		}
+		seen[sel.Key] = true
+
+		view := c.String()
+		lines := strings.Split(view, "\n")
+		if len(lines) > paneHeight+1 {
+			t.Fatalf("step %d (%s): the pane rendered %d lines into a %d-line box — it must window, not overflow",
+				step, sel.Key, len(lines), paneHeight)
+		}
+		if !strings.Contains(view, "›") {
+			t.Fatalf("step %d: the cursor is off screen while %q is selected — a selection you cannot see is one you will change by accident.\n--- view ---\n%s",
+				step, sel.Key, view)
+		}
+		// The selected key itself must be readable, not merely the marker.
+		if !strings.Contains(view, sel.Key) {
+			t.Fatalf("step %d: %q is selected but not rendered.\n--- view ---\n%s", step, sel.Key, view)
+		}
+		c.move(1)
+	}
+
+	if len(seen) < 5 {
+		t.Fatalf("the walk only reached %d keys — it is not exercising the scroll", len(seen))
+	}
+
+	// And back up again: the window must follow the cursor in both directions.
+	for step := 0; step < 40; step++ {
+		c.move(-1)
+		sel := c.selectedEntry()
+		view := c.String()
+		if !strings.Contains(view, "›") || !strings.Contains(view, sel.Key) {
+			t.Fatalf("walking back up, %q went off screen.\n--- view ---\n%s", sel.Key, view)
+		}
+	}
+}
+
+// TestConfigPaneWindowSaysWhatIsHidden pins the cue. A list that silently shows
+// two thirds of itself reads as the whole thing — a user who cannot see
+// worktree_root concludes af has no such setting.
+func TestConfigPaneWindowSaysWhatIsHidden(t *testing.T) {
+	c := NewConfigPane()
+	c.SetSize(64, paneHeight)
+	c.SetEntries(config.ManifestWithValues(config.DefaultConfig()), "/tmp/config.toml")
+	c.SetFocus(true)
+	c.showAdvanced = true
+	c.rebuildRows()
+
+	if !strings.Contains(c.String(), "more") {
+		t.Errorf("with the list scrolled, the pane must say content is hidden.\n--- view ---\n%s", c.String())
+	}
+}
+
+// TestConfigPaneClosingClearsTheLastWritesStatus is the guard for a stale echo
+// bleeding into the next open.
+//
+// The bug: esc closed the overlay by assigning hasFocus directly, skipping
+// SetFocus's reset. Reopening the editor then showed "set default_program =
+// codex" and a restart notice for an edit made minutes earlier — telling the user
+// something had just happened when nothing had, and pointing at a restart they
+// may already have done.
+//
+// It drives the REAL close path (the esc key), not SetFocus, because assigning
+// the field directly was the bug: a test that called SetFocus would have passed
+// against it.
+func TestConfigPaneClosingClearsTheLastWritesStatus(t *testing.T) {
+	c := newTestConfigPane(t)
+	selectKey(t, c, "default_program")
+	c.save = func(k, v string) (*config.SetResult, error) {
+		return &config.SetResult{Key: k, Value: v, Path: "/tmp/config.toml", RequiresRestart: true}, nil
+	}
+
+	c.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEnter})
+	c.input.SetValue("codex")
+	c.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEnter})
+	if c.status == "" {
+		t.Fatal("precondition: a write must leave an echo")
+	}
+
+	// Close the way the app closes it.
+	c.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEsc})
+	if c.HasFocus() {
+		t.Fatal("precondition: esc drops focus")
+	}
+
+	// Reopen the way showConfigEditor reopens it.
+	c.SetEntries(config.ManifestWithValues(config.DefaultConfig()), "/tmp/config.toml")
+	c.SetFocus(true)
+
+	view := c.String()
+	if strings.Contains(view, "set default_program = codex") {
+		t.Errorf("a reopened editor showed the PREVIOUS session's echo.\n--- view ---\n%s", view)
+	}
+	if strings.Contains(view, "daemon restart") {
+		t.Errorf("a reopened editor showed a stale restart notice for an edit the user cannot see.\n--- view ---\n%s", view)
+	}
+}
+
+// TestConfigPaneClosingClearsAStaleError is the same guard for the error line: a
+// rejected value's message must not greet the user on their next open.
+func TestConfigPaneClosingClearsAStaleError(t *testing.T) {
+	c := newTestConfigPane(t)
+	selectKey(t, c, "update_channel")
+	c.save = func(k, v string) (*config.SetResult, error) {
+		return nil, errStubRejected
+	}
+
+	c.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEnter})
+	c.input.SetValue("nightly")
+	c.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEnter})
+	if !c.statusIsError {
+		t.Fatal("precondition: a rejected value must leave an error")
+	}
+
+	// esc abandons the edit; a second esc closes the editor.
+	c.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEsc})
+	c.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEsc})
+	c.SetFocus(true)
+
+	if c.statusIsError || c.status != "" {
+		t.Errorf("a stale error survived the close: %q", c.status)
+	}
+}
+
+// TestConfigPaneNeverRendersALineWiderThanThePane is the width half of "fits in
+// its box", and it is what makes the height window's arithmetic true.
+//
+// The window budgets by counting the lines renderRowLines produces. If a line is
+// wider than the pane, the overlay frame wraps it into several physical rows —
+// so the count is a lie, the pane overflows anyway, and the selection scrolls off
+// exactly as it did before the window existed. This is not hypothetical:
+// worktree_root's purpose is 147 characters, over 2x a 72-column pane, and the
+// theme value serialized to ~700.
+//
+// It walks the list with a status and a restart notice up, because those are the
+// longest strings on screen.
+func TestConfigPaneNeverRendersALineWiderThanThePane(t *testing.T) {
+	const w = 72
+	c := NewConfigPane()
+	c.SetSize(w, paneHeight)
+	c.SetEntries(config.ManifestWithValues(config.DefaultConfig()), "~/.agent-factory/config.toml")
+	c.SetFocus(true)
+	c.showAdvanced = true
+	c.rebuildRows()
+	c.status = `update_channel must be one of [stable, preview], got "nightly". To preserve a custom path or flags, set it to the agent name and move the command into program_overrides.`
+	c.statusIsError = true
+
+	for step := 0; step < 40; step++ {
+		for _, line := range strings.Split(c.String(), "\n") {
+			if got := lipgloss.Width(line); got > w {
+				t.Fatalf("step %d (%s): rendered a %d-cell line into a %d-cell pane — the frame will wrap it and break the height window.\n  line: %s",
+					step, c.selectedEntry().Key, got, w, line)
+			}
+		}
+		c.move(1)
 	}
 }
