@@ -33,19 +33,28 @@ package shellsuggest
 
 import "strings"
 
-// shellSafeChars are the punctuation runes a POSIX shell treats literally in an
-// unquoted word, so a value made only of these (plus alphanumerics) needs no
-// quoting and stays readable.
+// shellSafeChars are the punctuation runes sh, bash and zsh all treat literally
+// in the MIDDLE of an unquoted word, so a value made only of these (plus
+// alphanumerics) needs no quoting and stays readable.
+//
+// Position matters: see startsExpandable — some of these are inert mid-word and
+// expand at the START of one.
 const shellSafeChars = "_@%+=:,./-"
 
-// Arg renders s as exactly ONE shell argument.
+// Arg renders s as exactly ONE shell argument, correct in **sh, bash and zsh**.
+//
+// Naming the shells is deliberate: "shell-safe" with no named target is a vibe,
+// not a claim, and the next contributor inherits whichever shells the last one
+// happened to think about. zsh is not optional here — it has been macOS's default
+// login shell since Catalina, so it is the shell most readers of these
+// suggestions are pasting into.
 //
 // Values that need no quoting pass through, so the common suggestion stays clean
 // and readable (`af sessions restore captain`, not `af sessions restore 'captain'`)
 // — readability matters for a string whose whole purpose is to be read and pasted.
 // Anything else is single-quoted, with embedded single quotes escaped by the
 // standard POSIX idiom ('\”), which makes every other metacharacter — space, ",
-// $, backtick, ;, newline — literal.
+// $, backtick, ;, newline — literal in all three shells.
 //
 // Prefer Command: a bare Arg still leaves a caller assembling a command by hand.
 // Arg is exported for the rare site that must interleave quoted values with
@@ -54,10 +63,39 @@ func Arg(s string) string {
 	if s == "" {
 		return "''"
 	}
-	if !strings.ContainsFunc(s, needsQuoting) {
+	if !startsExpandable(s) && !strings.ContainsFunc(s, needsQuoting) {
 		return s
 	}
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
+// startsExpandable reports whether s begins with a character that is inert in the
+// middle of a word but EXPANDS at the start of one, so the passthrough must judge
+// the first character more strictly than the rest.
+//
+//	'='  zsh equals-expansion: an unquoted word starting with '=' expands to the
+//	     path of that command (the EQUALS option, on by default). `=foo:` becomes
+//	     "foo: not found" and the command does not run. sh/bash leave it alone —
+//	     so a bash-only test passes against this bug, which is why the test for it
+//	     executes under zsh (#1978 review).
+//
+// This is not hypothetical for us: exactTarget() (session/tmux/cleanup.go) builds
+// "=<name>:" precisely BECAUSE the '=' makes tmux match that session EXACTLY
+// rather than prefix-matching a sibling (#1006). So the arguments most likely to
+// start with '=' are exactly the ones where hitting the wrong target is the
+// disaster the '=' was added to avoid.
+//
+// '~' (tilde expansion, sh/bash/zsh) needs no case here: it is absent from
+// shellSafeChars, so the general rule already quotes it. '%' is a job spec only
+// as an argument to a job-control builtin (kill/fg/bg), which we never suggest,
+// and both shells leave it literal otherwise — verified, not assumed.
+//
+// A leading '-' is deliberately NOT handled: quoting does not stop a program
+// parsing '-rf' as a flag (the shell passes the same bytes either way), that is a
+// job for a "--" separator at the call site, and quoting every "-t"/"--init" we
+// pass would make the common suggestion unreadable for no gain.
+func startsExpandable(s string) bool {
+	return s[0] == '='
 }
 
 func needsQuoting(r rune) bool {

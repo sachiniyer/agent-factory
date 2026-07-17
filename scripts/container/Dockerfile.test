@@ -10,7 +10,7 @@ FROM golang:1.25-bookworm
 # tmux + git are what the suite drives; procps provides pgrep for the
 # daemon's SIGTERM fallback path.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends tmux git procps \
+    && apt-get install -y --no-install-recommends tmux git procps zsh \
     && rm -rf /var/lib/apt/lists/*
 
 # Give the container a stable git identity so no test or mock-repo commit
