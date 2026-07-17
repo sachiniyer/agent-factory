@@ -237,50 +237,48 @@ func sessionWord(n int) string {
 }
 
 // deleteProjectConfirmMessage builds the delete-project confirmation (#1735,
-// corrected in #1973). It states the ACTUAL split before the user consents:
-// archived sessions are restorable, in-place ones are torn down and are not.
+// corrected in #1973). It returns the copy in two parts, because the overlay
+// clips from the bottom and this dialog's tail was the half that mattered:
 //
-// The split is honest in both directions, which is the whole point. Tearing
-// down an in-place session does NOT destroy the user's work — the worktree is
-// theirs, and GitWorktree.Cleanup() no-ops for an external worktree, so the
-// branch and uncommitted changes survive untouched. What does not survive is the
-// session: af deletes its record, so `af sessions restore` cannot bring it back.
-// Saying "you lose your work" would be false; saying "restorable" is the bug.
-// Both counts come from the same projection that feeds the row's own total.
-func deleteProjectConfirmMessage(name string, total, inPlace int, restoreKey string) string {
+//   - critical — the consequences the user is consenting to, one count per
+//     outcome. The overlay guarantees this renders in full or refuses the
+//     action outright, so it must stay short enough to fit the declared 40x10
+//     floor (ui/layout/grid.go HardMinWidth/HardMinHeight): a ~34-column text
+//     rect leaves four body lines. That budget is why these lines are headlines
+//     rather than prose.
+//   - detail — the elaboration, which may be clipped (and says when it is).
+//
+// The destructive count LEADS. A user who reads exactly one line must read the
+// one that cannot be undone; the reassuring half is what gives ground first.
+//
+// The split is honest in both directions. Tearing down an in-place session does
+// NOT destroy the user's work — the worktree is theirs, and GitWorktree.Cleanup()
+// no-ops for an external worktree, so the branch and uncommitted changes survive.
+// What does not survive is the session: af deletes its record, so `af sessions
+// restore` cannot bring it back. Saying "you lose your work" would be false;
+// saying "restorable" is the bug.
+func deleteProjectConfirmMessage(name string, total, inPlace int, restoreKey string) (critical, detail string) {
 	archived := total - inPlace
-	msg := fmt.Sprintf("[!] Delete project '%s'?\n\n", name)
+	title := fmt.Sprintf("[!] Delete project '%s'?", name)
+
+	killedLine := fmt.Sprintf("%d in-place %s torn down — not restorable.", inPlace, sessionWord(inPlace))
+	archivedLine := fmt.Sprintf("%d %s archived — restorable.", archived, sessionWord(archived))
+	gone := "Its worktree is yours — the branch and uncommitted changes stay exactly where they are, but the session and its agent are gone."
+	restore := fmt.Sprintf("Restore an archived session (%s, or `af sessions restore`) to bring the project back.", restoreKey)
+	repoSafe := "Your real git repository is untouched."
 
 	switch {
 	case total == 0:
-		msg += "It has no live sessions — it just leaves the projects list."
+		return title + "\nIt has no live sessions — it just leaves the projects list.", repoSafe
 	case inPlace == 0:
-		msg += fmt.Sprintf(
-			"Its %d %s %s archived and restorable — tmux torn down, worktrees moved out, branches and uncommitted work preserved. Restore any of them (%s, or `af sessions restore`) to bring the project back.",
-			archived, sessionWord(archived), isAre(archived), restoreKey,
-		)
+		return title + "\n" + archivedLine,
+			"tmux torn down, worktrees moved out — branches and uncommitted work preserved.\n\n" + restore + " " + repoSafe
 	case archived == 0:
-		msg += fmt.Sprintf(
-			"Its %d in-place %s %s torn down and cannot be restored — the worktree is yours, so its branch and uncommitted changes stay exactly where they are, but the session and its agent are gone.",
-			inPlace, sessionWord(inPlace), isAre(inPlace),
-		)
+		return title + "\n" + killedLine, gone + " " + repoSafe
 	default:
-		msg += fmt.Sprintf(
-			"%d %s %s archived and restorable — tmux torn down, worktrees moved out, branches and uncommitted work preserved. Restore any of them (%s, or `af sessions restore`) to bring the project back.\n\nThe other %d in-place %s %s torn down and cannot be restored — the worktree is yours, so its branch and uncommitted changes stay exactly where they are, but the session and its agent are gone.",
-			archived, sessionWord(archived), isAre(archived), restoreKey,
-			inPlace, sessionWord(inPlace), isAre(inPlace),
-		)
+		return title + "\n" + killedLine + "\n" + archivedLine,
+			gone + "\n\n" + restore + " " + repoSafe
 	}
-
-	return msg + "\n\nYour real git repository is untouched."
-}
-
-// isAre agrees the verb with the count so the copy reads as prose.
-func isAre(n int) string {
-	if n == 1 {
-		return "is"
-	}
-	return "are"
 }
 
 // deleteProjectResultMessage reports what delete-project ACTUALLY did, using the
@@ -317,8 +315,8 @@ func deleteProjectResultMessage(name string, archived, killed int) string {
 func (m *home) handleDeleteProject(proj ui.SidebarProject) (tea.Model, tea.Cmd) {
 	repoID := config.RepoIDFromRoot(proj.Root)
 	restoreKey := keys.GlobalKeyBindings[keys.KeyRestore].Help().Key
-	message := deleteProjectConfirmMessage(proj.Name, proj.SessionCount, proj.InPlaceCount, restoreKey)
-	return m, m.confirmAction(message, func() tea.Msg {
+	message, detail := deleteProjectConfirmMessage(proj.Name, proj.SessionCount, proj.InPlaceCount, restoreKey)
+	return m, m.confirmActionWithDetail(message, detail, func() tea.Msg {
 		return startDeleteProjectMsg{root: proj.Root, repoID: repoID, name: proj.Name}
 	})
 }
