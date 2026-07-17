@@ -130,14 +130,30 @@ jobs:
   build:
     name: Build
     runs-on: ubuntu-latest
-    # "Build" and "Lint" are this repo's only required checks (ruleset 14851503);
-    # "Test" gates merges transitively by being a `needs` of Build, since a failed
-    # dependency leaves Build skipped and the required check never green. Hanging
-    # the macOS job here gates it the same way, from the moment it lands — a new
-    # standalone job would gate nothing until someone edited the ruleset (see the
-    # same note on the auto-gate helper test above).
+    # "Build" and "Lint" are this repo's only required checks (ruleset 14851503),
+    # so Build is where Test and Test (macOS) get their teeth — a new standalone
+    # job would gate nothing until someone edited the ruleset (see the same note on
+    # the auto-gate helper test above).
+    #
+    # `needs` ALONE is not enough, and this is the trap: a failed dependency leaves
+    # Build SKIPPED, and a skipped required check does not fail — GitHub's docs are
+    # explicit that dependent jobs "are skipped and do not report a failure", so the
+    # required check never goes red and the merge button stays live. (auto-gate.js
+    # blocks anyway, since it demands conclusion === "success", but the native path
+    # would not.) So: run ALWAYS, and fail loudly on any unsuccessful need. Now a
+    # red macOS job turns the REQUIRED check red instead of quietly skipping it.
     needs: [lint, test, test-macos]
+    if: always()
     steps:
+      - name: Gate on the jobs this check stands in for
+        if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')
+        run: |
+          echo "::error::A required job failed — failing Build so the required check goes RED rather than skipping."
+          # needs['test-macos'], not needs.test-macos: a hyphen in a property path is
+          # parsed as subtraction, so the dotted form silently yields an empty string.
+          echo "lint=${{ needs.lint.result }} test=${{ needs.test.result }} test-macos=${{ needs['test-macos'].result }}"
+          exit 1
+
       - uses: actions/checkout@v6
 
       - name: Set up Go
