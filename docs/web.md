@@ -382,7 +382,7 @@ The **project switcher** in the top-right of the app bar lists every project (re
 af has a session or task in, each showing a per-project session + working count —
 the cross-project glance that replaces the old all-projects rail. Selecting a
 project scopes the rail and Tasks view to it; the choice persists across reloads.
-Projects with no live sessions show an empty-state prompt (`No sessions in
+Projects with no live sessions show an empty-state prompt (`No active sessions in
 <project> — + New`). The reversible delete-project control sits in the switcher
 menu footer.
 
