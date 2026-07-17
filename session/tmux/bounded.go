@@ -140,7 +140,7 @@ func normalizeWaitDelay(err error) error {
 
 // tmuxTimeoutContext returns the deadline every bounded tmux command runs under.
 //
-// Callers MUST check ctx.Err() before falling back to a DoesSessionExist probe
+// Callers MUST check ctx.Err() before falling back to an ExistsOrUnknown probe
 // on the error path: the probe spawns ANOTHER tmux command against the same
 // wedged server, so it would hang exactly like the command that just timed out
 // and defeat the bound we came here for. On a tripped deadline the session's

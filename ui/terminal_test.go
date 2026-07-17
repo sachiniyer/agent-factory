@@ -421,7 +421,7 @@ func TestTabPaneShellScrollModeSessionGoneExternally(t *testing.T) {
 			switch {
 			case strings.Contains(s, "has-session"):
 				// A session killed externally fails has-session, which is what
-				// DoesSessionExist()/TabAlive keys off of (#977).
+				// ExistsOrUnknown()/TabAlive keys off of (#977).
 				if gone.Load() {
 					return fmt.Errorf("session gone")
 				}

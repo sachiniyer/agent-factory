@@ -99,7 +99,7 @@ func repoHash(repoPath string) string {
 // toTmuxName builds the tmux session name from a user-supplied title.
 //
 // Characters that tmux does not preserve verbatim in session names must be
-// replaced here so DoesSessionExist() and kill paths match the name tmux
+// replaced here so ExistsOrUnknown() and kill paths match the name tmux
 // actually created (#574). Verified against tmux 3.4:
 //   - '.' and ':' are silently rewritten to '_'; using them as-is causes
 //     Start() to poll for a name tmux never created and time out, orphaning

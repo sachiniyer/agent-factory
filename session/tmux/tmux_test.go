@@ -105,7 +105,7 @@ func TestSanitizeName(t *testing.T) {
 // TestSanitizeNameTmuxRestrictedChars guards toTmuxName against the #574
 // failure mode: tmux silently rewrites or escapes certain characters in
 // session names, so a title containing them must be transformed before we
-// hand it to tmux. Otherwise DoesSessionExist() polls for a name tmux never
+// hand it to tmux. Otherwise ExistsOrUnknown() polls for a name tmux never
 // created and Start() times out, orphaning the session.
 func TestSanitizeNameTmuxRestrictedChars(t *testing.T) {
 	cases := []struct {
@@ -443,7 +443,7 @@ func TestHasUpdatedRespawnResetsDead(t *testing.T) {
 }
 
 // TestHasUpdatedTransientErrorKeepsLogging covers the other branch of #489:
-// if capture-pane fails but DoesSessionExist still reports the session is
+// if capture-pane fails but ExistsOrUnknown still reports the session is
 // alive (a rare transient error), the monitor must NOT latch dead and the
 // error must still be visible in the log every tick — the spam fix should
 // not silently swallow real problems.

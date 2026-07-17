@@ -12,8 +12,16 @@ import (
 // Start creates and starts a new tmux session, then attaches to it. Program is the command to run in
 // the session (ex. claude). workdir is the git worktree directory.
 func (t *TmuxSession) Start(workDir string) error {
-	// Check if the session already exists
-	if t.DoesSessionExist() {
+	// Check if the session already exists. This is a POSITIVE existence gate, so
+	// it must not read the lossy bool: a wedged/timed-out has-session is NOT proof
+	// the name is taken, and ExistsOrUnknown would launder it into "already
+	// exists" — the exact misread #1962 fixes. Surface the timeout instead so the
+	// caller learns the server never answered rather than that the name collided.
+	exists, known := t.ProbeSession()
+	if !known {
+		return fmt.Errorf("%w: has-session probe for session %q did not answer", ErrTmuxTimeout, t.sanitizedName)
+	}
+	if exists {
 		return fmt.Errorf("tmux session already exists: %s", t.sanitizedName)
 	}
 
@@ -27,8 +35,11 @@ func (t *TmuxSession) Start(workDir string) error {
 
 	ptmx, err := t.ptyFactory.Start(cmd)
 	if err != nil {
-		// Cleanup any partially created session if any exists.
-		if t.DoesSessionExist() {
+		// Cleanup any partially created session if any exists. ExistsOrUnknown is
+		// safe here: the only action gated on true is a bounded best-effort
+		// kill-session, so a wedged→"exists" merely triggers a harmless cleanup
+		// attempt against a possibly-live session, never a false liveness claim.
+		if t.ExistsOrUnknown() {
 			leaked := SessionProcessTrees(t.cmdExec, t.sanitizedName)
 			cleanupCmd := exec.Command("tmux", "kill-session", "-t", exactTarget(t.sanitizedName))
 			if cleanupErr := t.cmdExec.Run(cleanupCmd); cleanupErr != nil {
@@ -40,10 +51,18 @@ func (t *TmuxSession) Start(workDir string) error {
 		return fmt.Errorf("error starting tmux session: %w", err)
 	}
 
-	// Poll for session existence with exponential backoff
+	// Poll for session existence with exponential backoff. Break only on a probe
+	// that ANSWERED "exists" (known && exists): reading the lossy bool here let a
+	// mid-poll wedge exit the loop as if the session had come up, so Start reported
+	// success for a session tmux never confirmed (#1962). A !known probe means keep
+	// waiting until the 2s deadline, then take the timeout path below — which
+	// threads pane-state / ErrTmuxTimeout correctly.
 	timeout := time.After(2 * time.Second)
 	sleepDuration := 5 * time.Millisecond
-	for !t.DoesSessionExist() {
+	for {
+		if exists, known := t.ProbeSession(); known && exists {
+			break
+		}
 		select {
 		case <-timeout:
 			ptmx.Close()
@@ -98,7 +117,13 @@ func (t *TmuxSession) Start(workDir string) error {
 		// above saw the session, so if it is gone again by attach time the
 		// pane program exited within milliseconds of launch. Say so instead
 		// of the misleading "session does not exist" (#1116, #1131).
-		vanished := !t.DoesSessionExist()
+		//
+		// !ExistsOrUnknown is the definitively-absent branch: a wedged→"exists"
+		// only means we fall through to the generic "error restoring" message
+		// instead of the more specific "vanished" one — never a false "vanished"
+		// claim against a merely-slow server. This only picks the error wording;
+		// no destructive action is gated on it (#1962).
+		vanished := !t.ExistsOrUnknown()
 		// Same rule as the timeout path above: a failed Start DOES lead to a worktree
 		// delete in Launch, so an unknown pane state must reach it (#1917 round 7).
 		state, cleanupErr := t.Close()
@@ -269,7 +294,13 @@ func claudeTrustPromptPresent(content string) bool {
 // without such a flag, or programs that already include one, are left
 // untouched.
 func (t *TmuxSession) Restore(workDir string) error {
-	if !t.DoesSessionExist() {
+	// !ExistsOrUnknown is the definitively-absent branch (#1962): only a session
+	// tmux CONFIRMED gone triggers the re-spawn. A wedged→"exists" falls through
+	// to the pure rebind below, which is the safe direction — re-spawning against
+	// a server that is merely wedged around a still-live session would create a
+	// duplicate. The #386 respawn design has always fired only on definitive
+	// absence, and this preserves it.
+	if !t.ExistsOrUnknown() {
 		if workDir == "" {
 			return fmt.Errorf("tmux session %q does not exist", t.sanitizedName)
 		}

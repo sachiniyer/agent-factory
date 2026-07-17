@@ -18,7 +18,7 @@ import (
 // pin the ErrSessionGone mapping the daemon poll / AutoYes callers depend on.
 
 // recordTapCommands captures every tmux invocation the given tap func issues,
-// with has-session (DoesSessionExist) reporting `alive`.
+// with has-session (ExistsOrUnknown) reporting `alive`.
 func recordTapCommands(t *testing.T, alive bool, tap func(s *TmuxSession) error) ([]string, error) {
 	t.Helper()
 	var cmds []string
@@ -26,7 +26,7 @@ func recordTapCommands(t *testing.T, alive bool, tap func(s *TmuxSession) error)
 		RunFunc: func(c *exec.Cmd) error {
 			joined := strings.Join(c.Args, " ")
 			cmds = append(cmds, joined)
-			// The tap's send-keys fails, then DoesSessionExist's has-session probe
+			// The tap's send-keys fails, then ExistsOrUnknown's has-session probe
 			// reports whether the session is gone.
 			if strings.Contains(joined, "has-session") {
 				if alive {

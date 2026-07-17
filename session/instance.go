@@ -440,12 +440,20 @@ func (i *Instance) PreviewTabFullHistory(idx int) (string, error) {
 	return ts.CapturePaneContentWithOptions("-", "-")
 }
 
-// TabAlive reports whether the tab at idx has a live tmux session.
+// TabAlive reports whether the tab at idx has a live tmux session, as a LOSSY
+// bool: true means "alive OR could-not-determine (wedged/timeout)", false means
+// "no binding, or definitively gone". It is deliberately kept lossy because its
+// only consumers (ui/tab_pane.go) act solely on !TabAlive — they swap to the
+// "Terminal session not available" fallback. A wedged server reads as alive here,
+// which keeps the read-only TUI rendering the pane instead of falsely declaring a
+// merely-unreachable terminal dead: the safe direction for a view (#1962). A
+// caller that needs existence as EVIDENCE must use TmuxSession.ProbeSession
+// directly and handle !known.
 func (i *Instance) TabAlive(idx int) bool {
 	i.mu.RLock()
 	ts := i.tabTmuxAtLocked(idx)
 	i.mu.RUnlock()
-	return ts != nil && ts.DoesSessionExist()
+	return ts != nil && ts.ExistsOrUnknown()
 }
 
 // TabCount returns the number of tabs the instance currently holds.

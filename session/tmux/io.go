@@ -16,7 +16,7 @@ type statusMonitor struct {
 	// Store hashes to save memory.
 	prevOutputHash []byte
 	// dead is set once a capture-pane failure has been confirmed by
-	// DoesSessionExist() reporting the tmux session is gone. While true,
+	// ExistsOrUnknown() reporting the tmux session is gone. While true,
 	// HasUpdated short-circuits and emits no further logs so a stale
 	// instance can't flood agent-factory.log (#489). A successful Start or
 	// Restore replaces the monitor with a fresh one, which naturally clears
@@ -45,7 +45,7 @@ func (m *statusMonitor) hash(s string) []byte {
 func (t *TmuxSession) TapEnter() error {
 	cmd := exec.Command("tmux", "send-keys", "-t", exactTarget(t.sanitizedName), "Enter")
 	if err := t.cmdExec.Run(cmd); err != nil {
-		if !t.DoesSessionExist() {
+		if !t.ExistsOrUnknown() {
 			return fmt.Errorf("%w: send-keys Enter", ErrSessionGone)
 		}
 		return fmt.Errorf("error sending enter keystroke: %w", err)
@@ -60,7 +60,7 @@ func (t *TmuxSession) TapEnter() error {
 func (t *TmuxSession) TapDAndEnter() error {
 	cmd := exec.Command("tmux", "send-keys", "-t", exactTarget(t.sanitizedName), "D", "Enter")
 	if err := t.cmdExec.Run(cmd); err != nil {
-		if !t.DoesSessionExist() {
+		if !t.ExistsOrUnknown() {
 			return fmt.Errorf("%w: send-keys D Enter", ErrSessionGone)
 		}
 		return fmt.Errorf("error sending D+enter keystroke: %w", err)
@@ -106,7 +106,7 @@ func (t *TmuxSession) HasUpdated() (updated bool, hasPrompt bool, content string
 		// monitor as dead so the daemon's per-second poll doesn't spam
 		// the log (#489). Transient capture-pane failures while the
 		// session is still alive are rare and still surface every tick.
-		// CapturePaneContent has already probed DoesSessionExist on the
+		// CapturePaneContent has already probed ExistsOrUnknown on the
 		// error path, so use the wrapped sentinel rather than re-probing.
 		if errors.Is(err, ErrSessionGone) {
 			log.ErrorLog.Printf("tmux session %s is gone; status monitor going silent (capture-pane error: %v)", t.sanitizedName, err)
@@ -149,10 +149,13 @@ func (t *TmuxSession) HasUpdated() (updated bool, hasPrompt bool, content string
 	return changed, hasPrompt, content
 }
 
-// CapturePaneContent captures the content of the tmux pane. When the
-// capture fails and DoesSessionExist confirms the session is gone, the
+// CapturePaneContent captures the content of the tmux pane. When the capture
+// fails and !ExistsOrUnknown reports the session is definitively gone, the
 // returned error wraps ErrSessionGone so non-daemon callers can degrade
-// gracefully instead of logging at ERROR (#496).
+// gracefully instead of logging at ERROR (#496). Classifying on the lossy bool
+// is the SAFE direction here (#1962): a wedged→"exists" keeps the failure a
+// generic error, so a merely-slow server is never misread as ErrSessionGone —
+// the same asymmetry every send-keys/capture site in this package relies on.
 func (t *TmuxSession) CapturePaneContent() (string, error) {
 	return t.CapturePaneContentContext(context.Background())
 }
@@ -163,7 +166,7 @@ func (t *TmuxSession) CapturePaneContent() (string, error) {
 // to completion. The readiness poll (task.WaitForReady) uses it so an abandoned
 // create tears down its in-flight capture — no lingering tmux subprocess or
 // goroutine after the caller gives up. On cancellation it returns ctx.Err()
-// directly, skipping the DoesSessionExist probe (which would spawn another tmux
+// directly, skipping the ExistsOrUnknown probe (which would spawn another tmux
 // subprocess) since the failure cause is the cancel, not a dead session.
 func (t *TmuxSession) CapturePaneContentContext(ctx context.Context) (string, error) {
 	// Add -e flag to preserve escape sequences (ANSI color codes). `=` forces
@@ -176,7 +179,7 @@ func (t *TmuxSession) CapturePaneContentContext(ctx context.Context) (string, er
 		if ctx.Err() != nil {
 			return "", ctx.Err()
 		}
-		if !t.DoesSessionExist() {
+		if !t.ExistsOrUnknown() {
 			return "", fmt.Errorf("%w: capture-pane: %v", ErrSessionGone, err)
 		}
 		return "", fmt.Errorf("error capturing pane content: %v", err)
@@ -199,7 +202,7 @@ func (t *TmuxSession) CapturePaneContentContext(ctx context.Context) (string, er
 // Bounded by tmuxCommandTimeout (#1787): this runs on the WS subscribe path
 // BEFORE the 101 upgrade, so an unbounded stall here means the client never
 // receives a socket at all. On a tripped deadline it returns ErrTmuxTimeout
-// without probing DoesSessionExist — see tmuxTimeoutContext.
+// without probing ExistsOrUnknown — see tmuxTimeoutContext.
 func (t *TmuxSession) CaptureVisiblePaneGrid() (string, error) {
 	ctx, cancel := tmuxTimeoutContext()
 	defer cancel()
@@ -208,7 +211,7 @@ func (t *TmuxSession) CaptureVisiblePaneGrid() (string, error) {
 		if ctx.Err() != nil {
 			return "", fmt.Errorf("%w: capture-pane grid after %s", ErrTmuxTimeout, tmuxCommandTimeout)
 		}
-		if !t.DoesSessionExist() {
+		if !t.ExistsOrUnknown() {
 			return "", fmt.Errorf("%w: capture-pane: %v", ErrSessionGone, err)
 		}
 		return "", fmt.Errorf("error capturing pane grid: %v", err)
@@ -252,7 +255,7 @@ func (t *TmuxSession) CapturePaneContentWithOptions(start, end string) (string, 
 	cmd := exec.Command("tmux", "capture-pane", "-p", "-e", "-J", "-S", start, "-E", end, "-t", exactTarget(t.sanitizedName))
 	output, err := t.cmdExec.Output(cmd)
 	if err != nil {
-		if !t.DoesSessionExist() {
+		if !t.ExistsOrUnknown() {
 			return "", fmt.Errorf("%w: capture-pane: %v", ErrSessionGone, err)
 		}
 		return "", fmt.Errorf("failed to capture tmux pane content with options: %v", err)
