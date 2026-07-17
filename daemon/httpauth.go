@@ -181,7 +181,7 @@ func withAuth(next http.Handler, gate *authGate, corsOrigins []string) http.Hand
 			return
 		}
 		if gate != nil && !gate.authorize(r) {
-			writeHTTPError(w, http.StatusUnauthorized, errUnauthorized)
+			writeHTTPError(w, r, http.StatusUnauthorized, errUnauthorized)
 			return
 		}
 		next.ServeHTTP(w, r)
@@ -194,12 +194,12 @@ func withAuth(next http.Handler, gate *authGate, corsOrigins []string) http.Hand
 // source of truth the enforcement path uses.
 func writeAuthInfo(w http.ResponseWriter, r *http.Request, gate *authGate) {
 	if r.Method != http.MethodGet {
-		writeHTTPError(w, http.StatusMethodNotAllowed,
+		writeHTTPError(w, r, http.StatusMethodNotAllowed,
 			fmt.Errorf("method %s not allowed for %q; use GET", r.Method, authInfoPath))
 		return
 	}
 	required := gate != nil && gate.authRequired(r)
-	writeHTTPSuccess(w, authInfoResponse{AuthRequired: required})
+	writeHTTPSuccess(w, r, authInfoResponse{AuthRequired: required})
 }
 
 // applyCORSPolicy sets the CORS response headers from the config allow-list

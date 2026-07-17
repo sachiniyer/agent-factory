@@ -4,18 +4,21 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/sachiniyer/agent-factory/agentproto"
 	"github.com/sachiniyer/agent-factory/apiproto"
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
+	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/task"
 
 	"github.com/stretchr/testify/assert"
@@ -392,6 +395,67 @@ func TestHTTP_UnixSocket_EndToEnd(t *testing.T) {
 	require.NoError(t, closeHTTP())
 	_, statErr := os.Stat(sockPath)
 	assert.True(t, os.IsNotExist(statErr), "socket file must be unlinked on close")
+}
+
+// TestHTTPResponseWriteAbandoned gates raw socket errors on the request state:
+// an EPIPE from a live request remains visible, while a canceled client request
+// is an expected disconnect.
+func TestHTTPResponseWriteAbandoned(t *testing.T) {
+	live := httptest.NewRequest(http.MethodGet, "/", nil)
+	canceledCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+	canceled := httptest.NewRequest(http.MethodGet, "/", nil).WithContext(canceledCtx)
+
+	assert.False(t, httpResponseWriteAbandoned(live, syscall.EPIPE),
+		"a raw socket error on a live request must remain visible")
+	assert.False(t, httpResponseWriteAbandoned(live, syscall.ECONNRESET),
+		"a raw socket error on a live request must remain visible")
+	assert.True(t, httpResponseWriteAbandoned(canceled, syscall.EPIPE),
+		"a canceled request's broken pipe is an expected disconnect")
+	assert.True(t, httpResponseWriteAbandoned(canceled, fmt.Errorf("wrapped: %w", syscall.ECONNRESET)),
+		"wrapped disconnect errors must remain quiet once the request is canceled")
+	assert.True(t, httpResponseWriteAbandoned(live, context.Canceled))
+	assert.True(t, httpResponseWriteAbandoned(live, net.ErrClosed))
+}
+
+type responseWriteError struct {
+	*httptest.ResponseRecorder
+	err error
+}
+
+func (w responseWriteError) Write(p []byte) (int, error) {
+	return 0, w.err
+}
+
+// TestWriteHTTPEnvelope_LogsLiveBrokenPipe proves a raw socket error still
+// warns while its request is live: only a canceled request may suppress it.
+func TestWriteHTTPEnvelope_LogsLiveBrokenPipe(t *testing.T) {
+	var warnings bytes.Buffer
+	previous := log.WarningLog.Writer()
+	log.WarningLog.SetOutput(&warnings)
+	t.Cleanup(func() { log.WarningLog.SetOutput(previous) })
+
+	writeHTTPEnvelope(responseWriteError{ResponseRecorder: httptest.NewRecorder(), err: syscall.EPIPE},
+		httptest.NewRequest(http.MethodGet, "/", nil), http.StatusOK, apiproto.Success("ok"))
+
+	assert.Contains(t, warnings.String(), "failed to write HTTP response envelope")
+}
+
+// TestWriteHTTPEnvelope_SuppressesCanceledBrokenPipe proves the same raw socket
+// error is quiet once the request context confirms the client disconnected.
+func TestWriteHTTPEnvelope_SuppressesCanceledBrokenPipe(t *testing.T) {
+	var warnings bytes.Buffer
+	previous := log.WarningLog.Writer()
+	log.WarningLog.SetOutput(&warnings)
+	t.Cleanup(func() { log.WarningLog.SetOutput(previous) })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	r := httptest.NewRequest(http.MethodGet, "/", nil).WithContext(ctx)
+	writeHTTPEnvelope(responseWriteError{ResponseRecorder: httptest.NewRecorder(), err: syscall.EPIPE},
+		r, http.StatusOK, apiproto.Success("ok"))
+
+	assert.Empty(t, warnings.String())
 }
 
 // TestHTTP_SuccessBodyUsesSharedEnvelopeWriter pins that the HTTP success body is

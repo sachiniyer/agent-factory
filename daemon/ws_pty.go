@@ -72,24 +72,24 @@ func envDurationOr(key string, def time.Duration) time.Duration {
 // after websocket.Accept the connection is hijacked and errors close the socket.
 func (cs *controlServer) streamHandler(w http.ResponseWriter, r *http.Request) {
 	if cs.manager == nil {
-		writeHTTPError(w, http.StatusServiceUnavailable, fmt.Errorf("daemon has no session manager"))
+		writeHTTPError(w, r, http.StatusServiceUnavailable, fmt.Errorf("daemon has no session manager"))
 		return
 	}
 	id := r.PathValue("id")
 	repoID := r.URL.Query().Get("repo_id")
 	since, err := parseSince(r.URL.Query().Get("since"))
 	if err != nil {
-		writeHTTPError(w, http.StatusBadRequest, err)
+		writeHTTPError(w, r, http.StatusBadRequest, err)
 		return
 	}
 	tab, err := parseTab(r.URL.Query().Get("tab"))
 	if err != nil {
-		writeHTTPError(w, http.StatusBadRequest, err)
+		writeHTTPError(w, r, http.StatusBadRequest, err)
 		return
 	}
 	as, instance, err := cs.manager.agentServerForStream(id, repoID)
 	if err != nil {
-		writeHTTPError(w, http.StatusNotFound, err)
+		writeHTTPError(w, r, http.StatusNotFound, err)
 		return
 	}
 	// Address the tab by its STABLE id (#1738) when the client supplies ?tab_id=.
@@ -103,13 +103,13 @@ func (cs *controlServer) streamHandler(w http.ResponseWriter, r *http.Request) {
 	// ?tab= ordinal, preserving the pre-#1738 positional behavior.
 	binding, err := cs.bindTab(as, instance, r.URL.Query().Get("tab_id"), tab)
 	if err != nil {
-		writeHTTPError(w, httpStatusForTab(err), err)
+		writeHTTPError(w, r, httpStatusForTab(err), err)
 		return
 	}
 	sub, err := binding.subscribe(since)
 	if err != nil {
 		// A stale/unknown id is a 404 refusal, never a fall back to a positional tab.
-		writeHTTPError(w, httpStatusForTab(err), err)
+		writeHTTPError(w, r, httpStatusForTab(err), err)
 		return
 	}
 	// Announce the subscription's starting cursor on the handshake response so the
@@ -397,19 +397,19 @@ type streamInfoResponse struct {
 // agent-server's Expose() handle.
 func (cs *controlServer) streamInfoHandler(w http.ResponseWriter, r *http.Request) {
 	if cs.manager == nil {
-		writeHTTPError(w, http.StatusServiceUnavailable, fmt.Errorf("daemon has no session manager"))
+		writeHTTPError(w, r, http.StatusServiceUnavailable, fmt.Errorf("daemon has no session manager"))
 		return
 	}
 	id := r.PathValue("id")
 	repoID := r.URL.Query().Get("repo_id")
 	as, _, err := cs.manager.agentServerForStream(id, repoID)
 	if err != nil {
-		writeHTTPError(w, http.StatusNotFound, err)
+		writeHTTPError(w, r, http.StatusNotFound, err)
 		return
 	}
 	ep, err := as.Expose()
 	if err != nil {
-		writeHTTPError(w, http.StatusInternalServerError, err)
+		writeHTTPError(w, r, http.StatusInternalServerError, err)
 		return
 	}
 	resp := streamInfoResponse{Local: ep.Local}
@@ -418,7 +418,7 @@ func (cs *controlServer) streamInfoHandler(w http.ResponseWriter, r *http.Reques
 	} else {
 		resp.URL = localStreamPath(id, repoID)
 	}
-	writeHTTPSuccess(w, resp)
+	writeHTTPSuccess(w, r, resp)
 }
 
 // localStreamPath builds the relative stream URL for a local session, escaping

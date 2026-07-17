@@ -97,7 +97,7 @@ func (m *Manager) publishEvent(t agentproto.EventType, payload any) {
 // events to the client until it disconnects.
 func (cs *controlServer) eventsHandler(w http.ResponseWriter, r *http.Request) {
 	if cs.manager == nil || cs.manager.events == nil {
-		writeHTTPError(w, http.StatusServiceUnavailable, fmt.Errorf("daemon has no events hub"))
+		writeHTTPError(w, r, http.StatusServiceUnavailable, fmt.Errorf("daemon has no events hub"))
 		return
 	}
 	// Permissive origin on the unix socket now (§4.4); Phase 3 tightens it.

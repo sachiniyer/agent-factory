@@ -2,6 +2,7 @@ package app
 
 import (
 	"bytes"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -9,6 +10,8 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/sachiniyer/agent-factory/log"
+	"github.com/sachiniyer/agent-factory/session"
+	"github.com/sachiniyer/agent-factory/ui"
 )
 
 // captureWarningLog redirects log.WarningLog into a buffer for the duration
@@ -35,6 +38,44 @@ func setDetachTraceEnabled(t *testing.T, enabled bool) {
 // TestDetachTraceEnabledFromEnv covers the AF_DETACH_TRACE parsing that
 // initializes detachTraceEnabled at package init (#788): off unless the
 // variable is exactly "1".
+func TestRefreshPaneBindingCmd_SuppressesTearingDownError(t *testing.T) {
+	inst, err := session.NewInstance(session.InstanceOptions{Title: "closing", Path: t.TempDir(), Program: "test"})
+	require.NoError(t, err)
+
+	tw := ui.NewTabbedWindow(ui.NewTabPane(func(*session.Instance, int, bool) (string, error) {
+		inst.SetStatusForTest(session.Deleting)
+		return "", errors.New("session \"closing\" is being deleted")
+	}), nil)
+	warnings := captureWarningLog(t)
+
+	msg := refreshPaneBindingCmd(tw, inst, 0, tw.ContentSeq())()
+	require.IsType(t, panesRefreshedMsg{}, msg)
+	require.Empty(t, warnings.String(), "a capture racing session teardown must not emit a warning")
+}
+
+func TestRefreshPaneBindingCmd_LogsUnexpectedError(t *testing.T) {
+	inst, err := session.NewInstance(session.InstanceOptions{Title: "active", Path: t.TempDir(), Program: "test"})
+	require.NoError(t, err)
+
+	tw := ui.NewTabbedWindow(ui.NewTabPane(func(*session.Instance, int, bool) (string, error) {
+		return "", errors.New("unexpected capture failure")
+	}), nil)
+	warnings := captureWarningLog(t)
+
+	refreshPaneBindingCmd(tw, inst, 0, tw.ContentSeq())()
+	require.Contains(t, warnings.String(), "UpdateContent failed: unexpected capture failure")
+}
+
+func TestPaneRefreshTearingDown(t *testing.T) {
+	inst, err := session.NewInstance(session.InstanceOptions{Title: "closing", Path: t.TempDir(), Program: "test"})
+	require.NoError(t, err)
+	inst.SetStatusForTest(session.Deleting)
+
+	require.True(t, paneRefreshTearingDown(inst, errors.New("session \"closing\" is being deleted")))
+	require.False(t, paneRefreshTearingDown(inst, errors.New("unexpected capture failure")))
+	require.False(t, paneRefreshTearingDown(nil, errors.New("session \"closing\" is being deleted")))
+}
+
 func TestDetachTraceEnabledFromEnv(t *testing.T) {
 	for _, tc := range []struct {
 		value string

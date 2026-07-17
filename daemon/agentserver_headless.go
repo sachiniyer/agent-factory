@@ -213,14 +213,14 @@ func (hs *headlessServer) newMux() *http.ServeMux {
 	mux.HandleFunc("GET /v1/events", hs.eventsHandler)
 
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		writeHTTPError(w, http.StatusNotFound, fmt.Errorf("unknown route %q", r.URL.Path))
+		writeHTTPError(w, r, http.StatusNotFound, fmt.Errorf("unknown route %q", r.URL.Path))
 	})
 	return mux
 }
 
 // healthHandler answers GET /v1/health with a trivial liveness envelope.
 func (hs *headlessServer) healthHandler(w http.ResponseWriter, r *http.Request) {
-	writeHTTPSuccess(w, map[string]bool{"ok": true})
+	writeHTTPSuccess(w, r, map[string]bool{"ok": true})
 }
 
 // --- control REST: 1:1 mirror of session.AgentServer -----------------------
@@ -382,17 +382,17 @@ func (hs *headlessServer) Kill(_ struct{}, resp *agentOKResponse) error {
 func (hs *headlessServer) streamHandler(w http.ResponseWriter, r *http.Request) {
 	since, err := parseSince(r.URL.Query().Get("since"))
 	if err != nil {
-		writeHTTPError(w, http.StatusBadRequest, err)
+		writeHTTPError(w, r, http.StatusBadRequest, err)
 		return
 	}
 	tab, err := parseTab(r.URL.Query().Get("tab"))
 	if err != nil {
-		writeHTTPError(w, http.StatusBadRequest, err)
+		writeHTTPError(w, r, http.StatusBadRequest, err)
 		return
 	}
 	sub, err := hs.as.Subscribe(tab, since)
 	if err != nil {
-		writeHTTPError(w, http.StatusInternalServerError, err)
+		writeHTTPError(w, r, http.StatusInternalServerError, err)
 		return
 	}
 	w.Header().Set(streamSeqHeader, strconv.FormatUint(uint64(sub.Seq()), 10))
@@ -418,7 +418,7 @@ func (hs *headlessServer) streamInfoHandler(w http.ResponseWriter, r *http.Reque
 	id := r.PathValue("id")
 	ep, err := hs.as.Expose()
 	if err != nil {
-		writeHTTPError(w, http.StatusInternalServerError, err)
+		writeHTTPError(w, r, http.StatusInternalServerError, err)
 		return
 	}
 	resp := streamInfoResponse{Local: ep.Local}
@@ -427,7 +427,7 @@ func (hs *headlessServer) streamInfoHandler(w http.ResponseWriter, r *http.Reque
 	} else {
 		resp.URL = localStreamPath(id, "")
 	}
-	writeHTTPSuccess(w, resp)
+	writeHTTPSuccess(w, r, resp)
 }
 
 // eventsHandler upgrades GET /v1/events for surface parity with the daemon. The

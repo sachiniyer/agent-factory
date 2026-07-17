@@ -1,6 +1,7 @@
 package app
 
 import (
+	"fmt"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -261,12 +262,18 @@ func refreshPaneBindingCmd(tw *ui.TabbedWindow, selected *session.Instance, acti
 	return func() tea.Msg {
 		cmdStart := time.Now()
 		detachTraceMark("refreshPanesCmd-goroutine-entry")
-		if err := tw.UpdateContentAt(selected, activeTab, seq); err != nil {
+		if err := tw.UpdateContentAt(selected, activeTab, seq); err != nil && !paneRefreshTearingDown(selected, err) {
 			log.WarningLog.Printf("UpdateContent failed: %v", err)
 		}
 		detachTrace(cmdStart, "refreshPanesCmd-goroutine-exit")
 		return panesRefreshedMsg{}
 	}
+}
+
+// paneRefreshTearingDown reports the expected race where a capture dispatched
+// before a session delete reaches the daemon after teardown has started.
+func paneRefreshTearingDown(selected *session.Instance, err error) bool {
+	return selected != nil && selected.IsTearingDown() && err.Error() == fmt.Sprintf("session %q is being deleted", selected.Title)
 }
 
 // repaintAfterDetachMsg is dispatched by the attach goroutine immediately
