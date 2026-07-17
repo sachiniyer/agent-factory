@@ -551,10 +551,10 @@ af sessions tab-create <title> --kind vscode [--name editor]
 **How it runs.** The daemon starts **one** code-server per session — shared by
 every VS Code tab and pane in it — the first time a pane renders, listening on
 a **0600 unix socket** in a `0700` directory under the af home (no TCP listener
-at all). The editor is reached only through the daemon's `/v1/webtab/` proxy,
+at all). The browser reaches the editor through the daemon's `/v1/webtab/` proxy,
 which is what makes it work for a **remote viewer** (Tailscale/SSH) and what puts
-the daemon's auth policy in front of it. On a cold start the pane briefly shows
-"VS Code is still starting…" and resolves itself.
+the daemon's auth policy in front of that route. On a cold start the pane briefly
+shows "VS Code is still starting…" and resolves itself.
 
 The editor is stopped when its last VS Code tab is closed, and when the session is
 archived or killed — and on daemon shutdown, so nothing is left running. If it
@@ -565,9 +565,10 @@ tab survives a restart and simply starts a new editor when you next open it.
     The editor runs with authentication **off**, because it is only ever
     reachable through its 0600 unix socket, which is gated to **your** account by
     filesystem permissions — the same posture the daemon's own control socket
-    has. The daemon's `/v1/webtab/` proxy is the only thing that dials it, so the
-    daemon's auth policy still applies in front. It runs as **you**, with your
-    `PATH` and your code-server settings/extensions.
+    has. Anything running as you can dial that socket; that same-user boundary is
+    the protection, not the proxy. Your browser reaches it through the daemon's
+    `/v1/webtab/` proxy, so the daemon's auth policy applies to that route. It
+    runs as **you**, with your `PATH` and your code-server settings/extensions.
 
     Note that a VS Code pane is deliberately **not** origin-sandboxed the way a web
     tab is: VS Code cannot run under an opaque origin. That is acceptable because
