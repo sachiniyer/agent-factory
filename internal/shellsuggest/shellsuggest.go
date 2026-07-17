@@ -83,11 +83,24 @@ func needsQuoting(r rune) bool {
 // The second compiles (it is a valid one-piece command) but quotes the whole
 // string as a single argument, which is visibly wrong in the output — the failure
 // is loud rather than silent.
+//
+// Built with a strings.Builder rather than the obvious
+// make([]string, 0, len(args)+1) + strings.Join. That form tripped CodeQL's
+// go/allocation-size-overflow (high) on `len(args)+1` inside make(). The alert
+// was a FALSE POSITIVE — every call site passes a fixed literal arg list, so
+// len(args) is a small compile-time constant, and reaching an overflow would
+// need a []string of ~2^63 elements (~10^20 bytes of headers alone), which
+// cannot be constructed. But the arithmetic bought nothing on a path that runs
+// only while formatting an error message for a human, and code with no
+// allocation-size expression at all beats code that argues with a scanner. Do
+// not "optimise" this back into make()+Join: it re-raises a required-check
+// failure to save an allocation nobody will ever measure (#1978).
 func Command(name string, args ...string) string {
-	parts := make([]string, 0, len(args)+1)
-	parts = append(parts, Arg(name))
+	var b strings.Builder
+	b.WriteString(Arg(name))
 	for _, a := range args {
-		parts = append(parts, Arg(a))
+		b.WriteByte(' ')
+		b.WriteString(Arg(a))
 	}
-	return strings.Join(parts, " ")
+	return b.String()
 }
