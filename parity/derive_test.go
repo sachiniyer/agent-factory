@@ -307,31 +307,22 @@ func webCallBody(t *testing.T, method string) []string {
 
 // objectLiteralAfter returns the top-level keys of the first object literal that
 // follows s's start.
+//
+// It spans the literal with balancedFrom, which is QUOTE-AWARE: a brace inside a
+// string value (`{ url: "http://x/{id}" }`) must not be counted as structure. A
+// bare depth counter mis-spans on that input; today it under-reports (safe), but
+// the whole point of this package is that coverage is not left to luck of input,
+// so it uses the same span logic as every other literal here.
 func objectLiteralAfter(rest string) []string {
 	open := strings.Index(rest, "{")
 	if open < 0 {
 		return nil
 	}
-	depth, end := 0, -1
-	for i := open; i < len(rest); i++ {
-		switch rest[i] {
-		case '{':
-			depth++
-		case '}':
-			depth--
-			if depth == 0 {
-				end = i
-				break
-			}
-		}
-		if end >= 0 {
-			break
-		}
-	}
-	if end < 0 {
+	lit := balancedFrom(rest[open:])
+	if lit == "" {
 		return nil
 	}
-	return objectKeys(rest[open : end+1])
+	return objectKeys(lit)
 }
 
 // leadingIdentRe pulls the property name off one object-literal entry, covering

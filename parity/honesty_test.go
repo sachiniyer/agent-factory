@@ -285,6 +285,70 @@ func TestReturnedLiteralsAreBounded(t *testing.T) {
 	}
 }
 
+// TestBothSurfaceScannersRecurse locks the recursion on BOTH source scanners, so
+// a refactor from WalkDir back to a flat ReadDir fails instead of silently
+// re-blinding the audit to any module in a subdirectory.
+//
+// The Go side had exactly that hole when this test was written — goSurfaceFiles
+// used a non-recursive ReadDir while webSourceFiles (fixed earlier in the same
+// PR) recursed. A planted api/sub file proved invisible. The two scanners must
+// stay symmetric: both descend, or the audit is honest on one half and blind on
+// the other.
+//
+// It plants a real file in a subdirectory, asserts the scanner finds it, and
+// removes it — so the assertion is about what the CURRENT code walks, not a
+// fixture checked into the tree.
+func TestBothSurfaceScannersRecurse(t *testing.T) {
+	root := repoRoot(t)
+
+	t.Run("go", func(t *testing.T) {
+		dir := filepath.Join(root, "api", "paritywalkprobe")
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+		defer os.RemoveAll(dir)
+		planted := filepath.Join(dir, "planted.go")
+		if err := os.WriteFile(planted, []byte("package paritywalkprobe\n"), 0o644); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+		found := false
+		for _, f := range goSurfaceFiles(t, "cli") {
+			if f == planted {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("goSurfaceFiles(cli) did not descend into api/paritywalkprobe/. It is not " +
+				"recursing, so a request built in a subdirectory of api/app/apiclient is " +
+				"unaudited and the audit reports false parity over it — the exact hole " +
+				"webSourceFiles already closed. Restore the WalkDir in goSurfaceFiles.")
+		}
+	})
+
+	t.Run("web", func(t *testing.T) {
+		dir := filepath.Join(root, "web", "src", "paritywalkprobe")
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+		defer os.RemoveAll(dir)
+		planted := filepath.Join(dir, "planted.ts")
+		if err := os.WriteFile(planted, []byte("export const x = 1;\n"), 0o644); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+		found := false
+		for _, f := range webSourceFiles(t) {
+			if f == planted {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("webSourceFiles did not descend into web/src/paritywalkprobe/. It is not " +
+				"recursing, so a module moved into a subdirectory of web/src is unaudited and " +
+				"the audit reports false parity over it. Restore the WalkDir in webSourceFiles.")
+		}
+	})
+}
+
 // TestDerivationCoversEveryRequestConstructionSite is the backstop the fixtures
 // above cannot provide: they prove specific known gaps are visible, not that the
 // walk reaches every surface. If a surface's sources move, this catches the walk

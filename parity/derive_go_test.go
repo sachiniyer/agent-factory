@@ -17,6 +17,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -201,16 +202,28 @@ func goSurfaceFiles(t *testing.T, surface string) []string {
 			out = append(out, full)
 			continue
 		}
-		entries, err := os.ReadDir(full)
-		if err != nil {
-			t.Fatalf("read %s: %v", full, err)
-		}
-		for _, e := range entries {
-			n := e.Name()
-			if e.IsDir() || !strings.HasSuffix(n, ".go") || strings.HasSuffix(n, "_test.go") {
-				continue
+		// RECURSE, symmetric with webSourceFiles. A non-recursive read skips any
+		// module in a subdirectory of api/app/apiclient — a request-construction
+		// moved into api/tasks/… would go unaudited and the audit would report
+		// parity over code it never opened. That is the exact under-coverage the
+		// web side already fixed in this PR; leaving the Go side flat makes the
+		// audit honest on one half and blind on the other.
+		err = filepath.WalkDir(full, func(path string, d fs.DirEntry, werr error) error {
+			if werr != nil {
+				return werr
 			}
-			out = append(out, filepath.Join(full, n))
+			if d.IsDir() {
+				return nil
+			}
+			n := d.Name()
+			if !strings.HasSuffix(n, ".go") || strings.HasSuffix(n, "_test.go") {
+				return nil
+			}
+			out = append(out, path)
+			return nil
+		})
+		if err != nil {
+			t.Fatalf("walk %s: %v", full, err)
 		}
 	}
 	sort.Strings(out)
