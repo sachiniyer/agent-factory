@@ -80,6 +80,31 @@ else
     no "the no-injection case was treated as a missing injection"
 fi
 
+printf '\n=== the kill path refuses an empty home ===\n'
+
+# lc_daemon_pids feeds lc_teardown_home, which SIGKILLs what it returns. With an
+# empty home its match becomes [ "$dhome" = "" ], which matches every daemon
+# whose environ carries NO AGENT_FACTORY_HOME — exactly how a real default-home
+# daemon runs. This is the difference between a scoped teardown and shooting the
+# maintainer's daemon.
+if lc_daemon_pids "" >/dev/null 2>&1; then
+    no "lc_daemon_pids accepted an empty home (would match the real default-home daemon)"
+else
+    ok "lc_daemon_pids refuses an empty home"
+fi
+# ...and it must print nothing, since the caller pipes its output into kill.
+if [ -z "$(lc_daemon_pids "" 2>/dev/null)" ]; then
+    ok "lc_daemon_pids emits no pids for an empty home"
+else
+    no "lc_daemon_pids emitted pids for an empty home — those would be killed"
+fi
+# A home nothing serves must simply be empty, not an error.
+if [ -z "$(lc_daemon_pids "/tmp/lc-selftest-no-such-home" 2>/dev/null)" ]; then
+    ok "a home with no daemons yields no pids"
+else
+    no "a home with no daemons yielded pids"
+fi
+
 printf '\n=== the disposable guard defaults to NO ===\n'
 
 # These drive the REAL lc_detect_disposable by pointing its markers at temp

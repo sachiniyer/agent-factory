@@ -884,6 +884,12 @@ lc_session_states() {
 # anyway; a CI runner that runs several scenarios in one job does not.
 lc_teardown_home() {
     local home="$1" supervised="${2:-no}" pid
+    # Belt to lc_daemon_pids' braces: this function sends SIGKILL, so it states
+    # its own precondition rather than inheriting one.
+    if [ -z "$home" ]; then
+        lc_fail "lc_teardown_home called with an empty home — refusing to signal anything"
+        return 1
+    fi
     if [ "$supervised" = yes ] && lc_supervisor_available; then
         systemctl --user stop "$LC_UNIT_NAME" >/dev/null 2>&1 || true
         systemctl --user disable "$LC_UNIT_NAME" >/dev/null 2>&1 || true

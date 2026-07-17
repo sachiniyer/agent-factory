@@ -297,6 +297,18 @@ lc_assert_virgin() {
 #     #1920.
 lc_daemon_pids() {
     local home="$1" d pid argv0 argv1 dhome
+    # REFUSE an empty home. This function feeds lc_teardown_home, which SIGKILLs
+    # what it returns — so the matching rule is a safety boundary, not a filter.
+    # With home="", the test below becomes [ "$dhome" = "" ], which matches every
+    # daemon whose environ carries NO AGENT_FACTORY_HOME — that is precisely how
+    # a real daemon on the default home runs. One empty variable and this would
+    # hand the maintainer's daemon to kill -9. The disposable guard makes that
+    # unreachable today, but a kill path must not depend on a guard three layers
+    # up being correct.
+    if [ -z "$home" ]; then
+        lc_say "REFUSING to scan for daemons with an empty home (would match the real default-home daemon)"
+        return 1
+    fi
     for d in /proc/[0-9]*; do
         [ -r "$d/cmdline" ] || continue
         argv1=$(tr '\0' '\n' <"$d/cmdline" 2>/dev/null | sed -n '2p')
