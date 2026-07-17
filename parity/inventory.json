@@ -1014,6 +1014,78 @@
       },
       "verdict": "deliberate",
       "notes": "Both UIs have a pane workspace with surface-idiomatic gestures (the web adds mouse drag-and-drop the TUI cannot express; the TUI has keyboard splits the web reaches via Alt-chords). Layout is client-local and never hits the daemon."
+    },
+    {
+      "id": "session.autoyes-mode",
+      "title": "Run every session in auto-yes mode (process-wide)",
+      "tui": {
+        "status": "yes",
+        "pointer": "commands/root.go:250 (-y/--autoyes) -> app/handle_input.go:107"
+      },
+      "web": {
+        "status": "no",
+        "pointer": ""
+      },
+      "cli": {
+        "status": "yes",
+        "pointer": "commands/root.go:250 root --autoyes"
+      },
+      "verdict": "unclear",
+      "notes": "Distinct from session.create.opt.autoyes: this is the af PROCESS's mode, set once at launch and inherited by every session it creates, not a per-session choice. The web has the per-session control and no process-wide mode; the TUI/CLI have the reverse. Which model is right is the same owner call as session.create.opt.autoyes — triage them together."
+    },
+    {
+      "id": "daemon.remote-access",
+      "title": "Point a client at a remote daemon (URL + bearer token)",
+      "tui": {
+        "status": "yes",
+        "pointer": "commands/root.go:267,274 persistent --daemon-url/--token (inherited by the TUI launch)"
+      },
+      "web": {
+        "status": "n/a",
+        "pointer": ""
+      },
+      "cli": {
+        "status": "yes",
+        "pointer": "commands/root.go:267,274 --daemon-url/--token"
+      },
+      "verdict": "deliberate",
+      "notes": "The web is SERVED BY the daemon it talks to, so it has no 'point me elsewhere' knob by construction — it is already at the only daemon it can reach. The TUI and CLI are separate processes that must be told where the daemon is, so the flags are persistent on root for both."
+    },
+    {
+      "id": "cli.json-envelope",
+      "title": "Machine-readable {data,error} envelope output",
+      "tui": {
+        "status": "n/a",
+        "pointer": ""
+      },
+      "web": {
+        "status": "n/a",
+        "pointer": ""
+      },
+      "cli": {
+        "status": "yes",
+        "pointer": "api/api.go:580-581 --json (persistent on sessions/tasks/projects); per-command on config/token/daemon/api/bug-report"
+      },
+      "verdict": "deliberate",
+      "notes": "An output FORMAT for scripts consuming stdout, not a product capability. The UIs render the same data as pixels; there is nothing for --json to mean there."
+    },
+    {
+      "id": "task.edit.project-path",
+      "title": "Change which project a task belongs to",
+      "tui": {
+        "status": "yes",
+        "pointer": "ui/task_pane_edit.go:135 edits ProjectPath; the patch is task.DiffTask over the edited task.Task (ui/task_pane_state.go:91)"
+      },
+      "web": {
+        "status": "no",
+        "pointer": "web/src/types.ts:174-182 TaskUpdate omits project_path"
+      },
+      "cli": {
+        "status": "no",
+        "pointer": "api/api.go:644-650 af tasks update has no --project-path flag"
+      },
+      "verdict": "unclear",
+      "notes": "Found mechanically by the nested-payload derivation, not by hand: task.TaskUpdate.ProjectPath is reachable only from the TUI. Overlaps #1891 (tasks add should surface and guard the resolved project binding), so it wants triaging with that rather than a fresh issue. The web half is subsumed by #1935 (the web cannot edit a task at all)."
     }
   ],
   "ledger": {
@@ -1147,28 +1219,33 @@
       "UpdateTask": "task.edit"
     },
     "cli_flags": {
-      "af --autoyes": "session.create.opt.autoyes",
+      "af --autoyes": "session.autoyes-mode",
       "af --daemon": "meta.internal",
+      "af --daemon-url": "daemon.remote-access",
       "af --program": "session.create.opt.program",
+      "af --token": "daemon.remote-access",
       "af agent-server --auto-yes": "meta.internal",
       "af agent-server --listen": "meta.internal",
       "af agent-server --program": "meta.internal",
       "af agent-server --repo": "meta.internal",
       "af agent-server --title": "meta.internal",
-      "af api --json": "meta.discovery",
+      "af api --json": "cli.json-envelope",
       "af bug-report --file": "install.bug-report",
-      "af bug-report --json": "install.bug-report",
+      "af bug-report --json": "cli.json-envelope",
       "af bug-report --output": "install.bug-report",
-      "af config get --json": "config.read",
-      "af config list --json": "config.read",
-      "af config set --json": "config.write",
+      "af config get --json": "cli.json-envelope",
+      "af config list --json": "cli.json-envelope",
+      "af config set --json": "cli.json-envelope",
       "af daemon restart --quiet": "daemon.lifecycle",
-      "af daemon status --json": "daemon.lifecycle",
+      "af daemon status --json": "cli.json-envelope",
       "af doctor --fix": "install.doctor",
       "af doctor --setup": "install.doctor",
       "af doctor --verbose": "install.doctor",
+      "af projects --json": "cli.json-envelope",
       "af reset --force": "install.reset",
       "af reset --yes": "install.reset",
+      "af sessions --json": "cli.json-envelope",
+      "af sessions --repo": "project.switch",
       "af sessions archive --self": "session.archive",
       "af sessions create --backend": "session.create.opt.backend",
       "af sessions create --here": "session.create.opt.inplace",
@@ -1196,6 +1273,8 @@
       "af sessions tabs delete --name": "session.tab.close",
       "af sessions watch --interval": "session.watch",
       "af sessions watch --timeout": "session.watch",
+      "af tasks --json": "cli.json-envelope",
+      "af tasks --repo": "project.switch",
       "af tasks add --cron": "task.add",
       "af tasks add --name": "task.add",
       "af tasks add --program": "task.add",
@@ -1209,8 +1288,8 @@
       "af tasks update --prompt": "task.edit",
       "af tasks update --target-session": "task.edit",
       "af tasks update --watch-cmd": "task.edit",
-      "af token rotate --json": "daemon.token",
-      "af token show --json": "daemon.token",
+      "af token rotate --json": "cli.json-envelope",
+      "af token show --json": "cli.json-envelope",
       "af upgrade --allow-downgrade": "install.upgrade"
     }
   },
@@ -1350,6 +1429,57 @@
             "ok": "A scheduler concern, not a user option: it holds a send while a TUI is attached full-screen (daemon/control_types.go:167). The daemon's own task delivery sets it; a human running `af sessions send-prompt --create` wants the prompt delivered now."
           }
         }
+      },
+      "AddTaskRequest": {
+        "cli": {
+          "task.last_run_at": {
+            "ok": "Scheduler-owned, never a client input: the daemon stamps it after a run (task.Task last_run_at/last_run_status). A surface setting it would be lying about history."
+          },
+          "task.last_run_status": {
+            "ok": "Scheduler-owned, never a client input: the daemon stamps it after a run (task.Task last_run_at/last_run_status). A surface setting it would be lying about history."
+          }
+        },
+        "tui": {
+          "task.last_run_at": {
+            "ok": "Scheduler-owned, never a client input: the daemon stamps it after a run (task.Task last_run_at/last_run_status). A surface setting it would be lying about history."
+          },
+          "task.last_run_status": {
+            "ok": "Scheduler-owned, never a client input: the daemon stamps it after a run (task.Task last_run_at/last_run_status). A surface setting it would be lying about history."
+          }
+        }
+      },
+      "UpdateTaskRequest": {
+        "cli": {
+          "update.project_path": {
+            "gap": "task.edit.project-path"
+          }
+        },
+        "tui": {
+          "update.cron_expr": {
+            "ok": "Reached via task.DiffTask over the edited task.Task (ui/task_pane_state.go:91): the TUI never writes a task.TaskUpdate literal, so the AST cannot prove the field statically. Derivation reports it unreached — the SAFE direction, since unprovable forces a declaration rather than a silent pass."
+          },
+          "update.enabled": {
+            "ok": "Reached via task.DiffTask over the edited task.Task (ui/task_pane_state.go:91): the TUI never writes a task.TaskUpdate literal, so the AST cannot prove the field statically. Derivation reports it unreached — the SAFE direction, since unprovable forces a declaration rather than a silent pass."
+          },
+          "update.name": {
+            "ok": "Reached via task.DiffTask over the edited task.Task (ui/task_pane_state.go:91): the TUI never writes a task.TaskUpdate literal, so the AST cannot prove the field statically. Derivation reports it unreached — the SAFE direction, since unprovable forces a declaration rather than a silent pass."
+          },
+          "update.program": {
+            "ok": "Reached via task.DiffTask over the edited task.Task (ui/task_pane_state.go:91): the TUI never writes a task.TaskUpdate literal, so the AST cannot prove the field statically. Derivation reports it unreached — the SAFE direction, since unprovable forces a declaration rather than a silent pass."
+          },
+          "update.project_path": {
+            "ok": "Reached via task.DiffTask over the edited task.Task (ui/task_pane_state.go:91): the TUI never writes a task.TaskUpdate literal, so the AST cannot prove the field statically. Derivation reports it unreached — the SAFE direction, since unprovable forces a declaration rather than a silent pass."
+          },
+          "update.prompt": {
+            "ok": "Reached via task.DiffTask over the edited task.Task (ui/task_pane_state.go:91): the TUI never writes a task.TaskUpdate literal, so the AST cannot prove the field statically. Derivation reports it unreached — the SAFE direction, since unprovable forces a declaration rather than a silent pass."
+          },
+          "update.target_session": {
+            "ok": "Reached via task.DiffTask over the edited task.Task (ui/task_pane_state.go:91): the TUI never writes a task.TaskUpdate literal, so the AST cannot prove the field statically. Derivation reports it unreached — the SAFE direction, since unprovable forces a declaration rather than a silent pass."
+          },
+          "update.watch_cmd": {
+            "ok": "Reached via task.DiffTask over the edited task.Task (ui/task_pane_state.go:91): the TUI never writes a task.TaskUpdate literal, so the AST cannot prove the field statically. Derivation reports it unreached — the SAFE direction, since unprovable forces a declaration rather than a silent pass."
+          }
+        }
       }
     },
     "web_rpcs": {
@@ -1373,6 +1503,11 @@
         },
         "port": {
           "gap": "session.tab.create.web"
+        }
+      },
+      "UpdateTask": {
+        "update.project_path": {
+          "gap": "task.edit.project-path"
         }
       }
     }

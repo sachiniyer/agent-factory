@@ -125,26 +125,65 @@ to remember.
 - Quality bar: a surface marked `yes`/`partial` must cite code, a `deliberate`
   verdict must explain itself, and a `real-gap` must name an issue.
 
+## Is the derivation itself honest?
+
+This is the question that matters most, and it is not answered by the checks
+above. They compare the derivation to the inventory; none of them asks whether
+the derivation **sees anything**.
+
+A derivation with a hole does not fail loudly. It silently under-reports and the
+suite goes green — which is *worse than having no parity check*, because the
+green gets trusted. A detector that manufactures confidence is the failure mode
+this package exists to prevent, so it must not be one.
+
+`parity/honesty_test.go` therefore pins the derivation against gaps we already
+know are real, filed, and field-level — as fixtures, not aspirations:
+
+| Fixture | Derivation path it proves |
+|---|---|
+| [#1933](https://github.com/sachiniyer/agent-factory/issues/1933) — the web never sends `CreateSession.backend` | the web request-body parser |
+| #1933 (TUI half) — `sessionStartRequest` has no `Backend` | the Go AST walk |
+| [#1948](https://github.com/sachiniyer/agent-factory/issues/1948) — the CLI never sets `Preview.Tab/TabID/Full` | the AST **on an internal route**, invisible to the public catalog |
+| [#1935](https://github.com/sachiniyer/agent-factory/issues/1935) — the web's `TaskUpdate` omits `project_path` | nested recursion **behind a wrapper route**, plus the TS-interface read and the CLI's field-by-field assignment walk |
+
+Each fixture asserts in **both** directions: that the known gap is seen, *and*
+that a field the surface demonstrably does send is not reported as a gap. A
+parser returning nothing would satisfy the first half alone; it cannot satisfy
+both.
+
+If a gap is ever fixed, its fixture fails and says so. That is correct — the
+fixture is retired deliberately, not silently.
+
+The fixtures are verified by blinding each path and watching them fail: drop the
+nested recursion, remove the wrapper packages, break the TS parser, or break the
+call-body regex, and the matching fixture reports *"the parser is blind"* rather
+than passing.
+
 ## Known blind spots
 
-Stated so nobody mistakes a passing check for total coverage:
+Stated so nobody mistakes a passing check for total coverage. Note which way each
+one fails — **over-reporting forces a decision, under-reporting hides one**, and
+only the second is dangerous.
 
-- **Go field derivation reads composite literals.** A surface that built a
-  request field-by-field (`var r daemon.PreviewRequest; r.Tab = 1`) would read as
-  setting nothing. Every current site is a named composite literal; `minGoLiterals`
-  trips if that stops being true.
-- **Reachable ≠ user-settable.** The AST proves a construction site *sets* a
-  field, not that a user can *choose* its value. `session.create.opt.prompt`
-  (#1936) is exactly this: `app/session_control.go:106` sets `Prompt`, so the
-  field looks covered, while the TUI's naming flow never populates it upstream.
-  A field-level pass does not excuse reading the flow.
-- **Internal routes are not in the verb-level route check.** `daemon.HTTPRoutes()`
-  is the public catalog; `Preview` and `ResumeFromLimit` live in
-  `internalHTTPRoutes`. They are covered at the option level via
-  `auditedRequests`, but a new internal route reaching no surface would not trip
-  the route check.
-- **The web's TS types are not derived.** `web/src/types.ts` omitting a field
-  (as `TaskUpdate` omits `project_path`) is invisible here.
+- **Reachable ≠ user-settable** *(under-reports — the dangerous direction)*. The
+  AST proves a construction site *sets* a field, not that a user can *choose* its
+  value. `session.create.opt.prompt` (#1936) is exactly this trap:
+  `app/session_control.go:106` sets `Prompt`, so the field reads as covered while
+  the TUI's naming flow never populates it upstream. A field-level pass does not
+  excuse reading the flow.
+- **Internal routes are not in the *verb*-level route check** *(under-reports)*.
+  `daemon.HTTPRoutes()` is the public catalog; `Preview` and `ResumeFromLimit`
+  live in `internalHTTPRoutes`. Both are covered at the **option** level via
+  `auditedRequests` — which is what catches #1948 — but a new internal route that
+  no surface calls would not trip the route check.
+- **A nested payload built by a shared helper** *(over-reports — safe)*. The TUI
+  patches a task via `task.DiffTask`, in a package every surface shares, so the
+  walk cannot attribute it. Those fields are reported unreached and must be
+  declared `ok` with evidence: a decision is forced rather than skipped.
+- **Composite literals and simple var-assignment only.** The walk reads
+  `T{Field: …}` and `var x T; x.Field = …`. A request built some third way would
+  read as setting nothing — over-reporting, and `minGoLiterals` trips if the
+  surfaces move wholesale to another style.
 
 ## Verdicts
 

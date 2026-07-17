@@ -61,6 +61,19 @@ func loadInventory(t *testing.T) inventory {
 	return inv
 }
 
+// surfaceStatus returns a capability's status cell for one surface.
+func surfaceStatus(c capability, surface string) string {
+	switch surface {
+	case "tui":
+		return c.TUI.Status
+	case "web":
+		return c.Web.Status
+	case "cli":
+		return c.CLI.Status
+	}
+	return ""
+}
+
 func (inv inventory) byID() map[string]capability {
 	out := map[string]capability{}
 	for _, c := range inv.Capabilities {
@@ -104,7 +117,9 @@ func keysOf[V any](m map[string]V) []string {
 // inventory entry.
 func TestCLIVerbsAreInventoried(t *testing.T) {
 	inv := loadInventory(t)
-	derived := deriveCLI(t)
+	// Runnable commands only: `af sessions` is a grouping node, not a verb. Its
+	// persistent flags are still audited by TestCLIFlagsAreInventoried.
+	derived := cliVerbs(t)
 
 	if missing := diff(keysOf(derived), keysOf(inv.Ledger.CLIVerbs)); len(missing) > 0 {
 		t.Errorf("CLI verbs with no inventory entry: %v%s", missing, fixHint)
@@ -236,6 +251,10 @@ func TestLedgerAgreesWithSurfaceStatus(t *testing.T) {
 		}
 	}
 	check("cli", inv.Ledger.CLIVerbs, func(c capability) string { return c.CLI.Status })
+	// Flags carry option capabilities, so they need the same agreement: mapping
+	// `af sessions create --autoyes` while session.create.opt.autoyes still says
+	// cli:no would otherwise pass with a stale row.
+	check("cli", inv.Ledger.CLIFlags, func(c capability) string { return c.CLI.Status })
 	check("tui", inv.Ledger.TUIBindings, func(c capability) string { return c.TUI.Status })
 	check("web", inv.Ledger.WebRPCs, func(c capability) string { return c.Web.Status })
 }

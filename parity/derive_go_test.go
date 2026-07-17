@@ -27,11 +27,24 @@ import (
 	"github.com/sachiniyer/agent-factory/daemon"
 )
 
-// goSurfaces maps a surface to the package directory that builds its daemon
-// requests. api/ is the CLI's cobra commands; app/ is the TUI.
-var goSurfaces = map[string]string{
-	"cli": "api",
-	"tui": "app",
+// goSurfaces maps a surface to the sources that build its daemon requests.
+//
+// api/ is the CLI's cobra commands and app/ is the TUI, but neither is the whole
+// story: both surfaces also reach the daemon through WRAPPER helpers that build
+// the request for them, and a wrapper that never sets a field makes it
+// unreachable just as surely as the surface omitting it. The task paths are
+// exactly this — daemon/control_client.go:304,313 builds AddTaskRequest and
+// UpdateTaskRequest for the CLI, apiclient/control.go:118,127 does the same for
+// the TUI — so scanning only api/ and app/ would let those request types grow a
+// field with no parity decision at all.
+//
+// The wrappers are listed under the surface whose calls they serve; a file may
+// appear under both when both surfaces route through it.
+var goSurfaces = map[string][]string{
+	// daemon/control_client.go is the CLI's gob control-socket path.
+	"cli": {"api", "daemon/control_client.go"},
+	// apiclient/ is the TUI's HTTP path to the daemon.
+	"tui": {"app", "apiclient"},
 }
 
 // auditedRequests binds a daemon request type name to its reflect.Type so field
@@ -39,6 +52,7 @@ var goSurfaces = map[string]string{
 // surface actually constructs; any type it finds that is missing here fails the
 // check, so this registry cannot silently fall behind the code.
 var auditedRequests = map[string]reflect.Type{
+	"AddTaskRequest":          reflect.TypeOf(daemon.AddTaskRequest{}),
 	"ArchiveSessionRequest":   reflect.TypeOf(daemon.ArchiveSessionRequest{}),
 	"CloseTabRequest":         reflect.TypeOf(daemon.CloseTabRequest{}),
 	"CreateSessionRequest":    reflect.TypeOf(daemon.CreateSessionRequest{}),
@@ -46,30 +60,101 @@ var auditedRequests = map[string]reflect.Type{
 	"DeleteProjectRequest":    reflect.TypeOf(daemon.DeleteProjectRequest{}),
 	"DeliverPromptRequest":    reflect.TypeOf(daemon.DeliverPromptRequest{}),
 	"KillSessionRequest":      reflect.TypeOf(daemon.KillSessionRequest{}),
+	"ListTasksRequest":        reflect.TypeOf(daemon.ListTasksRequest{}),
 	"PauseStatusPollRequest":  reflect.TypeOf(daemon.PauseStatusPollRequest{}),
+	"PingRequest":             reflect.TypeOf(daemon.PingRequest{}),
 	"PreviewRequest":          reflect.TypeOf(daemon.PreviewRequest{}),
 	"RestoreSessionRequest":   reflect.TypeOf(daemon.RestoreSessionRequest{}),
 	"ResumeFromLimitRequest":  reflect.TypeOf(daemon.ResumeFromLimitRequest{}),
 	"ResumeStatusPollRequest": reflect.TypeOf(daemon.ResumeStatusPollRequest{}),
 	"SendPromptRequest":       reflect.TypeOf(daemon.SendPromptRequest{}),
 	"SetPRInfoRequest":        reflect.TypeOf(daemon.SetPRInfoRequest{}),
+	"RemoveTaskRequest":       reflect.TypeOf(daemon.RemoveTaskRequest{}),
 	"SnapshotRequest":         reflect.TypeOf(daemon.SnapshotRequest{}),
+	"TriggerTaskRequest":      reflect.TypeOf(daemon.TriggerTaskRequest{}),
+	"UpdateTaskRequest":       reflect.TypeOf(daemon.UpdateTaskRequest{}),
 }
 
 // minGoLiterals guards against a vacuous pass: if the surfaces are refactored to
 // build requests some other way (a builder, field-by-field assignment) the AST
 // walk would find nothing and every field would look reachable. Trip loudly
 // instead.
-const minGoLiterals = 20
+const minGoLiterals = 24
 
-// jsonFieldNames returns a struct's JSON wire field names keyed by Go field
-// name, mirroring the daemon's own jsonFields semantics (skip unexported, skip
-// json:"-", fall back to the Go name when untagged).
+// maxNestDepth bounds the nested-payload walk. Request payloads are shallow;
+// this only stops a self-referential type from looping.
+const maxNestDepth = 3
+
+// jsonFieldPaths returns a struct's JSON wire field paths, RECURSING into nested
+// struct payloads so a wrapper request cannot hide its options.
+//
+// This matters because several routes are thin wrappers: UpdateTaskRequest is
+// {id, update} where update is a task.TaskUpdate carrying eight real options, and
+// AddTaskRequest is {task}. Counting only top-level fields would mark the whole
+// payload covered the moment a surface sends the wrapper — which is precisely how
+// task.TaskUpdate.ProjectPath stayed invisible: every surface "sends update", but
+// only the TUI can populate project_path.
+//
+// Keys are Go field paths ("Update.ProjectPath"), values the JSON path
+// ("update.project_path"). Mirrors the daemon's jsonFields semantics: skip
+// unexported, skip json:"-", fall back to the Go name when untagged.
+func jsonFieldPaths(t reflect.Type) map[string]string {
+	out := map[string]string{}
+	var walk func(rt reflect.Type, goPrefix, jsonPrefix string, depth int)
+	walk = func(rt reflect.Type, goPrefix, jsonPrefix string, depth int) {
+		for rt.Kind() == reflect.Pointer {
+			rt = rt.Elem()
+		}
+		if rt.Kind() != reflect.Struct || depth > maxNestDepth {
+			return
+		}
+		for i := 0; i < rt.NumField(); i++ {
+			f := rt.Field(i)
+			if f.PkgPath != "" { // unexported: gob and encoding/json both skip it
+				continue
+			}
+			name := strings.Split(f.Tag.Get("json"), ",")[0]
+			if name == "-" {
+				continue
+			}
+			if name == "" {
+				name = f.Name
+			}
+			goPath, jsonPath := goPrefix+f.Name, jsonPrefix+name
+			out[goPath] = jsonPath
+
+			ft := f.Type
+			for ft.Kind() == reflect.Pointer {
+				ft = ft.Elem()
+			}
+			// time.Time and friends are leaf values despite being structs: they
+			// marshal whole, so their internals are not options a surface picks.
+			if ft.Kind() == reflect.Struct && !isLeafStruct(ft) {
+				walk(ft, goPath+".", jsonPath+".", depth+1)
+			}
+		}
+	}
+	walk(t, "", "", 0)
+	return out
+}
+
+// isLeafStruct reports structs that marshal as a single opaque value, so their
+// fields are not per-surface options.
+func isLeafStruct(rt reflect.Type) bool {
+	switch rt.String() {
+	case "time.Time":
+		return true
+	}
+	return false
+}
+
+// jsonFieldNames returns only the TOP-LEVEL json names keyed by Go field name —
+// what a composite literal can set directly.
 func jsonFieldNames(t reflect.Type) map[string]string {
 	out := map[string]string{}
 	for i := 0; i < t.NumField(); i++ {
 		f := t.Field(i)
-		if f.PkgPath != "" { // unexported: gob and encoding/json both skip it
+		if f.PkgPath != "" {
 			continue
 		}
 		name := strings.Split(f.Tag.Get("json"), ",")[0]
@@ -85,82 +170,273 @@ func jsonFieldNames(t reflect.Type) map[string]string {
 }
 
 // requestUse is what one surface can populate on one daemon request type: the
-// union of the JSON fields set across every construction site, plus where those
-// sites are.
+// union of the JSON field paths set across every construction site, plus where
+// those sites are.
 type requestUse struct {
-	Fields map[string]bool // json field names this surface can set
+	Fields map[string]bool // json field paths this surface provably sets
 	Sites  []string        // file:line of each construction site
 }
 
-// deriveGoRequestUse walks a surface's package for `daemon.XxxRequest{...}`
-// composite literals and reports, per request type, which JSON fields it sets.
-//
-// Limitation, stated plainly: this sees composite literals with named fields.
-// A surface that built a request by field-by-field assignment would read as
-// setting nothing. Every current site is a named composite literal (verified),
-// and minGoLiterals trips if that stops being true.
-func deriveGoRequestUse(t *testing.T, surface string) map[string]*requestUse {
+// goSurfaceFiles expands a surface's configured dirs/files into concrete
+// non-test .go paths.
+func goSurfaceFiles(t *testing.T, surface string) []string {
 	t.Helper()
-	dir := filepath.Join(repoRoot(t), goSurfaces[surface])
+	root := repoRoot(t)
+	var out []string
+	for _, entry := range goSurfaces[surface] {
+		full := filepath.Join(root, entry)
+		info, err := os.Stat(full)
+		if err != nil {
+			t.Fatalf("stat %s: %v", full, err)
+		}
+		if !info.IsDir() {
+			out = append(out, full)
+			continue
+		}
+		entries, err := os.ReadDir(full)
+		if err != nil {
+			t.Fatalf("read %s: %v", full, err)
+		}
+		for _, e := range entries {
+			n := e.Name()
+			if e.IsDir() || !strings.HasSuffix(n, ".go") || strings.HasSuffix(n, "_test.go") {
+				continue
+			}
+			out = append(out, filepath.Join(full, n))
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// requestTypeName returns the audited request type a composite literal builds, or
+// "" if it is not one.
+//
+// Both spellings must be recognised: api/, app/ and apiclient/ write
+// `daemon.XxxRequest{...}` (a SelectorExpr), while daemon/control_client.go is
+// INSIDE package daemon and writes the bare `XxxRequest{...}` (an Ident). Only
+// matching the qualified form would silently skip the CLI's own task wrapper —
+// the exact blind spot this fix exists to close.
+func requestTypeName(lit *ast.CompositeLit, pkgName string) string {
+	switch typ := lit.Type.(type) {
+	case *ast.SelectorExpr:
+		pkg, ok := typ.X.(*ast.Ident)
+		if !ok || pkg.Name != "daemon" {
+			return ""
+		}
+		return typ.Sel.Name
+	case *ast.Ident:
+		// A bare identifier is only a daemon request when the file IS package
+		// daemon. Accepting it everywhere would match a surface's own
+		// same-suffixed types (app's sessionStartRequest) and report them as
+		// unaudited daemon requests.
+		if pkgName != "daemon" {
+			return ""
+		}
+		return typ.Name
+	}
+	return ""
+}
+
+// typeExprName renders a composite-literal or var type as written ("task.Task"),
+// so it can be matched against reflect.Type.String().
+func typeExprName(e ast.Expr, pkgName string) string {
+	switch t := e.(type) {
+	case *ast.SelectorExpr:
+		if pkg, ok := t.X.(*ast.Ident); ok {
+			return pkg.Name + "." + t.Sel.Name
+		}
+	case *ast.Ident:
+		return pkgName + "." + t.Name
+	}
+	return ""
+}
+
+// deriveTypeFieldUse reports, per struct type NAME as reflect renders it
+// ("task.TaskUpdate"), which JSON fields a surface provably populates anywhere in
+// its sources.
+//
+// This is what makes nested payloads honest. A wrapper like
+// UpdateTaskRequest{ID: id, Update: update} proves only that `update` is set —
+// the sub-fields are chosen upstream, and the two surfaces do it differently:
+// api/tasks.go:172 builds a task.Task composite literal, while
+// api/tasks.go:296 declares `var patch task.TaskUpdate` and assigns
+// `patch.Name = …` field by field. Both forms are read here, so
+// task.TaskUpdate.ProjectPath shows up as genuinely unreachable from the CLI
+// rather than being hidden behind a covered wrapper.
+func deriveTypeFieldUse(t *testing.T, surface string) map[string]map[string]bool {
+	t.Helper()
 	fset := token.NewFileSet()
-	pkgs, err := parser.ParseDir(fset, dir, func(fi os.FileInfo) bool {
-		return !strings.HasSuffix(fi.Name(), "_test.go")
-	}, 0)
-	if err != nil {
-		t.Fatalf("parse %s: %v", dir, err)
+	out := map[string]map[string]bool{}
+
+	record := func(typeName, jsonName string) {
+		if out[typeName] == nil {
+			out[typeName] = map[string]bool{}
+		}
+		out[typeName][jsonName] = true
 	}
 
-	out := map[string]*requestUse{}
-	for _, pkg := range pkgs {
-		for _, file := range pkg.Files {
-			ast.Inspect(file, func(n ast.Node) bool {
-				lit, ok := n.(*ast.CompositeLit)
-				if !ok {
-					return true
-				}
-				sel, ok := lit.Type.(*ast.SelectorExpr)
-				if !ok {
-					return true
-				}
-				pkgIdent, ok := sel.X.(*ast.Ident)
-				if !ok || pkgIdent.Name != "daemon" || !strings.HasSuffix(sel.Sel.Name, "Request") {
-					return true
-				}
+	for _, path := range goSurfaceFiles(t, surface) {
+		file, err := parser.ParseFile(fset, path, nil, 0)
+		if err != nil {
+			t.Fatalf("parse %s: %v", path, err)
+		}
+		pkgName := file.Name.Name
+		// varTypes maps a local variable to the struct type it holds, so
+		// `patch.Name = x` can be attributed to task.TaskUpdate.
+		varTypes := map[string]string{}
 
-				typeName := sel.Sel.Name
-				rt, known := auditedRequests[typeName]
-				if !known {
-					t.Errorf("%s constructs daemon.%s at %s but it is not in auditedRequests "+
-						"(parity/derive_go_test.go) — add it so its fields are audited.",
-						surface, typeName, fset.Position(lit.Pos()))
+		ast.Inspect(file, func(n ast.Node) bool {
+			switch node := n.(type) {
+			case *ast.ValueSpec: // var patch task.TaskUpdate
+				if name := typeExprName(node.Type, pkgName); name != "" {
+					for _, id := range node.Names {
+						varTypes[id.Name] = name
+					}
+				}
+			case *ast.AssignStmt:
+				for i, lhs := range node.Lhs {
+					// x := task.TaskUpdate{...}
+					if id, ok := lhs.(*ast.Ident); ok && i < len(node.Rhs) {
+						if lit, ok := node.Rhs[i].(*ast.CompositeLit); ok {
+							if name := typeExprName(lit.Type, pkgName); name != "" {
+								varTypes[id.Name] = name
+							}
+						}
+					}
+					// patch.Name = ...
+					if sel, ok := lhs.(*ast.SelectorExpr); ok {
+						if base, ok := sel.X.(*ast.Ident); ok {
+							if typeName, known := varTypes[base.Name]; known {
+								record(typeName, sel.Sel.Name)
+							}
+						}
+					}
+				}
+			case *ast.CompositeLit: // task.Task{Name: ...}
+				name := typeExprName(node.Type, pkgName)
+				if name == "" {
 					return true
 				}
-				byGoName := jsonFieldNames(rt)
-
-				use := out[typeName]
-				if use == nil {
-					use = &requestUse{Fields: map[string]bool{}}
-					out[typeName] = use
-				}
-				use.Sites = append(use.Sites, relSite(t, fset.Position(lit.Pos()).String()))
-				for _, el := range lit.Elts {
+				for _, el := range node.Elts {
 					kv, ok := el.(*ast.KeyValueExpr)
 					if !ok {
 						continue
 					}
-					key, ok := kv.Key.(*ast.Ident)
-					if !ok {
-						continue
-					}
-					if jsonName, ok := byGoName[key.Name]; ok {
-						use.Fields[jsonName] = true
+					if key, ok := kv.Key.(*ast.Ident); ok {
+						record(name, key.Name)
 					}
 				}
-				return true
-			})
-		}
+			}
+			return true
+		})
 	}
 	return out
+}
+
+// deriveGoRequestUse walks a surface's sources for daemon request composite
+// literals and reports, per request type, which JSON field paths it provably
+// sets.
+//
+// Limitations, stated plainly rather than left for someone to discover:
+//   - Only composite literals with named fields are seen. A request built by
+//     field-by-field assignment would read as setting nothing; minGoLiterals
+//     trips if the surfaces ever move to that style.
+//   - A nested payload assigned from a VARIABLE (`Update: update`) proves only
+//     that the wrapper field is set, never which of its sub-fields the surface
+//     can populate — that depends on flags and forms upstream. Those sub-paths
+//     are therefore reported as unreached and must be declared, which is the
+//     forcing function: a new field inside task.TaskUpdate makes every surface
+//     answer for it.
+func deriveGoRequestUse(t *testing.T, surface string) map[string]*requestUse {
+	t.Helper()
+	fset := token.NewFileSet()
+	out := map[string]*requestUse{}
+
+	for _, path := range goSurfaceFiles(t, surface) {
+		file, err := parser.ParseFile(fset, path, nil, 0)
+		if err != nil {
+			t.Fatalf("parse %s: %v", path, err)
+		}
+		pkgName := file.Name.Name
+		ast.Inspect(file, func(n ast.Node) bool {
+			lit, ok := n.(*ast.CompositeLit)
+			if !ok {
+				return true
+			}
+			typeName := requestTypeName(lit, pkgName)
+			if typeName == "" || !strings.HasSuffix(typeName, "Request") {
+				return true
+			}
+			rt, known := auditedRequests[typeName]
+			if !known {
+				t.Errorf("%s constructs %s at %s but it is not in auditedRequests "+
+					"(parity/derive_go_test.go) — add it so its fields are audited.",
+					surface, typeName, relSite(t, fset.Position(lit.Pos()).String()))
+				return true
+			}
+			byGoName := jsonFieldNames(rt)
+
+			use := out[typeName]
+			if use == nil {
+				use = &requestUse{Fields: map[string]bool{}}
+				out[typeName] = use
+			}
+			use.Sites = append(use.Sites, relSite(t, fset.Position(lit.Pos()).String()))
+			for _, el := range lit.Elts {
+				kv, ok := el.(*ast.KeyValueExpr)
+				if !ok {
+					continue
+				}
+				key, ok := kv.Key.(*ast.Ident)
+				if !ok {
+					continue
+				}
+				jsonName, ok := byGoName[key.Name]
+				if !ok {
+					continue
+				}
+				use.Fields[jsonName] = true
+				// A nested payload written as an inline literal DOES prove which
+				// sub-fields the surface sets; one assigned from a variable does
+				// not, and its sub-paths stay unreached.
+				if nested, ok := kv.Value.(*ast.CompositeLit); ok {
+					collectNested(nested, rt, key.Name, jsonName, use)
+				}
+			}
+			return true
+		})
+	}
+	return out
+}
+
+// collectNested records the sub-paths an inline nested literal sets.
+func collectNested(lit *ast.CompositeLit, parent reflect.Type, goField, jsonPrefix string, use *requestUse) {
+	f, ok := parent.FieldByName(goField)
+	if !ok {
+		return
+	}
+	ft := f.Type
+	for ft.Kind() == reflect.Pointer {
+		ft = ft.Elem()
+	}
+	if ft.Kind() != reflect.Struct {
+		return
+	}
+	byGoName := jsonFieldNames(ft)
+	for _, el := range lit.Elts {
+		kv, ok := el.(*ast.KeyValueExpr)
+		if !ok {
+			continue
+		}
+		key, ok := kv.Key.(*ast.Ident)
+		if !ok {
+			continue
+		}
+		if jsonName, ok := byGoName[key.Name]; ok {
+			use.Fields[jsonPrefix+"."+jsonName] = true
+		}
+	}
 }
 
 // relSite trims an absolute position down to a repo-relative file:line.
@@ -172,13 +448,53 @@ func relSite(t *testing.T, pos string) string {
 
 // unreachedFields returns the JSON fields of a request type that a surface never
 // sets, sorted.
-func unreachedFields(rt reflect.Type, use *requestUse) []string {
+// unreachedFields returns the JSON field paths of a request type that a surface
+// never populates.
+//
+// A TOP-LEVEL path is reached when a construction site sets it. A NESTED path is
+// reached when the surface populates that field on the nested type ANYWHERE —
+// the wrapper hands the payload through, so what matters is whether the surface
+// can build one carrying that field (typeUse), not whether the wrapper literal
+// mentioned it.
+func unreachedFields(rt reflect.Type, use *requestUse, typeUse map[string]map[string]bool) []string {
+	byGoPath := jsonFieldPaths(rt)
 	var out []string
-	for _, jsonName := range jsonFieldNames(rt) {
-		if use == nil || !use.Fields[jsonName] {
-			out = append(out, jsonName)
+	for goPath, jsonPath := range byGoPath {
+		if !strings.Contains(goPath, ".") {
+			if use == nil || !use.Fields[jsonPath] {
+				out = append(out, jsonPath)
+			}
+			continue
 		}
+		if nestedTypeReaches(rt, goPath, typeUse) {
+			continue
+		}
+		if use != nil && use.Fields[jsonPath] {
+			continue // an inline nested literal set it directly
+		}
+		out = append(out, jsonPath)
 	}
 	sort.Strings(out)
 	return out
+}
+
+// nestedTypeReaches reports whether the surface populates the Go field named by
+// a dotted path on its owning nested type.
+func nestedTypeReaches(root reflect.Type, goPath string, typeUse map[string]map[string]bool) bool {
+	parts := strings.Split(goPath, ".")
+	rt := root
+	for i := 0; i < len(parts)-1; i++ {
+		f, ok := rt.FieldByName(parts[i])
+		if !ok {
+			return false
+		}
+		rt = f.Type
+		for rt.Kind() == reflect.Pointer {
+			rt = rt.Elem()
+		}
+		if rt.Kind() != reflect.Struct {
+			return false
+		}
+	}
+	return typeUse[rt.String()][parts[len(parts)-1]]
 }

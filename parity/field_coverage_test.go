@@ -19,7 +19,9 @@ package parity
 
 import (
 	"fmt"
+	"reflect"
 	"sort"
+	"strings"
 	"testing"
 )
 
@@ -44,7 +46,7 @@ type fieldCoverage struct {
 // Both directions matter: an undeclared unreached field is an unnoticed gap, and
 // a declared field the surface now DOES send is a gap that got fixed while the
 // table still calls it broken.
-func validateFieldDecls(t *testing.T, caps map[string]capability, label string, unreached []string, decls map[string]fieldDecl) {
+func validateFieldDecls(t *testing.T, caps map[string]capability, surface, label string, unreached []string, decls map[string]fieldDecl) {
 	t.Helper()
 
 	declared := map[string]bool{}
@@ -69,8 +71,19 @@ func validateFieldDecls(t *testing.T, caps map[string]capability, label string, 
 		case d.Gap == "" && d.OK == "":
 			t.Errorf("%s field %q declares neither gap nor ok", label, f)
 		case d.Gap != "":
-			if _, ok := caps[d.Gap]; !ok {
+			c, ok := caps[d.Gap]
+			if !ok {
 				t.Errorf("%s field %q names unknown capability %q", label, f, d.Gap)
+				break
+			}
+			// The declaration says this surface cannot send the field, so the
+			// capability must still agree that the surface lacks it. Otherwise
+			// flipping a row to yes/parity while the field stays unsent would
+			// leave the inventory quietly contradicting itself.
+			if st := surfaceStatus(c, surface); st != "no" && st != "partial" {
+				t.Errorf("%s declares %q a gap against capability %q, but that capability's "+
+					"%s status is %q. Either the surface really does reach the field (then it "+
+					"is not a gap) or the row is stale.", label, f, d.Gap, surface, st)
 			}
 		}
 	}
@@ -96,13 +109,14 @@ func TestGoFieldCoverage(t *testing.T) {
 	total := 0
 	for _, surface := range []string{"cli", "tui"} {
 		use := deriveGoRequestUse(t, surface)
+		typeUse := deriveTypeFieldUse(t, surface)
 		for typeName, u := range use {
 			total += len(u.Sites)
 			rt := auditedRequests[typeName]
-			unreached := unreachedFields(rt, u)
+			unreached := unreachedFields(rt, u, typeUse)
 			decls := inv.FieldCoverage.Requests[typeName][surface]
 			label := fmt.Sprintf("%s (%s, %v)", typeName, surface, u.Sites)
-			validateFieldDecls(t, caps, label, unreached, decls)
+			validateFieldDecls(t, caps, surface, label, unreached, decls)
 		}
 	}
 	if total < minGoLiterals {
@@ -131,15 +145,76 @@ func TestWebFieldCoverage(t *testing.T) {
 		for _, f := range webCallBody(t, rpc) {
 			sent[f] = true
 		}
-		var unreached []string
-		for _, f := range r.Fields {
-			if !sent[f] {
-				unreached = append(unreached, f)
+
+		// Prefer the request type's RECURSIVE field paths over the route
+		// catalog's list: HTTPRoutes reflects only top-level fields, so a
+		// wrapper route like UpdateTask ({id, update}) would look fully covered
+		// the moment the web sends `update` — hiding every option inside
+		// task.TaskUpdate, which is exactly where the web's missing
+		// project_path lives.
+		fields := r.Fields
+		if rt, audited := auditedRequests[rpc+"Request"]; audited {
+			fields = nil
+			for _, jsonPath := range jsonFieldPaths(rt) {
+				fields = append(fields, jsonPath)
 			}
 		}
+
+		var unreached []string
+		for _, f := range fields {
+			if sent[f] {
+				continue
+			}
+			// A nested payload is sent whole (`{ task }`), so the object parse
+			// only ever sees the wrapper key. The web's TS interface is its real
+			// contract for that payload, so read the reach from there.
+			if base, leaf, nested := strings.Cut(f, "."); nested {
+				if reached, known := webNestedReaches(t, rt(rpc), base, leaf); known {
+					if reached {
+						continue
+					}
+					unreached = append(unreached, f)
+					continue
+				}
+			}
+			unreached = append(unreached, f)
+		}
 		sort.Strings(unreached)
-		validateFieldDecls(t, caps, "web "+rpc, unreached, inv.FieldCoverage.WebRPCs[rpc])
+		validateFieldDecls(t, caps, "web", "web "+rpc, unreached, inv.FieldCoverage.WebRPCs[rpc])
 	}
+}
+
+// rt resolves an RPC name to its audited request type, or nil.
+func rt(rpc string) reflect.Type { return auditedRequests[rpc+"Request"] }
+
+// webNestedReaches reports whether the web can populate a nested payload's field,
+// read from the TypeScript interface that is its contract. known=false means the
+// payload has no mapped TS type, so the caller must fall back to a declaration.
+func webNestedReaches(t *testing.T, root reflect.Type, goBase, jsonLeaf string) (reached, known bool) {
+	t.Helper()
+	if root == nil {
+		return false, false
+	}
+	// goBase arrives as a JSON name; find the field that carries it.
+	var ft reflect.Type
+	for goName, jsonName := range jsonFieldNames(root) {
+		if jsonName != goBase {
+			continue
+		}
+		f, _ := root.FieldByName(goName)
+		ft = f.Type
+	}
+	if ft == nil {
+		return false, false
+	}
+	for ft.Kind() == reflect.Pointer {
+		ft = ft.Elem()
+	}
+	tsName, ok := webTSTypes[ft.String()]
+	if !ok {
+		return false, false
+	}
+	return webTSInterfaceFields(t, tsName)[jsonLeaf], true
 }
 
 // TestFieldCoverageHasNoStaleTypes keeps the declarations honest: a request type

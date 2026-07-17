@@ -36,16 +36,29 @@ func repoRoot(t *testing.T) string {
 
 // --- CLI -------------------------------------------------------------------
 
-// cliVerb is one invocable cobra command and its own (non-inherited) flags.
+// cliVerb is one cobra command and the flags DECLARED on it (its own locals plus
+// any persistent flags it declares for its children — not flags inherited from a
+// parent, which belong to that parent's entry).
 type cliVerb struct {
 	Path   string   // full invocation, e.g. "af sessions create"
-	Flags  []string // sorted long flag names registered on this command
+	Flags  []string // sorted long flag names declared at this command
 	Hidden bool
+	// Runnable distinguishes an invocable verb from a grouping node like
+	// `af sessions`, which is not a capability itself but can declare flags.
+	Runnable bool
 }
 
-// deriveCLI walks the real cobra tree. A command with subcommands but no RunE
-// is a grouping node (e.g. `af sessions`), not a capability, so it is skipped —
-// but its children are still walked.
+// deriveCLI walks the real cobra tree. A command with subcommands but no RunE is
+// a grouping node (e.g. `af sessions`), not an invocable verb — but it can still
+// DECLARE capabilities as persistent flags, so its flags are recorded even though
+// it is not a verb.
+//
+// Flags are attributed to the command that DECLARES them, via LocalFlags():
+// cobra's Flags() omits a parent's persistent flags, so walking only runnable
+// leaves would lose `--repo`/`--json` (declared on `af sessions`, api/api.go:572-581)
+// entirely — they show under `af sessions create --help` as Global Flags but
+// belong to the group. Attributing at the declaration site also keeps one flag as
+// one ledger entry instead of repeating it under every child.
 func deriveCLI(t *testing.T) map[string]cliVerb {
 	t.Helper()
 	root := commands.NewRootCommand(commands.Options{Version: "0.0.0-parity"})
@@ -53,20 +66,34 @@ func deriveCLI(t *testing.T) map[string]cliVerb {
 
 	var walk func(c *cobra.Command, path string)
 	walk = func(c *cobra.Command, path string) {
-		runnable := c.RunE != nil || c.Run != nil
-		if runnable {
-			var flags []string
-			c.Flags().VisitAll(func(f *pflag.Flag) {
-				flags = append(flags, f.Name)
-			})
-			sort.Strings(flags)
-			out[path] = cliVerb{Path: path, Flags: flags, Hidden: c.Hidden}
+		var flags []string
+		c.LocalFlags().VisitAll(func(f *pflag.Flag) {
+			flags = append(flags, f.Name)
+		})
+		sort.Strings(flags)
+		out[path] = cliVerb{
+			Path:     path,
+			Flags:    flags,
+			Hidden:   c.Hidden,
+			Runnable: c.RunE != nil || c.Run != nil,
 		}
 		for _, sub := range c.Commands() {
 			walk(sub, path+" "+sub.Name())
 		}
 	}
 	walk(root, "af")
+	return out
+}
+
+// cliVerbs returns just the invocable commands — the verb-level view.
+func cliVerbs(t *testing.T) map[string]cliVerb {
+	t.Helper()
+	out := map[string]cliVerb{}
+	for path, v := range deriveCLI(t) {
+		if v.Runnable {
+			out[path] = v
+		}
+	}
 	return out
 }
 
@@ -137,10 +164,6 @@ var webCallRe = regexp.MustCompile(`(?s)\baf(?:<[^>]*>)?\(\s*"([A-Za-z0-9_]+)"\s
 // than a loud failure.
 const webSrcDir = "web/src"
 
-// webAPISource is where the af() chokepoint itself lives; readWebAPI still reads
-// it for the request-body parse, which is keyed to that file's call shape.
-const webAPISource = "web/src/api.ts"
-
 // minWebCalls guards against a vacuous pass: if api.ts is restructured such
 // that the regex stops matching, the parity test must fail loudly instead of
 // concluding "the web calls nothing".
@@ -191,16 +214,6 @@ func webSourceFiles(t *testing.T) []string {
 	return out
 }
 
-func readWebAPI(t *testing.T) string {
-	t.Helper()
-	p := filepath.Join(repoRoot(t), webAPISource)
-	b, err := os.ReadFile(p)
-	if err != nil {
-		t.Fatalf("read %s: %v", p, err)
-	}
-	return string(b)
-}
-
 // webCallBody returns the JSON keys the web can set on one RPC, unioned across
 // EVERY call site for that method. The union matters: CreateTab has two sites
 // (a shell tab and a VS Code tab, web/src/api.ts:339 and :355) and only the
@@ -211,18 +224,28 @@ func readWebAPI(t *testing.T) string {
 // actually populate — not just verb reachability.
 func webCallBody(t *testing.T, method string) []string {
 	t.Helper()
-	src := readWebAPI(t)
 	seen := map[string]bool{}
 	needle := `"` + method + `"`
-	for off := 0; ; {
-		i := strings.Index(src[off:], needle)
-		if i < 0 {
-			break
+	// Scan every web source, not just api.ts: af<T>() is exported, so a module
+	// that calls it directly and sets a field (say CreateSession with `backend`)
+	// would otherwise be invisible here — and the inventory would keep reporting
+	// a gap that had actually been fixed.
+	for _, path := range webSourceFiles(t) {
+		b, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read %s: %v", path, err)
 		}
-		at := off + i
-		off = at + len(needle)
-		for _, f := range objectLiteralAfter(src[at:]) {
-			seen[f] = true
+		src := string(b)
+		for off := 0; ; {
+			i := strings.Index(src[off:], needle)
+			if i < 0 {
+				break
+			}
+			at := off + i
+			off = at + len(needle)
+			for _, f := range objectLiteralAfter(src[at:]) {
+				seen[f] = true
+			}
 		}
 	}
 	var out []string
@@ -312,4 +335,49 @@ func objectKeys(lit string) []string {
 	flush(inner[start:])
 	sort.Strings(fields)
 	return fields
+}
+
+// --- Web TypeScript payload types --------------------------------------------
+
+// webTSTypes maps a Go nested payload type to the TypeScript interface that is
+// the web's contract for it. For a wrapper RPC the web sends the payload whole
+// (`{ task }`, `{ id, update }`), so the object-literal parse sees only the
+// wrapper key and every option inside would look covered. The TS interface IS
+// the web's reachable set for those payloads — and it is derived, not asserted,
+// which is what catches TaskUpdate omitting project_path (#1935) mechanically
+// rather than by someone noticing.
+var webTSTypes = map[string]string{
+	"task.Task":       "TaskData",
+	"task.TaskUpdate": "TaskUpdate",
+}
+
+var tsInterfaceFieldRe = regexp.MustCompile(`(?m)^\s*([A-Za-z_]\w*)\??\s*:`)
+
+// webTSInterfaceFields returns the property names of a TypeScript interface in
+// web/src/types.ts.
+func webTSInterfaceFields(t *testing.T, name string) map[string]bool {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join(repoRoot(t), "web/src/types.ts"))
+	if err != nil {
+		t.Fatalf("read types.ts: %v", err)
+	}
+	src := string(b)
+	head := "export interface " + name + " {"
+	i := strings.Index(src, head)
+	if i < 0 {
+		t.Fatalf("web/src/types.ts has no `%s` — webTSTypes in derive_test.go is stale.", head)
+	}
+	rest := src[i+len(head):]
+	end := strings.Index(rest, "\n}")
+	if end < 0 {
+		t.Fatalf("unterminated interface %s in web/src/types.ts", name)
+	}
+	out := map[string]bool{}
+	for _, m := range tsInterfaceFieldRe.FindAllStringSubmatch(rest[:end], -1) {
+		out[m[1]] = true
+	}
+	if len(out) == 0 {
+		t.Fatalf("parsed zero fields from interface %s — the parser is blind", name)
+	}
+	return out
 }
