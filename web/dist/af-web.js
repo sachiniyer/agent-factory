@@ -6276,9 +6276,48 @@ async function createVSCodeTab(id, title, token2) {
   );
   return resp.name;
 }
-async function closeTab(id, title, tabName, token2) {
+async function closeTab(id, title, tabName, tabId, token2) {
   requireSessionID(id, "close a tab");
-  await af("CloseTab", { id, title, repo_id: "", tab_name: tabName, tab_index: 0 }, token2);
+  await af("CloseTab", { id, title, repo_id: "", tab_id: tabId, tab_name: tabName, tab_index: 0 }, token2);
+}
+async function renameTab(id, title, tabName, newName, tabId, token2) {
+  requireSessionID(id, "rename a tab");
+  const resp = await af(
+    "RenameTab",
+    { id, title, repo_id: "", tab_id: tabId, tab_name: tabName, new_name: newName },
+    token2
+  );
+  return resp.name;
+}
+async function reorderTab(id, title, tabName, index, tabId, token2) {
+  requireSessionID(id, "reorder a tab");
+  return af("ReorderTab", { id, title, repo_id: "", tab_id: tabId, tab_name: tabName, new_index: index }, token2);
+}
+var WEBTAB_ERROR_HEADER = "x-af-webtab-error";
+async function probeWebTab(path, token2, timeoutMs) {
+  const headers = {};
+  if (token2 !== "") {
+    headers.Authorization = `Bearer ${token2}`;
+  }
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const resp = await fetch(path, {
+      method: "GET",
+      headers,
+      cache: "no-store",
+      redirect: "manual",
+      signal: controller.signal
+    });
+    if (resp.status !== 502 && resp.status !== 504) {
+      return "ok";
+    }
+    return resp.headers.get(WEBTAB_ERROR_HEADER) !== null ? "dead" : "ok";
+  } catch {
+    return "dead";
+  } finally {
+    clearTimeout(timer);
+  }
 }
 async function listTasks(token2) {
   const resp = await af("ListTasks", {}, token2);
@@ -7750,11 +7789,64 @@ function webProxyPath(sessionId, tabId, target, token2) {
   const query = [targetQueryOf(target), token2 ? `${webtabTokenParam}=${encodeURIComponent(token2)}` : ""].filter((part) => part !== "").join("&");
   return query ? `${base}?${query}` : base;
 }
+var RELOAD_PARAM = "_afreload";
+function cacheBustedWebSrc(src, n) {
+  const sep = src.includes("?") ? "&" : "?";
+  return `${src}${sep}${RELOAD_PARAM}=${n}`;
+}
+var reloadNonce = Date.now();
+function nextReloadNonce() {
+  return ++reloadNonce;
+}
 function paneAddressUsesOrdinal(webTarget, realId) {
   if (webTarget !== null) {
     return false;
   }
   return realId === "";
+}
+
+// src/tablabel.ts
+function tabGlyph(kind) {
+  switch (kind) {
+    case TabKind.Agent:
+      return "\u25C6";
+    case TabKind.Shell:
+      return "\u203A";
+    case TabKind.Process:
+      return "\u203A";
+    // VS Code (#1817) shares the WEB glyph deliberately, on the same rule that has
+    // shell and process share `›`: the glyph names what a tab IS, and a VS Code tab
+    // is an embedded browser surface with no PTY — a web pane whose page happens to
+    // be an editor. What separates them is the text beside the glyph ("VS Code" vs
+    // the target's name), exactly as the command name separates a process tab from a
+    // shell. Letting it fall through to the default arm would call it a terminal,
+    // which is the one thing it is not.
+    case TabKind.Web:
+    case TabKind.VSCode:
+      return "\u25F1";
+    default:
+      return "\u203A";
+  }
+}
+function tabLabel(tab) {
+  switch (tab.kind) {
+    case TabKind.Agent:
+      return "Agent";
+    case TabKind.Shell:
+      return "Terminal";
+    case TabKind.Web:
+      return tab.name || "Web";
+    case TabKind.VSCode:
+      return tab.name || "VS Code";
+    default:
+      return tab.name || "Tab";
+  }
+}
+function tabDisplayLabel(tab) {
+  return `${tabGlyph(tab.kind)} ${tabLabel(tab)}`;
+}
+function isRenameableTab(kind) {
+  return kind === TabKind.Web || kind === TabKind.Process || kind === TabKind.VSCode;
 }
 
 // src/terminal.ts
@@ -8360,6 +8452,13 @@ function webFallbackMs() {
   const override = globalThis.__afWebtabFallbackMs;
   return typeof override === "number" ? override : 2500;
 }
+function hostLabel(target) {
+  try {
+    return new URL(target).host;
+  } catch {
+    return target;
+  }
+}
 var SplitView = class {
   constructor(host, cb) {
     this.host = host;
@@ -8389,6 +8488,11 @@ var SplitView = class {
   // "kind:name" identity did. webTargetAt reads it to tell a web/iframe tab from a
   // terminal one.
   tabKinds = [];
+  // Each tab's NAME, parallel to tabIds — what the pane headers render (with the
+  // kind, through tablabel.ts). Before #1813 the panes had no access to this at all
+  // and drew a positional "Tab N" instead: an ordinal that says nothing when several
+  // panes are open, which is the only time a pane header is read.
+  tabNames = [];
   // Whether the shown session is archived (#1809 follow-up). An archived session is
   // inert: the daemon refuses to proxy its preserved web tab, so the pane renders an
   // archived placeholder instead of a frame that could only fail — or, worse, could
@@ -8444,15 +8548,17 @@ var SplitView = class {
    * fresh single leaf bound to `initialTab`); the SAME session only re-validates the
    * tree against the current tab list (a tab closed elsewhere). Cheap on a no-op.
    */
-  setSession(sessionId, token2, tabIds, initialTab, tabTargets = [], tabKinds = [], tabRealIds = [], archived = false) {
+  setSession(sessionId, token2, tabIds, initialTab, tabTargets = [], tabKinds = [], tabRealIds = [], archived = false, tabNames = []) {
     this.token = token2;
     const prevIds = this.tabIds;
     const prevKinds = this.tabKinds;
     const prevTargets = this.tabTargets;
+    const prevNames = this.tabNames;
     this.tabIds = tabIds;
     this.tabRealIds = tabRealIds;
     this.tabTargets = tabTargets;
     this.tabKinds = tabKinds;
+    this.tabNames = tabNames;
     const archivedChanged = archived !== this.archived;
     this.archived = archived;
     const tabCount = tabIds.length > 0 ? tabIds.length : 1;
@@ -8471,7 +8577,8 @@ var SplitView = class {
       this.tree = validate(settled, tabCount);
       this.retain(sessionId, this.tree, tabIds);
       const rebound = tabsRebound(prevIds, prevKinds, prevTargets, tabIds, tabKinds, tabTargets);
-      if (before !== this.tree || rebound || archivedChanged) {
+      const renamed = !sameTabs(prevNames, tabNames);
+      if (before !== this.tree || rebound || archivedChanged || renamed) {
         this.reconcile();
         this.report();
       }
@@ -8750,7 +8857,9 @@ var SplitView = class {
       }
       pane.container.classList.toggle("af-pane-multi", multi);
       pane.container.setAttribute("data-tab-id", realId);
-      pane.label.textContent = `Tab ${leaf.tab + 1}`;
+      const named = { name: this.tabNames[leaf.tab] ?? "", kind: this.tabKinds[leaf.tab] ?? TabKind.Agent };
+      pane.glyph.textContent = tabGlyph(named.kind);
+      pane.label.textContent = tabLabel(named);
     }
     this.applyFocusClass();
   }
@@ -8758,6 +8867,8 @@ var SplitView = class {
     const container = el("div", "af-pane");
     container.setAttribute("data-leaf", leaf.id);
     const head = el("div", "af-pane-head");
+    const glyph = el("span", "af-pane-glyph");
+    glyph.setAttribute("aria-hidden", "true");
     const label = el("span", "af-pane-label");
     const closeBtn = document.createElement("button");
     closeBtn.type = "button";
@@ -8769,7 +8880,7 @@ var SplitView = class {
       e.stopPropagation();
       this.closePane(leaf.id);
     });
-    head.append(label, closeBtn);
+    head.append(glyph, label, closeBtn);
     const paneHost = el("div", "af-pane-host");
     const overlay = el("div", "af-drop-overlay");
     container.append(head, paneHost, overlay);
@@ -8779,6 +8890,7 @@ var SplitView = class {
       container,
       host: paneHost,
       label,
+      glyph,
       overlay,
       term: null,
       tab: -1,
@@ -8857,9 +8969,6 @@ var SplitView = class {
       frame.setAttribute("allow", "clipboard-read; clipboard-write");
     }
     frame.setAttribute("referrerpolicy", "no-referrer");
-    if (src !== "") {
-      frame.src = src;
-    }
     const fallback = el("div", "af-webpane-fallback");
     fallback.hidden = true;
     const fbMsg = el("div", "af-webpane-fallback-msg");
@@ -8870,7 +8979,12 @@ var SplitView = class {
     fbLink.target = "_blank";
     fbLink.rel = "noopener noreferrer";
     fbLink.textContent = "Open in a new tab \u2197";
-    fallback.append(fbMsg, fbLink);
+    const fbRetry = document.createElement("button");
+    fbRetry.type = "button";
+    fbRetry.className = "af-ghost af-webpane-fallback-retry";
+    fbRetry.textContent = "Retry";
+    fbRetry.hidden = true;
+    fallback.append(fbMsg, fbLink, fbRetry);
     wrap.append(bar, frame, fallback);
     pane.host.replaceChildren(wrap);
     if (this.archived) {
@@ -8878,6 +8992,7 @@ var SplitView = class {
       fbMsg.textContent = isVSCode ? "This session is archived. Restore it to open VS Code." : "This session is archived. Restore it to load this web tab.";
       fbLink.hidden = true;
       open.hidden = true;
+      reload.hidden = true;
       fallback.hidden = false;
       frame.hidden = true;
       pane.webDispose = null;
@@ -8888,43 +9003,82 @@ var SplitView = class {
       fbMsg.textContent = isVSCode ? "This VS Code tab can't be addressed yet. Reload the page." : "This web tab has no URL.";
       fbLink.hidden = true;
       open.hidden = true;
+      reload.hidden = true;
       fallback.hidden = false;
       frame.hidden = true;
       pane.webDispose = null;
       return;
     }
+    const webProxied = proxied && !isVSCode;
+    const probePath = webProxied ? webProxyPath(sessionId, realId, target, null) : "";
+    let disposed = false;
+    let probeSeq = 0;
+    const showDead = () => {
+      fallback.classList.add("af-webpane-dead");
+      fbMsg.textContent = `No dev server is answering at ${hostLabel(target)} yet.`;
+      fbLink.hidden = true;
+      open.hidden = true;
+      fbRetry.hidden = false;
+      fallback.hidden = false;
+      frame.hidden = true;
+      frame.removeAttribute("src");
+    };
+    const showFrame = () => {
+      fallback.classList.remove("af-webpane-dead");
+      fallback.hidden = true;
+      fbRetry.hidden = true;
+      open.hidden = false;
+      frame.hidden = false;
+    };
+    const showExternalFallback = () => {
+      fallback.classList.add("af-webpane-external");
+      fbMsg.textContent = "This site may block embedding.";
+      fbLink.hidden = false;
+      fbLink.textContent = "Open it in a new tab \u2197";
+      fbRetry.hidden = true;
+      reload.hidden = true;
+      fallback.hidden = false;
+      frame.hidden = true;
+    };
+    const external = !proxied;
+    const load = async (bust = false) => {
+      const seq = ++probeSeq;
+      if (webProxied) {
+        const health = await probeWebTab(probePath, this.token ?? "", webFallbackMs());
+        if (disposed || seq !== probeSeq) {
+          return;
+        }
+        if (health === "dead") {
+          showDead();
+          return;
+        }
+      }
+      if (external) {
+        showExternalFallback();
+        return;
+      }
+      showFrame();
+      const next = bust && webProxied ? cacheBustedWebSrc(src, nextReloadNonce()) : src;
+      if (frame.getAttribute("src") === next) {
+        frame.src = "";
+      }
+      frame.src = next;
+    };
     reload.addEventListener("click", (e) => {
       e.stopPropagation();
       if (src === "") {
         return;
       }
-      fallback.hidden = true;
-      frame.hidden = false;
-      frame.src = "";
-      frame.src = src;
+      void load(true);
     });
-    let settled = false;
-    const onLoad = () => {
-      settled = true;
-      fallback.hidden = true;
-      frame.hidden = false;
-    };
-    frame.addEventListener("load", onLoad);
-    let timer = null;
-    if (!proxied && src !== "") {
-      timer = setTimeout(() => {
-        if (!settled) {
-          fallback.hidden = false;
-          frame.hidden = true;
-        }
-      }, webFallbackMs());
-    }
+    fbRetry.addEventListener("click", (e) => {
+      e.stopPropagation();
+      void load(true);
+    });
     pane.webDispose = () => {
-      if (timer !== null) {
-        clearTimeout(timer);
-      }
-      frame.removeEventListener("load", onLoad);
+      disposed = true;
     };
+    void load();
   }
   buildNode(node) {
     if (node.kind === "leaf") {
@@ -9441,6 +9595,23 @@ function addTaskModal(projects, defaultProject2, callbacks) {
   return handle;
 }
 
+// src/tabreorder.ts
+var PINNED_TABS = 1;
+function insertionIndexAt(centers, x) {
+  let i = 0;
+  while (i < centers.length && x >= centers[i]) {
+    i++;
+  }
+  return Math.min(Math.max(i, PINNED_TABS), centers.length);
+}
+function reorderTargetIndex(from, insertion) {
+  if (from < PINNED_TABS) {
+    return null;
+  }
+  const target = insertion > from ? insertion - 1 : insertion;
+  return target === from ? null : target;
+}
+
 // src/ui.ts
 var MAX_TABS = 9;
 var OFF_BOX_BACKENDS = /* @__PURE__ */ new Set(["docker", "ssh", "remote"]);
@@ -9461,21 +9632,6 @@ function tabIdentity(tab) {
 }
 function tabRealId(tab) {
   return tab.id && tab.id !== "" ? tab.id : "";
-}
-function tabLabel(tab) {
-  if (tab.kind === TabKind.Agent) {
-    return "Agent";
-  }
-  if (tab.kind === TabKind.Shell) {
-    return "Terminal";
-  }
-  if (tab.kind === TabKind.Web) {
-    return tab.name || "Web";
-  }
-  if (tab.kind === TabKind.VSCode) {
-    return tab.name || "VS Code";
-  }
-  return tab.name || "Tab";
 }
 function viewLabel(view) {
   switch (view) {
@@ -9810,6 +9966,18 @@ var AppShell = class {
   // A signature of everything the bar DRAWS (see tabBarSig): the bar is rebuilt only
   // when this changes, so an unrelated status snapshot never churns its DOM (#1737).
   lastTabBarSig = "";
+  // The insertion indicator for a reorder drag over the bar (#1813): a thin accent
+  // rule drawn in the gap a drop would land in. It lives INSIDE the bar (which CSS
+  // makes its containing block) and is re-appended after every rebuild, since
+  // renderTabBar replaceChildren()es the bar's contents.
+  tabInsert = null;
+  // The tab index an in-flight drag from THIS bar started at, captured at dragstart
+  // (#1813). dragover cannot read the payload — the dataTransfer is in protected
+  // mode until the drop — so this is the only way the bar can know, WHILE the drag is
+  // over it, whether the grabbed tab is the pinned agent tab and must refuse to
+  // reorder. null when no tab drag from this bar is in flight (including a foreign
+  // drag carrying the same MIME, which then falls through to the drop's own checks).
+  dragFromIndex = null;
   // Last-applied state, for cheap change detection between updates.
   lastSessions = null;
   lastSelectedId = null;
@@ -9913,6 +10081,31 @@ var AppShell = class {
     const tabs = selected ? sessionTabs(selected) : [];
     this.currentTabIds = tabs.map(tabIdentity);
     this.currentTabRealIds = tabs.map(tabRealId);
+  }
+  /** The CURRENT identity of the tab drawn at `index`, for a GESTURE fired from a
+   *  button that may have been built against an older snapshot.
+   *
+   *  A tab button outlives every snapshot that leaves tabBarSig unchanged, so the tab
+   *  object it closed over can go stale in the one way the signature cannot see: its
+   *  IDENTITY. Reading the live cache instead means a gesture names the tab by what it
+   *  is NOW, not by what it was when its button was drawn — the same reason the drag
+   *  payload reads these caches rather than the render (#1779).
+   *
+   *  Read WHEN A GESTURE FIRES, and for a gesture with duration that means when it
+   *  BEGINS — dragstart stamps its payload here, and a rename captures its subject here
+   *  as the edit opens (beginTabRename). Deliberately not re-read when such a gesture
+   *  COMMITS: by then this answers "who is at this position now?", which a close+recreate
+   *  of the same name makes a different tab, invisibly to the signature.
+   *
+   *  The index is not stale in the same way, and that is structural rather than lucky:
+   *  the signature pins the whole ORDERED kind/name list, so any snapshot that could
+   *  move a tab to a different ordinal necessarily rebuilds the bar and replaces this
+   *  button. A surviving button therefore still sits at its own index.
+   *
+   *  "" (matching no tab, so the action refuses rather than guesses) if the index is
+   *  somehow past the roster — the same honest no-answer tabRealId returns. */
+  liveTabIdentity(index) {
+    return this.currentTabIds[index] ?? "";
   }
   /** Renders the rail SCOPED to the selected project (redesign PR2) and FILTERED by
    *  the status filter (feat: hide archived by default): only that project's sessions
@@ -10223,10 +10416,30 @@ var AppShell = class {
     this.tabBar.setAttribute("role", "tablist");
     this.tabBar.setAttribute("aria-label", "Session tabs");
     this.attachTabDrag(this.tabBar);
+    this.tabInsert = h2("div", { class: "af-tab-insert" });
+    this.tabInsert.hidden = true;
+    this.tabInsert.setAttribute("aria-hidden", "true");
+    this.attachTabReorder(this.tabBar);
     this.main.className = "af-main af-main-term";
     this.main.replaceChildren(head, this.tabBar, this.termHost);
     this.renderTabBar(state);
     this.patchMainHead(state);
+  }
+  /**
+   * Ends an inline tab rename that is open in the bar, through the edit's OWN blur
+   * path — the same one a click elsewhere takes, so Enter/blur/Escape keep their
+   * single meaning and this adds no fourth way to leave an edit.
+   *
+   * Called by renderTabBar before it rebuilds; see the note there for why the rebuild
+   * must not be the thing that evicts the input. Deliberately a blur() rather than a
+   * direct remove: the edit owns whether an exit commits, and blurring lets it decide
+   * exactly as it would for a click away.
+   */
+  settleTabEdit() {
+    const edit = this.tabBar?.querySelector(".af-tab-edit");
+    if (edit && document.activeElement === edit) {
+      edit.blur();
+    }
   }
   /** (Re)builds the tab bar's buttons from the selected session's tabs, with the
    *  active tab highlighted. Rebuilds only the bar's children, so the sibling
@@ -10240,18 +10453,24 @@ var AppShell = class {
     if (!selected) {
       return;
     }
+    this.settleTabEdit();
     const tabs = sessionTabs(selected);
     const canManage = canManageTabs(selected);
     const active = Math.min(Math.max(state.activeTab, 0), tabs.length - 1);
     const shown = new Set(state.shownTabs);
     const children = tabs.map(
-      (tab, i) => tabButton(tab, i, i === active, shown.has(i), canManage, this.actions)
+      (tab, i) => tabButton(tab, i, i === active, shown.has(i), canManage, this.actions, () => this.liveTabIdentity(i), selected.id ?? "")
     );
     if (canManage && tabs.length < MAX_TABS) {
       children.push(this.newTabControl());
     }
     bar.replaceChildren(...children);
+    if (this.tabInsert) {
+      this.tabInsert.hidden = true;
+      bar.append(this.tabInsert);
+    }
     document.body.classList.remove("af-dragging-tab");
+    this.dragFromIndex = null;
     this.lastTabBarSig = tabBarSig(state);
   }
   /** Wires the tab bar as a DRAG SOURCE via event DELEGATION on the (stable) bar
@@ -10275,8 +10494,100 @@ var AppShell = class {
       e.dataTransfer.setData(TAB_DND_MIME, JSON.stringify({ id, index, tabs: this.currentTabIds }));
       e.dataTransfer.effectAllowed = "move";
       document.body.classList.add("af-dragging-tab");
+      this.dragFromIndex = index;
     });
-    bar.addEventListener("dragend", () => document.body.classList.remove("af-dragging-tab"));
+    bar.addEventListener("dragend", () => {
+      document.body.classList.remove("af-dragging-tab");
+      this.dragFromIndex = null;
+      this.hideTabInsert();
+    });
+  }
+  /**
+   * Wires the tab bar as a drop TARGET, for reordering tabs within it (#1813).
+   *
+   * The gesture is disambiguated from drag-to-split by WHERE the drag is released,
+   * and the two regions are disjoint DOM subtrees that never overlap: the bar is a
+   * sibling of the terminal host (renderMain appends head, tabBar, termHost), and
+   * every split drop handler is bound inside a .af-pane within that host (split.ts
+   * wireDrop). A drag released over the strip reorders; over a pane it splits or
+   * replaces. Neither handler can see the other's event — there is no shared
+   * ancestor between them below <main>, so no bubbling to suppress and no
+   * coordinate test to get wrong. That is also why the agent tab stays draggable:
+   * it can't be reordered, but dragging it into a pane to split is the oldest
+   * gesture the feature has, and pinning it at the DROP rather than the source
+   * keeps that working.
+   */
+  attachTabReorder(bar) {
+    const isTabDrag = (e) => e.dataTransfer?.types.includes(TAB_DND_MIME) ?? false;
+    bar.addEventListener("dragover", (e) => {
+      if (!isTabDrag(e) || this.dragFromIndex === 0) {
+        return;
+      }
+      e.preventDefault();
+      if (e.dataTransfer) {
+        e.dataTransfer.dropEffect = "move";
+      }
+      this.showTabInsert(bar, e.clientX);
+    });
+    bar.addEventListener("dragleave", (e) => {
+      const to = e.relatedTarget;
+      if (to && bar.contains(to)) {
+        return;
+      }
+      this.hideTabInsert();
+    });
+    bar.addEventListener("drop", (e) => {
+      if (!isTabDrag(e)) {
+        return;
+      }
+      e.preventDefault();
+      this.hideTabInsert();
+      const from = this.resolveBarDrag(e.dataTransfer?.getData(TAB_DND_MIME));
+      if (from === null) {
+        return;
+      }
+      const to = reorderTargetIndex(from, insertionIndexAt(tabCenters(bar), e.clientX));
+      if (to === null) {
+        return;
+      }
+      this.actions.reorderTab(from, to);
+    });
+  }
+  /** The dragged tab's CURRENT ordinal, or null to ignore the drop. Resolves the
+   *  payload by stable id exactly as a pane drop does (layout.ts resolveDragTab), so
+   *  a tab closed or reordered by another client mid-drag cancels rather than moving
+   *  whatever now sits at the drag-time index. */
+  resolveBarDrag(raw) {
+    if (!raw) {
+      return null;
+    }
+    let drag;
+    try {
+      drag = JSON.parse(raw);
+    } catch {
+      return null;
+    }
+    if (typeof drag.index !== "number" || !Array.isArray(drag.tabs)) {
+      return null;
+    }
+    return resolveDragTab(drag, this.currentTabRealIds, this.currentTabIds, this.currentTabIds.length);
+  }
+  /** Draws the insertion indicator in the gap a drop at `clientX` would land in. */
+  showTabInsert(bar, clientX) {
+    const marker = this.tabInsert;
+    const tabs = barTabs(bar);
+    if (!marker || tabs.length === 0) {
+      return;
+    }
+    const at = insertionIndexAt(tabCenters(bar), clientX);
+    const edge = at < tabs.length ? tabs[at]?.getBoundingClientRect().left ?? 0 : tabs[tabs.length - 1]?.getBoundingClientRect().right ?? 0;
+    marker.style.left = `${edge - bar.getBoundingClientRect().left + bar.scrollLeft}px`;
+    marker.hidden = false;
+  }
+  hideTabInsert() {
+    if (this.tabInsert) {
+      this.tabInsert.hidden = true;
+    }
   }
   patchMainHead(state) {
     const selected = selectedSession(state);
@@ -10320,14 +10631,33 @@ function tabBarSig(state) {
   const shown = [...new Set(state.shownTabs)].sort((a, b) => a - b);
   return JSON.stringify([selected.id ?? "", tabs.map((t) => [t.kind, t.name]), active, shown, canManage]);
 }
-function tabButton(tab, index, active, shown, canManage, actions2) {
+function barTabs(bar) {
+  return [...bar.querySelectorAll(".af-tab")];
+}
+function tabCenters(bar) {
+  return barTabs(bar).map((t) => {
+    const r = t.getBoundingClientRect();
+    return r.left + r.width / 2;
+  });
+}
+function tabButton(tab, index, active, shown, canManage, actions2, liveIdentity, selectedSessionId) {
   const cls = `af-tab${active ? " af-tab-active" : ""}${shown && !active ? " af-tab-shown" : ""}`;
   const btn = h2("button", { type: "button", class: cls, draggable: true });
   btn.setAttribute("role", "tab");
   btn.setAttribute("aria-selected", active ? "true" : "false");
   btn.dataset.tabIndex = String(index);
-  btn.append(h2("span", { class: "af-tab-label" }, tabLabel(tab)));
+  const glyph = h2("span", { class: "af-tab-glyph" }, tabGlyph(tab.kind));
+  glyph.setAttribute("aria-hidden", "true");
+  btn.append(glyph, h2("span", { class: "af-tab-label" }, tabLabel(tab)));
   btn.addEventListener("click", () => actions2.openTab(index));
+  const renameable = canManage && isRenameableTab(tab.kind);
+  btn.title = renameable ? `${tabDisplayLabel(tab)} \u2014 double-click to rename` : tabDisplayLabel(tab);
+  if (renameable) {
+    btn.addEventListener("dblclick", (e) => {
+      e.preventDefault();
+      beginTabRename(btn, tab, actions2, liveIdentity(), selectedSessionId);
+    });
+  }
   if (index > 0 && canManage) {
     const close = h2("span", { class: "af-tab-close", title: "Close tab" }, "\xD7");
     close.setAttribute("aria-hidden", "true");
@@ -10338,6 +10668,35 @@ function tabButton(tab, index, active, shown, canManage, actions2) {
     btn.append(close);
   }
   return btn;
+}
+function beginTabRename(btn, tab, actions2, editedId, editedSessionId) {
+  const input = h2("input", { type: "text", class: "af-tab-edit", value: tab.name });
+  input.setAttribute("aria-label", `Rename tab ${tabLabel(tab)}`);
+  let done = false;
+  const finish = (commit) => {
+    if (done) {
+      return;
+    }
+    done = true;
+    const next = input.value.trim();
+    input.replaceWith(btn);
+    if (commit && next !== "" && next !== tab.name) {
+      actions2.renameTab(editedId, next, editedSessionId);
+    }
+  };
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      finish(true);
+    } else if (e.key === "Escape") {
+      e.preventDefault();
+      finish(false);
+    }
+  });
+  input.addEventListener("blur", () => finish(true));
+  btn.replaceWith(input);
+  input.focus();
+  input.select();
 }
 function sessionRow(s, selected, actions2) {
   const status = rowStatus(s);
@@ -10773,13 +11132,53 @@ function closeSessionTab(index) {
   const selId = sel.id ?? "";
   const keepId = tabToKeepOnClose(tabs.map(tabIdentity), index, store.get().activeTab);
   const gen = splitView.layoutGeneration();
-  void closeTab(selId, sel.title, target.name, tok).then(() => fetchSnapshot(tok)).then((sessions) => {
+  void closeTab(selId, sel.title, target.name, tabRealId(target), tok).then(() => fetchSnapshot(tok)).then((sessions) => {
     const shrunk = sessions.find((s) => s.id === selId);
     const next = shrunk ? sessionTabs(shrunk).map(tabIdentity).indexOf(keepId) : -1;
     store.set({ sessions, selectedId: pickSelection(sessions, store.get().selectedId) });
     if (next >= 0 && splitView.layoutGeneration() === gen && store.get().selectedId === selId) {
       splitView.setFocusedTab(next);
     }
+  }).catch((e) => surfaceTabError(e));
+}
+function renameSessionTab(id, name, editedSessionId) {
+  const sel = selectedSessionData();
+  const tok = token;
+  if (!sel || tok === null || !canManageTabs(sel)) {
+    return;
+  }
+  if ((sel.id ?? "") !== editedSessionId) {
+    return;
+  }
+  const target = sessionTabs(sel).find((t) => tabIdentity(t) === id);
+  if (!target) {
+    surfaceTabError(new Error("That tab is gone \u2014 nothing was renamed."));
+    return;
+  }
+  if (!isRenameableTab(target.kind)) {
+    return;
+  }
+  clearTabError();
+  const selId = sel.id ?? "";
+  void renameTab(selId, sel.title, target.name, name, tabRealId(target), tok).then(() => fetchSnapshot(tok)).then((sessions) => {
+    store.set({ sessions, selectedId: pickSelection(sessions, store.get().selectedId) });
+  }).catch((e) => surfaceTabError(e));
+}
+function reorderSessionTab(from, to) {
+  const sel = selectedSessionData();
+  const tok = token;
+  if (!sel || tok === null || !canManageTabs(sel)) {
+    return;
+  }
+  const tabs = sessionTabs(sel);
+  const target = tabs[from];
+  if (!target || from <= 0 || to <= 0 || to >= tabs.length || from === to) {
+    return;
+  }
+  clearTabError();
+  const selId = sel.id ?? "";
+  void reorderTab(selId, sel.title, target.name, to, tabRealId(target), tok).then(() => fetchSnapshot(tok)).then((sessions) => {
+    store.set({ sessions, selectedId: pickSelection(sessions, store.get().selectedId) });
   }).catch((e) => surfaceTabError(e));
 }
 function surfaceTabError(e) {
@@ -10941,6 +11340,8 @@ var actions = {
   openTab,
   newTab: createSessionTab,
   closeTab: closeSessionTab,
+  renameTab: renameSessionTab,
+  reorderTab: reorderSessionTab,
   switchView,
   setConfigValue: applyConfigValue,
   switchProject,
@@ -10962,8 +11363,19 @@ function syncSplit(state) {
   const tabRealIds = selected ? sessionTabs(selected).map(tabRealId) : [""];
   const tabTargets = selected ? sessionTabs(selected).map((t) => t.url) : [];
   const tabKinds = selected ? sessionTabs(selected).map((t) => t.kind) : [];
+  const tabNames = selected ? sessionTabs(selected).map((t) => t.name) : [];
   const archived = selected ? isArchived(selected) : false;
-  splitView.setSession(tok !== null ? selId : null, tok, tabIds, initialTab, tabTargets, tabKinds, tabRealIds, archived);
+  splitView.setSession(
+    tok !== null ? selId : null,
+    tok,
+    tabIds,
+    initialTab,
+    tabTargets,
+    tabKinds,
+    tabRealIds,
+    archived,
+    tabNames
+  );
 }
 function disposeSplit() {
   splitView.dispose();

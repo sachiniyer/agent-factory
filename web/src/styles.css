@@ -1106,6 +1106,9 @@ body {
   border-bottom: 1px solid var(--af-border);
   overflow-x: auto;
   scrollbar-width: thin;
+  /* The containing block for the reorder insertion indicator (#1813), which is
+   * absolutely positioned into the gap a drop would land in. */
+  position: relative;
 }
 
 .af-tab {
@@ -1153,10 +1156,50 @@ body {
   cursor: grabbing;
 }
 
+/* The tab's kind glyph (#1813): a quiet mark that tells agent / terminal / web apart
+ * at a glance, mirroring the TUI (ui/tree/labels.go). Dimmer than the label even on
+ * the active tab — it classifies, it doesn't compete with the name. */
+.af-tab-glyph {
+  flex: 0 0 auto;
+  color: var(--af-text-3, var(--af-text-2));
+  line-height: 1;
+}
+
 .af-tab-label {
   overflow: hidden;
   text-overflow: ellipsis;
   max-width: 12rem;
+}
+
+/* The inline rename edit (#1813), which REPLACES its tab button for the duration of
+ * the edit. Sized to sit in the row without reflowing the bar around it. */
+.af-tab-edit {
+  align-self: center;
+  width: 8rem;
+  padding: 0.15rem 0.3rem;
+  background: var(--af-bg-inset);
+  color: var(--af-text);
+  border: 1px solid var(--af-accent);
+  border-radius: var(--af-r-sm);
+  font: inherit;
+  font-size: var(--af-fs-xs);
+}
+
+/* The insertion indicator for a reorder drag (#1813): an accent rule in the gap the
+ * drop would land in. Absolutely positioned within the bar (hence the bar's
+ * position:relative) and pointer-events:none so it never becomes the drag's target. */
+.af-tab-insert {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  margin-left: -1px;
+  background: var(--af-accent);
+  pointer-events: none;
+}
+
+.af-tab-insert[hidden] {
+  display: none;
 }
 
 /* The × close affordance on a non-agent tab: dim until hovered, and it must not
@@ -1391,7 +1434,23 @@ body {
   display: flex;
 }
 
+/* The pane's kind glyph (#1813), the same mark the tab bar draws for the same tab.
+ * flex:0 0 auto keeps it hugging the label rather than being pushed to the far edge
+ * by the head's space-between. */
+.af-pane-glyph {
+  flex: 0 0 auto;
+  font-size: var(--af-fs-2xs);
+  color: var(--af-text-2);
+  line-height: 1;
+}
+
+/* Takes the free space, so the glyph stays beside it and only the × is pushed right
+ * (the head is space-between, and it has three children since #1813). min-width:0 is
+ * what lets a long tab name actually ellipsize inside a flex item. */
 .af-pane-label {
+  flex: 1 1 auto;
+  min-width: 0;
+  margin-right: auto;
   font-size: var(--af-fs-2xs);
   color: var(--af-text-2);
   white-space: nowrap;
@@ -1467,11 +1526,18 @@ body {
 }
 
 /* The `display` above outranks the UA `[hidden]` rule (the same hazard .af-viewport
- * documents), so without this the two fallbacks that WITHDRAW this link — the
- * archived placeholder (#1809) and the no-URL panel — would still render an "open ↗"
- * that goes nowhere. Not hypothetical: the display rule arrived with the #1827 voice
- * polish and silently un-hid the no-URL case until the #1809 archived test caught it. */
-.af-webpane-open[hidden] {
+ * documents), so without this the fallbacks that WITHDRAW a control — the archived
+ * placeholder (#1809) and the no-URL panel for "open ↗", plus the external card for
+ * ↻ — would still render it, going nowhere. Not hypothetical: the display rule
+ * arrived with the #1827 voice polish and silently un-hid the no-URL case until the
+ * #1809 archived test caught it.
+ *
+ * Scoped to BOTH controls, not just the link: they share the `display` above, so they
+ * share its hazard. Withdrawing ↻ where it cannot act (external / archived / no-URL)
+ * is otherwise a no-op that sets the attribute and changes no pixel — the same silent
+ * failure, one control over. */
+.af-webpane-open[hidden],
+.af-webpane-reload[hidden] {
   display: none;
 }
 
@@ -1499,9 +1565,10 @@ body {
   background: var(--af-bg-term);
 }
 
-/* Shown when a direct external frame is blocked from embedding (best-effort), or for
- * a URL-less tab. It fills the pane canvas (--af-bg-term via .af-webpane) with themed
- * text, so it reads correctly in both light and dark. */
+/* The designed pane state whenever there is no live frame to show: a direct external
+ * target (never framed inline, item A), a dead dev server (#1813), an archived
+ * session (#1809), or a URL-less tab. It fills the pane canvas (--af-bg-term via
+ * .af-webpane) with themed text, so it reads correctly in both light and dark. */
 .af-webpane-fallback {
   display: flex;
   flex-direction: column;
@@ -1520,6 +1587,36 @@ body {
 
 .af-webpane-fallback-link {
   color: var(--af-accent);
+}
+
+/* The dead-dev-server state (#1813): the pane a developer sees most often, because a
+ * tab created before its port answers is the NORMAL first state, not an error. So it
+ * is styled exactly like its calm siblings — the same --af-text-2 the archived and
+ * no-URL fallbacks use, deliberately NOT --af-danger: nothing is broken, the server
+ * just isn't up yet, and a red pane every time an agent opens a preview would be
+ * noise. No spinner or pulse either (#1766): the state is static and Retry is the
+ * verb. The variant class exists as the identity hook, not as a colour change. */
+.af-webpane-dead {
+  color: var(--af-text-2);
+}
+
+/* The external-embedding state (item A): a direct external site is never framed
+ * inline, because af cannot tell a working embed from the browser's own X-Frame-
+ * Options refusal and must never show the refusal. It reads exactly as calm as its
+ * siblings — same --af-text-2 as the base fallback, deliberately not --af-danger:
+ * "opens in a new tab" is a normal fact about external sites, not an error. The
+ * class is the identity hook (CSS + the driver test); the open link carries the
+ * action. */
+.af-webpane-external {
+  color: var(--af-text-2);
+}
+
+.af-webpane-fallback-retry {
+  flex: 0 0 auto;
+}
+
+.af-webpane-fallback-retry[hidden] {
+  display: none;
 }
 
 /* The focused pane, marked only when the layout is split (a single pane already reads

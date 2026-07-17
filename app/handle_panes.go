@@ -397,6 +397,92 @@ func sameTabSlotKeys(a, b []tabSlotKey) bool {
 	return true
 }
 
+// tabSlotResolver answers "where did this tab go?" for one tab-set change: it
+// maps a slot key captured BEFORE the change to that tab's index in the roster
+// AFTER it. Every binding into the roster that has to survive the change goes
+// through it — the open panes and the tree's own selection — so the two can
+// never disagree about what "the same tab" means, which is the whole failure
+// mode: a reorder that moves one and not the other leaves the user's selection
+// on a different tab than the pane they are looking at.
+type tabSlotResolver struct {
+	idxByID   map[string]int
+	idxByName map[string]int
+	domain    tabIdentityDomain
+}
+
+func newTabSlotResolver(instance *session.Instance, domain tabIdentityDomain) tabSlotResolver {
+	tabs := instance.GetTabs()
+	r := tabSlotResolver{
+		idxByID:   make(map[string]int, len(tabs)),
+		idxByName: make(map[string]int, len(tabs)),
+		domain:    domain,
+	}
+	for i, tab := range tabs {
+		if tab.ID != "" {
+			r.idxByID[tab.ID] = i
+		}
+		r.idxByName[tab.Name] = i
+	}
+	return r
+}
+
+// resolve returns the key's index in the current roster, or false when that tab
+// is really gone. The name is the key exactly where the id is not an identity —
+// a replaced session (every id freshly minted) or an id-less key (the agent
+// slot, a legacy pre-#1738 row, an AttachShellTab tab before its backfill) —
+// which is the same rule paneTabKeys and tabIdentityDomain already encode.
+func (r tabSlotResolver) resolve(key tabSlotKey) (int, bool) {
+	if r.domain == replacedSessionTabs || key.id == "" {
+		idx, ok := r.idxByName[key.name]
+		return idx, ok
+	}
+	idx, ok := r.idxByID[key.id]
+	return idx, ok
+}
+
+// reconcileActiveTabForTabs carries the TREE's selection across a tab-set change
+// — the selection twin of reconcilePanesForTabs, keyed by the same identity
+// through the same resolver.
+//
+// A selection is an IDENTITY ("the tab I am looking at"), not a position, and
+// nothing else in the TUI enforces that: ClampActiveTab and clampSelectionTab
+// only keep the index IN RANGE, which a permutation never violates, so a reorder
+// on another client silently re-points store.ActiveTab at whatever tab slid into
+// the ordinal (#1906's class, reaching the tree through the door #1813's reorder
+// opened). Re-resolving the pre-change key is what makes the selection move WITH
+// its tab instead.
+//
+// The sidebar cursor is remapped in the same breath, and that is load-bearing
+// rather than cosmetic: a tab row is keyed by SLOT (rowIdentity), so the cursor
+// has the same exposure, and pushSelection reads the cursor's slot straight back
+// into store.ActiveTab — leaving it behind would let the next read CLOBBER this
+// remap back onto the wrong tab. SyncCursorToActiveTab no-ops unless the cursor
+// really rests on a tab row, so a cursor parked on a header or an instance row is
+// untouched.
+//
+// Only the STORE's selected instance has an active tab to carry (the same
+// question handleCloseTab answers with treeIsSelected), and a tab that is truly
+// gone is left to the existing clamp — this fixes where the selection LANDS under
+// a permutation, and deliberately does not change what an out-of-band close does.
+func (m *home) reconcileActiveTabForTabs(instance *session.Instance, oldKeys []tabSlotKey, domain tabIdentityDomain) bool {
+	if instance == nil || instance != m.store.GetSelectedInstance() {
+		return false
+	}
+	slot := m.store.ActiveTab()
+	if slot < 0 || slot >= len(oldKeys) {
+		return false
+	}
+	idx, ok := newTabSlotResolver(instance, domain).resolve(oldKeys[slot])
+	if !ok || idx == slot {
+		return false
+	}
+	m.store.SetActiveTab(idx)
+	m.clampSelectionTab()
+	m.menu.SetActiveTab(m.store.ActiveTab())
+	m.sidebar.SyncCursorToActiveTab()
+	return true
+}
+
 // reconcilePanesForTabs re-binds the instance's open panes after its tab set
 // changed — the SHARED close/rebind semantics of the TUI `w` kill and the
 // daemon snapshot reconcile (#960: tabs can change with no local action, so
@@ -421,15 +507,7 @@ func sameTabSlotKeys(a, b []tabSlotKey) bool {
 // any pane closed or re-bound; callers relayout on true so the focus ring and
 // the §2.6 pane-count fitting stay consistent.
 func (m *home) reconcilePanesForTabs(instance *session.Instance, oldKeys []tabSlotKey, domain tabIdentityDomain) bool {
-	tabs := instance.GetTabs()
-	idxByID := make(map[string]int, len(tabs))
-	idxByName := make(map[string]int, len(tabs))
-	for i, tab := range tabs {
-		if tab.ID != "" {
-			idxByID[tab.ID] = i
-		}
-		idxByName[tab.Name] = i
-	}
+	res := newTabSlotResolver(instance, domain)
 	changed := false
 	for _, p := range append([]*store.OpenPane(nil), m.store.OpenPanes()...) {
 		if p.Instance() != instance {
@@ -439,17 +517,7 @@ func (m *home) reconcilePanesForTabs(instance *session.Instance, oldKeys []tabSl
 		if slot < 0 || slot >= len(oldKeys) {
 			continue
 		}
-		key := oldKeys[slot]
-		var (
-			idx int
-			ok  bool
-		)
-		switch {
-		case domain == replacedSessionTabs || key.id == "":
-			idx, ok = idxByName[key.name]
-		default:
-			idx, ok = idxByID[key.id]
-		}
+		idx, ok := res.resolve(oldKeys[slot])
 		switch {
 		case !ok:
 			m.closePaneWindow(p)

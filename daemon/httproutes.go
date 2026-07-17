@@ -131,9 +131,23 @@ var httpRoutes = []HTTPRoute{
 	{
 		Method:        http.MethodPost,
 		Path:          "/v1/CloseTab",
-		Description:   "Close a non-agent tab of a session (the agent tab cannot be closed).",
+		Description:   "Close a non-agent tab of a session (the agent tab cannot be closed). Address the tab by tab_id (its stable id) when you have one: it wins over tab_name/tab_index, which name a tab that may since have been closed and had its name or slot reused. A tab_id that no longer resolves is refused rather than falling back — closing is destructive, so a misroute kills the wrong tab's session.",
 		RequestFields: jsonFields(reflect.TypeOf(CloseTabRequest{})),
 		handler:       func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.CloseTab) },
+	},
+	{
+		Method:        http.MethodPost,
+		Path:          "/v1/RenameTab",
+		Description:   "Rename a tab of a session. Only web, process and VS Code tabs can be renamed — agent and shell tabs render fixed labels. The name is sanitized and made unique, so the resolved name is returned. Address the tab by tab_id (its stable id) when you have one: it wins over tab_name/tab_index, which name a tab that may since have been closed and had its name or slot reused. A tab_id that no longer resolves is refused rather than falling back.",
+		RequestFields: jsonFields(reflect.TypeOf(RenameTabRequest{})),
+		handler:       func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.RenameTab) },
+	},
+	{
+		Method:        http.MethodPost,
+		Path:          "/v1/ReorderTab",
+		Description:   "Move a tab within a session's roster. Index 0 is reserved for the agent tab, so only slots 1..n-1 can be moved or targeted. Address the tab by tab_id (its stable id) when you have one — see RenameTab; it matters most here, since a reorder is what invalidates every other client's tab_index.",
+		RequestFields: jsonFields(reflect.TypeOf(ReorderTabRequest{})),
+		handler:       func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.ReorderTab) },
 	},
 	{
 		Method:        http.MethodPost,

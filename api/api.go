@@ -609,15 +609,21 @@ func init() {
 	sessionsWatchCmd.Flags().DurationVar(&watchTimeoutFlag, "timeout", 30*time.Minute, "Give up and exit non-zero if the session is not idle within this window (0 = wait forever)")
 	sessionsWatchCmd.Flags().DurationVar(&watchIntervalFlag, "interval", 2*time.Second, "How often to poll the session's status")
 
-	// tab-create/tab-delete and their tabs {create,delete} aliases (#1192)
-	// share the same flag globals via these binders, so the two spellings stay
-	// in lockstep.
+	// The tab-* verbs and their tabs {create,delete,rename,reorder} aliases
+	// (#1192) share the same flag globals via these binders, so the two spellings
+	// stay in lockstep.
 	bindTabCreateFlags(sessionsTabCreateCmd)
 	bindTabCreateFlags(sessionsTabsCreateCmd)
 	bindTabDeleteFlags(sessionsTabDeleteCmd)
 	bindTabDeleteFlags(sessionsTabsDeleteCmd)
+	bindTabRenameFlags(sessionsTabRenameCmd)
+	bindTabRenameFlags(sessionsTabsRenameCmd)
+	bindTabReorderFlags(sessionsTabReorderCmd)
+	bindTabReorderFlags(sessionsTabsReorderCmd)
 	sessionsTabsCmd.AddCommand(sessionsTabsCreateCmd)
 	sessionsTabsCmd.AddCommand(sessionsTabsDeleteCmd)
+	sessionsTabsCmd.AddCommand(sessionsTabsRenameCmd)
+	sessionsTabsCmd.AddCommand(sessionsTabsReorderCmd)
 
 	SessionsCmd.AddCommand(sessionsListCmd)
 	SessionsCmd.AddCommand(sessionsGetCmd)
@@ -625,6 +631,8 @@ func init() {
 	SessionsCmd.AddCommand(sessionsSendPromptCmd)
 	SessionsCmd.AddCommand(sessionsTabCreateCmd)
 	SessionsCmd.AddCommand(sessionsTabDeleteCmd)
+	SessionsCmd.AddCommand(sessionsTabRenameCmd)
+	SessionsCmd.AddCommand(sessionsTabReorderCmd)
 	SessionsCmd.AddCommand(sessionsTabsCmd)
 	SessionsCmd.AddCommand(sessionsPreviewCmd)
 	SessionsCmd.AddCommand(sessionsWatchCmd)

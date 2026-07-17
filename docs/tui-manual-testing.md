@@ -62,7 +62,7 @@ text-greppable selection signal the driver asserts on:
 
 ```
   ▾ alpha          ●      ← selected (expanded); ● = ready
-       └ 1 Agent *
+       └ 1 ◆ Agent *
   ▸ beta           ●      ← not selected (collapsed)
 ```
 

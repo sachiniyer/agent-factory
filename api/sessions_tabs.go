@@ -174,18 +174,171 @@ func runTabDelete(cmd *cobra.Command, args []string) error {
 	return jsonOut(map[string]string{"name": name})
 }
 
-// The sessions tabs {create,delete} group gives a noun-subcommand spelling of
-// the tab-create/tab-delete verbs (#1192). Both spellings share the same RunE
-// and flag globals; the hyphen verbs are kept for the scripts that already use
-// them. tab-list has no equivalent — tabs are listed via `sessions get`.
+var (
+	tabRenameNameFlag    string
+	tabRenameNewNameFlag string
+)
+
+// bindTabRenameFlags registers the tab-rename flags on c, bound to the shared
+// globals. Called for both the hyphen verb and the tabs-rename alias (#1192).
+func bindTabRenameFlags(c *cobra.Command) {
+	c.Flags().StringVar(&tabRenameNameFlag, "name", "", "Name of the tab to rename (required)")
+	c.Flags().StringVar(&tabRenameNewNameFlag, "new-name", "", "New name for the tab (required; sanitized and auto-suffixed on collision)")
+	c.MarkFlagRequired("name")
+	c.MarkFlagRequired("new-name")
+}
+
+var sessionsTabRenameCmd = &cobra.Command{
+	Use:   "tab-rename <title>",
+	Short: "Rename a tab of a session",
+	Long: `Rename an existing tab — the fix for a name you have to live with all day,
+typically one an agent picked when it created the tab.
+
+Only web, process and VS Code tabs can be renamed: those are the tabs that
+display their name. The agent tab always shows "Agent" and shell tabs always show
+"Terminal" on every surface, so renaming them would change nothing and is refused.
+
+--new-name follows the same rules as tab-create's --name: characters outside
+[A-Za-z0-9_-] become "-", and the name is made unique within the session
+(auto-suffixed -2, -3, …). A name that sanitizes away to nothing is an error
+rather than a silent fall back to a default. The resolved name is printed on
+success — that is what the tab is actually called, and what the other tab verbs
+now address it by.
+
+The rename persists across a daemon/af restart and does not disturb the tab's
+running process. Not available for remote sessions (their tabs are fixed by
+remote_hooks config) or archived sessions (restore them first).`,
+	Args: cobra.ExactArgs(1),
+	RunE: runTabRename,
+}
+
+// runTabRename is the shared RunE body behind both sessions tab-rename and the
+// sessions tabs rename alias (#1192); see runTabCreate.
+func runTabRename(cmd *cobra.Command, args []string) error {
+	log.Initialize(false)
+	defer log.Close()
+
+	if strings.TrimSpace(tabRenameNameFlag) == "" {
+		return jsonError(fmt.Errorf("--name is required"))
+	}
+	if strings.TrimSpace(tabRenameNewNameFlag) == "" {
+		return jsonError(fmt.Errorf("--new-name is required"))
+	}
+
+	// Honor --repo scoping (#891 class), mirroring tab-create/tab-delete: an
+	// empty repoID preserves the all-repo search; a non-empty one confines the
+	// session lookup to that repo so a same-titled session in another repo never
+	// has a tab renamed out from under it.
+	repoID, err := resolveRepoID()
+	if err != nil {
+		return jsonError(err)
+	}
+
+	name, err := renameTabViaDaemon(daemon.RenameTabRequest{
+		Title:   args[0],
+		RepoID:  repoID,
+		TabName: tabRenameNameFlag,
+		NewName: tabRenameNewNameFlag,
+	})
+	if err != nil {
+		return jsonError(err)
+	}
+	return jsonOut(map[string]string{"name": name})
+}
+
+var (
+	tabReorderNameFlag  string
+	tabReorderIndexFlag int
+)
+
+// bindTabReorderFlags registers the tab-reorder flags on c, bound to the shared
+// globals. Called for both the hyphen verb and the tabs-reorder alias (#1192).
+func bindTabReorderFlags(c *cobra.Command) {
+	c.Flags().StringVar(&tabReorderNameFlag, "name", "", "Name of the tab to move (required)")
+	c.Flags().IntVar(&tabReorderIndexFlag, "index", 0, "Destination slot, 0-based, as the tab bar reads left to right (required; slot 0 is the agent tab and can't be targeted)")
+	c.MarkFlagRequired("name")
+	c.MarkFlagRequired("index")
+}
+
+var sessionsTabReorderCmd = &cobra.Command{
+	Use:   "tab-reorder <title>",
+	Short: "Move a tab within a session's tab order",
+	Long: `Move a tab to a different slot, so the tab order is yours rather than whatever
+order the tabs happened to be created in.
+
+--index is the destination slot, 0-based, counting the tab bar left to right,
+and read as the tab's FINAL position: moving a tab to --index 3 of a 4-tab
+session puts it last.
+
+Slot 0 is reserved for the agent tab: the agent tab can't be moved, and no tab
+can be moved in front of it. That is structural, not cosmetic — the agent tab is
+identified by its position throughout a session's lifecycle.
+
+The new order persists across a daemon/af restart and does not disturb any tab's
+running process. Not available for remote sessions (their tabs are fixed by
+remote_hooks config) or archived sessions (restore them first).`,
+	Args: cobra.ExactArgs(1),
+	RunE: runTabReorder,
+}
+
+// runTabReorder is the shared RunE body behind both sessions tab-reorder and
+// the sessions tabs reorder alias (#1192); see runTabCreate.
+func runTabReorder(cmd *cobra.Command, args []string) error {
+	log.Initialize(false)
+	defer log.Close()
+
+	if strings.TrimSpace(tabReorderNameFlag) == "" {
+		return jsonError(fmt.Errorf("--name is required"))
+	}
+
+	// Honor --repo scoping (#891 class), mirroring the other tab verbs.
+	repoID, err := resolveRepoID()
+	if err != nil {
+		return jsonError(err)
+	}
+
+	name, index, err := reorderTabViaDaemon(daemon.ReorderTabRequest{
+		Title:    args[0],
+		RepoID:   repoID,
+		TabName:  tabReorderNameFlag,
+		NewIndex: tabReorderIndexFlag,
+	})
+	if err != nil {
+		return jsonError(err)
+	}
+	return jsonOut(map[string]any{"name": name, "index": index})
+}
+
+// The sessions tabs {create,delete,rename,reorder} group gives a
+// noun-subcommand spelling of the tab-* verbs (#1192). Both spellings share the
+// same RunE and flag globals; the hyphen verbs are kept for the scripts that
+// already use them. tab-list has no equivalent — tabs are listed via `sessions
+// get`.
 var sessionsTabsCmd = &cobra.Command{
 	Use:   "tabs",
-	Short: "Manage a session's process tabs (create/delete)",
-	Long: `Noun-subcommand aliases for the tab-create/tab-delete verbs.
+	Short: "Manage a session's tabs (create/delete/rename/reorder)",
+	Long: `Noun-subcommand aliases for the tab-create/tab-delete/tab-rename/tab-reorder
+verbs.
 
-"sessions tabs create" is identical to "sessions tab-create" and "sessions tabs
-delete" is identical to "sessions tab-delete"; the hyphen verbs remain supported
-for existing scripts. To list a session's tabs, use "sessions get <title>".`,
+"sessions tabs create" is identical to "sessions tab-create", and the same holds
+for delete, rename and reorder; the hyphen verbs remain supported for existing
+scripts. To list a session's tabs, use "sessions get <title>".`,
+}
+
+var sessionsTabsRenameCmd = &cobra.Command{
+	Use:   "rename <title>",
+	Short: "Rename a tab of a session",
+	Long:  `Alias for "sessions tab-rename". See "af sessions tab-rename --help" for details.`,
+	Args:  cobra.ExactArgs(1),
+	RunE:  runTabRename,
+}
+
+var sessionsTabsReorderCmd = &cobra.Command{
+	Use:   "reorder <title>",
+	Short: "Move a tab within a session's tab order",
+	Long:  `Alias for "sessions tab-reorder". See "af sessions tab-reorder --help" for details.`,
+	Args:  cobra.ExactArgs(1),
+	RunE:  runTabReorder,
 }
 
 var sessionsTabsCreateCmd = &cobra.Command{

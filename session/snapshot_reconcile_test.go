@@ -204,6 +204,147 @@ func TestReconcileTabsFromData_SkipsTmuxfulTabWithNoSession(t *testing.T) {
 	assert.Len(t, inst.GetTabs(), 1)
 }
 
+// reconcileWithWebTabs seeds inst with the agent tab plus the named web tabs (in
+// order), each carrying the given stable id, by reconciling a target roster —
+// the same path the daemon's snapshot drives. Returns the seeded target so a
+// follow-up reconcile can mutate it.
+func reconcileWebTabs(t *testing.T, inst *Instance, agentName string, ids, names []string) []TabData {
+	t.Helper()
+	require.Len(t, ids, len(names))
+	target := []TabData{{ID: "agent-id", Name: inst.GetTabs()[0].Name, Kind: TabKindAgent, TmuxName: agentName}}
+	for k := range ids {
+		target = append(target, TabData{ID: ids[k], Name: names[k], Kind: TabKindWeb, URL: "http://localhost:5173/" + names[k]})
+	}
+	_, err := inst.ReconcileTabsFromData(target)
+	require.NoError(t, err)
+	require.Len(t, inst.GetTabs(), len(names)+1)
+	return target
+}
+
+// TestReconcileTabsFromData_PermutesToTargetOrder is the #1813 reorder
+// regression. A pure reorder leaves every name unchanged, so the old name-keyed
+// drop/add loops were both no-ops and the local order never moved — the reorder
+// reached every client except the TUI until a restart. The reconcile must permute
+// the live list to the daemon's order, pin the agent tab at 0, and report the
+// change.
+func TestReconcileTabsFromData_PermutesToTargetOrder(t *testing.T) {
+	const agentName = "af_snap_reorder"
+	inst, _ := newReconcileTestInstance(t, agentName, map[string]bool{agentName: true})
+
+	target := reconcileWebTabs(t, inst, agentName,
+		[]string{"id-a", "id-b", "id-c"}, []string{"a", "b", "c"})
+	require.Equal(t, []string{inst.GetTabs()[0].Name, "a", "b", "c"}, reconcileNames(inst))
+	tabA := inst.GetTabs()[1]
+
+	// The daemon moved "a" to the end: [agent, b, c, a].
+	target[1], target[2], target[3] = target[2], target[3], target[1]
+	changed, err := inst.ReconcileTabsFromData(target)
+	require.NoError(t, err)
+	assert.True(t, changed, "a reorder must report a change so the TUI repaints")
+
+	assert.Equal(t, []string{inst.GetTabs()[0].Name, "b", "c", "a"}, reconcileNames(inst))
+	assert.Same(t, tabA, inst.GetTabs()[3], "the moved tab keeps its identity, only its slot changes")
+	assert.Equal(t, TabKindAgent, inst.GetTabs()[0].Kind, "the agent tab stays pinned at index 0")
+
+	changedAgain, err := inst.ReconcileTabsFromData(target)
+	require.NoError(t, err)
+	assert.False(t, changedAgain, "re-reconciling the same order is a no-op")
+}
+
+// TestReconcileTabsFromData_ReordersLegacyIdlessRoster: the reorder pass is
+// name-keyed, so it corrects a pre-#1738 roster whose records carry no stable id
+// — the rollforward the reconcile must not regress. Names are unique per
+// instance, so name is a sound join key even without ids.
+func TestReconcileTabsFromData_ReordersLegacyIdlessRoster(t *testing.T) {
+	const agentName = "af_snap_legacy"
+	inst, _ := newReconcileTestInstance(t, agentName, map[string]bool{agentName: true})
+
+	// No ids anywhere — a roster written before #1738.
+	agentTab := inst.GetTabs()[0].Name
+	target := []TabData{
+		{Name: agentTab, Kind: TabKindAgent, TmuxName: agentName},
+		{Name: "a", Kind: TabKindWeb, URL: "http://localhost/a"},
+		{Name: "b", Kind: TabKindWeb, URL: "http://localhost/b"},
+	}
+	_, err := inst.ReconcileTabsFromData(target)
+	require.NoError(t, err)
+	require.Equal(t, []string{agentTab, "a", "b"}, reconcileNames(inst))
+
+	target[1], target[2] = target[2], target[1] // [agent, b, a]
+	changed, err := inst.ReconcileTabsFromData(target)
+	require.NoError(t, err)
+	assert.True(t, changed, "an id-less reorder must still repaint")
+	assert.Equal(t, []string{agentTab, "b", "a"}, reconcileNames(inst))
+}
+
+// TestReconcileTabsFromData_ClosedTabWhoseNameIsReused is the identity case the
+// name-keyed reconcile could not express: between two polls the daemon closed
+// tab B and renamed tab A to "B". A snapshot is a FULL roster, so the TUI never
+// sees the intermediate state — it must resolve both mutations from the end
+// state alone.
+//
+// Keyed on names, "B" is still in the target, so the closed tab is never
+// dropped and the renamed tab is a second tab called "B" — two rows for one
+// daemon tab, and (worse) both adopt id "a", which silently breaks the id-keyed
+// addressing (?tab_id= streams, pane bindings) the tab feature rests on. What
+// resolves it is that the DROP keys on the id (#1886): "b" is absent from the
+// target's ids, so the closed tab goes even though its name is still listed.
+//
+// Distinct from TestReconcileTabsFromData_CloseRecreateSameNameIsIDKeyed, which
+// is one tab closed and recreated under its own name. Here the name moves
+// BETWEEN two tabs — only a rename (#1813) can do that — so it is the rename
+// pass and the id-keyed drop interacting, which is this PR's seam and not
+// covered by that test.
+func TestReconcileTabsFromData_ClosedTabWhoseNameIsReused(t *testing.T) {
+	const agentName = "af_snap_reuse"
+	inst, _ := newReconcileTestInstance(t, agentName, map[string]bool{agentName: true})
+	agentTab := inst.GetTabs()[0].Name
+
+	withBoth := []TabData{
+		{Name: agentTab, Kind: TabKindAgent, TmuxName: agentName},
+		{ID: "b", Name: "B", Kind: TabKindWeb, URL: "http://localhost/b"},
+		{ID: "a", Name: "A", Kind: TabKindWeb, URL: "http://localhost/a"},
+	}
+	_, err := inst.ReconcileTabsFromData(withBoth)
+	require.NoError(t, err)
+	require.Equal(t, []string{agentTab, "B", "A"}, reconcileNames(inst))
+
+	// One snapshot later: B is gone and A has taken its name.
+	target := []TabData{
+		{Name: agentTab, Kind: TabKindAgent, TmuxName: agentName},
+		{ID: "a", Name: "B", Kind: TabKindWeb, URL: "http://localhost/a"},
+	}
+	changed, err := inst.ReconcileTabsFromData(target)
+	require.NoError(t, err)
+	assert.True(t, changed, "a drop plus a rename must repaint")
+
+	tabs := inst.GetTabs()
+	require.Len(t, tabs, 2, "the closed tab must be dropped, not kept alive by the renamed tab reusing its name")
+	// By ID, not by pointer: the rename applies copy-on-write
+	// (replaceTabFieldLocked), so the surviving *Tab is deliberately a NEW object —
+	// which is what keeps a GetTabs reader from racing the write. The id is the
+	// identity, and it is what must have survived.
+	assert.Equal(t, "a", tabs[1].ID, "the surviving tab is the RENAMED one (id a), not the closed one")
+	assert.Equal(t, "a", tabs[1].ID)
+	assert.Equal(t, "B", tabs[1].Name)
+
+	seen := make(map[string]bool, len(tabs))
+	for _, tab := range tabs {
+		require.False(t, seen[tab.ID], "tab id %q is on two tabs at once: id-keyed addressing is broken", tab.ID)
+		seen[tab.ID] = true
+	}
+}
+
+// reconcileNames returns an instance's tab display names in order.
+func reconcileNames(inst *Instance) []string {
+	tabs := inst.GetTabs()
+	names := make([]string, len(tabs))
+	for i, tab := range tabs {
+		names[i] = tab.Name
+	}
+	return names
+}
+
 // TestReconcileTabsFromData_NotStartedIsNoOp guards the not-started branch: an
 // unstarted instance (e.g. a Loading placeholder) must never attempt a reconnect.
 func TestReconcileTabsFromData_NotStartedIsNoOp(t *testing.T) {

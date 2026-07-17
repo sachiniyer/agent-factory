@@ -275,10 +275,118 @@ type CloseTabRequest struct {
 	// can't hit the wrong session under a cross-repo title collision (#1592
 	// Phase 5 PR7). TUI/CLI callers omit it and resolve by {Title, RepoID}.
 	ID string `json:"id"`
+	// TabID is the TAB's stable id; see RenameTabRequest.TabID for the full
+	// argument. Close is the verb that needs it MOST, because it is the only
+	// destructive one: rename and reorder land a wrong-tab mutation the user can
+	// undo, while a wrong-tab close kills that tab's tmux session and whatever was
+	// running in it (#1971).
+	//
+	// The reuse it defends against is not theoretical. uniqueTabName
+	// (session/tab_names.go) hands a freed name straight back to the next tab that
+	// asks for it, so between a client resolving "the tab named preview" and the
+	// daemon handling the close, another client can close that tab and have a NEW
+	// tab reissued the freed name — and a name-keyed close then kills the new tab.
+	//
+	// Same contract as the siblings: non-empty WINS over TabName/TabIndex, an
+	// unresolvable id is REFUSED rather than fallen back to the name (#1779), and
+	// empty means "no id supplied" — the CLI/TUI path, resolved by TabName/TabIndex
+	// exactly as before.
+	TabID string `json:"tab_id"`
 }
 
 type CloseTabResponse struct {
 	Name string `json:"name"`
+}
+
+// RenameTabRequest asks the daemon to relabel one tab of a session and persist
+// the change (#1813). Title selects the session; RepoID scopes the lookup like
+// the other sessions verbs (empty = all-repo). The tab is identified by TabName
+// (preferred); when TabName is empty TabIndex selects it by 0-based position —
+// the same resolution CloseTabRequest uses.
+//
+// NewName is sanitized to the tmux-safe token set and made unique within the
+// session exactly as tab-create's --name is, so the resolved name may differ
+// from the requested one ("dup" -> "dup-2"); RenameTabResponse carries what was
+// actually applied. A NewName that sanitizes to nothing is an error, not a
+// silent fall back to a default.
+//
+// Only tabs that display their name can be renamed — web, process and VS Code
+// tabs (session.TabKindRenameable). The agent and shell tabs render fixed labels
+// ("Agent"/"Terminal") on every
+// surface, so renaming them would be a no-op and is refused. Remote sessions'
+// tabs are fixed by their hook config, and an archived session's tabs are inert
+// (#1809), so both are refused.
+//
+// Every field is a value type, never a *T: this request travels the gob control
+// socket as well as JSON, and gob elides zero-value pointers (a *string "" would
+// arrive nil), so plain fields are what make the two transports agree (#1700).
+type RenameTabRequest struct {
+	Title    string `json:"title"`
+	RepoID   string `json:"repo_id"`
+	TabName  string `json:"tab_name"`
+	TabIndex int    `json:"tab_index"`
+	NewName  string `json:"new_name"`
+	// ID is the session's stable id; see KillSessionRequest.ID. When non-empty
+	// the daemon resolves the target session by id first, so a tab rename can't
+	// hit the wrong session under a cross-repo title collision (#1592 Phase 5
+	// PR7). TUI/CLI callers omit it and resolve by {Title, RepoID}.
+	ID string `json:"id"`
+	// TabID is the TAB's stable id (#1738) — the same protection ID gives the
+	// session, applied one level down (#1929). TabName and TabIndex are both
+	// REUSABLE: a name is freed by a close and handed to the next tab that asks
+	// for it, and an index shifts on every close/reorder. So a client that
+	// resolves a tab, then sends its name, addresses whatever tab answers to that
+	// name by the time the daemon handles the request — which after a concurrent
+	// close+create is a DIFFERENT tab. TabID is minted once and never reused, so
+	// it names the tab the client actually meant.
+	//
+	// When non-empty it WINS: the name/index in the same request are ignored
+	// rather than cross-checked, because the whole point is that the name may
+	// have changed underneath the client. A non-empty id that no longer resolves
+	// is REFUSED, never fallen back to the name — see resolveTabTarget (#1779).
+	// Empty means "no id supplied", the CLI/TUI path, and resolution proceeds by
+	// TabName/TabIndex exactly as before.
+	TabID string `json:"tab_id"`
+}
+
+// RenameTabResponse carries the RESOLVED name — sanitized and collision-suffixed
+// — which is what clients must render: it is the name the tab actually has, and
+// the name every other tab verb now addresses it by.
+type RenameTabResponse struct {
+	Name string `json:"name"`
+}
+
+// ReorderTabRequest asks the daemon to move one tab within a session's roster
+// and persist the new order (#1813). Title/RepoID/TabName/TabIndex resolve the
+// session and the tab exactly as RenameTabRequest does.
+//
+// NewIndex is the tab's destination read in the FINAL roster, so moving tab 1 to
+// index 3 of a 4-tab session leaves it last. Index 0 is rejected in both
+// directions: it is reserved for the agent tab, which the rest of the session
+// package identifies positionally (archive teardown, the agent conversation, the
+// agent tmux session all read Tabs[0]), so only slots 1..n-1 may be permuted.
+//
+// Value types only, for the same gob reason as RenameTabRequest.
+type ReorderTabRequest struct {
+	Title    string `json:"title"`
+	RepoID   string `json:"repo_id"`
+	TabName  string `json:"tab_name"`
+	TabIndex int    `json:"tab_index"`
+	NewIndex int    `json:"new_index"`
+	// ID is the session's stable id; see RenameTabRequest.ID.
+	ID string `json:"id"`
+	// TabID is the tab's stable id; see RenameTabRequest.TabID. Reorder needs it
+	// at least as much as rename does: it is the verb that INVALIDATES every
+	// other client's TabIndex, so two clients reordering the same roster are the
+	// likeliest way to send a request whose index no longer means what the sender
+	// meant (#1929).
+	TabID string `json:"tab_id"`
+}
+
+// ReorderTabResponse carries the moved tab's name and its resolved final index.
+type ReorderTabResponse struct {
+	Name  string `json:"name"`
+	Index int    `json:"index"`
 }
 
 // SetPRInfoRequest records (or clears) the GitHub PR info for a session and

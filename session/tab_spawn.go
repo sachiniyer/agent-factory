@@ -69,7 +69,7 @@ func (i *Instance) AddShellTab() (*Tab, error) {
 	// for the session to appear, which must not block other readers of i.mu. The
 	// tmux name is derived from the agent session + the unique display name so it
 	// is collision-free and restorable by exact name.
-	tmuxName := agentTmux.SanitizedName() + "__" + displayName
+	tmuxName := agentTmux.SanitizedName() + tmuxTabSeparator + displayName
 	shellTmux := agentTmux.NewSiblingSession(tmuxName, defaultShell())
 	if err := shellTmux.Start(worktreePath); err != nil {
 		return nil, fmt.Errorf("failed to start shell tab: %w", err)
@@ -150,7 +150,7 @@ func (i *Instance) AddProcessTab(command, requestedName string) (*Tab, error) {
 	// agent session + the unique, sanitized display name so it is collision-free
 	// and restorable by exact name. The sibling inherits the agent session's PTY
 	// factory / executor — real in production, mock in tests.
-	tmuxName := agentTmux.SanitizedName() + "__" + displayName
+	tmuxName := agentTmux.SanitizedName() + tmuxTabSeparator + displayName
 	procTmux := agentTmux.NewSiblingSession(tmuxName, command)
 	if err := procTmux.Start(worktreePath); err != nil {
 		return nil, fmt.Errorf("failed to start process tab: %w", err)

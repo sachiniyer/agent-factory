@@ -21,7 +21,7 @@
 import type { EventStreamStatus } from "./events.js";
 import type { KeyboardFocus, View } from "./nav.js";
 import { VIEWS } from "./nav.js";
-import { TAB_DND_MIME } from "./layout.js";
+import { resolveDragTab, TAB_DND_MIME } from "./layout.js";
 import {
   FILTER_KINDS,
   filterLabel,
@@ -34,6 +34,8 @@ import {
 import { projectMeta, projectName, type ProjectSummary, projectSummaries, scopeToProject } from "./project.js";
 import { compareSessionsForRail, isArchived, type RowKind, rowStatus, rowTitle } from "./status.js";
 import { ConfigPane, type ConfigStatus } from "./config.js";
+import { isRenameableTab, tabDisplayLabel, tabGlyph, tabLabel } from "./tablabel.js";
+import { insertionIndexAt, reorderTargetIndex } from "./tabreorder.js";
 import { TasksPane } from "./tasks.js";
 import { type ThemeChoice, THEME_CHOICES } from "./theme.js";
 import type { TerminalStatus } from "./terminal.js";
@@ -155,6 +157,36 @@ export interface Actions {
    *  in the browser: a second copy of the rules is how a UI accepts a value the
    *  loader later rejects at startup. */
   setConfigValue(key: string, value: string): void;
+  /** Renames the tab with the stable IDENTITY `id` (tabIdentity) to `name` (#1813):
+   *  the commit of the bar's inline edit. Only offered for a RENAMEABLE tab (web /
+   *  process — see isRenameableTab); index.ts resolves the identity to the tab's
+   *  CURRENT ordinal and name and calls the daemon, which returns the RESOLVED name
+   *  (it may dup-suffix, `dup` → `dup-2`) and publishes session.updated for every
+   *  client to repaint from.
+   *
+   *  An identity, NOT the ordinal the edit began at: an edit and its commit span two
+   *  rosters (the tab list can be reordered or shrunk by another window WHILE the
+   *  input is open — and that repaint is itself what blurs the input and commits it),
+   *  so an ordinal would name whichever tab had since moved into the slot. Same
+   *  principle, and the same reason, as closeSessionTab's tabToKeepOnClose.
+   *
+   *  The identity is the one CAPTURED WHEN THE EDIT OPENED (beginTabRename), so `id`
+   *  may name a tab that no longer exists — another client can close it while the input
+   *  is open. That is a MISS: index.ts reports it and renames nothing, rather than
+   *  falling through to whatever now occupies the slot.
+   *
+   *  `sessionId` is the session the edit OPENED on, also captured at edit start. A
+   *  render that reparents the bar (the user switching session/project) blurs the open
+   *  input and so fires this commit against the NOW-selected session — where the edited
+   *  tab legitimately does not exist. That is the user's own navigation, not a vanished
+   *  tab, so index.ts abandons it silently rather than reporting a tab "gone" that is
+   *  still there in the session they left. The miss is only reported when the session
+   *  is unchanged. */
+  renameTab(id: string, name: string, sessionId: string): void;
+  /** Moves the tab at `from` to the 0-based `to` (#1813): the commit of a drag
+   *  within the tab bar. The agent tab is pinned at 0 — neither index may be it,
+   *  which the bar enforces before calling and the daemon refuses regardless. */
+  reorderTab(from: number, to: number): void;
   /** Switches the top-level view: the appbar view tabs and the [ / ] keys route
    *  here; index.ts flips the store and hands the keyboard back to the rail (blurring
    *  the terminal) when leaving the sessions view. */
@@ -264,25 +296,6 @@ export function tabIdentity(tab: { id?: string; name: string; kind: number }): s
  *  this; the fallback is only ever a local hint. */
 export function tabRealId(tab: { id?: string }): string {
   return tab.id && tab.id !== "" ? tab.id : "";
-}
-
-/** The label a tab reads as, mirroring the TUI's labelForTab (ui/tree/labels.go):
- *  the agent tab is "Agent", a shell tab is "Terminal", a process tab shows its
- *  name. Keeps the web tab bar TUI-faithful. */
-function tabLabel(tab: { name: string; kind: number }): string {
-  if (tab.kind === TabKind.Agent) {
-    return "Agent";
-  }
-  if (tab.kind === TabKind.Shell) {
-    return "Terminal";
-  }
-  if (tab.kind === TabKind.Web) {
-    return tab.name || "Web";
-  }
-  if (tab.kind === TabKind.VSCode) {
-    return tab.name || "VS Code";
-  }
-  return tab.name || "Tab";
 }
 
 /** The appbar label for a top-level view. */
@@ -548,6 +561,18 @@ export class AppShell {
   // A signature of everything the bar DRAWS (see tabBarSig): the bar is rebuilt only
   // when this changes, so an unrelated status snapshot never churns its DOM (#1737).
   private lastTabBarSig = "";
+  // The insertion indicator for a reorder drag over the bar (#1813): a thin accent
+  // rule drawn in the gap a drop would land in. It lives INSIDE the bar (which CSS
+  // makes its containing block) and is re-appended after every rebuild, since
+  // renderTabBar replaceChildren()es the bar's contents.
+  private tabInsert: HTMLElement | null = null;
+  // The tab index an in-flight drag from THIS bar started at, captured at dragstart
+  // (#1813). dragover cannot read the payload — the dataTransfer is in protected
+  // mode until the drop — so this is the only way the bar can know, WHILE the drag is
+  // over it, whether the grabbed tab is the pinned agent tab and must refuse to
+  // reorder. null when no tab drag from this bar is in flight (including a foreign
+  // drag carrying the same MIME, which then falls through to the drop's own checks).
+  private dragFromIndex: number | null = null;
 
   // Last-applied state, for cheap change detection between updates.
   private lastSessions: SessionData[] | null = null;
@@ -882,6 +907,32 @@ export class AppShell {
     const tabs = selected ? sessionTabs(selected) : [];
     this.currentTabIds = tabs.map(tabIdentity);
     this.currentTabRealIds = tabs.map(tabRealId);
+  }
+
+  /** The CURRENT identity of the tab drawn at `index`, for a GESTURE fired from a
+   *  button that may have been built against an older snapshot.
+   *
+   *  A tab button outlives every snapshot that leaves tabBarSig unchanged, so the tab
+   *  object it closed over can go stale in the one way the signature cannot see: its
+   *  IDENTITY. Reading the live cache instead means a gesture names the tab by what it
+   *  is NOW, not by what it was when its button was drawn — the same reason the drag
+   *  payload reads these caches rather than the render (#1779).
+   *
+   *  Read WHEN A GESTURE FIRES, and for a gesture with duration that means when it
+   *  BEGINS — dragstart stamps its payload here, and a rename captures its subject here
+   *  as the edit opens (beginTabRename). Deliberately not re-read when such a gesture
+   *  COMMITS: by then this answers "who is at this position now?", which a close+recreate
+   *  of the same name makes a different tab, invisibly to the signature.
+   *
+   *  The index is not stale in the same way, and that is structural rather than lucky:
+   *  the signature pins the whole ORDERED kind/name list, so any snapshot that could
+   *  move a tab to a different ordinal necessarily rebuilds the bar and replaces this
+   *  button. A surviving button therefore still sits at its own index.
+   *
+   *  "" (matching no tab, so the action refuses rather than guesses) if the index is
+   *  somehow past the roster — the same honest no-answer tabRealId returns. */
+  private liveTabIdentity(index: number): string {
+    return this.currentTabIds[index] ?? "";
   }
 
   /** Renders the rail SCOPED to the selected project (redesign PR2) and FILTERED by
@@ -1247,6 +1298,13 @@ export class AppShell {
     // not per button — so EVERY tab, including one created after load, is a drag source
     // by construction, with no per-button binding to forget on a re-render (#1737).
     this.attachTabDrag(this.tabBar);
+    // ...and the bar is also a drop TARGET, for reordering (#1813). Same delegation,
+    // same reason. See attachTabReorder for how this stays unambiguous against the
+    // drag-to-split drop the panes wire.
+    this.tabInsert = h("div", { class: "af-tab-insert" });
+    this.tabInsert.hidden = true;
+    this.tabInsert.setAttribute("aria-hidden", "true");
+    this.attachTabReorder(this.tabBar);
 
     this.main.className = "af-main af-main-term";
     // The persistent terminal host is (re)mounted here; renderMain runs only on a
@@ -1254,6 +1312,26 @@ export class AppShell {
     this.main.replaceChildren(head, this.tabBar, this.termHost);
     this.renderTabBar(state);
     this.patchMainHead(state);
+  }
+
+  /**
+   * Ends an inline tab rename that is open in the bar, through the edit's OWN blur
+   * path — the same one a click elsewhere takes, so Enter/blur/Escape keep their
+   * single meaning and this adds no fourth way to leave an edit.
+   *
+   * Called by renderTabBar before it rebuilds; see the note there for why the rebuild
+   * must not be the thing that evicts the input. Deliberately a blur() rather than a
+   * direct remove: the edit owns whether an exit commits, and blurring lets it decide
+   * exactly as it would for a click away.
+   */
+  private settleTabEdit(): void {
+    // Scoped to the bar's own edit, and only while it holds focus — an unfocused input
+    // has already been settled (Enter/Escape restore the button before their blur
+    // lands), so there is nothing to end.
+    const edit = this.tabBar?.querySelector<HTMLElement>(".af-tab-edit");
+    if (edit && document.activeElement === edit) {
+      edit.blur();
+    }
   }
 
   /** (Re)builds the tab bar's buttons from the selected session's tabs, with the
@@ -1268,6 +1346,17 @@ export class AppShell {
     if (!selected) {
       return;
     }
+    // Settle an open inline rename BEFORE rebuilding, rather than letting
+    // replaceChildren() evict its input. The input is a CHILD of this bar, and Chromium
+    // fires the blur of a focused node it is removing while that node is STILL
+    // connected — so the blur handler's own DOM restore (input.replaceWith(btn)) lands
+    // in the middle of the child list replaceChildren is walking, and replaceChildren
+    // then throws NotFoundError on a node that "is no longer a child". That aborts the
+    // repaint half-done, leaving a bar holding stale buttons and no fresh ones. Blurring
+    // here runs the identical commit path with the list quiescent, so the rebuild below
+    // starts from a bar that only holds buttons. A no-op when no edit is open, and
+    // (`done`) when the edit was already settled by Enter/Escape.
+    this.settleTabEdit();
     const tabs = sessionTabs(selected);
     const canManage = canManageTabs(selected);
     // The active index is clamped: a resync that shrank the list must not leave the
@@ -1281,18 +1370,27 @@ export class AppShell {
     // them on every snapshot instead — see syncTabIdentityCaches (#1779).
 
     const children: HTMLElement[] = tabs.map((tab, i) =>
-      tabButton(tab, i, i === active, shown.has(i), canManage, this.actions),
+      tabButton(tab, i, i === active, shown.has(i), canManage, this.actions, () => this.liveTabIdentity(i), selected.id ?? ""),
     );
     if (canManage && tabs.length < MAX_TABS) {
       children.push(this.newTabControl());
     }
     bar.replaceChildren(...children);
+    // The insertion indicator is absolutely positioned and sits outside the tab flow,
+    // so it simply rides along as a last child — but replaceChildren above just
+    // detached it, so it has to go back. Re-hidden with it: the rebuild that dropped
+    // it may well be the one that ENDED the drag it was drawn for.
+    if (this.tabInsert) {
+      this.tabInsert.hidden = true;
+      bar.append(this.tabInsert);
+    }
     // Rebuilding the bar detaches EVERY tab button — including the source of an
     // in-flight drag. A native dragend can't fire on a detached node, so the delegated
     // dragend (on the bar) would never run and the drag flag would stick, leaving the UI
     // in "dragging" mode (pane hints + drop overlay, both gated on the flag). Clear it
     // here so a drag that loses its source still ends cleanly. A no-op when idle.
     document.body.classList.remove("af-dragging-tab");
+    this.dragFromIndex = null;
     // Record the signature this render represents, so update() skips a rebuild until
     // the bar's inputs actually change again.
     this.lastTabBarSig = tabBarSig(state);
@@ -1325,8 +1423,117 @@ export class AppShell {
       e.dataTransfer.setData(TAB_DND_MIME, JSON.stringify({ id, index, tabs: this.currentTabIds }));
       e.dataTransfer.effectAllowed = "move";
       document.body.classList.add("af-dragging-tab");
+      // Remembered for the bar's own dragover, which cannot read the payload it just
+      // stamped (#1813) — see dragFromIndex.
+      this.dragFromIndex = index;
     });
-    bar.addEventListener("dragend", () => document.body.classList.remove("af-dragging-tab"));
+    bar.addEventListener("dragend", () => {
+      document.body.classList.remove("af-dragging-tab");
+      this.dragFromIndex = null;
+      this.hideTabInsert();
+    });
+  }
+
+  /**
+   * Wires the tab bar as a drop TARGET, for reordering tabs within it (#1813).
+   *
+   * The gesture is disambiguated from drag-to-split by WHERE the drag is released,
+   * and the two regions are disjoint DOM subtrees that never overlap: the bar is a
+   * sibling of the terminal host (renderMain appends head, tabBar, termHost), and
+   * every split drop handler is bound inside a .af-pane within that host (split.ts
+   * wireDrop). A drag released over the strip reorders; over a pane it splits or
+   * replaces. Neither handler can see the other's event — there is no shared
+   * ancestor between them below <main>, so no bubbling to suppress and no
+   * coordinate test to get wrong. That is also why the agent tab stays draggable:
+   * it can't be reordered, but dragging it into a pane to split is the oldest
+   * gesture the feature has, and pinning it at the DROP rather than the source
+   * keeps that working.
+   */
+  private attachTabReorder(bar: HTMLElement): void {
+    const isTabDrag = (e: DragEvent): boolean => e.dataTransfer?.types.includes(TAB_DND_MIME) ?? false;
+    bar.addEventListener("dragover", (e: DragEvent) => {
+      // The pinned agent tab is refused HERE, by declining to be a drop target at
+      // all: no preventDefault means no drop event fires, so the browser shows a
+      // "no drop" cursor and the gesture reads as impossible rather than as a
+      // silently-ignored one. Dragging it onto a PANE is unaffected.
+      if (!isTabDrag(e) || this.dragFromIndex === 0) {
+        return;
+      }
+      e.preventDefault(); // allow the drop
+      if (e.dataTransfer) {
+        e.dataTransfer.dropEffect = "move";
+      }
+      this.showTabInsert(bar, e.clientX);
+    });
+    bar.addEventListener("dragleave", (e: DragEvent) => {
+      // Ignore leave events that only cross into a child of the bar (a tab button).
+      const to = e.relatedTarget as Node | null;
+      if (to && bar.contains(to)) {
+        return;
+      }
+      this.hideTabInsert();
+    });
+    bar.addEventListener("drop", (e: DragEvent) => {
+      if (!isTabDrag(e)) {
+        return;
+      }
+      e.preventDefault();
+      this.hideTabInsert();
+      const from = this.resolveBarDrag(e.dataTransfer?.getData(TAB_DND_MIME));
+      if (from === null) {
+        return;
+      }
+      const to = reorderTargetIndex(from, insertionIndexAt(tabCenters(bar), e.clientX));
+      if (to === null) {
+        return; // the agent tab, or a drop where the tab already sits
+      }
+      this.actions.reorderTab(from, to);
+    });
+  }
+
+  /** The dragged tab's CURRENT ordinal, or null to ignore the drop. Resolves the
+   *  payload by stable id exactly as a pane drop does (layout.ts resolveDragTab), so
+   *  a tab closed or reordered by another client mid-drag cancels rather than moving
+   *  whatever now sits at the drag-time index. */
+  private resolveBarDrag(raw: string | undefined): number | null {
+    if (!raw) {
+      return null;
+    }
+    let drag: { id?: string; index: number; tabs: string[] };
+    try {
+      drag = JSON.parse(raw) as { id?: string; index: number; tabs: string[] };
+    } catch {
+      return null;
+    }
+    if (typeof drag.index !== "number" || !Array.isArray(drag.tabs)) {
+      return null;
+    }
+    return resolveDragTab(drag, this.currentTabRealIds, this.currentTabIds, this.currentTabIds.length);
+  }
+
+  /** Draws the insertion indicator in the gap a drop at `clientX` would land in. */
+  private showTabInsert(bar: HTMLElement, clientX: number): void {
+    const marker = this.tabInsert;
+    const tabs = barTabs(bar);
+    if (!marker || tabs.length === 0) {
+      return;
+    }
+    const at = insertionIndexAt(tabCenters(bar), clientX);
+    // The gap's left edge: the next tab's left, or — for the gap past the end — the
+    // last tab's right. Converted into the bar's own coordinates (its border box is
+    // the marker's containing block) and offset by any horizontal scroll.
+    const edge =
+      at < tabs.length
+        ? (tabs[at]?.getBoundingClientRect().left ?? 0)
+        : (tabs[tabs.length - 1]?.getBoundingClientRect().right ?? 0);
+    marker.style.left = `${edge - bar.getBoundingClientRect().left + bar.scrollLeft}px`;
+    marker.hidden = false;
+  }
+
+  private hideTabInsert(): void {
+    if (this.tabInsert) {
+      this.tabInsert.hidden = true;
+    }
   }
 
   private patchMainHead(state: AppState): void {
@@ -1389,7 +1596,22 @@ function selectedSession(state: AppState): SessionData | null {
  *  Encoded with JSON.stringify over a STRUCTURED tuple, not a delimiter-joined string:
  *  a tab name containing a separator character must not be able to collide two distinct
  *  tab sets into the same signature and suppress a required rebuild. Exported for unit
- *  coverage. */
+ *  coverage.
+ *
+ *  THE PREMISE, stated because it is not this file's to enforce: the ordered [kind, name]
+ *  list is a faithful key only because the daemon refuses to mint two tabs with the same
+ *  name in one session (session/tab_names.go — uniqueShellName, "shell" → "shell-2";
+ *  uniqueTabNameExcluding, "dup" → "dup-2"). That is what lets tab IDs stay OUT of this
+ *  signature, which they must: adding them would rebuild the bar on an id backfill and
+ *  reintroduce the #1737 drag-destroying churn above (the drag caches are synced outside
+ *  this gate instead — see syncTabIdentityCaches). It is also what keeps every CAPTURED
+ *  ordinal in the bar honest — tabButton's closeTab(index)/openTab(index), attachTabDrag's
+ *  dragFromIndex, liveTabIdentity(index) — since a unique name means any permutation
+ *  necessarily moves a [kind, name] and rebuilds the button. Were duplicate names ever to
+ *  become representable (a daemon rule change, or tabLabel teaching a new kind to render
+ *  `name`), a swap of two such tabs would be invisible here: no rebuild, and every one of
+ *  those ordinals silently acts on the WRONG tab, with no error and no failing test.
+ *  Whoever changes that rule owes this signature the id back, and #1737 a new answer. */
 export function tabBarSig(state: AppState): string {
   const selected = selectedSession(state);
   if (!selected) {
@@ -1400,6 +1622,22 @@ export function tabBarSig(state: AppState): string {
   const canManage = canManageTabs(selected);
   const shown = [...new Set(state.shownTabs)].sort((a, b) => a - b);
   return JSON.stringify([selected.id ?? "", tabs.map((t) => [t.kind, t.name]), active, shown, canManage]);
+}
+
+/** The bar's tab buttons in render order. Excludes the + button and the insertion
+ *  indicator, which are children of the bar but not tabs. */
+function barTabs(bar: HTMLElement): HTMLElement[] {
+  return [...bar.querySelectorAll<HTMLElement>(".af-tab")];
+}
+
+/** Each tab's horizontal centre, in viewport px — the geometry the pure insertion
+ *  math takes (tabreorder.ts). Measured rather than derived: tab widths vary with
+ *  their labels, and a bar can scroll. */
+function tabCenters(bar: HTMLElement): number[] {
+  return barTabs(bar).map((t) => {
+    const r = t.getBoundingClientRect();
+    return r.left + r.width / 2;
+  });
 }
 
 /** One tab-bar button: its label, an active-state highlight, a "shown in a pane"
@@ -1414,12 +1652,23 @@ export function tabBarSig(state: AppState): string {
  *  handled once, via delegation, on the bar container (AppShell.attachTabDrag) so a tab
  *  created after load is a drag source with no per-button rebinding (#1737). */
 function tabButton(
-  tab: { name: string; kind: number },
+  tab: { id?: string; name: string; kind: number },
   index: number,
   active: boolean,
   shown: boolean,
   canManage: boolean,
   actions: Actions,
+  /** This tab's identity as of the LATEST snapshot — see AppShell.liveTabIdentity.
+   *  A getter rather than a value because this button outlives the render that built
+   *  it: it is called when a GESTURE fires, so the identity is the one the roster the
+   *  user is looking at carries, not the one `tab` happened to be stamped with. */
+  liveIdentity: () => string,
+  /** The selected session's id as of THIS render — a value, not a getter, precisely
+   *  because it must be the session the edit OPENS on: the bar is rebuilt whenever the
+   *  selection changes (a new tab set, a new signature), so a button only ever belongs
+   *  to the session selected when it was built. Carried into an inline rename so its
+   *  commit can tell a vanished tab from the user's own session switch. */
+  selectedSessionId: string,
 ): HTMLElement {
   const cls = `af-tab${active ? " af-tab-active" : ""}${shown && !active ? " af-tab-shown" : ""}`;
   const btn = h("button", { type: "button", class: cls, draggable: true });
@@ -1427,8 +1676,32 @@ function tabButton(
   btn.setAttribute("aria-selected", active ? "true" : "false");
   // The index the delegated dragstart reads to build the drag payload.
   btn.dataset.tabIndex = String(index);
-  btn.append(h("span", { class: "af-tab-label" }, tabLabel(tab)));
+  // The kind glyph (#1813), a DECORATIVE sibling of the label rather than part of
+  // its text: the pane headers render the very same glyph+label pair from the very
+  // same two functions, so the two surfaces agree by construction — but keeping the
+  // glyph out of .af-tab-label leaves that node's text the bare label, which is what
+  // both the bar's own aria-selected semantics and every existing label assertion
+  // read. tabDisplayLabel() is the same pair as one string, used for the title.
+  const glyph = h("span", { class: "af-tab-glyph" }, tabGlyph(tab.kind));
+  glyph.setAttribute("aria-hidden", "true");
+  btn.append(glyph, h("span", { class: "af-tab-label" }, tabLabel(tab)));
   btn.addEventListener("click", () => actions.openTab(index));
+  // Rename-in-place (#1813), offered ONLY where a name is actually rendered: an
+  // agent/shell tab draws a fixed label and ignores its name, so an edit there could
+  // only appear to work (see isRenameableTab). A tab-managed session is required for
+  // the same reason the + / × are: an archived/remote session's tab list is not the
+  // web's to mutate.
+  const renameable = canManage && isRenameableTab(tab.kind);
+  btn.title = renameable ? `${tabDisplayLabel(tab)} — double-click to rename` : tabDisplayLabel(tab);
+  if (renameable) {
+    btn.addEventListener("dblclick", (e) => {
+      e.preventDefault();
+      // Resolved HERE, as the edit OPENS — the identity is captured, never a getter
+      // the commit could re-read against a roster the user never saw. See
+      // beginTabRename. The session id is captured with it, for the same reason.
+      beginTabRename(btn, tab, actions, liveIdentity(), selectedSessionId);
+    });
+  }
   // The agent tab (index 0) is unclosable — killing the session tears it down.
   if (index > 0 && canManage) {
     const close = h("span", { class: "af-tab-close", title: "Close tab" }, "×");
@@ -1440,6 +1713,108 @@ function tabButton(
     btn.append(close);
   }
   return btn;
+}
+
+/**
+ * Swaps a tab button for an inline edit of its NAME (#1813): Enter or blur commits,
+ * Escape cancels, and either way the button goes back in its place.
+ *
+ * The input REPLACES the button rather than nesting inside it — an <input> within a
+ * <button> is invalid HTML and swallows its own clicks and keys.
+ *
+ * What is edited is `tab.name`, never the rendered label: they differ for a web tab
+ * with no name (which draws "Web"), and seeding the field with "Web" would turn a
+ * blur into a rename to the literal string "Web". Committing is likewise gated on a
+ * real change to a non-empty name, so the two ways to leave an edit untouched —
+ * blurring immediately, or clearing the field — both do nothing rather than fire a
+ * request the daemon would reject.
+ *
+ * The daemon, not this input, decides the final name (it may dup-suffix, `dup` →
+ * `dup-2`), and the session.updated it publishes is what repaints the bar. So the
+ * button restored here still carries the OLD name; it is a placeholder until that
+ * event lands, never a claim the rename resolved to what was typed.
+ *
+ * What the commit CARRIES is the tab's stable identity — never the ordinal it was
+ * drawn at. The two are not interchangeable: an ordinal names a tab only relative to
+ * one roster, and an edit spans two whenever another window reorders or closes a lower
+ * tab while the input is open. That is not a hypothetical race but the ordinary path,
+ * because the repaint which serves that change is itself what evicts the input from the
+ * bar, and evicting a focused input FIRES ITS BLUR — so the stale slot would be
+ * dereferenced by the very event that ends the edit, and whichever tab had shifted into
+ * it would be renamed instead. renderTabBar settles an open edit before it rebuilds;
+ * this makes that commit name the right tab.
+ *
+ * That identity is CAPTURED WHEN THE EDIT BEGINS (`editedId`) and carried to the
+ * commit — never re-read at commit. An edit has DURATION, and the two readings answer
+ * different questions: "which tab is the user editing?" versus "who is sitting at this
+ * position NOW?". Only the first is the rename's subject.
+ *
+ * They come apart on a path the signature cannot see. tabBarSig covers what the bar
+ * DRAWS — kind/name/active/shown — so another client CLOSING a tab and RECREATING one
+ * with the same name in the same slot is signature-identical: the bar is not rebuilt,
+ * this button and its open input survive, and the per-snapshot cache a commit-time read
+ * consults has meanwhile been restamped with the REPLACEMENT's id. That is not a narrow
+ * race: events dropped while the socket is down are never replayed, so the reconnect's
+ * single re-Snapshot (events.ts) is exactly where a close and a recreate arrive fused
+ * into one roster change. Committing that read renames a tab the user never edited.
+ *
+ * A captured id cannot go stale in the opposite direction, and that is structural
+ * rather than lucky: every tab the daemon serves carries an id (every Tab constructor
+ * mints one; restoreLocalTabs backfills a legacy pre-#1738 record on load), ids are
+ * minted once and never reused, and tabIdentity therefore never falls back to its
+ * synthesized kind:name here — the selftest asserts that premise against a live
+ * Snapshot, because it is enforced two layers away in another language. So the only
+ * thing that can change the identity at an index is a DIFFERENT tab arriving, which
+ * must abort rather than inherit the edit.
+ *
+ * When the captured id no longer resolves, the tab being edited is GONE: index.ts
+ * reports a miss and renames nothing. It deliberately does NOT fall back to the ordinal
+ * or to whoever now holds the slot — that is this same bug wearing a helpful face.
+ */
+function beginTabRename(
+  btn: HTMLElement,
+  tab: { id?: string; name: string; kind: number },
+  actions: Actions,
+  /** The edited tab's identity, resolved as the edit OPENS (tabButton). A value, not
+   *  a getter: the capture is what makes the commit name the right tab, so the type
+   *  is what keeps a later reader from re-reading it. */
+  editedId: string,
+  /** The session the edit opened on, captured with editedId (tabButton). Carried to
+   *  the commit so it can tell a vanished tab (report a miss) from the user switching
+   *  session while the input was open (abandon silently). */
+  editedSessionId: string,
+): void {
+  const input = h("input", { type: "text", class: "af-tab-edit", value: tab.name });
+  input.setAttribute("aria-label", `Rename tab ${tabLabel(tab)}`);
+  let done = false;
+  const finish = (commit: boolean): void => {
+    if (done) {
+      return; // Enter/Escape already settled it; the blur they cause is a no-op
+    }
+    done = true;
+    const next = input.value.trim();
+    input.replaceWith(btn);
+    if (commit && next !== "" && next !== tab.name) {
+      actions.renameTab(editedId, next, editedSessionId);
+    }
+  };
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      finish(true);
+    } else if (e.key === "Escape") {
+      // Settled synchronously, BEFORE the blur this may cause: `done` then makes
+      // that blur's commit a no-op, so Escape can never save what it cancelled.
+      e.preventDefault();
+      finish(false);
+    }
+  });
+  input.addEventListener("blur", () => finish(true));
+  // A drag started on the input would be a text selection, not a tab drag; the bar's
+  // delegated dragstart only fires for a .af-tab, so there is nothing to suppress.
+  btn.replaceWith(input);
+  input.focus();
+  input.select();
 }
 
 /** One session row: a status dot, the (prefixed) title, and the branch line —

@@ -84,6 +84,12 @@ func TestControlRoundTrips(t *testing.T) {
 		}
 	})
 
+	// No RenameTab/ReorderTab round-trip here: this file proves the Go HTTP
+	// client's methods, and #1813's rename/reorder deliberately have none (see
+	// control.go). Their transport parity is proven where it is actually used —
+	// daemon/httproutes_test.go pins the routes, and the web client calls them
+	// directly.
+
 	t.Run("KillSession success", func(t *testing.T) {
 		c := routeServer(t, "KillSession", func([]byte) apiproto.Envelope {
 			return apiproto.Success(daemon.KillSessionResponse{OK: true})

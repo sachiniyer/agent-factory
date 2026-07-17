@@ -670,6 +670,14 @@ func (m *home) updateInstanceFromSnapshot(inst *session.Instance, d session.Inst
 			if m.reconcilePanesForTabs(inst, oldKeys, sameSessionTabs) {
 				m.relayout()
 			}
+			// The tree's selection is the OTHER binding into that roster, and it
+			// needs the SAME identity remap for the same reason: a reorder lands
+			// entirely here (no local action, #1813), and the clamps only keep the
+			// index in range — which a permutation never violates — so an
+			// index-keyed selection silently becomes a different tab.
+			if m.reconcileActiveTabForTabs(inst, oldKeys, sameSessionTabs) {
+				changed = true
+			}
 		}
 	}
 	// PR info mirrors the daemon's recorded value. This runs on the event loop,

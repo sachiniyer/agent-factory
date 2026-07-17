@@ -205,6 +205,28 @@ func CloseTab(req CloseTabRequest) (string, error) {
 	return resp.Name, nil
 }
 
+// RenameTab asks the daemon to relabel one tab of an existing session. It
+// returns the RESOLVED name — sanitized and collision-suffixed — which is what
+// the tab is actually called afterwards, so callers print that rather than the
+// name that was requested.
+func RenameTab(req RenameTabRequest) (string, error) {
+	var resp RenameTabResponse
+	if err := callDaemon("RenameTab", req, &resp); err != nil {
+		return "", err
+	}
+	return resp.Name, nil
+}
+
+// ReorderTab asks the daemon to move one tab within a session's roster,
+// returning the moved tab's name and its final index.
+func ReorderTab(req ReorderTabRequest) (string, int, error) {
+	var resp ReorderTabResponse
+	if err := callDaemon("ReorderTab", req, &resp); err != nil {
+		return "", 0, err
+	}
+	return resp.Name, resp.Index, nil
+}
+
 // The TUI's control + read path moved onto the HTTP apiclient in #1592 Phase 2
 // PR3, so the net/rpc client wrappers only the TUI called — SetPRInfo,
 // PauseStatusPoll, ResumeStatusPoll (here) and ResumeFromLimit /

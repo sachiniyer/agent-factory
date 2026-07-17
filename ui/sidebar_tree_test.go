@@ -60,8 +60,8 @@ func TestSidebarTreeRendersTabChildren(t *testing.T) {
 
 	s.SetSelectedInstance(0)
 	out = s.String()
-	assert.Contains(t, out, "├ 1 Agent *", "agent tab child with slot number and active marker")
-	assert.Contains(t, out, "└ 2 Terminal", "terminal tab child with └ terminator")
+	assert.Contains(t, out, "├ 1 ◆ Agent *", "agent tab child with slot number and active marker")
+	assert.Contains(t, out, "└ 2 › Terminal", "terminal tab child with └ terminator")
 	assert.Contains(t, out, "▾", "selected instance shows the expanded arrow")
 	assert.Contains(t, out, "▸", "non-selected instance stays collapsed")
 	assert.NotRegexp(t, regexp.MustCompile(`\b\d+\.\s+t-\d\d`), out,
@@ -71,8 +71,8 @@ func TestSidebarTreeRendersTabChildren(t *testing.T) {
 	// The active-tab marker follows the store's active tab.
 	s.proj.SetActiveTab(1)
 	out = s.String()
-	assert.Contains(t, out, "└ 2 Terminal *")
-	assert.NotContains(t, out, "├ 1 Agent *")
+	assert.Contains(t, out, "└ 2 › Terminal *")
+	assert.NotContains(t, out, "├ 1 ◆ Agent *")
 }
 
 // TestSidebarTreeFreshInstanceSingleTabRow pins the #1100 tree rendering: a
@@ -92,13 +92,13 @@ func TestSidebarTreeFreshInstanceSingleTabRow(t *testing.T) {
 
 	require.Equal(t, 1, tabRowCount(s), "fresh instance: exactly one tab row")
 	out := s.String()
-	assert.Contains(t, out, "└ 1 Agent *", "the agent tab is the only — and last — child row")
+	assert.Contains(t, out, "└ 1 ◆ Agent *", "the agent tab is the only — and last — child row")
 	assert.NotContains(t, out, "Terminal", "no phantom Terminal row before t is pressed")
 
 	// `t` materializes the shell tab; the tree grows a real second row.
 	inst.AddTabForTest("shell", session.TabKindShell)
 	assert.Equal(t, 2, tabRowCount(s), "after t: the on-demand terminal is the second row")
-	assert.Contains(t, s.String(), "└ 2 Terminal")
+	assert.Contains(t, s.String(), "└ 2 › Terminal")
 }
 
 // TestSidebarTreeSelectionMoveCollapsesPrevious pins the collapse-by-default
@@ -352,7 +352,7 @@ func TestSidebarTreeOutOfBandTabAppears(t *testing.T) {
 	inst.AddTabForTest("btop", session.TabKindProcess)
 
 	assert.Equal(t, 3, tabRowCount(s), "in-place tab growth must surface without a store bump")
-	assert.Contains(t, s.String(), "└ 3 btop")
+	assert.Contains(t, s.String(), "└ 3 › btop")
 }
 
 // TestSidebarTreeWindowingWithTabRows extends the #787 windowing guarantee to
@@ -373,7 +373,7 @@ func TestSidebarTreeWindowingWithTabRows(t *testing.T) {
 	require.Equal(t, h, renderedLineCount(out),
 		"sidebar must render exactly the allocated height with tab rows present")
 	assert.Contains(t, out, "t-12", "selected instance must be inside the window")
-	assert.Contains(t, out, "└ 2 Terminal", "selected tab row must be inside the window")
+	assert.Contains(t, out, "└ 2 › Terminal", "selected tab row must be inside the window")
 }
 
 // TestSidebarUltraNarrowNoOverflow pins the #646 no-overflow guarantee for

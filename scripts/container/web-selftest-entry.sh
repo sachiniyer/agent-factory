@@ -95,6 +95,26 @@ SESSION_VITE=probe-vite
 # The #1810 misroute test gets its OWN session, visited by exactly one test, so its
 # close-a-tab assertions are independent of what any earlier test left selected.
 SESSION_MIS=probe-misroute
+# A loopback port with NOTHING listening on it (#1813). The daemon's proxy answers a
+# web tab pointing here with its 502 envelope — which is exactly the state a
+# developer hits every time a tab exists before its dev server has finished booting,
+# and what used to be rendered as raw JSON in the pane. Nothing binds this port for
+# the life of the container; that absence IS the fixture.
+DEAD_PORT=8892
+# The dead-dev-server session, kept SEPARATE (like SESSION_VITE) so it is immune to
+# the tab-consuming order of the probe-web tests.
+#
+# The substring caveat has a SECOND source the list above doesn't show: the spec also
+# MOCKS rows into the rail for the status-dot tests, named probe-dead / probe-lost /
+# probe-limit. A real session may not collide with those either — "probe-dead" reads
+# like the obvious name here and is exactly the one that breaks, by making that test's
+# row() match two rows. Hence probe-noserver.
+SESSION_DEAD=probe-noserver
+# The rename/reorder session (#1813): an agent tab plus a web tab and two process
+# tabs — the renameable kinds — created in a known order, so a reorder has something
+# unambiguous to permute. Substring caveat as above, and it bites here: this may NOT
+# be "probe-arrange", which contains "probe-a" and would wedge that session's row().
+SESSION_ORDER=probe-order
 export AGENT_FACTORY_HOME="$HOME_DIR"
 # A container binary is built at the branch version (typically behind the latest
 # release); without this it would self-update on boot and restart the daemon
@@ -187,6 +207,8 @@ cleanup() {
     "$BIN" sessions kill "$SESSION_WEB_SHELVED" >/dev/null 2>&1 || true
     "$BIN" sessions kill "$SESSION_VITE" >/dev/null 2>&1 || true
     "$BIN" sessions kill "$SESSION_MIS" >/dev/null 2>&1 || true
+    "$BIN" sessions kill "$SESSION_DEAD" >/dev/null 2>&1 || true
+    "$BIN" sessions kill "$SESSION_ORDER" >/dev/null 2>&1 || true
     kill "$WEBTAB_SERVER_PID" >/dev/null 2>&1 || true
     kill "$VITE_SERVER_PID" >/dev/null 2>&1 || true
     kill "$DAEMON_PID" >/dev/null 2>&1 || true
@@ -482,6 +504,45 @@ done
     --url "http://127.0.0.1:$VITE_PORT/app/viewer.html" --name mis >/dev/null
 "$BIN" sessions tab-create --repo "$MOCK" "$SESSION_MIS" --kind web --port "$WEBTAB_PORT" --name after >/dev/null
 
+# --- the dead-dev-server session (#1813) ------------------------------------
+# A web tab pointing at a loopback port nothing listens on. The daemon proxies it
+# and gets ECONNREFUSED, so the mirror path answers 502 with the {data,error}
+# envelope — which the pane used to render verbatim, as text, as the "preview".
+# tab-create validates the URL's SYNTAX only (it never probes the port), so a dead
+# target is stageable through the ordinary CLI: no store surgery needed.
+echo ">>> creating dead-dev-server session $SESSION_DEAD (#1813) ..."
+"$BIN" sessions create --repo "$MOCK" --name "$SESSION_DEAD" --program claude >/dev/null
+for i in $(seq 1 30); do
+    if "$BIN" sessions get "$SESSION_DEAD" >/dev/null 2>&1; then
+        break
+    fi
+    sleep 1
+done
+"$BIN" sessions tab-create --repo "$MOCK" "$SESSION_DEAD" --kind web --port "$DEAD_PORT" --name deadport >/dev/null
+# Fail loudly HERE if the port is somehow live: the whole fixture is the ABSENCE of
+# a server, and a regression would otherwise read as a confusing Playwright miss.
+if curl -s -o /dev/null --max-time 2 "http://127.0.0.1:$DEAD_PORT/"; then
+    echo "FATAL: something is listening on $DEAD_PORT; the dead-dev-server fixture needs it free (#1813)" >&2
+    exit 1
+fi
+
+# --- the rename/reorder session (#1813) -------------------------------------
+# Tabs in creation order: [agent, alpha(web), beta(process), gamma(process)]. The
+# order is the fixture — a reorder test has to permute something known — and the
+# kinds are the renameable ones (web/process), since agent/shell labels ignore their
+# name and the daemon refuses to rename them.
+echo ">>> creating rename/reorder session $SESSION_ORDER (#1813) ..."
+"$BIN" sessions create --repo "$MOCK" --name "$SESSION_ORDER" --program claude >/dev/null
+for i in $(seq 1 30); do
+    if "$BIN" sessions get "$SESSION_ORDER" >/dev/null 2>&1; then
+        break
+    fi
+    sleep 1
+done
+"$BIN" sessions tab-create --repo "$MOCK" "$SESSION_ORDER" --kind web --port "$WEBTAB_PORT" --name alpha >/dev/null
+"$BIN" sessions tab-create --repo "$MOCK" "$SESSION_ORDER" --command "sleep 300" --name beta >/dev/null
+"$BIN" sessions tab-create --repo "$MOCK" "$SESSION_ORDER" --command "sleep 300" --name gamma >/dev/null
+
 # --- seed the URL-less web tab through the daemon's OWN store (#1818) -------
 # ORDER MATTERS: this block STOPS the daemon to write its store, so it must come
 # after every seeding step that drives the live daemon over the CLI (the #1809
@@ -574,6 +635,9 @@ export AF_WEBTAB_EXTERNAL_URL="$WEBTAB_EXTERNAL_URL"
 export AF_VSCODE_MARKER="$VSCODE_MARKER"
 export AF_WEB_SESSION_VITE="$SESSION_VITE"
 export AF_WEB_SESSION_MIS="$SESSION_MIS"
+export AF_WEB_SESSION_DEAD="$SESSION_DEAD"
+export AF_WEB_SESSION_ORDER="$SESSION_ORDER"
+export AF_WEB_DEAD_PORT="$DEAD_PORT"
 export AF_VITE_MARKER="$VITE_MARKER"
 export AF_VITE_ABS_TITLE="$VITE_ABS_TITLE"
 export AF_WEBTAB_NOURL_NAME="$NOURL_TAB"

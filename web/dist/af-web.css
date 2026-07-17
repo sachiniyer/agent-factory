@@ -890,6 +890,7 @@ body {
   border-bottom: 1px solid var(--af-border);
   overflow-x: auto;
   scrollbar-width: thin;
+  position: relative;
 }
 .af-tab {
   display: inline-flex;
@@ -923,10 +924,38 @@ body {
 .af-tab:active {
   cursor: grabbing;
 }
+.af-tab-glyph {
+  flex: 0 0 auto;
+  color: var(--af-text-3, var(--af-text-2));
+  line-height: 1;
+}
 .af-tab-label {
   overflow: hidden;
   text-overflow: ellipsis;
   max-width: 12rem;
+}
+.af-tab-edit {
+  align-self: center;
+  width: 8rem;
+  padding: 0.15rem 0.3rem;
+  background: var(--af-bg-inset);
+  color: var(--af-text);
+  border: 1px solid var(--af-accent);
+  border-radius: var(--af-r-sm);
+  font: inherit;
+  font-size: var(--af-fs-xs);
+}
+.af-tab-insert {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  margin-left: -1px;
+  background: var(--af-accent);
+  pointer-events: none;
+}
+.af-tab-insert[hidden] {
+  display: none;
 }
 .af-tab-close {
   display: inline-flex;
@@ -1103,7 +1132,16 @@ body {
 .af-pane-multi .af-pane-head {
   display: flex;
 }
+.af-pane-glyph {
+  flex: 0 0 auto;
+  font-size: var(--af-fs-2xs);
+  color: var(--af-text-2);
+  line-height: 1;
+}
 .af-pane-label {
+  flex: 1 1 auto;
+  min-width: 0;
+  margin-right: auto;
   font-size: var(--af-fs-2xs);
   color: var(--af-text-2);
   white-space: nowrap;
@@ -1161,7 +1199,8 @@ body {
   line-height: 1.4;
   text-decoration: none;
 }
-.af-webpane-open[hidden] {
+.af-webpane-open[hidden],
+.af-webpane-reload[hidden] {
   display: none;
 }
 .af-webpane-url {
@@ -1197,6 +1236,18 @@ body {
 }
 .af-webpane-fallback-link {
   color: var(--af-accent);
+}
+.af-webpane-dead {
+  color: var(--af-text-2);
+}
+.af-webpane-external {
+  color: var(--af-text-2);
+}
+.af-webpane-fallback-retry {
+  flex: 0 0 auto;
+}
+.af-webpane-fallback-retry[hidden] {
+  display: none;
 }
 .af-kb-terminal .af-split-multi .af-pane-focused {
   outline: 2px solid var(--af-accent);

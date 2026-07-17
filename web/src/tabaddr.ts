@@ -133,6 +133,84 @@ export function webProxyPath(
   return query ? `${base}?${query}` : base;
 }
 
+/**
+ * The reload-only cache-busting query parameter (#1900). It carries no meaning beyond
+ * "this is attempt N" — only its CHANGING is load-bearing.
+ *
+ * The name is chosen to be collision-proof against the app being previewed, because it
+ * does not stop at the daemon: the proxy forwards the mirror path's query to the
+ * upstream dev server (it strips only ?access_token=, webtab_proxy.go), so the dev
+ * server sees this param too. That is harmless — a normal dev server ignores unknown
+ * query params, and it is in fact what makes the bust effective end to end, since the
+ * upstream is asked for a distinct URL as well. But it is also why the name is
+ * namespaced (`af`) and underscore-prefixed rather than something like `t` or
+ * `cachebust`, which a real app could plausibly read as its own.
+ */
+const RELOAD_PARAM = "_afreload";
+
+/**
+ * `src` with a cache-busting `_afreload=<n>` param, so the ↻ control really refetches
+ * (#1900).
+ *
+ * Re-assigning the same URL to an iframe is not a guarantee of fresh content: the
+ * browser's HTTP cache — or any intermediary between the daemon and the dev server —
+ * may answer from a stale entry, which is precisely the page the user pressed ↻ to
+ * escape. A URL that differs per attempt cannot be served from a prior entry.
+ *
+ * Two constraints the signature encodes:
+ *
+ *   - Callers must pass the PRISTINE src, never the frame's current one. That is what
+ *     makes repeated reloads REPLACE the param rather than accumulate `_afreload=1&
+ *     _afreload=2&…` into an ever-growing URL. It is structural: with a clean base
+ *     there is nothing to accumulate onto, so no strip/rewrite step can be forgotten.
+ *   - PROXIED targets only. An external target is never cache-busted, and the reason
+ *     is not caution: a presigned or CDN-token URL signs over its query string, so an
+ *     extra param invalidates the signature and turns a working preview into a 403.
+ *     split.ts enforces the proxied-only gate; this function is the mechanism.
+ */
+export function cacheBustedWebSrc(src: string, n: number): string {
+  const sep = src.includes("?") ? "&" : "?";
+  return `${src}${sep}${RELOAD_PARAM}=${n}`;
+}
+
+/**
+ * The next cache-busting value for a ↻ press — unique against every value this browser
+ * has ALREADY used, not merely against the ones a given pane has.
+ *
+ * The counter is the whole fix, so what it is scoped to IS the correctness argument. A
+ * cache-buster's only job is to name a URL the HTTP cache has never seen; a cache entry
+ * outlives the pane that created it, outlives the session selection, and outlives the
+ * PAGE. So a counter scoped to any of those collides with its own past the moment its
+ * scope is recreated, and re-issues a URL the cache can still answer — serving the exact
+ * stale page ↻ exists to escape, with the control appearing to work.
+ *
+ * That is why this is module-scope AND seeded from the clock, which are two separate
+ * fixes for two scopes:
+ *
+ *   - MODULE scope (rather than a `let` inside the pane mount, #1900's original) fixes
+ *     the collision across a pane recreate. A remount — switching tabs away and back,
+ *     changing the target, an archive flip — reran the mount and reset its counter to 0,
+ *     so the second ↻ of a session re-requested `_afreload=1`.
+ *   - The Date.now() SEED (rather than 0) fixes the same collision one scope up, across
+ *     a PAGE reload, which resets every module. F5 revalidates the document, not the
+ *     iframe subresources the cache holds, so a fresh module counter starting at 1 walks
+ *     straight back over the URLs the previous page issued.
+ *
+ * Monotonic rather than random: it is the same one-line guarantee (a value is never
+ * re-issued) without a birthday collision to reason about, and a strictly-increasing
+ * sequence is what a test can assert. Wall-clock going BACKWARDS (an NTP step) is the
+ * one way to re-issue a value, and it would have to land on exactly a previously-used
+ * integer to matter — strictly weaker than the every-remount collision this replaces.
+ *
+ * Numeric (not a random string) so the param stays `_afreload=<digits>`: proxies, the
+ * daemon and the specs all read it as such.
+ */
+let reloadNonce = Date.now();
+
+export function nextReloadNonce(): number {
+  return ++reloadNonce;
+}
+
 /** Whether a pane's live address for its tab EMBEDS that tab's ordinal — i.e. whether
  *  the tab merely shifting position invalidates what the pane already points at
  *  (#1779). It decides whether a moved tab must be torn down and rebuilt, or can
