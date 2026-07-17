@@ -63,6 +63,12 @@ jobs:
       - name: Test auto-gate helper
         run: node --test .github/scripts/auto-gate.test.js
 
+      # Same rationale as the auto-gate test above: the stale-external-pr helper
+      # decides which fork PRs to auto-close, so its pure decision logic gates
+      # here in the required Lint job. Built-in node:test, no install step.
+      - name: Test stale-external-pr helper
+        run: node --test .github/scripts/stale-external-pr.test.js
+
   test:
     name: Test
     runs-on: ubuntu-latest
