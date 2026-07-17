@@ -384,10 +384,10 @@ func (c *ConfigPane) renderEntryRow(i int, row configRow, e config.ConfigEntry) 
 	case !e.Settable:
 		// Say WHY it is not editable here, rather than showing a dead row. The
 		// key is real and the file is hand-editable by design.
-		b.WriteString(configValueStyle.Render(e.Value))
-		b.WriteString(configReadOnlyStyle.Render("  · hand-edited in config.toml"))
+		b.WriteString(configValueStyle.Render(c.displayValue(e)))
+		b.WriteString(configReadOnlyStyle.Render(" · hand-edited in config.toml"))
 	default:
-		b.WriteString(configValueStyle.Render(e.Value))
+		b.WriteString(configValueStyle.Render(c.displayValue(e)))
 	}
 	b.WriteString("\n")
 
@@ -402,6 +402,38 @@ func (c *ConfigPane) renderEntryRow(i int, row configRow, e config.ConfigEntry) 
 		}
 	}
 	return b.String()
+}
+
+// displayValue renders a value for the LIST, which is a different job from
+// rendering it into an edit field.
+//
+// Two decorations live here and MUST NOT leak into the edit field (c.input is
+// always filled from e.Value directly):
+//
+//   - An unset value reads as "(unset)". A blank column looks like a rendering
+//     bug; the empty edit field it opens does not.
+//   - A long value is truncated. A [theme] table serializes to ~700 characters
+//     of JSON — rendered whole it wraps over the entire pane and buries every
+//     row after it. Truncating is honest here precisely because the key is
+//     read-only: the file is where you edit it, and the row says so.
+//
+// This is the same split CurrentValue documents: what you SHOW and what you can
+// SAVE BACK are different, and conflating them is how `""` ends up in a user's
+// config.toml.
+func (c *ConfigPane) displayValue(e config.ConfigEntry) string {
+	if e.Value == "" {
+		return "(unset)"
+	}
+	// Leave room for the cursor, the key, and the read-only suffix.
+	budget := c.width - len(e.Key) - 34
+	if budget < 12 {
+		budget = 12
+	}
+	runes := []rune(e.Value)
+	if len(runes) <= budget {
+		return e.Value
+	}
+	return string(runes[:budget-1]) + "…"
 }
 
 // renderStatus renders the echo of the last write, or the validator's error,
