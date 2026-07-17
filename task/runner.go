@@ -274,11 +274,22 @@ func IsWorkingContent(content, agent string) bool {
 }
 
 // isDocTrustPrompt reports whether content shows the documentation-link trust
-// dialog shared by aider/gemini (and surfaced by claude). Both substrings are
-// required to avoid false positives from unrelated documentation links.
+// dialog shared by aider/gemini (and surfaced by claude).
+//
+// The predicate now lives in session/tmux (DocTrustPromptPresent) and is shared
+// with the dismissal path that types 'D'+Enter into the pane. The two had drifted
+// — the dismissal matched the prose alone and injected keystrokes into ordinary
+// agent output (#1952) — so they are one copy now. See DocTrustPromptPresent for
+// why both substrings are load-bearing.
+//
+// This TIGHTENED the local predicate: it required only the prefix "Open
+// documentation url", the shared one requires the dialog's full prose. That is the
+// safe direction here. Readiness gates prompt delivery (task/start.go SendPrompt),
+// so a false positive types the user's prompt into whatever is actually on screen
+// — the #729 hazard the codex branch of isReadyContent documents above. A miss
+// only costs a wait, and the real dialog carries the full prose regardless.
 func isDocTrustPrompt(content string) bool {
-	return strings.Contains(content, "Open documentation url") &&
-		strings.Contains(content, "(D)on't ask again")
+	return tmux.DocTrustPromptPresent(content)
 }
 
 // WaitForReady polls the instance's tmux pane until the program shows its

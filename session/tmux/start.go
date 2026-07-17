@@ -119,7 +119,7 @@ func (t *TmuxSession) CheckAndHandleTrustPrompt() bool {
 			return true
 		}
 	} else {
-		if strings.Contains(content, "Open documentation url for more info") {
+		if DocTrustPromptPresent(content) {
 			if err := t.TapDAndEnter(); err != nil {
 				log.ErrorLog.Printf("could not tap enter on trust screen: %v", err)
 				return false
@@ -128,6 +128,68 @@ func (t *TmuxSession) CheckAndHandleTrustPrompt() bool {
 		}
 	}
 	return false
+}
+
+// DocTrustPromptPresent reports whether content shows the documentation-link
+// trust dialog shared by aider/gemini:
+//
+//	Open documentation url for more info? (Y)es/(N)o/(D)on't ask again [Yes]:
+//
+// BOTH the full prose question and the "(D)on't ask again" affordance are
+// required, and NEITHER is redundant:
+//
+//   - The affordance is not a discriminator. aider renders "(D)on't ask again"
+//     on EVERY confirmation it asks ("Add src/main.go to the chat?", …). It only
+//     tells us some prompt is up — not which one. It is the weaker anchor.
+//   - The prose is the discriminator, and only at FULL length. Do not shorten it
+//     to a prefix like "Open documentation url": the prefix plus an affordance
+//     that is nearly always present means an unrelated confirmation gets answered
+//     'D' whenever that string is anywhere on screen — including in a source file
+//     the agent has open. This repo is self-hosted, so that is not hypothetical.
+//
+// The full prose is also the ORIGINAL observed string (2b23c52); the shorter form
+// was a later paraphrase introduced for readiness detection (7d78ee6), not an
+// observation of the dialog. Match what the dialog actually renders.
+//
+// ACTION HERE REQUIRES POSITIVE EVIDENCE, because the two ways to be wrong do not
+// cost the same:
+//
+//   - A MISS costs one keypress. The dialog stays up, the user presses D — or the
+//     next tick of the daemon's 1-second poll catches it, since this re-runs
+//     continuously and the real dialog does not go away on its own.
+//   - A FALSE POSITIVE types 'D'+Enter into a RUNNING agent that never asked
+//     anything (TapDAndEnter, via CheckAndHandleTrustPrompt above). That is
+//     unbidden input into someone's live session: it can answer a different
+//     question than the one we think is on screen, or land in an agent's prompt
+//     box and modify their files. The poll's caller discards the bool, so nothing
+//     breaks the loop — it re-fires every tick the phrase stays on screen (#1952).
+//
+// So this is deliberately conservative BY CONSTRUCTION, and the asymmetry above is
+// the reason. When the match is ambiguous the answer is DO NOTHING. If you are here
+// to "loosen this so it catches more cases": that trade buys back a keypress the
+// user can supply themselves, and pays for it in keystrokes injected into live
+// agents. Prefer adding a NEW anchored predicate for a specific dialog you can
+// identify over widening this one.
+//
+// Before changing this predicate, answer: what does the new one ADMIT that the old
+// one did not? Not what it rejects — what it lets through. Adding a conjunct while
+// quietly weakening another term reads as tightening and is not; that is how the
+// #1952 fix itself first shipped a NEW false-positive path. The tests only exercise
+// the real dialogs, so they will not catch it for you.
+//
+// The match runs against a visible-only capture (CapturePaneContent), so content
+// is whatever is on screen right now — including the agent's own output, a log
+// line, or a file it printed. Requiring a marker only the real dialog renders is
+// what keeps ordinary output from being mistaken for a question.
+//
+// This is the single copy, shared with task's readiness check (task/runner.go
+// isReadyContent) so the dismissal and the readiness signal can never drift apart
+// again — the drift between this and the Claude branch beside it is exactly how
+// #1952 happened. It lives here because task already imports session/tmux; the
+// reverse edge would be an import cycle.
+func DocTrustPromptPresent(content string) bool {
+	return strings.Contains(content, "Open documentation url for more info") &&
+		strings.Contains(content, "(D)on't ask again")
 }
 
 // claudeTrustPromptPresent reports whether the captured pane content is showing
