@@ -31,6 +31,7 @@ on:
       - ".github/workflows/lifecycle.yml"
       - "scripts/lifecycle.sh"
       - "scripts/lifecycle-lib.sh"
+      - "scripts/lifecycle-selftest.sh"
       - "scripts/container/lifecycle-entry.sh"
       - "scripts/container/Dockerfile.test"
       - "scripts/testbox.sh"
@@ -52,6 +53,17 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # The harness's own safety logic. Pure shell logic — no container, no network —
+  # so unlike the legs below it is cheap enough to never skip, and it is what
+  # keeps the gate itself from silently becoming a rubber stamp.
+  selftest:
+    name: Lifecycle harness selftest
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+      - run: make lifecycle-selftest
+
   # The leg that covers assertion #4. A GitHub runner is itself a clean,
   # ephemeral machine with a real systemd user manager — which the test
   # container does not have (PID 1 is docker-init, `af daemon install` fails

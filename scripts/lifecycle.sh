@@ -80,7 +80,7 @@ LC_WORKSPACE="${AF_LIFECYCLE_WORKSPACE:-$HOME/af-lifecycle}"
 . "$LC_HERE/lifecycle-lib.sh"
 
 LC_REPO_SLUG="sachiniyer/agent-factory"
-LC_API="https://api.github.com/repos/$LC_REPO_SLUG/releases?per_page=100"
+LC_API_BASE="https://api.github.com/repos/$LC_REPO_SLUG/releases"
 LC_DL="https://github.com/$LC_REPO_SLUG/releases/download"
 
 # INJECTIONS — deliberately break the machine to prove an assertion fires.
@@ -169,17 +169,37 @@ lc_goos_goarch() {
 # current boundary as releases cut. Nothing here asserts a specific version —
 # the assertions are about daemon/client coherence, which is version-agnostic.
 lc_two_newest_stable() {
-    local auth=() json tags
+    local auth=() page=1 json n stable=() tag
     [ -n "${GITHUB_TOKEN:-}" ] && auth=(-H "Authorization: Bearer $GITHUB_TOKEN")
-    json=$(curl -sSL --max-time 60 "${auth[@]}" "$LC_API" 2>/dev/null) || return 1
-    tags=$(printf '%s' "$json" |
-        jq -r '[.[] | select(.draft==false and .prerelease==false) | .tag_name] | .[0:2] | @tsv' 2>/dev/null)
-    [ -n "$tags" ] || return 1
-    # Two distinct releases are required: with fewer, "upgrade from N-1 to N"
-    # has nothing to upgrade across.
-    [ "$(printf '%s' "$tags" | awk -F'\t' '{print NF}')" = "2" ] || return 1
-    # @tsv gives newest-first; the caller wants N-1 first.
-    printf '%s\t%s\n' "$(printf '%s' "$tags" | cut -f2)" "$(printf '%s' "$tags" | cut -f1)"
+
+    # PAGINATE. A single ?per_page=100 fetch makes "100 is enough" a silent
+    # assumption: this repo interleaves -preview-N prereleases with stables, so a
+    # busy preview cycle can push the second-newest stable off page one. Walk
+    # pages until two stables are found, and FAIL if the set cannot be
+    # enumerated — never guess from page one and call it an upgrade matrix.
+    while [ "$page" -le "${LC_RELEASE_MAX_PAGES:-10}" ]; do
+        json=$(curl -sSL --max-time 60 "${auth[@]}" \
+            "$LC_API_BASE?per_page=100&page=$page" 2>/dev/null) || return 1
+        # A non-array (rate-limit object, error envelope) must not read as "no
+        # more releases" — that would end the walk and look like exhaustion.
+        [ "$(printf '%s' "$json" | jq -r 'type' 2>/dev/null)" = "array" ] || return 1
+        n=$(printf '%s' "$json" | jq -r 'length' 2>/dev/null)
+        [ -n "$n" ] || return 1
+        while IFS= read -r tag; do
+            [ -n "$tag" ] && stable+=("$tag")
+        done < <(printf '%s' "$json" |
+            jq -r '.[] | select(.draft==false and .prerelease==false) | .tag_name' 2>/dev/null)
+        [ "${#stable[@]}" -ge 2 ] && break
+        # A short page is the last page.
+        [ "$n" -lt 100 ] && break
+        page=$((page + 1))
+    done
+
+    # Two distinct releases are required: with fewer, "upgrade from N-1 to N" has
+    # nothing to upgrade across.
+    [ "${#stable[@]}" -ge 2 ] || return 1
+    # The API lists newest-first; the caller wants "N-1<TAB>N".
+    printf '%s\t%s\n' "${stable[1]}" "${stable[0]}"
 }
 
 # lc_install_release <tag> <dest-bin> — install a REAL release binary, the way
@@ -564,6 +584,7 @@ scenario_b() {
             lc_teardown_home "$home" "$supervised"
             return 1
         fi
+        lc_note_injection_applied
         lc_say "INJECT: applied — session states now: $(lc_session_states "$bin" "$repo")"
     fi
 
@@ -671,6 +692,7 @@ lc_do_upgrade() {
             lc_fail "INJECT skip-daemon-restart: binary is '$got', expected '${new_tag#v}' — the injection did not apply"
             return 1
         fi
+        lc_note_injection_applied
         lc_say "INJECT: applied — client is now $got, daemon deliberately left on the old image"
         return 0
     fi
@@ -893,6 +915,9 @@ main() {
     done
 
     lc_say "af lifecycle gate — $(uname -s)/$(uname -m)"
+    # Validate BEFORE running anything: an unrecognized injection injects
+    # nothing, and a green run would then claim we survived a fault never applied.
+    lc_validate_injection "$LC_INJECT" || exit 2
     [ -n "$LC_INJECT" ] && lc_say "FAULT INJECTION ACTIVE: $LC_INJECT (assertions are EXPECTED to fail)"
 
     case "$what" in
@@ -911,6 +936,9 @@ main() {
         exit 2
         ;;
     esac
+
+    # An injection asked for but never reached is a harness defect, not a pass.
+    lc_assert_injection_ran "$LC_INJECT"
 
     lc_summary
 }

@@ -8,7 +8,7 @@
 	agent-server-roundtrip-container remote-agent-server-roundtrip-container \
 	backend-docker-roundtrip backend-ssh-roundtrip \
 	playtest-container playtest-container-detached tui-driver tui-driver-selftest \
-	lifecycle-container \
+	lifecycle-container lifecycle-selftest \
 	testbox-image lint-file-length docs web-build web-test web-selftest-container
 
 # Structural-health lint (#1145): fail if any Go file exceeds its line limit
@@ -131,6 +131,14 @@ tui-driver-selftest:
 # See docs/lifecycle-testing.md.
 lifecycle-container:
 	scripts/testbox.sh lifecycle $(LIFECYCLE_SCENARIO)
+
+# Tests for the lifecycle harness's OWN safety logic: that a fault injection
+# which cannot execute FAILS rather than passing, that the disposable guard
+# refuses an unrecognized runtime, and that concurrent runs cannot share an
+# image tag. Pure logic — no containers, no daemons, no network, no AF home —
+# so it runs on the host in about a second and gates every PR.
+lifecycle-selftest:
+	bash scripts/lifecycle-selftest.sh
 
 # (Re)build the toolchain image only.
 testbox-image:

@@ -201,6 +201,39 @@ The general rule this settles on: **prefer fail-closed**. Enumerating bad states
 fails open — anything you did not think of passes. Asking "is this provably the
 good state?" turns every surprise into a loud failure instead of a quiet green.
 
+## The harness's own tests (`make lifecycle-selftest`)
+
+The gate proves things about af; this proves things about the gate — and it is
+the cheaper half: pure logic, no containers, no daemons, no network, so it runs
+on the host in a second and gates every PR.
+
+It covers the three ways this harness can become a rubber stamp, none of which
+is visible in a passing run:
+
+* **a fault injection that cannot execute.** An unregistered name
+  (`skip-restart` vs `skip-daemon-restart`) matches no branch, so nothing is
+  injected and every assertion passes — a green check for an experiment that
+  never happened. Names are now validated against a registry *before* anything
+  runs (hard exit 2), and execution is **recorded**: an injection requested but
+  never reached (e.g. asked for scenario B while only scenario A runs) FAILS the
+  run. Never a skip — a skip is how this class hides.
+* **the disposable guard saying yes to a real machine.** Detection is positive
+  only and the default is NO: docker (`/.dockerenv`), podman
+  (`/run/.containerenv` — testbox supports both engines, so a podman box could
+  not run this gate at all before), or `CI=true`. An unrecognized runtime is
+  never "probably fine".
+* **concurrent runs sharing an image tag.** That is #1171 (the fixed
+  `af-playtest` name), fixed in #1166 with per-run-unique names; the tag now
+  carries the same per-run token the container does and is removed on exit.
+
+Each case was **watched failing** against the pre-fix code. That discipline paid
+for itself immediately: the first version of the podman test re-implemented the
+detection and grepped the source for `/run/.containerenv` — and **passed against
+code with podman detection deleted**, because that string also appears in the
+guard's error message. The markers are now injectable variables so the test
+drives the real function. A test written to confirm a fix is not a test until
+you have seen it fail.
+
 ## What this does NOT cover yet
 
 * **macOS / launchd.** `lc_unit_active` and `lc_unit_main_pid` already have

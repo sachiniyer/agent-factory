@@ -24,15 +24,23 @@ IMAGE="${AF_TESTBOX_IMAGE:-agent-factory-testbox}"
 # see scripts/container/Dockerfile.web-selftest. Kept distinct so it never bloats
 # the plain testbox image every other gate shares.
 WEB_IMAGE="${AF_WEB_TESTBOX_IMAGE:-agent-factory-web-selftest}"
-# The lifecycle gate gets its OWN tag, even though it builds from the same
-# Dockerfile as the testbox. The tag is a GLOBAL name on the docker daemon, and
-# this box runs many worktrees: a sibling running `make test-container` from a
-# checkout that predates a Dockerfile change rebuilds `agent-factory-testbox`
-# from THEIR Dockerfile and moves the shared tag back, so whichever build ran
-# last wins. That is not theoretical — it silently reverted the image under this
-# gate mid-run ("missing required tool: jq"). A dedicated tag means a concurrent
-# sibling cannot decide what this gate runs against. Same reasoning as WEB_IMAGE.
-LIFECYCLE_IMAGE="${AF_LIFECYCLE_IMAGE:-agent-factory-lifecycle}"
+# The lifecycle gate's image tag is UNIQUE PER RUN.
+#
+# An image tag is a global name on the docker daemon, and this box runs many
+# worktrees at once. A fixed tag has two failure modes, and we have now eaten
+# both:
+#   * a SIBLING gate rebuilds the shared `agent-factory-testbox` tag from THEIR
+#     checkout's Dockerfile, so whichever build ran last wins — that silently
+#     reverted the image under this gate mid-run ("missing required tool: jq");
+#   * two CONCURRENT lifecycle runs from different worktrees clobber each
+#     other's tag. That is exactly #1171 (the fixed `af-playtest` name), fixed in
+#     #1166 with per-run-unique names. Re-introducing it in the sibling harness
+#     would be repeating a bug we already paid for.
+#
+# So the tag carries the same per-run token the container name does, and is
+# removed on exit. Layer cache is keyed on Dockerfile content, not the tag, so a
+# unique tag costs nothing on a warm cache. Pin AF_LIFECYCLE_IMAGE to reuse one.
+LIFECYCLE_IMAGE="${AF_LIFECYCLE_IMAGE:-}"
 
 # _uniq — a per-invocation token (pid + a little randomness) for container
 # names, so two runs never share a name.
@@ -222,13 +230,24 @@ lifecycle)
     # one testbox target that is not hermetic. It is wired nightly rather than
     # per-PR for that reason — see .github/workflows/lifecycle.yml.
     #
-    # Runs in an EPHEMERAL uniquely-named container (#1171) so concurrent runs
-    # cannot clobber each other and nothing survives the gate.
-    # Built from the same Dockerfile as the testbox, but under this gate's own
-    # tag so a concurrent sibling build cannot swap the image mid-run.
+    # Runs in an EPHEMERAL uniquely-named container AND under a uniquely-named
+    # image tag (#1171/#1166) so concurrent runs cannot clobber each other and
+    # nothing survives the gate. Built from the same Dockerfile as the testbox.
+    lc_token="$(_uniq)"
+    lc_teardown=no
+    if [ -z "$LIFECYCLE_IMAGE" ]; then
+        LIFECYCLE_IMAGE="agent-factory-lifecycle:$lc_token"
+        lc_teardown=yes
+    fi
+    LIFECYCLE_NAME="af-lifecycle-$lc_token"
+    # Remove the per-run tag however we exit; the underlying layers stay cached
+    # for the next run. A pinned AF_LIFECYCLE_IMAGE is the caller's to manage.
+    if [ "$lc_teardown" = yes ]; then
+        # shellcheck disable=SC2064  # expand the tag now, not at trap time
+        trap "\"$ENGINE\" rmi -f \"$LIFECYCLE_IMAGE\" >/dev/null 2>&1 || true" EXIT INT TERM
+    fi
     "$ENGINE" build -q -t "$LIFECYCLE_IMAGE" - <"$REPO_ROOT/scripts/container/Dockerfile.test" >/dev/null
     fix_cache_perms "$LIFECYCLE_IMAGE"
-    LIFECYCLE_NAME="af-lifecycle-$(_uniq)"
     rc=0
     "$ENGINE" run --rm \
         "${RUN_FLAGS[@]}" \

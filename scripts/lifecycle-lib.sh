@@ -112,6 +112,40 @@ lc_summary() {
 # /.dockerenv, a CI runner sets CI=true. A shared dev box has neither, so it
 # refuses even if someone exports the opt-in by accident.
 # ----------------------------------------------------------------------------
+# The container markers, as variables so the selftest can point them at temp
+# files and exercise THIS function rather than a re-implementation of it. A test
+# that greps the source for "/run/.containerenv" is not a test: that string also
+# appears in the error message below, so it passes against code with the
+# detection removed — observed, which is why these are parameters now.
+: "${LC_MARKER_DOCKER:=/.dockerenv}"
+: "${LC_MARKER_PODMAN:=/run/.containerenv}"
+
+# lc_detect_disposable — prints why this environment is disposable and returns 0,
+# or returns 1. Positive detection only, and THE DEFAULT ANSWER IS NO: an
+# unrecognized runtime is not "probably a container", it is a machine we cannot
+# vouch for — and this harness installs binaries, registers units and stops
+# daemons. Markers a real dev box does not have:
+#   /.dockerenv          docker
+#   /run/.containerenv   podman (docker has no such file and podman has no
+#                        /.dockerenv; testbox.sh supports BOTH engines, so a
+#                        podman box could not run this gate at all before)
+#   CI=true              an ephemeral CI runner
+lc_detect_disposable() {
+    if [ -f "$LC_MARKER_DOCKER" ]; then
+        printf 'docker container (%s)\n' "$LC_MARKER_DOCKER"
+        return 0
+    fi
+    if [ -f "$LC_MARKER_PODMAN" ]; then
+        printf 'podman container (%s)\n' "$LC_MARKER_PODMAN"
+        return 0
+    fi
+    if [ "${CI:-}" = "true" ]; then
+        printf 'CI runner (CI=true)\n'
+        return 0
+    fi
+    return 1
+}
+
 lc_guard_disposable() {
     if [ "${AF_LIFECYCLE_DISPOSABLE:-}" != "1" ]; then
         lc_say "REFUSING: this harness installs binaries, registers autostart units,"
@@ -121,16 +155,14 @@ lc_guard_disposable() {
         return 1
     fi
 
-    local disposable=no reason=""
-    if [ -f /.dockerenv ]; then
-        disposable=yes
-        reason="container (/.dockerenv)"
-    elif [ "${CI:-}" = "true" ]; then
-        disposable=yes
-        reason="CI runner (CI=true)"
-    fi
-    if [ "$disposable" != yes ]; then
-        lc_say "REFUSING: no disposable environment detected (no /.dockerenv, CI!=true)."
+    local reason=""
+    if reason="$(lc_detect_disposable)"; then
+        :
+    else
+        lc_say "REFUSING: no disposable environment detected."
+        lc_say "  looked for: /.dockerenv (docker), /run/.containerenv (podman), CI=true"
+        lc_say "An UNRECOGNIZED runtime is treated as NOT disposable — this harness"
+        lc_say "never decides 'probably fine' about whether it may wreck a machine."
         lc_say "This looks like a real machine. Use: make lifecycle-container"
         return 1
     fi
@@ -166,6 +198,57 @@ lc_guard_disposable() {
 # broken. Where af DOES have an answer (daemon status --json), we use it — but
 # never as the only witness for "is there exactly one daemon".
 # ----------------------------------------------------------------------------
+
+# ----------------------------------------------------------------------------
+# Fault-injection bookkeeping.
+#
+# A fault injection that never runs is the most dangerous outcome this harness
+# has: every assertion then passes, and the run reports that we survived a fault
+# we never injected — a green check for an experiment that did not happen. Two
+# ways that happens, both silent before this:
+#   * a typo'd / retired name matches no branch (`AF_LIFECYCLE_INJECT=skip-restart`
+#     vs `skip-daemon-restart`), so nothing is injected and everything passes;
+#   * a valid injection is requested for a scenario that this run does not
+#     execute (`AF_LIFECYCLE_INJECT=skip-daemon-restart ... scenario-a`), so its
+#     branch is never reached.
+#
+# So: names are validated against a registry up front, and execution is RECORDED.
+# If an injection was asked for and never applied, the run FAILS — loudly, as a
+# harness defect. Never a skip; a skip is how this class hides.
+# ----------------------------------------------------------------------------
+LC_KNOWN_INJECTIONS="skip-daemon-restart unhealthy-session"
+LC_INJECT_APPLIED=0
+
+# lc_validate_injection <name> — accept only a registered injection.
+lc_validate_injection() {
+    local want="$1" k
+    [ -z "$want" ] && return 0
+    for k in $LC_KNOWN_INJECTIONS; do
+        [ "$k" = "$want" ] && return 0
+    done
+    lc_say "UNKNOWN fault injection '$want'."
+    lc_say "  known: $LC_KNOWN_INJECTIONS"
+    lc_say "Refusing to run: an unrecognized injection injects NOTHING, and every"
+    lc_say "assertion would then pass — reporting that we survived a fault that was"
+    lc_say "never applied."
+    return 1
+}
+
+# lc_note_injection_applied — called by an injection once it has PROVED its
+# effect landed (outcome, not exit code).
+lc_note_injection_applied() { LC_INJECT_APPLIED=1; }
+
+# lc_assert_injection_ran <name> — the end-of-run reckoning.
+lc_assert_injection_ran() {
+    local want="$1"
+    [ -z "$want" ] && return 0
+    if [ "$LC_INJECT_APPLIED" = "1" ]; then
+        lc_pass "fault injection '$want' was actually applied during this run"
+        return 0
+    fi
+    lc_fail "fault injection '$want' was requested but NEVER EXECUTED — this run proves nothing about it (wrong scenario selected?)"
+    return 1
+}
 
 # lc_assert_virgin <home> <what> — prove this home is untouched, RIGHT BEFORE the
 # probe that depends on it.
