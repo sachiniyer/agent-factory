@@ -1196,6 +1196,42 @@
       },
       "verdict": "unclear",
       "notes": "A watch-task concurrency cap (task.Task/TaskUpdate.MaxConcurrentRuns) added on master. The CLI sets it via --max-concurrent-runs; the TUI task form and web do not expose it. Same class as the other task-edit gaps: the TUI can edit tasks (so this is a missing FIELD, #1935-adjacent) and the web cannot edit tasks at all (#1935). Niche enough that whether the UIs should surface it is an owner call. Not filed pending that."
+    },
+    {
+      "id": "session.tab.rename",
+      "title": "Rename a tab",
+      "tui": {
+        "status": "no",
+        "pointer": ""
+      },
+      "web": {
+        "status": "yes",
+        "pointer": "web/src/api.ts RenameTab"
+      },
+      "cli": {
+        "status": "yes",
+        "pointer": "api/sessions_tabs.go:192 tab-rename (+ tabs rename)"
+      },
+      "verdict": "unclear",
+      "notes": "#1904 added tab rename to the CLI (tab-rename --new-name) and web (RenameTab). The TUI shows tab names as pane labels (#1813) but has no rename affordance — no app/ code calls RenameTab and no keybinding. Whether the TUI should rename tabs is an owner call (the #1904/tab-ux author). Not filed."
+    },
+    {
+      "id": "session.tab.reorder",
+      "title": "Reorder a tab within a session",
+      "tui": {
+        "status": "no",
+        "pointer": ""
+      },
+      "web": {
+        "status": "yes",
+        "pointer": "web/src/api.ts:472 ReorderTab"
+      },
+      "cli": {
+        "status": "yes",
+        "pointer": "api/sessions_tabs.go:264 tab-reorder (+ tabs reorder)"
+      },
+      "verdict": "unclear",
+      "notes": "#1904 added tab reorder to the CLI (tab-reorder --index) and web (ReorderTab, drag in the tab bar). No TUI affordance. Same owner call as session.tab.rename. Not filed."
     }
   ],
   "ledger": {
@@ -1239,8 +1275,12 @@
       "af sessions send-prompt": "session.send-prompt",
       "af sessions tab-create": "session.tab.create",
       "af sessions tab-delete": "session.tab.close",
+      "af sessions tab-rename": "session.tab.rename",
+      "af sessions tab-reorder": "session.tab.reorder",
       "af sessions tabs create": "session.tab.create",
       "af sessions tabs delete": "session.tab.close",
+      "af sessions tabs rename": "session.tab.rename",
+      "af sessions tabs reorder": "session.tab.reorder",
       "af sessions watch": "session.watch",
       "af sessions whoami": "session.whoami",
       "af tasks add": "task.add",
@@ -1268,6 +1308,8 @@
       "POST /v1/ListBackends": "backend.list",
       "POST /v1/ListTasks": "task.list",
       "POST /v1/RemoveTask": "task.remove",
+      "POST /v1/RenameTab": "session.tab.rename",
+      "POST /v1/ReorderTab": "session.tab.reorder",
       "POST /v1/RestoreArchived": "session.restore",
       "POST /v1/RestoreSession": "session.restore",
       "POST /v1/SendPrompt": "session.send-prompt",
@@ -1335,6 +1377,8 @@
       "ListBackends": "backend.list",
       "ListTasks": "task.list",
       "RemoveTask": "task.remove",
+      "RenameTab": "session.tab.rename",
+      "ReorderTab": "session.tab.reorder",
       "SendPrompt": "session.send-prompt",
       "SetConfigValue": "config.write",
       "Snapshot": "session.list",
@@ -1433,6 +1477,12 @@
       "af sessions tab-create --url": "session.tab.create.web",
       "af sessions tab-delete --help": "meta.discovery",
       "af sessions tab-delete --name": "session.tab.close",
+      "af sessions tab-rename --help": "session.tab.rename",
+      "af sessions tab-rename --name": "session.tab.rename",
+      "af sessions tab-rename --new-name": "session.tab.rename",
+      "af sessions tab-reorder --help": "session.tab.reorder",
+      "af sessions tab-reorder --index": "session.tab.reorder",
+      "af sessions tab-reorder --name": "session.tab.reorder",
       "af sessions tabs --help": "meta.discovery",
       "af sessions tabs create --command": "session.tab.create.options",
       "af sessions tabs create --help": "meta.discovery",
@@ -1442,6 +1492,12 @@
       "af sessions tabs create --url": "session.tab.create.web",
       "af sessions tabs delete --help": "meta.discovery",
       "af sessions tabs delete --name": "session.tab.close",
+      "af sessions tabs rename --help": "session.tab.rename",
+      "af sessions tabs rename --name": "session.tab.rename",
+      "af sessions tabs rename --new-name": "session.tab.rename",
+      "af sessions tabs reorder --help": "session.tab.reorder",
+      "af sessions tabs reorder --index": "session.tab.reorder",
+      "af sessions tabs reorder --name": "session.tab.reorder",
       "af sessions watch --help": "meta.discovery",
       "af sessions watch --interval": "session.watch",
       "af sessions watch --timeout": "session.watch",
@@ -1570,6 +1626,9 @@
           },
           "tab_index": {
             "ok": "The CLI addresses the tab by --name; tab_index is the ordinal fallback the daemon only consults when TabName is empty (daemon/control_types.go:248)."
+          },
+          "tab_id": {
+            "ok": "The TAB's stable id (#1971): the web addresses tabs by it so a reorder can't misroute another client's ordinal; the CLI/TUI address by --name/index and the daemon resolves (session.TabMatches also accepts the displayed label, #1984). A CLI-side tab_id would be a niche convenience, not a gap."
           }
         },
         "tui": {
@@ -1578,6 +1637,9 @@
           },
           "tab_index": {
             "ok": "Same as the CLI: the TUI passes TabName, which is the daemon's preferred lookup key."
+          },
+          "tab_id": {
+            "ok": "The TAB's stable id (#1971): the web addresses tabs by it so a reorder can't misroute another client's ordinal; the CLI/TUI address by --name/index and the daemon resolves (session.TabMatches also accepts the displayed label, #1984). A CLI-side tab_id would be a niche convenience, not a gap."
           }
         }
       },
@@ -1716,6 +1778,32 @@
             "ok": "A CLI-side compare-and-swap guard (#1891): api/tasks.go enforceTaskScope authorizes a task mutation against the project the CLI resolved via --repo, so a stale id cannot hit a task that moved projects. The TUI and web operate within an already-selected project and set no expectation — it is the stateless CLI's safety mechanism, not a user option."
           }
         }
+      },
+      "RenameTabRequest": {
+        "cli": {
+          "id": {
+            "gap": "wire.id-addressing"
+          },
+          "tab_id": {
+            "ok": "The TAB's stable id (#1971): the web addresses tabs by it so a reorder can't misroute another client's ordinal; the CLI/TUI address by --name/index and the daemon resolves (session.TabMatches also accepts the displayed label, #1984). A CLI-side tab_id would be a niche convenience, not a gap."
+          },
+          "tab_index": {
+            "ok": "The CLI addresses the tab by --name; tab_index is the ordinal fallback the daemon consults only when TabName is empty (daemon/manager_tabs_arrange.go resolveTabTarget)."
+          }
+        }
+      },
+      "ReorderTabRequest": {
+        "cli": {
+          "id": {
+            "gap": "wire.id-addressing"
+          },
+          "tab_id": {
+            "ok": "The TAB's stable id (#1971): the web addresses tabs by it so a reorder can't misroute another client's ordinal; the CLI/TUI address by --name/index and the daemon resolves (session.TabMatches also accepts the displayed label, #1984). A CLI-side tab_id would be a niche convenience, not a gap."
+          },
+          "tab_index": {
+            "ok": "The CLI addresses the tab by --name; tab_index is the ordinal fallback the daemon consults only when TabName is empty (daemon/manager_tabs_arrange.go resolveTabTarget)."
+          }
+        }
       }
     },
     "web_rpcs": {
@@ -1807,6 +1895,16 @@
         },
         "expect.project_path": {
           "ok": "A CLI-side compare-and-swap guard (#1891): api/tasks.go enforceTaskScope authorizes a task mutation against the project the CLI resolved via --repo, so a stale id cannot hit a task that moved projects. The TUI and web operate within an already-selected project and set no expectation — it is the stateless CLI's safety mechanism, not a user option."
+        }
+      },
+      "RenameTab": {
+        "tab_index": {
+          "ok": "The CLI addresses the tab by --name; tab_index is the ordinal fallback the daemon consults only when TabName is empty (daemon/manager_tabs_arrange.go resolveTabTarget)."
+        }
+      },
+      "ReorderTab": {
+        "tab_index": {
+          "ok": "The CLI addresses the tab by --name; tab_index is the ordinal fallback the daemon consults only when TabName is empty (daemon/manager_tabs_arrange.go resolveTabTarget)."
         }
       }
     }
