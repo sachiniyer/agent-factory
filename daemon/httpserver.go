@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"syscall"
 	"time"
 
 	"github.com/sachiniyer/agent-factory/agentproto"
@@ -367,7 +368,17 @@ func writeHTTPError(w http.ResponseWriter, status int, err error) {
 func writeHTTPEnvelope(w http.ResponseWriter, status int, env apiproto.Envelope) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	if err := apiproto.WriteEnvelope(w, env); err != nil {
+	if err := apiproto.WriteEnvelope(w, env); err != nil && !httpResponseWriteAbandoned(err) {
 		log.WarningLog.Printf("failed to write HTTP response envelope: %v", err)
 	}
+}
+
+// httpResponseWriteAbandoned reports errors expected when an HTTP client closes
+// its connection before the daemon finishes writing a response. Those errors are
+// normal during client or session teardown and are not actionable warnings.
+func httpResponseWriteAbandoned(err error) bool {
+	return errors.Is(err, context.Canceled) ||
+		errors.Is(err, net.ErrClosed) ||
+		errors.Is(err, syscall.EPIPE) ||
+		errors.Is(err, syscall.ECONNRESET)
 }

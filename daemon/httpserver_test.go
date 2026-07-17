@@ -4,12 +4,15 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/sachiniyer/agent-factory/agentproto"
@@ -392,6 +395,22 @@ func TestHTTP_UnixSocket_EndToEnd(t *testing.T) {
 	require.NoError(t, closeHTTP())
 	_, statErr := os.Stat(sockPath)
 	assert.True(t, os.IsNotExist(statErr), "socket file must be unlinked on close")
+}
+
+// TestHTTPResponseWriteAbandoned covers the expected disconnect errors emitted
+// when a client tears down its connection before the response is written.
+func TestHTTPResponseWriteAbandoned(t *testing.T) {
+	for _, err := range []error{
+		context.Canceled,
+		net.ErrClosed,
+		syscall.EPIPE,
+		syscall.ECONNRESET,
+		fmt.Errorf("wrapped: %w", syscall.EPIPE),
+	} {
+		assert.True(t, httpResponseWriteAbandoned(err), "expected abandoned response write: %v", err)
+	}
+	assert.False(t, httpResponseWriteAbandoned(errors.New("disk full")),
+		"unexpected response write errors must remain visible")
 }
 
 // TestHTTP_SuccessBodyUsesSharedEnvelopeWriter pins that the HTTP success body is
