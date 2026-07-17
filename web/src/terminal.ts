@@ -103,7 +103,7 @@ export class AttachTerminal {
   private exited = false;
 
   constructor(
-    private readonly container: HTMLElement,
+    container: HTMLElement,
     private readonly sessionId: string,
     private readonly token: string,
     private readonly tabId: string,
@@ -158,6 +158,7 @@ export class AttachTerminal {
       handleClipboardKeydown(ev, {
         hasSelection: () => this.term.hasSelection(),
         getSelection: () => this.term.getSelection(),
+        clearSelection: () => this.term.clearSelection(),
         copy: (text) => this.copyToClipboard(text),
         sendInput: (text) => this.sendInput(text),
       }),
@@ -473,10 +474,12 @@ export class AttachTerminal {
   }
 
   /** Last-resort visible cue when BOTH clipboard paths fail, so the copy is never
-   *  silently dropped. Fixed to the viewport corner (an app-level "clipboard
-   *  unavailable" condition, not pane-specific) so it stays visible regardless of
-   *  ancestor positioning and is not clipped by the pane host's overflow:hidden;
-   *  styled inline so it needs no stylesheet plumbing and no <style> under the CSP. */
+   *  silently dropped. An app-level "clipboard unavailable" condition (not
+   *  pane-specific), so it is a viewport-fixed toast appended to document.body —
+   *  matching the app's own af-toast pattern and, by living outside the pane tree,
+   *  never clipped by a split pane's overflow:hidden or anchored to a transformed
+   *  ancestor. Styled inline so it needs no stylesheet plumbing and no <style>
+   *  element under the CSP. */
   private flashCopyHint(): void {
     try {
       const hint = document.createElement("div");
@@ -492,7 +495,7 @@ export class AttachTerminal {
       hint.style.background = "rgba(0, 0, 0, 0.82)";
       hint.style.color = "#fff";
       hint.style.pointerEvents = "none";
-      this.container.appendChild(hint);
+      document.body.appendChild(hint);
       window.setTimeout(() => hint.remove(), 2500);
     } catch {
       // If even the DOM cue fails there is nothing further to do.

@@ -23,10 +23,17 @@ function rig(opts: { selection?: string }) {
   const wire: Uint8Array[] = [];
   const clipboard: string[] = [];
   let prevented = 0;
-  const selection = opts.selection ?? "";
+  let cleared = 0;
+  // Mutable so clearSelection() genuinely drops it — a later hasSelection() then
+  // reports false, exactly as xterm behaves after a real clear.
+  let selection = opts.selection ?? "";
   const deps: ClipboardDeps = {
     hasSelection: () => selection !== "",
     getSelection: () => selection,
+    clearSelection: () => {
+      selection = "";
+      cleared++;
+    },
     copy: (t) => clipboard.push(t),
     // Byte-identical to terminal.ts's input path, so `wire` holds real OpInput frames.
     sendInput: (t) => wire.push(encode(inputFrame(enc.encode(t)))),
@@ -36,6 +43,7 @@ function rig(opts: { selection?: string }) {
     wire,
     clipboard,
     prevented: () => prevented,
+    cleared: () => cleared,
     markPrevented: () => {
       prevented++;
     },
@@ -81,6 +89,24 @@ test("Ctrl+C WITH a selection copies it and sends NO \\x03", () => {
   assert.deepEqual(r.clipboard, ["hello world"], "the selection must reach the clipboard");
   assert.equal(wireInput(r.wire), "", "no interrupt on the wire when copying");
   assert.equal(r.prevented(), 1, "preventDefault stops the browser's own copy");
+  assert.equal(r.cleared(), 1, "the selection is cleared so the NEXT Ctrl+C can interrupt");
+});
+
+test("a SECOND Ctrl+C after a copy interrupts — the runaway-agent reflex", () => {
+  // The scenario the interrupt half exists for: copy some runaway output, then the
+  // agent keeps going and the user reaches for Ctrl+C to STOP it. Because the first
+  // Ctrl+C cleared the selection, the second one falls through to the interrupt.
+  const r = rig({ selection: "runaway output" });
+
+  const first = handleClipboardKeydown(keyEvent({ key: "c", ctrlKey: true }, r.markPrevented), r.deps);
+  assert.equal(first, false);
+  assert.deepEqual(r.clipboard, ["runaway output"], "first Ctrl+C copies");
+  assert.equal(wireInput(r.wire), "", "first Ctrl+C does NOT interrupt");
+
+  const second = handleClipboardKeydown(keyEvent({ key: "c", ctrlKey: true }, r.markPrevented), r.deps);
+  assert.equal(second, false);
+  assert.equal(wireInput(r.wire), ETX, "second Ctrl+C interrupts — exactly one \\x03");
+  assert.deepEqual(r.clipboard, ["runaway output"], "the second press does NOT re-copy");
 });
 
 test("Ctrl+C with NO selection sends \\x03 on the wire and copies nothing", () => {
@@ -105,6 +131,7 @@ test("Ctrl+Shift+C copies the selection and never sends \\x03", () => {
   assert.deepEqual(r.clipboard, ["abc"]);
   assert.equal(wireInput(r.wire), "", "an explicit copy must never interrupt");
   assert.equal(r.prevented(), 1);
+  assert.equal(r.cleared(), 0, "Ctrl+Shift+C keeps the selection — it is the 'keep selecting' gesture");
 });
 
 test("Ctrl+Shift+C with NO selection is a no-op (no copy, no interrupt)", () => {

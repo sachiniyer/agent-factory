@@ -42,6 +42,9 @@ export interface ClipboardDeps {
   hasSelection(): boolean;
   /** The selected text (xterm.getSelection). Only read when hasSelection() is true. */
   getSelection(): string;
+  /** Clear the terminal's selection (xterm.clearSelection). Called after a Ctrl+C
+   *  copy so the NEXT Ctrl+C interrupts (see the Ctrl+C branch). */
+  clearSelection(): void;
   /** Copy text to the system clipboard, with a graceful, never-silent fallback. */
   copy(text: string): void;
   /** Send text to the PTY as OpInput — the same path onData uses for typed keys. */
@@ -94,7 +97,8 @@ export function handleClipboardKeydown(ev: ClipboardKeyEvent, deps: ClipboardDep
   if (key === "c") {
     if (ev.shiftKey) {
       // Ctrl+Shift+C — explicit, unambiguous copy. Copies a selection if present,
-      // a no-op otherwise; never interrupts.
+      // a no-op otherwise; never interrupts. The selection is deliberately LEFT
+      // intact: this is the "just copy, I want to keep selecting" gesture.
       ev.preventDefault();
       if (deps.hasSelection()) {
         deps.copy(deps.getSelection());
@@ -106,6 +110,13 @@ export function handleClipboardKeydown(ev: ClipboardKeyEvent, deps: ClipboardDep
     if (deps.hasSelection()) {
       ev.preventDefault();
       deps.copy(deps.getSelection());
+      // Clear the selection so the NEXT Ctrl+C interrupts. Without this, a user who
+      // copies runaway output and then reaches for Ctrl+C to STOP the agent keeps
+      // re-copying instead — the interrupt reflex the no-selection path exists for
+      // would be unreachable until they manually deselect. xterm only auto-clears
+      // the selection on its own onUserInput, which this path bypasses (we send via
+      // our WS and return false), so we clear it explicitly.
+      deps.clearSelection();
       return false;
     }
     // No selection: interrupt. Send \x03 ourselves and suppress xterm's own

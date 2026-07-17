@@ -7569,6 +7569,7 @@ function handleClipboardKeydown(ev, deps) {
     if (deps.hasSelection()) {
       ev.preventDefault();
       deps.copy(deps.getSelection());
+      deps.clearSelection();
       return false;
     }
     ev.preventDefault();
@@ -7780,7 +7781,6 @@ function wsScheme2() {
 }
 var AttachTerminal = class {
   constructor(container, sessionId, token2, tabId, tab, cb) {
-    this.container = container;
     this.sessionId = sessionId;
     this.token = token2;
     this.tabId = tabId;
@@ -7820,6 +7820,7 @@ var AttachTerminal = class {
       (ev) => handleClipboardKeydown(ev, {
         hasSelection: () => this.term.hasSelection(),
         getSelection: () => this.term.getSelection(),
+        clearSelection: () => this.term.clearSelection(),
         copy: (text) => this.copyToClipboard(text),
         sendInput: (text) => this.sendInput(text)
       })
@@ -8104,10 +8105,12 @@ var AttachTerminal = class {
     }
   }
   /** Last-resort visible cue when BOTH clipboard paths fail, so the copy is never
-   *  silently dropped. Fixed to the viewport corner (an app-level "clipboard
-   *  unavailable" condition, not pane-specific) so it stays visible regardless of
-   *  ancestor positioning and is not clipped by the pane host's overflow:hidden;
-   *  styled inline so it needs no stylesheet plumbing and no <style> under the CSP. */
+   *  silently dropped. An app-level "clipboard unavailable" condition (not
+   *  pane-specific), so it is a viewport-fixed toast appended to document.body —
+   *  matching the app's own af-toast pattern and, by living outside the pane tree,
+   *  never clipped by a split pane's overflow:hidden or anchored to a transformed
+   *  ancestor. Styled inline so it needs no stylesheet plumbing and no <style>
+   *  element under the CSP. */
   flashCopyHint() {
     try {
       const hint = document.createElement("div");
@@ -8123,7 +8126,7 @@ var AttachTerminal = class {
       hint.style.background = "rgba(0, 0, 0, 0.82)";
       hint.style.color = "#fff";
       hint.style.pointerEvents = "none";
-      this.container.appendChild(hint);
+      document.body.appendChild(hint);
       window.setTimeout(() => hint.remove(), 2500);
     } catch {
     }
