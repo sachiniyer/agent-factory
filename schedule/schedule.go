@@ -129,12 +129,12 @@ func ParseCron(expr string) (Schedule, bool) {
 		return custom(expr), false
 	}
 
-	// every N minutes: */N * * * *
-	if n, ok := stepOfStar(minute); ok && hour == "*" && dom == "*" && dow == "*" {
+	// every N minutes: */N * * * * (N in 1-59; see stepOfStar)
+	if n, ok := stepOfStar(minute, 59); ok && hour == "*" && dom == "*" && dow == "*" {
 		return Schedule{Type: EveryNMinutes, Interval: n}, true
 	}
-	// every N hours: 0 */N * * *
-	if n, ok := stepOfStar(hour); ok && minute == "0" && dom == "*" && dow == "*" {
+	// every N hours: 0 */N * * * (N in 1-23)
+	if n, ok := stepOfStar(hour, 23); ok && minute == "0" && dom == "*" && dow == "*" {
 		return Schedule{Type: EveryNHours, Interval: n}, true
 	}
 	// hourly: M * * * *
@@ -251,15 +251,20 @@ func ordinal(n int) string {
 	return strconv.Itoa(n) + suffix
 }
 
-// stepOfStar parses a "*/N" field and returns N (N>=1). Any other shape (a bare
-// "*", a single int, a range step, or a list) returns ok=false.
-func stepOfStar(field string) (int, bool) {
+// stepOfStar parses a "*/N" field and returns N when it is a friendly interval,
+// 1 <= N <= max. A step at or beyond the field size (e.g. "*/60" for minutes or
+// "*/24" for hours) is rejected so ParseCron falls back to Custom and preserves
+// the raw expression, rather than the picker clamping it (to */59 / */23) and
+// silently rewriting the cron on an otherwise-untouched re-save (#2057). Any
+// other shape (a bare "*", a single int, a range step, or a list) also returns
+// ok=false.
+func stepOfStar(field string, max int) (int, bool) {
 	rest, ok := strings.CutPrefix(field, "*/")
 	if !ok {
 		return 0, false
 	}
 	n, err := strconv.Atoi(rest)
-	if err != nil || n < 1 {
+	if err != nil || n < 1 || n > max {
 		return 0, false
 	}
 	return n, true

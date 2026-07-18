@@ -871,10 +871,10 @@ func TestTaskPaneConsumeDeletedClearsState(t *testing.T) {
 func TestTaskPaneCreateModeInactiveTriggerNotSaved(t *testing.T) {
 	tp := NewTaskPane()
 	tp.EnterCreateMode(newGitRepo(t))
-	fillCreateForm(t, tp, "both") // name, cron, prompt — cron type selected
+	fillCreateForm(t, tp, "both") // name + prompt; schedule picker holds its default
 
-	// Flip the trigger type to watch and fill the watch command. The cron
-	// buffer still holds "* * * * *".
+	// Flip the trigger type to watch and fill the watch command. The schedule
+	// picker still holds its default cron, but the watch selection must win.
 	tp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyTab}) // -> trigger selector
 	tp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyRight})
 	tp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyTab}) // -> watch value

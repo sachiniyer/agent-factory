@@ -267,8 +267,9 @@ func TestHandleStateTasks_PendingCreateFlushesDirtyTaskState(t *testing.T) {
 
 	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("new-task")})
 	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyTab}) // -> trigger selector (cron stays selected)
-	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyTab}) // -> cron value
-	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("* * * * *")})
+	// The schedule picker occupies the cron value stop and defaults to a valid
+	// daily schedule (#2057), so this create needs no cron input.
+	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyTab}) // -> schedule picker
 	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyTab}) // -> prompt
 	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("do other thing")})
 	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyTab}) // -> target session
@@ -519,8 +520,8 @@ func TestHandleStateTasks_FailedCreateDoesNotDuplicateOnReopen(t *testing.T) {
 	require.True(t, tp.IsCreating(), "'n' must open the inline create form")
 	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("dup-task")})
 	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyTab}) // -> trigger selector
-	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyTab}) // -> cron value
-	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("* * * * *")})
+	// Schedule picker defaults to a valid daily schedule; no cron input needed.
+	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyTab}) // -> schedule picker
 	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyTab}) // -> prompt
 	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("dup prompt")})
 	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyTab}) // -> target session
@@ -586,8 +587,11 @@ func TestHandleTaskCreate_RoutesThroughDaemonRPC(t *testing.T) {
 	require.True(t, tp.IsCreating(), "'n' must open the inline create form")
 	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("new-task")})
 	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyTab}) // -> trigger selector (cron stays selected)
-	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyTab}) // -> cron value
-	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("* * * * *")})
+	// The cron trigger's value stop is now the schedule picker (#2057); a user
+	// who accepts its default composes a daily-at-9:00-AM task ("0 9 * * *"),
+	// so no cron text is typed here. (The picker's own key handling and explicit
+	// schedule choices are covered by the ui package tests.)
+	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyTab}) // -> schedule picker
 	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyTab}) // -> prompt
 	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("do a thing")})
 	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyTab}) // -> target session
@@ -597,11 +601,13 @@ func TestHandleTaskCreate_RoutesThroughDaemonRPC(t *testing.T) {
 	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyEnter})
 
 	// (a) The create was dispatched through the daemon seam exactly once, with
-	// the task the user composed.
+	// the task the user composed. The schedule picker's default (daily at
+	// 9:00 AM) replaces the old raw-cron every-minute default, which was a poor
+	// default that hammered every minute (#2057).
 	require.Equal(t, 1, calls, "create must route through the daemon RPC, not a direct disk write")
 	require.NotNil(t, got)
 	assert.Equal(t, "new-task", got.Name)
-	assert.Equal(t, "* * * * *", got.CronExpr)
+	assert.Equal(t, "0 9 * * *", got.CronExpr)
 
 	// (b) The TUI wrote nothing to disk: with the daemon stubbed out, the only
 	// writer, tasks.json holds no task.

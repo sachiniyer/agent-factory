@@ -19,8 +19,10 @@
     { "name": "every-5-minutes", "schedule": { "type": "everyNMinutes", "interval": 5 },  "cron": "*/5 * * * *",  "human": "Every 5 minutes" },
     { "name": "every-15-minutes","schedule": { "type": "everyNMinutes", "interval": 15 }, "cron": "*/15 * * * *", "human": "Every 15 minutes" },
     { "name": "every-30-minutes","schedule": { "type": "everyNMinutes", "interval": 30 }, "cron": "*/30 * * * *", "human": "Every 30 minutes" },
+    { "name": "every-59-minutes","schedule": { "type": "everyNMinutes", "interval": 59 }, "cron": "*/59 * * * *", "human": "Every 59 minutes" },
 
     { "name": "every-1-hour",   "schedule": { "type": "everyNHours", "interval": 1 },  "cron": "0 */1 * * *",  "human": "Every hour" },
+    { "name": "every-23-hours", "schedule": { "type": "everyNHours", "interval": 23 }, "cron": "0 */23 * * *", "human": "Every 23 hours" },
     { "name": "every-2-hours",  "schedule": { "type": "everyNHours", "interval": 2 },  "cron": "0 */2 * * *",  "human": "Every 2 hours" },
     { "name": "every-6-hours",  "schedule": { "type": "everyNHours", "interval": 6 },  "cron": "0 */6 * * *",  "human": "Every 6 hours" },
     { "name": "every-12-hours", "schedule": { "type": "everyNHours", "interval": 12 }, "cron": "0 */12 * * *", "human": "Every 12 hours" },
@@ -60,6 +62,8 @@
     { "name": "custom-raw-is-recognized","schedule": { "type": "custom", "raw": "41 3 * * *" }, "cron": "41 3 * * *", "human": "Custom: 41 3 * * *", "parse": { "ok": true, "schedule": { "type": "daily", "hour": 3, "minute": 41 } } },
 
     { "name": "parse-sunday-alias-7",    "cron": "0 0 * * 7",     "parse": { "ok": true,  "schedule": { "type": "weekly", "hour": 0, "minute": 0, "weekdays": [0] } } },
+    { "name": "parse-minute-step-overflow", "cron": "*/60 * * * *", "parse": { "ok": false, "schedule": { "type": "custom", "raw": "*/60 * * * *" } } },
+    { "name": "parse-hour-step-overflow",   "cron": "0 */24 * * *", "parse": { "ok": false, "schedule": { "type": "custom", "raw": "0 */24 * * *" } } },
     { "name": "parse-empty",             "cron": "",              "parse": { "ok": false, "schedule": { "type": "custom", "raw": "" } } },
     { "name": "parse-garbage",           "cron": "not a cron",    "parse": { "ok": false, "schedule": { "type": "custom", "raw": "not a cron" } } },
     { "name": "parse-six-fields",        "cron": "0 0 * * * *",   "parse": { "ok": false, "schedule": { "type": "custom", "raw": "0 0 * * * *" } } },

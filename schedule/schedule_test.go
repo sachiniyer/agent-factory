@@ -133,8 +133,10 @@ func TestParseCronRoundTrip(t *testing.T) {
 	presets := []Schedule{
 		{Type: EveryNMinutes, Interval: 1},
 		{Type: EveryNMinutes, Interval: 45},
+		{Type: EveryNMinutes, Interval: 59}, // upper bound still a preset
 		{Type: EveryNHours, Interval: 1},
 		{Type: EveryNHours, Interval: 8},
+		{Type: EveryNHours, Interval: 23}, // upper bound still a preset
 		{Type: Hourly, Minute: 0},
 		{Type: Hourly, Minute: 17},
 		{Type: Daily, Hour: 0, Minute: 0},
@@ -168,6 +170,8 @@ func TestParseCronUnrecognizedFallsBackToCustom(t *testing.T) {
 		"0 0 * JAN *",    // named month
 		"@daily",         // descriptor
 		"0 0",            // too few fields
+		"*/60 * * * *",   // minute step at/over field size — clamps if parsed, so Custom
+		"0 */24 * * *",   // hour step at/over field size — Custom, not clamped to */23
 	} {
 		got, ok := ParseCron(expr)
 		if ok {
