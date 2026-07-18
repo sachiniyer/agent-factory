@@ -55,7 +55,7 @@ import { isRenameableTab } from "./tablabel.js";
 import { Store } from "./store.js";
 import { registerServiceWorker } from "./serviceworker.js";
 import { bootStampTheme, persistThemeChoice, stampTheme, type ThemeChoice } from "./theme.js";
-import { addTaskModal, type AddTaskInput, buildTask } from "./tasks.js";
+import { addTaskModal, type AddTaskInput, buildTask, editTaskModal } from "./tasks.js";
 import type { TerminalStatus } from "./terminal.js";
 import {
   AppShell,
@@ -1071,6 +1071,56 @@ function openAddTask(): void {
   );
 }
 
+/** Opens the edit-task modal seeded from the task, then submits the collected fields
+ *  as a field-level UpdateTask patch (#1935) keyed by the task's stable id; the
+ *  task.updated event + a refetch reconcile. Errors surface in the modal for a retry.
+ *
+ *  `enabled` is intentionally NOT in the patch — the toggle owns that bit, and
+ *  omitting it preserves a disabled task's state across an edit (the field-level
+ *  merge leaves an unsent field as-stored, #1700). Every other field the form
+ *  collects IS sent, as an INLINE literal: the surface-parity field audit derives the
+ *  web's reach from the values passed here (not the TS type), so each editable field
+ *  must appear at this exact call site. The unused trigger is cleared to "" — safe on
+ *  the HTTP/JSON path, which (unlike the CLI's gob socket) never elides "" to nil. */
+function openEditTask(task: TaskData): void {
+  const projects = pickerProjects(store.get().sessions, store.get().tasks);
+  openModal(
+    editTaskModal(projects, task, {
+      onSubmit: (input: AddTaskInput) => {
+        const tok = token;
+        // `=== null` not `!tok`: "" is the authorized-tokenless credential (#1696).
+        if (tok === null || !modal) {
+          return;
+        }
+        const m = modal;
+        m.setBusy(true);
+        void updateTask(
+          task.id,
+          {
+            name: input.name,
+            prompt: input.prompt,
+            cron_expr: input.trigger === "cron" ? input.cron : "",
+            watch_cmd: input.trigger === "watch" ? input.watchCmd : "",
+            target_session: input.targetSession,
+            project_path: input.projectPath,
+            program: input.program,
+          },
+          tok,
+        )
+          .then(() => {
+            closeModal();
+            refreshTasks();
+          })
+          .catch((e) => {
+            m.setBusy(false);
+            m.setError(describeError(e));
+          });
+      },
+      onCancel: closeModal,
+    }),
+  );
+}
+
 /** Enables/disables a task (UpdateTask with `enabled` flipped), then refetches. A
  *  failure surfaces as the shared transient toast (task ops have no modal). Keys off
  *  the task's stable id — requireTaskID in the api layer refuses a missing one. */
@@ -1172,6 +1222,7 @@ const actions = {
   setStatusFilter,
   resetStatusFilter,
   addTask: openAddTask,
+  editTask: openEditTask,
   toggleTask,
   triggerTask: doTriggerTask,
   removeTask: doRemoveTask,

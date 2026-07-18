@@ -177,6 +177,10 @@ export interface TaskUpdate {
   cron_expr?: string;
   watch_cmd?: string;
   target_session?: string;
+  /** The repo root the task belongs to — the project it groups under. Present so
+   *  the edit form can move a task between projects (#1935); the Go task.TaskUpdate
+   *  struct carries it, and the TUI already edits it (ui/task_pane_edit.go). */
+  project_path?: string;
   program?: string;
   enabled?: boolean;
 }

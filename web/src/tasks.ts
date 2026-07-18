@@ -37,6 +37,9 @@ export interface AddTaskInput {
 export interface TaskActions {
   /** Opens the add-task modal. */
   add(): void;
+  /** Opens the edit modal seeded from this task; submits the changed fields via
+   *  UpdateTask (the field-level patch, #1935). */
+  edit(task: TaskData): void;
   /** Flips enabled via UpdateTask. */
   toggle(task: TaskData): void;
   /** Fires the task now via TriggerTask (enabled cron tasks only). */
@@ -179,7 +182,10 @@ export class TasksPane {
     );
     toggleBtn.addEventListener("click", () => this.actions.toggle(t));
 
-    const actionEls: HTMLElement[] = [toggleBtn];
+    const editBtn = h("button", { type: "button", class: "af-ghost af-task-action" }, "Edit");
+    editBtn.addEventListener("click", () => this.actions.edit(t));
+
+    const actionEls: HTMLElement[] = [toggleBtn, editBtn];
     if (canTrigger(t)) {
       const triggerBtn = h("button", { type: "button", class: "af-ghost af-task-action" }, "Trigger");
       triggerBtn.addEventListener("click", () => this.actions.trigger(t));
@@ -195,23 +201,31 @@ export class TasksPane {
 }
 
 /**
- * The add-task modal (mirrors the TUI's task editor + `af tasks add`): name,
- * project, a cron/watch trigger toggle with its value, a prompt, an optional target
- * session, and the agent program. onSubmit fires with the collected input; the caller
- * builds the task (buildTask) and POSTs AddTask. A cron task requires a prompt (the
- * daemon rejects an empty one — there is no event line to fall back to); a watch task
- * requires its command and may omit the prompt.
+ * The task form modal (mirrors the TUI's task editor + `af tasks add`/`update`):
+ * name, project, a cron/watch trigger toggle with its value, a prompt, an optional
+ * target session, and the agent program. Shared by the ADD and EDIT flows — the only
+ * difference is the chrome (title/confirm label) and, in edit mode, that every field
+ * is SEEDED from the existing task (#1935). onSubmit fires with the collected input;
+ * the caller turns it into an AddTask (buildTask) or a field-level UpdateTask patch.
+ * A cron task requires a prompt (the daemon rejects an empty one — there is no event
+ * line to fall back to); a watch task requires its command and may omit the prompt.
  */
-export function addTaskModal(
-  projects: string[],
-  defaultProject: string | null,
-  callbacks: { onSubmit: (input: AddTaskInput) => void; onCancel: () => void },
-): ModalHandle {
+function taskFormModal(opts: {
+  title: string;
+  confirmLabel: string;
+  projects: string[];
+  /** The project the picker defaults to (add) or is seeded to (edit). */
+  defaultProject: string | null;
+  /** Present only in edit mode: the task whose current values seed the form. */
+  seed?: TaskData;
+  onSubmit: (input: AddTaskInput) => void;
+  onCancel: () => void;
+}): ModalHandle {
   const { handle, body, confirmBtn } = modalChrome({
-    title: "Add task",
-    confirmLabel: "Add",
+    title: opts.title,
+    confirmLabel: opts.confirmLabel,
     confirmClass: "af-primary",
-    onCancel: callbacks.onCancel,
+    onCancel: opts.onCancel,
   });
 
   const nameInput = h("input", { type: "text", class: "af-input", placeholder: "Task name", autocomplete: "off" });
@@ -219,20 +233,21 @@ export function addTaskModal(
 
   const projectSelect = h("select", { class: "af-input" });
   projectSelect.setAttribute("aria-label", "Project");
-  if (projects.length === 0) {
+  if (opts.projects.length === 0) {
     const opt = h("option", { value: "" }, "No projects yet — create a session first");
     opt.disabled = true;
     opt.selected = true;
     projectSelect.append(opt);
     confirmBtn.disabled = true;
   } else {
-    for (const p of projects) {
+    for (const p of opts.projects) {
       projectSelect.append(h("option", { value: p }, projectLabel(p)));
     }
     // Default the picker to the currently-scoped project (redesign PR2), so adding a
-    // task from within a project lands it in that project without extra clicks.
-    if (defaultProject && projects.includes(defaultProject)) {
-      projectSelect.value = defaultProject;
+    // task from within a project lands it in that project without extra clicks. In
+    // edit mode this is the task's own project (its seed), so it starts on it.
+    if (opts.defaultProject && opts.projects.includes(opts.defaultProject)) {
+      projectSelect.value = opts.defaultProject;
     }
   }
 
@@ -251,12 +266,13 @@ export function addTaskModal(
   watchField.hidden = true;
 
   // Show only the field for the selected trigger; the other is hidden (its value is
-  // ignored by buildTask, and the daemon rejects a task with both set).
-  triggerSelect.addEventListener("change", () => {
+  // ignored on submit, and the daemon rejects a task with both set).
+  const syncTriggerFields = (): void => {
     const isWatch = triggerSelect.value === "watch";
     cronField.hidden = isWatch;
     watchField.hidden = !isWatch;
-  });
+  };
+  triggerSelect.addEventListener("change", syncTriggerFields);
 
   const promptArea = h("textarea", { class: "af-input af-textarea", placeholder: "Prompt to deliver ({{line}} for the watch line)", rows: 3 });
   promptArea.setAttribute("aria-label", "Prompt");
@@ -269,6 +285,26 @@ export function addTaskModal(
   programSelect.append(h("option", { value: "" }, "Repo default"));
   for (const prog of ["claude", "codex", "aider", "gemini", "amp", "opencode"]) {
     programSelect.append(h("option", { value: prog }, prog));
+  }
+
+  // Seed every field from the existing task (edit mode). The trigger picker follows
+  // whichever of watch_cmd / cron_expr the task carries, and its field visibility is
+  // synced to match. A program the picker doesn't list (e.g. one set via the CLI) is
+  // appended first so an unrelated edit never silently resets it to the repo default.
+  if (opts.seed) {
+    const s = opts.seed;
+    nameInput.value = s.name ?? "";
+    const isWatch = !!(s.watch_cmd && s.watch_cmd.trim() !== "");
+    triggerSelect.value = isWatch ? "watch" : "cron";
+    cronInput.value = s.cron_expr ?? "";
+    watchInput.value = s.watch_cmd ?? "";
+    syncTriggerFields();
+    promptArea.value = s.prompt ?? "";
+    targetInput.value = s.target_session ?? "";
+    if (s.program && ![...programSelect.options].some((o) => o.value === s.program)) {
+      programSelect.append(h("option", { value: s.program }, s.program));
+    }
+    programSelect.value = s.program ?? "";
   }
 
   body.append(
@@ -306,7 +342,7 @@ export function addTaskModal(
       return;
     }
     handle.setError(null);
-    callbacks.onSubmit({
+    opts.onSubmit({
       name,
       projectPath: projectSelect.value,
       trigger,
@@ -320,4 +356,40 @@ export function addTaskModal(
 
   queueMicrotask(() => nameInput.focus());
   return handle;
+}
+
+/** The add-task modal: the shared task form with add chrome. The caller builds the
+ *  task (buildTask) and POSTs AddTask. */
+export function addTaskModal(
+  projects: string[],
+  defaultProject: string | null,
+  callbacks: { onSubmit: (input: AddTaskInput) => void; onCancel: () => void },
+): ModalHandle {
+  return taskFormModal({
+    title: "Add task",
+    confirmLabel: "Add",
+    projects,
+    defaultProject,
+    onSubmit: callbacks.onSubmit,
+    onCancel: callbacks.onCancel,
+  });
+}
+
+/** The edit-task modal (#1935): the same form seeded from `task`'s current values.
+ *  The caller submits the collected fields as a field-level UpdateTask patch. The
+ *  project picker starts on the task's own project and can move it to another. */
+export function editTaskModal(
+  projects: string[],
+  task: TaskData,
+  callbacks: { onSubmit: (input: AddTaskInput) => void; onCancel: () => void },
+): ModalHandle {
+  return taskFormModal({
+    title: "Edit task",
+    confirmLabel: "Save",
+    projects,
+    defaultProject: task.project_path,
+    seed: task,
+    onSubmit: callbacks.onSubmit,
+    onCancel: callbacks.onCancel,
+  });
 }
