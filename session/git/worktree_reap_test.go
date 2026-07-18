@@ -5,7 +5,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strconv"
 	"syscall"
 	"testing"
@@ -35,18 +34,13 @@ import (
 // file so it never fills the disk; exec.CommandContext SIGKILLs it at a deadline;
 // t.Cleanup SIGKILLs its whole process group and reaps it.
 func TestCleanup_ReapsSurvivingWriterBeforeRemoval(t *testing.T) {
-	// The reap finds writers by working directory, and proctree has no darwin cwd
-	// backend yet: readWorkingDir on macOS returns the honest unknown ("", false)
-	// rather than risk a fabricated path from an unverifiable libproc struct — which
-	// for a DESTRUCTIVE reap would mean signalling the wrong process. So on darwin
-	// reapWorktreeWriters safely no-ops, and the #2025 orphan persists on macOS
-	// until the darwin working-directory backend lands. This is a real, pre-existing
-	// platform gap in a shared package, not a defect in this fix — tracked in #2050.
-	if runtime.GOOS == "darwin" {
-		t.Skip("proctree has no darwin working-directory backend, so the cwd-based " +
-			"writer reap no-ops on macOS — #2025 stays open there until #2050 adds it")
-	}
-
+	// Runs on darwin as of #2050: proctree grew a working-directory backend
+	// (proc_info(PROC_PIDVNODEPATHINFO)), so the cwd-based writer reap is live on
+	// macOS rather than no-opping. This test is the only thing that exercises that
+	// backend against a REAL process — the decode has unit coverage on every
+	// platform, but "the kernel actually returns this pid's cwd" can only be
+	// observed on a Mac. If it fails here, suspect the syscall path in
+	// proctree_darwin.go before suspecting the reap.
 	sandboxHome(t)
 	repoRoot := createGitRepo(t)
 	runGit(t, repoRoot, "commit", "--allow-empty", "-m", "initial")
