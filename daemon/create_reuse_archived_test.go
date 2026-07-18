@@ -1,11 +1,13 @@
 package daemon
 
 import (
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"testing"
 
+	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/session"
 	sessiongit "github.com/sachiniyer/agent-factory/session/git"
 
@@ -103,6 +105,86 @@ func TestReserveCreate_ReusesArchivedName(t *testing.T) {
 	assert.Equal(t, "uncommitted-foo", string(dirty))
 	assert.Equal(t, branch, archived.GetBranch(), "restore preserves the original branch")
 	assert.Equal(t, id, archived.ID, "restore preserves the original stable id")
+}
+
+// seedLoadingGhost plants a legacy Loading-status ghost record (#551) alongside
+// whatever is already on disk for repoID. It reads the current rows, appends the
+// ghost with a literal Status==Loading and an empty id/worktree, and writes the
+// combined array RAW — deliberately NOT through appendInstanceData, because
+// ForStorage() would recompose the Loading status into Ready and the row would
+// stop being a ghost. This mirrors exactly what an older TUI binary left on disk.
+func seedLoadingGhost(t *testing.T, repoID, title, repoPath string) {
+	t.Helper()
+	data, err := loadRepoInstanceData(repoID)
+	require.NoError(t, err)
+	data = append(data, session.InstanceData{Title: title, Path: repoPath, Status: session.Loading})
+	raw, err := json.Marshal(data)
+	require.NoError(t, err)
+	require.NoError(t, config.LoadState().SaveInstances(repoID, raw))
+}
+
+// countRecordsWithTitle counts the persisted rows carrying exactly `title` in
+// repoID's instances.json. recordFor returns only the first match, so it cannot
+// see a duplicate; this is what the #1951 corruption assertion needs.
+func countRecordsWithTitle(t *testing.T, repoID, title string) int {
+	t.Helper()
+	data, err := loadRepoInstanceData(repoID)
+	require.NoError(t, err)
+	n := 0
+	for i := range data {
+		if data[i].Title == title {
+			n++
+		}
+	}
+	return n
+}
+
+// TestReserveCreate_ReusesArchivedName_OverwritesLoadingGhost is the #1951
+// regression test. A legacy TUI binary (#551) could persist a Loading-status
+// ghost record to disk; the rest of the codebase treats such ghosts as
+// overwritable, never as real title reservations — appendInstanceData overwrites
+// a same-titled Loading ghost, and findTitleConflictLocked skips Loading rows
+// when deciding a title is free. renameInstanceDataTitle (the reuse-archived-name
+// rewrite from #1719) copied the stable-id collision guard but NOT that ghost
+// handling, so when its rename lands on a title a Loading ghost holds it wrote a
+// SECOND record beside the ghost instead of replacing it — two rows sharing one
+// title, i.e. instances.json corruption and ambiguous lookups.
+//
+// Repro on the real production path (reserveCreate -> renameArchivedForReuseLocked
+// -> renameInstanceDataTitle): archive "foo", plant a Loading ghost on the exact
+// slot the rename will choose ("foo (archived)" — the availability check skips the
+// ghost, so uniqueArchivedTitleLocked picks it rather than "(archived 2)"), then
+// create a new "foo". Exactly ONE record must carry "foo (archived)" afterward,
+// and it must be the real archived session (stable id + branch preserved), proving
+// the ghost was overwritten rather than the archived record dropped.
+func TestReserveCreate_ReusesArchivedName_OverwritesLoadingGhost(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	archived, id := seedArchivedSession(t, manager, repoID, repoPath, "foo", "foo")
+	branch := archived.GetBranch()
+
+	// A legacy Loading ghost squatting on the exact title the rename will pick.
+	seedLoadingGhost(t, repoID, "foo (archived)", repoPath)
+
+	_, title, release, renamed, err := manager.reserveCreate(CreateSessionRequest{RepoPath: repoPath, Title: "foo", Program: "claude"})
+	require.NoError(t, err)
+	defer release()
+
+	assert.Equal(t, "foo", title)
+	require.NotNil(t, renamed, "the collision must have renamed the archived session")
+	assert.Equal(t, "foo (archived)", renamed.Title, "the rename must land on the ghost-held slot, not skip past it")
+
+	// The corruption assertion: the ghost must be REPLACED, leaving exactly one
+	// record under the reused title — not two. (Pre-fix: two.)
+	assert.Equal(t, 1, countRecordsWithTitle(t, repoID, "foo (archived)"),
+		"exactly one record must carry the reused title; a surviving Loading ghost beside the renamed record is the #1951 corruption")
+
+	// The surviving record must be the real archived session, not the ghost —
+	// stable id and branch preserved, status Archived.
+	rec := recordFor(t, repoID, "foo (archived)")
+	require.NotNil(t, rec, "the archived record must be persisted under the reused name")
+	assert.Equal(t, id, rec.ID, "the surviving record must be the archived session (its stable id), not the empty-id ghost")
+	assert.Equal(t, branch, rec.Branch, "the git branch must be preserved across the rename")
+	assert.Equal(t, session.Archived, rec.Status)
 }
 
 // TestReserveCreate_ReusesArchivedName_SuffixCollision: with BOTH archived "foo"
