@@ -134,11 +134,35 @@ func TestRestoreSession_RecoversLostInstanceOnDemand(t *testing.T) {
 	if got := inst.GetStatus(); got != session.Running {
 		t.Fatalf("status = %v, want Running after manual restore", got)
 	}
+	// A successful spawn is NOT confirmation (#1910/#1976): the retry state must be
+	// RETAINED, awaiting a liveness observation, with the prior failure history
+	// carried — not cleared the instant tmux accepts the session. Clearing here is
+	// what let a manual restore of a flapping session reset the backoff and re-open
+	// the hot-loop the automatic path prevents.
+	manager.mu.Lock()
+	st := manager.lostRestoreStates[key]
+	manager.mu.Unlock()
+	if st == nil {
+		t.Fatal("manual restore dropped the retry state on spawn success: an agent that dies " +
+			"before confirmation then re-enters as a fresh episode with a zeroed backoff (#1976)")
+	}
+	if !st.awaitingConfirm {
+		t.Fatal("a successful manual restore must arm the confirmation window")
+	}
+	if st.consecutiveFailures != 3 {
+		t.Fatalf("consecutiveFailures = %d, want 3 carried: manual restore must not reset the "+
+			"backoff history (#1976)", st.consecutiveFailures)
+	}
+
+	// A poll then ANSWERS: the runtime is confirmed alive, and only now is the
+	// episode forgotten.
+	observeAlive(manager, repoID, inst)
+	manager.RestoreLostSessions()
 	manager.mu.Lock()
 	_, hasState := manager.lostRestoreStates[key]
 	manager.mu.Unlock()
 	if hasState {
-		t.Fatal("manual restore must drop Lost retry state")
+		t.Fatal("a confirmed-alive manual restore must drop the retry state")
 	}
 }
 
