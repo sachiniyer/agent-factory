@@ -511,6 +511,16 @@ func redactInstanceData(d *session.InstanceData) {
 		if d.Tabs[i].TmuxName != "" {
 			d.Tabs[i].TmuxName = redactedMarker
 		}
+		// A web tab's URL is user-supplied (any http/https target passes
+		// NormalizeWebTabURL) and can name internal infrastructure or a private
+		// repo — the same class of sensitive URL PRInfo.URL is redacted for
+		// below (#1954). Redact non-loopback targets; keep loopback ones (the
+		// proxied dev-server case), which are safe and useful for triage,
+		// mirroring the loopback/non-loopback split the daemon proxy already
+		// draws (session.IsLoopbackWebTarget).
+		if d.Tabs[i].URL != "" && !session.IsLoopbackWebTarget(d.Tabs[i].URL) {
+			d.Tabs[i].URL = redactedMarker
+		}
 		if d.Tabs[i].Conversation != nil {
 			d.Tabs[i].Conversation.ID = ""
 		}
