@@ -72,8 +72,8 @@ func TestRefreshInstanceStatus_TornDownRemoteRuntime_DoesNotRecurse(t *testing.T
 	}
 	backend := &delegatingRemoteBackend{FakeBackend: session.NewFakeBackend(), maxDepth: 64}
 	inst.SetBackend(backend)
-	inst.SetStartedForTest(true)          // a running session that went Lost keeps started=true
-	inst.SetStatusForTest(session.Lost)   // Lost + started is what the poll and restore loop touch
+	inst.SetStartedForTest(true)        // a running session that went Lost keeps started=true
+	inst.SetStatusForTest(session.Lost) // Lost + started is what the poll and restore loop touch
 	seedDiskInstance(t, repoID, "torn-remote", repoPath)
 	manager.mu.Lock()
 	manager.instances[daemonInstanceKey(repoID, "torn-remote")] = inst
