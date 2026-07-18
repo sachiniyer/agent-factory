@@ -18,6 +18,15 @@ import (
 // sufficient.
 const ghNetworkTimeout = 30 * time.Second
 
+// ghWaitDelay bounds how long cmd.Wait blocks after gh exits before its inherited
+// stdout pipe is force-closed. exec.CommandContext kills only the direct child, so
+// any descendant that inherited the capture pipe holds its read end open and
+// Output() blocks on pipe EOF past the deadline above — the deadline kills gh and
+// then we wait on EOF anyway. Mirrors gitWaitDelay (#856); gh never legitimately
+// backgrounds a long-lived process here, so force-closing a straggler is safe
+// (#1967).
+const ghWaitDelay = 2 * time.Second
+
 // PRInfo holds information about a GitHub pull request associated with a branch.
 type PRInfo struct {
 	Number int    `json:"number"`
@@ -59,8 +68,13 @@ func FetchPRInfo(repoPath, branchName string) (*PRInfo, error) {
 	cmd := exec.CommandContext(ctx, "gh", "pr", "list", "--head", branchName, "--state", "all",
 		"--json", "number,title,url,state", "--limit", "10")
 	cmd.Dir = repoPath
+	cmd.WaitDelay = ghWaitDelay
 	out, err := cmd.Output()
-	if err != nil {
+	// A bare exec.ErrWaitDelay means gh exited cleanly (a non-zero exit is an
+	// *exec.ExitError, not ErrWaitDelay) and only a straggler held the capture
+	// pipe past ghWaitDelay; the JSON is already in out, so parse it rather than
+	// reporting a failure that would clear cached PR info on a healthy fetch.
+	if err != nil && !errors.Is(err, exec.ErrWaitDelay) {
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 			return nil, fmt.Errorf("gh pr list timed out after %s (GitHub unreachable or stalled): %w", ghNetworkTimeout, ctx.Err())
 		}

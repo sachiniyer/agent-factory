@@ -3,6 +3,7 @@ package session
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -82,6 +83,18 @@ const (
 	dockerBannerPollInterval   = 400 * time.Millisecond
 )
 
+// dockerWaitDelay bounds how long cmd.Wait blocks after the docker CLI (or the
+// origin-lookup git in originRemoteURL) exits or is killed on its deadline,
+// before the inherited stdout/stderr pipes are force-closed. exec.CommandContext
+// kills only the direct child; any descendant that inherited the capture pipe
+// keeps its read end open, and CombinedOutput()/Output() block on pipe EOF until
+// that descendant dies — which would silently defeat the timeouts above, so a
+// wedged docker daemon could hang the container reap forever (the guarantee
+// dockerReapTimeout reads as, but wasn't). Mirrors gitWaitDelay (#856/#896);
+// none of these children legitimately background a long-lived process, so
+// reaping the straggler is safe (#1967).
+const dockerWaitDelay = 2 * time.Second
+
 // dockerSelfBinary resolves the `af` binary to docker cp into the sandbox. In
 // production it is the running daemon's own executable — the same binary provides
 // `af agent-server`, so the sandbox is always version-matched to the daemon
@@ -104,7 +117,19 @@ func SetDockerSelfBinaryForTest(path string) func() {
 // the runtime against a fake docker CLI — including the create-then-fail path
 // (#2008) — without a real daemon on the box. Production wraps exec.CommandContext.
 var dockerExec = func(ctx context.Context, args ...string) ([]byte, error) {
-	return exec.CommandContext(ctx, "docker", args...).CombinedOutput()
+	cmd := exec.CommandContext(ctx, "docker", args...)
+	cmd.WaitDelay = dockerWaitDelay
+	out, err := cmd.CombinedOutput()
+	if errors.Is(err, exec.ErrWaitDelay) {
+		// docker itself exited cleanly — a non-zero exit surfaces as an
+		// *exec.ExitError, not ErrWaitDelay — and only a descendant held the
+		// capture pipe open past dockerWaitDelay and was just force-closed. The
+		// output is already complete, so this is not a command failure: treating
+		// it as one would fail a healthy `docker rm -f` and report a leaked
+		// container that was in fact reaped (#1966/#1967, #676/#914 precedent).
+		err = nil
+	}
+	return out, err
 }
 
 // SetDockerExecForTest overrides the docker CLI runner and returns a restore func.
@@ -501,8 +526,14 @@ func parseDockerPort(out string) string {
 func originRemoteURL(repoRoot string) string {
 	ctx, cancel := context.WithTimeout(context.Background(), dockerShortStepTimeout)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, "git", "-C", repoRoot, "remote", "get-url", "origin").Output()
-	if err != nil {
+	cmd := exec.CommandContext(ctx, "git", "-C", repoRoot, "remote", "get-url", "origin")
+	cmd.WaitDelay = dockerWaitDelay
+	out, err := cmd.Output()
+	// ErrWaitDelay means git exited cleanly and only a straggler held the pipe
+	// past dockerWaitDelay; the URL is already in out, so it is not a failure.
+	// Without this guard the WaitDelay bound would turn a healthy lookup into a
+	// spurious "" and mask a real origin (#1967).
+	if err != nil && !errors.Is(err, exec.ErrWaitDelay) {
 		return ""
 	}
 	return strings.TrimSpace(string(out))

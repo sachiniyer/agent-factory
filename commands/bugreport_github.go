@@ -3,6 +3,7 @@ package commands
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"net/url"
 	"os/exec"
@@ -134,9 +135,16 @@ func openViaGh(repoSlug, title, body string) (opened bool, reason string) {
 	defer cancel()
 
 	c := exec.CommandContext(ctx, "gh", ghIssueCreateWebArgs(repoSlug, title, body)...)
+	c.WaitDelay = ghDraftWaitDelay
 	var errBuf bytes.Buffer
 	c.Stderr = &errBuf
-	if err := c.Run(); err != nil {
+	// A bare exec.ErrWaitDelay means gh exited 0 and only a child it backgrounded
+	// (the browser --web launches) held the captured stderr pipe open past
+	// ghDraftWaitDelay — the draft WAS opened. Treating that as failure would send
+	// the caller down the fallback path and report a false "could not open a
+	// draft" on a working operation, the exact backwards-handling #1966/#1967 warn
+	// about; success keys on the exit status, which ErrWaitDelay does not touch.
+	if err := c.Run(); err != nil && !errors.Is(err, exec.ErrWaitDelay) {
 		detail := firstLine(strings.TrimSpace(errBuf.String()))
 		if detail == "" {
 			detail = err.Error()
@@ -149,6 +157,14 @@ func openViaGh(repoSlug, title, body string) (opened bool, reason string) {
 // ghDraftTimeout bounds openViaGh so a wedged gh can never hang `af bug-report`;
 // gh --web normally returns in well under a second.
 const ghDraftTimeout = 20 * time.Second
+
+// ghDraftWaitDelay bounds how long c.Run() blocks after gh exits before the
+// captured stderr pipe is force-closed. Without it the ghDraftTimeout above is
+// decorative: exec.CommandContext kills only gh, and the browser it backgrounds
+// (--web) can inherit the stderr pipe and hold it open, so Run() blocks on pipe
+// EOF for the life of the browser past the deadline. Mirrors gitWaitDelay
+// (#856/#1967).
+const ghDraftWaitDelay = 2 * time.Second
 
 // firstLine returns s up to (not including) the first newline, so a multi-line
 // gh error collapses to a single readable reason.
