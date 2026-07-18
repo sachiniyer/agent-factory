@@ -32,19 +32,14 @@ func (m *Manager) CreateSession(ctx context.Context, req CreateSessionRequest) (
 	defer cancel()
 
 	if req.Program == "" {
-		// Default from the repo-resolved config so an in-repo
-		// default_program applies to daemon-created sessions (task runs,
-		// API creates) too. Falls back to the daemon's global config when
-		// the repo path can't be resolved — reserveCreate will surface
-		// that error with more context right after.
-		req.Program = m.cfg.DefaultProgram
-		if req.RepoPath != "" {
-			if repo, err := config.RepoFromPath(req.RepoPath); err == nil {
-				if resolved, rerr := config.ResolveConfig(repo.Root); rerr == nil {
-					req.Program = resolved.DefaultProgram
-				}
-			}
-		}
+		// Default from the repo-resolved config so an in-repo default_program
+		// applies to daemon-created sessions (task runs, API creates) too.
+		//
+		// This is the ONE place the no-explicit-program default is decided, and
+		// ListPrograms (#1970) answers by calling the same function rather than
+		// restating the precedence — so the program a picker labels "repo default"
+		// cannot disagree with the one a real create picks.
+		req.Program = defaultProgramFor(m.cfg.DefaultProgram, req.RepoPath)
 	}
 	repo, title, release, renamedArchived, err := m.reserveCreate(req)
 	if err != nil {

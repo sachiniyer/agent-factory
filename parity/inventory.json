@@ -1111,16 +1111,15 @@
         "pointer": "app/handle_input.go:121-123 reads tmux.SupportedPrograms"
       },
       "web": {
-        "status": "partial",
-        "pointer": "web/src/modals.ts:173 hardcodes a COPY of the list"
+        "status": "yes",
+        "pointer": "web/src/programs.ts renders the served ListPrograms catalog (modals.ts + tasks.ts pickers)"
       },
       "cli": {
         "status": "yes",
         "pointer": "commands/root.go:246 + api/api.go:586 advertise tmux.SupportedProgramsString()"
       },
-      "verdict": "real-gap",
-      "issue": "#1970",
-      "notes": "A third drift dimension under verbs and fields: the VALUES a surface offers for a field. The TUI and CLI read tmux.SupportedPrograms (session/tmux/session.go:22); the web keeps its own copy. The lists MATCH today, so this is a live hazard rather than a live divergence — add a sixth agent server-side and the web silently never offers it while every field-level check stays green (the web does send `program`, so coverage calls it covered). Reported by the #1933 session, which found the same shape one level down. TestWebProgramEnumMatchesWire makes the drift loud in the meantime; the structural fix is to SERVE the enum, per the ListBackends reference implementation in #1968."
+      "verdict": "parity",
+      "notes": "RESOLVED by #1970. A third drift dimension under verbs and fields: the VALUES a surface offers for a field. The TUI and CLI read tmux.SupportedPrograms (session/tmux/session.go); the web kept its own copy in two pickers, so adding an agent server-side would have left the web silently offering the old set with every field-level check green. The fix is structural rather than a re-sync: the daemon SERVES the enum (POST /v1/ListPrograms, daemon/programs.go) and the web renders the response (web/src/programs.ts), so a seventh agent reaches the web with no edit under web/src — the acceptance criterion, pinned by TestListPrograms_NewProgramReachesClientsWithNoClientChange and its web twin. TestWebProgramEnumMatchesWire (the interim 'is the copy current?' guard) is replaced by TestWebHardcodesNoAgentEnum, which asserts the stronger property that NO copy exists. The reported default comes from the same decision function the create path uses (defaultProgramFor), so the picker's 'repo default' label cannot disagree with the program a real create picks."
     },
     {
       "id": "cli.argshape.session-title",
@@ -1304,6 +1303,7 @@
       "POST /v1/GetConfig": "config.read",
       "POST /v1/KillSession": "session.kill",
       "POST /v1/ListBackends": "backend.list",
+      "POST /v1/ListPrograms": "enum.agent-programs",
       "POST /v1/ListTasks": "task.list",
       "POST /v1/RemoveTask": "task.remove",
       "POST /v1/RenameTab": "session.tab.rename",
@@ -1376,6 +1376,7 @@
       "GetConfig": "config.read",
       "KillSession": "session.kill",
       "ListBackends": "backend.list",
+      "ListPrograms": "enum.agent-programs",
       "ListTasks": "task.list",
       "RemoveTask": "task.remove",
       "RenameTab": "session.tab.rename",

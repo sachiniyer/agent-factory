@@ -12,6 +12,7 @@
 // used by the /v1/events subscriber (events.ts) and, in PR4, the PTY stream.
 
 import type { BackendCatalog } from "./backends.js";
+import type { ProgramCatalog } from "./programs.js";
 import type {
   ConfigResponse,
   ConfigSetResponse,
@@ -266,6 +267,17 @@ export interface CreateSessionInput {
  *  hard-codes no backend names of its own. */
 export async function listBackends(repoPath: string, token: string): Promise<BackendCatalog> {
   return af<BackendCatalog>("ListBackends", { repo_path: repoPath }, token);
+}
+
+/** Lists the agent programs a session may be created with, and the program an
+ *  unspecified create defaults to for this repo (#1970). The daemon owns the enum;
+ *  the web renders whatever it returns and hard-codes no agent names of its own.
+ *
+ *  `repoPath` may be empty, unlike listBackends: the agent enum is global, so a
+ *  caller with no project picked yet still gets the list — only the default needs
+ *  a repo. */
+export async function listPrograms(repoPath: string, token: string): Promise<ProgramCatalog> {
+  return af<ProgramCatalog>("ListPrograms", { repo_path: repoPath }, token);
 }
 
 /** Creates a session and returns the daemon's authoritative projection of it (the

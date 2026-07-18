@@ -17,6 +17,7 @@ import {
   errorText,
   killSession,
   listBackends,
+  listPrograms,
   probeWebTab,
   removeTask,
   renameTab,
@@ -116,6 +117,27 @@ test("resumeFromLimit posts the stable id, so a duplicate title cannot misroute 
   assert.equal(cap.body.id, "id-repoB", "the daemon resolves by id first");
   assert.equal(cap.body.title, "feature", "the title still rides along for the event and the title-only fallback");
   assert.equal(cap.body.repo_id, "", "an all-repos web client scopes by id, not repo");
+});
+
+test("listPrograms asks the daemon for the agent catalog (#1970)", async () => {
+  const cap = stubFetch();
+  await listPrograms("/repos/af", "tok");
+
+  assert.equal(cap.url, "/v1/ListPrograms");
+  assert.equal(cap.auth, "Bearer tok");
+  assert.equal(cap.body.repo_path, "/repos/af", "the repo sharpens which program 'repo default' resolves to");
+});
+
+// Unlike listBackends, a repo-less request is legitimate: the agent enum is global,
+// so a form with no project picked yet still gets the list. Sending the field as ""
+// rather than omitting it keeps the wire shape uniform — the daemon treats an empty
+// repo_path as "no repo context" and answers with the global default.
+test("listPrograms works with no repo picked", async () => {
+  const cap = stubFetch();
+  await listPrograms("", "tok");
+
+  assert.equal(cap.url, "/v1/ListPrograms");
+  assert.equal(cap.body.repo_path, "");
 });
 
 test("killSession posts the stable id as the primary key alongside the title", async () => {

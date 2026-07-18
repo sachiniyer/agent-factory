@@ -27,6 +27,7 @@ import {
   killSession,
   getConfig,
   listBackends,
+  listPrograms,
   listTasks,
   setConfigValue,
   loadToken,
@@ -64,6 +65,7 @@ import { Store } from "./store.js";
 import { registerServiceWorker } from "./serviceworker.js";
 import { bootStampTheme, persistThemeChoice, stampTheme, type ThemeChoice } from "./theme.js";
 import { addTaskModal, type AddTaskInput, buildTask, editTaskModal } from "./tasks.js";
+import type { ProgramCatalog } from "./programs.js";
 import type { TerminalStatus } from "./terminal.js";
 import {
   AppShell,
@@ -133,6 +135,17 @@ const store = new Store<AppState>({
 // send-prompt/attach would be silently skipped because `!"" === true`.
 let token: string | null = null;
 let stream: EventStream | null = null;
+
+/** Fetches the agent catalog for a project (#1970), shared by the three forms that
+ *  offer a program picker: new session, add task, edit task. One helper rather than
+ *  three copies of the token dance — the hardcoded-list bug this RPC exists to
+ *  delete started as exactly that kind of duplication.
+ *
+ *  Tokenless ("") is a valid credential (#1696), so a null token — not a falsy one —
+ *  is the "not authorized yet" case. Rejecting there is safe: every caller degrades
+ *  to the repo default rather than blocking its form. */
+const loadPrograms = (repoPath: string): Promise<ProgramCatalog> =>
+  token === null ? Promise.reject(new Error("not authorized")) : listPrograms(repoPath, token);
 // Debounces the re-Snapshot that archived/restored events and reconnects trigger,
 // so a burst of events collapses into a single authoritative refetch.
 let resyncTimer: number | null = null;
@@ -528,6 +541,8 @@ function newSession(): void {
       // Tokenless ("") is a valid credential (#1696), so a null token — not a
       // falsy one — is the "not authorized yet" case.
       loadBackends: (repoPath: string) => (token === null ? Promise.reject(new Error("not authorized")) : listBackends(repoPath, token)),
+      // The agent catalog, same contract (#1970): the daemon owns the enum.
+      loadPrograms,
       onSubmit: (values: CreateSessionInput) => {
         const tok = token;
         // `=== null` not `!tok`: "" is the authorized-tokenless credential (#1696).
@@ -1102,6 +1117,7 @@ function openAddTask(): void {
   const projects = pickerProjects(store.get().sessions, store.get().tasks);
   openModal(
     addTaskModal(projects, store.get().selectedProject, {
+      loadPrograms,
       onSubmit: (input: AddTaskInput) => {
         const tok = token;
         // `=== null` not `!tok`: "" is the authorized-tokenless credential (#1696).
@@ -1140,6 +1156,7 @@ function openEditTask(task: TaskData): void {
   const projects = pickerProjects(store.get().sessions, store.get().tasks);
   openModal(
     editTaskModal(projects, task, {
+      loadPrograms,
       onSubmit: (input: AddTaskInput) => {
         const tok = token;
         // `=== null` not `!tok`: "" is the authorized-tokenless credential (#1696).
