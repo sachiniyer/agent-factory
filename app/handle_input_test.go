@@ -86,10 +86,11 @@ func TestHandleMenuHighlightingDoesNotInterceptNamingText(t *testing.T) {
 }
 
 // TestHandleMenuHighlightingNewInstanceActions is the regression guard for
-// issue #691/#1413: pressing Enter, Tab, or Esc while naming a new instance must drive the
-// menu highlight animation. The bug (commit f294e5b) folded stateNew into the
-// early-return filter, which made the Enter→KeySubmitName / Tab→KeyChangeProgram
-// remapping — and thus the highlight render path — unreachable.
+// issue #691/#1413: pressing Enter, Tab, Shift-Tab, or Esc while naming a new
+// instance must drive the menu highlight animation. The bug (commit f294e5b)
+// folded stateNew into the early-return filter, which made the
+// Enter→KeySubmitName / Tab→KeyChangeProgram remapping — and thus the highlight
+// render path — unreachable.
 func TestHandleMenuHighlightingNewInstanceActions(t *testing.T) {
 	// Force a real color profile so lipgloss emits the underline escape that
 	// signals a highlighted menu option; the Ascii profile used by default in
@@ -109,6 +110,9 @@ func TestHandleMenuHighlightingNewInstanceActions(t *testing.T) {
 	}{
 		{"enter", tea.KeyMsg{Type: tea.KeyEnter}},
 		{"tab", tea.KeyMsg{Type: tea.KeyTab}},
+		// shift+tab opens the initial-prompt field (#1936) — the naming form's
+		// third action key, and so subject to the same #691 filter.
+		{"shift+tab", tea.KeyMsg{Type: tea.KeyShiftTab}},
 		{"esc", tea.KeyMsg{Type: tea.KeyEsc}},
 	}
 

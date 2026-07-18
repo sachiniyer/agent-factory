@@ -4,6 +4,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/charmbracelet/lipgloss"
+
 	"github.com/sachiniyer/agent-factory/keys"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/ui/layout"
@@ -160,6 +162,79 @@ func TestMenuNewInstanceShowsSubmitProgramAndCancel(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Fatalf("new-instance footer missing %q:\n%s", want, out)
 		}
+	}
+}
+
+// TestMenuNewInstanceDropsPromptHintBeforeTheWayOut is the narrow-terminal
+// guard for #1936. Adding a fourth hint took the naming row from ~62 to ~78
+// cells, so it now overflows bars it used to fit — and the clamp cuts the RIGHT
+// edge, i.e. `esc cancel`, the only advertised way out of the form (the #1083
+// class). The prompt hint must be shed first instead: it advertises an optional
+// field, while submit/change-program/cancel are the form's load-bearing verbs.
+func TestMenuNewInstanceDropsPromptHintBeforeTheWayOut(t *testing.T) {
+	// 52..78 is the band this change created: wide enough for the three
+	// load-bearing verbs (51 cells) but not for the fourth hint. Below 52 even
+	// the shed row overflows and the status bar's clamp takes over — that is
+	// pre-existing behavior the drop list has never been able to fix.
+	for _, width := range []int{78, 70, 60, 55} {
+		m := NewMenu()
+		m.SetState(StateNewInstance)
+		m.SetNamingHasPrompt(true)
+		m.SetSize(width, 1)
+		out := m.String()
+
+		for _, want := range []string{"enter submit name", "tab change program", "esc cancel"} {
+			if !strings.Contains(out, want) {
+				t.Fatalf("width %d dropped the load-bearing hint %q:\n%s", width, want, out)
+			}
+		}
+		if strings.Contains(out, "initial prompt") {
+			t.Fatalf("width %d kept the optional prompt hint in an overflowing row:\n%s", width, out)
+		}
+		for i, line := range strings.Split(out, "\n") {
+			if got := lipgloss.Width(line); got > width {
+				t.Fatalf("width %d: hint row line %d is %d cells wide:\n%s", width, i, got, out)
+			}
+		}
+	}
+
+	// At the standard 80-column terminal everything still fits — the drop is a
+	// degradation, not the default.
+	m := NewMenu()
+	m.SetState(StateNewInstance)
+	m.SetSize(80, 1)
+	if out := m.String(); !strings.Contains(out, "initial prompt") {
+		t.Fatalf("an 80-column bar must still advertise the prompt field:\n%s", out)
+	}
+}
+
+// TestMenuNewInstancePromptHintSwapsAndDoesNotAlias covers the #1936 hint: the
+// naming footer advertises the initial-prompt field, and marks it once the
+// field holds text. The aliasing half is the part worth pinning — the swap
+// builds a copy, because writing the "✓" variant into the shared
+// newInstanceMenuOptions slice would leak it into every later naming form,
+// including ones with no prompt at all.
+func TestMenuNewInstancePromptHintSwapsAndDoesNotAlias(t *testing.T) {
+	m := NewMenu()
+	m.SetState(StateNewInstance)
+	m.SetSize(120, 1)
+
+	if out := m.String(); !strings.Contains(out, "initial prompt") {
+		t.Fatalf("new-instance footer missing the initial-prompt hint:\n%s", out)
+	}
+
+	m.SetNamingHasPrompt(true)
+	if out := m.String(); !strings.Contains(out, "initial prompt ✓") {
+		t.Fatalf("footer must mark an attached prompt:\n%s", out)
+	}
+
+	// A fresh menu must be back to the unmarked hint: if the swap had mutated
+	// the package-level slice in place, this would still read "✓".
+	fresh := NewMenu()
+	fresh.SetState(StateNewInstance)
+	fresh.SetSize(120, 1)
+	if out := fresh.String(); strings.Contains(out, "initial prompt ✓") {
+		t.Fatalf("the prompt-hint swap leaked into the shared options slice:\n%s", out)
 	}
 }
 

@@ -86,6 +86,7 @@ func (m *home) renderFittedPaneOverlay(r layout.Rect, setSize func(int, int), re
 func (m *home) layoutModalOverlays() {
 	m.layoutTextOverlay()
 	m.layoutSelectionOverlay()
+	m.layoutPromptOverlay()
 	m.layoutConfirmationOverlay()
 	m.layoutSearchOverlay()
 	m.layoutProjectPickerOverlay()
@@ -98,6 +99,17 @@ func (m *home) layoutSelectionOverlay() {
 	}
 	m.selectionOverlay.SetWidth(int(float32(m.termWidth) * 0.6))
 	m.selectionOverlay.SetMaxSize(m.termWidth, m.termHeight)
+}
+
+// layoutPromptOverlay sizes the initial-prompt field (#1936). It asks for the
+// same 60% of the terminal the program picker does, so the two fields of the
+// naming form open to the same box.
+func (m *home) layoutPromptOverlay() {
+	if m.promptOverlay == nil {
+		return
+	}
+	m.promptOverlay.SetWidth(int(float32(m.termWidth) * 0.6))
+	m.promptOverlay.SetMaxSize(m.termWidth, m.termHeight)
 }
 
 func (m *home) layoutConfirmationOverlay() {

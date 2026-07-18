@@ -70,6 +70,11 @@ type Menu struct {
 	// clickable key zones while the gesture is in flight.
 	statusText string
 
+	// namingHasPrompt is true while the session being named carries a non-empty
+	// initial prompt (#1936), which swaps the naming form's prompt hint to its
+	// "✓" variant. Only meaningful in StateNewInstance.
+	namingHasPrompt bool
+
 	// keyDown is the key which is pressed. The default is -1.
 	keyDown keys.KeyName
 
@@ -82,7 +87,14 @@ type Menu struct {
 }
 
 var defaultMenuOptions = []keys.KeyName{keys.KeyNew, keys.KeyNewRemote, keys.KeySearch, keys.KeyHelp, keys.KeyQuit}
-var newInstanceMenuOptions = []keys.KeyName{keys.KeySubmitName, keys.KeyChangeProgram, keys.KeyCancelName}
+
+// newInstanceMenuOptions are the naming-form hints. The third slot is the
+// initial-prompt field (#1936) and swaps its verb once a prompt is typed —
+// newInstanceOptions picks the variant, mirroring the archive/restore swap in
+// addInstanceOptions.
+var newInstanceMenuOptions = []keys.KeyName{
+	keys.KeySubmitName, keys.KeyChangeProgram, keys.KeySetPrompt, keys.KeyCancelName,
+}
 
 // automationsMenuOptions are the status-bar hints while the in-rail
 // automations section has focus: Enter opens the task manager overlay (which
@@ -249,11 +261,39 @@ func (m *Menu) updateOptions() {
 			}
 		}
 	case StateNewInstance:
-		m.options = newInstanceMenuOptions
+		m.options = m.newInstanceOptions()
 		m.groups = []menuGroup{
 			{start: 0, end: len(newInstanceMenuOptions), isAction: true},
 		}
 	}
+}
+
+// newInstanceOptions returns the naming-form hints with the initial-prompt slot
+// reading "initial prompt ✓" once the pending prompt holds text. The overlay
+// that edits it is modal, so the status bar is the only surface that can tell
+// the user a prompt is attached before they press Enter (#1936).
+func (m *Menu) newInstanceOptions() []keys.KeyName {
+	if !m.namingHasPrompt {
+		return newInstanceMenuOptions
+	}
+	opts := make([]keys.KeyName, len(newInstanceMenuOptions))
+	copy(opts, newInstanceMenuOptions)
+	for i, name := range opts {
+		if name == keys.KeySetPrompt {
+			opts[i] = keys.KeyEditPrompt
+		}
+	}
+	return opts
+}
+
+// SetNamingHasPrompt records whether the session being named carries a
+// non-empty initial prompt, and rebuilds the hints if that changed.
+func (m *Menu) SetNamingHasPrompt(has bool) {
+	if m.namingHasPrompt == has {
+		return
+	}
+	m.namingHasPrompt = has
+	m.updateOptions()
 }
 
 func (m *Menu) addInstanceOptions() {
@@ -412,8 +452,17 @@ func centerStart(box, content int) int {
 // help/quit are the global escape hatches, and `D kill` is the selected-
 // instance affordance the containerized TUI driver uses to distinguish a real
 // row cursor from the sticky single-instance display selection (#1174/#1422
-// redo). Naming-flow options are also absent because that row is short.
+// redo).
+//
+// The naming row used to be absent from this list because it was short. #1936
+// added its initial-prompt hint, taking it from ~62 to ~78 cells — wide enough
+// to overflow an 80-column bar once the bar has any padding, at which point the
+// clamp would cut `esc cancel` off the right edge. So the prompt hint leads the
+// list: it advertises an OPTIONAL field, and losing it costs a user far less
+// than losing the way out of the form. Submit/change-program/cancel stay absent
+// — those are the form's three load-bearing verbs.
 var hintDropOrder = [][]keys.KeyName{
+	{keys.KeySetPrompt, keys.KeyEditPrompt},
 	{keys.KeyShiftUp, keys.KeyShiftDown},
 	{keys.KeyAttach},
 	{keys.KeySearch},

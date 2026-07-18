@@ -41,6 +41,10 @@ const (
 	stateSwitchProject
 	// stateSelectProgram is the state when the user is selecting a program during naming.
 	stateSelectProgram
+	// statePromptInput is the state when the initial-prompt field of the naming
+	// form is open (#1936). Like stateSelectProgram it is a sub-state of
+	// stateNew: closing it returns to naming rather than to stateDefault.
+	statePromptInput
 	// stateHooks is the state when the post-worktree hooks editor overlay is
 	// open (#1024 PR 4: hooks lost their persistent sidebar slot and are
 	// hosted as a modal overlay instead).
@@ -367,6 +371,15 @@ type home struct {
 	projectPickerOverlay *overlay.ProjectPickerOverlay
 	// pendingProgram tracks the program selected during new instance naming
 	pendingProgram string
+	// promptOverlay handles initial-prompt entry during new-instance naming
+	// (#1936).
+	promptOverlay *overlay.PromptOverlay
+	// pendingPrompt tracks the initial prompt typed during new instance naming.
+	// It is the value handleStateNew puts on sessionStartRequest.Prompt, which
+	// the daemon delivers to the agent once it is ready — the same field
+	// `af sessions create --prompt` fills. Reset by startNewInstance so a
+	// cancelled create can never leak its prompt into the next one.
+	pendingPrompt string
 
 	// attached is set while the user is inside an attached tmux session.
 	// While true, periodic background work that hits the shared tmux server

@@ -2,6 +2,7 @@ package app
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -420,6 +421,13 @@ func (m *home) handleMenuHighlighting(msg tea.KeyMsg) (cmd tea.Cmd, returnEarly 
 			name = keys.KeySubmitName
 		case "tab":
 			name = keys.KeyChangeProgram
+		case "shift+tab":
+			// The initial-prompt hint (#1936) swaps its verb once a prompt is
+			// attached, so highlight whichever variant the bar is showing.
+			name = keys.KeySetPrompt
+			if strings.TrimSpace(m.pendingPrompt) != "" {
+				name = keys.KeyEditPrompt
+			}
 		case "esc":
 			name = keys.KeyCancelName
 		default:
@@ -495,6 +503,8 @@ func (m *home) handleKeyPress(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 		return m.handleStateSwitchProject(msg)
 	case stateSelectProgram:
 		return m.handleStateSelectProgram(msg)
+	case statePromptInput:
+		return m.handleStateInitialPrompt(msg)
 	case stateHooks:
 		return m.handleStateHooks(msg)
 	case stateTasks:
