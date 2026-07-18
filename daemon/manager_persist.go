@@ -346,8 +346,22 @@ var ghostCleanupWorktree = func(data *session.InstanceData, title string) (git.C
 // to a single kill; a pre-#953 record has no Tabs and yields just data.TmuxName,
 // keeping the legacy path byte-identical.
 func ghostTmuxNames(data *session.InstanceData) []string {
-	names := make([]string, 0, len(data.Tabs)+1)
-	seen := make(map[string]struct{}, len(data.Tabs)+1)
+	// Pre-sized to len(data.Tabs), NOT len(data.Tabs)+1. The legacy name is
+	// already one of the tabs on any post-#953 record, so the +1 was slack in the
+	// common case, and the one add that can exceed this cap (a pre-#953 record,
+	// which has no Tabs at all) grows the slice itself.
+	//
+	// The arithmetic tripped CodeQL's go/allocation-size-overflow (high) on
+	// `len(...)+1` inside make(). That was a FALSE POSITIVE — data.Tabs is a
+	// persisted session's tab list (an agent tab plus a handful of shell/process/
+	// web tabs), so reaching an overflow would need ~2^63 tabs, which cannot
+	// exist. But it is the same trade as #1988: the expression bought nothing on
+	// a path that runs once per ghost record during cleanup, and code with no
+	// allocation-size arithmetic beats code that argues with a scanner. Do not
+	// add the +1 back — it re-raises two high-severity alerts on the security tab
+	// to save an allocation nobody will ever measure (#2036).
+	names := make([]string, 0, len(data.Tabs))
+	seen := make(map[string]struct{}, len(data.Tabs))
 	add := func(name string) {
 		if name == "" {
 			return
