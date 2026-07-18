@@ -83,6 +83,13 @@ func TestListPrograms_OffersEverySupportedProgram(t *testing.T) {
 
 	assert.Equal(t, tmux.SupportedPrograms, programNames(resp),
 		"the catalog is tmux.SupportedPrograms verbatim, in its canonical (append-only) order")
+	// The RPC feeds the canonical enum straight into the catalog builder and does no
+	// filtering of its own. This is the second half of the anti-drift pair (see
+	// TestListPrograms_NewProgramReachesClientsWithNoClientChange): that one proves
+	// the builder passes any list through, this one proves the list it is given is
+	// the canonical one. Together they say a seventh agent reaches every client.
+	assert.Equal(t, programCatalog(tmux.SupportedPrograms), resp.Programs,
+		"ListPrograms must hand the canonical enum to programCatalog untouched")
 }
 
 // TestListPrograms_NewProgramReachesClientsWithNoClientChange is THE anti-drift
@@ -91,23 +98,49 @@ func TestListPrograms_OffersEverySupportedProgram(t *testing.T) {
 // It is the acceptance criterion the issue names: add a seventh agent the way a
 // real one is added — one entry in the canonical enum — and it must flow out of
 // the RPC, and therefore into every client that renders the response, with no
-// edit to this handler and none to web/src. If someone later reintroduces a
-// hardcoded list inside ListPrograms, this fails.
+// edit to this handler and none to web/src.
+//
+// It proves that by PASSING a list rather than by swapping tmux.SupportedPrograms,
+// which is what the first version of this test did. That swap is a data race: the
+// enum is a package-level global read on a hot path by tmux.DetectAgentFromCommand,
+// so writing it races every concurrently-running test that resolves an agent, and
+// `go test -race` caught exactly that. The enum is read-only after init in
+// production and must stay so; a test is not licence to make it mutable.
+//
+// Split across two claims that compose into the same guarantee, and are each
+// stronger than the end-to-end version was:
+//
+//	here                            — the catalog passes ANY list through untouched
+//	OffersEverySupportedProgram     — the RPC feeds it the canonical enum, verbatim
+//
+// If someone reintroduces a hardcoded list, a filter, or a label map inside
+// programCatalog, this fails.
 func TestListPrograms_NewProgramReachesClientsWithNoClientChange(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
-	repo := setupControlRepo(t)
+	require.NotContains(t, tmux.SupportedPrograms, "cursor", "precondition: the fake agent must not be a real one")
 
-	require.NotContains(t, tmux.SupportedPrograms, "cursor", "precondition: the fake agent must not already exist")
+	// A list containing an agent this handler has never heard of, exactly as the
+	// canonical enum would look the moment someone appends a seventh agent.
+	catalog := programCatalog([]string{tmux.ProgramClaude, "cursor"})
 
-	prev := tmux.SupportedPrograms
-	tmux.SupportedPrograms = append(append([]string{}, prev...), "cursor")
-	t.Cleanup(func() { tmux.SupportedPrograms = prev })
+	names := make([]string, 0, len(catalog))
+	for _, opt := range catalog {
+		names = append(names, opt.Name)
+	}
 
-	resp := listPrograms(t, nil, repo)
+	assert.Equal(t, []string{tmux.ProgramClaude, "cursor"}, names,
+		"the catalog is the list it was given: same values, same order, nothing added or dropped")
+	assert.Equal(t, "cursor", catalog[len(catalog)-1].Name,
+		"a newly added agent lands in enum order, not appended by a special case")
+}
 
-	assert.Contains(t, programNames(resp), "cursor")
-	assert.Equal(t, "cursor", resp.Programs[len(resp.Programs)-1].Name,
-		"it lands in enum order, not appended by a special case")
+// TestProgramCatalogIsEmptySafe pins the degenerate case rather than leaving it to
+// chance: an empty enum yields an empty, non-nil slice, so the wire carries `[]`
+// and not `null`. A client that got null would have to guard for it, and the one
+// that forgot would render a broken picker instead of an empty one.
+func TestProgramCatalogIsEmptySafe(t *testing.T) {
+	got := programCatalog(nil)
+	assert.NotNil(t, got, "an empty catalog marshals as [] rather than null")
+	assert.Empty(t, got)
 }
 
 // TestListPrograms_AnswersWithoutARepo pins the deliberate difference from

@@ -77,10 +77,7 @@ type ListProgramsResponse struct {
 // unspecified create resolves to. It is read-only: it starts nothing, dials
 // nothing, and touches no session state.
 func (s *controlServer) ListPrograms(req ListProgramsRequest, resp *ListProgramsResponse) error {
-	resp.Programs = make([]ProgramOption, 0, len(tmux.SupportedPrograms))
-	for _, name := range tmux.SupportedPrograms {
-		resp.Programs = append(resp.Programs, ProgramOption{Name: name})
-	}
+	resp.Programs = programCatalog(tmux.SupportedPrograms)
 
 	// A nil manager (test control servers, and the window before the manager is
 	// ready) means the global config is unavailable — so there is no default to
@@ -91,6 +88,28 @@ func (s *controlServer) ListPrograms(req ListProgramsRequest, resp *ListPrograms
 	}
 	resp.Default = defaultProgramFor(global, req.RepoPath)
 	return nil
+}
+
+// programCatalog turns a list of agent names into the options a client renders,
+// preserving order and adding, removing and rewriting nothing.
+//
+// It is a pure function taking the list as a PARAMETER, which is the whole point:
+// the property this RPC exists to guarantee — whatever the canonical enum holds
+// flows through untouched — is then testable by passing a list rather than by
+// swapping tmux.SupportedPrograms out from under the process.
+//
+// That swap is not merely inelegant, it is a DATA RACE. The enum is a package-level
+// global that tmux.DetectAgentFromCommand reads on a hot path (session/tmux/resume.go
+// findAgentToken), so a test assigning to it races every other test in the binary
+// that resolves an agent — which `go test -race` duly caught. Nothing in production
+// ever writes the enum; it is read-only after init, and it must stay that way for
+// the read path to be safe without a lock.
+func programCatalog(programs []string) []ProgramOption {
+	out := make([]ProgramOption, 0, len(programs))
+	for _, name := range programs {
+		out = append(out, ProgramOption{Name: name})
+	}
+	return out
 }
 
 // defaultProgramFor reports the agent program a create with no explicit program
