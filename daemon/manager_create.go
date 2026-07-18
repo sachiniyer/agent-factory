@@ -338,8 +338,15 @@ func (m *Manager) renameArchivedForReuseLocked(repoID, repoPath, title, program 
 			// Nothing is lost by skipping it: the per-repo start lock serializes
 			// spawn-then-persist sequences, while what actually serializes writers to
 			// instances.json is the file lock inside config.UpdateRepoInstances, which
-			// persistInstanceData takes on its own. CreateTab/CloseTab/SetPRInfo already
-			// persist through this same lock-free primitive.
+			// persistInstanceData takes on its own.
+			//
+			// This is the one site that calls persistInstanceData bare while holding
+			// m.mu; the other callers reach it with m.mu NOT held (CreateTab and
+			// SetPRInfo under the repo start lock, CloseTab under only its per-session
+			// op lock), so do not read them as precedent for the call shape here. What
+			// makes it safe is a property of the primitive rather than of any wrapper:
+			// persistInstanceData never re-enters m.mu, which is exactly where the old
+			// persistInstance -> persistInstanceErr -> startLockForRepo path went wrong.
 			//
 			// Best-effort by design: this is a recovery breadcrumb on an already-failing
 			// path, so a write failure is logged rather than returned — the operator
