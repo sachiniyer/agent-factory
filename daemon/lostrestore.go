@@ -369,18 +369,39 @@ func (m *Manager) restoreLostSession(key, repoID string, inst *session.Instance)
 	// is exactly the kind of statement the rule above keeps out of that window.
 	m.persistInstance(repoID, inst)
 	log.InfoLog.Printf("restored lost session %q (repo %s): agent re-spawned in its workspace", inst.Title, repoID)
-	// The spawn succeeded — but that is NOT recovery (#1910). Recover returns once
-	// tmux accepted the new session, which an agent that exits on startup also
-	// satisfies. So arm the confirmation window instead of clearing the retry
-	// state here: RestoreLostSessions clears it once the runtime has stayed
-	// non-Lost past confirmBy, and this function counts it as a failure if the row
-	// goes Lost first. consecutiveFailures is deliberately CARRIED (not reset) —
-	// resetting on an unconfirmed spawn is precisely the bug: it is what let a
-	// session that never stays up look like a first-time loss on every poll.
+	// The spawn succeeded — but that is NOT recovery (#1910). Arm the confirmation
+	// window rather than clearing the retry state; see armRestoreConfirmation.
+	m.armRestoreConfirmation(key, repoID, inst)
+}
+
+// armRestoreConfirmation marks a session whose recovery spawn just RETURNED SUCCESS
+// as awaiting the liveness observation that will confirm it — the shared mechanism
+// both the automatic loop (restoreLostSession) and the manual RPC
+// (restoreLostOrDeadSession) use so they cannot drift. It exists because they DID
+// drift: the auto path was fixed to arm this window (#1910), while the manual path
+// kept clearing the state on spawn-success alone (#1976).
+//
+// A spawn returning proves only that tmux accepted the new session, which an agent
+// that exits on startup also satisfies. So the retry state is RETAINED, not cleared,
+// and consecutiveFailures is deliberately CARRIED: RestoreLostSessions clears it
+// once a poll has OBSERVED the runtime alive (aliveObservations moving past
+// observedAtSpawn), and restoreLostSession charges an immediate re-loss against this
+// same episode so the #1108 backoff escalates. Clearing here on spawn success is
+// precisely the bug on both paths — it is what let a session that never stays up
+// look like a first-time loss on every poll.
+//
+// The entry is created if absent: the manual path may run with no prior automatic
+// attempts on record. Takes m.mu itself; the caller must not already hold it.
+func (m *Manager) armRestoreConfirmation(key, repoID string, inst *session.Instance) {
 	m.mu.Lock()
+	defer m.mu.Unlock()
+	st := m.lostRestoreStates[key]
+	if st == nil {
+		st = &lostRestoreState{}
+		m.lostRestoreStates[key] = st
+	}
 	st.awaitingConfirm = true
 	st.observedAtSpawn = m.aliveObservations[remoteLossKey(repoID, inst)]
-	m.mu.Unlock()
 }
 
 // observedAliveSinceSpawnLocked reports whether a poll has gotten an ANSWER out of

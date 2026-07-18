@@ -110,8 +110,14 @@ func (m *Manager) restoreLostOrDeadSession(req RestoreSessionRequest, repoID str
 	// automatic one; only the trigger differs (#1794).
 	m.noteRuntimeReplaced(repoID, instance)
 	m.persistInstance(repoID, instance)
-	m.mu.Lock()
-	delete(m.lostRestoreStates, key)
-	m.mu.Unlock()
+	// A manual restore is the same lifecycle event as an automatic one; only the
+	// trigger differs (#1794) — so it must arm the SAME confirm-alive gate #1923 put
+	// on the auto path, NOT clear the retry state on spawn success. The unconditional
+	// delete that used to be here reset the exponential backoff, so manually restoring
+	// a flapping session (whose agent exits on startup) re-opened the very hot-loop the
+	// auto path now prevents (#1976). consecutiveFailures is CARRIED; RestoreLostSessions
+	// clears the state once a poll observes the runtime alive, and the auto loop charges
+	// an immediate re-loss against the same episode.
+	m.armRestoreConfirmation(key, repoID, instance)
 	return instance.GetWorktreePath(), nil
 }
