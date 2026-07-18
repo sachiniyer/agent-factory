@@ -76,6 +76,14 @@ func TestListBackends_OffersEverySupportedBackend(t *testing.T) {
 		names = append(names, opt.Name)
 	}
 	assert.Equal(t, config.SupportedBackends, names, "the catalog is the canonical enum, in canonical order")
+	// The RPC feeds the canonical enum straight into the catalog builder and does no
+	// filtering of its own. This is the second half of the anti-drift pair (see
+	// TestListBackends_NewBackendReachesClientsWithNoClientChange): that one proves
+	// the builder passes any list through, this one proves the list it is given is
+	// the canonical one. Together they say a new backend reaches every client.
+	cfg, cfgErr := config.ResolveConfig(repo)
+	assert.Equal(t, backendCatalog(config.SupportedBackends, cfg, cfgErr, repo), resp.Backends,
+		"ListBackends must hand the canonical enum to backendCatalog untouched")
 
 	assert.Equal(t, BackendAvailable, optionByName(t, resp, config.BackendLocal).Status, "local needs no repo config")
 	assert.Empty(t, optionByName(t, resp, config.BackendLocal).Reason)
@@ -290,21 +298,32 @@ func TestListBackends_NewBackendReachesClientsWithNoClientChange(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 	repo := setupControlRepo(t)
 
-	require.NotContains(t, config.SupportedBackends, "fargate", "precondition: the fake backend must not already exist")
+	require.NotContains(t, config.SupportedBackends, "fargate", "precondition: the fake backend must not be a real one")
 
-	restoreRuntime := session.SetRuntimeForTest(session.BackendKind("fargate"), func() session.Runtime { return nil })
-	t.Cleanup(restoreRuntime)
+	// A list carrying a backend this handler has never heard of, exactly as the
+	// canonical enum would look the moment someone adds one — PASSED IN, not
+	// assigned to config.SupportedBackends. See backendCatalog: that assignment is
+	// a data race against session.ParseBackend's read, and it is the twin of the
+	// tmux.SupportedPrograms race `go test -race` failed on (#1970/#2079).
+	//
+	// Registering a runtime is no longer needed either, which removes a second
+	// global mutation: BackendUnusableReason switches on the KNOWN kinds and
+	// consults no registry, so an unrecognized backend correctly reports no config
+	// requirement — that is the property under test.
+	cfg, cfgErr := config.ResolveConfig(repo)
+	catalog := backendCatalog([]string{config.BackendLocal, "fargate"}, cfg, cfgErr, repo)
 
-	prev := config.SupportedBackends
-	config.SupportedBackends = append(append([]string{}, prev...), "fargate")
-	t.Cleanup(func() { config.SupportedBackends = prev })
+	names := make([]string, 0, len(catalog))
+	for _, opt := range catalog {
+		names = append(names, opt.Name)
+	}
+	assert.Equal(t, []string{config.BackendLocal, "fargate"}, names,
+		"the catalog is the list it was given: same values, same order, nothing added or dropped")
 
-	resp := listBackends(t, repo)
-
-	opt := optionByName(t, resp, "fargate")
-	assert.Equal(t, BackendAvailable, opt.Status, "a backend with no repo-config requirement is selectable as soon as it is registered")
-	assert.Empty(t, opt.Reason)
-	assert.Equal(t, "fargate", resp.Backends[len(resp.Backends)-1].Name, "it lands in enum order, not appended by a special case")
+	fargate := catalog[len(catalog)-1]
+	assert.Equal(t, "fargate", fargate.Name, "a newly added backend lands in enum order, not appended by a special case")
+	assert.Equal(t, BackendAvailable, fargate.Status, "a backend with no repo-config requirement is selectable as soon as it is in the enum")
+	assert.Empty(t, fargate.Reason)
 }
 
 // TestListBackends_RequiresARepo: availability and the default are both properties

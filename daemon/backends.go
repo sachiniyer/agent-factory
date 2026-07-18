@@ -102,12 +102,32 @@ func (s *controlServer) ListBackends(req ListBackendsRequest, resp *ListBackends
 	}
 
 	cfg, cfgErr := config.ResolveConfig(repo.Root)
-	resp.Backends = make([]BackendOption, 0, len(config.SupportedBackends))
-	for _, name := range config.SupportedBackends {
-		resp.Backends = append(resp.Backends, backendOptionFor(session.BackendKind(name), cfg, cfgErr, repo.Root))
-	}
+	resp.Backends = backendCatalog(config.SupportedBackends, cfg, cfgErr, repo.Root)
 	resp.Default, resp.DefaultStatus, resp.DefaultReason = defaultFor(resp.Backends, cfg, cfgErr, repo.Root)
 	return nil
+}
+
+// backendCatalog answers for a LIST of backends, preserving its order and adding,
+// dropping and renaming nothing.
+//
+// It takes the list as a PARAMETER rather than reading config.SupportedBackends
+// itself, which is what makes the anti-drift property — whatever the canonical
+// enum holds is offered — testable by passing a list instead of swapping the
+// global out from under the process (#2079).
+//
+// That swap is a DATA RACE, not just a smell: config.SupportedBackends is
+// read by session.ParseBackend (session/runtime.go, slices.Contains) and Go runs a
+// package's tests concurrently, so a test assigning to it races every other test
+// resolving a backend name. Its twin — the same pattern on tmux.SupportedPrograms
+// — is what `go test -race` failed on in #1970, and this one had simply not been
+// unlucky yet. Neither enum is ever written in production; both are read-only
+// after init, which is precisely why their read paths need no lock.
+func backendCatalog(names []string, cfg *config.ResolvedConfig, cfgErr error, repoRoot string) []BackendOption {
+	out := make([]BackendOption, 0, len(names))
+	for _, name := range names {
+		out = append(out, backendOptionFor(session.BackendKind(name), cfg, cfgErr, repoRoot))
+	}
+	return out
 }
 
 // backendOptionFor answers for ONE backend, honestly.
