@@ -7,8 +7,20 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
+	"unicode"
 
 	"github.com/sachiniyer/agent-factory/log"
+)
+
+// pasteDeliveryMaxWait bounds how long the submit path waits for a pasted prompt
+// to appear in the pane before sending Enter, and pasteDeliveryPollInterval is
+// how often it re-checks. They are package vars so tests can tighten them. The
+// defaults confirm an idle pane in a single poll (well under the old fixed
+// 500ms) while still tolerating a pane that is mid-render and drains slower than
+// 500ms — the exact case that stranded prompts (#1982).
+var (
+	pasteDeliveryMaxWait      = 2 * time.Second
+	pasteDeliveryPollInterval = 50 * time.Millisecond
 )
 
 // pasteBufferSeq makes each bracketed-paste buffer name unique per call so two
@@ -83,6 +95,16 @@ func (t *TmuxSession) sendKeysPasteBuffer(text string) error {
 	// after pasting so buffers never accumulate.
 	buf := pasteBufferName(pasteBufferProcessToken, t.sanitizedName, pasteBufferSeq.Add(1))
 
+	// Baseline the pane BEFORE delivery so the post-paste check waits for the
+	// prompt's tail to newly APPEAR (a count increase), not merely be present:
+	// the daemon re-delivers the same prompt after a limit resume (#1146), so an
+	// identical tail could already be on screen.
+	tail := deliveryTail(text)
+	baseline := 0
+	if tail != "" {
+		baseline = strings.Count(normalizeDelivery(t.capturePaneForDelivery()), tail)
+	}
+
 	loadCmd := exec.Command("tmux", "load-buffer", "-b", buf, "-")
 	loadCmd.Stdin = strings.NewReader(text)
 	if err := t.cmdExec.Run(loadCmd); err != nil {
@@ -107,19 +129,98 @@ func (t *TmuxSession) sendKeysPasteBuffer(text string) error {
 		return fmt.Errorf("error pasting buffer: %w", err)
 	}
 
-	// Wait for terminal control sequences (e.g. OSC color responses) and the
-	// paste to drain before sending Enter, otherwise they can corrupt the input.
-	//
-	// Bracketing (above) may make this unnecessary for apps that requested the
-	// mode: the `\x1b[201~` end-of-paste marker tells them the paste is complete,
-	// which is the whole reason codex needed `-p` rather than a longer sleep
-	// (#1254/#1256). It cannot go away unconditionally, though — `-p` is a no-op
-	// for apps that never enabled the mode, and those get no marker and still
-	// need the drain. Removing it is a separate change with its own evidence;
-	// left alone here deliberately (#1956 follow-up).
-	time.Sleep(500 * time.Millisecond)
+	// Confirm the paste actually LANDED in the pane before sending Enter, instead
+	// of sleeping a fixed 500ms and hoping it drained. Enter is a separate
+	// `send-keys`, and when it overtakes an as-yet-undrained paste it either
+	// truncates the command or — on a bracketed-paste composer that has not yet
+	// processed the `\x1b[201~` end-of-paste marker — is absorbed as a literal
+	// newline, stranding the prompt in the composer unsubmitted while the send
+	// still reports success (#1982). The fixed sleep undershot precisely when the
+	// pane was mid-render (a spinner/animation shortly after a turn), which is
+	// where the strands clustered. Waiting for the pasted tail to appear ties the
+	// Enter to observed delivery: it returns as soon as the paste is visible
+	// (usually well under the old 500ms) and, on the rare pane where capture
+	// cannot confirm it, falls back to sending Enter after the cap so delivery is
+	// never worse than the old blind sleep.
+	t.waitForPasteDelivered(tail, baseline)
 
 	// Send Enter separately to submit.
 	enterCmd := exec.Command("tmux", "send-keys", "-t", exactTarget(t.sanitizedName), "Enter")
 	return t.cmdExec.Run(enterCmd)
+}
+
+// deliveryTail returns a distinctive whitespace/box-free suffix of text used to
+// confirm the WHOLE paste landed before submitting: a racing Enter drops the
+// TAIL, so the tail is exactly what must be visible. Whitespace and box-drawing
+// glyphs are removed so an agent composer that wraps the prompt inside its
+// border box (claude/aider render one) still reads back as one contiguous run.
+// A short tail keeps it within a single composer line so a wrap can't split it.
+func deliveryTail(text string) string {
+	n := []rune(normalizeDelivery(text))
+	const tailRunes = 32
+	if len(n) > tailRunes {
+		n = n[len(n)-tailRunes:]
+	}
+	return string(n)
+}
+
+// normalizeDelivery strips whitespace and box-drawing / block-element glyphs so
+// a prompt wrapped inside a composer box reads back as one contiguous run,
+// independent of the pane's width or the agent's framing.
+func normalizeDelivery(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	for _, r := range s {
+		if unicode.IsSpace(r) || (r >= 0x2500 && r <= 0x259F) {
+			continue
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
+}
+
+// capturePaneForDelivery returns the pane's visible content, or "" if capture
+// fails (a transient/headless miss just means "not confirmed yet" — the caller
+// keeps polling and ultimately falls back to a best-effort Enter).
+//
+// It deliberately does NOT reuse CapturePaneContent, which is shaped for prompt
+// detection rather than text matching: that helper passes `-e` to PRESERVE ANSI
+// escapes, and a colourized composer would then interleave escape bytes through
+// the very text being matched. It also probes ExistsOrUnknown() on failure,
+// spawning a second tmux subprocess — wasted work inside the submit path, where
+// a failed capture only ever means "not confirmed yet". `-J` is kept, so a line
+// the TERMINAL wrapped is rejoined by tmux itself; app-drawn wrapping inside a
+// composer's border box is handled by normalizeDelivery instead.
+func (t *TmuxSession) capturePaneForDelivery() string {
+	cmd := exec.Command("tmux", "capture-pane", "-p", "-J", "-t", exactTarget(t.sanitizedName))
+	out, err := t.cmdExec.Output(cmd)
+	if err != nil {
+		return ""
+	}
+	return string(out)
+}
+
+// waitForPasteDelivered blocks until the pasted prompt's tail newly appears in
+// the pane (count exceeds the pre-paste baseline), or pasteDeliveryMaxWait
+// elapses. On expiry it logs and returns so Enter is still sent best-effort —
+// delivery is never worse than the fixed sleep it replaces (#1982).
+func (t *TmuxSession) waitForPasteDelivered(tail string, baseline int) {
+	if tail == "" {
+		// Nothing distinctive to confirm (empty/all-whitespace prompt); give
+		// control sequences a brief moment to drain, matching the old intent.
+		time.Sleep(pasteDeliveryPollInterval)
+		return
+	}
+	deadline := time.Now().Add(pasteDeliveryMaxWait)
+	for {
+		if strings.Count(normalizeDelivery(t.capturePaneForDelivery()), tail) > baseline {
+			return
+		}
+		if time.Now().After(deadline) {
+			log.ErrorLog.Printf("submit: paste delivery for session %q not confirmed within %s; sending Enter best-effort",
+				t.sanitizedName, pasteDeliveryMaxWait)
+			return
+		}
+		time.Sleep(pasteDeliveryPollInterval)
+	}
 }
