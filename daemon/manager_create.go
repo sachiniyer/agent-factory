@@ -264,6 +264,14 @@ func (m *Manager) reserveCreate(req CreateSessionRequest) (*config.RepoContext, 
 	return repo, title, release, renamedArchived, nil
 }
 
+// reuseArchivedRenamePersist is the durable title rewrite the archived-name-reuse
+// rename runs. A package var so tests can force that write to fail in isolation —
+// exercising the rollback, and the double-failure recovery branch behind it
+// (#2106) — without disturbing any other persist. Mirrors archivePersist's and
+// killTombstonePersist's precedent. Production points it at the real writer and
+// never reassigns it.
+var reuseArchivedRenamePersist = renameInstanceDataTitle
+
 // renameArchivedForReuseLocked frees `title` for a new session when the ONLY thing
 // holding it is an archived session, by renaming that archived session to a
 // disambiguated "<title> (archived[ N])" (feat: reuse archived name). It returns
@@ -310,12 +318,39 @@ func (m *Manager) renameArchivedForReuseLocked(repoID, repoPath, title, program 
 	// #1538): otherwise the on-disk record would point at the pre-rename path that no
 	// longer exists, stranding the archive after a daemon restart.
 	renamed := archived.ToInstanceData()
-	if perr := renameInstanceDataTitle(repoID, oldTitle, renamed); perr != nil {
+	if perr := reuseArchivedRenamePersist(repoID, oldTitle, renamed); perr != nil {
 		if rbErr := archived.RenameArchived(oldTitle, origDest); rbErr != nil {
 			// Could not move the worktree home: leave it re-keyed under the new title
 			// (the bytes live at newDest) and surface both failures so the operator can
 			// recover it. The new session create aborts.
-			m.persistInstance(repoID, archived)
+			//
+			// persistInstanceData DIRECTLY, never m.persistInstance (#2106): we are on
+			// reserveCreate's stack, which holds m.mu across this whole call, and
+			// m.persistInstance -> persistInstanceErr -> startLockForRepo takes m.mu
+			// again. sync.Mutex is not reentrant, so that self-deadlocked the goroutine
+			// on the manager lock and hung every other daemon operation behind it.
+			//
+			// Do NOT "fix" this by grabbing the repo start lock without m.mu either.
+			// CreateSession holds repoStartLock across its body and takes m.mu under it
+			// (the appendInstanceData critical section), so repoStartLock->m.mu is the
+			// established order; adding m.mu->repoStartLock here would close an ABBA
+			// cycle — the #2006 lock-inversion class, traded for the self-deadlock.
+			// Nothing is lost by skipping it: the per-repo start lock serializes
+			// spawn-then-persist sequences, while what actually serializes writers to
+			// instances.json is the file lock inside config.UpdateRepoInstances, which
+			// persistInstanceData takes on its own. CreateTab/CloseTab/SetPRInfo already
+			// persist through this same lock-free primitive.
+			//
+			// Best-effort by design: this is a recovery breadcrumb on an already-failing
+			// path, so a write failure is logged rather than returned — the operator
+			// error below is the real report. It commonly WILL fail with "not found in
+			// storage", because the durable rewrite that just failed is what would have
+			// moved the on-disk row to the new title; that is pre-existing behavior this
+			// fix deliberately does not change, and the returned error covers it.
+			if wErr := persistInstanceData(repoID, archived.ToInstanceData()); wErr != nil {
+				log.WarningLog.Printf("archived session %q was renamed to %q but could not be persisted or rolled back; recording its new identity also failed: %v",
+					oldTitle, archived.Title, wErr)
+			}
 			return nil, fmt.Errorf("failed to durably rename archived session %q and could not roll it back (%v); it may need manual recovery: %w", oldTitle, rbErr, perr)
 		}
 		delete(m.instances, newKey)

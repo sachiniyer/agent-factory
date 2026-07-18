@@ -426,6 +426,10 @@ func (m *Manager) archiveExclusiveTabLock(key string, instance *session.Instance
 // refreshInstanceStatus's persist, and returns any write error. persistInstance
 // wraps it for the best-effort callers; the archive commit uses this variant to
 // make the persist durable (#1538).
+//
+// LOCK CONTRACT (#2106): it goes through startLockForRepo, which takes m.mu, so
+// it must NEVER be called with m.mu held — see startLockForRepo. Under m.mu, call
+// persistInstanceData directly instead.
 func (m *Manager) persistInstanceErr(repoID string, instance *session.Instance) error {
 	repoStartLock := m.startLockForRepo(repoID)
 	repoStartLock.Lock()
@@ -436,6 +440,9 @@ func (m *Manager) persistInstanceErr(repoID string, instance *session.Instance) 
 // persistInstance is the best-effort form of persistInstanceErr: a failed write
 // only logs. Used everywhere the persist is a checkpoint that the next poll/tick
 // will re-attempt, never where the write's durability gates correctness.
+//
+// LOCK CONTRACT (#2106): inherits persistInstanceErr's — never call it with m.mu
+// held. Under m.mu, call persistInstanceData directly.
 func (m *Manager) persistInstance(repoID string, instance *session.Instance) {
 	if err := m.persistInstanceErr(repoID, instance); err != nil {
 		log.WarningLog.Printf("failed to persist instance %q: %v", instance.Title, err)
