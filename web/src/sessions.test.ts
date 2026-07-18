@@ -12,6 +12,7 @@ import {
   applyEvent,
   clampActiveTab,
   pickSelection,
+  rebindTargetAfterAwait,
   removeSession,
   sessionKey,
   tabToKeepOnClose,
@@ -230,4 +231,44 @@ test("an out-of-range active index yields no tab to follow", () => {
   // Identities are never empty (ui.tabIdentity synthesizes a kind:name fallback), so
   // "" can't accidentally match a real tab when the caller resolves it.
   assert.equal(["id-agent", "id-a"].indexOf(""), -1);
+});
+
+// --- rebindTargetAfterAwait: the shared guard on a post-await pane rebind ----
+//
+// Both createSessionTab and closeSessionTab await a round trip and then re-point the
+// focused pane. splitView.trees is per-session and setFocusedTab carries no session of
+// its own, so a target resolved before the await must NOT be applied if the user
+// formed a newer intent DURING it — switching sessions (selectedId moves) or focusing
+// another pane / changing the layout (layoutGeneration bumps). closeSessionTab pinned
+// exactly this since #1815; createSessionTab shipped with neither guard (#2000). These
+// pin the shared decision both now route through, so a third async rebind can't forget
+// it.
+
+test("rebind proceeds to the resolved tab when neither generation nor selection moved", () => {
+  assert.equal(rebindTargetAfterAwait(5, "sess-a", 5, "sess-a", 3), 3);
+});
+
+test("rebind BAILS when the user switched sessions during the await (#2000)", () => {
+  // The + round trip spawns a tmux window / code-server, so the await is real. If the
+  // user selects another session meanwhile, an ordinal resolved against the OLD
+  // session's roster must not be applied to the NEW session's per-session tree — the
+  // #1815 finding, in the one place (create) its guard was never applied.
+  assert.equal(rebindTargetAfterAwait(5, "sess-a", 5, "sess-b", 3), -1);
+});
+
+test("rebind BAILS when the layout generation moved — the user focused another pane (#1815)", () => {
+  // A slow round trip leaves a wide window in which the user can focus another pane or
+  // split the layout; re-pointing from an intent formed before that yanks it back.
+  assert.equal(rebindTargetAfterAwait(5, "sess-a", 6, "sess-a", 3), -1);
+});
+
+test("rebind BAILS when the resolved target no longer exists (idx < 0)", () => {
+  // The created/kept tab was closed by another client during the await, or the session
+  // vanished: -1 is the honest "leave the pane where syncSplit already settled it",
+  // never a guess. Mirrors closeSessionTab's `next >= 0` and tabToKeepOnClose's -1.
+  assert.equal(rebindTargetAfterAwait(5, "sess-a", 5, "sess-a", -1), -1);
+});
+
+test("a null current selection (session killed mid-flight) bails against any pinned id", () => {
+  assert.equal(rebindTargetAfterAwait(5, "sess-a", 5, null, 3), -1);
 });
