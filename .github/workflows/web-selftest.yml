@@ -1,0 +1,99 @@
+name: Web selftest
+
+# The Playwright web-driver selftest (#1592 Phase 5 PR6, docs/web-selftest.md):
+# a real af daemon on a throwaway home, two seeded sessions behind a fake agent,
+# and the embedded SPA driven in a headless Chromium. It is the acceptance proof
+# for the web client and, until #2069, it ran only when someone typed `make
+# web-selftest-container` by hand.
+#
+# It lives in its OWN workflow rather than as a job in pr.yml for two reasons:
+#
+#   * pr.yml has no `paths:` filter because its Lint/Build jobs must run on every
+#     PR. This one is expensive — it builds a Go+Node+Chromium image, then boots a
+#     daemon and a browser — so it is worth filtering, and a workflow-level
+#     `paths:` is the only native way to do that.
+#   * It is deliberately NOT wired into pr.yml's Build job, so it does not gate
+#     merges. See "Why this does not gate" below.
+#
+# The fast, deterministic web checks (parity tests + bundle reproducibility) DO
+# gate — they are the `Web` job in pr.yml.
+
+on:
+  pull_request:
+    branches: [master]
+    paths:
+      # The SPA itself, and the committed bundle the harness actually serves.
+      - 'web/**'
+      # The harness drives a REAL daemon, so the daemon's HTTP/WS surface and the
+      # embedding are as capable of breaking it as web/ is. #1932 (a header that
+      # went stale) and #1894 (a detach that dropped scroll) were both found here.
+      - 'daemon/**'
+      - 'agentproto/**'
+      - 'apiproto/**'
+      # The harness itself.
+      - 'scripts/testbox.sh'
+      - 'scripts/container/Dockerfile.web-selftest'
+      - 'scripts/container/web-selftest-entry.sh'
+      - '.github/workflows/web-selftest.yml'
+
+concurrency:
+  group: web-selftest-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+# Read-only: checks out source and runs the harness in a container. It never
+# comments on or modifies the PR.
+permissions:
+  contents: read
+
+jobs:
+  selftest:
+    name: Web selftest
+    runs-on: ubuntu-latest
+    # The image build (Go + Node + Chromium + system deps) dominates a cold run.
+    # GitHub gives no persistent docker layer cache between runs, so budget for
+    # the cold path every time — but not for a hung browser burning six hours.
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v6
+
+      # `make web-selftest-container` is the ONLY sanctioned entry point
+      # (docs/web-selftest.md), and CI uses it verbatim rather than reimplementing
+      # the steps — a CI-only copy of the harness is how the thing CI runs stops
+      # being the thing developers run. The ubuntu runner ships Docker, which is
+      # all the target needs; pr.yml's macOS job cannot host it for exactly this
+      # reason.
+      #
+      # Everything (daemon, tmux, browser) lives on 127.0.0.1 inside an ephemeral
+      # container with no published ports, so this is as isolated on a runner as
+      # it is on a dev box.
+      - name: Run the web-driver selftest
+        run: make web-selftest-container
+
+      # No artifact-upload step, deliberately. The harness copies /src into /work
+      # inside the container (the bind mount is read-only) and Playwright writes
+      # its traces there, so they die with the container — there is nothing on the
+      # host to upload. A step pointing at web/test-results/ would upload an empty
+      # artifact on every failure and read as though traces were captured.
+      #
+      # What you get instead is Playwright's reporter output in the job log, which
+      # names the failing assertion. For a trace, reproduce locally:
+      #   make web-selftest-container
+
+# ── Why this does not gate ────────────────────────────────────────────────────
+#
+# This repo's ruleset (14851503) requires only "Lint" and "Build", so a new job
+# gates nothing unless pr.yml's Build job lists it in `needs` — the mechanism
+# documented on the auto-gate helper test. That was a deliberate choice NOT to
+# use here:
+#
+#   * Cost: a cold Go+Node+Chromium image build plus a daemon+browser boot on
+#     every web PR, against ~40s for the deterministic checks that do gate.
+#   * Flake surface: it drives a real browser against a real daemon over a real
+#     PTY. Those have been contention-sensitive (see the dev-box selftest flakes),
+#     and a flaky REQUIRED check blocks every merge in the repo, not just web PRs.
+#
+# So it runs as a signal: red here means read it before merging. To promote it to
+# a gate, add `web-selftest` to pr.yml's Build `needs` — but note that a job in
+# ANOTHER workflow cannot be a `needs` dependency, so promoting it means moving it
+# into pr.yml (accepting the cost on every PR) or adding "Web selftest" to the
+# ruleset's required checks, which needs repo-admin access.
