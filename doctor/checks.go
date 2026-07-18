@@ -114,15 +114,27 @@ func killFix(ctx *scanContext, p proctree.Process) func() error {
 // autostart unit, pid file, and binary freshness. Read-only; never fixable
 // (restarting the daemon is a user decision). Takes the run's shared health
 // probe so every daemon check reasons about one consistent observation.
-func checkDaemonHealth(ctx *scanContext, report *Report, h daemon.HealthStatus) {
+func checkDaemonHealth(ctx *scanContext, report *Report, h daemon.HealthStatus, cfg *config.Config) {
 	if h.SocketErr != nil {
 		report.Fail(sectionDaemon, "daemon", fmt.Sprintf("cannot resolve daemon socket path: %v", h.SocketErr),
 			"fix AGENT_FACTORY_HOME and rerun `af doctor`")
 		return
 	}
+	// "not running" and "not running BECAUSE it refuses to" look identical from
+	// the socket, and only one of them is healthy. Ask the config before saying
+	// "starts on demand": under the #2090 auth posture the daemon will not start,
+	// on demand or otherwise, and reporting a cheerful pass would leave the user
+	// with a vanished web UI, a green doctor, and no thread to pull. The
+	// remediation is the whole point of the refusal, so doctor must carry it.
+	postureErr := config.ValidateListenerAuthPosture(cfg)
+
 	switch {
 	case h.PingErr == nil:
 		report.Pass(sectionDaemon, "daemon", "responding on "+h.SocketPath)
+	case postureErr != nil:
+		report.Fail(sectionDaemon, "daemon",
+			fmt.Sprintf("not running, and it cannot start: listen_addr %q is reachable from the network while require_token is false, which would serve the control API unauthenticated", cfg.ListenAddr),
+			"run `af config set require_token true` to require a bearer token, or `af config set listen_addr 127.0.0.1:8443` to serve the web UI locally only (or `af config set listen_addr \"\"` to turn it off)")
 	case !h.SocketExists:
 		report.Pass(sectionDaemon, "daemon", "not running; starts on demand")
 	default:

@@ -213,10 +213,10 @@ Two cases break that assumption, and both are on you to close:
   `require_loopback_token = true` (the latter is inert on its own), or
   `listen_addr = ""` to turn the web server off.
 - **A network bind**: pointing `listen_addr` at a routable interface while leaving
-  the tokenless default serves an **unauthenticated control plane** to anyone who
-  can route to it. Set `require_token = true`, or keep it on a private network
-  (Tailscale/VPN) or behind an authenticating proxy. The daemon logs a loud
-  startup warning on exactly this combination.
+  the tokenless default would serve an **unauthenticated control plane** to anyone
+  who can route to it, so the daemon **refuses to start** on that combination. Set
+  `require_token = true` to bind the network, or keep `listen_addr` on loopback
+  and reach it over SSH/Tailscale port-forwarding.
 
 See the [Security notes](#security-notes).
 
@@ -617,14 +617,14 @@ While a terminal is attached, all keys except `Escape` flow to the agent.
       so `require_loopback_token` alone changes nothing; or
     - `listen_addr = ""` — disable the web server entirely.
 
-!!! warning "A network bind is unauthenticated unless you turn the token on"
+!!! warning "A network bind requires the token"
     `require_token` defaults to `false`, so pointing `listen_addr` at a routable
-    interface (`0.0.0.0:8443`, a LAN/Tailscale IP) serves **full control of your
-    daemon to anyone who can reach the port, with no credential**. The daemon logs
-    a loud startup warning on exactly that combination. Set `require_token = true`,
-    or keep the listener on a private network (Tailscale/VPN) or behind an
-    authenticating proxy. This is the deliberate cost of the zero-friction default:
-    a stock install is protected by the loopback bind, not by auth.
+    interface (`0.0.0.0:8443`, a LAN/Tailscale IP) would serve **full control of
+    your daemon to anyone who can reach the port, with no credential**. The daemon
+    **refuses to start** on that combination rather than serving it: a non-loopback
+    `listen_addr` must set `require_token = true`. This is the boundary on the
+    zero-friction default — a stock install is protected by the loopback bind, and
+    af will not let that protection be removed silently.
 
 - **The token is full access.** Under the single-owner model, one token grants full
   control of the daemon. Treat it like a password; never commit it or paste it into

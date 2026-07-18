@@ -126,9 +126,9 @@ daemon HTTP TCP listener enabled on 0.0.0.0:8443 (plain HTTP — terminate TLS a
   listener is network-bound: every peer must present the token above, INCLUDING loopback-origin requests …
 ```
 
-Had you left `require_token` at its `false` default, that last line would instead
-read `all peers connect with NO token`, and the daemon would log the
-[tokenless network warning](#the-tokenless-network-warning) above it.
+Had you left `require_token` at its `false` default, the daemon would not have
+started at all — see
+[the tokenless network refusal](#the-tokenless-network-refusal).
 
 ### 2. Read the token
 
@@ -280,14 +280,14 @@ peer's real transport address — never from a header:
 | Peer | Default (`require_token` unset/`false`) | `require_token = true` |
 |---|---|---|
 | **Loopback** (`127.0.0.1` / `::1`) — a browser or client on the **same machine** | **No token** | **No token** on a loopback bind (unless `require_loopback_token = true`) |
-| **Network** — any other source address | **No token** — token disabled | **Token required** (401 without it) |
+| **Network** — any other source address | *daemon refuses to start* | **Token required** (401 without it) |
 
-> **A network-bound daemon under the default is open to anyone who can route to
-> it.** That combination — `listen_addr` on a routable interface *and* the
-> tokenless default — is an unauthenticated control plane, and the daemon logs a
-> loud startup warning when it sees it. If you bind to the network, either set
-> `require_token = true` or keep the listener on a private network (Tailscale,
-> VPN) or behind an authenticating proxy.
+> **A non-loopback `listen_addr` requires `require_token = true`.** That
+> combination — `listen_addr` on a routable interface *and* the tokenless default
+> — is an unauthenticated control plane, so the daemon **refuses to start** rather
+> than serve it (see [the tokenless network
+> refusal](#the-tokenless-network-refusal)). The tokenless column above is
+> therefore reachable only on a loopback bind.
 
 ### Why token-less by default
 
@@ -299,10 +299,11 @@ they saw the product. So the default is: open `http://localhost:8443` and it
 connects. The web client reads the daemon's answer from `/v1/auth-info` and skips
 its login screen whenever no token is required.
 
-The trade-off is deliberate: `af` now ships open rather than closed, and the
-loopback-only `listen_addr` is what bounds the blast radius. Exposing the daemon
-to a network is an explicit act, and the paragraphs below are what you owe
-yourself when you do it.
+The trade-off is deliberate: `af` ships open rather than closed, and the
+loopback-only `listen_addr` is what bounds the blast radius — the tokenless
+posture is only ever allowed to front a listener nothing off-box can reach.
+Exposing the daemon to a network is an explicit act, and it carries the token
+with it: af will not start a network listener without one.
 
 ### Loopback is exempt even with the token on
 
@@ -404,33 +405,52 @@ set `require_loopback_token = true`. The web client picks the change up on its
 next load and shows its paste-token login. Get the credential with
 `af token show`.
 
-Set it whenever `listen_addr` is anything but loopback and the network isn't one
-you fully control. Remember the token still travels over plain HTTP, so pair it
-with TLS termination or a private network.
+You **must** set it whenever `listen_addr` is anything but loopback — the daemon
+refuses to start otherwise, whether or not you trust the network. Remember the
+token still travels over plain HTTP, so pair it with TLS termination or a private
+network.
 
-### The tokenless network warning
+### The tokenless network refusal
 
 Leaving the default `require_token = false` while binding `listen_addr` to a
-routable interface means anyone who can reach the port has full control with no
-credential. The daemon logs a loud startup **warning** on exactly that
-combination:
+routable interface would mean anyone who can reach the port has full control with
+no credential — including `DeliverPrompt`, which types instructions into a running
+agent and submits them, so it is remote code execution, not just data exposure.
+
+This used to be a startup **warning** that then served the listener anyway. Since
+#2090 the daemon **refuses to start** on that combination:
 
 ```
-WARNING: the daemon web API on "0.0.0.0:8443" is NETWORK-bound and requires NO
-token (require_token defaults to false); anyone who can reach it has full
-control. The listener is plain HTTP (no TLS), so this leaves it fully open. Set
-require_token = true to require auth, or keep the listener on a private network
-(Tailscale/VPN) or behind an authenticating proxy.
+refusing to start: listen_addr "0.0.0.0:8443" is reachable from the network but
+require_token is false, so af would serve its full control API — including
+DeliverPrompt, which runs arbitrary instructions through your agents — to anyone
+who can reach that address, with no authentication and no TLS.
+
+Choose one:
+  af config set require_token true            keep the network bind, require a bearer token (`af token` prints it)
+  af config set listen_addr 127.0.0.1:8443    serve the web UI to this machine only
+  af config set listen_addr ""                turn the web server off entirely
 ```
 
-The warning is deliberately scoped to network binds: the ordinary loopback
-default is tokenless too, and warning on *that* every single start would train
-you to ignore the line that matters. If you see this, either set
-`require_token = true` or make sure only trusted peers can route to the port.
+The refusal is scoped to network binds: the ordinary loopback default is tokenless
+too, and that stays allowed — nothing off-box can reach it, which is exactly what
+makes the tokenless default safe.
+
+Note that `require_loopback_token = true` does **not** satisfy the requirement. It
+only withdraws the loopback exemption, and while `require_token` is `false` the
+token is disabled for *every* peer, so that exemption is already moot. A network
+bind needs `require_token = true`.
+
+**Upgrading?** If your config explicitly sets a non-loopback `listen_addr` with
+`require_token = false`, your daemon will stop with the message above on the next
+start. That configuration was serving an unauthenticated control plane, so the
+refusal is the fix, not a regression — pick one of the three lines it offers. af
+does not silently rewrite the address you chose.
 
 On a network you fully trust — a private Tailscale tailnet, a locked-down VPN —
-running tokenless is a legitimate choice. On any interface an untrusted party can
-reach, it is not.
+a tokenless listener may feel reasonable, but af no longer distinguishes trusted
+networks from untrusted ones at bind time: bind loopback and reach it over the
+tailnet with SSH port-forwarding (Option 1), or set the token.
 
 ---
 

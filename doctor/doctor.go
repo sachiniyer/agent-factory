@@ -319,7 +319,7 @@ func Run(opts Options) (*Report, error) {
 	// socket, and three checks asking the same daemon the same question could
 	// disagree if a restart landed between them.
 	health := ctx.opts.daemonHealth()
-	checkDaemonHealth(ctx, report, health)
+	checkDaemonHealth(ctx, report, health, cfg)
 	checkDaemonVersionSkew(ctx, report, health)
 	checkDuplicateDaemons(ctx, report)
 	checkHTTPSocket(ctx, report, health)

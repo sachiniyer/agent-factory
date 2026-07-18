@@ -2,11 +2,15 @@ package commands
 
 import (
 	"bytes"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/spf13/cobra"
+	"github.com/stretchr/testify/require"
 
+	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
 )
 
@@ -89,4 +93,48 @@ func TestPrintDaemonStatusHumanNotRunning(t *testing.T) {
 	if !strings.Contains(got, "af daemon install") {
 		t.Errorf("expected autostart install hint, got:\n%s", got)
 	}
+}
+
+// TestCollectDaemonStatusFlagsUnstartableConfig pins the #2090 status surface:
+// on a config the daemon refuses to start under, "not running" must be reported
+// as a dead end carrying the fix — not as a daemon waiting to be asked. This is
+// the command someone runs when their web UI disappears after an upgrade.
+func TestCollectDaemonStatusFlagsUnstartableConfig(t *testing.T) {
+	home := testguard.SocketTempDir(t)
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	require.NoError(t, os.WriteFile(filepath.Join(home, config.TomlConfigFileName),
+		[]byte("listen_addr = '0.0.0.0:8443'\nrequire_token = false\n"), 0600))
+
+	info := collectDaemonStatus()
+	require.False(t, info.Running)
+	require.NotEmpty(t, info.CannotStartReason, "an unstartable config must be reported, not implied")
+	require.Contains(t, info.CannotStartReason, "require_token")
+
+	cmd := &cobra.Command{}
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	printDaemonStatusHuman(cmd, info)
+	got := out.String()
+	require.Contains(t, got, "cannot start")
+	require.NotContains(t, got, "starts on demand",
+		"the on-demand promise is false here — it must not be printed")
+}
+
+// TestCollectDaemonStatusSafeConfigKeepsOnDemandWording is the other direction:
+// the ordinary not-running case must be untouched by the #2090 check, so a user
+// who simply has no daemon yet is not shown a failure.
+func TestCollectDaemonStatusSafeConfigKeepsOnDemandWording(t *testing.T) {
+	home := testguard.SocketTempDir(t)
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	require.NoError(t, os.WriteFile(filepath.Join(home, config.TomlConfigFileName),
+		[]byte("listen_addr = '127.0.0.1:8443'\nrequire_token = false\n"), 0600))
+
+	info := collectDaemonStatus()
+	require.Empty(t, info.CannotStartReason)
+
+	cmd := &cobra.Command{}
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	printDaemonStatusHuman(cmd, info)
+	require.Contains(t, out.String(), "starts on demand")
 }

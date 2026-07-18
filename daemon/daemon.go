@@ -41,6 +41,27 @@ var restoreManagerForStartup = func(m *Manager) error { return m.RestoreInstance
 func RunDaemon(cfg *config.Config) error {
 	log.InfoLog.Printf("starting daemon")
 
+	// Refuse to serve the control API unauthenticated on a network interface
+	// (#2090). This is the authoritative gate: it runs BEFORE the ping, the home
+	// lock, the socket, and the PID file, so a daemon in this configuration
+	// touches nothing on its way out and cannot be mistaken for a live one.
+	//
+	// It is fatal by design. Every other startup failure here is deliberately
+	// non-fatal (a failed web bind is logged and skipped so the unix control
+	// plane survives — startHTTPServer), but that trade runs the other way for
+	// this one: degrading to "serve it anyway" is precisely the bug. Under the
+	// autostart unit this surfaces as a failed unit rather than a silent
+	// exposure, which is the outcome we want operators to notice.
+	//
+	// EnsureDaemon pre-flights the same check before spawning, because a spawned
+	// daemon's stderr is discarded (startDaemonChild) — without that, an
+	// interactive `af` would show only a 5s "did not become ready" timeout and
+	// none of the guidance below.
+	if err := config.ValidateListenerAuthPosture(cfg); err != nil {
+		log.ErrorLog.Printf("%v", err)
+		return err
+	}
+
 	// Refuse to run two daemons against the same control socket. EnsureDaemon
 	// pings before launching, but a daemon started directly (af --daemon, the
 	// autostart unit, or two racing af invocations) would otherwise steal the

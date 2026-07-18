@@ -99,6 +99,24 @@ func ensureDaemonWithLauncher(launch func() error) error {
 		log.WarningLog.Printf("failed to stop stale daemon before launch: %v", err)
 	}
 
+	// Pre-flight the #2090 auth-posture refusal so the operator SEES it. RunDaemon
+	// is the authoritative gate, but a spawned daemon's stderr is discarded
+	// (startDaemonChild), so its refusal would reach the user only as the 5s
+	// "daemon did not become ready" timeout below — a dead end for the upgrade
+	// case this guard exists to catch. Returning the same error here puts the
+	// remediation in front of whoever just ran `af`.
+	//
+	// Read-only on purpose: LoadConfigReadOnly materializes nothing and converts
+	// nothing, so pre-flighting a launch never writes config as a side effect. A
+	// config that cannot be read is NOT treated as a refusal — that is the loader's
+	// error to report, and failing the launch here would misattribute it; the
+	// daemon re-checks the posture regardless, so nothing gets past by that route.
+	if load, err := config.LoadConfigReadOnly(); err == nil {
+		if postureErr := config.ValidateListenerAuthPosture(load.Config); postureErr != nil {
+			return postureErr
+		}
+	}
+
 	if err := launch(); err != nil {
 		return err
 	}
