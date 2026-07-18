@@ -547,6 +547,44 @@ The restored worktree path is printed on success.`,
 	},
 }
 
+// resolveAttachTarget resolves the {title, repoID} pair `sessions attach` hands
+// to the daemon's WS PTY stream.
+//
+// --repo scoping is honored (#891, same class as #761/#776): an empty repoID
+// preserves the all-repo search, a non-empty one confines the attach to that
+// repo so `attach <title> --repo <other>` can never connect the terminal to a
+// same-titled session in a different repo.
+//
+// The remote branch is #1974. Attach runs over the apiclient transport, so it
+// follows --daemon-url to another machine — but it was resolving the session on
+// THIS machine's disk first (resolveRepoID + findLiveInstanceByTitleInScope),
+// which fails "session not found" before any remote call for a session that
+// only exists on the daemon. Both halves were wrong against a remote: the repo
+// ID hashes the CLIENT's cwd, naming a repo the daemon has never heard of, and
+// the instances.json read has no bearing on what the remote holds. So a remote
+// target hands the bare title to the daemon, which resolves it on its own side
+// (by id from memory, then by title from its own disk) — mirroring the preview
+// command's remote branch above, the other apiclient-transport read.
+//
+// The LOCAL path is deliberately unchanged: resolveRepoIDForLookup is identical
+// to resolveRepoID when no remote target is set, and the disk lookup still
+// restores the instance, which is what gives the local daemon a session to
+// attach to.
+func resolveAttachTarget(title string) (string, string, error) {
+	repoID, err := resolveRepoIDForLookup()
+	if err != nil {
+		return "", "", err
+	}
+	if apiclient.IsRemoteTarget() {
+		return title, repoID, nil
+	}
+	instance, _, err := findLiveInstanceByTitleInScope(repoID, title)
+	if err != nil {
+		return "", "", err
+	}
+	return instance.Title, repoID, nil
+}
+
 var sessionsAttachCmd = &cobra.Command{
 	Use:   "attach <title>",
 	Short: "Attach to a session's terminal",
@@ -556,16 +594,7 @@ var sessionsAttachCmd = &cobra.Command{
 		log.Initialize(false)
 		defer log.Close()
 
-		// Honor --repo scoping (#891, same class as #761/#776). An empty repoID
-		// preserves the prior all-repo search; a non-empty one confines the
-		// attach to that repo so `attach <title> --repo <other>` can never
-		// connect the terminal to a same-titled session in a different repo.
-		repoID, err := resolveRepoID()
-		if err != nil {
-			return jsonError(err)
-		}
-
-		instance, _, err := findLiveInstanceByTitleInScope(repoID, args[0])
+		title, repoID, err := resolveAttachTarget(args[0])
 		if err != nil {
 			return jsonError(err)
 		}
@@ -595,7 +624,7 @@ var sessionsAttachCmd = &cobra.Command{
 		// The CLI attaches the agent tab (index 0), which is structurally always
 		// first and never shifts, so a positional address is unambiguous — no stable
 		// tab id needed here (#1738).
-		detached, err := client.AttachStream(cmd.Context(), instance.Title, repoID, "", 0)
+		detached, err := client.AttachStream(cmd.Context(), title, repoID, "", 0)
 		if err != nil {
 			return jsonError(fmt.Errorf("failed to attach: %w", err))
 		}
