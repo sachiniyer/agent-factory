@@ -25,18 +25,35 @@ type recordedCmd struct {
 
 func recordTmuxCommands(t *testing.T, program string, text string) []recordedCmd {
 	t.Helper()
+	var mu sync.Mutex
 	var cmds []recordedCmd
+	var loaded string
 	cmdExec := cmd_test.MockCmdExec{
 		RunFunc: func(c *exec.Cmd) error {
 			rec := recordedCmd{args: c.Args}
 			if c.Stdin != nil {
 				b, _ := io.ReadAll(c.Stdin)
 				rec.stdin = string(b)
+				if strings.Contains(strings.Join(c.Args, " "), "load-buffer") {
+					mu.Lock()
+					loaded = rec.stdin
+					mu.Unlock()
+				}
 			}
+			mu.Lock()
 			cmds = append(cmds, rec)
+			mu.Unlock()
 			return nil
 		},
-		OutputFunc: func(c *exec.Cmd) ([]byte, error) { return []byte("content"), nil },
+		// capture-pane reads the pane back: echo the loaded paste so the positive
+		// delivery check (#1982) confirms on the first poll instead of waiting out
+		// pasteDeliveryMaxWait. capture-pane goes through Output, so it never lands
+		// in cmds — the load/paste/Enter shape assertions are unaffected.
+		OutputFunc: func(c *exec.Cmd) ([]byte, error) {
+			mu.Lock()
+			defer mu.Unlock()
+			return []byte(loaded), nil
+		},
 	}
 
 	session := newTmuxSession("af_proj", program, NewMockPtyFactory(t), cmdExec)
@@ -174,6 +191,11 @@ func TestEveryAgentSubmitUsesBracketedPasteBuffer(t *testing.T) {
 // buffer, and every paste must read back the buffer its own load wrote.
 func TestCodexSubmitConcurrentDeliveriesUseDistinctBuffers(t *testing.T) {
 	const workers = 24
+
+	// This test asserts buffer distinctness, not delivery timing; its mock does
+	// not echo the paste, so shorten the delivery wait to keep the run fast (each
+	// worker just falls back to a best-effort Enter after the cap).
+	defer withPasteDeliveryTiming(20*time.Millisecond, time.Millisecond)()
 
 	var mu sync.Mutex
 	var loadBufs []string
@@ -320,6 +342,63 @@ func TestPasteBufferNameProcessTokenPreventsCrossProcessCollision(t *testing.T) 
 	require.NotEmpty(t, pasteBufferProcessToken, "the process token must be resolved at startup")
 }
 
+// TestSubmitDoesNotManufactureAFailureWhenThePaneDoesNotEcho pins the reason
+// this package does NOT verify submission after Enter, so the idea is not
+// re-implemented from first principles later.
+//
+// The tempting post-submit check is "after Enter, the prompt should no longer be
+// the pane's trailing content". It is unsound, and three integration gates prove
+// it: a pane whose agent ECHOES the prompt back leaves exactly that shape on a
+// perfectly good delivery —
+//
+//	❯ hello-integration
+//	hello-integration        <- prompt text, trailing, AFTER a successful submit
+//
+// so the check condemns healthy sends of `af sessions send-prompt`. Telling that
+// apart from a real strand needs per-agent composer geometry, which this layer
+// cannot know.
+//
+// The same trap one step earlier: this pane never renders what it receives (the
+// #1956 receiver gate writes its bytes to a FILE while the screen only shows
+// AF-RECEIVER-READY). "Not echoed" is not "not delivered" — arrival and echo are
+// different facts, and any echo-off pane, a password prompt being the everyday
+// case, looks identical. So an unobserved paste is logged loudly and never
+// turned into an error.
+func TestSubmitDoesNotManufactureAFailureWhenThePaneDoesNotEcho(t *testing.T) {
+	defer withPasteDeliveryTiming(50*time.Millisecond, time.Millisecond)()
+
+	cmdExec := cmd_test.MockCmdExec{
+		RunFunc: func(c *exec.Cmd) error { return nil },
+		// A pane that never renders what it receives.
+		OutputFunc: func(c *exec.Cmd) ([]byte, error) { return []byte("AF-RECEIVER-READY"), nil },
+	}
+	session := newTmuxSession("af_proj", "claude", NewMockPtyFactory(t), cmdExec)
+
+	require.NoError(t, session.SendKeysCommand("a prompt to a pane that does not echo"),
+		"a non-echoing pane must NOT be reported as a failed delivery — the bytes still arrive")
+}
+
+// TestSubmitDoesNotManufactureAFailureWhenThePaneIsUnreadable is the polarity
+// guard for the capture itself. Every check here is a probe that can fail to
+// SEE, and a probe that cannot see must never manufacture a negative — the
+// failure mode this repo keeps re-learning. With capture-pane failing outright,
+// delivery is unverifiable, so the submit path must keep its best-effort
+// behaviour and report SUCCESS rather than invent a delivery failure.
+func TestSubmitDoesNotManufactureAFailureWhenThePaneIsUnreadable(t *testing.T) {
+	defer withPasteDeliveryTiming(50*time.Millisecond, time.Millisecond)()
+
+	cmdExec := cmd_test.MockCmdExec{
+		RunFunc: func(c *exec.Cmd) error { return nil },
+		OutputFunc: func(c *exec.Cmd) ([]byte, error) {
+			return nil, fmt.Errorf("no server running on /tmp/tmux-1000/default")
+		},
+	}
+	session := newTmuxSession("af_proj", "claude", NewMockPtyFactory(t), cmdExec)
+
+	require.NoError(t, session.SendKeysCommand("a prompt to an unreadable pane"),
+		"an unreadable pane is NOT evidence of a failed delivery; it must stay best-effort")
+}
+
 func captureRawPane(session *TmuxSession) (string, error) {
 	cmd := exec.Command("tmux", "capture-pane", "-p", "-t", exactTarget(session.sanitizedName))
 	out, err := session.cmdExec.Output(cmd)
@@ -327,4 +406,78 @@ func captureRawPane(session *TmuxSession) (string, error) {
 		return "", err
 	}
 	return string(out), nil
+}
+
+// withPasteDeliveryTiming overrides the delivery-poll knobs for a test and
+// returns a restore func for defer.
+func withPasteDeliveryTiming(maxWait, poll time.Duration) func() {
+	savedMax, savedPoll := pasteDeliveryMaxWait, pasteDeliveryPollInterval
+	pasteDeliveryMaxWait, pasteDeliveryPollInterval = maxWait, poll
+	return func() { pasteDeliveryMaxWait, pasteDeliveryPollInterval = savedMax, savedPoll }
+}
+
+// TestSubmitWaitsForPasteBeforeEnter is the #1982 regression: the submit path
+// must not send Enter until the pasted prompt has actually landed in the pane.
+// The old code slept a fixed 500ms and sent Enter blind, so an Enter that
+// overtook an as-yet-undrained bracketed paste was absorbed as a newline and the
+// prompt stranded in the composer, unsubmitted, while the send reported success.
+//
+// The mock models drain latency: capture-pane returns the pane WITHOUT the
+// pasted text for the first few polls, then WITH it. The test asserts (a) the
+// path actually polled capture-pane, and (b) `send-keys Enter` was issued only
+// AFTER a capture confirmed the text was present. Under the old blind-sleep code
+// there are zero capture-pane calls, so both assertions fail — it reproduces the
+// defect at the mechanism level (Enter sent without confirming delivery).
+func TestSubmitWaitsForPasteBeforeEnter(t *testing.T) {
+	defer withPasteDeliveryTiming(2*time.Second, time.Millisecond)()
+
+	const prompt = "deploy the staging build and report back DELIVERY_TAIL_OK"
+
+	var mu sync.Mutex
+	var loaded string
+	var captureCalls int
+	confirmedText := false         // a capture has returned the pasted text
+	enterSawConfirmedText := false // Enter was sent after such a capture
+	const revealAfter = 3          // captures before the text becomes visible
+
+	cmdExec := cmd_test.MockCmdExec{
+		RunFunc: func(c *exec.Cmd) error {
+			joined := strings.Join(c.Args, " ")
+			if strings.Contains(joined, "load-buffer") && c.Stdin != nil {
+				b, _ := io.ReadAll(c.Stdin)
+				mu.Lock()
+				loaded = string(b)
+				mu.Unlock()
+			}
+			if strings.Contains(joined, "send-keys") && strings.Contains(joined, "Enter") {
+				mu.Lock()
+				enterSawConfirmedText = confirmedText
+				mu.Unlock()
+			}
+			return nil
+		},
+		OutputFunc: func(c *exec.Cmd) ([]byte, error) {
+			mu.Lock()
+			defer mu.Unlock()
+			captureCalls++
+			// Withhold the pasted text for the first few polls (drain latency),
+			// then reveal it — inside a composer border box, to prove the tail is
+			// recognized through the framing.
+			if captureCalls <= revealAfter || loaded == "" {
+				return []byte("╭─ composer ─╮\n│ >          │\n╰────────────╯"), nil
+			}
+			confirmedText = true
+			return []byte("╭─ composer ────────────╮\n│ > " + loaded + " │\n╰───────────────────────╯"), nil
+		},
+	}
+
+	session := newTmuxSession("af_proj", "claude", NewMockPtyFactory(t), cmdExec)
+	require.NoError(t, session.SendKeysCommand(prompt))
+
+	mu.Lock()
+	defer mu.Unlock()
+	require.Greater(t, captureCalls, revealAfter,
+		"submit must poll capture-pane until the paste lands, not send Enter blind (#1982); got %d captures", captureCalls)
+	require.True(t, enterSawConfirmedText,
+		"Enter must be sent only AFTER a capture confirmed the pasted text is present (#1982)")
 }
