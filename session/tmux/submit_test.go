@@ -342,6 +342,63 @@ func TestPasteBufferNameProcessTokenPreventsCrossProcessCollision(t *testing.T) 
 	require.NotEmpty(t, pasteBufferProcessToken, "the process token must be resolved at startup")
 }
 
+// TestSubmitDoesNotManufactureAFailureWhenThePaneDoesNotEcho pins the reason
+// this package does NOT verify submission after Enter, so the idea is not
+// re-implemented from first principles later.
+//
+// The tempting post-submit check is "after Enter, the prompt should no longer be
+// the pane's trailing content". It is unsound, and three integration gates prove
+// it: a pane whose agent ECHOES the prompt back leaves exactly that shape on a
+// perfectly good delivery —
+//
+//	❯ hello-integration
+//	hello-integration        <- prompt text, trailing, AFTER a successful submit
+//
+// so the check condemns healthy sends of `af sessions send-prompt`. Telling that
+// apart from a real strand needs per-agent composer geometry, which this layer
+// cannot know.
+//
+// The same trap one step earlier: this pane never renders what it receives (the
+// #1956 receiver gate writes its bytes to a FILE while the screen only shows
+// AF-RECEIVER-READY). "Not echoed" is not "not delivered" — arrival and echo are
+// different facts, and any echo-off pane, a password prompt being the everyday
+// case, looks identical. So an unobserved paste is logged loudly and never
+// turned into an error.
+func TestSubmitDoesNotManufactureAFailureWhenThePaneDoesNotEcho(t *testing.T) {
+	defer withPasteDeliveryTiming(50*time.Millisecond, time.Millisecond)()
+
+	cmdExec := cmd_test.MockCmdExec{
+		RunFunc: func(c *exec.Cmd) error { return nil },
+		// A pane that never renders what it receives.
+		OutputFunc: func(c *exec.Cmd) ([]byte, error) { return []byte("AF-RECEIVER-READY"), nil },
+	}
+	session := newTmuxSession("af_proj", "claude", NewMockPtyFactory(t), cmdExec)
+
+	require.NoError(t, session.SendKeysCommand("a prompt to a pane that does not echo"),
+		"a non-echoing pane must NOT be reported as a failed delivery — the bytes still arrive")
+}
+
+// TestSubmitDoesNotManufactureAFailureWhenThePaneIsUnreadable is the polarity
+// guard for the capture itself. Every check here is a probe that can fail to
+// SEE, and a probe that cannot see must never manufacture a negative — the
+// failure mode this repo keeps re-learning. With capture-pane failing outright,
+// delivery is unverifiable, so the submit path must keep its best-effort
+// behaviour and report SUCCESS rather than invent a delivery failure.
+func TestSubmitDoesNotManufactureAFailureWhenThePaneIsUnreadable(t *testing.T) {
+	defer withPasteDeliveryTiming(50*time.Millisecond, time.Millisecond)()
+
+	cmdExec := cmd_test.MockCmdExec{
+		RunFunc: func(c *exec.Cmd) error { return nil },
+		OutputFunc: func(c *exec.Cmd) ([]byte, error) {
+			return nil, fmt.Errorf("no server running on /tmp/tmux-1000/default")
+		},
+	}
+	session := newTmuxSession("af_proj", "claude", NewMockPtyFactory(t), cmdExec)
+
+	require.NoError(t, session.SendKeysCommand("a prompt to an unreadable pane"),
+		"an unreadable pane is NOT evidence of a failed delivery; it must stay best-effort")
+}
+
 func captureRawPane(session *TmuxSession) (string, error) {
 	cmd := exec.Command("tmux", "capture-pane", "-p", "-t", exactTarget(session.sanitizedName))
 	out, err := session.cmdExec.Output(cmd)
