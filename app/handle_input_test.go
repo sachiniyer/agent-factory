@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -171,7 +172,14 @@ func TestStartNewInstanceSelectsNamingInstanceAfterSortedInsert(t *testing.T) {
 		"the #1350 BeginCreate chokepoint still fires exactly once when naming starts")
 }
 
-func TestStartNewRemoteWithoutHooksNoops(t *testing.T) {
+// TestStartNewRemoteWithoutHooksExplains is the #2020 regression guard. The menu
+// advertises `N new remote` as a peer of `n new`, but for a repo with no
+// remote_hooks — nearly every repo — N used to be a silent no-op: byte-identical
+// screen, no overlay, no error, no hint that remote sessions need setup. This
+// asserts the visible outcome, naming remote_hooks so the user knows what to
+// configure. It inverts the earlier TestStartNewRemoteWithoutHooksNoops, which
+// pinned the swallow as intended behavior.
+func TestStartNewRemoteWithoutHooksExplains(t *testing.T) {
 	repoDir := setupRealRepo(t)
 	t.Chdir(repoDir)
 
@@ -181,11 +189,37 @@ func TestStartNewRemoteWithoutHooksNoops(t *testing.T) {
 	model, cmd := h.startNewInstance(true)
 
 	require.Same(t, h, model)
-	require.Nil(t, cmd)
+	require.NotNil(t, cmd, "pressing an advertised key must produce a visible outcome, never a swallowed keypress")
+	// No session is created and no naming overlay opens — the refusal itself is
+	// unchanged; only its silence is.
 	assert.Equal(t, stateDefault, h.state)
 	assert.Nil(t, h.namingInstance)
 	assert.Equal(t, 0, h.store.NumInstances())
-	assert.Empty(t, h.errBox.FullError())
+
+	full := h.errBox.FullError()
+	assert.Contains(t, full, "remote_hooks", "the message must name the config the user has to add")
+	assert.Contains(t, full, "n for a local session", "the message must offer the action that does work here")
+}
+
+// TestStartNewRemoteWithoutHooksLeadsWithTheCause pins the ordering the #1973
+// clipping class forces: the transient notice is truncated to the terminal
+// width and the TAIL is what vanishes, so the cause has to arrive before the
+// guide URL rather than after it.
+func TestStartNewRemoteWithoutHooksLeadsWithTheCause(t *testing.T) {
+	repoDir := setupRealRepo(t)
+	t.Chdir(repoDir)
+
+	h := newTestHome(t)
+	h.errBox.SetSize(120, 1)
+
+	h.startNewInstance(true)
+
+	full := h.errBox.FullError()
+	cause := strings.Index(full, "remote_hooks")
+	url := strings.Index(full, "https://")
+	require.NotEqual(t, -1, cause)
+	require.NotEqual(t, -1, url)
+	assert.Less(t, cause, url, "the cause must survive width-clipping; the URL is the part that may be cut")
 }
 
 func TestStartNewRemoteInvalidHooksStillErrors(t *testing.T) {
