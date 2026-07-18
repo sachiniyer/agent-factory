@@ -126,29 +126,7 @@ jobs:
     - name: Bump version, commit, and tag
       env:
         NEW_VERSION: ${{ inputs.version }}
-      run: |
-        CURRENT=$(grep -oP 'version\s+=\s+"\K[^"]+' main.go)
-        echo "Current main.go version: $CURRENT, releasing: $NEW_VERSION"
-        sed -i "s/version     = \"${CURRENT}\"/version     = \"${NEW_VERSION}\"/" main.go
-
-        # Fail loudly if the substitution missed (e.g. formatting drift in
-        # main.go) instead of tagging a release with a stale embedded version.
-        if ! grep -q "version     = \"${NEW_VERSION}\"" main.go; then
-          echo "::error::Failed to update version in main.go"
-          exit 1
-        fi
-
-        git config user.name "github-actions[bot]"
-        git config user.email "github-actions[bot]@users.noreply.github.com"
-        git add main.go
-        # No-op when main.go already carries the version (e.g. re-running
-        # after a failure that landed the bump commit but not the tag).
-        if ! git diff --cached --quiet; then
-          git commit -m "chore: release v${NEW_VERSION}"
-        fi
-        git tag "v${NEW_VERSION}"
-        git push origin HEAD:master
-        git push origin "v${NEW_VERSION}"
+      run: .github/scripts/release-bump-and-tag.sh "$NEW_VERSION"
 
     # Immutable releases require all assets to be attached before the release
     # is published: create as draft, upload assets into the draft, then publish.
