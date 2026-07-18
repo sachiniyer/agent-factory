@@ -99,6 +99,21 @@ func SetDockerSelfBinaryForTest(path string) func() {
 	return func() { dockerSelfBinary = prev }
 }
 
+// dockerExec runs `docker <args...>` and returns its combined output. It is a
+// package-level seam (mirroring dockerSelfBinary / lookPath) so tests can drive
+// the runtime against a fake docker CLI — including the create-then-fail path
+// (#2008) — without a real daemon on the box. Production wraps exec.CommandContext.
+var dockerExec = func(ctx context.Context, args ...string) ([]byte, error) {
+	return exec.CommandContext(ctx, "docker", args...).CombinedOutput()
+}
+
+// SetDockerExecForTest overrides the docker CLI runner and returns a restore func.
+func SetDockerExecForTest(f func(ctx context.Context, args ...string) ([]byte, error)) func() {
+	prev := dockerExec
+	dockerExec = f
+	return func() { dockerExec = prev }
+}
+
 // dockerBanner mirrors daemon.AgentServerInfo field-for-field (the JSON the
 // `af agent-server` prints on startup). It is duplicated here rather than
 // imported because daemon imports session (a cycle); the shared contract is the
@@ -236,6 +251,18 @@ func (p *dockerProvisioner) runContainer() error {
 
 	out, err := p.docker(dockerProvisionStepTimeout, args...)
 	if err != nil {
+		// `docker run -d` can CREATE the container and print its id to stdout, then
+		// still exit non-zero when a later start step fails — a run_arg naming a
+		// nonexistent device/volume/network, `--gpus all` on a GPU-less host. The
+		// container is then left behind in `created` state. Capture the id off the
+		// combined output even on this error path and store it so the
+		// provision-failure reap in Provision (guarded on p.containerID != "") removes
+		// it instead of leaking it (#2008). This is the exec started-vs-succeeded
+		// rule: gate cleanup on the container having been CREATED, not on `docker run`
+		// exiting zero.
+		if id := parseCreatedContainerID(out); id != "" {
+			p.containerID = id
+		}
 		return fmt.Errorf("backend=docker: `docker run` failed for image %q: %s: %w", p.image, strings.TrimSpace(string(out)), err)
 	}
 	id := strings.TrimSpace(string(out))
@@ -403,7 +430,7 @@ func (p *dockerProvisioner) reap() error {
 func (p *dockerProvisioner) docker(timeout time.Duration, args ...string) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	return exec.CommandContext(ctx, "docker", args...).CombinedOutput()
+	return dockerExec(ctx, args...)
 }
 
 // execSh runs a `sh -c <script>` inside the container.
@@ -416,6 +443,37 @@ func (p *dockerProvisioner) shortID() string {
 		return p.containerID[:12]
 	}
 	return p.containerID
+}
+
+// parseCreatedContainerID extracts the container id `docker run -d` prints to
+// stdout the moment it CREATES the container — even when a later start step fails
+// and docker exits non-zero (a run_arg naming a nonexistent device/volume/network,
+// `--gpus all` on a GPU-less host). docker writes the 64-char id to stdout and the
+// start error to stderr, and CombinedOutput interleaves them — so a bare TrimSpace
+// of the whole blob can't be trusted on the error path, but a line that is nothing
+// but hex digits is unambiguously the id (docker's error lines carry words, spaces
+// and colons). Returns "" when no such line is present — docker failed before
+// creating anything — leaving containerID empty so nothing is reaped.
+func parseCreatedContainerID(out []byte) string {
+	for _, line := range strings.Split(string(out), "\n") {
+		line = strings.TrimSpace(line)
+		if len(line) >= 12 && isHexString(line) {
+			return line
+		}
+	}
+	return ""
+}
+
+// isHexString reports whether every rune of s is a hex digit. A full docker
+// container id is 64 lowercase hex chars; uppercase is accepted too so the match
+// never turns on docker's casing.
+func isHexString(s string) bool {
+	for _, r := range s {
+		if (r < '0' || r > '9') && (r < 'a' || r > 'f') && (r < 'A' || r > 'F') {
+			return false
+		}
+	}
+	return true
 }
 
 // parseDockerPort extracts the host port from `docker port` output. The output is
