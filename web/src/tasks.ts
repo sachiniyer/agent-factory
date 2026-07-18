@@ -21,6 +21,7 @@
 // picker's Custom type.
 
 import { asForm, field, h, modalChrome, type ModalHandle, projectLabel } from "./modals.js";
+import { PROGRAM_REPO_DEFAULT, type ProgramCatalog, type ProgramChoice, programChoices } from "./programs.js";
 import { SCHEDULE_TYPE_OPTIONS, type Schedule, type ScheduleType, cron as scheduleCron, describe as scheduleDescribe, parseCron } from "./schedule.js";
 import type { TaskData } from "./types.js";
 
@@ -586,6 +587,10 @@ function taskFormModal(opts: {
   defaultProject: string | null;
   /** Present only in edit mode: the task whose current values seed the form. */
   seed?: TaskData;
+  /** Fetches the agent catalog for a project (#1970). Passed in rather than
+   *  imported so this module stays free of the API/token layer, and re-run on every
+   *  project change: the program a repo defaults to is a per-repo fact. */
+  loadPrograms: (repoPath: string) => Promise<ProgramCatalog>;
   onSubmit: (input: AddTaskInput) => void;
   onCancel: () => void;
 }): ModalHandle {
@@ -656,17 +661,56 @@ function taskFormModal(opts: {
   const targetInput = h("input", { type: "text", class: "af-input", placeholder: "Target session (optional)", autocomplete: "off" });
   targetInput.setAttribute("aria-label", "Target session");
 
+  // The program field (#1970). Its options come from the daemon, never from a list
+  // here, so an agent added server-side shows up with no change to the web.
   const programSelect = h("select", { class: "af-input" });
   programSelect.setAttribute("aria-label", "Program");
-  programSelect.append(h("option", { value: "" }, "Repo default"));
-  for (const prog of ["claude", "codex", "aider", "gemini", "amp", "opencode"]) {
-    programSelect.append(h("option", { value: prog }, prog));
-  }
+
+  // A program the catalog doesn't list (e.g. one set via the CLI, or one retired
+  // since the task was written) is carried through as a choice so an unrelated edit
+  // never silently resets it to the repo default — programChoices appends it last.
+  const keepProgram = opts.seed?.program ?? "";
+  let programs: ProgramChoice[] = programChoices(null, keepProgram);
+
+  const renderPrograms = (): void => {
+    const previous = programSelect.value;
+    programSelect.replaceChildren();
+    for (const choice of programs) {
+      programSelect.append(h("option", { value: choice.value }, choice.label));
+    }
+    programSelect.value = programs.some((c) => c.value === previous) ? previous : PROGRAM_REPO_DEFAULT;
+  };
+  renderPrograms();
+
+  // A per-load token: a slow catalog for the project the user just left must not
+  // overwrite the choices for the one they just picked.
+  let programSeq = 0;
+  const loadProgramsFor = (repoPath: string): void => {
+    const seq = ++programSeq;
+    void opts
+      .loadPrograms(repoPath)
+      .then((catalog) => {
+        if (seq !== programSeq) {
+          return;
+        }
+        programs = programChoices(catalog, keepProgram);
+        renderPrograms();
+      })
+      .catch(() => {
+        if (seq !== programSeq) {
+          return;
+        }
+        // Degrade to "repo default" (plus any seeded program) — an unreachable
+        // catalog costs the user the choice, never the task.
+        programs = programChoices(null, keepProgram);
+        renderPrograms();
+      });
+  };
+  projectSelect.addEventListener("change", () => loadProgramsFor(projectSelect.value));
 
   // Seed every field from the existing task (edit mode). The trigger picker follows
   // whichever of watch_cmd / cron_expr the task carries, and its field visibility is
-  // synced to match. A program the picker doesn't list (e.g. one set via the CLI) is
-  // appended first so an unrelated edit never silently resets it to the repo default.
+  // synced to match.
   if (opts.seed) {
     const s = opts.seed;
     nameInput.value = s.name ?? "";
@@ -679,11 +723,12 @@ function taskFormModal(opts: {
     syncTriggerFields();
     promptArea.value = s.prompt ?? "";
     targetInput.value = s.target_session ?? "";
-    if (s.program && ![...programSelect.options].some((o) => o.value === s.program)) {
-      programSelect.append(h("option", { value: s.program }, s.program));
-    }
     programSelect.value = s.program ?? "";
   }
+
+  // Kicked off after the seed so the catalog's re-render preserves the seeded
+  // program as the current selection rather than clobbering it with the default.
+  loadProgramsFor(projectSelect.value);
 
   body.append(
     field("Name", nameInput),
@@ -745,13 +790,18 @@ function taskFormModal(opts: {
 export function addTaskModal(
   projects: string[],
   defaultProject: string | null,
-  callbacks: { onSubmit: (input: AddTaskInput) => void; onCancel: () => void },
+  callbacks: {
+    onSubmit: (input: AddTaskInput) => void;
+    onCancel: () => void;
+    loadPrograms: (repoPath: string) => Promise<ProgramCatalog>;
+  },
 ): ModalHandle {
   return taskFormModal({
     title: "Add task",
     confirmLabel: "Add",
     projects,
     defaultProject,
+    loadPrograms: callbacks.loadPrograms,
     onSubmit: callbacks.onSubmit,
     onCancel: callbacks.onCancel,
   });
@@ -763,7 +813,11 @@ export function addTaskModal(
 export function editTaskModal(
   projects: string[],
   task: TaskData,
-  callbacks: { onSubmit: (input: AddTaskInput) => void; onCancel: () => void },
+  callbacks: {
+    onSubmit: (input: AddTaskInput) => void;
+    onCancel: () => void;
+    loadPrograms: (repoPath: string) => Promise<ProgramCatalog>;
+  },
 ): ModalHandle {
   return taskFormModal({
     title: "Edit task",
@@ -771,6 +825,7 @@ export function editTaskModal(
     projects,
     defaultProject: task.project_path,
     seed: task,
+    loadPrograms: callbacks.loadPrograms,
     onSubmit: callbacks.onSubmit,
     onCancel: callbacks.onCancel,
   });

@@ -20,6 +20,7 @@ package parity
 
 import (
 	"fmt"
+	"os"
 	"sort"
 	"strings"
 	"testing"
@@ -93,7 +94,21 @@ func TestAuditCoverageReport(t *testing.T) {
 	webFiles := webSourceFiles(t)
 	c.count("web.source-files", len(webFiles))
 	c.count("web.rpcs", len(deriveWebRPCs(t)))
-	c.count("web.enum-sites", len(webHardcodedProgramSites(t)))
+	// Hardcoded copies of the agent enum, which #1970 removed by serving it. This is
+	// now expected to be ZERO, so unlike the other counts it carries no floor — a
+	// floor here would demand the bug exist. The anti-vacuous guarantee moved into
+	// TestAgentEnumDetectorIsNotVacuous, which proves every run that the detector can
+	// still SEE a copy; without that, a zero here would be indistinguishable from a
+	// blind check.
+	webEnumCopies := 0
+	for _, path := range webFiles {
+		b, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		webEnumCopies += len(hardcodedAgentEnums(string(b)))
+	}
+	c.count("web.hardcoded-enum-sites", webEnumCopies)
 
 	// --- Go surfaces: request construction ---------------------------------
 	for _, surface := range []string{"cli", "tui"} {
@@ -164,7 +179,7 @@ func TestAuditCoverageReport(t *testing.T) {
 	floors := map[string]int{
 		"cli.verbs": 40, "cli.flags": 100, "daemon.public-routes": 15,
 		"tui.bindings": 40, "web.source-files": 15, "web.rpcs": 10,
-		"web.enum-sites": 2, "go.cli.request-sites": 8, "go.tui.request-sites": 8,
+		"go.cli.request-sites": 8, "go.tui.request-sites": 8,
 		"cli.noun-groups": 5, "inventory.capabilities": 50,
 	}
 	for kind, floor := range floors {

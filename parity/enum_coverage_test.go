@@ -6,23 +6,29 @@ package parity
 // surface do X?"; the field check asks "with which options?"; neither asks
 // "and does it offer the same VALUES?".
 //
-// That gap is live. web/src/modals.ts:173 hardcodes
-// ["claude","codex","aider","gemini","amp"] while session/tmux/session.go:22
-// owns the canonical list — and the TUI (app/handle_input.go:121) and CLI
-// (commands/root.go:246) both read the canonical one. Every existing check
-// passes: the web DOES send `program`, so field coverage calls it covered. Add a
-// sixth agent server-side and the web silently never offers it, with the whole
-// suite green.
+// That gap WAS live. web/src/modals.ts and web/src/tasks.ts each hardcoded a copy
+// of the agent list while session/tmux/session.go owns the canonical one, and the
+// TUI (app/handle_input.go) and CLI (commands/root.go) both read the canonical one.
+// Every other check passed: the web DOES send `program`, so field coverage called
+// it covered. Add a sixth agent server-side and the web silently never offers it,
+// with the whole suite green.
 //
-// It is the #1933 shape one level down — a surface quietly serving a stale copy
-// of something the daemon owns — so it gets the same treatment: derive both
-// sides and compare, rather than trusting a copy to stay in step.
+// #1970 closed it structurally: the daemon SERVES the enum (POST /v1/ListPrograms,
+// daemon/programs.go) and the web renders the response (web/src/programs.ts). There
+// is no copy left to drift.
 //
-// The fix for the underlying hazard is to serve the enum instead of copying it
-// (the ListBackends pattern from #1968, tracked separately). Until that lands,
-// this check makes the drift loud instead of silent.
+// So this file's job INVERTED. It used to assert "the copy is current" — a
+// mitigation that let the copy exist as long as someone remembered to sync it. It
+// now asserts the stronger thing: THERE IS NO COPY. A re-introduced hardcoded agent
+// list is the bug itself, not a list to check, and it fails here the moment it
+// appears rather than the day someone adds a seventh agent.
+//
+// Keeping a check here at all is deliberate. "Serve the enum" is a property of the
+// code that nothing in the type system enforces: a future picker can hand-type six
+// strings and work perfectly, today, exactly as these two did.
 
 import (
+	"fmt"
 	"os"
 	"regexp"
 	"sort"
@@ -32,97 +38,220 @@ import (
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
-// webProgramListRe matches the hardcoded agent list in the new-session modal:
+// quotedArrayRe matches a bracketed run of quoted strings — the shape any
+// hardcoded enum copy takes, whatever it is assigned to:
 //
-//	for (const prog of ["claude", "codex", …]) {
+//	["claude", "codex", …]
 //
-// Anchored on `const prog of [` rather than a bare array so an unrelated string
-// array cannot be mistaken for it. If the modal is rewritten (or, better, starts
-// rendering a served list), this stops matching and the test says so instead of
-// passing on an empty set.
-var webProgramListRe = regexp.MustCompile(`const\s+prog\s+of\s+\[([^\]]*)\]`)
+// Deliberately NOT anchored on the old `const prog of [` form. That anchor was the
+// weakness of the previous check: it recognized one spelling of the mistake, so a
+// copy stored in a const, a default parameter, or a Set would have slipped past
+// while the audit reported green.
+var quotedArrayRe = regexp.MustCompile(`\[((?:\s*"[^"\n]*"\s*,?)+)\s*\]`)
 
-var quotedRe = regexp.MustCompile(`"([^"]+)"`)
+var quotedRe = regexp.MustCompile(`"([^"]*)"`)
 
-// programListSite is one hardcoded copy of the agent enum in the web client.
-type programListSite struct {
-	File     string
-	Programs []string
+// stripComments blanks out TS comments so a PROSE mention of the old hardcoded
+// list — including the one at the top of web/src/programs.ts, which quotes it to
+// explain what was removed — is not mistaken for the list itself.
+//
+// It tracks string and template literals rather than blindly cutting at the first
+// `//`, because a URL inside a string ("https://…") would otherwise truncate the
+// rest of the line and hide a real copy sitting after it. Under-covering while
+// reporting green is the failure this whole file exists to prevent, so the scanner
+// errs toward scanning too much rather than too little.
+func stripComments(src string) string {
+	var out strings.Builder
+	out.Grow(len(src))
+
+	const (
+		code = iota
+		lineComment
+		blockComment
+		str
+	)
+	state := code
+	var quote byte
+	var escaped bool
+
+	for i := 0; i < len(src); i++ {
+		c := src[i]
+		switch state {
+		case code:
+			switch {
+			case c == '/' && i+1 < len(src) && src[i+1] == '/':
+				state = lineComment
+				i++
+			case c == '/' && i+1 < len(src) && src[i+1] == '*':
+				state = blockComment
+				i++
+			case c == '"' || c == '\'' || c == '`':
+				state, quote, escaped = str, c, false
+				out.WriteByte(c)
+			default:
+				out.WriteByte(c)
+			}
+		case lineComment:
+			if c == '\n' {
+				state = code
+				out.WriteByte(c)
+			}
+		case blockComment:
+			if c == '*' && i+1 < len(src) && src[i+1] == '/' {
+				state = code
+				i++
+			} else if c == '\n' {
+				// Keep newlines so reported positions stay meaningful.
+				out.WriteByte(c)
+			}
+		case str:
+			out.WriteByte(c)
+			switch {
+			case escaped:
+				escaped = false
+			case c == '\\':
+				escaped = true
+			case c == quote:
+				state = code
+			}
+		}
+	}
+	return out.String()
 }
 
-// webHardcodedProgramSites finds EVERY hardcoded agent list in the web client,
-// not just the new-session modal's.
+// hardcodedAgentEnums returns every array literal in src that lists two or more
+// canonical agent names — the signature of a copied enum.
 //
-// There are two today — web/src/modals.ts:173 (new session) and
-// web/src/tasks.ts:270 (the task form's program picker) — and checking one would
-// leave the other free to drift while the audit reported green. That is the
-// audit under-covering, which is worse than not auditing: it asserts parity over
-// a selector it never opened. Any future copy is picked up automatically.
-func webHardcodedProgramSites(t *testing.T) []programListSite {
-	t.Helper()
-	var out []programListSite
+// TWO is the threshold, not one. A single agent name in an array is ordinary and
+// legitimate (a default, a one-off fixture, an agent-specific branch); two or more
+// together is a list of agents, which is the thing the daemon now owns. Naming the
+// threshold here rather than leaving it implicit matters, because it is exactly the
+// line between "this check under-covers" and "this check false-fires".
+func hardcodedAgentEnums(src string) []string {
+	canonical := map[string]bool{}
+	for _, p := range tmux.SupportedPrograms {
+		canonical[p] = true
+	}
+
+	var found []string
+	for _, m := range quotedArrayRe.FindAllStringSubmatch(stripComments(src), -1) {
+		var hits []string
+		for _, q := range quotedRe.FindAllStringSubmatch(m[1], -1) {
+			if canonical[q[1]] {
+				hits = append(hits, q[1])
+			}
+		}
+		if len(hits) >= 2 {
+			sort.Strings(hits)
+			found = append(found, strings.Join(hits, ","))
+		}
+	}
+	return found
+}
+
+// TestWebHardcodesNoAgentEnum is the #1970 acceptance criterion as a test: adding
+// an agent server-side must reach the web with NO edit under web/src.
+//
+// It proves that by proving the only thing that could break it is absent — a local
+// list of agent names. The web's pickers build their options from ListPrograms
+// (web/src/programs.ts), so the enum has exactly one owner.
+//
+// Test files are excluded (webSourceFiles already skips *.test.ts) and that
+// exclusion is intentional, not an oversight: a test naming several agents is how
+// you verify the serving path works — web/src/programs.test.ts hands programChoices
+// a fake catalog full of agent names on purpose. Production code is where a name
+// must not appear.
+func TestWebHardcodesNoAgentEnum(t *testing.T) {
+	if len(tmux.SupportedPrograms) < 2 {
+		t.Fatalf("tmux.SupportedPrograms has %d entries — this check cannot detect a copy of a list that short", len(tmux.SupportedPrograms))
+	}
+
 	for _, path := range webSourceFiles(t) {
 		b, err := os.ReadFile(path)
 		if err != nil {
 			t.Fatalf("read %s: %v", path, err)
 		}
-		for _, m := range webProgramListRe.FindAllStringSubmatch(string(b), -1) {
-			var progs []string
-			for _, q := range quotedRe.FindAllStringSubmatch(m[1], -1) {
-				progs = append(progs, q[1])
-			}
-			if len(progs) == 0 {
-				t.Errorf("%s: matched a program-list site but parsed zero values — the parser "+
-					"is blind on it", relSite(t, path))
-				continue
-			}
-			sort.Strings(progs)
-			out = append(out, programListSite{File: relSite(t, path), Programs: progs})
+		for _, hit := range hardcodedAgentEnums(string(b)) {
+			t.Errorf("%s hardcodes a copy of the agent enum: [%s]\n\n"+
+				"The daemon owns this list (session/tmux/session.go) and serves it over "+
+				"POST /v1/ListPrograms (daemon/programs.go). A copy here works perfectly "+
+				"today and silently omits the NEXT agent someone adds, with every test "+
+				"green — that is the #1970 bug, which this copy would reintroduce.\n\n"+
+				"Build the options from the served catalog instead: programChoices() in "+
+				"web/src/programs.ts, as web/src/modals.ts and web/src/tasks.ts do.",
+				relSite(t, path), hit)
 		}
 	}
-	if len(out) < minProgramListSites {
-		t.Fatalf("found %d hardcoded program-list sites in web/src (expected >= %d).\n\n"+
-			"If the web now renders a list SERVED by the daemon, that is the fix (#1970) — "+
-			"delete this check and flip enum.agent-programs to parity in parity/inventory.json. "+
-			"If the sites were merely restructured, fix webProgramListRe: leaving it unmatched "+
-			"would make the enum drift silent again, which is the whole failure this guards.",
-			len(out), minProgramListSites)
-	}
-	return out
 }
 
-// minProgramListSites guards against a vacuous pass. Two copies exist today
-// (modals.ts, tasks.ts); if the regex stops matching them the check must fail
-// loudly rather than conclude the web hardcodes nothing.
-const minProgramListSites = 2
-
-// TestWebProgramEnumMatchesWire fails when the web's hardcoded agent list drifts
-// from the canonical one.
+// TestAgentEnumDetectorIsNotVacuous is the guard on the guard.
 //
-// This is deliberately NOT a "the web should serve this" assertion — that is
-// enum.agent-programs' verdict to carry. It is the narrower, mechanical claim
-// the copy makes implicitly and cannot keep on its own: that the copy is
-// current.
-func TestWebProgramEnumMatchesWire(t *testing.T) {
-	canonical := append([]string(nil), tmux.SupportedPrograms...)
-	sort.Strings(canonical)
-	if len(canonical) == 0 {
-		t.Fatal("tmux.SupportedPrograms is empty — the canonical source is unreadable")
-	}
+// A negative check ("no copies exist") passes just as green when it has silently
+// stopped being able to SEE a copy — a refactor, a new quoting style, a regex that
+// no longer matches. That failure mode is worse than no check, because it reports
+// coverage it does not have. So the detector is made to fire on a synthetic copy,
+// in several shapes, every run.
+func TestAgentEnumDetectorIsNotVacuous(t *testing.T) {
+	first, second := tmux.SupportedPrograms[0], tmux.SupportedPrograms[1]
 
-	for _, site := range webHardcodedProgramSites(t) {
-		if strings.Join(site.Programs, ",") == strings.Join(canonical, ",") {
-			continue
-		}
-		t.Errorf("the web's agent list has drifted from tmux.SupportedPrograms.\n"+
-			"  canonical (session/tmux/session.go:22): %v\n"+
-			"  web       (%s):                         %v\n"+
-			"  never offered by the web: %v\n"+
-			"  offered by the web but unknown to af: %v\n\n"+
-			"The web hardcodes a COPY of an enum the daemon owns, so adding an agent "+
-			"server-side silently leaves the web unable to offer it. Sync every site to "+
-			"unblock, but the real fix is to serve it (the ListBackends pattern) — see "+
-			"enum.agent-programs in parity/inventory.json (#1970).",
-			canonical, site.File, site.Programs, diff(canonical, site.Programs), diff(site.Programs, canonical))
+	for _, tc := range []struct {
+		name string
+		src  string
+	}{
+		{"the for-of loop this check originally caught", fmt.Sprintf(`for (const p of [%q, %q]) {}`, first, second)},
+		{"a const, which the old anchored regex missed", fmt.Sprintf(`const AGENTS = [%q, %q];`, first, second)},
+		{"a Set, likewise", fmt.Sprintf(`const AGENTS = new Set([%q, %q]);`, first, second)},
+		{"a default parameter", fmt.Sprintf(`function f(agents = [%q, %q]) {}`, first, second)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := hardcodedAgentEnums(tc.src); len(got) == 0 {
+				t.Errorf("the detector did not fire on a hardcoded copy: %s\n\n"+
+					"TestWebHardcodesNoAgentEnum is therefore passing without being able to "+
+					"see the thing it checks for. Fix quotedArrayRe/stripComments rather than "+
+					"this test — a blind check is how the enum drift went silent the first time.",
+					tc.src)
+			}
+		})
+	}
+}
+
+// TestAgentEnumDetectorIgnoresProseAndSingletons pins the other half: the check
+// must not false-fire, or the next person deletes it.
+//
+// The comment case is load-bearing and not hypothetical — web/src/programs.ts opens
+// by quoting the exact array it replaced, to explain what was removed and why.
+func TestAgentEnumDetectorIgnoresProseAndSingletons(t *testing.T) {
+	first, second := tmux.SupportedPrograms[0], tmux.SupportedPrograms[1]
+
+	for _, tc := range []struct {
+		name string
+		src  string
+	}{
+		{"a line comment describing the removed list", fmt.Sprintf(`// the web used to hardcode [%q, %q] here`, first, second)},
+		{"a block comment doing the same", fmt.Sprintf("/* it hardcoded [%q, %q] */", first, second)},
+		{"a single agent name, which is not a list", fmt.Sprintf(`const fallback = [%q];`, first)},
+		{"an unrelated string array", `const modes = ["light", "dark"];`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := hardcodedAgentEnums(tc.src); len(got) != 0 {
+				t.Errorf("the detector false-fired on %s: %v\nsource: %s", tc.name, got, tc.src)
+			}
+		})
+	}
+}
+
+// TestStripCommentsDoesNotTruncateAtAURL is the regression for the naive
+// implementation of stripComments — cutting each line at the first "//".
+//
+// A URL inside a string literal contains "//", so a naive strip would discard the
+// rest of that line, and a hardcoded enum sitting after it would become invisible.
+// The check would report green while blind, which is precisely the failure
+// TestAgentEnumDetectorIsNotVacuous exists to catch and this one localizes.
+func TestStripCommentsDoesNotTruncateAtAURL(t *testing.T) {
+	first, second := tmux.SupportedPrograms[0], tmux.SupportedPrograms[1]
+	src := fmt.Sprintf(`const docs = "https://example.invalid/agents"; const AGENTS = [%q, %q];`, first, second)
+
+	if got := hardcodedAgentEnums(src); len(got) == 0 {
+		t.Errorf("a copy after a URL string was not seen — stripComments truncated the line at the URL's //\nsource: %s", src)
 	}
 }

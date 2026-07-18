@@ -18,6 +18,7 @@
 
 import type { CreateSessionInput } from "./api.js";
 import { type BackendCatalog, type BackendChoice, REPO_DEFAULT, backendChoices, backendNotice, backendSelectable } from "./backends.js";
+import { PROGRAM_REPO_DEFAULT, type ProgramCatalog, type ProgramChoice, programChoices } from "./programs.js";
 
 /** A live modal: its root element plus in-place patch controls index.ts drives
  *  around the async submit. close() removes it from the DOM. */
@@ -136,12 +137,13 @@ export function asForm(card: HTMLElement, onSubmit: () => void): void {
  *  (like the TUI's zero-config picker). onSubmit fires with the collected form
  *  values.
  *
- *  loadBackends fetches the picked project's backend catalog (#1933). It is passed
- *  in rather than imported so this module stays free of the API/token layer, and is
- *  re-run whenever the project changes: availability and the default are per-repo
- *  facts, so the choices must follow the project picker. If it rejects, the backend
- *  field degrades to "repo default" alone — the exact behavior before this field
- *  existed, so a catalog failure can never block a create. */
+ *  loadBackends fetches the picked project's backend catalog (#1933), and
+ *  loadPrograms the agent catalog (#1970). Both are passed in rather than imported
+ *  so this module stays free of the API/token layer, and both are re-run whenever
+ *  the project changes: each catalog's default is a per-repo fact, so the choices
+ *  must follow the project picker. If either rejects, its field degrades to "repo
+ *  default" alone — the exact behavior before these fields existed, so a catalog
+ *  failure can never block a create. */
 export function newSessionModal(
   projects: string[],
   defaultProject: string | null,
@@ -149,6 +151,7 @@ export function newSessionModal(
     onSubmit: (values: CreateSessionInput) => void;
     onCancel: () => void;
     loadBackends: (repoPath: string) => Promise<BackendCatalog>;
+    loadPrograms: (repoPath: string) => Promise<ProgramCatalog>;
   },
 ): ModalHandle {
   const { handle, body, confirmBtn } = modalChrome({
@@ -180,12 +183,12 @@ export function newSessionModal(
     }
   }
 
+  // The program field (#1970). Like the backend field below, its options come from
+  // the daemon, never from a list here, so an agent added server-side shows up with
+  // no change to the web.
   const programSelect = h("select", { class: "af-input" });
   programSelect.setAttribute("aria-label", "Program");
-  programSelect.append(h("option", { value: "" }, "Repo default"));
-  for (const prog of ["claude", "codex", "aider", "gemini", "amp", "opencode"]) {
-    programSelect.append(h("option", { value: prog }, prog));
-  }
+  let programs: ProgramChoice[] = programChoices(null);
 
   // The backend field (#1933). Its options come from the daemon, never from a list
   // here, so a backend added server-side shows up with no change to the web.
@@ -238,11 +241,47 @@ export function newSessionModal(
 
   backendSelect.addEventListener("change", syncSubmitState);
 
+  const renderPrograms = (): void => {
+    const previous = programSelect.value;
+    programSelect.replaceChildren();
+    for (const choice of programs) {
+      programSelect.append(h("option", { value: choice.value }, choice.label));
+    }
+    // Same rule as the backend picker: keep the user's pick across a project switch
+    // when it is still offered, else fall back to the repo default, which always is.
+    programSelect.value = programs.some((c) => c.value === previous) ? previous : PROGRAM_REPO_DEFAULT;
+  };
+
   // A per-load token: a slow catalog for the project the user just left must not
-  // overwrite the choices for the one they just picked.
+  // overwrite the choices for the one they just picked. Shared by both catalogs —
+  // they are fetched together and are both per-project facts, so one token orders
+  // them consistently.
   let loadSeq = 0;
-  const loadBackendsFor = (repoPath: string): void => {
+  const loadCatalogsFor = (repoPath: string): void => {
     const seq = ++loadSeq;
+
+    // The program enum is global, so this is asked even with no project picked —
+    // repoPath only sharpens which agent "repo default" resolves to.
+    void callbacks
+      .loadPrograms(repoPath)
+      .then((catalog) => {
+        if (seq !== loadSeq) {
+          return;
+        }
+        programs = programChoices(catalog);
+        renderPrograms();
+      })
+      .catch(() => {
+        if (seq !== loadSeq) {
+          return;
+        }
+        // Degrade to "repo default" only — the same contract as the backend field:
+        // an unreachable catalog costs the user the choice, never the session, since
+        // sending no program is exactly what "repo default" means on the wire.
+        programs = programChoices(null);
+        renderPrograms();
+      });
+
     if (repoPath === "") {
       choices = backendChoices(null);
       renderChoices();
@@ -268,7 +307,7 @@ export function newSessionModal(
       });
   };
 
-  projectSelect.addEventListener("change", () => loadBackendsFor(projectSelect.value));
+  projectSelect.addEventListener("change", () => loadCatalogsFor(projectSelect.value));
 
   const promptArea = h("textarea", { class: "af-input af-textarea", placeholder: "Initial prompt (optional)", rows: 3 });
   promptArea.setAttribute("aria-label", "Initial prompt");
@@ -286,8 +325,9 @@ export function newSessionModal(
     autoYesRow,
   );
 
+  renderPrograms();
   renderChoices();
-  loadBackendsFor(projectSelect.value);
+  loadCatalogsFor(projectSelect.value);
 
   const card = handle.el.firstElementChild as HTMLElement;
   asForm(card, () => {

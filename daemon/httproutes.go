@@ -67,6 +67,13 @@ var httpRoutes = []HTTPRoute{
 	},
 	{
 		Method:        http.MethodPost,
+		Path:          "/v1/ListPrograms",
+		Description:   "List the agent programs a session can be created with, and the program an unspecified create defaults to.",
+		RequestFields: jsonFields(reflect.TypeOf(ListProgramsRequest{})),
+		handler:       func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.ListPrograms) },
+	},
+	{
+		Method:        http.MethodPost,
 		Path:          "/v1/Snapshot",
 		Description:   "List sessions from the daemon's authoritative in-memory state (empty repo_id = all repos).",
 		RequestFields: jsonFields(reflect.TypeOf(SnapshotRequest{})),

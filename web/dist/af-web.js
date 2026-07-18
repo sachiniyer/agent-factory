@@ -6226,6 +6226,9 @@ async function probeAuthRequired() {
 async function listBackends(repoPath, token2) {
   return af("ListBackends", { repo_path: repoPath }, token2);
 }
+async function listPrograms(repoPath, token2) {
+  return af("ListPrograms", { repo_path: repoPath }, token2);
+}
 async function createSession(input, token2) {
   const body = {
     title_base: input.title,
@@ -6396,6 +6399,27 @@ function backendSelectable(choices, selected) {
   return choice === void 0 || choice.status === "available";
 }
 
+// src/programs.ts
+var PROGRAM_REPO_DEFAULT = "";
+function programChoices(catalog, keep = "") {
+  const choices = [
+    {
+      value: PROGRAM_REPO_DEFAULT,
+      // "Repo default" with no parenthetical when the daemon reports no default —
+      // naming an agent there would be inventing one.
+      label: catalog === null || catalog.default === "" ? "Repo default" : `Repo default (${catalog.default})`
+    }
+  ];
+  for (const opt of catalog?.programs ?? []) {
+    choices.push({ value: opt.name, label: opt.name });
+  }
+  const extra = keep.trim();
+  if (extra !== "" && !choices.some((c) => c.value === extra)) {
+    choices.push({ value: extra, label: extra });
+  }
+  return choices;
+}
+
 // src/modals.ts
 function h(tag, props = {}, ...children) {
   const el2 = document.createElement(tag);
@@ -6492,10 +6516,7 @@ function newSessionModal(projects, defaultProject2, callbacks) {
   }
   const programSelect = h("select", { class: "af-input" });
   programSelect.setAttribute("aria-label", "Program");
-  programSelect.append(h("option", { value: "" }, "Repo default"));
-  for (const prog of ["claude", "codex", "aider", "gemini", "amp", "opencode"]) {
-    programSelect.append(h("option", { value: prog }, prog));
-  }
+  let programs = programChoices(null);
   const backendSelect = h("select", { class: "af-input" });
   backendSelect.setAttribute("aria-label", "Backend");
   const backendHint = h("p", { class: "af-modal-hint" });
@@ -6522,9 +6543,30 @@ function newSessionModal(projects, defaultProject2, callbacks) {
     syncSubmitState();
   };
   backendSelect.addEventListener("change", syncSubmitState);
+  const renderPrograms = () => {
+    const previous = programSelect.value;
+    programSelect.replaceChildren();
+    for (const choice of programs) {
+      programSelect.append(h("option", { value: choice.value }, choice.label));
+    }
+    programSelect.value = programs.some((c) => c.value === previous) ? previous : PROGRAM_REPO_DEFAULT;
+  };
   let loadSeq = 0;
-  const loadBackendsFor = (repoPath) => {
+  const loadCatalogsFor = (repoPath) => {
     const seq = ++loadSeq;
+    void callbacks.loadPrograms(repoPath).then((catalog) => {
+      if (seq !== loadSeq) {
+        return;
+      }
+      programs = programChoices(catalog);
+      renderPrograms();
+    }).catch(() => {
+      if (seq !== loadSeq) {
+        return;
+      }
+      programs = programChoices(null);
+      renderPrograms();
+    });
     if (repoPath === "") {
       choices = backendChoices(null);
       renderChoices();
@@ -6544,7 +6586,7 @@ function newSessionModal(projects, defaultProject2, callbacks) {
       renderChoices();
     });
   };
-  projectSelect.addEventListener("change", () => loadBackendsFor(projectSelect.value));
+  projectSelect.addEventListener("change", () => loadCatalogsFor(projectSelect.value));
   const promptArea = h("textarea", { class: "af-input af-textarea", placeholder: "Initial prompt (optional)", rows: 3 });
   promptArea.setAttribute("aria-label", "Initial prompt");
   const autoYes = h("input", { type: "checkbox", id: "af-autoyes" });
@@ -6558,8 +6600,9 @@ function newSessionModal(projects, defaultProject2, callbacks) {
     field("Prompt", promptArea),
     autoYesRow
   );
+  renderPrograms();
   renderChoices();
-  loadBackendsFor(projectSelect.value);
+  loadCatalogsFor(projectSelect.value);
   const card = handle.el.firstElementChild;
   asForm(card, () => {
     const title = titleInput.value.trim();
@@ -10059,10 +10102,35 @@ function taskFormModal(opts) {
   targetInput.setAttribute("aria-label", "Target session");
   const programSelect = h("select", { class: "af-input" });
   programSelect.setAttribute("aria-label", "Program");
-  programSelect.append(h("option", { value: "" }, "Repo default"));
-  for (const prog of ["claude", "codex", "aider", "gemini", "amp", "opencode"]) {
-    programSelect.append(h("option", { value: prog }, prog));
-  }
+  const keepProgram = opts.seed?.program ?? "";
+  let programs = programChoices(null, keepProgram);
+  const renderPrograms = () => {
+    const previous = programSelect.value;
+    programSelect.replaceChildren();
+    for (const choice of programs) {
+      programSelect.append(h("option", { value: choice.value }, choice.label));
+    }
+    programSelect.value = programs.some((c) => c.value === previous) ? previous : PROGRAM_REPO_DEFAULT;
+  };
+  renderPrograms();
+  let programSeq = 0;
+  const loadProgramsFor = (repoPath) => {
+    const seq = ++programSeq;
+    void opts.loadPrograms(repoPath).then((catalog) => {
+      if (seq !== programSeq) {
+        return;
+      }
+      programs = programChoices(catalog, keepProgram);
+      renderPrograms();
+    }).catch(() => {
+      if (seq !== programSeq) {
+        return;
+      }
+      programs = programChoices(null, keepProgram);
+      renderPrograms();
+    });
+  };
+  projectSelect.addEventListener("change", () => loadProgramsFor(projectSelect.value));
   if (opts.seed) {
     const s = opts.seed;
     nameInput.value = s.name ?? "";
@@ -10073,11 +10141,9 @@ function taskFormModal(opts) {
     syncTriggerFields();
     promptArea.value = s.prompt ?? "";
     targetInput.value = s.target_session ?? "";
-    if (s.program && ![...programSelect.options].some((o) => o.value === s.program)) {
-      programSelect.append(h("option", { value: s.program }, s.program));
-    }
     programSelect.value = s.program ?? "";
   }
+  loadProgramsFor(projectSelect.value);
   body.append(
     field("Name", nameInput),
     field("Project", projectSelect),
@@ -10133,6 +10199,7 @@ function addTaskModal(projects, defaultProject2, callbacks) {
     confirmLabel: "Add",
     projects,
     defaultProject: defaultProject2,
+    loadPrograms: callbacks.loadPrograms,
     onSubmit: callbacks.onSubmit,
     onCancel: callbacks.onCancel
   });
@@ -10144,6 +10211,7 @@ function editTaskModal(projects, task, callbacks) {
     projects,
     defaultProject: task.project_path,
     seed: task,
+    loadPrograms: callbacks.loadPrograms,
     onSubmit: callbacks.onSubmit,
     onCancel: callbacks.onCancel
   });
@@ -11396,6 +11464,7 @@ var store = new Store({
 });
 var token = null;
 var stream = null;
+var loadPrograms = (repoPath) => token === null ? Promise.reject(new Error("not authorized")) : listPrograms(repoPath, token);
 var resyncTimer = null;
 var taskResyncTimer = null;
 var tabErrorTimer = null;
@@ -11629,6 +11698,8 @@ function newSession() {
       // Tokenless ("") is a valid credential (#1696), so a null token — not a
       // falsy one — is the "not authorized yet" case.
       loadBackends: (repoPath) => token === null ? Promise.reject(new Error("not authorized")) : listBackends(repoPath, token),
+      // The agent catalog, same contract (#1970): the daemon owns the enum.
+      loadPrograms,
       onSubmit: (values) => {
         const tok = token;
         if (tok === null || !modal) {
@@ -11922,6 +11993,7 @@ function openAddTask() {
   const projects = pickerProjects(store.get().sessions, store.get().tasks);
   openModal(
     addTaskModal(projects, store.get().selectedProject, {
+      loadPrograms,
       onSubmit: (input) => {
         const tok = token;
         if (tok === null || !modal) {
@@ -11945,6 +12017,7 @@ function openEditTask(task) {
   const projects = pickerProjects(store.get().sessions, store.get().tasks);
   openModal(
     editTaskModal(projects, task, {
+      loadPrograms,
       onSubmit: (input) => {
         const tok = token;
         if (tok === null || !modal) {
