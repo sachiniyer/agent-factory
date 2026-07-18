@@ -13,8 +13,15 @@
 //
 // It is patched in place like the rest of the shell and CSP-safe (createElement +
 // addEventListener via the shared h() helper, no innerHTML with markup).
+//
+// The task form's cron field is the friendly schedule PICKER (#2057 phase 2, the
+// browser twin of ui/schedule_picker.go): a schedule type plus its contextual
+// inputs, generating the cron underneath. Cron is still the stored/wire format —
+// only the input UX changed — and the raw expression stays reachable as the
+// picker's Custom type.
 
 import { asForm, field, h, modalChrome, type ModalHandle, projectLabel } from "./modals.js";
+import { SCHEDULE_TYPE_OPTIONS, type Schedule, type ScheduleType, cron as scheduleCron, describe as scheduleDescribe, parseCron } from "./schedule.js";
 import type { TaskData } from "./types.js";
 
 /** The add-task form's inputs (a subset of task.Task the browser fills; the daemon
@@ -200,10 +207,371 @@ export class TasksPane {
   }
 }
 
+/** Weekday toggles render Monday-first ("M T W T F S S", #2057) but map onto the
+ *  Sunday-first weekday numbering the schedule model normalizes on — the same
+ *  display order as the TUI picker's weekdayDisplayOrder. */
+const WEEKDAY_DISPLAY: ReadonlyArray<{ weekday: number; letter: string; name: string }> = [
+  { weekday: 1, letter: "M", name: "Monday" },
+  { weekday: 2, letter: "T", name: "Tuesday" },
+  { weekday: 3, letter: "W", name: "Wednesday" },
+  { weekday: 4, letter: "T", name: "Thursday" },
+  { weekday: 5, letter: "F", name: "Friday" },
+  { weekday: 6, letter: "S", name: "Saturday" },
+  { weekday: 0, letter: "S", name: "Sunday" },
+];
+
+/** A form row that is NOT a <label>: the picker's multi-control rows (a time, a
+ *  weekday toggle group) hold several controls, and a <label> wrapping them forwards
+ *  a click on its own text to the first control inside — which would silently toggle
+ *  Monday when the user clicks the word "Days". Same class + look as modals' field(),
+ *  which stays the right helper for a single-control row. */
+function fieldGroup(label: string, control: HTMLElement): HTMLElement {
+  return h("div", { class: "af-modal-field" }, h("span", { class: "af-modal-label" }, label), control);
+}
+
+/** Parses a numeric cell, clamping into [min,max] and falling back to `def` for
+ *  anything unparseable — the browser twin of the TUI picker's atoiClamp. Clamping
+ *  happens when the schedule is MATERIALIZED, not on every keystroke, so a mid-edit
+ *  "7" on the way to "17" is never fought. */
+function clampField(raw: string, min: number, max: number, def: number): number {
+  const n = Number.parseInt(raw.trim(), 10);
+  if (!Number.isFinite(n)) {
+    return def;
+  }
+  return Math.min(Math.max(n, min), max);
+}
+
+/**
+ * The friendly schedule picker (#2057 phase 2): the browser twin of the TUI's
+ * ui/schedule_picker.go, and the cron field's replacement in the task form. A
+ * schedule-type selector plus ONLY the inputs that type needs, a live plain-English
+ * preview, and the generated cron shown read-only so users can see exactly what
+ * gets saved.
+ *
+ * All model logic — cron generation, the preview text, and seeding an existing task
+ * back into its matching preset — lives in the shared schedule module, which mirrors
+ * the canonical Go package under a vectors-driven parity test. This class is only
+ * the DOM surface over it, so the two pickers cannot drift apart in what a state
+ * means, only in how it is drawn.
+ *
+ * Cron remains the stored/wire format: cron() is what the form submits, and Custom
+ * hands back a raw expression verbatim (today's behavior, kept as the escape hatch).
+ */
+class SchedulePicker {
+  /** The rows to append into the modal body, in visual order. */
+  readonly rows: HTMLElement[];
+
+  private readonly typeSelect: HTMLSelectElement;
+  private readonly intervalInput: HTMLInputElement;
+  private readonly intervalUnit: HTMLElement;
+  private readonly hourInput: HTMLInputElement;
+  private readonly minuteInput: HTMLInputElement;
+  private readonly meridiemSelect: HTMLSelectElement;
+  private readonly domInput: HTMLInputElement;
+  private readonly rawInput: HTMLInputElement;
+  private readonly humanLine: HTMLElement;
+  private readonly cronOut: HTMLInputElement;
+
+  private readonly intervalRow: HTMLElement;
+  private readonly timeRow: HTMLElement;
+  private readonly timeLabel: HTMLElement;
+  private readonly hourGroup: HTMLElement;
+  private readonly weekdayRow: HTMLElement;
+  private readonly domRow: HTMLElement;
+  private readonly rawRow: HTMLElement;
+  private readonly previewRow: HTMLElement;
+
+  private readonly weekdayButtons: HTMLButtonElement[] = [];
+  private readonly weekdaysOn = new Set<number>();
+
+  constructor() {
+    this.typeSelect = h("select", { class: "af-input" });
+    this.typeSelect.setAttribute("aria-label", "Schedule type");
+    for (const opt of SCHEDULE_TYPE_OPTIONS) {
+      this.typeSelect.append(h("option", { value: opt.type }, opt.label));
+    }
+    this.typeSelect.addEventListener("change", () => this.onTypeChange());
+
+    this.intervalInput = this.numberInput("Interval", "1", "59");
+    this.intervalUnit = h("span", { class: "af-schedule-unit" }, "minutes");
+    this.intervalRow = fieldGroup(
+      "Run every",
+      h("div", { class: "af-schedule-row" }, this.intervalInput, this.intervalUnit),
+    );
+
+    this.hourInput = this.numberInput("Hour", "1", "12");
+    this.minuteInput = this.numberInput("Minute", "0", "59");
+    this.meridiemSelect = h("select", { class: "af-input af-schedule-meridiem" });
+    this.meridiemSelect.setAttribute("aria-label", "AM/PM");
+    this.meridiemSelect.append(h("option", { value: "AM" }, "AM"), h("option", { value: "PM" }, "PM"));
+    this.meridiemSelect.addEventListener("change", () => this.sync());
+    // Hour and AM/PM travel together: an hourly schedule keeps only the minute, so
+    // the whole group hides and the row's label switches to name what is left.
+    this.hourGroup = h(
+      "span",
+      { class: "af-schedule-clock" },
+      this.hourInput,
+      h("span", { class: "af-schedule-sep" }, ":"),
+    );
+    this.timeRow = fieldGroup("Time", h("div", { class: "af-schedule-row" }, this.hourGroup, this.minuteInput, this.meridiemSelect));
+    this.timeLabel = this.timeRow.firstElementChild as HTMLElement;
+
+    const weekdayGroup = h("div", { class: "af-weekdays" });
+    weekdayGroup.setAttribute("role", "group");
+    weekdayGroup.setAttribute("aria-label", "Days of the week");
+    for (const day of WEEKDAY_DISPLAY) {
+      // The letters repeat (T/T, S/S), so the accessible name is the full day name
+      // and aria-pressed carries the state — never the glyph alone.
+      const btn = h("button", { type: "button", class: "af-weekday" }, day.letter);
+      btn.setAttribute("aria-label", day.name);
+      btn.setAttribute("aria-pressed", "false");
+      btn.addEventListener("click", () => this.toggleWeekday(day.weekday));
+      this.weekdayButtons.push(btn);
+      weekdayGroup.append(btn);
+    }
+    this.weekdayRow = fieldGroup("Days", weekdayGroup);
+
+    this.domInput = this.numberInput("Day of month", "1", "31");
+    this.domRow = field("Day of month", this.domInput);
+
+    this.rawInput = h("input", { type: "text", class: "af-input", placeholder: "0 9 * * 1-5", autocomplete: "off" });
+    this.rawInput.setAttribute("aria-label", "Cron expression");
+    this.rawInput.addEventListener("input", () => this.sync());
+    this.rawRow = field("Cron expression", this.rawInput);
+
+    this.humanLine = h("p", { class: "af-schedule-human" });
+    this.humanLine.setAttribute("aria-live", "polite");
+    this.cronOut = h("input", { type: "text", class: "af-input af-schedule-cron", readOnly: true, tabIndex: -1 });
+    this.cronOut.setAttribute("aria-label", "Generated cron");
+    this.previewRow = h("div", { class: "af-schedule-preview" }, this.humanLine, this.cronOut);
+
+    this.rows = [
+      field("Schedule", this.typeSelect),
+      this.intervalRow,
+      this.timeRow,
+      this.weekdayRow,
+      this.domRow,
+      this.rawRow,
+      this.previewRow,
+    ];
+
+    this.reset();
+  }
+
+  private numberInput(label: string, min: string, max: string): HTMLInputElement {
+    const el = h("input", { type: "number", class: "af-input af-schedule-num", min, max, autocomplete: "off" });
+    el.setAttribute("aria-label", label);
+    el.addEventListener("input", () => this.sync());
+    return el;
+  }
+
+  /** Seeds a brand-new task: daily at 9:00 AM, with every other type's fields
+   *  carrying valid defaults so switching type never lands on an empty input. The
+   *  same defaults the TUI picker resets to. */
+  private reset(): void {
+    this.typeSelect.value = "daily";
+    this.intervalInput.value = "15";
+    this.hourInput.value = "9";
+    this.minuteInput.value = "00";
+    this.meridiemSelect.value = "AM";
+    this.domInput.value = "1";
+    this.rawInput.value = "";
+    this.weekdaysOn.clear();
+    this.weekdaysOn.add(1); // Monday
+    this.sync();
+  }
+
+  /**
+   * Seeds the picker from an existing task's cron: the matching preset if the
+   * expression is one of the shapes the model emits, otherwise Custom holding the
+   * original text verbatim. An empty expression (e.g. a watch task being switched to
+   * a cron trigger) keeps the new-task defaults rather than dropping into an empty
+   * Custom field.
+   */
+  seed(cronExpr: string): void {
+    this.reset();
+    if (cronExpr.trim() === "") {
+      return;
+    }
+    const { schedule: s } = parseCron(cronExpr);
+    this.typeSelect.value = s.type;
+    switch (s.type) {
+      case "everyNMinutes":
+      case "everyNHours":
+        if (s.interval !== undefined && s.interval > 0) {
+          this.intervalInput.value = String(s.interval);
+        }
+        break;
+      case "hourly":
+        this.minuteInput.value = pad2(s.minute ?? 0);
+        break;
+      case "daily":
+        this.setClock(s.hour ?? 0, s.minute ?? 0);
+        break;
+      case "weekly":
+        this.setClock(s.hour ?? 0, s.minute ?? 0);
+        this.weekdaysOn.clear();
+        for (const d of s.weekdays ?? []) {
+          this.weekdaysOn.add(d);
+        }
+        break;
+      case "monthly":
+        this.setClock(s.hour ?? 0, s.minute ?? 0);
+        if (s.dayOfMonth !== undefined && s.dayOfMonth > 0) {
+          this.domInput.value = String(s.dayOfMonth);
+        }
+        break;
+      default: // custom — the raw expression, unchanged
+        this.rawInput.value = s.raw ?? cronExpr;
+        break;
+    }
+    this.sync();
+  }
+
+  /** Splits a 24-hour time into the 12-hour hour + AM/PM cells (to12Hour). */
+  private setClock(hour24: number, minute: number): void {
+    let h12 = hour24;
+    let pm = false;
+    if (hour24 === 0) {
+      h12 = 12;
+    } else if (hour24 === 12) {
+      pm = true;
+    } else if (hour24 > 12) {
+      h12 = hour24 - 12;
+      pm = true;
+    }
+    this.hourInput.value = String(h12);
+    this.minuteInput.value = pad2(minute);
+    this.meridiemSelect.value = pm ? "PM" : "AM";
+  }
+
+  private toggleWeekday(weekday: number): void {
+    if (this.weekdaysOn.has(weekday)) {
+      this.weekdaysOn.delete(weekday);
+    } else {
+      this.weekdaysOn.add(weekday);
+    }
+    this.sync();
+  }
+
+  private get type(): ScheduleType {
+    return this.typeSelect.value as ScheduleType;
+  }
+
+  /** Switching INTO Custom prefills the raw field with the cron the previous preset
+   *  generated (when it is empty), so the escape hatch starts from a working
+   *  expression rather than blank — the TUI does the same. */
+  private onTypeChange(): void {
+    if (this.type === "custom" && this.rawInput.value.trim() === "") {
+      this.rawInput.value = this.cronOut.value;
+    }
+    this.sync();
+  }
+
+  /** Materializes the current cell state into a canonical Schedule, clamping the
+   *  numeric cells so the generated cron is always well-formed (Custom's raw text
+   *  excepted — the daemon validates that). */
+  schedule(): Schedule {
+    switch (this.type) {
+      case "everyNMinutes":
+        return { type: "everyNMinutes", interval: clampField(this.intervalInput.value, 1, 59, 15) };
+      case "everyNHours":
+        return { type: "everyNHours", interval: clampField(this.intervalInput.value, 1, 23, 1) };
+      case "hourly":
+        return { type: "hourly", minute: clampField(this.minuteInput.value, 0, 59, 0) };
+      case "daily":
+        return { type: "daily", hour: this.hour24(), minute: clampField(this.minuteInput.value, 0, 59, 0) };
+      case "weekly":
+        return {
+          type: "weekly",
+          hour: this.hour24(),
+          minute: clampField(this.minuteInput.value, 0, 59, 0),
+          weekdays: [...this.weekdaysOn],
+        };
+      case "monthly":
+        return {
+          type: "monthly",
+          hour: this.hour24(),
+          minute: clampField(this.minuteInput.value, 0, 59, 0),
+          dayOfMonth: clampField(this.domInput.value, 1, 31, 1),
+        };
+      default: // custom
+        return { type: "custom", raw: this.rawInput.value.trim() };
+    }
+  }
+
+  private hour24(): number {
+    const h = clampField(this.hourInput.value, 1, 12, 12);
+    const pm = this.meridiemSelect.value === "PM";
+    if (pm) {
+      return h === 12 ? 12 : h + 12;
+    }
+    return h === 12 ? 0 : h; // 12 AM = midnight
+  }
+
+  /** The cron expression the form submits — always live off the current state. */
+  cron(): string {
+    return scheduleCron(this.schedule());
+  }
+
+  /** Re-applies the per-type row visibility and preview. The task form calls this
+   *  after showing the picker again (switching the trigger back to cron), which
+   *  unhides every row wholesale. */
+  refresh(): void {
+    this.sync();
+  }
+
+  /** A user-facing message for an unsavable schedule, or null when it is good to
+   *  save. The daemon re-validates the expression itself (it always has); these are
+   *  the picker-level constraints that would otherwise generate a nonsense cron. */
+  validate(): string | null {
+    if (this.type === "custom" && this.rawInput.value.trim() === "") {
+      return "A cron expression is required for a cron task.";
+    }
+    if (this.type === "weekly" && this.weekdaysOn.size === 0) {
+      return "Select at least one day of the week.";
+    }
+    return null;
+  }
+
+  /** Shows only the cells the selected type needs, and refreshes the preview + the
+   *  read-only generated cron. Runs on every edit, so what the user reads is always
+   *  what a submit would store. */
+  private sync(): void {
+    const type = this.type;
+    const isClock = type === "daily" || type === "weekly" || type === "monthly";
+    this.intervalRow.hidden = type !== "everyNMinutes" && type !== "everyNHours";
+    this.intervalUnit.textContent = type === "everyNHours" ? "hours" : "minutes";
+    this.intervalInput.max = type === "everyNHours" ? "23" : "59";
+    this.timeRow.hidden = !isClock && type !== "hourly";
+    this.hourGroup.hidden = !isClock;
+    this.meridiemSelect.hidden = !isClock;
+    this.timeLabel.textContent = isClock ? "Time" : "Minute past the hour";
+    this.weekdayRow.hidden = type !== "weekly";
+    this.domRow.hidden = type !== "monthly";
+    this.rawRow.hidden = type !== "custom";
+
+    for (let i = 0; i < this.weekdayButtons.length; i++) {
+      const on = this.weekdaysOn.has(WEEKDAY_DISPLAY[i].weekday);
+      this.weekdayButtons[i].setAttribute("aria-pressed", on ? "true" : "false");
+      this.weekdayButtons[i].classList.toggle("af-weekday-on", on);
+    }
+
+    const s = this.schedule();
+    this.humanLine.textContent = scheduleDescribe(s);
+    this.cronOut.value = scheduleCron(s);
+  }
+}
+
+function pad2(n: number): string {
+  return String(n).padStart(2, "0");
+}
+
 /**
  * The task form modal (mirrors the TUI's task editor + `af tasks add`/`update`):
- * name, project, a cron/watch trigger toggle with its value, a prompt, an optional
- * target session, and the agent program. Shared by the ADD and EDIT flows — the only
+ * name, project, a cron/watch trigger toggle with its value — the schedule PICKER
+ * for cron (#2057), a command for watch — a prompt, an optional target session, and
+ * the agent program. Shared by the ADD and EDIT flows — the only
  * difference is the chrome (title/confirm label) and, in edit mode, that every field
  * is SEEDED from the existing task (#1935). onSubmit fires with the collected input;
  * the caller turns it into an AddTask (buildTask) or a field-level UpdateTask patch.
@@ -256,21 +624,29 @@ function taskFormModal(opts: {
   triggerSelect.append(h("option", { value: "cron" }, "Cron schedule"));
   triggerSelect.append(h("option", { value: "watch" }, "Watch command"));
 
-  const cronInput = h("input", { type: "text", class: "af-input", placeholder: "0 9 * * *", autocomplete: "off" });
-  cronInput.setAttribute("aria-label", "Cron expression");
-  const cronField = field("Cron expression", cronInput);
+  // The friendly schedule picker replaces the raw-cron text field (#2057). It still
+  // yields a cron expression — the stored/wire format is unchanged — and keeps the
+  // raw field available under its Custom type.
+  const picker = new SchedulePicker();
 
   const watchInput = h("input", { type: "text", class: "af-input", placeholder: "tail -F events.log", autocomplete: "off" });
   watchInput.setAttribute("aria-label", "Watch command");
   const watchField = field("Watch command", watchInput);
   watchField.hidden = true;
 
-  // Show only the field for the selected trigger; the other is hidden (its value is
-  // ignored on submit, and the daemon rejects a task with both set).
+  // Show only the field(s) for the selected trigger; the other is hidden (its value
+  // is ignored on submit, and the daemon rejects a task with both set).
   const syncTriggerFields = (): void => {
     const isWatch = triggerSelect.value === "watch";
-    cronField.hidden = isWatch;
+    for (const row of picker.rows) {
+      row.hidden = isWatch;
+    }
     watchField.hidden = !isWatch;
+    if (!isWatch) {
+      // Re-assert the picker's own per-type row visibility, which the blanket
+      // unhide above just cleared.
+      picker.refresh();
+    }
   };
   triggerSelect.addEventListener("change", syncTriggerFields);
 
@@ -296,7 +672,9 @@ function taskFormModal(opts: {
     nameInput.value = s.name ?? "";
     const isWatch = !!(s.watch_cmd && s.watch_cmd.trim() !== "");
     triggerSelect.value = isWatch ? "watch" : "cron";
-    cronInput.value = s.cron_expr ?? "";
+    // The picker re-opens as the preset the stored cron maps to, or as Custom
+    // holding the original expression verbatim (#2057).
+    picker.seed(s.cron_expr ?? "");
     watchInput.value = s.watch_cmd ?? "";
     syncTriggerFields();
     promptArea.value = s.prompt ?? "";
@@ -311,7 +689,7 @@ function taskFormModal(opts: {
     field("Name", nameInput),
     field("Project", projectSelect),
     field("Trigger", triggerSelect),
-    cronField,
+    ...picker.rows,
     watchField,
     field("Prompt", promptArea),
     field("Target session", targetInput),
@@ -322,17 +700,21 @@ function taskFormModal(opts: {
   asForm(card, () => {
     const trigger = triggerSelect.value === "watch" ? "watch" : "cron";
     const name = nameInput.value.trim();
-    const cron = cronInput.value.trim();
     const watchCmd = watchInput.value.trim();
     const prompt = promptArea.value.trim();
     if (name === "" || projectSelect.value === "") {
       handle.setError("A name and a project are required.");
       return;
     }
-    if (trigger === "cron" && cron === "") {
-      handle.setError("A cron expression is required for a cron task.");
+    // The picker always yields a well-formed expression for a preset; validate()
+    // only catches the states that cannot generate one (an empty Custom cron, a
+    // weekly with no days). The daemon re-validates whatever we send, as before.
+    const scheduleErr = trigger === "cron" ? picker.validate() : null;
+    if (scheduleErr !== null) {
+      handle.setError(scheduleErr);
       return;
     }
+    const cron = trigger === "cron" ? picker.cron() : "";
     if (trigger === "cron" && prompt === "") {
       handle.setError("A prompt is required for a cron task.");
       return;

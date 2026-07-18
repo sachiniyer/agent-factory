@@ -9401,6 +9401,193 @@ function registerServiceWorker() {
   });
 }
 
+// src/schedule.ts
+var SCHEDULE_TYPE_OPTIONS = [
+  { type: "everyNMinutes", label: "Every N minutes" },
+  { type: "everyNHours", label: "Every N hours" },
+  { type: "hourly", label: "Hourly" },
+  { type: "daily", label: "Daily" },
+  { type: "weekly", label: "Weekly" },
+  { type: "monthly", label: "Monthly" },
+  { type: "custom", label: "Custom (cron)" }
+];
+var WEEKDAY_ABBREV = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+function cron(s) {
+  switch (s.type) {
+    case "everyNMinutes":
+      return `*/${s.interval ?? 0} * * * *`;
+    case "everyNHours":
+      return `0 */${s.interval ?? 0} * * *`;
+    case "hourly":
+      return `${s.minute ?? 0} * * * *`;
+    case "daily":
+      return `${s.minute ?? 0} ${s.hour ?? 0} * * *`;
+    case "weekly":
+      return `${s.minute ?? 0} ${s.hour ?? 0} * * ${weekdayField(s.weekdays)}`;
+    case "monthly":
+      return `${s.minute ?? 0} ${s.hour ?? 0} ${s.dayOfMonth ?? 0} * *`;
+    default:
+      return s.raw ?? "";
+  }
+}
+function describe(s) {
+  switch (s.type) {
+    case "everyNMinutes":
+      return (s.interval ?? 0) === 1 ? "Every minute" : `Every ${s.interval ?? 0} minutes`;
+    case "everyNHours":
+      return (s.interval ?? 0) === 1 ? "Every hour" : `Every ${s.interval ?? 0} hours`;
+    case "hourly":
+      return `Every hour at :${pad2(s.minute ?? 0)}`;
+    case "daily":
+      return `Every day at ${clockTime(s.hour ?? 0, s.minute ?? 0)}`;
+    case "weekly":
+      return `Every week on ${weekdayNames(s.weekdays)} at ${clockTime(s.hour ?? 0, s.minute ?? 0)}`;
+    case "monthly":
+      return `Every month on the ${ordinal(s.dayOfMonth ?? 0)} at ${clockTime(s.hour ?? 0, s.minute ?? 0)}`;
+    default:
+      return `Custom: ${s.raw ?? ""}`;
+  }
+}
+function parseCron(expr) {
+  const f = fields(expr);
+  if (f.length !== 5) {
+    return { schedule: custom(expr), ok: false };
+  }
+  const [minute, hour, dom, month, dow] = f;
+  if (month !== "*") {
+    return { schedule: custom(expr), ok: false };
+  }
+  const everyMin = stepOfStar(minute, 59);
+  if (everyMin !== null && hour === "*" && dom === "*" && dow === "*") {
+    return { schedule: { type: "everyNMinutes", interval: everyMin }, ok: true };
+  }
+  const everyHour = stepOfStar(hour, 23);
+  if (everyHour !== null && minute === "0" && dom === "*" && dow === "*") {
+    return { schedule: { type: "everyNHours", interval: everyHour }, ok: true };
+  }
+  const hourlyMinute = singleInt(minute, 0, 59);
+  if (hourlyMinute !== null && hour === "*" && dom === "*" && dow === "*") {
+    return { schedule: { type: "hourly", minute: hourlyMinute }, ok: true };
+  }
+  const m = singleInt(minute, 0, 59);
+  const h3 = singleInt(hour, 0, 23);
+  if (m !== null && h3 !== null) {
+    if (dom === "*" && dow === "*") {
+      return { schedule: { type: "daily", hour: h3, minute: m }, ok: true };
+    }
+    if (dom === "*") {
+      const days = weekdayList(dow);
+      if (days !== null) {
+        return { schedule: { type: "weekly", hour: h3, minute: m, weekdays: days }, ok: true };
+      }
+    } else if (dow === "*") {
+      const d = singleInt(dom, 1, 31);
+      if (d !== null) {
+        return { schedule: { type: "monthly", hour: h3, minute: m, dayOfMonth: d }, ok: true };
+      }
+    }
+  }
+  return { schedule: custom(expr), ok: false };
+}
+function custom(expr) {
+  return { type: "custom", raw: expr };
+}
+function fields(expr) {
+  return expr.split(/\s+/).filter((part) => part !== "");
+}
+function weekdayField(days) {
+  const nums = normalizeWeekdays(days);
+  return nums.length === 0 ? "*" : nums.join(",");
+}
+function weekdayNames(days) {
+  return normalizeWeekdays(days).map((n) => WEEKDAY_ABBREV[n]).join(", ");
+}
+function normalizeWeekdays(days) {
+  const seen = /* @__PURE__ */ new Set();
+  for (const d of days ?? []) {
+    const n = (Math.trunc(d) % 7 + 7) % 7;
+    seen.add(n);
+  }
+  return [...seen].sort((a, b) => a - b);
+}
+function clockTime(hour, minute) {
+  let suffix = "AM";
+  let h3 = hour;
+  if (h3 === 0) {
+    h3 = 12;
+  } else if (h3 === 12) {
+    suffix = "PM";
+  } else if (h3 > 12) {
+    h3 -= 12;
+    suffix = "PM";
+  }
+  return `${h3}:${pad2(minute)} ${suffix}`;
+}
+function pad2(n) {
+  return String(n).padStart(2, "0");
+}
+function ordinal(n) {
+  let suffix = "th";
+  if (n % 100 < 11 || n % 100 > 13) {
+    switch (n % 10) {
+      case 1:
+        suffix = "st";
+        break;
+      case 2:
+        suffix = "nd";
+        break;
+      case 3:
+        suffix = "rd";
+        break;
+    }
+  }
+  return `${n}${suffix}`;
+}
+function stepOfStar(field2, max) {
+  if (!field2.startsWith("*/")) {
+    return null;
+  }
+  const n = atoi(field2.slice(2));
+  if (n === null || n < 1 || n > max) {
+    return null;
+  }
+  return n;
+}
+function singleInt(field2, min, max) {
+  const n = atoi(field2);
+  if (n === null || n < min || n > max) {
+    return null;
+  }
+  return n;
+}
+function weekdayList(field2) {
+  if (field2 === "*") {
+    return null;
+  }
+  const seen = /* @__PURE__ */ new Set();
+  for (const part of field2.split(",")) {
+    const n = atoi(part);
+    if (n === null || n < 0 || n > 7) {
+      return null;
+    }
+    seen.add(n === 7 ? 0 : n);
+  }
+  if (seen.size === 0) {
+    return null;
+  }
+  return [...seen].sort((a, b) => a - b);
+}
+function atoi(s) {
+  if (!/^[+-]?\d+$/.test(s)) {
+    return null;
+  }
+  const n = Number(s);
+  if (!Number.isSafeInteger(n)) {
+    return null;
+  }
+  return n === 0 ? 0 : n;
+}
+
 // src/tasks.ts
 function genTaskId() {
   const b = new Uint8Array(4);
@@ -9519,6 +9706,302 @@ var TasksPane = class {
     return h("li", { class: "af-task-row" }, enabledDot, main, actions2);
   }
 };
+var WEEKDAY_DISPLAY = [
+  { weekday: 1, letter: "M", name: "Monday" },
+  { weekday: 2, letter: "T", name: "Tuesday" },
+  { weekday: 3, letter: "W", name: "Wednesday" },
+  { weekday: 4, letter: "T", name: "Thursday" },
+  { weekday: 5, letter: "F", name: "Friday" },
+  { weekday: 6, letter: "S", name: "Saturday" },
+  { weekday: 0, letter: "S", name: "Sunday" }
+];
+function fieldGroup(label, control) {
+  return h("div", { class: "af-modal-field" }, h("span", { class: "af-modal-label" }, label), control);
+}
+function clampField(raw, min, max, def) {
+  const n = Number.parseInt(raw.trim(), 10);
+  if (!Number.isFinite(n)) {
+    return def;
+  }
+  return Math.min(Math.max(n, min), max);
+}
+var SchedulePicker = class {
+  /** The rows to append into the modal body, in visual order. */
+  rows;
+  typeSelect;
+  intervalInput;
+  intervalUnit;
+  hourInput;
+  minuteInput;
+  meridiemSelect;
+  domInput;
+  rawInput;
+  humanLine;
+  cronOut;
+  intervalRow;
+  timeRow;
+  timeLabel;
+  hourGroup;
+  weekdayRow;
+  domRow;
+  rawRow;
+  previewRow;
+  weekdayButtons = [];
+  weekdaysOn = /* @__PURE__ */ new Set();
+  constructor() {
+    this.typeSelect = h("select", { class: "af-input" });
+    this.typeSelect.setAttribute("aria-label", "Schedule type");
+    for (const opt of SCHEDULE_TYPE_OPTIONS) {
+      this.typeSelect.append(h("option", { value: opt.type }, opt.label));
+    }
+    this.typeSelect.addEventListener("change", () => this.onTypeChange());
+    this.intervalInput = this.numberInput("Interval", "1", "59");
+    this.intervalUnit = h("span", { class: "af-schedule-unit" }, "minutes");
+    this.intervalRow = fieldGroup(
+      "Run every",
+      h("div", { class: "af-schedule-row" }, this.intervalInput, this.intervalUnit)
+    );
+    this.hourInput = this.numberInput("Hour", "1", "12");
+    this.minuteInput = this.numberInput("Minute", "0", "59");
+    this.meridiemSelect = h("select", { class: "af-input af-schedule-meridiem" });
+    this.meridiemSelect.setAttribute("aria-label", "AM/PM");
+    this.meridiemSelect.append(h("option", { value: "AM" }, "AM"), h("option", { value: "PM" }, "PM"));
+    this.meridiemSelect.addEventListener("change", () => this.sync());
+    this.hourGroup = h(
+      "span",
+      { class: "af-schedule-clock" },
+      this.hourInput,
+      h("span", { class: "af-schedule-sep" }, ":")
+    );
+    this.timeRow = fieldGroup("Time", h("div", { class: "af-schedule-row" }, this.hourGroup, this.minuteInput, this.meridiemSelect));
+    this.timeLabel = this.timeRow.firstElementChild;
+    const weekdayGroup = h("div", { class: "af-weekdays" });
+    weekdayGroup.setAttribute("role", "group");
+    weekdayGroup.setAttribute("aria-label", "Days of the week");
+    for (const day of WEEKDAY_DISPLAY) {
+      const btn = h("button", { type: "button", class: "af-weekday" }, day.letter);
+      btn.setAttribute("aria-label", day.name);
+      btn.setAttribute("aria-pressed", "false");
+      btn.addEventListener("click", () => this.toggleWeekday(day.weekday));
+      this.weekdayButtons.push(btn);
+      weekdayGroup.append(btn);
+    }
+    this.weekdayRow = fieldGroup("Days", weekdayGroup);
+    this.domInput = this.numberInput("Day of month", "1", "31");
+    this.domRow = field("Day of month", this.domInput);
+    this.rawInput = h("input", { type: "text", class: "af-input", placeholder: "0 9 * * 1-5", autocomplete: "off" });
+    this.rawInput.setAttribute("aria-label", "Cron expression");
+    this.rawInput.addEventListener("input", () => this.sync());
+    this.rawRow = field("Cron expression", this.rawInput);
+    this.humanLine = h("p", { class: "af-schedule-human" });
+    this.humanLine.setAttribute("aria-live", "polite");
+    this.cronOut = h("input", { type: "text", class: "af-input af-schedule-cron", readOnly: true, tabIndex: -1 });
+    this.cronOut.setAttribute("aria-label", "Generated cron");
+    this.previewRow = h("div", { class: "af-schedule-preview" }, this.humanLine, this.cronOut);
+    this.rows = [
+      field("Schedule", this.typeSelect),
+      this.intervalRow,
+      this.timeRow,
+      this.weekdayRow,
+      this.domRow,
+      this.rawRow,
+      this.previewRow
+    ];
+    this.reset();
+  }
+  numberInput(label, min, max) {
+    const el2 = h("input", { type: "number", class: "af-input af-schedule-num", min, max, autocomplete: "off" });
+    el2.setAttribute("aria-label", label);
+    el2.addEventListener("input", () => this.sync());
+    return el2;
+  }
+  /** Seeds a brand-new task: daily at 9:00 AM, with every other type's fields
+   *  carrying valid defaults so switching type never lands on an empty input. The
+   *  same defaults the TUI picker resets to. */
+  reset() {
+    this.typeSelect.value = "daily";
+    this.intervalInput.value = "15";
+    this.hourInput.value = "9";
+    this.minuteInput.value = "00";
+    this.meridiemSelect.value = "AM";
+    this.domInput.value = "1";
+    this.rawInput.value = "";
+    this.weekdaysOn.clear();
+    this.weekdaysOn.add(1);
+    this.sync();
+  }
+  /**
+   * Seeds the picker from an existing task's cron: the matching preset if the
+   * expression is one of the shapes the model emits, otherwise Custom holding the
+   * original text verbatim. An empty expression (e.g. a watch task being switched to
+   * a cron trigger) keeps the new-task defaults rather than dropping into an empty
+   * Custom field.
+   */
+  seed(cronExpr) {
+    this.reset();
+    if (cronExpr.trim() === "") {
+      return;
+    }
+    const { schedule: s } = parseCron(cronExpr);
+    this.typeSelect.value = s.type;
+    switch (s.type) {
+      case "everyNMinutes":
+      case "everyNHours":
+        if (s.interval !== void 0 && s.interval > 0) {
+          this.intervalInput.value = String(s.interval);
+        }
+        break;
+      case "hourly":
+        this.minuteInput.value = pad22(s.minute ?? 0);
+        break;
+      case "daily":
+        this.setClock(s.hour ?? 0, s.minute ?? 0);
+        break;
+      case "weekly":
+        this.setClock(s.hour ?? 0, s.minute ?? 0);
+        this.weekdaysOn.clear();
+        for (const d of s.weekdays ?? []) {
+          this.weekdaysOn.add(d);
+        }
+        break;
+      case "monthly":
+        this.setClock(s.hour ?? 0, s.minute ?? 0);
+        if (s.dayOfMonth !== void 0 && s.dayOfMonth > 0) {
+          this.domInput.value = String(s.dayOfMonth);
+        }
+        break;
+      default:
+        this.rawInput.value = s.raw ?? cronExpr;
+        break;
+    }
+    this.sync();
+  }
+  /** Splits a 24-hour time into the 12-hour hour + AM/PM cells (to12Hour). */
+  setClock(hour24, minute) {
+    let h12 = hour24;
+    let pm = false;
+    if (hour24 === 0) {
+      h12 = 12;
+    } else if (hour24 === 12) {
+      pm = true;
+    } else if (hour24 > 12) {
+      h12 = hour24 - 12;
+      pm = true;
+    }
+    this.hourInput.value = String(h12);
+    this.minuteInput.value = pad22(minute);
+    this.meridiemSelect.value = pm ? "PM" : "AM";
+  }
+  toggleWeekday(weekday) {
+    if (this.weekdaysOn.has(weekday)) {
+      this.weekdaysOn.delete(weekday);
+    } else {
+      this.weekdaysOn.add(weekday);
+    }
+    this.sync();
+  }
+  get type() {
+    return this.typeSelect.value;
+  }
+  /** Switching INTO Custom prefills the raw field with the cron the previous preset
+   *  generated (when it is empty), so the escape hatch starts from a working
+   *  expression rather than blank — the TUI does the same. */
+  onTypeChange() {
+    if (this.type === "custom" && this.rawInput.value.trim() === "") {
+      this.rawInput.value = this.cronOut.value;
+    }
+    this.sync();
+  }
+  /** Materializes the current cell state into a canonical Schedule, clamping the
+   *  numeric cells so the generated cron is always well-formed (Custom's raw text
+   *  excepted — the daemon validates that). */
+  schedule() {
+    switch (this.type) {
+      case "everyNMinutes":
+        return { type: "everyNMinutes", interval: clampField(this.intervalInput.value, 1, 59, 15) };
+      case "everyNHours":
+        return { type: "everyNHours", interval: clampField(this.intervalInput.value, 1, 23, 1) };
+      case "hourly":
+        return { type: "hourly", minute: clampField(this.minuteInput.value, 0, 59, 0) };
+      case "daily":
+        return { type: "daily", hour: this.hour24(), minute: clampField(this.minuteInput.value, 0, 59, 0) };
+      case "weekly":
+        return {
+          type: "weekly",
+          hour: this.hour24(),
+          minute: clampField(this.minuteInput.value, 0, 59, 0),
+          weekdays: [...this.weekdaysOn]
+        };
+      case "monthly":
+        return {
+          type: "monthly",
+          hour: this.hour24(),
+          minute: clampField(this.minuteInput.value, 0, 59, 0),
+          dayOfMonth: clampField(this.domInput.value, 1, 31, 1)
+        };
+      default:
+        return { type: "custom", raw: this.rawInput.value.trim() };
+    }
+  }
+  hour24() {
+    const h3 = clampField(this.hourInput.value, 1, 12, 12);
+    const pm = this.meridiemSelect.value === "PM";
+    if (pm) {
+      return h3 === 12 ? 12 : h3 + 12;
+    }
+    return h3 === 12 ? 0 : h3;
+  }
+  /** The cron expression the form submits — always live off the current state. */
+  cron() {
+    return cron(this.schedule());
+  }
+  /** Re-applies the per-type row visibility and preview. The task form calls this
+   *  after showing the picker again (switching the trigger back to cron), which
+   *  unhides every row wholesale. */
+  refresh() {
+    this.sync();
+  }
+  /** A user-facing message for an unsavable schedule, or null when it is good to
+   *  save. The daemon re-validates the expression itself (it always has); these are
+   *  the picker-level constraints that would otherwise generate a nonsense cron. */
+  validate() {
+    if (this.type === "custom" && this.rawInput.value.trim() === "") {
+      return "A cron expression is required for a cron task.";
+    }
+    if (this.type === "weekly" && this.weekdaysOn.size === 0) {
+      return "Select at least one day of the week.";
+    }
+    return null;
+  }
+  /** Shows only the cells the selected type needs, and refreshes the preview + the
+   *  read-only generated cron. Runs on every edit, so what the user reads is always
+   *  what a submit would store. */
+  sync() {
+    const type = this.type;
+    const isClock = type === "daily" || type === "weekly" || type === "monthly";
+    this.intervalRow.hidden = type !== "everyNMinutes" && type !== "everyNHours";
+    this.intervalUnit.textContent = type === "everyNHours" ? "hours" : "minutes";
+    this.intervalInput.max = type === "everyNHours" ? "23" : "59";
+    this.timeRow.hidden = !isClock && type !== "hourly";
+    this.hourGroup.hidden = !isClock;
+    this.meridiemSelect.hidden = !isClock;
+    this.timeLabel.textContent = isClock ? "Time" : "Minute past the hour";
+    this.weekdayRow.hidden = type !== "weekly";
+    this.domRow.hidden = type !== "monthly";
+    this.rawRow.hidden = type !== "custom";
+    for (let i = 0; i < this.weekdayButtons.length; i++) {
+      const on = this.weekdaysOn.has(WEEKDAY_DISPLAY[i].weekday);
+      this.weekdayButtons[i].setAttribute("aria-pressed", on ? "true" : "false");
+      this.weekdayButtons[i].classList.toggle("af-weekday-on", on);
+    }
+    const s = this.schedule();
+    this.humanLine.textContent = describe(s);
+    this.cronOut.value = cron(s);
+  }
+};
+function pad22(n) {
+  return String(n).padStart(2, "0");
+}
 function taskFormModal(opts) {
   const { handle, body, confirmBtn } = modalChrome({
     title: opts.title,
@@ -9548,17 +10031,20 @@ function taskFormModal(opts) {
   triggerSelect.setAttribute("aria-label", "Trigger type");
   triggerSelect.append(h("option", { value: "cron" }, "Cron schedule"));
   triggerSelect.append(h("option", { value: "watch" }, "Watch command"));
-  const cronInput = h("input", { type: "text", class: "af-input", placeholder: "0 9 * * *", autocomplete: "off" });
-  cronInput.setAttribute("aria-label", "Cron expression");
-  const cronField = field("Cron expression", cronInput);
+  const picker = new SchedulePicker();
   const watchInput = h("input", { type: "text", class: "af-input", placeholder: "tail -F events.log", autocomplete: "off" });
   watchInput.setAttribute("aria-label", "Watch command");
   const watchField = field("Watch command", watchInput);
   watchField.hidden = true;
   const syncTriggerFields = () => {
     const isWatch = triggerSelect.value === "watch";
-    cronField.hidden = isWatch;
+    for (const row of picker.rows) {
+      row.hidden = isWatch;
+    }
     watchField.hidden = !isWatch;
+    if (!isWatch) {
+      picker.refresh();
+    }
   };
   triggerSelect.addEventListener("change", syncTriggerFields);
   const promptArea = h("textarea", { class: "af-input af-textarea", placeholder: "Prompt to deliver ({{line}} for the watch line)", rows: 3 });
@@ -9576,7 +10062,7 @@ function taskFormModal(opts) {
     nameInput.value = s.name ?? "";
     const isWatch = !!(s.watch_cmd && s.watch_cmd.trim() !== "");
     triggerSelect.value = isWatch ? "watch" : "cron";
-    cronInput.value = s.cron_expr ?? "";
+    picker.seed(s.cron_expr ?? "");
     watchInput.value = s.watch_cmd ?? "";
     syncTriggerFields();
     promptArea.value = s.prompt ?? "";
@@ -9590,7 +10076,7 @@ function taskFormModal(opts) {
     field("Name", nameInput),
     field("Project", projectSelect),
     field("Trigger", triggerSelect),
-    cronField,
+    ...picker.rows,
     watchField,
     field("Prompt", promptArea),
     field("Target session", targetInput),
@@ -9600,17 +10086,18 @@ function taskFormModal(opts) {
   asForm(card, () => {
     const trigger = triggerSelect.value === "watch" ? "watch" : "cron";
     const name = nameInput.value.trim();
-    const cron = cronInput.value.trim();
     const watchCmd = watchInput.value.trim();
     const prompt = promptArea.value.trim();
     if (name === "" || projectSelect.value === "") {
       handle.setError("A name and a project are required.");
       return;
     }
-    if (trigger === "cron" && cron === "") {
-      handle.setError("A cron expression is required for a cron task.");
+    const scheduleErr = trigger === "cron" ? picker.validate() : null;
+    if (scheduleErr !== null) {
+      handle.setError(scheduleErr);
       return;
     }
+    const cron2 = trigger === "cron" ? picker.cron() : "";
     if (trigger === "cron" && prompt === "") {
       handle.setError("A prompt is required for a cron task.");
       return;
@@ -9624,7 +10111,7 @@ function taskFormModal(opts) {
       name,
       projectPath: projectSelect.value,
       trigger,
-      cron,
+      cron: cron2,
       watchCmd,
       prompt: promptArea.value,
       targetSession: targetInput.value.trim(),
