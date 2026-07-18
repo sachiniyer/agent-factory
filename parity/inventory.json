@@ -697,16 +697,15 @@
         "pointer": "ui/task_pane.go:362 (enter) -> ui/task_pane_edit.go form"
       },
       "web": {
-        "status": "partial",
-        "pointer": "web/src/index.ts:854-865 sends only {enabled}; no edit form exists"
+        "status": "yes",
+        "pointer": "web/src/tasks.ts editTaskModal (seeded from the task) -> web/src/index.ts openEditTask sends a field-level TaskUpdate patch via api.ts updateTask"
       },
       "cli": {
         "status": "yes",
         "pointer": "api/tasks.go:270 tasksUpdateCmd (7 fields)"
       },
-      "verdict": "real-gap",
-      "issue": "#1935",
-      "notes": "The web can create a task but never change it: the only UpdateTask call site is the enable/disable toggle. Its TS TaskUpdate type (web/src/types.ts:174-182) also omits project_path, so that field is unreachable from the web even in principle. To fix a typo'd cron the user must delete and re-add."
+      "verdict": "parity",
+      "notes": "Closed by #1935: the Edit action opens the add-task form seeded from the task and submits the changed fields to UpdateTask. project_path is now in the web TS TaskUpdate (web/src/types.ts) and sent by the edit call site, so every field the create form collects is editable."
     },
     {
       "id": "task.toggle",
@@ -1076,15 +1075,15 @@
         "pointer": "ui/task_pane_edit.go:135 edits ProjectPath; the patch is task.DiffTask over the edited task.Task (ui/task_pane_state.go:91)"
       },
       "web": {
-        "status": "no",
-        "pointer": "web/src/types.ts:174-182 TaskUpdate omits project_path"
+        "status": "yes",
+        "pointer": "web/src/tasks.ts editTaskModal project picker (seeded, editable) -> web/src/index.ts openEditTask sends update.project_path"
       },
       "cli": {
         "status": "no",
         "pointer": "api/api.go:644-650 af tasks update has no --project-path flag"
       },
       "verdict": "unclear",
-      "notes": "Found mechanically by the nested-payload derivation, not by hand: task.TaskUpdate.ProjectPath is reachable only from the TUI. Overlaps #1891 (tasks add should surface and guard the resolved project binding), so it wants triaging with that rather than a fresh issue. The web half is subsumed by #1935 (the web cannot edit a task at all)."
+      "notes": "The web half was subsumed by #1935 and is now closed: the edit form's project picker is seeded from the task and can move it to another project, so the edit call site sends update.project_path. The CLI still cannot — `af tasks update` has no --project-path flag. That remaining CLI gap overlaps #1891 (tasks add should surface and guard the resolved project binding), so it wants triaging with that rather than a fresh issue."
     },
     {
       "id": "cli.shell-completion",
@@ -1827,27 +1826,6 @@
         }
       },
       "UpdateTask": {
-        "update.project_path": {
-          "gap": "task.edit.project-path"
-        },
-        "update.cron_expr": {
-          "gap": "task.edit"
-        },
-        "update.name": {
-          "gap": "task.edit"
-        },
-        "update.program": {
-          "gap": "task.edit"
-        },
-        "update.prompt": {
-          "gap": "task.edit"
-        },
-        "update.target_session": {
-          "gap": "task.edit"
-        },
-        "update.watch_cmd": {
-          "gap": "task.edit"
-        },
         "update.max_concurrent_runs": {
           "gap": "task.max-concurrent-runs"
         },

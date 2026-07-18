@@ -198,10 +198,18 @@ func TestDerivationSeesPreviewTabGap(t *testing.T) {
 	}
 }
 
-// TestDerivationSeesNestedProjectPathGap pins the wrapper case behind #1935.
-// UpdateTask is {id, update}: a top-level-only check calls it covered the moment
-// the web sends `update`, hiding every option inside task.TaskUpdate. This is the
-// exact shape that hid project_path.
+// TestDerivationSeesNestedProjectPathGap pins the wrapper case that motivated
+// #1935. UpdateTask is {id, update}: a top-level-only check calls it covered the
+// moment the web sends `update`, hiding every option inside task.TaskUpdate —
+// exactly how project_path stayed invisible.
+//
+// #1935 LANDED (like #1968 for the sibling fixture above): the web now edits tasks,
+// and its edit call site sends project_path as an inline literal. So this fixture
+// asserts the reverse of what it did before — project_path is IN the TS interface
+// AND reachable BY VALUE (the derivation real coverage uses) — while still proving
+// the recursion and the CLI-side assignment walk see what they must. The CLI has no
+// --project-path flag, so the assignment walk must still report TaskUpdate.ProjectPath
+// unreached: the surviving CLI half of task.edit.project-path.
 func TestDerivationSeesNestedProjectPathGap(t *testing.T) {
 	paths := jsonFieldPaths(auditedRequests["UpdateTaskRequest"])
 	var nested []string
@@ -217,15 +225,16 @@ func TestDerivationSeesNestedProjectPathGap(t *testing.T) {
 	}
 	if !contains(nested, "update.project_path") {
 		t.Fatal("update.project_path is not in the derived field paths — the recursion is blind " +
-			"to the very field that motivated it (task/task.go:428)")
+			"to the very field that motivated it (task/task.go:566)")
 	}
 
-	// The web's contract for the payload is its TS interface; project_path is
-	// absent from it (web/src/types.ts:174-182) while the other options are not.
+	// #1935 landed: project_path is now in the web's TS TaskUpdate (web/src/types.ts),
+	// alongside the options that were always there. If it disappears the fix was
+	// reverted — flip task.edit.project-path's web cell back to `no`.
 	ts := webTSInterfaceFields(t, "TaskUpdate")
-	if ts["project_path"] {
-		t.Error("web/src/types.ts TaskUpdate now has project_path. If the gap was fixed, " +
-			"update task.edit.project-path and retire this fixture.")
+	if !ts["project_path"] {
+		t.Error("web/src/types.ts TaskUpdate no longer has project_path — #1935 was reverted; " +
+			"flip task.edit's web cell back to `partial` and task.edit.project-path's to `no`.")
 	}
 	for _, f := range []string{"name", "prompt", "cron_expr", "enabled"} {
 		if !ts[f] {
@@ -234,8 +243,26 @@ func TestDerivationSeesNestedProjectPathGap(t *testing.T) {
 		}
 	}
 
+	// The interface says what is POSSIBLE; coverage keys off what the web SENDS. Prove
+	// the edit call site reaches project_path (and enabled, via the toggle) BY VALUE —
+	// the derivation the real check uses — and that no call site is unreadable (a
+	// variable body would silently blind the audit to the reach it derives here).
+	reach := webNestedValueReach(t, "TaskUpdate")
+	if len(reach.Unanalyzable) > 0 {
+		t.Errorf("web TaskUpdate has call sites the value walk cannot read: %v — the audit would "+
+			"go blind on the reach it derives from them.", reach.Unanalyzable)
+	}
+	for _, f := range []string{"project_path", "name", "prompt", "cron_expr", "enabled"} {
+		if !reach.Fields[f] {
+			t.Errorf("the web does not reach TaskUpdate.%s by value (sites: %v) — #1935's edit "+
+				"call site must send it as an inline literal, or the coverage credit is fiction.",
+				f, reach.Sites)
+		}
+	}
+
 	// The CLI reaches the payload field-by-field (`patch.Name = …`), not as a
-	// literal, so this also proves the assignment-tracking half of the walk.
+	// literal, so this also proves the assignment-tracking half of the walk. It still
+	// has no --project-path flag, so ProjectPath must stay unreached.
 	typeUse := deriveTypeFieldUse(t, "cli")
 	fields := typeUse["task.TaskUpdate"]
 	if len(fields) == 0 {

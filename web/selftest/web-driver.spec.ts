@@ -1954,6 +1954,99 @@ test("tasks view (#1592 PR8): list the seeded task; add / trigger / remove round
   await expect(page.locator(".af-rail-list")).toBeVisible();
 });
 
+test("tasks view edit (#1935): the Edit form is seeded from the task, and a changed cron/prompt PERSISTS", async () => {
+  // The gap this fixes: before #1935 the web could create a task but never change it —
+  // the only UpdateTask call was the enable toggle, and no edit form existed. This
+  // fails on the old bundle at the very first step (no "Edit" button in the row).
+  //
+  // Capture the AddTask (to learn the minted id) and UpdateTask (to prove the patch is
+  // a field-level UpdateTask keyed by that SAME stable id, #1678) request bodies.
+  let addedTaskId: string | undefined;
+  let updateBody: { id?: string; update?: Record<string, unknown> } | null = null;
+  await page.route("**/v1/AddTask", async (route) => {
+    addedTaskId = route.request().postDataJSON()?.task?.id;
+    await route.continue();
+  });
+  await page.route("**/v1/UpdateTask", async (route) => {
+    updateBody = route.request().postDataJSON();
+    await route.continue();
+  });
+
+  await page.locator('.af-viewtab[data-view="tasks"]').click();
+  const tasks = page.locator(".af-tasks");
+  await expect(tasks).toBeVisible();
+
+  // Seed a task of our own to edit (so this test never mutates the harness's seeded
+  // task, which other tests assert on). A cron task requires a prompt.
+  const named = `probe-edit-${Date.now().toString(36)}`;
+  const originalCron = "*/5 * * * *";
+  await tasks.locator(".af-tasks-add").click();
+  const addModal = page.locator(".af-modal-card");
+  await expect(addModal).toBeVisible();
+  await addModal.locator('input[aria-label="Task name"]').fill(named);
+  await addModal.locator('input[aria-label="Cron expression"]').fill(originalCron);
+  await addModal.locator('textarea[aria-label="Prompt"]').fill("echo original");
+  await addModal.locator("button.af-primary").click();
+
+  const editedRow = tasks.locator(".af-task-row", { hasText: named });
+  await expect(editedRow).toBeVisible({ timeout: 30_000 });
+  await expect(addModal).toBeHidden();
+  expect(addedTaskId, "AddTask must mint + send a stable task id").toBeTruthy();
+  await expect(editedRow.locator(".af-task-trigger")).toContainText(originalCron);
+
+  // Open the Edit form. It reuses the add-task modal in edit mode, SEEDED from the
+  // task's current values — proof the form is not a blank re-entry.
+  await editedRow.locator("button", { hasText: "Edit" }).click();
+  const editModal = page.locator(".af-modal-card");
+  await expect(editModal).toBeVisible();
+  await expect(editModal.locator(".af-modal-title")).toHaveText("Edit task");
+  await expect(editModal.locator('input[aria-label="Task name"]')).toHaveValue(named);
+  await expect(editModal.locator('input[aria-label="Cron expression"]')).toHaveValue(originalCron);
+  await expect(editModal.locator('textarea[aria-label="Prompt"]')).toHaveValue("echo original");
+
+  // Change the cron expression and the prompt, then save.
+  const newCron = "30 8 * * 1";
+  await editModal.locator('input[aria-label="Cron expression"]').fill(newCron);
+  await editModal.locator('textarea[aria-label="Prompt"]').fill("echo edited");
+  await editModal.locator("button.af-primary", { hasText: "Save" }).click();
+  await expect(editModal).toBeHidden();
+
+  // The UpdateTask patch is a field-level TaskUpdate keyed by the SAME id AddTask
+  // minted (never the name). It carries the changed fields plus project_path (#1935's
+  // type addition reaching the wire), and does NOT carry `enabled` — the edit form
+  // leaves the toggle's bit as-stored (the field-level merge, #1700).
+  expect(updateBody?.id, "UpdateTask must target the id AddTask minted").toBe(addedTaskId);
+  expect(updateBody?.update?.cron_expr).toBe(newCron);
+  expect(updateBody?.update?.watch_cmd, "switching to/keeping cron clears watch_cmd").toBe("");
+  expect(updateBody?.update?.prompt).toBe("echo edited");
+  expect(updateBody?.update?.project_path, "the edit reaches project_path (#1935)").toBeTruthy();
+  expect(updateBody?.update, "the edit patch omits `enabled` (the toggle owns it)").not.toHaveProperty("enabled");
+
+  // The row reflects the new trigger without a reload (the list refetched).
+  await expect(editedRow.locator(".af-task-trigger")).toContainText(newCron, { timeout: 30_000 });
+
+  // The real proof: RELOAD and re-fetch from the daemon. The new cron persisted, so
+  // the daemon actually applied the UpdateTask — not just an optimistic local echo.
+  await page.reload();
+  await expect(page.locator(".af-app")).toBeVisible();
+  await page.locator('.af-viewtab[data-view="tasks"]').click();
+  const reloadedRow = page.locator(".af-tasks .af-task-row", { hasText: named });
+  await expect(reloadedRow).toBeVisible({ timeout: 30_000 });
+  await expect(reloadedRow.locator(".af-task-trigger")).toContainText(newCron);
+  await expect(reloadedRow.locator(".af-task-trigger")).not.toContainText(originalCron);
+
+  // Clean up our task and return to the sessions view for the following flows.
+  await page.route("**/v1/RemoveTask", (route) => route.continue());
+  await reloadedRow.locator("button", { hasText: "Remove" }).click();
+  await expect(page.locator(".af-tasks .af-task-row", { hasText: named })).toHaveCount(0, { timeout: 30_000 });
+
+  await page.unroute("**/v1/AddTask");
+  await page.unroute("**/v1/UpdateTask");
+  await page.unroute("**/v1/RemoveTask");
+  await page.locator('.af-viewtab[data-view="sessions"]').click();
+  await expect(page.locator(".af-rail-list")).toBeVisible();
+});
+
 test.describe("create → kill (one session, two flows)", () => {
   // The ONE genuine ordering dependency in this file, and the only place serial
   // mode is warranted: create stashes the title it invented and kill consumes it,

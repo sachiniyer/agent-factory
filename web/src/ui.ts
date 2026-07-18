@@ -206,6 +206,8 @@ export interface Actions {
   resetStatusFilter(): void;
   /** Opens the add-task modal (#1592 Phase 5 PR8). */
   addTask(): void;
+  /** Opens the edit-task modal seeded from the task, submitting via UpdateTask (#1935). */
+  editTask(task: TaskData): void;
   /** Enables/disables a task via UpdateTask. */
   toggleTask(task: TaskData): void;
   /** Fires a task now via TriggerTask (enabled cron tasks). */
@@ -785,6 +787,7 @@ export class AppShell {
     // (scoped to the selected project) so a task.* event patches only that pane.
     this.tasksPane = new TasksPane({
       add: () => this.actions.addTask(),
+      edit: (task: TaskData) => this.actions.editTask(task),
       toggle: (task: TaskData) => this.actions.toggleTask(task),
       trigger: (task: TaskData) => this.actions.triggerTask(task),
       remove: (task: TaskData) => this.actions.removeTask(task),

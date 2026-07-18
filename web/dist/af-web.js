@@ -9498,7 +9498,9 @@ var TasksPane = class {
       t.enabled ? "Disable" : "Enable"
     );
     toggleBtn.addEventListener("click", () => this.actions.toggle(t));
-    const actionEls = [toggleBtn];
+    const editBtn = h("button", { type: "button", class: "af-ghost af-task-action" }, "Edit");
+    editBtn.addEventListener("click", () => this.actions.edit(t));
+    const actionEls = [toggleBtn, editBtn];
     if (canTrigger(t)) {
       const triggerBtn = h("button", { type: "button", class: "af-ghost af-task-action" }, "Trigger");
       triggerBtn.addEventListener("click", () => this.actions.trigger(t));
@@ -9511,29 +9513,29 @@ var TasksPane = class {
     return h("li", { class: "af-task-row" }, enabledDot, main, actions2);
   }
 };
-function addTaskModal(projects, defaultProject2, callbacks) {
+function taskFormModal(opts) {
   const { handle, body, confirmBtn } = modalChrome({
-    title: "Add task",
-    confirmLabel: "Add",
+    title: opts.title,
+    confirmLabel: opts.confirmLabel,
     confirmClass: "af-primary",
-    onCancel: callbacks.onCancel
+    onCancel: opts.onCancel
   });
   const nameInput = h("input", { type: "text", class: "af-input", placeholder: "Task name", autocomplete: "off" });
   nameInput.setAttribute("aria-label", "Task name");
   const projectSelect = h("select", { class: "af-input" });
   projectSelect.setAttribute("aria-label", "Project");
-  if (projects.length === 0) {
+  if (opts.projects.length === 0) {
     const opt = h("option", { value: "" }, "No projects yet \u2014 create a session first");
     opt.disabled = true;
     opt.selected = true;
     projectSelect.append(opt);
     confirmBtn.disabled = true;
   } else {
-    for (const p of projects) {
+    for (const p of opts.projects) {
       projectSelect.append(h("option", { value: p }, projectLabel(p)));
     }
-    if (defaultProject2 && projects.includes(defaultProject2)) {
-      projectSelect.value = defaultProject2;
+    if (opts.defaultProject && opts.projects.includes(opts.defaultProject)) {
+      projectSelect.value = opts.defaultProject;
     }
   }
   const triggerSelect = h("select", { class: "af-input" });
@@ -9547,11 +9549,12 @@ function addTaskModal(projects, defaultProject2, callbacks) {
   watchInput.setAttribute("aria-label", "Watch command");
   const watchField = field("Watch command", watchInput);
   watchField.hidden = true;
-  triggerSelect.addEventListener("change", () => {
+  const syncTriggerFields = () => {
     const isWatch = triggerSelect.value === "watch";
     cronField.hidden = isWatch;
     watchField.hidden = !isWatch;
-  });
+  };
+  triggerSelect.addEventListener("change", syncTriggerFields);
   const promptArea = h("textarea", { class: "af-input af-textarea", placeholder: "Prompt to deliver ({{line}} for the watch line)", rows: 3 });
   promptArea.setAttribute("aria-label", "Prompt");
   const targetInput = h("input", { type: "text", class: "af-input", placeholder: "Target session (optional)", autocomplete: "off" });
@@ -9561,6 +9564,21 @@ function addTaskModal(projects, defaultProject2, callbacks) {
   programSelect.append(h("option", { value: "" }, "Repo default"));
   for (const prog of ["claude", "codex", "aider", "gemini", "amp", "opencode"]) {
     programSelect.append(h("option", { value: prog }, prog));
+  }
+  if (opts.seed) {
+    const s = opts.seed;
+    nameInput.value = s.name ?? "";
+    const isWatch = !!(s.watch_cmd && s.watch_cmd.trim() !== "");
+    triggerSelect.value = isWatch ? "watch" : "cron";
+    cronInput.value = s.cron_expr ?? "";
+    watchInput.value = s.watch_cmd ?? "";
+    syncTriggerFields();
+    promptArea.value = s.prompt ?? "";
+    targetInput.value = s.target_session ?? "";
+    if (s.program && ![...programSelect.options].some((o) => o.value === s.program)) {
+      programSelect.append(h("option", { value: s.program }, s.program));
+    }
+    programSelect.value = s.program ?? "";
   }
   body.append(
     field("Name", nameInput),
@@ -9596,7 +9614,7 @@ function addTaskModal(projects, defaultProject2, callbacks) {
       return;
     }
     handle.setError(null);
-    callbacks.onSubmit({
+    opts.onSubmit({
       name,
       projectPath: projectSelect.value,
       trigger,
@@ -9609,6 +9627,27 @@ function addTaskModal(projects, defaultProject2, callbacks) {
   });
   queueMicrotask(() => nameInput.focus());
   return handle;
+}
+function addTaskModal(projects, defaultProject2, callbacks) {
+  return taskFormModal({
+    title: "Add task",
+    confirmLabel: "Add",
+    projects,
+    defaultProject: defaultProject2,
+    onSubmit: callbacks.onSubmit,
+    onCancel: callbacks.onCancel
+  });
+}
+function editTaskModal(projects, task, callbacks) {
+  return taskFormModal({
+    title: "Edit task",
+    confirmLabel: "Save",
+    projects,
+    defaultProject: task.project_path,
+    seed: task,
+    onSubmit: callbacks.onSubmit,
+    onCancel: callbacks.onCancel
+  });
 }
 
 // src/tabreorder.ts
@@ -9914,6 +9953,7 @@ var AppShell = class {
     this.sessionsBody = h2("div", { class: "af-body" }, rail, this.main, this.navScrim);
     this.tasksPane = new TasksPane({
       add: () => this.actions.addTask(),
+      edit: (task) => this.actions.editTask(task),
       toggle: (task) => this.actions.toggleTask(task),
       trigger: (task) => this.actions.triggerTask(task),
       remove: (task) => this.actions.removeTask(task)
@@ -11355,6 +11395,41 @@ function openAddTask() {
     })
   );
 }
+function openEditTask(task) {
+  const projects = pickerProjects(store.get().sessions, store.get().tasks);
+  openModal(
+    editTaskModal(projects, task, {
+      onSubmit: (input) => {
+        const tok = token;
+        if (tok === null || !modal) {
+          return;
+        }
+        const m = modal;
+        m.setBusy(true);
+        void updateTask(
+          task.id,
+          {
+            name: input.name,
+            prompt: input.prompt,
+            cron_expr: input.trigger === "cron" ? input.cron : "",
+            watch_cmd: input.trigger === "watch" ? input.watchCmd : "",
+            target_session: input.targetSession,
+            project_path: input.projectPath,
+            program: input.program
+          },
+          tok
+        ).then(() => {
+          closeModal();
+          refreshTasks();
+        }).catch((e) => {
+          m.setBusy(false);
+          m.setError(describeError(e));
+        });
+      },
+      onCancel: closeModal
+    })
+  );
+}
 function toggleTask(task) {
   const tok = token;
   if (tok === null) {
@@ -11424,6 +11499,7 @@ var actions = {
   setStatusFilter,
   resetStatusFilter,
   addTask: openAddTask,
+  editTask: openEditTask,
   toggleTask,
   triggerTask: doTriggerTask,
   removeTask: doRemoveTask,
