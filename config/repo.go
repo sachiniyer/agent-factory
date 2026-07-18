@@ -145,3 +145,60 @@ func repoContextFromRoot(root string) *RepoContext {
 		ID:   RepoIDFromRoot(root),
 	}
 }
+
+// ResolvedProject is a recorded project path resolved to its owning repository.
+// Root is "" when nothing could be resolved, which is what makes an invented
+// identity distinguishable from a real one.
+type ResolvedProject struct {
+	ID   string
+	Root string
+}
+
+// ResolveProjectPath maps a recorded project path to its owning repository.
+//
+// An EXISTING path — including a subdirectory or a linked worktree — resolves
+// through git to the main repo root, which is why identity matching (rather
+// than path-string equality) sees a task in its own project no matter which
+// directory it was created from.
+//
+// A path that no longer exists is the hard case. Hashing the stale leaf invents
+// an ID that equals nothing: the surviving project's ID is sha256 of ITS root,
+// never of a deleted child. That strands the record — hidden from its project
+// and unaddressable. So walk up to the nearest ANCESTOR that still resolves: a
+// deleted subdirectory of a surviving project resolves back to that project.
+//
+// The walk answers what git itself would say about the path if it existed, so
+// it cannot be more wrong than the path is. When nothing up the chain resolves,
+// fall back to the leaf hash — path equality, which at least keeps an orphan
+// addressable at its own recorded path — and report Root "" so callers can tell
+// this identity is derived rather than real.
+//
+// This is the ONE path→project-identity mechanism. It backs both the CLI's
+// project scoping (api/scope.go, #1893) and the TUI task pane's repo filter
+// (task.LoadTasksForRepo, #2098); they were separate rules until the latter's
+// raw path equality hid subdirectory-created tasks from their own pane.
+func ResolveProjectPath(projectPath string) ResolvedProject {
+	if repo, err := RepoFromPath(projectPath); err == nil {
+		return ResolvedProject{ID: repo.ID, Root: repo.Root}
+	}
+	cleaned := filepath.Clean(projectPath)
+	// Only walk an ABSOLUTE path. A relative one has no meaning independent of
+	// the current directory, so climbing it reaches "." and resolves to whatever
+	// repository the caller happens to be standing in — adopting a record into
+	// the current project on no evidence at all. That is the same invented
+	// identity the leaf hash produced, just harder to spot, so a relative path
+	// degrades to path equality instead. No supported writer records one (the
+	// CLI stores repo.Root, the TUI an absolute path), so this only guards
+	// hand-edited rows.
+	if filepath.IsAbs(cleaned) {
+		for dir := filepath.Dir(cleaned); ; dir = filepath.Dir(dir) {
+			if repo, err := RepoFromPath(dir); err == nil {
+				return ResolvedProject{ID: repo.ID, Root: repo.Root}
+			}
+			if parent := filepath.Dir(dir); parent == dir {
+				break // reached the filesystem root
+			}
+		}
+	}
+	return ResolvedProject{ID: RepoIDFromRoot(cleaned)}
+}
