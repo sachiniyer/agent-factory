@@ -342,6 +342,42 @@ _expect_attach_send_no_truncation() {
     )
 }
 
+# _expect_short_command_delivery_waits — regression proof for the SHORT-command
+# hole in the #1995 fix. _af_delivery_tail used a bare `${ws: -24}`, which bash
+# evaluates to the EMPTY string whenever the command is shorter than 24
+# characters (it does not clamp to the whole string). The empty tail then
+# satisfied _af_wait_for_line_echo's `[ -z "$tail" ]` short-circuit, so
+# af_send_line returned WITHOUT waiting — silently degrading back into the exact
+# race #1995 is about, for most real commands ('git status', 'ls -la', 'make').
+#
+# _expect_attach_send_no_truncation could not catch this: its command is 31
+# characters, so it always had a real tail. This drives the SHORT case directly.
+# shellcheck disable=SC2317  # dispatched indirectly via step(); not dead code.
+_expect_short_command_delivery_waits() {
+    (
+        local short='git status' tail rc=0
+
+        # 1. The tail of a short command must be non-empty, or every check below
+        #    it is vacuous.
+        tail="$(_af_delivery_tail "$short")"
+        if [ -z "$tail" ]; then
+            _af_fail "#1995: _af_delivery_tail('$short') is EMPTY — short commands skip the delivery wait entirely"
+            return 1
+        fi
+
+        # 2. Against a screen that NEVER echoes the command, the wait must FAIL
+        #    (time out). Returning 0 here is the bug: it reports delivery
+        #    confirmed for a paste that never arrived.
+        af_capture() { printf '%s\n' 'dev@host:~/sandbox/mock-repo$ '; }
+        _af_wait_for_line_echo "$short" 1 'short command never echoed' >/dev/null 2>&1 || rc=$?
+        if [ "$rc" -eq 0 ]; then
+            _af_fail "#1995: _af_wait_for_line_echo reported success for a short command that never echoed"
+            return 1
+        fi
+        return 0
+    )
+}
+
 # --- #1884/#1885 multi-tab pane cycling ---
 # The tab-cycling play-test that found #1884/#1885/#1886: on one instance with
 # several tabs, a pane-focused number key (1-9) jumps THAT pane, and the pane
@@ -642,6 +678,7 @@ step "detach (and prove the attach client was reaped)"      af_detach
 # never execute a truncated command the way a bare af_send_literal + af_send
 # Enter can. Deterministic stub proof — no live TUI.
 step "attach send-line does not submit a truncated command (#1995)" _expect_attach_send_no_truncation
+step "short commands still wait for their echo (#1995)"      _expect_short_command_delivery_waits
 
 step "assert selection survived attach/detach"              af_expect_selected beta
 step "assert no orphan tmux attach clients"                 af_assert_no_orphan_clients

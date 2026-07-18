@@ -219,7 +219,19 @@ _af_wait_for_pane_echo() {
 # be distinctive while short enough to stay within one line.
 _af_delivery_tail() {
     local ws; ws="$(printf '%s' "$1" | tr -d '[:space:]')"
-    printf '%s' "${ws: -24}"
+    # Bash evaluates ${ws: -N} to the EMPTY STRING when N exceeds the string's
+    # length — it does NOT clamp to the whole string (zsh does, which is exactly
+    # what makes this easy to get wrong). An empty tail then satisfies the
+    # `[ -z "$tail" ]` short-circuit in _af_wait_for_line_echo, which "confirms"
+    # delivery on the first iteration WITHOUT waiting — silently degrading
+    # af_send_line back into the naive send-then-Enter race (#1995) for every
+    # command under 24 characters, i.e. most real commands. Fall back to the
+    # whole stripped string when it is shorter than the window.
+    if [ "${#ws}" -le 24 ]; then
+        printf '%s' "$ws"
+    else
+        printf '%s' "${ws: -24}"
+    fi
 }
 
 # _af_wait_for_line_echo <text> [timeout_s] [label] — wait until <text> has FULLY
