@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"regexp"
+	"strings"
 	"time"
 
 	"github.com/sachiniyer/agent-factory/log"
@@ -20,10 +21,16 @@ const defaultLimitRetryInterval = "30m"
 // at load (sanitizeLimitRetryInterval), so a parse error here degrades safely to
 // 0 — surface-only for a no-parseable-reset-time limit.
 func (c *Config) LimitRetryIntervalDuration() time.Duration {
-	if c.LimitRetryInterval == "" {
+	// Trim before parsing so a whitespace-padded hand-edit still yields the
+	// intended cadence rather than degrading to 0 (which silently disables the
+	// fixed-interval fallback). sanitizeLimitRetryInterval already stores a
+	// trimmed value, so this is defense-in-depth for any value that reaches the
+	// consumer without passing through the loader (#2009).
+	v := strings.TrimSpace(c.LimitRetryInterval)
+	if v == "" {
 		return 0
 	}
-	d, err := time.ParseDuration(c.LimitRetryInterval)
+	d, err := time.ParseDuration(v)
 	if err != nil || d < 0 {
 		return 0
 	}
@@ -36,10 +43,16 @@ func (c *Config) LimitRetryIntervalDuration() time.Duration {
 // warns and falls back to the default so a typo can neither silently disable
 // auto-resume nor mis-time it.
 func sanitizeLimitRetryInterval(raw, prettyConfigPath string) string {
-	if raw == "" {
+	// Trim first: a stray leading/trailing space is an unambiguous hand-edit
+	// typo, and time.ParseDuration rejects " 30s ". Without this the value would
+	// fail to parse and be replaced by the default with the user's intended
+	// interval silently thrown away (#2009). The parsed value is stored trimmed
+	// so the consumer sees a canonical duration string.
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
 		return ""
 	}
-	d, err := time.ParseDuration(raw)
+	d, err := time.ParseDuration(trimmed)
 	if err != nil {
 		log.WarningLog.Printf("Config issue in %s: limit_retry_interval=%q is not a valid duration (%v); using default %q",
 			prettyConfigPath, raw, err, defaultLimitRetryInterval)
@@ -50,7 +63,7 @@ func sanitizeLimitRetryInterval(raw, prettyConfigPath string) string {
 			prettyConfigPath, raw, defaultLimitRetryInterval)
 		return defaultLimitRetryInterval
 	}
-	return raw
+	return trimmed
 }
 
 // validateLimitRetryIntervalValue applies sanitizeLimitRetryInterval's rules as
@@ -63,6 +76,12 @@ func sanitizeLimitRetryInterval(raw, prettyConfigPath string) string {
 // rejects on set): a typo the loader would quietly turn into 30m should be told
 // to the user at the moment they typed it, rather than silently mis-timing
 // auto-resume later.
+//
+// Whitespace is intentionally NOT trimmed here, unlike the loader (#2009): a
+// hand-edited config.toml with a stray space is honored leniently on load, but
+// a value passed explicitly to `af config set` is strict input — rejecting
+// " 30s " with a message naming the value is honest and actionable, not a
+// silent default, so it stays a hard error.
 func validateLimitRetryIntervalValue(value string) error {
 	if value == "" {
 		return nil

@@ -1,7 +1,9 @@
 package preflight
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -11,6 +13,19 @@ import (
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/shellsuggest"
 	"github.com/sachiniyer/agent-factory/session/tmux"
+)
+
+// Program-check outcome sentinels let ProgramError classify a CheckCommand
+// failure by kind instead of string-matching. A missing binary is "not
+// installed"; a present-but-unrunnable one needs chmod, not a reinstall —
+// collapsing the two sends the user to fix the wrong thing (#2010).
+var (
+	// errProgramNotFound: the executable could not be located — no such file, or
+	// absent from PATH.
+	errProgramNotFound = errors.New("not installed or not on PATH")
+	// errProgramNotExecutable: the executable exists but cannot be run (its
+	// permission bits are clear).
+	errProgramNotExecutable = errors.New("found but not executable")
 )
 
 // ProgramCheck describes the executable a configured agent command resolves to.
@@ -74,20 +89,23 @@ func CheckCommand(command string) (*ProgramCheck, error) {
 		path := config.ExpandTilde(exe)
 		info, err := os.Stat(path)
 		if err != nil {
-			return check, fmt.Errorf("executable %q does not exist", exe)
+			if os.IsNotExist(err) {
+				return check, fmt.Errorf("%w: executable %q does not exist", errProgramNotFound, exe)
+			}
+			return check, fmt.Errorf("executable %q could not be checked: %w", exe, err)
 		}
 		if info.IsDir() {
-			return check, fmt.Errorf("executable %q is a directory", exe)
+			return check, fmt.Errorf("executable %q is a directory, not a program", exe)
 		}
 		if info.Mode().Perm()&0o111 == 0 {
-			return check, fmt.Errorf("executable %q is not executable; run: %s", exe, shellsuggest.Command("chmod", "+x", path))
+			return check, fmt.Errorf("%w: executable %q is not executable; run: %s", errProgramNotExecutable, exe, shellsuggest.Command("chmod", "+x", path))
 		}
 		check.Path = path
 		return check, nil
 	}
 	path, err := exec.LookPath(exe)
 	if err != nil {
-		return check, fmt.Errorf("executable %q was not found on PATH", exe)
+		return check, fmt.Errorf("%w: executable %q was not found on PATH", errProgramNotFound, exe)
 	}
 	check.Path = path
 	return check, nil
@@ -105,15 +123,54 @@ func LocalSessionPrereqs(cfg *config.Config, agent string) error {
 	return nil
 }
 
-// ProgramError renders the actionable user-facing error for a missing agent.
+// ProgramError renders the actionable user-facing error for an agent that
+// failed its preflight check. It classifies the cause so the lead line points
+// at the real fix: a missing binary says "not installed or not on PATH" (fix:
+// install), a present-but-non-executable one says "found but not executable"
+// with a chmod hint (fix: chmod +x, NOT reinstall), and anything else reports
+// the actual error rather than a misleading not-installed message (#2010).
 func ProgramError(agent, command string, cause error) error {
 	name := agentDisplayName(agent)
-	if isSupportedAgent(agent) {
-		return fmt.Errorf("%s is not installed or not on PATH (resolved command: %q). Install %s, choose another agent, or set program_overrides.%s in ~/.agent-factory/config.toml. Details: %v",
-			name, command, name, agent, cause)
+	supported := isSupportedAgent(agent)
+
+	// subject and remediation are the supported/unsupported dimension, which is
+	// orthogonal to the failure kind below.
+	subject := name
+	remediation := fmt.Sprintf("set program_overrides.%s in ~/.agent-factory/config.toml", agent)
+	if !supported {
+		subject = fmt.Sprintf("program %q", agent)
+		remediation = "fix the command in config"
 	}
-	return fmt.Errorf("program %q is not installed or not on PATH (resolved command: %q). Install it, choose another agent, or fix the command in config. Details: %v",
-		agent, command, cause)
+
+	switch {
+	case isNotExecutable(cause):
+		return fmt.Errorf("%s was found but is not executable (resolved command: %q). Make it executable (chmod +x), choose another agent, or %s. Details: %v",
+			subject, command, remediation, cause)
+	case isNotFound(cause):
+		installWord := name
+		if !supported {
+			installWord = "it"
+		}
+		return fmt.Errorf("%s is not installed or not on PATH (resolved command: %q). Install %s, choose another agent, or %s. Details: %v",
+			subject, command, installWord, remediation, cause)
+	default:
+		return fmt.Errorf("%s could not be started (resolved command: %q). Choose another agent, or %s. Details: %v",
+			subject, command, remediation, cause)
+	}
+}
+
+// isNotExecutable reports whether cause is a present-but-unrunnable binary — a
+// permission problem that chmod, not a reinstall, fixes.
+func isNotExecutable(cause error) bool {
+	return errors.Is(cause, errProgramNotExecutable) || errors.Is(cause, fs.ErrPermission)
+}
+
+// isNotFound reports whether cause is a genuinely-absent binary, whether from a
+// resolved path that does not exist or a bare name absent from PATH.
+func isNotFound(cause error) bool {
+	return errors.Is(cause, errProgramNotFound) ||
+		errors.Is(cause, fs.ErrNotExist) ||
+		errors.Is(cause, exec.ErrNotFound)
 }
 
 func agentDisplayName(agent string) string {

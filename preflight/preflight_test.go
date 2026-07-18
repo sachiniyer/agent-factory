@@ -1,7 +1,6 @@
 package preflight
 
 import (
-	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -75,10 +74,64 @@ func TestCheckCommandRejectsNonExecutablePath(t *testing.T) {
 }
 
 func TestProgramErrorDisplaysAmp(t *testing.T) {
-	err := ProgramError(tmux.ProgramAmp, "amp", errors.New("missing"))
+	err := ProgramError(tmux.ProgramAmp, "amp", errProgramNotFound)
 	if !strings.Contains(err.Error(), "Amp is not installed") {
 		t.Fatalf("ProgramError() = %q, want Amp display name", err.Error())
 	}
+}
+
+// TestProgramErrorClassifiesNotExecutable is the #2010 regression lock: a
+// present-but-non-executable binary is a permission problem, and the error must
+// point the user at chmod, NOT at reinstalling. Collapsing this into "not
+// installed or not on PATH" sends them to fix the wrong thing.
+func TestProgramErrorClassifiesNotExecutable(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "fake-agent")
+	if err := os.WriteFile(path, []byte("#!/bin/sh\n"), 0o644); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+	_, cause := CheckCommand(path)
+	if cause == nil {
+		t.Fatal("CheckCommand should reject a non-executable path")
+	}
+	msg := ProgramError(tmux.ProgramClaude, path, cause).Error()
+	if strings.Contains(msg, "not installed") {
+		t.Errorf("ProgramError() = %q, must NOT say \"not installed\" for a permission error", msg)
+	}
+	if !strings.Contains(msg, "not executable") {
+		t.Errorf("ProgramError() = %q, want a \"not executable\" message", msg)
+	}
+	if !strings.Contains(msg, "chmod") {
+		t.Errorf("ProgramError() = %q, want the chmod remediation", msg)
+	}
+}
+
+// TestProgramErrorClassifiesMissing pins the other half: a genuinely-absent
+// binary still reports "not installed or not on PATH" (via both a resolved path
+// that does not exist and a bare name absent from PATH).
+func TestProgramErrorClassifiesMissing(t *testing.T) {
+	t.Run("absolute path does not exist", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "definitely-absent")
+		_, cause := CheckCommand(path)
+		if cause == nil {
+			t.Fatal("CheckCommand should reject an absent path")
+		}
+		msg := ProgramError(tmux.ProgramClaude, path, cause).Error()
+		if !strings.Contains(msg, "not installed or not on PATH") {
+			t.Errorf("ProgramError() = %q, want the not-installed message", msg)
+		}
+	})
+
+	t.Run("bare name not on PATH", func(t *testing.T) {
+		t.Setenv("PATH", t.TempDir())
+		_, cause := CheckCommand("definitely-absent-agent")
+		if cause == nil {
+			t.Fatal("CheckCommand should reject a bare name absent from PATH")
+		}
+		msg := ProgramError(tmux.ProgramClaude, "definitely-absent-agent", cause).Error()
+		if !strings.Contains(msg, "not installed or not on PATH") {
+			t.Errorf("ProgramError() = %q, want the not-installed message", msg)
+		}
+	})
 }
 
 // TestProgramErrorDisplaysOpencode pins opencode's display name to the LOWERCASE
@@ -93,7 +146,7 @@ func TestProgramErrorDisplaysAmp(t *testing.T) {
 // `program "opencode" is not installed` fallback, which offers no fix — so this
 // doubles as the first-class-agent lock.
 func TestProgramErrorDisplaysOpencode(t *testing.T) {
-	err := ProgramError(tmux.ProgramOpencode, "opencode", errors.New("missing"))
+	err := ProgramError(tmux.ProgramOpencode, "opencode", errProgramNotFound)
 
 	if !strings.Contains(err.Error(), "opencode is not installed") {
 		t.Fatalf("ProgramError() = %q, want lowercase opencode display name", err.Error())
