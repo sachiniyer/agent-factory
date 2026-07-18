@@ -116,6 +116,38 @@ func TestGeneralHelpOverlayFitsAndMarksScrollAt80x24(t *testing.T) {
 	require.Contains(t, out, "↑ more", "scrolled viewport must show overflow above")
 }
 
+// TestGeneralHelpStaysCenteredWhenScrolledAt80x24 is the #1998 regression: at
+// 80x24 the general help wraps to lines one cell past the box's text width, so
+// the overlay box grew a row per such visible line, overflowed the terminal,
+// and PlaceOverlay fell back to dumping the raw frame — a ~50-column fragment at
+// column 0 with its top border clipped and the surrounding TUI blank. Drive the
+// real Ctrl-D scroll path deep into (and past) the content through home.View()
+// and assert every composited frame stays the full 80x24 window (which the
+// overflow dump violates: it is only as wide as the box and taller than the
+// terminal). The overlay's own centering geometry is locked, over a blank
+// background, by TestTextOverlayStaysFramedWhenLinesSoftWrapPastWidth.
+func TestGeneralHelpStaysCenteredWhenScrolledAt80x24(t *testing.T) {
+	const termWidth, termHeight = 80, 24
+
+	h := newTestHome(t)
+	resizeHome(h, termWidth, termHeight)
+	_, _ = h.showHelpScreen(helpTypeGeneral{}, nil)
+
+	for step := 0; step < 30; step++ {
+		out := h.View()
+		// The whole-window contract: a taller-than-terminal box makes PlaceOverlay
+		// return the raw foreground, which is only box-wide and overflows the
+		// height — failing both the per-line width and the line-count checks here.
+		requireViewSized(t, out, termWidth, termHeight)
+		// A scroll marker proves the framed, scrollable overlay is actually
+		// composited on top — not that PlaceOverlay silently dropped it.
+		require.Containsf(t, out, "more", "step %d: the scrollable help overlay must stay on screen", step)
+
+		_, _ = h.handleHelpState(tea.KeyMsg{Type: tea.KeyCtrlD})
+		require.Equalf(t, stateHelp, h.state, "step %d: Ctrl-D must scroll, not dismiss the help overlay", step)
+	}
+}
+
 func TestGeneralHelpOverlayShiftArrowsScrollAt80x24(t *testing.T) {
 	h := newTestHome(t)
 	resizeHome(h, 80, 24)

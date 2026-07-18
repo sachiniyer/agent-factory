@@ -1,11 +1,13 @@
 package overlay
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
 	"github.com/muesli/ansi"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // wideContent produces content whose natural render width exceeds a typical
@@ -123,6 +125,83 @@ func TestTextOverlayScrollsContent(t *testing.T) {
 	overlay.ScrollUp()
 	rendered = overlay.Render()
 	assert.Contains(t, rendered, "title", "scrolling up returns toward the top")
+}
+
+// visibleColumnOf returns the printable column at which sub first appears in an
+// ANSI-styled line, or -1 if absent. Used to check where the box frame lands
+// after PlaceOverlay composites it, independent of the styling on the line.
+func visibleColumnOf(line, sub string) int {
+	idx := strings.Index(line, sub)
+	if idx < 0 {
+		return -1
+	}
+	return ansi.PrintableRuneWidth(line[:idx])
+}
+
+// TestTextOverlayStaysFramedWhenLinesSoftWrapPastWidth is the #1998 regression
+// guard at the component level. At 80x24 the general help wraps to lines one
+// cell past the box's text width; a *soft* wrapper (wordwrap) leaves them there
+// and lipgloss then re-wraps each into two rows, so the box grew one row per
+// such visible line, overflowed the terminal, and PlaceOverlay fell back to
+// dumping the raw frame at column 0 with its top border clipped. The wrap must
+// match lipgloss's own (ansi.Wrap) so one logical line is exactly one rendered
+// row; then the box height and centering hold at every scroll offset — even
+// scrolled past content-end.
+func TestTextOverlayStaysFramedWhenLinesSoftWrapPastWidth(t *testing.T) {
+	// Interleave the real help line that soft-wraps to textWidth+1 (44→45 at the
+	// 80x24 geometry) with filler so the overlay is tall enough to scroll.
+	var b strings.Builder
+	for i := 0; i < 30; i++ {
+		if i%3 == 0 {
+			b.WriteString("c              - Retry a session blocked at a usage\n")
+		} else {
+			b.WriteString(fmt.Sprintf("line %d filler text for the help body\n", i))
+		}
+	}
+	ov := NewTextOverlay(strings.TrimRight(b.String(), "\n"))
+	// 80x24 help geometry: width = int(0.6*80) = 48, height = 24 - 2 = 22.
+	const (
+		termWidth, termHeight = 80, 24
+		boxHeight             = termHeight - 2 // outer height layoutTextOverlay sets
+	)
+	ov.SetWidth(48)
+	ov.SetHeight(boxHeight)
+
+	bgLine := strings.Repeat(" ", termWidth)
+	bgLines := make([]string, termHeight)
+	for i := range bgLines {
+		bgLines[i] = bgLine
+	}
+	bg := strings.Join(bgLines, "\n")
+
+	// Drive the scroll offset from the top well past content-end.
+	for step := 0; step <= 40; step++ {
+		fg := ov.Render()
+		require.Equal(t, boxHeight, strings.Count(fg, "\n")+1,
+			"step %d: box must stay within its %d-row height budget", step, boxHeight)
+
+		placed := PlaceOverlay(0, 0, fg, bg, true)
+		lines := strings.Split(placed, "\n")
+		require.Len(t, lines, termHeight,
+			"step %d: composited view must stay exactly terminal height", step)
+
+		// The top border must be present and horizontally centered — never
+		// flush at column 0 (the raw-fg fallback signature).
+		topRow, topCol := -1, -1
+		for i, l := range lines {
+			if c := visibleColumnOf(l, "╭"); c >= 0 {
+				topRow, topCol = i, c
+				break
+			}
+		}
+		require.GreaterOrEqual(t, topRow, 0, "step %d: top border ╭ must be visible", step)
+		expectedCol := (termWidth - ansi.PrintableRuneWidth(strings.Split(fg, "\n")[0])) / 2
+		require.Greater(t, expectedCol, 0, "sanity: centered box must have a left margin")
+		require.Equal(t, expectedCol, topCol,
+			"step %d: box must stay centered, not collapse toward column 0", step)
+
+		ov.ScrollDown()
+	}
 }
 
 func TestTextOverlayHeightWindowsWrappedContent(t *testing.T) {
