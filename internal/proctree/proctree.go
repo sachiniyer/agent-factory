@@ -50,6 +50,23 @@ import (
 // never treat it as an empty result. Test with errors.Is.
 var ErrUnsupportedPlatform = errors.New("proctree: reading the process table is not supported on this platform")
 
+// ErrProcessExited is returned by the per-pid backend read when the PID names a
+// process that has already exited but whose parent has not yet collected its
+// exit status — a zombie on Linux, SZOMB on darwin.
+//
+// It is a POSITIVE finding, not a read failure, and that distinction is the
+// whole of #2103. Every existence-shaped check still finds a zombie: it keeps
+// its /proc entry, kill(pid, 0) succeeds, and a signal aimed at it is accepted
+// and does nothing. So a liveness check built on existence called corpses
+// "running", and the reapers waited out their entire budget — 3s per worktree
+// teardown, 6s per tmux one — for processes that had already exited, then
+// logged "survived SIGKILL" about them.
+//
+// Backends must report this rather than a generic error so the difference
+// between "it is gone" and "I could not look" stays legible; this package's
+// standing rule is that those two must never collapse into each other.
+var ErrProcessExited = errors.New("proctree: process has exited and is awaiting collection by its parent")
+
 // Process identifies one live process at snapshot time.
 type Process struct {
 	PID  int
@@ -145,6 +162,13 @@ func SessionMembers(snap map[int]Process, sid int) []Process {
 
 // AliveSame reports whether the same process instance (matching PID and start
 // identifier) is still running.
+//
+// RUNNING, not merely present in the process table: a zombie is neither, and
+// the backend reports it as ErrProcessExited (see #2103). Anything that cannot
+// be read is also reported as not-alive here — this is the one place where that
+// collapse is the safe direction, because every caller of AliveSame is deciding
+// whether to keep WAITING, and waiting forever on a process we cannot see is
+// worse than stopping early on one that is somehow still there.
 func AliveSame(p Process) bool {
 	cur, err := readProc(p.PID)
 	if err != nil {

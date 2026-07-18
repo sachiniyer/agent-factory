@@ -56,7 +56,12 @@ func snapshot() (map[int]Process, error) {
 		}
 		p, err := readProc(pid)
 		if err != nil {
-			// Process exited between ReadDir and the stat read; skip.
+			// Exited between ReadDir and the stat read, or exited already and
+			// is waiting to be collected (ErrProcessExited). A zombie has no
+			// children of its own — the kernel reparents them when a process
+			// exits, not when it is collected — so dropping it here loses no
+			// descendant, and keeping it would only hand the reapers a corpse
+			// to kill and then wait for. Skip.
 			continue
 		}
 		if bootErr == nil {
@@ -92,6 +97,12 @@ func bootTime() (time.Time, error) {
 // readProc parses /proc/<pid>/stat. Format: `pid (comm) state ppid ...`.
 // Comm may itself contain spaces and ')' — the parse anchors on the LAST ')'.
 //
+// A zombie is reported as ErrProcessExited rather than returned as a Process
+// (#2103). The state field is the ONLY thing that distinguishes a corpse here:
+// a zombie keeps its stat entry, its ppid, its session id and — the part that
+// defeated the identity check — its unchanging start time, so PID+StartID match
+// perfectly for a process that has already exited.
+//
 // StartedAt is deliberately left zero here: it needs boot time, which is a
 // per-snapshot fact rather than a per-process one. snapshot() fills it in.
 func readProc(pid int) (Process, error) {
@@ -114,6 +125,12 @@ func readProc(pid int) (Process, error) {
 	)
 	if len(fields) <= idxStart {
 		return Process{}, fmt.Errorf("truncated stat for pid %d", pid)
+	}
+	// Z is the zombie state; X/x is EXIT_DEAD, the sliver between the two halves
+	// of teardown. Neither will ever run again or answer a signal.
+	switch fields[0] {
+	case "Z", "X", "x":
+		return Process{}, ErrProcessExited
 	}
 	ppid, err := strconv.Atoi(fields[idxPPID])
 	if err != nil {

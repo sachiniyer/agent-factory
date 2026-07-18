@@ -65,12 +65,24 @@ func snapshot() (map[int]Process, error) {
 	return procs, nil
 }
 
+// szomb is SZOMB from <sys/proc.h>: the p_stat of a process that has exited
+// and is waiting for its parent to collect it. x/sys/unix exposes the P_stat
+// field but not the state constants, so the value is spelled out here.
+const szomb = 5
+
 // readProc reads one process's kinfo_proc. Returns an error when the pid names
 // no live process, which is what makes it usable as an identity check.
 func readProc(pid int) (Process, error) {
 	kp, err := unix.SysctlKinfoProc("kern.proc.pid", pid)
 	if err != nil {
 		return Process{}, err
+	}
+	// kern.proc.pid answers for zombies too, with ppid, session and start time
+	// all intact — so without this the identity check matches a process that
+	// has already exited. Same defect as the Linux state field, same fix
+	// (#2103); see ErrProcessExited.
+	if kp.Proc.P_stat == szomb {
+		return Process{}, ErrProcessExited
 	}
 	p, ok := processFromKinfo(kp)
 	if !ok {
@@ -79,10 +91,12 @@ func readProc(pid int) (Process, error) {
 	return p, nil
 }
 
-// processFromKinfo converts one kinfo_proc into a Process.
+// processFromKinfo converts one kinfo_proc into a Process. Zombies are refused
+// for the reason readProc gives: they are exited processes that every
+// existence-shaped check still finds.
 func processFromKinfo(kp *unix.KinfoProc) (Process, bool) {
 	pid := int(kp.Proc.P_pid)
-	if pid <= 0 {
+	if pid <= 0 || kp.Proc.P_stat == szomb {
 		return Process{}, false
 	}
 	// P_starttime is wall-clock (a timeval), unlike Linux's ticks-since-boot,
