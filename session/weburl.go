@@ -63,6 +63,11 @@ func IsLoopbackWebTarget(rawURL string) bool {
 
 // isLoopbackHost reports whether host is the loopback name or a loopback IP.
 func isLoopbackHost(host string) bool {
+	// A single trailing dot is the DNS root label: "localhost." and "127.0.0.1."
+	// are the rooted-FQDN forms of the same loopback host and resolve identically,
+	// so strip one before comparing (#2004). Only one dot is stripped — a doubled
+	// dot ("localhost..") is malformed and stays non-loopback, failing closed.
+	host = strings.TrimSuffix(host, ".")
 	if host == "" {
 		return false
 	}

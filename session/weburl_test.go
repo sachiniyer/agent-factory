@@ -58,6 +58,10 @@ func TestIsLoopbackWebTarget(t *testing.T) {
 		"http://127.0.0.1:5173",
 		"http://127.0.0.53/x",
 		"http://[::1]:8080",
+		// Rooted (trailing-dot) FQDN forms of the same loopback hosts — a
+		// browser treats "localhost." exactly as "localhost" (#2004).
+		"http://localhost.:3000",
+		"http://127.0.0.1.:5173",
 	}
 	for _, u := range loopback {
 		if !IsLoopbackWebTarget(u) {
@@ -69,10 +73,41 @@ func TestIsLoopbackWebTarget(t *testing.T) {
 		"http://192.168.1.10:3000",
 		"http://10.0.0.1/x",
 		"not a url",
+		// A rooted external name is still external — stripping the root dot
+		// must not turn a real remote host into loopback.
+		"https://example.com.",
 	}
 	for _, u := range external {
 		if IsLoopbackWebTarget(u) {
 			t.Errorf("IsLoopbackWebTarget(%q) = true, want false", u)
+		}
+	}
+}
+
+// TestIsLoopbackHostTrailingDot pins the loopback classifier directly on the
+// rooted-FQDN forms (#2004): "localhost." and "127.0.0.1." are the same host as
+// their unrooted forms and are loopback, while a doubled dot or a bare dot is
+// malformed and must fail closed as non-loopback.
+func TestIsLoopbackHostTrailingDot(t *testing.T) {
+	cases := []struct {
+		host string
+		want bool
+	}{
+		{"localhost", true},
+		{"localhost.", true},
+		{"LocalHost.", true},
+		{"127.0.0.1", true},
+		{"127.0.0.1.", true},
+		{"::1", true},
+		{"example.com", false},
+		{"example.com.", false},
+		{"", false},
+		{".", false},
+		{"localhost..", false},
+	}
+	for _, c := range cases {
+		if got := isLoopbackHost(c.host); got != c.want {
+			t.Errorf("isLoopbackHost(%q) = %v, want %v", c.host, got, c.want)
 		}
 	}
 }
