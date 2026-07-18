@@ -148,3 +148,35 @@ export function tabToKeepOnClose(ids: string[], closedIndex: number, activeIndex
   const keepIndex = closedIndex === activeIndex ? activeIndex - 1 : activeIndex;
   return ids[keepIndex] ?? "";
 }
+
+/** The tab ordinal a post-await pane rebind should land on, or -1 to leave the pane
+ *  where it is. The store-side twin of the layout guard, and the shared decision
+ *  createSessionTab and closeSessionTab both route through (#2000).
+ *
+ *  Both verbs await a round trip and then re-point the FOCUSED pane. splitView.trees
+ *  is per-session and setFocusedTab carries no session of its own, so a `targetIdx`
+ *  resolved against the roster the verb mutated must not be applied once the user has
+ *  formed a NEWER intent during the await:
+ *
+ *   - selection guard: the user selected another session (`currentSelId` moved off the
+ *     pinned `pinnedSelId`), so the ordinal names a tab in a session that is no longer
+ *     on screen — applying it re-points and attaches the wrong session's pane. This is
+ *     the #1815 finding, in the one place (create) its guard was never applied.
+ *   - generation guard: the user focused another pane or changed the layout, bumping
+ *     `layoutGeneration`; re-pointing from an intent formed before that yanks it back.
+ *
+ *  `targetIdx < 0` is the honest "the tab is gone" — the created/kept tab was closed
+ *  out-of-band during the await, or its session vanished — and -1 flows straight
+ *  through as "leave the pane where syncSplit's identity remap already settled it",
+ *  never a guess. Mirrors closeSessionTab's `next >= 0` and tabToKeepOnClose's -1. */
+export function rebindTargetAfterAwait(
+  pinnedGen: number,
+  pinnedSelId: string,
+  currentGen: number,
+  currentSelId: string | null,
+  targetIdx: number,
+): number {
+  // FAIL-FIRST STUB (#2000): models the shipped createSessionTab, which re-points the
+  // pane unconditionally with neither guard. The guarded body lands in the next commit.
+  return targetIdx;
+}
