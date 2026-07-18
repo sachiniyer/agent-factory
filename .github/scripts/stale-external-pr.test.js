@@ -104,6 +104,36 @@ test("change request exactly 12h old → CLOSE (boundary is inclusive)", () => {
   assert.equal(decide(pr, NOW).shouldClose, true);
 });
 
+// #2027: the grace check used to compare hoursBetween (rounded to tenths)
+// against STALE_HOURS. 11h57m is 11.95h, which rounds to 12.0 — not < 12 — so
+// the PR closed ~3 minutes before its grace window was actually up. The
+// comparison is now exact milliseconds.
+test("change request 11h57m old → KEEP (rounding must not end grace early)", () => {
+  const pr = forkPR({ reviews: [maintReview("CHANGES_REQUESTED", hoursAgo(11 + 57 / 60))] });
+  const d = decide(pr, NOW);
+  assert.equal(d.shouldClose, false, "grace ends at 12h exactly, not at the first age that rounds to 12h");
+  assert.match(d.reason, /grace/);
+});
+
+// The reported age is a log detail, but it must not contradict the decision it
+// accompanies: a message granting grace cannot quote an age >= the threshold.
+test("the grace message never reports an age at or past the threshold", () => {
+  for (const ageHours of [11 + 57 / 60, 11.99, 11.999]) {
+    const pr = forkPR({ reviews: [maintReview("CHANGES_REQUESTED", hoursAgo(ageHours))] });
+    const d = decide(pr, NOW);
+    assert.equal(d.shouldClose, false, `${ageHours}h is inside the grace window`);
+    const reported = Number(d.reason.match(/only ([\d.]+)h old/)[1]);
+    assert.ok(reported < 12, `grace message reported ${reported}h, which reads as already stale`);
+  }
+});
+
+// The exact comparison must not drift the other way either: a hair PAST 12h is
+// stale, even though it truncates to "12h" in the message.
+test("change request 12h01m old → CLOSE", () => {
+  const pr = forkPR({ reviews: [maintReview("CHANGES_REQUESTED", hoursAgo(12 + 1 / 60))] });
+  assert.equal(decide(pr, NOW).shouldClose, true);
+});
+
 // ---- Review ordering / decisional state --------------------------------------
 
 test("changes requested AFTER an earlier approval → CLOSE when stale", () => {
