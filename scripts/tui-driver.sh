@@ -133,14 +133,29 @@ af_wait_gone() {
     done
 }
 
-# _af_strip_screen_frame — remove the TUI frame columns from captured rows so
-# a terminal line wrapped inside a framed pane can be joined back together.
-_af_strip_screen_frame() {
-    sed -E 's/\r//g;
-            s/^[^│║┃┆┇┊┋]*[│║┃┆┇┊┋]//;
-            s/[│║┃┆┇┊┋][^│║┃┆┇┊┋]*$//;
-            s/^[[:space:]│║┃┆┇┊┋╭╮╰╯┌┐└┘╔╗╚╝╠╣╦╩╬─═]+//;
-            s/[[:space:]│║┃┆┇┊┋╭╮╰╯┌┐└┘╔╗╚╝╠╣╦╩╬─═]+$//'
+# _af_pane_column — for each captured row, the workspace pane's OWN text: the
+# cell between its box's two vertical borders (the second-to-last │-delimited
+# field). Rows with fewer than two borders — sidebar-only rows, the box's ─
+# top/bottom, an unframed full-screen capture — contribute nothing. Joined across
+# rows (via _af_join_lines_*), this reconstructs a line that wrapped INSIDE the
+# pane.
+#
+# It splits on the LITERAL │ (U+2502) string, which is locale-safe. The old
+# _af_strip_screen_frame used bracket expressions ([│…]); in the sandbox's C
+# locale GNU grep/sed match those byte-by-byte, so they matched only the first
+# byte of the 3-byte glyph and mangled the strip (the same trap _af_tab_count
+# documents). It also removed only the FIRST and LAST border, so the sidebar's
+# own tree-guide │ became the "first border" and its cell text leaked between the
+# marker's halves — the two ways #1994's split marker went unrecognized.
+_af_pane_column() {
+    awk -F'│' '
+        NF >= 3 {
+            cell = $(NF - 1)
+            gsub(/\r/, "", cell)
+            gsub(/^[[:space:]]+/, "", cell)
+            gsub(/[[:space:]]+$/, "", cell)
+            print cell
+        }'
 }
 
 _af_join_lines_tight() {
@@ -157,8 +172,9 @@ _af_squash_ws() {
 
 # _af_wait_for_pane_echo <literal> [timeout_s] [label] — wait for pane input
 # echo without assuming the marker remains on one captured row. The embedded
-# pane is framed by the TUI, so normalize both "wrap inside a word" and "wrap
-# at whitespace" cases before falling back to a whitespace-squashed comparison.
+# pane is framed by the TUI, so reconstruct the pane's own column and normalize
+# both "wrap inside a word" (tight join) and "wrap at whitespace" (spaced join)
+# before falling back to a whitespace-squashed comparison.
 _af_wait_for_pane_echo() {
     local text="$1" timeout="${2:-8}" label="${3:-pane echo}" screen
     local tight spaced spaced_ws text_ws
@@ -170,12 +186,12 @@ _af_wait_for_pane_echo() {
             return 0
         fi
 
-        tight="$(printf '%s\n' "$screen" | _af_strip_screen_frame | _af_join_lines_tight)"
+        tight="$(printf '%s\n' "$screen" | _af_pane_column | _af_join_lines_tight)"
         if printf '%s' "$tight" | grep -Fq -- "$text"; then
             return 0
         fi
 
-        spaced="$(printf '%s\n' "$screen" | _af_strip_screen_frame | _af_join_lines_spaced)"
+        spaced="$(printf '%s\n' "$screen" | _af_pane_column | _af_join_lines_spaced)"
         if printf '%s' "$spaced" | grep -Fq -- "$text"; then
             return 0
         fi
@@ -185,6 +201,56 @@ _af_wait_for_pane_echo() {
             return 0
         fi
 
+        if [ "$(_af_now)" -ge "$deadline" ]; then
+            _af_log "TIMEOUT ${timeout}s waiting for: $label"
+            _af_log "----- last screen -----"
+            printf '%s\n' "$screen" >&2
+            _af_log "-----------------------"
+            return 1
+        fi
+        sleep "$AF_DRIVER_POLL"
+    done
+}
+
+# _af_delivery_tail <text> — a distinctive whitespace-free suffix of <text>. A
+# racing Enter after a paste truncates the TAIL, so the tail is exactly what must
+# be on screen before it is safe to submit. Whitespace is removed so a wrap at
+# the terminal edge can't hide it; the last 24 non-space characters are enough to
+# be distinctive while short enough to stay within one line.
+_af_delivery_tail() {
+    local ws; ws="$(printf '%s' "$1" | tr -d '[:space:]')"
+    # Bash evaluates ${ws: -N} to the EMPTY STRING when N exceeds the string's
+    # length — it does NOT clamp to the whole string (zsh does, which is exactly
+    # what makes this easy to get wrong). An empty tail then satisfies the
+    # `[ -z "$tail" ]` short-circuit in _af_wait_for_line_echo, which "confirms"
+    # delivery on the first iteration WITHOUT waiting — silently degrading
+    # af_send_line back into the naive send-then-Enter race (#1995) for every
+    # command under 24 characters, i.e. most real commands. Fall back to the
+    # whole stripped string when it is shorter than the window.
+    if [ "${#ws}" -le 24 ]; then
+        printf '%s' "$ws"
+    else
+        printf '%s' "${ws: -24}"
+    fi
+}
+
+# _af_wait_for_line_echo <text> [timeout_s] [label] — wait until <text> has FULLY
+# echoed on an UNFRAMED (full-screen attach) screen. It matches a whitespace-free
+# tail of <text> against the whitespace-stripped screen, so a line that wrapped
+# at the terminal edge is still recognized. This is the full-screen counterpart
+# to _af_wait_for_pane_echo: there is no pane box to reconstruct, so stripping ALL
+# whitespace is both sufficient and locale-independent (pure ASCII compare).
+# Returns 0 on match, 1 on timeout.
+_af_wait_for_line_echo() {
+    local text="$1" timeout="${2:-8}" label="${3:-line echo}" screen tail screen_ws
+    tail="$(_af_delivery_tail "$text")"
+    local deadline; deadline=$(( $(_af_now) + timeout ))
+    while :; do
+        screen="$(af_capture)"
+        screen_ws="$(printf '%s' "$screen" | tr -d '[:space:]')"
+        if [ -z "$tail" ] || printf '%s' "$screen_ws" | grep -Fq -- "$tail"; then
+            return 0
+        fi
         if [ "$(_af_now)" -ge "$deadline" ]; then
             _af_log "TIMEOUT ${timeout}s waiting for: $label"
             _af_log "----- last screen -----"
@@ -454,9 +520,24 @@ af_select() {
             sleep "$AF_DRIVER_POLL"
         fi
         screen="$(af_capture)"
-        if printf '%s\n' "$screen" | grep -qE -- "▾[[:space:]]+${name_re}([[:space:]]|\$)" \
-           && printf '%s\n' "$screen" | grep -qE -- 'D kill'; then
+        printf '%s\n' "$screen" | grep -qE -- "▾[[:space:]]+${name_re}([[:space:]]|\$)" || continue
+        if printf '%s\n' "$screen" | grep -qE -- 'D kill'; then
             return 0
+        fi
+        # The target is display-selected (▾) but the footer is the pane menu, not
+        # 'D kill': moving the cursor onto an instance that already has an open
+        # workspace pane auto-focuses that pane, which replaces the tree footer
+        # AND stops the remaining scan keys from driving the tree (#1996). The
+        # instance IS selected — the pane could only be focused because of that —
+        # so restore tree focus and finalize instead of scanning fruitlessly to
+        # the boundary and reporting a false selection failure. This is NOT the
+        # #1759 sticky-header false positive: that shows the tree menu ('n new'),
+        # never the pane menu.
+        if printf '%s\n' "$screen" | grep -qE -- 'hide pane'; then
+            af_focus_tree || return 1
+            if af_capture | grep -qE -- "▾[[:space:]]+${name_re}([[:space:]]|\$)"; then
+                return 0
+            fi
         fi
     done
     _af_log "could not select '${name}' (need ▾ on its parent row AND cursor-on-tab, i.e. 'D kill' in the menu)"
@@ -562,6 +643,25 @@ af_send_to_pane() {
     af_send Enter
     _af_wait_for_pane_echo "$marker" 8 "pane echoed delivery marker for '$text'" \
         || _af_log "note: delivery marker for '$text' not seen echoed (may have scrolled off)"
+}
+
+# af_send_line <text> [timeout_s] — paste <text> into a FULL-SCREEN attach and
+# submit it, but only AFTER confirming the whole paste has landed in the input
+# line. In a full-screen attach, af_send_literal streams the bytes through the
+# raw attach proxy into the nested session; a following bare `af_send Enter` can
+# overtake the still-draining paste and execute a TRUNCATED command (#1995) — the
+# harness analog of submit.go's load-bearing drain wait, which the attach path
+# lacks. The driver can SEE the attached screen, so it asserts delivery (waits
+# for the text to echo) instead of guessing, then sends Enter. Use this rather
+# than a bare `af_send_literal … ; af_send Enter` whenever the submitted command
+# matters. Precondition: a full-screen attach is active (af_attach).
+af_send_line() {
+    local text="$1"
+    [ -n "$text" ] || { af_send Enter; return 0; }
+    af_send_literal "$text" || return 1
+    _af_wait_for_line_echo "$text" "${2:-8}" "attached input echoed '$text'" \
+        || _af_log "note: attached input for '$text' not confirmed; submitting best-effort"
+    af_send Enter
 }
 
 # af_attach — attach the selected instance full-screen (`o`). Precondition: an

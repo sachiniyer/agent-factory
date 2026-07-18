@@ -93,6 +93,27 @@ _expect_wrapped_send_no_timeout() {
     return "$rc"
 }
 
+# _expect_wrapped_marker_recognized — regression proof for #1994. When
+# af_send_to_pane's short delivery marker wraps INSIDE the framed pane, the
+# wrap-tolerant matcher must still recognize it instead of burning the full 8s
+# false timeout. Driven against a stubbed capture (no live TUI) that reproduces
+# the exact failing shape: the marker AF32561AE1 is split across two rows AND the
+# continuation row's sidebar cell carries a tree-guide │ — the extra border that
+# defeated the old one-pair frame strip, compounded by that strip's byte-wise
+# bracket matching in the container's C locale. A match on the first capture
+# returns immediately; a regression would loop to the 3s timeout and fail here.
+# shellcheck disable=SC2317  # dispatched indirectly via step(); not dead code.
+_expect_wrapped_marker_recognized() {
+    (
+        sleep() { :; }
+        af_capture() {
+            printf ' \xe2\x94\x9c 1 Agent     \xe2\x94\x82 dev@host:~/sandbox/mock-repo$ : "AF32561 \xe2\x94\x82\n'
+            printf ' \xe2\x94\x82 \xe2\x94\x94 2 Terminal \xe2\x94\x82 AE1"; sed -n 1,120p todo.sh        \xe2\x94\x82\n'
+        }
+        _af_wait_for_pane_echo 'AF32561AE1' 3 'wrapped delivery marker (#1994)'
+    )
+}
+
 # _enter_interactive_and_probe_literal_send — regression proof for #1504. The
 # literal sender used to pass the text as tmux command arguments, so leading
 # hyphens were parsed as flags and repeated semicolons were parsed as command
@@ -232,6 +253,131 @@ _expect_af_select_boundary() {
     )
 }
 
+# _expect_af_select_open_pane — regression proof for #1996. Scanning onto an
+# instance that already has an open workspace pane auto-focuses that pane, which
+# replaces the tree footer (removing 'D kill') and stops the scan keys from
+# driving the tree — so af_select used to exhaust its scan and report a false
+# selection failure even though the instance WAS selected. Stubbed (no live TUI):
+# a `j` counter flips the target to display-selected-with-pane-menu at the loop
+# midpoint, and af_focus_tree restores the tree footer. The old af_select never
+# saw 'D kill' and failed; the fixed one detects the pane menu, re-focuses the
+# tree, and finalizes.
+# shellcheck disable=SC2317  # dispatched indirectly via step(); not dead code.
+_expect_af_select_open_pane() {
+    (
+        _AF_OPENPANE_JCOUNT=0
+        _AF_OPENPANE_FOCUS=tree
+        af_ensure_nav() { :; }
+        # Restoring tree focus clears the pane menu (as the real af_focus_tree does).
+        af_focus_tree() { _AF_OPENPANE_FOCUS=tree; return 0; }
+        sleep() { :; }
+        af_send() {
+            if [ "${1:-}" = j ]; then
+                _AF_OPENPANE_JCOUNT=$((_AF_OPENPANE_JCOUNT + 1))
+                [ "$_AF_OPENPANE_JCOUNT" -ge 5 ] && _AF_OPENPANE_FOCUS=pane
+            fi
+            return 0
+        }
+        af_capture() {
+            if [ "$_AF_OPENPANE_JCOUNT" -lt 5 ]; then
+                printf '%s\n' ' ▸ target                       │ menu: n new'
+            elif [ "$_AF_OPENPANE_FOCUS" = pane ]; then
+                printf '%s\n' ' ▾ target                       │ ← prev pane • → next pane │ s open pane • x hide pane'
+            else
+                printf '%s\n' ' ▾ target                       │ menu: n new • D kill'
+            fi
+        }
+        af_select target
+    )
+}
+
+# _expect_attach_send_no_truncation — regression proof for #1995. In a
+# full-screen attach, a bare `af_send_literal … ; af_send Enter` can let the
+# Enter overtake a still-draining paste and execute a TRUNCATED command;
+# af_send_line must wait for the whole line to echo before submitting. Stubbed
+# (no live TUI): a file-backed counter reveals the pasted line ~8 chars per
+# capture (drain latency), and Enter "executes" whatever is visible at that
+# instant. First it proves the naive path truncates (so this stays a real
+# regression proof), then proves af_send_line delivers the whole command.
+# shellcheck disable=SC2317  # dispatched indirectly via step(); not dead code.
+_expect_attach_send_no_truncation() {
+    (
+        local state target submitted
+        state="$(mktemp "${TMPDIR:-/tmp}/af-1995.XXXXXX")" || return 1
+        target='git status --short && echo ATTACH_OK'
+        sleep() { :; }
+        _vis_for() {
+            local n="${1:-0}" reveal
+            reveal=$(( n * 8 ))
+            if [ "$reveal" -ge "${#target}" ]; then printf '%s' "$target"
+            else printf '%s' "${target:0:$reveal}"; fi
+        }
+        af_capture() {
+            local n; n="$(cat "$state" 2>/dev/null || echo 0)"; n=$(( n + 1 ))
+            printf '%s' "$n" > "$state"
+            printf 'dev@host:~/sandbox/mock-repo$ %s\n' "$(_vis_for "$n")"
+        }
+        af_send_literal() { printf '1' > "$state"; return 0; }
+        af_send() { [ "${1:-}" = Enter ] && submitted="$(_vis_for "$(cat "$state" 2>/dev/null || echo 0)")"; return 0; }
+
+        # 1. The naive sequence must truncate here, or the stub isn't reproducing
+        #    the race and the pass below would be meaningless.
+        printf '1' > "$state"; submitted='<none>'
+        af_send_literal "$target"; af_send Enter
+        if [ "$submitted" = "$target" ]; then
+            rm -f "$state"
+            _af_fail "#1995 stub did not reproduce truncation (naive path submitted the full line)"
+            return 1
+        fi
+
+        # 2. af_send_line waits for the whole line before Enter, so it submits it intact.
+        printf '1' > "$state"; submitted='<none>'
+        af_send_line "$target" 3
+        rm -f "$state"
+        if [ "$submitted" = "$target" ]; then
+            return 0
+        fi
+        _af_fail "#1995: af_send_line submitted a TRUNCATED command: [$submitted]"
+        return 1
+    )
+}
+
+# _expect_short_command_delivery_waits — regression proof for the SHORT-command
+# hole in the #1995 fix. _af_delivery_tail used a bare `${ws: -24}`, which bash
+# evaluates to the EMPTY string whenever the command is shorter than 24
+# characters (it does not clamp to the whole string). The empty tail then
+# satisfied _af_wait_for_line_echo's `[ -z "$tail" ]` short-circuit, so
+# af_send_line returned WITHOUT waiting — silently degrading back into the exact
+# race #1995 is about, for most real commands ('git status', 'ls -la', 'make').
+#
+# _expect_attach_send_no_truncation could not catch this: its command is 31
+# characters, so it always had a real tail. This drives the SHORT case directly.
+# shellcheck disable=SC2317  # dispatched indirectly via step(); not dead code.
+_expect_short_command_delivery_waits() {
+    (
+        local short='git status' tail rc=0
+
+        # 1. The tail of a short command must be non-empty, or every check below
+        #    it is vacuous.
+        tail="$(_af_delivery_tail "$short")"
+        if [ -z "$tail" ]; then
+            _af_fail "#1995: _af_delivery_tail('$short') is EMPTY — short commands skip the delivery wait entirely"
+            return 1
+        fi
+
+        # 2. Against a screen that NEVER echoes the command, the wait must FAIL
+        #    (time out). Returning 0 here is the bug: it reports delivery
+        #    confirmed for a paste that never arrived.
+        af_capture() { printf '%s\n' 'dev@host:~/sandbox/mock-repo$ '; }
+        _af_wait_for_line_echo "$short" 1 'short command never echoed' >/dev/null 2>&1 || rc=$?
+        if [ "$rc" -eq 0 ]; then
+            _af_fail "#1995: _af_wait_for_line_echo reported success for a short command that never echoed"
+            return 1
+        fi
+        return 0
+    )
+}
+
 # --- #1884/#1885 multi-tab pane cycling ---
 # The tab-cycling play-test that found #1884/#1885/#1886: on one instance with
 # several tabs, a pane-focused number key (1-9) jumps THAT pane, and the pane
@@ -347,6 +493,7 @@ step "assert beta is selected"                              af_expect_selected b
 # A row that only becomes actionable on the loop's boundary `j` used to be
 # missed (false selection failure). Deterministic stub proof — no live TUI.
 step "af_select evaluates the boundary step (#1759)"        _expect_af_select_boundary
+step "af_select handles a target with an open pane (#1996)"  _expect_af_select_open_pane
 
 # --- #1757 regression: the task-overlay run action ---
 # `m` drops straight into the selected task's EDIT form when a task exists, and
@@ -510,6 +657,7 @@ step "config editor refuses an invalid value with the CLI error"   _expect_confi
 step "open beta's tab as a pane"                            af_open_pane
 step "enter interactive mode and probe literal send"         _enter_interactive_and_probe_literal_send
 step "send a wrapped command without echo false-timeout"     _expect_wrapped_send_no_timeout
+step "recognize a delivery marker split by a pane wrap (#1994)" _expect_wrapped_marker_recognized
 # The command COMPUTES its marker (arithmetic expansion), so the sentinel we
 # assert on — SELFTEST_42 — appears ONLY in the command's output, never in the
 # echoed input line (which shows the literal $((6*7))). A shell that echoed
@@ -524,6 +672,13 @@ step "exit interactive mode"                                af_exit_interactive
 
 step "attach full-screen"                                   af_attach
 step "detach (and prove the attach client was reaped)"      af_detach
+
+# --- #1995 regression: a following Enter must not overtake an attach paste ---
+# af_send_line asserts the pasted line fully echoed before submitting, so it can
+# never execute a truncated command the way a bare af_send_literal + af_send
+# Enter can. Deterministic stub proof — no live TUI.
+step "attach send-line does not submit a truncated command (#1995)" _expect_attach_send_no_truncation
+step "short commands still wait for their echo (#1995)"      _expect_short_command_delivery_waits
 
 step "assert selection survived attach/detach"              af_expect_selected beta
 step "assert no orphan tmux attach clients"                 af_assert_no_orphan_clients
