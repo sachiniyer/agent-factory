@@ -137,6 +137,29 @@ func isDoubleDotSegment(seg string) bool {
 		strings.EqualFold(seg, "%2e.") || strings.EqualFold(seg, "%2e%2e")
 }
 
+// hasDotDotSegment reports whether any SEGMENT of an already-DECODED path is
+// exactly "..", which is the only form that climbs a directory.
+//
+// Segment equality is the test, never substring containment. ".." occurring
+// INSIDE a longer segment — bundle..js, foo..bar, a range like v1..2 — is an
+// ordinary run of characters naming a real file, and the strings.Contains check
+// this replaces 400'd every one of them (#2104).
+//
+// The caller must pass the decoded view. That ordering is what keeps the guard
+// honest about the escaped path the proxy actually forwards: "%2e%2e" decodes to
+// ".." and is caught here, so the request cannot be accepted on its raw spelling
+// and then forwarded as traversal. A %2F likewise decodes to a separator, so an
+// encoded slash hiding a ".." segment splits open and is caught too — stricter
+// than the forwarded bytes strictly need, and deliberately so.
+func hasDotDotSegment(decodedPath string) bool {
+	for _, seg := range strings.Split(decodedPath, "/") {
+		if seg == ".." {
+			return true
+		}
+	}
+	return false
+}
+
 // normalizeEscapedPath resolves the "." and ".." segments of an absolute escaped
 // path, the way the browser resolves them when it follows the rewritten header.
 //

@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
 )
 
@@ -259,12 +260,131 @@ func TestWebTabProxy_RejectsEncodedTraversal(t *testing.T) {
 	for _, sub := range []string{
 		"%2E%2E%2F%2E%2E%2Fetc/passwd", // fully encoded
 		"a/%2E%2E/%2E%2E/etc/passwd",   // encoded dots under a real segment
+		"%2e%2e/etc",                   // lower-case escape
+		"%2E%2e/etc",                   // mixed case within one segment
+		"a/%2e./b",                     // half-encoded, leading dot escaped
+		"a/.%2E/b",                     // half-encoded, trailing dot escaped
 	} {
 		t.Run(sub, func(t *testing.T) {
 			rec := proxyGet(t, mux, id, tabID, sub)
 			if rec.Code != http.StatusBadRequest {
 				t.Fatalf("sub=%q: status = %d, want 400 — encoded traversal must not reach upstream (body: %s)",
 					sub, rec.Code, rec.Body.String())
+			}
+		})
+	}
+}
+
+// TestWebTabProxy_ForwardsDotDotInsideSegment is the #2104 regression test.
+//
+// The traversal guard tested for ".." ANYWHERE in the remainder, so it also
+// refused every legitimate path that merely contains those two bytes inside a
+// longer segment: a cache-busted bundle (bundle..js), a route with a range in it
+// (v1..2), any filename an app happens to spell that way. Users hit a flat 400 on
+// a resource the dev server serves perfectly well when unproxied.
+//
+// Only a whole segment equal to ".." climbs a directory, so only that is refused
+// — these must reach upstream in their own encoding, like any other path.
+func TestWebTabProxy_ForwardsDotDotInsideSegment(t *testing.T) {
+	upstream := newEchoPathUpstream(t)
+	mux, id, tabID := newWebTabProxyFixture(t, upstream.URL)
+
+	cases := []struct{ name, sub, want string }{
+		{name: "cache-busted bundle", sub: "assets/bundle..js", want: "PATH=/assets/bundle..js"},
+		{name: "dots inside a single segment", sub: "foo..bar", want: "PATH=/foo..bar"},
+		{name: "dots in a leading segment", sub: "a..b/x", want: "PATH=/a..b/x"},
+		{name: "leading dots in a name", sub: "..hidden", want: "PATH=/..hidden"},
+		{name: "trailing dots in a name", sub: "report..", want: "PATH=/report.."},
+		{name: "three dots is not a climb", sub: "...", want: "PATH=/..."},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := proxyGet(t, mux, id, tabID, tc.sub)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("sub=%q: status = %d, want 200 — a %q inside a segment is an ordinary path, not traversal (body: %s)",
+					tc.sub, rec.Code, "..", rec.Body.String())
+			}
+			if got := rec.Body.String(); !contains(got, tc.want) {
+				t.Fatalf("sub=%q: upstream saw %q, want it to contain %q", tc.sub, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestWebTabProxy_LiteralTraversalNeverReachesUpstream pins the other half of
+// #2104: narrowing the guard to whole segments must not open the literal form.
+//
+// A literal "/../" is refused a layer EARLIER than the guard — ServeMux cleans it
+// and redirects before the handler runs — which is why these assert "never
+// forwarded" rather than a status code. The echo upstream answers "PATH=", so its
+// absence is proof the hop never happened; the redirect it answers instead must
+// still name a location inside the proxy prefix, never a climbed one.
+func TestWebTabProxy_LiteralTraversalNeverReachesUpstream(t *testing.T) {
+	upstream := newEchoPathUpstream(t)
+	mux, id, tabID := newWebTabProxyFixture(t, upstream.URL)
+
+	for _, sub := range []string{
+		"../etc/passwd",      // leading climb
+		"..",                 // bare segment
+		"a/../../etc/passwd", // climb out from under a real segment
+		"a/..",               // trailing climb
+	} {
+		t.Run(sub, func(t *testing.T) {
+			rec := proxyGet(t, mux, id, tabID, sub)
+			if rec.Code == http.StatusOK {
+				t.Fatalf("sub=%q: status = 200 — traversal must never be served (body: %s)", sub, rec.Body.String())
+			}
+			if body := rec.Body.String(); contains(body, "PATH=") {
+				t.Fatalf("sub=%q: reached upstream (body: %s) — traversal was forwarded", sub, body)
+			}
+			if loc := rec.Header().Get("Location"); loc != "" {
+				if hasDotDotSegment(loc) {
+					t.Fatalf("sub=%q: Location %q still carries a %q segment", sub, loc, "..")
+				}
+				if !strings.HasPrefix(loc, webtabPathPrefix) {
+					t.Fatalf("sub=%q: Location %q escaped the proxy prefix %q", sub, loc, webtabPathPrefix)
+				}
+			}
+		})
+	}
+}
+
+// TestHasDotDotSegment pins the predicate itself, including the contract that
+// makes it safe: it is given the DECODED path, so it needs to recognize exactly
+// one spelling of a climb.
+func TestHasDotDotSegment(t *testing.T) {
+	cases := []struct {
+		path string
+		want bool
+	}{
+		{path: "", want: false},
+		{path: "a/b/c.js", want: false},
+		// The #2104 cases: two dots inside a longer segment name a real file.
+		{path: "assets/bundle..js", want: false},
+		{path: "foo..bar", want: false},
+		{path: "a..b/x", want: false},
+		{path: "..hidden", want: false},
+		{path: "report..", want: false},
+		{path: "...", want: false},
+		{path: ".", want: false},
+		// A whole segment equal to ".." climbs, wherever it sits.
+		{path: "..", want: true},
+		{path: "../a", want: true},
+		{path: "a/..", want: true},
+		{path: "a/../b", want: true},
+		{path: "/../etc/passwd", want: true},
+		{path: "a/b/../../../etc", want: true},
+		// Callers pass the decoded path, which is what makes checking a single
+		// spelling sound: "%2e%2e" has ALREADY become ".." by the time it gets here
+		// (TestWebTabProxy_RejectsEncodedTraversal proves the proxy does that). A
+		// literal "%2e%2e" still present after decoding came from a double-encoded
+		// request and names a file, so it is correctly not a climb.
+		{path: "%2e%2e", want: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.path, func(t *testing.T) {
+			if got := hasDotDotSegment(tc.path); got != tc.want {
+				t.Fatalf("hasDotDotSegment(%q) = %v, want %v", tc.path, got, tc.want)
 			}
 		})
 	}
