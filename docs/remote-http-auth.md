@@ -527,11 +527,11 @@ plaintext backend.
   [Shared machines](#shared-machines-the-loopback-exemption-is-weaker-than-the-unix-socket).
 - **The default is tokenless — auth is opt-in.** `require_token` defaults to
   `false`, so what protects a stock install is the loopback-only `listen_addr`,
-  not a credential. The moment you point `listen_addr` at a network, you are
-  serving an unauthenticated control plane unless you also set
-  `require_token = true` or put the listener behind a private network/proxy.
-  Never do it on `0.0.0.0` without a firewall. The startup warning fires on
-  exactly that combination.
+  not a credential. Pointing `listen_addr` at a network would serve an
+  unauthenticated control plane, so the daemon **refuses to start** in that
+  combination — set `require_token = true` (or put the listener behind a private
+  network/proxy). See [the tokenless network
+  refusal](#the-tokenless-network-refusal).
 - **Rotate on suspected exposure.** `af token rotate` invalidates the old token
   for new connections at once — no restart, no downtime for live sessions.
 

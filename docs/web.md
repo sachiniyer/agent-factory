@@ -56,16 +56,16 @@ same.
     ```
 
 - **`0.0.0.0:8443` (or a LAN/Tailscale IP) — expose to the network.** The listener
-  is reachable from the network. Because `require_token` defaults to `false`, a
-  network peer needs **no credential** unless you turn the token on — so set
-  `require_token = true` in the same edit unless the network is one you fully
-  trust. Only bind a routable interface when you must, and put it behind a
-  firewall. Hand-edit your global config and restart the daemon:
+  is reachable from the network. A network bind **requires `require_token = true`**
+  — the daemon refuses to start otherwise (see [Remote daemon
+  access](remote-http-auth.md#the-tokenless-network-refusal)). Only bind a routable
+  interface when you must, and put it behind a firewall. Hand-edit your global
+  config and restart the daemon:
 
     ```toml
     # ~/.agent-factory/config.toml
     listen_addr = "0.0.0.0:8443"
-    require_token = true   # the default is false — a network bind without this is open
+    require_token = true   # required: the default is false, and a non-loopback bind won't start without this
     ```
 
     ```bash
