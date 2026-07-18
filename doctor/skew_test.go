@@ -129,6 +129,16 @@ func stubProcessHomes(t *testing.T, homes map[int]string) {
 	}
 }
 
+// stubDaemonProcessArgv makes the daemon scan read a fixed argv for every pid,
+// so a test can present its own spawned shell as a daemon-shaped process without
+// depending on the real /proc argv.
+func stubDaemonProcessArgv(t *testing.T, argv func(pid int) []string) {
+	t.Helper()
+	prev := daemonProcessArgv
+	daemonProcessArgv = argv
+	t.Cleanup(func() { daemonProcessArgv = prev })
+}
+
 // stubProcessEnv gives one pid a complete fake environ, so a test can put a
 // daemon in a frame of reference (its own HOME, its own AGENT_FACTORY_HOME
 // spelling) that differs from doctor's. Other pids keep their real environ.
@@ -349,9 +359,7 @@ func TestDuplicateDaemons_AncestorDaemonIsCounted(t *testing.T) {
 	testguard.IsolateTmux(t)
 
 	home := t.TempDir()
-	stubDaemonProcessProbe(t,
-		func(int) bool { return true },
-		func(int) []string { return []string{"af", "--daemon"} })
+	stubDaemonProcessArgv(t, func(int) []string { return []string{"af", "--daemon"} })
 
 	stale := spawnWithEnv(t, "af", []string{"--daemon"}, map[string]string{"AGENT_FACTORY_HOME": home})
 	// Both the ancestor (us) and the stale extra serve this home.
@@ -375,9 +383,7 @@ func TestForeignDaemons_AncestorNeverOfferedForKill(t *testing.T) {
 	testguard.IsolateTmux(t)
 
 	home := t.TempDir()
-	stubDaemonProcessProbe(t,
-		func(int) bool { return true },
-		func(int) []string { return []string{"af", "--daemon"} })
+	stubDaemonProcessArgv(t, func(int) []string { return []string{"af", "--daemon"} })
 	// Our own process, presented as an ancestor daemon serving ANOTHER home —
 	// the shape that would otherwise reach the foreign-daemon kill path.
 	otherHome := t.TempDir()
@@ -412,9 +418,7 @@ func TestRemedies_NeverRecommendDestructiveResetForDaemonProblems(t *testing.T) 
 	home := socketTempHome(t)
 	// Stage every daemon-lifecycle problem at once: two daemons, a stale HTTP
 	// socket, a skewed daemon, and a mismatched autostart unit.
-	stubDaemonProcessProbe(t,
-		func(int) bool { return true },
-		func(int) []string { return []string{"af", "--daemon"} })
+	stubDaemonProcessArgv(t, func(int) []string { return []string{"af", "--daemon"} })
 	first := spawnWithEnv(t, "af", []string{"--daemon"}, map[string]string{"AGENT_FACTORY_HOME": home})
 	second := spawnWithEnv(t, "af", []string{"--daemon"}, map[string]string{"AGENT_FACTORY_HOME": home})
 	stubProcessHomes(t, map[int]string{first.PID: home, second.PID: home})
@@ -479,9 +483,7 @@ func TestDuplicateDaemons_ForeignUserDaemon_NotAttributedHere(t *testing.T) {
 
 	// Make every process in the (2-pid) snapshot look like an af daemon, so
 	// only ownership and the unreadable environ can tell them apart.
-	stubDaemonProcessProbe(t,
-		func(int) bool { return true },
-		func(int) []string { return []string{"af", "--daemon"} })
+	stubDaemonProcessArgv(t, func(int) []string { return []string{"af", "--daemon"} })
 
 	// $HOME is not sandboxed by the package harness (only AGENT_FACTORY_HOME
 	// is), so leaving it alone would point this test at the developer's real
@@ -635,9 +637,7 @@ func TestDuplicateDaemons_HomeSpellingsCompareEqual(t *testing.T) {
 	tildeSpelling := filepath.Join("~", filepath.Base(realHome))
 	require.Equal(t, realHome, config.ExpandTilde(tildeSpelling), "test premise: the two spell one dir")
 
-	stubDaemonProcessProbe(t,
-		func(int) bool { return true },
-		func(int) []string { return []string{"af", "--daemon"} })
+	stubDaemonProcessArgv(t, func(int) []string { return []string{"af", "--daemon"} })
 
 	first := spawnWithEnv(t, "af", []string{"--daemon"}, nil)
 	second := spawnWithEnv(t, "af", []string{"--daemon"}, nil)

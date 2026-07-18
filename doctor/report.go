@@ -323,18 +323,46 @@ func collapsedCount(findings []Finding) int {
 	return total
 }
 
-func summarizedMoreCount(detail string) (int, bool) {
-	fields := strings.Fields(detail)
-	for i := 0; i+2 < len(fields); i++ {
-		if fields[i] != "and" || fields[i+2] != "more" {
+// countUnresolvedFindings counts the TRUE number of underlying issues the
+// un-remediated findings represent. It mirrors collapsedCount's expansion of a
+// "… and N more" summary into N, so the total the summary reports and the
+// per-check counts a reader sees are the same arithmetic — 1 + 15 + 62, not
+// 1 + 15 + 16 (#1979). Without this the summary's total counts collapsed ROWS
+// while the per-check details count PROCESSES, and the two never add up.
+func countUnresolvedFindings(findings []Finding) int {
+	n := 0
+	for _, f := range findings {
+		if f.Fixed {
 			continue
 		}
-		var n int
-		if _, err := fmt.Sscanf(fields[i+1], "%d", &n); err == nil {
-			return n, true
+		if c, ok := summarizedMoreCount(f.Detail); ok {
+			n += c
+			continue
 		}
+		n++
 	}
-	return 0, false
+	return n
+}
+
+// summarizedMoreCount reads N back out of a "… and N more …" roll-up detail —
+// the one finding that stands for several (see checkOrphanedProcesses' cap).
+//
+// It is ANCHORED to the "… and N more" prefix that roll-up is written with, not
+// matched anywhere in the string, because a finding's detail can embed a
+// process's cmdline (describeProc) and a command line containing the words "and
+// 5 more" would otherwise be read as a roll-up of five. That miscount now
+// reaches the exit-code-driving total (#1979), so the match has to be precise
+// rather than opportunistic.
+func summarizedMoreCount(detail string) (int, bool) {
+	fields := strings.Fields(detail)
+	if len(fields) < 4 || fields[0] != "…" || fields[1] != "and" || fields[3] != "more" {
+		return 0, false
+	}
+	var n int
+	if _, err := fmt.Sscanf(fields[2], "%d", &n); err != nil {
+		return 0, false
+	}
+	return n, true
 }
 
 func plural(n int, singular, plural string) string {
@@ -453,22 +481,29 @@ func orderedSections(rows []renderRow) []string {
 	return out
 }
 
+// summaryLine LEADS with the actionable count, then gives the status-row
+// breakdown (#1979). A reader who stops at "0 FAIL" must not conclude "healthy"
+// while `af doctor` exits nonzero: the exit code keys on the actionable count
+// (UnresolvedCount), so that count is the headline and the exit code cannot
+// contradict it. The PASS/WARN/FAIL tally is a different axis — it counts ROWS,
+// not issues, which is why it trails in parentheses and why one collapsed WARN
+// row can stand for many issues.
 func summaryLine(r *Report, rows []renderRow, fixMode bool) string {
 	counts := map[CheckStatus]int{}
 	for _, row := range rows {
 		counts[row.status]++
 	}
-	parts := []string{
+	breakdown := []string{
 		fmt.Sprintf("%d PASS", counts[StatusPass]),
 		fmt.Sprintf("%d WARN", counts[StatusWarn]),
 		fmt.Sprintf("%d FAIL", counts[StatusFail]),
 	}
 	if counts[StatusFixed] > 0 {
-		parts = append(parts, fmt.Sprintf("%d FIXED", counts[StatusFixed]))
+		breakdown = append(breakdown, fmt.Sprintf("%d FIXED", counts[StatusFixed]))
 	}
 
 	unresolved := r.UnresolvedCount()
-	summary := fmt.Sprintf("Summary: %s; %s.", strings.Join(parts, ", "), issuePhrase(unresolved))
+	summary := fmt.Sprintf("Summary: %s (%s).", issuePhrase(unresolved), strings.Join(breakdown, ", "))
 	switch {
 	case !fixMode && fixableCount(r) > 0:
 		summary = strings.TrimSuffix(summary, ".") +
@@ -485,9 +520,9 @@ func issuePhrase(n int) string {
 		return "no issues require action"
 	}
 	if n == 1 {
-		return "1 underlying issue requires action"
+		return "1 issue requires action"
 	}
-	return fmt.Sprintf("%d underlying issues require action", n)
+	return fmt.Sprintf("%d issues require action", n)
 }
 
 func fixableCount(r *Report) int {

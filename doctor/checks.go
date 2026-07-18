@@ -25,8 +25,13 @@ func selfPID() int { return os.Getpid() }
 func tempDirDefault() string { return os.TempDir() }
 
 var (
-	daemonProcessArgv   = daemon.ProcessArgv
-	daemonPIDLooksAlive = daemon.PIDLooksAlive
+	daemonProcessArgv = daemon.ProcessArgv
+	// tempHomeLockProbe answers "is a daemon running for this home?" through the
+	// home's daemon.lock — the kernel-guaranteed fact that authorises removing an
+	// abandoned temp home (#1989). A package var so tests can stage each of the
+	// three outcomes (held / takeable / unprovable) deterministically, without a
+	// real daemon or a real NFS mount.
+	tempHomeLockProbe = daemon.ProbeHomeLock
 	// The per-process facts that decide whether a daemon is OURS (#1044).
 	// Injectable for the same reason as the two above: the states that matter —
 	// another user's process, an environ we may not read — cannot be staged by
@@ -121,8 +126,32 @@ func checkDaemonHealth(ctx *scanContext, report *Report, h daemon.HealthStatus) 
 	case !h.SocketExists:
 		report.Pass(sectionDaemon, "daemon", "not running; starts on demand")
 	default:
-		report.Fail(sectionDaemon, "daemon", fmt.Sprintf("socket %s exists but the daemon is not responding (%v)", h.SocketPath, h.PingErr),
-			"run `af daemon restart`; if it still fails, remove the stale socket after verifying no daemon is running")
+		// The socket exists but the ping failed — classify WHY. A dial timeout
+		// is not proof the daemon is dead: a live daemon with a saturated
+		// control-socket accept backlog times out identically, so reading that
+		// as a Fail would send the user to `af daemon restart` over a working
+		// daemon and drive a spurious nonzero exit (#2040). Only a completed
+		// negative (a refusal) is the definite Fail; a timeout is advisory.
+		notResponding := func() {
+			report.Fail(sectionDaemon, "daemon", fmt.Sprintf("socket %s exists but the daemon is not responding (%v)", h.SocketPath, h.PingErr),
+				"run `af daemon restart`; if it still fails, remove the stale socket after verifying no daemon is running")
+		}
+		daemon.ClassifyPingFailure(h.PingErr).Match(
+			// Yes and NotFound are unreachable: ClassifyPingFailure returns them
+			// only for a nil error, and this arm runs only when the ping FAILED.
+			// They route to the definite Fail rather than to a fabricated pass, so
+			// a future fifth outcome cannot quietly turn a broken daemon healthy.
+			notResponding,
+			notResponding, // No: a refusal — nobody is behind the socket.
+			notResponding,
+			func(cause error) {
+				report.Warn(sectionDaemon, "daemon",
+					fmt.Sprintf("control socket %s did not answer within the dial timeout, so daemon liveness is "+
+						"unknown — it may be alive but busy (%v)", h.SocketPath, h.PingErr),
+					"if the daemon seems wedged run `af daemon restart`; a momentary timeout under heavy RPC load is "+
+						"harmless and needs no action", false)
+			},
+		)
 	}
 	// "A unit file exists" is not "this home has autostart". There is one unit
 	// per user and it bakes its AGENT_FACTORY_HOME at install time, so under a
@@ -490,18 +519,45 @@ var afHomeMarkers = []string{
 func checkStaleTempHomes(ctx *scanContext, report *Report) {
 	tempDir := filepath.Clean(ctx.opts.TempDir)
 	activeHome := filepath.Clean(ctx.opts.ConfigDir)
-	homesInUse, unreadableProcs := processReferencedHomes(ctx.snap)
-	tmuxHomesInUse := liveTmuxHomes(ctx)
+	processHomes := processReferencedHomes(ctx.snap)
+	tmuxHomes := liveTmuxHomes(ctx)
 
 	for _, dir := range candidateTempHomes(tempDir) {
 		dir = filepath.Clean(dir)
 		if dir == activeHome || !isAFHome(dir) {
 			continue
 		}
-		if reason := tempHomeInUseReason(dir, homesInUse, tmuxHomesInUse, unreadableProcs); reason != "" {
-			report.Pass(sectionProcesses, "temp home", fmt.Sprintf("%s is in use (%s)", dir, reason))
+		// POSITIVE proofs of use come first. Each can only ADD a reason to keep
+		// the home; none authorises a delete, so an unread or unavailable surface
+		// here costs at worst an unreported keep — never a wrong removal.
+		if processHomes[dir] {
+			report.Pass(sectionProcesses, "temp home", fmt.Sprintf("%s is in use (a live process references it)", dir))
 			continue
 		}
+		if tmuxHomes[dir] {
+			report.Pass(sectionProcesses, "temp home", fmt.Sprintf("%s is in use (a live tmux session references it)", dir))
+			continue
+		}
+		// The AUTHORITATIVE signal: does a live daemon hold the home's lock? This
+		// replaces the old "did I see a process referencing this home?" — a
+		// negative four consecutive P1 reviews each found a fresh way to falsify,
+		// every one ending at an rm -rf. The lock cannot be falsified that way:
+		// the kernel releases it on the daemon's death, so a takeable lock is
+		// PROOF (not inference) that no live daemon owns the home (#1989).
+		lock := tempHomeLockProbe(dir)
+		var daemonHoldsLock, provablyFree bool
+		var lockCause error
+		lock.Match(
+			func() { daemonHoldsLock = true }, // Yes: a live daemon owns it
+			func() { provablyFree = true },    // No: we took the lock; no daemon owns it
+			func() {},                         // NotFound: ProbeHomeLock never returns this; treat as unknown
+			func(cause error) { lockCause = cause },
+		)
+		if daemonHoldsLock {
+			report.Pass(sectionProcesses, "temp home", fmt.Sprintf("%s is in use (an af daemon holds its lock)", dir))
+			continue
+		}
+
 		age := timeSince(newestMtime(dir))
 		if age < ctx.opts.MinTempHomeAge {
 			continue
@@ -509,51 +565,46 @@ func checkStaleTempHomes(ctx *scanContext, report *Report) {
 		if !pathInside(tempDir, dir) {
 			continue
 		}
-		// REPORT-ONLY. No FixAction, no fix closure: `af doctor --fix` will
-		// not delete this, and that is deliberate.
-		//
-		// This finding used to carry an rm -rf, gated on "no process
-		// references this home". FOUR consecutive P1 reviews found four
-		// different ways to make that negative false, and every one of them
-		// ended at this same delete:
-		//
-		//   1. darwin redacts a foreign process's environment silently, so an
-		//      unread env read as "references no home".
-		//   2. the permission gate written to fix (1) modelled uid but not
-		//      CS_RESTRICT, which SIP makes ordinary — so a same-uid restricted
-		//      process read as "references no home".
-		//   3. (the gate was deleted; classify the answer instead.)
-		//   4. the uid filter that survived assumed temp homes sit under a
-		//      user-owned root. Linux's /tmp is 01777 and shared, so another
-		//      user's home lives there and their processes read as
-		//      "references no home".
-		//
-		// That is not four bugs. It is one unsound question: "can I prove
-		// nobody is using this?" cannot be answered by inspecting processes.
-		// Process inspection is inference over a surface that is adversarial by
-		// construction — kernels redact, policies grow clauses we did not
-		// model, /proc can be mounted subset=pid, /tmp is shared with users we
-		// cannot see, PIDs recycle. Each of those turns "I saw no user" into
-		// "there is no user", and that negative authorised an rm -rf.
-		//
-		// So the teeth come out until the predicate is a FACT rather than an
-		// inference: a lockfile the owning process holds for its lifetime,
-		// where "is this in use?" is answered by trying to take the lock and
-		// the kernel is the authority (see the follow-up issue; af homes
-		// already have exactly such a lock in daemon/singleton_lock.go).
-		//
-		// Reporting is honest; authorising is dangerous; they are not the same
-		// code path. Doctor still names the directory and still says what it
-		// could not verify — the operator decides.
+
+		if provablyFree {
+			// The teeth, restored on a FACT. The lock is takeable (no live daemon)
+			// and no live tmux session names it, so the home is provably unused.
+			// The fix re-verifies every precondition at fix time (TOCTOU): a
+			// daemon may have started, or a tmux session appeared, since detection.
+			report.Findings = append(report.Findings, Finding{
+				Check: "stale-temp-home",
+				Detail: fmt.Sprintf("agent-factory home %s is abandoned (untouched for %s) and no live daemon "+
+					"holds its lock, so it is safe to remove", dir, formatAge(age.Seconds())),
+				FixAction:   "remove " + dir,
+				fix:         staleTempHomeRemoveFix(ctx, dir, tempDir, activeHome),
+				Severity:    StatusWarn,
+				Remediation: "run `af doctor --fix` to remove it, or `rm -rf " + dir + "`",
+			})
+			continue
+		}
+
+		// UNKNOWN: no lock file at all (absence of a lock is not proof of
+		// non-use), a filesystem whose flock cannot be trusted (NFS), or an I/O
+		// error. Report it — reporting is safe — but never authorise the delete
+		// on a proof we do not have. The operator decides.
 		report.Findings = append(report.Findings, Finding{
 			Check: "stale-temp-home",
-			Detail: fmt.Sprintf("agent-factory home %s looks abandoned (untouched for %s), but nothing "+
-				"here can PROVE it is unused — inspect it and remove it yourself if it is dead",
-				dir, formatAge(age.Seconds())),
+			Detail: fmt.Sprintf("agent-factory home %s looks abandoned (untouched for %s), but nothing here can "+
+				"PROVE it is unused (%s) — inspect it and remove it yourself if it is dead",
+				dir, formatAge(age.Seconds()), lockUnknownReason(lockCause)),
 			Severity:    StatusWarn,
 			Remediation: "verify nothing is using it, then `rm -rf " + dir + "`",
 		})
 	}
+}
+
+// lockUnknownReason renders the cause of an undetermined lock probe for the
+// report, defaulting to a plain phrase when the probe carried none.
+func lockUnknownReason(cause error) string {
+	if cause == nil {
+		return "no lock to take proves nothing"
+	}
+	return cause.Error()
 }
 
 // timeSince is time.Since, indirected so tests can pin the clock if needed.
@@ -598,66 +649,25 @@ func isAFHome(dir string) bool {
 }
 
 // processReferencedHomes returns the AF homes live processes name in their
-// environment, AND the number of processes whose environment could not be read.
+// AGENT_FACTORY_HOME environment. It is a POSITIVE signal only: finding a
+// process that names a home proves the home is in use, which spares it. The
+// converse — "no process names it" — is NOT proof of non-use and is deliberately
+// not derived here: that inference was the unsound predicate behind the
+// temp-home rm -rf, and the delete now rests on the daemon lock instead (#1989,
+// staleTempHomeRemoveFix). So an unreadable environment simply contributes no
+// home, which can only under-spare — never authorise a removal.
 //
-// The second return is the whole point, and dropping it would restore a
-// DESTRUCTIVE bug. This feeds tempHomeInUseReason, whose negative — "no process
-// references this home" — is the predicate for os.RemoveAll. A process whose
-// environment we could not read might be using the home; if its unreadability
-// is silently folded into "does not reference it", doctor --fix deletes a home
-// that is in use, on the strength of a read that was denied.
-//
-// This is not hypothetical on darwin: the kernel redacts a foreign process's
-// environment and the buffer looks identical to one with no variables at all
-// (see internal/proctree's darwin readEnviron). Linux says EACCES honestly, but
-// the caller cannot depend on the platform to be honest for it.
-//
-// Only OUR OWN processes count toward unreadable. A home under this user's
-// 0700 temp dir cannot be in use by another user's process, so a foreign
-// process being unreadable tells us nothing we needed to know — and counting it
-// would make --fix refuse forever on any real machine, where most of the
-// process table belongs to root.
-func processReferencedHomes(snap map[int]proctree.Process) (homes map[string]bool, unreadable int) {
-	homes = map[string]bool{}
-	if snap == nil {
-		return homes, 0
-	}
-	self := os.Getuid()
+// Only EnvFound attributes a home. A redacted or denied read (EnvUnknown) must
+// add nothing to the set in either direction — "I could not read its home" is
+// not "its home is X", and it is not "it names no home" either.
+func processReferencedHomes(snap map[int]proctree.Process) map[string]bool {
+	homes := map[string]bool{}
 	for pid := range snap {
-		home, status := proctree.LookupEnv(pid, "AGENT_FACTORY_HOME")
-		switch status {
-		case proctree.EnvFound:
-			if home != "" {
-				homes[filepath.Clean(home)] = true
-			}
-		case proctree.EnvAbsent:
-			// Read, and it names no home: it cannot be using one.
-		default:
-			// EnvUnknown. Narrow it to the processes whose unreadability
-			// actually costs us knowledge, or --fix would refuse forever:
-			// on a real machine most of the table is root's, and darwin
-			// redacts every one of those environments.
-			uid, ok := proctree.UID(pid)
-			switch {
-			case !ok:
-				// No credentials at all means the process is gone — it was
-				// in the snapshot and has since exited. A dead process uses
-				// nothing, so its silence costs us nothing. (Ownership comes
-				// from the process table, which is readable for ANY process
-				// on both platforms, so a failure here is absence of the
-				// process rather than absence of permission.)
-			case uid != self:
-				// Another user's process. It cannot be using a home under
-				// this user's 0700 temp dir, so whether we can read its
-				// environment is irrelevant to the question being asked.
-			default:
-				// Ours, alive, and unreadable: precisely the case we cannot
-				// rule out.
-				unreadable++
-			}
+		if home, status := proctree.LookupEnv(pid, "AGENT_FACTORY_HOME"); status == proctree.EnvFound && home != "" {
+			homes[filepath.Clean(home)] = true
 		}
 	}
-	return homes, unreadable
+	return homes
 }
 
 func liveTmuxHomes(ctx *scanContext) map[string]bool {
@@ -682,83 +692,57 @@ func tmuxSessionHomeMarker(ctx *scanContext, name string) (string, bool) {
 	return strings.CutPrefix(strings.TrimSpace(string(out)), tmux.EnvMarkerHome+"=")
 }
 
-type tempHomeDaemonStatus int
-
-const (
-	tempHomeDaemonAbsentOrDead tempHomeDaemonStatus = iota
-	tempHomeDaemonAlive
-	tempHomeDaemonUnknown
-)
-
-// tempHomeDaemonLiveness reports whether the home's daemon.pid names a live
-// agent-factory daemon. A live PID with unreadable argv is unknown, not dead:
-// doctor must not delete a home when daemon liveness cannot be verified.
-func tempHomeDaemonLiveness(dir string) tempHomeDaemonStatus {
-	data, err := os.ReadFile(filepath.Join(dir, "daemon.pid"))
-	if err != nil {
-		if os.IsNotExist(err) {
-			return tempHomeDaemonAbsentOrDead
+// staleTempHomeRemoveFix rm -rf's an abandoned temp home — the teeth #1969 took
+// out, restored on a predicate the kernel guarantees rather than an inference we
+// assemble (#1989).
+//
+// The old closure was careful — containment, active-home and isAFHome checks, a
+// fresh snapshot at fix time — and none of that was the problem. Its PREDICATE
+// was: "did I see any process referencing this home? no → delete." Four
+// consecutive P1 reviews each found a fresh way for that "no" to be false, every
+// one ending here in an rm -rf. You cannot make an unsound question safe by
+// validating its inputs harder.
+//
+// So the gate is now a FACT: re-probe the home's daemon lock, and delete only on
+// AnswerNo — the lock existed on a trusted filesystem and we took it, proving no
+// live daemon owns the home. Everything is re-checked at fix time because the
+// findings are applied after detection, leaving a window in which a daemon could
+// start (its lock would then be held → refuse) or a tmux session could claim the
+// home (refuse). Undetermined (no lock file, untrusted filesystem) never reaches
+// here: only a provably-free home carries this closure.
+func staleTempHomeRemoveFix(ctx *scanContext, dir, tempDir, activeHome string) func() error {
+	return func() error {
+		dir = filepath.Clean(dir)
+		// Re-assert containment and identity at fix time — cheap, and the home
+		// may have changed under us since detection.
+		if dir == activeHome {
+			return fmt.Errorf("refusing to remove the active home %s", dir)
 		}
-		return tempHomeDaemonUnknown
-	}
-	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
-	if err != nil || pid <= 0 {
-		return tempHomeDaemonUnknown
-	}
-	if !daemonPIDLooksAlive(pid) {
-		return tempHomeDaemonAbsentOrDead
-	}
-	args := daemonProcessArgv(pid)
-	if len(args) == 0 {
-		return tempHomeDaemonUnknown
-	}
-	if daemon.LooksLikeDaemonArgv(args) {
-		return tempHomeDaemonAlive
-	}
-	return tempHomeDaemonAbsentOrDead
-}
-
-// tempHomeInUseReason returns why dir must not be removed, or "" when it is
-// provably unused. unreadableProcs is how many of this user's processes have an
-// environment we could not read: each one is a process that MIGHT reference
-// dir, so a non-zero count means "unused" cannot be proven and the directory
-// stays. That mirrors the tempHomeDaemonUnknown arm below — this function
-// already knew that uncertainty is a reason to keep, not to delete.
-func tempHomeInUseReason(dir string, processHomes, tmuxHomes map[string]bool, unreadableProcs int) string {
-	dir = filepath.Clean(dir)
-	switch {
-	case processHomes[dir]:
-		return "live process references it"
-	case tmuxHomes[dir]:
-		return "live tmux session references it"
-	case unreadableProcs > 0:
-		return fmt.Sprintf("%d of this user's processes have an unreadable environment, so nothing proves "+
-			"they are not using it", unreadableProcs)
-	}
-	switch tempHomeDaemonLiveness(dir) {
-	case tempHomeDaemonAlive:
-		return "daemon pid is live"
-	case tempHomeDaemonUnknown:
-		return "daemon.pid liveness is uncertain"
-	default:
-		return ""
+		if !pathInside(tempDir, dir) {
+			return fmt.Errorf("refusing to remove %s: it is not inside the temp dir %s", dir, tempDir)
+		}
+		if !isAFHome(dir) {
+			return fmt.Errorf("refusing to remove %s: it no longer looks like an agent-factory home", dir)
+		}
+		// A live tmux session naming the home is the second, sound signal the
+		// lock cannot see (a home with live tmux sessions but a dead daemon holds
+		// no lock). Re-check it fresh.
+		if liveTmuxHomes(ctx)[dir] {
+			return fmt.Errorf("refusing to remove %s: a live tmux session now references it", dir)
+		}
+		// The authoritative gate: delete ONLY on a proven "no live daemon owns
+		// this" (AnswerNo). A daemon that appeared since detection now holds the
+		// lock (Yes → refuse); an unprovable answer (Undetermined → refuse) is not
+		// a licence to os.RemoveAll.
+		answer := tempHomeLockProbe(dir)
+		proven := false
+		answer.Match(func() {}, func() { proven = true }, func() {}, func(error) {})
+		if !proven {
+			return fmt.Errorf("refusing to remove %s: cannot prove no daemon owns it (lock answer: %s)", dir, answer.String())
+		}
+		return os.RemoveAll(dir)
 	}
 }
-
-// staleTempHomeRemoveFix is DELETED. Do not reintroduce it without the lock.
-//
-// It was the --fix closure that rm -rf'd an "abandoned" temp home, and it was
-// careful: containment checks, an active-home check, an isAFHome check, and a
-// fresh snapshot at fix time. None of that was the problem. Its PREDICATE was:
-// it asked "did I see any process referencing this home?" and treated "no" as
-// proof. Four consecutive P1 reviews found four different ways for that "no" to
-// be false (see checkStaleTempHomes), each one ending here, in an rm -rf.
-//
-// The care was real and it did not help, because you cannot make an unsound
-// question safe by validating its inputs harder. The delete returns when the
-// predicate is a fact the kernel guarantees — try to take the home's lock —
-// rather than an inference we assemble from a surface that redacts, restricts
-// and shares. See the follow-up issue.
 
 func pathInside(base, path string) bool {
 	rel, err := filepath.Rel(base, path)

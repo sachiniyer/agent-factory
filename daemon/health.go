@@ -156,6 +156,32 @@ func classifyDialFailure(path string, err error) ProbeAnswer {
 	return AnswerNo()
 }
 
+// ClassifyPingFailure turns a FAILED control-socket ping into a three-valued
+// answer about daemon liveness, so `af doctor` never reads a dial TIMEOUT as a
+// definite "the daemon is dead". It is the ping-path twin of classifyDialFailure
+// on the HTTP path (#2014/#2039): the control socket has an accept backlog too,
+// and under heavy TUI/CLI RPC load a dial can time out at daemonDialTimeout
+// while a perfectly live daemon is merely busy.
+//
+//   - A nil error is Yes: a daemon answered.
+//   - A timeout (os.IsTimeout / os.ErrDeadlineExceeded) is Undetermined: a
+//     live-but-backlogged daemon times out the same way, so a made-up "dead"
+//     would send the user to `af daemon restart` over a working daemon — the
+//     exact timeout-is-not-a-negative fabrication #1920 set out to kill (#2040).
+//   - Anything else — a refusal (ECONNREFUSED), a reset, an RPC-level error — is
+//     a completed answer that nothing is responding: a definite No.
+func ClassifyPingFailure(err error) ProbeAnswer {
+	if err == nil {
+		return AnswerYes()
+	}
+	if os.IsTimeout(err) || errors.Is(err, os.ErrDeadlineExceeded) {
+		return Undetermined(fmt.Errorf(
+			"the control socket did not answer within %s, so daemon liveness is unknown "+
+				"(a live daemon may be busy with a saturated accept backlog): %w", daemonDialTimeout, err))
+	}
+	return AnswerNo()
+}
+
 // DaemonSocketNames returns the file names of the Unix sockets a daemon binds
 // inside an agent-factory home. Exported so `af doctor` can look for sockets
 // left behind in a home it was pointed at, rather than only the active one,
@@ -190,8 +216,9 @@ func ProcessArgv(pid int) []string {
 	return daemonArgs(pid)
 }
 
-// PIDLooksAlive reports whether pid still appears to name a live process,
-// using the same zombie-aware liveness probe as daemon shutdown paths.
-func PIDLooksAlive(pid int) bool {
-	return pidLooksAlive(pid)
-}
+// PIDLooksAlive is GONE with its last caller. It was exported so `af doctor`
+// could decide whether a temp home's daemon.pid named a live daemon — the
+// heuristic PID validation #960 rejected, and the inference #1989 replaced with
+// the per-home flock (ProbeHomeLock). Nothing outside this package needs to
+// guess at daemon liveness any more: ask the lock. The internal pidLooksAlive
+// remains for the shutdown paths that own a PID legitimately.

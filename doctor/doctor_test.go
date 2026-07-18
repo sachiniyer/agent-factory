@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -334,20 +335,18 @@ func TestLeakedTmuxSessionReportedNotKilled(t *testing.T) {
 		"leaked session must survive --fix")
 }
 
-// TestStaleTempHomeReportedButNeverRemoved: an abandoned AF home under the temp
-// root is DETECTED by its structural markers and REPORTED — and `--fix` does
-// not remove it. A fresh home, and a plain directory, stay untouched too.
+// TestStaleTempHomeReportedButNeverRemoved: an abandoned AF home with NO
+// daemon.lock file is DETECTED by its structural markers and REPORTED — and
+// `--fix` does not remove it. A fresh home, and a plain directory, stay
+// untouched too.
 //
-// This test used to assert the opposite (`require.NoDirExists(stale)`), and the
-// inversion is the point. The removal was gated on "no process references this
-// home", a negative that four consecutive P1 reviews each found a new way to
-// falsify — darwin's silent env redaction, a permission gate that modelled uid
-// but not CS_RESTRICT, and a uid filter that assumed temp roots are
-// user-owned when Linux's /tmp is 01777 and shared. Every one ended at this
-// rm -rf. Process inspection cannot answer "is anything using this?", so it no
-// longer authorises deleting anything; it reports, and the operator decides.
-// The delete returns when the predicate is a lock the kernel guarantees rather
-// than an inference we assemble.
+// This is the "no lock file → never deleted" acceptance of #1989. The delete now
+// rests on a kernel fact — a takeable daemon.lock proves no live daemon owns the
+// home — but ABSENCE of a lock is not proof of non-use: a home may predate the
+// lock, or have been made by a build that never wrote one, and taking a lock
+// nobody ever held would prove nothing. So a home with no lock lands in UNKNOWN:
+// reported (the operator decides), never removed. (The takeable-lock delete that
+// DOES fire is exercised by TestTakeableLockTempHomeRemovedOnFix.)
 func TestStaleTempHomeReportedButNeverRemoved(t *testing.T) {
 	testguard.IsolateTmux(t)
 	opts := testOptions(t, true)
@@ -379,8 +378,8 @@ func TestStaleTempHomeReportedButNeverRemoved(t *testing.T) {
 	require.Len(t, findings, 1)
 	require.Contains(t, findings[0].Detail, stale, "the operator must still be told which directory")
 	require.Empty(t, findings[0].FixAction,
-		"stale-temp-home must carry NO fix action: process inspection cannot prove a home is unused, "+
-			"so it must not authorise deleting one")
+		"stale-temp-home with no lock file must carry NO fix action: absence of a lock is not proof of "+
+			"non-use, so it must not authorise deleting one")
 	require.False(t, findings[0].Fixed, "a --fix run must not have removed anything")
 
 	require.DirExists(t, stale, "a --fix run must NOT delete a home it cannot prove is unused")
@@ -702,4 +701,138 @@ func TestRemoteCoderWhoamiWarnsWithoutFailingDoctor(t *testing.T) {
 	require.Contains(t, checks[0].Detail, "not logged in")
 	require.Equal(t, "run `coder login`", checks[0].Remediation)
 	require.Zero(t, report.UnresolvedCount(), "coder auth warnings must not fail doctor")
+}
+
+// TestDaemonPingTimeoutIsAdvisoryNotFail is the #2040 fail-first: when the
+// control socket EXISTS but the ping DIAL times out — a live daemon momentarily
+// backlogged under heavy RPC load looks exactly like this — doctor must not read
+// it as a definite Fail. A Fail would drive a nonzero exit and tell the user to
+// `af daemon restart` a working daemon. The timeout is advisory: a WARN whose
+// Problem is false, so it never touches the exit code.
+//
+// Observed failing at 307f159: checkDaemonHealth's default arm collapsed any
+// non-nil PingErr into report.Fail, so the daemon row came back FAIL with
+// Problem true and the StatusWarn / !Problem assertions failed.
+func TestDaemonPingTimeoutIsAdvisoryNotFail(t *testing.T) {
+	testguard.IsolateTmux(t)
+	opts := testOptions(t, false)
+	home := opts.ConfigDir
+
+	// The socket file must be present so checkDaemonHealth reaches the ping arm
+	// rather than the "not running; starts on demand" pass.
+	sockPath := filepath.Join(home, "daemon.sock")
+	require.NoError(t, os.WriteFile(sockPath, nil, 0600))
+
+	// The exact error shape net.DialTimeout returns on a deadline expiry.
+	timeoutErr := &net.OpError{Op: "dial", Net: "unix", Err: os.ErrDeadlineExceeded}
+	require.True(t, os.IsTimeout(timeoutErr) || errors.Is(timeoutErr, os.ErrDeadlineExceeded))
+	opts.daemonHealth = func() daemon.HealthStatus {
+		return daemon.HealthStatus{
+			SocketPath:    sockPath,
+			SocketExists:  true,
+			PingErr:       timeoutErr,
+			HTTPListening: daemon.Undetermined(errNoDaemon),
+		}
+	}
+
+	report, err := Run(opts)
+	require.NoError(t, err)
+
+	rows := findCheckRows(report, "daemon")
+	require.Len(t, rows, 1)
+	require.Equal(t, StatusWarn, rows[0].Status,
+		"a dial timeout is not proof the daemon is dead — a busy daemon times out identically (#2040)")
+	require.False(t, rows[0].Problem, "a timeout is advisory; it must not drive the exit code (#2040)")
+}
+
+// TestDaemonPingRefusalStaysFail: a refusal (ECONNREFUSED) is a completed answer
+// — nobody is home — and must stay the definite Fail. The #2040 fix must demote
+// only timeouts, not blur a real refusal into an advisory warning.
+func TestDaemonPingRefusalStaysFail(t *testing.T) {
+	testguard.IsolateTmux(t)
+	opts := testOptions(t, false)
+	home := opts.ConfigDir
+	sockPath := filepath.Join(home, "daemon.sock")
+	require.NoError(t, os.WriteFile(sockPath, nil, 0600))
+
+	refusedErr := &net.OpError{Op: "dial", Net: "unix",
+		Err: &os.SyscallError{Syscall: "connect", Err: syscall.ECONNREFUSED}}
+	opts.daemonHealth = func() daemon.HealthStatus {
+		return daemon.HealthStatus{
+			SocketPath:    sockPath,
+			SocketExists:  true,
+			PingErr:       refusedErr,
+			HTTPListening: daemon.Undetermined(errNoDaemon),
+		}
+	}
+
+	report, err := Run(opts)
+	require.NoError(t, err)
+
+	rows := findCheckRows(report, "daemon")
+	require.Len(t, rows, 1)
+	require.Equal(t, StatusFail, rows[0].Status, "a refused ping is a definite negative")
+	require.True(t, rows[0].Problem, "a refusal is actionable and must drive the exit code")
+}
+
+// TestSummaryLeadsWithActionableCountMatchingUnresolved is the #1979 fail-first:
+// the summary must LEAD with the actionable count (which the exit code keys on),
+// and that count must be the TRUE number of underlying issues so it matches the
+// per-check counts a reader sees — not the smaller number of collapsed rows.
+//
+// Observed failing at 307f159: UnresolvedCount counted the two collapsed finding
+// STRUCTS (1 shown + 1 "… and 46 more") as 2, and the summary trailed with
+// "0 PASS, 1 WARN, 0 FAIL; 2 underlying issues require action" — so both the
+// "47 issues require action" assertion and the leads-before-FAIL ordering failed
+// while the per-check row already said "47 processes".
+func TestSummaryLeadsWithActionableCountMatchingUnresolved(t *testing.T) {
+	r := &Report{
+		Findings: []Finding{
+			{Check: "possible-orphan", Detail: "pid 1 (x) belongs to a dead tmux server"},
+			{Check: "possible-orphan", Detail: "… and 46 more processes of dead tmux servers"},
+		},
+	}
+	// 1 shown + 46 folded into the summary row = 47 underlying issues, the same
+	// number the collapsed per-check row shows.
+	require.Equal(t, 47, r.UnresolvedCount(),
+		"the count that drives the exit code must reflect the true underlying issues, not the number of collapsed rows (#1979)")
+
+	var buf bytes.Buffer
+	Render(&buf, r, false, false)
+	out := buf.String()
+
+	require.Contains(t, out, "47 issues require action")
+	require.Contains(t, out, "47 processes belong to dead tmux servers",
+		"the per-check row and the summary total must be the same arithmetic (#1979)")
+
+	idxCount := strings.Index(out, "issues require action")
+	idxFail := strings.Index(out, "FAIL")
+	require.GreaterOrEqual(t, idxCount, 0)
+	require.GreaterOrEqual(t, idxFail, 0)
+	require.Less(t, idxCount, idxFail,
+		"the summary must lead with the actionable count, not the FAIL tally, so a reader who stops at "+
+			"'0 FAIL' cannot conclude healthy while doctor exits nonzero (#1979)")
+}
+
+// TestSummarizedMoreCountIsAnchoredNotOpportunistic: a finding whose detail
+// embeds a process cmdline containing the words "and 5 more" must count as ONE
+// issue, not five. The roll-up count is read back out of rendered English, so
+// the match is anchored to the "… and N more" prefix the roll-up is written
+// with. Unanchored, a user's command line silently inflates the total that now
+// drives the exit code (#1979).
+func TestSummarizedMoreCountIsAnchoredNotOpportunistic(t *testing.T) {
+	embedded := &Report{
+		Findings: []Finding{
+			{Check: "possible-orphan", Detail: "pid 42 (sh): /bin/sh -c 'sync and 5 more files' belongs to a dead tmux server"},
+		},
+	}
+	require.Equal(t, 1, embedded.UnresolvedCount(),
+		"a cmdline that happens to contain 'and 5 more' is one finding, not five")
+
+	// The genuine roll-up still expands to what it folded.
+	rollup := &Report{
+		Findings: []Finding{{Check: "possible-orphan", Detail: "… and 46 more processes of dead tmux servers"}},
+	}
+	require.Equal(t, 46, rollup.UnresolvedCount(),
+		"the real roll-up must still stand for every process it folded")
 }

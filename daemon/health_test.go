@@ -96,6 +96,41 @@ func TestProbeHTTPSocket_DialRefusedIsNo(t *testing.T) {
 	requireAnswer(t, "no", listening, "a refused dial is a completed answer that nothing is listening")
 }
 
+// The control-socket ping's timeout must be Undetermined, not a definite No —
+// the same fix as probeHTTPSocket, one path over (#2040). A momentarily
+// backlogged control socket times out exactly like a dead one, so collapsing
+// the timeout into a Fail would send a user to `af daemon restart` over a live
+// daemon. The error injected here is the exact shape net.DialTimeout returns on
+// a deadline expiry.
+func TestClassifyPingFailure_TimeoutIsUndetermined(t *testing.T) {
+	timeoutErr := &net.OpError{Op: "dial", Net: "unix", Err: os.ErrDeadlineExceeded}
+	require.True(t, os.IsTimeout(timeoutErr) || errors.Is(timeoutErr, os.ErrDeadlineExceeded),
+		"the injected error must be exactly what the production classification keys on")
+
+	answer := ClassifyPingFailure(timeoutErr)
+	requireAnswer(t, "unknown", answer,
+		"a dial timeout is not evidence the daemon is dead (#2040)")
+	require.Error(t, answer.Cause(), "an undetermined answer must carry its cause")
+}
+
+// A refusal (ECONNREFUSED) is a completed answer — nobody is home — and must
+// stay a definite No that drives the Fail. The fix must not blur it into
+// "unknown".
+func TestClassifyPingFailure_RefusalIsNo(t *testing.T) {
+	refusedErr := &net.OpError{Op: "dial", Net: "unix",
+		Err: &os.SyscallError{Syscall: "connect", Err: syscall.ECONNREFUSED}}
+	require.False(t, os.IsTimeout(refusedErr) || errors.Is(refusedErr, os.ErrDeadlineExceeded),
+		"a refusal must not look like a timeout to the classification")
+
+	requireAnswer(t, "no", ClassifyPingFailure(refusedErr),
+		"a refused ping is a completed answer that nothing is responding")
+}
+
+// A nil error is Yes: a daemon answered.
+func TestClassifyPingFailure_NilIsYes(t *testing.T) {
+	requireAnswer(t, "yes", ClassifyPingFailure(nil), "a nil ping error means a daemon answered")
+}
+
 // A real listener that actually accepts answers Yes — the happy path, run
 // through the REAL dial (no stub) so the seam's production wiring is covered.
 func TestProbeHTTPSocket_LiveListenerIsYes(t *testing.T) {
