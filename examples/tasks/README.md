@@ -6,11 +6,12 @@ Runnable skeletons for the `watch_cmd` trigger ([docs/tasks.md](../../docs/tasks
 |---|---|
 | [`log-tail.sh`](log-tail.sh) | Stream a file: `tail -F` piped through a line-buffered `grep`. One event per matching log line. |
 | [`gh-issue-poll.sh`](gh-issue-poll.sh) | Poll an API with a since-cursor the script persists itself. One event per newly opened GitHub issue; survives daemon restarts without replaying or dropping. |
+| [`gh-events-poll.sh`](gh-events-poll.sh) | Poll SEVERAL sources at once (issues, PRs, comments), each with its own cursor and its own seen-set, so one failing endpoint cannot stall — or repeat — the others. |
 
 ## Quick start
 
 ```bash
-chmod +x log-tail.sh gh-issue-poll.sh
+chmod +x log-tail.sh gh-issue-poll.sh gh-events-poll.sh
 
 af tasks add --name "log-errors" \
   --watch-cmd "LOG_FILE=/var/log/app.log $PWD/log-tail.sh" \
@@ -20,6 +21,11 @@ af tasks add --name "log-errors" \
 af tasks add --name "gh-issues" \
   --watch-cmd "REPO=owner/name $PWD/gh-issue-poll.sh" \
   --prompt "Triage this new issue: {{line}}"
+
+af tasks add --name "gh-events" \
+  --watch-cmd "REPO=owner/name $PWD/gh-events-poll.sh" \
+  --prompt "Handle this GitHub event: {{line}}" \
+  --target-session triage
 ```
 
 With `--target-session` the prompt is sent into that session (auto-created if missing); without it, every event creates a fresh session.
@@ -30,3 +36,6 @@ With `--target-session` the prompt is sent into that session (auto-created if mi
 - **Exit 0 means "stop me"** (status `stopped`, no restart until re-enable). Exit non-zero on failure so the daemon restarts you with backoff — and so a persistent misconfiguration trips the crash-loop breaker (`errored`) instead of looping silently.
 - **Stay under 10 events/min** per task; excess events are dropped (with a logged warning).
 - **Own your cursor.** Events are not replayed across daemon restarts, so pollers should persist their resume point, like `gh-issue-poll.sh` does.
+- **Keep sources independent.** Once you poll more than one source, give each its own cursor and its own seen-set (`gh-events-poll.sh`). A single shared "did every call succeed?" flag makes one broken endpoint hold back all of them, and with no seen-set behind the cursor, a frozen cursor re-emits the same events forever (#1949).
+- **Re-read your cursor each cycle, not once at startup.** The state file is the source of truth, not a seed — otherwise repairing a stuck cursor by hand silently does nothing until the watcher restarts, which is exactly what an operator reaches for when it is stuck.
+- **Say when you are broken.** A source failing for many cycles should report it once, rather than degrading into silence: undelivered events look identical to "nothing happened".
