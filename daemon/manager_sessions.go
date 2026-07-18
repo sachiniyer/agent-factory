@@ -133,23 +133,40 @@ func (m *Manager) KillSession(req KillSessionRequest) (session.InstanceData, err
 
 	if instance != nil {
 		stage.set("tearing down tmux + worktree")
-		// Returning here deliberately SKIPS the record delete below (#1917). Kill
-		// only errors when the teardown could not be completed safely — tmux never
-		// confirmed a pane dead, or git was cut off mid-removal — and in both cases
-		// the workspace is still there. Dropping the record would orphan it and take
-		// away the only handle the user has to retry through. The tombstone is
-		// already durable, so the kill stays committed: finishUserKill retries it on
-		// every poll until it succeeds, with no daemon restart needed.
-		if teardownErr = instance.Kill(); teardownErr != nil {
+		// Retain + retry ONLY when the teardown's outcome is UNKNOWN, gated on the
+		// SAME session.TeardownStateUnknown classifier deleteSessionRecord uses below
+		// (#2017). Returning here deliberately SKIPS the record delete: an unknown
+		// state — tmux never confirmed a pane dead (ErrPaneMayBeLive), or git was cut
+		// off mid-removal (ErrWorkspaceStateUnknown) — means the workspace may still be
+		// on disk with this record as its only handle, so dropping the record would
+		// orphan it and take away the only handle the user has to retry through. The
+		// tombstone is already durable, so the kill stays committed: finishUserKill
+		// retries it on every poll until it succeeds, with no daemon restart needed.
+		//
+		// A KNOWN-state error must NOT retain, or the message it prints is a lie. A
+		// remote (docker/ssh/hook) session's Kill joins the in-sandbox /v1/agent/kill
+		// REST result with the sandbox reap, so a session whose in-sandbox agent-server
+		// already died — the common reason to kill it — returns the failed REST call
+		// over a SUCCEEDED reap: a plain endpoint error whose subject is a dead
+		// endpoint, not the workspace. The workspace is provably gone, so we fall
+		// through to deleteSessionRecord, which logs that cause and deletes the row —
+		// instead of the old any-non-nil return reporting "its workspace was left
+		// intact … retried automatically" on a fully successful reap and flickering the
+		// row for one poll. Mirrors the create-cleanup gate in manager_create.go.
+		if teardownErr = instance.Kill(); session.TeardownStateUnknown(teardownErr) {
 			log.WarningLog.Printf("kill of session %q could not complete its teardown; the record is kept and the daemon will retry it: %v", req.Title, teardownErr)
 			return session.InstanceData{}, fmt.Errorf("kill of session %q could not finish tearing it down safely, so its workspace was left intact; the kill is recorded and will be retried automatically: %w", req.Title, teardownErr)
 		}
 	} else if data != nil {
 		stage.set("cleaning up ghost record")
-		// Same gate as the live-instance branch above: skip the record delete when
-		// the ghost's tmux never confirmed dead, so its workspace and its record
-		// both survive for finishUserKill to retry (#1917).
-		if teardownErr = ghostCleanup(data, req.Title); teardownErr != nil {
+		// Same gate as the live-instance branch above: retain + retry ONLY on an
+		// UNKNOWN-state teardown, routed through the same session.TeardownStateUnknown
+		// classifier (#1917/#2017). ghostCleanup only ever returns an ErrPaneMayBeLive/
+		// ErrWorkspaceStateUnknown wrapper or nil today, so this is behavior-preserving —
+		// but sharing the predicate keeps this branch from re-introducing the #2017
+		// defect (a known-state error misreported as "workspace left intact"): any
+		// future known-state error would fall through to deleteSessionRecord instead.
+		if teardownErr = ghostCleanup(data, req.Title); session.TeardownStateUnknown(teardownErr) {
 			// NO automatic retry is promised here, deliberately (#1917 round 5).
 			// finishUserKill is reached only from refreshInstanceStatus, which
 			// iterates m.instances — and a ghost is precisely a record that could not
