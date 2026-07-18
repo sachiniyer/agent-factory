@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -107,5 +108,108 @@ func TestDockerReapSuccessReturnsNil(t *testing.T) {
 	p := &dockerProvisioner{spec: ProvisionSpec{Title: "clean"}, containerID: "deadbeefcafe0000"}
 	if err := p.reap(); err != nil {
 		t.Fatalf("a successful reap must return nil, got %v", err)
+	}
+}
+
+// reapWithin runs p.reap() (which blocks up to dockerReapTimeout) in a goroutine and
+// returns its error, failing the test if it does not return within guard.
+func reapWithin(t *testing.T, p *dockerProvisioner, guard time.Duration) error {
+	t.Helper()
+	done := make(chan error, 1)
+	go func() { done <- p.reap() }()
+	select {
+	case err := <-done:
+		return err
+	case <-time.After(guard):
+		t.Fatalf("reap did not return within %s", guard)
+		return nil
+	}
+}
+
+// TestDockerReapTimeoutIsReRunnable is the #2063-review guard: a timed-out reap must
+// NOT latch. The daemon's finishUserKill re-invokes instance.Kill() → reap() on
+// every poll for a retained (tombstoned) record; if reap latched on the first
+// timeout, the second call would return nil — the container never re-reaped — so the
+// row would be deleted and the container orphaned exactly one poll later, defeating
+// the fix. A second reap() while docker is still wedged must (i) actually re-attempt
+// `docker rm -f` and (ii) keep returning the unknown sentinel, never nil.
+func TestDockerReapTimeoutIsReRunnable(t *testing.T) {
+	withShortDockerReapTimeout(t, 150*time.Millisecond)
+	var calls int32
+	restore := SetDockerExecForTest(func(ctx context.Context, _ ...string) ([]byte, error) {
+		atomic.AddInt32(&calls, 1)
+		<-ctx.Done()
+		return nil, ctx.Err()
+	})
+	defer restore()
+
+	p := &dockerProvisioner{spec: ProvisionSpec{Title: "wedged"}, containerID: "deadbeefcafe0000"}
+
+	first := reapWithin(t, p, 10*time.Second)
+	if !errors.Is(first, ErrWorkspaceStateUnknown) {
+		t.Fatalf("first timed-out reap must wrap ErrWorkspaceStateUnknown, got %v", first)
+	}
+
+	second := reapWithin(t, p, 10*time.Second)
+	if second == nil {
+		t.Fatal("second reap after a timeout returned nil — the latch skipped the retry, so the row " +
+			"would be deleted and the container orphaned one poll later (#2063 review)")
+	}
+	if !errors.Is(second, ErrWorkspaceStateUnknown) {
+		t.Fatalf("a second reap while docker is still wedged must keep returning ErrWorkspaceStateUnknown, got %v", second)
+	}
+	if !TeardownStateUnknown(second) {
+		t.Fatalf("the retained row depends on TeardownStateUnknown staying true across retries, got false for: %v", second)
+	}
+	if n := atomic.LoadInt32(&calls); n < 2 {
+		t.Fatalf("a timed-out reap must actually re-attempt `docker rm -f` on the next call; dockerExec ran %d times, want >= 2", n)
+	}
+}
+
+// TestDockerReapTimeoutThenSuccessClears completes the retry contract: once docker
+// recovers, a reap after a prior timeout actually reaps the container and returns
+// nil, so the row is finally deleted rather than retained forever — and a further
+// reap stays latched at nil.
+//
+// The call-count assertion is what makes this discriminating rather than
+// decorative: a latching reap ALSO returns nil on the second call (that is the
+// #2063-review bug), so "returned nil" alone passes on the broken code. Only proving
+// `docker rm -f` actually RAN again distinguishes a real re-attempt from a stale
+// latched nil.
+func TestDockerReapTimeoutThenSuccessClears(t *testing.T) {
+	withShortDockerReapTimeout(t, 150*time.Millisecond)
+	var wedged atomic.Bool
+	var calls int32
+	wedged.Store(true)
+	restore := SetDockerExecForTest(func(ctx context.Context, _ ...string) ([]byte, error) {
+		atomic.AddInt32(&calls, 1)
+		if wedged.Load() {
+			<-ctx.Done()
+			return nil, ctx.Err()
+		}
+		return []byte("deadbeefcafe0000\n"), nil
+	})
+	defer restore()
+
+	p := &dockerProvisioner{spec: ProvisionSpec{Title: "recovers"}, containerID: "deadbeefcafe0000"}
+
+	if err := reapWithin(t, p, 10*time.Second); !errors.Is(err, ErrWorkspaceStateUnknown) {
+		t.Fatalf("first (wedged) reap must be unknown, got %v", err)
+	}
+	wedged.Store(false) // docker recovers
+	if err := reapWithin(t, p, 10*time.Second); err != nil {
+		t.Fatalf("after docker recovers, the retry must reap and return nil so the row is deleted, got %v", err)
+	}
+	if n := atomic.LoadInt32(&calls); n < 2 {
+		t.Fatalf("the post-recovery reap must actually re-run `docker rm -f`, not return a latched nil; "+
+			"dockerExec ran %d times, want >= 2 (a latched nil would leave the container leaked)", n)
+	}
+	// Now that a reap COMPLETED, it latches: no further docker command, still nil.
+	after := atomic.LoadInt32(&calls)
+	if err := reapWithin(t, p, 10*time.Second); err != nil {
+		t.Fatalf("a completed reap must latch nil, got %v", err)
+	}
+	if n := atomic.LoadInt32(&calls); n != after {
+		t.Fatalf("a completed reap must not re-run `docker rm -f` (the Kill-retry collapse the latch exists for); ran %d more times", n-after)
 	}
 }

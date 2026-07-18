@@ -218,7 +218,17 @@ type dockerProvisioner struct {
 	program string
 
 	containerID string
-	reapOnce    sync.Once
+
+	// reap memoizes across the repeated Kill retries and the Kill-vs-provision-
+	// failure race, but only for a reap that COMPLETED: reaped latches on success
+	// or on a failure docker ANSWERED with (already-gone, etc.), storing the outcome
+	// in reapErr. A TIMEOUT deliberately does NOT latch — the reap did not complete
+	// and the container may still be running, so the daemon's kill-retry must be able
+	// to re-run `docker rm -f` (#2049 / #2063 review). A plain sync.Once cannot
+	// express "done, but re-runnable", so this is a mutex + explicit latch.
+	reapMu  sync.Mutex
+	reaped  bool
+	reapErr error
 }
 
 // provision runs the full container lifecycle and returns the wiring a docker
@@ -433,45 +443,71 @@ func (p *dockerProvisioner) publishedPort() (string, error) {
 	return port, nil
 }
 
-// reap removes the container, idempotently. It runs on the session's Kill (after
-// the in-container workspace is torn down over REST), on a provisioning failure,
-// and on a bad-endpoint NewInstance failure — so a container is never leaked. The
-// sync.Once makes the repeated Kill retries and the Kill-vs-provision-failure
-// races collapse to one `docker rm -f`.
+// reap removes the container. It runs on the session's Kill (after the in-container
+// workspace is torn down over REST), on a provisioning failure, and on a
+// bad-endpoint NewInstance failure — so a container is never leaked.
+//
+// It is memoized but only for a reap that COMPLETED: a success, or a failure docker
+// ANSWERED with, latches (reaped=true, outcome in reapErr) so the repeated Kill
+// retries and the Kill-vs-provision-failure race collapse to that one result.
+//
+// A TIMEOUT deliberately does NOT latch. The `docker rm -f` was SIGKILLed mid-reap,
+// so it did not complete and the container may STILL be running; the daemon's
+// kill-retry (finishUserKill, on every poll for the retained record) must therefore
+// be able to actually re-run `docker rm -f` rather than see a stale nil. This is the
+// #2063-review defect the naive sync.Once had: it latched on the timeout too, so the
+// second reap() skipped the closure and returned nil (reapErr was a per-call local),
+// the row was deleted, and the container was orphaned exactly one poll later —
+// retention that lasted a single tick. Not latching a timeout makes retention
+// durable AND the reap genuinely retry-able.
+//
+// While a reap keeps timing out it keeps returning the ErrWorkspaceStateUnknown
+// sentinel (row retained); once docker answers — a later `docker rm -f` succeeds or
+// reports (e.g. "No such container", already gone) — it latches and the row may go.
+// It never silently returns nil while the container may still be leaked.
 func (p *dockerProvisioner) reap() error {
-	var reapErr error
-	p.reapOnce.Do(func() {
-		if p.containerID == "" {
-			return
-		}
-		// Own the context here (rather than via p.docker) so a tripped deadline is
-		// distinguishable from a reap that docker ANSWERED with an error — the two
-		// mean opposite things for the record (#2049).
-		ctx, cancel := context.WithTimeout(context.Background(), dockerReapTimeout)
-		defer cancel()
-		out, err := dockerExec(ctx, "rm", "-f", p.containerID)
-		if err == nil {
-			log.InfoLog.Printf("docker runtime: reaped container %s for session %q", p.shortID(), p.spec.Title)
-			return
-		}
-		reapErr = fmt.Errorf("backend=docker: `docker rm -f %s` failed: %s: %w", p.shortID(), strings.TrimSpace(string(out)), err)
-		// A tripped deadline is NOT a report that the container is gone: docker was
-		// SIGKILLed mid-reap, so the container may STILL be running. Wrap the
-		// unknown-state sentinel so KillSession/deleteSessionRecord RETAIN the row —
-		// the only handle on the possibly-leaked container — instead of classifying
-		// the timeout as a known teardown and deleting it, orphaning the container
-		// (#2049, the fabricated-negative / teardown-taxonomy family: a two-valued
-		// error can't say "I don't know if it's gone", so a timeout reads as "gone").
-		// A docker that ANSWERED with an error (e.g. "No such container" — already
-		// gone) stays a plain, known-state error and the row may go, per the
-		// documented deleteSessionRecord contract. The #914 guard applies: only when
-		// err != nil AND the ctx deadline tripped, so a bare exec.ErrWaitDelay that
-		// dockerExec already normalized to success (err == nil) never lands here.
-		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-			reapErr = fmt.Errorf("%w: %w", ErrWorkspaceStateUnknown, reapErr)
-		}
+	// Held across the docker call so concurrent reaps serialize (no double
+	// `docker rm -f`) and the latch is read/written race-free — the same
+	// mutual-exclusion the sync.Once gave, minus its permanent latch.
+	p.reapMu.Lock()
+	defer p.reapMu.Unlock()
+	if p.reaped {
+		return p.reapErr
+	}
+	if p.containerID == "" {
+		p.reaped = true
+		return nil
+	}
+	// Own the context here (rather than via p.docker) so a tripped deadline is
+	// distinguishable from a reap that docker ANSWERED with an error — the two mean
+	// opposite things for the record (#2049).
+	ctx, cancel := context.WithTimeout(context.Background(), dockerReapTimeout)
+	defer cancel()
+	out, err := dockerExec(ctx, "rm", "-f", p.containerID)
+	if err == nil {
+		p.reaped = true
+		p.reapErr = nil
+		log.InfoLog.Printf("docker runtime: reaped container %s for session %q", p.shortID(), p.spec.Title)
+		return nil
+	}
+	reapErr := fmt.Errorf("backend=docker: `docker rm -f %s` failed: %s: %w", p.shortID(), strings.TrimSpace(string(out)), err)
+	// The #914 guard: classify a TIMEOUT only when err != nil AND the ctx deadline
+	// tripped, so a bare exec.ErrWaitDelay that dockerExec already normalized to
+	// success (err == nil) never reaches here.
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		// Unknown-state, and NOT latched: RETAIN the row now and re-run on the next
+		// reap. (#2049 classification + #2063-review retry.)
+		reapErr = fmt.Errorf("%w: %w", ErrWorkspaceStateUnknown, reapErr)
 		log.WarningLog.Printf("%v", reapErr)
-	})
+		return reapErr
+	}
+	// docker ANSWERED with an error: the reap completed and TOLD us something, so it
+	// latches as a KNOWN-state error and the row may be deleted, per the documented
+	// deleteSessionRecord contract. Latching also stops retries from re-running a
+	// command that will keep answering the same way.
+	p.reaped = true
+	p.reapErr = reapErr
+	log.WarningLog.Printf("%v", reapErr)
 	return reapErr
 }
 
