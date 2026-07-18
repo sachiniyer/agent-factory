@@ -1,0 +1,70 @@
+{
+  "_readme": [
+    "Shared schedule test vectors for #2057 (task-scheduling UX). BOTH the Go",
+    "tests (schedule/schedule_test.go) and the phase-2 web tests load this file",
+    "so the two Schedule implementations cannot drift (the #1970 shared-source-",
+    "of-truth pattern). Do not tighten it to Go-only shapes.",
+    "",
+    "Each entry in `vectors` is checked as follows:",
+    "  - schedule + cron   -> assert Schedule.Cron() == cron",
+    "  - schedule + human  -> assert Schedule.Describe() == human",
+    "  - ParseCron:  input    = parse.cron   if present, else cron (skipped if neither)",
+    "                expectOk = parse.ok     if present, else true",
+    "                expected = parse.schedule if present, else schedule",
+    "                assert ParseCron(input) == (expected, expectOk)",
+    "Weekdays use time.Weekday numbering (Sunday=0 .. Saturday=6)."
+  ],
+  "vectors": [
+    { "name": "every-1-minute",  "schedule": { "type": "everyNMinutes", "interval": 1 },  "cron": "*/1 * * * *",  "human": "Every minute" },
+    { "name": "every-5-minutes", "schedule": { "type": "everyNMinutes", "interval": 5 },  "cron": "*/5 * * * *",  "human": "Every 5 minutes" },
+    { "name": "every-15-minutes","schedule": { "type": "everyNMinutes", "interval": 15 }, "cron": "*/15 * * * *", "human": "Every 15 minutes" },
+    { "name": "every-30-minutes","schedule": { "type": "everyNMinutes", "interval": 30 }, "cron": "*/30 * * * *", "human": "Every 30 minutes" },
+
+    { "name": "every-1-hour",   "schedule": { "type": "everyNHours", "interval": 1 },  "cron": "0 */1 * * *",  "human": "Every hour" },
+    { "name": "every-2-hours",  "schedule": { "type": "everyNHours", "interval": 2 },  "cron": "0 */2 * * *",  "human": "Every 2 hours" },
+    { "name": "every-6-hours",  "schedule": { "type": "everyNHours", "interval": 6 },  "cron": "0 */6 * * *",  "human": "Every 6 hours" },
+    { "name": "every-12-hours", "schedule": { "type": "everyNHours", "interval": 12 }, "cron": "0 */12 * * *", "human": "Every 12 hours" },
+
+    { "name": "hourly-at-0",  "schedule": { "type": "hourly", "minute": 0 },  "cron": "0 * * * *",  "human": "Every hour at :00" },
+    { "name": "hourly-at-5",  "schedule": { "type": "hourly", "minute": 5 },  "cron": "5 * * * *",  "human": "Every hour at :05" },
+    { "name": "hourly-at-30", "schedule": { "type": "hourly", "minute": 30 }, "cron": "30 * * * *", "human": "Every hour at :30" },
+    { "name": "hourly-at-59", "schedule": { "type": "hourly", "minute": 59 }, "cron": "59 * * * *", "human": "Every hour at :59" },
+
+    { "name": "daily-midnight",  "schedule": { "type": "daily", "hour": 0,  "minute": 0 },  "cron": "0 0 * * *",   "human": "Every day at 12:00 AM" },
+    { "name": "daily-morning",   "schedule": { "type": "daily", "hour": 9,  "minute": 5 },  "cron": "5 9 * * *",   "human": "Every day at 9:05 AM" },
+    { "name": "daily-noon",      "schedule": { "type": "daily", "hour": 12, "minute": 0 },  "cron": "0 12 * * *",  "human": "Every day at 12:00 PM" },
+    { "name": "daily-1pm",       "schedule": { "type": "daily", "hour": 13, "minute": 0 },  "cron": "0 13 * * *",  "human": "Every day at 1:00 PM" },
+    { "name": "daily-afternoon", "schedule": { "type": "daily", "hour": 15, "minute": 41 }, "cron": "41 15 * * *", "human": "Every day at 3:41 PM" },
+    { "name": "daily-late",      "schedule": { "type": "daily", "hour": 23, "minute": 59 }, "cron": "59 23 * * *", "human": "Every day at 11:59 PM" },
+
+    { "name": "weekly-mon-wed",  "schedule": { "type": "weekly", "hour": 9,  "minute": 0,  "weekdays": [1, 3] },          "cron": "0 9 * * 1,3",         "human": "Every week on Mon, Wed at 9:00 AM" },
+    { "name": "weekly-sunday",   "schedule": { "type": "weekly", "hour": 0,  "minute": 0,  "weekdays": [0] },             "cron": "0 0 * * 0",           "human": "Every week on Sun at 12:00 AM" },
+    { "name": "weekly-saturday", "schedule": { "type": "weekly", "hour": 10, "minute": 15, "weekdays": [6] },             "cron": "15 10 * * 6",         "human": "Every week on Sat at 10:15 AM" },
+    { "name": "weekly-weekdays", "schedule": { "type": "weekly", "hour": 8,  "minute": 30, "weekdays": [1, 2, 3, 4, 5] }, "cron": "30 8 * * 1,2,3,4,5",  "human": "Every week on Mon, Tue, Wed, Thu, Fri at 8:30 AM" },
+    { "name": "weekly-weekend",  "schedule": { "type": "weekly", "hour": 18, "minute": 0,  "weekdays": [0, 6] },          "cron": "0 18 * * 0,6",        "human": "Every week on Sun, Sat at 6:00 PM" },
+
+    { "name": "monthly-1st",  "schedule": { "type": "monthly", "hour": 0,  "minute": 0,  "dayOfMonth": 1 },  "cron": "0 0 1 * *",    "human": "Every month on the 1st at 12:00 AM" },
+    { "name": "monthly-2nd",  "schedule": { "type": "monthly", "hour": 6,  "minute": 0,  "dayOfMonth": 2 },  "cron": "0 6 2 * *",    "human": "Every month on the 2nd at 6:00 AM" },
+    { "name": "monthly-3rd",  "schedule": { "type": "monthly", "hour": 6,  "minute": 0,  "dayOfMonth": 3 },  "cron": "0 6 3 * *",    "human": "Every month on the 3rd at 6:00 AM" },
+    { "name": "monthly-11th", "schedule": { "type": "monthly", "hour": 6,  "minute": 0,  "dayOfMonth": 11 }, "cron": "0 6 11 * *",   "human": "Every month on the 11th at 6:00 AM" },
+    { "name": "monthly-12th", "schedule": { "type": "monthly", "hour": 6,  "minute": 0,  "dayOfMonth": 12 }, "cron": "0 6 12 * *",   "human": "Every month on the 12th at 6:00 AM" },
+    { "name": "monthly-13th", "schedule": { "type": "monthly", "hour": 6,  "minute": 0,  "dayOfMonth": 13 }, "cron": "0 6 13 * *",   "human": "Every month on the 13th at 6:00 AM" },
+    { "name": "monthly-15th", "schedule": { "type": "monthly", "hour": 14, "minute": 30, "dayOfMonth": 15 }, "cron": "30 14 15 * *", "human": "Every month on the 15th at 2:30 PM" },
+    { "name": "monthly-21st", "schedule": { "type": "monthly", "hour": 6,  "minute": 0,  "dayOfMonth": 21 }, "cron": "0 6 21 * *",   "human": "Every month on the 21st at 6:00 AM" },
+    { "name": "monthly-22nd", "schedule": { "type": "monthly", "hour": 6,  "minute": 0,  "dayOfMonth": 22 }, "cron": "0 6 22 * *",   "human": "Every month on the 22nd at 6:00 AM" },
+    { "name": "monthly-23rd", "schedule": { "type": "monthly", "hour": 6,  "minute": 0,  "dayOfMonth": 23 }, "cron": "0 6 23 * *",   "human": "Every month on the 23rd at 6:00 AM" },
+    { "name": "monthly-31st", "schedule": { "type": "monthly", "hour": 23, "minute": 0,  "dayOfMonth": 31 }, "cron": "0 23 31 * *",  "human": "Every month on the 31st at 11:00 PM" },
+
+    { "name": "custom-echoes-raw",       "schedule": { "type": "custom", "raw": "0 9 * * 1-5" }, "cron": "0 9 * * 1-5", "human": "Custom: 0 9 * * 1-5", "parse": { "ok": false } },
+    { "name": "custom-step-range",       "schedule": { "type": "custom", "raw": "*/7 9-17 * * *" }, "cron": "*/7 9-17 * * *", "human": "Custom: */7 9-17 * * *", "parse": { "ok": false } },
+    { "name": "custom-raw-is-recognized","schedule": { "type": "custom", "raw": "41 3 * * *" }, "cron": "41 3 * * *", "human": "Custom: 41 3 * * *", "parse": { "ok": true, "schedule": { "type": "daily", "hour": 3, "minute": 41 } } },
+
+    { "name": "parse-sunday-alias-7",    "cron": "0 0 * * 7",     "parse": { "ok": true,  "schedule": { "type": "weekly", "hour": 0, "minute": 0, "weekdays": [0] } } },
+    { "name": "parse-empty",             "cron": "",              "parse": { "ok": false, "schedule": { "type": "custom", "raw": "" } } },
+    { "name": "parse-garbage",           "cron": "not a cron",    "parse": { "ok": false, "schedule": { "type": "custom", "raw": "not a cron" } } },
+    { "name": "parse-six-fields",        "cron": "0 0 * * * *",   "parse": { "ok": false, "schedule": { "type": "custom", "raw": "0 0 * * * *" } } },
+    { "name": "parse-month-restricted",  "cron": "0 9 1 6 *",     "parse": { "ok": false, "schedule": { "type": "custom", "raw": "0 9 1 6 *" } } },
+    { "name": "parse-minute-list",       "cron": "0,30 * * * *",  "parse": { "ok": false, "schedule": { "type": "custom", "raw": "0,30 * * * *" } } },
+    { "name": "parse-dom-and-dow",       "cron": "0 9 1 * 1",     "parse": { "ok": false, "schedule": { "type": "custom", "raw": "0 9 1 * 1" } } }
+  ]
+}

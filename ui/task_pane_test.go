@@ -9,6 +9,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/sachiniyer/agent-factory/keys"
+	"github.com/sachiniyer/agent-factory/schedule"
 	"github.com/sachiniyer/agent-factory/task"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -344,16 +345,15 @@ func tabTo(tp *TaskPane, presses int) {
 	}
 }
 
-// fillCreateForm types a name, cron expression, and prompt into the create
-// form (the trigger selector defaults to cron) so submitting via the Save
-// button doesn't trip validation. Leaves focus back on index 0 (Name) so
-// callers can walk to whichever field they want to drive next.
+// fillCreateForm types a name and prompt into the create form (the trigger
+// selector defaults to cron) so submitting via the Save button doesn't trip
+// validation. The schedule picker seeds a valid default (daily at 9:00 AM), so
+// the cron trigger needs no input to be savable (#2057). Leaves focus back on
+// index 0 (Name) so callers can walk to whichever field they want to drive next.
 func fillCreateForm(t *testing.T, tp *TaskPane, name string) {
 	t.Helper()
 	tp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(name)})
-	tabTo(tp, 2) // name -> trigger selector (cron stays selected) -> cron value
-	tp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("* * * * *")})
-	tp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyTab}) // -> prompt
+	tabTo(tp, taskFocusPrompt) // name -> trigger selector -> schedule picker -> prompt
 	tp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("do something")})
 	// Walk back to name (index 0) so callers can navigate forward consistently.
 	for i := 0; i < taskFocusPrompt; i++ {
@@ -888,21 +888,27 @@ func TestTaskPaneCreateModeInactiveTriggerNotSaved(t *testing.T) {
 	assert.Equal(t, "tail -F log", watchCmd)
 }
 
-// TestTaskPaneCreateModeRejectsEmptyCron covers the cron half of the trigger
-// contract: submitting a cron-type task with no expression must surface an
-// inline error under the trigger field instead of creating an unfireable task.
-func TestTaskPaneCreateModeRejectsEmptyCron(t *testing.T) {
+// TestTaskPaneCreateModeRejectsEmptyCustomCron covers the surviving empty-cron
+// path: a preset schedule always generates a valid cron, but the Custom escape
+// hatch can be emptied. Submitting Custom with a blank expression must surface
+// the inline error under the trigger field instead of creating an unfireable
+// task (#2057).
+func TestTaskPaneCreateModeRejectsEmptyCustomCron(t *testing.T) {
 	tp := NewTaskPane()
 	tp.EnterCreateMode("/tmp/repo")
 
-	// Name and prompt only — no cron expression.
 	tp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("untriggered")})
 	tabTo(tp, taskFocusPrompt)
 	tp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("do something")})
+
+	// Drop the schedule into Custom and clear the raw expression.
+	tp.schedule.setType(schedule.Custom)
+	tp.schedule.raw.SetValue("")
+
 	tabTo(tp, taskFocusSave-taskFocusPrompt)
 	tp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEnter})
 
-	assert.False(t, tp.HasPendingCreate(), "no trigger must not produce a pending create")
+	assert.False(t, tp.HasPendingCreate(), "empty custom cron must not produce a pending create")
 	assert.True(t, tp.IsCreating(), "form must stay open so user can fix the error")
 	assert.Equal(t, "cron expression is required", tp.editError)
 	assert.Equal(t, taskFocusTriggerValue, tp.editErrorField)
@@ -1278,21 +1284,22 @@ func TestTaskPaneSetTasksClearsPendingCreateButKeepsPendingTrigger(t *testing.T)
 // TestTaskPaneCreateModeEnterMovesFocusToInvalidField: submitting an invalid
 // form from any field surfaces the inline error AND moves focus to the
 // offending field, so the error is in view even when the clamped form has it
-// scrolled off-screen (#1098).
+// scrolled off-screen (#1098). The schedule picker seeds a valid default cron,
+// so the first offending field for a name-only form is now the empty prompt.
 func TestTaskPaneCreateModeEnterMovesFocusToInvalidField(t *testing.T) {
 	repo := newGitRepo(t)
 	tp := NewTaskPane()
 	tp.SetSize(80, 24)
 	tp.EnterCreateMode(repo)
-	// Name typed, cron left empty.
+	// Name typed, prompt left empty (the schedule defaults to a valid cron).
 	tp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("half-filled")})
 
 	tp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEnter})
 	assert.True(t, tp.creating, "invalid form must not submit")
 	assert.False(t, tp.pendingCreate)
-	assert.Equal(t, "cron expression is required", tp.editError)
-	assert.Equal(t, taskFocusTriggerValue, tp.editErrorField)
-	assert.Equal(t, taskFocusTriggerValue, tp.focusIndex,
+	assert.Equal(t, "prompt must be non-empty", tp.editError)
+	assert.Equal(t, taskFocusPrompt, tp.editErrorField)
+	assert.Equal(t, taskFocusPrompt, tp.focusIndex,
 		"focus must land on the offending field")
 }
 
