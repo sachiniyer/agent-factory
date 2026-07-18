@@ -54,7 +54,18 @@ func (g *GitWorktree) SnapshotAndPushBranch() (string, error) {
 	// Snapshot uncommitted work so it survives the sandbox teardown. `git status
 	// --porcelain` is empty for a clean tree, in which case there is nothing to
 	// commit and we push the committed history as-is.
-	status, err := g.runGitCommand(g.worktreePath, "status", "--porcelain")
+	//
+	// --untracked-files=normal is load-bearing (#2101): bare `git status
+	// --porcelain` honours status.showUntrackedFiles, and a worktree shares
+	// .git/config with its main repo, so a user who set that to `no` made this
+	// gate read a tree full of untracked work as clean. The `add -A` below would
+	// have staged those files perfectly well — it simply never ran, and the work
+	// died with the sandbox. The flag overrides the config, so the gate answers
+	// "is there anything to snapshot?" the same way for every user. `normal`
+	// rather than `all` because we only need that boolean: `normal` reports an
+	// untracked directory as one `?? dir/` entry instead of walking every file
+	// beneath it, which is the same answer for less work on a big tree.
+	status, err := g.runGitCommand(g.worktreePath, "status", "--porcelain", "--untracked-files=normal")
 	if err != nil {
 		return "", fmt.Errorf("failed to check worktree status before archive push: %w", err)
 	}

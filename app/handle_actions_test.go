@@ -123,6 +123,32 @@ func TestKillConfirmationWarning(t *testing.T) {
 		require.NotContains(t, warning, "Could not verify")
 	})
 
+	// #2101: `git status --porcelain` honours status.showUntrackedFiles, so a user
+	// (or a global/main-repo config inherited by the worktree) that sets it to `no`
+	// hid untracked files from the only safety check standing between D+y and
+	// `git worktree remove -f`. The warning must not depend on user config.
+	t.Run("untracked file with showUntrackedFiles=no still warns", func(t *testing.T) {
+		dir := gitInit(t)
+		cmd := exec.Command("git", "-C", dir, "config", "status.showUntrackedFiles", "no")
+		require.NoError(t, cmd.Run(), "git config failed")
+		require.NoError(t, os.WriteFile(filepath.Join(dir, "untracked.txt"), []byte("data"), 0o644))
+		warning := killConfirmationWarning(dir)
+		require.Contains(t, warning, "uncommitted changes that will be lost",
+			"warning should still be shown despite showUntrackedFiles=no")
+		require.NotContains(t, warning, "Could not verify")
+	})
+
+	// The same hiding vector via the untracked file living in an untracked
+	// subdirectory — the shape `-unormal` collapses to a single `?? dir/` entry.
+	t.Run("untracked subdirectory with showUntrackedFiles=no still warns", func(t *testing.T) {
+		dir := gitInit(t)
+		cmd := exec.Command("git", "-C", dir, "config", "status.showUntrackedFiles", "no")
+		require.NoError(t, cmd.Run(), "git config failed")
+		require.NoError(t, os.MkdirAll(filepath.Join(dir, "notes", "deep"), 0o755))
+		require.NoError(t, os.WriteFile(filepath.Join(dir, "notes", "deep", "wip.txt"), []byte("data"), 0o644))
+		require.Contains(t, killConfirmationWarning(dir), "uncommitted changes that will be lost")
+	})
+
 	t.Run("status check failure fails closed with could-not-verify warning", func(t *testing.T) {
 		// A plain directory that is not a git repository makes `git status` fail.
 		warning := killConfirmationWarning(t.TempDir())

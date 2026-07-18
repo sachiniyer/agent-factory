@@ -126,8 +126,19 @@ func killConfirmMessage(title, warning string, reserved bool) string {
 // the user gets. If `git status` itself fails we cannot prove the worktree is
 // clean — fail closed and warn that changes may be lost rather than silently
 // skipping the warning (#815).
+//
+// --untracked-files=normal is load-bearing (#2101). Bare `git status --porcelain`
+// honours status.showUntrackedFiles, and a session worktree shares .git/config
+// with its main repo, so a user with that set to `no` (or inheriting it globally)
+// got the bare, safe-looking "[!] Kill session 'x'?" prompt over a worktree full
+// of untracked work — and D+y then fed it to `git worktree remove -f`. Whether
+// the user gets a data-loss warning must not depend on their status preferences.
+// `normal` rather than `all` because this is a boolean: `normal` collapses an
+// untracked directory to a single `?? dir/` entry instead of walking every file
+// under it, which matters on a path that runs synchronously on the Bubble Tea
+// Update loop (#2030).
 func killConfirmationWarning(wt string) string {
-	out, err := runKillGit(wt, "status", "--porcelain")
+	out, err := runKillGit(wt, "status", "--porcelain", "--untracked-files=normal")
 	if err != nil {
 		log.WarningLog.Printf("could not verify worktree status for %s before kill: %v", wt, err)
 		return fmt.Sprintf("WARNING: Could not verify worktree status (%v); it may contain uncommitted changes that will be lost!", err)
