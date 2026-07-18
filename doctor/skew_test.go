@@ -2,6 +2,7 @@ package doctor
 
 import (
 	"encoding/json"
+	"errors"
 	"net"
 	"os"
 	"path/filepath"
@@ -938,6 +939,39 @@ func TestHTTPSocket_Healthy_Passes(t *testing.T) {
 	report, err := Run(opts)
 	require.NoError(t, err)
 	require.Equal(t, StatusPass, findCheck(t, report, "http socket").Status)
+}
+
+// A dial that TIMED OUT is not evidence the HTTP listener is dead — a live
+// listener with a saturated accept backlog times out too. So an Undetermined
+// probe must render as an advisory "could not probe … unknown", NOT as an
+// actionable "run af daemon restart" that drives a nonzero exit over a
+// live-but-busy listener (#2014). This is the downstream half of the fix: even
+// once probeHTTPSocket returns Undetermined on a timeout, doctor must route it
+// to the non-actionable branch.
+func TestHTTPSocket_DialTimeout_IsAdvisoryNotRestart(t *testing.T) {
+	testguard.IsolateTmux(t)
+
+	opts := testOptions(t, false)
+	opts.Version = "1.0.192"
+	opts.daemonHealth = func() daemon.HealthStatus {
+		return daemon.HealthStatus{
+			SocketPath: "/fake/daemon.sock", SocketExists: true, DaemonVersion: "1.0.192",
+			// Control socket healthy; the HTTP dial timed out (unknown, not "no").
+			HTTPSocketPath: "/fake/daemon-http.sock", HTTPSocketExists: true,
+			HTTPListening: daemon.Undetermined(errors.New("dialing /fake/daemon-http.sock did not complete within 250ms")),
+		}
+	}
+
+	report, err := Run(opts)
+	require.NoError(t, err)
+
+	c := findCheck(t, report, "http socket")
+	require.Equal(t, StatusWarn, c.Status)
+	require.False(t, c.Problem,
+		"a timeout is not proof of a dead surface; it must not be actionable or drive a nonzero exit")
+	require.Contains(t, c.Detail, "could not probe", "a timeout renders as an inability to observe, not a verdict")
+	require.NotContains(t, c.Remediation, "restart",
+		"a live-but-busy listener must not be told to run af daemon restart")
 }
 
 // With no daemon at all, its HTTP socket being gone is expected — the row would

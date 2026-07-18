@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -97,6 +98,14 @@ func Health() HealthStatus {
 	return h
 }
 
+// dialUnix dials a Unix socket with a bounded timeout. It is a package var so a
+// test can substitute a deterministic dial outcome (a synthetic timeout or a
+// refusal) instead of manufacturing one from the OS: kernel accept-backlog
+// semantics differ across platforms, so a real saturated-backlog timeout is not
+// portably reproducible (Darwin completes handshakes past the nominal backlog
+// and never saturates — #2039). Production wires the real net.DialTimeout.
+var dialUnix = net.DialTimeout
+
 // probeHTTPSocket reports the HTTP socket's path, whether it exists, and
 // whether anything is accepting connections on it.
 //
@@ -116,13 +125,35 @@ func probeHTTPSocket() (path string, exists bool, listening ProbeAnswer) {
 		}
 		return path, false, Undetermined(fmt.Errorf("cannot stat %s: %w", path, err))
 	}
-	conn, err := net.DialTimeout("unix", path, daemonDialTimeout)
+	conn, err := dialUnix("unix", path, daemonDialTimeout)
 	if err != nil {
-		// The socket is there and refused us: nobody is behind it.
-		return path, true, AnswerNo()
+		return path, true, classifyDialFailure(path, err)
 	}
 	_ = conn.Close()
 	return path, true, AnswerYes()
+}
+
+// classifyDialFailure turns a FAILED dial of the socket into an answer about
+// whether anything is listening. A dial error is not automatically a "no".
+//
+//   - A refusal (ECONNREFUSED) is a completed answer: the socket file is there
+//     and the kernel had no listener to hand the connection to. Nobody is
+//     behind it — a definite No.
+//   - A deadline expiry is NOT an answer. A listener can be present with a
+//     saturated accept backlog, so the connect waits and the 250ms bound fires
+//     before it is serviced. Reading that timeout as No is the exact
+//     timeout-is-not-a-negative fabrication #1920 set out to kill, one field
+//     over (#2014): it would send a user to `af daemon restart` over a
+//     live-but-busy listener. A timeout is Undetermined, never a made-up No.
+func classifyDialFailure(path string, err error) ProbeAnswer {
+	if os.IsTimeout(err) || errors.Is(err, os.ErrDeadlineExceeded) {
+		return Undetermined(fmt.Errorf(
+			"dialing %s did not complete within %s, so whether anything is listening is unknown "+
+				"(a listener may be present with a saturated accept backlog): %w",
+			path, daemonDialTimeout, err))
+	}
+	// The socket is there and refused us: nobody is behind it.
+	return AnswerNo()
 }
 
 // DaemonSocketNames returns the file names of the Unix sockets a daemon binds
