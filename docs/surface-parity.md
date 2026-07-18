@@ -102,15 +102,16 @@ accepts that a surface never sends:
   never sets `PreviewRequest.Tab` / `TabID` / `Full`
 
 The **enum** level is the newest and the easiest to miss, because the other two
-both pass while it drifts. `web/src/modals.ts:173` hardcodes a copy of
-`tmux.SupportedPrograms` ([#1970](https://github.com/sachiniyer/agent-factory/issues/1970)):
-the web *does* send `program`, so field coverage calls it covered, and adding a
-sixth agent server-side would leave the web silently unable to offer it with the
-whole suite green. A surface serving a stale copy of something the daemon owns is
-the #1933 shape one level down, so it gets the same answer — derive both sides
-and compare, rather than trusting a copy to stay in step. The structural fix is
-to SERVE the enum (the `ListBackends` pattern), at which point the check is
-deleted and the row flips to `parity`.
+both pass while it drifts. [#1970](https://github.com/sachiniyer/agent-factory/issues/1970)
+found it: the web hardcoded a copy of `tmux.SupportedPrograms` in two pickers,
+so the web *did* send `program` (field coverage called it covered) while adding
+a new agent server-side would have left the web silently unable to offer it with
+the whole suite green. A surface serving a stale copy of something the daemon
+owns is the #1933 shape one level down, so it gets the same answer — derive both
+sides and compare, rather than trusting a copy to stay in step. The structural
+fix is to SERVE the enum (the `ListBackends` pattern — `POST /v1/ListPrograms`),
+at which point the check is deleted and the row flips to `parity`, which is how
+#1970 was closed.
 
 Every field a surface does not send must be declared in `field_coverage` as
 either `{"gap": "<capability-id>"}` (a tracked divergence) or `{"ok": "<reason>"}`
