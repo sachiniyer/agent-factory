@@ -5,14 +5,15 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
 
 	"github.com/sachiniyer/agent-factory/cmd/cmd_test"
+	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/internal/proctree"
 )
 
@@ -34,24 +35,15 @@ func makeOldTempAFHome(t *testing.T, tempRoot, name string) string {
 	return dir
 }
 
-func writeOldDaemonPID(t *testing.T, dir string, pid int) {
+// stubTempHomeLockProbe forces the lock-probe outcome for a test, so the
+// report/delete decisions can be driven off each of the three answers
+// (held / takeable / unprovable) without a real daemon or a real NFS mount. The
+// real probe mechanics are covered by the daemon package's ProbeHomeLock tests.
+func stubTempHomeLockProbe(t *testing.T, answer func(dir string) daemon.ProbeAnswer) {
 	t.Helper()
-	path := filepath.Join(dir, "daemon.pid")
-	require.NoError(t, os.WriteFile(path, []byte(strconv.Itoa(pid)), 0600))
-	old := time.Now().Add(-48 * time.Hour)
-	require.NoError(t, os.Chtimes(path, old, old))
-}
-
-func stubDaemonProcessProbe(t *testing.T, alive func(int) bool, argv func(int) []string) {
-	t.Helper()
-	origAlive := daemonPIDLooksAlive
-	origArgv := daemonProcessArgv
-	daemonPIDLooksAlive = alive
-	daemonProcessArgv = argv
-	t.Cleanup(func() {
-		daemonPIDLooksAlive = origAlive
-		daemonProcessArgv = origArgv
-	})
+	prev := tempHomeLockProbe
+	tempHomeLockProbe = answer
+	t.Cleanup(func() { tempHomeLockProbe = prev })
 }
 
 func macLikeTempHomeOptions(t *testing.T, tempRoot string, fix bool) Options {
@@ -70,39 +62,108 @@ func macLikeTempHomeOptions(t *testing.T, tempRoot string, fix bool) Options {
 	return opts
 }
 
-func TestTempHomeDaemonLivenessUsesDaemonProcessArgv(t *testing.T) {
-	tempRoot := t.TempDir()
-	dir := makeOldTempAFHome(t, tempRoot, "tmp.live-daemon")
-	writeOldDaemonPID(t, dir, 4242)
-	stubDaemonProcessProbe(t,
-		func(pid int) bool { return pid == 4242 },
-		func(pid int) []string {
-			require.Equal(t, 4242, pid)
-			return []string{"/usr/local/bin/af", "--daemon"}
-		},
-	)
-
-	report, err := Run(macLikeTempHomeOptions(t, tempRoot, true))
+// holdDaemonLock creates dir's daemon.lock and holds an exclusive flock on it
+// for the whole test — exactly what a running daemon does. flock contends
+// across open-file-descriptions the same in one process as across two, so this
+// is a faithful stand-in for a live daemon owning the home.
+func holdDaemonLock(t *testing.T, dir string) {
+	t.Helper()
+	path := filepath.Join(dir, "daemon.lock")
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0600)
 	require.NoError(t, err)
-	require.Empty(t, findByCheck(report, "stale-temp-home"))
-	require.DirExists(t, dir, "a temp home with a verified live daemon must never be removed")
-	require.True(t, okContains(report, "daemon pid is live"))
+	t.Cleanup(func() { _ = f.Close() })
+	require.NoError(t, syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB))
+	// Creating the lock file refreshed dir's mtime; age it back so the home is
+	// old enough to be a delete candidate. Otherwise the age gate would spare it
+	// for looking fresh, masking whether the LOCK is what spares it.
+	old := time.Now().Add(-48 * time.Hour)
+	require.NoError(t, os.Chtimes(path, old, old))
+	require.NoError(t, os.Chtimes(dir, old, old))
 }
 
-func TestTempHomeDaemonUncertainLivenessSparesHome(t *testing.T) {
+// TestTempHomeWithHeldDaemonLockIsSpared is the #1989 fail-first: a temp home
+// whose daemon.lock is held by a LIVE daemon must never be reported stale or
+// removed, even under --fix — and even when the process/pid surface the old
+// scan relied on shows nothing (this run has no /proc and no tmux).
+//
+// Observed failing at 307f159: the old code has no lock probe, so its process
+// scan finds no reference, reads the home as abandoned, and REPORTS it stale —
+// the assertion that nothing is reported then fails. The lock probe is what
+// turns "I saw no process" into the sound "a daemon holds the lock → in use".
+func TestTempHomeWithHeldDaemonLockIsSpared(t *testing.T) {
 	tempRoot := t.TempDir()
-	dir := makeOldTempAFHome(t, tempRoot, "tmp.unknown-daemon")
-	writeOldDaemonPID(t, dir, 4243)
-	stubDaemonProcessProbe(t,
-		func(pid int) bool { return pid == 4243 },
-		func(pid int) []string { return nil },
-	)
+	dir := makeOldTempAFHome(t, tempRoot, "tmp.live-daemon-lock")
+	holdDaemonLock(t, dir)
 
-	report, err := Run(macLikeTempHomeOptions(t, tempRoot, true))
+	report, err := Run(macLikeTempHomeOptions(t, tempRoot, true)) // Fix: true
 	require.NoError(t, err)
-	require.Empty(t, findByCheck(report, "stale-temp-home"))
-	require.DirExists(t, dir, "uncertain daemon liveness must fail closed")
-	require.True(t, okContains(report, "daemon.pid liveness is uncertain"))
+	require.Empty(t, findByCheck(report, "stale-temp-home"),
+		"a temp home whose daemon.lock is held by a live daemon must never be reported stale or removed")
+	require.DirExists(t, dir)
+	require.True(t, okContains(report, "an af daemon holds its lock"),
+		"doctor should report the held-lock home as in use")
+}
+
+// TestTakeableLockTempHomeRemovedOnFix restores the teeth on a FACT: a temp home
+// whose lock is takeable (no live daemon) and which no live tmux session names
+// is provably unused, so --fix removes it. The lock outcome is forced to the
+// proven-free answer so the test is deterministic on any filesystem; the real
+// takeable-vs-untrusted mechanics live in the daemon package tests.
+//
+// Observed failing when the checkStaleTempHomes delete-arm is reverted to
+// report-only (#1969's report-only state): the home is reported but not removed,
+// so the require.True(Fixed) / require.NoDirExists assertions fail.
+func TestTakeableLockTempHomeRemovedOnFix(t *testing.T) {
+	tempRoot := t.TempDir()
+	dir := makeOldTempAFHome(t, tempRoot, "tmp.abandoned")
+	stubTempHomeLockProbe(t, func(string) daemon.ProbeAnswer { return daemon.AnswerNo() })
+
+	report, err := Run(macLikeTempHomeOptions(t, tempRoot, true)) // Fix: true
+	require.NoError(t, err)
+	findings := findByCheck(report, "stale-temp-home")
+	require.Len(t, findings, 1)
+	require.True(t, findings[0].Fixed,
+		"a home with a takeable lock and no live tmux session must be removed on --fix")
+	require.NoDirExists(t, dir, "the provably-unused home must be gone")
+}
+
+// TestTakeableLockTempHomeReportedButNotRemovedWithoutFix: without --fix the
+// same provably-unused home is REPORTED with a fix action and left on disk.
+func TestTakeableLockTempHomeReportedButNotRemovedWithoutFix(t *testing.T) {
+	tempRoot := t.TempDir()
+	dir := makeOldTempAFHome(t, tempRoot, "tmp.abandoned")
+	stubTempHomeLockProbe(t, func(string) daemon.ProbeAnswer { return daemon.AnswerNo() })
+
+	report, err := Run(macLikeTempHomeOptions(t, tempRoot, false)) // report-only
+	require.NoError(t, err)
+	findings := findByCheck(report, "stale-temp-home")
+	require.Len(t, findings, 1)
+	require.NotEmpty(t, findings[0].FixAction, "a provably-unused home must be offered for removal")
+	require.False(t, findings[0].Fixed)
+	require.DirExists(t, dir, "a report-only run must not remove anything")
+}
+
+// TestUnprovableLockTempHomeReportedNotRemoved: when the lock answer is
+// Undetermined — no lock file, or a filesystem whose flock cannot be trusted —
+// the home is REPORTED but carries NO fix action and is never removed, even
+// under --fix. Unknown is not a licence to os.RemoveAll (#1989).
+func TestUnprovableLockTempHomeReportedNotRemoved(t *testing.T) {
+	tempRoot := t.TempDir()
+	dir := makeOldTempAFHome(t, tempRoot, "tmp.unprovable")
+	stubTempHomeLockProbe(t, func(string) daemon.ProbeAnswer {
+		return daemon.Undetermined(fmt.Errorf("simulated untrusted filesystem"))
+	})
+
+	report, err := Run(macLikeTempHomeOptions(t, tempRoot, true)) // Fix: true
+	require.NoError(t, err)
+	findings := findByCheck(report, "stale-temp-home")
+	require.Len(t, findings, 1)
+	require.Empty(t, findings[0].FixAction,
+		"an unprovable home must not authorise a delete: unknown is not proof of non-use")
+	require.False(t, findings[0].Fixed)
+	require.DirExists(t, dir, "a home we cannot prove unused must never be removed")
+	require.Contains(t, findings[0].Detail, "untrusted filesystem",
+		"the report must name WHY it could not decide, or the operator cannot act on it")
 }
 
 // TestScanContextDefaultsSnapshot pins the invariant broken by #1785: the
@@ -119,20 +180,9 @@ func TestScanContextDefaultsSnapshot(t *testing.T) {
 		"scan context must carry a snapshot func, else the fix-time process recheck is unreachable")
 }
 
-// TestStaleTempHomeRefusesWithoutSnapshotFunc and
-// TestStaleTempHomeClaimedAfterDetectionIsSpared are DELETED with the closure
-// they drove (staleTempHomeRemoveFix).
-//
-// They were good tests of a bad idea. One pinned that an un-recheckable home
-// fails closed; the other that a home claimed between detection and --fix
-// survives. Both hardened the INPUTS to "did I see a process referencing this
-// home?" — and that question is unanswerable by process inspection, so no
-// amount of input-hardening made the rm -rf it authorised safe. The delete is
-// gone; there is nothing left to fail closed.
-//
-// What replaced them: TestStaleTempHomeReportedButNeverRemoved (doctor_test.go)
-// asserts a --fix run REPORTS the home and leaves it on disk.
-
+// TestTempHomeWithLiveTmuxSessionMarkerSparesHomeWithoutProc: a live tmux
+// session naming the home spares it even with no process table and no daemon
+// lock — the second, sound signal (tmux show-environment) the lock cannot see.
 func TestTempHomeWithLiveTmuxSessionMarkerSparesHomeWithoutProc(t *testing.T) {
 	tempRoot := t.TempDir()
 	dir := makeOldTempAFHome(t, tempRoot, "tmp.live-session")
@@ -155,24 +205,33 @@ func TestTempHomeWithLiveTmuxSessionMarkerSparesHomeWithoutProc(t *testing.T) {
 	require.NoError(t, err)
 	require.Empty(t, findByCheck(report, "stale-temp-home"))
 	require.DirExists(t, dir, "a temp home with a live tmux session marker must never be removed")
-	require.True(t, okContains(report, "live tmux session references it"))
+	require.True(t, okContains(report, "a live tmux session references it"))
 }
 
-// TestStaleTempHomeFixRechecksDaemonBeforeRemove is DELETED with the closure it
-// drove — the fourth and last test whose subject was the fix-time recheck. It
-// asserted the fix re-reads daemon.pid and refuses a home that became active in
-// between. Sound reasoning, wrong layer: it made the rm -rf's inputs fresher,
-// not its question answerable. There is no fix to recheck now.
+// TestStaleTempHomeFixRefusesWhenDaemonAppearsAfterDetection: findings are
+// applied AFTER detection, so a daemon can start in the window between. The fix
+// re-probes the lock and must REFUSE rather than rm -rf a home that is now
+// owned. Detection sees a takeable lock; by fix time a daemon holds it.
+func TestStaleTempHomeFixRefusesWhenDaemonAppearsAfterDetection(t *testing.T) {
+	tempRoot := t.TempDir()
+	dir := makeOldTempAFHome(t, tempRoot, "tmp.claimed")
 
-// TestStaleTempHomeFixFailsClosedWhenSnapshotFailsAtFixTime is the #1728
-// regression: detection got a working process snapshot (so the home was
-// flagged stale on genuinely-empty data), but the fix-time recheck fails
-// (transient /proc error). The detection snapshot is now stale — a one-off
-// command with no daemon.pid and no tmux marker could have claimed the home
-// in between — so the fix must fail closed rather than delete on stale data.
-/// TestStaleTempHomeFixFailsClosedWhenSnapshotFailsAtFixTime is DELETED with the
-// closure it drove, for the same reason as its two siblings above: it hardened
-// an INPUT ("re-take the snapshot at fix time, fail closed if it fails") to a
-// question process inspection cannot answer. Its final assertion — that an
-// unverifiable home is never deleted — is now structurally true, because
-// nothing deletes. TestStaleTempHomeReportedButNeverRemoved asserts it directly.
+	probes := 0
+	stubTempHomeLockProbe(t, func(string) daemon.ProbeAnswer {
+		probes++
+		if probes == 1 {
+			return daemon.AnswerNo() // detection: provably free
+		}
+		return daemon.AnswerYes() // fix time: a daemon has claimed it
+	})
+
+	report, err := Run(macLikeTempHomeOptions(t, tempRoot, true)) // Fix: true
+	require.NoError(t, err)
+	findings := findByCheck(report, "stale-temp-home")
+	require.Len(t, findings, 1)
+	require.False(t, findings[0].Fixed, "a home claimed between detection and fix must not be removed")
+	require.Error(t, findings[0].FixErr, "the refusal must surface as a fix error, not a silent skip")
+	require.Contains(t, findings[0].FixErr.Error(), "cannot prove no daemon owns it")
+	require.DirExists(t, dir, "the newly-claimed home must survive the --fix run")
+	require.GreaterOrEqual(t, probes, 2, "the fix must re-probe the lock rather than trust detection")
+}

@@ -19,6 +19,16 @@
 // identity. Anything ambiguous — a process that merely looks orphaned, a
 // session that might belong to another agent-factory home — is reported,
 // never touched.
+//
+// The same asymmetry governs removing an abandoned temp home, and it is worth
+// stating explicitly because getting it wrong deletes someone's work. `--fix`
+// removes one only on a POSITIVE proof: the home's daemon.lock exists on a
+// filesystem whose flock we trust and doctor could TAKE it, which the kernel
+// guarantees means no live daemon owns the home (#1989) — plus no live tmux
+// session names it. Every other outcome, including "no lock file at all" and
+// "this filesystem's flock cannot be trusted", is UNKNOWN: reported, never
+// removed. Doctor never infers "unused" from having failed to find a user;
+// under-cleaning is cosmetic, over-cleaning is not.
 package doctor
 
 import (
@@ -92,8 +102,12 @@ type Report struct {
 	Findings []Finding
 }
 
-// UnresolvedCount returns how many findings remain un-remediated (either
-// report-only, fix not requested, or fix failed).
+// UnresolvedCount returns how many underlying issues remain un-remediated
+// (either report-only, fix not requested, or fix failed). It is the number the
+// summary leads with and the exit code keys on, so it counts TRUE underlying
+// issues — a collapsed "… and N more" summary finding stands for N issues, not
+// one — and therefore equals the sum of the per-check counts a reader sees, not
+// the smaller number of collapsed rows (#1979).
 func (r *Report) UnresolvedCount() int {
 	n := 0
 	for _, c := range r.Checks {
@@ -101,12 +115,7 @@ func (r *Report) UnresolvedCount() int {
 			n++
 		}
 	}
-	for _, f := range r.Findings {
-		if !f.Fixed {
-			n++
-		}
-	}
-	return n
+	return n + countUnresolvedFindings(r.Findings)
 }
 
 // Options configures a doctor run. Zero values resolve to production
