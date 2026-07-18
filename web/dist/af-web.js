@@ -7563,6 +7563,12 @@ function tabToKeepOnClose(ids, closedIndex, activeIndex) {
   const keepIndex = closedIndex === activeIndex ? activeIndex - 1 : activeIndex;
   return ids[keepIndex] ?? "";
 }
+function rebindTargetAfterAwait(pinnedGen, pinnedSelId, currentGen, currentSelId, targetIdx) {
+  if (currentGen !== pinnedGen || currentSelId !== pinnedSelId || targetIdx < 0) {
+    return -1;
+  }
+  return targetIdx;
+}
 
 // src/layout.ts
 var TAB_DND_MIME = "application/x-af-tab";
@@ -11215,6 +11221,20 @@ function openTab(index) {
   splitView.setFocusedTab(index);
   focusTerminal();
 }
+function guardedTabRebind(selId, run, resolve, attach) {
+  const gen = splitView.layoutGeneration();
+  void run().then((sessions) => {
+    const targetIdx = resolve(sessions);
+    store.set({ sessions, selectedId: pickSelection(sessions, store.get().selectedId) });
+    const idx = rebindTargetAfterAwait(gen, selId, splitView.layoutGeneration(), store.get().selectedId, targetIdx);
+    if (idx >= 0) {
+      splitView.setFocusedTab(idx);
+      if (attach) {
+        focusTerminal();
+      }
+    }
+  }).catch((e) => surfaceTabError(e));
+}
 function createSessionTab(kind = "shell") {
   const sel = selectedSessionData();
   const tok = token;
@@ -11224,13 +11244,24 @@ function createSessionTab(kind = "shell") {
   clearTabError();
   const selId = sel.id ?? "";
   const create = kind === "vscode" ? createVSCodeTab : createTab;
-  void create(selId, sel.title, tok).then(() => fetchSnapshot(tok)).then((sessions) => {
-    const grown = sessions.find((s) => s.id === selId);
-    const newIdx = grown ? sessionTabs(grown).length - 1 : store.get().activeTab;
-    store.set({ sessions, selectedId: pickSelection(sessions, store.get().selectedId) });
-    splitView.setFocusedTab(newIdx);
-    focusTerminal();
-  }).catch((e) => surfaceTabError(e));
+  let createdName = "";
+  guardedTabRebind(
+    selId,
+    () => create(selId, sel.title, tok).then((name) => {
+      createdName = name;
+      return fetchSnapshot(tok);
+    }),
+    // Focus the created tab BY its resolved name, never `length - 1`: the last slot is
+    // an ordinal, and a concurrent create from another client landing inside this
+    // round trip would make it THEIR tab. Resolving the name to its current ordinal in
+    // the post-await roster is the create-side twin of closeSessionTab's keepId, and a
+    // -1 (name gone, or session vanished) bails rather than guessing (#2000).
+    (sessions) => {
+      const grown = sessions.find((s) => s.id === selId);
+      return grown ? sessionTabs(grown).findIndex((t) => t.name === createdName) : -1;
+    },
+    true
+  );
 }
 function closeSessionTab(index) {
   const sel = selectedSessionData();
@@ -11246,15 +11277,18 @@ function closeSessionTab(index) {
   clearTabError();
   const selId = sel.id ?? "";
   const keepId = tabToKeepOnClose(tabs.map(tabIdentity), index, store.get().activeTab);
-  const gen = splitView.layoutGeneration();
-  void closeTab(selId, sel.title, target.name, tabRealId(target), tok).then(() => fetchSnapshot(tok)).then((sessions) => {
-    const shrunk = sessions.find((s) => s.id === selId);
-    const next = shrunk ? sessionTabs(shrunk).map(tabIdentity).indexOf(keepId) : -1;
-    store.set({ sessions, selectedId: pickSelection(sessions, store.get().selectedId) });
-    if (next >= 0 && splitView.layoutGeneration() === gen && store.get().selectedId === selId) {
-      splitView.setFocusedTab(next);
-    }
-  }).catch((e) => surfaceTabError(e));
+  guardedTabRebind(
+    selId,
+    () => closeTab(selId, sel.title, target.name, tabRealId(target), tok).then(() => fetchSnapshot(tok)),
+    // Resolve the kept tab's CURRENT ordinal in the post-close roster; -1 (a concurrent
+    // close took it too) leaves the pane where syncSplit's identity remap already
+    // settled it rather than guessing again.
+    (sessions) => {
+      const shrunk = sessions.find((s) => s.id === selId);
+      return shrunk ? sessionTabs(shrunk).map(tabIdentity).indexOf(keepId) : -1;
+    },
+    false
+  );
 }
 function renameSessionTab(id, name, editedSessionId) {
   const sel = selectedSessionData();

@@ -48,7 +48,14 @@ import { InstallAffordance } from "./install.js";
 import { decideKey, type KeyboardFocus, type View } from "./nav.js";
 import { defaultFilter, filterSessions, loadFilter, persistFilter, withKind } from "./filter.js";
 import { loadProjectChoice, persistProjectChoice, pickerProjects, reconcileProject, scopeToProject } from "./project.js";
-import { applyEvent, clampActiveTab, pickSelection, tabToKeepOnClose, upsertSession } from "./sessions.js";
+import {
+  applyEvent,
+  clampActiveTab,
+  pickSelection,
+  rebindTargetAfterAwait,
+  tabToKeepOnClose,
+  upsertSession,
+} from "./sessions.js";
 import { SplitView } from "./split.js";
 import { isArchived, type RowKind } from "./status.js";
 import { isRenameableTab } from "./tablabel.js";
@@ -677,14 +684,58 @@ function openTab(index: number): void {
   focusTerminal();
 }
 
+/** Runs a tab mutation whose post-await step re-points the FOCUSED pane, applying the
+ *  two guards every such rebind needs so a new async gesture can't forget them
+ *  (#2000). Both create and close await a round trip and then point the focused pane
+ *  at a tab resolved against the roster they mutated — but splitView.trees is
+ *  per-session and setFocusedTab carries no session of its own, so re-pointing from an
+ *  intent formed BEFORE the await would yank the pane once the user has since selected
+ *  another session or focused another pane (the #1815 hazard closeSessionTab first
+ *  named, which createSessionTab shipped without).
+ *
+ *  `run` issues the RPC and resolves to the refreshed roster; `resolve` names the tab
+ *  the pane should end on in that post-await roster BY IDENTITY, returning -1 when it's
+ *  gone (never an ordinal snapshotted before the await, which names a tab only relative
+ *  to one roster). The roster is committed unconditionally so the grown/shrunk tab list
+ *  always lands; only the pane rebind is gated, by sessions.rebindTargetAfterAwait —
+ *  the one place the guard lives, so both call sites (and the next) stay in step.
+ *  `attach` attaches the focused terminal after (a create/open, mirroring the TUI's
+ *  `t`), or leaves the keyboard where it is (a close). Errors (e.g. a remote session,
+ *  or the tab cap) surface on the pane header's status line. */
+function guardedTabRebind(
+  selId: string,
+  run: () => Promise<SessionData[]>,
+  resolve: (sessions: SessionData[]) => number,
+  attach: boolean,
+): void {
+  // Pinned BEFORE the RPC is issued, exactly where closeSessionTab captured `gen`.
+  const gen = splitView.layoutGeneration();
+  void run()
+    .then((sessions) => {
+      const targetIdx = resolve(sessions);
+      // Commit the roster first (rerender → syncSplit re-validates the tree against the
+      // new tabCount), then re-point the focused pane only if the pinned intent still
+      // holds. selectedId is read AFTER the set so it reflects any session switch the
+      // user made during the await (pickSelection keeps their newer choice).
+      store.set({ sessions, selectedId: pickSelection(sessions, store.get().selectedId) });
+      const idx = rebindTargetAfterAwait(gen, selId, splitView.layoutGeneration(), store.get().selectedId, targetIdx);
+      if (idx >= 0) {
+        splitView.setFocusedTab(idx);
+        if (attach) {
+          focusTerminal();
+        }
+      }
+    })
+    .catch((e) => surfaceTabError(e));
+}
+
 /** Creates a $SHELL tab on the selected session (the `t` key / + button), then
  *  resyncs to pull the grown tab list, selects the new tab, and attaches it —
  *  mirroring the TUI's `t`, which opens the fresh tab as a pane. The resync is
  *  kept for THIS window's own mutation because it must select+attach the new tab
  *  synchronously, which needs the tab in hand rather than an event later; a tab
  *  changed by any OTHER actor now arrives on its own, since CreateTab/CloseTab
- *  publish session.updated with the refreshed roster (#1812). Errors (e.g. a
- *  remote session, or the tab cap) surface on the pane header's status line. */
+ *  publish session.updated with the refreshed roster (#1812). */
 function createSessionTab(kind: NewTabKind = "shell"): void {
   const sel = selectedSessionData();
   const tok = token;
@@ -696,19 +747,27 @@ function createSessionTab(kind: NewTabKind = "shell"): void {
   clearTabError();
   const selId = sel.id ?? "";
   const create = kind === "vscode" ? createVSCodeTab : createTab;
-  void create(selId, sel.title, tok)
-    .then(() => fetchSnapshot(tok))
-    .then((sessions) => {
+  // createTab returns the daemon's resolved, collision-suffixed name; hold it so the
+  // rebind lands on the tab THIS create made.
+  let createdName = "";
+  guardedTabRebind(
+    selId,
+    () =>
+      create(selId, sel.title, tok).then((name) => {
+        createdName = name;
+        return fetchSnapshot(tok);
+      }),
+    // Focus the created tab BY its resolved name, never `length - 1`: the last slot is
+    // an ordinal, and a concurrent create from another client landing inside this
+    // round trip would make it THEIR tab. Resolving the name to its current ordinal in
+    // the post-await roster is the create-side twin of closeSessionTab's keepId, and a
+    // -1 (name gone, or session vanished) bails rather than guessing (#2000).
+    (sessions) => {
       const grown = sessions.find((s) => s.id === selId);
-      const newIdx = grown ? sessionTabs(grown).length - 1 : store.get().activeTab;
-      // Commit the grown tab list first (rerender → syncSplit sees the new tabCount),
-      // then point the focused pane at the fresh tab and attach it — mirroring the
-      // TUI's `t`, which opens the new tab as the active pane.
-      store.set({ sessions, selectedId: pickSelection(sessions, store.get().selectedId) });
-      splitView.setFocusedTab(newIdx);
-      focusTerminal();
-    })
-    .catch((e) => surfaceTabError(e));
+      return grown ? sessionTabs(grown).findIndex((t) => t.name === createdName) : -1;
+    },
+    true,
+  );
 }
 
 /** Closes the tab at `index` of the selected session (the `w` key / × button),
@@ -747,34 +806,28 @@ function closeSessionTab(index: number): void {
   // the layout tree, applied to the store's index. See sessions.tabToKeepOnClose, which
   // holds the decision as a pure function so both directions above are unit-tested.
   const keepId = tabToKeepOnClose(tabs.map(tabIdentity), index, store.get().activeTab);
-  // Pin what the rebind assumes: this session, and no explicit layout/focus mutation
-  // since. A slow close leaves a wide window in which the user can select another tab
-  // or focus another pane, and re-pointing from an intent formed before that would
-  // yank it back (the same stale-async hazard the #1777 scroll-fill token guards).
-  const gen = splitView.layoutGeneration();
   // tabRealId, NOT tabIdentity: this crosses the wire, so it must be an id the DAEMON
   // can resolve — never the synthesized kind:name tabIdentity falls back to for a
   // pre-#1738 record (see renameSessionTab). The keepId above is the opposite case,
   // local bookkeeping, which is why the two helpers appear within a few lines of each
   // other here and are not interchangeable.
-  void closeTab(selId, sel.title, target.name, tabRealId(target), tok)
-    .then(() => fetchSnapshot(tok))
-    .then((sessions) => {
-      // Resolve the kept tab's CURRENT ordinal in the post-close roster.
+  //
+  // The post-await rebind — and its layoutGeneration + selectedId guard, once
+  // spelled out here and the source of the #1815 finding — now lives in
+  // guardedTabRebind, which createSessionTab shares so neither can forget it (#2000).
+  // A close only re-points the focused pane; it does not attach (attach = false).
+  guardedTabRebind(
+    selId,
+    () => closeTab(selId, sel.title, target.name, tabRealId(target), tok).then(() => fetchSnapshot(tok)),
+    // Resolve the kept tab's CURRENT ordinal in the post-close roster; -1 (a concurrent
+    // close took it too) leaves the pane where syncSplit's identity remap already
+    // settled it rather than guessing again.
+    (sessions) => {
       const shrunk = sessions.find((s) => s.id === selId);
-      const next = shrunk ? sessionTabs(shrunk).map(tabIdentity).indexOf(keepId) : -1;
-      // Commit the shrunk tab list first (rerender → syncSplit re-validates the tree,
-      // clamping any pane past the new end), then re-point the focused pane — but only
-      // if the rebind still describes anything real: the user must not have moved focus
-      // or switched away while the close was in flight, and the kept tab must still
-      // exist (a concurrent close can take it too, in which case syncSplit's remap has
-      // already settled the pane somewhere sane and guessing again would only misroute).
-      store.set({ sessions, selectedId: pickSelection(sessions, store.get().selectedId) });
-      if (next >= 0 && splitView.layoutGeneration() === gen && store.get().selectedId === selId) {
-        splitView.setFocusedTab(next);
-      }
-    })
-    .catch((e) => surfaceTabError(e));
+      return shrunk ? sessionTabs(shrunk).map(tabIdentity).indexOf(keepId) : -1;
+    },
+    false,
+  );
 }
 
 /**

@@ -176,7 +176,8 @@ export function rebindTargetAfterAwait(
   currentSelId: string | null,
   targetIdx: number,
 ): number {
-  // FAIL-FIRST STUB (#2000): models the shipped createSessionTab, which re-points the
-  // pane unconditionally with neither guard. The guarded body lands in the next commit.
+  if (currentGen !== pinnedGen || currentSelId !== pinnedSelId || targetIdx < 0) {
+    return -1;
+  }
   return targetIdx;
 }
