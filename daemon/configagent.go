@@ -155,7 +155,14 @@ const configAgentTrustRetryDelay = 500 * time.Millisecond
 
 // SpawnConfigAgent starts a config agent in a bare tmux session rooted at AF
 // home, waits for it to be ready, dismisses any trust prompt, delivers the
-// briefing, and returns the tmux session name for the caller to attach to.
+// briefing, and returns the tmux session name AND the absolute socket path for
+// the caller to attach to.
+//
+// The socket path is returned alongside the name so the TUI can attach with
+// `tmux -S <socket> attach-session` (#2019): the daemon and the TUI are
+// different processes and can resolve different TMUX_TMPDIR values, so the
+// default-socket path is not something the attaching side can assume. The socket
+// this session lives on is authoritative only here, where it was spawned.
 //
 // AF home — not the user's repo — is the working directory, and that is a
 // deliberate improvement over the in-place seam this replaces: the agent's cwd
@@ -166,36 +173,60 @@ const configAgentTrustRetryDelay = 500 * time.Millisecond
 //
 // On ANY failure the session is torn down before returning, so a half-started
 // config agent never survives as an orphan.
-func (m *Manager) SpawnConfigAgent(ctx context.Context, req SpawnConfigAgentRequest) (string, error) {
+func (m *Manager) SpawnConfigAgent(ctx context.Context, req SpawnConfigAgentRequest) (string, string, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	if req.Program == "" {
-		return "", fmt.Errorf("config agent: no program to run")
+		return "", "", fmt.Errorf("config agent: no program to run")
 	}
 	home, err := config.GetConfigDir()
 	if err != nil {
-		return "", fmt.Errorf("config agent: cannot resolve the agent-factory home: %w", err)
+		return "", "", fmt.Errorf("config agent: cannot resolve the agent-factory home: %w", err)
 	}
 
-	name := fmt.Sprintf("%s%d", configAgentSessionPrefix, configAgentSeq.Add(1))
-	ts := tmux.NewTmuxSession(name, req.Program)
+	// seq is only for uniqueness within this daemon; the tmux session NewTmuxSession
+	// actually creates is TmuxPrefix + this (af_af-config-<n>) — see SanitizedName
+	// below. Keeping the af_ prefix is what keeps the session inside the namespace
+	// every af cleanup path recognizes (`^af_`).
+	seq := fmt.Sprintf("%s%d", configAgentSessionPrefix, configAgentSeq.Add(1))
+	ts := tmux.NewTmuxSession(seq, req.Program)
 	if err := ts.Start(home); err != nil {
-		return "", fmt.Errorf("config agent: failed to start tmux session: %w", err)
+		return "", "", fmt.Errorf("config agent: failed to start tmux session: %w", err)
 	}
-	if !m.configAgents.track(name, ts) {
+	// The name the caller must attach to and reap by is the name tmux actually
+	// knows — the sanitized name, WITH the af_ prefix — not the bare seq. Returning
+	// the bare seq was a latent bug: `tmux attach-session -t af-config-<n>` does not
+	// resolve the real session af_af-config-<n>, so the attach failed with "can't
+	// find session" (masked inside tmux by the nesting refusal this PR fixes, but a
+	// hard failure everywhere once $TMUX is scrubbed). Track, reap, and return the
+	// resolvable name so every side agrees (#2019).
+	sessionName := ts.SanitizedName()
+	if !m.configAgents.track(sessionName, ts) {
 		// The daemon is shutting down; do not leak the session we just made. Pane
 		// state ignored: no worktree, so nothing destructive follows (see HooksDone).
 		_, _ = ts.Close()
-		return "", fmt.Errorf("config agent: the daemon is shutting down")
+		return "", "", fmt.Errorf("config agent: the daemon is shutting down")
 	}
 	// Any failure past this point tears the session down rather than leaving a
 	// tmux nobody owns.
-	fail := func(err error) (string, error) {
-		if rerr := m.configAgents.reap(name); rerr != nil {
+	fail := func(err error) (string, string, error) {
+		if rerr := m.configAgents.reap(sessionName); rerr != nil {
 			log.WarningLog.Printf("config agent: cleanup after a failed spawn also failed: %v", rerr)
 		}
-		return "", err
+		return "", "", err
+	}
+
+	// The absolute socket path this session lives on, queried from tmux itself so
+	// it is authoritative rather than recomputed from TMUX_TMPDIR (#2019). A
+	// failure here is NOT fatal: the attach can still resolve the session via its
+	// own default socket when both sides share a TMUX_TMPDIR, which is the common
+	// case — so degrade to an empty path and let that fall back, rather than
+	// failing a spawn that would otherwise attach fine.
+	socketPath, serr := ts.SocketPath(ctx)
+	if serr != nil {
+		log.WarningLog.Printf("config agent: could not resolve the tmux socket path for %s (%v); the attach will fall back to the default socket", sessionName, serr)
+		socketPath = ""
 	}
 
 	// The agent the pane ACTUALLY runs, detected from the command — so an
@@ -218,8 +249,8 @@ func (m *Manager) SpawnConfigAgent(ctx context.Context, req SpawnConfigAgentRequ
 			return fail(fmt.Errorf("config agent: failed to deliver the briefing: %w", err))
 		}
 	}
-	log.InfoLog.Printf("config agent: started %s in %s (agent %q)", name, home, agent)
-	return name, nil
+	log.InfoLog.Printf("config agent: started %s in %s on socket %q (agent %q)", sessionName, home, socketPath, agent)
+	return sessionName, socketPath, nil
 }
 
 // dismissConfigAgentTrustPrompt clears the agent's first-run trust dialog, the

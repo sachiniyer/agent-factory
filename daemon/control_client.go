@@ -376,15 +376,16 @@ func TriggerTask(id string, expect task.ProjectExpectation) error {
 }
 
 // SpawnConfigAgent asks the daemon to start a config agent in a bare tmux session
-// and returns the session name to attach to. callDaemon carries the warm-up
-// retry, so pressing the hotkey while the daemon is still starting waits rather
-// than failing.
-func SpawnConfigAgent(req SpawnConfigAgentRequest) (string, error) {
+// and returns the session name AND the absolute socket path to attach to.
+// callDaemon carries the warm-up retry, so pressing the hotkey while the daemon
+// is still starting waits rather than failing. The socket path may be empty (the
+// daemon could not resolve it); the attach then falls back to the default socket.
+func SpawnConfigAgent(req SpawnConfigAgentRequest) (string, string, error) {
 	var resp SpawnConfigAgentResponse
 	if err := callDaemon("SpawnConfigAgent", req, &resp); err != nil {
-		return "", err
+		return "", "", err
 	}
-	return resp.SessionName, nil
+	return resp.SessionName, resp.SocketPath, nil
 }
 
 // ReapConfigAgent tears down a config-agent session once the caller is done with

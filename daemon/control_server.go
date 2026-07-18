@@ -275,11 +275,12 @@ func (s *controlServer) SpawnConfigAgent(req SpawnConfigAgentRequest, resp *Spaw
 	if err := s.requireManagerReady(); err != nil {
 		return err
 	}
-	name, err := s.manager.SpawnConfigAgent(context.Background(), req)
+	name, socketPath, err := s.manager.SpawnConfigAgent(context.Background(), req)
 	if err != nil {
 		return err
 	}
 	resp.SessionName = name
+	resp.SocketPath = socketPath
 	return nil
 }
 

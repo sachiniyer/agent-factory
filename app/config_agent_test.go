@@ -3,6 +3,8 @@ package app
 import (
 	"errors"
 	"os/exec"
+	"slices"
+	"strings"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -31,10 +33,10 @@ func TestConfigAgentKeyDispatches(t *testing.T) {
 	var gotMode configagent.Mode
 	var gotRepo string
 	spawned := 0
-	t.Cleanup(SetConfigAgentSpawnerForTest(func(mode configagent.Mode, repoPath string) (string, error) {
+	t.Cleanup(SetConfigAgentSpawnerForTest(func(mode configagent.Mode, repoPath string) (string, string, error) {
 		spawned++
 		gotMode, gotRepo = mode, repoPath
-		return "af-config-1", nil
+		return "af-config-1", "", nil
 	}))
 
 	model, cmd := h.handleDefaultKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'C'}}, name)
@@ -73,7 +75,7 @@ func TestConfigAgentMissingBinaryIsNonFatal(t *testing.T) {
 		Command: "/nonexistent/claude",
 		Err:     errors.New("Claude Code is not installed or not on PATH (resolved command: \"/nonexistent/claude\")"),
 	}
-	t.Cleanup(SetConfigAgentSpawnerForTest(func(configagent.Mode, string) (string, error) { return "", missing }))
+	t.Cleanup(SetConfigAgentSpawnerForTest(func(configagent.Mode, string) (string, string, error) { return "", "", missing }))
 
 	_, cmd := h.handleDefaultKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'C'}}, keys.KeyConfigAgent)
 	require.NotNil(t, cmd)
@@ -101,18 +103,22 @@ func TestConfigAgentMissingBinaryIsNonFatal(t *testing.T) {
 func TestConfigAgentSpawnEntersTheTakeover(t *testing.T) {
 	h := newTestHome(t)
 
-	var attached string
+	var attached, attachedSocket string
 	prevExec := execConfigAgentAttach
-	execConfigAgentAttach = func(name string) *exec.Cmd {
-		attached = name
+	execConfigAgentAttach = func(name, socketPath string) *exec.Cmd {
+		attached, attachedSocket = name, socketPath
 		return exec.Command("true") // never actually attach in a test
 	}
 	t.Cleanup(func() { execConfigAgentAttach = prevExec })
 
-	model, cmd := h.handleConfigAgentSpawned(configAgentSpawnedMsg{sessionName: "af-config-7"})
+	model, cmd := h.handleConfigAgentSpawned(configAgentSpawnedMsg{sessionName: "af-config-7", socketPath: "/tmp/tmux-1000/default"})
 	require.NotNil(t, model)
 	require.NotNil(t, cmd, "a successful spawn must hand the terminal to the config agent")
 	assert.Equal(t, "af-config-7", attached, "the takeover must attach to the session the daemon named")
+	// The socket path the daemon reported must reach the attach, so it can pin
+	// `-S` and resolve the session independently of the TUI's TMUX_TMPDIR (#2019).
+	assert.Equal(t, "/tmp/tmux-1000/default", attachedSocket,
+		"the takeover must attach on the socket the daemon reported")
 }
 
 // TestConfigAgentSpawnWithNoSessionNameIsAnError pins the defensive case: the
@@ -171,9 +177,9 @@ func TestConfigAgentDoesNotSpawnTwice(t *testing.T) {
 	h := newTestHome(t)
 
 	spawns := 0
-	t.Cleanup(SetConfigAgentSpawnerForTest(func(configagent.Mode, string) (string, error) {
+	t.Cleanup(SetConfigAgentSpawnerForTest(func(configagent.Mode, string) (string, string, error) {
 		spawns++
-		return "af-config-1", nil
+		return "af-config-1", "", nil
 	}))
 
 	pressC := func() tea.Cmd {
@@ -215,7 +221,7 @@ func TestConfigAgentDoesNotSpawnTwice(t *testing.T) {
 // the user had not read yet. Only retract our own, and only if it is still up.
 func TestConfigAgentSpawnClearsOnlyItsOwnNotice(t *testing.T) {
 	h := newTestHome(t)
-	t.Cleanup(SetConfigAgentSpawnerForTest(func(configagent.Mode, string) (string, error) { return "af-config-1", nil }))
+	t.Cleanup(SetConfigAgentSpawnerForTest(func(configagent.Mode, string) (string, string, error) { return "af-config-1", "", nil }))
 
 	_, cmd := h.handleDefaultKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'C'}}, keys.KeyConfigAgent)
 	require.NotNil(t, cmd)
@@ -231,11 +237,80 @@ func TestConfigAgentSpawnClearsOnlyItsOwnNotice(t *testing.T) {
 
 	// The normal case still retracts our own notice.
 	h2 := newTestHome(t)
-	t.Cleanup(SetConfigAgentSpawnerForTest(func(configagent.Mode, string) (string, error) { return "af-config-1", nil }))
+	t.Cleanup(SetConfigAgentSpawnerForTest(func(configagent.Mode, string) (string, string, error) { return "af-config-1", "", nil }))
 	_, cmd2 := h2.handleDefaultKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'C'}}, keys.KeyConfigAgent)
 	own := cmd2().(configAgentSpawnedMsg)
 	require.Contains(t, h2.errBox.FullError(), "Starting the config agent",
 		"the keypress should have raised a starting notice")
 	h2.handleConfigAgentSpawned(own)
 	assert.Empty(t, h2.errBox.FullError(), "a successful spawn should retract its own starting notice")
+}
+
+// envValue returns the value of KEY from a KEY=VALUE environment slice, and
+// whether it was present.
+func envValue(env []string, key string) (string, bool) {
+	for _, kv := range env {
+		if name, val, ok := strings.Cut(kv, "="); ok && name == key {
+			return val, true
+		}
+	}
+	return "", false
+}
+
+// TestConfigAgentAttachCommandScrubsTMUXAndPinsSocket is the deterministic guard
+// for #2019. It is NOT the primary proof — a command a test builds cannot show
+// what tmux does with it, so the behavioral reproduction lives in the tui-driver
+// selftest (af genuinely runs inside a tmux pane there) — but it locks the two
+// properties the fix depends on against silent regression, at unit speed.
+//
+//  1. $TMUX is scrubbed from the child env. af inherits $TMUX when it is launched
+//     from a tmux pane, and `tmux attach-session` then refuses to nest and exits
+//     1 — the reported failure. The child env must not carry TMUX.
+//  2. TMUX_TMPDIR is LEFT in place. It participates in default-socket resolution
+//     and is not what breaks the nesting; scrubbing it would be a gratuitous
+//     behavior change.
+//  3. The socket is pinned with `-S <path>` so resolution never depends on the
+//     TUI's own TMUX_TMPDIR, which can differ from the daemon's.
+func TestConfigAgentAttachCommandScrubsTMUXAndPinsSocket(t *testing.T) {
+	// Simulate af running inside tmux: $TMUX set, plus a TMUX_TMPDIR that must
+	// survive. t.Setenv restores both on cleanup.
+	t.Setenv("TMUX", "/tmp/tmux-1000/default,1234,0")
+	t.Setenv("TMUX_TMPDIR", "/tmp/tmux-1000")
+
+	cmd := execConfigAgentAttach("af-config-3", "/tmp/tmux-1000/default")
+
+	// The socket is pinned BEFORE the subcommand (a tmux global option), and the
+	// session is addressed by name.
+	assert.Equal(t, []string{"tmux", "-S", "/tmp/tmux-1000/default", "attach-session", "-t", "af-config-3"}, cmd.Args,
+		"the attach must pin the reported socket with -S and address the session by name")
+
+	// Env is set explicitly (nil would inherit the parent's, TMUX and all).
+	require.NotNil(t, cmd.Env, "the attach must set an explicit child env, not inherit $TMUX")
+	_, hasTMUX := envValue(cmd.Env, "TMUX")
+	assert.False(t, hasTMUX,
+		"TMUX must be scrubbed from the attach child env, or tmux refuses to nest and exits 1 (#2019)")
+	tmpdir, hasTmpdir := envValue(cmd.Env, "TMUX_TMPDIR")
+	assert.True(t, hasTmpdir, "TMUX_TMPDIR must be left in place — it is not what breaks nesting")
+	assert.Equal(t, "/tmp/tmux-1000", tmpdir, "TMUX_TMPDIR must pass through unchanged")
+
+	// A sanity check that scrubbing did not drop everything: an unrelated var
+	// survives. (Guards against a filter that is too aggressive.)
+	assert.True(t, slices.ContainsFunc(cmd.Env, func(kv string) bool {
+		return strings.HasPrefix(kv, "PATH=")
+	}), "the child env must still carry the rest of the environment")
+}
+
+// TestConfigAgentAttachWithoutSocketOmitsPin pins the fallback: when the daemon
+// could not report a socket (empty path), the attach omits `-S` and lets tmux
+// resolve the session on its default socket. Part 1 (the $TMUX scrub) alone still
+// fixes the reported nesting refusal, so an unknown socket must degrade, not
+// hand tmux an empty `-S ""`.
+func TestConfigAgentAttachWithoutSocketOmitsPin(t *testing.T) {
+	t.Setenv("TMUX", "/tmp/tmux-1000/default,1234,0")
+
+	cmd := execConfigAgentAttach("af-config-4", "")
+	assert.Equal(t, []string{"tmux", "attach-session", "-t", "af-config-4"}, cmd.Args,
+		"an empty socket path must omit -S entirely, never pass -S \"\"")
+	_, hasTMUX := envValue(cmd.Env, "TMUX")
+	assert.False(t, hasTMUX, "TMUX must be scrubbed even on the default-socket fallback path (#2019)")
 }

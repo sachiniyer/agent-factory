@@ -24,7 +24,7 @@ func tempAFHome(t *testing.T) {
 
 // stubSpawn replaces the daemon round trip so a test can observe the request
 // without a daemon or a tmux server.
-func stubSpawn(t *testing.T, fn func(daemon.SpawnConfigAgentRequest) (string, error)) {
+func stubSpawn(t *testing.T, fn func(daemon.SpawnConfigAgentRequest) (string, string, error)) {
 	t.Helper()
 	prev := spawnViaDaemon
 	spawnViaDaemon = fn
@@ -68,12 +68,12 @@ func TestSpawnCreatesNoInstance(t *testing.T) {
 	})
 
 	var got daemon.SpawnConfigAgentRequest
-	stubSpawn(t, func(req daemon.SpawnConfigAgentRequest) (string, error) {
+	stubSpawn(t, func(req daemon.SpawnConfigAgentRequest) (string, string, error) {
 		got = req
-		return "af-config-1", nil
+		return "af-config-1", "", nil
 	})
 
-	name, err := Spawn(Options{Mode: ModeOnboard, RepoPath: "/tmp/some-repo"})
+	name, _, err := Spawn(Options{Mode: ModeOnboard, RepoPath: "/tmp/some-repo"})
 	if err != nil {
 		t.Fatalf("spawn: %v", err)
 	}
@@ -109,12 +109,12 @@ func TestSpawnMissingProgramReturnsTypedErrorAndCreatesNothing(t *testing.T) {
 	})
 
 	spawned := 0
-	stubSpawn(t, func(daemon.SpawnConfigAgentRequest) (string, error) {
+	stubSpawn(t, func(daemon.SpawnConfigAgentRequest) (string, string, error) {
 		spawned++
-		return "af-config-1", nil
+		return "af-config-1", "", nil
 	})
 
-	_, err := Spawn(Options{Mode: ModeOnboard, RepoPath: "/tmp/some-repo"})
+	_, _, err := Spawn(Options{Mode: ModeOnboard, RepoPath: "/tmp/some-repo"})
 	if err == nil {
 		t.Fatal("expected a missing program to be rejected")
 	}
@@ -150,12 +150,12 @@ func TestSpawnDeliversBriefingAsThePrompt(t *testing.T) {
 	})
 
 	var got daemon.SpawnConfigAgentRequest
-	stubSpawn(t, func(req daemon.SpawnConfigAgentRequest) (string, error) {
+	stubSpawn(t, func(req daemon.SpawnConfigAgentRequest) (string, string, error) {
 		got = req
-		return "af-config-1", nil
+		return "af-config-1", "", nil
 	})
 
-	if _, err := Spawn(Options{Mode: ModeChange, RepoPath: "/tmp/some-repo"}); err != nil {
+	if _, _, err := Spawn(Options{Mode: ModeChange, RepoPath: "/tmp/some-repo"}); err != nil {
 		t.Fatalf("spawn: %v", err)
 	}
 	if got.Prompt == "" {
@@ -188,12 +188,12 @@ func TestSpawnWithoutARepoFallsBackToGlobal(t *testing.T) {
 	}
 
 	var got daemon.SpawnConfigAgentRequest
-	stubSpawn(t, func(req daemon.SpawnConfigAgentRequest) (string, error) {
+	stubSpawn(t, func(req daemon.SpawnConfigAgentRequest) (string, string, error) {
 		got = req
-		return "af-config-1", nil
+		return "af-config-1", "", nil
 	})
 
-	if _, err := Spawn(Options{Mode: ModeOnboard}); err != nil {
+	if _, _, err := Spawn(Options{Mode: ModeOnboard}); err != nil {
 		t.Fatalf("spawn with no repo path must work: %v", err)
 	}
 	if got.Program != "/bin/sh" {
@@ -218,12 +218,12 @@ func TestSpawnBriefsWithGlobalConfigValues(t *testing.T) {
 	})
 
 	var got daemon.SpawnConfigAgentRequest
-	stubSpawn(t, func(req daemon.SpawnConfigAgentRequest) (string, error) {
+	stubSpawn(t, func(req daemon.SpawnConfigAgentRequest) (string, string, error) {
 		got = req
-		return "af-config-1", nil
+		return "af-config-1", "", nil
 	})
 
-	if _, err := Spawn(Options{Mode: ModeOnboard, RepoPath: "/tmp/some-repo"}); err != nil {
+	if _, _, err := Spawn(Options{Mode: ModeOnboard, RepoPath: "/tmp/some-repo"}); err != nil {
 		t.Fatalf("spawn: %v", err)
 	}
 	if got.Program != "/bin/sh" {

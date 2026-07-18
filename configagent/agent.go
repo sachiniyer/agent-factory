@@ -104,7 +104,8 @@ func Reap(sessionName string) error {
 // the real resolver.
 var resolveConfigForRepo = config.ResolveConfig
 
-// Spawn starts the config agent and returns the tmux session name to attach to.
+// Spawn starts the config agent and returns the tmux session name AND the
+// absolute socket path to attach to.
 //
 //  1. Resolve the repo's config — this picks up an in-repo default_program /
 //     program_overrides, so the agent launched is the one the user actually gets
@@ -113,6 +114,10 @@ var resolveConfigForRepo = config.ResolveConfig
 //     spawns NOTHING — never a spawn that hangs to a readiness timeout.
 //  3. Ask the daemon to run it in a bare tmux session at AF home. The daemon owns
 //     the rest: readiness, trust-prompt dismissal, briefing delivery, and reaping.
+//
+// The socket path rides back alongside the name so the caller can attach with
+// `tmux -S <socket>` (#2019); it may be empty, in which case the attach falls
+// back to the default socket.
 //
 // No Instance is created anywhere in this path, which is what keeps the config
 // agent out of instances.json and out of the session list.
@@ -125,7 +130,7 @@ var resolveConfigForRepo = config.ResolveConfig
 // permissions skipped. What actually bounds this agent is the scope fence in the
 // briefing: an instruction, not a sandbox. That is the honest posture, and it is
 // why the fence is worded as forcefully as it is.
-func Spawn(opts Options) (string, error) {
+func Spawn(opts Options) (string, string, error) {
 	// The briefing describes the GLOBAL config, because that is what `af config
 	// set`/`get` read and write — briefing the agent on a repo-resolved view
 	// would show it values it cannot write. The PROGRAM comes from the resolved
@@ -133,7 +138,7 @@ func Spawn(opts Options) (string, error) {
 	// gets in this repo.
 	globalCfg, err := config.LoadConfig()
 	if err != nil {
-		return "", fmt.Errorf("cannot read the global config to brief the config agent: %w", err)
+		return "", "", fmt.Errorf("cannot read the global config to brief the config agent: %w", err)
 	}
 	configPath, pathErr := config.GlobalConfigPath()
 	if pathErr != nil {
@@ -159,19 +164,19 @@ func Spawn(opts Options) (string, error) {
 	// Check the binary before spending a daemon round trip, a tmux session and a
 	// readiness wait on a program that cannot start.
 	if _, perr := preflight.CheckProgram(agentCfg, agent); perr != nil {
-		return "", &ProgramUnavailableError{
+		return "", "", &ProgramUnavailableError{
 			Agent:   agent,
 			Command: command,
 			Err:     preflight.ProgramError(agent, command, perr),
 		}
 	}
 
-	name, err := spawnViaDaemon(daemon.SpawnConfigAgentRequest{
+	name, socketPath, err := spawnViaDaemon(daemon.SpawnConfigAgentRequest{
 		Program: command,
 		Prompt:  BuildBriefing(opts.Mode, globalCfg, configPath),
 	})
 	if err != nil {
-		return "", fmt.Errorf("failed to start the config agent: %w", err)
+		return "", "", fmt.Errorf("failed to start the config agent: %w", err)
 	}
-	return name, nil
+	return name, socketPath, nil
 }
