@@ -123,6 +123,25 @@ func renameInstanceDataTitle(repoID, oldTitle string, newData session.InstanceDa
 		if err := json.Unmarshal(raw, &existing); err != nil {
 			return nil, fmt.Errorf("failed to parse existing instances: %w", err)
 		}
+		// A Loading ghost left by an older TUI binary (#551) does NOT reserve a
+		// title: appendInstanceData overwrites a same-titled Loading ghost rather
+		// than treating it as a conflict, and findTitleConflictLocked skips Loading
+		// rows when deciding a title is free — which is exactly why
+		// uniqueArchivedTitleLocked could hand us a newData.Title a ghost still
+		// holds. Drop any such ghost before the collision check so the rename
+		// REPLACES the ghost instead of writing a second same-titled record beside
+		// it (#1951). Without this the ghost's empty ID also makes
+		// stableIDMatchesForDaemon report a match, so the collision guard below
+		// never fires and the duplicate persists silently — two rows sharing one
+		// title, i.e. instances.json corruption.
+		kept := existing[:0]
+		for i := range existing {
+			if existing[i].Title == newData.Title && existing[i].Status == session.Loading {
+				continue
+			}
+			kept = append(kept, existing[i])
+		}
+		existing = kept
 		for i := range existing {
 			if existing[i].Title == newData.Title && !stableIDMatchesForDaemon(existing[i].ID, newData.ID) {
 				return nil, fmt.Errorf("cannot rename archived session to %q: another session already holds that title", newData.Title)
