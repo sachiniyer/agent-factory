@@ -419,11 +419,90 @@ _expect_config_editor_rejects() {
     return 0
 }
 
+# _expect_config_agent_attaches_in_tmux — regression proof for #2019. This is the
+# END-TO-END gate for the config-agent takeover, and it is only meaningful HERE:
+# the driver runs af inside a real tmux pane, so pressing C hits the reporter's
+# exact condition — af has $TMUX set. On unfixed code the config agent's
+# `tmux attach-session` refuses to nest ("sessions should be nested with care,
+# unset $TMUX to force") and the takeover collapses back to the TUI as
+# "config agent: exit status 1". The fix (1) scrubs $TMUX so tmux stops refusing,
+# (2) pins the server socket with -S, and (3) attaches to the RESOLVABLE session
+# name (the daemon returned the bare seq af-config-<n>, which does not resolve the
+# real session af_af-config-<n> — a latent "can't find session" that the nesting
+# refusal masked). So the takeover LANDS: the TUI chrome is replaced by the config
+# agent's own session.
+#
+# The sandbox default_program resolves to bash (program_overrides), so the config
+# agent needs no real agent binary; the briefing arrives as a bracketed paste, so
+# bash keeps running and the takeover stays up until we detach it. The config
+# session lives on this same container tmux server, so detach-client by name
+# returns control to the TUI without guessing a nested prefix key.
+# shellcheck disable=SC2317  # dispatched indirectly via step(); not dead code.
+_expect_config_agent_attaches_in_tmux() {
+    af_ensure_nav
+    af_focus_tree || return 1
+
+    af_send C
+
+    # Resolve one of two mutually exclusive outcomes:
+    #   * the attach error surfaces — #2019 reproduced (hard fail), OR
+    #   * the TUI chrome vanishes — the takeover landed (pass).
+    # The failure strings are deterministic on unfixed code (af always runs inside
+    # tmux here), so seeing any of them is the failure. The 75s budget covers the
+    # spawn's readiness wait plus the briefing paste.
+    local deadline screen; deadline=$(( $(_af_now) + 75 ))
+    while :; do
+        screen="$(af_capture)"
+        if printf '%s\n' "$screen" | grep -qiE 'exit status 1|nested with care|can.t find session'; then
+            _af_log "#2019: config agent failed to attach (takeover collapsed to an error):"
+            printf '%s\n' "$screen" >&2
+            return 1
+        fi
+        if ! printf '%s\n' "$screen" | grep -qE 'Agent Factory'; then
+            break  # chrome gone → the takeover landed
+        fi
+        if [ "$(_af_now)" -ge "$deadline" ]; then
+            _af_log "#2019: config agent neither attached nor errored within 75s"
+            printf '%s\n' "$screen" >&2
+            return 1
+        fi
+        sleep "$AF_DRIVER_POLL"
+    done
+
+    # We are inside the config agent's tmux session now. Detach its client so
+    # control returns to the TUI (the app then reaps the session and reloads
+    # config). The session is af_af-config-<n> on this same server.
+    local cfg
+    cfg="$(tmux list-sessions -F '#{session_name}' 2>/dev/null | grep '^af_af-config-' | head -1)"
+    if [ -z "$cfg" ]; then
+        _af_log "#2019: takeover landed but no af_af-config-* session was found to detach"
+        return 1
+    fi
+    tmux detach-client -s "$cfg" 2>/dev/null || true
+
+    # Back in the TUI, and NOT via the error path.
+    af_wait_for 'Agent Factory' "$AF_DRIVER_TIMEOUT" 'returned to the TUI after the config-agent takeover' || return 1
+    af_refute_screen 'exit status 1' 'the config-agent takeover must not have errored (#2019)' || return 1
+    return 0
+}
+
 step "seed a task via the create form"                      af_add_task selftest-task
 step "close the tasks overlay after create"                 af_close_tasks
 step "reopen tasks — edit-mode overlay recognized (#1757)"  af_open_tasks
 step "assert the task editor shows the run action"          af_assert_screen "$_AF_TASKS_RUN_HINT" 'task-overlay run action'
 step "close the tasks overlay"                              af_close_tasks
+
+# --- #2019 regression: the config agent (C) must attach even though af is nested
+# inside tmux. On unfixed code the takeover collapses to "config agent: exit
+# status 1" (tmux refusing to nest); the fix scrubs $TMUX, pins the socket, and
+# attaches to the resolvable session name.
+#
+# This runs BEFORE the config-editor steps deliberately: those rewrite
+# default_program to codex (not installed in the test image), which would make the
+# config agent fail preflight rather than exercise the attach. Here the sandbox's
+# default_program still resolves to bash (config.json program_overrides), so the
+# config agent runs bash and needs no real agent binary.
+step "config agent (C) attaches while af runs inside tmux (#2019)"  _expect_config_agent_attaches_in_tmux
 
 step "open the config editor (,) and write through the real path"  _expect_config_editor_writes
 step "config editor refuses an invalid value with the CLI error"   _expect_config_editor_rejects

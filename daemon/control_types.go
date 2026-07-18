@@ -560,9 +560,21 @@ type SpawnConfigAgentRequest struct {
 	Prompt string `json:"prompt"`
 }
 
-// SpawnConfigAgentResponse returns the tmux session name the client attaches to.
+// SpawnConfigAgentResponse returns the tmux session name AND the absolute socket
+// path the client attaches to.
+//
+// SocketPath is a PLAIN STRING, deliberately, and for the same reason the
+// request's fields are: the control socket is net/rpc gob, which elides
+// zero-value fields, so a *string would arrive as nil when empty (#1700). A
+// missing socket path is a legitimate value here — the daemon returns it empty
+// when it could not resolve the socket, and the attach then falls back to its
+// default socket — so it must transmit as "" rather than be laundered into nil.
 type SpawnConfigAgentResponse struct {
 	SessionName string `json:"session_name"`
+	// SocketPath is the absolute tmux server socket the session lives on, so the
+	// client can pin it with `tmux -S <path> attach-session` (#2019). Empty when
+	// the daemon could not resolve it; the attach falls back to the default socket.
+	SocketPath string `json:"socket_path"`
 }
 
 // ReapConfigAgentRequest tears down a config-agent session once the client is

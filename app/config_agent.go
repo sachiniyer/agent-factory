@@ -3,7 +3,9 @@ package app
 import (
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
+	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -30,10 +32,12 @@ import (
 // A package var so tests can drive the hotkey without spawning anything, and so
 // the seam rework has exactly one call site to move.
 //
-// The signature is deliberately narrow — a mode and a repo path in, an error out
-// — so it stays valid across the rework: the caller does not care whether the
-// agent is an Instance, a pane, or a bare tmux session.
-var spawnConfigAgent = func(mode configagent.Mode, repoPath string) (string, error) {
+// The signature is deliberately narrow — a mode and a repo path in, the tmux
+// session name plus its socket path and an error out — so it stays valid across
+// the rework: the caller does not care whether the agent is an Instance, a pane,
+// or a bare tmux session. The socket path is what lets the attach pin `-S` so it
+// resolves the session independently of the TUI's TMUX_TMPDIR (#2019).
+var spawnConfigAgent = func(mode configagent.Mode, repoPath string) (string, string, error) {
 	return configagent.Spawn(configagent.Options{Mode: mode, RepoPath: repoPath})
 }
 
@@ -44,7 +48,7 @@ var reapConfigAgent = configagent.Reap
 
 // SetConfigAgentSpawnerForTest swaps the spawn seam and returns a restore func,
 // matching SetLocalSessionPreflightForTest and the other app test seams.
-func SetConfigAgentSpawnerForTest(f func(configagent.Mode, string) (string, error)) func() {
+func SetConfigAgentSpawnerForTest(f func(configagent.Mode, string) (string, string, error)) func() {
 	prev := spawnConfigAgent
 	spawnConfigAgent = f
 	return func() { spawnConfigAgent = prev }
@@ -66,6 +70,11 @@ type configAgentSpawnedMsg struct {
 	// sessionName is the bare tmux session the daemon started, empty on failure.
 	// The takeover attaches to it and the reap tears it down.
 	sessionName string
+	// socketPath is the absolute tmux server socket the session lives on, so the
+	// attach can pin it with `tmux -S <path>` and resolve the session
+	// independently of the TUI's TMUX_TMPDIR (#2019). Empty when the daemon could
+	// not resolve it; the attach then falls back to the default socket.
+	socketPath string
 	// noticeID identifies the "Starting…" notice this spawn raised, so the
 	// handler can retract ITS OWN notice and not whatever is on screen by then.
 	// The spawn runs async for up to a minute — ample time for another action to
@@ -115,8 +124,8 @@ func (m *home) handleConfigAgent() (tea.Model, tea.Cmd) {
 	noticeID := m.setTransientNotice(errors.New("Starting the config agent…"))
 	spawn := spawnConfigAgent
 	return m, func() tea.Msg {
-		name, err := spawn(configagent.ModeChange, repoPath)
-		return configAgentSpawnedMsg{err: err, sessionName: name, noticeID: noticeID}
+		name, socketPath, err := spawn(configagent.ModeChange, repoPath)
+		return configAgentSpawnedMsg{err: err, sessionName: name, socketPath: socketPath, noticeID: noticeID}
 	}
 }
 
@@ -150,7 +159,7 @@ func (m *home) handleConfigAgentSpawned(msg configAgentSpawnedMsg) (tea.Model, t
 		// terminal to a `tmux attach-session -t ""`.
 		return m, m.handleError(errors.New("the config agent started but reported no session to attach to"))
 	}
-	return m, m.enterConfigAgent(msg.sessionName)
+	return m, m.enterConfigAgent(msg.sessionName, msg.socketPath)
 }
 
 // configAgentDoneMsg reports that the user has left the config-agent takeover.
@@ -173,8 +182,8 @@ type configAgentDoneMsg struct {
 // Attaching to a tmux session is also why this can work at all without an
 // Instance: `tmux attach-session` needs only a session NAME, while the WS route
 // needs an Instance to resolve a byte source — and an Instance is a row.
-func (m *home) enterConfigAgent(sessionName string) tea.Cmd {
-	cmd := execConfigAgentAttach(sessionName)
+func (m *home) enterConfigAgent(sessionName, socketPath string) tea.Cmd {
+	cmd := execConfigAgentAttach(sessionName, socketPath)
 	return tea.ExecProcess(cmd, func(err error) tea.Msg {
 		return configAgentDoneMsg{sessionName: sessionName, err: err}
 	})
@@ -182,8 +191,59 @@ func (m *home) enterConfigAgent(sessionName string) tea.Cmd {
 
 // execConfigAgentAttach builds the attach command. A var so tests can drive the
 // takeover without a tmux server.
-var execConfigAgentAttach = func(sessionName string) *exec.Cmd {
-	return exec.Command("tmux", "attach-session", "-t", sessionName)
+//
+// Two things make this attach survive af running INSIDE a tmux session (#2019):
+//
+//   - $TMUX is scrubbed from the child's env. When af itself was launched from a
+//     tmux pane, af inherits $TMUX, and `tmux attach-session` then refuses to
+//     nest — "sessions should be nested with care, unset $TMUX to force" — and
+//     exits 1. This is the ONLY terminal handover in the TUI that shells out to
+//     `tmux attach-session` (every other attach goes through the WS raw proxy,
+//     which needs an Instance — a session-list row — that the config agent
+//     deliberately is not), so it is the only one that hits the nesting refusal.
+//     Dropping $TMUX is exactly what tmux's own error instructs.
+//
+//   - The server socket is pinned with `-S <path>`. After $TMUX is gone, tmux
+//     resolves the session through the DEFAULT socket
+//     (${TMUX_TMPDIR:-/tmp/tmux-<uid>}/default), and the daemon that spawned the
+//     session can resolve a different TMUX_TMPDIR than this TUI — so "default"
+//     could point at two different directories and the attach would not find the
+//     session. Pinning the authoritative socket the daemon reported makes
+//     resolution independent of either side's TMUX_TMPDIR. socketPath is empty
+//     only when the daemon could not resolve it, in which case the attach falls
+//     back to the default socket (Part 1 alone still fixes the reported bug).
+var execConfigAgentAttach = func(sessionName, socketPath string) *exec.Cmd {
+	args := make([]string, 0, 5)
+	if socketPath != "" {
+		args = append(args, "-S", socketPath)
+	}
+	args = append(args, "attach-session", "-t", sessionName)
+	cmd := exec.Command("tmux", args...)
+	cmd.Env = configAgentAttachEnv()
+	return cmd
+}
+
+// configAgentAttachEnv is the current environment with the TMUX marker removed,
+// so the nested `tmux attach-session` above does not refuse to run (#2019).
+//
+// Only TMUX is dropped, and deliberately: TMUX_TMPDIR is left in place because it
+// participates in default-socket resolution (and the `-S` pin depends on nothing
+// here). This mirrors daemon/vscode_server.go's vscodeChildEnv, which likewise
+// builds a child env from os.Environ() dropping selected KEY= prefixes because a
+// stale inherited handle would break the child — the same shape, one key.
+//
+// The `TMUX=` prefix match is exact: it drops `TMUX=…` without touching
+// `TMUX_TMPDIR=…`, whose key does not start with `TMUX=`.
+func configAgentAttachEnv() []string {
+	src := os.Environ()
+	out := make([]string, 0, len(src))
+	for _, kv := range src {
+		if strings.HasPrefix(kv, "TMUX=") {
+			continue
+		}
+		out = append(out, kv)
+	}
+	return out
 }
 
 // handleConfigAgentDone runs when the user leaves the takeover: reap the session
@@ -216,7 +276,15 @@ func (m *home) handleConfigAgentDone(msg configAgentDoneMsg) (tea.Model, tea.Cmd
 		m.appConfig = cfg
 	}
 	if msg.err != nil {
-		return m, m.handleError(fmt.Errorf("config agent: %w", msg.err))
+		// Name what happened and what to do, not a bare exit code. A raw
+		// "config agent: exit status 1" (what tmux returns when it refuses to
+		// nest, #2019, and what any other attach failure surfaces as) tells the
+		// user neither the cause nor a way forward. Lead with the consequential
+		// half — the transient notice clips its tail at real widths, and the
+		// wrapped cause stays available under `E details`.
+		return m, m.handleError(fmt.Errorf(
+			"could not attach to the config agent — it may have exited, or tmux is unavailable · press C to retry, or run af config set to edit config directly: %w",
+			msg.err))
 	}
 	return m, nil
 }
