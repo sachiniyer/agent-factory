@@ -135,6 +135,8 @@ func (m *home) handleDefaultKeyPress(msg tea.KeyMsg, name keys.KeyName) (tea.Mod
 		return m.handleRestore()
 	case keys.KeyLimitRetry:
 		return m.handleLimitRetry()
+	case keys.KeyHandoff:
+		return m.handleHandoff()
 	case keys.KeyEnter:
 		return m.handleEnter()
 	case keys.KeyAttach:

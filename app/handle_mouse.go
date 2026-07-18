@@ -584,6 +584,17 @@ func (m *home) handleModalClick(id string) (tea.Model, tea.Cmd) {
 			m.selectionOverlay.SetSelectedIndex(idx)
 			return m.handleStateSelectTabKind(tea.KeyMsg{Type: tea.KeyEnter})
 		}
+	// The handoff picker reuses the same selection overlay, so it needs the same
+	// click routing. Without this the agent list responds to the keyboard and
+	// silently ignores the mouse — the #1819 class.
+	case stateSelectHandoffAgent:
+		if m.selectionOverlay == nil {
+			return m, nil
+		}
+		if idx, ok := zones.OverlaySelectIdx(id); ok {
+			m.selectionOverlay.SetSelectedIndex(idx)
+			return m.handleStateSelectHandoffAgent(tea.KeyMsg{Type: tea.KeyEnter})
+		}
 	case stateSearch:
 		if m.searchOverlay == nil {
 			return m, nil

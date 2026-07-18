@@ -84,6 +84,9 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 			td.TmuxName = tab.tmux.SanitizedName()
 		}
 		td.Conversation = conversationDataPtr(tab.Conversation)
+		if len(tab.Handoffs) > 0 {
+			td.Handoffs = append([]AgentHandoff(nil), tab.Handoffs...)
+		}
 		data.Tabs = append(data.Tabs, td)
 	}
 
@@ -310,6 +313,10 @@ func restoreLocalTabs(instance *Instance, data InstanceData) {
 			if id == "" {
 				id = newTabID()
 			}
+			var handoffs []AgentHandoff
+			if len(td.Handoffs) > 0 {
+				handoffs = append([]AgentHandoff(nil), td.Handoffs...)
+			}
 			instance.Tabs = append(instance.Tabs, &Tab{
 				ID:           id,
 				Name:         td.Name,
@@ -317,6 +324,7 @@ func restoreLocalTabs(instance *Instance, data InstanceData) {
 				Command:      td.Command,
 				URL:          td.URL,
 				Conversation: conversation,
+				Handoffs:     handoffs,
 				tmux:         ts,
 			})
 		}

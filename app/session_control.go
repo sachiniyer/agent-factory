@@ -200,6 +200,34 @@ var resumeFromLimitThroughDaemon = func(title, repoID string) error {
 	})
 }
 
+// handoffSessionThroughDaemon routes the TUI's handoff verb (#2013) through the
+// daemon — the single writer (#960) — which swaps the session's agent program in
+// place, re-launches it in the same worktree, and delivers the mission brief. It
+// returns the OUTGOING agent the daemon actually resolved, so the TUI reports the
+// swap that happened rather than the one it assumed: the picker's idea of the
+// current agent can be a poll tick stale. A package var so the app test suite can
+// stub it without dialing a real daemon.
+var handoffSessionThroughDaemon = func(title, repoID, target string) (string, error) {
+	var from string
+	err := withDaemonHTTP(func(c *apiclient.Client) error {
+		resp, e := c.HandoffSession(daemon.HandoffSessionRequest{Title: title, RepoID: repoID, To: target})
+		if e != nil {
+			return e
+		}
+		from = resp.From
+		return nil
+	})
+	return from, err
+}
+
+// SetHandoffRunnerForTest swaps the handoff seam (#2013) so a test can assert the
+// TUI routes its handoff through the daemon — without dialing a real one.
+func SetHandoffRunnerForTest(fn func(title, repoID, target string) (string, error)) func() {
+	prev := handoffSessionThroughDaemon
+	handoffSessionThroughDaemon = fn
+	return func() { handoffSessionThroughDaemon = prev }
+}
+
 // triggerTaskThroughDaemon runs a task by ID through the daemon's single shared
 // trigger path — the SAME entrypoint `af tasks trigger` and the cron scheduler
 // use. It routes through the TriggerTask RPC (#1029 PR 3) so the firing runs

@@ -334,6 +334,17 @@ func (m *Menu) addInstanceOptions() {
 	// the hints.
 	if m.instance != nil && m.instance.LimitReached() {
 		actionGroup = append(actionGroup, keys.KeyLimitRetry)
+		// Handoff (#2013) is the OTHER answer to a limit wall: `c` waits for this
+		// agent's window to reset, `H` continues the work under a different one.
+		// They are only useful together, so the bar advertises them together.
+		//
+		// The key itself is not gated on the limit — handing a session over is
+		// legitimate whenever an agent is stuck — but a limit is the case where a
+		// user needs to be TOLD the option exists, and every other session keeps an
+		// uncluttered bar.
+		if m.instance.Capabilities().Handoff {
+			actionGroup = append(actionGroup, keys.KeyHandoff)
+		}
 	}
 
 	// Tab group: create, close, and number-jump (#930 PR 4). The tab CYCLE key

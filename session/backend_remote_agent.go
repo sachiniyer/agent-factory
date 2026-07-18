@@ -23,7 +23,19 @@ func (b *remoteAgentBackend) Capabilities() Capabilities {
 		TabManagement:    false,
 		TerminalTab:      true,
 		InteractiveInput: true,
+		Handoff:          false,
 	}
+}
+
+// SwapAgent is not serviced off-box (#2013). Swapping the agent inside a
+// provisioned sandbox means re-launching a different process INSIDE it while
+// keeping the workspace — but every re-spawn path these runtimes have
+// (recoverSandbox) re-provisions the sandbox and re-clones the branch from
+// origin, which would discard unpushed work rather than hand it over. Wiring a
+// genuine in-sandbox relaunch is its own change; until then this says so instead
+// of quietly doing the destructive thing.
+func (b *remoteAgentBackend) SwapAgent(*Instance) error {
+	return ErrHandoffUnsupported
 }
 
 // Start provisions then launches the remote workspace through its AgentServer.

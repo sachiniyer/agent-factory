@@ -22,7 +22,11 @@ Request fields are the JSON keys of each route's request body; a `—` means the
 | `POST` | `/v1/RestoreArchived` | `title`, `repo_id` | Restore an archived session: move its worktree back next to the repo and re-spawn the agent. |
 | `POST` | `/v1/RestoreSession` | `title`, `repo_id` | Restore an archived, Lost, or Dead session. |
 | `POST` | `/v1/SendPrompt` | `title`, `repo_id`, `prompt`, `id` | Send a prompt to an existing session's agent. |
+<<<<<<< HEAD
 | `POST` | `/v1/ResumeFromLimit` | `title`, `repo_id`, `id` | Resume a usage-limit-blocked session: re-spawn if needed, re-deliver the pending prompt, clear the limit. |
+=======
+| `POST` | `/v1/HandoffSession` | `title`, `repo_id`, `id`, `to`, `brief` | Continue a session under a different agent, in place: swap its agent program, keep its worktree and branch, and deliver a mission brief to the new agent. |
+>>>>>>> 07e0847 (feat(handoff): continue a session under a different agent, in place (#2013))
 | `POST` | `/v1/DeleteProject` | `repo_path`, `repo_id` | Delete a project (a repo's session grouping): archive its live sessions (restorable), tear down in-place ones, and drop its root_agents opt-in — the real git repo is untouched. |
 | `POST` | `/v1/DeliverPrompt` | `title`, `repo_path`, `program`, `prompt`, `auto_yes`, `defer_while_attached` | Deliver a prompt to a session, auto-creating it if it does not exist yet. |
 | `POST` | `/v1/CreateTab` | `title`, `repo_id`, `command`, `name`, `shell`, `kind`, `url`, `port`, `id` | Spawn a tab in a session: a process tab (command) or shell tab in the worktree, a web tab (kind=web) that iframes a url/port (localhost is daemon-proxied, external is direct), or a VS Code tab (kind=vscode) serving the session's worktree in a daemon-managed code-server (no url/port: the worktree is the target). |

@@ -177,6 +177,17 @@ type Tab struct {
 	// conversation exactly. Empty means recovery falls back to the provider's
 	// existing latest-session behavior.
 	Conversation AgentConversationData
+	// Handoffs is the append-only record of agent swaps on this tab (#2013),
+	// oldest first. Empty for the overwhelming majority of tabs — a session that
+	// was never handed off.
+	//
+	// It is the tab's history, and Conversation is only its present. A swap
+	// overwrites Conversation with the incoming agent's id, so without this list
+	// the outgoing agent's conversation would be unrecoverable and a hand-back
+	// could only reach that provider's latest-session fallback. Each entry also
+	// pins the branch tip at swap time, which is what makes per-agent attribution
+	// a checkable git range.
+	Handoffs []AgentHandoff
 	// tmux is the tab's tmux session. nil until the instance is started, and
 	// always nil for remote/hook-backed instances, which drive their agent
 	// session through hook commands rather than a local tmux session.

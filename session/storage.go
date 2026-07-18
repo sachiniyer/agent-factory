@@ -140,6 +140,12 @@ type TabData struct {
 	// the underlying agent exposes a durable resume id. Omitted for legacy rows
 	// and providers where af can only resume "latest".
 	Conversation *AgentConversationData `json:"conversation,omitempty"`
+	// Handoffs is the tab's append-only agent-swap ledger (#2013), oldest first.
+	// omitempty + additive on the same rollforward precedent as ID and
+	// Conversation: a record written before #2013 has none, which is
+	// indistinguishable from a session that was never handed off — and those two
+	// deserve the same treatment, so nothing has to be backfilled.
+	Handoffs []AgentHandoff `json:"handoffs,omitempty"`
 }
 
 // PRInfoData represents the serializable data of a PRInfo

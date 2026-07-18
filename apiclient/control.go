@@ -75,6 +75,17 @@ func (c *Client) ResumeFromLimit(req daemon.ResumeFromLimitRequest) error {
 	return c.call("ResumeFromLimit", req, &daemon.ResumeFromLimitResponse{})
 }
 
+// HandoffSession asks the daemon to continue a session under a different agent,
+// in place (#2013) — the TUI's handoff action. Returns the swap the daemon
+// actually performed (outgoing agent, incoming agent, attribution boundary).
+func (c *Client) HandoffSession(req daemon.HandoffSessionRequest) (daemon.HandoffSessionResponse, error) {
+	var resp daemon.HandoffSessionResponse
+	if err := c.call("HandoffSession", req, &resp); err != nil {
+		return daemon.HandoffSessionResponse{}, err
+	}
+	return resp, nil
+}
+
 // CreateTab asks the daemon to spawn, persist, and report a new process/shell
 // tab on an existing session, returning the resolved (collision-suffixed) name
 // and the tmux session it was spawned under. Callers need BOTH: the two names

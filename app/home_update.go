@@ -255,6 +255,12 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.archiveInstanceCmd(msg.title)
 	case instanceArchivedMsg:
 		return m.handleInstanceArchived(msg)
+	case startHandoffMsg:
+		// Handoff confirmed; run the daemon swap off the event loop, mirroring the
+		// kill/archive dispatch — it stops one agent process and starts another.
+		return m, m.handoffCmd(msg.title, msg.target)
+	case handoffDoneMsg:
+		return m.handleHandoffDone(msg)
 	case instanceRestoredMsg:
 		return m.handleInstanceRestored(msg)
 	case startDeleteProjectMsg:
@@ -510,6 +516,8 @@ func (m *home) handleKeyPress(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 		return m.handleStateSelectTabKind(msg)
 	case statePromptInput:
 		return m.handleStateInitialPrompt(msg)
+	case stateSelectHandoffAgent:
+		return m.handleStateSelectHandoffAgent(msg)
 	case stateHooks:
 		return m.handleStateHooks(msg)
 	case stateTasks:

@@ -1,9 +1,21 @@
 # Design: Agent handoff on a usage limit (#2013)
 
-Status: **Proposed — three decisions await the owner (§2, §3, §4)** · Author: Captain Claude · Issue: [#2013](https://github.com/sachiniyer/agent-factory/issues/2013) · Builds on: [#1146](https://github.com/sachiniyer/agent-factory/issues/1146)
+Status: **Accepted — D1/D2/D3 confirmed by Sachin 2026-07-18** · Author: Captain Claude · Issue: [#2013](https://github.com/sachiniyer/agent-factory/issues/2013) · Builds on: [#1146](https://github.com/sachiniyer/agent-factory/issues/1146)
 
-> Nothing here is implemented. This document exists to get D1/D2/D3 answered
-> before code is written, because each one is expensive to reverse.
+> **Decisions confirmed 2026-07-18.** All three recommendations were accepted as
+> written:
+>
+> - **D1 = prompted-first.** A detected limit surfaces a hand-off *action* the
+>   user confirms. Automatic mode is a later, separately gated addition — **not
+>   built now** (§2.2 phase 2 is deferred, and §10 PR 6 with it).
+> - **D2 = mission + worktree.** The swapped-in agent inherits the same
+>   worktree/branch plus a concise mission summary (goal · what's done · what's
+>   next). No transcript replay.
+> - **D3 = swap in place.** The running session's program changes in place; same
+>   af session, same worktree, same branch.
+>
+> Implementation follows this document. Where the build revised a detail, the
+> section says so inline.
 
 ## 0. Summary
 
@@ -14,12 +26,25 @@ The headline finding of this design pass is that handoff is far less new
 machinery than the issue assumes, and far more of a *policy* problem than a
 *mechanism* problem:
 
-- The **executor already exists**. `LocalBackend.Respawn`
+- Most of the **executor already exists**. `LocalBackend.Respawn`
   (`session/backend_local.go:427`) is guard-free by design — it was made so for
   the #1146 limit-retry path — and recomputes the whole program from the
-  persisted `Instance.Program` on every attempt. Writing a different agent name
-  into `Instance.Program` and calling `Respawn` swaps the agent in place, with
-  correct override resolution and system-prompt injection, for free.
+  persisted `Instance.Program` on every attempt.
+
+  > **Corrected during the build.** The first draft of this document claimed
+  > `Respawn` alone would swap the agent "for free". It will not, and the way it
+  > fails is silent. `Respawn` ends in `TmuxSession.Restore`, and `Restore`
+  > against a session tmux still reports as live is a **pure logical rebind**
+  > (`session/tmux/start.go:329-341`) that never re-execs the program — it only
+  > re-arms a status monitor. A usage-limit-blocked agent *is* live, which is
+  > precisely the case handoff exists for. So the naive implementation rewrites
+  > `Instance.Program`, reports success, and leaves the old agent running.
+  >
+  > A handoff therefore needs its own runtime step (`SwapAgent`, §4.5): stop the
+  > old agent and *confirm* it stopped, then launch the new one through the
+  > **first-launch** path. Not the resume path either — that appends the
+  > provider's "continue the most recent conversation here" flag, and the
+  > incoming agent has no conversation in this worktree to continue.
 - The **detector already exists** (`task/limit.go:71`), the **park state**
   already exists (`LiveLimitReached`, `session/liveness.go:54`), and the
   **scheduler that acts on it** already exists (`daemon/limitresume.go:67`).
@@ -29,11 +54,11 @@ machinery than the issue assumes, and far more of a *policy* problem than a
 
 Recommendations in one line each:
 
-| # | Decision | Recommendation |
+| # | Decision | Outcome |
 |---|---|---|
-| **D1** | Trigger (§2) | **Prompted first, automatic second and separately gated.** Auto-handoff on today's detector is not safe. |
-| **D2** | State transfer (§3) | **Mission + worktree, never transcript.** Re-issue the stored prompt to the new agent with an explicit continuation brief. |
-| **D3** | Session identity (§4) | **Swap in place.** A same-branch successor is *impossible* without destroying the original — verified, §4.2. |
+| **D1** | Trigger (§2) | ✅ **Confirmed — prompted first**, automatic second and separately gated. Auto-handoff on today's detector is not safe. |
+| **D2** | State transfer (§3) | ✅ **Confirmed — mission + worktree, never transcript.** Re-issue the mission to the new agent with an explicit continuation brief. |
+| **D3** | Session identity (§4) | ✅ **Confirmed — swap in place.** A same-branch successor is *impossible* without destroying the original — verified, §4.2. |
 | — | Agent matrix (§5) | Trigger on claude/codex only; target any configured agent; never target a known-limited one. |
 | — | Attribution (§6) | Append-only handoff ledger on the tab, anchored to the HEAD SHA at swap time. |
 | — | Surface (§7) | CLI verb is the primitive; TUI key + web action required by the parity gate. |
@@ -292,10 +317,10 @@ and the original agent's conversation is stranded in the archived worktree
 
 1. **It is the only option that keeps uncommitted work in place** without a
    commit-and-fork dance.
-2. **The mechanism already exists and is already exercised** — `SetProgram` is
-   documented as mutable-after-creation (`session/tmux/program.go:5-10`), and
-   `Respawn` recomputes from `Instance.Program` on every attempt
-   (`session/backend_local.go:435`).
+2. **Most of the mechanism already exists** — `SetProgram` is documented as
+   mutable-after-creation (`session/tmux/program.go:5-10`), and the launch path
+   recomputes everything from `Instance.Program`. What had to be added is the
+   teardown-then-first-launch step in §4.5, not a new lifecycle.
 3. **Handoff becomes reversible.** Because every agent's resume is keyed to the
    *cwd*, one worktree accumulates N private per-agent transcripts. Keep the
    worktree and codex's thread survives the handoff — when its limit resets,
@@ -310,6 +335,37 @@ ledger is for — and any consumer that needs the *live* answer must already cal
 `ResolvedAgent()`, not read the field (§5.3).
 
 ---
+
+### 4.5 The runtime step, as built
+
+`Backend.SwapAgent` (`session/backend_local.go`) is the runtime half, and its
+ordering is the correctness argument:
+
+1. **Close the agent pane and wait for its process to exit.** Until the old agent
+   is gone there is nothing to replace it with, and the wait is the #802 ordering
+   that keeps its final writes from racing the new agent's first ones in the same
+   worktree.
+2. **Then launch the new program through the first-launch path**
+   (`prepareLaunchConversation` + `Start`), never the resume path.
+
+**A teardown whose outcome tmux could not confirm aborts the swap.** This is the
+one place the honest answer costs something: refusing leaves the session on its
+old agent, still blocked, and the user has to retry. Proceeding on an
+unconfirmed teardown risks two agents writing the same worktree at once, which
+is unrecoverable in a way a retry is not. This is the three-valued discipline
+the repo already applies to teardown state (`PaneStateUnknown`), and handoff is
+exactly the kind of caller that must not collapse unknown into "it's gone".
+
+The record is rolled back if the runtime swap fails: a session whose
+`Instance.Program` says `claude` while its pane runs `codex` would mis-resolve
+every later respawn, readiness heuristic, and same-agent check. If the swap
+succeeds but the mission delivery fails, the swap **stands** and the error says
+so — the new agent genuinely is the one running, and pretending otherwise to
+make the error tidier would strand the record.
+
+The worktree is never cleaned up on failure, unlike the first-launch path this
+otherwise mirrors: on a create, a failed start means the workspace holds nothing
+worth keeping; here it holds everything the outgoing agent did.
 
 ## 5. Agent matrix
 
@@ -523,33 +579,43 @@ fewer way to be half-configured.
 
 Serialized; each PR independently useful and independently revertable.
 
-| PR | Scope | Gated on |
-|---|---|---|
-| 1 | Per-agent limit registry (§8), three-valued, daemon-held. Improves #1146 standalone. | — |
-| 2 | `Instance.Program` write path + `AgentHandoff` ledger (§6) + `HandoffSession` RPC. No UI. | 1 |
-| 3 | CLI `af sessions handoff` + parity entries + docs + `afUsageReference`. | 2 |
-| 4 | TUI key + agent picker + confirm. **Play-test gate applies** (visible TUI change). | 3 |
-| 5 | Web action (§7) — also closes the #1934 dead-end. `make web-build`. | 3 |
-| 6 | Automatic trigger: `limit_action`, tail-anchoring + stability gate (§2.1), no-stored-prompt refusal (§3.3). | 4, 5 |
+**Revised after the D1 decision.** With automatic mode deferred, the per-agent
+limit registry (PR 1 below) is no longer on the critical path — it exists to make
+*machine* target-selection safe, and in the prompted path a human selects the
+target. It moves to the deferred set with the auto trigger.
 
-PR 6 is deliberately last and separately revertable: it is the only one that
-acts without a human in the loop.
+| PR | Scope | Status |
+|---|---|---|
+| **1** | `Instance.Program` write path + `AgentHandoff` ledger (§6) + mission builder (§3.2) + `HandoffSession` RPC + CLI verb + TUI action + parity entries + docs | **built — this PR** |
+| 2 | Web action (§7) — also closes the #1934 dead-end. `make web-build`. | deferred |
+| 3 | Automatic trigger: `limit_action`, tail-anchoring + stability gate (§2.1), no-stored-prompt refusal (§3.3), per-agent limit registry (§8), loop guard | deferred |
+
+The prompted feature is small enough to land coherently in one PR — splitting the
+RPC from its only two callers would ship a verb no surface can reach, and the
+parity gate (§7) would fail on the intermediate state anyway. The automatic
+trigger stays separate and separately revertable: it is the only part that acts
+without a human in the loop.
 
 ---
 
-## 11. Open questions for the owner
+## 11. Decisions (resolved 2026-07-18)
 
-1. **D1 (§2)** — Confirm prompted-first, with automatic as a later separately
-   gated phase? The alternative is shipping auto in PR 1, which I recommend
-   against on the false-positive evidence in §2.1.
-2. **D2 (§3)** — Confirm mission-not-transcript, and specifically confirm that
-   **a session with no stored prompt refuses automatic handoff** (§3.3) rather
-   than sending a fresh agent a bare `continue`.
-3. **D3 (§4)** — Confirm swap-in-place over successor+archive. This one
-   contradicts the manual pattern, on the evidence in §4.2 that a same-branch
-   successor cannot exist while the original does.
-4. **Naming** — `af sessions handoff` and `limit_action` are new public
-   surface (CLI noun, config key) and are cheap to change now, expensive later.
-5. **Scope check** — is the per-agent limit registry (§8) welcome as PR 1? It is
-   strictly required for a correct loop guard, and it independently improves
-   #1146, but it is more than the issue literally asked for.
+1. **D1 — prompted-first. ✅ Confirmed.** A detected limit surfaces an action the
+   user confirms. Automatic mode is deferred to a later, separately gated
+   change; the §2.1 detector hardening (tail-anchoring, stability gate) is a
+   prerequisite for it and is *not* needed for the prompted path, because a
+   human is the gate.
+2. **D2 — mission + worktree. ✅ Confirmed.** No transcript replay. The mission
+   summary is goal · what's done · what's next (§3.2).
+3. **D3 — swap in place. ✅ Confirmed**, over successor+archive, on the §4.2
+   evidence that a same-branch successor cannot exist while the original does.
+4. **Naming** — `af sessions handoff <title> --to <agent>` and the TUI `H` key,
+   as built.
+5. **Agent restrictions** — none. Any supported agent may be a target; the only
+   refusals are structural (§5.2, and see the note there on what is *warned*
+   rather than refused).
+
+Deferred, tracked but not built here: the automatic trigger (§2.2 phase 2), the
+per-agent limit registry (§8), and the loop guard that depends on it. The
+prompted path needs none of them — a human picks the target, so there is no
+selection to make safe and no round-robin to bound.

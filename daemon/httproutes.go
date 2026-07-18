@@ -129,6 +129,13 @@ var httpRoutes = []HTTPRoute{
 	},
 	{
 		Method:        http.MethodPost,
+		Path:          "/v1/HandoffSession",
+		Description:   "Continue a session under a different agent, in place: swap its agent program, keep its worktree and branch, and deliver a mission brief to the new agent.",
+		RequestFields: jsonFields(reflect.TypeOf(HandoffSessionRequest{})),
+		handler:       func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.HandoffSession) },
+	},
+	{
+		Method:        http.MethodPost,
 		Path:          "/v1/DeleteProject",
 		Description:   "Delete a project (a repo's session grouping): archive its live sessions (restorable), tear down in-place ones, and drop its root_agents opt-in — the real git repo is untouched.",
 		RequestFields: jsonFields(reflect.TypeOf(DeleteProjectRequest{})),

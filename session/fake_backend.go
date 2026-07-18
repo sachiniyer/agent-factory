@@ -114,6 +114,7 @@ func (b *FakeBackend) CheckAndHandleTrustPrompt(*Instance) bool     { return fal
 func (b *FakeBackend) TapEnter(*Instance)                           {}
 func (b *FakeBackend) Recover(*Instance) error                      { return nil }
 func (b *FakeBackend) Respawn(*Instance) error                      { return nil }
+func (b *FakeBackend) SwapAgent(*Instance) error                    { return nil }
 func (b *FakeBackend) Type() string                                 { return "local" }
 
 // Capabilities reports local full parity by default, mirroring LocalBackend so
@@ -128,5 +129,6 @@ func (b *FakeBackend) Capabilities() Capabilities {
 		TabManagement:    true,
 		TerminalTab:      true,
 		InteractiveInput: true,
+		Handoff:          true,
 	}
 }
