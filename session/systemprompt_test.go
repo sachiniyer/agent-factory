@@ -65,6 +65,10 @@ func TestInjectSystemPrompt_ClaudeWithResolvedFlags(t *testing.T) {
 // -c developer_instructions= blob (#1043 retired): the launch command comes back
 // UNCHANGED and the af skill is written where codex auto-discovers it.
 func TestInjectSystemPrompt_Codex(t *testing.T) {
+	// These agents write into the USER'S global config dir, which af only does
+	// under the global_agent_skills opt-in (#1977). Grant it: this test is about
+	// WHERE and HOW the file is written, not whether af may write it.
+	grantGlobalAgentSkills(t)
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("CODEX_HOME", "") // force the ~/.codex fallback under the temp HOME
@@ -132,6 +136,10 @@ func TestInjectSystemPrompt_Aider(t *testing.T) {
 // Gemini gets a FILE seam (its user skills folder, 0.42.0+): launch command
 // UNCHANGED, af skill written where gemini auto-discovers and enables it.
 func TestInjectSystemPrompt_Gemini(t *testing.T) {
+	// These agents write into the USER'S global config dir, which af only does
+	// under the global_agent_skills opt-in (#1977). Grant it: this test is about
+	// WHERE and HOW the file is written, not whether af may write it.
+	grantGlobalAgentSkills(t)
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("GEMINI_CLI_HOME", "") // force the ~/.gemini fallback under the temp HOME
@@ -156,6 +164,10 @@ func TestInjectSystemPrompt_Gemini(t *testing.T) {
 }
 
 func TestInjectSystemPrompt_Amp(t *testing.T) {
+	// These agents write into the USER'S global config dir, which af only does
+	// under the global_agent_skills opt-in (#1977). Grant it: this test is about
+	// WHERE and HOW the file is written, not whether af may write it.
+	grantGlobalAgentSkills(t)
 	// Amp's seam is a file, not a flag: point HOME at a temp dir so the write
 	// lands there instead of the real ~/.config/amp (amp discovers skills under
 	// $HOME/.config, ignoring XDG_CONFIG_HOME).
@@ -457,6 +469,10 @@ func TestAfUsageReference_CoversFullSurface(t *testing.T) {
 }
 
 func TestEnsureAmpSkillDir(t *testing.T) {
+	// These agents write into the USER'S global config dir, which af only does
+	// under the global_agent_skills opt-in (#1977). Grant it: this test is about
+	// WHERE and HOW the file is written, not whether af may write it.
+	grantGlobalAgentSkills(t)
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 
@@ -496,6 +512,10 @@ func TestEnsureAmpSkillDir(t *testing.T) {
 // marker belongs to the user (or another tool) and must survive untouched
 // (#1585 review, finding 1). A file WITH the marker is af-owned and regenerates.
 func TestEnsureAmpSkillDir_NonDestructive(t *testing.T) {
+	// These agents write into the USER'S global config dir, which af only does
+	// under the global_agent_skills opt-in (#1977). Grant it: this test is about
+	// WHERE and HOW the file is written, not whether af may write it.
+	grantGlobalAgentSkills(t)
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 
@@ -542,6 +562,10 @@ func TestEnsureAmpSkillDir_NonDestructive(t *testing.T) {
 // (verified against the amp CLI), so honoring XDG here would write the skill
 // where amp never looks for a user who has XDG_CONFIG_HOME set.
 func TestEnsureAmpSkillDir_IgnoresXDG(t *testing.T) {
+	// These agents write into the USER'S global config dir, which af only does
+	// under the global_agent_skills opt-in (#1977). Grant it: this test is about
+	// WHERE and HOW the file is written, not whether af may write it.
+	grantGlobalAgentSkills(t)
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir()) // a DIFFERENT dir; must be ignored
@@ -557,6 +581,10 @@ func TestEnsureAmpSkillDir_IgnoresXDG(t *testing.T) {
 }
 
 func TestEnsureAmpSkillDir_Idempotent(t *testing.T) {
+	// These agents write into the USER'S global config dir, which af only does
+	// under the global_agent_skills opt-in (#1977). Grant it: this test is about
+	// WHERE and HOW the file is written, not whether af may write it.
+	grantGlobalAgentSkills(t)
 	t.Setenv("HOME", t.TempDir())
 
 	dir1, err := ensureAmpSkillDir()
@@ -574,6 +602,10 @@ func TestEnsureAmpSkillDir_Idempotent(t *testing.T) {
 
 // Codex skills base resolves under $CODEX_HOME when set, else $HOME/.codex.
 func TestEnsureCodexSkillDir(t *testing.T) {
+	// These agents write into the USER'S global config dir, which af only does
+	// under the global_agent_skills opt-in (#1977). Grant it: this test is about
+	// WHERE and HOW the file is written, not whether af may write it.
+	grantGlobalAgentSkills(t)
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("CODEX_HOME", "")
@@ -598,6 +630,10 @@ func TestEnsureCodexSkillDir(t *testing.T) {
 }
 
 func TestEnsureCodexSkillDir_HonorsCodexHome(t *testing.T) {
+	// These agents write into the USER'S global config dir, which af only does
+	// under the global_agent_skills opt-in (#1977). Grant it: this test is about
+	// WHERE and HOW the file is written, not whether af may write it.
+	grantGlobalAgentSkills(t)
 	codexHome := t.TempDir()
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("CODEX_HOME", codexHome)
@@ -615,6 +651,10 @@ func TestEnsureCodexSkillDir_HonorsCodexHome(t *testing.T) {
 // Gemini skills base resolves under $GEMINI_CLI_HOME/.gemini when set, else
 // $HOME/.gemini.
 func TestEnsureGeminiSkillDir(t *testing.T) {
+	// These agents write into the USER'S global config dir, which af only does
+	// under the global_agent_skills opt-in (#1977). Grant it: this test is about
+	// WHERE and HOW the file is written, not whether af may write it.
+	grantGlobalAgentSkills(t)
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("GEMINI_CLI_HOME", "")
@@ -639,6 +679,10 @@ func TestEnsureGeminiSkillDir(t *testing.T) {
 }
 
 func TestEnsureGeminiSkillDir_HonorsGeminiCliHome(t *testing.T) {
+	// These agents write into the USER'S global config dir, which af only does
+	// under the global_agent_skills opt-in (#1977). Grant it: this test is about
+	// WHERE and HOW the file is written, not whether af may write it.
+	grantGlobalAgentSkills(t)
 	geminiHome := t.TempDir()
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("GEMINI_CLI_HOME", geminiHome)
@@ -657,6 +701,9 @@ func TestEnsureGeminiSkillDir_HonorsGeminiCliHome(t *testing.T) {
 // non-clobber guarantee, exercised through the codex skills path (the same guard
 // protects gemini, amp, and the aider context file).
 func TestWriteAfMarkedFile_NonDestructive(t *testing.T) {
+	// Exercises the af-owned-vs-user-owned write rules inside a global agent
+	// config dir, so it needs the global_agent_skills opt-in (#1977).
+	grantGlobalAgentSkills(t)
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("CODEX_HOME", "")

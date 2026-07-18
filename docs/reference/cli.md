@@ -535,6 +535,7 @@ Settable keys:
   limit_auto_resume          true | false
   limit_retry_interval       Go duration (e.g. 30m), or "" to never retry
   limit_patterns.<agent>     usage-limit banner regex for an agent
+  global_agent_skills        true | false
 
 Structural keys (root_agents, [theme], the [keys] rebind table) and the
 cors_allowed_origins list are not settable here — edit config.toml directly.

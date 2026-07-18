@@ -202,6 +202,29 @@ type Config struct {
 	// retry from PR2) and the scheduler does zero work. Deliberately GLOBAL-ONLY
 	// (it configures daemon behavior), like auto_yes / daemon_poll_interval.
 	LimitAutoResume bool `json:"limit_auto_resume" toml:"limit_auto_resume"`
+	// GlobalAgentSkills opts af into writing its "agent-factory" skill file
+	// into the USER'S GLOBAL per-agent config directories — codex's
+	// $CODEX_HOME/skills, gemini's ~/.gemini/skills, amp's
+	// ~/.config/amp/skills — so those agents discover af's CLI guidance
+	// (#1977). DEFAULT FALSE: creating a session is not consent to edit the
+	// user's global tool configuration, and a file written there outlives the
+	// session, survives uninstalling af, and still loads when the user runs
+	// that agent by hand somewhere af has nothing to do with.
+	//
+	// It governs ONLY the three agents with no per-launch pointer. claude
+	// (--plugin-dir), aider (--read) and opencode (OPENCODE_CONFIG) get the
+	// same guidance from af-OWNED files under af's own config dir, are
+	// unaffected by this key, and stay on unconditionally — nothing of af's
+	// escapes into the user's config on those paths.
+	//
+	// With it false, af additionally removes the marker-stamped file a PRIOR af
+	// version wrote, so the edit does not outlive the decision not to make it.
+	// A file at that path without af's marker is the user's and is never
+	// touched either way.
+	//
+	// Global-only, like auto_yes and root_agents: what af writes into your home
+	// directory must not be settable by cloning a repo.
+	GlobalAgentSkills bool `json:"global_agent_skills" toml:"global_agent_skills"`
 	// LimitRetryInterval is the fixed fallback cadence the auto-resume scheduler
 	// uses ONLY when a usage-limit banner carried no parseable reset time (#1146
 	// PR3): a Go duration string ("30m", "1h"). Empty or a non-positive duration
@@ -409,6 +432,7 @@ func DefaultConfig() *Config {
 		ListenAddr:           defaultListenAddr,
 		DaemonPollInterval:   defaultDaemonPollInterval,
 		LimitAutoResume:      false,
+		GlobalAgentSkills:    false,
 		LimitRetryInterval:   defaultLimitRetryInterval,
 		LogMaxSizeMB:         log.DefaultMaxSizeMB,
 		LogMaxBackups:        log.DefaultMaxBackups,

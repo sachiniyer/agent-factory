@@ -114,7 +114,11 @@ var inRepoGlobalOnlyKeys = map[string]bool{
 	"cors_allowed_origins": true,
 	"daemon_poll_interval": true,
 	"detach_keys":          true,
-	"listen_addr":          true,
+	// What af writes into your HOME directory is a user/host decision; a
+	// cloned repo must never be able to opt you into af editing your global
+	// codex/gemini/amp config (#1977).
+	"global_agent_skills": true,
+	"listen_addr":         true,
 	// The [keys] keymap is a user/host preference: a cloned repo must never
 	// be able to rebind someone's terminal (#1026).
 	"keys":                 true,
