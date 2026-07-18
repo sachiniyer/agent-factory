@@ -137,8 +137,14 @@ function decide(pr, now) {
     );
   }
 
+  // The DECISION compares exact milliseconds; hoursBetween is for the log line
+  // only. Comparing the rounded hours closed up to ~3 minutes early: a change
+  // request aged [11.95h, 12h) rounds to 12.0, which is not < 12, so the grace
+  // window ended before it was actually over (#2027). Never a wrong-target close,
+  // but the threshold we publish should be the threshold we enforce.
+  const ageMs = nowMs - reviewMs;
   const ageHours = hoursBetween(reviewMs, nowMs);
-  if (ageHours < STALE_HOURS) {
+  if (ageMs < STALE_HOURS * 36e5) {
     return skip(`change request only ${ageHours}h old (< ${STALE_HOURS}h grace)`);
   }
 
@@ -200,9 +206,15 @@ function toMs(value) {
   return Number.isNaN(ms) ? NaN : ms;
 }
 
-// Whole-tenths of an hour, for readable log/reason lines.
+// Whole-tenths of an hour, for readable log/reason lines. It never decides
+// anything — the grace check in decide() compares exact milliseconds (#2027).
+//
+// Truncates rather than rounds so the number can never OVER-report an age.
+// Rounding made the grace message argue with itself: at 11h57m it read "only 12h
+// old (< 12h grace)", quoting an age that is not less than the threshold it was
+// granting grace against. Truncation keeps this a lower bound on the real age.
 function hoursBetween(fromMs, toMsValue) {
-  return Math.round(((toMsValue - fromMs) / 36e5) * 10) / 10;
+  return Math.floor(((toMsValue - fromMs) / 36e5) * 10) / 10;
 }
 
 /**
