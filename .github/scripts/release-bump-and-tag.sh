@@ -42,6 +42,31 @@ git add main.go
 if ! git diff --cached --quiet; then
 	git commit -m "chore: release v${NEW_VERSION}"
 fi
+
+# Push the bump to master, tolerating a master that moved during the ~4-minute
+# build (#1927). The auto-gate squash-merges CI-green PRs continuously, so a
+# plain push races that traffic and dies non-fast-forward, throwing away four
+# good builds. On a rejection, rebase the one-line bump onto the new tip and
+# retry, bounded. A rebase drops the bump as already-applied when a prior run
+# already landed it (patch-id), so the re-run converges to a clean no-op push.
+# A genuine conflict — only a rival version bump would touch this line — fails
+# the rebase loudly here instead of force-pushing over another release.
+MAX_ATTEMPTS="${RELEASE_PUSH_MAX_ATTEMPTS:-5}"
+attempt=1
+until git push origin HEAD:master; do
+	if [ "$attempt" -ge "$MAX_ATTEMPTS" ]; then
+		echo "::error::Version bump push rejected after ${MAX_ATTEMPTS} attempts (master kept moving)"
+		exit 1
+	fi
+	echo "Push rejected — master advanced during the build; rebasing onto origin/master and retrying (attempt ${attempt}/${MAX_ATTEMPTS})…"
+	git fetch origin master
+	git rebase FETCH_HEAD
+	attempt=$((attempt + 1))
+done
+
+# Tag the commit that actually landed on master. A rebase above may have
+# rewritten HEAD, so the tag is created only after the push succeeds — and
+# pushed after master, never before, so a failure at worst leaves a bump commit
+# with no tag (a clean, re-runnable state) and never a tag with no release.
 git tag "v${NEW_VERSION}"
-git push origin HEAD:master
 git push origin "v${NEW_VERSION}"
