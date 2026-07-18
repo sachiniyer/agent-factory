@@ -35,6 +35,7 @@ import {
   removeTask,
   renameTab,
   reorderTab,
+  restoreSession,
   sendPrompt,
   storeToken,
   triggerTask,
@@ -584,8 +585,10 @@ function openSendPrompt(): void {
   );
 }
 
-/** Opens the kill/archive confirm modal for the selected session. */
-function openConfirm(action: "kill" | "archive"): void {
+/** Opens the kill/archive/restore confirm modal for the selected session. Restore
+ *  is the reverse of archive (#1932): the archived row's Archive button becomes a
+ *  Restore button, and confirming it POSTs RestoreSession. */
+function openConfirm(action: "kill" | "archive" | "restore"): void {
   const sel = selectedSession();
   if (!sel) {
     return;
@@ -602,8 +605,14 @@ function openConfirm(action: "kill" | "archive"): void {
         }
         const m = modal;
         m.setBusy(true);
+        // Restore resolves the target by TITLE only — its daemon request has no id
+        // field (see restoreSession), unlike kill/archive which key by sel.id.
         const run =
-          action === "kill" ? killSession(sel.id, sel.title, tok) : archiveSession(sel.id, sel.title, tok);
+          action === "kill"
+            ? killSession(sel.id, sel.title, tok)
+            : action === "archive"
+              ? archiveSession(sel.id, sel.title, tok)
+              : restoreSession(sel.title, tok);
         void run.then(closeModal).catch((e) => {
           m.setBusy(false);
           m.setError(describeError(e));
@@ -1150,6 +1159,7 @@ const actions = {
   sendPrompt: openSendPrompt,
   kill: () => openConfirm("kill"),
   archive: () => openConfirm("archive"),
+  restore: () => openConfirm("restore"),
   switchTab,
   openTab,
   newTab: createSessionTab,

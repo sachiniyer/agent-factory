@@ -139,6 +139,9 @@ export interface Actions {
   kill(): void;
   /** Opens the archive-confirm modal for the current selection. */
   archive(): void;
+  /** Opens the restore-confirm modal for the current selection (an archived / Lost
+   *  / Dead session): the reverse of archive (#1932). */
+  restore(): void;
   /** Switches the selected session's active tab WITHOUT attaching — the keyboard
    *  stays in rail nav mode (the 1-9 keys, mirroring the TUI). */
   switchTab(index: number): void;
@@ -546,6 +549,13 @@ export class AppShell {
   // Header text nodes for the selected pane, (re)created per selection.
   private headTitle: HTMLElement | null = null;
   private headMeta: HTMLElement | null = null;
+  // The archive/restore lifecycle button and the archived-ness it currently shows
+  // (#1932). The header STRUCTURE is only rebuilt on a selection change, but a session
+  // can flip archived⇄live WITHOUT one (archiving or restoring the row that is already
+  // selected — the common path), so patchMainHead swaps this button's verb in place,
+  // exactly as it patches the header text. null when nothing is selected.
+  private lifecycleBtn: HTMLElement | null = null;
+  private lifecycleArchived = false;
   // The tab bar for the selected session, (re)created per selection and patched in
   // place when the tab list or active tab changes (#1592 Phase 5 PR7). null when
   // nothing is selected (the empty state has no tabs).
@@ -1325,6 +1335,7 @@ export class AppShell {
     if (!selected) {
       this.headTitle = null;
       this.headMeta = null;
+      this.lifecycleBtn = null;
       this.tabBar = null;
       // Detaches the terminal host if it was mounted; index.ts disposes the terminal.
       this.main.className = "af-main af-main-empty";
@@ -1342,11 +1353,25 @@ export class AppShell {
     // behind a confirm. They act on the current selection; index.ts reads it.
     const promptBtn = h("button", { type: "button", class: "af-ghost af-term-action" }, "Prompt");
     promptBtn.addEventListener("click", () => this.actions.sendPrompt());
-    const archiveBtn = h("button", { type: "button", class: "af-ghost af-term-action" }, "Archive");
-    archiveBtn.addEventListener("click", () => this.actions.archive());
+    // Archive and restore are reverse verbs on the same slot: an archived session
+    // can't be archived again (the daemon rejects it, mirroring the TUI's `a`
+    // no-op), and restore is the only way back — so an archived row shows Restore
+    // where a live row shows Archive (#1932). This makes the "you can restore it
+    // later" copy the archive confirm prints actually reachable from the web. The
+    // click handler reads this.lifecycleArchived (not a render-time capture) so
+    // patchMainHead can flip the verb in place when the row is archived/restored
+    // while it stays selected, without a header rebuild.
+    this.lifecycleArchived = isArchived(selected);
+    const lifecycleBtn = h(
+      "button",
+      { type: "button", class: "af-ghost af-term-action" },
+      this.lifecycleArchived ? "Restore" : "Archive",
+    );
+    lifecycleBtn.addEventListener("click", () => (this.lifecycleArchived ? this.actions.restore() : this.actions.archive()));
+    this.lifecycleBtn = lifecycleBtn;
     const killBtn = h("button", { type: "button", class: "af-danger af-term-action" }, "Kill");
     killBtn.addEventListener("click", () => this.actions.kill());
-    const actions = h("div", { class: "af-term-actions" }, promptBtn, archiveBtn, killBtn);
+    const actions = h("div", { class: "af-term-actions" }, promptBtn, lifecycleBtn, killBtn);
 
     const head = h("div", { class: "af-term-head" }, titleBox, actions);
 
@@ -1610,6 +1635,16 @@ export class AppShell {
     }
     this.headMeta.textContent = parts.join(" · ");
     this.headMeta.className = `af-term-meta af-term-${state.termStatus}`;
+
+    // Flip the lifecycle button's verb if the selected row was archived or restored
+    // without a selection change (renderMain, which builds the button, runs only on a
+    // selection change — #1932). Archiving the currently-selected session must turn
+    // its Archive button into Restore live, and a restore must turn it back.
+    const nowArchived = isArchived(selected);
+    if (this.lifecycleBtn && nowArchived !== this.lifecycleArchived) {
+      this.lifecycleArchived = nowArchived;
+      this.lifecycleBtn.textContent = nowArchived ? "Restore" : "Archive";
+    }
   }
 }
 

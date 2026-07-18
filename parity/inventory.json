@@ -270,7 +270,7 @@
         "pointer": "api/sessions.go:741 sessionsArchiveCmd"
       },
       "verdict": "parity",
-      "notes": "Reachable everywhere — but see session.restore: on the web this is a one-way door."
+      "notes": "Reachable everywhere. Restorable everywhere too as of #1932 — see session.restore, which closed the web's archive-only one-way door."
     },
     {
       "id": "session.restore",
@@ -280,16 +280,15 @@
         "pointer": "keys/keys.go:148 (r) -> app/session_control.go:172"
       },
       "web": {
-        "status": "no",
-        "pointer": "no RestoreSession/RestoreArchived call anywhere in web/src (grep-verified)"
+        "status": "yes",
+        "pointer": "web/src/api.ts:330 restoreSession -> RestoreSession; the pane header's Archive button becomes Restore on an archived row (web/src/ui.ts renderMain/patchMainHead)"
       },
       "cli": {
         "status": "yes",
         "pointer": "api/sessions.go:823 sessionsRestoreCmd"
       },
-      "verdict": "real-gap",
-      "issue": "#1932",
-      "notes": "Highest-impact gap found. The web can archive but not restore, so archive is a reachable dead end. Worse, the web already handles the session.restored event (web/src/sessions.ts:85) and its own copy instructs users to do the thing it cannot do: modals.ts:261 'You can restore it later.', modals.ts:292 'restore any of them to bring the project back', split.ts:868 'Restore it to open VS Code.'"
+      "verdict": "parity",
+      "notes": "Reachable everywhere as of #1932, which closed the archive-only one-way door: the web POSTs RestoreSession by title (no id field on the request, unlike archive/kill) and already handled the session.restored resync (web/src/sessions.ts:85). Since RestoreSession also recovers Lost/Dead rows, this gave the web its Lost-recovery off-ramp too."
     },
     {
       "id": "session.limit-retry",
@@ -1379,6 +1378,7 @@
       "RemoveTask": "task.remove",
       "RenameTab": "session.tab.rename",
       "ReorderTab": "session.tab.reorder",
+      "RestoreSession": "session.restore",
       "SendPrompt": "session.send-prompt",
       "SetConfigValue": "config.write",
       "Snapshot": "session.list",

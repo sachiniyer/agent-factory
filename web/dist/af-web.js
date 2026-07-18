@@ -6250,6 +6250,9 @@ async function killSession(id, title, token2) {
 async function archiveSession(id, title, token2) {
   await af("ArchiveSession", { id, title, repo_id: "" }, token2);
 }
+async function restoreSession(title, token2) {
+  await af("RestoreSession", { title, repo_id: "" }, token2);
+}
 async function deleteProject(root2, token2) {
   return af("DeleteProject", { repo_path: root2, repo_id: "" }, token2);
 }
@@ -6600,20 +6603,33 @@ function promptModal(sessionTitle, callbacks) {
   return handle;
 }
 function confirmModal(opts) {
-  const isKill = opts.action === "kill";
+  const copy = {
+    kill: {
+      title: `Kill ${opts.sessionTitle}?`,
+      confirmLabel: "Kill",
+      confirmClass: "af-danger",
+      body: "This permanently destroys the session and prunes its branch. This can't be undone."
+    },
+    archive: {
+      title: `Archive ${opts.sessionTitle}?`,
+      confirmLabel: "Archive",
+      confirmClass: "af-primary",
+      body: "This tears down the session's terminal and moves its worktree to the archive. You can restore it later."
+    },
+    restore: {
+      title: `Restore ${opts.sessionTitle}?`,
+      confirmLabel: "Restore",
+      confirmClass: "af-primary",
+      body: "This moves the session's worktree back next to its repo and re-spawns the agent, returning it to the live rail."
+    }
+  }[opts.action];
   const { handle, body } = modalChrome({
-    title: isKill ? `Kill ${opts.sessionTitle}?` : `Archive ${opts.sessionTitle}?`,
-    confirmLabel: isKill ? "Kill" : "Archive",
-    confirmClass: isKill ? "af-danger" : "af-primary",
+    title: copy.title,
+    confirmLabel: copy.confirmLabel,
+    confirmClass: copy.confirmClass,
     onCancel: opts.onCancel
   });
-  body.append(
-    h(
-      "p",
-      { class: "af-modal-text" },
-      isKill ? "This permanently destroys the session and prunes its branch. This can't be undone." : "This tears down the session's terminal and moves its worktree to the archive. You can restore it later."
-    )
-  );
+  body.append(h("p", { class: "af-modal-text" }, copy.body));
   const card = handle.el.firstElementChild;
   asForm(card, () => {
     handle.setError(null);
@@ -9961,6 +9977,13 @@ var AppShell = class {
   // Header text nodes for the selected pane, (re)created per selection.
   headTitle = null;
   headMeta = null;
+  // The archive/restore lifecycle button and the archived-ness it currently shows
+  // (#1932). The header STRUCTURE is only rebuilt on a selection change, but a session
+  // can flip archived⇄live WITHOUT one (archiving or restoring the row that is already
+  // selected — the common path), so patchMainHead swaps this button's verb in place,
+  // exactly as it patches the header text. null when nothing is selected.
+  lifecycleBtn = null;
+  lifecycleArchived = false;
   // The tab bar for the selected session, (re)created per selection and patched in
   // place when the tab list or active tab changes (#1592 Phase 5 PR7). null when
   // nothing is selected (the empty state has no tabs).
@@ -10433,6 +10456,7 @@ var AppShell = class {
     if (!selected) {
       this.headTitle = null;
       this.headMeta = null;
+      this.lifecycleBtn = null;
       this.tabBar = null;
       this.main.className = "af-main af-main-empty";
       this.main.replaceChildren(
@@ -10446,11 +10470,17 @@ var AppShell = class {
     const titleBox = h2("div", { class: "af-term-head-main" }, this.headTitle, this.headMeta);
     const promptBtn = h2("button", { type: "button", class: "af-ghost af-term-action" }, "Prompt");
     promptBtn.addEventListener("click", () => this.actions.sendPrompt());
-    const archiveBtn = h2("button", { type: "button", class: "af-ghost af-term-action" }, "Archive");
-    archiveBtn.addEventListener("click", () => this.actions.archive());
+    this.lifecycleArchived = isArchived(selected);
+    const lifecycleBtn = h2(
+      "button",
+      { type: "button", class: "af-ghost af-term-action" },
+      this.lifecycleArchived ? "Restore" : "Archive"
+    );
+    lifecycleBtn.addEventListener("click", () => this.lifecycleArchived ? this.actions.restore() : this.actions.archive());
+    this.lifecycleBtn = lifecycleBtn;
     const killBtn = h2("button", { type: "button", class: "af-danger af-term-action" }, "Kill");
     killBtn.addEventListener("click", () => this.actions.kill());
-    const actions2 = h2("div", { class: "af-term-actions" }, promptBtn, archiveBtn, killBtn);
+    const actions2 = h2("div", { class: "af-term-actions" }, promptBtn, lifecycleBtn, killBtn);
     const head = h2("div", { class: "af-term-head" }, titleBox, actions2);
     this.tabBar = h2("div", { class: "af-tabbar" });
     this.tabBar.setAttribute("role", "tablist");
@@ -10641,6 +10671,11 @@ var AppShell = class {
     }
     this.headMeta.textContent = parts.join(" \xB7 ");
     this.headMeta.className = `af-term-meta af-term-${state.termStatus}`;
+    const nowArchived = isArchived(selected);
+    if (this.lifecycleBtn && nowArchived !== this.lifecycleArchived) {
+      this.lifecycleArchived = nowArchived;
+      this.lifecycleBtn.textContent = nowArchived ? "Restore" : "Archive";
+    }
   }
 };
 var APP_NAME = "Agent Factory";
@@ -11097,7 +11132,7 @@ function openConfirm(action) {
         }
         const m = modal;
         m.setBusy(true);
-        const run = action === "kill" ? killSession(sel.id, sel.title, tok) : archiveSession(sel.id, sel.title, tok);
+        const run = action === "kill" ? killSession(sel.id, sel.title, tok) : action === "archive" ? archiveSession(sel.id, sel.title, tok) : restoreSession(sel.title, tok);
         void run.then(closeModal).catch((e) => {
           m.setBusy(false);
           m.setError(describeError(e));
@@ -11376,6 +11411,7 @@ var actions = {
   sendPrompt: openSendPrompt,
   kill: () => openConfirm("kill"),
   archive: () => openConfirm("archive"),
+  restore: () => openConfirm("restore"),
   switchTab,
   openTab,
   newTab: createSessionTab,
