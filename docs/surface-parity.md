@@ -135,25 +135,30 @@ asserted a tab was absent while the user could see it on screen — and left the
 to discover the mapping. One concept, two representations: the same disease as
 #1972 and #1970.
 
-The rule now lives beside the `Tab` type, not in the TUI, because **a label a
-user can read is an identifier they will type**:
+The rule lives beside the `Tab` type, not in the TUI, so "what a user reads"
+sits next to "what a user types" — and the two are deliberately allowed to
+differ ([#1986](https://github.com/sachiniyer/agent-factory/issues/1986)):
 
-- `session.TabLabel` — the one definition of what a user SEES. `ui/tree` delegates
-  to it, so display cannot drift from what is accepted.
-- `session.TabMatches` — accepts the canonical name **or** the label. Additive:
-  `--name shell` keeps working for every script, nothing is renamed, no display
-  changes.
+- `session.TabLabel` — the one definition of what a user SEES. Presentation
+  only: agent and shell tabs render fixed labels (`Agent`/`Terminal`) that are
+  not their names (`agent`/`shell`). `ui/tree` delegates to it, so display has a
+  single source.
+- `session.TabMatches` — resolves on the canonical **name alone**. The label is
+  never an identifier: accepting it would make two strings address one tab, the
+  ambiguity #1929/#1904 removed from the tab surface.
 - `session.TabIdentifiers` — renders a tab as both spellings, so *"no tab named
-  X"* lists the valid options instead of asserting an absence. That is worth more
-  than the alias: it still fires for a real typo, but turns a dead end into a fix.
+  X"* lists the valid options with their labels. This is the whole mechanism
+  now: the label never resolves, but a user who read `Terminal` off the bar is
+  told the real name `shell` rather than left at a dead end.
 
-The label is an **input** spelling only — the resolver canonicalises before
-returning, or `tab-delete --name Terminal` would answer `{"name":"Terminal"}`, a
-string that is not any tab's identity.
+[#1937](https://github.com/sachiniyer/agent-factory/issues/1937) first closed
+the gap by accepting the label as an alias; #1986 reversed that so the label
+carries no identity, keeping the #1984 symptom from returning through
+discoverability rather than a second handle.
 
-`TestDisplayedTabIdentifiersAreAccepted` enforces the invariant for every
-`TabKind`, including kinds with no UI yet, so a new kind cannot ship a label its
-own CLI rejects.
+`TestLabelIsNeverAnAcceptedIdentifier` enforces the invariant for every
+`TabKind`, including kinds with no UI yet: the name resolves, the label does
+not, and where the two differ the label is still named in the error.
 
 ## The CLI-vs-CLI axis: argument shape
 

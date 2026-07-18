@@ -592,17 +592,23 @@ func TestRPCClients_CloseTab_RoundTrip(t *testing.T) {
 	// set_prinfo_test.go.
 }
 
-// TestCloseTab_AcceptsTheLabelTheTUIDisplays is #1984, reported by hand:
+// TestCloseTab_RefusesTheDisplayedLabelButNamesTheTab is the #1986 flip of the
+// original #1984 report:
 //
 //	$ af sessions tab-delete alpha --name Terminal
-//	session "alpha" has no tab named "Terminal"      # the tab bar SAYS "Terminal"
+//	session "alpha" has no tab named "Terminal"; its tabs are: … "shell" (shown as "Terminal")
 //	$ af sessions tab-delete alpha --name shell
 //	# works
 //
-// The TUI renders a LABEL and CloseTab demanded the canonical NAME, so a user
-// read "Terminal" off the screen, typed it, and was told a tab they could see
-// did not exist. The label is now accepted as an alias.
-func TestCloseTab_AcceptsTheLabelTheTUIDisplays(t *testing.T) {
+// #1937 first closed the #1984 gap by ACCEPTING "Terminal" as an alias for
+// "shell". #1986 reverses that: the display label is presentation-only and must
+// never resolve, because two strings addressing one tab is the ambiguity
+// #1929/#1904 removed from the tab surface. The #1984 symptom (a user typing a
+// label they read off the bar) is kept from returning not by accepting the
+// label but by NAMING the real handle in the miss error — so the user learns to
+// type "shell". This is the daemon-level lock on that contract at the shared
+// resolver every destructive tab verb goes through.
+func TestCloseTab_RefusesTheDisplayedLabelButNamesTheTab(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 	repoPath := setupControlRepo(t)
 	repo, err := config.RepoFromPath(repoPath)
@@ -626,12 +632,27 @@ func TestCloseTab_AcceptsTheLabelTheTUIDisplays(t *testing.T) {
 			shell.Name, session.TabLabel(shell), "shell", "Terminal")
 	}
 
-	name, err := manager.CloseTab(CloseTabRequest{Title: title, RepoID: repo.ID, TabName: "Terminal"})
-	if err != nil {
-		t.Fatalf("CloseTab by the displayed label %q failed: %v\n"+
-			"This is the #1984 report: the tab bar shows \"Terminal\" and the user typed it.", "Terminal", err)
+	// The displayed label must NOT resolve — the tab stays untouched.
+	_, err = manager.CloseTab(CloseTabRequest{Title: title, RepoID: repo.ID, TabName: "Terminal"})
+	if err == nil {
+		t.Fatalf("CloseTab by the displayed label %q succeeded; the label is presentation-only "+
+			"and must never resolve (#1986).", "Terminal")
 	}
-	// The daemon reports the CANONICAL name back, not the alias the user typed.
+	// …but the error must lead the user to the real handle, not assert an absence
+	// they can see is false. It names "shell" AND the label they typed.
+	if !strings.Contains(err.Error(), `"shell" (shown as "Terminal")`) {
+		t.Fatalf("CloseTab miss error = %q; it must name the real handle so a user who read "+
+			"\"Terminal\" learns to type \"shell\" (#1984 discoverability).", err.Error())
+	}
+	if inst.TabCount() != 2 {
+		t.Fatalf("expected 2 tabs (agent+shell) still present after a refused close, got %d", inst.TabCount())
+	}
+
+	// And the canonical name still closes it.
+	name, err := manager.CloseTab(CloseTabRequest{Title: title, RepoID: repo.ID, TabName: "shell"})
+	if err != nil {
+		t.Fatalf("CloseTab by the canonical name %q failed: %v", "shell", err)
+	}
 	if name != "shell" {
 		t.Fatalf("closed tab name = %q, want the canonical %q", name, "shell")
 	}
@@ -640,8 +661,8 @@ func TestCloseTab_AcceptsTheLabelTheTUIDisplays(t *testing.T) {
 	}
 }
 
-// TestCloseTab_StillAcceptsTheCanonicalName pins that the label alias is
-// ADDITIVE: every script already passing "shell" must keep working.
+// TestCloseTab_StillAcceptsTheCanonicalName pins that the canonical name keeps
+// working: every script already passing "shell" must be unaffected by #1986.
 func TestCloseTab_StillAcceptsTheCanonicalName(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 	repoPath := setupControlRepo(t)
