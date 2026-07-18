@@ -1,12 +1,14 @@
 package main
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 // These tests exercise the release version-computation scripts used by the
@@ -363,6 +365,116 @@ func TestReleaseBumpIdempotentWhenBumpAlreadyLanded(t *testing.T) {
 	if tag, tip := gitOutEnv(t, origin, env, "rev-list", "-n", "1", "v1.0.1"),
 		gitOutEnv(t, origin, env, "rev-parse", "master"); tag != tip {
 		t.Fatalf("tag v1.0.1 (%s) does not point at master tip (%s)", tag, tip)
+	}
+}
+
+// runReleaseScript runs release-bump-and-tag.sh under a hard timeout so a
+// regressed unbounded retry loop is killed and reported rather than hanging the
+// whole suite. Returns combined output, whether the deadline was hit, and the
+// run error.
+func runReleaseScript(t *testing.T, dir string, env []string, version string) (out string, timedOut bool, err error) {
+	t.Helper()
+	script := filepath.Join(repoRoot(t), ".github", "scripts", "release-bump-and-tag.sh")
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, script, version)
+	cmd.Dir = dir
+	cmd.Env = env
+	b, runErr := cmd.CombinedOutput()
+	return string(b), ctx.Err() == context.DeadlineExceeded, runErr
+}
+
+// TestReleaseBumpBoundsRetriesOnPersistentReject locks the retry BOUND: with a
+// remote that rejects every push to master (a racer that never lets the push
+// through) and RELEASE_PUSH_MAX_ATTEMPTS=1, the script must give up non-zero —
+// not spin forever — and must leave the remote pristine (no bump on master, no
+// tag). This fails CI if a future edit drops the MAX_ATTEMPTS guard and
+// reintroduces an unbounded loop (the run would hang and hit the timeout).
+func TestReleaseBumpBoundsRetriesOnPersistentReject(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("release-bump-and-tag.sh is POSIX sh; not run on Windows")
+	}
+	base := t.TempDir()
+	home := filepath.Join(base, "home")
+	env := isolatedGitEnv(home)
+
+	origin, work := seedReleaseRemote(t, base, env, "1.0.0")
+
+	// A pre-receive hook that declines every push stands in for a racer that
+	// keeps the master push rejecting no matter how often we rebase and retry.
+	writeExecutable(t, filepath.Join(origin, "hooks", "pre-receive"),
+		"#!/bin/sh\necho 'push rejected by test (persistent racer)' >&2\nexit 1\n")
+	masterBefore := gitOutEnv(t, origin, env, "rev-parse", "master")
+
+	out, timedOut, err := runReleaseScript(t, work,
+		isolatedGitEnv(home, "RELEASE_PUSH_MAX_ATTEMPTS=1"), "1.0.1")
+	if timedOut {
+		t.Fatalf("script did not terminate — the retry loop is unbounded?\n%s", out)
+	}
+	if err == nil {
+		t.Fatalf("expected non-zero exit when the push keeps rejecting; got success\n%s", out)
+	}
+
+	// The remote stayed pristine: master unmoved, no bump commit, no tag.
+	if tip := gitOutEnv(t, origin, env, "rev-parse", "master"); tip != masterBefore {
+		t.Fatalf("master moved (%s → %s) despite every push being rejected", masterBefore, tip)
+	}
+	if log := gitOutEnv(t, origin, env, "log", "--format=%s", "master"); strings.Contains(log, "chore: release") {
+		t.Fatalf("a bump commit reached master despite exhaustion:\n%s", log)
+	}
+	if tags := gitOutEnv(t, origin, env, "tag", "-l", "v*"); tags != "" {
+		t.Fatalf("a tag was pushed despite the push never landing: %q", tags)
+	}
+}
+
+// TestReleaseBumpFailsLoudlyOnGenuineConflict locks the fail-loud behavior when
+// the rebase genuinely conflicts — a rival commit rewrote main.go's version
+// line, so the one-line bump cannot replay. The script must abort non-zero and
+// must NOT clobber the rival's commit (no force-push) or push a tag. This fails
+// CI if someone "hardens" the loop into a silent `git push --force` over
+// another release.
+func TestReleaseBumpFailsLoudlyOnGenuineConflict(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("release-bump-and-tag.sh is POSIX sh; not run on Windows")
+	}
+	base := t.TempDir()
+	home := filepath.Join(base, "home")
+	env := isolatedGitEnv(home)
+
+	origin, work := seedReleaseRemote(t, base, env, "1.0.0")
+
+	// A rival release lands on master mid-build and rewrites the SAME version
+	// line to a different value, so our bump's rebase must conflict.
+	rival := filepath.Join(base, "rival")
+	runGitEnv(t, base, env, "clone", origin, rival)
+	writeFile(t, filepath.Join(rival, "main.go"),
+		"package main\n\nconst (\n\tversion = \"2.0.0\"\n)\n")
+	runGitEnv(t, rival, env, "add", "main.go")
+	runGitEnv(t, rival, env, "commit", "-m", "chore: release v2.0.0")
+	runGitEnv(t, rival, env, "push", "origin", "master")
+	rivalTip := gitOutEnv(t, origin, env, "rev-parse", "master")
+
+	out, timedOut, err := runReleaseScript(t, work, env, "1.0.1")
+	if timedOut {
+		t.Fatalf("script hung on a conflict instead of failing fast\n%s", out)
+	}
+	if err == nil {
+		t.Fatalf("expected non-zero exit on a genuine version-line conflict; got success\n%s", out)
+	}
+
+	// The rival was preserved — master was neither overwritten nor advanced by
+	// our bump, and no tag was pushed.
+	if tip := gitOutEnv(t, origin, env, "rev-parse", "master"); tip != rivalTip {
+		t.Fatalf("master was force-overwritten: %s (rival tip was %s)", tip, rivalTip)
+	}
+	if got := gitOutEnv(t, origin, env, "show", "master:main.go"); !strings.Contains(got, `version = "2.0.0"`) {
+		t.Fatalf("rival's version was clobbered:\n%s", got)
+	}
+	if log := gitOutEnv(t, origin, env, "log", "--format=%s", "master"); strings.Contains(log, "chore: release v1.0.1") {
+		t.Fatalf("our bump commit reached master despite the conflict:\n%s", log)
+	}
+	if tags := gitOutEnv(t, origin, env, "tag", "-l", "v*"); tags != "" {
+		t.Fatalf("a tag was pushed despite the conflict: %q", tags)
 	}
 }
 
