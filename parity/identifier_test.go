@@ -1,12 +1,13 @@
 package parity
 
-// Identifier parity: is the string we SHOW the string we ACCEPT?
+// Identifier parity: the string we SHOW is presentation-only and never resolves;
+// the string we ACCEPT is discoverable from what we show.
 //
 // A fourth dimension, and the one that is invisible until someone types it. The
 // others ask whether a surface has a verb, its options, or the right values.
-// This asks something narrower and nastier: when a surface DISPLAYS an
-// identifier, does every surface that TAKES that identifier accept the string
-// the user just read?
+// This asks something narrower and nastier: when a surface DISPLAYS a label and
+// a user types it, does the tool lead them to the real handle rather than assert
+// a tab they can see does not exist?
 //
 // It was found by hand, like the others (#1984):
 //
@@ -21,12 +22,23 @@ package parity
 // disease as #1972 (create --name vs a positional <title>) and #1970 (the web's
 // copy of the agent enum).
 //
-// The invariant is one line: anything a user can read off a surface must be
-// accepted by the surfaces that take it. This test enforces it for every tab
-// kind, including kinds nobody has shipped a UI for yet, so a new TabKind cannot
-// introduce a label its own CLI rejects.
+// #1937 first closed the gap by ACCEPTING the label as an alias. #1986 undid that
+// choice deliberately: the label is presentation-only and must never be an
+// identifier, because two strings addressing one tab is the ambiguity #1929/#1904
+// spent a PR removing from the tab surface. So the invariant flips. It is no
+// longer "the label must be accepted"; it is two clauses that together keep the
+// #1984 symptom from returning WITHOUT the ambiguity:
+//
+//  1. Name is the SOLE handle — the label never resolves (session.TabMatches).
+//  2. The label stays DISCOVERABLE — when it differs from the name, a "no tab
+//     named …" error names the real handle (session.TabIdentifiers), so a user
+//     who read "Terminal" learns to type "shell" rather than hitting a dead end.
+//
+// Enforced for every tab kind, including kinds nobody has shipped a UI for yet,
+// so a new TabKind cannot introduce a label that strands the user who reads it.
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/sachiniyer/agent-factory/session"
@@ -46,31 +58,43 @@ var tabKindsUnderAudit = []struct {
 	{session.TabKindVSCode, "editor"},
 }
 
-// TestDisplayedTabIdentifiersAreAccepted is the invariant: every label a surface
-// shows must be accepted by the surfaces that take a tab name.
-func TestDisplayedTabIdentifiersAreAccepted(t *testing.T) {
+// TestLabelIsNeverAnAcceptedIdentifier is the #1986 invariant: the name is the
+// sole handle, the label never resolves, and where the two differ the label is
+// still discoverable through the miss error.
+func TestLabelIsNeverAnAcceptedIdentifier(t *testing.T) {
 	for _, c := range tabKindsUnderAudit {
 		tab := &session.Tab{Name: c.name, Kind: c.kind}
 		label := session.TabLabel(tab)
 
 		if label == "" {
-			t.Errorf("kind %v renders an EMPTY label — a user can read nothing to type", c.kind)
+			t.Errorf("kind %v renders an EMPTY label — a user can read nothing off the screen", c.kind)
 			continue
 		}
-		if !session.TabMatches(tab, label) {
-			t.Errorf("kind %v is DISPLAYED as %q but %q is not accepted as its identifier.\n\n"+
-				"A user reads the label off the screen and types it; if only %q works, the "+
-				"error tells them a tab they can see does not exist (#1984). Accept the label "+
-				"as an alias in session.TabMatches — additively, never by renaming the tab or "+
-				"changing what the UI shows.", c.kind, label, label, c.name)
-		}
-		// The canonical name must keep working: the alias is additive, and every
-		// script passing "shell" today must be unaffected.
+		// 1. The canonical name is the sole handle and must always resolve.
 		if !session.TabMatches(tab, c.name) {
-			t.Errorf("kind %v no longer accepts its canonical name %q — the label alias must "+
-				"ADD a spelling, never replace one. Scripts depend on this.", c.kind, c.name)
+			t.Errorf("kind %v does not accept its canonical name %q — Name is the one handle a "+
+				"user types, and every tab verb resolves against it.", c.kind, c.name)
 		}
-		// Not blind: a matcher that accepts everything would satisfy the above.
+		// The label is presentation-only and must NOT be an identifier. This only
+		// bites where the label diverges from the name (agent/shell); for kinds
+		// whose label IS the name (process/web/vscode) it resolves because it is
+		// the name, not because the label is accepted, so skip those.
+		if label != c.name {
+			if session.TabMatches(tab, label) {
+				t.Errorf("kind %v is DISPLAYED as %q but that label is ACCEPTED as an identifier.\n\n"+
+					"The label is presentation-only (#1986): accepting it makes two strings address "+
+					"one tab, the ambiguity #1929/#1904 removed. Resolve on Name alone in "+
+					"session.TabMatches; let the miss error name the real handle instead.", c.kind, label)
+			}
+			// 2. …but the label must not be a dead end: the error the miss produces
+			//    must name it, so the user who read it can find the name to type.
+			if ids := session.TabIdentifiers(tab); !strings.Contains(ids, label) {
+				t.Errorf("kind %v is shown as %q, which does not resolve, yet TabIdentifiers(%q) = %s "+
+					"does not surface %q — a user who read the label off the bar is stranded with no "+
+					"path to the real name (#1984).", c.kind, label, c.name, ids, label)
+			}
+		}
+		// Not blind: a matcher that accepts everything would satisfy clause 1.
 		if session.TabMatches(tab, "definitely-not-a-tab-name") {
 			t.Errorf("kind %v matches an arbitrary token — TabMatches is accepting anything, "+
 				"so the assertions above prove nothing.", c.kind)
@@ -78,14 +102,15 @@ func TestDisplayedTabIdentifiersAreAccepted(t *testing.T) {
 	}
 }
 
-// TestTabIdentifiersNameTheAlternatives pins the other half of #1984, which is
-// worth more than the alias: the error a real typo produces must name the tabs
-// that exist rather than assert an absence.
+// TestTabIdentifiersNameTheAlternatives pins the discoverability half of #1984,
+// which is now the whole mechanism (there is no alias): the error a real typo —
+// or a label a user typed — produces must name the tabs that exist rather than
+// assert an absence.
 func TestTabIdentifiersNameTheAlternatives(t *testing.T) {
 	shell := &session.Tab{Name: "shell", Kind: session.TabKindShell}
 	got := session.TabIdentifiers(shell)
 	// Both spellings, because the whole point is that the user knows only one.
-	if !contains([]string{got}, `"shell" (shown as "Terminal")`) {
+	if got != `"shell" (shown as "Terminal")` {
 		t.Errorf("TabIdentifiers(shell) = %s; it must give BOTH the name and the label when "+
 			"they differ, since a user who saw \"Terminal\" cannot guess \"shell\" from an "+
 			"error that only says \"shell\".", got)
@@ -101,7 +126,7 @@ func TestTabIdentifiersNameTheAlternatives(t *testing.T) {
 
 // TestTabKindCoverageIsComplete keeps the audit's denominator honest: a TabKind
 // added without an entry above would never be checked, and the suite would go
-// green while a new label went unaccepted — under-coverage, which is worse than
+// green while a new label went unchecked — under-coverage, which is worse than
 // no check.
 func TestTabKindCoverageIsComplete(t *testing.T) {
 	// TabKind is an iota enum with no reflective listing, so probe upward until
@@ -119,6 +144,6 @@ func TestTabKindCoverageIsComplete(t *testing.T) {
 	if label := session.TabLabel(next); label != "Tab" {
 		t.Errorf("TabKind %v renders as %q, not the generic %q fallback — it looks like a real "+
 			"kind that tabKindsUnderAudit (parity/identifier_test.go) does not list, so its "+
-			"label is never checked against what the CLI accepts.", highest+1, label, "Tab")
+			"label is never audited against the #1986 identity split.", highest+1, label, "Tab")
 	}
 }

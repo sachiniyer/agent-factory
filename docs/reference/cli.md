@@ -1283,7 +1283,10 @@ Delete the named tab from an existing session — the counterpart of tab-create.
 The tab is removed from the daemon's session state and its tmux window is
 killed. The removal is persistent: the daemon will not respawn the tab, and it
 does not return on a daemon/af restart. The name to pass is the tab name
-tab-create printed (also visible in the TUI tab bar).
+tab-create printed, as reported by "af sessions get" — not the label the TUI
+tab bar shows, which is a fixed "Agent"/"Terminal" for agent and shell tabs. A
+miss lists the tabs that exist, with those labels, so a wrong name is a next
+step rather than a dead end.
 
 The agent tab can't be deleted — use "af sessions kill" to tear down the whole
 session. Deleting a tab or session that doesn't exist is an error, not a

@@ -28,20 +28,26 @@ var newTabID = func() string {
 	return fmt.Sprintf("%x", b[:])
 }
 
-// agentTabName is the display label of the default Agent tab.
+// agentTabName is the canonical name of the default Agent tab — the handle a
+// user types (`--name agent`), not the label the UI shows (which is "Agent";
+// see TabLabel).
 const agentTabName = "agent"
 
-// shellTabName is the display label of the first Shell tab — the on-demand
-// per-instance terminal session ('t' / `af sessions tab-create`).
+// shellTabName is the canonical name of the first Shell tab — the on-demand
+// per-instance terminal session ('t' / `af sessions tab-create`). The handle a
+// user types (`--name shell`), not the label the UI shows (which is "Terminal";
+// see TabLabel).
 const shellTabName = "shell"
 
-// webTabName is the default display label of a web/iframe tab ('web', then
-// 'web-2', … on collision). Created via `af sessions tab-create --kind web`.
+// webTabName is the default canonical name of a web/iframe tab ('web', then
+// 'web-2', … on collision). Created via `af sessions tab-create --kind web`. For
+// web tabs the label equals the name (see TabLabel).
 const webTabName = "web"
 
-// vscodeTabName is the default display label of a VS Code tab ('vscode', then
+// vscodeTabName is the default canonical name of a VS Code tab ('vscode', then
 // 'vscode-2', … on collision). Created via `af sessions tab-create --kind vscode`
-// or the web UI's + New tab flow.
+// or the web UI's + New tab flow. For vscode tabs the label equals the name (see
+// TabLabel).
 const vscodeTabName = "vscode"
 
 // tmuxTabSeparator joins an instance's agent tmux session name to a tab's name
@@ -144,7 +150,17 @@ type Tab struct {
 	// (reused on close+recreate). Empty only for a legacy persisted tab written
 	// before #1738, which restoreLocalTabs backfills with a fresh id on load.
 	ID string
-	// Name is the display label (e.g. "agent").
+	// Name is the tab's canonical handle: the stable, human-typable string a user
+	// addresses it by (`agent`, `shell`, `btop`, or a name set at create/rename),
+	// unique within the instance. It is what every tab verb resolves against
+	// (`--name`, via TabMatches), alongside the stable ID above.
+	//
+	// It is NOT the display label. What the UI renders is TabLabel, a
+	// presentation-only string that is never resolved against — the two
+	// deliberately differ for agent/shell tabs (named `agent`/`shell`, shown as
+	// "Agent"/"Terminal"). This field's doc once claimed to be "the display
+	// label"; that confusion was #1986, and the split into Name (the one handle)
+	// and TabLabel (the one display string) is its resolution.
 	Name string
 	// Kind selects the tab's process behavior.
 	Kind TabKind
@@ -251,18 +267,22 @@ func tabKindForData(k TabKind) TabKind {
 	}
 }
 
-// TabLabel returns the string a user SEES for a tab.
+// TabLabel returns the presentation-only string a user SEES for a tab — its
+// display label. It is NEVER an identifier: no surface resolves a tab by it
+// (TabMatches keys on Name alone), which is exactly what frees it to be a
+// prettier, non-unique string than the canonical Name. Agent and shell tabs
+// render fixed labels ("Agent", "Terminal") that are deliberately not their
+// names (`agent`/`shell`); every other kind shows its Name.
 //
-// It lives beside the Tab type rather than in the TUI because a label a user can
-// read off the screen is, in practice, an identifier they will type — and until
-// #1984 the two disagreed: the TUI showed "Terminal" while the only accepted
-// name was "shell", so `af sessions tab-delete alpha --name Terminal` reported
-// that the tab did not exist while it sat visible in the tab bar. Keeping the
-// rule here lets every surface that ACCEPTS a tab name honour what the TUI
-// SHOWS, from one definition.
-//
-// Note Tab.Name's doc calls itself "the display label"; it is not, and that
-// confusion is the bug. Name is the canonical identifier; this is the label.
+// This is the #1986 split: Name is the one handle a user types, the label is the
+// one string a user reads, and they are allowed to differ because the label
+// carries no identity. It lives beside the Tab type — not in the TUI — so the
+// definition of "what a user reads" sits next to Name, the definition of "what a
+// user types": whenever the two differ, TabIdentifiers surfaces the label in a
+// "no tab named …" error, so a user who read "Terminal" off the bar is told the
+// real name `shell` rather than left to guess it. That discoverability is what
+// replaces the label-as-alias #1937 shipped (#1984): the label never resolves,
+// but it is never a dead end either.
 func TabLabel(t *Tab) string {
 	if t == nil {
 		return ""
@@ -290,22 +310,27 @@ func TabLabel(t *Tab) string {
 	}
 }
 
-// TabMatches reports whether token identifies this tab, by its canonical Name or
-// by the label the UI displays for it.
-//
-// The label is accepted as an ALIAS: `--name shell` keeps working for every
-// script that already uses it, and `--name Terminal` now works for the person
-// who read it off the screen. Nothing is renamed and no display changes.
+// TabMatches reports whether token identifies this tab. It keys on the canonical
+// Name ONLY: the display label (TabLabel) is presentation and is never an
+// identifier (#1986). A person who typed a label they read off the screen is not
+// matched here — accepting it would make two strings address one tab, the
+// ambiguity #1929/#1904 removed from the tab surface. The label is not a dead
+// end either: TabIdentifiers names it in the resulting "no tab named …" error,
+// so the user learns the real name to type (the discoverability half of #1984).
 func TabMatches(t *Tab, token string) bool {
 	if t == nil || token == "" {
 		return false
 	}
-	return t.Name == token || TabLabel(t) == token
+	return t.Name == token
 }
 
-// TabIdentifiers renders a tab as the strings a user may type for it: its name,
-// plus its label when that differs. Used to make "no tab named X" list the valid
-// options instead of asserting an absence the user can see is false.
+// TabIdentifiers renders a tab as the strings that help a user address it in an
+// error: its canonical Name, plus the label the UI shows when that differs.
+// Because the label is presentation-only and never accepted (TabMatches keys on
+// Name), naming it here is what lets a user who read "Terminal" off the bar find
+// the `shell` they must type — the discoverability the #1986 split relies on in
+// place of the label alias. Used to make "no tab named X" list the valid options
+// instead of asserting an absence the user can see is false.
 func TabIdentifiers(t *Tab) string {
 	if t == nil {
 		return ""
