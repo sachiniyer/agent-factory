@@ -65,6 +65,36 @@ func writeAfMarkedFile(path, content string) (bool, error) {
 	return true, nil
 }
 
+// globalSkillConsent is what af knows about the user's answer to "may af manage
+// your global agent config?". It has THREE values on purpose (#1933's rule): a
+// config af could not read is UNKNOWN, not "no" — collapsing it to "no" would
+// let an unreadable config authorize deleting a file, which is the
+// fabricated-negative shape this repo keeps getting bitten by.
+type globalSkillConsent int
+
+const (
+	globalSkillUnknown globalSkillConsent = iota // config unreadable: write nothing, delete nothing
+	globalSkillDeclined
+	globalSkillGranted
+)
+
+// globalAgentSkillsConsent reads the global_agent_skills opt-in.
+//
+// The key is global-only and defaults FALSE, so on a default install af writes
+// nothing into any agent's global config. Enabling it is the user stating that
+// af may manage that directory.
+func globalAgentSkillsConsent() globalSkillConsent {
+	cfg, err := config.LoadConfig()
+	if err != nil {
+		log.WarningLog.Printf("af skill: could not read the af config (%v); leaving the global agent skills directories exactly as they are", err)
+		return globalSkillUnknown
+	}
+	if cfg.GlobalAgentSkills {
+		return globalSkillGranted
+	}
+	return globalSkillDeclined
+}
+
 // ensureAfSkillDir writes the af-managed "agent-factory" skill into the given
 // per-agent skills base directory and returns the skill directory path. The agent
 // auto-discovers skills there with NO command-line flag, so this injects
@@ -75,9 +105,43 @@ func writeAfMarkedFile(path, content string) (bool, error) {
 // agent loses the af guidance for this launch; callers log and carry on. The write
 // is non-destructive (writeAfMarkedFile): a user's own un-marked SKILL.md at our
 // path is left untouched and logged.
+//
+// Every base passed here is the USER'S GLOBAL per-agent config directory
+// (codex's $CODEX_HOME/skills, gemini's ~/.gemini/skills, amp's
+// ~/.config/amp/skills), which is why the consent gate lives at this one choke
+// point rather than in each caller (#1977). A file written there reaches outside
+// af and outlives it: it survives archiving the session, survives uninstalling
+// af, and is still loaded when the user runs that agent by hand in an unrelated
+// directory tomorrow. Creating a session is not consent to edit the user's
+// global tool configuration, so af does none of it unless global_agent_skills
+// is on. An empty returned path means "not injected"; every caller discards the
+// path and only checks the error, so this reads as a clean skip.
+//
+// The af-owned seams are unaffected and stay unconditional: claude
+// (--plugin-dir), aider (--read) and opencode (OPENCODE_CONFIG) all point at
+// files under af's OWN config dir, so they vanish with af and are invisible to
+// an agent af did not launch. That is the pattern this gate exists to converge
+// on; these three agents expose no equivalent per-launch pointer (codex's
+// CODEX_HOME and gemini's GEMINI_CLI_HOME relocate the agent's whole home,
+// auth and history included, and amp's --settings-file would have af own
+// settings the user also sets), so consent is the honest seam until one does.
 func ensureAfSkillDir(base string) (string, error) {
 	skillDir := filepath.Join(base, afSkillDirName)
 	path := filepath.Join(skillDir, "SKILL.md")
+
+	switch globalAgentSkillsConsent() {
+	case globalSkillGranted:
+	case globalSkillDeclined:
+		// Also clean up what an EARLIER af version wrote here before this key
+		// existed, so af's edits to the user's global config do not outlive the
+		// decision not to make them (#1977's first objection).
+		removeAfSkillDir(skillDir, path)
+		log.WarningLog.Printf("af skill: not writing %s — af does not manage global agent config directories unless global_agent_skills = true is set in the af config (af guidance not injected for this agent)", path)
+		return "", nil
+	default: // globalSkillUnknown
+		return "", nil
+	}
+
 	wrote, err := writeAfMarkedFile(path, afSkillDoc)
 	if err != nil {
 		return "", err
@@ -86,6 +150,42 @@ func ensureAfSkillDir(base string) (string, error) {
 		log.WarningLog.Printf("af skill: %s exists but is not af-managed; leaving it untouched (af guidance not injected)", path)
 	}
 	return skillDir, nil
+}
+
+// removeAfSkillDir deletes the skill af ITSELF wrote into a global agent config
+// directory, and nothing else.
+//
+// Every step is gated on a POSITIVE observed fact, never an inference:
+//
+//   - The file is removed only when it is present AND carries afSkillMarker. A
+//     file at our path without the marker is the user's (or another tool's) and
+//     is left alone, exactly as writeAfMarkedFile refuses to overwrite it.
+//   - A read that FAILS for any reason other than not-exist (permissions, I/O)
+//     leaves the file alone. "I could not look" is not "there is nothing of
+//     value here" — that conflation is the #1969/#2011 class.
+//   - The enclosing agent-factory/ directory is removed with os.Remove, not
+//     RemoveAll, so the kernel refuses (ENOTEMPTY) if anything else is in there.
+//     A user who dropped their own file beside ours keeps it, and we never have
+//     to predict what else the directory holds.
+func removeAfSkillDir(skillDir, path string) {
+	existing, err := os.ReadFile(path)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			log.WarningLog.Printf("af skill: could not read %s to check whether af wrote it (%v); leaving it in place", path, err)
+		}
+		return
+	}
+	if !bytes.Contains(existing, []byte(afSkillMarker)) {
+		return
+	}
+	if err := os.Remove(path); err != nil {
+		log.WarningLog.Printf("af skill: could not remove the af-managed %s (%v); it stays until removed by hand", path, err)
+		return
+	}
+	// Best-effort, and deliberately not RemoveAll: this succeeds only if the
+	// directory is now empty.
+	_ = os.Remove(skillDir)
+	log.WarningLog.Printf("af skill: removed the af-managed %s — af no longer writes into global agent config directories (set global_agent_skills = true to restore it)", path)
 }
 
 // codexSkillsBaseDir returns codex's skills-discovery base: $CODEX_HOME/skills, or

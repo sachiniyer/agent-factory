@@ -9,7 +9,7 @@ Precedence is **app defaults → global config → in-repo config**: an in-repo 
 
 Config is [TOML](https://toml.io) — chosen so it is easy to hand-edit. If you are upgrading from a version that used `config.json`, see [Migrating from JSON](#migrating-from-json) below; the change is automatic.
 
-You can also read and write the global config from the CLI: `af config get <key>` / `af config list` print the effective values, and `af config set <key> <value>` writes a single settable scalar key **in place**, preserving all comments and ordering (it never regenerates the file) and validating the value first. Settable keys are the scalar tunables — `default_program`, `program_overrides.<agent>`, `auto_yes`, `auto_update`, `listen_addr`, `require_token`, `require_loopback_token`, `daemon_poll_interval`, `log_max_size_mb`, `log_max_backups`, `branch_prefix`, `worktree_root`, `detach_keys`, `update_channel`, `vscode_server_binary`, `limit_auto_resume`, `limit_retry_interval`, `limit_patterns.<agent>`; the structural tables (`root_agents`, `[theme]`, `[keys]`) and the `cors_allowed_origins` list are hand-edited only. See [`af config`](reference/cli.md#af-config) in the CLI reference. Changes apply on the next `af`/daemon start, the same as a hand-edit.
+You can also read and write the global config from the CLI: `af config get <key>` / `af config list` print the effective values, and `af config set <key> <value>` writes a single settable scalar key **in place**, preserving all comments and ordering (it never regenerates the file) and validating the value first. Settable keys are the scalar tunables — `default_program`, `program_overrides.<agent>`, `auto_yes`, `auto_update`, `listen_addr`, `require_token`, `require_loopback_token`, `daemon_poll_interval`, `log_max_size_mb`, `log_max_backups`, `branch_prefix`, `worktree_root`, `detach_keys`, `update_channel`, `vscode_server_binary`, `limit_auto_resume`, `limit_retry_interval`, `limit_patterns.<agent>`, `global_agent_skills`; the structural tables (`root_agents`, `[theme]`, `[keys]`) and the `cors_allowed_origins` list are hand-edited only. See [`af config`](reference/cli.md#af-config) in the CLI reference. Changes apply on the next `af`/daemon start, the same as a hand-edit.
 
 ## Global config
 
@@ -27,6 +27,7 @@ log_max_size_mb = 50
 log_max_backups = 2
 update_channel = "stable"
 limit_auto_resume = false
+global_agent_skills = false
 limit_retry_interval = "30m"
 
 [program_overrides]
@@ -75,6 +76,7 @@ pane_border_preview = "#DC8CC3"
 | `root_agents` | Opt-in table of repositories that get an always-ensured `root` agent (default: none). See [Root agents](#root-agents-always-ensured). |
 | `limit_auto_resume` | Opt in to the daemon auto-resuming a session parked at a usage-limit wall once its limit window elapses (default: `false`). See [Usage-limit auto-resume](#usage-limit-auto-resume). |
 | `limit_retry_interval` | Fallback retry cadence (Go duration, e.g. `30m`) used only when `limit_auto_resume` is on **and** the limit banner carried no parseable reset time (default: `30m`). Empty or `0` disables the fallback. |
+| `global_agent_skills` | Opt in to af writing its `agent-factory` skill file into your **global** codex/gemini/amp config directories so those agents discover af's CLI guidance (default: `false`). See [Agent guidance and your global agent config](#agent-guidance-and-your-global-agent-config). |
 | `limit_patterns` | Optional map from agent enum to a regex that overrides the built-in usage-limit **detection** banner for that agent (the built-in reset-time parser is kept). Default: none. See [Custom usage-limit detection](#custom-usage-limit-detection-limit_patterns). |
 | `theme` | Optional TUI color table. Defaults to a Zenburn-derived palette and validates each value as `#RRGGBB`; invalid values fall back to the corresponding default with a warning. See [Theme colors](#theme-colors-theme). |
 | `keys` | Optional keymap overrides for the TUI. See [Key bindings](#key-bindings-keys). |
@@ -208,6 +210,26 @@ scroll_up = "shift+up"
 scroll_down = "shift+down"
 ```
 
+### Agent guidance and your global agent config
+
+af teaches each agent how to drive `af` itself — `af sessions whoami`, `af sessions archive --self`, and the rest. How that guidance reaches the agent depends on what the agent supports.
+
+For **claude**, **aider** and **opencode**, af owns the file and points the agent at it for that launch only (`--plugin-dir`, `--read`, and `OPENCODE_CONFIG` respectively). Everything lives under af's own config directory, so it disappears when you uninstall af and is invisible to an agent af did not launch.
+
+**codex**, **gemini** and **amp** auto-discover skills from a directory in your home and offer no per-launch pointer to an extra one. The only way to reach them is to write a file into *your* config — `$CODEX_HOME/skills/agent-factory/`, `~/.gemini/skills/agent-factory/`, `~/.config/amp/skills/agent-factory/` — which outlives the session, survives uninstalling af, and applies when you run those agents by hand somewhere af has nothing to do with. Creating a session is not consent to that, so **af does not do it by default**:
+
+```toml
+global_agent_skills = true
+```
+
+With it on, af writes (and keeps up to date) a single `agent-factory/SKILL.md` under each of those agents' skills directories. With it off — the default — those three agents simply do not get af's guidance; everything else about the session is unchanged.
+
+af only ever manages the file it wrote. Each one carries an af marker, and:
+
+- a file at that path **without** the marker is yours and is never overwritten or removed;
+- turning the key off (or leaving it off after an af version that wrote one) removes af's **own** marked file, so af's edit does not outlive the decision;
+- the `agent-factory/` directory is removed only if it is empty, so anything you put beside af's file keeps the directory alive.
+
 ### Choosing the agent
 
 Override the agent for new sessions with `-p`:
@@ -241,7 +263,7 @@ delete_cmd = "./infra/delete.sh"
 | `default_program`, `program_overrides` | Valid globally **and** in-repo (in-repo wins). |
 | `post_worktree_commands`, `remote_hooks` | **In-repo only.** The legacy `~/.agent-factory/repos/<repoID>/config.json` location keeps working for one more release (a deprecation warning in the log points at the new file) and is shadowed whenever the in-repo file sets the same key — including by an explicit empty value like `post_worktree_commands = []`. |
 | `backend`, `docker`, `ssh` | **In-repo only.** Select the runtime a repo's sessions run on. |
-| `auto_yes`, `auto_update`, `require_token`, `require_loopback_token`, `listen_addr`, `cors_allowed_origins`, `daemon_poll_interval`, `branch_prefix`, `worktree_root`, `detach_keys`, `log_max_size_mb`, `log_max_backups`, `update_channel`, `keys`, `theme`, `root_agents`, `limit_auto_resume`, `limit_retry_interval`, `vscode_server_binary` | Global only. Setting them in-repo is rejected with an error naming the key. The daemon network-surface keys (`require_token`, `listen_addr`, `cors_allowed_origins`) are global-only so a cloned repo can never open a port, widen CORS, or disable auth. `vscode_server_binary` is global-only for the same reason: it names a binary the daemon executes. See [remote-http-auth.md](remote-http-auth.md). |
+| `auto_yes`, `auto_update`, `require_token`, `require_loopback_token`, `listen_addr`, `cors_allowed_origins`, `daemon_poll_interval`, `branch_prefix`, `worktree_root`, `detach_keys`, `log_max_size_mb`, `log_max_backups`, `update_channel`, `keys`, `theme`, `root_agents`, `limit_auto_resume`, `limit_retry_interval`, `vscode_server_binary`, `global_agent_skills` | Global only. Setting them in-repo is rejected with an error naming the key. The daemon network-surface keys (`require_token`, `listen_addr`, `cors_allowed_origins`) are global-only so a cloned repo can never open a port, widen CORS, or disable auth. `vscode_server_binary` is global-only for the same reason: it names a binary the daemon executes. See [remote-http-auth.md](remote-http-auth.md). |
 
 `post_worktree_commands` are shell commands run after each new worktree is created (e.g. `npm install`, `make build`) — they can also be edited from the TUI via the `e` (worktree hooks) key. `remote_hooks` configures a remote-machine backend; see [remote-hooks.md](remote-hooks.md) for the script protocol.
 

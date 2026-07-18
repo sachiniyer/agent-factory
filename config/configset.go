@@ -101,6 +101,7 @@ var settableKeySpecs = map[string]settableKeySpec{
 	// where the binary is actually run, and already lives there.
 	"vscode_server_binary": {kind: cfgString},
 	"limit_auto_resume":    {kind: cfgBool},
+	"global_agent_skills":  {kind: cfgBool},
 	"limit_retry_interval": {kind: cfgString, validate: func(_, v string) error {
 		return validateLimitRetryIntervalValue(v)
 	}},

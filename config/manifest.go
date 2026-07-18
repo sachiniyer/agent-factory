@@ -255,6 +255,14 @@ var configManifest = []ManifestEntry{
 		Settable: true,
 	},
 	{
+		Key:      "global_agent_skills",
+		Type:     "bool",
+		Default:  "false",
+		Purpose:  "Let af add its af-usage skill to your own codex/gemini/amp config folders · off means those agents are not told about af.",
+		Tier:     TierAdvanced,
+		Settable: true,
+	},
+	{
 		Key:      "limit_retry_interval",
 		Type:     "string",
 		Default:  "30m",
