@@ -41,8 +41,16 @@ func (t *TmuxSession) Start(workDir string) error {
 		// attempt against a possibly-live session, never a false liveness claim.
 		if t.ExistsOrUnknown() {
 			leaked := SessionProcessTrees(t.cmdExec, t.sanitizedName)
-			cleanupCmd := exec.Command("tmux", "kill-session", "-t", exactTarget(t.sanitizedName))
-			if cleanupErr := t.cmdExec.Run(cleanupCmd); cleanupErr != nil {
+			// Bound the cleanup kill-session (#2028): on bare exec.Command it could
+			// hang forever on a wedged tmux server, and Start is on the daemon's
+			// create/launch path, so an unbounded stall here wedges that handler. Route
+			// it through the same bounded runner as the rest of the package's tmux
+			// commands (#1917) — a tripped deadline degrades to a best-effort cleanup
+			// failure, the same as any other kill-session error below.
+			ctx, cancel := tmuxTimeoutContext()
+			cleanupErr := t.runTmuxBounded(ctx, "kill-session", "-t", exactTarget(t.sanitizedName))
+			cancel()
+			if cleanupErr != nil {
 				err = fmt.Errorf("%v (cleanup error: %v)", err, cleanupErr)
 			} else if len(leaked) > 0 {
 				go reapLeakedProcesses(t.sanitizedName, leaked, reapGraceWait, reapTermWait)
@@ -97,17 +105,22 @@ func (t *TmuxSession) Start(workDir string) error {
 	}
 	ptmx.Close()
 
-	// Set history limit to enable scrollback (default is 2000, we'll use 10000 for more history)
-	historyCmd := exec.Command("tmux", "set-option", "-t", exactTarget(t.sanitizedName), "history-limit", "10000")
-	if err := t.cmdExec.Run(historyCmd); err != nil {
+	// Set history limit to enable scrollback (default is 2000, we'll use 10000 for
+	// more history). Bounded like every other tmux command in this package (#1917/
+	// #2028): these run on the daemon's create path, so a wedged server must not
+	// hang them; both are best-effort and only log on failure.
+	ctx, cancel := tmuxTimeoutContext()
+	if err := t.runTmuxBounded(ctx, "set-option", "-t", exactTarget(t.sanitizedName), "history-limit", "10000"); err != nil {
 		log.InfoLog.Printf("Warning: failed to set history-limit for session %s: %v", t.sanitizedName, err)
 	}
+	cancel()
 
 	// Enable mouse scrolling for the session
-	mouseCmd := exec.Command("tmux", "set-option", "-t", exactTarget(t.sanitizedName), "mouse", "on")
-	if err := t.cmdExec.Run(mouseCmd); err != nil {
+	ctx, cancel = tmuxTimeoutContext()
+	if err := t.runTmuxBounded(ctx, "set-option", "-t", exactTarget(t.sanitizedName), "mouse", "on"); err != nil {
 		log.InfoLog.Printf("Warning: failed to enable mouse scrolling for session %s: %v", t.sanitizedName, err)
 	}
+	cancel()
 
 	// Attach to the session we just created. Pass empty workDir so a missing
 	// session here surfaces as an error rather than recursively re-spawning.
