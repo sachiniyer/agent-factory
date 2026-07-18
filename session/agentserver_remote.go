@@ -243,6 +243,62 @@ func (s *remoteAgentServer) Archive() (string, error) {
 	return resp.Branch, nil
 }
 
+// deadRemoteAgentServer is the AgentServer for a remote-workspace instance
+// (docker/ssh/hook) whose runtime wiring has been torn down: remoteClient is nil,
+// so there is no live `af agent-server` to reach. AgentServer() returns it — never
+// a localAgentServer — for such an instance (#2005): a remote backend's data-plane
+// methods delegate back to i.AgentServer(), so a localAgentServer wrapping one
+// mutually recurses until the daemon poll overflows its stack. Two instances land
+// in this state:
+//
+//   - a sandbox session loaded inert from disk (its container is gone after a
+//     daemon restart, awaiting an explicit restore — instance_data.go), and
+//   - one left Lost by a FAILED lost-recovery (reprovisionRemote succeeded, Start
+//     failed, teardownAfterStartFailure cleared remoteClient) that stays
+//     started+Lost so the #1128 restore loop keeps retrying.
+//
+// Every method reports the sandbox as gone/unreachable — the truth — which is
+// exactly what the poll's remote-probe-failure path (#1794) and the restore loop's
+// Alive gate already expect. It carries no client and no locks: it is a pure,
+// stateless refusal, so AgentServer() can build one under i.mu just like the other
+// two impls.
+type deadRemoteAgentServer struct {
+	title string
+}
+
+var _ AgentServer = (*deadRemoteAgentServer)(nil)
+
+func (s *deadRemoteAgentServer) err() error {
+	return fmt.Errorf("session %q has no live agent-server: its sandbox is not provisioned", s.title)
+}
+
+func (s *deadRemoteAgentServer) Provision(bool) error              { return s.err() }
+func (s *deadRemoteAgentServer) Launch(bool) error                 { return s.err() }
+func (s *deadRemoteAgentServer) Expose() (StreamEndpoint, error)   { return StreamEndpoint{}, s.err() }
+func (s *deadRemoteAgentServer) Snapshot() (Observation, error)    { return Observation{}, s.err() }
+func (s *deadRemoteAgentServer) Preview(int, bool) (string, error) { return "", s.err() }
+
+// Alive returns (false, err) = UNKNOWN, never an authoritative "the agent is gone":
+// there is no sandbox to answer, so a caller must not treat this false as proof of
+// death and act destructively on it (#1794). remoteSandboxAnswersAlive reads it as
+// "did not answer alive", so the restore loop keeps re-provisioning rather than
+// declaring the row un-recoverable.
+func (s *deadRemoteAgentServer) Alive() (bool, error) { return false, s.err() }
+
+func (s *deadRemoteAgentServer) SendPrompt(string) error { return s.err() }
+func (s *deadRemoteAgentServer) TapEnter()               {}
+
+func (s *deadRemoteAgentServer) Subscribe(int, Seq) (PTYSubscription, error) { return nil, s.err() }
+func (s *deadRemoteAgentServer) Input(int, []byte) error                     { return s.err() }
+func (s *deadRemoteAgentServer) Resize(int, uint16, uint16) error            { return s.err() }
+
+// Kill is a no-op success: the sandbox was already reaped, so there is nothing
+// live to tear down, and a killed row must still delete cleanly — instance.Kill()
+// routes here, and returning an error would keep the record for a doomed retry.
+func (s *deadRemoteAgentServer) Kill() error { return nil }
+
+func (s *deadRemoteAgentServer) Archive() (string, error) { return "", s.err() }
+
 // --- remote WS clientlessChannel: the sandbox stream as a broker channel ---
 
 // remoteClientlessChannel is the remote runtime's clientlessChannel: it binds ONE
