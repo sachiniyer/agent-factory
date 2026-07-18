@@ -3,9 +3,26 @@ name: PR Validation
 on:
   pull_request:
     branches: [master]
+  # A merge queue creates a temporary gh-readonly-queue/… ref and dispatches the
+  # merge_group event. The required "Lint" and "Build" checks below MUST run on
+  # that event and report against the merge_group ref, or the queue never gets a
+  # result and every merge stalls forever. The jobs are the SAME ones the PR runs
+  # (none is gated on github.event_name), so they report the identical "Lint" and
+  # "Build" check contexts on the merged-result ref. Do NOT filter merge_group by
+  # branch — the queue only ever targets master, and a base-branch filter here is
+  # an easy way to silently stop the checks from running.
+  merge_group:
 
 concurrency:
-  group: pr-${{ github.event.pull_request.number }}
+  # pull_request keys the group on the PR number so a new push cancels the stale
+  # run (pr-123). merge_group carries no pull_request payload, so that expression
+  # is empty: without a fallback EVERY merge_group run would share the group "pr-"
+  # and cancel-in-progress would cancel the previous queue entry, stalling the
+  # merge queue. Fall back to github.ref, which is the unique gh-readonly-queue/…
+  # ref per merge_group entry (and refs/pull/N/merge for PRs, so PR runs never
+  # collide with queue runs either). Mirrors how auto-gate.yml keys off a fallback
+  # chain when the pull_request payload is null.
+  group: pr-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 # Read-only: workflow only checks out source and runs lint/test/build; it never comments on or modifies the PR.
