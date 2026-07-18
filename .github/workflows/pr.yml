@@ -113,6 +113,80 @@ jobs:
       - name: Run tests
         run: go test -v -race -count=1 ./...
 
+  # The web client's deterministic gates (#2069). Until this landed, NOTHING in
+  # GitHub Actions ran them: the schedule/frame/icons parity tests, the typecheck,
+  # and the committed-bundle reproducibility check were enforced only by a human
+  # typing `make web-test` locally. A web regression merged green.
+  #
+  # Runs on EVERY PR rather than behind a `web/**` path filter, for two reasons:
+  #
+  #   * The parity tests guard a CROSS-LANGUAGE contract. schedule.test.ts loads
+  #     schedule/testdata/vectors.json — a Go-owned file — precisely so the TUI and
+  #     web cannot drift (#2057). A `web/**` filter would skip the check on exactly
+  #     the Go-side change most likely to break it.
+  #   * pr.yml has no workflow-level path filter (Lint/Build must run on every PR),
+  #     and job-level filtering means either an external action or a hand-rolled
+  #     `git diff` step whose skip semantics then have to be reasoned about against
+  #     the merge_group event. The job costs well under a minute; the filter would
+  #     cost more than it saves.
+  #
+  # It uses the `make` targets rather than open-coding npm, so what CI runs is what
+  # a developer runs. A CI-only copy of these steps is how the two quietly diverge.
+  web:
+    name: Web
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+
+      # Pinned major, matching the toolchain the lockfile was resolved against.
+      # `cache: npm` caches ~/.npm (the download cache), not node_modules — `npm ci`
+      # still runs and still installs from the lockfile, which is what keeps the
+      # bundle reproducible.
+      - name: Set up Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      # `make web-test` runs `npm ci` (via the web/node_modules file target) then
+      # typecheck + the node:test suite: the frame codec golden vectors, the
+      # schedule parity vectors shared with Go, the icon set, and the unit tests.
+      - name: Typecheck and test the web client
+        run: make web-test
+
+      # Bundle reproducibility. web/dist is COMMITTED because the Go binary embeds
+      # it (web/embed.go) and the Go side must stay Node-free — so a PR that edits
+      # web/src and forgets `make web-build` ships a binary serving the OLD bundle,
+      # and nothing before this caught it. The selftest serves the committed dist,
+      # so it would have been testing the stale one too.
+      - name: Rebuild the committed bundle
+        run: make web-build
+
+      # `git status --porcelain`, not `git diff --exit-code`: diff sees modified
+      # tracked files but is BLIND to a new untracked one, so a build that started
+      # emitting an extra asset (an icon, a chunk) would pass a diff-only check while
+      # the committed dist was genuinely incomplete. Porcelain catches modified,
+      # untracked and deleted alike.
+      - name: Check the committed bundle matches web/src
+        run: |
+          dirty="$(git status --porcelain -- web/dist)"
+          if [ -n "$dirty" ]; then
+            echo "::error::web/dist is stale — it does not match a fresh build of web/src."
+            echo "$dirty"
+            echo
+            echo "The Go binary embeds the COMMITTED web/dist (web/embed.go), so this PR would"
+            echo "ship a bundle that does not match its source. Fix it with:"
+            echo
+            echo "    make web-build && git add web/dist"
+            echo
+            echo "Rebuild — never hand-edit or hand-merge dist/af-web.js; it is generated."
+            git diff -- web/dist | head -50
+            exit 1
+          fi
+          echo "web/dist matches a fresh build."
+
   # We cross-compile and ship darwin/arm64 and darwin/amd64 binaries from
   # stable-release.yml, but every job in this repo ran on ubuntu — so no test had
   # ever executed on the OS we ship to. macOS-only defects reached users instead
@@ -177,7 +251,7 @@ jobs:
     # blocks anyway, since it demands conclusion === "success", but the native path
     # would not.) So: run ALWAYS, and fail loudly on any unsuccessful need. Now a
     # red macOS job turns the REQUIRED check red instead of quietly skipping it.
-    needs: [lint, test, test-macos]
+    needs: [lint, test, test-macos, web]
     if: always()
     steps:
       - name: Gate on the jobs this check stands in for
@@ -186,7 +260,7 @@ jobs:
           echo "::error::A required job failed — failing Build so the required check goes RED rather than skipping."
           # needs['test-macos'], not needs.test-macos: a hyphen in a property path is
           # parsed as subtraction, so the dotted form silently yields an empty string.
-          echo "lint=${{ needs.lint.result }} test=${{ needs.test.result }} test-macos=${{ needs['test-macos'].result }}"
+          echo "lint=${{ needs.lint.result }} test=${{ needs.test.result }} test-macos=${{ needs['test-macos'].result }} web=${{ needs.web.result }}"
           exit 1
 
       - uses: actions/checkout@v6

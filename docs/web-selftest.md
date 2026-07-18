@@ -32,6 +32,25 @@ Everything — the daemon, its tmux server, the sessions, the browser — lives 
 ports**, no access to the host tmux server, and no touch of the real
 `~/.agent-factory`, exactly like the other container harnesses.
 
+## In CI
+
+Since #2069 a PR touching `web/`, `daemon/`, `agentproto/`, `apiproto/` or the
+harness itself also runs this on a GitHub runner
+(`.github/workflows/web-selftest.yml`), using the same `make` target — CI does
+not keep its own copy of the steps.
+
+It is a **signal, not a gate**: it is not in `pr.yml`'s `Build` `needs`, so a red
+run does not block the merge button. Read it before merging anyway. The reasoning
+(cost on every web PR, and the flake surface of a real browser driving a real
+daemon) and the promotion path are written out in that workflow.
+
+The deterministic web checks — typecheck, the unit/parity suites, and
+`web/dist` reproducibility — **do** gate, as pr.yml's `Web` job.
+
+Failures give you Playwright's assertion output in the job log but no trace: the
+harness works inside the container's own copy of the tree, so its
+`web/test-results/` never reaches the host. Reproduce locally for a trace.
+
 ## What it asserts
 
 Against the live SPA served over the daemon's plain-HTTP listener:
