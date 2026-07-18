@@ -590,6 +590,17 @@ export class AppShell {
   // load until a select-then-deselect. (#1592 Phase 5 PR9)
   private mainRendered = false;
 
+  // The narrow-viewport session rail (web mobile pass): below ~768px the rail is an
+  // off-canvas drawer that the .af-nav-toggle hamburger slides over the terminal, so a
+  // phone gives the terminal the full width. This is the ONLY piece of the responsive
+  // work that needs JS — everything else is @media CSS. `navOpen` is pure UI ephemera
+  // (never store state): the drawer is closed on load, opens on the toggle, and
+  // auto-closes when a session is selected (reveal the terminal) or the view changes.
+  // On desktop the CSS ignores the class, so setNav is an inert no-op there.
+  private readonly navToggle: HTMLButtonElement;
+  private readonly navScrim: HTMLElement;
+  private navOpen = false;
+
   constructor(
     private readonly actions: Actions,
     private readonly termHost: HTMLElement,
@@ -673,9 +684,20 @@ export class AppShell {
       }
     });
 
+    // The narrow-viewport rail toggle (web mobile pass): a hamburger that slides the
+    // session drawer over the terminal. CSS keeps it display:none on desktop and shows
+    // it only in the sessions view on a phone (the tasks/config views have no rail), so
+    // it never competes with the appbar controls on a comfortable width.
+    this.navToggle = h("button", { type: "button", class: "af-nav-toggle" }, "☰");
+    this.navToggle.setAttribute("aria-label", "Toggle sessions");
+    this.navToggle.setAttribute("aria-controls", "af-rail");
+    this.navToggle.setAttribute("aria-expanded", "false");
+    this.navToggle.addEventListener("click", () => this.toggleNav());
+
     const header = h(
       "header",
       { class: "af-appbar" },
+      this.navToggle,
       h("span", { class: "af-brand" }, "Agent Factory"),
       viewNav,
       this.projectSwitchWrap,
@@ -733,10 +755,20 @@ export class AppShell {
     this.railList = h("ul", { class: "af-rail-list" });
     this.railList.setAttribute("role", "listbox");
     this.railList.setAttribute("aria-label", "Sessions");
-    const rail = h("nav", { class: "af-rail" }, railHead, this.railList);
+    // Tapping a row on a phone should reveal the terminal, so any click that reaches a
+    // rail row closes the drawer (the row's own handler still attaches). Delegated on
+    // the list — not the rail head — so filtering/creating stays possible with the
+    // drawer open. Idempotent and inert on desktop (setNav no-ops there).
+    this.railList.addEventListener("click", () => this.setNav(false));
+    const rail = h("nav", { class: "af-rail", id: "af-rail" }, railHead, this.railList);
 
     this.main = h("section", { class: "af-main" });
-    this.sessionsBody = h("div", { class: "af-body" }, rail, this.main);
+    // The drawer scrim: a tap-to-dismiss layer over the terminal while the mobile rail
+    // is open. CSS keeps it display:none except in the narrow-viewport drawer state.
+    this.navScrim = h("div", { class: "af-nav-scrim" });
+    this.navScrim.setAttribute("aria-hidden", "true");
+    this.navScrim.addEventListener("click", () => this.setNav(false));
+    this.sessionsBody = h("div", { class: "af-body" }, rail, this.main, this.navScrim);
 
     // The tasks view is a peer of the sessions body inside one viewport; update()
     // shows exactly one and hides the other by `state.view`. It owns its own subtree
@@ -770,6 +802,23 @@ export class AppShell {
       this.lastDocTitle = title;
       document.title = title;
     }
+  }
+
+  /** Opens or closes the narrow-viewport session drawer (web mobile pass). A class on
+   *  the app root that the @media CSS turns into a slide-in rail + scrim; on desktop the
+   *  CSS ignores it, so this is a no-op there. Cheap-guarded so a redundant call from
+   *  update() doesn't thrash the class or the aria state. */
+  private setNav(open: boolean): void {
+    if (this.navOpen === open) {
+      return;
+    }
+    this.navOpen = open;
+    this.el.classList.toggle("af-nav-open", open);
+    this.navToggle.setAttribute("aria-expanded", open ? "true" : "false");
+  }
+
+  private toggleNav(): void {
+    this.setNav(!this.navOpen);
   }
 
   /** Applies the latest state, touching only what changed. */
@@ -812,6 +861,11 @@ export class AppShell {
         tab.classList.toggle("af-viewtab-active", v === state.view);
         tab.setAttribute("aria-selected", v === state.view ? "true" : "false");
       }
+      // The mobile rail drawer belongs to the sessions view (tasks/config have no
+      // rail): gate the hamburger's visibility on a root class, and fold the drawer
+      // shut on any view switch so it never lingers open over another surface.
+      this.el.classList.toggle("af-view-sessions", state.view === "sessions");
+      this.setNav(false);
     }
 
     // Highlight the active theme option (redesign PR1) when the choice changes.
@@ -841,6 +895,14 @@ export class AppShell {
     const sessionsChanged = this.lastSessions !== state.sessions;
     const selectionChanged = this.lastSelectedId !== state.selectedId;
     const projectChanged = this.lastSelectedProject !== state.selectedProject;
+
+    // Selecting a session on a phone should reveal its terminal, so fold the drawer
+    // shut whenever the selection lands on a real session — the keyboard/programmatic
+    // path (j/k then Enter) that never touches the rail's delegated click. Guarded on a
+    // non-null id so a deselection doesn't yank a browsing user out of the rail.
+    if (selectionChanged && state.selectedId) {
+      this.setNav(false);
+    }
 
     // The project switcher label + menu reflect the derived project list and the
     // current scope; rebuild when the sessions, the tasks (a task-only project), or

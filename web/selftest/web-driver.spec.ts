@@ -36,7 +36,7 @@
 // playwright.config.ts): AF_WEB_BASE_URL and the two seeded session titles
 // AF_WEB_SESSION_A / AF_WEB_SESSION_B. No token is needed.
 
-import { expect, type Locator, type Page, test } from "@playwright/test";
+import { expect, type Browser, type BrowserContext, type Locator, type Page, test } from "@playwright/test";
 
 const SESSION_A = process.env.AF_WEB_SESSION_A ?? "probe-a";
 const SESSION_B = process.env.AF_WEB_SESSION_B ?? "probe-b";
@@ -4774,4 +4774,119 @@ test("#1929/#1971: a rename, a reorder and a close from the web carry the tab's 
   await page.unroute("**/v1/CloseTab");
   expect(closeBody.tab_id, "a close must carry the CLOSED tab's stable id").toBe(doomedId);
   expect(closeBody.tab_name, "…alongside the name fallback").toBe(doomed);
+});
+
+// ---- Mobile / narrow-viewport pass ------------------------------------------
+//
+// Sachin's ask: the web UI must be USABLE on a phone — below ~768px the session rail
+// auto-collapses to an off-canvas drawer so the terminal gets the full width, a
+// hamburger slides it back over as an overlay, and picking a session folds it shut. And
+// the classic mobile bug — one overflowing element scrolling the whole page sideways —
+// must never happen at a phone or small-tablet width.
+//
+// These drive a REAL headless Chromium at fixed viewport sizes, each in its OWN context
+// so the emulated viewport + fresh localStorage never leak into the shared desktop
+// `page` the rest of the file uses. They are the responsive-layout gate: the CSS is
+// @media-driven, so only a real sized viewport proves the breakpoint actually engages.
+
+/** Opens the app in a fresh context at the given viewport and waits for the tokenless
+ *  shell + a populated rail. Rail rows exist in the DOM even while the mobile drawer is
+ *  collapsed (visibility:hidden), so this readiness signal is viewport-agnostic — it
+ *  works at a phone width and a desktop width alike. */
+async function openAt(browser: Browser, width: number, height: number): Promise<{ ctx: BrowserContext; p: Page }> {
+  const ctx = await browser.newContext({ viewport: { width, height } });
+  const p = await ctx.newPage();
+  await p.goto("/");
+  await expect(p.locator(".af-app")).toBeVisible();
+  await expect(p.locator(".af-rail-list .af-row", { hasText: SESSION_A })).toHaveCount(1);
+  return { ctx, p };
+}
+
+/** The page's horizontal overflow past the viewport, in px — the number that must stay
+ *  ≤ 0 (a hair of sub-pixel tolerance) or the page scrolls sideways. */
+async function horizontalOverflow(p: Page): Promise<number> {
+  return p.evaluate(() => {
+    const de = document.documentElement;
+    return Math.max(de.scrollWidth, document.body.scrollWidth) - window.innerWidth;
+  });
+}
+
+test("mobile (375px): the rail auto-collapses to a drawer; the hamburger reveals it as an overlay and picking a session folds it shut", async ({
+  browser,
+}) => {
+  const { ctx, p } = await openAt(browser, 375, 667);
+  const app = p.locator(".af-app");
+  const rail = p.locator(".af-rail");
+  const toggle = p.locator(".af-nav-toggle");
+
+  // Collapsed by default: the hamburger is offered, the rail is off-canvas (not
+  // visible), and the terminal/main pane owns the full width.
+  await expect(toggle).toBeVisible();
+  await expect(rail).not.toBeVisible();
+  await expect(app).not.toHaveClass(/af-nav-open/);
+  const widths = () =>
+    p.evaluate(() => ({
+      app: document.querySelector(".af-app")!.getBoundingClientRect().width,
+      main: document.querySelector(".af-main")!.getBoundingClientRect().width,
+    }));
+  let w = await widths();
+  expect(w.main, "the main pane fills the width while the rail is collapsed").toBeGreaterThan(w.app - 2);
+
+  // The hamburger slides the drawer in. It overlays the terminal (the main pane keeps
+  // its full width underneath) rather than reflowing it, and it sits within the viewport
+  // without covering the whole screen.
+  await toggle.click();
+  await expect(app).toHaveClass(/af-nav-open/);
+  await expect(rail).toBeVisible();
+  // Poll the settled position: the drawer slides in over ~0.22s, so a boundingBox read
+  // the instant it turns visible catches it mid-transform. Poll until its left edge
+  // reaches the viewport.
+  await expect
+    .poll(async () => (await rail.boundingBox())?.x ?? -9999, {
+      message: "the open drawer slides fully into the viewport",
+    })
+    .toBeGreaterThanOrEqual(-1);
+  const railBox = await rail.boundingBox();
+  expect(railBox!.width, "the drawer does not swallow the whole screen").toBeLessThan(375);
+  w = await widths();
+  expect(w.main, "opening the drawer overlays — it does not shrink the terminal").toBeGreaterThan(w.app - 2);
+
+  // Picking a session closes the drawer and reveals that session's terminal.
+  await p.locator(".af-rail-list .af-row", { hasText: SESSION_A }).click();
+  await expect(app).not.toHaveClass(/af-nav-open/);
+  await expect(rail).not.toBeVisible();
+  await expect(p.locator(".af-main.af-main-term")).toBeVisible();
+
+  await ctx.close();
+});
+
+for (const width of [375, 768]) {
+  test(`mobile (${width}px): the page never scrolls sideways, drawer closed or open`, async ({ browser }) => {
+    const { ctx, p } = await openAt(browser, width, 812);
+
+    expect(await horizontalOverflow(p), "the page must not scroll sideways with the drawer closed").toBeLessThanOrEqual(
+      1,
+    );
+
+    // Open the drawer and re-check: an off-canvas layer that widened the page would show
+    // up here.
+    await p.locator(".af-nav-toggle").click();
+    await expect(p.locator(".af-app")).toHaveClass(/af-nav-open/);
+    expect(await horizontalOverflow(p), "…nor with the drawer slid open").toBeLessThanOrEqual(1);
+
+    await ctx.close();
+  });
+}
+
+test("desktop (1280px): the mobile drawer never engages — the rail stays in view and the hamburger is hidden", async ({
+  browser,
+}) => {
+  // The desktop guard: the responsive rules are scoped to a @media (max-width: 768px)
+  // block, so above it the layout must be exactly as it was — rail in the flow, no
+  // hamburger. This is the "don't regress desktop" assertion.
+  const { ctx, p } = await openAt(browser, 1280, 800);
+  await expect(p.locator(".af-rail")).toBeVisible();
+  await expect(p.locator(".af-nav-toggle")).toBeHidden();
+  await expect(p.locator(".af-app")).not.toHaveClass(/af-nav-open/);
+  await ctx.close();
 });

@@ -9836,9 +9836,15 @@ var AppShell = class {
         this.closeProjectMenu();
       }
     });
+    this.navToggle = h2("button", { type: "button", class: "af-nav-toggle" }, "\u2630");
+    this.navToggle.setAttribute("aria-label", "Toggle sessions");
+    this.navToggle.setAttribute("aria-controls", "af-rail");
+    this.navToggle.setAttribute("aria-expanded", "false");
+    this.navToggle.addEventListener("click", () => this.toggleNav());
     const header = h2(
       "header",
       { class: "af-appbar" },
+      this.navToggle,
       h2("span", { class: "af-brand" }, "Agent Factory"),
       viewNav,
       this.projectSwitchWrap,
@@ -9883,9 +9889,13 @@ var AppShell = class {
     this.railList = h2("ul", { class: "af-rail-list" });
     this.railList.setAttribute("role", "listbox");
     this.railList.setAttribute("aria-label", "Sessions");
-    const rail = h2("nav", { class: "af-rail" }, railHead, this.railList);
+    this.railList.addEventListener("click", () => this.setNav(false));
+    const rail = h2("nav", { class: "af-rail", id: "af-rail" }, railHead, this.railList);
     this.main = h2("section", { class: "af-main" });
-    this.sessionsBody = h2("div", { class: "af-body" }, rail, this.main);
+    this.navScrim = h2("div", { class: "af-nav-scrim" });
+    this.navScrim.setAttribute("aria-hidden", "true");
+    this.navScrim.addEventListener("click", () => this.setNav(false));
+    this.sessionsBody = h2("div", { class: "af-body" }, rail, this.main, this.navScrim);
     this.tasksPane = new TasksPane({
       add: () => this.actions.addTask(),
       toggle: (task) => this.actions.toggleTask(task),
@@ -9993,6 +10003,16 @@ var AppShell = class {
   // selection-changed guard alone wouldn't fire) — otherwise the pane is blank on
   // load until a select-then-deselect. (#1592 Phase 5 PR9)
   mainRendered = false;
+  // The narrow-viewport session rail (web mobile pass): below ~768px the rail is an
+  // off-canvas drawer that the .af-nav-toggle hamburger slides over the terminal, so a
+  // phone gives the terminal the full width. This is the ONLY piece of the responsive
+  // work that needs JS — everything else is @media CSS. `navOpen` is pure UI ephemera
+  // (never store state): the drawer is closed on load, opens on the toggle, and
+  // auto-closes when a session is selected (reveal the terminal) or the view changes.
+  // On desktop the CSS ignores the class, so setNav is an inert no-op there.
+  navToggle;
+  navScrim;
+  navOpen = false;
   /** Points the browser tab at what is on screen, so a pinned/backgrounded tab and the
    *  history entry name the session and project rather than a static "Agent Factory".
    *  Assigns only on a real change (a rename, a selection, or a project switch). */
@@ -10002,6 +10022,21 @@ var AppShell = class {
       this.lastDocTitle = title;
       document.title = title;
     }
+  }
+  /** Opens or closes the narrow-viewport session drawer (web mobile pass). A class on
+   *  the app root that the @media CSS turns into a slide-in rail + scrim; on desktop the
+   *  CSS ignores it, so this is a no-op there. Cheap-guarded so a redundant call from
+   *  update() doesn't thrash the class or the aria state. */
+  setNav(open) {
+    if (this.navOpen === open) {
+      return;
+    }
+    this.navOpen = open;
+    this.el.classList.toggle("af-nav-open", open);
+    this.navToggle.setAttribute("aria-expanded", open ? "true" : "false");
+  }
+  toggleNav() {
+    this.setNav(!this.navOpen);
   }
   /** Applies the latest state, touching only what changed. */
   update(state) {
@@ -10031,6 +10066,8 @@ var AppShell = class {
         tab.classList.toggle("af-viewtab-active", v === state.view);
         tab.setAttribute("aria-selected", v === state.view ? "true" : "false");
       }
+      this.el.classList.toggle("af-view-sessions", state.view === "sessions");
+      this.setNav(false);
     }
     if (this.lastThemeChoice !== state.themeChoice) {
       this.lastThemeChoice = state.themeChoice;
@@ -10049,6 +10086,9 @@ var AppShell = class {
     const sessionsChanged = this.lastSessions !== state.sessions;
     const selectionChanged = this.lastSelectedId !== state.selectedId;
     const projectChanged = this.lastSelectedProject !== state.selectedProject;
+    if (selectionChanged && state.selectedId) {
+      this.setNav(false);
+    }
     if (this.lastProjectSessions !== state.sessions || this.lastProjectTasks !== state.tasks || projectChanged) {
       this.lastProjectSessions = state.sessions;
       this.lastProjectTasks = state.tasks;

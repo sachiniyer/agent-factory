@@ -307,6 +307,7 @@ body {
 }
 .af-app {
   height: 100vh;
+  height: 100dvh;
   display: flex;
   flex-direction: column;
 }
@@ -314,10 +315,30 @@ body {
   display: flex;
   align-items: center;
   gap: var(--af-sp-4);
-  padding: var(--af-sp-3) var(--af-sp-5);
+  padding: max(var(--af-sp-3), env(safe-area-inset-top)) max(var(--af-sp-5), env(safe-area-inset-right)) var(--af-sp-3) max(var(--af-sp-5), env(safe-area-inset-left));
   background: var(--af-bg-surface);
   border-bottom: 1px solid var(--af-border);
   flex-wrap: wrap;
+}
+.af-nav-toggle {
+  display: none;
+  align-items: center;
+  justify-content: center;
+  min-width: 2.75rem;
+  min-height: 2.75rem;
+  padding: 0.3rem 0.55rem;
+  background: transparent;
+  color: var(--af-text);
+  border: 1px solid var(--af-border);
+  border-radius: var(--af-r-md);
+  font: inherit;
+  font-size: var(--af-fs-lg);
+  line-height: 1;
+  cursor: pointer;
+}
+.af-nav-toggle:hover {
+  background: var(--af-bg-inset);
+  border-color: var(--af-border-strong);
 }
 .af-brand {
   font-weight: 600;
@@ -538,6 +559,10 @@ body {
   flex: 1;
   display: flex;
   min-height: 0;
+  position: relative;
+}
+.af-nav-scrim {
+  display: none;
 }
 .af-rail {
   width: 18rem;
@@ -1591,16 +1616,73 @@ body {
   padding: 0.3rem 0.55rem;
   font-size: var(--af-fs-xs);
 }
-@media (max-width: 640px) {
-  .af-body {
-    flex-direction: column;
+@media (max-width: 768px) {
+  .af-app.af-view-sessions .af-nav-toggle {
+    display: inline-flex;
   }
   .af-rail {
-    width: 100%;
-    flex: 0 0 auto;
-    max-height: 45vh;
-    border-right: none;
-    border-bottom: 1px solid var(--af-border);
+    position: absolute;
+    top: 0;
+    left: 0;
+    bottom: 0;
+    z-index: 30;
+    width: min(85vw, 20rem);
+    flex: none;
+    transform: translateX(-100%);
+    visibility: hidden;
+    transition: transform 0.22s ease, visibility 0s linear 0.22s;
+  }
+  .af-app.af-nav-open .af-rail {
+    transform: translateX(0);
+    visibility: visible;
+    box-shadow: var(--af-shadow-overlay);
+    transition: transform 0.22s ease, visibility 0s linear 0s;
+  }
+  .af-nav-scrim {
+    display: block;
+    position: absolute;
+    inset: 0;
+    z-index: 29;
+    background: var(--af-backdrop);
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.22s ease;
+  }
+  .af-app.af-nav-open .af-nav-scrim {
+    opacity: 1;
+    pointer-events: auto;
+  }
+  .af-brand {
+    display: none;
+  }
+  .af-tab {
+    min-height: 2.5rem;
+  }
+  .af-term-action {
+    min-height: 2.5rem;
+    padding: 0.4rem 0.7rem;
+  }
+  .af-tab-close,
+  .af-tab-new {
+    min-width: 2rem;
+    min-height: 2rem;
+  }
+  .af-rail-new,
+  .af-rail-filter,
+  .af-project-switch,
+  .af-viewtab,
+  .af-theme-opt {
+    min-height: 2.25rem;
+  }
+  .af-row {
+    padding-top: var(--af-sp-3);
+    padding-bottom: var(--af-sp-3);
+  }
+  .af-modal-backdrop {
+    padding: var(--af-sp-3);
+  }
+  .af-modal-card {
+    max-height: 92vh;
   }
 }
 .af-config {

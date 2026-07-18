@@ -361,7 +361,12 @@ body {
 
 /* Authed app shell: appbar over a rail + main body. */
 .af-app {
+  /* 100vh is the fallback; 100dvh (dynamic viewport height) is the real value on a
+   * phone, where the address bar shrinks the visible area — with plain vh the terminal
+   * would be cut off under the browser chrome. dvh == vh on desktop, so this is inert
+   * there. */
   height: 100vh;
+  height: 100dvh;
   display: flex;
   flex-direction: column;
 }
@@ -370,13 +375,44 @@ body {
   display: flex;
   align-items: center;
   gap: var(--af-sp-4);
-  padding: var(--af-sp-3) var(--af-sp-5);
+  /* The base padding is the desktop value; the max(…, env(safe-area-inset-*)) only
+   * grows it on a device with a display cutout (notch/rounded corner) once the viewport
+   * meta opts into viewport-fit=cover. env() resolves to 0 on every non-notched display,
+   * so the desktop bar is byte-for-byte unchanged. */
+  padding: max(var(--af-sp-3), env(safe-area-inset-top)) max(var(--af-sp-5), env(safe-area-inset-right))
+    var(--af-sp-3) max(var(--af-sp-5), env(safe-area-inset-left));
   background: var(--af-bg-surface);
   border-bottom: 1px solid var(--af-border);
   /* Keep the bar to one row on a comfortable width, but never let it force the page
    * wider than the viewport: on a narrow window it wraps to a second line instead of
    * overflowing (the overflow-x guard on body would otherwise clip it). */
   flex-wrap: wrap;
+}
+
+/* The narrow-viewport rail toggle (web mobile pass): a hamburger that slides the
+ * session drawer over the terminal. Hidden on desktop (the rail is always in view) and
+ * shown only in the sessions view on a phone — see the @media block. Sized to a ~44px
+ * tap target so it clears the touch-target floor. */
+.af-nav-toggle {
+  display: none;
+  align-items: center;
+  justify-content: center;
+  min-width: 2.75rem;
+  min-height: 2.75rem;
+  padding: 0.3rem 0.55rem;
+  background: transparent;
+  color: var(--af-text);
+  border: 1px solid var(--af-border);
+  border-radius: var(--af-r-md);
+  font: inherit;
+  font-size: var(--af-fs-lg);
+  line-height: 1;
+  cursor: pointer;
+}
+
+.af-nav-toggle:hover {
+  background: var(--af-bg-inset);
+  border-color: var(--af-border-strong);
 }
 
 .af-brand {
@@ -648,11 +684,21 @@ body {
   font-weight: 600;
 }
 
-/* Body: fixed-width rail + flexible main content. */
+/* Body: fixed-width rail + flexible main content. `position: relative` is the
+ * positioning context the narrow-viewport rail drawer + its scrim absolutely position
+ * against (web mobile pass); it is inert for the desktop flex row. */
 .af-body {
   flex: 1;
   display: flex;
   min-height: 0;
+  position: relative;
+}
+
+/* The rail drawer's tap-to-dismiss scrim (web mobile pass). Absent on desktop; the
+ * @media block turns it into a dimming layer over the terminal while the mobile rail is
+ * open, and a tap on it closes the drawer (ui.ts). */
+.af-nav-scrim {
+  display: none;
 }
 
 .af-rail {
@@ -2065,18 +2111,120 @@ body {
   font-size: var(--af-fs-xs);
 }
 
-/* Narrow viewport: stack the rail above the main pane (design §7.2 item 7 —
- * usable-but-not-optimized on a phone). */
-@media (max-width: 640px) {
-  .af-body {
-    flex-direction: column;
+/* ---- Narrow viewport: the session rail becomes an off-canvas drawer -------
+ * Sachin's mobile pass: below ~768px (a phone, and a small tablet in portrait) the
+ * rail slides off-canvas so the terminal gets the full width, and the .af-nav-toggle
+ * hamburger slides it back over the terminal as an overlay. Everything here is CSS on a
+ * single root class (.af-nav-open, set by ui.ts) — no JS layout math — and none of it
+ * exists above the breakpoint, so the desktop rail + main row is untouched.
+ *
+ * The drawer overlays rather than reflows: it is absolutely positioned inside .af-body,
+ * so the main pane keeps the full body width whether the drawer is open or shut, and the
+ * terminal's own ResizeObserver never sees a width change when it toggles. */
+@media (max-width: 768px) {
+  /* The hamburger is meaningful only where there is a rail to reveal — the sessions
+   * view. In tasks/config the body (and its drawer) is display:none, so the toggle
+   * would be a dead control; hide it there. */
+  .af-app.af-view-sessions .af-nav-toggle {
+    display: inline-flex;
   }
+
+  /* The parked drawer sits at translateX(-100%) — off the left edge — which the root
+   * `body { overflow-x: hidden }` guard already clips, so no `overflow: hidden` is needed
+   * here (and adding one would clip the rail-head filter menu / tab-new menu that open
+   * inside the body). */
+
+  /* The rail: a left-edge drawer, parked off-canvas and slid in on .af-nav-open. It is
+   * out of flow (position: absolute), so .af-main below takes the whole body width. */
   .af-rail {
-    width: 100%;
-    flex: 0 0 auto;
-    max-height: 45vh;
-    border-right: none;
-    border-bottom: 1px solid var(--af-border);
+    position: absolute;
+    top: 0;
+    left: 0;
+    bottom: 0;
+    z-index: 30;
+    width: min(85vw, 20rem);
+    flex: none;
+    transform: translateX(-100%);
+    /* The parked drawer is visibility:hidden so it takes no touches and drops out of the
+     * tab/a11y order; the 0.22s visibility delay lets it finish sliding OUT before it
+     * disappears (open flips it visible immediately, at 0s). */
+    visibility: hidden;
+    transition:
+      transform 0.22s ease,
+      visibility 0s linear 0.22s;
+  }
+
+  .af-app.af-nav-open .af-rail {
+    transform: translateX(0);
+    visibility: visible;
+    box-shadow: var(--af-shadow-overlay);
+    transition:
+      transform 0.22s ease,
+      visibility 0s linear 0s;
+  }
+
+  /* The scrim over the terminal while the drawer is open — dim + tap-to-close. */
+  .af-nav-scrim {
+    display: block;
+    position: absolute;
+    inset: 0;
+    z-index: 29;
+    background: var(--af-backdrop);
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.22s ease;
+  }
+
+  .af-app.af-nav-open .af-nav-scrim {
+    opacity: 1;
+    pointer-events: auto;
+  }
+
+  /* The brand wordmark is decorative — drop it on a phone so the functional appbar
+   * controls (hamburger, view nav, project switch) have room before they wrap. */
+  .af-brand {
+    display: none;
+  }
+
+  /* Touch targets: lift the primary controls to a ~40-44px tap area so nothing on the
+   * terminal path depends on a precise tap or a hover that touch never delivers. */
+  .af-tab {
+    min-height: 2.5rem;
+  }
+
+  .af-term-action {
+    min-height: 2.5rem;
+    padding: 0.4rem 0.7rem;
+  }
+
+  .af-tab-close,
+  .af-tab-new {
+    min-width: 2rem;
+    min-height: 2rem;
+  }
+
+  .af-rail-new,
+  .af-rail-filter,
+  .af-project-switch,
+  .af-viewtab,
+  .af-theme-opt {
+    min-height: 2.25rem;
+  }
+
+  .af-row {
+    padding-top: var(--af-sp-3);
+    padding-bottom: var(--af-sp-3);
+  }
+
+  /* Overlays go near-full-width so a modal (create session, confirms) is never clipped
+   * off the edge — the card is already width:100% max-width:30rem, this just trims the
+   * backdrop gutter that would otherwise pinch it on a 375px screen. */
+  .af-modal-backdrop {
+    padding: var(--af-sp-3);
+  }
+
+  .af-modal-card {
+    max-height: 92vh;
   }
 }
 
