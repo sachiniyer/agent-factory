@@ -2,7 +2,7 @@ package daemon
 
 import (
 	"context"
-	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/sachiniyer/agent-factory/config"
@@ -10,15 +10,21 @@ import (
 	"github.com/sachiniyer/agent-factory/session"
 )
 
-// failKillBackend is a readyFakeBackend whose Kill always errors, modelling a
-// teardown that dies partway — the crash window the kill-intent tombstone
-// (#1108) exists for.
+// failKillBackend is a readyFakeBackend whose Kill reports an UNKNOWN-state
+// teardown — the pane's liveness was never confirmed (session.ErrPaneMayBeLive),
+// so the workspace may still be live and on disk. That is the ONLY teardown
+// outcome that must RETAIN the record: deleting it would orphan a possibly-live
+// workspace, so it is what exercises the #1108 kill-intent tombstone surviving a
+// failed teardown. A PLAIN error would model a teardown that told us the workspace
+// is gone, which deleteSessionRecord/TeardownStateUnknown now (correctly) let
+// through to delete the row (#2017) — so it would no longer model this case at all.
+// Mirrors the unsafeTeardownBackend rationale in kill_commit_test.go.
 type failKillBackend struct {
 	readyFakeBackend
 }
 
 func (failKillBackend) Kill(*session.Instance) error {
-	return errors.New("teardown interrupted")
+	return fmt.Errorf("teardown interrupted: %w", session.ErrPaneMayBeLive)
 }
 
 // recordFor returns the persisted InstanceData for title, or nil.
