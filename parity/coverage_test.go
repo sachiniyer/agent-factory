@@ -70,12 +70,16 @@ func TestAuditCoverageReport(t *testing.T) {
 	// --- Daemon route catalog ----------------------------------------------
 	routes := deriveRoutes(t)
 	c.count("daemon.public-routes", len(routes))
-	// The public catalog is not the whole mux. Internal routes (Preview,
-	// ResumeFromLimit) are served but excluded from HTTPRoutes(), so they are
-	// covered at the FIELD level via auditedRequests instead — state that rather
-	// than letting the route count imply total coverage.
+	// The public catalog is not the whole mux. Internal routes (Preview) are served
+	// but excluded from HTTPRoutes(), so they are covered at the FIELD level via
+	// auditedRequests instead — state that rather than letting the route count imply
+	// total coverage.
+	//
+	// ResumeFromLimit left this list in #1934: it is now a PUBLIC route, so the
+	// route count covers it directly and naming it here would claim a blind spot
+	// that no longer exists.
 	c.count("daemon.audited-request-types", len(auditedRequests))
-	for _, internal := range []string{"PreviewRequest", "ResumeFromLimitRequest"} {
+	for _, internal := range []string{"PreviewRequest"} {
 		if _, ok := auditedRequests[internal]; !ok {
 			c.skip("daemon.internal-route "+internal, "served but absent from HTTPRoutes() AND "+
 				"not in auditedRequests, so neither the verb nor the field level sees it")

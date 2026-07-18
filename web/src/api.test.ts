@@ -22,6 +22,7 @@ import {
   renameTab,
   reorderTab,
   restoreSession,
+  resumeFromLimit,
   sendPrompt,
   triggerTask,
   updateTask,
@@ -101,6 +102,20 @@ test("listBackends asks the daemon for the picked repo's catalog", async () => {
   assert.equal(cap.url, "/v1/ListBackends");
   assert.equal(cap.auth, "Bearer tok");
   assert.equal(cap.body.repo_path, "/repos/af", "availability and the default are per-repo facts");
+});
+
+// #1934: the verb re-delivers a PROMPT into a pane, so it must key by stable id
+// like kill/archive — not by title like restore. A title-resolved misroute here
+// types someone's instruction into an unrelated repo's agent.
+test("resumeFromLimit posts the stable id, so a duplicate title cannot misroute the prompt", async () => {
+  const cap = stubFetch();
+  await resumeFromLimit("id-repoB", "feature", "tok");
+
+  assert.equal(cap.url, "/v1/ResumeFromLimit");
+  assert.equal(cap.auth, "Bearer tok");
+  assert.equal(cap.body.id, "id-repoB", "the daemon resolves by id first");
+  assert.equal(cap.body.title, "feature", "the title still rides along for the event and the title-only fallback");
+  assert.equal(cap.body.repo_id, "", "an all-repos web client scopes by id, not repo");
 });
 
 test("killSession posts the stable id as the primary key alongside the title", async () => {

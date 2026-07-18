@@ -7,7 +7,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { type DotKind, isArchived, isWorking, rowStatus, rowTitle } from "./status.js";
+import { type DotKind, isArchived, isLimitReached, isWorking, rowStatus, rowTitle } from "./status.js";
 import { InFlightOp, Liveness, Status, type SessionData } from "./types.js";
 
 function sess(over: Partial<SessionData> = {}): SessionData {
@@ -97,6 +97,36 @@ test("isArchived reads the liveness (and the legacy fallback)", () => {
   assert.equal(isArchived(sess({ liveness: Liveness.Archived })), true);
   assert.equal(isArchived(sess({ liveness: Liveness.Ready })), false);
   assert.equal(isArchived(sess({ status: Status.Archived })), true);
+});
+
+// isLimitReached gates the web's Retry action (#1934). It is the predicate that
+// decides whether a stuck session offers a way out at all, so its edges matter more
+// than a boolean helper's usually would.
+test("isLimitReached reads the liveness, so Retry appears exactly when the session is parked", () => {
+  assert.equal(isLimitReached(sess({ liveness: Liveness.LimitReached })), true);
+  assert.equal(isLimitReached(sess({ liveness: Liveness.Ready })), false);
+  assert.equal(isLimitReached(sess({ liveness: Liveness.Running })), false);
+  assert.equal(isLimitReached(sess({ liveness: Liveness.Archived })), false);
+  assert.equal(isLimitReached(sess({ liveness: Liveness.Lost })), false);
+  assert.equal(isLimitReached(sess()), false, "a projection with no liveness is not limit-blocked");
+});
+
+// The reset timestamp is NOT the signal, and conflating them breaks both ways.
+// A session can be limit-blocked before its reset time has been parsed (the banner
+// matched, the time did not), and a RESUMED session keeps its stale limit_reset_at
+// in the projection — so keying the button off the timestamp would hide Retry on a
+// genuinely parked session and show it on a running one.
+test("isLimitReached ignores limit_reset_at, which outlives the state it described", () => {
+  assert.equal(
+    isLimitReached(sess({ liveness: Liveness.LimitReached })),
+    true,
+    "parked with no parsed reset time still offers Retry",
+  );
+  assert.equal(
+    isLimitReached(sess({ liveness: Liveness.Ready, limit_reset_at: "2026-07-18T15:04:00Z" })),
+    false,
+    "a resumed session carrying a stale reset time must not offer Retry",
+  );
 });
 
 /** Builds an RFC3339 timestamp for today at the given local hour/min so the

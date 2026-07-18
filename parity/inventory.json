@@ -298,8 +298,8 @@
         "pointer": "keys/keys.go:149 (c) -> app/session_control.go:199"
       },
       "web": {
-        "status": "no",
-        "pointer": "renders the limit state (web/src/status.ts:57,137) but never calls ResumeFromLimit"
+        "status": "yes",
+        "pointer": "web/src/ui.ts Retry action -> web/src/api.ts resumeFromLimit (shown only on a LimitReached selection)"
       },
       "cli": {
         "status": "no",
@@ -307,7 +307,7 @@
       },
       "verdict": "real-gap",
       "issue": "#1934",
-      "notes": "TUI-only. The route is served but parked in internalHTTPRoutes, and daemon/httproutes.go:185-188 admits this is provisional: 'ResumeFromLimit is a genuine client-facing session verb (the TUI `c` key); it lands here rather than the public catalog only to hold the catalog steady in this PR — promoting it to httpRoutes is a one-line follow-up.' That follow-up never happened. The web shows a session is limit-blocked with no way out."
+      "notes": "PARTIALLY closed by #1934: the route is promoted out of internalHTTPRoutes into the public catalog — the one-line follow-up daemon/httproutes.go promised in #1592 Phase 2 PR3 and never wrote — and the web now offers Retry on a limit-blocked session, mirroring the TUI's `c`: shown only when the selection is actually LimitReached, no confirm, optimistic clear on success. ResumeFromLimitRequest gained an `id` so the web addresses the session by stable id (wire.id-addressing) rather than title; the verb re-delivers a prompt into a pane, so a title misroute would type it into another repo's agent. STILL A GAP on the CLI: there is no retry verb in the cobra tree. That half is deliberately not in #1934 because naming a new public CLI noun (`af sessions retry-limit`? a flag on an existing verb?) is an owner call, and the issue says so. Re-verdict to parity once that lands."
     },
     {
       "id": "session.attach",
@@ -1311,6 +1311,7 @@
       "POST /v1/RestoreArchived": "session.restore",
       "POST /v1/RestoreSession": "session.restore",
       "POST /v1/SendPrompt": "session.send-prompt",
+      "POST /v1/ResumeFromLimit": "session.limit-retry",
       "POST /v1/SetConfigValue": "config.write",
       "POST /v1/SetPRInfo": "session.pr.set",
       "POST /v1/Snapshot": "session.list",
@@ -1379,6 +1380,7 @@
       "ReorderTab": "session.tab.reorder",
       "RestoreSession": "session.restore",
       "SendPrompt": "session.send-prompt",
+      "ResumeFromLimit": "session.limit-retry",
       "SetConfigValue": "config.write",
       "Snapshot": "session.list",
       "TriggerTask": "task.trigger",
@@ -1801,6 +1803,13 @@
           },
           "tab_index": {
             "ok": "The CLI addresses the tab by --name; tab_index is the ordinal fallback the daemon consults only when TabName is empty (daemon/manager_tabs_arrange.go resolveTabTarget)."
+          }
+        }
+      },
+      "ResumeFromLimitRequest": {
+        "tui": {
+          "id": {
+            "gap": "wire.id-addressing"
           }
         }
       }

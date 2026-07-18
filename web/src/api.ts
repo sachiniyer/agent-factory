@@ -331,6 +331,24 @@ export async function restoreSession(title: string, token: string): Promise<void
   await af("RestoreSession", { title, repo_id: "" }, token);
 }
 
+/** Resumes a session blocked at a usage-limit wall (#1934) — the web half of the
+ *  TUI's `c` key. The daemon re-spawns the agent if its tmux session exited while
+ *  blocked, re-delivers the pending prompt, and clears the LimitReached liveness;
+ *  the resulting session.updated event drops the ◆ badge from the rail.
+ *
+ *  Sends `id` like kill/archive, NOT title-only like restore: the request struct
+ *  gained an `id` field in #1934 precisely so this could. It matters more here
+ *  than almost anywhere — the verb re-delivers a PROMPT into a pane, so resolving
+ *  a duplicate title across repos to the wrong session would type someone's
+ *  instruction into an unrelated agent.
+ *
+ *  The daemon refuses a session that is not actually limit-blocked, so a stale
+ *  click (the limit cleared itself between render and click) surfaces as an error
+ *  rather than an unwanted prompt. */
+export async function resumeFromLimit(id: string, title: string, token: string): Promise<void> {
+  await af("ResumeFromLimit", { id, title, repo_id: "" }, token);
+}
+
 /** The daemon's DeleteProject response: how many sessions it archived vs tore
  *  down (in-place ones that can't be archived). */
 export interface DeleteProjectResult {
