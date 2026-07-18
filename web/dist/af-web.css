@@ -1434,6 +1434,74 @@ body {
   color: var(--af-text-2);
   cursor: pointer;
 }
+.af-modal-body [hidden] {
+  display: none;
+}
+.af-schedule-row {
+  display: flex;
+  align-items: center;
+  gap: var(--af-sp-2);
+}
+.af-schedule-clock {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--af-sp-2);
+}
+.af-schedule-num {
+  width: 5rem;
+  flex: none;
+}
+.af-schedule-meridiem {
+  width: auto;
+  flex: none;
+}
+.af-schedule-sep,
+.af-schedule-unit {
+  color: var(--af-text-2);
+  font-size: var(--af-fs-sm);
+}
+.af-weekdays {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--af-sp-2);
+}
+.af-weekday {
+  width: 2.25rem;
+  height: 2.25rem;
+  padding: 0;
+  background: var(--af-bg-inset);
+  border: 1px solid var(--af-border);
+  border-radius: var(--af-r-md);
+  color: var(--af-text-2);
+  font: inherit;
+  font-size: var(--af-fs-sm);
+  cursor: pointer;
+}
+.af-weekday:hover {
+  border-color: var(--af-accent);
+}
+.af-weekday-on {
+  background: var(--af-accent);
+  border-color: var(--af-accent);
+  color: var(--af-on-accent);
+  font-weight: 600;
+}
+.af-schedule-preview {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+.af-schedule-human {
+  margin: 0;
+  color: var(--af-text);
+  font-size: var(--af-fs-md);
+}
+.af-schedule-cron {
+  font-family: var(--af-font-mono);
+  font-size: var(--af-fs-sm);
+  color: var(--af-text-2);
+  cursor: default;
+}
 .af-modal-text {
   margin: 0;
   color: var(--af-text-2);

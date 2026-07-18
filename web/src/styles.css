@@ -1877,6 +1877,99 @@ body {
   cursor: pointer;
 }
 
+/* `hidden` must actually hide inside a modal. The fields' own `display:flex` above
+ * is an AUTHOR style, so it outranks the UA `[hidden] { display: none }` rule
+ * regardless of specificity — the same hazard .af-viewport documents below. Without
+ * this, a hidden row stays on screen: the schedule picker's contextual rows (#2057)
+ * would all show at once, and so would the trigger toggle's inactive field, which is
+ * how the cron AND watch inputs were both visible before this rule existed. */
+.af-modal-body [hidden] {
+  display: none;
+}
+
+/* The schedule picker (#2057): a row of cells for the selected schedule type, then
+ * the plain-English preview and the read-only cron it generates. */
+.af-schedule-row {
+  display: flex;
+  align-items: center;
+  gap: var(--af-sp-2);
+}
+
+.af-schedule-clock {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--af-sp-2);
+}
+
+.af-schedule-num {
+  width: 5rem;
+  flex: none;
+}
+
+.af-schedule-meridiem {
+  width: auto;
+  flex: none;
+}
+
+.af-schedule-sep,
+.af-schedule-unit {
+  color: var(--af-text-2);
+  font-size: var(--af-fs-sm);
+}
+
+/* The weekday toggles: "M T W T F S S", Monday-first. State reads from the filled
+ * background + aria-pressed, no animation (#1766). */
+.af-weekdays {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--af-sp-2);
+}
+
+.af-weekday {
+  width: 2.25rem;
+  height: 2.25rem;
+  padding: 0;
+  background: var(--af-bg-inset);
+  border: 1px solid var(--af-border);
+  border-radius: var(--af-r-md);
+  color: var(--af-text-2);
+  font: inherit;
+  font-size: var(--af-fs-sm);
+  cursor: pointer;
+}
+
+.af-weekday:hover {
+  border-color: var(--af-accent);
+}
+
+.af-weekday-on {
+  background: var(--af-accent);
+  border-color: var(--af-accent);
+  color: var(--af-on-accent);
+  font-weight: 600;
+}
+
+.af-schedule-preview {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+
+.af-schedule-human {
+  margin: 0;
+  color: var(--af-text);
+  font-size: var(--af-fs-md);
+}
+
+/* The generated cron: read-only, monospace, and visibly not an input you fill in —
+ * it is there so the user can see (and copy) exactly what gets stored. */
+.af-schedule-cron {
+  font-family: var(--af-font-mono);
+  font-size: var(--af-fs-sm);
+  color: var(--af-text-2);
+  cursor: default;
+}
+
 .af-modal-text {
   margin: 0;
   color: var(--af-text-2);

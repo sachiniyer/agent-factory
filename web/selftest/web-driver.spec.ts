@@ -312,6 +312,22 @@ async function dragTabOntoPaneHitTested(
   );
 }
 
+/** Points the task modal's schedule picker (#2057) at the "every N minutes" preset.
+ *  The task form no longer has a bare cron text box: a schedule TYPE plus its
+ *  contextual inputs generate the expression, so a test that wants an
+ *  every-N-minutes cron drives the preset that produces it. */
+async function setEveryNMinutes(modal: Locator, minutes: number): Promise<void> {
+  await modal.locator('select[aria-label="Schedule type"]').selectOption("everyNMinutes");
+  await modal.locator('input[aria-label="Interval"]').fill(String(minutes));
+}
+
+/** Points the schedule picker at Custom and fills its raw cron field — the advanced
+ *  escape hatch, and the only place a literal expression is typed now. */
+async function setCustomCron(modal: Locator, expr: string): Promise<void> {
+  await modal.locator('select[aria-label="Schedule type"]').selectOption("custom");
+  await modal.locator('input[aria-label="Cron expression"]').fill(expr);
+}
+
 /** Opens the app on the loopback daemon and asserts the tokenless auto-connect
  *  (#1696): the SPA learns via /v1/auth-info that this loopback client needs no
  *  token, skips the paste-token login entirely, and renders the authed shell with
@@ -1840,7 +1856,7 @@ test("task-only project (redesign PR2, follow-on): add-task targets ITS repo, an
   const modal = page.locator(".af-modal-card");
   await expect(modal).toBeVisible();
   await modal.locator('input[aria-label="Task name"]').fill(added);
-  await modal.locator('input[aria-label="Cron expression"]').fill("*/5 * * * *");
+  await setEveryNMinutes(modal, 5);
   await modal.locator('textarea[aria-label="Prompt"]').fill("echo mock3-added");
   await modal.locator("button.af-primary").click();
 
@@ -1910,7 +1926,7 @@ test("tasks view (#1592 PR8): list the seeded task; add / trigger / remove round
   const modal = page.locator(".af-modal-card");
   await expect(modal).toBeVisible();
   await modal.locator('input[aria-label="Task name"]').fill(added);
-  await modal.locator('input[aria-label="Cron expression"]').fill("*/5 * * * *");
+  await setEveryNMinutes(modal, 5);
   await modal.locator('textarea[aria-label="Prompt"]').fill("echo scheduled-web");
   await modal.locator("button.af-primary").click();
 
@@ -1984,7 +2000,7 @@ test("tasks view edit (#1935): the Edit form is seeded from the task, and a chan
   const addModal = page.locator(".af-modal-card");
   await expect(addModal).toBeVisible();
   await addModal.locator('input[aria-label="Task name"]').fill(named);
-  await addModal.locator('input[aria-label="Cron expression"]').fill(originalCron);
+  await setEveryNMinutes(addModal, 5); // generates originalCron
   await addModal.locator('textarea[aria-label="Prompt"]').fill("echo original");
   await addModal.locator("button.af-primary").click();
 
@@ -2001,12 +2017,17 @@ test("tasks view edit (#1935): the Edit form is seeded from the task, and a chan
   await expect(editModal).toBeVisible();
   await expect(editModal.locator(".af-modal-title")).toHaveText("Edit task");
   await expect(editModal.locator('input[aria-label="Task name"]')).toHaveValue(named);
-  await expect(editModal.locator('input[aria-label="Cron expression"]')).toHaveValue(originalCron);
+  // The schedule seeds through ParseCron (#2057): the stored expression re-opens as
+  // the preset it maps to, and the read-only cron line shows what would be saved.
+  await expect(editModal.locator('select[aria-label="Schedule type"]')).toHaveValue("everyNMinutes");
+  await expect(editModal.locator('input[aria-label="Interval"]')).toHaveValue("5");
+  await expect(editModal.locator('input[aria-label="Generated cron"]')).toHaveValue(originalCron);
   await expect(editModal.locator('textarea[aria-label="Prompt"]')).toHaveValue("echo original");
 
-  // Change the cron expression and the prompt, then save.
+  // Change the cron expression and the prompt, then save. This one goes through the
+  // Custom escape hatch, so the literal expression is what gets stored.
   const newCron = "30 8 * * 1";
-  await editModal.locator('input[aria-label="Cron expression"]').fill(newCron);
+  await setCustomCron(editModal, newCron);
   await editModal.locator('textarea[aria-label="Prompt"]').fill("echo edited");
   await editModal.locator("button.af-primary", { hasText: "Save" }).click();
   await expect(editModal).toBeHidden();
@@ -2043,6 +2064,131 @@ test("tasks view edit (#1935): the Edit form is seeded from the task, and a chan
   await page.unroute("**/v1/AddTask");
   await page.unroute("**/v1/UpdateTask");
   await page.unroute("**/v1/RemoveTask");
+  await page.locator('.af-viewtab[data-view="sessions"]').click();
+  await expect(page.locator(".af-rail-list")).toBeVisible();
+});
+
+test("schedule picker (#2057): a preset generates the cron, an edit re-opens as that preset, and the change PERSISTS", async () => {
+  // Phase 2 of #2057: the raw-cron box in the task form is replaced by a schedule
+  // TYPE plus only that type's inputs, a plain-English preview, and the generated
+  // cron shown read-only. Cron is still what gets stored, so this asserts the whole
+  // chain — picker state → generated expression → what the daemon persists → what
+  // the picker shows when the task is re-opened.
+  //
+  // The cron/human strings asserted here are the same ones the shared vector file
+  // (schedule/testdata/vectors.json) pins for the Go model, so this flow also
+  // demonstrates the browser and TUI pickers agreeing on real input.
+  let addedCron: string | undefined;
+  let updateBody: { update?: Record<string, unknown> } | null = null;
+  await page.route("**/v1/AddTask", async (route) => {
+    addedCron = route.request().postDataJSON()?.task?.cron_expr;
+    await route.continue();
+  });
+  await page.route("**/v1/UpdateTask", async (route) => {
+    updateBody = route.request().postDataJSON();
+    await route.continue();
+  });
+
+  await page.locator('.af-viewtab[data-view="tasks"]').click();
+  const tasks = page.locator(".af-tasks");
+  await expect(tasks).toBeVisible();
+
+  const named = `probe-sched-${Date.now().toString(36)}`;
+  await tasks.locator(".af-tasks-add").click();
+  const addModal = page.locator(".af-modal-card");
+  await expect(addModal).toBeVisible();
+  await addModal.locator('input[aria-label="Task name"]').fill(named);
+
+  // A brand-new task opens on a friendly default (daily at 9:00 AM), NOT a blank
+  // cron box, with the preview and generated cron already filled in.
+  const typeSelect = addModal.locator('select[aria-label="Schedule type"]');
+  const generated = addModal.locator('input[aria-label="Generated cron"]');
+  const preview = addModal.locator(".af-schedule-human");
+  await expect(typeSelect).toHaveValue("daily");
+  await expect(generated).toHaveValue("0 9 * * *");
+  await expect(preview).toHaveText("Every day at 9:00 AM");
+
+  // Contextual inputs: a daily schedule shows the time, and nothing else. The
+  // weekday toggles, the day-of-month cell and the raw-cron escape hatch are all
+  // hidden until their type is picked — and the OTHER trigger's watch field stays
+  // hidden too (it shares the same `hidden` mechanism this relies on).
+  await expect(addModal.locator('input[aria-label="Hour"]')).toBeVisible();
+  await expect(addModal.locator(".af-weekdays")).toBeHidden();
+  await expect(addModal.locator('input[aria-label="Day of month"]')).toBeHidden();
+  await expect(addModal.locator('input[aria-label="Cron expression"]')).toBeHidden();
+  await expect(addModal.locator('input[aria-label="Watch command"]')).toBeHidden();
+
+  // Build "every week on Mon, Wed at 9:30 AM" through the picker.
+  await typeSelect.selectOption("weekly");
+  await expect(addModal.locator(".af-weekdays")).toBeVisible();
+  await addModal.locator('input[aria-label="Minute"]').fill("30");
+  // Monday is on by default; adding Wednesday makes the two-day list.
+  await expect(addModal.locator('button[aria-label="Monday"]')).toHaveAttribute("aria-pressed", "true");
+  await addModal.locator('button[aria-label="Wednesday"]').click();
+  await expect(addModal.locator('button[aria-label="Wednesday"]')).toHaveAttribute("aria-pressed", "true");
+
+  // The preview and the read-only cron are live, and byte-identical to what the Go
+  // model produces for this schedule.
+  await expect(preview).toHaveText("Every week on Mon, Wed at 9:30 AM");
+  await expect(generated).toHaveValue("30 9 * * 1,3");
+
+  await addModal.locator('textarea[aria-label="Prompt"]').fill("echo scheduled");
+  await addModal.locator("button.af-primary").click();
+
+  // What the daemon was asked to store is the generated expression — the wire format
+  // is unchanged, only the input UX.
+  const row = tasks.locator(".af-task-row", { hasText: named });
+  await expect(row).toBeVisible({ timeout: 30_000 });
+  await expect(addModal).toBeHidden();
+  expect(addedCron, "AddTask must carry the picker's generated cron").toBe("30 9 * * 1,3");
+  await expect(row.locator(".af-task-trigger")).toContainText("30 9 * * 1,3");
+
+  // Re-open it: the stored cron round-trips back through ParseCron into the WEEKLY
+  // preset with its cells restored — not a raw string in a text box.
+  await row.locator("button", { hasText: "Edit" }).click();
+  const editModal = page.locator(".af-modal-card");
+  await expect(editModal).toBeVisible();
+  await expect(editModal.locator('select[aria-label="Schedule type"]')).toHaveValue("weekly");
+  await expect(editModal.locator('input[aria-label="Hour"]')).toHaveValue("9");
+  await expect(editModal.locator('input[aria-label="Minute"]')).toHaveValue("30");
+  await expect(editModal.locator('select[aria-label="AM/PM"]')).toHaveValue("AM");
+  await expect(editModal.locator('button[aria-label="Monday"]')).toHaveAttribute("aria-pressed", "true");
+  await expect(editModal.locator('button[aria-label="Wednesday"]')).toHaveAttribute("aria-pressed", "true");
+  await expect(editModal.locator('button[aria-label="Tuesday"]')).toHaveAttribute("aria-pressed", "false");
+  await expect(editModal.locator('input[aria-label="Generated cron"]')).toHaveValue("30 9 * * 1,3");
+
+  // Switch it to a different preset and save.
+  await editModal.locator('select[aria-label="Schedule type"]').selectOption("everyNHours");
+  await editModal.locator('input[aria-label="Interval"]').fill("6");
+  await expect(editModal.locator(".af-schedule-human")).toHaveText("Every 6 hours");
+  await expect(editModal.locator('input[aria-label="Generated cron"]')).toHaveValue("0 */6 * * *");
+  await editModal.locator("button.af-primary", { hasText: "Save" }).click();
+  await expect(editModal).toBeHidden();
+
+  expect(updateBody?.update?.cron_expr, "the edit patch carries the newly generated cron").toBe("0 */6 * * *");
+  await expect(row.locator(".af-task-trigger")).toContainText("0 */6 * * *", { timeout: 30_000 });
+
+  // The real proof: RELOAD and re-fetch from the daemon — the generated cron was
+  // actually persisted, and the picker seeds itself from it again.
+  await page.reload();
+  await expect(page.locator(".af-app")).toBeVisible();
+  await page.locator('.af-viewtab[data-view="tasks"]').click();
+  const reloadedRow = page.locator(".af-tasks .af-task-row", { hasText: named });
+  await expect(reloadedRow).toBeVisible({ timeout: 30_000 });
+  await expect(reloadedRow.locator(".af-task-trigger")).toContainText("0 */6 * * *");
+  await reloadedRow.locator("button", { hasText: "Edit" }).click();
+  const reopened = page.locator(".af-modal-card");
+  await expect(reopened.locator('select[aria-label="Schedule type"]')).toHaveValue("everyNHours");
+  await expect(reopened.locator('input[aria-label="Interval"]')).toHaveValue("6");
+  await reopened.locator("button.af-ghost", { hasText: "Cancel" }).click();
+  await expect(reopened).toBeHidden();
+
+  // Clean up and return to the sessions view for the following flows.
+  await reloadedRow.locator("button", { hasText: "Remove" }).click();
+  await expect(page.locator(".af-tasks .af-task-row", { hasText: named })).toHaveCount(0, { timeout: 30_000 });
+
+  await page.unroute("**/v1/AddTask");
+  await page.unroute("**/v1/UpdateTask");
   await page.locator('.af-viewtab[data-view="sessions"]').click();
   await expect(page.locator(".af-rail-list")).toBeVisible();
 });
