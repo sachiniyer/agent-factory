@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -118,11 +119,33 @@ func probeHTTPSocket() (path string, exists bool, listening ProbeAnswer) {
 	}
 	conn, err := net.DialTimeout("unix", path, daemonDialTimeout)
 	if err != nil {
-		// The socket is there and refused us: nobody is behind it.
-		return path, true, AnswerNo()
+		return path, true, classifyDialFailure(path, err)
 	}
 	_ = conn.Close()
 	return path, true, AnswerYes()
+}
+
+// classifyDialFailure turns a FAILED dial of the socket into an answer about
+// whether anything is listening. A dial error is not automatically a "no".
+//
+//   - A refusal (ECONNREFUSED) is a completed answer: the socket file is there
+//     and the kernel had no listener to hand the connection to. Nobody is
+//     behind it — a definite No.
+//   - A deadline expiry is NOT an answer. A listener can be present with a
+//     saturated accept backlog, so the connect waits and the 250ms bound fires
+//     before it is serviced. Reading that timeout as No is the exact
+//     timeout-is-not-a-negative fabrication #1920 set out to kill, one field
+//     over (#2014): it would send a user to `af daemon restart` over a
+//     live-but-busy listener. A timeout is Undetermined, never a made-up No.
+func classifyDialFailure(path string, err error) ProbeAnswer {
+	if os.IsTimeout(err) || errors.Is(err, os.ErrDeadlineExceeded) {
+		return Undetermined(fmt.Errorf(
+			"dialing %s did not complete within %s, so whether anything is listening is unknown "+
+				"(a listener may be present with a saturated accept backlog): %w",
+			path, daemonDialTimeout, err))
+	}
+	// The socket is there and refused us: nobody is behind it.
+	return AnswerNo()
 }
 
 // DaemonSocketNames returns the file names of the Unix sockets a daemon binds
