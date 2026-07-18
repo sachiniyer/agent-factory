@@ -32,6 +32,9 @@ import (
 //   - proc_info(PROC_PIDTASKINFO) — cumulative CPU. kinfo_proc's p_uticks /
 //     p_sticks are legacy fields the modern XNU kernel does not populate, so
 //     reading them would report a confident 0% for a process pegging a core.
+//   - proc_info(PROC_PIDVNODEPATHINFO) — the working directory, this platform's
+//     answer to /proc/<pid>/cwd. kinfo_proc carries no cwd at all, so there is no
+//     cheaper source. Its buffer is decoded in vnodepathinfo.go (#2050).
 //
 // Nothing here reports a read failure as an empty result: an unreadable
 // process table returns an error, and an unreadable CPU counter returns
@@ -225,6 +228,9 @@ const (
 	procInfoCallPIDInfo = 2
 	// procPIDTaskInfo is PROC_PIDTASKINFO, the flavor returning procTaskInfo.
 	procPIDTaskInfo = 4
+	// procPIDVnodePathInfo is PROC_PIDVNODEPATHINFO, the flavor returning
+	// struct proc_vnodepathinfo — the process's cwd and root directory.
+	procPIDVnodePathInfo = 9
 )
 
 // readCPUTime returns pid's cumulative user+system CPU time.
@@ -258,18 +264,53 @@ func readCPUTime(pid int) (time.Duration, error) {
 	return time.Duration(ti.TotalUser + ti.TotalSystem), nil
 }
 
-// readWorkingDir has no darwin backend yet, and returns the honest unknown
-// rather than a guess.
+// readWorkingDir reads pid's cwd from proc_info(PROC_PIDVNODEPATHINFO), the
+// darwin equivalent of reading Linux's /proc/<pid>/cwd symlink (#2050).
 //
-// darwin's cwd source is proc_pidinfo(PROC_PIDVNODEPATHINFO), whose struct is
-// large and cannot be verified from a Linux dev box — and a mis-declared offset
-// would return a WRONG path, i.e. a fabricated POSITIVE, which is strictly worse
-// than "unknown" for the caller that resolves a home in this frame. So until it
-// can be written and proven on a real Mac, this reports (", false): WorkingDir's
-// explicit unknown channel, which skew.go already treats as "cannot resolve"
-// (#1044) and skips. A daemon whose home is spelled RELATIVELY is therefore not
-// evaluated for skew on darwin — a report-only, safe degradation, not a
-// fabricated fact.
-func readWorkingDir(int) (string, bool) {
-	return "", false
+// This goes through the proc_info syscall rather than libproc's proc_pidinfo()
+// for the same reason readCPUTime does: the wrapper needs cgo, and darwin builds
+// here run cgo-free. The flavor is the only difference between the two calls —
+// PROC_PIDVNODEPATHINFO instead of PROC_PIDTASKINFO — so this reuses a syscall
+// shape the package already relies on rather than introducing a cgo dependency
+// on the one path that must keep cross-compiling.
+//
+// The kernel refuses this for processes we do not own (and for others it does
+// not explain — SIP and code-signing restrictions among them). Per this
+// package's rule, that refusal is NOT modelled in advance: we ask, and classify
+// what comes back. Every failure — a refusal, a short write, a path that does
+// not validate — becomes the honest unknown, which the callers treat as "cannot
+// resolve" and skip (#1044). Deliberately no error channel: WorkingDir's
+// contract is two-valued, and every caller here already handles false.
+//
+// The decode is NOT done in this file. It lives in vnodepathinfo.go, untagged,
+// so Linux CI exercises the offset arithmetic that this file can only feed —
+// see that file for why the offsets are validated rather than trusted, and for
+// what a wrong one would cost on the destructive reap path.
+func readWorkingDir(pid int) (string, bool) {
+	var buf [vnodePathInfoSize]byte
+	n, _, errno := syscall.Syscall6(
+		uintptr(unix.SYS_PROC_INFO),
+		uintptr(procInfoCallPIDInfo),
+		uintptr(pid),
+		uintptr(procPIDVnodePathInfo),
+		0,
+		uintptr(unsafe.Pointer(&buf[0])),
+		uintptr(len(buf)),
+	)
+	if errno != 0 {
+		// Includes the forward-compatible case: proc_info returns ENOMEM when the
+		// buffer is smaller than the flavor's struct, so if a future macOS grows
+		// proc_vnodepathinfo this reports unknown and the reap goes back to
+		// no-opping — the same safe degradation it had before #2050, never a
+		// half-decoded path.
+		return "", false
+	}
+	if n != uintptr(len(buf)) {
+		// A short write means the kernel's struct is not the one vnodepathinfo.go
+		// describes, so the bytes at the cwd offset are not the cwd. Same reasoning
+		// as readCPUTime's length check, with a sharper consequence: this value is
+		// what reapWorktreeWriters signals on.
+		return "", false
+	}
+	return cwdFromVnodePathInfo(buf[:n])
 }

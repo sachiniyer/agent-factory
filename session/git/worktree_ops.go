@@ -661,13 +661,12 @@ var (
 // uninterruptible I/O, a mount) is left for the removal to fail loudly on, not
 // spun on forever.
 //
-// PLATFORM GAP (darwin): proctree.WorkingDir has no macOS backend yet — it
-// returns the honest unknown rather than fabricate a path from an unverifiable
-// libproc struct (proctree_darwin.go) — so on darwin every process reads as
-// "cwd unknown", this finds no writers, and the reap no-ops. The #2025 orphan
-// therefore still races on macOS until the darwin working-directory backend
-// lands (tracked in #2050). No-op is the safe degradation: it can never signal
-// the wrong process, only fail to signal the right one.
+// Linux and darwin both back proctree.WorkingDir (/proc/<pid>/cwd and
+// proc_info(PROC_PIDVNODEPATHINFO) respectively), so the reap is live on both
+// as of #2050. Elsewhere, and for any process whose cwd the kernel will not
+// disclose, WorkingDir reports the honest unknown and that process is simply not
+// matched — the safe degradation, since it can only fail to signal the right
+// process, never signal the wrong one.
 func reapWorktreeWriters(worktreePath string) {
 	// The path exists (callers reap only after an os.Stat succeeds), so resolving
 	// symlinks here matches /proc/<pid>/cwd, which the kernel already resolves.
