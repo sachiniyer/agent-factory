@@ -6,6 +6,7 @@ import (
 	stdlog "log"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
 
@@ -158,9 +159,13 @@ func TestMoveWorktree_FallbackRepairsRegistration(t *testing.T) {
 }
 
 // TestMoveWorktree_CrossDeviceCopyCleanupFailureCommitsCopiedLocation covers a
-// copy-then-remove failure in the cross-device fallback. Before #1475, the
-// error returned before worktreePath was updated, so callers persisted the
-// partially deleted source while the complete copy at dest was orphaned.
+// copy-then-remove failure in the cross-device fallback. Two invariants stack
+// here: worktreePath must commit to dest where the bytes live (the #1475 fix —
+// the error used to return before worktreePath was updated, so callers persisted
+// the partially deleted source while the complete copy at dest was orphaned),
+// AND the copy+register success must NOT surface as an error (#2011 — an error
+// return drives the caller into a retry that registers a second, orphaned
+// worktree). The only correct outcome is nil + a warning naming the leftover.
 func TestMoveWorktree_CrossDeviceCopyCleanupFailureCommitsCopiedLocation(t *testing.T) {
 	prevMove := worktreeMoveFast
 	worktreeMoveFast = func(*GitWorktree, string, string) error {
@@ -173,6 +178,11 @@ func TestMoveWorktree_CrossDeviceCopyCleanupFailureCommitsCopiedLocation(t *test
 		return syscall.EXDEV
 	}
 	t.Cleanup(func() { renamePath = prevRename })
+
+	var warnings bytes.Buffer
+	origWarning := aflog.WarningLog
+	aflog.WarningLog = stdlog.New(&warnings, "WARNING: ", 0)
+	t.Cleanup(func() { aflog.WarningLog = origWarning })
 
 	gw, _, srcPath := archiveTestWorktree(t)
 	dest := filepath.Join(testguard.CanonicalTempDir(t), "archived", "repoid", "arch")
@@ -187,12 +197,115 @@ func TestMoveWorktree_CrossDeviceCopyCleanupFailureCommitsCopiedLocation(t *test
 	}
 	t.Cleanup(func() { removeAllPath = prevRemoveAll })
 
-	err := gw.MoveWorktree(dest)
-	require.Error(t, err)
-	assert.ErrorIs(t, err, cleanupErr)
-	assert.Contains(t, err.Error(), "worktree copied and registered")
+	require.NoError(t, gw.MoveWorktree(dest),
+		"a copy+register success with only source cleanup failing must not error (#2011)")
 	assert.True(t, pathExists(srcPath), "the source cleanup failure leaves the original for manual cleanup")
-	assertLiveWorktreeAt(t, gw, dest)
+	assertLiveWorktreeAt(t, gw, dest) // worktreePath committed to dest (#1475), still valid + registered
+	assert.Contains(t, warnings.String(), "failed to remove the leftover source directory")
+	assert.Contains(t, warnings.String(), srcPath)
+}
+
+// countBranchWorktrees returns how many registered worktrees in repoRoot are
+// checked out on branch, per `git worktree list --porcelain`. Used to prove a
+// relocate leaves exactly ONE — never an orphaned second registration.
+func countBranchWorktrees(t *testing.T, repoRoot, branch string) int {
+	t.Helper()
+	out := runGitInPlaceTest(t, repoRoot, "worktree", "list", "--porcelain")
+	n := 0
+	for _, line := range strings.Split(out, "\n") {
+		if line == "branch refs/heads/"+branch {
+			n++
+		}
+	}
+	return n
+}
+
+// TestRelocate_CopySucceedsCleanupFails_NoErrorNoRetryOrphan is the #2011
+// regression. On a cross-device relocate where the byte copy AND `git worktree
+// repair` both succeed but removing the SOURCE directory fails, relocate must
+// return nil: the worktree is valid, registered, and usable at dest — a leftover
+// source dir is a disk-reclamation nuisance, not a move failure. Returning an
+// error here is what corrupts state: it drives the caller's archive-rollback /
+// restore-retry logic even though a valid worktree already exists at dest, and
+// the retry picks a fresh collision-suffixed dest, copies + registers a SECOND
+// worktree, and orphans the first — corrupting `git worktree list` and branch
+// exclusivity.
+//
+// The test drives the REAL MoveWorktree path (the same relocateWorktreeTo engine
+// RestoreWorktreeTo uses) — NOT moveDirCrossDevice directly, which would skip the
+// repair/registration gate that must have SUCCEEDED for this bug to apply — and
+// models the caller's retry-on-error loop: a correct relocate returns nil on
+// attempt 1, so the loop never advances to a second dest and no orphan is born.
+func TestRelocate_CopySucceedsCleanupFails_NoErrorNoRetryOrphan(t *testing.T) {
+	prevMove := worktreeMoveFast
+	worktreeMoveFast = func(*GitWorktree, string, string) error {
+		return errors.New("forced fast-path failure (simulating EXDEV)")
+	}
+	t.Cleanup(func() { worktreeMoveFast = prevMove })
+
+	prevRename := renamePath
+	renamePath = func(_, _ string) error { return syscall.EXDEV }
+	t.Cleanup(func() { renamePath = prevRename })
+
+	var warnings bytes.Buffer
+	origWarning := aflog.WarningLog
+	aflog.WarningLog = stdlog.New(&warnings, "WARNING: ", 0)
+	t.Cleanup(func() { aflog.WarningLog = origWarning })
+
+	gw, repoRoot, srcPath := archiveTestWorktree(t)
+
+	// Fail removal of whatever the CURRENT source directory is on every attempt: a
+	// copy+register success paired with a persistent source-cleanup failure. Keying
+	// on the live worktree path (not a fixed one) means a retry's move is caught
+	// too, so on the buggy code the modeled loop errors on BOTH attempts and
+	// physically creates the orphaned second worktree at dest2.
+	prevRemoveAll := removeAllPath
+	removeAllPath = func(path string) error {
+		if path == gw.GetWorktreePath() {
+			return errors.New("forced source cleanup failure")
+		}
+		return os.RemoveAll(path)
+	}
+	t.Cleanup(func() { removeAllPath = prevRemoveAll })
+
+	// Model the restore/retry loop: the daemon recomputes a collision-suffixed dest
+	// and retries whenever the move returns an error (RestoreArchived via
+	// RestoreWorktreePath). A correct relocate stops the loop after one attempt.
+	baseDest := filepath.Join(testguard.CanonicalTempDir(t), "archived", "repoid", "arch")
+	dest2 := baseDest + "-2"
+
+	dest := baseDest
+	attempts := 0
+	var lastErr error
+	for attempts < 2 {
+		attempts++
+		lastErr = gw.MoveWorktree(dest)
+		if lastErr == nil {
+			break
+		}
+		dest = dest2 // collision handling would pick the next free path on retry
+	}
+
+	require.NoError(t, lastErr,
+		"copy+register success with a failed source cleanup must return nil, not error (else the caller retries into a second worktree)")
+	assert.Equal(t, 1, attempts,
+		"a nil return must stop the caller after one attempt — no retry")
+	assert.False(t, pathExists(dest2),
+		"no second (orphaned) worktree directory must be created by a retry")
+
+	// The one valid worktree is registered at the first dest, branch + dirty tree intact.
+	assertLiveWorktreeAt(t, gw, baseDest)
+
+	// The un-removed source is a leftover directory for manual reclamation — NOT a
+	// registered worktree. Git tracks exactly one worktree on the branch.
+	assert.True(t, pathExists(srcPath),
+		"the source cleanup failure leaves the original directory for manual reclamation")
+	assert.Equal(t, 1, countBranchWorktrees(t, repoRoot, "arch/branch"),
+		"git must track exactly one worktree for the branch — no orphan")
+
+	// The cleanup failure is surfaced (visible, not swallowed) so the leftover disk is reclaimable.
+	assert.Contains(t, warnings.String(), "failed to remove")
+	assert.Contains(t, warnings.String(), srcPath)
 }
 
 // TestRestoreWorktreeTo_FallbackRepairsSubmoduleGitdirs archives and restores an

@@ -187,7 +187,26 @@ func (g *GitWorktree) relocateWorktreeTo(dest string) error {
 			)
 		}
 		if sourceCleanupErr != nil {
-			return fmt.Errorf("worktree copied and registered at %s, but failed to remove original %s; remove the original manually: %w", dest, src, sourceCleanupErr)
+			// Copy AND git registration both succeeded: the worktree is valid,
+			// registered, and usable at dest. Removing the leftover source dir is
+			// the only step that failed — a disk-reclamation nuisance, not a move
+			// failure. Returning an error here is actively harmful (#2011): it
+			// drives the daemon's archive-rollback / restore-retry logic even
+			// though a valid worktree already exists at dest, and the retry picks a
+			// fresh collision-suffixed dest, copies + registers a SECOND worktree,
+			// orphaning the first and corrupting `git worktree list` and branch
+			// exclusivity. The old "remove the original manually" advice is worse
+			// than useless: instance state may still point at src, so following it
+			// breaks recovery. Warn (so the leftover disk stays visible and
+			// reclaimable) and return nil.
+			log.WarningLog.Printf(
+				"worktree copied and registered at %s, but failed to remove the leftover source directory %s; "+
+					"the worktree is valid and usable at %s — the leftover is only reclaimable disk, "+
+					"remove it by hand with `%s`: %v",
+				dest, src, dest,
+				shellsuggest.Command("rm", "-rf", src),
+				sourceCleanupErr,
+			)
 		}
 		return nil
 	}
