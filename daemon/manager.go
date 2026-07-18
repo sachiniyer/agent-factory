@@ -144,11 +144,17 @@ type Manager struct {
 	pausedMu    sync.Mutex
 	pausedPolls map[string]time.Time
 	// taskRunProbeDue schedules the backstop observation for a PAUSED session whose
-	// task run is still in flight (#1892), keyed like pausedPolls and guarded by the
-	// same pausedMu. An attach suppresses the liveness probe, and the cap's slot is
-	// released by observing the agent go idle — so without a bounded backstop a user
-	// watching their own task run silently stalls the task. Entries exist only while
-	// such a session is attached; ResumeStatusPoll drops them with the pause.
+	// task run is still in flight (#1892). Guarded by pausedMu (the same lock as
+	// pausedPolls) but keyed by remoteLossKey — the stable instance ID — NOT by
+	// pausedPolls' daemonInstanceKey: taskRunBackstopDue is its only writer and keys
+	// it that way, so a same-title successor never inherits a predecessor's stale due
+	// time. An attach suppresses the liveness probe, and the cap's slot is released
+	// by observing the agent go idle — so without a bounded backstop a user watching
+	// their own task run silently stalls the task. Entries live only while the
+	// session is paused: ResumeStatusPoll drops one on a clean detach (matching the
+	// writer's key), and sweepTaskRunProbeDue reclaims any whose lease lapsed or
+	// whose session was torn down, so the map tracks pausedPolls and never grows
+	// unbounded over the daemon's lifetime (#2015).
 	taskRunProbeDue map[string]time.Time
 
 	// events is the WS events-plane fan-out (#1592 Phase 2 PR5): every session/

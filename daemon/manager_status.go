@@ -65,12 +65,36 @@ func (m *Manager) PauseStatusPoll(repoID, title string) {
 
 // ResumeStatusPoll clears a pause immediately on a clean detach so the poll
 // resumes on the next tick rather than waiting out the lease (#1160).
+//
+// It also frees the session's backstop-timer entry (#2015). That entry is keyed
+// by remoteLossKey (the stable instance ID), NOT the daemonInstanceKey pausedPolls
+// uses — taskRunBackstopDue is its only writer and keys it that way — so the
+// delete must resolve the instance to match the writer; deleting under the pause
+// key was a silent no-op that leaked one entry per probed-while-paused session.
+// sweepTaskRunProbeDue reclaims any entry this cannot (a crashed TUI that never
+// resumes, a session torn down mid-pause), so a lookup miss here is harmless.
 func (m *Manager) ResumeStatusPoll(repoID, title string) {
 	key := daemonInstanceKey(repoID, title)
+	probeKey := m.taskRunProbeKey(repoID, title)
 	m.pausedMu.Lock()
 	delete(m.pausedPolls, key)
-	delete(m.taskRunProbeDue, key)
+	if probeKey != "" {
+		delete(m.taskRunProbeDue, probeKey)
+	}
 	m.pausedMu.Unlock()
+}
+
+// taskRunProbeKey resolves the taskRunProbeDue key (remoteLossKey — the stable
+// instance ID) for a tracked session, or "" when the session is no longer tracked
+// (already torn down; the sweep drops any orphaned entry). Reads m.instances under
+// m.mu and is never called with pausedMu held, so the two locks stay unnested.
+func (m *Manager) taskRunProbeKey(repoID, title string) string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if inst := m.instances[daemonInstanceKey(repoID, title)]; inst != nil {
+		return remoteLossKey(repoID, inst)
+	}
+	return ""
 }
 
 // taskRunBackstopDue reports whether a PAUSED session with an in-flight task run
@@ -93,6 +117,58 @@ func (m *Manager) taskRunBackstopDue(key string) bool {
 	}
 	m.taskRunProbeDue[key] = now.Add(taskRunPollBackstop)
 	return true
+}
+
+// sweepTaskRunProbeDue drops backstop-timer entries whose session is no longer
+// PAUSED (#2015): a clean detach already reclaims its own via ResumeStatusPoll,
+// but a crashed TUI that never resumes (its lease lapses) and a session killed or
+// archived mid-pause both strand an entry with nothing left to delete it. The
+// entry is armed and read ONLY in refreshInstanceStatus's paused branch, so once
+// the pause is gone it is dead weight; without this GC the map grows one entry per
+// distinct task session ever probed-while-paused and never shrinks over the
+// daemon's lifetime. Called once per poll from RefreshStatuses, beside the sibling
+// sweepRemoteLossStates.
+//
+// That sibling keys garbage on "session gone", but a session stays live across a
+// detach, so this keys garbage on "not currently paused" instead. taskRunProbeDue
+// is keyed by remoteLossKey (the stable instance ID) while pausedPolls is keyed by
+// daemonInstanceKey, so the live set is bridged by walking m.instances. m.mu and
+// pausedMu are taken SEPARATELY, never nested — the poll deliberately keeps them
+// apart so a slow probe under one can't block RPCs behind the other (see
+// pausedPolls' field doc).
+func (m *Manager) sweepTaskRunProbeDue() {
+	m.pausedMu.Lock()
+	empty := len(m.taskRunProbeDue) == 0
+	m.pausedMu.Unlock()
+	if empty {
+		return // nothing armed: skip the instance walk in the common case
+	}
+
+	type keyPair struct{ daemonKey, probeKey string }
+	m.mu.Lock()
+	pairs := make([]keyPair, 0, len(m.instances))
+	for key, inst := range m.instances {
+		repoID, _ := splitDaemonInstanceKey(key)
+		pairs = append(pairs, keyPair{daemonKey: key, probeKey: remoteLossKey(repoID, inst)})
+	}
+	m.mu.Unlock()
+
+	now := nowFunc()
+	m.pausedMu.Lock()
+	defer m.pausedMu.Unlock()
+	live := make(map[string]struct{}, len(m.pausedPolls))
+	for _, p := range pairs {
+		// An expired lease is treated as unpaused even before isPollPaused lazily
+		// deletes it, so the entry is reclaimed the same tick the lease lapses.
+		if expiry, ok := m.pausedPolls[p.daemonKey]; ok && now.Before(expiry) {
+			live[p.probeKey] = struct{}{}
+		}
+	}
+	for key := range m.taskRunProbeDue {
+		if _, ok := live[key]; !ok {
+			delete(m.taskRunProbeDue, key)
+		}
+	}
 }
 
 // isPollPaused reports whether an instance's poll is currently paused (#1160).
@@ -171,8 +247,10 @@ func (m *Manager) RefreshStatuses() {
 	m.mu.Unlock()
 
 	// Drop debounce state for sessions that are gone or replaced, colocated with
-	// the pass that creates it (#1794).
+	// the pass that creates it (#1794), and backstop timers for sessions no longer
+	// paused (#2015) — both maps the poll itself populates.
 	m.sweepRemoteLossStates()
+	m.sweepTaskRunProbeDue()
 
 	for _, e := range entries {
 		m.refreshInstanceStatus(e.repoID, e.instance)
