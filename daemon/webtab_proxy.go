@@ -377,7 +377,11 @@ func (cs *controlServer) webTabProxyHandler(w http.ResponseWriter, r *http.Reque
 	// here intact. Reject the residue so a crafted request can never escape the
 	// proxied prefix. rest is the decoded view of the remainder, so testing it here
 	// covers the escaped form the proxy actually forwards.
-	if strings.Contains(rest, "..") {
+	//
+	// Only a whole SEGMENT equal to ".." climbs. Testing for ".." anywhere in the
+	// string also rejected legitimate routes that merely contain it — /assets/
+	// bundle..js and friends never reached the dev server at all (#2104).
+	if hasDotDotSegment(rest) {
 		writeHTTPError(w, r, http.StatusBadRequest, fmt.Errorf("invalid web tab path"))
 		return
 	}
