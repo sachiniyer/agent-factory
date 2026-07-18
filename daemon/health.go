@@ -98,6 +98,14 @@ func Health() HealthStatus {
 	return h
 }
 
+// dialUnix dials a Unix socket with a bounded timeout. It is a package var so a
+// test can substitute a deterministic dial outcome (a synthetic timeout or a
+// refusal) instead of manufacturing one from the OS: kernel accept-backlog
+// semantics differ across platforms, so a real saturated-backlog timeout is not
+// portably reproducible (Darwin completes handshakes past the nominal backlog
+// and never saturates — #2039). Production wires the real net.DialTimeout.
+var dialUnix = net.DialTimeout
+
 // probeHTTPSocket reports the HTTP socket's path, whether it exists, and
 // whether anything is accepting connections on it.
 //
@@ -117,7 +125,7 @@ func probeHTTPSocket() (path string, exists bool, listening ProbeAnswer) {
 		}
 		return path, false, Undetermined(fmt.Errorf("cannot stat %s: %w", path, err))
 	}
-	conn, err := net.DialTimeout("unix", path, daemonDialTimeout)
+	conn, err := dialUnix("unix", path, daemonDialTimeout)
 	if err != nil {
 		return path, true, classifyDialFailure(path, err)
 	}
