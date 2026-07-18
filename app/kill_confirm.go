@@ -1,12 +1,75 @@
 package app
 
 import (
+	"context"
+	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
+	"syscall"
+	"time"
 
 	"github.com/sachiniyer/agent-factory/log"
 )
+
+// killGitTimeout bounds the local git metadata reads the kill confirmation runs.
+// handleKill is synchronous on the Bubble Tea Update loop, so a wedged git (a
+// hung network mount, a D-state process holding the worktree) would freeze the
+// whole TUI without a deadline (#2030). The reads are local and offline (status,
+// log, rev-parse, symbolic-ref), so this only trips on a genuine stall; it is
+// generous enough that a slow-but-progressing read on a cold cache still
+// completes. Mirrors session/git's localGitTimeout reasoning (#1917).
+//
+// A var (not a const) only so tests can shorten it; production never reassigns.
+var killGitTimeout = 5 * time.Second
+
+// killGitWaitDelay bounds how long cmd.Wait blocks after git exits or is killed on
+// the deadline, before the inherited pipes are force-closed. A child that inherited
+// the capture pipe would otherwise block Output() on pipe EOF past the deadline and
+// defeat it (the #856/#1967 lesson). Mirrors gitWaitDelay.
+const killGitWaitDelay = 2 * time.Second
+
+// runKillGit runs `git -C dir args...` bounded by killGitTimeout, in its own
+// process group so the deadline tears down git and any child it spawned together,
+// with a WaitDelay so a straggler holding the capture pipe cannot outlast the
+// bound. It mirrors session/git's runGitCommandContext (#856/#896/#1967),
+// reproduced here because that runner is a private method on *GitWorktree in
+// another package and these callers operate on a bare worktree path.
+func runKillGit(dir string, args ...string) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), killGitTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "git", append([]string{"-C", dir}, args...)...)
+	// Own process group so the deadline kills git AND any child together, rather
+	// than exec.CommandContext's default of SIGKILLing only the git process.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		// Negative pid targets the whole group; a group already gone (ESRCH) maps to
+		// os.ErrProcessDone, which Wait ignores rather than reporting as a failure.
+		if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); err != nil {
+			if errors.Is(err, syscall.ESRCH) {
+				return os.ErrProcessDone
+			}
+			return err
+		}
+		return nil
+	}
+	cmd.WaitDelay = killGitWaitDelay
+	out, err := cmd.Output()
+	if cmd.Process != nil {
+		// Reap any child that outlived git on every exit path so a wedged read never
+		// leaks a pipe-holding process; the group is led by the already-exited git,
+		// so this is ESRCH (ignored) in the common case.
+		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+	}
+	if errors.Is(err, exec.ErrWaitDelay) {
+		// git itself exited (a non-zero exit surfaces as an *exec.ExitError, not
+		// ErrWaitDelay); only a child held the pipe past killGitWaitDelay and was
+		// just reaped. The output is complete, so this is not a failure (#676/#914).
+		err = nil
+	}
+	return out, err
+}
 
 // This file holds the kill-confirmation copy and the data-loss detection behind
 // it. handleKill (handle_actions.go) assembles these into the confirmation the
@@ -64,7 +127,7 @@ func killConfirmMessage(title, warning string, reserved bool) string {
 // clean — fail closed and warn that changes may be lost rather than silently
 // skipping the warning (#815).
 func killConfirmationWarning(wt string) string {
-	out, err := exec.Command("git", "-C", wt, "status", "--porcelain").Output()
+	out, err := runKillGit(wt, "status", "--porcelain")
 	if err != nil {
 		log.WarningLog.Printf("could not verify worktree status for %s before kill: %v", wt, err)
 		return fmt.Sprintf("WARNING: Could not verify worktree status (%v); it may contain uncommitted changes that will be lost!", err)
@@ -113,7 +176,7 @@ func unmergedCommitWarning(worktreePath, recordedBaseSHA, prState string) (strin
 	}
 	// Commits reachable from the branch tip (HEAD is the branch, checked out in
 	// the worktree) but not from base: the session's own commits.
-	uniqueOut, err := exec.Command("git", "-C", worktreePath, "log", "--oneline", base+"..HEAD").Output()
+	uniqueOut, err := runKillGit(worktreePath, "log", "--oneline", base+"..HEAD")
 	if err != nil {
 		return unmergedFailClosedLine(err), false
 	}
@@ -128,7 +191,7 @@ func unmergedCommitWarning(worktreePath, recordedBaseSHA, prState string) (strin
 	}
 	// Of the session's commits, those NOT reachable from any remote-tracking ref
 	// are the ones that exist only here. branch -D orphans exactly these.
-	localOut, err := exec.Command("git", "-C", worktreePath, "log", "--oneline", base+"..HEAD", "--not", "--remotes").Output()
+	localOut, err := runKillGit(worktreePath, "log", "--oneline", base+"..HEAD", "--not", "--remotes")
 	if err != nil {
 		return unmergedFailClosedLine(err), false
 	}
@@ -149,14 +212,14 @@ func unmergedCommitWarning(worktreePath, recordedBaseSHA, prState string) (strin
 // (for the copy), else "".
 func resolveKillBase(worktreePath, recordedBaseSHA string) (base, baseLabel string, ok bool) {
 	commitExists := func(rev string) bool {
-		_, err := exec.Command("git", "-C", worktreePath, "rev-parse", "--verify", "--quiet", rev+"^{commit}").Output()
+		_, err := runKillGit(worktreePath, "rev-parse", "--verify", "--quiet", rev+"^{commit}")
 		return err == nil
 	}
 	if b := strings.TrimSpace(recordedBaseSHA); b != "" && commitExists(b) {
 		return b, "", true
 	}
 	// origin/HEAD (symbolic ref to origin's default branch), then the usual names.
-	if out, err := exec.Command("git", "-C", worktreePath, "symbolic-ref", "--short", "-q", "refs/remotes/origin/HEAD").Output(); err == nil {
+	if out, err := runKillGit(worktreePath, "symbolic-ref", "--short", "-q", "refs/remotes/origin/HEAD"); err == nil {
 		if ref := strings.TrimSpace(string(out)); ref != "" && commitExists(ref) {
 			return ref, strings.TrimPrefix(ref, "origin/"), true
 		}

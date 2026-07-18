@@ -94,6 +94,24 @@ func (i *Instance) GetWorktreePath() string {
 	return gw.GetWorktreePath()
 }
 
+// GetBaseCommitSHA returns the recorded base commit SHA of the instance's
+// worktree, or "" when there is no worktree. Deliberately NOT gated on started
+// (unlike GetGitWorktree): the kill-confirmation's unmerged-work check must run
+// for a session that has a worktree even if it was never started — a restore-
+// failed session's branch still gets force-deleted by the kill (#2029). Mirrors
+// GetWorktreePath, which is likewise ungated so both loss checks cover the same
+// session states.
+func (i *Instance) GetBaseCommitSHA() string {
+	i.mu.RLock()
+	gw := i.gitWorktree
+	i.mu.RUnlock()
+
+	if gw == nil {
+		return ""
+	}
+	return gw.GetBaseCommitSHA()
+}
+
 // GetRepoPath returns the resolved git repo path stored in the instance's
 // worktree, or empty string when no worktree is attached (e.g. a remote-
 // backend instance). Callers using the result to derive a repo ID must
