@@ -81,16 +81,41 @@ func (i *Instance) AgentServer() AgentServer {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	if i.agentSrv == nil {
-		if i.remoteClient != nil {
+		switch {
+		case i.remoteClient != nil:
 			// teardown reaps the sandbox this session runs in (docker rm -f) after
 			// the remote Kill tears the in-sandbox workspace down — nil for the PR2
 			// out-of-process case (no sandbox to reap), set for a docker session.
 			i.agentSrv = &remoteAgentServer{rc: i.remoteClient, teardown: i.runtimeTeardown}
-		} else {
+		case backendIsRemoteWorkspace(i.backend):
+			// A remote-workspace backend (docker/ssh/hook) with NO live client:
+			// remoteClient is nil because the runtime wiring was torn down — a
+			// sandbox session loaded inert from disk, or one left Lost by a FAILED
+			// lost-recovery (reprovisionRemote succeeded, Start failed, then
+			// teardownAfterStartFailure cleared remoteClient while the session stays
+			// started+Lost so the #1128 restore loop keeps retrying). A localAgentServer
+			// must NEVER stand in here: a remote backend's data-plane methods
+			// (HasUpdated/IsAlive/Preview/…) delegate straight back to i.AgentServer(),
+			// so a localAgentServer wrapping one mutually recurses until the daemon
+			// poll overflows its stack (#2005). Report the sandbox as gone instead —
+			// the poll's remote-probe-failure path (#1794) and the restore loop's
+			// Alive gate already handle that, and the instance keeps its started+Lost
+			// state so auto-recovery is never stranded.
+			i.agentSrv = &deadRemoteAgentServer{title: i.Title}
+		default:
 			i.agentSrv = &localAgentServer{inst: i}
 		}
 	}
 	return i.agentSrv
+}
+
+// backendIsRemoteWorkspace reports whether b drives an off-box workspace
+// (docker/ssh/hook) — the backends whose data-plane methods delegate back to
+// i.AgentServer() (they embed remoteAgentBackend), and which therefore must never
+// be wrapped in a localAgentServer (#2005). A nil backend is treated as local
+// (the not-yet-initialised default, matching Instance.Capabilities).
+func backendIsRemoteWorkspace(b Backend) bool {
+	return b != nil && b.Capabilities().Workspace == WorkspaceRemote
 }
 
 var _ AgentServer = (*localAgentServer)(nil)
