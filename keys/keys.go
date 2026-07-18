@@ -120,6 +120,22 @@ const (
 	// iota-based, so inserting a name mid-block silently renumbers every
 	// KeyName after it. New names go here.
 	KeyConfigAgent
+
+	// KeySetPrompt and KeyEditPrompt are the two faces of the same display-only
+	// hint: the initial-prompt field of the naming form (#1936). The naming
+	// menu shows KeySetPrompt while the pending prompt is empty and
+	// KeyEditPrompt once it holds text, so the status bar is the confirmation
+	// that a prompt is attached — the overlay is modal, so there is nowhere
+	// else for that feedback to live. Same pattern as the archive/restore
+	// verb swap in Menu.addInstanceOptions.
+	//
+	// shift+tab rather than a mnemonic like ctrl+p: ctrl+p is a REBINDABLE
+	// global (switch_project), so hardcoding it here would silently drift the
+	// day a user rebinds that action. shift+tab is a reserved structural key
+	// config can never claim, it is a no-op in the naming flow today, and it
+	// pairs with the tab that opens the program field.
+	KeySetPrompt
+	KeyEditPrompt
 )
 
 // spec is one action's canonical binding definition: its default keys, help
@@ -205,6 +221,8 @@ var specs = []spec{
 	// -- Special keybindings --
 	{name: KeySubmitName, keys: []string{"enter"}, helpLabel: "enter", desc: "submit name"},
 	{name: KeyChangeProgram, keys: []string{"tab"}, desc: "change program"},
+	{name: KeySetPrompt, keys: []string{"shift+tab"}, desc: "initial prompt"},
+	{name: KeyEditPrompt, keys: []string{"shift+tab"}, desc: "initial prompt ✓"},
 	{name: KeyCancelName, keys: []string{"esc"}, desc: "cancel"},
 }
 

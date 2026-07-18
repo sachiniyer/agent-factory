@@ -200,6 +200,12 @@ func (m *home) View() string {
 		fg := m.selectionOverlay.Render()
 		m.selectionOverlay.RegisterZones(m.zones, overlayOrigin(fg, mainView))
 		return overlay.PlaceOverlay(0, 0, fg, mainView, true)
+	} else if m.state == statePromptInput {
+		if m.promptOverlay == nil {
+			log.ErrorLog.Printf("prompt overlay is nil")
+			return mainView
+		}
+		return overlay.PlaceOverlay(0, 0, m.promptOverlay.Render(), mainView, true)
 	} else if m.state == stateHooks {
 		return overlay.PlaceOverlay(0, 0, m.renderHooksOverlay(), mainView, true)
 	} else if m.state == stateTasks {

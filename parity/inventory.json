@@ -75,8 +75,8 @@
       "id": "session.create.opt.prompt",
       "title": "Send an initial prompt with the new session",
       "tui": {
-        "status": "no",
-        "pointer": "app/handle_input.go:103-109 builds sessionStartRequest without Prompt"
+        "status": "yes",
+        "pointer": "shift+tab during naming -> app/handle_overlay.go handleStateInitialPrompt -> app/handle_input.go sessionStartRequest.Prompt"
       },
       "web": {
         "status": "yes",
@@ -86,9 +86,9 @@
         "status": "yes",
         "pointer": "api/api.go:585 --prompt"
       },
-      "verdict": "real-gap",
+      "verdict": "parity",
       "issue": "#1936",
-      "notes": "Inverted gap: the TUI is the surface that lacks this. sessionStartRequest.Prompt exists and is plumbed to the daemon (app/session_control.go:106) but its only construction site never populates it, so the field is dead from the TUI."
+      "notes": "Closed by #1936: the naming form grew an initial-prompt field on shift+tab (a textarea overlay, so multi-line prompts and pastes survive), populating the sessionStartRequest.Prompt that was already plumbed to the daemon. Was an inverted gap — the TUI was the short surface, with the field dead at its only construction site."
     },
     {
       "id": "session.create.opt.autoyes",
@@ -1333,6 +1333,8 @@
       "fixed:delete project": "project.delete",
       "fixed:focus": "tui.navigation",
       "fixed:focus prev": "tui.navigation",
+      "fixed:initial prompt": "session.create.opt.prompt",
+      "fixed:initial prompt ✓": "session.create.opt.prompt",
       "fixed:interact": "session.send-prompt",
       "fixed:jump": "tui.panes",
       "fixed:manage": "task.list",

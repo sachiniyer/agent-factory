@@ -27,6 +27,7 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		m.state = stateDefault
 		m.namingInstance = nil
+		m.pendingPrompt = ""
 		// Menu.SetState rebuilds the options slice; call it synchronously
 		// on the event-loop goroutine rather than from a tea.Cmd closure
 		// that runs off-loop and races with home.View -> Menu.String.
@@ -90,6 +91,13 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// began — re-raising it here would be a second BeginCreate from OpCreating,
 		// an illegal edge the chokepoint rejects (#1350). Set it exactly once.
 		instance.Program = m.pendingProgram
+		// Read the pending prompt here, on the event loop, and clear it with the
+		// rest of the naming state: the cmd below runs off-loop, so reading
+		// m.pendingPrompt from inside the closure would race the next create's
+		// reset. TrimSpace so a field holding only whitespace is "no prompt"
+		// rather than a stray newline delivered to the agent.
+		prompt := strings.TrimSpace(m.pendingPrompt)
+		m.pendingPrompt = ""
 		m.namingInstance = nil
 		m.state = stateDefault
 		m.menu.SetState(ui.StateDefault)
@@ -101,9 +109,15 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		start := startSessionThroughDaemon
 		startCmd := func() tea.Msg {
 			req := sessionStartRequest{
-				Title:       instance.Title,
-				RepoPath:    instance.Path,
-				Program:     instance.Program,
+				Title:    instance.Title,
+				RepoPath: instance.Path,
+				Program:  instance.Program,
+				// The initial prompt typed into the naming form's shift+tab
+				// field (#1936). session_control.go forwards it to the daemon,
+				// which delivers it once the agent is ready — the same path
+				// `af sessions create --prompt` takes. Empty means "no prompt",
+				// exactly as before this field existed.
+				Prompt:      prompt,
 				AutoYes:     m.autoYes,
 				ForceRemote: instance.Capabilities().Workspace == session.WorkspaceRemote,
 			}
@@ -131,6 +145,13 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.selectionOverlay.SetSelectedIndex(selectedIdx)
 		m.layoutSelectionOverlay()
 		m.state = stateSelectProgram
+		return m, nil
+	case tea.KeyShiftTab:
+		// Open the initial-prompt field, seeded with whatever is already
+		// pending so reopening it is an edit, not a retype (#1936).
+		m.promptOverlay = overlay.NewPromptOverlay("Initial prompt", m.pendingPrompt)
+		m.layoutPromptOverlay()
+		m.state = statePromptInput
 		return m, nil
 	case tea.KeyRunes:
 		newTitle := instance.Title + string(msg.Runes)
@@ -163,6 +184,7 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			log.ErrorLog.Printf("failed to clean up instance on cancel: %v", err)
 		}
 		m.namingInstance = nil
+		m.pendingPrompt = ""
 		m.state = stateDefault
 		cmd := m.selectionChanged()
 
@@ -180,6 +202,10 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // If remote is true, the instance is forced to use the remote hook backend.
 func (m *home) startNewInstance(remote bool) (tea.Model, tea.Cmd) {
 	m.pendingProgram = m.program
+	// Every create starts with an empty prompt field. The cancel paths clear it
+	// too, but this is the authoritative reset: it also covers a create that
+	// ended by any route other than Enter/Esc/ctrl+c.
+	m.pendingPrompt = ""
 	if m.pendingProgram == "" && m.appConfig != nil {
 		m.pendingProgram = m.appConfig.DefaultProgram
 	}
@@ -214,6 +240,7 @@ func (m *home) startNewInstance(remote bool) (tea.Model, tea.Cmd) {
 	m.sidebar.SelectInstance(instance)
 	m.namingInstance = instance
 	m.state = stateNew
+	m.menu.SetNamingHasPrompt(false)
 	m.menu.SetState(ui.StateNewInstance)
 	return m, nil
 }

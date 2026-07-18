@@ -3,6 +3,7 @@ package app
 import (
 	"fmt"
 	"path/filepath"
+	"strings"
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/keys"
@@ -28,6 +29,31 @@ func (m *home) handleStateSelectProgram(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.menu.SetState(ui.StateNewInstance)
 		return m, nil
 	}
+	return m, nil
+}
+
+// handleStateInitialPrompt handles key events while the naming form's
+// initial-prompt field is open (#1936). Closing keeps the text — the field is
+// part of the create form, so Tab/Esc back out of it rather than discarding it
+// — and returns to naming, mirroring handleStateSelectProgram. ctrl+c is the
+// exception: it means "cancel this create", so it is replayed into the naming
+// handler, which owns the kill-and-clean-up path (#717).
+func (m *home) handleStateInitialPrompt(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	shouldClose := m.promptOverlay.HandleKeyPress(msg)
+	if !shouldClose {
+		return m, nil
+	}
+	canceled := m.promptOverlay.IsCanceled()
+	if !canceled {
+		m.pendingPrompt = m.promptOverlay.Value()
+	}
+	m.promptOverlay = nil
+	m.state = stateNew
+	if canceled {
+		return m.handleStateNew(tea.KeyMsg{Type: tea.KeyCtrlC})
+	}
+	m.menu.SetNamingHasPrompt(strings.TrimSpace(m.pendingPrompt) != "")
+	m.menu.SetState(ui.StateNewInstance)
 	return m, nil
 }
 

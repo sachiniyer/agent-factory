@@ -100,6 +100,12 @@ it.
 | `Ctrl-P` | switch project | | `Ctrl-U`/`Ctrl-D` | scroll tab |
 | `Ctrl-W` | detach (full-screen) |
 
+While naming a new instance the form owns the keyboard and its keys are fixed:
+`Tab` opens the program picker, `Shift-Tab` opens the initial-prompt field
+(#1936), `Enter` submits, `Esc`/`Ctrl-C` cancel the create. Inside the prompt
+field `Enter` is a newline — `Tab`/`Esc` close it keeping the text, `Ctrl-C`
+cancels the whole create.
+
 `Enter`, `Tab`, `Shift-Tab`, `Esc`, `Ctrl-]`, and `1`–`9` are **reserved** and
 cannot be rebound (`[keys]` config). `Ctrl-W` is the configurable detach key
 (`detach_keys`); the driver reads it from `AF_DRIVER_DETACH_KEY`.
@@ -270,6 +276,37 @@ make tui-driver-selftest
 The self-test is the baseline gate for *any* PR that touches startup, the
 sidebar/tree, panes, interactive mode, or attach/detach. If it isn't green,
 stop.
+
+### Create-form changes (the #1936 class)
+
+The naming form is a multi-field form behind a single row, so gate every field
+plus the paths that leave it:
+
+```bash
+af_boot
+af_ensure_nav; af_focus_tree
+af_send n; af_wait_for 'submit name'
+af_wait_for 'initial prompt'                  # the field is advertised
+af_send Tab; af_wait_for 'Select Program'     # sibling field still opens
+af_send Escape; af_wait_for 'submit name'
+af_send BTab; af_wait_for 'enter newline'     # shift+tab opens the field
+af_send_literal 'first line'; af_send Enter   # enter is a NEWLINE here…
+af_wait_for 'enter newline'                   # …so the field is still open
+af_send Tab; af_wait_for 'initial prompt ✓'   # closes, hint confirms it stuck
+af_send BTab; af_wait_for 'first line'        # reopening shows the text
+af_send Escape                                # esc keeps the text (field, not dialog)
+af_wait_for 'initial prompt ✓'
+```
+
+`enter newline` is the overlay's own hint row, used as the marker rather than
+its `Initial prompt` title: the status-bar hint underneath says `initial
+prompt` too, so the title alone cannot tell "field open" from "field
+advertised".
+
+Then finish the create by hand and confirm the agent receives the prompt as its
+first input — that round trip is the whole point of the feature and no marker
+can stand in for it. Re-run `n` afterwards and confirm the hint is back to
+`initial prompt` with no `✓`: a prompt must never leak into the next session.
 
 ### Tree / selection / focus changes (the #1156, #1084 class)
 
