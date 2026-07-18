@@ -5,6 +5,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/sachiniyer/agent-factory/schedule"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 	"github.com/sachiniyer/agent-factory/task"
 
@@ -60,10 +61,13 @@ type TaskPane struct {
 	// selector back and forth never loses typed input; save resolves to
 	// exactly one via triggerValues.
 	editTriggerIsWatch bool
-	editCron           textinput.Model
-	editWatch          textinput.Model
-	editTarget         textinput.Model
-	editPath           textinput.Model
+	// schedule is the friendly cron-free picker that replaces the raw-cron
+	// input for a time trigger (#2057). It owns the generated cron; editWatch
+	// stays the plain command input for a watch trigger.
+	schedule   *schedulePicker
+	editWatch  textinput.Model
+	editTarget textinput.Model
+	editPath   textinput.Model
 	// Program selector state. editProgramOptions is the list of choices shown
 	// inline (index 0 is always the "use config default" entry, followed by
 	// tmux.SupportedPrograms). Per-task Program is restricted to the agent
@@ -140,14 +144,10 @@ func (s *TaskPane) initForm(tsk *task.Task, defaultPath string) {
 	prompt.CharLimit = 0
 	prompt.MaxHeight = 0
 
-	// The cron placeholder is an EXAMPLE, not a prefilled value: the "e.g."
-	// prefix plus the faint placeholder style keep it visually distinct from
-	// typed input, so an untouched field reads as empty (play-test on #1096).
-	cron := textinput.New()
-	cron.Placeholder = "e.g. 0 9 * * 1-5"
-	cron.PlaceholderStyle = taskPlaceholderStyle
-	cron.CharLimit = 64
-	cron.Blur()
+	// The time trigger is edited through the friendly schedule picker (#2057)
+	// rather than a raw-cron field; the picker generates the cron the store
+	// still persists. It is seeded below from the task's existing cron.
+	picker := newSchedulePicker()
 
 	watch := textinput.New()
 	watch.Placeholder = "long-running cmd; 1 stdout line = 1 event"
@@ -169,12 +169,18 @@ func (s *TaskPane) initForm(tsk *task.Task, defaultPath string) {
 	if tsk != nil {
 		name.SetValue(tsk.Name)
 		prompt.SetValue(tsk.Prompt)
-		cron.SetValue(tsk.CronExpr)
 		watch.SetValue(tsk.WatchCmd)
 		target.SetValue(tsk.TargetSession)
 		path.SetValue(tsk.ProjectPath)
 		s.editTriggerIsWatch = tsk.IsWatch()
 		s.setProgramFromValue(tsk.Program)
+		// Re-open an existing time trigger on its matching preset when the cron
+		// maps cleanly; otherwise ParseCron falls back to Custom with the raw
+		// expression shown, so nothing is lost (#2057).
+		if !s.editTriggerIsWatch && strings.TrimSpace(tsk.CronExpr) != "" {
+			sc, _ := schedule.ParseCron(tsk.CronExpr)
+			picker.seed(sc)
+		}
 	} else {
 		path.SetValue(defaultPath)
 		s.editTriggerIsWatch = false
@@ -183,7 +189,7 @@ func (s *TaskPane) initForm(tsk *task.Task, defaultPath string) {
 
 	s.editName = name
 	s.editPrompt = prompt
-	s.editCron = cron
+	s.schedule = picker
 	s.editWatch = watch
 	s.editTarget = target
 	s.editPath = path
@@ -253,7 +259,7 @@ func (s *TaskPane) triggerValues() (cron, watch string) {
 	if s.editTriggerIsWatch {
 		return "", strings.TrimSpace(s.editWatch.Value())
 	}
-	return strings.TrimSpace(s.editCron.Value()), ""
+	return s.schedule.Cron(), ""
 }
 
 // HasPendingCreate returns true if a new task was submitted and needs saving.

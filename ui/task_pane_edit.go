@@ -9,7 +9,6 @@ import (
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/session/git"
-	"github.com/sachiniyer/agent-factory/task"
 )
 
 // validateForm enforces the shared create/edit form contract, mirroring
@@ -30,12 +29,11 @@ func (s *TaskPane) validateForm() (string, int) {
 			return "watch command is required", taskFocusTriggerValue
 		}
 	} else {
-		cron := strings.TrimSpace(s.editCron.Value())
-		if cron == "" {
-			return "cron expression is required", taskFocusTriggerValue
-		}
-		if err := task.ValidateCronExpr(cron); err != nil {
-			return fmt.Sprintf("invalid cron: %v", err), taskFocusTriggerValue
+		// The schedule picker owns the generated cron and its own validation
+		// (a weekly needs a day, custom needs a valid expression); it round-
+		// trips the same task.ValidateCronExpr gate the raw field used (#2057).
+		if msg := s.schedule.validate(); msg != "" {
+			return msg, taskFocusTriggerValue
 		}
 		if strings.TrimSpace(s.editPrompt.Value()) == "" {
 			return "prompt must be non-empty", taskFocusPrompt
@@ -148,7 +146,7 @@ func (s *TaskPane) handleEditMode(msg tea.KeyMsg) bool {
 			if s.editTriggerIsWatch {
 				s.editWatch, _ = s.editWatch.Update(msg)
 			} else {
-				s.editCron, _ = s.editCron.Update(msg)
+				s.schedule.handleKey(msg)
 			}
 		case taskFocusPrompt:
 			s.editPrompt, _ = s.editPrompt.Update(msg)
@@ -197,10 +195,12 @@ func (s *TaskPane) handleProgramKey(msg tea.KeyMsg) {
 func (s *TaskPane) updateEditFocus() {
 	s.editName.Blur()
 	s.editPrompt.Blur()
-	s.editCron.Blur()
 	s.editWatch.Blur()
 	s.editTarget.Blur()
 	s.editPath.Blur()
+	// The schedule picker is active only while it is the focused trigger value
+	// on a cron task; blur it otherwise so its raw-cron cursor stays hidden.
+	s.schedule.setFocused(s.focusIndex == taskFocusTriggerValue && !s.editTriggerIsWatch)
 
 	switch s.focusIndex {
 	case taskFocusName:
@@ -208,8 +208,6 @@ func (s *TaskPane) updateEditFocus() {
 	case taskFocusTriggerValue:
 		if s.editTriggerIsWatch {
 			s.editWatch.Focus()
-		} else {
-			s.editCron.Focus()
 		}
 	case taskFocusPrompt:
 		s.editPrompt.Focus()
@@ -250,7 +248,7 @@ func (s *TaskPane) renderEditMode() string {
 	if s.height > 0 {
 		s.editPrompt.SetHeight(s.height / 4)
 	}
-	s.editCron.Width = inputWidth
+	s.schedule.setWidth(s.width)
 	s.editWatch.Width = inputWidth
 	s.editTarget.Width = inputWidth
 	s.editPath.Width = inputWidth
@@ -325,8 +323,9 @@ func (s *TaskPane) renderEditMode() string {
 		b.WriteString(label("Watch:"))
 		b.WriteString(s.editWatch.View())
 	} else {
-		b.WriteString(label("Cron:"))
-		b.WriteString(s.editCron.View())
+		// The picker renders its own multi-line block (type selector,
+		// contextual inputs, preview, read-only cron) in place of the raw field.
+		b.WriteString(s.schedule.render())
 	}
 	b.WriteString("\n")
 	b.WriteString(fieldErr(taskFocusTriggerValue))
