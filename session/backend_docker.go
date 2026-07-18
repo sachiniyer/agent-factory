@@ -78,10 +78,14 @@ const (
 const (
 	dockerProvisionStepTimeout = 5 * time.Minute
 	dockerShortStepTimeout     = 30 * time.Second
-	dockerReapTimeout          = 30 * time.Second
 	dockerBannerPollTimeout    = 45 * time.Second
 	dockerBannerPollInterval   = 400 * time.Millisecond
 )
+
+// dockerReapTimeout bounds the `docker rm -f` container reap. A var (not a const)
+// only so tests can shorten it to exercise the deadline path; production never
+// reassigns it. Mirrors networkGitTimeout / tmuxCommandTimeout.
+var dockerReapTimeout = 30 * time.Second
 
 // dockerWaitDelay bounds how long cmd.Wait blocks after the docker CLI (or the
 // origin-lookup git in originRemoteURL) exits or is killed on its deadline,
@@ -440,13 +444,33 @@ func (p *dockerProvisioner) reap() error {
 		if p.containerID == "" {
 			return
 		}
-		out, err := p.docker(dockerReapTimeout, "rm", "-f", p.containerID)
-		if err != nil {
-			reapErr = fmt.Errorf("backend=docker: `docker rm -f %s` failed: %s: %w", p.shortID(), strings.TrimSpace(string(out)), err)
-			log.WarningLog.Printf("%v", reapErr)
+		// Own the context here (rather than via p.docker) so a tripped deadline is
+		// distinguishable from a reap that docker ANSWERED with an error — the two
+		// mean opposite things for the record (#2049).
+		ctx, cancel := context.WithTimeout(context.Background(), dockerReapTimeout)
+		defer cancel()
+		out, err := dockerExec(ctx, "rm", "-f", p.containerID)
+		if err == nil {
+			log.InfoLog.Printf("docker runtime: reaped container %s for session %q", p.shortID(), p.spec.Title)
 			return
 		}
-		log.InfoLog.Printf("docker runtime: reaped container %s for session %q", p.shortID(), p.spec.Title)
+		reapErr = fmt.Errorf("backend=docker: `docker rm -f %s` failed: %s: %w", p.shortID(), strings.TrimSpace(string(out)), err)
+		// A tripped deadline is NOT a report that the container is gone: docker was
+		// SIGKILLed mid-reap, so the container may STILL be running. Wrap the
+		// unknown-state sentinel so KillSession/deleteSessionRecord RETAIN the row —
+		// the only handle on the possibly-leaked container — instead of classifying
+		// the timeout as a known teardown and deleting it, orphaning the container
+		// (#2049, the fabricated-negative / teardown-taxonomy family: a two-valued
+		// error can't say "I don't know if it's gone", so a timeout reads as "gone").
+		// A docker that ANSWERED with an error (e.g. "No such container" — already
+		// gone) stays a plain, known-state error and the row may go, per the
+		// documented deleteSessionRecord contract. The #914 guard applies: only when
+		// err != nil AND the ctx deadline tripped, so a bare exec.ErrWaitDelay that
+		// dockerExec already normalized to success (err == nil) never lands here.
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			reapErr = fmt.Errorf("%w: %w", ErrWorkspaceStateUnknown, reapErr)
+		}
+		log.WarningLog.Printf("%v", reapErr)
 	})
 	return reapErr
 }
