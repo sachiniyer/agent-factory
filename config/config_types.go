@@ -256,8 +256,10 @@ type Config struct {
 	// an explicit `listen_addr = ""` OVERRIDES it to empty — the opt-out that
 	// DISABLES the web server entirely (no TCP listener, pure-unix daemon). A
 	// routable value like "0.0.0.0:8443" or a LAN/Tailscale IP exposes it to the
-	// network (opt-in), still bearer-token-gated for non-loopback peers unless
-	// require_token=false. The listener is plain HTTP — af terminates no TLS of
+	// network (opt-in) and REQUIRES require_token=true: since #2090 the daemon
+	// refuses to start on a non-loopback listen_addr while the token is off,
+	// rather than serving the control plane unauthenticated (see
+	// ValidateListenerAuthPosture). The listener is plain HTTP — af terminates no TLS of
 	// its own; put a routable listener behind a reverse proxy (nginx/caddy) or a
 	// private network (Tailscale/VPN) if you need transport encryption. See
 	// docs/remote-http-auth.md. Global-only (daemon behavior), like
@@ -279,14 +281,17 @@ type Config struct {
 	// browser is on this machine or a network peer (the SPA reads that posture
 	// from /v1/auth-info and skips its login screen entirely, #1696).
 	//
-	// The trade-off is deliberate: a daemon bound to a NON-loopback listen_addr
-	// under this default serves an UNAUTHENTICATED control plane to everyone who
-	// can route to it. The default listen_addr is loopback-only (127.0.0.1:8443),
-	// so that exposure requires an explicit opt-in to a network bind. If you take
-	// it, either set require_token = true, or keep the listener on a private
-	// network (Tailscale/VPN) or behind an authenticating proxy. The listener is
+	// The default is safe only because listen_addr is loopback-only
+	// (127.0.0.1:8443): nothing off-box can reach a listener the tokenless posture
+	// applies to. Pairing this default with a NON-loopback listen_addr would serve
+	// an unauthenticated control plane to everyone who can route to it, so since
+	// #2090 the daemon REFUSES TO START in that combination instead of serving it
+	// (ValidateListenerAuthPosture) — a network bind must set require_token = true.
+	// Note that require_loopback_token cannot substitute: it is inert while this
+	// key is false, because tokenDisabled short-circuits the gate. The listener is
 	// plain HTTP (no TLS) regardless — this key is only about the token, and the
-	// token itself travels over the plaintext connection.
+	// token itself travels over the plaintext connection, so a routable listener
+	// still wants a TLS-terminating proxy or a private network.
 	//
 	// Set true to require the token from network peers; loopback peers stay exempt
 	// on a loopback bind unless require_loopback_token is also true. Global-only

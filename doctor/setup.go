@@ -24,7 +24,7 @@ func checkSetup(ctx *scanContext, report *Report) {
 	if cfg != nil {
 		checkAgentPrograms(cfg, report)
 	}
-	checkDaemonHealth(ctx, report, ctx.opts.daemonHealth())
+	checkDaemonHealth(ctx, report, ctx.opts.daemonHealth(), cfg)
 	checkRemoteSetup(ctx, report)
 }
 

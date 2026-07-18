@@ -208,15 +208,18 @@ type SetResult struct {
 // It WARNS and nothing more: it does not refuse (that would break scripting) and
 // does not auto-set require_token (silently changing a key the user did not name
 // is worse than the surprise it prevents). The user stays in control; they just
-// stop being surprised.
+// stop being surprised. Since #2090 the DAEMON refuses to start on this same
+// pairing (ValidateListenerAuthPosture), so this warning is the early, local
+// notice that the next daemon start will stop — not the only line of defense.
 //
 // Both directions of the pairing are checked, because either key can create the
 // exposure: pointing listen_addr at the network while the token is off, or
 // turning the token off while listen_addr is already on the network.
 //
-// The loopback test is config.IsLoopbackListenAddr — the SAME predicate the
-// daemon's token gate uses. Two definitions of "is this loopback" drifting apart
-// is precisely how a security check rots, so there is only one.
+// The exposure test is ListenerServesUnauthenticatedNetwork — the SAME predicate
+// the daemon's refusal uses, itself built on the IsLoopbackListenAddr the token
+// gate derives from. Two definitions of "is this exposed" drifting apart is
+// precisely how a security check rots, so there is only one.
 func exposureWarning(cfg *Config, key, canonical string) string {
 	if cfg == nil {
 		return ""
@@ -230,15 +233,14 @@ func exposureWarning(cfg *Config, key, canonical string) string {
 	default:
 		return ""
 	}
-	// An empty listen_addr disables the web server outright: nothing is exposed.
-	if addr == "" || tokenRequired || IsLoopbackListenAddr(addr) {
+	if !ListenerServesUnauthenticatedNetwork(addr, tokenRequired) {
 		return ""
 	}
-	return fmt.Sprintf("WARNING: %s is reachable from the network and require_token is false, so anyone who can "+
-		"reach it has full control of your agents and this machine — af serves a plain-HTTP control plane with no "+
-		"authentication in this configuration. Run `af config set require_token true` to require a token "+
-		"(`af token` prints it), or set listen_addr back to a loopback address such as 127.0.0.1:8443, or \"\" to "+
-		"turn the web server off.", addr)
+	return fmt.Sprintf("WARNING: %s is reachable from the network and require_token is false, which would put a "+
+		"plain-HTTP control plane with no authentication in front of anyone who can reach it. The daemon refuses to "+
+		"start in this configuration, so af has no web server until you change one of the two. Run "+
+		"`af config set require_token true` to require a token (`af token` prints it), or set listen_addr back to a "+
+		"loopback address such as 127.0.0.1:8443, or \"\" to turn the web server off.", addr)
 }
 
 // resolveSettable maps a user key ("default_program" or "program_overrides.claude")

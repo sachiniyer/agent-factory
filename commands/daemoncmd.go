@@ -51,10 +51,11 @@ per-workspace backend a daemon drives on a remote machine.
 Clients reach the daemon over a local Unix socket by default. To drive one from
 another machine, either ssh to that host and run 'af' there, or give listen_addr
 a routable address and point a client at it with the persistent --daemon-url and
---token flags. Auth is off unless you turn it on: without require_token = true a
-routable listener is open to anyone who can reach it. That listener speaks plain
-HTTP, so put it behind a reverse proxy or a private network (Tailscale/VPN) if
-you need TLS.
+--token flags. A routable listener REQUIRES require_token = true: the daemon
+refuses to start on a non-loopback listen_addr while the token is off, rather
+than serving the control API to anyone who can reach it. That listener speaks
+plain HTTP, so put it behind a reverse proxy or a private network
+(Tailscale/VPN) if you need TLS.
 Full guide: https://sachiniyer.github.io/agent-factory/remote-http-auth/
 
 Install the daemon as a user-level autostart unit (systemd user service on
@@ -121,6 +122,11 @@ type daemonStatusInfo struct {
 	PIDVerified       bool   `json:"pid_verified"`
 	AutostartUnit     bool   `json:"autostart_unit"`
 	BinaryStale       bool   `json:"binary_stale"`
+	// CannotStartReason is non-empty when the config would make the daemon refuse
+	// to start (#2090), so "not running" can be reported as the dead end it is
+	// rather than as a daemon waiting to be asked. Additive on the JSON surface:
+	// omitempty keeps existing consumers byte-identical when nothing is wrong.
+	CannotStartReason string `json:"cannot_start_reason,omitempty"`
 }
 
 // collectDaemonStatus builds a daemonStatusInfo from the read-only health
@@ -144,6 +150,20 @@ func collectDaemonStatus() daemonStatusInfo {
 			info.HTTPSocketFile = true
 		}
 	}
+	// Read-only, and only meaningful while nothing is serving: a RUNNING daemon
+	// already proved it could start, and its posture is whatever it booted with,
+	// not whatever the file says now.
+	if !info.Running {
+		if load, err := config.LoadConfigReadOnly(); err == nil {
+			if postureErr := config.ValidateListenerAuthPosture(load.Config); postureErr != nil {
+				info.CannotStartReason = fmt.Sprintf(
+					"listen_addr %q is reachable from the network while require_token is false, which would serve the "+
+						"control API unauthenticated. Run `af config set require_token true`, or "+
+						"`af config set listen_addr 127.0.0.1:8443` to serve the web UI locally only",
+					load.Config.ListenAddr)
+			}
+		}
+	}
 	return info
 }
 
@@ -151,9 +171,17 @@ func collectDaemonStatus() daemonStatusInfo {
 // the wording `af doctor` uses for the daemon check.
 func printDaemonStatusHuman(cmd *cobra.Command, info daemonStatusInfo) {
 	w := cmd.OutOrStdout()
-	if info.Running {
+	switch {
+	case info.Running:
 		fmt.Fprintln(w, "daemon: running")
-	} else {
+	// "starts on demand" is a promise about the future, so it has to be checked
+	// against the config that governs it. Under the #2090 auth posture the daemon
+	// refuses to start, and repeating the on-demand line there would send someone
+	// whose web UI just vanished looking anywhere but the cause (same reasoning as
+	// the doctor row — doctor/checks.go).
+	case info.CannotStartReason != "":
+		fmt.Fprintf(w, "daemon: not running and cannot start — %s\n", info.CannotStartReason)
+	default:
 		fmt.Fprintln(w, "daemon: not running (starts on demand when you run af with an enabled task)")
 	}
 	fmt.Fprintf(w, "  control socket: %s (%s)\n", info.ControlSocket, presence(info.ControlSocketFile))

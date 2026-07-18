@@ -136,16 +136,21 @@ func startHTTPServer(manager *Manager, scheduler *taskScheduler, watchers *watch
 		// listener never exempts loopback: a same-host reverse proxy connects from
 		// 127.0.0.1, so exempting it would bypass the token (webListenerPolicy).
 		policy := webListenerPolicy(manager.cfg)
-		if policy.tokenDisabled && !config.IsLoopbackListenAddr(manager.cfg.ListenAddr) {
-			// Tokenless is the DEFAULT (require_token=false), so warning on it alone
-			// would fire on every ordinary loopback start and train operators to
-			// ignore the line. The dangerous combination is tokenless AND
-			// network-bound: that is a control plane anyone who can route to
-			// listen_addr owns outright. Warn on exactly that, so the line stays rare
-			// and therefore readable.
-			log.WarningLog.Printf("WARNING: the daemon web API on %q is NETWORK-bound and requires NO token (require_token defaults to false); anyone who can reach it has full control. The listener is plain HTTP (no TLS), so this leaves it fully open. Set require_token = true to require auth, or keep the listener on a private network (Tailscale/VPN) or behind an authenticating proxy.", manager.cfg.ListenAddr)
-		}
-		if closer, info, err := startTCPListener(mux, manager.cfg, policy, withWebShell); err != nil {
+		// Defense in depth for #2090. RunDaemon already refuses to start in this
+		// configuration, so in production this is unreachable — it is kept because
+		// it makes the bind site safe on its OWN terms rather than by trusting its
+		// caller: any future entry point that reaches startHTTPServer without
+		// RunDaemon's gate still cannot open an unauthenticated network listener.
+		// This used to be a log warning that then bound the listener anyway, which
+		// is the #2090 exposure exactly: the operator on the reporting box had the
+		// warning in their log and served the control plane regardless.
+		//
+		// Skipping the listener (rather than failing startup) matches this
+		// function's contract that the web server is never allowed to take the
+		// unix control plane down with it.
+		if config.ListenerServesUnauthenticatedNetwork(manager.cfg.ListenAddr, manager.cfg.RequireToken) {
+			log.ErrorLog.Printf("refusing to serve the daemon web API on %q: it is reachable from the network but require_token is false, which would expose the full control API (including DeliverPrompt) unauthenticated. Set require_token = true, or bind listen_addr to 127.0.0.1. The web server is disabled for this run; the local unix control plane is unaffected.", manager.cfg.ListenAddr)
+		} else if closer, info, err := startTCPListener(mux, manager.cfg, policy, withWebShell); err != nil {
 			log.WarningLog.Printf("failed to start daemon HTTP TCP listener on %q: %v", manager.cfg.ListenAddr, err)
 		} else {
 			closeTCP = closer

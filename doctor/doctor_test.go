@@ -836,3 +836,73 @@ func TestSummarizedMoreCountIsAnchoredNotOpportunistic(t *testing.T) {
 	require.Equal(t, 46, rollup.UnresolvedCount(),
 		"the real roll-up must still stand for every process it folded")
 }
+
+// TestDaemonUnauthenticatedListenerIsNotAPass is the #2090 diagnosability lock.
+//
+// A daemon that REFUSES to start and a daemon that has simply not been started
+// yet present identically at the socket: no file, no ping. Doctor used to read
+// that as "not running; starts on demand" — a PASS asserting a future the config
+// has already ruled out. The user's symptom (the web UI is gone after an upgrade)
+// then had no diagnostic thread at all: the TUI works, doctor is green, and the
+// only trace is a line in agent-factory.log.
+//
+// So on the refusing config the daemon row must FAIL and carry the remediation.
+func TestDaemonUnauthenticatedListenerIsNotAPass(t *testing.T) {
+	testguard.IsolateTmux(t)
+	opts := testOptions(t, false)
+
+	// The exact upgrade case: an explicit network listen_addr from an era when
+	// that was the shipped default, still paired with the tokenless default.
+	require.NoError(t, os.WriteFile(
+		filepath.Join(opts.ConfigDir, config.TomlConfigFileName),
+		[]byte("listen_addr = '0.0.0.0:8443'\nrequire_token = false\n"), 0600))
+
+	opts.daemonHealth = func() daemon.HealthStatus {
+		return daemon.HealthStatus{
+			SocketPath:    filepath.Join(opts.ConfigDir, "daemon.sock"),
+			SocketExists:  false, // never started — because it cannot
+			PingErr:       errNoDaemon,
+			HTTPListening: daemon.Undetermined(errNoDaemon),
+		}
+	}
+
+	report, err := Run(opts)
+	require.NoError(t, err)
+
+	rows := findCheckRows(report, "daemon")
+	require.Len(t, rows, 1)
+	require.Equal(t, StatusFail, rows[0].Status,
+		"a daemon that cannot start must not be reported as a healthy on-demand daemon")
+	require.Contains(t, rows[0].Detail, "cannot start")
+	require.Contains(t, rows[0].Remediation, "require_token true",
+		"the row must carry the fix, since the refusal itself is only visible in the log")
+}
+
+// TestDaemonNotRunningStillPassesOnASafeConfig guards the other direction: the
+// #2090 row must fire on the unsafe posture ONLY. An ordinary user who has just
+// not started a daemon yet still gets the on-demand pass, not a scary failure.
+func TestDaemonNotRunningStillPassesOnASafeConfig(t *testing.T) {
+	testguard.IsolateTmux(t)
+	opts := testOptions(t, false)
+
+	require.NoError(t, os.WriteFile(
+		filepath.Join(opts.ConfigDir, config.TomlConfigFileName),
+		[]byte("listen_addr = '127.0.0.1:8443'\nrequire_token = false\n"), 0600))
+
+	opts.daemonHealth = func() daemon.HealthStatus {
+		return daemon.HealthStatus{
+			SocketPath:    filepath.Join(opts.ConfigDir, "daemon.sock"),
+			SocketExists:  false,
+			PingErr:       errNoDaemon,
+			HTTPListening: daemon.Undetermined(errNoDaemon),
+		}
+	}
+
+	report, err := Run(opts)
+	require.NoError(t, err)
+
+	rows := findCheckRows(report, "daemon")
+	require.Len(t, rows, 1)
+	require.Equal(t, StatusPass, rows[0].Status,
+		"the loopback default is safe — it must keep the on-demand pass")
+}
