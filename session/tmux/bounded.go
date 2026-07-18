@@ -3,6 +3,7 @@ package tmux
 import (
 	"context"
 	"errors"
+	"io"
 	"os"
 	"os/exec"
 	"syscall"
@@ -39,8 +40,32 @@ import (
 // exec.Command. daemon.KillSession runs the whole teardown with no deadline of its
 // own while holding a per-session kills-in-flight guard, so a single unbounded tmux
 // call there does not merely stall one kill: it makes that session permanently
-// undeletable for the daemon's entire lifetime. Every tmux command in this package
-// is now bounded; new ones must be too.
+// undeletable for the daemon's entire lifetime.
+//
+// #2099/#2105 closed the last gaps, which were regressions against the invariant
+// this comment used to assert outright ("every tmux command in this package is now
+// bounded") while three capture paths were in fact still unbounded — the claim was
+// load-bearing enough that later code trusted it instead of checking:
+//
+//   - The CAPTURE/POLL paths: CapturePaneContent (the daemon's per-second status
+//     poll, via HasUpdated), CapturePaneContentWithOptions, and the submit path's
+//     capturePaneForDelivery. The daemon polls instances SEQUENTIALLY, so one
+//     wedged session froze the status of every instance behind it.
+//   - CapturePaneContentContext had a ctx but ran on plain exec.CommandContext,
+//     which sets no WaitDelay and kills only the direct process — so a child
+//     holding the inherited stdout pipe kept Output() blocked on pipe EOF and
+//     silently defeated the deadline. A ctx alone is NOT a bound; it has to go
+//     through boundedTmuxCommand.
+//   - The remaining send-keys/buffer/sweep commands (TapEnter, TapDAndEnter,
+//     sendEnter, load-buffer, paste-buffer, delete-buffer, show-environment,
+//     tmux -V, tmux ls, CleanupSessions' kill-session).
+//
+// The invariant is real again, and stated as an obligation rather than a fact:
+// every tmux command in this package MUST be bounded, and session/tmux's wedge
+// tests (bounded_test.go, kill_wedge_test.go, capture_wedge_test.go) are what
+// hold new ones to it. The one deliberate exception is start.go's `new-session`,
+// which is not a control command: it is handed to the PtyFactory as the session's
+// own long-lived process, and its lifetime is managed by the ptmx, not a deadline.
 //
 // A var (not a const) only so tests can shorten it; production never reassigns.
 var tmuxCommandTimeout = 10 * time.Second
@@ -126,6 +151,30 @@ func (t *TmuxSession) outputTmuxBounded(ctx context.Context, args ...string) ([]
 	return outputTmuxBoundedWith(ctx, t.cmdExec, args...)
 }
 
+// runTmuxBoundedStdin runs a tmux command under ctx with stdin wired to r. It
+// exists because the helpers above deliberately take no stdin, and `load-buffer`
+// is this package's only tmux command that STREAMS a payload in (#2099).
+//
+// It does NOT normalize exec.ErrWaitDelay to success, and that divergence from
+// runTmuxBounded is the whole reason it is a separate helper. exec copies a
+// non-*os.File stdin to the child through an OS pipe on a background goroutine,
+// and WaitDelay force-closes that pipe when it elapses — which is exactly what
+// keeps a killed tmux from stranding the copier, but it also means an unknown
+// PREFIX of the payload may be all that landed. For the output-discarding control
+// commands, normalizing is right: tmux exited cleanly and only a pipe-holding
+// child lingered, so the work is done (#676/#914). For load-buffer it would claim
+// a prompt was loaded when it was truncated, and the paste that follows would
+// submit the mangled remainder while still reporting success — the silent
+// prompt-corruption class of #1982, which is strictly worse than the hang this
+// bound removes. So the error propagates and the submit fails loudly.
+func runTmuxBoundedStdin(ctx context.Context, cmdExec cmd.Executor, r io.Reader, args ...string) error {
+	c := boundedTmuxCommand(ctx, args...)
+	c.Stdin = r
+	err := cmdExec.Run(c)
+	reapTmuxGroup(c)
+	return err
+}
+
 // normalizeWaitDelay converts an exec.ErrWaitDelay into success: tmux itself
 // exited cleanly (a non-zero exit surfaces as an ExitError, not ErrWaitDelay)
 // and only an inherited child held the capture pipe open past tmuxWaitDelay —
@@ -149,4 +198,25 @@ func normalizeWaitDelay(err error) error {
 // cancellation, where it skips the probe and returns ctx.Err() directly).
 func tmuxTimeoutContext() (context.Context, context.CancelFunc) {
 	return context.WithTimeout(context.Background(), tmuxCommandTimeout)
+}
+
+// tmuxTimeoutContextWithin is tmuxTimeoutContext for a caller that already has a
+// SHORTER deadline of its own: the bound becomes the smaller of budget and
+// tmuxCommandTimeout.
+//
+// It exists for poll loops (#2099). A loop whose whole budget is
+// pasteDeliveryMaxWait (2s) cannot bound the tmux command inside it at the flat
+// tmuxCommandTimeout (10s): one stalled command would then overshoot the loop's
+// entire budget 5x, and the loop's own deadline check — the code that decides to
+// give up — stays unreachable for the whole 10s. Bounding each command by what is
+// LEFT of the loop's budget is what makes that check actually run on time.
+//
+// A non-positive budget yields an already-expired context rather than an
+// unbounded one: the caller is past its deadline, so the correct outcome is for
+// the command to fail immediately and let the loop exit.
+func tmuxTimeoutContextWithin(budget time.Duration) (context.Context, context.CancelFunc) {
+	if budget > tmuxCommandTimeout {
+		budget = tmuxCommandTimeout
+	}
+	return context.WithTimeout(context.Background(), budget)
 }

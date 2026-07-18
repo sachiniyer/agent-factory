@@ -2,7 +2,6 @@ package tmux
 
 import (
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -55,8 +54,17 @@ func sessionEnvFlags(sanitizedName string) []string {
 // environment (stamped via `new-session -e` at creation). Returns ("", false)
 // when the session carries no marker — created by a pre-marker build or by a
 // tmux older than 3.2, which cannot set session environment at creation.
+//
+// Bounded by tmuxCommandTimeout (#2099): CleanupSessions calls this once per
+// discovered session, so an unbounded stall on any one of them wedges the whole
+// sweep — and `af reset` runs that sweep synchronously in a short-lived CLI
+// process, where the only way out is ^C. A tripped deadline reports "no marker",
+// which is the safe direction: the sweep leaves any session it cannot PROVE this
+// home owns (#1122), and a wedged server proves nothing.
 func sessionHomeMarker(cmdExec cmd.Executor, sanitizedName string) (string, bool) {
-	out, err := cmdExec.Output(exec.Command("tmux", "show-environment", "-t", exactTarget(sanitizedName), EnvMarkerHome))
+	ctx, cancel := tmuxTimeoutContext()
+	defer cancel()
+	out, err := outputTmuxBoundedWith(ctx, cmdExec, "show-environment", "-t", exactTarget(sanitizedName), EnvMarkerHome)
 	if err != nil {
 		// show-environment exits non-zero when the variable is unset.
 		return "", false
@@ -73,9 +81,21 @@ var (
 
 // tmuxSupportsNewSessionEnv probes `tmux -V` once per process. Unparseable
 // versions ("openbsd-7.4", exotic builds) conservatively report false.
+//
+// Bounded like every other tmux command in this package (#2099), though the
+// hazard here is narrower and worth naming honestly: `tmux -V` is answered by the
+// CLIENT and never contacts the server, so a wedged SERVER — the failure mode
+// #2099/#2105 are about — cannot stall it. What can is a hanging tmux BINARY (a
+// wrapper script, a stalled network filesystem holding the executable). That is
+// defensive rather than reproduced, but the blast radius justifies the three
+// lines: this sits behind a sync.Once on the session-CREATE path, so a single
+// hang would wedge session creation for the entire process lifetime and every
+// later caller would block on the Once rather than retry.
 func tmuxSupportsNewSessionEnv() bool {
 	newSessionEnvOnce.Do(func() {
-		out, err := exec.Command("tmux", "-V").Output()
+		ctx, cancel := tmuxTimeoutContext()
+		defer cancel()
+		out, err := outputTmuxBoundedWith(ctx, cmd.MakeExecutor(), "-V")
 		if err != nil {
 			return
 		}
