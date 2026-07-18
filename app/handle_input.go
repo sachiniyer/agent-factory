@@ -223,7 +223,21 @@ func (m *home) startNewInstance(remote bool) (tea.Model, tea.Cmd) {
 			return m, m.handleError(err)
 		}
 		if !configured {
-			return m, nil
+			// The menu advertises `N new remote` next to `n new`, so an
+			// unconfigured repo must SAY that rather than eat the keypress
+			// (#2020). RemoteHooksConfiguredForPath reports the unconfigured
+			// repo as (false, nil) — a normal empty state, not an error — which
+			// is why only a MALFORMED remote_hooks config used to surface
+			// anything, and the common case (no remote_hooks at all) did
+			// nothing at all. Every other gated action in the TUI explains
+			// itself; this was the one that did not.
+			//
+			// The cause and the fix lead the sentence: the transient notice
+			// clips to the terminal width and the tail is what disappears
+			// (#1973), so the guide URL — recoverable under `E details` — goes
+			// last.
+			return m, m.handleError(fmt.Errorf(
+				"remote sessions need a remote_hooks backend configured for this repo — press n for a local session, or configure remote_hooks and try again. Guide: https://sachiniyer.github.io/agent-factory/remote-hooks/"))
 		}
 	}
 	instance, err := session.NewInstance(session.InstanceOptions{
