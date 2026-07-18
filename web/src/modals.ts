@@ -344,27 +344,45 @@ export function promptModal(
   return handle;
 }
 
-/** A destructive-action confirm modal (kill or archive). */
+/** A session-lifecycle confirm modal (kill, archive, or restore). Kill is
+ *  destructive; archive/restore are the reversible pair (#1932). */
 export function confirmModal(
-  opts: { action: "kill" | "archive"; sessionTitle: string; onConfirm: () => void; onCancel: () => void },
+  opts: { action: "kill" | "archive" | "restore"; sessionTitle: string; onConfirm: () => void; onCancel: () => void },
 ): ModalHandle {
-  const isKill = opts.action === "kill";
+  // Restore is the reverse of archive (#1932): non-destructive, so it reads as a
+  // primary (not danger) confirm, mirroring archive's own class. The web routes it
+  // through this same confirm chrome as kill/archive so it inherits their busy +
+  // error surface; the copy makes true the "you can restore it later" promise the
+  // archive confirm already prints.
+  const copy = {
+    kill: {
+      title: `Kill ${opts.sessionTitle}?`,
+      confirmLabel: "Kill",
+      confirmClass: "af-danger",
+      body: "This permanently destroys the session and prunes its branch. This can't be undone.",
+    },
+    archive: {
+      title: `Archive ${opts.sessionTitle}?`,
+      confirmLabel: "Archive",
+      confirmClass: "af-primary",
+      body: "This tears down the session's terminal and moves its worktree to the archive. You can restore it later.",
+    },
+    restore: {
+      title: `Restore ${opts.sessionTitle}?`,
+      confirmLabel: "Restore",
+      confirmClass: "af-primary",
+      body: "This moves the session's worktree back next to its repo and re-spawns the agent, returning it to the live rail.",
+    },
+  }[opts.action];
+
   const { handle, body } = modalChrome({
-    title: isKill ? `Kill ${opts.sessionTitle}?` : `Archive ${opts.sessionTitle}?`,
-    confirmLabel: isKill ? "Kill" : "Archive",
-    confirmClass: isKill ? "af-danger" : "af-primary",
+    title: copy.title,
+    confirmLabel: copy.confirmLabel,
+    confirmClass: copy.confirmClass,
     onCancel: opts.onCancel,
   });
 
-  body.append(
-    h(
-      "p",
-      { class: "af-modal-text" },
-      isKill
-        ? "This permanently destroys the session and prunes its branch. This can't be undone."
-        : "This tears down the session's terminal and moves its worktree to the archive. You can restore it later.",
-    ),
-  );
+  body.append(h("p", { class: "af-modal-text" }, copy.body));
 
   const card = handle.el.firstElementChild as HTMLElement;
   asForm(card, () => {

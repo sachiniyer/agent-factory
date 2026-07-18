@@ -21,6 +21,7 @@ import {
   removeTask,
   renameTab,
   reorderTab,
+  restoreSession,
   sendPrompt,
   triggerTask,
   updateTask,
@@ -119,6 +120,30 @@ test("archiveSession posts the stable id alongside the title", async () => {
   assert.equal(cap.body.id, "id-repoB");
   assert.equal(cap.body.title, "feature");
   assert.equal(cap.body.repo_id, "");
+});
+
+// restoreSession is the archive round-trip's missing return leg (#1932): the web
+// could archive but never restore. Unlike kill/archive it resolves by TITLE only —
+// the daemon's RestoreSessionRequest (daemon/control_types.go) has no `id` field —
+// so these pin BOTH that it hits the RestoreSession route the CLI/TUI use AND that
+// it sends NO `id`: a web request carries no client-version header, so the daemon
+// decodes with DisallowUnknownFields and a stray `id` would be a 400.
+test("restoreSession posts to RestoreSession by title, with an empty repo_id", async () => {
+  const cap = stubFetch();
+  await restoreSession("feature", "tok");
+  assert.equal(cap.url, "/v1/RestoreSession", "must hit the same route af sessions restore / the TUI `r` use");
+  assert.equal(cap.auth, "Bearer tok");
+  assert.equal(cap.body.title, "feature");
+  assert.equal(cap.body.repo_id, "", "web is an all-repos client; repo_id stays empty, as it does for archive/kill");
+});
+
+test("restoreSession does NOT send an id (RestoreSessionRequest has no id field)", async () => {
+  const cap = stubFetch();
+  await restoreSession("feature", "tok");
+  // The daemon decodes web requests with DisallowUnknownFields; an `id` key it does
+  // not know would be rejected as a 400 "unknown field". Archive/kill send `id`
+  // only because THEIR request structs accept it — restore's does not.
+  assert.equal("id" in cap.body, false, "no id key may reach the daemon, or DisallowUnknownFields 400s the restore");
 });
 
 test("sendPrompt posts the stable id alongside the title and prompt", async () => {

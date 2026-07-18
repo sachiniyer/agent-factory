@@ -2096,6 +2096,63 @@ test("archive: the archive confirm retires the session out of the default rail",
   await expect(row(page, SESSION_B)).toHaveCount(0);
 });
 
+test("restore (#1932): the pane header's Restore action brings an archived session back to the live rail", async () => {
+  // The return leg of archive. The preceding test left B archived; the web could
+  // shelve a session but — until #1932 — offered no way back, contradicting the "you
+  // can restore it later" copy the archive confirm itself prints. This drives the real
+  // round-trip through the daemon AND pins the LIVE button swap: renderMain (which
+  // builds the pane header) runs only on a selection change, so archiving/restoring
+  // the row that STAYS selected has to flip Archive⇄Restore in place — the exact bug
+  // the first cut of this test caught (an archived, still-selected row kept its stale
+  // Archive button, a daemon no-op).
+  //
+  // Hold the archived filter ON for the whole flow so B stays visible in the rail
+  // across both transitions; restore the default (archived hidden) only at the end,
+  // leaving B archived for the downstream filter tests.
+  await setFilter(page, "archived", true);
+  await expect(row(page, SESSION_B)).toHaveClass(/af-row-archived/, { timeout: 30_000 });
+
+  await row(page, SESSION_B).click();
+  await expect(page.locator(".af-main.af-main-term")).toBeVisible();
+
+  // An archived session's lifecycle button IS Restore, not Archive — the reverse verb
+  // on the same slot, never a second button.
+  const head = page.locator(".af-term-head");
+  await expect(head.locator("button", { hasText: "Archive" })).toHaveCount(0);
+  await head.locator("button", { hasText: "Restore" }).click();
+
+  // Restore is a confirm (mirroring kill/archive), so it inherits their busy/error
+  // surface; the primary button POSTs RestoreSession.
+  const restoreModal = page.locator(".af-modal-card");
+  await expect(restoreModal).toBeVisible();
+  await expect(restoreModal).toContainText("Restore");
+  await restoreModal.locator("button.af-primary").click();
+
+  // The daemon's session.restored event resyncs the rail: B rejoins the LIVE group,
+  // no longer archived — the end-to-end proof the archived session returned to active.
+  await expect(row(page, SESSION_B)).not.toHaveClass(/af-row-archived/, { timeout: 30_000 });
+  // ...and its pane header — STILL selected, never reselected — flips its verb back to
+  // Archive in place: the patchMainHead swap the selection-change-only rebuild misses.
+  await expect(head.locator("button", { hasText: "Restore" })).toHaveCount(0, { timeout: 30_000 });
+  await expect(head.locator("button", { hasText: "Archive" })).toHaveCount(1);
+
+  // Re-archive from that same live-flipped button (NO reselect): restores the fixture
+  // the downstream filter tests need (B archived) and re-proves both the archive leg
+  // and the reverse (Archive→Restore) live flip in one flow.
+  await head.locator("button", { hasText: "Archive" }).click();
+  const archiveModal = page.locator(".af-modal-card");
+  await expect(archiveModal).toBeVisible();
+  await archiveModal.locator("button.af-primary").click();
+  await expect(row(page, SESSION_B)).toHaveClass(/af-row-archived/, { timeout: 30_000 });
+  await expect(head.locator("button", { hasText: "Archive" })).toHaveCount(0);
+  await expect(head.locator("button", { hasText: "Restore" })).toHaveCount(1);
+
+  // Back to the default filter (archived hidden): B drops from the rail, exactly as
+  // the archive test left it.
+  await resetFilter(page);
+  await expect(row(page, SESSION_B)).toHaveCount(0);
+});
+
 test("#1933: a backend availability refresh must not re-enable Create mid-submit", async () => {
   // The race: a ListBackends is in flight when the user submits, and its response
   // lands DURING the create. Re-rendering the choices must not decide, on its own,
