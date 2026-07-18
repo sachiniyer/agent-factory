@@ -320,6 +320,32 @@ var ghostCleanupWorktree = func(data *session.InstanceData, title string) (git.C
 	return state, cleanupErr
 }
 
+// ghostTmuxNames returns the deduped, ordered set of tmux session names a ghost
+// record owns: the legacy agent-tab name (data.TmuxName) first, then each tab's
+// name in persisted order. Empty names are skipped. A post-#953 record repeats
+// the agent tab in BOTH data.TmuxName and data.Tabs, so the dedupe collapses that
+// to a single kill; a pre-#953 record has no Tabs and yields just data.TmuxName,
+// keeping the legacy path byte-identical.
+func ghostTmuxNames(data *session.InstanceData) []string {
+	names := make([]string, 0, len(data.Tabs)+1)
+	seen := make(map[string]struct{}, len(data.Tabs)+1)
+	add := func(name string) {
+		if name == "" {
+			return
+		}
+		if _, ok := seen[name]; ok {
+			return
+		}
+		seen[name] = struct{}{}
+		names = append(names, name)
+	}
+	add(data.TmuxName)
+	for _, tab := range data.Tabs {
+		add(tab.TmuxName)
+	}
+	return names
+}
+
 // ghostCleanup runs best-effort teardown of a ghost session's external
 // resources. Tmux teardown is independent of worktree state (#516/#549): a
 // ghost record can have an empty worktree path while a tmux session with the
@@ -333,10 +359,23 @@ var ghostCleanupWorktree = func(data *session.InstanceData, title string) (git.C
 // workspace of a session that might still be running. Found by auditing every
 // caller of the bounded teardown rather than by the review itself.
 func ghostCleanup(data *session.InstanceData, title string) error {
-	if data.TmuxName != "" {
-		state, killErr := ghostKillTmuxByName(data.TmuxName)
+	// Kill EVERY tmux session this ghost owns, not just the agent tab. The live
+	// teardown path (Instance.teardownTabs) closes every tab's tmux; the ghost
+	// path has no live Instance, so it must reconstruct the same set from the
+	// persisted record. Before #2007 it killed only the legacy data.TmuxName (the
+	// agent tab), so a multi-tab ghost's shell (`<agent>__shell`) and process
+	// (`<agent>__btop`) tmux sessions leaked with no cleanup short of `af reset` —
+	// the tab list persisted by #953 was never consulted here.
+	//
+	// The per-tab kills gate the worktree delete the same way the agent tab always
+	// has (#1917): a tmux we could not confirm dead (state != Known) may still have
+	// a pane writing into the workspace, so we stop before touching it and keep the
+	// record intact for a retry. Tmux still goes FIRST for the #802 reason (a live
+	// agent racing git's recursive delete leaks a half-deleted directory).
+	for _, name := range ghostTmuxNames(data) {
+		state, killErr := ghostKillTmuxByName(name)
 		if killErr != nil {
-			log.WarningLog.Printf("ghost session %q: tmux cleanup failed: %v", title, killErr)
+			log.WarningLog.Printf("ghost session %q: tmux cleanup failed for %q: %v", title, name, killErr)
 		}
 		if state != tmux.PaneStateKnown {
 			return fmt.Errorf("ghost session %q: %w: leaving its workspace and record intact: %v",
