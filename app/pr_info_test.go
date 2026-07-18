@@ -221,13 +221,17 @@ func TestPrInfoUpdatedMsg_Error_PreservesCacheAndDebounces(t *testing.T) {
 		"MarkPRInfoFetched should have bumped the fetch timestamp to prevent retry thrash")
 }
 
-// TestSelectionChanged_TriggersFetchForStaleSelectedInstance — verifies the
-// lazy-on-select wiring: landing on an instance whose PR info is stale (or
-// never fetched) schedules a fetch.
+// TestSelectionChanged_DoesNotRefetchFreshInstance pins the debounce half of the
+// lazy-on-select wiring: landing on an instance whose PR info is already fresh
+// must not schedule another `gh pr view`.
 //
-// We only assert the returned cmd is non-nil for a *stale* started instance;
-// asserting the cmd produces a prInfoUpdatedMsg would require a real `gh`
-// invocation, which is covered by the e2e layer.
+// It asserts on the instance's cached info and fetch timestamp rather than on the
+// returned cmd, because selectionChanged also dispatches an off-loop pane refresh
+// (#579) — the cmd is non-nil either way, so checking it would prove nothing.
+//
+// The other half (a stale instance DOES schedule a fetch, exactly once) is
+// covered against fetchPRInfoCmd directly by
+// TestFetchPRInfoCmd_MarksFetchAtKickoff_DebouncesConcurrentCalls below.
 func TestSelectionChanged_DoesNotRefetchFreshInstance(t *testing.T) {
 	h := newTestHome(t)
 	inst := newStartedInstance(t, "fresh")

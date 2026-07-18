@@ -23,7 +23,9 @@ import (
 // fallback entry point while in scroll mode and assert the fallback message
 // renders, scroll mode is exited, and the viewport content is cleared.
 //
-// Mirrors TestTerminalScroll* / the TerminalPane setFallbackState invariant.
+// Mirrors the TabPane twin of this invariant in terminal_test.go:
+// TestTabPaneShellFallbackResetsScrollMode and the TestTabPaneShellScrollMode*
+// cases.
 
 const staleScrollMarker = "STALE-SCROLL-VIEWPORT-CONTENT"
 
