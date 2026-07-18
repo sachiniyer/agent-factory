@@ -363,10 +363,14 @@ only the second is dangerous.
   the TUI's naming flow never populates it upstream. A field-level pass does not
   excuse reading the flow.
 - **Internal routes are not in the *verb*-level route check** *(under-reports)*.
-  `daemon.HTTPRoutes()` is the public catalog; `Preview` and `ResumeFromLimit`
-  live in `internalHTTPRoutes`. Both are covered at the **option** level via
-  `auditedRequests` — which is what catches #1948 — but a new internal route that
-  no surface calls would not trip the route check.
+  `daemon.HTTPRoutes()` is the public catalog; `Preview` and the two
+  `*StatusPoll` routes live in `internalHTTPRoutes`. They are covered at the
+  **option** level via `auditedRequests` — which is what catches #1948 — but a new
+  internal route that no surface calls would not trip the route check.
+  `ResumeFromLimit` used to be in that list and is the cautionary case: it sat
+  there for so long that the web shipped the usage-limit state with no way out of
+  it, and no check failed, because an unreachable verb breaks nothing. It was
+  promoted in #1934.
 - **A nested payload built by a shared helper** *(over-reports — safe)*. The TUI
   patches a task via `task.DiffTask`, in a package every surface shares, so the
   walk cannot attribute it. Those fields are reported unreached and must be

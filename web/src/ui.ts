@@ -32,7 +32,7 @@ import {
   type StatusFilter,
 } from "./filter.js";
 import { projectMeta, projectName, type ProjectSummary, projectSummaries, scopeToProject } from "./project.js";
-import { compareSessionsForRail, isArchived, type RowKind, rowStatus, rowTitle } from "./status.js";
+import { compareSessionsForRail, isArchived, isLimitReached, type RowKind, rowStatus, rowTitle } from "./status.js";
 import { ConfigPane, type ConfigStatus } from "./config.js";
 import { isRenameableTab, tabDisplayLabel, tabGlyph, tabLabel } from "./tablabel.js";
 import { insertionIndexAt, reorderTargetIndex } from "./tabreorder.js";
@@ -142,6 +142,11 @@ export interface Actions {
   /** Opens the restore-confirm modal for the current selection (an archived / Lost
    *  / Dead session): the reverse of archive (#1932). */
   restore(): void;
+  /** Resumes the current selection from its usage-limit wall (#1934) — the web's
+   *  analogue of the TUI's `c`. Fires immediately with NO confirm, matching the
+   *  TUI: it is not destructive (it re-delivers the prompt the session was already
+   *  going to run) and it is the obvious next step for a session that is stuck. */
+  retryLimit(): void;
   /** Switches the selected session's active tab WITHOUT attaching — the keyboard
    *  stays in rail nav mode (the 1-9 keys, mirroring the TUI). */
   switchTab(index: number): void;
@@ -558,6 +563,12 @@ export class AppShell {
   // exactly as it patches the header text. null when nothing is selected.
   private lifecycleBtn: HTMLElement | null = null;
   private lifecycleArchived = false;
+  // The usage-limit Retry button and whether it is currently shown (#1934). Same
+  // treatment, and for the same reason, as lifecycleBtn above: a session hits the
+  // limit wall — or is resumed off it — WITHOUT a selection change, which is the
+  // only thing that rebuilds the header, so patchMainHead toggles it in place.
+  private retryBtn: HTMLElement | null = null;
+  private retryVisible = false;
   // The tab bar for the selected session, (re)created per selection and patched in
   // place when the tab list or active tab changes (#1592 Phase 5 PR7). null when
   // nothing is selected (the empty state has no tabs).
@@ -1339,6 +1350,8 @@ export class AppShell {
       this.headTitle = null;
       this.headMeta = null;
       this.lifecycleBtn = null;
+      this.retryBtn = null;
+      this.retryVisible = false;
       this.tabBar = null;
       // Detaches the terminal host if it was mounted; index.ts disposes the terminal.
       this.main.className = "af-main af-main-empty";
@@ -1372,9 +1385,31 @@ export class AppShell {
     );
     lifecycleBtn.addEventListener("click", () => (this.lifecycleArchived ? this.actions.restore() : this.actions.archive()));
     this.lifecycleBtn = lifecycleBtn;
+
+    // Retry, for a session parked at a usage-limit wall (#1934). The web rendered
+    // that state — ◆ glyph, "Limit reached" label, "[limit] resets …" title prefix
+    // — and offered nothing to do about it, so the session sat until someone found
+    // a terminal and opened the TUI.
+    //
+    // Shown only while the selection is limit-blocked, mirroring the TUI, which
+    // advertises `c` only for a limit-blocked row (ui/menu.go) rather than showing
+    // a dead control on every session.
+    //
+    // Hidden via `hidden`, and patched by patchMainHead — NOT decided once here.
+    // renderMain runs only on a SELECTION change, and the common path is a session
+    // hitting the wall while it is already selected, which is no selection change
+    // at all (#1932, the same trap the archive/restore verb hit). A render-time
+    // decision would mean the button appears only if you look away and back.
+    const retryBtn = h("button", { type: "button", class: "af-ghost af-term-action" }, "Retry");
+    retryBtn.title = "Resume this session from its usage-limit wall";
+    retryBtn.addEventListener("click", () => this.actions.retryLimit());
+    this.retryBtn = retryBtn;
+    this.retryVisible = isLimitReached(selected);
+    retryBtn.hidden = !this.retryVisible;
+
     const killBtn = h("button", { type: "button", class: "af-danger af-term-action" }, "Kill");
     killBtn.addEventListener("click", () => this.actions.kill());
-    const actions = h("div", { class: "af-term-actions" }, promptBtn, lifecycleBtn, killBtn);
+    const actions = h("div", { class: "af-term-actions" }, promptBtn, retryBtn, lifecycleBtn, killBtn);
 
     const head = h("div", { class: "af-term-head" }, titleBox, actions);
 
@@ -1647,6 +1682,18 @@ export class AppShell {
     if (this.lifecycleBtn && nowArchived !== this.lifecycleArchived) {
       this.lifecycleArchived = nowArchived;
       this.lifecycleBtn.textContent = nowArchived ? "Restore" : "Archive";
+    }
+
+    // Show/hide Retry as the selected session enters or leaves the usage-limit wall
+    // (#1934). This is the load-bearing half of the button: a session almost always
+    // hits the limit while it is the one you are watching, and that is not a
+    // selection change, so renderMain never runs. Deciding visibility only at build
+    // time would leave a limit-blocked session with no way out until the user
+    // clicked away and back.
+    const nowLimited = isLimitReached(selected);
+    if (this.retryBtn && nowLimited !== this.retryVisible) {
+      this.retryVisible = nowLimited;
+      this.retryBtn.hidden = !nowLimited;
     }
   }
 }

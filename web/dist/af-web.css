@@ -884,6 +884,9 @@ body {
   padding: 0.3rem 0.6rem;
   font-size: var(--af-fs-xs);
 }
+.af-term-action[hidden] {
+  display: none;
+}
 .af-term-title {
   font-size: var(--af-fs-md);
   font-weight: 600;

@@ -165,11 +165,24 @@ func (m *Manager) persistPollChange(repoID string, instance *session.Instance, b
 // ResumeFromLimitRequest asks the daemon to resume a session blocked at a usage-
 // limit wall (#1146): re-spawn its agent if the tmux session exited, re-deliver
 // the pending prompt, and clear the LimitReached liveness. It is the manual-
-// retry action behind the TUI's `c` key; PR3's auto-resume scheduler reuses the
-// same Manager method.
+// retry action behind the TUI's `c` key and the web's Retry button (#1934);
+// PR3's auto-resume scheduler reuses the same Manager method.
 type ResumeFromLimitRequest struct {
 	Title  string `json:"title"`
 	RepoID string `json:"repo_id"`
+	// ID is the session's stable id (session.InstanceData.ID). When non-empty it
+	// is the PRIMARY lookup key: the daemon resolves the target by id first and
+	// only falls back to {Title, RepoID} when it is empty. Same contract as
+	// KillSessionRequest.ID — web clients send it so a duplicate title across
+	// repos cannot target the wrong session, TUI/CLI callers omit it and resolve
+	// by title.
+	//
+	// Added when this verb was promoted out of internalHTTPRoutes for the web
+	// (#1934). It is not decoration: the verb re-delivers a prompt into a pane, so
+	// a misroute types someone's prompt into an unrelated repo's agent. Exposing a
+	// title-keyed mutation to a client that natively holds stable ids is the
+	// unstable-identity class this repo has already paid for repeatedly (#1904).
+	ID string `json:"id"`
 }
 
 type ResumeFromLimitResponse struct {
@@ -228,15 +241,23 @@ func (s *controlServer) ResumeFromLimit(req ResumeFromLimitRequest, resp *Resume
 var testHookResumeAfterFirstLock = func() {}
 
 func (m *Manager) resumeFromLimit(req ResumeFromLimitRequest) error {
-	instance, repoID, _, err := m.findSession(req.Title, req.RepoID)
+	// resolveActionSession, not findSession: id-first with a {title, repoID}
+	// fallback, the same resolver kill/archive/restore and the tab verbs use. This
+	// verb re-delivers a prompt INTO a pane, so resolving it by title alone would
+	// let a duplicate title across repos type someone's prompt into an unrelated
+	// agent — which is why the web, which holds stable ids, sends one (#1934).
+	//
+	// Every use below is the RESOLVED title rather than req.Title, which an
+	// id-keyed request may leave empty.
+	instance, repoID, title, _, _, err := m.resolveActionSession(req.ID, req.Title, req.RepoID)
 	if err != nil {
 		return err
 	}
 	if instance == nil {
-		return fmt.Errorf("session %q not found", req.Title)
+		return fmt.Errorf("session %q not found", title)
 	}
 	if !instance.LimitReached() {
-		return fmt.Errorf("session %q is not blocked on a usage limit", req.Title)
+		return fmt.Errorf("session %q is not blocked on a usage limit", title)
 	}
 
 	key := daemonInstanceKey(repoID, instance.Title)
@@ -272,7 +293,7 @@ func (m *Manager) resumeFromLimit(req ResumeFromLimitRequest) error {
 		return nil
 	}
 
-	return m.resumeFromLimitLocked(repoID, key, instance, req.Title)
+	return m.resumeFromLimitLocked(repoID, key, instance, title)
 }
 
 // resumeFromLimitLocked performs the shared limit-resume action. The caller must

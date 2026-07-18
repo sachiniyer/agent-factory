@@ -150,6 +150,19 @@ export function isArchived(s: SessionData): boolean {
   return livenessOf(s) === Liveness.Archived;
 }
 
+/** True when the session is parked at a usage-limit wall — the state the ◆ glyph
+ *  and the "[limit] resets …" title prefix already render.
+ *
+ *  It gates the Retry action (#1934), mirroring the TUI, which advertises `c` only
+ *  when the selected session is actually limit-blocked (ui/menu.go) and refuses it
+ *  with an explanatory error otherwise (app/handle_actions.go handleLimitRetry).
+ *  Reading the liveness rather than the mere presence of `limit_reset_at` is the
+ *  point: a session can be limit-blocked with no parsed reset time yet, and a
+ *  resumed one keeps its stale reset timestamp in the projection. */
+export function isLimitReached(s: SessionData): boolean {
+  return livenessOf(s) === Liveness.LimitReached;
+}
+
 /**
  * The rail's session comparator, a line-for-line mirror of the TUI sidebar
  * (ui/sidebar_model.go partitionByArchived, #1605): live rows first, then the

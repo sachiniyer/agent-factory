@@ -107,6 +107,19 @@ var httpRoutes = []HTTPRoute{
 		RequestFields: jsonFields(reflect.TypeOf(SendPromptRequest{})),
 		handler:       func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.SendPrompt) },
 	},
+	// Promoted out of internalHTTPRoutes in #1934 — the follow-up promised in
+	// #1592 Phase 2 PR3, which then sat unwritten while the state it exits stayed
+	// visible on every surface. A client can only call what HTTPRoutes()
+	// advertises, so the web rendered a session as limit-blocked — its own glyph,
+	// label and title prefix — and offered no way out. The STATE was deliberately
+	// surfaced on all three surfaces; the EXIT existed on one.
+	{
+		Method:        http.MethodPost,
+		Path:          "/v1/ResumeFromLimit",
+		Description:   "Resume a usage-limit-blocked session: re-spawn if needed, re-deliver the pending prompt, clear the limit.",
+		RequestFields: jsonFields(reflect.TypeOf(ResumeFromLimitRequest{})),
+		handler:       func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.ResumeFromLimit) },
+	},
 	{
 		Method:        http.MethodPost,
 		Path:          "/v1/DeleteProject",
@@ -221,19 +234,22 @@ var httpRoutes = []HTTPRoute{
 // returns only httpRoutes, so the discovery surface stays exactly the
 // client-facing session/task ops it promised.
 //
-// ResumeFromLimit is a genuine client-facing session verb (the TUI `c` key); it
-// lands here rather than the public catalog only to hold the catalog steady in
-// this PR — promoting it to httpRoutes is a one-line follow-up. Pause/Resume
-// StatusPoll are attach-coordination infra (best-effort poll leases, #1160)
-// that no CLI user should call, so they belong here permanently.
+// ResumeFromLimit USED to live here, parked with a note calling it "a genuine
+// client-facing session verb" whose promotion was "a one-line follow-up". That
+// follow-up went unwritten for long enough that the web shipped the limit state
+// with no way out of it (#1934), so it is now in httpRoutes above. The lesson is
+// worth leaving here: a client-facing verb parked in this table is invisible to
+// every client that is not the TUI, and nothing fails when it stays parked.
+//
+// What remains belongs here PERMANENTLY, not provisionally:
+//   - Preview is the daemon-sole-capturer render path, an implementation detail of
+//     how the TUI draws, not something a user scripts.
+//   - Pause/ResumeStatusPoll are attach-coordination infra (best-effort poll
+//     leases, #1160) that no CLI user should call.
+//
+// Before adding to this table, ask whether the verb is infra or merely
+// unfinished. If a user could reasonably want it, it goes above.
 var internalHTTPRoutes = []HTTPRoute{
-	{
-		Method:        http.MethodPost,
-		Path:          "/v1/ResumeFromLimit",
-		Description:   "Resume a usage-limit-blocked session: re-spawn if needed, re-deliver the pending prompt, clear the limit.",
-		RequestFields: jsonFields(reflect.TypeOf(ResumeFromLimitRequest{})),
-		handler:       func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.ResumeFromLimit) },
-	},
 	{
 		Method:        http.MethodPost,
 		Path:          "/v1/Preview",

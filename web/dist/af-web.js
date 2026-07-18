@@ -6253,6 +6253,9 @@ async function archiveSession(id, title, token2) {
 async function restoreSession(title, token2) {
   await af("RestoreSession", { title, repo_id: "" }, token2);
 }
+async function resumeFromLimit(id, title, token2) {
+  await af("ResumeFromLimit", { id, title, repo_id: "" }, token2);
+}
 async function deleteProject(root2, token2) {
   return af("DeleteProject", { repo_path: root2, repo_id: "" }, token2);
 }
@@ -7241,6 +7244,9 @@ function dotForLiveness(lv) {
 }
 function isArchived(s) {
   return livenessOf(s) === Liveness.Archived;
+}
+function isLimitReached(s) {
+  return livenessOf(s) === Liveness.LimitReached;
 }
 function compareSessionsForRail(a, b) {
   const aArchived = isArchived(a);
@@ -10517,6 +10523,12 @@ var AppShell = class {
   // exactly as it patches the header text. null when nothing is selected.
   lifecycleBtn = null;
   lifecycleArchived = false;
+  // The usage-limit Retry button and whether it is currently shown (#1934). Same
+  // treatment, and for the same reason, as lifecycleBtn above: a session hits the
+  // limit wall — or is resumed off it — WITHOUT a selection change, which is the
+  // only thing that rebuilds the header, so patchMainHead toggles it in place.
+  retryBtn = null;
+  retryVisible = false;
   // The tab bar for the selected session, (re)created per selection and patched in
   // place when the tab list or active tab changes (#1592 Phase 5 PR7). null when
   // nothing is selected (the empty state has no tabs).
@@ -10990,6 +11002,8 @@ var AppShell = class {
       this.headTitle = null;
       this.headMeta = null;
       this.lifecycleBtn = null;
+      this.retryBtn = null;
+      this.retryVisible = false;
       this.tabBar = null;
       this.main.className = "af-main af-main-empty";
       this.main.replaceChildren(
@@ -11011,9 +11025,15 @@ var AppShell = class {
     );
     lifecycleBtn.addEventListener("click", () => this.lifecycleArchived ? this.actions.restore() : this.actions.archive());
     this.lifecycleBtn = lifecycleBtn;
+    const retryBtn = h2("button", { type: "button", class: "af-ghost af-term-action" }, "Retry");
+    retryBtn.title = "Resume this session from its usage-limit wall";
+    retryBtn.addEventListener("click", () => this.actions.retryLimit());
+    this.retryBtn = retryBtn;
+    this.retryVisible = isLimitReached(selected);
+    retryBtn.hidden = !this.retryVisible;
     const killBtn = h2("button", { type: "button", class: "af-danger af-term-action" }, "Kill");
     killBtn.addEventListener("click", () => this.actions.kill());
-    const actions2 = h2("div", { class: "af-term-actions" }, promptBtn, lifecycleBtn, killBtn);
+    const actions2 = h2("div", { class: "af-term-actions" }, promptBtn, retryBtn, lifecycleBtn, killBtn);
     const head = h2("div", { class: "af-term-head" }, titleBox, actions2);
     this.tabBar = h2("div", { class: "af-tabbar" });
     this.tabBar.setAttribute("role", "tablist");
@@ -11208,6 +11228,11 @@ var AppShell = class {
     if (this.lifecycleBtn && nowArchived !== this.lifecycleArchived) {
       this.lifecycleArchived = nowArchived;
       this.lifecycleBtn.textContent = nowArchived ? "Restore" : "Archive";
+    }
+    const nowLimited = isLimitReached(selected);
+    if (this.retryBtn && nowLimited !== this.retryVisible) {
+      this.retryVisible = nowLimited;
+      this.retryBtn.hidden = !nowLimited;
     }
   }
 };
@@ -11965,6 +11990,14 @@ function doTriggerTask(task) {
   }
   void triggerTask(task.id, tok).then(refreshTasks).catch((e) => surfaceTabError(e));
 }
+function doRetryLimit() {
+  const sel = selectedSession2();
+  const tok = token;
+  if (!sel || tok === null) {
+    return;
+  }
+  void resumeFromLimit(sel.id, sel.title, tok).catch((e) => surfaceTabError(e));
+}
 function doRemoveTask(task) {
   const tok = token;
   if (tok === null) {
@@ -12008,6 +12041,7 @@ var actions = {
   kill: () => openConfirm("kill"),
   archive: () => openConfirm("archive"),
   restore: () => openConfirm("restore"),
+  retryLimit: doRetryLimit,
   switchTab,
   openTab,
   newTab: createSessionTab,

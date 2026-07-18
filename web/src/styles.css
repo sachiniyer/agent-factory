@@ -1110,6 +1110,18 @@ body {
   font-size: var(--af-fs-xs);
 }
 
+/* The usage-limit Retry action (#1934) is shown by toggling `hidden`, so pin the
+ * hidden case as an AUTHOR rule rather than relying on the UA `[hidden]` default.
+ * Nothing outranks it today — neither .af-term-action nor .af-ghost sets `display`
+ * — but the day someone adds `display: inline-flex` here to align an icon, that
+ * author rule would beat the UA one and Retry would appear on EVERY session,
+ * offering an action the daemon refuses. This repo has already paid for that
+ * exact hazard three times (.af-install[hidden], .af-webpane-*[hidden],
+ * .af-viewport > [hidden]); one rule now makes the fourth impossible. */
+.af-term-action[hidden] {
+  display: none;
+}
+
 .af-term-title {
   font-size: var(--af-fs-md);
   font-weight: 600;

@@ -99,7 +99,12 @@ func TestControlRoundTrips(t *testing.T) {
 		}
 	})
 
-	t.Run("ResumeFromLimit rides internal route", func(t *testing.T) {
+	// No longer an INTERNAL route: #1934 promoted it into the public catalog so the
+	// web could reach it. The apiclient call is unchanged either way — both tables
+	// are served on the same mux — so this still only pins that the TUI's `c` key
+	// reaches /v1/ResumeFromLimit. The name is corrected because a subtest asserting
+	// "internal" while the route is public is a false claim that still passes.
+	t.Run("ResumeFromLimit posts to its route", func(t *testing.T) {
 		c := routeServer(t, "ResumeFromLimit", func([]byte) apiproto.Envelope {
 			return apiproto.Success(daemon.ResumeFromLimitResponse{OK: true})
 		})

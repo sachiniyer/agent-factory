@@ -36,6 +36,7 @@ import {
   renameTab,
   reorderTab,
   restoreSession,
+  resumeFromLimit,
   sendPrompt,
   storeToken,
   triggerTask,
@@ -1203,6 +1204,33 @@ function doTriggerTask(task: TaskData): void {
     .catch((e) => surfaceTabError(e));
 }
 
+/**
+ * Resumes the selected session from its usage-limit wall (#1934) — the web's
+ * analogue of the TUI's `c`.
+ *
+ * No confirm, matching the TUI: it is not destructive, and it re-delivers the
+ * prompt the session was already going to run.
+ *
+ * No optimistic clear, DEPARTING from the TUI — deliberately. The TUI clears the
+ * row's limit state locally for instant feedback; the web is a read-only
+ * projection of the daemon's state (#960 single writer), so it lets the resulting
+ * session.updated event drop the ◆ badge. Faking the cleared state here would put
+ * the projection ahead of the daemon and show a resumed session that, if the
+ * resume failed downstream, is still parked.
+ *
+ * The daemon refuses a session that is not actually limit-blocked, so a click that
+ * races the limit clearing itself surfaces an error rather than an unwanted prompt.
+ */
+function doRetryLimit(): void {
+  const sel = selectedSession();
+  const tok = token;
+  // `=== null` not `!tok`: "" is the authorized-tokenless credential (#1696).
+  if (!sel || tok === null) {
+    return;
+  }
+  void resumeFromLimit(sel.id, sel.title, tok).catch((e) => surfaceTabError(e));
+}
+
 /** Removes a task (RemoveTask), then refetches. Keys off the stable id. */
 function doRemoveTask(task: TaskData): void {
   const tok = token;
@@ -1263,6 +1291,7 @@ const actions = {
   kill: () => openConfirm("kill"),
   archive: () => openConfirm("archive"),
   restore: () => openConfirm("restore"),
+  retryLimit: doRetryLimit,
   switchTab,
   openTab,
   newTab: createSessionTab,
