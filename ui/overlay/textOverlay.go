@@ -5,7 +5,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
-	"github.com/muesli/reflow/wordwrap"
+	xansi "github.com/charmbracelet/x/ansi"
 
 	"github.com/sachiniyer/agent-factory/ui"
 )
@@ -158,8 +158,16 @@ func (t *TextOverlay) visibleContent() string {
 	return strings.Join(visible, "\n")
 }
 
+// wrappedContentLines splits the content into the physical rows the box will
+// actually render. It MUST use the same wrapper lipgloss applies internally
+// (ansi.Wrap at width−padding, hard-breaking over-long words) so every logical
+// line here maps to exactly one rendered row. wordwrap.String is a *soft* wrap
+// that can leave a line one cell past the limit; lipgloss then re-wraps that
+// line into two rows, so the scroll/height math — which counts one line as one
+// row — under-counts, the box grows past the terminal, and PlaceOverlay dumps
+// the raw un-centered frame with its top border clipped (#1998).
 func (t *TextOverlay) wrappedContentLines() []string {
-	return strings.Split(wordwrap.String(t.content, t.textWidth()), "\n")
+	return strings.Split(xansi.Wrap(t.content, t.textWidth(), ""), "\n")
 }
 
 func textOverlayScrollMarker(width int, marker string) string {
