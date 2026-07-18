@@ -539,12 +539,14 @@ func TestControlServer_CloseTab_GatedAndValidated(t *testing.T) {
 	}
 }
 
-// TestRPCClients_CloseTabAndSetPRInfo_RoundTrip drives the package-level client
-// funcs (daemon.CloseTab / daemon.SetPRInfo) through an in-process control
-// server bound on a temp-HOME socket — exercising the full client → RPC →
-// Manager → persist wire path. It is hermetic: the launch seam is stubbed so a
-// ping race can never fork the real daemon, and the socket lives under the test
-// temp HOME.
+// TestRPCClients_CloseTab_RoundTrip drives the package-level client func
+// (daemon.CloseTab) through an in-process control server bound on a temp-HOME
+// socket — exercising the full client → RPC → Manager → persist wire path. It is
+// hermetic: the launch seam is stubbed so a ping race can never fork the real
+// daemon, and the socket lives under the test temp HOME.
+//
+// SetPRInfo used to ride along here; see the note at the end of the body for
+// where its coverage moved.
 func TestRPCClients_CloseTab_RoundTrip(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 

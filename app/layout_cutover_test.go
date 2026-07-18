@@ -157,14 +157,12 @@ func TestLayoutCutover_AutomationsFocusConsumesHiddenPaneVerbs(t *testing.T) {
 		"hidden s must not focus the existing workspace pane")
 }
 
-// TestLayoutCutover_EnterOpensTasksOverlay: Enter on the focused in-rail
-// section opens the task manager as a centered modal (#1096 play-test fix 1),
-// preselecting the section cursor's task; Esc closes it and saving runs.
-// TestLayoutCutover_EnterOpensTaskInEditMode is the #1249 guard: acting on a
-// task once (Enter on the section cursor's task) drops straight into that
-// task's editable config form — no second keypress to leave the list. Esc
-// steps back out of the form to the list (overlay still open), and a second
-// Esc closes the overlay.
+// TestLayoutCutover_EnterOpensTaskInEditMode covers the whole Enter gesture on
+// the focused in-rail section: it opens the task manager as a centered modal
+// (#1096 play-test fix 1) preselecting the section cursor's task, and — the
+// #1249 guard — acting on a task once drops straight into that task's editable
+// config form, with no second keypress to leave the list. Esc steps back out of
+// the form to the list (overlay still open), and a second Esc closes it.
 func TestLayoutCutover_EnterOpensTaskInEditMode(t *testing.T) {
 	h := newTestHome(t)
 	resizeHome(h, 100, 30)

@@ -77,8 +77,19 @@ func CurrentValue(cfg *Config, key string) (string, bool) {
 // two. The TUI calls ManifestWithValues in-process; the daemon returns the same
 // slice from GetConfig and the web UI renders that. Neither surface holds a key
 // list, a type switch, or a copy of the defaults, so adding a key to
-// config_types.go reaches both without either UI being touched — which is what
-// TestBothEditorSurfacesRenderEveryManifestKey pins.
+// config_types.go reaches both without either UI being touched.
+//
+// No single test pins that end to end; one per link in the chain does:
+//   - TestManifestCoversEveryConfigKey (config) — every toml-tagged Config field
+//     has a manifest entry.
+//   - TestCurrentValueCoversEveryManifestKey (config) — every entry's Key
+//     resolves through the reflection walk both surfaces read values with, so an
+//     entry with a typo'd Key cannot render as "unknown" in both UIs.
+//   - TestConfigPaneRendersEveryManifestKey (ui) — the TUI editor renders every
+//     manifest key.
+//   - "the control for a key is decided by the manifest, so an unknown key still
+//     renders" (web/src/config.test.ts) — the web control is chosen from the
+//     entry's own description, so a key the bundle predates still renders.
 type ConfigEntry struct {
 	Key      string `json:"key"`
 	Type     string `json:"type"`
