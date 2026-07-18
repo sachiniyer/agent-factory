@@ -47,6 +47,11 @@ type fakeClientlessChannel struct {
 	// stopDone, when non-nil, is signaled AFTER StopCapture has closed the writer,
 	// so a test can order an assertion strictly after the teardown's effect.
 	stopDone chan struct{}
+	// snapshotHook, when non-nil, runs at the START of each Snapshot with f.mu NOT
+	// held. The real Snapshot is a `tmux capture-pane` exec taking milliseconds, and
+	// the pane keeps producing the whole time; the hook is how a test drives output
+	// into that window (the #1975 recovery-flicker race).
+	snapshotHook func()
 }
 
 func (f *fakeClientlessChannel) StartCapture() (io.ReadCloser, error) {
@@ -96,6 +101,12 @@ func (f *fakeClientlessChannel) Resize(rows, cols uint16) error {
 }
 
 func (f *fakeClientlessChannel) Snapshot() (PaneSnapshot, error) {
+	f.mu.Lock()
+	hook := f.snapshotHook
+	f.mu.Unlock()
+	if hook != nil {
+		hook() // runs WITHOUT f.mu so it can emit() into the live capture pipe
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.snapshots++

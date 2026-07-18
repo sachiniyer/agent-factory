@@ -1,6 +1,7 @@
 package session
 
 import (
+	"context"
 	"strings"
 	"testing"
 	"time"
@@ -283,6 +284,94 @@ func TestPTYBrokerRecoveryDoesNotReplayStaleBytes(t *testing.T) {
 	// ring or strand A's cursor above head.
 	ch.emit(t, []byte("post-recovery-output"))
 	mustData(t, a, "post-recovery-output")
+}
+
+// TestPTYBrokerRecoveryRepaintPrecedesLiveBytes is #1975: a subscriber that stayed
+// attached across a tmux respawn must see the recovery repaint BEFORE any byte from
+// the re-spawned pane — never a stale/partial frame that the repaint then wipes.
+//
+// The window is `reseedSubscribersLocked`'s Snapshot, which runs WITHOUT b.mu (a real
+// `capture-pane` exec takes milliseconds) AFTER resetCapture has already restarted the
+// capture. The fresh readLoop feeds and wakes subscribers during that window, and
+// pendingRepaint is not set yet, so NextEvent hands back PTYCursor/PTYData first: the
+// client renders live bytes onto its pre-death screen, then the repaint clears and
+// redraws it — the visible flicker. Order delivered was PTYData -> PTYRepaint; the
+// order owed is PTYRepaint -> PTYCursor -> PTYData.
+//
+// Fail-before/pass-after: the snapshotHook drives exactly that interleaving — it emits
+// pane output while the recovery snapshot is still being taken and waits (bounded) for
+// the subscriber to consume it. On the pre-fix ordering the subscriber's cursor moves
+// inside the hook and the first recorded event is PTYData, so the PTYRepaint assert
+// below fails. With the barrier the subscriber stays parked for the whole recovery, the
+// repaint lands first, and the live bytes follow it undropped.
+func TestPTYBrokerRecoveryRepaintPrecedesLiveBytes(t *testing.T) {
+	const live = "LIVE-BYTES-FROM-RESPAWNED-PANE"
+	ch := &fakeClientlessChannel{snapshot: []byte("SCREEN-BEFORE-DEATH")}
+	br := newPTYBroker(ch)
+
+	a, err := br.subscribe(0)
+	if err != nil {
+		t.Fatalf("subscribe A: %v", err)
+	}
+	mustRepaintContains(t, a, "SCREEN-BEFORE-DEATH")
+
+	// A stays attached and parked in NextEvent across the respawn — the common case
+	// (a web/TUI client whose socket never dropped). Record its event stream in order.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	events := make(chan PTYEvent, 8)
+	go func() {
+		for {
+			ev, err := a.NextEvent(ctx)
+			if err != nil {
+				return
+			}
+			events <- ev
+		}
+	}()
+
+	// tmux dies and the daemon re-spawns it. The recovered pane shows a new screen —
+	// and starts producing output while the recovery snapshot is still being captured.
+	ch.mu.Lock()
+	ch.snapshot = []byte("SCREEN-AFTER-RECOVERY")
+	ch.snapshotHook = func() {
+		ch.emit(t, []byte(live))
+		waitRingHead(t, br, Seq(len(live)))
+		// Give the woken subscriber room to deliver those bytes. On the pre-fix
+		// ordering it does so at once (its cursor moves); with the barrier it stays
+		// parked and this simply burns its deadline.
+		deadline := time.Now().Add(300 * time.Millisecond)
+		for time.Now().Before(deadline) && a.Seq() == 0 {
+			time.Sleep(time.Millisecond)
+		}
+	}
+	ch.mu.Unlock()
+
+	br.resetCapture()
+
+	// The repaint is the FIRST thing A sees after recovery. Anything before it is a
+	// frame rendered against the wrong screen that the repaint immediately wipes.
+	select {
+	case ev := <-events:
+		if ev.Kind != PTYRepaint || !strings.Contains(string(ev.Data), "SCREEN-AFTER-RECOVERY") {
+			t.Fatalf("first post-recovery event = Kind=%d Data=%q, want the PTYRepaint of "+
+				"the recovered screen: pane output delivered before the recovery repaint "+
+				"renders a stale frame the repaint then wipes (the flicker)", ev.Kind, ev.Data)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("no post-recovery event: A was never re-seeded")
+	}
+
+	// Holding the stream is not dropping it: the bytes the pane produced during the
+	// snapshot window still arrive, after the repaint.
+	select {
+	case ev := <-events:
+		if ev.Kind != PTYData || string(ev.Data) != live {
+			t.Fatalf("event after the repaint = Kind=%d Data=%q, want PTYData %q", ev.Kind, ev.Data, live)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("pane output produced during the recovery snapshot was never delivered")
+	}
 }
 
 // clientCursor models what a REAL client does with the events it receives — the same

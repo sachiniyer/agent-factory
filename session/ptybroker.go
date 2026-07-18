@@ -362,6 +362,14 @@ func (b *ptyBroker) maybeStopCapture() {
 //     With no subscribers left, the lazy lifecycle is simply re-armed for the next
 //     Subscribe.
 //
+// Recovery is ATOMIC as each attached subscriber sees it (#1975): the barrier armed
+// below holds every subscriber's content stream from the moment recovery starts until
+// the repaint is installed, so the repaint is the FIRST thing a subscriber renders
+// after the respawn. Without it, steps 1-3 each leak a frame the repaint then wipes —
+// the dead pane's still-buffered bytes before the discard, and (the reported case) the
+// re-spawned pane's live bytes during step 3's snapshot, which runs without b.mu while
+// the freshly-started readLoop is already feeding and waking subscribers.
+//
 // The subscriber count is re-read AFTER the stop (still under captureMu) so a
 // subscriber that left during the blocking teardown is not resurrected onto a capture
 // nobody wants. A no-op when the broker is already closed.
@@ -374,6 +382,11 @@ func (b *ptyBroker) resetCapture() {
 		b.mu.Unlock()
 		return
 	}
+	// Arm the barrier FIRST — before the teardown, the discard, and the restart — so no
+	// subscriber can emit a frame at any point inside the recovery. Armed subscribers
+	// are captured by identity, not re-read from b.subs at release time, so one that
+	// detaches mid-recovery is still released rather than left parked (#1975).
+	armed := b.armRecoveryRepaintLocked()
 	var stop func()
 	if b.capturing {
 		stop = b.stopCapture
@@ -381,6 +394,14 @@ func (b *ptyBroker) resetCapture() {
 		b.stopCapture = nil
 	}
 	b.mu.Unlock()
+
+	// The barrier MUST be lifted on EVERY path out — a failed restart, a Snapshot
+	// error, nobody left attached — or an armed subscriber parks in NextEvent forever
+	// waiting for a repaint that never comes. rp is read when the deferred call runs,
+	// so this single exit point both installs whatever repaint the recovery managed to
+	// build and lifts the barrier, atomically under b.mu.
+	var rp []byte
+	defer func() { b.releaseRecoveryRepaint(armed, rp) }()
 
 	if stop != nil {
 		stop()
@@ -416,37 +437,73 @@ func (b *ptyBroker) resetCapture() {
 
 	// A subscriber stayed attached across the respawn. Restart the capture against the
 	// re-spawned pane and re-seed every current subscriber so it repaints the recovered
-	// screen and resumes live output without a new Subscribe.
+	// screen and resumes live output without a new Subscribe. The restarted capture's
+	// readLoop begins feeding and waking subscribers IMMEDIATELY — the barrier is what
+	// keeps those bytes behind the repaint built below (#1975).
 	if err := b.ensureCaptureStartedLocked(); err != nil {
 		log.WarningLog.Printf("pty broker: restart capture after recovery: %v", err)
 		return
 	}
-	b.reseedSubscribersLocked()
+	rp = b.recoveryRepaint()
 }
 
-// reseedSubscribersLocked gives every currently-registered subscriber a fresh initial
-// repaint of the recovered pane's screen and wakes it, so a client that stayed
-// attached across a tmux respawn repaints the current screen and resumes live output
-// on its own (#1682). It mirrors subscribe()'s initial-repaint injection but fans the
-// one snapshot to ALL subscribers. Best-effort: a Snapshot error (or an empty screen)
-// degrades to just waking the subscribers — the restarted capture's next live byte
-// still reaches them — rather than failing the recovery. Caller holds captureMu; the
-// snapshot exec runs without b.mu held, matching subscribe().
-func (b *ptyBroker) reseedSubscribersLocked() {
-	var rp []byte
-	if snap, err := b.ch.Snapshot(); err != nil {
-		log.WarningLog.Printf("pty broker: snapshot for recovery re-seed: %v", err)
-	} else if len(snap.Screen) > 0 {
-		rp = buildRepaint(snap)
+// armRecoveryRepaintLocked holds every currently-registered subscriber's content
+// stream (PTYCursor/PTYData) until the recovery repaint is installed, and returns the
+// subscribers it armed. Caller holds b.mu.
+//
+// The returned slice — NOT a later re-read of b.subs — is what releaseRecoveryRepaint
+// walks: a subscriber that detaches mid-recovery is gone from the map but may still be
+// parked in NextEvent, and it must be released too.
+func (b *ptyBroker) armRecoveryRepaintLocked() []*ptySub {
+	armed := make([]*ptySub, 0, len(b.subs))
+	for _, s := range b.subs {
+		s.repaintArmed = true
+		armed = append(armed, s)
 	}
+	return armed
+}
+
+// recoveryRepaint captures the recovered pane's screen and builds the repaint bytes
+// the re-seed installs, so a client that stayed attached across a tmux respawn
+// repaints the current screen and resumes live output on its own (#1682). It mirrors
+// subscribe()'s initial-repaint injection but builds ONE snapshot for all subscribers.
+// The Snapshot exec runs without b.mu held (matching subscribe) — which is precisely
+// the window the barrier exists to cover. Best-effort: a Snapshot error or an empty
+// screen yields nil, and the release degrades to just lifting the barrier and waking
+// the subscribers — the restarted capture's next live byte still reaches them — rather
+// than failing the recovery. Caller holds captureMu.
+func (b *ptyBroker) recoveryRepaint() []byte {
+	snap, err := b.ch.Snapshot()
+	if err != nil {
+		log.WarningLog.Printf("pty broker: snapshot for recovery re-seed: %v", err)
+		return nil
+	}
+	if len(snap.Screen) == 0 {
+		return nil
+	}
+	return buildRepaint(snap)
+}
+
+// releaseRecoveryRepaint installs rp on every armed subscriber and lifts the barrier —
+// both under ONE b.mu hold, so a subscriber can never observe the lifted barrier
+// without also seeing the repaint that was owed to it. Waking is what makes a parked
+// subscriber re-read that state.
+func (b *ptyBroker) releaseRecoveryRepaint(armed []*ptySub, rp []byte) {
 	b.mu.Lock()
-	if len(rp) > 0 {
-		for _, s := range b.subs {
+	for _, s := range armed {
+		if len(rp) > 0 {
 			s.pendingRepaint = rp
 		}
+		s.repaintArmed = false
 	}
 	b.wakeAllLocked()
 	b.mu.Unlock()
+	// wakeAllLocked only rings subscribers still in b.subs. An armed subscriber that
+	// detached mid-recovery is not in the map but can still be parked on the barrier,
+	// so ring its doorbell directly; wake() is a coalescing no-op when already signaled.
+	for _, s := range armed {
+		s.wake()
+	}
 }
 
 // readLoop copies the clientless capture reader into the ring until it errors or
@@ -588,8 +645,13 @@ type ptySub struct {
 	// pendingRepaint is a one-shot initial screen repaint delivered before any
 	// other event to a fresh subscriber (set by subscribe). Read/written under br.mu.
 	pendingRepaint []byte
-	notify         chan struct{}
-	closeOnce      sync.Once
+	// repaintArmed marks this subscriber as held at a recovery boundary: a repaint of
+	// the recovered screen is being captured for it, so NextEvent must emit NOTHING
+	// until it lands (#1975). Set/cleared under br.mu by resetCapture's arm/release
+	// pair, which is the only thing that may set it.
+	repaintArmed bool
+	notify       chan struct{}
+	closeOnce    sync.Once
 }
 
 // wake signals this subscriber's doorbell (coalescing, cap-1). Safe to call
@@ -624,6 +686,20 @@ func (s *ptySub) NextEvent(ctx context.Context) (PTYEvent, error) {
 			s.br.mu.Unlock()
 			return PTYEvent{Kind: PTYRepaint, Data: data}, nil
 		}
+		// A recovery is in flight and this subscriber's repaint of the recovered screen
+		// is still being captured: emit NOTHING until it lands (#1975). Everything this
+		// subscriber could send right now paints the WRONG screen — the dead pane's
+		// buffered tail, the cursor jump the discard is about to make, or the re-spawned
+		// pane's first bytes rendered onto the pre-death frame — and the repaint wipes it
+		// a moment later, which is the flicker. Held, not dropped: nothing is consumed
+		// here, so after the release the repaint goes first and the same cursor/data
+		// events follow it in order.
+		if s.repaintArmed {
+			if err := s.awaitWake(ctx); err != nil {
+				return PTYEvent{}, err
+			}
+			continue
+		}
 		if s.br.hasSize && s.resizeSeen != s.br.resizeGen {
 			s.resizeSeen = s.br.resizeGen
 			ev := PTYEvent{Kind: PTYResize, Rows: s.br.rows, Cols: s.br.cols}
@@ -655,13 +731,22 @@ func (s *ptySub) NextEvent(ctx context.Context) (PTYEvent, error) {
 			s.br.mu.Unlock()
 			return PTYEvent{Kind: PTYData, Data: data}, nil
 		}
-		s.br.mu.Unlock()
-
-		select {
-		case <-ctx.Done():
-			return PTYEvent{}, ctx.Err()
-		case <-s.notify:
+		if err := s.awaitWake(ctx); err != nil {
+			return PTYEvent{}, err
 		}
+	}
+}
+
+// awaitWake RELEASES br.mu (which the caller must hold) and blocks until this
+// subscriber's doorbell rings or ctx ends. NextEvent re-takes the lock and re-reads all
+// state on the next iteration, so the doorbell only has to say "something changed".
+func (s *ptySub) awaitWake(ctx context.Context) error {
+	s.br.mu.Unlock()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-s.notify:
+		return nil
 	}
 }
 
