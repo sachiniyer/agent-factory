@@ -214,10 +214,19 @@ func (s *controlServer) ResumeFromLimit(req ResumeFromLimitRequest, resp *Resume
 // respawn arm re-applies the block for that reason — Respawn ends in ConfirmLive,
 // which would otherwise report a session as resumed before its prompt existed.
 //
-// Runs under the per-(repo, title) target lock (like DeliverPrompt) and re-
-// verifies the limit state under it, so it never races a self-recovery, a kill,
-// or a concurrent resume. Rejects a tombstoned / reserved-root session, mirroring
-// the lostrestore guards.
+// Takes the per-(repo, title) target lock and then the per-session op lock — the
+// same target-before-op order DeliverPrompt uses (#2006) — and re-verifies the
+// limit state under them, so it never races a self-recovery, a kill, a concurrent
+// resume, or an overlapping send-prompt. Rejects a tombstoned / reserved-root
+// session, mirroring the lostrestore guards.
+//
+// testHookResumeAfterFirstLock fires in resumeFromLimit immediately after the
+// FIRST of its two locks is acquired, before the second. No-op in production; the
+// #2006 ABBA regression test substitutes a barrier so it can pin one resume
+// goroutine holding its first lock and force the cross-lock interleaving that the
+// inverted order deadlocked on.
+var testHookResumeAfterFirstLock = func() {}
+
 func (m *Manager) resumeFromLimit(req ResumeFromLimitRequest) error {
 	instance, repoID, _, err := m.findSession(req.Title, req.RepoID)
 	if err != nil {
@@ -238,6 +247,17 @@ func (m *Manager) resumeFromLimit(req ResumeFromLimitRequest) error {
 	}
 	m.mu.Unlock()
 
+	// Canonical lock order is target-before-op (#2006). DeliverPrompt holds the
+	// per-target lock across the op lock it acquires inside SendPrompt, so every
+	// path that needs both must take the target lock FIRST. Taking the op lock
+	// first here — as this path used to — inverted that order, so a manual resume
+	// overlapping a send-prompt (or the auto-resume scheduler) to the same session
+	// deadlocked: each held one lock and blocked on the other. The op lock is still
+	// only TryLock'd, so a resume never blocks behind a kill teardown that holds it.
+	unlock := m.lockTarget(repoID, instance.Title)
+	defer unlock()
+	testHookResumeAfterFirstLock()
+
 	opLock := m.opLockFor(key)
 	if !opLock.TryLock() {
 		return nil
@@ -255,14 +275,14 @@ func (m *Manager) resumeFromLimit(req ResumeFromLimitRequest) error {
 	return m.resumeFromLimitLocked(repoID, key, instance, req.Title)
 }
 
-// resumeFromLimitLocked performs the shared limit-resume action. The caller
-// must hold the per-session op lock for key, so a manual retry cannot interleave
-// with kill teardown and auto-resume can reuse the body after its own op-lock
-// guard.
+// resumeFromLimitLocked performs the shared limit-resume action. The caller must
+// hold BOTH the per-target lock and the per-session op lock for key, acquired in
+// that canonical target-before-op order (#2006) — the target lock serializes this
+// resume's send against a concurrent DeliverPrompt to the same pane, and the op
+// lock keeps a manual retry from interleaving with kill teardown. Both entry
+// points (resumeFromLimit and the auto-resume scheduler) take the two locks before
+// calling in, so this body never touches the lock helpers itself.
 func (m *Manager) resumeFromLimitLocked(repoID, key string, instance *session.Instance, requestedTitle string) error {
-	unlock := m.lockTarget(repoID, instance.Title)
-	defer unlock()
-
 	// Re-verify under the lock: a self-recovery or the poll may have cleared the
 	// limit between the check above and the lock.
 	if !instance.LimitReached() {

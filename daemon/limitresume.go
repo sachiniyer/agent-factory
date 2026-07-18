@@ -114,11 +114,11 @@ func (m *Manager) ResumeLimitedSessions() {
 // resumeLimitedSession auto-resumes one session when it is eligible and its
 // limit window has elapsed. Eligibility mirrors restoreLostSession: started,
 // LiveLimitReached, not tombstoned, not the reserved root (the manual retry and
-// the poll own those), and no kill in flight. The op lock is only TryLock'd so
-// the poll goroutine never stalls behind a kill teardown; everything is
-// re-verified under it because the checks above are point-in-time. The resume
-// itself is the shared resumeFromLimit action (PR2), which takes its own target
-// lock and re-verifies the limit state once more before acting.
+// the poll own those), and no kill in flight. It takes the per-target lock and
+// then the per-session op lock in that canonical order (#2006) before invoking the
+// shared resumeFromLimitLocked body; the op lock is only TryLock'd so the poll
+// goroutine never stalls behind a kill teardown, and everything is re-verified
+// under the locks because the checks above are point-in-time.
 func (m *Manager) resumeLimitedSession(key, repoID string, inst *session.Instance, retryInterval time.Duration) {
 	if inst == nil || !inst.Started() || inst.GetLiveness() != session.LiveLimitReached {
 		return
@@ -164,6 +164,14 @@ func (m *Manager) resumeLimitedSession(key, repoID string, inst *session.Instanc
 	if skip {
 		return
 	}
+
+	// Canonical lock order is target-before-op (#2006); see resumeFromLimit. This
+	// runs on the poll goroutine, so it can briefly block here on a DeliverPrompt
+	// in flight to the same session — bounded and correct, exactly where taking the
+	// op lock first used to deadlock the whole daemon. The op lock is still only
+	// TryLock'd, so the poll never stalls behind a kill teardown that holds it.
+	unlockTarget := m.lockTarget(repoID, inst.Title)
+	defer unlockTarget()
 
 	opLock := m.opLockFor(key)
 	if !opLock.TryLock() {

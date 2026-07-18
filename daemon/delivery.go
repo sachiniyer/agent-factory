@@ -27,6 +27,14 @@ var (
 	targetDeliverPoll = 100 * time.Millisecond
 )
 
+// testHookDeliverAfterTargetLock fires in DeliverPrompt immediately after the
+// per-target lock is acquired, before the op lock is taken (inside SendPrompt).
+// No-op in production; the #2006 ABBA regression test substitutes a signal so it
+// can prove DeliverPrompt holds the target lock before releasing the resume
+// goroutine — the ordering that used to deadlock. Mirrors the existing
+// testHookPollBeforePublish seam.
+var testHookDeliverAfterTargetLock = func() {}
+
 // StatusDeferredAttached is the delivery status returned when an automated task
 // delivery (DeferWhileAttached) targets a session a TUI is attached full-screen
 // to (#1586). It extends the "started"/"sent" status vocabulary. It is
@@ -78,6 +86,7 @@ func (m *Manager) DeliverPrompt(req DeliverPromptRequest) (string, error) {
 
 	unlock := m.lockTarget(repo.ID, req.Title)
 	defer unlock()
+	testHookDeliverAfterTargetLock()
 
 	exists, deleting, liveness, err := m.targetSessionState(repo.ID, req.Title)
 	if err != nil {
