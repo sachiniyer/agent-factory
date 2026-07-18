@@ -295,7 +295,7 @@
       "title": "Resume a session blocked at a usage-limit wall",
       "tui": {
         "status": "yes",
-        "pointer": "keys/keys.go:149 (c) -> app/session_control.go:199"
+        "pointer": "keys/keys.go:169 (c) -> app/handle_actions.go:482 handleLimitRetry -> app/session_control.go:197"
       },
       "web": {
         "status": "yes",

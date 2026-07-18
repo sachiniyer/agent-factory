@@ -1,12 +1,15 @@
 package daemon
 
 import (
+	"net/http"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/testguard"
 	"github.com/sachiniyer/agent-factory/session"
 )
 
@@ -47,6 +50,46 @@ func TestResumeFromLimit_IsInThePublicCatalog(t *testing.T) {
 			"%s was promoted out of internalHTTPRoutes in #1934; moving it back makes the web's Retry button "+
 				"unreachable again, and nothing else would fail", path)
 	}
+}
+
+// TestResumeFromLimit_BrowserBodyDecodes is the lock on the trap that eats web
+// requests in this repo.
+//
+// A BROWSER sends no X-AF-Client-Version header, and the daemon decodes a
+// header-less body with DisallowUnknownFields (daemon/httpserver.go) — so a field
+// the request struct does not declare is a 400 "unknown field", not an ignored
+// extra. That is exactly why restoreSession must NOT send `id` (see the comment on
+// web/src/api.ts restoreSession): RestoreSessionRequest has no such field.
+//
+// This verb is the opposite case only because #1934 ADDED the field. Without that,
+// the web's Retry would have 400'd on every click, and the api-layer unit test —
+// which asserts the body it SENDS, not what the daemon accepts — would have passed
+// anyway. So the decode is pinned here, against the real mux, from the real
+// header-less shape the browser produces.
+//
+// It asserts the body was UNDERSTOOD, not that the resume succeeded: there is no
+// such session, so an error is expected. The distinction under test is which kind.
+//
+// The negative assertion is not decorative: TestHTTP_UnknownJSONField_400 proves
+// the daemon really does answer `unknown field "…"` through this same header-less
+// doHTTP path, so there is a live mechanism for this check to catch. (Deleting the
+// ID field to watch this one fail is not possible in isolation — the field is used
+// by the tests below, so its removal breaks the build instead.)
+func TestResumeFromLimit_BrowserBodyDecodes(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	m, err := NewManager(config.DefaultConfig())
+	require.NoError(t, err)
+
+	// Byte-for-byte what web/src/api.ts resumeFromLimit posts.
+	rec := doHTTP(&controlServer{manager: m}, http.MethodPost, "/v1/ResumeFromLimit",
+		`{"id":"id-abc","title":"feature","repo_id":""}`)
+
+	env := decodeEnvelope(t, rec)
+	require.NotNil(t, env.Error, "no such session, so this must fail — the question is HOW")
+	assert.NotContains(t, env.Error.Message, "unknown field",
+		"the browser's body must DECODE: a field the struct does not declare is a 400 under "+
+			"DisallowUnknownFields, and the web would never reach the handler at all")
+	assert.NotContains(t, env.Error.Message, "malformed JSON")
 }
 
 // TestResumeFromLimit_ResolvesByStableID pins the id-first addressing the web
