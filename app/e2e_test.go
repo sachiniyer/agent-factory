@@ -69,6 +69,17 @@ type prFetchCall struct {
 // from the test goroutine would race.
 func newE2EHarness(t *testing.T) *e2eHarness {
 	t.Helper()
+	// Every TestE2E_* in this package funnels through this constructor and nothing
+	// else does, so gating here gates the whole family (and any future E2E flow)
+	// without per-test drift. These flows round-trip through the real tea.Program
+	// goroutine and poll on wall-clock timeouts, so they flake when a runner is
+	// slow or contended (#2052). The release build.yml runs its redundant matrix
+	// cells with -short so such a flake can't red master's post-merge Build check;
+	// every required gate (pr.yml Test + Test (macOS), the release preflight) runs
+	// WITHOUT -short, so E2E coverage on the native runners is unchanged.
+	if testing.Short() {
+		t.Skip("timing-sensitive E2E flow; skipped under -short — see #2052")
+	}
 	h := newTestHome(t)
 	eh := &e2eHarness{t: t, home: h}
 
