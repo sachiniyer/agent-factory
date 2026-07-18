@@ -41,6 +41,9 @@ type instanceData struct {
 }
 
 func TestBlackBoxCLIDaemonLifecycle(t *testing.T) {
+	if testing.Short() {
+		t.Skip("timing-sensitive daemon integration test; skipped under -short — see #2052")
+	}
 	h := newHarness(t)
 
 	created := h.createSession("alpha")
@@ -85,6 +88,9 @@ func TestBlackBoxCLIDaemonLifecycle(t *testing.T) {
 }
 
 func TestConcurrentCLIClientsUseDaemonCoordinator(t *testing.T) {
+	if testing.Short() {
+		t.Skip("timing-sensitive daemon integration test; skipped under -short — see #2052")
+	}
 	h := newHarness(t)
 
 	// Warm the daemon before stressing concurrent lifecycle operations. This
@@ -146,6 +152,9 @@ func TestConcurrentCLIClientsUseDaemonCoordinator(t *testing.T) {
 }
 
 func TestScheduledTaskRunnerUsesDaemonAndAllocatesRerunTitle(t *testing.T) {
+	if testing.Short() {
+		t.Skip("timing-sensitive daemon integration test; skipped under -short — see #2052")
+	}
 	h := newHarness(t)
 	writeTasksFile(t, h.home, []map[string]interface{}{
 		{
@@ -184,6 +193,9 @@ func TestScheduledTaskRunnerUsesDaemonAndAllocatesRerunTitle(t *testing.T) {
 }
 
 func TestDaemonLifecycleRecoversFromStaleSocketAndDeadDaemon(t *testing.T) {
+	if testing.Short() {
+		t.Skip("timing-sensitive daemon integration test; skipped under -short — see #2052")
+	}
 	h := newHarness(t)
 
 	staleSocket := filepath.Join(h.home, "daemon.sock")

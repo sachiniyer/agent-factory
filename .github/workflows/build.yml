@@ -39,8 +39,25 @@ jobs:
     - name: Install zsh
       run: sudo apt-get update && sudo apt-get install -y --no-install-recommends zsh
 
+    # Every matrix cell runs this step on the amd64 ubuntu runner — GOOS/GOARCH are
+    # set only on the Build step below, so `go test` compiles and runs the SAME
+    # amd64 binary in all four cells (the arch appears only in the cell's name, not
+    # in what the tests execute; there is no QEMU here). Running the full
+    # timing-sensitive E2E/integration suite four times over quadruples the odds a
+    # racy test reds this post-merge Build check — the two flakes in #2052 were
+    # labelled (linux, arm64) but actually ran on amd64. Run the full suite once,
+    # on linux/amd64 (the native-amd64 signal the issue keeps), and run the other
+    # three cells with -short, which skips the testing.Short()-gated E2E/integration
+    # tests while still compiling the tree and running the fast unit tests. The
+    # required PR gates (pr.yml Test + Test (macOS), both -race) run the FULL suite
+    # with no -short, so native E2E/integration coverage is unchanged.
     - name: Run tests
-      run: go test -v ./...
+      run: |
+        if [ "${{ matrix.goos }}/${{ matrix.goarch }}" = "linux/amd64" ]; then
+          go test -v ./...
+        else
+          go test -short -v ./...
+        fi
 
     - name: Build
       env:

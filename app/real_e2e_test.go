@@ -34,6 +34,19 @@ import (
 // a POSIX shell for the stub program.
 func skipIfRealBackendDepsMissing(t *testing.T) {
 	t.Helper()
+	// Every real-backend test in this package funnels through this guard as its
+	// first statement, so gating here gates the whole family without per-test
+	// drift. Unlike the FakeBackend E2E flows (newE2EHarness), these drive a real
+	// LocalBackend — real tmux/git, and some a real `af` daemon — with sleeps and
+	// polling, so they are timing-sensitive and flake on a slow/contended runner
+	// (#2052). Their dep check below passes on the ubuntu runner (tmux/git/sh/cat
+	// are all present), so without this they would still run under -short on
+	// build.yml's shortened cells and re-open the very flake this PR closes. The
+	// required PR gates (pr.yml Test + Test (macOS)) and the release preflight run
+	// WITHOUT -short, so real-backend coverage on the native runners is unchanged.
+	if testing.Short() {
+		t.Skip("timing-sensitive real-backend E2E/integration; skipped under -short — see #2052")
+	}
 	for _, bin := range []string{"tmux", "git", "sh", "cat"} {
 		if _, err := exec.LookPath(bin); err != nil {
 			t.Skipf("%s not found on PATH — skipping real-backend test", bin)
