@@ -2,7 +2,11 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <!-- viewport-fit=cover lets the themed appbar/background paint edge-to-edge under a
+         phone's notch/home-indicator; the safe-area env() insets in styles.css keep the
+         actual controls out of those cutouts. Without width=device-width a mobile browser
+         renders at ~980px desktop width and the @media breakpoints never engage. -->
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <title>Agent Factory</title>
     <!-- Same-origin bundle only: the daemon serves this shell with a strict
          `Content-Security-Policy: default-src 'self'` (#1592 Phase 5 PR2), so the
