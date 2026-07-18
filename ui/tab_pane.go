@@ -591,11 +591,23 @@ func (p *TabPane) String() string {
 	}
 
 	lines := strings.Split(p.content.text, "\n")
-	// strings.Split produces a trailing empty element when text ends in "\n"
-	// (common for capture-pane output). Drop it so the off-by-one does not
-	// trigger truncation when content actually fits, and so the truncate branch
-	// keeps the right slice of lines (#649/#898).
-	if len(lines) > 0 && lines[len(lines)-1] == "" {
+	// Drop ALL trailing blank lines before the keep-newest truncation below. A
+	// shell/process tab is captured with `tmux capture-pane`, which returns the
+	// session's FULL screen height: the visible content (e.g. a prompt at the top)
+	// followed by blank rows padding out to the window height, which it does NOT
+	// strip. When that captured window is taller than the preview pane — the common
+	// case, since a non-streamed tab keeps whatever taller size a prior stream pinned
+	// its window to — keeping only the newest p.height lines dropped the real content
+	// off the top and left the body rendering the trailing blanks, i.e. empty
+	// (#1958). Stripping them first makes the truncation act on real content only:
+	// genuine overflow (an agent that scrolled past the pane) has content on every
+	// row and is unaffected, while a short capture padded with blanks renders
+	// top-aligned — matching what the live pane shows for the same tab. This subsumes
+	// the earlier single-trailing-"\n" strip (the empty element strings.Split leaves
+	// when text ends in "\n" — #649/#898). A row is blank when it has no printable
+	// content: lipgloss.Width is ANSI-aware (a trailing style reset is zero-width) and
+	// TrimRight handles capture's trailing-space padding.
+	for len(lines) > 0 && lipgloss.Width(strings.TrimRight(lines[len(lines)-1], " ")) == 0 {
 		lines = lines[:len(lines)-1]
 	}
 
