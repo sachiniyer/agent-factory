@@ -2,6 +2,7 @@ package session
 
 import (
 	"crypto/rand"
+	"errors"
 	"fmt"
 	"sort"
 	"time"
@@ -322,6 +323,64 @@ func TabMatches(t *Tab, token string) bool {
 		return false
 	}
 	return t.Name == token
+}
+
+// Sentinel misses from ResolveTabIndex. They are values rather than formatted
+// strings because the CALLER owns the message: the daemon names the session and
+// lists the tabs that exist, the CLI says which flag was wrong. Only the RULE is
+// shared.
+var (
+	// ErrTabIDNotFound: a stable id was supplied and is not in the roster.
+	ErrTabIDNotFound = errors.New("no tab with that id")
+	// ErrTabNameNotFound: a name was supplied and matches no tab.
+	ErrTabNameNotFound = errors.New("no tab with that name")
+	// ErrTabIndexOutOfRange: no id or name was supplied and the ordinal is not a slot.
+	ErrTabIndexOutOfRange = errors.New("tab index out of range")
+)
+
+// ResolveTabIndex resolves which tab of tabs a caller addresses, in the
+// repo-wide precedence every tab verb shares: the stable tabID first, then
+// tabName, then the ordinal tabIndex.
+//
+// The id comes first because it is the only handle that is not REUSABLE (#1929).
+// A name is freed by a close and handed to the next tab that asks for it; an
+// ordinal shifts on every close and reorder. So a client that resolved a tab and
+// then sends its name is asking for "whatever is called that NOW", which after a
+// concurrent close+create or rename is a different tab — and a name-keyed
+// resolve does not fail, it succeeds on the wrong tab.
+//
+// A non-empty id or name that does not resolve is REFUSED, never fallen back to
+// the ordinal. That is the #1779/#1929 rule: falling back would address whatever
+// tab has since taken the slot — the precise misroute the stable id exists to
+// prevent, wearing a backward-compatible face. The ordinal is used ONLY when
+// neither an id nor a name was supplied.
+//
+// This lives beside the Tab type rather than in the daemon because the daemon is
+// no longer the only resolver: `af sessions preview` reads a tab on the LOCAL
+// path without going through a daemon RPC at all (#1948), and a second copy of
+// the precedence is how the two would drift into disagreeing about what
+// `--tab-name` means.
+func ResolveTabIndex(tabs []*Tab, tabID, tabName string, tabIndex int) (int, error) {
+	if tabID != "" {
+		for i, tab := range tabs {
+			if tab.ID == tabID {
+				return i, nil
+			}
+		}
+		return 0, ErrTabIDNotFound
+	}
+	if tabName != "" {
+		for i, tab := range tabs {
+			if TabMatches(tab, tabName) {
+				return i, nil
+			}
+		}
+		return 0, ErrTabNameNotFound
+	}
+	if tabIndex < 0 || tabIndex >= len(tabs) {
+		return 0, ErrTabIndexOutOfRange
+	}
+	return tabIndex, nil
 }
 
 // TabIdentifiers renders a tab as the strings that help a user address it in an

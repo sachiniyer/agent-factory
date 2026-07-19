@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 
@@ -145,29 +146,19 @@ func (m *Manager) tabMutationTarget(reqID, reqTitle, reqRepoID string, labels ta
 // it already holds, and a second lookup against the live list could return an
 // index that no longer addresses the same element of tabs.
 func resolveTabTarget(tabs []*session.Tab, title, tabID, tabName string, tabIndex int) (int, string, error) {
-	if tabID != "" {
-		for i, tab := range tabs {
-			if tab.ID == tabID {
-				return i, tab.Name, nil
-			}
-		}
+	// The PRECEDENCE and the refuse-never-fall-back rule live in
+	// session.ResolveTabIndex (#1948), because the daemon is no longer the only
+	// resolver — `af sessions preview` addresses a tab on the local path without an
+	// RPC. This function owns only the MESSAGES, which are the daemon's to write:
+	// they name the session and list the tabs that exist.
+	idx, err := session.ResolveTabIndex(tabs, tabID, tabName, tabIndex)
+	switch {
+	case errors.Is(err, session.ErrTabIDNotFound):
 		return 0, "", fmt.Errorf("session %q has no tab with id %q; it may have been closed — reload the session's tabs and retry", title, tabID)
-	}
-	if tabName != "" {
-		// Match the canonical Name only (session.TabMatches, #1986). The display
-		// label is presentation and is never an identifier: the TUI shows
-		// "Terminal" for a tab named "shell", but the label does not resolve here —
-		// accepting it would make two strings address one tab, the ambiguity #1929/
-		// #1904 removed from the tab surface. A user who typed the label is not left
-		// stranded: the miss error below names the real handle. Because this is the
-		// shared resolver (#1971), close, rename, and reorder all key on Name alike.
-		for i, tab := range tabs {
-			if session.TabMatches(tab, tabName) {
-				return i, tab.Name, nil
-			}
-		}
+	case errors.Is(err, session.ErrTabNameNotFound):
 		// Name the tabs that DO exist, with their labels where the two differ, so a
-		// user who read "Terminal" learns to type "shell". The old error asserted an
+		// user who read "Terminal" learns to type "shell" — the label is
+		// presentation-only and never resolves (#1986). The old error asserted an
 		// absence and left the user to guess the mapping; listing the valid options
 		// turns a dead end into a fix, and still fires correctly for a real typo.
 		ids := make([]string, 0, len(tabs))
@@ -176,11 +167,12 @@ func resolveTabTarget(tabs []*session.Tab, title, tabID, tabName string, tabInde
 		}
 		return 0, "", fmt.Errorf("session %q has no tab named %q; its tabs are: %s",
 			title, tabName, strings.Join(ids, ", "))
-	}
-	if tabIndex < 0 || tabIndex >= len(tabs) {
+	case errors.Is(err, session.ErrTabIndexOutOfRange):
 		return 0, "", fmt.Errorf("session %q has no tab at index %d", title, tabIndex)
+	case err != nil:
+		return 0, "", err
 	}
-	return tabIndex, tabs[tabIndex].Name, nil
+	return idx, tabs[idx].Name, nil
 }
 
 // Rollback on persist failure: rename and reorder DO roll back, CloseTab

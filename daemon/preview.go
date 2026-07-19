@@ -2,7 +2,10 @@ package daemon
 
 import (
 	"errors"
+	"fmt"
+	"strings"
 
+	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
@@ -42,7 +45,20 @@ type PreviewRequest struct {
 	// resolveTabTarget (#1929): once a client addresses a tab by its stable id, no
 	// daemon path may fall back to a positional one.
 	TabID string `json:"tab_id,omitempty"`
-	Full  bool   `json:"full"`
+	// TabName addresses the tab by its canonical name — the handle a user types
+	// (#1986), the one `af sessions tab-create` printed. It is what a person has
+	// on hand: `af sessions preview alpha --tab-name shell` (#1948). Resolved
+	// against the roster the DAEMON holds, so the CLI never has to fetch the tab
+	// list and race it.
+	//
+	// Ranks BELOW TabID and ABOVE Tab, the precedence every tab verb shares (see
+	// session.ResolveTabIndex). A name that matches nothing is an ERROR listing the
+	// tabs that exist — unlike an unresolvable TabID, which answers Gone: an id
+	// that stops resolving means the exact tab the client was looking at went
+	// away, while a name that matches nothing is far more likely a typo, and a
+	// typo deserves the roster rather than a silent empty capture.
+	TabName string `json:"tab_name,omitempty"`
+	Full    bool   `json:"full"`
 }
 
 // PreviewResponse carries the captured content, or Gone=true when the session's
@@ -69,21 +85,42 @@ func (s *controlServer) Preview(req PreviewRequest, resp *PreviewResponse) error
 	if err != nil {
 		return err
 	}
-	// Address the capture by the stable tab id (#1738) when the client gives one:
-	// resolve it to the tab's CURRENT ordinal so a capture follows the tab across a
-	// reorder/close. A non-empty id that no longer resolves is REFUSED as gone —
-	// NOT fallen back to req.Tab (#1779). The fallback previewed whatever tab had
-	// shifted into the stale ordinal, which is precisely the misroute the stable id
-	// exists to prevent. Gone (rather than an error) is the honest answer and the
-	// shape the TUI already degrades on: the addressed tab is genuinely no longer
-	// there. The ordinal is used ONLY when no id was supplied at all — a legacy
-	// client, for which positional addressing is all there ever was.
+	// Address the capture by the stable tab id (#1738), or by name (#1948), when
+	// the client gives one: resolve it to the tab's CURRENT ordinal so a capture
+	// follows the tab across a reorder/close. The precedence — id, then name, then
+	// ordinal — is session.ResolveTabIndex's, shared with every other tab verb
+	// rather than restated here.
+	//
+	// A non-empty id that no longer resolves is REFUSED as gone, NOT fallen back to
+	// req.Tab (#1779): the fallback previewed whatever tab had shifted into the
+	// stale ordinal, precisely the misroute the stable id exists to prevent. Gone
+	// (rather than an error) is the honest answer and the shape the TUI already
+	// degrades on — the addressed tab is genuinely no longer there.
+	//
+	// The ordinal is used ONLY when neither an id nor a name was supplied — a
+	// legacy client, for which positional addressing is all there ever was — and
+	// that path is left byte-for-byte as it was, so such a client is unaffected.
 	tab := req.Tab
-	if req.TabID != "" {
-		idx, ok := instance.TabIndexByID(req.TabID)
-		if !ok {
+	if req.TabID != "" || req.TabName != "" {
+		idx, rerr := session.ResolveTabIndex(instance.GetTabs(), req.TabID, req.TabName, req.Tab)
+		switch {
+		case errors.Is(rerr, session.ErrTabIDNotFound):
+			// Gone, not an error: the specific tab this client was looking at is no
+			// longer there, which is the fallback the TUI already degrades on.
 			resp.Gone = true
 			return nil
+		case errors.Is(rerr, session.ErrTabNameNotFound):
+			// A name that matches nothing is far more likely a typo than a
+			// disappearance, so answer with the roster rather than an empty capture.
+			tabs := instance.GetTabs()
+			ids := make([]string, 0, len(tabs))
+			for _, t := range tabs {
+				ids = append(ids, session.TabIdentifiers(t))
+			}
+			return fmt.Errorf("session %q has no tab named %q; its tabs are: %s",
+				req.Title, req.TabName, strings.Join(ids, ", "))
+		case rerr != nil:
+			return rerr
 		}
 		tab = idx
 	}

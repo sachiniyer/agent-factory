@@ -357,12 +357,11 @@
         "pointer": "web/src/terminal.ts:205-223 streams any tab via tab_id"
       },
       "cli": {
-        "status": "no",
-        "pointer": "api/sessions.go:674 sends only {Title, RepoID}; no --tab flag"
+        "status": "yes",
+        "pointer": "api/sessions.go sessionsPreviewCmd --tab/--tab-name/--tab-id"
       },
-      "verdict": "real-gap",
-      "issue": "#1948",
-      "notes": "The substrate supports it and one surface does not expose it: PreviewRequest carries Tab (ordinal) and TabID (stable id, #1738), the TUI drives both, and `af sessions preview <title>` can only ever see tab 0. Absurd in practice because the CLI can CREATE a tab (`af sessions tab-create --name x --command …`) and then has no way to read it — create without read. Found by dogfooding, not by the verb-level check, which is why field_coverage now exists."
+      "verdict": "parity",
+      "notes": "Closed by #1948. PreviewRequest always carried Tab and TabID and the CLI sent neither, so `af sessions preview` could only ever see tab 0 — it could CREATE a tab and then had no way to read it. The CLI now sends all three selectors and gained --tab-name, the handle a person actually has; the id/name/ordinal precedence is session.ResolveTabIndex, shared with every other tab verb rather than restated per surface."
     },
     {
       "id": "session.preview-full",
@@ -376,12 +375,11 @@
         "pointer": "web/src/terminal.ts (xterm holds its own scrollback)"
       },
       "cli": {
-        "status": "no",
-        "pointer": "api/sessions.go:674 never sets Full"
+        "status": "yes",
+        "pointer": "api/sessions.go sessionsPreviewCmd --full"
       },
-      "verdict": "real-gap",
-      "issue": "#1948",
-      "notes": "PreviewRequest.Full selects PreviewFullHistory over the visible capture (daemon/preview.go:80 -> session/agentserver_local.go:122-130). `af sessions preview` can only ever show the visible screen, never scrollback — the same unexposed-field shape as session.preview-tab, on the same request, so it is tracked by the same issue."
+      "verdict": "parity",
+      "notes": "Closed by #1948. --full selects PreviewFullHistory over the visible capture, so the CLI can read scrollback instead of only the visible screen."
     },
     {
       "id": "session.tab.create.options",
@@ -1464,7 +1462,11 @@
       "af sessions kill --force": "session.kill",
       "af sessions kill --help": "meta.discovery",
       "af sessions list --help": "meta.discovery",
+      "af sessions preview --full": "session.preview-full",
       "af sessions preview --help": "meta.discovery",
+      "af sessions preview --tab": "session.preview-tab",
+      "af sessions preview --tab-id": "session.preview-tab",
+      "af sessions preview --tab-name": "session.preview-tab",
       "af sessions restore --help": "meta.discovery",
       "af sessions send-prompt --all": "session.send-prompt.broadcast",
       "af sessions send-prompt --all-repos": "session.send-prompt.broadcast",
@@ -1563,15 +1565,9 @@
     ],
     "requests": {
       "PreviewRequest": {
-        "cli": {
-          "tab": {
-            "gap": "session.preview-tab"
-          },
-          "tab_id": {
-            "gap": "session.preview-tab"
-          },
-          "full": {
-            "gap": "session.preview-full"
+        "tui": {
+          "tab_name": {
+            "ok": "The TUI holds the live tab object and addresses it by TabID, which is the stronger handle: a name is freed by a close and handed to the next tab that asks for it, a stable id never is. TabName exists for the CLI, where a person types the handle they actually have on hand (#1948)."
           }
         }
       },

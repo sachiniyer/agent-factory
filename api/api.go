@@ -595,6 +595,16 @@ func init() {
 	sessionsCreateCmd.Flags().StringVar(&createBackendFlag, "backend", "", "Runtime to run the session on (one of: "+config.SupportedBackendsString()+"; defaults to the repo's backend config, or local). docker runs the session in a container (set docker.image in the repo config); ssh runs it on a remote host (set ssh.host in the repo config)")
 	sessionsCreateCmd.MarkFlagRequired("name")
 
+	// Tab addressing for `sessions preview` (#1948). The daemon's PreviewRequest
+	// always carried Tab/TabID/Full and the CLI sent none of them, so `af sessions
+	// preview` could only ever capture tab 0's visible screen — it could CREATE a
+	// tab it had no way to read. --tab-name is the handle a person actually has;
+	// --tab-id is for scripts that must not follow a reused name.
+	sessionsPreviewCmd.Flags().IntVar(&previewTabFlag, "tab", 0, "Tab slot to capture, 0-based as the tab bar reads left to right (slot 0 is the agent tab)")
+	sessionsPreviewCmd.Flags().StringVar(&previewTabNameFlag, "tab-name", "", "Name of the tab to capture, as reported by \"af sessions get\" (not the TUI's \"Agent\"/\"Terminal\" label); wins over --tab")
+	sessionsPreviewCmd.Flags().StringVar(&previewTabIDFlag, "tab-id", "", "Stable id of the tab to capture (#1738); wins over --tab-name and --tab")
+	sessionsPreviewCmd.Flags().BoolVar(&previewFullFlag, "full", false, "Capture the entire scrollback instead of the visible screen")
+
 	// --prompt is an ALIAS for the positional <prompt>, mirroring `sessions
 	// create --prompt` so the two sibling verbs take the same concept the same
 	// way. The positional stays supported: this is additive, not a migration.

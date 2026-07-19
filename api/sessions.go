@@ -1,6 +1,7 @@
 package api
 
 import (
+	"errors"
 	"fmt"
 
 	"os/exec"
@@ -335,6 +336,42 @@ pointing at one).`,
 	},
 }
 
+var (
+	previewTabFlag     int
+	previewTabNameFlag string
+	previewTabIDFlag   string
+	previewFullFlag    bool
+)
+
+// resolvePreviewTab picks the tab slot `af sessions preview` should capture on
+// the LOCAL path, from the --tab-id/--tab-name/--tab flags.
+//
+// The precedence and the refuse-never-fall-back rule are session's
+// (ResolveTabIndex) — the same definition the daemon resolves against — so the
+// two paths cannot drift into disagreeing about what --tab-name means (#1948).
+// Only the wording is the CLI's, and it names the FLAG that was wrong, which the
+// daemon's session-oriented message cannot.
+func resolvePreviewTab(tabs []*session.Tab) (int, error) {
+	idx, err := session.ResolveTabIndex(tabs, previewTabIDFlag, previewTabNameFlag, previewTabFlag)
+	switch {
+	case errors.Is(err, session.ErrTabIDNotFound):
+		return 0, fmt.Errorf("--tab-id %q matches no tab in this session; it may have been closed", previewTabIDFlag)
+	case errors.Is(err, session.ErrTabNameNotFound):
+		ids := make([]string, 0, len(tabs))
+		for _, t := range tabs {
+			ids = append(ids, session.TabIdentifiers(t))
+		}
+		return 0, fmt.Errorf("--tab-name %q matches no tab in this session; its tabs are: %s",
+			previewTabNameFlag, strings.Join(ids, ", "))
+	case errors.Is(err, session.ErrTabIndexOutOfRange):
+		return 0, fmt.Errorf("--tab %d is not a slot in this session, which has %d tab(s)",
+			previewTabFlag, len(tabs))
+	case err != nil:
+		return 0, err
+	}
+	return idx, nil
+}
+
 var sessionsPreviewCmd = &cobra.Command{
 	Use:   "preview <title>",
 	Short: "Preview a session's terminal content",
@@ -344,7 +381,18 @@ name can exist in several repos. The title resolves inside the repo given by
 
 With no repo context, a title held by exactly one session still resolves; one
 held by sessions in several projects is ambiguous and reports an error naming
-those projects instead of guessing between them.`,
+those projects instead of guessing between them.
+
+By default this captures the session's AGENT tab (slot 0), visible screen only.
+Address another tab with --tab-name (the tab name "af sessions tab-create"
+printed, as reported by "af sessions get" — not the TUI's "Agent"/"Terminal"
+label), --tab-id (the stable id, for scripts that must not follow a reused
+name), or --tab (the 0-based slot). They resolve in that precedence — id, then
+name, then slot — the same order every tab verb uses. An id or name that does
+not resolve is an error, never a silent fall back to a slot: that would capture
+whatever tab had shifted into it.
+
+--full returns the entire scrollback instead of the visible screen.`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		log.Initialize(false)
@@ -369,7 +417,19 @@ those projects instead of guessing between them.`,
 			if cerr != nil {
 				return jsonError(cerr)
 			}
-			content, gone, perr := client.Preview(daemon.PreviewRequest{Title: args[0], RepoID: repoID})
+			// The tab selectors go over the wire as-is: the DAEMON resolves them,
+			// against the roster it actually holds, through the same
+			// session.ResolveTabIndex the local path below uses. Resolving a name
+			// client-side would need an extra round trip and would race — the
+			// roster it read could differ from the one the capture runs against.
+			content, gone, perr := client.Preview(daemon.PreviewRequest{
+				Title:   args[0],
+				RepoID:  repoID,
+				Tab:     previewTabFlag,
+				TabName: previewTabNameFlag,
+				TabID:   previewTabIDFlag,
+				Full:    previewFullFlag,
+			})
 			if perr != nil {
 				return jsonError(perr)
 			}
@@ -387,7 +447,14 @@ those projects instead of guessing between them.`,
 			return jsonError(err)
 		}
 
-		content, err := instance.AgentServer().Preview(0, false)
+		// Same precedence as the daemon path, from the same definition
+		// (session.ResolveTabIndex) rather than a second copy of the rule.
+		tab, terr := resolvePreviewTab(instance.GetTabs())
+		if terr != nil {
+			return jsonError(terr)
+		}
+
+		content, err := instance.AgentServer().Preview(tab, previewFullFlag)
 		if err != nil {
 			return jsonError(fmt.Errorf("failed to get preview: %w", err))
 		}

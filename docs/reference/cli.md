@@ -1145,9 +1145,29 @@ With no repo context, a title held by exactly one session still resolves; one
 held by sessions in several projects is ambiguous and reports an error naming
 those projects instead of guessing between them.
 
+By default this captures the session's AGENT tab (slot 0), visible screen only.
+Address another tab with --tab-name (the tab name "af sessions tab-create"
+printed, as reported by "af sessions get" — not the TUI's "Agent"/"Terminal"
+label), --tab-id (the stable id, for scripts that must not follow a reused
+name), or --tab (the 0-based slot). They resolve in that precedence — id, then
+name, then slot — the same order every tab verb uses. An id or name that does
+not resolve is an error, never a silent fall back to a slot: that would capture
+whatever tab had shifted into it.
+
+--full returns the entire scrollback instead of the visible screen.
+
 ```
-af sessions preview <title>
+af sessions preview <title> [flags]
 ```
+
+**Flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--full` |  | Capture the entire scrollback instead of the visible screen |
+| `--tab` | `int` | Tab slot to capture, 0-based as the tab bar reads left to right (slot 0 is the agent tab) (default `0`) |
+| `--tab-id` | `string` | Stable id of the tab to capture (#1738); wins over --tab-name and --tab |
+| `--tab-name` | `string` | Name of the tab to capture, as reported by "af sessions get" (not the TUI's "Agent"/"Terminal" label); wins over --tab |
 
 **Global flags**
 
