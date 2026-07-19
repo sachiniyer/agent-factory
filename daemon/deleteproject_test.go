@@ -210,3 +210,79 @@ func TestDeleteProject_TildePathMatches(t *testing.T) {
 	assert.Len(t, result.Archived, 1, "a ~/-prefixed path must resolve to the real project, not silently miss")
 	assert.Empty(t, liveProjectRoots(manager.Snapshot(repoID)))
 }
+
+// TestDeleteProject_ConcurrentlyArchivedTargetIsSuccess is the #2108 regression:
+// DeleteProject snapshots the repo's live sessions under m.mu, releases the lock,
+// then archives them one by one. A concurrent ArchiveSession that lands in that
+// window leaves a snapshot target ALREADY in the desired archived state, so
+// ArchiveSession's early liveness guard rejects it. That is idempotent SUCCESS,
+// not a failure: the session is archived, which is all the delete wanted. Before
+// the fix DeleteProject returned a partial-failure error and omitted the session
+// from result.Archived, so the TUI took the error path (no refresh) and reported
+// an undercount.
+func TestDeleteProject_ConcurrentlyArchivedTargetIsSuccess(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	registerArchivable(t, manager, repoID, repoPath, "alpha")
+	beta, betaSrc := registerArchivable(t, manager, repoID, repoPath, "beta")
+	require.NoError(t, manager.SaveInstances())
+
+	// Stand in for the race deterministically. Targets are archived in sorted
+	// order, so flipping "beta" to Archived during "alpha"'s archive commit puts it
+	// in exactly the state a concurrent ArchiveSession would have left it in by the
+	// time the loop reaches it — no real data race needed to hit the guard.
+	orig := archivePersist
+	t.Cleanup(func() { archivePersist = orig })
+	archivePersist = func(m *Manager, rid string, inst *session.Instance) error {
+		if inst.Title == "alpha" {
+			beta.SetStatusForTest(session.Archived)
+		}
+		return orig(m, rid, inst)
+	}
+
+	result, err := manager.DeleteProject(DeleteProjectRequest{RepoID: repoID, RepoPath: repoPath})
+	require.NoError(t, err, "a target already in the desired archived state is success, not a partial failure")
+
+	var titles []string
+	for _, d := range result.Archived {
+		titles = append(titles, d.Title)
+		assert.NotEmpty(t, d.ID, "every reported session carries its stable id, so the event names the right row")
+	}
+	assert.ElementsMatch(t, []string{"alpha", "beta"}, titles,
+		"the already-archived session counts toward Archived — omitting it undercounts what the delete achieved")
+	assert.Empty(t, result.Killed)
+
+	// beta really is archived (the pre-flip stood in for a completed concurrent
+	// archive, so its worktree is still where that archive would have left it) and
+	// the project is gone from the active list — the contract the caller is told.
+	assert.Equal(t, session.Archived, beta.GetStatus())
+	assert.True(t, exists(betaSrc), "the seam only flipped liveness; this delete must not re-move an archived worktree")
+	assert.Empty(t, liveProjectRoots(manager.Snapshot(repoID)), "no live session ⇒ the project drops out of the active list")
+}
+
+// TestDeleteProject_GenuineArchiveFailureStillReportsPartialFailure is the
+// other half of #2108: treating "already archived" as success must NOT become a
+// blanket swallow of ArchiveSession errors. A session that genuinely could not be
+// archived — here one held by another destructive op — is still a real failure,
+// still reported, and still excluded from result.Archived, so the caller knows to
+// retry.
+func TestDeleteProject_GenuineArchiveFailureStillReportsPartialFailure(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	registerArchivable(t, manager, repoID, repoPath, "alpha")
+	beta, betaSrc := registerArchivable(t, manager, repoID, repoPath, "beta")
+	require.NoError(t, manager.SaveInstances())
+
+	// beta is genuinely busy: another destructive op holds it, so its archive fails
+	// for real and it stays LIVE.
+	manager.mu.Lock()
+	manager.killsInFlight[daemonInstanceKey(repoID, "beta")] = struct{}{}
+	manager.mu.Unlock()
+
+	result, err := manager.DeleteProject(DeleteProjectRequest{RepoID: repoID, RepoPath: repoPath})
+	require.Error(t, err, "a genuine archive failure must still surface as a partial failure")
+	assert.Contains(t, err.Error(), "could not be removed")
+	assert.Len(t, result.Archived, 1, "only the session that actually archived is reported")
+	assert.Equal(t, "alpha", result.Archived[0].Title)
+
+	assert.NotEqual(t, session.Archived, beta.GetStatus(), "the busy session is untouched")
+	assert.True(t, exists(betaSrc), "the busy session's worktree is untouched")
+}

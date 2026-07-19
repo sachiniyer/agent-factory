@@ -135,6 +135,20 @@ func (m *Manager) DeleteProject(req DeleteProjectRequest) (DeleteProjectResult, 
 			continue
 		}
 		_, archived, err := m.ArchiveSession(ArchiveSessionRequest{Title: t.title, RepoID: repoID})
+		// A target that is ALREADY archived is idempotent SUCCESS, not a failure
+		// (#2108). The snapshot above is a point-in-time read taken under m.mu and
+		// then acted on with the lock released, so a concurrent ArchiveSession can
+		// land in that window and leave a target in exactly the state this delete
+		// wants it in. Counting that as a failure returned a partial-failure error,
+		// omitted the session from Archived (an undercount), and pushed the TUI down
+		// the error path — all for a session that IS archived. ArchiveSession returns
+		// the resolved identity alongside the sentinel, so the row is reported with
+		// its real {id, title}. Every OTHER error stays a failure: a busy session, an
+		// op in flight, or a teardown that broke is genuinely not archived, and the
+		// caller must be told to retry.
+		if errors.Is(err, ErrAlreadyArchived) {
+			err = nil
+		}
 		if err != nil {
 			errs = append(errs, fmt.Errorf("session %q: %w", t.title, err))
 			continue
