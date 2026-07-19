@@ -23,7 +23,7 @@ var (
 // globals. Called for both the hyphen verb and the tabs-create alias (#1192).
 func bindTabCreateFlags(c *cobra.Command) {
 	c.Flags().StringVar(&tabCreateCommandFlag, "command", "", "Command to run in a process tab (required unless --kind web/vscode)")
-	c.Flags().StringVar(&tabCreateNameFlag, "name", "", "Tab name (defaults to the command basename, or \"web\"/\"vscode\" for those kinds; auto-suffixed on collision)")
+	c.Flags().StringVar(&tabCreateNameFlag, "name", "", "Tab name — sanitized to [A-Za-z0-9_-] and auto-suffixed on collision (defaults to the command basename, or \"web\"/\"vscode\" for those kinds)")
 	c.Flags().StringVar(&tabCreateKindFlag, "kind", "", "Tab kind: empty for a process tab, \"web\" for a URL/iframe tab, or \"vscode\" for a VS Code editor on the session's worktree")
 	c.Flags().StringVar(&tabCreateURLFlag, "url", "", "Web tab target URL (with --kind web): a localhost dev-server address or an external https URL")
 	c.Flags().IntVar(&tabCreatePortFlag, "port", 0, "Web tab convenience for --url http://localhost:<port> (with --kind web)")
@@ -32,7 +32,7 @@ func bindTabCreateFlags(c *cobra.Command) {
 // bindTabDeleteFlags registers the tab-delete flag on c, bound to the shared
 // global. Called for both the hyphen verb and the tabs-delete alias (#1192).
 func bindTabDeleteFlags(c *cobra.Command) {
-	c.Flags().StringVar(&tabDeleteNameFlag, "name", "", "Name of the tab to delete (required)")
+	c.Flags().StringVar(&tabDeleteNameFlag, "name", "", "Name of the tab to delete (required; the tab's name, not the TUI's \"Agent\"/\"Terminal\" label)")
 	c.MarkFlagRequired("name")
 }
 
@@ -54,9 +54,15 @@ URL is iframed directly (best-effort — many sites block embedding). The web ta
 renders as an iframe in the web UI and as a placeholder in the TUI.
 
 The tab persists and reconnects across a daemon/af restart like every other tab.
-The name is made unique within the session (auto-suffixed -2, -3, …). The resolved
-tab name is printed on success so scripts/agents can address it. Not available for
-remote sessions: they have no local worktree.`,
+
+--name sets the tab's name — the handle every other tab verb addresses it by,
+not the label the TUI renders (agent and shell tabs always show "Agent" and
+"Terminal"). The name is sanitized before use: characters outside [A-Za-z0-9_-]
+become "-". It is then made unique within the session (auto-suffixed -2, -3, …).
+So the name you pass is not always the name you get — the resolved tab name is
+printed on success, and that is the one the other tab verbs address.
+
+Not available for remote sessions: they have no local worktree.`,
 	Args: cobra.ExactArgs(1),
 	RunE: runTabCreate,
 }
@@ -185,7 +191,7 @@ var (
 // bindTabRenameFlags registers the tab-rename flags on c, bound to the shared
 // globals. Called for both the hyphen verb and the tabs-rename alias (#1192).
 func bindTabRenameFlags(c *cobra.Command) {
-	c.Flags().StringVar(&tabRenameNameFlag, "name", "", "Name of the tab to rename (required)")
+	c.Flags().StringVar(&tabRenameNameFlag, "name", "", "Name of the tab to rename (required; the tab's name, not the TUI's \"Agent\"/\"Terminal\" label)")
 	c.Flags().StringVar(&tabRenameNewNameFlag, "new-name", "", "New name for the tab (required; sanitized and auto-suffixed on collision)")
 	c.MarkFlagRequired("name")
 	c.MarkFlagRequired("new-name")
@@ -199,7 +205,9 @@ typically one an agent picked when it created the tab.
 
 Only web, process and VS Code tabs can be renamed: those are the tabs that
 display their name. The agent tab always shows "Agent" and shell tabs always show
-"Terminal" on every surface, so renaming them would change nothing and is refused.
+"Terminal" on every surface, so renaming one would change the handle you address
+it by without changing anything you can see — confusing rather than useful, so it
+is refused.
 
 --new-name follows the same rules as tab-create's --name: characters outside
 [A-Za-z0-9_-] become "-", and the name is made unique within the session
@@ -257,7 +265,7 @@ var (
 // bindTabReorderFlags registers the tab-reorder flags on c, bound to the shared
 // globals. Called for both the hyphen verb and the tabs-reorder alias (#1192).
 func bindTabReorderFlags(c *cobra.Command) {
-	c.Flags().StringVar(&tabReorderNameFlag, "name", "", "Name of the tab to move (required)")
+	c.Flags().StringVar(&tabReorderNameFlag, "name", "", "Name of the tab to move (required; the tab's name, not the TUI's \"Agent\"/\"Terminal\" label)")
 	c.Flags().IntVar(&tabReorderIndexFlag, "index", 0, "Destination slot, 0-based, as the tab bar reads left to right (required; slot 0 is the agent tab and can't be targeted)")
 	c.MarkFlagRequired("name")
 	c.MarkFlagRequired("index")
@@ -346,7 +354,7 @@ var sessionsTabsReorderCmd = &cobra.Command{
 
 var sessionsTabsCreateCmd = &cobra.Command{
 	Use:   "create <title>",
-	Short: "Spawn a process tab (a command) or a web tab (a URL/iframe) in a session",
+	Short: "Spawn a process tab (a command), a web tab (a URL/iframe), or a VS Code tab in a session",
 	Long:  `Alias for "sessions tab-create". See "af sessions tab-create --help" for details.`,
 	Args:  cobra.ExactArgs(1),
 	RunE:  runTabCreate,

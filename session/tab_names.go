@@ -7,7 +7,7 @@ import (
 	"strings"
 )
 
-// uniqueShellName returns a shell-tab display name not already used by any tab
+// uniqueShellName returns a shell-tab name not already used by any tab
 // in tabs: "shell", then "shell-2", "shell-3", ...
 func uniqueShellName(tabs []*Tab) string {
 	return uniqueTabName(tabs, shellTabName)
@@ -86,7 +86,7 @@ func agentTmuxPrefix(tabs []*Tab) string {
 // keeps '_'), e.g. "logs__api" derives session "…__logs__api" whose token is
 // "logs__api", NOT the "api" a split-on-last-"__" would wrongly yield and leave
 // free for a colliding tab-create. It is this spawn-time token, not the tab's
-// current display name (which a rename decouples from it), that a later
+// current name (which a rename decouples from it), that a later
 // tab-create would collide with.
 //
 // Empty when there is nothing to reserve: a web/vscode tab (no PTY), an unstarted
@@ -120,7 +120,7 @@ func sanitizeTabName(name string) string {
 	return strings.Trim(tabNameUnsafe.ReplaceAllString(name, "-"), "-")
 }
 
-// processTabBaseName picks the base display name for a new Process tab: the
+// processTabBaseName picks the base name for a new Process tab: the
 // sanitized requestedName when the caller passed --name, otherwise the sanitized
 // basename of the command's first word ("/usr/bin/btop -t" -> "btop"). Falls back
 // to "process" when neither yields a usable token.

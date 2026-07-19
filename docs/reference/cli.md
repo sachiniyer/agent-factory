@@ -47,7 +47,7 @@ Run `af <command> --help` for the same information at the terminal. For a narrat
 - [`af sessions tab-rename`](#af-sessions-tab-rename) — Rename a tab of a session
 - [`af sessions tab-reorder`](#af-sessions-tab-reorder) — Move a tab within a session's tab order
 - [`af sessions tabs`](#af-sessions-tabs) — Manage a session's tabs (create/delete/rename/reorder)
-- [`af sessions tabs create`](#af-sessions-tabs-create) — Spawn a process tab (a command) or a web tab (a URL/iframe) in a session
+- [`af sessions tabs create`](#af-sessions-tabs-create) — Spawn a process tab (a command), a web tab (a URL/iframe), or a VS Code tab in a session
 - [`af sessions tabs delete`](#af-sessions-tabs-delete) — Delete a single tab from a session
 - [`af sessions tabs rename`](#af-sessions-tabs-rename) — Rename a tab of a session
 - [`af sessions tabs reorder`](#af-sessions-tabs-reorder) — Move a tab within a session's tab order
@@ -1249,9 +1249,15 @@ URL is iframed directly (best-effort — many sites block embedding). The web ta
 renders as an iframe in the web UI and as a placeholder in the TUI.
 
 The tab persists and reconnects across a daemon/af restart like every other tab.
-The name is made unique within the session (auto-suffixed -2, -3, …). The resolved
-tab name is printed on success so scripts/agents can address it. Not available for
-remote sessions: they have no local worktree.
+
+--name sets the tab's name — the handle every other tab verb addresses it by,
+not the label the TUI renders (agent and shell tabs always show "Agent" and
+"Terminal"). The name is sanitized before use: characters outside [A-Za-z0-9_-]
+become "-". It is then made unique within the session (auto-suffixed -2, -3, …).
+So the name you pass is not always the name you get — the resolved tab name is
+printed on success, and that is the one the other tab verbs address.
+
+Not available for remote sessions: they have no local worktree.
 
 ```
 af sessions tab-create <title> [flags]
@@ -1263,7 +1269,7 @@ af sessions tab-create <title> [flags]
 |------|------|-------------|
 | `--command` | `string` | Command to run in a process tab (required unless --kind web/vscode) |
 | `--kind` | `string` | Tab kind: empty for a process tab, "web" for a URL/iframe tab, or "vscode" for a VS Code editor on the session's worktree |
-| `--name` | `string` | Tab name (defaults to the command basename, or "web"/"vscode" for those kinds; auto-suffixed on collision) |
+| `--name` | `string` | Tab name — sanitized to [A-Za-z0-9_-] and auto-suffixed on collision (defaults to the command basename, or "web"/"vscode" for those kinds) |
 | `--port` | `int` | Web tab convenience for --url http://localhost:<port> (with --kind web) (default `0`) |
 | `--url` | `string` | Web tab target URL (with --kind web): a localhost dev-server address or an external https URL |
 
@@ -1303,7 +1309,7 @@ af sessions tab-delete <title> [flags]
 
 | Flag | Type | Description |
 |------|------|-------------|
-| `--name` | `string` | Name of the tab to delete (required) |
+| `--name` | `string` | Name of the tab to delete (required; the tab's name, not the TUI's "Agent"/"Terminal" label) |
 
 **Global flags**
 
@@ -1323,7 +1329,9 @@ typically one an agent picked when it created the tab.
 
 Only web, process and VS Code tabs can be renamed: those are the tabs that
 display their name. The agent tab always shows "Agent" and shell tabs always show
-"Terminal" on every surface, so renaming them would change nothing and is refused.
+"Terminal" on every surface, so renaming one would change the handle you address
+it by without changing anything you can see — confusing rather than useful, so it
+is refused.
 
 --new-name follows the same rules as tab-create's --name: characters outside
 [A-Za-z0-9_-] become "-", and the name is made unique within the session
@@ -1344,7 +1352,7 @@ af sessions tab-rename <title> [flags]
 
 | Flag | Type | Description |
 |------|------|-------------|
-| `--name` | `string` | Name of the tab to rename (required) |
+| `--name` | `string` | Name of the tab to rename (required; the tab's name, not the TUI's "Agent"/"Terminal" label) |
 | `--new-name` | `string` | New name for the tab (required; sanitized and auto-suffixed on collision) |
 
 **Global flags**
@@ -1384,7 +1392,7 @@ af sessions tab-reorder <title> [flags]
 | Flag | Type | Description |
 |------|------|-------------|
 | `--index` | `int` | Destination slot, 0-based, as the tab bar reads left to right (required; slot 0 is the agent tab and can't be targeted) (default `0`) |
-| `--name` | `string` | Name of the tab to move (required) |
+| `--name` | `string` | Name of the tab to move (required; the tab's name, not the TUI's "Agent"/"Terminal" label) |
 
 **Global flags**
 
@@ -1412,7 +1420,7 @@ af sessions tabs
 
 **Subcommands**
 
-- [`af sessions tabs create`](#af-sessions-tabs-create) — Spawn a process tab (a command) or a web tab (a URL/iframe) in a session
+- [`af sessions tabs create`](#af-sessions-tabs-create) — Spawn a process tab (a command), a web tab (a URL/iframe), or a VS Code tab in a session
 - [`af sessions tabs delete`](#af-sessions-tabs-delete) — Delete a single tab from a session
 - [`af sessions tabs rename`](#af-sessions-tabs-rename) — Rename a tab of a session
 - [`af sessions tabs reorder`](#af-sessions-tabs-reorder) — Move a tab within a session's tab order
@@ -1428,7 +1436,7 @@ af sessions tabs
 
 ## af sessions tabs create
 
-Spawn a process tab (a command) or a web tab (a URL/iframe) in a session
+Spawn a process tab (a command), a web tab (a URL/iframe), or a VS Code tab in a session
 
 Alias for "sessions tab-create". See "af sessions tab-create --help" for details.
 
@@ -1442,7 +1450,7 @@ af sessions tabs create <title> [flags]
 |------|------|-------------|
 | `--command` | `string` | Command to run in a process tab (required unless --kind web/vscode) |
 | `--kind` | `string` | Tab kind: empty for a process tab, "web" for a URL/iframe tab, or "vscode" for a VS Code editor on the session's worktree |
-| `--name` | `string` | Tab name (defaults to the command basename, or "web"/"vscode" for those kinds; auto-suffixed on collision) |
+| `--name` | `string` | Tab name — sanitized to [A-Za-z0-9_-] and auto-suffixed on collision (defaults to the command basename, or "web"/"vscode" for those kinds) |
 | `--port` | `int` | Web tab convenience for --url http://localhost:<port> (with --kind web) (default `0`) |
 | `--url` | `string` | Web tab target URL (with --kind web): a localhost dev-server address or an external https URL |
 
@@ -1469,7 +1477,7 @@ af sessions tabs delete <title> [flags]
 
 | Flag | Type | Description |
 |------|------|-------------|
-| `--name` | `string` | Name of the tab to delete (required) |
+| `--name` | `string` | Name of the tab to delete (required; the tab's name, not the TUI's "Agent"/"Terminal" label) |
 
 **Global flags**
 
@@ -1494,7 +1502,7 @@ af sessions tabs rename <title> [flags]
 
 | Flag | Type | Description |
 |------|------|-------------|
-| `--name` | `string` | Name of the tab to rename (required) |
+| `--name` | `string` | Name of the tab to rename (required; the tab's name, not the TUI's "Agent"/"Terminal" label) |
 | `--new-name` | `string` | New name for the tab (required; sanitized and auto-suffixed on collision) |
 
 **Global flags**
@@ -1521,7 +1529,7 @@ af sessions tabs reorder <title> [flags]
 | Flag | Type | Description |
 |------|------|-------------|
 | `--index` | `int` | Destination slot, 0-based, as the tab bar reads left to right (required; slot 0 is the agent tab and can't be targeted) (default `0`) |
-| `--name` | `string` | Name of the tab to move (required) |
+| `--name` | `string` | Name of the tab to move (required; the tab's name, not the TUI's "Agent"/"Terminal" label) |
 
 **Global flags**
 

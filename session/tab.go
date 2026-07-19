@@ -10,7 +10,7 @@ import (
 )
 
 // newTabID mints a stable, collision-free identity for a tab (#1738). Unlike a
-// tab's ordinal position (which shifts on a reorder/close) or its display name
+// tab's ordinal position (which shifts on a reorder/close) or its name
 // (which is reused on close+recreate — a fresh "shell" after the old one is
 // gone), this id is minted once at creation, persisted, and never reused, so a
 // stream or pane binding keyed on it can never misroute to a different tab after
@@ -55,7 +55,7 @@ const vscodeTabName = "vscode"
 // Deterministic so a tab's session is collision-free across instances and
 // restorable by exact name across a restart. It is also the token boundary
 // tabTmuxToken splits on to recover the name a live session was derived from,
-// which a rename decouples from the tab's current display name.
+// which a rename decouples from the tab's current name.
 const tmuxTabSeparator = "__"
 
 // shellTmuxSuffix extends an instance's agent tmux session name to derive its
@@ -146,7 +146,7 @@ func (k TabKind) HasTmux() bool {
 type Tab struct {
 	// ID is the tab's stable identity (#1738), minted at creation and persisted.
 	// It is the collision-proof key streams and pane bindings address the tab by —
-	// unlike the ordinal position (shifts on reorder/close) or the display name
+	// unlike the ordinal position (shifts on reorder/close) or the name
 	// (reused on close+recreate). Empty only for a legacy persisted tab written
 	// before #1738, which restoreLocalTabs backfills with a fresh id on load.
 	ID string
@@ -208,15 +208,15 @@ func newRemoteAgentTab() *Tab {
 
 // newWebTab returns a TabKindWeb tab pointing at url. It carries no tmux
 // session (web tabs have no PTY): the target is rendered as an iframe in the web
-// UI and as a placeholder in the TUI. The caller sets a unique display name.
+// UI and as a placeholder in the TUI. The caller sets a unique name.
 func newWebTab(url string) *Tab {
 	return &Tab{ID: newTabID(), Name: webTabName, Kind: TabKindWeb, URL: url}
 }
 
 // newVSCodeTab returns a TabKindVSCode tab. It carries neither a tmux session nor
 // a URL: the editor is a daemon-managed per-session code-server whose loopback
-// address is resolved at proxy time (see TabKindVSCode). The caller sets a unique
-// display name.
+// address is resolved at proxy time (see TabKindVSCode). The caller sets a
+// unique name.
 func newVSCodeTab() *Tab {
 	return &Tab{ID: newTabID(), Name: vscodeTabName, Kind: TabKindVSCode}
 }
