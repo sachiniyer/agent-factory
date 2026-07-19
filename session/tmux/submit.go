@@ -1,9 +1,9 @@
 package tmux
 
 import (
+	"context"
 	"fmt"
 	"os"
-	"os/exec"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -143,9 +143,18 @@ func (t *TmuxSession) sendKeysPasteBuffer(text string) error {
 		}
 	}
 
-	loadCmd := exec.Command("tmux", "load-buffer", "-b", buf, "-")
-	loadCmd.Stdin = strings.NewReader(text)
-	if err := t.cmdExec.Run(loadCmd); err != nil {
+	// load-buffer streams the prompt in on stdin, so it needs the stdin-carrying
+	// bounded runner rather than the shared one — and deliberately does NOT treat
+	// exec.ErrWaitDelay as success, because a force-closed stdin pipe means the
+	// payload may be truncated. See runTmuxBoundedStdin.
+	loadCtx, loadCancel := tmuxTimeoutContext()
+	err := runTmuxBoundedStdin(loadCtx, t.cmdExec, strings.NewReader(text), "load-buffer", "-b", buf, "-")
+	loadTimedOut := loadCtx.Err() != nil
+	loadCancel()
+	if err != nil {
+		if loadTimedOut {
+			return fmt.Errorf("%w: load-buffer after %s", ErrTmuxTimeout, tmuxCommandTimeout)
+		}
 		return fmt.Errorf("error loading paste buffer: %w", err)
 	}
 
@@ -153,18 +162,27 @@ func (t *TmuxSession) sendKeysPasteBuffer(text string) error {
 	// comment: prompts are pasted DATA, never keystrokes), and `=` forces an
 	// exact session match so input never reaches a prefix-matched sibling
 	// session (#1006).
-	args := []string{"paste-buffer", "-d", "-p", "-b", buf, "-t", exactTarget(t.sanitizedName)}
-	pasteCmd := exec.Command("tmux", args...)
-	if err := t.cmdExec.Run(pasteCmd); err != nil {
+	pasteCtx, pasteCancel := tmuxTimeoutContext()
+	pasteErr := t.runTmuxBounded(pasteCtx, "paste-buffer", "-d", "-p", "-b", buf, "-t", exactTarget(t.sanitizedName))
+	pasteTimedOut := pasteCtx.Err() != nil
+	pasteCancel()
+	if pasteErr != nil {
 		// `-d` only deletes the buffer once the paste succeeds; a failed paste
 		// would otherwise strand the named buffer, and tmux buffers are
 		// server-scoped (they outlive the session), so each failed submit would
-		// leak one buffer unbounded. Best-effort delete it before returning.
-		delCmd := exec.Command("tmux", "delete-buffer", "-b", buf)
-		if derr := t.cmdExec.Run(delCmd); derr != nil {
+		// leak one buffer unbounded. Best-effort delete it before returning —
+		// bounded too, or the cleanup for a wedge-failed paste would itself wedge
+		// on the same server and undo the bound we just added.
+		delCtx, delCancel := tmuxTimeoutContext()
+		derr := t.runTmuxBounded(delCtx, "delete-buffer", "-b", buf)
+		delCancel()
+		if derr != nil {
 			log.ErrorLog.Printf("failed to delete paste buffer %q after paste error: %v", buf, derr)
 		}
-		return fmt.Errorf("error pasting buffer: %w", err)
+		if pasteTimedOut {
+			return fmt.Errorf("%w: paste-buffer after %s", ErrTmuxTimeout, tmuxCommandTimeout)
+		}
+		return fmt.Errorf("error pasting buffer: %w", pasteErr)
 	}
 
 	// Confirm the paste actually LANDED in the pane before sending Enter, instead
@@ -199,10 +217,20 @@ func (t *TmuxSession) sendKeysPasteBuffer(text string) error {
 	return nil
 }
 
-// sendEnter submits whatever is pending in the pane.
+// sendEnter submits whatever is pending in the pane. Bounded by
+// tmuxCommandTimeout (#2099): it is the last step of a submit the daemon drives
+// while holding the per-session op lock, so an unbounded stall here leaves the
+// session unpromptable rather than merely dropping one Enter.
 func (t *TmuxSession) sendEnter() error {
-	enterCmd := exec.Command("tmux", "send-keys", "-t", exactTarget(t.sanitizedName), "Enter")
-	return t.cmdExec.Run(enterCmd)
+	ctx, cancel := tmuxTimeoutContext()
+	defer cancel()
+	if err := t.runTmuxBounded(ctx, "send-keys", "-t", exactTarget(t.sanitizedName), "Enter"); err != nil {
+		if ctx.Err() != nil {
+			return fmt.Errorf("%w: send-keys Enter after %s", ErrTmuxTimeout, tmuxCommandTimeout)
+		}
+		return err
+	}
+	return nil
 }
 
 // deliveryTail returns a distinctive whitespace/box-free suffix of text used to
@@ -250,10 +278,39 @@ func normalizeDelivery(s string) string {
 // The bool reports whether the capture itself SUCCEEDED. Callers must keep that
 // separate from "the text was not there": a failed capture means the pane could
 // not be inspected at all, and collapsing that into a negative would let a
-// blind probe condemn a perfectly good delivery.
+// blind probe condemn a perfectly good delivery. A capture killed on a deadline
+// is exactly such a failure, so a wedged server yields false — never a negative.
+//
+// This form is for callers with no deadline of their own and takes the package's
+// standard tmuxCommandTimeout; waitForPasteDelivered's poll loop uses
+// capturePaneForDeliveryWithin instead. Both were unbounded before #2099.
 func (t *TmuxSession) capturePaneForDelivery() (string, bool) {
-	cmd := exec.Command("tmux", "capture-pane", "-p", "-J", "-t", exactTarget(t.sanitizedName))
-	out, err := t.cmdExec.Output(cmd)
+	ctx, cancel := tmuxTimeoutContext()
+	defer cancel()
+	return t.capturePaneForDeliveryContext(ctx)
+}
+
+// capturePaneForDeliveryWithin is capturePaneForDelivery bounded by a caller's
+// own REMAINING budget rather than the flat tmuxCommandTimeout.
+//
+// This is what makes waitForPasteDelivered actually honor pasteDeliveryMaxWait
+// (#2099). The loop's whole budget is 2s; bounding the capture inside it at
+// tmuxCommandTimeout (10s) would let ONE stalled capture overshoot that budget 5x
+// and leave the loop's own `time.Now().After(deadline)` check — the code that
+// decides to stop waiting and send Enter best-effort — unreachable for the whole
+// 10s. Fixing the hang without this would only half-fix the reported bug: the
+// call would return eventually, but the deadline it is supposed to respect still
+// would not hold.
+func (t *TmuxSession) capturePaneForDeliveryWithin(budget time.Duration) (string, bool) {
+	ctx, cancel := tmuxTimeoutContextWithin(budget)
+	defer cancel()
+	return t.capturePaneForDeliveryContext(ctx)
+}
+
+// capturePaneForDeliveryContext is the shared body: one bounded capture-pane,
+// with any failure (including a tripped deadline) reported as "could not look".
+func (t *TmuxSession) capturePaneForDeliveryContext(ctx context.Context) (string, bool) {
+	out, err := t.outputTmuxBounded(ctx, "capture-pane", "-p", "-J", "-t", exactTarget(t.sanitizedName))
 	if err != nil {
 		return "", false
 	}
@@ -282,7 +339,9 @@ func (t *TmuxSession) waitForPasteDelivered(tail string, baseline int) deliveryO
 		needed = 2
 	}
 	for {
-		if content, ok := t.capturePaneForDelivery(); ok {
+		// Bound each capture by what is LEFT of this loop's budget, so a wedged
+		// server cannot push a single capture past the deadline below (#2099).
+		if content, ok := t.capturePaneForDeliveryWithin(time.Until(deadline)); ok {
 			sawCapture = true
 			if strings.Count(normalizeDelivery(content), tail) > baseline {
 				streak++

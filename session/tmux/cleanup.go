@@ -137,13 +137,25 @@ func exactTarget(name string) string {
 // test sweep that escapes onto the developer's real server must be a no-op
 // (#1122). `af doctor` lists unowned af_ sessions with a manual kill command.
 func CleanupSessions(cmdExec cmd.Executor) error {
-	// First try to list sessions
-	cmd := exec.Command("tmux", "ls")
-	output, err := cmdExec.Output(cmd)
+	// First try to list sessions. Bounded by tmuxCommandTimeout (#2099): this is
+	// the first tmux command of the sweep, and `af reset` runs the sweep
+	// synchronously in a short-lived CLI process, so an unbounded stall here is a
+	// user-visible hang with no way out but ^C.
+	listCtx, listCancel := tmuxTimeoutContext()
+	output, err := outputTmuxBoundedWith(listCtx, cmdExec, "ls")
+	listTimedOut := listCtx.Err() != nil
+	listCancel()
 
 	// If there's an error and it's because no server is running, that's fine
 	// Exit code 1 typically means no sessions exist
 	if err != nil {
+		if listTimedOut {
+			// A wedged server has told us NOTHING about what is running, so the
+			// sweep must abort rather than proceed on an empty list — an empty
+			// list here would silently read as "nothing to clean up" and report
+			// success for a reset that swept nothing.
+			return fmt.Errorf("%w: tmux ls after %s", ErrTmuxTimeout, tmuxCommandTimeout)
+		}
 		if exitErr, ok := err.(*exec.ExitError); ok && exitErr.ExitCode() == 1 {
 			return nil // No sessions to clean up
 		}
@@ -195,12 +207,27 @@ func CleanupSessions(cmdExec cmd.Executor) error {
 		log.InfoLog.Printf("cleaning up session: %s", match)
 		// `=` forces an exact session match so a name extracted from `tmux ls`
 		// kills exactly that session and never a prefix-matching sibling (#1006).
-		if err := cmdExec.Run(exec.Command("tmux", "kill-session", "-t", exactTarget(match))); err != nil {
+		//
+		// Bounded by tmuxCommandTimeout (#2099) so one undeletable session cannot
+		// wedge the whole sweep.
+		killCtx, killCancel := tmuxTimeoutContext()
+		killErrRaw := runTmuxBoundedWith(killCtx, cmdExec, "kill-session", "-t", exactTarget(match))
+		killTimedOut := killCtx.Err() != nil
+		killCancel()
+		if killErrRaw != nil {
+			if killTimedOut {
+				// Do NOT fall back to the sessionExists probe on a tripped
+				// deadline: it spawns another tmux command against the same
+				// wedged server and would hang identically, buying nothing (see
+				// tmuxTimeoutContext). Report the wedge and stop.
+				killErr = fmt.Errorf("%w: kill-session %s after %s", ErrTmuxTimeout, match, tmuxCommandTimeout)
+				break
+			}
 			// Idempotent teardown (#967): a session can vanish between the
 			// `tmux ls` above and this kill (TOCTOU). A gone session is the
 			// goal of cleanup, so only a survivor is a real failure.
 			if sessionExists(cmdExec, match) {
-				killErr = fmt.Errorf("failed to kill tmux session %s: %v", match, err)
+				killErr = fmt.Errorf("failed to kill tmux session %s: %v", match, killErrRaw)
 				break
 			}
 		}

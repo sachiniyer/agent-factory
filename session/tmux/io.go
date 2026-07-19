@@ -6,7 +6,6 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
-	"os/exec"
 	"strings"
 
 	"github.com/sachiniyer/agent-factory/log"
@@ -42,9 +41,19 @@ func (m *statusMonitor) hash(s string) []byte {
 // AutoYes (daemon poll) and the trust-prompt dismissal in
 // CheckAndHandleTrustPrompt. A missing session surfaces ErrSessionGone so
 // callers degrade gracefully instead of logging at ERROR (#510).
+//
+// Bounded by tmuxCommandTimeout (#2105): this runs on the daemon's unsupervised
+// per-second poll, which walks instances SEQUENTIALLY, so an unbounded stall here
+// freezes every later instance's status exactly like the capture it accompanies.
+// On a tripped deadline it returns ErrTmuxTimeout without probing ExistsOrUnknown
+// — see tmuxTimeoutContext.
 func (t *TmuxSession) TapEnter() error {
-	cmd := exec.Command("tmux", "send-keys", "-t", exactTarget(t.sanitizedName), "Enter")
-	if err := t.cmdExec.Run(cmd); err != nil {
+	ctx, cancel := tmuxTimeoutContext()
+	defer cancel()
+	if err := t.runTmuxBounded(ctx, "send-keys", "-t", exactTarget(t.sanitizedName), "Enter"); err != nil {
+		if ctx.Err() != nil {
+			return fmt.Errorf("%w: send-keys Enter after %s", ErrTmuxTimeout, tmuxCommandTimeout)
+		}
 		if !t.ExistsOrUnknown() {
 			return fmt.Errorf("%w: send-keys Enter", ErrSessionGone)
 		}
@@ -56,10 +65,15 @@ func (t *TmuxSession) TapEnter() error {
 // TapDAndEnter injects 'D' then Enter (the non-Claude trust/doc-dialog
 // dismissal) via a clientless `send-keys` command. "D" is the literal glyph and
 // "Enter" the named key — semantically identical to the old ptmx write of
-// {0x44, 0x0D}.
+// {0x44, 0x0D}. Bounded by tmuxCommandTimeout for the same reason as TapEnter
+// (#2105): it runs on the same unsupervised daemon poll.
 func (t *TmuxSession) TapDAndEnter() error {
-	cmd := exec.Command("tmux", "send-keys", "-t", exactTarget(t.sanitizedName), "D", "Enter")
-	if err := t.cmdExec.Run(cmd); err != nil {
+	ctx, cancel := tmuxTimeoutContext()
+	defer cancel()
+	if err := t.runTmuxBounded(ctx, "send-keys", "-t", exactTarget(t.sanitizedName), "D", "Enter"); err != nil {
+		if ctx.Err() != nil {
+			return fmt.Errorf("%w: send-keys D Enter after %s", ErrTmuxTimeout, tmuxCommandTimeout)
+		}
 		if !t.ExistsOrUnknown() {
 			return fmt.Errorf("%w: send-keys D Enter", ErrSessionGone)
 		}
@@ -85,9 +99,10 @@ func (t *TmuxSession) HasUpdated() (updated bool, hasPrompt bool, content string
 	// monitorMu guards the monitor pointer (swapped by Restore) and its
 	// dead/prevOutputHash fields (mutated here) against the data race #1528
 	// fixes. The lock is deliberately NOT held across CapturePaneContent: that
-	// runs an unbounded `tmux capture-pane`, and blocking Restore's setMonitor
-	// on a slow/hung tmux server would freeze detach/restore — worse than the
-	// race. So snapshot the live monitor under the lock, release it, run the
+	// runs a `tmux capture-pane` which — even bounded by tmuxCommandTimeout since
+	// #2105 — can still take that full deadline against a wedged server, and
+	// blocking Restore's setMonitor on it would freeze detach/restore for as long
+	// as the bound. So snapshot the live monitor under the lock, release it, run the
 	// tmux command lock-free, then re-acquire only to update the monitor's
 	// fields. Field writes land on the snapshotted monitor: if Restore swaps in
 	// a fresh one meanwhile, the stale monitor is discarded and updating it is a
@@ -156,28 +171,61 @@ func (t *TmuxSession) HasUpdated() (updated bool, hasPrompt bool, content string
 // is the SAFE direction here (#1962): a wedged→"exists" keeps the failure a
 // generic error, so a merely-slow server is never misread as ErrSessionGone —
 // the same asymmetry every send-keys/capture site in this package relies on.
+//
+// It passes context.Background(), so before #2105 it had no deadline whatsoever.
+// This is the daemon's per-second status-poll capture (via HasUpdated), and the
+// daemon polls instances SEQUENTIALLY with no watchdog, so a single wedged server
+// silently froze the status of every instance behind it — liveness tracking,
+// trust-prompt dismissal, AutoYes and the usage-limit detector (#1146) all stop.
+// CapturePaneContentContext now applies tmuxCommandTimeout regardless of the ctx
+// it is handed, which is what bounds this path; a tripped deadline surfaces as
+// ErrTmuxTimeout, never ErrSessionGone.
 func (t *TmuxSession) CapturePaneContent() (string, error) {
 	return t.CapturePaneContentContext(context.Background())
 }
 
-// CapturePaneContentContext is CapturePaneContent bound to ctx: the underlying
-// `tmux capture-pane` is launched with exec.CommandContext, so a cancelled or
-// deadline-exceeded ctx SIGKILLs the capture subprocess instead of letting it run
-// to completion. The readiness poll (task.WaitForReady) uses it so an abandoned
-// create tears down its in-flight capture — no lingering tmux subprocess or
-// goroutine after the caller gives up. On cancellation it returns ctx.Err()
-// directly, skipping the ExistsOrUnknown probe (which would spawn another tmux
-// subprocess) since the failure cause is the cancel, not a dead session.
+// CapturePaneContentContext is CapturePaneContent bound to ctx AND to the
+// package's own tmuxCommandTimeout, whichever fires first.
+//
+// The caller's ctx is honored as before: the readiness poll (task.WaitForReady)
+// passes a cancellable one so an abandoned create tears down its in-flight
+// capture, and cancellation returns ctx.Err() directly, skipping the
+// ExistsOrUnknown probe (which would spawn another tmux subprocess) since the
+// failure cause is the cancel, not a dead session.
+//
+// #2105 added the second, independent bound and moved the command onto
+// boundedTmuxCommand. Both halves were needed:
+//
+//   - A caller-supplied ctx is not a bound at all when the caller supplies
+//     context.Background(), which is exactly what CapturePaneContent does on the
+//     daemon's per-second status poll. Deriving our own timeout from ctx means
+//     that path is bounded no matter what the caller passes, while a caller with
+//     a SHORTER deadline still wins.
+//   - Plain exec.CommandContext sets no WaitDelay and kills only the direct
+//     process, so a child holding the inherited stdout pipe keeps Output()
+//     blocked on pipe EOF long after tmux is SIGKILLed — the deadline fires and
+//     buys nothing. boundedTmuxCommand's process-group kill plus tmuxWaitDelay is
+//     what actually makes a deadline bite.
+//
+// The two failures are reported distinctly and that distinction matters: a caller
+// cancel is a normal abandon (ctx.Err()), while a tripped internal deadline means
+// the SERVER is wedged and the session's state is UNKNOWN (ErrTmuxTimeout, never
+// ErrSessionGone — callers tear sessions down on "gone"). The parent is checked
+// first so a cancel racing the deadline is attributed to the caller.
 func (t *TmuxSession) CapturePaneContentContext(ctx context.Context) (string, error) {
 	// Add -e flag to preserve escape sequences (ANSI color codes). `=` forces
 	// an exact session match: without it tmux would prefix-match a surviving
 	// sibling session (e.g. the `__shell` tab) when the agent session has
 	// died, capturing the wrong pane and masking the dead agent (#1006).
-	cmd := exec.CommandContext(ctx, "tmux", "capture-pane", "-p", "-e", "-J", "-t", exactTarget(t.sanitizedName))
-	output, err := t.cmdExec.Output(cmd)
+	bctx, cancel := context.WithTimeout(ctx, tmuxCommandTimeout)
+	defer cancel()
+	output, err := t.outputTmuxBounded(bctx, "capture-pane", "-p", "-e", "-J", "-t", exactTarget(t.sanitizedName))
 	if err != nil {
 		if ctx.Err() != nil {
 			return "", ctx.Err()
+		}
+		if bctx.Err() != nil {
+			return "", fmt.Errorf("%w: capture-pane after %s", ErrTmuxTimeout, tmuxCommandTimeout)
 		}
 		if !t.ExistsOrUnknown() {
 			return "", fmt.Errorf("%w: capture-pane: %v", ErrSessionGone, err)
@@ -249,12 +297,20 @@ func (t *TmuxSession) CursorPosition() (row, col int, err error) {
 // CapturePaneContentWithOptions captures the pane content with additional options
 // start and end specify the starting and ending line numbers (use "-" for the start/end of history).
 // Wraps ErrSessionGone when the session has vanished, mirroring CapturePaneContent.
+//
+// Bounded by tmuxCommandTimeout (#2099): it was the last capture-pane read in the
+// package running on bare exec.Command. On a tripped deadline it returns
+// ErrTmuxTimeout without probing ExistsOrUnknown — see tmuxTimeoutContext.
 func (t *TmuxSession) CapturePaneContentWithOptions(start, end string) (string, error) {
 	// Add -e flag to preserve escape sequences (ANSI color codes). `=` forces
 	// an exact session match, mirroring CapturePaneContent (#1006).
-	cmd := exec.Command("tmux", "capture-pane", "-p", "-e", "-J", "-S", start, "-E", end, "-t", exactTarget(t.sanitizedName))
-	output, err := t.cmdExec.Output(cmd)
+	ctx, cancel := tmuxTimeoutContext()
+	defer cancel()
+	output, err := t.outputTmuxBounded(ctx, "capture-pane", "-p", "-e", "-J", "-S", start, "-E", end, "-t", exactTarget(t.sanitizedName))
 	if err != nil {
+		if ctx.Err() != nil {
+			return "", fmt.Errorf("%w: capture-pane options after %s", ErrTmuxTimeout, tmuxCommandTimeout)
+		}
 		if !t.ExistsOrUnknown() {
 			return "", fmt.Errorf("%w: capture-pane: %v", ErrSessionGone, err)
 		}
