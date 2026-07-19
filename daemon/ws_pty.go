@@ -75,6 +75,26 @@ func (cs *controlServer) streamHandler(w http.ResponseWriter, r *http.Request) {
 		writeHTTPError(w, r, http.StatusServiceUnavailable, fmt.Errorf("daemon has no session manager"))
 		return
 	}
+	// Refuse during warm-up, BEFORE anything reads session state (#2109) — the same
+	// gate every state-dependent RPC goes through, and the one webTabProxyHandler
+	// was brought under in #1878 for this identical reason: an HTTP route is not
+	// net/rpc, so it slips the gating by default.
+	//
+	// The listener binds long before the restore finishes (#829), and a stale client
+	// reconnects the instant the port answers. Resolution runs refreshLocked, which
+	// builds instances off disk; RestoreInstances then rebuilds that map wholesale,
+	// so the instance already handed to this client stops being the tracked one —
+	// requireManagerReady's own comment names it, "throwaway instances from disk
+	// that the restore then orphans".
+	//
+	// It has to fire BEFORE websocket.Accept. Past the upgrade the only refusal
+	// available is a close frame, which a client reads as a stream that DROPPED and
+	// handles on an entirely different path; a plain 503 is a retry it already
+	// understands, and matches every other pre-upgrade error on this route.
+	if err := cs.requireManagerReady(); err != nil {
+		writeHTTPError(w, r, http.StatusServiceUnavailable, err)
+		return
+	}
 	id := r.PathValue("id")
 	repoID := r.URL.Query().Get("repo_id")
 	since, err := parseSince(r.URL.Query().Get("since"))
@@ -398,6 +418,15 @@ type streamInfoResponse struct {
 func (cs *controlServer) streamInfoHandler(w http.ResponseWriter, r *http.Request) {
 	if cs.manager == nil {
 		writeHTTPError(w, r, http.StatusServiceUnavailable, fmt.Errorf("daemon has no session manager"))
+		return
+	}
+	// Same warm-up gate as streamHandler (#2109), and needed for the same reason:
+	// this route resolves the session through the very code path that builds
+	// instances off disk, so an ungated call during the restore window orphans what
+	// it just resolved. Answering the stream's ADDRESS is not a lesser read — it is
+	// the call a client makes immediately before dialing the stream itself.
+	if err := cs.requireManagerReady(); err != nil {
+		writeHTTPError(w, r, http.StatusServiceUnavailable, err)
 		return
 	}
 	id := r.PathValue("id")

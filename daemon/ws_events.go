@@ -95,6 +95,13 @@ func (m *Manager) publishEvent(t agentproto.EventType, payload any) {
 
 // eventsHandler upgrades GET /v1/events to a WebSocket and streams state-change
 // events to the client until it disconnects.
+//
+// Deliberately NOT gated on requireManagerReady, unlike the stream routes (#2109)
+// and the web-tab proxy (#1878): it resolves no session and reads no instance
+// state — it only subscribes to the hub — so it cannot build an instance off disk
+// for the restore to orphan, which is the whole hazard that gate exists for. A
+// client that connects mid-warm-up simply starts receiving events as the restore
+// publishes them, which is what a client watching a daemon come up wants.
 func (cs *controlServer) eventsHandler(w http.ResponseWriter, r *http.Request) {
 	if cs.manager == nil || cs.manager.events == nil {
 		writeHTTPError(w, r, http.StatusServiceUnavailable, fmt.Errorf("daemon has no events hub"))
