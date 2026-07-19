@@ -77,11 +77,11 @@ cannot make. Everything else is read out of the code at test time.
 
 A verb-level check alone is not enough, and that is not a theory — it is how
 [#1948](https://github.com/sachiniyer/agent-factory/issues/1948) got missed.
-`af sessions preview` exists, so "preview a session" looked like parity. But
-`PreviewRequest` carries `Tab`, `TabID`, and `Full`; the TUI sends all three and
-the CLI sends none, so the CLI can only ever see tab 0. The verb was present and
-the **options** were not. It was found by someone using the product, not by this
-check.
+`af sessions preview` existed, so "preview a session" looked like parity. But
+`PreviewRequest` carries `Tab`, `TabID`, and `Full`; the TUI sent all three and
+the CLI sent none, so the CLI could only ever see tab 0. The verb was present
+and the **options** were not. It was found by someone using the product, not by
+this check (and is now fixed — see the gap list below).
 
 So the check works at four levels, each blind to the one below it:
 
@@ -93,13 +93,14 @@ So the check works at four levels, each blind to the one below it:
 | **Identifier** | is the string we SHOW the string we ACCEPT? | the display rule (`session.TabLabel`) vs the resolver (`session.TabMatches`) |
 
 The option level is where the interesting gaps live, because they hide behind a
-verb that looks present. Three of the same shape so far — a field the daemon
+verb that looks present. Two of the same shape so far — a field the daemon
 accepts that a surface never sends:
 
 - [#1933](https://github.com/sachiniyer/agent-factory/issues/1933) — the TUI
   never sets `CreateSessionRequest.Backend`
 - [#1948](https://github.com/sachiniyer/agent-factory/issues/1948) — the CLI
-  never sets `PreviewRequest.Tab` / `TabID` / `Full`
+  never set `PreviewRequest.Tab` / `TabID` / `Full` (now closed; the fixture
+  stays, repointed, in the honesty table below)
 
 The **enum** level is the newest and the easiest to miss, because the other two
 both pass while it drifts. [#1970](https://github.com/sachiniyer/agent-factory/issues/1970)
@@ -230,7 +231,7 @@ know are real, filed, and field-level — as fixtures, not aspirations:
 | cobra's lazy surface — `af completion bash`, `af help`, `--help`, `--version` | the tree is walked **after** cobra finishes building it |
 | [#1933](https://github.com/sachiniyer/agent-factory/issues/1933) — the web now **does** send `CreateSession.backend` (#1968 landed), via a `const body` variable | the web body parser, incl. variable resolution |
 | #1933 (TUI half) — `sessionStartRequest` has no `Backend` | the Go AST walk |
-| [#1948](https://github.com/sachiniyer/agent-factory/issues/1948) — the CLI never sets `Preview.Tab/TabID/Full` | the AST **on an internal route**, invisible to the public catalog |
+| [#1948](https://github.com/sachiniyer/agent-factory/issues/1948) — closed; the CLI now sets `Preview.Tab/TabID/TabName/Full`, so the fixture is repointed to track that the walk still sees both the CLI's usage and the TUI's non-use of `tab_name` | the AST **on an internal route**, invisible to the public catalog |
 | [#1935](https://github.com/sachiniyer/agent-factory/issues/1935) — the web's `TaskUpdate` omits `project_path` | nested recursion **behind a wrapper route**, plus the TS-interface read and the CLI's field-by-field assignment walk |
 
 Each fixture asserts in **both** directions: that the known gap is seen, *and*
