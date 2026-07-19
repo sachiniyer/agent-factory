@@ -12,7 +12,23 @@ import (
 func (i *Instance) ToInstanceData() InstanceData {
 	i.mu.RLock()
 	defer i.mu.RUnlock()
+	return i.toInstanceDataLocked()
+}
 
+// ToInstanceDataWithEpoch returns the serializable form together with the state
+// epoch it was read at, both under ONE hold of i.mu (#2135). A writer that
+// persists what it read uses it so the epoch it re-checks before the write
+// provably belongs to the payload it is about to write — reading the two
+// separately would leave a window in which the state moves between them, which is
+// the very thing the epoch exists to detect.
+func (i *Instance) ToInstanceDataWithEpoch() (InstanceData, uint64) {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	return i.toInstanceDataLocked(), i.stateEpoch
+}
+
+// toInstanceDataLocked is the shared body. Caller holds i.mu (read or write).
+func (i *Instance) toInstanceDataLocked() InstanceData {
 	data := InstanceData{
 		ID:     i.ID,
 		TaskID: i.TaskID,
