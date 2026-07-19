@@ -390,7 +390,7 @@ func TestDefaultConfig(t *testing.T) {
 
 	t.Run("bash alias with flags lands in override unquoted", func(t *testing.T) {
 		// An alias value is already shell syntax: it must reach the
-		// override verbatim, NOT wrapped in quotes by shellQuotePath as a
+		// override verbatim, NOT wrapped in quotes by ShellQuotePath as a
 		// single "path" (#688).
 		bashPath := requireBash(t)
 		homeDir := t.TempDir()

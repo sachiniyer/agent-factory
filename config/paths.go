@@ -29,12 +29,16 @@ func prettyHomePath(absPath string) string {
 	return absPath
 }
 
-// shellQuotePath wraps a non-empty filesystem path in single quotes, escaping
+// ShellQuotePath wraps a non-empty filesystem path in single quotes, escaping
 // any embedded apostrophes with the standard POSIX single-quote escape idiom.
 // Used by DefaultConfig when persisting auto-detected claude paths into
 // ProgramOverrides — the value is passed to `sh -c` by tmux, so shell
 // metacharacters in paths must never be left for the shell to interpret.
-func shellQuotePath(path string) string {
+//
+// Exported for the other half of that rule: any path AF prints inside a command
+// it expects the user to PASTE must be quoted the same way (#1978), or a path
+// with a space silently becomes two arguments.
+func ShellQuotePath(path string) string {
 	if path == "" {
 		return path
 	}

@@ -405,16 +405,7 @@ func (r *cleanupRun) registered() (yes bool, ok bool) {
 	if err != nil {
 		return false, false
 	}
-	target := normalizeWorktreePath(r.g.worktreePath)
-	for _, line := range strings.Split(output, "\n") {
-		if !strings.HasPrefix(line, "worktree ") {
-			continue
-		}
-		if normalizeWorktreePath(strings.TrimPrefix(line, "worktree ")) == target {
-			return true, true
-		}
-	}
-	return false, true
+	return worktreeListed(output, r.g.worktreePath), true
 }
 
 // state derives the run's outcome. Settled ONLY if nothing tripped a deadline.
@@ -558,28 +549,17 @@ func (g *GitWorktree) Cleanup() (CleanupState, error) {
 // read as "not ours" (#1917 round 4).
 func (r *cleanupRun) shouldRemoveWorktreeDir(removeErr error) bool {
 	registered, ok := r.registered()
-	if !ok {
-		// The probe could not be read — but WHY matters, and conflating the two
-		// reasons was itself a bug (found reviewing this PR's own diff).
-		if r.unknown {
-			// It TIMED OUT. Never act on a verdict we could not obtain, and never
-			// re-enter the unbounded delete on a filesystem that just stalled. The run
-			// is already unknown, so the record is retained and a retry can finish.
-			return false
-		}
-		// It ANSWERED with an error (a corrupted repo, not a stall). Nothing is
-		// unknown here, so refusing would report a SETTLED cleanup while leaving the
-		// directory on disk — the caller would then drop the record and orphan it,
-		// which is the outcome this whole PR exists to prevent. Fall back to the
-		// conservative #726 string gate, exactly as before this PR (#719/#726).
-		return strings.Contains(removeErr.Error(), "validation failed")
+	if !ok && r.unknown {
+		// The probe TIMED OUT. Never act on a verdict we could not obtain, and never
+		// re-enter the unbounded delete on a filesystem that just stalled. The run
+		// is already unknown, so the record is retained and a retry can finish.
+		//
+		// This branch is the RUN's, not the rule's — which is why it lives here and
+		// the rule itself is the shared function below. Conflating a stall with an
+		// error was itself a bug (found reviewing #1917's own diff).
+		return false
 	}
-	if !registered {
-		return true
-	}
-	// Still registered: only the conservative #726 corrupted-pointer gate may
-	// delete.
-	return strings.Contains(removeErr.Error(), "validation failed")
+	return mayDeleteWorktreeDir(registered, ok, removeErr)
 }
 
 // isWorktreeRegistered reports whether git still lists g.worktreePath as a
@@ -594,27 +574,7 @@ func (g *GitWorktree) isWorktreeRegistered() (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	target := normalizeWorktreePath(g.worktreePath)
-	for _, line := range strings.Split(output, "\n") {
-		if !strings.HasPrefix(line, "worktree ") {
-			continue
-		}
-		if normalizeWorktreePath(strings.TrimPrefix(line, "worktree ")) == target {
-			return true, nil
-		}
-	}
-	return false, nil
-}
-
-// normalizeWorktreePath cleans the path and resolves symlinks (best-effort)
-// so `worktree list` output compares equal to a stored path even when one
-// side went through a symlinked parent (e.g. /tmp -> /private/tmp on macOS).
-func normalizeWorktreePath(p string) string {
-	p = filepath.Clean(p)
-	if resolved, err := filepath.EvalSymlinks(p); err == nil {
-		return resolved
-	}
-	return p
+	return worktreeListed(output, g.worktreePath), nil
 }
 
 var (
@@ -730,64 +690,6 @@ func pathAtOrUnder(root, p string) bool {
 		return false
 	}
 	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
-}
-
-// RemoveWorktreeDir removes a SINGLE worktree directory that AF created for a
-// session in the repo at repoRoot, and prunes the registry. It deletes NO
-// branch. It reports whether a directory was actually removed.
-//
-// This is the factory reset's only worktree-removal path (`af reset`, #1736):
-// reset must remove ONLY the worktrees AF created — identified by the paths in
-// AF's own session records — and NEVER the user's manually-created linked
-// worktrees, so there is deliberately no per-repo bulk pass. It also refuses to
-// touch the main worktree: a worktreePath that resolves to repoRoot (an
-// external `--here` session's tree) is a no-op. Branch deletion is handled
-// separately, gated on BranchCreatedByUs, so this never removes a branch either.
-//
-// A missing directory is not an error (idempotent: a second reset is a clean
-// no-op); the registry is still pruned so a stale entry cannot later block a
-// `git branch -D`.
-func RemoveWorktreeDir(repoRoot, worktreePath string) (bool, error) {
-	if repoRoot == "" || worktreePath == "" {
-		return false, nil
-	}
-	// Never remove the main repo/working tree (e.g. an external --here session
-	// whose worktree path IS the user's repo).
-	if filepath.Clean(repoRoot) == filepath.Clean(worktreePath) {
-		return false, nil
-	}
-
-	// If the directory is already gone, just prune any stale registry entry so a
-	// later branch delete isn't blocked, and report nothing removed.
-	if _, err := os.Stat(worktreePath); os.IsNotExist(err) {
-		_ = exec.Command("git", "-C", repoRoot, "worktree", "prune").Run()
-		return false, nil
-	}
-
-	// Reap any process still writing inside the tree before removing it (#2025) —
-	// the same race GitWorktree.Cleanup guards: a survivor re-creating files
-	// defeats both the git remove and the os.RemoveAll fallback. worktreePath here
-	// is always an AF-created session worktree (reset passes AF's own record paths
-	// and the main tree is refused above), so the cwd-scoped reap only ever hits
-	// this session's processes.
-	reapWorktreeWriters(worktreePath)
-
-	// Remove the worktree FIRST (git refuses to delete a branch checked out in a
-	// worktree). Fall back to a manual directory removal if git can't (e.g. the
-	// worktree was relocated to the archive and is no longer registered).
-	if err := exec.Command("git", "-C", repoRoot, "worktree", "remove", "-f", worktreePath).Run(); err != nil {
-		log.ErrorLog.Printf("failed to remove worktree %s: %v", worktreePath, err)
-		if rmErr := os.RemoveAll(worktreePath); rmErr != nil {
-			return false, fmt.Errorf("remove worktree dir %s: %w", worktreePath, rmErr)
-		}
-	}
-
-	// Prune stale metadata so a subsequent `git branch -D` for this session's
-	// branch isn't blocked by a lingering worktree registration.
-	if err := exec.Command("git", "-C", repoRoot, "worktree", "prune").Run(); err != nil {
-		log.ErrorLog.Printf("failed to prune worktrees for %s: %v", repoRoot, err)
-	}
-	return true, nil
 }
 
 // CleanupWorktreesForRepo removes all worktrees and their associated branches

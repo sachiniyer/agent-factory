@@ -462,7 +462,7 @@ func DefaultConfig() *Config {
 		// space/apostrophe quoting treatment (#569).
 		command := claudePath
 		if _, statErr := os.Stat(claudePath); statErr == nil {
-			command = shellQuotePath(claudePath)
+			command = ShellQuotePath(claudePath)
 		}
 		cfg.ProgramOverrides = map[string]string{
 			tmux.ProgramClaude: command + " --dangerously-skip-permissions",
