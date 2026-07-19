@@ -347,6 +347,126 @@ func TestSwitchProjectClearsHooksWhenConfigResolveFails(t *testing.T) {
 	assert.Empty(t, h.hooksPane.GetCommands(), "stale hooks from the previous project must be cleared, not carried over")
 }
 
+// writeInRepoConfig writes <root>/.agent-factory/config.toml with body.
+func writeInRepoConfig(t *testing.T, root, body string) {
+	t.Helper()
+	dir := filepath.Join(root, config.InRepoConfigDirName)
+	require.NoError(t, os.MkdirAll(dir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "config.toml"), []byte(body), 0o644))
+}
+
+// TestSwitchProjectResetsProgramWhenConfigResolveFails is the #2138 guarantee,
+// the m.program half of the #1686 hooks reset above: when ResolveConfig fails
+// for the incoming project (here, a corrupt IN-REPO config), the switch must
+// reset m.program to the global default rather than leave the OUTGOING
+// project's program in place. Session creation is protected by
+// preflightSessionCreate, which re-resolves and blocks; task creation is not —
+// it falls back to m.program and PERSISTS it into tasks.json, so a stale value
+// silently runs the new project's tasks under the previous project's agent.
+func TestSwitchProjectResetsProgramWhenConfigResolveFails(t *testing.T) {
+	h := newTestHome(t)
+	h.snapshotFetcher = func(string) (daemon.SnapshotResponse, error) {
+		return daemon.SnapshotResponse{}, nil
+	}
+
+	globalDefault := h.appConfig.DefaultProgram
+	require.NotEmpty(t, globalDefault, "precondition: the global config carries a default program")
+
+	// The outgoing project (A) set a non-global program, and its hooks are in
+	// the pane — both are project-scoped state that must not survive the switch.
+	h.program = "codex"
+	require.NotEqual(t, globalDefault, h.program, "precondition: the outgoing program differs from the global default")
+	h.hooksPane.SetCommands([]string{"echo 'project-a-hook'"})
+	h.store.SetHookCount(1)
+
+	// The incoming project (B) is a real git repo whose in-repo config cannot be
+	// parsed. Only B's config is corrupt: the global config stays valid, which is
+	// what makes "reset to the global default" a well-defined target.
+	projectBRoot := initTestGitRepo(t)
+	writeInRepoConfig(t, projectBRoot, "invalid toml {{{\n[broken")
+	repoB := &config.RepoContext{Root: projectBRoot, ID: config.RepoIDFromRoot(projectBRoot)}
+
+	_, err := config.ResolveConfig(projectBRoot)
+	require.Error(t, err, "precondition: ResolveConfig must fail with the corrupt in-repo config")
+	global, err := config.LoadConfig()
+	require.NoError(t, err, "precondition: the global config must still load")
+	require.Equal(t, globalDefault, global.DefaultProgram)
+
+	h.switchProject(repoB)
+
+	assert.Equal(t, projectBRoot, h.repoRoot, "repoRoot must be re-scoped to the new project")
+	assert.Equal(t, globalDefault, h.program,
+		"the outgoing project's program must be reset to the global default, not carried over (#2138)")
+	assert.Empty(t, h.hooksPane.GetCommands(), "hooks must still be cleared on a failed resolve (#1686)")
+	assert.Equal(t, 0, h.store.GetHookCount(), "the hook count must still be cleared on a failed resolve (#1686)")
+}
+
+// TestSwitchProjectAppliesProjectProgramWhenConfigResolves guards the success
+// branch the #2138 reset sits beside: a project whose in-repo config sets
+// default_program still wins over both the outgoing program and the global
+// default.
+func TestSwitchProjectAppliesProjectProgramWhenConfigResolves(t *testing.T) {
+	h := newTestHome(t)
+	h.snapshotFetcher = func(string) (daemon.SnapshotResponse, error) {
+		return daemon.SnapshotResponse{}, nil
+	}
+	h.program = "codex"
+
+	projectBRoot := initTestGitRepo(t)
+	writeInRepoConfig(t, projectBRoot, "default_program = \"aider\"\n")
+	repoB := &config.RepoContext{Root: projectBRoot, ID: config.RepoIDFromRoot(projectBRoot)}
+
+	h.switchProject(repoB)
+
+	assert.Equal(t, "aider", h.program, "the incoming project's default_program must win on a successful resolve")
+}
+
+// TestTaskCreateAfterFailedResolveUsesGlobalProgram is the user-visible half of
+// #2138: the leaked program was not just a field, it was PERSISTED. Creating a
+// task in a project whose config failed to resolve must record the global
+// default program, not the previous project's.
+func TestTaskCreateAfterFailedResolveUsesGlobalProgram(t *testing.T) {
+	h := newTestHome(t)
+	h.snapshotFetcher = func(string) (daemon.SnapshotResponse, error) {
+		return daemon.SnapshotResponse{}, nil
+	}
+	globalDefault := h.appConfig.DefaultProgram
+	h.program = "codex"
+
+	projectBRoot := initTestGitRepo(t)
+	writeInRepoConfig(t, projectBRoot, "invalid toml {{{\n[broken")
+	repoB := &config.RepoContext{Root: projectBRoot, ID: config.RepoIDFromRoot(projectBRoot)}
+	_, err := config.ResolveConfig(projectBRoot)
+	require.Error(t, err, "precondition: ResolveConfig must fail with the corrupt in-repo config")
+
+	h.switchProject(repoB)
+
+	// Drive the inline create form the way a user would: the program field is
+	// left on its default option, which is exactly the case that falls back to
+	// m.program in handleTaskCreate.
+	tp := h.automations.TaskPane()
+	_, _ = h.showTasksOverlay()
+	require.Equal(t, stateTasks, h.state)
+	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("n")})
+	require.True(t, tp.IsCreating(), "'n' must open the inline create form")
+	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("nightly")})
+	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyTab}) // -> trigger selector (cron)
+	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyTab}) // -> schedule picker (valid default)
+	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyTab}) // -> prompt
+	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("do the thing")})
+	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyTab}) // -> target session
+	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyTab}) // -> path
+	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyTab}) // -> program (default option)
+	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyTab}) // -> save button
+	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyEnter})
+
+	saved, err := task.LoadTasks()
+	require.NoError(t, err)
+	require.Len(t, saved, 1, "the create must have reached disk")
+	assert.Equal(t, globalDefault, saved[0].Program,
+		"a task created after a failed resolve must carry the global default program, not the previous project's (#2138)")
+}
+
 // TestBuildProjectListUnionsSourcesWithCounts: the picker list unions the
 // cross-repo session snapshot (with counts), the root_agents opt-ins, and the
 // active project, deduped by repo root.

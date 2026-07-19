@@ -424,6 +424,16 @@ func (m *home) switchProject(repo *config.RepoContext) (tea.Model, tea.Cmd) {
 		// this only matters on an in-place switch.
 		m.store.SetHookCount(0)
 		m.hooksPane.SetCommands(nil)
+		// Reset the program for the same reason, and to the same target the
+		// success branch would land on for a project with no override: the global
+		// default (#2138). Leaving it alone kept the OUTGOING project's program,
+		// and task creation falls back to m.program without re-resolving config —
+		// so the stale value was PERSISTED into tasks.json and the new project's
+		// tasks ran under the previous project's agent. Session creation is
+		// already covered: preflightSessionCreate re-resolves and blocks.
+		if m.appConfig != nil {
+			m.program = m.appConfig.DefaultProgram
+		}
 	}
 
 	// Re-prime the projection from the snapshot fetched above (scoped to the new
