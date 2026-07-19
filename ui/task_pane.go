@@ -13,11 +13,17 @@ import (
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	xansi "github.com/charmbracelet/x/ansi"
 )
 
 // programDefaultLabel is the selector option that resolves to an empty Program
 // string (the daemon then falls back to the user's configured default_program).
 const programDefaultLabel = "(use config default)"
+
+// watchRunNowRefusal explains why "run now" is unavailable on a watch task.
+// Both surfaces that accept r (the list and the editor) report it, so it lives
+// in one place rather than drifting between them.
+const watchRunNowRefusal = "watch tasks run on their watch command's output, not on manual trigger"
 
 // taskPlaceholderStyle renders form placeholders faint so an example (the
 // cron "e.g. 0 9 * * 1-5") can never be mistaken for a typed value.
@@ -76,7 +82,14 @@ type TaskPane struct {
 	editProgramIdx     int
 	editError          string // last validation error shown to the user
 	editErrorField     int    // focus stop the error is rendered under (-1 = none)
-	focusIndex         int
+	// listNotice is the list-mode counterpart of editError: edit mode hangs a
+	// validation message under the offending field, but list mode has no
+	// fields, so a refused action (r on a watch task) reported nothing and the
+	// key looked dead (#2137). The notice renders just above the hint row and
+	// clears on the next keypress, so it reads as feedback for one action
+	// rather than a stale error.
+	listNotice string
+	focusIndex int
 	// formScroll is the edit form's line offset when the pane is shorter than
 	// the rendered form (#1098): renderEditMode windows the form so the
 	// focused field stays in view instead of clipping off the top.
@@ -196,6 +209,7 @@ func (s *TaskPane) initForm(tsk *task.Task, defaultPath string) {
 	s.focusIndex = taskFocusName
 	s.editError = ""
 	s.editErrorField = -1
+	s.listNotice = ""
 	s.formScroll = 0
 }
 
@@ -315,6 +329,8 @@ func (s *TaskPane) ScrollUp() {
 	if s.editing || s.creating {
 		return
 	}
+	// Moving the selection retires a notice about the row being left behind.
+	s.listNotice = ""
 	if s.selectedIdx > 0 {
 		s.selectedIdx--
 	}
@@ -325,6 +341,7 @@ func (s *TaskPane) ScrollDown() {
 	if s.editing || s.creating {
 		return
 	}
+	s.listNotice = ""
 	if s.selectedIdx < len(s.tasks)-1 {
 		s.selectedIdx++
 	}
@@ -335,6 +352,11 @@ func (s *TaskPane) HandleKeyPress(msg tea.KeyMsg) bool {
 	if !s.hasFocus {
 		return false
 	}
+	// The notice is feedback for the key that produced it; every later key is a
+	// new action, so drop it up front and let this key's handler set its own.
+	// Clearing here (rather than in handleNormalMode) also means a notice set
+	// inside the editor can't follow the user back out to the list.
+	s.listNotice = ""
 	if s.editing || s.creating {
 		return s.handleEditMode(msg)
 	}
@@ -425,11 +447,14 @@ func (s *TaskPane) runSelectedTask() {
 	}
 	// Watch tasks fire from their watch command's stdout; a manual trigger has
 	// no event line to render the prompt, so the daemon refuses them (RunTask).
-	// Don't queue a doomed run — surface the reason inline (shown in edit mode)
-	// and keep the "run now" affordance out of the hints for watch tasks (#1758).
+	// Don't queue a doomed run — surface the reason on whichever surface the
+	// key came from (edit mode hangs it under the trigger selector, list mode
+	// renders it above the hint row, #2137) and keep the "run now" affordance
+	// out of the hints for watch tasks (#1758).
 	if s.tasks[s.selectedIdx].IsWatch() {
-		s.editError = "watch tasks run on their watch command's output, not on manual trigger"
+		s.editError = watchRunNowRefusal
 		s.editErrorField = taskFocusTrigger
+		s.listNotice = watchRunNowRefusal
 		return
 	}
 	s.pendingTrigger = true
@@ -590,6 +615,33 @@ func (s *TaskPane) renderListMode() string {
 	}
 
 	b.WriteString("\n")
+
+	// A refused action reports directly above the hint row, styled like the
+	// editor's inline field error so the two surfaces read the same. It is
+	// word-wrapped rather than ellipsized: the consequential half of this
+	// message is its tail, and a clipped tail reads as no explanation at all
+	// (#1973). pinnedFooter keeps the notice on screen with the hint when a
+	// long task list would otherwise scroll it off.
+	pinnedFooter := 1
+	if s.listNotice != "" {
+		noticeStyle := lipgloss.NewStyle().Foreground(t.Error).Bold(true)
+		noticeWidth := s.width - 4
+		if noticeWidth < 1 {
+			noticeWidth = 1
+		}
+		for i, line := range strings.Split(xansi.Wrap(s.listNotice, noticeWidth, ""), "\n") {
+			// The "! " marker leads the first line; continuations align under
+			// the text rather than under the marker.
+			indent := "    "
+			if i == 0 {
+				indent = "  ! "
+			}
+			b.WriteString(noticeStyle.Render(fitLine(indent+line, s.width)))
+			b.WriteString("\n")
+			pinnedFooter++
+		}
+	}
+
 	if s.hasFocus {
 		hint := "↑/↓ select • n new • enter edit • r run now • x toggle • D delete • esc back"
 		short := "r run now • ↑/↓ • n new • enter • esc"
@@ -607,7 +659,7 @@ func (s *TaskPane) renderListMode() string {
 		b.WriteString(hintStyle.Render(fitLine("enter to focus and edit tasks", s.width)))
 	}
 
-	return fitBlockToSize(b.String(), s.width, s.height, 1)
+	return fitBlockToSize(b.String(), s.width, s.height, pinnedFooter)
 }
 
 // promptSnippet collapses a prompt to a single line truncated to maxWidth,
