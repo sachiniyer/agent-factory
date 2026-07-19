@@ -31,8 +31,9 @@ audit (#1937) found gaps pointing in every direction:
   (`app/session_control.go:106`) and its only construction site never populates
   it — the plumbing is finished and simply never fed.
 - **The CLI is behind both UIs** on limit-retry: resuming a usage-limit-blocked
-  session is TUI-only, and the CLI has no verb for it at all
-  ([#1934](https://github.com/sachiniyer/agent-factory/issues/1934)).
+  session is TUI- and web-only (the web got a Retry button in
+  [#1934](https://github.com/sachiniyer/agent-factory/issues/1934)), and the CLI
+  has no verb for it at all.
 - **Only the CLI** can choose a backend per session
   ([#1933](https://github.com/sachiniyer/agent-factory/issues/1933)).
 
