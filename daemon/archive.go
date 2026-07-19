@@ -14,6 +14,16 @@ import (
 	sessiongit "github.com/sachiniyer/agent-factory/session/git"
 )
 
+// ErrAlreadyArchived is returned by ArchiveSession when its target is already in
+// the archived state. It is a SENTINEL — not just prose — because "already
+// archived" is the one archive rejection that means the caller's goal is already
+// met: a bulk caller that just wants the session archived (DeleteProject, #2108)
+// must be able to tell it apart from a genuine failure (busy, op in flight,
+// teardown error) with errors.Is, and count it as success instead of reporting a
+// misleading partial failure. Only in-process callers can match it; over the
+// control RPC it degrades to its (unchanged) message.
+var ErrAlreadyArchived = errors.New("already archived")
+
 // ArchiveSession archives a session (#1028): it tears down the session's tmux
 // (agent + shell/process tabs; web tabs have none and are preserved with their
 // URLs, #1809) while PRESERVING the record, relocates the
@@ -63,7 +73,12 @@ func (m *Manager) ArchiveSession(req ArchiveSessionRequest) (string, session.Ins
 		return "", session.InstanceData{}, fmt.Errorf("cannot archive an in-place/external worktree session %q — archive relocates the worktree, which isn't supported for in-place sessions", req.Title)
 	}
 	if instance.GetLiveness() == session.LiveArchived {
-		return "", session.InstanceData{}, fmt.Errorf("session %q is already archived", req.Title)
+		// Sentinel-wrapped, and returned WITH the resolved identity: a caller that
+		// only wants the session archived (DeleteProject, #2108) can treat this as
+		// idempotent success and still report the right {id, title}, while a caller
+		// archiving one named session — the CLI/TUI verbs — keeps the same message
+		// and the same failure it has always shown.
+		return "", resolved, fmt.Errorf("session %q is %w", req.Title, ErrAlreadyArchived)
 	}
 	if instance.GetInFlightOp() != session.OpNone {
 		return "", session.InstanceData{}, fmt.Errorf("session %q is busy (%v); try again in a moment", req.Title, instance.GetStatus())

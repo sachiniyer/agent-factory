@@ -172,9 +172,17 @@ func TestArchiveSession_RejectsAlreadyArchived(t *testing.T) {
 	inst, _ := registerArchivable(t, manager, repoID, repoPath, "worker")
 	inst.SetStatusForTest(session.Archived)
 
-	_, _, err := manager.ArchiveSession(ArchiveSessionRequest{Title: "worker", RepoID: repoID})
+	_, archived, err := manager.ArchiveSession(ArchiveSessionRequest{Title: "worker", RepoID: repoID})
 	require.Error(t, err)
+	// The message single-session callers (CLI/TUI, and every caller across the
+	// control RPC, where the sentinel cannot survive) show is unchanged...
 	assert.Contains(t, err.Error(), "already archived")
+	// ...and it is matchable as ErrAlreadyArchived, which is what lets an in-process
+	// bulk caller treat it as idempotent success (#2108). The resolved identity
+	// comes back with it so that caller can report the row it skipped.
+	assert.ErrorIs(t, err, ErrAlreadyArchived)
+	assert.Equal(t, "worker", archived.Title)
+	assert.Equal(t, inst.ID, archived.ID)
 }
 
 // TestArchiveSession_RejectsWhenOperationInFlight: an archive is refused while
