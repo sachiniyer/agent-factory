@@ -88,10 +88,26 @@ func (k transitionKind) String() string {
 
 // TransitionEvent is a lifecycle event handed to Instance.Transition. Construct
 // one with the exported constructors below; lv is meaningful only for
-// ObserveLiveness.
+// ObserveLiveness. epoch/epochScoped are set only by AtEpoch.
 type TransitionEvent struct {
-	kind transitionKind
-	lv   Liveness
+	kind        transitionKind
+	lv          Liveness
+	epoch       uint64
+	epochScoped bool
+}
+
+// AtEpoch scopes an event to the state epoch its decision was made at (#2135):
+// Transition applies it only while the instance is still at that epoch, and
+// silently DROPS it once a newer authoritative transition has moved the state on.
+// Use it wherever the event is a conclusion drawn from an observation taken
+// earlier — the daemon poll settling liveness from pane content it captured a
+// moment ago — so a decision about a state the session has already left cannot
+// overwrite the one it moved to. Events constructed without it are unscoped and
+// apply unconditionally, exactly as before. See session/state_epoch.go.
+func (ev TransitionEvent) AtEpoch(epoch uint64) TransitionEvent {
+	ev.epoch = epoch
+	ev.epochScoped = true
+	return ev
 }
 
 // BeginCreate overlays OpCreating for an optimistic create (was SetStatus(Loading)).
@@ -395,6 +411,13 @@ func (i *Instance) Transition(ev TransitionEvent) error {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 
+	if ev.epochScoped && i.stateEpoch != ev.epoch {
+		// The decision behind this event was drawn from an observation that a newer
+		// authoritative transition has since superseded. Drop it — silently and
+		// without an error, since being out-competed by newer truth is not a
+		// mis-ordered edge (#2135). The observer re-decides on its next tick.
+		return nil
+	}
 	from := stateAxes{i.liveness, i.inFlightOp}
 	spec, ok := transitionTable[ev.kind]
 	if !ok {
@@ -430,6 +453,9 @@ func (i *Instance) Transition(ev TransitionEvent) error {
 	}
 	i.liveness = to.liveness
 	i.inFlightOp = to.op
+	// Every real change to the lifecycle state advances the epoch, so an observer
+	// holding an older one learns its in-flight decision is stale (#2135).
+	i.noteStateChangeLocked(from.liveness, from.op, i.limitResetAt)
 	switch spec.started {
 	case startedSet:
 		i.started = true

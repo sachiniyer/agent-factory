@@ -218,6 +218,7 @@ func (m *Manager) isPollPaused(repoID, title string) bool {
 func (m *Manager) observeTaskRunWhilePaused(repoID, key string, instance *session.Instance) {
 	before := instance.GetLiveness()
 	beforeReset, _ := instance.LimitResetAt()
+	epoch := instance.StateEpoch() // see refreshInstanceStatus (#2135)
 	obs, err := instance.AgentServer().Snapshot()
 	// Whatever happened, no loss episode survives an attach (see above).
 	m.clearRemoteLoss(key)
@@ -229,7 +230,7 @@ func (m *Manager) observeTaskRunWhilePaused(repoID, key string, instance *sessio
 	// Idle output. The normal poll would probe liveness here to tell a healthy idle
 	// session from a vanished one; this path deliberately does not, because it must
 	// never conclude death. The attach already answers that question.
-	m.resolveIdleLiveness(instance, obs.Content)
+	m.resolveIdleLiveness(instance, obs.Content, epoch)
 	m.persistPollChange(repoID, instance, before, beforeReset)
 }
 
@@ -376,6 +377,11 @@ func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instanc
 	as := instance.AgentServer()
 	before := instance.GetLiveness()
 	beforeReset, _ := instance.LimitResetAt()
+	// Captured BEFORE the observation below, so the idle resolve can tell whether
+	// the conclusion it draws from that capture is still about the state it
+	// observed — or whether a resume/kill/archive has moved the session on since
+	// (#2135). See resolveIdleLiveness and session/state_epoch.go.
+	epoch := instance.StateEpoch()
 	// Snapshot dismisses a pending trust prompt then reads the pane in one probe
 	// (the exact order the poll used to run CheckAndHandleTrustPrompt then
 	// HasUpdated). Content is the capture handed back so the idle branch runs the
@@ -487,7 +493,7 @@ func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instanc
 			// Idle output: settle to Ready, or LimitReached when the pane shows a
 			// usage-limit banner for a claude/codex session (#1146). content is
 			// HasUpdated's capture (no re-capture); see resolveIdleLiveness.
-			m.resolveIdleLiveness(instance, content)
+			m.resolveIdleLiveness(instance, content, epoch)
 		}
 	}
 	if observedAlive {

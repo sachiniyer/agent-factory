@@ -166,6 +166,7 @@ func (i *Instance) statusLocked() Status {
 // untouched (they overlay it); settled values set liveness and clear the op —
 // matching the old single-field clobber exactly.
 func (i *Instance) setStatusLocked(s Status) {
+	lv, op, resetAt := i.lifecycleStateLocked()
 	switch s {
 	case Loading:
 		i.inFlightOp = OpCreating
@@ -175,6 +176,7 @@ func (i *Instance) setStatusLocked(s Status) {
 		i.inFlightOp = OpNone
 		i.liveness = LivenessForStatus(s)
 	}
+	i.noteStateChangeLocked(lv, op, resetAt)
 }
 
 // SetStatusForTest sets the status under the instance mutex by decomposing the
@@ -332,7 +334,9 @@ func (i *Instance) HasInFlightOp() bool {
 func (i *Instance) SetInFlightOpForTest(op InFlightOp) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
+	lv, prevOp, resetAt := i.lifecycleStateLocked()
 	i.inFlightOp = op
+	i.noteStateChangeLocked(lv, prevOp, resetAt)
 }
 
 // MarkLive is retired (#1195 Phase 2e): marking a completed create/recover live
@@ -375,12 +379,42 @@ func (i *Instance) TabSpawnBlocked() error {
 func (i *Instance) SetLimitReached(resetAt time.Time) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
-	if s := i.statusLocked(); s == Loading || s == Deleting {
-		return
+	i.setLimitReachedLocked(resetAt)
+}
+
+// SetLimitReachedAtEpoch is SetLimitReached for a decision derived from an
+// OBSERVATION — the daemon poll's usage-limit detection over captured pane
+// content (#2135). It applies the block only while the instance's state epoch is
+// still the one the observation was captured at; if a newer authoritative
+// transition has landed since (a resume's ClearLimitReached above all, but equally
+// a kill or an archive) the decision is known-stale and is dropped. Reports
+// whether it applied.
+//
+// The check and the write are one critical section under i.mu, which is the whole
+// point: an epoch read followed by a separate SetLimitReached would leave the same
+// window it closes.
+func (i *Instance) SetLimitReachedAtEpoch(resetAt time.Time, epoch uint64) bool {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if i.stateEpoch != epoch {
+		return false
 	}
+	return i.setLimitReachedLocked(resetAt)
+}
+
+// setLimitReachedLocked is the shared body: mark the instance limit-blocked and
+// record its reset time, skipping a row mid create/kill teardown so it never
+// clobbers an in-flight op. Reports whether it applied. Caller holds i.mu.
+func (i *Instance) setLimitReachedLocked(resetAt time.Time) bool {
+	if s := i.statusLocked(); s == Loading || s == Deleting {
+		return false
+	}
+	lv, op, prevReset := i.lifecycleStateLocked()
 	i.inFlightOp = OpNone
 	i.liveness = LiveLimitReached
 	i.limitResetAt = resetAt
+	i.noteStateChangeLocked(lv, op, prevReset)
+	return true
 }
 
 // SetLimitResetAt records only the display-only reset time (#1146), leaving both
@@ -394,7 +428,9 @@ func (i *Instance) SetLimitReached(resetAt time.Time) {
 func (i *Instance) SetLimitResetAt(resetAt time.Time) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
+	lv, op, prevReset := i.lifecycleStateLocked()
 	i.limitResetAt = resetAt
+	i.noteStateChangeLocked(lv, op, prevReset)
 }
 
 // ClearLimitReached moves a limit-blocked instance back to LiveRunning so the
@@ -407,8 +443,13 @@ func (i *Instance) ClearLimitReached() {
 	if i.liveness != LiveLimitReached {
 		return
 	}
+	lv, op, prevReset := i.lifecycleStateLocked()
 	i.liveness = LiveRunning
 	i.limitResetAt = time.Time{}
+	// The epoch bump here is what a racing poll checks: it is the resume's
+	// completion point, so any limit re-detection made from content captured before
+	// it is stale by definition and must not land (#2135).
+	i.noteStateChangeLocked(lv, op, prevReset)
 }
 
 // LimitReached reports whether the instance is blocked on a usage limit (#1146).

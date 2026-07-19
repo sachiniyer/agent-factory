@@ -147,6 +147,13 @@ type Instance struct {
 	// carried in the daemon snapshot so the badge survives a restart; PR3's
 	// auto-resume scheduler reads it. Mutex-protected.
 	limitResetAt time.Time
+	// stateEpoch is the generation counter for the lifecycle state above — the two
+	// axes plus limitResetAt — bumped by every writer that actually changes one of
+	// them (#2135). It is how an observer that decided from a captured pane learns
+	// its decision has been superseded by a newer transition before it applies it;
+	// see state_epoch.go. Mutex-protected, in-memory only: it describes a window
+	// between an observation and its apply, and no such window survives a restart.
+	stateEpoch uint64
 	// Program is the program to run in the instance.
 	Program string
 	// Height is the height of the instance.

@@ -70,9 +70,11 @@ func (i *Instance) ArchiveTeardown(dest string) error {
 func (i *Instance) SetArchived() {
 	i.mu.Lock()
 	defer i.mu.Unlock()
+	lv, op, resetAt := i.lifecycleStateLocked()
 	i.started = false
 	i.liveness = LiveArchived
 	i.inFlightOp = OpNone
+	i.noteStateChangeLocked(lv, op, resetAt)
 }
 
 // RestoreArchivedWorktree moves this instance's archived worktree back to dest

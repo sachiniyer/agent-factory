@@ -72,10 +72,25 @@ func createdTaskStatus(data session.InstanceData) string {
 // static frame through every quiet gap in a turn). So before settling Ready, ask
 // the agent: a pane that says it is working IS working, and stays Running. See
 // task.IsWorkingContent for why a debounce cannot stand in for this.
-func (m *Manager) resolveIdleLiveness(instance *session.Instance, content string) {
+//
+// epoch is the instance's state epoch captured BEFORE the pane capture `content`
+// came from, and every write below is scoped to it (#2135). This whole function
+// is a conclusion about a session as it was when its pane was read, and between
+// that read and here an authoritative transition can land — above all a resume
+// (the manual `c` retry or the auto-resume scheduler) clearing the usage-limit
+// block, re-delivering the prompt and persisting LiveRunning. Applying the
+// detector's hit on top of that re-parked a session that was in fact working, and
+// the persist gate then wrote the reverted state to disk. So the applies here
+// carry the epoch: the state moved ⇒ this decision is about a state the session
+// has already left, and it is dropped rather than clobbering the newer one. The
+// next tick re-decides from content captured after the transition, which is why
+// nothing is lost — see session/state_epoch.go.
+func (m *Manager) resolveIdleLiveness(instance *session.Instance, content string, epoch uint64) {
 	agent := instance.ResolvedAgent()
 	if hit, resetAt, _ := m.limitDetector.Check(content, agent, time.Now()); hit {
-		instance.SetLimitReached(resetAt)
+		// Returns false when the decision was superseded; nothing to do about it
+		// here — the next tick observes the session as it is now.
+		_ = instance.SetLimitReachedAtEpoch(resetAt, epoch)
 		return
 	}
 	if task.IsWorkingContent(content, agent) {
@@ -83,14 +98,14 @@ func (m *Manager) resolveIdleLiveness(instance *session.Instance, content string
 		// stays dark. Settling Ready here is the green flash (#1766 says green ==
 		// waiting for you), and it is not merely cosmetic — a Ready amp is what
 		// `af sessions watch` unblocks on and what tells a user their turn is done.
-		_ = instance.Transition(session.ObserveLiveness(session.LiveRunning))
+		_ = instance.Transition(session.ObserveLiveness(session.LiveRunning).AtEpoch(epoch))
 		return
 	}
 	// Plain idle: settle to Ready. On the two-axis model (#1195) SetLiveness
 	// writes only the liveness axis and never clobbers an in-flight op, so it
 	// needs no "if not deleting" guard — this is exactly what the poll's Ready
 	// fallback does inline in refreshInstanceStatus.
-	_ = instance.Transition(session.ObserveLiveness(session.LiveReady))
+	_ = instance.Transition(session.ObserveLiveness(session.LiveReady).AtEpoch(epoch))
 }
 
 // testHookPollBeforePublish runs immediately before persistPollChange announces
@@ -99,6 +114,13 @@ func (m *Manager) resolveIdleLiveness(instance *session.Instance, content string
 // property that keeps an older whole-session payload from landing after a newer
 // tab roster. No-op in production.
 var testHookPollBeforePublish = func() {}
+
+// testHookPollBeforePersistLock runs in persistPollChange after it has read the
+// payload it intends to write and BEFORE it takes the repo start lock — the exact
+// window a concurrent transition (a usage-limit resume) can land in and be
+// overwritten by this poll's older payload. Tests substitute it to land that
+// transition deterministically, with no goroutines or sleeps. No-op in production.
+var testHookPollBeforePersistLock = func() {}
 
 // persistPollChange writes an instance's state to disk when the poll changed
 // something durable this tick (the #960 targeted writer): its LIVENESS
@@ -119,19 +141,43 @@ var testHookPollBeforePublish = func() {}
 // A concurrent client op (create/kill/archive) means that op's executor owns the
 // durable state, so the poll never persists over it. Split from
 // refreshInstanceStatus so control.go stays under its length ceiling (#1145).
+//
+// WHAT IS WRITTEN IS WHAT IS TRUE AT WRITE TIME (#2135). The change test above is
+// a decision about a payload read at one instant, and the write happens at
+// another — after a repo start lock that a session create can hold for seconds.
+// An authoritative transition landing in between (a usage-limit resume clearing
+// the block and persisting LiveRunning, above all) would otherwise be overwritten
+// by the intermediate this poll decided from, and the reset-time arm is what
+// carried it there: it fires INDEPENDENTLY of the liveness, so a poll whose
+// liveness compare read "unchanged" (LimitReached → LimitReached) still flushed —
+// planting a limit-blocked row on disk for a session that was working.
+//
+// So the payload is re-read under the lock whenever the state epoch shows it
+// moved: the poll's gate decides WHETHER to write, never WHAT. Deliberately not
+// the reverse (take the lock, then read once): the lock is uncontended only when
+// nothing is being created, and taking it on every tick of every session would
+// park the whole poll behind an unrelated create. The epoch keeps the hot path
+// lock-free and costs a second read only in the rare superseded case.
 func (m *Manager) persistPollChange(repoID string, instance *session.Instance, before session.Liveness, beforeReset time.Time) {
 	if instance.GetInFlightOp() != session.OpNone {
 		return
 	}
-	afterReset, _ := instance.LimitResetAt()
-	livenessChanged := instance.GetLiveness() != before
-	resetChanged := !afterReset.Equal(beforeReset)
+	data, epoch := instance.ToInstanceDataWithEpoch()
+	livenessChanged := data.Liveness != before
+	resetChanged := !data.LimitResetAt.Equal(beforeReset)
 	if !livenessChanged && !resetChanged {
 		return
 	}
 	repoStartLock := m.startLockForRepo(repoID)
+	testHookPollBeforePersistLock()
 	repoStartLock.Lock()
-	data := instance.ToInstanceData()
+	if current, now := instance.ToInstanceDataWithEpoch(); now != epoch {
+		// Superseded while we waited for the lock. Persist and publish what is true
+		// NOW — the transition that beat us owns this state, and both the disk row
+		// and the session.updated payload must show it, not the intermediate this
+		// tick decided from.
+		data = current
+	}
 	err := persistInstanceData(repoID, data)
 	// Push the change onto the events plane (#1592 PR5): this is the single choke
 	// point every liveness/limit transition already flows through, so one publish
