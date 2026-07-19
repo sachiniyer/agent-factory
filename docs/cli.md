@@ -30,7 +30,7 @@ af tasks list --repo /repos/beta
 
 ### Remote daemons
 
-For the **session reads** that follow `--daemon-url`/`AF_DAEMON_URL` (`sessions list`, `get`, `watch`, `preview`), rule 2 does not apply: your current directory names a repository on *this* machine, which says nothing about the daemon's projects, so only an explicit `--repo` scopes a remote lookup.
+For the **session reads** that follow `--daemon-url`/`AF_DAEMON_URL` (`sessions list`, `get`, `watch`, `preview`, and `attach`), rule 2 does not apply: your current directory names a repository on *this* machine, which says nothing about the daemon's projects, so only an explicit `--repo` scopes a remote lookup.
 
 **`af tasks` is not remote-targeted at all.** Every task command talks to the local daemon over its control socket, whatever `--daemon-url`/`AF_DAEMON_URL` is set to — so `af tasks list` scopes by your local current directory and lists *local* tasks, and `af tasks remove` removes a local one. There is no way to manage a remote daemon's tasks from here today.
 
@@ -58,7 +58,7 @@ session "foo" exists in multiple projects: /repos/alpha, /repos/beta — pass --
 
 Against a remote daemon (`--daemon-url`/`AF_DAEMON_URL`), the split follows the transport:
 
-- **Reads served by the targeted daemon** — `list`, `get`, `watch`, `preview` — ignore the current directory rather than sending it as a scope, since it names a repo on *your* machine, not the daemon's. A bare title resolves across the remote's projects.
+- **Served by the targeted daemon** — `list`, `get`, `watch`, `preview`, `attach` — ignore the current directory rather than sending it as a scope, since it names a repo on *your* machine, not the daemon's. A bare title resolves across the remote's projects.
 - **Everything else** — `kill`, `archive`, `restore`, `send-prompt`, tab create/delete — reaches the *local* daemon regardless of `--daemon-url`, so it stays scoped to the current directory.
 
 Caveat for the reads: `--repo` becomes an id by hashing the path **as given on this machine**, so it only disambiguates when the daemon has that project checked out at the same absolute path. Prefer a bare title against a remote and let the ambiguity error tell you when to narrow it.
