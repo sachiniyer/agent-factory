@@ -216,6 +216,14 @@ func (m *Manager) reserveCreate(req CreateSessionRequest) (*config.RepoContext, 
 		// archived session out of the way so the new session can take the name
 		// (feat: reuse archived name). A LIVE collision is left untouched, so
 		// validateTitleAvailableLocked below still rejects it exactly as before.
+		//
+		// This path deliberately does NOT get #2091's worktree-branch check. The
+		// walk above can route around a held branch by taking the next suffix; an
+		// explicitly requested title has nowhere to go, and the rename that frees
+		// the title does not free the BRANCH the archived worktree still holds —
+		// so gating here would only move a guaranteed failure earlier, not fix it.
+		// Making reuse-archived-name actually work means releasing the branch too;
+		// tracked in #2127.
 		renamedArchived, err = m.renameArchivedForReuseLocked(repo.ID, repo.Root, title, req.Program, &diskData)
 		if err != nil {
 			return nil, "", nil, nil, err
@@ -416,6 +424,11 @@ func (m *Manager) findArchivedOnlyCollisionLocked(repoID, title string) (*sessio
 // archived session being renamed out of the way: "<base> (archived)", then
 // "<base> (archived 2)", "(archived 3)", … skipping any that collide with an
 // existing live or archived session (feat: reuse archived name). Runs under m.mu.
+//
+// No worktree-branch check here (#2091): this walk renames an EXISTING archived
+// session, which keeps the branch it already has checked out. The new title is a
+// label, not a branch to be created, so "is this branch checked out somewhere" is
+// not a question about it.
 func (m *Manager) uniqueArchivedTitleLocked(repoID, repoPath, base, program string, remote bool, diskData []session.InstanceData) (string, error) {
 	for i := 1; i <= 10000; i++ {
 		candidate := fmt.Sprintf("%s (archived)", base)
@@ -434,10 +447,27 @@ func (m *Manager) uniqueArchivedTitleLocked(repoID, repoPath, base, program stri
 }
 
 func (m *Manager) nextAvailableTitleLocked(repoID, repoPath, baseTitle, program string, remote bool, diskData []session.InstanceData) (string, error) {
+	// Session records are not the only thing that can make a candidate unusable
+	// (#2091). A branch already CHECKED OUT by some worktree cannot be checked
+	// out again, and archiving relocates a worktree rather than removing it
+	// (#2013), so an archived session keeps its branch — under a path no record
+	// points at once its row has been renamed. The rot that produced: a daily
+	// task walked to a suffix its own archived predecessor still held, `git
+	// worktree add` refused it, and the task died that way every run, forever.
+	// So ask the one component that knows which branches are checked out
+	// somewhere, ONCE per walk, and skip those rungs instead of discovering the
+	// collision at add time.
+	heldBranches := m.worktreeHeldBranchesLocked(repoPath, remote)
 	for i := 1; i <= 10000; i++ {
 		candidate := baseTitle
 		if i > 1 {
 			candidate = fmt.Sprintf("%s-%d", baseTitle, i)
+		}
+		branch := m.branchForTitle(candidate)
+		if holder, held := heldBranches[branch]; held {
+			log.InfoLog.Printf("title %q derives branch %q, which the worktree at %s still has checked out; trying the next suffix",
+				candidate, branch, holder)
+			continue
 		}
 		err := m.validateTitleAvailableLocked(repoID, repoPath, candidate, program, remote, false, diskData)
 		if err == nil {
@@ -678,6 +708,34 @@ func (m *Manager) findTitleConflictLocked(repoID, title string, diskData []sessi
 // TUI's naming pre-check stay in lockstep (#936).
 func (m *Manager) titlesCollide(a, b string) bool {
 	return git.TitlesCollide(a, b, m.cfg.BranchPrefix)
+}
+
+// worktreeHeldBranchesLocked answers "which branches are already checked out by
+// a worktree of this repo" for the title walk (#2091), mapping each to the
+// worktree holding it. Runs under m.mu.
+//
+// Two deliberate non-answers:
+//
+//   - Hook sessions (remote) never take a local worktree — backend_local is the
+//     only caller of NewGitWorktree — so no local branch can block their name,
+//     and probing the repo for them would be answering a question nobody asked.
+//   - A probe that could not RUN returns nil, not an empty map with a shrug.
+//     Nil means "no holds known", which leaves the pre-#2091 behavior exactly as
+//     it was: the create proceeds, and if the name really is held, `git worktree
+//     add` refuses it loudly and changes nothing. That is the right failure for
+//     an unanswerable question. The destructive reading would be to treat an
+//     unreadable repo as "everything is held" and walk a recurring task's name
+//     to an ever-growing suffix on the strength of a probe that never answered.
+func (m *Manager) worktreeHeldBranchesLocked(repoPath string, remote bool) map[string]string {
+	if remote {
+		return nil
+	}
+	held, err := git.BranchesHeldByWorktrees(repoPath)
+	if err != nil {
+		log.WarningLog.Printf("could not list worktree branch holds for %s; resolving the session title without them (a name an archived worktree holds will fail at worktree add instead of being skipped): %v", repoPath, err)
+		return nil
+	}
+	return held
 }
 
 // branchForTitle derives the git branch name for a session title using the same
