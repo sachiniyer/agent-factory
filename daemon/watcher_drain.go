@@ -171,6 +171,14 @@ func (w *taskWatcher) drainLoop() {
 				}
 				continue
 			}
+			// Same refund rule as the live path (#2102): a replay that died on a
+			// pre-flight check reached nothing, so it must not spend the target's
+			// per-minute budget — a long outage retries many times, and charging
+			// each one throttles the drain right when the backlog needs to move.
+			// A failed create/send stays charged: it may have landed.
+			if errors.Is(err, errNotAttempted) {
+				w.releaseEventSlot()
+			}
 			log.WarningLog.Printf("watch task %s: replay delivery failed (%d event(s) pending); retrying in %s: %v", w.taskID, w.queue.pendingCount(), backoff, err)
 			if !w.sleepStopAware(backoff) {
 				w.stopDraining()
