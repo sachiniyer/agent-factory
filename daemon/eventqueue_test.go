@@ -429,6 +429,121 @@ func TestEventQueue_PartialWriteTruncateFailureRecoversAcrossRestart(t *testing.
 	}
 }
 
+// enqueueWithCloseFailure reproduces the #2107 failure mode: the record reaches
+// the real file IN FULL through the production append, and only the close
+// reports an error (a real POSIX case — close surfaces deferred writeback
+// errors). n == len(rec), so nothing on disk is torn. It returns the enqueue
+// error so the caller can assert it, and restores the production seam.
+func enqueueWithCloseFailure(q *eventQueue, line string, closeErr error) error {
+	q.appendRecord = func(path string, rec []byte) (int, error) {
+		n, err := appendRecordToFile(path, rec)
+		if err != nil {
+			return n, err
+		}
+		return n, closeErr // full write, failed close
+	}
+	defer func() { q.appendRecord = appendRecordToFile }()
+	return q.enqueue(line)
+}
+
+func eventQueueFileSize(t *testing.T, path string) int64 {
+	t.Helper()
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat %s: %v", path, err)
+	}
+	return info.Size()
+}
+
+// TestEventQueue_FullWriteCloseFailureKeepsEvent is the #2107 regression: a
+// close error after a FULL write must not destroy the record. "Close failed" is
+// not "write torn" — truncate-to-realign exists only because O_APPEND would glue
+// the NEXT record onto torn bytes, and a complete record leaves no torn bytes to
+// glue onto. Before the fix, enqueue saw n > 0 with an error, truncated back to
+// the previous size, and the fully-written event was permanently lost.
+func TestEventQueue_FullWriteCloseFailureKeepsEvent(t *testing.T) {
+	dir := t.TempDir()
+	taskID := "ab210070"
+	q := newEventQueue(dir, taskID)
+	if err := q.enqueue("before"); err != nil {
+		t.Fatalf("enqueue before: %v", err)
+	}
+
+	closeErr := errors.New("simulated close failure")
+	err := enqueueWithCloseFailure(q, "survives-close-failure", closeErr)
+	if !errors.Is(err, closeErr) {
+		t.Fatalf("enqueue error = %v, want the close error surfaced to the caller", err)
+	}
+	// The record is on disk, so it must also be counted in memory — otherwise a
+	// later torn write would truncate back to a stale size and delete it after
+	// the fact.
+	// Errorf, not Fatalf: the drain assertion below is the one that shows the
+	// actual data loss, and it is worth reporting in the same run.
+	if got := q.pendingCount(); got != 2 {
+		t.Errorf("pending after full write + close failure = %d, want 2 (the record is on disk)", got)
+	}
+
+	// A following append must land on a record boundary, which only holds if the
+	// kept record was accounted for.
+	if err := q.enqueue("after"); err != nil {
+		t.Fatalf("enqueue after: %v", err)
+	}
+
+	// Reopen as a restarted daemon would: state comes purely from disk.
+	reopened := newEventQueue(dir, taskID)
+	got := drainAllEvents(t, reopened)
+	want := []string{"before", "survives-close-failure", "after"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("drained %v, want %v (a failed close must not drop a fully-written event)", got, want)
+	}
+}
+
+// TestEventQueue_PartialWriteTruncatesToRecordBoundary pins the OTHER branch of
+// the #2107 fix: a genuinely torn (partial) write is STILL truncated back to the
+// last record boundary. O_APPEND writes at the real end of file, so leaving the
+// torn bytes would glue the next record onto them into one invalid line.
+func TestEventQueue_PartialWriteTruncatesToRecordBoundary(t *testing.T) {
+	dir := t.TempDir()
+	taskID := "ab210071"
+	q := newEventQueue(dir, taskID)
+	if err := q.enqueue("good-1"); err != nil {
+		t.Fatalf("enqueue good-1: %v", err)
+	}
+	sizeBefore := eventQueueFileSize(t, q.path)
+
+	shortWrite := errors.New("simulated short write")
+	q.appendRecord = func(path string, rec []byte) (int, error) {
+		f, ferr := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+		if ferr != nil {
+			return 0, ferr
+		}
+		n, _ := f.Write(rec[:len(rec)/2]) // < len(rec): the trailing newline never lands
+		_ = f.Close()
+		return n, shortWrite
+	}
+	err := q.enqueue("torn")
+	q.appendRecord = appendRecordToFile
+	if !errors.Is(err, shortWrite) {
+		t.Fatalf("enqueue error = %v, want the short-write error", err)
+	}
+	if got := eventQueueFileSize(t, q.path); got != sizeBefore {
+		t.Fatalf("file size after torn write = %d, want %d (torn bytes must be truncated away)", got, sizeBefore)
+	}
+	if got := q.pendingCount(); got != 1 {
+		t.Fatalf("pending after torn write = %d, want 1 (the torn record is not an event)", got)
+	}
+
+	if err := q.enqueue("good-2"); err != nil {
+		t.Fatalf("enqueue good-2: %v", err)
+	}
+	reopened := newEventQueue(dir, taskID)
+	got := drainAllEvents(t, reopened)
+	want := []string{"good-1", "good-2"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("drained %v, want %v (the torn record must not merge into the next)", got, want)
+	}
+}
+
 // TestEventQueue_DropsOldestOverEventCap: the backlog is bounded; overflow
 // drops the OLDEST pending events (newest are the actionable ones after an
 // outage) and counts the drops.
