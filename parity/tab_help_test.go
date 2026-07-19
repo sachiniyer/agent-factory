@@ -20,6 +20,7 @@ package parity
 import (
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -30,34 +31,45 @@ import (
 	"github.com/sachiniyer/agent-factory/session"
 )
 
-// tabNameCommands returns every command in the real cobra tree that takes a
-// tab-addressing --name flag (the `sessions tab-*` verbs and their `tabs *`
-// aliases). Derived from the tree, so a new tab verb is covered the day it is
-// added rather than when someone remembers to list it here.
-func tabNameCommands(t *testing.T) map[string]*cobra.Command {
+// allCommands returns every command in the real cobra tree, keyed by its full
+// invocation path ("af sessions tab-create").
+func allCommands(t *testing.T) map[string]*cobra.Command {
 	t.Helper()
 	root := initCobraDefaults(commands.NewRootCommand(commands.Options{Version: "0.0.0-parity"}))
 	out := map[string]*cobra.Command{}
 
 	var walk func(c *cobra.Command, path string)
 	walk = func(c *cobra.Command, path string) {
-		if strings.Contains(path, " tab") {
-			hasName := false
-			c.LocalFlags().VisitAll(func(f *pflag.Flag) {
-				if f.Name == "name" {
-					hasName = true
-				}
-			})
-			if hasName && (c.RunE != nil || c.Run != nil) {
-				out[path] = c
-			}
-		}
+		out[path] = c
 		for _, sub := range c.Commands() {
 			walk(sub, path+" "+sub.Name())
 		}
 	}
 	walk(root, "af")
+	return out
+}
 
+// tabNameCommands narrows the tree to the commands that take a tab-addressing
+// --name flag (the `sessions tab-*` verbs and their `tabs *` aliases). Derived,
+// so a new tab verb is covered the day it is added rather than when someone
+// remembers to list it here.
+func tabNameCommands(t *testing.T) map[string]*cobra.Command {
+	t.Helper()
+	out := map[string]*cobra.Command{}
+	for path, c := range allCommands(t) {
+		if !strings.Contains(path, " tab") || (c.RunE == nil && c.Run == nil) {
+			continue
+		}
+		hasName := false
+		c.LocalFlags().VisitAll(func(f *pflag.Flag) {
+			if f.Name == "name" {
+				hasName = true
+			}
+		})
+		if hasName {
+			out[path] = c
+		}
+	}
 	if len(out) == 0 {
 		t.Fatal("derived no tab commands taking --name; the walk is broken, so every " +
 			"assertion below would vacuously pass")
@@ -131,6 +143,58 @@ func TestTabNamingRulesAreStatedWhereTheHelpPointsAtThem(t *testing.T) {
 			t.Errorf("%s does not state that the name is made unique, the other half of the "+
 				"cited rules.", path)
 		}
+	}
+}
+
+// aliasDelegation matches a command whose Long hands the reader to another
+// command: `Alias for "sessions tab-create". See "af sessions …" for details.`
+// The quotes are load-bearing — flag usages say "Alias for --here" with no
+// quotes, and sweeping those in would compare a flag against a command.
+var aliasDelegation = regexp.MustCompile(`Alias for "([^"]+)"`)
+
+// TestAliasVerbsMatchTheirTargetShort locks the one-line summary of a
+// delegating alias to the verb it delegates to.
+//
+// The #1192 aliases deliberately do not restate their target's Long — they point
+// at it, which is what keeps the two from drifting. But Short is NOT delegated:
+// it is written out twice, once per command, and it is what `af sessions tabs
+// --help` and the generated command index actually print. So it drifts silently,
+// and it did: `tabs create` still described "a process tab or a web tab" long
+// after tab-create grew VS Code, so the alias advertised strictly less than the
+// verb it claims to be identical to.
+//
+// The content assertions in this file fold Short into helpText, so a drift like
+// that could only ever be caught INCIDENTALLY (and not at all once a delegating
+// alias is skipped). This is the dedicated lock.
+func TestAliasVerbsMatchTheirTargetShort(t *testing.T) {
+	all := allCommands(t)
+	checked := 0
+
+	for path, c := range all {
+		m := aliasDelegation.FindStringSubmatch(c.Long)
+		if m == nil {
+			continue
+		}
+		targetPath := "af " + m[1]
+		target, ok := all[targetPath]
+		if !ok {
+			t.Errorf("%s says it is an %q, but %q is not a command in the tree — the help "+
+				"sends the reader somewhere that does not exist.", path, m[0], targetPath)
+			continue
+		}
+		checked++
+		if c.Short != target.Short {
+			t.Errorf("%s delegates to %s but their one-line summaries disagree:\n"+
+				"  alias:  %q\n  target: %q\n\n"+
+				"An alias that claims to be identical must SAY the same thing: Short is the "+
+				"line `af sessions tabs --help` and the docs index print, and unlike Long it is "+
+				"written out twice, so it drifts silently.", path, targetPath, c.Short, target.Short)
+		}
+	}
+
+	if checked == 0 {
+		t.Fatal("found no delegating aliases; the regex or the walk is broken, so this " +
+			"assertion proves nothing")
 	}
 }
 
