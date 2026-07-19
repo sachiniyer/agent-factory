@@ -61,12 +61,24 @@ type teardownMode interface {
 	finalize(i *Instance, closed []closedTab, gw *git.GitWorktree)
 }
 
-// closedTab pairs a tab with the exact tmux session teardownTabs closed for it,
-// so finalize can identity-guard the ref clear: only a ref that is STILL the
-// session we closed is nil'd, never a fresh one a concurrent Start swapped in.
+// closedTab records the tmux session teardownTabs closed for a tab, keyed by
+// that tab's STABLE ID (#1738) rather than by the *Tab pointer it was captured
+// from, plus the name the close is reported under.
+//
+// The pointer is not a stable handle. Since #1904 a rename writes through
+// replaceTabFieldLocked, which COPIES the Tab and stores a new pointer in
+// i.Tabs — so a rename landing inside teardown's unlock window would leave a
+// captured pointer aimed at a stale copy. The ref clear would then nil the dead
+// object while the live tab kept a ref to a session that had already been
+// killed: no error, no panic, just a tab holding a corpse forever (#1987).
+//
+// The id survives the copy. The tmux session is kept beside it because the clear
+// still has to be identity-guarded — only a ref that is STILL the session we
+// closed may be nil'd, never a fresh one a concurrent Start swapped in.
 type closedTab struct {
-	tab *Tab
-	ts  *tmux.TmuxSession
+	id   string
+	name string
+	ts   *tmux.TmuxSession
 }
 
 // teardownState reports whether a teardown step ESTABLISHED what it did.
@@ -187,7 +199,10 @@ func (i *Instance) teardownTabs(mode teardownMode) error {
 	closed := make([]closedTab, 0, len(i.Tabs))
 	for _, tab := range i.Tabs {
 		if tab.tmux != nil {
-			closed = append(closed, closedTab{tab: tab, ts: tab.tmux})
+			// Capture the name here, under the lock, rather than reading it off the
+			// *Tab later: the kills below run unlocked, and a concurrent rename is
+			// exactly what this struct no longer wants to be holding a pointer into.
+			closed = append(closed, closedTab{id: tab.ID, name: tab.Name, ts: tab.tmux})
 		}
 	}
 	gw := i.gitWorktree
@@ -200,7 +215,7 @@ func (i *Instance) teardownTabs(mode teardownMode) error {
 	var errs []error
 	paneMayBeLive := false
 	for _, c := range closed {
-		state, err := mode.closeTab(c.ts, title, c.tab.Name)
+		state, err := mode.closeTab(c.ts, title, c.name)
 		if err != nil {
 			errs = append(errs, err)
 		}
@@ -242,13 +257,32 @@ func (i *Instance) teardownTabs(mode teardownMode) error {
 	return errors.Join(errs...)
 }
 
-// clearClosedTmuxRefs nils each closed tab's tmux ref under a held i.mu,
-// identity-guarded so a concurrent Start that swapped in a fresh session is
-// never clobbered. Shared by the kill and release-PTY finalizers.
-func clearClosedTmuxRefs(closed []closedTab) {
+// clearClosedTmuxRefs nils each closed tab's tmux ref under a held i.mu. Shared
+// by the kill and release-PTY finalizers.
+//
+// The fix for #1987 is the RESOLUTION, not the key: this looks the tab up in the
+// live roster instead of dereferencing a pointer captured before the unlock
+// window, so a copy-on-write rename that replaced i.Tabs[idx] mid-teardown is
+// still found rather than silently missed.
+//
+// Of the two conditions, only the session check is provably load-bearing —
+// deleting it lets a concurrent Start's fresh session be clobbered, which a test
+// catches. Matching on the id as well is defense in depth and, mainly,
+// documentation: it says the thing being cleared is the tab we closed, rather
+// than leaving that to incidental pointer equality. (It is not independently
+// testable here: closed holds ts alive for the duration, so no other session can
+// occupy that address and an id-blind match behaves identically. Said plainly so
+// nobody later mistakes the id for the guard.)
+//
+// A tab whose id no longer resolves has been dropped from the roster entirely;
+// there is nothing left to clear, which is the correct no-op.
+func clearClosedTmuxRefs(i *Instance, closed []closedTab) {
 	for _, c := range closed {
-		if c.tab.tmux == c.ts {
-			c.tab.tmux = nil
+		for _, tab := range i.Tabs {
+			if tab.ID == c.id && tab.tmux == c.ts {
+				tab.tmux = nil
+				break
+			}
 		}
 	}
 }
@@ -299,7 +333,7 @@ func (teardownKill) handleWorktree(gw *git.GitWorktree, title string) (teardownS
 func (teardownKill) clearsStarted() bool { return true }
 
 func (teardownKill) finalize(i *Instance, closed []closedTab, gw *git.GitWorktree) {
-	clearClosedTmuxRefs(closed)
+	clearClosedTmuxRefs(i, closed)
 	if i.gitWorktree == gw {
 		i.gitWorktree = nil
 	}
@@ -331,8 +365,8 @@ func (teardownReleasePTY) handleWorktree(_ *git.GitWorktree, _ string) (teardown
 
 func (teardownReleasePTY) clearsStarted() bool { return true }
 
-func (teardownReleasePTY) finalize(_ *Instance, closed []closedTab, _ *git.GitWorktree) {
-	clearClosedTmuxRefs(closed)
+func (teardownReleasePTY) finalize(i *Instance, closed []closedTab, _ *git.GitWorktree) {
+	clearClosedTmuxRefs(i, closed)
 }
 
 // teardownArchive tears down every tab's tmux session and RELOCATES the worktree
