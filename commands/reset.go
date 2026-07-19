@@ -32,6 +32,10 @@ const wipeConfirmWord = "WIPE"
 // WIPE confirmation for non-interactive/scripted use.
 var resetForceFlag bool
 
+// worktreesResidueDir is the AF home subdirectory holding AF-managed session
+// worktrees. Named because the wipe has to special-case it (see resetWipePaths).
+const worktreesResidueDir = "worktrees"
+
 // resetWipePaths are the state trees/files under the AF home directory that a
 // factory reset removes wholesale (in addition to instances/, handled by
 // DeleteAllInstances, and tasks.json, handled by task.DeleteAllTasks).
@@ -54,8 +58,13 @@ var resetForceFlag bool
 // NOTE: "archived" is deliberately NOT here — archived worktrees are removed
 // per-repo (removeArchivedDirs) so a preserved (corrupt/unreadable) record is
 // never left pointing at a deleted archive.
+//
+// NOTE: "worktrees" is a wholesale removal only because the per-worktree pass is
+// expected to have emptied it. When that pass DELIBERATELY left a worktree in
+// place (#2110), this blind delete would destroy the very directory git still
+// owns — so the wipe below skips it and prunes the tree entry-by-entry instead.
 var resetWipePaths = []string{
-	"worktrees",             // AF-managed worktree parent dir (residue after cleanup)
+	worktreesResidueDir,     // AF-managed worktree parent dir (residue after cleanup)
 	"events",                // daemon event queue
 	"logs",                  // per-task run logs
 	"locks",                 // per-task run locks
@@ -95,10 +104,12 @@ type resetPlan struct {
 }
 
 // worktreeTarget is one AF-created worktree directory to remove, with the repo
-// root git needs to operate on it.
+// root git needs to operate on it and the repoID whose record set describes it
+// (the record is retained when the removal is blocked — see #2110).
 type worktreeTarget struct {
-	root string
-	path string
+	repoID string
+	root   string
+	path   string
 }
 
 func (p *resetPlan) branchCount() int {
@@ -117,6 +128,7 @@ type resetSummary struct {
 	worktrees int
 	branches  int // branches actually deleted (<= plan.branchCount())
 	corrupt   int // repos left intact because their records were unreadable
+	blocked   int // worktrees git would not release (locked) — records retained (#2110)
 }
 
 var resetCmd = &cobra.Command{
@@ -309,8 +321,9 @@ func runReset(cmd *cobra.Command, _ []string) (err error) {
 	//    failure, so the user sees exactly where the reset got to.
 	printResetSummary(out, summary)
 	if resetErr != nil {
-		fmt.Fprintln(out, "\nSome items could not be removed; the reset is PARTIAL. "+
-			"Every step is idempotent — re-run `af reset` to finish. Details:")
+		fmt.Fprintln(out, "\nSome items could not be removed; the reset is PARTIAL. Their session records "+
+			"were KEPT, so a re-run revisits exactly that work — but clear the cause below first, "+
+			"or the re-run repeats the same failure. Details:")
 		fmt.Fprintln(out, resetErr)
 		return resetErr
 	}
@@ -489,7 +502,7 @@ func planFactoryReset() (*resetPlan, error) {
 			if r.Worktree.WorktreePath != "" && !r.Worktree.ExternalWorktree && root != "" {
 				plan.worktrees++
 				plan.worktreeTargets = append(plan.worktreeTargets,
-					worktreeTarget{root: root, path: r.Worktree.WorktreePath})
+					worktreeTarget{repoID: repoID, root: root, path: r.Worktree.WorktreePath})
 			}
 			if root == "" {
 				continue
@@ -602,9 +615,19 @@ func executeFactoryReset(plan *resetPlan) (*resetSummary, error) {
 	// the user's own manually-created linked worktrees. Deletes NO branch here;
 	// branch deletion is funneled through the BranchCreatedByUs-guarded pass
 	// below. Resilient: a per-worktree failure is collected, not fatal.
+	//
+	// A worktree git would NOT release (locked, #2110) is recorded per repo: its
+	// session record is retained below so the recovery the error prints
+	// (`git worktree unlock <path> && af reset`) has something to revisit. Deleting
+	// the record here is what made the old "re-run to finish" guidance a lie — the
+	// re-run planned nothing and the branch stayed blocked forever.
+	blockedWorktrees := make(map[string][]string) // repoID -> worktree paths still registered
 	for _, wt := range plan.worktreeTargets {
 		if _, err := git.RemoveWorktreeDir(wt.root, wt.path); err != nil {
 			errs = append(errs, fmt.Errorf("remove worktree %s: %w", wt.path, err))
+			if errors.Is(err, git.ErrWorktreeStillRegistered) {
+				blockedWorktrees[wt.repoID] = append(blockedWorktrees[wt.repoID], wt.path)
+			}
 		}
 	}
 
@@ -633,12 +656,27 @@ func executeFactoryReset(plan *resetPlan) (*resetSummary, error) {
 	// repos we could parse and LEAVE the corrupt ones (and their branches)
 	// intact — erasing a record whose branch we deliberately did not prune would
 	// orphan that branch.
-	if len(plan.corruptRepoIDs) == 0 {
+	//
+	// A repo with a BLOCKED worktree (#2110) is preserved the same way, but at
+	// record granularity: only the records whose worktree is still registered
+	// survive, so the retained state is exactly the part of the reset that did not
+	// happen — and no record is left pointing at a worktree this run deleted.
+	preserveRepoIDs := append([]string(nil), plan.corruptRepoIDs...)
+	for rid := range blockedWorktrees {
+		preserveRepoIDs = append(preserveRepoIDs, rid)
+	}
+	if len(preserveRepoIDs) == 0 {
 		if err := plan.storage.DeleteAllInstances(); err != nil {
 			errs = append(errs, fmt.Errorf("reset session storage: %w", err))
 		}
 	} else {
 		for _, rid := range plan.processedRepoIDs {
+			if paths, blocked := blockedWorktrees[rid]; blocked {
+				if err := retainBlockedInstances(rid, paths); err != nil {
+					errs = append(errs, fmt.Errorf("retain blocked session records for repo %s: %w", rid, err))
+				}
+				continue
+			}
 			if err := config.DeleteRepoInstances(rid); err != nil {
 				errs = append(errs, fmt.Errorf("delete instances for repo %s: %w", rid, err))
 			}
@@ -646,10 +684,17 @@ func executeFactoryReset(plan *resetPlan) (*resetSummary, error) {
 	}
 
 	// Remove archived-session worktree dirs PER REPO, skipping any preserved
-	// (corrupt/unreadable) repo — its records still point at those archives, so
-	// deleting them would leave a dangling reference. A whole-tree wipe would do
-	// exactly that; keep preserved records and their archives consistent.
-	errs = append(errs, removeArchivedDirs(plan.configDir, plan.corruptRepoIDs)...)
+	// (corrupt/unreadable, or #2110-blocked) repo — its records still point at
+	// those archives, so deleting them would leave a dangling reference. A
+	// whole-tree wipe would do exactly that; keep preserved records and their
+	// archives consistent.
+	//
+	// This is repo-granular where the record retention above is record-granular,
+	// deliberately: a blocked worktree may itself BE an archived one, and this
+	// pass must not delete the directory RemoveWorktreeDir just refused to touch.
+	// The cost is that one repo's already-deleted archives linger until the
+	// recovery re-run — over-preserving, never dangling.
+	errs = append(errs, removeArchivedDirs(plan.configDir, preserveRepoIDs)...)
 
 	// Delete the task store (removes <AF_HOME>/tasks.json).
 	if err := task.DeleteAllTasks(); err != nil {
@@ -658,13 +703,29 @@ func executeFactoryReset(plan *resetPlan) (*resetSummary, error) {
 
 	// Remove the remaining AF state trees/files, leaving config (config.toml,
 	// config.json, repos/) and daemon identity untouched.
+	var blockedPaths []string
+	for _, paths := range blockedWorktrees {
+		blockedPaths = append(blockedPaths, paths...)
+	}
 	for _, name := range resetWipePaths {
 		p := filepath.Join(plan.configDir, name)
+		// The worktrees/ tree is wiped wholesale ONLY because the per-worktree pass
+		// above is expected to have emptied it. A worktree that pass deliberately
+		// left in place (#2110) is still git's — deleting it here would undo the
+		// ownership check three steps later and destroy the tree the user locked.
+		if name == worktreesResidueDir && len(blockedPaths) > 0 {
+			errs = append(errs, pruneWorktreeResidue(p, blockedPaths)...)
+			continue
+		}
 		if err := os.RemoveAll(p); err != nil {
 			errs = append(errs, fmt.Errorf("remove %s: %w", p, err))
 		}
 	}
 
+	blockedCount := 0
+	for _, paths := range blockedWorktrees {
+		blockedCount += len(paths)
+	}
 	summary := &resetSummary{
 		sessions:  plan.sessions,
 		archived:  plan.archived,
@@ -672,6 +733,7 @@ func executeFactoryReset(plan *resetPlan) (*resetSummary, error) {
 		worktrees: plan.worktrees,
 		branches:  branchesDeleted,
 		corrupt:   len(plan.corruptRepoIDs),
+		blocked:   blockedCount,
 	}
 	if len(errs) > 0 {
 		return summary, errors.Join(errs...)
@@ -720,6 +782,97 @@ func removeArchivedDirs(configDir string, preserve []string) []error {
 	return errs
 }
 
+// pruneWorktreeResidue empties the AF worktrees/ tree entry-by-entry, keeping
+// any top-level entry that holds a worktree the reset deliberately left in place
+// (#2110). It is the guarded form of the wholesale `os.RemoveAll(worktrees/)`.
+//
+// Keeping is TOP-LEVEL: an entry that merely contains a blocked worktree is kept
+// whole, siblings included. Over-preserving is the safe direction — the residue
+// is one directory that the recovery re-run removes once the worktree is gone,
+// whereas under-preserving destroys a checkout git still owns.
+func pruneWorktreeResidue(root string, keep []string) []error {
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return []error{fmt.Errorf("read %s: %w", root, err)}
+	}
+	var errs []error
+	for _, e := range entries {
+		p := filepath.Join(root, e.Name())
+		if holdsAnyPath(p, keep) {
+			continue
+		}
+		if err := os.RemoveAll(p); err != nil {
+			errs = append(errs, fmt.Errorf("remove %s: %w", p, err))
+		}
+	}
+	return errs
+}
+
+// holdsAnyPath reports whether dir IS, or contains, any of paths. Both sides are
+// symlink-resolved best-effort so a record written through /tmp still matches a
+// scan that walked /private/tmp (macOS).
+func holdsAnyPath(dir string, paths []string) bool {
+	dir = resolvePath(dir)
+	for _, p := range paths {
+		p = resolvePath(p)
+		if p == dir {
+			return true
+		}
+		rel, err := filepath.Rel(dir, p)
+		if err != nil {
+			continue
+		}
+		if rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			return true
+		}
+	}
+	return false
+}
+
+func resolvePath(p string) string {
+	p = filepath.Clean(p)
+	if resolved, err := filepath.EvalSymlinks(p); err == nil {
+		return resolved
+	}
+	return p
+}
+
+// retainBlockedInstances rewrites repoID's record set down to ONLY the sessions
+// whose worktree git refused to release (#2110), dropping every record the reset
+// actually completed.
+//
+// This is what makes the printed recovery honest. `af reset` deletes records
+// even on partial failure, so the old "re-run `af reset` to finish" planned
+// nothing on the second run and the blocked branch was stuck forever. Keeping
+// the blocked session's record — and only that one — means the re-run after
+// `git worktree unlock` plans exactly the leftover work, and the TUI never shows
+// a record whose worktree this run already deleted.
+func retainBlockedInstances(repoID string, blockedPaths []string) error {
+	keep := make(map[string]struct{}, len(blockedPaths))
+	for _, p := range blockedPaths {
+		keep[filepath.Clean(p)] = struct{}{}
+	}
+	return config.UpdateRepoInstances(repoID, func(raw json.RawMessage) (json.RawMessage, error) {
+		var recs []session.InstanceData
+		if err := json.Unmarshal(raw, &recs); err != nil {
+			return nil, fmt.Errorf("read instances: %w", err)
+		}
+		kept := make([]session.InstanceData, 0, len(blockedPaths))
+		for _, r := range recs {
+			if r.Worktree.WorktreePath == "" {
+				continue
+			}
+			if _, blocked := keep[filepath.Clean(r.Worktree.WorktreePath)]; blocked {
+				kept = append(kept, r)
+			}
+		}
+		return json.Marshal(kept)
+	})
+}
+
 func printResetPlan(out io.Writer, plan *resetPlan) {
 	fmt.Fprintln(out, "af reset — factory reset (IRREVERSIBLE)")
 	fmt.Fprintln(out)
@@ -747,6 +900,11 @@ func printResetSummary(out io.Writer, s *resetSummary) {
 		fmt.Fprintf(out, "  NEEDS ATTENTION: %d repo(s) had unreadable records and were LEFT INTACT "+
 			"— their records, branches, and archived worktrees were all KEPT (nothing dangling). "+
 			"Fix or remove those instances.json files and re-run to finish.\n", s.corrupt)
+	}
+	if s.blocked > 0 {
+		fmt.Fprintf(out, "  NEEDS ATTENTION: %d worktree(s) are still registered with git (usually a locked "+
+			"worktree) and were LEFT IN PLACE with their branch and session record. "+
+			"Run the unlock shown with each one below, then re-run `af reset` to finish.\n", s.blocked)
 	}
 	fmt.Fprintln(out, "Preserved: your git repositories and daemon config (config.toml).")
 	fmt.Fprintln(out, "The supervised daemon will restart with empty session/task state and the same config.")
