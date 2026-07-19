@@ -165,6 +165,64 @@ func TestRemoveWorktreeDir_MissingDirWithLockedMetadata(t *testing.T) {
 	require.ErrorIs(t, err, ErrWorktreeStillRegistered)
 }
 
+// TestRemoveWorktreeDir_SymlinkedRootWithMissingDir is the darwin-only bug this
+// fix originally shipped with, pinned so it cannot come back on any platform.
+//
+// macOS puts temp/working roots behind a symlink (/var -> /private/var), and git
+// reports the CANONICAL path in `worktree list --porcelain` while AF holds the
+// spelling the session was created with. The registration probe compared the two
+// raw strings. That works while the checkout exists — EvalSymlinks canonicalizes
+// both sides — but every post-removal probe runs with the leaf DELETED, where
+// plain EvalSymlinks fails on both sides and neither gets canonicalized. The
+// probe then reported a still-locked worktree as "not registered": a fabricated
+// negative, the exact failure mode the verification above exists to catch.
+//
+// The symlinked root is built INSIDE the test rather than taken from TMPDIR, so
+// this reproduces on Linux CI too instead of only on the macOS runner (#2110).
+func TestRemoveWorktreeDir_SymlinkedRootWithMissingDir(t *testing.T) {
+	base := t.TempDir()
+	realRoot := filepath.Join(base, "real")
+	require.NoError(t, os.MkdirAll(realRoot, 0o755))
+	linkRoot := filepath.Join(base, "link")
+	require.NoError(t, os.Symlink(realRoot, linkRoot))
+
+	// Everything below is addressed through the SYMLINK, exactly as an AF record
+	// created under macOS /var would be; git canonicalizes to realRoot internally.
+	repoRoot := filepath.Join(linkRoot, "repo")
+	require.NoError(t, os.MkdirAll(repoRoot, 0o755))
+	git := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", append([]string{"-C", repoRoot}, args...)...)
+		cmd.Env = append(os.Environ(),
+			"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@test.com",
+			"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@test.com",
+		)
+		out, err := cmd.CombinedOutput()
+		require.NoError(t, err, "git %s: %s", strings.Join(args, " "), string(out))
+	}
+	git("init", "-q", "-b", "master", ".")
+	git("commit", "-q", "--allow-empty", "-m", "initial")
+
+	worktreePath := filepath.Join(linkRoot, "wt-symlinked")
+	git("worktree", "add", "-q", "-b", "symlinked", worktreePath)
+	git("worktree", "lock", worktreePath, "--reason", "still in use")
+
+	// Sanity: git really does report a DIFFERENT spelling than the one AF holds.
+	listed, err := exec.Command("git", "-C", repoRoot, "worktree", "list", "--porcelain").Output()
+	require.NoError(t, err)
+	require.NotContains(t, string(listed), linkRoot,
+		"sanity: git should report the canonical (non-symlinked) path")
+
+	// The half-cleaned state: directory gone, locked metadata retained. Neither
+	// side of the comparison can be resolved by a plain EvalSymlinks now.
+	require.NoError(t, os.RemoveAll(worktreePath))
+
+	_, err = RemoveWorktreeDir(repoRoot, worktreePath)
+	require.Error(t, err,
+		"a still-registered worktree must be detected even when the record's path is spelled through a symlink")
+	require.ErrorIs(t, err, ErrWorktreeStillRegistered)
+}
+
 // TestRemoveWorktreeDir_DeletedRepoStillRemovesOrphanDir guards the other side
 // of the #2110 verification: a repo the user has deleted registers nothing, so
 // the probe that cannot run must NOT be read as "still registered" and leak AF's
@@ -177,6 +235,28 @@ func TestRemoveWorktreeDir_DeletedRepoStillRemovesOrphanDir(t *testing.T) {
 
 	removed, err := RemoveWorktreeDir(repoRoot, worktreePath)
 	require.NoError(t, err, "a deleted repo is not a failed cleanup")
+	assert.True(t, removed)
+
+	_, statErr := os.Stat(worktreePath)
+	assert.True(t, os.IsNotExist(statErr), "the orphaned worktree directory should be removed")
+}
+
+// TestRemoveWorktreeDir_DeGittedRepoStillRemovesOrphanDir pins the de-git'd repo
+// edge: the directory survives but its .git is gone, so it registers nothing.
+//
+// The conservative reading ("the probe failed, so maybe it is still registered")
+// would retain the record and tell the user to unlock a worktree that has no repo
+// to be registered with — advice no re-run could ever satisfy. Since "not a git
+// repo" is directly observable rather than inferred from a git error, reset
+// settles it instead of leaving an unclearable record behind (#2110).
+func TestRemoveWorktreeDir_DeGittedRepoStillRemovesOrphanDir(t *testing.T) {
+	repoRoot, worktreePath, _ := resetRepoWithWorktree(t, "degitted")
+
+	// The user blew away .git but kept the working tree.
+	require.NoError(t, os.RemoveAll(filepath.Join(repoRoot, ".git")))
+
+	removed, err := RemoveWorktreeDir(repoRoot, worktreePath)
+	require.NoError(t, err, "a repo that registers nothing is not a failed cleanup")
 	assert.True(t, removed)
 
 	_, statErr := os.Stat(worktreePath)

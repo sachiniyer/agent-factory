@@ -96,7 +96,7 @@ func TestFactoryReset_LockedWorktreeIsRecoverable(t *testing.T) {
 	// The summary must tell the user what to do about it.
 	var out bytes.Buffer
 	printResetSummary(&out, summary)
-	if !strings.Contains(out.String(), "NEEDS ATTENTION") || !strings.Contains(out.String(), "unlock") {
+	if !strings.Contains(out.String(), "Needs attention") || !strings.Contains(out.String(), "recovery command") {
 		t.Errorf("summary must flag the blocked worktree and point at the unlock recovery, got:\n%s", out.String())
 	}
 

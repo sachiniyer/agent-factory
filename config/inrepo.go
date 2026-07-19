@@ -423,28 +423,6 @@ func LoadInRepoConfig(repoRoot string) (*InRepoConfig, []byte, error) {
 	return &cfg, data, nil
 }
 
-// resolveSymlinksForCompare resolves symlinks in a path that may not exist
-// yet, for path-identity comparisons: the deepest existing ancestor is
-// resolved with filepath.EvalSymlinks and the non-existent remainder is
-// re-joined. Falls back to the cleaned input when nothing resolves, so a
-// comparison built on it is never weaker than comparing Clean-ed paths.
-func resolveSymlinksForCompare(path string) string {
-	path = filepath.Clean(path)
-	suffix := ""
-	for {
-		resolved, err := filepath.EvalSymlinks(path)
-		if err == nil {
-			return filepath.Join(resolved, suffix)
-		}
-		parent := filepath.Dir(path)
-		if parent == path {
-			return filepath.Join(path, suffix)
-		}
-		suffix = filepath.Join(filepath.Base(path), suffix)
-		path = parent
-	}
-}
-
 // beforeInRepoConfigWrite is a test hook for exercising filesystem races at
 // the last point before the save opens its destination for writing.
 var beforeInRepoConfigWrite func() error
@@ -585,14 +563,14 @@ func SaveInRepoPostWorktreeCommands(repoRoot string, commands []string) error {
 	// AGENT_FACTORY_HOME (or a symlinked .agent-factory dir) makes distinct
 	// strings name the same file, and these guards exist precisely for the
 	// aliased cases.
-	resolvedPath := resolveSymlinksForCompare(path)
+	resolvedPath := pathutil.ResolveForCompare(path)
 	// A repo rooted at the user's home directory makes the in-repo path
 	// collide with the global config file; writing hooks there would clobber
 	// the user's global settings.
 	if configDir, dirErr := GetConfigDir(); dirErr == nil {
 		for _, globalName := range []string{ConfigFileName, TomlConfigFileName} {
 			globalPath := filepath.Join(configDir, globalName)
-			if resolvedPath == resolveSymlinksForCompare(globalPath) {
+			if resolvedPath == pathutil.ResolveForCompare(globalPath) {
 				return fmt.Errorf("in-repo config path %s collides with the global config file %s; not saving — run this from a repo whose root is not the config home", prettyHomePath(path), prettyHomePath(globalPath))
 			}
 		}
@@ -601,7 +579,7 @@ func SaveInRepoPostWorktreeCommands(repoRoot string, commands []string) error {
 	// dir symlinked outside the repo must not receive the save. The read
 	// guard alone can't cover this — it only fires when the config file
 	// already exists at the resolved location.
-	if !pathutil.IsStrictlyInside(resolvedPath, resolveSymlinksForCompare(repoRoot)) {
+	if !pathutil.IsStrictlyInside(resolvedPath, pathutil.ResolveForCompare(repoRoot)) {
 		return fmt.Errorf("in-repo config %s resolves outside the repository (to %s); refusing to save it", prettyHomePath(path), prettyHomePath(resolvedPath))
 	}
 	data, _, err := readInRepoConfigFile(repoRoot)

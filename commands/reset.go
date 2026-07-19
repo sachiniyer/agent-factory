@@ -14,6 +14,7 @@ import (
 	cmdutil "github.com/sachiniyer/agent-factory/cmd"
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/daemon"
+	"github.com/sachiniyer/agent-factory/internal/pathutil"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/session/git"
@@ -321,9 +322,9 @@ func runReset(cmd *cobra.Command, _ []string) (err error) {
 	//    failure, so the user sees exactly where the reset got to.
 	printResetSummary(out, summary)
 	if resetErr != nil {
-		fmt.Fprintln(out, "\nSome items could not be removed; the reset is PARTIAL. Their session records "+
-			"were KEPT, so a re-run revisits exactly that work — but clear the cause below first, "+
-			"or the re-run repeats the same failure. Details:")
+		fmt.Fprintln(out, "\nSome items could not be removed, so this reset is only partial. Their session "+
+			"records were kept, so a re-run revisits exactly that work — but clear the cause below first, "+
+			"or the re-run just repeats the same failure. Details:")
 		fmt.Fprintln(out, resetErr)
 		return resetErr
 	}
@@ -811,33 +812,22 @@ func pruneWorktreeResidue(root string, keep []string) []error {
 	return errs
 }
 
-// holdsAnyPath reports whether dir IS, or contains, any of paths. Both sides are
-// symlink-resolved best-effort so a record written through /tmp still matches a
-// scan that walked /private/tmp (macOS).
+// holdsAnyPath reports whether dir IS, or contains, any of paths.
+//
+// Both sides go through pathutil.ResolveForCompare so a record stored with one
+// spelling matches a scan that walked another — and, critically, so a blocked
+// worktree whose DIRECTORY is already gone still matches: a plain EvalSymlinks
+// cannot resolve a missing leaf, which on a symlinked root (macOS /var ->
+// /private/var) silently turns "keep this" into "delete this" (#2110).
 func holdsAnyPath(dir string, paths []string) bool {
-	dir = resolvePath(dir)
+	dir = pathutil.ResolveForCompare(dir)
 	for _, p := range paths {
-		p = resolvePath(p)
-		if p == dir {
-			return true
-		}
-		rel, err := filepath.Rel(dir, p)
-		if err != nil {
-			continue
-		}
-		if rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		p = pathutil.ResolveForCompare(p)
+		if p == dir || pathutil.IsStrictlyInside(p, dir) {
 			return true
 		}
 	}
 	return false
-}
-
-func resolvePath(p string) string {
-	p = filepath.Clean(p)
-	if resolved, err := filepath.EvalSymlinks(p); err == nil {
-		return resolved
-	}
-	return p
 }
 
 // retainBlockedInstances rewrites repoID's record set down to ONLY the sessions
@@ -897,14 +887,14 @@ func printResetSummary(out io.Writer, s *resetSummary) {
 	fmt.Fprintf(out, "  worktrees: %d\n", s.worktrees)
 	fmt.Fprintf(out, "  branches:  %d\n", s.branches)
 	if s.corrupt > 0 {
-		fmt.Fprintf(out, "  NEEDS ATTENTION: %d repo(s) had unreadable records and were LEFT INTACT "+
-			"— their records, branches, and archived worktrees were all KEPT (nothing dangling). "+
-			"Fix or remove those instances.json files and re-run to finish.\n", s.corrupt)
+		fmt.Fprintf(out, "  Needs attention: %d repo(s) had unreadable records and were left untouched "+
+			"— their records, branches, and archived worktrees were all kept, so nothing is dangling. "+
+			"Fix or remove those instances.json files, then re-run `af reset` to finish.\n", s.corrupt)
 	}
 	if s.blocked > 0 {
-		fmt.Fprintf(out, "  NEEDS ATTENTION: %d worktree(s) are still registered with git (usually a locked "+
-			"worktree) and were LEFT IN PLACE with their branch and session record. "+
-			"Run the unlock shown with each one below, then re-run `af reset` to finish.\n", s.blocked)
+		fmt.Fprintf(out, "  Needs attention: %d worktree(s) are still registered with git — usually because "+
+			"they are locked. Each was left in place, along with its branch and its session record. "+
+			"Run the recovery command shown with each one below, then re-run `af reset` to finish.\n", s.blocked)
 	}
 	fmt.Fprintln(out, "Preserved: your git repositories and daemon config (config.toml).")
 	fmt.Fprintln(out, "The supervised daemon will restart with empty session/task state and the same config.")
