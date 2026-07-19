@@ -68,6 +68,19 @@ type PreviewRequest struct {
 type PreviewResponse struct {
 	Content string `json:"content"`
 	Gone    bool   `json:"gone,omitempty"`
+	// TabGone NARROWS Gone: the session is alive and well, but the TAB the request
+	// addressed is not there — an id that no longer resolves, or an ordinal that is
+	// not a slot. Gone is always set alongside it, so a client that only knows
+	// about Gone (the TUI's session-gone fallback) behaves exactly as before.
+	//
+	// It exists because the two causes are indistinguishable to a CLIENT and the
+	// daemon knows them apart. `af sessions preview --tab-id x` used to report a
+	// tab-level miss as "session %q is no longer running": a plain lie about a
+	// running session, and one the CLI could only have avoided by GUESSING from
+	// the fact that it had sent a selector — which is wrong precisely when the
+	// session really did die mid-capture. Carrying the fact is the alternative to
+	// inferring it.
+	TabGone bool `json:"tab_gone,omitempty"`
 }
 
 // Preview captures one tab's content through the session's agent-server — the same
@@ -98,31 +111,33 @@ func (s *controlServer) Preview(req PreviewRequest, resp *PreviewResponse) error
 	// degrades on — the addressed tab is genuinely no longer there.
 	//
 	// The ordinal is used ONLY when neither an id nor a name was supplied — a
-	// legacy client, for which positional addressing is all there ever was — and
-	// that path is left byte-for-byte as it was, so such a client is unaffected.
-	tab := req.Tab
-	if req.TabID != "" || req.TabName != "" {
-		idx, rerr := session.ResolveTabIndex(instance.GetTabs(), req.TabID, req.TabName, req.Tab)
-		switch {
-		case errors.Is(rerr, session.ErrTabIDNotFound):
-			// Gone, not an error: the specific tab this client was looking at is no
-			// longer there, which is the fallback the TUI already degrades on.
-			resp.Gone = true
-			return nil
-		case errors.Is(rerr, session.ErrTabNameNotFound):
-			// A name that matches nothing is far more likely a typo than a
-			// disappearance, so answer with the roster rather than an empty capture.
-			tabs := instance.GetTabs()
-			ids := make([]string, 0, len(tabs))
-			for _, t := range tabs {
-				ids = append(ids, session.TabIdentifiers(t))
-			}
-			return fmt.Errorf("session %q has no tab named %q; its tabs are: %s",
-				req.Title, req.TabName, strings.Join(ids, ", "))
-		case rerr != nil:
-			return rerr
+	// legacy client, for which positional addressing is all there ever was. It goes
+	// through this same call so it is BOUNDS-CHECKED like every other selector: an
+	// in-range ordinal resolves to itself and behaves byte-for-byte as it always
+	// did, while an out-of-range one used to reach as.Preview and come back as a
+	// silent empty capture with no error at all. A capture verb that answers "" to
+	// a bad slot is the dishonesty this cluster exists to remove, so it is now a
+	// tab-level Gone like any other missing tab.
+	tabs := instance.GetTabs()
+	tab, rerr := session.ResolveTabIndex(tabs, req.TabID, req.TabName, req.Tab)
+	switch {
+	case errors.Is(rerr, session.ErrTabIDNotFound), errors.Is(rerr, session.ErrTabIndexOutOfRange):
+		// Gone, not an error: the tab this client addressed is no longer there,
+		// which is the fallback the TUI already degrades on. TabGone says the
+		// SESSION is fine, so a client need not guess which vanished.
+		resp.Gone, resp.TabGone = true, true
+		return nil
+	case errors.Is(rerr, session.ErrTabNameNotFound):
+		// A name that matches nothing is far more likely a typo than a
+		// disappearance, so answer with the roster rather than an empty capture.
+		ids := make([]string, 0, len(tabs))
+		for _, t := range tabs {
+			ids = append(ids, session.TabIdentifiers(t))
 		}
-		tab = idx
+		return fmt.Errorf("session %q has no tab named %q; its tabs are: %s",
+			req.Title, req.TabName, strings.Join(ids, ", "))
+	case rerr != nil:
+		return rerr
 	}
 	content, err := as.Preview(tab, req.Full)
 	if err != nil {

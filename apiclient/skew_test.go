@@ -91,7 +91,7 @@ func TestPreview_VersionSkew_SurfacesActionableError(t *testing.T) {
 		return apiproto.Failure(daemonMsg)
 	})
 
-	_, _, err := c.Preview(daemon.PreviewRequest{Title: "alpha", TabID: "t-abc"})
+	_, _, _, err := c.Preview(daemon.PreviewRequest{Title: "alpha", TabID: "t-abc"})
 	if err == nil {
 		t.Fatal("want an error from a skewed daemon")
 	}
@@ -123,7 +123,7 @@ func TestEnvelopeError_NonSkew_StaysVerbatim(t *testing.T) {
 	c := routeServer(t, "Preview", func([]byte) apiproto.Envelope {
 		return apiproto.Failure(`session "ghost" not found`)
 	})
-	_, _, err := c.Preview(daemon.PreviewRequest{Title: "ghost"})
+	_, _, _, err := c.Preview(daemon.PreviewRequest{Title: "ghost"})
 	if err == nil || err.Error() != `session "ghost" not found` {
 		t.Fatalf("want the verbatim daemon message, got %v", err)
 	}
@@ -153,7 +153,7 @@ func TestCall_SendsClientVersionHeader(t *testing.T) {
 	go func() { _ = srv.Serve(ln) }()
 	t.Cleanup(func() { _ = srv.Close() })
 
-	if _, _, err := NewWithSocket(sockPath).Preview(daemon.PreviewRequest{Title: "alpha"}); err != nil {
+	if _, _, _, err := NewWithSocket(sockPath).Preview(daemon.PreviewRequest{Title: "alpha"}); err != nil {
 		t.Fatalf("Preview: %v", err)
 	}
 	select {

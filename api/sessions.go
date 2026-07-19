@@ -354,8 +354,8 @@ var (
 func resolvePreviewTab(tabs []*session.Tab) (int, error) {
 	idx, err := session.ResolveTabIndex(tabs, previewTabIDFlag, previewTabNameFlag, previewTabFlag)
 	switch {
-	case errors.Is(err, session.ErrTabIDNotFound):
-		return 0, fmt.Errorf("--tab-id %q matches no tab in this session; it may have been closed", previewTabIDFlag)
+	case errors.Is(err, session.ErrTabIDNotFound), errors.Is(err, session.ErrTabIndexOutOfRange):
+		return 0, previewTabMissErr()
 	case errors.Is(err, session.ErrTabNameNotFound):
 		ids := make([]string, 0, len(tabs))
 		for _, t := range tabs {
@@ -363,13 +363,30 @@ func resolvePreviewTab(tabs []*session.Tab) (int, error) {
 		}
 		return 0, fmt.Errorf("--tab-name %q matches no tab in this session; its tabs are: %s",
 			previewTabNameFlag, strings.Join(ids, ", "))
-	case errors.Is(err, session.ErrTabIndexOutOfRange):
-		return 0, fmt.Errorf("--tab %d is not a slot in this session, which has %d tab(s)",
-			previewTabFlag, len(tabs))
 	case err != nil:
 		return 0, err
 	}
 	return idx, nil
+}
+
+// previewTabMissErr is the message for a tab-level miss — an --tab-id that no
+// longer resolves, or a --tab that is not a slot.
+//
+// One function serves BOTH paths on purpose. The local path learns the miss from
+// session.ResolveTabIndex and the remote path from the daemon's TabGone, but a
+// user should not be able to tell which machine resolved their flag, and the two
+// drifting apart is what this whole cluster is about. It names the FLAG the user
+// passed, which neither the daemon's session-oriented error nor a bare "gone"
+// can do.
+//
+// A --tab-name miss is deliberately NOT here: it is answered with the session's
+// roster, which only the side holding the tab list can produce.
+func previewTabMissErr() error {
+	if previewTabIDFlag != "" {
+		return fmt.Errorf("--tab-id %q matches no tab in this session; it may have been closed",
+			previewTabIDFlag)
+	}
+	return fmt.Errorf("--tab %d is not a slot in this session", previewTabFlag)
 }
 
 var sessionsPreviewCmd = &cobra.Command{
@@ -422,7 +439,7 @@ whatever tab had shifted into it.
 			// session.ResolveTabIndex the local path below uses. Resolving a name
 			// client-side would need an extra round trip and would race — the
 			// roster it read could differ from the one the capture runs against.
-			content, gone, perr := client.Preview(daemon.PreviewRequest{
+			content, gone, tabGone, perr := client.Preview(daemon.PreviewRequest{
 				Title:   args[0],
 				RepoID:  repoID,
 				Tab:     previewTabFlag,
@@ -432,6 +449,15 @@ whatever tab had shifted into it.
 			})
 			if perr != nil {
 				return jsonError(perr)
+			}
+			// A tab-level miss is NOT a dead session. Reporting one as the other
+			// told the user their running session had ended because they mistyped a
+			// --tab-id, and the same message for both is what let that pass. The
+			// daemon distinguishes them (TabGone), so this does not have to guess
+			// from "we sent a selector" — which would be wrong in exactly the case
+			// where the session really did die mid-capture.
+			if tabGone {
+				return jsonError(previewTabMissErr())
 			}
 			if gone {
 				return jsonError(fmt.Errorf("session %q is no longer running", args[0]))
