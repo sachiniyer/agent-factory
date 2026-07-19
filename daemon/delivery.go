@@ -51,6 +51,34 @@ const StatusDeferredAttached = "deferred: target attached"
 // durable re-queue/retry without tripping the delivery-failure alarm (#1238).
 var errTargetBusy = errors.New("target session is attached; delivery deferred until detach")
 
+// errNotAttempted marks a delivery failure that provably sent NOTHING: the
+// attempt died on a pre-flight check, before any session was created and before
+// any keystroke reached a pane. The watch paths refund the rate slot such an
+// attempt reserved (#2102) — the rule is "refund iff nothing was delivered", so
+// a deferral (errTargetBusy), a cap refusal (errAtConcurrencyLimit), and a
+// pre-flight error are the same case, and only the deferrals used to refund.
+//
+// Deliberately NOT applied to a failed create or a failed send. Both cross the
+// control socket, and delivery itself is keystrokes-then-submit, so their error
+// can surface AFTER the session was created or the prompt was already pasted;
+// the caller cannot distinguish "never sent" from "sent, then the reply was
+// lost". Refunding an ambiguous failure would let a delivered event escape the
+// per-minute budget — the exact pressure this limiter exists to bound — so
+// ambiguity stays charged. Under-refunding costs a little throughput;
+// over-refunding breaks the guarantee.
+var errNotAttempted = errors.New("delivery not attempted")
+
+// notAttempted tags err as a pre-flight failure. The wrapper is transparent:
+// Error() is the wrapped message verbatim, so every log line reads exactly as
+// before and only errors.Is(err, errNotAttempted) flips.
+func notAttempted(err error) error { return &notAttemptedError{err: err} }
+
+type notAttemptedError struct{ err error }
+
+func (e *notAttemptedError) Error() string        { return e.err.Error() }
+func (e *notAttemptedError) Unwrap() error        { return e.err }
+func (e *notAttemptedError) Is(target error) bool { return target == errNotAttempted }
+
 // deferWhileAttached reports whether an automated delivery must be held because a
 // TUI is attached full-screen to the target (#1586). Every SendPrompt delivery
 // path routes through this: the fast "exists" path AND both wait-then-send paths

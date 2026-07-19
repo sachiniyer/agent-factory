@@ -53,7 +53,9 @@ var cronDeferPollInterval = 1 * time.Second
 func deliverTaskPrompt(t *task.Task, prompt string, deferWhileAttached bool) (string, error) {
 	cfg, err := config.LoadConfig()
 	if err != nil {
-		return "", fmt.Errorf("failed to load config: %w", err)
+		// Pre-flight: this returns before any create or send, so the watch paths
+		// refund the rate slot (#2102). Inert for cron, which only checks err != nil.
+		return "", notAttempted(fmt.Errorf("failed to load config: %w", err))
 	}
 
 	// Ask the SAME question the cap was validated against (#1892). Reading the raw

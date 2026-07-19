@@ -808,6 +808,15 @@ func (w *taskWatcher) handleEvent(line string, tail *tailBuffer) {
 			w.releaseEventSlot()
 			log.InfoLog.Printf("watch task %s: at its max_concurrent_runs limit; queueing event until a session finishes (#1892)", w.taskID)
 		default:
+			// A genuine failure that never got as far as the target delivered
+			// nothing either, so it refunds too (#2102) — otherwise the live
+			// attempt AND every drainer retry each spend a slot, leaking the
+			// per-minute budget exactly when an outage needs it for recovery. Only
+			// pre-flight failures qualify: a failed create or send may have landed
+			// (see errNotAttempted), and a delivered event must stay charged.
+			if errors.Is(err, errNotAttempted) {
+				w.releaseEventSlot()
+			}
 			log.ErrorLog.Printf("watch task %s: failed to deliver event: %v", w.taskID, err)
 		}
 		w.enqueueEvent(line, tail)
@@ -903,16 +912,20 @@ func (w *taskWatcher) stopDraining() {
 // {{line}}, and routes through the same delivery path cron fires use, then
 // records the run status (#664 path).
 func deliverWatchEvent(taskID, line string) error {
+	// The three pre-flight checks below fail before anything is created or sent,
+	// so they are tagged notAttempted and the caller refunds their rate slot
+	// (#2102). Everything past them can fail with the delivery already in
+	// flight, and stays charged.
 	t, err := task.GetTask(taskID)
 	if err != nil {
-		return fmt.Errorf("failed to load task: %w", err)
+		return notAttempted(fmt.Errorf("failed to load task: %w", err))
 	}
 	if !t.Enabled {
-		return fmt.Errorf("task %s is disabled", taskID)
+		return notAttempted(fmt.Errorf("task %s is disabled", taskID))
 	}
 	prompt := task.RenderWatchPrompt(t.Prompt, line)
 	if strings.TrimSpace(prompt) == "" {
-		return fmt.Errorf("event rendered an empty prompt (line %q)", line)
+		return notAttempted(fmt.Errorf("event rendered an empty prompt (line %q)", line))
 	}
 	status, err := deliverTaskPrompt(t, prompt, true)
 	if err != nil {
