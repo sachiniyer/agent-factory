@@ -239,6 +239,28 @@ func (q *eventQueue) enqueue(line string) error {
 	rec = append(rec, '\n')
 	n, err := q.appendRecord(q.path, rec)
 	if err != nil {
+		if n >= len(rec) {
+			// The record landed IN FULL and only the close/flush failed (#2107) —
+			// a real POSIX case, since close surfaces deferred writeback errors.
+			// Truncating here would destroy a complete event: "close failed" is
+			// not "write torn". The truncate below exists solely because O_APPEND
+			// would glue the next record onto TORN bytes, and a complete record
+			// leaves none to glue onto, so the file is already record-aligned.
+			// Keep it, and account for it — the on-disk record must be counted in
+			// memory or a later torn write would truncate back to a stale size and
+			// delete it after the fact. Same philosophy as compactLocked, whose
+			// temp-file+rename leaves the original intact when its close fails.
+			q.size += int64(n)
+			q.pending++
+			log.WarningLog.Printf("watch task %s: event-queue append succeeded but close failed; kept the fully-written record: %v", q.taskID, err)
+			// Enforce the caps as the success path does: a persistently failing
+			// close must not let the backlog outgrow its bounds. The close error is
+			// the one worth returning, so a cap failure only gets logged.
+			if capErr := q.dropOldestOverCapsLocked(); capErr != nil {
+				log.WarningLog.Printf("watch task %s: failed to enforce event-queue caps after a close failure: %v", q.taskID, capErr)
+			}
+			return err
+		}
 		// A short write leaves a torn record that would corrupt the NEXT append:
 		// O_APPEND writes at the real end of file, so the next record glues onto
 		// the torn bytes into one invalid line. Truncate back to the last record
