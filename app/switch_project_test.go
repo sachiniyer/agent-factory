@@ -421,6 +421,48 @@ func TestSwitchProjectAppliesProjectProgramWhenConfigResolves(t *testing.T) {
 	assert.Equal(t, "aider", h.program, "the incoming project's default_program must win on a successful resolve")
 }
 
+// TestSwitchProjectUsesGlobalDefaultWhenProjectSetsNoProgram locks the third
+// case beside the two above: a project whose config resolves FINE but sets no
+// default_program of its own must still land on the GLOBAL default, never the
+// outgoing project's program.
+//
+// This holds through ResolveConfig rather than through switchProject's `!= ""`
+// guard: ResolveConfig seeds res.DefaultProgram from the global config and only
+// overwrites it with a non-empty in-repo value, and a successfully loaded global
+// config always carries a valid (hence non-empty) default_program —
+// validateConfig runs it through ValidateProgramEnum, which rejects "". So
+// "project sets no default_program" already arrives as the global default. The
+// test pins that end-to-end behavior so it cannot regress silently into the same
+// leak shape as #2138 one branch over.
+func TestSwitchProjectUsesGlobalDefaultWhenProjectSetsNoProgram(t *testing.T) {
+	h := newTestHome(t)
+	h.snapshotFetcher = func(string) (daemon.SnapshotResponse, error) {
+		return daemon.SnapshotResponse{}, nil
+	}
+	globalDefault := h.appConfig.DefaultProgram
+	require.NotEmpty(t, globalDefault)
+
+	// (1) A valid in-repo config that configures OTHER keys but no program.
+	withConfig := initTestGitRepo(t)
+	writeInRepoConfig(t, withConfig, "post_worktree_commands = [\"echo hi\"]\n")
+	resolved, err := config.ResolveConfig(withConfig)
+	require.NoError(t, err, "precondition: this project's config must resolve cleanly")
+	require.Equal(t, globalDefault, resolved.DefaultProgram,
+		"precondition: a project with no default_program resolves to the global default")
+
+	h.program = "codex"
+	h.switchProject(&config.RepoContext{Root: withConfig, ID: config.RepoIDFromRoot(withConfig)})
+	assert.Equal(t, globalDefault, h.program,
+		"a project that sets no default_program must use the global default, not the outgoing project's program")
+
+	// (2) A project with no in-repo config at all — the common case.
+	noConfig := initTestGitRepo(t)
+	h.program = "codex"
+	h.switchProject(&config.RepoContext{Root: noConfig, ID: config.RepoIDFromRoot(noConfig)})
+	assert.Equal(t, globalDefault, h.program,
+		"a project with no in-repo config must use the global default, not the outgoing project's program")
+}
+
 // TestTaskCreateAfterFailedResolveUsesGlobalProgram is the user-visible half of
 // #2138: the leaked program was not just a field, it was PERSISTED. Creating a
 // task in a project whose config failed to resolve must record the global

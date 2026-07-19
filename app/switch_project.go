@@ -409,9 +409,28 @@ func (m *home) switchProject(repo *config.RepoContext) (tea.Model, tea.Cmd) {
 
 	// Re-resolve the new project's default program for future sessions. AutoYes,
 	// BranchPrefix, etc. are global-only, so they do not change on switch.
+	//
+	// m.program is PROJECT-scoped state, so every path out of this block must
+	// land on a value derived from the INCOMING project: its own default_program
+	// when it sets one, the global default otherwise. What none of them may do is
+	// leave the OUTGOING project's program in place — task creation falls back to
+	// m.program without re-resolving config and PERSISTS it into tasks.json, so a
+	// carried-over value silently runs this project's tasks under the previous
+	// project's agent (#2138). Session creation is separately covered:
+	// preflightSessionCreate re-resolves and blocks.
 	if resolved, err := config.ResolveConfig(repo.Root); err == nil {
+		// A project that sets no default_program already arrives here as the
+		// global default: ResolveConfig seeds DefaultProgram from the global
+		// config and only overwrites it with a non-empty in-repo value, and a
+		// global config that loaded successfully always carries a valid — hence
+		// non-empty — default_program (validateConfig runs it through
+		// ValidateProgramEnum, which rejects ""). The empty case is therefore
+		// unreachable today; the else keeps the rule above true by construction
+		// rather than by that chain of reasoning holding forever.
 		if resolved.DefaultProgram != "" {
 			m.program = resolved.DefaultProgram
+		} else if m.appConfig != nil {
+			m.program = m.appConfig.DefaultProgram
 		}
 		m.store.SetHookCount(len(resolved.PostWorktreeCommands))
 		m.hooksPane.SetCommands(resolved.PostWorktreeCommands)
@@ -424,13 +443,11 @@ func (m *home) switchProject(repo *config.RepoContext) (tea.Model, tea.Cmd) {
 		// this only matters on an in-place switch.
 		m.store.SetHookCount(0)
 		m.hooksPane.SetCommands(nil)
-		// Reset the program for the same reason, and to the same target the
-		// success branch would land on for a project with no override: the global
-		// default (#2138). Leaving it alone kept the OUTGOING project's program,
-		// and task creation falls back to m.program without re-resolving config —
-		// so the stale value was PERSISTED into tasks.json and the new project's
-		// tasks ran under the previous project's agent. Session creation is
-		// already covered: preflightSessionCreate re-resolves and blocks.
+		// Same reasoning for the program (#2138): a config we cannot parse tells
+		// us nothing about this project's preference, so fall back to the global
+		// default — the value a project that expresses no preference gets. This
+		// branch is where the leak actually shipped, because it was the one path
+		// that left m.program untouched.
 		if m.appConfig != nil {
 			m.program = m.appConfig.DefaultProgram
 		}
