@@ -51,7 +51,7 @@ func TestPreview_CarriesTabAndReturnsContent(t *testing.T) {
 		return apiproto.Success(daemon.PreviewResponse{Content: "PANE-" + strconv.Itoa(req.Tab)})
 	})
 
-	content, gone, err := c.Preview(daemon.PreviewRequest{Title: "alpha", RepoID: "r", Tab: 2, Full: true})
+	content, gone, _, err := c.Preview(daemon.PreviewRequest{Title: "alpha", RepoID: "r", Tab: 2, Full: true})
 	if err != nil {
 		t.Fatalf("Preview: %v", err)
 	}
@@ -72,7 +72,7 @@ func TestPreview_GoneSurfacesFlag(t *testing.T) {
 	c, _ := previewServer(t, func(daemon.PreviewRequest) apiproto.Envelope {
 		return apiproto.Success(daemon.PreviewResponse{Gone: true})
 	})
-	content, gone, err := c.Preview(daemon.PreviewRequest{Title: "alpha"})
+	content, gone, _, err := c.Preview(daemon.PreviewRequest{Title: "alpha"})
 	if err != nil {
 		t.Fatalf("Preview: %v", err)
 	}

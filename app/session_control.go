@@ -342,7 +342,9 @@ func snapshotThroughDaemon(repoID string) (daemon.SnapshotResponse, error) {
 func previewThroughDaemon(req daemon.PreviewRequest) (content string, gone bool, err error) {
 	err = withDaemonHTTP(func(c *apiclient.Client) error {
 		var e error
-		content, gone, e = c.Preview(req)
+		// tabGone is deliberately dropped here: the TUI renders its session-gone
+		// fallback for either cause, and it addresses tabs it can see (#1948).
+		content, gone, _, e = c.Preview(req)
 		return e
 	})
 	return content, gone, err

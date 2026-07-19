@@ -2,7 +2,10 @@ package daemon
 
 import (
 	"errors"
+	"fmt"
+	"strings"
 
+	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
@@ -42,7 +45,20 @@ type PreviewRequest struct {
 	// resolveTabTarget (#1929): once a client addresses a tab by its stable id, no
 	// daemon path may fall back to a positional one.
 	TabID string `json:"tab_id,omitempty"`
-	Full  bool   `json:"full"`
+	// TabName addresses the tab by its canonical name — the handle a user types
+	// (#1986), the one `af sessions tab-create` printed. It is what a person has
+	// on hand: `af sessions preview alpha --tab-name shell` (#1948). Resolved
+	// against the roster the DAEMON holds, so the CLI never has to fetch the tab
+	// list and race it.
+	//
+	// Ranks BELOW TabID and ABOVE Tab, the precedence every tab verb shares (see
+	// session.ResolveTabIndex). A name that matches nothing is an ERROR listing the
+	// tabs that exist — unlike an unresolvable TabID, which answers Gone: an id
+	// that stops resolving means the exact tab the client was looking at went
+	// away, while a name that matches nothing is far more likely a typo, and a
+	// typo deserves the roster rather than a silent empty capture.
+	TabName string `json:"tab_name,omitempty"`
+	Full    bool   `json:"full"`
 }
 
 // PreviewResponse carries the captured content, or Gone=true when the session's
@@ -52,6 +68,19 @@ type PreviewRequest struct {
 type PreviewResponse struct {
 	Content string `json:"content"`
 	Gone    bool   `json:"gone,omitempty"`
+	// TabGone NARROWS Gone: the session is alive and well, but the TAB the request
+	// addressed is not there — an id that no longer resolves, or an ordinal that is
+	// not a slot. Gone is always set alongside it, so a client that only knows
+	// about Gone (the TUI's session-gone fallback) behaves exactly as before.
+	//
+	// It exists because the two causes are indistinguishable to a CLIENT and the
+	// daemon knows them apart. `af sessions preview --tab-id x` used to report a
+	// tab-level miss as "session %q is no longer running": a plain lie about a
+	// running session, and one the CLI could only have avoided by GUESSING from
+	// the fact that it had sent a selector — which is wrong precisely when the
+	// session really did die mid-capture. Carrying the fact is the alternative to
+	// inferring it.
+	TabGone bool `json:"tab_gone,omitempty"`
 }
 
 // Preview captures one tab's content through the session's agent-server — the same
@@ -69,23 +98,46 @@ func (s *controlServer) Preview(req PreviewRequest, resp *PreviewResponse) error
 	if err != nil {
 		return err
 	}
-	// Address the capture by the stable tab id (#1738) when the client gives one:
-	// resolve it to the tab's CURRENT ordinal so a capture follows the tab across a
-	// reorder/close. A non-empty id that no longer resolves is REFUSED as gone —
-	// NOT fallen back to req.Tab (#1779). The fallback previewed whatever tab had
-	// shifted into the stale ordinal, which is precisely the misroute the stable id
-	// exists to prevent. Gone (rather than an error) is the honest answer and the
-	// shape the TUI already degrades on: the addressed tab is genuinely no longer
-	// there. The ordinal is used ONLY when no id was supplied at all — a legacy
-	// client, for which positional addressing is all there ever was.
-	tab := req.Tab
-	if req.TabID != "" {
-		idx, ok := instance.TabIndexByID(req.TabID)
-		if !ok {
-			resp.Gone = true
-			return nil
+	// Address the capture by the stable tab id (#1738), or by name (#1948), when
+	// the client gives one: resolve it to the tab's CURRENT ordinal so a capture
+	// follows the tab across a reorder/close. The precedence — id, then name, then
+	// ordinal — is session.ResolveTabIndex's, shared with every other tab verb
+	// rather than restated here.
+	//
+	// A non-empty id that no longer resolves is REFUSED as gone, NOT fallen back to
+	// req.Tab (#1779): the fallback previewed whatever tab had shifted into the
+	// stale ordinal, precisely the misroute the stable id exists to prevent. Gone
+	// (rather than an error) is the honest answer and the shape the TUI already
+	// degrades on — the addressed tab is genuinely no longer there.
+	//
+	// The ordinal is used ONLY when neither an id nor a name was supplied — a
+	// legacy client, for which positional addressing is all there ever was. It goes
+	// through this same call so it is BOUNDS-CHECKED like every other selector: an
+	// in-range ordinal resolves to itself and behaves byte-for-byte as it always
+	// did, while an out-of-range one used to reach as.Preview and come back as a
+	// silent empty capture with no error at all. A capture verb that answers "" to
+	// a bad slot is the dishonesty this cluster exists to remove, so it is now a
+	// tab-level Gone like any other missing tab.
+	tabs := instance.GetTabs()
+	tab, rerr := session.ResolveTabIndex(tabs, req.TabID, req.TabName, req.Tab)
+	switch {
+	case errors.Is(rerr, session.ErrTabIDNotFound), errors.Is(rerr, session.ErrTabIndexOutOfRange):
+		// Gone, not an error: the tab this client addressed is no longer there,
+		// which is the fallback the TUI already degrades on. TabGone says the
+		// SESSION is fine, so a client need not guess which vanished.
+		resp.Gone, resp.TabGone = true, true
+		return nil
+	case errors.Is(rerr, session.ErrTabNameNotFound):
+		// A name that matches nothing is far more likely a typo than a
+		// disappearance, so answer with the roster rather than an empty capture.
+		ids := make([]string, 0, len(tabs))
+		for _, t := range tabs {
+			ids = append(ids, session.TabIdentifiers(t))
 		}
-		tab = idx
+		return fmt.Errorf("session %q has no tab named %q; its tabs are: %s",
+			req.Title, req.TabName, strings.Join(ids, ", "))
+	case rerr != nil:
+		return rerr
 	}
 	content, err := as.Preview(tab, req.Full)
 	if err != nil {

@@ -156,45 +156,61 @@ func TestDerivationSeesTUIBackendGap(t *testing.T) {
 	}
 }
 
-// TestDerivationSeesPreviewTabGap pins #1948: `af sessions preview` reaches the
-// Preview RPC but can only ever see tab 0. This one also proves the derivation
-// covers an INTERNAL route — Preview is absent from the public catalog, so a
-// route-catalog-only check cannot see it.
-func TestDerivationSeesPreviewTabGap(t *testing.T) {
+// TestDerivationTracksPreviewTabUse is the successor to the #1948 fixture. That
+// gap ("`af sessions preview` reaches the Preview RPC but can only ever see tab
+// 0") is now CLOSED, and the old test said what to do when that happened: retire
+// the fixture. Retiring it outright would delete the meta-check with it, so it is
+// repointed rather than removed — and the post-fix state is a strictly better
+// fixture, because one request type now exercises BOTH failure directions at
+// once:
+//
+//   - under-reporting: the CLI sets tab/tab_id/tab_name/full, so a walk that
+//     missed real usage would report them unreached and manufacture a false gap.
+//   - over-reporting: the TUI sets every field EXCEPT tab_name (it holds the live
+//     tab and addresses it by the stronger TabID), so a walk that credited
+//     construction it never saw would report nothing unreached and hide a real
+//     one.
+//
+// It also still proves the derivation covers an INTERNAL route — Preview is
+// absent from the public catalog, so a route-catalog-only check cannot see it.
+func TestDerivationTracksPreviewTabUse(t *testing.T) {
 	use := deriveGoRequestUse(t, "cli")
 	typeUse := deriveTypeFieldUse(t, "cli")
 
 	u, ok := use["PreviewRequest"]
 	if !ok {
 		t.Fatal("AST found no CLI PreviewRequest construction — the walk is blind " +
-			"(expected api/sessions.go:674)")
+			"(expected api/sessions.go, sessionsPreviewCmd)")
 	}
 	unreached := unreachedFields(auditedRequests["PreviewRequest"], u, typeUse)
-	for _, f := range []string{"tab", "tab_id", "full"} {
-		if !contains(unreached, f) {
-			t.Errorf("derivation says the CLI reaches PreviewRequest.%s, but api/sessions.go:674 "+
-				"sends only {Title, RepoID}. Either #1948 was fixed (retire the fixture) or "+
-				"the AST walk is over-crediting.", f)
+	// Not blind: the CLI provably sets all four selectors since #1948.
+	for _, f := range []string{"title", "tab", "tab_id", "tab_name", "full"} {
+		if contains(unreached, f) {
+			t.Errorf("derivation says the CLI never sets PreviewRequest.%s, but sessionsPreviewCmd "+
+				"plainly does (#1948) — the AST walk is under-reporting, which manufactures false "+
+				"gaps.", f)
 		}
 	}
-	if contains(unreached, "title") {
-		t.Error("derivation says the CLI never sets PreviewRequest.title — it plainly does; " +
-			"the AST walk is under-reporting.")
-	}
 
-	// The TUI is the control: it drives the SAME RPC with every field, so a
-	// derivation that reported the gap for both surfaces would be broken in a way
-	// the CLI-only assertions above could not distinguish.
+	// The TUI is the control, and it is no longer a trivial one: it sets every
+	// field but tab_name, so this pins the derivation's ability to spot a genuine
+	// non-use rather than just agreeing that everything is covered.
 	tuiUse := deriveGoRequestUse(t, "tui")
 	tui, ok := tuiUse["PreviewRequest"]
 	if !ok {
 		t.Fatal("AST found no TUI PreviewRequest construction (expected app/live_stream.go:35)")
 	}
 	tuiUnreached := unreachedFields(auditedRequests["PreviewRequest"], tui, deriveTypeFieldUse(t, "tui"))
-	if len(tuiUnreached) != 0 {
-		t.Errorf("the TUI sets every PreviewRequest field (app/live_stream.go:35), but derivation "+
-			"reports %v unreached — it is over-reporting, which would manufacture false gaps.",
-			tuiUnreached)
+	if !contains(tuiUnreached, "tab_name") {
+		t.Error("derivation says the TUI reaches PreviewRequest.tab_name, but app/live_stream.go " +
+			"addresses the tab by TabID and never sends a name — the AST walk is over-crediting, " +
+			"which HIDES real gaps.")
+	}
+	for _, f := range []string{"title", "tab", "tab_id", "full"} {
+		if contains(tuiUnreached, f) {
+			t.Errorf("derivation says the TUI never sets PreviewRequest.%s, but app/live_stream.go:35 "+
+				"does — the AST walk is under-reporting.", f)
+		}
 	}
 }
 
