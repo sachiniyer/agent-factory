@@ -15,16 +15,23 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// seedArchivedSession builds a real linked worktree (dir/branch derived from the
-// git-safe slug, so a title carrying spaces/parens still gets a valid branch),
+// seedArchivedSession builds a real linked worktree (dir derived from the
+// git-safe slug, so a title carrying spaces/parens still gets a valid path),
 // registers a started instance for it in the manager and on disk, then archives
 // it. The instance ends inert (LiveArchived) with its worktree relocated to the
 // title-keyed archive dir — the precondition for the reuse-archived-name tests.
 // Returns the archived instance and the stable id it was minted with.
+//
+// The branch is m.branchForTitle(title) — the SAME derivation a real create
+// applies to the same title — not a fixture-local invention (#2127). Seeding
+// "af/"+slug while branchForTitle yields "<prefix><title>" meant the fixture's
+// branch could never collide with the branch a create derives, so these tests
+// passed on a shape production never produces: they exercised freeing the TITLE
+// while silently skipping the BRANCH hold that is the whole difficulty here.
 func seedArchivedSession(t *testing.T, m *Manager, repoID, repoPath, title, slug string) (*session.Instance, string) {
 	t.Helper()
 	wtPath := filepath.Join(filepath.Dir(repoPath), "wt-"+slug)
-	branch := "af/" + slug
+	branch := m.branchForTitle(title)
 	out, err := exec.Command("git", "-C", repoPath, "worktree", "add", "-b", branch, wtPath).CombinedOutput()
 	require.NoError(t, err, string(out))
 	require.NoError(t, os.WriteFile(filepath.Join(wtPath, "dirty.txt"), []byte("uncommitted-"+slug), 0644))
@@ -36,13 +43,17 @@ func seedArchivedSession(t *testing.T, m *Manager, repoID, repoPath, title, slug
 	require.NoError(t, err)
 	inst.SetBackend(&recoverFakeBackend{FakeBackend: session.NewFakeBackend()})
 	inst.SetGitWorktreeForTest(gw)
+	// Provision sets i.Branch on a real create; SetGitWorktreeForTest does not, and
+	// InstanceData.Branch reads i.Branch — so without this every "the branch is
+	// preserved" assertion below compared "" to "" and asserted nothing.
+	inst.Branch = branch
 	inst.SetStartedForTest(true)
 	inst.SetStatusForTest(session.Ready)
 	id := inst.ID
 
 	// appendInstanceData (not seedDiskInstance) so multiple seeded sessions
 	// accumulate on disk instead of clobbering one another.
-	require.NoError(t, appendInstanceData(repoID, session.InstanceData{ID: id, Title: title, Path: repoPath, Status: session.Ready}))
+	require.NoError(t, appendInstanceData(repoID, session.InstanceData{ID: id, Title: title, Path: repoPath, Branch: branch, Status: session.Ready}))
 	m.mu.Lock()
 	m.instances[daemonInstanceKey(repoID, title)] = inst
 	m.mu.Unlock()
@@ -53,14 +64,57 @@ func seedArchivedSession(t *testing.T, m *Manager, repoID, repoPath, title, slug
 	return inst, id
 }
 
+// seedArchivedSessionBranchFreed seeds an archived session exactly as
+// seedArchivedSession does, then detaches the archived worktree's HEAD so its
+// branch is no longer checked out anywhere.
+//
+// This is the shape in which reuse-archived-name can actually COMPLETE, and it
+// is what the tests below that exercise the rename machinery — the suffix walk,
+// the Loading-ghost overwrite, the #2106 double-failure recovery — need in order
+// to reach that machinery at all: with the branch still held, #2127's guard
+// refuses before the rename runs, which is the whole point of the guard and not
+// what those tests are about.
+//
+// Detaching is a constructed shape, not what archiving produces (#2013 leaves
+// the branch checked out), and saying so is the honest framing: it is reachable
+// — a user can check something else out inside an archived worktree — and it is
+// what option 1 on #2127 would make the DEFAULT if archiving is ever changed to
+// release the branch. The worktree itself is untouched, so relocation and
+// restore behave identically.
+func seedArchivedSessionBranchFreed(t *testing.T, m *Manager, repoID, repoPath, title, slug string) (*session.Instance, string) {
+	t.Helper()
+	inst, id := seedArchivedSession(t, m, repoID, repoPath, title, slug)
+
+	archivedPath, err := archivedWorktreePath(repoID, title)
+	require.NoError(t, err)
+	out, err := exec.Command("git", "-C", archivedPath, "checkout", "--detach").CombinedOutput()
+	require.NoError(t, err, string(out))
+
+	// Not merely detached on paper: git must no longer report the branch as held,
+	// or the tests relying on this would silently be testing the guarded shape.
+	held, err := sessiongit.BranchesHeldByWorktrees(repoPath)
+	require.NoError(t, err)
+	require.NotContains(t, held, m.branchForTitle(title),
+		"the seeded archived worktree must have released its branch")
+	return inst, id
+}
+
 // TestReserveCreate_ReusesArchivedName is the headline case (feat: reuse archived
 // name): archive "foo", then create a NEW "foo" — the create succeeds and the old
 // archived session is renamed to "foo (archived)", keyed and persisted under the
 // new name, its worktree relocated to the new title-keyed archive dir, and still
 // fully restorable (same worktree contents, branch, and stable id).
+//
+// Seeded with the branch FREED, which is now load-bearing rather than incidental
+// (#2127). The reuse can only complete when the archived session is not still
+// holding the branch the new session derives; with it held, the guard refuses
+// (TestReserveCreate_HeldArchivedBranchRefusesBeforeRename below). The old
+// fixture hid that distinction entirely by seeding an "af/"+slug branch that
+// branchForTitle never produces, so this test used to pass while asserting
+// nothing about the branch at all.
 func TestReserveCreate_ReusesArchivedName(t *testing.T) {
 	manager, repoID, repoPath := newStatusTestManager(t)
-	archived, id := seedArchivedSession(t, manager, repoID, repoPath, "foo", "foo")
+	archived, id := seedArchivedSessionBranchFreed(t, manager, repoID, repoPath, "foo", "foo")
 	branch := archived.GetBranch()
 
 	_, title, release, renamed, err := manager.reserveCreate(CreateSessionRequest{RepoPath: repoPath, Title: "foo", Program: "claude"})
@@ -70,6 +124,23 @@ func TestReserveCreate_ReusesArchivedName(t *testing.T) {
 	assert.Equal(t, "foo", title, "the new session takes the freed title verbatim")
 	require.NotNil(t, renamed, "the collision must have renamed the archived session")
 	assert.Equal(t, "foo (archived)", renamed.Title)
+
+	// The gate this test was missing (#2127): a granted title is worth nothing if
+	// the create it authorizes cannot build its worktree. Freeing the NAME while
+	// the BRANCH stays checked out is exactly the failure the guard now refuses
+	// up front, and only actually running the add can tell the two apart.
+	//
+	// `worktree add <path> <branch>` with no -b is the form AF itself runs when
+	// the derived branch already exists (setupFromExistingBranch), and it is the
+	// command that reports "already used by worktree at …" on a held branch.
+	dest := filepath.Join(t.TempDir(), "new-session")
+	out, addErr := exec.Command("git", "-C", repoPath, "worktree", "add", dest,
+		manager.branchForTitle(title)).CombinedOutput()
+	require.NoError(t, addErr, "the granted title %q must be usable by the create it was granted for: %s", title, string(out))
+	// Vacate it again so the restore assertions below see the archive layout the
+	// rest of this test is about, not this probe's leftovers.
+	out, err = exec.Command("git", "-C", repoPath, "worktree", "remove", "--force", dest).CombinedOutput()
+	require.NoError(t, err, string(out))
 
 	// The archived instance now carries the disambiguated name, re-keyed in the map.
 	assert.Equal(t, "foo (archived)", archived.Title)
@@ -159,7 +230,7 @@ func countRecordsWithTitle(t *testing.T, repoID, title string) int {
 // the ghost was overwritten rather than the archived record dropped.
 func TestReserveCreate_ReusesArchivedName_OverwritesLoadingGhost(t *testing.T) {
 	manager, repoID, repoPath := newStatusTestManager(t)
-	archived, id := seedArchivedSession(t, manager, repoID, repoPath, "foo", "foo")
+	archived, id := seedArchivedSessionBranchFreed(t, manager, repoID, repoPath, "foo", "foo")
 	branch := archived.GetBranch()
 
 	// A legacy Loading ghost squatting on the exact title the rename will pick.
@@ -192,8 +263,8 @@ func TestReserveCreate_ReusesArchivedName_OverwritesLoadingGhost(t *testing.T) {
 // old archived "foo" to the next free slot, "foo (archived 2)".
 func TestReserveCreate_ReusesArchivedName_SuffixCollision(t *testing.T) {
 	manager, repoID, repoPath := newStatusTestManager(t)
-	seedArchivedSession(t, manager, repoID, repoPath, "foo", "foo")
-	seedArchivedSession(t, manager, repoID, repoPath, "foo (archived)", "foo-archived")
+	seedArchivedSessionBranchFreed(t, manager, repoID, repoPath, "foo", "foo")
+	seedArchivedSessionBranchFreed(t, manager, repoID, repoPath, "foo (archived)", "foo-archived")
 
 	_, title, release, renamed, err := manager.reserveCreate(CreateSessionRequest{RepoPath: repoPath, Title: "foo", Program: "claude"})
 	require.NoError(t, err)

@@ -217,13 +217,15 @@ func (m *Manager) reserveCreate(req CreateSessionRequest) (*config.RepoContext, 
 		// (feat: reuse archived name). A LIVE collision is left untouched, so
 		// validateTitleAvailableLocked below still rejects it exactly as before.
 		//
-		// This path deliberately does NOT get #2091's worktree-branch check. The
-		// walk above can route around a held branch by taking the next suffix; an
-		// explicitly requested title has nowhere to go, and the rename that frees
-		// the title does not free the BRANCH the archived worktree still holds —
-		// so gating here would only move a guaranteed failure earlier, not fix it.
-		// Making reuse-archived-name actually work means releasing the branch too;
-		// tracked in #2127.
+		// Ahead of that rename, refuse when the branch this create would derive is
+		// already checked out somewhere (#2127) — freeing the title does not free
+		// the branch, and moving that guaranteed failure EARLIER is the whole point:
+		// discovering it at `git worktree add` leaves the archived session renamed
+		// for a create that then did not happen, which is exactly the state the
+		// admission comment above promises this function never produces.
+		if err := m.refuseHeldBranchReuseLocked(repo.ID, repo.Root, title, usesHook, req.InPlace); err != nil {
+			return nil, "", nil, nil, err
+		}
 		renamedArchived, err = m.renameArchivedForReuseLocked(repo.ID, repo.Root, title, req.Program, &diskData)
 		if err != nil {
 			return nil, "", nil, nil, err
@@ -270,6 +272,63 @@ func (m *Manager) reserveCreate(req CreateSessionRequest) (*config.RepoContext, 
 	}
 
 	return repo, title, release, renamedArchived, nil
+}
+
+// refuseHeldBranchReuseLocked refuses an explicit-title create BEFORE the
+// archived-name-reuse rename touches anything, when the branch the new session
+// would derive is already checked out by a registered worktree (#2127). Runs
+// under m.mu.
+//
+// renameArchivedForReuseLocked frees a TITLE. It does not free a BRANCH: per
+// #2013 archiving relocates a worktree and repairs its registration rather than
+// removing it, so the archived session keeps <prefix><title> checked out, and
+// the new session derives that same branch. `git worktree add` then refuses it
+// and the create fails — with the archived session already renamed out of the
+// way for a create that never happened, the one state reserveCreate's own
+// comment promises a refusal never leaves behind.
+//
+// So ask git first. This does not make reuse-archived-name WORK for a local
+// session — only releasing or relocating the branch can, and that changes what
+// happens to a user's branches, so it is a separate call tracked on #2127. What
+// it does is turn a state-corrupting failure into an honest one that names the
+// blocker and how to clear it.
+//
+// Three deliberate non-firings:
+//
+//   - No archived collision means renameArchivedForReuseLocked will not rename
+//     anything, so there is no invariant to protect. The create proceeds and
+//     fails at `git worktree add` exactly as before. Widening this into a
+//     general "is the branch free" gate over every explicit title would refuse
+//     creates that have nothing to do with this bug.
+//   - Hook and --here creates never derive <prefix><title> at all: a hook
+//     session takes no local worktree (backend_local is the only caller of
+//     NewGitWorktree), and --here attaches to the repo's OWN working tree at ITS
+//     current branch (NewGitWorktreeInPlace). A hold on a branch the create will
+//     not use must not block it.
+//   - A probe that could not RUN yields nil holds, and nil must never refuse.
+//     "I could not ask git" is not "the branch is held"; treating it as one
+//     would block a legitimate reuse on the strength of an answer git never
+//     gave — the fabricated-negative failure this repo keeps paying for. On a
+//     failed probe the create proceeds and, if the branch really is held, fails
+//     loudly at `git worktree add`: precisely the pre-guard behavior, which
+//     destroyed nothing. Only a branch git POSITIVELY reports as held refuses.
+func (m *Manager) refuseHeldBranchReuseLocked(repoID, repoPath, title string, remote, inPlace bool) error {
+	if remote || inPlace {
+		return nil
+	}
+	archived, _ := m.findArchivedOnlyCollisionLocked(repoID, title)
+	if archived == nil {
+		return nil
+	}
+	branch := m.branchForTitle(title)
+	// Indexing a nil map is the nil-probe path: not held, so no refusal.
+	holder, held := m.worktreeHeldBranchesLocked(repoPath, false)[branch]
+	if !held {
+		return nil
+	}
+	return fmt.Errorf("cannot create session %q: the archived session %q still has branch %q checked out at %s, and the new session would derive that same branch. Renaming the archived session aside frees its name but not its branch, so the create would fail at `git worktree add` — permanently delete the archived session to release both (%s), or create this session under a different name",
+		title, archived.Title, branch, config.ShellQuotePath(holder),
+		shellsuggest.Command("af", "sessions", "kill", archived.Title))
 }
 
 // reuseArchivedRenamePersist is the durable title rewrite the archived-name-reuse
@@ -710,6 +769,14 @@ func (m *Manager) titlesCollide(a, b string) bool {
 	return git.TitlesCollide(a, b, m.cfg.BranchPrefix)
 }
 
+// branchesHeldByWorktrees is the git query worktreeHeldBranchesLocked runs. A
+// package var so tests can force the probe to FAIL in isolation — the answer
+// that must NOT block a create (#2127) — without breaking the repo out from
+// under the rest of the create path, which needs it readable to get that far.
+// Mirrors reuseArchivedRenamePersist's precedent. Production points it at the
+// real query and never reassigns it.
+var branchesHeldByWorktrees = git.BranchesHeldByWorktrees
+
 // worktreeHeldBranchesLocked answers "which branches are already checked out by
 // a worktree of this repo" for the title walk (#2091), mapping each to the
 // worktree holding it. Runs under m.mu.
@@ -730,7 +797,7 @@ func (m *Manager) worktreeHeldBranchesLocked(repoPath string, remote bool) map[s
 	if remote {
 		return nil
 	}
-	held, err := git.BranchesHeldByWorktrees(repoPath)
+	held, err := branchesHeldByWorktrees(repoPath)
 	if err != nil {
 		log.WarningLog.Printf("could not list worktree branch holds for %s; resolving the session title without them (a name an archived worktree holds will fail at worktree add instead of being skipped): %v", repoPath, err)
 		return nil

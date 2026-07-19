@@ -45,7 +45,11 @@ import (
 // panics.
 func TestReserveCreate_ReusesArchivedName_DoubleFailureNoSelfDeadlock(t *testing.T) {
 	manager, repoID, repoPath := newStatusTestManager(t)
-	archived, _ := seedArchivedSession(t, manager, repoID, repoPath, "foo", "foo")
+	// Branch freed: this repro must REACH the rename to force its double failure,
+	// and #2127's guard refuses before the rename whenever the archived session
+	// still holds the branch the create derives. Guarding is not what this test
+	// pins — the lock ordering inside the recovery branch is.
+	archived, _ := seedArchivedSessionBranchFreed(t, manager, repoID, repoPath, "foo", "foo")
 
 	// Where the archived worktree lives before the rename; the rollback move
 	// targets exactly this path.
