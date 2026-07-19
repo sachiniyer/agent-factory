@@ -659,7 +659,7 @@ func (i *Instance) ReconcileTabsFromData(target []TabData) (bool, error) {
 
 	changed := false
 
-	// The reconcile keys on the STABLE TAB ID (#1738), not the display name
+	// The reconcile keys on the STABLE TAB ID (#1738), not the name
 	// (#1886/#1905). Names are reused on close+recreate, so a name-keyed reconcile
 	// reported "unchanged" for an out-of-band close+recreate and then silently
 	// re-pointed the local tab's id at the NEW tab — leaving an open pane bound to
@@ -721,11 +721,11 @@ func (i *Instance) ReconcileTabsFromData(target []TabData) (bool, error) {
 		}
 	}
 	// Rename in place by stable id (#1905): a tab whose id is unchanged but whose
-	// display name changed out-of-band (a rename on another client, #1813) keeps
-	// its live tmux session, its slot, and any open pane bound to it — only the
-	// label changes. Without this a rename reads as "old name gone, new name
-	// added", which drops the tab and re-adds it at the END of the roster,
-	// blipping its PTY and reordering it.
+	// name changed out-of-band (a rename on another client, #1813) keeps its live
+	// tmux session, its slot, and any open pane bound to it — only its name, and
+	// so the label derived from it, changes. Without this a rename reads as "old
+	// name gone, new name added", which drops the tab and re-adds it at the END
+	// of the roster, blipping its PTY and reordering it.
 	for _, td := range target {
 		if td.ID == "" {
 			continue
@@ -888,7 +888,7 @@ func (i *Instance) dropTabByName(name string) bool {
 
 // dropTabByID is dropTabByName keyed on the stable id (#1738) — what the
 // id-keyed snapshot reconcile drops on, so a tab whose id left the daemon's
-// roster goes even when a NEW tab has already reused its display name (#1886).
+// roster goes even when a NEW tab has already reused its name (#1886).
 func (i *Instance) dropTabByID(id string) bool {
 	if id == "" {
 		return false

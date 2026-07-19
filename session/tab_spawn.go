@@ -35,7 +35,7 @@ func tabSpawnPreconditionErr(started, hasTmux, hasWorktree bool) error {
 // AddShellTab spawns a new Shell-kind tab running $SHELL in the instance's
 // worktree, appends it to Tabs, and returns it. Local instances only — remote
 // instances have no local worktree, so callers must reject backends without the
-// TabManagement capability before calling. The new tab's display name is unique
+// TabManagement capability before calling. The new tab's name is unique
 // within the instance ("shell",
 // then "shell-2", "shell-3", …) and its tmux session name is derived from it so
 // it is collision-free and restorable by exact name across a restart (#930 PR
@@ -67,7 +67,7 @@ func (i *Instance) AddShellTab() (*Tab, error) {
 
 	// Spawn outside the lock: Start shells out to `tmux new-session` and polls
 	// for the session to appear, which must not block other readers of i.mu. The
-	// tmux name is derived from the agent session + the unique display name so it
+	// tmux name is derived from the agent session + the unique name so it
 	// is collision-free and restorable by exact name.
 	tmuxName := agentTmux.SanitizedName() + tmuxTabSeparator + displayName
 	shellTmux := agentTmux.NewSiblingSession(tmuxName, defaultShell())
@@ -112,9 +112,9 @@ func (i *Instance) AddShellTab() (*Tab, error) {
 // arbitrary command, so an agent can prompt-spawn a tab hosting a data explorer,
 // test watcher, etc. Local instances only — remote instances have no local
 // worktree, so callers must reject backends without the TabManagement capability
-// before calling. The display name is
-// requestedName when non-empty, otherwise derived from the command's basename;
-// it is sanitized and made unique within the instance ("btop", "btop-2", …) so
+// before calling. The name is requestedName when non-empty, otherwise derived
+// from the command's basename; it is sanitized and made unique within the
+// instance ("btop", "btop-2", …) so
 // its derived tmux session name is collision-free and restorable by exact name
 // across a restart. Errors on an empty command, an instance that is not started /
 // has no worktree, or one already at maxTabs.
@@ -147,7 +147,7 @@ func (i *Instance) AddProcessTab(command, requestedName string) (*Tab, error) {
 	}
 
 	// Spawn outside the lock (see AddShellTab): the tmux name is derived from the
-	// agent session + the unique, sanitized display name so it is collision-free
+	// agent session + the unique, sanitized name so it is collision-free
 	// and restorable by exact name. The sibling inherits the agent session's PTY
 	// factory / executor — real in production, mock in tests.
 	tmuxName := agentTmux.SanitizedName() + tmuxTabSeparator + displayName
@@ -186,7 +186,7 @@ func (i *Instance) AddProcessTab(command, requestedName string) (*Tab, error) {
 // pure metadata (a URL the web UI iframes and, for loopback targets, the daemon
 // reverse-proxies), so there is nothing to spawn: the append itself is the whole
 // operation. url must already be normalized (session.NormalizeWebTabURL); the
-// display name is requestedName when non-empty, otherwise "web", made unique
+// name is requestedName when non-empty, otherwise "web", made unique
 // within the instance ("web", "web-2", …). Local instances only, matching
 // shell/process tabs: a web tab is persisted on the local instance record and
 // rebuilt from it on restart, and remote/hook sessions rebuild their tabs from
@@ -230,7 +230,7 @@ func (i *Instance) AddWebTab(url, requestedName string) (*Tab, error) {
 // opens. It takes no target: a vscode tab ALWAYS edits this instance's worktree,
 // and the code-server serving it is daemon-managed per session and resolved
 // lazily at proxy time (see TabKindVSCode), so there is no URL to store. The
-// display name is requestedName when non-empty, otherwise "vscode", made unique
+// name is requestedName when non-empty, otherwise "vscode", made unique
 // within the instance ("vscode", "vscode-2", …). Errors when the instance is not
 // started/has no worktree or already holds maxTabs tabs.
 func (i *Instance) AddVSCodeTab(requestedName string) (*Tab, error) {

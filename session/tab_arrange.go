@@ -29,7 +29,7 @@ func TabKindRenameable(kind TabKind) bool {
 	return kind == TabKindWeb || kind == TabKindProcess || kind == TabKindVSCode
 }
 
-// RenameTab sets a new display name on the tab at idx and returns the RESOLVED
+// RenameTab sets a new name on the tab at idx and returns the RESOLVED
 // name — sanitized, and suffixed ("dup" -> "dup-2") when the sanitized name is
 // already taken — so callers can render what actually happened rather than what
 // was asked for.
