@@ -1,4 +1,7 @@
-tmux kill-server
-rm -rf worktree*
-rm -rf ~/.agent-factory
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+"$script_dir/clean.sh" "$@"
 git worktree prune
