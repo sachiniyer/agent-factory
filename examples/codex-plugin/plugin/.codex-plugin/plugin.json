@@ -1,0 +1,26 @@
+{
+  "name": "agent-factory",
+  "version": "0.1.0",
+  "description": "Drive Agent Factory (af) from Codex: run coding agents in isolated git worktrees, and schedule them.",
+  "author": {
+    "name": "Agent Factory"
+  },
+  "homepage": "https://github.com/sachiniyer/agent-factory",
+  "repository": "https://github.com/sachiniyer/agent-factory",
+  "license": "AGPL-3.0",
+  "keywords": ["agents", "worktrees", "tmux", "automation"],
+  "skills": "./skills/",
+  "hooks": "./hooks/hooks.json",
+  "interface": {
+    "displayName": "Agent Factory",
+    "shortDescription": "Run and schedule coding agents in isolated git worktrees",
+    "longDescription": "Agent Factory (af) runs each AI coding agent in its own git worktree and tmux session. This plugin teaches Codex to drive the af CLI — create and prompt sessions, preview their output, and schedule recurring tasks — and checks at session start whether af is installed.",
+    "developerName": "Agent Factory",
+    "category": "Productivity",
+    "websiteURL": "https://github.com/sachiniyer/agent-factory",
+    "defaultPrompt": [
+      "Use Agent Factory to start a session that fixes the failing test in this repo.",
+      "Use Agent Factory to list my running sessions and preview the one that looks stuck."
+    ]
+  }
+}

@@ -1,0 +1,19 @@
+{
+  "name": "agent-factory-example",
+  "interface": {
+    "displayName": "Agent Factory (example)"
+  },
+  "plugins": [
+    {
+      "name": "agent-factory",
+      "source": {
+        "source": "local",
+        "path": "./plugin"
+      },
+      "policy": {
+        "installation": "AVAILABLE"
+      },
+      "category": "Productivity"
+    }
+  ]
+}

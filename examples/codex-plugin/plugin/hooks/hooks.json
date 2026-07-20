@@ -1,0 +1,15 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${PLUGIN_ROOT}/hooks/af-preflight.sh\"",
+            "statusMessage": "Checking for the af CLI"
+          }
+        ]
+      }
+    ]
+  }
+}

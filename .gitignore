@@ -11,6 +11,10 @@
 # Build artifacts
 agent-factory
 af
+
+# ...but "agent-factory" is also a legitimate directory name (an af skill is
+# named after the tool), and the bare pattern above matches at any depth.
+!examples/codex-plugin/plugin/skills/agent-factory/
 cs
 *.exe
 *.dll
