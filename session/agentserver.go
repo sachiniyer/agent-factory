@@ -3,6 +3,7 @@ package session
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 )
 
@@ -12,6 +13,19 @@ import (
 // tab by its stable id, silently serving whatever tab now sits at some ordinal is
 // the misroute the id exists to prevent (#1779). Callers map it to a 404/gone.
 var ErrTabGone = errors.New("no tab with that id")
+
+// ErrTabClosed ends a PTY subscription whose TAB was closed (#2136), as opposed
+// to the session-wide teardown that ends every tab's stream at once (Kill). It is
+// the end-of-stream error CloseTab hands the closed tab's subscribers so the WS
+// writer can name the cause instead of leaving them blocked until the keepalive
+// gives up.
+//
+// It WRAPS io.EOF deliberately: every consumer of a subscription already treats
+// io.EOF as "this stream is over" (daemon/ws_pty.go, the attach clients, the
+// tests), and a tab close IS that — only with a known cause. Wrapping means the
+// distinction is opt-in for the one caller that renders it, and no existing
+// errors.Is(err, io.EOF) check has to learn about tabs.
+var ErrTabClosed = fmt.Errorf("tab closed: %w", io.EOF)
 
 // TabAddressableServer is implemented by an agent-server whose data plane can be
 // addressed by a tab's STABLE id (#1738) instead of a shifting ordinal. It is the
@@ -197,8 +211,9 @@ type Observation struct {
 type PTYSubscription interface {
 	// NextEvent blocks until the next stream event (output bytes or a resize
 	// echo), ctx cancellation, or Close. It returns io.EOF once the stream ends
-	// (the session's PTY vanished or the broker closed). A client that reconnects
-	// resumes from Seq() via Subscribe(since).
+	// (the session's PTY vanished or the broker closed), or ErrTabClosed — which
+	// wraps io.EOF — when the end came from THIS tab being closed (#2136). A client
+	// that reconnects resumes from Seq() via Subscribe(since).
 	NextEvent(ctx context.Context) (PTYEvent, error)
 	// Seq reports the cursor of the next output byte this subscriber will read, so
 	// a client that reconnects can resume the gap with Subscribe(since).

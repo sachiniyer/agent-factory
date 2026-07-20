@@ -321,9 +321,23 @@ func writePTYStream(ctx context.Context, sub session.PTYSubscription, conn *webs
 			// agent-server, which already emits MsgExit that the TUI attach consumes
 			// (apiclient/attach.go). Go stream consumers (TUI live panes) ignore an
 			// unrecognized control frame, so the added frame is safe for them.
+			//
+			// A tab close (#2136) is a third case that used to be NEITHER: CloseTab
+			// killed the tab's tmux without touching its broker, so NextEvent never
+			// returned and a PTY-only client sat on a dead stream until the keepalive
+			// dropped it ~15s later. It now ends the stream with ErrTabClosed, which
+			// WRAPS io.EOF — so it takes the same "tell the client" branch, and the only
+			// difference on the wire is the exit's additive reason field. An old client
+			// reads a plain exit and settles exactly as it does on a session end (which
+			// is right: this stream is over either way); a client that reads the reason
+			// can say "tab closed" and leave the session's other tabs alone.
 			if ctx.Err() == nil && errors.Is(err, io.EOF) {
+				exit := agentproto.NewExitMessage(0)
+				if errors.Is(err, session.ErrTabClosed) {
+					exit = agentproto.NewTabClosedMessage()
+				}
 				ectx, ecancel := context.WithTimeout(context.Background(), wsWriteTimeout)
-				_ = agentproto.WriteControl(ectx, conn, agentproto.NewExitMessage(0))
+				_ = agentproto.WriteControl(ectx, conn, exit)
 				ecancel()
 			}
 			return

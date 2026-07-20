@@ -16,6 +16,10 @@ func TestControlMessageWireShapes(t *testing.T) {
 		{"resize", NewResizeMessage(24, 80), `{"type":"resize","rows":24,"cols":80}`},
 		{"exit", NewExitMessage(0), `{"type":"exit","code":0}`},
 		{"exit_nonzero", NewExitMessage(137), `{"type":"exit","code":137}`},
+		// #2136: the tab-close exit is the SAME frame with an additive reason, and
+		// the reasonless session-end exit above must stay byte-identical (omitempty)
+		// so no existing client sees a changed wire shape.
+		{"exit_tab_closed", NewTabClosedMessage(), `{"type":"exit","code":0,"reason":"tab_closed"}`},
 		{"detach", NewDetachMessage(), `{"type":"detach"}`},
 	}
 	for _, tc := range cases {

@@ -164,6 +164,86 @@ func TestWSPTYSessionKillEmitsExit(t *testing.T) {
 	waitUntil(t, 5*time.Second, "subscriber received MsgExit on session kill", func() bool {
 		return a.sawExit()
 	})
+	// The session-end exit carries NO reason — the additive tab-close reason
+	// (#2136) must not leak onto the path every existing client already handles.
+	if r := a.exitReason(); r != "" {
+		t.Errorf("session-kill exit reason = %q, want empty", r)
+	}
+}
+
+// TestWSPTYCloseTabNotifiesSubscribers is the #2136 regression: closing a TAB
+// must end that tab's PTY stream with a protocol-level exit, promptly. Before the
+// fix CloseTab killed the tab's tmux session but left its broker open, so a
+// PTY-only subscriber (a third-party client on apiclient.DialStream, which is not
+// on the events plane) got NOTHING — it sat on a dead stream until the WS
+// keepalive dropped it up to 15s later, with no way to tell the tab had gone.
+//
+// It also pins the property the fix must not trade for that: brokers are per-tab,
+// so closing one tab must NOT tear down a SIBLING tab's live stream.
+func TestWSPTYCloseTabNotifiesSubscribers(t *testing.T) {
+	testguard.SkipDarwinPTYStream(t)
+	h := newHarness(t)
+	h.startDaemon()
+	h.createSession("wstabclose")
+
+	// Two process tabs running `cat`, so each pane echoes what its own subscriber
+	// sends and the two streams are provably distinct.
+	h.run("sessions", "--repo", h.repo, "tab-create", "wstabclose", "--command", "cat", "--name", "alpha")
+	h.run("sessions", "--repo", h.repo, "tab-create", "wstabclose", "--command", "cat", "--name", "beta")
+	closedID := h.tabID(t, "wstabclose", "alpha")
+	siblingID := h.tabID(t, "wstabclose", "beta")
+
+	// Address both by their STABLE tab id (#1738) — the id-native path a real
+	// client binds on, and the identity the broker is keyed by.
+	closed := h.dialWS(t, "/v1/sessions/wstabclose/stream?tab_id="+closedID)
+	defer closed.close()
+	sibling := h.dialWS(t, "/v1/sessions/wstabclose/stream?tab_id="+siblingID)
+	defer sibling.close()
+	closed.sendInput(t, []byte("alpha-marker\n"))
+	closed.waitOutput(t, "alpha-marker")
+	sibling.sendInput(t, []byte("beta-marker\n"))
+	sibling.waitOutput(t, "beta-marker")
+
+	h.run("sessions", "--repo", h.repo, "tab-delete", "wstabclose", "--name", "alpha")
+
+	// PROMPT: 5s is well inside the 15s keepalive this used to fall through to.
+	waitUntil(t, 5*time.Second, "closed tab's subscriber received an exit", func() bool {
+		return closed.sawExit()
+	})
+	// ...and it says WHY, so a client can render "tab closed" and leave the rest of
+	// the session alone. An older client that ignores the field reads a plain exit
+	// and settles the same way it does on a session end — which is also right here.
+	if r := closed.exitReason(); r != "tab_closed" {
+		t.Errorf("closed tab's exit reason = %q, want %q", r, "tab_closed")
+	}
+
+	// NO over-teardown: the sibling tab's stream is untouched and still live.
+	if sibling.sawExit() {
+		t.Fatal("closing one tab must not exit a SIBLING tab's stream")
+	}
+	sibling.sendInput(t, []byte("beta-still-here\n"))
+	sibling.waitOutput(t, "beta-still-here")
+}
+
+// tabID resolves a session's tab name to its stable id (#1738), the handle the
+// stream binds on (?tab_id=).
+func (h *harness) tabID(t *testing.T, title, tabName string) string {
+	t.Helper()
+	for _, s := range h.listSessions() {
+		if s.Title != title {
+			continue
+		}
+		for _, tab := range s.Tabs {
+			if tab.Name == tabName {
+				if tab.ID == "" {
+					t.Fatalf("session %q tab %q has no stable id", title, tabName)
+				}
+				return tab.ID
+			}
+		}
+	}
+	t.Fatalf("session %q has no tab named %q", title, tabName)
+	return ""
 }
 
 // wsClient is a test subscriber: a coder/websocket connection with a read pump
@@ -177,6 +257,10 @@ type wsClient struct {
 	out     []byte
 	resizes []agentproto.ResizeMessage
 	exited  bool
+	// lastExitReason is the exit's additive "reason" (#2136), read as a bare
+	// string rather than through the agentproto type so this harness asserts the
+	// WIRE contract a third-party client sees.
+	lastExitReason string
 	// cursor is the absolute replay cursor, tracked the way a real client tracks it
 	// (ui/termpane, web/src/terminal.ts): seeded from the handshake seq, ADOPTED from
 	// every HELLO frame, and advanced by each PTY_OUT byte. Deliberately NOT
@@ -245,6 +329,11 @@ func (c *wsClient) readPump() {
 				c.resizes = append(c.resizes, rm)
 			}
 		} else if typ, _ := agentproto.MessageTypeOf(msg.Text); typ == agentproto.MsgExit {
+			var em struct {
+				Reason string `json:"reason"`
+			}
+			_ = json.Unmarshal(msg.Text, &em)
+			c.lastExitReason = em.Reason
 			c.exited = true
 		}
 		c.mu.Unlock()
@@ -281,6 +370,14 @@ func (c *wsClient) sawExit() bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.exited
+}
+
+// exitReason is the "reason" carried by the MsgExit this client received, or ""
+// for the reasonless session-end exit (#2136).
+func (c *wsClient) exitReason() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.lastExitReason
 }
 
 // sinceCursor is the absolute seq this client has consumed — what it would send as

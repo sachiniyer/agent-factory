@@ -43,15 +43,41 @@ func NewResizeMessage(rows, cols uint16) ResizeMessage {
 	return ResizeMessage{Type: MsgResize, Rows: rows, Cols: cols}
 }
 
+// ExitReason says WHY a MsgExit ended the stream. It is an additive
+// discriminator (#1029: additive envelope, no renames): a client that ignores it
+// reads every exit exactly as it did before the field existed, which is the
+// correct end-of-stream handling in all cases — the stream it was reading is over
+// and reconnecting to it is pointless. A client that reads it can say something
+// truer than "the agent exited".
+type ExitReason string
+
+const (
+	// ExitReasonTabClosed marks the exit of a stream whose TAB was closed (#2136),
+	// as opposed to the session-wide end (an empty reason). The distinction is
+	// per-stream either way — both mean "this PTY is gone" — so it changes only what
+	// a client can RENDER and whether it may keep other tabs of the same session
+	// open, never whether it stops reading this one.
+	ExitReasonTabClosed ExitReason = "tab_closed"
+)
+
 // ExitMessage reports the agent/PTY end code.
 type ExitMessage struct {
 	Type MessageType `json:"type"`
 	Code int         `json:"code"`
+	// Reason is why the stream ended; omitempty so the session-end exit every
+	// existing client already handles goes on the wire byte-identically.
+	Reason ExitReason `json:"reason,omitempty"`
 }
 
 // NewExitMessage builds an exit notice.
 func NewExitMessage(code int) ExitMessage {
 	return ExitMessage{Type: MsgExit, Code: code}
+}
+
+// NewTabClosedMessage builds the exit notice for a stream whose tab was closed
+// (#2136). Code 0: a closed tab is an orderly teardown, not a crashed process.
+func NewTabClosedMessage() ExitMessage {
+	return ExitMessage{Type: MsgExit, Code: 0, Reason: ExitReasonTabClosed}
 }
 
 // DetachMessage is a client's clean-close signal.

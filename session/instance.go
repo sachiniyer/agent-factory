@@ -488,35 +488,6 @@ func (i *Instance) TabTmuxName(idx int) string {
 	return ts.SanitizedName()
 }
 
-// CloseTab kills the tab at idx and removes it from Tabs. The agent tab (idx 0)
-// is unclosable; CloseTab errors on idx 0 or any out-of-range index. The tab is
-// removed from Tabs regardless of whether the tmux teardown succeeds (best-
-// effort, matching LocalBackend.Kill) so a broken session can't wedge the tab
-// list. Unlike Kill this does not wait for the pane to exit: the worktree is not
-// being removed, so there is no #802 delete race to guard against.
-func (i *Instance) CloseTab(idx int) error {
-	i.mu.Lock()
-	if idx <= 0 || idx >= len(i.Tabs) {
-		i.mu.Unlock()
-		return fmt.Errorf("tab cannot be closed")
-	}
-	tab := i.Tabs[idx]
-	i.Tabs = append(i.Tabs[:idx], i.Tabs[idx+1:]...)
-	i.mu.Unlock()
-
-	if tab.tmux == nil {
-		return nil
-	}
-	// Pane state deliberately ignored: closing ONE tab touches no worktree, so
-	// nothing destructive follows an unknown here. (A Close that fails after the
-	// tab was already dropped from i.Tabs above leaks the tmux session — true of
-	// every Close failure, not just a timeout, and unchanged by #1917.)
-	if _, err := tab.tmux.Close(); err != nil {
-		return fmt.Errorf("failed to close tab %q: %w", tab.Name, err)
-	}
-	return nil
-}
-
 // AttachShellTab reconnects this local instance's in-memory tab list to a shell
 // tab that already exists server-side — one the daemon's CreateTab RPC just
 // spawned out-of-band (#960 PR 2). It is the no-spawn counterpart of
