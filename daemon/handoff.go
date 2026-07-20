@@ -135,7 +135,7 @@ func (m *Manager) HandoffSession(req HandoffSessionRequest) (HandoffSessionRespo
 		return HandoffSessionResponse{}, err
 	}
 
-	outgoing := instance.ResolvedAgent()
+	outgoing := instance.CurrentAgentName()
 
 	// The mission describes the outgoing agent's work, so build it before the
 	// swap rewrites who the outgoing agent is.

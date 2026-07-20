@@ -66,7 +66,7 @@ func (i *Instance) SwapAgent() error {
 	if !i.Capabilities().Handoff {
 		return ErrHandoffUnsupported
 	}
-	return i.backend.SwapAgent(i)
+	return i.currentBackend().SwapAgent(i)
 }
 
 // ArchiveTeardown tears down every tab's tmux session for an archive AND

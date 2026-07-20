@@ -104,11 +104,10 @@ func (i *Instance) LastHandoff() (AgentHandoff, bool) {
 // the CLI, the RPC, and the TUI so all three refuse the same inputs with the
 // same words.
 //
-// The target is compared against ResolvedAgent — what the pane is ACTUALLY
-// running — not the stored enum. program_overrides can point an agent name at
-// an arbitrary command, and #1116's rule is that every agent-keyed decision
-// keys off the resolved command. Keying the same-agent check off the enum would
-// let "hand codex off to codex" through whenever an override was in play.
+// The target is compared against CurrentAgentName, not ResolvedAgent. See that
+// function for why: ResolvedAgent answers "which binary is running" and is
+// documented to return "" for a wrapper script, which silently disables this
+// guard exactly when a user has customized their setup.
 func (i *Instance) ValidateHandoffTarget(target string) error {
 	target = strings.TrimSpace(target)
 	if target == "" {
@@ -117,10 +116,62 @@ func (i *Instance) ValidateHandoffTarget(target string) error {
 	if !tmux.IsSupportedProgram(target) {
 		return fmt.Errorf("unknown agent %q: handoff target must be one of %s", target, tmux.SupportedProgramsString())
 	}
-	if current := i.ResolvedAgent(); current == target {
+	if current := i.CurrentAgentName(); current == target {
 		return fmt.Errorf("session is already running %s", target)
 	}
 	return nil
+}
+
+// CurrentAgentName reports which agent enum this session should be treated AS.
+// It returns "" only when that is genuinely unknowable, and every handoff
+// surface — the picker's filter, the same-agent guard, the confirmation copy,
+// the ledger's outgoing entry — resolves it through here so they cannot
+// disagree about who is being replaced.
+//
+// It is deliberately NOT ResolvedAgent, and the difference is load-bearing.
+// ResolvedAgent answers a different question — "which binary is this pane
+// actually running" — for decisions like claude-only flag injection and
+// readiness detection (#1116). For those, a wrapper script that af cannot
+// identify SHOULD come back empty: injecting claude's flags into an unknown
+// command would break it. configuration.md documents that contract ("if you
+// wrap an agent in a script, name the script after the agent").
+//
+// Identity is not that question. A session created as claude is claude even
+// when it launches through ~/bin/my-claude-wrapper, and answering "" there is
+// not conservative — it is what let the picker offer claude as a handoff target
+// for a session already running claude, and let the same-agent guard pass it.
+// A self-handoff kills a working agent and restarts it with no conversation, so
+// the empty answer authorized the destructive path rather than blocking it.
+//
+// Precedence runs from most to least direct evidence:
+//  1. the running command, when af can identify it — it beats any record,
+//     because an override pointing "claude" at codex really is running codex;
+//  2. the conversation the agent actually opened, captured at runtime;
+//  3. the configured enum, which is what the user asked for and what a handoff
+//     rewrites — this is the one that rescues the wrapper-script case.
+func (i *Instance) CurrentAgentName() string {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	return i.currentAgentNameLocked()
+}
+
+// currentAgentNameLocked is CurrentAgentName's already-locked half, for callers
+// holding i.mu (SwapAgentProgram builds the ledger entry inside its write lock,
+// and sync.RWMutex is not reentrant). TmuxSession.Program takes only the tmux
+// session's own programMu and never calls back into Instance, so reading it
+// under i.mu introduces no lock cycle.
+func (i *Instance) currentAgentNameLocked() string {
+	if ts := i.tmuxLocked(); ts != nil {
+		if agent := tmux.DetectAgentFromCommand(ts.Program()); agent != "" {
+			return agent
+		}
+	}
+	if len(i.Tabs) > 0 {
+		if recorded := strings.TrimSpace(i.Tabs[0].Conversation.Agent); tmux.IsSupportedProgram(recorded) {
+			return recorded
+		}
+	}
+	return tmux.DetectAgentFromCommand(i.Program)
 }
 
 // SwapAgentProgram rewrites the instance's agent program in place and appends
@@ -151,12 +202,13 @@ func (i *Instance) SwapAgentProgram(target, reason, headSHA string, automatic bo
 		return AgentHandoff{}, fmt.Errorf("session %q has no agent tab to hand off", i.Title)
 	}
 
-	// Record the outgoing agent by what it actually resolved to, falling back to
-	// the stored enum when no tmux session has been bound yet (tests, and an
-	// instance handed off before its first start).
+	// Record the outgoing agent through the shared identity resolver, so the
+	// ledger names the same agent the guard compared and the confirmation
+	// showed. The conversation id alongside it is what makes a hand-back able to
+	// re-enter the outgoing agent's own thread, so it is kept as captured.
 	outgoing := i.Tabs[0].Conversation
 	if strings.TrimSpace(outgoing.Agent) == "" {
-		outgoing.Agent = tmux.DetectAgentFromCommand(i.Program)
+		outgoing.Agent = i.currentAgentNameLocked()
 	}
 
 	entry := AgentHandoff{

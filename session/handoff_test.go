@@ -225,3 +225,103 @@ func TestMissionBrief_NoGoalIsStatedNotInvented(t *testing.T) {
 		t.Fatalf("brief renders an empty goal section.\n%s", rendered)
 	}
 }
+
+// TestCurrentAgentNameSurvivesUndetectableCommand pins the identity rule that
+// the handoff surfaces depend on, using the state that actually broke: a live
+// session whose command af cannot identify.
+//
+// program_overrides may point an agent enum at any command, and af identifies
+// an agent by command-token BASENAME — so a wrapper script named anything other
+// than the agent resolves to "" by design (configuration.md). Every earlier
+// handoff test bound no tmux session at all, so ResolvedAgent fell back to the
+// stored enum and the same-agent guard looked correct while being untested for
+// the one configuration that defeats it.
+//
+// Found by driving the real TUI: the picker offered "claude" for a session
+// already running claude, and the guard passed it — a self-handoff that stops a
+// working agent and restarts it with no conversation.
+func TestCurrentAgentNameSurvivesUndetectableCommand(t *testing.T) {
+	inst := handoffTestInstance(t, tmux.ProgramClaude)
+	inst.SetTmuxSession(tmux.NewTmuxSessionFromSanitizedNameWithDeps(
+		"af_handoff_wrapper", "/home/dev/bin/my-claude-wrapper.sh", nil, nil))
+
+	if got := inst.ResolvedAgent(); got != "" {
+		t.Fatalf("precondition failed: ResolvedAgent()=%q, want \"\" — this test needs a command af cannot identify", got)
+	}
+	if got := inst.CurrentAgentName(); got != tmux.ProgramClaude {
+		t.Fatalf("CurrentAgentName()=%q, want %q: a session configured as claude is claude even behind a wrapper script",
+			got, tmux.ProgramClaude)
+	}
+	if err := inst.ValidateHandoffTarget(tmux.ProgramClaude); err == nil {
+		t.Fatal("same-agent handoff accepted behind a wrapper script: the swap would stop a working agent and restart it with no conversation")
+	}
+}
+
+// TestCurrentAgentNamePrefersTheRunningCommand is the other half of the rule.
+// When af CAN identify the running command it wins over the stored enum: an
+// override pointing "claude" at codex really is running codex, so handing that
+// session "to codex" is the no-op the guard must catch.
+func TestCurrentAgentNamePrefersTheRunningCommand(t *testing.T) {
+	inst := handoffTestInstance(t, tmux.ProgramClaude)
+	inst.SetTmuxSession(tmux.NewTmuxSessionFromSanitizedNameWithDeps(
+		"af_handoff_mismatch", "/usr/local/bin/codex --sandbox", nil, nil))
+
+	if got := inst.CurrentAgentName(); got != tmux.ProgramCodex {
+		t.Fatalf("CurrentAgentName()=%q, want %q: the running command outranks the configured enum", got, tmux.ProgramCodex)
+	}
+	if err := inst.ValidateHandoffTarget(tmux.ProgramCodex); err == nil {
+		t.Fatal("handoff to the agent already running accepted")
+	}
+	if err := inst.ValidateHandoffTarget(tmux.ProgramClaude); err != nil {
+		t.Fatalf("handoff to the configured-but-not-running agent rejected: %v", err)
+	}
+}
+
+// TestSwapAgentProgramRecordsResolvedOutgoingAgent locks the ledger to the same
+// identity resolver as the guard. The ledger's outgoing agent is what a
+// hand-back reads to restore the previous agent, so a "" there strands the
+// session's own history.
+func TestSwapAgentProgramRecordsResolvedOutgoingAgent(t *testing.T) {
+	inst := handoffTestInstance(t, tmux.ProgramClaude)
+	inst.Tabs[0].Conversation = AgentConversationData{}
+	inst.SetTmuxSession(tmux.NewTmuxSessionFromSanitizedNameWithDeps(
+		"af_handoff_ledger", "/home/dev/bin/my-claude-wrapper.sh", nil, nil))
+
+	entry, err := inst.SwapAgentProgram(tmux.ProgramCodex, HandoffReasonManual, "abc123", false)
+	if err != nil {
+		t.Fatalf("SwapAgentProgram: %v", err)
+	}
+	if entry.From.Agent != tmux.ProgramClaude {
+		t.Fatalf("ledger recorded outgoing agent %q, want %q", entry.From.Agent, tmux.ProgramClaude)
+	}
+}
+
+// TestMissionBrief_ReadsAsEnglishForEveryReason covers a copy defect found by
+// driving a real handoff and reading what the incoming agent was actually sent:
+// "It was being done by claude, which stopped because it hit manual."
+//
+// The HandoffReason* constants are ledger LABELS, and the brief interpolated one
+// straight into a sentence. "usage limit" happened to read acceptably there,
+// which is why it survived review — the manual reason, the one the only shipped
+// trigger produces, did not.
+func TestMissionBrief_ReadsAsEnglishForEveryReason(t *testing.T) {
+	for _, tc := range []struct {
+		reason   string
+		wantSub  string
+		bannedIn string
+	}{
+		{HandoffReasonManual, "handed over to you", "hit manual"},
+		{HandoffReasonUsageLimit, "hit its usage limit", "hit usage limit."},
+		{"", "stopped before the work was finished", "hit ."},
+	} {
+		inst := handoffTestInstance(t, tmux.ProgramClaude)
+		rendered := inst.BuildMissionBrief(tmux.ProgramGemini, "", tc.reason).Render()
+
+		if !strings.Contains(rendered, tc.wantSub) {
+			t.Fatalf("reason %q: brief lacks %q\n%s", tc.reason, tc.wantSub, rendered)
+		}
+		if strings.Contains(rendered, tc.bannedIn) {
+			t.Fatalf("reason %q: brief still contains the malformed clause %q\n%s", tc.reason, tc.bannedIn, rendered)
+		}
+	}
+}

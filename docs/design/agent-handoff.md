@@ -417,6 +417,28 @@ Handoff adds two more agent-keyed behaviors (target selection, limit-registry
 keying) and both must obey it. Keying off `Instance.Program` would pick a
 fallback that isn't what runs.
 
+> **Corrected during the build — this section was half right.** The rule above
+> is correct for *behavioral* decisions (flag injection, readiness), and wrong
+> when applied unchanged to **identity**. `ResolvedAgent()` answers "which
+> binary is running" and returns `""` when it cannot tell — and
+> `configuration.md` documents that a wrapper script not named after its agent
+> is exactly that case, by design.
+>
+> Handoff then used `""` as an *answer*. Driving the real TUI showed what that
+> produces: for a session running claude through `~/bin/my-claude-wrapper`, the
+> picker offered **claude** as a handoff target and the same-agent guard passed
+> it — a self-handoff that stops a working agent and restarts it with no
+> conversation. The empty answer authorized the destructive path instead of
+> blocking it — a probe that cannot know, answering anyway.
+>
+> Identity now resolves through `Instance.CurrentAgentName()`, which prefers the
+> running command when identifiable, then the captured conversation, then the
+> configured enum, and reserves `""` for genuinely unknowable. The picker, the
+> guard, the confirmation copy, and the ledger all read it, so they cannot
+> disagree about who is being replaced — they previously used three different
+> sources. `ResolvedAgent()` keeps its original meaning for the behavioral
+> decisions above, unchanged.
+
 Also: `SupportedPrograms` (`session/tmux/session.go:27`) is **positionally
 load-bearing** — `app/handle_overlay.go:24` indexes it by overlay row. Any
 agent-picker reuse must not reorder it.

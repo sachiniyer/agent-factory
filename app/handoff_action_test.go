@@ -1,6 +1,7 @@
 package app
 
 import (
+	"strings"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -119,4 +120,32 @@ func TestHandleStateSelectHandoffAgent_CancelDoesNotSwap(t *testing.T) {
 	require.Equal(t, stateDefault, h.state, "cancelling returns to the default state")
 	require.Nil(t, h.confirmationOverlay, "cancelling must not raise a confirmation")
 	require.False(t, called)
+}
+
+// TestHandoffConfirmMessage_OmitsAnUnknownOutgoingAgent covers the copy defect
+// found by driving the real TUI: with an unidentifiable agent the dialog
+// rendered "Hand 'alpha' from  to claude?" — a double space where the outgoing
+// agent should be.
+//
+// The identity fix (Instance.CurrentAgentName) makes the empty case rare, but
+// not impossible: a session whose program is a bare non-agent command has no
+// agent name to report, and this is the dialog a user reads before letting af
+// replace a running agent. It should read as a deliberate sentence, not a
+// failed interpolation.
+func TestHandoffConfirmMessage_OmitsAnUnknownOutgoingAgent(t *testing.T) {
+	withFrom := handoffConfirmMessage("alpha", "codex", "claude")
+	if withFrom != "Hand 'alpha' from codex to claude?" {
+		t.Fatalf("message = %q, want the outgoing agent named", withFrom)
+	}
+
+	unknown := handoffConfirmMessage("alpha", "", "claude")
+	if strings.Contains(unknown, "  ") {
+		t.Fatalf("message = %q, contains a double space from interpolating an empty agent name", unknown)
+	}
+	if strings.Contains(unknown, "from") {
+		t.Fatalf("message = %q, keeps a dangling \"from\" clause with no agent to name", unknown)
+	}
+	if !strings.Contains(unknown, "claude") || !strings.Contains(unknown, "alpha") {
+		t.Fatalf("message = %q, must still name the session and the target", unknown)
+	}
 }

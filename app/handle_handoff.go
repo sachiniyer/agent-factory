@@ -31,6 +31,23 @@ func handoffAgentChoices(current string) []string {
 	return choices
 }
 
+// handoffConfirmMessage builds the confirmation prompt for a handoff.
+//
+// It leads with the consequential half: the clipped-notice class (#1973) drops
+// the TAIL of a line at real terminal widths, so what the user must understand
+// goes first and the reassurance goes last.
+//
+// When the outgoing agent is unknown it drops the "from" clause entirely rather
+// than interpolating an empty string. "Hand 'alpha' from  to codex?" renders a
+// double space and reads as a rendering bug — on the one dialog that has to be
+// trusted before a running agent is replaced.
+func handoffConfirmMessage(title, from, target string) string {
+	if from == "" {
+		return fmt.Sprintf("Hand '%s' to %s?", title, target)
+	}
+	return fmt.Sprintf("Hand '%s' from %s to %s?", title, from, target)
+}
+
 // handleHandoff opens the agent picker for a handoff (#2013).
 //
 // Guards run BEFORE the picker, not after the choice: making the user pick an
@@ -48,7 +65,7 @@ func (m *home) handleHandoff() (tea.Model, tea.Cmd) {
 		return m, m.handleError(fmt.Errorf("session '%s' cannot be handed off: only local-worktree sessions can swap their agent", selected.Title))
 	}
 
-	current := selected.ResolvedAgent()
+	current := selected.CurrentAgentName()
 	choices := handoffAgentChoices(current)
 	if len(choices) == 0 {
 		return m, m.handleError(fmt.Errorf("no other agent is available to hand '%s' off to", selected.Title))
@@ -90,12 +107,9 @@ func (m *home) handleStateSelectHandoffAgent(msg tea.KeyMsg) (tea.Model, tea.Cmd
 		return m, nil
 	}
 	title := selected.Title
-	from := selected.ResolvedAgent()
+	from := selected.CurrentAgentName()
 
-	// Lead with the consequential half: the clipped-notice class (#1973) drops the
-	// TAIL of a line at real terminal widths, so what the user must understand
-	// goes first and the reassurance goes last.
-	message := fmt.Sprintf("Hand '%s' from %s to %s?", title, from, target)
+	message := handoffConfirmMessage(title, from, target)
 	detail := "The new agent starts fresh with a summary of the work so far. " +
 		"Same worktree and branch — nothing is discarded."
 

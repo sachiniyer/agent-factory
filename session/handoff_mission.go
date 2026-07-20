@@ -43,7 +43,7 @@ type MissionBrief struct {
 // a brief, minus the "work already done" section.
 func (i *Instance) BuildMissionBrief(to, override, reason string) MissionBrief {
 	brief := MissionBrief{
-		From:   i.ResolvedAgent(),
+		From:   i.CurrentAgentName(),
 		To:     strings.TrimSpace(to),
 		Reason: strings.TrimSpace(reason),
 	}
@@ -83,14 +83,10 @@ func (m MissionBrief) Render() string {
 	if strings.TrimSpace(from) == "" {
 		from = "another agent"
 	}
-	reason := m.Reason
-	if strings.TrimSpace(reason) == "" {
-		reason = "an external limit"
-	}
-
 	b.WriteString("You are continuing work that is already in progress in this worktree.\n\n")
-	fmt.Fprintf(&b, "It was being done by %s, which stopped because it hit %s. "+
-		"Its conversation is not available to you — only the working tree and its git history are.\n", from, reason)
+	fmt.Fprintf(&b, "It was being done by %s, which %s. "+
+		"Its conversation is not available to you — only the working tree and its git history are.\n",
+		from, stoppedClause(m.Reason))
 
 	if m.Goal != "" {
 		b.WriteString("\nThe original goal:\n\n")
@@ -119,6 +115,28 @@ func (m MissionBrief) Render() string {
 	b.WriteString("\nContinue from that state. Do not start over, and do not revert work you did not write.\n")
 
 	return b.String()
+}
+
+// stoppedClause turns a handoff reason into the verb clause the brief reads
+// with. The HandoffReason* constants are LABELS — they name a reason in a
+// ledger or a status line — and interpolating one into a sentence produced
+// "which stopped because it hit manual", which is not English and is the first
+// thing the incoming agent reads.
+//
+// The mapping is explicit rather than a format string per reason so that a
+// reason with no clause degrades to a true, if vaguer, sentence instead of a
+// broken one. That matters more here than in most copy: the brief IS the state
+// transfer, and an agent that opens on a garbled sentence has been told, in the
+// same breath, that the record it is inheriting is unreliable.
+func stoppedClause(reason string) string {
+	switch strings.TrimSpace(reason) {
+	case HandoffReasonUsageLimit:
+		return "stopped because it hit its usage limit"
+	case HandoffReasonManual:
+		return "was handed over to you before the work was finished"
+	default:
+		return "stopped before the work was finished"
+	}
 }
 
 func pluralize(n int, noun string) string {
