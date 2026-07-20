@@ -240,7 +240,7 @@ func TestPreviewScrolling(t *testing.T) {
 	require.NoError(t, err)
 
 	// Verify we're not in scrolling mode initially
-	require.False(t, previewPane.isScrolling, "Should not be in scrolling mode initially")
+	require.False(t, previewPane.scroll.Active(), "Should not be in scrolling mode initially")
 
 	// Step 2: Check that PreviewFullHistory returns all content
 	fullHistory, err := setup.instance.AgentServer().Preview(0, true)
@@ -255,7 +255,7 @@ func TestPreviewScrolling(t *testing.T) {
 	require.NoError(t, err)
 
 	// Verify we entered scrolling mode
-	require.True(t, previewPane.isScrolling, "Should be in scrolling mode after ScrollUp")
+	require.True(t, previewPane.scroll.Active(), "Should be in scrolling mode after ScrollUp")
 
 	// Step 4: Get the content directly from the viewport
 	viewportContent := previewPane.viewport.View()
@@ -289,7 +289,7 @@ func TestPreviewScrolling(t *testing.T) {
 	require.NoError(t, err)
 
 	// Verify we exited scrolling mode
-	require.False(t, previewPane.isScrolling, "Should not be in scrolling mode after reset")
+	require.False(t, previewPane.scroll.Active(), "Should not be in scrolling mode after reset")
 }
 
 // MockPtyFactory for testing tmux sessions
@@ -374,7 +374,7 @@ func TestPreviewContentWithoutScrolling(t *testing.T) {
 	require.NoError(t, err)
 
 	// Verify we're not in scrolling mode
-	require.False(t, previewPane.isScrolling, "Should not be in scrolling mode")
+	require.False(t, previewPane.scroll.Active(), "Should not be in scrolling mode")
 
 	// Verify that the preview state is not in fallback mode
 	require.False(t, previewPane.content.fallback, "Preview should not be in fallback mode")
@@ -505,10 +505,10 @@ func TestPreviewResetToNormalModeNilInstance(t *testing.T) {
 
 	// Simulate being in scroll mode with stale viewport content.
 	const staleContent = "stale-scroll-content-line\nanother-line"
-	p.isScrolling = true
+	p.scroll.Scroll(&p.viewport, scrollOneLineUp)
 	p.viewport.SetContent(staleContent)
 
-	require.True(t, p.isScrolling, "precondition: should be in scrolling mode")
+	require.True(t, p.scroll.Active(), "precondition: should be in scrolling mode")
 	require.Contains(t, p.viewport.View(), "stale-scroll-content-line",
 		"precondition: viewport should hold stale content")
 
@@ -516,7 +516,7 @@ func TestPreviewResetToNormalModeNilInstance(t *testing.T) {
 	err := p.ResetToNormalMode(nil, 0)
 	require.NoError(t, err)
 
-	require.False(t, p.isScrolling,
+	require.False(t, p.scroll.Active(),
 		"isScrolling must be false after ResetToNormalMode(nil)")
 
 	// The rendered output must no longer be the stale scroll-mode viewport.
@@ -550,10 +550,10 @@ func TestPreviewResetToNormalModeLoadingShowsFallback(t *testing.T) {
 		"precondition: Loading instance shows the fallback in normal mode")
 
 	require.NoError(t, p.ScrollUp(inst, 0))
-	require.True(t, p.isScrolling, "precondition: ScrollUp enters scroll mode")
+	require.True(t, p.scroll.Active(), "precondition: ScrollUp enters scroll mode")
 
 	require.NoError(t, p.ResetToNormalMode(inst, 0))
-	require.False(t, p.isScrolling,
+	require.False(t, p.scroll.Active(),
 		"isScrolling must be false after ResetToNormalMode")
 	require.True(t, p.content.fallback,
 		"exiting scroll mode on a Loading instance must keep the fallback state")
@@ -907,7 +907,7 @@ func TestResetToNormalModeDoesNotClearFallbackFlag(t *testing.T) {
 	p.setFallbackState("Setting up workspace…")
 	require.True(t, p.content.fallback,
 		"precondition: fallback should be true after setFallbackState")
-	p.isScrolling = true
+	p.scroll.Scroll(&p.viewport, scrollOneLineUp)
 	p.viewport.SetContent("ESC to exit scroll mode")
 
 	// Exit scroll mode. ResetToNormalMode clears scroll state without capturing
@@ -915,7 +915,7 @@ func TestResetToNormalModeDoesNotClearFallbackFlag(t *testing.T) {
 	// #577 bug. A live instance matches none of its synchronous fallback cases, so
 	// p.content is left exactly as it was (the fallback), consistently.
 	require.NoError(t, p.ResetToNormalMode(setup.instance, 0))
-	require.False(t, p.isScrolling, "should exit scroll mode")
+	require.False(t, p.scroll.Active(), "should exit scroll mode")
 	require.False(t, p.content.fallback && p.content.text == expectedContent,
 		"#577: ResetToNormalMode must never leave fallback==true holding real terminal text")
 
@@ -956,17 +956,17 @@ func TestPreviewSwitchInstanceResetsScroll(t *testing.T) {
 	// Render A normally, then enter scroll mode on A.
 	require.NoError(t, p.UpdateContent(instA, 0))
 	require.NoError(t, p.ScrollUp(instA, 0))
-	require.True(t, p.isScrolling, "should be scrolling after ScrollUp on A")
+	require.True(t, p.scroll.Active(), "should be scrolling after ScrollUp on A")
 
 	// Re-render the SAME instance while scrolling: scroll state must
 	// survive (this is the original behavior the #470 fix must not break).
 	require.NoError(t, p.UpdateContent(instA, 0))
-	require.True(t, p.isScrolling,
+	require.True(t, p.scroll.Active(),
 		"re-rendering the same instance must preserve scroll mode")
 
 	// Now switch to B. Scroll state must be cleared and B's content rendered.
 	require.NoError(t, p.UpdateContent(instB, 0))
-	require.False(t, p.isScrolling,
+	require.False(t, p.scroll.Active(),
 		"switching to a different instance must exit scroll mode")
 	require.False(t, p.content.fallback,
 		"B is a real running instance; preview must not be in fallback")
@@ -997,7 +997,7 @@ func TestScrollMouseDifferentInstanceResetsScrollMode(t *testing.T) {
 	// entry is I/O-free (#1637); the off-loop refresh (UpdateContent) fills the
 	// viewport from A — the two-step flow production drives after a wheel scroll.
 	require.NoError(t, p.ScrollUp(instA, 0))
-	require.True(t, p.isScrolling, "should be scrolling A after ScrollUp(A)")
+	require.True(t, p.scroll.Active(), "should be scrolling A after ScrollUp(A)")
 	require.NoError(t, p.UpdateContent(instA, 0))
 	require.Contains(t, p.viewport.View(), previewA,
 		"precondition: viewport should hold A's captured content")
@@ -1007,7 +1007,7 @@ func TestScrollMouseDifferentInstanceResetsScrollMode(t *testing.T) {
 	// drops scroll state and re-keys to B (dropStaleView clears the viewport at
 	// once), and the off-loop fill captures B's content — never stale A.
 	require.NoError(t, p.ScrollUp(instB, 0))
-	require.True(t, p.isScrolling,
+	require.True(t, p.scroll.Active(),
 		"should re-enter scroll mode for B after the switch")
 	require.NotContains(t, p.viewport.View(), previewA,
 		"stale viewport content from A must be cleared on the scroll path at once")

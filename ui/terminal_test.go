@@ -227,7 +227,7 @@ func TestTabPaneShellFallbackResetsScrollMode(t *testing.T) {
 
 		p.mu.Lock()
 		require.True(t, p.content.fallback)
-		require.False(t, p.isScrolling, "fallback must clear scroll state (#669)")
+		require.False(t, p.scroll.Active(), "fallback must clear scroll state (#669)")
 		p.mu.Unlock()
 
 		rendered := p.String()
@@ -250,7 +250,7 @@ func TestTabPaneShellFallbackResetsScrollMode(t *testing.T) {
 
 		p.mu.Lock()
 		require.True(t, p.content.fallback)
-		require.False(t, p.isScrolling)
+		require.False(t, p.scroll.Active())
 		p.mu.Unlock()
 
 		rendered := p.String()
@@ -477,7 +477,7 @@ func TestTabPaneShellScrollModeSessionGoneExternally(t *testing.T) {
 		"a gone shell session must NOT bubble an error up to handleError")
 
 	p.mu.Lock()
-	stillScrolling := p.isScrolling
+	stillScrolling := p.scroll.Active()
 	hasFallback := p.content.fallback
 	fallbackText := p.content.text
 	p.mu.Unlock()
@@ -568,7 +568,7 @@ func TestTabPaneShellScrollModeAlreadyDead(t *testing.T) {
 		"entering scroll mode on a dead shell must not bubble an error")
 
 	p.mu.Lock()
-	stillScrolling := p.isScrolling
+	stillScrolling := p.scroll.Active()
 	hasFallback := p.content.fallback
 	fallbackText := p.content.text
 	p.mu.Unlock()

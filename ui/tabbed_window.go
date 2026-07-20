@@ -531,6 +531,13 @@ func (w *TabbedWindow) IsInScrollMode() bool {
 	return w.tab.IsScrolling()
 }
 
+// ScrollOwner reports which subsystem can satisfy scroll intent for this pane.
+// Exposing the owner at the window boundary is the routing seam for captured
+// host history and child-owned terminal history.
+func (w *TabbedWindow) ScrollOwner() ScrollOwner {
+	return w.tab.ScrollOwner()
+}
+
 // NeedsScrollFill reports whether the pane just entered scroll mode and is still
 // waiting for its off-loop scrollback capture — panesRefresh bypasses its
 // throttle for such a pane so the fill is immediate (#1637).

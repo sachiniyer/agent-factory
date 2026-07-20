@@ -1,6 +1,8 @@
 package ui
 
 import (
+	"fmt"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -8,6 +10,147 @@ import (
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/stretchr/testify/require"
 )
+
+func numberedScrollHistory(lines int) string {
+	out := make([]string, lines)
+	for i := range out {
+		out[i] = fmt.Sprintf("history-%03d", i+1)
+	}
+	return strings.Join(out, "\n")
+}
+
+// TestFirstScrollIntentSurvivesPendingFill is the fail-first half of #2192:
+// the gesture that ENTERS scroll mode is still a scroll request. The history
+// capture remains off the event loop (#1637), but when it lands the viewport
+// must be one row above the bottom rather than discarding that first intent.
+func TestFirstScrollIntentSurvivesPendingFill(t *testing.T) {
+	inst := makeShellInstance(t, "first-intent", "visible-line")
+	defer func() { _ = inst.Kill() }()
+
+	const height = 10
+	history := numberedScrollHistory(40)
+	started := make(chan struct{})
+	release := make(chan struct{})
+	src := func(_ *session.Instance, _ int, full bool) (string, error) {
+		if !full {
+			return "visible-line", nil
+		}
+		close(started)
+		<-release
+		return history, nil
+	}
+
+	p := NewTabPane(src)
+	p.SetSize(80, height)
+	require.NoError(t, p.ScrollUp(inst, 1))
+	p.BeginScrollFill()
+
+	filled := make(chan error, 1)
+	go func() { filled <- p.UpdateContent(inst, 1) }()
+	<-started
+	close(release)
+	require.NoError(t, <-filled)
+
+	// Forty history rows plus the one-row footer produce a bottom offset of 31.
+	// The initiating up intent must therefore land at offset 30.
+	require.Equal(t, 30, p.viewport.YOffset,
+		"the first scroll-up must be applied after the async history fill")
+}
+
+// TestQueuedScrollIntentsSurvivePendingFill is the latency-sensitive half of
+// #2192. Input can continue while the off-loop capture is pending; every
+// gesture must accumulate against the eventual history instead of operating on
+// the temporarily empty viewport and disappearing when the fill publishes.
+func TestQueuedScrollIntentsSurvivePendingFill(t *testing.T) {
+	inst := makeShellInstance(t, "queued-intents", "visible-line")
+	defer func() { _ = inst.Kill() }()
+
+	const height = 10
+	history := numberedScrollHistory(40)
+	started := make(chan struct{})
+	release := make(chan struct{})
+	src := func(_ *session.Instance, _ int, full bool) (string, error) {
+		if !full {
+			return "visible-line", nil
+		}
+		close(started)
+		<-release
+		return history, nil
+	}
+
+	p := NewTabPane(src)
+	p.SetSize(80, height)
+	require.NoError(t, p.ScrollUp(inst, 1)) // initiating intent
+	p.BeginScrollFill()
+
+	filled := make(chan error, 1)
+	go func() { filled <- p.UpdateContent(inst, 1) }()
+	<-started
+	require.NoError(t, p.ScrollUp(inst, 1)) // queued while capture is blocked
+	require.NoError(t, p.ScrollUp(inst, 1)) // queued while capture is blocked
+	close(release)
+	require.NoError(t, <-filled)
+
+	// Bottom is 31; all three up intents must survive, yielding 28.
+	require.Equal(t, 28, p.viewport.YOffset,
+		"scroll intents queued during the pending fill must all be applied")
+}
+
+// TestHostHistoryScrollRetargetKeepsNewViewIntent pins the view-key boundary:
+// moving from A to B must discard A's ready viewport, but the wheel/key intent
+// that performs the retarget is B's first request and must survive B's fill.
+func TestHostHistoryScrollRetargetKeepsNewViewIntent(t *testing.T) {
+	instA := makeShellInstance(t, "retarget-a", "visible-a")
+	instB := makeShellInstance(t, "retarget-b", "visible-b")
+	defer func() { _ = instA.Kill() }()
+	defer func() { _ = instB.Kill() }()
+
+	historyA := strings.ReplaceAll(numberedScrollHistory(40), "history", "a-history")
+	historyB := strings.ReplaceAll(numberedScrollHistory(40), "history", "b-history")
+	aStarted := make(chan struct{})
+	releaseA := make(chan struct{})
+	src := func(inst *session.Instance, _ int, full bool) (string, error) {
+		if !full {
+			if inst == instA {
+				return "visible-a", nil
+			}
+			return "visible-b", nil
+		}
+		if inst == instA {
+			close(aStarted)
+			<-releaseA
+			return historyA, nil
+		}
+		return historyB, nil
+	}
+
+	p := NewTabPane(src)
+	p.SetSize(80, 10)
+	require.NoError(t, p.ScrollUp(instA, 1))
+	p.BeginScrollFill()
+	aFilled := make(chan error, 1)
+	go func() { aFilled <- p.UpdateContent(instA, 1) }()
+	<-aStarted
+
+	// Retarget while A is still captured off-loop. This gesture belongs to B.
+	require.NoError(t, p.ScrollUp(instB, 1))
+	require.NotContains(t, p.viewport.View(), "a-history",
+		"retarget must clear A before B's capture lands")
+	p.BeginScrollFill()
+	require.NoError(t, p.UpdateContent(instB, 1))
+	require.Contains(t, p.viewport.View(), "b-history")
+	require.NotContains(t, p.viewport.View(), "a-history")
+	require.Equal(t, 30, p.viewport.YOffset,
+		"the retargeting intent must be applied to B's host history")
+
+	// A's stale capture may return afterward, but cannot overwrite B or consume
+	// B's already-applied intent.
+	close(releaseA)
+	require.NoError(t, <-aFilled)
+	require.Contains(t, p.viewport.View(), "b-history")
+	require.NotContains(t, p.viewport.View(), "a-history")
+	require.Equal(t, 30, p.viewport.YOffset)
+}
 
 // TestScrollEntryExitNeverCapturesOnEventLoop is the #1637 regression: entering
 // and exiting scroll mode must NOT perform the full-scrollback capture inline.
