@@ -104,6 +104,14 @@ type home struct {
 	// resumeStatusPollThroughDaemon in production; tests assign fakes directly.
 	pauseStatusPoll  func(title, repoID string) error
 	resumeStatusPoll func(title, repoID string) error
+	// releaseTerminal / restoreTerminal hand the REAL terminal to a full-screen
+	// attach and take it back (#2157). They are Bubble Tea's own
+	// Program.ReleaseTerminal / RestoreTerminal, wired in Run; PER-home fields
+	// rather than package globals for the same reason as the seams above, and nil
+	// in tests, which drive attachOverlayCallback without a Program or a tty.
+	// See releaseTerminalToAttach for why a raw-proxy attach must have them.
+	releaseTerminal func() error
+	restoreTerminal func() error
 	// appConfig stores persistent application configuration
 	appConfig *config.Config
 	// appState stores persistent application state like seen help screens
