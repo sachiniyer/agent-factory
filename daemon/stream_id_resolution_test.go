@@ -1,10 +1,13 @@
 package daemon
 
 import (
+	"errors"
+	"sync/atomic"
 	"testing"
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
+	"github.com/sachiniyer/agent-factory/session"
 )
 
 // The /v1/sessions/{id}/stream route resolves its {id} segment by the session's
@@ -96,10 +99,10 @@ func TestResolveStreamSessionIDBeatsCrossRepoTitleCollision(t *testing.T) {
 	}
 }
 
-// TestResolveStreamSessionTitleFallback pins the unchanged TUI path: a value that
-// matches no instance id falls back to title resolution, returning the passed
-// string as the title (what the killsInFlight gate and error messages use).
-func TestResolveStreamSessionTitleFallback(t *testing.T) {
+// TestResolveStreamSessionTrackedTitleSkipsDiskRefresh pins the TUI hot path: a
+// repo-scoped title already restored in the daemon resolves from m.instances
+// without walking persisted session history before every preview capture.
+func TestResolveStreamSessionTrackedTitleSkipsDiskRefresh(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	repoPath := setupControlRepo(t)
 	repo, err := config.RepoFromPath(repoPath)
@@ -117,6 +120,18 @@ func TestResolveStreamSessionTitleFallback(t *testing.T) {
 	manager.instances[daemonInstanceKey(repo.ID, "byname")] = inst
 	manager.mu.Unlock()
 
+	// Replace the on-disk roster with an unrelated row after the canonical target
+	// is tracked. Any refresh would both invoke this materializer and evict the
+	// target from the map; the preview resolver must do neither.
+	seedDiskInstance(t, repo.ID, "disk-only", repoPath)
+	var diskBuilds atomic.Int32
+	prev := fromInstanceDataForRefresh
+	fromInstanceDataForRefresh = func(session.InstanceData) (*session.Instance, error) {
+		diskBuilds.Add(1)
+		return nil, errors.New("unexpected preview-path disk materialization")
+	}
+	t.Cleanup(func() { fromInstanceDataForRefresh = prev })
+
 	// Address by TITLE (no id match) — the TUI's call shape.
 	got, rid, title, err := manager.resolveStreamSession("byname", repo.ID)
 	if err != nil {
@@ -130,5 +145,8 @@ func TestResolveStreamSessionTitleFallback(t *testing.T) {
 	}
 	if title != "byname" {
 		t.Fatalf("resolved title = %q, want %q", title, "byname")
+	}
+	if got := diskBuilds.Load(); got != 0 {
+		t.Fatalf("tracked preview resolution materialized %d on-disk session(s), want 0", got)
 	}
 }

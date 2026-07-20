@@ -308,6 +308,9 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// currently in flight.
 		endDetachWatchdog()
 		return m, nil
+	case panePreviewStaleExpiredMsg:
+		m.expireStalePanePreview(msg)
+		return m, nil
 	case instanceStartedMsg:
 		// The user may have navigated elsewhere while the instance was
 		// starting. Don't yank their selection or pop a modal onto them.

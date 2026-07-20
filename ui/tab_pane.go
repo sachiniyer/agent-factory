@@ -62,8 +62,13 @@ type TabPane struct {
 	width  int
 	height int
 
-	content     tabContentState
-	isScrolling bool
+	content tabContentState
+	// renderRevision advances whenever this pane publishes a completed render
+	// state: captured content, a fallback, or a filled scroll viewport. Preview
+	// retargeting snapshots it so a grace-period expiry can replace stale content
+	// without racing and overwriting a capture that landed at the deadline.
+	renderRevision uint64
+	isScrolling    bool
 	// scrollFillPending is set when ScrollUp/ScrollDown enter scroll mode and
 	// cleared once the off-loop capture has populated the viewport. Scroll entry
 	// no longer captures on the bubbletea event loop (#1637); this flag is the
@@ -213,6 +218,14 @@ func (p *TabPane) dropStaleView(instance *session.Instance, activeTab int) {
 	}
 }
 
+// publishContent replaces the normal/fallback render state and records that a
+// completed state for the current binding is ready to paint. Caller must hold
+// p.mu.
+func (p *TabPane) publishContent(content tabContentState) {
+	p.content = content
+	p.renderRevision++
+}
+
 // setFallbackState sets the pane to display a centered fallback message. Caller
 // must hold p.mu.
 //
@@ -222,13 +235,21 @@ func (p *TabPane) dropStaleView(instance *session.Instance, activeTab int) {
 // session-gone) would render the prior view's stale viewport instead of the
 // fallback message (#669/#672/#940).
 func (p *TabPane) setFallbackState(message string) {
-	p.content = tabContentState{
+	p.publishContent(tabContentState{
 		fallback: true,
 		text:     lipgloss.JoinVertical(lipgloss.Center, FallBackText, "", message),
-	}
+	})
 	p.isScrolling = false
 	p.resetScrollFill()
 	p.viewport.SetContent("")
+}
+
+// RenderRevision returns the completed-render generation. It is safe to read
+// from the Bubble Tea event loop while an off-loop capture is publishing.
+func (p *TabPane) RenderRevision() uint64 {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.renderRevision
 }
 
 type contentGuard func() bool
@@ -249,6 +270,26 @@ func (p *TabPane) InvalidateContent(instance *session.Instance, activeTab int, m
 	defer p.mu.Unlock()
 	p.dropStaleView(instance, activeTab)
 	p.setFallbackState(message)
+}
+
+// InvalidateContentIfRevision publishes a fallback only if no capture or other
+// completed state has landed since expected was sampled. The check and write
+// share p.mu so a capture completing at the grace-period boundary wins instead
+// of being overwritten by a late loading fallback.
+func (p *TabPane) InvalidateContentIfRevision(
+	instance *session.Instance,
+	activeTab int,
+	expected uint64,
+	message string,
+) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.renderRevision != expected {
+		return false
+	}
+	p.dropStaleView(instance, activeTab)
+	p.setFallbackState(message)
+	return true
 }
 
 // UpdateContent captures the selected tab's content. Safe to call from a
@@ -361,6 +402,7 @@ func (p *TabPane) updateAgent(instance *session.Instance, guard contentGuard) er
 		// preserved (#1637).
 		p.viewport.GotoBottom()
 		p.resetScrollFill()
+		p.renderRevision++
 		return nil
 	}
 
@@ -390,7 +432,7 @@ func (p *TabPane) updateAgent(instance *session.Instance, guard contentGuard) er
 	if len(content) == 0 && !instance.Started() {
 		p.setFallbackState("Please enter a name for the instance.")
 	} else {
-		p.content = tabContentState{fallback: false, text: content}
+		p.publishContent(tabContentState{fallback: false, text: content})
 	}
 	return nil
 }
@@ -530,6 +572,7 @@ func (p *TabPane) updateShell(instance *session.Instance, activeTab int, guard c
 		p.viewport.SetContent(lipgloss.JoinVertical(lipgloss.Left, content, scrollFooter()))
 		p.viewport.GotoBottom()
 		p.resetScrollFill()
+		p.renderRevision++
 		return nil
 	}
 
@@ -556,7 +599,7 @@ func (p *TabPane) updateShell(instance *session.Instance, activeTab int, guard c
 		}
 		return fmt.Errorf("tab pane: failed to capture terminal content: %w", err)
 	}
-	p.content = tabContentState{fallback: false, text: content}
+	p.publishContent(tabContentState{fallback: false, text: content})
 	return nil
 }
 
