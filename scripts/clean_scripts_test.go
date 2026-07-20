@@ -118,6 +118,10 @@ func TestCleanScriptUsesOnlyExplicitSocketForTeardown(t *testing.T) {
 	})
 
 	t.Run("confirmed default resolves path", func(t *testing.T) {
+		// The first probe intentionally has no socket arguments. This also pins
+		// Bash 3.2 compatibility: under `set -u`, expanding an empty array aborts
+		// before fake tmux runs, which used to make macOS mistake the live default
+		// server for a missing one.
 		result := runCleanScript(t, "clean.sh", []string{"--yes-really"}, "other\n")
 		if result.err != nil {
 			t.Fatalf("confirmed cleanup failed: %v\n%s", result.err, result.output)

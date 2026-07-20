@@ -82,7 +82,15 @@ refuse_live_af_sessions() {
 }
 
 list_target_sessions() {
-  tmux "${tmux_socket_args[@]}" list-sessions -F '#{session_name}' 2>/dev/null
+  # macOS still ships Bash 3.2, where expanding an empty array under `set -u`
+  # aborts before tmux is invoked. Keep the default-server probe literal until
+  # --yes-really resolves it to an explicit -S path; after that the array is
+  # necessarily populated.
+  if (( ${#tmux_socket_args[@]} == 0 )); then
+    tmux list-sessions -F '#{session_name}' 2>/dev/null
+  else
+    tmux "${tmux_socket_args[@]}" list-sessions -F '#{session_name}' 2>/dev/null
+  fi
 }
 
 # A missing server is already stopped. A reachable server is checked twice,
