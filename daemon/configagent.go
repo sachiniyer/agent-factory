@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"sync"
 	"sync/atomic"
-	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/log"
@@ -145,13 +144,22 @@ func (t tmuxReadinessTarget) PreviewContent(ctx context.Context) (string, error)
 // an external worktree already takes.
 func (t tmuxReadinessTarget) HooksDone() <-chan struct{} { return nil }
 
-// configAgentTrustPromptAttempts bounds the trust-prompt dismissal loop,
-// mirroring task.StartAndSendPrompt's own cap.
-const configAgentTrustPromptAttempts = 5
+// configAgentTrustTarget is tmuxReadinessTarget plus the trust-prompt check, so
+// the config agent runs task.DismissTrustPrompt — the same loop, on the same
+// budget, as every regular session.
+//
+// The budget used to live here as a second pair of constants (5 attempts ×
+// 500ms) under a comment claiming they mirrored task/start.go's, which they
+// never did: the canonical budget is 20 × 1s, so a config agent whose trust
+// dialogs took longer than 2.5s failed with "trust prompt did not dismiss" —
+// and the caller reaps the session and shows the error, so the user is left
+// unable to configure af — where a regular session would have succeeded
+// (#2097). The numbers are not copied here any more; the loop is shared.
+type configAgentTrustTarget struct{ tmuxReadinessTarget }
 
-// configAgentTrustRetryDelay is the pause between trust-prompt dismissal
-// attempts, mirroring task.StartAndSendPrompt.
-const configAgentTrustRetryDelay = 500 * time.Millisecond
+func (t configAgentTrustTarget) CheckAndHandleTrustPrompt() bool {
+	return t.ts.CheckAndHandleTrustPrompt()
+}
 
 // SpawnConfigAgent starts a config agent in a bare tmux session rooted at AF
 // home, waits for it to be ready, dismisses any trust prompt, delivers the
@@ -237,7 +245,7 @@ func (m *Manager) SpawnConfigAgent(ctx context.Context, req SpawnConfigAgentRequ
 	if err := task.WaitForReadyOn(ctx, tmuxReadinessTarget{ts: ts, agent: agent}); err != nil {
 		return fail(fmt.Errorf("config agent: %w", err))
 	}
-	if err := dismissConfigAgentTrustPrompt(ctx, ts, agent); err != nil {
+	if err := dismissConfigAgentTrustPrompt(ctx, configAgentTrustTarget{tmuxReadinessTarget{ts: ts, agent: agent}}); err != nil {
 		return fail(fmt.Errorf("config agent: %w", err))
 	}
 	// The briefing rides in over a tmux paste buffer (stdin-streamed), so its
@@ -261,26 +269,13 @@ func (m *Manager) SpawnConfigAgent(ctx context.Context, req SpawnConfigAgentRequ
 // asking a non-agent command about one would tap Enter into an arbitrary
 // program. The decision is keyed off the RESOLVED agent for the same reason it
 // is there.
-func dismissConfigAgentTrustPrompt(ctx context.Context, ts *tmux.TmuxSession, agent string) error {
-	switch agent {
+func dismissConfigAgentTrustPrompt(ctx context.Context, target task.TrustPromptTarget) error {
+	switch target.ResolvedAgent() {
 	case tmux.ProgramClaude, tmux.ProgramCodex, tmux.ProgramAider, tmux.ProgramGemini, tmux.ProgramAmp:
 	default:
 		return nil // not a known agent: it has no trust dialog to dismiss
 	}
-	for attempts := 0; ts.CheckAndHandleTrustPrompt(); attempts++ {
-		if attempts+1 >= configAgentTrustPromptAttempts {
-			return fmt.Errorf("trust prompt did not dismiss after %d attempts", configAgentTrustPromptAttempts)
-		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(configAgentTrustRetryDelay):
-		}
-		if err := task.WaitForReadyOn(ctx, tmuxReadinessTarget{ts: ts, agent: agent}); err != nil {
-			return err
-		}
-	}
-	return nil
+	return task.DismissTrustPrompt(ctx, target)
 }
 
 // ReapConfigAgent tears down a config-agent session by name. It is the caller's

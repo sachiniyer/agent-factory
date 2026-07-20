@@ -97,7 +97,7 @@ func TestStartAndSendPrompt_BoundsPersistentTrustPrompt(t *testing.T) {
 		waitForReadyPollInterval = oldPoll
 	})
 
-	backend := &startBackend{trustPrompts: maxTrustPromptAttempts + 5}
+	backend := &startBackend{trustPrompts: MaxTrustPromptAttempts + 5}
 	err := StartAndSendPrompt(context.Background(), newStartTestInstance(t, backend), "do work")
 	if err == nil {
 		t.Fatalf("expected persistent trust prompt error")
@@ -105,8 +105,8 @@ func TestStartAndSendPrompt_BoundsPersistentTrustPrompt(t *testing.T) {
 	if !strings.Contains(err.Error(), "trust prompt did not dismiss") {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if backend.trustChecks != maxTrustPromptAttempts {
-		t.Fatalf("expected %d trust checks, got %d", maxTrustPromptAttempts, backend.trustChecks)
+	if backend.trustChecks != MaxTrustPromptAttempts {
+		t.Fatalf("expected %d trust checks, got %d", MaxTrustPromptAttempts, backend.trustChecks)
 	}
 	if backend.sentPrompt != "" {
 		t.Fatalf("prompt should not be sent after trust prompt failure, got %q", backend.sentPrompt)
