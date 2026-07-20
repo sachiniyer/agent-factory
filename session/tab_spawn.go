@@ -48,6 +48,15 @@ func (i *Instance) AddShellTab() (*Tab, error) {
 	agentTmux := i.tmuxLocked()
 	gw := i.gitWorktree
 	displayName := uniqueShellName(i.Tabs)
+	// Resolve the tmux session name under the SAME read lock as the display name:
+	// the two are independent namespaces (see tab_names.go) and both are read off
+	// i.Tabs, so deriving the tmux name after the unlock would read the roster
+	// unsynchronized. Guarded on agentTmux because a not-started instance has no
+	// session to spawn a sibling of — the precondition check below rejects it.
+	tmuxName := ""
+	if agentTmux != nil {
+		tmuxName = uniqueTabTmuxName(i.Tabs, agentTmux.SanitizedName(), displayName)
+	}
 	nTabs := len(i.Tabs)
 	i.mu.RUnlock()
 
@@ -67,9 +76,8 @@ func (i *Instance) AddShellTab() (*Tab, error) {
 
 	// Spawn outside the lock: Start shells out to `tmux new-session` and polls
 	// for the session to appear, which must not block other readers of i.mu. The
-	// tmux name is derived from the agent session + the unique name so it
-	// is collision-free and restorable by exact name.
-	tmuxName := agentTmux.SanitizedName() + tmuxTabSeparator + displayName
+	// tmux name was resolved above against the live sibling sessions, so it is
+	// collision-free and restorable by exact name.
 	shellTmux := agentTmux.NewSiblingSession(tmuxName, defaultShell())
 	if err := shellTmux.Start(worktreePath); err != nil {
 		return nil, fmt.Errorf("failed to start shell tab: %w", err)
@@ -129,6 +137,11 @@ func (i *Instance) AddProcessTab(command, requestedName string) (*Tab, error) {
 	agentTmux := i.tmuxLocked()
 	gw := i.gitWorktree
 	displayName := uniqueTabName(i.Tabs, processTabBaseName(requestedName, command))
+	// Both namespaces resolved under the one read lock; see AddShellTab.
+	tmuxName := ""
+	if agentTmux != nil {
+		tmuxName = uniqueTabTmuxName(i.Tabs, agentTmux.SanitizedName(), displayName)
+	}
 	nTabs := len(i.Tabs)
 	i.mu.RUnlock()
 
@@ -146,11 +159,10 @@ func (i *Instance) AddProcessTab(command, requestedName string) (*Tab, error) {
 		return nil, fmt.Errorf("cannot add a tab without a worktree")
 	}
 
-	// Spawn outside the lock (see AddShellTab): the tmux name is derived from the
-	// agent session + the unique, sanitized name so it is collision-free
-	// and restorable by exact name. The sibling inherits the agent session's PTY
-	// factory / executor — real in production, mock in tests.
-	tmuxName := agentTmux.SanitizedName() + tmuxTabSeparator + displayName
+	// Spawn outside the lock (see AddShellTab): the tmux name was resolved above
+	// against the live sibling sessions, so it is collision-free and restorable by
+	// exact name. The sibling inherits the agent session's PTY factory / executor
+	// — real in production, mock in tests.
 	procTmux := agentTmux.NewSiblingSession(tmuxName, command)
 	if err := procTmux.Start(worktreePath); err != nil {
 		return nil, fmt.Errorf("failed to start process tab: %w", err)

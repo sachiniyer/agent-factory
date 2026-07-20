@@ -104,7 +104,7 @@ func TestCreateTab_RejectedAfterArchive(t *testing.T) {
 	require.NoError(t, err)
 	require.False(t, exists(srcPath), "archive must have moved the worktree out of its original path")
 
-	_, err = manager.CreateTab(CreateTabRequest{Title: title, RepoID: repoID, Command: "btop"})
+	_, _, err = manager.CreateTab(CreateTabRequest{Title: title, RepoID: repoID, Command: "btop"})
 	require.Error(t, err, "CreateTab on an archived session must be rejected")
 	assert.Contains(t, err.Error(), "archived")
 	assert.False(t, isAlive(agentName+"__btop"), "no process tmux session may be spawned into the moved-away worktree")
@@ -139,7 +139,7 @@ func TestCreateTab_SerializedWithInFlightArchiveDoesNotOrphan(t *testing.T) {
 	}
 	done := make(chan result, 1)
 	go func() {
-		name, err := manager.CreateTab(CreateTabRequest{Title: title, RepoID: repoID, Command: "btop"})
+		name, _, err := manager.CreateTab(CreateTabRequest{Title: title, RepoID: repoID, Command: "btop"})
 		done <- result{name, err}
 	}()
 
@@ -176,7 +176,7 @@ func TestArchiveSession_ModeBTearsDownExtraTabsNoOrphan(t *testing.T) {
 	// Give the session a second (process) tab BEFORE archiving, so the archive
 	// teardown has an extra live tmux session it must not orphan into the worktree
 	// it is about to move.
-	_, err := manager.CreateTab(CreateTabRequest{Title: title, RepoID: repoID, Command: "btop"})
+	_, _, err := manager.CreateTab(CreateTabRequest{Title: title, RepoID: repoID, Command: "btop"})
 	require.NoError(t, err, "a process tab must spawn on a live session")
 	require.Equal(t, 2, inst.TabCount(), "the session now has agent + process tabs")
 	require.True(t, isAlive(agentName+"__btop"), "the process tab's tmux session is live before archive")
@@ -203,7 +203,7 @@ func TestCreateTab_ShellRejectedAfterArchive(t *testing.T) {
 	_, _, err := manager.ArchiveSession(ArchiveSessionRequest{Title: title, RepoID: repoID})
 	require.NoError(t, err)
 
-	_, err = manager.CreateTab(CreateTabRequest{Title: title, RepoID: repoID, Shell: true})
+	_, _, err = manager.CreateTab(CreateTabRequest{Title: title, RepoID: repoID, Shell: true})
 	require.Error(t, err, "shell CreateTab on an archived session must be rejected")
 	assert.Contains(t, err.Error(), "archived")
 	assert.False(t, isAlive(agentName+"__shell"), "no shell tmux session may be spawned into the moved-away worktree")

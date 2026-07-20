@@ -37,14 +37,15 @@ func (m *home) handleNewTab() (tea.Model, tea.Cmd) {
 		return m, m.handleError(fmt.Errorf("only local sessions support new tabs — this session's workspace runs off-box (docker/ssh/remote), so there is no local worktree to spawn a tab in"))
 	}
 
-	name, err := createShellTabThroughDaemon(selected.Title, m.repoID)
+	name, tmuxName, err := createShellTabThroughDaemon(selected.Title, m.repoID)
 	if err != nil {
 		return m, m.handleError(err)
 	}
 	// The daemon spawned and persisted the tab; reflect it locally for instant
-	// display without a second spawn. The daemon write is authoritative, so the
-	// TUI never saves (#960 PR 4).
-	if _, attachErr := selected.AttachShellTab(name); attachErr != nil {
+	// display without a second spawn, binding to the exact tmux session it
+	// reported rather than one re-derived from the name (#1957). The daemon write
+	// is authoritative, so the TUI never saves (#960 PR 4).
+	if _, attachErr := selected.AttachShellTab(name, tmuxName); attachErr != nil {
 		return m, m.handleError(attachErr)
 	}
 

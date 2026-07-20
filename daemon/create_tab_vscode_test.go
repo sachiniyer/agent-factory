@@ -36,7 +36,7 @@ func newVSCodeCreateFixture(t *testing.T) (m *Manager, repoID, title string) {
 func TestCreateTab_VSCodeKind(t *testing.T) {
 	manager, repoID, title := newVSCodeCreateFixture(t)
 
-	name, err := manager.CreateTab(CreateTabRequest{Title: title, RepoID: repoID, Kind: "vscode"})
+	name, _, err := manager.CreateTab(CreateTabRequest{Title: title, RepoID: repoID, Kind: "vscode"})
 	if err != nil {
 		t.Fatalf("CreateTab(vscode): %v", err)
 	}
@@ -75,7 +75,7 @@ func TestCreateTab_VSCodeRejectsTargets(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			req := tc.req
 			req.Title, req.RepoID = title, repoID
-			_, err := manager.CreateTab(req)
+			_, _, err := manager.CreateTab(req)
 			if err == nil {
 				t.Fatalf("CreateTab(%+v) succeeded; want a rejection", tc.req)
 			}
@@ -92,7 +92,7 @@ func TestCreateTab_VSCodeRejectsTargets(t *testing.T) {
 func TestCreateTab_UnknownKindNamesTheVocabulary(t *testing.T) {
 	manager, repoID, title := newVSCodeCreateFixture(t)
 
-	_, err := manager.CreateTab(CreateTabRequest{Title: title, RepoID: repoID, Kind: "emacs"})
+	_, _, err := manager.CreateTab(CreateTabRequest{Title: title, RepoID: repoID, Kind: "emacs"})
 	if err == nil {
 		t.Fatal("CreateTab with an unknown kind succeeded; want a rejection")
 	}
@@ -112,7 +112,7 @@ func TestCloseTab_StopsEditorOnlyWithTheLastVSCodeTab(t *testing.T) {
 	inst := manager.instances[key]
 
 	for _, n := range []string{"one", "two"} {
-		if _, err := manager.CreateTab(CreateTabRequest{Title: title, RepoID: repoID, Kind: "vscode", Name: n}); err != nil {
+		if _, _, err := manager.CreateTab(CreateTabRequest{Title: title, RepoID: repoID, Kind: "vscode", Name: n}); err != nil {
 			t.Fatalf("CreateTab(%s): %v", n, err)
 		}
 	}
@@ -146,10 +146,10 @@ func TestCloseTab_ShellTabLeavesEditorAlone(t *testing.T) {
 	manager, repoID, title := newVSCodeCreateFixture(t)
 	key := daemonInstanceKey(repoID, title)
 
-	if _, err := manager.CreateTab(CreateTabRequest{Title: title, RepoID: repoID, Kind: "vscode"}); err != nil {
+	if _, _, err := manager.CreateTab(CreateTabRequest{Title: title, RepoID: repoID, Kind: "vscode"}); err != nil {
 		t.Fatalf("CreateTab(vscode): %v", err)
 	}
-	if _, err := manager.CreateTab(CreateTabRequest{Title: title, RepoID: repoID, Shell: true}); err != nil {
+	if _, _, err := manager.CreateTab(CreateTabRequest{Title: title, RepoID: repoID, Shell: true}); err != nil {
 		t.Fatalf("CreateTab(shell): %v", err)
 	}
 	manager.vscode.servers[key] = &vscodeServer{worktree: "/nowhere", exited: make(chan struct{})}
@@ -171,7 +171,7 @@ func TestCloseTab_StopsEditorEvenWhenPersistFails(t *testing.T) {
 	manager, repoID, title := newVSCodeCreateFixture(t)
 	key := daemonInstanceKey(repoID, title)
 
-	if _, err := manager.CreateTab(CreateTabRequest{Title: title, RepoID: repoID, Kind: "vscode"}); err != nil {
+	if _, _, err := manager.CreateTab(CreateTabRequest{Title: title, RepoID: repoID, Kind: "vscode"}); err != nil {
 		t.Fatalf("CreateTab(vscode): %v", err)
 	}
 	manager.vscode.servers[key] = &vscodeServer{worktree: "/nowhere", exited: make(chan struct{})}

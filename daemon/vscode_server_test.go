@@ -306,7 +306,7 @@ func newVSCodeFixture(t *testing.T, binary string) (m *Manager, sessionID, tabID
 	manager.vscode.cooldown = 50 * time.Millisecond
 	t.Cleanup(manager.vscode.Stop)
 
-	if _, err := manager.CreateTab(CreateTabRequest{Title: title, RepoID: repo.ID, Kind: "vscode"}); err != nil {
+	if _, _, err := manager.CreateTab(CreateTabRequest{Title: title, RepoID: repo.ID, Kind: "vscode"}); err != nil {
 		t.Fatalf("CreateTab(vscode): %v", err)
 	}
 	// The tab fixture's instance is tmux-mocked and never materializes its

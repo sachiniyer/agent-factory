@@ -76,13 +76,16 @@ func (c *Client) ResumeFromLimit(req daemon.ResumeFromLimitRequest) error {
 }
 
 // CreateTab asks the daemon to spawn, persist, and report a new process/shell
-// tab on an existing session, returning the resolved (collision-suffixed) name.
-func (c *Client) CreateTab(req daemon.CreateTabRequest) (string, error) {
+// tab on an existing session, returning the resolved (collision-suffixed) name
+// and the tmux session it was spawned under. Callers need BOTH: the two names
+// are independent namespaces that diverge after a rename (#1957), so the tmux
+// session cannot be re-derived from the tab name. See CreateTabResponse.TmuxName.
+func (c *Client) CreateTab(req daemon.CreateTabRequest) (string, string, error) {
 	var resp daemon.CreateTabResponse
 	if err := c.call("CreateTab", req, &resp); err != nil {
-		return "", err
+		return "", "", err
 	}
-	return resp.Name, nil
+	return resp.Name, resp.TmuxName, nil
 }
 
 // CloseTab asks the daemon to close a non-agent tab and returns the resolved

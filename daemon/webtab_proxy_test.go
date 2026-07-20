@@ -56,7 +56,7 @@ func newWebTabProxyFixtureN(t *testing.T, targets ...string) (
 	const title = "webproxy"
 	inst = startedLocalTabInstance(t, manager, repo.ID, repoPath, title, "af_"+title+"_agent")
 	for i, target := range targets {
-		if _, err := manager.CreateTab(CreateTabRequest{
+		if _, _, err := manager.CreateTab(CreateTabRequest{
 			Title: title, RepoID: repo.ID, Kind: "web", URL: target, Name: fmt.Sprintf("web%d", i),
 		}); err != nil {
 			t.Fatalf("CreateTab(web, %q): %v", target, err)
@@ -433,7 +433,7 @@ func TestWebTabProxy_RejectsNonWebTab(t *testing.T) {
 	}
 	const title = "webproxy"
 	inst := startedLocalTabInstance(t, manager, repo.ID, repoPath, title, "af_"+title+"_agent")
-	if _, err := manager.CreateTab(CreateTabRequest{Title: title, RepoID: repo.ID, Kind: "web", URL: upstream.URL}); err != nil {
+	if _, _, err := manager.CreateTab(CreateTabRequest{Title: title, RepoID: repo.ID, Kind: "web", URL: upstream.URL}); err != nil {
 		t.Fatalf("CreateTab(web): %v", err)
 	}
 	mux := newHTTPMux(&controlServer{manager: manager})

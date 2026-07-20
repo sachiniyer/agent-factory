@@ -73,7 +73,7 @@ func TestCreateTab_WebPublishesSessionUpdated(t *testing.T) {
 	manager, repo := tabEventSession(t, title)
 
 	_, ch := manager.events.subscribe()
-	name, err := manager.CreateTab(CreateTabRequest{
+	name, _, err := manager.CreateTab(CreateTabRequest{
 		Title: title, RepoID: repo.ID, Kind: "web", URL: "http://localhost:5173", Name: "livepreview",
 	})
 	if err != nil {
@@ -99,7 +99,7 @@ func TestCreateTab_ProcessPublishesSessionUpdated(t *testing.T) {
 	manager, repo := tabEventSession(t, title)
 
 	_, ch := manager.events.subscribe()
-	name, err := manager.CreateTab(CreateTabRequest{
+	name, _, err := manager.CreateTab(CreateTabRequest{
 		Title: title, RepoID: repo.ID, Command: "sleep 600", Name: "worker",
 	})
 	if err != nil {
@@ -122,7 +122,7 @@ func TestCloseTab_PublishesSessionUpdated(t *testing.T) {
 	const title = "closeevt"
 	manager, repo := tabEventSession(t, title)
 
-	name, err := manager.CreateTab(CreateTabRequest{
+	name, _, err := manager.CreateTab(CreateTabRequest{
 		Title: title, RepoID: repo.ID, Kind: "web", URL: "http://localhost:5173", Name: "doomed",
 	})
 	if err != nil {

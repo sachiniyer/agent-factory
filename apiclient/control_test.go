@@ -74,13 +74,20 @@ func TestControlRoundTrips(t *testing.T) {
 		}
 	})
 
-	t.Run("CreateTab returns resolved name", func(t *testing.T) {
+	// Both names come back, and they DIFFER: the resolved tab name and the tmux
+	// session it was spawned under are independent namespaces post-#1957, so a
+	// client that dropped the second and re-derived it from the first would bind
+	// the TUI's instant-display projection to a different tab's live session.
+	t.Run("CreateTab returns resolved name and tmux name", func(t *testing.T) {
 		c := routeServer(t, "CreateTab", func([]byte) apiproto.Envelope {
-			return apiproto.Success(daemon.CreateTabResponse{Name: "shell-2"})
+			return apiproto.Success(daemon.CreateTabResponse{Name: "shell", TmuxName: "af_x_alpha__shell-2"})
 		})
-		name, err := c.CreateTab(daemon.CreateTabRequest{Title: "alpha", Shell: true})
-		if err != nil || name != "shell-2" {
-			t.Fatalf("CreateTab = %q, %v; want shell-2", name, err)
+		name, tmuxName, err := c.CreateTab(daemon.CreateTabRequest{Title: "alpha", Shell: true})
+		if err != nil || name != "shell" {
+			t.Fatalf("CreateTab name = %q, %v; want shell", name, err)
+		}
+		if tmuxName != "af_x_alpha__shell-2" {
+			t.Fatalf("CreateTab tmux name = %q; want af_x_alpha__shell-2", tmuxName)
 		}
 	})
 

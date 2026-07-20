@@ -151,9 +151,9 @@ func TestTreeNav_TabStopAcrossInstancePreservesParentForActions(t *testing.T) {
 		"instance actions resolve the selected tab's parent instance")
 
 	var createdFor string
-	t.Cleanup(SetTabCreatorForTest(func(title, repoID string) (string, error) {
+	t.Cleanup(SetTabCreatorForTest(func(title, repoID string) (string, string, error) {
 		createdFor = title
-		return spawnDaemonTab(beta), nil
+		return spawnDaemonTab(beta)
 	}))
 
 	_, _ = h.handleNewTab()
@@ -206,8 +206,8 @@ func TestTreeNav_TabCreateCloseFromTabRow(t *testing.T) {
 	selectInstance(h, inst)
 
 	var closedNames []string
-	t.Cleanup(SetTabCreatorForTest(func(title, repoID string) (string, error) {
-		return spawnDaemonTab(inst), nil
+	t.Cleanup(SetTabCreatorForTest(func(title, repoID string) (string, string, error) {
+		return spawnDaemonTab(inst)
 	}))
 	t.Cleanup(SetTabCloserForTest(func(title, repoID, tabName string) error {
 		closedNames = append(closedNames, tabName)

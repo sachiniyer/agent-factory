@@ -255,6 +255,18 @@ type CreateTabRequest struct {
 
 type CreateTabResponse struct {
 	Name string `json:"name"`
+	// TmuxName is the tmux session the tab was actually spawned under, or empty
+	// for a kind that owns no PTY (web, vscode — see session.TabKind.HasTmux).
+	//
+	// It is normally "<agent session>__<name>", but the two are independent
+	// namespaces and diverge after a rename (#1957): a tab named "fresh" spawns
+	// under "…__fresh-2" when an earlier tab that was renamed AWAY from "fresh"
+	// still holds "…__fresh". Reporting it is what lets the TUI attach its
+	// instant-display projection to the exact session (Instance.AttachShellTab)
+	// instead of re-deriving one from the name and landing on the older tab's.
+	// It also makes the reservation inspectable rather than invisible, which is
+	// the complaint #1957 opened with.
+	TmuxName string `json:"tmux_name,omitempty"`
 }
 
 // CloseTabRequest asks the daemon to close a non-agent tab of a session and

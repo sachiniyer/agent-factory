@@ -277,16 +277,20 @@ func resumeStatusPollThroughDaemon(title, repoID string) error {
 
 // createShellTabThroughDaemon routes the TUI's `t` (new shell tab) mutation to
 // the daemon so the daemon — the single writer (#960) — owns the spawn and the
-// persist, returning the resolved tab name. The TUI reflects the new tab locally
-// for instant display via Instance.AttachShellTab.
-var createShellTabThroughDaemon = func(title, repoID string) (string, error) {
-	var name string
+// persist, returning the resolved tab name AND the tmux session the daemon
+// spawned it under. The TUI reflects the new tab locally for instant display via
+// Instance.AttachShellTab, which binds to that exact session: the two names are
+// independent namespaces that diverge after a rename (#1957), so re-deriving the
+// session from the tab name would attach the projection to a DIFFERENT tab's
+// live session.
+var createShellTabThroughDaemon = func(title, repoID string) (string, string, error) {
+	var name, tmuxName string
 	err := withDaemonHTTP(func(c *apiclient.Client) error {
 		var e error
-		name, e = c.CreateTab(daemon.CreateTabRequest{Title: title, RepoID: repoID, Shell: true})
+		name, tmuxName, e = c.CreateTab(daemon.CreateTabRequest{Title: title, RepoID: repoID, Shell: true})
 		return e
 	})
-	return name, err
+	return name, tmuxName, err
 }
 
 // closeTabThroughDaemon routes the TUI's `w` (close tab) mutation to the daemon,
@@ -427,7 +431,7 @@ func SetLimitResumerForTest(f func(title, repoID string) error) func() {
 	return func() { resumeFromLimitThroughDaemon = prev }
 }
 
-func SetTabCreatorForTest(f func(title, repoID string) (string, error)) func() {
+func SetTabCreatorForTest(f func(title, repoID string) (string, string, error)) func() {
 	prev := createShellTabThroughDaemon
 	createShellTabThroughDaemon = f
 	return func() { createShellTabThroughDaemon = prev }

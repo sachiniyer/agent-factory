@@ -19,9 +19,9 @@ func TestHandleNewTab_RoutesThroughDaemon_NoLocalSave(t *testing.T) {
 	selectInstance(h, inst)
 
 	var gotTitle, gotRepo string
-	restore := SetTabCreatorForTest(func(title, repoID string) (string, error) {
+	restore := SetTabCreatorForTest(func(title, repoID string) (string, string, error) {
 		gotTitle, gotRepo = title, repoID
-		return spawnDaemonTab(inst), nil
+		return spawnDaemonTab(inst)
 	})
 	defer restore()
 
@@ -46,8 +46,8 @@ func TestHandleCloseTab_RoutesThroughDaemon_NoLocalSave(t *testing.T) {
 	selectInstance(h, inst)
 
 	var gotTitle, gotRepo, gotTab string
-	createRestore := SetTabCreatorForTest(func(title, repoID string) (string, error) {
-		return spawnDaemonTab(inst), nil
+	createRestore := SetTabCreatorForTest(func(title, repoID string) (string, string, error) {
+		return spawnDaemonTab(inst)
 	})
 	defer createRestore()
 	closeRestore := SetTabCloserForTest(func(title, repoID, tabName string) error {

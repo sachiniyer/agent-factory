@@ -179,7 +179,7 @@ func TestAttachShellTab_KilledSessionDoesNotSpawn(t *testing.T) {
 	spawned := false
 	inst, isAlive := raceMockInstance(t, agentName, func() { spawned = true })
 
-	tab, err := inst.AttachShellTab(shellTabName)
+	tab, err := inst.AttachShellTab(shellTabName, "")
 	require.Error(t, err, "attaching to a killed session must fail, not resurrect it")
 	assert.Contains(t, err.Error(), "failed to reconnect shell tab")
 	assert.Nil(t, tab)
@@ -256,7 +256,7 @@ func TestAttachShellTab_KillRaceDropsProjection(t *testing.T) {
 		Tabs:        []*Tab{newAgentTab(agentTs)},
 	}
 
-	tab, err := inst.AttachShellTab(shellTabName)
+	tab, err := inst.AttachShellTab(shellTabName, "")
 	require.Error(t, err, "a tab attached during teardown must be refused")
 	assert.Contains(t, err.Error(), "session was killed during tab attach")
 	assert.Nil(t, tab)

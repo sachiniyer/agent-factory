@@ -156,7 +156,7 @@ func TestCreateTab_RejectsEmptyCommand(t *testing.T) {
 		t.Fatalf("NewManager: %v", err)
 	}
 
-	if _, err := manager.CreateTab(CreateTabRequest{Title: "x", Command: "   "}); err == nil {
+	if _, _, err := manager.CreateTab(CreateTabRequest{Title: "x", Command: "   "}); err == nil {
 		t.Fatal("expected error for empty command, got nil")
 	}
 }
@@ -187,7 +187,7 @@ func TestCreateTab_RejectsRemoteInstance(t *testing.T) {
 	manager.instances[daemonInstanceKey(repo.ID, "rem")] = inst
 	manager.mu.Unlock()
 
-	_, err = manager.CreateTab(CreateTabRequest{Title: "rem", RepoID: repo.ID, Command: "btop"})
+	_, _, err = manager.CreateTab(CreateTabRequest{Title: "rem", RepoID: repo.ID, Command: "btop"})
 	assertTabRejection(t, err, "only local sessions support user-managed tabs")
 }
 
@@ -211,7 +211,7 @@ func TestCreateTab_SpawnsPersistsAndReturnsName(t *testing.T) {
 	agentName := "af_" + title + "_agent"
 	startedLocalTabInstance(t, manager, repo.ID, repoPath, title, agentName)
 
-	name, err := manager.CreateTab(CreateTabRequest{Title: title, RepoID: repo.ID, Command: "btop -t"})
+	name, _, err := manager.CreateTab(CreateTabRequest{Title: title, RepoID: repo.ID, Command: "btop -t"})
 	if err != nil {
 		t.Fatalf("CreateTab: %v", err)
 	}
@@ -274,7 +274,7 @@ func TestCreateTab_ShellSpawnsPersistsAndReturnsName(t *testing.T) {
 	startedLocalTabInstance(t, manager, repo.ID, repoPath, title, agentName)
 
 	// Shell=true ignores Command and creates a $SHELL tab named "shell".
-	name, err := manager.CreateTab(CreateTabRequest{Title: title, RepoID: repo.ID, Shell: true})
+	name, _, err := manager.CreateTab(CreateTabRequest{Title: title, RepoID: repo.ID, Shell: true})
 	if err != nil {
 		t.Fatalf("CreateTab(shell): %v", err)
 	}
@@ -337,6 +337,6 @@ func TestCreateTab_ShellRejectsRemoteInstance(t *testing.T) {
 	manager.instances[daemonInstanceKey(repo.ID, "rem")] = inst
 	manager.mu.Unlock()
 
-	_, err = manager.CreateTab(CreateTabRequest{Title: "rem", RepoID: repo.ID, Shell: true})
+	_, _, err = manager.CreateTab(CreateTabRequest{Title: "rem", RepoID: repo.ID, Shell: true})
 	assertTabRejection(t, err, "only local sessions support user-managed tabs")
 }

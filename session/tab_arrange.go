@@ -44,10 +44,15 @@ func TabKindRenameable(kind TabKind) bool {
 // Only kinds that display their name can be renamed (TabKindRenameable); the
 // agent tab is additionally pinned at index 0. Resolution and mutation are atomic
 // under the write lock so two concurrent renames cannot both resolve to the same
-// free name. Renaming does NOT touch the tab's live tmux session — restore
-// rebinds by the persisted TmuxName, not by re-deriving from the name, so the
-// tab survives a restart; uniqueTabNameExcluding keeps the now-decoupled tmux
-// token reserved against a later spawn.
+// free name.
+//
+// Renaming does NOT touch the tab's live tmux session — restore rebinds by the
+// persisted TmuxName, not by re-deriving from the name, so the tab survives a
+// restart. The name it renames AWAY from is therefore free immediately: names
+// are unique among the roster's current names and nothing else (#1957), and the
+// still-live tmux session it leaves behind is dodged at SPAWN by
+// uniqueTabTmuxName rather than by holding the user's old name hostage. See the
+// two-namespace note at the top of tab_names.go.
 func (i *Instance) RenameTab(idx int, requestedName string) (string, error) {
 	base := sanitizeTabName(requestedName)
 	if base == "" {
@@ -68,8 +73,8 @@ func (i *Instance) RenameTab(idx int, requestedName string) (string, error) {
 	//
 	//   - uniqueTabNameExcluding excludes by POINTER identity, so it has to run
 	//     while tab is still the entry in i.Tabs. Replacing first would leave the
-	//     exclusion matching nothing, and a tab could no longer reclaim its own
-	//     name or tmux token (TestRenameTab_ReclaimsItsOwnToken).
+	//     exclusion matching nothing, and a tab could no longer be renamed to the
+	//     name it already holds (TestRenameTab_ReclaimsItsOwnName).
 	//   - The write must be copy-on-write, because GetTabs hands out these very
 	//     pointers and its callers read Name off-lock (see replaceTabFieldLocked).
 	name := uniqueTabNameExcluding(i.Tabs, base, tab)
