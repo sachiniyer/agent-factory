@@ -183,8 +183,12 @@ so they are documented here. `CreateSession` returns `{ "instance": <session> }`
 `Snapshot` and `ImportRemoteHookSessions` return `{ "instances": [<session>…] }`;
 `ArchiveSession` returns `{ "ok": true, "archived_path": "…" }`;
 `RestoreArchived` returns `{ "ok": true, "worktree_path": "…" }`;
-`DeliverPrompt` returns `{ "status": "started" | "sent" }`; `CreateTab` /
-`CloseTab` return `{ "name": "<resolved-tab-name>" }`; `ListTasks` returns
+`DeliverPrompt` returns `{ "status": "started" | "sent" }`; `CreateTab`
+returns `{ "name": "<resolved-tab-name>", "tmux_name"?: "<tmux-session>" }`
+(`tmux_name` is the tmux session the tab was spawned under, omitted for a
+web/vscode tab that owns no PTY; it normally tracks the name but diverges
+after a rename, so read it from the response rather than re-deriving it);
+`CloseTab` returns `{ "name": "<resolved-tab-name>" }`; `ListTasks` returns
 `{ "tasks": [<task>…] }`; `UpdateTask` returns `{ "ok": true, "task": <task> }`
 (the merged record); the rest return `{ "ok": true }`. The `task` field of
 `AddTask` is a full task object — the CLI/TUI build and validate it, and the
