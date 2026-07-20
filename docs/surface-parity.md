@@ -91,7 +91,7 @@ So the check works at four levels, each blind to the one below it:
 | **Verb** | can this surface do X at all? | the cobra tree, the route catalog, the binding table, the web's RPC call sites |
 | **Option** | can it do X with the options the daemon accepts? | CLI flags off the cobra tree; the wire structs by reflection, vs the AST of `api/`+`app/` and the web's request bodies |
 | **Enum** | does it offer the same VALUES for those options? | the canonical Go enum, vs what a surface actually lists |
-| **Identifier** | is the string we SHOW the string we ACCEPT? | the display rule (`session.TabLabel`) vs the resolver (`session.TabMatches`) |
+| **Identifier** | is the string we SHOW presentation-only, with the string we ACCEPT discoverable from it? | the display rule (`session.TabLabel`) vs the resolver (`session.TabMatches`) |
 
 The option level is where the interesting gaps live, because they hide behind a
 verb that looks present. Two of the same shape so far — a field the daemon
