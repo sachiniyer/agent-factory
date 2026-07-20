@@ -287,7 +287,8 @@ func (m *home) persistTUIViewStateAfter(msg tea.Msg) {
 
 func shouldPersistTUIViewStateAfter(msg tea.Msg) bool {
 	switch msg.(type) {
-	case previewTickMsg, panesRefreshedMsg, repaintAfterDetachMsg, keyupMsg, hideErrMsg:
+	case previewTickMsg, panesRefreshedMsg, panePreviewStaleExpiredMsg,
+		repaintAfterDetachMsg, keyupMsg, hideErrMsg:
 		return false
 	default:
 		return true

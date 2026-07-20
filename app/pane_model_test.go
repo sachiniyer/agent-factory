@@ -237,6 +237,70 @@ func TestPanePreviewPaintsLastCaptureWhileRefreshing(t *testing.T) {
 	assert.NotContains(t, view, "ALPHA_PREVIEW_CONTENT")
 }
 
+func TestPanePreviewSlowCaptureFallsBackAfterGrace(t *testing.T) {
+	h := paneTestHome(t)
+	alpha := h.store.GetInstanceByTitle("alpha")
+	beta := h.store.GetInstanceByTitle("beta")
+	setPreviewText(alpha, "ALPHA_PREVIEW_CONTENT")
+
+	pressKey(t, h, "s")
+	paneA := h.store.OpenPanes()[0]
+	w := h.paneWindows[paneA.ID()]
+	require.NotNil(t, w)
+	require.IsType(t, panesRefreshedMsg{}, refreshPaneBindingCmd(w, alpha, 0, w.ContentSeq())())
+
+	started := time.Now()
+	graceCmd := h.updatePanePreview(beta, 0, false, false)
+	require.NotNil(t, graceCmd, "a new preview target must arm the stale-frame grace period")
+	assert.Contains(t, h.View(), "ALPHA_PREVIEW_CONTENT",
+		"the completed frame stays visible during the fast-path grace period")
+	assert.Nil(t, h.updatePanePreview(beta, 0, false, false),
+		"refresh ticks for the same target must not keep restarting the grace period")
+
+	msg := graceCmd()
+	assert.GreaterOrEqual(t, time.Since(started), panePreviewStaleGrace)
+	require.IsType(t, panePreviewStaleExpiredMsg{}, msg)
+	_, followup := h.Update(msg)
+	assert.Nil(t, followup)
+
+	view := h.View()
+	assert.Contains(t, view, "PREVIEW beta · ◆ Agent (original alpha · ◆ Agent)")
+	assert.Contains(t, view, "Loading preview…",
+		"a capture that does not arrive must stop showing another session's pane")
+	assert.NotContains(t, view, "ALPHA_PREVIEW_CONTENT")
+}
+
+func TestPanePreviewCompletedCaptureWinsGraceExpiry(t *testing.T) {
+	h := paneTestHome(t)
+	alpha := h.store.GetInstanceByTitle("alpha")
+	beta := h.store.GetInstanceByTitle("beta")
+	setPreviewText(alpha, "ALPHA_PREVIEW_CONTENT")
+	setPreviewText(beta, "BETA_PREVIEW_CONTENT")
+
+	pressKey(t, h, "s")
+	paneA := h.store.OpenPanes()[0]
+	w := h.paneWindows[paneA.ID()]
+	require.NotNil(t, w)
+	require.IsType(t, panesRefreshedMsg{}, refreshPaneBindingCmd(w, alpha, 0, w.ContentSeq())())
+
+	require.NotNil(t, h.updatePanePreview(beta, 0, false, false))
+	txn := *h.panePreviewTxn
+	expiry := panePreviewStaleExpiredMsg{
+		ownerPaneID:    txn.ownerPaneID,
+		target:         txn.target,
+		seq:            txn.seq,
+		renderRevision: w.RenderRevision(),
+	}
+	require.IsType(t, panesRefreshedMsg{}, refreshPaneBindingCmd(w, beta, 0, txn.seq)())
+
+	_, followup := h.Update(expiry)
+	assert.Nil(t, followup)
+	view := h.View()
+	assert.Contains(t, view, "BETA_PREVIEW_CONTENT",
+		"the grace timer must not overwrite a capture that already landed")
+	assert.NotContains(t, view, "Loading preview…")
+}
+
 func TestPanePreviewRetargetHonorsCaptureThrottle(t *testing.T) {
 	h := paneTestHome(t)
 	beta := h.store.GetInstanceByTitle("beta")
@@ -291,12 +355,21 @@ func TestPanePreviewFastScrollLatestWins(t *testing.T) {
 	_ = h.selectionChanged()
 	require.NotNil(t, h.panePreviewTxn)
 	betaSeq := h.panePreviewTxn.seq
+	betaExpiry := panePreviewStaleExpiredMsg{
+		ownerPaneID:    h.panePreviewTxn.ownerPaneID,
+		target:         h.panePreviewTxn.target,
+		seq:            betaSeq,
+		renderRevision: w.RenderRevision(),
+	}
 
 	h.sidebar.SetSelectedInstance(2)
 	_ = h.selectionChanged()
 	require.NotNil(t, h.panePreviewTxn)
 	gammaSeq := h.panePreviewTxn.seq
 	require.NotEqual(t, betaSeq, gammaSeq)
+	_, _ = h.Update(betaExpiry)
+	assert.NotContains(t, h.View(), "Loading preview…",
+		"the grace timer for an older target must not blank the newest preview")
 
 	require.IsType(t, panesRefreshedMsg{}, refreshPaneBindingCmd(w, beta, 0, betaSeq)())
 	view := h.View()

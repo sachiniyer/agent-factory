@@ -29,6 +29,19 @@ type panePreviewSuppression struct {
 	target   paneBinding
 }
 
+// Two capture cadences give a retarget suppressed by the per-pane throttle one
+// full tick to dispatch and the measured 4–6ms local capture time to land. A
+// slower or wedged capture then degrades from the stale frame to an honest
+// loading state instead of leaving the previous session mislabeled forever.
+const panePreviewStaleGrace = 2 * paneCaptureMinInterval
+
+type panePreviewStaleExpiredMsg struct {
+	ownerPaneID    int
+	target         paneBinding
+	seq            uint64
+	renderRevision uint64
+}
+
 func samePaneBinding(a, b paneBinding) bool {
 	return a.instance == b.instance && a.tab == b.tab
 }
@@ -110,6 +123,7 @@ func (m *home) updatePanePreview(selected *session.Instance, targetTab int, tabS
 		m.enforceInteractiveInvariant()
 	}
 
+	previousSeq := w.ContentSeq()
 	seq := w.SetPreview(target.instance, target.tab, paneBindingLabel(original))
 	m.panePreviewTxn = &panePreviewTxn{
 		ownerPaneID: owner.ID(),
@@ -123,8 +137,40 @@ func (m *home) updatePanePreview(selected *session.Instance, targetTab int, tabS
 	// timestamp also defeated panesRefresh's 100ms rapid-navigation throttle and
 	// dispatched one RPC per arrow key. The render generation above still drops a
 	// late capture for an older target, so stale-first painting cannot overwrite a
-	// newer selection.
-	return nil
+	// newer selection. If no completed state lands within the grace window, the
+	// timer replaces this stale frame with an honest loading state. Repeated
+	// refresh ticks for the same target do not restart the timer.
+	if seq == previousSeq {
+		return nil
+	}
+	renderRevision := w.RenderRevision()
+	return tea.Tick(panePreviewStaleGrace, func(time.Time) tea.Msg {
+		return panePreviewStaleExpiredMsg{
+			ownerPaneID:    owner.ID(),
+			target:         target,
+			seq:            seq,
+			renderRevision: renderRevision,
+		}
+	})
+}
+
+func (m *home) expireStalePanePreview(msg panePreviewStaleExpiredMsg) {
+	txn := m.panePreviewTxn
+	if txn == nil || txn.ownerPaneID != msg.ownerPaneID || txn.seq != msg.seq ||
+		!samePaneBinding(txn.target, msg.target) {
+		return
+	}
+	w := m.paneWindows[msg.ownerPaneID]
+	if w == nil {
+		return
+	}
+	w.InvalidateContentIfUnchanged(
+		msg.target.instance,
+		msg.target.tab,
+		msg.seq,
+		msg.renderRevision,
+		"Loading preview…",
+	)
 }
 
 // effectivePaneBinding resolves what a pane is ACTUALLY SHOWING — the single

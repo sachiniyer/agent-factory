@@ -473,6 +473,26 @@ func (w *TabbedWindow) InvalidateContent(instance *session.Instance, tab int, me
 	w.tab.InvalidateContent(instance, tab, message)
 }
 
+// RenderRevision returns the generation of the last completed pane render.
+func (w *TabbedWindow) RenderRevision() uint64 {
+	return w.tab.RenderRevision()
+}
+
+// InvalidateContentIfUnchanged replaces stale content only while both the
+// preview binding and completed render are unchanged from the caller's sample.
+func (w *TabbedWindow) InvalidateContentIfUnchanged(
+	instance *session.Instance,
+	tab int,
+	seq uint64,
+	renderRevision uint64,
+	message string,
+) bool {
+	if w.ContentSeq() != seq {
+		return false
+	}
+	return w.tab.InvalidateContentIfRevision(instance, tab, renderRevision, message)
+}
+
 // ResetToNormalMode resets the pane's tab view to normal (non-scroll) mode.
 func (w *TabbedWindow) ResetToNormalMode(instance *session.Instance) error {
 	return w.tab.ResetToNormalMode(instance, w.activeTab())
