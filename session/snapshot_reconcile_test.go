@@ -4,6 +4,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/sachiniyer/agent-factory/cmd/cmd_test"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session/git"
 	"github.com/sachiniyer/agent-factory/session/tmux"
@@ -19,13 +20,20 @@ import (
 // Restore reconnects rather than spawning.
 func newReconcileTestInstance(t *testing.T, agentName string, alive map[string]bool) (*Instance, string) {
 	t.Helper()
+	return newReconcileTestInstanceWithExec(t, agentName, nameKeyedExec(alive))
+}
+
+// newReconcileTestInstanceWithExec is newReconcileTestInstance over a caller-
+// supplied mock exec, for a test that needs to observe or hook the tmux commands
+// the reconcile issues (snapshot_reconcile_race_test.go).
+func newReconcileTestInstanceWithExec(t *testing.T, agentName string, exec cmd_test.MockCmdExec) (*Instance, string) {
+	t.Helper()
 	log.Initialize(false)
 	t.Cleanup(log.Close)
 	// Isolate config reads from the developer's real ~/.agent-factory (see
 	// tab_persist_test.go for the full #837 rationale).
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 
-	exec := nameKeyedExec(alive)
 	pty := persistPtyFactory{t: t, cmdExec: exec}
 
 	worktreePath := filepath.Join(t.TempDir(), "wt")

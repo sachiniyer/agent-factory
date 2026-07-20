@@ -193,6 +193,60 @@ func (i *Instance) AddProcessTab(command, requestedName string) (*Tab, error) {
 	return tab, nil
 }
 
+// appendReconciledTab appends a tab ReconcileTabsFromData rebuilt from the
+// daemon's roster, unless the instance moved out from under the reconnect it did
+// outside i.mu. Reports whether the tab was adopted.
+//
+// It is the third site of the same recheck AddShellTab and AddProcessTab do, and
+// it lives beside them so the three cannot drift (#2100). The reconcile lacked it
+// entirely: it released i.mu to reconnect the session, and a Kill or an archive
+// landing in that window was appended straight into a roster teardownTabs had
+// already snapshotted for cleanup — a tab spliced into a session being torn down,
+// which no teardown pass will ever visit.
+//
+// matchID/name are the target ROW's keys, not the tab's: an id-less legacy row
+// mints a fresh local id, so only the row's own key can answer "did a concurrent
+// reconcile/AddTab already add this one". Keeping that dedupe is why this takes
+// the row's keys rather than reading them off tab.
+//
+// What it does NOT do on a lost race is kill the session. That is the one place
+// it deliberately parts from AddShellTab: AddShellTab SPAWNED the session it
+// abandons and therefore owns its teardown, while the reconcile only ever
+// ATTACHES — Restore("") errors instead of spawning (#1152) — to a session the
+// daemon spawned and owns (#960). It also races an operation that can be UNDONE:
+// the TUI raises OpKilling optimistically at confirmation time and RevertKill
+// puts the row back when the daemon's teardown fails, and a failed archive move
+// aborts back to Lost. Killing here would destroy a live tab over an operation
+// the user still gets back. So it releases only what this process opened and
+// drops the projection, exactly as AttachShellTab's kill-race path does.
+func (i *Instance) appendReconciledTab(matchID, name string, tab *Tab) bool {
+	i.mu.Lock()
+	// Keyed on the id (name for an id-less roster row) to match the presence test
+	// the caller ran before reconnecting — a name re-check would wrongly skip a
+	// recreated tab whose new id must land.
+	exists := false
+	for _, t := range i.Tabs {
+		if (matchID != "" && t.ID == matchID) || (matchID == "" && t.Name == name) {
+			exists = true
+			break
+		}
+	}
+	stale := !i.started || i.tabSpawnBlockedLocked() != nil
+	adopt := !stale && !exists
+	if adopt {
+		i.Tabs = append(i.Tabs, tab)
+	}
+	title := i.Title
+	i.mu.Unlock()
+
+	if stale && tab.tmux != nil {
+		if cerr := tab.tmux.CloseAttachOnly(); cerr != nil {
+			log.WarningLog.Printf("reconcile tabs for %q: releasing attach client for tab %q after kill/archive race: %v", title, name, cerr)
+		}
+	}
+	return adopt
+}
+
 // AddWebTab appends a new Web-kind tab pointing at url to the instance's Tabs and
 // returns it. Unlike shell/process tabs a web tab has NO tmux session — it is
 // pure metadata (a URL the web UI iframes and, for loopback targets, the daemon
