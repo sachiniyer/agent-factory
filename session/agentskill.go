@@ -136,7 +136,10 @@ func ensureAfSkillDir(base string) (string, error) {
 		// existed, so af's edits to the user's global config do not outlive the
 		// decision not to make them (#1977's first objection).
 		removeAfSkillDir(skillDir, path)
-		log.WarningLog.Printf("af skill: not writing %s — af does not manage global agent config directories unless global_agent_skills = true is set in the af config (af guidance not injected for this agent)", path)
+		// INFO, not WARNING (#2166): global_agent_skills defaults false, so this
+		// fires on every codex/gemini/amp session start on a DEFAULT install. af
+		// is honoring the documented default, which is not a defect.
+		log.InfoLog.Printf("af skill: not writing %s — af does not manage global agent config directories unless global_agent_skills = true is set in the af config (af guidance not injected for this agent)", path)
 		return "", nil
 	default: // globalSkillUnknown
 		return "", nil
@@ -147,7 +150,10 @@ func ensureAfSkillDir(base string) (string, error) {
 		return "", err
 	}
 	if !wrote {
-		log.WarningLog.Printf("af skill: %s exists but is not af-managed; leaving it untouched (af guidance not injected)", path)
+		// INFO, not WARNING (#2166): the user owns a file at our path and af is
+		// deliberately not overwriting it. That is the designed outcome of the
+		// marker guard, repeated on every session start, not something to fix.
+		log.InfoLog.Printf("af skill: %s exists but is not af-managed; leaving it untouched (af guidance not injected)", path)
 	}
 	return skillDir, nil
 }
@@ -185,7 +191,9 @@ func removeAfSkillDir(skillDir, path string) {
 	// Best-effort, and deliberately not RemoveAll: this succeeds only if the
 	// directory is now empty.
 	_ = os.Remove(skillDir)
-	log.WarningLog.Printf("af skill: removed the af-managed %s — af no longer writes into global agent config directories (set global_agent_skills = true to restore it)", path)
+	// INFO, not WARNING (#2166): this reports a cleanup that SUCCEEDED, taken
+	// because the user's config says af may not manage that directory.
+	log.InfoLog.Printf("af skill: removed the af-managed %s — af no longer writes into global agent config directories (set global_agent_skills = true to restore it)", path)
 }
 
 // codexSkillsBaseDir returns codex's skills-discovery base: $CODEX_HOME/skills, or
@@ -281,7 +289,8 @@ func ensureAiderReadFile() (string, error) {
 		return "", err
 	}
 	if !wrote {
-		log.WarningLog.Printf("af skill: %s exists but is not af-managed; not injecting --read for aider", path)
+		// INFO, not WARNING (#2166): same marker-guard skip as ensureAfSkillDir.
+		log.InfoLog.Printf("af skill: %s exists but is not af-managed; not injecting --read for aider", path)
 		return "", nil
 	}
 	return path, nil

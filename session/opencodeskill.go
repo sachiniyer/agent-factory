@@ -82,7 +82,9 @@ func ensureOpencodeAfConfig() (string, error) {
 		return "", err
 	}
 	if !wrote {
-		log.WarningLog.Printf("af skill: %s exists but is not af-managed; not injecting OPENCODE_CONFIG for opencode", instructionsPath)
+		// INFO, not WARNING (#2166): the marker guard refusing to overwrite a
+		// user-owned file is the designed outcome, not a failure.
+		log.InfoLog.Printf("af skill: %s exists but is not af-managed; not injecting OPENCODE_CONFIG for opencode", instructionsPath)
 		return "", nil
 	}
 
@@ -92,7 +94,8 @@ func ensureOpencodeAfConfig() (string, error) {
 		return "", err
 	}
 	if !wrote {
-		log.WarningLog.Printf("af skill: %s exists but is not af-managed; not injecting OPENCODE_CONFIG for opencode", configPath)
+		// INFO, not WARNING (#2166): see above.
+		log.InfoLog.Printf("af skill: %s exists but is not af-managed; not injecting OPENCODE_CONFIG for opencode", configPath)
 		return "", nil
 	}
 	return configPath, nil
