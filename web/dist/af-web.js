@@ -10238,6 +10238,32 @@ function supportsTabManagement(s) {
 function canManageTabs(s) {
   return supportsTabManagement(s) && !isArchived(s);
 }
+function tabCreationUnavailableReason(s, tabCount = sessionTabs(s).length) {
+  const supported = supportsTabManagement(s);
+  if (isArchived(s)) {
+    if (!supported) {
+      return `Archived \xB7 ${tabRuntimeLabel(s)} sessions have a fixed tab list`;
+    }
+    return "Restore this session to create tabs";
+  }
+  if (!supported) {
+    return `${tabRuntimeLabel(s)} sessions have a fixed tab list`;
+  }
+  if (tabCount >= MAX_TABS) {
+    return "Nine-tab limit reached";
+  }
+  return null;
+}
+function tabRuntimeLabel(s) {
+  switch (s.backend_type) {
+    case "docker":
+      return "Docker";
+    case "ssh":
+      return "SSH";
+    default:
+      return "Remote";
+  }
+}
 function sessionTabs(s) {
   if (s.tabs && s.tabs.length > 0) {
     return s.tabs;
@@ -10998,34 +11024,35 @@ var AppShell = class {
     });
     return item;
   }
-  /** The `+` button and its kind menu.
+  /** The visible `+ New tab` button and its kind menu.
    *
-   *  `+` still creates a terminal tab in ONE click — it is long-established muscle
-   *  memory (and the mouse twin of the TUI's `t`), so making it open a menu would
-   *  tax every existing user to surface a second kind. The `▾` beside it opens the
-   *  picker instead: the same split VS Code itself uses for its terminal + / ▾.
+   *  The old split control created a terminal from `+` and hid VS Code behind a
+   *  separate, unlabeled `▾`. Even the project's maintainer could not find that
+   *  path (#2077), so the labelled button now makes the choice explicit where the
+   *  editor will appear. The `t` shortcut remains the direct shell fast path.
    *
    *  Built per render (the tab bar is rebuilt wholesale), so the menu's listeners
    *  are bound to THIS instance and torn down with it — see the isConnected check
    *  in onDocMouseDown, which self-cleans if a rerender detaches an open menu. */
   newTabControl() {
     const wrap = h2("div", { class: "af-tab-new-wrap" });
-    const add = h2("button", { type: "button", class: "af-tab-new", title: "New terminal tab" }, "+");
-    add.addEventListener("click", (e) => {
-      e.stopPropagation();
-      this.actions.newTab("shell");
-    });
-    const caret = h2("button", { type: "button", class: "af-tab-new-kind", title: "New tab\u2026" }, "\u25BE");
-    caret.setAttribute("aria-haspopup", "menu");
-    caret.setAttribute("aria-expanded", "false");
-    caret.setAttribute("aria-label", "Choose tab type");
+    const trigger = h2(
+      "button",
+      { type: "button", class: "af-tab-new", title: "Create a terminal or VS Code tab" },
+      h2("span", { class: "af-tab-new-plus" }, "+"),
+      h2("span", {}, "New tab"),
+      h2("span", { class: "af-tab-new-caret" }, "\u25BE")
+    );
+    trigger.setAttribute("aria-haspopup", "menu");
+    trigger.setAttribute("aria-expanded", "false");
+    trigger.setAttribute("aria-label", "New tab \xB7 Terminal or VS Code");
     const menu = h2("div", { class: "af-tab-menu" });
     menu.setAttribute("role", "menu");
     menu.setAttribute("aria-label", "Tab type");
     menu.hidden = true;
     const close = () => {
       menu.hidden = true;
-      caret.setAttribute("aria-expanded", "false");
+      trigger.setAttribute("aria-expanded", "false");
       document.removeEventListener("mousedown", onDocMouseDown);
       document.removeEventListener("keydown", onKeyDown, true);
     };
@@ -11040,11 +11067,11 @@ var AppShell = class {
       }
       e.stopPropagation();
       close();
-      caret.focus();
+      trigger.focus();
     };
     const open = () => {
       menu.hidden = false;
-      caret.setAttribute("aria-expanded", "true");
+      trigger.setAttribute("aria-expanded", "true");
       document.addEventListener("mousedown", onDocMouseDown);
       document.addEventListener("keydown", onKeyDown, true);
     };
@@ -11059,7 +11086,7 @@ var AppShell = class {
       return b;
     };
     menu.append(item("Terminal", "shell"), item("VS Code", "vscode"));
-    caret.addEventListener("click", (e) => {
+    trigger.addEventListener("click", (e) => {
       e.stopPropagation();
       if (menu.hidden) {
         open();
@@ -11067,7 +11094,7 @@ var AppShell = class {
         close();
       }
     });
-    wrap.append(add, caret, menu);
+    wrap.append(trigger, menu);
     return wrap;
   }
   toggleFilterMenu() {
@@ -11181,8 +11208,13 @@ var AppShell = class {
     const children = tabs.map(
       (tab, i) => tabButton(tab, i, i === active, shown.has(i), canManage, this.actions, () => this.liveTabIdentity(i), selected.id ?? "")
     );
-    if (canManage && tabs.length < MAX_TABS) {
+    const unavailable = tabCreationUnavailableReason(selected, tabs.length);
+    if (unavailable === null) {
       children.push(this.newTabControl());
+    } else {
+      const reason = h2("span", { class: "af-tab-new-unavailable", title: unavailable }, unavailable);
+      reason.setAttribute("aria-label", `New tab unavailable \xB7 ${unavailable}`);
+      children.push(reason);
     }
     bar.replaceChildren(...children);
     if (this.tabInsert) {
@@ -11357,8 +11389,9 @@ function tabBarSig(state) {
   const tabs = sessionTabs(selected);
   const active = Math.min(Math.max(state.activeTab, 0), tabs.length - 1);
   const canManage = canManageTabs(selected);
+  const createReason = tabCreationUnavailableReason(selected, tabs.length);
   const shown = [...new Set(state.shownTabs)].sort((a, b) => a - b);
-  return JSON.stringify([selected.id ?? "", tabs.map((t) => [t.kind, t.name]), active, shown, canManage]);
+  return JSON.stringify([selected.id ?? "", tabs.map((t) => [t.kind, t.name]), active, shown, canManage, createReason]);
 }
 function barTabs(bar) {
   return [...bar.querySelectorAll(".af-tab")];

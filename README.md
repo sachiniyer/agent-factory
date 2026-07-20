@@ -66,11 +66,11 @@ Three ideas carry the whole tool.
   git artifact you can diff, push, or open a PR from. Pass `--here` when you
   deliberately want the agent in your current checkout instead.
 - **Tabs — more than one thing per session.** Every session has its agent tab,
-  and a local session can open more beside it in the same worktree: a shell with
-  `t`, or — via `af sessions tab-create` — a long-running command, a web view, or
-  a VS Code editor. Sessions on the docker, ssh, and hook backends run off-box,
-  so their tab list is fixed by the runtime; adding tabs to them isn't supported
-  yet.
+  and a local session can open more beside it in the same worktree: `t` chooses a
+  terminal or VS Code editor, while `af sessions tab-create` adds a named
+  long-running command or web view. Sessions on the docker, ssh, and hook
+  backends run off-box, so their tab list is fixed by the runtime; adding tabs
+  to them isn't supported yet.
 - **Daemon — the thing that actually owns state.** A background daemon runs the
   sessions, schedules tasks, serves the web UI, and is the single source of
   truth. Opening the TUI starts one, as do autoyes mode and any enabled task;

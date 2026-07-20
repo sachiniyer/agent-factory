@@ -5,6 +5,8 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/sachiniyer/agent-factory/session"
+	"github.com/sachiniyer/agent-factory/ui/overlay"
 	"github.com/sachiniyer/agent-factory/ui/tree"
 )
 
@@ -12,21 +14,89 @@ import (
 // out of handle_actions.go to keep that file under the length limit (#1145).
 // They share the pane layer's stable-id + focused-pane rules (#1884/#1885/#1886).
 
-// handleNewTab spawns a new shell tab in the selected instance and selects it
-// (#930 PR 4). Single keypress, no prompt: the tab runs $SHELL in the instance's
-// worktree. Remote instances have no local worktree and the hook protocol has no
-// run-arbitrary-command verb, so new-tab is unsupported there: a remote session's
-// only terminal tab is the one derived from remote_hooks.terminal_cmd (#930 PR 6).
+type newTabChoice struct {
+	label string
+	kind  session.TabKind
+}
+
+var newTabChoices = []newTabChoice{
+	{label: "Terminal", kind: session.TabKindShell},
+	{label: "VS Code", kind: session.TabKindVSCode},
+}
+
+// showNewTabPicker opens the TUI's existing enum-selection overlay for `t`.
+// Terminal and VS Code both need no further input, so they fit this small picker;
+// process and web tabs still need a command or URL and remain on tab-create. The
+// target title is captured now because a background snapshot can arrive while
+// the modal owns the keyboard and may replace the instance pointer.
+func (m *home) showNewTabPicker() (tea.Model, tea.Cmd) {
+	selected := m.sidebar.GetSelectedInstance()
+	if selected == nil || selected.HasInFlightOp() {
+		return m, nil
+	}
+	if !selected.Capabilities().TabManagement {
+		return m, m.handleError(fmt.Errorf("only local sessions support new tabs — this session's workspace runs off-box (docker/ssh/remote), so there is no local worktree to spawn a tab in"))
+	}
+
+	items := make([]string, len(newTabChoices))
+	for idx, choice := range newTabChoices {
+		items[idx] = choice.label
+	}
+	m.tabCreateTitle = selected.Title
+	m.selectionOverlay = overlay.NewSelectionOverlay("New tab", items)
+	m.selectionOverlay.SetWidth(40)
+	m.layoutSelectionOverlay()
+	m.state = stateSelectTabKind
+	return m, nil
+}
+
+// handleStateSelectTabKind submits or cancels the new-tab picker. It has no text
+// field, so ordinary rune keys (including a configured `q` quit key) cannot be
+// mistaken for form input or silently create a different kind.
+func (m *home) handleStateSelectTabKind(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.selectionOverlay == nil {
+		m.tabCreateTitle = ""
+		m.state = stateDefault
+		return m, nil
+	}
+	if !m.selectionOverlay.HandleKeyPress(msg) {
+		return m, nil
+	}
+
+	submitted := m.selectionOverlay.IsSubmitted()
+	idx := m.selectionOverlay.GetSelectedIndex()
+	title := m.tabCreateTitle
+	m.selectionOverlay = nil
+	m.tabCreateTitle = ""
+	m.state = stateDefault
+	if !submitted || title == "" || idx < 0 || idx >= len(newTabChoices) {
+		return m, nil
+	}
+	selected := m.store.GetInstanceByTitle(title)
+	if selected == nil {
+		return m, nil
+	}
+	return m.createNewTab(selected, newTabChoices[idx].kind)
+}
+
+// handleNewTab is the direct shell-create helper used by the Terminal picker
+// choice and focused lifecycle tests. The user-facing `t` binding opens
+// showNewTabPicker first (#2077).
+func (m *home) handleNewTab() (tea.Model, tea.Cmd) {
+	return m.createNewTab(m.sidebar.GetSelectedInstance(), session.TabKindShell)
+}
+
+// createNewTab creates one no-input tab kind through the daemon's CreateTab RPC
+// and selects it. Remote instances have no local worktree and the hook protocol
+// has no run-arbitrary-command verb, so their tab roster is runtime-fixed.
 //
 // The spawn+persist is routed through the daemon's CreateTab RPC (#960): the
 // daemon — the single writer — owns the new tab so its authoritative view holds
-// it and the TUI no longer originates a tab write at all (#959). The TUI reflects
-// the daemon-created tab locally via AttachShellTab for instant display (it
-// reconnects to the session the daemon spawned, never a second colliding spawn);
-// the snapshot reconcile (PR 3) keeps it mirrored thereafter. The daemon's soft
-// cap (max tabs) error is surfaced verbatim.
-func (m *home) handleNewTab() (tea.Model, tea.Cmd) {
-	selected := m.sidebar.GetSelectedInstance()
+// it and the TUI no longer originates a persisted tab write at all (#959). The
+// local projection is reflected immediately for both kinds; the next snapshot
+// adopts the daemon-minted stable id. The daemon's soft cap error is surfaced
+// verbatim.
+func (m *home) createNewTab(selected *session.Instance, kind session.TabKind) (tea.Model, tea.Cmd) {
 	if selected == nil {
 		return m, nil
 	}
@@ -37,22 +107,37 @@ func (m *home) handleNewTab() (tea.Model, tea.Cmd) {
 		return m, m.handleError(fmt.Errorf("only local sessions support new tabs — this session's workspace runs off-box (docker/ssh/remote), so there is no local worktree to spawn a tab in"))
 	}
 
-	name, tmuxName, err := createShellTabThroughDaemon(selected.Title, m.repoID)
+	var name, tmuxName string
+	var err error
+	switch kind {
+	case session.TabKindShell:
+		name, tmuxName, err = createShellTabThroughDaemon(selected.Title, m.repoID)
+	case session.TabKindVSCode:
+		name, tmuxName, err = createVSCodeTabThroughDaemon(selected.Title, m.repoID)
+	default:
+		return m, m.handleError(fmt.Errorf("tab kind %d is not available from the TUI", kind))
+	}
 	if err != nil {
 		return m, m.handleError(err)
 	}
-	// The daemon spawned and persisted the tab; reflect it locally for instant
-	// display without a second spawn, binding to the exact tmux session it
-	// reported rather than one re-derived from the name (#1957). The daemon write
-	// is authoritative, so the TUI never saves (#960 PR 4).
-	if _, attachErr := selected.AttachShellTab(name, tmuxName); attachErr != nil {
+	// Reflect the daemon-created tab locally for instant display. A shell binds to
+	// the exact tmux session the daemon reported (#1957); a VS Code tab is metadata
+	// only and carries no tmux session at all. Neither path spawns or persists a
+	// second tab.
+	var attachErr error
+	if kind == session.TabKindVSCode {
+		_, attachErr = selected.AttachVSCodeTab(name)
+	} else {
+		_, attachErr = selected.AttachShellTab(name, tmuxName)
+	}
+	if attachErr != nil {
 		return m, m.handleError(attachErr)
 	}
 
 	// Select the fresh tab in the tree and open it as a pane (#1088): the
-	// pre-N-pane behavior showed the new tab in the workspace immediately,
-	// and the issue's canonical flow — agent pane + terminal pane side by
-	// side for one instance — is exactly `s` then `t`.
+	// pre-N-pane behavior showed the new tab in the workspace immediately. A VS
+	// Code tab opens the existing terminal placeholder that points to the web UI;
+	// the browser renders the editor itself.
 	newIdx := len(tree.TabLabels(selected)) - 1
 	m.store.SetActiveTab(newIdx)
 	m.menu.SetActiveTab(newIdx)

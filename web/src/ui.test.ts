@@ -8,7 +8,13 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { canManageTabs, documentTitle, supportsTabManagement, tabBarSig } from "./ui.js";
+import {
+  canManageTabs,
+  documentTitle,
+  supportsTabManagement,
+  tabBarSig,
+  tabCreationUnavailableReason,
+} from "./ui.js";
 import type { AppState } from "./ui.js";
 import { Liveness, type SessionData } from "./types.js";
 
@@ -113,6 +119,23 @@ test("supportsTabManagement: local and legacy records keep tab management", () =
   // backend_type is omitempty, so a pre-#1592 record carries none. It is a local
   // session; defaulting it to off-box would strip the + from every legacy row.
   assert.equal(supportsTabManagement(sess({})), true, "a record with no backend_type is local");
+});
+
+test("tab creation always explains archived, off-box, and full states (#2077)", () => {
+  assert.equal(tabCreationUnavailableReason(sess({ backend_type: "local" }), 1), null);
+  assert.equal(
+    tabCreationUnavailableReason(sess({ backend_type: "local", liveness: Liveness.Archived }), 1),
+    "Restore this session to create tabs",
+  );
+  assert.equal(tabCreationUnavailableReason(sess({ backend_type: "docker" }), 1), "Docker sessions have a fixed tab list");
+  assert.equal(tabCreationUnavailableReason(sess({ backend_type: "ssh" }), 1), "SSH sessions have a fixed tab list");
+  assert.equal(tabCreationUnavailableReason(sess({ backend_type: "remote" }), 1), "Remote sessions have a fixed tab list");
+  assert.equal(
+    tabCreationUnavailableReason(sess({ backend_type: "remote", liveness: Liveness.Archived }), 1),
+    "Archived · Remote sessions have a fixed tab list",
+    "restoring an off-box session must not falsely promise that tab creation will become available",
+  );
+  assert.equal(tabCreationUnavailableReason(sess({ backend_type: "local" }), 9), "Nine-tab limit reached");
 });
 
 test("archiving the selected session changes the sig — the bar must rebuild to drop the × (#1809)", () => {

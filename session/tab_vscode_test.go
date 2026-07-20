@@ -51,6 +51,28 @@ func TestAddVSCodeTab_ExplicitNameAndCollisionSuffixing(t *testing.T) {
 	assert.Equal(t, "vscode", third.Name)
 }
 
+// TestAttachVSCodeTabReflectsDaemonOwnedTab verifies the TUI-side projection
+// path adds no second editor and invents no competing stable identity. A raced
+// snapshot that already reflected the daemon row is a name-keyed no-op.
+func TestAttachVSCodeTabReflectsDaemonOwnedTab(t *testing.T) {
+	log.Initialize(false)
+	defer log.Close()
+
+	inst := startedMockInstance(t, "af_vscode_attach")
+	tab, err := inst.AttachVSCodeTab("editor")
+	require.NoError(t, err)
+	assert.Equal(t, TabKindVSCode, tab.Kind)
+	assert.Equal(t, "editor", tab.Name)
+	assert.Empty(t, tab.ID, "the next authoritative snapshot must supply the daemon-minted id")
+	assert.Nil(t, tab.tmux, "reflecting a VS Code tab must not spawn or attach a tmux session")
+	assert.Equal(t, 2, inst.TabCount())
+
+	again, err := inst.AttachVSCodeTab("editor")
+	require.NoError(t, err)
+	assert.Same(t, tab, again, "a snapshot that won the race must not duplicate the tab")
+	assert.Equal(t, 2, inst.TabCount())
+}
+
 // TestVSCodeTab_PersistRoundTrip verifies a vscode tab survives a
 // serialize/restore cycle. This is what makes "restore, then respawn the editor
 // lazily" work: the tab carries no editor state at all, so there is nothing to go

@@ -200,6 +200,14 @@ func (m *home) View() string {
 		fg := m.selectionOverlay.Render()
 		m.selectionOverlay.RegisterZones(m.zones, overlayOrigin(fg, mainView))
 		return overlay.PlaceOverlay(0, 0, fg, mainView, true)
+	} else if m.state == stateSelectTabKind {
+		if m.selectionOverlay == nil {
+			log.ErrorLog.Printf("tab-kind selection overlay is nil")
+			return mainView
+		}
+		fg := m.selectionOverlay.Render()
+		m.selectionOverlay.RegisterZones(m.zones, overlayOrigin(fg, mainView))
+		return overlay.PlaceOverlay(0, 0, fg, mainView, true)
 	} else if m.state == statePromptInput {
 		if m.promptOverlay == nil {
 			log.ErrorLog.Printf("prompt overlay is nil")

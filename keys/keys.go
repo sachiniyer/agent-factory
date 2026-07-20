@@ -27,7 +27,7 @@ const (
 	KeyShiftTab   // ShiftTab cycles the focus ring in reverse.
 	KeySubmitName // SubmitName is a special keybinding for submitting the name of a new instance.
 
-	KeyNewTab   // NewTab spawns a new shell tab in the selected instance (#930 PR 4).
+	KeyNewTab   // NewTab opens the Terminal / VS Code picker for the selected instance (#2077).
 	KeyCloseTab // CloseTab closes the active (non-agent) tab (#930 PR 4).
 	KeyJumpTab  // JumpTab is the 1-9 number-key jump hint; dispatched manually, menu/help only.
 

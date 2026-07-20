@@ -151,7 +151,7 @@ func (h helpTypeGeneral) toContent() string {
 		}},
 		{title: "Tabs:", rows: []helpRow{
 			{helpKey(keys.KeyJumpTab), "Select a tab by number (s opens it, enter attaches)"},
-			{helpKey(keys.KeyNewTab), "Open a new terminal tab"},
+			{helpKey(keys.KeyNewTab), "Choose a terminal or VS Code tab"},
 			{helpKey(keys.KeyCloseTab), "Close the current tab (the agent tab can't be closed)"},
 			{helpKey(keys.KeyShiftUp) + "/" + helpKey(keys.KeyShiftDown), "Scroll in the current tab"},
 		}},

@@ -118,11 +118,11 @@ func (m *home) handleDefaultKeyPress(msg tea.KeyMsg, name keys.KeyName) (tea.Mod
 	case keys.KeyShiftTab:
 		return m, m.cycleFocus(true)
 
-	// Tab lifecycle (#930 PR 4): `t` creates, `w` kills the selection's
+	// Tab lifecycle (#930 PR 4): `t` chooses and creates, `w` kills the selection's
 	// active tab. Hiding a PANE is `x` — `w` keeps its kill meaning
 	// everywhere (§2.3).
 	case keys.KeyNewTab:
-		return m.handleNewTab()
+		return m.showNewTabPicker()
 	case keys.KeyCloseTab:
 		return m.handleCloseTab()
 

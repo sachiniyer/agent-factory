@@ -1205,9 +1205,9 @@ body {
 
 /* Tab bar (#1592 Phase 5 PR7): a slim strip of the session's tabs between the pane
  * header and the terminal, mirroring the TUI's tab row (ui/tabbed_window.go). The
- * active tab is accent-underlined; each non-agent tab carries a × close, and a +
- * adds a shell tab. It scrolls horizontally rather than wrapping so a full row of
- * tabs never pushes the terminal down. */
+ * active tab is accent-underlined; each non-agent tab carries a × close, and the
+ * labelled New tab control offers Terminal / VS Code. It scrolls horizontally
+ * rather than wrapping so a full row of tabs never pushes the terminal down. */
 .af-tabbar {
   display: flex;
   align-items: stretch;
@@ -1332,38 +1332,15 @@ body {
   background: var(--af-danger-subtle);
 }
 
-/* The new-tab control: + (create a terminal tab) plus ▾ (pick a kind) and the
-   menu the caret opens. The wrap is the positioning context the absolutely-placed
-   menu hangs from. */
+/* The labelled new-tab control and its kind menu. The wrap is the positioning
+   context the absolutely-placed menu hangs from. */
 .af-tab-new-wrap {
   position: relative;
   display: inline-flex;
   align-items: center;
 }
 
-/* The ▾ kind picker: deliberately quieter than the +, which stays the primary
-   one-click action. */
-.af-tab-new-kind {
-  padding: 0.35rem 0.3rem;
-  background: transparent;
-  color: var(--af-text-2);
-  border: none;
-  font: inherit;
-  font-size: var(--af-fs-2xs);
-  line-height: 1;
-  cursor: pointer;
-}
-
-.af-tab-new-kind:hover {
-  color: var(--af-accent);
-}
-
-.af-tab-new-kind:focus-visible {
-  outline: 2px solid var(--af-accent);
-  outline-offset: 2px;
-}
-
-/* The + menu (Terminal / VS Code). Mirrors .af-project-menu's chrome so the two
+/* The new-tab menu (Terminal / VS Code). Mirrors .af-project-menu's chrome so the two
    dropdowns read as one component, but hangs from the LEFT: the + sits at the
    start of the free space after the tabs, so a right-anchored menu would drift
    away from its button as the tab count changes. */
@@ -1403,22 +1380,47 @@ body {
   outline-offset: -2px;
 }
 
-/* The + new-tab button: the tab-bar analogue of the rail's "+ New". */
+/* The labelled new-tab button: the tab-bar analogue of the rail's "+ New". */
 .af-tab-new {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
   padding: 0.35rem 0.55rem;
   background: transparent;
   color: var(--af-accent);
   border: none;
   border-radius: 0;
   font: inherit;
-  font-size: var(--af-fs-md);
+  font-size: var(--af-fs-xs);
   font-weight: 600;
   line-height: 1;
+  white-space: nowrap;
   cursor: pointer;
 }
 
 .af-tab-new:hover {
   color: var(--af-text);
+}
+
+.af-tab-new-plus {
+  font-size: var(--af-fs-md);
+  line-height: 0.8;
+}
+
+.af-tab-new-caret {
+  color: var(--af-text-2);
+  font-size: var(--af-fs-2xs);
+}
+
+/* Creation never vanishes silently: archived sessions, off-box runtimes, and a
+   full nine-tab roster each leave a concise, visible reason in the tab bar. */
+.af-tab-new-unavailable {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.35rem 0.55rem;
+  color: var(--af-text-2);
+  font-size: var(--af-fs-xs);
+  white-space: nowrap;
 }
 
 /* Tab-op error toast (#1592 Phase 5 PR7): a transient banner pinned bottom-right,

@@ -41,6 +41,9 @@ const (
 	stateSwitchProject
 	// stateSelectProgram is the state when the user is selecting a program during naming.
 	stateSelectProgram
+	// stateSelectTabKind is the state when the user is choosing which kind of tab
+	// the new-tab action should create.
+	stateSelectTabKind
 	// statePromptInput is the state when the initial-prompt field of the naming
 	// form is open (#1936). Like stateSelectProgram it is a sub-state of
 	// stateNew: closing it returns to naming rather than to stateDefault.
@@ -371,8 +374,13 @@ type home struct {
 	// action so that handleStateConfirm can forward it to the Bubble Tea
 	// event loop after OnConfirm runs.
 	pendingConfirmMsg tea.Msg
-	// selectionOverlay handles program selection during new-instance naming
+	// selectionOverlay handles short enum choices: program selection during
+	// new-instance naming and tab-kind selection from the new-tab action.
 	selectionOverlay *overlay.SelectionOverlay
+	// tabCreateTitle identifies the session that opened the tab-kind picker.
+	// Background snapshots may move the sidebar selection or replace an instance
+	// pointer while the modal is open, so submit re-resolves this stable title.
+	tabCreateTitle string
 	// searchOverlay handles session search
 	searchOverlay *overlay.SearchOverlay
 	// projectPickerOverlay handles switching the active project (#1461)
