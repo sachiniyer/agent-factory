@@ -21,6 +21,7 @@ func (b *startBackend) Start(instance *session.Instance, _ bool) error {
 }
 
 func (b *startBackend) Provision(*session.Instance, bool) error { return nil }
+func (b *startBackend) SwapAgent(*session.Instance) error       { return nil }
 
 func (b *startBackend) Launch(instance *session.Instance, _ bool) error {
 	instance.SetStartedForTest(true)

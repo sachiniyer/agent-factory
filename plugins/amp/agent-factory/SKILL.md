@@ -18,6 +18,7 @@ Sessions (one agent per isolated worktree):
   af sessions kill <title>                             Kill a session and clean up its worktree
   af sessions archive <title>                          Archive (tmux down, worktree moved out; restartable)
   af sessions archive --self                            Archive your OWN session (resolved via whoami); no title needed
+  af sessions handoff <title> --to <agent>             Continue a stuck session under a different agent (same worktree/branch)
   af sessions restore <title>                          Restore an archived, lost, or dead session
 
 Tabs (extra processes in a session's worktree; max 9 per session; not available for remote sessions):

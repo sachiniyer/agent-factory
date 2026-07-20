@@ -310,6 +310,25 @@
       "notes": "PARTIALLY closed by #1934: the route is promoted out of internalHTTPRoutes into the public catalog — the one-line follow-up daemon/httproutes.go promised in #1592 Phase 2 PR3 and never wrote — and the web now offers Retry on a limit-blocked session, mirroring the TUI's `c`: shown only when the selection is actually LimitReached, and no confirm. It deliberately does NOT copy the TUI's optimistic badge clear: the web is a read-only projection of the daemon's state (#960 single writer), so the session.updated event clears the ◆ badge. That matters beyond purity — resumeFromLimit returns nil in four distinct did-nothing cases (kill in flight, op lock contended, teardown, instance swapped), so clearing on any nil would show a session as resumed while it is still parked. ResumeFromLimitRequest gained an `id` so the web addresses the session by stable id (wire.id-addressing) rather than title; the verb re-delivers a prompt into a pane, so a title misroute would type it into another repo's agent. STILL A GAP on the CLI: there is no retry verb in the cobra tree. That half is deliberately not in #1934 because naming a new public CLI noun (`af sessions retry-limit`? a flag on an existing verb?) is an owner call, and the issue says so. Re-verdict to parity once that lands."
     },
     {
+      "id": "session.handoff",
+      "title": "Continue a session under a different agent, in place",
+      "tui": {
+        "status": "yes",
+        "pointer": "keys/keys.go (F, handoff) -> app/handle_handoff.go -> app/session_control.go handoffSessionThroughDaemon"
+      },
+      "web": {
+        "status": "no",
+        "pointer": "no handoffSession() in web/src/api.ts (derived)"
+      },
+      "cli": {
+        "status": "yes",
+        "pointer": "api/sessions_handoff.go (af sessions handoff <title> --to <agent>)"
+      },
+      "verdict": "real-gap",
+      "issue": "#2013",
+      "notes": "Shipped TUI+CLI in the #2013 prompted-handoff PR; the web action is deferred to that issue's follow-up. Recorded as a real gap rather than a deliberate one, and #2084 is why: it just gave the web a way OUT of a limit-blocked session (closing #1934), so the web now surfaces the exact state that motivates a handoff and offers only one of the two answers to it - wait, but not switch. The agent picker the modal needs already exists (web/src/modals.ts programSelect), and HandoffSession is a public route, so this is a client-side addition rather than new plumbing."
+    },
+    {
       "id": "session.attach",
       "title": "Attach to a session's terminal",
       "tui": {
@@ -1282,6 +1301,7 @@
       "af sessions attach": "session.attach",
       "af sessions create": "session.create",
       "af sessions get": "session.get",
+      "af sessions handoff": "session.handoff",
       "af sessions kill": "session.kill",
       "af sessions list": "session.list",
       "af sessions preview": "session.preview",
@@ -1318,6 +1338,7 @@
       "POST /v1/DeleteProject": "project.delete",
       "POST /v1/DeliverPrompt": "-",
       "POST /v1/GetConfig": "config.read",
+      "POST /v1/HandoffSession": "session.handoff",
       "POST /v1/KillSession": "session.kill",
       "POST /v1/ListBackends": "backend.list",
       "POST /v1/ListPrograms": "enum.agent-programs",
@@ -1359,6 +1380,7 @@
       "fixed:nav mode": "tui.navigation",
       "fixed:submit name": "session.create",
       "fixed:switch": "project.switch",
+      "handoff": "session.handoff",
       "help": "tui.navigation",
       "hide_pane": "tui.panes",
       "hooks": "worktree.hooks.edit",
@@ -1480,6 +1502,9 @@
       "af sessions create --program": "session.create.opt.program",
       "af sessions create --prompt": "session.create.opt.prompt",
       "af sessions get --help": "meta.discovery",
+      "af sessions handoff --brief": "session.handoff",
+      "af sessions handoff --help": "meta.discovery",
+      "af sessions handoff --to": "session.handoff",
       "af sessions kill --force": "session.kill",
       "af sessions kill --help": "meta.discovery",
       "af sessions list --help": "meta.discovery",
@@ -1827,6 +1852,21 @@
         "tui": {
           "id": {
             "gap": "wire.id-addressing"
+          }
+        }
+      },
+      "HandoffSessionRequest": {
+        "cli": {
+          "id": {
+            "ok": "The CLI resolves sessions by title under --repo scoping, exactly as kill/archive/send-prompt do; the stable id is the web client's collision-proof key. Adding it here would be a new CLI concept, not a parity fix."
+          }
+        },
+        "tui": {
+          "id": {
+            "ok": "The TUI operates on the row the user selected in a single-repo rail, so title+repoID already names it unambiguously - the same resolution kill/archive/restore use from this surface."
+          },
+          "brief": {
+            "ok": "Deliberate. The TUI handoff is pick-agent-then-confirm; the mission defaults to the session's stored prompt, which the TUI can now set at create time (session.create.opt.prompt, shipped in #2075) and change any time via send-prompt. Putting a free-text field inside a confirmation dialog is a different interaction from a form field, and the confirm is deliberately one decision. `af sessions handoff --brief` is the surface for overriding the mission inline."
           }
         }
       }

@@ -43,7 +43,11 @@ func resolveProgramForInstance(i *Instance) string {
 		}
 		cfg = loaded
 	}
-	resolved := config.ResolveProgram(cfg, i.Program)
+	// Read the enum through the accessor, not the bare field: a handoff (#2013)
+	// rewrites Program in place while the instance is live and shared, so this
+	// is a genuinely concurrent read now. Every other reader of the field
+	// (ToInstanceData, ReconcileTabsFromData) already holds the instance lock.
+	resolved := config.ResolveProgram(cfg, i.AgentProgram())
 	// Key the claude-only flag off the agent the RESOLVED command actually
 	// runs, not the config-name enum: an override may point "claude" at a
 	// different program, which would exit on the unknown flag (#1116).
@@ -161,6 +165,7 @@ func (b *LocalBackend) Capabilities() Capabilities {
 		TabManagement:    true,
 		TerminalTab:      true,
 		InteractiveInput: true,
+		Handoff:          true,
 	}
 }
 
@@ -460,6 +465,79 @@ func (b *LocalBackend) Recover(i *Instance) error {
 // LimitReached/no-tombstone under the target lock).
 func (b *LocalBackend) Respawn(i *Instance) error {
 	return b.respawn(i)
+}
+
+// SwapAgent replaces the running agent with the instance's current program
+// (#2013). Instance.Program has already been rewritten to the incoming agent by
+// SwapAgentProgram; this performs the runtime half.
+//
+// Order is the whole correctness argument:
+//
+//  1. Close the agent pane and WAIT for its process to exit. Until the old agent
+//     is gone there is nothing to replace it with — and the wait is the #802
+//     ordering that keeps its final writes from racing the new agent's first
+//     ones in the same worktree.
+//  2. Only then start the new program, through the FIRST-LAUNCH path
+//     (prepareLaunchConversation + Start), never the resume path. The incoming
+//     agent has no conversation in this worktree; asking it to continue one
+//     would at best start fresh noisily and at worst fail to boot.
+//
+// A teardown whose outcome tmux could not confirm ABORTS the swap. This is the
+// one place the honest answer costs something: refusing leaves the session on
+// its old agent, still blocked, and the user has to retry. Proceeding on an
+// unconfirmed teardown risks two agents writing the same worktree at once, which
+// is unrecoverable in a way a retry is not. The instance keeps its rewritten
+// Program either way — the caller rolls that back on error.
+//
+// The worktree is never cleaned up on failure, unlike the first-launch path this
+// otherwise mirrors: on a create, a failed Start means the workspace holds
+// nothing worth keeping; here it holds everything the outgoing agent did.
+func (b *LocalBackend) SwapAgent(i *Instance) error {
+	i.mu.RLock()
+	ts := i.tmuxLocked()
+	gw := i.gitWorktree
+	i.mu.RUnlock()
+	if ts == nil {
+		return fmt.Errorf("swap agent: session %q has no tmux binding", i.Title)
+	}
+	if gw == nil {
+		return fmt.Errorf("swap agent: session %q has no worktree", i.Title)
+	}
+	workDir := gw.GetWorktreePath()
+	if workDir == "" {
+		return fmt.Errorf("swap agent: session %q has no worktree path", i.Title)
+	}
+	if _, err := os.Stat(workDir); err != nil {
+		// Do NOT rebuild here the way respawn does. A handoff is only ever issued
+		// against a live session the user is looking at; a missing worktree means
+		// something is wrong that a swap should not paper over by recreating an
+		// empty tree and dispatching a fresh agent into it.
+		return &WorktreeUnavailableError{Title: i.Title, WorktreePath: workDir, Err: err}
+	}
+
+	state, closeErr := ts.CloseAndWaitForPaneExit()
+	if state == tmux.PaneStateUnknown {
+		return fmt.Errorf("swap agent: cannot confirm %q's current agent stopped (%v); "+
+			"not starting a replacement, because two agents writing %s at once would corrupt the work in it",
+			i.Title, closeErr, workDir)
+	}
+	if closeErr != nil {
+		return fmt.Errorf("swap agent: failed to stop the current agent for %q: %w", i.Title, closeErr)
+	}
+
+	program := prepareLaunchConversation(i, resolveProgramForInstance(i))
+	ts.SetProgram(injectSystemPrompt(program))
+	if err := ts.Start(workDir); err != nil {
+		if cleanupErr := ts.CloseAttachOnly(); cleanupErr != nil {
+			err = fmt.Errorf("%v (cleanup error: %v)", err, cleanupErr)
+		}
+		return fmt.Errorf("swap agent: failed to start %s for %q: %w", i.AgentProgram(), i.Title, err)
+	}
+
+	// The new agent is booting: Running, exactly like a fresh create. Mirrors the
+	// respawn completion so the daemon poll re-derives Ready/Running from here.
+	_ = i.Transition(ConfirmLive())
+	return nil
 }
 
 // respawn holds the shared re-spawn mechanics for Recover and Respawn: re-spawn

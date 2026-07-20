@@ -334,6 +334,17 @@ func (m *Menu) addInstanceOptions() {
 	// the hints.
 	if m.instance != nil && m.instance.LimitReached() {
 		actionGroup = append(actionGroup, keys.KeyLimitRetry)
+		// Handoff (#2013) is the OTHER answer to a limit wall: `c` waits for this
+		// agent's window to reset, `H` continues the work under a different one.
+		// They are only useful together, so the bar advertises them together.
+		//
+		// The key itself is not gated on the limit — handing a session over is
+		// legitimate whenever an agent is stuck — but a limit is the case where a
+		// user needs to be TOLD the option exists, and every other session keeps an
+		// uncluttered bar.
+		if m.instance.Capabilities().Handoff {
+			actionGroup = append(actionGroup, keys.KeyHandoff)
+		}
 	}
 
 	// Tab group: create, close, and number-jump (#930 PR 4). The tab CYCLE key
@@ -477,6 +488,28 @@ var hintDropOrder = [][]keys.KeyName{
 	{keys.KeyJumpTab},
 	{keys.KeyCloseTab},
 	{keys.KeyNewTab},
+	// The two usage-limit actions shed LAST, and only after everything else has
+	// gone (#2085). They appear on one state — a session stuck at a provider
+	// wall — and on that row they are the only hints that address why the user is
+	// looking at it, so tab/pane discovery goes first and these two outlast it.
+	// Handoff before retry: retry is the primary action, handoff its alternative.
+	//
+	// They are IN this list at all because they have to be. `c retry limit` used
+	// to be absent, which read as "never drop it" but actually meant the row had
+	// no give left once everything below it was gone — so at ~45 cells it rendered
+	// 48 cells into the bar and the exact-rect clamp cut the RIGHT edge, taking
+	// `? help` and `q quit` with it. That is precisely the failure #1083 built
+	// this priority list to prevent, re-entered through the one row the list did
+	// not cover. Being droppable-last keeps them through every width where they
+	// fit and lets the row degrade honestly below that, instead of overflowing.
+	//
+	// Why not shed help/quit instead, to keep retry/handoff at any width: the
+	// floor forbids it. new+kill+help+quit is 32 cells; adding retry+handoff
+	// needs 61. Below ~61 something in that set must go, and #1083 settled which
+	// — help and quit are the escape hatches a lost user needs most, and they are
+	// deliberately absent from this list entirely.
+	{keys.KeyHandoff},
+	{keys.KeyLimitRetry},
 }
 
 func (m *Menu) String() string {

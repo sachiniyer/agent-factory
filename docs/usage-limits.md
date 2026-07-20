@@ -86,6 +86,62 @@ limit_retry_interval = "30m"   # fallback cadence when a banner states no reset 
 
 Full config reference: [configuration.md](configuration.md#usage-limit-auto-resume).
 
+## Hand off to another agent
+
+Waiting is not the only option. If the work should not sit until the window
+resets — a day, sometimes several — hand the session to a **different agent**:
+
+```
+af sessions handoff fix-auth --to claude
+```
+
+In the TUI, press **`F`** on the selected session, pick the agent, and confirm.
+The key is advertised on the status bar for a limit-blocked session, next to the
+`c` retry, because the two are the two answers to the same wall: `c` waits for
+*this* agent's window, `H` continues under another one.
+
+What a handoff does, and does not do:
+
+- **The session is the same session.** Same worktree, same branch, same tabs,
+  same task binding, same name. Only the agent process is replaced. Nothing is
+  archived, nothing is re-cloned, and uncommitted work is untouched — it is
+  simply still there, because the worktree never moved.
+- **The new agent starts fresh, with a brief.** Agent conversations are not
+  portable between providers: claude cannot read codex's transcript and vice
+  versa. So instead of a transcript, the incoming agent is told the session's
+  goal, that it is continuing someone else's work, and where to look
+  (`git log`/`git diff` on the branch). It is explicitly told not to start over.
+- **The swap is recorded.** af notes which agent handed off to which, and the
+  branch tip at that moment. That tip is the attribution boundary: everything up
+  to it is the outgoing agent's work, everything after is the incoming agent's.
+  af cannot label the commits themselves — your agent writes them — so the
+  recorded tip is what lets a reviewer check the split rather than take it on
+  trust.
+
+Use `--brief` when the stored goal is stale or too broad, which is common on a
+long-running session:
+
+```
+af sessions handoff fix-auth --to gemini --brief "just finish the retry test; leave the docs alone"
+```
+
+Any supported agent can be a target. Two things worth knowing rather than being
+blocked on:
+
+- **`codex`, `amp`, and `opencode` have no auto-approve flag**, so handing an
+  autoyes session to one of them yields a session that stops at confirmation
+  prompts.
+- **Local-worktree sessions only.** A docker/ssh/hook session runs its agent
+  inside a provisioned sandbox, where swapping the agent is a different
+  lifecycle; those sessions refuse the handoff rather than half-perform it.
+
+Handing off is **reversible**. Each agent's conversation history is stored per
+directory, so the outgoing agent's thread is still in the worktree — hand back
+to it once its limit resets and it picks up its own conversation.
+
+There is no automatic handoff. A swap changes which agent is editing your
+branch, so it is always something you ask for.
+
 ## Task runs: park, don't fail
 
 A **task** (cron or watch) can fire while your plan is already exhausted. When a
@@ -107,19 +163,25 @@ failure even though nothing was actually wrong — you'd just hit your plan limi
 
 ## Scope summary
 
-| Agent | Detected | `[limit]` badge | Manual `c` retry | Auto-resume | Task park |
-|-------|:--------:|:---------------:|:----------------:|:-----------:|:---------:|
-| `claude` | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `codex` | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `gemini` | — | — | — | — | — |
-| `aider` | — | — | — | — | — |
-| `amp` | — | — | — | — | — |
-| `opencode` | — | — | — | — | — |
+| Agent | Detected | `[limit]` badge | Manual `c` retry | Auto-resume | Task park | Handoff target |
+|-------|:--------:|:---------------:|:----------------:|:-----------:|:---------:|:--------------:|
+| `claude` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `codex` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `gemini` | — | — | — | — | — | ✅ |
+| `aider` | — | — | — | — | — | ✅ |
+| `amp` | — | — | — | — | — | ✅ |
+| `opencode` | — | — | — | — | — | ✅ |
 
 Auto-resume covers `claude`/`codex` because their banners carry a parseable
 reset window; other supported agents either do not expose a known plan-reset
 banner or are API-key-metered (transient 429s the CLI retries) with no plan
 window to schedule against.
+
+The last column runs the other way, and deliberately so. Detection answers "can
+af tell this agent hit a wall", which only `claude`/`codex` support — so only
+they can be handed *from* on a limit. Being handed *to* needs nothing from the
+agent at all: af stops one process and starts another in the same worktree, so
+every supported agent is a valid destination.
 
 ## Custom detection patterns
 

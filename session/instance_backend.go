@@ -58,6 +58,17 @@ func (i *Instance) Respawn() error {
 	return i.currentBackend().Respawn(i)
 }
 
+// SwapAgent replaces the running agent process with the instance's current
+// program (#2013). Rewrite Instance.Program first (SwapAgentProgram); this only
+// performs the runtime half, and the caller owns every precondition. Refuses on
+// a backend whose workspace is off-box.
+func (i *Instance) SwapAgent() error {
+	if !i.Capabilities().Handoff {
+		return ErrHandoffUnsupported
+	}
+	return i.currentBackend().SwapAgent(i)
+}
+
 // ArchiveTeardown tears down every tab's tmux session for an archive AND
 // relocates the worktree to dest in one operation (#1028) — the tmux half of
 // Kill, but it PRESERVES the record and MOVES the worktree instead of deleting

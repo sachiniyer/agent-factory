@@ -37,6 +37,7 @@ func TestDefaultMapsMatchApprovedKeymap(t *testing.T) {
 		"a":         KeyArchive,
 		"r":         KeyRestore,
 		"c":         KeyLimitRetry,
+		"F":         KeyHandoff,
 		"q":         KeyQuit,
 		"E":         KeyErrorDetails,
 		"tab":       KeyTab,

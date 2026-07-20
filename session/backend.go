@@ -1,5 +1,7 @@
 package session
 
+import "errors"
+
 // WorkspaceKind describes where a backend's workspace physically lives, so
 // callers reason about locality without asking "is this the remote type"
 // (#1592 Phase 1). New runtimes (ssh/container) pick the kind that matches
@@ -46,7 +48,17 @@ type Capabilities struct {
 	// InteractiveInput: raw key / prompt injection works — SendKeys/TapEnter/
 	// SendPrompt drive a live PTY rather than returning "not supported".
 	InteractiveInput bool
+	// Handoff: the session's agent program can be swapped in place, keeping the
+	// same workspace and branch (#2013). Local-worktree only for now — a sandbox
+	// backend would have to re-launch the agent inside the provisioned sandbox
+	// rather than re-provision it, which is a separate lifecycle.
+	Handoff bool
 }
+
+// ErrHandoffUnsupported is returned when an agent handoff (#2013) is requested
+// on a backend that cannot swap its agent in place. It is a typed sentinel so
+// callers can render the restriction rather than match on prose.
+var ErrHandoffUnsupported = errors.New("agent handoff is only supported for local-worktree sessions")
 
 // Backend abstracts the session lifecycle so that instances can be backed
 // by local tmux+git worktrees (the default) or by user-provided remote
@@ -154,6 +166,31 @@ type Backend interface {
 	// same recoverSandbox re-provision-and-clone path as Recover — no backend
 	// returns an unsupported sentinel.
 	Respawn(instance *Instance) error
+
+	// SwapAgent tears down the running agent process and launches the instance's
+	// CURRENT program in its place, as a fresh conversation (#2013). The caller
+	// has already rewritten Instance.Program to the incoming agent and owns every
+	// precondition; this is only the runtime half.
+	//
+	// It is deliberately not Respawn. Respawn goes through the resume path, which
+	// appends the provider's "continue the most recent conversation here" flag —
+	// correct when the SAME agent is coming back after its session vanished, and
+	// wrong for a handoff, where the incoming agent has no conversation in this
+	// worktree to continue and would be asked to resume one that does not exist.
+	// A handoff is a first launch for the new agent, so it takes the first-launch
+	// path.
+	//
+	// It is also not Restore-based: Restore on a session tmux still reports as
+	// live is a pure logical rebind that never re-execs the program, and a
+	// usage-limit-blocked agent IS live. Routing a swap through it would rewrite
+	// the program string and leave the old agent running — a silent no-op. The
+	// teardown below is what makes the re-launch actually happen.
+	//
+	// Backends whose workspace is off-box do not implement this: swapping the
+	// agent inside a provisioned sandbox is a different lifecycle (re-launch
+	// inside the sandbox, not re-provision it), so they return
+	// ErrHandoffUnsupported and the Handoff capability bit is false.
+	SwapAgent(instance *Instance) error
 
 	// Type returns the backend type identifier ("local" or "remote"). Since
 	// #1592 Phase 1 this is the persisted serialization discriminator only (the

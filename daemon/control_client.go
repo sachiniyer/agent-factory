@@ -308,6 +308,17 @@ func ArchiveSession(req ArchiveSessionRequest) (string, error) {
 	return resp.ArchivedPath, nil
 }
 
+// HandoffSession asks the daemon to continue a session under a different agent,
+// in place (#2013): swap the agent program, keep the worktree and branch, and
+// deliver a mission brief to the incoming agent.
+func HandoffSession(req HandoffSessionRequest) (HandoffSessionResponse, error) {
+	var resp HandoffSessionResponse
+	if err := callDaemon("HandoffSession", req, &resp); err != nil {
+		return HandoffSessionResponse{}, err
+	}
+	return resp, nil
+}
+
 // RestoreSession asks the daemon to restore an archived, Lost, or Dead session.
 func RestoreSession(req RestoreSessionRequest) (string, error) {
 	var resp RestoreSessionResponse

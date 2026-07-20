@@ -95,6 +95,11 @@ func TestBackendCapabilities(t *testing.T) {
 		TabManagement:    true,
 		TerminalTab:      true,
 		InteractiveInput: true,
+		// Handoff (#2013): only a local worktree can swap its agent in place. The
+		// sandbox runtimes below leave it false — see
+		// TestSandboxBackendsDoNotAdvertiseHandoff, which pairs the bit with proof
+		// that their SwapAgent really does refuse.
+		Handoff: true,
 	}
 
 	// Every off-box runtime shares one descriptor: a remote workspace with
@@ -108,6 +113,7 @@ func TestBackendCapabilities(t *testing.T) {
 		TabManagement:    false,
 		TerminalTab:      true,
 		InteractiveInput: true,
+		Handoff:          false,
 	}
 
 	tests := []struct {

@@ -136,6 +136,10 @@ const (
 	// pairs with the tab that opens the program field.
 	KeySetPrompt
 	KeyEditPrompt
+	// KeyHandoff hands a session's work to a different agent in place, keeping
+	// its worktree and branch (#2013). Appended at the end of this iota block for
+	// the same reason KeyConfigAgent was.
+	KeyHandoff
 )
 
 // spec is one action's canonical binding definition: its default keys, help
@@ -183,6 +187,18 @@ var specs = []spec{
 	{name: KeyArchive, configKey: "archive", keys: []string{"a"}, desc: "archive", dispatch: true},
 	{name: KeyRestore, configKey: "restore", keys: []string{"r"}, desc: "restore", dispatch: true},
 	{name: KeyLimitRetry, configKey: "limit_retry", keys: []string{"c"}, desc: "retry limit", dispatch: true},
+	// "F" for hand-oFF. Capital like the other consequential verbs (D kill, S
+	// split, C config agent): lower-case h/l are navigation, and swapping the
+	// agent that edits your branch should not sit under an unshifted key next to
+	// the movement keys.
+	//
+	// NOT "H", which is the obvious mnemonic: H was the pre-ergonomics default for
+	// the hooks editor and is deliberately left unbound so a user who learned it
+	// gets nothing rather than a different action (TestOldErgonomicReplacements
+	// AreNotBoundByDefault pins that, along with A/P/shift+up/shift+down). Giving a
+	// retired key a NEW meaning is worse than leaving it dead — it silently
+	// converts stale muscle memory into an unintended agent swap.
+	{name: KeyHandoff, configKey: "handoff", keys: []string{"F"}, desc: "hand off", dispatch: true},
 	{name: KeyHelp, configKey: "help", keys: []string{"?"}, desc: "help", dispatch: true},
 	{name: KeyQuit, configKey: "quit", keys: []string{"q"}, desc: "quit", dispatch: true},
 	{name: KeyErrorDetails, configKey: "error_details", keys: []string{"E"}, desc: "details", dispatch: true},

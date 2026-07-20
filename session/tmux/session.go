@@ -31,6 +31,19 @@ func SupportedProgramsString() string {
 	return strings.Join(SupportedPrograms, ", ")
 }
 
+// IsSupportedProgram reports whether name is one of the canonical agent enum
+// names. It answers the membership question against the same slice
+// SupportedProgramsString renders, so a caller's validation and its error
+// message can never disagree about what the list is.
+func IsSupportedProgram(name string) bool {
+	for _, supported := range SupportedPrograms {
+		if name == supported {
+			return true
+		}
+	}
+	return false
+}
+
 // TmuxSession represents a managed tmux session
 type TmuxSession struct {
 	// Initialized by NewTmuxSession

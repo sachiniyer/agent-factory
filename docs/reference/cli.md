@@ -37,6 +37,7 @@ Run `af <command> --help` for the same information at the terminal. For a narrat
 - [`af sessions attach`](#af-sessions-attach) — Attach to a session's terminal
 - [`af sessions create`](#af-sessions-create) — Create a new session
 - [`af sessions get`](#af-sessions-get) — Get a session by title
+- [`af sessions handoff`](#af-sessions-handoff) — Continue a session under a different agent, in place
 - [`af sessions kill`](#af-sessions-kill) — Permanently destroy a session and prune its worktree branch
 - [`af sessions list`](#af-sessions-list) — List sessions
 - [`af sessions preview`](#af-sessions-preview) — Preview a session's terminal content
@@ -937,6 +938,7 @@ af sessions
 - [`af sessions attach`](#af-sessions-attach) — Attach to a session's terminal
 - [`af sessions create`](#af-sessions-create) — Create a new session
 - [`af sessions get`](#af-sessions-get) — Get a session by title
+- [`af sessions handoff`](#af-sessions-handoff) — Continue a session under a different agent, in place
 - [`af sessions kill`](#af-sessions-kill) — Permanently destroy a session and prune its worktree branch
 - [`af sessions list`](#af-sessions-list) — List sessions
 - [`af sessions preview`](#af-sessions-preview) — Preview a session's terminal content
@@ -1072,6 +1074,54 @@ those projects instead of guessing between them.
 ```
 af sessions get <title>
 ```
+
+**Global flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http:// or ws:// URL instead of the local unix socket (env: AF_DAEMON_URL). The daemon is HTTP-only; terminate TLS at your own proxy if needed. |
+| `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload) |
+| `--repo` | `string` | Path to the project's git repository (default: the current directory's project) |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
+
+## af sessions handoff
+
+Continue a session under a different agent, in place
+
+Hand a session's work over to a different agent without losing it.
+
+The session keeps its identity, its git worktree, and its branch — only the
+agent process changes. The incoming agent starts a fresh conversation and is
+given a mission brief: the session's goal, and what is already on the branch.
+
+This is the answer to an agent that has stopped and cannot continue — most often
+one blocked at its provider's usage limit, where the alternative is waiting for
+the window to reset (see 'af sessions list' for a [limit] badge, and
+docs/usage-limits.md for the waiting path).
+
+Agent conversations are not portable between providers: the incoming agent
+cannot read what its predecessor was thinking, only the working tree and the git
+history. The brief points it at both. Because of that, a handoff is recorded —
+the swap and the branch tip at the moment it happened — so a reviewer reading
+the resulting diff can tell which agent wrote which part.
+
+Local-worktree sessions only: swapping the agent inside a remote/docker/ssh
+sandbox is a different lifecycle and is not supported yet.
+
+Examples:
+  af sessions handoff fix-auth --to claude
+  af sessions handoff fix-auth --to gemini --brief "finish the retry test, skip the docs"
+
+```
+af sessions handoff <title> [flags]
+```
+
+**Flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--brief` | `string` | Mission for the incoming agent, replacing the session's stored prompt |
+| `--to` | `string` | Agent to hand the session off to (one of claude, codex, aider, gemini, amp, opencode) |
 
 **Global flags**
 

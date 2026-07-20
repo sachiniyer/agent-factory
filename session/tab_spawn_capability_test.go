@@ -45,6 +45,25 @@ func TestSandboxBackendsDoNotAdvertiseTabManagement(t *testing.T) {
 	}
 }
 
+// TestSandboxBackendsDoNotAdvertiseHandoff is the handoff half of the same
+// contract (#2013): an off-box backend must not claim it can swap its agent in
+// place, AND its SwapAgent must actually refuse. The bit and the behavior are
+// asserted together for the same reason as TabManagement above — a capability
+// that lies in either direction is worse than one that is simply false.
+func TestSandboxBackendsDoNotAdvertiseHandoff(t *testing.T) {
+	for name, b := range sandboxBackends() {
+		t.Run(name, func(t *testing.T) {
+			assert.False(t, b.Capabilities().Handoff,
+				"%s advertises Handoff, but swapping the agent inside a provisioned sandbox is a re-launch its recover path does not do (#2013)", name)
+
+			err := b.SwapAgent(&Instance{Title: "sandbox-inst", backend: b, started: true, Tabs: []*Tab{newRemoteAgentTab()}})
+			require.Error(t, err, "%s must refuse a swap outright rather than half-perform it", name)
+			assert.ErrorIs(t, err, ErrHandoffUnsupported,
+				"%s must refuse with the typed sentinel so clients can render the restriction instead of matching prose", name)
+		})
+	}
+}
+
 // TestSandboxInstanceTabSpawnRejected pins the other half of the contract: the
 // Add*Tab paths really are unable to service a sandbox instance. If this ever
 // starts passing, the capability above should be flipped to true in the same

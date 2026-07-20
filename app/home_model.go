@@ -62,6 +62,11 @@ const (
 	// open, so its value field can take arbitrary text (a listen address, a
 	// branch prefix) without the global key map eating the runes.
 	stateConfigEditor
+	// stateSelectHandoffAgent is the state when the user is picking which agent
+	// to hand the selected session off to (#2013). It reuses the same selection
+	// overlay stateSelectProgram uses at create time; the two differ only in what
+	// happens on submit — create stashes the choice, handoff confirms and swaps.
+	stateSelectHandoffAgent
 )
 
 type home struct {
@@ -385,6 +390,11 @@ type home struct {
 	searchOverlay *overlay.SearchOverlay
 	// projectPickerOverlay handles switching the active project (#1461)
 	projectPickerOverlay *overlay.ProjectPickerOverlay
+	// handoffChoices is the agent list currently offered by the handoff picker
+	// (#2013). It is held alongside the overlay because the list is FILTERED (it
+	// omits the running agent), so the overlay's selected index cannot be mapped
+	// back through tmux.SupportedPrograms the way the create-time picker's can.
+	handoffChoices []string
 	// pendingProgram tracks the program selected during new instance naming
 	pendingProgram string
 	// promptOverlay handles initial-prompt entry during new-instance naming

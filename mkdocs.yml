@@ -140,3 +140,4 @@ nav:
           - Release testing plan: release-testing-plan.md
           - TUI manual testing: tui-manual-testing.md
           - TUI rewrite (design): design/tui-rewrite.md
+          - Agent handoff (design): design/agent-handoff.md
