@@ -11,6 +11,7 @@
 #   scripts/testbox.sh drive                   boot af via the driver + attach
 #   scripts/testbox.sh lifecycle [scenario]    clean-install / install->upgrade gate
 #   scripts/testbox.sh build                   (re)build the image only
+#   scripts/testbox.sh clean                   reclaim this harness's disk (#2133)
 #
 # The container gets: its own tmux server, a throwaway AF home, pids/memory
 # caps so a runaway generator (the 2026-07-03 outage class) suffocates
@@ -57,6 +58,42 @@ _uniq() {
 # resolved name — never a hardcoded 'af-playtest'.
 PLAYTEST_NAME="${AF_PLAYTEST_NAME:-af-playtest-$(_uniq)}"
 
+# ---------------------------------------------------------------- disk (#2133)
+#
+# This harness once filled a 2TB box. Every image, container, and cache volume
+# it creates therefore carries LABEL, so cleanup can filter on it and can never
+# reach an artifact the harness did not build. Same shape as the docker
+# backend's own `af.session` label (session/backend_docker.go).
+LABEL="af.harness=testbox"
+
+# The named cache volumes the harness mounts, listed explicitly rather than
+# matched by prefix: these are the exact names mounted below, so `clean` removes
+# what this script created and never something that merely looks like it. They
+# are the single largest thing the harness holds (a Go build cache reaches tens
+# of GB on a busy box) — Go's own 5-day cache trim bounds them, `clean` empties
+# them.
+CACHE_VOLUMES=(
+    af-testbox-gomod
+    af-testbox-gobuild
+    af-web-selftest-gomod
+    af-web-selftest-gobuild
+)
+
+# Ceiling for the shared builder cache. Unlike everything else here this cannot
+# be scoped to the harness — BuildKit cache records carry no labels — so it is
+# deliberately a ceiling and not a wipe: docker evicts least-recently-used
+# records until the total fits, which leaves a co-tenant's warm cache alone as
+# long as it is warmer than ours, and everything evicted is rebuildable. The
+# default holds one warm generation of every image here (the web-selftest build
+# alone is ~4GB of cache) with room for churn. Set it to `off` to leave the
+# build cache untouched.
+CACHE_MAX="${AF_TESTBOX_CACHE_MAX:-10GB}"
+
+# Free space below which a run says something before it starts. What actually
+# broke in #2133 was not a slow test — it was the af daemon on the same
+# filesystem losing the ability to persist session state. Set to 0 to silence.
+MIN_FREE_GB="${AF_TESTBOX_MIN_FREE_GB:-20}"
+
 # docker-or-podman autodetect (docker on the current dev box; podman kept
 # as a fallback for other boxes).
 if command -v docker >/dev/null 2>&1; then
@@ -71,7 +108,110 @@ fi
 build_image() {
     # Dockerfile via stdin: no build context is sent (the Dockerfile has no
     # COPY), so this is instant when layers are cached.
-    "$ENGINE" build -q -t "$IMAGE" - <"$REPO_ROOT/scripts/container/Dockerfile.test" >/dev/null
+    "$ENGINE" build -q --label "$LABEL" -t "$IMAGE" - <"$REPO_ROOT/scripts/container/Dockerfile.test" >/dev/null
+}
+
+# ensure_cache_volumes — create the named cache volumes up front, labelled.
+#
+# `docker run -v name:/path` auto-creates a volume with no labels, which cleanup
+# then has no precise way to recognize. Creating them here means every volume
+# this harness owns is self-identifying. Idempotent, and it deliberately does
+# NOT relabel a volume that already exists — `clean` matches CACHE_VOLUMES by
+# name too, so the ones predating this became sweepable without being touched.
+ensure_cache_volumes() {
+    local v
+    for v in "$@"; do
+        "$ENGINE" volume inspect "$v" >/dev/null 2>&1 ||
+            "$ENGINE" volume create --label "$LABEL" "$v" >/dev/null 2>&1 || true
+    done
+}
+
+# reap_dangling_images — drop images this harness built that no longer carry a
+# tag.
+#
+# Every build target here (re)builds a STABLE tag, so any edit to a Dockerfile —
+# or simply a sibling worktree whose Dockerfile differs — moves the tag off the
+# previous image. Whether that image then lingers is an ENGINE property, not a
+# harness one: with the classic overlay2 image store it becomes a dangling
+# <none> that nothing collects, at ~1.2GB (testbox) / ~4GB (web-selftest) a
+# copy; with the containerd snapshotter (docker 29's default, and what this box
+# runs) the engine collects it itself. Measured both ways for #2133 — this reap
+# is cheap insurance for the stores that need it, not the whole fix.
+#
+# Safe while a sibling run is in flight, twice over: `image prune` without `-a`
+# considers only UNTAGGED images, and docker refuses to remove an image any
+# container still references — so another run's image, tagged and in use, is
+# doubly untouchable. The label filter is the outer wall: it cannot match an
+# image built by anything but this harness.
+reap_dangling_images() {
+    "$ENGINE" image prune -f --filter "label=$LABEL" >/dev/null 2>&1 || true
+}
+
+# cap_build_cache — hold the builder cache under CACHE_MAX. See the CACHE_MAX
+# comment for why this one is a ceiling rather than a label-scoped removal.
+cap_build_cache() {
+    if [ "$CACHE_MAX" = off ]; then
+        return 0
+    fi
+    # docker >= 28 renamed --keep-storage to --max-used-space, and podman's
+    # `builder prune` has neither. Probe the help text rather than parsing
+    # version numbers, and do nothing at all if no ceiling flag exists.
+    local flag
+    case "$("$ENGINE" builder prune --help 2>&1)" in
+    *--max-used-space*) flag=--max-used-space ;;
+    *--keep-storage*) flag=--keep-storage ;;
+    *) return 0 ;;
+    esac
+    "$ENGINE" builder prune -f "$flag" "$CACHE_MAX" >/dev/null 2>&1 || true
+}
+
+# warn_low_disk — say something before a run that the box may not have room for.
+#
+# Advisory only, and deliberately so: it warns and continues rather than
+# refusing, because nothing here knows how much room this particular run needs,
+# and a harness that refuses to run is its own kind of outage. It is equally
+# deliberate that every way of NOT knowing — a remote engine, an unreadable
+# root, a df that does not parse — exits quietly instead of guessing. A probe
+# that answers anyway is how a warning becomes noise and then gets ignored.
+warn_low_disk() {
+    if [ "$MIN_FREE_GB" = 0 ]; then
+        return 0
+    fi
+    local root free_kb want_kb
+    root="$("$ENGINE" info --format '{{.DockerRootDir}}' 2>/dev/null || true)"
+    if [ -z "$root" ] || [ ! -d "$root" ]; then
+        return 0
+    fi
+    free_kb="$(df -Pk "$root" 2>/dev/null | awk 'NR==2 {print $4}')"
+    case "$free_kb" in
+    '' | *[!0-9]*) return 0 ;;
+    esac
+    want_kb=$((MIN_FREE_GB * 1024 * 1024))
+    if [ "$free_kb" -lt "$want_kb" ]; then
+        echo "testbox: $((free_kb / 1024 / 1024))G free on $root, under the ${MIN_FREE_GB}G mark." >&2
+        echo "testbox: a full disk stops the af daemon persisting session state, not just this run." >&2
+        echo "testbox: reclaim this harness's share with: make testbox-clean" >&2
+    fi
+}
+
+# Teardown runs on EVERY exit path — pass, test failure, Ctrl-C — so the run
+# that leaves residue behind can never be the red one. Nothing below may `exec`
+# for that reason: exec replaces this shell and the trap never fires.
+teardown() {
+    reap_dangling_images
+    cap_build_cache
+}
+trap teardown EXIT
+
+# lifecycle_teardown — the lifecycle gate's extra step, chained onto the shared
+# one rather than replacing it: an EXIT trap is single-slot, so installing a
+# bare `rmi` over it would silently disarm the disk reap for that target alone.
+# Dropping the per-run tag is also precisely what leaves an image dangling, so
+# the reap has to run after it.
+# shellcheck disable=SC2317  # invoked via trap, below
+lifecycle_teardown() {
+    "$ENGINE" rmi -f "$LIFECYCLE_IMAGE" >/dev/null 2>&1 || true
+    teardown
 }
 
 # Flags shared by every run:
@@ -80,7 +220,10 @@ build_image() {
 # - no host $HOME, $TMUX, or TMUX_TMPDIR passthrough; no published ports
 # - bounded pids + memory (override: AF_TESTBOX_PIDS / AF_TESTBOX_MEMORY)
 RUN_FLAGS=(
+    # --rm also drops any anonymous volume the container created, so the only
+    # volumes that outlive a run are the named caches below (#2133).
     --rm
+    --label "$LABEL"
     # --init: a real PID 1 (tini) that reaps orphans. Without it, processes
     # the suite kills linger as zombies and the reaping tests see them as
     # "still alive".
@@ -112,7 +255,8 @@ fi
 # lifecycle gate passes its own so it never depends on the shared tag existing
 # or being current.
 fix_cache_perms() {
-    "$ENGINE" run --rm --user 0 \
+    ensure_cache_volumes af-testbox-gomod af-testbox-gobuild
+    "$ENGINE" run --rm --label "$LABEL" --user 0 \
         -v af-testbox-gomod:/cache/gomod \
         -v af-testbox-gobuild:/cache/gobuild \
         "${1:-$IMAGE}" chown -R dev:dev /cache >/dev/null
@@ -157,16 +301,25 @@ ensure_playtest_up() {
 cmd="${1:-test}"
 [ $# -gt 0 ] && shift
 
+# Every command but `clean` is about to consume disk; `clean` is the answer to
+# the warning, so warning there would just be noise.
+if [ "$cmd" != clean ]; then
+    warn_low_disk
+fi
+
 case "$cmd" in
 build)
-    "$ENGINE" build -t "$IMAGE" - <"$REPO_ROOT/scripts/container/Dockerfile.test"
+    "$ENGINE" build --label "$LABEL" -t "$IMAGE" - <"$REPO_ROOT/scripts/container/Dockerfile.test"
     ;;
 test)
     build_image
     fix_cache_perms
     # The one sanctioned home for a bare full-suite run on a shared box.
-    exec "$ENGINE" run "${RUN_FLAGS[@]}" "$IMAGE" \
-        bash /src/scripts/container/run-tests.sh "$@"
+    # Not `exec`: the teardown trap has to survive the run (#2133).
+    rc=0
+    "$ENGINE" run "${RUN_FLAGS[@]}" "$IMAGE" \
+        bash /src/scripts/container/run-tests.sh "$@" || rc=$?
+    exit "$rc"
     ;;
 playtest)
     build_image
@@ -180,12 +333,14 @@ playtest)
         echo "                $ENGINE exec $PLAYTEST_NAME tmux capture-pane -p -t drive"
         echo "  tear down:    $ENGINE rm -f $PLAYTEST_NAME"
     else
-        exec "$ENGINE" run -it \
+        rc=0
+        "$ENGINE" run -it \
             "${RUN_FLAGS[@]}" \
             --name "$PLAYTEST_NAME" \
             -e AGENT_FACTORY_HOME=/home/dev/sandbox/home \
             -e "AGENT_FACTORY_AUTO_UPDATE=${AGENT_FACTORY_AUTO_UPDATE:-false}" \
-            "$IMAGE" bash /src/scripts/container/playtest-entry.sh
+            "$IMAGE" bash /src/scripts/container/playtest-entry.sh || rc=$?
+        exit "$rc"
     fi
     ;;
 selftest)
@@ -217,7 +372,9 @@ drive)
         'source /src/scripts/tui-driver.sh && af_boot' >&2
     echo "testbox: af is up in session 'drive'; attaching (detach with prefix+d)." >&2
     echo "testbox: tear down with: $ENGINE rm -f $PLAYTEST_NAME" >&2
-    exec "$ENGINE" exec -it "$PLAYTEST_NAME" tmux attach -t drive
+    rc=0
+    "$ENGINE" exec -it "$PLAYTEST_NAME" tmux attach -t drive || rc=$?
+    exit "$rc"
     ;;
 lifecycle)
     # Clean-environment install + upgrade gate. Unlike every other target here,
@@ -243,10 +400,9 @@ lifecycle)
     # Remove the per-run tag however we exit; the underlying layers stay cached
     # for the next run. A pinned AF_LIFECYCLE_IMAGE is the caller's to manage.
     if [ "$lc_teardown" = yes ]; then
-        # shellcheck disable=SC2064  # expand the tag now, not at trap time
-        trap "\"$ENGINE\" rmi -f \"$LIFECYCLE_IMAGE\" >/dev/null 2>&1 || true" EXIT INT TERM
+        trap lifecycle_teardown EXIT INT TERM
     fi
-    "$ENGINE" build -q -t "$LIFECYCLE_IMAGE" - <"$REPO_ROOT/scripts/container/Dockerfile.test" >/dev/null
+    "$ENGINE" build -q --label "$LABEL" -t "$LIFECYCLE_IMAGE" - <"$REPO_ROOT/scripts/container/Dockerfile.test" >/dev/null
     fix_cache_perms "$LIFECYCLE_IMAGE"
     rc=0
     "$ENGINE" run --rm \
@@ -265,20 +421,83 @@ web-selftest)
     # listener, and drives the embedded SPA in a headless Chromium. Everything
     # (daemon, tmux, browser) lives on 127.0.0.1 inside the container: no
     # published ports, no host tmux, no real AF home.
-    "$ENGINE" build -q -t "$WEB_IMAGE" - <"$REPO_ROOT/scripts/container/Dockerfile.web-selftest" >/dev/null
+    "$ENGINE" build -q --label "$LABEL" -t "$WEB_IMAGE" - <"$REPO_ROOT/scripts/container/Dockerfile.web-selftest" >/dev/null
     # Dedicated cache volumes (not the shared testbox ones): this container runs
     # as root, so mixing caches would leave root-owned files the dev-user testbox
     # can't write. Chromium wants more memory + pids than the default suite.
-    exec "$ENGINE" run --rm --init \
+    ensure_cache_volumes af-web-selftest-gomod af-web-selftest-gobuild
+    rc=0
+    "$ENGINE" run --rm --label "$LABEL" --init \
         -v "$REPO_ROOT":/src:ro \
         -v af-web-selftest-gomod:/cache/gomod \
         -v af-web-selftest-gobuild:/cache/gobuild \
         --pids-limit "${AF_TESTBOX_PIDS:-2048}" \
         --memory "${AF_WEB_TESTBOX_MEMORY:-4g}" \
-        "$WEB_IMAGE" bash /src/scripts/container/web-selftest-entry.sh
+        "$WEB_IMAGE" bash /src/scripts/container/web-selftest-entry.sh || rc=$?
+    exit "$rc"
+    ;;
+clean)
+    # Reclaim the disk this harness holds, and only what this harness holds
+    # (#2133). Every run already reaps its own dangling images and caps the
+    # build cache; this is the deeper, explicit lever — it also empties the Go
+    # module/build cache volumes, which are the largest thing here (tens of GB
+    # on a busy box) and which no automatic step touches, because emptying them
+    # costs the next run a full cold rebuild.
+    #
+    # A running labelled container is reported, never removed: on a box with
+    # several worktrees that container is most likely a sibling's in-flight run
+    # or a parked play-test sandbox, and `clean` is not allowed to be the thing
+    # that kills it.
+    running="$("$ENGINE" ps -q --filter "label=$LABEL" 2>/dev/null || true)"
+    # `container prune` removes stopped containers only — the running ones are
+    # skipped by the engine itself, not by a check here that could drift.
+    echo "testbox: containers · $("$ENGINE" container prune -f --filter "label=$LABEL" 2>/dev/null |
+        grep -i 'reclaimed' || echo 'nothing to reclaim')"
+
+    # -a: tagged images too, not just dangling ones. Still label-filtered, so it
+    # reaches agent-factory-testbox / -web-selftest and nothing else.
+    echo "testbox: images · $("$ENGINE" image prune -af --filter "label=$LABEL" 2>/dev/null |
+        grep -i 'reclaimed' || echo 'nothing to reclaim')"
+
+    # …and by exact tag, because the label alone is not sufficient here. These
+    # tags are global names on the engine, so a sibling worktree running a
+    # checkout without this change rebuilds them and strips the label off —
+    # observed while verifying #2133, and the same shared-tag hazard the
+    # lifecycle gate already carries a unique tag to avoid. Matching the exact
+    # names this script builds is precise by construction, not a guess: they are
+    # defined a few lines up. An image a container is still using survives, so a
+    # sibling's in-flight run is unaffected.
+    for i in "$IMAGE" "$WEB_IMAGE"; do
+        if "$ENGINE" rmi "$i" >/dev/null 2>&1; then
+            echo "testbox: removed image $i"
+        fi
+    done
+
+    for v in "${CACHE_VOLUMES[@]}"; do
+        if "$ENGINE" volume rm "$v" >/dev/null 2>&1; then
+            echo "testbox: removed cache volume $v"
+        fi
+    done
+
+    cap_build_cache
+    if [ "$CACHE_MAX" = off ]; then
+        echo "testbox: left the build cache alone (AF_TESTBOX_CACHE_MAX=off)"
+    else
+        echo "testbox: build cache capped at $CACHE_MAX"
+        echo "         it is shared with every other builder on this box, so emptying it is"
+        echo "         yours to decide: $ENGINE builder prune -af"
+    fi
+
+    if [ -n "$running" ]; then
+        echo
+        echo "testbox: left $(printf '%s\n' "$running" | wc -l | tr -d ' ') running container(s) alone — a sibling's in-flight run or a"
+        echo "         parked play-test sandbox looks exactly like this. Remove one deliberately with:"
+        "$ENGINE" ps --filter "label=$LABEL" --format '           '"$ENGINE"' rm -f {{.Names}}   # {{.Status}}'
+    fi
+    "$ENGINE" system df
     ;;
 *)
-    echo "testbox: unknown command '$cmd' (want: test | playtest | selftest | drive | lifecycle | web-selftest | build)" >&2
+    echo "testbox: unknown command '$cmd' (want: test | playtest | selftest | drive | lifecycle | web-selftest | build | clean)" >&2
     exit 1
     ;;
 esac

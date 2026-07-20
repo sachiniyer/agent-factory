@@ -89,6 +89,11 @@ go test $(go list ./... | grep -v '/daemon')
 # private tmux); see docs/container-testing.md
 make playtest-container
 
+# Reclaim the docker disk the container harness holds — and only that (#2133).
+# Every target above already cleans up after itself on the way out; this one
+# also empties the Go cache volumes, which reach tens of GB on a busy box.
+make testbox-clean
+
 # Install locally
 ./dev-install.sh    # installs to ~/.local/bin/af
 
