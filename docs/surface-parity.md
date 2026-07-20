@@ -24,12 +24,13 @@ audit (#1937) found gaps pointing in every direction:
   surface that can set it per session. The TUI inherits one process-wide `-y`
   flag for every session it creates; the CLI reads the repo config and
   `af sessions create --autoyes` is an unknown-flag error.
-- **The TUI is behind the other two** on create-time prompts: the web modal and
-  `af sessions create --prompt` both send one, and the TUI cannot
-  ([#1936](https://github.com/sachiniyer/agent-factory/issues/1936)). The
-  `Prompt` field is plumbed end-to-end to the daemon
-  (`app/session_control.go:106`) and its only construction site never populates
-  it — the plumbing is finished and simply never fed.
+- **The TUI was behind the other two** on create-time prompts: the web modal
+  and `af sessions create --prompt` both sent one, and the TUI could not
+  ([#1936](https://github.com/sachiniyer/agent-factory/issues/1936) — now
+  closed; the naming form grew a `shift+tab` initial-prompt field). The
+  `Prompt` field was plumbed end-to-end to the daemon
+  (`app/session_control.go:106`) and its only construction site never
+  populated it — the plumbing was finished and simply never fed.
 - **The CLI is behind both UIs** on limit-retry: resuming a usage-limit-blocked
   session is TUI- and web-only (the web got a Retry button in
   [#1934](https://github.com/sachiniyer/agent-factory/issues/1934)), and the CLI
@@ -43,7 +44,7 @@ another**. All three accept different subsets of the same nine-field request.
 | Create option | TUI | Web | CLI |
 |---|---|---|---|
 | Title, program | yes | yes | yes |
-| Initial prompt | **no** | yes | yes |
+| Initial prompt | yes | yes | yes |
 | Auto-yes per session | **no** | **yes** | **no** |
 | Backend (docker/ssh/hook) | **no** | **no** | yes |
 | Force-remote (hook) | partial | **no** | yes |
@@ -361,10 +362,11 @@ only the second is dangerous.
 
 - **Reachable ≠ user-settable** *(under-reports — the dangerous direction)*. The
   AST proves a construction site *sets* a field, not that a user can *choose* its
-  value. `session.create.opt.prompt` (#1936) is exactly this trap:
-  `app/session_control.go:106` sets `Prompt`, so the field reads as covered while
-  the TUI's naming flow never populates it upstream. A field-level pass does not
-  excuse reading the flow.
+  value. `session.create.opt.prompt` (#1936) was the canonical trap:
+  `app/session_control.go:106` sets `Prompt`, so the field read as covered while
+  the TUI's naming flow never populated it upstream. The gap is closed (the
+  naming form now has a `shift+tab` initial-prompt field), but the category
+  remains — a field-level pass does not excuse reading the flow.
 - **Internal routes are not in the *verb*-level route check** *(under-reports)*.
   `daemon.HTTPRoutes()` is the public catalog; `Preview` and the two
   `*StatusPoll` routes live in `internalHTTPRoutes`. They are covered at the
