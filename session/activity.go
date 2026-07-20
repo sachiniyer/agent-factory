@@ -134,11 +134,13 @@ func (i *Instance) LifecycleView() LifecycleView {
 		Status:     i.statusLocked(),
 		Started:    i.started,
 		UserKilled: i.userKilled,
-		// Capabilities() takes no lock of its own (it reads the immutable backend
-		// and returns a static struct), so calling it here cannot deadlock — and
-		// reading the backend under the instance lock is strictly more correct than
-		// the bare read it does elsewhere.
-		Recoverable:   i.Capabilities().Recover,
+		// The already-locked variant, NOT Capabilities(): the backend is mutable
+		// (a restore rebinds it in bindProvisionResult), so Capabilities() now
+		// takes i.mu.RLock itself — and calling it while this snapshot holds the
+		// same non-reentrant lock would deadlock against a queued restore writer
+		// (#2096). Resolving it here also keeps the capability in the SAME critical
+		// section as the liveness axes, so the two can never disagree.
+		Recoverable:   i.capabilitiesLocked().Recover,
 		TaskRunActive: i.taskRunActive,
 	}
 }

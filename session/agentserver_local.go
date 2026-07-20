@@ -13,7 +13,7 @@ import (
 // (HasUpdated/TapEnter/IsAlive/SendPromptCommand/Preview) now live — internal to
 // the local runtime, reached only through the uniform AgentServer interface.
 //
-// It calls the Backend methods directly (i.backend.*) rather than the Instance
+// It calls the Backend methods directly (via i.currentBackend()) rather than the Instance
 // wrappers, so the wrappers that existed only for the daemon's path (Instance
 // HasUpdated/TapEnter) could be deleted with the daemon routed here — the seam is
 // the AgentServer interface, not a second set of pass-through methods.
@@ -121,11 +121,11 @@ func backendIsRemoteWorkspace(b Backend) bool {
 var _ AgentServer = (*localAgentServer)(nil)
 
 func (s *localAgentServer) Provision(firstTimeSetup bool) error {
-	return s.inst.backend.Provision(s.inst, firstTimeSetup)
+	return s.inst.currentBackend().Provision(s.inst, firstTimeSetup)
 }
 
 func (s *localAgentServer) Launch(firstTimeSetup bool) error {
-	return s.inst.backend.Launch(s.inst, firstTimeSetup)
+	return s.inst.currentBackend().Launch(s.inst, firstTimeSetup)
 }
 
 func (s *localAgentServer) Expose() (StreamEndpoint, error) {
@@ -139,8 +139,12 @@ func (s *localAgentServer) Snapshot() (Observation, error) {
 	// exact order the daemon poll ran (CheckAndHandleTrustPrompt then HasUpdated).
 	// CheckAndHandleTrustPrompt's bool return is intentionally discarded: the poll
 	// never consumed it.
-	s.inst.backend.CheckAndHandleTrustPrompt(s.inst)
-	updated, hasPrompt, content := s.inst.backend.HasUpdated(s.inst)
+	// One backend snapshot for both calls, so the pair can never straddle a
+	// restore's rebind and dismiss a prompt on one backend while reading the pane
+	// of another (#2096).
+	b := s.inst.currentBackend()
+	b.CheckAndHandleTrustPrompt(s.inst)
+	updated, hasPrompt, content := b.HasUpdated(s.inst)
 	return Observation{Updated: updated, HasPrompt: hasPrompt, Content: content}, nil
 }
 
@@ -151,9 +155,9 @@ func (s *localAgentServer) Preview(tab int, full bool) (string, error) {
 	// updateAgent/updateShell split now that the daemon is the sole capturer.
 	if tab == 0 {
 		if full {
-			return s.inst.backend.PreviewFullHistory(s.inst)
+			return s.inst.currentBackend().PreviewFullHistory(s.inst)
 		}
-		return s.inst.backend.Preview(s.inst)
+		return s.inst.currentBackend().Preview(s.inst)
 	}
 	if full {
 		return s.inst.PreviewTabFullHistory(tab)
@@ -175,7 +179,7 @@ type ctxPreviewBackend interface {
 // the caller's wait still returns promptly; only the subprocess-kill is skipped.
 func (s *localAgentServer) PreviewContext(ctx context.Context, tab int, full bool) (string, error) {
 	if tab == 0 && !full {
-		if cb, ok := s.inst.backend.(ctxPreviewBackend); ok {
+		if cb, ok := s.inst.currentBackend().(ctxPreviewBackend); ok {
 			return cb.PreviewContext(ctx, s.inst)
 		}
 	}
@@ -191,17 +195,17 @@ func (s *localAgentServer) Alive() (bool, error) {
 	// here meant "the probe answered", which was never checked and often false.
 	// probeLiveness maps a non-nil error to probeUnknown, so this is the hop that
 	// lets an unanswerable tmux stop being counted as alive.
-	return s.inst.backend.IsAlive(s.inst)
+	return s.inst.currentBackend().IsAlive(s.inst)
 }
 
 func (s *localAgentServer) SendPrompt(prompt string) error {
 	// The reliable command path (tmux send-keys), which is what automated/scheduled
 	// deliveries need — it lands whether or not a PTY is currently attached.
-	return s.inst.backend.SendPromptCommand(s.inst, prompt)
+	return s.inst.currentBackend().SendPromptCommand(s.inst, prompt)
 }
 
 func (s *localAgentServer) TapEnter() {
-	s.inst.backend.TapEnter(s.inst)
+	s.inst.currentBackend().TapEnter(s.inst)
 }
 
 // --- data plane: WS PTY broker + clientless tmux fan-out (#1592 PR5) ---
@@ -405,5 +409,5 @@ func (s *localAgentServer) Kill() error {
 	for _, br := range brokers {
 		br.close()
 	}
-	return s.inst.backend.Kill(s.inst)
+	return s.inst.currentBackend().Kill(s.inst)
 }
