@@ -68,12 +68,18 @@ jobs:
         with:
           go-version: "1.25"
 
-      - name: Regenerate autogen docs and check for drift
+      # The drift gate for every generated artifact: the docs reference pages
+      # and the per-agent plugins (#2172). `git status --porcelain` rather than
+      # `git diff` on purpose — a generated file the author forgot to `git add`
+      # is untracked, which `git diff` does not see at all.
+      - name: Regenerate autogen artifacts and check for drift
         run: |
+          generated=(docs/reference plugins .agents .claude-plugin)
           scripts/gen-docs.sh
-          if ! git diff --quiet -- docs/reference; then
-            echo "::error::docs/reference is stale. Run scripts/gen-docs.sh and commit the result."
-            git --no-pager diff -- docs/reference
+          if [[ -n "$(git status --porcelain -- "${generated[@]}")" ]]; then
+            echo "::error::Generated files are stale. Run scripts/gen-docs.sh and commit the result."
+            git --no-pager status --porcelain -- "${generated[@]}"
+            git --no-pager diff -- "${generated[@]}"
             exit 1
           fi
 

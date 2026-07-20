@@ -18,6 +18,17 @@ import (
 // never collide with a user's "af" skill (#1585 review).
 const afSkillDirName = "agent-factory"
 
+// AfSkillName is afSkillDirName, exported for the plugin generator
+// (commands/plugins_gen.go), which names the skill directory and the plugin
+// itself after it so the installed artifact matches what af writes at runtime.
+const AfSkillName = afSkillDirName
+
+// AfSkillDescription is the one-line description every surface presents for the
+// af skill — the SKILL.md frontmatter for amp/codex/gemini, the Claude Code
+// slash command (plugin.go), and the generated plugin artifacts. It is what each
+// agent surfaces for lazy activation, so there is exactly one of it.
+const AfSkillDescription = "Manage Agent Factory (af) sessions, tabs, scheduled tasks, and the daemon via the af CLI"
+
 // afSkillMarker stamps every file we write so a later launch can tell a file it
 // owns (safe to regenerate) from a user's/tool's own file that happens to sit at
 // our path (never clobber). See writeAfMarkedFile.
@@ -35,7 +46,7 @@ const afSkillMarker = "managed by agent-factory (af): regenerated on each af ses
 // checks for ownership.
 var afSkillDoc = "---\n" +
 	"name: " + afSkillDirName + "\n" +
-	"description: Manage Agent Factory (af) sessions, tabs, scheduled tasks, and the daemon via the af CLI\n" +
+	"description: " + AfSkillDescription + "\n" +
 	"---\n" +
 	"<!-- " + afSkillMarker + " -->\n" +
 	"\n" +

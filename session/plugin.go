@@ -7,12 +7,29 @@ import (
 	"github.com/sachiniyer/agent-factory/config"
 )
 
+// The plugin's identity — the fields any agent's plugin manifest carries. They
+// are constants rather than literals inside the manifest below because the
+// SAME identity is emitted by the generated, installable per-agent plugins
+// (commands/plugins_gen.go, #2172): the manifest af writes at runtime for the
+// session it is launching, and the manifest a user installs from the repo
+// marketplace, must describe the same plugin.
+const (
+	// AfPluginDescription is the plugin's one-line summary. Unlike
+	// AfSkillDescription (which tells an agent when to activate the skill),
+	// this is what a human reads in a marketplace listing.
+	AfPluginDescription = "Run and schedule AI coding agents in isolated git worktrees with the Agent Factory (af) CLI"
+	// AfPluginAuthorName is the publisher name every manifest carries.
+	AfPluginAuthorName = "Agent Factory"
+	// AfPluginHomepage is the project URL every manifest carries.
+	AfPluginHomepage = "https://github.com/sachiniyer/agent-factory"
+)
+
 // pluginManifest is the .claude-plugin/plugin.json content required by Claude Code.
 const pluginManifest = `{
-  "name": "agent-factory",
-  "description": "Agent Factory (af) CLI usage: sessions, tabs, tasks, daemon",
+  "name": "` + AfSkillName + `",
+  "description": "` + AfPluginDescription + `",
   "author": {
-    "name": "Agent Factory"
+    "name": "` + AfPluginAuthorName + `"
   }
 }
 `
@@ -30,7 +47,7 @@ const pluginManifest = `{
 var pluginCommands = map[string]string{
 	"af.md": "---\n" +
 		"allowed-tools: Bash(af:*)\n" +
-		"description: Manage Agent Factory (af) sessions, tabs, scheduled tasks, and the daemon via the af CLI\n" +
+		"description: " + AfSkillDescription + "\n" +
 		"argument-hint: [request]\n" +
 		"---\n" +
 		"\n" +

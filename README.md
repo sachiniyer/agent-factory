@@ -111,6 +111,10 @@ af tasks add --name triage --prompt "Triage open issues" --cron "0 9 * * *"
   `docker` to run in a container (with `docker.image`), to `ssh` to run on
   another machine (with `ssh.host`), or to `hook` to launch on your own
   infrastructure. See [backends](docs/backends.md).
+- **Agent plugins** — install the `agent-factory` skill into Codex, Claude Code,
+  Gemini, or amp (`codex plugin marketplace add sachiniyer/agent-factory`) and
+  an agent `af` never launched knows how to run and schedule af sessions. See
+  [agent plugins](docs/agent-plugins.md).
 - **Auto-update** — `af` updates itself on launch, at most once every 6 hours,
   and relaunches into the new build. Pin it with `auto_update = false`; track
   early builds with `update_channel = "preview"`. `af upgrade` updates on demand.
@@ -145,7 +149,8 @@ units, so they cover login and reboot, not running while you are logged out.
   [the TUI](docs/concepts/tui.md) · [the web client](docs/web.md) ·
   [the daemon](docs/concepts/daemon.md)
 - Guides: [CLI](docs/cli.md) · [configuration](docs/configuration.md) ·
-  [tasks](docs/tasks.md) · [backends](docs/backends.md) ·
+  [tasks](docs/tasks.md) · [agent plugins](docs/agent-plugins.md) ·
+  [backends](docs/backends.md) ·
   [remote hooks](docs/remote-hooks.md) ·
   [remote daemon access](docs/remote-http-auth.md) ·
   [usage limits](docs/usage-limits.md)

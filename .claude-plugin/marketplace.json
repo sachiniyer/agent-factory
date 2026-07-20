@@ -1,0 +1,15 @@
+{
+  "name": "agent-factory",
+  "owner": {
+    "name": "Agent Factory",
+    "url": "https://github.com/sachiniyer/agent-factory"
+  },
+  "plugins": [
+    {
+      "name": "agent-factory",
+      "source": "./plugins/claude/agent-factory",
+      "description": "Run and schedule AI coding agents in isolated git worktrees with the Agent Factory (af) CLI",
+      "version": "1.0.0"
+    }
+  ]
+}

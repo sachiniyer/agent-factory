@@ -8,10 +8,15 @@
 # AI tools
 .aider*
 
-# Build artifacts
-agent-factory
-af
-cs
+# Build artifacts. Anchored to the repo root with a leading slash: `go build`
+# and dev-install.sh only ever drop a binary here, while "agent-factory" and
+# "af" are legitimate DIRECTORY names deeper in the tree — the af skill and the
+# generated agent plugins are named after the tool (plugins/*/agent-factory/,
+# session/agentskill.go:19). An unanchored pattern matches at any depth and
+# silently swallowed them.
+/agent-factory
+/af
+/cs
 *.exe
 *.dll
 *.so
