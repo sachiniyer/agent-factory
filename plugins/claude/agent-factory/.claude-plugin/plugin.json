@@ -1,0 +1,19 @@
+{
+  "name": "agent-factory",
+  "description": "Run and schedule AI coding agents in isolated git worktrees with the Agent Factory (af) CLI",
+  "version": "1.0.0",
+  "author": {
+    "name": "Agent Factory",
+    "url": "https://github.com/sachiniyer/agent-factory"
+  },
+  "homepage": "https://github.com/sachiniyer/agent-factory",
+  "repository": "https://github.com/sachiniyer/agent-factory",
+  "license": "AGPL-3.0",
+  "keywords": [
+    "agents",
+    "worktrees",
+    "tmux",
+    "automation",
+    "sessions"
+  ]
+}

@@ -13,7 +13,52 @@ import (
 // (agentskill.go), and the aider --read context file — so no surface can drift
 // (#1043). Keep it complete but terse: every user-facing command group (sessions,
 // tabs, tasks, daemon, maintenance), no boilerplate.
-const afUsageReference = `You are running inside Agent Factory (af), a terminal multiplexer that runs each AI coding agent in an isolated git worktree. Manage sessions, tasks, and the daemon with the "af" CLI. Commands print JSON on stdout; run "af <command> --help" for full flag lists. Every session and task command is PROJECT-SCOPED: it acts on the current directory's project unless --repo <path> names another one, so "af tasks list" shows this project's tasks and "af tasks add" binds the new task here. Acting on another project always takes an explicit --repo; "af tasks list --all" is the one opt-in that spans every project. Session titles are unique WITHIN a project, not across projects, so the same name may exist in several repos: a <title> resolves inside --repo when given, else the current directory's repo. Task ids are globally unique but still project-scoped — "af tasks get/update/trigger/remove <id>" refuses an id owned by another project and names the --repo that would reach it. A task whose project changed underneath a command is refused rather than acted on; nothing is changed, so re-run it. With no repo context (outside a git repository) a title or id held by just one project still resolves, while a title held by several reports an error naming those projects — pass --repo to pick one. Remote hook sessions are the one exception: their names are shared across projects because the hook scripts receive them verbatim.
+//
+// It is assembled from segments rather than written as one literal because the
+// text is delivered to TWO audiences whose framing differs (#2172):
+//
+//   - an agent af itself launched, which IS a session (afUsageIntroInside,
+//     afUsageOutroInside), and
+//   - an agent that installed the af plugin/skill on its own and is NOT running
+//     inside af (afUsageIntroPlugin, afUsageOutroPlugin) — see
+//     AfPluginUsageReference.
+//
+// Everything that is true for both — every command group, every scoping rule —
+// lives in the shared afUsageBody, so editing af's usage guidance changes both
+// audiences at once and neither can drift. Only the framing is swapped; the
+// generated plugin artifacts must never carry a verbatim copy of the "you are
+// running inside af" opening, which is false for the audience that installed
+// them.
+const afUsageReference = afUsageIntroInside + " " + afUsageBody + "\n\n" + afUsageOutroInside + "\n\n" + afUsageOutro
+
+// AfPluginUsageReference is afUsageReference reframed for an agent that is NOT
+// running inside af: the same body and the same command reference, but an
+// opening that introduces af as a separate CLI the agent drives (and that this
+// plugin does not install), and a closing that tells it how to leave the
+// sessions it created behind. It is what the generated per-agent plugin
+// artifacts carry (see `af gen-docs --plugin-root`).
+const AfPluginUsageReference = afUsageIntroPlugin + " " + afUsageBody + "\n\n" + afUsageOutroPlugin + "\n\n" + afUsageOutro
+
+// afUsageIntroInside frames the body for an agent af launched: it IS a session.
+const afUsageIntroInside = `You are running inside Agent Factory (af), a terminal multiplexer that runs each AI coding agent in an isolated git worktree. Manage sessions, tasks, and the daemon with the "af" CLI.`
+
+// afUsageIntroPlugin frames the body for an agent that is not an af session —
+// the plugin/skill audience. It states the two facts that framing changes:
+// af is a separate program this plugin does not install, and the agent is a
+// caller of af rather than a thing af is running. The "check, then tell the
+// user" instruction is deliberate: an agent must never fetch and execute a
+// release binary on the user's behalf (#2172, #2174).
+const afUsageIntroPlugin = `Agent Factory (af) is a terminal multiplexer that runs each AI coding agent in its own isolated git worktree and tmux session. Use the "af" CLI to hand a task to a background agent instead of doing it in this conversation, and to schedule recurring agent runs. You are NOT running inside af: af is a separate program that this plugin does not install, so run "af version" first, and if that fails tell the user to install it with "` + AfInstallCommand + `" and stop — never download or run an installer yourself. Session and task commands need af's background daemon, which starts on demand; "af daemon status" reports it.`
+
+// AfInstallCommand is the one command that installs af, as published in the
+// README and the getting-started guide. It is a constant because two generated
+// surfaces quote it — the plugin framing above and the plugin's detect-only
+// preflight hook (commands/plugins_gen.go) — and an install command that has
+// drifted is worse than none.
+const AfInstallCommand = `curl -fsSL https://raw.githubusercontent.com/sachiniyer/agent-factory/master/install.sh | sh`
+
+// afUsageBody is every part of the reference that is true for BOTH audiences.
+const afUsageBody = `Commands print JSON on stdout; run "af <command> --help" for full flag lists. Every session and task command is PROJECT-SCOPED: it acts on the current directory's project unless --repo <path> names another one, so "af tasks list" shows this project's tasks and "af tasks add" binds the new task here. Acting on another project always takes an explicit --repo; "af tasks list --all" is the one opt-in that spans every project. Session titles are unique WITHIN a project, not across projects, so the same name may exist in several repos: a <title> resolves inside --repo when given, else the current directory's repo. Task ids are globally unique but still project-scoped — "af tasks get/update/trigger/remove <id>" refuses an id owned by another project and names the --repo that would reach it. A task whose project changed underneath a command is refused rather than acted on; nothing is changed, so re-run it. With no repo context (outside a git repository) a title or id held by just one project still resolves, while a title held by several reports an error naming those projects — pass --repo to pick one. Remote hook sessions are the one exception: their names are shared across projects because the hook scripts receive them verbatim.
 
 Sessions (one agent per isolated worktree):
   af sessions whoami                                   Identify your own session
@@ -45,11 +90,20 @@ Tasks (deliver a prompt on a cron schedule, or whenever a long-running watch scr
   af tasks remove <id>
 Without --target-session each run creates a fresh session; {{line}} in a watch prompt is replaced by the emitted stdout line. On update, setting one trigger clears the other, and --target-session "" reverts to session-per-run. A task is bound to one project at creation and "tasks add" echoes the binding as project_path — check it matches the project you meant, and never create a task from a scratch clone of a repo, which binds the automation to the clone instead of the real project. The background daemon runs all schedules; "af daemon install" / "af daemon uninstall" manage its login autostart.
 
-Creating or prompting a session: the prompt is the entire contract, because the receiving agent inherits no context from your conversation. State everything it needs, including the expected output shape, e.g. "Open a PR titled X, link it back, do not merge" or "Write a report to <file> and stop; no code changes".
+Creating or prompting a session: the prompt is the entire contract, because the receiving agent inherits no context from your conversation. State everything it needs, including the expected output shape, e.g. "Open a PR titled X, link it back, do not merge" or "Write a report to <file> and stop; no code changes".`
 
-Finishing up: when the user confirms your work is complete and asks you to wrap up, self-archive with "af sessions archive --self". It is non-destructive — the worktree is moved out, nothing is deleted, and the session is restorable later with "af sessions restore <title>". But it tears down THIS session's tmux, so it kills you the instant you run it: nothing you say or do after it is ever seen. Treat it as the ABSOLUTE LAST action — first finish every summary, result, and confirmation the user needs, and only once you have nothing left to report run "af sessions archive --self" as the very last step.
+// afUsageOutroInside is the wrap-up for an agent that IS an af session: it can
+// self-archive, and doing so kills it.
+const afUsageOutroInside = `Finishing up: when the user confirms your work is complete and asks you to wrap up, self-archive with "af sessions archive --self". It is non-destructive — the worktree is moved out, nothing is deleted, and the session is restorable later with "af sessions restore <title>". But it tears down THIS session's tmux, so it kills you the instant you run it: nothing you say or do after it is ever seen. Treat it as the ABSOLUTE LAST action — first finish every summary, result, and confirmation the user needs, and only once you have nothing left to report run "af sessions archive --self" as the very last step.`
 
-Maintenance: af version, af debug (print resolved config), af upgrade (self-upgrade). Never run "af reset": it kills every session and deletes ALL linked worktrees and their branches across repos.`
+// afUsageOutroPlugin is the wrap-up for an agent that is NOT an af session.
+// The inside version would be actively wrong here in both directions: there is
+// no own session to archive, and the sessions this agent created keep running
+// after the conversation ends unless it says so.
+const afUsageOutroPlugin = `Finishing up: the sessions you create keep running after this conversation ends — they are separate agents in their own worktrees, not part of this one. When work in a session is done and reviewed, archive it with "af sessions archive <title>": non-destructive, the worktree is moved out, nothing is deleted, and it comes back with "af sessions restore <title>". Prefer archiving over "af sessions kill <title>", which deletes the worktree. "af sessions whoami" and "af sessions archive --self" resolve the CALLING session, so they only work from inside a session af launched — from here, always name the session.`
+
+// afUsageOutro closes the reference for both audiences.
+const afUsageOutro = `Maintenance: af version, af debug (print resolved config), af upgrade (self-upgrade). Never run "af reset": it kills every session and deletes ALL linked worktrees and their branches across repos.`
 
 // shellQuote wraps a string in single quotes, escaping any embedded single quotes
 // using the standard shell idiom: replace ' with '\"

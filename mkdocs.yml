@@ -120,6 +120,7 @@ nav:
           - The web client: web.md
           - The daemon: concepts/daemon.md
           - Tasks & automation: tasks.md
+          - Agent plugins: agent-plugins.md
           - Backends (runtimes): backends.md
           - Remote hooks: remote-hooks.md
           - Remote daemon access: remote-http-auth.md

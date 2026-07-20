@@ -1,0 +1,20 @@
+{
+  "name": "agent-factory",
+  "interface": {
+    "displayName": "Agent Factory"
+  },
+  "plugins": [
+    {
+      "name": "agent-factory",
+      "source": {
+        "source": "local",
+        "path": "./plugins/codex/agent-factory"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Developer Tools"
+    }
+  ]
+}
