@@ -558,13 +558,18 @@ func (i *Instance) AttachShellTab(name, tmuxName string) (*Tab, error) {
 	// next snapshot's ReconcileTabsFromData adopts the daemon's authoritative id.
 	tab.ID = ""
 	i.mu.Lock()
-	// Re-check started under the write lock before appending, mirroring
+	// Re-check the teardown fence under the write lock before appending, mirroring
 	// AddShellTab: Kill is not serialized against attach and can have flipped
 	// started=false (snapshotting Tabs for teardown) in the window since our
-	// RLock. Nothing was spawned above (attach-only), so a lost race only needs to
-	// release the local attach client we opened and drop the projection; the next
-	// reconcile re-adds the tab if it still exists server-side.
-	killed := !i.started
+	// RLock, and an archive teardown+move keeps started=true and raises OpArchiving
+	// over that same window instead (#1195) — which the started-only recheck this
+	// shipped with never saw, even though the caller gates on HasInFlightOp before
+	// the daemon round-trip precisely because the op matters (#2100, the sibling of
+	// the reconcile's missing recheck). Nothing was spawned above (attach-only), so
+	// a lost race only needs to release the local attach client we opened and drop
+	// the projection; the next reconcile re-adds the tab if it still exists
+	// server-side.
+	killed := !i.started || i.tabSpawnBlockedLocked() != nil
 	title := i.Title
 	if !killed {
 		i.Tabs = append(i.Tabs, tab)
@@ -832,23 +837,13 @@ func (i *Instance) ReconcileTabsFromData(target []TabData) (bool, error) {
 		// URL rides along for a web tab (a vscode tab has none by design — its target
 		// is resolved at proxy time), or the pane would have nothing to iframe.
 		tab := &Tab{ID: id, Name: td.Name, Kind: kind, Command: td.Command, URL: td.URL, tmux: ts}
-		i.mu.Lock()
-		// Re-check under the write lock: a concurrent reconcile/AddTab may have
-		// added this tab while we reconnected outside the lock. Keyed on the id
-		// (name for an id-less roster row) to match the presence test above — a
-		// name re-check would wrongly skip a recreated tab whose new id must land.
-		exists := false
-		for _, t := range i.Tabs {
-			if (td.ID != "" && t.ID == td.ID) || (td.ID == "" && t.Name == td.Name) {
-				exists = true
-				break
-			}
-		}
-		if !exists {
-			i.Tabs = append(i.Tabs, tab)
+		// Adopt under the write lock, re-checking BOTH the already-present dedupe (a
+		// concurrent reconcile/AddTab may have added this tab while we reconnected
+		// outside the lock) and the teardown fence a Kill/archive can have raised in
+		// that same window (#2100). See appendReconciledTab.
+		if i.appendReconciledTab(td.ID, td.Name, tab) {
 			changed = true
 		}
-		i.mu.Unlock()
 	}
 
 	// Reorder LAST, once the local set matches the daemon's. A pure reorder leaves
