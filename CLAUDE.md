@@ -58,6 +58,7 @@ Working style:
   stays restorable. Use `af sessions kill --force` only when you explicitly mean
   to permanently destroy the session and prune its branch. Don't let sessions
   accumulate.
+- Never run `pkill tmux`/`pkill af` or bare `tmux kill-server` on a shared host; tmux teardown must name an isolated socket with `-L` or `-S`.
 - Run `golangci-lint run --timeout=3m --fast`, `gofmt -l .`, `go build ./...`,
   and the full test suite before opening a PR — CI blocks on all four. On a
   shared dev box run the suite as `make test-container` (never bare

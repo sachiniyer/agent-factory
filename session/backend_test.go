@@ -16,12 +16,25 @@ import (
 
 	"github.com/sachiniyer/agent-factory/cmd/cmd_test"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
+	"github.com/sachiniyer/agent-factory/internal/tmuxguard"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session/git"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
 func TestMain(m *testing.M) {
+	// The generated Claude plugin points at os.Executable so its regression
+	// test exercises the actual configured hook process. Under go test that is
+	// this package binary; mirror main's hidden-command dispatch to the same
+	// native handler before setting up the rest of the session test harness.
+	if len(os.Args) == 2 && os.Args[1] == "hook-guard-tmux" {
+		if err := tmuxguard.Run(os.Stdin, os.Stdout); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
+
 	// #837: fail the package loudly if any test touches the real config.json.
 	verifyRealConfig := testguard.ConfigTripwire()
 	// #1056: fail loudly if a test leaks an af_ session onto the ambient tmux

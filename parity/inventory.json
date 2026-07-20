@@ -1227,6 +1227,24 @@
       },
       "verdict": "unclear",
       "notes": "#1904 added tab reorder to the CLI (tab-reorder --index) and web (ReorderTab, drag in the tab bar). No TUI affordance. Same owner call as session.tab.rename. Not filed."
+    },
+    {
+      "id": "internal.hook-guard-tmux",
+      "title": "Run the Claude PreToolUse tmux safety hook",
+      "tui": {
+        "status": "n/a",
+        "pointer": "session/plugin.go:20 pluginHooks"
+      },
+      "web": {
+        "status": "n/a",
+        "pointer": "session/plugin.go:20 pluginHooks"
+      },
+      "cli": {
+        "status": "yes",
+        "pointer": "commands/tmuxguardcmd.go:11 tmuxGuardHookCmd"
+      },
+      "verdict": "deliberate",
+      "notes": "Hidden JSON-over-stdio integration command invoked only by the af-managed Claude plugin; it is not a user-facing capability and has no TUI or web analogue."
     }
   ],
   "ledger": {
@@ -1256,6 +1274,7 @@
       "af doctor": "install.doctor",
       "af gen-docs": "meta.internal",
       "af help": "meta.discovery",
+      "af hook-guard-tmux": "internal.hook-guard-tmux",
       "af keys": "meta.discovery",
       "af projects delete": "project.delete",
       "af reset": "install.reset",
@@ -1392,6 +1411,7 @@
       "af --daemon": "meta.internal",
       "af --daemon-url": "daemon.remote-access",
       "af --help": "meta.discovery",
+      "af hook-guard-tmux --help": "internal.hook-guard-tmux",
       "af --program": "session.create.opt.program",
       "af --token": "daemon.remote-access",
       "af --version": "meta.discovery",
