@@ -47,23 +47,6 @@ var automationDetailStyle = lipgloss.NewStyle().
 var automationsHintStyle = lipgloss.NewStyle().
 	Foreground(activeTheme.ForegroundDim)
 
-// fitLine truncates plain text to w cells, marking a cut with a trailing "…"
-// (dropped when even the ellipsis cannot fit) — the same treatment the tree
-// rows apply, replacing the bare hard cut ClampToRect would make.
-func fitLine(s string, w int) string {
-	if w <= 0 {
-		return ""
-	}
-	if runewidth.StringWidth(s) <= w {
-		return s
-	}
-	tail := "…"
-	if w < runewidth.StringWidth(tail) {
-		tail = ""
-	}
-	return runewidth.Truncate(s, w, tail)
-}
-
 // AutomationsPane is the bottom section of the left rail (#1087 revised RFC
 // §2.1's bottom strip): one row per task — the enabled glyph and the task
 // title in the instances-list title color — pinned under the instances tree

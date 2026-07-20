@@ -166,6 +166,20 @@ func PlaceOverlay(
 	bgHeight := len(bgLines)
 	fgHeight := len(fgLines)
 
+	// An overlay is OPAQUE: every cell inside its rectangle belongs to it,
+	// including the blank tail of a row narrower than the widest one. Only the
+	// row's own width used to be written, so the compositor filled the rest of
+	// the rectangle from the layer below and the pane behind showed through
+	// mid-modal (#2149). Padding here — rather than at each caller — makes the
+	// guarantee a property of compositing, so it holds for whatever a modal
+	// happens to render. lipgloss-framed modals already pad their rows, so this
+	// is a no-op for them and only catches the ragged ones.
+	for i, line := range fgLines {
+		if w := ansi.PrintableRuneWidth(line); w < fgWidth {
+			fgLines[i] = line + strings.Repeat(" ", fgWidth-w)
+		}
+	}
+
 	// Apply a fade effect to the background by directly modifying each line
 	fadedBgLines := make([]string, len(bgLines))
 
