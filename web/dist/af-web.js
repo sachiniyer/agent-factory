@@ -6122,13 +6122,34 @@ WARNING: This link could potentially be dangerous`)) {
 // src/api.ts
 var TOKEN_KEY = "af.token";
 function loadToken() {
-  return sessionStorage.getItem(TOKEN_KEY);
+  try {
+    const raw = localStorage.getItem(TOKEN_KEY);
+    return raw === null || raw === "" ? null : raw;
+  } catch {
+    return null;
+  }
 }
 function storeToken(token2) {
-  sessionStorage.setItem(TOKEN_KEY, token2);
+  if (token2 === "") {
+    return;
+  }
+  try {
+    localStorage.setItem(TOKEN_KEY, token2);
+  } catch {
+  }
 }
 function clearToken() {
-  sessionStorage.removeItem(TOKEN_KEY);
+  try {
+    localStorage.removeItem(TOKEN_KEY);
+  } catch {
+  }
+  try {
+    sessionStorage.removeItem(TOKEN_KEY);
+  } catch {
+  }
+}
+function shouldForgetToken(e) {
+  return e instanceof ApiError && (e.status === 401 || e.status === 403);
 }
 function errorText(e, fallback = "unknown error") {
   if (e instanceof Error) {
@@ -10338,6 +10359,10 @@ function loginView(state, actions2) {
       h2("code", {}, "af token show"),
       " on the host."
     ),
+    // Say that the token is kept, and where the off switch is. Persisting a
+    // full-access credential in the browser is the user's call to make knowingly —
+    // silently writing it to disk is the thing not to do.
+    h2("p", { class: "af-subtitle af-login-note" }, "It stays saved in this browser until you disconnect."),
     form
   ];
   if (state.loginError) {
@@ -10406,6 +10431,7 @@ var AppShell = class {
     const live = h2("span", { class: "af-live" }, this.pip, this.pipLabel);
     live.setAttribute("role", "status");
     const disconnect2 = h2("button", { type: "button", class: "af-ghost" }, "Disconnect");
+    disconnect2.setAttribute("title", "Disconnect and forget the saved token");
     disconnect2.addEventListener("click", () => this.actions.disconnect());
     const themeToggle = h2("div", { class: "af-theme-toggle" });
     themeToggle.setAttribute("role", "group");
@@ -11546,14 +11572,14 @@ async function connect(candidate) {
   try {
     sessions = await probeToken(candidate);
   } catch (e) {
-    clearToken();
+    if (shouldForgetToken(e)) {
+      clearToken();
+    }
     store.set({ phase: "login", connecting: false, loginError: describeError(e) });
     return;
   }
   token = candidate;
-  if (candidate !== "") {
-    storeToken(candidate);
-  }
+  storeToken(candidate);
   let tasks = [];
   try {
     tasks = await listTasks(candidate);

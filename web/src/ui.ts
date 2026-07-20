@@ -422,6 +422,10 @@ function loginView(state: AppState, actions: Actions): HTMLElement {
       h("code", {}, "af token show"),
       " on the host.",
     ),
+    // Say that the token is kept, and where the off switch is. Persisting a
+    // full-access credential in the browser is the user's call to make knowingly —
+    // silently writing it to disk is the thing not to do.
+    h("p", { class: "af-subtitle af-login-note" }, "It stays saved in this browser until you disconnect."),
     form,
   ];
   if (state.loginError) {
@@ -640,7 +644,12 @@ export class AppShell {
     const live = h("span", { class: "af-live" }, this.pip, this.pipLabel);
     live.setAttribute("role", "status");
 
+    // Disconnect doubles as "forget the saved token": the credential persists across
+    // visits now, so this button is the only way back to the login prompt on a shared
+    // machine or after a rotation. The title says so — the label alone reads as a
+    // transport action, not a logout.
     const disconnect = h("button", { type: "button", class: "af-ghost" }, "Disconnect");
+    disconnect.setAttribute("title", "Disconnect and forget the saved token");
     disconnect.addEventListener("click", () => this.actions.disconnect());
 
     // The theme toggle: a compact Auto/Light/Dark segmented control. A click routes

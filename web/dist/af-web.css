@@ -249,6 +249,10 @@ body {
   font-size: var(--af-fs-md);
   line-height: 1.5;
 }
+.af-login-note {
+  margin-top: calc(-1 * var(--af-sp-3));
+  font-size: var(--af-fs-sm);
+}
 .af-subtitle code {
   font-family: var(--af-font-mono);
   color: var(--af-text);

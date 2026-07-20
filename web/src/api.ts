@@ -5,11 +5,25 @@
 // this file must not fork it.
 //
 // Token handling is deliberately minimal and lives here so there is ONE place that
-// knows the credential: it is kept in sessionStorage (survives reload within the
-// tab, gone on tab-close — design §1.2, a deliberate "don't persist a full-access
-// credential to disk" posture) and attached as `Authorization: Bearer` on every
-// request. The WS `?access_token=` fallback (browsers cannot set WS headers) is
-// used by the /v1/events subscriber (events.ts) and, in PR4, the PTY stream.
+// knows the credential: it is kept in localStorage and attached as
+// `Authorization: Bearer` on every request. The WS `?access_token=` fallback
+// (browsers cannot set WS headers) is used by the /v1/events subscriber (events.ts)
+// and the PTY stream.
+//
+// localStorage, not sessionStorage: the original design §1.2 posture was "don't
+// persist a full-access credential to disk", which cost a paste of `af token show`
+// on every new tab and every browser restart — the token survived only a reload of
+// the same tab. For a self-hosted tool that is a login wall in front of your own
+// machine, so the credential now persists like the other durable choices (theme,
+// filter, project). The tradeoff is honest and bounded: a bearer in localStorage is
+// readable by same-origin JS, so an XSS in the SPA can exfiltrate it. Nothing else
+// weakens — the token still rides the Authorization header, never a cookie the
+// browser would attach automatically (no CSRF surface), and the webtab frame still
+// cannot read it (api.ts §probeWebTab, the opaque-origin sandbox).
+//
+// Forgetting it is a first-class path: Disconnect clears it, and so does a 401 from
+// a stored token (see shouldForgetToken) — a rotated token re-prompts once instead
+// of wedging the app.
 
 import type { BackendCatalog } from "./backends.js";
 import type { ProgramCatalog } from "./programs.js";
@@ -25,19 +39,63 @@ import type {
 
 const TOKEN_KEY = "af.token";
 
-/** Reads the stored bearer token for this tab, or null if none is set. */
+/** Reads the stored bearer token, or null if none is stored. Never throws: blocked
+ *  storage (private mode / a hardened profile) reads as "nothing stored", which
+ *  lands on the paste-token login rather than a broken boot. */
 export function loadToken(): string | null {
-  return sessionStorage.getItem(TOKEN_KEY);
+  try {
+    const raw = localStorage.getItem(TOKEN_KEY);
+    return raw === null || raw === "" ? null : raw;
+  } catch {
+    return null;
+  }
 }
 
-/** Persists the bearer token for this tab (sessionStorage, not localStorage). */
+/** Persists the bearer token so the next visit — new tab, reload, browser restart —
+ *  resumes it without a paste. Best-effort: a blocked store still leaves the running
+ *  app connected, it just cannot resume later. The empty-token sentinel (a client the
+ *  daemon needs no credential from, #1696) is never stored — see connect(). */
 export function storeToken(token: string): void {
-  sessionStorage.setItem(TOKEN_KEY, token);
+  if (token === "") {
+    return;
+  }
+  try {
+    localStorage.setItem(TOKEN_KEY, token);
+  } catch {
+    // no-op: persistence is best-effort
+  }
 }
 
-/** Forgets the stored token (logout / failed probe). */
+/** Forgets the stored token (Disconnect, or a stored token the daemon rejected).
+ *  Clears the legacy sessionStorage copy too, so a token written by a pre-persistence
+ *  build cannot outlive an explicit logout in the tab that stored it. */
 export function clearToken(): void {
-  sessionStorage.removeItem(TOKEN_KEY);
+  try {
+    localStorage.removeItem(TOKEN_KEY);
+  } catch {
+    // no-op
+  }
+  try {
+    sessionStorage.removeItem(TOKEN_KEY);
+  } catch {
+    // no-op
+  }
+}
+
+/**
+ * Whether a failed connect attempt means the credential itself is bad, and so the
+ * stored copy must be forgotten. ONLY an auth rejection counts: 401 (a missing or
+ * invalid bearer) and 403 (a bearer the daemon refuses).
+ *
+ * The distinction is what makes persistence usable. A transport failure (status 0 —
+ * daemon down, wrong host, laptop asleep) says nothing about the token, and clearing
+ * on it would delete a good credential every time the daemon restarted while a tab
+ * was open — re-creating the exact re-paste-every-time complaint this persistence
+ * exists to fix. Same for a 5xx. Those surface an error and keep the token, so the
+ * next load resumes silently once the daemon is back.
+ */
+export function shouldForgetToken(e: unknown): boolean {
+  return e instanceof ApiError && (e.status === 401 || e.status === 403);
 }
 
 /**

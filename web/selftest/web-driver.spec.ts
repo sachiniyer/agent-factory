@@ -485,6 +485,169 @@ test("an unreachable daemon reports a real transport message, not [object Object
   await ctx.close();
 });
 
+// --- token persistence (feat: log in once) ---------------------------------
+//
+// The property: after ONE successful token login, a returning visit — new tab,
+// reload, browser restart — resumes the stored credential and lands in the authed
+// shell with no prompt, until the daemon rejects it. Before this, the token lived in
+// sessionStorage, so every new tab was a fresh paste of `af token show`.
+//
+// A browser CONTEXT is the unit of persistence here: pages in one context share the
+// origin's localStorage exactly as tabs of one browser profile do, and a second
+// context is a different profile. So "a new tab in the same context" is the honest
+// proxy for a returning visit, and it is precisely what the old per-tab
+// sessionStorage failed.
+//
+// The daemon under test requires no token (require_token=false), so any bearer is
+// accepted — /v1/auth-info is intercepted to force the paste-token login into
+// existence, and the rejection cases fake the 401 the same way.
+
+/** The stored bearer token as the page sees it, or null when nothing is stored. */
+function storedToken(p: Page): Promise<string | null> {
+  return p.evaluate(() => localStorage.getItem("af.token"));
+}
+
+/** A context whose pages all believe the daemon requires a token. Context-level (not
+ *  page-level) routing so a SECOND page in the context inherits it — that second page
+ *  is the returning visit under test. */
+async function tokenRequiredContext(browser: Browser): Promise<BrowserContext> {
+  const ctx = await browser.newContext();
+  await ctx.route("**/v1/auth-info", (route) =>
+    route.fulfill({ status: 200, contentType: "application/json", body: authInfoBody(true) }),
+  );
+  return ctx;
+}
+
+/** Pastes a token into the login form and waits for the authed shell. */
+async function loginWithToken(p: Page, token: string): Promise<void> {
+  await p.goto("/");
+  await expect(p.locator("#af-token")).toBeVisible();
+  await p.locator("#af-token").fill(token);
+  await p.locator(".af-login-form button[type=submit]").click();
+  await expect(p.locator(".af-app")).toBeVisible();
+}
+
+test("token persistence: a NEW TAB after a login resumes the token and never prompts", async ({ browser }) => {
+  const ctx = await tokenRequiredContext(browser);
+  const first = await ctx.newPage();
+  await loginWithToken(first, "persisted-token");
+  expect(await storedToken(first)).toBe("persisted-token");
+
+  // The returning visit: a fresh tab on the same profile, no interaction at all. It
+  // must land in the authed shell — the paste field never renders. (On the old
+  // sessionStorage build this tab started empty and showed the login form.)
+  const second = await ctx.newPage();
+  await second.goto("/");
+  await expect(second.locator(".af-app")).toBeVisible();
+  await expect(second.locator("#af-token")).toHaveCount(0);
+  // And it is really authorized, not just past the gate: the events WS connected on
+  // the resumed credential.
+  await expect(second.locator(".af-live-pip.af-live-open")).toBeVisible();
+
+  // A reload of the ORIGINAL tab resumes it too (the browser-restart case, minus the
+  // restart), and the login form still never appears.
+  await first.reload();
+  await expect(first.locator(".af-app")).toBeVisible();
+  await expect(first.locator("#af-token")).toHaveCount(0);
+
+  await ctx.close();
+});
+
+test("token persistence: the login screen says the token will be saved", async ({ browser }) => {
+  // Persisting a full-access credential silently is the thing not to do: the screen
+  // that takes the token says it keeps it, and names the way back out. Kept as its
+  // own test so a copy change never masquerades as a persistence failure.
+  const ctx = await tokenRequiredContext(browser);
+  const p = await ctx.newPage();
+  await p.goto("/");
+  await expect(p.locator(".af-login-note")).toContainText("stays saved in this browser until you disconnect");
+  await ctx.close();
+});
+
+test("token persistence: Disconnect forgets the token, so the next visit prompts", async ({ browser }) => {
+  const ctx = await tokenRequiredContext(browser);
+  const p = await ctx.newPage();
+  await loginWithToken(p, "forget-me");
+
+  // The logout affordance: on a shared machine or after a rotation, this is the way
+  // back to the prompt. It must clear the STORE, not just the in-memory credential.
+  await p.locator(".af-appbar button", { hasText: "Disconnect" }).click();
+  await expect(p.locator("#af-token")).toBeVisible();
+  expect(await storedToken(p)).toBeNull();
+
+  // A new tab confirms it: nothing was left behind to resume.
+  const after = await ctx.newPage();
+  await after.goto("/");
+  await expect(after.locator("#af-token")).toBeVisible();
+  await expect(after.locator(".af-app")).toHaveCount(0);
+
+  await ctx.close();
+});
+
+test("token persistence: a REJECTED stored token clears itself and prompts once — no loop", async ({ browser }) => {
+  const ctx = await tokenRequiredContext(browser);
+  // The rotation case: the stored token is no longer valid, so the daemon 401s the
+  // login probe. Without the clear, every load would retry the dead credential.
+  await ctx.route("**/v1/Snapshot", (route) =>
+    route.fulfill({ status: 401, contentType: "application/json", body: failureBody("unauthorized") }),
+  );
+  const p = await ctx.newPage();
+  await p.goto("/");
+  await expect(p.locator("#af-token")).toBeVisible();
+  // Seed a stale token the way a previous successful login would have, then return.
+  await p.evaluate(() => localStorage.setItem("af.token", "rotated-away"));
+
+  await p.reload();
+  // Exactly one outcome: the paste form, with the rejection explained.
+  await expect(p.locator("#af-token")).toBeVisible();
+  await expect(p.locator(".af-error")).toContainText("That token was rejected");
+  await expect(p.locator(".af-app")).toHaveCount(0);
+  // Cleared, so the next load prompts straight away rather than re-probing a token
+  // that is known bad.
+  expect(await storedToken(p)).toBeNull();
+
+  // And it stays put: a further reload shows the same clean prompt, no error carried
+  // over from a retry the app should not be making.
+  await p.reload();
+  await expect(p.locator("#af-token")).toBeVisible();
+  await expect(p.locator(".af-error")).toHaveCount(0);
+
+  await ctx.close();
+});
+
+test("token persistence: an unreachable daemon KEEPS the stored token", async ({ browser }) => {
+  // The distinction that makes persistence usable: a transport failure says nothing
+  // about the credential. Clearing on it would mean every daemon restart (or asleep
+  // laptop) deleted a good token and demanded a fresh paste — the exact behavior this
+  // feature exists to remove.
+  const ctx = await tokenRequiredContext(browser);
+  const p = await ctx.newPage();
+  await p.goto("/");
+  await expect(p.locator("#af-token")).toBeVisible();
+  await p.evaluate(() => localStorage.setItem("af.token", "still-good"));
+
+  await ctx.route("**/v1/Snapshot", (route) => route.abort("connectionrefused"));
+  await p.reload();
+  await expect(p.locator(".af-error")).toContainText("Couldn't reach the daemon");
+  expect(await storedToken(p)).toBe("still-good");
+
+  // Daemon back: the very next load resumes silently, with no paste in between.
+  await ctx.unroute("**/v1/Snapshot");
+  await p.reload();
+  await expect(p.locator(".af-app")).toBeVisible();
+  await expect(p.locator("#af-token")).toHaveCount(0);
+
+  await ctx.close();
+});
+
+test("token persistence: the tokenless path stores no credential (#1696)", async () => {
+  // The shared page is the tokenless loopback client: it connects with the empty-token
+  // sentinel, which must never be written out as a stored credential — a stored ""
+  // would read back as "this client needs none" and could skip a login that IS
+  // required. Nothing on disk; the /v1/auth-info probe decides afresh on every load.
+  expect(await storedToken(page)).toBeNull();
+});
+
 test("sidebar lists the seeded sessions from the Snapshot/events plane", async () => {
   // Both seeded rows are present — proof the rail is driven by the daemon
   // projection, not a static list. The rail is SCOPED to the default project (the

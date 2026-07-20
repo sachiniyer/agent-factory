@@ -230,11 +230,14 @@ $ af token show
 token: kZ9abc...-...q0
 ```
 
-Paste the `token` value into the field and click **Connect**. The token is stored
-in the browser tab's `sessionStorage`, so a page reload resumes automatically; a
-rejected token shows an actionable error (`That token was rejected. Check
-af token show on the host and try again.`), and a connection that fails for any
-other reason reports the daemon's own message rather than a generic failure.
+Paste the `token` value into the field and click **Connect**. **You paste it once**:
+the token is saved in the browser's `localStorage` for that origin, so a reload, a
+new tab, and a browser restart all reconnect silently. A rejected token shows an
+actionable error (`That token was rejected. Check af token show on the host and try
+again.`) and is **forgotten**, so the next visit prompts cleanly instead of retrying
+a dead credential. A connection that fails for any other reason — the daemon is
+down, the wrong host — reports the daemon's own message and **keeps** the token: a
+daemon restart doesn't cost you a re-paste.
 
 See [Turning auth on](remote-http-auth.md#turning-auth-on-require_token-true) for
 the full setup, and the note there on why `require_loopback_token` does nothing
@@ -629,6 +632,15 @@ While a terminal is attached, all keys except `Escape` flow to the agent.
 - **The token is full access.** Under the single-owner model, one token grants full
   control of the daemon. Treat it like a password; never commit it or paste it into
   a shared log. Rotate it with `af token rotate` if you suspect exposure.
+- **The browser keeps the token in `localStorage`.** That is what makes you paste it
+  once instead of every visit, and it is a real tradeoff: anything that can run
+  same-origin JavaScript in the tab can read it. af's own bundle is fully
+  self-contained (no CDN, no third-party script, and the daemon's CSP is
+  `default-src 'self'`), so the exposure is an XSS in af itself — not a supply-chain
+  script. The token still rides the `Authorization` header rather than a cookie the
+  browser would attach automatically, so there is no CSRF surface. On a **shared
+  machine**, use **Disconnect** when you step away (it erases the stored token), or
+  use a private/incognito window, whose storage the browser discards on close.
 - **Prefer loopback + SSH over `0.0.0.0`.** Binding `listen_addr` to `127.0.0.1`
   and forwarding over SSH keeps the port off the network entirely, encrypts the
   channel, and still gives you the browser UI.

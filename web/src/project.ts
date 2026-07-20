@@ -19,8 +19,8 @@ import type { SessionData, TaskData } from "./types.js";
 
 /** localStorage key for the persisted selected-project root (the repo path). Kept in
  *  localStorage (not sessionStorage) so the choice survives a full reload/new tab —
- *  the token lives in sessionStorage, but the project is a durable UI preference like
- *  the theme (theme.ts). */
+ *  a durable UI preference like the theme (theme.ts) and, since token persistence,
+ *  like the credential itself (api.ts). */
 const PROJECT_KEY = "af-project";
 
 /** One project's cross-project glance for the switcher menu: its repo root (the
