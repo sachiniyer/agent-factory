@@ -1,15 +1,112 @@
 package app
 
 import (
+	"fmt"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/stretchr/testify/require"
 
 	"github.com/sachiniyer/agent-factory/daemon"
+	"github.com/sachiniyer/agent-factory/keys"
 	"github.com/sachiniyer/agent-factory/session"
+	"github.com/sachiniyer/agent-factory/ui"
+	"github.com/sachiniyer/agent-factory/ui/layout"
+	"github.com/sachiniyer/agent-factory/ui/layout/zones"
 )
+
+func appNumberedHistory(lines int) string {
+	out := make([]string, lines)
+	for i := range out {
+		out[i] = fmt.Sprintf("input-history-%03d", i+1)
+	}
+	return strings.Join(out, "\n")
+}
+
+func firstRenderedHistoryMarker(view string, maxLines int) int {
+	for i := 1; i <= maxLines; i++ {
+		if strings.Contains(view, fmt.Sprintf("input-history-%03d", i)) {
+			return i
+		}
+	}
+	return 0
+}
+
+// TestPreviewScrollFirstIntentConformanceKeyboardAndWheel proves both root
+// input paths submit the same semantic first intent to host-history preview.
+// The size matrix is the real outer-terminal contract requested by #2192; the
+// expected top marker is derived from each resulting pane height.
+func TestPreviewScrollFirstIntentConformanceKeyboardAndWheel(t *testing.T) {
+	const historyLines = 100
+	history := appNumberedHistory(historyLines)
+
+	for _, size := range []struct {
+		name          string
+		width, height int
+	}{
+		{name: "80x24", width: 80, height: 24},
+		{name: "120x40", width: 120, height: 40},
+	} {
+		for _, input := range []string{"keyboard", "wheel"} {
+			t.Run(size.name+"/"+input, func(t *testing.T) {
+				h := newTestHome(t)
+				h.previewFetcher = func(req daemon.PreviewRequest) (string, bool, error) {
+					if req.Full {
+						return history, false, nil
+					}
+					return "visible-line", false, nil
+				}
+				inst := instanceWithFakeBackend(t, "scroll-input")
+				inst.AddTabForTest("agent", session.TabKindAgent)
+				h.store.AddInstance(inst)
+				h.sidebar.SetSelectedInstance(0)
+				_ = h.selectionChanged()
+
+				resizeHome(h, size.width, size.height)
+				pane := openTestPane(t, h, inst, 0)
+				w := h.paneWindows[pane.ID()]
+				require.NotNil(t, w)
+
+				switch input {
+				case "keyboard":
+					_, _ = h.handleDefaultKeyPress(
+						tea.KeyMsg{Type: tea.KeyCtrlU}, keys.KeyShiftUp)
+				case "wheel":
+					region := layout.PaneRegion(pane.ID())
+					body := zoneRect(t, h, zones.PaneBody(region))
+					wheel(h, body.X+1, body.Y+1, true)
+				}
+
+				require.True(t, w.IsInScrollMode(), "first %s input enters scroll mode", input)
+				require.Equal(t, ui.ScrollOwnerHostHistory, w.ScrollOwner())
+				require.NoError(t, w.UpdateContent(inst))
+
+				_, paneHeight := w.GetPreviewSize()
+				// History has 100 rows plus the footer. Bottom's first marker is
+				// 102-paneHeight; one preserved up intent makes it 101-paneHeight.
+				require.Equal(t, 101-paneHeight, firstRenderedHistoryMarker(w.View(), historyLines),
+					"first %s intent must be visible after fill at %s", input, size.name)
+
+				// Exercise the matching down route too. Once history is ready this
+				// applies synchronously and must return to the newest viewport.
+				switch input {
+				case "keyboard":
+					_, _ = h.handleDefaultKeyPress(
+						tea.KeyMsg{Type: tea.KeyCtrlD}, keys.KeyShiftDown)
+				case "wheel":
+					region := layout.PaneRegion(pane.ID())
+					body := zoneRect(t, h, zones.PaneBody(region))
+					wheel(h, body.X+1, body.Y+1, false)
+				}
+				require.Equal(t, 102-paneHeight, firstRenderedHistoryMarker(w.View(), historyLines),
+					"%s down intent must return to bottom at %s", input, size.name)
+			})
+		}
+	}
+}
 
 // TestPanesRefreshNoRedundantScrollFillCapture is the #1709 regression: while a
 // scroll-fill capture is already in flight, a second panesRefresh cycle must NOT

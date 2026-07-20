@@ -189,8 +189,8 @@ func (m *home) panesRefresh(attachedNow bool) tea.Cmd {
 		// one-shot off-loop scrollback fill MUST run even for a live pane —
 		// otherwise the viewport stays empty and the pane renders blank until
 		// scroll mode is left. NeedsScrollFill is true only until that single
-		// fill lands (it clears scrollFillPending), so a live pane resumes
-		// skipping capture for every subsequent scroll keystroke.
+		// fill lands (the controller transitions loading→ready), so a live pane
+		// resumes skipping capture for every subsequent scroll keystroke.
 		needsFill := w.NeedsScrollFill()
 		if w.HasLive() && !needsFill {
 			continue

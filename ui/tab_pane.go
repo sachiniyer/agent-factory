@@ -49,7 +49,7 @@ type tabContentState struct {
 //     off the passed instance + slot (not a title cache), so there is no
 //     stale-session drift to attach/scroll the wrong thing.
 //   - #669/#672/#940 setFallbackState clears scroll state so fallback==true can
-//     never coexist with isScrolling==true (String() checks isScrolling first).
+//     never coexist with an active scroll controller (String() checks it first).
 //   - #496/#920/#935 session-gone / Deleting / Dead fallbacks.
 //   - #898/#649 trailing-newline strip + newest-lines truncation.
 type TabPane struct {
@@ -68,32 +68,12 @@ type TabPane struct {
 	// retargeting snapshots it so a grace-period expiry can replace stale content
 	// without racing and overwriting a capture that landed at the deadline.
 	renderRevision uint64
-	isScrolling    bool
-	// scrollFillPending is set when ScrollUp/ScrollDown enter scroll mode and
-	// cleared once the off-loop capture has populated the viewport. Scroll entry
-	// no longer captures on the bubbletea event loop (#1637); this flag is the
-	// deterministic "capture still owed" signal the updateAgent/updateShell
-	// lazy-fill and NeedsScrollFill key off — a sized viewport's View() is never
-	// the empty string (it renders padding), so viewport emptiness cannot serve.
-	scrollFillPending bool
-	// scrollFillGen / scrollFillDispatchedGen are the generation token that
-	// replaces a plain in-flight bool (#1709). scrollFillGen stamps the current
-	// scroll-fill lifecycle: it bumps on every scroll entry, every reset, and
-	// every re-arm, so each owed fill is a distinct request. scrollFillDispatchedGen
-	// records the generation panesRefresh has already dispatched a capture for.
-	//
-	// A generation, not a bool, because the in-flight state is shared across scroll
-	// EXIT and RE-ENTRY on the same instance/tab (unchanged render seq — scroll
-	// entry/exit does not bump ContentSeq). A capture stamps scrollFillGen at
-	// dispatch and, on return, applies its result only if the generation still
-	// matches; a slow capture from a previous scroll session finds the generation
-	// moved on and is ignored, so it can neither satisfy nor clear the newer
-	// entry's fill. Masking (no redundant dispatch) falls out of the same tokens:
-	// a fill is owed-and-undispatched only while scrollFillDispatchedGen != the
-	// current scrollFillGen.
-	scrollFillGen           uint64
-	scrollFillDispatchedGen uint64
-	viewport                viewport.Model
+	// scroll is the explicit scroll owner and transition controller (#2192).
+	// Captured tabs use host-history ownership. It owns active/loading/
+	// ready state, fill generations, and pending intent; TabPane owns only the
+	// rendered viewport it asks the controller to manipulate.
+	scroll   historyScrollController
+	viewport viewport.Model
 
 	// currentInstance + currentTab identify the (instance, tab-index) view
 	// currently rendered. UpdateContent/ScrollUp/ScrollDown reset scroll-mode
@@ -126,6 +106,7 @@ func NewTabPane(src PreviewSource) *TabPane {
 	return &TabPane{
 		viewport:   viewport.New(0, 0),
 		previewSrc: src,
+		scroll:     newHostHistoryScrollController(),
 	}
 }
 
@@ -134,7 +115,16 @@ func NewTabPane(src PreviewSource) *TabPane {
 func (p *TabPane) IsScrolling() bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	return p.isScrolling
+	return p.scroll.Active()
+}
+
+// ScrollOwner reports which subsystem is responsible for satisfying this
+// pane's scroll requests. The owner boundary lets child-owned terminals route
+// input without changing the host-history contract.
+func (p *TabPane) ScrollOwner() ScrollOwner {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.scroll.Owner()
 }
 
 // NeedsScrollFill reports whether the pane is in scroll mode with an unfilled
@@ -146,41 +136,19 @@ func (p *TabPane) IsScrolling() bool {
 func (p *TabPane) NeedsScrollFill() bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	// Owed AND not yet dispatched for the current generation: a dispatched capture
-	// (scrollFillDispatchedGen == scrollFillGen) masks the pane until it resolves
-	// or a new generation supersedes it, so no redundant capture fires (#1709).
-	return p.isScrolling && p.scrollFillPending &&
-		p.scrollFillDispatchedGen != p.scrollFillGen && p.viewport.Height > 0
+	return p.scroll.NeedsFill(p.viewport.Height)
 }
 
 // BeginScrollFill records that panesRefresh has dispatched a capture for the
 // current fill generation, so a refresh cycle in the dispatch→land window sees
 // NeedsScrollFill go false and does not fire a redundant one (#1709). It is
 // called synchronously on the event loop the instant the capture is dispatched.
-// A later scroll entry bumps scrollFillGen past this dispatched generation, which
-// both re-arms NeedsScrollFill and marks the in-flight capture stale.
+// A later scroll lifecycle has a new controller generation, which both re-arms
+// NeedsScrollFill and marks the prior in-flight capture stale.
 func (p *TabPane) BeginScrollFill() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.scrollFillDispatchedGen = p.scrollFillGen
-}
-
-// resetScrollFill clears the fill-owed flag and starts a new generation. Every
-// scroll-state reset and every completed fill funnels through it: bumping the
-// generation invalidates any capture still in flight against the old one, so a
-// stale completion can never satisfy or clear a later fill (#1709). Caller must
-// hold p.mu.
-func (p *TabPane) resetScrollFill() {
-	p.scrollFillPending = false
-	p.scrollFillGen++
-}
-
-// rearmScrollFill starts a new generation while leaving the fill owed, so a
-// capture that resolved but could not publish (render binding moved on, transient
-// error) re-dispatches instead of wedging the viewport blank, and its own stale
-// return is ignored (#1709). Caller must hold p.mu.
-func (p *TabPane) rearmScrollFill() {
-	p.scrollFillGen++
+	p.scroll.BeginFill()
 }
 
 func (p *TabPane) SetSize(width, maxHeight int) {
@@ -188,8 +156,7 @@ func (p *TabPane) SetSize(width, maxHeight int) {
 	defer p.mu.Unlock()
 	p.width = width
 	p.height = maxHeight
-	p.viewport.Width = width
-	p.viewport.Height = maxHeight
+	p.scroll.Resize(&p.viewport, width, maxHeight)
 	// Local session sizing is the WS stream's job now (last-resize-wins
 	// resize-window, #1592 Phase 2 PR6): the pane geometry rides the RESIZE frame,
 	// so the TabPane no longer resizes a detached tmux session itself.
@@ -207,11 +174,8 @@ func (p *TabPane) SetSize(width, maxHeight int) {
 // entry points consistent (the #669 motivation).
 func (p *TabPane) dropStaleView(instance *session.Instance, activeTab int) {
 	if instance != p.currentInstance || activeTab != p.currentTab {
-		if p.isScrolling {
-			p.isScrolling = false
-			p.resetScrollFill()
-			p.viewport.SetContent("")
-			p.viewport.GotoTop()
+		if p.scroll.Active() {
+			p.scroll.Reset(&p.viewport)
 		}
 		p.currentInstance = instance
 		p.currentTab = activeTab
@@ -229,19 +193,16 @@ func (p *TabPane) publishContent(content tabContentState) {
 // setFallbackState sets the pane to display a centered fallback message. Caller
 // must hold p.mu.
 //
-// Also resets scroll-mode state so fallback==true cannot coexist with
-// isScrolling==true. String() checks isScrolling before fallback, so leaving
-// scroll state intact when entering a fallback (nil/Loading/Deleting/Dead/
-// session-gone) would render the prior view's stale viewport instead of the
-// fallback message (#669/#672/#940).
+// Also resets scroll-mode state so fallback==true cannot coexist with an active
+// controller. String() checks scroll before fallback, so leaving it active when
+// entering a fallback (nil/Loading/Deleting/Dead/session-gone) would render the
+// prior view's stale viewport instead of the fallback message (#669/#672/#940).
 func (p *TabPane) setFallbackState(message string) {
 	p.publishContent(tabContentState{
 		fallback: true,
 		text:     lipgloss.JoinVertical(lipgloss.Center, FallBackText, "", message),
 	})
-	p.isScrolling = false
-	p.resetScrollFill()
-	p.viewport.SetContent("")
+	p.scroll.Reset(&p.viewport)
 }
 
 // RenderRevision returns the completed-render generation. It is safe to read
@@ -314,6 +275,44 @@ func (p *TabPane) UpdateContentGuarded(instance *session.Instance, activeTab int
 	return p.updateShell(instance, activeTab, guard)
 }
 
+// fillHostHistoryLocked performs the one asynchronous transition shared by
+// agent and shell previews. Caller holds p.mu; this method releases it around
+// capture and returns with it held. The controller keeps both the generation
+// token and every pending ScrollIntent, so a stale capture cannot publish and a
+// slow current capture cannot erase input (#1637/#1709/#2192).
+func (p *TabPane) fillHostHistoryLocked(
+	instance *session.Instance,
+	activeTab int,
+	guard contentGuard,
+	goneMessage string,
+) error {
+	gen := p.scroll.FillGeneration()
+	p.mu.Unlock()
+	content, err := p.previewSrc(instance, activeTab, true)
+	p.mu.Lock()
+
+	if !p.scroll.FillIsCurrent(gen) {
+		return nil
+	}
+	if !guardOK(guard) || !p.isCurrentViewLocked(instance, activeTab) {
+		p.scroll.RearmFill()
+		return nil
+	}
+	if err != nil {
+		if errors.Is(err, tmux.ErrSessionGone) {
+			p.setFallbackState(goneMessage)
+			return nil
+		}
+		p.scroll.RearmFill()
+		return err
+	}
+	content = lipgloss.JoinVertical(lipgloss.Left, content, scrollFooter())
+	if p.scroll.CompleteFill(gen, &p.viewport, content) {
+		p.renderRevision++
+	}
+	return nil
+}
+
 // updateAgent reproduces the former PreviewPane.UpdateContent.
 func (p *TabPane) updateAgent(instance *session.Instance, guard contentGuard) error {
 	p.mu.Lock()
@@ -357,56 +356,15 @@ func (p *TabPane) updateAgent(instance *session.Instance, guard contentGuard) er
 	// alive and its screen shows the limit message, so it falls through to the
 	// live Preview() below.
 
-	// If scroll mode was entered but the scrollback hasn't been captured yet,
-	// capture the full history now. ScrollUp/ScrollDown enter scroll mode WITHOUT
-	// any capture (that used to block the bubbletea event loop on a slow tmux
-	// capture / daemon RPC — #1637); the fill happens here instead, on the
-	// off-loop refresh goroutine, the first time UpdateContent runs with a
-	// pending scroll fill.
-	if p.isScrolling && p.scrollFillPending {
-		gen := p.scrollFillGen
+	// Scroll entry is I/O-free; the controller preserves pending intent while
+	// this off-loop full-history capture runs (#1637/#2192).
+	if p.scroll.AwaitingHistory() {
+		err := p.fillHostHistoryLocked(instance, 0, guard, "Session no longer running.")
 		p.mu.Unlock()
-		content, err := p.previewSrc(instance, 0, true)
-		p.mu.Lock()
-		defer p.mu.Unlock()
-		// A scroll exit+re-entry (or any reset) during the capture bumps the
-		// generation, handing the fill to a newer dispatch. Ignore this stale
-		// completion entirely: it must neither satisfy nor clear the newer entry's
-		// fill, and it must not publish its stale content (#1709 review). Every
-		// path that clears pending or exits scroll mode bumps the generation, so a
-		// matching generation here guarantees the fill is still owed and current.
-		if p.scrollFillGen != gen {
-			return nil
-		}
-		if !guardOK(guard) || !p.isCurrentViewLocked(instance, 0) {
-			// Could not publish for the live render binding: re-arm so the owed
-			// fill re-dispatches rather than wedging the viewport blank (#1709).
-			p.rearmScrollFill()
-			return nil
-		}
-		if err != nil {
-			if errors.Is(err, tmux.ErrSessionGone) {
-				// setFallbackState clears scroll state and the stale viewport, so
-				// the fallback renders even mid scroll-capture (#940).
-				p.setFallbackState("Session no longer running.")
-				return nil
-			}
-			p.rearmScrollFill()
-			return err
-		}
-		p.viewport.SetContent(lipgloss.JoinVertical(lipgloss.Left, content, scrollFooter()))
-		// First fill lands at the bottom (newest output), matching the live view
-		// the user was looking at when they entered scroll mode. This is the only
-		// place that pins the offset: subsequent LineUp/LineDown move it and the
-		// fill no longer runs (pending cleared), so the scroll position is
-		// preserved (#1637).
-		p.viewport.GotoBottom()
-		p.resetScrollFill()
-		p.renderRevision++
-		return nil
+		return err
 	}
 
-	if p.isScrolling {
+	if p.scroll.Active() {
 		p.mu.Unlock()
 		return nil
 	}
@@ -439,7 +397,7 @@ func (p *TabPane) updateAgent(instance *session.Instance, guard contentGuard) er
 
 // webTabPlaceholder is the TUI content for a web/iframe tab, which the terminal
 // cannot render: the target URL plus a pointer to where it can be viewed. Shared
-// by updateShell and enterScrollModeLocked so the two never diverge.
+// by updateShell and canEnterScrollModeLocked so the two never diverge.
 func webTabPlaceholder(url string) string {
 	return fmt.Sprintf("%s\n\nWeb tab — view in the web UI or open in a browser", url)
 }
@@ -454,7 +412,7 @@ func vscodeTabPlaceholder() string {
 
 // tabPlaceholder returns the TUI placeholder for a tab kind the terminal cannot
 // render, and ok=false for kinds it can (agent/shell/process, which have a PTY).
-// Shared by updateShell and enterScrollModeLocked so the two never diverge.
+// Shared by updateShell and canEnterScrollModeLocked so the two never diverge.
 func tabPlaceholder(tab *session.Tab) (string, bool) {
 	switch tab.Kind {
 	case session.TabKindWeb:
@@ -526,7 +484,7 @@ func (p *TabPane) updateShell(instance *session.Instance, activeTab int, guard c
 	// This runs BEFORE the scroll-mode guard below so a shell session killed
 	// externally while the user is scrolling transitions to the fallback instead
 	// of leaving stale scrollback pinned on screen forever (#977). setFallbackState
-	// clears scroll state, so String() (which checks isScrolling first) renders the
+	// clears scroll state, so String() (which checks the controller first) renders the
 	// fallback message. This mirrors the agent slot, whose Dead check also precedes
 	// its scroll guard in updateAgent.
 	if !instance.TabAlive(activeTab) {
@@ -535,50 +493,17 @@ func (p *TabPane) updateShell(instance *session.Instance, activeTab int, guard c
 		return nil
 	}
 
-	// Scroll mode with a pending fill: capture the tab's full scrollback here —
-	// off the event loop, exactly like the agent slot. ScrollUp/ScrollDown no
-	// longer capture inline (that blocked the bubbletea event loop on a slow tmux
-	// capture / daemon RPC — #1637); the shell slot fills lazily on this off-loop
-	// refresh goroutine, the first time UpdateContent runs with a pending fill.
-	if p.isScrolling && p.scrollFillPending {
-		gen := p.scrollFillGen
+	// The shell slot uses the same controller and off-loop fill transition as the
+	// agent slot; input queued during capture is applied when history publishes.
+	if p.scroll.AwaitingHistory() {
+		err := p.fillHostHistoryLocked(instance, activeTab, guard, "Terminal session no longer running.")
 		p.mu.Unlock()
-		content, err := p.previewSrc(instance, activeTab, true)
-		p.mu.Lock()
-		defer p.mu.Unlock()
-		// Stale-generation completion (scroll exit+re-entry during the capture):
-		// ignore it entirely, so this old capture can't satisfy or clear the newer
-		// scroll entry's fill nor publish its stale content (#1709 review). A
-		// matching generation guarantees the fill is still owed and current.
-		if p.scrollFillGen != gen {
-			return nil
-		}
-		if !guardOK(guard) || !p.isCurrentViewLocked(instance, activeTab) {
-			// Could not publish for the live render binding: re-arm so the owed
-			// fill re-dispatches rather than wedging the viewport blank (#1709).
-			p.rearmScrollFill()
-			return nil
-		}
-		if err != nil {
-			if errors.Is(err, tmux.ErrSessionGone) {
-				// setFallbackState clears scroll state and the stale viewport, so
-				// the fallback renders even mid scroll-capture (#940/#977).
-				p.setFallbackState("Terminal session no longer running.")
-				return nil
-			}
-			p.rearmScrollFill()
-			return err
-		}
-		p.viewport.SetContent(lipgloss.JoinVertical(lipgloss.Left, content, scrollFooter()))
-		p.viewport.GotoBottom()
-		p.resetScrollFill()
-		p.renderRevision++
-		return nil
+		return err
 	}
 
 	// Already-filled scroll viewport: leave it (and p.content) untouched so
 	// LineUp/LineDown keep their position.
-	if p.isScrolling {
+	if p.scroll.Active() {
 		p.mu.Unlock()
 		return nil
 	}
@@ -619,7 +544,7 @@ func (p *TabPane) String() string {
 	rect := layout.Rect{W: p.width, H: p.height}
 
 	// In scroll/copy mode always use the viewport.
-	if p.isScrolling {
+	if p.scroll.Active() {
 		return layout.ClampToRect(p.viewport.View(), rect)
 	}
 
@@ -666,6 +591,18 @@ func (p *TabPane) String() string {
 
 // ScrollUp enters scroll mode (if not already) and scrolls up.
 func (p *TabPane) ScrollUp(instance *session.Instance, activeTab int) error {
+	return p.scrollBy(instance, activeTab, scrollOneLineUp)
+}
+
+// ScrollDown enters scroll mode (if not already) and scrolls down.
+func (p *TabPane) ScrollDown(instance *session.Instance, activeTab int) error {
+	return p.scrollBy(instance, activeTab, scrollOneLineDown)
+}
+
+// scrollBy is the single keyboard/wheel-independent input path. It validates a
+// new host-history session, then hands the semantic intent to the controller;
+// the controller either applies it now or preserves it across the pending fill.
+func (p *TabPane) scrollBy(instance *session.Instance, activeTab int, intent ScrollIntent) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if instance == nil {
@@ -674,77 +611,41 @@ func (p *TabPane) ScrollUp(instance *session.Instance, activeTab int) error {
 	// Reset scroll mode if the view changed out from under us, so we capture the
 	// newly selected view's content rather than scrolling stale content (#702).
 	p.dropStaleView(instance, activeTab)
-	if !p.isScrolling {
-		if err := p.enterScrollModeLocked(instance, activeTab); err != nil {
-			return err
-		}
+	if !p.scroll.Active() && !p.canEnterScrollModeLocked(instance, activeTab) {
 		return nil
 	}
-	p.viewport.LineUp(1)
+	p.scroll.Scroll(&p.viewport, intent)
 	return nil
 }
 
-// ScrollDown enters scroll mode (if not already) and scrolls down.
-func (p *TabPane) ScrollDown(instance *session.Instance, activeTab int) error {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if instance == nil {
-		return nil
-	}
-	p.dropStaleView(instance, activeTab)
-	if !p.isScrolling {
-		if err := p.enterScrollModeLocked(instance, activeTab); err != nil {
-			return err
-		}
-		return nil
-	}
-	p.viewport.LineDown(1)
-	return nil
-}
-
-// enterScrollModeLocked switches the pane into scroll mode WITHOUT capturing.
+// canEnterScrollModeLocked validates a new scroll session WITHOUT capturing.
 // The full-scrollback capture used to run inline here, on the bubbletea event
 // loop — an unbounded tmux capture / daemon Preview RPC that froze the whole TUI
-// while entering scroll mode if that capture was slow or hung (#1637). It now
-// only flips scroll state and empties the viewport; the capture happens off the
-// event loop on the next UpdateContent (the updateAgent/updateShell lazy-fill,
-// keyed on an empty scroll viewport), which the app dispatches immediately on
-// scroll entry (panesRefresh bypasses its throttle while NeedsScrollFill). Caller
-// must hold p.mu. Validation uses in-memory state only, never I/O.
-func (p *TabPane) enterScrollModeLocked(instance *session.Instance, activeTab int) error {
+// while entering scroll mode if that capture was slow or hung (#1637). The
+// controller starts the lazy fill only after this in-memory validation succeeds.
+// Caller must hold p.mu.
+func (p *TabPane) canEnterScrollModeLocked(instance *session.Instance, activeTab int) bool {
 	if instance.IsTearingDown() {
 		p.setFallbackState("Tearing down session…")
-		return nil
+		return false
 	}
 	// A web/vscode tab has no scrollback (no PTY): keep the placeholder rather than
 	// entering scroll mode over an empty capture. Mirrors updateShell's branch.
 	if tabs := instance.GetTabs(); activeTab >= 0 && activeTab < len(tabs) {
 		if placeholder, ok := tabPlaceholder(tabs[activeTab]); ok {
 			p.setFallbackState(placeholder)
-			return nil
+			return false
 		}
 	}
 	// An already-dead shell tab transitions to the fallback rather than entering
-	// scroll mode over stale terminal output: leaving p.content intact with
-	// isScrolling==false would render the last capture instead of the dead-session
+	// scroll mode over stale terminal output: leaving normal content intact would
+	// render the last capture instead of the dead-session
 	// message. Mirrors updateShell's !TabAlive branch (#998, sibling of #977/#984).
 	if activeTab != 0 && !instance.TabAlive(activeTab) {
 		p.setFallbackState("Terminal session not available.")
-		return nil
+		return false
 	}
-	// Empty the viewport and mark a fill pending so the off-loop lazy-fill
-	// captures the full scrollback and pins it to the bottom. Capture is keyed off
-	// the passed instance + tab index there, never a cached title, so the wrong
-	// view can never be captured (#746/#384).
-	p.viewport.SetContent("")
-	p.isScrolling = true
-	p.scrollFillPending = true
-	// Start a new generation: this entry's fill is owed and undispatched
-	// (scrollFillDispatchedGen now trails scrollFillGen), and any capture still in
-	// flight from a previous scroll session is stamped an older generation, so it
-	// can't satisfy this entry (#1709).
-	p.scrollFillGen++
-	return nil
+	return true
 }
 
 // ResetToNormalMode exits scroll mode and returns to normal content display.
@@ -754,12 +655,9 @@ func (p *TabPane) ResetToNormalMode(instance *session.Instance, activeTab int) e
 	// Always clear scroll state first so pressing ESC while no instance is
 	// selected (e.g. the sidebar header) does not leave the pane stuck on stale
 	// viewport content.
-	wasScrolling := p.isScrolling
+	wasScrolling := p.scroll.Active()
 	if wasScrolling {
-		p.isScrolling = false
-		p.resetScrollFill()
-		p.viewport.SetContent("")
-		p.viewport.GotoTop()
+		p.scroll.Reset(&p.viewport)
 	}
 
 	if instance == nil || !wasScrolling {

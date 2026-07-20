@@ -41,7 +41,7 @@ func enterScrollWithStaleViewport(p *TabPane, inst *session.Instance) {
 	// when UpdateContent(inst, 0) runs — we want to prove setFallbackState is
 	// what clears scroll mode, not the view-change guard.
 	p.currentTab = 0
-	p.isScrolling = true
+	p.scroll.Scroll(&p.viewport, scrollOneLineUp)
 	p.viewport.SetContent(staleScrollMarker)
 }
 
@@ -65,7 +65,7 @@ func TestPreviewScrollModeThenDeletingFallback(t *testing.T) {
 
 	require.NoError(t, p.UpdateContent(inst, 0))
 
-	require.False(t, p.isScrolling,
+	require.False(t, p.scroll.Active(),
 		"entering the Deleting fallback must exit scroll mode")
 	require.True(t, p.content.fallback,
 		"Deleting instance must render a fallback")
@@ -91,12 +91,12 @@ func TestPreviewScrollModeThenNilInstanceFallback(t *testing.T) {
 	// (nil==nil, tab unchanged) does not reset scroll itself — setFallbackState
 	// must.
 	p.currentTab = 0
-	p.isScrolling = true
+	p.scroll.Scroll(&p.viewport, scrollOneLineUp)
 	p.viewport.SetContent(staleScrollMarker)
 
 	require.NoError(t, p.UpdateContent(nil, 0))
 
-	require.False(t, p.isScrolling,
+	require.False(t, p.scroll.Active(),
 		"the nil-instance fallback must exit scroll mode")
 	require.True(t, p.content.fallback)
 	require.NotContains(t, p.viewport.View(), staleScrollMarker,
@@ -127,7 +127,7 @@ func TestPreviewScrollModeThenLoadingFallback(t *testing.T) {
 
 	require.NoError(t, p.UpdateContent(inst, 0))
 
-	require.False(t, p.isScrolling,
+	require.False(t, p.scroll.Active(),
 		"entering the Loading fallback must exit scroll mode")
 	require.True(t, p.content.fallback)
 	require.NotContains(t, p.viewport.View(), staleScrollMarker)
@@ -154,7 +154,7 @@ func TestPreviewScrollEntryDeletingShowsTeardownFallback(t *testing.T) {
 
 	require.NoError(t, p.ScrollUp(inst, 0))
 
-	require.False(t, p.isScrolling,
+	require.False(t, p.scroll.Active(),
 		"deleting agent tab must not enter empty scroll mode")
 	require.True(t, p.content.fallback,
 		"deleting agent tab must enter fallback state when scrolling starts")
@@ -188,7 +188,7 @@ func TestPreviewScrollModeViewportContentCleared(t *testing.T) {
 
 	require.NoError(t, p.UpdateContent(inst, 0))
 
-	require.False(t, p.isScrolling, "scroll mode must be exited")
+	require.False(t, p.scroll.Active(), "scroll mode must be exited")
 	require.NotContains(t, p.viewport.View(), staleScrollMarker,
 		"viewport content must be cleared when entering a fallback (#940)")
 }
@@ -250,7 +250,7 @@ func TestPreviewScrollModeThenSessionGoneFallback(t *testing.T) {
 	require.NoError(t, p.ScrollUp(setup.instance, 0))
 	require.NoError(t, p.UpdateContent(setup.instance, 0))
 
-	require.False(t, p.isScrolling,
+	require.False(t, p.scroll.Active(),
 		"session-gone while entering scroll mode must not leave the pane scrolling")
 	require.True(t, p.content.fallback,
 		"preview must enter fallback state when the session is gone")
