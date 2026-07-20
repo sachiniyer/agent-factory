@@ -86,6 +86,14 @@ jobs:
       - name: Test stale-external-pr helper
         run: node --test .github/scripts/stale-external-pr.test.js
 
+      # The container harness's own disk hygiene (#2133): cleanup must run on a
+      # FAILING run, and every prune must be scoped to artifacts the harness
+      # built. It went green for months while filling a 2TB box, so "the suite
+      # passed" was never evidence. Runs against a fake docker — no engine
+      # needed on the runner — which is why it fits in the required Lint job.
+      - name: Test container-harness disk hygiene
+        run: make testbox-selftest
+
   test:
     name: Test
     runs-on: ubuntu-latest

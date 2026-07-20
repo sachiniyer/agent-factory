@@ -38,7 +38,105 @@ What the harness does:
   every module);
 - caps pids and memory (`AF_TESTBOX_PIDS`, `AF_TESTBOX_MEMORY`) so a
   runaway process generator suffocates inside the container instead of
-  taking the box down.
+  taking the box down;
+- cleans up after itself on the way out, pass or fail, so repeated runs don't
+  grow `/var/lib/docker` — see [disk footprint](#disk-footprint).
+
+## Disk footprint
+
+This harness once filled a 2TB dev box (#2133). `/` hit 100%, and the first
+thing to break was not the tests — it was the running `af` daemon, which
+shares the filesystem and could no longer persist session state. So every
+target here is now **self-limiting on disk**, and none of the cleanup can
+reach anything the harness did not create.
+
+Every image, container, and cache volume the harness makes carries the label
+`af.harness=testbox` — the same idea as the `af.session` label the docker
+backend puts on session containers. Cleanup filters on it, so a prune here can
+only ever match the harness's own artifacts.
+
+**On every run**, on the way out — including when the suite *fails*, which is
+exactly the run you re-run and therefore the one that used to compound fastest:
+
+- containers are `--rm`, so no writable layer and no anonymous volume survives;
+- images this harness built that no longer carry a tag are pruned. Every target
+  builds a *stable* tag, so editing a Dockerfile — or just running from a
+  sibling worktree whose Dockerfile differs — moves the tag off the previous
+  image (~1.2GB for the testbox image, ~4GB for web-selftest). Whether that
+  image then lingers depends on the engine: the classic `overlay2` image store
+  leaves it as a dangling `<none>` forever, while the containerd snapshotter
+  (docker 29's default) collects it itself. The reap costs nothing on the
+  engines that don't need it;
+- the shared BuildKit cache is held under a ceiling (default 10GB,
+  `AF_TESTBOX_CACHE_MAX`). This is the one cleanup that cannot be
+  label-scoped — BuildKit cache records carry no labels — so it is deliberately
+  a *ceiling* and not a wipe: docker evicts least-recently-used records until
+  the total fits, which leaves another builder's warm cache alone as long as it
+  is warmer than ours, and anything evicted is rebuildable. Set
+  `AF_TESTBOX_CACHE_MAX=off` to skip it entirely.
+
+The net effect: images, containers and build cache cost about as much for N
+runs as for one. The Go cache volumes are the honest exception — they keep
+growing with how much you build, bounded only by Go's own 5-day cache trim,
+which is why `make testbox-clean` exists.
+
+**When you want the space back**, including the Go caches:
+
+```bash
+make testbox-clean
+```
+
+That removes the harness's stopped containers and images, empties the four
+named cache volumes (`af-testbox-{gomod,gobuild}`,
+`af-web-selftest-{gomod,gobuild}`), caps the build cache, and prints
+`docker system df`. The Go build cache volume is the largest thing here — tens
+of GB on a busy box — and no automatic step touches it, because emptying it
+costs the next run a full cold rebuild. Go trims its own cache at 5 days, so it
+is bounded, just generously.
+
+`make testbox-clean` reports **running** containers rather than removing them
+and prints the exact `docker rm -f` for each. On a box with several worktrees a
+running labelled container is most likely a sibling's in-flight suite or a
+parked play-test sandbox, and a cleanup target is not allowed to be the thing
+that kills it.
+
+Nothing here ever runs `docker system prune` or an unfiltered
+`docker volume prune`. Both would have fixed the disk and deleted co-tenants'
+images to do it. `make testbox-selftest` asserts exactly that, against a fake
+docker, in about a second — it gates every PR.
+
+**Before a run**, if free space on the docker root filesystem is under 20GB
+(`AF_TESTBOX_MIN_FREE_GB`, `0` silences it), the harness says so and points at
+`make testbox-clean`. It warns and continues rather than refusing: nothing here
+knows how much room a given run needs, and a harness that won't start is its
+own outage. Every way of *not* being able to tell — a remote engine, an
+unreadable root — stays quiet instead of guessing.
+
+### What actually accumulates
+
+Measured on the box that filled up, so the next person doesn't have to re-derive
+it. Categories, largest first:
+
+| Category | Bounded by | Notes |
+| --- | --- | --- |
+| Cache volumes (~30GB) | Go's own 5-day cache trim; `make testbox-clean` | The largest item by far, and `docker system prune -af` does **not** touch volumes |
+| Build cache (~5GB) | the per-run ceiling above | Nothing pruned it before |
+| Harness images (~5GB) | the per-run reap above | Only strands copies on `overlay2`; see above |
+| Containers | `--rm` | Never a leak; `--rm` was always there |
+
+One correction to the incident write-up in #2133 while we're here. The reclaim
+that recovered the box was `docker system prune -af` **plus** clearing the
+host's `~/.cache/go-build`, and the "post-prune `/var/lib/docker` was 4.0K"
+reading that the write-up took as "docker held essentially all of it" was a
+`du` without root — `/var/lib/docker` is `drwx--x---  root root`, so a non-root
+`du` prints a permission error on stderr and `4.0K` on stdout. Docker did not
+hold all 312GB; the host Go build cache held a share of it that this reading
+could not see. Both are regenerable, and only the docker half is this harness's
+to bound — but if this box fills again, check `~/.cache/go-build` too.
+
+> One-time note for boxes that ran the harness before this landed: images built
+> then carry no label, so the label-scoped reap cannot see them. Clear that
+> backlog once with `docker image prune -f` (dangling images only).
 
 ## `make remote-roundtrip-container` — mock remote hooks
 

@@ -9,7 +9,8 @@
 	backend-docker-roundtrip backend-ssh-roundtrip \
 	playtest-container playtest-container-detached tui-driver tui-driver-selftest \
 	lifecycle-container lifecycle-selftest \
-	testbox-image lint-file-length docs web-build web-test web-selftest-container
+	testbox-image testbox-clean testbox-selftest \
+	lint-file-length docs web-build web-test web-selftest-container
 
 # Structural-health lint (#1145): fail if any Go file exceeds its line limit
 # (1000 for production code, 1500 for *_test.go) unless grandfathered in
@@ -143,6 +144,25 @@ lifecycle-selftest:
 # (Re)build the toolchain image only.
 testbox-image:
 	scripts/testbox.sh build
+
+# Reclaim the disk the container harness holds — and only what it holds (#2133).
+# Every target above already reaps its own dangling images and caps the build
+# cache on the way out, so this is the deeper lever: it also empties the Go
+# module/build cache volumes, which reach tens of GB on a busy box and which no
+# automatic step touches (emptying them costs the next run a cold rebuild).
+# Running containers are reported, never removed — on a box with several
+# worktrees one is most likely a sibling's in-flight run.
+# See docs/container-testing.md § disk footprint.
+testbox-clean:
+	scripts/testbox.sh clean
+
+# Tests for the container harness's OWN disk hygiene: that cleanup runs even
+# when the suite fails, and that every prune is scoped to artifacts the harness
+# built. Pure logic against a fake docker — no containers, no images, no daemon
+# — so it runs on the host in about a second and gates every PR, the same deal
+# as lifecycle-selftest.
+testbox-selftest:
+	bash scripts/testbox-selftest.sh
 
 # Web client toolchain (#1592 Phase 5). The JS build+test are gated ENTIRELY behind
 # these targets: `go build ./...` and `make test-container` never invoke Node — the
