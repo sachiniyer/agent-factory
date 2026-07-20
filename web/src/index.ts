@@ -38,7 +38,6 @@ import {
   reorderTab,
   restoreSession,
   resumeFromLimit,
-  sendPrompt,
   shouldForgetToken,
   storeToken,
   triggerTask,
@@ -46,7 +45,7 @@ import {
 } from "./api.js";
 import { createKeyedQueue } from "./config.js";
 import { EventStream, type EventStreamStatus } from "./events.js";
-import { confirmDeleteProjectModal, confirmModal, type ModalHandle, newSessionModal, promptModal } from "./modals.js";
+import { confirmDeleteProjectModal, confirmModal, type ModalHandle, newSessionModal } from "./modals.js";
 import { InstallAffordance } from "./install.js";
 import { decideKey, type KeyboardFocus, type View } from "./nav.js";
 import { defaultFilter, filterSessions, loadFilter, persistFilter, withKind } from "./filter.js";
@@ -133,7 +132,7 @@ const store = new Store<AppState>({
 // daemon requires no token for this client (loopback, or require_token=false) —
 // a fully authorized connection. Every "am I connected?" guard MUST test
 // `token === null`, never `!token`, or a tokenless client's create/kill/archive/
-// send-prompt/attach would be silently skipped because `!"" === true`.
+// restore/retry/attach would be silently skipped because `!"" === true`.
 let token: string | null = null;
 let stream: EventStream | null = null;
 
@@ -592,37 +591,9 @@ function newSession(): void {
   );
 }
 
-/** Opens the send-prompt modal for the selected session. */
-function openSendPrompt(): void {
-  const sel = selectedSession();
-  if (!sel) {
-    return;
-  }
-  openModal(
-    promptModal(sel.title, {
-      onSubmit: (text: string) => {
-        const tok = token;
-        // `=== null` not `!tok`: "" is the authorized-tokenless credential (#1696).
-        if (tok === null || !modal) {
-          return;
-        }
-        const m = modal;
-        m.setBusy(true);
-        void sendPrompt(sel.id, sel.title, text, tok)
-          .then(closeModal)
-          .catch((e) => {
-            m.setBusy(false);
-            m.setError(describeError(e));
-          });
-      },
-      onCancel: closeModal,
-    }),
-  );
-}
-
 /** Opens the kill/archive/restore confirm modal for the selected session. Restore
- *  is the reverse of archive (#1932): the archived row's Archive button becomes a
- *  Restore button, and confirming it POSTs RestoreSession. */
+ *  is the reverse of archive (#1932): the archived row's lifecycle glyph becomes
+ *  Restore, and confirming it POSTs RestoreSession. */
 function openConfirm(action: "kill" | "archive" | "restore"): void {
   const sel = selectedSession();
   if (!sel) {
@@ -1316,7 +1287,6 @@ const actions = {
   disconnect,
   open: openFromRail,
   newSession,
-  sendPrompt: openSendPrompt,
   kill: () => openConfirm("kill"),
   archive: () => openConfirm("archive"),
   restore: () => openConfirm("restore"),

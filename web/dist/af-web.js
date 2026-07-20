@@ -6265,9 +6265,6 @@ async function createSession(input, token2) {
   const resp = await af("CreateSession", body, token2);
   return resp.instance;
 }
-async function sendPrompt(id, title, prompt, token2) {
-  await af("SendPrompt", { id, title, repo_id: "", prompt }, token2);
-}
 async function killSession(id, title, token2) {
   await af("KillSession", { id, title, repo_id: "" }, token2);
 }
@@ -6644,29 +6641,6 @@ function newSessionModal(projects, defaultProject2, callbacks) {
     });
   });
   queueMicrotask(() => titleInput.focus());
-  return handle;
-}
-function promptModal(sessionTitle, callbacks) {
-  const { handle, body } = modalChrome({
-    title: `Send prompt to ${sessionTitle}`,
-    confirmLabel: "Send",
-    confirmClass: "af-primary",
-    onCancel: callbacks.onCancel
-  });
-  const area = h("textarea", { class: "af-input af-textarea", placeholder: "Prompt", rows: 4 });
-  area.setAttribute("aria-label", "Prompt");
-  body.append(area);
-  const card = handle.el.firstElementChild;
-  asForm(card, () => {
-    const text = area.value.trim();
-    if (text === "") {
-      handle.setError("Enter a prompt to send.");
-      return;
-    }
-    handle.setError(null);
-    callbacks.onSubmit(text);
-  });
-  queueMicrotask(() => area.focus());
   return handle;
 }
 function confirmModal(opts) {
@@ -10610,11 +10584,11 @@ var AppShell = class {
   // Header text nodes for the selected pane, (re)created per selection.
   headTitle = null;
   headMeta = null;
-  // The archive/restore lifecycle button and the archived-ness it currently shows
-  // (#1932). The header STRUCTURE is only rebuilt on a selection change, but a session
-  // can flip archived⇄live WITHOUT one (archiving or restoring the row that is already
-  // selected — the common path), so patchMainHead swaps this button's verb in place,
-  // exactly as it patches the header text. null when nothing is selected.
+  // The selected rail row's archive/restore control and the archived-ness it currently
+  // shows (#1932, #2186). A session can flip archived⇄live WITHOUT a selection change
+  // (archiving or restoring the row that is already selected — the common path), so
+  // patchMainHead swaps this control's glyph + accessible verb in place, exactly as it
+  // patches the header text. null when the selected row is not visible in the rail.
   lifecycleBtn = null;
   lifecycleArchived = false;
   // The usage-limit Retry button and whether it is currently shown (#1934). Same
@@ -10817,6 +10791,7 @@ var AppShell = class {
   renderRail(state) {
     const scoped = scopeToProject(state.sessions, state.selectedProject);
     const visible = filterSessions(orderedSessions(scoped), state.statusFilter);
+    this.lifecycleBtn = null;
     this.railCount.textContent = String(visible.length);
     this.renderFilterMenu(state, scoped);
     const list = this.railList;
@@ -10832,9 +10807,50 @@ var AppShell = class {
       );
       return;
     }
-    const rows = visible.map((s) => sessionRow(s, s.id === state.selectedId, this.actions));
+    const rows = visible.map((s) => {
+      const selected = s.id === state.selectedId;
+      return sessionRow(s, selected, this.actions, selected ? this.selectedRowActions(s) : null);
+    });
     const notice = this.railNotice(state, scoped, visible);
     list.replaceChildren(...notice ? [notice, ...rows] : rows);
+  }
+  /** Quiet per-session controls shown only beside the selected rail row (#2186).
+   *  Archive/Restore share one slot; the click reads lifecycleArchived at gesture
+   *  time so patchMainHead can change the action without rebuilding the row. */
+  selectedRowActions(selected) {
+    const lifecycleBtn = h2("button", { type: "button", class: "af-rail-action af-rail-lifecycle" });
+    lifecycleBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      if (this.lifecycleArchived) {
+        this.actions.restore();
+      } else {
+        this.actions.archive();
+      }
+    });
+    this.lifecycleBtn = lifecycleBtn;
+    this.patchLifecycleButton(isArchived(selected));
+    const killBtn = h2("button", { type: "button", class: "af-rail-action af-rail-kill" }, "\u232B");
+    killBtn.setAttribute("aria-label", "Kill session");
+    killBtn.setAttribute("title", "Kill session");
+    killBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      this.actions.kill();
+    });
+    return h2("div", { class: "af-row-actions" }, lifecycleBtn, killBtn);
+  }
+  /** Applies both the visible static glyph and the accessible reverse verb to the
+   *  selected row's lifecycle slot. Kept in one helper so render and live patching
+   *  cannot disagree about what an archived row offers. */
+  patchLifecycleButton(archived) {
+    const btn = this.lifecycleBtn;
+    if (!btn) {
+      return;
+    }
+    this.lifecycleArchived = archived;
+    const verb = archived ? "Restore session" : "Archive session";
+    btn.textContent = archived ? "\u21B6" : "\u25AA";
+    btn.setAttribute("aria-label", verb);
+    btn.setAttribute("title", verb);
   }
   /**
    * The dim one-liner above the rows explaining what ISN'T there, or null when the
@@ -11095,7 +11111,6 @@ var AppShell = class {
     if (!selected) {
       this.headTitle = null;
       this.headMeta = null;
-      this.lifecycleBtn = null;
       this.retryBtn = null;
       this.retryVisible = false;
       this.tabBar = null;
@@ -11109,25 +11124,13 @@ var AppShell = class {
     this.headTitle = h2("span", { class: "af-term-title" }, selected.title);
     this.headMeta = h2("span", { class: "af-term-meta" });
     const titleBox = h2("div", { class: "af-term-head-main" }, this.headTitle, this.headMeta);
-    const promptBtn = h2("button", { type: "button", class: "af-ghost af-term-action" }, "Prompt");
-    promptBtn.addEventListener("click", () => this.actions.sendPrompt());
-    this.lifecycleArchived = isArchived(selected);
-    const lifecycleBtn = h2(
-      "button",
-      { type: "button", class: "af-ghost af-term-action" },
-      this.lifecycleArchived ? "Restore" : "Archive"
-    );
-    lifecycleBtn.addEventListener("click", () => this.lifecycleArchived ? this.actions.restore() : this.actions.archive());
-    this.lifecycleBtn = lifecycleBtn;
     const retryBtn = h2("button", { type: "button", class: "af-ghost af-term-action" }, "Retry");
     retryBtn.title = "Resume this session from its usage-limit wall";
     retryBtn.addEventListener("click", () => this.actions.retryLimit());
     this.retryBtn = retryBtn;
     this.retryVisible = isLimitReached(selected);
     retryBtn.hidden = !this.retryVisible;
-    const killBtn = h2("button", { type: "button", class: "af-danger af-term-action" }, "Kill");
-    killBtn.addEventListener("click", () => this.actions.kill());
-    const actions2 = h2("div", { class: "af-term-actions" }, promptBtn, retryBtn, lifecycleBtn, killBtn);
+    const actions2 = h2("div", { class: "af-term-actions" }, retryBtn);
     const head = h2("div", { class: "af-term-head" }, titleBox, actions2);
     this.tabBar = h2("div", { class: "af-tabbar" });
     this.tabBar.setAttribute("role", "tablist");
@@ -11320,8 +11323,7 @@ var AppShell = class {
     this.headMeta.className = `af-term-meta af-term-${state.termStatus}`;
     const nowArchived = isArchived(selected);
     if (this.lifecycleBtn && nowArchived !== this.lifecycleArchived) {
-      this.lifecycleArchived = nowArchived;
-      this.lifecycleBtn.textContent = nowArchived ? "Restore" : "Archive";
+      this.patchLifecycleButton(nowArchived);
     }
     const nowLimited = isLimitReached(selected);
     if (this.retryBtn && nowLimited !== this.retryVisible) {
@@ -11425,7 +11427,7 @@ function beginTabRename(btn, tab, actions2, editedId, editedSessionId) {
   input.focus();
   input.select();
 }
-function sessionRow(s, selected, actions2) {
+function sessionRow(s, selected, actions2, rowActions) {
   const status = rowStatus(s);
   const title = h2("div", { class: "af-row-title" }, rowTitle(s));
   const branch = h2(
@@ -11444,6 +11446,9 @@ function sessionRow(s, selected, actions2) {
     row.append(dot);
   }
   row.append(main);
+  if (rowActions) {
+    row.append(rowActions);
+  }
   row.setAttribute("role", "option");
   row.setAttribute("aria-selected", selected ? "true" : "false");
   row.setAttribute("title", `${s.title} \u2014 ${status.label}`);
@@ -11740,29 +11745,6 @@ function newSession() {
             store.set({ sessions, selectedId: created.id, activeTab: 0, tabError: null });
           }
         }).catch((e) => {
-          m.setBusy(false);
-          m.setError(describeError(e));
-        });
-      },
-      onCancel: closeModal
-    })
-  );
-}
-function openSendPrompt() {
-  const sel = selectedSession2();
-  if (!sel) {
-    return;
-  }
-  openModal(
-    promptModal(sel.title, {
-      onSubmit: (text) => {
-        const tok = token;
-        if (tok === null || !modal) {
-          return;
-        }
-        const m = modal;
-        m.setBusy(true);
-        void sendPrompt(sel.id, sel.title, text, tok).then(closeModal).catch((e) => {
           m.setBusy(false);
           m.setError(describeError(e));
         });
@@ -12136,7 +12118,6 @@ var actions = {
   disconnect,
   open: openFromRail,
   newSession,
-  sendPrompt: openSendPrompt,
   kill: () => openConfirm("kill"),
   archive: () => openConfirm("archive"),
   restore: () => openConfirm("restore"),

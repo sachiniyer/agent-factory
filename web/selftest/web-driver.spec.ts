@@ -20,7 +20,7 @@
 //
 // The daemon runs with the shipped default require_token=false, so NO peer needs a
 // token — the SPA's /v1/auth-info probe reports auth_required=false, the login screen
-// is skipped, and every core action (create/kill/archive/send-prompt/attach) runs on
+// is skipped, and every core action (create/kill/archive/restore/retry/attach) runs on
 // the empty-token credential. That makes this harness the end-to-end regression guard
 // that tokenless authorization works for ALL actions, not just the read path.
 //
@@ -97,6 +97,11 @@ const SESSION_ORDER = process.env.AF_WEB_SESSION_ORDER ?? "probe-order";
 /** A rail row by its session title. */
 function row(page: Page, title: string): Locator {
   return page.locator(".af-rail-list .af-row", { hasText: title });
+}
+
+/** One of the quiet lifecycle glyphs revealed on the selected rail row (#2186). */
+function railAction(page: Page, title: string, name: "Archive session" | "Restore session" | "Kill session"): Locator {
+  return row(page, title).getByRole("button", { name, exact: true });
 }
 
 /** One state's checkbox in the rail's filter menu (feat: hide archived by default). */
@@ -745,6 +750,17 @@ test("status dots (#1766): waiting shows a green dot, working shows none, error 
   await expect(p.locator(".af-dot-spin")).toHaveCount(0);
   await expect(p.locator(".af-dot-working")).toHaveCount(0);
 
+  // Retry remains the conditional pane-header escape from a usage-limit wall
+  // (#1934): selecting the synthetic limit row reveals it, while selecting an
+  // ordinary waiting row withdraws it. The rail move must not displace this path.
+  await row(p, "probe-limit").click();
+  const retry = p.locator(".af-term-head button", { hasText: "Retry" });
+  await expect(retry).toBeVisible();
+  await expect(row(p, "probe-limit").locator(".af-row-actions")).toBeVisible();
+  await expect(row(p, "probe-waiting").locator(".af-row-actions")).toHaveCount(0);
+  await row(p, "probe-waiting").click();
+  await expect(retry).toBeHidden();
+
   await ctx.close();
 });
 
@@ -764,6 +780,19 @@ test("click-to-attach opens the xterm terminal and shows live output", async () 
   // the attach into terminal mode (#1693/#1694).
   await expect(page.locator(".af-term-meta")).toContainText("Live");
   await expect(page.locator(".af-app.af-kb-terminal")).toBeVisible();
+
+  // The quiet actions live beside the selected instance, not permanently in the
+  // terminal header or on every rail row. Kill is a muted glyph here; af-danger is
+  // reserved for the confirmation step.
+  await expect(page.locator(".af-row-actions")).toHaveCount(1);
+  await expect(row(page, SESSION_A).locator(".af-row-actions")).toBeVisible();
+  await expect(row(page, SESSION_B).locator(".af-row-actions")).toHaveCount(0);
+  await expect(railAction(page, SESSION_A, "Archive session")).toHaveText("▪");
+  await expect(railAction(page, SESSION_A, "Kill session")).toHaveText("⌫");
+  await expect(railAction(page, SESSION_A, "Kill session")).not.toHaveClass(/af-danger/);
+  await expect(page.locator(".af-term-head button", { hasText: "Prompt" })).toHaveCount(0);
+  await expect(page.locator(".af-term-head button", { hasText: "Archive" })).toHaveCount(0);
+  await expect(page.locator(".af-term-head button", { hasText: "Kill" })).toHaveCount(0);
 });
 
 test("the #1694 keyboard model: j/k navigate, Enter attaches, Escape returns to rail", async () => {
@@ -777,8 +806,11 @@ test("the #1694 keyboard model: j/k navigate, Enter attaches, Escape returns to 
   // always navigate the rail in nav mode. (Pre-#1693 j/k silently fed the agent.)
   await page.keyboard.press("j");
   await expect(row(page, SESSION_A)).not.toHaveClass(/af-row-selected/);
+  await expect(row(page, SESSION_A).locator(".af-row-actions")).toHaveCount(0);
   const movedTo = page.locator(".af-rail-list .af-row.af-row-selected");
   await expect(movedTo).toHaveCount(1);
+  await expect(movedTo.locator(".af-row-actions")).toBeVisible();
+  await expect(page.locator(".af-row-actions")).toHaveCount(1);
   await expect(page.locator(".af-app.af-kb-rail")).toBeVisible();
 
   // k moves back up to A — j/k are symmetric rail navigation.
@@ -2451,11 +2483,11 @@ test.describe("create → kill (one session, two flows)", () => {
 
   test("kill: the kill confirm removes the session's row", async () => {
     expect(createdTitle).not.toBe("");
-    // The created session is the current selection, so the pane header shows its
-    // actions. Kill it and confirm.
+    // The created session is the current selection, so its rail row reveals the
+    // quiet actions. Kill it and confirm.
     await row(page, createdTitle).click();
     await expect(page.locator(".af-main.af-main-term")).toBeVisible();
-    await page.locator(".af-term-head button.af-danger").click();
+    await railAction(page, createdTitle, "Kill session").click();
 
     const modal = page.locator(".af-modal-card");
     await expect(modal).toBeVisible();
@@ -2472,8 +2504,8 @@ test("archive: the archive confirm retires the session out of the default rail",
   await row(page, SESSION_B).click();
   await expect(page.locator(".af-main.af-main-term")).toBeVisible();
 
-  // The Archive action is the ghost button labeled "Archive" in the pane header.
-  await page.locator(".af-term-head button", { hasText: "Archive" }).click();
+  // Archive is the quiet ▪ glyph beside the selected row, not a labelled header chip.
+  await railAction(page, SESSION_B, "Archive session").click();
   const modal = page.locator(".af-modal-card");
   await expect(modal).toBeVisible();
   await modal.locator("button.af-primary").click();
@@ -2498,15 +2530,14 @@ test("archive: the archive confirm retires the session out of the default rail",
   await expect(row(page, SESSION_B)).toHaveCount(0);
 });
 
-test("restore (#1932): the pane header's Restore action brings an archived session back to the live rail", async () => {
+test("restore (#1932): the selected rail row's Restore action brings an archived session back", async () => {
   // The return leg of archive. The preceding test left B archived; the web could
   // shelve a session but — until #1932 — offered no way back, contradicting the "you
   // can restore it later" copy the archive confirm itself prints. This drives the real
   // round-trip through the daemon AND pins the LIVE button swap: renderMain (which
   // builds the pane header) runs only on a selection change, so archiving/restoring
-  // the row that STAYS selected has to flip Archive⇄Restore in place — the exact bug
-  // the first cut of this test caught (an archived, still-selected row kept its stale
-  // Archive button, a daemon no-op).
+  // the row that STAYS selected has to flip Archive⇄Restore in place — now in the
+  // rail, but still patched by patchMainHead rather than decided only at render time.
   //
   // Hold the archived filter ON for the whole flow so B stays visible in the rail
   // across both transitions; restore the default (archived hidden) only at the end,
@@ -2517,11 +2548,11 @@ test("restore (#1932): the pane header's Restore action brings an archived sessi
   await row(page, SESSION_B).click();
   await expect(page.locator(".af-main.af-main-term")).toBeVisible();
 
-  // An archived session's lifecycle button IS Restore, not Archive — the reverse verb
-  // on the same slot, never a second button.
-  const head = page.locator(".af-term-head");
-  await expect(head.locator("button", { hasText: "Archive" })).toHaveCount(0);
-  await head.locator("button", { hasText: "Restore" }).click();
+  // An archived session's lifecycle slot IS Restore, not Archive — one selected-row
+  // slot whose accessible verb and static glyph both reverse.
+  await expect(railAction(page, SESSION_B, "Archive session")).toHaveCount(0);
+  await expect(railAction(page, SESSION_B, "Restore session")).toHaveText("↶");
+  await railAction(page, SESSION_B, "Restore session").click();
 
   // Restore is a confirm (mirroring kill/archive), so it inherits their busy/error
   // surface; the primary button POSTs RestoreSession.
@@ -2533,21 +2564,21 @@ test("restore (#1932): the pane header's Restore action brings an archived sessi
   // The daemon's session.restored event resyncs the rail: B rejoins the LIVE group,
   // no longer archived — the end-to-end proof the archived session returned to active.
   await expect(row(page, SESSION_B)).not.toHaveClass(/af-row-archived/, { timeout: 30_000 });
-  // ...and its pane header — STILL selected, never reselected — flips its verb back to
-  // Archive in place: the patchMainHead swap the selection-change-only rebuild misses.
-  await expect(head.locator("button", { hasText: "Restore" })).toHaveCount(0, { timeout: 30_000 });
-  await expect(head.locator("button", { hasText: "Archive" })).toHaveCount(1);
+  // ...and its rail row — STILL selected, never reselected — flips its verb back to
+  // Archive in place: the patchMainHead path remains load-bearing after the move.
+  await expect(railAction(page, SESSION_B, "Restore session")).toHaveCount(0, { timeout: 30_000 });
+  await expect(railAction(page, SESSION_B, "Archive session")).toHaveText("▪");
 
   // Re-archive from that same live-flipped button (NO reselect): restores the fixture
   // the downstream filter tests need (B archived) and re-proves both the archive leg
   // and the reverse (Archive→Restore) live flip in one flow.
-  await head.locator("button", { hasText: "Archive" }).click();
+  await railAction(page, SESSION_B, "Archive session").click();
   const archiveModal = page.locator(".af-modal-card");
   await expect(archiveModal).toBeVisible();
   await archiveModal.locator("button.af-primary").click();
   await expect(row(page, SESSION_B)).toHaveClass(/af-row-archived/, { timeout: 30_000 });
-  await expect(head.locator("button", { hasText: "Archive" })).toHaveCount(0);
-  await expect(head.locator("button", { hasText: "Restore" })).toHaveCount(1);
+  await expect(railAction(page, SESSION_B, "Archive session")).toHaveCount(0);
+  await expect(railAction(page, SESSION_B, "Restore session")).toHaveText("↶");
 
   // Back to the default filter (archived hidden): B drops from the rail, exactly as
   // the archive test left it.
@@ -5315,6 +5346,26 @@ test("mobile (375px): the rail auto-collapses to a drawer; the hamburger reveals
   await expect(app).not.toHaveClass(/af-nav-open/);
   await expect(rail).not.toBeVisible();
   await expect(p.locator(".af-main.af-main-term")).toBeVisible();
+
+  // Re-open the narrow drawer with a selection: both quiet glyphs fit inside the row
+  // without squeezing its title away or widening the page.
+  await toggle.click();
+  await expect(rail).toBeVisible();
+  await expect(railAction(p, SESSION_A, "Archive session")).toBeVisible();
+  await expect(railAction(p, SESSION_A, "Kill session")).toBeVisible();
+  const fit = await row(p, SESSION_A).evaluate((el) => {
+    const rowBox = el.getBoundingClientRect();
+    const mainBox = el.querySelector(".af-row-main")!.getBoundingClientRect();
+    const actionBox = el.querySelector(".af-row-actions")!.getBoundingClientRect();
+    return {
+      mainWidth: mainBox.width,
+      actionsInside: actionBox.right <= rowBox.right + 1,
+      overflow: el.scrollWidth - el.clientWidth,
+    };
+  });
+  expect(fit.mainWidth, "the selected row keeps readable room for its title").toBeGreaterThan(80);
+  expect(fit.actionsInside, "the action glyphs stay inside the selected row").toBe(true);
+  expect(fit.overflow, "the selected row does not overflow at 375px").toBeLessThanOrEqual(1);
 
   await ctx.close();
 });

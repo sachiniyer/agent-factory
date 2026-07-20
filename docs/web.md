@@ -343,17 +343,22 @@ header shows the session title, the terminal's connection state (`Live` /
 
 #### Per-session actions
 
-Below the terminal, three buttons act on the selected session (each behind a
-modal):
+The selected session's rail row quietly reveals two glyph actions; unselected rows
+stay free of action chrome:
 
-- **Prompt** — deliver a one-off prompt to the agent (the web analogue of
-  `af sessions send-prompt`).
-- **Archive** — move the session into the archived group (restorable).
-- **Kill** — tear the session down (behind a confirm).
+- **`▪` Archive** — move a live session into the archived group. On an archived
+  row the same slot becomes **`↶` Restore**.
+- **`⌫` Kill** — permanently tear the session down. Its resting treatment is
+  muted, while the confirmation remains explicitly destructive.
+
+Both actions keep their confirmation step. A **Retry** button appears in the pane
+header only when the selected session is blocked at a usage limit; it is the escape
+from that wall and stays hidden in every other state. Send follow-up instructions by
+typing in the attached terminal (or with `af sessions send-prompt`).
 
 **Create** a session with **`+ New`**; the new row appears in the rail and opens
-attached. All of create / kill / archive / prompt resolve the session by its stable
-id, so titles that collide across repos are never ambiguous.
+attached. Kill and archive resolve the selected session by its stable id, so titles
+that collide across repos are never ambiguous.
 
 ### Tabs
 
