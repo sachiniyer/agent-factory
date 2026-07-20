@@ -166,7 +166,7 @@ compose across `docker exec` invocations.
 | Function | Keys | Completion marker |
 |----------|------|-------------------|
 | `af_reset_sandbox` | — | wipes instances/branches for a deterministic rerun (sandbox-scoped, fails closed) |
-| `af_boot` | launch `af` | `Agent Factory` + `Instances (` frame |
+| `af_boot` | launch `af` | `Agent Factory` frame + the instance rail painted — `Instances (` **or** the scrolled `▲ N more` the rail shows in its place (#2148) |
 | `af_new_instance <name>` | `n`,text,`Enter` | the row shows `<name> … ●` (ready) |
 | `af_select <name>` | `k`×,`j`× | `<name>`'s row shows `▾` |
 | `af_open_pane` | `s` | pane-focus menu (`x hide pane`) |
@@ -175,6 +175,7 @@ compose across `docker exec` invocations.
 | `af_exit_interactive` | `Ctrl-]` | interactive menu gone |
 | `af_send_to_pane <text>` | marker+text,`Enter` | short delivery marker echoes in the pane (then wait for output yourself) |
 | `af_attach` | `o` | TUI chrome gone (full-screen) |
+| `af_send_line <text> [t]` | text,`Enter` | the WHOLE line echoed on the attached screen. **Fails closed** (#2147): it clears and re-pastes up to `AF_DRIVER_SEND_LINE_ATTEMPTS` times, and if the line still never lands complete it returns non-zero having sent **no** `Enter` — a submitted partial leaves an unbalanced quote and drops the shell into `>` |
 | `af_detach [raw_seq]` | `Ctrl-W` (once) | TUI chrome back **and** the attach client is reaped (guards #1157) |
 | `af_new_tab` | `t` | tab-child count rises |
 | `af_close_tab` | `w` | tab-child count falls |
