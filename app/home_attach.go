@@ -157,12 +157,25 @@ func SetAttachStreamFnForTest(fn func(context.Context, string, string, string, i
 // a real WS stream.
 func (m *home) attachOverlayCallback(title, label, traceSuffix string, attach func() (chan struct{}, error)) tea.Cmd {
 	detachTraceMark(label + "-onDismiss-entry" + traceSuffix)
+	// Snapshot the terminal-write seam ONCE, here, before the attach starts —
+	// same rule as the per-home seams captured below and as apiclient's attach
+	// driver applies to its own package-level seams. remoteDetachResetWriter is a
+	// mutable package global, and this callback runs for the whole length of an
+	// attach; re-reading it on the detach path is a live read of shared mutable
+	// state from a long-running call, which a test that swaps and restores it
+	// races (the #1970/#2079 shared-global class). Every write below goes to this
+	// local, so the writer this attach releases into is the one it reclaims into.
+	resetWriter := remoteDetachResetWriter
 	// Hand the terminal to the attach BEFORE it starts reading stdin (#2157).
-	released := m.releaseTerminalToAttach()
+	released := m.releaseTerminalToAttach(resetWriter)
 	ch, err := attach()
 	if err != nil {
+		// Only when we released: an attach that never started scribbled nothing,
+		// so there is no terminal state to take back and re-asserting modes would
+		// pointlessly wipe the current frame. When we DID release, the reclaim is
+		// mandatory — see reclaimTerminalFromAttach on the mouse.
 		if released {
-			m.reclaimTerminalFromAttach()
+			m.reclaimTerminalFromAttach(resetWriter, true)
 		}
 		m.attachTransitioning = false
 		log.ErrorLog.Printf("failed to attach (%s): %v", label+traceSuffix, err)
@@ -219,26 +232,13 @@ func (m *home) attachOverlayCallback(title, label, traceSuffix string, attach fu
 		return repaintAfterDetachMsg{}
 	}
 	// The attach driver (WS or hook) wrote its neutral restore before closing ch,
-	// so both of these land strictly after it. The Update goroutine is still
+	// so the reclaim lands strictly after it. The Update goroutine is still
 	// blocked in this callback, so no renderer write can interleave (#845).
-	//
-	// Take the terminal back first: that restarts the input reader the attach was
-	// given exclusive use of, and re-enters the alt screen with the renderer's
-	// bookkeeping and the terminal agreeing again. The hand-rolled re-assert then
-	// still runs, because RestoreTerminal does NOT re-enable mouse reporting —
-	// Bubble Tea enables it once at startup from the WithMouseCellMotion option and
-	// never again — so without it mouse scroll and click would be dead for the rest
-	// of the session after the first attach. The re-assert's other modes are
-	// re-asserted by RestoreTerminal too; writing them twice is harmless and keeps
-	// this one constant the single description of "the modes this TUI runs in".
 	//
 	// ClearScreen then invalidates the renderer's stale diff cache before the
 	// repaint flow runs; then the usual repaintAfterDetachMsg path, watchdog
 	// semantics (#683) included.
-	if released {
-		m.reclaimTerminalFromAttach()
-	}
-	_, _ = io.WriteString(remoteDetachResetWriter, remoteDetachTerminalReassert)
+	m.reclaimTerminalFromAttach(resetWriter, released)
 	return tea.Sequence(tea.ClearScreen, repaintCmd)
 }
 
@@ -274,7 +274,10 @@ func (m *home) attachOverlayCallback(title, label, traceSuffix string, attach fu
 // racy paste is a far better outcome than refusing to attach at all. The false
 // return then keeps the terminal from being "restored" from a state it was never
 // released into.
-func (m *home) releaseTerminalToAttach() bool {
+//
+// out is the terminal, captured by the caller before the attach starts, never
+// re-read from the package seam mid-attach.
+func (m *home) releaseTerminalToAttach(out io.Writer) bool {
 	if m.releaseTerminal == nil {
 		return false // no Program wired (tests): nothing owns the terminal
 	}
@@ -282,23 +285,47 @@ func (m *home) releaseTerminalToAttach() bool {
 		log.ErrorLog.Printf("failed to release the terminal to the attach: %v", err)
 		return false
 	}
-	_, _ = io.WriteString(remoteDetachResetWriter, attachAltScreenEnter)
+	_, _ = io.WriteString(out, attachAltScreenEnter)
 	return true
 }
 
-// reclaimTerminalFromAttach takes the terminal back after a released attach ends:
-// the input reader restarts, the renderer resumes, and the alt screen is
-// re-entered. Paired with a releaseTerminalToAttach that returned true.
-func (m *home) reclaimTerminalFromAttach() {
-	if m.restoreTerminal == nil {
-		return
+// reclaimTerminalFromAttach takes the terminal back for the TUI once the attach
+// is over — on a clean detach and on an attach that failed after the release.
+// released says whether the terminal was actually handed to Bubble Tea's
+// ReleaseTerminal; out is the terminal, captured by the caller.
+//
+// This is the ONLY place the mode re-assert is written, and that is deliberate.
+// Both halves of "take the terminal back" have to happen together on EVERY path:
+//
+//   - RestoreTerminal restarts the input reader the attach was given exclusive
+//     use of, resumes the renderer, and re-enters the alt screen with the
+//     renderer's bookkeeping and the terminal agreeing again;
+//   - remoteDetachTerminalReassert covers what it does not — above all MOUSE
+//     reporting, which the release disabled and which bubbletea only ever writes
+//     once, at startup, from the WithMouseCellMotion option.
+//
+// Splitting them is how a failed attach came to leave a TUI whose mouse was dead
+// until the process restarted: attach errors are ordinary (a daemon down or
+// restarting, an unresolved socket, a failed WS dial), that path returned early,
+// and it skipped a re-assert that was written further down. One function, both
+// halves, and the error path cannot drift from the detach path again.
+//
+// The re-assert is written even when the release did not happen (a headless
+// caller, or a release that errored): the attach itself is a raw byte proxy that
+// scribbled the pane program's modes onto the terminal regardless, which is the
+// #845 reason this constant exists at all. It is also written even if
+// RestoreTerminal fails, since a mouse-dead terminal helps nobody.
+func (m *home) reclaimTerminalFromAttach(out io.Writer, released bool) {
+	if released && m.restoreTerminal != nil {
+		if err := m.restoreTerminal(); err != nil {
+			// The terminal is now in whatever state the attach left it and the input
+			// reader may be down. There is no second lever to pull — surface it in the
+			// log; the mode re-assert below and the repaint the caller schedules are
+			// the best remaining recovery.
+			log.ErrorLog.Printf("failed to reclaim the terminal after attach: %v", err)
+		}
 	}
-	if err := m.restoreTerminal(); err != nil {
-		// The terminal is now in whatever state the attach left it and the input
-		// reader may be down. There is no second lever to pull — surface it in the
-		// log; the repaint the caller schedules is the best remaining recovery.
-		log.ErrorLog.Printf("failed to reclaim the terminal after attach: %v", err)
-	}
+	_, _ = io.WriteString(out, remoteDetachTerminalReassert)
 }
 
 // statusPollRenewInterval is how often an attached TUI re-sends PauseStatusPoll

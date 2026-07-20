@@ -103,9 +103,17 @@ func TestAttachOverlayCallback_ReleasesTerminalAroundTheAttach(t *testing.T) {
 }
 
 // TestAttachOverlayCallback_ReclaimsTerminalWhenAttachFails: a failed attach
-// must still give the terminal back. Leaving it released would leave the TUI
-// with no input reader and a stopped renderer — a frozen app — which is a far
-// worse outcome than the attach error the user actually hit.
+// must still give the terminal back, MODES INCLUDED. Leaving it released would
+// leave the TUI with no input reader and a stopped renderer — a frozen app —
+// which is a far worse outcome than the attach error the user actually hit.
+//
+// The modes half is its own hazard, and attach errors are production-reachable
+// (a daemon that is down or restarting, an unresolved socket, a failed WS dial).
+// Releasing the terminal disables mouse reporting, and RestoreTerminal does not
+// put it back — bubbletea writes it once at startup from WithMouseCellMotion and
+// never again. So a reclaim that skips the mode re-assert hands the user a TUI
+// whose mouse is dead until the process restarts: the silent mode leak of #1832,
+// arrived at from the other side.
 func TestAttachOverlayCallback_ReclaimsTerminalWhenAttachFails(t *testing.T) {
 	h := newTestHome(t)
 	rec := newRecordingHandover(h)
@@ -123,6 +131,17 @@ func TestAttachOverlayCallback_ReclaimsTerminalWhenAttachFails(t *testing.T) {
 		"a failed attach must hand the terminal back, not strand the TUI")
 	assert.False(t, h.attached.Load())
 	assert.False(t, h.attachTransitioning)
+	assert.Equal(t, attachAltScreenEnter+remoteDetachTerminalReassert, out.String(),
+		"a released terminal must be reclaimed with its modes: every reclaim, "+
+			"clean detach or failed attach, re-asserts what RestoreTerminal does not")
+	for _, seq := range []struct{ esc, what string }{
+		{"\x1b[?1002h", "cell-motion mouse"},
+		{"\x1b[?1006h", "SGR mouse encoding"},
+	} {
+		assert.Contains(t, out.String(), seq.esc,
+			"the release disabled %s and RestoreTerminal does not put it back — "+
+				"without this write it stays dead for the rest of the session", seq.what)
+	}
 }
 
 // TestAttachOverlayCallback_NoReclaimWhenReleaseFails: if the release itself
@@ -305,7 +324,12 @@ func TestAttachOwnsTheTerminalAlone(t *testing.T) {
 
 	forwarded := make(chan []byte, 1)
 	ch := make(chan struct{})
+	// callbackDone is what the test waits on before returning: the callback
+	// reads package-level seams (remoteDetachResetWriter) that t.Cleanup restores,
+	// so letting it outlive the test is a real data race, not a tidiness point.
+	callbackDone := make(chan struct{})
 	go func() {
+		defer close(callbackDone)
 		h.attachOverlayCallback("t1", "test-attach", "", func() (chan struct{}, error) {
 			go func() {
 				var got []byte
@@ -344,6 +368,11 @@ func TestAttachOwnsTheTerminalAlone(t *testing.T) {
 		t.Fatalf("the released TUI reader never returned")
 	}
 
-	close(ch)
+	close(ch) // detach
+	select {
+	case <-callbackDone:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("attachOverlayCallback did not return after detach")
+	}
 	endDetachWatchdog()
 }
