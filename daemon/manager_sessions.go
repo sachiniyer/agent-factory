@@ -335,20 +335,26 @@ func (m *Manager) agentServerForStream(idOrTitle, repoID string) (session.AgentS
 // returns the instance, its resolved repoID, and its title — the last so the
 // killsInFlight gate keys off the real title even when the caller addressed the
 // session by id. The id scan only sees in-memory (live) instances, which is all a
-// stream can attach to; an unmatched id falls through to findSession, which also
-// restores an on-disk session the title path may need.
+// stream can attach to. Both the stable-id and repo-scoped title paths consult
+// the daemon's already-restored map directly: Preview is a repaint hot path, so
+// re-scanning every persisted session before each capture makes its latency grow
+// with the whole session history. A miss still falls through to findSession,
+// preserving the disk restore and unscoped-title ambiguity checks for callers
+// that genuinely address an untracked session.
 func (m *Manager) resolveStreamSession(idOrTitle, repoID string) (*session.Instance, string, string, error) {
 	m.mu.Lock()
-	if err := m.refreshLocked(); err != nil {
-		m.mu.Unlock()
-		return nil, "", "", err
-	}
 	for key, instance := range m.instances {
-		if instance.ID != "" && instance.ID == idOrTitle {
+		if instance != nil && instance.ID != "" && instance.ID == idOrTitle {
 			rid, _ := splitDaemonInstanceKey(key)
 			title := instance.Title
 			m.mu.Unlock()
 			return instance, rid, title, nil
+		}
+	}
+	if repoID != "" {
+		if instance := m.instances[daemonInstanceKey(repoID, idOrTitle)]; instance != nil {
+			m.mu.Unlock()
+			return instance, repoID, instance.Title, nil
 		}
 	}
 	m.mu.Unlock()

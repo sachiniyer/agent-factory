@@ -205,7 +205,7 @@ func TestPane_HeaderAnnotatesSelectionDivergence(t *testing.T) {
 		"canceling preview restores the #1289 selected row vs shown content invariant")
 }
 
-func TestPanePreviewInvalidatesStaleContentSynchronously(t *testing.T) {
+func TestPanePreviewPaintsLastCaptureWhileRefreshing(t *testing.T) {
 	h := paneTestHome(t)
 	alpha := h.store.GetInstanceByTitle("alpha")
 	beta := h.store.GetInstanceByTitle("beta")
@@ -224,11 +224,33 @@ func TestPanePreviewInvalidatesStaleContentSynchronously(t *testing.T) {
 
 	view := h.View()
 	assert.Contains(t, view, "PREVIEW beta · ◆ Agent (original alpha · ◆ Agent)")
-	assert.Contains(t, view, "Loading preview…")
-	assert.NotContains(t, view, "ALPHA_PREVIEW_CONTENT",
-		"retargeting preview must clear the original content before async beta capture returns")
+	assert.Contains(t, view, "ALPHA_PREVIEW_CONTENT",
+		"retargeting must paint the last capture instead of blanking while beta loads")
+	assert.NotContains(t, view, "Loading preview…")
 	assert.Same(t, alpha, paneA.Instance(), "preview must not mutate the committed pane binding")
 	assert.Same(t, beta, h.panePreviewTxn.target.instance)
+
+	require.IsType(t, panesRefreshedMsg{}, refreshPaneBindingCmd(w, beta, 0, h.panePreviewTxn.seq)())
+	view = h.View()
+	assert.Contains(t, view, "BETA_PREVIEW_CONTENT",
+		"the daemon capture must replace stale content in place when it lands")
+	assert.NotContains(t, view, "ALPHA_PREVIEW_CONTENT")
+}
+
+func TestPanePreviewRetargetHonorsCaptureThrottle(t *testing.T) {
+	h := paneTestHome(t)
+	beta := h.store.GetInstanceByTitle("beta")
+
+	pressKey(t, h, "s")
+	paneA := h.store.OpenPanes()[0]
+	recent := time.Now()
+	h.lastPaneCapture[paneA.ID()] = recent
+
+	h.updatePanePreview(beta, 0, false, false)
+	assert.Equal(t, recent, h.lastPaneCapture[paneA.ID()],
+		"arrowing to a new preview must not bypass the per-pane capture cadence")
+	assert.Nil(t, h.panesRefresh(false),
+		"a selection inside the 100ms window must reuse the next scheduled refresh")
 }
 
 func TestPanePreviewSplitHintRequiresActivePreview(t *testing.T) {
@@ -255,6 +277,7 @@ func TestPanePreviewFastScrollLatestWins(t *testing.T) {
 	alpha := h.store.GetInstanceByTitle("alpha")
 	beta := h.store.GetInstanceByTitle("beta")
 	gamma := h.store.GetInstanceByTitle("gamma")
+	setPreviewText(alpha, "ALPHA_PREVIEW_CONTENT")
 	setPreviewText(beta, "BETA_PREVIEW_CONTENT")
 	setPreviewText(gamma, "GAMMA_PREVIEW_CONTENT")
 
@@ -262,6 +285,7 @@ func TestPanePreviewFastScrollLatestWins(t *testing.T) {
 	paneA := h.store.OpenPanes()[0]
 	w := h.paneWindows[paneA.ID()]
 	require.NotNil(t, w)
+	require.IsType(t, panesRefreshedMsg{}, refreshPaneBindingCmd(w, alpha, 0, w.ContentSeq())())
 
 	h.sidebar.SetSelectedInstance(1)
 	_ = h.selectionChanged()
@@ -277,7 +301,8 @@ func TestPanePreviewFastScrollLatestWins(t *testing.T) {
 	require.IsType(t, panesRefreshedMsg{}, refreshPaneBindingCmd(w, beta, 0, betaSeq)())
 	view := h.View()
 	assert.Contains(t, view, "PREVIEW gamma · ◆ Agent (original alpha · ◆ Agent)")
-	assert.Contains(t, view, "Loading preview…")
+	assert.Contains(t, view, "ALPHA_PREVIEW_CONTENT",
+		"a late capture for beta must leave the last painted frame in place")
 	assert.NotContains(t, view, "BETA_PREVIEW_CONTENT",
 		"late beta capture must not overwrite the newer gamma preview target")
 

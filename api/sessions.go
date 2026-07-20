@@ -1,7 +1,6 @@
 package api
 
 import (
-	"errors"
 	"fmt"
 
 	"os/exec"
@@ -36,7 +35,17 @@ var (
 	closeTabViaDaemon       = daemon.CloseTab
 	renameTabViaDaemon      = daemon.RenameTab
 	reorderTabViaDaemon     = daemon.ReorderTab
-	preflightLocalSession   = preflight.LocalSessionPrereqs
+	previewSessionViaDaemon = func(req daemon.PreviewRequest) (string, bool, bool, error) {
+		if !apiclient.IsRemoteTarget() {
+			return daemon.PreviewSession(req)
+		}
+		client, err := apiclient.NewTargeted()
+		if err != nil {
+			return "", false, false, err
+		}
+		return client.Preview(req)
+	}
+	preflightLocalSession = preflight.LocalSessionPrereqs
 	// snapshotViaDaemon is the non-spawning read path for list/get/whoami
 	// (#1029 PR 2). It reflects the daemon's authoritative in-memory state when
 	// a daemon is already running, and returns daemon.ErrDaemonUnavailable
@@ -343,41 +352,13 @@ var (
 	previewFullFlag    bool
 )
 
-// resolvePreviewTab picks the tab slot `af sessions preview` should capture on
-// the LOCAL path, from the --tab-id/--tab-name/--tab flags.
-//
-// The precedence and the refuse-never-fall-back rule are session's
-// (ResolveTabIndex) — the same definition the daemon resolves against — so the
-// two paths cannot drift into disagreeing about what --tab-name means (#1948).
-// Only the wording is the CLI's, and it names the FLAG that was wrong, which the
-// daemon's session-oriented message cannot.
-func resolvePreviewTab(tabs []*session.Tab) (int, error) {
-	idx, err := session.ResolveTabIndex(tabs, previewTabIDFlag, previewTabNameFlag, previewTabFlag)
-	switch {
-	case errors.Is(err, session.ErrTabIDNotFound), errors.Is(err, session.ErrTabIndexOutOfRange):
-		return 0, previewTabMissErr()
-	case errors.Is(err, session.ErrTabNameNotFound):
-		ids := make([]string, 0, len(tabs))
-		for _, t := range tabs {
-			ids = append(ids, session.TabIdentifiers(t))
-		}
-		return 0, fmt.Errorf("--tab-name %q matches no tab in this session; its tabs are: %s",
-			previewTabNameFlag, strings.Join(ids, ", "))
-	case err != nil:
-		return 0, err
-	}
-	return idx, nil
-}
-
 // previewTabMissErr is the message for a tab-level miss — an --tab-id that no
 // longer resolves, or a --tab that is not a slot.
 //
-// One function serves BOTH paths on purpose. The local path learns the miss from
-// session.ResolveTabIndex and the remote path from the daemon's TabGone, but a
-// user should not be able to tell which machine resolved their flag, and the two
-// drifting apart is what this whole cluster is about. It names the FLAG the user
-// passed, which neither the daemon's session-oriented error nor a bare "gone"
-// can do.
+// Both local and remote previews are daemon-resolved and report the miss through
+// TabGone, so a user cannot tell which machine resolved the selector. It names
+// the FLAG the user passed, which neither the daemon's session-oriented error nor
+// a bare "gone" can do.
 //
 // A --tab-name miss is deliberately NOT here: it is answered with the session's
 // roster, which only the side holding the tab list can produce.
@@ -423,66 +404,31 @@ whatever tab had shifted into it.
 			return jsonError(err)
 		}
 
-		// A remote target must be previewed BY the remote daemon. The local path
-		// below reads this machine's instances.json and restores the session to
-		// capture it — against --daemon-url that would preview (and start) a
-		// same-titled LOCAL session, or report not-found even though the remote
-		// holds the session. The daemon resolves {title, repoID} on its own side,
-		// where the sessions actually live.
-		if apiclient.IsRemoteTarget() {
-			client, cerr := apiclient.NewTargeted()
-			if cerr != nil {
-				return jsonError(cerr)
-			}
-			// The tab selectors go over the wire as-is: the DAEMON resolves them,
-			// against the roster it actually holds, through the same
-			// session.ResolveTabIndex the local path below uses. Resolving a name
-			// client-side would need an extra round trip and would race — the
-			// roster it read could differ from the one the capture runs against.
-			content, gone, tabGone, perr := client.Preview(daemon.PreviewRequest{
-				Title:   args[0],
-				RepoID:  repoID,
-				Tab:     previewTabFlag,
-				TabName: previewTabNameFlag,
-				TabID:   previewTabIDFlag,
-				Full:    previewFullFlag,
-			})
-			if perr != nil {
-				return jsonError(perr)
-			}
-			// A tab-level miss is NOT a dead session. Reporting one as the other
-			// told the user their running session had ended because they mistyped a
-			// --tab-id, and the same message for both is what let that pass. The
-			// daemon distinguishes them (TabGone), so this does not have to guess
-			// from "we sent a selector" — which would be wrong in exactly the case
-			// where the session really did die mid-capture.
-			if tabGone {
-				return jsonError(previewTabMissErr())
-			}
-			if gone {
-				return jsonError(fmt.Errorf("session %q is no longer running", args[0]))
-			}
-			return jsonOut(map[string]string{
-				"title":   args[0],
-				"content": content,
-			})
-		}
-
-		instance, _, err := findLiveInstanceByTitleInScope(repoID, args[0])
+		// Capture through the daemon on both local and remote targets. Rebuilding a
+		// local Instance here used to restore the session in this short-lived CLI
+		// process, which also ran the configured shell-command probe before the one
+		// capture-pane the command actually needed. The daemon already owns the
+		// canonical live Instance and is the sole capture path, so selectors travel
+		// there unresolved and are applied atomically against its current tab roster.
+		content, gone, tabGone, err := previewSessionViaDaemon(daemon.PreviewRequest{
+			Title:   args[0],
+			RepoID:  repoID,
+			Tab:     previewTabFlag,
+			TabName: previewTabNameFlag,
+			TabID:   previewTabIDFlag,
+			Full:    previewFullFlag,
+		})
 		if err != nil {
 			return jsonError(err)
 		}
-
-		// Same precedence as the daemon path, from the same definition
-		// (session.ResolveTabIndex) rather than a second copy of the rule.
-		tab, terr := resolvePreviewTab(instance.GetTabs())
-		if terr != nil {
-			return jsonError(terr)
+		// A tab-level miss is NOT a dead session. Reporting one as the other
+		// tells the user their running session ended because they mistyped a
+		// selector. The daemon carries the distinction so this path never guesses.
+		if tabGone {
+			return jsonError(previewTabMissErr())
 		}
-
-		content, err := instance.AgentServer().Preview(tab, previewFullFlag)
-		if err != nil {
-			return jsonError(fmt.Errorf("failed to get preview: %w", err))
+		if gone {
+			return jsonError(fmt.Errorf("session %q is no longer running", args[0]))
 		}
 		return jsonOut(map[string]string{
 			"title":   args[0],

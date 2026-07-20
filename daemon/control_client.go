@@ -277,6 +277,18 @@ func SnapshotNoSpawn(req SnapshotRequest) ([]session.InstanceData, error) {
 	return resp.Instances, nil
 }
 
+// PreviewSession captures one session tab through the daemon's sole Preview
+// handler. Unlike SnapshotNoSpawn, previewing a live terminal is an active read:
+// it ensures the daemon is running and waits through daemon warm-up, just like
+// the other session control calls.
+func PreviewSession(req PreviewRequest) (content string, gone, tabGone bool, err error) {
+	var resp PreviewResponse
+	if err := callDaemon("Preview", req, &resp); err != nil {
+		return "", false, false, err
+	}
+	return resp.Content, resp.Gone, resp.TabGone, nil
+}
+
 // KillSession asks the daemon to kill a session and remove it from storage.
 func KillSession(req KillSessionRequest) error {
 	var resp KillSessionResponse

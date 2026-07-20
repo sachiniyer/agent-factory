@@ -105,11 +105,6 @@ func (m *home) updatePanePreview(selected *session.Instance, targetTab int, tabS
 		m.cancelPanePreview(false)
 		return nil
 	}
-	changed := m.panePreviewTxn == nil ||
-		m.panePreviewTxn.ownerPaneID != owner.ID() ||
-		!samePaneBinding(m.panePreviewTxn.original, original) ||
-		!samePaneBinding(m.panePreviewTxn.target, target)
-
 	if m.liveTerms[owner.ID()] != nil {
 		m.closeLiveTermPaneFor(owner.ID())
 		m.enforceInteractiveInvariant()
@@ -122,10 +117,13 @@ func (m *home) updatePanePreview(selected *session.Instance, targetTab int, tabS
 		target:      target,
 		seq:         seq,
 	}
-	if changed {
-		w.InvalidateContent(target.instance, target.tab, "Loading preview…")
-		m.lastPaneCapture[owner.ID()] = time.Time{}
-	}
+	// Keep the last completed capture on screen while the existing off-loop
+	// refresh pipeline fetches this target. Clearing it to "Loading preview…"
+	// made every selection visibly wait on the daemon RPC; resetting the capture
+	// timestamp also defeated panesRefresh's 100ms rapid-navigation throttle and
+	// dispatched one RPC per arrow key. The render generation above still drops a
+	// late capture for an older target, so stale-first painting cannot overwrite a
+	// newer selection.
 	return nil
 }
 
