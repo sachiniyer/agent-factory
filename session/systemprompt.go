@@ -137,7 +137,9 @@ func injectSystemPrompt(resolved string) string {
 		// opencode MERGES it with the user's own config (verified), so their
 		// settings survive, and af writes nothing into ~/.config/opencode.
 		if opencodeCarriesConfigEnv(resolved) {
-			log.WarningLog.Printf("opencode command already sets OPENCODE_CONFIG; leaving it alone (af guidance not injected for opencode)")
+			// INFO, not WARNING (#2166): the user pointed OPENCODE_CONFIG at
+			// their own file via program_overrides and af is honoring it.
+			log.InfoLog.Printf("opencode command already sets OPENCODE_CONFIG; leaving it alone (af guidance not injected for opencode)")
 			return resolved
 		}
 		path, err := ensureOpencodeAfConfig()

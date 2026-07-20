@@ -111,14 +111,17 @@ func (t *TmuxSession) Start(workDir string) error {
 	// hang them; both are best-effort and only log on failure.
 	ctx, cancel := tmuxTimeoutContext()
 	if err := t.runTmuxBounded(ctx, "set-option", "-t", exactTarget(t.sanitizedName), "history-limit", "10000"); err != nil {
-		log.InfoLog.Printf("Warning: failed to set history-limit for session %s: %v", t.sanitizedName, err)
+		// Logged at INFO with no "Warning:" text (#2166): the level is the
+		// severity signal, and an embedded "Warning:" makes an INFO line trip a
+		// log scraper that greps for the word.
+		log.InfoLog.Printf("failed to set history-limit for session %s (scrollback stays at the tmux default): %v", t.sanitizedName, err)
 	}
 	cancel()
 
 	// Enable mouse scrolling for the session
 	ctx, cancel = tmuxTimeoutContext()
 	if err := t.runTmuxBounded(ctx, "set-option", "-t", exactTarget(t.sanitizedName), "mouse", "on"); err != nil {
-		log.InfoLog.Printf("Warning: failed to enable mouse scrolling for session %s: %v", t.sanitizedName, err)
+		log.InfoLog.Printf("failed to enable mouse scrolling for session %s: %v", t.sanitizedName, err)
 	}
 	cancel()
 

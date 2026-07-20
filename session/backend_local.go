@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync"
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/log"
@@ -49,7 +50,7 @@ func resolveProgramForInstance(i *Instance) string {
 	//
 	// opencode has NO auto-approve flag on the TUI to wire, so instead of joining
 	// codex/amp as a SILENT AutoYes no-op (#1963) it says so out loud — see
-	// warnIfAutoYesUnsupported below.
+	// noteAutoYesUnsupported below.
 	//
 	// Its whole TUI flag set is -h -v --print-logs --log-level --pure --port
 	// --hostname --mdns --mdns-domain --cors -m/--model -c/--continue -s/--session
@@ -77,7 +78,7 @@ func resolveProgramForInstance(i *Instance) string {
 		resolved = resolved + " --permission-mode bypassPermissions"
 	}
 	if i.AutoYes {
-		warnIfAutoYesUnsupported(tmux.DetectAgentFromCommand(resolved), i.Title)
+		noteAutoYesUnsupported(tmux.DetectAgentFromCommand(resolved), i.Title)
 	}
 	return resolved
 }
@@ -116,12 +117,33 @@ var autoYesUnsupported = map[string]string{
 		"If your opencode exposes one, set it via program_overrides.opencode",
 }
 
-// warnIfAutoYesUnsupported tells the user when auto_yes will not be honored for the
+// autoYesNoticed records the (agent, session) pairs this process has already told
+// the user about, so the notice is emitted once per session per process rather
+// than on every start AND every restore. Restore runs on daemon reconcile and on
+// each lost-restore retry, so without this the same static, unchanging fact is
+// re-logged on a timer.
+var autoYesNoticed sync.Map
+
+// noteAutoYesUnsupported tells the user when auto_yes will not be honored for the
 // agent they picked, instead of ignoring the setting in silence (#1963).
-func warnIfAutoYesUnsupported(agent, title string) {
-	if reason, ok := autoYesUnsupported[agent]; ok {
-		log.WarningLog.Printf("auto_yes has no effect for %s (session %q): %s", agent, title, reason)
+//
+// This is INFO, not WARNING (#2166). Severity states whether something is wrong,
+// and nothing here is: the user turned on auto_yes and picked an agent whose
+// approval knob af cannot reach, which is an expected configuration with a
+// documented escape hatch printed right in the message. An operator scraping the
+// log for WARNING/ERROR should not be paged by a normal codex session start. The
+// guidance text is unchanged — the message is still worth reading, it just is not
+// a defect report. It also keeps a plain `af` run out of log.dirty (#1749), so a
+// successful command stops ending with the "wrote logs to …" note.
+func noteAutoYesUnsupported(agent, title string) {
+	reason, ok := autoYesUnsupported[agent]
+	if !ok {
+		return
 	}
+	if _, seen := autoYesNoticed.LoadOrStore(agent+"\x00"+title, struct{}{}); seen {
+		return
+	}
+	log.InfoLog.Printf("auto_yes has no effect for %s (session %q): %s", agent, title, reason)
 }
 
 // LocalBackend implements Backend using local tmux sessions and git worktrees.
