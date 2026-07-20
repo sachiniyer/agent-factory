@@ -275,22 +275,32 @@ func resumeStatusPollThroughDaemon(title, repoID string) error {
 	})
 }
 
-// createShellTabThroughDaemon routes the TUI's `t` (new shell tab) mutation to
-// the daemon so the daemon — the single writer (#960) — owns the spawn and the
-// persist, returning the resolved tab name AND the tmux session the daemon
-// spawned it under. The TUI reflects the new tab locally for instant display via
-// Instance.AttachShellTab, which binds to that exact session: the two names are
-// independent namespaces that diverge after a rename (#1957), so re-deriving the
-// session from the tab name would attach the projection to a DIFFERENT tab's
-// live session.
-var createShellTabThroughDaemon = func(title, repoID string) (string, string, error) {
+// createTabThroughDaemon is the TUI's single CreateTab RPC path. Both picker
+// choices use it, so VS Code creation sends the same Kind:"vscode" request the
+// CLI does rather than growing a TUI-only implementation. It returns the resolved
+// tab name and, for a shell/process tab, the exact tmux session the daemon spawned.
+func createTabThroughDaemon(req daemon.CreateTabRequest) (string, string, error) {
 	var name, tmuxName string
 	err := withDaemonHTTP(func(c *apiclient.Client) error {
 		var e error
-		name, tmuxName, e = c.CreateTab(daemon.CreateTabRequest{Title: title, RepoID: repoID, Shell: true})
+		name, tmuxName, e = c.CreateTab(req)
 		return e
 	})
 	return name, tmuxName, err
+}
+
+// createShellTabThroughDaemon routes the Terminal picker choice through the
+// shared RPC. The returned tab name and tmux name are independent namespaces
+// after a rename (#1957), so AttachShellTab receives both verbatim.
+var createShellTabThroughDaemon = func(title, repoID string) (string, string, error) {
+	return createTabThroughDaemon(daemon.CreateTabRequest{Title: title, RepoID: repoID, Shell: true})
+}
+
+// createVSCodeTabThroughDaemon routes the VS Code picker choice through the same
+// request shape as `af sessions tab-create <title> --kind vscode`. A VS Code tab
+// has no tmux session, so the second return value is empty by design.
+var createVSCodeTabThroughDaemon = func(title, repoID string) (string, string, error) {
+	return createTabThroughDaemon(daemon.CreateTabRequest{Title: title, RepoID: repoID, Kind: "vscode"})
 }
 
 // closeTabThroughDaemon routes the TUI's `w` (close tab) mutation to the daemon,
@@ -435,6 +445,14 @@ func SetTabCreatorForTest(f func(title, repoID string) (string, string, error)) 
 	prev := createShellTabThroughDaemon
 	createShellTabThroughDaemon = f
 	return func() { createShellTabThroughDaemon = prev }
+}
+
+// SetVSCodeTabCreatorForTest swaps the VS Code half of the TUI tab-create seam
+// without dialing a daemon.
+func SetVSCodeTabCreatorForTest(f func(title, repoID string) (string, string, error)) func() {
+	prev := createVSCodeTabThroughDaemon
+	createVSCodeTabThroughDaemon = f
+	return func() { createVSCodeTabThroughDaemon = prev }
 }
 
 func SetTabCloserForTest(f func(title, repoID, tabName string) error) func() {

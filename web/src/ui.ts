@@ -226,8 +226,9 @@ export interface Actions {
 }
 
 /** The soft cap on tabs per session (session/tab.go maxTabs): the agent tab plus
- *  up to eight shell/process tabs, matching the 1-9 number-key range. The + button
- *  hides at the cap so the web never fires a guaranteed-to-fail CreateTab. */
+ *  up to eight additional tabs, matching the 1-9 number-key range. At the cap the
+ *  create control becomes an explanatory note, so the web never fires a
+ *  guaranteed-to-fail CreateTab. */
 const MAX_TABS = 9;
 
 /** The backend types whose workspace lives off-box (session/archive_sandbox.go
@@ -245,8 +246,9 @@ const OFF_BOX_BACKENDS = new Set(["docker", "ssh", "remote"]);
 
 /** Whether a session supports user tab management. Off-box sessions (docker/ssh/
  *  remote-hook) have a tab list their runtime fixes at launch — a single agent
- *  tab — so the web hides their + / × affordances and gates the `t`/`w` keys,
- *  mirroring the daemon's Capabilities().TabManagement.
+ *  tab — so the web withdraws their × controls, replaces new-tab with a visible
+ *  fixed-list explanation, and gates the `t`/`w` keys, mirroring the daemon's
+ *  Capabilities().TabManagement.
  *
  *  A record with no backend_type is a pre-#1592 local session (the field is
  *  omitempty), so it defaults to local — treating it as off-box would strip tab
@@ -258,12 +260,44 @@ export function supportsTabManagement(s: SessionData): boolean {
 /** Whether the web may offer tab management for a session RIGHT NOW: its backend
  *  must support it AND it must not be archived. An archived session is inert — the
  *  daemon refuses both CreateTab (since #1196) and CloseTab (#1809 follow-up) on
- *  one — so offering a + / × there can only produce a guaranteed-to-fail call, and
+ *  one — so offering mutable + / × controls there can only produce a guaranteed-to-fail call, and
  *  the × specifically would try to strip the web-tab URL that archive preserved for
  *  the restore. Every site that offers or fires a tab mutation reads THIS, not
  *  supportsTabManagement, so the affordances and the daemon's answer can't drift. */
 export function canManageTabs(s: SessionData): boolean {
   return supportsTabManagement(s) && !isArchived(s);
+}
+
+/** A visible explanation for every state in which the tab bar cannot offer its
+ *  new-tab control. Returning null means creation is available. This stays
+ *  separate from canManageTabs because "archived", "runtime-fixed", and "full"
+ *  have different next steps and must not collapse into one missing affordance. */
+export function tabCreationUnavailableReason(s: SessionData, tabCount = sessionTabs(s).length): string | null {
+  const supported = supportsTabManagement(s);
+  if (isArchived(s)) {
+    if (!supported) {
+      return `Archived · ${tabRuntimeLabel(s)} sessions have a fixed tab list`;
+    }
+    return "Restore this session to create tabs";
+  }
+  if (!supported) {
+    return `${tabRuntimeLabel(s)} sessions have a fixed tab list`;
+  }
+  if (tabCount >= MAX_TABS) {
+    return "Nine-tab limit reached";
+  }
+  return null;
+}
+
+function tabRuntimeLabel(s: SessionData): string {
+  switch (s.backend_type) {
+    case "docker":
+      return "Docker";
+    case "ssh":
+      return "SSH";
+    default:
+      return "Remote";
+  }
 }
 
 /** The selected session's tabs, always non-empty: a pre-#930 record with no tabs
@@ -1272,27 +1306,28 @@ export class AppShell {
     return item;
   }
 
-  /** The `+` button and its kind menu.
+  /** The visible `+ New tab` button and its kind menu.
    *
-   *  `+` still creates a terminal tab in ONE click — it is long-established muscle
-   *  memory (and the mouse twin of the TUI's `t`), so making it open a menu would
-   *  tax every existing user to surface a second kind. The `▾` beside it opens the
-   *  picker instead: the same split VS Code itself uses for its terminal + / ▾.
+   *  The old split control created a terminal from `+` and hid VS Code behind a
+   *  separate, unlabeled `▾`. Even the project's maintainer could not find that
+   *  path (#2077), so the labelled button now makes the choice explicit where the
+   *  editor will appear. The `t` shortcut remains the direct shell fast path.
    *
    *  Built per render (the tab bar is rebuilt wholesale), so the menu's listeners
    *  are bound to THIS instance and torn down with it — see the isConnected check
    *  in onDocMouseDown, which self-cleans if a rerender detaches an open menu. */
   private newTabControl(): HTMLElement {
     const wrap = h("div", { class: "af-tab-new-wrap" });
-    const add = h("button", { type: "button", class: "af-tab-new", title: "New terminal tab" }, "+");
-    add.addEventListener("click", (e) => {
-      e.stopPropagation();
-      this.actions.newTab("shell");
-    });
-    const caret = h("button", { type: "button", class: "af-tab-new-kind", title: "New tab…" }, "▾");
-    caret.setAttribute("aria-haspopup", "menu");
-    caret.setAttribute("aria-expanded", "false");
-    caret.setAttribute("aria-label", "Choose tab type");
+    const trigger = h(
+      "button",
+      { type: "button", class: "af-tab-new", title: "Create a terminal or VS Code tab" },
+      h("span", { class: "af-tab-new-plus" }, "+"),
+      h("span", {}, "New tab"),
+      h("span", { class: "af-tab-new-caret" }, "▾"),
+    );
+    trigger.setAttribute("aria-haspopup", "menu");
+    trigger.setAttribute("aria-expanded", "false");
+    trigger.setAttribute("aria-label", "New tab · Terminal or VS Code");
     const menu = h("div", { class: "af-tab-menu" });
     menu.setAttribute("role", "menu");
     menu.setAttribute("aria-label", "Tab type");
@@ -1300,7 +1335,7 @@ export class AppShell {
 
     const close = (): void => {
       menu.hidden = true;
-      caret.setAttribute("aria-expanded", "false");
+      trigger.setAttribute("aria-expanded", "false");
       document.removeEventListener("mousedown", onDocMouseDown);
       document.removeEventListener("keydown", onKeyDown, true);
     };
@@ -1320,11 +1355,11 @@ export class AppShell {
       // the terminal / drop rail focus the way a bare Escape does.
       e.stopPropagation();
       close();
-      caret.focus();
+      trigger.focus();
     };
     const open = (): void => {
       menu.hidden = false;
-      caret.setAttribute("aria-expanded", "true");
+      trigger.setAttribute("aria-expanded", "true");
       document.addEventListener("mousedown", onDocMouseDown);
       // CAPTURE phase, deliberately. The app's own keydown handler is a
       // capture-phase listener on document that stopPropagation()s Escape (so
@@ -1348,7 +1383,7 @@ export class AppShell {
     };
     menu.append(item("Terminal", "shell"), item("VS Code", "vscode"));
 
-    caret.addEventListener("click", (e) => {
+    trigger.addEventListener("click", (e) => {
       e.stopPropagation();
       if (menu.hidden) {
         open();
@@ -1356,7 +1391,7 @@ export class AppShell {
         close();
       }
     });
-    wrap.append(add, caret, menu);
+    wrap.append(trigger, menu);
     return wrap;
   }
 
@@ -1530,8 +1565,13 @@ export class AppShell {
     const children: HTMLElement[] = tabs.map((tab, i) =>
       tabButton(tab, i, i === active, shown.has(i), canManage, this.actions, () => this.liveTabIdentity(i), selected.id ?? ""),
     );
-    if (canManage && tabs.length < MAX_TABS) {
+    const unavailable = tabCreationUnavailableReason(selected, tabs.length);
+    if (unavailable === null) {
       children.push(this.newTabControl());
+    } else {
+      const reason = h("span", { class: "af-tab-new-unavailable", title: unavailable }, unavailable);
+      reason.setAttribute("aria-label", `New tab unavailable · ${unavailable}`);
+      children.push(reason);
     }
     bar.replaceChildren(...children);
     // The insertion indicator is absolutely positioned and sits outside the tab flow,
@@ -1764,7 +1804,7 @@ function selectedSession(state: AppState): SessionData | null {
 
 /** A signature of everything the tab BAR draws for the selected session: which session
  *  it is, the ordered tabs (kind + name), the active index, the shown-in-a-pane set, and
- *  whether tabs are manageable (the + / × affordances). The bar is rebuilt ONLY when
+ *  whether tabs are manageable (the create explanation / × affordances). The bar is rebuilt ONLY when
  *  this changes (ui update()), so an unrelated session-status snapshot — a rail event
  *  that leaves the tab list, highlight, and split layout alone — no longer
  *  replaceChildren()es the bar. That churn was the real cause of "a freshly-created tab
@@ -1799,8 +1839,9 @@ export function tabBarSig(state: AppState): string {
   const tabs = sessionTabs(selected);
   const active = Math.min(Math.max(state.activeTab, 0), tabs.length - 1);
   const canManage = canManageTabs(selected);
+  const createReason = tabCreationUnavailableReason(selected, tabs.length);
   const shown = [...new Set(state.shownTabs)].sort((a, b) => a - b);
-  return JSON.stringify([selected.id ?? "", tabs.map((t) => [t.kind, t.name]), active, shown, canManage]);
+  return JSON.stringify([selected.id ?? "", tabs.map((t) => [t.kind, t.name]), active, shown, canManage, createReason]);
 }
 
 /** The bar's tab buttons in render order. Excludes the + button and the insertion

@@ -385,8 +385,8 @@
       "id": "session.tab.create.options",
       "title": "Choose a new tab's command, name, or kind at create time",
       "tui": {
-        "status": "no",
-        "pointer": "app/session_control.go:286 sends only {Title, RepoID, Shell:true}"
+        "status": "partial",
+        "pointer": "app/handle_tabs.go showNewTabPicker chooses Terminal/VS Code; app/session_control.go sends Shell or Kind"
       },
       "web": {
         "status": "partial",
@@ -397,7 +397,7 @@
         "pointer": "api/sessions_tabs.go:112 sends Command, Name, Kind, URL, Port"
       },
       "verdict": "unclear",
-      "notes": "The TUI's `t` always spawns a bare $SHELL: it cannot name a tab or run a command. Overlaps the open tab-UX work in #1813 (tabs labelled 'Tab N', no rename), so it wants triaging with that rather than a fresh issue. Distinct from session.tab.create.web, which is a deliberate omission."
+      "notes": "#2077 added the no-input kind choice (Terminal / VS Code) to `t`. The TUI still cannot name a tab or supply a process command; those input-bearing options remain CLI/API surface. Distinct from session.tab.create.web, which is a deliberate omission."
     },
     {
       "id": "session.tab.create.shell",
@@ -476,7 +476,7 @@
       "title": "Spawn a shell/process tab in a session",
       "tui": {
         "status": "yes",
-        "pointer": "keys/keys.go:156 (t) -> app/handle_actions.go:822"
+        "pointer": "keys/keys.go KeyNewTab -> app/handle_tabs.go showNewTabPicker"
       },
       "web": {
         "status": "yes",
@@ -487,14 +487,14 @@
         "pointer": "api/sessions_tabs.go:39 tab-create"
       },
       "verdict": "parity",
-      "notes": "All three gate off-box backends: the web hides + / x for docker/ssh/remote (web/src/ui.ts:187-210) mirroring the daemon's Capabilities().TabManagement, and the TUI refuses at app/handle_actions.go:830-832."
+      "notes": "All three gate off-box backends. The web keeps a visible explanation where the create control would be, while its close controls stay withdrawn; the TUI refuses before opening the picker. Both mirror the daemon's Capabilities().TabManagement."
     },
     {
       "id": "session.tab.create.vscode",
       "title": "Spawn a VS Code tab",
       "tui": {
-        "status": "no",
-        "pointer": "no kind selector on the t binding"
+        "status": "yes",
+        "pointer": "app/handle_tabs.go showNewTabPicker -> createNewTab(TabKindVSCode)"
       },
       "web": {
         "status": "yes",
@@ -504,8 +504,8 @@
         "status": "yes",
         "pointer": "api/sessions_tabs.go:27 --kind vscode"
       },
-      "verdict": "unclear",
-      "notes": "The TUI's t always spawns $SHELL. A VS Code tab is an editor window the TUI cannot render inline, so a TUI affordance may be pointless — but the tab would still exist for web/CLI consumers. Needs an owner call."
+      "verdict": "parity",
+      "notes": "Closed by #2077. The TUI creates Kind:vscode through the same daemon CreateTab RPC as `af sessions tab-create --kind vscode`; its pane shows the existing web-UI placeholder because a terminal cannot render the editor. The web exposes the choice from a labelled New tab menu."
     },
     {
       "id": "session.tab.create.web",
@@ -1627,9 +1627,6 @@
             "gap": "session.tab.create.options"
           },
           "name": {
-            "gap": "session.tab.create.options"
-          },
-          "kind": {
             "gap": "session.tab.create.options"
           },
           "url": {

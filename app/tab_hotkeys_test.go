@@ -10,10 +10,13 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
+	xansi "github.com/charmbracelet/x/ansi"
 	"github.com/stretchr/testify/require"
 
 	"github.com/sachiniyer/agent-factory/cmd/cmd_test"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
+	"github.com/sachiniyer/agent-factory/keys"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 	"github.com/sachiniyer/agent-factory/ui/tree"
@@ -110,11 +113,15 @@ func setupGitRepoForTabs(t *testing.T, workdir string) {
 // since #1100: one agent tab, no shell tab until 't'.
 func freshLocalInstance(t *testing.T, title string) *session.Instance {
 	t.Helper()
+	return freshLocalInstanceNamed(t, fmt.Sprintf("af-tabs-%s-%d", title, time.Now().UnixNano()))
+}
+
+func freshLocalInstanceNamed(t *testing.T, name string) *session.Instance {
+	t.Helper()
 	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	workdir := t.TempDir()
 	setupGitRepoForTabs(t, workdir)
 
-	name := fmt.Sprintf("af-tabs-%s-%d", title, time.Now().UnixNano())
 	cmdExec, spawn := nameKeyedTmuxExec()
 	pty := tabHotkeysPty{t: t, cmdExec: cmdExec}
 
@@ -233,6 +240,114 @@ func TestHandleNewTabAppendsAndSelects(t *testing.T) {
 	require.Equal(t, 3, inst.TabCount(), "new-tab must append a shell tab")
 	require.Equal(t, 2, h.store.ActiveTab(),
 		"the freshly created tab must be selected")
+}
+
+// TestNewTabPickerCreatesVSCodeThroughDaemon is the #2077 TUI acceptance path:
+// the actual `t` action opens a visible kind choice, and choosing VS Code routes
+// through the daemon seam before reflecting the same TabKindVSCode the CLI's
+// --kind vscode request creates.
+func TestNewTabPickerCreatesVSCodeThroughDaemon(t *testing.T) {
+	h := newTestHome(t)
+	inst := freshLocalInstance(t, "vscode-picker")
+	selectInstance(h, inst)
+
+	called := 0
+	t.Cleanup(SetVSCodeTabCreatorForTest(func(title, repoID string) (string, string, error) {
+		called++
+		require.Equal(t, inst.Title, title)
+		require.Equal(t, h.repoID, repoID)
+		return "vscode", "", nil
+	}))
+
+	_, _ = h.handleDefaultKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'t'}}, keys.KeyNewTab)
+	require.Equal(t, stateSelectTabKind, h.state)
+	require.NotNil(t, h.selectionOverlay)
+	h.termWidth, h.termHeight = 80, 24
+	h.layoutSelectionOverlay()
+	picker := xansi.Strip(h.selectionOverlay.Render())
+	require.Contains(t, picker, "Terminal")
+	require.Contains(t, picker, "VS Code")
+
+	h.selectionOverlay.SetSelectedIndex(1)
+	_, _ = h.handleStateSelectTabKind(tea.KeyMsg{Type: tea.KeyEnter})
+
+	require.Equal(t, 1, called, "VS Code creation must cross the daemon CreateTab seam")
+	require.Equal(t, stateDefault, h.state)
+	require.Nil(t, h.selectionOverlay)
+	require.Equal(t, 2, inst.TabCount())
+	tabs := inst.GetTabs()
+	require.Equal(t, session.TabKindVSCode, tabs[1].Kind)
+	require.Empty(t, tabs[1].ID, "the projection waits for the daemon's authoritative tab id")
+	require.Equal(t, 1, h.store.ActiveTab(), "the fresh VS Code tab must be selected")
+	require.Equal(t, []string{"◆ Agent", "◱ vscode"}, tree.TabLabels(inst),
+		"the resolved daemon name is the tab's addressable label, matching CLI creation")
+}
+
+// TestNewTabPickerReResolvesSnapshotReplacement guards the modal window: a
+// snapshot may rebuild the selected session while the picker owns the keyboard.
+// Submit must mutate the live replacement, never the orphaned pointer.
+func TestNewTabPickerReResolvesSnapshotReplacement(t *testing.T) {
+	h := newTestHome(t)
+	stale := freshLocalInstance(t, "vscode-stale")
+	selectInstance(h, stale)
+	_, _ = h.showNewTabPicker()
+
+	replacement := freshLocalInstanceNamed(t, stale.Title)
+	require.True(t, h.store.ReplaceInstanceByTitle(stale.Title, replacement))
+	t.Cleanup(SetVSCodeTabCreatorForTest(func(title, repoID string) (string, string, error) {
+		require.Equal(t, replacement.Title, title)
+		return "vscode", "", nil
+	}))
+
+	h.selectionOverlay.SetSelectedIndex(1)
+	_, _ = h.handleStateSelectTabKind(tea.KeyMsg{Type: tea.KeyEnter})
+
+	require.Equal(t, 1, stale.TabCount(), "the swapped-out projection must stay untouched")
+	require.Equal(t, 2, replacement.TabCount())
+	require.Equal(t, session.TabKindVSCode, replacement.GetTabs()[1].Kind)
+}
+
+// TestNewTabPickerDefaultsToTerminal preserves the existing fast path inside the
+// new picker: Enter on its first row still creates Shell:true through the same
+// daemon seam and selects the resulting terminal.
+func TestNewTabPickerDefaultsToTerminal(t *testing.T) {
+	h := newTestHome(t)
+	inst := freshLocalInstance(t, "terminal-picker")
+	selectInstance(h, inst)
+	created, _ := stubTabDaemonSeams(t, inst)
+
+	_, _ = h.showNewTabPicker()
+	_, _ = h.handleStateSelectTabKind(tea.KeyMsg{Type: tea.KeyEnter})
+
+	require.Equal(t, 1, *created)
+	require.Equal(t, session.TabKindShell, inst.GetTabs()[1].Kind)
+	require.Equal(t, 1, h.store.ActiveTab())
+}
+
+// TestNewTabPickerFitsRequiredTerminalSizes guards both the ordinary 80x24
+// play-test viewport and narrower terminals. The picker uses no new status-row
+// hint, and its own escape hatch must remain visible instead of being clamped.
+func TestNewTabPickerFitsRequiredTerminalSizes(t *testing.T) {
+	for _, size := range []struct{ w, h int }{{80, 24}, {60, 15}, {40, 10}} {
+		h := newTestHome(t)
+		inst := freshLocalInstance(t, fmt.Sprintf("picker-%d", size.w))
+		selectInstance(h, inst)
+		h.termWidth, h.termHeight = size.w, size.h
+		_, _ = h.showNewTabPicker()
+		h.layoutSelectionOverlay()
+
+		rendered := h.selectionOverlay.Render()
+		for idx, line := range strings.Split(rendered, "\n") {
+			require.LessOrEqual(t, lipgloss.Width(line), size.w,
+				"picker line %d overflows a %dx%d terminal", idx, size.w, size.h)
+		}
+		require.LessOrEqual(t, strings.Count(rendered, "\n")+1, size.h,
+			"picker is taller than a %dx%d terminal", size.w, size.h)
+		plain := xansi.Strip(rendered)
+		require.Contains(t, plain, "Terminal")
+		require.Contains(t, plain, "VS Code")
+		require.Contains(t, plain, "esc cancel", "the way out must survive width pressure")
+	}
 }
 
 // TestHandleCloseTabSelectsNeighbor: closing a shell tab removes it and selects

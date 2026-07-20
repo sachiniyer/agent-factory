@@ -138,9 +138,23 @@ func (s *SelectionOverlay) Render() string {
 	if !compact {
 		lines = append(lines, "")
 	}
-	hint := "↑/↓ navigate • enter select • esc cancel"
-	if compact || lipgloss.Width(hint) > textRect.W {
-		hint = "↑/↓ nav • enter • esc cancel"
+	// Keep the escape hatch at the right edge by choosing a whole hint that fits,
+	// never by truncating a longer one. At narrow widths navigation detail drops
+	// first, then navigation itself; `esc cancel` is the load-bearing last item.
+	hint := "esc cancel"
+	candidates := []string{
+		"↑/↓ navigate · enter select · esc cancel",
+		"↑/↓ nav · enter · esc cancel",
+		"enter · esc cancel",
+	}
+	if compact {
+		candidates = candidates[1:]
+	}
+	for _, candidate := range candidates {
+		if lipgloss.Width(candidate) <= textRect.W {
+			hint = candidate
+			break
+		}
 	}
 	lines = append(lines, truncateOverlayLine(hintStyle.Render(hint), textRect.W))
 

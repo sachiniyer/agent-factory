@@ -222,6 +222,18 @@ async function resetToAgentTab(page: Page): Promise<void> {
   await expect(tabbar.locator(".af-tab")).toHaveCount(1, { timeout: 30_000 });
 }
 
+/** Creates the menu's Terminal choice. The labelled New tab control deliberately
+ *  makes every mouse-created kind explicit; the `t` keyboard shortcut remains the
+ *  one-keystroke shell path. */
+async function createTerminalTab(page: Page): Promise<void> {
+  const tabbar = page.locator(".af-tabbar");
+  await tabbar.locator(".af-tab-new").click();
+  const menu = tabbar.locator(".af-tab-menu");
+  await expect(menu).toBeVisible();
+  await menu.locator(".af-tab-menu-item", { hasText: /^Terminal$/ }).click();
+  await expect(menu).toBeHidden();
+}
+
 /**
  * Dispatches a drop carrying a HAND-CRAFTED drag payload ({index, tabs}) onto the
  * (single) current pane — bypassing the real tab buttons so a stale / out-of-range /
@@ -955,10 +967,10 @@ test("tabs: create a shell tab, switch to it, see its distinct output, close it 
   await expect(tabbar.locator(".af-tab")).toHaveCount(1);
   await expect(tabbar.locator(".af-tab.af-tab-active .af-tab-label")).toHaveText("Agent");
 
-  // Create a $SHELL tab via the + button (mirrors the TUI `t`). The tab bar grows
+  // Create a $SHELL tab via New tab → Terminal (the mouse twin of the web `t`). The tab bar grows
   // to two tabs, the new "Terminal" tab appears AND becomes active (createSessionTab
   // attaches it), and the terminal re-points its WS stream to that tab.
-  await tabbar.locator(".af-tab-new").click();
+  await createTerminalTab(page);
   await expect(tabbar.locator(".af-tab")).toHaveCount(2, { timeout: 30_000 });
   const shellTab = tabbar.locator(".af-tab", { hasText: "Terminal" });
   await expect(shellTab).toHaveClass(/af-tab-active/);
@@ -1020,7 +1032,7 @@ test("split panes (feat): drag a tab to a pane edge splits into two live panes; 
   await expect(page.locator(".af-term-host")).toContainText(READY_MARKER);
 
   const tabbar = page.locator(".af-tabbar");
-  await tabbar.locator(".af-tab-new").click();
+  await createTerminalTab(page);
   await expect(tabbar.locator(".af-tab")).toHaveCount(2, { timeout: 30_000 });
   await expect(page.locator(".af-term-meta")).toContainText("Live");
 
@@ -1072,7 +1084,7 @@ test("split panes (feat): a FRESHLY-CREATED tab is a drag source too — drag th
   await expect(page.locator(".af-term-host")).toContainText(READY_MARKER);
 
   const tabbar = page.locator(".af-tabbar");
-  await tabbar.locator(".af-tab-new").click();
+  await createTerminalTab(page);
   await expect(tabbar.locator(".af-tab")).toHaveCount(2, { timeout: 30_000 });
   const shellTab = tabbar.locator(".af-tab", { hasText: "Terminal" });
   await expect(shellTab).toHaveClass(/af-tab-active/);
@@ -1125,7 +1137,7 @@ test("split panes (feat): a bar rebuild that replaces a drag's source ends the d
   await row(page, SESSION_A).click();
   await expect(page.locator(".af-main.af-main-term")).toBeVisible();
   const tabbar = page.locator(".af-tabbar");
-  await tabbar.locator(".af-tab-new").click();
+  await createTerminalTab(page);
   await expect(tabbar.locator(".af-tab")).toHaveCount(2, { timeout: 30_000 });
 
   // Begin a real drag on the Terminal tab and drive a dragover so a pane shows its drop
@@ -1150,7 +1162,7 @@ test("split panes (feat): a bar rebuild that replaces a drag's source ends the d
 
   // Force a bar rebuild that REPLACES the drag's source button, with NO dragend on it —
   // add another tab (a concurrent tab change would do the same).
-  await tabbar.locator(".af-tab-new").click();
+  await createTerminalTab(page);
   await expect(tabbar.locator(".af-tab")).toHaveCount(3, { timeout: 30_000 });
 
   // The drag ended cleanly: no stuck flag, and the overlay is no longer shown (its
@@ -1189,7 +1201,7 @@ test("split panes (feat): a mid-drag tab-set change cancels the drop — no misb
   await row(page, SESSION_A).click();
   await expect(page.locator(".af-main.af-main-term")).toBeVisible();
   const tabbar = page.locator(".af-tabbar");
-  await tabbar.locator(".af-tab-new").click();
+  await createTerminalTab(page);
   await expect(tabbar.locator(".af-tab")).toHaveCount(2, { timeout: 30_000 });
   await expect(page.locator(".af-term-host .af-pane")).toHaveCount(1);
 
@@ -1225,7 +1237,7 @@ test("split panes (#1901): dragging the ACTIVE tab splits and opens a DIFFERENT 
 
   const tabbar = page.locator(".af-tabbar");
   await resetToAgentTab(page);
-  await tabbar.locator(".af-tab-new").click();
+  await createTerminalTab(page);
   await expect(tabbar.locator(".af-tab")).toHaveCount(2, { timeout: 30_000 });
   await expect(page.locator(".af-term-meta")).toContainText("Live");
   // Creating a tab switches to it: the pane now shows Terminal, and Terminal is the tab
@@ -1478,8 +1490,10 @@ test("web tab (#1809 follow-up): an ARCHIVED session's preserved web tab is iner
   // The × is withdrawn: clicking it would strip the very URL the archive preserved,
   // and the daemon would refuse anyway — so the affordance must not be offered.
   await expect(shelvedTab.locator(".af-tab-close")).toHaveCount(0);
-  // ...and so is the + (an archived session can't gain tabs either).
+  // Creation does not vanish: the bar names the restore step instead of looking
+  // indistinguishable from a product with no tab-create feature (#2077).
   await expect(tabbar.locator(".af-tab-new")).toHaveCount(0);
+  await expect(tabbar.locator(".af-tab-new-unavailable")).toHaveText("Restore this session to create tabs");
 
   await shelvedTab.click();
 
@@ -1860,7 +1874,7 @@ test("tabs (#1855): switching away and back keeps activeTab on the visible pane 
   // it stays true across the session.updated rebuild the create publishes (#1812).
   await row(page, SESSION_WEB).click();
   await expect(page.locator(".af-main.af-main-term")).toBeVisible();
-  await tabbar.locator(".af-tab-new").click();
+  await createTerminalTab(page);
   const throwaway = tabbar.locator(".af-tab", { hasText: "Terminal" });
   await expect(throwaway).toHaveCount(1, { timeout: 30_000 });
   // The create attaches the new tab, so the pane is on it — which is what makes the
@@ -1873,11 +1887,11 @@ test("tabs (#1855): switching away and back keeps activeTab on the visible pane 
   await expect(page.locator(".af-tab.af-tab-active .af-tab-label")).toHaveText("external");
   await expect(frame).toHaveCount(1, { timeout: 15_000 });
 
-  // Switch away, and leave probe-b focused on its own tab 1 (+ creates AND attaches),
+  // Switch away, and leave probe-b focused on its own tab 1 (create also attaches),
   // so the last reported focused tab is 1 — the collision.
   await row(page, SESSION_B).click();
   await expect(page.locator(".af-main.af-main-term")).toBeVisible();
-  await tabbar.locator(".af-tab-new").click();
+  await createTerminalTab(page);
   await expect(tabbar.locator(".af-tab")).toHaveCount(2, { timeout: 30_000 });
   await expect(page.locator(".af-tab.af-tab-active .af-tab-label")).toHaveText("Terminal");
 
@@ -1912,7 +1926,7 @@ test("split panes (feat): logout clears retained trees — a fresh login shows t
   await row(page, SESSION_A).click();
   await expect(page.locator(".af-main.af-main-term")).toBeVisible();
   const tabbar = page.locator(".af-tabbar");
-  await tabbar.locator(".af-tab-new").click();
+  await createTerminalTab(page);
   await expect(tabbar.locator(".af-tab")).toHaveCount(2, { timeout: 30_000 });
   await dragTabToPane(page, "Agent", "right");
   await expect(page.locator(".af-term-host .af-pane")).toHaveCount(2, { timeout: 15_000 });
@@ -2407,7 +2421,7 @@ test.describe("create → kill (one session, two flows)", () => {
     // ?tab=1 stream URL for the brand-new session (which has only the agent tab).
     await row(page, SESSION_A).click();
     await expect(page.locator(".af-main.af-main-term")).toBeVisible();
-    await page.locator(".af-tabbar .af-tab-new").click();
+    await createTerminalTab(page);
     await expect(page.locator(".af-tabbar .af-tab")).toHaveCount(2, { timeout: 30_000 });
     await expect(page.locator(".af-tab.af-tab-active .af-tab-label")).toHaveText("Terminal");
 
@@ -4026,7 +4040,7 @@ test("dismissing the install affordance sticks across reloads — it must never 
   await ctx.close();
 });
 
-test("vscode tab (feat): the ▾ menu creates a VS Code tab and the daemon serves it through the proxy", async () => {
+test("vscode tab (#2077): the labelled New tab menu creates a VS Code tab and serves it through the proxy", async () => {
   // End to end, with no seeded fixture: pick VS Code from the tab bar's kind menu,
   // and the daemon spawns a code-server (the FAKE one on PATH — no CI box has a
   // real one) on a 0600 unix socket it names, rooted at THIS session's worktree,
@@ -4039,13 +4053,16 @@ test("vscode tab (feat): the ▾ menu creates a VS Code tab and the daemon serve
   await expect(page.locator(".af-main.af-main-term")).toBeVisible();
 
   const tabbar = page.locator(".af-tabbar");
-  // + still creates a terminal in one click; the kind picker is the ▾ beside it.
-  await expect(page.locator(".af-tab-new")).toHaveCount(1);
-  const caret = page.locator(".af-tab-new-kind");
-  await expect(caret).toHaveCount(1);
+  // The choice is named on the tab bar itself. The pre-#2077 split control exposed
+  // only `+` and an unlabeled caret, so a user had to know the hidden menu existed.
+  const newTab = page.locator(".af-tab-new");
+  await expect(newTab).toHaveCount(1);
+  await expect(newTab).toContainText("New tab");
+  await expect(newTab).toHaveAttribute("aria-label", "New tab · Terminal or VS Code");
+  await expect(page.locator(".af-tab-new-kind")).toHaveCount(0);
   await expect(page.locator(".af-tab-menu")).toBeHidden();
 
-  await caret.click();
+  await newTab.click();
   const menu = page.locator(".af-tab-menu");
   await expect(menu).toBeVisible();
   await expect(menu.locator(".af-tab-menu-item")).toHaveText(["Terminal", "VS Code"]);
@@ -4105,7 +4122,7 @@ test("vscode tab (feat): the ▾ menu creates a VS Code tab and the daemon serve
 
   // Escape closes the menu without creating anything (checked after, so a stray
   // tab from a mis-click can't be mistaken for the one above).
-  await caret.click();
+  await newTab.click();
   await expect(menu).toBeVisible();
   await page.keyboard.press("Escape");
   await expect(menu).toBeHidden();

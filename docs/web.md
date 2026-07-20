@@ -367,13 +367,14 @@ Just like the TUI, a session isn't limited to its agent — each one holds up to
 pane header and the terminal:
 
 ```
-┌──────────┬────────────┬──────────┬───┐
-│  Agent   │  Terminal  │  btop  × │ + │
-└──────────┴────────────┴──────────┴───┘
+┌──────────┬────────────┬──────────┬─────────────┐
+│  Agent   │  Terminal  │  btop  × │ + New tab ▾ │
+└──────────┴────────────┴──────────┴─────────────┘
 ```
 
 - **Tab 0 is the agent** — it's unclosable (killing the session tears it down).
-- **`t`** (or the **`+`** button) opens a new shell tab in the worktree.
+- **`t`** opens a new shell tab directly. The labelled **`+ New tab`** menu
+  offers **Terminal** and **VS Code** where the resulting pane will appear.
 - **`w`** (or a tab's **`×`**) closes the active shell tab.
 - **`1`–`9`** switch to that tab (without attaching, like j/k); **clicking** a tab
   switches *and* attaches.
@@ -381,9 +382,10 @@ pane header and the terminal:
 Tabs labelled **Agent** / **Terminal** / a process name mirror the TUI's labels. A
 failed tab op (e.g. hitting the nine-tab cap) surfaces as a brief toast rather than
 a modal. **Off-box sessions** (docker, ssh, and remote-hook) run their workspace on
-another host, so there is no daemon-side worktree to spawn a tab in — their `+` /
-`×` affordances and the `t` / `w` keys are disabled, and the tab list is fixed by
-the runtime (a single agent tab).
+another host, so there is no daemon-side worktree to spawn a tab in — the tab bar
+explains that the runtime has a fixed tab list, its `×` affordances are withdrawn,
+and the `t` / `w` keys are disabled. Archived sessions similarly say to restore
+before creating tabs instead of leaving an unexplained blank.
 
 ### Project switcher
 
@@ -427,10 +429,10 @@ dev-server preview**: an agent runs a dev server in its worktree and injects a t
 pointing at it, so you watch the app render in the browser as the agent builds it.
 
 Web tabs are created from inside a session (by an agent or by you) with the
-CLI/API — they are not in the tab bar's `+` menu, because their target comes from
-whatever the agent is running rather than from anything the UI could ask you for
-(a [VS Code tab](#vs-code-tabs), which always targets the worktree, *is* in that
-menu):
+CLI/API — they are not in the tab bar's **New tab** menu, because their target
+comes from whatever the agent is running rather than from anything the UI could
+ask you for (a [VS Code tab](#vs-code-tabs), which always targets the worktree,
+*is* in that menu):
 
 ```bash
 # a local dev server on port 5173 (Vite/Next/CRA/…)
@@ -536,8 +538,8 @@ without leaving the web UI. It renders as a pane like any other tab, and works i
 splits and drag/drop.
 
 Unlike a web tab it takes **no target**: the session's worktree is always what it
-opens. That is what makes it offerable from the tab bar's **+** menu, which lists
-**Terminal** and **VS Code**. From the CLI:
+opens. That is what makes it offerable from the tab bar's labelled **New tab**
+menu, which lists **Terminal** and **VS Code**. From the CLI:
 
 ```bash
 af sessions tab-create <title> --kind vscode [--name editor]

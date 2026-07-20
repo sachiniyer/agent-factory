@@ -728,7 +728,8 @@ function guardedTabRebind(
     .catch((e) => surfaceTabError(e));
 }
 
-/** Creates a $SHELL tab on the selected session (the `t` key / + button), then
+/** Creates the requested tab on the selected session (`t` sends shell; the
+ *  labelled New tab menu can also send vscode), then
  *  resyncs to pull the grown tab list, selects the new tab, and attaches it —
  *  mirroring the TUI's `t`, which opens the fresh tab as a pane. The resync is
  *  kept for THIS window's own mutation because it must select+attach the new tab

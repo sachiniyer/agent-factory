@@ -576,6 +576,14 @@ func (m *home) handleModalClick(id string) (tea.Model, tea.Cmd) {
 			m.selectionOverlay.SetSelectedIndex(idx)
 			return m.handleStateSelectProgram(tea.KeyMsg{Type: tea.KeyEnter})
 		}
+	case stateSelectTabKind:
+		if m.selectionOverlay == nil {
+			return m, nil
+		}
+		if idx, ok := zones.OverlaySelectIdx(id); ok {
+			m.selectionOverlay.SetSelectedIndex(idx)
+			return m.handleStateSelectTabKind(tea.KeyMsg{Type: tea.KeyEnter})
+		}
 	case stateSearch:
 		if m.searchOverlay == nil {
 			return m, nil

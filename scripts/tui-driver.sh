@@ -826,13 +826,15 @@ af_detach() {
     done
 }
 
-# af_new_tab — spawn a new shell tab in the selected instance (`t`).
-# Precondition: an instance is selected. Syncs on the tab-child count rising.
+# af_new_tab — choose the default terminal item from the new-tab picker (`t`).
+# Precondition: an instance is selected. Syncs on the picker and tab-child count.
 af_new_tab() {
     af_ensure_nav
     af_focus_tree || return 1
     local before; before="$(_af_tab_count)"
     af_send t
+    af_wait_for 'New tab' "$AF_DRIVER_TIMEOUT" 'new-tab picker' || return 1
+    af_send Enter
     local deadline; deadline=$(( $(_af_now) + AF_DRIVER_TIMEOUT ))
     while [ "$(_af_tab_count)" -le "$before" ]; do
         if [ "$(_af_now)" -ge "$deadline" ]; then

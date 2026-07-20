@@ -36,14 +36,18 @@ There are two ways in, split deliberately:
 A session isn't limited to its agent. Each one can hold up to nine **tabs**, all
 running in the *same* worktree:
 
-- **`t`** spawns a new tab — a shell, or any command you name (a dev server,
-  `btop`, a test watcher). It runs alongside the agent, sharing its files.
+- **`t`** opens a new-tab picker. Choose **Terminal** for a shell in the
+  worktree, or **VS Code** for a browser editor on that worktree (the TUI shows
+  its placeholder; open the web client to use the editor).
 - **`w`** closes the focused tab (the agent's own tab can't be closed — kill the
   session instead).
 - **`1`–`9`** jump straight to a tab by number.
 
 Tabs persist across restarts, and each is a real process the daemon tracks.
 (Remote sessions are more limited — see [Remote hooks](../remote-hooks.md).)
+
+For a named long-running command or a web preview with a URL/port, use
+`af sessions tab-create`; those kinds need input beyond this two-item picker.
 
 ## Working with results
 
