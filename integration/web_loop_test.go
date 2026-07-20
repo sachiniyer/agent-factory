@@ -15,8 +15,9 @@ import (
 // TestWebActionsLoop is the #1592 Phase 5 PR5 play-test in code: it drives the
 // EXACT daemon HTTP+WS endpoints the browser client speaks — CreateSession over
 // POST /v1/CreateSession, the live rail over the /v1/events WebSocket, the attach
-// terminal over /v1/sessions/{id}/stream, SendPrompt, and KillSession — against a
-// REAL daemon serving a REAL local tmux session in the container fence. It proves
+// terminal over /v1/sessions/{id}/stream and KillSession, plus the daemon's
+// SendPrompt control path — against a REAL daemon serving a REAL local tmux session
+// in the container fence. It proves
 // the v1 loop end to end (list → attach → type → create/kill) and the two
 // server-side correctness fixes this PR folds in:
 //
@@ -73,7 +74,7 @@ func TestWebActionsLoop(t *testing.T) {
 	term.waitOutput(t, "hello-from-web")
 	t.Log("STEP 4: attached the terminal by id and typed — the pane echoed it")
 
-	// --- send a prompt via SendPrompt, mirroring the send-prompt modal ---
+	// --- exercise the daemon's SendPrompt control path ---
 	if err := h.tryHTTPPost("/v1/SendPrompt", map[string]any{
 		"title":   title,
 		"repo_id": "",

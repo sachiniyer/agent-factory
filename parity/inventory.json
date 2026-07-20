@@ -209,14 +209,14 @@
       },
       "web": {
         "status": "yes",
-        "pointer": "web/src/api.ts:275 sendPrompt"
+        "pointer": "web/src/terminal.ts:151 onData -> sendInput"
       },
       "cli": {
         "status": "yes",
         "pointer": "api/sessions.go:346 sendPromptCmd"
       },
       "verdict": "parity",
-      "notes": "The TUI reaches this by typing into the live terminal rather than via the SendPrompt RPC; same user capability, different transport."
+      "notes": "The TUI and web reach this by typing into the live terminal rather than via the SendPrompt RPC; same user capability, different transport."
     },
     {
       "id": "session.send-prompt.broadcast",
@@ -281,7 +281,7 @@
       },
       "web": {
         "status": "yes",
-        "pointer": "web/src/api.ts:330 restoreSession -> RestoreSession; the pane header's Archive button becomes Restore on an archived row (web/src/ui.ts renderMain/patchMainHead)"
+        "pointer": "web/src/api.ts restoreSession -> RestoreSession; the selected rail row's Archive slot becomes Restore on an archived row (web/src/ui.ts selectedRowActions/patchMainHead)"
       },
       "cli": {
         "status": "yes",

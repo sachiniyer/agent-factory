@@ -252,6 +252,7 @@ body {
 .af-project-switch:focus-visible,
 .af-project-item:focus-visible,
 .af-rail-filter:focus-visible,
+.af-rail-action:focus-visible,
 .af-filter-item:focus-visible,
 .af-task-action:focus-visible {
   outline: 2px solid var(--af-accent);
@@ -993,6 +994,50 @@ body {
 .af-row-main {
   min-width: 0;
   flex: 1;
+}
+
+/* Per-session lifecycle controls (#2186): only the selected row creates this slot.
+ * Archive/Restore matches the rail filter's quiet outlined-glyph treatment; Kill is
+ * quieter still at rest (a bare, muted ⌫) and becomes explicit through its distinct
+ * glyph, accessible name, and the unchanged destructive confirm step. */
+.af-row-actions {
+  display: flex;
+  align-items: center;
+  align-self: center;
+  flex: 0 0 auto;
+  gap: 0.15rem;
+}
+
+.af-rail-action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.6rem;
+  height: 1.6rem;
+  padding: 0;
+  background: transparent;
+  color: var(--af-text-2);
+  border: 1px solid var(--af-border);
+  border-radius: var(--af-r-md);
+  font: inherit;
+  font-size: var(--af-fs-sm);
+  line-height: 1;
+  cursor: pointer;
+}
+
+.af-rail-action:hover {
+  color: var(--af-text);
+  border-color: var(--af-border-strong);
+}
+
+.af-rail-kill {
+  color: var(--af-text-3);
+  border-color: transparent;
+}
+
+.af-rail-kill:hover {
+  color: var(--af-danger);
+  border-color: var(--af-border-strong);
 }
 
 .af-row-title {
@@ -2318,10 +2363,15 @@ body {
 
   .af-rail-new,
   .af-rail-filter,
+  .af-rail-action,
   .af-project-switch,
   .af-viewtab,
   .af-theme-opt {
     min-height: 2.25rem;
+  }
+
+  .af-rail-action {
+    min-width: 2.25rem;
   }
 
   .af-row {

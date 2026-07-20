@@ -133,8 +133,6 @@ export interface Actions {
   open(id: string): void;
   /** Opens the new-session modal (#1592 Phase 5 PR5). */
   newSession(): void;
-  /** Opens the send-prompt modal for the current selection. */
-  sendPrompt(): void;
   /** Opens the kill-confirm modal for the current selection. */
   kill(): void;
   /** Opens the archive-confirm modal for the current selection. */
@@ -560,11 +558,11 @@ export class AppShell {
   // Header text nodes for the selected pane, (re)created per selection.
   private headTitle: HTMLElement | null = null;
   private headMeta: HTMLElement | null = null;
-  // The archive/restore lifecycle button and the archived-ness it currently shows
-  // (#1932). The header STRUCTURE is only rebuilt on a selection change, but a session
-  // can flip archived⇄live WITHOUT one (archiving or restoring the row that is already
-  // selected — the common path), so patchMainHead swaps this button's verb in place,
-  // exactly as it patches the header text. null when nothing is selected.
+  // The selected rail row's archive/restore control and the archived-ness it currently
+  // shows (#1932, #2186). A session can flip archived⇄live WITHOUT a selection change
+  // (archiving or restoring the row that is already selected — the common path), so
+  // patchMainHead swaps this control's glyph + accessible verb in place, exactly as it
+  // patches the header text. null when the selected row is not visible in the rail.
   private lifecycleBtn: HTMLElement | null = null;
   private lifecycleArchived = false;
   // The usage-limit Retry button and whether it is currently shown (#1934). Same
@@ -1038,6 +1036,10 @@ export class AppShell {
   private renderRail(state: AppState): void {
     const scoped = scopeToProject(state.sessions, state.selectedProject);
     const visible = filterSessions(orderedSessions(scoped), state.statusFilter);
+    // Every rebuild replaces the row controls. Drop the old reference first so a
+    // selected row hidden by the project/status filter cannot leave patchMainHead
+    // mutating a detached button.
+    this.lifecycleBtn = null;
     // The count is what the rail SHOWS, not what the project holds — a count that
     // disagrees with the rows under it is just a bug the user has to reconcile. The
     // filter menu carries the per-state totals for what's hidden.
@@ -1058,9 +1060,55 @@ export class AppShell {
       );
       return;
     }
-    const rows = visible.map((s) => sessionRow(s, s.id === state.selectedId, this.actions));
+    const rows = visible.map((s) => {
+      const selected = s.id === state.selectedId;
+      return sessionRow(s, selected, this.actions, selected ? this.selectedRowActions(s) : null);
+    });
     const notice = this.railNotice(state, scoped, visible);
     list.replaceChildren(...(notice ? [notice, ...rows] : rows));
+  }
+
+  /** Quiet per-session controls shown only beside the selected rail row (#2186).
+   *  Archive/Restore share one slot; the click reads lifecycleArchived at gesture
+   *  time so patchMainHead can change the action without rebuilding the row. */
+  private selectedRowActions(selected: SessionData): HTMLElement {
+    const lifecycleBtn = h("button", { type: "button", class: "af-rail-action af-rail-lifecycle" });
+    lifecycleBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      if (this.lifecycleArchived) {
+        this.actions.restore();
+      } else {
+        this.actions.archive();
+      }
+    });
+    this.lifecycleBtn = lifecycleBtn;
+    this.patchLifecycleButton(isArchived(selected));
+
+    // Kill stays unmistakably destructive through its distinct ⌫ glyph and confirm,
+    // but its resting rail treatment is deliberately muted instead of af-danger.
+    const killBtn = h("button", { type: "button", class: "af-rail-action af-rail-kill" }, "⌫");
+    killBtn.setAttribute("aria-label", "Kill session");
+    killBtn.setAttribute("title", "Kill session");
+    killBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      this.actions.kill();
+    });
+    return h("div", { class: "af-row-actions" }, lifecycleBtn, killBtn);
+  }
+
+  /** Applies both the visible static glyph and the accessible reverse verb to the
+   *  selected row's lifecycle slot. Kept in one helper so render and live patching
+   *  cannot disagree about what an archived row offers. */
+  private patchLifecycleButton(archived: boolean): void {
+    const btn = this.lifecycleBtn;
+    if (!btn) {
+      return;
+    }
+    this.lifecycleArchived = archived;
+    const verb = archived ? "Restore session" : "Archive session";
+    btn.textContent = archived ? "↶" : "▪";
+    btn.setAttribute("aria-label", verb);
+    btn.setAttribute("title", verb);
   }
 
   /**
@@ -1358,7 +1406,6 @@ export class AppShell {
     if (!selected) {
       this.headTitle = null;
       this.headMeta = null;
-      this.lifecycleBtn = null;
       this.retryBtn = null;
       this.retryVisible = false;
       this.tabBar = null;
@@ -1373,27 +1420,6 @@ export class AppShell {
     this.headTitle = h("span", { class: "af-term-title" }, selected.title);
     this.headMeta = h("span", { class: "af-term-meta" });
     const titleBox = h("div", { class: "af-term-head-main" }, this.headTitle, this.headMeta);
-
-    // Per-session actions (#1592 Phase 5 PR5): send a prompt, or kill/archive
-    // behind a confirm. They act on the current selection; index.ts reads it.
-    const promptBtn = h("button", { type: "button", class: "af-ghost af-term-action" }, "Prompt");
-    promptBtn.addEventListener("click", () => this.actions.sendPrompt());
-    // Archive and restore are reverse verbs on the same slot: an archived session
-    // can't be archived again (the daemon rejects it, mirroring the TUI's `a`
-    // no-op), and restore is the only way back — so an archived row shows Restore
-    // where a live row shows Archive (#1932). This makes the "you can restore it
-    // later" copy the archive confirm prints actually reachable from the web. The
-    // click handler reads this.lifecycleArchived (not a render-time capture) so
-    // patchMainHead can flip the verb in place when the row is archived/restored
-    // while it stays selected, without a header rebuild.
-    this.lifecycleArchived = isArchived(selected);
-    const lifecycleBtn = h(
-      "button",
-      { type: "button", class: "af-ghost af-term-action" },
-      this.lifecycleArchived ? "Restore" : "Archive",
-    );
-    lifecycleBtn.addEventListener("click", () => (this.lifecycleArchived ? this.actions.restore() : this.actions.archive()));
-    this.lifecycleBtn = lifecycleBtn;
 
     // Retry, for a session parked at a usage-limit wall (#1934). The web rendered
     // that state — ◆ glyph, "Limit reached" label, "[limit] resets …" title prefix
@@ -1416,9 +1442,7 @@ export class AppShell {
     this.retryVisible = isLimitReached(selected);
     retryBtn.hidden = !this.retryVisible;
 
-    const killBtn = h("button", { type: "button", class: "af-danger af-term-action" }, "Kill");
-    killBtn.addEventListener("click", () => this.actions.kill());
-    const actions = h("div", { class: "af-term-actions" }, promptBtn, retryBtn, lifecycleBtn, killBtn);
+    const actions = h("div", { class: "af-term-actions" }, retryBtn);
 
     const head = h("div", { class: "af-term-head" }, titleBox, actions);
 
@@ -1683,14 +1707,13 @@ export class AppShell {
     this.headMeta.textContent = parts.join(" · ");
     this.headMeta.className = `af-term-meta af-term-${state.termStatus}`;
 
-    // Flip the lifecycle button's verb if the selected row was archived or restored
-    // without a selection change (renderMain, which builds the button, runs only on a
-    // selection change — #1932). Archiving the currently-selected session must turn
-    // its Archive button into Restore live, and a restore must turn it back.
+    // Flip the selected rail row's lifecycle glyph + accessible verb if it was
+    // archived or restored without a selection change (#1932, #2186). The rail is
+    // often rebuilt by a fresh Snapshot too, but that is not a safe prerequisite:
+    // this patch is what keeps a same-selection state change correct in place.
     const nowArchived = isArchived(selected);
     if (this.lifecycleBtn && nowArchived !== this.lifecycleArchived) {
-      this.lifecycleArchived = nowArchived;
-      this.lifecycleBtn.textContent = nowArchived ? "Restore" : "Archive";
+      this.patchLifecycleButton(nowArchived);
     }
 
     // Show/hide Retry as the selected session enters or leaves the usage-limit wall
@@ -1973,11 +1996,11 @@ function beginTabRename(
   input.select();
 }
 
-/** One session row: a status dot, the (prefixed) title, and the branch line —
- *  the same three signals the TUI row carries (ui/tree/render.go). Clicking opens
- *  the session by its stable id (selects it and attaches its terminal, #1693); a
- *  row lacking an id (never expected from a live Snapshot) is rendered but inert. */
-function sessionRow(s: SessionData, selected: boolean, actions: Actions): HTMLElement {
+/** One session row: a status dot, the (prefixed) title, the branch line, and (only
+ *  when selected) its quiet lifecycle actions (#2186). Clicking opens the session by
+ *  its stable id (selects it and attaches its terminal, #1693); a row lacking an id
+ *  (never expected from a live Snapshot) is rendered but inert. */
+function sessionRow(s: SessionData, selected: boolean, actions: Actions, rowActions: HTMLElement | null): HTMLElement {
   const status = rowStatus(s);
 
   const title = h("div", { class: "af-row-title" }, rowTitle(s));
@@ -2001,6 +2024,9 @@ function sessionRow(s: SessionData, selected: boolean, actions: Actions): HTMLEl
     row.append(dot);
   }
   row.append(main);
+  if (rowActions) {
+    row.append(rowActions);
+  }
   row.setAttribute("role", "option");
   row.setAttribute("aria-selected", selected ? "true" : "false");
   row.setAttribute("title", `${s.title} — ${status.label}`);
