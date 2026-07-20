@@ -181,7 +181,7 @@ func (i *Instance) SetTitle(title string) error {
 // refuse to attach — but it must never be used as evidence of liveness: take
 // IsAlive directly for that (#1917 round 8).
 func (i *Instance) TmuxAlive() bool {
-	alive, err := i.backend.IsAlive(i)
+	alive, err := i.currentBackend().IsAlive(i)
 	return err == nil && alive
 }
 

@@ -4,9 +4,31 @@ import (
 	"fmt"
 )
 
+// currentBackend snapshots the instance's backend under i.mu (#2096). The
+// backend is NOT immutable: a restore/recover of an off-box session rebinds it
+// via bindProvisionResult under i.mu.Lock, and the restore paths consult the
+// instance (Capabilities, liveness) before taking the per-instance opLock, so a
+// bare field read genuinely races that write.
+//
+// Every read goes through here — or through the *Locked variant below — and the
+// returned Backend is then used OUTSIDE the lock: the delegated calls
+// (Start/Recover/Preview/…) block on tmux, docker, and ssh I/O, and several
+// re-enter i.mu, so holding it across them would deadlock. Snapshot-then-call
+// only guarantees the pointer read is synchronized; serializing an operation
+// against a concurrent rebind is the opLock's job, not this lock's.
+//
+// Callers must not already hold i.mu — sync.RWMutex is not reentrant, and a
+// recursive RLock deadlocks the moment a writer queues between the two
+// acquisitions. Code that already holds the lock uses capabilitiesLocked.
+func (i *Instance) currentBackend() Backend {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	return i.backend
+}
+
 // firstTimeSetup is true if this is a new instance. Otherwise, it's one loaded from storage.
 func (i *Instance) Start(firstTimeSetup bool) error {
-	return i.backend.Start(i, firstTimeSetup)
+	return i.currentBackend().Start(i, firstTimeSetup)
 }
 
 // Kill terminates the instance and cleans up all resources. It delegates to the
@@ -23,7 +45,7 @@ func (i *Instance) Kill() error {
 // the daemon's restore loop and by user-initiated restore (#1300); loads stay
 // side-effect free (#970).
 func (i *Instance) Recover() error {
-	return i.backend.Recover(i)
+	return i.currentBackend().Recover(i)
 }
 
 // Respawn re-establishes the instance's backing session in place without a
@@ -33,7 +55,7 @@ func (i *Instance) Recover() error {
 // !Lost guard rejects, but the re-spawn mechanics are identical. The caller owns
 // the precondition.
 func (i *Instance) Respawn() error {
-	return i.backend.Respawn(i)
+	return i.currentBackend().Respawn(i)
 }
 
 // ArchiveTeardown tears down every tab's tmux session for an archive AND
@@ -148,7 +170,7 @@ func (i *Instance) RestoreFromArchive() error {
 	if err := i.Transition(BeginRestore()); err != nil {
 		return err
 	}
-	if err := i.backend.Recover(i); err != nil {
+	if err := i.currentBackend().Recover(i); err != nil {
 		// Re-spawn failed: drop the fence to a plain Lost (started left true) so
 		// the #1108 restore loop owns the retry against the now-restored worktree.
 		_ = i.Transition(AbortRestoreToLost())
@@ -163,12 +185,12 @@ func (i *Instance) RestoreFromArchive() error {
 // duplicate Instance built from disk that lost a race to the canonical tracked
 // Instance (#867); see Backend.CloseAttachOnly.
 func (i *Instance) CloseAttachOnly() error {
-	return i.backend.CloseAttachOnly(i)
+	return i.currentBackend().CloseAttachOnly(i)
 }
 
 // CheckAndHandleTrustPrompt checks for and dismisses the trust prompt for supported programs.
 func (i *Instance) CheckAndHandleTrustPrompt() bool {
-	return i.backend.CheckAndHandleTrustPrompt(i)
+	return i.currentBackend().CheckAndHandleTrustPrompt(i)
 }
 
 // Capabilities returns the backing runtime's capability descriptor (#1592
@@ -177,7 +199,22 @@ func (i *Instance) CheckAndHandleTrustPrompt() bool {
 // session, so returning the zero value instead would be an incoherent
 // descriptor (local workspace but every capability off) and would regress
 // e.g. the tab-management footer.
+//
+// The backend read is synchronized (#2096): the daemon's restore loops consult
+// Capabilities().Recover BEFORE taking the instance's opLock, so it runs
+// concurrently with a restore rebinding the backend.
 func (i *Instance) Capabilities() Capabilities {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	return i.capabilitiesLocked()
+}
+
+// capabilitiesLocked is Capabilities' already-locked half, for callers that
+// already hold i.mu (LifecycleView resolves the recover capability inside its
+// single read-locked snapshot). It must NOT take the lock itself: sync.RWMutex is
+// not reentrant, so a nested RLock deadlocks against a queued writer — which on
+// this path is exactly the restore goroutine the lock exists to exclude.
+func (i *Instance) capabilitiesLocked() Capabilities {
 	if i.backend == nil {
 		return (&LocalBackend{}).Capabilities()
 	}
@@ -186,10 +223,14 @@ func (i *Instance) Capabilities() Capabilities {
 
 // GetBackend returns the backend for the instance (mainly for testing).
 func (i *Instance) GetBackend() Backend {
-	return i.backend
+	return i.currentBackend()
 }
 
-// SetBackend sets the backend for the instance (mainly for testing).
+// SetBackend sets the backend for the instance (mainly for testing). It writes
+// under i.mu to match bindProvisionResult, so a test swapping the backend cannot
+// race a reader on a background tick.
 func (i *Instance) SetBackend(b Backend) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
 	i.backend = b
 }
