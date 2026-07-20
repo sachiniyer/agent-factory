@@ -41,6 +41,7 @@
 : "${AF_DRIVER_POLL:=0.25}"                       # capture-pane poll interval
 : "${AF_DRIVER_DETACH_KEY:=C-w}"                 # tmux key that detaches attach
 : "${AF_DRIVER_STATE_DIR:=${TMPDIR:-/tmp}/af-driver}"  # cross-call scratch
+: "${AF_DRIVER_SEND_LINE_ATTEMPTS:=4}"           # af_send_line paste retries
 : "${AGENT_FACTORY_AUTO_UPDATE:=false}"          # disable startup auto-update: a
                                                  # branch binary built behind the
                                                  # latest release would try to
@@ -236,54 +237,74 @@ _af_wait_for_pane_echo() {
     done
 }
 
-# _af_delivery_tail <text> — a distinctive whitespace-free suffix of <text>. A
-# racing Enter after a paste truncates the TAIL, so the tail is exactly what must
-# be on screen before it is safe to submit. Whitespace is removed so a wrap at
-# the terminal edge can't hide it; the last 24 non-space characters are enough to
-# be distinctive while short enough to stay within one line.
-_af_delivery_tail() {
-    local ws; ws="$(printf '%s' "$1" | tr -d '[:space:]')"
-    # Bash evaluates ${ws: -N} to the EMPTY STRING when N exceeds the string's
-    # length — it does NOT clamp to the whole string (zsh does, which is exactly
-    # what makes this easy to get wrong). An empty tail then satisfies the
-    # `[ -z "$tail" ]` short-circuit in _af_wait_for_line_echo, which "confirms"
-    # delivery on the first iteration WITHOUT waiting — silently degrading
-    # af_send_line back into the naive send-then-Enter race (#1995) for every
-    # command under 24 characters, i.e. most real commands. Fall back to the
-    # whole stripped string when it is shorter than the window.
-    if [ "${#ws}" -le 24 ]; then
-        printf '%s' "$ws"
-    else
-        printf '%s' "${ws: -24}"
-    fi
+# _af_line_echo_count <text> — how many times the WHOLE of <text> is currently
+# echoed on an UNFRAMED (full-screen attach) screen.
+#
+# Both sides are stripped of ALL whitespace before comparing, which buys three
+# things at once and is why this is not a plain `grep -F` on the raw capture:
+#   * a line that WRAPPED at the terminal edge still matches (the wrap is just a
+#     newline between two halves of the same string);
+#   * a space that fell exactly ON the wrap column is not fatal — capture-pane
+#     right-trims every row, so that space is simply absent from the capture
+#     (observed live: a 128-char line echoes as 127 captured characters, missing
+#     the space between `echo` and its argument);
+#   * the compare is byte-wise on the stripped strings, so it is independent of
+#     the sandbox's C/POSIX locale (cf. _af_tab_count).
+#
+# Matching the WHOLE text — not a suffix of it — is the #2147 correction. The
+# old check matched a 24-character TAIL, on the theory that a racing Enter can
+# only truncate the END of a paste. That theory does not hold on the full-screen
+# attach path: whole interior chunks of a paste can go missing while the tail
+# lands (reproduced live — a 128-char line echoed as chunks 1, 2 and 4 with
+# chunk 3 dropped), and a tail-only check CONFIRMS that mangled line. A probe
+# that cannot see the middle of the line must not get to vouch for it.
+_af_line_echo_count() {
+    local text_ws screen_ws count
+    text_ws="$(printf '%s' "$1" | tr -d '[:space:]')"
+    if [ -z "$text_ws" ]; then printf '0'; return 0; fi
+    screen_ws="$(af_capture | tr -d '[:space:]')"
+    count="$(printf '%s' "$screen_ws" | grep -oF -- "$text_ws" | wc -l)" || count=0
+    count="${count//[^0-9]/}"
+    printf '%s' "${count:-0}"
+    return 0
 }
 
-# _af_wait_for_line_echo <text> [timeout_s] [label] — wait until <text> has FULLY
-# echoed on an UNFRAMED (full-screen attach) screen. It matches a whitespace-free
-# tail of <text> against the whitespace-stripped screen, so a line that wrapped
-# at the terminal edge is still recognized. This is the full-screen counterpart
-# to _af_wait_for_pane_echo: there is no pane box to reconstruct, so stripping ALL
-# whitespace is both sufficient and locale-independent (pure ASCII compare).
+# _af_wait_for_line_echo <text> [timeout_s] [baseline] — wait until the
+# screen shows MORE than <baseline> (default 0) complete echoes of <text>. This
+# is the full-screen counterpart to _af_wait_for_pane_echo: there is no pane box
+# to reconstruct, so the whitespace-stripped compare above is sufficient.
+#
+# The baseline is what keeps the confirmation honest across repeats. A command
+# the driver already ran once is still on screen in the scrollback, so a bare
+# "is it there?" check would confirm the NEXT paste of the same text before a
+# single byte of it had landed. Callers pass the count they measured immediately
+# before pasting, so what is confirmed is that THIS paste added an occurrence.
+#
+# Deliberately silent: af_send_line retries around it and owns the diagnostics,
+# so a recovered attempt does not print a TIMEOUT banner into a passing run.
 # Returns 0 on match, 1 on timeout.
 _af_wait_for_line_echo() {
-    local text="$1" timeout="${2:-8}" label="${3:-line echo}" screen tail screen_ws
-    tail="$(_af_delivery_tail "$text")"
+    local text="$1" timeout="${2:-8}" baseline="${3:-0}"
     local deadline; deadline=$(( $(_af_now) + timeout ))
     while :; do
-        screen="$(af_capture)"
-        screen_ws="$(printf '%s' "$screen" | tr -d '[:space:]')"
-        if [ -z "$tail" ] || printf '%s' "$screen_ws" | grep -Fq -- "$tail"; then
+        if [ "$(_af_line_echo_count "$text")" -gt "$baseline" ]; then
             return 0
         fi
         if [ "$(_af_now)" -ge "$deadline" ]; then
-            _af_log "TIMEOUT ${timeout}s waiting for: $label"
-            _af_log "----- last screen -----"
-            printf '%s\n' "$screen" >&2
-            _af_log "-----------------------"
             return 1
         fi
         sleep "$AF_DRIVER_POLL"
     done
+}
+
+# _af_clear_input_line — wipe whatever is sitting on the attached shell's input
+# line (ctrl-u, readline's unix-line-discard). Used by af_send_line both BETWEEN
+# retries — so a re-paste appends to an empty line instead of concatenating onto
+# a partial one — and on give-up, so a failed delivery leaves the shell at a
+# clean prompt rather than holding an unbalanced fragment.
+_af_clear_input_line() {
+    af_send C-u
+    sleep "$AF_DRIVER_POLL"
 }
 
 # af_ensure_nav — force a known focus state. Ctrl-] exits interactive mode (a
@@ -451,6 +472,36 @@ af_reset_sandbox() {
     sleep 0.5
 }
 
+# _AF_RAIL_MARKER — proof that the instance rail has painted, i.e. that af is
+# past its first frame and not merely showing chrome. Used as the second boot
+# gate by af_boot and af_relaunch.
+#
+# It accepts EITHER the section header OR the rail's scrolled-up indicator,
+# because the header is not chrome: it is the rail's first windowed ROW
+# (ui/sidebar_render.go String()), so it scrolls out of the window like any
+# other row. At 80x24 with three sessions and the middle or lower one selected,
+# the rail scrolls and renders `▲ 2 more` where the header used to be — the TUI
+# has booted perfectly, every session is alive, and a header-only gate waits the
+# full timeout and reports a boot failure that never happened (#2148).
+#
+# The two alternatives are exhaustive rather than a widened net: the rail draws
+# the ▲ indicator exactly when it has hidden rows above (hiddenAbove > 0), and
+# when it has not, row 0 — the header — is on screen. One of them is always
+# present the instant the rail paints, whichever session the restored selection
+# lands on. Neither is present before af paints, so this still fails a boot that
+# did not happen: a shell prompt, a build error, or a hung launch matches
+# nothing here. (`Agent Factory`, the sidebar's title chip, is NOT sufficient on
+# its own — it is static chrome that paints with the frame, so it would go on
+# matching an af that rendered its shell and no rail at all.)
+#
+# The indicator is anchored to the sidebar's left edge — only leading whitespace
+# may precede it — the same anchor _af_tab_count uses, so a workspace pane that
+# happens to print "▲ 3 more" cannot satisfy the boot gate: pane text is always
+# preceded on its row by the sidebar columns and the pane's own border. `▲` is
+# matched as a literal byte sequence rather than inside a bracket expression,
+# which the sandbox's C/POSIX locale would match byte-wise (#1994).
+: "${_AF_RAIL_MARKER:=Instances \(|^[[:space:]]*▲ [0-9]+ more}"
+
 # af_boot — launch af at a fixed size in a fresh driver session and wait for
 # the first frame. Pre-seeds help_screens_seen so the one-time overlays
 # (instance-created, attach, interactive) never appear — the single biggest
@@ -485,7 +536,8 @@ af_boot() {
     af_send_literal "cd $AF_DRIVER_REPO && $bin"
     af_send Enter
     af_wait_for 'Agent Factory' "$AF_DRIVER_TIMEOUT" 'af first frame' || return 1
-    af_wait_for 'Instances \(' "$AF_DRIVER_TIMEOUT" 'instances header' || return 1
+    af_wait_for "$_AF_RAIL_MARKER" "$AF_DRIVER_TIMEOUT" \
+        'instance rail painted (header or scrolled ▲ indicator)' || return 1
     af_focus_tree
 }
 
@@ -670,22 +722,60 @@ af_send_to_pane() {
 }
 
 # af_send_line <text> [timeout_s] — paste <text> into a FULL-SCREEN attach and
-# submit it, but only AFTER confirming the whole paste has landed in the input
+# submit it, but ONLY after confirming the whole paste has landed in the input
 # line. In a full-screen attach, af_send_literal streams the bytes through the
 # raw attach proxy into the nested session; a following bare `af_send Enter` can
 # overtake the still-draining paste and execute a TRUNCATED command (#1995) — the
 # harness analog of submit.go's load-bearing drain wait, which the attach path
-# lacks. The driver can SEE the attached screen, so it asserts delivery (waits
-# for the text to echo) instead of guessing, then sends Enter. Use this rather
-# than a bare `af_send_literal … ; af_send Enter` whenever the submitted command
-# matters. Precondition: a full-screen attach is active (af_attach).
+# lacks. The driver can SEE the attached screen, so it asserts delivery instead
+# of guessing. Use this rather than a bare `af_send_literal … ; af_send Enter`
+# whenever the submitted command matters. Precondition: a full-screen attach is
+# active (af_attach). Returns non-zero if the line could not be delivered.
+#
+# It FAILS CLOSED (#2147). The old version confirmed best-effort: on an
+# unconfirmed paste it logged a note and pressed Enter anyway. That is strictly
+# worse than not delivering at all, because the attach path really does drop
+# bytes — the first paste after an attach frequently lands only a prefix (a
+# multiple of 32 bytes, the attach input pump's read size; reproduced on 5 of 9
+# consecutive live 80x24 attempts). Submitting a prefix of a QUOTED command
+# leaves bash in its `>` continuation prompt, and every later scripted command
+# becomes a continuation line — one unconfirmed paste silently corrupts the whole
+# rest of the scenario. A testing helper must never turn an unconfirmed partial
+# paste into shell input; the caller needs an error, not a wrecked session.
+#
+# Recovery before refusal: the drop is transient rather than terminal — the input
+# path stays alive, and a re-paste lands in full (5 of 5 live retries). So each
+# attempt clears the input line first (so the re-paste cannot concatenate onto
+# the partial one) and re-pastes, and only after AF_DRIVER_SEND_LINE_ATTEMPTS
+# failures does it clear the line one last time and fail loudly, having pressed
+# no Enter at all. The [timeout_s] budget is per attempt.
 af_send_line() {
-    local text="$1"
-    [ -n "$text" ] || { af_send Enter; return 0; }
-    af_send_literal "$text" || return 1
-    _af_wait_for_line_echo "$text" "${2:-8}" "attached input echoed '$text'" \
-        || _af_log "note: attached input for '$text' not confirmed; submitting best-effort"
-    af_send Enter
+    local text="$1" timeout="${2:-8}" attempt baseline
+    # Nothing to confirm in an empty/whitespace-only line: submitting it is
+    # harmless and there is no echo to match against.
+    if [ -z "$(printf '%s' "$text" | tr -d '[:space:]')" ]; then
+        af_send Enter
+        return 0
+    fi
+    for attempt in $(seq 1 "$AF_DRIVER_SEND_LINE_ATTEMPTS"); do
+        _af_clear_input_line
+        # Measured AFTER the clear and BEFORE the paste, so what gets confirmed
+        # is this paste's own echo and not an identical command still sitting in
+        # the scrollback from an earlier af_send_line.
+        baseline="$(_af_line_echo_count "$text")"
+        af_send_literal "$text" || return 1
+        if _af_wait_for_line_echo "$text" "$timeout" "$baseline"; then
+            af_send Enter
+            return 0
+        fi
+        _af_log "af_send_line: attempt ${attempt}/${AF_DRIVER_SEND_LINE_ATTEMPTS} landed only PART of the line; clearing and re-pasting"
+    done
+    _af_log "----- last screen -----"
+    af_capture >&2
+    _af_log "-----------------------"
+    _af_clear_input_line
+    _af_fail "af_send_line: only part of the line ever echoed after ${AF_DRIVER_SEND_LINE_ATTEMPTS} attempts; NOT submitting it — a partial line would corrupt the attached shell (#2147). Line: $text"
+    return 1
 }
 
 # af_attach — attach the selected instance full-screen (`o`). Precondition: an
@@ -961,7 +1051,8 @@ af_relaunch() {
     af_send_literal "cd $AF_DRIVER_REPO && $bin"
     af_send Enter
     af_wait_for 'Agent Factory' "$AF_DRIVER_TIMEOUT" 'af first frame (relaunch)' || return 1
-    af_wait_for 'Instances \(' "$AF_DRIVER_TIMEOUT" 'instances header (relaunch)' || return 1
+    af_wait_for "$_AF_RAIL_MARKER" "$AF_DRIVER_TIMEOUT" \
+        'instance rail painted (relaunch)' || return 1
     af_focus_tree
 }
 
