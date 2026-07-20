@@ -970,10 +970,10 @@
       },
       "cli": {
         "status": "yes",
-        "pointer": "commands/docs_gen.go:23 (hidden); commands/agentservercmd.go:34"
+        "pointer": "commands/docs_gen.go:29 (hidden); commands/docs_gen.go:61 (--plugin-root); commands/agentservercmd.go:34"
       },
       "verdict": "deliberate",
-      "notes": "af gen-docs is Hidden:true (CI docs generation). af agent-server is daemon-consumed plumbing — its own Long says it 'exists to be consumed by a daemon rather than opened by a person' — and af --daemon is a hidden flag. None are user capabilities."
+      "notes": "af gen-docs is Hidden:true (CI docs generation). af agent-server is daemon-consumed plumbing — its own Long says it 'exists to be consumed by a daemon rather than opened by a person' — and af --daemon is a hidden flag. None are user capabilities. af gen-docs --plugin-root (#2172) regenerates the committed per-agent plugin artifacts from the canonical af usage text; like the rest of gen-docs it is build tooling, run by scripts/gen-docs.sh and the CI drift gate. The TUI and web will deliberately never expose it — regenerating a repo's committed build artifacts is not something either surface should offer — so this is a recorded decision, not a parity gap to re-report."
     },
     {
       "id": "tui.navigation",
@@ -1437,6 +1437,7 @@
       "af doctor --setup": "install.doctor",
       "af doctor --verbose": "install.doctor",
       "af gen-docs --help": "meta.discovery",
+      "af gen-docs --plugin-root": "meta.internal",
       "af help --help": "meta.discovery",
       "af keys --help": "meta.discovery",
       "af projects --help": "meta.discovery",
