@@ -29,15 +29,28 @@ var (
 	sendPromptIncludeRootFlag bool
 )
 
+// promptFlagGiven reports whether --prompt was passed, empty value included.
+// `--prompt ""` is the flag being GIVEN with an empty value — a script whose
+// variable came back unset writes exactly that — not the flag being omitted, so
+// this asks cobra's Changed bit rather than testing the value (#2139). Testing
+// `sendPromptPromptFlag != ""` instead made an empty flag look like no flag: the
+// arity check went looking for a positional <prompt> the user never meant to
+// type and died on a misleading "takes exactly 2 positional argument(s)", while
+// the positional spelling of the same thing (`send-prompt <title> ""`) sailed
+// through. Same reasoning as --target-session in tasks.go.
+func promptFlagGiven(cmd *cobra.Command) bool {
+	return cmd.Flags().Changed("prompt")
+}
+
 // sendPromptArgCount is how many positionals send-prompt expects in the current
 // mode. The prompt comes from --prompt or the last positional, and --all drops
 // the <title>, so the arity is a 2x2 rather than a constant.
-func sendPromptArgCount() int {
+func sendPromptArgCount(cmd *cobra.Command) int {
 	want := 2 // <title> <prompt>
 	if sendPromptAllFlag {
 		want-- // broadcast has no target title
 	}
-	if sendPromptPromptFlag != "" {
+	if promptFlagGiven(cmd) {
 		want-- // the prompt came from the flag
 	}
 	return want
@@ -46,13 +59,13 @@ func sendPromptArgCount() int {
 // sendPromptUsage names the exact invocation the current flags imply, so an
 // arity error tells the user what to type instead of just counting (#658/#734:
 // a public CLI owes actionable errors).
-func sendPromptUsage() string {
+func sendPromptUsage(cmd *cobra.Command) string {
 	switch {
-	case sendPromptAllFlag && sendPromptPromptFlag != "":
+	case sendPromptAllFlag && promptFlagGiven(cmd):
 		return "af sessions send-prompt --all --prompt <prompt> (no positional arguments)"
 	case sendPromptAllFlag:
 		return "af sessions send-prompt --all <prompt>"
-	case sendPromptPromptFlag != "":
+	case promptFlagGiven(cmd):
 		return "af sessions send-prompt <title> --prompt <prompt>"
 	default:
 		return "af sessions send-prompt <title> <prompt>"
@@ -62,8 +75,8 @@ func sendPromptUsage() string {
 // resolveSendPrompt returns the prompt for this invocation and the positionals
 // with it removed, so callers read the title from a consistent place regardless
 // of which spelling the user chose.
-func resolveSendPrompt(args []string) (prompt string, rest []string) {
-	if sendPromptPromptFlag != "" {
+func resolveSendPrompt(cmd *cobra.Command, args []string) (prompt string, rest []string) {
+	if promptFlagGiven(cmd) {
 		return sendPromptPromptFlag, args
 	}
 	if len(args) == 0 {
@@ -101,9 +114,9 @@ results.`,
 		if err := validateSendPromptFlags(); err != nil {
 			return jsonError(err)
 		}
-		if want := sendPromptArgCount(); len(args) != want {
+		if want := sendPromptArgCount(cmd); len(args) != want {
 			return jsonError(fmt.Errorf("%s takes exactly %d positional argument(s); got %d",
-				sendPromptUsage(), want, len(args)))
+				sendPromptUsage(cmd), want, len(args)))
 		}
 		return nil
 	},
@@ -119,12 +132,12 @@ results.`,
 		}
 		// Re-check arity here too: unit tests drive RunE directly (bypassing
 		// Args), so indexing rest[0] below must not depend on Args having run.
-		if len(args) != sendPromptArgCount() {
+		if len(args) != sendPromptArgCount(cmd) {
 			return jsonError(fmt.Errorf("%s takes exactly %d positional argument(s); got %d",
-				sendPromptUsage(), sendPromptArgCount(), len(args)))
+				sendPromptUsage(cmd), sendPromptArgCount(cmd), len(args)))
 		}
 
-		prompt, rest := resolveSendPrompt(args)
+		prompt, rest := resolveSendPrompt(cmd, args)
 		if sendPromptAllFlag {
 			return runBroadcast(prompt)
 		}
