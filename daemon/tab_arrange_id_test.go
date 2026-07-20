@@ -57,7 +57,7 @@ func tabNameByID(data session.InstanceData, id string) string {
 func arrangeWebTabs(t *testing.T, m *Manager, repoID, title string, names ...string) {
 	t.Helper()
 	for _, n := range names {
-		if _, err := m.CreateTab(CreateTabRequest{
+		if _, _, err := m.CreateTab(CreateTabRequest{
 			Title: title, RepoID: repoID, Kind: "web", URL: "http://localhost:5173", Name: n,
 		}); err != nil {
 			t.Fatalf("CreateTab(%s): %v", n, err)

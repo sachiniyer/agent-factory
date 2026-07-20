@@ -59,8 +59,8 @@ func newTestHome(t *testing.T) *home {
 	// override the relevant seam. createTab/closeTab default to an error so an
 	// unstubbed mutation fails loudly rather than reaching the daemon; setPRInfo
 	// defaults to a no-op so the in-memory PR-badge path stays exercisable.
-	t.Cleanup(SetTabCreatorForTest(func(title, repoID string) (string, error) {
-		return "", fmt.Errorf("createShellTabThroughDaemon not stubbed in test")
+	t.Cleanup(SetTabCreatorForTest(func(title, repoID string) (string, string, error) {
+		return "", "", fmt.Errorf("createShellTabThroughDaemon not stubbed in test")
 	}))
 	t.Cleanup(SetTabCloserForTest(func(title, repoID, tabName string) error {
 		return fmt.Errorf("closeTabThroughDaemon not stubbed in test")

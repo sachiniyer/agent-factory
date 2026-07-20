@@ -51,7 +51,7 @@ func TestCreateTab_WebSpawnsPersistsAndReturnsName(t *testing.T) {
 	const title = "webworker"
 	startedLocalTabInstance(t, manager, repo.ID, repoPath, title, "af_"+title+"_agent")
 
-	name, err := manager.CreateTab(CreateTabRequest{
+	name, _, err := manager.CreateTab(CreateTabRequest{
 		Title: title, RepoID: repo.ID, Kind: "web", URL: "http://localhost:5173",
 	})
 	if err != nil {
@@ -93,7 +93,7 @@ func TestCreateTab_WebPortConvenience(t *testing.T) {
 	const title = "webport"
 	startedLocalTabInstance(t, manager, repo.ID, repoPath, title, "af_"+title+"_agent")
 
-	if _, err := manager.CreateTab(CreateTabRequest{Title: title, RepoID: repo.ID, Kind: "web", Port: 3000}); err != nil {
+	if _, _, err := manager.CreateTab(CreateTabRequest{Title: title, RepoID: repo.ID, Kind: "web", Port: 3000}); err != nil {
 		t.Fatalf("CreateTab(web,port): %v", err)
 	}
 	web := loadWebTab(t, repo.ID)
@@ -110,7 +110,7 @@ func TestCreateTab_WebRejectsMissingTarget(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewManager: %v", err)
 	}
-	if _, err := manager.CreateTab(CreateTabRequest{Title: "x", Kind: "web"}); err == nil {
+	if _, _, err := manager.CreateTab(CreateTabRequest{Title: "x", Kind: "web"}); err == nil {
 		t.Fatal("expected error for web tab with no target, got nil")
 	}
 }
@@ -122,7 +122,7 @@ func TestCreateTab_WebRejectsUnknownKind(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewManager: %v", err)
 	}
-	if _, err := manager.CreateTab(CreateTabRequest{Title: "x", Kind: "bogus", URL: "http://localhost:1"}); err == nil {
+	if _, _, err := manager.CreateTab(CreateTabRequest{Title: "x", Kind: "bogus", URL: "http://localhost:1"}); err == nil {
 		t.Fatal("expected error for unknown kind, got nil")
 	}
 }
@@ -152,7 +152,7 @@ func TestCreateTab_WebRejectsRemoteInstance(t *testing.T) {
 	manager.instances[daemonInstanceKey(repo.ID, "rem")] = inst
 	manager.mu.Unlock()
 
-	_, err = manager.CreateTab(CreateTabRequest{Title: "rem", RepoID: repo.ID, Kind: "web", URL: "http://localhost:3000"})
+	_, _, err = manager.CreateTab(CreateTabRequest{Title: "rem", RepoID: repo.ID, Kind: "web", URL: "http://localhost:3000"})
 	if err == nil {
 		t.Fatal("expected error for remote instance, got nil")
 	}

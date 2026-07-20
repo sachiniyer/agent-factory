@@ -29,8 +29,8 @@ func TestTUIHasNoInstancesWritePath(t *testing.T) {
 	require.NotNil(t, cmd, "quit must still proceed")
 
 	// new shell tab: routed through the daemon (stubbed), reflected locally only.
-	createRestore := SetTabCreatorForTest(func(title, repoID string) (string, error) {
-		return spawnDaemonTab(inst), nil
+	createRestore := SetTabCreatorForTest(func(title, repoID string) (string, string, error) {
+		return spawnDaemonTab(inst)
 	})
 	defer createRestore()
 	_, _ = h.handleNewTab()

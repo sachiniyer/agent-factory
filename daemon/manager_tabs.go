@@ -12,7 +12,12 @@ import (
 
 // CreateTab spawns a Process-kind tab running req.Command in the target
 // session's worktree, persists the grown tab list, and returns the resolved tab
-// name (#930 PR 5). It mirrors CreateSession's discipline: the find+spawn+persist
+// name plus the tmux session it was spawned under (#930 PR 5). The two are
+// independent namespaces and diverge after a rename (#1957), so the caller is
+// told BOTH rather than left to re-derive the second from the first — see
+// CreateTabResponse.TmuxName.
+//
+// It mirrors CreateSession's discipline: the find+spawn+persist
 // runs under the per-repo start lock so a concurrent CreateSession/CreateTab on
 // the same repo can't race the tab list or derive a duplicate name. The new tab
 // is persisted immediately (ToInstanceData serializes its command + tmux name,
@@ -22,29 +27,29 @@ import (
 // commands — a remote session's only terminal tab is the terminal_cmd one), an
 // empty command, or an instance already at the soft cap (maxTabs, enforced by
 // AddProcessTab).
-func (m *Manager) CreateTab(req CreateTabRequest) (string, error) {
+func (m *Manager) CreateTab(req CreateTabRequest) (string, string, error) {
 	// An empty kind is the default (shell-or-process, per req.Shell), not a kind;
 	// every explicit kind resolves through session.ParseTabKindName, the shared
 	// vocabulary the CLI validates against, so the two can't drift.
 	kind, explicitKind := session.ParseTabKindName(req.Kind)
 	if !explicitKind && req.Kind != "" {
-		return "", fmt.Errorf("unknown tab kind %q (expected one of %s, or empty)",
+		return "", "", fmt.Errorf("unknown tab kind %q (expected one of %s, or empty)",
 			req.Kind, strings.Join(session.TabKindNameList(), ", "))
 	}
 	isWeb := explicitKind && kind == session.TabKindWeb
 	isVSCode := explicitKind && kind == session.TabKindVSCode
 	if !explicitKind && !req.Shell && strings.TrimSpace(req.Command) == "" {
-		return "", fmt.Errorf("a process tab requires a non-empty command (--command)")
+		return "", "", fmt.Errorf("a process tab requires a non-empty command (--command)")
 	}
 	// A vscode tab always edits the session's own worktree, so a target is not
 	// just unnecessary but meaningless — reject one rather than silently ignoring
 	// it and leaving the caller thinking it took effect.
 	if isVSCode {
 		if strings.TrimSpace(req.URL) != "" || req.Port != 0 {
-			return "", fmt.Errorf("--url/--port are not valid for a vscode tab (--kind vscode): it always opens the session's worktree")
+			return "", "", fmt.Errorf("--url/--port are not valid for a vscode tab (--kind vscode): it always opens the session's worktree")
 		}
 		if strings.TrimSpace(req.Command) != "" {
-			return "", fmt.Errorf("--command is not valid for a vscode tab (--kind vscode)")
+			return "", "", fmt.Errorf("--command is not valid for a vscode tab (--kind vscode)")
 		}
 	}
 	// Resolve the web target up front so an invalid URL/port fails fast, before
@@ -55,17 +60,17 @@ func (m *Manager) CreateTab(req CreateTabRequest) (string, error) {
 		target := strings.TrimSpace(req.URL)
 		if target == "" {
 			if req.Port == 0 {
-				return "", fmt.Errorf("a web tab requires a target (--url or --port)")
+				return "", "", fmt.Errorf("a web tab requires a target (--url or --port)")
 			}
 			portURL, perr := session.WebTabURLForPort(req.Port)
 			if perr != nil {
-				return "", perr
+				return "", "", perr
 			}
 			target = portURL
 		}
 		normalized, nerr := session.NormalizeWebTabURL(target)
 		if nerr != nil {
-			return "", nerr
+			return "", "", nerr
 		}
 		webURL = normalized
 	}
@@ -77,16 +82,16 @@ func (m *Manager) CreateTab(req CreateTabRequest) (string, error) {
 	// RESOLVED title, not the (possibly ambiguous) request title.
 	instance, repoID, title, _, _, err := m.resolveActionSession(req.ID, req.Title, req.RepoID)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	if instance == nil {
-		return "", fmt.Errorf("failed to restore instance %q", title)
+		return "", "", fmt.Errorf("failed to restore instance %q", title)
 	}
 	// The message names the real reason rather than the old
 	// remote_hooks.terminal_cmd knob, which #1592 Phase 4 PR7 deleted — pointing a
 	// user at a setting that no longer exists is worse than no advice (#1874).
 	if !instance.Capabilities().TabManagement {
-		return "", fmt.Errorf("cannot create a tab on session %q: only local sessions support user-managed tabs — this session's workspace runs off-box (docker/ssh/remote), so there is no local worktree to spawn a tab in", title)
+		return "", "", fmt.Errorf("cannot create a tab on session %q: only local sessions support user-managed tabs — this session's workspace runs off-box (docker/ssh/remote), so there is no local worktree to spawn a tab in", title)
 	}
 
 	// Serialize the tab spawn against an archive/kill/restore teardown+move for
@@ -94,7 +99,7 @@ func (m *Manager) CreateTab(req CreateTabRequest) (string, error) {
 	// archiveExclusiveTabLock for the op-lock ordering and orphan rationale.
 	opLock, err := m.archiveExclusiveTabLock(daemonInstanceKey(repoID, title), instance)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	defer opLock.Unlock()
 
@@ -121,7 +126,7 @@ func (m *Manager) CreateTab(req CreateTabRequest) (string, error) {
 		tab, err = instance.AddProcessTab(req.Command, req.Name)
 	}
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 
 	// Persist through the targeted per-repo writer (persistInstanceData) — the
@@ -135,7 +140,7 @@ func (m *Manager) CreateTab(req CreateTabRequest) (string, error) {
 		if closeErr := instance.CloseTab(instance.TabCount() - 1); closeErr != nil {
 			log.WarningLog.Printf("CreateTab %q: rolling back unpersisted tab failed: %v", title, closeErr)
 		}
-		return "", fmt.Errorf("failed to persist new tab: %w", err)
+		return "", "", fmt.Errorf("failed to persist new tab: %w", err)
 	}
 
 	// Announce the grown roster (#1812). A tab created by an agent, the CLI, the
@@ -154,7 +159,26 @@ func (m *Manager) CreateTab(req CreateTabRequest) (string, error) {
 	// the same order they persisted. publishEvent is non-blocking (drop-slow), so
 	// a wedged subscriber can't stall the mutation.
 	m.publishEvent(agentproto.EventSessionUpdated, data)
-	return tab.Name, nil
+	// Report the tmux session the tab actually spawned under, read out of the very
+	// snapshot that was just persisted and keyed on the tab's STABLE ID — not on
+	// its ordinal (which any concurrent close shifts) and not by re-deriving
+	// "<agent>__<name>", which is the assumption #1957 retired. Empty for a
+	// tmux-less kind (web, vscode), which is the honest answer for them.
+	return tab.Name, tabTmuxNameByID(data.Tabs, tab.ID), nil
+}
+
+// tabTmuxNameByID returns the persisted tmux session name of the tab with this
+// stable id, or "" when it has none (a web/vscode tab) or the id is absent.
+func tabTmuxNameByID(tabs []session.TabData, id string) string {
+	if id == "" {
+		return ""
+	}
+	for _, td := range tabs {
+		if td.ID == id {
+			return td.TmuxName
+		}
+	}
+	return ""
 }
 
 // CloseTab closes a non-agent tab of the target session, kills its tmux

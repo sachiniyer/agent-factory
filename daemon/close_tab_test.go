@@ -129,7 +129,7 @@ func TestCloseTab_RejectsArchivedSession(t *testing.T) {
 	const title = "worker"
 	inst := startedLocalTabInstance(t, manager, repo.ID, repoPath, title, "af_"+title+"_agent")
 	const target = "http://localhost:3000"
-	if _, err := manager.CreateTab(CreateTabRequest{Title: title, RepoID: repo.ID, Kind: "web", URL: target, Name: "webpreview"}); err != nil {
+	if _, _, err := manager.CreateTab(CreateTabRequest{Title: title, RepoID: repo.ID, Kind: "web", URL: target, Name: "webpreview"}); err != nil {
 		t.Fatalf("CreateTab(web): %v", err)
 	}
 
@@ -195,7 +195,7 @@ func TestCloseTab_ArchiveWinningOpLockRaceKeepsWebTab(t *testing.T) {
 	const title = "worker"
 	inst := startedLocalTabInstance(t, manager, repo.ID, repoPath, title, "af_"+title+"_agent")
 	const target = "http://localhost:3000"
-	if _, err := manager.CreateTab(CreateTabRequest{Title: title, RepoID: repo.ID, Kind: "web", URL: target, Name: "webpreview"}); err != nil {
+	if _, _, err := manager.CreateTab(CreateTabRequest{Title: title, RepoID: repo.ID, Kind: "web", URL: target, Name: "webpreview"}); err != nil {
 		t.Fatalf("CreateTab(web): %v", err)
 	}
 
@@ -453,7 +453,7 @@ func TestCloseTab_SerializedWithInFlightKillDoesNotCloseStaleTab(t *testing.T) {
 
 	exec, isAlive := closeBlockingTabExec(map[string]bool{agentName: true}, processTmuxName, killStarted, releaseKill)
 	inst := startedLocalTabInstanceWithExec(t, manager, repoID, repoPath, title, agentName, exec)
-	if _, err := manager.CreateTab(CreateTabRequest{Title: title, RepoID: repoID, Command: "btop"}); err != nil {
+	if _, _, err := manager.CreateTab(CreateTabRequest{Title: title, RepoID: repoID, Command: "btop"}); err != nil {
 		t.Fatalf("CreateTab: %v", err)
 	}
 	if !isAlive(processTmuxName) {

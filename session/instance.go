@@ -523,16 +523,21 @@ func (i *Instance) CloseTab(idx int) error {
 // AddShellTab: the daemon owns the spawn (so its authoritative view holds the
 // tab and can't be clobbered), and the TUI only needs to reflect the new tab
 // locally for instant display. It binds to the EXACT tmux session the daemon
-// derived (agent session name + "__" + name) and Restores (reconnects) it,
-// mirroring restoreLocalTabs + LocalBackend.setupTabs, so the tab is immediately
-// previewable/attachable without a second spawn that would collide on the name.
+// spawned and Restores (reconnects) it, mirroring restoreLocalTabs +
+// LocalBackend.setupTabs, so the tab is immediately previewable/attachable
+// without a second, colliding spawn.
 //
-// name is the resolved tab name returned by the daemon. Local instances only —
-// callers reject backends without TabManagement first. If a tab with that name
-// is already present
-// (e.g. a refresh raced ahead) this is a no-op returning the existing tab.
-// Errors when the instance is not started or has no agent session/worktree.
-func (i *Instance) AttachShellTab(name string) (*Tab, error) {
+// name and tmuxName are BOTH the daemon's, as returned by CreateTab. tmuxName is
+// passed, not re-derived as "<agent>__<name>", because the two are independent
+// namespaces (#1957, see tab_names.go): after a rename the daemon spawns
+// "…__shell-2" for a tab named "shell", and re-deriving would bind this
+// projection to the OLDER tab's still-live session. Empty falls back to the
+// derivation — right for its only cause, a daemon predating the field.
+//
+// Local instances only — callers reject backends without TabManagement first. A
+// tab with that name already present (a refresh raced ahead) makes this a no-op
+// returning it. Errors when the instance is not started or has no session.
+func (i *Instance) AttachShellTab(name, tmuxName string) (*Tab, error) {
 	i.mu.RLock()
 	started := i.started
 	agentTmux := i.tmuxLocked()
@@ -557,8 +562,8 @@ func (i *Instance) AttachShellTab(name string) (*Tab, error) {
 		return nil, fmt.Errorf("cannot attach a tab without a worktree")
 	}
 
-	// Bind to the exact session name the daemon derived and ATTACH-ONLY to it —
-	// never spawn. Pass empty workDir so a session that is missing surfaces as an
+	// Bind to the exact session the daemon spawned and ATTACH-ONLY to it — never
+	// spawn. Pass empty workDir so a session that is missing surfaces as an
 	// error instead of re-spawning (#1152). The daemon is the single writer that
 	// owns every tmux spawn (#960); this is a pure TUI-side projection of a tab
 	// the daemon already created. If the daemon killed the instance in the window
@@ -566,7 +571,9 @@ func (i *Instance) AttachShellTab(name string) (*Tab, error) {
 	// tmux session that escapes the daemon's Kill teardown and orphans over the
 	// about-to-be-deleted worktree — the same #990 leak AddShellTab guards. Fail
 	// cleanly and let the daemon's next Snapshot reconcile the tab away.
-	tmuxName := agentTmux.SanitizedName() + "__" + name
+	if tmuxName == "" {
+		tmuxName = agentTmux.SanitizedName() + tmuxTabSeparator + name
+	}
 	shellTmux := agentTmux.NewSiblingSession(tmuxName, defaultShell())
 	if err := shellTmux.Restore(""); err != nil {
 		return nil, fmt.Errorf("failed to reconnect shell tab: %w", err)

@@ -143,13 +143,17 @@ func registerDaemonSpawn(t *testing.T, inst *session.Instance, spawn func(string
 
 // spawnDaemonTab is the shared body of every stubbed daemon CreateTab: derive
 // the next shell tab name, mark that sibling session alive in the mock (the
-// daemon's server-side spawn), and return the name for the TUI to attach to.
-func spawnDaemonTab(inst *session.Instance) string {
+// daemon's server-side spawn), and return the name AND the tmux session name for
+// the TUI to attach to — both, as the real RPC does since #1957, so the stub
+// can't quietly re-establish the name-derives-the-session assumption the fix
+// removed.
+func spawnDaemonTab(inst *session.Instance) (string, string, error) {
 	name := nextShellTabName(inst.GetTabs())
+	tmuxName := inst.TabTmuxName(0) + "__" + name
 	if spawn := daemonSpawnHooks[inst]; spawn != nil {
-		spawn(inst.TabTmuxName(0) + "__" + name)
+		spawn(tmuxName)
 	}
-	return name
+	return name, tmuxName, nil
 }
 
 // startedLocalInstance is freshLocalInstance plus one on-demand shell tab
@@ -203,9 +207,9 @@ func nextShellTabName(tabs []*session.Tab) string {
 func stubTabDaemonSeams(t *testing.T, inst *session.Instance) (created, closed *int) {
 	t.Helper()
 	var c, d int
-	t.Cleanup(SetTabCreatorForTest(func(title, repoID string) (string, error) {
+	t.Cleanup(SetTabCreatorForTest(func(title, repoID string) (string, string, error) {
 		c++
-		return spawnDaemonTab(inst), nil
+		return spawnDaemonTab(inst)
 	}))
 	t.Cleanup(SetTabCloserForTest(func(title, repoID, tabName string) error {
 		d++

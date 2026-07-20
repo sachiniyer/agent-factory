@@ -12,9 +12,11 @@ import (
 )
 
 // Rename/reorder unit tests (#1813). The headline case is
-// TestRenameTab_FreesNoTmuxTokenForALaterSpawn: rename deliberately does NOT
+// TestRenameTab_SpawnDodgesTheStillLiveTmuxSession: rename deliberately does NOT
 // rename the live tmux session, so a tab's name and its tmux token decouple, and
-// the collision that opens is the one bug this feature could introduce.
+// the collision that opens is the one bug this feature could introduce. What the
+// FREED NAME must do — go straight back to the next tab that asks for it — is
+// pinned next door in tab_name_release_test.go (#1957).
 
 // tabNames returns the roster's display names, in order.
 func tabNames(i *Instance) []string {
@@ -25,19 +27,22 @@ func tabNames(i *Instance) []string {
 	return names
 }
 
-// TestRenameTab_FreesNoTmuxTokenForALaterSpawn is the regression test for the
-// collision a rename opens up. A tab's tmux session name is derived at SPAWN
+// TestRenameTab_SpawnDodgesTheStillLiveTmuxSession is the regression test for the
+// collision a rename opens up. A tab's tmux session name is fixed at SPAWN
 // ("<agent>__shell") and a rename does not touch it — restore rebinds by the
 // persisted TmuxName, so the live session must keep its original name. That
-// decouples the display name from the tmux token, and without reserving the
-// token a later `t` would re-derive the SAME tmux name and collide with the
-// renamed tab's still-live session:
+// decouples the display name from the tmux token, and a later `t` that blindly
+// re-derived "<agent>__shell" would collide with the renamed tab's still-live
+// session:
 //
-//	Name="shell"/tmux "__shell" -> rename to "editor" -> `t` sees "shell" free
-//	-> new tab derives "__shell" -> collision.
+//	Name="shell"/tmux "__shell" -> rename to "editor" -> `t` asks for "shell"
+//	-> naive derive "__shell" -> collision.
 //
-// The new tab must therefore get "shell-2"/"__shell-2".
-func TestRenameTab_FreesNoTmuxTokenForALaterSpawn(t *testing.T) {
+// The SPAWN is what takes the suffix ("__shell-2"). The NAME does not: nothing on
+// the roster is called "shell" any more, so the new tab is named "shell" (#1957 —
+// charging the user's namespace for a tmux collision is what made the -2 a
+// mystery). Both halves are asserted here so neither can regress alone.
+func TestRenameTab_SpawnDodgesTheStillLiveTmuxSession(t *testing.T) {
 	log.Initialize(false)
 	defer log.Close()
 
@@ -60,22 +65,23 @@ func TestRenameTab_FreesNoTmuxTokenForALaterSpawn(t *testing.T) {
 	assert.Equal(t, firstTmux, first.tmux.SanitizedName(),
 		"rename must leave the live tmux session's name alone — restore rebinds by it")
 
-	// The `t` key: a second shell tab. "shell" LOOKS free (no tab is named it),
-	// but the renamed tab's live session still owns the token.
+	// The `t` key: a second shell tab. "shell" IS free as a name — no tab is called
+	// it — while the renamed tab's live session still owns the tmux token.
 	second, err := inst.AddShellTab()
 	require.NoError(t, err)
 	assert.NotEqual(t, firstTmux, second.tmux.SanitizedName(),
 		"new tab derived the renamed tab's live tmux session name — collision")
-	assert.Equal(t, "shell-2", second.Name)
-	assert.Equal(t, "af_collide_agent__shell-2", second.tmux.SanitizedName())
+	assert.Equal(t, "shell", second.Name, "the freed name goes back to the next tab that asks")
+	assert.Equal(t, "af_collide_agent__shell-2", second.tmux.SanitizedName(),
+		"the spawn walks past the live session instead")
 }
 
 // TestRenameTab_TmuxTokenSurvivesSeparatorInName is the regression for the
 // Codex finding on the token parse. sanitizeTabName keeps '_', so "logs__api" is
 // a VALID tab name whose tmux session is "…__logs__api". The old parse split on
-// the LAST "__" and reserved "api", leaving "logs__api" free — so a later
-// tab-create --name logs__api derived the SAME session the renamed tab still
-// owns and collided at spawn. The token must be the whole "logs__api".
+// the LAST "__" and reserved "api", leaving the "logs__api" token unreserved — so
+// a later tab-create --name logs__api spawned the SAME session the renamed tab
+// still owns and collided. The token must be the whole "logs__api".
 func TestRenameTab_TmuxTokenSurvivesSeparatorInName(t *testing.T) {
 	log.Initialize(false)
 	defer log.Close()
@@ -94,21 +100,22 @@ func TestRenameTab_TmuxTokenSurvivesSeparatorInName(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, firstTmux, first.tmux.SanitizedName(), "rename leaves the live session alone")
 
-	// Re-request the freed name. The reserved token is the whole "logs__api", so
-	// the new tab must be suffixed rather than deriving the live session's name.
+	// Re-request the freed name. The name comes back whole, and the SESSION is what
+	// gets suffixed — which only lands clear of the live one if the reserved token
+	// is the whole "logs__api" rather than the "api" a last-"__" split would yield.
 	second, err := inst.AddProcessTab("btop", "logs__api")
 	require.NoError(t, err)
 	assert.NotEqual(t, firstTmux, second.tmux.SanitizedName(),
 		"new tab derived the renamed tab's live session name — the separator-in-name collision")
-	assert.Equal(t, "logs__api-2", second.Name)
+	assert.Equal(t, "logs__api", second.Name)
 	assert.Equal(t, "af_sep_agent__logs__api-2", second.tmux.SanitizedName())
 }
 
-// TestRenameTab_ReclaimsItsOwnToken: excluding the renamed tab covers its token
-// as well as its name, so a tab can be renamed back to what it was. Nothing else
-// can have taken the name in the meantime — it was reserved the whole time the
-// tab held it.
-func TestRenameTab_ReclaimsItsOwnToken(t *testing.T) {
+// TestRenameTab_ReclaimsItsOwnName: the rename excludes the tab being renamed
+// from the taken set, so a tab can be renamed back to what it was called. Nothing
+// else can have taken that name in the meantime — this instance's roster is the
+// whole namespace, and the tab held the name until this very rename.
+func TestRenameTab_ReclaimsItsOwnName(t *testing.T) {
 	log.Initialize(false)
 	defer log.Close()
 

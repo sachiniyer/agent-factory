@@ -84,7 +84,7 @@ func TestPersistPollChange_PublishesRosterAsOfItsLock(t *testing.T) {
 		t.Fatalf("session %q missing from the manager", title)
 	}
 
-	name, err := manager.CreateTab(CreateTabRequest{
+	name, _, err := manager.CreateTab(CreateTabRequest{
 		Title: title, RepoID: repo.ID, Kind: "web", URL: "http://localhost:5173", Name: "livepreview",
 	})
 	if err != nil {

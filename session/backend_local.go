@@ -558,15 +558,15 @@ func (b *LocalBackend) setupTabs(i *Instance) {
 	// dead-shell replacement below applies.
 	hasShellTab := false
 	hasLiveShell := false
-	replacementShellName := ""
+	var replacementShell *Tab
 	for idx, tab := range tabs {
 		if idx == 0 {
 			continue
 		}
 		if tab.Kind == TabKindShell {
 			hasShellTab = true
-			if replacementShellName == "" {
-				replacementShellName = tab.Name
+			if replacementShell == nil {
+				replacementShell = tab
 			}
 		}
 		if tab.tmux == nil {
@@ -605,12 +605,31 @@ func (b *LocalBackend) setupTabs(i *Instance) {
 	// A persisted shell tab restored dead (#991): create a fresh shell session
 	// as a sibling of the agent session so it inherits the agent's PTY factory /
 	// executor — real in production, mock in tests — keeping the create path
-	// hermetic. The name extends the agent session's name deterministically so
-	// it is collision-free and restorable by exact name.
-	if replacementShellName == "" {
-		replacementShellName = shellTabName
+	// hermetic.
+	//
+	// Reuse the dead tab's OWN persisted tmux name rather than re-deriving one
+	// from its display name. Re-deriving is unsafe now that the two namespaces are
+	// independent (#1957, see tab_names.go): a shell tab named "shell" may hold the
+	// session "…__shell-2" because a renamed tab still owns "…__shell", and
+	// re-deriving would have this replacement collide with that live session. Its
+	// own name is also the right answer on its merits — the session it names is
+	// dead, so retaking it is free, and the tab keeps the session name already
+	// persisted against it. uniqueTabTmuxName covers the no-persisted-name case
+	// (no shell tab to inherit from, or a legacy row with an empty TmuxName).
+	replacementShellName := shellTabName
+	replacementTmuxName := ""
+	if replacementShell != nil {
+		if replacementShell.Name != "" {
+			replacementShellName = replacementShell.Name
+		}
+		if replacementShell.tmux != nil {
+			replacementTmuxName = replacementShell.tmux.SanitizedName()
+		}
 	}
-	shellTmux := agentTmux.NewSiblingSession(agentTmux.SanitizedName()+"__"+replacementShellName, defaultShell())
+	if replacementTmuxName == "" {
+		replacementTmuxName = uniqueTabTmuxName(tabs, agentTmux.SanitizedName(), replacementShellName)
+	}
+	shellTmux := agentTmux.NewSiblingSession(replacementTmuxName, defaultShell())
 	if err := shellTmux.Start(worktreePath); err != nil {
 		log.WarningLog.Printf("start shell tab for %q failed: %v", i.Title, err)
 		return

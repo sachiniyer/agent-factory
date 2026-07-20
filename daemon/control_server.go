@@ -300,11 +300,12 @@ func (s *controlServer) CreateTab(req CreateTabRequest, resp *CreateTabResponse)
 	if err := validateRPCRepoID(req.RepoID); err != nil {
 		return err
 	}
-	name, err := s.manager.CreateTab(req)
+	name, tmuxName, err := s.manager.CreateTab(req)
 	if err != nil {
 		return err
 	}
 	resp.Name = name
+	resp.TmuxName = tmuxName
 	return nil
 }
 
