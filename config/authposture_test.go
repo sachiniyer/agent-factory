@@ -63,24 +63,32 @@ func TestAuthPostureDefaults(t *testing.T) {
 		"listen_addr must default to loopback — it is what bounds the tokenless default")
 }
 
-// TestValidateListenerAuthPosture is the #2090 refusal contract: the daemon
-// starts in every posture that authenticates network peers (or keeps them out
-// entirely) and refuses in the one that does not.
+// TestListenerExposureNotice is the #2168 Phase 0 contract: NO posture is
+// refused any more, and the one posture that serves the control API to
+// unauthenticated network peers says so.
+//
+// The owner's decision this pins: "just allow binding to 0.0.0.0 without a
+// token. Assume users are safe and will do the right thing." #2090 had made this
+// combination a fatal startup refusal; the notice is what replaced it. The
+// property that must hold is therefore about the RETURN TYPE as much as the
+// table — a string cannot be returned up a call stack as a failure, which is how
+// the refusal reached os.Exit(1) and crash-looped the autostart unit (#2168 §1.2).
 //
 // The require_loopback_token rows are the subtle ones and the reason this table
 // exists. That key reads like a second lock, but daemon.webListenerPolicy sets
 // tokenDisabled = !RequireToken and tokenDisabled short-circuits the gate, so
 // while require_token is false NOTHING is authenticated — require_loopback_token
-// only withdraws an exemption that a disabled token already made moot. A guard
-// that let require_loopback_token = true excuse a network bind would hand back
-// the exact hole #2090 reported, under a config that reads secure.
-func TestValidateListenerAuthPosture(t *testing.T) {
+// only withdraws an exemption that a disabled token already made moot. A notice
+// that let require_loopback_token = true excuse a network bind would leave the
+// user unwarned about the exact hole #2090 reported, under a config that reads
+// secure.
+func TestListenerExposureNotice(t *testing.T) {
 	cases := []struct {
 		name                 string
 		listenAddr           string
 		requireToken         bool
 		requireLoopbackToken bool
-		wantRefusal          bool
+		wantNotice           bool
 	}{
 		// Safe: nothing off-box can reach a loopback listener, so the tokenless
 		// default (the shipped one) stays allowed.
@@ -117,45 +125,48 @@ func TestValidateListenerAuthPosture(t *testing.T) {
 			cfg.RequireToken = tc.requireToken
 			cfg.RequireLoopbackToken = tc.requireLoopbackToken
 
-			err := ValidateListenerAuthPosture(cfg)
-			if !tc.wantRefusal {
-				assert.NoError(t, err, "this posture authenticates network peers (or admits none) and must start")
+			notice := ListenerExposureNotice(cfg)
+			if !tc.wantNotice {
+				assert.Empty(t, notice, "this posture authenticates network peers (or admits none) — nothing to warn about")
 				return
 			}
-			require.Error(t, err, "an unauthenticated network listener must refuse to start")
-			// The refusal is only useful if it says what to change, so pin the
-			// remediation rather than just the failure.
-			assert.Contains(t, err.Error(), tc.listenAddr, "name the offending address")
-			assert.Contains(t, err.Error(), "af config set require_token true", "offer the token fix")
-			assert.Contains(t, err.Error(), "af config set listen_addr 127.0.0.1:8443", "offer the loopback fix")
+			require.NotEmpty(t, notice, "an unauthenticated network listener must be reported")
+			// The warning is only useful if it says what is exposed and how to add
+			// auth, so pin both rather than just its existence.
+			assert.Contains(t, notice, tc.listenAddr, "name the exposed address")
+			assert.Contains(t, notice, "DeliverPrompt", "say what an unauthenticated peer can actually do")
+			assert.Contains(t, notice, "require_token = true", "offer the token fix")
+			// It reports; it does not forecast a failure that no longer happens.
+			assert.NotContains(t, notice, "refus", "the posture is allowed since #2168 Phase 0 — nothing refuses it")
+			assert.NotContains(t, notice, "\n", "one line: this goes in a log and a status row")
 		})
 	}
 }
 
-// TestValidateListenerAuthPostureNilConfig pins the nil case: callers pre-flight
-// this against a config they may have failed to load, and a nil-deref there would
-// turn a security guard into a crash on an unrelated path.
-func TestValidateListenerAuthPostureNilConfig(t *testing.T) {
-	assert.NoError(t, ValidateListenerAuthPosture(nil))
+// TestListenerExposureNoticeNilConfig pins the nil case: callers reach this with
+// a config they may have failed to load, and a nil-deref there would turn a
+// diagnostic into a crash on an unrelated path.
+func TestListenerExposureNoticeNilConfig(t *testing.T) {
+	assert.Empty(t, ListenerExposureNotice(nil))
 }
 
-// TestDefaultConfigStartsClean pins the upgrade promise for the common case: a
-// user who never touched these keys is not stopped by the new guard.
-func TestDefaultConfigStartsClean(t *testing.T) {
-	assert.NoError(t, ValidateListenerAuthPosture(DefaultConfig()),
-		"the shipped default must never trip the guard it ships with")
+// TestDefaultConfigHasNoExposureNotice pins the common case: a user who never
+// touched these keys is never warned about an exposure they do not have.
+func TestDefaultConfigHasNoExposureNotice(t *testing.T) {
+	assert.Empty(t, ListenerExposureNotice(DefaultConfig()),
+		"the shipped default is loopback-bound — it must never trip the warning it ships with")
 }
 
-// TestExposureWarningAgreesWithTheRefusal pins the two halves of the #2090
-// defense to the same predicate: `af config set` warns exactly when the daemon
-// would refuse to start.
+// TestExposureWarningAgreesWithTheDaemonNotice pins the two user-facing halves of
+// the #2090 report to the same predicate: `af config set` warns at write time
+// exactly when the daemon will warn at bind time.
 //
-// Drift here is silently awful in both directions. A warning without a refusal is
-// the pre-#2090 world (told about it, exposed anyway). A refusal without a warning
-// is worse UX than it looks: `af config set` exits 0 and says nothing, and the
-// daemon only stops at the NEXT restart — possibly days later, with no memory of
-// which config change caused it.
-func TestExposureWarningAgreesWithTheRefusal(t *testing.T) {
+// Drift here is silently awful in both directions. A set-time warning with no
+// daemon notice means the only record of an exposure is a line the user saw once,
+// days before it started serving. A daemon notice with no set-time warning means
+// `af config set` exits 0, says nothing, and the exposure surfaces only in a log
+// file at the next restart — with no memory of which config change caused it.
+func TestExposureWarningAgreesWithTheDaemonNotice(t *testing.T) {
 	addrs := []string{
 		"127.0.0.1:8443", "[::1]:8443", "localhost:8443", "127.0.0.2:8443",
 		"0.0.0.0:8443", "[::]:8443", ":8443", "10.0.0.5:8443", "192.168.1.10:8443", "",
@@ -169,13 +180,13 @@ func TestExposureWarningAgreesWithTheRefusal(t *testing.T) {
 
 				warned := exposureWarning(cfg, "listen_addr", addr) != ""
 
-				refusedCfg := DefaultConfig()
-				refusedCfg.ListenAddr = addr
-				refusedCfg.RequireToken = requireToken
-				refused := ValidateListenerAuthPosture(refusedCfg) != nil
+				noticedCfg := DefaultConfig()
+				noticedCfg.ListenAddr = addr
+				noticedCfg.RequireToken = requireToken
+				noticed := ListenerExposureNotice(noticedCfg) != ""
 
-				assert.Equal(t, refused, warned,
-					"set-time warning and daemon refusal must fire on exactly the same configs")
+				assert.Equal(t, noticed, warned,
+					"set-time warning and daemon notice must fire on exactly the same configs")
 			})
 		}
 	}

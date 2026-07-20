@@ -136,27 +136,29 @@ func startHTTPServer(manager *Manager, scheduler *taskScheduler, watchers *watch
 		// listener never exempts loopback: a same-host reverse proxy connects from
 		// 127.0.0.1, so exempting it would bypass the token (webListenerPolicy).
 		policy := webListenerPolicy(manager.cfg)
-		// Defense in depth for #2090. RunDaemon already refuses to start in this
-		// configuration, so in production this is unreachable — it is kept because
-		// it makes the bind site safe on its OWN terms rather than by trusting its
-		// caller: any future entry point that reaches startHTTPServer without
-		// RunDaemon's gate still cannot open an unauthenticated network listener.
-		// This used to be a log warning that then bound the listener anyway, which
-		// is the #2090 exposure exactly: the operator on the reporting box had the
-		// warning in their log and served the control plane regardless.
+		notice := config.ListenerExposureNotice(manager.cfg)
+		// A tokenless NETWORK listener binds (#2168 Phase 0). #2090 made this site
+		// skip the bind, backed by a fatal refusal in RunDaemon; the owner reversed
+		// both — "just allow binding to 0.0.0.0 without a token" — so the exposure
+		// is reported, not prevented.
 		//
-		// Skipping the listener (rather than failing startup) matches this
-		// function's contract that the web server is never allowed to take the
-		// unix control plane down with it.
-		if config.ListenerServesUnauthenticatedNetwork(manager.cfg.ListenAddr, manager.cfg.RequireToken) {
-			log.ErrorLog.Printf("refusing to serve the daemon web API on %q: it is reachable from the network but require_token is false, which would expose the full control API (including DeliverPrompt) unauthenticated. Set require_token = true, or bind listen_addr to 127.0.0.1. The web server is disabled for this run; the local unix control plane is unaffected.", manager.cfg.ListenAddr)
-		} else if closer, info, err := startTCPListener(mux, manager.cfg, policy, withWebShell); err != nil {
+		// This is the ONE place the notice is emitted. startHTTPServer runs exactly
+		// once per daemon start and only reaches the warning when the port actually
+		// opened, so the operator gets a single accurate line rather than a warning
+		// about a listener that was never served — and nothing on a per-request or
+		// per-connection path repeats it.
+		if closer, info, err := startTCPListener(mux, manager.cfg, policy, withWebShell); err != nil {
 			log.WarningLog.Printf("failed to start daemon HTTP TCP listener on %q: %v", manager.cfg.ListenAddr, err)
 		} else {
 			closeTCP = closer
 			log.InfoLog.Printf("daemon HTTP TCP listener enabled on %s (plain HTTP — terminate TLS at a proxy if needed)", info.Addr)
 			log.InfoLog.Printf("  bearer token: %s", info.Token)
 			switch {
+			// The exposure warning REPLACES the tokenless banner line for a network
+			// bind rather than joining it: they say the same thing, and saying it
+			// twice is how a warning stops being read.
+			case notice != "":
+				log.WarningLog.Printf("%s", notice)
 			case policy.tokenDisabled:
 				log.InfoLog.Printf("  all peers connect with NO token (require_token defaults to false; set require_token = true to require auth)")
 			case policy.loopbackExempt:

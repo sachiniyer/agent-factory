@@ -594,11 +594,11 @@ per-workspace backend a daemon drives on a remote machine.
 Clients reach the daemon over a local Unix socket by default. To drive one from
 another machine, either ssh to that host and run 'af' there, or give listen_addr
 a routable address and point a client at it with the persistent --daemon-url and
---token flags. A routable listener REQUIRES require_token = true: the daemon
-refuses to start on a non-loopback listen_addr while the token is off, rather
-than serving the control API to anyone who can reach it. That listener speaks
-plain HTTP, so put it behind a reverse proxy or a private network
-(Tailscale/VPN) if you need TLS.
+--token flags. A routable listener is allowed with the token off, but af warns
+once at daemon start: with require_token = false anyone who can reach the
+address drives your agents, so set require_token = true unless you trust the
+network. That listener speaks plain HTTP either way, so put it behind a reverse
+proxy or a private network (Tailscale/VPN) if you need TLS.
 Full guide: https://sachiniyer.github.io/agent-factory/remote-http-auth/
 
 Install the daemon as a user-level autostart unit (systemd user service on

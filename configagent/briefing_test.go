@@ -107,13 +107,20 @@ func TestBriefingStatesTheScopeFence(t *testing.T) {
 // called the single most consequential thing the walkthrough does: opening af to
 // the network must never leave the token off. If this text drifts, the walkthrough
 // can talk a user into an unauthenticated control plane on their LAN.
+//
+// #2168 Phase 0 made this rule MORE load-bearing, not less. af no longer refuses
+// the pairing, so a walkthrough that writes it gets no correction from the daemon
+// — the briefing is the last thing standing between a user who asked for "access
+// from my phone" and an open control plane. Hence the pinned phrase is now about
+// the agent's own initiative: it may write the pairing if the user insists, and
+// must never reach for it unprompted.
 func TestBriefingCouplesListenAddrToRequireToken(t *testing.T) {
 	for _, mode := range []Mode{ModeOnboard, ModeChange} {
 		out := BuildBriefing(mode, briefingConfig(), "/tmp/af/config.toml")
 
 		for _, want := range []string{
 			"af config set require_token true",
-			"Never leave the user with a non-loopback",
+			"Never write a non-loopback listen_addr with require_token = false on your own",
 			"require_token = false",
 		} {
 			if !strings.Contains(out, want) {

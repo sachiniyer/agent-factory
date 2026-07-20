@@ -56,16 +56,16 @@ same.
     ```
 
 - **`0.0.0.0:8443` (or a LAN/Tailscale IP) — expose to the network.** The listener
-  is reachable from the network. A network bind **requires `require_token = true`**
-  — the daemon refuses to start otherwise (see [Remote daemon
-  access](remote-http-auth.md#the-tokenless-network-refusal)). Only bind a routable
+  is reachable from the network. Pair it with **`require_token = true`** — af
+  serves a tokenless network bind and only warns (see [Remote daemon
+  access](remote-http-auth.md#the-tokenless-network-warning)). Only bind a routable
   interface when you must, and put it behind a firewall. Hand-edit your global
   config and restart the daemon:
 
     ```toml
     # ~/.agent-factory/config.toml
     listen_addr = "0.0.0.0:8443"
-    require_token = true   # required: the default is false, and a non-loopback bind won't start without this
+    require_token = true   # strongly recommended: the default is false — no token at all
     ```
 
     ```bash
@@ -214,7 +214,8 @@ Two cases break that assumption, and both are on you to close:
   `listen_addr = ""` to turn the web server off.
 - **A network bind**: pointing `listen_addr` at a routable interface while leaving
   the tokenless default would serve an **unauthenticated control plane** to anyone
-  who can route to it, so the daemon **refuses to start** on that combination. Set
+  who can route to it. af allows that and warns once at daemon start rather than
+  refusing, so this one is on you. Set
   `require_token = true` to bind the network, or keep `listen_addr` on loopback
   and reach it over SSH/Tailscale port-forwarding.
 
@@ -621,8 +622,8 @@ While a terminal is attached, all keys except `Escape` flow to the agent.
     `require_token` defaults to `false`, so pointing `listen_addr` at a routable
     interface (`0.0.0.0:8443`, a LAN/Tailscale IP) would serve **full control of
     your daemon to anyone who can reach the port, with no credential**. The daemon
-    **refuses to start** on that combination rather than serving it: a non-loopback
-    `listen_addr` must set `require_token = true`. This is the boundary on the
+    **warns once at daemon start** on that combination and serves it anyway: a
+    non-loopback `listen_addr` should set `require_token = true`. This is the boundary on the
     zero-friction default — a stock install is protected by the loopback bind, and
     af will not let that protection be removed silently.
 

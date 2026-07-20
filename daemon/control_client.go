@@ -99,23 +99,19 @@ func ensureDaemonWithLauncher(launch func() error) error {
 		log.WarningLog.Printf("failed to stop stale daemon before launch: %v", err)
 	}
 
-	// Pre-flight the #2090 auth-posture refusal so the operator SEES it. RunDaemon
-	// is the authoritative gate, but a spawned daemon's stderr is discarded
-	// (startDaemonChild), so its refusal would reach the user only as the 5s
-	// "daemon did not become ready" timeout below — a dead end for the upgrade
-	// case this guard exists to catch. Returning the same error here puts the
-	// remediation in front of whoever just ran `af`.
+	// No auth-posture pre-flight here any more (#2168 Phase 0). This used to load
+	// the config and return the #2090 refusal before spawning, because a spawned
+	// daemon's stderr is discarded (startDaemonChild) and the refusal would
+	// otherwise reach the user only as the 5s "did not become ready" timeout
+	// below. There is nothing left to pre-flight: a tokenless network bind starts
+	// and serves, so this path can no longer predict a startup failure — and
+	// keeping the check would turn the very config the owner chose to allow into
+	// an `af` that refuses to run at all.
 	//
-	// Read-only on purpose: LoadConfigReadOnly materializes nothing and converts
-	// nothing, so pre-flighting a launch never writes config as a side effect. A
-	// config that cannot be read is NOT treated as a refusal — that is the loader's
-	// error to report, and failing the launch here would misattribute it; the
-	// daemon re-checks the posture regardless, so nothing gets past by that route.
-	if load, err := config.LoadConfigReadOnly(); err == nil {
-		if postureErr := config.ValidateListenerAuthPosture(load.Config); postureErr != nil {
-			return postureErr
-		}
-	}
+	// The exposure is still reported, on surfaces the user is actually looking
+	// at: `af config set` warns at write time, the daemon warns once when the
+	// listener binds (startHTTPServer), and `af doctor` / `af daemon status`
+	// carry a row for it.
 
 	if err := launch(); err != nil {
 		return err

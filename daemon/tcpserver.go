@@ -65,10 +65,11 @@ type tokenGatePolicy struct {
 //
 //   - tokenDisabled from require_token=false, THE DEFAULT — drop the token for ALL
 //     peers, so the daemon-served web UI opens with no login. Paired with the
-//     loopback-only default listen_addr, nothing off-host can reach it. This
-//     policy is never constructed for a NETWORK bind under the default: since
-//     #2090 the daemon refuses to start there, and startHTTPServer refuses to bind
-//     the listener, so a tokenless gate only ever fronts a loopback listener.
+//     loopback-only default listen_addr, nothing off-host can reach it. A tokenless
+//     gate CAN front a network listener: #2090 refused to bind that combination,
+//     and #2168 Phase 0 reversed the refusal by owner decision, so startHTTPServer
+//     binds it and warns once instead. Nothing below authenticates such a peer —
+//     that is the configuration doing exactly what it says.
 //   - loopbackExempt lets same-machine peers skip the token, BUT only when the
 //     listener is LOOPBACK-BOUND. On a network bind the exemption is withheld
 //     regardless of require_loopback_token: a same-host reverse proxy connects
