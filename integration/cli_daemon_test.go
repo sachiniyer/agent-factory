@@ -32,6 +32,7 @@ type instanceData struct {
 	TmuxName    string `json:"tmux_name"`
 	BackendType string `json:"backend_type"`
 	Tabs        []struct {
+		ID   string `json:"id"`
 		Name string `json:"name"`
 		Kind int    `json:"kind"`
 	} `json:"tabs"`

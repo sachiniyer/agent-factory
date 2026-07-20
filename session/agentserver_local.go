@@ -298,6 +298,41 @@ func (s *localAgentServer) ensureBrokerByID(tabID string) (*ptyBroker, error) {
 	return br, nil
 }
 
+// tabStreamCloser is the optional agent-server capability of ending ONE tab's
+// PTY stream — the data-plane half of closing a tab. It is deliberately narrow
+// and unexported: CloseTab is a session-package operation, and a runtime that
+// has no in-process broker to close (the remote agent-server, whose brokers live
+// on the far side of the wire) simply does not implement it.
+type tabStreamCloser interface {
+	closeTabStream(tabID string)
+}
+
+var _ tabStreamCloser = (*localAgentServer)(nil)
+
+// closeTabStream tears down the data plane of the ONE tab named by tabID (#2136):
+// its subscribers' NextEvent returns ErrTabClosed and its clientless capture
+// stops, so a PTY-only client learns the tab is gone at once instead of blocking
+// on a stream that will never produce another byte. Every OTHER tab's broker is
+// untouched — the map is keyed by the tab's STABLE id (#1738), so this can only
+// ever reach the tab that was actually closed, even after a reorder.
+//
+// The broker is also dropped from the map: the id is never reused, so keeping a
+// closed broker under it would only retain the ring buffer. Safe to call for a
+// tab that has no broker (nobody ever streamed it), was already closed, or on an
+// agent-server already torn down by Kill — each is a no-op.
+func (s *localAgentServer) closeTabStream(tabID string) {
+	if tabID == "" {
+		return
+	}
+	s.mu.Lock()
+	br := s.brokers[tabID]
+	delete(s.brokers, tabID)
+	s.mu.Unlock()
+	if br != nil {
+		br.closeTab()
+	}
+}
+
 func (s *localAgentServer) SubscribeTab(tabID string, since Seq) (PTYSubscription, error) {
 	br, err := s.ensureBrokerByID(tabID)
 	if err != nil {

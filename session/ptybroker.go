@@ -120,6 +120,12 @@ type ptyBroker struct {
 	capturing   bool
 	stopCapture func() // tears down the capture goroutine + clientless channel
 	closed      bool
+	// tabClosed records that this broker was shut down because ITS TAB was closed
+	// (#2136) rather than because the whole session was torn down. It only selects
+	// which end-of-stream error NextEvent reports (ErrTabClosed vs bare io.EOF);
+	// the teardown itself is identical. Set under mu in the same section that
+	// latches closed, so a subscriber can never observe one without the other.
+	tabClosed bool
 }
 
 func newPTYBroker(ch clientlessChannel) *ptyBroker {
@@ -608,11 +614,23 @@ func (b *ptyBroker) remove(id uint64) {
 }
 
 // close tears down the broker: every subscriber's NextEvent returns io.EOF and
-// the clientless capture is stopped. Called when the session is killed. Holds
-// captureMu (captureMu-then-mu ordering) so it cannot race a concurrent
+// the clientless capture is stopped. Called when the session is killed.
+func (b *ptyBroker) close() { b.shutdown(false) }
+
+// closeTab is close for a broker whose TAB was closed (#2136) — the same
+// teardown, but each subscriber's NextEvent reports ErrTabClosed so the WS writer
+// can tell the client its tab went away rather than leaving it to time out on the
+// keepalive. Only the closed tab's broker is shut down; a sibling tab of the same
+// session has its own broker and keeps streaming.
+func (b *ptyBroker) closeTab() { b.shutdown(true) }
+
+// shutdown is the shared teardown behind close/closeTab. Holds captureMu
+// (captureMu-then-mu ordering) so it cannot race a concurrent
 // ensureCaptureStarted into resurrecting a capture on a closed broker (#1661) —
-// a bring-up that lost the race sees b.closed and unwinds.
-func (b *ptyBroker) close() {
+// a bring-up that lost the race sees b.closed and unwinds. Idempotent: a second
+// shutdown (a tab closed while the session is being killed, or the reverse) sees
+// closed and returns without re-running the teardown or flipping the reason.
+func (b *ptyBroker) shutdown(tabClosed bool) {
 	b.captureMu.Lock()
 	defer b.captureMu.Unlock()
 
@@ -622,6 +640,7 @@ func (b *ptyBroker) close() {
 		return
 	}
 	b.closed = true
+	b.tabClosed = tabClosed
 	b.wakeAllLocked()
 	var stop func()
 	if b.capturing {
@@ -673,7 +692,14 @@ func (s *ptySub) NextEvent(ctx context.Context) (PTYEvent, error) {
 	for {
 		s.br.mu.Lock()
 		if s.br.closed {
+			tabClosed := s.br.tabClosed
 			s.br.mu.Unlock()
+			if tabClosed {
+				// ErrTabClosed wraps io.EOF, so a consumer that only asks "is the stream
+				// over" is unaffected; the daemon's WS writer asks the narrower question
+				// and turns it into an exit with a tab_closed reason (#2136).
+				return PTYEvent{}, ErrTabClosed
+			}
 			return PTYEvent{}, io.EOF
 		}
 		// The initial screen repaint is delivered before anything else, so a fresh
