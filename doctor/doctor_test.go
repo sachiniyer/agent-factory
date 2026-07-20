@@ -837,22 +837,23 @@ func TestSummarizedMoreCountIsAnchoredNotOpportunistic(t *testing.T) {
 		"the real roll-up must still stand for every process it folded")
 }
 
-// TestDaemonUnauthenticatedListenerIsNotAPass is the #2090 diagnosability lock.
+// TestDaemonUnauthenticatedListenerWarnsWithoutFailing is the #2168 Phase 0
+// doctor contract, and it flips the #2090 assertion that stood here.
 //
-// A daemon that REFUSES to start and a daemon that has simply not been started
-// yet present identically at the socket: no file, no ping. Doctor used to read
-// that as "not running; starts on demand" — a PASS asserting a future the config
-// has already ruled out. The user's symptom (the web UI is gone after an upgrade)
-// then had no diagnostic thread at all: the TUI works, doctor is green, and the
-// only trace is a line in agent-factory.log.
+// #2090 read a tokenless network bind as a daemon that could not start, so the
+// `daemon` row FAILED with "not running, and it cannot start". The daemon starts
+// now, by owner decision, so that row would be a fabricated negative — doctor
+// would be asserting a refusal that no longer happens. What remains true is the
+// exposure, and doctor is one of the few places a user will actually read it.
 //
-// So on the refusing config the daemon row must FAIL and carry the remediation.
-func TestDaemonUnauthenticatedListenerIsNotAPass(t *testing.T) {
+// Two properties, and the second is the one with teeth: the exposure gets its own
+// WARN row, and it is not a `problem` — `af doctor` must exit 0 on a posture the
+// owner decided users may choose. A Warn that still failed the run would be the
+// refusal wearing a different hat.
+func TestDaemonUnauthenticatedListenerWarnsWithoutFailing(t *testing.T) {
 	testguard.IsolateTmux(t)
 	opts := testOptions(t, false)
 
-	// The exact upgrade case: an explicit network listen_addr from an era when
-	// that was the shipped default, still paired with the tokenless default.
 	require.NoError(t, os.WriteFile(
 		filepath.Join(opts.ConfigDir, config.TomlConfigFileName),
 		[]byte("listen_addr = '0.0.0.0:8443'\nrequire_token = false\n"), 0600))
@@ -860,7 +861,7 @@ func TestDaemonUnauthenticatedListenerIsNotAPass(t *testing.T) {
 	opts.daemonHealth = func() daemon.HealthStatus {
 		return daemon.HealthStatus{
 			SocketPath:    filepath.Join(opts.ConfigDir, "daemon.sock"),
-			SocketExists:  false, // never started — because it cannot
+			SocketExists:  false, // simply not started yet
 			PingErr:       errNoDaemon,
 			HTTPListening: daemon.Undetermined(errNoDaemon),
 		}
@@ -869,18 +870,29 @@ func TestDaemonUnauthenticatedListenerIsNotAPass(t *testing.T) {
 	report, err := Run(opts)
 	require.NoError(t, err)
 
-	rows := findCheckRows(report, "daemon")
-	require.Len(t, rows, 1)
-	require.Equal(t, StatusFail, rows[0].Status,
-		"a daemon that cannot start must not be reported as a healthy on-demand daemon")
-	require.Contains(t, rows[0].Detail, "cannot start")
-	require.Contains(t, rows[0].Remediation, "require_token true",
-		"the row must carry the fix, since the refusal itself is only visible in the log")
+	// The daemon row is back to the plain truth: nothing is running, and it will
+	// start when asked. Under #2090 this row was a Fail.
+	daemonRows := findCheckRows(report, "daemon")
+	require.Len(t, daemonRows, 1)
+	require.Equal(t, StatusPass, daemonRows[0].Status,
+		"the daemon starts fine on this config now — doctor must not report a refusal that cannot happen")
+
+	// The exposure is still reported, on its own row, with the fix.
+	listenerRows := findCheckRows(report, "listener")
+	require.Len(t, listenerRows, 1)
+	require.Equal(t, StatusWarn, listenerRows[0].Status,
+		"an unauthenticated network listener is worth saying — as a warning, not a failure")
+	require.False(t, listenerRows[0].Problem,
+		"this posture is allowed since #2168 Phase 0, so it must not drive a nonzero `af doctor` exit")
+	require.Contains(t, listenerRows[0].Detail, "0.0.0.0:8443")
+	require.Contains(t, listenerRows[0].Detail, "DeliverPrompt",
+		"say what an unauthenticated peer can actually do, not just that auth is off")
+	require.Contains(t, listenerRows[0].Remediation, "require_token true")
 }
 
 // TestDaemonNotRunningStillPassesOnASafeConfig guards the other direction: the
-// #2090 row must fire on the unsafe posture ONLY. An ordinary user who has just
-// not started a daemon yet still gets the on-demand pass, not a scary failure.
+// exposure row must fire on the unsafe posture ONLY. An ordinary user who has just
+// not started a daemon yet gets the on-demand pass and no listener row at all.
 func TestDaemonNotRunningStillPassesOnASafeConfig(t *testing.T) {
 	testguard.IsolateTmux(t)
 	opts := testOptions(t, false)
@@ -905,4 +917,33 @@ func TestDaemonNotRunningStillPassesOnASafeConfig(t *testing.T) {
 	require.Len(t, rows, 1)
 	require.Equal(t, StatusPass, rows[0].Status,
 		"the loopback default is safe — it must keep the on-demand pass")
+	require.Empty(t, findCheckRows(report, "listener"),
+		"nothing is exposed on the shipped default, so there is nothing to warn about")
+}
+
+// TestAuthenticatedNetworkListenerIsNotWarned pins that require_token = true is
+// untouched by #2168 Phase 0. A network bind that authenticates its peers is the
+// posture the docs recommend; warning about it would train users to ignore the
+// row that matters.
+func TestAuthenticatedNetworkListenerIsNotWarned(t *testing.T) {
+	testguard.IsolateTmux(t)
+	opts := testOptions(t, false)
+
+	require.NoError(t, os.WriteFile(
+		filepath.Join(opts.ConfigDir, config.TomlConfigFileName),
+		[]byte("listen_addr = '0.0.0.0:8443'\nrequire_token = true\n"), 0600))
+
+	opts.daemonHealth = func() daemon.HealthStatus {
+		return daemon.HealthStatus{
+			SocketPath:    filepath.Join(opts.ConfigDir, "daemon.sock"),
+			SocketExists:  false,
+			PingErr:       errNoDaemon,
+			HTTPListening: daemon.Undetermined(errNoDaemon),
+		}
+	}
+
+	report, err := Run(opts)
+	require.NoError(t, err)
+	require.Empty(t, findCheckRows(report, "listener"),
+		"a network bind with the token on is authenticated — no exposure to report")
 }

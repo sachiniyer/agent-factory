@@ -120,21 +120,9 @@ func checkDaemonHealth(ctx *scanContext, report *Report, h daemon.HealthStatus, 
 			"fix AGENT_FACTORY_HOME and rerun `af doctor`")
 		return
 	}
-	// "not running" and "not running BECAUSE it refuses to" look identical from
-	// the socket, and only one of them is healthy. Ask the config before saying
-	// "starts on demand": under the #2090 auth posture the daemon will not start,
-	// on demand or otherwise, and reporting a cheerful pass would leave the user
-	// with a vanished web UI, a green doctor, and no thread to pull. The
-	// remediation is the whole point of the refusal, so doctor must carry it.
-	postureErr := config.ValidateListenerAuthPosture(cfg)
-
 	switch {
 	case h.PingErr == nil:
 		report.Pass(sectionDaemon, "daemon", "responding on "+h.SocketPath)
-	case postureErr != nil:
-		report.Fail(sectionDaemon, "daemon",
-			fmt.Sprintf("not running, and it cannot start: listen_addr %q is reachable from the network while require_token is false, which would serve the control API unauthenticated", cfg.ListenAddr),
-			"run `af config set require_token true` to require a bearer token, or `af config set listen_addr 127.0.0.1:8443` to serve the web UI locally only (or `af config set listen_addr \"\"` to turn it off)")
 	case !h.SocketExists:
 		report.Pass(sectionDaemon, "daemon", "not running; starts on demand")
 	default:
@@ -164,6 +152,31 @@ func checkDaemonHealth(ctx *scanContext, report *Report, h daemon.HealthStatus, 
 						"harmless and needs no action", false)
 			},
 		)
+	}
+	// The #2090 exposure is INFORMATIONAL since #2168 Phase 0: a tokenless
+	// network listener is an allowed, deliberate configuration, so this is a Warn
+	// with problem=false — it never makes `af doctor` exit non-zero over a posture
+	// the owner decided users may choose. It was a Fail ("not running, and it
+	// cannot start") back when the daemon refused; there is no such dead end left
+	// to report.
+	//
+	// Reported independently of daemon liveness, unlike the old row: the exposure
+	// matters MOST when the daemon is up, because then it is actually being
+	// served. (What doctor reads is the config on disk, which a running daemon may
+	// predate — naming the running daemon's booted posture is #2168 Phase 4.)
+	//
+	// cfg is nil when the config could not be loaded at all (doctor.Run passes
+	// what it got). Say nothing then rather than guessing a posture — the load
+	// failure has its own row, and inventing either answer here would be worse
+	// than the silence.
+	if cfg != nil && config.ListenerServesUnauthenticatedNetwork(cfg.ListenAddr, cfg.RequireToken) {
+		report.Warn(sectionDaemon, "listener",
+			fmt.Sprintf("listen_addr %q is reachable from the network and require_token is false, so the control API "+
+				"(including DeliverPrompt, which runs instructions through your agents) is served to anyone who can "+
+				"reach that address, with no authentication", cfg.ListenAddr),
+			"if that is not what you want, run `af config set require_token true` to require a bearer token (`af token "+
+				"show` prints it), or `af config set listen_addr 127.0.0.1:8443` to serve this machine only",
+			false)
 	}
 	// "A unit file exists" is not "this home has autostart". There is one unit
 	// per user and it bakes its AGENT_FACTORY_HOME at install time, so under a

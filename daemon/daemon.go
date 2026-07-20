@@ -41,26 +41,24 @@ var restoreManagerForStartup = func(m *Manager) error { return m.RestoreInstance
 func RunDaemon(cfg *config.Config) error {
 	log.InfoLog.Printf("starting daemon")
 
-	// Refuse to serve the control API unauthenticated on a network interface
-	// (#2090). This is the authoritative gate: it runs BEFORE the ping, the home
-	// lock, the socket, and the PID file, so a daemon in this configuration
-	// touches nothing on its way out and cannot be mistaken for a live one.
+	// No auth-posture gate here, deliberately (#2168 Phase 0). #2090 made a
+	// tokenless network listener a FATAL startup refusal at this exact spot; the
+	// owner reversed that: binding 0.0.0.0 with no token is allowed, and the
+	// exposure is surfaced as a warning instead of decided for the user.
 	//
-	// It is fatal by design. Every other startup failure here is deliberately
-	// non-fatal (a failed web bind is logged and skipped so the unix control
-	// plane survives — startHTTPServer), but that trade runs the other way for
-	// this one: degrading to "serve it anyway" is precisely the bug. Under the
-	// autostart unit this surfaces as a failed unit rather than a silent
-	// exposure, which is the outcome we want operators to notice.
+	// Two reasons it does not simply move up here as a log line. The exposure is
+	// only real once the listener actually binds — a warning emitted here would
+	// still fire when the web port is taken and nothing gets served — and the
+	// "say it exactly once" requirement is easiest to keep honest at the single
+	// site that opens the port. So the notice
+	// (config.ListenerExposureNotice) is emitted by startHTTPServer, which
+	// RunDaemon calls once, below.
 	//
-	// EnsureDaemon pre-flights the same check before spawning, because a spawned
-	// daemon's stderr is discarded (startDaemonChild) — without that, an
-	// interactive `af` would show only a 5s "did not become ready" timeout and
-	// none of the guidance below.
-	if err := config.ValidateListenerAuthPosture(cfg); err != nil {
-		log.ErrorLog.Printf("%v", err)
-		return err
-	}
+	// The refusal's other effect was the #2168 incident: a config rejected on
+	// every attempt is not transient, but the autostart unit's
+	// Restart=on-failure could not tell that apart from a crash, so the unit
+	// restarted every 5s forever. Nothing here exits non-zero on config posture
+	// any more.
 
 	// Refuse to run two daemons against the same control socket. EnsureDaemon
 	// pings before launching, but a daemon started directly (af --daemon, the

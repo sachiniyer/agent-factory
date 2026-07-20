@@ -51,11 +51,11 @@ per-workspace backend a daemon drives on a remote machine.
 Clients reach the daemon over a local Unix socket by default. To drive one from
 another machine, either ssh to that host and run 'af' there, or give listen_addr
 a routable address and point a client at it with the persistent --daemon-url and
---token flags. A routable listener REQUIRES require_token = true: the daemon
-refuses to start on a non-loopback listen_addr while the token is off, rather
-than serving the control API to anyone who can reach it. That listener speaks
-plain HTTP, so put it behind a reverse proxy or a private network
-(Tailscale/VPN) if you need TLS.
+--token flags. A routable listener is allowed with the token off, but af warns
+once at daemon start: with require_token = false anyone who can reach the
+address drives your agents, so set require_token = true unless you trust the
+network. That listener speaks plain HTTP either way, so put it behind a reverse
+proxy or a private network (Tailscale/VPN) if you need TLS.
 Full guide: https://sachiniyer.github.io/agent-factory/remote-http-auth/
 
 Install the daemon as a user-level autostart unit (systemd user service on
@@ -122,11 +122,16 @@ type daemonStatusInfo struct {
 	PIDVerified       bool   `json:"pid_verified"`
 	AutostartUnit     bool   `json:"autostart_unit"`
 	BinaryStale       bool   `json:"binary_stale"`
-	// CannotStartReason is non-empty when the config would make the daemon refuse
-	// to start (#2090), so "not running" can be reported as the dead end it is
-	// rather than as a daemon waiting to be asked. Additive on the JSON surface:
-	// omitempty keeps existing consumers byte-identical when nothing is wrong.
-	CannotStartReason string `json:"cannot_start_reason,omitempty"`
+	// ExposureWarning is non-empty when the config on disk serves the control API
+	// unauthenticated on a network address (#2090) — an ALLOWED posture since
+	// #2168 Phase 0, so this reports it rather than predicting a failure.
+	//
+	// It replaces cannot_start_reason, which named a dead end that no longer
+	// exists: the daemon starts and serves in this configuration now, so a field
+	// meaning "it cannot start" could only ever have been wrong. omitempty keeps
+	// the JSON byte-identical for every consumer whose posture is safe, which is
+	// every consumer on the default config.
+	ExposureWarning string `json:"exposure_warning,omitempty"`
 }
 
 // collectDaemonStatus builds a daemonStatusInfo from the read-only health
@@ -150,19 +155,14 @@ func collectDaemonStatus() daemonStatusInfo {
 			info.HTTPSocketFile = true
 		}
 	}
-	// Read-only, and only meaningful while nothing is serving: a RUNNING daemon
-	// already proved it could start, and its posture is whatever it booted with,
-	// not whatever the file says now.
-	if !info.Running {
-		if load, err := config.LoadConfigReadOnly(); err == nil {
-			if postureErr := config.ValidateListenerAuthPosture(load.Config); postureErr != nil {
-				info.CannotStartReason = fmt.Sprintf(
-					"listen_addr %q is reachable from the network while require_token is false, which would serve the "+
-						"control API unauthenticated. Run `af config set require_token true`, or "+
-						"`af config set listen_addr 127.0.0.1:8443` to serve the web UI locally only",
-					load.Config.ListenAddr)
-			}
-		}
+	// Read-only (LoadConfigReadOnly materializes and converts nothing, so `af
+	// daemon status` never writes config as a side effect). Reported whether or
+	// not a daemon is running: an exposed listener is most worth saying when it is
+	// actually being served. This reads the config on disk, which a long-running
+	// daemon may predate — reporting the posture the RUNNING daemon booted with
+	// needs a Ping that carries it (#2168 Phase 4).
+	if load, err := config.LoadConfigReadOnly(); err == nil {
+		info.ExposureWarning = config.ListenerExposureNotice(load.Config)
 	}
 	return info
 }
@@ -171,17 +171,12 @@ func collectDaemonStatus() daemonStatusInfo {
 // the wording `af doctor` uses for the daemon check.
 func printDaemonStatusHuman(cmd *cobra.Command, info daemonStatusInfo) {
 	w := cmd.OutOrStdout()
-	switch {
-	case info.Running:
+	if info.Running {
 		fmt.Fprintln(w, "daemon: running")
-	// "starts on demand" is a promise about the future, so it has to be checked
-	// against the config that governs it. Under the #2090 auth posture the daemon
-	// refuses to start, and repeating the on-demand line there would send someone
-	// whose web UI just vanished looking anywhere but the cause (same reasoning as
-	// the doctor row — doctor/checks.go).
-	case info.CannotStartReason != "":
-		fmt.Fprintf(w, "daemon: not running and cannot start — %s\n", info.CannotStartReason)
-	default:
+	} else {
+		// The on-demand promise is unconditional again: since #2168 Phase 0 there
+		// is no config the daemon refuses to start under, so there is no posture
+		// that makes this line a lie.
 		fmt.Fprintln(w, "daemon: not running (starts on demand when you run af with an enabled task)")
 	}
 	fmt.Fprintf(w, "  control socket: %s (%s)\n", info.ControlSocket, presence(info.ControlSocketFile))
@@ -204,6 +199,9 @@ func printDaemonStatusHuman(cmd *cobra.Command, info daemonStatusInfo) {
 	}
 	if info.BinaryStale {
 		fmt.Fprintf(w, "  warning:        pid %d is running a binary since replaced on disk — restart the daemon to pick up the new version\n", info.PID)
+	}
+	if info.ExposureWarning != "" {
+		fmt.Fprintf(w, "  warning:        %s\n", info.ExposureWarning)
 	}
 }
 

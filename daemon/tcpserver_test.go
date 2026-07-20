@@ -1,13 +1,16 @@
 package daemon
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
+	stdlog "log"
 	"net"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -17,6 +20,7 @@ import (
 	"github.com/sachiniyer/agent-factory/agentproto"
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
+	"github.com/sachiniyer/agent-factory/log"
 )
 
 // TestTCPListener_HTTP_TokenRoundTrip is the PR3 payoff, now HTTP-only: a real
@@ -369,44 +373,83 @@ func freeNetworkPort(t *testing.T) string {
 	return addr
 }
 
-// TestStartHTTPServer_RefusesUnauthenticatedNetworkListener is the #2090
-// regression lock, asserted where it matters: not that a warning was logged, but
-// that the port is CLOSED. The pre-fix daemon logged "WARNING: … requires NO
-// token" and then bound the listener anyway, which is how the reporting box
-// ended up answering POST /v1/Snapshot with 200 and no credentials.
+// captureWarnings redirects log.WarningLog into a buffer for the duration of a
+// test and returns a reader for what was written. The logger vars are package
+// globals, so it restores the previous one — a leaked writer would send every
+// later test's warnings into a dead buffer.
+func captureWarnings(t *testing.T) func() string {
+	t.Helper()
+	var buf bytes.Buffer
+	prev := log.WarningLog
+	log.WarningLog = stdlog.New(&buf, "WARNING: ", 0)
+	t.Cleanup(func() { log.WarningLog = prev })
+	return buf.String
+}
+
+// TestStartHTTPServer_BindsUnauthenticatedNetworkListener is the #2168 Phase 0
+// lock, and it REVERSES the #2090 assertion that stood here before: the port must
+// be OPEN and serving.
 //
-// The daemon itself must survive: the unix control plane every local client
-// depends on is not allowed to go down because the web listener was refused.
-func TestStartHTTPServer_RefusesUnauthenticatedNetworkListener(t *testing.T) {
+// The owner's decision, verbatim: "just allow binding to 0.0.0.0 without a token.
+// Assume users are safe and will do the right thing; if it becomes a problem I
+// will check up on them." So this is not a regression to be re-fixed — it is the
+// deliberate posture, and a future change that stops binding here breaks a
+// documented configuration.
+//
+// The exposure is still SAID, exactly once. Log spam is the failure mode of a
+// warning that replaces a refusal, so "once" is asserted, not assumed: a per-
+// request or per-connection warning would fire again on the requests below.
+func TestStartHTTPServer_BindsUnauthenticatedNetworkListener(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	warnings := captureWarnings(t)
 
 	addr := freeNetworkPort(t)
 	cfg := config.DefaultConfig()
 	cfg.ListenAddr = addr // network-bound…
 	cfg.RequireToken = false
 	// …and require_loopback_token cannot stand in for the real token: it is inert
-	// while require_token is false, so this must still refuse.
+	// while require_token is false, so this peer is genuinely unauthenticated.
 	cfg.RequireLoopbackToken = true
 
 	m, err := NewManager(cfg)
 	require.NoError(t, err)
 
 	closeHTTP, err := startHTTPServer(m, newTaskScheduler(), nil)
-	require.NoError(t, err, "refusing the web listener must never take the daemon down")
+	require.NoError(t, err, "an exposed posture must never take the daemon down")
 	defer func() { require.NoError(t, closeHTTP()) }()
 
-	conn, dialErr := net.DialTimeout("tcp", addr, 2*time.Second)
-	if dialErr == nil {
-		_ = conn.Close()
-		t.Fatalf("daemon is serving on network address %s with require_token=false — #2090 is open", addr)
+	// The property: it BINDS. Pre-#2168 this dial failed (connection refused)
+	// because startHTTPServer skipped the listener entirely.
+	conn, dialErr := net.DialTimeout("tcp", addr, 5*time.Second)
+	require.NoError(t, dialErr, "a tokenless network bind must be served, not skipped")
+	require.NoError(t, conn.Close())
+
+	// And it SERVES: a caller with no credentials is answered, not 401'd. That is
+	// the whole point of require_token = false, and asserting the bind alone would
+	// pass against a listener that authenticated everyone.
+	client := &http.Client{Timeout: 5 * time.Second}
+	for i := 0; i < 3; i++ {
+		resp, err := client.Post("http://"+addr+"/v1/Snapshot", "application/json", nil)
+		require.NoError(t, err)
+		require.NoError(t, resp.Body.Close())
+		require.NotEqual(t, http.StatusUnauthorized, resp.StatusCode,
+			"require_token = false means no peer is challenged — including this one")
 	}
+
+	// Said once, and worth reading: the address, what a peer can do with it, and
+	// how to turn auth on. The three requests above must not have added copies.
+	got := warnings()
+	require.Equal(t, 1, strings.Count(got, "reachable from the network"),
+		"the exposure warning must be emitted exactly once per daemon start, not per request:\n%s", got)
+	require.Contains(t, got, addr)
+	require.Contains(t, got, "DeliverPrompt")
+	require.Contains(t, got, "require_token = true")
 }
 
-// TestStartHTTPServer_NetworkListenerServesWithToken is the other half of the
-// contract: the guard blocks the UNAUTHENTICATED network listener, not network
-// binds as such. An operator who sets require_token = true still gets their
-// remote web UI — and it answers 401 to a caller with no credentials, which is
-// the behavior that makes the bind safe in the first place.
+// TestStartHTTPServer_NetworkListenerServesWithToken pins that #2168 Phase 0
+// changed only the tokenless side. An operator who sets require_token = true
+// still gets their remote web UI — and it answers 401 to a caller with no
+// credentials, which is the enforcement path this relaxation must not touch.
 func TestStartHTTPServer_NetworkListenerServesWithToken(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 

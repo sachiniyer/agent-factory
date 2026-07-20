@@ -139,13 +139,14 @@ the same breath, without being asked:
 and tell them plainly why: without the token, anyone who can reach that address can
 drive their agents and their machine.
 
-Never leave the user with a non-loopback listen_addr and require_token = false. That
-pairing is not a judgement call you can defer to them — af refuses to start in it, so
-writing it does not give them remote access, it gives them a daemon that will not
-come up. If they ask for it anyway, tell them that is what would happen, and offer
-the two things that do work: the token, or a loopback bind they reach over SSH or
-Tailscale port-forwarding. Note that require_loopback_token does not substitute for
-require_token here — it changes nothing while require_token is false.
+Never write a non-loopback listen_addr with require_token = false on your own
+initiative. af allows that pairing — the daemon starts, serves, and warns once — so
+it is the user's call to make, not a configuration that fails loudly and teaches
+them. That is exactly why you must not make it for them. If they ask for it anyway,
+write it, and say in the same breath that anyone who can reach the address can drive
+their agents, and that the token or a loopback bind reached over SSH or Tailscale
+port-forwarding is the alternative. Note that require_loopback_token does not
+substitute for require_token here — it changes nothing while require_token is false.
 
 One more thing to tell them if they go off this machine: af serves plain HTTP and
 terminates no encryption of its own. Beyond a trusted private network, they want a

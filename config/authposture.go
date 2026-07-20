@@ -16,7 +16,7 @@ import "fmt"
 //	false, NOTHING authenticates anyone: require_loopback_token only ever
 //	withdraws an exemption that a disabled token already made irrelevant.
 //	Treating require_loopback_token = true as making a network bind safe
-//	would leave the listener wide open under a config that reads secure.
+//	would report a listener that is wide open as a listener that is fine.
 //
 // So on a non-loopback bind the one question that matters is whether the token
 // is on. Loopback binds are exempt (nothing off-box can reach them — the
@@ -26,6 +26,11 @@ import "fmt"
 // The loopback test is IsLoopbackListenAddr, the SAME predicate the daemon's
 // token gate derives its policy from. Two definitions of "is this loopback"
 // drifting apart is how a security check rots, so there is only one.
+//
+// This predicate is the ONE definition of the exposure. Every surface that
+// mentions it — the daemon's startup warning (daemon/tcpserver.go), `af config
+// set` (exposureWarning), `af doctor`, `af daemon status` — asks it rather than
+// re-deriving the answer.
 func ListenerServesUnauthenticatedNetwork(listenAddr string, requireToken bool) bool {
 	if listenAddr == "" {
 		return false // web server disabled — nothing is served at all
@@ -33,35 +38,38 @@ func ListenerServesUnauthenticatedNetwork(listenAddr string, requireToken bool) 
 	return !requireToken && !IsLoopbackListenAddr(listenAddr)
 }
 
-// ValidateListenerAuthPosture returns a non-nil error when cfg would serve the
-// control API unauthenticated on a network interface (#2090). The daemon calls
-// it as a REFUSAL — it will not start in this configuration — so the message is
-// written for someone who just got stopped and needs to choose a way forward.
+// ListenerExposureNotice returns the one-line operator notice for a config that
+// serves the control API unauthenticated on a network interface (#2090), or ""
+// when the posture is safe.
 //
-// Why refuse rather than warn: the API this listener exposes includes
-// DeliverPrompt, which types instructions into a running agent and submits
-// them. An agent runs with the user's shell permissions, so an unauthenticated
-// network listener is remote code execution against everyone who can route to
-// it. A log line (which is all this used to be — daemon/httpserver.go) is not a
-// proportionate response to that, and it scrolled past unread on the box that
-// filed #2090.
+// This posture is ALLOWED. #2090 originally made it a refusal — the daemon would
+// not start — and #2168 reverses that by owner decision: "just allow binding to
+// 0.0.0.0 without a token. Assume users are safe and will do the right thing."
+// The exposure is real (the API this listener serves includes DeliverPrompt,
+// which types instructions into a running agent and submits them, and an agent
+// runs with the user's shell permissions), so it is still SAID — once, plainly,
+// with the way to add auth. It is no longer decided on the user's behalf.
 //
-// Why not auto-correct to loopback instead: silently overriding a listen_addr
-// the operator explicitly set would break the deliberate "serve the web UI to
-// my LAN/Tailscale" setup with no signal, trading a security bug for a
-// availability one. Refusing keeps the operator in control of which of the two
-// safe postures they want, which is also what makes this survivable as an
-// upgrade: the config that used to boot now stops with instructions.
-func ValidateListenerAuthPosture(cfg *Config) error {
+// The refusal also had a failure mode the warning does not: a config the daemon
+// rejects on every attempt is not a transient failure, but the autostart unit's
+// Restart=on-failure could not tell the difference, so a hand-edit to
+// 0.0.0.0 + require_token = false crash-looped the unit indefinitely (#2168 §1.2).
+// A warning cannot crash-loop.
+//
+// A string, not an error: every caller now reports it rather than acting on it,
+// and an error return is an invitation to `if err != nil { return err }` — which
+// is exactly the refusal being removed.
+//
+// Callers must emit this AT MOST ONCE per daemon start. It is deliberately not
+// wired into any per-request or per-connection path: a warning repeated on every
+// call is a warning nobody reads.
+func ListenerExposureNotice(cfg *Config) string {
 	if cfg == nil || !ListenerServesUnauthenticatedNetwork(cfg.ListenAddr, cfg.RequireToken) {
-		return nil
+		return ""
 	}
-	return fmt.Errorf("refusing to start: listen_addr %q is reachable from the network but require_token is false, "+
-		"so af would serve its full control API — including DeliverPrompt, which runs arbitrary instructions "+
-		"through your agents — to anyone who can reach that address, with no authentication and no TLS.\n\n"+
-		"Choose one:\n"+
-		"  af config set require_token true            keep the network bind, require a bearer token (`af token` prints it)\n"+
-		"  af config set listen_addr 127.0.0.1:8443    serve the web UI to this machine only\n"+
-		"  af config set listen_addr \"\"                turn the web server off entirely",
+	return fmt.Sprintf("listen_addr %q is reachable from the network and require_token is false, so af serves its "+
+		"full control API — including DeliverPrompt, which runs instructions through your agents — to anyone who can "+
+		"reach that address, with no authentication and no TLS · set require_token = true to require a bearer token "+
+		"(`af token show` prints it), or set listen_addr to 127.0.0.1:8443 to serve this machine only",
 		cfg.ListenAddr)
 }

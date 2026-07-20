@@ -208,9 +208,15 @@ type SetResult struct {
 // It WARNS and nothing more: it does not refuse (that would break scripting) and
 // does not auto-set require_token (silently changing a key the user did not name
 // is worse than the surprise it prevents). The user stays in control; they just
-// stop being surprised. Since #2090 the DAEMON refuses to start on this same
-// pairing (ValidateListenerAuthPosture), so this warning is the early, local
-// notice that the next daemon start will stop — not the only line of defense.
+// stop being surprised.
+//
+// Warning is now the ONLY response anywhere: #2090 briefly made the daemon
+// refuse to start on this pairing, and #2168 Phase 0 reversed that by owner
+// decision ("assume users are safe and will do the right thing"). #2168 Phase 2
+// had proposed escalating THIS warning into a refusal as well; that was dropped
+// with the rest. So this is the notice a user gets when they type the command,
+// and the daemon repeats it once when the listener binds (startHTTPServer) — it
+// no longer forecasts a failure, because there is not going to be one.
 //
 // Both directions of the pairing are checked, because either key can create the
 // exposure: pointing listen_addr at the network while the token is off, or
@@ -236,11 +242,11 @@ func exposureWarning(cfg *Config, key, canonical string) string {
 	if !ListenerServesUnauthenticatedNetwork(addr, tokenRequired) {
 		return ""
 	}
-	return fmt.Sprintf("WARNING: %s is reachable from the network and require_token is false, which would put a "+
-		"plain-HTTP control plane with no authentication in front of anyone who can reach it. The daemon refuses to "+
-		"start in this configuration, so af has no web server until you change one of the two. Run "+
-		"`af config set require_token true` to require a token (`af token` prints it), or set listen_addr back to a "+
-		"loopback address such as 127.0.0.1:8443, or \"\" to turn the web server off.", addr)
+	return fmt.Sprintf("WARNING: %s is reachable from the network and require_token is false, which puts a "+
+		"plain-HTTP control plane with no authentication in front of anyone who can reach it — including "+
+		"DeliverPrompt, which runs instructions through your agents. The daemon will serve this on its next start. "+
+		"Run `af config set require_token true` to require a token (`af token show` prints it), or set listen_addr "+
+		"back to a loopback address such as 127.0.0.1:8443, or \"\" to turn the web server off.", addr)
 }
 
 // resolveSettable maps a user key ("default_program" or "program_overrides.claude")
