@@ -263,6 +263,12 @@ daemon is running, this command exits successfully without starting one.`,
 		if err != nil {
 			return fmt.Errorf("failed to resolve executable path: %w", err)
 		}
+		// Existing Linux installs carry their rendered unit on disk. Make that
+		// unit restart-safe before the Shutdown RPC: refreshing it afterwards is
+		// too late, because systemd may already have cgroup-killed tmux (#2176).
+		if err := refreshAutostartUnitFn(); err != nil {
+			return fmt.Errorf("refusing to restart through an unsafe daemon autostart unit: %w", err)
+		}
 
 		result, err := restartDaemonFromPath(resolvedPath)
 		if err != nil {
@@ -308,6 +314,7 @@ var (
 	ensureDaemonFromPathFn      = daemon.EnsureDaemonFromPath
 	waitForShutdownCompletionFn = daemon.WaitForShutdownCompletion
 	autostartUnitExecPathFn     = daemon.AutostartUnitExecPath
+	refreshAutostartUnitFn      = daemon.RefreshAutostartUnit
 	configDirFn                 = config.GetConfigDir
 )
 

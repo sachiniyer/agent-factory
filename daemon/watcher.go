@@ -108,6 +108,10 @@ func truncateRunes(s string, maxBytes int) string {
 type watcherSupervisor struct {
 	mu       sync.Mutex
 	watchers map[string]*taskWatcher // task ID → supervised watcher
+	// stopped latches during daemon teardown. The control socket deliberately
+	// stays available while Stop joins in-flight deliveries, so a concurrent
+	// ReloadTasks RPC must not repopulate the map after Stop snapshots it.
+	stopped bool
 
 	// Injection points for tests: loadTasks substitutes fixture task lists,
 	// deliver observes events without spawning sessions, setStatus observes
@@ -182,6 +186,9 @@ func (s *watcherSupervisor) Reload() error {
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.stopped {
+		return fmt.Errorf("watch task supervisor is shutting down")
+	}
 
 	var stale []*taskWatcher
 	for id, w := range s.watchers {
@@ -248,6 +255,7 @@ func (s *watcherSupervisor) cleanOrphanQueues(tasks []task.Task) {
 // after the grace. Blocks until all watcher goroutines have returned.
 func (s *watcherSupervisor) Stop() {
 	s.mu.Lock()
+	s.stopped = true
 	stale := make([]*taskWatcher, 0, len(s.watchers))
 	for _, w := range s.watchers {
 		stale = append(stale, w)

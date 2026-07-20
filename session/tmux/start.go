@@ -2,7 +2,6 @@ package tmux
 
 import (
 	"fmt"
-	"os/exec"
 	"strings"
 	"time"
 
@@ -31,10 +30,13 @@ func (t *TmuxSession) Start(workDir string) error {
 	args := []string{"new-session", "-d", "-s", t.sanitizedName, "-c", workDir}
 	args = append(args, sessionEnvFlags(t.sanitizedName)...)
 	args = append(args, t.programCmd())
-	cmd := exec.Command("tmux", args...)
+	cmd, systemdScoped := newTmuxServerCommand(args...)
 
-	ptmx, err := t.ptyFactory.Start(cmd)
+	ptmx, commandDone, err := startPtyTracked(t.ptyFactory, cmd)
 	if err != nil {
+		if systemdScoped {
+			err = fmt.Errorf("systemd-run --user --scope could not start: %w", err)
+		}
 		// Cleanup any partially created session if any exists. ExistsOrUnknown is
 		// safe here: the only action gated on true is a bounded best-effort
 		// kill-session, so a wedged→"exists" merely triggers a harmless cleanup
@@ -72,6 +74,20 @@ func (t *TmuxSession) Start(workDir string) error {
 			break
 		}
 		select {
+		case commandErr := <-commandDone:
+			// A nil exit only means the detached new-session command completed;
+			// tmux may need another poll before the session becomes visible. A
+			// non-zero systemd-run exit, however, is the actionable cause. Before
+			// #2176 that status was discarded by Pty's reaper and the operator saw
+			// only a misleading tmux readiness timeout.
+			commandDone = nil
+			if commandErr != nil {
+				_ = ptmx.Close()
+				if systemdScoped {
+					return fmt.Errorf("error starting tmux session: systemd-run --user --scope failed to create session %q: %w", t.sanitizedName, commandErr)
+				}
+				return fmt.Errorf("error starting tmux session: tmux new-session for %q failed: %w", t.sanitizedName, commandErr)
+			}
 		case <-timeout:
 			ptmx.Close()
 			// The pane program exiting instantly (bad path, rejected flag)
@@ -79,6 +95,9 @@ func (t *TmuxSession) Start(workDir string) error {
 			// ever sees it — name the likely cause and the exact command so
 			// the user isn't left with a bare timeout (#1116, #1131).
 			timeoutErr := fmt.Errorf("timed out waiting for tmux session %s; the pane program may have exited immediately after launch — check that it runs and accepts its flags (program: %q)", t.sanitizedName, t.programCmd())
+			if systemdScoped {
+				timeoutErr = fmt.Errorf("systemd-run --user --scope completed but the tmux session did not appear: %w", timeoutErr)
+			}
 			// The pane state is LOAD-BEARING here, and the comment that used to sit
 			// on this line said the opposite: "Start's failure path touches no
 			// worktree". It does. LocalBackend.Launch calls gw.Cleanup() the moment

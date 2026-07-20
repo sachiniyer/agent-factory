@@ -170,20 +170,30 @@ func autoUpdateForChannel(channel string, checkTimeout, downloadBudget time.Dura
 			return fmt.Errorf("failed to write new binary: %w", err)
 		}
 
+		unitRefreshErr := refreshAutostartUnitFn()
+		if unitRefreshErr != nil {
+			// The new binary is already on disk, but stopping through a stale
+			// control-group unit is worse than leaving the old daemon running:
+			// it can take every daemon-spawned tmux pane with it (#2176).
+			log.WarningLog.Printf("auto-update: updated to %s but left the running daemon alone because its autostart unit could not be made restart-safe: %v; run af daemon install, then af daemon restart", latestVersion, unitRefreshErr)
+		}
+
 		// Same rationale as `af upgrade` (#498/#1386): restart the running daemon
 		// immediately from the freshly written binary. Quiet on the no-daemon path
 		// since this runs on every launch. Pre-#501 daemons don't speak the
 		// Shutdown RPC; RequestShutdown falls back to PID-file-based SIGTERM (#504).
-		result, restartErr := restartDaemonFromPath(resolvedPath)
-		switch {
-		case restartErr != nil:
-			log.WarningLog.Printf("auto-update: updated to %s but failed to restart daemon: %v", latestVersion, restartErr)
-		case result == daemon.ShutdownViaRPC:
-			log.InfoLog.Printf("auto-update: updated to %s and restarted running daemon", latestVersion)
-		case result == daemon.ShutdownViaSIGTERM:
-			log.InfoLog.Printf("auto-update: updated to %s and restarted pre-#501 running daemon via SIGTERM fallback", latestVersion)
-		default:
-			log.InfoLog.Printf("auto-update: updated to %s", latestVersion)
+		if unitRefreshErr == nil {
+			result, restartErr := restartDaemonFromPath(resolvedPath)
+			switch {
+			case restartErr != nil:
+				log.WarningLog.Printf("auto-update: updated to %s but failed to restart daemon: %v", latestVersion, restartErr)
+			case result == daemon.ShutdownViaRPC:
+				log.InfoLog.Printf("auto-update: updated to %s and restarted running daemon", latestVersion)
+			case result == daemon.ShutdownViaSIGTERM:
+				log.InfoLog.Printf("auto-update: updated to %s and restarted pre-#501 running daemon via SIGTERM fallback", latestVersion)
+			default:
+				log.InfoLog.Printf("auto-update: updated to %s", latestVersion)
+			}
 		}
 		// The binary on disk is now latestVersion; record it as such so the
 		// re-exec'd process sees a fresh, matching entry and skips its own

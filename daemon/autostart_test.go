@@ -15,9 +15,11 @@ func TestSystemdAutostartUnitContent(t *testing.T) {
 Description=Agent Factory daemon (task scheduler + autoyes)
 
 [Service]
+KillMode=process
 ExecStart="/home/user/.local/bin/af" --daemon
 Restart=on-failure
 RestartSec=5
+Environment=AGENT_FACTORY_SYSTEMD_UNIT=agent-factory-daemon.service
 Environment=PATH=/usr/bin:/bin
 Environment=SHELL=/bin/zsh
 
@@ -139,9 +141,11 @@ func TestSystemdAutostartUnitCapturesAgentFactoryHome(t *testing.T) {
 Description=Agent Factory daemon (task scheduler + autoyes)
 
 [Service]
+KillMode=process
 ExecStart="/home/user/.local/bin/af" --daemon
 Restart=on-failure
 RestartSec=5
+Environment=AGENT_FACTORY_SYSTEMD_UNIT=agent-factory-daemon.service
 Environment=PATH=/usr/bin:/bin
 Environment=SHELL=/bin/zsh
 Environment=AGENT_FACTORY_HOME=/srv/af-home
