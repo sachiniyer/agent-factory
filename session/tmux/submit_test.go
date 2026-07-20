@@ -98,12 +98,20 @@ func TestCodexSubmitUsesBracketedPaste(t *testing.T) {
 	cmds := recordTmuxCommands(t, "codex", prompt)
 	joined := joinedArgs(cmds)
 
-	require.Len(t, cmds, 3, "codex submit is load-buffer, paste-buffer, send-keys Enter; got %v", joined)
+	require.Len(t, cmds, 4, "codex submit is clear, load-buffer, paste-buffer, send-keys Enter; got %v", joined)
+
+	// 0. A stranded draft in the composer is cleared with keystrokes BEFORE the
+	//    paste (#2070) so a prior lost Enter cannot fuse with this prompt. It must
+	//    be a keystroke clear, never a paste (a clear is a command, #1956), and it
+	//    must precede the load so the payload lands in an empty composer.
+	require.Contains(t, joined[0], "send-keys", "first command must clear the composer; got %v", joined)
+	require.Contains(t, joined[0], "C-u", "the clear must send C-u to kill the pending line (#2070); got %v", joined)
+	require.NotContains(t, joined[0], "load-buffer", "the clear must precede the load; got %v", joined)
 
 	// 1. Text is streamed into a buffer via stdin (not an argv arg → no ARG_MAX
 	//    ceiling for large prompts) and never as `send-keys -l`.
-	require.Contains(t, joined[0], "load-buffer", "first command must load the paste buffer; got %v", joined)
-	require.Equal(t, prompt, cmds[0].stdin, "paste text must be streamed on stdin")
+	require.Contains(t, joined[1], "load-buffer", "second command must load the paste buffer; got %v", joined)
+	require.Equal(t, prompt, cmds[1].stdin, "paste text must be streamed on stdin")
 	for _, j := range joined {
 		require.NotContains(t, j, "send-keys -t =af_proj: -l",
 			"codex must not use the plain literal send-keys path that gets swallowed (#1254); got %v", joined)
@@ -112,16 +120,16 @@ func TestCodexSubmitUsesBracketedPaste(t *testing.T) {
 	// 2. The paste is bracketed (-p) so codex gets an end-of-paste marker, and
 	//    the buffer is deleted after (-d) so buffers don't accumulate. The paste
 	//    reads back the SAME buffer the load wrote (no cross-talk).
-	require.Contains(t, joined[1], "paste-buffer", "second command must paste the buffer; got %v", joined)
-	require.Contains(t, joined[1], "-p", "paste must be bracketed (-p) so codex sees the paste boundary")
-	require.Contains(t, joined[1], "-d", "paste must delete the buffer afterward (-d)")
-	loadBuf, pasteBuf := bufferOf(cmds[0].args), bufferOf(cmds[1].args)
+	require.Contains(t, joined[2], "paste-buffer", "third command must paste the buffer; got %v", joined)
+	require.Contains(t, joined[2], "-p", "paste must be bracketed (-p) so codex sees the paste boundary")
+	require.Contains(t, joined[2], "-d", "paste must delete the buffer afterward (-d)")
+	loadBuf, pasteBuf := bufferOf(cmds[1].args), bufferOf(cmds[2].args)
 	require.NotEmpty(t, loadBuf, "load-buffer must name a buffer; got %v", joined)
 	require.Equal(t, loadBuf, pasteBuf, "paste must read back the buffer the load wrote; got %v", joined)
 
 	// 3. Enter is a SEPARATE command issued last — this is what actually submits.
-	require.Contains(t, joined[2], "send-keys", "last command must send Enter; got %v", joined)
-	require.Contains(t, joined[2], "Enter", "last command must send Enter to submit; got %v", joined)
+	require.Contains(t, joined[3], "send-keys", "last command must send Enter; got %v", joined)
+	require.Contains(t, joined[3], "Enter", "last command must send Enter to submit; got %v", joined)
 
 	// Every targeted command keeps the #1006 exact-match target.
 	for _, c := range cmds {
@@ -152,23 +160,26 @@ func TestEveryAgentSubmitUsesBracketedPasteBuffer(t *testing.T) {
 			cmds := recordTmuxCommands(t, program, prompt)
 			joined := joinedArgs(cmds)
 
-			require.Len(t, cmds, 3, "paste path is load-buffer, paste-buffer, send-keys Enter; got %v", joined)
-			require.Contains(t, joined[0], "load-buffer", "first command must load the paste buffer; got %v", joined)
-			require.Equal(t, prompt, cmds[0].stdin, "paste text must be streamed on stdin")
-			require.Contains(t, joined[1], "paste-buffer", "second command must paste the buffer; got %v", joined)
-			require.Contains(t, joined[1], "-d", "paste must delete the buffer afterward (-d)")
-			require.True(t, hasArg(cmds[1].args, "-p"),
+			require.Len(t, cmds, 4, "paste path is clear, load-buffer, paste-buffer, send-keys Enter; got %v", joined)
+			require.Contains(t, joined[0], "send-keys", "first command must clear the composer; got %v", joined)
+			require.Contains(t, joined[0], "C-u",
+				"a stranded draft must be cleared with C-u before the paste so it can't fuse with this prompt (#2070); got %v", joined)
+			require.Contains(t, joined[1], "load-buffer", "second command must load the paste buffer; got %v", joined)
+			require.Equal(t, prompt, cmds[1].stdin, "paste text must be streamed on stdin")
+			require.Contains(t, joined[2], "paste-buffer", "third command must paste the buffer; got %v", joined)
+			require.Contains(t, joined[2], "-d", "paste must delete the buffer afterward (-d)")
+			require.True(t, hasArg(cmds[2].args, "-p"),
 				"every pane must receive a BRACKETED paste: a plain paste arrives as keystrokes "+
 					"and a modal composer executes it as commands (#1956); got %v", joined)
-			require.Contains(t, joined[2], "send-keys", "last command must send Enter; got %v", joined)
-			require.Contains(t, joined[2], "Enter", "last command must submit with Enter; got %v", joined)
+			require.Contains(t, joined[3], "send-keys", "last command must send Enter; got %v", joined)
+			require.Contains(t, joined[3], "Enter", "last command must submit with Enter; got %v", joined)
 
 			for _, j := range joined {
 				require.NotContains(t, j, "send-keys -t =af_proj: -l",
 					"no pane may use the literal send-keys path that redraws wrapped bash input (#1292); got %v", joined)
 			}
 
-			loadBuf, pasteBuf := bufferOf(cmds[0].args), bufferOf(cmds[1].args)
+			loadBuf, pasteBuf := bufferOf(cmds[1].args), bufferOf(cmds[2].args)
 			require.NotEmpty(t, loadBuf, "load-buffer must name a buffer; got %v", joined)
 			require.Equal(t, loadBuf, pasteBuf, "paste must read back the buffer the load wrote; got %v", joined)
 
@@ -177,6 +188,34 @@ func TestEveryAgentSubmitUsesBracketedPasteBuffer(t *testing.T) {
 					require.Equal(t, "=af_proj:", tgt,
 						"submit commands must target by exact match (#1006); got %q in %v", tgt, joined)
 				}
+			}
+		})
+	}
+}
+
+// TestClearNeverSendsEscapeTheInterruptKey pins the safety property that decides
+// WHICH keystroke the pre-delivery clear (#2070) may use.
+//
+// Escape is the agents' INTERRUPT key: codex and claude both advertise "esc to
+// interrupt" in the footer of a working pane, and codex ships an `interrupt_turn`
+// action. Deliveries routinely land on a BUSY agent — cron and watch tasks fire
+// on schedule regardless of agent state, and the #1146 limit-resume re-delivery
+// targets a session that may have resumed on its own — so an Escape on this path
+// would abort in-flight work on every scheduled delivery. That is strictly worse
+// than the fusion the clear prevents: fusion corrupts one prompt, this would
+// silently destroy real work.
+//
+// Measured against real codex 0.144.6, Escape also does not clear the composer
+// (a stranded draft survived it) and tears down a modal picker, so it is pure
+// downside. If someone later "improves" the clear by prepending Escape to handle
+// modal composers, this test is what tells them why that is a regression.
+func TestClearNeverSendsEscapeTheInterruptKey(t *testing.T) {
+	for _, program := range []string{"claude", "codex", "aider", "gemini", "amp", "opencode"} {
+		t.Run(program, func(t *testing.T) {
+			for _, j := range joinedArgs(recordTmuxCommands(t, program, "a routine scheduled prompt")) {
+				require.NotContains(t, j, "Escape",
+					"the delivery path must never send Escape: it is the agents' interrupt key, so a "+
+						"delivery to a working agent would abort its turn (#2070); got %q", j)
 			}
 		})
 	}

@@ -132,15 +132,44 @@ func (t *TmuxSession) sendKeysPasteBuffer(text string) error {
 
 	tail := deliveryTail(text)
 
-	// Baseline the pane BEFORE delivery so the post-paste check waits for the
-	// prompt's tail to newly APPEAR (a count increase), not merely be present:
-	// the daemon re-delivers the same prompt after a limit resume (#1146), so an
-	// identical tail could already be on screen.
+	// Clear any draft stranded in the composer BEFORE this paste (#2070/#1982
+	// half b). A prior send whose Enter never took leaves its full text sitting in
+	// the composer; without a clear, this paste appends to it and the receiver
+	// gets STRANDED-DRAFTNEW-PROMPT — one lost Enter silently corrupts the NEXT
+	// instruction. #2065 closed the pixel-inference routes as unsound (an agent
+	// echoes its prompt, an echo-off pane writes to a file — "not on screen" is
+	// not "not submitted"), so we do NOT try to detect whether a strand exists:
+	// that check cannot be made soundly from pane content. We clear
+	// unconditionally instead, which asserts nothing about the pane. The captures
+	// around the clear are for the LOG only (noteClearedDraft) — nothing is gated
+	// on them — and the post-clear pane doubles as the delivery baseline below.
+	//
+	// Clearing unconditionally is only safe because the clear keystroke is inert
+	// on a BUSY pane: see clearComposerDraft for why it is C-u and explicitly NOT
+	// Escape, which is the agents' INTERRUPT key and would abort a running turn on
+	// every scheduled delivery.
+	//
+	// Cost: this is one capture more than the single (tail-conditional) baseline
+	// capture it replaces, and both are unconditional. Each is bounded by
+	// tmuxCommandTimeout, so against a WEDGED server the delivery path can now
+	// stall one extra bound before giving up. That is the price of the
+	// discarded-draft record; if it ever matters, the `before` capture is the
+	// droppable half (it feeds only the log, never the baseline).
+	before, _ := t.capturePaneForDelivery()
+	t.clearComposerDraft()
+	after, afterOK := t.capturePaneForDelivery()
+	noteClearedDraft(t.sanitizedName, before, after)
+
+	// Baseline the pane AFTER the clear but BEFORE the paste so the post-paste
+	// check waits for the prompt's tail to newly APPEAR (a count increase), not
+	// merely be present: the daemon re-delivers the same prompt after a limit
+	// resume (#1146), so an identical tail could already be on screen. Baselining
+	// post-clear is also what lets a re-delivery whose prior attempt stranded an
+	// identical tail still confirm — the clear removed that copy, so the tail
+	// genuinely re-appears.
 	baseline := 0
-	if tail != "" {
-		if content, ok := t.capturePaneForDelivery(); ok {
-			baseline = strings.Count(normalizeDelivery(content), tail)
-		}
+	if tail != "" && afterOK {
+		baseline = strings.Count(normalizeDelivery(after), tail)
 	}
 
 	// load-buffer streams the prompt in on stdin, so it needs the stdin-carrying
@@ -231,6 +260,88 @@ func (t *TmuxSession) sendEnter() error {
 		return err
 	}
 	return nil
+}
+
+// clearComposerDraft best-effort removes any text stranded in the pane's
+// composer before a new paste, so a draft whose Enter never took (#1982) cannot
+// fuse with the next prompt into STRANDED-DRAFTNEW-PROMPT (#2070).
+//
+// It sends C-u as a KEYSTROKE — never a bracketed paste. A clear is by
+// definition a command, which is exactly what `-p` exists to prevent for the
+// PROMPT (#1956): the prompt is pasted DATA, the clear is typed control input.
+//
+// C-u ALONE, and deliberately NOT Escape. Escape looks like the natural way to
+// resolve a modal composer to a known state, and it is disqualified three times
+// over — measured against the real codex 0.144.6 binary in a container:
+//
+//   - Escape is the INTERRUPT key. Both codex and claude advertise "esc to
+//     interrupt" in the footer of a working pane, and codex ships an
+//     `interrupt_turn` action. Delivery to a busy agent is routine — cron and
+//     watch tasks fire on schedule regardless of agent state, and the #1146
+//     limit-resume re-delivery targets a session that may have resumed on its
+//     own — so an Escape here would abort in-flight work on a scheduled
+//     delivery. Killing a running turn is far worse than the fusion this fixes:
+//     fusion corrupts one prompt, that would silently destroy real work.
+//   - Escape does not even clear. Sent to a codex composer holding a stranded
+//     draft, the draft was still there afterward. It buys nothing.
+//   - Escape is destructive at a modal picker. Sent to codex's trust dialog it
+//     dismissed the dialog and tore the session down, so a delivery arriving
+//     while any picker is up would answer it by cancelling.
+//
+// Escape is also counterproductive for the modal case it was meant to serve: a
+// vim composer rests in NORMAL mode (see sendKeysPasteBuffer on claude's
+// `editorMode`), where C-u is half-page-scroll rather than kill-line. Escape
+// forces the composer INTO that mode, making the clear strictly less likely to
+// work. So it is pure downside on every axis.
+//
+// C-u carries none of that: it is not bound to interrupt in any supported agent,
+// it is the POSIX tty KILL character (so readline/bash-class panes erase the
+// pending line), and against real codex it cleared a stranded draft outright.
+// A vim-NORMAL composer is still not cleared — that residual gap is unchanged
+// from before this fix, and closing it would need the per-agent clear matrix
+// #2070 warns against.
+//
+// Best-effort: a failed clear must NOT block delivery — the paste is what
+// matters, and a session that could not be cleared is no worse off than before
+// this fix — so the error is logged and swallowed. Bounded by tmuxCommandTimeout
+// like every other tmux call on this path (#2099/#2105): it runs on the delivery
+// path the daemon drives under the per-session op lock, so an unbounded stall
+// against a wedged server would leave the session unpromptable rather than
+// merely skipping one clear.
+func (t *TmuxSession) clearComposerDraft() {
+	ctx, cancel := tmuxTimeoutContext()
+	defer cancel()
+	// send-keys discards output, so runTmuxBounded (which normalizes
+	// exec.ErrWaitDelay to success) is the right runner — the stdin-streaming
+	// caveat that makes load-buffer use its own helper does not apply here.
+	if err := t.runTmuxBounded(ctx, "send-keys", "-t", exactTarget(t.sanitizedName), "C-u"); err != nil {
+		if ctx.Err() != nil {
+			log.ErrorLog.Printf("submit: clearing composer for session %q timed out after %s (continuing to deliver)",
+				t.sanitizedName, tmuxCommandTimeout)
+			return
+		}
+		log.ErrorLog.Printf("submit: could not clear composer for session %q before delivery (continuing): %v",
+			t.sanitizedName, err)
+	}
+}
+
+// noteClearedDraft logs when the pre-delivery clear visibly changed the pane —
+// evidence the composer held pending content that would otherwise have fused
+// with this prompt (#2070). It stays SOUND because nothing is gated on it: this
+// is a record for the operator, not a decision. A normalized difference between
+// the pane captured before and after the clear is the observable EFFECT of our
+// own C-u, not an inference about composer state from ambiguous pixels — the
+// unsound move #2065 closed. A pane merely mid-render can also differ, so the
+// message hedges rather than asserting a strand. Empty/failed captures produce
+// no log (nb == "").
+func noteClearedDraft(sessionName, before, after string) {
+	nb := normalizeDelivery(before)
+	if nb == "" || nb == normalizeDelivery(after) {
+		return
+	}
+	log.ErrorLog.Printf("submit: cleared composer for session %q before delivery; the pane changed "+
+		"across the clear, so a stranded draft was likely discarded (or the pane was mid-render). "+
+		"Prior pane tail: %s", sessionName, oneLineTail(before))
 }
 
 // deliveryTail returns a distinctive whitespace/box-free suffix of text used to
@@ -374,6 +485,14 @@ func paneTailForLog(t *TmuxSession) string {
 	if !ok {
 		return "<pane not capturable>"
 	}
+	return oneLineTail(content)
+}
+
+// oneLineTail condenses pane content to a short, single-line excerpt for a log
+// line: the last few non-blank rows, whitespace collapsed, row breaks marked
+// with ⏎, and truncated. Shared by paneTailForLog and noteClearedDraft so a
+// discarded-draft record and a delivery-failure record read the same.
+func oneLineTail(content string) string {
 	lines := strings.Split(strings.TrimRight(content, "\n \t"), "\n")
 	keep := lines
 	if len(keep) > 3 {
