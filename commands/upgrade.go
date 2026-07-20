@@ -249,6 +249,17 @@ func runUpgrade(out, errOut io.Writer, downloadURL string, noRestart bool) error
 		return fmt.Errorf("failed to write new binary: %w", err)
 	}
 
+	if err := refreshAutostartUnitFn(); err != nil {
+		fmt.Fprintln(out, "Upgraded successfully!")
+		fmt.Fprintf(errOut, "The daemon autostart unit could not be made restart-safe: %v\n", err)
+		if noRestart {
+			fmt.Fprintln(errOut, "The running daemon was left alone as requested, but the installed unit still needs repair. Run `af daemon install` before restarting it.")
+		} else {
+			fmt.Fprintln(errOut, "The running daemon was left alone because restarting through the stale unit could stop live tmux sessions. Run `af daemon install`, then `af daemon restart`.")
+		}
+		return nil
+	}
+
 	if noRestart {
 		fmt.Fprintln(out, "Upgraded successfully! Left the running daemon alone (--no-restart); it keeps executing the old binary until you run `af daemon restart`.")
 		return nil

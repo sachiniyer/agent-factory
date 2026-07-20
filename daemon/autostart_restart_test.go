@@ -228,6 +228,122 @@ func TestAutostartInstalledUnsupportedGOOS(t *testing.T) {
 	}
 }
 
+// TestRefreshAutostartUnitRewritesLegacyLinuxUnit is the upgrade half of
+// #2176: changing the renderer cannot repair the unit an existing install
+// already has on disk. The migration is deliberately surgical so #2168's
+// StartLimit and exit-status policy can land in the same template unchanged.
+func TestRefreshAutostartUnitRewritesLegacyLinuxUnit(t *testing.T) {
+	dir := withAutostartTestEnv(t, "linux")
+	calls := stubAutostartUnitCommand(t, nil)
+	unitPath := filepath.Join(dir, autostartUnitName)
+	legacy := "[Unit]\n" +
+		"Description=Agent Factory daemon\n" +
+		"StartLimitIntervalSec=60\n" +
+		"StartLimitBurst=5\n\n" +
+		"[Service]\n" +
+		"ExecStart=\"/opt/af\" --daemon\n" +
+		"Restart=on-failure\n" +
+		"RestartPreventExitStatus=78\n" +
+		"Environment=PATH=/custom/bin\n\n" +
+		"[Install]\nWantedBy=default.target\n"
+	if err := os.WriteFile(unitPath, []byte(legacy), 0644); err != nil {
+		t.Fatalf("seed legacy unit: %v", err)
+	}
+
+	if err := RefreshAutostartUnit(); err != nil {
+		t.Fatalf("RefreshAutostartUnit: %v", err)
+	}
+	got, err := os.ReadFile(unitPath)
+	if err != nil {
+		t.Fatalf("read refreshed unit: %v", err)
+	}
+	text := string(got)
+	if strings.Count(text, "KillMode=process\n") != 1 {
+		t.Fatalf("refreshed unit must contain exactly one safe KillMode:\n%s", text)
+	}
+	for _, preserved := range []string{
+		"StartLimitIntervalSec=60",
+		"StartLimitBurst=5",
+		"RestartPreventExitStatus=78",
+		"ExecStart=\"/opt/af\" --daemon",
+		"Environment=PATH=/custom/bin",
+	} {
+		if !strings.Contains(text, preserved) {
+			t.Errorf("migration dropped future/existing directive %q:\n%s", preserved, text)
+		}
+	}
+	if !calledWith(*calls, "systemctl", "--user", "daemon-reload") {
+		t.Fatalf("rewritten unit was not reloaded; calls=%v", *calls)
+	}
+}
+
+func TestRefreshAutostartUnitReplacesUnsafeAndDuplicateKillModes(t *testing.T) {
+	dir := withAutostartTestEnv(t, "linux")
+	stubAutostartUnitCommand(t, nil)
+	unitPath := filepath.Join(dir, autostartUnitName)
+	legacy := "[Unit]\nDescription=x\n\n[Service]\nKillMode=mixed\nExecStart=/opt/af --daemon\nKillMode=control-group\n"
+	if err := os.WriteFile(unitPath, []byte(legacy), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := RefreshAutostartUnit(); err != nil {
+		t.Fatalf("RefreshAutostartUnit: %v", err)
+	}
+	got, err := os.ReadFile(unitPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Count(string(got), "KillMode=") != 1 || !strings.Contains(string(got), "KillMode=process\n") {
+		t.Fatalf("unsafe/duplicate KillMode directives survived:\n%s", got)
+	}
+}
+
+func TestRefreshAutostartUnitReloadsAlreadySafeUnit(t *testing.T) {
+	dir := withAutostartTestEnv(t, "linux")
+	calls := stubAutostartUnitCommand(t, nil)
+	unitPath := filepath.Join(dir, autostartUnitName)
+	unit := "[Service]\nKillMode=process\nExecStart=/opt/af --daemon\n"
+	if err := os.WriteFile(unitPath, []byte(unit), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := RefreshAutostartUnit(); err != nil {
+		t.Fatalf("RefreshAutostartUnit: %v", err)
+	}
+	got, err := os.ReadFile(unitPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != unit {
+		t.Fatalf("already-safe unit changed:\n got=%q\nwant=%q", got, unit)
+	}
+	if !calledWith(*calls, "systemctl", "--user", "daemon-reload") {
+		t.Fatalf("already-safe unit was not reloaded after a possible prior reload failure; calls=%v", *calls)
+	}
+}
+
+func TestRefreshAutostartUnitDarwinLeavesPlistUntouched(t *testing.T) {
+	dir := withAutostartTestEnv(t, "darwin")
+	calls := stubAutostartUnitCommand(t, nil)
+	plistPath := filepath.Join(dir, autostartLaunchdLabel+".plist")
+	plist := "<plist><dict><key>Label</key><string>com.agent-factory.daemon</string></dict></plist>\n"
+	if err := os.WriteFile(plistPath, []byte(plist), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := RefreshAutostartUnit(); err != nil {
+		t.Fatalf("RefreshAutostartUnit(darwin): %v", err)
+	}
+	got, err := os.ReadFile(plistPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != plist {
+		t.Fatalf("Linux cgroup migration rewrote the launchd plist:\n got=%q\nwant=%q", got, plist)
+	}
+	if len(*calls) != 0 {
+		t.Fatalf("Darwin refresh invoked a service-manager command: %v", *calls)
+	}
+}
+
 func TestRestartAutostartUnitLinux(t *testing.T) {
 	withAutostartTestEnv(t, "linux")
 	calls := stubAutostartUnitCommand(t, nil)

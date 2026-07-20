@@ -22,6 +22,11 @@ import (
 const (
 	autostartUnitName     = "agent-factory-daemon.service"
 	autostartLaunchdLabel = "com.agent-factory.daemon"
+	// autostartSystemdMarker lets the daemon distinguish its direct service
+	// process from descendants that merely inherited the unit's environment.
+	// session/tmux checks it together with SYSTEMD_EXEC_PID before asking the
+	// user manager to put a newly-created tmux server in its own scope (#2176).
+	autostartSystemdMarker = "AGENT_FACTORY_SYSTEMD_UNIT"
 )
 
 // Every launchctl call af makes names the gui/<uid> domain explicitly, and
@@ -99,6 +104,12 @@ func formatSystemdEnvLine(name, value string) string {
 // AGENT_FACTORY_HOME is captured for the same reason when the installing
 // shell has it set: without it the unit's daemon would serve the default
 // home instead of the custom one (#782).
+//
+// KillMode=process is intentional. mixed sends SIGTERM only to the main
+// process but still SIGKILLs every remaining cgroup process when that main
+// process exits, so it kills exactly the persistent tmux server #2176 needs to
+// protect. New servers leave the service cgroup through systemd-run; process
+// also protects servers an older daemon already placed there before upgrade.
 func systemdAutostartUnit(execPath, pathEnv, shellEnv, agentFactoryHome string) string {
 	envLines := formatSystemdEnvLine("PATH", pathEnv) + "\n" + formatSystemdEnvLine("SHELL", shellEnv)
 	if agentFactoryHome != "" {
@@ -108,6 +119,7 @@ func systemdAutostartUnit(execPath, pathEnv, shellEnv, agentFactoryHome string) 
 Description=Agent Factory daemon (task scheduler + autoyes)
 
 [Service]
+KillMode=process
 ExecStart=%s --daemon
 Restart=on-failure
 RestartSec=5
@@ -115,7 +127,7 @@ RestartSec=5
 
 [Install]
 WantedBy=default.target
-`, quoteExecStartPath(execPath), envLines)
+`, quoteExecStartPath(execPath), formatSystemdEnvLine(autostartSystemdMarker, autostartUnitName)+"\n"+envLines)
 }
 
 // launchdAutostartPlist renders the launchd agent that keeps the daemon
@@ -319,6 +331,110 @@ func AutostartInstalled() bool {
 	}
 	_, err = os.Stat(path)
 	return err == nil
+}
+
+// RefreshAutostartUnit makes an already-installed Linux unit safe before an
+// upgrade or explicit restart stops its daemon (#2176). Older installs carry
+// the rendered unit on disk, so changing systemdAutostartUnit alone does
+// nothing for the machines at risk. Rewrite only KillMode, preserving the
+// captured executable, environment, and #2168's planned StartLimit policy,
+// then reload the user manager before a caller is allowed to restart.
+//
+// The reload runs even when the file already contains the safe directive. A
+// prior reload may have failed after the atomic write, leaving systemd's
+// in-memory unit stale; treating the on-disk text as sufficient would make the
+// next restart destructive again.
+//
+// launchd has no systemd cgroup KillMode equivalent. Its plist is deliberately
+// left byte-identical on Darwin rather than pretending this Linux fix applies.
+func RefreshAutostartUnit() error {
+	if autostartGOOS != "linux" {
+		return nil
+	}
+
+	path, err := autostartUnitFilePath()
+	if err != nil {
+		return fmt.Errorf("failed to resolve daemon autostart unit: %w", err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("failed to read daemon autostart unit %s: %w", path, err)
+	}
+
+	content, changed, err := ensureSystemdServiceDirective(string(data), "KillMode", "process")
+	if err != nil {
+		return fmt.Errorf("cannot make daemon autostart unit restart-safe: %w", err)
+	}
+	if changed {
+		if err := config.AtomicWriteFile(path, []byte(content), 0644); err != nil {
+			return fmt.Errorf("failed to rewrite daemon autostart unit %s: %w", path, err)
+		}
+	}
+	if out, err := autostartUnitCommand("systemctl", "--user", "daemon-reload"); err != nil {
+		return fmt.Errorf("failed to reload rewritten daemon autostart unit: %w\n%s", err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+// ensureSystemdServiceDirective returns content with exactly one key=value in
+// [Service]. Other sections and directives remain byte-for-byte and in order;
+// this is a targeted safety migration, not a re-render that could overwrite an
+// install's captured PATH, home, executable, or future StartLimit settings.
+func ensureSystemdServiceDirective(content, key, value string) (string, bool, error) {
+	lines := strings.Split(content, "\n")
+	inService := false
+	serviceFound := false
+	count := 0
+	alreadyCorrect := false
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "[") && strings.HasSuffix(trimmed, "]") {
+			inService = trimmed == "[Service]"
+			serviceFound = serviceFound || inService
+			continue
+		}
+		if !inService {
+			continue
+		}
+		name, got, found := strings.Cut(trimmed, "=")
+		if found && strings.TrimSpace(name) == key {
+			count++
+			alreadyCorrect = strings.TrimSpace(got) == value
+		}
+	}
+	if !serviceFound {
+		return "", false, fmt.Errorf("unit has no [Service] section")
+	}
+	if count == 1 && alreadyCorrect {
+		return content, false, nil
+	}
+
+	out := make([]string, 0, len(lines)+1)
+	inService = false
+	inserted := false
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "[") && strings.HasSuffix(trimmed, "]") {
+			inService = trimmed == "[Service]"
+			out = append(out, line)
+			if inService && !inserted {
+				out = append(out, key+"="+value)
+				inserted = true
+			}
+			continue
+		}
+		if inService {
+			name, _, found := strings.Cut(trimmed, "=")
+			if found && strings.TrimSpace(name) == key {
+				continue
+			}
+		}
+		out = append(out, line)
+	}
+	return strings.Join(out, "\n"), true, nil
 }
 
 // AutostartUnitServesHome reports whether the INSTALLED autostart unit's daemon

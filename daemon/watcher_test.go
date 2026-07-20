@@ -325,6 +325,40 @@ func TestWatcherStopEscalatesToGroupKill(t *testing.T) {
 	})
 }
 
+// TestWatcherStopRejectsConcurrentReload closes the KillMode=process shutdown
+// race: the control socket stays available while watcher Stop joins in-flight
+// deliveries, so a ReloadTasks RPC may already be loading tasks when teardown
+// starts. It must observe the stopped latch before spawning anything, or that
+// late process group would outlive the daemon after systemd stopped sweeping
+// the whole service cgroup (#2176).
+func TestWatcherStopRejectsConcurrentReload(t *testing.T) {
+	dir := t.TempDir()
+	loadStarted := make(chan struct{})
+	releaseLoad := make(chan struct{})
+	s, rec := newTestSupervisor(t, func() ([]task.Task, error) {
+		close(loadStarted)
+		<-releaseLoad
+		return []task.Task{watchTask("stop0001", "echo spawned; sleep 300", dir)}, nil
+	})
+
+	reloadDone := make(chan error, 1)
+	go func() { reloadDone <- s.Reload() }()
+	<-loadStarted
+	s.Stop()
+	close(releaseLoad)
+
+	if err := <-reloadDone; err == nil || !strings.Contains(err.Error(), "shutting down") {
+		t.Fatalf("Reload racing Stop returned %v, want shutting-down error", err)
+	}
+	time.Sleep(100 * time.Millisecond)
+	if got := rec.eventsSnapshot(); len(got) != 0 {
+		t.Fatalf("Reload spawned a watcher after Stop: events=%v", got)
+	}
+	if ids := s.watchingTaskIDs(); len(ids) != 0 {
+		t.Fatalf("Reload registered watchers after Stop: %v", ids)
+	}
+}
+
 // TestWatcherStderrGoesToTaskLog verifies the script contract's logging leg:
 // stderr appends to the per-task log file.
 func TestWatcherStderrGoesToTaskLog(t *testing.T) {

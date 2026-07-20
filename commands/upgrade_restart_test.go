@@ -71,6 +71,18 @@ func stubShutdown(t *testing.T, result daemon.ShutdownResult, err error) *int {
 	return calls
 }
 
+func stubAutostartRefresh(t *testing.T, err error) *int {
+	t.Helper()
+	previous := refreshAutostartUnitFn
+	calls := new(int)
+	refreshAutostartUnitFn = func() error {
+		*calls++
+		return err
+	}
+	t.Cleanup(func() { refreshAutostartUnitFn = previous })
+	return calls
+}
+
 // TestRespawnAfterUpgrade_LeavesOtherHomesUnitAlone is the #1950 repro, from
 // that issue's ready-made failing test (its home gate is stubbed here so it
 // cannot read the host's real unit).
@@ -166,6 +178,7 @@ func TestRespawnAfterUpgrade_UnprovableHomeLeavesUnitAlone(t *testing.T) {
 func TestUpgrade_NoRestartSkipsRestart(t *testing.T) {
 	binPath, url := upgradeHarness(t)
 	shutdownCalls := stubShutdown(t, daemon.ShutdownViaRPC, nil)
+	refreshCalls := stubAutostartRefresh(t, nil)
 	stubDaemonHealth(t, daemon.HealthStatus{})
 
 	var out, errOut bytes.Buffer
@@ -175,6 +188,9 @@ func TestUpgrade_NoRestartSkipsRestart(t *testing.T) {
 
 	if *shutdownCalls != 0 {
 		t.Fatalf("shutdown calls = %d, want 0 (--no-restart must leave the daemon alone)", *shutdownCalls)
+	}
+	if *refreshCalls != 1 {
+		t.Fatalf("unit refresh calls = %d, want 1 (--no-restart still has to repair the installed unit on upgrade)", *refreshCalls)
 	}
 	got, err := os.ReadFile(binPath)
 	if err != nil {
@@ -187,6 +203,58 @@ func TestUpgrade_NoRestartSkipsRestart(t *testing.T) {
 	// "you are running the new version" either.
 	if !strings.Contains(out.String(), "--no-restart") {
 		t.Fatalf("stdout must say the daemon was deliberately left on the old binary.\ngot=%q", out.String())
+	}
+}
+
+func TestUpgradeRefreshesAutostartBeforeStoppingDaemon(t *testing.T) {
+	_, url := upgradeHarness(t)
+	stubDaemonHealth(t, daemon.HealthStatus{})
+	stubRespawnCollaborators(t, false, nil)
+
+	previousRefresh := refreshAutostartUnitFn
+	previousShutdown := requestDaemonShutdownFn
+	t.Cleanup(func() {
+		refreshAutostartUnitFn = previousRefresh
+		requestDaemonShutdownFn = previousShutdown
+	})
+	var sequence []string
+	refreshAutostartUnitFn = func() error {
+		sequence = append(sequence, "refresh")
+		return nil
+	}
+	requestDaemonShutdownFn = func() (daemon.ShutdownResult, error) {
+		sequence = append(sequence, "shutdown")
+		return daemon.ShutdownViaRPC, nil
+	}
+
+	if err := runUpgrade(&bytes.Buffer{}, &bytes.Buffer{}, url, false); err != nil {
+		t.Fatalf("runUpgrade: %v", err)
+	}
+	if len(sequence) != 2 || sequence[0] != "refresh" || sequence[1] != "shutdown" {
+		t.Fatalf("upgrade sequence = %v, want [refresh shutdown]; the legacy unit must be safe before any stop", sequence)
+	}
+}
+
+func TestUpgradeRefreshFailureLeavesDaemonRunning(t *testing.T) {
+	_, url := upgradeHarness(t)
+	refreshCalls := stubAutostartRefresh(t, errors.New("daemon-reload failed"))
+	shutdownCalls := stubShutdown(t, daemon.ShutdownViaRPC, nil)
+	stubDaemonHealth(t, daemon.HealthStatus{})
+
+	var out, errOut bytes.Buffer
+	if err := runUpgrade(&out, &errOut, url, false); err != nil {
+		t.Fatalf("the binary is already installed, so refresh failure should be reported without claiming rollback: %v", err)
+	}
+	if *refreshCalls != 1 {
+		t.Fatalf("unit refresh calls = %d, want 1", *refreshCalls)
+	}
+	if *shutdownCalls != 0 {
+		t.Fatalf("shutdown calls = %d, want 0 when systemd may still hold the destructive legacy unit", *shutdownCalls)
+	}
+	for _, want := range []string{"could not be made restart-safe", "left alone", "af daemon install"} {
+		if !strings.Contains(errOut.String(), want) {
+			t.Fatalf("refresh failure stderr missing %q:\n%s", want, errOut.String())
+		}
 	}
 }
 

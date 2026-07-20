@@ -46,6 +46,10 @@ func TestMain(m *testing.M) {
 	// developer's real one. Sandbox AFTER the tripwire snapshots the real
 	// environment, BEFORE logging resolves its file path.
 	restoreHome := testguard.SandboxHome()
+	// Upgrade tests replace binaries in temp dirs and must never inspect or
+	// rewrite the developer's real autostart unit. Individual migration tests
+	// override this seam explicitly.
+	refreshAutostartUnitFn = func() error { return nil }
 	// autoUpdate() calls log.ErrorLog.Printf, which panics if logging has not
 	// been initialized. Initialize once for the whole package test binary.
 	aflog.Initialize(false)
@@ -332,6 +336,7 @@ func TestAutoUpdateRecordsCheckOnDownloadFailure(t *testing.T) {
 func TestAutoUpdateCallsShutdownAfterBinarySwap(t *testing.T) {
 	withTestHome(t)
 	infoBuf, errBuf := captureLogs(t)
+	refreshCalls := stubAutostartRefresh(t, nil)
 
 	tempBin := tempBinPath(t)
 	if err := os.WriteFile(tempBin, []byte("old-binary"), 0755); err != nil {
@@ -380,6 +385,9 @@ func TestAutoUpdateCallsShutdownAfterBinarySwap(t *testing.T) {
 	if shutdownCalls != 1 {
 		t.Fatalf("expected one Shutdown call, got %d", shutdownCalls)
 	}
+	if *refreshCalls != 1 {
+		t.Fatalf("expected one installed-unit refresh before shutdown, got %d", *refreshCalls)
+	}
 	if respawnCalls != 1 {
 		t.Fatalf("expected the daemon respawn check to run once after shutdown, got %d", respawnCalls)
 	}
@@ -402,6 +410,71 @@ func TestAutoUpdateCallsShutdownAfterBinarySwap(t *testing.T) {
 	if strings.Contains(errBuf.String(), "updating from") {
 		t.Fatalf("'updating from' must not be logged at ERROR level, got:\n%s",
 			errBuf.String())
+	}
+}
+
+func TestAutoUpdateRefreshFailureSkipsDaemonRestart(t *testing.T) {
+	withTestHome(t)
+	_, errBuf := captureLogs(t)
+	previousWarningOut := aflog.WarningLog.Writer()
+	aflog.WarningLog.SetOutput(errBuf)
+	t.Cleanup(func() { aflog.WarningLog.SetOutput(previousWarningOut) })
+	refreshCalls := stubAutostartRefresh(t, errors.New("daemon-reload failed"))
+
+	tempBin := tempBinPath(t)
+	if err := os.WriteFile(tempBin, []byte("old-binary"), 0755); err != nil {
+		t.Fatalf("seed binary: %v", err)
+	}
+
+	prevGOOS := runtimeGOOS
+	prevFetch := fetchLatestReleaseTagFn
+	prevDownload := downloadBinaryFn
+	prevVersion := version
+	prevExe := osExecutableFn
+	prevShutdown := requestDaemonShutdownFn
+	prevRespawn := respawnDaemonFn
+	t.Cleanup(func() {
+		runtimeGOOS = prevGOOS
+		fetchLatestReleaseTagFn = prevFetch
+		downloadBinaryFn = prevDownload
+		version = prevVersion
+		osExecutableFn = prevExe
+		requestDaemonShutdownFn = prevShutdown
+		respawnDaemonFn = prevRespawn
+	})
+
+	runtimeGOOS = "linux"
+	version = "1.0.0"
+	fetchLatestReleaseTagFn = func(string, time.Duration) (string, error) { return "v1.0.1", nil }
+	downloadBinaryFn = func(string, time.Duration) ([]byte, error) { return []byte("new-binary"), nil }
+	osExecutableFn = func() (string, error) { return tempBin, nil }
+	shutdownCalls := 0
+	requestDaemonShutdownFn = func() (daemon.ShutdownResult, error) {
+		shutdownCalls++
+		return daemon.ShutdownViaRPC, nil
+	}
+	respawnDaemonFn = func(string) (respawnResult, error) {
+		t.Fatal("respawn must not run when systemd may still hold the destructive legacy unit")
+		return respawnResult{}, nil
+	}
+
+	installed, err := runAutoUpdate()
+	if err != nil {
+		t.Fatalf("autoUpdate: %v", err)
+	}
+	if installed != "1.0.1" {
+		t.Fatalf("installed version = %q, want 1.0.1", installed)
+	}
+	if *refreshCalls != 1 {
+		t.Fatalf("unit refresh calls = %d, want 1", *refreshCalls)
+	}
+	if shutdownCalls != 0 {
+		t.Fatalf("shutdown calls = %d, want 0 after a failed safety refresh", shutdownCalls)
+	}
+	for _, want := range []string{"left the running daemon alone", "daemon-reload failed", "af daemon install"} {
+		if !strings.Contains(errBuf.String(), want) {
+			t.Fatalf("auto-update warning missing %q:\n%s", want, errBuf.String())
+		}
 	}
 }
 
