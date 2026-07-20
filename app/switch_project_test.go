@@ -483,14 +483,14 @@ func TestTaskCreateAfterFailedResolveUsesGlobalProgram(t *testing.T) {
 
 	h.switchProject(repoB)
 
-	// Drive the inline create form the way a user would: the program field is
-	// left on its default option, which is exactly the case that falls back to
-	// m.program in handleTaskCreate.
+	// Enter the form with the switched-to repo explicitly: this test is about the
+	// program fallback, not the list's `n` shortcut or its process-CWD fallback.
+	// The testbox intentionally copies the source without .git, so relying on its
+	// CWD would make form validation reject the unrelated project-path field.
 	tp := h.automations.TaskPane()
 	_, _ = h.showTasksOverlay()
 	require.Equal(t, stateTasks, h.state)
-	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("n")})
-	require.True(t, tp.IsCreating(), "'n' must open the inline create form")
+	tp.EnterCreateMode(projectBRoot)
 	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("nightly")})
 	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyTab}) // -> trigger selector (cron)
 	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyTab}) // -> schedule picker (valid default)
