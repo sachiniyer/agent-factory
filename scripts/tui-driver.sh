@@ -133,22 +133,41 @@ af_wait_gone() {
     done
 }
 
-# _af_pane_column — for each captured row, the workspace pane's OWN text: the
-# cell between its box's two vertical borders (the second-to-last │-delimited
-# field). Rows with fewer than two borders — sidebar-only rows, the box's ─
-# top/bottom, an unframed full-screen capture — contribute nothing. Joined across
-# rows (via _af_join_lines_*), this reconstructs a line that wrapped INSIDE the
-# pane.
+# _AF_PANE_BORDER_FS — the field separator that splits a captured row on ANY
+# pane vertical border. A pane's frame glyph depends on its STATE, not on the
+# driver's mode-agnostic view of it: ordinary/selected/preview panes render the
+# rounded border │ (U+2502), while the pane that owns the keyboard in
+# interactive mode renders a DOUBLE border ║ (U+2551) — ui/tabbed_window.go's
+# interactiveWindowStyle, the #1089 "keystrokes go INTO this terminal" signal
+# that must read without color. Splitting on only one of them makes every
+# wrap-tolerant matcher below work in one mode and false-time-out in the other
+# (#2145), so every border is one separator set here and no caller
+# special-cases a mode.
 #
-# It splits on the LITERAL │ (U+2502) string, which is locale-safe. The old
-# _af_strip_screen_frame used bracket expressions ([│…]); in the sandbox's C
-# locale GNU grep/sed match those byte-by-byte, so they matched only the first
-# byte of the 3-byte glyph and mangled the strip (the same trap _af_tab_count
-# documents). It also removed only the FIRST and LAST border, so the sidebar's
-# own tree-guide │ became the "first border" and its cell text leaked between the
-# marker's halves — the two ways #1994's split marker went unrecognized.
+# The two glyphs are joined with an ERE ALTERNATION, never a bracket expression
+# ([│║]): the sandbox runs a C/POSIX locale where a bracket expression matches
+# byte-by-byte, so it would match single bytes of these 3-byte glyphs and
+# shred the row (the trap #1994 and _af_tab_count both document). Alternation
+# matches each glyph's literal byte sequence regardless of locale.
+: "${_AF_PANE_BORDER_FS:=│|║}"
+
+# _af_pane_column — for each captured row, the workspace pane's OWN text: the
+# cell between its box's two vertical borders (the second-to-last
+# border-delimited field). Rows with fewer than two borders — sidebar-only
+# rows, the box's ─/═ top/bottom, an unframed full-screen capture — contribute
+# nothing. Joined across rows (via _af_join_lines_*), this reconstructs a line
+# that wrapped INSIDE the pane.
+#
+# Taking $(NF - 1) — rather than stripping the first and last border — is what
+# makes the extra borders on a row harmless: the sidebar's own tree-guide │,
+# and the mixed row where a │-bordered sidebar/pane sits left of a ║-bordered
+# interactive pane. The old _af_strip_screen_frame removed only the FIRST and
+# LAST border, so a sidebar tree-guide │ became the "first border" and its cell
+# text leaked between the marker's halves — one of the two ways #1994's split
+# marker went unrecognized (its bracket-expression matching, see
+# _AF_PANE_BORDER_FS, was the other).
 _af_pane_column() {
-    awk -F'│' '
+    awk -F"$_AF_PANE_BORDER_FS" '
         NF >= 3 {
             cell = $(NF - 1)
             gsub(/\r/, "", cell)
@@ -175,6 +194,11 @@ _af_squash_ws() {
 # pane is framed by the TUI, so reconstruct the pane's own column and normalize
 # both "wrap inside a word" (tight join) and "wrap at whitespace" (spaced join)
 # before falling back to a whitespace-squashed comparison.
+#
+# The reconstruction is border-glyph agnostic (_AF_PANE_BORDER_FS): the caller
+# is usually af_send_to_pane, which by definition runs against the INTERACTIVE
+# pane and its ║ frame, so a │-only split matched nothing there and every
+# successful command paid the full 8s timeout (#2145).
 _af_wait_for_pane_echo() {
     local text="$1" timeout="${2:-8}" label="${3:-pane echo}" screen
     local tight spaced spaced_ws text_ws
@@ -757,7 +781,8 @@ af_close_tab() {
 # whitespace before its connector. A workspace pane, by contrast, is a
 # rounded-border box to the RIGHT of the sidebar, so tree-like text INSIDE a
 # pane (e.g. a shell printing `├ 1 foo`) is always preceded on its line by the
-# sidebar columns and the pane's own `│` border — never only whitespace — so it
+# sidebar columns and the pane's own border (`│`, or `║` when that pane is the
+# interactive one — _AF_PANE_BORDER_FS) — never only whitespace — so it
 # is NOT counted. Without the `^[[:space:]]*` anchor such pane output would
 # re-introduce af_close_tab false timeouts from the opposite direction (#1561
 # review). The `[0-9]+` index additionally keeps this off instance rows, which

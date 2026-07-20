@@ -114,6 +114,37 @@ _expect_wrapped_marker_recognized() {
     )
 }
 
+# _expect_interactive_wrapped_marker_recognized — regression proof for #2145,
+# the INTERACTIVE-mode variant of the case above. af_send_to_pane by definition
+# types into the pane that owns the keyboard, and that pane is framed with the
+# DOUBLE border ║ (ui/tabbed_window.go interactiveWindowStyle), not the rounded
+# │. A │-only reconstruction therefore saw no pane column at all on the one
+# screen it was always run against: every successful command paid the full 8s
+# false timeout (reproduced on four consecutive commands at 80x24).
+#
+# The stub is the shape captured live from that repro — marker AF553325DF split
+# across two rows by the pane's right ║ border, the continuation row resuming
+# flush against the left ║ — plus a sidebar tree-guide │ on the continuation
+# row, so the row carries BOTH glyphs and pins that $(NF - 1) still lands on the
+# pane cell in a mixed row rather than on a sidebar cell.
+#
+# This case and the #1994 one above are a PAIR, and neither alone is the lock:
+# splitting on only │ fails this one, splitting on only ║ fails that one. Both
+# green means the reconstruction is border-glyph agnostic, which is the actual
+# invariant — the driver does not know, and must not need to know, which frame
+# state the pane it is matching happens to be in.
+# shellcheck disable=SC2317  # dispatched indirectly via step(); not dead code.
+_expect_interactive_wrapped_marker_recognized() {
+    (
+        sleep() { :; }
+        af_capture() {
+            printf '  \xe2\x96\xbe  alpha        \xe2\x97\x8f  \xe2\x95\x91dev@host:~/sandbox/mock-repo-alpha$ : "AF553325D\xe2\x95\x91\n'
+            printf ' \xe2\x94\x82   \xe2\x94\x94 2 Terminal    \xe2\x95\x91F"; echo HELLO_2145                       \xe2\x95\x91\n'
+        }
+        _af_wait_for_pane_echo 'AF553325DF' 3 'interactive-mode wrapped delivery marker (#2145)'
+    )
+}
+
 # _enter_interactive_and_probe_literal_send — regression proof for #1504. The
 # literal sender used to pass the text as tmux command arguments, so leading
 # hyphens were parsed as flags and repeated semicolons were parsed as command
@@ -658,6 +689,7 @@ step "open beta's tab as a pane"                            af_open_pane
 step "enter interactive mode and probe literal send"         _enter_interactive_and_probe_literal_send
 step "send a wrapped command without echo false-timeout"     _expect_wrapped_send_no_timeout
 step "recognize a delivery marker split by a pane wrap (#1994)" _expect_wrapped_marker_recognized
+step "recognize a marker split by the interactive ║ border (#2145)" _expect_interactive_wrapped_marker_recognized
 # The command COMPUTES its marker (arithmetic expansion), so the sentinel we
 # assert on — SELFTEST_42 — appears ONLY in the command's output, never in the
 # echoed input line (which shows the literal $((6*7))). A shell that echoed
