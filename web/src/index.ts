@@ -39,6 +39,7 @@ import {
   restoreSession,
   resumeFromLimit,
   sendPrompt,
+  shouldForgetToken,
   storeToken,
   triggerTask,
   updateTask,
@@ -222,9 +223,11 @@ function mount(): void {
 
 /** Decides the opening view (#1696): probe whether the daemon requires a token for
  *  THIS client. If not (loopback, or require_token=false), connect straight through
- *  with no credential. If it does, resume a token kept in sessionStorage across a
- *  reload, else land on the paste-token login. A probe transport failure falls back
- *  to the token login — never auto-connects on uncertainty. */
+ *  with no credential — and store nothing. If it does, resume the token kept in
+ *  localStorage (so a new tab / a browser restart logs in once, not every visit),
+ *  else land on the paste-token login. A resumed token the daemon rejects clears
+ *  itself and falls back to the paste form, once. A probe transport failure also
+ *  falls back to the token login — never auto-connects on uncertainty. */
 async function bootstrap(): Promise<void> {
   let required = true;
   try {
@@ -279,23 +282,29 @@ function rerender(): void {
 
 /** Validates the token (Snapshot probe), and on success persists it, seeds the rail
  *  from the probe's snapshot, subscribes to /v1/events, and shows the app; on
- *  failure clears it and surfaces an actionable error on the login view. */
+ *  failure surfaces an actionable error on the login view — forgetting the stored
+ *  token only when the daemon REJECTED it (shouldForgetToken). */
 async function connect(candidate: string): Promise<void> {
   store.set({ connecting: true, loginError: null });
   let sessions: SessionData[];
   try {
     sessions = await probeToken(candidate);
   } catch (e) {
-    clearToken();
+    // A rejected credential is forgotten so the next load prompts cleanly instead of
+    // retrying a dead token forever; a transport failure keeps it, because "the
+    // daemon is down" is not evidence the token is bad (see shouldForgetToken).
+    // Either way we land on the login view exactly once — no retry loop.
+    if (shouldForgetToken(e)) {
+      clearToken();
+    }
     store.set({ phase: "login", connecting: false, loginError: describeError(e) });
     return;
   }
   token = candidate;
-  // Persist only a REAL token so a reload can resume it; the empty-token sentinel
-  // (no-auth client, #1696) is never worth storing — bootstrap re-probes on reload.
-  if (candidate !== "") {
-    storeToken(candidate);
-  }
+  // Persist only a REAL token so the next visit can resume it; the empty-token
+  // sentinel (no-auth client, #1696) is never stored — bootstrap re-probes
+  // /v1/auth-info on every load, so a tokenless daemon needs nothing on disk.
+  storeToken(candidate);
   // Fetch the tasks BEFORE choosing the initial project scope (redesign PR2, Greptile
   // follow-on Fix 2): the persisted selection must reconcile against the FULL project
   // list — sessions AND tasks — so a persisted TASK-ONLY project restores AS ITSELF,
@@ -329,7 +338,10 @@ async function connect(candidate: string): Promise<void> {
   startStream(candidate);
 }
 
-/** Forgets the token, tears down the push stream + terminal, and returns to login. */
+/** Forgets the token — in memory AND in storage — tears down the push stream +
+ *  terminal, and returns to login. This is the "forget the saved token" affordance
+ *  now that the credential persists across visits: on a shared machine, or after a
+ *  rotation, Disconnect is what makes the next load prompt again. */
 function disconnect(): void {
   stopStream();
   closeModal();

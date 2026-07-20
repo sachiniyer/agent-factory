@@ -294,6 +294,14 @@ body {
   line-height: 1.5;
 }
 
+/* The "it stays saved" note under the login subtitle: a quieter second line of the
+   same block, so it reads as a footnote to the paste instruction rather than a
+   second paragraph competing with it. */
+.af-login-note {
+  margin-top: calc(-1 * var(--af-sp-3));
+  font-size: var(--af-fs-sm);
+}
+
 .af-subtitle code {
   font-family: var(--af-font-mono);
   color: var(--af-text);
