@@ -72,7 +72,8 @@ type KillSessionRequest struct {
 	// only falls back to {Title, RepoID} when it is empty. Web clients send it so
 	// a duplicate title across repos can't target the wrong session on this
 	// destructive action — the write-path analogue of the id-keyed read/stream
-	// paths (#1592 Phase 5 PR5). TUI/CLI callers omit it and resolve by title.
+	// paths (#1592 Phase 5 PR5). Retained TUI actions send it; one-shot CLI
+	// callers resolve by repo-scoped title.
 	ID string `json:"id"`
 	// No force field: kill always destroys the session since the unmerged-work
 	// guard was dropped (#1579). The CLI `--force` flag is accepted as a no-op
@@ -94,7 +95,8 @@ type ArchiveSessionRequest struct {
 	// ID is the session's stable id; see KillSessionRequest.ID. When non-empty
 	// the daemon resolves the archive target by id first, so a web archive can't
 	// hit the wrong session under a cross-repo title collision (#1592 Phase 5
-	// follow-up). TUI/CLI callers omit it and resolve by {Title, RepoID}.
+	// follow-up). Retained TUI actions send it; one-shot CLI callers resolve by
+	// {Title, RepoID}.
 	ID string `json:"id"`
 }
 

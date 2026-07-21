@@ -152,7 +152,8 @@ func TestHandleKill_UnmergedUnpushedCommit_EscalatesAndNamesLoss(t *testing.T) {
 	assert.Equal(t, session.Deleting, inst.GetStatus())
 	startMsg, ok := cmd().(startKillMsg)
 	require.True(t, ok, "confirm must emit startKillMsg")
-	assert.Equal(t, "gamma", startMsg.title)
+	assert.Equal(t, "gamma", startMsg.target.title)
+	assert.Equal(t, inst.ID, startMsg.target.id)
 }
 
 // TestHandleKill_AgentSwitchesBranch_WarnsForSessionBranchCommits is the #2199

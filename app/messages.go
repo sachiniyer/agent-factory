@@ -14,22 +14,22 @@ type previewTickMsg struct{}
 // dispatches killInstanceCmd, which runs the slow teardown in a background
 // goroutine (#844).
 type startKillMsg struct {
-	title string
+	target sessionActionTarget
 }
 
 // instanceKilledMsg reports completion of an async kill. A nil err means the
 // daemon tore the session down and deleted its record; a non-nil err means
 // the session is still alive and the row must become retryable again.
 type instanceKilledMsg struct {
-	title string
-	err   error
+	target sessionActionTarget
+	err    error
 }
 
 // startArchiveMsg is emitted by the archive confirmation (#1028); its handler
 // dispatches archiveInstanceCmd to run the daemon teardown+move off the event
 // loop, mirroring startKillMsg → killInstanceCmd.
 type startArchiveMsg struct {
-	title string
+	target sessionActionTarget
 }
 
 // startDeleteProjectMsg is emitted by the delete-project confirmation (#1735);
@@ -62,8 +62,8 @@ type projectDeletedMsg struct {
 // next daemon Snapshot reconcile (which re-partitions it into / out of the
 // Archived folder); a non-nil err is surfaced in the error box.
 type instanceArchivedMsg struct {
-	title string
-	err   error
+	target sessionActionTarget
+	err    error
 }
 
 type instanceRestoredMsg struct {

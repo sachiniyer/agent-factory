@@ -7,6 +7,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/keys"
 	"github.com/sachiniyer/agent-factory/session"
 )
@@ -34,7 +35,7 @@ func TestHandleArchive_LiveRowConfirms(t *testing.T) {
 
 	called := false
 	prev := archiveSessionThroughDaemon
-	archiveSessionThroughDaemon = func(string, string) (string, error) { called = true; return "", nil }
+	archiveSessionThroughDaemon = func(daemon.ArchiveSessionRequest) (string, error) { called = true; return "", nil }
 	defer func() { archiveSessionThroughDaemon = prev }()
 
 	model, _ := h.handleArchive()
@@ -188,20 +189,22 @@ func TestHandleRestore_LiveRowIsNoOp(t *testing.T) {
 func TestArchiveInstanceCmd_CallsDaemon(t *testing.T) {
 	h := newTestHome(t)
 
-	var gotTitle string
+	var gotRequest daemon.ArchiveSessionRequest
 	prev := archiveSessionThroughDaemon
-	archiveSessionThroughDaemon = func(title, repoID string) (string, error) {
-		gotTitle = title
+	archiveSessionThroughDaemon = func(request daemon.ArchiveSessionRequest) (string, error) {
+		gotRequest = request
 		return "/archive/path", nil
 	}
 	defer func() { archiveSessionThroughDaemon = prev }()
 
-	msg := h.archiveInstanceCmd("worker")()
-	require.Equal(t, "worker", gotTitle, "the archive command must call the daemon for the given title")
+	target := sessionActionTarget{id: "session-id", title: "worker", repoID: h.repoID}
+	msg := h.archiveInstanceCmd(target)()
+	require.Equal(t, daemon.ArchiveSessionRequest{ID: target.id, Title: target.title, RepoID: target.repoID}, gotRequest,
+		"the archive command must preserve the captured stable identity")
 	done, ok := msg.(instanceArchivedMsg)
 	require.True(t, ok, "the command must emit instanceArchivedMsg")
 	require.NoError(t, done.err)
-	require.Equal(t, "worker", done.title)
+	require.Equal(t, target, done.target)
 }
 
 // TestArchiveInstanceCmd_SurfacesError: a daemon rejection is carried back as an
@@ -209,12 +212,12 @@ func TestArchiveInstanceCmd_CallsDaemon(t *testing.T) {
 func TestArchiveInstanceCmd_SurfacesError(t *testing.T) {
 	h := newTestHome(t)
 	prev := archiveSessionThroughDaemon
-	archiveSessionThroughDaemon = func(string, string) (string, error) {
+	archiveSessionThroughDaemon = func(daemon.ArchiveSessionRequest) (string, error) {
 		return "", errors.New("cannot archive in-place session")
 	}
 	defer func() { archiveSessionThroughDaemon = prev }()
 
-	msg := h.archiveInstanceCmd("worker")()
+	msg := h.archiveInstanceCmd(sessionActionTarget{title: "worker", repoID: h.repoID})()
 	done := msg.(instanceArchivedMsg)
 	require.Error(t, done.err)
 }

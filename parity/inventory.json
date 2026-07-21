@@ -423,7 +423,7 @@
       "title": "Address a session by its stable id rather than by title",
       "tui": {
         "status": "partial",
-        "pointer": "app/handle_handoff.go:127-130 sends HandoffSessionRequest.ID; other TUI mutations still send {Title, RepoID}"
+        "pointer": "app/session_action_target.go captures stable identity; handle_actions.go sends it for kill/archive and handle_handoff.go sends it for handoff"
       },
       "web": {
         "status": "yes",
@@ -435,7 +435,7 @@
       },
       "verdict": "real-gap",
       "issue": "#2358",
-      "notes": "#2322 disproved the old blanket 'repo-scoped title is enough' rationale for a TUI action that survives a modal: a killed/recreated row can reuse the title while the user's intent still names the prior stable session. Handoff now carries ID from picker-open through daemon dispatch. The remaining TUI mutations are still title-addressed and need an action-by-action audit; the CLI remains deliberately repo+title scoped because each invocation resolves and dispatches one command without retained UI intent."
+      "notes": "#2322 disproved the old blanket 'repo-scoped title is enough' rationale for a TUI action that survives a modal: a killed/recreated row can reuse the title while the user's intent still names the prior stable session. Handoff, kill, and archive now carry one captured identity through modal, daemon dispatch, and completion. The remaining TUI mutations are still title-addressed and need an action-by-action audit; the CLI remains deliberately repo+title scoped because each invocation resolves and dispatches one command without retained UI intent."
     },
     {
       "id": "session.watch",
@@ -1722,7 +1722,7 @@
         },
         "tui": {
           "id": {
-            "gap": "wire.id-addressing"
+            "ok": "The TUI captures the selected session ID before confirmation and carries it through the daemon request and async completion."
           }
         }
       },
@@ -1734,7 +1734,7 @@
         },
         "tui": {
           "id": {
-            "gap": "wire.id-addressing"
+            "ok": "The TUI captures the selected session ID before confirmation and carries it through the daemon request and async completion."
           }
         }
       },

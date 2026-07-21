@@ -2,7 +2,6 @@ package app
 
 import (
 	"fmt"
-	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -14,12 +13,7 @@ import (
 	"github.com/sachiniyer/agent-factory/ui/overlay"
 )
 
-type handoffPickerTarget struct {
-	id        string
-	title     string
-	repoID    string
-	createdAt time.Time
-}
+type handoffPickerTarget = sessionActionTarget
 
 func (target handoffPickerTarget) request(to string) daemon.HandoffSessionRequest {
 	return daemon.HandoffSessionRequest{
@@ -88,9 +82,7 @@ func (m *home) handleHandoff() (tea.Model, tea.Cmd) {
 	}
 
 	m.handoffChoices = choices
-	m.handoffTarget = handoffPickerTarget{
-		id: selected.ID, title: selected.Title, repoID: m.repoID, createdAt: selected.CreatedAt,
-	}
+	m.handoffTarget = captureSessionActionTarget(selected, m.repoID)
 	m.selectionOverlay = overlay.NewSelectionOverlay("Hand off to", choices)
 	m.state = stateSelectHandoffAgent
 	return m, nil
@@ -123,7 +115,7 @@ func (m *home) handleStateSelectHandoffAgent(msg tea.KeyMsg) (tea.Model, tea.Cmd
 	}
 	target := choices[idx]
 
-	selected := m.resolveHandoffPickerTarget(pickerTarget)
+	selected := m.resolveSessionActionTarget(pickerTarget)
 	if selected == nil {
 		return m, nil
 	}
@@ -143,32 +135,6 @@ func (m *home) handleStateSelectHandoffAgent(msg tea.KeyMsg) (tea.Model, tea.Cmd
 		}
 		return startHandoffMsg{request: pickerTarget.request(target), target: pickerTarget}
 	})
-}
-
-func (m *home) resolveHandoffPickerTarget(target handoffPickerTarget) *session.Instance {
-	if target.repoID == "" || target.repoID != m.repoID {
-		return nil
-	}
-	if target.id == "" {
-		// Compatibility for records written before stable session IDs existed.
-		// CreatedAt is the same legacy discriminator snapshot reconciliation uses;
-		// a zero timestamp proves no identity, so fail closed instead of letting
-		// title reuse inherit a retained destructive action (#2322/#2358).
-		if target.createdAt.IsZero() {
-			return nil
-		}
-		inst := m.store.GetInstanceByTitle(target.title)
-		if inst != nil && inst.CreatedAt.Equal(target.createdAt) {
-			return inst
-		}
-		return nil
-	}
-	for _, inst := range m.store.GetInstances() {
-		if inst.ID == target.id {
-			return inst
-		}
-	}
-	return nil
 }
 
 // startHandoffMsg is emitted by the confirmation action and turned into the

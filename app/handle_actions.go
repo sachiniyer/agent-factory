@@ -164,9 +164,11 @@ func (m *home) handleKill() (tea.Model, tea.Cmd) {
 		return m, m.handleError(fmt.Errorf("session '%s' is already being deleted", selected.Title))
 	}
 
-	// Capture the title at confirmation time so that background tick events
-	// cannot change which instance we operate on.
+	// Capture stable identity at confirmation-open time. A title may be reused
+	// while the modal is open, so every later phase resolves this target instead
+	// of whichever current row happens to carry the display title (#2358).
 	selectedTitle := selected.Title
+	target := captureSessionActionTarget(selected, m.repoID)
 
 	// Runs synchronously in the confirmation overlay's OnConfirm, on the
 	// event loop — keep it fast. Raising the optimistic OpKilling op here (not in
@@ -175,11 +177,10 @@ func (m *home) handleKill() (tea.Model, tea.Cmd) {
 	// overlay (the daemon does not emit a kill op; it drops the record), so it
 	// composes to Deleting for rendering and survives non-terminal reconciles.
 	killAction := func() tea.Msg {
-		for _, inst := range m.store.GetInstances() {
-			if inst.Title == selectedTitle {
-				_ = inst.Transition(session.BeginKill())
-				return startKillMsg{title: selectedTitle}
-			}
+		inst := m.resolveSessionActionTarget(target)
+		if inst != nil {
+			_ = inst.Transition(session.BeginKill())
+			return startKillMsg{target: target}
 		}
 		// The row was removed (e.g. by an external kill picked up by the
 		// background refresh) while the dialog was open; nothing to do.
@@ -266,8 +267,7 @@ func (m *home) handleKill() (tea.Model, tea.Cmd) {
 // is unchanged: it goes through the killSessionThroughDaemon seam — now the HTTP
 // apiclient's KillSession (#1592 Phase 2 PR3) — which keeps the title blocked
 // against reuse until the teardown completes.
-func (m *home) killInstanceCmd(title string) tea.Cmd {
-	repoID := m.repoID
+func (m *home) killInstanceCmd(target sessionActionTarget) tea.Cmd {
 	// Capture the kill seam on the event loop, before the goroutine: it is a
 	// package var swapped by test seams, so reading it inside the cmd goroutine
 	// would race a sibling parallel test's swap (#960 PR 4 race-fix class).
@@ -276,11 +276,11 @@ func (m *home) killInstanceCmd(title string) tea.Cmd {
 		// The shell tab's tmux session is owned by the instance and torn down by
 		// LocalBackend.Kill (looping all tabs) inside the daemon teardown — there
 		// is no longer a UI-side terminal cache to clean up (#930 PR 2).
-		if err := kill(title, repoID); err != nil {
+		if err := kill(target.killRequest()); err != nil {
 			log.ErrorLog.Printf("could not kill instance: %v", err)
-			return instanceKilledMsg{title: title, err: err}
+			return instanceKilledMsg{target: target, err: err}
 		}
-		return instanceKilledMsg{title: title}
+		return instanceKilledMsg{target: target}
 	}
 }
 
@@ -290,34 +290,21 @@ func (m *home) killInstanceCmd(title string) tea.Cmd {
 // kill, and the underlying error — the evidence, per #797 — lands in the
 // error box.
 func (m *home) handleInstanceKilled(msg instanceKilledMsg) (tea.Model, tea.Cmd) {
+	inst := m.resolveSessionActionTarget(msg.target)
 	if msg.err != nil {
-		for _, inst := range m.store.GetInstances() {
-			if inst.Title == msg.title && inst.GetInFlightOp() == session.OpKilling {
-				// Clear the optimistic kill op: the row reverts to its underlying
-				// daemon liveness so the user can retry the kill.
-				_ = inst.Transition(session.RevertKill())
-				break
-			}
+		if inst != nil && inst.GetInFlightOp() == session.OpKilling {
+			// Clear the optimistic kill op: the row reverts to its underlying
+			// daemon liveness so the user can retry the kill.
+			_ = inst.Transition(session.RevertKill())
 		}
-		return m, m.handleError(fmt.Errorf("failed to kill session '%s': %w", msg.title, msg.err))
+		return m, m.handleError(fmt.Errorf("failed to kill session '%s': %w", msg.target.title, msg.err))
 	}
 
-	// The TUI's in-memory instance is untouched by the daemon-side teardown,
-	// so its repo name is still resolvable here for repo-section bookkeeping.
-	// The row may already be gone when the background refresh noticed the
-	// deleted disk record first — both removals are no-ops then.
-	var repoName string
-	var repoErr error = fmt.Errorf("instance not found")
-	for _, inst := range m.store.GetInstances() {
-		if inst.Title == msg.title {
-			repoName, repoErr = inst.RepoName()
-			break
-		}
-	}
-	if repoErr == nil {
-		m.store.RemoveInstanceByTitleWithRepo(msg.title, repoName)
-	} else {
-		m.store.RemoveInstanceByTitle(msg.title)
+	// A refresh may already have removed the row, or replaced it with a new
+	// same-title session while the RPC was in flight. Remove only the captured
+	// identity; both missing cases are intentional no-ops.
+	if inst != nil {
+		m.store.RemoveInstance(inst)
 	}
 	return m, m.selectionChanged()
 }
@@ -342,6 +329,7 @@ func (m *home) handleArchive() (tea.Model, tea.Cmd) {
 		return m, m.handleError(fmt.Errorf("session '%s' is being deleted", selected.Title))
 	}
 	title := selected.Title
+	target := captureSessionActionTarget(selected, m.repoID)
 
 	// A resting (Archived/Lost/Dead) row has no live worktree/tmux to tear down;
 	// `a` does nothing. Restore is on its own key now (`r`).
@@ -365,13 +353,12 @@ func (m *home) handleArchive() (tea.Model, tea.Cmd) {
 		// while the RPC runs (#1195). It composes to Deleting for rendering; the
 		// reconcile clears it once the daemon liveness settles on Archived, and the
 		// completion handler finalizes it — so the row can never strand (#1187).
-		for _, inst := range m.store.GetInstances() {
-			if inst.Title == title {
-				_ = inst.Transition(session.BeginArchive())
-				break
-			}
+		inst := m.resolveSessionActionTarget(target)
+		if inst == nil {
+			return nil
 		}
-		return startArchiveMsg{title: title}
+		_ = inst.Transition(session.BeginArchive())
+		return startArchiveMsg{target: target}
 	})
 }
 
@@ -415,15 +402,14 @@ func (m *home) handleRestore() (tea.Model, tea.Cmd) {
 // archiveInstanceCmd runs the daemon archive (tmux teardown + worktree move) off
 // the event loop (#1028), mirroring killInstanceCmd — the RPC blocks for the
 // whole operation, so it must not run on the Update goroutine.
-func (m *home) archiveInstanceCmd(title string) tea.Cmd {
-	repoID := m.repoID
+func (m *home) archiveInstanceCmd(target sessionActionTarget) tea.Cmd {
 	archive := archiveSessionThroughDaemon
 	return func() tea.Msg {
-		if _, err := archive(title, repoID); err != nil {
-			log.ErrorLog.Printf("could not archive instance %q: %v", title, err)
-			return instanceArchivedMsg{title: title, err: err}
+		if _, err := archive(target.archiveRequest()); err != nil {
+			log.ErrorLog.Printf("could not archive instance %q: %v", target.title, err)
+			return instanceArchivedMsg{target: target, err: err}
 		}
-		return instanceArchivedMsg{title: title}
+		return instanceArchivedMsg{target: target}
 	}
 }
 
@@ -449,29 +435,24 @@ func (m *home) restoreInstanceCmd(title string) tea.Cmd {
 // never strand on "Tearing down session…" even if a poll caught it mid-fence.
 // On failure the error lands in the error box.
 func (m *home) handleInstanceArchived(msg instanceArchivedMsg) (tea.Model, tea.Cmd) {
+	inst := m.resolveSessionActionTarget(msg.target)
 	if msg.err != nil {
 		// Archive failed: clear the optimistic op so the row reverts to its
 		// underlying daemon liveness rather than stranding as archiving.
-		for _, inst := range m.store.GetInstances() {
-			if inst.Title == msg.title && inst.GetInFlightOp() == session.OpArchiving {
-				_ = inst.Transition(session.ClearOp())
-				break
-			}
+		if inst != nil && inst.GetInFlightOp() == session.OpArchiving {
+			_ = inst.Transition(session.ClearOp())
 		}
-		return m, m.handleError(fmt.Errorf("failed to archive session '%s': %w", msg.title, msg.err))
+		return m, m.handleError(fmt.Errorf("failed to archive session '%s': %w", msg.target.title, msg.err))
 	}
-	for _, inst := range m.store.GetInstances() {
-		if inst.Title == msg.title {
-			// SetArchived is an unconditional projection-mirror: it copies the
-			// daemon's already-committed Archived state (started=false,
-			// liveness=Archived, op cleared) onto the read-only row. It is NOT the
-			// fenced CommitArchive transition (that's the daemon's I2 enforcement
-			// point) — the TUI row may be in any state here (optimistic OpArchiving,
-			// or already Archived if the reconcile settled first), so it stays a
-			// direct unconditional mirror rather than a fenced edge (#1195 Phase 2d).
-			inst.SetArchived()
-			break
-		}
+	if inst != nil {
+		// SetArchived is an unconditional projection-mirror: it copies the
+		// daemon's already-committed Archived state (started=false,
+		// liveness=Archived, op cleared) onto the read-only row. It is NOT the
+		// fenced CommitArchive transition (that's the daemon's I2 enforcement
+		// point) — the TUI row may be in any state here (optimistic OpArchiving,
+		// or already Archived if the reconcile settled first), so it stays a
+		// direct unconditional mirror rather than a fenced edge (#1195 Phase 2d).
+		inst.SetArchived()
 	}
 	return m, m.selectionChanged()
 }

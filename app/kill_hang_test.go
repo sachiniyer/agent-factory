@@ -63,7 +63,9 @@ func TestKillSessionThroughDaemon_WedgedDaemon_ReturnsActionableError(t *testing
 	killRPCTimeout = 250 * time.Millisecond
 
 	done := make(chan error, 1)
-	go func() { done <- killSessionThroughDaemon("alpha", "repo-1") }()
+	go func() {
+		done <- killSessionThroughDaemon(daemon.KillSessionRequest{ID: "alpha-id", Title: "alpha", RepoID: "repo-1"})
+	}()
 
 	select {
 	case err := <-done:
@@ -174,7 +176,9 @@ func TestKillSessionThroughDaemon_DaemonError_SurfacesVerbatim(t *testing.T) {
 	}
 
 	done := make(chan error, 1)
-	go func() { done <- killSessionThroughDaemon("ghost", "repo-1") }()
+	go func() {
+		done <- killSessionThroughDaemon(daemon.KillSessionRequest{ID: "ghost-id", Title: "ghost", RepoID: "repo-1"})
+	}()
 	select {
 	case err := <-done:
 		if err == nil || !strings.Contains(err.Error(), `session "ghost" not found`) {
