@@ -9,6 +9,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/sachiniyer/agent-factory/internal/pathutil"
 	"github.com/sachiniyer/agent-factory/log"
 )
 
@@ -216,8 +217,10 @@ func ensureStorageParent(path string) error {
 // the configured AF home. A newly created home is always 0700, and the default
 // ~/.agent-factory is tightened on upgrade. An existing custom home is left
 // alone: AGENT_FACTORY_HOME explicitly supports broad caller-owned directories
-// such as "~", and a file helper must never chmod those. AtomicWriteFile and the
-// lock helpers are generic, so paths elsewhere are left alone too.
+// such as "~", and a file helper must never chmod those. A default-name symlink
+// is custom ownership too: AF neither chmods its target nor blocks startup over
+// that mode. AtomicWriteFile and the lock helpers are generic, so paths elsewhere
+// are left alone too.
 func secureAFHomeForPath(path string) error {
 	afHome, err := GetConfigDir()
 	if err != nil {
@@ -253,13 +256,13 @@ func secureAFHomeForPath(path string) error {
 	if statErr != nil {
 		return fmt.Errorf("inspect AF home: %w", statErr)
 	}
-	// Environment presence does not make a path custom: users commonly export
-	// AGENT_FACTORY_HOME=$HOME/.agent-factory to pin the default explicitly. Base
-	// the permission policy on the resolved location so that spelling receives
-	// the same legacy repair, while genuinely custom broad directories (notably
-	// AGENT_FACTORY_HOME=~) retain their caller-owned mode.
-	isDefaultHome := os.Getenv("AGENT_FACTORY_HOME") == "" || resolvesToDefaultAFHome(absHome)
-	if !isDefaultHome && !created {
+	// Environment presence does not make a path custom: users commonly export an
+	// alias of $HOME/.agent-factory to pin the default explicitly. Direction does
+	// matter, though. An alias INTO a concrete default is AF-owned and repairable;
+	// when the default name itself is a symlink, its target remains caller-owned.
+	// concreteDefaultAFHome returns the path AF may safely chmod, never the alias.
+	defaultRepairPath := concreteDefaultAFHome(absHome)
+	if defaultRepairPath == "" && !created {
 		return nil
 	}
 	if info.Mode()&os.ModeSymlink != 0 {
@@ -269,28 +272,54 @@ func secureAFHomeForPath(path string) error {
 		if err != nil {
 			return fmt.Errorf("inspect AF home symlink target: %w", err)
 		}
-		if !target.IsDir() || target.Mode().Perm() != 0o700 {
+		if !target.IsDir() {
 			return fmt.Errorf("AF home %s is a symlink whose target is not an owner-only directory", absHome)
+		}
+		if target.Mode().Perm() != 0o700 {
+			if defaultRepairPath == "" {
+				return fmt.Errorf("AF home %s is a symlink whose target is not an owner-only directory", absHome)
+			}
+			// Repair the concrete default, not the user-provided alias. That keeps a
+			// retargeted alias from redirecting chmod to a caller-owned directory.
+			if err := os.Chmod(defaultRepairPath, 0o700); err != nil {
+				return fmt.Errorf("secure AF home: %w", err)
+			}
 		}
 		return nil
 	}
 	if !info.IsDir() {
 		return fmt.Errorf("AF home %s is not a directory", absHome)
 	}
-	if err := os.Chmod(absHome, 0o700); err != nil {
+	repairPath := absHome
+	if defaultRepairPath != "" {
+		repairPath = defaultRepairPath
+	}
+	if err := os.Chmod(repairPath, 0o700); err != nil {
 		return fmt.Errorf("secure AF home: %w", err)
 	}
 	return nil
 }
 
-func resolvesToDefaultAFHome(absHome string) bool {
+// concreteDefaultAFHome returns the concrete default directory when absHome is
+// another spelling of it. The direction is intentional: if the default name is
+// itself a symlink, its target is caller-owned and no spelling of that target is
+// permission-repairable here. This resolves both sides of the policy without
+// turning symmetric path equality into symmetric ownership.
+func concreteDefaultAFHome(absHome string) string {
 	defaultHome, err := ConfigDirFor("")
 	if err != nil {
-		return false
+		return ""
 	}
 	absDefault, err := filepath.Abs(defaultHome)
 	if err != nil {
-		return false
+		return ""
 	}
-	return filepath.Clean(absHome) == filepath.Clean(absDefault)
+	defaultInfo, err := os.Lstat(absDefault)
+	if err != nil || !defaultInfo.IsDir() || defaultInfo.Mode()&os.ModeSymlink != 0 {
+		return ""
+	}
+	if pathutil.ResolveForCompare(absHome) != pathutil.ResolveForCompare(absDefault) {
+		return ""
+	}
+	return absDefault
 }

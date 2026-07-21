@@ -67,6 +67,99 @@ func TestLoadConfigSecuresDefaultAFHome(t *testing.T) {
 	}
 }
 
+// An explicit AGENT_FACTORY_HOME may spell the default through a symlinked
+// ancestor (including macOS /var -> /private/var). Path identity, not the raw
+// spelling, decides whether the legacy default-home repair applies.
+func TestLoadConfigSecuresExplicitDefaultAFHomeThroughSymlink(t *testing.T) {
+	base := t.TempDir()
+	realHome := filepath.Join(base, "real-home")
+	require.NoError(t, os.Mkdir(realHome, 0o755))
+	linkHome := filepath.Join(base, "link-home")
+	require.NoError(t, os.Symlink(realHome, linkHome))
+
+	afHome := filepath.Join(realHome, ".agent-factory")
+	require.NoError(t, os.Mkdir(afHome, 0o755))
+	require.NoError(t, os.Chmod(afHome, 0o755))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(afHome, TomlConfigFileName),
+		[]byte("default_program = 'codex'\n"), 0o644))
+	t.Setenv("HOME", realHome)
+	t.Setenv("AGENT_FACTORY_HOME", filepath.Join(linkHome, ".agent-factory"))
+	fastShell(t)
+
+	cfg, err := LoadConfig()
+	require.NoError(t, err)
+	require.Equal(t, "codex", cfg.DefaultProgram,
+		"securing the symlink-spelled default must preserve its config")
+	requireMode(t, afHome, 0o700)
+}
+
+// A final-component alias pointing INTO a concrete default home is another
+// spelling of the directory AF owns. Repair the concrete default path rather
+// than refusing the alias merely because chmod would follow it.
+func TestLoadConfigRepairsExplicitAliasToConcreteDefaultAFHome(t *testing.T) {
+	base := t.TempDir()
+	userHome := filepath.Join(base, "home")
+	require.NoError(t, os.Mkdir(userHome, 0o755))
+	afHome := filepath.Join(userHome, ".agent-factory")
+	require.NoError(t, os.Mkdir(afHome, 0o755))
+	require.NoError(t, os.Chmod(afHome, 0o755))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(afHome, TomlConfigFileName),
+		[]byte("default_program = 'codex'\n"), 0o644))
+	alias := filepath.Join(base, "af-home-alias")
+	require.NoError(t, os.Symlink(afHome, alias))
+	t.Setenv("HOME", userHome)
+	t.Setenv("AGENT_FACTORY_HOME", alias)
+	fastShell(t)
+
+	cfg, err := LoadConfig()
+	require.NoError(t, err)
+	require.Equal(t, "codex", cfg.DefaultProgram)
+	requireMode(t, afHome, 0o700)
+}
+
+// Direction matters when the default name is itself a symlink. Its target is
+// caller-owned; pointing the default name at a broad directory must not grant AF
+// permission to chmod that directory when AGENT_FACTORY_HOME names it directly.
+func TestAtomicWriteFilePreservesCustomTargetOfDefaultSymlink(t *testing.T) {
+	base := t.TempDir()
+	userHome := filepath.Join(base, "home")
+	require.NoError(t, os.Mkdir(userHome, 0o755))
+	customHome := filepath.Join(base, "shared-af-home")
+	require.NoError(t, os.Mkdir(customHome, 0o755))
+	require.NoError(t, os.Chmod(customHome, 0o755))
+	require.NoError(t, os.Symlink(customHome, filepath.Join(userHome, ".agent-factory")))
+	t.Setenv("HOME", userHome)
+	t.Setenv("AGENT_FACTORY_HOME", customHome)
+
+	path := filepath.Join(customHome, "state.json")
+	require.NoError(t, AtomicWriteFile(path, []byte("{}"), 0o644))
+	require.FileExists(t, path)
+	requireMode(t, customHome, 0o755)
+}
+
+// When AF is addressed through a default-name symlink, preserve the permissive
+// target rather than chmodding caller-owned storage or failing startup. The safe
+// alias repair above must not reverse this direction.
+func TestAtomicWriteFilePreservesPermissiveDefaultSymlinkTarget(t *testing.T) {
+	base := t.TempDir()
+	userHome := filepath.Join(base, "home")
+	require.NoError(t, os.Mkdir(userHome, 0o755))
+	customHome := filepath.Join(base, "shared-af-home")
+	require.NoError(t, os.Mkdir(customHome, 0o755))
+	require.NoError(t, os.Chmod(customHome, 0o755))
+	defaultHome := filepath.Join(userHome, ".agent-factory")
+	require.NoError(t, os.Symlink(customHome, defaultHome))
+	t.Setenv("HOME", userHome)
+	t.Setenv("AGENT_FACTORY_HOME", "")
+
+	path := filepath.Join(defaultHome, "state.json")
+	require.NoError(t, AtomicWriteFile(path, []byte("{}"), 0o644))
+	require.FileExists(t, path)
+	requireMode(t, customHome, 0o755)
+}
+
 func TestAtomicWriteFileCreatesMissingCustomAFHomePrivate(t *testing.T) {
 	userHome := t.TempDir()
 	afHome := filepath.Join(userHome, "custom-af-home")
