@@ -599,7 +599,7 @@ func TestFailedPostClearCaptureKeepsPreClearBaseline(t *testing.T) {
 		"a failed post-clear capture must fall back to the pre-clear count instead of falsely confirming an old tail")
 }
 
-func TestFinalCaptureFailureKeepsEarlierObservedAbsence(t *testing.T) {
+func TestFinalCaptureFailureMakesEarlierAbsenceUnobservable(t *testing.T) {
 	defer withPasteDeliveryTiming(8*time.Millisecond, time.Millisecond)()
 	captures := 0
 	cmdExec := cmd_test.MockCmdExec{
@@ -614,8 +614,29 @@ func TestFinalCaptureFailureKeepsEarlierObservedAbsence(t *testing.T) {
 	session := newTmuxSession("af_proj", ProgramClaude, NewMockPtyFactory(t), cmdExec)
 
 	got := session.waitForPasteDelivered("DISTINCTIVE_DELIVERY_TAIL", 0)
-	require.Equal(t, deliveryObservedAbsent, got,
-		"a failed final probe must not erase an earlier successful observation of absence (#2214 review)")
+	require.Equal(t, deliveryCouldNotObserve, got,
+		"an early absence followed by failed probes cannot say whether the paste landed later")
+}
+
+func TestCaptureFailureBreaksShortTailSightingStreak(t *testing.T) {
+	defer withPasteDeliveryTiming(8*time.Millisecond, time.Millisecond)()
+	captures := 0
+	cmdExec := cmd_test.MockCmdExec{
+		OutputFunc: func(*exec.Cmd) ([]byte, error) {
+			captures++
+			switch captures {
+			case 1, 3:
+				return []byte("ok"), nil
+			default:
+				return nil, fmt.Errorf("capture failed")
+			}
+		},
+	}
+	session := newTmuxSession("af_proj", ProgramClaude, NewMockPtyFactory(t), cmdExec)
+
+	got := session.waitForPasteDelivered("ok", 0)
+	require.Equal(t, deliveryCouldNotObserve, got,
+		"two weak sightings separated by a failed probe are not consecutive delivery evidence")
 }
 
 // TestObservedDeliveryCachesEchoBehavior proves unknown programs are detected
