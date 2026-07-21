@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/pathutil"
 
 	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/assert"
@@ -208,6 +209,90 @@ func TestConfigListExplainJSONContainsEveryProjectResolution(t *testing.T) {
 		assert.NotEmpty(t, value.Precedence)
 		assert.NotEmpty(t, value.Candidates)
 	}
+}
+
+func TestConfigExplainPreservesSelectedPathSpellingForEverySourceReference(t *testing.T) {
+	container := t.TempDir()
+	realParent := filepath.Join(container, "real")
+	selectedParent := filepath.Join(container, "selected")
+	require.NoError(t, os.Mkdir(realParent, 0755))
+	require.NoError(t, os.Symlink(realParent, selectedParent))
+
+	home := filepath.Join(selectedParent, "home")
+	repoRoot := filepath.Join(selectedParent, "repo")
+	require.NoError(t, os.MkdirAll(home, 0755))
+	require.NoError(t, os.MkdirAll(repoRoot, 0755))
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	t.Setenv("SHELL", "/bin/sh")
+	require.NoError(t, os.WriteFile(filepath.Join(home, config.TomlConfigFileName), []byte(`
+schema_version = 1
+default_program = "codex"
+
+[program_overrides]
+codex = "/global/codex"
+`), 0644))
+	require.NoError(t, exec.Command("git", "-C", repoRoot, "init", "-q").Run())
+	writeCommandTestInRepoConfig(t, repoRoot, `
+default_program = "aider"
+
+[program_overrides]
+codex = "/repo/codex"
+`)
+	selector := filepath.Join(repoRoot, "nested")
+	require.NoError(t, os.Mkdir(selector, 0755))
+
+	resolvedRepoRoot := pathutil.ResolveForCompare(repoRoot)
+	require.NotEqual(t, repoRoot, resolvedRepoRoot,
+		"the test must exercise two lexical spellings for one repository")
+	setConfigListReadFlags(t, selector, true, true)
+	output, err := runConfigListForTest(t)
+	require.NoError(t, err)
+
+	var envelope struct {
+		Data  configListExplanation `json:"data"`
+		Error any                   `json:"error"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(output), &envelope))
+	assert.Nil(t, envelope.Error)
+	assert.Equal(t, repoRoot, envelope.Data.Context.ProjectRoot)
+
+	repo, err := config.RepoFromPath(repoRoot)
+	require.NoError(t, err)
+	wantPaths := map[string]string{
+		config.SourceGlobal.String():     filepath.Join(home, config.TomlConfigFileName),
+		config.SourceLegacyRepo.String(): filepath.Join(home, "repos", repo.ID, config.ConfigFileName),
+		config.SourceRepoShared.String(): filepath.Join(repoRoot, config.InRepoConfigDirName, config.TomlConfigFileName),
+	}
+	assertSource := func(layer, path string) {
+		t.Helper()
+		want, hasLocation := wantPaths[layer]
+		if !hasLocation {
+			assert.Empty(t, path, "the built-in source must not acquire a filesystem location")
+			return
+		}
+		assert.Equal(t, want, path, "source %s must keep the selected/configured spelling", layer)
+		assert.NotContains(t, path, resolvedRepoRoot,
+			"display paths must not leak the symlink-resolved project spelling")
+	}
+	for _, value := range envelope.Data.Values {
+		if value.Winner != nil {
+			assertSource(value.Winner.Layer, value.Winner.Path)
+		}
+		for _, origin := range value.Origins {
+			assertSource(origin.Layer, origin.Path)
+		}
+		for _, candidate := range value.Candidates {
+			assertSource(candidate.Layer, candidate.Path)
+		}
+	}
+
+	setConfigGetReadFlags(t, selector, true, false)
+	human, err := runConfigGetForTest(t, "default_program")
+	require.NoError(t, err)
+	assert.Contains(t, human, "project: "+repoRoot)
+	assert.Contains(t, human, wantPaths[config.SourceGlobal.String()]+":default_program")
+	assert.Contains(t, human, wantPaths[config.SourceLegacyRepo.String()]+":default_program")
+	assert.Contains(t, human, wantPaths[config.SourceRepoShared.String()]+":default_program")
 }
 
 func TestConfigGetProjectRejectsNonRepositoryWithJSONEnvelope(t *testing.T) {

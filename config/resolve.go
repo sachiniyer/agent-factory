@@ -55,7 +55,8 @@ type ResolvedConfig struct {
 	SSH    *SSHConfig    `config:"ssh"`
 
 	// ProjectRoot is empty for ResolveGlobalConfig and is the repository root
-	// supplied to ResolveConfig.
+	// supplied to ResolveConfig. Presentation code may replace it with an
+	// equivalent lexical spelling through RebaseProjectPathsForDisplay.
 	ProjectRoot string `json:"-" toml:"-"`
 
 	// Resolution is produced by the same manifest-driven pass that populated

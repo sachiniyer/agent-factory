@@ -3,11 +3,13 @@ package commands
 import (
 	"fmt"
 	"io"
+	"path/filepath"
 	"sort"
 	"strings"
 	"text/tabwriter"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/pathutil"
 )
 
 type configExplainContext struct {
@@ -39,7 +41,33 @@ func loadResolvedConfig(projectSelector string) (*config.ResolvedConfig, error) 
 	if err != nil {
 		return nil, fmt.Errorf("failed to resolve --project path %q: %w", projectSelector, err)
 	}
-	return config.ResolveConfig(repo.Root)
+	resolved, err := config.ResolveConfig(repo.Root)
+	if err != nil {
+		return nil, err
+	}
+	displayRoot := selectedProjectDisplayRoot(abs, repo.Root)
+	if err := resolved.RebaseProjectPathsForDisplay(displayRoot); err != nil {
+		return nil, fmt.Errorf("failed to preserve --project path %q for display: %w", projectSelector, err)
+	}
+	return resolved, nil
+}
+
+// selectedProjectDisplayRoot walks the lexical selector toward the filesystem
+// root until it finds the ancestor with the same identity as the repository
+// root returned by git. ResolveForCompare is deliberately used only for that
+// comparison; the returned path keeps the spelling the user supplied. A
+// linked worktree has no such ancestor because its configuration lives at the
+// main worktree root, so the git-provided root is the honest fallback.
+func selectedProjectDisplayRoot(selector, resolvedRoot string) string {
+	want := pathutil.ResolveForCompare(resolvedRoot)
+	for candidate := filepath.Clean(selector); ; candidate = filepath.Dir(candidate) {
+		if pathutil.ResolveForCompare(candidate) == want {
+			return candidate
+		}
+		if filepath.Dir(candidate) == candidate {
+			return resolvedRoot
+		}
+	}
 }
 
 func configEntriesFromResolution(resolved *config.ResolvedConfig) []configEntry {
