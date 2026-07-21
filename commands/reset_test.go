@@ -197,7 +197,7 @@ func TestFactoryReset_WipesEverythingKeepsRepoAndConfig(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RegisterProject: %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(home, "projects", registered.ID, "project.json")); err != nil {
+	if _, err := os.Stat(filepath.Join(home, config.ProjectRegistryDirName, registered.ID, "project.json")); err != nil {
 		t.Fatalf("registered sessionless project is not durable before reset: %v", err)
 	}
 
@@ -247,7 +247,7 @@ func TestFactoryReset_WipesEverythingKeepsRepoAndConfig(t *testing.T) {
 	assertGone(t, filepath.Join(home, config.StateFileName))
 	assertGone(t, filepath.Join(home, config.TUIStateFileName))
 	assertGone(t, filepath.Join(home, "tasks.json"))
-	assertGone(t, filepath.Join(home, "projects"))
+	assertGone(t, filepath.Join(home, config.ProjectRegistryDirName))
 	assertGone(t, liveWT)
 	assertGone(t, reusedWT)
 	projects, err := config.ListProjects()

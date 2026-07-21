@@ -65,12 +65,13 @@ const worktreesResidueDir = "worktrees"
 // place (#2110), this blind delete would destroy the very directory git still
 // owns — so the wipe below skips it and prunes the tree entry-by-entry instead.
 var resetWipePaths = []string{
-	worktreesResidueDir,     // AF-managed worktree parent dir (residue after cleanup)
-	"events",                // daemon event queue
-	"logs",                  // per-task run logs
-	"locks",                 // per-task run locks
-	config.StateFileName,    // state.json (help-screen bitmask etc.)
-	config.TUIStateFileName, // tui-state.json (TUI layout state)
+	worktreesResidueDir,           // AF-managed worktree parent dir (residue after cleanup)
+	config.ProjectRegistryDirName, // durable project identity and personal project state
+	"events",                      // daemon event queue
+	"logs",                        // per-task run logs
+	"locks",                       // per-task run locks
+	config.StateFileName,          // state.json (help-screen bitmask etc.)
+	config.TUIStateFileName,       // tui-state.json (TUI layout state)
 }
 
 // resetPlan is the pre-computed, non-destructive picture of what a factory

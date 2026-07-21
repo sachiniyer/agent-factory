@@ -16,6 +16,10 @@ import (
 	"github.com/sachiniyer/agent-factory/log"
 )
 
+// ProjectRegistryDirName is the AF-home directory containing durable project
+// identities and their future personal configuration.
+const ProjectRegistryDirName = "projects"
+
 const (
 	projectRegistrySchemaVersion = 1
 	projectMetadataFileName      = "project.json"
@@ -60,6 +64,7 @@ type projectBinding struct {
 	root           string
 	checkoutRoot   string
 	relativeRoot   string
+	gitCommonDir   string
 	checkoutMarker string
 }
 
@@ -112,20 +117,24 @@ func RegisterProject(path string) (Project, error) {
 		if err != nil {
 			return err
 		}
-		checkoutID, err := ensureCheckoutID(binding.checkoutMarker, "")
+		checkoutID, err := ensureCheckoutID(binding.checkoutMarker)
 		if err != nil {
 			return err
 		}
 		for _, record := range records {
 			if record.CheckoutID == checkoutID && record.RelativeRoot == binding.relativeRoot {
 				if !sameProjectPath(record.Root, binding.root) {
-					if projectPathExists(record.Root) && projectPathExists(binding.root) {
+					oldRootExists := projectPathExists(record.Root)
+					if oldRootExists && projectPathExists(binding.root) &&
+						!projectRootUsesGitCommonDir(record.Root, binding.gitCommonDir) {
 						return fmt.Errorf("checkout marker %s appears at both %s and %s — move or remove one copy; af will not choose between them", checkoutID, record.Root, binding.root)
 					}
-					record.Root = binding.root
-					record.CheckoutRoot = binding.checkoutRoot
-					if err := writeProjectRecord(dir, record); err != nil {
-						return err
+					if !oldRootExists {
+						record.Root = binding.root
+						record.CheckoutRoot = binding.checkoutRoot
+						if err := writeProjectRecord(dir, record); err != nil {
+							return err
+						}
 					}
 				}
 				registered = projectFromRecord(record)
@@ -199,11 +208,7 @@ func RebindProject(id, path string) (Project, error) {
 		}
 
 		record := records[index]
-		preferredCheckoutID := ""
-		if sameProjectPath(record.CheckoutRoot, binding.checkoutRoot) {
-			preferredCheckoutID = record.CheckoutID
-		}
-		checkoutID, err := ensureCheckoutID(binding.checkoutMarker, preferredCheckoutID)
+		checkoutID, err := ensureCheckoutID(binding.checkoutMarker)
 		if err != nil {
 			return err
 		}
@@ -216,7 +221,8 @@ func RebindProject(id, path string) (Project, error) {
 			}
 		}
 		if record.CheckoutID == checkoutID && !sameProjectPath(record.Root, binding.root) &&
-			projectPathExists(record.Root) && projectPathExists(binding.root) {
+			projectPathExists(record.Root) && projectPathExists(binding.root) &&
+			!projectRootUsesGitCommonDir(record.Root, binding.gitCommonDir) {
 			return fmt.Errorf("checkout marker %s appears at both %s and %s — move or remove one copy; af will not choose between them", checkoutID, record.Root, binding.root)
 		}
 		record.CheckoutID = checkoutID
@@ -240,7 +246,7 @@ func projectRegistryDir() (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("resolve AF home: %w", err)
 	}
-	return filepath.Join(home, "projects"), nil
+	return filepath.Join(home, ProjectRegistryDirName), nil
 }
 
 func projectRegistryLockPath(dir string) string {
@@ -347,14 +353,6 @@ func resolveProjectBinding(path string) (projectBinding, error) {
 		return projectBinding{}, fmt.Errorf("project path %q is not a directory", resolved)
 	}
 
-	checkoutRoot, err := resolveMainRepoRoot("-C", resolved)
-	if err != nil {
-		return projectBinding{}, fmt.Errorf("project path %q is not inside a git checkout: %w", resolved, err)
-	}
-	checkoutRoot, err = filepath.EvalSymlinks(checkoutRoot)
-	if err != nil {
-		return projectBinding{}, fmt.Errorf("resolve git checkout root: %w", err)
-	}
 	commonCmd := exec.Command("git", "-C", resolved, "rev-parse", "--show-toplevel", "--git-common-dir")
 	commonOut, err := commonCmd.Output()
 	if err != nil {
@@ -363,6 +361,10 @@ func resolveProjectBinding(path string) (projectBinding, error) {
 	commonParts := strings.SplitN(strings.TrimSpace(string(commonOut)), "\n", 2)
 	if len(commonParts) != 2 {
 		return projectBinding{}, fmt.Errorf("resolve git common directory: unexpected git output %q", strings.TrimSpace(string(commonOut)))
+	}
+	worktreeRoot, err := filepath.EvalSymlinks(commonParts[0])
+	if err != nil {
+		return projectBinding{}, fmt.Errorf("resolve git worktree root: %w", err)
 	}
 	commonDir := commonParts[1]
 	if !filepath.IsAbs(commonDir) {
@@ -375,15 +377,36 @@ func resolveProjectBinding(path string) (projectBinding, error) {
 	if err != nil {
 		return projectBinding{}, fmt.Errorf("resolve git common directory: %w", err)
 	}
+	bareCmd := exec.Command("git", "--git-dir", commonDir, "rev-parse", "--is-bare-repository")
+	bareOut, err := bareCmd.Output()
+	if err != nil {
+		return projectBinding{}, fmt.Errorf("inspect git common directory: %w", err)
+	}
+	bare := strings.TrimSpace(string(bareOut))
+	if bare != "true" && bare != "false" {
+		return projectBinding{}, fmt.Errorf("inspect git common directory: unexpected git output %q", bare)
+	}
+	checkoutRoot := worktreeRoot
+	if bare == "false" {
+		checkoutRoot, err = resolveMainRepoRoot("-C", resolved)
+		if err != nil {
+			return projectBinding{}, fmt.Errorf("project path %q is not inside a git checkout: %w", resolved, err)
+		}
+		checkoutRoot, err = filepath.EvalSymlinks(checkoutRoot)
+		if err != nil {
+			return projectBinding{}, fmt.Errorf("resolve git checkout root: %w", err)
+		}
+	}
 	return projectBinding{
 		root:           filepath.Clean(checkoutRoot),
 		checkoutRoot:   filepath.Clean(checkoutRoot),
 		relativeRoot:   ".",
+		gitCommonDir:   filepath.Clean(commonDir),
 		checkoutMarker: filepath.Join(commonDir, checkoutMarkerDirName, checkoutMarkerFileName),
 	}, nil
 }
 
-func ensureCheckoutID(markerPath, preferred string) (string, error) {
+func ensureCheckoutID(markerPath string) (string, error) {
 	checkoutID := ""
 	err := WithFileLock(markerPath, func() error {
 		data, err := os.ReadFile(markerPath)
@@ -397,12 +420,9 @@ func ensureCheckoutID(markerPath, preferred string) (string, error) {
 		if !errors.Is(err, os.ErrNotExist) {
 			return fmt.Errorf("read checkout marker %s: %w", markerPath, err)
 		}
-		checkoutID = preferred
-		if checkoutID == "" {
-			checkoutID, err = newOpaqueID(checkoutIDPrefix)
-			if err != nil {
-				return err
-			}
+		checkoutID, err = newOpaqueID(checkoutIDPrefix)
+		if err != nil {
+			return err
 		}
 		if !checkoutIDPattern.MatchString(checkoutID) {
 			return fmt.Errorf("invalid checkout id %q", checkoutID)
@@ -416,6 +436,11 @@ func ensureCheckoutID(markerPath, preferred string) (string, error) {
 		return "", err
 	}
 	return checkoutID, nil
+}
+
+func projectRootUsesGitCommonDir(root, commonDir string) bool {
+	binding, err := resolveProjectBinding(root)
+	return err == nil && sameProjectPath(binding.gitCommonDir, commonDir)
 }
 
 func writeNewProjectRecord(dir string, record projectRecord) error {
