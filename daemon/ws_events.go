@@ -26,15 +26,15 @@ import (
 // threaded through the auth/CORS seam and covered by the WS harness.
 
 // eventsBufferSize bounds one subscriber's pending-event queue. A subscriber that
-// falls this far behind has an event dropped (non-blocking publish) rather than
-// stalling the mutation that published it — a dropped state-change is recoverable
-// by a Snapshot, a blocked daemon mutation is not. Generous enough that a healthy
-// client never drops.
+// falls this far behind is disconnected (non-blocking publish) rather than
+// stalling the mutation that published it. Reconnect triggers the client's
+// authoritative Snapshot, so overflow is observable and self-healing instead of
+// leaving an open connection with silently stale state.
 const eventsBufferSize = 256
 
 // eventsHub is the Manager-owned fan-out of state-change events to every
-// connected /v1/events subscriber. Non-blocking on publish (drop-slow), so no
-// subscriber can back-pressure a daemon mutation.
+// connected /v1/events subscriber. Non-blocking on publish (disconnect-slow), so
+// no subscriber can back-pressure a daemon mutation.
 type eventsHub struct {
 	mu   sync.Mutex
 	subs map[uint64]chan agentproto.Event
@@ -60,20 +60,26 @@ func (h *eventsHub) subscribe() (uint64, <-chan agentproto.Event) {
 func (h *eventsHub) unsubscribe(id uint64) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	delete(h.subs, id)
+	if ch, ok := h.subs[id]; ok {
+		delete(h.subs, id)
+		close(ch)
+	}
 }
 
-// publish fans an event to every subscriber, dropping it for any whose buffer is
-// full (never blocking the mutation that published it).
+// publish fans an event to every subscriber. A full buffer removes that
+// subscriber and closes its channel (never blocking the mutation that published
+// it), making the client's existing reconnect/resync path authoritative.
 func (h *eventsHub) publish(ev agentproto.Event) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	for _, ch := range h.subs {
+	for id, ch := range h.subs {
 		select {
 		case ch <- ev:
 		default:
-			// Slow subscriber: drop this event rather than block the daemon. The
-			// client can re-Snapshot to resynchronise.
+			// Slow subscriber: close it rather than leave the client with a
+			// silently stale open connection. Reconnect causes a Snapshot.
+			delete(h.subs, id)
+			close(ch)
 		}
 	}
 }
@@ -146,7 +152,12 @@ func serveEvents(hub *eventsHub, conn *websocket.Conn) {
 			_ = conn.Close(websocket.StatusNormalClosure, "")
 			wg.Wait()
 			return
-		case ev := <-ch:
+		case ev, ok := <-ch:
+			if !ok {
+				_ = conn.Close(websocket.StatusPolicyViolation, "events subscriber fell behind; reconnecting")
+				wg.Wait()
+				return
+			}
 			wctx, wcancel := context.WithTimeout(ctx, wsWriteTimeout)
 			err := agentproto.WriteControl(wctx, conn, ev)
 			wcancel()

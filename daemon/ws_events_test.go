@@ -14,11 +14,11 @@ import (
 	"github.com/sachiniyer/agent-factory/session"
 )
 
-// TestEventsHubFanoutAndDropSlow pins the hub contract: an event fans out to
-// every subscriber, and a subscriber whose bounded buffer is full drops events
-// rather than blocking publish (so a slow client can never back-pressure a daemon
-// mutation).
-func TestEventsHubFanoutAndDropSlow(t *testing.T) {
+// TestEventsHubFanoutAndDisconnectSlow pins the hub contract: an event fans out
+// to every subscriber, and a subscriber whose bounded buffer is full is closed
+// rather than blocking publish (so a slow client can never back-pressure a
+// daemon mutation or remain silently stale).
+func TestEventsHubFanoutAndDisconnectSlow(t *testing.T) {
 	hub := newEventsHub()
 	_, a := hub.subscribe()
 	_, b := hub.subscribe()
@@ -39,7 +39,8 @@ func TestEventsHubFanoutAndDropSlow(t *testing.T) {
 		}
 	}
 
-	// Overfill one subscriber's buffer: publish must not block (drop-slow).
+	// Overfill one subscriber's buffer: publish must not block and must close the
+	// slow subscriber so its reconnect path can request an authoritative Snapshot.
 	done := make(chan struct{})
 	go func() {
 		for i := 0; i < eventsBufferSize*3; i++ {
@@ -50,7 +51,18 @@ func TestEventsHubFanoutAndDropSlow(t *testing.T) {
 	select {
 	case <-done:
 	case <-time.After(2 * time.Second):
-		t.Fatal("publish blocked on a full subscriber buffer (drop-slow broken)")
+		t.Fatal("publish blocked on a full subscriber buffer (disconnect-slow broken)")
+	}
+	deadline := time.After(time.Second)
+	for {
+		select {
+		case _, ok := <-a:
+			if !ok {
+				return
+			}
+		case <-deadline:
+			t.Fatal("slow subscriber was not closed after its buffer filled")
+		}
 	}
 }
 
