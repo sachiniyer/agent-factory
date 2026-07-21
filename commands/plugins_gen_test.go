@@ -1,7 +1,9 @@
 package commands
 
 import (
+	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -342,6 +344,7 @@ func TestGeneratedFilesAreDeterministic(t *testing.T) {
 func TestGeneratedPluginVersionTracksEveryPayloadChange(t *testing.T) {
 	seed := generatedPluginFilesAtVersion(pluginVersionSeed)
 	version := pluginContentVersion(seed)
+	seedSum := pluginContentSum(seed)
 	mutated := append([]pluginFile(nil), seed...)
 	for i := range mutated {
 		if strings.HasSuffix(mutated[i].path, "SKILL.md") {
@@ -349,8 +352,20 @@ func TestGeneratedPluginVersionTracksEveryPayloadChange(t *testing.T) {
 			break
 		}
 	}
-	if got := pluginContentVersion(mutated); got == version {
-		t.Fatalf("content changed without changing plugin version %q", got)
+	mutatedSum := pluginContentSum(mutated)
+	if mutatedSum == seedSum {
+		t.Fatal("payload changed without changing the pinned content digest")
+	}
+	func() {
+		defer func() {
+			if recovered := recover(); recovered == nil || !strings.Contains(fmt.Sprint(recovered), "append it to pluginReleaseDigests") {
+				t.Fatalf("unversioned payload change did not fail with bump instructions: %v", recovered)
+			}
+		}()
+		_ = pluginContentVersion(mutated)
+	}()
+	if version == "" {
+		t.Fatal("current plugin version is empty")
 	}
 
 	files := generatedPluginFiles()
@@ -363,6 +378,48 @@ func TestGeneratedPluginVersionTracksEveryPayloadChange(t *testing.T) {
 	mustUnmarshalGenerated(t, files, claudePluginRoot+"/.claude-plugin/plugin.json", &claude)
 	if claude.Version != version {
 		t.Errorf("Claude manifest version = %q, want content version %q", claude.Version, version)
+	}
+}
+
+func TestGeneratedPluginVersionNeverMovesBackward(t *testing.T) {
+	seed := generatedPluginFilesAtVersion(pluginVersionSeed)
+	current := pluginContentVersion(seed)
+	var currentMajor, currentMinor, currentPatch uint64
+	if _, err := fmt.Sscanf(current, "%d.%d.%d", &currentMajor, &currentMinor, &currentPatch); err != nil {
+		t.Fatal(err)
+	}
+	if currentMajor != pluginVersionMajor || currentMinor != uint64(len(pluginReleaseDigests)) {
+		t.Fatalf("current plugin version %s is not bound to major %d and release ledger length %d", current, pluginVersionMajor, len(pluginReleaseDigests))
+	}
+	if currentMajor <= 2 {
+		t.Fatalf("current plugin version %s does not sort after published 2.2501713274.1093626954", current)
+	}
+	mutated := append([]pluginFile(nil), seed...)
+	mutated[0].content += "\nnext release\n"
+	next := pluginVersionForRelease(uint64(len(pluginReleaseDigests)+1), pluginContentSum(mutated))
+	var major, minor, patch uint64
+	if _, err := fmt.Sscanf(next, "%d.%d.%d", &major, &minor, &patch); err != nil {
+		t.Fatal(err)
+	}
+	if major < currentMajor || major == currentMajor && (minor < currentMinor || minor == currentMinor && patch <= currentPatch) {
+		t.Fatalf("next plugin release did not move forward: %s -> %s", current, next)
+	}
+}
+
+func TestPluginReleaseDigestLedgerIsValid(t *testing.T) {
+	if len(pluginReleaseDigests) == 0 {
+		t.Fatal("plugin release digest ledger is empty")
+	}
+	seen := make(map[string]bool, len(pluginReleaseDigests))
+	for idx, digest := range pluginReleaseDigests {
+		decoded, err := hex.DecodeString(digest)
+		if err != nil || len(decoded) != 32 {
+			t.Fatalf("plugin release %d digest %q is not SHA-256: decoded=%d err=%v", idx+1, digest, len(decoded), err)
+		}
+		if seen[digest] {
+			t.Fatalf("plugin release %d repeats an earlier content digest; do not mint a new version for unchanged bytes", idx+1)
+		}
+		seen[digest] = true
 	}
 }
 
