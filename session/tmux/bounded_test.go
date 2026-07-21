@@ -97,7 +97,7 @@ func TestBoundedTmuxCommandsSucceedWhenTmuxIsHealthy(t *testing.T) {
 	dir := t.TempDir()
 	// display-message drives CursorPosition, which parses "row col"; every other
 	// command just needs a clean exit.
-	script := "#!/bin/sh\nif [ \"$1\" = \"display-message\" ]; then echo '3 7 0 0 0 0 0 0 0'; else echo 'pane line'; fi\n"
+	script := "#!/bin/sh\nif [ \"$1\" = \"display-message\" ]; then echo '3 7 1 0 0 0 0 0 0 0'; else echo 'pane line'; fi\n"
 	if err := os.WriteFile(filepath.Join(dir, "tmux"), []byte(script), 0o755); err != nil {
 		t.Fatalf("write fake tmux: %v", err)
 	}

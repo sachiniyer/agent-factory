@@ -59,6 +59,12 @@ type TmuxSession struct {
 	// submit must never clear the first submit's freshly pasted composer while
 	// that first call is still waiting to send Enter (#2178 review).
 	submitMu sync.Mutex
+	// lastPastedTail is the normalized distinctive tail of the most recent
+	// payload paste that tmux accepted. The next submit may use it only as
+	// provenance for the cleared-composer diagnostic: matching arbitrary pane
+	// text is not enough to claim that a prior delivery was stranded (#2225).
+	// Protected by submitMu; it never gates delivery.
+	lastPastedTail string
 	// ptyFactory is used to create a PTY for the tmux session.
 	ptyFactory PtyFactory
 	// cmdExec is used to execute commands in the tmux session.
