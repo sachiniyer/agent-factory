@@ -18,6 +18,7 @@ import (
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
 	"github.com/sachiniyer/agent-factory/session/tmux"
+	"github.com/sachiniyer/agent-factory/task"
 )
 
 type harness struct {
@@ -162,7 +163,7 @@ func TestScheduledTaskRunnerUsesDaemonAndAllocatesRerunTitle(t *testing.T) {
 			"id":           "task-one",
 			"name":         "nightly",
 			"prompt":       "",
-			"cron_expr":    "* * * * *",
+			"cron_expr":    manualTriggerFixtureCron(time.Now()),
 			"project_path": h.repo,
 			"program":      tmux.ProgramClaude,
 			"enabled":      true,
@@ -190,6 +191,27 @@ func TestScheduledTaskRunnerUsesDaemonAndAllocatesRerunTitle(t *testing.T) {
 	tasks := tasksFile.Tasks
 	if len(tasks) != 1 || tasks[0].LastRunAt == nil || tasks[0].LastRunStatus != "started" {
 		t.Fatalf("task status was not updated after run: %+v", tasks)
+	}
+}
+
+// manualTriggerFixtureCron keeps the task enabled and schedulable while placing
+// its next automatic fire outside this test's manual-trigger window. An
+// every-minute fixture lets robfig/cron race h.run below for the same nonblocking
+// task lock, so either manual invocation can fail without exercising title
+// allocation at all (#2163).
+func manualTriggerFixtureCron(now time.Time) string {
+	future := now.Add(24 * time.Hour)
+	return fmt.Sprintf("%d %d %d %d *", future.Minute(), future.Hour(), future.Day(), future.Month())
+}
+
+func TestScheduledTaskManualTriggerFixtureCannotRaceTheScheduler(t *testing.T) {
+	now := time.Date(2026, time.July, 21, 20, 33, 42, 0, time.UTC)
+	schedule, err := task.ParseCron(manualTriggerFixtureCron(now))
+	if err != nil {
+		t.Fatalf("parse fixture cron: %v", err)
+	}
+	if next := schedule.Next(now); next.Before(now.Add(12 * time.Hour)) {
+		t.Fatalf("fixture can fire during manual triggers: next run is %s after %s", next, now)
 	}
 }
 
