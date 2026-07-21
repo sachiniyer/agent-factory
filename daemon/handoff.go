@@ -15,8 +15,9 @@ type HandoffSessionRequest struct {
 	Title  string `json:"title"`
 	RepoID string `json:"repo_id"`
 	// ID is the session's stable id; see KillSessionRequest.ID. When non-empty
-	// the daemon resolves by id first, so a web/CLI handoff cannot land on the
-	// wrong session under a cross-repo title collision.
+	// the daemon resolves by id first. The TUI sends it so picker intent cannot
+	// move to a same-title replacement while a modal is open; the repo-scoped CLI
+	// keeps the legacy title path.
 	ID string `json:"id"`
 	// To is the incoming agent (a supported agent enum name).
 	To string `json:"to"`

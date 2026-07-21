@@ -422,8 +422,8 @@
       "id": "wire.id-addressing",
       "title": "Address a session by its stable id rather than by title",
       "tui": {
-        "status": "no",
-        "pointer": "app/session_control.go:139 et al send {Title, RepoID}"
+        "status": "partial",
+        "pointer": "app/handle_handoff.go:127-130 sends HandoffSessionRequest.ID; other TUI mutations still send {Title, RepoID}"
       },
       "web": {
         "status": "yes",
@@ -433,8 +433,9 @@
         "status": "no",
         "pointer": "api/sessions.go:733 et al send {Title, RepoID}"
       },
-      "verdict": "deliberate",
-      "notes": "Documented at daemon/control_types.go:226-230 and :48-54: 'TUI/CLI callers omit it and resolve by {Title, RepoID}'. The web sends the stable id because it is an all-repos client where a duplicate title across repos could target the wrong session; the TUI and CLI are repo-scoped (--repo / the focused project) so title resolution is unambiguous for them. The ID field being unset by the Go surfaces is by design, not drift."
+      "verdict": "real-gap",
+      "issue": "#2358",
+      "notes": "#2322 disproved the old blanket 'repo-scoped title is enough' rationale for a TUI action that survives a modal: a killed/recreated row can reuse the title while the user's intent still names the prior stable session. Handoff now carries ID from picker-open through daemon dispatch. The remaining TUI mutations are still title-addressed and need an action-by-action audit; the CLI remains deliberately repo+title scoped because each invocation resolves and dispatches one command without retained UI intent."
     },
     {
       "id": "session.watch",
@@ -1873,9 +1874,6 @@
           }
         },
         "tui": {
-          "id": {
-            "ok": "The TUI operates on the row the user selected in a single-repo rail, so title+repoID already names it unambiguously - the same resolution kill/archive/restore use from this surface."
-          },
           "brief": {
             "ok": "Deliberate. The TUI handoff is pick-agent-then-confirm; the mission defaults to the session's stored prompt, which the TUI can now set at create time (session.create.opt.prompt, shipped in #2075) and change any time via send-prompt. Putting a free-text field inside a confirmation dialog is a different interaction from a form field, and the confirm is deliberately one decision. `af sessions handoff --brief` is the surface for overriding the mission inline."
           }
