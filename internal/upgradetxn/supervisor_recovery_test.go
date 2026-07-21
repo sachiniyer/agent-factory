@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -57,6 +58,36 @@ func TestSupervisorLossBeforeActivationHandshakeAbortsWithoutStoppingPrevious(t 
 	installed, err := os.ReadFile(executable)
 	require.NoError(t, err)
 	require.Equal(t, "known-running-binary", string(installed))
+}
+
+func TestSupervisorReadyTakeoverAbortsBeforePublishingReadiness(t *testing.T) {
+	txn, home, _ := prepareFixture(t)
+	lease, err := txn.tryAcquireRecoveryAs(txn.Journal().PreviousBinaryPath)
+	require.NoError(t, err)
+	require.NoError(t, lease.Advance(PhaseSupervisorReady))
+	require.NoError(t, lease.Heartbeat(PhaseSupervisorReady, time.Now().Add(time.Minute)))
+	require.NoError(t, lease.Release())
+
+	resumed, err := Load(home)
+	require.NoError(t, err)
+	takeover, err := resumed.tryAcquireRecoveryAs(resumed.Journal().PreviousBinaryPath)
+	require.NoError(t, err)
+	statusVisibleAtAbort := false
+	err = (Supervisor{
+		Operations: (&fakeSupervisorRuntime{running: "previous"}).operations(),
+		AfterBoundary: func(phase Phase) error {
+			if phase != PhaseAborted {
+				return nil
+			}
+			_, statusErr := ReadRecoveryStatus(home)
+			statusVisibleAtAbort = statusErr == nil
+			return errors.New("stop after observing abort boundary")
+		},
+	}).Run(context.Background(), resumed, takeover)
+	require.ErrorIs(t, err, ErrSupervisorInterrupted)
+	require.False(t, statusVisibleAtAbort,
+		"a takeover must not publish a supervisor_ready proof before aborting")
+	require.NoError(t, takeover.Release())
 }
 
 func TestSupervisorRejectsLeaseFromAnotherTransactionBeforeMutation(t *testing.T) {

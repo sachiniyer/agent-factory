@@ -96,6 +96,21 @@ func (s Supervisor) Run(ctx context.Context, txn *Transaction, lease *RecoveryLe
 	var candidateValidatedThisRun bool
 	var previousValidatedThisRun bool
 	firstIteration := true
+	if txn.Journal().Phase == PhaseSupervisorReady {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		// A new actor cannot inherit the prior actor's authorization
+		// assumptions. Abort before publishing any readiness proof that the old
+		// daemon could mistake for permission to begin shutdown.
+		abortCause = errSupervisorInterruptedBeforeShutdown
+		if err := lease.Abort(); err != nil {
+			return errors.Join(abortCause, err)
+		}
+		if err := s.afterBoundary(PhaseAborted); err != nil {
+			return err
+		}
+	}
 
 	for {
 		if err := ctx.Err(); err != nil {
@@ -108,19 +123,6 @@ func (s Supervisor) Run(ctx context.Context, txn *Transaction, lease *RecoveryLe
 		if firstIteration {
 			firstIteration = false
 			switch journal.Phase {
-			case PhaseSupervisorReady:
-				// A new actor cannot inherit the prior actor's authorization
-				// assumptions. The old daemon has not durably stopped, so abort
-				// without touching live binary or metadata state.
-				abortCause = errSupervisorInterruptedBeforeShutdown
-				if err := lease.Abort(); err != nil {
-					return errors.Join(abortCause, err)
-				}
-				if err := s.afterBoundary(PhaseAborted); err != nil {
-					return err
-				}
-				continue
-
 			case PhaseDaemonStopped, PhaseCandidateInstalled,
 				PhaseCandidateStarting, PhaseCandidateValidating:
 				// Before commit, actor loss is a durable negative verdict. A
