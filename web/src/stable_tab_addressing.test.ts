@@ -20,7 +20,7 @@ import { tabBarSig, tabIdentity, tabRealId } from "./ui.js";
 import type { AppState } from "./ui.js";
 import { type SessionData, TabKind } from "./types.js";
 import { leaves, remapByIdentity, resolveDragTab, tabsRebound } from "./layout.js";
-import { iframeIdentity, iframeIsProxied, paneAddressUsesOrdinal, webProxyPath } from "./tabaddr.js";
+import { iframeIdentity, iframeIsProxied, isLoopbackWebUrl, paneAddressUsesOrdinal, webProxyPath } from "./tabaddr.js";
 
 // --- tabRealId: the real id, never a synthesized one -----------------------
 
@@ -432,6 +432,20 @@ test("a VSCODE pane is always proxied — it has no target to classify", () => {
   assert.equal(iframeIsProxied({ kind: TabKind.Web, target: "http://localhost:3000" }), true);
   assert.equal(iframeIsProxied({ kind: TabKind.Web, target: "https://example.com" }), false);
   assert.equal(iframeIsProxied({ kind: TabKind.Web, target: "" }), false);
+});
+
+test("#2202: rooted localhost follows the same loopback proxy path as Go", () => {
+  const target = "http://localhost.:3000";
+
+  // DNS permits a trailing root dot, and the Go classifier already strips it.
+  // Pin both the pure parity rule and the production decision that chooses the
+  // daemon-proxied iframe instead of the external fallback.
+  assert.equal(isLoopbackWebUrl(target), true);
+  assert.equal(iframeIsProxied({ kind: TabKind.Web, target }), true);
+
+  // Stripping one root dot must not broaden malformed or external hosts.
+  assert.equal(isLoopbackWebUrl("http://localhost..:3000"), false);
+  assert.equal(isLoopbackWebUrl("https://example.com."), false);
 });
 
 test("a VSCODE pane's identity is constant, so a reconcile never reloads the editor", () => {
