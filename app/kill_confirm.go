@@ -186,6 +186,28 @@ func unmergedCommitWarning(worktreePath, branchName, recordedBaseSHA, prState st
 	if strings.TrimSpace(worktreePath) == "" {
 		return unmergedFailClosedLine(branchName, fmt.Errorf("no worktree path")), false
 	}
+
+	// Branch reachability and detached-HEAD reachability are independent. An
+	// agent can detach from a clean recorded branch, create commits, and leave
+	// those commits reachable only through the worktree's HEAD. Cleanup removes
+	// that worktree, so a branch-only check would silently orphan them (#2210
+	// review). Assess both and preserve every warning in the confirmation.
+	branchLine, branchSevere := branchCommitWarning(worktreePath, branchName, recordedBaseSHA, prState)
+	detachedLine, detachedSevere := detachedHeadCommitWarning(worktreePath)
+	lines := make([]string, 0, 2)
+	for _, line := range []string{branchLine, detachedLine} {
+		if strings.TrimSpace(line) != "" {
+			lines = append(lines, line)
+		}
+	}
+	return strings.Join(lines, "\n\n"), branchSevere || detachedSevere
+}
+
+// branchCommitWarning is the recorded-branch half of
+// unmergedCommitWarning. branchName is the GitWorktree's canonical branch —
+// the exact ref Cleanup deletes — not Instance.Branch, which can be empty or
+// stale on legacy/restored records (#2209 review).
+func branchCommitWarning(worktreePath, branchName, recordedBaseSHA, prState string) (string, bool) {
 	branchName = strings.TrimSpace(branchName)
 	if branchName == "" {
 		return unmergedFailClosedLine(branchName, fmt.Errorf("no session branch name")), false
@@ -226,6 +248,40 @@ func unmergedCommitWarning(worktreePath, branchName, recordedBaseSHA, prState st
 		return "", false // every commit is pushed somewhere — recoverable
 	}
 	return unmergedSevereLine(branchName, localOnly, baseLabel), true
+}
+
+// detachedHeadCommitWarning reports commits that would lose their final ref
+// when the worktree is removed. `for-each-ref --contains=HEAD` asks the exact
+// durability question across every ref namespace (branches, remotes, tags,
+// stash, and custom refs) without guessing which namespaces a user relies on.
+// Empty output while HEAD is detached proves its tip is unreferenced; at least
+// that tip is then orphaned by cleanup even when the recorded branch is clean.
+func detachedHeadCommitWarning(worktreePath string) (string, bool) {
+	if _, err := runKillGit(worktreePath, "symbolic-ref", "--quiet", "HEAD"); err == nil {
+		return "", false // attached HEAD: the branch check owns committed loss
+	} else {
+		var exitErr *exec.ExitError
+		if !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 {
+			return detachedHeadFailClosedLine(err), false
+		}
+	}
+	if _, err := runKillGit(worktreePath, "rev-parse", "--verify", "--quiet", "HEAD^{commit}"); err != nil {
+		return detachedHeadFailClosedLine(fmt.Errorf("HEAD could not be resolved: %w", err)), false
+	}
+	refs, err := runKillGit(worktreePath, "for-each-ref", "--contains=HEAD", "--format=%(refname)")
+	if err != nil {
+		return detachedHeadFailClosedLine(err), false
+	}
+	if strings.TrimSpace(string(refs)) != "" {
+		return "", false // some durable ref contains HEAD; removing the worktree preserves it
+	}
+	return "Detached HEAD points to one or more commits not reachable from any ref. " +
+		"Killing removes the worktree and permanently orphans them · this cannot be undone.", true
+}
+
+func detachedHeadFailClosedLine(err error) string {
+	return fmt.Sprintf("Could not verify whether detached HEAD contains local-only commits (%v); "+
+		"any unreferenced commits would be permanently orphaned when the worktree is removed.", err)
 }
 
 // resolveKillBase resolves the commit the branch is measured against for the

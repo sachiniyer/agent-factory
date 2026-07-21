@@ -191,6 +191,52 @@ func TestHandleKill_AgentSwitchesBranch_WarnsForSessionBranchCommits(t *testing.
 		"local-only work on the deleted branch must require deliberate confirmation")
 }
 
+// TestHandleKill_UsesCanonicalWorktreeBranch is the #2209 review regression.
+// Legacy/restored records can carry an empty or stale top-level Instance.Branch,
+// while cleanup deletes GitWorktree.BranchName. The confirmation must inspect
+// the latter or it can miss exactly the commits kill is about to orphan.
+func TestHandleKill_UsesCanonicalWorktreeBranch(t *testing.T) {
+	repoDir, baseSHA := initBaseRepo(t)
+	wt := addWorktree(t, repoDir, baseSHA, "dev/canonical")
+	commitInWorktree(t, wt)
+
+	inst := startedWorktreeInstance(t, "legacy", repoDir, wt, "dev/canonical", baseSHA)
+	inst.Branch = "stale-legacy-value"
+	_, hm := armKill(t, inst)
+
+	rendered := flatten(hm.confirmationOverlay.Render())
+	assert.Contains(t, rendered, "dev/canonical",
+		"warning must name the worktree branch cleanup will actually delete")
+	assert.NotContains(t, rendered, "stale-legacy-value")
+	assert.Contains(t, rendered, "1 commit")
+	assert.Equal(t, unmergedKillConfirmKey, hm.confirmationOverlay.ConfirmKey)
+}
+
+// TestHandleKill_DetachedLocalCommitEscalates is the #2210 review regression.
+// The recorded branch is level with base, but HEAD carries a new commit that no
+// ref contains. Removing the worktree drops the final reference to that commit,
+// so the branch-only check used to show the ordinary safe-looking confirmation.
+func TestHandleKill_DetachedLocalCommitEscalates(t *testing.T) {
+	repoDir, baseSHA := initBaseRepo(t)
+	wt := addWorktree(t, repoDir, baseSHA, "dev/detached")
+	killGit(t, wt, "checkout", "-q", "--detach", baseSHA)
+	commitInWorktree(t, wt)
+	require.Empty(t, killGit(t, wt, "status", "--porcelain"), "detached worktree must be clean")
+	require.Empty(t, killGit(t, wt, "for-each-ref", "--contains=HEAD", "--format=%(refname)"),
+		"the detached tip must exist only through the worktree HEAD")
+
+	inst := startedWorktreeInstance(t, "detached", repoDir, wt, "dev/detached", baseSHA)
+	_, hm := armKill(t, inst)
+
+	rendered := flatten(hm.confirmationOverlay.Render())
+	assert.Contains(t, rendered, "Detached HEAD")
+	assert.Contains(t, rendered, "not reachable from any ref")
+	assert.Contains(t, rendered, "permanently orphans")
+	assert.Contains(t, rendered, "cannot be undone")
+	assert.Equal(t, unmergedKillConfirmKey, hm.confirmationOverlay.ConfirmKey,
+		"an unreferenced detached commit must require deliberate confirmation")
+}
+
 // TestHandleKill_NoUniqueCommits_KeepsBareConfirmation guards against
 // over-warning: a clean worktree whose branch is level with base (no committed
 // work to lose) must kill behind the SAME bare confirmation and ordinary 'y' as
@@ -363,5 +409,25 @@ func TestUnmergedCommitWarning(t *testing.T) {
 		line, severe := unmergedCommitWarning(t.TempDir(), "dev/missing", "deadbeef", "")
 		assert.False(t, severe)
 		assert.Contains(t, line, "Could not verify")
+	})
+
+	t.Run("detached unreferenced commit is severe", func(t *testing.T) {
+		repoDir, baseSHA := initBaseRepo(t)
+		wt := addWorktree(t, repoDir, baseSHA, "dev/detached-direct")
+		killGit(t, wt, "checkout", "-q", "--detach", baseSHA)
+		commitInWorktree(t, wt)
+		line, severe := unmergedCommitWarning(wt, "dev/detached-direct", baseSHA, "")
+		assert.True(t, severe)
+		assert.Contains(t, line, "Detached HEAD")
+		assert.Contains(t, line, "permanently orphans")
+	})
+
+	t.Run("detached referenced commit is safe", func(t *testing.T) {
+		repoDir, baseSHA := initBaseRepo(t)
+		wt := addWorktree(t, repoDir, baseSHA, "dev/detached-referenced")
+		killGit(t, wt, "checkout", "-q", "--detach", baseSHA)
+		line, severe := unmergedCommitWarning(wt, "dev/detached-referenced", baseSHA, "")
+		assert.False(t, severe)
+		assert.Empty(t, line, "a detached HEAD still contained by the session branch survives worktree removal")
 	})
 }

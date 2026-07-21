@@ -47,6 +47,21 @@ func (i *Instance) GetBranch() string {
 	return i.Branch
 }
 
+// GetWorktreeBranch returns the canonical branch recorded by the GitWorktree,
+// or empty when the instance has no worktree. Unlike GetGitWorktree, this is not
+// gated on started: kill/archive cleanup still acts on a restore-failed row's
+// recorded worktree and branch, so safety checks must be able to inspect the
+// exact ref cleanup would delete (#2209 review).
+func (i *Instance) GetWorktreeBranch() string {
+	i.mu.RLock()
+	gw := i.gitWorktree
+	i.mu.RUnlock()
+	if gw == nil {
+		return ""
+	}
+	return gw.GetBranchName()
+}
+
 // MarkUserKilled records kill intent on the instance (#1108). Callers persist
 // the instance afterwards so the tombstone survives a daemon crash mid-kill.
 func (i *Instance) MarkUserKilled() {
