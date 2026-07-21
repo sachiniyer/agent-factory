@@ -10,6 +10,7 @@ import (
 )
 
 var errUnsupportedShell = errors.New("unsupported shell construct")
+var errOpaqueStdin = errors.New("unmodeled here-document or stdin consumer")
 
 // parseShellCommands parses Bash syntax with a maintained parser, but resolves
 // only a deliberately small, literal subset. Dynamic words fail closed before
@@ -24,6 +25,10 @@ func parseShellCommands(command string) ([][]string, error) {
 	var walkErr error
 	syntax.Walk(file, func(node syntax.Node) bool {
 		if node == nil || walkErr != nil {
+			return false
+		}
+		if isOpaqueStdinSyntax(node) {
+			walkErr = errOpaqueStdin
 			return false
 		}
 		switch node := node.(type) {
@@ -46,10 +51,6 @@ func parseShellCommands(command string) ([][]string, error) {
 			// Even a literal assignment can change later command resolution
 			// (PATH, BASH_ENV, LD_PRELOAD, exported shell functions, and more).
 			walkErr = errUnsupportedShell
-		case *syntax.Redirect:
-			if node.Op == syntax.Hdoc || node.Op == syntax.DashHdoc || node.Op == syntax.WordHdoc {
-				walkErr = errUnsupportedShell
-			}
 		case *syntax.ArithmCmd, *syntax.CStyleLoop, *syntax.FuncDecl, *syntax.LetClause:
 			walkErr = errUnsupportedShell
 		}
@@ -59,6 +60,17 @@ func parseShellCommands(command string) ([][]string, error) {
 		return nil, walkErr
 	}
 	return commands, nil
+}
+
+func isOpaqueStdinSyntax(node syntax.Node) bool {
+	switch node := node.(type) {
+	case *syntax.BinaryCmd:
+		return node.Op == syntax.Pipe || node.Op == syntax.PipeAll
+	case *syntax.Redirect:
+		return node.Op == syntax.Hdoc || node.Op == syntax.DashHdoc || node.Op == syntax.WordHdoc
+	default:
+		return false
+	}
 }
 
 func literalWord(word *syntax.Word) (string, error) {

@@ -8,6 +8,7 @@ package tmuxguard
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"io"
 	"path/filepath"
 	"strings"
@@ -20,6 +21,7 @@ const (
 	broadTmuxReason    = "Agent Factory blocked a host-wide tmux kill-server. Target an isolated server explicitly with 'tmux -L <socket> kill-server' or 'tmux -S <path> kill-server'."
 	patternKillReason  = "Agent Factory blocked a pattern-based process kill because it cannot prove the shared tmux server will be spared. Resolve the one intended PID and use 'kill -- <pid>'; for tmux teardown, use 'tmux -L <socket> kill-server' or 'tmux -S <path> kill-server'."
 	unknownShellReason = "Agent Factory could not prove this shell command safe, so it was blocked. Rewrite it as literal simple commands: replace variables, substitutions, globs, and brace or tilde expansions with literal values, and run inner commands directly instead of through eval or opaque command-building wrappers. Use af for session orchestration. For tmux teardown, use 'tmux -L <socket> kill-server' or 'tmux -S <path> kill-server' directly."
+	opaqueInputReason  = "Agent Factory blocked an unmodeled here-document or stdin consumer because it cannot inspect the supplied code or data. Keep this as a two-tool operation: use the agent's non-shell file tool (Claude Write or Codex apply_patch) to create a reviewable literal file, then pass that literal path to the consumer. For Python, use 'python3 /tmp/task.py'; for GitHub text, use 'gh pr comment <number> --body-file /tmp/reply.md'. Do not pipe or heredoc interpreter code. Put shell code directly in the Bash request as literal simple commands. For tmux teardown, use 'tmux -L <socket> kill-server' or 'tmux -S <path> kill-server'."
 )
 
 type hookInput struct {
@@ -97,6 +99,9 @@ func denialReason(command string, depth int) string {
 	}
 	commands, err := parseShellCommands(command)
 	if err != nil {
+		if errors.Is(err, errOpaqueStdin) {
+			return opaqueInputReason
+		}
 		return unknownShellReason
 	}
 	for _, words := range commands {

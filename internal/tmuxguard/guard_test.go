@@ -49,7 +49,7 @@ func TestDenialReason(t *testing.T) {
 		{name: "brace expansion", command: `printf '%s\n' {a,b}`, wantReason: unknownShellReason},
 		{name: "tilde expansion", command: `printf '%s\n' ~`, wantReason: unknownShellReason},
 		{name: "ANSI-C quote", command: `printf $'safe'`, wantReason: unknownShellReason},
-		{name: "here document", command: "cat <<EOF\nsafe\nEOF", wantReason: unknownShellReason},
+		{name: "here document", command: "cat <<EOF\nsafe\nEOF", wantReason: opaqueInputReason},
 		{name: "malformed syntax", command: `echo "unterminated`, wantReason: unknownShellReason},
 		{name: "function declaration", command: `safe() { printf safe; }`, wantReason: unknownShellReason},
 		{name: "arithmetic command", command: `((1 + 1))`, wantReason: unknownShellReason},
@@ -69,7 +69,7 @@ func TestDenialReason(t *testing.T) {
 		{name: "login nested shell", command: `bash -lc 'printf safe'`, wantReason: unknownShellReason},
 		{name: "dynamic nested shell", command: `bash -c 'echo "$HOME"'`, wantReason: unknownShellReason},
 		{name: "shell script file is opaque", command: `bash ./script.sh`, wantReason: unknownShellReason},
-		{name: "stdin-fed shell is opaque", command: `printf 'tmux kill-server\n' | bash`, wantReason: unknownShellReason},
+		{name: "stdin-fed shell is opaque", command: `printf 'tmux kill-server\n' | bash`, wantReason: opaqueInputReason},
 		{name: "dynamic socket", command: `tmux -L "$socket" kill-server`, wantReason: unknownShellReason},
 		{name: "shell assignment", command: `BASH_ENV=/tmp/rc bash -c 'printf safe'`, wantReason: unknownShellReason},
 		{name: "assignment only", command: `FOO=bar`, wantReason: unknownShellReason},
@@ -198,6 +198,45 @@ func TestDenialReasonsAreActionable(t *testing.T) {
 			if !strings.Contains(reason, hint) {
 				t.Errorf("denial for %q = %q, missing actionable hint %q", tt.command, reason, hint)
 			}
+		}
+	}
+}
+
+// TestDenialReasonExplainsAuditableHeredocBoundary is derived from the fixed
+// #2251 traffic replay: 267/3,250 Bash calls used heredocs, including 85 direct
+// Python heredocs. After #2184 delivered the same policy to Codex, every
+// observed heredoc still denied. The denial must keep interpreter stdin closed
+// while naming the two-tool boundary that both guarded agents can actually use:
+// write a reviewable literal file without a shell, then pass its literal path.
+func TestDenialReasonExplainsAuditableHeredocBoundary(t *testing.T) {
+	tests := []string{
+		"python3 - <<'PY'\nprint('safe')\nPY",
+		"gh pr comment 1 --body-file - <<'EOF'\nsafe review note\nEOF",
+		"printf 'print(1)' | python3 -",
+		"printf 'safe review note' | gh pr comment 1 --body-file -",
+		"printf 'safe review note' |& gh pr comment 1 --body-file -",
+	}
+	for _, command := range tests {
+		reason := DenialReason(command)
+		for _, want := range []string{
+			"here-document or stdin consumer",
+			"non-shell file tool",
+			"literal file",
+			"python3 /tmp/task.py",
+			"--body-file /tmp/reply.md",
+		} {
+			if !strings.Contains(reason, want) {
+				t.Errorf("DenialReason(%q) = %q, missing auditable rewrite %q", command, reason, want)
+			}
+		}
+	}
+
+	for _, command := range []string{
+		"python3 /tmp/task.py",
+		"gh pr comment 1 --body-file /tmp/reply.md",
+	} {
+		if reason := DenialReason(command); reason != "" {
+			t.Errorf("literal-file rewrite %q was denied: %q", command, reason)
 		}
 	}
 }

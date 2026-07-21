@@ -109,6 +109,15 @@ func TestInjectedClaudePluginGuardsBroadTmuxKills(t *testing.T) {
 		!strings.Contains(decision.HookSpecificOutput.PermissionDecisionReason, "literal simple commands") {
 		t.Fatalf("unprovable shell syntax must fail closed with an actionable rewrite, got: %s", unproven)
 	}
+
+	opaqueInput := runHook("python3 - <<'PY'\nprint('safe')\nPY")
+	if err := json.Unmarshal([]byte(opaqueInput), &decision); err != nil {
+		t.Fatalf("opaque interpreter input did not return a structured denial: %q (%v)", opaqueInput, err)
+	}
+	if decision.HookSpecificOutput.PermissionDecision != "deny" ||
+		!strings.Contains(decision.HookSpecificOutput.PermissionDecisionReason, "non-shell file tool") {
+		t.Fatalf("opaque interpreter input must name the literal-file rewrite, got: %s", opaqueInput)
+	}
 }
 
 // TestEnsurePluginDir_ConcurrentStalePrune is a regression test for issues

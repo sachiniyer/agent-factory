@@ -355,7 +355,8 @@ func TestGeneratedCodexPluginGuardsBroadTmuxKills(t *testing.T) {
 	}
 	var decision struct {
 		HookSpecificOutput struct {
-			PermissionDecision string `json:"permissionDecision"`
+			PermissionDecision       string `json:"permissionDecision"`
+			PermissionDecisionReason string `json:"permissionDecisionReason"`
 		} `json:"hookSpecificOutput"`
 	}
 	if err := json.Unmarshal([]byte(blocked), &decision); err != nil {
@@ -371,6 +372,18 @@ func TestGeneratedCodexPluginGuardsBroadTmuxKills(t *testing.T) {
 	}
 	if allowed != "" {
 		t.Fatalf("socket-scoped kill-server must be allowed, got: %s", allowed)
+	}
+
+	opaqueInput, stderr, err := runHook("python3 - <<'PY'\nprint('safe')\nPY", binDir+string(os.PathListSeparator)+"/usr/bin:/bin")
+	if err != nil {
+		t.Fatalf("configured Codex guard failed instead of denying opaque interpreter input: %v\nstderr: %s", err, stderr)
+	}
+	if err := json.Unmarshal([]byte(opaqueInput), &decision); err != nil {
+		t.Fatalf("opaque interpreter input did not return a structured denial: %q (%v)", opaqueInput, err)
+	}
+	if decision.HookSpecificOutput.PermissionDecision != "deny" ||
+		!strings.Contains(decision.HookSpecificOutput.PermissionDecisionReason, "non-shell file tool") {
+		t.Fatalf("opaque interpreter input must name the literal-file rewrite, got: %s", opaqueInput)
 	}
 
 	_, stderr, err = runHook("printf safe", "/usr/bin:/bin")
