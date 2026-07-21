@@ -333,6 +333,18 @@ func ArchiveSession(req ArchiveSessionRequest) (string, error) {
 	return resp.ArchivedPath, nil
 }
 
+// ResumeFromLimit asks the daemon to retry a session parked at a usage-limit
+// wall. The TUI and web reach the identical controlServer handler over HTTP;
+// this wrapper gives the CLI its existing gob-control-socket transport without
+// duplicating the recovery action.
+func ResumeFromLimit(req ResumeFromLimitRequest) error {
+	var resp ResumeFromLimitResponse
+	if err := callDaemon("ResumeFromLimit", req, &resp); err != nil {
+		return err
+	}
+	return nil
+}
+
 // HandoffSession asks the daemon to continue a session under a different agent,
 // in place (#2013): swap the agent program, keep the worktree and branch, and
 // deliver a mission brief to the incoming agent.

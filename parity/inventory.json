@@ -302,12 +302,12 @@
         "pointer": "web/src/ui.ts Retry action -> web/src/api.ts resumeFromLimit (shown only on a LimitReached selection)"
       },
       "cli": {
-        "status": "no",
-        "pointer": "no limit/retry verb in the cobra tree (derived)"
+        "status": "yes",
+        "pointer": "api/sessions_limit_retry.go (af sessions retry-limit <title>)"
       },
-      "verdict": "real-gap",
+      "verdict": "parity",
       "issue": "#1934",
-      "notes": "PARTIALLY closed by #1934: the route is promoted out of internalHTTPRoutes into the public catalog — the one-line follow-up daemon/httproutes.go promised in #1592 Phase 2 PR3 and never wrote — and the web now offers Retry on a limit-blocked session, mirroring the TUI's `c`: shown only when the selection is actually LimitReached, and no confirm. It deliberately does NOT copy the TUI's optimistic badge clear: the web is a read-only projection of the daemon's state (#960 single writer), so the session.updated event clears the ◆ badge. That matters beyond purity — resumeFromLimit returns nil in four distinct did-nothing cases (kill in flight, op lock contended, teardown, instance swapped), so clearing on any nil would show a session as resumed while it is still parked. ResumeFromLimitRequest gained an `id` so the web addresses the session by stable id (wire.id-addressing) rather than title; the verb re-delivers a prompt into a pane, so a title misroute would type it into another repo's agent. STILL A GAP on the CLI: there is no retry verb in the cobra tree. That half is deliberately not in #1934 because naming a new public CLI noun (`af sessions retry-limit`? a flag on an existing verb?) is an owner call, and the issue says so. Re-verdict to parity once that lands."
+      "notes": "Closed across all three surfaces. #1934 promoted ResumeFromLimit into the public catalog and added the web Retry action; `af sessions retry-limit <title>` closes the remaining CLI half using the same daemon controlServer and Manager.resumeFromLimit action. The CLI follows the established repo-scoped title contract and leaves stable-id addressing to the all-project web client (wire.id-addressing). Every surface therefore shares the daemon-owned respawn, pending-prompt delivery, and durable liveness transition instead of implementing recovery client-side."
     },
     {
       "id": "session.handoff",
@@ -1344,6 +1344,7 @@
       "af sessions list": "session.list",
       "af sessions preview": "session.preview",
       "af sessions restore": "session.restore",
+      "af sessions retry-limit": "session.limit-retry",
       "af sessions send-prompt": "session.send-prompt",
       "af sessions tab-create": "session.tab.create",
       "af sessions tab-delete": "session.tab.close",
@@ -1556,6 +1557,7 @@
       "af sessions preview --tab-id": "session.preview-tab",
       "af sessions preview --tab-name": "session.preview-tab",
       "af sessions restore --help": "meta.discovery",
+      "af sessions retry-limit --help": "meta.discovery",
       "af sessions send-prompt --all": "session.send-prompt.broadcast",
       "af sessions send-prompt --all-repos": "session.send-prompt.broadcast",
       "af sessions send-prompt --create": "session.send-prompt",
@@ -1891,6 +1893,11 @@
         }
       },
       "ResumeFromLimitRequest": {
+        "cli": {
+          "id": {
+            "ok": "The CLI resolves sessions by title under --repo scoping, exactly as kill/archive/send-prompt do; the stable id is the all-project web client's collision-proof key."
+          }
+        },
         "tui": {
           "id": {
             "gap": "wire.id-addressing"

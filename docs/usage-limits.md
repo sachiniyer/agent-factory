@@ -44,9 +44,15 @@ limit resets:
 (whether you resume it, the daemon auto-resumes it, or the banner scrolls away
 on its own).
 
-## Manual retry (the `c` key)
+## Manual retry
 
-Select a limit-blocked session and press **`c`** to resume it immediately. This:
+Resume a limit-blocked session immediately from any surface:
+
+- TUI: select it and press **`c`**.
+- Web: select it and click **Retry**.
+- CLI: run `af sessions retry-limit <title>` (with `--repo` when needed).
+
+Every surface calls the same daemon recovery action. It:
 
 1. Re-spawns the agent if its tmux session exited while blocked (the rare case);
    a live stall just gets nudged.
@@ -57,12 +63,13 @@ Select a limit-blocked session and press **`c`** to resume it immediately. This:
    [anthropics/claude-code#5977](https://github.com/anthropics/claude-code/issues/5977)).
 3. Clears the `[limit]` badge so the poll re-resolves the real state.
 
-The `c` binding is rebindable like any other via the `[keys]` table (action
-`limit_retry`); see [configuration.md](configuration.md#key-bindings-keys).
+The TUI's `c` binding is rebindable like any other via the `[keys]` table
+(action `limit_retry`); see
+[configuration.md](configuration.md#key-bindings-keys).
 
 ## Opt-in auto-resume
 
-By default a limit is **surface-only**: the badge plus the manual `c` retry. Set
+By default a limit is **surface-only**: the badge plus the manual retry. Set
 `limit_auto_resume = true` in your global config to let the **daemon** resume a
 parked `claude`/`codex` session on its own once its limit window elapses:
 

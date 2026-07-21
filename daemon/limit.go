@@ -235,10 +235,9 @@ type ResumeFromLimitResponse struct {
 	OK bool `json:"ok"`
 }
 
-// The net/rpc ResumeFromLimit client wrapper moved onto the HTTP apiclient in
-// #1592 Phase 2 PR3 (apiclient.Client.ResumeFromLimit, an internal non-cataloged
-// route) — the TUI's `c` key was its only caller. The controlServer handler
-// below still serves the verb over both transports.
+// The TUI and web reach this handler through apiclient/HTTP. The CLI reaches the
+// same handler through daemon.ResumeFromLimit on the gob control socket; only
+// the transport differs, while the controlServer and Manager action stay shared.
 
 func (s *controlServer) ResumeFromLimit(req ResumeFromLimitRequest, resp *ResumeFromLimitResponse) error {
 	if err := s.requireStateMutationAdmission(); err != nil {
