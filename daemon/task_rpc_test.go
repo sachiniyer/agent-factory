@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -126,6 +127,51 @@ func TestControlAddTask_WarmupSkipsReload(t *testing.T) {
 	require.Len(t, tasks, 1, "the write must land even during warm-up")
 	assert.Empty(t, srv.scheduler.scheduledTaskIDs(),
 		"warm-up must skip the reload; RunDaemon arms the scheduler after the restore")
+}
+
+func TestTaskControlLockIsSharedAcrossTransportServers(t *testing.T) {
+	scheduler := newTaskScheduler()
+	enteredLoad := make(chan int32, 2)
+	releaseFirst := make(chan struct{})
+	var calls atomic.Int32
+	scheduler.loadTasks = func() ([]task.Task, error) {
+		call := calls.Add(1)
+		enteredLoad <- call
+		if call == 1 {
+			<-releaseFirst
+		}
+		return nil, nil
+	}
+
+	// Production registers distinct controlServer values for gob and HTTP, but
+	// both carry this same scheduler pointer. The first transport is held inside
+	// task reconciliation; the second must not enter even the load phase.
+	rpcServer := &controlServer{scheduler: scheduler}
+	httpServer := &controlServer{scheduler: scheduler}
+	firstDone := make(chan error, 1)
+	go func() {
+		firstDone <- rpcServer.ReloadTasks(ReloadTasksRequest{}, &ReloadTasksResponse{})
+	}()
+	if call := <-enteredLoad; call != 1 {
+		t.Fatalf("first load call = %d, want 1", call)
+	}
+
+	secondDone := make(chan error, 1)
+	go func() {
+		secondDone <- httpServer.ReloadTasks(ReloadTasksRequest{}, &ReloadTasksResponse{})
+	}()
+	select {
+	case call := <-enteredLoad:
+		close(releaseFirst)
+		t.Fatalf("second transport entered task reconciliation as load call %d before the first released it", call)
+	case <-time.After(time.Second):
+		// Still blocked on the shared transport-independent control lock.
+	}
+
+	close(releaseFirst)
+	require.NoError(t, <-firstDone)
+	require.NoError(t, <-secondDone)
+	require.EqualValues(t, 2, calls.Load())
 }
 
 // TestControlTriggerTask_UsesSharedFiringPath pins the core #1169-class fix:

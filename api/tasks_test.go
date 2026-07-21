@@ -24,12 +24,14 @@ import (
 // scheduler/watchers in-process, so `writes` counts successful add/update/remove
 // RPC dispatches (each of which subsumes the old separate reload poke).
 type daemonCalls struct {
-	writes    int
-	addErr    error
-	updateErr error
-	removeErr error
-	triggered []string
-	runErr    error
+	writes     int
+	addErr     error
+	updateErr  error
+	removeErr  error
+	triggered  []string
+	restarted  []string
+	restartErr error
+	runErr     error
 	// lastUpdate records the field-level patch the CLI sent on the most recent
 	// UpdateTask dispatch (#1700), so tests can assert `af tasks update` ships
 	// ONLY the flags the user passed and never a full-struct copy.
@@ -56,6 +58,7 @@ func stubDaemon(t *testing.T) *daemonCalls {
 	origAdd := daemonAddTask
 	origUpdate := daemonUpdateTask
 	origRemove := daemonRemoveTask
+	origRestart := daemonRestartTask
 	origTrigger := daemonTriggerTask
 	origList := daemonListTasksNoSpawn
 
@@ -93,6 +96,11 @@ func stubDaemon(t *testing.T) *daemonCalls {
 		calls.writes++
 		return nil
 	}
+	daemonRestartTask = func(id string, expect task.ProjectExpectation) error {
+		calls.restarted = append(calls.restarted, id)
+		calls.lastExpect = expect
+		return calls.restartErr
+	}
 	daemonTriggerTask = func(id string, expect task.ProjectExpectation) error {
 		calls.triggered = append(calls.triggered, id)
 		calls.lastExpect = expect
@@ -105,6 +113,7 @@ func stubDaemon(t *testing.T) *daemonCalls {
 		daemonAddTask = origAdd
 		daemonUpdateTask = origUpdate
 		daemonRemoveTask = origRemove
+		daemonRestartTask = origRestart
 		daemonTriggerTask = origTrigger
 		daemonListTasksNoSpawn = origList
 	})
@@ -614,6 +623,25 @@ func TestTasksTrigger_RejectsInvalidTaskID(t *testing.T) {
 	err := tasksRunCmd.RunE(tasksRunCmd, []string{"../evil"})
 	require.Error(t, err)
 	assert.Empty(t, calls.triggered, "invalid IDs must be rejected before reaching the daemon")
+}
+
+func TestTasksRestart_DispatchesThroughDaemon(t *testing.T) {
+	useTempConfig(t)
+	calls := stubDaemon(t)
+	seedTask(t, task.Task{ID: "feed0001", Name: "feed", WatchCmd: "./watch.sh", Enabled: true})
+
+	err := tasksRestartCmd.RunE(tasksRestartCmd, []string{"feed0001"})
+	require.NoError(t, err)
+	assert.Equal(t, []string{"feed0001"}, calls.restarted)
+}
+
+func TestTasksRestart_RejectsInvalidTaskIDBeforeDaemon(t *testing.T) {
+	useTempConfig(t)
+	calls := stubDaemon(t)
+
+	err := tasksRestartCmd.RunE(tasksRestartCmd, []string{"../evil"})
+	require.Error(t, err)
+	assert.Empty(t, calls.restarted)
 }
 
 // TestTasksAdd_ExactlyOneTrigger pins the #782 CLI contract: --cron and

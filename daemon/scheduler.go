@@ -16,9 +16,14 @@ import (
 // schedules atomically; TUI CRUD still writes tasks.json directly and pokes
 // ReloadTasks (tracked follow-up).
 type taskScheduler struct {
-	mu      sync.Mutex
-	cron    *cron.Cron
-	entries map[string]cron.EntryID // task ID → scheduled entry
+	// controlMu serializes task-file mutations and cron/watcher reconciliation
+	// across every daemon transport. The gob and HTTP control servers are
+	// distinct objects but share this scheduler, so the lock must live here
+	// rather than on either transport wrapper.
+	controlMu sync.Mutex
+	mu        sync.Mutex
+	cron      *cron.Cron
+	entries   map[string]cron.EntryID // task ID → scheduled entry
 
 	// Injection points for tests: loadTasks substitutes fixture task lists,
 	// parse allows a seconds-granularity parser so firing tests don't wait a

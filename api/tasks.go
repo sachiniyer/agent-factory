@@ -33,6 +33,7 @@ var (
 	daemonAddTask          = daemon.AddTask
 	daemonUpdateTask       = daemon.UpdateTask
 	daemonRemoveTask       = daemon.RemoveTask
+	daemonRestartTask      = daemon.RestartTask
 	daemonTriggerTask      = daemon.TriggerTask
 )
 
@@ -360,6 +361,34 @@ var tasksRunCmd = &cobra.Command{
 			return jsonError(fmt.Errorf("failed to trigger task: %w", err))
 		}
 
+		return jsonOut(map[string]bool{"ok": true})
+	},
+}
+
+var tasksRestartCmd = &cobra.Command{
+	Use:   "restart <id>",
+	Short: "Restart an enabled watch task without process overlap",
+	Long: "Restart an enabled watch task in the current project. The command waits " +
+		"for the old process tree to exit before starting one replacement, so an " +
+		"edited script is re-read without double-emitting events.\n\n" +
+		"The task must belong to the resolved project: --repo when given, otherwise " +
+		"the current directory's project. Outside a git repository there is no " +
+		"project context and the id resolves globally.",
+	Args: cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		log.Initialize(false)
+		defer log.Close()
+
+		if err := task.ValidateTaskID(args[0]); err != nil {
+			return jsonError(err)
+		}
+		expect, err := enforceTaskScope(args[0])
+		if err != nil {
+			return jsonError(err)
+		}
+		if err := daemonRestartTask(args[0], expect); err != nil {
+			return jsonError(fmt.Errorf("failed to restart task: %w", err))
+		}
 		return jsonOut(map[string]bool{"ok": true})
 	},
 }

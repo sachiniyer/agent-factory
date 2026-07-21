@@ -237,6 +237,7 @@ var controlMethodPolicies = map[string]probationPolicy{
 	"ReapConfigAgent":  blockedDuringProbation,
 	"ReloadTasks":      blockedDuringProbation,
 	"RemoveTask":       blockedDuringProbation,
+	"RestartTask":      blockedDuringProbation,
 	"RenameTab":        blockedDuringProbation,
 	"ReorderTab":       blockedDuringProbation,
 	"RestoreArchived":  blockedDuringProbation,

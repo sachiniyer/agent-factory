@@ -544,6 +544,17 @@ type RemoveTaskResponse struct {
 	OK bool `json:"ok"`
 }
 
+// RestartTaskRequest asks the daemon to stop and replace one enabled watch
+// task from its current on-disk definition. Expect carries the same project
+// compare-and-swap as the other id-addressed task mutations.
+type RestartTaskRequest struct {
+	ID     string                  `json:"id"`
+	Expect task.ProjectExpectation `json:"expect,omitempty"`
+}
+type RestartTaskResponse struct {
+	OK bool `json:"ok"`
+}
+
 // TriggerTaskRequest asks the daemon to fire a task NOW through the same
 // RunTask firing path the in-daemon scheduler uses (#1029 PR 3 / #1169-class
 // fix). The handler preserves RunTask's guards: watch tasks and disabled tasks

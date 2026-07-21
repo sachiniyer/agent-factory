@@ -743,6 +743,24 @@
       "notes": ""
     },
     {
+      "id": "task.restart",
+      "title": "Restart an enabled watch task after editing its script",
+      "tui": {
+        "status": "no",
+        "pointer": ""
+      },
+      "web": {
+        "status": "no",
+        "pointer": ""
+      },
+      "cli": {
+        "status": "yes",
+        "pointer": "api/tasks.go:368 tasksRestartCmd"
+      },
+      "verdict": "deliberate",
+      "notes": "This is an operator workflow after editing an external script file, which neither UI owns. Both task UIs already expose the enabled toggle; its daemon update is synchronous and therefore remains a safe manual cycle. The dedicated one-command restart belongs in the scripting CLI."
+    },
+    {
       "id": "task.trigger",
       "title": "Trigger a task now",
       "tui": {
@@ -1324,6 +1342,7 @@
       "af tasks get": "task.get",
       "af tasks list": "task.list",
       "af tasks remove": "task.remove",
+      "af tasks restart": "task.restart",
       "af tasks trigger": "task.trigger",
       "af tasks update": "task.edit",
       "af token rotate": "daemon.token",
@@ -1347,6 +1366,7 @@
       "POST /v1/ListPrograms": "enum.agent-programs",
       "POST /v1/ListTasks": "task.list",
       "POST /v1/RemoveTask": "task.remove",
+      "POST /v1/RestartTask": "task.restart",
       "POST /v1/RenameTab": "session.tab.rename",
       "POST /v1/ReorderTab": "session.tab.reorder",
       "POST /v1/RestoreArchived": "session.restore",
@@ -1575,6 +1595,7 @@
       "af tasks list --all": "task.list",
       "af tasks list --help": "meta.discovery",
       "af tasks remove --help": "meta.discovery",
+      "af tasks restart --help": "meta.discovery",
       "af tasks trigger --help": "meta.discovery",
       "af tasks update --cron": "task.edit",
       "af tasks update --enabled": "task.toggle",

@@ -70,6 +70,7 @@ var auditedRequests = map[string]reflect.Type{
 	"RenameTabRequest":        reflect.TypeOf(daemon.RenameTabRequest{}),
 	"ReorderTabRequest":       reflect.TypeOf(daemon.ReorderTabRequest{}),
 	"RestoreSessionRequest":   reflect.TypeOf(daemon.RestoreSessionRequest{}),
+	"RestartTaskRequest":      reflect.TypeOf(daemon.RestartTaskRequest{}),
 	"ResumeFromLimitRequest":  reflect.TypeOf(daemon.ResumeFromLimitRequest{}),
 	"ResumeStatusPollRequest": reflect.TypeOf(daemon.ResumeStatusPollRequest{}),
 	"SendPromptRequest":       reflect.TypeOf(daemon.SendPromptRequest{}),

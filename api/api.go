@@ -714,5 +714,6 @@ func init() {
 	TasksCmd.AddCommand(tasksAddCmd)
 	TasksCmd.AddCommand(tasksUpdateCmd)
 	TasksCmd.AddCommand(tasksRemoveCmd)
+	TasksCmd.AddCommand(tasksRestartCmd)
 	TasksCmd.AddCommand(tasksRunCmd)
 }
