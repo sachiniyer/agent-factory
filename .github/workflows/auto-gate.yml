@@ -3,7 +3,11 @@ name: Auto Gate
 on:
   check_suite:
     types: [completed]
+  issue_comment:
+    types: [created, edited, deleted]
   pull_request_review:
+  pull_request_review_comment:
+    types: [created, edited, deleted]
   pull_request:
     types: [labeled]
   status:
@@ -17,7 +21,7 @@ permissions:
   issues: read
 
 concurrency:
-  group: auto-gate-${{ github.event.pull_request.number || github.event.check_suite.head_sha || github.event.sha || github.run_id }}
+  group: auto-gate-${{ github.event.pull_request.number || github.event.issue.number || github.event.check_suite.pull_requests[0].number || github.event.check_suite.head_sha || github.event.sha || github.run_id }}
   cancel-in-progress: false
 
 jobs:
@@ -28,12 +32,14 @@ jobs:
     # against a stale head (#1876). Drafts are never merge-eligible, so review
     # traffic on a held-open draft is pure evaluation waste (#1907) — the helper
     # blocks them anyway, this just skips before the checkout and API calls.
-    # Events that carry no pull_request payload (check_suite, status) resolve the
-    # PR by head SHA and already filter to open PRs, so they must not be skipped
-    # here; the helper's own isDraft check remains the backstop for those.
+    # check_suite/status events resolve the PR by head SHA and already filter to
+    # open PRs. issue_comment events are limited to comments on open PRs here.
+    # The helper's own state/draft checks remain the backstop for every event.
     if: >-
-      github.event.pull_request == null ||
-      (github.event.pull_request.state == 'open' && github.event.pull_request.draft != true)
+      (github.event_name != 'issue_comment' ||
+       (github.event.issue.pull_request != null && github.event.issue.state == 'open')) &&
+      (github.event.pull_request == null ||
+       (github.event.pull_request.state == 'open' && github.event.pull_request.draft != true))
     steps:
       - name: Check out gate logic
         uses: actions/checkout@v6

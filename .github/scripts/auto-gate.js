@@ -1,7 +1,13 @@
 const ALLOWED_AUTHORS = new Set(["sachiniyer", "app-detail-app", "app-detail-app[bot]"]);
 const TUI_PATH_PREFIXES = ["app/", "ui/", "session/tmux/"];
 const DOCS_DEPLOY_PATHS = ["docs/", "mkdocs.yml"];
-const GREPTILE_RE = /greptile/i;
+const CODEX_REVIEWER = "chatgpt-codex-connector[bot]";
+const CODEX_REVIEW_RE = /\bCodex Review\b/i;
+const CODEX_RATE_LIMIT_RE = /reached your Codex usage limits for code reviews/i;
+const REVIEWED_COMMIT_RE = /\*\*Reviewed commit:\*\*\s*`([0-9a-f]{7,40})`/i;
+// Docs/Deploy is deliberately conditional and is skipped on pull_request runs.
+const ALLOWED_SKIPPED_CHECKS = new Set(["Deploy"]);
+const AUTO_GATE_CHECK_NAME = "Evaluate auto-merge gate";
 const RESOLUTION_MARKER_RE = /\b(?:RESOLVED|ACCEPTED)\b/;
 
 async function evaluate({ github, context, core, prNumber, setOutputs = true }) {
@@ -43,6 +49,10 @@ async function evaluatePullRequest({ github, context, core, prNumber, setOutputs
   core.info(`Base: ${pr.baseRefName}; head SHA: ${pr.headRefOid}`);
   core.info(`Mergeable: ${pr.mergeable}; merge state: ${pr.mergeStateStatus}`);
 
+  if (pr.state !== "OPEN" || pr.merged) {
+    reasons.push(`PR is ${pr.merged ? "already merged" : pr.state.toLowerCase()}, not open`);
+  }
+
   if (pr.baseRefName !== "master") {
     reasons.push(`base branch is ${pr.baseRefName}, not master`);
   }
@@ -57,8 +67,8 @@ async function evaluatePullRequest({ github, context, core, prNumber, setOutputs
 
   if (pr.mergeable === "CONFLICTING" || pr.mergeStateStatus === "DIRTY") {
     reasons.push(`mergeability is blocked (${pr.mergeable}/${pr.mergeStateStatus})`);
-  } else if (pr.mergeable === "UNKNOWN") {
-    reasons.push("mergeability is still UNKNOWN");
+  } else if (pr.mergeable !== "MERGEABLE") {
+    reasons.push(`mergeability is still ${pr.mergeable}`);
   }
 
   const files = await listPullRequestFiles({ github, context, number: pr.number });
@@ -92,18 +102,17 @@ async function evaluatePullRequest({ github, context, core, prNumber, setOutputs
   }
   notes.push(...requiredChecks.notes);
 
-  const greptile = await evaluateGreptile({
+  const codex = await evaluateCodex({
     github,
     context,
     number: pr.number,
     sha: pr.headRefOid,
     lastCommitDate: pr.lastCommitDate,
-    core,
   });
-  if (!greptile.ok) {
-    reasons.push(...greptile.reasons);
+  if (!codex.ok) {
+    reasons.push(...codex.reasons);
   }
-  notes.push(...greptile.notes);
+  notes.push(...codex.notes);
 
   return finish(core, setOutputs, {
     prNumber: String(pr.number),
@@ -160,6 +169,10 @@ async function findPullRequestNumber({ github, context, core }) {
     return payload.pull_request.number;
   }
 
+  if (payload.issue?.pull_request && payload.issue.number) {
+    return payload.issue.number;
+  }
+
   const checkSuitePrs = payload.check_suite?.pull_requests || [];
   const checkSuitePr = checkSuitePrs.find((pr) => pr.base?.ref === "master") || checkSuitePrs[0];
   if (checkSuitePr?.number) {
@@ -201,6 +214,8 @@ async function getPullRequest({ github, context, number }) {
           headRefName
           headRefOid
           isDraft
+          state
+          merged
           mergeable
           mergeStateStatus
           author {
@@ -236,6 +251,8 @@ async function getPullRequest({ github, context, number }) {
     baseRefName: pr.baseRefName,
     headRefOid: pr.headRefOid,
     isDraft: pr.isDraft,
+    state: pr.state,
+    merged: pr.merged,
     mergeable: pr.mergeable,
     mergeStateStatus: pr.mergeStateStatus,
     author: pr.author?.login || "",
@@ -262,14 +279,10 @@ async function evaluateRequiredChecks({ github, context, branch, sha, core }) {
   const reasons = [...required.errors];
 
   if (specs.length === 0) {
-    if (reasons.length > 0) {
-      return { ok: false, reasons, notes };
-    }
     notes.push("No required status checks configured for branch");
-    return { ok: true, reasons, notes };
+  } else {
+    notes.push(`Required status checks: ${specs.map(formatCheckSpec).join(", ")}`);
   }
-
-  notes.push(`Required status checks: ${specs.map(formatCheckSpec).join(", ")}`);
 
   const { owner, repo } = context.repo;
   const checkRuns = await github.paginate(github.rest.checks.listForRef, {
@@ -294,7 +307,21 @@ async function evaluateRequiredChecks({ github, context, branch, sha, core }) {
 
     notes.push(`${formatCheckSpec(spec)}: ${state.description}`);
     if (!state.ok) {
-      reasons.push(`required check ${formatCheckSpec(spec)} is not completed successfully (${state.description})`);
+      const stateDescription = state.waiting ? "is still settling" : "did not succeed";
+      reasons.push(`required check ${formatCheckSpec(spec)} ${stateDescription} (${state.description})`);
+    }
+  }
+
+  for (const run of latestCheckRuns(checkRuns)) {
+    if (run.name === AUTO_GATE_CHECK_NAME || specs.some((spec) => checkRunMatchesSpec(run, spec))) {
+      continue;
+    }
+
+    const state = checkRunState(run);
+    notes.push(`Head check ${run.name}: ${state.description}`);
+    if (!state.ok) {
+      const stateDescription = state.waiting ? "is still settling" : "did not succeed";
+      reasons.push(`head check ${run.name} ${stateDescription} (${state.description})`);
     }
   }
 
@@ -379,16 +406,13 @@ function latestRequiredState(spec, checkRuns, statuses) {
   const candidates = [];
 
   for (const run of checkRuns) {
-    if (run.name !== spec.context) {
+    if (!checkRunMatchesSpec(run, spec)) {
       continue;
     }
-    if (spec.sourceAppId && Number(run.app?.id) !== spec.sourceAppId) {
-      continue;
-    }
+    const state = checkRunState(run);
     candidates.push({
       date: parseTimestamp(run.completed_at || run.started_at || run.created_at) || 0,
-      ok: run.status === "completed" && run.conclusion === "success",
-      description: `check run ${run.status}/${run.conclusion || "no conclusion"} from ${formatRunSource(run)}`,
+      ...state,
     });
   }
 
@@ -400,6 +424,7 @@ function latestRequiredState(spec, checkRuns, statuses) {
       candidates.push({
         date: parseTimestamp(status.created_at) || 0,
         ok: status.state === "success",
+        waiting: status.state === "pending",
         description: `commit status ${status.state}`,
       });
     }
@@ -407,6 +432,43 @@ function latestRequiredState(spec, checkRuns, statuses) {
 
   candidates.sort((a, b) => b.date - a.date);
   return candidates[0] || null;
+}
+
+function checkRunMatchesSpec(run, spec) {
+  if (run.name !== spec.context) {
+    return false;
+  }
+  return !spec.sourceAppId || Number(run.app?.id) === spec.sourceAppId;
+}
+
+function checkRunState(run) {
+  const description = `check run ${run.status}/${run.conclusion || "no conclusion"} from ${formatRunSource(run)}`;
+  const successful = run.status === "completed" && run.conclusion === "success";
+  const conditionalSkip =
+    run.status === "completed" &&
+    run.conclusion === "skipped" &&
+    ALLOWED_SKIPPED_CHECKS.has(run.name) &&
+    run.app?.slug === "github-actions";
+
+  return {
+    ok: successful || conditionalSkip,
+    // GitHub Advanced Security reports CodeQL neutral while its Analyze jobs run,
+    // then updates the same head check to success when analysis settles.
+    waiting: run.status !== "completed" || (run.name === "CodeQL" && run.conclusion === "neutral"),
+    description,
+  };
+}
+
+function latestCheckRuns(checkRuns) {
+  const latest = new Map();
+  for (const run of checkRuns) {
+    const key = `${run.name}\0${run.app?.id || ""}`;
+    const current = latest.get(key);
+    if (!current || latestRunTime(run) > latestRunTime(current)) {
+      latest.set(key, run);
+    }
+  }
+  return [...latest.values()].sort((a, b) => a.name.localeCompare(b.name));
 }
 
 function formatRunSource(run) {
@@ -417,34 +479,14 @@ function formatRunSource(run) {
   return `${name} (${run.app.id || "unknown app id"})`;
 }
 
-async function evaluateGreptile({ github, context, number, sha, lastCommitDate, core }) {
+async function evaluateCodex({ github, context, number, sha, lastCommitDate }) {
   const notes = [];
   const reasons = [];
   const { owner, repo } = context.repo;
   const lastPushTime = parseTimestamp(lastCommitDate);
 
   if (lastPushTime == null) {
-    reasons.push("last commit timestamp was unavailable, so Greptile freshness cannot be verified");
-  }
-
-  const checkRuns = await github.paginate(github.rest.checks.listForRef, {
-    owner,
-    repo,
-    ref: sha,
-    per_page: 100,
-  });
-  const greptileRuns = checkRuns
-    .filter((run) => GREPTILE_RE.test(run.name) || GREPTILE_RE.test(run.app?.slug || run.app?.name || ""))
-    .sort((a, b) => latestRunTime(b) - latestRunTime(a));
-  const latestRun = greptileRuns[0];
-
-  if (!latestRun) {
-    reasons.push("Greptile Review check run was not found");
-  } else {
-    notes.push(`Greptile check: ${latestRun.name} ${latestRun.status}/${latestRun.conclusion || "no conclusion"}`);
-    if (latestRun.status !== "completed" || latestRun.conclusion !== "success") {
-      reasons.push(`Greptile Review is not completed successfully (${latestRun.status}/${latestRun.conclusion || "no conclusion"})`);
-    }
+    reasons.push("last commit timestamp was unavailable, so Codex freshness cannot be verified");
   }
 
   const comments = await github.paginate(github.rest.issues.listComments, {
@@ -453,29 +495,24 @@ async function evaluateGreptile({ github, context, number, sha, lastCommitDate, 
     issue_number: number,
     per_page: 100,
   });
-  const latestGreptileComment = comments
-    .filter((comment) => GREPTILE_RE.test(comment.user?.login || ""))
-    .sort((a, b) => {
-      const bTime = parseTimestamp(b.updated_at || b.created_at) || 0;
-      const aTime = parseTimestamp(a.updated_at || a.created_at) || 0;
-      return bTime - aTime;
-    })[0];
+  const codexComments = comments
+    .filter((comment) => comment.user?.login === CODEX_REVIEWER)
+    .sort((a, b) => commentTime(b) - commentTime(a));
+  const verdict = codexComments.find((comment) => {
+    const reviewedCommit = parseReviewedCommit(comment.body || "");
+    return reviewedCommit != null && reviewedCommitMatchesHead(reviewedCommit, sha);
+  });
 
-  if (!latestGreptileComment) {
-    reasons.push("latest greptile-apps summary comment was not found");
+  if (!verdict) {
+    const rateLimited = CODEX_RATE_LIMIT_RE.test(codexComments[0]?.body || "");
+    const suffix = rateLimited ? "; the latest Codex response was usage-limited" : "";
+    reasons.push(`Codex has not reviewed head ${sha} yet${suffix}`);
   } else {
-    const summaryTime = parseTimestamp(latestGreptileComment.updated_at || latestGreptileComment.created_at);
-    if (lastPushTime == null || summaryTime == null || summaryTime <= lastPushTime) {
-      reasons.push("latest greptile-apps summary comment is older than the head commit");
-    }
-
-    const score = parseConfidenceScore(latestGreptileComment.body || "");
-    if (score == null) {
-      reasons.push("latest greptile-apps summary comment did not include a Confidence Score");
-    } else if (score < 4) {
-      reasons.push(`Greptile Confidence Score is ${score}/5, below 4/5`);
+    const verdictTime = commentTime(verdict);
+    if (lastPushTime == null || verdictTime === 0 || verdictTime <= lastPushTime) {
+      reasons.push("Codex verdict for the head commit is older than the head commit timestamp");
     } else {
-      notes.push(`Greptile Confidence Score: ${score}/5`);
+      notes.push(`Codex verdict matches head ${sha}`);
     }
   }
 
@@ -497,49 +534,41 @@ async function evaluateGreptile({ github, context, number, sha, lastCommitDate, 
       .map((comment) => comment.in_reply_to_id),
   );
   const unresolvedFindings = reviewComments.filter((comment) => {
-    if (!GREPTILE_RE.test(comment.user?.login || "")) {
+    if (comment.user?.login !== CODEX_REVIEWER) {
       return false;
     }
     if (comment.in_reply_to_id) {
       return false;
     }
-    if (lastPushTime == null || parseTimestamp(comment.created_at) == null || parseTimestamp(comment.created_at) <= lastPushTime) {
-      return false;
-    }
-    if (!/\bP[12]\b/i.test(comment.body || "")) {
-      return false;
-    }
-    if (comment.position == null) {
+    if (comment.line == null) {
       return false;
     }
     return !resolvedByAllowedReply.has(comment.id);
   });
 
   if (unresolvedFindings.length > 0) {
-    reasons.push(`${unresolvedFindings.length} unresolved Greptile P1/P2 inline finding(s) after the last push`);
+    reasons.push(`${unresolvedFindings.length} unresolved live Codex inline finding(s)`);
   } else {
-    notes.push("No unresolved Greptile P1/P2 inline findings after the last push");
+    notes.push("No unresolved live Codex inline findings");
   }
 
   return { ok: reasons.length === 0, reasons, notes };
 }
 
-function parseConfidenceScore(body) {
-  const normalized = body.replace(/\s+/g, " ");
-  const patterns = [
-    /confidence\s*score\D{0,40}([0-5](?:\.\d+)?)\s*\/\s*5/i,
-    /confidence\D{0,40}([0-5](?:\.\d+)?)\s*\/\s*5/i,
-    /([0-5](?:\.\d+)?)\s*\/\s*5\D{0,40}confidence/i,
-  ];
-
-  for (const pattern of patterns) {
-    const match = normalized.match(pattern);
-    if (match) {
-      return Number.parseFloat(match[1]);
-    }
+function parseReviewedCommit(body) {
+  if (!CODEX_REVIEW_RE.test(body) || CODEX_RATE_LIMIT_RE.test(body)) {
+    return null;
   }
+  return body.match(REVIEWED_COMMIT_RE)?.[1]?.toLowerCase() || null;
+}
 
-  return null;
+function reviewedCommitMatchesHead(reviewedCommit, headSha) {
+  const normalizedHead = String(headSha || "").toLowerCase();
+  return /^[0-9a-f]{40}$/.test(normalizedHead) && normalizedHead.startsWith(reviewedCommit);
+}
+
+function commentTime(comment) {
+  return parseTimestamp(comment.updated_at || comment.created_at) || 0;
 }
 
 function hasResolutionMarker(body) {
@@ -593,9 +622,11 @@ module.exports = {
   evaluate,
   merge,
   __test: {
-    evaluateGreptile,
+    evaluateCodex,
+    evaluateRequiredChecks,
     hasResolutionMarker,
     latestRequiredState,
-    parseConfidenceScore,
+    parseReviewedCommit,
+    reviewedCommitMatchesHead,
   },
 };
