@@ -1,11 +1,11 @@
 package tmux
 
 import (
-	"bytes"
 	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"syscall"
 	"testing"
 	"time"
@@ -135,7 +135,7 @@ func TestBoundedTmuxCommandsSucceedWhenTmuxIsHealthy(t *testing.T) {
 // runTmuxBounded/outputTmuxBounded safe: boundedTmuxCommand puts each tmux
 // command in its OWN process group and SIGKILLs that group on every exit path —
 // including SUCCESS — to collect any child holding the capture pipe. That is
-// only correct because `pipe-pane`'s shell command (the broker's `dd`) is
+// only correct because `pipe-pane`'s shell command (the broker's copier) is
 // spawned by the tmux SERVER, not by the short-lived tmux CLIENT we exec, so it
 // is not in the group we kill. If it ever were, EnablePipePane would destroy its
 // own pipe the instant it succeeded and the WS stream would silently go dead —
@@ -143,11 +143,12 @@ func TestBoundedTmuxCommandsSucceedWhenTmuxIsHealthy(t *testing.T) {
 // catch. So this drives a REAL tmux, on a private server (IsolateTmux) so it
 // cannot touch the developer's sessions.
 func TestRealPipePaneStreamsPastTheReap(t *testing.T) {
-	// This is the minimal #1945 delivery gate — raw mkfifo + pipe-pane + dd + one
+	// This is the minimal #1945 delivery gate — raw mkfifo + pipe-pane + one
 	// read, with no agent-server, daemon, or broker. It mirrors the post-#2300
 	// production FIFO posture: a blocking read-only descriptor plus a private
 	// keeper writer, never the O_RDWR descriptor implicated by the original
-	// Darwin failures.
+	// Darwin failures. The copier mirrors production's platform choice: BSD dd
+	// waits for a full block, while Darwin's cat forwards prompt-sized writes.
 	testguard.IsolateTmux(t)
 
 	const name = "af1787-reap-pipe"
@@ -158,35 +159,6 @@ func TestRealPipePaneStreamsPastTheReap(t *testing.T) {
 	t.Cleanup(func() { _ = ex.Run(exec.Command("tmux", "kill-session", "-t", "="+name)) })
 
 	ts := NewTmuxSessionFromSanitizedNameWithDeps(name, "sh", MakePtyFactory(), ex)
-	regular := filepath.Join(t.TempDir(), "pane.log")
-	if err := ts.EnablePipePane("dd of=" + shellQuoteForTest(regular) + " bs=4096 2>/dev/null"); err != nil {
-		t.Fatalf("EnablePipePane to regular file: %v", err)
-	}
-	const fileMarker = "AF1787FILE"
-	if err := ts.SendRawKeys([]byte("echo " + fileMarker + "\n")); err != nil {
-		t.Fatalf("SendRawKeys to regular-file pipe: %v", err)
-	}
-	fileBytes, fileOK, fileErr := waitForFileContains(regular, []byte(fileMarker), 2*time.Second)
-	if !fileOK {
-		pipeState, _ := ex.Output(exec.Command("tmux", "display-message", "-p", "-t", "="+name+":", "#{pane_pipe} #{pane_pipe_pid}"))
-		pane, _ := ts.CapturePaneContent()
-		ddDisableErr := ts.DisablePipePane()
-
-		catRegular := filepath.Join(t.TempDir(), "pane-cat.log")
-		catEnableErr := ts.EnablePipePane("cat > " + shellQuoteForTest(catRegular))
-		var catSendErr error
-		if catEnableErr == nil {
-			catSendErr = ts.SendRawKeys([]byte("echo AF1787CAT\n"))
-		}
-		catBytes, catOK, catFileErr := waitForFileContains(catRegular, []byte("AF1787CAT"), 2*time.Second)
-		catDisableErr := ts.DisablePipePane()
-		t.Fatalf("pipe-pane accepted the command but its dd child wrote no regular-file bytes; pane_pipe/pid=%q pane=%q dd_file=%q dd_file_err=%v dd_disable_err=%v; cat_control_ok=%v cat_file=%q cat_file_err=%v cat_enable_err=%v cat_send_err=%v cat_disable_err=%v",
-			pipeState, pane, fileBytes, fileErr, ddDisableErr, catOK, catBytes, catFileErr, catEnableErr, catSendErr, catDisableErr)
-	}
-	if err := ts.DisablePipePane(); err != nil {
-		t.Fatalf("DisablePipePane after regular-file control: %v", err)
-	}
-
 	fifo := filepath.Join(t.TempDir(), "pane.out")
 	if err := syscall.Mkfifo(fifo, 0o600); err != nil {
 		t.Fatalf("mkfifo: %v", err)
@@ -209,7 +181,11 @@ func TestRealPipePaneStreamsPastTheReap(t *testing.T) {
 	rc := os.NewFile(uintptr(fd), fifo)
 	t.Cleanup(func() { _ = rc.Close() })
 
-	if err := ts.EnablePipePane("dd of=" + shellQuoteForTest(fifo) + " bs=4096 2>/dev/null"); err != nil {
+	pipeCommand := "dd of=" + shellQuoteForTest(fifo) + " bs=65536 2>/dev/null"
+	if runtime.GOOS == "darwin" {
+		pipeCommand = "cat > " + shellQuoteForTest(fifo)
+	}
+	if err := ts.EnablePipePane(pipeCommand); err != nil {
 		t.Fatalf("EnablePipePane: %v", err)
 	}
 	// Produce output AFTER the pipe is up: pipe-pane only streams future bytes.
@@ -248,17 +224,3 @@ func TestRealPipePaneStreamsPastTheReap(t *testing.T) {
 }
 
 func shellQuoteForTest(s string) string { return "'" + s + "'" }
-
-func waitForFileContains(path string, marker []byte, timeout time.Duration) ([]byte, bool, error) {
-	deadline := time.Now().Add(timeout)
-	var data []byte
-	var err error
-	for time.Now().Before(deadline) {
-		data, err = os.ReadFile(path)
-		if bytes.Contains(data, marker) {
-			return data, true, nil
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	return data, false, err
-}

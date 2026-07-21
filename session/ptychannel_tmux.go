@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -243,16 +244,20 @@ func (c *tmuxClientlessChannel) Resize(rows, cols uint16) error {
 // FIFO path is single-quoted so a home dir with spaces or shell metacharacters
 // cannot break the command.
 //
-// It uses `dd` rather than `cat` because `cat` is NOT reliably unbuffered across
+// Linux uses `dd` rather than `cat` because `cat` is NOT reliably unbuffered across
 // libc/coreutils implementations (#1592 Phase 4 PR4): busybox `cat` (musl/alpine,
-// the common docker BYO image base) block-buffers its stdout when it is a pipe,
-// so a session's live PTY output never streams — it sits in cat's buffer until
-// the pane closes, which breaks the WS stream inside a container while working on
-// a glibc host. `dd` does one read()→write() per block and writes each partial
-// read immediately, so it streams promptly EVERYWHERE while a large block size
-// keeps bulk output (a full-screen repaint, a fast log) as efficient as cat was.
-// dd's completion stats go to stderr, discarded here.
+// the common docker BYO image base) can hold a live session's bytes until the pane
+// closes. Darwin is the inverse: BSD dd waits for its full bs=65536 input block, so
+// ordinary prompt-sized writes never reach the FIFO. Its system cat copies those
+// partial reads promptly, as the real macOS pipe-pane gate proves (#1945).
 func pipePaneCommand(fifoPath string) string {
+	return pipePaneCommandForGOOS(fifoPath, runtime.GOOS)
+}
+
+func pipePaneCommandForGOOS(fifoPath, goos string) string {
+	if goos == "darwin" {
+		return "cat > " + shellSingleQuote(fifoPath)
+	}
 	return "dd of=" + shellSingleQuote(fifoPath) + " bs=65536 2>/dev/null"
 }
 
