@@ -190,6 +190,12 @@ func (m *Manager) HandoffSession(req HandoffSessionRequest) (HandoffSessionRespo
 		_ = instance.Transition(session.AbortHandoff())
 		return HandoffSessionResponse{}, fmt.Errorf("failed to hand %q off to %s: %w", req.Title, target, swapErr)
 	}
+	// A usage-limit observation belongs to one concrete provider runtime. Once
+	// the replacement succeeds, retaining the outgoing block would make recovery
+	// divert an undelivered incoming mission into the old provider's limit-resume
+	// path. Clear it at the runtime boundary while OpReplacing remains raised; a
+	// newly observed incoming limit is recorded independently below.
+	instance.ClearLimitReached()
 
 	// The runtime this session's failure history was about is gone (#1794).
 	m.noteRuntimeReplaced(repoID, instance)

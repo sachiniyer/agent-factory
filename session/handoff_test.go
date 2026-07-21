@@ -82,7 +82,7 @@ func TestSwapAgentProgram_RewritesProgramAndRecordsLedger(t *testing.T) {
 	if len(ledger) != 1 {
 		t.Fatalf("ledger has %d entries, want 1", len(ledger))
 	}
-	if ledger[0] != entry {
+	if ledger[0] != entry.AgentHandoff {
 		t.Fatalf("ledger[0] = %+v, want the returned entry %+v", ledger[0], entry)
 	}
 }
@@ -164,6 +164,28 @@ func TestRevertHandoff_RestoresProgramAndConversation(t *testing.T) {
 	}
 	if ledger := inst.Handoffs(); len(ledger) != 0 {
 		t.Fatalf("ledger has %d entries after revert, want 0 — a swap that never happened must not be recorded", len(ledger))
+	}
+}
+
+func TestRevertHandoff_RestoresOpaqueOutgoingProgram(t *testing.T) {
+	inst := handoffTestInstance(t, tmux.ProgramClaude)
+	const outgoing = "/opt/agent-tools/my-free-form-wrapper --profile legacy"
+	inst.Program = outgoing
+	inst.Tabs[0].Conversation = AgentConversationData{}
+	inst.SetTmuxSession(tmux.NewTmuxSession("opaque-rollback", outgoing))
+
+	entry, err := inst.SwapAgentProgram(tmux.ProgramGemini, HandoffReasonManual, "sha", false)
+	if err != nil {
+		t.Fatalf("SwapAgentProgram: %v", err)
+	}
+	if entry.From.Agent != "" {
+		t.Fatalf("precondition failed: opaque outgoing command resolved as agent %q", entry.From.Agent)
+	}
+	if err := inst.RevertHandoff(entry); err != nil {
+		t.Fatalf("RevertHandoff: %v", err)
+	}
+	if got := inst.AgentProgram(); got != outgoing {
+		t.Fatalf("Program after rollback = %q, want exact outgoing command %q", got, outgoing)
 	}
 }
 

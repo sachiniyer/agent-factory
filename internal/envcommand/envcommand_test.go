@@ -23,6 +23,10 @@ func TestParse(t *testing.T) {
 		{name: "resolver rejects dynamic assignment", args: []string{"HOME=$OTHER", "codex"}, policy: Policy{AllowAssignments: true}, bad: true},
 		{name: "resolver rejects dynamic chdir", args: []string{"-C", "$OTHER", "codex"}, policy: Policy{AllowAssignments: true}, bad: true},
 		{name: "reject split string", args: []string{"-S", "codex"}, bad: true},
+		{name: "reject help before command", args: []string{"--help", "codex"}, bad: true},
+		{name: "reject version before command", args: []string{"--version", "codex"}, bad: true},
+		{name: "reject short null with command", args: []string{"-0", "codex"}, bad: true},
+		{name: "reject long null with command", args: []string{"--null", "codex"}, bad: true},
 		{name: "reject unknown option", args: []string{"--future", "codex"}, bad: true},
 	}
 	for _, tc := range tests {

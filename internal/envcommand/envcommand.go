@@ -59,8 +59,11 @@ func Parse(args []string, policy Policy) (Invocation, error) {
 				result.Mutations = nil
 				idx++
 				continue
-			case arg == "-0" || arg == "-v" || arg == "--null" || arg == "--debug" ||
-				arg == "--list-signal-handling" || arg == "--help" || arg == "--version":
+			case arg == "--help" || arg == "--version":
+				return result, unsupported(arg, "option exits env without running a command")
+			case arg == "-0" || arg == "--null":
+				return result, unsupported(arg, "null output mode cannot run a command")
+			case arg == "-v" || arg == "--debug" || arg == "--list-signal-handling":
 				idx++
 				continue
 			case arg == "-S" || strings.HasPrefix(arg, "-S") || arg == "--split-string" || strings.HasPrefix(arg, "--split-string="):

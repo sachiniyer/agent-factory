@@ -68,17 +68,18 @@ func CheckProgram(cfg *config.Config, agent string) (*ProgramCheck, error) {
 	return check, nil
 }
 
-// CheckCommand verifies the first executable in command. It handles common
-// shell shapes used in program_overrides: quotes, explicit paths, leading
-// VAR=value assignments, and env VAR=value wrappers.
+// CheckCommand verifies the shell executable and, when detectable, the agent it
+// launches. It handles common shell shapes used in program_overrides: quotes,
+// explicit paths, leading VAR=value assignments, env wrappers, and opaque
+// wrappers whose own executable is the only command af can prove.
 func CheckCommand(command string) (*ProgramCheck, error) {
 	return checkCommand(command, "")
 }
 
 // CheckCommandAt verifies command in the same cwd and effective environment its
 // tmux launch will use. Handoff calls this before stopping the outgoing agent,
-// so relative executables, env -C, and PATH assignments must be resolved exactly
-// as the incoming process will see them.
+// so wrappers, detected agent executables, relative paths, env -C, and PATH
+// assignments must be resolved exactly as the incoming process will see them.
 func CheckCommandAt(command, workingDir string) (*ProgramCheck, error) {
 	return checkCommand(command, workingDir)
 }
@@ -93,53 +94,49 @@ func checkCommand(command, workingDir string) (*ProgramCheck, error) {
 	if err != nil {
 		return check, err
 	}
-	exe, err := firstExecutable(words)
-	if err != nil {
-		return check, fmt.Errorf("could not resolve executable in command %q: %w", command, err)
-	}
-	check.Executable = exe
-	if exe == "" {
+	shellExe := shellExecutable(words)
+	if shellExe == "" {
 		return check, fmt.Errorf("could not find an executable in command %q", command)
 	}
-	var launch tmux.CommandEnvironment
-	if workingDir != "" {
-		launch, err = tmux.CommandEnvironmentFromCommand(command, workingDir)
+	launchDir := workingDir
+	if launchDir == "" {
+		launchDir, err = os.Getwd()
 		if err != nil {
-			return check, err
-		}
-		info, statErr := os.Stat(launch.WorkingDir)
-		if statErr != nil {
-			return check, fmt.Errorf("launch directory %q cannot be used: %w", launch.WorkingDir, statErr)
-		}
-		if !info.IsDir() {
-			return check, fmt.Errorf("launch directory %q is not a directory", launch.WorkingDir)
+			return check, fmt.Errorf("cannot determine launch directory for command preflight: %w", err)
 		}
 	}
-	// env is itself an executable as well as a command parser. Validate both
-	// halves: approving only the wrapper misses a missing target, while approving
-	// only the target turns a missing custom /path/to/env into a launch-time
-	// failure after a destructive handoff has already stopped the old agent.
-	if wrapper := envWrapperExecutable(words); wrapper != "" {
-		var wrapperErr error
-		if workingDir == "" {
-			_, wrapperErr = resolveExecutable(wrapper)
-		} else {
-			_, wrapperErr = resolveEnvWrapperAt(words, wrapper, workingDir)
-		}
-		if wrapperErr != nil {
-			return check, fmt.Errorf("env wrapper %q cannot be executed: %w", wrapper, wrapperErr)
+	launch, err := tmux.CommandEnvironmentFromCommand(command, launchDir)
+	if err != nil {
+		return check, err
+	}
+	info, statErr := os.Stat(launch.WorkingDir)
+	if statErr != nil {
+		return check, fmt.Errorf("launch directory %q cannot be used: %w", launch.WorkingDir, statErr)
+	}
+	if !info.IsDir() {
+		return check, fmt.Errorf("launch directory %q is not a directory", launch.WorkingDir)
+	}
+	exe := launch.Executable
+	check.Executable = exe
+	// The shell command and the detected agent are independent executable
+	// obligations. For `ionice ... codex`, approving codex alone can still lose
+	// the handoff to a missing ionice; approving ionice alone repeats the shipped
+	// bug and discovers a missing codex only after teardown. Validate both, using
+	// the shell prefix for the wrapper and the shared env/cwd model for the target.
+	if shellExe != exe {
+		if _, shellErr := resolveShellExecutableAt(words, shellExe, launchDir); shellErr != nil {
+			kind := "command wrapper"
+			if isEnvExecutable(shellExe) {
+				kind = "env wrapper"
+			}
+			return check, fmt.Errorf("%s %q cannot be executed: %w", kind, shellExe, shellErr)
 		}
 	}
-	var path string
-	if workingDir == "" {
-		path, err = resolveExecutable(exe)
-	} else {
-		pathValue, pathSet := os.LookupEnv("PATH")
-		if override := launch.Override("PATH"); override.Present {
-			pathValue, pathSet = override.Value, override.Set
-		}
-		path, err = resolveExecutableAt(exe, launch.WorkingDir, pathValue, pathSet)
+	pathValue, pathSet := os.LookupEnv("PATH")
+	if override := launch.Override("PATH"); override.Present {
+		pathValue, pathSet = override.Value, override.Set
 	}
+	path, err := resolveExecutableAt(exe, launch.WorkingDir, pathValue, pathSet)
 	if err != nil {
 		return check, err
 	}
@@ -147,10 +144,11 @@ func checkCommand(command, workingDir string) (*ProgramCheck, error) {
 	return check, nil
 }
 
-// resolveEnvWrapperAt models the shell lookup that happens before GNU env can
-// apply its own operands. Only leading shell assignments affect that lookup;
-// an env-internal PATH= value applies later, to env's child command.
-func resolveEnvWrapperAt(words []string, wrapper, workingDir string) (string, error) {
+// resolveShellExecutableAt models lookup of the command the shell itself starts.
+// Only leading shell assignments affect that lookup; an env-internal PATH= value
+// applies later to env's child, and an arbitrary wrapper's later operands cannot
+// retroactively change how the wrapper was found.
+func resolveShellExecutableAt(words []string, executable, workingDir string) (string, error) {
 	pathValue, pathSet := os.LookupEnv("PATH")
 	for _, word := range words {
 		name, value, assignment := strings.Cut(word, "=")
@@ -164,7 +162,7 @@ func resolveEnvWrapperAt(words []string, wrapper, workingDir string) (string, er
 			pathValue, pathSet = value, true
 		}
 	}
-	return resolveExecutableAt(wrapper, workingDir, pathValue, pathSet)
+	return resolveExecutableAt(executable, workingDir, pathValue, pathSet)
 }
 
 func resolveExecutableAt(exe, workingDir, pathValue string, pathSet bool) (string, error) {

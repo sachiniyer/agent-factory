@@ -26,6 +26,13 @@ type CommandEnvOverride struct {
 // can change both in one invocation; resolving either in isolation recreates
 // the receipt-routing drift this model exists to prevent.
 type CommandEnvironment struct {
+	// Executable is the exact token whose launch context was resolved. When a
+	// supported agent token is present it is that agent executable; otherwise it
+	// is the first command that can be proven through leading env wrappers.
+	Executable string
+	// Agent is the canonical supported agent name when Executable was selected
+	// from positive agent-token detection, or empty for an opaque command.
+	Agent          string
 	WorkingDir     string
 	clearInherited bool
 	overrides      map[string]CommandEnvOverride
@@ -43,17 +50,20 @@ func (e CommandEnvironment) Override(name string) CommandEnvOverride {
 }
 
 // CommandEnvironmentFromCommand resolves the environment and cwd inherited by
-// the first detected agent token. Every GNU env invocation is parsed by the
-// same closed-set parser used by internal/tmuxguard. The only policy difference
-// is explicit: receipt routing models literal assignments, while the guard
-// rejects all assignments because they may alter executable resolution.
+// the first detected agent token. When there is no supported agent token, it
+// resolves only the first executable provable through shell assignments and env
+// wrappers; it never guesses through an arbitrary wrapper's operand grammar.
+// Every GNU env invocation is parsed by the same closed-set parser used by
+// internal/tmuxguard. The only policy difference is explicit: receipt routing
+// models literal assignments, while the guard rejects all assignments because
+// they may alter executable resolution.
 //
 // Unknown options, split-string, dynamic values/chdirs, misplaced assignments,
 // and an agent token consumed as an env operand return an error. Receipt callers
 // must surface that error and abort rather than polling a guessed path.
 func CommandEnvironmentFromCommand(command, workingDir string) (CommandEnvironment, error) {
 	tokens, _ := splitShellTokens(command)
-	agentIdx, agent, findErr := findAgentTokenStrict(tokens)
+	targetIdx, agent, findErr := findAgentTokenStrict(tokens)
 	result := CommandEnvironment{
 		WorkingDir: filepath.Clean(workingDir),
 		overrides:  make(map[string]CommandEnvOverride),
@@ -65,23 +75,32 @@ func CommandEnvironmentFromCommand(command, workingDir string) (CommandEnvironme
 		return result, fmt.Errorf("cannot resolve env invocation before agent: %w", findErr)
 	}
 	if agent == "" {
-		return result, fmt.Errorf("could not find a supported agent executable")
+		targetIdx, findErr = firstCommandTokenStrict(tokens)
+		if findErr != nil {
+			return result, fmt.Errorf("cannot resolve command through env wrapper: %w", findErr)
+		}
+		if targetIdx < 0 {
+			return result, fmt.Errorf("could not find an executable in command")
+		}
 	}
+	result.Executable = tokens[targetIdx]
+	result.Agent = agent
+	targetName := result.Executable
 
 	atShellPrefix := true
-	for idx := 0; idx < agentIdx; {
+	for idx := 0; idx < targetIdx; {
 		tok := tokens[idx]
 		if strings.EqualFold(baseCommand(tok), "env") {
 			invocation, err := envcommand.Parse(tokens[idx+1:], envcommand.Policy{AllowAssignments: true})
 			if err != nil {
-				return result, fmt.Errorf("cannot resolve env invocation before %s: %w", agent, err)
+				return result, fmt.Errorf("cannot resolve env invocation before %s: %w", targetName, err)
 			}
 			if invocation.CommandIndex < 0 {
-				return result, fmt.Errorf("cannot resolve env invocation before %s: env has no command", agent)
+				return result, fmt.Errorf("cannot resolve env invocation before %s: env has no command", targetName)
 			}
 			commandIdx := idx + 1 + invocation.CommandIndex
-			if commandIdx > agentIdx {
-				return result, fmt.Errorf("cannot resolve env invocation before %s: the agent token is an option operand, not env's command", agent)
+			if commandIdx > targetIdx {
+				return result, fmt.Errorf("cannot resolve env invocation before %s: the target token is an option operand, not env's command", targetName)
 			}
 			if invocation.ClearEnvironment {
 				result.clearInherited = true
@@ -124,6 +143,34 @@ func CommandEnvironmentFromCommand(command, workingDir string) (CommandEnvironme
 		idx++
 	}
 	return result, nil
+}
+
+// firstCommandTokenStrict returns the first executable that can be established
+// without understanding arbitrary wrapper grammars. Leading shell assignments
+// and nested GNU env invocations are modeled; the first other token is an opaque
+// command boundary and is deliberately not guessed through.
+func firstCommandTokenStrict(tokens []string) (int, error) {
+	idx := 0
+	for idx < len(tokens) {
+		if _, _, assignment := shellAssignment(tokens[idx]); !assignment {
+			break
+		}
+		idx++
+	}
+	for idx < len(tokens) && strings.EqualFold(baseCommand(tokens[idx]), "env") {
+		invocation, err := envcommand.Parse(tokens[idx+1:], envcommand.Policy{AllowAssignments: true})
+		if err != nil {
+			return -1, err
+		}
+		if invocation.CommandIndex < 0 {
+			return -1, nil
+		}
+		idx += 1 + invocation.CommandIndex
+	}
+	if idx >= len(tokens) {
+		return -1, nil
+	}
+	return idx, nil
 }
 
 // CodexHomeFromCommand resolves the rollout store the launched command will

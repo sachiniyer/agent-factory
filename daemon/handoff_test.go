@@ -586,6 +586,36 @@ func TestResumePendingHandoffs_DeliversPostReadyFailure(t *testing.T) {
 	}
 }
 
+func TestResumePendingHandoffs_PostReadyFailureClearsOutgoingLimit(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	sendErr := errors.New("paste transport failed")
+	backend := &handoffBackend{FakeBackend: session.NewFakeBackend(), sendErr: sendErr}
+	inst := registerHandoffSubject(t, manager, repoID, repoPath, "retry-after-outgoing-limit", backend)
+	inst.SetLimitReached(time.Now().Add(time.Hour))
+
+	_, err := manager.HandoffSession(HandoffSessionRequest{
+		Title: "retry-after-outgoing-limit", RepoID: repoID, To: tmux.ProgramGemini,
+	})
+	if !errors.Is(err, task.ErrPromptDelivery) || !errors.Is(err, sendErr) {
+		t.Fatalf("HandoffSession error = %v, want post-ready prompt-delivery failure", err)
+	}
+	if inst.LimitReached() {
+		t.Fatal("post-ready failure retained the outgoing provider's limit on the incoming runtime")
+	}
+	mission := inst.PendingHandoffMission()
+	if mission == "" || inst.GetInFlightOp() != session.OpReplacing {
+		t.Fatalf("retry state = pending:%q op:%v, want mission behind replacement fence", mission, inst.GetInFlightOp())
+	}
+
+	backend.setSendErr(nil)
+	manager.ResumePendingHandoffs()
+
+	_, prompts := backend.snapshot()
+	if len(prompts) != 1 || prompts[0] != mission {
+		t.Fatalf("recovery prompts = %q, want exact pending mission; stale limit state must not divert it to limit resume", prompts)
+	}
+}
+
 // A usage-limit banner can replace the incoming composer's ready prompt. That
 // is a parked handoff, not a generic delivery failure: the rendered takeover
 // brief must become the pending prompt so the normal limit-resume path sends

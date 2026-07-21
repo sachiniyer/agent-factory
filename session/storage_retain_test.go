@@ -114,3 +114,44 @@ func TestSaveInstances_KeepsStartupUnknownRowAlongsideStartedSibling(t *testing.
 	}
 	t.Fatal("the daemon checkpoint dropped an inert startup-unknown row and orphaned its workspace")
 }
+
+func TestSaveInstances_KeepsPendingHandoffAlongsideStartedSibling(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	repoPath := t.TempDir()
+
+	alive := &Instance{Title: "alive", Path: repoPath, started: true}
+	alive.SetStatusForTest(Running)
+
+	pending := &Instance{
+		Title: "pending-handoff", Path: repoPath, started: true,
+		liveness: LiveRunning, inFlightOp: OpReplacing,
+		pendingHandoffMission: "continue the exact inherited work",
+	}
+
+	storage, err := NewStorage(config.LoadState(), "")
+	if err != nil {
+		t.Fatalf("NewStorage: %v", err)
+	}
+	if err := storage.SaveInstances([]*Instance{alive, pending}); err != nil {
+		t.Fatalf("SaveInstances: %v", err)
+	}
+
+	repoID := config.RepoIDFromRoot(repoPath)
+	scoped, err := NewStorage(config.LoadState(), repoID)
+	if err != nil {
+		t.Fatalf("NewStorage(scoped): %v", err)
+	}
+	rows, err := scoped.LoadInstanceData()
+	if err != nil {
+		t.Fatalf("LoadInstanceData: %v", err)
+	}
+	for _, row := range rows {
+		if row.Title == pending.Title {
+			if row.PendingHandoffMission != pending.pendingHandoffMission {
+				t.Fatalf("pending handoff mission = %q, want %q", row.PendingHandoffMission, pending.pendingHandoffMission)
+			}
+			return
+		}
+	}
+	t.Fatal("whole-repo save dropped the pending handoff row while its incoming runtime was live")
+}

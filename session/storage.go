@@ -287,9 +287,11 @@ func dedupeInstanceData(data []InstanceData) []InstanceData {
 // Only repos with at least one persistable in-memory instance are rewritten;
 // repos the daemon holds nothing for are left untouched — their records were
 // already removed by the targeted DeleteInstance on kill, or were never loaded.
-// Loading/Deleting/non-started instances are skipped: their worktree is not yet
-// populated (Loading) or is mid-teardown (Deleting), so FromInstanceData cannot
-// restore them.
+// Generic Loading/Deleting/non-started instances are skipped: their worktree is
+// not yet populated (Loading) or is mid-teardown (Deleting), so FromInstanceData
+// cannot restore them. Explicit durable retention markers override that legacy
+// projection; in particular, a pending handoff composes to Loading but names a
+// live replacement and the mission recovery still owes it.
 //
 // The targeted writers (appendInstanceData / persistInstanceData /
 // DeleteInstance) keep the disk current on every mutation; this full save is the
@@ -304,8 +306,14 @@ func (s *Storage) SaveInstances(instances []*Instance) error {
 	// Worktree.RepoPath is empty. This mirrors CollectRepoRoots (#667).
 	grouped := make(map[string][]InstanceData)
 	for _, inst := range instances {
-		status := inst.GetStatus()
-		if status == Loading || status == Deleting {
+		data := inst.ToInstanceData()
+		status := data.Status
+		pendingHandoff := data.PendingHandoffMission != ""
+		// A pending mission is a durable recovery obligation and therefore a
+		// retention claim, not generic transient UI state. OpReplacing composes to
+		// Loading, but dropping that row would erase the only handle to a live
+		// incoming runtime. The explicit marker outranks the lossy legacy status.
+		if (status == Loading || status == Deleting) && !pendingHandoff {
 			continue
 		}
 		// The !Started() skip drops transient never-started junk (a create that
@@ -326,7 +334,8 @@ func (s *Storage) SaveInstances(instances []*Instance) error {
 		// started session in the repo would silently drop it, undoing the retention
 		// in a layer that never heard of it, and orphaning the very workspace the
 		// retention exists to protect. Retention is a claim on this writer too.
-		if !inst.Started() && status != Archived && !inst.UserKilled() && !inst.StartupStateUnknown() {
+		if !inst.Started() && status != Archived && !data.UserKilled &&
+			!data.StartupStateUnknown && !pendingHandoff {
 			continue
 		}
 		root := inst.GetRepoPath()
@@ -334,7 +343,7 @@ func (s *Storage) SaveInstances(instances []*Instance) error {
 			root = inst.Path
 		}
 		rid := config.RepoIDFromRoot(root)
-		grouped[rid] = append(grouped[rid], inst.ToInstanceData().ForStorage())
+		grouped[rid] = append(grouped[rid], data.ForStorage())
 	}
 
 	for rid, group := range grouped {
