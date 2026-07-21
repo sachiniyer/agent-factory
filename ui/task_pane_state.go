@@ -99,15 +99,43 @@ func (s *TaskPane) ConsumeDirty() []task.TaskEdit {
 	return edits
 }
 
+// AcknowledgeSavedEdit advances one task's diff baseline after its daemon
+// update succeeds. The update contains every user-editable field that differs
+// from the previous baseline, so the pane's current value is exactly the new
+// baseline for later edits even if the caller's final disk reload fails.
+func (s *TaskPane) AcknowledgeSavedEdit(id string) {
+	for _, current := range s.tasks {
+		if current.ID != id {
+			continue
+		}
+		if s.originals == nil {
+			s.originals = make(map[string]task.Task)
+		}
+		s.originals[id] = current
+		delete(s.dirtyIDs, id)
+		return
+	}
+}
+
+// RestoreFailedEdit makes a consumed edit retryable when its daemon update
+// fails. A successful final reload will still replace the pane and clear this
+// state; if that reload also fails, the in-memory edit remains the only copy
+// and must stay dirty rather than being mistaken for a persisted baseline.
+func (s *TaskPane) RestoreFailedEdit(id string) {
+	s.markTaskDirty(id)
+}
+
 // ConsumeDeleted returns the tasks pending deletion and clears the pane's
-// dirty state so a subsequent save can't reprocess already-deleted tasks. The
-// deletion loop in saveContentPaneState removes task records as a side
-// effect, so re-running it would call RemoveTask on records that no longer
-// exist and log spurious errors (fixes #763).
+// deletion state so a subsequent save can't reprocess already-deleted tasks.
+// Failed edits restored after ConsumeDirty keep the pane dirty until the final
+// reload succeeds or a later save retries them. The deletion loop in
+// saveContentPaneState removes task records as a side effect, so re-running it
+// would call RemoveTask on records that no longer exist and log spurious errors
+// (fixes #763).
 func (s *TaskPane) ConsumeDeleted() []task.Task {
 	deleted := s.deleted
 	s.deleted = nil
-	s.dirty = false
+	s.dirty = len(s.dirtyIDs) > 0
 	return deleted
 }
 
