@@ -253,7 +253,13 @@ func secureAFHomeForPath(path string) error {
 	if statErr != nil {
 		return fmt.Errorf("inspect AF home: %w", statErr)
 	}
-	if os.Getenv("AGENT_FACTORY_HOME") != "" && !created {
+	// Environment presence does not make a path custom: users commonly export
+	// AGENT_FACTORY_HOME=$HOME/.agent-factory to pin the default explicitly. Base
+	// the permission policy on the resolved location so that spelling receives
+	// the same legacy repair, while genuinely custom broad directories (notably
+	// AGENT_FACTORY_HOME=~) retain their caller-owned mode.
+	isDefaultHome := os.Getenv("AGENT_FACTORY_HOME") == "" || resolvesToDefaultAFHome(absHome)
+	if !isDefaultHome && !created {
 		return nil
 	}
 	if info.Mode()&os.ModeSymlink != 0 {
@@ -275,4 +281,16 @@ func secureAFHomeForPath(path string) error {
 		return fmt.Errorf("secure AF home: %w", err)
 	}
 	return nil
+}
+
+func resolvesToDefaultAFHome(absHome string) bool {
+	defaultHome, err := ConfigDirFor("")
+	if err != nil {
+		return false
+	}
+	absDefault, err := filepath.Abs(defaultHome)
+	if err != nil {
+		return false
+	}
+	return filepath.Clean(absHome) == filepath.Clean(absDefault)
 }

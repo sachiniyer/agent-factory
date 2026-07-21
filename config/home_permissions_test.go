@@ -18,6 +18,7 @@ func TestLoadConfigSecuresDefaultAFHome(t *testing.T) {
 		name           string
 		legacyConfig   string
 		defaultProgram string
+		explicitHome   bool
 	}{
 		{name: "fresh home"},
 		{
@@ -25,12 +26,22 @@ func TestLoadConfigSecuresDefaultAFHome(t *testing.T) {
 			legacyConfig:   "default_program = 'codex'\n",
 			defaultProgram: "codex",
 		},
+		{
+			name:           "legacy 0755 home explicitly pinned as AGENT_FACTORY_HOME",
+			legacyConfig:   "default_program = 'codex'\n",
+			defaultProgram: "codex",
+			explicitHome:   true,
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			userHome := t.TempDir()
 			afHome := filepath.Join(userHome, ".agent-factory")
 			t.Setenv("HOME", userHome)
-			t.Setenv("AGENT_FACTORY_HOME", "")
+			if tc.explicitHome {
+				t.Setenv("AGENT_FACTORY_HOME", afHome)
+			} else {
+				t.Setenv("AGENT_FACTORY_HOME", "")
+			}
 			fastShell(t)
 
 			if tc.legacyConfig != "" {
