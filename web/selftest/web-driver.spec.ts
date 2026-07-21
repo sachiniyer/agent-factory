@@ -5835,6 +5835,20 @@ test("#2227 mobile appbar: project context wins scarce width at 320px and 375px"
         expect(menuBox, "project menu has phone geometry").not.toBeNull();
         expect(menuBox!.x).toBeGreaterThanOrEqual(0);
         expect(menuBox!.x + menuBox!.width).toBeLessThanOrEqual(width);
+
+        // Disclosure exclusivity belongs to the actions, not pointer bubbling. The
+        // More click stops propagation and keyboard activation has no mousedown, so
+        // both directions would otherwise leave overlapping panels open (#2226's
+        // event-path gotcha in miniature).
+        await more.click();
+        await expect(projectMenu).toBeHidden();
+        await expect(tools).toBeVisible();
+        await expect(more).toHaveAttribute("aria-expanded", "true");
+        await project.focus();
+        await p.keyboard.press("Enter");
+        await expect(tools).toBeHidden();
+        await expect(more).toHaveAttribute("aria-expanded", "false");
+        await expect(projectMenu).toBeVisible();
         await projectItem(p, LONG_PROJECT).click();
         await expect(projectMenu).toBeHidden();
 
@@ -5855,6 +5869,7 @@ test("#2227 mobile appbar: project context wins scarce width at 320px and 375px"
         }
         await p.keyboard.press("Escape");
         await expect(tools).toBeHidden();
+        await expect(more).toHaveAttribute("aria-expanded", "false");
         await expect(more).toBeFocused();
 
         await testInfo.attach(`2227-${width}-${theme}-drawer-closed`, {

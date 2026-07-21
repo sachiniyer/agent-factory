@@ -757,6 +757,7 @@ export class AppShell {
     this.projectSwitchBtn.setAttribute("aria-label", "Switch project");
     this.projectSwitchBtn.addEventListener("click", (e) => {
       e.stopPropagation();
+      setAppbarToolsOpen(false);
       this.toggleProjectMenu();
     });
     this.projectMenu = h("div", { class: "af-project-menu" });
@@ -800,12 +801,11 @@ export class AppShell {
     const appbarMore = h("button", { type: "button", class: "af-appbar-more" }, "⋯");
     appbarMore.setAttribute("aria-label", "More app controls");
     appbarMore.setAttribute("title", "More app controls");
-    appbarMore.setAttribute("aria-haspopup", "true");
     appbarMore.setAttribute("aria-controls", "af-appbar-tools");
     appbarMore.setAttribute("aria-expanded", "false");
     const appbarToolsWrap = h("div", { class: "af-appbar-tools-wrap" }, appbarMore, appbarTools);
     let appbarToolsOpen = false;
-    const setAppbarToolsOpen = (open: boolean): void => {
+    function setAppbarToolsOpen(open: boolean): void {
       if (appbarToolsOpen === open) {
         return;
       }
@@ -821,7 +821,7 @@ export class AppShell {
         document.removeEventListener("keydown", onAppbarToolsKeyDown, true);
         window.removeEventListener("resize", onAppbarToolsResize);
       }
-    };
+    }
     const onAppbarToolsMouseDown = (e: MouseEvent): void => {
       if (!appbarToolsWrap.isConnected || !appbarToolsWrap.contains(e.target as Node)) {
         setAppbarToolsOpen(false);
@@ -838,7 +838,11 @@ export class AppShell {
     const onAppbarToolsResize = (): void => setAppbarToolsOpen(false);
     appbarMore.addEventListener("click", (e) => {
       e.stopPropagation();
-      setAppbarToolsOpen(!appbarToolsOpen);
+      const opening = !appbarToolsOpen;
+      if (opening) {
+        this.closeProjectMenu();
+      }
+      setAppbarToolsOpen(opening);
     });
     // Disconnect replaces the shell synchronously. Close first so the temporary
     // document/window listeners cannot outlive the DOM subtree they describe.

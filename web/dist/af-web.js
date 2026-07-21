@@ -10477,6 +10477,7 @@ var AppShell = class {
     this.projectSwitchBtn.setAttribute("aria-label", "Switch project");
     this.projectSwitchBtn.addEventListener("click", (e) => {
       e.stopPropagation();
+      setAppbarToolsOpen(false);
       this.toggleProjectMenu();
     });
     this.projectMenu = h2("div", { class: "af-project-menu" });
@@ -10507,12 +10508,11 @@ var AppShell = class {
     const appbarMore = h2("button", { type: "button", class: "af-appbar-more" }, "\u22EF");
     appbarMore.setAttribute("aria-label", "More app controls");
     appbarMore.setAttribute("title", "More app controls");
-    appbarMore.setAttribute("aria-haspopup", "true");
     appbarMore.setAttribute("aria-controls", "af-appbar-tools");
     appbarMore.setAttribute("aria-expanded", "false");
     const appbarToolsWrap = h2("div", { class: "af-appbar-tools-wrap" }, appbarMore, appbarTools);
     let appbarToolsOpen = false;
-    const setAppbarToolsOpen = (open) => {
+    function setAppbarToolsOpen(open) {
       if (appbarToolsOpen === open) {
         return;
       }
@@ -10528,7 +10528,7 @@ var AppShell = class {
         document.removeEventListener("keydown", onAppbarToolsKeyDown, true);
         window.removeEventListener("resize", onAppbarToolsResize);
       }
-    };
+    }
     const onAppbarToolsMouseDown = (e) => {
       if (!appbarToolsWrap.isConnected || !appbarToolsWrap.contains(e.target)) {
         setAppbarToolsOpen(false);
@@ -10545,7 +10545,11 @@ var AppShell = class {
     const onAppbarToolsResize = () => setAppbarToolsOpen(false);
     appbarMore.addEventListener("click", (e) => {
       e.stopPropagation();
-      setAppbarToolsOpen(!appbarToolsOpen);
+      const opening = !appbarToolsOpen;
+      if (opening) {
+        this.closeProjectMenu();
+      }
+      setAppbarToolsOpen(opening);
     });
     disconnect2.addEventListener("click", () => {
       setAppbarToolsOpen(false);
