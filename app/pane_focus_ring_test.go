@@ -7,6 +7,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/stretchr/testify/require"
 
+	"github.com/sachiniyer/agent-factory/keys"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/ui/layout"
 )
@@ -231,6 +232,27 @@ func TestSectionNav_ProjectsFocusUsesGlobalBindings(t *testing.T) {
 	_, _ = h.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{']'}})
 	require.Equal(t, layout.RegionTree, h.ring.Active(),
 		"#2278: ] from Projects must wrap to Instances")
+}
+
+// A section-navigation override can intentionally take a Projects cursor alias
+// such as j or k. The configured global action must win before the captive list
+// consumes that physical key as cursor movement.
+func TestSectionNav_ProjectsFocusHonorsReboundCursorKeys(t *testing.T) {
+	require.NoError(t, keys.ApplyOverrides(map[string][]string{
+		"next_section": {"j"},
+		"prev_section": {"k"},
+	}))
+	t.Cleanup(func() { require.NoError(t, keys.ApplyOverrides(nil)) })
+
+	h := projectsHomeWithRows(t)
+	_, _ = h.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+	require.Equal(t, layout.RegionTree, h.ring.Active(),
+		"a rebound next-section key must take priority over the Projects cursor")
+
+	h.focusRegion(layout.RegionProjects)
+	_, _ = h.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'k'}})
+	require.Equal(t, layout.RegionAutomations, h.ring.Active(),
+		"a rebound previous-section key must take priority over the Projects cursor")
 }
 
 // TestSectionNav_SkipsWorkspacePanes proves `]` jumps SECTION to SECTION, not

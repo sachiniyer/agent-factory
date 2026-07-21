@@ -158,6 +158,16 @@ func (m *home) handleProjectsFocus(msg tea.KeyMsg) (tea.Model, tea.Cmd, bool) {
 	if m.ring.Active() != layout.RegionProjects {
 		return m, nil, false
 	}
+	// A configured section-navigation key takes priority over this list's
+	// hardcoded vim/cursor aliases. For example, next_section = "j" suppresses
+	// the global down binding, so Projects must not reclaim j before the global
+	// dispatcher can honor the override.
+	if key.Matches(msg,
+		keys.GlobalKeyBindings[keys.KeyNextSection],
+		keys.GlobalKeyBindings[keys.KeyPrevSection],
+	) {
+		return m, nil, false
+	}
 	// The section owns its vim/cursor nav (j/k/up/down).
 	if _, consumed := m.projects.HandleKey(msg); consumed {
 		return m, nil, true
@@ -204,9 +214,10 @@ func (m *home) handleProjectsFocus(msg tea.KeyMsg) (tea.Model, tea.Cmd, bool) {
 }
 
 // projectsChromeFallthroughKey reports whether a key pressed with the Projects
-// section focused must still reach the global handler — focus-ring and section
-// navigation, help (?), quit (q), and the always-on ctrl+c hard exit. Every
-// other key is consumed as a no-op by handleProjectsFocus (#1620).
+// section focused must still reach the global handler — focus-ring navigation,
+// help (?), quit (q), and the always-on ctrl+c hard exit. Section navigation is
+// checked before the captive cursor handler above so rebound cursor keys work.
+// Every other key is consumed as a no-op by handleProjectsFocus (#1620).
 func projectsChromeFallthroughKey(msg tea.KeyMsg) bool {
 	if msg.String() == "ctrl+c" {
 		return true
@@ -214,8 +225,6 @@ func projectsChromeFallthroughKey(msg tea.KeyMsg) bool {
 	for _, name := range []keys.KeyName{
 		keys.KeyTab,
 		keys.KeyShiftTab,
-		keys.KeyNextSection,
-		keys.KeyPrevSection,
 		keys.KeyHelp,
 		keys.KeyQuit,
 	} {
