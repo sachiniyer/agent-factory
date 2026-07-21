@@ -36,6 +36,28 @@ func TestWaitForPIDExit_AliveProcessTimesOut(t *testing.T) {
 		"a live PID must report not-exited once the timeout elapses")
 }
 
+func TestCloseAndWaitForPaneExit_AlivePaneKeepsCleanupUnsafe(t *testing.T) {
+	oldWait := paneExitWait
+	paneExitWait = 20 * time.Millisecond
+	t.Cleanup(func() { paneExitWait = oldWait })
+
+	cmdExec := cmd_test.MockCmdExec{
+		RunFunc: func(*exec.Cmd) error { return nil },
+		OutputFunc: func(cmd *exec.Cmd) ([]byte, error) {
+			if strings.Contains(cmd.String(), "display-message") {
+				return []byte(fmt.Sprintf("%d\n", os.Getpid())), nil
+			}
+			return nil, nil
+		},
+	}
+	session := newTmuxSession(toTmuxName("close-wait-live", ""), "claude", NewMockPtyFactory(t), cmdExec)
+
+	state, err := session.CloseAndWaitForPaneExit()
+	require.Error(t, err)
+	require.Equal(t, PaneStateUnknown, state,
+		"a pane still flushing after kill-session must veto worktree cleanup")
+}
+
 // TestCloseAndWaitForPaneExit_QueriesPaneBeforeKill verifies the #802
 // ordering contract: the pane PID is captured via display-message BEFORE
 // kill-session runs (afterwards there is nothing left to query), and the

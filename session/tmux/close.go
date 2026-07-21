@@ -31,10 +31,10 @@ type PaneState int
 
 const (
 	// PaneStateUnknown (the ZERO VALUE): a bounded tmux command tripped its
-	// deadline, so the server never answered and the session may still be RUNNING —
-	// or nobody established its state at all. No caller may take a destructive step
-	// on this: deleting or moving a workspace an agent is still writing to destroys
-	// the user's work on a guess. Retry instead.
+	// deadline, the pane process remained alive after bounded teardown, or nobody
+	// established its state at all. No caller may take a destructive step on this:
+	// deleting or moving a workspace an agent is still writing to destroys the
+	// user's work on a guess. Retry instead.
 	//
 	// Unknown is the zero value deliberately (#1917). The safe outcome must be the
 	// LAZY outcome: a state nobody set refuses to destroy rather than permitting it.
@@ -184,7 +184,7 @@ func (t *TmuxSession) CloseAttachOnly() error {
 // paneExitWait bounds how long CloseAndWaitForPaneExit blocks for the pane
 // process to die. Long enough for an agent to handle SIGHUP and flush state,
 // short enough that teardown of a wedged process doesn't hang the caller.
-const paneExitWait = 3 * time.Second
+var paneExitWait = 3 * time.Second
 
 // CloseAndWaitForPaneExit terminates the tmux session like Close, then waits
 // (bounded by paneExitWait) until the pane's root process has actually
@@ -221,12 +221,12 @@ func (t *TmuxSession) CloseAndWaitForPaneExit() (PaneState, error) {
 		return state, closeErr
 	}
 	if !waitForPIDExit(pid, paneExitWait) {
-		// Pre-existing #802 behavior, deliberately unchanged: kill-session was
-		// CONFIRMED delivered, so this pane is dying — it is merely slow. Treating a
-		// slow flush as unknown would defer routine kills of any agent that takes
-		// >3s to exit. The unknown cases above are the ones where tmux never spoke.
-		log.WarningLog.Printf("tmux session %s: pane process %d still alive %v after kill-session; "+
-			"worktree cleanup may race with its in-flight writes", t.sanitizedName, pid, paneExitWait)
+		// kill-session returning establishes only that SIGHUP was sent, not that the
+		// process stopped writing. Unknown is the only state that keeps every
+		// destructive caller from deleting/moving the worktree on that assumption.
+		err := fmt.Errorf("pane process %d is still alive %v after kill-session", pid, paneExitWait)
+		log.WarningLog.Printf("tmux session %s: %v; refusing worktree cleanup", t.sanitizedName, err)
+		return PaneStateUnknown, errors.Join(closeErr, err)
 	}
 	return state, closeErr
 }

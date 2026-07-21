@@ -5,11 +5,12 @@ import (
 	"testing"
 )
 
-// TestStartupUnknownIsTerminalAndHasNoLifecycleAction pins the shared view read
-// by sessions-watch, task concurrency, the TUI, and the web client. A retained
-// uncertain create is not an ordinary ready row just because LiveReady was the
-// instance's pre-launch default.
-func TestStartupUnknownIsTerminalAndHasNoLifecycleAction(t *testing.T) {
+// TestStartupUnknownIsTerminalAndKillableButHasNoLifecycleAction pins the shared
+// view read by sessions-watch, task concurrency, the TUI, and the web client. A
+// retained uncertain create is not an ordinary ready row just because LiveReady
+// was the instance's pre-launch default, but its stable record must remain an
+// explicit teardown handle.
+func TestStartupUnknownIsTerminalAndKillableButHasNoLifecycleAction(t *testing.T) {
 	data := InstanceData{
 		ID:                  "unknown-id",
 		Title:               "uncertain",
@@ -41,8 +42,15 @@ func TestStartupUnknownIsTerminalAndHasNoLifecycleAction(t *testing.T) {
 	if action := inst.LifecycleAction(); action != LifecycleActionNone {
 		t.Fatalf("startup-unknown instance advertises lifecycle action %q", action)
 	}
-	if action := inst.ToInstanceData().LifecycleAction; action != LifecycleActionNone {
+	if !inst.CanKill() {
+		t.Fatal("startup-unknown instance lost its explicit teardown handle")
+	}
+	projection := inst.ToInstanceData()
+	if action := projection.LifecycleAction; action != LifecycleActionNone {
 		t.Fatalf("startup-unknown projection advertises lifecycle action %q", action)
+	}
+	if !projection.CanKill {
+		t.Fatal("startup-unknown projection lost its explicit teardown handle")
 	}
 }
 

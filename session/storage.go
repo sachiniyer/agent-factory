@@ -50,6 +50,11 @@ type InstanceData struct {
 	// ToInstanceData and scrubbed by ForStorage; instances.json must not preserve
 	// a UI decision that can go stale across restart.
 	LifecycleAction LifecycleAction `json:"lifecycle_action,omitempty"`
+	// CanKill is the independent projection-only teardown capability. It is true
+	// for any stable, non-creating row, including StartupStateUnknown: that state
+	// vetoes runtime reuse but must remain explicitly removable. Like
+	// LifecycleAction, this is derived live and scrubbed before disk persistence.
+	CanKill bool `json:"can_kill,omitempty"`
 	// TaskRunActive records whether this session's task run is still in flight
 	// (#1892) — true from creation, false once the agent goes idle. It is the one
 	// fact the watch-task concurrency cap counts, and it is stored rather than
@@ -133,6 +138,7 @@ func (d InstanceData) ForStorage() InstanceData {
 	d.Liveness = lv
 	d.InFlightOp = OpNone
 	d.LifecycleAction = LifecycleActionNone
+	d.CanKill = false
 	return d
 }
 

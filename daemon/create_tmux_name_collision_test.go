@@ -150,3 +150,33 @@ func TestTmuxNameCollisionIsScopedToTwoLocalRuntimes(t *testing.T) {
 		t.Fatalf("local create was blocked by a sandbox row with no host tmux name: %v", err)
 	}
 }
+
+func TestReserveCreateRejectsMultipleArchivedTmuxCollisionsWithoutRename(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	seedArchivedSessionBranchFreed(t, manager, repoID, repoPath, "a/b", "slash-branch")
+	seedArchivedSessionBranchFreed(t, manager, repoID, repoPath, "a_b", "underscore-branch")
+
+	_, _, _, renamed, err := manager.reserveCreate(CreateSessionRequest{
+		RepoPath: repoPath,
+		Title:    "a/b",
+		Program:  tmux.ProgramClaude,
+	})
+	if err == nil {
+		t.Fatal("create accepted a runtime name claimed by two archived rows")
+	}
+	if renamed != nil {
+		t.Fatalf("failed create reported a rename: %+v", renamed)
+	}
+	if !strings.Contains(err.Error(), "both claim") {
+		t.Fatalf("collision error does not explain the ambiguous archived claims: %v", err)
+	}
+
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	for _, title := range []string{"a/b", "a_b"} {
+		inst := manager.instances[daemonInstanceKey(repoID, title)]
+		if inst == nil || inst.Title != title || inst.GetLiveness() != session.LiveArchived {
+			t.Fatalf("failed create mutated archived row %q: %+v", title, inst)
+		}
+	}
+}

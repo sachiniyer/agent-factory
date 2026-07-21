@@ -1034,8 +1034,8 @@ body {
   background: var(--af-bg-inset);
 }
 
-/* A row without the daemon's lifecycle capability is visible status only. Creating
- * rows share this class but override the cursor below with progress. */
+/* A row that cannot attach is visible status only, though it may still contain an
+ * independently projected Kill button. Creating rows override the cursor below. */
 .af-row-inert {
   cursor: default;
 }

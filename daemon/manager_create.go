@@ -398,7 +398,10 @@ func (m *Manager) refuseHeldBranchReuseLocked(repoID, repoPath, title string, na
 	if namespace != runtimeNamespaceLocalTmux || inPlace {
 		return nil
 	}
-	archived, _ := m.findArchivedOnlyCollisionLocked(repoID, repoPath, title, namespace)
+	archived, _, err := m.findArchivedOnlyCollisionLocked(repoID, repoPath, title, namespace)
+	if err != nil {
+		return err
+	}
 	if archived == nil {
 		return nil
 	}
@@ -429,7 +432,10 @@ var reuseArchivedRenamePersist = renameInstanceDataTitle
 // the name, in which case the create is left to fail in validateTitleAvailableLocked
 // exactly as before. Runs under m.mu.
 func (m *Manager) renameArchivedForReuseLocked(repoID, repoPath, title, program string, namespace runtimeNameNamespace, diskData *[]session.InstanceData) (*session.InstanceData, error) {
-	archived, oldKey := m.findArchivedOnlyCollisionLocked(repoID, repoPath, title, namespace)
+	archived, oldKey, err := m.findArchivedOnlyCollisionLocked(repoID, repoPath, title, namespace)
+	if err != nil {
+		return nil, err
+	}
 	if archived == nil {
 		return nil, nil
 	}
@@ -531,25 +537,26 @@ func (m *Manager) renameArchivedForReuseLocked(repoID, repoPath, title, program 
 	return &renamed, nil
 }
 
-// findArchivedOnlyCollisionLocked returns the archived instance whose title
-// collides with `title`, together with its manager-map key — but ONLY when nothing
-// else claims the name: no LIVE (non-archived) instance and no in-flight
-// reservation collide with it. A live or reserved collision returns nil, so the
-// archived-name-reuse rename never runs around a name a real session still holds.
+// findArchivedOnlyCollisionLocked returns the ONE archived instance whose title
+// collides with `title`, together with its manager-map key — but only when it is
+// the sole claim. A live/reserved collision returns nil so ordinary availability
+// validation reports it. Multiple archived claims return an error immediately:
+// renaming an arbitrary map-iteration winner would mutate user state and still
+// leave the requested runtime name unavailable.
 // Runs under m.mu.
-func (m *Manager) findArchivedOnlyCollisionLocked(repoID, repoPath, title string, namespace runtimeNameNamespace) (*session.Instance, string) {
+func (m *Manager) findArchivedOnlyCollisionLocked(repoID, repoPath, title string, namespace runtimeNameNamespace) (*session.Instance, string, error) {
 	for key := range m.reservedTitles {
 		rid, existing := splitDaemonInstanceKey(key)
 		if rid == repoID && m.titlesCollide(existing, title) {
 			// A concurrent create is reserving a colliding name; let the
 			// availability check reject with errConcurrentCreate.
-			return nil, ""
+			return nil, "", nil
 		}
 	}
 	if namespace == runtimeNamespaceLocalTmux {
 		nameKey := daemonInstanceKey(repoID, tmux.SanitizedNameForRepo(title, repoPath))
 		if _, reserved := m.reservedTmuxNames[nameKey]; reserved {
-			return nil, ""
+			return nil, "", nil
 		}
 	}
 	var archived *session.Instance
@@ -565,12 +572,16 @@ func (m *Manager) findArchivedOnlyCollisionLocked(repoID, repoPath, title string
 		}
 		if inst.GetLiveness() != session.LiveArchived {
 			// A live session still holds the name — do not rename around it.
-			return nil, ""
+			return nil, "", nil
+		}
+		if archived != nil {
+			return nil, "", fmt.Errorf("cannot reuse session name %q: archived sessions %q and %q both claim its runtime namespace; rename or permanently delete one before retrying",
+				title, archived.Title, inst.Title)
 		}
 		archived = inst
 		archivedKey = key
 	}
-	return archived, archivedKey
+	return archived, archivedKey, nil
 }
 
 // uniqueArchivedTitleLocked returns the first free disambiguated title for an

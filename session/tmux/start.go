@@ -122,15 +122,20 @@ func (t *TmuxSession) Start(workDir string) error {
 			// diagnostics, and older callers may still distinguish an unknown tmux
 			// outcome from a clean pre-spawn failure. %w, never %v, so the sentinel
 			// survives every wrapping layer.
-			cleanupState, cleanupErr := t.Close()
+			// A timeout may happen after tmux created a pane but before has-session
+			// observed it. Teardown alone is not cleanup proof: kill-session returns
+			// before the pane process finishes flushing. Wait for that process here,
+			// and keep the outcome unknown if it outlives the bound, so LocalBackend
+			// cannot remove the fresh worktree underneath its final writes.
+			cleanupState, cleanupErr := t.CloseAndWaitForPaneExit()
 			if cleanupErr != nil {
 				timeoutErr = fmt.Errorf("%v (cleanup error: %v)", timeoutErr, cleanupErr)
 			}
-			// A successful Close on a positive-policy name establishes that the
-			// exact launch identity is gone. The old blanket timeout classification
-			// was necessary only while a fresh title could contain spellings tmux
-			// rewrote (#2207); legacy exact names still stay on that conservative
-			// path through hasStableTmuxSpelling.
+			// A successful close+pane-exit confirmation on a positive-policy name
+			// establishes that the exact launch identity is gone. The old blanket
+			// timeout classification was necessary only while a fresh title could
+			// contain spellings tmux rewrote (#2207); legacy exact names still stay
+			// on that conservative path through hasStableTmuxSpelling.
 			if cleanupState == PaneStateKnown && cleanupErr == nil && hasStableTmuxSpelling(t.sanitizedName) {
 				return fmt.Errorf("%w: %w", timeoutErr, ErrSessionNotStarted)
 			}

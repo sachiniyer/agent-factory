@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	cmd2 "github.com/sachiniyer/agent-factory/cmd"
 
@@ -302,6 +303,34 @@ func TestStartTimeoutCleanupSucceeds(t *testing.T) {
 	require.Contains(t, err.Error(), "timed out waiting for tmux session af_timeout-ok")
 	require.NotContains(t, err.Error(), "<nil>")
 	require.NotContains(t, err.Error(), "cleanup error")
+}
+
+func TestStartTimeoutKeepsCleanupUnsafeWhileKilledPaneStillRuns(t *testing.T) {
+	oldWait := paneExitWait
+	paneExitWait = 20 * time.Millisecond
+	t.Cleanup(func() { paneExitWait = oldWait })
+	ptyFactory := NewMockPtyFactory(t)
+	cmdExec := cmd_test.MockCmdExec{
+		RunFunc: func(cmd *exec.Cmd) error {
+			if strings.Contains(cmd.String(), "has-session") {
+				return fmt.Errorf("session not found")
+			}
+			return nil
+		},
+		OutputFunc: func(cmd *exec.Cmd) ([]byte, error) {
+			if strings.Contains(cmd.String(), "display-message") {
+				return []byte(fmt.Sprintf("%d\n", os.Getpid())), nil
+			}
+			return nil, nil
+		},
+	}
+	session := newTmuxSession(toTmuxName("timeout-live-pane", ""), "claude", ptyFactory, cmdExec)
+
+	err := session.Start(t.TempDir())
+	require.Error(t, err)
+	require.ErrorIs(t, err, ErrTmuxTimeout)
+	require.NotErrorIs(t, err, ErrSessionNotStarted,
+		"a pane that has not exited must never authorize fresh-worktree removal")
 }
 
 // TestStartTimeoutCleanupFails is the companion to the #696 guard: when

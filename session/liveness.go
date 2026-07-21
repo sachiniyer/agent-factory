@@ -90,11 +90,14 @@ const (
 	LifecycleActionRestore LifecycleAction = "restore"
 )
 
-// lifecycleActionFor is the one policy shared by Instance (the TUI) and
-// ToInstanceData (the web projection). A creating row has a provisional identity
-// but no session to destroy yet. An id-less row cannot address a destructive API
-// unambiguously, so it also exposes nothing. Resting rows restore; every other
-// settled row archives. Kill is available whenever this result is non-zero.
+// lifecycleActionFor is the one archive/restore policy shared by Instance (the
+// TUI) and ToInstanceData (the web projection). A creating row has a provisional
+// identity but no session to manage yet. An id-less row cannot address a mutation
+// API unambiguously, so it also exposes nothing. A startup-unknown row must not
+// reuse its unconfirmed runtime binding. Resting rows restore; every other settled
+// row archives. Kill addressability is intentionally independent (CanKill): a
+// retained startup-unknown row must remain removable without becoming attachable,
+// archivable, or restorable.
 func lifecycleActionFor(id string, liveness Liveness, op InFlightOp, startupStateUnknown bool) LifecycleAction {
 	if id == "" || op == OpCreating || startupStateUnknown {
 		return LifecycleActionNone
@@ -107,6 +110,14 @@ func lifecycleActionFor(id string, liveness Liveness, op InFlightOp, startupStat
 	}
 }
 
+// canKillFor answers only whether a row has a stable teardown target. It does not
+// imply that the runtime binding is safe to reuse: startup-unknown rows are the
+// important counterexample. A creating row has no confirmed session to tear down,
+// and an id-less legacy row cannot address the destructive API without guessing.
+func canKillFor(id string, op InFlightOp) bool {
+	return id != "" && op != OpCreating
+}
+
 // LifecycleAction returns the shared lifecycle verb for this instance. TUI menus
 // and handlers use this method; browser clients receive the same value from
 // InstanceData.LifecycleAction.
@@ -114,6 +125,15 @@ func (i *Instance) LifecycleAction() LifecycleAction {
 	i.mu.RLock()
 	defer i.mu.RUnlock()
 	return lifecycleActionFor(i.ID, i.liveness, i.inFlightOp, i.startupStateUnknown)
+}
+
+// CanKill reports whether interactive clients may offer explicit teardown for
+// this instance. It is a separate domain axis from LifecycleAction so exceptional
+// retained records do not become impossible to remove.
+func (i *Instance) CanKill() bool {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	return canKillFor(i.ID, i.inFlightOp)
 }
 
 // composeStatus derives the legacy Status enum from the two-axis model. An

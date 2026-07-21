@@ -59,6 +59,13 @@ export type NewTabKind = "shell" | "vscode";
  *  so a visible but inert row cannot reach them through the normal code path. */
 export type ActionableSession = SessionData & { id: string; lifecycle_action: LifecycleAction };
 
+/** A row carrying the Go domain's positive teardown capability and stable target.
+ *  This is intentionally not implied by ActionableSession: startup-unknown rows
+ *  are killable while archive/restore and attach remain unavailable. */
+export type KillableSession = SessionData & { id: string; can_kill: true };
+
+type ManagedSession = ActionableSession | KillableSession;
+
 /** Fail-closed wire narrowing only — the policy itself lives in Go's
  *  session.LifecycleAction (#2234). Exact values reject a malformed or stale
  *  projection instead of manufacturing an action in the browser. */
@@ -68,6 +75,11 @@ export function isActionableSession(s: SessionData): s is ActionableSession {
     s.id !== "" &&
     (s.lifecycle_action === "archive" || s.lifecycle_action === "restore")
   );
+}
+
+/** Fail-closed narrowing for the daemon's independent teardown capability. */
+export function isKillableSession(s: SessionData): s is KillableSession {
+  return typeof s.id === "string" && s.id !== "" && s.can_kill === true;
 }
 
 /** The whole client state: which view to show, the login details, and — once
@@ -157,8 +169,8 @@ export interface Actions {
   open(id: string): void;
   /** Opens the new-session modal (#1592 Phase 5 PR5). */
   newSession(): void;
-  /** Opens the kill-confirm modal for this rail row. */
-  kill(session: ActionableSession): void;
+  /** Opens the kill-confirm modal for this stably-addressed rail row. */
+  kill(session: KillableSession): void;
   /** Opens the archive-confirm modal for this rail row. */
   archive(session: ActionableSession): void;
   /** Opens the restore-confirm modal for this rail row (an archived / Lost / Dead
@@ -1207,36 +1219,45 @@ export class AppShell {
     list.replaceChildren(...(notice ? [notice, ...rows] : rows));
   }
 
-  /** Quiet per-session controls reserved beside every ACTIONABLE rail row (#2186,
-   *  #2223, #2234). The Go projection chooses Archive vs Restore; the browser never
-   *  reconstructs that policy from row state. */
-  private rowActions(session: ActionableSession, selected: boolean): HTMLElement {
-    const lifecycleBtn = h("button", { type: "button", class: "af-rail-action af-rail-lifecycle" });
-    lifecycleBtn.addEventListener("click", (e) => {
-      e.stopPropagation();
-      if (lifecycleBtn.dataset.action === "restore") {
-        this.runRailExit(() => this.actions.restore(session));
-      } else {
-        this.runRailExit(() => this.actions.archive(session));
+  /** Quiet controls reserved beside every row carrying at least one daemon-owned
+   *  capability (#2186, #2223, #2234). Archive/Restore and Kill narrow separately;
+   *  the browser never reconstructs either policy from status pixels. */
+  private rowActions(session: ManagedSession, selected: boolean): HTMLElement {
+    const buttons: HTMLElement[] = [];
+    if (isActionableSession(session)) {
+      const lifecycleSession = session;
+      const lifecycleBtn = h("button", { type: "button", class: "af-rail-action af-rail-lifecycle" });
+      lifecycleBtn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        if (lifecycleBtn.dataset.action === "restore") {
+          this.runRailExit(() => this.actions.restore(lifecycleSession));
+        } else {
+          this.runRailExit(() => this.actions.archive(lifecycleSession));
+        }
+      });
+      this.patchLifecycleButton(lifecycleBtn, lifecycleSession.lifecycle_action, lifecycleSession.title);
+      if (selected) {
+        this.lifecycleBtn = lifecycleBtn;
+        this.lifecycleAction = lifecycleSession.lifecycle_action;
       }
-    });
-    this.patchLifecycleButton(lifecycleBtn, session.lifecycle_action, session.title);
-    if (selected) {
-      this.lifecycleBtn = lifecycleBtn;
-      this.lifecycleAction = session.lifecycle_action;
+      buttons.push(lifecycleBtn);
     }
 
-    // Kill stays unmistakably destructive through its distinct ⌫ glyph and confirm,
-    // but its resting rail treatment is deliberately muted instead of af-danger.
-    const killBtn = h("button", { type: "button", class: "af-rail-action af-rail-kill" }, "⌫");
-    const killLabel = `Kill session “${session.title}”`;
-    killBtn.setAttribute("aria-label", killLabel);
-    killBtn.setAttribute("title", killLabel);
-    killBtn.addEventListener("click", (e) => {
-      e.stopPropagation();
-      this.runRailExit(() => this.actions.kill(session));
-    });
-    return h("div", { class: "af-row-actions" }, lifecycleBtn, killBtn);
+    if (isKillableSession(session)) {
+      const killSession = session;
+      // Kill stays unmistakably destructive through its distinct ⌫ glyph and
+      // confirm, but its resting rail treatment remains muted instead of af-danger.
+      const killBtn = h("button", { type: "button", class: "af-rail-action af-rail-kill" }, "⌫");
+      const killLabel = `Kill session “${killSession.title}”`;
+      killBtn.setAttribute("aria-label", killLabel);
+      killBtn.setAttribute("title", killLabel);
+      killBtn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        this.runRailExit(() => this.actions.kill(killSession));
+      });
+      buttons.push(killBtn);
+    }
+    return h("div", { class: "af-row-actions" }, ...buttons);
   }
 
   /** Applies the daemon-projected verb, glyph, and target-qualified accessible name
@@ -2241,18 +2262,20 @@ function beginTabRename(
 }
 
 /** One session row: a status dot, the (prefixed) title, the branch line, and a reserved
- *  slot for its quiet lifecycle actions (#2186, #2223). Clicking opens the session by
- *  its stable id (selects it and attaches its terminal, #1693); a row lacking an id
- *  (never expected from a live Snapshot) is rendered but inert. */
+ *  slot for its daemon-projected management actions (#2186, #2223). Clicking opens
+ *  only a lifecycle-actionable session by stable id; a kill-only startup-unknown row
+ *  retains its button without becoming attachable. */
 function sessionRow(
   s: SessionData,
   selected: boolean,
   openSession: (id: string) => void,
-  buildActions: (session: ActionableSession) => HTMLElement,
+  buildActions: (session: ManagedSession) => HTMLElement,
 ): HTMLElement {
   const status = rowStatus(s);
   const creating = isCreating(s);
   const actionable = isActionableSession(s);
+  const killable = isKillableSession(s);
+  const managed = actionable || killable;
 
   const title = h("div", { class: "af-row-title" }, rowTitle(s));
   const branch = h(
@@ -2277,18 +2300,17 @@ function sessionRow(
     row.append(dot);
   }
   row.append(main);
-  if (actionable) {
+  if (managed) {
     row.append(buildActions(s));
   }
   row.setAttribute("role", "option");
   row.setAttribute("aria-selected", selected ? "true" : "false");
   row.setAttribute("title", `${s.title} — ${status.label}`);
-  if (!actionable) {
-    // The server withheld a lifecycle action: a creating row has no session yet,
-    // while an id-less row has no unambiguous destructive target. Selection and
-    // lifecycle controls consume the same fail-closed capability.
+  if (!actionable && !managed) {
+    // The server withheld both capabilities: a creating row has no session yet,
+    // while an id-less row has no unambiguous mutation target.
     row.setAttribute("aria-disabled", "true");
-  } else {
+  } else if (actionable) {
     row.addEventListener("click", () => openSession(s.id));
   }
   return row;
