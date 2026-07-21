@@ -44,17 +44,16 @@ func blankRuns(s string) (top, bottom int) {
 	return top, bottom
 }
 
-// TestPreviewFallbackWrappedArtMatchesAllocatedHeight is the regression test
-// for #699. At an 80-column terminal the preview pane is ~48 columns wide and
-// the 58-column fallback ASCII art wraps, increasing the rendered line count.
-// Centering math that counts pre-wrap lines then under-pads and the overall
-// output overflows the pane allocation (49 lines for a 30-line pane).
-func TestPreviewFallbackWrappedArtMatchesAllocatedHeight(t *testing.T) {
+// TestPreviewFallbackWidthAwareContentMatchesAllocatedHeight covers both sides
+// of the #2146 fallback: narrow panes render the message without logo fragments,
+// while wide panes retain the full art. Both still honor the #699 exact-height
+// contract.
+func TestPreviewFallbackWidthAwareContentMatchesAllocatedHeight(t *testing.T) {
 	for _, tc := range []struct{ w, h int }{
-		{48, 15}, // 80x24 terminal: real preview pane content size
+		{48, 15}, // 80x24 terminal: message-only fallback
 		{48, 30},
 		{48, 60},
-		{80, 30}, // wide enough that the art does not wrap
+		{80, 30}, // wide enough for the full logo
 	} {
 		p := NewTabPane(previewFromInstance)
 		p.SetSize(tc.w, tc.h)
@@ -66,13 +65,12 @@ func TestPreviewFallbackWrappedArtMatchesAllocatedHeight(t *testing.T) {
 	}
 }
 
-// TestPreviewFallbackCentersWrappedLineCount verifies the padding is computed
-// from the wrapped (rendered) line count: the top and bottom padding runs must
-// be balanced even when wrapping changes the art's height (#699).
-func TestPreviewFallbackCentersWrappedLineCount(t *testing.T) {
+// TestPreviewFallbackCentersWidthAwareContent verifies that padding is balanced
+// for both the narrow message-only and wide full-logo variants.
+func TestPreviewFallbackCentersWidthAwareContent(t *testing.T) {
 	for _, tc := range []struct{ w, h int }{
-		{48, 60}, // art wraps at this width
-		{80, 30}, // art does not wrap
+		{48, 60}, // logo omitted at this width
+		{80, 30}, // logo retained at this width
 	} {
 		p := NewTabPane(previewFromInstance)
 		p.SetSize(tc.w, tc.h)
@@ -82,7 +80,8 @@ func TestPreviewFallbackCentersWrappedLineCount(t *testing.T) {
 
 		// Inspect the centering math pre-clamp: the final exact-rect clamp
 		// space-pads every line, which would hide which lines are padding.
-		out := renderCenteredFallback(tabPaneStyle, p.content.text, tc.w, tc.h)
+		out := renderCenteredFallback(tabPaneStyle,
+			paneFallbackContent(p.content.text, tc.w), tc.w, tc.h)
 		top, bottom := blankRuns(out)
 		require.Greater(t, top, 0,
 			"%dx%d: content shorter than the box must be padded down from the top", tc.w, tc.h)
@@ -113,10 +112,9 @@ func TestTerminalFallbackMatchesNormalModeHeight(t *testing.T) {
 	}
 }
 
-// TestTerminalFallbackWrappedArtMatchesAllocatedHeight covers the terminal
-// pane's variant of #699: at narrow widths the fallback art wraps, and the
-// pre-fix centering math both miscentered and overflowed the allocation.
-func TestTerminalFallbackWrappedArtMatchesAllocatedHeight(t *testing.T) {
+// TestTerminalFallbackWidthAwareContentMatchesAllocatedHeight covers the same
+// narrow-message/wide-logo contract for terminal-tab fallbacks.
+func TestTerminalFallbackWidthAwareContentMatchesAllocatedHeight(t *testing.T) {
 	for _, tc := range []struct{ w, h int }{
 		{48, 15},
 		{48, 30},
