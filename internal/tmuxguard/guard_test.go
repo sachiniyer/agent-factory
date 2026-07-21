@@ -80,6 +80,7 @@ func TestDenialReason(t *testing.T) {
 		{name: "tmux config option", command: `tmux -f /tmp/tmux.conf list-sessions`, wantReason: unknownShellReason},
 		{name: "tmux run-shell", command: `tmux run-shell 'tmux kill-server'`, wantReason: unknownShellReason},
 		{name: "scoped tmux run-shell", command: `tmux -L af-test run-shell 'printf safe'`, wantReason: unknownShellReason},
+		{name: "tmux command builder after separator", command: `tmux list-sessions \; run-shell 'pkill tmux'`, wantReason: unknownShellReason},
 		{name: "tmux command format", command: `tmux display-message '#(tmux kill-server)'`, wantReason: unknownShellReason},
 		{name: "unscoped state-changing tmux command", command: `tmux new-session`, wantReason: unknownShellReason},
 

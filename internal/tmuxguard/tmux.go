@@ -7,7 +7,8 @@ func inspectTmux(args []string) string {
 	if err != nil {
 		return unknownShellReason
 	}
-	if tmuxKillServerIsBroad(args[commandAt:], scoped) {
+	commandArgs := args[commandAt:]
+	if tmuxKillServerIsBroad(commandArgs, scoped) {
 		return broadTmuxReason
 	}
 	for _, arg := range args {
@@ -22,17 +23,78 @@ func inspectTmux(args []string) string {
 		return unknownShellReason
 	}
 
-	command := strings.ToLower(args[commandAt])
-	if isKillServerCommand(command) {
-		return "" // A preceding literal -L/-S made this teardown socket-scoped.
-	}
-	if tmuxCommandBuildsCommands(command) {
+	commands, err := splitTmuxCommands(commandArgs)
+	if err != nil {
 		return unknownShellReason
 	}
-	if scoped || safeUnscopedTmuxCommand(command) {
-		return ""
+	for _, words := range commands {
+		command := strings.ToLower(words[0])
+		if isKillServerCommand(command) {
+			continue // A preceding literal -L/-S made this teardown socket-scoped.
+		}
+		if tmuxCommandBuildsCommands(command) {
+			return unknownShellReason
+		}
+		if !scoped && !safeUnscopedTmuxCommand(command) {
+			return unknownShellReason
+		}
 	}
-	return unknownShellReason
+	return ""
+}
+
+// splitTmuxCommands models tmux's command-sequence boundary. Shell quoting is
+// already gone here: an escaped or quoted semicolon reaches tmux as either its
+// own argument or an unescaped suffix. Reject empty sequence elements instead
+// of guessing how a particular tmux version interprets them.
+func splitTmuxCommands(args []string) ([][]string, error) {
+	var commands [][]string
+	var current []string
+	flush := func() error {
+		if len(current) == 0 {
+			return errUnsupportedShell
+		}
+		commands = append(commands, current)
+		current = nil
+		return nil
+	}
+
+	for _, arg := range args {
+		separator := arg == ";" || hasUnescapedTrailingSemicolon(arg)
+		if separator && arg != ";" {
+			arg = strings.TrimSuffix(arg, ";")
+			if arg == "" || hasUnescapedTrailingSemicolon(arg) {
+				return nil, errUnsupportedShell
+			}
+			current = append(current, arg)
+		} else if !separator {
+			current = append(current, arg)
+		}
+		if separator {
+			if err := flush(); err != nil {
+				return nil, err
+			}
+		}
+	}
+	if len(current) > 0 {
+		if err := flush(); err != nil {
+			return nil, err
+		}
+	}
+	if len(commands) == 0 {
+		return nil, errUnsupportedShell
+	}
+	return commands, nil
+}
+
+func hasUnescapedTrailingSemicolon(arg string) bool {
+	if !strings.HasSuffix(arg, ";") {
+		return false
+	}
+	backslashes := 0
+	for i := len(arg) - 2; i >= 0 && arg[i] == '\\'; i-- {
+		backslashes++
+	}
+	return backslashes%2 == 0
 }
 
 func parseTmuxPrefix(args []string) (scoped bool, commandAt int, versionOnly bool, err error) {
