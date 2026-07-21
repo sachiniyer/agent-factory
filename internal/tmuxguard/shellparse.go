@@ -10,6 +10,7 @@ import (
 )
 
 var errUnsupportedShell = errors.New("unsupported shell construct")
+var errOpaqueStdin = errors.New("unmodeled here-document or stdin consumer")
 
 // parseShellCommands parses Bash syntax with a maintained parser, but resolves
 // only a deliberately small, literal subset. Dynamic words fail closed before
@@ -48,7 +49,7 @@ func parseShellCommands(command string) ([][]string, error) {
 			walkErr = errUnsupportedShell
 		case *syntax.Redirect:
 			if node.Op == syntax.Hdoc || node.Op == syntax.DashHdoc || node.Op == syntax.WordHdoc {
-				walkErr = errUnsupportedShell
+				walkErr = errOpaqueStdin
 			}
 		case *syntax.ArithmCmd, *syntax.CStyleLoop, *syntax.FuncDecl, *syntax.LetClause:
 			walkErr = errUnsupportedShell
