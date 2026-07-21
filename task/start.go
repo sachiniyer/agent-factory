@@ -116,13 +116,31 @@ func (t instanceTrustTarget) CheckAndHandleTrustPrompt() bool {
 // pane-poll instead of spinning to the timeout (see WaitForReady). A nil ctx is
 // treated as context.Background().
 func StartAndSendPrompt(ctx context.Context, instance *session.Instance, prompt string) error {
+	_, err := StartAndSendPromptWithConversationCapture(ctx, instance, prompt)
+	return err
+}
+
+// StartAndSendPromptWithConversationCapture is the daemon create path. It
+// separates provisioning from launch so a local backend can snapshot the exact
+// command-specific provider store after the final cwd exists in the model but
+// before the agent process can create a transcript there.
+func StartAndSendPromptWithConversationCapture(
+	ctx context.Context,
+	instance *session.Instance,
+	prompt string,
+) (session.ConversationCaptureSnapshot, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	if err := instance.Start(true); err != nil {
-		return err
+	plan, err := instance.PrepareCreateLaunch()
+	if err != nil {
+		return session.ConversationCaptureSnapshot{}, err
 	}
-	return WaitForReadyAndSendPrompt(ctx, instance, prompt)
+	capture := plan.ConversationCapture()
+	if err := instance.LaunchPreparedCreate(plan); err != nil {
+		return capture, err
+	}
+	return capture, WaitForReadyAndSendPrompt(ctx, instance, prompt)
 }
 
 // WaitForReadyAndSendPrompt is the post-launch half of StartAndSendPrompt. A
