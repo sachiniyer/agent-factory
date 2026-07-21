@@ -37,13 +37,17 @@ func (t *TmuxSession) preSubmitEchoBehavior() preSubmitEchoBehavior {
 	return t.preSubmitEcho
 }
 
-// notePreSubmitEchoObserved promotes an unknown/non-echoing capability only on
-// positive evidence. A missing tail can never demote it: absence is precisely
-// the ambiguous signal #2213 forbids us from treating as detection.
+// notePreSubmitEchoObserved promotes an UNKNOWN capability only on positive
+// evidence. A known non-echoing agent stays non-echoing even if unrelated pane
+// output happens to contain the same short tail (#2214 review). A missing tail
+// can never demote it: absence is precisely the ambiguous signal #2213 forbids
+// us from treating as detection.
 func (t *TmuxSession) notePreSubmitEchoObserved() {
 	t.programMu.Lock()
 	defer t.programMu.Unlock()
-	t.preSubmitEcho = preSubmitEchoes
+	if t.preSubmitEcho == preSubmitEchoUnknown {
+		t.preSubmitEcho = preSubmitEchoes
+	}
 }
 
 // setProgramCmd stores the pane's program command string under programMu.

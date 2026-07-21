@@ -56,6 +56,10 @@ type TmuxSession struct {
 	program       string
 	preSubmitEcho preSubmitEchoBehavior
 	programMu     sync.RWMutex
+	// submitMu serializes the whole clear → paste → Enter transaction. A second
+	// submit must never clear the first submit's freshly pasted composer while
+	// that first call is still waiting to send Enter (#2178 review).
+	submitMu sync.Mutex
 	// ptyFactory is used to create a PTY for the tmux session.
 	ptyFactory PtyFactory
 	// cmdExec is used to execute commands in the tmux session.

@@ -73,9 +73,9 @@ const (
 // delivery promotes that session to preSubmitEchoes.
 func knownPreSubmitEchoBehavior(command string) preSubmitEchoBehavior {
 	switch DetectAgentFromCommand(command) {
-	case ProgramClaude:
+	case ProgramClaude, ProgramAider:
 		// Claude visibly renders pasted composer input; #1982's positive-tail
-		// delivery guard depends on this behavior.
+		// delivery guard depends on this behavior. Aider does too (#2214 review).
 		return preSubmitEchoes
 	case ProgramCodex:
 		// Codex consumes successful pastes without rendering them before Enter
@@ -122,6 +122,8 @@ func pasteBufferName(processToken, sanitizedName string, seq uint64) string {
 // Every pane gets the bracketed paste — there is no per-agent exception list.
 // See sendKeysPasteBuffer for why that is both necessary and safe (#1956).
 func (t *TmuxSession) SendKeysCommand(text string) error {
+	t.submitMu.Lock()
+	defer t.submitMu.Unlock()
 	return t.sendKeysPasteBuffer(text)
 }
 
@@ -160,6 +162,21 @@ func (t *TmuxSession) sendKeysPasteBuffer(text string) error {
 
 	tail := deliveryTail(text)
 
+	// Load the payload BEFORE touching the live composer. A load failure means
+	// there is nothing we can deliver, so clearing first would destroy a user's
+	// draft and then return without replacing it (#2178 review). Streaming via
+	// stdin also avoids ARG_MAX for arbitrarily large prompts.
+	loadCtx, loadCancel := tmuxTimeoutContext()
+	err := runTmuxBoundedStdin(loadCtx, t.cmdExec, strings.NewReader(text), "load-buffer", "-b", buf, "-")
+	loadTimedOut := loadCtx.Err() != nil
+	loadCancel()
+	if err != nil {
+		if loadTimedOut {
+			return fmt.Errorf("%w: load-buffer after %s", ErrTmuxTimeout, tmuxCommandTimeout)
+		}
+		return fmt.Errorf("error loading paste buffer: %w", err)
+	}
+
 	// Clear any draft stranded in the composer BEFORE this paste (#2070/#1982
 	// half b). A prior send whose Enter never took leaves its full text sitting in
 	// the composer; without a clear, this paste appends to it and the receiver
@@ -183,7 +200,7 @@ func (t *TmuxSession) sendKeysPasteBuffer(text string) error {
 	// stall one extra bound before giving up. That is the price of the
 	// discarded-draft record; if it ever matters, the `before` capture is the
 	// droppable half (it feeds only the log, never the baseline).
-	before, _ := t.capturePaneForDelivery()
+	before, beforeOK := t.capturePaneForDelivery()
 	t.clearComposerDraft()
 	after, afterOK := t.capturePaneForDelivery()
 	noteClearedDraft(t.sanitizedName, before, after)
@@ -196,23 +213,16 @@ func (t *TmuxSession) sendKeysPasteBuffer(text string) error {
 	// identical tail still confirm — the clear removed that copy, so the tail
 	// genuinely re-appears.
 	baseline := 0
-	if tail != "" && afterOK {
-		baseline = strings.Count(normalizeDelivery(after), tail)
-	}
-
-	// load-buffer streams the prompt in on stdin, so it needs the stdin-carrying
-	// bounded runner rather than the shared one — and deliberately does NOT treat
-	// exec.ErrWaitDelay as success, because a force-closed stdin pipe means the
-	// payload may be truncated. See runTmuxBoundedStdin.
-	loadCtx, loadCancel := tmuxTimeoutContext()
-	err := runTmuxBoundedStdin(loadCtx, t.cmdExec, strings.NewReader(text), "load-buffer", "-b", buf, "-")
-	loadTimedOut := loadCtx.Err() != nil
-	loadCancel()
-	if err != nil {
-		if loadTimedOut {
-			return fmt.Errorf("%w: load-buffer after %s", ErrTmuxTimeout, tmuxCommandTimeout)
+	if tail != "" {
+		switch {
+		case afterOK:
+			baseline = strings.Count(normalizeDelivery(after), tail)
+		case beforeOK:
+			// A failed post-clear capture must not erase the usable pre-clear
+			// baseline. Reusing it is conservative: content the clear removed can
+			// only make confirmation harder, never create a false success.
+			baseline = strings.Count(normalizeDelivery(before), tail)
 		}
-		return fmt.Errorf("error loading paste buffer: %w", err)
 	}
 
 	// `-d` deletes the buffer after pasting, `-p` brackets it (see the doc
@@ -480,13 +490,13 @@ func (t *TmuxSession) waitForPasteDelivered(
 	if len([]rune(tail)) < minDistinctiveTail {
 		needed = 2
 	}
-	lastCaptureOK := false
+	sawAbsentCapture := false
 	for {
 		// If the prior capture succeeded and the following poll interval carried
 		// us across the deadline, that prior read is the terminal observation. Do
 		// not launch an already-expired capture just to turn success into unknown.
 		if time.Until(deadline) <= 0 {
-			if lastCaptureOK && t.preSubmitEchoBehavior() == preSubmitEchoes {
+			if sawAbsentCapture && t.preSubmitEchoBehavior() == preSubmitEchoes {
 				return deliveryObservedAbsent
 			}
 			return deliveryCouldNotObserve
@@ -495,7 +505,6 @@ func (t *TmuxSession) waitForPasteDelivered(
 		// Bound each capture by what is LEFT of this loop's budget, so a wedged
 		// server cannot push a single capture past the deadline below (#2099).
 		if content, ok := t.capturePaneForDeliveryWithin(time.Until(deadline)); ok {
-			lastCaptureOK = true
 			if strings.Count(normalizeDelivery(content), tail) > baseline {
 				streak++
 				if streak >= needed {
@@ -504,15 +513,14 @@ func (t *TmuxSession) waitForPasteDelivered(
 				}
 			} else {
 				streak = 0
+				sawAbsentCapture = true
 			}
-		} else {
-			lastCaptureOK = false
 		}
 		if time.Now().After(deadline) {
-			// A failed final capture is "could not look", even if an earlier poll
-			// succeeded. Likewise, missing text in an agent not known to echo says
-			// nothing about whether the paste landed. Neither is an ERROR (#2213).
-			if !lastCaptureOK || t.preSubmitEchoBehavior() != preSubmitEchoes {
+			// A final failed capture must not erase earlier successful observations
+			// of absence (#2214 review). Missing text in an agent not known to echo
+			// still says nothing about whether the paste landed (#2213).
+			if !sawAbsentCapture || t.preSubmitEchoBehavior() != preSubmitEchoes {
 				return deliveryCouldNotObserve
 			}
 			return deliveryObservedAbsent
