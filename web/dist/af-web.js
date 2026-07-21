@@ -11854,6 +11854,11 @@ function openFromRail(id) {
   focusTerminal();
 }
 function focusTerminal() {
+  const selected = selectedSessionData();
+  if (!selected || !isActionableSession(selected)) {
+    focusRail();
+    return;
+  }
   if (!splitView.focus()) {
     focusRail();
     return;
@@ -12346,14 +12351,16 @@ function syncSplit(state) {
   const tok = token;
   const initialTab = clampActiveTab(state.sessions, selId, state.activeTab);
   const selected = selId ? state.sessions.find((s) => s.id === selId) : null;
-  const tabIds = selected ? sessionTabs(selected).map(tabIdentity) : ["0:"];
-  const tabRealIds = selected ? sessionTabs(selected).map(tabRealId) : [""];
-  const tabTargets = selected ? sessionTabs(selected).map((t) => t.url) : [];
-  const tabKinds = selected ? sessionTabs(selected).map((t) => t.kind) : [];
-  const tabNames = selected ? sessionTabs(selected).map((t) => t.name) : [];
-  const archived = selected ? isArchived(selected) : false;
+  const runtimeSelected = selected && isActionableSession(selected) ? selected : null;
+  const runtimeSessionId = runtimeSelected ? selId : null;
+  const tabIds = runtimeSelected ? sessionTabs(runtimeSelected).map(tabIdentity) : ["0:"];
+  const tabRealIds = runtimeSelected ? sessionTabs(runtimeSelected).map(tabRealId) : [""];
+  const tabTargets = runtimeSelected ? sessionTabs(runtimeSelected).map((t) => t.url) : [];
+  const tabKinds = runtimeSelected ? sessionTabs(runtimeSelected).map((t) => t.kind) : [];
+  const tabNames = runtimeSelected ? sessionTabs(runtimeSelected).map((t) => t.name) : [];
+  const archived = runtimeSelected ? isArchived(runtimeSelected) : false;
   splitView.setSession(
-    tok !== null ? selId : null,
+    tok !== null ? runtimeSessionId : null,
     tok,
     tabIds,
     initialTab,
@@ -12448,8 +12455,9 @@ function onKeydown(e) {
   if (!inTerminal && e.key !== "Escape" && isNativeControl(target)) {
     return;
   }
-  const focus = state.selectedId && state.view === "sessions" ? state.focus : "rail";
   const selected = selectedSessionData();
+  const actionableSelected = selected && isActionableSession(selected) ? selected : null;
+  const focus = state.selectedId && actionableSelected && state.view === "sessions" ? state.focus : "rail";
   const action = decideKey(
     e.key,
     {
@@ -12465,11 +12473,11 @@ function onKeydown(e) {
       orderedIds: filterSessions(
         orderedSessions(scopeToProject(state.sessions, state.selectedProject)),
         state.statusFilter
-      ).filter((s) => !isCreating(s)).map((s) => s.id ?? "").filter((id) => id !== ""),
-      selectedId: state.selectedId,
-      tabCount: selected ? sessionTabs(selected).length : 1,
+      ).filter(isActionableSession).map((s) => s.id),
+      selectedId: actionableSelected ? state.selectedId : null,
+      tabCount: actionableSelected ? sessionTabs(actionableSelected).length : 1,
       activeTab: state.activeTab,
-      tabManagement: selected ? canManageTabs(selected) : false
+      tabManagement: actionableSelected ? canManageTabs(actionableSelected) : false
     },
     { alt: e.altKey }
   );

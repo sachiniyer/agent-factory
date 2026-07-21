@@ -59,7 +59,7 @@ import {
   upsertSession,
 } from "./sessions.js";
 import { SplitView } from "./split.js";
-import { isArchived, isCreating, type RowKind } from "./status.js";
+import { isArchived, type RowKind } from "./status.js";
 import { isRenameableTab } from "./tablabel.js";
 import { Store } from "./store.js";
 import { registerServiceWorker } from "./serviceworker.js";
@@ -69,6 +69,7 @@ import type { ProgramCatalog } from "./programs.js";
 import type { TerminalStatus } from "./terminal.js";
 import {
   AppShell,
+  isActionableSession,
   orderedSessions,
   renderLogin,
   sessionTabs,
@@ -424,6 +425,15 @@ function openFromRail(id: string): void {
  *  there, and a cross-origin iframe's focus is not reliably observable anyway.
  *  switchTab already sets focus:"rail" for exactly this reason. */
 function focusTerminal(): void {
+  const selected = selectedSessionData();
+  if (!selected || !isActionableSession(selected)) {
+    // A kill-only startup-unknown row has a stable management target but no
+    // confirmed runtime binding. Keep every caller behind the same daemon-owned
+    // lifecycle fence as row clicks; focusing whatever SplitView happens to
+    // retain would turn an explicit teardown capability into attach authority.
+    focusRail();
+    return;
+  }
   if (!splitView.focus()) {
     focusRail();
     return;
@@ -1335,32 +1345,39 @@ function syncSplit(state: AppState): void {
   // stale index can never bind a pane to a tab that doesn't exist.
   const initialTab = clampActiveTab(state.sessions, selId, state.activeTab);
   const selected = selId ? state.sessions.find((s) => s.id === selId) : null;
+  // Selection is presentation state; it is not proof that a runtime may be
+  // entered. Startup-unknown rows remain selectable as durable cleanup records,
+  // so bind SplitView only when the daemon also projected a lifecycle capability.
+  // This is the stream-side choke point complement to focusTerminal's keyboard
+  // fence: neither merely selecting nor attaching can reuse an uncertain binding.
+  const runtimeSelected = selected && isActionableSession(selected) ? selected : null;
+  const runtimeSessionId = runtimeSelected ? selId : null;
   // The ordered tab identities, so the split view can (a) know the live tab count and
   // (b) reject a drop whose drag-time snapshot no longer matches (a mid-drag reorder).
-  const tabIds = selected ? sessionTabs(selected).map(tabIdentity) : ["0:"];
+  const tabIds = runtimeSelected ? sessionTabs(runtimeSelected).map(tabIdentity) : ["0:"];
   // The REAL daemon ids ("" where a tab has none), parallel to tabIds. The split view
   // needs BOTH: tabIds is its local identity/change-detection key (always non-empty,
   // synthesized when needed), while these are the only values it may send as a
   // ?tab_id= or trust as collision-proof (#1779).
-  const tabRealIds = selected ? sessionTabs(selected).map(tabRealId) : [""];
+  const tabRealIds = runtimeSelected ? sessionTabs(runtimeSelected).map(tabRealId) : [""];
   // The per-tab iframe target for web tabs (undefined for terminal tabs), parallel
   // to tabIds, so the split view can iframe a web leaf.
-  const tabTargets = selected ? sessionTabs(selected).map((t) => t.url) : [];
+  const tabTargets = runtimeSelected ? sessionTabs(runtimeSelected).map((t) => t.url) : [];
   // The kind of each tab, parallel to tabIds — the split view reads it to tell a web
   // tab from a terminal one now that the identity is the opaque stable id (#1738).
-  const tabKinds = selected ? sessionTabs(selected).map((t) => t.kind) : [];
+  const tabKinds = runtimeSelected ? sessionTabs(runtimeSelected).map((t) => t.kind) : [];
   // Each tab's NAME, parallel to tabIds — what the pane headers render, with the kind,
   // through the same tablabel.ts derivation the tab bar uses (#1813). Before this the
   // panes had no name to render and drew a positional "Tab N" instead.
-  const tabNames = selected ? sessionTabs(selected).map((t) => t.name) : [];
+  const tabNames = runtimeSelected ? sessionTabs(runtimeSelected).map((t) => t.name) : [];
   // Whether the shown session is archived (#1809 follow-up): an archived session's
   // preserved web tabs render an inert placeholder rather than a live frame, and the
   // flip re-renders them on archive/restore even when the tab list is unchanged.
-  const archived = selected ? isArchived(selected) : false;
+  const archived = runtimeSelected ? isArchived(runtimeSelected) : false;
   // `tok !== null` not `tok`: "" is the authorized-tokenless credential (#1696), so a
   // loopback client still attaches its live panes.
   splitView.setSession(
-    tok !== null ? selId : null,
+    tok !== null ? runtimeSessionId : null,
     tok,
     tabIds,
     initialTab,
@@ -1524,9 +1541,11 @@ function onKeydown(e: KeyboardEvent): void {
   // to the projects/tasks view (which hides the panes) must not leave the stored focus
   // stale, so we never honor terminal mode without a live, visible pane. The pure state
   // machine (nav.ts) decides the rest; index.ts only performs the effect.
-  const focus: KeyboardFocus = state.selectedId && state.view === "sessions" ? state.focus : "rail";
-  // The selected session's tab shape drives the nav-mode tab keys (1-9 / t / w).
   const selected = selectedSessionData();
+  const actionableSelected = selected && isActionableSession(selected) ? selected : null;
+  const focus: KeyboardFocus =
+    state.selectedId && actionableSelected && state.view === "sessions" ? state.focus : "rail";
+  // The selected session's tab shape drives the nav-mode tab keys (1-9 / t / w).
   const action = decideKey(
     e.key,
     {
@@ -1543,16 +1562,16 @@ function onKeydown(e: KeyboardEvent): void {
         orderedSessions(scopeToProject(state.sessions, state.selectedProject)),
         state.statusFilter,
       )
-        // Creating rows are visible daemon state but not selectable: no terminal
-        // exists until CreateSession resolves, and success owns the one atomic
-        // upsert+selection that opens it attached.
-        .filter((s) => !isCreating(s))
-        .map((s) => s.id ?? "")
-        .filter((id) => id !== ""),
-      selectedId: state.selectedId,
-      tabCount: selected ? sessionTabs(selected).length : 1,
+        // Keyboard selection is a runtime-entry path: walk only rows carrying the
+        // daemon's lifecycle capability, exactly like pointer-open. A kill-only
+        // startup-unknown row remains visible/removable but cannot become a pane
+        // target through j/k.
+        .filter(isActionableSession)
+        .map((s) => s.id),
+      selectedId: actionableSelected ? state.selectedId : null,
+      tabCount: actionableSelected ? sessionTabs(actionableSelected).length : 1,
       activeTab: state.activeTab,
-      tabManagement: selected ? canManageTabs(selected) : false,
+      tabManagement: actionableSelected ? canManageTabs(actionableSelected) : false,
     },
     { alt: e.altKey },
   );

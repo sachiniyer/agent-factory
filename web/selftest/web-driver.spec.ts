@@ -932,6 +932,19 @@ test("#2234: creating and id-less rows expose no lifecycle actions; the shared p
   await expect(railAction(p, "probe-startup-unknown", "Archive session")).toHaveCount(0);
   await expect(railAction(p, "probe-startup-unknown", "Restore session")).toHaveCount(0);
 
+  // Keyboard navigation must apply the same runtime-entry fence as row clicks.
+  // Walk the entire visible rail in both directions: a kill-only retained row may
+  // own its explicit Kill button, but j/k must never make it the terminal target.
+  const visibleRows = await p.locator(".af-rail .af-row").count();
+  let uncertainSelected = false;
+  for (const key of ["j", "k"]) {
+    for (let i = 0; i <= visibleRows; i += 1) {
+      await p.keyboard.press(key);
+      uncertainSelected ||= (await uncertain.getAttribute("aria-selected")) === "true";
+    }
+  }
+  expect(uncertainSelected).toBe(false);
+
   // The same server-owned value selects Archive vs Restore, and every accessible
   // name carries its target now that unselected rows can own controls.
   await expect(railAction(p, "probe-actionable", "Archive session")).toHaveCount(1);
