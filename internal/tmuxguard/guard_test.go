@@ -174,6 +174,7 @@ func TestDenialReason(t *testing.T) {
 		{name: "init PID kill", command: `kill -- 1`, wantReason: unknownShellReason},
 		{name: "export", command: `export FOO=bar`, wantReason: unknownShellReason},
 		{name: "scoped home export", command: `export AGENT_FACTORY_HOME="$scratch"`},
+		{name: "scoped home export reaches dispatcher", command: `export AGENT_FACTORY_HOME="$scratch"; af status`, wantReason: unknownShellReason},
 		{name: "command substitution in scoped home export", command: `export AGENT_FACTORY_HOME="$(tmux kill-server)"`, wantReason: broadTmuxReason},
 		{name: "hash command alias", command: `hash -p /usr/bin/tmux safe`, wantReason: unknownShellReason},
 		{name: "tmux shell option", command: `tmux -c 'tmux kill-server'`, wantReason: unknownShellReason},

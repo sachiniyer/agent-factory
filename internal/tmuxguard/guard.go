@@ -104,27 +104,27 @@ func denialReason(command string, depth int) string {
 			return reason
 		}
 	}
-	if assignmentStateReachesCommand(commands) {
+	if shellStateReachesCommand(commands) {
 		return unknownShellReason
 	}
 	return ""
 }
 
-func assignmentStateReachesCommand(commands []shellCommand) bool {
-	hasAssignmentOnly := false
+func shellStateReachesCommand(commands []shellCommand) bool {
+	hasEnvironmentState := false
 	hasExecutable := false
 	for _, command := range commands {
-		if len(command.words) == 0 && len(command.assignments) > 0 {
-			hasAssignmentOnly = true
+		if (len(command.words) == 0 && len(command.assignments) > 0) || command.declaration != nil {
+			hasEnvironmentState = true
 		}
-		if len(command.words) > 0 || command.declaration != nil {
+		if len(command.words) > 0 {
 			hasExecutable = true
 		}
 	}
 	// A prior assignment may retain an inherited export attribute (PATH is
 	// the obvious example), so a semicolon cannot turn a denied prefix into an
-	// allow. Assignment-only input remains harmless because it runs no program.
-	return hasAssignmentOnly && hasExecutable
+	// allow. State-only input remains harmless because it runs no program.
+	return hasEnvironmentState && hasExecutable
 }
 
 func inspectCommand(command shellCommand, depth int) string {
