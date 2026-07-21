@@ -67,6 +67,10 @@
   --af-shadow-2: 0 4px 10px rgba(16, 24, 40, 0.08), 0 2px 4px rgba(16, 24, 40, 0.06);
   --af-shadow-overlay: 0 16px 48px rgba(16, 24, 40, 0.22), 0 4px 12px rgba(16, 24, 40, 0.12);
   --af-backdrop: rgba(23, 32, 46, 0.42);
+  --af-z-drawer: 30;
+  --af-z-appbar: 40;
+  --af-z-popover: 60;
+  --af-z-modal: 100;
 }
 @media (prefers-color-scheme: dark) {
   :root {
@@ -1458,7 +1462,7 @@ body {
 }
 .af-modal-host {
   position: relative;
-  z-index: 20;
+  z-index: var(--af-z-modal);
 }
 .af-modal-backdrop {
   position: fixed;
@@ -1468,7 +1472,7 @@ body {
   align-items: center;
   justify-content: center;
   padding: var(--af-sp-5);
-  z-index: 20;
+  z-index: var(--af-z-modal);
 }
 .af-modal-card {
   width: 100%;
@@ -1788,10 +1792,10 @@ body {
 @media (max-width: 768px) {
   .af-appbar {
     position: relative;
-    z-index: 40;
+    z-index: var(--af-z-appbar);
     display: grid;
     grid-template-columns: auto minmax(0, 1fr) auto;
-    grid-template-areas: "nav project tools" "views views views";
+    grid-template-areas: "nav views views" "project project tools";
     align-items: center;
     gap: var(--af-sp-2);
     padding: max(var(--af-sp-2), env(safe-area-inset-top)) max(var(--af-sp-2), env(safe-area-inset-right)) var(--af-sp-2) max(var(--af-sp-2), env(safe-area-inset-left));
@@ -1807,7 +1811,7 @@ body {
     top: 0;
     left: 0;
     bottom: 0;
-    z-index: 30;
+    z-index: var(--af-z-drawer);
     width: min(85vw, 20rem);
     flex: none;
     transform: translateX(-100%);
@@ -1824,7 +1828,7 @@ body {
     display: block;
     position: absolute;
     inset: 0;
-    z-index: 29;
+    z-index: calc(var(--af-z-drawer) - 1);
     background: var(--af-backdrop);
     opacity: 0;
     pointer-events: none;
@@ -1859,17 +1863,20 @@ body {
     max-width: none;
     max-height: calc(100dvh - 7rem);
     overflow-y: auto;
-    z-index: 60;
+    z-index: var(--af-z-popover);
   }
   .af-viewnav {
     grid-area: views;
     width: 100%;
     margin-left: 0;
+    padding: 0;
+    border: 0;
+    box-shadow: inset 0 0 0 1px var(--af-border-subtle);
   }
-  .af-viewtab {
+  .af-appbar .af-viewtab {
     flex: 1 1 0;
     min-width: 0;
-    min-height: 2.5rem;
+    min-height: 2.75rem;
     padding-inline: var(--af-sp-2);
   }
   .af-appbar-tools-wrap {
@@ -1885,7 +1892,7 @@ body {
     position: absolute;
     top: calc(100% + 6px);
     right: 0;
-    z-index: 60;
+    z-index: var(--af-z-popover);
     width: min(17rem, calc(100vw - var(--af-sp-2) - var(--af-sp-2)));
     max-height: calc(100dvh - 4rem);
     overflow-y: auto;

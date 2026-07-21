@@ -278,12 +278,12 @@ Tasks view to the selected project), a **Live** pip showing the daemon
 event-stream state (`Live` / `Connecting…` / `Reconnecting…`), and
 **Disconnect**.
 
-On a phone, width is assigned by function rather than desktop order: the first row
-keeps the session-drawer toggle, the current **project**, and one **More** button;
-the view tabs share an aligned row below. Long project names end in an ellipsis but
-keep the largest flexible slot. The decorative brand disappears, while Live status,
-install, theme, and Disconnect remain available as comfortable touch targets inside
-**More** instead of being squeezed or removed.
+On a phone, width is assigned by function rather than desktop shrink behavior: the
+session-drawer toggle and view tabs share one aligned row in their keyboard order;
+the current **project** gets the wide slot on the next row beside one **More** button.
+Long project names end in an ellipsis. The decorative brand disappears, while Live
+status, install, theme, and Disconnect remain available as comfortable touch targets
+inside **More** instead of being squeezed or removed.
 
 ### Sessions view
 
