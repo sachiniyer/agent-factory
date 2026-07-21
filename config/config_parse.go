@@ -175,6 +175,11 @@ func validateConfig(config *Config, prettyConfigPath string) (*Config, error) {
 		return nil, fmt.Errorf("Config issue in %s: session_env_passthrough: %w", prettyConfigPath, err)
 	}
 	config.SessionEnvPassthrough = normalizedSessionEnv
+	for idx, image := range config.DockerEnvTrustedImages {
+		if !isImmutableDockerImageReference(image) {
+			return nil, fmt.Errorf("Config issue in %s: docker_env_trusted_images entry %d must be an exact immutable image@sha256:<64 lowercase hexadecimal digits> reference", prettyConfigPath, idx+1)
+		}
+	}
 
 	sanitizeLimitPatterns(config)
 	sanitizeThemeColors(config, prettyConfigPath)

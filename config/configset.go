@@ -75,14 +75,17 @@ type settableKeySpec struct {
 //   - theme — a color table (see ThemeConfig); setting one slot at a time through
 //     the CLI is not how anyone edits a palette.
 //   - keys — array-capable rebinds (an action may map to a list of keys).
-//   - cors_allowed_origins — a LIST of origins, and the only excluded key that is
-//     otherwise scalar-ish. It needs real design first, not a spec entry: this
+//   - cors_allowed_origins and docker_env_trusted_images — LISTS, and the only
+//     excluded keys that are otherwise scalar-ish. They need real design first,
+//     not spec entries: this
 //     file's machinery is scalar-only end to end (cfgValueKind has no list kind,
 //     canonicalizeScalar returns one encoded scalar, setTOMLScalar writes one
 //     `key = value` line), and a list also needs a decided WRITE SEMANTIC —
 //     whether `set` replaces the whole list, appends to it, or gets add/remove
 //     verbs — which is a CLI contract choice, not an implementation detail.
-//     Deferred rather than guessed.
+//     Deferred rather than guessed. Docker image trust is additionally kept
+//     hand-edited so granting a credential boundary is never a one-line command
+//     that obscures the exact digest being authorized.
 var settableKeySpecs = map[string]settableKeySpec{
 	"default_program": {kind: cfgString, validate: func(_, v string) error {
 		return ValidateProgramEnum("default_program", "default_program", v, "")

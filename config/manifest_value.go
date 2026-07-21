@@ -191,8 +191,9 @@ func ManifestWithValues(cfg *Config) []ConfigEntry {
 //     bare key is NOT settable, but its leaves are — so the honest hint names
 //     the command that works, rather than sending someone to a text editor for
 //     something af can do for them.
-//   - A structural key (theme, root_agents, keys, cors_allowed_origins) is
-//     hand-edited by design. There is no command; say so.
+//   - A structural key (theme, root_agents, keys, cors_allowed_origins,
+//     docker_env_trusted_images) is hand-edited by design. There is no command;
+//     say so.
 func editability(e ManifestEntry) (editable bool, hint string) {
 	if !e.Settable {
 		return false, "hand-edited in config.toml"

@@ -148,6 +148,12 @@ type Config struct {
 	// daemon's environment. Values are looked up only when a session starts and
 	// are never written to config, argv, or logs.
 	SessionEnvPassthrough []string `json:"session_env_passthrough,omitempty" toml:"session_env_passthrough,omitempty"`
+	// DockerEnvTrustedImages is the host-owned allowlist of immutable container
+	// image references permitted to receive values from the daemon's environment.
+	// Entries must be exact image@sha256:digest strings; mutable tags never grant
+	// trust. Deliberately global-only: a cloned repository chooses docker.image,
+	// but it must never be able to authorize that image to receive credentials.
+	DockerEnvTrustedImages []string `json:"-" toml:"docker_env_trusted_images,omitempty"`
 	// AutoUpdate controls the startup self-update check. It defaults to true:
 	// af checks the configured release channel on launch and applies newer
 	// releases automatically. Set false to opt out on this machine.

@@ -50,6 +50,41 @@ func SupportedBackendsString() string {
 	return strings.Join(SupportedBackends, ", ")
 }
 
+// IsDockerEnvironmentImageTrusted reports whether image is an exact immutable
+// reference explicitly granted access to host environment values. Both
+// conditions matter: an allowlisted mutable tag can change underneath a grant,
+// while an immutable image not named by the host owner was still selected by
+// checked-in repository config. The deliberately narrow sha256 spelling keeps
+// this decision independent of Docker's evolving shorthand parser.
+func IsDockerEnvironmentImageTrusted(image string, trusted []string) bool {
+	if !isImmutableDockerImageReference(image) {
+		return false
+	}
+	for _, allowed := range trusted {
+		if allowed == image {
+			return true
+		}
+	}
+	return false
+}
+
+func isImmutableDockerImageReference(image string) bool {
+	const marker = "@sha256:"
+	if image == "" || strings.TrimSpace(image) != image || strings.Count(image, marker) != 1 {
+		return false
+	}
+	parts := strings.SplitN(image, marker, 2)
+	if parts[0] == "" || strings.Contains(parts[0], "@") || len(parts[1]) != 64 {
+		return false
+	}
+	for _, char := range parts[1] {
+		if (char < '0' || char > '9') && (char < 'a' || char > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
 // DockerConfig parameterizes the docker runtime (#1592 Phase 4 PR3 config
 // surface; the runtime that consumes it lands in PR4). A session with
 // `backend = "docker"` runs its workspace + agent in a container started from

@@ -397,6 +397,18 @@ var configManifest = []ManifestEntry{
 		Formats:    formatTOMLJSON,
 	},
 	{
+		Key:        "docker_env_trusted_images",
+		Type:       "list",
+		Default:    "none",
+		Purpose:    "Immutable container image digests allowed to receive values from the daemon's environment · empty keeps every Docker image outside that credential boundary.",
+		Tier:       TierAdvanced,
+		Settable:   false,
+		Sources:    sourceGlobalOnly,
+		Precedence: precedenceGlobal,
+		Merge:      MergeListReplace,
+		Formats:    formatTOMLOnly,
+	},
+	{
 		Key:        "keys",
 		Type:       "table",
 		Default:    "none · the built-in bindings are used",

@@ -459,7 +459,7 @@ func TestRenderBriefingTellsAgentHowToSet(t *testing.T) {
 	}
 
 	// The structural tables must not be advertised as settable.
-	for _, key := range []string{"theme", "root_agents", "keys", "cors_allowed_origins"} {
+	for _, key := range []string{"theme", "root_agents", "keys", "cors_allowed_origins", "docker_env_trusted_images"} {
 		if strings.Contains(out, "`af config set "+key+" <value>`") {
 			t.Errorf("briefing advertises `af config set %s`, which the CLI rejects — %s is hand-edited", key, key)
 		}

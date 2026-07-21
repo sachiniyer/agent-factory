@@ -494,13 +494,14 @@ func TestSetGlobalConfigValueRejectsInvalidNewKeys(t *testing.T) {
 // TestSetGlobalConfigValueStillRejectsStructuralKeys locks the deliberate
 // exclusions in place. Widening the allowlist must not have made the
 // structural tables settable by accident: root_agents, [theme] and the [keys]
-// rebinds have no scalar shape, and cors_allowed_origins is a list whose write
-// semantics (replace? append?) are an undecided CLI contract. The manifest marks
-// all four Settable: false, and TestManifestAgreesWithSettableKeys ties that
+// rebinds have no scalar shape, and cors_allowed_origins and
+// docker_env_trusted_images are lists whose write semantics (replace? append?)
+// are an undecided CLI contract. The manifest marks them Settable: false, and
+// TestManifestAgreesWithSettableKeys ties that
 // claim to this rejection.
 func TestSetGlobalConfigValueStillRejectsStructuralKeys(t *testing.T) {
 	writeTempConfig(t, "default_program = 'claude'\n")
-	for _, key := range []string{"theme", "root_agents", "keys", "cors_allowed_origins", "schema_version"} {
+	for _, key := range []string{"theme", "root_agents", "keys", "cors_allowed_origins", "docker_env_trusted_images", "schema_version"} {
 		if _, err := SetGlobalConfigValue(key, "x"); err == nil {
 			t.Errorf("`af config set %s` must be rejected — it is not a settable scalar key", key)
 		}
