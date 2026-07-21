@@ -1238,6 +1238,20 @@ body {
   font-size: var(--af-fs-xs);
 }
 
+/* The pane owns management controls only while the selected rail row is filtered
+ * out (#2188). This is one compact fixed-width group beside the scrolling tab bar;
+ * the buttons themselves come from the rail's shared capability-narrowed builder. */
+.af-term-actions {
+  display: flex;
+  align-items: center;
+  flex: 0 0 auto;
+  gap: 0.3rem;
+}
+
+.af-term-kill:hover {
+  color: var(--af-danger);
+}
+
 /* The usage-limit Retry action (#1934) is shown by toggling `hidden`, so pin the
  * hidden case as an AUTHOR rule rather than relying on the UA `[hidden]` default.
  * Nothing outranks it today — neither .af-term-action nor .af-ghost sets `display`
@@ -1247,6 +1261,10 @@ body {
  * exact hazard three times (.af-install[hidden], .af-webpane-*[hidden],
  * .af-viewport > [hidden]); one rule now makes the fourth impossible. */
 .af-term-action[hidden] {
+  display: none;
+}
+
+.af-term-actions[hidden] {
   display: none;
 }
 

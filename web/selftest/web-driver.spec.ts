@@ -3047,6 +3047,59 @@ test("filter (feat): the default hides ONLY archived, and each state's box hides
   await ctx.close();
 });
 
+test("#2188: a filtered selected session keeps one visible management surface", async ({ browser }) => {
+  // Use a separate context because the filter is persisted, but a REAL session: the
+  // invariant matters precisely while its terminal keeps streaming. Hiding every
+  // live state makes the final absence deterministic even if the agent transitions
+  // Ready↔Working while the check is in flight.
+  const title = SESSION_A;
+  const ctx = await browser.newContext();
+  try {
+    const p = await ctx.newPage();
+    await p.goto("/");
+    await expect(p.locator(".af-app")).toBeVisible();
+
+    await expect(row(p, title)).toBeVisible({ timeout: 15_000 });
+    await row(p, title).click();
+    await expect(p.locator(".af-term-title")).toHaveText(title);
+    await expect(p.locator(".af-main.af-main-term .xterm")).toBeVisible();
+
+    // While the selected row is visible, its rail controls are the one action
+    // surface; the pane header must not duplicate them.
+    await expect(railAction(p, title, "Archive session")).toBeVisible();
+    await expect(railAction(p, title, "Kill session")).toBeVisible();
+    await expect(p.locator(".af-term-actions")).toBeHidden();
+
+    // Hide every non-archived state. Selection and the terminal pane intentionally
+    // survive this display filter, so management must move with them instead of
+    // disappearing with the row.
+    for (const kind of ["working", "ready", "lost", "dead", "limit"]) {
+      await setFilter(p, kind, false);
+    }
+    await expect(row(p, title)).toHaveCount(0);
+    await expect(p.locator(".af-term-title")).toHaveText(title);
+    await expect(p.locator(".af-main.af-main-term .xterm")).toBeVisible();
+    const headActions = p.locator(".af-term-actions");
+    await expect(headActions).toBeVisible();
+    await expect(headActions.getByRole("button", { name: `Archive session “${title}”`, exact: true })).toBeVisible();
+    await expect(headActions.getByRole("button", { name: `Kill session “${title}”`, exact: true })).toBeVisible();
+
+    // The fallback is the same action path, not decorative recovery copy: both
+    // buttons open the existing target-qualified confirmations. Cancelling keeps the
+    // seeded fixture unchanged for every later flow.
+    const modal = p.locator(".af-modal-card");
+    await headActions.getByRole("button", { name: `Archive session “${title}”`, exact: true }).click();
+    await expect(modal).toContainText(`Archive ${title}?`);
+    await modal.getByRole("button", { name: "Cancel", exact: true }).click();
+    await expect(modal).toBeHidden();
+    await headActions.getByRole("button", { name: `Kill session “${title}”`, exact: true }).click();
+    await expect(modal).toContainText(`Kill ${title}?`);
+    await modal.getByRole("button", { name: "Cancel", exact: true }).click();
+  } finally {
+    await ctx.close();
+  }
+});
+
 test("filter (feat): keyboard nav walks the VISIBLE rows — j never lands on a hidden one", async () => {
   // The rail's j/k order must be the rows on screen. If nav still walked the archived
   // rows the rail hides, j would select something invisible: the pane would swap to a

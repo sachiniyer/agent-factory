@@ -981,7 +981,19 @@ body {
   padding: 0.3rem 0.6rem;
   font-size: var(--af-fs-xs);
 }
+.af-term-actions {
+  display: flex;
+  align-items: center;
+  flex: 0 0 auto;
+  gap: 0.3rem;
+}
+.af-term-kill:hover {
+  color: var(--af-danger);
+}
 .af-term-action[hidden] {
+  display: none;
+}
+.af-term-actions[hidden] {
   display: none;
 }
 .af-term-title {
