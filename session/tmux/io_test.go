@@ -69,3 +69,31 @@ func TestTapDAndEnterReturnsErrSessionGoneWhenSessionMissing(t *testing.T) {
 	_, err := recordTapCommands(t, false, (*TmuxSession).TapDAndEnter)
 	require.ErrorIs(t, err, ErrSessionGone)
 }
+
+func TestReadPaneCursorStateCarriesVisibilityWithoutChangingTerminalModes(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		wire    string
+		visible bool
+	}{
+		{name: "visible", wire: "7 11 1", visible: true},
+		{name: "hidden", wire: "7 11 0", visible: false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			var requestedFormat string
+			cmdExec := cmd_test.MockCmdExec{
+				OutputFunc: func(c *exec.Cmd) ([]byte, error) {
+					requestedFormat = c.Args[len(c.Args)-1]
+					return []byte(tt.wire), nil
+				},
+			}
+			session := newTmuxSession("af_cursor", ProgramClaude, NewMockPtyFactory(t), cmdExec)
+
+			state, err := session.readPaneCursorState()
+			require.NoError(t, err)
+			require.Equal(t, paneCursorState{Row: 7, Col: 11, Visible: tt.visible}, state)
+			require.Equal(t, paneCursorStateFormat, requestedFormat,
+				"cursor visibility must ride its own focused query, not alter terminalStateFormat")
+		})
+	}
+}

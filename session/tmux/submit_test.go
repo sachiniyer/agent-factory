@@ -219,6 +219,113 @@ func TestClearNeverSendsEscapeTheInterruptKey(t *testing.T) {
 	}
 }
 
+func TestClearedComposerNoticeRequiresObservableRemovedContent(t *testing.T) {
+	tests := []struct {
+		name              string
+		previousPasteTail string
+		before            composerClearObservation
+		after             composerClearObservation
+	}{
+		{
+			name:              "empty prompt redraw",
+			previousPasteTail: newDeliveryProbe("previous delivery content").completion,
+			before:            observedComposerPane("completed response\n❯\n────────────────────────────────", 1, 2, true),
+			after:             observedComposerPane("completed response\n\n────────────────────────────────", 1, 1, true),
+		},
+		{
+			name:              "content disappears during an unrelated redraw",
+			previousPasteTail: newDeliveryProbe("different previous delivery").completion,
+			before:            observedComposerPane("status: working\n❯ pending-looking-text\nfooter stable", 1, 22, true),
+			after:             observedComposerPane("status: done\n❯\nfooter stable", 1, 1, true),
+		},
+		{
+			name: "empty prompt glyph changes while footer disappears",
+			// Deliberately make the footer equal the previous paste tail: matching
+			// across flattened rows would manufacture a composer removal.
+			previousPasteTail: newDeliveryProbe("status: working").completion,
+			before:            observedComposerPane("history\n❯ ◉\nstatus: working", 1, 3, true),
+			after:             observedComposerPane("history\n❯", 1, 1, true),
+		},
+		{
+			name:              "glyph-prefixed status text disappears",
+			previousPasteTail: newDeliveryProbe("thinking").completion,
+			before:            observedComposerPane("done\n⠋ thinking", 1, 10, true),
+			after:             observedComposerPane("done\n⠋", 1, 1, true),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			errors := captureErrorLog(t)
+			noteClearedComposerContent("af_proj", tt.previousPasteTail, tt.before, tt.after)
+			require.Empty(t, errors.String(),
+				"pane redraws without previous-paste content at the live cursor are not evidence of a clear")
+		})
+	}
+}
+
+func observedComposerPane(pane string, row, col int, cursorVisible bool) composerClearObservation {
+	return composerClearObservation{
+		pane: pane,
+		cursor: paneCursorState{
+			Row:     row,
+			Col:     col,
+			Visible: cursorVisible,
+		},
+		cursorKnown: true,
+	}
+}
+
+func TestClearedComposerNoticeKeepsExactAnchoredRemoval(t *testing.T) {
+	errors := captureErrorLog(t)
+	previousPasteTail := newDeliveryProbe("STRANDED-DRAFT").completion
+
+	noteClearedComposerContent(
+		"af_proj",
+		previousPasteTail,
+		observedComposerPane("history\n│ ❯ STRANDED-DRAFT │\n────────────────────", 1, 20, true),
+		observedComposerPane("history\n│ ❯ │\n────────────────────", 1, 3, true),
+	)
+
+	got := errors.String()
+	require.Equal(t, 1, strings.Count(got, "removed visible previous-paste content at the input cursor"),
+		"an exact removal of this session's previous paste at its live cursor is actionable once, got %q", got)
+	require.Contains(t, got, "Prior pane tail:")
+	require.NotContains(t, got, "or the pane was mid-render",
+		"an ERROR must state only what the captures actually establish")
+}
+
+func TestSuccessfulPasteSuppliesProvenanceForTheNextClear(t *testing.T) {
+	const prompt = "a prior delivery with a distinctive tail for later composer evidence"
+	var loaded string
+	pasted := false
+	cmdExec := cmd_test.MockCmdExec{
+		RunFunc: func(c *exec.Cmd) error {
+			joined := strings.Join(c.Args, " ")
+			if strings.Contains(joined, "load-buffer") {
+				payload, err := io.ReadAll(c.Stdin)
+				require.NoError(t, err)
+				loaded = string(payload)
+			}
+			if strings.Contains(joined, "paste-buffer") {
+				pasted = true
+			}
+			return nil
+		},
+		OutputFunc: func(*exec.Cmd) ([]byte, error) {
+			if pasted {
+				return []byte(loaded), nil
+			}
+			return []byte("❯\n────────────────"), nil
+		},
+	}
+	session := newTmuxSession("af_proj", ProgramCodex, NewMockPtyFactory(t), cmdExec)
+
+	require.NoError(t, session.SendKeysCommand(prompt))
+	require.Equal(t, newDeliveryProbe(prompt).completion, session.lastPastedTail,
+		"only the exact tail of a paste tmux accepted may identify content on the next clear")
+}
+
 func TestSubmitLoadsPayloadBeforeClearingComposer(t *testing.T) {
 	loadErr := fmt.Errorf("load rejected")
 	clearSent := false
@@ -421,9 +528,13 @@ func TestSubmitDeletesBufferWhenPasteFails(t *testing.T) {
 	}
 
 	session := newTmuxSession("af_proj", "claude", NewMockPtyFactory(t), cmdExec)
+	const existingProvenance = "previously-accepted-completion"
+	session.lastPastedTail = existingProvenance
 	err := session.SendKeysCommand("a prompt that fails to paste")
 	require.Error(t, err, "a failed paste-buffer must surface as an error")
 	require.ErrorIs(t, err, pasteErr, "the paste error must be wrapped and returned")
+	require.Equal(t, existingProvenance, session.lastPastedTail,
+		"a rejected paste must not replace provenance from the last accepted payload")
 
 	require.NotEmpty(t, loadBuf, "load-buffer must have named a buffer")
 	require.Equal(t, loadBuf, deletedBuf,

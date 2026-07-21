@@ -182,8 +182,10 @@ func (t *TmuxSession) sendKeysPasteBuffer(text string) error {
 	// not "not submitted"), so we do NOT try to detect whether a strand exists:
 	// that check cannot be made soundly from pane content. We clear
 	// unconditionally instead, which asserts nothing about the pane. The captures
-	// around the clear are for the LOG only (noteClearedDraft) — nothing is gated
-	// on them — and the post-clear pane doubles as the delivery baseline below.
+	// around the clear are for the LOG only (noteClearedComposerContent) — nothing
+	// is gated on them — and the post-clear pane doubles as the delivery baseline
+	// below. The log itself requires an exact visible removal; an arbitrary pane
+	// redraw is not evidence that the composer held a draft (#2225).
 	//
 	// Clearing unconditionally is only safe because the clear keystroke is inert
 	// on a BUSY pane: see clearComposerDraft for why it is C-u and explicitly NOT
@@ -193,13 +195,29 @@ func (t *TmuxSession) sendKeysPasteBuffer(text string) error {
 	// Cost: this is one capture more than the single (tail-conditional) baseline
 	// capture it replaces, and both are unconditional. Each is bounded by
 	// tmuxCommandTimeout, so against a WEDGED server the delivery path can now
-	// stall one extra bound before giving up. That is the price of the
-	// discarded-draft record; if it ever matters, the `before` capture is the
-	// droppable half (it feeds only the log, never the baseline).
+	// stall one extra bound before giving up. That is the price of recording a
+	// demonstrably non-empty clear; if it ever matters, the `before` capture is
+	// the droppable half (it feeds only the log, never the baseline).
+	priorTail := t.lastPastedTail
 	before, beforeOK := t.capturePaneForDelivery()
+	beforeCursor, beforeCursorOK := paneCursorState{}, false
+	if beforeOK {
+		beforeCursor, beforeCursorOK = t.previousPasteCursor(before, priorTail)
+	}
 	t.clearComposerDraft()
 	after, afterOK := t.capturePaneForDelivery()
-	noteClearedDraft(t.sanitizedName, before, after)
+	afterCursor, afterCursorOK := paneCursorState{}, false
+	if beforeCursorOK && afterOK {
+		var err error
+		afterCursor, err = t.readPaneCursorState()
+		afterCursorOK = err == nil
+	}
+	noteClearedComposerContent(
+		t.sanitizedName,
+		priorTail,
+		composerClearObservation{pane: before, cursor: beforeCursor, cursorKnown: beforeCursorOK},
+		composerClearObservation{pane: after, cursor: afterCursor, cursorKnown: afterCursorOK},
+	)
 
 	// Baseline the pane AFTER the clear but BEFORE the paste so the post-paste
 	// check waits for the prompt's tail to newly APPEAR (a count increase), not
@@ -244,6 +262,12 @@ func (t *TmuxSession) sendKeysPasteBuffer(text string) error {
 		}
 		return fmt.Errorf("error pasting buffer: %w", pasteErr)
 	}
+	// Remember only a payload tmux actually accepted. Reusing the delivery
+	// probe's exact completion suffix keeps one source of truth for what tmux was
+	// asked to render. On the next submit it is provenance that distinguishes
+	// prior pasted input from a spinner, footer, or unrelated pane redraw.
+	// submitMu owns the field.
+	t.lastPastedTail = probe.completion
 
 	// Confirm the paste actually LANDED in the pane before sending Enter, instead
 	// of sleeping a fixed 500ms and hoping it drained. Enter is a separate
@@ -357,23 +381,129 @@ func (t *TmuxSession) clearComposerDraft() {
 	}
 }
 
-// noteClearedDraft logs when the pre-delivery clear visibly changed the pane —
-// evidence the composer held pending content that would otherwise have fused
-// with this prompt (#2070). It stays SOUND because nothing is gated on it: this
-// is a record for the operator, not a decision. A normalized difference between
-// the pane captured before and after the clear is the observable EFFECT of our
-// own C-u, not an inference about composer state from ambiguous pixels — the
-// unsound move #2065 closed. A pane merely mid-render can also differ, so the
-// message hedges rather than asserting a strand. Empty/failed captures produce
-// no log (nb == "").
-func noteClearedDraft(sessionName, before, after string) {
-	nb := normalizeDelivery(before)
-	if nb == "" || nb == normalizeDelivery(after) {
+type composerClearObservation struct {
+	pane        string
+	cursor      paneCursorState
+	cursorKnown bool
+}
+
+// noteClearedComposerContent records only content from the previous successful
+// paste disappearing at the live input cursor. A whole-pane difference, a
+// glyph-like row prefix, or text in a neighboring footer is not provenance for
+// a discarded draft (#2225). Ambiguous and failed observations stay silent,
+// following deliveryCouldNotObserve.
+func noteClearedComposerContent(
+	sessionName string,
+	previousPasteTail string,
+	before, after composerClearObservation,
+) {
+	if !paneShowsPreviousPasteRemoved(previousPasteTail, before, after) {
 		return
 	}
-	log.ErrorLog.Printf("submit: cleared composer for session %q before delivery; the pane changed "+
-		"across the clear, so a stranded draft was likely discarded (or the pane was mid-render). "+
-		"Prior pane tail: %s", sessionName, oneLineTail(before))
+	log.ErrorLog.Printf("submit: pre-delivery clear removed visible previous-paste content at the input cursor "+
+		"for session %q; this can indicate a stranded draft. Prior pane tail: %s",
+		sessionName, oneLineTail(before.pane))
+}
+
+// previousPasteCursor returns a cursor observation only when a distinctive tail
+// from this TmuxSession's previous paste ends on that exact cursor row. It is a
+// cheap no-op unless the tail appears somewhere in the pane; the extra bounded
+// tmux read is therefore reserved for a plausible stranded-paste candidate.
+func (t *TmuxSession) previousPasteCursor(pane, previousPasteTail string) (paneCursorState, bool) {
+	if !distinctivePreviousPasteTail(previousPasteTail) ||
+		!strings.Contains(normalizeDelivery(pane), previousPasteTail) {
+		return paneCursorState{}, false
+	}
+	cursor, err := t.readPaneCursorState()
+	if err != nil || !cursor.Visible {
+		return paneCursorState{}, false
+	}
+	row, ok := paneRowAt(pane, cursor.Row)
+	if !ok || !strings.HasSuffix(normalizeDelivery(row), previousPasteTail) {
+		return paneCursorState{}, false
+	}
+	return cursor, true
+}
+
+// paneShowsPreviousPasteRemoved recognizes one deliberately narrow transition:
+// a distinctive tail that THIS session previously pasted ends on the visible
+// cursor row; C-u leaves the cursor on that same row but moves it backward; and
+// the row loses a suffix while retaining a non-text anchor above the same
+// decorative composer boundary. Comparing only the cursor row makes neighboring
+// redraw text impossible to absorb into the match, while the live cursor, paste
+// provenance, and boundary prevent a glyph-prefixed status row from qualifying.
+func paneShowsPreviousPasteRemoved(
+	previousPasteTail string,
+	before, after composerClearObservation,
+) bool {
+	if !distinctivePreviousPasteTail(previousPasteTail) ||
+		!before.cursorKnown || !after.cursorKnown ||
+		!before.cursor.Visible || !after.cursor.Visible ||
+		before.cursor.Row != after.cursor.Row ||
+		before.cursor.Col <= after.cursor.Col ||
+		!sameComposerBoundaryBelow(before, after) {
+		return false
+	}
+
+	beforeRow, beforeOK := paneRowAt(before.pane, before.cursor.Row)
+	afterRow, afterOK := paneRowAt(after.pane, after.cursor.Row)
+	if !beforeOK || !afterOK {
+		return false
+	}
+
+	normalizedBefore := normalizeDelivery(beforeRow)
+	normalizedAfter := normalizeDelivery(afterRow)
+	if normalizedAfter == "" || hasLetterOrNumber(normalizedAfter) ||
+		!strings.HasPrefix(normalizedBefore, normalizedAfter) {
+		return false
+	}
+
+	removed := strings.TrimPrefix(normalizedBefore, normalizedAfter)
+	return strings.HasSuffix(removed, previousPasteTail)
+}
+
+// sameComposerBoundaryBelow requires the cursor row to sit immediately above
+// an unchanged, non-empty row made only of whitespace/box drawing. This is the
+// generic structure of the supported agents' idle composer divider/bottom edge;
+// a busy spinner or arbitrary symbol-prefixed status line has no such evidence.
+// If an agent changes that geometry, the diagnostic goes silent rather than
+// guessing from a prompt glyph.
+func sameComposerBoundaryBelow(before, after composerClearObservation) bool {
+	row := before.cursor.Row + 1
+	beforeBoundary, beforeOK := paneRowAt(before.pane, row)
+	afterBoundary, afterOK := paneRowAt(after.pane, row)
+	if !beforeOK || !afterOK {
+		return false
+	}
+	beforeBoundary = strings.TrimSpace(beforeBoundary)
+	afterBoundary = strings.TrimSpace(afterBoundary)
+	return beforeBoundary != "" &&
+		beforeBoundary == afterBoundary &&
+		normalizeDelivery(beforeBoundary) == ""
+}
+
+func distinctivePreviousPasteTail(tail string) bool {
+	return len([]rune(tail)) >= minDistinctiveFragment && hasLetterOrNumber(tail)
+}
+
+func paneRowAt(pane string, row int) (string, bool) {
+	if row < 0 {
+		return "", false
+	}
+	// capture-pane terminates its grid with one newline. Remove that terminator,
+	// not every trailing newline: an actually blank bottom row must retain its
+	// index so tmux's 0-based cursor_y still names the same row.
+	rows := strings.Split(strings.TrimSuffix(pane, "\n"), "\n")
+	if row >= len(rows) {
+		return "", false
+	}
+	return rows[row], true
+}
+
+func hasLetterOrNumber(s string) bool {
+	return strings.IndexFunc(s, func(r rune) bool {
+		return unicode.IsLetter(r) || unicode.IsNumber(r)
+	}) >= 0
 }
 
 // newDeliveryProbe derives two disjoint, payload-specific witnesses. The suffix
@@ -459,9 +589,10 @@ func normalizeDelivery(s string) string {
 // escapes, and a colourized composer would then interleave escape bytes through
 // the very text being matched. It also probes ExistsOrUnknown() on failure,
 // spawning a second tmux subprocess — wasted work inside the submit path, where
-// a failed capture only ever means "not confirmed yet". `-J` is kept, so a line
-// the TERMINAL wrapped is rejoined by tmux itself; app-drawn wrapping inside a
-// composer's border box is handled by normalizeDelivery instead.
+// a failed capture only ever means "not confirmed yet". The capture stays a
+// GRID (no `-J`) so cursor_y can identify the one row eligible for the #2225
+// cleared-content diagnostic. normalizeDelivery strips row breaks, so terminal
+// and app-drawn wrapping remain irrelevant to the delivery-tail matcher.
 // The bool reports whether the capture itself SUCCEEDED. Callers must keep that
 // separate from "the text was not there": a failed capture means the pane could
 // not be inspected at all, and collapsing that into a negative would let a
@@ -497,7 +628,7 @@ func (t *TmuxSession) capturePaneForDeliveryWithin(budget time.Duration) (string
 // capturePaneForDeliveryContext is the shared body: one bounded capture-pane,
 // with any failure (including a tripped deadline) reported as "could not look".
 func (t *TmuxSession) capturePaneForDeliveryContext(ctx context.Context) (string, bool) {
-	out, err := t.outputTmuxBounded(ctx, "capture-pane", "-p", "-J", "-t", exactTarget(t.sanitizedName))
+	out, err := t.outputTmuxBounded(ctx, "capture-pane", "-p", "-t", exactTarget(t.sanitizedName))
 	if err != nil {
 		return "", false
 	}
@@ -583,8 +714,7 @@ func (t *TmuxSession) waitForPasteDelivered(probe deliveryProbe) deliveryObserva
 // oneLineTail condenses pane content to a short, single-line excerpt for a log
 // line: the last few non-blank rows, whitespace collapsed, row breaks marked
 // with ⏎, and truncated. Shared by the terminal delivery observation and
-// noteClearedDraft so a discarded-draft record and a delivery-failure record
-// read the same.
+// noteClearedComposerContent so both diagnostics use the same escaping policy.
 func oneLineTail(content string) string {
 	lines := strings.Split(strings.TrimRight(content, "\n \t"), "\n")
 	keep := lines
