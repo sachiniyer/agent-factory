@@ -342,6 +342,9 @@ func ResumeFromLimit(req ResumeFromLimitRequest) error {
 	if err := callDaemon("ResumeFromLimit", req, &resp); err != nil {
 		return err
 	}
+	if !resp.OK {
+		return fmt.Errorf("resume was not performed: %s", resp.Reason)
+	}
 	return nil
 }
 
