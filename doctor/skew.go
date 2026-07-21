@@ -626,7 +626,7 @@ func checkHTTPSocket(ctx *scanContext, report *Report, h daemon.HealthStatus) {
 // actually supervising the daemon. On macOS that includes an agent loaded in a
 // domain other than the gui/<uid> the restart path targets: restarts silently
 // miss it, so an old daemon keeps serving and skew never clears.
-func checkAutostartSupervision(ctx *scanContext, report *Report) {
+func checkAutostartSupervision(ctx *scanContext, report *Report, h daemon.HealthStatus) {
 	if !autostartUnitIsOurs(ctx) {
 		return
 	}
@@ -655,12 +655,16 @@ func checkAutostartSupervision(ctx *scanContext, report *Report) {
 	// Match has no default branch, so the "we could not ask" case cannot be
 	// forgotten here or in any future edit: the compiler demands it.
 	info.Active.Match(
-		func() { supervisionActive(ctx, report, info) },
-		func() { supervisionNotRunning(report, info) },
-		func() { supervisionUnitUnknownToManager(report, info) },
+		func() { supervisionActive(ctx, report, info, h) },
+		func() { supervisionNotRunning(report, info, h) },
+		func() { supervisionUnitUnknownToManager(report, info, h) },
 		func(cause error) {
+			detail := fmt.Sprintf("could not query the service manager, so supervision is unknown: %s", oneLine(cause))
+			if h.PingErr == nil {
+				detail = fmt.Sprintf("a daemon is responding, but the service manager could not be queried, so whether it is supervised is unknown: %s", oneLine(cause))
+			}
 			report.Warn(sectionDaemon, "autostart supervision",
-				fmt.Sprintf("could not query the service manager, so supervision is unknown: %s", oneLine(cause)),
+				detail,
 				"check that the service manager is reachable (`systemctl --user status` / `launchctl print`), then rerun `af doctor`", false)
 		},
 	)
@@ -668,10 +672,73 @@ func checkAutostartSupervision(ctx *scanContext, report *Report) {
 
 // supervisionActive renders the manager's "it is running" answer, which still
 // leaves the is-enabled question to report.
-func supervisionActive(ctx *scanContext, report *Report, info daemon.SupervisionInfo) {
+func supervisionActive(ctx *scanContext, report *Report, info daemon.SupervisionInfo, h daemon.HealthStatus) {
 	_ = ctx
+	enabledYes := false
+	enablement := ""
+	enablementProblem := false
 	info.Enabled.Match(
-		func() { report.Pass(sectionDaemon, "autostart supervision", "unit is enabled and running") },
+		func() { enabledYes, enablement = true, "unit is enabled" },
+		func() { enablement, enablementProblem = "unit is not enabled", true },
+		func() {
+			enablement, enablementProblem = "the service manager has no enablement record for the unit", true
+		},
+		func(cause error) { enablement = "whether the unit starts at login is unknown: " + oneLine(cause) },
+	)
+
+	if h.PingErr == nil {
+		ownership := daemon.ServingDaemonSupervised(h, info)
+		handled := false
+		ownership.Match(
+			func() {
+				if enabledYes {
+					report.Pass(sectionDaemon, "autostart supervision",
+						fmt.Sprintf("unit is enabled and running; it owns the responding daemon pid %d", h.ServingPID))
+				} else {
+					report.Warn(sectionDaemon, "autostart supervision",
+						fmt.Sprintf("the unit is running and owns responding daemon pid %d; %s", h.ServingPID, enablement),
+						"run `af daemon install` if the unit is not enabled, or check the service manager directly", enablementProblem)
+				}
+				handled = true
+			},
+			func() {
+				detail := fmt.Sprintf("the installed unit owns pid %d, but responding daemon pid %d is not supervised by it",
+					info.MainPID, h.ServingPID)
+				if info.MainPID == 0 {
+					detail = "the installed unit is active but owns no daemon process; the responding daemon is not supervised by it"
+				}
+				report.Warn(sectionDaemon, "autostart supervision", detail+"; "+enablement,
+					"run `af daemon install` to hand the daemon back to the installed unit", true)
+				handled = true
+			},
+			func() {
+				report.Warn(sectionDaemon, "autostart supervision",
+					"the service manager has no record of the installed unit, so the responding daemon is not supervised by it; "+enablement,
+					"reload the unit: `systemctl --user daemon-reload`, or reinstall it: af daemon install", true)
+				handled = true
+			},
+			func(cause error) {
+				if enabledYes {
+					report.Warn(sectionDaemon, "autostart supervision",
+						"the unit is enabled and active, but whether it owns the responding daemon is unknown: "+oneLine(cause),
+						"upgrade or restart the daemon and rerun `af doctor`", false)
+				} else {
+					report.Warn(sectionDaemon, "autostart supervision",
+						fmt.Sprintf("the unit is active, but whether it owns responding daemon pid %d is unknown: %s; %s",
+							h.ServingPID, oneLine(cause), enablement),
+						"run `af daemon install` if the unit is not enabled, or upgrade/restart the daemon and rerun `af doctor`", enablementProblem)
+				}
+				handled = true
+			},
+		)
+		if handled {
+			return
+		}
+	}
+	info.Enabled.Match(
+		func() {
+			report.Pass(sectionDaemon, "autostart supervision", "unit is enabled and running")
+		},
 		func() {
 			report.Warn(sectionDaemon, "autostart supervision",
 				fmt.Sprintf("the unit is running but not enabled, so it won't start at login (%s)", info.Detail),
@@ -691,13 +758,19 @@ func supervisionActive(ctx *scanContext, report *Report, info daemon.Supervision
 }
 
 // supervisionNotRunning renders an answered "it is not running".
-func supervisionNotRunning(report *Report, info daemon.SupervisionInfo) {
+func supervisionNotRunning(report *Report, info daemon.SupervisionInfo, h daemon.HealthStatus) {
 	if info.Err != nil {
 		// The unit is installed but unreadable AND it is not running: the
 		// unreadable file is the likely reason nothing is supervising.
 		report.Warn(sectionDaemon, "autostart supervision",
 			fmt.Sprintf("a unit file is installed but cannot be read (%v) and the service manager is not running it", info.Err),
 			"fix the unit file's permissions, or reinstall it: af daemon install", true)
+		return
+	}
+	if h.PingErr == nil {
+		report.Warn(sectionDaemon, "autostart supervision",
+			fmt.Sprintf("a daemon is responding, but the installed unit is not running it (%s); the responder is not supervised", info.Detail),
+			"run `af daemon install` to hand the daemon back to the installed unit", true)
 		return
 	}
 	loadedButDead := false
@@ -729,7 +802,13 @@ func supervisionNotRunning(report *Report, info daemon.SupervisionInfo) {
 // manager not knowing it means it was never loaded: `systemctl --user
 // daemon-reload` fixes it. Reported as "inactive" it sent users to reinstall
 // something that was already there; reported as "unknown" it told them nothing.
-func supervisionUnitUnknownToManager(report *Report, info daemon.SupervisionInfo) {
+func supervisionUnitUnknownToManager(report *Report, info daemon.SupervisionInfo, h daemon.HealthStatus) {
+	if h.PingErr == nil {
+		report.Warn(sectionDaemon, "autostart supervision",
+			fmt.Sprintf("a daemon is responding, but the service manager has no record of the installed unit (%s); the responder is not supervised", info.Detail),
+			"load it: `systemctl --user daemon-reload`, or reinstall it: af daemon install", true)
+		return
+	}
 	report.Warn(sectionDaemon, "autostart supervision",
 		fmt.Sprintf("a unit file is installed but the service manager has no record of it (%s), so nothing starts af at login", info.Detail),
 		"load it: `systemctl --user daemon-reload`, or reinstall it: af daemon install", true)

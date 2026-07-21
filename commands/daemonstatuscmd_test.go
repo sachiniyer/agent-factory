@@ -2,6 +2,8 @@ package commands
 
 import (
 	"bytes"
+	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -85,6 +87,183 @@ func TestPrintDaemonStatusHumanRunning(t *testing.T) {
 			t.Errorf("human output missing %q\n%s", want, got)
 		}
 	}
+}
+
+// A unit file on disk is not evidence that it owns the daemon which answered
+// Ping. Before #2168 Phase 4 status printed only "autostart: installed", the
+// exact reassurance shown during the incident while an ad-hoc daemon served.
+func TestPrintDaemonStatusHumanInstalledUnitDoesNotImplySupervision(t *testing.T) {
+	cmd := &cobra.Command{}
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+
+	printDaemonStatusHuman(cmd, daemonStatusInfo{
+		Running:       true,
+		PID:           42,
+		PIDVerified:   true,
+		AutostartUnit: true,
+	})
+
+	got := out.String()
+	require.Contains(t, got, "supervision:",
+		"status must distinguish an installed unit from a unit proven to own the responder")
+	require.Contains(t, got, "unknown",
+		"an absent service-manager answer is unknown, never an implied supervised yes")
+}
+
+func TestCollectDaemonStatusCorrelatesResponderUnitAndConfig(t *testing.T) {
+	home := testguard.SocketTempDir(t)
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	require.NoError(t, os.WriteFile(filepath.Join(home, config.TomlConfigFileName),
+		[]byte("listen_addr = '127.0.0.1:8443'\nrequire_token = true\n"), 0600))
+
+	previousHealth := daemonHealthFn
+	previousScope := autostartUnitServesHomeFn
+	previousSupervision := daemonStatusSupervisionFn
+	t.Cleanup(func() {
+		daemonHealthFn = previousHealth
+		autostartUnitServesHomeFn = previousScope
+		daemonStatusSupervisionFn = previousSupervision
+	})
+	daemonHealthFn = func() daemon.HealthStatus {
+		return daemon.HealthStatus{
+			ServingPID:    42,
+			BootConfig:    &daemon.DaemonBootConfig{ListenAddr: "0.0.0.0:8443", RequireToken: false},
+			AutostartUnit: true,
+		}
+	}
+	autostartUnitServesHomeFn = func(string) (bool, bool, error) { return true, true, nil }
+	daemonStatusSupervisionFn = func() daemon.SupervisionInfo {
+		return daemon.SupervisionInfo{
+			Supported: true, UnitPresent: true, Enabled: daemon.AnswerYes(), Active: daemon.AnswerYes(),
+			MainPID: 42, MainPIDPresent: daemon.AnswerYes(),
+		}
+	}
+
+	info := collectDaemonStatus()
+	require.True(t, info.Running)
+	require.Equal(t, "yes", info.Supervised)
+	require.Equal(t, "no", info.ConfigMatches)
+	require.Contains(t, info.ConfigDetail, "listen_addr")
+	require.Contains(t, info.ConfigDetail, "require_token")
+}
+
+func TestCollectDaemonStatusDoesNotAttributeForeignHomeUnit(t *testing.T) {
+	home := testguard.SocketTempDir(t)
+	t.Setenv("AGENT_FACTORY_HOME", home)
+
+	previousHealth := daemonHealthFn
+	previousScope := autostartUnitServesHomeFn
+	previousSupervision := daemonStatusSupervisionFn
+	t.Cleanup(func() {
+		daemonHealthFn = previousHealth
+		autostartUnitServesHomeFn = previousScope
+		daemonStatusSupervisionFn = previousSupervision
+	})
+	daemonHealthFn = func() daemon.HealthStatus {
+		return daemon.HealthStatus{ServingPID: 42, AutostartUnit: true}
+	}
+	autostartUnitServesHomeFn = func(got string) (bool, bool, error) {
+		require.Equal(t, home, got)
+		return false, true, nil
+	}
+	daemonStatusSupervisionFn = func() daemon.SupervisionInfo {
+		t.Fatal("status must not query or attribute another home's service-manager unit")
+		return daemon.SupervisionInfo{}
+	}
+
+	info := collectDaemonStatus()
+	require.False(t, info.AutostartUnit)
+	require.Empty(t, info.AutostartEnabled)
+	require.Empty(t, info.AutostartActive)
+	require.Zero(t, info.UnitPID)
+	require.Equal(t, "no", info.Supervised, "this home has no unit supervising its responder")
+}
+
+func TestCollectDaemonStatusNoUnitOmitsInapplicableManagerState(t *testing.T) {
+	home := testguard.SocketTempDir(t)
+	t.Setenv("AGENT_FACTORY_HOME", home)
+
+	previousHealth := daemonHealthFn
+	previousScope := autostartUnitServesHomeFn
+	previousSupervision := daemonStatusSupervisionFn
+	t.Cleanup(func() {
+		daemonHealthFn = previousHealth
+		autostartUnitServesHomeFn = previousScope
+		daemonStatusSupervisionFn = previousSupervision
+	})
+	daemonHealthFn = func() daemon.HealthStatus {
+		return daemon.HealthStatus{PingErr: errors.New("no daemon")}
+	}
+	autostartUnitServesHomeFn = func(string) (bool, bool, error) { return false, false, nil }
+	daemonStatusSupervisionFn = func() daemon.SupervisionInfo {
+		t.Fatal("no installed unit means there is no service-manager state to query")
+		return daemon.SupervisionInfo{}
+	}
+
+	data, err := json.Marshal(collectDaemonStatus())
+	require.NoError(t, err)
+	var wire map[string]any
+	require.NoError(t, json.Unmarshal(data, &wire))
+	require.Equal(t, false, wire["autostart_unit"])
+	require.NotContains(t, wire, "autostart_enabled")
+	require.NotContains(t, wire, "autostart_active")
+	require.NotContains(t, wire, "unit_pid")
+}
+
+func TestCollectDaemonStatusUnitScopeFailureStaysUnknown(t *testing.T) {
+	home := testguard.SocketTempDir(t)
+	t.Setenv("AGENT_FACTORY_HOME", home)
+
+	previousHealth := daemonHealthFn
+	previousScope := autostartUnitServesHomeFn
+	previousSupervision := daemonStatusSupervisionFn
+	t.Cleanup(func() {
+		daemonHealthFn = previousHealth
+		autostartUnitServesHomeFn = previousScope
+		daemonStatusSupervisionFn = previousSupervision
+	})
+	daemonHealthFn = func() daemon.HealthStatus {
+		return daemon.HealthStatus{ServingPID: 42, AutostartUnit: true}
+	}
+	autostartUnitServesHomeFn = func(string) (bool, bool, error) {
+		return false, true, errors.New("unit file is unreadable")
+	}
+	daemonStatusSupervisionFn = func() daemon.SupervisionInfo {
+		t.Fatal("an unscoped unit must not be attributed through the service manager")
+		return daemon.SupervisionInfo{}
+	}
+
+	info := collectDaemonStatus()
+	require.True(t, info.AutostartUnit, "the file is known to exist even though its home is unknown")
+	require.Equal(t, "unknown", info.Supervised)
+	require.Contains(t, info.SupervisionDetail, "unit file is unreadable")
+	require.Empty(t, info.AutostartEnabled)
+	require.Empty(t, info.AutostartActive)
+}
+
+func TestPrintDaemonStatusHumanNamesPIDMismatchAndStaleConfig(t *testing.T) {
+	cmd := &cobra.Command{}
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+
+	printDaemonStatusHuman(cmd, daemonStatusInfo{
+		Running:          true,
+		ServingPID:       42,
+		AutostartUnit:    true,
+		AutostartEnabled: "yes",
+		AutostartActive:  "yes",
+		UnitPID:          99,
+		Supervised:       "no",
+		ConfigMatches:    "no",
+		ConfigDetail:     `listen_addr: running "0.0.0.0:8443", file "127.0.0.1:8443"`,
+	})
+
+	got := out.String()
+	require.Contains(t, got, "responding daemon pid 42 is not supervised")
+	require.Contains(t, got, "installed unit, which owns pid 99")
+	require.Contains(t, got, "config on disk differs from the running daemon")
+	require.Contains(t, got, "restart the daemon to apply it")
 }
 
 func TestPrintDaemonStatusHumanNotRunning(t *testing.T) {

@@ -55,7 +55,7 @@ daemon's autostart unit once:
 
 ```bash
 af daemon install     # systemd user service on Linux, launchd agent on macOS
-af daemon status      # liveness, sockets, pid, and autostart state
+af daemon status      # liveness, supervision ownership, and config freshness
 af daemon restart     # restart the daemon process; sessions are re-adopted
 af daemon uninstall   # remove the autostart unit
 ```
@@ -63,8 +63,10 @@ af daemon uninstall   # remove the autostart unit
 Because the daemon owns live state, you don't stop it by force while sessions
 are running; let `af` manage its lifecycle. `af daemon restart` restarts only
 the daemon process and re-adopts existing tmux sessions from persisted state.
-`af daemon status` is the right tool when you want to know whether it's up and
-where its sockets are.
+`af daemon status` is the right tool when you want to know whether it's up,
+whether the installed unit actually owns the responder, whether config edits
+have reached it, and where its sockets are. Those checks are read-only; an
+unavailable manager or older daemon is reported as unknown rather than guessed.
 
 ## Sockets
 

@@ -1095,14 +1095,22 @@ func TestSkewChecks_HealthyMachine_AllPass(t *testing.T) {
 
 	opts := testOptions(t, false)
 	opts.Version = "1.0.192"
-	opts.daemonHealth = respondingDaemon("1.0.192")
+	healthyDaemon := respondingDaemon("1.0.192")
+	opts.daemonHealth = func() daemon.HealthStatus {
+		h := healthyDaemon()
+		h.ServingPID = 4242
+		return h
+	}
 	ourAutostartUnit(&opts)
 	opts.autostartUnit = func() daemon.AutostartUnitInfo {
 		return daemon.AutostartUnitInfo{Supported: true, Exists: true, ExecPath: bin}
 	}
 	ourAutostartUnit(&opts)
 	opts.autostartSupervision = func() daemon.SupervisionInfo {
-		return daemon.SupervisionInfo{Supported: true, UnitPresent: true, Enabled: daemon.AnswerYes(), Active: daemon.AnswerYes()}
+		return daemon.SupervisionInfo{
+			Supported: true, UnitPresent: true, Enabled: daemon.AnswerYes(), Active: daemon.AnswerYes(),
+			MainPID: 4242, MainPIDPresent: daemon.AnswerYes(),
+		}
 	}
 	opts.selfBinary = func() (string, error) { return bin, nil }
 	opts.binaryCandidates = func() []string { return []string{bin} }

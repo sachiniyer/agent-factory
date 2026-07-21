@@ -326,7 +326,7 @@ func Run(opts Options) (*Report, error) {
 	checkAutostartPath(ctx, report)
 	checkSplitBrainBinaries(ctx, report)
 	checkStaleSockets(ctx, report, health)
-	checkAutostartSupervision(ctx, report)
+	checkAutostartSupervision(ctx, report, health)
 	checkOrphanedProcesses(ctx, report)
 	checkRunawayChildren(ctx, report)
 	checkLeakedTmuxSessions(ctx, report)

@@ -34,6 +34,12 @@ type HealthStatus struct {
 	TransactionID string
 	Phase         DaemonPhase
 	Listeners     DaemonListenerStatus
+	// ServingPID and BootConfig come from the process that answered Ping. They
+	// are authoritative for supervision/config-skew diagnosis; PIDFilePID and a
+	// fresh config read cannot say which process answered or what it booted with.
+	// Zero/nil with PingErr == nil means the responder predates these fields.
+	ServingPID int
+	BootConfig *DaemonBootConfig
 	// HTTPSocketPath is the daemon's HTTP/JSON socket location.
 	HTTPSocketPath string
 	// HTTPSocketExists reports whether HTTPSocketPath is present on disk.
@@ -86,6 +92,8 @@ func Health() HealthStatus {
 		h.TransactionID = ping.TransactionID
 		h.Phase = ping.Phase
 		h.Listeners = ping.Listeners
+		h.ServingPID = ping.PID
+		h.BootConfig = ping.BootConfig
 	}
 	h.HTTPSocketPath, h.HTTPSocketExists, h.HTTPListening = probeHTTPSocket()
 	h.AutostartUnit = AutostartInstalled()

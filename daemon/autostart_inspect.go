@@ -7,6 +7,7 @@ import (
 	"html"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -170,6 +171,11 @@ type SupervisionInfo struct {
 	// Active reports whether the service manager is currently RUNNING the
 	// daemon — systemd is-active, or a launchd job with a live process.
 	Active ProbeAnswer
+	// MainPID is the live process owned by the service manager. It is meaningful
+	// only when MainPIDPresent is Yes. Keeping the answer separate preserves the
+	// difference between pid 0 and a query that never completed.
+	MainPID        int
+	MainPIDPresent ProbeAnswer
 	// Loaded reports that launchd knows the job in Domain. Loaded without
 	// Active is a real and quiet state: the agent is installed and registered,
 	// so everything looks configured, while no daemon process is running.
@@ -225,9 +231,18 @@ func AutostartSupervision() SupervisionInfo {
 		}
 		active, activeWord := systemdAsk(systemdIsActive)
 		info.Active = active
+		active.Match(
+			func() { info.MainPID, info.MainPIDPresent = systemdMainPID() },
+			func() { info.MainPIDPresent = AnswerNo() },
+			func() { info.MainPIDPresent = AnswerNotFound() },
+			func(cause error) { info.MainPIDPresent = Undetermined(cause) },
+		)
 		// The manager's own words, not our answer names: "failed" and
 		// "inactive" are both No, and the difference is the user's to see.
 		info.Detail = fmt.Sprintf("is-enabled=%s is-active=%s", enabledWord, activeWord)
+		if info.MainPID > 0 {
+			info.Detail += fmt.Sprintf(" main-pid=%d", info.MainPID)
+		}
 	case "darwin":
 		info.Domain = launchdDomainTarget()
 		info.Enabled = launchdEnabled()
@@ -246,11 +261,18 @@ func AutostartSupervision() SupervisionInfo {
 			// is alive: it reports the service's properties, including a state
 			// and last exit status, for a loaded job whose process has stopped.
 			info.Loaded, info.LoadedElsewhere = AnswerYes(), AnswerNo()
-			if launchdJobRunning(out) {
+			if pid, ok := launchdJobPID(out); ok {
 				info.Active = AnswerYes()
+				info.MainPID = pid
+				info.MainPIDPresent = AnswerYes()
+				info.Detail = "loaded and running in " + info.Domain
+			} else if launchdJobRunning(out) {
+				info.Active = AnswerYes()
+				info.MainPIDPresent = Undetermined(errors.New("launchd reports the job running but did not report its pid"))
 				info.Detail = "loaded and running in " + info.Domain
 			} else {
 				info.Active = AnswerNo()
+				info.MainPIDPresent = AnswerNo()
 				info.Detail = "loaded in " + info.Domain + " but no daemon process is running"
 			}
 		case launchdSaysNotFound(out, print.ExitCode()):
@@ -412,6 +434,30 @@ func systemdAsk(verb string) (ProbeAnswer, string) {
 	// what it means, and guessing in EITHER direction is how this bug family
 	// works.
 	return Undetermined(systemdProbeErr(verb, out)), "unknown"
+}
+
+// systemdMainPID asks the same manager which answered is-active for the exact
+// process it owns. The command is separately bounded by autostartProbeCommand;
+// a timeout or malformed answer stays unknown and can never become pid 0.
+func systemdMainPID() (int, ProbeAnswer) {
+	res := autostartProbeCommand("systemctl", "--user", "show", autostartUnitName, "--property=MainPID", "--value")
+	out, ok := res.Output()
+	if !ok {
+		return 0, Undetermined(fmt.Errorf("could not query systemd (show MainPID): %w", res.Cause()))
+	}
+	if !res.Succeeded() {
+		return 0, Undetermined(systemdProbeErr("show MainPID", out))
+	}
+	word := strings.TrimSpace(firstLine(out))
+	word = strings.TrimSpace(strings.TrimPrefix(word, "MainPID="))
+	pid, err := strconv.Atoi(word)
+	if err != nil || pid < 0 {
+		return 0, Undetermined(fmt.Errorf("systemd returned an invalid MainPID %q", word))
+	}
+	if pid == 0 {
+		return 0, AnswerNo()
+	}
+	return pid, AnswerYes()
 }
 
 const (
@@ -670,4 +716,21 @@ func launchdJobRunning(out string) bool {
 		}
 	}
 	return running
+}
+
+// launchdJobPID extracts the live pid from the same `launchctl print` block
+// used for Active, so ownership never depends on a second racy manager query.
+func launchdJobPID(out string) (int, bool) {
+	for _, line := range strings.Split(out, "\n") {
+		field := strings.TrimSpace(line)
+		raw, ok := strings.CutPrefix(field, "pid = ")
+		if !ok {
+			continue
+		}
+		pid, err := strconv.Atoi(strings.TrimSpace(raw))
+		if err == nil && pid > 0 {
+			return pid, true
+		}
+	}
+	return 0, false
 }
