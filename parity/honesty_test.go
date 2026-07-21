@@ -128,6 +128,29 @@ func TestDerivationSeesWebCreateOptions(t *testing.T) {
 	}
 }
 
+// TestWebPromptParityNamesTheLiveTerminalTransport pins the distinction exposed
+// by the #2188 review: the browser CAN send a prompt, but it does so by typing on
+// the attached PTY. A dead af("SendPrompt", ...) wrapper is not a production
+// surface and must not keep that RPC in the web reachability ledger. The daemon
+// route remains public for the CLI, so this asserts both sides instead of
+// deleting the capability itself.
+func TestWebPromptParityNamesTheLiveTerminalTransport(t *testing.T) {
+	inv := loadInventory(t)
+	if deriveWebRPCs(t)["SendPrompt"] {
+		t.Fatal("web prompt delivery is reaching SendPrompt RPC again; either remove the dead wrapper or deliberately update the terminal-transport parity decision")
+	}
+	if _, stale := inv.Ledger.WebRPCs["SendPrompt"]; stale {
+		t.Fatal("web_rpcs still counts SendPrompt even though the browser reaches prompt delivery through its live terminal")
+	}
+	if got := inv.Ledger.Routes["POST /v1/SendPrompt"]; got != "session.send-prompt" {
+		t.Fatalf("the daemon/CLI SendPrompt route disappeared with the dead web wrapper: route maps to %q", got)
+	}
+	capability, ok := inv.byID()["session.send-prompt"]
+	if !ok || capability.Web.Status != "yes" || !strings.Contains(capability.Web.Pointer, "terminal.ts") {
+		t.Fatalf("session.send-prompt must remain a web capability through terminal input, got %+v", capability.Web)
+	}
+}
+
 // TestDerivationSeesTUIBackendGap pins the other half of #1933 through the Go
 // AST: the TUI's sessionStartRequest has no Backend field at all.
 func TestDerivationSeesTUIBackendGap(t *testing.T) {

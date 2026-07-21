@@ -1459,7 +1459,6 @@
       "RenameTab": "session.tab.rename",
       "ReorderTab": "session.tab.reorder",
       "RestoreSession": "session.restore",
-      "SendPrompt": "session.send-prompt",
       "ResumeFromLimit": "session.limit-retry",
       "SetConfigValue": "config.write",
       "Snapshot": "session.list",
