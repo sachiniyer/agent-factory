@@ -23,9 +23,13 @@ type fakeSupervisorRuntime struct {
 
 func (f *fakeSupervisorRuntime) operations() SupervisorOperations {
 	return SupervisorOperations{
-		AwaitActivation: func(context.Context, Journal) error {
+		AwaitActivation: func(_ context.Context, journal Journal) error {
 			f.calls = append(f.calls, "await-activation")
-			return nil
+			txn, err := Load(journal.HomeDir)
+			if err != nil {
+				return err
+			}
+			return txn.AuthorizeActivation(journal.ID, journal.RecoveryNonce)
 		},
 		StopPrevious: func(context.Context, Journal) (StopOutcome, error) {
 			f.calls = append(f.calls, "stop-previous")
@@ -169,6 +173,32 @@ func TestSupervisorAbortsWithoutRestoringOverAConfirmedLivePreviousDaemon(t *tes
 	require.ErrorIs(t, loadErr, ErrNoActiveTransaction)
 	installed, readErr := os.ReadFile(executable)
 	require.NoError(t, readErr)
+	require.Equal(t, "known-running-binary", string(installed))
+}
+
+func TestSupervisorRefusesCallbackWithoutActorBoundApproval(t *testing.T) {
+	txn, home, executable := prepareFixture(t)
+	lease, err := txn.tryAcquireRecoveryAs(txn.Journal().PreviousBinaryPath)
+	require.NoError(t, err)
+	runtime := &fakeSupervisorRuntime{running: "previous", candidateValid: true}
+	operations := runtime.operations()
+	operations.AwaitActivation = func(context.Context, Journal) error {
+		runtime.calls = append(runtime.calls, "await-activation")
+		return nil
+	}
+
+	err = (Supervisor{Operations: operations}).Run(context.Background(), txn, lease)
+	require.ErrorIs(t, err, ErrUpgradeAborted)
+	require.ErrorIs(t, err, ErrActivationNotAuthorized)
+	require.NoError(t, lease.Release())
+	require.Equal(t, "previous", runtime.running)
+	require.Equal(t, []string{"await-activation", "disable-recovery-job"}, runtime.calls,
+		"a callback cannot bypass the actor-bound approval capability")
+
+	_, err = Load(home)
+	require.ErrorIs(t, err, ErrNoActiveTransaction)
+	installed, err := os.ReadFile(executable)
+	require.NoError(t, err)
 	require.Equal(t, "known-running-binary", string(installed))
 }
 

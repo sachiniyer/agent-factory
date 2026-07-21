@@ -43,9 +43,12 @@ const (
 )
 
 // SupervisorOperations is the process/service-manager boundary around the
-// durable state machine. Implementations must scope stop operations to the
-// exact version, transaction, boot, AF home, and captured owner in Journal;
-// returning StopConfirmed is destructive authority.
+// durable state machine. AwaitActivation may only wait for the old daemon's
+// approval; it must not quiesce or stop that daemon. StopPrevious is the first
+// shutdown operation and runs only after daemon_stopping is durable.
+// Implementations must scope stop operations to the exact version,
+// transaction, boot, AF home, and captured owner in Journal; returning
+// StopConfirmed is destructive authority.
 type SupervisorOperations struct {
 	AwaitActivation    func(context.Context, Journal) error
 	StopPrevious       func(context.Context, Journal) (StopOutcome, error)
@@ -157,13 +160,23 @@ func (s Supervisor) Run(ctx context.Context, txn *Transaction, lease *RecoveryLe
 			}
 
 		case PhaseSupervisorReady:
-			if err := s.Operations.AwaitActivation(ctx, journal); err != nil {
-				if !errors.Is(err, ErrActivationNotAuthorized) {
-					return fmt.Errorf("wait for upgrade activation handshake: %w", err)
+			activationErr := s.Operations.AwaitActivation(ctx, journal)
+			if activationErr == nil {
+				authorized, err := lease.ActivationAuthorized()
+				if err != nil {
+					return fmt.Errorf("validate upgrade activation handshake: %w", err)
 				}
-				abortCause = err
+				if !authorized {
+					activationErr = ErrActivationNotAuthorized
+				}
+			}
+			if activationErr != nil {
+				if !errors.Is(activationErr, ErrActivationNotAuthorized) {
+					return fmt.Errorf("wait for upgrade activation handshake: %w", activationErr)
+				}
+				abortCause = activationErr
 				if abortErr := lease.Abort(); abortErr != nil {
-					return errors.Join(err, abortErr)
+					return errors.Join(activationErr, abortErr)
 				}
 				if boundaryErr := s.afterBoundary(PhaseAborted); boundaryErr != nil {
 					return boundaryErr
