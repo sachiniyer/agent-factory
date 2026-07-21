@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/sachiniyer/agent-factory/apiclient"
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/task"
@@ -94,9 +95,9 @@ func (m *home) saveContentPaneState() error {
 	// writer of tasks.json among clients (#960), so a TUI edit/delete goes
 	// through the same RPC wrappers the CLI uses instead of touching the file
 	// directly. Each CRUD RPC re-arms the daemon's scheduler + watchers
-	// in-process, so there is no separate ReloadTasks poke here — the write and
-	// its schedule refresh are one atomic daemon call (removing the old
-	// double-reload).
+	// in-process, so there is no separate ReloadTasks poke here. The write lands
+	// before the refresh; a post-commit refresh failure is classified below so
+	// the error remains visible without retrying a durable edit.
 	//
 	// Persist ONLY the tasks the user actually edited (ConsumeDirty), and only
 	// the FIELDS they changed: each edit carries a field-level patch (diffed
@@ -107,7 +108,14 @@ func (m *home) saveContentPaneState() error {
 	// harmless no-op the daemon still validates.
 	for _, edit := range sp.ConsumeDirty() {
 		if err := updateTaskThroughDaemon(edit.ID, edit.Update); err != nil {
-			sp.RestoreFailedEdit(edit.ID)
+			if apiclient.IsMutationCommitted(err) {
+				// The task write landed; only the daemon's schedule refresh
+				// failed. Keep surfacing that failure, but advance this task's
+				// baseline so a later edit is diffed against durable state.
+				sp.AcknowledgeSavedEdit(edit.ID)
+			} else {
+				sp.RestoreFailedEdit(edit.ID)
+			}
 			log.ErrorLog.Printf("failed to update task: %v", err)
 			saveErr = errors.Join(saveErr, fmt.Errorf("failed to save task %q: %w", edit.ID, err))
 			continue

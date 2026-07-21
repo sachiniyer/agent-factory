@@ -32,11 +32,18 @@ type Envelope struct {
 }
 
 // EnvelopeError is the error member of an Envelope. Message is a human-readable
-// description; the struct leaves room to grow additional fields (e.g. a machine
-// code) later without breaking the additive contract.
+// description. Code is an optional machine-readable outcome; omitting it keeps
+// ordinary failure envelopes byte-for-byte compatible with older clients.
 type EnvelopeError struct {
 	Message string `json:"message"`
+	Code    string `json:"code,omitempty"`
 }
+
+// ErrorCodeMutationCommitted says the requested mutation reached durable
+// storage before a later, non-transactional follow-up failed. A caller must
+// still surface the failure, but must not retry the mutation as though it never
+// happened.
+const ErrorCodeMutationCommitted = "mutation_committed"
 
 // Success wraps a payload as a successful Envelope (Error nil).
 func Success(data any) Envelope {
@@ -46,6 +53,12 @@ func Success(data any) Envelope {
 // Failure wraps a message as a failed Envelope (Data nil).
 func Failure(msg string) Envelope {
 	return Envelope{Data: nil, Error: &EnvelopeError{Message: msg}}
+}
+
+// FailureWithCode wraps a failure with an additive machine-readable outcome.
+// Older clients ignore Code and retain the existing human-readable error.
+func FailureWithCode(msg, code string) Envelope {
+	return Envelope{Data: nil, Error: &EnvelopeError{Message: msg, Code: code}}
 }
 
 // MarshalIndented is the single JSON-encoding primitive the CLI and HTTP output
