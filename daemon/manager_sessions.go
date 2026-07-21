@@ -338,28 +338,56 @@ func (m *Manager) agentServerForStream(idOrTitle, repoID string) (session.AgentS
 // stream can attach to. Both the stable-id and repo-scoped title paths consult
 // the daemon's already-restored map directly: Preview is a repaint hot path, so
 // re-scanning every persisted session before each capture makes its latency grow
-// with the whole session history. A miss still falls through to findSession,
-// preserving the disk restore and unscoped-title ambiguity checks for callers
-// that genuinely address an untracked session.
+// with the whole session history. A miss enters findSessionByStableID, whose one
+// refresh transaction scans the stable-id namespace BEFORE interpreting the
+// opaque value as a title; an earlier restore may have skipped a row that is now
+// recoverable (#2187). Only that post-refresh ID miss reaches the existing title
+// and ambiguity paths.
 func (m *Manager) resolveStreamSession(idOrTitle, repoID string) (*session.Instance, string, string, error) {
 	m.mu.Lock()
-	for key, instance := range m.instances {
-		if instance != nil && instance.ID != "" && instance.ID == idOrTitle {
-			rid, _ := splitDaemonInstanceKey(key)
-			title := instance.Title
-			m.mu.Unlock()
-			return instance, rid, title, nil
-		}
+	if instance, rid, title := m.trackedStreamSessionLocked(idOrTitle, repoID); instance != nil {
+		m.mu.Unlock()
+		return instance, rid, title, nil
+	}
+	m.mu.Unlock()
+	instance, resolvedRepoID, _, err := m.findSessionByStableID(idOrTitle, idOrTitle, repoID)
+	if instance == nil {
+		return nil, resolvedRepoID, idOrTitle, err
+	}
+	return instance, resolvedRepoID, instance.Title, err
+}
+
+// trackedStreamSessionLocked resolves only facts already materialized in
+// m.instances, with stable identity taking precedence over the legacy title
+// namespace. The caller holds m.mu. Keeping both the hot-path scan and the
+// post-refresh retry in this one helper prevents their precedence rules from
+// drifting apart.
+func (m *Manager) trackedStreamSessionLocked(idOrTitle, repoID string) (*session.Instance, string, string) {
+	if instance, rid := m.trackedSessionByIDLocked(idOrTitle); instance != nil {
+		return instance, rid, instance.Title
 	}
 	if repoID != "" {
 		if instance := m.instances[daemonInstanceKey(repoID, idOrTitle)]; instance != nil {
-			m.mu.Unlock()
-			return instance, repoID, instance.Title, nil
+			return instance, repoID, instance.Title
 		}
 	}
-	m.mu.Unlock()
-	instance, resolvedRepoID, _, err := m.findSession(idOrTitle, repoID)
-	return instance, resolvedRepoID, idOrTitle, err
+	return nil, "", ""
+}
+
+// trackedSessionByIDLocked resolves one stable identity in the materialized
+// instance map. The caller holds m.mu. Stream hot-path lookup and post-refresh
+// lookup share it so the stable namespace cannot drift between the two phases.
+func (m *Manager) trackedSessionByIDLocked(id string) (*session.Instance, string) {
+	if id == "" {
+		return nil, ""
+	}
+	for key, instance := range m.instances {
+		if instance != nil && instance.ID == id {
+			rid, _ := splitDaemonInstanceKey(key)
+			return instance, rid
+		}
+	}
+	return nil, ""
 }
 
 // resolveActionSession resolves a write-action target (kill/archive/send-prompt)
@@ -416,6 +444,16 @@ func (m *Manager) resolveActionSession(id, title, repoID string) (*session.Insta
 }
 
 func (m *Manager) findSession(title, repoID string) (*session.Instance, string, *session.InstanceData, error) {
+	return m.findSessionByStableID("", title, repoID)
+}
+
+// findSessionByStableID performs findSession's refresh exactly once, then gives
+// stableID first refusal on the refreshed map before any title lookup. Passing an
+// empty stableID preserves findSession's title-only behavior. The stream route
+// passes the same opaque segment as both values because it supports stable IDs and
+// legacy titles on one endpoint; this ordering is what prevents a newly-restored
+// ID from being reinterpreted as somebody else's title (#2187).
+func (m *Manager) findSessionByStableID(stableID, title, repoID string) (*session.Instance, string, *session.InstanceData, error) {
 	if title == "" {
 		return nil, "", nil, fmt.Errorf("session title is required")
 	}
@@ -424,6 +462,10 @@ func (m *Manager) findSession(title, repoID string) (*session.Instance, string, 
 	if err := m.refreshLocked(); err != nil {
 		m.mu.Unlock()
 		return nil, "", nil, err
+	}
+	if instance, rid := m.trackedSessionByIDLocked(stableID); instance != nil {
+		m.mu.Unlock()
+		return instance, rid, nil, nil
 	}
 	if repoID != "" {
 		key := daemonInstanceKey(repoID, title)
