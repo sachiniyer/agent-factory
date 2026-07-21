@@ -149,10 +149,11 @@ func (m *home) handleAutomationsFocus(msg tea.KeyMsg) (tea.Model, tea.Cmd, bool)
 // key is a no-op here (consumed, never fired) so nothing can START a search or
 // filter from the section — notably the ctrl+p project-picker filter and the
 // session-create/tasks/collapse verbs that used to leak through when this handler
-// fell through to the global key map. Only the focus-ring and hard-exit chrome
-// (Tab/Shift-Tab, ? help, q quit, ctrl+c) is allowed to fall through, so the user
-// is never trapped in the section. Scoped to Projects focus; the Instances tree
-// and Automations section are untouched.
+// fell through to the global key map. Only focus-ring navigation, documented
+// section navigation, and hard-exit chrome (Tab/Shift-Tab, `[`/`]`, ? help, q quit,
+// ctrl+c) are allowed to fall through, so the user is never trapped and can
+// keep cycling across every rail region. Scoped to Projects focus; the Instances
+// tree and Automations section are untouched.
 func (m *home) handleProjectsFocus(msg tea.KeyMsg) (tea.Model, tea.Cmd, bool) {
 	if m.ring.Active() != layout.RegionProjects {
 		return m, nil, false
@@ -189,8 +190,9 @@ func (m *home) handleProjectsFocus(msg tea.KeyMsg) (tea.Model, tea.Cmd, bool) {
 		mod, cmd := m.showSearchOverlay()
 		return mod, cmd, true
 	}
-	// The focus ring and hard-exit chrome must keep working so the user can
-	// always leave the section; let only those fall through to the root handler.
+	// Focus and section navigation plus hard-exit chrome must keep working so the
+	// user can always leave the section; let only those fall through to the root
+	// handler.
 	if projectsChromeFallthroughKey(msg) {
 		return m, nil, false
 	}
@@ -202,10 +204,9 @@ func (m *home) handleProjectsFocus(msg tea.KeyMsg) (tea.Model, tea.Cmd, bool) {
 }
 
 // projectsChromeFallthroughKey reports whether a key pressed with the Projects
-// section focused must still reach the global handler — the focus ring
-// (Tab/Shift-Tab), help (?), quit (q), and the always-on ctrl+c hard exit. Every
-// other key is consumed as a no-op by handleProjectsFocus (#1620), so these are
-// the only escape hatches out of the captive section.
+// section focused must still reach the global handler — focus-ring and section
+// navigation, help (?), quit (q), and the always-on ctrl+c hard exit. Every
+// other key is consumed as a no-op by handleProjectsFocus (#1620).
 func projectsChromeFallthroughKey(msg tea.KeyMsg) bool {
 	if msg.String() == "ctrl+c" {
 		return true
@@ -213,6 +214,8 @@ func projectsChromeFallthroughKey(msg tea.KeyMsg) bool {
 	for _, name := range []keys.KeyName{
 		keys.KeyTab,
 		keys.KeyShiftTab,
+		keys.KeyNextSection,
+		keys.KeyPrevSection,
 		keys.KeyHelp,
 		keys.KeyQuit,
 	} {

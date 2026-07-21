@@ -4,6 +4,7 @@ import (
 	"testing"
 	"time"
 
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/stretchr/testify/require"
 
 	"github.com/sachiniyer/agent-factory/session"
@@ -209,6 +210,27 @@ func TestSectionNav_JumpsAcrossRailSections(t *testing.T) {
 	pressKey(t, h, "[")
 	require.Equal(t, layout.RegionProjects, h.ring.Active(),
 		"#1706: [ walks the sections in reverse")
+}
+
+// TestSectionNav_ProjectsFocusUsesGlobalBindings is the #2278 regression. The
+// focused Projects section owns most keys before the global dispatcher runs,
+// but the documented section-navigation bindings must fall through that
+// captive handler so they can keep cycling through every rail section.
+func TestSectionNav_ProjectsFocusUsesGlobalBindings(t *testing.T) {
+	h := paneTestHome(t)
+	h.focusRegion(layout.RegionProjects)
+	require.Equal(t, layout.RegionProjects, h.ring.Active())
+
+	// Drive Update rather than handleDefaultKeyPress directly: production sends
+	// this key through handleProjectsFocus before the global key map.
+	_, _ = h.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'['}})
+	require.Equal(t, layout.RegionAutomations, h.ring.Active(),
+		"#2278: [ from Projects must reach Automations")
+
+	h.focusRegion(layout.RegionProjects)
+	_, _ = h.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{']'}})
+	require.Equal(t, layout.RegionTree, h.ring.Active(),
+		"#2278: ] from Projects must wrap to Instances")
 }
 
 // TestSectionNav_SkipsWorkspacePanes proves `]` jumps SECTION to SECTION, not
