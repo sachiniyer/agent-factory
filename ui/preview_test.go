@@ -616,10 +616,7 @@ func TestPreviewFallbackHeightNoDoubleCounting(t *testing.T) {
 
 	// Count the number of lines in the fallback text itself so we can make
 	// assertions that depend on the ASCII art surviving the layout math.
-	fallbackTextLines := len(strings.Split(
-		lipgloss.JoinVertical(lipgloss.Center, FallBackText, "", "msg"),
-		"\n",
-	))
+	fallbackTextLines := len(strings.Split(paneFallbackContent("msg", 80), "\n"))
 
 	t.Run("renders full content at comfortable height", func(t *testing.T) {
 		p := NewTabPane(previewFromInstance)
@@ -662,6 +659,30 @@ func TestPreviewFallbackHeightNoDoubleCounting(t *testing.T) {
 				"height=%d: fallback message must remain visible", h)
 		}
 	})
+}
+
+func TestPreviewFallbackOmitsLogoWhenItCannotFit(t *testing.T) {
+	for _, tc := range []struct{ width, height int }{
+		{56, 20}, // content box in the reported 80x24 layout
+		{48, 15}, // compact 80x24 layout variants
+		{36, 16}, // content box in a narrower terminal
+	} {
+		p := NewTabPane(previewFromInstance)
+		p.SetSize(tc.width, tc.height)
+		p.setFallbackState("Setting up workspace…")
+
+		rendered := p.String()
+		require.Contains(t, rendered, "Setting up workspace…")
+		require.NotContains(t, rendered, "████",
+			"%d-cell panes must omit, not hard-wrap, the fallback logo", tc.width)
+		require.Equal(t, tc.height, len(strings.Split(rendered, "\n")))
+	}
+
+	p := NewTabPane(previewFromInstance)
+	p.SetSize(lipgloss.Width(FallBackText), 30)
+	p.setFallbackState("Setting up workspace…")
+	require.Contains(t, p.String(), "████",
+		"the full fallback logo remains at widths where it fits")
 }
 
 // TestPreviewFallbackMatchesNormalModeHeight is the regression test for #616.

@@ -25,8 +25,7 @@ func TerminalTooSmall(width, height int) string {
 //
 // The text is rendered (and therefore wrapped) at the target width before the
 // vertical padding is computed, so centering uses the wrapped line count
-// rather than the pre-wrap count — on narrow panes the fallback ASCII art
-// wraps and padding computed from the raw line count miscenters it (#699).
+// rather than the pre-wrap count (#699).
 //
 // When the wrapped text is taller than the box it is clamped to the bottom
 // height lines — keeping the trailing message visible, matching the
@@ -53,4 +52,16 @@ func renderCenteredFallback(style lipgloss.Style, text string, width, height int
 	out = append(out, lines...)
 	out = append(out, make([]string, height-len(lines)-topPadding)...)
 	return strings.Join(out, "\n")
+}
+
+// paneFallbackContent adds the full Agent Factory logo only when it fits
+// without wrapping. At ordinary 80-column terminals the workspace pane is
+// narrower than the logo; omitting it keeps transient setup/name fallbacks calm
+// and leaves their actionable message intact instead of rendering art fragments
+// (#2146).
+func paneFallbackContent(message string, width int) string {
+	if width < lipgloss.Width(FallBackText) {
+		return message
+	}
+	return lipgloss.JoinVertical(lipgloss.Center, FallBackText, "", message)
 }

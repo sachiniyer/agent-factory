@@ -19,10 +19,11 @@ var tabPaneStyle = lipgloss.NewStyle().
 
 // tabContentState holds the rendered content of the tab pane.
 //
-// Invariant: fallback==true iff text is a centered fallback message
-// (loading / error / inactive). Writers MUST replace the whole struct rather
-// than mutate fields individually, so the two fields can never disagree about
-// which rendering branch String() should take (#577).
+// Invariant: fallback==true iff text is a fallback message (loading / error /
+// inactive); String adds width-appropriate branding and centers it. Writers
+// MUST replace the whole struct rather than mutate fields individually, so the
+// two fields can never disagree about which rendering branch String() should
+// take (#577).
 type tabContentState struct {
 	fallback bool
 	text     string
@@ -322,7 +323,7 @@ func (p *TabPane) publishContent(content tabContentState) {
 func (p *TabPane) setFallbackState(message string) {
 	p.publishContent(tabContentState{
 		fallback: true,
-		text:     lipgloss.JoinVertical(lipgloss.Center, FallBackText, "", message),
+		text:     message,
 	})
 	// Reset unconditionally: an already-None controller can still have viewport
 	// data left by a prior owner or a test seam. Fallback must make stale scroll
@@ -723,10 +724,11 @@ func (p *TabPane) String() string {
 		// TabbedWindow.SetRect already subtracts borders/margins/padding from
 		// p.height, so use it directly to match normal mode. Subtracting again
 		// would double-count chrome and leave a trailing blank line (#616/#703).
-		// renderCenteredFallback centers using the wrapped line count so narrow
-		// panes don't miscenter (#699).
+		// paneFallbackContent omits the logo when it cannot fit unwrapped (#2146),
+		// then renderCenteredFallback centers the remaining width-aware content.
 		return layout.ClampToRect(
-			renderCenteredFallback(tabPaneStyle, p.content.text, p.width, p.height), rect)
+			renderCenteredFallback(tabPaneStyle,
+				paneFallbackContent(p.content.text, p.width), p.width, p.height), rect)
 	}
 
 	lines := strings.Split(p.content.text, "\n")
