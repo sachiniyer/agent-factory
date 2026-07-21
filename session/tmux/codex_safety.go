@@ -258,7 +258,7 @@ func parseCodexSafetyDialog(content, targetLabel string, promptActive bool) (cod
 // fail-closed startup blocker if the cursor query fails, but it is never
 // actionable without the positive hidden-cursor signal.
 func (t *TmuxSession) inspectCodexSafetyPrompt(content string) (targetLabel string, promptPresent, promptActive bool) {
-	targetLabel, candidate := codexSafetyPromptTarget(content)
+	targetLabel, candidate := codexSafetyPromptCandidate(content)
 	if !candidate {
 		return "", false, false
 	}
@@ -272,30 +272,31 @@ func (t *TmuxSession) inspectCodexSafetyPrompt(content string) (targetLabel stri
 	return targetLabel, true, true
 }
 
-// codexSafetyPromptTarget recognizes the whole modal shell independently from
-// its option rows. That lets af surface a changed/unhandled picker without
-// injecting any key, while parseCodexSafetyDialog remains the stricter action
-// gate. The unique footer must end the visible pane, apart from the one normal
-// Codex model status line that some terminal layouts retain below the picker.
-// Any other trailing output rejects the capture.
-func codexSafetyPromptTarget(content string) (string, bool) {
+// codexSafetyPromptCandidate recognizes picker-shaped text independently from
+// its option rows. It deliberately does not claim the picker is active: quoted
+// transcript can have the same shell, so inspectCodexSafetyPrompt separately
+// requires Codex's hidden-cursor modal state before allowing input. The unique
+// footer must end the visible pane, apart from the one normal Codex model
+// status line that some terminal layouts retain below the picker. Any other
+// trailing output rejects the capture.
+func codexSafetyPromptCandidate(content string) (string, bool) {
 	clean := normalizeCodexPane(content)
 	flat := strings.Join(strings.Fields(clean), " ")
 	const oldMessage = "Additional safety checks This request requires additional safety checks, which can take extra time. Hang tight or retry with a faster model for a quicker response, though it may be less capable of handling complex requests."
 	const oldFooter = "Press enter to confirm or esc to go back"
-	if strings.Contains(flat, oldMessage) && codexSafetyFooterEndsPane(clean, flat, oldFooter) {
+	if strings.Contains(flat, oldMessage) && codexSafetyCandidateFooterEndsPane(clean, flat, oldFooter) {
 		return codexSafetyWaitLabel, true
 	}
 
 	const newMessage = "Our systems are thinking a bit more about this request before responding. Hang tight or retry with a faster model for a quicker response, though it may be less capable of handling complex requests."
 	const newFooter = "No action is required. Codex will keep waiting, and this menu will close when the response is ready."
-	if strings.Contains(flat, newMessage) && codexSafetyFooterEndsPane(clean, flat, newFooter) {
+	if strings.Contains(flat, newMessage) && codexSafetyCandidateFooterEndsPane(clean, flat, newFooter) {
 		return codexSafetyDismissWaitLabel, true
 	}
 	return "", false
 }
 
-func codexSafetyFooterEndsPane(clean, flat, footer string) bool {
+func codexSafetyCandidateFooterEndsPane(clean, flat, footer string) bool {
 	if strings.HasSuffix(flat, footer) {
 		return true
 	}
@@ -309,8 +310,8 @@ func codexSafetyFooterEndsPane(clean, flat, footer string) bool {
 		if codexStatusLineModel(statusLine) == "" {
 			return false
 		}
-		status := strings.Join(strings.Fields(statusLine), " ")
-		return strings.HasSuffix(flat, footer+" "+status)
+		candidateSuffix := footer + " " + strings.Join(strings.Fields(statusLine), " ")
+		return strings.HasSuffix(flat, candidateSuffix)
 	}
 	return false
 }
