@@ -288,6 +288,7 @@ func (p *schedulePicker) adjust(dir int) {
 		n := len(scheduleTypes)
 		p.typ = (p.typ + dir + n) % n
 		p.clampCursor()
+		p.normalizeInterval()
 		// Switching into Custom prefills the raw field with the cron the
 		// previous preset generated, so the escape hatch starts from a working
 		// expression rather than blank.
@@ -372,15 +373,33 @@ func (p *schedulePicker) intervalMax() int {
 	return 59
 }
 
+// intervalValue is the one canonical projection of the shared interval field.
+// Both save-time materialization and a type transition use it, so the editable
+// chip cannot retain a value that the selected schedule type will save
+// differently.
+func (p *schedulePicker) intervalValue() int {
+	if p.kind() == schedule.EveryNHours {
+		return atoiClamp(p.interval, 1, p.intervalMax(), 1)
+	}
+	return atoiClamp(p.interval, 1, p.intervalMax(), 15)
+}
+
+func (p *schedulePicker) normalizeInterval() {
+	switch p.kind() {
+	case schedule.EveryNMinutes, schedule.EveryNHours:
+		p.interval = strconv.Itoa(p.intervalValue())
+	}
+}
+
 // toSchedule materializes the current picker state into a canonical Schedule,
 // clamping numeric fields into valid ranges so the generated cron is always
 // well-formed (custom raw text excepted — it is validated separately).
 func (p *schedulePicker) toSchedule() schedule.Schedule {
 	switch p.kind() {
 	case schedule.EveryNMinutes:
-		return schedule.Schedule{Type: schedule.EveryNMinutes, Interval: atoiClamp(p.interval, 1, 59, 15)}
+		return schedule.Schedule{Type: schedule.EveryNMinutes, Interval: p.intervalValue()}
 	case schedule.EveryNHours:
-		return schedule.Schedule{Type: schedule.EveryNHours, Interval: atoiClamp(p.interval, 1, 23, 1)}
+		return schedule.Schedule{Type: schedule.EveryNHours, Interval: p.intervalValue()}
 	case schedule.Hourly:
 		return schedule.Schedule{Type: schedule.Hourly, Minute: atoiClamp(p.minuteStr, 0, 59, 0)}
 	case schedule.Daily:
