@@ -168,6 +168,34 @@ else
     ok "AF_LIFECYCLE_ALLOW_PARTIAL=1 does not pardon genuine FAILs"
 fi
 
+printf '\n=== native CI requires positive supervision proof ===\n'
+
+# The native workflow permits release-availability SKIPs, so absence of the
+# container-only "SKIP assertion #4" line is not proof that scenario B reached
+# supervision at all. Its log contract requires every assertion-4 PASS record.
+proof_log="$SELFTEST_TMP/supervision-pass.log"
+printf '%s\n' \
+    '[lifecycle]   PASS  assertion 4: the unit is still active (= active)' \
+    '[lifecycle]   PASS  assertion 4: af still sees the autostart unit (= true)' \
+    "[lifecycle]   PASS  assertion 4: the running daemon IS the unit's child (MainPID=7712) — not demoted" \
+    >"$proof_log"
+if lc_log_proves_supervision "$proof_log" 2>/dev/null; then
+    ok "all three assertion-4 PASS records prove native supervision ran"
+else
+    no "a complete assertion-4 PASS log was not recognized"
+fi
+
+skipped_log="$SELFTEST_TMP/release-skip.log"
+printf '%s\n' \
+    '[lifecycle]   SKIP  scenario-b/upgrade-cmd: could not verify the release boundary — GitHub release API unavailable or rate-limited' \
+    '[lifecycle] 4 PASS, 0 FAIL, 1 SKIP' \
+    >"$skipped_log"
+if lc_log_proves_supervision "$skipped_log" 2>/dev/null; then
+    no "a release-boundary SKIP with no assertion-4 records passed as supervision proof"
+else
+    ok "a release-boundary SKIP cannot masquerade as native supervision coverage"
+fi
+
 printf '\n=== the kill path refuses an empty home ===\n'
 
 # lc_daemon_pids feeds lc_teardown_home, which SIGKILLs what it returns. With an

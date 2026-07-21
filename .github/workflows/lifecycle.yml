@@ -129,10 +129,6 @@ jobs:
           AF_LIFECYCLE_AF_BIN: ${{ runner.temp }}/bin/af
           AF_LIFECYCLE_WORKSPACE: ${{ runner.temp }}/af-lifecycle
           AF_LIFECYCLE_INJECT: ${{ github.event.inputs.inject }}
-          # External release availability is reported as an explicit SKIP. Do
-          # not turn that into a product-red job; the dedicated step below still
-          # makes the one mandatory native-only assertion (#4) non-skippable.
-          AF_LIFECYCLE_ALLOW_PARTIAL: "1"
           # Raises the release-API rate limit; the API is public either way.
           GITHUB_TOKEN: ${{ github.token }}
         # `set -o pipefail` is load-bearing: without it the exit status of
@@ -141,19 +137,25 @@ jobs:
         # run of this workflow, which passed while reporting two FAILs.
         run: |
           set -o pipefail
-          bash scripts/lifecycle.sh all 2>&1 | tee "$RUNNER_TEMP/lifecycle.log"
+          # External release availability is an explicit SKIP, not a product
+          # failure. Scope that acknowledgement to the harness process; the
+          # independent step below still requires positive supervision proof.
+          AF_LIFECYCLE_ALLOW_PARTIAL=1 \
+            bash scripts/lifecycle.sh all 2>&1 | tee "$RUNNER_TEMP/lifecycle.log"
 
       - name: Verify the supervision assertion actually ran
         # The container leg legitimately skips assertion #4. This leg is the ONLY
-        # place it runs, so a SKIP here means the job proved nothing about the
-        # thing it exists for.
+        # place it runs, so require its positive proof records. Merely checking
+        # for no explicit assertion-4 SKIP is vacuous when release discovery
+        # stops scenario B before it reaches supervision.
         if: ${{ always() && github.event.inputs.inject == '' }}
         run: |
-          if grep -q 'SKIP.*assertion #4' "$RUNNER_TEMP/lifecycle.log"; then
-            echo "::error::assertion #4 (unit stays the supervisor) was SKIPPED on the native leg — this job exists to cover it. Check the systemd user manager setup."
+          . scripts/lifecycle-lib.sh
+          if ! lc_log_proves_supervision "$RUNNER_TEMP/lifecycle.log"; then
+            echo "::error::missing positive proof for assertion #4 (unit stays the supervisor) on the native leg. Scenario B may have stopped before supervision or the systemd checks may not have completed."
             exit 1
           fi
-          echo "assertion #4 ran on this leg."
+          echo "all assertion #4 supervision checks passed on this leg."
 
       - name: Upload the run log
         if: always()

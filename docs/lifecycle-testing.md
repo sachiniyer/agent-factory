@@ -186,9 +186,10 @@ Two guards keep that honest:
   PARTIAL COVERAGE banner naming what went untested. The native CI leg also
   permits an explicit external-release-availability skip; its dedicated check
   below still makes assertion #4 non-skippable;
-* the CI native leg **fails the job** if assertion #4 ever silently starts
-  skipping — a green run that quietly stopped testing supervision is the exact
-  lie this gate exists to prevent.
+* the CI native leg requires all three positive assertion-4 PASS records. It
+  **fails the job** if assertion #4 skips or scenario B stops before reaching
+  it — a green run that quietly stopped testing supervision is the exact lie
+  this gate exists to prevent.
 
 ## The audit: "what would make this pass without testing anything?"
 
