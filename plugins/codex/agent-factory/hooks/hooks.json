@@ -1,5 +1,17 @@
 {
   "hooks": {
+    "PreToolUse": [
+      {
+        "hooks": [
+          {
+            "command": "if [ ! -x \"${PLUGIN_ROOT}/hooks/guard-tmux.sh\" ]; then echo 'Agent Factory tmux safety guard is unavailable; refusing the Bash command.' \u003e\u00262; exit 2; fi; \"${PLUGIN_ROOT}/hooks/guard-tmux.sh\"",
+            "statusMessage": "Checking tmux command safety",
+            "type": "command"
+          }
+        ],
+        "matcher": "Bash"
+      }
+    ],
     "SessionStart": [
       {
         "hooks": [

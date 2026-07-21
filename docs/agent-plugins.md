@@ -33,8 +33,10 @@ installs the plugin from it. Codex copies the manifest, the skill, and the hook
 into `$CODEX_HOME/plugins/cache/agent-factory/agent-factory/<version>/`.
 
 Codex does not trust a plugin's hooks just because the plugin is installed — it
-asks you to review them first. Declining the hook is fine: the skill, which is
-the whole point, works either way.
+asks you to review their exact definitions first. The skill works if you decline
+them, but the tmux teardown guard does not: use `/hooks` to trust the plugin's
+current hooks if you want the protection described below. A plugin update that
+changes a hook requires review again.
 
 ## Claude Code
 
@@ -73,17 +75,45 @@ For a user-wide install, copy it into `~/.config/agents/skills/` instead. Amp
 also still discovers the legacy `~/.config/amp/skills/` directory that `af`
 writes when `global_agent_skills` is on.
 
-## The preflight hook
+## Codex hooks
 
-The Codex plugin ships one optional `SessionStart` hook. It reports whether `af`
-is on your `PATH` and, if not, prints the install command. That is all it does.
+The Codex plugin ships two optional hooks:
 
-It deliberately does not fetch or install anything. A plugin hook runs as you,
+- A `SessionStart` preflight reports whether `af` is on your `PATH` and, if not,
+  prints the install command.
+- A `PreToolUse` hook checks every Codex shell command with `af
+  hook-guard-tmux`. It blocks commands the shared policy cannot prove safe,
+  including a bare `tmux kill-server` and pattern-based process kills. A
+  socket-scoped teardown such as `tmux -L test-socket kill-server` remains
+  available. If the installed `af` helper is missing or fails, the hook blocks
+  the command rather than silently dropping the guard.
+
+The preflight deliberately does not fetch or install anything. A plugin hook runs as you,
 with your permissions, and af's releases carry no checksum or signature to
 verify against — `install.sh` and `af upgrade` both check only that the download
 is a well-formed tarball. Downloading and executing a binary from inside an
 agent session, on the strength of nothing, is the wrong shape however convenient
 it would be. Detect and instruct instead.
+
+## Tmux guard coverage
+
+The guard is a safety layer, not a sandbox. Its policy is agent-neutral, but
+each agent needs a blocking lifecycle seam that af actually delivers:
+
+| Agent | Guarded by af | Delivery boundary |
+| --- | --- | --- |
+| Claude Code | Yes, for sessions launched by af | af injects its runtime plugin with `--plugin-dir` on every Claude launch. |
+| Codex | Yes, when this plugin is installed, enabled, and its current hooks are trusted | The plugin's `PreToolUse` hook covers Codex shell and unified-exec calls. An af-launched Codex session is not guarded merely because af wrote its optional skill. |
+| Gemini CLI | No | af ships a skill, not a blocking hook integration. |
+| Amp | No | af ships a skill, not a blocking hook integration. |
+| Aider | No | af injects read-only guidance with `--read`; it has no af-delivered blocking command hook. |
+| OpenCode | No | af injects guidance through `OPENCODE_CONFIG`; it has no af-delivered blocking command hook. |
+
+Codex can disable hooks globally, skip untrusted plugin hooks, or be configured
+to accept managed hooks only. Those modes are outside this plugin's control and
+leave the Codex session unguarded. Gemini, Amp, Aider, and OpenCode must be
+treated as unguarded until af ships and verifies a blocking delivery seam for
+each one.
 
 ## Relationship to `global_agent_skills`
 
