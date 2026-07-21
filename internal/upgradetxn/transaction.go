@@ -666,6 +666,11 @@ func (t *Transaction) rollback() error {
 		if err := t.persistPhaseLocked(PhaseRollingBack); err != nil {
 			return err
 		}
+		if t.afterRollbackCheckpoint != nil {
+			if err := t.afterRollbackCheckpoint(t.journal.RollbackProgress); err != nil {
+				return err
+			}
+		}
 	default:
 		return fmt.Errorf("cannot roll back upgrade from phase %s", t.journal.Phase)
 	}

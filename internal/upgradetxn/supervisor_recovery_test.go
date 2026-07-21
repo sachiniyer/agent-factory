@@ -80,15 +80,19 @@ func TestSupervisorRejectsLeaseFromAnotherTransactionBeforeMutation(t *testing.T
 }
 
 func TestSupervisorLossAtEveryFileRollbackCheckpointIsTakenOver(t *testing.T) {
-	checkpoints := []RollbackProgress{
-		{BinaryRestored: true},
-		{BinaryRestored: true, MetadataRestored: 1},
-		{BinaryRestored: true, MetadataRestored: 2},
-		{BinaryRestored: true, MetadataRestored: 3},
+	checkpoints := []struct {
+		name     string
+		progress RollbackProgress
+	}{
+		{name: "rollback-started"},
+		{name: "binary-restored", progress: RollbackProgress{BinaryRestored: true}},
+		{name: "metadata-1", progress: RollbackProgress{BinaryRestored: true, MetadataRestored: 1}},
+		{name: "metadata-2", progress: RollbackProgress{BinaryRestored: true, MetadataRestored: 2}},
+		{name: "metadata-3", progress: RollbackProgress{BinaryRestored: true, MetadataRestored: 3}},
 	}
 	for _, checkpoint := range checkpoints {
 		checkpoint := checkpoint
-		t.Run(fmt.Sprintf("metadata-%d", checkpoint.MetadataRestored), func(t *testing.T) {
+		t.Run(checkpoint.name, func(t *testing.T) {
 			txn, home, executable := prepareFixture(t)
 			lease, err := txn.tryAcquireRecoveryAs(txn.Journal().PreviousBinaryPath)
 			require.NoError(t, err)
@@ -105,7 +109,7 @@ func TestSupervisorLossAtEveryFileRollbackCheckpointIsTakenOver(t *testing.T) {
 			}
 			injected := false
 			txn.afterRollbackCheckpoint = func(got RollbackProgress) error {
-				if !injected && got == checkpoint {
+				if !injected && got == checkpoint.progress {
 					injected = true
 					return fmt.Errorf("simulated supervisor death: %w", errRecoveryCheckpointInterrupted)
 				}
@@ -116,7 +120,7 @@ func TestSupervisorLossAtEveryFileRollbackCheckpointIsTakenOver(t *testing.T) {
 			require.ErrorIs(t, err, errRecoveryCheckpointInterrupted)
 			require.True(t, injected, "fault injection must actually execute")
 			require.Equal(t, PhaseRollingBack, txn.Journal().Phase)
-			require.Equal(t, checkpoint, txn.Journal().RollbackProgress)
+			require.Equal(t, checkpoint.progress, txn.Journal().RollbackProgress)
 			require.NoError(t, lease.Release())
 
 			resumed, err := Load(home)
