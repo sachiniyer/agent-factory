@@ -65,12 +65,12 @@ type TabPane struct {
 	// retargeting snapshots it so a grace-period expiry can replace stale content
 	// without racing and overwriting a capture that landed at the deadline.
 	renderRevision uint64
-	// captureGeneration orders same-target preview snapshots. Every capture
-	// dispatch and every state transition that invalidates pending captures
-	// advances it; only the current generation may publish. A slow older capture
-	// therefore cannot overwrite a newer terminal-owner decision merely because
-	// it finished last.
-	captureGeneration uint64
+	// normalCaptureGeneration orders same-target normal preview snapshots. Full
+	// history captures deliberately use a controller-issued single-flight token:
+	// periodic duplicate requests cannot launch a competing capture or starve the
+	// viewport. Owner/target changes and scroll entry advance this generation so
+	// an older normal snapshot cannot overwrite them.
+	normalCaptureGeneration uint64
 	// scroll is the explicit scroll owner and transition controller (#2192).
 	// Capture-backed tabs begin with an ownership probe and resolve to host or
 	// child ownership from the same snapshot as their content. The controller
@@ -209,7 +209,7 @@ func (p *TabPane) setScrollOwnerLocked(owner ScrollOwner) {
 		}
 	}
 	p.scroll.Reset(&p.viewport)
-	p.captureGeneration++
+	p.normalCaptureGeneration++
 	switch owner {
 	case ScrollOwnerHostHistory:
 		p.scroll = newHostHistoryScrollController()
@@ -223,7 +223,7 @@ func (p *TabPane) setScrollOwnerLocked(owner ScrollOwner) {
 
 func (p *TabPane) installOwnershipProbeLocked() {
 	p.scroll.Reset(&p.viewport)
-	p.captureGeneration++
+	p.normalCaptureGeneration++
 	p.scroll = newOwnershipProbeScrollController()
 	p.scroll.Resize(&p.viewport, p.width, p.height)
 }
@@ -256,7 +256,7 @@ func (p *TabPane) BeginScrollFill() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if history, ok := p.historyScrollLocked(); ok {
-		history.BeginFill()
+		history.MarkFillDispatched()
 	}
 }
 
@@ -312,7 +312,7 @@ func (p *TabPane) setFallbackState(message string) {
 	// Reset unconditionally: an already-None controller can still have viewport
 	// data left by a prior owner or a test seam. Fallback must make stale scroll
 	// rendering impossible even when the ownership enum does not change (#940).
-	p.captureGeneration++
+	p.normalCaptureGeneration++
 	p.scroll.Reset(&p.viewport)
 	p.setScrollOwnerLocked(ScrollOwnerNone)
 }
@@ -331,9 +331,9 @@ func guardOK(guard contentGuard) bool {
 	return guard == nil || guard()
 }
 
-func (p *TabPane) beginCaptureLocked() uint64 {
-	p.captureGeneration++
-	return p.captureGeneration
+func (p *TabPane) beginNormalCaptureLocked() uint64 {
+	p.normalCaptureGeneration++
+	return p.normalCaptureGeneration
 }
 
 // capturePaneHistoryRows removes capture-pane's one output-record separator.
@@ -415,23 +415,27 @@ func (p *TabPane) fillHostHistoryLocked(
 	if !ok {
 		return nil
 	}
-	gen := history.FillGeneration()
-	captureGeneration := p.beginCaptureLocked()
+	token, claimed := history.ClaimFill()
+	if !claimed {
+		// A periodic refresh may reach this path after the event-loop dispatch
+		// claimed the lifecycle. The controller admits exactly one full capture;
+		// duplicates return without competing with the in-flight fill.
+		return nil
+	}
 	p.mu.Unlock()
 	snapshot, err := p.previewSrc(instance, activeTab, true)
 	p.mu.Lock()
 
-	// Ownership can switch while capture is off-loop. A child transition replaces
-	// the controller and resets the old generation; never publish that host buffer.
-	if p.captureGeneration != captureGeneration {
-		return nil
-	}
+	// Ownership/target changes replace the controller, and a new scroll lifecycle
+	// advances its fill generation. Those are the authoritative stale checks for
+	// full history. ClaimFill prevents periodic refreshes in this SAME lifecycle
+	// from launching a second full capture in the first place.
 	current, stillHost := p.historyScrollLocked()
-	if !stillHost || current != history || !history.FillIsCurrent(gen) {
+	if !stillHost || current != history || !history.FillIsCurrent(token) {
 		return nil
 	}
 	if !guardOK(guard) || !p.isCurrentViewLocked(instance, activeTab) {
-		history.RearmFill()
+		history.RearmFill(token)
 		return nil
 	}
 	if err != nil {
@@ -439,7 +443,7 @@ func (p *TabPane) fillHostHistoryLocked(
 			p.setFallbackState(goneMessage)
 			return nil
 		}
-		history.RearmFill()
+		history.RearmFill(token)
 		return err
 	}
 	if snapshot.Owner != ScrollOwnerHostHistory {
@@ -453,7 +457,7 @@ func (p *TabPane) fillHostHistoryLocked(
 	// value too; TabbedWindow renders the scroll cue in its header, outside the
 	// child's history coordinate system.
 	content := capturePaneHistoryRows(snapshot.Content)
-	if history.CompleteFill(gen, &p.viewport, content) {
+	if history.CompleteFill(token, &p.viewport, content) {
 		p.renderRevision++
 	}
 	return nil
@@ -514,13 +518,13 @@ func (p *TabPane) updateAgent(instance *session.Instance, guard contentGuard) er
 		p.mu.Unlock()
 		return nil
 	}
-	captureGeneration := p.beginCaptureLocked()
+	captureGeneration := p.beginNormalCaptureLocked()
 	p.mu.Unlock()
 
 	snapshot, err := p.previewSrc(instance, 0, false)
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if p.captureGeneration != captureGeneration ||
+	if p.normalCaptureGeneration != captureGeneration ||
 		!guardOK(guard) || !p.isCurrentViewLocked(instance, 0) {
 		return nil
 	}
@@ -656,13 +660,13 @@ func (p *TabPane) updateShell(instance *session.Instance, activeTab int, guard c
 		p.mu.Unlock()
 		return nil
 	}
-	captureGeneration := p.beginCaptureLocked()
+	captureGeneration := p.beginNormalCaptureLocked()
 	p.mu.Unlock()
 
 	snapshot, err := p.previewSrc(instance, activeTab, false)
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if p.captureGeneration != captureGeneration ||
+	if p.normalCaptureGeneration != captureGeneration ||
 		!guardOK(guard) || !p.isCurrentViewLocked(instance, activeTab) {
 		return nil
 	}
@@ -770,7 +774,14 @@ func (p *TabPane) scrollBy(instance *session.Instance, activeTab int, intent Scr
 	if !p.scroll.Active() && !p.canEnterScrollModeLocked(instance, activeTab) {
 		return nil
 	}
+	wasActive := history.Active()
 	history.Scroll(&p.viewport, intent)
+	if !wasActive && history.Active() {
+		// Scroll entry starts a controller-owned full-history lifecycle. Invalidate
+		// any older normal capture now; full captures themselves must not compete on
+		// this generation or duplicate periodic refreshes can starve the fill.
+		p.normalCaptureGeneration++
+	}
 	return nil
 }
 

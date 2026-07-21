@@ -25,8 +25,9 @@ func TestHostHistoryScrollControllerConformanceAtTerminalSizes(t *testing.T) {
 			controller.Scroll(&v, scrollOneLineUp)
 			require.True(t, controller.Active())
 			require.True(t, controller.NeedsFill(size.height))
-			gen := controller.FillGeneration()
-			require.True(t, controller.CompleteFill(gen, &v, history))
+			token, claimed := controller.ClaimFill()
+			require.True(t, claimed)
+			require.True(t, controller.CompleteFill(token, &v, history))
 
 			bottom := 100 - size.height
 			require.Equal(t, bottom-1, v.YOffset,
@@ -45,13 +46,14 @@ func TestHostHistoryScrollControllerPreservesIntentAcrossPendingResize(t *testin
 	controller := newHostHistoryScrollController()
 
 	controller.Scroll(&v, scrollOneLineUp)
-	gen := controller.FillGeneration()
+	token, claimed := controller.ClaimFill()
+	require.True(t, claimed)
 
 	// The real TUI can resize while capture is in flight. The eventual offset is
 	// computed from the new geometry, while both pre/post-resize intents survive.
 	controller.Resize(&v, 120, 40)
 	controller.Scroll(&v, scrollOneLineUp)
-	require.True(t, controller.CompleteFill(gen, &v, history))
+	require.True(t, controller.CompleteFill(token, &v, history))
 	require.Equal(t, 58, v.YOffset, "120x40 bottom 60 minus two queued up intents")
 }
 
@@ -65,7 +67,9 @@ func TestHostHistoryScrollControllerReplaysQueuedIntentInOrder(t *testing.T) {
 	// incorrectly cancel the two and lose their ordering semantics.
 	controller.Scroll(&v, scrollOneLineDown)
 	controller.Scroll(&v, scrollOneLineUp)
-	require.True(t, controller.CompleteFill(controller.FillGeneration(), &v, history))
+	token, claimed := controller.ClaimFill()
+	require.True(t, claimed)
+	require.True(t, controller.CompleteFill(token, &v, history))
 	require.Equal(t, 75, v.YOffset)
 }
 
@@ -75,7 +79,9 @@ func TestHostHistoryScrollControllerPreservesDistanceAcrossReadyResize(t *testin
 	controller := newHostHistoryScrollController()
 
 	controller.Scroll(&v, scrollOneLineUp)
-	require.True(t, controller.CompleteFill(controller.FillGeneration(), &v, history))
+	token, claimed := controller.ClaimFill()
+	require.True(t, claimed)
+	require.True(t, controller.CompleteFill(token, &v, history))
 	require.Equal(t, 75, v.YOffset, "80x24 bottom 76 minus one")
 
 	controller.Resize(&v, 120, 40)
