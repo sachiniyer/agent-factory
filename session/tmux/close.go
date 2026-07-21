@@ -3,12 +3,12 @@ package tmux
 import (
 	"errors"
 	"fmt"
-	"os"
 	"strconv"
 	"strings"
 	"syscall"
 	"time"
 
+	"github.com/sachiniyer/agent-factory/internal/proctree"
 	"github.com/sachiniyer/agent-factory/log"
 )
 
@@ -203,6 +203,18 @@ var paneExitWait = 3 * time.Second
 // kills-in-flight guard across this call with no deadline of its own.
 func (t *TmuxSession) CloseAndWaitForPaneExit() (PaneState, error) {
 	pid, pidErr := t.panePID()
+	var (
+		paneProcess proctree.Process
+		waitForPane bool
+		processErr  error
+	)
+	if pidErr == nil {
+		// Capture the process IDENTITY before kill-session. Polling the bare PID
+		// afterwards confuses both an unreaped zombie and a recycled PID with the
+		// original pane still running (#2103). The process-table identity makes
+		// both distinctions explicit.
+		paneProcess, waitForPane, processErr = capturePaneProcess(pid)
+	}
 	state, closeErr := t.Close()
 	if pidErr != nil {
 		// A TIMED-OUT panePID is not "nothing to wait on" (#1917). It means the
@@ -220,7 +232,14 @@ func (t *TmuxSession) CloseAndWaitForPaneExit() (PaneState, error) {
 		// and Close's own state stands.
 		return state, closeErr
 	}
-	if !waitForPIDExit(pid, paneExitWait) {
+	if processErr != nil {
+		// We knew which PID tmux owned, but could not establish a process identity
+		// to follow across teardown. A successful kill-session is not enough to
+		// prove that process stopped writing, so fail closed like a timed-out PID
+		// query rather than deleting the worktree on an existence guess.
+		return PaneStateUnknown, errors.Join(closeErr, processErr)
+	}
+	if waitForPane && !waitForProcessExit(paneProcess, paneExitWait) {
 		// kill-session returning establishes only that SIGHUP was sent, not that the
 		// process stopped writing. Unknown is the only state that keeps every
 		// destructive caller from deleting/moving the worktree on that assumption.
@@ -229,6 +248,27 @@ func (t *TmuxSession) CloseAndWaitForPaneExit() (PaneState, error) {
 		return PaneStateUnknown, errors.Join(closeErr, err)
 	}
 	return state, closeErr
+}
+
+// capturePaneProcess turns tmux's bare pane PID into a process-table identity
+// before teardown. A PID absent from a successful snapshot is accepted as gone
+// only when the kernel agrees with ESRCH. If the PID still exists, the snapshot
+// was unable to identify it (or it became a zombie in the observation gap), and
+// callers must keep cleanup unsafe rather than manufacturing an exit.
+func capturePaneProcess(pid int) (proctree.Process, bool, error) {
+	snap, err := proctree.Snapshot()
+	if err != nil {
+		return proctree.Process{}, false, fmt.Errorf("cannot inspect pane process %d before kill-session: %w", pid, err)
+	}
+	if process, ok := snap[pid]; ok {
+		return process, true, nil
+	}
+	if err := syscall.Kill(pid, 0); errors.Is(err, syscall.ESRCH) {
+		return proctree.Process{}, false, nil
+	} else if err != nil {
+		return proctree.Process{}, false, fmt.Errorf("cannot establish whether pane process %d already exited: %w", pid, err)
+	}
+	return proctree.Process{}, false, fmt.Errorf("pane process %d still exists but was absent from the process-table snapshot", pid)
 }
 
 // panePID returns the PID of the root process running in the session's pane
@@ -258,24 +298,9 @@ func (t *TmuxSession) panePID() (int, error) {
 	return pid, nil
 }
 
-// waitForPIDExit polls pid with signal 0 until the process is gone or the
-// timeout elapses. Returns true when the process exited within the timeout.
-// The tmux server reaps its dead children promptly, so a lingering zombie
-// (signal 0 succeeds on zombies) does not realistically pin this to the full
-// timeout.
-func waitForPIDExit(pid int, timeout time.Duration) bool {
-	deadline := time.Now().Add(timeout)
-	for {
-		proc, err := os.FindProcess(pid)
-		if err != nil {
-			return true
-		}
-		if err := proc.Signal(syscall.Signal(0)); err != nil {
-			return true
-		}
-		if time.Now().After(deadline) {
-			return false
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
+// waitForProcessExit waits on the pre-teardown process identity, not merely its
+// PID. proctree treats zombies as exited and PID reuse as a different identity,
+// so neither can masquerade as a pane that is still writing (#2103).
+func waitForProcessExit(process proctree.Process, timeout time.Duration) bool {
+	return len(proctree.WaitForExits([]proctree.Process{process}, timeout)) == 0
 }

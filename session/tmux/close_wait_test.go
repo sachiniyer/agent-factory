@@ -11,29 +11,56 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/sachiniyer/agent-factory/cmd/cmd_test"
+	"github.com/sachiniyer/agent-factory/internal/proctree"
 )
 
-// deadPID returns a PID that is guaranteed to have exited and been reaped:
-// we spawn a trivial process and wait for it ourselves.
-func deadPID(t *testing.T) int {
+func processIdentity(t *testing.T, pid int) proctree.Process {
 	t.Helper()
-	cmd := exec.Command("true")
-	require.NoError(t, cmd.Run())
-	return cmd.Process.Pid
+	snap, err := proctree.Snapshot()
+	require.NoError(t, err)
+	process, ok := snap[pid]
+	require.True(t, ok, "pid %d missing from process snapshot", pid)
+	return process
 }
 
-func TestWaitForPIDExit_ExitedProcess(t *testing.T) {
+// exitedProcess returns the captured identity of a process that is now fully
+// exited and reaped, so a later PID reuse cannot change the expected answer.
+func exitedProcess(t *testing.T) proctree.Process {
+	t.Helper()
+	cmd := exec.Command("sleep", "300")
+	require.NoError(t, cmd.Start())
+	process := processIdentity(t, cmd.Process.Pid)
+	require.NoError(t, cmd.Process.Kill())
+	_, _ = cmd.Process.Wait()
+	return process
+}
+
+func TestWaitForProcessExit_ExitedProcess(t *testing.T) {
 	start := time.Now()
-	require.True(t, waitForPIDExit(deadPID(t), 2*time.Second),
+	require.True(t, waitForProcessExit(exitedProcess(t), 2*time.Second),
 		"an already-exited PID must report exited")
 	require.Less(t, time.Since(start), time.Second,
 		"a dead PID must be detected without burning the timeout")
 }
 
-func TestWaitForPIDExit_AliveProcessTimesOut(t *testing.T) {
+func TestWaitForProcessExit_AliveProcessTimesOut(t *testing.T) {
 	// Our own PID is alive for the duration of the test.
-	require.False(t, waitForPIDExit(os.Getpid(), 120*time.Millisecond),
+	require.False(t, waitForProcessExit(processIdentity(t, os.Getpid()), 120*time.Millisecond),
 		"a live PID must report not-exited once the timeout elapses")
+}
+
+func TestWaitForProcessExit_ZombieCountsAsExited(t *testing.T) {
+	cmd := exec.Command("sleep", "300")
+	require.NoError(t, cmd.Start())
+	process := processIdentity(t, cmd.Process.Pid)
+	t.Cleanup(func() { _, _ = cmd.Process.Wait() })
+	require.NoError(t, cmd.Process.Kill())
+
+	start := time.Now()
+	require.True(t, waitForProcessExit(process, 500*time.Millisecond),
+		"a pane that exited but remains an unreaped zombie is no longer writing")
+	require.Less(t, time.Since(start), 250*time.Millisecond,
+		"an exited pane must not burn the teardown wait budget")
 }
 
 func TestCloseAndWaitForPaneExit_AlivePaneKeepsCleanupUnsafe(t *testing.T) {
@@ -63,7 +90,8 @@ func TestCloseAndWaitForPaneExit_AlivePaneKeepsCleanupUnsafe(t *testing.T) {
 // kill-session runs (afterwards there is nothing left to query), and the
 // wait happens on that PID after the session is gone.
 func TestCloseAndWaitForPaneExit_QueriesPaneBeforeKill(t *testing.T) {
-	pid := deadPID(t)
+	process := exitedProcess(t)
+	pid := process.PID
 	var calls []string
 
 	cmdExec := cmd_test.MockCmdExec{
