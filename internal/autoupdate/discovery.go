@@ -43,14 +43,6 @@ type Discovery struct {
 	ReleasesURL      string
 }
 
-// DefaultDiscovery returns the production GitHub release discovery endpoints.
-func DefaultDiscovery() Discovery {
-	return Discovery{
-		LatestReleaseURL: DefaultLatestReleaseAPIURL,
-		ReleasesURL:      DefaultReleasesAPIURL,
-	}
-}
-
 // LatestReleaseTag returns the newest published tag on channel. Stable uses
 // /releases/latest so frequent previews cannot push the newest stable release
 // off the first page of the release list; preview scans the release list.
