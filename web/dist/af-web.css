@@ -638,7 +638,11 @@ body {
   border-color: var(--af-accent);
 }
 .af-rail-filter-glyph {
-  font-size: 0.9em;
+  display: block;
+  width: 0.875rem;
+  height: 0.875rem;
+  flex: 0 0 auto;
+  fill: currentColor;
 }
 .af-rail-filter-dot {
   width: 4px;
