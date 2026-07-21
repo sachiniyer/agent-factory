@@ -69,8 +69,8 @@ func (c *Client) DeleteProject(req daemon.DeleteProjectRequest) (daemon.DeletePr
 }
 
 // ResumeFromLimit asks the daemon to resume a usage-limit-blocked session
-// (#1146) — the TUI's `c` key. It rides an internal (non-cataloged) route: a
-// client-facing session verb the `af api` catalog does not advertise.
+// (#1146) — the action behind the TUI's `c` key and the web's Retry button.
+// The CLI reaches the same public handler over its gob control transport.
 func (c *Client) ResumeFromLimit(req daemon.ResumeFromLimitRequest) error {
 	return c.call("ResumeFromLimit", req, &daemon.ResumeFromLimitResponse{})
 }

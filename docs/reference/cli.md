@@ -42,6 +42,7 @@ Run `af <command> --help` for the same information at the terminal. For a narrat
 - [`af sessions list`](#af-sessions-list) — List sessions in the current project
 - [`af sessions preview`](#af-sessions-preview) — Preview a session's terminal content
 - [`af sessions restore`](#af-sessions-restore) — Restore an archived, lost, or dead session
+- [`af sessions retry-limit`](#af-sessions-retry-limit) — Retry a session blocked at a usage limit
 - [`af sessions send-prompt`](#af-sessions-send-prompt) — Send a prompt to a session (or broadcast to all with --all)
 - [`af sessions tab-create`](#af-sessions-tab-create) — Spawn a process tab (a command), a web tab (a URL/iframe), or a VS Code tab in a session
 - [`af sessions tab-delete`](#af-sessions-tab-delete) — Delete a single tab from a session
@@ -961,6 +962,7 @@ af sessions
 - [`af sessions list`](#af-sessions-list) — List sessions in the current project
 - [`af sessions preview`](#af-sessions-preview) — Preview a session's terminal content
 - [`af sessions restore`](#af-sessions-restore) — Restore an archived, lost, or dead session
+- [`af sessions retry-limit`](#af-sessions-retry-limit) — Retry a session blocked at a usage limit
 - [`af sessions send-prompt`](#af-sessions-send-prompt) — Send a prompt to a session (or broadcast to all with --all)
 - [`af sessions tab-create`](#af-sessions-tab-create) — Spawn a process tab (a command), a web tab (a URL/iframe), or a VS Code tab in a session
 - [`af sessions tab-delete`](#af-sessions-tab-delete) — Delete a single tab from a session
@@ -1272,6 +1274,36 @@ The restored worktree path is printed on success.
 
 ```
 af sessions restore <title>
+```
+
+**Global flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http:// or ws:// URL instead of the local unix socket (env: AF_DAEMON_URL). The daemon is HTTP-only; terminate TLS at your own proxy if needed. |
+| `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload) |
+| `--repo` | `string` | Path to the project's git repository (default: the current directory's project) |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
+
+## af sessions retry-limit
+
+Retry a session blocked at a usage limit
+
+Retry a session that is parked at a provider usage-limit wall.
+
+The daemon runs the same recovery action as the TUI's c key and the web's Retry
+button: it re-spawns an exited agent when necessary, re-delivers the pending
+prompt (or "continue" for an interactive session with no stored prompt), and
+clears the limit state after delivery succeeds.
+
+The command fails if the session is not currently blocked on a usage limit.
+Use 'af sessions list' to find sessions carrying the [limit] badge.
+
+Example:
+  af sessions retry-limit fix-auth
+
+```
+af sessions retry-limit <title>
 ```
 
 **Global flags**

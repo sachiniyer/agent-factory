@@ -674,6 +674,7 @@ func init() {
 	SessionsCmd.AddCommand(sessionsKillCmd)
 	SessionsCmd.AddCommand(sessionsArchiveCmd)
 	SessionsCmd.AddCommand(sessionsHandoffCmd)
+	SessionsCmd.AddCommand(sessionsRetryLimitCmd)
 	SessionsCmd.AddCommand(sessionsRestoreCmd)
 	SessionsCmd.AddCommand(sessionsAttachCmd)
 	SessionsCmd.AddCommand(sessionsWhoamiCmd)

@@ -31,10 +31,12 @@ audit (#1937) found gaps pointing in every direction:
   `Prompt` field was plumbed end-to-end to the daemon
   (`app/session_control.go:106`) and its only construction site never
   populated it — the plumbing was finished and simply never fed.
-- **The CLI is behind both UIs** on limit-retry: resuming a usage-limit-blocked
-  session is TUI- and web-only (the web got a Retry button in
-  [#1934](https://github.com/sachiniyer/agent-factory/issues/1934)), and the CLI
-  has no verb for it at all.
+- **The CLI was behind both UIs** on limit-retry: the TUI had `c` and the web
+  gained a Retry button in
+  [#1934](https://github.com/sachiniyer/agent-factory/issues/1934), while the CLI
+  had no exit from the same `[limit]` state. `af sessions retry-limit <title>`
+  now sends the same daemon action, closing that gap without duplicating the
+  recovery logic client-side.
 - **Only the CLI** can choose a backend per session
   ([#1933](https://github.com/sachiniyer/agent-factory/issues/1933)).
 
