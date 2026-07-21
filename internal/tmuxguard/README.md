@@ -17,6 +17,8 @@ Accordingly:
 - a denial means the command matched a known hazard or was outside the guard's
   approved best-effort shapes;
 - an allow means only that no currently modeled hazard was found;
+- a literal script, package, or source path is a compatibility shape, not file
+  provenance: the guard neither reviews file contents nor tracks earlier writes;
 - findings should improve the speed bump when the cost is reasonable, but a
   new bypass is not evidence that host isolation has been defeated;
 - operators and reviewers must not relax around an allow decision.

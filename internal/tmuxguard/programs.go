@@ -170,7 +170,7 @@ func gitArgsDispatch(command string, args []string) bool {
 			"--textconv", "--upload-pack":
 			return true
 		}
-		if command == "grep" && (option == "--open-files-in-pager" || option == "-O" ||
+		if command == "grep" && (longOptionMatches(option, "--open-files-in-pager", "--open") || option == "-O" ||
 			(strings.HasPrefix(arg, "-O") && len(arg) > 2)) {
 			return true
 		}
@@ -330,7 +330,7 @@ func inspectSort(args []shellWord) string {
 			continue
 		}
 		option, _, _ := strings.Cut(arg.literal, "=")
-		if len(option) >= len("--co") && strings.HasPrefix("--compress-program", option) {
+		if longOptionMatches(option, "--compress-program", "--co") {
 			return sortReason
 		}
 	}
@@ -342,6 +342,9 @@ func inspectGo(args []shellWord) string {
 	if !ok || len(literals) == 0 {
 		return unknownShellReason
 	}
+	// This best-effort grammar rejects command-line executor selectors. Literal
+	// package and source operands remain a compatibility surface; their contents
+	// are explicitly outside this guard's model and require host containment.
 	command := literals[0]
 	switch command {
 	case "help", "version":
@@ -402,7 +405,7 @@ func inspectPython(args []shellWord) string {
 		case arg == "-c" || arg == "-m" || arg == "-":
 			return unknownShellReason
 		case arg == "--":
-			if i+1 >= len(args) || !args[i+1].resolved || !reviewedPythonScript(args[i+1].literal) {
+			if i+1 >= len(args) || !args[i+1].resolved || !literalPythonScriptPath(args[i+1].literal) {
 				return unknownShellReason
 			}
 			return ""
@@ -418,9 +421,10 @@ func inspectPython(args []shellWord) string {
 				return unknownShellReason
 			}
 		default:
-			// The reviewed script is the dispatching position. Its own argv is
-			// data and may remain dynamic.
-			if reviewedPythonScript(arg) {
+			// A literal script path is the compatibility boundary for argv. The
+			// guard cannot prove its contents reviewed; containment remains the
+			// boundary for source-file execution.
+			if literalPythonScriptPath(arg) {
 				return ""
 			}
 			return unknownShellReason
@@ -441,7 +445,7 @@ func safePythonFlags(arg string) bool {
 	return true
 }
 
-func reviewedPythonScript(path string) bool {
+func literalPythonScriptPath(path string) bool {
 	cleaned := strings.ToLower(filepath.Clean(path))
 	if !strings.HasSuffix(cleaned, ".py") {
 		return false
@@ -465,14 +469,17 @@ func inspectJournalctl(args []shellWord) string {
 
 func inspectMake(args []shellWord) string {
 	for _, arg := range args {
-		if !arg.resolved || strings.HasPrefix(arg.literal, "-") || isAssignment(arg.literal) {
+		if !arg.resolved || strings.HasPrefix(arg.literal, "-") || strings.ContainsRune(arg.literal, '=') {
 			return unknownShellReason
 		}
 	}
-	// Targets select recipes from the reviewed repository Makefile. Alternate
-	// makefiles, command-line variables, eval, includes, and future options are
-	// excluded by the literal bare-target grammar above.
+	// Bare targets exclude command-line dispatch syntax. Recipe/source contents
+	// remain outside this best-effort model and require host containment.
 	return ""
+}
+
+func longOptionMatches(option, full, minimum string) bool {
+	return len(option) >= len(minimum) && strings.HasPrefix(full, option)
 }
 
 func inspectFile(args []shellWord) string {

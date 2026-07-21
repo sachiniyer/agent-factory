@@ -31,6 +31,7 @@ type shellCommand struct {
 	assignments         []shellAssignment
 	declaration         *shellDeclaration
 	hasHeredoc          bool
+	cwdChangePersists   bool
 	environmentAssigned bool
 	directoryChanged    bool
 }
@@ -47,9 +48,26 @@ func parseShellCommands(command string) ([]shellCommand, error) {
 	heredocCalls := make(map[*syntax.CallExpr]bool)
 	var commands []shellCommand
 	var walkErr error
+	var scopeStack []bool
+	nonPersistentDepth := 0
 	syntax.Walk(file, func(node syntax.Node) bool {
-		if node == nil || walkErr != nil {
+		if node == nil {
+			last := len(scopeStack) - 1
+			if last >= 0 {
+				if scopeStack[last] {
+					nonPersistentDepth--
+				}
+				scopeStack = scopeStack[:last]
+			}
+			return walkErr == nil
+		}
+		if walkErr != nil {
 			return false
+		}
+		nonPersistent := startsNonPersistentShellScope(node)
+		scopeStack = append(scopeStack, nonPersistent)
+		if nonPersistent {
+			nonPersistentDepth++
 		}
 		switch node := node.(type) {
 		case *syntax.Stmt:
@@ -71,9 +89,10 @@ func parseShellCommands(command string) ([]shellCommand, error) {
 			}
 			if len(words) > 0 || len(node.Assigns) > 0 {
 				commands = append(commands, shellCommand{
-					words:       words,
-					assignments: describeAssignments(node.Assigns),
-					hasHeredoc:  heredocCalls[node],
+					words:             words,
+					assignments:       describeAssignments(node.Assigns),
+					hasHeredoc:        heredocCalls[node],
+					cwdChangePersists: nonPersistentDepth == 0,
 				})
 			}
 		case *syntax.DeclClause:
@@ -103,6 +122,19 @@ func parseShellCommands(command string) ([]shellCommand, error) {
 		return nil, walkErr
 	}
 	return commands, nil
+}
+
+func startsNonPersistentShellScope(node syntax.Node) bool {
+	switch node := node.(type) {
+	case *syntax.Subshell, *syntax.CmdSubst:
+		return true
+	case *syntax.BinaryCmd:
+		return node.Op == syntax.Pipe || node.Op == syntax.PipeAll
+	case *syntax.Stmt:
+		return node.Background || node.Coprocess || node.Disown
+	default:
+		return false
+	}
 }
 
 func unsafeParamExpansion(expansion *syntax.ParamExp) bool {
