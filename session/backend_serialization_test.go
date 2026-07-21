@@ -33,6 +33,23 @@ func TestToInstanceDataIncludesBackendType(t *testing.T) {
 	})
 }
 
+func TestInstanceDataUsesLocalTmux(t *testing.T) {
+	for _, tc := range []struct {
+		backendType string
+		want        bool
+	}{
+		{"", true}, // legacy rows predate the discriminator and were local
+		{"local", true},
+		{"remote", false},
+		{"docker", false},
+		{"ssh", false},
+	} {
+		t.Run(tc.backendType, func(t *testing.T) {
+			assert.Equal(t, tc.want, (InstanceData{BackendType: tc.backendType}).UsesLocalTmux())
+		})
+	}
+}
+
 func TestInstanceDataJSONRoundTrip(t *testing.T) {
 	t.Run("local backend serializes correctly", func(t *testing.T) {
 		data := InstanceData{

@@ -125,7 +125,7 @@ func TestArchiveSession_ReuseArchivedNameKeepsWebTabs(t *testing.T) {
 	disk, derr := loadRepoInstanceData(repoID)
 	require.NoError(t, derr)
 	manager.mu.Lock()
-	renamed, rerr := manager.renameArchivedForReuseLocked(repoID, repoPath, "worker", "claude", &disk)
+	renamed, rerr := manager.renameArchivedForReuseLocked(repoID, repoPath, "worker", "claude", runtimeNamespaceLocalTmux, &disk)
 	manager.mu.Unlock()
 	require.NoError(t, rerr)
 	require.NotNil(t, renamed, "the archived collision must be renamed out of the way")

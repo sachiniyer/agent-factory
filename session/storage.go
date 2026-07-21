@@ -115,6 +115,15 @@ func (d InstanceData) IsRemoteHook() bool {
 	return d.BackendType == "remote"
 }
 
+// UsesLocalTmux reports whether this persisted row belongs to the in-process
+// local backend and therefore claims a repo-scoped tmux name. Empty is the
+// pre-backend-discriminator legacy encoding and also means local. Keeping this
+// decoding beside BackendType prevents daemon admission from growing its own
+// backend-name list.
+func (d InstanceData) UsesLocalTmux() bool {
+	return d.BackendType == "" || d.BackendType == "local"
+}
+
 // ForStorage returns data suitable for instances.json. InstanceData is also the
 // daemon Snapshot payload, so it can carry transient in-flight operation state;
 // disk persistence must not.

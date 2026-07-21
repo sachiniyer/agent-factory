@@ -98,14 +98,17 @@ const TmuxPrefix = "af_"
 // does not use this sentinel.
 var ErrSessionGone = errors.New("tmux session no longer exists")
 
-// ErrSessionNotStarted is positive evidence that Start failed before its
-// new-session process began. LocalBackend is allowed to remove a newly-created
-// worktree only when this marker is present; every other Start error is
-// conservatively treated as a session that may be running in that workspace.
+// ErrSessionNotStarted is positive evidence that a failed Start left no tmux
+// session running under the fresh launch identity. The process may have failed
+// before it began, its answered launch command may have left the name absent, or
+// a readiness-timeout cleanup may have confirmed the name gone. LocalBackend is
+// allowed to remove a newly-created worktree only when this marker is present;
+// every other Start error is conservatively treated as a session that may be
+// running in that workspace.
 //
-// This is deliberately narrower than "Start returned an error". In particular,
-// a readiness timeout means af did not observe the session under the name it
-// probed; it does not prove tmux failed to create one (#2207).
+// A readiness timeout for a legacy spelling still does not prove tmux failed to
+// create one: tmux may have rewritten that spelling (#2207). Only names admitted
+// by hasStableTmuxSpelling can turn a confirmed absence into this marker.
 var ErrSessionNotStarted = errors.New("tmux session definitely did not start")
 
 // DetachKeyByte is the ASCII byte for the key used to detach from attached sessions.
@@ -145,7 +148,7 @@ func repoHash(repoPath string) string {
 func toTmuxName(title string, repoPath string) string {
 	title = strings.Map(func(r rune) rune {
 		switch {
-		case unicode.IsLetter(r), unicode.IsNumber(r), unicode.IsMark(r), r == '_', r == '-':
+		case stableTmuxNameRune(r):
 			return r
 		case unicode.IsSpace(r):
 			return -1
@@ -159,6 +162,37 @@ func toTmuxName(title string, repoPath string) string {
 	return fmt.Sprintf("%s%s", TmuxPrefix, title)
 }
 
+// stableTmuxNameRune is the positive punctuation policy shared by fresh-name
+// construction and the post-start proof that tmux could not have rewritten the
+// name. Keeping one predicate makes widening or narrowing that policy atomic.
+func stableTmuxNameRune(r rune) bool {
+	return unicode.IsLetter(r) || unicode.IsNumber(r) || unicode.IsMark(r) || r == '_' || r == '-'
+}
+
+// SanitizedNameForRepo returns the exact tmux session name a fresh local
+// session with title will use in repoPath. Admission checks call this same
+// derivation as NewTmuxSessionForRepo so the namespace they reserve cannot drift
+// from the namespace Start eventually claims.
+func SanitizedNameForRepo(title, repoPath string) string {
+	return toTmuxName(title, repoPath)
+}
+
+// hasStableTmuxSpelling reports whether tmux stores name byte-for-byte. Fresh
+// names produced by toTmuxName satisfy this positive policy. Legacy persisted
+// exact names may not; Start must keep treating an apparently absent legacy name
+// as unknown because tmux may have rewritten it when it was created (#2207).
+func hasStableTmuxSpelling(name string) bool {
+	if !strings.HasPrefix(name, TmuxPrefix) {
+		return false
+	}
+	for _, r := range name {
+		if !stableTmuxNameRune(r) {
+			return false
+		}
+	}
+	return true
+}
+
 // NewTmuxSession creates a new TmuxSession with the given name and program (no repo scoping).
 func NewTmuxSession(name string, program string) *TmuxSession {
 	return newTmuxSession(toTmuxName(name, ""), program, MakePtyFactory(), cmd.MakeExecutor())
@@ -166,7 +200,7 @@ func NewTmuxSession(name string, program string) *TmuxSession {
 
 // NewTmuxSessionForRepo creates a new TmuxSession with a repo-scoped name to avoid collisions.
 func NewTmuxSessionForRepo(name string, repoPath string, program string) *TmuxSession {
-	return newTmuxSession(toTmuxName(name, repoPath), program, MakePtyFactory(), cmd.MakeExecutor())
+	return newTmuxSession(SanitizedNameForRepo(name, repoPath), program, MakePtyFactory(), cmd.MakeExecutor())
 }
 
 // NewTmuxSessionFromSanitizedName creates a new TmuxSession with an exact pre-computed name.

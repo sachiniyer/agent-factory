@@ -133,6 +133,9 @@ func TestSystemdRunRefusalIsActionable(t *testing.T) {
 	if err == nil {
 		t.Fatal("Start succeeded after systemd-run refused the transient scope")
 	}
+	if !errors.Is(err, ErrSessionNotStarted) {
+		t.Fatalf("systemd-run exited and the follow-up probe confirmed the session absent, but the outcome remained unknown: %v", err)
+	}
 	for _, want := range []string{
 		"systemd-run --user --scope failed",
 		"Failed to start transient scope unit: Access denied",

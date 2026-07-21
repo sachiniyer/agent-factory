@@ -84,8 +84,14 @@ func (i *Instance) UserKilled() bool {
 func (i *Instance) MarkStartupStateUnknown() {
 	i.mu.Lock()
 	defer i.mu.Unlock()
+	lv, op, resetAt := i.lifecycleStateLocked()
 	i.startupStateUnknown = true
 	i.started = false
+	// The create attempt has settled into an explicit blocked outcome. Leaving
+	// OpCreating set makes projections report an operation that no goroutine owns
+	// and can keep old clients polling forever.
+	i.inFlightOp = OpNone
+	i.noteStateChangeLocked(lv, op, resetAt)
 }
 
 // StartupStateUnknown reports whether a create may have launched a runtime but

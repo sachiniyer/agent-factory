@@ -276,9 +276,10 @@ func TestStartTmuxSession(t *testing.T) {
 	require.Error(t, err)
 }
 
-// TestStartTimeoutCleanupSucceeds guards issue #696: when the session never
-// appears before the startup timeout and cleanup succeeds, the error must
-// describe the timeout without rendering a nil error as the literal "<nil>".
+// TestStartTimeoutCleanupSucceeds guards issue #696: when the positively
+// sanitized session never appears before the startup timeout and cleanup
+// confirms it absent, the error must authorize cleanup without rendering a nil
+// error as the literal "<nil>".
 func TestStartTimeoutCleanupSucceeds(t *testing.T) {
 	ptyFactory := NewMockPtyFactory(t)
 
@@ -297,8 +298,7 @@ func TestStartTimeoutCleanupSucceeds(t *testing.T) {
 
 	err := session.Start(t.TempDir())
 	require.Error(t, err)
-	require.ErrorIs(t, err, ErrTmuxTimeout)
-	require.NotErrorIs(t, err, ErrSessionNotStarted)
+	require.ErrorIs(t, err, ErrSessionNotStarted)
 	require.Contains(t, err.Error(), "timed out waiting for tmux session af_timeout-ok")
 	require.NotContains(t, err.Error(), "<nil>")
 	require.NotContains(t, err.Error(), "cleanup error")

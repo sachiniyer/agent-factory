@@ -95,8 +95,8 @@ const (
 // but no session to destroy yet. An id-less row cannot address a destructive API
 // unambiguously, so it also exposes nothing. Resting rows restore; every other
 // settled row archives. Kill is available whenever this result is non-zero.
-func lifecycleActionFor(id string, liveness Liveness, op InFlightOp) LifecycleAction {
-	if id == "" || op == OpCreating {
+func lifecycleActionFor(id string, liveness Liveness, op InFlightOp, startupStateUnknown bool) LifecycleAction {
+	if id == "" || op == OpCreating || startupStateUnknown {
 		return LifecycleActionNone
 	}
 	switch liveness {
@@ -113,7 +113,7 @@ func lifecycleActionFor(id string, liveness Liveness, op InFlightOp) LifecycleAc
 func (i *Instance) LifecycleAction() LifecycleAction {
 	i.mu.RLock()
 	defer i.mu.RUnlock()
-	return lifecycleActionFor(i.ID, i.liveness, i.inFlightOp)
+	return lifecycleActionFor(i.ID, i.liveness, i.inFlightOp, i.startupStateUnknown)
 }
 
 // composeStatus derives the legacy Status enum from the two-axis model. An

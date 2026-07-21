@@ -42,7 +42,7 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 		Status:              i.statusLocked(),
 		Liveness:            i.liveness,
 		InFlightOp:          i.inFlightOp,
-		LifecycleAction:     lifecycleActionFor(i.ID, i.liveness, i.inFlightOp),
+		LifecycleAction:     lifecycleActionFor(i.ID, i.liveness, i.inFlightOp, i.startupStateUnknown),
 		Height:              i.Height,
 		Width:               i.Width,
 		CreatedAt:           i.CreatedAt,
