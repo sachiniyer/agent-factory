@@ -170,6 +170,29 @@ func TestHandleStateSelectHandoffAgent_DropsARecreatedSameTitleTarget(t *testing
 		"a replacement that reused the title must not inherit the pending handoff")
 }
 
+func TestHandleStateSelectHandoffAgent_DropsARecreatedLegacyTarget(t *testing.T) {
+	h := newTestHome(t)
+	original := handoffActionInstance(t, "worker", tmux.ProgramClaude)
+	original.ID = "" // persisted before stable session IDs existed
+	h.store.AddInstance(original)
+	h.sidebar.SetSelectedInstance(0)
+
+	_, _ = h.handleHandoff()
+	require.True(t, h.store.RemoveInstanceByTitle(original.Title))
+	replacement := handoffActionInstance(t, original.Title, tmux.ProgramClaude)
+	require.False(t, replacement.CreatedAt.Equal(original.CreatedAt),
+		"fixture requires a distinct legacy identity")
+	h.store.AddInstance(replacement)
+	h.selectionOverlay.SetSelectedIndex(0)
+
+	_, cmd := h.handleStateSelectHandoffAgent(tea.KeyMsg{Type: tea.KeyEnter})
+
+	require.Nil(t, cmd)
+	require.Equal(t, stateDefault, h.state)
+	require.Nil(t, h.confirmationOverlay,
+		"a replacement must not inherit an id-less session's pending handoff")
+}
+
 // Cancelling the picker must leave the session untouched.
 func TestHandleStateSelectHandoffAgent_CancelDoesNotSwap(t *testing.T) {
 	h := newTestHome(t)
