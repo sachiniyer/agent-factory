@@ -144,6 +144,43 @@ func TestRollbackRemovesAbsentMetadataUnderCandidatePrivateParent(t *testing.T) 
 		"temporary rollback permissions must not broaden a surviving candidate-created directory")
 }
 
+func TestRollbackResyncsAlreadyAbsentMetadataBeforeCheckpoint(t *testing.T) {
+	home := t.TempDir()
+	plan := basicPreparePlan(t, home, "absence-retry-sync")
+	plan.MetadataPaths = []string{"tasks.json"}
+	txn, err := Prepare(plan)
+	require.NoError(t, err)
+	lease, err := txn.tryAcquireRecoveryAs(txn.Journal().PreviousBinaryPath)
+	require.NoError(t, err)
+	defer lease.Release()
+	require.NoError(t, lease.Advance(PhaseSupervisorReady))
+	require.NoError(t, lease.Advance(PhaseDaemonStopped))
+	require.NoError(t, lease.InstallCandidate())
+	require.NoError(t, os.WriteFile(filepath.Join(home, "tasks.json"), []byte("candidate-state"), 0o600))
+
+	previousSync := syncTransactionDirectory
+	canonicalHome := txn.Journal().HomeDir
+	syncTransactionDirectory = func(path string) error {
+		if path == canonicalHome {
+			return errRecoveryCheckpointInterrupted
+		}
+		return previousSync(path)
+	}
+	t.Cleanup(func() { syncTransactionDirectory = previousSync })
+
+	err = lease.Rollback()
+	require.ErrorIs(t, err, errRecoveryCheckpointInterrupted)
+	require.NoFileExists(t, filepath.Join(home, "tasks.json"))
+	require.Equal(t, PhaseRollingBack, txn.Journal().Phase)
+	require.Equal(t, 0, txn.Journal().RollbackProgress.MetadataRestored)
+
+	err = lease.Rollback()
+	require.ErrorIs(t, err, errRecoveryCheckpointInterrupted,
+		"a retry must make the already-observed absence durable before checkpointing it")
+	require.Equal(t, PhaseRollingBack, txn.Journal().Phase)
+	require.Equal(t, 0, txn.Journal().RollbackProgress.MetadataRestored)
+}
+
 func TestRollbackResumesFromDurablePerFileCheckpoints(t *testing.T) {
 	txn, home, executable := prepareFixture(t)
 	lease, err := txn.tryAcquireRecoveryAs(txn.Journal().PreviousBinaryPath)
@@ -220,6 +257,30 @@ func TestRecoveryLockIsTheDeathTest(t *testing.T) {
 	require.NoError(t, second.Release())
 }
 
+func TestRecoveryLockReplacementCannotCreateSecondActor(t *testing.T) {
+	txn, home, _ := prepareFixture(t)
+	stale, err := Load(home)
+	require.NoError(t, err)
+	first, err := txn.tryAcquireRecoveryAs(txn.Journal().PreviousBinaryPath)
+	require.NoError(t, err)
+	defer first.Release()
+
+	journal := txn.Journal()
+	lockPath := first.file.Name()
+	readyPath := filepath.Join(transactionDir(journal.HomeDir, journal.ID), "recovery.ready.lock")
+	require.NoError(t, os.Remove(lockPath))
+	require.NoError(t, os.WriteFile(lockPath, []byte(journal.RecoveryNonce+"\n"), journalFileMode))
+	require.NoError(t, os.Remove(readyPath))
+	require.NoError(t, os.WriteFile(readyPath, nil, journalFileMode))
+
+	second, err := stale.tryAcquireRecoveryAs(stale.Journal().PreviousBinaryPath)
+	if second != nil {
+		defer second.Release()
+	}
+	require.Error(t, err,
+		"replacing lock pathnames must not create a second recovery authority over new inodes")
+}
+
 func TestActivationRequiresLivePreviousBinaryNonceHandshake(t *testing.T) {
 	txn, _, _ := prepareFixture(t)
 	journal := txn.Journal()
@@ -261,6 +322,34 @@ func TestActivationApprovalCannotBeConsumedByTakeoverActor(t *testing.T) {
 	authorized, err = takeover.ActivationAuthorized()
 	require.NoError(t, err)
 	require.True(t, authorized, "the old daemon can explicitly authorize the new lock owner")
+}
+
+func TestActivationApprovalRequiresConsumerDirectorySync(t *testing.T) {
+	txn, _, _ := prepareFixture(t)
+	journal := txn.Journal()
+	lease, err := txn.tryAcquireRecoveryAs(journal.PreviousBinaryPath)
+	require.NoError(t, err)
+	defer lease.Release()
+	require.NoError(t, lease.Advance(PhaseSupervisorReady))
+	require.NoError(t, lease.Heartbeat(PhaseSupervisorReady, time.Now().Add(time.Minute)))
+
+	injected := errors.New("injected approval directory sync failure")
+	previousSync := syncTransactionDirectory
+	txnDir := transactionDir(journal.HomeDir, journal.ID)
+	syncTransactionDirectory = func(path string) error {
+		if path == txnDir {
+			return injected
+		}
+		return previousSync(path)
+	}
+	t.Cleanup(func() { syncTransactionDirectory = previousSync })
+
+	err = txn.AuthorizeActivation(journal.ID, journal.RecoveryNonce)
+	require.ErrorIs(t, err, injected)
+	authorized, readErr := lease.ActivationAuthorized()
+	require.ErrorIs(t, readErr, injected,
+		"a visible approval is not authority until its directory entry is durable")
+	require.False(t, authorized)
 }
 
 func TestActivationRejectsExpiredSupervisorLease(t *testing.T) {
@@ -447,7 +536,11 @@ func TestTerminalCleanupRecoversAfterTransactionDirectoryDisappears(t *testing.T
 	got, err := os.ReadFile(executable)
 	require.NoError(t, err)
 	require.Equal(t, "candidate-binary", string(got))
-	for _, artifact := range []string{journal.PreviousBinaryPath, journal.CandidatePath} {
+	for _, artifact := range []string{
+		journal.PreviousBinaryPath,
+		journal.CandidatePath,
+		recoveryLockPath(journal.HomeDir, journal.ID),
+	} {
 		_, err = os.Stat(artifact)
 		require.ErrorIs(t, err, os.ErrNotExist)
 	}
@@ -781,6 +874,15 @@ func TestCleanupKeepsRecoveryAuthorityWhenActiveRemovalSyncFails(t *testing.T) {
 	require.ErrorIs(t, err, injected)
 	require.DirExists(t, transactionDir(home, txn.Journal().ID))
 	require.FileExists(t, txn.Journal().PreviousBinaryPath)
+
+	err = lease.Cleanup()
+	require.ErrorIs(t, err, injected,
+		"a retry must durably confirm active.json absence before deleting recovery authority")
+	require.DirExists(t, transactionDir(home, txn.Journal().ID))
+	require.FileExists(t, txn.Journal().PreviousBinaryPath)
+
+	syncTransactionDirectory = previousSync
+	require.NoError(t, lease.Cleanup())
 }
 
 func TestPrepareRetainsRecoveryInputsWhenJournalPublishSyncFails(t *testing.T) {
@@ -790,11 +892,12 @@ func TestPrepareRetainsRecoveryInputsWhenJournalPublishSyncFails(t *testing.T) {
 	plan := basicPreparePlan(t, home, "publish-sync-failure")
 	injected := errors.New("injected active journal sync failure")
 	previousSync := syncTransactionDirectory
-	rootSyncs := 0
+	activePath := activeJournalPath(canonicalHome)
+	publishSyncs := 0
 	syncTransactionDirectory = func(path string) error {
 		if path == upgradeRoot(canonicalHome) {
-			rootSyncs++
-			if rootSyncs == 3 {
+			if _, statErr := os.Lstat(activePath); statErr == nil {
+				publishSyncs++
 				return injected
 			}
 		}
@@ -804,8 +907,8 @@ func TestPrepareRetainsRecoveryInputsWhenJournalPublishSyncFails(t *testing.T) {
 
 	_, err = Prepare(plan)
 	require.ErrorIs(t, err, injected)
-	require.Equal(t, 3, rootSyncs)
-	journal, readErr := readJournal(activeJournalPath(canonicalHome))
+	require.Equal(t, 1, publishSyncs)
+	journal, readErr := readJournal(activePath)
 	require.NoError(t, readErr, "a visible journal must retain everything needed for later recovery")
 	require.FileExists(t, journal.PreviousBinaryPath)
 	require.FileExists(t, journal.CandidatePath)

@@ -10,7 +10,6 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
-	"syscall"
 )
 
 var (
@@ -182,13 +181,10 @@ func restoreMetadataEntry(home string, metadata MetadataSnapshot) (retErr error)
 		return fmt.Errorf("validate rollback path %s: %w", metadata.Path, err)
 	}
 	if !metadata.Existed {
-		if removeErr := os.Remove(target); removeErr != nil {
-			if errors.Is(removeErr, os.ErrNotExist) {
-				return nil
-			}
+		if removeErr := os.Remove(target); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
 			return fmt.Errorf("restore absence of %s: %w", metadata.Path, removeErr)
 		}
-		if err := syncTransactionDirectory(filepath.Dir(target)); err != nil {
+		if err := syncMetadataAbsence(home, target); err != nil {
 			return fmt.Errorf("sync restored absence of %s: %w", metadata.Path, err)
 		}
 		return nil
@@ -201,6 +197,30 @@ func restoreMetadataEntry(home string, metadata MetadataSnapshot) (retErr error)
 		return fmt.Errorf("restore metadata %s: %w", metadata.Path, err)
 	}
 	return nil
+}
+
+func syncMetadataAbsence(home, target string) error {
+	directory := filepath.Dir(target)
+	for {
+		info, err := os.Lstat(directory)
+		if err == nil {
+			if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+				return fmt.Errorf("metadata absence parent %s is not a real directory", directory)
+			}
+			return syncTransactionDirectory(directory)
+		}
+		if !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		if directory == home {
+			return errors.New("upgrade home disappeared while restoring metadata absence")
+		}
+		parent := filepath.Dir(directory)
+		if parent == directory {
+			return errors.New("metadata absence parent escapes the upgrade home")
+		}
+		directory = parent
+	}
 }
 
 func validateJournal(home string, journal Journal) error {
@@ -229,6 +249,9 @@ func validateJournal(home string, journal Journal) error {
 	if _, err := hex.DecodeString(journal.RecoveryNonce); err != nil {
 		return errors.New("journal contains an invalid recovery nonce")
 	}
+	if journal.RecoveryLockIdentity.Inode == 0 {
+		return errors.New("journal contains an invalid recovery lock identity")
+	}
 	if journal.ExecutableMode == 0 || os.FileMode(journal.ExecutableMode)&^os.ModePerm != 0 {
 		return errors.New("journal contains an invalid executable mode")
 	}
@@ -249,6 +272,9 @@ func validateJournal(home string, journal Journal) error {
 		return err
 	}
 	if err := validateTransactionStorage(home, journal); err != nil {
+		return err
+	}
+	if err := validateRecoveryLockStorage(home, journal); err != nil {
 		return err
 	}
 
@@ -730,6 +756,13 @@ func (t *Transaction) cleanup() error {
 
 	current, err := readJournal(activeJournalPath(t.journal.HomeDir))
 	if errors.Is(err, ErrNoActiveTransaction) {
+		root := upgradeRoot(t.journal.HomeDir)
+		if err := validateDirectoryNoSymlink(root); err != nil {
+			return fmt.Errorf("validate inactive upgrade root: %w", err)
+		}
+		if err := syncTransactionDirectory(root); err != nil {
+			return fmt.Errorf("confirm durable active journal absence: %w", err)
+		}
 		return t.cleanupInactiveArtifacts()
 	}
 	if err != nil {
@@ -760,6 +793,9 @@ func (t *Transaction) cleanupInactiveArtifacts() error {
 	}
 	if err := removeDurableFile(t.journal.PreviousBinaryPath); err != nil {
 		return fmt.Errorf("remove previous-binary cleanup actor: %w", err)
+	}
+	if err := removeDurableFile(recoveryLockPath(t.journal.HomeDir, t.journal.ID)); err != nil {
+		return fmt.Errorf("remove inactive recovery lock: %w", err)
 	}
 	return nil
 }
@@ -801,34 +837,6 @@ func readAndVerify(path, expectedDigest string) ([]byte, error) {
 		return nil, fmt.Errorf("digest mismatch for %s", path)
 	}
 	return data, nil
-}
-
-func acquireFileLock(path string, nonblocking bool) (*os.File, error) {
-	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, journalFileMode)
-	if err != nil {
-		return nil, err
-	}
-	operation := syscall.LOCK_EX
-	if nonblocking {
-		operation |= syscall.LOCK_NB
-	}
-	if err := syscall.Flock(int(file.Fd()), operation); err != nil {
-		_ = file.Close()
-		if nonblocking && (errors.Is(err, syscall.EWOULDBLOCK) || errors.Is(err, syscall.EAGAIN)) {
-			return nil, ErrRecoveryActive
-		}
-		return nil, err
-	}
-	return file, nil
-}
-
-func releaseFileLock(file *os.File) error {
-	if file == nil {
-		return nil
-	}
-	unlockErr := syscall.Flock(int(file.Fd()), syscall.LOCK_UN)
-	closeErr := file.Close()
-	return errors.Join(unlockErr, closeErr)
 }
 
 func syncDirectory(path string) error {

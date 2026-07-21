@@ -69,8 +69,8 @@ func (t *Transaction) AuthorizeActivation(transactionID, nonce string) error {
 }
 
 func validateActivationRecoveryProof(current Journal, now time.Time) (RecoveryStatus, error) {
-	lockPath := filepath.Join(transactionDir(current.HomeDir, current.ID), "recovery.lock")
-	probe, err := acquireFileLock(lockPath, true)
+	lockPath := recoveryLockPath(current.HomeDir, current.ID)
+	probe, err := acquireRecoveryLock(lockPath, current.RecoveryLockIdentity, true)
 	if err == nil {
 		_ = releaseFileLock(probe)
 		return RecoveryStatus{}, errors.New("upgrade activation cannot be authorized without a live recovery actor")
@@ -130,6 +130,9 @@ func (l *RecoveryLease) ActivationAuthorized() (bool, error) {
 	}
 	if approval.ActorID != l.actorID {
 		return false, nil
+	}
+	if err := syncTransactionDirectory(filepath.Dir(path)); err != nil {
+		return false, fmt.Errorf("confirm durable upgrade activation approval: %w", err)
 	}
 	return true, nil
 }

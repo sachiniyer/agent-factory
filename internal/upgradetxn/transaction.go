@@ -76,6 +76,14 @@ type RollbackProgress struct {
 	MetadataRestored int  `json:"metadata_restored"`
 }
 
+// FileIdentity pins a durable lock pathname to the inode created before the
+// transaction is published. A lock held on an unlinked inode cannot protect a
+// replacement pathname, so every recovery acquisition verifies both values.
+type FileIdentity struct {
+	Device uint64 `json:"device"`
+	Inode  uint64 `json:"inode"`
+}
+
 // Plan contains all bytes and paths whose pre-upgrade state must be captured
 // before the transaction becomes visible to another process.
 type Plan struct {
@@ -179,6 +187,7 @@ type Journal struct {
 	ToVersion            string             `json:"to_version"`
 	Phase                Phase              `json:"phase"`
 	RecoveryNonce        string             `json:"recovery_nonce"`
+	RecoveryLockIdentity FileIdentity       `json:"recovery_lock_identity"`
 	PreviousBinaryPath   string             `json:"previous_binary_path"`
 	PreviousBinarySHA256 string             `json:"previous_binary_sha256"`
 	CandidatePath        string             `json:"candidate_path"`
@@ -263,6 +272,7 @@ func Prepare(stablePlan Plan) (_ *Transaction, retErr error) {
 	if _, err := rand.Read(nonceBytes); err != nil {
 		return nil, fmt.Errorf("generate upgrade recovery nonce: %w", err)
 	}
+	recoveryNonce := hex.EncodeToString(nonceBytes)
 
 	executable, err := canonicalExistingFile(stablePlan.ExecutablePath)
 	if err != nil {
@@ -331,6 +341,26 @@ func Prepare(stablePlan Plan) (_ *Transaction, retErr error) {
 	if err := createDurableDirectory(txnDir, metadataDir, transactionDirMode); err != nil {
 		return nil, fmt.Errorf("create metadata snapshot directory: %w", err)
 	}
+	lockPath := recoveryLockPath(home, stablePlan.ID)
+	if _, err := os.Lstat(lockPath); err == nil {
+		return nil, fmt.Errorf("upgrade recovery lock already exists at %s", lockPath)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return nil, fmt.Errorf("inspect upgrade recovery lock: %w", err)
+	}
+	createdArtifacts = append(createdArtifacts, lockPath)
+	if err := durableAtomicWriteFile(
+		lockPath, []byte(recoveryNonce+"\n"), journalFileMode,
+	); err != nil {
+		return nil, fmt.Errorf("create durable upgrade recovery lock: %w", err)
+	}
+	recoveryLockInfo, err := os.Lstat(lockPath)
+	if err != nil {
+		return nil, fmt.Errorf("inspect durable upgrade recovery lock: %w", err)
+	}
+	recoveryLockIdentity, err := fileIdentity(recoveryLockInfo)
+	if err != nil {
+		return nil, fmt.Errorf("identify durable upgrade recovery lock: %w", err)
+	}
 
 	for _, path := range []string{previousPath, candidatePath} {
 		if _, err := os.Lstat(path); err == nil {
@@ -363,7 +393,8 @@ func Prepare(stablePlan Plan) (_ *Transaction, retErr error) {
 		FromVersion:          stablePlan.FromVersion,
 		ToVersion:            stablePlan.ToVersion,
 		Phase:                PhasePrepared,
-		RecoveryNonce:        hex.EncodeToString(nonceBytes),
+		RecoveryNonce:        recoveryNonce,
+		RecoveryLockIdentity: recoveryLockIdentity,
 		PreviousBinaryPath:   previousPath,
 		PreviousBinarySHA256: digest(previousBinary),
 		CandidatePath:        candidatePath,
@@ -491,8 +522,8 @@ func (t *Transaction) RecoveryActorLive() (bool, error) {
 	if err := t.ensureRecoveryLockDirectoryLocked(); err != nil {
 		return false, err
 	}
-	lockPath := filepath.Join(transactionDir(t.journal.HomeDir, t.journal.ID), "recovery.lock")
-	file, err := acquireFileLock(lockPath, true)
+	lockPath := recoveryLockPath(t.journal.HomeDir, t.journal.ID)
+	file, err := acquireRecoveryLock(lockPath, t.journal.RecoveryLockIdentity, true)
 	if errors.Is(err, ErrRecoveryActive) {
 		return true, nil
 	}
@@ -710,8 +741,8 @@ func (t *Transaction) tryAcquireRecoveryAs(actorExecutable string) (*RecoveryLea
 	if err := t.ensureRecoveryLockDirectoryLocked(); err != nil {
 		return nil, err
 	}
-	lockPath := filepath.Join(transactionDir(t.journal.HomeDir, t.journal.ID), "recovery.lock")
-	file, err := acquireFileLock(lockPath, true)
+	lockPath := recoveryLockPath(t.journal.HomeDir, t.journal.ID)
+	file, err := acquireRecoveryLock(lockPath, t.journal.RecoveryLockIdentity, true)
 	if err != nil {
 		if errors.Is(err, ErrRecoveryActive) {
 			return nil, err
@@ -748,7 +779,7 @@ func (t *Transaction) tryAcquireRecoveryAs(actorExecutable string) (*RecoveryLea
 		_ = releaseFileLock(file)
 		return nil, fmt.Errorf("%w: %v", ErrRecoveryActorMismatch, err)
 	}
-	statusPath := filepath.Join(filepath.Dir(lockPath), "recovery.json")
+	statusPath := filepath.Join(transactionDir(t.journal.HomeDir, t.journal.ID), "recovery.json")
 	// recovery.json belongs to the former flock owner. Remove it while holding
 	// the newly acquired lock so no caller can combine this actor's liveness
 	// with a dead actor's future-dated supervisor_ready heartbeat.
@@ -756,7 +787,7 @@ func (t *Transaction) tryAcquireRecoveryAs(actorExecutable string) (*RecoveryLea
 		_ = releaseFileLock(file)
 		return nil, fmt.Errorf("invalidate previous upgrade recovery status: %w", err)
 	}
-	readyPath := filepath.Join(filepath.Dir(lockPath), "recovery.ready.lock")
+	readyPath := filepath.Join(transactionDir(t.journal.HomeDir, t.journal.ID), "recovery.ready.lock")
 	readyFile, err := acquireFileLock(readyPath, true)
 	if err != nil {
 		_ = releaseFileLock(file)
