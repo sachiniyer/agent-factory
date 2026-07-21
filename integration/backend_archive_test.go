@@ -57,7 +57,7 @@ func TestDockerBackendArchiveRestore(t *testing.T) {
 	writeDockerRepoConfig(t, repo, image, []string{"-v", bare + ":/repo.git"})
 	// The container pushes (as root) into the bind-mounted bare repo, so reown it
 	// before t.TempDir's RemoveAll runs (LIFO: registered after the TempDir).
-	reownTempViaDocker(t, bareDir)
+	reownTempViaDocker(t, image, bareDir)
 
 	title := "docker-ar"
 	slug := session.Slugify(title)
@@ -190,7 +190,7 @@ func TestSSHBackendArchiveRestore(t *testing.T) {
 	runExternal(t, repo, "git", "remote", "add", "origin", "file:///repo.git")
 	// The sshd container pushes (as root) into the bind-mounted bare repo, so reown
 	// it before t.TempDir's RemoveAll runs (LIFO: registered after the TempDir).
-	reownTempViaDocker(t, bareDir)
+	reownTempViaDocker(t, image, bareDir)
 
 	keyDir := t.TempDir()
 	privKey := filepath.Join(keyDir, "id_ed25519")
@@ -316,24 +316,51 @@ func TestSSHBackendArchiveRestore(t *testing.T) {
 // are simple, but quoting keeps the exec robust).
 func shellQ(s string) string { return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'" }
 
-// reownTempViaDocker chowns dir back to the invoking user via a throwaway root
-// container, registered so it runs BEFORE t.TempDir's RemoveAll (LIFO). The
-// sandbox containers run as root and push git objects into the bind-mounted bare
-// repo, leaving root-owned files the non-root test user cannot delete; without
-// this, cleanup fails with EPERM.
-func reownTempViaDocker(t *testing.T, dir string) {
+// reownTempViaDocker chowns dir back to the invoking user via an image the test
+// has already built, registered so it runs BEFORE t.TempDir's RemoveAll (LIFO).
+// --pull=never makes the local-image invariant explicit: cleanup cannot acquire
+// a late registry dependency. The sandbox containers run as root and push git
+// objects into the bind-mounted bare repo, leaving root-owned files the non-root
+// test user cannot delete; without this, cleanup fails with EPERM.
+func reownTempViaDocker(t *testing.T, image, dir string) {
 	t.Helper()
 	uid, gid := os.Getuid(), os.Getgid()
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 		defer cancel()
-		out, err := exec.CommandContext(ctx, "docker", "run", "--rm",
-			"-v", dir+":/reown", "alpine:3.20",
-			"chown", "-R", fmt.Sprintf("%d:%d", uid, gid), "/reown").CombinedOutput()
+		out, err := exec.CommandContext(ctx, "docker", reownTempDockerArgs(image, dir, uid, gid)...).CombinedOutput()
 		if err != nil {
-			t.Logf("reown %s failed (leaked root-owned files may remain): %v\n%s", dir, err, out)
+			t.Errorf("reown %s failed (leaked root-owned files may remain): %v\n%s", dir, err, out)
 		}
 	})
+}
+
+func reownTempDockerArgs(image, dir string, uid, gid int) []string {
+	return []string{
+		"run",
+		"--pull=never",
+		"--rm",
+		"--entrypoint", "chown",
+		"-v", dir + ":/reown",
+		image,
+		"-R", fmt.Sprintf("%d:%d", uid, gid), "/reown",
+	}
+}
+
+func TestReownTempDockerArgsUsesProvidedImageWithoutPull(t *testing.T) {
+	want := strings.Join([]string{
+		"run",
+		"--pull=never",
+		"--rm",
+		"--entrypoint", "chown",
+		"-v", "/tmp/test-repo:/reown",
+		"af-already-built:test",
+		"-R", "123:456", "/reown",
+	}, "\n")
+	got := strings.Join(reownTempDockerArgs("af-already-built:test", "/tmp/test-repo", 123, 456), "\n")
+	if got != want {
+		t.Fatalf("reown docker args:\n%s\nwant:\n%s", got, want)
+	}
 }
 
 // shortID trims a container id to the 12-char short form for logs.
