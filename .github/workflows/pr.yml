@@ -152,9 +152,11 @@ jobs:
       - name: Enable the systemd user manager
         run: |
           sudo loginctl enable-linger "$USER"
-          echo "XDG_RUNTIME_DIR=/run/user/$(id -u)" >> "$GITHUB_ENV"
+          XDG_RUNTIME_DIR="/run/user/$(id -u)"
+          export XDG_RUNTIME_DIR
+          echo "XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR" >> "$GITHUB_ENV"
           for _ in $(seq 1 30); do
-            [ -d "/run/user/$(id -u)" ] && break
+            [ -d "$XDG_RUNTIME_DIR" ] && break
             sleep 1
           done
           systemd --version | head -1
