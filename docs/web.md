@@ -258,7 +258,7 @@ the top bar, the **project switcher** (top-right), or the `[` / `]` keys:
 ┌───────────────────────────────────────────────────────────────────────┐
 │  Agent Factory   [ Sessions ]  Tasks       project ▾   ● Live   Disconnect│  ← app bar
 ├──────────────────────┬────────────────────────────────────────────────┤
-│ Sessions      3 ▤ +New│ fix-login-flow · Live │ Agent │ Terminal │ + │  ← title + tabs
+│ Sessions      3 ▼ +New│ fix-login-flow · Live │ Agent │ Terminal │ + │  ← title + tabs
 │                       │ ┌────────────────────────────────────────────┐ │
 │ ● fix-login-flow      │ │                                            │ │
 │   ⎇ fix/login         │ │                                            │ │
@@ -309,7 +309,7 @@ seen).
 #### Filtering by state
 
 The rail shows the work you can still act on: **archived sessions are hidden by
-default**, and every other state is shown. The **▤** control in the rail header
+default**, and every other state is shown. The **funnel** control in the rail header
 opens a checkbox per state — Working, Ready, Lost, Dead, Limit reached, Archived —
 so you can reveal the archive or narrow to just one group (only what's working, say).
 Archived rows render dimmed when shown, so they read as inactive.
