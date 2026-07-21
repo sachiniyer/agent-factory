@@ -312,17 +312,23 @@ func (m *Menu) SetNamingHasPrompt(has bool) {
 }
 
 func (m *Menu) addInstanceOptions() {
-	// A row with no shared lifecycle action gets the same minimal menu on every
-	// surface (#2234). This includes a create still in flight and a legacy/id-less
-	// row whose destructive target cannot be addressed unambiguously.
+	// Archive/restore and explicit teardown are separate capabilities. A retained
+	// startup-unknown row cannot safely reuse its runtime binding, but its stable
+	// record must still expose Kill so the user can remove it.
 	lifecycleAction := session.LifecycleActionNone
+	canKill := false
 	if m.instance != nil {
 		lifecycleAction = m.instance.LifecycleAction()
+		canKill = m.instance.CanKill()
 	}
 	if lifecycleAction == session.LifecycleActionNone {
-		m.options = []keys.KeyName{keys.KeyNew, keys.KeyHelp, keys.KeyQuit}
+		m.options = []keys.KeyName{keys.KeyNew}
+		if canKill {
+			m.options = append(m.options, keys.KeyKill)
+		}
+		m.options = append(m.options, keys.KeyHelp, keys.KeyQuit)
 		m.groups = []menuGroup{
-			{start: 0, end: 3, isAction: false},
+			{start: 0, end: len(m.options), isAction: false},
 		}
 		return
 	}

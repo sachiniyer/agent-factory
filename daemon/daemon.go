@@ -501,7 +501,11 @@ func refreshDaemonInstances(existing map[string]*session.Instance) (map[string]*
 				// flight if the persisted marker says so. Keep it counted against the
 				// task's cap (#1892), or a session we merely failed to LOAD would let the
 				// task admit a replacement beyond its limit.
-				if item.TaskID != "" && item.TaskRunActive {
+				// StartupStateUnknown is terminal by definition. New writers clear
+				// TaskRunActive on that transition, but keep this raw-row projection
+				// defensive for a record written by an intermediate/older build: a
+				// contradictory stale bit must not wedge max_concurrent_runs forever.
+				if item.TaskID != "" && item.TaskRunActive && !item.StartupStateUnknown {
 					ghostTaskRuns[taskRunReservationKey(repoID, item.TaskID)]++
 					log.WarningLog.Printf("watch task %s: session %q failed to load but its run is still counted against max_concurrent_runs (#1892); kill or repair the session to release its slot", item.TaskID, item.Title)
 				}

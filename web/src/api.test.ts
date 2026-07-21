@@ -1,7 +1,7 @@
 // Tests for the write-side lifecycle callers (#1592 Phase 5 follow-up): they must
 // send the session's STABLE id as the primary lookup key, not just the title. The
 // daemon resolves the action target by id first, so a cross-repo duplicate title
-// can't make a web kill/archive/prompt hit the wrong session. These pin the id in
+// can't make a web kill/archive hit the wrong session. These pin the id in
 // the request body without a daemon (fetch is stubbed).
 
 import { test, afterEach } from "node:test";
@@ -24,7 +24,6 @@ import {
   reorderTab,
   restoreSession,
   resumeFromLimit,
-  sendPrompt,
   triggerTask,
   updateTask,
 } from "./api.js";
@@ -181,16 +180,6 @@ test("restoreSession does NOT send an id (RestoreSessionRequest has no id field)
   // not know would be rejected as a 400 "unknown field". Archive/kill send `id`
   // only because THEIR request structs accept it — restore's does not.
   assert.equal("id" in cap.body, false, "no id key may reach the daemon, or DisallowUnknownFields 400s the restore");
-});
-
-test("sendPrompt posts the stable id alongside the title and prompt", async () => {
-  const cap = stubFetch();
-  await sendPrompt("id-repoB", "feature", "do the thing", "tok");
-  assert.equal(cap.url, "/v1/SendPrompt");
-  assert.equal(cap.body.id, "id-repoB");
-  assert.equal(cap.body.title, "feature");
-  assert.equal(cap.body.prompt, "do the thing");
-  assert.equal(cap.body.repo_id, "");
 });
 
 test("createTab / closeTab post the stable id alongside the title", async () => {

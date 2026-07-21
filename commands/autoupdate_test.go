@@ -17,6 +17,7 @@ import (
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
+	"github.com/sachiniyer/agent-factory/internal/tmuxguard"
 	aflog "github.com/sachiniyer/agent-factory/log"
 )
 
@@ -39,6 +40,18 @@ func captureLogs(t *testing.T) (info, errLog *bytes.Buffer) {
 }
 
 func TestMain(m *testing.M) {
+	// Generated Codex hooks resolve `af` from PATH. Integration tests symlink
+	// this package test binary as af so they exercise the same native policy as
+	// the production hidden command without building or installing over the
+	// maintainer's live binary.
+	if len(os.Args) == 2 && os.Args[1] == "hook-guard-tmux" {
+		if err := tmuxguard.Run(os.Stdin, os.Stdout); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
+
 	// #837: fail the package loudly if any test touches the real config.json.
 	verifyRealConfig := testguard.ConfigTripwire()
 	// #1056: default the whole package into a sandboxed AGENT_FACTORY_HOME so
@@ -337,6 +350,7 @@ func TestAutoUpdateCallsShutdownAfterBinarySwap(t *testing.T) {
 	withTestHome(t)
 	infoBuf, errBuf := captureLogs(t)
 	refreshCalls := stubAutostartRefresh(t, nil)
+	stubAutostartScope(t, true, true, nil)
 
 	tempBin := tempBinPath(t)
 	if err := os.WriteFile(tempBin, []byte("old-binary"), 0755); err != nil {
@@ -420,6 +434,7 @@ func TestAutoUpdateRefreshFailureSkipsDaemonRestart(t *testing.T) {
 	aflog.WarningLog.SetOutput(errBuf)
 	t.Cleanup(func() { aflog.WarningLog.SetOutput(previousWarningOut) })
 	refreshCalls := stubAutostartRefresh(t, errors.New("daemon-reload failed"))
+	stubAutostartScope(t, true, true, nil)
 
 	tempBin := tempBinPath(t)
 	if err := os.WriteFile(tempBin, []byte("old-binary"), 0755); err != nil {

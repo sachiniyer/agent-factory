@@ -6,19 +6,22 @@ import (
 	"github.com/sachiniyer/agent-factory/ui/store"
 )
 
-// scrollOwnerForModes is the one terminal ownership decision used by nav
-// preview and interactive mouse routing. Alternate-screen applications own
-// their private history even when they do not track the mouse (Codex transcript);
-// a primary-screen application that explicitly tracks mouse also owns wheel
-// input. Unknown is never guessed as host history.
-func scrollOwnerForModes(modes terminal.Modes, known bool) ui.ScrollOwner {
-	if !known {
-		return ui.ScrollOwnerNone
-	}
+// scrollOwnerForKnownModes is the one authoritative terminal ownership decision
+// used by nav preview and interactive mouse routing. Alternate-screen applications
+// own their private history even when they do not track the mouse (Codex transcript);
+// a primary-screen application that explicitly tracks mouse also owns wheel input.
+func scrollOwnerForKnownModes(modes terminal.Modes) ui.ScrollOwner {
 	if modes.AlternateScreen || modes.MouseTrackingEnabled() {
 		return ui.ScrollOwnerChildApplication
 	}
 	return ui.ScrollOwnerHostHistory
+}
+
+func scrollOwnerForSnapshot(modes terminal.Modes, known bool) ui.ScrollOwner {
+	if !known {
+		return ui.ScrollOwnerNone
+	}
+	return scrollOwnerForKnownModes(modes)
 }
 
 // paneScrollOwnership is the input-time decision for one target. childMouse is
@@ -41,9 +44,12 @@ func (m *home) resolvePaneScrollOwnership(p *store.OpenPane, w *ui.TabbedWindow)
 	}
 	if lt := m.liveTerms[p.ID()]; lt != nil {
 		modes, known := lt.TerminalModes()
+		if !known {
+			return paneScrollOwnership{owner: w.ObserveScrollOwnerUnknown()}
+		}
 		decision := paneScrollOwnership{
-			owner:      scrollOwnerForModes(modes, known),
-			childMouse: known && modes.MouseTrackingEnabled(),
+			owner:      scrollOwnerForKnownModes(modes),
+			childMouse: modes.MouseTrackingEnabled(),
 		}
 		w.SetScrollOwner(decision.owner)
 		return decision

@@ -364,14 +364,9 @@ export async function createSession(input: CreateSessionInput, token: string): P
 // The lifecycle mutations send the session's stable `id` as the primary lookup
 // key alongside the (display) title, with an empty repo_id. The daemon resolves
 // the target by id FIRST, so a duplicate title across repos can never make the
-// web kill/archive/prompt the wrong session — the write-path analogue of the
+// web kill/archive the wrong session — the write-path analogue of the
 // id-keyed read/stream paths (#1592 Phase 5 PR5). The title is still sent so the
 // daemon's lifecycle event and any title-only fallback stay correct.
-
-/** Sends a prompt to an existing session (mirrors `af sessions send-prompt`). */
-export async function sendPrompt(id: string, title: string, prompt: string, token: string): Promise<void> {
-  await af("SendPrompt", { id, title, repo_id: "", prompt }, token);
-}
 
 /** Kills a session (mirrors `af sessions kill`). The session.killed event removes
  *  its row from the rail live. */

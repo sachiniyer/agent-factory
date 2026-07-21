@@ -1,6 +1,7 @@
 package commands
 
 import (
+	"bytes"
 	"errors"
 	"testing"
 
@@ -8,6 +9,20 @@ import (
 )
 
 const testUpgradeDaemonPath = "/tmp/af-upgraded"
+
+func stubAutostartScope(t *testing.T, serves, installed bool, gateErr error) {
+	t.Helper()
+	prevServes := autostartUnitServesHomeFn
+	prevConfigDir := configDirFn
+	t.Cleanup(func() {
+		autostartUnitServesHomeFn = prevServes
+		configDirFn = prevConfigDir
+	})
+	configDirFn = func() (string, error) { return "/tmp/af-test-home", nil }
+	autostartUnitServesHomeFn = func(string) (bool, bool, error) {
+		return serves, installed, gateErr
+	}
+}
 
 // Tests for the unit-aware upgrade respawn (#796) and the unconditional
 // fallback (#813). All collaborators are stubbed so nothing here
@@ -251,5 +266,46 @@ func TestRestartDaemonFromPathRespawnsStoppedDaemon(t *testing.T) {
 	}
 	if gotPath != "/opt/af/current" {
 		t.Fatalf("respawn path = %q, want /opt/af/current", gotPath)
+	}
+}
+
+// The command promises an idempotent no-op when no daemon is running. That
+// answer must be established before reading, rewriting, or reloading an
+// installed unit: a broken stale unit is irrelevant when nothing will stop.
+func TestRunDaemonRestartNoDaemonSkipsUnsafeUnitRefresh(t *testing.T) {
+	prevPresence := daemonRestartPresenceFn
+	prevRefresh := refreshAutostartUnitFn
+	prevExecutable := osExecutableFn
+	prevConfigDir := configDirFn
+	prevQuiet := daemonRestartQuiet
+	t.Cleanup(func() {
+		daemonRestartPresenceFn = prevPresence
+		refreshAutostartUnitFn = prevRefresh
+		osExecutableFn = prevExecutable
+		configDirFn = prevConfigDir
+		daemonRestartQuiet = prevQuiet
+	})
+
+	daemonRestartPresenceFn = func() daemon.ProbeAnswer { return daemon.AnswerNo() }
+	refreshAutostartUnitFn = func() error {
+		t.Fatal("no-daemon restart touched the stale autostart unit")
+		return errors.New("daemon-reload failed")
+	}
+	osExecutableFn = func() (string, error) {
+		t.Fatal("no-daemon restart resolved an executable despite being a no-op")
+		return "", nil
+	}
+	configDirFn = func() (string, error) {
+		t.Fatal("no-daemon restart tried to scope an irrelevant autostart unit")
+		return "", nil
+	}
+	daemonRestartQuiet = false
+
+	var out bytes.Buffer
+	if err := runDaemonRestart(&out); err != nil {
+		t.Fatalf("runDaemonRestart: %v", err)
+	}
+	if got := out.String(); got != "no running daemon to restart\n" {
+		t.Fatalf("restart output = %q, want documented no-op", got)
 	}
 }

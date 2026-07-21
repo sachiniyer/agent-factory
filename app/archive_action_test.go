@@ -44,6 +44,23 @@ func TestHandleArchive_LiveRowConfirms(t *testing.T) {
 	require.False(t, called, "the archive RPC must not fire before confirmation")
 }
 
+// Startup uncertainty vetoes every operation that would reuse the unconfirmed
+// runtime binding, but it must not veto explicit teardown. Otherwise the retained
+// row is visible yet cannot be removed from either interactive client.
+func TestHandleKill_StartupUnknownStillConfirms(t *testing.T) {
+	h := newTestHome(t)
+	inst := archiveActionInstance(t, "uncertain", session.Ready)
+	inst.MarkStartupStateUnknown()
+	h.store.AddInstance(inst)
+	h.sidebar.SetSelectedInstance(0)
+
+	model, _ := h.handleKill()
+	h = model.(*home)
+
+	require.Equal(t, stateConfirm, h.state, "startup-unknown row must remain killable")
+	require.NotNil(t, h.confirmationOverlay)
+}
+
 // TestHandleArchive_ConfirmationUsesEffectiveRestoreKey: the archive confirmation
 // tells the user how to bring the session back, so it must name the effective
 // RESTORE key (#1605), not the archive key — and it must track a [keys] rebind of

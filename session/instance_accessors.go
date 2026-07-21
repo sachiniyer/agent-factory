@@ -84,8 +84,19 @@ func (i *Instance) UserKilled() bool {
 func (i *Instance) MarkStartupStateUnknown() {
 	i.mu.Lock()
 	defer i.mu.Unlock()
+	lv, op, resetAt := i.lifecycleStateLocked()
 	i.startupStateUnknown = true
 	i.started = false
+	// Startup-unknown is a terminal delivery outcome, not a run still consuming
+	// the task's concurrency budget. Store that fact on the same transition that
+	// stores the terminal marker so projections, persistence, and unloadable-row
+	// accounting cannot disagree about whether the slot was released.
+	i.taskRunActive = false
+	// The create attempt has settled into an explicit blocked outcome. Leaving
+	// OpCreating set makes projections report an operation that no goroutine owns
+	// and can keep old clients polling forever.
+	i.inFlightOp = OpNone
+	i.noteStateChangeLocked(lv, op, resetAt)
 }
 
 // StartupStateUnknown reports whether a create may have launched a runtime but
@@ -273,6 +284,23 @@ func (i *Instance) ResolvedAgent() string {
 		}
 	}
 	return tmux.DetectAgentFromCommand(i.Program)
+}
+
+// ResolvedPaneAgent returns the canonical agent proven by this instance's
+// concrete local tmux binding, or "" when there is no such binding or its
+// command names no known agent. Unlike ResolvedAgent it deliberately never
+// falls back to Instance.Program: callers describing an already-attached pane
+// must not invent agent-specific behavior for remote tabs, whose real command
+// was resolved inside the sandbox and is not represented by a local tmux
+// session (#2210).
+func (i *Instance) ResolvedPaneAgent() string {
+	i.mu.RLock()
+	ts := i.tmuxLocked()
+	i.mu.RUnlock()
+	if ts == nil || strings.TrimSpace(ts.Program()) == "" {
+		return ""
+	}
+	return tmux.DetectAgentFromCommand(ts.Program())
 }
 
 // SetTmuxSession sets the agent tab's tmux session for testing purposes,

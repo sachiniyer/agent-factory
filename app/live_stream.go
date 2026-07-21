@@ -11,7 +11,6 @@ import (
 	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/session/tmux"
-	"github.com/sachiniyer/agent-factory/terminal"
 	"github.com/sachiniyer/agent-factory/ui"
 	"github.com/sachiniyer/agent-factory/ui/termpane"
 )
@@ -42,7 +41,7 @@ func (m *home) newTabPaneSource() ui.PreviewSource {
 		}
 		return ui.PreviewSnapshot{
 			Content: resp.Content,
-			Owner:   scrollOwnerForModes(resp.Modes, resp.HasModes),
+			Owner:   scrollOwnerForSnapshot(resp.Modes, resp.HasModes),
 		}, nil
 	}
 }
@@ -78,7 +77,7 @@ func streamDialer(title, repoID, tabID string, tab int) termpane.Dialer {
 // binary frames.
 type apiStream struct {
 	sc           *apiclient.StreamConn
-	pendingModes *terminal.Modes
+	pendingModes *agentproto.TerminalModesMessage
 }
 
 var _ termpane.Stream = (*apiStream)(nil)
@@ -101,7 +100,10 @@ func (s *apiStream) Recv(ctx context.Context) (termpane.Event, error) {
 			case agentproto.OpRepaint:
 				ev := termpane.Event{Kind: termpane.EventRepaint, Data: msg.Frame.Data}
 				if s.pendingModes != nil {
-					ev.Modes, ev.HasModes = *s.pendingModes, true
+					ev.Modes, ev.HasModes = s.pendingModes.Modes, true
+					if s.pendingModes.CoversNextCursor {
+						ev.CursorCoverage = termpane.RepaintCoversNextCursor
+					}
 					s.pendingModes = nil
 				}
 				return ev, nil
@@ -121,8 +123,7 @@ func (s *apiStream) Recv(ctx context.Context) (termpane.Event, error) {
 			// the next grid. Clear first so ownership metadata is fail-closed.
 			s.pendingModes = nil
 			if json.Unmarshal(msg.Text, &mm) == nil {
-				modes := mm.Modes
-				s.pendingModes = &modes
+				s.pendingModes = &mm
 			}
 			// Modes and repaint are emitted consecutively by the daemon. Keep
 			// reading so termpane applies both under one emulator lock.

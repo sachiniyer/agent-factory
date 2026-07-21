@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"github.com/sachiniyer/agent-factory/agentproto"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
 )
@@ -162,9 +163,11 @@ func (m *Manager) finishUserKill(repoID string, instance *session.Instance) {
 		log.InfoLog.Printf("finishing kill of %q skipped storage delete: current record has a different instance identity", instance.Title)
 		return
 	}
+	removed := false
 	m.mu.Lock()
 	if m.instances[key] == instance {
 		delete(m.instances, key)
+		removed = true
 	}
 	if session.IsReservedTitle(instance.Title) {
 		// Arm the grace window the interrupted KillSession never reached
@@ -179,4 +182,12 @@ func (m *Manager) finishUserKill(repoID string, instance *session.Instance) {
 		log.InfoLog.Printf("root agent for repo %s: finished an interrupted user kill; the ensure loop will re-create it in ~%s unless the repo is removed from root_agents", repoID, rootKillHealDelay)
 	}
 	m.mu.Unlock()
+	if removed {
+		// Explicit RPC kills publish this from control_server after their
+		// synchronous delete. A tombstone completed by the poll has no wrapper to
+		// do that, so publish at the point its durable row and authoritative map
+		// entry actually disappear. Stable-id payloads keep a delayed event from
+		// removing a replacement that reused the title.
+		m.publishEvent(agentproto.EventSessionKilled, session.InstanceData{ID: instance.ID, Title: instance.Title})
+	}
 }

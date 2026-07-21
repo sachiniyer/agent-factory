@@ -107,6 +107,22 @@ func RequestShutdown() (ShutdownResult, error) {
 	return ShutdownViaRPC, nil
 }
 
+// ClassifyShutdownTarget turns the read-only ping made before a restart into
+// the exact presence answer RequestShutdown will rely on. Only the two kernel
+// answers that RequestShutdown already treats as daemon-absent — ENOENT and
+// ECONNREFUSED — become No. Permission errors, resets, timeouts, and every
+// other failure remain Undetermined, so a failed observation cannot authorize
+// a supposedly harmless no-op before restart-safety checks run.
+func ClassifyShutdownTarget(pingErr error) ProbeAnswer {
+	if pingErr == nil {
+		return AnswerYes()
+	}
+	if isDaemonAbsentErr(pingErr) {
+		return AnswerNo()
+	}
+	return Undetermined(fmt.Errorf("cannot determine whether a daemon is available to shut down: %w", pingErr))
+}
+
 // shutdownCompleteGrace bounds how long WaitForShutdownCompletion polls for
 // the control socket to stop answering; shutdownCompletePoll is the cadence.
 // Package vars rather than constants so tests can shorten the timeout path,

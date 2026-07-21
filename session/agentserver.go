@@ -256,6 +256,17 @@ const (
 	PTYCursor
 )
 
+// PTYRepaintProvenance distinguishes a fresh/reconnect snapshot from the
+// recovery barrier repaint that intentionally covers the immediately following
+// cursor jump. Defaulting to Fresh is fail-closed for callers that construct an
+// event without provenance.
+type PTYRepaintProvenance uint8
+
+const (
+	PTYRepaintFresh PTYRepaintProvenance = iota
+	PTYRepaintRecovery
+)
+
 // PTYEvent is one event delivered to a subscriber: output bytes, the authoritative
 // resize echo, a screen repaint, or a cursor re-seed, selected by Kind.
 type PTYEvent struct {
@@ -270,6 +281,7 @@ type PTYEvent struct {
 	Seq Seq
 	// Modes accompany PTYRepaint when HasModes is true. They are snapshot
 	// metadata, not ring bytes, and therefore do not advance Seq.
-	Modes    terminal.Modes
-	HasModes bool
+	Modes             terminal.Modes
+	HasModes          bool
+	RepaintProvenance PTYRepaintProvenance
 }

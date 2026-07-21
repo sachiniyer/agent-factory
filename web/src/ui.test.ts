@@ -12,6 +12,7 @@ import {
   canManageTabs,
   documentTitle,
   isActionableSession,
+  isKillableSession,
   supportsTabManagement,
   tabBarSig,
   tabCreationUnavailableReason,
@@ -49,6 +50,24 @@ test("rail actionability is granted only by the daemon projection (#2234)", () =
     isActionableSession(sess({ id: undefined, lifecycle_action: "archive" })),
     false,
     "a malformed id-less capability fails closed",
+  );
+});
+
+test("kill addressability is independent and fails closed", () => {
+  assert.equal(
+    isKillableSession(sess({ can_kill: true })),
+    true,
+    "a stable row with the projected teardown capability is killable",
+  );
+  assert.equal(
+    isKillableSession(sess({ lifecycle_action: "archive" })),
+    false,
+    "the lifecycle verb must not implicitly grant teardown",
+  );
+  assert.equal(
+    isKillableSession(sess({ id: undefined, can_kill: true })),
+    false,
+    "an id-less teardown capability fails closed",
   );
 });
 

@@ -105,6 +105,15 @@ Nothing here ever runs `docker system prune` or an unfiltered
 images to do it. `make testbox-selftest` asserts exactly that, against a fake
 docker, in about a second — it gates every PR.
 
+Tagged-image cleanup is also serialized against the only unsafe window in a
+sibling run: from rebuilding a stable harness tag until Docker/Podman reports
+the first container using it as running. The lock is shared across worktrees and
+released at that positive engine observation, so suites still run concurrently;
+afterward the container reference itself prevents image deletion. This keeps
+`image prune -a` and the legacy exact-tag cleanup fallback from deleting a local-
+only image between build and `run`, and also keeps two sibling Dockerfile builds
+from retagging the name out from under a not-yet-created container.
+
 **Before a run**, if free space on the docker root filesystem is under 20GB
 (`AF_TESTBOX_MIN_FREE_GB`, `0` silences it), the harness says so and points at
 `make testbox-clean`. It warns and continues rather than refusing: nothing here

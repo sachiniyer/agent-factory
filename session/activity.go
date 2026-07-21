@@ -50,6 +50,13 @@ const (
 // mid-create session as idle — releasing a concurrency slot it should hold, and
 // telling `sessions watch` a session is ready before it ever started.
 func ClassifyActivity(data InstanceData) (Activity, string) {
+	// A failed create whose runtime identity could not be confirmed is a settled
+	// blocked outcome, not an idle LiveReady session. It wins even over a stale
+	// OpCreating persisted by the failure path: no automatic operation may settle
+	// this row, and watch must exit non-zero with an actionable explanation.
+	if data.StartupStateUnknown {
+		return ActivityTerminal, "session startup state is unknown (af could not confirm which runtime owns its workspace); inspect it and explicitly remove it before retrying"
+	}
 	// Any operation in flight (create, kill, archive, restore) means the session
 	// is mid-transition; wait for it to settle rather than reporting the
 	// transient composed status.
@@ -111,6 +118,10 @@ type LifecycleView struct {
 	Status     Status
 	Started    bool
 	UserKilled bool
+	// StartupStateUnknown is the retained-create fence: the launch may have
+	// succeeded under an identity af could not confirm, so no runtime or workspace
+	// action may infer ordinary LiveReady semantics from this view.
+	StartupStateUnknown bool
 	// TaskRunActive is whether this session's task run is still in flight — the one
 	// fact the concurrency cap counts. See Instance.taskRunActive.
 	TaskRunActive bool
@@ -135,13 +146,14 @@ func (i *Instance) LifecycleView() LifecycleView {
 // cannot observe different lifecycle states.
 func (i *Instance) lifecycleViewLocked() LifecycleView {
 	return LifecycleView{
-		Title:      i.Title,
-		TaskID:     i.TaskID,
-		Liveness:   i.liveness,
-		InFlightOp: i.inFlightOp,
-		Status:     i.statusLocked(),
-		Started:    i.started,
-		UserKilled: i.userKilled,
+		Title:               i.Title,
+		TaskID:              i.TaskID,
+		Liveness:            i.liveness,
+		InFlightOp:          i.inFlightOp,
+		Status:              i.statusLocked(),
+		Started:             i.started,
+		UserKilled:          i.userKilled,
+		StartupStateUnknown: i.startupStateUnknown,
 		// The already-locked variant, NOT Capabilities(): the backend is mutable
 		// (a restore rebinds it in bindProvisionResult), so Capabilities() now
 		// takes i.mu.RLock itself — and calling it while this snapshot holds the
@@ -161,7 +173,11 @@ func (i *Instance) lifecycleViewLocked() LifecycleView {
 // resolved liveness (NewInstance sets it, FromInstanceData rolls a legacy record
 // forward at load), so ClassifyActivity's LivenessUnset fallback never applies.
 func (v LifecycleView) Activity() Activity {
-	activity, _ := ClassifyActivity(InstanceData{Liveness: v.Liveness, InFlightOp: v.InFlightOp})
+	activity, _ := ClassifyActivity(InstanceData{
+		Liveness:            v.Liveness,
+		InFlightOp:          v.InFlightOp,
+		StartupStateUnknown: v.StartupStateUnknown,
+	})
 	return activity
 }
 

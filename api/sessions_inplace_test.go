@@ -36,14 +36,14 @@ func silenceStdio(t *testing.T) {
 // sessionsCreateCmd and restores them afterwards.
 func setSessionsCreateFlags(t *testing.T, name, repo string, here, inPlace bool) {
 	t.Helper()
-	prevName, prevPrompt, prevProgram := createNameFlag, createPromptFlag, createProgramFlag
+	prevName, prevPrompt, prevProgram, prevBackend := createNameFlag, createPromptFlag, createProgramFlag, createBackendFlag
 	prevHere, prevInPlace, prevRepo := createHereFlag, createInPlaceFlag, repoFlag
 	prevPreflight := preflightLocalSession
-	createNameFlag, createPromptFlag, createProgramFlag = name, "do the thing", ""
+	createNameFlag, createPromptFlag, createProgramFlag, createBackendFlag = name, "do the thing", "", ""
 	createHereFlag, createInPlaceFlag, repoFlag = here, inPlace, repo
 	preflightLocalSession = func(*config.Config, string) error { return nil }
 	t.Cleanup(func() {
-		createNameFlag, createPromptFlag, createProgramFlag = prevName, prevPrompt, prevProgram
+		createNameFlag, createPromptFlag, createProgramFlag, createBackendFlag = prevName, prevPrompt, prevProgram, prevBackend
 		createHereFlag, createInPlaceFlag, repoFlag = prevHere, prevInPlace, prevRepo
 		preflightLocalSession = prevPreflight
 	})

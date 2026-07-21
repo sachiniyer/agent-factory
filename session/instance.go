@@ -112,8 +112,10 @@ type Instance struct {
 	inFlightOp InFlightOp
 	// taskRunActive is THE fact the watch-task concurrency cap is about (#1892):
 	// has this session's task run finished yet? It is true from creation for a
-	// task-spawned session and flips false — once, permanently — the first time the
-	// AGENT goes idle, which is the definition of the run being done.
+	// task-spawned session and flips false — once, permanently — when the AGENT
+	// first goes idle, or when startup settles terminal-unknown without ever
+	// establishing a runnable session. Either outcome means no run remains that a
+	// later poll could observe finishing.
 	//
 	// It is a stored fact rather than something derived at read time because every
 	// neighbouring signal answers a DIFFERENT question, and reconstructing the run
@@ -129,10 +131,10 @@ type Instance struct {
 	//     AbortArchiveToLost) look like an interrupted run and claim a slot.
 	//
 	// So the run's own lifetime is recorded on the run's own edges: it begins when
-	// the session is created for a delivery and ends when the agent goes idle.
-	// Neither of those is ambiguous, and neither has to be inferred later from a
-	// state that means something else. Persisted, because an outage that loses
-	// sessions is the same event that restarts the daemon.
+	// the session is created for a delivery and ends when the agent goes idle or
+	// startup reaches its explicit terminal-unknown boundary. Neither has to be
+	// inferred later from a neighbouring state. Persisted, because an outage that
+	// loses sessions is the same event that restarts the daemon.
 	//
 	// It never flips back to true: a capped task creates one session per event (a
 	// cap and a target_session are mutually exclusive — see task.ValidateTrigger),

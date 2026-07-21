@@ -1,10 +1,13 @@
 package commands
 
 import (
+	"bytes"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -243,6 +246,136 @@ func TestPreflightHookNeverInstalls(t *testing.T) {
 			continue
 		}
 		t.Errorf("the preflight hook must never execute the installer, found: %q", trimmed)
+	}
+}
+
+// TestGeneratedCodexPluginGuardsBroadTmuxKills starts at the generated plugin
+// tree Codex installs, discovers the configured handler exactly as Codex does,
+// and executes it through the native af policy. A tmuxguard unit test alone
+// would stay green if the Codex plugin stopped delivering the guard (#2184).
+func TestGeneratedCodexPluginGuardsBroadTmuxKills(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the generated Codex hook requires bash")
+	}
+
+	pluginRoot := filepath.Join(t.TempDir(), "plugin root")
+	for _, file := range generatedPluginFiles() {
+		prefix := codexPluginRoot + "/"
+		if !strings.HasPrefix(file.path, prefix) {
+			continue
+		}
+		path := filepath.Join(pluginRoot, filepath.FromSlash(strings.TrimPrefix(file.path, prefix)))
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatalf("mkdir generated plugin path: %v", err)
+		}
+		if err := os.WriteFile(path, []byte(file.content), file.mode); err != nil {
+			t.Fatalf("write generated plugin file %s: %v", file.path, err)
+		}
+	}
+
+	type hookHandler struct {
+		Type    string `json:"type"`
+		Command string `json:"command"`
+	}
+	type hookGroup struct {
+		Matcher string        `json:"matcher"`
+		Hooks   []hookHandler `json:"hooks"`
+	}
+	var cfg struct {
+		Hooks map[string][]hookGroup `json:"hooks"`
+	}
+	hooksPath := filepath.Join(pluginRoot, "hooks", "hooks.json")
+	raw, err := os.ReadFile(hooksPath)
+	if err != nil {
+		t.Fatalf("generated Codex plugin has no hook config: %v", err)
+	}
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		t.Fatalf("parse generated Codex hook config: %v", err)
+	}
+
+	var handler hookHandler
+	for _, group := range cfg.Hooks["PreToolUse"] {
+		if group.Matcher == "Bash" && len(group.Hooks) == 1 {
+			handler = group.Hooks[0]
+			break
+		}
+	}
+	if handler.Type != "command" || handler.Command == "" {
+		t.Fatalf("generated Codex plugin has no Bash PreToolUse command handler: %s", raw)
+	}
+
+	guardPath := filepath.Join(pluginRoot, "hooks", "guard-tmux.sh")
+	info, err := os.Stat(guardPath)
+	if err != nil {
+		t.Fatalf("generated Codex plugin did not ship its guard: %v", err)
+	}
+	if info.Mode().Perm()&0o111 == 0 {
+		t.Fatalf("generated Codex guard is not executable (mode %v)", info.Mode().Perm())
+	}
+
+	binDir := t.TempDir()
+	testBinary, err := os.Executable()
+	if err != nil {
+		t.Fatalf("resolve test binary: %v", err)
+	}
+	if err := os.Symlink(testBinary, filepath.Join(binDir, "af")); err != nil {
+		t.Fatalf("link native guard test binary: %v", err)
+	}
+
+	runHook := func(shellCommand, path string) (stdout, stderr string, runErr error) {
+		t.Helper()
+		input, err := json.Marshal(map[string]any{
+			"hook_event_name": "PreToolUse",
+			"tool_name":       "Bash",
+			"tool_input": map[string]any{
+				"command": shellCommand,
+			},
+		})
+		if err != nil {
+			t.Fatalf("marshal hook input: %v", err)
+		}
+
+		cmd := exec.Command("bash", "-c", handler.Command)
+		cmd.Env = append(os.Environ(),
+			"PLUGIN_ROOT="+pluginRoot,
+			"PATH="+path,
+		)
+		cmd.Stdin = bytes.NewReader(input)
+		var out, errOut bytes.Buffer
+		cmd.Stdout = &out
+		cmd.Stderr = &errOut
+		runErr = cmd.Run()
+		return strings.TrimSpace(out.String()), strings.TrimSpace(errOut.String()), runErr
+	}
+
+	blocked, stderr, err := runHook("tmux kill-server", binDir+string(os.PathListSeparator)+"/usr/bin:/bin")
+	if err != nil {
+		t.Fatalf("configured Codex guard failed instead of returning a denial: %v\nstderr: %s", err, stderr)
+	}
+	var decision struct {
+		HookSpecificOutput struct {
+			PermissionDecision string `json:"permissionDecision"`
+		} `json:"hookSpecificOutput"`
+	}
+	if err := json.Unmarshal([]byte(blocked), &decision); err != nil {
+		t.Fatalf("bare kill-server did not return a structured denial: %q (%v)", blocked, err)
+	}
+	if decision.HookSpecificOutput.PermissionDecision != "deny" {
+		t.Fatalf("bare kill-server must be denied, got: %s", blocked)
+	}
+
+	allowed, stderr, err := runHook("tmux -L af-test-guard kill-server", binDir+string(os.PathListSeparator)+"/usr/bin:/bin")
+	if err != nil {
+		t.Fatalf("configured Codex guard failed for a scoped teardown: %v\nstderr: %s", err, stderr)
+	}
+	if allowed != "" {
+		t.Fatalf("socket-scoped kill-server must be allowed, got: %s", allowed)
+	}
+
+	_, stderr, err = runHook("printf safe", "/usr/bin:/bin")
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 2 {
+		t.Fatalf("missing af must fail closed with exit 2, got err=%v stderr=%q", err, stderr)
 	}
 }
 

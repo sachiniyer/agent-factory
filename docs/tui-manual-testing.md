@@ -97,7 +97,7 @@ it.
 | `D` | kill instance | | `/` | search |
 | `a` | archive/restore | | `q` | quit |
 | `p`/`y` | open/copy PR | | `e` | hooks editor |
-| `Ctrl-P` | switch project | | `Ctrl-U`/`Ctrl-D` | scroll tab |
+| `Ctrl-P` | switch project | | `Ctrl-U`/`Ctrl-D` | preview scroll |
 | `Ctrl-W` | detach (full-screen) |
 
 While naming a new instance the form owns the keyboard and its keys are fixed:

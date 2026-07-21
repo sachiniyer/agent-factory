@@ -68,7 +68,7 @@ For a named long-running command or a web preview with a URL/port, use
   active preview as another pane.
 - **`Left`** / **`Right`** move focus between open workspace panes when a pane
   has focus.
-- **`Ctrl-u`** / **`Ctrl-d`** scroll the current tab up and down.
+- **`Ctrl-u`** / **`Ctrl-d`** preview-scroll the current tab. In a full-screen attach the child program owns input and scrolling; these only work in AF's navigation mode.
 - **`Ctrl-p`** switches the active project without restarting the TUI. It works
   from navigation only — while you're attached to a pane, `Ctrl-p` is forwarded
   to the running program, so detach (`Ctrl-]`) first.

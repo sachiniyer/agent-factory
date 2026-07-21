@@ -10,6 +10,13 @@ import (
 	"github.com/sachiniyer/agent-factory/session"
 )
 
+// errSessionNotFound classifies only a resolver's authoritative miss. Its text
+// is deliberately "not found" so wrapping it preserves the existing messages
+// byte-for-byte. DeleteProject uses errors.Is on this in process because its own
+// under-lock snapshot proves the target existed; normal KillSession callers
+// still receive the same error, and the sentinel does not survive net/rpc.
+var errSessionNotFound = errors.New("not found")
+
 // KillSession tears down and deletes the resolved session. It returns the stable
 // identity (id + title) of the session it ACTUALLY resolved and acted on, so the
 // control server publishes the killed event for exactly that session — never the
@@ -298,14 +305,12 @@ func promptTargetLivenessError(title string, liveness session.Liveness) error {
 }
 
 // agentServerForStream resolves the /v1/sessions/{id}/stream target to its cached
-// agent-server for the WS PTY broker (#1592 Phase 2 PR5). The {id} segment is
-// resolved by the session's STABLE id first, then by title (with optional repoID)
-// as a fallback. The TUI/apiclient pass a title there (no id match → title path,
-// behavior unchanged); the browser web client (Phase 5 PR4) passes the
-// globally-unique session id, which sidesteps the rail's cross-repo title
-// collision — a title alone can name two sessions in two repos, an id names
-// exactly one. Both paths return the tracked instance's cached agent-server
-// singleton whose ring buffer/subscribers persist.
+// agent-server for the WS PTY broker (#1592 Phase 2 PR5). The route multiplexes
+// two authoritative request shapes: TUI/CLI send {title}+repo_id, while Web sends
+// a globally unique stable id with no repo_id. Presence of repo_id selects the
+// title namespace; only the unscoped shape tries stable identity first. Both
+// return the tracked instance's cached agent-server singleton whose ring
+// buffer/subscribers persist.
 func (m *Manager) agentServerForStream(idOrTitle, repoID string) (session.AgentServer, *session.Instance, error) {
 	instance, resolvedRepoID, title, err := m.resolveStreamSession(idOrTitle, repoID)
 	if err != nil {
@@ -330,36 +335,78 @@ func (m *Manager) agentServerForStream(idOrTitle, repoID string) (session.AgentS
 	return instance.AgentServer(), instance, nil
 }
 
-// resolveStreamSession resolves a stream target by the session's stable id first
-// (the web client's key), else by title (the TUI's key, with optional repoID). It
-// returns the instance, its resolved repoID, and its title — the last so the
-// killsInFlight gate keys off the real title even when the caller addressed the
-// session by id. The id scan only sees in-memory (live) instances, which is all a
-// stream can attach to. Both the stable-id and repo-scoped title paths consult
-// the daemon's already-restored map directly: Preview is a repaint hot path, so
-// re-scanning every persisted session before each capture makes its latency grow
-// with the whole session history. A miss still falls through to findSession,
-// preserving the disk restore and unscoped-title ambiguity checks for callers
-// that genuinely address an untracked session.
+// resolveStreamSession returns the instance, its resolved repoID, and its title —
+// the last so the killsInFlight gate keys off the real title even when Web used a
+// stable id. Both request shapes consult the daemon's already-restored map
+// directly: Preview is a repaint hot path, so re-scanning every persisted session
+// before each capture makes its latency grow with the whole session history. A
+// miss refreshes exactly once, using the SAME streamTarget authority in both
+// phases: repo-scoped title lookup never detours through the global ID namespace,
+// while an unscoped Web ID gets first refusal after refresh before legacy title
+// fallback (#2187/#2279 review).
 func (m *Manager) resolveStreamSession(idOrTitle, repoID string) (*session.Instance, string, string, error) {
+	target := authoritativeStreamTarget(idOrTitle, repoID)
 	m.mu.Lock()
-	for key, instance := range m.instances {
-		if instance != nil && instance.ID != "" && instance.ID == idOrTitle {
-			rid, _ := splitDaemonInstanceKey(key)
-			title := instance.Title
-			m.mu.Unlock()
-			return instance, rid, title, nil
-		}
-	}
-	if repoID != "" {
-		if instance := m.instances[daemonInstanceKey(repoID, idOrTitle)]; instance != nil {
-			m.mu.Unlock()
-			return instance, repoID, instance.Title, nil
-		}
+	if instance, rid, title := m.trackedStreamSessionLocked(target); instance != nil {
+		m.mu.Unlock()
+		return instance, rid, title, nil
 	}
 	m.mu.Unlock()
-	instance, resolvedRepoID, _, err := m.findSession(idOrTitle, repoID)
-	return instance, resolvedRepoID, idOrTitle, err
+	instance, resolvedRepoID, _, err := m.findSessionByStableID(target.stableID, target.title, target.repoID)
+	if instance == nil {
+		return nil, resolvedRepoID, target.title, err
+	}
+	return instance, resolvedRepoID, instance.Title, err
+}
+
+// streamTarget makes the route's two authority shapes mutually exclusive. A
+// scoped target can carry only {repo,title}; an unscoped target may carry the
+// stable-id interpretation of the same opaque segment. No resolver phase can
+// accidentally give a foreign global ID precedence over an explicit repo scope.
+type streamTarget struct {
+	stableID string
+	title    string
+	repoID   string
+}
+
+func authoritativeStreamTarget(idOrTitle, repoID string) streamTarget {
+	target := streamTarget{title: idOrTitle, repoID: repoID}
+	if repoID == "" {
+		target.stableID = idOrTitle
+	}
+	return target
+}
+
+// trackedStreamSessionLocked resolves only facts already materialized in
+// m.instances. The caller holds m.mu. The streamTarget, rather than this helper,
+// decides the namespace so the hot path and post-refresh path cannot drift.
+func (m *Manager) trackedStreamSessionLocked(target streamTarget) (*session.Instance, string, string) {
+	if target.repoID != "" {
+		if instance := m.instances[daemonInstanceKey(target.repoID, target.title)]; instance != nil {
+			return instance, target.repoID, instance.Title
+		}
+		return nil, "", ""
+	}
+	if instance, rid := m.trackedSessionByIDLocked(target.stableID); instance != nil {
+		return instance, rid, instance.Title
+	}
+	return nil, "", ""
+}
+
+// trackedSessionByIDLocked resolves one stable identity in the materialized
+// instance map. The caller holds m.mu. Stream hot-path lookup and post-refresh
+// lookup share it so the stable namespace cannot drift between the two phases.
+func (m *Manager) trackedSessionByIDLocked(id string) (*session.Instance, string) {
+	if id == "" {
+		return nil, ""
+	}
+	for key, instance := range m.instances {
+		if instance != nil && instance.ID == id {
+			rid, _ := splitDaemonInstanceKey(key)
+			return instance, rid
+		}
+	}
+	return nil, ""
 }
 
 // resolveActionSession resolves a write-action target (kill/archive/send-prompt)
@@ -377,12 +424,12 @@ func (m *Manager) resolveStreamSession(idOrTitle, repoID string) (*session.Insta
 // this fix closes, just re-entered through a stale id. Erroring keeps a stale id
 // from ever silently retargeting; the id-less title path stays for legacy/CLI.
 //
-// It mirrors the stream path's id-first scan (resolveStreamSession): the id scan
-// sees only in-memory (live) instances — all a client's rail ever shows. It returns
-// the resolved instance, its repoID, its canonical title, its stable id, and (for
-// the title path) its on-disk data — so the caller keys teardown, storage, AND the
-// lifecycle event off the session actually resolved, never the request's own
-// (possibly stale) id/title.
+// Its ID-addressed arm mirrors the unscoped Web stream shape; repo-scoped stream
+// callers deliberately take the title arm instead. It returns the resolved
+// instance, its repoID, its canonical title, its stable id, and (for the title
+// path) its on-disk data — so the caller keys teardown, storage, AND the lifecycle
+// event off the session actually resolved, never the request's own (possibly
+// stale) id/title.
 func (m *Manager) resolveActionSession(id, title, repoID string) (*session.Instance, string, string, string, *session.InstanceData, error) {
 	if id != "" {
 		m.mu.Lock()
@@ -399,7 +446,7 @@ func (m *Manager) resolveActionSession(id, title, repoID string) (*session.Insta
 			}
 		}
 		m.mu.Unlock()
-		return nil, "", "", "", nil, fmt.Errorf("session with id %q not found", id)
+		return nil, "", "", "", nil, fmt.Errorf("session with id %q %w", id, errSessionNotFound)
 	}
 	// Legacy/CLI path: no id supplied, resolve by {title, repoID}.
 	instance, resolvedRepoID, data, err := m.findSession(title, repoID)
@@ -416,6 +463,17 @@ func (m *Manager) resolveActionSession(id, title, repoID string) (*session.Insta
 }
 
 func (m *Manager) findSession(title, repoID string) (*session.Instance, string, *session.InstanceData, error) {
+	return m.findSessionByStableID("", title, repoID)
+}
+
+// findSessionByStableID performs findSession's refresh exactly once, then gives
+// stableID first refusal on the refreshed map before any title lookup. Passing an
+// empty stableID preserves findSession's title-only behavior. The stream route
+// supplies stableID only for its unscoped shape; this both prevents a newly
+// restored Web ID from being reinterpreted as somebody else's title (#2187) and
+// prevents a scoped TUI title from being reinterpreted as a foreign ID (#2279
+// review).
+func (m *Manager) findSessionByStableID(stableID, title, repoID string) (*session.Instance, string, *session.InstanceData, error) {
 	if title == "" {
 		return nil, "", nil, fmt.Errorf("session title is required")
 	}
@@ -424,6 +482,10 @@ func (m *Manager) findSession(title, repoID string) (*session.Instance, string, 
 	if err := m.refreshLocked(); err != nil {
 		m.mu.Unlock()
 		return nil, "", nil, err
+	}
+	if instance, rid := m.trackedSessionByIDLocked(stableID); instance != nil {
+		m.mu.Unlock()
+		return instance, rid, nil, nil
 	}
 	if repoID != "" {
 		key := daemonInstanceKey(repoID, title)

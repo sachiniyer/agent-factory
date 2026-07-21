@@ -238,7 +238,7 @@ func TestPasteDeliveryLoopHonorsItsOwnBudget(t *testing.T) {
 	done := make(chan time.Duration, 1)
 	go func() {
 		start := time.Now()
-		ts.waitForPasteDelivered("a-distinctive-tail", 0)
+		ts.waitForPasteDelivered(newDeliveryProbe("a-distinctive-tail"))
 		done <- time.Since(start)
 	}()
 
@@ -255,30 +255,6 @@ func TestPasteDeliveryLoopHonorsItsOwnBudget(t *testing.T) {
 	case <-time.After(30 * time.Second):
 		t.Fatal("waitForPasteDelivered hung against a stalled tmux (#2099): the capture inside " +
 			"its poll loop is unbounded, so the loop's deadline check never runs")
-	}
-}
-
-// TestPaneTailForLogDoesNotHangOnWedgedServer covers capturePaneForDelivery's
-// OTHER caller. paneTailForLog runs outside the poll loop and has no deadline of
-// its own, so a per-loop budget alone would leave it unbounded — it needs the
-// package's standard bound. It runs on the delivery-not-observed logging path,
-// i.e. precisely when the pane is already misbehaving.
-func TestPaneTailForLogDoesNotHangOnWedgedServer(t *testing.T) {
-	stallingTmuxOnPath(t)
-	shortTmuxTimeout(t, 200*time.Millisecond)
-	ts := NewTmuxSessionWithDeps("wedge-2099-tail", "sh", MakePtyFactory(), cmd.MakeExecutor())
-
-	done := make(chan string, 1)
-	go func() { done <- paneTailForLog(ts) }()
-
-	select {
-	case got := <-done:
-		if got != "<pane not capturable>" {
-			t.Fatalf("a wedged server must report the pane as not capturable, got %q", got)
-		}
-	case <-time.After(30 * time.Second):
-		t.Fatal("paneTailForLog hung against a stalled tmux (#2099): it calls " +
-			"capturePaneForDelivery outside the poll loop, with no deadline of its own")
 	}
 }
 

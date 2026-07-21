@@ -219,6 +219,113 @@ func TestClearNeverSendsEscapeTheInterruptKey(t *testing.T) {
 	}
 }
 
+func TestClearedComposerNoticeRequiresObservableRemovedContent(t *testing.T) {
+	tests := []struct {
+		name              string
+		previousPasteTail string
+		before            composerClearObservation
+		after             composerClearObservation
+	}{
+		{
+			name:              "empty prompt redraw",
+			previousPasteTail: newDeliveryProbe("previous delivery content").completion,
+			before:            observedComposerPane("completed response\n❯\n────────────────────────────────", 1, 2, true),
+			after:             observedComposerPane("completed response\n\n────────────────────────────────", 1, 1, true),
+		},
+		{
+			name:              "content disappears during an unrelated redraw",
+			previousPasteTail: newDeliveryProbe("different previous delivery").completion,
+			before:            observedComposerPane("status: working\n❯ pending-looking-text\nfooter stable", 1, 22, true),
+			after:             observedComposerPane("status: done\n❯\nfooter stable", 1, 1, true),
+		},
+		{
+			name: "empty prompt glyph changes while footer disappears",
+			// Deliberately make the footer equal the previous paste tail: matching
+			// across flattened rows would manufacture a composer removal.
+			previousPasteTail: newDeliveryProbe("status: working").completion,
+			before:            observedComposerPane("history\n❯ ◉\nstatus: working", 1, 3, true),
+			after:             observedComposerPane("history\n❯", 1, 1, true),
+		},
+		{
+			name:              "glyph-prefixed status text disappears",
+			previousPasteTail: newDeliveryProbe("thinking").completion,
+			before:            observedComposerPane("done\n⠋ thinking", 1, 10, true),
+			after:             observedComposerPane("done\n⠋", 1, 1, true),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			errors := captureErrorLog(t)
+			noteClearedComposerContent("af_proj", tt.previousPasteTail, tt.before, tt.after)
+			require.Empty(t, errors.String(),
+				"pane redraws without previous-paste content at the live cursor are not evidence of a clear")
+		})
+	}
+}
+
+func observedComposerPane(pane string, row, col int, cursorVisible bool) composerClearObservation {
+	return composerClearObservation{
+		pane: pane,
+		cursor: paneCursorState{
+			Row:     row,
+			Col:     col,
+			Visible: cursorVisible,
+		},
+		cursorKnown: true,
+	}
+}
+
+func TestClearedComposerNoticeKeepsExactAnchoredRemoval(t *testing.T) {
+	errors := captureErrorLog(t)
+	previousPasteTail := newDeliveryProbe("STRANDED-DRAFT").completion
+
+	noteClearedComposerContent(
+		"af_proj",
+		previousPasteTail,
+		observedComposerPane("history\n│ ❯ STRANDED-DRAFT │\n────────────────────", 1, 20, true),
+		observedComposerPane("history\n│ ❯ │\n────────────────────", 1, 3, true),
+	)
+
+	got := errors.String()
+	require.Equal(t, 1, strings.Count(got, "removed visible previous-paste content at the input cursor"),
+		"an exact removal of this session's previous paste at its live cursor is actionable once, got %q", got)
+	require.Contains(t, got, "Prior pane tail:")
+	require.NotContains(t, got, "or the pane was mid-render",
+		"an ERROR must state only what the captures actually establish")
+}
+
+func TestSuccessfulPasteSuppliesProvenanceForTheNextClear(t *testing.T) {
+	const prompt = "a prior delivery with a distinctive tail for later composer evidence"
+	var loaded string
+	pasted := false
+	cmdExec := cmd_test.MockCmdExec{
+		RunFunc: func(c *exec.Cmd) error {
+			joined := strings.Join(c.Args, " ")
+			if strings.Contains(joined, "load-buffer") {
+				payload, err := io.ReadAll(c.Stdin)
+				require.NoError(t, err)
+				loaded = string(payload)
+			}
+			if strings.Contains(joined, "paste-buffer") {
+				pasted = true
+			}
+			return nil
+		},
+		OutputFunc: func(*exec.Cmd) ([]byte, error) {
+			if pasted {
+				return []byte(loaded), nil
+			}
+			return []byte("❯\n────────────────"), nil
+		},
+	}
+	session := newTmuxSession("af_proj", ProgramCodex, NewMockPtyFactory(t), cmdExec)
+
+	require.NoError(t, session.SendKeysCommand(prompt))
+	require.Equal(t, newDeliveryProbe(prompt).completion, session.lastPastedTail,
+		"only the exact tail of a paste tmux accepted may identify content on the next clear")
+}
+
 func TestSubmitLoadsPayloadBeforeClearingComposer(t *testing.T) {
 	loadErr := fmt.Errorf("load rejected")
 	clearSent := false
@@ -421,9 +528,13 @@ func TestSubmitDeletesBufferWhenPasteFails(t *testing.T) {
 	}
 
 	session := newTmuxSession("af_proj", "claude", NewMockPtyFactory(t), cmdExec)
+	const existingProvenance = "previously-accepted-completion"
+	session.lastPastedTail = existingProvenance
 	err := session.SendKeysCommand("a prompt that fails to paste")
 	require.Error(t, err, "a failed paste-buffer must surface as an error")
 	require.ErrorIs(t, err, pasteErr, "the paste error must be wrapped and returned")
+	require.Equal(t, existingProvenance, session.lastPastedTail,
+		"a rejected paste must not replace provenance from the last accepted payload")
 
 	require.NotEmpty(t, loadBuf, "load-buffer must have named a buffer")
 	require.Equal(t, loadBuf, deletedBuf,
@@ -527,11 +638,75 @@ func TestSubmitDoesNotManufactureAFailureWhenThePaneIsUnreadable(t *testing.T) {
 		"a failed observation probe must not manufacture an ERROR")
 }
 
-// TestMissingPromptInKnownEchoingPaneStaysLoud protects the genuine #1982
-// signal. Unlike the Codex case above, Claude is known to render pasted input
-// before Enter. Successful captures that never contain the prompt are therefore
-// observed-absent, not could-not-observe, and must remain actionable at ERROR.
-func TestMissingPromptInKnownEchoingPaneStaysLoud(t *testing.T) {
+// TestSubmitRequiresPromptSpecificRenderingBeforeObservedAbsent is the #2266
+// fail-first pair. Claude's ability to render a composer is not proof that it
+// rendered THIS payload: long pastes are deliberately collapsed, while a
+// capture that contains only the composer's frame says nothing about the
+// payload at all. These are separate mechanisms seen in the live log and both
+// must stay could-not-observe rather than manufacturing a terminal negative.
+func TestSubmitRequiresPromptSpecificRenderingBeforeObservedAbsent(t *testing.T) {
+	tests := []struct {
+		name      string
+		paneAfter string
+	}{
+		{
+			name: "collapsed paste placeholder",
+			paneAfter: "╭─ composer ─────────────────╮\n" +
+				"│ ❯ [Pasted text #1 +10 lines] │\n" +
+				"╰──────────────────────────────╯\n" +
+				"paste again to expand",
+		},
+		{
+			name: "composer frame without payload text",
+			paneAfter: "╭──────────────────────────────╮\n" +
+				"│                              │\n" +
+				"╰──────────────────────────────╯\n" +
+				"-- INSERT --",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			defer withPasteDeliveryTiming(20*time.Millisecond, time.Millisecond)()
+			errors := captureErrorLog(t)
+			pasted := false
+			enterSent := false
+
+			cmdExec := cmd_test.MockCmdExec{
+				RunFunc: func(c *exec.Cmd) error {
+					joined := strings.Join(c.Args, " ")
+					if strings.Contains(joined, "paste-buffer") {
+						pasted = true
+					}
+					if strings.Contains(joined, "send-keys") && hasArg(c.Args, "Enter") {
+						enterSent = true
+					}
+					return nil
+				},
+				OutputFunc: func(*exec.Cmd) ([]byte, error) {
+					if pasted {
+						return []byte(tt.paneAfter), nil
+					}
+					return []byte("╭─ composer ─╮\n│ >          │\n╰────────────╯"), nil
+				},
+			}
+			session := newTmuxSession("af_proj", ProgramClaude, NewMockPtyFactory(t), cmdExec)
+			prompt := "deliver this long briefing\nwith enough hidden lines\nthat Claude may elide it\n" +
+				"while retaining a distinctive DELIVERY_TAIL_THAT_IS_NOT_RENDERED"
+
+			require.NoError(t, session.SendKeysCommand(prompt))
+			require.True(t, enterSent, "could-not-observe must retain the best-effort Enter")
+			require.NotContains(t, errors.String(), "prompt delivery observed absent",
+				"a pane that did not render prompt-specific text cannot prove the prompt absent")
+		})
+	}
+}
+
+// TestMissingPromptAfterPromptSpecificRenderingStaysLoud protects the genuine
+// #1982 signal. The pane renders a new prefix from this exact prompt but never
+// its disjoint completion tail. That is terminal observed-absent regardless of
+// agent identity and must remain actionable at ERROR.
+func TestMissingPromptAfterPromptSpecificRenderingStaysLoud(t *testing.T) {
 	defer withPasteDeliveryTiming(50*time.Millisecond, time.Millisecond)()
 	errors := captureErrorLog(t)
 	enterSent := false
@@ -551,8 +726,13 @@ func TestMissingPromptInKnownEchoingPaneStaysLoud(t *testing.T) {
 		},
 		// Capture works and sees a truncated prefix stranded inside an open quote,
 		// but never the distinctive tail: the genuine #1982 case that must stay
-		// loud even though Enter is still sent best-effort.
+		// loud even though Enter is still sent best-effort. After Enter, the pane
+		// changes; the diagnostic must retain THIS authorizing frame rather than
+		// recapturing unrelated pixels.
 		OutputFunc: func(c *exec.Cmd) ([]byte, error) {
+			if enterSent {
+				return []byte("post-Enter pane changed to an unrelated frame"), nil
+			}
 			if pasted {
 				return []byte("╭─ composer ─────────────────╮\n│ > run bash -lc 'printf started │\n╰────────────────────────────╯"), nil
 			}
@@ -566,12 +746,76 @@ func TestMissingPromptInKnownEchoingPaneStaysLoud(t *testing.T) {
 	got := errors.String()
 	require.Equal(t, 1, strings.Count(got, "prompt delivery observed absent"),
 		"a genuine missing prompt should emit one actionable ERROR, got %q", got)
-	require.Contains(t, got, "pane known to echo input")
+	require.Contains(t, got, "pane rendered this prompt's prefix but not its completion tail")
 	require.Contains(t, got, "Enter sent best-effort")
 	require.Contains(t, got, "run bash -lc 'printf started",
 		"the actionable ERROR should retain the observed truncated pane tail")
+	require.NotContains(t, got, "post-Enter pane changed",
+		"the diagnostic must print the frame that authorized observed-absent, not a later recapture")
 	require.NotContains(t, got, "may simply not echo")
 	require.NotContains(t, got, "may be unsubmitted")
+}
+
+// TestMediumPromptPartialRenderingStaysLoud is the Codex review fail-first.
+// A medium prompt can still provide two disjoint, distinctive fragments even
+// though a fixed 32-rune completion tail leaves less than the preferred 24-rune
+// prefix. Seeing that prompt-specific prefix newly render must preserve #1982's
+// terminal negative instead of silently becoming could-not-observe.
+func TestMediumPromptPartialRenderingStaysLoud(t *testing.T) {
+	defer withPasteDeliveryTiming(20*time.Millisecond, time.Millisecond)()
+	errors := captureErrorLog(t)
+	pasted := false
+	prompt := "PFX12345" + strings.Repeat("completion", 3)
+	require.Equal(t, 38, len([]rune(normalizeDelivery(prompt))))
+
+	cmdExec := cmd_test.MockCmdExec{
+		RunFunc: func(c *exec.Cmd) error {
+			if strings.Contains(strings.Join(c.Args, " "), "paste-buffer") {
+				pasted = true
+			}
+			return nil
+		},
+		OutputFunc: func(*exec.Cmd) ([]byte, error) {
+			if pasted {
+				return []byte("╭─ composer ─╮\n│ > PFX12345 │\n╰────────────╯"), nil
+			}
+			return []byte("╭─ composer ─╮\n│ >          │\n╰────────────╯"), nil
+		},
+	}
+	session := newTmuxSession("af_proj", ProgramClaude, NewMockPtyFactory(t), cmdExec)
+
+	require.NoError(t, session.SendKeysCommand(prompt))
+	require.Contains(t, errors.String(), "prompt delivery observed absent",
+		"a newly rendered prompt-specific prefix must remain loud even when the prompt is shorter than the preferred witness pair")
+}
+
+func TestDeliveryProbeReservesTwoDistinctiveFragments(t *testing.T) {
+	tests := []struct {
+		name           string
+		promptRunes    int
+		wantCompletion int
+		wantWitness    int
+	}{
+		{name: "short prompt keeps full completion", promptRunes: 15, wantCompletion: 15},
+		{name: "completion-sized prompt stays conservative", promptRunes: 32, wantCompletion: 32},
+		{name: "lower reviewed range", promptRunes: 33, wantCompletion: 25, wantWitness: 8},
+		{name: "full completion fits", promptRunes: 40, wantCompletion: 32, wantWitness: 8},
+		{name: "upper reviewed range", promptRunes: 55, wantCompletion: 32, wantWitness: 23},
+		{name: "preferred pair", promptRunes: 56, wantCompletion: 32, wantWitness: 24},
+		{name: "long prompt caps both fragments", promptRunes: 100, wantCompletion: 32, wantWitness: 24},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			probe := newDeliveryProbe(strings.Repeat("x", tt.promptRunes))
+			require.Equal(t, tt.wantCompletion, len([]rune(probe.completion)))
+			require.Equal(t, tt.wantWitness, len([]rune(probe.renderWitness)))
+			require.LessOrEqual(t,
+				len([]rune(probe.completion))+len([]rune(probe.renderWitness)),
+				tt.promptRunes,
+				"the completion and render witness must remain disjoint")
+		})
+	}
 }
 
 func TestFailedPostClearCaptureKeepsPreClearBaseline(t *testing.T) {
@@ -595,8 +839,52 @@ func TestFailedPostClearCaptureKeepsPreClearBaseline(t *testing.T) {
 	session := newTmuxSession("af_proj", ProgramClaude, NewMockPtyFactory(t), cmdExec)
 
 	require.NoError(t, session.SendKeysCommand(prompt))
-	require.Contains(t, errors.String(), "prompt delivery observed absent",
-		"a failed post-clear capture must fall back to the pre-clear count instead of falsely confirming an old tail")
+	require.NotContains(t, errors.String(), "prompt delivery observed absent",
+		"an old prompt retained across a failed post-clear capture proves neither new delivery nor new partial rendering")
+}
+
+// TestFailedBaselineCapturesCannotAuthorizeObservedAbsent is the Codex review
+// fail-first: when neither pre-paste capture succeeds, zero is not a measured
+// baseline. A prompt prefix already present in scrollback may appear in every
+// later frame, so its count above zero cannot prove this paste rendered it.
+func TestFailedBaselineCapturesCannotAuthorizeObservedAbsent(t *testing.T) {
+	defer withPasteDeliveryTiming(20*time.Millisecond, time.Millisecond)()
+	errors := captureErrorLog(t)
+	pasted := false
+	const prompt = "run bash -lc 'printf started && inspect every file before reporting DELIVERY_TAIL_COMPLETE'"
+
+	cmdExec := cmd_test.MockCmdExec{
+		RunFunc: func(c *exec.Cmd) error {
+			if strings.Contains(strings.Join(c.Args, " "), "paste-buffer") {
+				pasted = true
+			}
+			return nil
+		},
+		OutputFunc: func(*exec.Cmd) ([]byte, error) {
+			if !pasted {
+				return nil, fmt.Errorf("transient baseline capture failure")
+			}
+			return []byte("old scrollback: run bash -lc 'printf started"), nil
+		},
+	}
+	session := newTmuxSession("af_proj", ProgramClaude, NewMockPtyFactory(t), cmdExec)
+
+	require.NoError(t, session.SendKeysCommand(prompt))
+	require.NotContains(t, errors.String(), "prompt delivery observed absent",
+		"without a measured baseline, retained prefix text cannot be called new")
+}
+
+func TestUncapturedBaselineCannotConfirmOldCompletionTail(t *testing.T) {
+	defer withPasteDeliveryTiming(8*time.Millisecond, time.Millisecond)()
+	const prompt = "an old complete prompt with a distinctive DELIVERY_TAIL_ALREADY_IN_SCROLLBACK"
+	cmdExec := cmd_test.MockCmdExec{
+		OutputFunc: func(*exec.Cmd) ([]byte, error) { return []byte(prompt), nil },
+	}
+	session := newTmuxSession("af_proj", ProgramClaude, NewMockPtyFactory(t), cmdExec)
+
+	got := session.waitForPasteDelivered(newDeliveryProbe(prompt))
+	require.Equal(t, deliveryCouldNotObserve, got.outcome,
+		"without a measured baseline, retained completion text cannot prove this paste landed")
 }
 
 func TestFinalCaptureFailureMakesEarlierAbsenceUnobservable(t *testing.T) {
@@ -613,8 +901,8 @@ func TestFinalCaptureFailureMakesEarlierAbsenceUnobservable(t *testing.T) {
 	}
 	session := newTmuxSession("af_proj", ProgramClaude, NewMockPtyFactory(t), cmdExec)
 
-	got := session.waitForPasteDelivered("DISTINCTIVE_DELIVERY_TAIL", 0)
-	require.Equal(t, deliveryCouldNotObserve, got,
+	got := session.waitForPasteDelivered(newDeliveryProbe("DISTINCTIVE_DELIVERY_TAIL"))
+	require.Equal(t, deliveryCouldNotObserve, got.outcome,
 		"an early absence followed by failed probes cannot say whether the paste landed later")
 }
 
@@ -634,72 +922,50 @@ func TestCaptureFailureBreaksShortTailSightingStreak(t *testing.T) {
 	}
 	session := newTmuxSession("af_proj", ProgramClaude, NewMockPtyFactory(t), cmdExec)
 
-	got := session.waitForPasteDelivered("ok", 0)
-	require.Equal(t, deliveryCouldNotObserve, got,
+	got := session.waitForPasteDelivered(newDeliveryProbe("ok"))
+	require.Equal(t, deliveryCouldNotObserve, got.outcome,
 		"two weak sightings separated by a failed probe are not consecutive delivery evidence")
 }
 
-// TestObservedDeliveryCachesEchoBehavior proves unknown programs are detected
-// only from positive evidence, then reuse that capability. The first visible
-// delivery promotes the session; a later genuinely absent prompt is therefore
-// loud without consulting a per-agent guess table.
-func TestObservedDeliveryCachesEchoBehavior(t *testing.T) {
+// TestPriorVisibleDeliveryDoesNotAuthorizeALaterNegative pins the payload scope
+// of observation. A pane rendering one prompt proves only that delivery. It
+// cannot grant an agent-wide capability that turns a later empty composer into
+// observed-absent (#2266's root sharp edge).
+func TestPriorVisibleDeliveryDoesNotAuthorizeALaterNegative(t *testing.T) {
 	defer withPasteDeliveryTiming(50*time.Millisecond, time.Millisecond)()
 	errors := captureErrorLog(t)
 
 	var loaded string
 	delivery := 0
+	loads := 0
 	cmdExec := cmd_test.MockCmdExec{
 		RunFunc: func(c *exec.Cmd) error {
 			joined := strings.Join(c.Args, " ")
 			if strings.Contains(joined, "load-buffer") && c.Stdin != nil {
 				b, _ := io.ReadAll(c.Stdin)
 				loaded = string(b)
+				loads++
 			}
 			if strings.Contains(joined, "paste-buffer") {
 				delivery++
 			}
 			return nil
 		},
-		OutputFunc: func(c *exec.Cmd) ([]byte, error) {
-			if delivery == 1 && loaded != "" {
+		OutputFunc: func(*exec.Cmd) ([]byte, error) {
+			if delivery == 1 && loads == 1 && loaded != "" {
 				return []byte("custom composer: " + loaded), nil
 			}
 			return []byte("custom composer ready"), nil
 		},
 	}
 	session := newTmuxSession("af_proj", "custom-agent", NewMockPtyFactory(t), cmdExec)
-	require.Equal(t, preSubmitEchoUnknown, session.preSubmitEchoBehavior())
 
 	require.NoError(t, session.SendKeysCommand("first prompt lands visibly"))
-	require.Equal(t, preSubmitEchoes, session.preSubmitEchoBehavior(),
-		"a positively observed delivery should be cached for this agent session")
 	require.Empty(t, errors.String())
 
 	require.NoError(t, session.SendKeysCommand("second prompt is genuinely absent"))
-	require.Contains(t, errors.String(), "prompt delivery observed absent",
-		"the cached echo capability must keep a later genuine failure loud")
-}
-
-func TestPreSubmitEchoBehaviorTracksResolvedProgram(t *testing.T) {
-	session := newTmuxSession("af_proj", "/usr/local/bin/codex --full-auto", NewMockPtyFactory(t), cmd_test.MockCmdExec{})
-	require.Equal(t, preSubmitDoesNotEcho, session.preSubmitEchoBehavior(),
-		"capability detection must use the resolved executable, including absolute paths")
-	session.notePreSubmitEchoObserved()
-	require.Equal(t, preSubmitDoesNotEcho, session.preSubmitEchoBehavior(),
-		"a coincidental tail match must not promote a known non-echoing Codex pane")
-
-	session.SetProgram("ionice -c 3 claude --model opus")
-	require.Equal(t, preSubmitEchoes, session.preSubmitEchoBehavior(),
-		"agent handoff must replace the cached capability with the new agent's behavior")
-
-	session.SetProgram("aider --model sonnet")
-	require.Equal(t, preSubmitEchoes, session.preSubmitEchoBehavior(),
-		"Aider visibly echoes pasted composer input and must keep missing delivery loud")
-
-	session.SetProgram("/opt/bin/claude-wrapper")
-	require.Equal(t, preSubmitEchoUnknown, session.preSubmitEchoBehavior(),
-		"an unknown override must stay unknown instead of substring-matching an agent name")
+	require.NotContains(t, errors.String(), "prompt delivery observed absent",
+		"one visible delivery cannot make a later payload terminal without prompt-specific evidence")
 }
 
 func captureRawPane(session *TmuxSession) (string, error) {

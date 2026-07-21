@@ -97,9 +97,10 @@ type PaneSnapshot struct {
 // modes captured with it. The daemon emits the modes immediately before Data,
 // and Data also restores them as DEC sequences for terminal-only clients.
 type repaintSnapshot struct {
-	data     []byte
-	modes    terminal.Modes
-	hasModes bool
+	data       []byte
+	modes      terminal.Modes
+	hasModes   bool
+	provenance PTYRepaintProvenance
 }
 
 // ptyBroker is the per-session data plane. Guarded by mu; the ring buffer, the
@@ -522,6 +523,7 @@ func (b *ptyBroker) recoveryRepaint() *repaintSnapshot {
 		return nil
 	}
 	rp := buildRepaintSnapshot(snap)
+	rp.provenance = PTYRepaintRecovery
 	return &rp
 }
 
@@ -746,10 +748,11 @@ func (s *ptySub) NextEvent(ctx context.Context) (PTYEvent, error) {
 			s.pendingRepaint = nil
 			s.br.mu.Unlock()
 			return PTYEvent{
-				Kind:     PTYRepaint,
-				Data:     rp.data,
-				Modes:    rp.modes,
-				HasModes: rp.hasModes,
+				Kind:              PTYRepaint,
+				Data:              rp.data,
+				Modes:             rp.modes,
+				HasModes:          rp.hasModes,
+				RepaintProvenance: rp.provenance,
 			}, nil
 		}
 		// A recovery is in flight and this subscriber's repaint of the recovered screen

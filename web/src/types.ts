@@ -50,8 +50,10 @@ export const InFlightOp = {
   Restoring: 4,
 } as const;
 
-/** session.LifecycleAction: the daemon-owned lifecycle verb for a row. Absence
- *  means the row must expose no archive/restore/kill controls (#2234). */
+/** session.LifecycleAction: the daemon-owned archive/restore verb for a row.
+ *  Absence means the row must expose neither reversible lifecycle control. Kill
+ *  addressability is projected independently because startup-unknown rows may be
+ *  torn down but must not reuse their unconfirmed runtime binding. */
 export type LifecycleAction = "archive" | "restore";
 
 /** session.Status (session/instance.go) — the legacy single-axis int, read ONLY
@@ -90,6 +92,9 @@ export interface SessionData {
   /** Daemon-owned lifecycle capability. The web consumes this decision instead
    *  of re-deriving TUI policy from liveness/in-flight fields. */
   lifecycle_action?: LifecycleAction;
+  /** Daemon-owned explicit teardown capability. True means the row has a stable
+   *  non-creating target; absence/false fails closed. */
+  can_kill?: boolean;
   /** Usage-limit reset time (RFC3339), present only for a LimitReached row. */
   limit_reset_at?: string;
   /** Backend discriminator; "remote" marks a remote-hook session (→ [remote]). */

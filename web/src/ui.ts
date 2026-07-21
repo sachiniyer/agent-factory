@@ -59,6 +59,13 @@ export type NewTabKind = "shell" | "vscode";
  *  so a visible but inert row cannot reach them through the normal code path. */
 export type ActionableSession = SessionData & { id: string; lifecycle_action: LifecycleAction };
 
+/** A row carrying the Go domain's positive teardown capability and stable target.
+ *  This is intentionally not implied by ActionableSession: startup-unknown rows
+ *  are killable while archive/restore and attach remain unavailable. */
+export type KillableSession = SessionData & { id: string; can_kill: true };
+
+type ManagedSession = ActionableSession | KillableSession;
+
 /** Fail-closed wire narrowing only — the policy itself lives in Go's
  *  session.LifecycleAction (#2234). Exact values reject a malformed or stale
  *  projection instead of manufacturing an action in the browser. */
@@ -68,6 +75,11 @@ export function isActionableSession(s: SessionData): s is ActionableSession {
     s.id !== "" &&
     (s.lifecycle_action === "archive" || s.lifecycle_action === "restore")
   );
+}
+
+/** Fail-closed narrowing for the daemon's independent teardown capability. */
+export function isKillableSession(s: SessionData): s is KillableSession {
+  return typeof s.id === "string" && s.id !== "" && s.can_kill === true;
 }
 
 /** The whole client state: which view to show, the login details, and — once
@@ -157,8 +169,8 @@ export interface Actions {
   open(id: string): void;
   /** Opens the new-session modal (#1592 Phase 5 PR5). */
   newSession(): void;
-  /** Opens the kill-confirm modal for this rail row. */
-  kill(session: ActionableSession): void;
+  /** Opens the kill-confirm modal for this stably-addressed rail row. */
+  kill(session: KillableSession): void;
   /** Opens the archive-confirm modal for this rail row. */
   archive(session: ActionableSession): void;
   /** Opens the restore-confirm modal for this rail row (an archived / Lost / Dead
@@ -420,6 +432,15 @@ export function orderedSessions(sessions: SessionData[]): SessionData[] {
   return [...sessions].sort(compareSessionsForRail);
 }
 
+/** The exact rows the rail renders after project scope, order, and status filtering.
+ *  Both the rail itself and the selected-session action fallback consume this one
+ *  derivation: if either grows a new display rule, they cannot disagree about whether
+ *  the selected row has a visible management surface (#2188). */
+function visibleRailSessions(state: AppState): SessionData[] {
+  const scoped = scopeToProject(state.sessions, state.selectedProject);
+  return filterSessions(orderedSessions(scoped), state.statusFilter);
+}
+
 /** Renders the paste-token login view, replacing the root's contents. */
 export function renderLogin(root: HTMLElement, state: AppState, actions: Actions): void {
   root.replaceChildren(loginView(state, actions));
@@ -616,13 +637,19 @@ export class AppShell {
   // Header text nodes for the selected pane, (re)created per selection.
   private headTitle: HTMLElement | null = null;
   private headMeta: HTMLElement | null = null;
-  // The selected rail row's archive/restore control and the daemon-owned verb it
+  // The selected visible rail row's archive/restore control and daemon-owned verb it
   // currently shows (#1932, #2186, #2234). Every actionable row owns controls now
   // (#2223), but a session can flip archive⇄restore WITHOUT a selection change, so
   // patchMainHead still needs this reference to swap the selected control in place.
   // null when the selected row is not visible/actionable in the rail.
   private lifecycleBtn: HTMLElement | null = null;
   private lifecycleAction: LifecycleAction | null = null;
+  // A selected session deliberately survives a status-filter change so its terminal
+  // keeps streaming. When that hides its rail row, this stable pane-header container
+  // becomes the one visible management surface (#2188). Its children use the same
+  // capability-narrowed builder as the rail; only their presentation differs.
+  private headActions: HTMLElement | null = null;
+  private headActionSig = "";
   // The usage-limit Retry button and whether it is currently shown (#1934). Same
   // treatment, and for the same reason, as lifecycleBtn above: a session hits the
   // limit wall — or is resumed off it — WITHOUT a selection change, which is the
@@ -1168,7 +1195,7 @@ export class AppShell {
    *  rows, under a notice when there is something worth saying about what's missing. */
   private renderRail(state: AppState): void {
     const scoped = scopeToProject(state.sessions, state.selectedProject);
-    const visible = filterSessions(orderedSessions(scoped), state.statusFilter);
+    const visible = visibleRailSessions(state);
     // Every rebuild replaces the row controls. Drop the old reference first so a
     // selected row hidden by the project/status filter cannot leave patchMainHead
     // mutating a detached button.
@@ -1207,45 +1234,80 @@ export class AppShell {
     list.replaceChildren(...(notice ? [notice, ...rows] : rows));
   }
 
-  /** Quiet per-session controls reserved beside every ACTIONABLE rail row (#2186,
-   *  #2223, #2234). The Go projection chooses Archive vs Restore; the browser never
-   *  reconstructs that policy from row state. */
-  private rowActions(session: ActionableSession, selected: boolean): HTMLElement {
-    const lifecycleBtn = h("button", { type: "button", class: "af-rail-action af-rail-lifecycle" });
-    lifecycleBtn.addEventListener("click", (e) => {
-      e.stopPropagation();
-      if (lifecycleBtn.dataset.action === "restore") {
-        this.runRailExit(() => this.actions.restore(session));
-      } else {
-        this.runRailExit(() => this.actions.archive(session));
+  /** Quiet controls reserved beside every row carrying at least one daemon-owned
+   *  capability (#2186, #2223, #2234). Archive/Restore and Kill narrow separately;
+   *  the browser never reconstructs either policy from status pixels. */
+  private rowActions(session: ManagedSession, selected: boolean): HTMLElement {
+    return h("div", { class: "af-row-actions" }, ...this.sessionActionButtons(session, "rail", selected));
+  }
+
+  /** Builds both rail and fallback-header controls from the same daemon capabilities.
+   *  Placement chooses only presentation and whether a mobile rail exit is needed;
+   *  target narrowing, labels, and callbacks remain one path. */
+  private sessionActionButtons(
+    session: ManagedSession,
+    surface: "rail" | "head",
+    selected = false,
+  ): HTMLElement[] {
+    const buttons: HTMLElement[] = [];
+    if (isActionableSession(session)) {
+      const lifecycleSession = session;
+      const lifecycleClass =
+        surface === "rail" ? "af-rail-action af-rail-lifecycle" : "af-ghost af-term-action af-term-lifecycle";
+      const lifecycleBtn = h("button", { type: "button", class: lifecycleClass });
+      lifecycleBtn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        const run = lifecycleBtn.dataset.action === "restore"
+          ? () => this.actions.restore(lifecycleSession)
+          : () => this.actions.archive(lifecycleSession);
+        if (surface === "rail") {
+          this.runRailExit(run);
+        } else {
+          run();
+        }
+      });
+      this.patchLifecycleButton(lifecycleBtn, lifecycleSession.lifecycle_action, lifecycleSession.title, surface);
+      if (surface === "rail" && selected) {
+        this.lifecycleBtn = lifecycleBtn;
+        this.lifecycleAction = lifecycleSession.lifecycle_action;
       }
-    });
-    this.patchLifecycleButton(lifecycleBtn, session.lifecycle_action, session.title);
-    if (selected) {
-      this.lifecycleBtn = lifecycleBtn;
-      this.lifecycleAction = session.lifecycle_action;
+      buttons.push(lifecycleBtn);
     }
 
-    // Kill stays unmistakably destructive through its distinct ⌫ glyph and confirm,
-    // but its resting rail treatment is deliberately muted instead of af-danger.
-    const killBtn = h("button", { type: "button", class: "af-rail-action af-rail-kill" }, "⌫");
-    const killLabel = `Kill session “${session.title}”`;
-    killBtn.setAttribute("aria-label", killLabel);
-    killBtn.setAttribute("title", killLabel);
-    killBtn.addEventListener("click", (e) => {
-      e.stopPropagation();
-      this.runRailExit(() => this.actions.kill(session));
-    });
-    return h("div", { class: "af-row-actions" }, lifecycleBtn, killBtn);
+    if (isKillableSession(session)) {
+      const killSession = session;
+      // Kill stays unmistakably destructive through its distinct ⌫ glyph and
+      // confirm, but its resting rail treatment remains muted instead of af-danger.
+      const killClass = surface === "rail" ? "af-rail-action af-rail-kill" : "af-ghost af-term-action af-term-kill";
+      const killBtn = h("button", { type: "button", class: killClass }, surface === "rail" ? "⌫" : "Kill");
+      const killLabel = `Kill session “${killSession.title}”`;
+      killBtn.setAttribute("aria-label", killLabel);
+      killBtn.setAttribute("title", killLabel);
+      killBtn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        if (surface === "rail") {
+          this.runRailExit(() => this.actions.kill(killSession));
+        } else {
+          this.actions.kill(killSession);
+        }
+      });
+      buttons.push(killBtn);
+    }
+    return buttons;
   }
 
   /** Applies the daemon-projected verb, glyph, and target-qualified accessible name
    *  in one place so render and same-selection live patching cannot drift. */
-  private patchLifecycleButton(btn: HTMLElement, action: LifecycleAction, sessionTitle: string): void {
+  private patchLifecycleButton(
+    btn: HTMLElement,
+    action: LifecycleAction,
+    sessionTitle: string,
+    surface: "rail" | "head" = "rail",
+  ): void {
     const verb = action === "restore" ? "Restore session" : "Archive session";
     const label = `${verb} “${sessionTitle}”`;
     btn.dataset.action = action;
-    btn.textContent = action === "restore" ? "↶" : "▪";
+    btn.textContent = surface === "rail" ? (action === "restore" ? "↶" : "▪") : verb.replace(" session", "");
     btn.setAttribute("aria-label", label);
     btn.setAttribute("title", label);
   }
@@ -1567,6 +1629,8 @@ export class AppShell {
     if (!selected) {
       this.headTitle = null;
       this.headMeta = null;
+      this.headActions = null;
+      this.headActionSig = "";
       this.retryBtn = null;
       this.retryVisible = false;
       this.tabBar = null;
@@ -1603,6 +1667,14 @@ export class AppShell {
     this.retryVisible = isLimitReached(selected);
     retryBtn.hidden = !this.retryVisible;
 
+    // Empty while the selected row is visible; patchMainHead fills it only when the
+    // shared rail derivation says filtering/scoping removed that row. Keeping the
+    // container stable avoids touching the terminal host as that condition flips.
+    const headActions = h("div", { class: "af-term-actions" });
+    headActions.hidden = true;
+    this.headActions = headActions;
+    this.headActionSig = "";
+
     // The tab bar is the flexible middle of the single pane-header row (#2224):
     // title first, the same horizontally scrolling bar, then the fixed Retry escape
     // when a limit wall makes it visible. Keeping the real bar node here (rather
@@ -1628,10 +1700,10 @@ export class AppShell {
     // button; a listener owned by the old button cannot receive the final dblclick.
     this.attachTabRename(tabBar);
 
-    // Retry is the only pane-level action. Append it directly instead of keeping a
-    // wrapper box: hidden controls create no flex item and therefore no phantom gap
-    // on the common path, while the visible button cannot shrink behind the tabs.
-    const head = h("div", { class: "af-term-head" }, titleBox, tabBar, retryBtn);
+    // Retry and the filtered-selection fallback are fixed pane-level actions. Their
+    // hidden containers create no flex items on the common path, while visible
+    // controls cannot shrink behind the tabs.
+    const head = h("div", { class: "af-term-head" }, titleBox, tabBar, headActions, retryBtn);
 
     this.main.className = "af-main af-main-term";
     // The persistent terminal host is (re)mounted here; renderMain runs only on a
@@ -1941,6 +2013,8 @@ export class AppShell {
     this.headMeta.textContent = parts.join(" · ");
     this.headMeta.className = `af-term-meta af-term-${state.termStatus}`;
 
+    this.patchHeadActions(state, selected);
+
     // Flip the selected rail row's lifecycle glyph + accessible verb when the
     // daemon-owned action changes without a selection change (#1932, #2186, #2234).
     // A fresh Snapshot usually rebuilds the rail too, but this patch keeps the
@@ -1962,6 +2036,39 @@ export class AppShell {
       this.retryVisible = nowLimited;
       this.retryBtn.hidden = !nowLimited;
     }
+  }
+
+  /** Keeps management reachable when the selected session's rail row is filtered
+   *  out, and only then. Capability and row visibility are both positive evidence:
+   *  malformed/inert projections gain no controls, while a visible row remains the
+   *  sole action surface. */
+  private patchHeadActions(state: AppState, selected: SessionData): void {
+    const host = this.headActions;
+    if (!host) {
+      return;
+    }
+    const managed = isActionableSession(selected) || isKillableSession(selected) ? selected : null;
+    const rowVisible = visibleRailSessions(state).some((s) => s.id === selected.id);
+    if (!managed || rowVisible) {
+      if (this.headActionSig !== "") {
+        host.replaceChildren();
+        this.headActionSig = "";
+      }
+      host.hidden = true;
+      return;
+    }
+
+    const sig = JSON.stringify([
+      managed.id,
+      managed.title,
+      managed.lifecycle_action ?? null,
+      managed.can_kill === true,
+    ]);
+    if (sig !== this.headActionSig) {
+      host.replaceChildren(...this.sessionActionButtons(managed, "head"));
+      this.headActionSig = sig;
+    }
+    host.hidden = false;
   }
 }
 
@@ -2241,18 +2348,20 @@ function beginTabRename(
 }
 
 /** One session row: a status dot, the (prefixed) title, the branch line, and a reserved
- *  slot for its quiet lifecycle actions (#2186, #2223). Clicking opens the session by
- *  its stable id (selects it and attaches its terminal, #1693); a row lacking an id
- *  (never expected from a live Snapshot) is rendered but inert. */
+ *  slot for its daemon-projected management actions (#2186, #2223). Clicking opens
+ *  only a lifecycle-actionable session by stable id; a kill-only startup-unknown row
+ *  retains its button without becoming attachable. */
 function sessionRow(
   s: SessionData,
   selected: boolean,
   openSession: (id: string) => void,
-  buildActions: (session: ActionableSession) => HTMLElement,
+  buildActions: (session: ManagedSession) => HTMLElement,
 ): HTMLElement {
   const status = rowStatus(s);
   const creating = isCreating(s);
   const actionable = isActionableSession(s);
+  const killable = isKillableSession(s);
+  const managed = actionable || killable;
 
   const title = h("div", { class: "af-row-title" }, rowTitle(s));
   const branch = h(
@@ -2277,18 +2386,17 @@ function sessionRow(
     row.append(dot);
   }
   row.append(main);
-  if (actionable) {
+  if (managed) {
     row.append(buildActions(s));
   }
   row.setAttribute("role", "option");
   row.setAttribute("aria-selected", selected ? "true" : "false");
   row.setAttribute("title", `${s.title} — ${status.label}`);
-  if (!actionable) {
-    // The server withheld a lifecycle action: a creating row has no session yet,
-    // while an id-less row has no unambiguous destructive target. Selection and
-    // lifecycle controls consume the same fail-closed capability.
+  if (!actionable && !managed) {
+    // The server withheld both capabilities: a creating row has no session yet,
+    // while an id-less row has no unambiguous mutation target.
     row.setAttribute("aria-disabled", "true");
-  } else {
+  } else if (actionable) {
     row.addEventListener("click", () => openSession(s.id));
   }
   return row;

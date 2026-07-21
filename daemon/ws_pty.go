@@ -355,7 +355,18 @@ func writePTYStream(ctx context.Context, sub session.PTYSubscription, conn *webs
 			// the repaint's DEC restore prefix keeps terminal-only/older clients
 			// correct too.
 			if ev.HasModes {
-				err = agentproto.WriteControl(wctx, conn, agentproto.NewTerminalModesMessage(ev.Modes))
+				var modeMessage agentproto.TerminalModesMessage
+				switch ev.RepaintProvenance {
+				case session.PTYRepaintFresh:
+					modeMessage = agentproto.NewTerminalModesMessage(ev.Modes)
+				case session.PTYRepaintRecovery:
+					modeMessage = agentproto.NewTerminalModesMessageCoveringNextCursor(ev.Modes)
+				default:
+					err = fmt.Errorf("unknown PTY repaint provenance %d", ev.RepaintProvenance)
+				}
+				if err == nil {
+					err = agentproto.WriteControl(wctx, conn, modeMessage)
+				}
 			}
 			if err == nil {
 				err = agentproto.WriteFrame(wctx, conn, agentproto.RepaintFrame(ev.Data))

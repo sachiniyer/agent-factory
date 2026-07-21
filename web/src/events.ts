@@ -19,8 +19,8 @@
 // (the socket wasn't yet subscribed to receive it). Re-Snapshotting once the
 // socket is open — after which every subsequent event IS delivered — makes the
 // rail whole regardless of what happened in that gap. Reconnect opens resync for
-// the same reason (events published while the socket was down are dropped by
-// design — the hub is drop-slow, not replayed). The resync is debounced in
+// the same reason (events published while the socket was down are not replayed
+// by the hub). The resync is debounced in
 // index.ts, so the extra first-open refetch collapses with any burst.
 
 import type { WireEvent } from "./types.js";

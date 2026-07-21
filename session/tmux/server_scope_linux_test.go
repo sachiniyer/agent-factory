@@ -104,11 +104,14 @@ func (f refusingTrackedPtyFactory) StartTracked(*exec.Cmd) (*os.File, <-chan err
 
 func (refusingTrackedPtyFactory) Close() {}
 
-// TestSystemdRunRefusalIsActionable covers the severe failure mode where the
-// wrapper binary exists but the user manager refuses the transient scope. Pty
-// used to discard that exit status, so Start waited two seconds and blamed tmux
-// readiness; the CreateSession RPC now carries systemd-run's role and failure.
-func TestSystemdRunRefusalIsActionable(t *testing.T) {
+// TestSystemdRunRefusalIsActionableButCleanupUnsafe covers the severe failure
+// mode where the wrapper binary exists but the user manager refuses the
+// transient scope. Pty used to discard that exit status, so Start waited two
+// seconds and blamed tmux readiness; the CreateSession RPC now carries
+// systemd-run's role and failure. The wait channel cannot prove whether a
+// generic non-zero wrapper status came from systemd-run itself or the scoped
+// tmux child, though, so it must not authorize fresh-worktree deletion.
+func TestSystemdRunRefusalIsActionableButCleanupUnsafe(t *testing.T) {
 	t.Setenv(systemdDaemonMarkerEnv, systemdDaemonUnit)
 	t.Setenv("SYSTEMD_EXEC_PID", strconv.Itoa(os.Getpid()))
 	stubSelfCgroup(t, "", errors.New("proc unavailable"))
@@ -132,6 +135,9 @@ func TestSystemdRunRefusalIsActionable(t *testing.T) {
 	err := ts.Start(t.TempDir())
 	if err == nil {
 		t.Fatal("Start succeeded after systemd-run refused the transient scope")
+	}
+	if errors.Is(err, ErrSessionNotStarted) {
+		t.Fatalf("a systemd-run exit was mistaken for proof that its scoped child never started: %v", err)
 	}
 	for _, want := range []string{
 		"systemd-run --user --scope failed",
