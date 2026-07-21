@@ -30,7 +30,10 @@ func inspectTmux(args []string) string {
 	for _, words := range commands {
 		command := strings.ToLower(words[0])
 		if isKillServerCommand(command) {
-			continue // A preceding literal -L/-S made this teardown socket-scoped.
+			if !scoped {
+				return broadTmuxReason
+			}
+			continue
 		}
 		if tmuxCommandBuildsCommands(command) {
 			return unknownShellReason
