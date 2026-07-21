@@ -6275,7 +6275,7 @@ async function restoreSession(title, token2) {
   await af("RestoreSession", { title, repo_id: "" }, token2);
 }
 async function resumeFromLimit(id, title, token2) {
-  await af("ResumeFromLimit", { id, title, repo_id: "" }, token2);
+  return af("ResumeFromLimit", { id, title, repo_id: "" }, token2);
 }
 async function deleteProject(root2, token2) {
   return af("DeleteProject", { repo_path: root2, repo_id: "" }, token2);
@@ -12578,7 +12578,11 @@ function doRetryLimit() {
   if (!sel || tok === null) {
     return;
   }
-  void resumeFromLimit(sel.id, sel.title, tok).catch((e) => surfaceTabError(e));
+  void resumeFromLimit(sel.id, sel.title, tok).then((result) => {
+    if (!result.ok) {
+      throw new Error(result.reason || "resume was not performed");
+    }
+  }).catch((e) => surfaceTabError(e));
 }
 function doRemoveTask(task) {
   const tok = token;
