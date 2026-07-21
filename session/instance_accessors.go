@@ -275,6 +275,23 @@ func (i *Instance) ResolvedAgent() string {
 	return tmux.DetectAgentFromCommand(i.Program)
 }
 
+// ResolvedPaneAgent returns the canonical agent proven by this instance's
+// concrete local tmux binding, or "" when there is no such binding or its
+// command names no known agent. Unlike ResolvedAgent it deliberately never
+// falls back to Instance.Program: callers describing an already-attached pane
+// must not invent agent-specific behavior for remote tabs, whose real command
+// was resolved inside the sandbox and is not represented by a local tmux
+// session (#2210).
+func (i *Instance) ResolvedPaneAgent() string {
+	i.mu.RLock()
+	ts := i.tmuxLocked()
+	i.mu.RUnlock()
+	if ts == nil || strings.TrimSpace(ts.Program()) == "" {
+		return ""
+	}
+	return tmux.DetectAgentFromCommand(ts.Program())
+}
+
 // SetTmuxSession sets the agent tab's tmux session for testing purposes,
 // materializing the single Agent tab if needed.
 func (i *Instance) SetTmuxSession(session *tmux.TmuxSession) {

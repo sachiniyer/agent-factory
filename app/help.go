@@ -105,7 +105,7 @@ func helpStart(instance *session.Instance) helpText {
 func helpAttach(instance *session.Instance, tabIdx int) helpText {
 	agent := ""
 	if instance != nil && tabIdx == 0 {
-		agent = instance.ResolvedAgent()
+		agent = instance.ResolvedPaneAgent()
 	}
 	return helpTypeInstanceAttach{agent: agent}
 }

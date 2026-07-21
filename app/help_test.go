@@ -8,6 +8,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/sachiniyer/agent-factory/keys"
+	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
@@ -142,8 +143,19 @@ func TestAttachedScrollHelpIsAgentSpecific(t *testing.T) {
 	}
 }
 
+type remoteHelpBackend struct{ *session.FakeBackend }
+
+func (b *remoteHelpBackend) Capabilities() session.Capabilities {
+	capabilities := b.FakeBackend.Capabilities()
+	capabilities.Workspace = session.WorkspaceRemote
+	return capabilities
+}
+
+func (b *remoteHelpBackend) Type() string { return "remote" }
+
 func TestHelpAttachOnlyNamesControlsForAgentTab(t *testing.T) {
 	instance := newStartedInstance(t, "claude-session")
+	instance.SetTmuxSession(tmux.NewTmuxSessionFromSanitizedName("af_help_claude", "claude"))
 
 	agentTab, ok := helpAttach(instance, 0).(helpTypeInstanceAttach)
 	require.True(t, ok)
@@ -158,6 +170,13 @@ func TestHelpAttachOnlyNamesControlsForAgentTab(t *testing.T) {
 	require.True(t, ok)
 	require.Empty(t, overriddenAgentTab.agent,
 		"a configured Claude slot overridden to bash must follow the resolved child, not guess from Instance.Program")
+
+	remote := newStartedInstance(t, "remote-claude")
+	remote.SetBackend(&remoteHelpBackend{FakeBackend: session.NewFakeBackend()})
+	remoteAgentTab, ok := helpAttach(remote, 0).(helpTypeInstanceAttach)
+	require.True(t, ok)
+	require.Empty(t, remoteAgentTab.agent,
+		"a remote tab with no local resolved command must not guess controls from Instance.Program")
 }
 
 func TestGeneralHelpSeparatesPreviewAndAttachedScrolling(t *testing.T) {
