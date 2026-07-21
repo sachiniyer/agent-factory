@@ -3792,6 +3792,9 @@ test("#2347: activating a terminal repairs peer-owned geometry before scrolling"
     const firstHost = first.locator(".af-term-host");
     const firstRows = (): Promise<number> => firstHost.locator(".xterm-rows > div").count();
     await expect.poll(firstRows).toBeGreaterThan(24);
+    const localRows = await firstRows();
+    const localViewport = first.viewportSize();
+    expect(localViewport, "desktop peer test needs a fixed local viewport").not.toBeNull();
 
     await firstHost.click();
     await first.keyboard.type("for i in $(seq 1 60); do echo peer-fit-line-$i; done");
@@ -3836,6 +3839,42 @@ test("#2347: activating a terminal repairs peer-owned geometry before scrolling"
       "desktop shell",
       readingLine,
     );
+
+    await test.step("a second peer resize already matching the local grid still restores the reading anchor", async () => {
+      const secondReadingLine = (await firstHost.locator(".xterm-rows > div").first().textContent()) ?? "";
+      expect(secondReadingLine.trim(), "second peer setup must anchor a visible line").not.toBe("");
+      await first.mouse.move(0, 0);
+
+      // The tall peer reclaims the shared PTY, so the first client records a fresh
+      // pending anchor. Then the SAME peer resizes to the first page's viewport and
+      // broadcasts the local grid before the first page becomes active again.
+      await second.bringToFront();
+      await secondHost.locator(".af-pane-host").hover();
+      await expect
+        .poll(firstRows, { message: "the tall peer must own the grid before returning it to local size" })
+        .toBeGreaterThan(60);
+      await second.setViewportSize(localViewport!);
+      await expect
+        .poll(firstRows, { message: "the peer's second resize must already match the first host's local rows" })
+        .toBe(localRows);
+      const alreadyLocal = await terminalGeometry(firstHost, true);
+
+      // No FitAddon resize is needed now, but the peer reflows above still displaced
+      // the viewport. Activation must consume the pending marker independently of
+      // whether `needsFit` is true.
+      await first.bringToFront();
+      await firstHost.locator(".af-pane-host").hover();
+      await first.evaluate(
+        () =>
+          new Promise<void>((resolve) => {
+            requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
+          }),
+      );
+      await expect(
+        firstHost.locator(".xterm-rows > div").first(),
+        `already-local activation must restore the named reading row; geometry=${JSON.stringify(alreadyLocal)}`,
+      ).toHaveText(secondReadingLine);
+    });
   } finally {
     await secondCtx?.close();
     await firstCtx.close();

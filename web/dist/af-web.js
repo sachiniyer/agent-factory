@@ -8262,8 +8262,14 @@ function shouldRefitVisibleTerminal(host, current, proposed) {
 function viewportMarkerOffset(position) {
   return position.viewportY - (position.baseY + position.cursorY);
 }
-function shouldRestoreViewport(scheduledViewportY, currentViewportY) {
-  return scheduledViewportY === currentViewportY;
+function viewportAnchorLine(anchor, baseY) {
+  if (anchor.atBottom) {
+    return baseY;
+  }
+  return anchor.markerLine !== null && anchor.markerLine >= 0 ? anchor.markerLine : anchor.fallbackLine;
+}
+function shouldRestoreViewport(intent) {
+  return intent.scheduledUserScroll === intent.currentUserScroll;
 }
 
 // src/theme.ts
@@ -8466,6 +8472,10 @@ var AttachTerminal = class {
   resizeTimer = null;
   visibleFitFrame = null;
   viewportRestoreFrame = null;
+  // Incremented only by an actual wheel while a peer-owned anchor is pending.
+  // Output and resize reflows can move viewportY too, so position deltas alone do
+  // not prove that a user intended to override the saved reading line.
+  userScrollRevision = 0;
   // The absolute replay cursor: seeded from OpHello, advanced by OpPTYOut byte
   // counts (never by OpRepaint). `seeded` gates whether a reconnect can pass a
   // real ?since; the first connect omits it (live tail + a fresh-screen repaint).
@@ -8502,6 +8512,7 @@ var AttachTerminal = class {
   onWheel = () => {
     if (this.pendingViewport !== null) {
       this.fitVisibleHost();
+      this.userScrollRevision += 1;
     }
   };
   /** Permanently closes the terminal: stops the reconnect loop, drops the socket,
@@ -8714,9 +8725,9 @@ var AttachTerminal = class {
       } catch {
         return;
       }
-      this.scheduleViewportRestore(this.term.rows, this.term.cols);
       this.sendResize(this.term.rows, this.term.cols, false);
     }
+    this.scheduleViewportRestore(this.term.rows, this.term.cols);
     this.connectAfterInitialFit();
   }
   /** Restores the pre-peer reading position after xterm has rendered its new grid.
@@ -8729,7 +8740,7 @@ var AttachTerminal = class {
       return;
     }
     this.cancelViewportRestoreFrame();
-    const scheduledViewportY = this.term.buffer.active.viewportY;
+    const scheduledUserScroll = this.userScrollRevision;
     this.viewportRestoreFrame = window.requestAnimationFrame(() => {
       this.viewportRestoreFrame = null;
       if (this.stopped || this.term.rows !== rows || this.term.cols !== cols) {
@@ -8740,11 +8751,21 @@ var AttachTerminal = class {
         return;
       }
       const buffer = this.term.buffer.active;
-      if (!shouldRestoreViewport(scheduledViewportY, buffer.viewportY)) {
+      if (!shouldRestoreViewport({
+        scheduledUserScroll,
+        currentUserScroll: this.userScrollRevision
+      })) {
         this.clearPendingViewport();
         return;
       }
-      const target = anchor.atBottom ? buffer.baseY : anchor.marker?.line ?? anchor.line;
+      const target = viewportAnchorLine(
+        {
+          atBottom: anchor.atBottom,
+          markerLine: anchor.marker?.line ?? null,
+          fallbackLine: anchor.line
+        },
+        buffer.baseY
+      );
       this.clearPendingViewport();
       this.term.scrollToLine(Math.max(0, target));
     });

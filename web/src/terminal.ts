@@ -45,6 +45,7 @@ import {
   hasVisibleTerminalGeometry,
   shouldRefitVisibleTerminal,
   shouldRestoreViewport,
+  viewportAnchorLine,
   viewportMarkerOffset,
 } from "./terminal-geometry.js";
 import { currentXtermTheme } from "./theme.js";
@@ -109,6 +110,10 @@ export class AttachTerminal {
   private resizeTimer: number | null = null;
   private visibleFitFrame: number | null = null;
   private viewportRestoreFrame: number | null = null;
+  // Incremented only by an actual wheel while a peer-owned anchor is pending.
+  // Output and resize reflows can move viewportY too, so position deltas alone do
+  // not prove that a user intended to override the saved reading line.
+  private userScrollRevision = 0;
 
   // The absolute replay cursor: seeded from OpHello, advanced by OpPTYOut byte
   // counts (never by OpRepaint). `seeded` gates whether a reconnect can pass a
@@ -147,6 +152,10 @@ export class AttachTerminal {
   private readonly onWheel = (): void => {
     if (this.pendingViewport !== null) {
       this.fitVisibleHost();
+      // fitVisibleHost schedules from the pre-wheel revision. xterm consumes the
+      // wheel after this capture listener, so the deferred callback sees a newer
+      // explicit user intent and leaves that first gesture authoritative.
+      this.userScrollRevision += 1;
     }
   };
 
@@ -482,9 +491,11 @@ export class AttachTerminal {
       } catch {
         return; // container detached between proposal and fit
       }
-      this.scheduleViewportRestore(this.term.rows, this.term.cols);
       this.sendResize(this.term.rows, this.term.cols, false);
     }
+    // A second peer can already have returned xterm to this host's local grid. No
+    // fit is needed in that case, but its reflow still displaced the saved line.
+    this.scheduleViewportRestore(this.term.rows, this.term.cols);
     this.connectAfterInitialFit();
   }
 
@@ -498,7 +509,7 @@ export class AttachTerminal {
       return;
     }
     this.cancelViewportRestoreFrame();
-    const scheduledViewportY = this.term.buffer.active.viewportY;
+    const scheduledUserScroll = this.userScrollRevision;
     this.viewportRestoreFrame = window.requestAnimationFrame(() => {
       this.viewportRestoreFrame = null;
       if (this.stopped || this.term.rows !== rows || this.term.cols !== cols) {
@@ -509,14 +520,23 @@ export class AttachTerminal {
         return;
       }
       const buffer = this.term.buffer.active;
-      // xterm handles wheel after our capture listener. If that changed the
-      // viewport before this frame, the user's gesture is newer than the saved
-      // anchor and must win.
-      if (!shouldRestoreViewport(scheduledViewportY, buffer.viewportY)) {
+      if (
+        !shouldRestoreViewport({
+          scheduledUserScroll,
+          currentUserScroll: this.userScrollRevision,
+        })
+      ) {
         this.clearPendingViewport();
         return;
       }
-      const target = anchor.atBottom ? buffer.baseY : anchor.marker?.line ?? anchor.line;
+      const target = viewportAnchorLine(
+        {
+          atBottom: anchor.atBottom,
+          markerLine: anchor.marker?.line ?? null,
+          fallbackLine: anchor.line,
+        },
+        buffer.baseY,
+      );
       this.clearPendingViewport();
       this.term.scrollToLine(Math.max(0, target));
     });

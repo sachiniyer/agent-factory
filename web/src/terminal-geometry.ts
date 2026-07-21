@@ -14,6 +14,17 @@ export interface TerminalBufferPosition {
   viewportY: number;
 }
 
+export interface ViewportAnchorTarget {
+  atBottom: boolean;
+  markerLine: number | null;
+  fallbackLine: number;
+}
+
+export interface ViewportRestoreIntent {
+  scheduledUserScroll: number;
+  currentUserScroll: number;
+}
+
 /** Whether FitAddon has a real grid for a non-hidden host. This also gates the
  * first socket connect, so a newly opened client never advertises xterm's 80x24
  * constructor default to the shared PTY before layout has produced its real grid. */
@@ -42,7 +53,17 @@ export function viewportMarkerOffset(position: TerminalBufferPosition): number {
   return position.viewportY - (position.baseY + position.cursorY);
 }
 
-/** A real scroll after fitting wins over the deferred anchor restore. */
-export function shouldRestoreViewport(scheduledViewportY: number, currentViewportY: number): boolean {
-  return scheduledViewportY === currentViewportY;
+/** Resolves a saved viewport anchor. xterm leaves a disposed marker object alive
+ * with line=-1, so only a non-negative marker can outrank the absolute fallback. */
+export function viewportAnchorLine(anchor: ViewportAnchorTarget, baseY: number): number {
+  if (anchor.atBottom) {
+    return baseY;
+  }
+  return anchor.markerLine !== null && anchor.markerLine >= 0 ? anchor.markerLine : anchor.fallbackLine;
+}
+
+/** A real user scroll after fitting wins over the deferred anchor restore. Output
+ * may move viewportY on its own and must not pose as user intent. */
+export function shouldRestoreViewport(intent: ViewportRestoreIntent): boolean {
+  return intent.scheduledUserScroll === intent.currentUserScroll;
 }

@@ -4,6 +4,7 @@ import {
   hasVisibleTerminalGeometry,
   shouldRefitVisibleTerminal,
   shouldRestoreViewport,
+  viewportAnchorLine,
   viewportMarkerOffset,
 } from "./terminal-geometry.js";
 
@@ -39,8 +40,14 @@ test("#2347: a scrollback marker anchors the visible line, not a stale bottom di
   assert.equal(viewportMarkerOffset({ baseY: 100, cursorY: 24, viewportY: 91 }), -33);
 });
 
-test("#2347: a wheel movement wins over a deferred viewport restore", () => {
-  assert.equal(shouldRestoreViewport(12, 12), true);
-  assert.equal(shouldRestoreViewport(12, 11), false);
-  assert.equal(shouldRestoreViewport(12, 13), false);
+test("#2347: a disposed marker falls back to the saved line instead of the top", () => {
+  assert.equal(viewportAnchorLine({ atBottom: false, markerLine: 42, fallbackLine: 17 }, 83), 42);
+  assert.equal(viewportAnchorLine({ atBottom: false, markerLine: -1, fallbackLine: 17 }, 83), 17);
+  assert.equal(viewportAnchorLine({ atBottom: false, markerLine: null, fallbackLine: 17 }, 83), 17);
+  assert.equal(viewportAnchorLine({ atBottom: true, markerLine: -1, fallbackLine: 17 }, 83), 83);
+});
+
+test("#2347: only user scroll intent cancels a deferred viewport restore", () => {
+  assert.equal(shouldRestoreViewport({ scheduledUserScroll: 4, currentUserScroll: 4 }), true);
+  assert.equal(shouldRestoreViewport({ scheduledUserScroll: 4, currentUserScroll: 5 }), false);
 });
