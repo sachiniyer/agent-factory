@@ -453,6 +453,7 @@ func TestHandoffSession_ReplacementFenceCoversMissionDelivery(t *testing.T) {
 		release:        make(chan struct{}),
 	}
 	inst := registerHandoffSubject(t, manager, repoID, repoPath, "fenced-delivery", backend)
+	inst.SetLimitReached(time.Date(2026, 7, 22, 9, 0, 0, 0, time.UTC))
 	done := make(chan error, 1)
 	go func() {
 		_, err := manager.HandoffSession(HandoffSessionRequest{
@@ -469,6 +470,11 @@ func TestHandoffSession_ReplacementFenceCoversMissionDelivery(t *testing.T) {
 	opDuringReadiness := inst.GetInFlightOp()
 	manager.refreshInstanceStatus(repoID, inst)
 	_, _, statusPolls := base.eventSnapshot()
+	raw, checkpointErr := config.LoadRepoInstances(repoID)
+	var checkpoint []session.InstanceData
+	if checkpointErr == nil {
+		checkpointErr = json.Unmarshal(raw, &checkpoint)
+	}
 	close(backend.release)
 	if err := <-done; err != nil {
 		t.Fatalf("HandoffSession: %v", err)
@@ -479,6 +485,13 @@ func TestHandoffSession_ReplacementFenceCoversMissionDelivery(t *testing.T) {
 	}
 	if statusPolls != 0 {
 		t.Fatalf("status poll probed %d times before the incoming mission landed; an idle prompt here is not a completed task run", statusPolls)
+	}
+	if checkpointErr != nil {
+		t.Fatalf("load runtime-swap checkpoint: %v", checkpointErr)
+	}
+	if len(checkpoint) != 1 || checkpoint[0].Program != tmux.ProgramGemini ||
+		checkpoint[0].Liveness != session.LiveRunning || !checkpoint[0].LimitResetAt.IsZero() {
+		t.Fatalf("disk checkpoint during delivery fence = %+v; want incoming program as Running with the outgoing limit cleared", checkpoint)
 	}
 	if got := inst.GetInFlightOp(); got != session.OpNone {
 		t.Fatalf("in-flight op after mission delivery = %v, want OpNone", got)
