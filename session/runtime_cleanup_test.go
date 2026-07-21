@@ -201,6 +201,34 @@ func TestRuntimeCleanupHandleRoundTripsEveryOffBoxBackend(t *testing.T) {
 	}
 }
 
+func TestArchivedKillTombstoneDoesNotPersistRuntimeCleanup(t *testing.T) {
+	const secretHost = "archived-cleanup.example.test"
+	cleanup := &RuntimeCleanupData{SSH: &SSHRuntimeCleanupData{
+		Config:     config.SSHConfig{Host: secretHost, User: "remote"},
+		SessionDir: "/srv/af/already-archived",
+		RemotePID:  "4242",
+	}}
+	stored := (InstanceData{
+		ID:             "archived-id",
+		Title:          "archived",
+		BackendType:    "ssh",
+		Liveness:       LiveArchived,
+		UserKilled:     true,
+		RuntimeCleanup: cleanup,
+		runtimeCleanup: cleanup,
+	}).ForStorage()
+	if stored.RuntimeCleanup != nil {
+		t.Fatalf("archived tombstone retained unused cleanup identity: %#v", stored.RuntimeCleanup)
+	}
+	raw, err := json.Marshal(stored)
+	if err != nil {
+		t.Fatalf("marshal archived tombstone: %v", err)
+	}
+	if strings.Contains(string(raw), secretHost) {
+		t.Fatalf("archived tombstone leaked cleanup identity: %s", raw)
+	}
+}
+
 func TestMissingRemoteCleanupHandleFailsClosed(t *testing.T) {
 	restored, err := FromInstanceData(InstanceData{
 		ID:          "legacy-tombstone-id",

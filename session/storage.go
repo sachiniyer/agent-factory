@@ -146,9 +146,10 @@ func (d InstanceData) ForStorage() InstanceData {
 	d.InFlightOp = OpNone
 	d.LifecycleAction = LifecycleActionNone
 	d.CanKill = false
-	if !d.UserKilled {
+	if !d.UserKilled || lv == LiveArchived {
 		// Cleanup credentials/identities have no reason to live in ordinary session
-		// records. The kill tombstone is the commit point that makes them durable.
+		// records. The kill tombstone is the commit point that makes them durable,
+		// except for archived rows whose runtime was already reaped before archive.
 		d.RuntimeCleanup = nil
 	} else if d.runtimeCleanup != nil {
 		d.RuntimeCleanup = d.runtimeCleanup.clone()

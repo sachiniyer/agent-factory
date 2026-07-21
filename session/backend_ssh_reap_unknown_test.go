@@ -568,7 +568,8 @@ func TestSSHKillScriptUsesProcBeforeIncompatiblePS(t *testing.T) {
 
 // TestSSHKillScriptPSFallbackMatchesOnlyArgvZero drives the non-proc (macOS)
 // branch with fake ps/kill commands. Merely mentioning the session af path as an
-// argument is not process identity; only an exact argv[0] may be signalled.
+// argument is not process identity; a command line whose argv[0] is the exact
+// path must be signalled even though ps includes its arguments too.
 func TestSSHKillScriptPSFallbackMatchesOnlyArgvZero(t *testing.T) {
 	p := &sshProvisioner{sessionDir: filepath.Join(t.TempDir(), "session with spaces")}
 	expected := p.afPath()
@@ -579,7 +580,8 @@ func TestSSHKillScriptPSFallbackMatchesOnlyArgvZero(t *testing.T) {
 		wantSignal bool
 	}{
 		{name: "expected path is only an argument", psOutput: "/usr/bin/editor " + expected},
-		{name: "argv zero matches exactly", psOutput: expected, wantSignal: true},
+		{name: "similar executable prefix", psOutput: expected + "-other agent-server"},
+		{name: "argv zero matches before arguments", psOutput: "   " + expected + " agent-server --repo /workspace", wantSignal: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			fakeBin := t.TempDir()

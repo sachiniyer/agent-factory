@@ -156,15 +156,17 @@ func (p *sshProvisioner) runReapCombined(timeout time.Duration, script string) (
 
 // remotePIDKillScript makes a numeric-PID retry safe. Linux reads argv[0]
 // directly from procfs (including BusyBox/Alpine hosts whose ps rejects procps
-// flags); macOS and other hosts fall back to ps's command-only field. The unique
-// per-session af path remains argv[0] for the agent-server's lifetime. A recycled
-// PID whose argv[0] is not exactly that path is treated as already gone, never
-// signalled; mentioning the path in an argument proves nothing.
+// flags); macOS and other hosts fall back to ps's command-and-arguments field.
+// The fallback accepts only an exact command-line prefix of the expected binary
+// followed by either end-of-line or an argument separator. The unique per-session
+// af path remains argv[0] for the agent-server's lifetime. A recycled PID whose
+// argv[0] is not that path is treated as already gone, never signalled; mentioning
+// the path in a later argument proves nothing.
 // Re-check before SIGKILL as well so recycling during the grace sleep cannot
 // redirect the second signal.
 func (p *sshProvisioner) remotePIDKillScript(remotePID string) string {
 	return fmt.Sprintf(
-		`pid=%s; expected=%s; matches_session() { if [ -r "/proc/$pid/cmdline" ]; then actual=$(tr '\000' '\n' < "/proc/$pid/cmdline" | sed -n '1p') || return 2; [ "$actual" = "$expected" ]; return; fi; actual=$(ps -ww -p "$pid" -o comm= 2>/dev/null) || return 2; [ "$actual" = "$expected" ]; }; if ! kill -0 "$pid" 2>/dev/null; then exit 0; fi; matches_session; matched=$?; if [ "$matched" -eq 1 ]; then exit 0; elif [ "$matched" -ne 0 ]; then exit 75; fi; kill "$pid" 2>/dev/null || exit 76; sleep 0.3; if ! kill -0 "$pid" 2>/dev/null; then exit 0; fi; matches_session; matched=$?; if [ "$matched" -eq 1 ]; then exit 0; elif [ "$matched" -ne 0 ]; then exit 75; fi; kill -9 "$pid" 2>/dev/null || exit 77`,
+		`pid=%s; expected=%s; matches_session() { if [ -r "/proc/$pid/cmdline" ]; then actual=$(tr '\000' '\n' < "/proc/$pid/cmdline" | sed -n '1p') || return 2; [ "$actual" = "$expected" ]; return; fi; actual=$(ps -ww -p "$pid" -o command= 2>/dev/null) || return 2; actual=${actual#"${actual%%%%[![:space:]]*}"}; case "$actual" in "$expected"|"$expected "*) return 0 ;; *) return 1 ;; esac; }; if ! kill -0 "$pid" 2>/dev/null; then exit 0; fi; matches_session; matched=$?; if [ "$matched" -eq 1 ]; then exit 0; elif [ "$matched" -ne 0 ]; then exit 75; fi; kill "$pid" 2>/dev/null || exit 76; sleep 0.3; if ! kill -0 "$pid" 2>/dev/null; then exit 0; fi; matches_session; matched=$?; if [ "$matched" -eq 1 ]; then exit 0; elif [ "$matched" -ne 0 ]; then exit 75; fi; kill -9 "$pid" 2>/dev/null || exit 77`,
 		shellQuote(remotePID), shellQuote(p.afPath()))
 }
 
