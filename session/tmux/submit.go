@@ -262,10 +262,12 @@ func (t *TmuxSession) sendKeysPasteBuffer(text string) error {
 		}
 		return fmt.Errorf("error pasting buffer: %w", pasteErr)
 	}
-	// Remember only a payload tmux actually accepted. On the next submit this
-	// exact tail is the provenance that distinguishes prior pasted input from a
-	// spinner, footer, or unrelated pane redraw. submitMu owns the field.
-	t.lastPastedTail = tail
+	// Remember only a payload tmux actually accepted. Reusing the delivery
+	// probe's exact completion suffix keeps one source of truth for what tmux was
+	// asked to render. On the next submit it is provenance that distinguishes
+	// prior pasted input from a spinner, footer, or unrelated pane redraw.
+	// submitMu owns the field.
+	t.lastPastedTail = probe.completion
 
 	// Confirm the paste actually LANDED in the pane before sending Enter, instead
 	// of sleeping a fixed 500ms and hoping it drained. Enter is a separate
@@ -481,7 +483,7 @@ func sameComposerBoundaryBelow(before, after composerClearObservation) bool {
 }
 
 func distinctivePreviousPasteTail(tail string) bool {
-	return len([]rune(tail)) >= minDistinctiveTail && hasLetterOrNumber(tail)
+	return len([]rune(tail)) >= minDistinctiveFragment && hasLetterOrNumber(tail)
 }
 
 func paneRowAt(pane string, row int) (string, bool) {
