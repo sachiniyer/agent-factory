@@ -56,7 +56,13 @@ test("terminal non-success conclusions never verify a required check", () => {
 });
 
 test("only the known conditional Deploy check may be skipped", async () => {
-  const allowed = await evaluateGate();
+  const allowed = await evaluateGate({
+    requiredChecks: [
+      { context: "Lint", integration_id: ACTIONS_APP_ID },
+      { context: "Build", integration_id: ACTIONS_APP_ID },
+      { context: "Deploy", integration_id: ACTIONS_APP_ID },
+    ],
+  });
   assert.equal(allowed.shouldMerge, true);
 
   const blocked = await evaluateGate({
@@ -65,9 +71,22 @@ test("only the known conditional Deploy check may be skipped", async () => {
       checkRun({ name: "Deploy", conclusion: "skipped" }),
       checkRun({ name: "Security scan", conclusion: "skipped" }),
     ],
+    requiredChecks: [
+      { context: "Lint", integration_id: ACTIONS_APP_ID },
+      { context: "Build", integration_id: ACTIONS_APP_ID },
+      { context: "Security scan", integration_id: ACTIONS_APP_ID },
+    ],
   });
   assert.equal(blocked.shouldMerge, false);
-  assert.match(blocked.reasons.join("\n"), /head check Security scan.*skipped/);
+  assert.match(blocked.reasons.join("\n"), /required check Security scan.*skipped/);
+});
+
+test("a failing optional Web selftest does not become a merge requirement", async () => {
+  const result = await evaluateGate({
+    checkRuns: [...happyCheckRuns(), checkRun({ name: "Web selftest", conclusion: "failure" })],
+  });
+
+  assert.equal(result.shouldMerge, true);
 });
 
 test("transient CodeQL neutral waits for Analyze jobs and later passes", async () => {
@@ -83,10 +102,15 @@ test("transient CodeQL neutral waits for Analyze jobs and later passes", async (
       checkRun({ name: "Analyze (go)", status: "in_progress", conclusion: null }),
       checkRun({ name: "Deploy", conclusion: "skipped" }),
     ],
+    requiredChecks: [
+      { context: "Lint", integration_id: ACTIONS_APP_ID },
+      { context: "Build", integration_id: ACTIONS_APP_ID },
+      { context: "CodeQL", integration_id: 57789 },
+    ],
   });
 
   assert.equal(settling.shouldMerge, false);
-  assert.match(settling.reasons.join("\n"), /head check CodeQL is still settling.*neutral/);
+  assert.match(settling.reasons.join("\n"), /required check CodeQL.*still settling.*neutral/);
 
   const settled = await evaluateGate({
     checkRuns: [
@@ -99,6 +123,11 @@ test("transient CodeQL neutral waits for Analyze jobs and later passes", async (
       }),
       checkRun({ name: "Analyze (go)", conclusion: "success" }),
       checkRun({ name: "Deploy", conclusion: "skipped" }),
+    ],
+    requiredChecks: [
+      { context: "Lint", integration_id: ACTIONS_APP_ID },
+      { context: "Build", integration_id: ACTIONS_APP_ID },
+      { context: "CodeQL", integration_id: 57789 },
     ],
   });
 
@@ -162,12 +191,35 @@ test("an exact-head Codex PR review proves review after its finding is resolved"
 
 test("an exact-head Codex review body finding overrides a clean verdict", async () => {
   const result = await evaluateGate({
-    reviews: [codexReview(HEAD_SHA, "P1: a finding present only in the review body")],
+    issueComments: [codexVerdict(HEAD_SHA, "2026-07-09T01:20:00Z")],
+    reviews: [
+      codexReview(
+        HEAD_SHA,
+        "P1: a finding present only in the review body",
+        "2026-07-09T01:21:00Z",
+      ),
+    ],
     reviewComments: [],
   });
 
   assert.equal(result.shouldMerge, false);
-  assert.match(result.reasons.join("\n"), /1 exact-head Codex review body finding/);
+  assert.match(result.reasons.join("\n"), /latest exact-head Codex review body.*P0-P3 finding/);
+});
+
+test("a newer clean exact-head verdict supersedes an older body-only finding", async () => {
+  const result = await evaluateGate({
+    issueComments: [codexVerdict(HEAD_SHA, "2026-07-09T01:21:00Z")],
+    reviews: [
+      codexReview(
+        HEAD_SHA,
+        "P1: an older body-only finding",
+        "2026-07-09T01:20:00Z",
+      ),
+    ],
+    reviewComments: [],
+  });
+
+  assert.equal(result.shouldMerge, true);
 });
 
 test("a verdict for an older head does not verify the current head", async () => {
@@ -380,12 +432,12 @@ function checkRun({
   };
 }
 
-function codexVerdict(sha) {
+function codexVerdict(sha, timestamp = "2026-07-09T01:20:00Z") {
   return {
     user: { login: "chatgpt-codex-connector[bot]" },
     body: `Codex Review: Didn't find any major issues.\n\n**Reviewed commit:** \`${sha.slice(0, 10)}\``,
-    created_at: "2026-07-09T01:20:00Z",
-    updated_at: "2026-07-09T01:20:00Z",
+    created_at: timestamp,
+    updated_at: timestamp,
   };
 }
 
@@ -398,11 +450,11 @@ function codexRateLimit() {
   };
 }
 
-function codexReview(sha, summary = "Here are some suggestions.") {
+function codexReview(sha, summary = "Here are some suggestions.", timestamp = "2026-07-09T01:20:00Z") {
   return {
     user: { login: "chatgpt-codex-connector[bot]" },
     body: `### Codex Review\n\n${summary}\n\n**Reviewed commit:** \`${sha.slice(0, 10)}\``,
-    submitted_at: "2026-07-09T01:20:00Z",
+    submitted_at: timestamp,
   };
 }
 

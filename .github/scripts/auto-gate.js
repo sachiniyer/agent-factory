@@ -8,7 +8,6 @@ const CODEX_BODY_FINDING_RE = /\bP[0-3]\b/i;
 const REVIEWED_COMMIT_RE = /\*\*Reviewed commit:\*\*\s*`([0-9a-f]{7,40})`/i;
 // Docs/Deploy is deliberately conditional and is skipped on pull_request runs.
 const ALLOWED_SKIPPED_CHECKS = new Set(["Deploy"]);
-const AUTO_GATE_CHECK_NAME = "Evaluate auto-merge gate";
 const RESOLUTION_MARKER_RE = /\b(?:RESOLVED|ACCEPTED)\b/;
 
 async function evaluate({ github, context, core, prNumber, setOutputs = true }) {
@@ -313,19 +312,6 @@ async function evaluateRequiredChecks({ github, context, branch, sha, core }) {
     }
   }
 
-  for (const run of latestCheckRuns(checkRuns)) {
-    if (run.name === AUTO_GATE_CHECK_NAME || specs.some((spec) => checkRunMatchesSpec(run, spec))) {
-      continue;
-    }
-
-    const state = checkRunState(run);
-    notes.push(`Head check ${run.name}: ${state.description}`);
-    if (!state.ok) {
-      const stateDescription = state.waiting ? "is still settling" : "did not succeed";
-      reasons.push(`head check ${run.name} ${stateDescription} (${state.description})`);
-    }
-  }
-
   return { ok: reasons.length === 0, reasons, notes };
 }
 
@@ -460,18 +446,6 @@ function checkRunState(run) {
   };
 }
 
-function latestCheckRuns(checkRuns) {
-  const latest = new Map();
-  for (const run of checkRuns) {
-    const key = `${run.name}\0${run.app?.id || ""}`;
-    const current = latest.get(key);
-    if (!current || latestRunTime(run) > latestRunTime(current)) {
-      latest.set(key, run);
-    }
-  }
-  return [...latest.values()].sort((a, b) => a.name.localeCompare(b.name));
-}
-
 function formatRunSource(run) {
   if (!run.app) {
     return "unknown source";
@@ -526,11 +500,8 @@ async function evaluateCodex({ github, context, number, sha, lastCommitDate }) {
     }
   }
 
-  const bodyFindings = matchingReviewArtifacts.filter((artifact) =>
-    CODEX_BODY_FINDING_RE.test(artifact.body || ""),
-  );
-  if (bodyFindings.length > 0) {
-    reasons.push(`${bodyFindings.length} exact-head Codex review body finding(s)`);
+  if (verdict && CODEX_BODY_FINDING_RE.test(verdict.body || "")) {
+    reasons.push("latest exact-head Codex review body contains a P0-P3 finding");
   }
 
   const reviewComments = await github.paginate(github.rest.pulls.listReviewComments, {
