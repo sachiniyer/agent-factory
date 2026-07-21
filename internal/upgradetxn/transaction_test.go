@@ -230,6 +230,69 @@ func TestActivationRejectsExpiredSupervisorLease(t *testing.T) {
 	require.NoError(t, lease.Release())
 }
 
+func TestTakeoverInvalidatesPreviousActorsSupervisorReadyHeartbeat(t *testing.T) {
+	txn, _, _ := prepareFixture(t)
+	journal := txn.Journal()
+	first, err := txn.tryAcquireRecoveryAs(journal.PreviousBinaryPath)
+	require.NoError(t, err)
+	require.NoError(t, first.Advance(PhaseSupervisorReady))
+	require.NoError(t, first.Heartbeat(PhaseSupervisorReady, time.Now().Add(time.Hour)))
+	require.NoError(t, first.Release())
+
+	takeover, err := txn.tryAcquireRecoveryAs(journal.PreviousBinaryPath)
+	require.NoError(t, err)
+	defer takeover.Release()
+	err = txn.AuthorizeActivation(journal.ID, journal.RecoveryNonce)
+	require.Error(t, err,
+		"the new flock owner must publish its own heartbeat before it can authorize shutdown")
+}
+
+func TestTakeoverCannotBorrowStaleHeartbeatBeforeInvalidationFinishes(t *testing.T) {
+	txn, home, _ := prepareFixture(t)
+	journal := txn.Journal()
+	first, err := txn.tryAcquireRecoveryAs(journal.PreviousBinaryPath)
+	require.NoError(t, err)
+	require.NoError(t, first.Advance(PhaseSupervisorReady))
+	require.NoError(t, first.Heartbeat(PhaseSupervisorReady, time.Now().Add(time.Hour)))
+	require.NoError(t, first.Release())
+	takeoverTxn, err := Load(home)
+	require.NoError(t, err)
+
+	statusPath := filepath.Join(transactionDir(journal.HomeDir, journal.ID), "recovery.json")
+	removeStarted := make(chan struct{})
+	continueRemove := make(chan struct{})
+	previousRemove := removeTransactionFile
+	removeTransactionFile = func(path string) error {
+		if path == statusPath {
+			close(removeStarted)
+			<-continueRemove
+		}
+		return previousRemove(path)
+	}
+	t.Cleanup(func() { removeTransactionFile = previousRemove })
+	type acquisition struct {
+		lease *RecoveryLease
+		err   error
+	}
+	acquired := make(chan acquisition, 1)
+	go func() {
+		lease, acquireErr := takeoverTxn.tryAcquireRecoveryAs(journal.PreviousBinaryPath)
+		acquired <- acquisition{lease: lease, err: acquireErr}
+	}()
+	select {
+	case <-removeStarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("takeover did not reach stale-status invalidation")
+	}
+	authorizeErr := txn.AuthorizeActivation(journal.ID, journal.RecoveryNonce)
+	close(continueRemove)
+	result := <-acquired
+	require.NoError(t, result.err)
+	require.NoError(t, result.lease.Release())
+	require.Error(t, authorizeErr,
+		"holding the death-test lock is insufficient until this actor publishes its own readiness proof")
+}
+
 func TestRecoveryTakeoverReloadsJournalAfterActorDeath(t *testing.T) {
 	txn, home, _ := prepareFixture(t)
 	stale, err := Load(home)
@@ -481,6 +544,37 @@ func TestCleanupRejectsStorageRootReplacedBySymlink(t *testing.T) {
 	require.Error(t, err)
 	require.FileExists(t, sentinel, "cleanup must never traverse a symlinked storage ancestor")
 	require.FileExists(t, journal.PreviousBinaryPath)
+}
+
+func TestRecoveryLoadsJournalWhenCandidateReplacesMetadataParentWithSymlink(t *testing.T) {
+	txn, home, executable := prepareFixture(t)
+	lease, err := txn.tryAcquireRecoveryAs(txn.Journal().PreviousBinaryPath)
+	require.NoError(t, err)
+	require.NoError(t, lease.Advance(PhaseSupervisorReady))
+	require.NoError(t, lease.Advance(PhaseDaemonStopped))
+	require.NoError(t, lease.InstallCandidate())
+	require.NoError(t, lease.Release())
+
+	instancesDir := filepath.Join(home, "instances")
+	require.NoError(t, os.RemoveAll(instancesDir))
+	external := t.TempDir()
+	sentinel := filepath.Join(external, "must-survive")
+	require.NoError(t, os.WriteFile(sentinel, []byte("foreign"), 0o600))
+	require.NoError(t, os.Symlink(external, instancesDir))
+
+	loaded, err := Load(home)
+	require.NoError(t, err,
+		"mutable candidate state must not prevent the previous binary from loading its recovery journal")
+	recovery, err := loaded.tryAcquireRecoveryAs(loaded.Journal().PreviousBinaryPath)
+	require.NoError(t, err)
+	err = recovery.Rollback()
+	require.Error(t, err, "rollback must reject rather than traverse the candidate-created symlink")
+	require.NoError(t, recovery.Release())
+	require.Equal(t, PhaseRollbackFailed, loaded.Journal().Phase)
+	require.FileExists(t, sentinel)
+	got, readErr := os.ReadFile(executable)
+	require.NoError(t, readErr)
+	require.Equal(t, "known-running-binary", string(got))
 }
 
 func TestPrepareRejectsRecoveryJobMismatchedToDaemonOwner(t *testing.T) {

@@ -223,7 +223,7 @@ func validateJournal(home string, journal Journal) error {
 	seen := make(map[string]struct{}, len(journal.Metadata))
 	txnDir := transactionDir(home, journal.ID)
 	for index, metadata := range journal.Metadata {
-		relative, _, err := validateMetadataPath(home, metadata.Path)
+		relative, _, err := resolveMetadataPath(home, metadata.Path)
 		if err != nil {
 			return err
 		}
@@ -481,7 +481,7 @@ func createDurableDirectory(parent, path string, mode os.FileMode) error {
 	return nil
 }
 
-func validateMetadataPath(home, path string) (string, string, error) {
+func resolveMetadataPath(home, path string) (string, string, error) {
 	if path == "" || filepath.IsAbs(path) {
 		return "", "", fmt.Errorf("metadata path %q must be relative to the upgrade home", path)
 	}
@@ -493,6 +493,14 @@ func validateMetadataPath(home, path string) (string, string, error) {
 	inside, err := filepath.Rel(home, target)
 	if err != nil || inside != relative {
 		return "", "", fmt.Errorf("metadata path %q escapes the upgrade home", path)
+	}
+	return relative, target, nil
+}
+
+func validateMetadataPath(home, path string) (string, string, error) {
+	relative, target, err := resolveMetadataPath(home, path)
+	if err != nil {
+		return "", "", err
 	}
 	if err := ensureNoSymlinkParents(home, target); err != nil {
 		return "", "", fmt.Errorf("metadata path %q is unsafe: %w", path, err)

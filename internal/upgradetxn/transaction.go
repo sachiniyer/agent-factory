@@ -208,12 +208,13 @@ const (
 	ExecutableCandidate
 )
 
-// RecoveryLease is the kernel-held death test for the upgrade supervisor.
-// Heartbeats aid diagnosis and deadline enforcement by the lock owner, but
-// they never grant another process permission to take over while flock lives.
+// RecoveryLease holds the kernel death-test flock and a second readiness flock.
+// Acquisition first deletes stale status; Heartbeat then publishes this actor's
+// status. Authorization requires both flocks and that current publication.
 type RecoveryLease struct {
 	mu         sync.Mutex
 	file       *os.File
+	readyFile  *os.File
 	path       string
 	txnID      string
 	nonce      string
@@ -240,7 +241,8 @@ type RecoveryStatus struct {
 
 // Prepare snapshots every rollback input and publishes active.json last. A
 // process crash before publication therefore leaves no transaction that a
-// recovery actor could mistake for complete.
+// recovery actor could mistake for complete. Prepare does not quiesce a live
+// daemon; a production caller must first prove the metadata manifest is stable.
 func Prepare(plan Plan) (_ *Transaction, retErr error) {
 	home, err := canonicalExistingDir(plan.HomeDir)
 	if err != nil {
@@ -525,6 +527,15 @@ func (t *Transaction) AuthorizeActivation(transactionID, nonce string) error {
 	if !errors.Is(err, ErrRecoveryActive) {
 		return fmt.Errorf("verify recovery actor before activation: %w", err)
 	}
+	readyPath := filepath.Join(transactionDir(current.HomeDir, current.ID), "recovery.ready.lock")
+	readyProbe, err := acquireFileLock(readyPath, true)
+	if err == nil {
+		_ = releaseFileLock(readyProbe)
+		return errors.New("upgrade recovery actor has not published its current readiness proof")
+	}
+	if !errors.Is(err, ErrRecoveryActive) {
+		return fmt.Errorf("verify recovery actor readiness before activation: %w", err)
+	}
 	status, err := readRecoveryStatusForJournal(current)
 	if err != nil {
 		return err
@@ -798,9 +809,24 @@ func (t *Transaction) tryAcquireRecoveryAs(actorExecutable string) (*RecoveryLea
 		_ = releaseFileLock(file)
 		return nil, fmt.Errorf("%w: %v", ErrRecoveryActorMismatch, err)
 	}
+	statusPath := filepath.Join(filepath.Dir(lockPath), "recovery.json")
+	// recovery.json belongs to the former flock owner. Remove it while holding
+	// the newly acquired lock so no caller can combine this actor's liveness
+	// with a dead actor's future-dated supervisor_ready heartbeat.
+	if err := removeDurableFile(statusPath); err != nil {
+		_ = releaseFileLock(file)
+		return nil, fmt.Errorf("invalidate previous upgrade recovery status: %w", err)
+	}
+	readyPath := filepath.Join(filepath.Dir(lockPath), "recovery.ready.lock")
+	readyFile, err := acquireFileLock(readyPath, true)
+	if err != nil {
+		_ = releaseFileLock(file)
+		return nil, fmt.Errorf("acquire upgrade recovery readiness lock: %w", err)
+	}
 	return &RecoveryLease{
 		file:       file,
-		path:       filepath.Join(filepath.Dir(lockPath), "recovery.json"),
+		readyFile:  readyFile,
+		path:       statusPath,
 		txnID:      t.journal.ID,
 		nonce:      t.journal.RecoveryNonce,
 		executable: actorPath,
@@ -896,12 +922,12 @@ func (l *RecoveryLease) withTransaction(action func(*Transaction) error) error {
 	return action(l.txn)
 }
 
-// Heartbeat records diagnostics and the lock owner's own deadline. The lease's
-// open file descriptor, not this timestamp, remains the takeover authority.
+// Heartbeat records the lock owner's diagnostics and deadline. The readiness
+// flock was acquired only after stale status was durably invalidated.
 func (l *RecoveryLease) Heartbeat(phase Phase, deadline time.Time) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	if l.released || l.file == nil {
+	if l.released || l.file == nil || l.readyFile == nil {
 		return errors.New("upgrade recovery lease is released")
 	}
 	heartbeat := RecoveryStatus{
@@ -935,9 +961,11 @@ func (l *RecoveryLease) Release() error {
 		return nil
 	}
 	l.released = true
+	readyErr := releaseFileLock(l.readyFile)
+	l.readyFile = nil
 	err := releaseFileLock(l.file)
 	l.file = nil
-	return err
+	return errors.Join(readyErr, err)
 }
 
 func (t *Transaction) persistPhaseLocked(phase Phase) error {
