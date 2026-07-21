@@ -210,10 +210,7 @@ func validateJournal(home string, journal Journal) error {
 	if err := validateDaemonSnapshot(journal.Daemon); err != nil {
 		return err
 	}
-	if err := validateRecoveryJob(journal.ID, journal.RecoveryJob); err != nil {
-		return err
-	}
-	if err := validateDaemonRecoveryPair(journal.Daemon, journal.RecoveryJob); err != nil {
+	if err := validateRecoveryConfiguration(journal.ID, journal.Daemon, journal.RecoveryJob); err != nil {
 		return err
 	}
 	if err := validateTransactionStorage(home, journal); err != nil {
@@ -260,6 +257,13 @@ func validateJournal(home string, journal Journal) error {
 		}
 	}
 	return nil
+}
+
+func validateRecoveryConfiguration(transactionID string, snapshot DaemonSnapshot, job RecoveryJob) error {
+	if err := validateRecoveryJob(transactionID, job); err != nil {
+		return err
+	}
+	return validateDaemonRecoveryPair(snapshot, job)
 }
 
 func validateDaemonRecoveryPair(snapshot DaemonSnapshot, job RecoveryJob) error {

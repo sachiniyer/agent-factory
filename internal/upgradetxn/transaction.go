@@ -243,18 +243,18 @@ type RecoveryStatus struct {
 // process crash before publication therefore leaves no transaction that a
 // recovery actor could mistake for complete. Prepare does not quiesce a live
 // daemon; a production caller must first prove the metadata manifest is stable.
-func Prepare(plan Plan) (_ *Transaction, retErr error) {
-	home, err := canonicalExistingDir(plan.HomeDir)
+func Prepare(stablePlan Plan) (_ *Transaction, retErr error) {
+	home, err := canonicalExistingDir(stablePlan.HomeDir)
 	if err != nil {
 		return nil, fmt.Errorf("validate upgrade home: %w", err)
 	}
-	if err := validateTransactionID(plan.ID); err != nil {
+	if err := validateTransactionID(stablePlan.ID); err != nil {
 		return nil, err
 	}
-	if strings.TrimSpace(plan.FromVersion) == "" || strings.TrimSpace(plan.ToVersion) == "" {
+	if strings.TrimSpace(stablePlan.FromVersion) == "" || strings.TrimSpace(stablePlan.ToVersion) == "" {
 		return nil, errors.New("upgrade versions cannot be blank")
 	}
-	if len(plan.Candidate) == 0 {
+	if len(stablePlan.Candidate) == 0 {
 		return nil, errors.New("candidate binary cannot be empty")
 	}
 	nonceBytes := make([]byte, recoveryNonceBytes)
@@ -262,7 +262,7 @@ func Prepare(plan Plan) (_ *Transaction, retErr error) {
 		return nil, fmt.Errorf("generate upgrade recovery nonce: %w", err)
 	}
 
-	executable, err := canonicalExistingFile(plan.ExecutablePath)
+	executable, err := canonicalExistingFile(stablePlan.ExecutablePath)
 	if err != nil {
 		return nil, fmt.Errorf("validate running executable: %w", err)
 	}
@@ -277,7 +277,7 @@ func Prepare(plan Plan) (_ *Transaction, retErr error) {
 	if err != nil {
 		return nil, fmt.Errorf("read running executable: %w", err)
 	}
-	if digest(previousBinary) == digest(plan.Candidate) {
+	if digest(previousBinary) == digest(stablePlan.Candidate) {
 		return nil, errors.New("candidate binary is byte-identical to the previous binary")
 	}
 
@@ -301,20 +301,20 @@ func Prepare(plan Plan) (_ *Transaction, retErr error) {
 		return nil, fmt.Errorf("inspect active upgrade journal: %w", err)
 	}
 
-	txnDir := transactionDir(home, plan.ID)
+	txnDir := transactionDir(home, stablePlan.ID)
 	transactionsRoot := filepath.Dir(txnDir)
 	if err := ensureDurableDirectory(root, transactionsRoot, transactionDirMode); err != nil {
 		return nil, fmt.Errorf("prepare transactions root: %w", err)
 	}
 	if err := createDurableDirectory(transactionsRoot, txnDir, transactionDirMode); err != nil {
 		if errors.Is(err, os.ErrExist) {
-			return nil, fmt.Errorf("upgrade transaction artifacts already exist for %q", plan.ID)
+			return nil, fmt.Errorf("upgrade transaction artifacts already exist for %q", stablePlan.ID)
 		}
 		_ = os.Remove(txnDir)
 		return nil, fmt.Errorf("create transaction directory: %w", err)
 	}
 	published := false
-	previousPath, candidatePath := binaryArtifactPaths(executable, plan.ID)
+	previousPath, candidatePath := binaryArtifactPaths(executable, stablePlan.ID)
 	var createdArtifacts []string
 	defer func() {
 		if published {
@@ -344,31 +344,31 @@ func Prepare(plan Plan) (_ *Transaction, retErr error) {
 		return nil, fmt.Errorf("snapshot previous binary: %w", err)
 	}
 	createdArtifacts = append(createdArtifacts, candidatePath)
-	if err := durableAtomicWriteFile(candidatePath, plan.Candidate, mode); err != nil {
+	if err := durableAtomicWriteFile(candidatePath, stablePlan.Candidate, mode); err != nil {
 		return nil, fmt.Errorf("stage candidate binary: %w", err)
 	}
 
-	metadata, err := snapshotMetadata(home, txnDir, plan.MetadataPaths)
+	metadata, err := snapshotMetadata(home, txnDir, stablePlan.MetadataPaths)
 	if err != nil {
 		return nil, err
 	}
 
 	journal := Journal{
 		SchemaVersion:        journalSchemaVersion,
-		ID:                   plan.ID,
+		ID:                   stablePlan.ID,
 		HomeDir:              home,
 		ExecutablePath:       executable,
-		FromVersion:          plan.FromVersion,
-		ToVersion:            plan.ToVersion,
+		FromVersion:          stablePlan.FromVersion,
+		ToVersion:            stablePlan.ToVersion,
 		Phase:                PhasePrepared,
 		RecoveryNonce:        hex.EncodeToString(nonceBytes),
 		PreviousBinaryPath:   previousPath,
 		PreviousBinarySHA256: digest(previousBinary),
 		CandidatePath:        candidatePath,
-		CandidateSHA256:      digest(plan.Candidate),
+		CandidateSHA256:      digest(stablePlan.Candidate),
 		ExecutableMode:       uint32(mode),
-		Daemon:               plan.Daemon,
-		RecoveryJob:          plan.RecoveryJob,
+		Daemon:               stablePlan.Daemon,
+		RecoveryJob:          stablePlan.RecoveryJob,
 		Metadata:             metadata,
 		UpdatedAt:            time.Now().UTC(),
 	}
@@ -518,6 +518,18 @@ func (t *Transaction) AuthorizeActivation(transactionID, nonce string) error {
 	if current.Phase != PhaseSupervisorReady {
 		return fmt.Errorf("upgrade supervisor is not ready for activation (phase %s)", current.Phase)
 	}
+	if err := validateActivationRecoveryProof(current, time.Now().UTC()); err != nil {
+		return err
+	}
+	approvalPath := filepath.Join(transactionDir(current.HomeDir, current.ID), "activation.approved")
+	if err := durableAtomicWriteFile(approvalPath, []byte(current.RecoveryNonce+"\n"), journalFileMode); err != nil {
+		return fmt.Errorf("persist upgrade activation approval: %w", err)
+	}
+	t.journal = current
+	return nil
+}
+
+func validateActivationRecoveryProof(current Journal, now time.Time) error {
 	lockPath := filepath.Join(transactionDir(current.HomeDir, current.ID), "recovery.lock")
 	probe, err := acquireFileLock(lockPath, true)
 	if err == nil {
@@ -543,14 +555,9 @@ func (t *Transaction) AuthorizeActivation(transactionID, nonce string) error {
 	if status.Phase != PhaseSupervisorReady {
 		return fmt.Errorf("upgrade recovery actor has not reached supervisor_ready (status %s)", status.Phase)
 	}
-	if !time.Now().UTC().Before(status.Deadline) {
+	if !now.Before(status.Deadline) {
 		return fmt.Errorf("upgrade recovery actor's supervisor_ready deadline expired at %s", status.Deadline.Format(time.RFC3339Nano))
 	}
-	approvalPath := filepath.Join(transactionDir(current.HomeDir, current.ID), "activation.approved")
-	if err := durableAtomicWriteFile(approvalPath, []byte(current.RecoveryNonce+"\n"), journalFileMode); err != nil {
-		return fmt.Errorf("persist upgrade activation approval: %w", err)
-	}
-	t.journal = current
 	return nil
 }
 

@@ -628,7 +628,12 @@ func TestPersistJournalReturnsDirectorySyncFailure(t *testing.T) {
 	syncTransactionDirectory = func(string) error { return injected }
 	t.Cleanup(func() { syncTransactionDirectory = previousSync })
 
-	err := persistJournal(filepath.Join(t.TempDir(), "active.json"), Journal{ID: "durability"})
+	// Production journal paths are derived from Prepare's canonical AF home.
+	// Mirror that boundary because macOS exposes its temp root through /var,
+	// which is a symlink to /private/var.
+	directory, err := canonicalExistingDir(t.TempDir())
+	require.NoError(t, err)
+	err = persistJournal(filepath.Join(directory, "active.json"), Journal{ID: "durability"})
 	require.ErrorIs(t, err, injected)
 }
 
