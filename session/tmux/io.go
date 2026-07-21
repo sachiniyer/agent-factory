@@ -267,6 +267,37 @@ func (t *TmuxSession) CaptureVisiblePaneGrid() (string, error) {
 	return string(output), nil
 }
 
+type paneCursorState struct {
+	Row     int
+	Col     int
+	Visible bool
+}
+
+const paneCursorStateFormat = "#{cursor_y} #{cursor_x} #{?cursor_flag,1,0}"
+
+// readPaneCursorState reports cursor position and whether the pane application
+// exposes that cursor. Keeping this focused three-field query separate from the
+// terminal-mode snapshot means a diagnostic cannot silently change the shared
+// snapshot wire shape (#2225 review).
+func (t *TmuxSession) readPaneCursorState() (paneCursorState, error) {
+	ctx, cancel := tmuxTimeoutContext()
+	defer cancel()
+	output, err := t.outputTmuxBounded(ctx, "display-message", "-p", "-t", exactTarget(t.sanitizedName), paneCursorStateFormat)
+	if err != nil {
+		if ctx.Err() != nil {
+			return paneCursorState{}, fmt.Errorf("%w: display-message after %s", ErrTmuxTimeout, tmuxCommandTimeout)
+		}
+		return paneCursorState{}, fmt.Errorf("failed to read tmux cursor state: %v", err)
+	}
+	var state paneCursorState
+	var visible int
+	if _, err := fmt.Sscanf(strings.TrimSpace(string(output)), "%d %d %d", &state.Row, &state.Col, &visible); err != nil {
+		return paneCursorState{}, fmt.Errorf("failed to parse tmux cursor state %q: %v", string(output), err)
+	}
+	state.Visible = visible != 0
+	return state, nil
+}
+
 // CursorPosition reports the pane cursor position as 0-based (row, col) via
 // display-message (`#{cursor_y} #{cursor_x}`, both 0-based in tmux). The broker's
 // repaint uses it to restore the emulator cursor to where the pane program's

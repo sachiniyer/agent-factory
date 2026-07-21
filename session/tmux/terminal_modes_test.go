@@ -10,7 +10,7 @@ import (
 
 func TestReadTerminalState(t *testing.T) {
 	dir := t.TempDir()
-	script := "#!/bin/sh\nprintf '7 11 1 1 1 0 1 0 0 1\\n'\n"
+	script := "#!/bin/sh\nprintf '7 11 1 1 0 1 0 0 1\\n'\n"
 	if err := os.WriteFile(filepath.Join(dir, "tmux"), []byte(script), 0o755); err != nil {
 		t.Fatalf("write fake tmux: %v", err)
 	}
@@ -23,9 +23,6 @@ func TestReadTerminalState(t *testing.T) {
 	}
 	if state.CursorRow != 7 || state.CursorCol != 11 {
 		t.Fatalf("cursor = (%d,%d), want (7,11)", state.CursorRow, state.CursorCol)
-	}
-	if !state.CursorVisible {
-		t.Fatal("cursor visibility = false, want true")
 	}
 	if !state.Modes.AlternateScreen || !state.Modes.MouseButton || !state.Modes.MouseSGR {
 		t.Fatalf("modes = %+v, want alternate + button tracking + SGR", state.Modes)

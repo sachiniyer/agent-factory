@@ -200,16 +200,16 @@ func (t *TmuxSession) sendKeysPasteBuffer(text string) error {
 	// the droppable half (it feeds only the log, never the baseline).
 	priorTail := t.lastPastedTail
 	before, beforeOK := t.capturePaneForDelivery()
-	beforeCursor, beforeCursorOK := TerminalState{}, false
+	beforeCursor, beforeCursorOK := paneCursorState{}, false
 	if beforeOK {
 		beforeCursor, beforeCursorOK = t.previousPasteCursor(before, priorTail)
 	}
 	t.clearComposerDraft()
 	after, afterOK := t.capturePaneForDelivery()
-	afterCursor, afterCursorOK := TerminalState{}, false
+	afterCursor, afterCursorOK := paneCursorState{}, false
 	if beforeCursorOK && afterOK {
 		var err error
-		afterCursor, err = t.ReadTerminalState()
+		afterCursor, err = t.readPaneCursorState()
 		afterCursorOK = err == nil
 	}
 	noteClearedComposerContent(
@@ -381,7 +381,7 @@ func (t *TmuxSession) clearComposerDraft() {
 
 type composerClearObservation struct {
 	pane        string
-	cursor      TerminalState
+	cursor      paneCursorState
 	cursorKnown bool
 }
 
@@ -407,18 +407,18 @@ func noteClearedComposerContent(
 // from this TmuxSession's previous paste ends on that exact cursor row. It is a
 // cheap no-op unless the tail appears somewhere in the pane; the extra bounded
 // tmux read is therefore reserved for a plausible stranded-paste candidate.
-func (t *TmuxSession) previousPasteCursor(pane, previousPasteTail string) (TerminalState, bool) {
+func (t *TmuxSession) previousPasteCursor(pane, previousPasteTail string) (paneCursorState, bool) {
 	if !distinctivePreviousPasteTail(previousPasteTail) ||
 		!strings.Contains(normalizeDelivery(pane), previousPasteTail) {
-		return TerminalState{}, false
+		return paneCursorState{}, false
 	}
-	cursor, err := t.ReadTerminalState()
-	if err != nil || !cursor.CursorVisible {
-		return TerminalState{}, false
+	cursor, err := t.readPaneCursorState()
+	if err != nil || !cursor.Visible {
+		return paneCursorState{}, false
 	}
-	row, ok := paneRowAt(pane, cursor.CursorRow)
+	row, ok := paneRowAt(pane, cursor.Row)
 	if !ok || !strings.HasSuffix(normalizeDelivery(row), previousPasteTail) {
-		return TerminalState{}, false
+		return paneCursorState{}, false
 	}
 	return cursor, true
 }
@@ -436,15 +436,15 @@ func paneShowsPreviousPasteRemoved(
 ) bool {
 	if !distinctivePreviousPasteTail(previousPasteTail) ||
 		!before.cursorKnown || !after.cursorKnown ||
-		!before.cursor.CursorVisible || !after.cursor.CursorVisible ||
-		before.cursor.CursorRow != after.cursor.CursorRow ||
-		before.cursor.CursorCol <= after.cursor.CursorCol ||
+		!before.cursor.Visible || !after.cursor.Visible ||
+		before.cursor.Row != after.cursor.Row ||
+		before.cursor.Col <= after.cursor.Col ||
 		!sameComposerBoundaryBelow(before, after) {
 		return false
 	}
 
-	beforeRow, beforeOK := paneRowAt(before.pane, before.cursor.CursorRow)
-	afterRow, afterOK := paneRowAt(after.pane, after.cursor.CursorRow)
+	beforeRow, beforeOK := paneRowAt(before.pane, before.cursor.Row)
+	afterRow, afterOK := paneRowAt(after.pane, after.cursor.Row)
 	if !beforeOK || !afterOK {
 		return false
 	}
@@ -467,7 +467,7 @@ func paneShowsPreviousPasteRemoved(
 // If an agent changes that geometry, the diagnostic goes silent rather than
 // guessing from a prompt glyph.
 func sameComposerBoundaryBelow(before, after composerClearObservation) bool {
-	row := before.cursor.CursorRow + 1
+	row := before.cursor.Row + 1
 	beforeBoundary, beforeOK := paneRowAt(before.pane, row)
 	afterBoundary, afterOK := paneRowAt(after.pane, row)
 	if !beforeOK || !afterOK {

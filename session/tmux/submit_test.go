@@ -267,10 +267,10 @@ func TestClearedComposerNoticeRequiresObservableRemovedContent(t *testing.T) {
 func observedComposerPane(pane string, row, col int, cursorVisible bool) composerClearObservation {
 	return composerClearObservation{
 		pane: pane,
-		cursor: TerminalState{
-			CursorRow:     row,
-			CursorCol:     col,
-			CursorVisible: cursorVisible,
+		cursor: paneCursorState{
+			Row:     row,
+			Col:     col,
+			Visible: cursorVisible,
 		},
 		cursorKnown: true,
 	}
