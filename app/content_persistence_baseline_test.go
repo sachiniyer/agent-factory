@@ -64,6 +64,40 @@ func TestSaveContentPaneStateKeepsFailedEditDirtyWhenReloadFails(t *testing.T) {
 	assert.Equal(t, 2, attempts, "the second save must retry the unpersisted patch")
 }
 
+// A daemon update can durably commit tasks.json and then fail while reloading
+// its scheduler. That error must still surface, but it is not an unpersisted
+// edit: retaining the old baseline would make the next edit diff against stale
+// state and can drop a user's revert.
+func TestSaveContentPaneStateAdvancesPostCommitErrorWhenReloadFails(t *testing.T) {
+	h, pane := taskPaneWithEnabledTask(t)
+	var updates []task.TaskUpdate
+	t.Cleanup(SetTaskUpdaterForTest(func(_ string, update task.TaskUpdate) error {
+		updates = append(updates, update)
+		return committedUpdateTestError{}
+	}))
+
+	require.True(t, pane.HandleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("x")}))
+	err := h.saveContentPaneState()
+	require.ErrorContains(t, err, "scheduler reload failed after commit")
+	require.ErrorContains(t, err, "failed to reload tasks after save")
+	assert.False(t, pane.IsDirty(), "a committed edit must not remain queued as an unpersisted retry")
+
+	// The first write committed false. Returning to true is therefore a second
+	// real edit, even though true was the pane's pre-save value.
+	require.True(t, pane.HandleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("x")}))
+	err = h.saveContentPaneState()
+	require.ErrorContains(t, err, "scheduler reload failed after commit")
+	require.Len(t, updates, 2,
+		"a post-commit error must advance the baseline before the next edit is diffed")
+	require.NotNil(t, updates[1].Enabled)
+	assert.True(t, *updates[1].Enabled)
+}
+
+type committedUpdateTestError struct{}
+
+func (committedUpdateTestError) Error() string           { return "scheduler reload failed after commit" }
+func (committedUpdateTestError) MutationCommitted() bool { return true }
+
 func taskPaneWithEnabledTask(t *testing.T) (*home, taskPaneSaveSurface) {
 	t.Helper()
 	h := newTestHome(t)
