@@ -35,8 +35,9 @@ const (
 // Download timeouts are variables (not consts) so tests can shrink them to
 // keep the stalled-server case under a few seconds.
 var (
-	// downloadTimeout caps the total time spent fetching the release tarball.
-	// Binaries are <10MB but we stay generous to tolerate slow links.
+	// downloadTimeout caps the total time spent fetching the checksum manifest
+	// and release tarball. Binaries are <10MB but we stay generous to tolerate
+	// slow links.
 	downloadTimeout = 5 * time.Minute
 	// downloadResponseHeaderTimeout caps the time spent waiting for response
 	// headers, so a server that accepts the TCP connection but never replies
@@ -48,9 +49,10 @@ var (
 // standing up an httptest server.
 var downloadBinaryFn = downloadBinary
 
-// downloadBinary fetches the release tarball at url and returns the embedded
-// `agent-factory` binary bytes. CandidateStager bounds both the overall fetch
-// and response-header wait so a stalled server cannot hang the caller (#471).
+// downloadBinary fetches the release tarball at url, verifies it against the
+// sibling checksum manifest, and returns the embedded `agent-factory` binary
+// bytes. CandidateStager bounds both the overall fetch and response-header wait
+// so a stalled server cannot hang the caller (#471).
 func downloadBinary(url string, timeout time.Duration) ([]byte, error) {
 	return candidateStager().Download(url, timeout)
 }

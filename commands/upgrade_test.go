@@ -4,7 +4,9 @@ import (
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
+	"crypto/sha256"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -14,7 +16,35 @@ import (
 	"time"
 
 	"github.com/sachiniyer/agent-factory/daemon"
+	"github.com/sachiniyer/agent-factory/internal/autoupdate"
 )
+
+const testUpgradeArchiveName = "agent-factory-linux-amd64.tar.gz"
+
+func verifiedUpgradeURL(t *testing.T, archive []byte) string {
+	t.Helper()
+	return upgradeReleaseURL(t, archive, nil)
+}
+
+func upgradeReleaseURL(t *testing.T, archive []byte, archiveHandler http.HandlerFunc) string {
+	t.Helper()
+	checksum := sha256.Sum256(archive)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/"+autoupdate.ChecksumManifestName, func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = fmt.Fprintf(w, "%x  %s\n", checksum, testUpgradeArchiveName)
+	})
+	mux.HandleFunc("/"+testUpgradeArchiveName, func(w http.ResponseWriter, r *http.Request) {
+		if archiveHandler != nil {
+			archiveHandler(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/gzip")
+		_, _ = w.Write(archive)
+	})
+	server := httptest.NewServer(mux)
+	t.Cleanup(server.Close)
+	return server.URL + "/" + testUpgradeArchiveName
+}
 
 func TestExtractBinaryFromTarGz(t *testing.T) {
 	archive := makeTarGz(t, map[string][]byte{
@@ -69,14 +99,8 @@ func TestDownloadBinarySuccess(t *testing.T) {
 	archive := makeTarGz(t, map[string][]byte{
 		"agent-factory": []byte("binary-content"),
 	})
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/gzip")
-		w.WriteHeader(200)
-		w.Write(archive)
-	}))
-	defer srv.Close()
 
-	got, err := downloadBinary(srv.URL, downloadTimeout)
+	got, err := downloadBinary(verifiedUpgradeURL(t, archive), downloadTimeout)
 	if err != nil {
 		t.Fatalf("downloadBinary returned error: %v", err)
 	}
@@ -88,12 +112,11 @@ func TestDownloadBinarySuccess(t *testing.T) {
 // TestDownloadBinaryNon200 ensures a non-200 response surfaces as an error
 // rather than being fed to the gzip reader.
 func TestDownloadBinaryNon200(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	url := upgradeReleaseURL(t, []byte("unused archive"), func(w http.ResponseWriter, _ *http.Request) {
 		http.Error(w, "not found", http.StatusNotFound)
-	}))
-	defer srv.Close()
+	})
 
-	_, err := downloadBinary(srv.URL, downloadTimeout)
+	_, err := downloadBinary(url, downloadTimeout)
 	if err == nil || !strings.Contains(err.Error(), "404") {
 		t.Fatalf("expected HTTP 404 error, got %v", err)
 	}
@@ -114,7 +137,7 @@ func TestDownloadBinaryStalled(t *testing.T) {
 	downloadResponseHeaderTimeout = 500 * time.Millisecond
 
 	stalled := make(chan struct{})
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	url := upgradeReleaseURL(t, []byte("unused archive"), func(w http.ResponseWriter, _ *http.Request) {
 		// Send headers immediately, then hang until the test ends. The
 		// client should hit downloadTimeout while reading the body.
 		w.Header().Set("Content-Type", "application/gzip")
@@ -123,17 +146,14 @@ func TestDownloadBinaryStalled(t *testing.T) {
 			f.Flush()
 		}
 		<-stalled
-	}))
-	// Order matters: unblock handler goroutines before Close() waits on them.
-	t.Cleanup(func() {
-		close(stalled)
-		srv.Close()
 	})
+	// Order matters: unblock handler goroutines before the server cleanup waits.
+	t.Cleanup(func() { close(stalled) })
 
 	deadline := time.After(3 * time.Second)
 	done := make(chan error, 1)
 	go func() {
-		_, err := downloadBinary(srv.URL, downloadTimeout)
+		_, err := downloadBinary(url, downloadTimeout)
 		done <- err
 	}()
 
@@ -169,18 +189,15 @@ func TestDownloadBinaryStalledHeaders(t *testing.T) {
 	downloadResponseHeaderTimeout = 500 * time.Millisecond
 
 	stalled := make(chan struct{})
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	url := upgradeReleaseURL(t, []byte("unused archive"), func(_ http.ResponseWriter, _ *http.Request) {
 		<-stalled
-	}))
-	t.Cleanup(func() {
-		close(stalled)
-		srv.Close()
 	})
+	t.Cleanup(func() { close(stalled) })
 
 	deadline := time.After(3 * time.Second)
 	done := make(chan error, 1)
 	go func() {
-		_, err := downloadBinary(srv.URL, downloadTimeout)
+		_, err := downloadBinary(url, downloadTimeout)
 		done <- err
 	}()
 
@@ -205,10 +222,7 @@ func TestUpgradeCallsShutdownAfterBinarySwap(t *testing.T) {
 	}
 
 	archive := makeTarGz(t, map[string][]byte{"agent-factory": []byte("new-binary")})
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Write(archive)
-	}))
-	defer srv.Close()
+	url := verifiedUpgradeURL(t, archive)
 
 	prevExe := osExecutableFn
 	prevShutdown := requestDaemonShutdownFn
@@ -233,7 +247,7 @@ func TestUpgradeCallsShutdownAfterBinarySwap(t *testing.T) {
 	}
 
 	stubDaemonHealth(t, daemon.HealthStatus{})
-	if err := runUpgrade(io.Discard, io.Discard, srv.URL, false); err != nil {
+	if err := runUpgrade(io.Discard, io.Discard, url, false); err != nil {
 		t.Fatalf("runUpgrade: %v", err)
 	}
 	if shutdownCalls != 1 {
@@ -265,10 +279,7 @@ func TestUpgradeSucceedsWhenNoDaemon(t *testing.T) {
 	}
 
 	archive := makeTarGz(t, map[string][]byte{"agent-factory": []byte("new-binary")})
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Write(archive)
-	}))
-	defer srv.Close()
+	url := verifiedUpgradeURL(t, archive)
 
 	prevExe := osExecutableFn
 	prevShutdown := requestDaemonShutdownFn
@@ -291,7 +302,7 @@ func TestUpgradeSucceedsWhenNoDaemon(t *testing.T) {
 	}
 
 	stubDaemonHealth(t, daemon.HealthStatus{})
-	if err := runUpgrade(io.Discard, io.Discard, srv.URL, false); err != nil {
+	if err := runUpgrade(io.Discard, io.Discard, url, false); err != nil {
 		t.Fatalf("runUpgrade with absent daemon failed: %v", err)
 	}
 	if respawnCalls != 0 {
@@ -316,10 +327,7 @@ func TestUpgradeSucceedsWhenShutdownErrors(t *testing.T) {
 	}
 
 	archive := makeTarGz(t, map[string][]byte{"agent-factory": []byte("new-binary")})
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Write(archive)
-	}))
-	defer srv.Close()
+	url := verifiedUpgradeURL(t, archive)
 
 	prevExe := osExecutableFn
 	prevShutdown := requestDaemonShutdownFn
@@ -340,7 +348,7 @@ func TestUpgradeSucceedsWhenShutdownErrors(t *testing.T) {
 	}
 
 	stubDaemonHealth(t, daemon.HealthStatus{})
-	if err := runUpgrade(io.Discard, io.Discard, srv.URL, false); err != nil {
+	if err := runUpgrade(io.Discard, io.Discard, url, false); err != nil {
 		t.Fatalf("runUpgrade should not fail when Shutdown errors, got: %v", err)
 	}
 	got, err := os.ReadFile(tempBin)
@@ -363,10 +371,7 @@ func TestUpgradeReportsSIGTERMFallback(t *testing.T) {
 	}
 
 	archive := makeTarGz(t, map[string][]byte{"agent-factory": []byte("new-binary")})
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Write(archive)
-	}))
-	defer srv.Close()
+	url := verifiedUpgradeURL(t, archive)
 
 	prevExe := osExecutableFn
 	prevShutdown := requestDaemonShutdownFn
@@ -390,7 +395,7 @@ func TestUpgradeReportsSIGTERMFallback(t *testing.T) {
 
 	stubDaemonHealth(t, daemon.HealthStatus{})
 	var out, errOut bytes.Buffer
-	if err := runUpgrade(&out, &errOut, srv.URL, false); err != nil {
+	if err := runUpgrade(&out, &errOut, url, false); err != nil {
 		t.Fatalf("runUpgrade: %v", err)
 	}
 

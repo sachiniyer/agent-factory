@@ -99,7 +99,8 @@ channel; verify a preview release by its `vX.Y.Z-preview-N` tag instead):
 
 ```bash
 gh release view --repo sachiniyer/agent-factory --latest   # or: gh release view <tag>
-gh release download --repo sachiniyer/agent-factory --latest --pattern 'agent-factory-*.tar.gz' --dir /tmp/af-release
+gh release download --repo sachiniyer/agent-factory --latest --pattern 'agent-factory-*.tar.gz' --pattern sha256sums.txt --dir /tmp/af-release
+(cd /tmp/af-release && sha256sum --check sha256sums.txt) # macOS: shasum -a 256 --check sha256sums.txt
 for archive in /tmp/af-release/*.tar.gz; do
   tar tzf "$archive"
 done
@@ -108,6 +109,7 @@ done
 Expected result:
 - Artifacts exist for `linux-amd64`, `linux-arm64`, `darwin-amd64`, and
   `darwin-arm64`.
+- `sha256sums.txt` has one matching entry for each archive and no mismatches.
 - Each archive contains one executable named `agent-factory`.
 - The host-platform binary runs `version` and reports the new tag.
 

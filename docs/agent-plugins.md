@@ -89,11 +89,11 @@ The Codex plugin ships two optional hooks:
   the command rather than silently dropping the guard.
 
 The preflight deliberately does not fetch or install anything. A plugin hook runs as you,
-with your permissions, and af's releases carry no checksum or signature to
-verify against — `install.sh` and `af upgrade` both check only that the download
-is a well-formed tarball. Downloading and executing a binary from inside an
-agent session, on the strength of nothing, is the wrong shape however convenient
-it would be. Detect and instruct instead.
+with your permissions. Af verifies release checksums, but those checksums are
+unsigned and arrive through the same release channel as the archive: they catch
+corruption, not a compromised publisher or release channel. Downloading and
+executing a binary from inside an agent session is the wrong shape however
+convenient it would be. Detect and instruct instead.
 
 ## Tmux guard coverage
 
