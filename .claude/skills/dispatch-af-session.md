@@ -22,8 +22,11 @@ Captain Claude contract. Root verifies and merges; worker sessions do not.
    Do NOT merge. Root verifies the PR.
 
    Gates:
+   - golangci-lint run --timeout=3m --fast
+   - gofmt -l .
    - go build ./...
    - make test-container
+   - deadcode -test ./...
    - scripts/lint-file-length.sh
    - <any task-specific gate>
 

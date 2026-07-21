@@ -12,9 +12,12 @@ Create a PR for the current branch against `master`.
 
 1. **Pre-flight checks** — before creating the PR, run these and fix any issues:
    ```bash
-   gofmt -l .          # fix any unformatted files with: gofmt -w <file>
-   go build ./...      # ensure compilation succeeds
-   go test ./...       # ensure all tests pass
+   golangci-lint run --timeout=3m --fast
+   gofmt -l .                    # fix any output with: gofmt -w <file>
+   go build ./...
+   make test-container           # never run bare go test ./... on a shared host
+   deadcode -test ./...
+   scripts/lint-file-length.sh
    ```
 
 2. **Review changes** — examine the diff against master:
@@ -37,8 +40,12 @@ Create a PR for the current branch against `master`.
 
    ## Test Plan
 
-   - [x] `go test ./...` passes
-   - [x] `gofmt` applied to changed files
+   - [x] `golangci-lint run --timeout=3m --fast` passes
+   - [x] `gofmt -l .` produces no output
+   - [x] `go build ./...` passes
+   - [x] `make test-container` passes
+   - [x] `deadcode -test ./...` produces no output
+   - [x] `scripts/lint-file-length.sh` passes
    - [ ] Manually tested in TUI (if applicable)
    EOF
    )"

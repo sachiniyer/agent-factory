@@ -44,10 +44,12 @@ merges before the next file begins.
 6. **Run the gates**:
    ```bash
    gofmt -w <changed-go-files>
+   golangci-lint run --timeout=3m --fast
+   gofmt -l .
    go build ./...
    make test-container
-   scripts/lint-file-length.sh
    deadcode -test ./...
+   scripts/lint-file-length.sh
    ```
 
    If the change is TUI-visible, also play-test the affected flow before
