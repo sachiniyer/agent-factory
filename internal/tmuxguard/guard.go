@@ -16,8 +16,8 @@ const (
 
 	broadTmuxReason    = "Agent Factory blocked a host-wide tmux kill-server. Target an isolated server explicitly with 'tmux -L <socket> kill-server' or 'tmux -S <path> kill-server'."
 	patternKillReason  = "Agent Factory blocked a pattern-based process kill because it cannot prove the shared tmux server will be spared. Resolve the one intended PID and use 'kill -- <pid>'; for tmux teardown, use 'tmux -L <socket> kill-server' or 'tmux -S <path> kill-server'."
-	unknownShellReason = "Agent Factory could not resolve an execution-sensitive part of this shell command, so it was blocked. Rewrite it as literal simple commands: keep executables, wrapper options, and tmux/process-kill arguments literal; move dynamic values into ordinary data arguments or separate commands; and run inner commands directly instead of through eval or opaque command builders. Use af for session orchestration. For tmux teardown, use 'tmux -L <socket> kill-server' or 'tmux -S <path> kill-server' directly."
-	opaqueInputReason  = "Agent Factory blocked an unmodeled here-document or stdin consumer because it cannot inspect the supplied code or data. For data, write it to a literal file and pass that literal path (Git commit messages may use 'git commit -F -'); for interpreter code, create and review a literal script file, then run the interpreter with its literal path. For tmux teardown, use 'tmux -L <socket> kill-server' or 'tmux -S <path> kill-server'."
+	unknownShellReason = "Agent Factory could not prove this command stays outside the host command-dispatch paths, so it was blocked. Rewrite it as supported literal simple commands: keep executables, wrapper options, subcommands, and command-bearing arguments literal; put dynamic data after '--' where the program supports it. Remove assignment prefixes from command-dispatching programs, run inner commands directly instead of through eval or opaque builders, and use a dedicated non-shell tool for an unmodeled program. Move inline interpreter input to a reviewed literal script, add '--sandbox' to GNU sed, and invoke Make with bare literal targets. Git commands must use a literal built-in subcommand without -c/--config-env; Docker inspection may use commands such as 'docker ps' or 'docker inspect', but container workloads need an isolated runner. Use af for session orchestration. For tmux teardown, use 'tmux -L <socket> kill-server' or 'tmux -S <path> kill-server' directly."
+	opaqueInputReason  = "Agent Factory blocked an unmodeled here-document or stdin consumer because it cannot inspect the supplied code or data. For data, write it to a literal file and pass that literal path (Git commit messages may use 'git commit -F -'); for Python code, create and review a literal script file, then run Python with that literal path. Put shell code directly in this Bash request as literal simple commands instead of feeding a shell or script file. For tmux teardown, use 'tmux -L <socket> kill-server' or 'tmux -S <path> kill-server'."
 	findReason         = "Agent Factory blocked a find command whose operands could become command-building syntax. Rewrite a dynamic root as 'cd \"$root\" && find . <literal predicates>', and replace -exec/-execdir/-ok/-okdir with a separate literal command over the results. For tmux teardown, use 'tmux -L <socket> kill-server' or 'tmux -S <path> kill-server'."
 )
 
@@ -82,11 +82,11 @@ func writeDenial(w io.Writer, reason string) error {
 }
 
 // DenialReason returns an actionable reason when command contains a broad
-// tmux teardown or uses shell dispatch syntax the guard cannot prove safe. An
-// empty result means executable positions and modeled wrapper/tmux semantics
-// were resolved; dynamic expansions appeared only in audited data positions.
-// This is a shell-dispatch guard, not a sandbox for arbitrary executable code.
-// The parser is agent-neutral so #2184 can reuse one policy everywhere.
+// tmux teardown or uses a shell/program dispatch path the guard cannot prove
+// safe. An empty result means the program was classified and every modeled
+// command-bearing position was resolved; dynamic expansions appeared only in
+// audited data positions. The parser and program policy are agent-neutral so
+// #2184 can reuse one policy everywhere.
 func DenialReason(command string) string {
 	return denialReason(command, 0)
 }
@@ -104,7 +104,27 @@ func denialReason(command string, depth int) string {
 			return reason
 		}
 	}
+	if assignmentStateReachesCommand(commands) {
+		return unknownShellReason
+	}
 	return ""
+}
+
+func assignmentStateReachesCommand(commands []shellCommand) bool {
+	hasAssignmentOnly := false
+	hasExecutable := false
+	for _, command := range commands {
+		if len(command.words) == 0 && len(command.assignments) > 0 {
+			hasAssignmentOnly = true
+		}
+		if len(command.words) > 0 || command.declaration != nil {
+			hasExecutable = true
+		}
+	}
+	// A prior assignment may retain an inherited export attribute (PATH is
+	// the obvious example), so a semicolon cannot turn a denied prefix into an
+	// allow. Assignment-only input remains harmless because it runs no program.
+	return hasAssignmentOnly && hasExecutable
 }
 
 func inspectCommand(command shellCommand, depth int) string {
@@ -114,35 +134,80 @@ func inspectCommand(command shellCommand, depth int) string {
 		}
 		return unknownShellReason
 	}
-	if !safeShellAssignments(command.assignments) {
-		return unknownShellReason
-	}
 	if len(command.words) == 0 {
-		return "" // A modeled scalar assignment does not execute a command.
+		for _, assignment := range command.assignments {
+			if !assignment.simple {
+				return unknownShellReason
+			}
+		}
+		// A scalar shell-local assignment does not select a program. If a
+		// later command expands it into an execution-sensitive position, that
+		// word remains tainted and the selected program policy rejects it.
+		return ""
 	}
 	if !command.words[0].resolved {
 		return unknownShellReason
 	}
 	words := command.words
+	policy := classifyProgram(words[0].literal)
 	name := strings.ToLower(filepath.Base(words[0].literal))
 	if command.hasHeredoc && !safeHeredocCommand(words) {
 		return opaqueInputReason
 	}
-	// These commands consume their arguments as data rather than as another
-	// host command. Command/process substitutions within their arguments are
-	// separate AST commands and are still inspected below in the command list.
-	if safeTerminalCommand(name) {
+
+	// Pattern kills and broad tmux teardown remain the most specific denial,
+	// even when a wrapper also changed the child's environment.
+	if policy.role == rolePatternKill {
+		return patternKillReason
+	}
+	if policy.role == roleTmux {
+		suffix, ok := literalWords(words[1:])
+		if !ok {
+			return unknownShellReason
+		}
+		if reason := inspectTmux(suffix); reason != "" {
+			return reason
+		}
+		if len(command.assignments) > 0 || command.environmentAssigned || command.directoryChanged {
+			return unknownShellReason
+		}
 		return ""
 	}
-	if shellExecutable(name) {
+
+	// Prefix assignments are never globally safe: their meaning belongs to
+	// the program that consumes the resulting environment. No current program
+	// policy proves arbitrary assignments inert, so they fail closed instead of
+	// relying on an inevitably incomplete variable-name denylist.
+	if len(command.assignments) > 0 || command.environmentAssigned {
+		return unknownShellReason
+	}
+	if command.directoryChanged && !policy.directoryInert {
+		return unknownShellReason
+	}
+
+	switch policy.dispatch {
+	case dispatchNone:
+		// Nested shell substitutions are separate AST commands and are still
+		// inspected by parseShellCommands.
+		return ""
+	case dispatchTrusted:
+		return ""
+	case dispatchOpaque:
+		return unknownShellReason
+	case dispatchAudited:
+		// Continue into the role-specific grammar below.
+	default:
+		return unknownShellReason
+	}
+
+	switch policy.role {
+	case roleShell:
 		payload, found, err := shellCommandPayloadWords(words[1:])
 		if err != nil || !found {
 			return unknownShellReason
 		}
 		return denialReason(payload, depth+1)
-	}
-	switch name {
-	case "command":
+	case roleCommand:
 		target, noCommand, err := commandTarget(words[1:])
 		if err != nil {
 			return unknownShellReason
@@ -151,18 +216,24 @@ func inspectCommand(command shellCommand, depth int) string {
 			return ""
 		}
 		return inspectCommand(shellCommand{words: target}, depth)
-	case "env":
-		target, noCommand, err := envTarget(words[1:])
+	case roleEnv:
+		target, noCommand, effects, err := envTarget(words[1:])
 		if err != nil {
 			return unknownShellReason
 		}
 		if noCommand {
 			return ""
 		}
-		return inspectCommand(shellCommand{words: target}, depth)
-	case "find":
+		return inspectCommand(shellCommand{
+			words:               target,
+			environmentAssigned: effects.assigned,
+			directoryChanged:    effects.chdir,
+		}, depth)
+	case roleFind:
 		return inspectFind(words[1:])
-	case "timeout":
+	case rolePIDKill:
+		return inspectPIDKill(words[1:])
+	case roleTimeout:
 		target, noCommand, err := timeoutTarget(words[1:])
 		if err != nil {
 			return unknownShellReason
@@ -171,71 +242,31 @@ func inspectCommand(command shellCommand, depth int) string {
 			return ""
 		}
 		return inspectCommand(shellCommand{words: target}, depth)
-	}
-	if unmodeledWrapper(name) && len(words) > 1 {
+	case rolePrintf:
+		return inspectPrintf(words[1:])
+	case roleTest:
+		return inspectTest(name, words[1:])
+	case roleGit:
+		return inspectGit(words[1:])
+	case roleDocker:
+		return inspectDocker(words[1:])
+	case roleRipgrep:
+		return inspectRipgrep(words[1:])
+	case roleGitHub:
+		return inspectGitHub(words[1:])
+	case roleGo:
+		return inspectGo(words[1:])
+	case rolePython:
+		return inspectPython(words[1:])
+	case roleSed:
+		return inspectSed(words[1:])
+	case roleJournalctl:
+		return inspectJournalctl(words[1:])
+	case roleMake:
+		return inspectMake(words[1:])
+	default:
 		return unknownShellReason
 	}
-	for i, word := range words {
-		if !word.resolved {
-			continue
-		}
-		name := strings.ToLower(filepath.Base(word.literal))
-		switch name {
-		case "tmux":
-			suffix, ok := literalWords(words[i+1:])
-			if !ok {
-				return unknownShellReason
-			}
-			if reason := inspectTmux(suffix); reason != "" {
-				return reason
-			}
-		case "pkill", "killall":
-			if i+1 < len(words) {
-				return patternKillReason
-			}
-		case "env":
-			suffix, ok := literalWords(words[i+1:])
-			if !ok || validateEnvPrefix(suffix) != nil {
-				return unknownShellReason
-			}
-		case "sh", "ash", "bash", "dash", "fish", "ksh", "mksh", "yash", "zsh":
-			suffix, ok := literalWords(words[i+1:])
-			if !ok {
-				return unknownShellReason
-			}
-			payload, found, err := shellCommandPayload(suffix)
-			if err != nil {
-				return unknownShellReason
-			}
-			if found {
-				if reason := denialReason(payload, depth+1); reason != "" {
-					return reason
-				}
-			} else {
-				// A script path or stdin-fed shell is opaque to this hook. The
-				// caller can put a literal command in this tool call instead.
-				return unknownShellReason
-			}
-		case ".", "alias", "autoload", "bind", "builtin", "declare", "enable", "eval", "export", "fc", "hash", "local", "mapfile", "parallel", "readarray", "readonly", "set", "shopt", "source", "trap", "typeset", "unalias", "unset", "xargs":
-			if i+1 < len(words) {
-				return unknownShellReason
-			}
-		case "find":
-			for _, arg := range words[i+1:] {
-				if !arg.resolved {
-					return unknownShellReason
-				}
-				switch arg.literal {
-				case "-exec", "-execdir", "-ok", "-okdir":
-					return unknownShellReason
-				}
-			}
-		}
-	}
-	if hasDynamicWord(words) {
-		return unknownShellReason
-	}
-	return ""
 }
 
 func inspectFind(args []shellWord) string {
@@ -249,15 +280,6 @@ func inspectFind(args []shellWord) string {
 		}
 	}
 	return ""
-}
-
-func safeShellAssignments(assignments []shellAssignment) bool {
-	for _, assignment := range assignments {
-		if !assignment.simple || executionSensitiveVariable(assignment.name) {
-			return false
-		}
-	}
-	return true
 }
 
 func safeShellDeclaration(declaration *shellDeclaration) bool {
@@ -275,21 +297,10 @@ func safeShellDeclaration(declaration *shellDeclaration) bool {
 func safeExportVariable(name string) bool {
 	switch name {
 	case "AF_PLAYTEST_NAME", "AGENT_FACTORY_HOME", "CLAUDE_CONFIG_DIR", "CODEX_HOME",
-		"GEMINI_CLI_HOME", "GOFLAGS":
+		"GEMINI_CLI_HOME":
 		return true
 	default:
 		return false
-	}
-}
-
-func executionSensitiveVariable(name string) bool {
-	switch name {
-	case "BASHOPTS", "BASH_ENV", "CDPATH", "ENV", "FPATH", "GLOBIGNORE", "IFS",
-		"KSHENV", "LD_LIBRARY_PATH", "LD_PRELOAD", "PATH", "PROMPT_COMMAND", "SHELL",
-		"SHELLOPTS", "TMUX", "TMUX_TMPDIR", "ZDOTDIR":
-		return true
-	default:
-		return strings.HasPrefix(name, "DYLD_")
 	}
 }
 
@@ -311,20 +322,6 @@ func hasDynamicWord(words []shellWord) bool {
 		}
 	}
 	return false
-}
-
-func safeTerminalCommand(name string) bool {
-	switch name {
-	case ":", "[", "af", "agent-browser", "av", "basename", "cat", "cd", "chmod", "cmp", "comm",
-		"cp", "curl", "cut", "date", "diff", "dirname", "docker", "du", "echo", "false",
-		"file", "gcloud", "gh", "git", "go", "gofmt", "grep", "head", "jq", "ln", "ls", "mkdir",
-		"paste", "printenv", "printf", "ps", "pwd", "readlink", "realpath", "rg", "rm", "rmdir",
-		"shellcheck", "sort", "stat", "strings", "tail", "tee", "test", "touch", "tr", "true",
-		"wc", "which":
-		return true
-	default:
-		return false
-	}
 }
 
 func safeHeredocCommand(words []shellWord) bool {

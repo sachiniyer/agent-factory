@@ -6,24 +6,21 @@ import (
 	"unicode"
 )
 
-// validateEnvPrefix recognizes a closed set of GNU env options. Split-string
-// is intentionally unsupported because it performs a second round of command
-// construction; unknown spellings and future options fail closed.
-func validateEnvPrefix(words []string) error {
-	resolved := make([]shellWord, 0, len(words))
-	for _, word := range words {
-		resolved = append(resolved, shellWord{literal: word, resolved: true})
-	}
-	_, _, err := envTarget(resolved)
-	return err
+// envTarget recognizes a closed set of GNU env options. Split-string is
+// intentionally unsupported because it performs a second round of command
+// construction; unknown spellings and future options fail closed. Assignments
+// are preserved for the selected program policy.
+type envEffects struct {
+	assigned bool
+	chdir    bool
 }
 
-func envTarget(args []shellWord) (target []shellWord, noCommand bool, err error) {
+func envTarget(args []shellWord) (target []shellWord, noCommand bool, effects envEffects, err error) {
 	i := 0
 	optionsDone := false
 	for i < len(args) && !optionsDone {
 		if !args[i].resolved {
-			return nil, false, errUnsupportedShell
+			return nil, false, effects, errUnsupportedShell
 		}
 		arg := args[i].literal
 		switch {
@@ -37,41 +34,42 @@ func envTarget(args []shellWord) (target []shellWord, noCommand bool, err error)
 			i++
 		case arg == "--help" || arg == "--list-signal-handling" || arg == "--version":
 			if len(args) != i+1 {
-				return nil, false, errUnsupportedShell
+				return nil, false, effects, errUnsupportedShell
 			}
-			return nil, true, nil
+			return nil, true, effects, nil
 		case arg == "-S" || strings.HasPrefix(arg, "-S") || arg == "--split-string" || strings.HasPrefix(arg, "--split-string="):
-			return nil, false, errUnsupportedShell
+			return nil, false, effects, errUnsupportedShell
 		case arg == "-u" || arg == "-C" || arg == "--unset" || arg == "--chdir":
 			if i+1 >= len(args) || !args[i+1].resolved || args[i+1].literal == "" {
-				return nil, false, errUnsupportedShell
+				return nil, false, effects, errUnsupportedShell
 			}
+			effects.chdir = effects.chdir || arg == "-C" || arg == "--chdir"
 			i += 2
 		case (strings.HasPrefix(arg, "-u") || strings.HasPrefix(arg, "-C")) && len(arg) > 2:
+			effects.chdir = effects.chdir || strings.HasPrefix(arg, "-C")
 			i++
 		case strings.HasPrefix(arg, "--unset=") || strings.HasPrefix(arg, "--chdir="):
+			effects.chdir = effects.chdir || strings.HasPrefix(arg, "--chdir=")
 			i++
 		case signalEnvOption(arg):
 			i++
 		default:
-			return nil, false, fmt.Errorf("%w: unknown env option", errUnsupportedShell)
+			return nil, false, effects, fmt.Errorf("%w: unknown env option", errUnsupportedShell)
 		}
 	}
 
 	for i < len(args) {
 		if !args[i].resolved {
-			return nil, false, errUnsupportedShell
+			return nil, false, effects, errUnsupportedShell
 		}
 		arg := args[i].literal
 		if !isAssignment(arg) {
-			return args[i:], false, nil
+			return args[i:], false, effects, nil
 		}
-		if executionSensitiveVariable(arg[:strings.IndexByte(arg, '=')]) {
-			return nil, false, errUnsupportedShell
-		}
+		effects.assigned = true
 		i++
 	}
-	return nil, true, nil
+	return nil, true, effects, nil
 }
 
 func signalEnvOption(arg string) bool {
@@ -81,39 +79,6 @@ func signalEnvOption(arg string) bool {
 		}
 	}
 	return false
-}
-
-func shellCommandPayload(args []string) (string, bool, error) {
-	for i := 0; i < len(args); i++ {
-		arg := args[i]
-		switch {
-		case arg == "--" || arg == "-" || !strings.HasPrefix(arg, "-"):
-			return "", false, nil
-		case arg == "-c":
-			if i+1 >= len(args) {
-				return "", false, errUnsupportedShell
-			}
-			return args[i+1], true, nil
-		case arg == "-o" || arg == "-O":
-			if i+1 >= len(args) {
-				return "", false, errUnsupportedShell
-			}
-			i++
-		case strings.HasPrefix(arg, "--"):
-			if !knownShellLongOption(arg) {
-				return "", false, errUnsupportedShell
-			}
-		case strings.ContainsRune(arg[1:], 'c'):
-			flags := arg[1:]
-			if flags[len(flags)-1] != 'c' || !knownShellFlags(flags[:len(flags)-1]) || i+1 >= len(args) {
-				return "", false, errUnsupportedShell
-			}
-			return args[i+1], true, nil
-		case !knownShellFlags(arg[1:]):
-			return "", false, errUnsupportedShell
-		}
-	}
-	return "", false, nil
 }
 
 func shellCommandPayloadWords(args []shellWord) (string, bool, error) {
@@ -151,15 +116,6 @@ func shellCommandPayloadWords(args []shellWord) (string, bool, error) {
 		}
 	}
 	return "", false, nil
-}
-
-func shellExecutable(name string) bool {
-	switch name {
-	case "ash", "bash", "dash", "fish", "ksh", "mksh", "sh", "yash", "zsh":
-		return true
-	default:
-		return false
-	}
 }
 
 func knownShellLongOption(arg string) bool {
@@ -206,7 +162,7 @@ func timeoutTarget(args []shellWord) (target []shellWord, noCommand bool, err er
 				return nil, false, errUnsupportedShell
 			}
 			return nil, true, nil
-		case arg == "--foreground" || arg == "--preserve-status" || arg == "--verbose":
+		case arg == "--foreground" || arg == "--preserve-status" || arg == "--verbose" || arg == "-v":
 		case arg == "-k" || arg == "-s" || arg == "--kill-after" || arg == "--signal":
 			if i+1 >= len(args) || !args[i+1].resolved || args[i+1].literal == "" {
 				return nil, false, errUnsupportedShell
@@ -304,17 +260,4 @@ func gitSubcommandAt(args []string) (int, bool) {
 		}
 	}
 	return 0, false
-}
-
-func unmodeledWrapper(name string) bool {
-	switch name {
-	case "builtin", "busybox", "chroot", "chrt", "doas", "eatmydata", "exec",
-		"firejail", "flock", "ionice", "ltrace", "nice", "nohup", "nsenter", "parallel",
-		"prlimit", "rlwrap", "runuser", "script", "setpriv", "setsid", "stdbuf", "strace",
-		"su", "sudo", "systemd-run", "taskset", "toybox", "unshare", "valgrind", "watch",
-		"winpty", "xargs":
-		return true
-	default:
-		return false
-	}
 }

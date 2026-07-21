@@ -27,10 +27,12 @@ type shellDeclaration struct {
 }
 
 type shellCommand struct {
-	words       []shellWord
-	assignments []shellAssignment
-	declaration *shellDeclaration
-	hasHeredoc  bool
+	words               []shellWord
+	assignments         []shellAssignment
+	declaration         *shellDeclaration
+	hasHeredoc          bool
+	environmentAssigned bool
+	directoryChanged    bool
 }
 
 // parseShellCommands parses Bash syntax with a maintained parser, but resolves
@@ -79,8 +81,21 @@ func parseShellCommands(command string) ([]shellCommand, error) {
 				variant:     node.Variant.Value,
 				assignments: describeAssignments(node.Args),
 			}})
-		case *syntax.ArithmCmd, *syntax.CStyleLoop, *syntax.FuncDecl, *syntax.LetClause:
+		case *syntax.ArithmCmd, *syntax.ArithmExp, *syntax.CStyleLoop, *syntax.FuncDecl,
+			*syntax.LetClause:
 			walkErr = errUnsupportedShell
+		case *syntax.ParamExp:
+			if unsafeParamExpansion(node) {
+				walkErr = errUnsupportedShell
+			}
+		case *syntax.UnaryTest:
+			if node.Op == syntax.TsVarSet || node.Op == syntax.TsRefVar {
+				walkErr = errUnsupportedShell
+			}
+		case *syntax.BinaryTest:
+			if arithmeticTestOperator(node.Op) {
+				walkErr = errUnsupportedShell
+			}
 		}
 		return walkErr == nil
 	})
@@ -88,6 +103,20 @@ func parseShellCommands(command string) ([]shellCommand, error) {
 		return nil, walkErr
 	}
 	return commands, nil
+}
+
+func unsafeParamExpansion(expansion *syntax.ParamExp) bool {
+	return expansion.Excl || expansion.Index != nil || expansion.Slice != nil ||
+		(expansion.Exp != nil && expansion.Exp.Op == syntax.OtherParamOps)
+}
+
+func arithmeticTestOperator(operator syntax.BinTestOperator) bool {
+	switch operator {
+	case syntax.TsEql, syntax.TsNeq, syntax.TsLeq, syntax.TsGeq, syntax.TsLss, syntax.TsGtr:
+		return true
+	default:
+		return false
+	}
 }
 
 func describeAssignments(assignments []*syntax.Assign) []shellAssignment {
