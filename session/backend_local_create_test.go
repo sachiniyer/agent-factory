@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/pathutil"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
@@ -85,13 +86,15 @@ func TestPrepareCreateLaunchResolvesCommandSpecificCodexHome(t *testing.T) {
 				return
 			}
 			require.NoError(t, err)
-			require.Equal(t, repoRoot, plan.workDir,
+			expectedWorkDir := pathutil.ResolveForCompare(repoRoot)
+			expectedCodexHome := pathutil.ResolveForCompare(tc.want(repoRoot))
+			require.Equal(t, expectedWorkDir, pathutil.ResolveForCompare(plan.workDir),
 				"the capture plan must be prepared only after provisioning fixes the launch cwd")
-			require.Equal(t, tc.want(repoRoot), plan.conversationCapture.codexHome)
+			require.Equal(t, expectedCodexHome, pathutil.ResolveForCompare(plan.conversationCapture.codexHome))
 			require.False(t, plan.conversationCapture.startedAt.IsZero(),
 				"the before-image must be taken during prepare, before launch")
 
-			writeCodexRolloutFile(t, tc.want(repoRoot),
+			writeCodexRolloutFile(t, expectedCodexHome,
 				"rollout-2026-07-06T10-17-35-019f386f-7206-7fc2-803b-f7045e07a242.jsonl")
 			conv, captureErr := CaptureAgentConversation(tmux.ProgramCodex, plan.ConversationCapture(), time.Second)
 			require.NoError(t, captureErr)
