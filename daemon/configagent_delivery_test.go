@@ -128,6 +128,7 @@ func TestConfigAgentCodexInlineHomeSubmitsAndVerifiesBriefing(t *testing.T) {
 
 func TestConfigAgentCodexReceiptHome(t *testing.T) {
 	workDir := t.TempDir()
+	envChdir := t.TempDir()
 	daemonCodexHome := t.TempDir()
 	includeHome := t.TempDir()
 	t.Setenv("CODEX_HOME", daemonCodexHome)
@@ -143,8 +144,12 @@ func TestConfigAgentCodexReceiptHome(t *testing.T) {
 		{name: "inline absolute wins", program: "CODEX_HOME=/tmp/inline-codex codex", want: "/tmp/inline-codex"},
 		{name: "inline relative uses launch cwd", program: "CODEX_HOME=relative-codex codex", want: filepath.Join(workDir, "relative-codex")},
 		{name: "unset uses command home", program: "env -u CODEX_HOME HOME=/tmp/inline-home codex", want: "/tmp/inline-home/.codex"},
+		{name: "attached unset uses command home", program: "env -uCODEX_HOME HOME=/tmp/inline-home codex", want: "/tmp/inline-home/.codex"},
+		{name: "relative home uses env chdir", program: "env -C " + envChdir + " CODEX_HOME=relative-codex codex", want: filepath.Join(envChdir, "relative-codex")},
 		{name: "cleared environment without home", program: "env -i codex", wantErr: "no literal HOME fallback"},
 		{name: "dynamic path refused", program: "CODEX_HOME=$OTHER codex", wantErr: "uses shell expansion"},
+		{name: "dynamic env chdir refused", program: "env -C $OTHER CODEX_HOME=relative codex", wantErr: "use a literal value"},
+		{name: "unknown env option refused", program: "env --future-option CODEX_HOME=/tmp codex", wantErr: "unknown option"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
