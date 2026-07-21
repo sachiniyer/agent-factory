@@ -177,6 +177,8 @@ func TestAutostartSupervision_LinuxEnabledActive(t *testing.T) {
 			return answered("enabled\n", 0)
 		case "is-active":
 			return answered("active\n", 0)
+		case "show":
+			return answered("4242\n", 0)
 		}
 		return neverAnswered(errFake)
 	})
@@ -185,6 +187,31 @@ func TestAutostartSupervision_LinuxEnabledActive(t *testing.T) {
 	require.True(t, info.UnitPresent)
 	requireAnswer(t, "yes", info.Enabled)
 	requireAnswer(t, "yes", info.Active)
+	requireAnswer(t, "yes", info.MainPIDPresent)
+	require.Equal(t, 4242, info.MainPID)
+}
+
+func TestAutostartSupervision_ActiveButMainPIDProbeFailsIsUnknown(t *testing.T) {
+	dir := withAutostartTestEnv(t, "linux")
+	writeUnitFile(t, filepath.Join(dir, autostartUnitName), systemdAutostartUnit("/usr/local/bin/af", "", "", ""))
+
+	withProbeCommand(t, func(_ string, args ...string) probeResult {
+		switch args[1] {
+		case "is-enabled":
+			return answered("enabled\n", 0)
+		case "is-active":
+			return answered("active\n", 0)
+		case "show":
+			return neverAnswered(errors.New("user bus disappeared"))
+		}
+		return neverAnswered(errFake)
+	})
+
+	info := AutostartSupervision()
+	requireAnswer(t, "yes", info.Active, "systemd did answer that the unit is active")
+	requireAnswer(t, "unknown", info.MainPIDPresent,
+		"losing the second query must not become pid 0 or a supervision mismatch")
+	require.Contains(t, info.MainPIDPresent.Cause().Error(), "user bus disappeared")
 }
 
 func TestAutostartSupervision_LinuxInactive(t *testing.T) {
@@ -284,6 +311,17 @@ func TestLaunchdJobRunning_ReadsState(t *testing.T) {
 	require.False(t, launchdJobRunning("\tpid = \n"), "an empty pid is not a pid")
 }
 
+func TestLaunchdJobPIDRequiresPositiveInteger(t *testing.T) {
+	pid, ok := launchdJobPID("\tstate = running\n\tpid = 4321\n")
+	require.True(t, ok)
+	require.Equal(t, 4321, pid)
+
+	for _, out := range []string{"\tstate = running\n", "\tpid = \n", "\tpid = nope\n", "\tpid = 0\n"} {
+		_, ok := launchdJobPID(out)
+		require.False(t, ok, "invalid launchd pid output must not become ownership evidence: %q", out)
+	}
+}
+
 func TestAutostartSupervision_DarwinLoadedInGUIDomain(t *testing.T) {
 	dir := withAutostartTestEnv(t, "darwin")
 	writeUnitFile(t, filepath.Join(dir, autostartLaunchdLabel+".plist"),
@@ -305,6 +343,8 @@ func TestAutostartSupervision_DarwinLoadedInGUIDomain(t *testing.T) {
 	requireAnswer(t, "yes", info.Loaded)
 	requireAnswer(t, "yes", info.Active)
 	requireAnswer(t, "no", info.LoadedElsewhere)
+	requireAnswer(t, "yes", info.MainPIDPresent)
+	require.Equal(t, 4321, info.MainPID)
 }
 
 func TestAutostartSupervision_DarwinNotLoaded(t *testing.T) {

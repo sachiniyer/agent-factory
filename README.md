@@ -140,7 +140,8 @@ A fresh install has no autostart unit — run `af daemon install` to register on
 (a systemd user service on Linux, a launchd agent on macOS) so the daemon starts
 at login and task schedules keep running across reboots. Both are user-level
 units, so they cover login and reboot, not running while you are logged out.
-`af daemon status` reports whether one is installed.
+`af daemon status` reports whether one is installed and active, whether it owns
+the daemon that answered, and whether that daemon has applied the config on disk.
 
 ## Documentation
 

@@ -364,6 +364,99 @@ func TestAutostartSupervision_UnitPresentButInactive_Warns(t *testing.T) {
 	require.True(t, c.Problem)
 }
 
+// This is the exact #2168 incident topology: Ping succeeds, but the installed
+// unit is inactive. The two facts must be correlated into "the responder is not
+// supervised" rather than emitted as an unrelated daemon pass and unit warning.
+func TestAutostartSupervision_RespondingDaemonWithInactiveUnitNamesUnsupervised(t *testing.T) {
+	testguard.IsolateTmux(t)
+
+	opts := testOptions(t, false)
+	ourAutostartUnit(&opts)
+	opts.daemonHealth = respondingDaemon("1.0.192")
+	opts.autostartSupervision = func() daemon.SupervisionInfo {
+		return daemon.SupervisionInfo{
+			Supported: true, UnitPresent: true, Enabled: daemon.AnswerYes(), Active: daemon.AnswerNo(),
+			Detail: "is-enabled=enabled is-active=inactive",
+		}
+	}
+
+	report, err := Run(opts)
+	require.NoError(t, err)
+
+	c := findCheck(t, report, "autostart supervision")
+	require.Equal(t, StatusWarn, c.Status)
+	require.Contains(t, c.Detail, "daemon is responding")
+	require.Contains(t, c.Detail, "not supervised")
+	require.True(t, c.Problem)
+}
+
+// An active unit plus a responder from an older daemon is not enough to prove
+// ownership: without the responder PID they may be two different processes.
+// The zero-value probe must remain unknown instead of preserving the old false
+// "unit is enabled and running" all-clear.
+func TestAutostartSupervision_OlderResponderWithoutPIDIsUnknown(t *testing.T) {
+	testguard.IsolateTmux(t)
+
+	opts := testOptions(t, false)
+	ourAutostartUnit(&opts)
+	opts.daemonHealth = respondingDaemon("1.0.192")
+	opts.autostartSupervision = func() daemon.SupervisionInfo {
+		return daemon.SupervisionInfo{
+			Supported: true, UnitPresent: true, Enabled: daemon.AnswerYes(), Active: daemon.AnswerYes(),
+			Detail: "is-enabled=enabled is-active=active",
+		}
+	}
+
+	report, err := Run(opts)
+	require.NoError(t, err)
+
+	c := findCheck(t, report, "autostart supervision")
+	require.Equal(t, StatusWarn, c.Status)
+	require.Contains(t, c.Detail, "unknown")
+	require.Contains(t, c.Detail, "PID")
+	require.False(t, c.Problem, "missing evidence is not proof of a supervision defect")
+}
+
+// Enablement and ownership are independent facts. A unit can be active but
+// disabled, and a different ad-hoc daemon can still own the control socket. The
+// existing enablement warning must not hide that the responder is unsupervised.
+func TestAutostartSupervision_DisabledActiveUnitStillReportsOwnership(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		unitPID int
+		want    string
+	}{
+		{name: "different responder", unitPID: 99, want: "not supervised"},
+		{name: "same responder", unitPID: 42, want: "owns responding daemon pid 42"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			testguard.IsolateTmux(t)
+
+			opts := testOptions(t, false)
+			ourAutostartUnit(&opts)
+			opts.daemonHealth = func() daemon.HealthStatus {
+				return daemon.HealthStatus{DaemonVersion: "1.0.192", ServingPID: 42}
+			}
+			opts.autostartSupervision = func() daemon.SupervisionInfo {
+				return daemon.SupervisionInfo{
+					Supported: true, UnitPresent: true, Enabled: daemon.AnswerNo(), Active: daemon.AnswerYes(),
+					MainPID: tc.unitPID, MainPIDPresent: daemon.AnswerYes(), Detail: "is-enabled=disabled is-active=active",
+				}
+			}
+
+			report, err := Run(opts)
+			require.NoError(t, err)
+
+			c := findCheck(t, report, "autostart supervision")
+			require.Equal(t, StatusWarn, c.Status)
+			require.Contains(t, c.Detail, "responding daemon pid 42")
+			require.Contains(t, c.Detail, tc.want)
+			require.Contains(t, c.Detail, "not enabled")
+			require.True(t, c.Problem)
+		})
+	}
+}
+
 // Loaded is not running: the agent is installed and launchd knows it, so
 // everything looks configured while no daemon is actually up. Reporting PASS
 // here is a false all-clear on the platform where this was hit.

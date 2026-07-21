@@ -24,7 +24,7 @@ Run `af <command> --help` for the same information at the terminal. For a narrat
 - [`af daemon`](#af-daemon) — Manage the background daemon: serves the web UI and schedules tasks
 - [`af daemon install`](#af-daemon-install) — Register the daemon to start automatically at login
 - [`af daemon restart`](#af-daemon-restart) — Restart the running daemon without stopping live sessions
-- [`af daemon status`](#af-daemon-status) — Report daemon liveness, sockets, pid, and autostart
+- [`af daemon status`](#af-daemon-status) — Report daemon liveness, config freshness, and supervision
 - [`af daemon uninstall`](#af-daemon-uninstall) — Remove the daemon autostart unit
 - [`af debug`](#af-debug) — Print debug information like config paths
 - [`af doctor`](#af-doctor) — Diagnose setup, daemon health, and leaked session resources
@@ -631,7 +631,7 @@ af daemon
 
 - [`af daemon install`](#af-daemon-install) — Register the daemon to start automatically at login
 - [`af daemon restart`](#af-daemon-restart) — Restart the running daemon without stopping live sessions
-- [`af daemon status`](#af-daemon-status) — Report daemon liveness, sockets, pid, and autostart
+- [`af daemon status`](#af-daemon-status) — Report daemon liveness, config freshness, and supervision
 - [`af daemon uninstall`](#af-daemon-uninstall) — Remove the daemon autostart unit
 
 **Global flags**
@@ -683,16 +683,16 @@ af daemon restart [flags]
 
 ## af daemon status
 
-Report daemon liveness, sockets, pid, and autostart
+Report daemon liveness, config freshness, and supervision
 
 Print a read-only snapshot of the background daemon: whether it is responding
 on the control socket, the control and HTTP socket paths (and whether their
-files are present), the recorded pid and whether it is a verified af daemon,
-whether the autostart unit is installed, and whether the running daemon is on a
-since-replaced binary.
+files are present), the recorded and responding pids, whether the installed
+autostart unit owns that responding process, whether the config on disk matches
+what the daemon booted with, and whether the running binary was replaced.
 
 It never contacts a paused daemon in a way that spawns one and never starts the
-daemon — it uses the same no-spawn health probe as af doctor. Use --json for a
+daemon. Service-manager inspection is bounded and read-only. Use --json for a
 machine-readable form wrapped in the shared {data,error} envelope.
 
 ```

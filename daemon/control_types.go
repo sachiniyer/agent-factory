@@ -450,6 +450,17 @@ type ResumeStatusPollResponse struct {
 // #1145).
 
 type PingRequest struct{}
+
+// DaemonBootConfig is the small immutable config posture a running daemon
+// reports through Ping. It is deliberately narrower than config.Config: status
+// only needs the listener/auth values that can differ after a supported
+// hand-edit, and Ping must never become a general config or secret export.
+type DaemonBootConfig struct {
+	ListenAddr           string `json:"listen_addr"`
+	RequireToken         bool   `json:"require_token"`
+	RequireLoopbackToken bool   `json:"require_loopback_token"`
+}
+
 type PingResponse struct {
 	OK bool `json:"ok"`
 	// Version is the af build version the responding daemon is running, so a
@@ -474,6 +485,14 @@ type PingResponse struct {
 	// and ordinary mutations have been admitted.
 	Phase     DaemonPhase          `json:"phase,omitempty"`
 	Listeners DaemonListenerStatus `json:"listeners"`
+	// PID identifies the process which answered this Ping. daemon.pid is only a
+	// disk record and can be stale, so it cannot prove that the service manager's
+	// MainPID owns the responder (#2168 Phase 4).
+	PID int `json:"pid,omitempty"`
+	// BootConfig is nil only for a responder predating this additive field (or a
+	// synthetic test server with no manager). A pointer preserves the difference
+	// between an older daemon and the valid false value of RequireToken.
+	BootConfig *DaemonBootConfig `json:"boot_config,omitempty"`
 }
 
 type ReloadTasksRequest struct{}

@@ -1,8 +1,11 @@
 package daemon
 
 import (
+	"encoding/json"
+	"os"
 	"testing"
 
+	"github.com/sachiniyer/agent-factory/config"
 	"github.com/stretchr/testify/require"
 )
 
@@ -38,6 +41,33 @@ func TestPing_UnsetVersionStaysEmpty(t *testing.T) {
 	require.NoError(t, s.Ping(PingRequest{}, &resp))
 	require.True(t, resp.OK)
 	require.Empty(t, resp.Version)
+}
+
+// Phase 4 of #2168 needs status and doctor to compare the daemon that actually
+// answered Ping with the installed unit and the config currently on disk. Pin
+// those facts on Ping itself: a PID file can be stale, and rereading config in
+// the client cannot reveal what the already-running daemon booted with.
+func TestPing_ReportsProcessAndBootConfig(t *testing.T) {
+	s := &controlServer{manager: &Manager{cfg: &config.Config{
+		ListenAddr:           "0.0.0.0:8443",
+		RequireToken:         true,
+		RequireLoopbackToken: true,
+	}}}
+
+	var resp PingResponse
+	require.NoError(t, s.Ping(PingRequest{}, &resp))
+
+	data, err := json.Marshal(resp)
+	require.NoError(t, err)
+	var wire map[string]any
+	require.NoError(t, json.Unmarshal(data, &wire))
+	require.Equal(t, float64(os.Getpid()), wire["pid"],
+		"the responding process, not daemon.pid, is the supervision identity")
+	require.Equal(t, map[string]any{
+		"listen_addr":            "0.0.0.0:8443",
+		"require_token":          true,
+		"require_loopback_token": true,
+	}, wire["boot_config"], "Ping must report the immutable config this daemon booted with")
 }
 
 func TestSetVersion_RoundTrips(t *testing.T) {

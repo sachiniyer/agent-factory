@@ -110,9 +110,9 @@ var daemonUninstallCmd = &cobra.Command{
 var daemonStatusJSON bool
 
 // daemonStatusInfo is the read-only liveness/topology snapshot printed by
-// `af daemon status`. It is derived entirely from daemon.Health() (the same
-// no-spawn probe `af doctor` uses) plus an os.Stat of the HTTP socket, so the
-// command never dials or starts a daemon and needs no new RPC.
+// `af daemon status`. It is derived from daemon.Health() (the same no-spawn
+// Ping `af doctor` uses), a bounded read-only service-manager probe, and an
+// os.Stat of the HTTP socket. It never starts, stops, or reloads anything.
 type daemonStatusInfo struct {
 	Running           bool                         `json:"running"`
 	Version           string                       `json:"version,omitempty"`
@@ -126,7 +126,16 @@ type daemonStatusInfo struct {
 	HTTPSocketFile    bool                         `json:"http_socket_file"`
 	PID               int                          `json:"pid"`
 	PIDVerified       bool                         `json:"pid_verified"`
+	ServingPID        int                          `json:"serving_pid,omitempty"`
 	AutostartUnit     bool                         `json:"autostart_unit"`
+	AutostartEnabled  string                       `json:"autostart_enabled,omitempty"`
+	AutostartActive   string                       `json:"autostart_active,omitempty"`
+	UnitPID           int                          `json:"unit_pid,omitempty"`
+	Supervised        string                       `json:"serving_daemon_supervised,omitempty"`
+	SupervisionDetail string                       `json:"supervision_detail,omitempty"`
+	BootConfig        *daemon.DaemonBootConfig     `json:"boot_config,omitempty"`
+	ConfigMatches     string                       `json:"config_matches_running_daemon,omitempty"`
+	ConfigDetail      string                       `json:"config_detail,omitempty"`
 	BinaryStale       bool                         `json:"binary_stale"`
 	// ExposureWarning is non-empty when the config on disk serves the control API
 	// unauthenticated on a network address (#2090) — an ALLOWED posture since
@@ -145,7 +154,18 @@ type daemonStatusInfo struct {
 // stat'd; a missing config dir leaves the field empty rather than erroring, so
 // status still reports the control-plane facts.
 func collectDaemonStatus() daemonStatusInfo {
-	h := daemon.Health()
+	h := daemonHealthFn()
+	unitServesHome, unitInstalled := false, h.AutostartUnit
+	var unitScopeErr error
+	if configDir, err := configDirFn(); err != nil {
+		unitScopeErr = fmt.Errorf("cannot resolve the config dir to scope the autostart unit: %w", err)
+	} else {
+		unitServesHome, unitInstalled, unitScopeErr = autostartUnitServesHomeFn(configDir)
+	}
+	var supervision daemon.SupervisionInfo
+	if unitScopeErr == nil && unitServesHome {
+		supervision = daemonStatusSupervisionFn()
+	}
 	info := daemonStatusInfo{
 		Running:           h.PingErr == nil,
 		Version:           h.DaemonVersion,
@@ -156,8 +176,15 @@ func collectDaemonStatus() daemonStatusInfo {
 		ControlSocketFile: h.SocketExists,
 		PID:               h.PIDFilePID,
 		PIDVerified:       h.PIDVerified,
-		AutostartUnit:     h.AutostartUnit,
+		ServingPID:        h.ServingPID,
+		AutostartUnit:     unitServesHome || (unitScopeErr != nil && unitInstalled),
+		BootConfig:        h.BootConfig,
 		BinaryStale:       h.BinaryDeleted,
+	}
+	if unitServesHome {
+		info.AutostartEnabled = supervision.Enabled.String()
+		info.AutostartActive = supervision.Active.String()
+		info.UnitPID = supervision.MainPID
 	}
 	if h.PingErr == nil && h.Phase != "" {
 		listeners := h.Listeners
@@ -172,11 +199,31 @@ func collectDaemonStatus() daemonStatusInfo {
 	// Read-only (LoadConfigReadOnly materializes and converts nothing, so `af
 	// daemon status` never writes config as a side effect). Reported whether or
 	// not a daemon is running: an exposed listener is most worth saying when it is
-	// actually being served. This reads the config on disk, which a long-running
-	// daemon may predate — reporting the posture the RUNNING daemon booted with
-	// needs a Ping that carries it (#2168 Phase 4).
+	// actually being served. The comparison below pairs this disk read with the
+	// immutable posture returned by the running daemon's Ping (#2168 Phase 4).
+	var current *config.Config
 	if load, err := config.LoadConfigReadOnly(); err == nil {
-		info.ExposureWarning = config.ListenerExposureNotice(load.Config)
+		current = load.Config
+		info.ExposureWarning = config.ListenerExposureNotice(current)
+	}
+	if info.Running {
+		supervised := daemon.AnswerNo()
+		if unitScopeErr != nil {
+			supervised = daemon.Undetermined(fmt.Errorf("cannot tell whether the installed autostart unit serves this home: %w", unitScopeErr))
+		} else if unitServesHome {
+			supervised = daemon.ServingDaemonSupervised(h, supervision)
+		}
+		info.Supervised = supervised.String()
+		if cause := supervised.Cause(); cause != nil {
+			info.SupervisionDetail = cause.Error()
+		}
+		matches := daemon.RunningConfigMatches(h, current)
+		info.ConfigMatches = matches.String()
+		if cause := matches.Cause(); cause != nil {
+			info.ConfigDetail = cause.Error()
+		} else if info.ConfigMatches == daemon.AnswerNo().String() {
+			info.ConfigDetail = daemon.RunningConfigDifference(h.BootConfig, current)
+		}
 	}
 	return info
 }
@@ -233,10 +280,58 @@ func printDaemonStatusHuman(cmd *cobra.Command, info daemonStatusInfo) {
 	} else {
 		fmt.Fprintln(w, "  pid:            (no daemon.pid on disk)")
 	}
+	if info.ServingPID > 0 {
+		fmt.Fprintf(w, "  responder pid:  %d\n", info.ServingPID)
+	}
 	if info.AutostartUnit {
-		fmt.Fprintln(w, "  autostart:      installed")
+		enabled, active := info.AutostartEnabled, info.AutostartActive
+		if enabled == "" {
+			enabled = "unknown"
+		}
+		if active == "" {
+			active = "unknown"
+		}
+		fmt.Fprintf(w, "  autostart:      installed · enabled=%s · active=%s\n", enabled, active)
 	} else {
-		fmt.Fprintln(w, "  autostart:      not installed (`af daemon install` to keep schedules running across reboots)")
+		fmt.Fprintln(w, "  autostart:      no unit for this home (`af daemon install` to keep schedules running across reboots)")
+	}
+	if info.Running {
+		switch info.Supervised {
+		case "yes":
+			fmt.Fprintf(w, "  supervision:    installed unit owns responding daemon pid %d\n", info.ServingPID)
+		case "no":
+			switch {
+			case !info.AutostartUnit:
+				fmt.Fprintln(w, "  warning:        responding daemon is not supervised because no autostart unit serves this home")
+			case info.AutostartActive == "no" || info.AutostartActive == "not-found":
+				fmt.Fprintln(w, "  warning:        daemon is responding, but the installed unit is not running it — the responder is not supervised")
+			case info.UnitPID > 0:
+				fmt.Fprintf(w, "  warning:        responding daemon pid %d is not supervised by the installed unit, which owns pid %d\n",
+					info.ServingPID, info.UnitPID)
+			default:
+				fmt.Fprintln(w, "  warning:        responding daemon is not supervised by the installed unit")
+			}
+		default:
+			detail := info.SupervisionDetail
+			if detail == "" {
+				detail = "the service manager or responding daemon did not report enough identity information"
+			}
+			fmt.Fprintf(w, "  supervision:    unknown (%s)\n", detail)
+		}
+
+		switch info.ConfigMatches {
+		case "yes":
+			fmt.Fprintln(w, "  daemon config:  file matches the running daemon")
+		case "no":
+			fmt.Fprintf(w, "  warning:        config on disk differs from the running daemon (%s) — restart the daemon to apply it\n",
+				info.ConfigDetail)
+		default:
+			detail := info.ConfigDetail
+			if detail == "" {
+				detail = "the responding daemon did not report its boot config"
+			}
+			fmt.Fprintf(w, "  daemon config:  unknown (%s)\n", detail)
+		}
 	}
 	if info.BinaryStale {
 		fmt.Fprintf(w, "  warning:        pid %d is running a binary since replaced on disk — restart the daemon to pick up the new version\n", info.PID)
@@ -256,15 +351,15 @@ func presence(exists bool) string {
 
 var daemonStatusCmd = &cobra.Command{
 	Use:   "status",
-	Short: "Report daemon liveness, sockets, pid, and autostart",
+	Short: "Report daemon liveness, config freshness, and supervision",
 	Long: `Print a read-only snapshot of the background daemon: whether it is responding
 on the control socket, the control and HTTP socket paths (and whether their
-files are present), the recorded pid and whether it is a verified af daemon,
-whether the autostart unit is installed, and whether the running daemon is on a
-since-replaced binary.
+files are present), the recorded and responding pids, whether the installed
+autostart unit owns that responding process, whether the config on disk matches
+what the daemon booted with, and whether the running binary was replaced.
 
 It never contacts a paused daemon in a way that spawns one and never starts the
-daemon — it uses the same no-spawn health probe as af doctor. Use --json for a
+daemon. Service-manager inspection is bounded and read-only. Use --json for a
 machine-readable form wrapped in the shared {data,error} envelope.`,
 	Args: cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
@@ -380,6 +475,7 @@ var (
 	refreshAutostartUnitFn      = daemon.RefreshAutostartUnit
 	configDirFn                 = config.GetConfigDir
 	daemonRestartPresenceFn     = probeDaemonRestartPresence
+	daemonStatusSupervisionFn   = daemon.AutostartSupervision
 )
 
 // probeDaemonRestartPresence gives the explicit restart command a three-value

@@ -27,12 +27,20 @@ type controlServer struct {
 func (s *controlServer) Ping(_ PingRequest, resp *PingResponse) error {
 	resp.OK = true
 	resp.Version = Version()
+	resp.PID = os.Getpid()
 	if s.manager != nil && s.manager.lifecycle != nil {
 		state := s.manager.lifecycle.snapshot()
 		resp.BootID = state.bootID
 		resp.TransactionID = state.transactionID
 		resp.Phase = state.phase
 		resp.Listeners = state.listeners
+	}
+	if s.manager != nil && s.manager.cfg != nil {
+		resp.BootConfig = &DaemonBootConfig{
+			ListenAddr:           s.manager.cfg.ListenAddr,
+			RequireToken:         s.manager.cfg.RequireToken,
+			RequireLoopbackToken: s.manager.cfg.RequireLoopbackToken,
+		}
 	}
 	return nil
 }

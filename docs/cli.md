@@ -159,10 +159,10 @@ The background daemon hosts task cron schedules, watch-task scripts, session mon
 af daemon install      # register autostart at login
 af daemon restart      # restart a running daemon and re-adopt live sessions
 af daemon uninstall    # remove the autostart unit (the daemon still starts on demand)
-af daemon status       # read-only health snapshot: running?, socket paths, pid, autostart (+ --json)
+af daemon status       # read-only health, supervision, and config freshness (+ --json)
 ```
 
-`af daemon status` uses the same no-spawn probe as `af doctor` — it reports whether the daemon answers on the control socket, the control/HTTP socket paths and file presence, the recorded (and verified) pid, whether the autostart unit is installed, and whether a running daemon is on a since-replaced binary. It never dials in a way that starts a daemon.
+`af daemon status` uses the same no-spawn Ping as `af doctor`, plus bounded read-only service-manager inspection. It reports the responder PID separately from the recorded PID, whether the installed unit owns that responder, and whether the listener/auth config on disk matches what the daemon booted with. Manager failures and older daemons render as `unknown`; they are never guessed into “unsupervised” or “current.” It never starts, stops, or reloads a daemon or unit.
 
 `af daemon restart` is safe to run after replacing the `af` binary. It asks a
 running daemon to shut down cleanly, restarts the autostart unit when one is

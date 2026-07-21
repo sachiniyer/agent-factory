@@ -169,6 +169,9 @@ func checkDaemonHealth(ctx *scanContext, report *Report, h daemon.HealthStatus, 
 			},
 		)
 	}
+	if h.PingErr == nil && cfg != nil {
+		checkRunningDaemonConfig(report, h, cfg)
+	}
 	// The #2090 exposure is INFORMATIONAL since #2168 Phase 0: a tokenless
 	// network listener is an allowed, deliberate configuration, so this is a Warn
 	// with problem=false — it never makes `af doctor` exit non-zero over a posture
@@ -178,8 +181,8 @@ func checkDaemonHealth(ctx *scanContext, report *Report, h daemon.HealthStatus, 
 	//
 	// Reported independently of daemon liveness, unlike the old row: the exposure
 	// matters MOST when the daemon is up, because then it is actually being
-	// served. (What doctor reads is the config on disk, which a running daemon may
-	// predate — naming the running daemon's booted posture is #2168 Phase 4.)
+	// served. The separate daemon-config row compares this disk value with the
+	// posture returned by the running daemon itself (#2168 Phase 4).
 	//
 	// cfg is nil when the config could not be loaded at all (doctor.Run passes
 	// what it got). Say nothing then rather than guessing a posture — the load
@@ -226,6 +229,33 @@ func checkDaemonHealth(ctx *scanContext, report *Report, h daemon.HealthStatus, 
 		report.Warn(sectionDaemon, "daemon binary", fmt.Sprintf("pid %d is running a binary that was replaced on disk", h.PIDFilePID),
 			"run `af daemon restart` to pick up the current binary", true)
 	}
+}
+
+// checkRunningDaemonConfig compares the file on disk with the immutable
+// listener/auth posture returned by the process which answered Ping. An older
+// responder is reported as unknown, not silently treated as current.
+func checkRunningDaemonConfig(report *Report, h daemon.HealthStatus, cfg *config.Config) {
+	matches := daemon.RunningConfigMatches(h, cfg)
+	matches.Match(
+		func() {
+			report.Pass(sectionDaemon, "daemon config", "on-disk listener/auth config matches the running daemon")
+		},
+		func() {
+			report.Warn(sectionDaemon, "daemon config",
+				"config on disk differs from the running daemon ("+daemon.RunningConfigDifference(h.BootConfig, cfg)+")",
+				"run `af daemon restart` to apply the config on disk", true)
+		},
+		func() {
+			report.Warn(sectionDaemon, "daemon config",
+				"the running daemon could not be compared with the config on disk because the responder was not identified",
+				"restart the daemon, then rerun `af doctor`", false)
+		},
+		func(cause error) {
+			report.Warn(sectionDaemon, "daemon config",
+				"whether the running daemon matches the config on disk is unknown: "+oneLine(cause),
+				"restart the daemon to apply the current config, or rerun `af doctor` after upgrading the daemon", false)
+		},
+	)
 }
 
 // checkOrphanedProcesses finds processes carrying the AF_SESSION ancestry
