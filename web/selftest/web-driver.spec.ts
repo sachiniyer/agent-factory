@@ -5628,6 +5628,103 @@ test("mobile (375px): the rail auto-collapses to a drawer; the hamburger reveals
   await ctx.close();
 });
 
+test("#2226 mobile (375px): drawer dismissal follows action intent, not click propagation", async ({ browser }) => {
+  const { ctx, p } = await openAt(browser, 375, 667);
+  const app = p.locator(".af-app");
+  const rail = p.locator(".af-rail");
+  const toggle = p.locator(".af-nav-toggle");
+  const modal = p.locator(".af-modal-card");
+  const lifecyclePosts: string[] = [];
+  p.on("request", (request) => {
+    if (/\/v1\/(?:KillSession|ArchiveSession|RestoreSession)$/.test(request.url())) {
+      lifecyclePosts.push(request.url());
+    }
+  });
+
+  const openDrawer = async () => {
+    await toggle.click();
+    await expect(app).toHaveClass(/af-nav-open/);
+    await expect(rail).toBeVisible();
+  };
+  const expectDrawerClosed = async () => {
+    await expect(app).not.toHaveClass(/af-nav-open/);
+    await expect(rail).not.toBeVisible();
+  };
+
+  // Create lives in the rail HEAD, outside the old delegated list handler. Opening
+  // its form is a leave-the-rail action: fold the drawer first so the form can take
+  // focus instead of sitting under the overlay.
+  await openDrawer();
+  await p.locator(".af-rail-new").click();
+  await expectDrawerClosed();
+  await expect(modal).toBeVisible();
+  const titleInput = modal.locator('input[aria-label="Session title"]');
+  await titleInput.click();
+  await expect(titleInput).toBeFocused();
+  await modal.getByRole("button", { name: "Cancel", exact: true }).click();
+  await expect(modal).toBeHidden();
+
+  // Selecting a row leaves the rail for its terminal. This used to pass only because
+  // its click happened to bubble to railList; the same action must stay explicit.
+  await openDrawer();
+  await row(p, SESSION_A).click();
+  await expectDrawerClosed();
+  await expect(p.locator(".af-main.af-main-term")).toBeVisible();
+
+  // Row actions MUST keep stopPropagation (otherwise they also select the row), so
+  // Kill and Archive have to dismiss by intent before opening their own confirms.
+  await openDrawer();
+  await railAction(p, SESSION_A, "Kill session").click();
+  await expectDrawerClosed();
+  await expect(modal).toContainText(`Kill ${SESSION_A}?`);
+  await modal.getByRole("button", { name: "Cancel", exact: true }).click();
+  await expect(modal).toBeHidden();
+  expect(lifecyclePosts, "cancelling Kill must not post a lifecycle mutation").toEqual([]);
+  await expect(row(p, SESSION_A)).toHaveCount(1);
+
+  await openDrawer();
+  await railAction(p, SESSION_A, "Archive session").click();
+  await expectDrawerClosed();
+  await expect(modal).toContainText(`Archive ${SESSION_A}?`);
+  await modal.getByRole("button", { name: "Cancel", exact: true }).click();
+  await expect(modal).toBeHidden();
+  expect(lifecyclePosts, "cancelling Archive must not post a lifecycle mutation").toEqual([]);
+  await expect(row(p, SESSION_A)).toHaveCount(1);
+
+  // Filtering is a stay-in-the-rail action. Both opening the filter and toggling the
+  // archived projection keep the drawer and menu open so several states can be set.
+  await openDrawer();
+  await p.locator(".af-rail-filter").click();
+  await expect(p.locator(".af-filter-menu")).toBeVisible();
+  await expect(app).toHaveClass(/af-nav-open/);
+  await filterItem(p, "archived").click();
+  await expect(filterItem(p, "archived")).toHaveAttribute("aria-checked", "true");
+  await expect(p.locator(".af-filter-menu")).toBeVisible();
+  await expect(app).toHaveClass(/af-nav-open/);
+
+  // Restore is the archived row's version of the same lifecycle action. It must
+  // leave the drawer too; keeping this leg in the browser guard prevents the two
+  // branches in rowActions from drifting apart.
+  await expect(row(p, SESSION_B)).toHaveClass(/af-row-archived/);
+  await railAction(p, SESSION_B, "Restore session").click();
+  await expectDrawerClosed();
+  await expect(modal).toContainText(`Restore ${SESSION_B}?`);
+  await modal.getByRole("button", { name: "Cancel", exact: true }).click();
+  await expect(modal).toBeHidden();
+  expect(lifecyclePosts, "cancelling Restore must not post a lifecycle mutation").toEqual([]);
+
+  // The escape hatch remains location-based by design: the scrim's action IS drawer
+  // dismissal. Tap its exposed right edge (the left side sits behind the drawer).
+  await openDrawer();
+  const scrim = p.locator(".af-nav-scrim");
+  const scrimBox = await scrim.boundingBox();
+  expect(scrimBox, "the open mobile drawer exposes a scrim").not.toBeNull();
+  await scrim.click({ position: { x: scrimBox!.width - 5, y: scrimBox!.height / 2 } });
+  await expectDrawerClosed();
+
+  await ctx.close();
+});
+
 for (const width of [375, 768]) {
   test(`mobile (${width}px): the page never scrolls sideways, drawer closed or open`, async ({ browser }) => {
     const { ctx, p } = await openAt(browser, width, 812);

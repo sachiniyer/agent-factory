@@ -678,7 +678,8 @@ export class AppShell {
   // phone gives the terminal the full width. This is the ONLY piece of the responsive
   // work that needs JS — everything else is @media CSS. `navOpen` is pure UI ephemera
   // (never store state): the drawer is closed on load, opens on the toggle, and
-  // auto-closes when a session is selected (reveal the terminal) or the view changes.
+  // auto-closes when an action leaves the rail (create/select/lifecycle) or the view
+  // changes. Filtering stays in the rail and deliberately keeps it open (#2226).
   // On desktop the CSS ignores the class, so setNav is an inert no-op there.
   private readonly navToggle: HTMLButtonElement;
   private readonly navScrim: HTMLElement;
@@ -800,7 +801,7 @@ export class AppShell {
 
     this.railCount = h("span", { class: "af-rail-count" }, "0");
     const newBtn = h("button", { type: "button", class: "af-rail-new", title: "New session" }, "+ New");
-    newBtn.addEventListener("click", () => this.actions.newSession());
+    newBtn.addEventListener("click", () => this.runRailExit(() => this.actions.newSession()));
 
     // The status filter (feat: hide archived by default). A small funnel mark rather
     // than a word, so the rail head still fits the count + New at 18rem; the dot beside
@@ -850,11 +851,6 @@ export class AppShell {
     this.railList = h("ul", { class: "af-rail-list" });
     this.railList.setAttribute("role", "listbox");
     this.railList.setAttribute("aria-label", "Sessions");
-    // Tapping a row on a phone should reveal the terminal, so any click that reaches a
-    // rail row closes the drawer (the row's own handler still attaches). Delegated on
-    // the list — not the rail head — so filtering/creating stays possible with the
-    // drawer open. Idempotent and inert on desktop (setNav no-ops there).
-    this.railList.addEventListener("click", () => this.setNav(false));
     const rail = h("nav", { class: "af-rail", id: "af-rail" }, railHead, this.railList);
 
     this.main = h("section", { class: "af-main" });
@@ -911,6 +907,16 @@ export class AppShell {
     this.navOpen = open;
     this.el.classList.toggle("af-nav-open", open);
     this.navToggle.setAttribute("aria-expanded", open ? "true" : "false");
+  }
+
+  /** Runs an action whose result lives outside the session drawer (#2226). Drawer
+   *  dismissal belongs to the action's intent, not to where its click happened or
+   *  whether it bubbled: Create and lifecycle controls stop at different DOM nodes,
+   *  while both must expose the modal they open. Filter actions bypass this helper
+   *  because their result remains inside the rail. */
+  private runRailExit(action: () => void): void {
+    this.setNav(false);
+    action();
   }
 
   private toggleNav(): void {
@@ -1128,7 +1134,12 @@ export class AppShell {
     }
     const rows = visible.map((s) => {
       const selected = s.id === state.selectedId;
-      return sessionRow(s, selected, this.actions, (target) => this.rowActions(target, selected));
+      return sessionRow(
+        s,
+        selected,
+        (id) => this.runRailExit(() => this.actions.open(id)),
+        (target) => this.rowActions(target, selected),
+      );
     });
     const notice = this.railNotice(state, scoped, visible);
     list.replaceChildren(...(notice ? [notice, ...rows] : rows));
@@ -1142,9 +1153,9 @@ export class AppShell {
     lifecycleBtn.addEventListener("click", (e) => {
       e.stopPropagation();
       if (lifecycleBtn.dataset.action === "restore") {
-        this.actions.restore(session);
+        this.runRailExit(() => this.actions.restore(session));
       } else {
-        this.actions.archive(session);
+        this.runRailExit(() => this.actions.archive(session));
       }
     });
     this.patchLifecycleButton(lifecycleBtn, session.lifecycle_action, session.title);
@@ -1161,7 +1172,7 @@ export class AppShell {
     killBtn.setAttribute("title", killLabel);
     killBtn.addEventListener("click", (e) => {
       e.stopPropagation();
-      this.actions.kill(session);
+      this.runRailExit(() => this.actions.kill(session));
     });
     return h("div", { class: "af-row-actions" }, lifecycleBtn, killBtn);
   }
@@ -1195,7 +1206,7 @@ export class AppShell {
     const hasActive = scoped.some((s) => !isArchived(s));
     if (!hasActive) {
       const newBtn = h("button", { type: "button", class: "af-rail-empty-new", title: "New session" }, "+ New");
-      newBtn.addEventListener("click", () => this.actions.newSession());
+      newBtn.addEventListener("click", () => this.runRailExit(() => this.actions.newSession()));
       const empty = h("li", { class: "af-rail-empty-project" }, `No active sessions in ${name} — `, newBtn);
       const archived = scoped.filter(isArchived).length;
       if (archived > 0 && !state.statusFilter.archived) {
@@ -2098,7 +2109,7 @@ function beginTabRename(
 function sessionRow(
   s: SessionData,
   selected: boolean,
-  actions: Actions,
+  openSession: (id: string) => void,
   buildActions: (session: ActionableSession) => HTMLElement,
 ): HTMLElement {
   const status = rowStatus(s);
@@ -2140,7 +2151,7 @@ function sessionRow(
     // lifecycle controls consume the same fail-closed capability.
     row.setAttribute("aria-disabled", "true");
   } else {
-    row.addEventListener("click", () => actions.open(s.id));
+    row.addEventListener("click", () => openSession(s.id));
   }
   return row;
 }
