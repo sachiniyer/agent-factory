@@ -56,6 +56,21 @@ func TestHandleHandoff_OpensPickerWithoutDispatching(t *testing.T) {
 	require.False(t, called, "opening the picker must not swap the agent")
 }
 
+func TestHandleHandoff_RefusesArchivedSessionBeforePicker(t *testing.T) {
+	h := newTestHome(t)
+	inst := handoffActionInstance(t, "archived", tmux.ProgramClaude)
+	inst.SetStatusForTest(session.Archived)
+	inst.SetStartedForTest(false)
+	h.store.AddInstance(inst)
+	h.sidebar.SetSelectedInstance(0)
+
+	_, _ = h.handleHandoff()
+
+	require.Equal(t, stateDefault, h.state, "an inert row must not enter the handoff flow")
+	require.Nil(t, h.selectionOverlay, "the user should not pick a target for an impossible handoff")
+	require.Contains(t, strings.ToLower(h.errBox.FullError()), "archived")
+}
+
 // The picker's selected index must be resolved against the FILTERED choice list
 // it was built from. Resolving it against tmux.SupportedPrograms instead would
 // hand off to the wrong agent — silently, and to a plausible-looking one.

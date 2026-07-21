@@ -109,6 +109,15 @@ func (i *Instance) LastHandoff() (AgentHandoff, bool) {
 // documented to return "" for a wrapper script, which silently disables this
 // guard exactly when a user has customized their setup.
 func (i *Instance) ValidateHandoffTarget(target string) error {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	return i.validateHandoffTargetLocked(target)
+}
+
+// validateHandoffTargetLocked is ValidateHandoffTarget's already-locked half.
+// Keeping target identity and runtime eligibility checks in the same instance
+// critical section lets SwapAgentProgram validate and mutate one state snapshot.
+func (i *Instance) validateHandoffTargetLocked(target string) error {
 	target = strings.TrimSpace(target)
 	if target == "" {
 		return fmt.Errorf("handoff target agent is required (one of %s)", tmux.SupportedProgramsString())
@@ -116,7 +125,7 @@ func (i *Instance) ValidateHandoffTarget(target string) error {
 	if !tmux.IsSupportedProgram(target) {
 		return fmt.Errorf("unknown agent %q: handoff target must be one of %s", target, tmux.SupportedProgramsString())
 	}
-	if current := i.CurrentAgentName(); current == target {
+	if current := i.currentAgentNameLocked(); current == target {
 		return fmt.Errorf("session is already running %s", target)
 	}
 	return nil
@@ -190,13 +199,16 @@ func (i *Instance) currentAgentNameLocked() string {
 // The caller must hold whatever serialization the daemon requires; this method
 // takes only the instance lock.
 func (i *Instance) SwapAgentProgram(target, reason, headSHA string, automatic bool) (AgentHandoff, error) {
-	if err := i.ValidateHandoffTarget(target); err != nil {
-		return AgentHandoff{}, err
-	}
 	target = strings.TrimSpace(target)
 
 	i.mu.Lock()
 	defer i.mu.Unlock()
+	if err := i.validateHandoffTargetLocked(target); err != nil {
+		return AgentHandoff{}, err
+	}
+	if err := i.lifecycleViewLocked().ValidateRuntimeAction(RuntimeActionHandoff); err != nil {
+		return AgentHandoff{}, err
+	}
 
 	if len(i.Tabs) == 0 {
 		return AgentHandoff{}, fmt.Errorf("session %q has no agent tab to hand off", i.Title)

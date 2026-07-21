@@ -327,8 +327,8 @@ func (m *Manager) RestoreArchived(req RestoreArchivedRequest) (string, error) {
 	if instance == nil {
 		return "", fmt.Errorf("cannot restore session %q: no such session", req.Title)
 	}
-	if instance.GetLiveness() != session.LiveArchived {
-		return "", fmt.Errorf("session %q is not archived", req.Title)
+	if err := instance.ValidateRuntimeAction(session.RuntimeActionRestoreArchived); err != nil {
+		return "", fmt.Errorf("cannot restore: %w", err)
 	}
 
 	key := daemonInstanceKey(repoID, req.Title)
@@ -353,8 +353,15 @@ func (m *Manager) RestoreArchived(req RestoreArchivedRequest) (string, error) {
 	m.mu.Lock()
 	current := m.instances[key]
 	m.mu.Unlock()
-	if current != instance || instance.GetLiveness() != session.LiveArchived {
+	if current != instance {
 		return "", fmt.Errorf("session %q changed state before restore could start", req.Title)
+	}
+	// Re-run the shared runtime-entry guard under the operation lock, before the
+	// worktree move. A durable kill tombstone is terminal intent: restoring
+	// around it would appear to succeed, then finishUserKill would reap the
+	// replacement on the next poll (#2208).
+	if err := instance.ValidateRuntimeAction(session.RuntimeActionRestoreArchived); err != nil {
+		return "", fmt.Errorf("cannot restore: %w", err)
 	}
 
 	// A sandbox session (docker/ssh) restores by re-provisioning a fresh sandbox

@@ -126,6 +126,14 @@ type LifecycleView struct {
 func (i *Instance) LifecycleView() LifecycleView {
 	i.mu.RLock()
 	defer i.mu.RUnlock()
+	return i.lifecycleViewLocked()
+}
+
+// lifecycleViewLocked is LifecycleView's already-locked half. Callers must hold
+// i.mu for reading or writing. Runtime-action chokepoints use it while making a
+// state mutation under the same critical section, so validation and mutation
+// cannot observe different lifecycle states.
+func (i *Instance) lifecycleViewLocked() LifecycleView {
 	return LifecycleView{
 		Title:      i.Title,
 		TaskID:     i.TaskID,

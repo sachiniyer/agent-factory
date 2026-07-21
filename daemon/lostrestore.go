@@ -180,10 +180,10 @@ func (m *Manager) RestoreLostSessions() {
 // lock, so a caller could see Lost on one read and Running on the next and fall
 // through every arm (#1892).
 func lostSessionWantsRestore(v session.LifecycleView) bool {
-	if !v.Started || v.Status != session.Lost {
+	if v.ValidateRuntimeAction(session.RuntimeActionRecoverLost) != nil {
 		return false
 	}
-	return !v.UserKilled && !session.IsReservedTitle(v.Title)
+	return !session.IsReservedTitle(v.Title)
 }
 
 // canAutoRestoreLostSession reports whether RestoreLostSessions will keep trying
@@ -300,7 +300,7 @@ func (m *Manager) restoreLostSession(key, repoID string, inst *session.Instance)
 	current := m.instances[key]
 	_, killing := m.killsInFlight[key]
 	m.mu.Unlock()
-	if killing || current != inst || inst.UserKilled() || inst.GetStatus() != session.Lost {
+	if killing || current != inst || inst.ValidateRuntimeAction(session.RuntimeActionRecoverLost) != nil {
 		return
 	}
 
