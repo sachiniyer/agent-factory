@@ -98,20 +98,18 @@ func TestCodexSubmitUsesBracketedPaste(t *testing.T) {
 	cmds := recordTmuxCommands(t, "codex", prompt)
 	joined := joinedArgs(cmds)
 
-	require.Len(t, cmds, 4, "codex submit is clear, load-buffer, paste-buffer, send-keys Enter; got %v", joined)
+	require.Len(t, cmds, 4, "codex submit is load-buffer, clear, paste-buffer, send-keys Enter; got %v", joined)
 
-	// 0. A stranded draft in the composer is cleared with keystrokes BEFORE the
-	//    paste (#2070) so a prior lost Enter cannot fuse with this prompt. It must
-	//    be a keystroke clear, never a paste (a clear is a command, #1956), and it
-	//    must precede the load so the payload lands in an empty composer.
-	require.Contains(t, joined[0], "send-keys", "first command must clear the composer; got %v", joined)
-	require.Contains(t, joined[0], "C-u", "the clear must send C-u to kill the pending line (#2070); got %v", joined)
-	require.NotContains(t, joined[0], "load-buffer", "the clear must precede the load; got %v", joined)
+	// 0. Text is loaded before the destructive clear. If load-buffer fails, the
+	//    user's existing composer remains untouched (#2178 review).
+	require.Contains(t, joined[0], "load-buffer", "first command must load the paste buffer; got %v", joined)
+	require.Equal(t, prompt, cmds[0].stdin, "paste text must be streamed on stdin")
 
-	// 1. Text is streamed into a buffer via stdin (not an argv arg → no ARG_MAX
-	//    ceiling for large prompts) and never as `send-keys -l`.
-	require.Contains(t, joined[1], "load-buffer", "second command must load the paste buffer; got %v", joined)
-	require.Equal(t, prompt, cmds[1].stdin, "paste text must be streamed on stdin")
+	// 1. A stranded draft in the composer is cleared with keystrokes AFTER a
+	//    replacement payload exists but BEFORE it is pasted (#2070/#2178).
+	require.Contains(t, joined[1], "send-keys", "second command must clear the composer; got %v", joined)
+	require.Contains(t, joined[1], "C-u", "the clear must send C-u to kill the pending line (#2070); got %v", joined)
+	require.NotContains(t, joined[1], "load-buffer", "the clear must be distinct from the load; got %v", joined)
 	for _, j := range joined {
 		require.NotContains(t, j, "send-keys -t =af_proj: -l",
 			"codex must not use the plain literal send-keys path that gets swallowed (#1254); got %v", joined)
@@ -123,7 +121,7 @@ func TestCodexSubmitUsesBracketedPaste(t *testing.T) {
 	require.Contains(t, joined[2], "paste-buffer", "third command must paste the buffer; got %v", joined)
 	require.Contains(t, joined[2], "-p", "paste must be bracketed (-p) so codex sees the paste boundary")
 	require.Contains(t, joined[2], "-d", "paste must delete the buffer afterward (-d)")
-	loadBuf, pasteBuf := bufferOf(cmds[1].args), bufferOf(cmds[2].args)
+	loadBuf, pasteBuf := bufferOf(cmds[0].args), bufferOf(cmds[2].args)
 	require.NotEmpty(t, loadBuf, "load-buffer must name a buffer; got %v", joined)
 	require.Equal(t, loadBuf, pasteBuf, "paste must read back the buffer the load wrote; got %v", joined)
 
@@ -160,12 +158,12 @@ func TestEveryAgentSubmitUsesBracketedPasteBuffer(t *testing.T) {
 			cmds := recordTmuxCommands(t, program, prompt)
 			joined := joinedArgs(cmds)
 
-			require.Len(t, cmds, 4, "paste path is clear, load-buffer, paste-buffer, send-keys Enter; got %v", joined)
-			require.Contains(t, joined[0], "send-keys", "first command must clear the composer; got %v", joined)
-			require.Contains(t, joined[0], "C-u",
+			require.Len(t, cmds, 4, "paste path is load-buffer, clear, paste-buffer, send-keys Enter; got %v", joined)
+			require.Contains(t, joined[0], "load-buffer", "first command must load the paste buffer; got %v", joined)
+			require.Equal(t, prompt, cmds[0].stdin, "paste text must be streamed on stdin")
+			require.Contains(t, joined[1], "send-keys", "second command must clear the composer; got %v", joined)
+			require.Contains(t, joined[1], "C-u",
 				"a stranded draft must be cleared with C-u before the paste so it can't fuse with this prompt (#2070); got %v", joined)
-			require.Contains(t, joined[1], "load-buffer", "second command must load the paste buffer; got %v", joined)
-			require.Equal(t, prompt, cmds[1].stdin, "paste text must be streamed on stdin")
 			require.Contains(t, joined[2], "paste-buffer", "third command must paste the buffer; got %v", joined)
 			require.Contains(t, joined[2], "-d", "paste must delete the buffer afterward (-d)")
 			require.True(t, hasArg(cmds[2].args, "-p"),
@@ -179,7 +177,7 @@ func TestEveryAgentSubmitUsesBracketedPasteBuffer(t *testing.T) {
 					"no pane may use the literal send-keys path that redraws wrapped bash input (#1292); got %v", joined)
 			}
 
-			loadBuf, pasteBuf := bufferOf(cmds[1].args), bufferOf(cmds[2].args)
+			loadBuf, pasteBuf := bufferOf(cmds[0].args), bufferOf(cmds[2].args)
 			require.NotEmpty(t, loadBuf, "load-buffer must name a buffer; got %v", joined)
 			require.Equal(t, loadBuf, pasteBuf, "paste must read back the buffer the load wrote; got %v", joined)
 
@@ -218,6 +216,84 @@ func TestClearNeverSendsEscapeTheInterruptKey(t *testing.T) {
 						"delivery to a working agent would abort its turn (#2070); got %q", j)
 			}
 		})
+	}
+}
+
+func TestSubmitLoadsPayloadBeforeClearingComposer(t *testing.T) {
+	loadErr := fmt.Errorf("load rejected")
+	clearSent := false
+	cmdExec := cmd_test.MockCmdExec{
+		RunFunc: func(c *exec.Cmd) error {
+			joined := strings.Join(c.Args, " ")
+			if strings.Contains(joined, "load-buffer") {
+				return loadErr
+			}
+			if strings.Contains(joined, "send-keys") && hasArg(c.Args, "C-u") {
+				clearSent = true
+			}
+			return nil
+		},
+	}
+	session := newTmuxSession("af_proj", ProgramClaude, NewMockPtyFactory(t), cmdExec)
+
+	err := session.SendKeysCommand("replacement prompt")
+	require.ErrorIs(t, err, loadErr)
+	require.False(t, clearSent,
+		"a failed load must leave the user's existing composer untouched (#2178 review)")
+}
+
+func TestSubmitSerializesClearPasteAndEnter(t *testing.T) {
+	defer withPasteDeliveryTiming(5*time.Millisecond, time.Millisecond)()
+
+	firstPasteStarted := make(chan struct{})
+	releaseFirstPaste := make(chan struct{})
+	secondLoadStarted := make(chan struct{})
+	var mu sync.Mutex
+	bufferPayload := make(map[string]string)
+	cmdExec := cmd_test.MockCmdExec{
+		RunFunc: func(c *exec.Cmd) error {
+			joined := strings.Join(c.Args, " ")
+			switch {
+			case strings.Contains(joined, "load-buffer"):
+				payload, _ := io.ReadAll(c.Stdin)
+				mu.Lock()
+				bufferPayload[bufferOf(c.Args)] = string(payload)
+				mu.Unlock()
+				if string(payload) == "second prompt" {
+					close(secondLoadStarted)
+				}
+			case strings.Contains(joined, "paste-buffer"):
+				mu.Lock()
+				payload := bufferPayload[bufferOf(c.Args)]
+				mu.Unlock()
+				if payload == "first prompt" {
+					close(firstPasteStarted)
+					<-releaseFirstPaste
+				}
+			}
+			return nil
+		},
+		OutputFunc: func(*exec.Cmd) ([]byte, error) { return []byte("composer ready"), nil },
+	}
+	session := newTmuxSession("af_proj", ProgramCodex, NewMockPtyFactory(t), cmdExec)
+	errCh := make(chan error, 2)
+
+	go func() { errCh <- session.SendKeysCommand("first prompt") }()
+	<-firstPasteStarted
+	go func() { errCh <- session.SendKeysCommand("second prompt") }()
+
+	select {
+	case <-secondLoadStarted:
+		t.Fatal("a concurrent submit started before the first paste could send Enter; its clear can erase the first prompt")
+	case <-time.After(20 * time.Millisecond):
+	}
+	close(releaseFirstPaste)
+	require.NoError(t, <-errCh)
+	require.NoError(t, <-errCh)
+	select {
+	case <-secondLoadStarted:
+	default:
+		t.Fatal("the second submit never ran after the first transaction completed")
 	}
 }
 
@@ -498,6 +574,50 @@ func TestMissingPromptInKnownEchoingPaneStaysLoud(t *testing.T) {
 	require.NotContains(t, got, "may be unsubmitted")
 }
 
+func TestFailedPostClearCaptureKeepsPreClearBaseline(t *testing.T) {
+	defer withPasteDeliveryTiming(10*time.Millisecond, time.Millisecond)()
+	errors := captureErrorLog(t)
+	const prompt = "identical re-delivery with a distinctive DELIVERY_BASELINE_TAIL"
+
+	captures := 0
+	cmdExec := cmd_test.MockCmdExec{
+		RunFunc: func(*exec.Cmd) error { return nil },
+		OutputFunc: func(*exec.Cmd) ([]byte, error) {
+			captures++
+			if captures == 2 {
+				return nil, fmt.Errorf("transient post-clear capture failure")
+			}
+			// The same tail was already present before the clear and remains in
+			// every later capture. It is not evidence that this paste arrived.
+			return []byte(prompt), nil
+		},
+	}
+	session := newTmuxSession("af_proj", ProgramClaude, NewMockPtyFactory(t), cmdExec)
+
+	require.NoError(t, session.SendKeysCommand(prompt))
+	require.Contains(t, errors.String(), "prompt delivery observed absent",
+		"a failed post-clear capture must fall back to the pre-clear count instead of falsely confirming an old tail")
+}
+
+func TestFinalCaptureFailureKeepsEarlierObservedAbsence(t *testing.T) {
+	defer withPasteDeliveryTiming(8*time.Millisecond, time.Millisecond)()
+	captures := 0
+	cmdExec := cmd_test.MockCmdExec{
+		OutputFunc: func(*exec.Cmd) ([]byte, error) {
+			captures++
+			if captures == 1 {
+				return []byte("composer is visibly empty"), nil
+			}
+			return nil, fmt.Errorf("capture failed")
+		},
+	}
+	session := newTmuxSession("af_proj", ProgramClaude, NewMockPtyFactory(t), cmdExec)
+
+	got := session.waitForPasteDelivered("DISTINCTIVE_DELIVERY_TAIL", 0)
+	require.Equal(t, deliveryObservedAbsent, got,
+		"a failed final probe must not erase an earlier successful observation of absence (#2214 review)")
+}
+
 // TestObservedDeliveryCachesEchoBehavior proves unknown programs are detected
 // only from positive evidence, then reuse that capability. The first visible
 // delivery promotes the session; a later genuinely absent prompt is therefore
@@ -544,10 +664,17 @@ func TestPreSubmitEchoBehaviorTracksResolvedProgram(t *testing.T) {
 	session := newTmuxSession("af_proj", "/usr/local/bin/codex --full-auto", NewMockPtyFactory(t), cmd_test.MockCmdExec{})
 	require.Equal(t, preSubmitDoesNotEcho, session.preSubmitEchoBehavior(),
 		"capability detection must use the resolved executable, including absolute paths")
+	session.notePreSubmitEchoObserved()
+	require.Equal(t, preSubmitDoesNotEcho, session.preSubmitEchoBehavior(),
+		"a coincidental tail match must not promote a known non-echoing Codex pane")
 
 	session.SetProgram("ionice -c 3 claude --model opus")
 	require.Equal(t, preSubmitEchoes, session.preSubmitEchoBehavior(),
 		"agent handoff must replace the cached capability with the new agent's behavior")
+
+	session.SetProgram("aider --model sonnet")
+	require.Equal(t, preSubmitEchoes, session.preSubmitEchoBehavior(),
+		"Aider visibly echoes pasted composer input and must keep missing delivery loud")
 
 	session.SetProgram("/opt/bin/claude-wrapper")
 	require.Equal(t, preSubmitEchoUnknown, session.preSubmitEchoBehavior(),
