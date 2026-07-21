@@ -1,16 +1,23 @@
-// Package tmuxguard implements the Claude PreToolUse policy that prevents an
+// Package tmuxguard implements the agent hook policy that prevents an
 // af-managed agent from tearing down the host's shared tmux server.
 package tmuxguard
 
 import (
+	"bytes"
 	"encoding/json"
 	"io"
 	"path/filepath"
 	"strings"
-	"unicode"
 )
 
-const maxHookInput = 4 << 20
+const (
+	maxHookInput   = 4 << 20
+	maxNestedShell = 32
+
+	broadTmuxReason    = "Agent Factory blocked a host-wide tmux kill-server. Target an isolated server explicitly with 'tmux -L <socket> kill-server' or 'tmux -S <path> kill-server'."
+	patternKillReason  = "Agent Factory blocked a pattern-based process kill because it cannot prove the shared tmux server will be spared. Resolve the one intended PID and use 'kill -- <pid>'; for tmux teardown, use 'tmux -L <socket> kill-server' or 'tmux -S <path> kill-server'."
+	unknownShellReason = "Agent Factory could not prove this shell command safe, so it was blocked. Rewrite it as literal simple commands: replace variables, substitutions, globs, and brace or tilde expansions with literal values, and run inner commands directly instead of through eval or opaque command-building wrappers. Use af for session orchestration. For tmux teardown, use 'tmux -L <socket> kill-server' or 'tmux -S <path> kill-server' directly."
+)
 
 type hookInput struct {
 	ToolName  string `json:"tool_name"`
@@ -27,13 +34,16 @@ type hookDecision struct {
 	} `json:"hookSpecificOutput"`
 }
 
-// Run reads one Claude PreToolUse payload and emits a structured denial when
-// its Bash command would broadly kill tmux. Malformed input fails closed: a
-// broken guard must not turn into permission to destroy the shared server.
+// Run reads one PreToolUse payload and emits a structured denial when its
+// shell command is unsafe or cannot be validated. The hook fails closed: a
+// broken or drifted payload must not grant permission to destroy shared state.
 func Run(r io.Reader, w io.Writer) error {
-	var input hookInput
-	if err := json.NewDecoder(io.LimitReader(r, maxHookInput)).Decode(&input); err != nil {
-		return writeDenial(w, "Agent Factory could not validate this Bash command, so it was blocked to protect shared tmux sessions.")
+	input, ok := decodeHookInput(r)
+	if !ok {
+		return writeDenial(w, unknownShellReason)
+	}
+	if input.ToolName == "" {
+		return writeDenial(w, unknownShellReason)
 	}
 	if input.ToolName != "Bash" {
 		return nil
@@ -44,6 +54,23 @@ func Run(r io.Reader, w io.Writer) error {
 	return nil
 }
 
+func decodeHookInput(r io.Reader) (hookInput, bool) {
+	var input hookInput
+	raw, err := io.ReadAll(io.LimitReader(r, maxHookInput+1))
+	if err != nil || len(raw) > maxHookInput {
+		return input, false
+	}
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	if err := decoder.Decode(&input); err != nil {
+		return input, false
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		return input, false
+	}
+	return input, true
+}
+
 func writeDenial(w io.Writer, reason string) error {
 	var decision hookDecision
 	decision.HookSpecificOutput.HookEventName = "PreToolUse"
@@ -52,335 +79,72 @@ func writeDenial(w io.Writer, reason string) error {
 	return json.NewEncoder(w).Encode(decision)
 }
 
-// DenialReason returns an actionable reason when command contains a direct,
-// host-wide tmux teardown. An empty result means the command is allowed.
+// DenialReason returns an actionable reason when command contains a broad
+// tmux teardown or uses shell syntax the guard cannot prove safe. An empty
+// result means every shell word was statically resolved and no teardown was
+// found. The parser is agent-neutral so #2184 can reuse one policy everywhere.
 func DenialReason(command string) string {
-	for _, words := range shellCommandWords(command) {
-		executable, args := unwrapInvocation(removeRedirections(words))
-		switch strings.ToLower(filepath.Base(executable)) {
+	return denialReason(command, 0)
+}
+
+func denialReason(command string, depth int) string {
+	if strings.TrimSpace(command) == "" || depth > maxNestedShell {
+		return unknownShellReason
+	}
+	commands, err := parseShellCommands(command)
+	if err != nil {
+		return unknownShellReason
+	}
+	for _, words := range commands {
+		if reason := inspectWords(words, depth); reason != "" {
+			return reason
+		}
+	}
+	return ""
+}
+
+func inspectWords(words []string, depth int) string {
+	for i, word := range words {
+		name := strings.ToLower(filepath.Base(word))
+		switch name {
 		case "tmux":
-			if tmuxKillServerIsBroad(args) {
-				return "Agent Factory blocked a host-wide tmux kill-server. Target an isolated server explicitly with 'tmux -L <socket> kill-server' or 'tmux -S <path> kill-server'."
-			}
-		case "pkill":
-			if pkillTargetsTmux(args) {
-				return "Agent Factory blocked pkill targeting tmux because pkill cannot be scoped to one tmux socket. Use 'tmux -L <socket> kill-server' or 'tmux -S <path> kill-server' instead."
-			}
-		case "sh", "bash", "dash", "zsh", "ksh":
-			if nested := shellCommandArgument(args); nested != "" {
-				if reason := DenialReason(nested); reason != "" {
-					return reason
-				}
-			}
-		case "eval":
-			if reason := DenialReason(strings.Join(args, " ")); reason != "" {
+			if reason := inspectTmux(words[i+1:]); reason != "" {
 				return reason
 			}
-		}
-	}
-	return ""
-}
-
-func tmuxKillServerIsBroad(args []string) bool {
-	socketScoped := false
-	for i := 0; i < len(args); i++ {
-		switch arg := args[i]; {
-		case arg == "-L" || arg == "-S":
-			if i+1 < len(args) && args[i+1] != "" {
-				socketScoped = true
-			}
-			i++
-		case (strings.HasPrefix(arg, "-L") || strings.HasPrefix(arg, "-S")) && len(arg) > 2:
-			socketScoped = true
-		case arg == "kill-server":
-			return !socketScoped
-		}
-	}
-	return false
-}
-
-func pkillTargetsTmux(args []string) bool {
-	if len(args) == 0 {
-		return false
-	}
-	// pkill's one required positional argument is its pattern. In the normal
-	// and documented forms it is the final argument; matching "tmux" inside
-	// that regex also catches anchored spellings such as ^tmux$.
-	return strings.Contains(strings.ToLower(args[len(args)-1]), "tmux")
-}
-
-func shellCommandArgument(args []string) string {
-	for i := 0; i < len(args); i++ {
-		if args[i] == "-c" && i+1 < len(args) {
-			return args[i+1]
-		}
-		if strings.HasPrefix(args[i], "-c") && len(args[i]) > 2 {
-			return args[i][2:]
-		}
-	}
-	return ""
-}
-
-const redirectionToken = "\x00af-redirection"
-
-func removeRedirections(words []string) []string {
-	clean := make([]string, 0, len(words))
-	for i := 0; i < len(words); i++ {
-		if words[i] == redirectionToken {
+		case "pkill", "killall":
 			if i+1 < len(words) {
-				i++
+				return patternKillReason
 			}
-			continue
-		}
-		clean = append(clean, words[i])
-	}
-	return clean
-}
-
-// unwrapInvocation returns the executable and arguments for one shell command
-// segment. It recognizes the common wrappers agents use around commands, while
-// leaving arbitrary argument text (for example "echo tmux kill-server") alone.
-func unwrapInvocation(words []string) (string, []string) {
-	for len(words) > 0 {
-		for len(words) > 0 && (isAssignment(words[0]) || isControlPrefix(words[0])) {
-			words = words[1:]
-		}
-		if len(words) == 0 {
-			return "", nil
-		}
-
-		switch strings.ToLower(filepath.Base(words[0])) {
-		case "command", "exec", "nohup":
-			words = skipFlagOnlyPrefix(words[1:])
 		case "env":
-			words = skipEnvPrefix(words[1:])
-		case "sudo":
-			words = skipSudoPrefix(words[1:])
-		case "nice":
-			words = skipNicePrefix(words[1:])
-		case "timeout":
-			words = skipTimeoutPrefix(words[1:])
-		default:
-			return words[0], words[1:]
-		}
-	}
-	return "", nil
-}
-
-func skipFlagOnlyPrefix(words []string) []string {
-	for len(words) > 0 && strings.HasPrefix(words[0], "-") {
-		if words[0] == "--" {
-			return words[1:]
-		}
-		words = words[1:]
-	}
-	return words
-}
-
-func skipEnvPrefix(words []string) []string {
-	for len(words) > 0 {
-		switch {
-		case words[0] == "--":
-			return words[1:]
-		case words[0] == "-u" || words[0] == "--unset":
-			if len(words) < 2 {
-				return nil
+			if err := validateEnvPrefix(words[i+1:]); err != nil {
+				return unknownShellReason
 			}
-			words = words[2:]
-		case strings.HasPrefix(words[0], "-") || isAssignment(words[0]):
-			words = words[1:]
-		default:
-			return words
-		}
-	}
-	return words
-}
-
-func skipSudoPrefix(words []string) []string {
-	for len(words) > 0 && strings.HasPrefix(words[0], "-") {
-		if words[0] == "--" {
-			return words[1:]
-		}
-		if sudoOptionTakesValue(words[0]) {
-			if len(words) < 2 {
-				return nil
+		case "sh", "ash", "bash", "dash", "fish", "ksh", "mksh", "yash", "zsh":
+			payload, found, err := shellCommandPayload(words[i+1:])
+			if err != nil {
+				return unknownShellReason
 			}
-			words = words[2:]
-			continue
-		}
-		words = words[1:]
-	}
-	return words
-}
-
-func sudoOptionTakesValue(option string) bool {
-	switch option {
-	case "-u", "--user", "-g", "--group", "-h", "--host", "-p", "--prompt", "-C", "--close-from", "-R", "--chroot", "-T", "--command-timeout":
-		return true
-	default:
-		return false
-	}
-}
-
-func skipNicePrefix(words []string) []string {
-	if len(words) >= 2 && (words[0] == "-n" || words[0] == "--adjustment") {
-		return words[2:]
-	}
-	if len(words) > 0 && strings.HasPrefix(words[0], "-") {
-		return words[1:]
-	}
-	return words
-}
-
-func skipTimeoutPrefix(words []string) []string {
-	for len(words) > 0 && strings.HasPrefix(words[0], "-") {
-		if words[0] == "--" {
-			words = words[1:]
-			break
-		}
-		if words[0] == "-k" || words[0] == "--kill-after" || words[0] == "-s" || words[0] == "--signal" {
-			if len(words) < 2 {
-				return nil
-			}
-			words = words[2:]
-			continue
-		}
-		words = words[1:]
-	}
-	if len(words) > 0 { // duration
-		words = words[1:]
-	}
-	return words
-}
-
-func isControlPrefix(word string) bool {
-	switch word {
-	case "!", "if", "then", "elif", "else", "while", "until", "do", "time", "coproc":
-		return true
-	default:
-		return false
-	}
-}
-
-func isAssignment(word string) bool {
-	eq := strings.IndexByte(word, '=')
-	if eq <= 0 {
-		return false
-	}
-	for i, r := range word[:eq] {
-		if (i == 0 && !unicode.IsLetter(r) && r != '_') || (i > 0 && !unicode.IsLetter(r) && !unicode.IsDigit(r) && r != '_') {
-			return false
-		}
-	}
-	return true
-}
-
-// shellCommandWords performs the small amount of shell lexing the policy
-// needs: quotes and backslash escapes are decoded, while list/pipeline/control
-// operators split independent command segments. It deliberately does not
-// expand variables; a dynamic socket flag is not an explicit -L/-S and is
-// therefore denied.
-func shellCommandWords(command string) [][]string {
-	var commands [][]string
-	var words []string
-	var word strings.Builder
-	inWord := false
-	quote := byte(0)
-
-	flushWord := func() {
-		if !inWord {
-			return
-		}
-		words = append(words, word.String())
-		word.Reset()
-		inWord = false
-	}
-	flushCommand := func() {
-		flushWord()
-		if len(words) != 0 {
-			commands = append(commands, words)
-			words = nil
-		}
-	}
-
-	for i := 0; i < len(command); i++ {
-		c := command[i]
-		if quote == '\'' {
-			if c == '\'' {
-				quote = 0
-			} else {
-				word.WriteByte(c)
-			}
-			continue
-		}
-		if quote == '"' {
-			switch c {
-			case '"':
-				quote = 0
-			case '\\':
-				if i+1 < len(command) {
-					i++
-					word.WriteByte(command[i])
-				}
-			default:
-				word.WriteByte(c)
-			}
-			continue
-		}
-
-		switch c {
-		case ' ', '\t', '\r':
-			flushWord()
-		case '\n', ';', '|', '&', '(', ')', '{', '}':
-			flushCommand()
-			if i+1 < len(command) && command[i+1] == c && (c == '|' || c == '&') {
-				i++
-			}
-		case '<', '>':
-			if inWord && allDigits(word.String()) {
-				word.Reset()
-				inWord = false
-			} else {
-				flushWord()
-			}
-			words = append(words, redirectionToken)
-			if i+1 < len(command) && (command[i+1] == c || command[i+1] == '&') {
-				i++
-			}
-		case '\\':
-			inWord = true
-			if i+1 < len(command) {
-				i++
-				word.WriteByte(command[i])
-			}
-		case '\'', '"':
-			inWord = true
-			quote = c
-		case '#':
-			if !inWord {
-				for i+1 < len(command) && command[i+1] != '\n' {
-					i++
+			if found {
+				if reason := denialReason(payload, depth+1); reason != "" {
+					return reason
 				}
 			} else {
-				word.WriteByte(c)
+				// A script path or stdin-fed shell is opaque to this hook. The
+				// caller can put a literal command in this tool call instead.
+				return unknownShellReason
 			}
-		default:
-			inWord = true
-			word.WriteByte(c)
+		case ".", "alias", "autoload", "bind", "builtin", "declare", "enable", "eval", "export", "fc", "hash", "local", "mapfile", "parallel", "readarray", "readonly", "set", "shopt", "source", "trap", "typeset", "unalias", "unset", "xargs":
+			if i+1 < len(words) {
+				return unknownShellReason
+			}
+		case "find":
+			for _, arg := range words[i+1:] {
+				switch arg {
+				case "-exec", "-execdir", "-ok", "-okdir":
+					return unknownShellReason
+				}
+			}
 		}
 	}
-	flushCommand()
-	return commands
-}
-
-func allDigits(s string) bool {
-	if s == "" {
-		return false
-	}
-	for _, r := range s {
-		if !unicode.IsDigit(r) {
-			return false
-		}
-	}
-	return true
+	return ""
 }

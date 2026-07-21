@@ -86,7 +86,8 @@ func TestInjectedClaudePluginGuardsBroadTmuxKills(t *testing.T) {
 	blocked := runHook("tmux kill-server")
 	var decision struct {
 		HookSpecificOutput struct {
-			PermissionDecision string `json:"permissionDecision"`
+			PermissionDecision       string `json:"permissionDecision"`
+			PermissionDecisionReason string `json:"permissionDecisionReason"`
 		} `json:"hookSpecificOutput"`
 	}
 	if err := json.Unmarshal([]byte(blocked), &decision); err != nil {
@@ -98,6 +99,15 @@ func TestInjectedClaudePluginGuardsBroadTmuxKills(t *testing.T) {
 
 	if allowed := runHook("tmux -L af-test-guard kill-server"); allowed != "" {
 		t.Fatalf("socket-scoped kill-server must be allowed, got: %s", allowed)
+	}
+
+	unproven := runHook(`echo "$HOME"`)
+	if err := json.Unmarshal([]byte(unproven), &decision); err != nil {
+		t.Fatalf("unprovable shell syntax did not return a structured denial: %q (%v)", unproven, err)
+	}
+	if decision.HookSpecificOutput.PermissionDecision != "deny" ||
+		!strings.Contains(decision.HookSpecificOutput.PermissionDecisionReason, "literal simple commands") {
+		t.Fatalf("unprovable shell syntax must fail closed with an actionable rewrite, got: %s", unproven)
 	}
 }
 
