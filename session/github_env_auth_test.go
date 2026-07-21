@@ -25,11 +25,32 @@ func TestGitHubEnvironmentCredentialIsOriginScopedAndValueFree(t *testing.T) {
 	}
 }
 
-func TestGitHubEnvironmentCredentialIgnoresSSHAndFileOrigins(t *testing.T) {
-	for _, origin := range []string{"git@github.com:example/project.git", "file:///tmp/project.git"} {
+func TestGitHubEnvironmentCredentialRejectsNonGitHubAndNonHTTPSOrigins(t *testing.T) {
+	t.Setenv("GH_HOST", "github.enterprise.test")
+	for _, origin := range []string{
+		"git@github.com:example/project.git",
+		"file:///tmp/project.git",
+		"http://github.com/example/project.git",
+		"https://gitlab.example/example/project.git",
+		"https://github.enterprise.test.attacker.invalid/example/project.git",
+	} {
 		if _, _, ok := githubEnvironmentCredential(origin); ok {
-			t.Fatalf("non-HTTP origin %q unexpectedly produced a token helper", origin)
+			t.Fatalf("untrusted origin %q unexpectedly produced a GitHub token helper", origin)
 		}
+	}
+}
+
+func TestGitHubEnvironmentCredentialAllowsConfiguredEnterpriseHost(t *testing.T) {
+	t.Setenv("GH_HOST", "github.enterprise.test")
+	key, helper, ok := githubEnvironmentCredential("https://github.enterprise.test/example/project.git")
+	if !ok {
+		t.Fatal("configured HTTPS GitHub Enterprise origin did not produce a credential helper")
+	}
+	if key != "credential.https://github.enterprise.test.helper" {
+		t.Fatalf("credential key = %q", key)
+	}
+	if !strings.Contains(helper, "GH_ENTERPRISE_TOKEN") {
+		t.Fatal("enterprise credential helper omitted the enterprise token name")
 	}
 }
 

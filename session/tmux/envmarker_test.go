@@ -85,7 +85,12 @@ func TestStartInjectsEnvMarkers(t *testing.T) {
 			}
 			return nil
 		},
-		OutputFunc: func(cmd *exec.Cmd) ([]byte, error) { return []byte("output"), nil },
+		OutputFunc: func(cmd *exec.Cmd) ([]byte, error) {
+			if len(cmd.Args) >= 2 && cmd.Args[1] == "show-options" {
+				return nil, fmt.Errorf("no server running")
+			}
+			return []byte("output"), nil
+		},
 	}
 
 	workdir := t.TempDir()

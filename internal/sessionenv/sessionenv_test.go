@@ -39,6 +39,20 @@ func TestFilterAllowsExplicitExactName(t *testing.T) {
 	}
 }
 
+func TestImportNamesIncludesAbsentAllowedNamesAndDynamicLocale(t *testing.T) {
+	got := ImportNames([]string{"LC_MESSAGES=C", "UNRELATED_DATABASE_KEY=present"}, "codex", []string{"CUSTOM_PROVIDER_TOKEN"})
+	for _, want := range []string{"PATH", "OPENAI_API_KEY", "CUSTOM_PROVIDER_TOKEN", "LC_MESSAGES"} {
+		if !slices.Contains(got, want) {
+			t.Fatalf("tmux import names omitted %s", want)
+		}
+	}
+	for _, denied := range []string{"ANTHROPIC_API_KEY", "UNRELATED_DATABASE_KEY"} {
+		if slices.Contains(got, denied) {
+			t.Fatalf("tmux import names admitted %s", denied)
+		}
+	}
+}
+
 func TestFilterRequiresClaudeProviderSelectorForCloudCredentials(t *testing.T) {
 	source := []string{
 		"ANTHROPIC_API_KEY=present",

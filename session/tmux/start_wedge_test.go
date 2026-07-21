@@ -112,6 +112,10 @@ func wedgeHasSessionAfterFirstOnPath(t *testing.T) {
 		"  if [ \"$n\" -eq 1 ]; then exit 1; fi\n" +
 		"  sleep 300 & wait\n" +
 		"  ;;\n" +
+		"show-options)\n" +
+		"  echo 'no server running' >&2\n" +
+		"  exit 1\n" +
+		"  ;;\n" +
 		"set-option|new-session)\n" +
 		"  exit 0\n" +
 		"  ;;\n" +

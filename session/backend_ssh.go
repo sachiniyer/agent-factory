@@ -156,7 +156,7 @@ func (sshRuntime) Provision(spec ProvisionSpec) (ProvisionResult, error) {
 		spec:    spec,
 		cfg:     sshCfg,
 		afBin:   afBin,
-		program: spec.Program,
+		program: config.ResolveProgram(&cfg.Config, spec.Program),
 	}
 	res, err := p.provision()
 	if err != nil {

@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -13,6 +15,96 @@ import (
 
 	"golang.org/x/crypto/ssh"
 )
+
+func TestHookCleanupHandleRestoresFilteredEnvironment(t *testing.T) {
+	const (
+		customName = "CUSTOM_PROVIDER_TOKEN"
+		deniedName = "AF_TEST_UNRELATED_SECRET"
+	)
+	t.Setenv(customName, "test-value")
+	t.Setenv("OPENAI_API_KEY", "test-value")
+	t.Setenv(deniedName, "test-value")
+
+	dir := t.TempDir()
+	marker := filepath.Join(dir, "delete-saw-filtered-env")
+	deleteCmd := filepath.Join(dir, "delete.sh")
+	script := "#!/bin/sh\n" +
+		"names=$(env | cut -d= -f1)\n" +
+		"printf '%s\\n' \"$names\" | grep -qx " + customName + " || exit 9\n" +
+		"printf '%s\\n' \"$names\" | grep -qx OPENAI_API_KEY || exit 9\n" +
+		"printf '%s\\n' \"$names\" | grep -qx " + deniedName + " && exit 9\n" +
+		": > " + shellQuote(marker) + "\n"
+	if err := os.WriteFile(deleteCmd, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	raw, err := json.Marshal(map[string]any{
+		"id":           "hook-cleanup-env-id",
+		"title":        "hook-cleanup-env",
+		"path":         "/repo",
+		"backend_type": "remote",
+		"user_killed":  true,
+		"runtime_cleanup": map[string]any{
+			"hook": map[string]any{
+				"delete_cmd":              deleteCmd,
+				"slug":                    "hook-cleanup-env",
+				"agent":                   "codex",
+				"agent_resolved":          true,
+				"session_env_passthrough": []string{customName},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stored InstanceData
+	if err := json.Unmarshal(raw, &stored); err != nil {
+		t.Fatal(err)
+	}
+	stored = stored.ForStorage()
+	restored, err := FromInstanceData(stored)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := restored.Kill(); err != nil {
+		t.Fatalf("restored hook cleanup lost its approved environment: %v", err)
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatal("restored delete_cmd did not receive its filtered cleanup environment")
+	}
+}
+
+func TestHookCleanupHandlePreservesResolvedNoAgent(t *testing.T) {
+	const deniedName = "ANTHROPIC_API_KEY"
+	t.Setenv(deniedName, "test-value")
+
+	dir := t.TempDir()
+	marker := filepath.Join(dir, "delete-used-common-only-environment")
+	deleteCmd := filepath.Join(dir, "delete.sh")
+	script := "#!/bin/sh\n" +
+		"env | cut -d= -f1 | grep -qx " + deniedName + " && exit 9\n" +
+		": > " + shellQuote(marker) + "\n"
+	if err := os.WriteFile(deleteCmd, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	_, teardown, err := restoreRuntimeCleanup("hook-common-only", "remote", &RuntimeCleanupData{
+		Hook: &HookRuntimeCleanupData{
+			DeleteCmd:     deleteCmd,
+			Slug:          "hook-common-only",
+			AgentResolved: true,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := teardown(); err != nil {
+		t.Fatalf("restored no-agent cleanup admitted agent credentials: %v", err)
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatal("restored no-agent cleanup did not run")
+	}
+}
 
 // TestSSHCleanupHandleSurvivesTombstoneRoundTrip covers the restart half of
 // #2198's cleanup retry contract. A kill tombstone can survive only if the exact

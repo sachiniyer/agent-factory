@@ -163,6 +163,27 @@ func Filter(source []string, agent string, extras []string) []string {
 	return out
 }
 
+// ImportNames returns the deterministic variable-name list tmux should import
+// from a filtered client when it creates a session on an existing server. The
+// values remain solely in the client environment; this list is safe for argv.
+// Names absent from source are included so tmux marks stale server values as
+// removed instead of reviving an old credential in a new pane.
+func ImportNames(source []string, agent string, extras []string) []string {
+	allowed := allowedNames(source, agent, extras)
+	for _, entry := range source {
+		name, _, ok := strings.Cut(entry, "=")
+		if ok && strings.HasPrefix(name, "LC_") && validName(name) {
+			allowed[name] = struct{}{}
+		}
+	}
+	out := make([]string, 0, len(allowed))
+	for name := range allowed {
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	return out
+}
+
 // DockerCLIEnvironment is the environment for the trusted, short-lived docker
 // client. It includes Docker connection selection in addition to the session
 // allowlist because those values decide which daemon the CLI contacts.

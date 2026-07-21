@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session/tmux"
@@ -197,7 +198,7 @@ func (dockerRuntime) Provision(spec ProvisionSpec) (ProvisionResult, error) {
 		image:   image,
 		runArgs: runArgs,
 		afBin:   afBin,
-		program: spec.Program,
+		program: config.ResolveProgram(&cfg.Config, spec.Program),
 	}
 	res, err := p.provision()
 	if err != nil {
@@ -293,7 +294,7 @@ func (p *dockerProvisioner) runContainer() error {
 		"-e", "HOME=/root",
 		"-p", "127.0.0.1::" + dockerAgentPort,
 	}
-	for _, name := range sessionenv.DockerForwardNames(os.Environ(), p.agentName(), p.spec.SessionEnvPassthrough) {
+	for _, name := range p.containerEnvironmentNames() {
 		// Docker looks the value up in the CLI process's filtered environment;
 		// only the name appears in argv, logs, and test captures.
 		args = append(args, "-e", name)
@@ -323,6 +324,10 @@ func (p *dockerProvisioner) runContainer() error {
 	}
 	p.containerID = id
 	return nil
+}
+
+func (p *dockerProvisioner) containerEnvironmentNames() []string {
+	return sessionenv.DockerForwardNames(os.Environ(), p.agentName(), p.spec.SessionEnvPassthrough)
 }
 
 // configureGit sets a git identity and marks every directory safe inside the

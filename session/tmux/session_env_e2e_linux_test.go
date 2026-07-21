@@ -21,11 +21,25 @@ func TestRealPaneEnvironmentIsFiltered(t *testing.T) {
 		customName = "CUSTOM_PROVIDER_TOKEN"
 		deniedName = "AF_TEST_UNRELATED_SECRET"
 	)
-	t.Setenv("OPENAI_API_KEY", "test-value")
 	t.Setenv("ANTHROPIC_API_KEY", "test-value")
-	t.Setenv(customName, "test-value")
 	t.Setenv(deniedName, "test-value")
 	forceNewSessionEnvMarkers(t, true)
+
+	// Create the private package tmux server before the Codex authentication and
+	// explicit pass-through variables enter the client environment. This makes
+	// the test exercise the existing-server import path instead of accidentally
+	// passing because a fresh server snapshotted the values at startup.
+	seedName := "af_session_env_seed"
+	if err := exec.Command("tmux", "new-session", "-d", "-s", seedName, "sleep", "30").Run(); err != nil {
+		t.Fatal("could not prepare the isolated pre-existing tmux server")
+	}
+	t.Cleanup(func() { _ = exec.Command("tmux", "kill-session", "-t", "="+seedName).Run() })
+	originalUpdateEnvironment, err := exec.Command("tmux", "show-options", "-gv", "update-environment").Output()
+	if err != nil {
+		t.Fatal("could not read the isolated tmux server environment policy")
+	}
+	t.Setenv("OPENAI_API_KEY", "test-value")
+	t.Setenv(customName, "test-value")
 
 	dir := t.TempDir()
 	namesPath := filepath.Join(dir, "environment-names")
@@ -57,6 +71,7 @@ func TestRealPaneEnvironmentIsFiltered(t *testing.T) {
 	}
 	agentPath := filepath.Join(dir, ProgramCodex)
 	program := "#!/bin/sh\n" +
+		"test -n \"$OPENAI_API_KEY\" && test -n \"$CUSTOM_PROVIDER_TOKEN\" || exit 9\n" +
 		"tr '\\000' '\\n' < /proc/$$/environ | sed 's/=.*//' | sort > \"$1\"\n" +
 		"if git -C \"$2\" push origin HEAD:refs/heads/session-env-e2e >/dev/null 2>&1; then : > \"$3\"; fi\n" +
 		"while :; do sleep 1; done\n"
@@ -74,6 +89,13 @@ func TestRealPaneEnvironmentIsFiltered(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _, _ = session.CloseAndWaitForPaneExit() })
+	restoredUpdateEnvironment, err := exec.Command("tmux", "show-options", "-gv", "update-environment").Output()
+	if err != nil {
+		t.Fatal("could not read the restored tmux server environment policy")
+	}
+	if string(restoredUpdateEnvironment) != string(originalUpdateEnvironment) {
+		t.Fatal("session launch did not restore the existing tmux server environment policy")
+	}
 
 	var names []string
 	deadline := time.Now().Add(3 * time.Second)

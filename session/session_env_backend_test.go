@@ -2,14 +2,102 @@ package session
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
 
+	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
+
+func TestDockerEnvironmentUsesResolvedProgramOverride(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("OPENAI_API_KEY", "test-value")
+	t.Setenv("ANTHROPIC_API_KEY", "test-value")
+	repoRoot := initTempGitRepo(t)
+	writeInRepoConfig(t, repoRoot, map[string]any{
+		"backend": "docker",
+		"docker":  map[string]any{"image": "example.invalid/agent:latest"},
+		"program_overrides": map[string]any{
+			tmux.ProgramClaude: tmux.ProgramCodex,
+		},
+	})
+	defer SetLookPathForTest(func(string) (string, error) { return "/usr/bin/docker", nil })()
+	defer SetDockerSelfBinaryForTest(filepath.Join(t.TempDir(), "af"))()
+
+	var runArgs []string
+	defer SetDockerExecForTest(func(_ context.Context, _ []string, args ...string) ([]byte, error) {
+		if len(args) > 0 && args[0] == "run" {
+			runArgs = append([]string(nil), args...)
+		}
+		return nil, fmt.Errorf("stop after capturing docker run")
+	})()
+
+	_, _ = (dockerRuntime{}).Provision(ProvisionSpec{
+		RepoRoot: repoRoot,
+		Title:    "override-auth",
+		Program:  tmux.ProgramClaude,
+		CloneURL: "file:///fixture.git",
+	})
+	if !dockerHasEnvName(runArgs, "OPENAI_API_KEY") {
+		t.Fatal("docker dropped Codex authentication selected by program_overrides.claude")
+	}
+	if dockerHasEnvName(runArgs, "ANTHROPIC_API_KEY") {
+		t.Fatal("docker forwarded Claude authentication after the override selected Codex")
+	}
+}
+
+func TestHookEnvironmentUsesResolvedProgramOverride(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("OPENAI_API_KEY", "test-value")
+	t.Setenv("ANTHROPIC_API_KEY", "test-value")
+	repoRoot := initTempGitRepo(t)
+	scriptDir := t.TempDir()
+	launch := writeScript(t, scriptDir, "launch.sh", `
+env | cut -d= -f1 | grep -qx OPENAI_API_KEY || exit 9
+env | cut -d= -f1 | grep -qx ANTHROPIC_API_KEY && exit 9
+resolved=
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "--program" ]; then
+    shift
+    [ "$1" = "codex" ] || exit 9
+    resolved=yes
+  fi
+  shift
+done
+[ "$resolved" = yes ] || exit 9
+echo '{"url":"http://127.0.0.1:9","token":"test-token"}'
+`)
+	writeInRepoConfig(t, repoRoot, map[string]any{
+		"backend": "hook",
+		"remote_hooks": map[string]any{
+			"launch_cmd": launch,
+			"delete_cmd": "true",
+		},
+		"program_overrides": map[string]any{
+			tmux.ProgramClaude: tmux.ProgramCodex,
+		},
+	})
+
+	result, err := (hookRuntime{}).Provision(ProvisionSpec{
+		RepoRoot: repoRoot,
+		Title:    "override-auth",
+		Program:  tmux.ProgramClaude,
+	})
+	if err != nil {
+		t.Fatalf("hook launch did not receive authentication for the resolved Codex command: %v", err)
+	}
+	if result.Teardown != nil {
+		defer func() { _ = result.Teardown() }()
+	}
+	backend, ok := result.Backend.(*HookBackend)
+	if !ok || backend.cleanup == nil || backend.cleanup.Agent != tmux.ProgramCodex || !backend.cleanup.AgentResolved {
+		t.Fatalf("hook cleanup did not persist the resolved Codex environment identity: %#v", result.Backend)
+	}
+}
 
 func TestDockerRunForwardsAllowedNamesWithoutAmbientEnvironment(t *testing.T) {
 	const (
@@ -88,6 +176,45 @@ func TestSandboxAgentServersCarryPassThroughNamesIntoFilteredExec(t *testing.T) 
 			if !strings.Contains(command, want) {
 				t.Fatalf("%s agent-server command omitted %q", backend, want)
 			}
+		}
+	}
+}
+
+func TestSandboxAgentServerUsesResolvedCommandForFilteringAndLaunch(t *testing.T) {
+	spec := ProvisionSpec{Title: "override", Program: tmux.ProgramClaude}
+	tests := map[string]struct {
+		executable    string
+		inner         string
+		commandResult func() (string, error)
+	}{
+		"docker": {
+			executable: dockerAfBinaryPath,
+			inner: fmt.Sprintf("%s agent-server --listen :%s --repo %s --title %s --program %s",
+				shellQuote(dockerAfBinaryPath), dockerAgentPort, shellQuote(dockerWorkspaceDir), shellQuote(spec.Title), shellQuote(tmux.ProgramCodex)),
+			commandResult: func() (string, error) {
+				return (&dockerProvisioner{spec: spec, program: tmux.ProgramCodex}).agentServerCommand()
+			},
+		},
+		"ssh": {
+			executable: "/srv/af-session/af",
+			inner: fmt.Sprintf("%s agent-server --listen 127.0.0.1:0 --repo %s --title %s --program %s",
+				shellQuote("/srv/af-session/af"), shellQuote("/srv/af-session/workspace"), shellQuote(spec.Title), shellQuote(tmux.ProgramCodex)),
+			commandResult: func() (string, error) {
+				return (&sshProvisioner{spec: spec, program: tmux.ProgramCodex, sessionDir: "/srv/af-session"}).agentServerCommand()
+			},
+		},
+	}
+	for backend, test := range tests {
+		command, err := test.commandResult()
+		if err != nil {
+			t.Fatal(err)
+		}
+		want, err := sessionenv.WrapCommand(test.executable, tmux.ProgramCodex, nil, test.inner)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if command != want {
+			t.Fatalf("%s agent-server command = %q, want the resolved Codex command inside the Codex filter %q", backend, command, want)
 		}
 	}
 }

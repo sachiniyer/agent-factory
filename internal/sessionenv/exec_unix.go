@@ -5,11 +5,12 @@ package sessionenv
 import (
 	"fmt"
 	"os"
-	"os/exec"
 	"strconv"
 	"strings"
 	"syscall"
 )
+
+var processExec = syscall.Exec
 
 // WrapCommand builds the shell command handed to tmux. It contains only the af
 // executable path, the selected agent, explicit variable NAMES, and the
@@ -58,27 +59,12 @@ func execInvocation(args []string) error {
 	}
 	command := args[len(args)-1]
 	environ := Filter(os.Environ(), agent, extras)
-	shell := envValue(environ, "SHELL")
-	if shell == "" {
-		shell = "/bin/sh"
-	} else if !strings.ContainsRune(shell, '/') {
-		resolved, lookErr := exec.LookPath(shell)
-		if lookErr != nil {
-			return lookErr
-		}
-		shell = resolved
-	}
-	return syscall.Exec(shell, []string{shell, "-c", command}, environ)
-}
-
-func envValue(environ []string, name string) string {
-	prefix := name + "="
-	for _, entry := range environ {
-		if strings.HasPrefix(entry, prefix) {
-			return strings.TrimPrefix(entry, prefix)
-		}
-	}
-	return ""
+	// tmux runs shell-command through the system shell, not the user's login
+	// shell. Keep that POSIX contract: program overrides and injected commands
+	// commonly use assignment prefixes, redirects, and quoting that fish/tcsh
+	// interpret differently.
+	shell := "/bin/sh"
+	return processExec(shell, []string{shell, "-c", command}, environ)
 }
 
 func shellQuote(arg string) string {

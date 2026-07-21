@@ -108,3 +108,82 @@ func TestStartAllowsConfiguredExactVariable(t *testing.T) {
 		t.Fatal("tmux argv rendered an environment value")
 	}
 }
+
+func TestStartImportsAllowedEnvironmentIntoExistingTmuxServer(t *testing.T) {
+	const (
+		allowedName = "CUSTOM_PROVIDER_TOKEN"
+		deniedName  = "AF_TEST_UNRELATED_SECRET"
+	)
+	t.Setenv(allowedName, "test-value")
+	t.Setenv(deniedName, "test-value")
+	forceNewSessionEnvMarkers(t, false)
+
+	pty := &captureLaunchEnvPty{}
+	execu := cmd_test.MockCmdExec{
+		RunFunc: func(*exec.Cmd) error { return errors.New("session not found") },
+		OutputFunc: func(command *exec.Cmd) ([]byte, error) {
+			if len(command.Args) >= 2 && command.Args[1] == "show-options" {
+				return []byte("DISPLAY SSH_AUTH_SOCK\n"), nil
+			}
+			return nil, nil
+		},
+	}
+	session := NewTmuxSessionWithDeps("existing-server-env", "codex", pty, execu)
+	if err := session.SetEnvPassthrough([]string{allowedName}); err != nil {
+		t.Fatal(err)
+	}
+	_ = session.Start(t.TempDir())
+	if pty.cmd == nil {
+		t.Fatal("Start never reached the tmux launch command")
+	}
+
+	var updateEnvironment string
+	for idx, arg := range pty.cmd.Args {
+		if arg == "update-environment" && idx+1 < len(pty.cmd.Args) {
+			updateEnvironment = pty.cmd.Args[idx+1]
+			break
+		}
+	}
+	if updateEnvironment == "" {
+		t.Fatal("existing tmux server launch did not override update-environment for the new session")
+	}
+	if !strings.Contains(" "+updateEnvironment+" ", " "+allowedName+" ") {
+		t.Fatalf("tmux update-environment omitted configured variable name %s", allowedName)
+	}
+	if strings.Contains(updateEnvironment, deniedName) {
+		t.Fatalf("tmux update-environment admitted disallowed variable name %s", deniedName)
+	}
+	for _, arg := range pty.cmd.Args {
+		if strings.Contains(arg, "test-value") {
+			t.Fatal("tmux argv rendered an environment value")
+		}
+	}
+	var updateValues []string
+	for idx, arg := range pty.cmd.Args {
+		if arg == "update-environment" && idx+1 < len(pty.cmd.Args) {
+			updateValues = append(updateValues, pty.cmd.Args[idx+1])
+		}
+	}
+	if len(updateValues) != 2 || updateValues[1] != "DISPLAY SSH_AUTH_SOCK" {
+		t.Fatalf("tmux launch did not restore the prior update-environment option: %q", updateValues)
+	}
+}
+
+func TestStartSurfacesUnexpectedEnvironmentImportFailure(t *testing.T) {
+	forceNewSessionEnvMarkers(t, false)
+	pty := &captureLaunchEnvPty{}
+	execu := cmd_test.MockCmdExec{
+		RunFunc: func(*exec.Cmd) error { return errors.New("session not found") },
+		OutputFunc: func(*exec.Cmd) ([]byte, error) {
+			return nil, errors.New("permission denied")
+		},
+	}
+	session := NewTmuxSessionWithDeps("environment-import-error", "codex", pty, execu)
+	err := session.Start(t.TempDir())
+	if err == nil || !strings.Contains(err.Error(), "permission denied") {
+		t.Fatalf("Start() error = %v, want the environment import failure", err)
+	}
+	if pty.cmd != nil {
+		t.Fatal("Start launched a pane after it could not determine the existing server environment policy")
+	}
+}
