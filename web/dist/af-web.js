@@ -10438,7 +10438,6 @@ var AppShell = class {
     live.setAttribute("role", "status");
     const disconnect2 = h2("button", { type: "button", class: "af-ghost" }, "Disconnect");
     disconnect2.setAttribute("title", "Disconnect and forget the saved token");
-    disconnect2.addEventListener("click", () => this.actions.disconnect());
     const themeToggle = h2("div", { class: "af-theme-toggle" });
     themeToggle.setAttribute("role", "group");
     themeToggle.setAttribute("aria-label", "Theme");
@@ -10495,6 +10494,63 @@ var AppShell = class {
     this.navToggle.setAttribute("aria-controls", "af-rail");
     this.navToggle.setAttribute("aria-expanded", "false");
     this.navToggle.addEventListener("click", () => this.toggleNav());
+    const appbarTools = h2(
+      "div",
+      { class: "af-appbar-tools", id: "af-appbar-tools" },
+      live,
+      ...this.installEl ? [this.installEl] : [],
+      themeToggle,
+      disconnect2
+    );
+    appbarTools.setAttribute("role", "group");
+    appbarTools.setAttribute("aria-label", "App controls");
+    const appbarMore = h2("button", { type: "button", class: "af-appbar-more" }, "\u22EF");
+    appbarMore.setAttribute("aria-label", "More app controls");
+    appbarMore.setAttribute("title", "More app controls");
+    appbarMore.setAttribute("aria-haspopup", "true");
+    appbarMore.setAttribute("aria-controls", "af-appbar-tools");
+    appbarMore.setAttribute("aria-expanded", "false");
+    const appbarToolsWrap = h2("div", { class: "af-appbar-tools-wrap" }, appbarMore, appbarTools);
+    let appbarToolsOpen = false;
+    const setAppbarToolsOpen = (open) => {
+      if (appbarToolsOpen === open) {
+        return;
+      }
+      appbarToolsOpen = open;
+      appbarToolsWrap.classList.toggle("af-appbar-tools-open", open);
+      appbarMore.setAttribute("aria-expanded", open ? "true" : "false");
+      if (open) {
+        document.addEventListener("mousedown", onAppbarToolsMouseDown);
+        document.addEventListener("keydown", onAppbarToolsKeyDown, true);
+        window.addEventListener("resize", onAppbarToolsResize);
+      } else {
+        document.removeEventListener("mousedown", onAppbarToolsMouseDown);
+        document.removeEventListener("keydown", onAppbarToolsKeyDown, true);
+        window.removeEventListener("resize", onAppbarToolsResize);
+      }
+    };
+    const onAppbarToolsMouseDown = (e) => {
+      if (!appbarToolsWrap.isConnected || !appbarToolsWrap.contains(e.target)) {
+        setAppbarToolsOpen(false);
+      }
+    };
+    const onAppbarToolsKeyDown = (e) => {
+      if (e.key !== "Escape") {
+        return;
+      }
+      e.stopPropagation();
+      setAppbarToolsOpen(false);
+      appbarMore.focus();
+    };
+    const onAppbarToolsResize = () => setAppbarToolsOpen(false);
+    appbarMore.addEventListener("click", (e) => {
+      e.stopPropagation();
+      setAppbarToolsOpen(!appbarToolsOpen);
+    });
+    disconnect2.addEventListener("click", () => {
+      setAppbarToolsOpen(false);
+      this.actions.disconnect();
+    });
     const header = h2(
       "header",
       { class: "af-appbar" },
@@ -10502,10 +10558,7 @@ var AppShell = class {
       h2("span", { class: "af-brand" }, "Agent Factory"),
       viewNav,
       this.projectSwitchWrap,
-      live,
-      ...this.installEl ? [this.installEl] : [],
-      themeToggle,
-      disconnect2
+      appbarToolsWrap
     );
     this.railCount = h2("span", { class: "af-rail-count" }, "0");
     const newBtn = h2("button", { type: "button", class: "af-rail-new", title: "New session" }, "+ New");

@@ -5732,6 +5732,160 @@ test("#2226 mobile (375px): drawer dismissal follows action intent, not click pr
   await ctx.close();
 });
 
+test("#2227 mobile appbar: project context wins scarce width at 320px and 375px", async ({ browser }, testInfo) => {
+  const LONG_PROJECT = "project-with-a-deliberately-long-distinguishing-name";
+  const LONG_ROOT = `/work/${LONG_PROJECT}`;
+
+  for (const width of [320, 375]) {
+    for (const theme of ["light", "dark"] as const) {
+      await test.step(`${width}px · ${theme}`, async () => {
+        const ctx = await browser.newContext({ viewport: { width, height: 812 } });
+        await ctx.addInitScript(
+          ({ root, savedTheme }) => {
+            localStorage.setItem("af-project", root);
+            localStorage.setItem("af-theme", savedTheme);
+          },
+          { root: LONG_ROOT, savedTheme: theme },
+        );
+        const p = await ctx.newPage();
+        await p.route("**/v1/Snapshot", async (route) => {
+          const resp = await route.fetch();
+          const body = await resp.json();
+          const snap = body?.data as { instances?: Array<Record<string, unknown> & { title: string }> };
+          const list = snap?.instances ?? [];
+          const proto = { ...(list.find((s) => s.title === SESSION_A) ?? {}) };
+          list.push({
+            ...proto,
+            id: `synth-mobile-appbar-${width}-${theme}`,
+            title: `mobile-appbar-${width}-${theme}`,
+            branch: `mobile-appbar-${width}-${theme}`,
+            liveness: 2,
+            in_flight_op: 0,
+            lifecycle_action: "archive",
+            worktree: { ...(proto.worktree as Record<string, unknown>), repo_path: LONG_ROOT },
+          });
+          if (snap) {
+            snap.instances = list;
+          }
+          await route.fulfill({ status: resp.status(), contentType: "application/json", body: JSON.stringify(body) });
+        });
+        await p.goto("/");
+        await expect(p.locator(".af-app")).toBeVisible();
+        await expect(p.locator(".af-project-switch-name")).toHaveText(LONG_PROJECT);
+        await expect(p.locator("html")).toHaveAttribute("data-theme", theme);
+
+        const brand = p.locator(".af-brand");
+        const toggle = p.locator(".af-nav-toggle");
+        const project = p.locator(".af-project-switch");
+        const projectName = p.locator(".af-project-switch-name");
+        const more = p.locator(".af-appbar-more");
+        const tools = p.locator(".af-appbar-tools");
+        await expect(brand, "decoration yields before project context").toBeHidden();
+        await expect(toggle).toBeVisible();
+        await expect(project).toBeVisible();
+        await expect(more, "secondary appbar tools collapse behind one touch target").toBeVisible();
+        await expect(tools).toBeHidden();
+
+        const primary = await p.evaluate(() => {
+          const rect = (selector: string) => {
+            const box = document.querySelector(selector)!.getBoundingClientRect();
+            return { left: box.left, right: box.right, top: box.top, height: box.height, width: box.width };
+          };
+          return {
+            toggle: rect(".af-nav-toggle"),
+            project: rect(".af-project-switch"),
+            more: rect(".af-appbar-more"),
+          };
+        });
+        for (const [name, box] of Object.entries(primary)) {
+          expect(box.left, `${name} starts inside ${width}px`).toBeGreaterThanOrEqual(0);
+          expect(box.right, `${name} ends inside ${width}px`).toBeLessThanOrEqual(width);
+          expect(box.height, `${name} keeps a comfortable tap height`).toBeGreaterThanOrEqual(44);
+        }
+        expect(primary.project.width, "project context owns the flexible middle of the primary row").toBeGreaterThan(150);
+        expect(Math.abs(primary.toggle.top - primary.project.top), "primary controls share one top edge").toBeLessThanOrEqual(1);
+        expect(Math.abs(primary.more.top - primary.project.top), "primary controls share one top edge").toBeLessThanOrEqual(1);
+
+        const truncation = await projectName.evaluate((el) => {
+          const css = getComputedStyle(el);
+          return {
+            clientWidth: el.clientWidth,
+            scrollWidth: el.scrollWidth,
+            overflow: css.overflow,
+            textOverflow: css.textOverflow,
+            whiteSpace: css.whiteSpace,
+          };
+        });
+        expect(truncation.scrollWidth, "the long name genuinely exceeds its visible slot").toBeGreaterThan(
+          truncation.clientWidth,
+        );
+        expect(truncation).toMatchObject({ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" });
+        expect(await horizontalOverflow(p), "the closed drawer never widens the page").toBeLessThanOrEqual(1);
+
+        // The project popover itself must remain inside the phone and offer several
+        // projects. Clicking the current long-name item proves it is hit-testable.
+        await project.click();
+        const projectMenu = p.locator(".af-project-menu");
+        await expect(projectMenu).toBeVisible();
+        expect(
+          await projectMenu.locator(".af-project-item").count(),
+          "the phone menu keeps several projects operable",
+        ).toBeGreaterThanOrEqual(3);
+        const menuBox = await projectMenu.boundingBox();
+        expect(menuBox, "project menu has phone geometry").not.toBeNull();
+        expect(menuBox!.x).toBeGreaterThanOrEqual(0);
+        expect(menuBox!.x + menuBox!.width).toBeLessThanOrEqual(width);
+        await projectItem(p, LONG_PROJECT).click();
+        await expect(projectMenu).toBeHidden();
+
+        // Rare chrome remains operable rather than consuming the primary row.
+        await more.click();
+        await expect(tools).toBeVisible();
+        await expect(tools.locator(`.af-theme-opt[data-theme-opt="${theme}"]`)).toHaveClass(/af-theme-opt-active/);
+        const disconnect = tools.getByRole("button", { name: "Disconnect" });
+        await expect(disconnect).toBeVisible();
+        const toolsBox = await tools.boundingBox();
+        expect(toolsBox, "More popover has phone geometry").not.toBeNull();
+        expect(toolsBox!.x).toBeGreaterThanOrEqual(0);
+        expect(toolsBox!.x + toolsBox!.width).toBeLessThanOrEqual(width);
+        for (const control of [disconnect, ...(await tools.locator(".af-theme-opt").all())]) {
+          const box = await control.boundingBox();
+          expect(box, "every More action has geometry").not.toBeNull();
+          expect(box!.height, "More actions keep comfortable tap heights").toBeGreaterThanOrEqual(40);
+        }
+        await p.keyboard.press("Escape");
+        await expect(tools).toBeHidden();
+        await expect(more).toBeFocused();
+
+        await testInfo.attach(`2227-${width}-${theme}-drawer-closed`, {
+          body: await p.screenshot(),
+          contentType: "image/png",
+        });
+
+        // Opening the drawer must not reflow the bar, and its z-index must not cover
+        // the project menu: selecting the same project while open proves both.
+        await toggle.click();
+        await expect(p.locator(".af-app")).toHaveClass(/af-nav-open/);
+        const openProjectBox = await project.boundingBox();
+        expect(openProjectBox, "drawer-open project switch has geometry").not.toBeNull();
+        expect(openProjectBox!.x).toBeCloseTo(primary.project.left, 0);
+        expect(openProjectBox!.width).toBeCloseTo(primary.project.width, 0);
+        await project.click();
+        await expect(projectMenu).toBeVisible();
+        await projectItem(p, LONG_PROJECT).click();
+        await expect(projectMenu).toBeHidden();
+        expect(await horizontalOverflow(p), "the open drawer never widens the page").toBeLessThanOrEqual(1);
+
+        await testInfo.attach(`2227-${width}-${theme}-drawer-open`, {
+          body: await p.screenshot(),
+          contentType: "image/png",
+        });
+        await ctx.close();
+      });
+    }
+  }
+});
+
 for (const width of [375, 768]) {
   test(`mobile (${width}px): the page never scrolls sideways, drawer closed or open`, async ({ browser }) => {
     const { ctx, p } = await openAt(browser, width, 812);
@@ -5759,6 +5913,9 @@ test("desktop (1280px): the mobile drawer never engages — the rail stays in vi
   const { ctx, p } = await openAt(browser, 1280, 800);
   await expect(p.locator(".af-rail")).toBeVisible();
   await expect(p.locator(".af-nav-toggle")).toBeHidden();
+  await expect(p.locator(".af-brand")).toBeVisible();
+  await expect(p.locator(".af-appbar-more")).toBeHidden();
+  await expect(p.locator(".af-appbar-tools")).toBeVisible();
   await expect(p.locator(".af-app")).not.toHaveClass(/af-nav-open/);
   await ctx.close();
 });
