@@ -1,6 +1,7 @@
 package upgradetxn
 
 import (
+	"bytes"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -61,10 +62,31 @@ func (t *Transaction) AuthorizeActivation(transactionID, nonce string) error {
 	}
 	data = append(data, '\n')
 	approvalPath := filepath.Join(transactionDir(current.HomeDir, current.ID), "activation.approved")
-	if err := durableAtomicWriteFile(approvalPath, data, journalFileMode); err != nil {
-		return fmt.Errorf("persist upgrade activation approval: %w", err)
+	if err := publishActivationApproval(approvalPath, data); err != nil {
+		return err
 	}
 	t.journal = current
+	return nil
+}
+
+func publishActivationApproval(path string, data []byte) error {
+	writeErr := durableAtomicWriteFile(path, data, journalFileMode)
+	if writeErr == nil {
+		return nil
+	}
+	// A directory-sync failure happens after rename, so the exact approval can
+	// be visible even though the durable writer reports an error. Complete that
+	// barrier here when possible; ActivationAuthorized repeats it before use.
+	visible, readErr := os.ReadFile(path)
+	if readErr != nil || !bytes.Equal(visible, data) {
+		return fmt.Errorf("persist upgrade activation approval: %w", writeErr)
+	}
+	if syncErr := syncTransactionDirectory(filepath.Dir(path)); syncErr != nil {
+		return errors.Join(
+			fmt.Errorf("persist upgrade activation approval: %w", writeErr),
+			fmt.Errorf("confirm visible upgrade activation approval: %w", syncErr),
+		)
+	}
 	return nil
 }
 

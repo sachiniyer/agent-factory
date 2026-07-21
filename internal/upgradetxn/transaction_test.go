@@ -352,6 +352,39 @@ func TestActivationApprovalRequiresConsumerDirectorySync(t *testing.T) {
 	require.False(t, authorized)
 }
 
+func TestActivationApprovalCompletesVisibleDirectorySync(t *testing.T) {
+	txn, _, _ := prepareFixture(t)
+	journal := txn.Journal()
+	lease, err := txn.tryAcquireRecoveryAs(journal.PreviousBinaryPath)
+	require.NoError(t, err)
+	defer lease.Release()
+	require.NoError(t, lease.Advance(PhaseSupervisorReady))
+	require.NoError(t, lease.Heartbeat(PhaseSupervisorReady, time.Now().Add(time.Minute)))
+
+	injected := errors.New("injected first approval directory sync failure")
+	previousSync := syncTransactionDirectory
+	txnDir := transactionDir(journal.HomeDir, journal.ID)
+	approvalSyncs := 0
+	syncTransactionDirectory = func(path string) error {
+		if path == txnDir {
+			approvalSyncs++
+			if approvalSyncs == 1 {
+				return injected
+			}
+		}
+		return previousSync(path)
+	}
+	t.Cleanup(func() { syncTransactionDirectory = previousSync })
+
+	require.NoError(t, txn.AuthorizeActivation(journal.ID, journal.RecoveryNonce),
+		"a visible exact approval should complete its interrupted durability barrier")
+	authorized, err := lease.ActivationAuthorized()
+	require.NoError(t, err)
+	require.True(t, authorized)
+	require.GreaterOrEqual(t, approvalSyncs, 3,
+		"the writer retry and consumer must each confirm the approval directory")
+}
+
 func TestActivationRejectsExpiredSupervisorLease(t *testing.T) {
 	txn, _, _ := prepareFixture(t)
 	journal := txn.Journal()

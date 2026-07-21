@@ -756,14 +756,7 @@ func (t *Transaction) cleanup() error {
 
 	current, err := readJournal(activeJournalPath(t.journal.HomeDir))
 	if errors.Is(err, ErrNoActiveTransaction) {
-		root := upgradeRoot(t.journal.HomeDir)
-		if err := validateDirectoryNoSymlink(root); err != nil {
-			return fmt.Errorf("validate inactive upgrade root: %w", err)
-		}
-		if err := syncTransactionDirectory(root); err != nil {
-			return fmt.Errorf("confirm durable active journal absence: %w", err)
-		}
-		return t.cleanupInactiveArtifacts()
+		return t.cleanupAfterConfirmedJournalAbsence()
 	}
 	if err != nil {
 		return err
@@ -780,6 +773,17 @@ func (t *Transaction) cleanup() error {
 	activePath := activeJournalPath(t.journal.HomeDir)
 	if err := removeRequiredDurableFile(activePath); err != nil {
 		return fmt.Errorf("remove active upgrade journal: %w", err)
+	}
+	return t.cleanupInactiveArtifacts()
+}
+
+func (t *Transaction) cleanupAfterConfirmedJournalAbsence() error {
+	root := upgradeRoot(t.journal.HomeDir)
+	if err := validateDirectoryNoSymlink(root); err != nil {
+		return fmt.Errorf("validate inactive upgrade root: %w", err)
+	}
+	if err := syncTransactionDirectory(root); err != nil {
+		return fmt.Errorf("confirm durable active journal absence: %w", err)
 	}
 	return t.cleanupInactiveArtifacts()
 }
