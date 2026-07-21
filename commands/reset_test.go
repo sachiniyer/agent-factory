@@ -193,6 +193,13 @@ func TestFactoryReset_WipesEverythingKeepsRepoAndConfig(t *testing.T) {
 	repo, liveWT, reusedWT := seedMockRepo(t, home)
 	cfgBytes := seedAFState(t, home, repo, liveWT, reusedWT)
 	repoID := config.RepoIDFromRoot(repo)
+	registered, err := config.RegisterProject(repo)
+	if err != nil {
+		t.Fatalf("RegisterProject: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(home, "projects", registered.ID, "project.json")); err != nil {
+		t.Fatalf("registered sessionless project is not durable before reset: %v", err)
+	}
 
 	// --- Plan reflects the real scope ---
 	plan, err := planFactoryReset()
@@ -240,8 +247,16 @@ func TestFactoryReset_WipesEverythingKeepsRepoAndConfig(t *testing.T) {
 	assertGone(t, filepath.Join(home, config.StateFileName))
 	assertGone(t, filepath.Join(home, config.TUIStateFileName))
 	assertGone(t, filepath.Join(home, "tasks.json"))
+	assertGone(t, filepath.Join(home, "projects"))
 	assertGone(t, liveWT)
 	assertGone(t, reusedWT)
+	projects, err := config.ListProjects()
+	if err != nil {
+		t.Fatalf("ListProjects after reset: %v", err)
+	}
+	if len(projects) != 0 {
+		t.Errorf("projects after reset = %d, want 0", len(projects))
+	}
 
 	tasks, err := task.LoadTasks()
 	if err != nil {

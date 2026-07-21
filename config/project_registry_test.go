@@ -245,6 +245,52 @@ func TestRebindProjectCarriesProjectIDToNewCheckoutIdentity(t *testing.T) {
 	require.Equal(t, replacementRoot, rebound.Root)
 }
 
+func TestRebindProjectDoesNotReuseCheckoutIDAtReplacementPath(t *testing.T) {
+	base := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", filepath.Join(base, "af-home"))
+	originalPath := filepath.Join(base, "repo")
+	original, err := RegisterProject(initProjectRegistryRepo(t, originalPath))
+	require.NoError(t, err)
+	require.NoError(t, os.Rename(originalPath, filepath.Join(base, "old-checkout")))
+
+	// A fresh clone now occupies the same spelling as the last-known root, but
+	// has no checkout marker. Path equality is not proof that it is the checkout
+	// moved aside above; explicit rebind preserves only the stable project ID.
+	replacement := initProjectRegistryRepo(t, originalPath)
+	rebound, err := RebindProject(original.ID, replacement)
+	require.NoError(t, err)
+	require.Equal(t, original.ID, rebound.ID)
+	require.NotEqual(t, original.CheckoutID, rebound.CheckoutID,
+		"a replacement clone must mint its own checkout identity even at the old path")
+}
+
+func TestRegisterProjectBareBackedWorktreesUseCheckedOutRoot(t *testing.T) {
+	base := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", filepath.Join(base, "af-home"))
+	seed := initProjectRegistryRepo(t, filepath.Join(base, "seed"))
+	runProjectRegistryGit(t, seed, "config", "user.email", "test@example.com")
+	runProjectRegistryGit(t, seed, "config", "user.name", "Test")
+	require.NoError(t, os.WriteFile(filepath.Join(seed, "README.md"), []byte("test\n"), 0o644))
+	runProjectRegistryGit(t, seed, "add", "README.md")
+	runProjectRegistryGit(t, seed, "commit", "--quiet", "-m", "initial")
+
+	bare := filepath.Join(base, "backing.git")
+	runProjectRegistryGit(t, base, "clone", "--quiet", "--bare", seed, bare)
+	firstRoot := filepath.Join(base, "first-worktree")
+	secondRoot := filepath.Join(base, "second-worktree")
+	runProjectRegistryGit(t, base, "--git-dir", bare, "worktree", "add", "--quiet", "--detach", firstRoot)
+	runProjectRegistryGit(t, base, "--git-dir", bare, "worktree", "add", "--quiet", "--detach", secondRoot)
+
+	first, err := RegisterProject(firstRoot)
+	require.NoError(t, err)
+	require.Equal(t, canonicalExistingPath(t, firstRoot), first.Root,
+		"a bare backing repo has no main working tree, so its checked-out worktree is the usable root")
+	second, err := RegisterProject(secondRoot)
+	require.NoError(t, err)
+	require.Equal(t, first.ID, second.ID, "worktrees sharing one bare common directory share checkout identity")
+	require.Equal(t, first.Root, second.Root, "the first live registered worktree remains the canonical root")
+}
+
 func TestProjectRegistryRefusesNewerMetadata(t *testing.T) {
 	base := t.TempDir()
 	home := filepath.Join(base, "af-home")
