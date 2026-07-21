@@ -46,7 +46,7 @@ func TestNextAvailableTitle_SkipsBranchHeldByArchivedWorktree(t *testing.T) {
 	holdBranchInArchivedWorktree(t, repoPath, manager.branchForTitle("sweep-2"), "sweep-2")
 
 	manager.mu.Lock()
-	title, err := manager.nextAvailableTitleLocked(repoID, repoPath, "sweep", "claude", false, nil)
+	title, err := manager.nextAvailableTitleLocked(repoID, repoPath, "sweep", "claude", runtimeNamespaceLocalTmux, nil)
 	manager.mu.Unlock()
 	require.NoError(t, err)
 
@@ -67,7 +67,7 @@ func TestNextAvailableTitle_UncontestedNameKeepsBareForm(t *testing.T) {
 	manager, repoID, repoPath := newStatusTestManager(t)
 
 	manager.mu.Lock()
-	title, err := manager.nextAvailableTitleLocked(repoID, repoPath, "sweep", "claude", false, nil)
+	title, err := manager.nextAvailableTitleLocked(repoID, repoPath, "sweep", "claude", runtimeNamespaceLocalTmux, nil)
 	manager.mu.Unlock()
 
 	require.NoError(t, err)
@@ -86,7 +86,7 @@ func TestNextAvailableTitle_ExistingBranchIsNotAHold(t *testing.T) {
 	require.NoError(t, err, string(out))
 
 	manager.mu.Lock()
-	title, err := manager.nextAvailableTitleLocked(repoID, repoPath, "sweep", "claude", false, nil)
+	title, err := manager.nextAvailableTitleLocked(repoID, repoPath, "sweep", "claude", runtimeNamespaceLocalTmux, nil)
 	manager.mu.Unlock()
 
 	require.NoError(t, err)

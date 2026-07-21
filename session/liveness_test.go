@@ -153,13 +153,38 @@ func TestLifecycleActionIsSharedAcrossInstanceAndProjection(t *testing.T) {
 func TestLifecycleActionIsProjectionOnly(t *testing.T) {
 	data := (&Instance{ID: "ready-id", liveness: LiveReady}).ToInstanceData()
 	require.Equal(t, LifecycleActionArchive, data.LifecycleAction)
+	require.True(t, data.CanKill)
 
 	stored := data.ForStorage()
 	require.Equal(t, LifecycleActionNone, stored.LifecycleAction)
+	require.False(t, stored.CanKill)
 	raw, err := json.Marshal(stored)
 	require.NoError(t, err)
 	assert.NotContains(t, string(raw), "lifecycle_action",
 		"instances.json must not persist a UI capability derived from live state")
+	assert.NotContains(t, string(raw), "can_kill",
+		"instances.json must not persist a UI capability derived from live state")
+}
+
+func TestKillAddressabilityIsSharedAcrossInstanceAndProjection(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		id             string
+		op             InFlightOp
+		startupUnknown bool
+		want           bool
+	}{
+		{name: "settled stable row", id: "ready-id", want: true},
+		{name: "startup unknown keeps teardown handle", id: "unknown-id", startupUnknown: true, want: true},
+		{name: "creating has no teardown target", id: "pending-id", op: OpCreating},
+		{name: "id-less cannot address teardown"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			inst := &Instance{ID: tc.id, liveness: LiveReady, inFlightOp: tc.op, startupStateUnknown: tc.startupUnknown}
+			require.Equal(t, tc.want, inst.CanKill(), "TUI domain decision")
+			require.Equal(t, tc.want, inst.ToInstanceData().CanKill, "web projection decision")
+		})
+	}
 }
 
 func TestInFlightOpStrippedFromStorageRecords(t *testing.T) {

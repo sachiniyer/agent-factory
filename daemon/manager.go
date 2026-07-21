@@ -40,6 +40,12 @@ type Manager struct {
 	// mutation lookups do not, so a half-built runtime cannot be acted on.
 	pendingCreates map[string]session.InstanceData
 	reservedTitles map[string]struct{}
+	// reservedTmuxNames closes the second namespace a local create claims. Titles
+	// such as "a/b" and "a_b" can derive distinct git branches but the same
+	// positive-policy tmux name; reserving only the raw title leaves that collision
+	// open until Start, after the worktree already exists. Keyed per repo by the
+	// exact sanitized tmux name; the value is the user-facing title for errors.
+	reservedTmuxNames map[string]string
 	// reservedRemoteNames holds in-flight remote-hook slug reservations, keyed by
 	// the BARE slug — deliberately global, unlike every other name a session owns.
 	//
@@ -247,6 +253,7 @@ func newManagerShellForDaemon(cfg *config.Config, transactionID string) (*Manage
 		instances:           make(map[string]*session.Instance),
 		pendingCreates:      make(map[string]session.InstanceData),
 		reservedTitles:      make(map[string]struct{}),
+		reservedTmuxNames:   make(map[string]string),
 		reservedRemoteNames: make(map[string]struct{}),
 		reservedTaskRuns:    make(map[string]int),
 		ghostTaskRuns:       make(map[string]int),

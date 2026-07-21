@@ -88,18 +88,26 @@ func (m *Manager) CreateSession(ctx context.Context, req CreateSessionRequest) (
 	m.mu.Unlock()
 	m.publishEvent(agentproto.EventSessionUpdated, pending)
 
-	createSucceeded := false
+	// Tracks whether the provisional client row was replaced by any durable
+	// outcome, not merely whether CreateSession returns nil. Retained failures are
+	// real rows too: deleting their provisional identity from live clients would
+	// hide the only handle that can inspect or clean up the uncertain workspace.
+	creatingProjectionSettled := false
 	defer func() {
 		m.mu.Lock()
 		delete(m.pendingCreates, key)
 		m.mu.Unlock()
-		if !createSucceeded {
+		if !creatingProjectionSettled {
 			// Delete-class events are id-keyed, so a client removes exactly the
 			// provisional row even when another repo has the same title. A missed
 			// event is repaired by Snapshot, which no longer contains the pending row.
 			m.publishEvent(agentproto.EventSessionKilled, session.InstanceData{ID: pending.ID, Title: title})
 		}
 	}()
+	settleRetainedCreate := func(instance *session.Instance) {
+		creatingProjectionSettled = true
+		m.publishEvent(agentproto.EventSessionUpdated, instance.ToInstanceData())
+	}
 
 	repoStartLock := m.startLockForRepo(repo.ID)
 	repoStartLock.Lock()
@@ -141,6 +149,7 @@ func (m *Manager) CreateSession(ctx context.Context, req CreateSessionRequest) (
 				return session.InstanceData{}, fmt.Errorf("failed to start instance %q, and its startup outcome could not be determined safely — its workspace may still be on disk at %s and could not be recorded, so it must be inspected and cleaned up by hand: %w",
 					title, instance.GetWorktreePath(), errors.Join(serr, keepErr))
 			}
+			settleRetainedCreate(instance)
 			return session.InstanceData{}, fmt.Errorf("failed to start instance %q, and its startup outcome could not be determined safely, so its workspace was left in place; the session is recorded for inspection and no automatic cleanup will run: %w",
 				title, serr)
 		}
@@ -170,6 +179,7 @@ func (m *Manager) CreateSession(ctx context.Context, req CreateSessionRequest) (
 				return session.InstanceData{}, fmt.Errorf("failed to start instance %q, and its cleanup could not complete safely — its workspace may still be on disk at %s and could not be recorded, so it must be cleaned up by hand: %w",
 					title, instance.GetWorktreePath(), errors.Join(serr, killErr, keepErr))
 			}
+			settleRetainedCreate(instance)
 			return session.InstanceData{}, fmt.Errorf("failed to start instance %q, and its cleanup could not complete safely, so its workspace was left in place; the session is recorded and the daemon will keep retrying the cleanup — it will clear once that succeeds: %w",
 				title, errors.Join(serr, killErr))
 		}
@@ -205,7 +215,7 @@ func (m *Manager) CreateSession(ctx context.Context, req CreateSessionRequest) (
 		return session.InstanceData{}, persistErr
 	}
 	m.captureAgentConversationAsync(repo.ID, key, instance, conversationCapture)
-	createSucceeded = true
+	creatingProjectionSettled = true
 	// Publish from the Manager, not only the control-server wrapper: task delivery
 	// and root-agent ensure call Manager.CreateSession directly. They announced the
 	// same pending row above and therefore must settle it on the same events plane.
@@ -248,22 +258,23 @@ func (m *Manager) reserveCreate(req CreateSessionRequest) (*config.RepoContext, 
 		return nil, "", nil, nil, err
 	}
 
-	// Whether this create lands on the HOOK backend — the one runtime whose name
-	// is a global namespace. ForceRemote is only ONE of three ways to get there:
-	// `--backend hook` and a repo's `backend = "hook"` config both select it with
-	// ForceRemote false, and gating the hook-name checks on ForceRemote alone let
-	// those creates hand scripts a colliding --name. Ask the factory the same
-	// question it will answer at provision time.
-	usesHook := req.ForceRemote
+	// Resolve the runtime once for every namespace decision below. Hook creates
+	// claim a global external slug; local creates claim a repo-scoped tmux name;
+	// docker/ssh claim neither on this host. ForceRemote is only one way to select
+	// hook, so ask the same resolver NewInstance uses.
+	runtimeKind := session.BackendLocal
+	if req.ForceRemote {
+		runtimeKind = session.BackendHook
+	}
 	if kind, kerr := session.BackendKindFor(session.InstanceOptions{
 		Backend:     session.BackendKind(req.Backend),
 		ForceRemote: req.ForceRemote,
 	}, repo.Root); kerr == nil {
-		usesHook = kind == session.BackendHook
+		runtimeKind = kind
 	}
-	// A kerr here means an invalid `backend` value; leave usesHook at the legacy
-	// ForceRemote answer and let NewInstance surface the canonical error rather
-	// than duplicating its wording at a different point in the flow.
+	// A kerr means an invalid backend value. Leave the conservative default above
+	// and let NewInstance surface the canonical error rather than duplicating it.
+	nameNamespace := runtimeNamespaceForKind(runtimeKind)
 
 	var renamedArchived *session.InstanceData
 	title := req.Title
@@ -275,7 +286,7 @@ func (m *Manager) reserveCreate(req CreateSessionRequest) (*config.RepoContext, 
 		// A derived title_base keeps auto-suffixing around every existing session,
 		// archived rows included — the archived-name-reuse rename is reserved for an
 		// EXPLICIT title the caller asked for by name (below).
-		title, err = m.nextAvailableTitleLocked(repo.ID, repo.Root, base, req.Program, usesHook, diskData)
+		title, err = m.nextAvailableTitleLocked(repo.ID, repo.Root, base, req.Program, nameNamespace, diskData)
 		if err != nil {
 			return nil, "", nil, nil, err
 		}
@@ -291,21 +302,25 @@ func (m *Manager) reserveCreate(req CreateSessionRequest) (*config.RepoContext, 
 		// discovering it at `git worktree add` leaves the archived session renamed
 		// for a create that then did not happen, which is exactly the state the
 		// admission comment above promises this function never produces.
-		if err := m.refuseHeldBranchReuseLocked(repo.ID, repo.Root, title, usesHook, req.InPlace); err != nil {
+		if err := m.refuseHeldBranchReuseLocked(repo.ID, repo.Root, title, nameNamespace, req.InPlace, diskData); err != nil {
 			return nil, "", nil, nil, err
 		}
-		renamedArchived, err = m.renameArchivedForReuseLocked(repo.ID, repo.Root, title, req.Program, &diskData)
+		renamedArchived, err = m.renameArchivedForReuseLocked(repo.ID, repo.Root, title, req.Program, nameNamespace, &diskData)
 		if err != nil {
 			return nil, "", nil, nil, err
 		}
-		if err := m.validateTitleAvailableLocked(repo.ID, repo.Root, title, req.Program, usesHook, req.allowReserved, diskData); err != nil {
+		if err := m.validateTitleAvailableLocked(repo.ID, repo.Root, title, req.Program, nameNamespace, req.allowReserved, diskData); err != nil {
 			return nil, "", nil, nil, err
 		}
 	}
 
 	key := daemonInstanceKey(repo.ID, title)
+	tmuxReservationKey := ""
+	if nameNamespace == runtimeNamespaceLocalTmux {
+		tmuxReservationKey = daemonInstanceKey(repo.ID, tmux.SanitizedNameForRepo(title, repo.Root))
+	}
 	remoteName := ""
-	if usesHook {
+	if nameNamespace == runtimeNamespaceRemoteHook {
 		// Keyed by the BARE slug on purpose: it is the exact string the hook
 		// scripts receive as --name, and that namespace is global (see
 		// reservedRemoteNames).
@@ -321,6 +336,12 @@ func (m *Manager) reserveCreate(req CreateSessionRequest) (*config.RepoContext, 
 	// returns the release() only on success); m.mu has been held unbroken since
 	// admitTaskRunLocked, so the count is exactly what admission saw.
 	m.reservedTitles[key] = struct{}{}
+	if tmuxReservationKey != "" {
+		if m.reservedTmuxNames == nil {
+			m.reservedTmuxNames = make(map[string]string)
+		}
+		m.reservedTmuxNames[tmuxReservationKey] = title
+	}
 	if remoteName != "" {
 		m.reservedRemoteNames[remoteName] = struct{}{}
 	}
@@ -329,6 +350,9 @@ func (m *Manager) reserveCreate(req CreateSessionRequest) (*config.RepoContext, 
 		m.mu.Lock()
 		defer m.mu.Unlock()
 		delete(m.reservedTitles, key)
+		if tmuxReservationKey != "" {
+			delete(m.reservedTmuxNames, tmuxReservationKey)
+		}
 		if remoteName != "" {
 			delete(m.reservedRemoteNames, remoteName)
 		}
@@ -380,11 +404,14 @@ func (m *Manager) reserveCreate(req CreateSessionRequest) (*config.RepoContext, 
 //     failed probe the create proceeds and, if the branch really is held, fails
 //     loudly at `git worktree add`: precisely the pre-guard behavior, which
 //     destroyed nothing. Only a branch git POSITIVELY reports as held refuses.
-func (m *Manager) refuseHeldBranchReuseLocked(repoID, repoPath, title string, remote, inPlace bool) error {
-	if remote || inPlace {
+func (m *Manager) refuseHeldBranchReuseLocked(repoID, repoPath, title string, namespace runtimeNameNamespace, inPlace bool, diskData []session.InstanceData) error {
+	if namespace != runtimeNamespaceLocalTmux || inPlace {
 		return nil
 	}
-	archived, _ := m.findArchivedOnlyCollisionLocked(repoID, title)
+	archived, _, err := m.findArchivedOnlyCollisionLocked(repoID, repoPath, title, namespace, diskData)
+	if err != nil {
+		return err
+	}
 	if archived == nil {
 		return nil
 	}
@@ -414,8 +441,11 @@ var reuseArchivedRenamePersist = renameInstanceDataTitle
 // rename happened — no archived collision, or a LIVE/reserved session also holds
 // the name, in which case the create is left to fail in validateTitleAvailableLocked
 // exactly as before. Runs under m.mu.
-func (m *Manager) renameArchivedForReuseLocked(repoID, repoPath, title, program string, diskData *[]session.InstanceData) (*session.InstanceData, error) {
-	archived, oldKey := m.findArchivedOnlyCollisionLocked(repoID, title)
+func (m *Manager) renameArchivedForReuseLocked(repoID, repoPath, title, program string, namespace runtimeNameNamespace, diskData *[]session.InstanceData) (*session.InstanceData, error) {
+	archived, oldKey, err := m.findArchivedOnlyCollisionLocked(repoID, repoPath, title, namespace, *diskData)
+	if err != nil {
+		return nil, err
+	}
 	if archived == nil {
 		return nil, nil
 	}
@@ -425,8 +455,13 @@ func (m *Manager) renameArchivedForReuseLocked(repoID, repoPath, title, program 
 	// Slugify(newTitle), so that slug has to be free in the GLOBAL hook namespace
 	// too — otherwise the rename quietly parks it on a name another project's
 	// sandbox already owns.
-	archivedIsHook := archived.ToInstanceData().IsRemoteHook()
-	newTitle, err := m.uniqueArchivedTitleLocked(repoID, repoPath, oldTitle, program, archivedIsHook, *diskData)
+	archivedNamespace := runtimeNamespaceSandbox
+	if archived.Capabilities().Workspace == session.WorkspaceLocalWorktree {
+		archivedNamespace = runtimeNamespaceLocalTmux
+	} else if archived.ToInstanceData().IsRemoteHook() {
+		archivedNamespace = runtimeNamespaceRemoteHook
+	}
+	newTitle, err := m.uniqueArchivedTitleLocked(repoID, repoPath, oldTitle, program, archivedNamespace, *diskData)
 	if err != nil {
 		return nil, err
 	}
@@ -512,19 +547,27 @@ func (m *Manager) renameArchivedForReuseLocked(repoID, repoPath, title, program 
 	return &renamed, nil
 }
 
-// findArchivedOnlyCollisionLocked returns the archived instance whose title
-// collides with `title`, together with its manager-map key — but ONLY when nothing
-// else claims the name: no LIVE (non-archived) instance and no in-flight
-// reservation collide with it. A live or reserved collision returns nil, so the
-// archived-name-reuse rename never runs around a name a real session still holds.
+// findArchivedOnlyCollisionLocked returns the ONE loaded archived instance whose
+// title collides with `title`, together with its manager-map key — but only when
+// it is the sole claim across reservations, loaded instances, and durable rows.
+// A live/reserved collision returns nil so ordinary availability validation
+// reports it. Multiple claims return an error immediately: renaming an arbitrary
+// loaded winner would mutate user state and still leave the requested runtime
+// name unavailable.
 // Runs under m.mu.
-func (m *Manager) findArchivedOnlyCollisionLocked(repoID, title string) (*session.Instance, string) {
+func (m *Manager) findArchivedOnlyCollisionLocked(repoID, repoPath, title string, namespace runtimeNameNamespace, diskData []session.InstanceData) (*session.Instance, string, error) {
 	for key := range m.reservedTitles {
 		rid, existing := splitDaemonInstanceKey(key)
 		if rid == repoID && m.titlesCollide(existing, title) {
 			// A concurrent create is reserving a colliding name; let the
 			// availability check reject with errConcurrentCreate.
-			return nil, ""
+			return nil, "", nil
+		}
+	}
+	if namespace == runtimeNamespaceLocalTmux {
+		nameKey := daemonInstanceKey(repoID, tmux.SanitizedNameForRepo(title, repoPath))
+		if _, reserved := m.reservedTmuxNames[nameKey]; reserved {
+			return nil, "", nil
 		}
 	}
 	var archived *session.Instance
@@ -534,17 +577,48 @@ func (m *Manager) findArchivedOnlyCollisionLocked(repoID, title string) (*sessio
 		if rid != repoID || inst == nil {
 			continue
 		}
-		if !m.titlesCollide(inst.Title, title) {
+		bothUseLocalTmux := namespace == runtimeNamespaceLocalTmux && inst.Capabilities().Workspace == session.WorkspaceLocalWorktree
+		if m.titleCollisionNamespace(repoPath, inst.Title, title, bothUseLocalTmux) == titleNamespaceNone {
 			continue
 		}
 		if inst.GetLiveness() != session.LiveArchived {
 			// A live session still holds the name — do not rename around it.
-			return nil, ""
+			return nil, "", nil
+		}
+		if archived != nil {
+			return nil, "", fmt.Errorf("cannot reuse session name %q: archived sessions %q and %q both claim its runtime namespace; rename or permanently delete one before retrying",
+				title, archived.Title, inst.Title)
 		}
 		archived = inst
 		archivedKey = key
 	}
-	return archived, archivedKey
+	if archived == nil {
+		// A disk-only claim will be rejected by the ordinary availability check.
+		// With no loaded archived row there is nothing this helper could mutate,
+		// so leave that path's established diagnostic in charge.
+		return nil, "", nil
+	}
+
+	// diskData contains the persisted copy of the loaded archived row as well as
+	// rows refreshLocked could not materialize. Consume exactly ONE matching copy
+	// of the loaded row; every other colliding non-Loading record is an independent
+	// namespace claim. Checking it before RenameArchived is load-bearing: the
+	// later availability check also sees disk-only rows, but by then the archive's
+	// worktree, title, manager key, and storage row have already been rewritten.
+	matchedPersistedCopy := false
+	for _, data := range diskData {
+		bothUseLocalTmux := namespace == runtimeNamespaceLocalTmux && data.UsesLocalTmux()
+		if m.titleCollisionNamespace(repoPath, data.Title, title, bothUseLocalTmux) == titleNamespaceNone || data.Status == session.Loading {
+			continue
+		}
+		if !matchedPersistedCopy && data.Title == archived.Title && data.ID == archived.ID {
+			matchedPersistedCopy = true
+			continue
+		}
+		return nil, "", fmt.Errorf("cannot reuse session name %q: archived session %q and stored session %q both claim its runtime namespace; rename or permanently delete one before retrying",
+			title, archived.Title, data.Title)
+	}
+	return archived, archivedKey, nil
 }
 
 // uniqueArchivedTitleLocked returns the first free disambiguated title for an
@@ -556,13 +630,13 @@ func (m *Manager) findArchivedOnlyCollisionLocked(repoID, title string) (*sessio
 // session, which keeps the branch it already has checked out. The new title is a
 // label, not a branch to be created, so "is this branch checked out somewhere" is
 // not a question about it.
-func (m *Manager) uniqueArchivedTitleLocked(repoID, repoPath, base, program string, remote bool, diskData []session.InstanceData) (string, error) {
+func (m *Manager) uniqueArchivedTitleLocked(repoID, repoPath, base, program string, namespace runtimeNameNamespace, diskData []session.InstanceData) (string, error) {
 	for i := 1; i <= 10000; i++ {
 		candidate := fmt.Sprintf("%s (archived)", base)
 		if i > 1 {
 			candidate = fmt.Sprintf("%s (archived %d)", base, i)
 		}
-		err := m.validateTitleAvailableLocked(repoID, repoPath, candidate, program, remote, false, diskData)
+		err := m.validateTitleAvailableLocked(repoID, repoPath, candidate, program, namespace, false, diskData)
 		if err == nil {
 			return candidate, nil
 		}
@@ -573,7 +647,7 @@ func (m *Manager) uniqueArchivedTitleLocked(repoID, repoPath, base, program stri
 	return "", fmt.Errorf("could not find an available archived name for %q", base)
 }
 
-func (m *Manager) nextAvailableTitleLocked(repoID, repoPath, baseTitle, program string, remote bool, diskData []session.InstanceData) (string, error) {
+func (m *Manager) nextAvailableTitleLocked(repoID, repoPath, baseTitle, program string, namespace runtimeNameNamespace, diskData []session.InstanceData) (string, error) {
 	// Session records are not the only thing that can make a candidate unusable
 	// (#2091). A branch already CHECKED OUT by some worktree cannot be checked
 	// out again, and archiving relocates a worktree rather than removing it
@@ -584,7 +658,7 @@ func (m *Manager) nextAvailableTitleLocked(repoID, repoPath, baseTitle, program 
 	// So ask the one component that knows which branches are checked out
 	// somewhere, ONCE per walk, and skip those rungs instead of discovering the
 	// collision at add time.
-	heldBranches := m.worktreeHeldBranchesLocked(repoPath, remote)
+	heldBranches := m.worktreeHeldBranchesLocked(repoPath, namespace != runtimeNamespaceLocalTmux)
 	for i := 1; i <= 10000; i++ {
 		candidate := baseTitle
 		if i > 1 {
@@ -596,7 +670,7 @@ func (m *Manager) nextAvailableTitleLocked(repoID, repoPath, baseTitle, program 
 				candidate, branch, holder)
 			continue
 		}
-		err := m.validateTitleAvailableLocked(repoID, repoPath, candidate, program, remote, false, diskData)
+		err := m.validateTitleAvailableLocked(repoID, repoPath, candidate, program, namespace, false, diskData)
 		if err == nil {
 			return candidate, nil
 		}
@@ -610,7 +684,7 @@ func (m *Manager) nextAvailableTitleLocked(repoID, repoPath, baseTitle, program 
 	return "", fmt.Errorf("could not find an available title for %q", baseTitle)
 }
 
-func (m *Manager) validateTitleAvailableLocked(repoID, repoPath, title, program string, remote, allowReserved bool, diskData []session.InstanceData) error {
+func (m *Manager) validateTitleAvailableLocked(repoID, repoPath, title, program string, namespace runtimeNameNamespace, allowReserved bool, diskData []session.InstanceData) error {
 	// Whitespace-only titles (e.g. "   ") are non-empty and so slip past a bare
 	// == "" check, creating sessions with effectively blank names (#973). Trim
 	// before the emptiness gate; the TUI naming flow applies the same check.
@@ -632,18 +706,20 @@ func (m *Manager) validateTitleAvailableLocked(repoID, repoPath, title, program 
 	// (#605) or "A B"/"a-b" (#741) both collide. The second worktree create
 	// would otherwise fail with a cryptic git error, so reject the conflict
 	// here, before any worktree or tmux setup runs.
-	if existing, kind := m.findTitleConflictLocked(repoID, title, diskData); existing != "" {
+	if existing, kind, collisionNamespace := m.findTitleConflictLocked(repoID, repoPath, title, namespace == runtimeNamespaceLocalTmux, diskData); existing != "" {
 		switch {
 		case existing == title:
 			if kind == titleConflictReserved {
 				return fmt.Errorf("session with title %q is already reserved: %w", title, errConcurrentCreate)
 			}
 			return fmt.Errorf("session with title %q already exists: %w", title, errConcurrentCreate)
+		case collisionNamespace == titleNamespaceTmux:
+			return fmt.Errorf("session titled %q conflicts with existing session %q: both map to tmux session %q", title, existing, tmux.SanitizedNameForRepo(title, repoPath))
 		default:
 			return fmt.Errorf("session titled %q conflicts with existing session %q: both sanitize to the same git branch %q", title, existing, m.branchForTitle(title))
 		}
 	}
-	if remote {
+	if namespace == runtimeNamespaceRemoteHook {
 		candidate := session.Slugify(title)
 		// Hook names are the ONE namespace that stays global while titles go
 		// per-repo: launch_cmd/delete_cmd receive `--name <slug>` verbatim, with
@@ -696,6 +772,9 @@ func (m *Manager) validateTitleAvailableLocked(repoID, repoPath, title, program 
 		if owner != "" {
 			return fmt.Errorf("remote session titled %q in project %s already maps to hook name %q; remote hook names are shared across projects because the hook scripts receive them verbatim as --name — pick another title for this remote session", owner, ownerRepo, candidate)
 		}
+		return nil
+	}
+	if namespace != runtimeNamespaceLocalTmux {
 		return nil
 	}
 	tmuxSession := tmux.NewTmuxSessionForRepo(title, repoPath, program)
@@ -778,64 +857,6 @@ func hookSlugOwnerInOtherRepos(candidate, repoID string) (string, string, error)
 // available title", swallowing the actionable corruption message. Callers check
 // errors.Is and surface it instead of suffixing around it.
 var errTitleCheckFatal = errors.New("cannot verify title availability")
-
-type titleConflictKind int
-
-const (
-	titleConflictNone titleConflictKind = iota
-	titleConflictReserved
-	titleConflictLive
-	titleConflictDisk
-)
-
-// findTitleConflictLocked returns the existing title that conflicts with the
-// given candidate, along with the source of the conflict. An empty result means
-// the title is available. Two titles conflict when they derive the same git
-// branch name: branches are produced by git.SanitizeBranchName, which lowercases
-// and normalizes (spaces -> dashes, unsafe chars stripped, dashes collapsed),
-// so distinct titles like "MyApp"/"myapp" (#605) or "A B"/"a-b" (#741) can map
-// to one branch. Rejecting the collision here keeps the second worktree create
-// from failing with a cryptic git error.
-func (m *Manager) findTitleConflictLocked(repoID, title string, diskData []session.InstanceData) (string, titleConflictKind) {
-	for key := range m.reservedTitles {
-		rid, existing := splitDaemonInstanceKey(key)
-		if rid == repoID && m.titlesCollide(existing, title) {
-			return existing, titleConflictReserved
-		}
-	}
-	for key, inst := range m.instances {
-		rid, _ := splitDaemonInstanceKey(key)
-		if rid != repoID || inst == nil {
-			continue
-		}
-		if m.titlesCollide(inst.Title, title) {
-			return inst.Title, titleConflictLive
-		}
-	}
-	for _, data := range diskData {
-		if !m.titlesCollide(data.Title, title) {
-			continue
-		}
-		// Loading entries are transient TUI state with an empty worktree
-		// path and cannot be restored. Older TUI binaries (#551) could
-		// persist them to disk on quit, where they would block title
-		// reuse forever. Treat them as ghosts that the next save will
-		// reap rather than as live reservations.
-		if data.Status == session.Loading {
-			continue
-		}
-		return data.Title, titleConflictDisk
-	}
-	return "", titleConflictNone
-}
-
-// titlesCollide reports whether two session titles cannot coexist in the same
-// repo because they would derive the same git branch. It delegates to the shared
-// git.TitlesCollide helper so the daemon's authoritative validation and the
-// TUI's naming pre-check stay in lockstep (#936).
-func (m *Manager) titlesCollide(a, b string) bool {
-	return git.TitlesCollide(a, b, m.cfg.BranchPrefix)
-}
 
 // branchesHeldByWorktrees is the git query worktreeHeldBranchesLocked runs. A
 // package var so tests can force the probe to FAIL in isolation — the answer

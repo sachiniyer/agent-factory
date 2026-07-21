@@ -10236,6 +10236,9 @@ function reorderTargetIndex(from, insertion) {
 function isActionableSession(s) {
   return typeof s.id === "string" && s.id !== "" && (s.lifecycle_action === "archive" || s.lifecycle_action === "restore");
 }
+function isKillableSession(s) {
+  return typeof s.id === "string" && s.id !== "" && s.can_kill === true;
+}
 var MAX_TABS = 9;
 var OFF_BOX_BACKENDS = /* @__PURE__ */ new Set(["docker", "ssh", "remote"]);
 function supportsTabManagement(s) {
@@ -10924,33 +10927,42 @@ var AppShell = class {
     const notice = this.railNotice(state, scoped, visible);
     list.replaceChildren(...notice ? [notice, ...rows] : rows);
   }
-  /** Quiet per-session controls reserved beside every ACTIONABLE rail row (#2186,
-   *  #2223, #2234). The Go projection chooses Archive vs Restore; the browser never
-   *  reconstructs that policy from row state. */
+  /** Quiet controls reserved beside every row carrying at least one daemon-owned
+   *  capability (#2186, #2223, #2234). Archive/Restore and Kill narrow separately;
+   *  the browser never reconstructs either policy from status pixels. */
   rowActions(session, selected) {
-    const lifecycleBtn = h2("button", { type: "button", class: "af-rail-action af-rail-lifecycle" });
-    lifecycleBtn.addEventListener("click", (e) => {
-      e.stopPropagation();
-      if (lifecycleBtn.dataset.action === "restore") {
-        this.runRailExit(() => this.actions.restore(session));
-      } else {
-        this.runRailExit(() => this.actions.archive(session));
+    const buttons = [];
+    if (isActionableSession(session)) {
+      const lifecycleSession = session;
+      const lifecycleBtn = h2("button", { type: "button", class: "af-rail-action af-rail-lifecycle" });
+      lifecycleBtn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        if (lifecycleBtn.dataset.action === "restore") {
+          this.runRailExit(() => this.actions.restore(lifecycleSession));
+        } else {
+          this.runRailExit(() => this.actions.archive(lifecycleSession));
+        }
+      });
+      this.patchLifecycleButton(lifecycleBtn, lifecycleSession.lifecycle_action, lifecycleSession.title);
+      if (selected) {
+        this.lifecycleBtn = lifecycleBtn;
+        this.lifecycleAction = lifecycleSession.lifecycle_action;
       }
-    });
-    this.patchLifecycleButton(lifecycleBtn, session.lifecycle_action, session.title);
-    if (selected) {
-      this.lifecycleBtn = lifecycleBtn;
-      this.lifecycleAction = session.lifecycle_action;
+      buttons.push(lifecycleBtn);
     }
-    const killBtn = h2("button", { type: "button", class: "af-rail-action af-rail-kill" }, "\u232B");
-    const killLabel = `Kill session \u201C${session.title}\u201D`;
-    killBtn.setAttribute("aria-label", killLabel);
-    killBtn.setAttribute("title", killLabel);
-    killBtn.addEventListener("click", (e) => {
-      e.stopPropagation();
-      this.runRailExit(() => this.actions.kill(session));
-    });
-    return h2("div", { class: "af-row-actions" }, lifecycleBtn, killBtn);
+    if (isKillableSession(session)) {
+      const killSession2 = session;
+      const killBtn = h2("button", { type: "button", class: "af-rail-action af-rail-kill" }, "\u232B");
+      const killLabel = `Kill session \u201C${killSession2.title}\u201D`;
+      killBtn.setAttribute("aria-label", killLabel);
+      killBtn.setAttribute("title", killLabel);
+      killBtn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        this.runRailExit(() => this.actions.kill(killSession2));
+      });
+      buttons.push(killBtn);
+    }
+    return h2("div", { class: "af-row-actions" }, ...buttons);
   }
   /** Applies the daemon-projected verb, glyph, and target-qualified accessible name
    *  in one place so render and same-selection live patching cannot drift. */
@@ -11616,6 +11628,8 @@ function sessionRow(s, selected, openSession, buildActions) {
   const status = rowStatus(s);
   const creating = isCreating(s);
   const actionable = isActionableSession(s);
+  const killable = isKillableSession(s);
+  const managed = actionable || killable;
   const title = h2("div", { class: "af-row-title" }, rowTitle(s));
   const branch = h2(
     "div",
@@ -11633,15 +11647,15 @@ function sessionRow(s, selected, openSession, buildActions) {
     row.append(dot);
   }
   row.append(main);
-  if (actionable) {
+  if (managed) {
     row.append(buildActions(s));
   }
   row.setAttribute("role", "option");
   row.setAttribute("aria-selected", selected ? "true" : "false");
   row.setAttribute("title", `${s.title} \u2014 ${status.label}`);
-  if (!actionable) {
+  if (!actionable && !managed) {
     row.setAttribute("aria-disabled", "true");
-  } else {
+  } else if (actionable) {
     row.addEventListener("click", () => openSession(s.id));
   }
   return row;
@@ -11840,6 +11854,11 @@ function openFromRail(id) {
   focusTerminal();
 }
 function focusTerminal() {
+  const selected = selectedSessionData();
+  if (!selected || !isActionableSession(selected)) {
+    focusRail();
+    return;
+  }
   if (!splitView.focus()) {
     focusRail();
     return;
@@ -12332,14 +12351,16 @@ function syncSplit(state) {
   const tok = token;
   const initialTab = clampActiveTab(state.sessions, selId, state.activeTab);
   const selected = selId ? state.sessions.find((s) => s.id === selId) : null;
-  const tabIds = selected ? sessionTabs(selected).map(tabIdentity) : ["0:"];
-  const tabRealIds = selected ? sessionTabs(selected).map(tabRealId) : [""];
-  const tabTargets = selected ? sessionTabs(selected).map((t) => t.url) : [];
-  const tabKinds = selected ? sessionTabs(selected).map((t) => t.kind) : [];
-  const tabNames = selected ? sessionTabs(selected).map((t) => t.name) : [];
-  const archived = selected ? isArchived(selected) : false;
+  const runtimeSelected = selected && isActionableSession(selected) ? selected : null;
+  const runtimeSessionId = runtimeSelected ? selId : null;
+  const tabIds = runtimeSelected ? sessionTabs(runtimeSelected).map(tabIdentity) : ["0:"];
+  const tabRealIds = runtimeSelected ? sessionTabs(runtimeSelected).map(tabRealId) : [""];
+  const tabTargets = runtimeSelected ? sessionTabs(runtimeSelected).map((t) => t.url) : [];
+  const tabKinds = runtimeSelected ? sessionTabs(runtimeSelected).map((t) => t.kind) : [];
+  const tabNames = runtimeSelected ? sessionTabs(runtimeSelected).map((t) => t.name) : [];
+  const archived = runtimeSelected ? isArchived(runtimeSelected) : false;
   splitView.setSession(
-    tok !== null ? selId : null,
+    tok !== null ? runtimeSessionId : null,
     tok,
     tabIds,
     initialTab,
@@ -12434,8 +12455,9 @@ function onKeydown(e) {
   if (!inTerminal && e.key !== "Escape" && isNativeControl(target)) {
     return;
   }
-  const focus = state.selectedId && state.view === "sessions" ? state.focus : "rail";
   const selected = selectedSessionData();
+  const actionableSelected = selected && isActionableSession(selected) ? selected : null;
+  const focus = state.selectedId && actionableSelected && state.view === "sessions" ? state.focus : "rail";
   const action = decideKey(
     e.key,
     {
@@ -12451,11 +12473,11 @@ function onKeydown(e) {
       orderedIds: filterSessions(
         orderedSessions(scopeToProject(state.sessions, state.selectedProject)),
         state.statusFilter
-      ).filter((s) => !isCreating(s)).map((s) => s.id ?? "").filter((id) => id !== ""),
-      selectedId: state.selectedId,
-      tabCount: selected ? sessionTabs(selected).length : 1,
+      ).filter(isActionableSession).map((s) => s.id),
+      selectedId: actionableSelected ? state.selectedId : null,
+      tabCount: actionableSelected ? sessionTabs(actionableSelected).length : 1,
       activeTab: state.activeTab,
-      tabManagement: selected ? canManageTabs(selected) : false
+      tabManagement: actionableSelected ? canManageTabs(actionableSelected) : false
     },
     { alt: e.altKey }
   );

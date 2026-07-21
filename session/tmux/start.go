@@ -85,10 +85,18 @@ func (t *TmuxSession) Start(workDir string) error {
 			commandDone = nil
 			if commandErr != nil {
 				_ = ptmx.Close()
+				var launchErr error
 				if systemdScoped {
-					return fmt.Errorf("error starting tmux session: systemd-run --user --scope failed to create session %q: %w", t.sanitizedName, commandErr)
+					launchErr = fmt.Errorf("error starting tmux session: systemd-run --user --scope failed to create session %q: %w", t.sanitizedName, commandErr)
+				} else {
+					launchErr = fmt.Errorf("error starting tmux session: tmux new-session for %q failed: %w", t.sanitizedName, commandErr)
 				}
-				return fmt.Errorf("error starting tmux session: tmux new-session for %q failed: %w", t.sanitizedName, commandErr)
+
+				// The launch process began. Its exit status, even paired with later
+				// name absence, cannot prove a pane never ran and is not still flushing
+				// after tmux removed its session. Keep every answered post-spawn failure
+				// outside ErrSessionNotStarted so LocalBackend preserves the worktree.
+				return launchErr
 			}
 		case <-timeout:
 			ptmx.Close()
@@ -104,14 +112,23 @@ func (t *TmuxSession) Start(workDir string) error {
 			// diagnostics, and older callers may still distinguish an unknown tmux
 			// outcome from a clean pre-spawn failure. %w, never %v, so the sentinel
 			// survives every wrapping layer.
-			_, cleanupErr := t.Close()
+			// A timeout may happen after tmux created a pane but before has-session
+			// observed it. Teardown alone is not cleanup proof: kill-session returns
+			// before the pane process finishes flushing. Wait for that process here,
+			// and keep the outcome unknown if it outlives the bound, so LocalBackend
+			// cannot remove the fresh worktree underneath its final writes.
+			cleanupState, cleanupErr := t.CloseAndWaitForPaneExit()
 			if cleanupErr != nil {
 				timeoutErr = fmt.Errorf("%v (cleanup error: %v)", timeoutErr, cleanupErr)
 			}
-			// The readiness deadline itself is the unknown. Even if Close
-			// confidently reports that the requested name is absent, tmux may
-			// have created a differently escaped name that Close never targeted
-			// (#2207). A timeout can therefore never authorize workspace deletion.
+			// A successful close+pane-exit confirmation on a positive-policy name
+			// establishes that the exact launch identity is gone. The old blanket
+			// timeout classification was necessary only while a fresh title could
+			// contain spellings tmux rewrote (#2207); legacy exact names still stay
+			// on that conservative path through hasStableTmuxSpelling.
+			if cleanupState == PaneStateKnown && cleanupErr == nil && hasStableTmuxSpelling(t.sanitizedName) {
+				return fmt.Errorf("%w: %w", timeoutErr, ErrSessionNotStarted)
+			}
 			return fmt.Errorf("%w: %w", timeoutErr, ErrTmuxTimeout)
 		default:
 			time.Sleep(sleepDuration)

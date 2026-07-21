@@ -50,9 +50,15 @@ type InstanceData struct {
 	// ToInstanceData and scrubbed by ForStorage; instances.json must not preserve
 	// a UI decision that can go stale across restart.
 	LifecycleAction LifecycleAction `json:"lifecycle_action,omitempty"`
+	// CanKill is the independent projection-only teardown capability. It is true
+	// for any stable, non-creating row, including StartupStateUnknown: that state
+	// vetoes runtime reuse but must remain explicitly removable. Like
+	// LifecycleAction, this is derived live and scrubbed before disk persistence.
+	CanKill bool `json:"can_kill,omitempty"`
 	// TaskRunActive records whether this session's task run is still in flight
-	// (#1892) — true from creation, false once the agent goes idle. It is the one
-	// fact the watch-task concurrency cap counts, and it is stored rather than
+	// (#1892) — true from creation, false once the agent goes idle or startup
+	// settles terminal-unknown. It is the one fact the watch-task concurrency cap
+	// counts, and it is stored rather than
 	// re-derived because every neighbouring signal answers a different question:
 	// Lost cannot tell a finished run from an interrupted one, and an in-flight op
 	// means the DAEMON is busy (archiving a completed session is teardown, not
@@ -115,6 +121,15 @@ func (d InstanceData) IsRemoteHook() bool {
 	return d.BackendType == "remote"
 }
 
+// UsesLocalTmux reports whether this persisted row belongs to the in-process
+// local backend and therefore claims a repo-scoped tmux name. Empty is the
+// pre-backend-discriminator legacy encoding and also means local. Keeping this
+// decoding beside BackendType prevents daemon admission from growing its own
+// backend-name list.
+func (d InstanceData) UsesLocalTmux() bool {
+	return d.BackendType == "" || d.BackendType == "local"
+}
+
 // ForStorage returns data suitable for instances.json. InstanceData is also the
 // daemon Snapshot payload, so it can carry transient in-flight operation state;
 // disk persistence must not.
@@ -124,6 +139,7 @@ func (d InstanceData) ForStorage() InstanceData {
 	d.Liveness = lv
 	d.InFlightOp = OpNone
 	d.LifecycleAction = LifecycleActionNone
+	d.CanKill = false
 	return d
 }
 

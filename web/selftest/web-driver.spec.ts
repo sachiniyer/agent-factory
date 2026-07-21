@@ -894,13 +894,15 @@ test("#2234: creating and id-less rows expose no lifecycle actions; the shared p
       liveness: 2,
       in_flight_op: 0,
       lifecycle_action: "archive",
+      can_kill: true,
       ...extra,
     });
     list.push(
       synth("probe-actionable", {}),
       synth("probe-restorable", { liveness: 3, lifecycle_action: "restore" }),
-      synth("probe-creating", { in_flight_op: 1, lifecycle_action: undefined }),
-      synth("probe-idless", { id: undefined, lifecycle_action: undefined }),
+      synth("probe-startup-unknown", { startup_state_unknown: true, lifecycle_action: undefined }),
+      synth("probe-creating", { in_flight_op: 1, lifecycle_action: undefined, can_kill: undefined }),
+      synth("probe-idless", { id: undefined, lifecycle_action: undefined, can_kill: undefined }),
     );
     if (snap) {
       snap.instances = list;
@@ -920,6 +922,28 @@ test("#2234: creating and id-less rows expose no lifecycle actions; the shared p
     await expect(inert.locator(".af-row-actions")).toHaveCount(0);
     await expect(inert.getByRole("button")).toHaveCount(0);
   }
+
+  // Runtime uncertainty is not a reversible lifecycle action and cannot attach,
+  // but its stable retained record remains explicitly removable.
+  const uncertain = row(p, "probe-startup-unknown");
+  await expect(uncertain).toBeVisible();
+  await uncertain.hover();
+  await expect(railAction(p, "probe-startup-unknown", "Kill session")).toHaveCount(1);
+  await expect(railAction(p, "probe-startup-unknown", "Archive session")).toHaveCount(0);
+  await expect(railAction(p, "probe-startup-unknown", "Restore session")).toHaveCount(0);
+
+  // Keyboard navigation must apply the same runtime-entry fence as row clicks.
+  // Walk the entire visible rail in both directions: a kill-only retained row may
+  // own its explicit Kill button, but j/k must never make it the terminal target.
+  const visibleRows = await p.locator(".af-rail .af-row").count();
+  let uncertainSelected = false;
+  for (const key of ["j", "k"]) {
+    for (let i = 0; i <= visibleRows; i += 1) {
+      await p.keyboard.press(key);
+      uncertainSelected ||= (await uncertain.getAttribute("aria-selected")) === "true";
+    }
+  }
+  expect(uncertainSelected).toBe(false);
 
   // The same server-owned value selects Archive vs Restore, and every accessible
   // name carries its target now that unselected rows can own controls.

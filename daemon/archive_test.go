@@ -89,6 +89,23 @@ func TestArchiveSession_MovesWorktreeAndMarksArchived(t *testing.T) {
 	assert.Contains(t, string(list), archivedPath, "git must still register the worktree at its new path")
 }
 
+// TestArchiveSessionRejectsStartupUnknown prevents archive from turning an
+// uncertain runtime identity into a destructive worktree move. The only safe
+// lifecycle operation on this record is an explicit kill/cleanup chosen by the
+// user after inspection.
+func TestArchiveSessionRejectsStartupUnknown(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	inst, srcPath := registerArchivable(t, manager, repoID, repoPath, "uncertain")
+	inst.MarkStartupStateUnknown()
+
+	_, _, err := manager.ArchiveSession(ArchiveSessionRequest{Title: "uncertain", RepoID: repoID})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "startup")
+	assert.Contains(t, err.Error(), "unknown")
+	assert.True(t, exists(srcPath), "archive moved a worktree whose runtime identity is unknown")
+	assert.NotEqual(t, session.Archived, inst.GetStatus())
+}
+
 // TestArchiveSession_MoveFailureMarksLost: when the worktree move fails, the
 // instance is marked Lost (not Archived) with started still true, so the
 // Lost-restore loop re-spawns the agent in place — and the worktree is left

@@ -148,6 +148,29 @@ func TestMenuArchiveRestoreActionByRowState(t *testing.T) {
 	}
 }
 
+// A create whose launch crossed the uncertainty boundary is deliberately inert:
+// af cannot safely attach, archive, or restore it because the runtime identity was
+// never confirmed. Its stable record is still the only cleanup handle the user
+// has, though, so the footer must keep Kill available as a separate capability.
+func TestMenuStartupUnknownOffersKillWithoutRuntimeActions(t *testing.T) {
+	inst := readyUIInstance()
+	inst.MarkStartupStateUnknown()
+	m := NewMenu()
+	m.SetInstance(inst)
+
+	if !menuHasOption(m, keys.KeyKill) {
+		t.Fatal("startup-unknown row has no Kill action")
+	}
+	for _, forbidden := range []keys.KeyName{
+		keys.KeyArchive, keys.KeyRestore, keys.KeyEnter, keys.KeyAttach,
+		keys.KeyNewTab, keys.KeyCloseTab, keys.KeyOpenPane,
+	} {
+		if menuHasOption(m, forbidden) {
+			t.Fatalf("startup-unknown row exposes unsafe action %q", forbidden)
+		}
+	}
+}
+
 // TestMenuArchiveRestoreHintByRowState verifies the mgmt-group footer hint
 // (#1605): a live row advertises `a archive`; a resting (archived/lost/dead) row
 // advertises the dedicated `r restore` key instead. The two verbs live on

@@ -35,6 +35,9 @@ func (v LifecycleView) ValidateRuntimeAction(action RuntimeAction) error {
 	if v.UserKilled {
 		return fmt.Errorf("session %q has a pending kill", v.Title)
 	}
+	if v.StartupStateUnknown {
+		return fmt.Errorf("session %q has an unknown startup state; inspect its workspace and runtime before explicitly removing it", v.Title)
+	}
 
 	switch action {
 	case RuntimeActionRestoreArchived:

@@ -157,7 +157,7 @@ func (m *home) handleDefaultKeyPress(msg tea.KeyMsg, name keys.KeyName) (tea.Mod
 // so the event loop never blocks on it (#844).
 func (m *home) handleKill() (tea.Model, tea.Cmd) {
 	selected := m.sidebar.GetSelectedInstance()
-	if selected == nil || selected.LifecycleAction() == session.LifecycleActionNone {
+	if selected == nil || !selected.CanKill() {
 		return m, nil
 	}
 	if selected.IsTearingDown() {
