@@ -22,51 +22,98 @@ type tmuxClientlessChannel struct {
 	ts *tmux.TmuxSession
 
 	mu   sync.Mutex
-	dir  string         // temp dir holding the FIFO, removed on StopCapture
+	dir  string         // temp dir holding the FIFO, removed after its reader drains
 	fifo string         // FIFO path pipe-pane writes to
 	rc   *captureReader // read end of the FIFO
 }
 
-// captureReader wraps the FIFO's read end so Close wakes a Read parked in
-// read(2). The FIFO cannot enter Go's netpoller on darwin (kqueue does not
-// work with fifos — see os/file_unix.go), so the fd is a plain blocking
-// descriptor and close(2) does NOT interrupt an in-flight read: with pipe-pane
-// already gone no byte would ever arrive, and the teardown join in
-// ptyBroker.stopCapture hung forever, wedging session delete and with it the
-// whole daemon (#1943). Close latches stopped, then writes one sentinel byte
-// into the FIFO — the O_RDWR read end keeps a reader registered, so the
-// nonblocking writer open cannot fail with ENXIO — forcing any parked read to
-// return. Read reports io.EOF once stopped, so the sentinel never reaches the
-// broker ring.
+// captureReader wraps the FIFO's read end so capture teardown can drain every
+// byte the pipe-pane writer committed before reporting EOF. The FIFO reader is
+// opened read-only and a private keeper writer prevents transient writer exits
+// from ending a live capture. Once tmux has disabled pipe-pane, closing that
+// keeper lets the kernel's ordered FIFO EOF become the drain boundary: queued
+// pane bytes (including NULs and chunks larger than the broker buffer) are read
+// first, then EOF arrives after the real writer closes.
+//
+// If disabling pipe-pane fails, its writer may remain open forever. That
+// already-aborted path writes one wake byte through the keeper before closing
+// it; Read sees the abort latch and discards the whole read, so the byte can
+// never be confused with successful raw PTY output. Successful teardown never
+// injects a control byte.
 type captureReader struct {
-	f       *os.File
-	fifo    string
-	stopped atomic.Bool
-	once    sync.Once
-	err     error
+	f         *os.File
+	keepalive *os.File
+	dir       string
+	abort     atomic.Bool
+	eof       atomic.Bool
+	stopOnce  sync.Once
+	cleanOnce sync.Once
+	err       error
 }
 
 func (r *captureReader) Read(p []byte) (int, error) {
-	if r.stopped.Load() {
+	if r.eof.Load() {
+		return 0, io.EOF
+	}
+	if len(p) == 0 {
+		return 0, nil
+	}
+
+	if r.abort.Load() {
+		r.eof.Store(true)
+		r.finish()
 		return 0, io.EOF
 	}
 	n, err := r.f.Read(p)
-	if r.stopped.Load() {
+	if r.abort.Load() {
+		r.eof.Store(true)
+		r.finish()
 		return 0, io.EOF
+	}
+	if err != nil {
+		if err == io.EOF {
+			r.eof.Store(true)
+		}
+		r.finish()
 	}
 	return n, err
 }
 
 func (r *captureReader) Close() error {
-	r.once.Do(func() {
-		r.stopped.Store(true)
-		if w, err := os.OpenFile(r.fifo, os.O_WRONLY|syscall.O_NONBLOCK, 0); err == nil {
-			_, _ = w.Write([]byte{0})
-			_ = w.Close()
+	return r.stop(false)
+}
+
+// stop closes the FIFO's private keeper. When tmux positively disabled its
+// writer, drain=true lets Read consume through the kernel EOF. Otherwise the
+// keeper's failure-only byte prevents an unknown external writer from wedging
+// teardown; Read discards it because abort is already latched.
+func (r *captureReader) stop(drain bool) error {
+	r.stopOnce.Do(func() {
+		if !drain {
+			r.abort.Store(true)
+			if r.keepalive != nil {
+				_, _ = r.keepalive.Write([]byte{0})
+			}
 		}
-		r.err = r.f.Close()
+		if r.keepalive != nil {
+			r.err = r.keepalive.Close()
+		}
 	})
 	return r.err
+}
+
+func (r *captureReader) finish() {
+	r.cleanOnce.Do(func() {
+		if r.f != nil {
+			_ = r.f.Close()
+		}
+		if r.keepalive != nil {
+			_ = r.keepalive.Close()
+		}
+		if r.dir != "" {
+			_ = os.RemoveAll(r.dir)
+		}
+	})
 }
 
 var _ clientlessChannel = (*tmuxClientlessChannel)(nil)
@@ -76,10 +123,10 @@ func newTmuxClientlessChannel(ts *tmux.TmuxSession) *tmuxClientlessChannel {
 }
 
 // StartCapture makes a private FIFO, opens its read end, and enables pipe-pane to
-// write the pane's raw output into it. The FIFO is opened O_RDWR so the reader
-// stays valid even across the brief window before tmux's `cat` opens the write
-// end (and never sees EOF from a transient writer close) — StopCapture is the
-// only thing that ends the stream.
+// write the pane's raw output into it. A private writer keeps the FIFO live across
+// the brief window before tmux opens its writer and across transient writer exits;
+// StopCapture closes the keeper only after disabling pipe-pane, making FIFO EOF
+// an ordered end-of-stream marker rather than injecting one into the PTY bytes.
 func (c *tmuxClientlessChannel) StartCapture() (io.ReadCloser, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -96,22 +143,41 @@ func (c *tmuxClientlessChannel) StartCapture() (io.ReadCloser, error) {
 		_ = os.RemoveAll(dir)
 		return nil, fmt.Errorf("mkfifo pty stream: %w", err)
 	}
-	f, err := os.OpenFile(fifo, os.O_RDWR, 0600)
+	// Open the read side nonblocking only long enough to establish the keeper;
+	// wrapping the descriptor after restoring blocking mode deliberately keeps
+	// FIFOs out of Go's kqueue/netpoll path on Darwin (where writer close does not
+	// produce a readiness event).
+	fd, err := syscall.Open(fifo, syscall.O_RDONLY|syscall.O_NONBLOCK|syscall.O_CLOEXEC, 0600)
 	if err != nil {
 		_ = os.RemoveAll(dir)
 		return nil, fmt.Errorf("open pty stream fifo: %w", err)
 	}
+	keepalive, err := os.OpenFile(fifo, os.O_WRONLY|syscall.O_NONBLOCK, 0600)
+	if err != nil {
+		_ = syscall.Close(fd)
+		_ = os.RemoveAll(dir)
+		return nil, fmt.Errorf("keep pty stream fifo open: %w", err)
+	}
+	if err := syscall.SetNonblock(fd, false); err != nil {
+		_ = keepalive.Close()
+		_ = syscall.Close(fd)
+		_ = os.RemoveAll(dir)
+		return nil, fmt.Errorf("make pty stream fifo blocking: %w", err)
+	}
+	f := os.NewFile(uintptr(fd), fifo)
 	if err := c.ts.EnablePipePane(pipePaneCommand(fifo)); err != nil {
+		_ = keepalive.Close()
 		_ = f.Close()
 		_ = os.RemoveAll(dir)
 		return nil, err
 	}
-	rc := &captureReader{f: f, fifo: fifo}
+	rc := &captureReader{f: f, keepalive: keepalive, dir: dir}
 	c.dir, c.fifo, c.rc = dir, fifo, rc
 	return rc, nil
 }
 
-// StopCapture disables pipe-pane, closes the read end, and removes the FIFO dir.
+// StopCapture disables pipe-pane and starts an ordered drain. The capture reader
+// closes its descriptors and removes the FIFO directory when it reaches EOF.
 func (c *tmuxClientlessChannel) StopCapture() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -119,10 +185,7 @@ func (c *tmuxClientlessChannel) StopCapture() error {
 		return nil
 	}
 	err := c.ts.DisablePipePane()
-	_ = c.rc.Close()
-	if c.dir != "" {
-		_ = os.RemoveAll(c.dir)
-	}
+	_ = c.rc.stop(err == nil)
 	c.dir, c.fifo, c.rc = "", "", nil
 	return err
 }

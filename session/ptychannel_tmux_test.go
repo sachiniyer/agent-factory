@@ -1,8 +1,13 @@
 package session
 
 import (
+	"bytes"
+	"errors"
+	"io"
+	"os"
 	"os/exec"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -10,6 +15,100 @@ import (
 
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
+
+type captureReadResult struct {
+	buf []byte
+	err error
+}
+
+func readAcrossCaptureStop(t *testing.T, data []byte) captureReadResult {
+	t.Helper()
+	outputR, outputW, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("create output pipe: %v", err)
+	}
+	r := &captureReader{f: outputR, keepalive: outputW}
+	result := make(chan captureReadResult, 1)
+	go func() {
+		buf, readErr := io.ReadAll(r)
+		result <- captureReadResult{buf: buf, err: readErr}
+	}()
+
+	if _, err := outputW.Write(data); err != nil {
+		t.Fatalf("write final output: %v", err)
+	}
+	if err := r.stop(true); err != nil {
+		t.Fatalf("stop capture reader: %v", err)
+	}
+	select {
+	case got := <-result:
+		return got
+	case <-time.After(2 * time.Second):
+		t.Fatal("capture reader did not reach FIFO EOF after graceful stop")
+		return captureReadResult{}
+	}
+}
+
+func TestCaptureReaderPreservesBytesReadAsCloseStarts(t *testing.T) {
+	const finalOutput = "final pane output"
+	got := readAcrossCaptureStop(t, []byte(finalOutput))
+	if string(got.buf) != finalOutput {
+		t.Fatalf("Read data = %q (n=%d), want final pane output %q", got.buf, len(got.buf), finalOutput)
+	}
+	if got.err != nil {
+		t.Fatalf("ReadAll error = %v", got.err)
+	}
+}
+
+func TestCaptureReaderPreservesRealTrailingNULAtStop(t *testing.T) {
+	finalOutput := []byte("final pane output\x00")
+	got := readAcrossCaptureStop(t, finalOutput)
+	if !bytes.Equal(got.buf, finalOutput) {
+		t.Fatalf("Read data = %q (n=%d), want raw final pane output %q", got.buf, len(got.buf), finalOutput)
+	}
+}
+
+func TestCaptureReaderDrainsMoreThanOneBufferBeforeStop(t *testing.T) {
+	finalOutput := bytes.Repeat([]byte("pane-output-"), 8*1024)
+	got := readAcrossCaptureStop(t, finalOutput)
+	if !bytes.Equal(got.buf, finalOutput) {
+		t.Fatalf("ReadAll returned %d bytes, want all %d final pane bytes", len(got.buf), len(finalOutput))
+	}
+}
+
+func TestCaptureReaderAbortWakesWithExternalWriterStillOpen(t *testing.T) {
+	outputR, outputW, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("create output pipe: %v", err)
+	}
+	externalFD, err := syscall.Dup(int(outputW.Fd()))
+	if err != nil {
+		_ = outputR.Close()
+		_ = outputW.Close()
+		t.Fatalf("duplicate external writer: %v", err)
+	}
+	externalW := os.NewFile(uintptr(externalFD), "capture-external-writer")
+	t.Cleanup(func() { _ = externalW.Close() })
+	r := &captureReader{f: outputR, keepalive: outputW}
+	result := make(chan error, 1)
+	go func() {
+		buf := make([]byte, 1)
+		_, readErr := r.Read(buf)
+		result <- readErr
+	}()
+
+	if err := r.Close(); err != nil {
+		t.Fatalf("close capture reader: %v", err)
+	}
+	select {
+	case err := <-result:
+		if !errors.Is(err, io.EOF) {
+			t.Fatalf("Read error = %v, want EOF from failure-only abort wake", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("capture reader stayed blocked with an external writer open")
+	}
+}
 
 // TestTmuxSnapshotRepaintCursorRealTmux is the #1688 end-to-end gate against a REAL
 // tmux server: it drives the actual capture → buildRepaint → emulator path and
@@ -101,11 +200,10 @@ func TestTmuxSnapshotRepaintCursorRealTmux(t *testing.T) {
 
 // TestClientlessCaptureCloseWakesBlockedRead is the #1943 gate: tearing down the
 // clientless capture must wake a read loop that is parked inside a blocking
-// read(2) on the pipe-pane FIFO. The FIFO is opened O_RDWR and darwin's kqueue
-// cannot poll fifos, so the fd never enters the netpoller and closing it does
-// not interrupt an in-flight read — before the fix, the teardown join below
-// hangs forever, which is exactly how a session delete wedged the daemon
-// (KillSession → ptyBroker.close blocks on captureMu behind the stuck join).
+// FIFO wait. Darwin's kqueue cannot poll FIFOs through Go's netpoller, and
+// close(2) does not interrupt an in-flight FIFO read. Before the original fix,
+// the teardown join below hung forever and wedged session delete; the current
+// implementation must preserve that wake guarantee while draining to FIFO EOF.
 func TestClientlessCaptureCloseWakesBlockedRead(t *testing.T) {
 	if _, err := exec.LookPath("tmux"); err != nil {
 		t.Skipf("tmux not available: %v", err)
@@ -119,9 +217,7 @@ func TestClientlessCaptureCloseWakesBlockedRead(t *testing.T) {
 		t.Fatalf("start tmux session: %v", err)
 	}
 	// Pane state deliberately ignored: this is #1944's FIFO-wake regression test
-	// tearing down its own fixture session; nothing destructive follows. The second
-	// return is new in this PR (tmux.PaneState) — the production captureReader from
-	// #1944 is untouched, only this call site acknowledges the added value.
+	// tearing down its own fixture session; nothing destructive follows.
 	t.Cleanup(func() { _, _ = ts.Close() })
 
 	ch := newTmuxClientlessChannel(ts)
