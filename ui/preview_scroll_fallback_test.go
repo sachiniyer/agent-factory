@@ -167,6 +167,49 @@ func TestPreviewScrollEntryDeletingShowsTeardownFallback(t *testing.T) {
 		"rendered frame must show the teardown fallback")
 }
 
+// TestPreviewScrollEntryDeadAgentShowsFallbackImmediately is the regression
+// for #2134. Scroll entry returns to Bubble Tea before the off-loop history
+// capture runs, so the frame rendered immediately after ScrollUp must already
+// carry the authoritative dead/lost fallback. Entering an empty viewport and
+// relying on UpdateContent to repair it produces one visible blank frame.
+func TestPreviewScrollEntryDeadAgentShowsFallbackImmediately(t *testing.T) {
+	log.Initialize(false)
+	defer log.Close()
+
+	for _, tc := range []struct {
+		name     string
+		liveness session.Liveness
+		want     string
+	}{
+		{name: "dead", liveness: session.LiveDead, want: "Session no longer running."},
+		{name: "lost", liveness: session.LiveLost, want: "Session lost — its tmux session is gone."},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			inst, err := session.NewInstance(session.InstanceOptions{
+				Title: tc.name, Path: t.TempDir(), Program: "test",
+			})
+			require.NoError(t, err)
+			inst.SetBackend(session.NewFakeBackend())
+			require.NoError(t, inst.Transition(session.ObserveLiveness(tc.liveness)))
+
+			p := NewTabPane(previewFromInstance)
+			p.SetSize(80, 30)
+			enableHostHistory(p, inst, 0)
+
+			require.NoError(t, p.ScrollUp(inst, 0))
+
+			require.False(t, p.scroll.Active(),
+				"%s agent tab must reject scroll mode before the first frame", tc.name)
+			require.True(t, p.content.fallback,
+				"%s agent tab must publish its fallback synchronously", tc.name)
+			require.Empty(t, strings.TrimSpace(p.viewport.View()),
+				"a rejected scroll entry must not leave viewport content")
+			require.Contains(t, p.String(), tc.want,
+				"the immediate post-ScrollUp frame must render the %s fallback", tc.name)
+		})
+	}
+}
+
 // TestPreviewScrollModeViewportContentCleared focuses on the viewport-clearing
 // half of the invariant: after entering any fallback, viewport.View() must no
 // longer contain the captured scroll content. Without the fix the viewport is
