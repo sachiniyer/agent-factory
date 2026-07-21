@@ -195,7 +195,7 @@ Run `af keys` to see the effective bindings (defaults plus your rebinds).
 
 The default TUI keys changed to ergonomic lower-case bindings in #1027:
 archive is `a`, restore is `r` (#1605), the task manager is `m`, copy PR URL
-is `y`, hooks is `e`, and scrolling is `ctrl+u` / `ctrl+d`. The previous
+is `y`, hooks is `e`, and preview scrolling is `ctrl+u` / `ctrl+d`. The previous
 defaults are not built-in
 aliases; restore any old binding you still want by pinning it here:
 

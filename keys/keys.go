@@ -175,8 +175,8 @@ type spec struct {
 var specs = []spec{
 	{name: KeyUp, configKey: "up", keys: []string{"up", "k"}, desc: "up", dispatch: true},
 	{name: KeyDown, configKey: "down", keys: []string{"down", "j"}, desc: "down", dispatch: true},
-	{name: KeyShiftUp, configKey: "scroll_up", keys: []string{"ctrl+u"}, desc: "scroll", dispatch: true},
-	{name: KeyShiftDown, configKey: "scroll_down", keys: []string{"ctrl+d"}, desc: "scroll", dispatch: true},
+	{name: KeyShiftUp, configKey: "scroll_up", keys: []string{"ctrl+u"}, desc: "preview scroll", dispatch: true},
+	{name: KeyShiftDown, configKey: "scroll_down", keys: []string{"ctrl+d"}, desc: "preview scroll", dispatch: true},
 	{name: KeyEnter, keys: []string{"enter"}, desc: "interact", dispatch: true},
 	// "o" was an Enter alias until #1089 PR 2 split the verbs: Enter enters
 	// the pane (interactive), o keeps the old full-screen attach.

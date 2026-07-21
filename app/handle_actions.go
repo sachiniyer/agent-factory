@@ -802,7 +802,7 @@ func (m *home) attachInstanceTab(instance *session.Instance, tabIdx int, agentLa
 		tabID, _ := instance.TabIDAt(tabIdx)
 		return attachStreamFn(context.Background(), instance.Title, repoID, tabID, tabIdx)
 	}
-	return m.showHelpScreen(helpTypeInstanceAttach{}, func() tea.Cmd {
+	return m.showHelpScreen(helpAttach(instance, tabIdx), func() tea.Cmd {
 		return m.beginAttachTransition(func() tea.Cmd {
 			return attachOverlayCallbackFn(m, instance.Title, label, "", attach)
 		})

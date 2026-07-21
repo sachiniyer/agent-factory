@@ -8,6 +8,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/sachiniyer/agent-factory/keys"
+	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
 // TestHelpReflectsKeymapRebinds is the regression guard for the #1141
@@ -86,8 +87,9 @@ func TestInstanceAttachHelpShowsProceedCancelAndDetach(t *testing.T) {
 	content := helpTypeInstanceAttach{}.toContent()
 
 	for _, want := range []string{
-		"enter attach full-screen",
-		"esc cancel",
+		"The attached program owns input and scrolling",
+		"preview scrolling works only in navigation mode",
+		"enter attach full-screen · esc cancel",
 		"Detach later with",
 		"ctrl-w",
 	} {
@@ -95,6 +97,78 @@ func TestInstanceAttachHelpShowsProceedCancelAndDetach(t *testing.T) {
 			t.Errorf("attach help missing %q; got:\n%s", want, content)
 		}
 	}
+}
+
+// TestAttachedScrollHelpIsAgentSpecific pins #2195's central honesty rule:
+// Claude and Codex do not share attached scroll controls, and an unknown child
+// gets no guessed hint. Codex PageUp works only after Ctrl-T opens transcript;
+// its wheel did not scroll in the real 0.144.6 TUI verification.
+func TestAttachedScrollHelpIsAgentSpecific(t *testing.T) {
+	tests := []struct {
+		name   string
+		agent  string
+		want   string
+		reject []string
+	}{
+		{
+			name:   "Claude",
+			agent:  tmux.ProgramClaude,
+			want:   "Claude owns attached scrolling: " + claudeAttachedScrollControls,
+			reject: []string{"ctrl+t opens transcript"},
+		},
+		{
+			name:   "Codex",
+			agent:  tmux.ProgramCodex,
+			want:   "Codex owns attached scrolling: " + codexAttachedScrollControls,
+			reject: []string{"mouse wheel", "ctrl+home/end"},
+		},
+		{
+			name:   "unknown child",
+			agent:  "aider",
+			reject: []string{"owns attached scrolling", "mouse wheel", "opens transcript"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			content := helpTypeInstanceAttach{agent: tc.agent}.toContent()
+			if tc.want != "" {
+				require.Contains(t, content, tc.want)
+			}
+			for _, reject := range tc.reject {
+				require.NotContains(t, content, reject)
+			}
+		})
+	}
+}
+
+func TestHelpAttachOnlyNamesControlsForAgentTab(t *testing.T) {
+	instance := newStartedInstance(t, "claude-session")
+
+	agentTab, ok := helpAttach(instance, 0).(helpTypeInstanceAttach)
+	require.True(t, ok)
+	require.Equal(t, tmux.ProgramClaude, agentTab.agent)
+
+	shellTab, ok := helpAttach(instance, 1).(helpTypeInstanceAttach)
+	require.True(t, ok)
+	require.Empty(t, shellTab.agent, "an arbitrary shell/process child must not get an agent-specific scroll guess")
+
+	instance.SetTmuxSession(tmux.NewTmuxSessionFromSanitizedName("af_help_override", "bash"))
+	overriddenAgentTab, ok := helpAttach(instance, 0).(helpTypeInstanceAttach)
+	require.True(t, ok)
+	require.Empty(t, overriddenAgentTab.agent,
+		"a configured Claude slot overridden to bash must follow the resolved child, not guess from Instance.Program")
+}
+
+func TestGeneralHelpSeparatesPreviewAndAttachedScrolling(t *testing.T) {
+	content := helpTypeGeneral{}.toContent()
+
+	require.Contains(t, content, "Scroll the current tab preview (navigation mode only)")
+	require.Contains(t, content, "Claude")
+	require.Contains(t, content, claudeAttachedScrollControls)
+	require.Contains(t, content, "Codex")
+	require.Contains(t, content, codexAttachedScrollControls)
+	require.NotContains(t, content, "Scroll in the current tab")
 }
 
 func TestGeneralHelpOverlayFitsAndMarksScrollAt80x24(t *testing.T) {
