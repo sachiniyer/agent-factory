@@ -78,6 +78,9 @@ func (s Supervisor) Run(ctx context.Context, txn *Transaction, lease *RecoveryLe
 	if txn == nil || lease == nil {
 		return errors.New("upgrade supervisor requires a transaction and recovery lease")
 	}
+	if err := lease.validateSupervisorTransaction(txn); err != nil {
+		return err
+	}
 	if err := s.validateOperations(); err != nil {
 		return err
 	}
@@ -330,6 +333,18 @@ func (s Supervisor) Run(ctx context.Context, txn *Transaction, lease *RecoveryLe
 			return fmt.Errorf("cannot supervise upgrade in phase %s", journal.Phase)
 		}
 	}
+}
+
+func (l *RecoveryLease) validateSupervisorTransaction(txn *Transaction) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.released || l.file == nil || l.txn == nil {
+		return errors.New("upgrade recovery lease is released")
+	}
+	if l.txn != txn {
+		return errors.New("upgrade recovery lease does not belong to the supplied transaction")
+	}
+	return nil
 }
 
 func (s Supervisor) finishTerminalRollbackFailure(

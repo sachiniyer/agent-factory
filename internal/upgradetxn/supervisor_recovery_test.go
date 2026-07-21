@@ -59,6 +59,26 @@ func TestSupervisorLossBeforeActivationHandshakeAbortsWithoutStoppingPrevious(t 
 	require.Equal(t, "known-running-binary", string(installed))
 }
 
+func TestSupervisorRejectsLeaseFromAnotherTransactionBeforeMutation(t *testing.T) {
+	txn, _, _ := prepareFixture(t)
+	other, _, _ := prepareFixture(t)
+	otherLease, err := other.tryAcquireRecoveryAs(other.Journal().PreviousBinaryPath)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, otherLease.Release()) })
+	runtime := &fakeSupervisorRuntime{running: "previous", candidateValid: true}
+
+	err = (Supervisor{
+		Operations: runtime.operations(),
+		AfterBoundary: func(Phase) error {
+			return errors.New("mismatched lease advanced a phase")
+		},
+	}).Run(context.Background(), txn, otherLease)
+	require.ErrorContains(t, err, "recovery lease does not belong to the supplied transaction")
+	require.Equal(t, PhasePrepared, txn.Journal().Phase)
+	require.Equal(t, PhasePrepared, other.Journal().Phase)
+	require.Empty(t, runtime.calls)
+}
+
 func TestSupervisorLossAtEveryFileRollbackCheckpointIsTakenOver(t *testing.T) {
 	checkpoints := []RollbackProgress{
 		{BinaryRestored: true},
