@@ -1007,16 +1007,26 @@ body {
   flex: 1;
 }
 
-/* Per-session lifecycle controls (#2186): only the selected row creates this slot.
- * Archive/Restore matches the rail filter's quiet outlined-glyph treatment; Kill is
- * quieter still at rest (a bare, muted ⌫) and becomes explicit through its distinct
- * glyph, accessible name, and the unchanged destructive confirm step. */
+/* Per-session lifecycle controls (#2186, #2223): every row reserves this slot, so
+ * revealing it never shifts the title under the pointer. It is visually withdrawn at
+ * rest but remains in the tab order; focusing either button makes :focus-within reveal
+ * the whole slot for keyboard parity. Archive/Restore matches the rail filter's quiet
+ * outlined-glyph treatment; Kill stays quieter still at rest. */
 .af-row-actions {
   display: flex;
   align-items: center;
   align-self: center;
   flex: 0 0 auto;
   gap: 0.15rem;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.af-row-selected > .af-row-actions,
+.af-row:hover > .af-row-actions,
+.af-row:focus-within > .af-row-actions {
+  opacity: 1;
+  pointer-events: auto;
 }
 
 .af-rail-action {

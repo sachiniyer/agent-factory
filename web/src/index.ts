@@ -600,18 +600,15 @@ function newSession(): void {
   );
 }
 
-/** Opens the kill/archive/restore confirm modal for the selected session. Restore
- *  is the reverse of archive (#1932): the archived row's lifecycle glyph becomes
- *  Restore, and confirming it POSTs RestoreSession. */
-function openConfirm(action: "kill" | "archive" | "restore"): void {
-  const sel = selectedSession();
-  if (!sel) {
-    return;
-  }
+/** Opens the kill/archive/restore confirm modal for the rail row that invoked it.
+ *  This cannot derive its target from selection now that hover exposes actions on
+ *  unselected rows (#2223). Restore remains the reverse of archive (#1932). */
+function openConfirm(action: "kill" | "archive" | "restore", session: SessionData): void {
+  const target = { id: session.id ?? "", title: session.title };
   openModal(
     confirmModal({
       action,
-      sessionTitle: sel.title,
+      sessionTitle: target.title,
       onConfirm: () => {
         const tok = token;
         // `=== null` not `!tok`: "" is the authorized-tokenless credential (#1696).
@@ -621,13 +618,13 @@ function openConfirm(action: "kill" | "archive" | "restore"): void {
         const m = modal;
         m.setBusy(true);
         // Restore resolves the target by TITLE only — its daemon request has no id
-        // field (see restoreSession), unlike kill/archive which key by sel.id.
+        // field (see restoreSession), unlike kill/archive which key by target.id.
         const run =
           action === "kill"
-            ? killSession(sel.id, sel.title, tok)
+            ? killSession(target.id, target.title, tok)
             : action === "archive"
-              ? archiveSession(sel.id, sel.title, tok)
-              : restoreSession(sel.title, tok);
+              ? archiveSession(target.id, target.title, tok)
+              : restoreSession(target.title, tok);
         void run.then(closeModal).catch((e) => {
           m.setBusy(false);
           m.setError(describeError(e));
@@ -1297,9 +1294,9 @@ const actions = {
   disconnect,
   open: openFromRail,
   newSession,
-  kill: () => openConfirm("kill"),
-  archive: () => openConfirm("archive"),
-  restore: () => openConfirm("restore"),
+  kill: (session: SessionData) => openConfirm("kill", session),
+  archive: (session: SessionData) => openConfirm("archive", session),
+  restore: (session: SessionData) => openConfirm("restore", session),
   retryLimit: doRetryLimit,
   switchTab,
   openTab,
