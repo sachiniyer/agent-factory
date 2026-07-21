@@ -37,11 +37,16 @@
 // daemon/webserve.go.)
 
 import { FitAddon } from "@xterm/addon-fit";
-import { type ITheme, Terminal } from "@xterm/xterm";
+import { type IMarker, type ITheme, Terminal } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
 import { handleClipboardKeydown } from "./clipboard.js";
 import { decode, encode, inputFrame, Op, resizeFrame } from "./frame.js";
-import { shouldRefitVisibleTerminal, viewportLineFromBottom } from "./terminal-geometry.js";
+import {
+  hasVisibleTerminalGeometry,
+  shouldRefitVisibleTerminal,
+  shouldRestoreViewport,
+  viewportMarkerOffset,
+} from "./terminal-geometry.js";
 import { currentXtermTheme } from "./theme.js";
 
 /** The attach terminal's connection state, surfaced for a small status line. */
@@ -61,6 +66,15 @@ const BACKOFF_MAX_MS = 10_000;
 // Debounce the fit→OpResize send so dragging a window edge sends one resize on
 // settle, not one per animation frame. The server echoes the winning size back.
 const RESIZE_DEBOUNCE_MS = 120;
+
+interface PendingViewportAnchor {
+  /** A marker follows the actual line while inactive output shifts the buffer. */
+  marker: IMarker | null;
+  /** Absolute fallback for a buffer where xterm cannot register a marker. */
+  line: number;
+  /** A reader already at the bottom should follow new output to the new bottom. */
+  atBottom: boolean;
+}
 
 /** ws: matching the page origin — the daemon serves the SPA over plain HTTP, so
  *  this is normally ws:. If a reverse proxy fronts the daemon and serves the page
@@ -90,6 +104,7 @@ export class AttachTerminal {
   private stopped = false;
   private everOpened = false;
   private retry = 0;
+  private initialConnectStarted = false;
   private reconnectTimer: number | null = null;
   private resizeTimer: number | null = null;
   private visibleFitFrame: number | null = null;
@@ -105,10 +120,10 @@ export class AttachTerminal {
   private lastRows = 0;
   private lastCols = 0;
   // A peer resize can temporarily collapse this client's scrollback (for example,
-  // 60 lines fit in a peer's 111-row grid). Preserve the user's local reading
-  // position independently of that reflow so the next visible-host fit can restore
-  // it. Null means no peer-owned grid is pending reconciliation.
-  private pendingViewportDistance: number | null = null;
+  // 60 lines fit in a peer's 111-row grid). Anchor the actual visible buffer line,
+  // not a one-time distance from the bottom: output can keep arriving while this
+  // client is inactive. Null means no peer-owned grid is pending reconciliation.
+  private pendingViewport: PendingViewportAnchor | null = null;
   private exited = false;
 
   // A peer is allowed to resize the one shared PTY and every client obeys that
@@ -130,7 +145,7 @@ export class AttachTerminal {
   // path; pointer entry above handles the ordinary first gesture. The pending-peer
   // gate makes every ordinary wheel a no-op before even measuring layout.
   private readonly onWheel = (): void => {
-    if (this.pendingViewportDistance !== null) {
+    if (this.pendingViewport !== null) {
       this.fitVisibleHost();
     }
   };
@@ -219,8 +234,6 @@ export class AttachTerminal {
     container.addEventListener("pointerenter", this.onPointerEnter);
     container.addEventListener("wheel", this.onWheel, { capture: true, passive: true });
     this.scheduleVisibleFit();
-
-    this.connect();
   }
 
   /** Permanently closes the terminal: stops the reconnect loop, drops the socket,
@@ -239,10 +252,7 @@ export class AttachTerminal {
       window.cancelAnimationFrame(this.visibleFitFrame);
       this.visibleFitFrame = null;
     }
-    if (this.viewportRestoreFrame !== null) {
-      window.cancelAnimationFrame(this.viewportRestoreFrame);
-      this.viewportRestoreFrame = null;
-    }
+    this.clearPendingViewport();
     this.ro.disconnect();
     this.io.disconnect();
     window.removeEventListener("focus", this.onWindowFocus);
@@ -329,6 +339,16 @@ export class AttachTerminal {
         // already closing
       }
     };
+  }
+
+  /** Starts the first connection only after a real visible-host fit. Reconnects
+   * continue through connect() directly once this boundary has been crossed. */
+  private connectAfterInitialFit(): void {
+    if (this.initialConnectStarted || this.stopped) {
+      return;
+    }
+    this.initialConnectStarted = true;
+    this.connect();
   }
 
   private onMessage(data: unknown): void {
@@ -451,48 +471,68 @@ export class AttachTerminal {
     } catch {
       return; // xterm has not painted metrics yet, or the container detached
     }
-    if (
-      !shouldRefitVisibleTerminal(
-        { width: this.container.clientWidth, height: this.container.clientHeight },
-        { rows: this.term.rows, cols: this.term.cols },
-        proposed,
-      )
-    ) {
+    const host = { width: this.container.clientWidth, height: this.container.clientHeight };
+    if (!hasVisibleTerminalGeometry(host, proposed)) {
       return;
     }
-    try {
-      this.fit.fit();
-    } catch {
-      return; // container detached between proposal and fit
+    const needsFit = shouldRefitVisibleTerminal(host, { rows: this.term.rows, cols: this.term.cols }, proposed);
+    if (needsFit) {
+      try {
+        this.fit.fit();
+      } catch {
+        return; // container detached between proposal and fit
+      }
+      this.scheduleViewportRestore(this.term.rows, this.term.cols);
+      this.sendResize(this.term.rows, this.term.cols, false);
     }
-    this.scheduleViewportRestore(this.term.rows, this.term.cols);
-    this.sendResize(this.term.rows, this.term.cols, false);
+    this.connectAfterInitialFit();
   }
 
   /** Restores the pre-peer reading position after xterm has rendered its new grid.
    *  resize() schedules the buffer reflow: reading baseY synchronously after fit can
    *  still see the peer-collapsed zero. The next painted frame is the first settled
-   *  value. A newer peer grid cancels this frame and leaves the distance pending for
+   *  value. A newer peer grid cancels this frame and leaves the anchor pending for
    *  the next local activation. */
   private scheduleViewportRestore(rows: number, cols: number): void {
-    if (this.pendingViewportDistance === null) {
+    if (this.pendingViewport === null) {
       return;
     }
-    if (this.viewportRestoreFrame !== null) {
-      window.cancelAnimationFrame(this.viewportRestoreFrame);
-    }
+    this.cancelViewportRestoreFrame();
+    const scheduledViewportY = this.term.buffer.active.viewportY;
     this.viewportRestoreFrame = window.requestAnimationFrame(() => {
       this.viewportRestoreFrame = null;
       if (this.stopped || this.term.rows !== rows || this.term.cols !== cols) {
         return;
       }
-      const distance = this.pendingViewportDistance;
-      if (distance === null) {
+      const anchor = this.pendingViewport;
+      if (anchor === null) {
         return;
       }
-      this.pendingViewportDistance = null;
-      this.term.scrollToLine(viewportLineFromBottom(this.term.buffer.active.baseY, distance));
+      const buffer = this.term.buffer.active;
+      // xterm handles wheel after our capture listener. If that changed the
+      // viewport before this frame, the user's gesture is newer than the saved
+      // anchor and must win.
+      if (!shouldRestoreViewport(scheduledViewportY, buffer.viewportY)) {
+        this.clearPendingViewport();
+        return;
+      }
+      const target = anchor.atBottom ? buffer.baseY : anchor.marker?.line ?? anchor.line;
+      this.clearPendingViewport();
+      this.term.scrollToLine(Math.max(0, target));
     });
+  }
+
+  private cancelViewportRestoreFrame(): void {
+    if (this.viewportRestoreFrame !== null) {
+      window.cancelAnimationFrame(this.viewportRestoreFrame);
+      this.viewportRestoreFrame = null;
+    }
+  }
+
+  private clearPendingViewport(): void {
+    this.cancelViewportRestoreFrame();
+    this.pendingViewport?.marker?.dispose();
+    this.pendingViewport = null;
   }
 
   private scheduleFit(): void {
@@ -533,14 +573,21 @@ export class AttachTerminal {
       // already have collapsed/reflowed the buffer, but the first boundary still
       // knows where this client was reading in its own grid. The active-host fit
       // consumes and clears this value before its own echo comes back.
-      if (this.pendingViewportDistance === null) {
+      if (this.pendingViewport === null) {
         const buffer = this.term.buffer.active;
-        this.pendingViewportDistance = Math.max(0, buffer.baseY - buffer.viewportY);
+        const atBottom = buffer.viewportY >= buffer.baseY;
+        let marker: IMarker | null = null;
+        if (!atBottom) {
+          try {
+            marker = this.term.registerMarker(viewportMarkerOffset(buffer));
+          } catch {
+            // Alternate buffers cannot register markers; the absolute line below
+            // is still safer than a bottom distance that grows stale with output.
+          }
+        }
+        this.pendingViewport = { marker, line: buffer.viewportY, atBottom };
       }
-      if (this.viewportRestoreFrame !== null) {
-        window.cancelAnimationFrame(this.viewportRestoreFrame);
-        this.viewportRestoreFrame = null;
-      }
+      this.cancelViewportRestoreFrame();
       try {
         this.term.resize(cols, rows);
       } catch {

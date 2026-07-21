@@ -3665,6 +3665,8 @@ async function assertActiveTerminalReclaimsPeerGeometry(
   lastLine: string,
   lineCount: number,
   scenario: string,
+  expectedFirstRow?: string,
+  wheelImmediately = false,
 ): Promise<void> {
   const firstViewport = firstHost.locator(".xterm-viewport");
   const firstRows = (): Promise<number> => firstHost.locator(".xterm-rows > div").count();
@@ -3696,7 +3698,38 @@ async function assertActiveTerminalReclaimsPeerGeometry(
   // The tall peer is already the active page after construction. Re-focusing it
   // here would queue another local fit immediately before the first page's fit;
   // that synthetic race would correctly let the peer win last-writer-wins again.
+  if (wheelImmediately) {
+    // The peer's authoritative grid persists after disconnect. Close only this
+    // page so a delayed tall-host activation cannot win again while this branch
+    // isolates the first-wheel-vs-deferred-restore ordering.
+    await second.close();
+  }
   await first.bringToFront();
+  if (wheelImmediately) {
+    // Target the actual pane with a trusted pointer transition, then send the real
+    // wheel immediately—without polling for the deferred anchor frame in between.
+    await firstHost.locator(".af-pane-host").hover();
+    await first.mouse.wheel(0, -900);
+    await expect
+      .poll(firstRows, { message: `${scenario}: the first wheel must refit the peer-owned grid` })
+      .toBeLessThan(lineCount);
+    await first.evaluate(
+      () =>
+        new Promise<void>((resolve) => {
+          requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
+        }),
+    );
+    const repaired = await terminalGeometry(firstHost);
+    expect(
+      repaired.scrollHeight,
+      `${scenario}: the first wheel must recreate scrollback; geometry=${JSON.stringify({ stranded, repaired })}`,
+    ).toBeGreaterThan(repaired.viewportHeight);
+    expect(
+      repaired.scrollTop,
+      `${scenario}: deferred restore must not erase the first wheel; geometry=${JSON.stringify({ stranded, repaired })}`,
+    ).toBeLessThan(repaired.scrollHeight - repaired.viewportHeight);
+    return;
+  }
   // Target the actual xterm mount, not its full split-layout wrapper. On narrow
   // layouts the wrapper also spans drawer/scrim stacking surfaces; the production
   // activation listener lives on .af-pane-host.
@@ -3714,8 +3747,15 @@ async function assertActiveTerminalReclaimsPeerGeometry(
       message: `${scenario}: activation must restore the pre-peer position; geometry=${JSON.stringify({ stranded, refit })}`,
     })
     .toBeGreaterThan(0);
+  if (expectedFirstRow !== undefined) {
+    await expect(firstHost.locator(".xterm-rows > div").first()).toHaveText(expectedFirstRow);
+  } else {
+    // A bottom-following viewport must still show the newest output. A deliberately
+    // scrolled-up viewport proved that output before activation and must not be
+    // yanked down merely so the newest line remains in xterm's rendered DOM.
+    await expect(firstHost).toContainText(lastLine);
+  }
   const repaired = await terminalGeometry(firstHost);
-  await expect(firstHost).toContainText(lastLine);
   await first.mouse.wheel(0, -900);
   await expect
     .poll(() => firstViewport.evaluate((el) => el.scrollTop), {
@@ -3757,6 +3797,16 @@ test("#2347: activating a terminal repairs peer-owned geometry before scrolling"
     await first.keyboard.type("for i in $(seq 1 60); do echo peer-fit-line-$i; done");
     await first.keyboard.press("Enter");
     await expect(firstHost).toContainText("peer-fit-line-60", { timeout: 15_000 });
+    const firstViewport = firstHost.locator(".xterm-viewport");
+    await first.mouse.wheel(0, -180);
+    await expect
+      .poll(async () => {
+        const { scrollHeight, viewportHeight, scrollTop } = await terminalGeometry(firstHost);
+        return scrollTop > 0 && scrollTop < scrollHeight - viewportHeight;
+      }, { message: "desktop shell setup must pause on a real middle scrollback line" })
+      .toBe(true);
+    const readingLine = (await firstHost.locator(".xterm-rows > div").first().textContent()) ?? "";
+    expect(readingLine.trim(), "desktop shell setup must anchor a non-empty visible line").not.toBe("");
     // Leave the pane for the peer window. Returning across this boundary is the
     // pointer-activation path a side-by-side user takes before their first wheel.
     await first.mouse.move(0, 0);
@@ -3769,13 +3819,22 @@ test("#2347: activating a terminal repairs peer-owned geometry before scrolling"
     await expect(secondShell).toHaveCount(1, { timeout: 15_000 });
     await secondShell.click();
     await expect(second.locator(".af-term-meta")).toContainText("Live");
+    const secondHost = second.locator(".af-term-host");
+    await expect.poll(firstRows).toBeGreaterThan(60);
+    // New output while the first client is inactive must not stale its reading
+    // anchor. A one-time distance from the bottom jumps down by these ten lines.
+    await secondHost.click();
+    await second.keyboard.type("for i in $(seq 61 70); do echo peer-fit-line-$i; done");
+    await second.keyboard.press("Enter");
+    await expect(firstHost).toContainText("peer-fit-line-70", { timeout: 15_000 });
     await assertActiveTerminalReclaimsPeerGeometry(
       first,
       second,
       firstHost,
-      "peer-fit-line-60",
+      "peer-fit-line-70",
       60,
       "desktop shell",
+      readingLine,
     );
   } finally {
     await secondCtx?.close();
@@ -3855,6 +3914,8 @@ test("#2347: the mobile agent terminal also reclaims peer-owned geometry", REAL_
       lastLine,
       lineCount,
       "mobile agent",
+      undefined,
+      true,
     );
   } finally {
     await secondCtx?.close();

@@ -8250,14 +8250,20 @@ function decode(raw) {
 }
 
 // src/terminal-geometry.ts
+function hasVisibleTerminalGeometry(host, proposed) {
+  return host.width > 0 && host.height > 0 && !!proposed && proposed.rows > 0 && proposed.cols > 0;
+}
 function shouldRefitVisibleTerminal(host, current, proposed) {
-  if (host.width <= 0 || host.height <= 0 || !proposed || proposed.rows <= 0 || proposed.cols <= 0) {
+  if (!hasVisibleTerminalGeometry(host, proposed)) {
     return false;
   }
   return proposed.rows !== current.rows || proposed.cols !== current.cols;
 }
-function viewportLineFromBottom(baseY, distanceFromBottom) {
-  return Math.max(0, baseY - Math.max(0, distanceFromBottom));
+function viewportMarkerOffset(position) {
+  return position.viewportY - (position.baseY + position.cursorY);
+}
+function shouldRestoreViewport(scheduledViewportY, currentViewportY) {
+  return scheduledViewportY === currentViewportY;
 }
 
 // src/theme.ts
@@ -8445,7 +8451,6 @@ var AttachTerminal = class {
     container.addEventListener("pointerenter", this.onPointerEnter);
     container.addEventListener("wheel", this.onWheel, { capture: true, passive: true });
     this.scheduleVisibleFit();
-    this.connect();
   }
   term;
   fit;
@@ -8456,6 +8461,7 @@ var AttachTerminal = class {
   stopped = false;
   everOpened = false;
   retry = 0;
+  initialConnectStarted = false;
   reconnectTimer = null;
   resizeTimer = null;
   visibleFitFrame = null;
@@ -8470,10 +8476,10 @@ var AttachTerminal = class {
   lastRows = 0;
   lastCols = 0;
   // A peer resize can temporarily collapse this client's scrollback (for example,
-  // 60 lines fit in a peer's 111-row grid). Preserve the user's local reading
-  // position independently of that reflow so the next visible-host fit can restore
-  // it. Null means no peer-owned grid is pending reconciliation.
-  pendingViewportDistance = null;
+  // 60 lines fit in a peer's 111-row grid). Anchor the actual visible buffer line,
+  // not a one-time distance from the bottom: output can keep arriving while this
+  // client is inactive. Null means no peer-owned grid is pending reconciliation.
+  pendingViewport = null;
   exited = false;
   // A peer is allowed to resize the one shared PTY and every client obeys that
   // authoritative echo. When this window becomes active again, its visible host
@@ -8494,7 +8500,7 @@ var AttachTerminal = class {
   // path; pointer entry above handles the ordinary first gesture. The pending-peer
   // gate makes every ordinary wheel a no-op before even measuring layout.
   onWheel = () => {
-    if (this.pendingViewportDistance !== null) {
+    if (this.pendingViewport !== null) {
       this.fitVisibleHost();
     }
   };
@@ -8514,10 +8520,7 @@ var AttachTerminal = class {
       window.cancelAnimationFrame(this.visibleFitFrame);
       this.visibleFitFrame = null;
     }
-    if (this.viewportRestoreFrame !== null) {
-      window.cancelAnimationFrame(this.viewportRestoreFrame);
-      this.viewportRestoreFrame = null;
-    }
+    this.clearPendingViewport();
     this.ro.disconnect();
     this.io.disconnect();
     window.removeEventListener("focus", this.onWindowFocus);
@@ -8585,6 +8588,15 @@ var AttachTerminal = class {
       } catch {
       }
     };
+  }
+  /** Starts the first connection only after a real visible-host fit. Reconnects
+   * continue through connect() directly once this boundary has been crossed. */
+  connectAfterInitialFit() {
+    if (this.initialConnectStarted || this.stopped) {
+      return;
+    }
+    this.initialConnectStarted = true;
+    this.connect();
   }
   onMessage(data) {
     if (typeof data === "string") {
@@ -8691,45 +8703,62 @@ var AttachTerminal = class {
     } catch {
       return;
     }
-    if (!shouldRefitVisibleTerminal(
-      { width: this.container.clientWidth, height: this.container.clientHeight },
-      { rows: this.term.rows, cols: this.term.cols },
-      proposed
-    )) {
+    const host = { width: this.container.clientWidth, height: this.container.clientHeight };
+    if (!hasVisibleTerminalGeometry(host, proposed)) {
       return;
     }
-    try {
-      this.fit.fit();
-    } catch {
-      return;
+    const needsFit = shouldRefitVisibleTerminal(host, { rows: this.term.rows, cols: this.term.cols }, proposed);
+    if (needsFit) {
+      try {
+        this.fit.fit();
+      } catch {
+        return;
+      }
+      this.scheduleViewportRestore(this.term.rows, this.term.cols);
+      this.sendResize(this.term.rows, this.term.cols, false);
     }
-    this.scheduleViewportRestore(this.term.rows, this.term.cols);
-    this.sendResize(this.term.rows, this.term.cols, false);
+    this.connectAfterInitialFit();
   }
   /** Restores the pre-peer reading position after xterm has rendered its new grid.
    *  resize() schedules the buffer reflow: reading baseY synchronously after fit can
    *  still see the peer-collapsed zero. The next painted frame is the first settled
-   *  value. A newer peer grid cancels this frame and leaves the distance pending for
+   *  value. A newer peer grid cancels this frame and leaves the anchor pending for
    *  the next local activation. */
   scheduleViewportRestore(rows, cols) {
-    if (this.pendingViewportDistance === null) {
+    if (this.pendingViewport === null) {
       return;
     }
-    if (this.viewportRestoreFrame !== null) {
-      window.cancelAnimationFrame(this.viewportRestoreFrame);
-    }
+    this.cancelViewportRestoreFrame();
+    const scheduledViewportY = this.term.buffer.active.viewportY;
     this.viewportRestoreFrame = window.requestAnimationFrame(() => {
       this.viewportRestoreFrame = null;
       if (this.stopped || this.term.rows !== rows || this.term.cols !== cols) {
         return;
       }
-      const distance = this.pendingViewportDistance;
-      if (distance === null) {
+      const anchor = this.pendingViewport;
+      if (anchor === null) {
         return;
       }
-      this.pendingViewportDistance = null;
-      this.term.scrollToLine(viewportLineFromBottom(this.term.buffer.active.baseY, distance));
+      const buffer = this.term.buffer.active;
+      if (!shouldRestoreViewport(scheduledViewportY, buffer.viewportY)) {
+        this.clearPendingViewport();
+        return;
+      }
+      const target = anchor.atBottom ? buffer.baseY : anchor.marker?.line ?? anchor.line;
+      this.clearPendingViewport();
+      this.term.scrollToLine(Math.max(0, target));
     });
+  }
+  cancelViewportRestoreFrame() {
+    if (this.viewportRestoreFrame !== null) {
+      window.cancelAnimationFrame(this.viewportRestoreFrame);
+      this.viewportRestoreFrame = null;
+    }
+  }
+  clearPendingViewport() {
+    this.cancelViewportRestoreFrame();
+    this.pendingViewport?.marker?.dispose();
+    this.pendingViewport = null;
   }
   scheduleFit() {
     if (this.resizeTimer !== null) {
@@ -8763,14 +8792,19 @@ var AttachTerminal = class {
     this.lastRows = rows;
     this.lastCols = cols;
     if (rows !== this.term.rows || cols !== this.term.cols) {
-      if (this.pendingViewportDistance === null) {
+      if (this.pendingViewport === null) {
         const buffer = this.term.buffer.active;
-        this.pendingViewportDistance = Math.max(0, buffer.baseY - buffer.viewportY);
+        const atBottom = buffer.viewportY >= buffer.baseY;
+        let marker = null;
+        if (!atBottom) {
+          try {
+            marker = this.term.registerMarker(viewportMarkerOffset(buffer));
+          } catch {
+          }
+        }
+        this.pendingViewport = { marker, line: buffer.viewportY, atBottom };
       }
-      if (this.viewportRestoreFrame !== null) {
-        window.cancelAnimationFrame(this.viewportRestoreFrame);
-        this.viewportRestoreFrame = null;
-      }
+      this.cancelViewportRestoreFrame();
       try {
         this.term.resize(cols, rows);
       } catch {
