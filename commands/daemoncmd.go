@@ -2,6 +2,7 @@ package commands
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 
@@ -294,40 +295,62 @@ daemon is running, this command exits successfully without starting one.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		log.Initialize(false)
 		defer log.Close()
+		return runDaemonRestart(cmd.OutOrStdout())
+	},
+}
 
-		execPath, err := osExecutableFn()
-		if err != nil {
-			return fmt.Errorf("failed to find current executable: %w", err)
-		}
-		resolvedPath, err := filepath.EvalSymlinks(execPath)
-		if err != nil {
-			return fmt.Errorf("failed to resolve executable path: %w", err)
-		}
-		// Existing Linux installs carry their rendered unit on disk. Make that
-		// unit restart-safe before the Shutdown RPC: refreshing it afterwards is
-		// too late, because systemd may already have cgroup-killed tmux (#2176).
-		if err := refreshAutostartUnitFn(); err != nil {
-			return fmt.Errorf("refusing to restart through an unsafe daemon autostart unit: %w", err)
-		}
-
-		result, err := restartDaemonFromPath(resolvedPath)
-		if err != nil {
-			return err
-		}
-
-		w := cmd.OutOrStdout()
-		switch result {
-		case daemon.ShutdownNoDaemon:
-			if !daemonRestartQuiet {
-				fmt.Fprintln(w, "no running daemon to restart")
-			}
-		case daemon.ShutdownViaSIGTERM:
-			fmt.Fprintln(w, "daemon restarted (stopped old daemon via SIGTERM fallback)")
-		default:
-			fmt.Fprintln(w, "daemon restarted")
+func runDaemonRestart(w io.Writer) error {
+	// Preserve this command's documented no-op before touching the installed
+	// unit. A stale or foreign unit is irrelevant when there is no daemon to
+	// stop, and failing to parse/reload it must not turn an idempotent restart
+	// into an error (#2185). Undetermined deliberately falls through to the
+	// fail-closed refresh path; only a completed negative authorizes the no-op.
+	absent := false
+	daemonRestartPresenceFn().Match(
+		func() {},
+		func() { absent = true },
+		func() { absent = true },
+		func(error) {},
+	)
+	if absent {
+		if !daemonRestartQuiet {
+			fmt.Fprintln(w, "no running daemon to restart")
 		}
 		return nil
-	},
+	}
+
+	execPath, err := osExecutableFn()
+	if err != nil {
+		return fmt.Errorf("failed to find current executable: %w", err)
+	}
+	resolvedPath, err := filepath.EvalSymlinks(execPath)
+	if err != nil {
+		return fmt.Errorf("failed to resolve executable path: %w", err)
+	}
+	// Existing Linux installs carry their rendered unit on disk. Make a unit
+	// serving THIS home restart-safe before the Shutdown RPC: refreshing it
+	// afterwards is too late, because systemd may already have cgroup-killed
+	// tmux (#2176). A foreign unit cannot own this daemon and is left untouched.
+	if err := refreshAutostartUnitForCurrentHome(); err != nil {
+		return fmt.Errorf("refusing to restart through an unsafe daemon autostart unit: %w", err)
+	}
+
+	result, err := restartDaemonFromPath(resolvedPath)
+	if err != nil {
+		return err
+	}
+
+	switch result {
+	case daemon.ShutdownNoDaemon:
+		if !daemonRestartQuiet {
+			fmt.Fprintln(w, "no running daemon to restart")
+		}
+	case daemon.ShutdownViaSIGTERM:
+		fmt.Fprintln(w, "daemon restarted (stopped old daemon via SIGTERM fallback)")
+	default:
+		fmt.Fprintln(w, "daemon restarted")
+	}
+	return nil
 }
 
 func init() {
@@ -356,7 +379,52 @@ var (
 	autostartUnitExecPathFn     = daemon.AutostartUnitExecPath
 	refreshAutostartUnitFn      = daemon.RefreshAutostartUnit
 	configDirFn                 = config.GetConfigDir
+	daemonRestartPresenceFn     = probeDaemonRestartPresence
 )
+
+// probeDaemonRestartPresence gives the explicit restart command a three-value
+// read-only answer before it mutates an installed unit. A responding daemon or
+// a verified daemon PID is positive evidence. Only RequestShutdown's own
+// kernel-level absent answers are negative; every other failure to look remains
+// Undetermined, so it cannot silently authorize the no-op.
+func probeDaemonRestartPresence() daemon.ProbeAnswer {
+	h := daemonHealthFn()
+	if h.PIDVerified {
+		return daemon.AnswerYes()
+	}
+	return daemon.ClassifyShutdownTarget(h.PingErr)
+}
+
+// autostartRefreshScopeError means we could not prove that the installed unit
+// belongs to this home. It is distinct from a refresh failure: reinstalling is
+// the only honest repair, while suggesting `af daemon restart` would re-enter
+// the same unprovable gate.
+type autostartRefreshScopeError struct{ err error }
+
+func (e *autostartRefreshScopeError) Error() string { return e.err.Error() }
+func (e *autostartRefreshScopeError) Unwrap() error { return e.err }
+
+// refreshAutostartUnitForCurrentHome applies the restart-safety migration only
+// to the installed unit that can actually own the daemon being stopped. Unit
+// presence, unit ownership, and refresh now share AutostartUnitServesHome's
+// single parser instead of letting an alternate AGENT_FACTORY_HOME rewrite or
+// reload an unrelated user's unit (#2185).
+func refreshAutostartUnitForCurrentHome() error {
+	configDir, err := configDirFn()
+	if err != nil {
+		return &autostartRefreshScopeError{err: fmt.Errorf(
+			"cannot resolve the config dir to scope the autostart unit refresh: %w", err)}
+	}
+	serves, installed, err := autostartUnitServesHomeFn(configDir)
+	if err != nil {
+		return &autostartRefreshScopeError{err: fmt.Errorf(
+			"cannot tell whether the autostart unit serves %s: %w", configDir, err)}
+	}
+	if !installed || !serves {
+		return nil
+	}
+	return refreshAutostartUnitFn()
+}
 
 // respawnResult reports the ways a respawn can succeed and still leave the
 // user worse off than they think, so callers can say so instead of assuming

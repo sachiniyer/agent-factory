@@ -337,6 +337,7 @@ func TestAutoUpdateCallsShutdownAfterBinarySwap(t *testing.T) {
 	withTestHome(t)
 	infoBuf, errBuf := captureLogs(t)
 	refreshCalls := stubAutostartRefresh(t, nil)
+	stubAutostartScope(t, true, true, nil)
 
 	tempBin := tempBinPath(t)
 	if err := os.WriteFile(tempBin, []byte("old-binary"), 0755); err != nil {
@@ -420,6 +421,7 @@ func TestAutoUpdateRefreshFailureSkipsDaemonRestart(t *testing.T) {
 	aflog.WarningLog.SetOutput(errBuf)
 	t.Cleanup(func() { aflog.WarningLog.SetOutput(previousWarningOut) })
 	refreshCalls := stubAutostartRefresh(t, errors.New("daemon-reload failed"))
+	stubAutostartScope(t, true, true, nil)
 
 	tempBin := tempBinPath(t)
 	if err := os.WriteFile(tempBin, []byte("old-binary"), 0755); err != nil {

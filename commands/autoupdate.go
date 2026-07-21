@@ -1,6 +1,7 @@
 package commands
 
 import (
+	"errors"
 	"fmt"
 	"path/filepath"
 	"runtime"
@@ -162,12 +163,17 @@ func autoUpdateForChannel(channel string, checkTimeout, downloadBudget time.Dura
 			return fmt.Errorf("failed to write new binary: %w", err)
 		}
 
-		unitRefreshErr := refreshAutostartUnitFn()
+		unitRefreshErr := refreshAutostartUnitForCurrentHome()
 		if unitRefreshErr != nil {
 			// The new binary is already on disk, but stopping through a stale
 			// control-group unit is worse than leaving the old daemon running:
 			// it can take every daemon-spawned tmux pane with it (#2176).
-			log.WarningLog.Printf("auto-update: updated to %s but left the running daemon alone because its autostart unit could not be made restart-safe: %v; run af daemon install, then af daemon restart", latestVersion, unitRefreshErr)
+			var scopeErr *autostartRefreshScopeError
+			if errors.As(unitRefreshErr, &scopeErr) {
+				log.WarningLog.Printf("auto-update: updated to %s but left the running daemon alone because af could not prove the installed autostart unit belongs to this home: %v; run af daemon install", latestVersion, unitRefreshErr)
+			} else {
+				log.WarningLog.Printf("auto-update: updated to %s but left the running daemon alone because its autostart unit could not be made restart-safe: %v; run af daemon install, then af daemon restart", latestVersion, unitRefreshErr)
+			}
 		}
 
 		// Same rationale as `af upgrade` (#498/#1386): restart the running daemon
