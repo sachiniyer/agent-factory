@@ -165,16 +165,14 @@ func gitArgsDispatch(command string, args []string) bool {
 		if before, _, found := strings.Cut(option, "="); found {
 			option = before
 		}
-		switch option {
-		case "--config-env", "--exec", "--ext-diff", "--receive-pack", "--strategy",
-			"--textconv", "--upload-pack":
+		if gitLongOptionDispatch(option) {
 			return true
 		}
-		if command == "grep" && (longOptionMatches(option, "--open-files-in-pager", "--op") || option == "-O" ||
+		if command == "grep" && (option == "-O" ||
 			(strings.HasPrefix(arg, "-O") && len(arg) > 2)) {
 			return true
 		}
-		if command == "clone" && (option == "-c" || option == "--config" || option == "-u" ||
+		if command == "clone" && (option == "-c" || option == "-u" ||
 			(strings.HasPrefix(arg, "-c") && len(arg) > 2) ||
 			(strings.HasPrefix(arg, "-u") && len(arg) > 2)) {
 			return true
@@ -182,7 +180,23 @@ func gitArgsDispatch(command string, args []string) bool {
 		if command == "merge" && (option == "-s" || (strings.HasPrefix(arg, "-s") && len(arg) > 2)) {
 			return true
 		}
-		if command == "archive" && option == "--remote" {
+	}
+	return false
+}
+
+func gitLongOptionDispatch(option string) bool {
+	if len(option) <= 2 || !strings.HasPrefix(option, "--") {
+		return false
+	}
+	for _, dispatchOption := range []string{
+		"--config", "--config-env", "--exec", "--ext-diff", "--open-files-in-pager",
+		"--receive-pack", "--remote", "--strategy", "--textconv", "--upload-pack",
+	} {
+		// Git's parse-options API accepts unique long-option prefixes. Reject
+		// every prefix of an executor-bearing option, including prefixes Git
+		// currently considers ambiguous, so a future option cannot make an
+		// abbreviation unexpectedly executable.
+		if strings.HasPrefix(dispatchOption, option) {
 			return true
 		}
 	}
@@ -226,7 +240,7 @@ func dockerSubcommandAt(args []shellWord) (int, bool, bool) {
 			continue
 		case "--config", "-c", "--context", "--host", "-H", "--log-level", "-l",
 			"--tlscacert", "--tlscert", "--tlskey":
-			if i+1 >= len(args) {
+			if i+1 >= len(args) || !args[i+1].resolved {
 				return 0, false, false
 			}
 			i++
@@ -352,7 +366,9 @@ func inspectGo(args []shellWord) string {
 	case "build", "clean", "fmt", "get", "install", "list", "mod", "run", "test", "vet", "work":
 	case "env":
 		for _, arg := range literals[1:] {
-			if arg == "-w" || arg == "-u" || strings.HasPrefix(arg, "-w=") || strings.HasPrefix(arg, "-u=") {
+			option := canonicalGoOption(arg)
+			if option == "-w" || option == "-u" || strings.HasPrefix(option, "-w=") ||
+				strings.HasPrefix(option, "-u=") {
 				return unknownShellReason
 			}
 		}
@@ -362,7 +378,7 @@ func inspectGo(args []shellWord) string {
 		return unknownShellReason
 	}
 	for _, arg := range literals[1:] {
-		option := arg
+		option := canonicalGoOption(arg)
 		if before, _, found := strings.Cut(option, "="); found {
 			option = before
 		}
@@ -372,6 +388,13 @@ func inspectGo(args []shellWord) string {
 		}
 	}
 	return ""
+}
+
+func canonicalGoOption(option string) string {
+	if strings.HasPrefix(option, "--") {
+		return option[1:]
+	}
+	return option
 }
 
 func pythonVersionedExecutable(name string) bool {

@@ -1,5 +1,7 @@
 package tmuxguard
 
+import "strings"
+
 func inspectGitHub(args []shellWord) string {
 	if len(args) == 0 || !args[0].resolved {
 		return unknownShellReason
@@ -16,7 +18,37 @@ func inspectGitHub(args []shellWord) string {
 		// names may become executable in a future gh release.
 		return unknownShellReason
 	}
+	if gitHubArgsDispatch(args[2:]) {
+		return unknownShellReason
+	}
 	return ""
+}
+
+func gitHubArgsDispatch(args []shellWord) bool {
+	optionsDone := false
+	for _, arg := range args {
+		if !arg.resolved {
+			// Cobra/pflag accepts options after positional arguments, so an
+			// unresolved word can become --web unless -- ended option parsing.
+			if !optionsDone {
+				return true
+			}
+			continue
+		}
+		if optionsDone {
+			continue
+		}
+		if arg.literal == "--" {
+			optionsDone = true
+			continue
+		}
+		if arg.literal == "--web" || strings.HasPrefix(arg.literal, "--web=") ||
+			(strings.HasPrefix(arg.literal, "-") && !strings.HasPrefix(arg.literal, "--") &&
+				strings.ContainsRune(arg.literal[1:], 'w')) {
+			return true
+		}
+	}
+	return false
 }
 
 func safeGitHubSubcommand(path string) bool {

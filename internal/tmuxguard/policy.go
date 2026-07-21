@@ -60,7 +60,7 @@ func classifyProgram(executable string) programPolicy {
 		return programPolicy{dispatch: dispatchOpaque, role: roleOpaque}
 	}
 	switch name {
-	case ":", "agent-browser", "basename", "cat", "cd", "chmod", "cmp", "comm", "cp", "curl",
+	case ":", "basename", "cat", "cd", "chmod", "cmp", "comm", "cp", "curl",
 		"cut", "date", "df", "diff", "dirname", "du", "echo", "false", "gofmt",
 		"grep", "head", "hostname", "id", "jq", "ln", "ls", "mkdir", "mktemp", "mv",
 		"paste", "pgrep", "printenv", "ps", "pwd", "readlink", "realpath", "rm", "rmdir",

@@ -33,22 +33,26 @@ func hasEffectiveSedSandbox(args []shellWord) bool {
 			return false
 		case arg == "--sandbox":
 			return true
-		case arg == "-e" || arg == "-f" || arg == "-l" ||
-			arg == "--expression" || arg == "--file" || arg == "--line-length":
+		case arg == "-e" || arg == "-f" || arg == "--expression" || arg == "--file":
+			// GNU sed applies sandboxing while parsing each script source. A
+			// later --sandbox cannot retroactively constrain an earlier script.
+			return false
+		case strings.HasPrefix(arg, "--expression=") || strings.HasPrefix(arg, "--file="):
+			return false
+		case arg == "-l" || arg == "--line-length":
 			if i+1 >= len(args) || !args[i+1].resolved {
 				return false
 			}
 			i++
-		case strings.HasPrefix(arg, "--expression=") || strings.HasPrefix(arg, "--file=") ||
-			strings.HasPrefix(arg, "--line-length="):
+		case strings.HasPrefix(arg, "--line-length="):
 		case arg == "--debug" || arg == "--follow-symlinks" || arg == "--null-data" ||
 			arg == "--posix" || arg == "--quiet" || arg == "--regexp-extended" ||
 			arg == "--separate" || arg == "--silent" || arg == "--unbuffered":
 		case strings.HasPrefix(arg, "--"):
 			return false
 		case strings.HasPrefix(arg, "-") && arg != "-":
-			consumesNext, ok := sedShortOptionConsumesNext(arg[1:])
-			if !ok {
+			scriptBearing, consumesNext, ok := sedShortOptionBeforeSandbox(arg[1:])
+			if !ok || scriptBearing {
 				return false
 			}
 			if consumesNext {
@@ -66,19 +70,21 @@ func hasEffectiveSedSandbox(args []shellWord) bool {
 	return false
 }
 
-func sedShortOptionConsumesNext(flags string) (bool, bool) {
+func sedShortOptionBeforeSandbox(flags string) (bool, bool, bool) {
 	for i := 0; i < len(flags); i++ {
 		switch flags[i] {
 		case 'E', 'n', 'r', 's', 'u', 'z':
-		case 'e', 'f', 'l':
-			return i+1 == len(flags), true
+		case 'e', 'f':
+			return true, false, true
+		case 'l':
+			return false, i+1 == len(flags), true
 		case 'i':
-			return false, true
+			return false, false, true
 		default:
-			return false, false
+			return false, false, false
 		}
 	}
-	return false, true
+	return false, false, true
 }
 
 func literalSedScripts(args []shellWord) ([]string, bool) {
