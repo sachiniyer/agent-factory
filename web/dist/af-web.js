@@ -6748,6 +6748,7 @@ function createKeyedQueue() {
         tails.delete(key);
       }
     });
+    return next;
   };
 }
 var ConfigPane = class {

@@ -190,8 +190,8 @@ test("saves for one key run in the order the user made them, however slow the ne
   };
 
   queue("auto_yes", save("off"));
-  queue("auto_yes", save("on"));
-  await new Promise((r) => setTimeout(r, 80));
+  const done = queue("auto_yes", save("on"));
+  await done;
 
   assert.deepEqual(started, ["off", "on"], "the second save must not start until the first settles");
   assert.deepEqual(finished, ["off", "on"], "the LAST value the user chose must be the last one written");
@@ -204,10 +204,10 @@ test("a rejected save does not wedge the queue for that key", async () => {
   queue("update_channel", async () => {
     throw new Error('update_channel must be one of [stable, preview], got "nightly"');
   });
-  queue("update_channel", async () => {
+  const done = queue("update_channel", async () => {
     finished.push("preview");
   });
-  await new Promise((r) => setTimeout(r, 20));
+  await done;
 
   assert.deepEqual(finished, ["preview"], "a refused value must not block the user's next attempt on that key");
 });
@@ -217,14 +217,14 @@ test("different keys are not queued behind each other", async () => {
   const queue = createKeyedQueue();
 
   // A slow save on one key must not hold up an unrelated one.
-  queue("listen_addr", async () => {
+  const slow = queue("listen_addr", async () => {
     await new Promise((r) => setTimeout(r, 40));
     finished.push("listen_addr");
   });
-  queue("auto_yes", async () => {
+  const fast = queue("auto_yes", async () => {
     finished.push("auto_yes");
   });
-  await new Promise((r) => setTimeout(r, 80));
+  await Promise.all([slow, fast]);
 
   assert.deepEqual(finished, ["auto_yes", "listen_addr"], "keys have no ordering relationship; they must not block each other");
 });
