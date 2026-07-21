@@ -160,6 +160,16 @@ test("an exact-head Codex PR review proves review after its finding is resolved"
   assert.equal(result.shouldMerge, true);
 });
 
+test("an exact-head Codex review body finding overrides a clean verdict", async () => {
+  const result = await evaluateGate({
+    reviews: [codexReview(HEAD_SHA, "P1: a finding present only in the review body")],
+    reviewComments: [],
+  });
+
+  assert.equal(result.shouldMerge, false);
+  assert.match(result.reasons.join("\n"), /1 exact-head Codex review body finding/);
+});
+
 test("a verdict for an older head does not verify the current head", async () => {
   const result = await evaluateGate({ issueComments: [codexVerdict(OTHER_SHA)] });
 
@@ -388,10 +398,10 @@ function codexRateLimit() {
   };
 }
 
-function codexReview(sha) {
+function codexReview(sha, summary = "Here are some suggestions.") {
   return {
     user: { login: "chatgpt-codex-connector[bot]" },
-    body: `### Codex Review\n\nHere are some suggestions.\n\n**Reviewed commit:** \`${sha.slice(0, 10)}\``,
+    body: `### Codex Review\n\n${summary}\n\n**Reviewed commit:** \`${sha.slice(0, 10)}\``,
     submitted_at: "2026-07-09T01:20:00Z",
   };
 }

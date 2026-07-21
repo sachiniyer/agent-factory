@@ -4,6 +4,7 @@ const DOCS_DEPLOY_PATHS = ["docs/", "mkdocs.yml"];
 const CODEX_REVIEWER = "chatgpt-codex-connector[bot]";
 const CODEX_REVIEW_RE = /\bCodex Review\b/i;
 const CODEX_RATE_LIMIT_RE = /reached your Codex usage limits for code reviews/i;
+const CODEX_BODY_FINDING_RE = /\bP[0-3]\b/i;
 const REVIEWED_COMMIT_RE = /\*\*Reviewed commit:\*\*\s*`([0-9a-f]{7,40})`/i;
 // Docs/Deploy is deliberately conditional and is skipped on pull_request runs.
 const ALLOWED_SKIPPED_CHECKS = new Set(["Deploy"]);
@@ -505,10 +506,11 @@ async function evaluateCodex({ github, context, number, sha, lastCommitDate }) {
   const codexReviewArtifacts = [...codexComments, ...reviews]
     .filter((comment) => comment.user?.login === CODEX_REVIEWER)
     .sort((a, b) => reviewArtifactTime(b) - reviewArtifactTime(a));
-  const verdict = codexReviewArtifacts.find((comment) => {
+  const matchingReviewArtifacts = codexReviewArtifacts.filter((comment) => {
     const reviewedCommit = parseReviewedCommit(comment.body || "");
     return reviewedCommit != null && reviewedCommitMatchesHead(reviewedCommit, sha);
   });
+  const verdict = matchingReviewArtifacts[0];
 
   if (!verdict) {
     const latestCodexComment = codexComments.sort((a, b) => reviewArtifactTime(b) - reviewArtifactTime(a))[0];
@@ -522,6 +524,13 @@ async function evaluateCodex({ github, context, number, sha, lastCommitDate }) {
     } else {
       notes.push(`Codex verdict matches head ${sha}`);
     }
+  }
+
+  const bodyFindings = matchingReviewArtifacts.filter((artifact) =>
+    CODEX_BODY_FINDING_RE.test(artifact.body || ""),
+  );
+  if (bodyFindings.length > 0) {
+    reasons.push(`${bodyFindings.length} exact-head Codex review body finding(s)`);
   }
 
   const reviewComments = await github.paginate(github.rest.pulls.listReviewComments, {
