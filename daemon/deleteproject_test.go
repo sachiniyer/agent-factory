@@ -8,10 +8,23 @@ import (
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/session"
+	sessiongit "github.com/sachiniyer/agent-factory/session/git"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+type killAnotherSessionBackend struct {
+	*session.FakeBackend
+	onKill func() error
+}
+
+func (b *killAnotherSessionBackend) Kill(instance *session.Instance) error {
+	if err := b.onKill(); err != nil {
+		return err
+	}
+	return b.FakeBackend.Kill(instance)
+}
 
 // liveProjectRoots mirrors the "active projects" derivation the TUI and web use
 // (live-only grouping by repo root): archived sessions do not keep a project in
@@ -285,4 +298,73 @@ func TestDeleteProject_GenuineArchiveFailureStillReportsPartialFailure(t *testin
 
 	assert.NotEqual(t, session.Archived, beta.GetStatus(), "the busy session is untouched")
 	assert.True(t, exists(betaSrc), "the busy session's worktree is untouched")
+}
+
+// TestDeleteProject_ConcurrentlyKilledExternalTargetIsSuccess is the external
+// counterpart to TestDeleteProject_ConcurrentlyArchivedTargetIsSuccess above.
+// DeleteProject's under-lock snapshot proves beta existed. If another kill
+// removes beta before the sorted loop reaches it, "not found" means beta is
+// already in the desired gone state — not a partial failure.
+func TestDeleteProject_ConcurrentlyKilledExternalTargetIsSuccess(t *testing.T) {
+	for _, tc := range []struct {
+		name             string
+		legacyIDlessBeta bool
+	}{
+		{name: "stable id"},
+		{name: "legacy id-less row", legacyIDlessBeta: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			manager, repoID, repoPath := newStatusTestManager(t)
+
+			registerExternal := func(title string, backend session.Backend) *session.Instance {
+				gw, err := sessiongit.NewGitWorktreeFromStorage(repoPath, repoPath, title, "master", "", true, false)
+				require.NoError(t, err)
+				inst, err := session.NewInstance(session.InstanceOptions{Title: title, Path: repoPath, Program: "claude"})
+				require.NoError(t, err)
+				inst.SetBackend(backend)
+				inst.SetGitWorktreeForTest(gw)
+				inst.SetStartedForTest(true)
+				inst.SetStatusForTest(session.Ready)
+				manager.mu.Lock()
+				manager.instances[daemonInstanceKey(repoID, title)] = inst
+				manager.mu.Unlock()
+				return inst
+			}
+
+			beta := registerExternal("beta", session.NewFakeBackend())
+			if tc.legacyIDlessBeta {
+				beta.ID = ""
+			}
+			var concurrentKillErr error
+			alphaBackend := &killAnotherSessionBackend{
+				FakeBackend: session.NewFakeBackend(),
+				onKill: func() error {
+					_, concurrentKillErr = manager.KillSession(KillSessionRequest{ID: beta.ID, Title: beta.Title, RepoID: repoID})
+					return concurrentKillErr
+				},
+			}
+			alpha := registerExternal("alpha", alphaBackend)
+			require.NoError(t, manager.SaveInstances())
+
+			result, err := manager.DeleteProject(DeleteProjectRequest{RepoID: repoID, RepoPath: repoPath})
+			require.NoError(t, concurrentKillErr, "the competing kill must complete before DeleteProject reaches beta")
+			require.NoError(t, err, "a snapshotted target already in the desired gone state is success, not a partial failure")
+
+			wantIDs := map[string]string{"alpha": alpha.ID, "beta": beta.ID}
+			var titles []string
+			for _, data := range result.Killed {
+				titles = append(titles, data.Title)
+				assert.Equal(t, wantIDs[data.Title], data.ID,
+					"every reported kill carries the identity captured in the snapshot")
+			}
+			assert.ElementsMatch(t, []string{"alpha", "beta"}, titles,
+				"the concurrently killed session counts toward Killed instead of being undercounted")
+			assert.Empty(t, result.Archived)
+			assert.Empty(t, manager.Snapshot(repoID), "both external sessions are gone")
+
+			_, err = manager.KillSession(KillSessionRequest{ID: beta.ID, Title: beta.Title, RepoID: repoID})
+			require.Error(t, err, "a normal single-session caller must still see a stale target as not found")
+			assert.Contains(t, err.Error(), "not found")
+		})
+	}
 }

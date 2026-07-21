@@ -102,6 +102,7 @@ func (m *Manager) DeleteProject(req DeleteProjectRequest) (DeleteProjectResult, 
 	// with the lock released — ArchiveSession/KillSession take their own
 	// per-session locks and would deadlock if called while holding m.mu.
 	type target struct {
+		id       string
 		title    string
 		external bool
 	}
@@ -115,7 +116,7 @@ func (m *Manager) DeleteProject(req DeleteProjectRequest) (DeleteProjectResult, 
 		if inst.GetLiveness() == session.LiveArchived {
 			continue
 		}
-		targets = append(targets, target{title: title, external: inst.IsExternalWorktree()})
+		targets = append(targets, target{id: inst.ID, title: title, external: inst.IsExternalWorktree()})
 	}
 	m.mu.Unlock()
 
@@ -126,7 +127,21 @@ func (m *Manager) DeleteProject(req DeleteProjectRequest) (DeleteProjectResult, 
 	var errs []error
 	for _, t := range targets {
 		if t.external {
-			killed, err := m.KillSession(KillSessionRequest{Title: t.title, RepoID: repoID})
+			// Carry the stable identity captured under m.mu into the destructive
+			// lookup. Besides making a concurrent completed kill distinguishable,
+			// this prevents a same-title replacement from being torn down in the
+			// original target's place. Legacy id-less rows retain title lookup.
+			killed, err := m.KillSession(KillSessionRequest{ID: t.id, Title: t.title, RepoID: repoID})
+			if errors.Is(err, errSessionNotFound) {
+				// This is idempotent success only because t came from DeleteProject's
+				// own under-lock snapshot: the target existed then and is gone now,
+				// which is precisely the requested end state (#2124). A standalone
+				// KillSession for a stale/never-existing target still returns the
+				// same not-found error. Report the snapshotted identity so counts and
+				// lifecycle events do not understate what the delete achieved.
+				killed = session.InstanceData{ID: t.id, Title: t.title}
+				err = nil
+			}
 			if err != nil {
 				errs = append(errs, fmt.Errorf("session %q: %w", t.title, err))
 				continue

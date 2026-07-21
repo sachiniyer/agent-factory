@@ -10,6 +10,13 @@ import (
 	"github.com/sachiniyer/agent-factory/session"
 )
 
+// errSessionNotFound classifies only a resolver's authoritative miss. Its text
+// is deliberately "not found" so wrapping it preserves the existing messages
+// byte-for-byte. DeleteProject uses errors.Is on this in process because its own
+// under-lock snapshot proves the target existed; normal KillSession callers
+// still receive the same error, and the sentinel does not survive net/rpc.
+var errSessionNotFound = errors.New("not found")
+
 // KillSession tears down and deletes the resolved session. It returns the stable
 // identity (id + title) of the session it ACTUALLY resolved and acted on, so the
 // control server publishes the killed event for exactly that session — never the
@@ -439,7 +446,7 @@ func (m *Manager) resolveActionSession(id, title, repoID string) (*session.Insta
 			}
 		}
 		m.mu.Unlock()
-		return nil, "", "", "", nil, fmt.Errorf("session with id %q not found", id)
+		return nil, "", "", "", nil, fmt.Errorf("session with id %q %w", id, errSessionNotFound)
 	}
 	// Legacy/CLI path: no id supplied, resolve by {title, repoID}.
 	instance, resolvedRepoID, data, err := m.findSession(title, repoID)

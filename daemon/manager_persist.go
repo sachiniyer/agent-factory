@@ -226,7 +226,7 @@ func findInstanceDataByTitle(title, repoID string) (*session.InstanceData, strin
 				return &data[i], repoID, nil
 			}
 		}
-		return nil, "", fmt.Errorf("instance %q not found", title)
+		return nil, "", fmt.Errorf("instance %q %w", title, errSessionNotFound)
 	}
 
 	allInstances, err := config.LoadAllRepoInstances()
@@ -272,7 +272,7 @@ func findInstanceDataByTitle(title, repoID string) (*session.InstanceData, strin
 		sort.Strings(corrupted)
 		return nil, "", fmt.Errorf("instance %q not found; %d repo(s) have a corrupted instances.json that may be hiding it: %s", title, len(corrupted), strings.Join(corrupted, ", "))
 	}
-	return nil, "", fmt.Errorf("instance %q not found", title)
+	return nil, "", fmt.Errorf("instance %q %w", title, errSessionNotFound)
 }
 
 // ghostKillTmuxByName issues a tmux kill-session for a persisted sanitized
