@@ -216,7 +216,15 @@ type Backend interface {
 // it impossible for the destructive half to silently launch a command different
 // from the one that was checked while the outgoing agent was still alive.
 type AgentSwapPlan struct {
-	target       string
-	program      string
-	conversation AgentConversationData
+	target              string
+	program             string
+	conversation        AgentConversationData
+	conversationCapture ConversationCaptureSnapshot
+}
+
+// ConversationCapture returns the provider-store before-image frozen by
+// preflight. The snapshot is opaque outside session: callers can pass it to the
+// capture API, but cannot retarget it after the outgoing runtime is stopped.
+func (p AgentSwapPlan) ConversationCapture() ConversationCaptureSnapshot {
+	return p.conversationCapture
 }

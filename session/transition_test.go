@@ -2,6 +2,7 @@ package session
 
 import (
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -74,6 +75,7 @@ func TestTransitionTable_RunEffectsAreTheAgreedTable(t *testing.T) {
 		// which agent process owns it.
 		tkBeginHandoff:  runKeep,
 		tkCommitHandoff: runKeep,
+		tkParkHandoff:   runKeep,
 		tkAbortHandoff:  runKeep,
 		// Dropping an overlay reveals liveness; it does not change the agent's work.
 		tkClearOp: runKeep,
@@ -133,6 +135,7 @@ func TestTransition_LegalEdgesApply(t *testing.T) {
 		{"MarkRestoring keeps liveness", stateAxes{LiveArchived, OpNone}, false, false, MarkRestoring(), LiveArchived, OpRestoring, false},
 		{"BeginHandoff fences running agent", stateAxes{LiveRunning, OpNone}, true, false, BeginHandoff(), LiveRunning, OpReplacing, true},
 		{"CommitHandoff settles incoming agent", stateAxes{LiveReady, OpReplacing}, true, false, CommitHandoff(), LiveRunning, OpNone, true},
+		{"ParkHandoff settles incoming agent at limit", stateAxes{LiveRunning, OpReplacing}, true, false, ParkHandoff(time.Date(2026, 7, 25, 17, 55, 0, 0, time.UTC)), LiveLimitReached, OpNone, true},
 		{"AbortHandoff preserves outgoing liveness", stateAxes{LiveLimitReached, OpReplacing}, true, false, AbortHandoff(), LiveLimitReached, OpNone, true},
 		// ClearOp: drop any optimistic overlay to None, liveness untouched.
 		{"ClearOp from archiving", stateAxes{LiveReady, OpArchiving}, true, false, ClearOp(), LiveReady, OpNone, true},
@@ -147,6 +150,15 @@ func TestTransition_LegalEdgesApply(t *testing.T) {
 			assert.Equal(t, tc.wantStarted, i.started, "started")
 		})
 	}
+}
+
+func TestTransition_ParkHandoffStoresIncomingResetTime(t *testing.T) {
+	resetAt := time.Date(2026, 7, 25, 17, 55, 0, 0, time.UTC)
+	i := &Instance{liveness: LiveRunning, inFlightOp: OpReplacing}
+	require.NoError(t, i.Transition(ParkHandoff(resetAt)))
+	got, ok := i.LimitResetAt()
+	require.True(t, ok)
+	require.Equal(t, resetAt, got)
 }
 
 // I1 (tombstone-before-teardown) is intentionally NOT a chokepoint edge —

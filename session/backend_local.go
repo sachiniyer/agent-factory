@@ -107,7 +107,21 @@ func (b *LocalBackend) PrepareAgentSwap(i *Instance, target string) (AgentSwapPl
 		return AgentSwapPlan{}, fmt.Errorf("handoff target %s failed launch preflight: %w", target,
 			preflight.ProgramError(target, resolved, err))
 	}
-	return AgentSwapPlan{target: target, program: program, conversation: conversation}, nil
+	var capture ConversationCaptureSnapshot
+	if tmux.DetectAgentFromCommand(program) == tmux.ProgramCodex {
+		workDir := i.GetWorktreePath()
+		if workDir == "" {
+			return AgentSwapPlan{}, fmt.Errorf("handoff target %s has no worktree path for resolving its Codex conversation store", target)
+		}
+		codexHome, err := tmux.CodexHomeFromCommand(program, workDir)
+		if err != nil {
+			return AgentSwapPlan{}, fmt.Errorf("handoff target %s has an unresolvable Codex conversation store: %w", target, err)
+		}
+		capture = BeginConversationCaptureAtCodexHome(codexHome)
+	}
+	return AgentSwapPlan{
+		target: target, program: program, conversation: conversation, conversationCapture: capture,
+	}, nil
 }
 
 // autoYesUnsupported explains, per agent, why AutoYes cannot be honored — and is
@@ -649,6 +663,7 @@ func (b *LocalBackend) respawn(i *Instance) error {
 // same stable tab; retaining a broker capture from either old pane strands every
 // existing and future subscriber on a silent read loop.
 func resetAgentBrokerCaptures(i *Instance) {
+	i.noteAgentRuntimeReplaced()
 	if as, ok := i.AgentServer().(*localAgentServer); ok {
 		as.resetBrokerCaptures()
 	}

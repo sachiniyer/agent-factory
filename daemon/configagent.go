@@ -3,9 +3,6 @@ package daemon
 import (
 	"context"
 	"fmt"
-	"os"
-	"path/filepath"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -298,41 +295,7 @@ func (m *Manager) SpawnConfigAgent(ctx context.Context, req SpawnConfigAgentRequ
 // an unset CODEX_HOME falls back through the command-specific HOME. Relative
 // values resolve against the effective launch cwd, including GNU env -C.
 func configAgentCodexReceiptHome(program, workingDir string) (string, error) {
-	launch, err := tmux.CommandEnvironmentFromCommand(program, workingDir)
-	if err != nil {
-		return "", fmt.Errorf("cannot resolve Codex receipt environment: %w", err)
-	}
-	effective := func(name string) (string, bool, error) {
-		override := launch.Override(name)
-		if !override.Present {
-			value, set := os.LookupEnv(name)
-			return value, set, nil
-		}
-		if !override.Literal {
-			return "", false, fmt.Errorf("%s uses shell expansion; use a literal path so receipt verification can follow it", name)
-		}
-		return override.Value, override.Set, nil
-	}
-	resolve := func(path string) string {
-		if filepath.IsAbs(path) {
-			return filepath.Clean(path)
-		}
-		return filepath.Clean(filepath.Join(launch.WorkingDir, path))
-	}
-
-	if codexHome, set, err := effective("CODEX_HOME"); err != nil {
-		return "", err
-	} else if set && strings.TrimSpace(codexHome) != "" {
-		return resolve(codexHome), nil
-	}
-	home, set, err := effective("HOME")
-	if err != nil {
-		return "", err
-	}
-	if !set || strings.TrimSpace(home) == "" {
-		return "", fmt.Errorf("CODEX_HOME is unset and the launched command has no literal HOME fallback")
-	}
-	return filepath.Join(resolve(home), ".codex"), nil
+	return tmux.CodexHomeFromCommand(program, workingDir)
 }
 
 // dismissConfigAgentTrustPrompt clears the agent's first-run trust dialog, the

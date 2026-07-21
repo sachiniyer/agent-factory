@@ -156,6 +156,12 @@ type Instance struct {
 	// see state_epoch.go. Mutex-protected, in-memory only: it describes a window
 	// between an observation and its apply, and no such window survives a restart.
 	stateEpoch uint64
+	// agentRuntimeGeneration identifies the concrete agent process currently
+	// owning the Agent tab. Async conversation capture binds to this generation,
+	// so a result from a replaced process cannot write through a later handoff or
+	// recovery merely because the Instance pointer (or even agent name) matches.
+	// In-memory only: no capture goroutine survives a daemon restart.
+	agentRuntimeGeneration uint64
 	// Program is the program to run in the instance.
 	Program string
 	// Height is the height of the instance.

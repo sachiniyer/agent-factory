@@ -250,6 +250,26 @@ func TestMissionBrief_DirtyWorkIncludesWorkingTreeCommands(t *testing.T) {
 	}
 }
 
+func TestMissionBrief_UnbornDirtyWorkDoesNotReferenceHEAD(t *testing.T) {
+	brief := MissionBrief{
+		From: tmux.ProgramClaude,
+		To:   tmux.ProgramCodex,
+		Work: git.WorkSummary{
+			Branch:     "unborn-work",
+			DirtyFiles: 2,
+		},
+	}
+	rendered := brief.Render()
+	if strings.Contains(rendered, "git diff HEAD") {
+		t.Fatalf("unborn-branch brief tells the incoming agent to diff nonexistent HEAD:\n%s", rendered)
+	}
+	for _, command := range []string{"git status --short", "git diff --cached", "git diff"} {
+		if !strings.Contains(rendered, command) {
+			t.Fatalf("unborn dirty-work brief omits %q:\n%s", command, rendered)
+		}
+	}
+}
+
 // A session with no stored prompt must not have a goal invented for it. The
 // brief says it has none — an agent handed a fabricated goal would pursue the
 // fabrication.

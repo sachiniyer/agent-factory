@@ -110,7 +110,14 @@ func (m MissionBrief) Render() string {
 				b.WriteString("  Review committed work:  git log\n")
 			}
 			if m.Work.DirtyFiles > 0 {
-				b.WriteString("  Review uncommitted work:  git status --short  ·  git diff HEAD\n")
+				if strings.TrimSpace(m.Work.HeadSHA) == "" && m.Work.Commits == 0 {
+					// An unborn branch has no HEAD to diff. Status is what exposes
+					// untracked work; the two HEAD-less diffs cover staged and
+					// unstaged tracked changes without manufacturing a bad revision.
+					b.WriteString("  Review uncommitted work:  git status --short  ·  git diff --cached  ·  git diff\n")
+				} else {
+					b.WriteString("  Review uncommitted work:  git status --short  ·  git diff HEAD\n")
+				}
 			}
 		}
 	}

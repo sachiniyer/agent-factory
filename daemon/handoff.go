@@ -67,9 +67,10 @@ func (s *controlServer) HandoffSession(req HandoffSessionRequest, resp *HandoffS
 //     stopped and why — so it must be built before Program is rewritten.
 //  4. Raise OpReplacing, then rewrite Program + append the ledger entry.
 //  5. Swap the runtime using the prepared plan: stop the old agent, confirm it
-//     stopped, launch the new one fresh, and commit the replacement fence.
-//  6. Persist the new durable goal/record and begin conversation capture.
-//  7. Wait for readiness, dismiss trust UI, and only then deliver the mission.
+//     stopped, and launch the new one fresh while KEEPING the fence raised.
+//  6. Wait for readiness, dismiss trust UI, and deliver the mission. A usage
+//     limit here atomically parks the incoming runtime with that mission pending.
+//  7. Settle the fence, then persist and begin generation-scoped capture.
 //
 // Rollback: if the runtime swap fails, step 4's state change is reverted, because
 // a record claiming the session runs claude while the pane still runs codex is
@@ -162,7 +163,7 @@ func (m *Manager) HandoffSession(req HandoffSessionRequest) (HandoffSessionRespo
 	}
 	brief := instance.BuildMissionBrief(target, req.Brief, reason)
 	headSHA := brief.Work.HeadSHA
-	conversationCapture := session.BeginConversationCapture()
+	conversationCapture := plan.ConversationCapture()
 
 	// Fence the close/start window before either the record or runtime changes.
 	// New polls skip OpReplacing; a poll already observing the outgoing pane sees
@@ -193,19 +194,18 @@ func (m *Manager) HandoffSession(req HandoffSessionRequest) (HandoffSessionRespo
 	// The runtime this session's failure history was about is gone (#1794).
 	m.noteRuntimeReplaced(repoID, instance)
 
-	// Any usage-limit block is already cleared at this point: SwapAgent commits
-	// the replacement as LiveRunning, which drops LiveLimitReached. That is the
-	// CORRECT outcome here, and it is the opposite of what the #1146 respawn arm
-	// does — that path deliberately re-applies the block, because there the same
-	// agent is coming back and stays parked until its pending prompt lands.
+	// A successful backend swap does not clear the replacement fence yet. That is
+	// intentional: a fresh idle prompt before delivery is not a completed task
+	// run, and the status poll must not observe it as one. Settling below clears
+	// any OUTGOING usage-limit block as part of the incoming agent's outcome. That
+	// is the opposite of what the #1146 respawn arm does — that path deliberately
+	// re-applies the block, because there the same agent is coming back and stays
+	// parked until its pending prompt lands.
 	//
-	// Here the pane is running a DIFFERENT agent, which is not at anyone's limit.
-	// The block described the outgoing agent's plan; re-applying it would badge a
-	// healthy session [limit] and hand it to the auto-resume scheduler, which
-	// would then "resume" an agent that was never blocked. This holds even if the
-	// delivery below fails — the session is then a running agent with no
-	// instructions, which is a different problem than a usage limit and should
-	// not be reported as one.
+	// Here the pane is running a DIFFERENT agent. The old block described the
+	// outgoing agent's plan; re-applying it would badge a healthy incoming session
+	// [limit]. A NEW limit observed while waiting for that incoming agent is a
+	// different fact and parks through ParkHandoff below.
 	//
 	// An operator-supplied brief becomes the durable goal for later limit resumes
 	// and handoffs; replaying the create-time prompt would send the new agent back
@@ -214,17 +214,49 @@ func (m *Manager) HandoffSession(req HandoffSessionRequest) (HandoffSessionRespo
 		instance.SetPrompt(override)
 	}
 
-	// Persist before delivering: the swap is the durable fact, and a delivery
-	// failure must not lose it (the #1854 lesson from the resume path).
-	m.persistInstance(repoID, instance)
-	m.captureAgentConversationAsync(repoID, key, instance, conversationCapture)
-
 	mission := brief.Render()
+	settle := func(event session.TransitionEvent) error {
+		if err := instance.Transition(event); err != nil {
+			return err
+		}
+		// Persist only settled outcomes. Disk persistence strips transient ops, so
+		// writing while OpReplacing is raised would manufacture an unfenced state
+		// no in-memory reader was ever allowed to observe.
+		m.persistInstance(repoID, instance)
+		m.captureAgentConversationAsync(repoID, key, instance, conversationCapture)
+		return nil
+	}
 	if serr := task.WaitForReadyAndSendPrompt(context.Background(), instance, mission); serr != nil {
+		var limitErr *task.LimitReachedError
+		if errors.As(serr, &limitErr) {
+			// The mission never reached the composer. Store the rendered takeover
+			// context — not the old create prompt or bare override — because the
+			// normal limit-resume path replays exactly Instance.Prompt.
+			instance.SetPrompt(mission)
+			if terr := settle(session.ParkHandoff(limitErr.ResetAt)); terr != nil {
+				return HandoffSessionResponse{}, fmt.Errorf(
+					"handed %q off to %s, which hit a usage limit before its mission could be delivered, and failed to park the handoff: %w",
+					req.Title, target, errors.Join(serr, terr))
+			}
+			return HandoffSessionResponse{}, fmt.Errorf(
+				"handed %q off to %s, which hit a usage limit before its mission could be delivered; "+
+					"the rendered mission is saved and will be sent by the normal limit-resume path: %w",
+				req.Title, target, serr)
+		}
+		if terr := settle(session.CommitHandoff()); terr != nil {
+			return HandoffSessionResponse{}, fmt.Errorf(
+				"handed %q off to %s, but its mission delivery and replacement-fence settlement both failed: %w",
+				req.Title, target, errors.Join(serr, terr))
+		}
 		return HandoffSessionResponse{}, fmt.Errorf(
 			"handed %q off to %s, but its mission brief could not be delivered (%w); "+
 				"the new agent is running with no instructions — re-send them with `af sessions send-prompt`",
 			req.Title, target, serr)
+	}
+	if err := settle(session.CommitHandoff()); err != nil {
+		return HandoffSessionResponse{}, fmt.Errorf(
+			"handed %q off to %s and delivered its mission, but could not settle the replacement fence: %w",
+			req.Title, target, err)
 	}
 	log.InfoLog.Printf("handoff: session %q swapped %s → %s at %s", instance.Title, outgoing, target, shortSHA(headSHA))
 

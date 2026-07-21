@@ -57,3 +57,10 @@ func TestCommandEnvironmentFromCommand(t *testing.T) {
 		})
 	}
 }
+
+func TestCodexHomeFromCommandUsesEffectiveCwd(t *testing.T) {
+	launchDir := filepath.Join(string(filepath.Separator), "launch")
+	got, err := CodexHomeFromCommand("env -C /tmp CODEX_HOME=relative codex", launchDir)
+	require.NoError(t, err)
+	require.Equal(t, filepath.Join(string(filepath.Separator), "tmp", "relative"), got)
+}

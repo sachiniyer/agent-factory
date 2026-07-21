@@ -2,6 +2,7 @@ package tmux
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"unicode"
@@ -120,6 +121,48 @@ func CommandEnvironmentFromCommand(command, workingDir string) (CommandEnvironme
 		idx++
 	}
 	return result, nil
+}
+
+// CodexHomeFromCommand resolves the rollout store the launched command will
+// actually use. CODEX_HOME and HOME are interpreted in the same environment +
+// cwd model as GNU env itself, so receipt/capture callers never silently watch
+// the daemon's store while a wrapped Codex writes somewhere else.
+func CodexHomeFromCommand(command, workingDir string) (string, error) {
+	launch, err := CommandEnvironmentFromCommand(command, workingDir)
+	if err != nil {
+		return "", fmt.Errorf("cannot resolve Codex environment: %w", err)
+	}
+	effective := func(name string) (string, bool, error) {
+		override := launch.Override(name)
+		if !override.Present {
+			value, set := os.LookupEnv(name)
+			return value, set, nil
+		}
+		if !override.Literal {
+			return "", false, fmt.Errorf("%s uses shell expansion; use a literal path so Codex storage can be followed", name)
+		}
+		return override.Value, override.Set, nil
+	}
+	resolve := func(path string) string {
+		if filepath.IsAbs(path) {
+			return filepath.Clean(path)
+		}
+		return filepath.Clean(filepath.Join(launch.WorkingDir, path))
+	}
+
+	if codexHome, set, err := effective("CODEX_HOME"); err != nil {
+		return "", err
+	} else if set && strings.TrimSpace(codexHome) != "" {
+		return resolve(codexHome), nil
+	}
+	home, set, err := effective("HOME")
+	if err != nil {
+		return "", err
+	}
+	if !set || strings.TrimSpace(home) == "" {
+		return "", fmt.Errorf("CODEX_HOME is unset and the launched command has no literal HOME fallback")
+	}
+	return filepath.Join(resolve(home), ".codex"), nil
 }
 
 func resolveCommandDir(current, requested string) (string, error) {

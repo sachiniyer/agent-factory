@@ -23,6 +23,18 @@ type AgentConversationData struct {
 	CaptureKind string    `json:"capture_kind,omitempty"`
 }
 
+// AgentRuntimeToken binds asynchronous provider discovery to one concrete
+// process generation. Its fields stay private so callers can only obtain a
+// valid token from an Instance snapshot, not reconstruct one from a matching
+// agent name after the runtime has moved on.
+type AgentRuntimeToken struct {
+	agent      string
+	generation uint64
+}
+
+// Agent reports the provider the captured runtime actually launched.
+func (t AgentRuntimeToken) Agent() string { return t.agent }
+
 func (c AgentConversationData) Empty() bool {
 	return strings.TrimSpace(c.Agent) == "" &&
 		strings.TrimSpace(c.ID) == "" &&
@@ -59,6 +71,49 @@ func (i *Instance) SetAgentConversation(conv AgentConversationData) bool {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	return i.setAgentConversationLocked(conv)
+}
+
+// AgentRuntimeToken snapshots the provider and runtime generation atomically.
+// Capture callers take it before starting their goroutine and must use
+// SetAgentConversationForRuntime to commit the eventual result.
+func (i *Instance) AgentRuntimeToken() AgentRuntimeToken {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	return AgentRuntimeToken{
+		agent:      i.resolvedAgentLocked(),
+		generation: i.agentRuntimeGeneration,
+	}
+}
+
+// SetAgentConversationForRuntime commits conv only while token still names the
+// live process generation it was captured for. This catches A→B as well as
+// A→B→A handoffs; an agent-name comparison alone cannot distinguish the latter.
+func (i *Instance) SetAgentConversationForRuntime(token AgentRuntimeToken, conv AgentConversationData) bool {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if i.userKilled || token.agent == "" || token.generation != i.agentRuntimeGeneration ||
+		conv.Agent != token.agent || i.resolvedAgentLocked() != token.agent {
+		return false
+	}
+	return i.setAgentConversationLocked(conv)
+}
+
+// noteAgentRuntimeReplaced invalidates every capture bound to the prior process.
+// Handoff record mutation calls the locked increment before teardown; local
+// recovery calls this after re-spawn so both replacement paths close the edge.
+func (i *Instance) noteAgentRuntimeReplaced() {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	i.agentRuntimeGeneration++
+}
+
+func (i *Instance) resolvedAgentLocked() string {
+	if ts := i.tmuxLocked(); ts != nil {
+		if program := ts.Program(); strings.TrimSpace(program) != "" {
+			return tmux.DetectAgentFromCommand(program)
+		}
+	}
+	return tmux.DetectAgentFromCommand(i.Program)
 }
 
 func (i *Instance) setAgentConversationLocked(conv AgentConversationData) bool {

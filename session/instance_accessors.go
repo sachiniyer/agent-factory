@@ -292,14 +292,8 @@ func (i *Instance) TmuxAlive() bool {
 // "/home/foo/bin/claude --plugin-dir x" (#677).
 func (i *Instance) ResolvedAgent() string {
 	i.mu.RLock()
-	ts := i.tmuxLocked()
-	i.mu.RUnlock()
-	if ts != nil {
-		if p := ts.Program(); strings.TrimSpace(p) != "" {
-			return tmux.DetectAgentFromCommand(p)
-		}
-	}
-	return tmux.DetectAgentFromCommand(i.Program)
+	defer i.mu.RUnlock()
+	return i.resolvedAgentLocked()
 }
 
 // ResolvedPaneAgent returns the canonical agent proven by this instance's

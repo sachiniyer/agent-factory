@@ -67,7 +67,7 @@ func TestCheckCommand(t *testing.T) {
 	if err := os.WriteFile(exe, []byte("#!/bin/sh\n"), 0o755); err != nil {
 		t.Fatalf("write executable: %v", err)
 	}
-	t.Setenv("PATH", dir)
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	check, err := CheckCommand("env FOO=1 fake-agent --ready")
 	if err != nil {
@@ -75,6 +75,32 @@ func TestCheckCommand(t *testing.T) {
 	}
 	if check.Executable != "fake-agent" || check.Path != exe {
 		t.Fatalf("unexpected check: %+v", check)
+	}
+}
+
+func TestCheckCommandParsesAndValidatesAbsoluteEnvWrapper(t *testing.T) {
+	dir := t.TempDir()
+	envPath := filepath.Join(dir, "env")
+	if err := os.WriteFile(envPath, []byte("#!/bin/sh\nexec /usr/bin/env \"$@\"\n"), 0o755); err != nil {
+		t.Fatalf("write env wrapper: %v", err)
+	}
+
+	missingTarget := filepath.Join(dir, "missing-codex")
+	check, err := CheckCommand(envPath + " FOO=1 " + missingTarget)
+	if err == nil {
+		t.Fatalf("absolute env wrapper approved missing command %q", missingTarget)
+	}
+	if check.Executable != missingTarget {
+		t.Fatalf("checked executable = %q, want env's command %q", check.Executable, missingTarget)
+	}
+
+	validTarget := filepath.Join(dir, "codex")
+	if err := os.WriteFile(validTarget, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("write target: %v", err)
+	}
+	missingEnv := filepath.Join(t.TempDir(), "env")
+	if _, err := CheckCommand(missingEnv + " " + validTarget); err == nil {
+		t.Fatalf("approved command whose env wrapper %q does not exist", missingEnv)
 	}
 }
 

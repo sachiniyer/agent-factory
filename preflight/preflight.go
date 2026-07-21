@@ -89,30 +89,46 @@ func CheckCommand(command string) (*ProgramCheck, error) {
 	if exe == "" {
 		return check, fmt.Errorf("could not find an executable in command %q", command)
 	}
+	// env is itself an executable as well as a command parser. Validate both
+	// halves: approving only the wrapper misses a missing target, while approving
+	// only the target turns a missing custom /path/to/env into a launch-time
+	// failure after a destructive handoff has already stopped the old agent.
+	if wrapper := envWrapperExecutable(words); wrapper != "" {
+		if _, err := resolveExecutable(wrapper); err != nil {
+			return check, fmt.Errorf("env wrapper %q cannot be executed: %w", wrapper, err)
+		}
+	}
+	path, err := resolveExecutable(exe)
+	if err != nil {
+		return check, err
+	}
+	check.Path = path
+	return check, nil
+}
+
+func resolveExecutable(exe string) (string, error) {
 	if strings.ContainsRune(exe, filepath.Separator) || strings.HasPrefix(exe, "~") {
 		path := config.ExpandTilde(exe)
 		info, err := os.Stat(path)
 		if err != nil {
 			if os.IsNotExist(err) {
-				return check, fmt.Errorf("%w: executable %q does not exist", errProgramNotFound, exe)
+				return "", fmt.Errorf("%w: executable %q does not exist", errProgramNotFound, exe)
 			}
-			return check, fmt.Errorf("executable %q could not be checked: %w", exe, err)
+			return "", fmt.Errorf("executable %q could not be checked: %w", exe, err)
 		}
 		if info.IsDir() {
-			return check, fmt.Errorf("executable %q is a directory, not a program", exe)
+			return "", fmt.Errorf("executable %q is a directory, not a program", exe)
 		}
 		if info.Mode().Perm()&0o111 == 0 {
-			return check, fmt.Errorf("%w: executable %q is not executable; run: %s", errProgramNotExecutable, exe, shellsuggest.Command("chmod", "+x", path))
+			return "", fmt.Errorf("%w: executable %q is not executable; run: %s", errProgramNotExecutable, exe, shellsuggest.Command("chmod", "+x", path))
 		}
-		check.Path = path
-		return check, nil
+		return path, nil
 	}
 	path, err := exec.LookPath(exe)
 	if err != nil {
-		return check, fmt.Errorf("%w: executable %q was not found on PATH", errProgramNotFound, exe)
+		return "", fmt.Errorf("%w: executable %q was not found on PATH", errProgramNotFound, exe)
 	}
-	check.Path = path
-	return check, nil
+	return path, nil
 }
 
 // LocalSessionPrereqs verifies the prerequisites needed before creating a
@@ -219,7 +235,7 @@ func firstExecutable(words []string) (string, error) {
 	if len(words) == 0 {
 		return "", nil
 	}
-	if words[0] != "env" {
+	if !isEnvExecutable(words[0]) {
 		return words[0], nil
 	}
 
@@ -236,6 +252,20 @@ func firstExecutable(words []string) (string, error) {
 		return "", nil
 	}
 	return words[1+invocation.CommandIndex], nil
+}
+
+func envWrapperExecutable(words []string) string {
+	for len(words) > 0 && isAssignment(words[0]) {
+		words = words[1:]
+	}
+	if len(words) > 0 && isEnvExecutable(words[0]) {
+		return words[0]
+	}
+	return ""
+}
+
+func isEnvExecutable(word string) bool {
+	return filepath.Base(config.ExpandTilde(word)) == "env"
 }
 
 func isAssignment(word string) bool {
