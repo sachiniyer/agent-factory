@@ -211,6 +211,7 @@ body {
 .af-tab-new:focus-visible,
 .af-viewtab:focus-visible,
 .af-theme-opt:focus-visible,
+.af-appbar-more:focus-visible,
 .af-project-switch:focus-visible,
 .af-project-item:focus-visible,
 .af-rail-filter:focus-visible,
@@ -352,6 +353,7 @@ body {
 .af-project-switch-wrap {
   position: relative;
   margin-left: auto;
+  min-width: 0;
 }
 .af-project-switch {
   display: inline-flex;
@@ -376,10 +378,18 @@ body {
   color: var(--af-text-3);
 }
 .af-project-glyph {
+  flex: 0 0 auto;
   color: var(--af-accent);
   font-weight: 700;
 }
+.af-project-switch-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .af-project-caret {
+  flex: 0 0 auto;
   color: var(--af-text-3);
   font-size: 0.6em;
 }
@@ -495,6 +505,33 @@ body {
 .af-live-pip.af-live-reconnecting {
   background: var(--af-dot-lost);
   animation: af-pulse 1.2s ease-in-out infinite;
+}
+.af-appbar-tools-wrap,
+.af-appbar-tools {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--af-sp-4);
+  flex: 0 0 auto;
+}
+.af-appbar-more {
+  display: none;
+  align-items: center;
+  justify-content: center;
+  width: 2.75rem;
+  height: 2.75rem;
+  padding: 0;
+  background: transparent;
+  color: var(--af-text);
+  border: 1px solid var(--af-border);
+  border-radius: var(--af-r-md);
+  font: inherit;
+  font-size: var(--af-fs-lg);
+  line-height: 1;
+  cursor: pointer;
+}
+.af-appbar-more:hover {
+  background: var(--af-bg-inset);
+  border-color: var(--af-border-strong);
 }
 .af-ghost {
   padding: 0.4rem var(--af-sp-3);
@@ -1749,6 +1786,19 @@ body {
   font-size: var(--af-fs-xs);
 }
 @media (max-width: 768px) {
+  .af-appbar {
+    position: relative;
+    z-index: 40;
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    grid-template-areas: "nav project tools" "views views views";
+    align-items: center;
+    gap: var(--af-sp-2);
+    padding: max(var(--af-sp-2), env(safe-area-inset-top)) max(var(--af-sp-2), env(safe-area-inset-right)) var(--af-sp-2) max(var(--af-sp-2), env(safe-area-inset-left));
+  }
+  .af-nav-toggle {
+    grid-area: nav;
+  }
   .af-app.af-view-sessions .af-nav-toggle {
     display: inline-flex;
   }
@@ -1786,6 +1836,96 @@ body {
   }
   .af-brand {
     display: none;
+  }
+  .af-project-switch-wrap {
+    grid-area: project;
+    width: 100%;
+    min-width: 0;
+    margin-left: 0;
+  }
+  .af-project-switch {
+    width: 100%;
+    min-width: 0;
+    height: 2.75rem;
+  }
+  .af-project-switch-name {
+    flex: 1 1 auto;
+    text-align: left;
+  }
+  .af-project-menu {
+    right: calc(-2.75rem - var(--af-sp-2));
+    width: calc(100vw - var(--af-sp-2) - var(--af-sp-2));
+    min-width: 0;
+    max-width: none;
+    max-height: calc(100dvh - 7rem);
+    overflow-y: auto;
+    z-index: 60;
+  }
+  .af-viewnav {
+    grid-area: views;
+    width: 100%;
+    margin-left: 0;
+  }
+  .af-viewtab {
+    flex: 1 1 0;
+    min-width: 0;
+    min-height: 2.5rem;
+    padding-inline: var(--af-sp-2);
+  }
+  .af-appbar-tools-wrap {
+    grid-area: tools;
+    position: relative;
+    display: block;
+  }
+  .af-appbar-more {
+    display: inline-flex;
+  }
+  .af-appbar-tools {
+    display: none;
+    position: absolute;
+    top: calc(100% + 6px);
+    right: 0;
+    z-index: 60;
+    width: min(17rem, calc(100vw - var(--af-sp-2) - var(--af-sp-2)));
+    max-height: calc(100dvh - 4rem);
+    overflow-y: auto;
+    flex-direction: column;
+    align-items: stretch;
+    gap: var(--af-sp-2);
+    padding: var(--af-sp-2);
+    background: var(--af-bg-raised);
+    border: 1px solid var(--af-border);
+    border-radius: var(--af-r-lg);
+    box-shadow: var(--af-shadow-overlay);
+  }
+  .af-appbar-tools-open > .af-appbar-tools {
+    display: flex;
+  }
+  .af-appbar-tools .af-live {
+    min-height: 2.75rem;
+    padding-inline: var(--af-sp-3);
+  }
+  .af-appbar-tools .af-install {
+    width: 100%;
+  }
+  .af-appbar-tools .af-install__go {
+    flex: 1 1 auto;
+    min-height: 2.75rem;
+  }
+  .af-appbar-tools .af-install__dismiss {
+    min-width: 2.75rem;
+    min-height: 2.75rem;
+  }
+  .af-appbar-tools .af-theme-toggle {
+    width: 100%;
+  }
+  .af-appbar-tools .af-theme-opt {
+    flex: 1 1 0;
+    min-height: 2.5rem;
+  }
+  .af-appbar-tools > .af-ghost {
+    width: 100%;
+    min-height: 2.75rem;
   }
   .af-tab {
     min-height: 2.5rem;

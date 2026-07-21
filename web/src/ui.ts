@@ -707,7 +707,6 @@ export class AppShell {
     // transport action, not a logout.
     const disconnect = h("button", { type: "button", class: "af-ghost" }, "Disconnect");
     disconnect.setAttribute("title", "Disconnect and forget the saved token");
-    disconnect.addEventListener("click", () => this.actions.disconnect());
 
     // The theme toggle: a compact Auto/Light/Dark segmented control. A click routes
     // through actions.setTheme, which persists the choice and re-themes the terminals.
@@ -783,6 +782,71 @@ export class AppShell {
     this.navToggle.setAttribute("aria-expanded", "false");
     this.navToggle.addEventListener("click", () => this.toggleNav());
 
+    // Secondary appbar chrome stays inline on desktop, but a phone cannot give all
+    // four controls scarce primary-row width without clipping the project context
+    // (#2227). Group them behind one More trigger at the narrow breakpoint instead
+    // of deleting functionality or shrinking touch targets. The listeners exist only
+    // while the popover is open, so logout/login cannot accumulate document handlers.
+    const appbarTools = h(
+      "div",
+      { class: "af-appbar-tools", id: "af-appbar-tools" },
+      live,
+      ...(this.installEl ? [this.installEl] : []),
+      themeToggle,
+      disconnect,
+    );
+    appbarTools.setAttribute("role", "group");
+    appbarTools.setAttribute("aria-label", "App controls");
+    const appbarMore = h("button", { type: "button", class: "af-appbar-more" }, "⋯");
+    appbarMore.setAttribute("aria-label", "More app controls");
+    appbarMore.setAttribute("title", "More app controls");
+    appbarMore.setAttribute("aria-haspopup", "true");
+    appbarMore.setAttribute("aria-controls", "af-appbar-tools");
+    appbarMore.setAttribute("aria-expanded", "false");
+    const appbarToolsWrap = h("div", { class: "af-appbar-tools-wrap" }, appbarMore, appbarTools);
+    let appbarToolsOpen = false;
+    const setAppbarToolsOpen = (open: boolean): void => {
+      if (appbarToolsOpen === open) {
+        return;
+      }
+      appbarToolsOpen = open;
+      appbarToolsWrap.classList.toggle("af-appbar-tools-open", open);
+      appbarMore.setAttribute("aria-expanded", open ? "true" : "false");
+      if (open) {
+        document.addEventListener("mousedown", onAppbarToolsMouseDown);
+        document.addEventListener("keydown", onAppbarToolsKeyDown, true);
+        window.addEventListener("resize", onAppbarToolsResize);
+      } else {
+        document.removeEventListener("mousedown", onAppbarToolsMouseDown);
+        document.removeEventListener("keydown", onAppbarToolsKeyDown, true);
+        window.removeEventListener("resize", onAppbarToolsResize);
+      }
+    };
+    const onAppbarToolsMouseDown = (e: MouseEvent): void => {
+      if (!appbarToolsWrap.isConnected || !appbarToolsWrap.contains(e.target as Node)) {
+        setAppbarToolsOpen(false);
+      }
+    };
+    const onAppbarToolsKeyDown = (e: KeyboardEvent): void => {
+      if (e.key !== "Escape") {
+        return;
+      }
+      e.stopPropagation();
+      setAppbarToolsOpen(false);
+      appbarMore.focus();
+    };
+    const onAppbarToolsResize = (): void => setAppbarToolsOpen(false);
+    appbarMore.addEventListener("click", (e) => {
+      e.stopPropagation();
+      setAppbarToolsOpen(!appbarToolsOpen);
+    });
+    // Disconnect replaces the shell synchronously. Close first so the temporary
+    // document/window listeners cannot outlive the DOM subtree they describe.
+    disconnect.addEventListener("click", () => {
+      setAppbarToolsOpen(false);
+      this.actions.disconnect();
+    });
+
     const header = h(
       "header",
       { class: "af-appbar" },
@@ -790,13 +854,7 @@ export class AppShell {
       h("span", { class: "af-brand" }, "Agent Factory"),
       viewNav,
       this.projectSwitchWrap,
-      live,
-      // Install sits with the other trailing appbar controls. It carries `hidden`
-      // unless the browser reports the app installable, which on most loads (and
-      // always over plain-HTTP Tailscale) means it contributes nothing to the bar.
-      ...(this.installEl ? [this.installEl] : []),
-      themeToggle,
-      disconnect,
+      appbarToolsWrap,
     );
 
     this.railCount = h("span", { class: "af-rail-count" }, "0");
