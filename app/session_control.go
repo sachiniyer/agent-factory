@@ -204,10 +204,10 @@ var resumeFromLimitThroughDaemon = func(title, repoID string) error {
 // swap that happened rather than the one it assumed: the picker's idea of the
 // current agent can be a poll tick stale. A package var so the app test suite can
 // stub it without dialing a real daemon.
-var handoffSessionThroughDaemon = func(title, repoID, target string) (string, error) {
+var handoffSessionThroughDaemon = func(req daemon.HandoffSessionRequest) (string, error) {
 	var from string
 	err := withDaemonHTTP(func(c *apiclient.Client) error {
-		resp, e := c.HandoffSession(daemon.HandoffSessionRequest{Title: title, RepoID: repoID, To: target})
+		resp, e := c.HandoffSession(req)
 		if e != nil {
 			return e
 		}
@@ -219,7 +219,7 @@ var handoffSessionThroughDaemon = func(title, repoID, target string) (string, er
 
 // SetHandoffRunnerForTest swaps the handoff seam (#2013) so a test can assert the
 // TUI routes its handoff through the daemon — without dialing a real one.
-func SetHandoffRunnerForTest(fn func(title, repoID, target string) (string, error)) func() {
+func SetHandoffRunnerForTest(fn func(daemon.HandoffSessionRequest) (string, error)) func() {
 	prev := handoffSessionThroughDaemon
 	handoffSessionThroughDaemon = fn
 	return func() { handoffSessionThroughDaemon = prev }

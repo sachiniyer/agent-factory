@@ -5,12 +5,19 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 	"github.com/sachiniyer/agent-factory/ui"
 	"github.com/sachiniyer/agent-factory/ui/overlay"
 )
+
+type handoffPickerTarget struct {
+	id     string
+	title  string
+	repoID string
+}
 
 // handoffAgentChoices returns the agents the selected session may be handed to:
 // every supported agent except the one already running.
@@ -73,6 +80,7 @@ func (m *home) handleHandoff() (tea.Model, tea.Cmd) {
 	}
 
 	m.handoffChoices = choices
+	m.handoffTarget = handoffPickerTarget{id: selected.ID, title: selected.Title, repoID: m.repoID}
 	m.selectionOverlay = overlay.NewSelectionOverlay("Hand off to", choices)
 	m.state = stateSelectHandoffAgent
 	return m, nil
@@ -92,9 +100,11 @@ func (m *home) handleStateSelectHandoffAgent(msg tea.KeyMsg) (tea.Model, tea.Cmd
 	submitted := m.selectionOverlay.IsSubmitted()
 	idx := m.selectionOverlay.GetSelectedIndex()
 	choices := m.handoffChoices
+	pickerTarget := m.handoffTarget
 
 	m.selectionOverlay = nil
 	m.handoffChoices = nil
+	m.handoffTarget = handoffPickerTarget{}
 	m.state = stateDefault
 	m.menu.SetState(ui.StateDefault)
 
@@ -103,7 +113,7 @@ func (m *home) handleStateSelectHandoffAgent(msg tea.KeyMsg) (tea.Model, tea.Cmd
 	}
 	target := choices[idx]
 
-	selected := m.sidebar.GetSelectedInstance()
+	selected := m.resolveHandoffPickerTarget(pickerTarget)
 	if selected == nil {
 		return m, nil
 	}
@@ -115,8 +125,28 @@ func (m *home) handleStateSelectHandoffAgent(msg tea.KeyMsg) (tea.Model, tea.Cmd
 		"Same worktree and branch — nothing is discarded."
 
 	return m, m.confirmActionWithDetail(message, detail, func() tea.Msg {
-		return startHandoffMsg{title: title, target: target}
+		return startHandoffMsg{request: daemon.HandoffSessionRequest{
+			ID: pickerTarget.id, Title: title, RepoID: pickerTarget.repoID, To: target,
+		}}
 	})
+}
+
+func (m *home) resolveHandoffPickerTarget(target handoffPickerTarget) *session.Instance {
+	if target.repoID == "" || target.repoID != m.repoID {
+		return nil
+	}
+	if target.id == "" {
+		// Compatibility for records written before stable session IDs existed.
+		// Current sessions take the ID arm below, which is what prevents a killed
+		// and recreated same-title row from inheriting the pending action.
+		return m.store.GetInstanceByTitle(target.title)
+	}
+	for _, inst := range m.store.GetInstances() {
+		if inst.ID == target.id {
+			return inst
+		}
+	}
+	return nil
 }
 
 // startHandoffMsg is emitted by the confirmation action and turned into the
@@ -124,8 +154,7 @@ func (m *home) handleStateSelectHandoffAgent(msg tea.KeyMsg) (tea.Model, tea.Cmd
 // event loop never blocks on the swap (which stops a process and starts
 // another).
 type startHandoffMsg struct {
-	title  string
-	target string
+	request daemon.HandoffSessionRequest
 }
 
 type handoffDoneMsg struct {
@@ -136,15 +165,14 @@ type handoffDoneMsg struct {
 }
 
 // handoffCmd runs the daemon handoff off the event loop.
-func (m *home) handoffCmd(title, target string) tea.Cmd {
-	repoID := m.repoID
+func (m *home) handoffCmd(request daemon.HandoffSessionRequest) tea.Cmd {
 	handoff := handoffSessionThroughDaemon
 	return func() tea.Msg {
-		from, err := handoff(title, repoID, target)
+		from, err := handoff(request)
 		if err != nil {
-			log.ErrorLog.Printf("could not hand session %q off to %s: %v", title, target, err)
+			log.ErrorLog.Printf("could not hand session %q off to %s: %v", request.Title, request.To, err)
 		}
-		return handoffDoneMsg{title: title, from: from, target: target, err: err}
+		return handoffDoneMsg{title: request.Title, from: from, target: request.To, err: err}
 	}
 }
 
