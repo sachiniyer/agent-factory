@@ -191,7 +191,11 @@ type Backend interface {
 	// agent inside a provisioned sandbox is a different lifecycle (re-launch
 	// inside the sandbox, not re-provision it), so they return
 	// ErrHandoffUnsupported and the Handoff capability bit is false.
-	SwapAgent(instance *Instance) error
+	// PrepareAgentSwap resolves and validates the exact command that a handoff
+	// would launch. It runs before the outgoing process is touched; SwapAgent must
+	// consume this plan rather than resolving configuration again after teardown.
+	PrepareAgentSwap(instance *Instance, target string) (AgentSwapPlan, error)
+	SwapAgent(instance *Instance, plan AgentSwapPlan) error
 
 	// Type returns the backend type identifier ("local" or "remote"). Since
 	// #1592 Phase 1 this is the persisted serialization discriminator only (the
@@ -204,4 +208,15 @@ type Backend interface {
 	// instance because some capabilities (TerminalTab) depend on per-session
 	// config.
 	Capabilities() Capabilities
+}
+
+// AgentSwapPlan is the immutable boundary between handoff preflight and runtime
+// replacement. Its fields are intentionally private: only a Backend can produce
+// a plan, and callers can only hand that same value back to SwapAgent. That makes
+// it impossible for the destructive half to silently launch a command different
+// from the one that was checked while the outgoing agent was still alive.
+type AgentSwapPlan struct {
+	target       string
+	program      string
+	conversation AgentConversationData
 }

@@ -52,6 +52,9 @@ const (
 	tkBeginRestore
 	tkAbortRestoreToLost
 	tkMarkRestoring
+	tkBeginHandoff
+	tkCommitHandoff
+	tkAbortHandoff
 	tkClearOp
 	numTransitionKinds
 )
@@ -80,6 +83,12 @@ func (k transitionKind) String() string {
 		return "AbortRestoreToLost"
 	case tkMarkRestoring:
 		return "MarkRestoring"
+	case tkBeginHandoff:
+		return "BeginHandoff"
+	case tkCommitHandoff:
+		return "CommitHandoff"
+	case tkAbortHandoff:
+		return "AbortHandoff"
 	case tkClearOp:
 		return "ClearOp"
 	}
@@ -164,6 +173,15 @@ func AbortRestoreToLost() TransitionEvent { return TransitionEvent{kind: tkAbort
 // sees the Archived→live transition and rebuilds the row (#1203), while
 // ShownArchived re-homes it into the live section eagerly (#1210).
 func MarkRestoring() TransitionEvent { return TransitionEvent{kind: tkMarkRestoring} }
+
+// BeginHandoff raises the OpReplacing fence before the outgoing pane is touched.
+func BeginHandoff() TransitionEvent { return TransitionEvent{kind: tkBeginHandoff} }
+
+// CommitHandoff settles a successfully launched incoming agent as Running.
+func CommitHandoff() TransitionEvent { return TransitionEvent{kind: tkCommitHandoff} }
+
+// AbortHandoff drops a replacement fence whose runtime swap did not complete.
+func AbortHandoff() TransitionEvent { return TransitionEvent{kind: tkAbortHandoff} }
 
 // ClearOp drops any in-flight optimistic op back to None, leaving liveness
 // untouched — the client-projection bookkeeping for when an optimistic op's
@@ -369,6 +387,25 @@ var transitionTable = map[transitionKind]edgeSpec{
 		// state and the daemon never counts caps off it.
 		run: runKeep,
 	},
+	tkBeginHandoff: {
+		allowedFrom: func(s stateAxes) bool {
+			return s.op == OpNone && (s.liveness == LiveRunning || s.liveness == LiveReady || s.liveness == LiveLimitReached)
+		},
+		target: func(s stateAxes, _ TransitionEvent) stateAxes { return stateAxes{s.liveness, OpReplacing} },
+		// Replacement continues the same task run under another agent.
+		run: runKeep,
+	},
+	tkCommitHandoff: {
+		allowedFrom: func(s stateAxes) bool { return s.op == OpReplacing },
+		target:      func(stateAxes, TransitionEvent) stateAxes { return stateAxes{LiveRunning, OpNone} },
+		run:         runKeep,
+	},
+	tkAbortHandoff: {
+		allowedFrom:      func(s stateAxes) bool { return s.op == OpReplacing },
+		target:           func(s stateAxes, _ TransitionEvent) stateAxes { return stateAxes{s.liveness, OpNone} },
+		yieldWhenBlocked: true, // a terminal kill may supersede the replacement
+		run:              runKeep,
+	},
 	tkClearOp: {
 		// Clearing an optimistic overlay back to None is always valid — it never
 		// resurrects or teardown-clobbers (liveness is untouched).
@@ -512,6 +549,8 @@ func opLabel(op InFlightOp) string {
 		return "Archiving"
 	case OpRestoring:
 		return "Restoring"
+	case OpReplacing:
+		return "Replacing"
 	}
 	return fmt.Sprintf("InFlightOp(%d)", int(op))
 }

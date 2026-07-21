@@ -11,6 +11,7 @@ import (
 	"unicode"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/envcommand"
 	"github.com/sachiniyer/agent-factory/internal/shellsuggest"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
@@ -80,7 +81,10 @@ func CheckCommand(command string) (*ProgramCheck, error) {
 	if err != nil {
 		return check, err
 	}
-	exe := firstExecutable(words)
+	exe, err := firstExecutable(words)
+	if err != nil {
+		return check, fmt.Errorf("could not resolve executable in command %q: %w", command, err)
+	}
 	check.Executable = exe
 	if exe == "" {
 		return check, fmt.Errorf("could not find an executable in command %q", command)
@@ -208,35 +212,30 @@ func isSupportedAgent(agent string) bool {
 	return false
 }
 
-func firstExecutable(words []string) string {
+func firstExecutable(words []string) (string, error) {
 	for len(words) > 0 && isAssignment(words[0]) {
 		words = words[1:]
 	}
 	if len(words) == 0 {
-		return ""
+		return "", nil
 	}
 	if words[0] != "env" {
-		return words[0]
+		return words[0], nil
 	}
-	words = words[1:]
-	for len(words) > 0 {
-		switch {
-		case words[0] == "--":
-			words = words[1:]
-		case isAssignment(words[0]):
-			words = words[1:]
-		case words[0] == "-u" || words[0] == "--unset" || words[0] == "-C" || words[0] == "--chdir":
-			if len(words) < 2 {
-				return ""
-			}
-			words = words[2:]
-		case strings.HasPrefix(words[0], "-"):
-			words = words[1:]
-		default:
-			return words[0]
-		}
+
+	// GNU env is parsed in one place. In particular, do not skip an unknown
+	// option and guess that the following token is the executable: the same
+	// command resolver is used to authorize a destructive handoff, so a guessed
+	// preflight can stop the outgoing agent before discovering the target was not
+	// runnable. Receipt routing and tmuxguard consume this parser as well.
+	invocation, err := envcommand.Parse(words[1:], envcommand.Policy{AllowAssignments: true})
+	if err != nil {
+		return "", err
 	}
-	return ""
+	if invocation.CommandIndex < 0 {
+		return "", nil
+	}
+	return words[1+invocation.CommandIndex], nil
 }
 
 func isAssignment(word string) bool {

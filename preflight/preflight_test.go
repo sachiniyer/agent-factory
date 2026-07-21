@@ -30,16 +30,31 @@ func TestFirstExecutable(t *testing.T) {
 		name  string
 		words []string
 		want  string
+		bad   bool
 	}{
-		{"bare", []string{"claude", "--flag"}, "claude"},
-		{"assignment", []string{"FOO=1", "codex"}, "codex"},
-		{"env assignment", []string{"env", "FOO=1", "gemini"}, "gemini"},
-		{"env unset", []string{"env", "-u", "FOO", "aider"}, "aider"},
-		{"env chdir", []string{"env", "-C", "/tmp", "claude"}, "claude"},
+		{"bare", []string{"claude", "--flag"}, "claude", false},
+		{"assignment", []string{"FOO=1", "codex"}, "codex", false},
+		{"env assignment", []string{"env", "FOO=1", "gemini"}, "gemini", false},
+		{"env unset", []string{"env", "-u", "FOO", "aider"}, "aider", false},
+		{"env attached unset", []string{"env", "-uFOO", "aider"}, "aider", false},
+		{"env chdir", []string{"env", "-C", "/tmp", "claude"}, "claude", false},
+		{"env attached chdir", []string{"env", "-C/tmp", "claude"}, "claude", false},
+		{name: "env split string fails closed", words: []string{"env", "-S", "claude"}, bad: true},
+		{name: "env unknown option fails closed", words: []string{"env", "--future", "claude"}, bad: true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := firstExecutable(tc.words); got != tc.want {
+			got, err := firstExecutable(tc.words)
+			if tc.bad {
+				if err == nil {
+					t.Fatalf("firstExecutable(%#v) accepted an env form the shared parser cannot model", tc.words)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("firstExecutable(%#v): %v", tc.words, err)
+			}
+			if got != tc.want {
 				t.Fatalf("firstExecutable(%#v) = %q, want %q", tc.words, got, tc.want)
 			}
 		})

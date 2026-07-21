@@ -1,12 +1,14 @@
 package daemon
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strings"
 
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
+	"github.com/sachiniyer/agent-factory/task"
 )
 
 // HandoffSessionRequest asks the daemon to continue a session under a different
@@ -56,17 +58,18 @@ func (s *controlServer) HandoffSession(req HandoffSessionRequest, resp *HandoffS
 //
 // The sequence and why it is ordered this way:
 //
-//  1. Resolve and validate BEFORE touching anything. An unsupported backend, an
-//     unknown target, or a target that is already the running agent must fail
-//     without having killed a working agent.
+//  1. Resolve and preflight the exact launch command BEFORE touching anything.
+//     An unsupported backend, unknown/same target, missing executable, or env
+//     wrapper af cannot model must fail without having killed a working agent.
 //  2. Capture the branch tip. This is the attribution boundary, and it has to be
 //     read while the outgoing agent's work is the only work on the branch.
 //  3. Build the mission from the OUTGOING agent's perspective — it names who
 //     stopped and why — so it must be built before Program is rewritten.
-//  4. Rewrite Program + append the ledger entry (SwapAgentProgram).
-//  5. Swap the runtime (SwapAgent): stop the old agent, confirm it stopped,
-//     launch the new one fresh.
-//  6. Deliver the mission.
+//  4. Raise OpReplacing, then rewrite Program + append the ledger entry.
+//  5. Swap the runtime using the prepared plan: stop the old agent, confirm it
+//     stopped, launch the new one fresh, and commit the replacement fence.
+//  6. Persist the new durable goal/record and begin conversation capture.
+//  7. Wait for readiness, dismiss trust UI, and only then deliver the mission.
 //
 // Rollback: if the runtime swap fails, step 4's state change is reverted, because
 // a record claiming the session runs claude while the pane still runs codex is
@@ -144,6 +147,10 @@ func (m *Manager) HandoffSession(req HandoffSessionRequest) (HandoffSessionRespo
 	if err := instance.ValidateHandoffTarget(target); err != nil {
 		return HandoffSessionResponse{}, err
 	}
+	plan, err := instance.PrepareAgentSwap(target)
+	if err != nil {
+		return HandoffSessionResponse{}, fmt.Errorf("cannot hand %q off to %s without stopping its current agent: %w", req.Title, target, err)
+	}
 
 	outgoing := instance.CurrentAgentName()
 
@@ -155,27 +162,39 @@ func (m *Manager) HandoffSession(req HandoffSessionRequest) (HandoffSessionRespo
 	}
 	brief := instance.BuildMissionBrief(target, req.Brief, reason)
 	headSHA := brief.Work.HeadSHA
+	conversationCapture := session.BeginConversationCapture()
 
-	entry, err := instance.SwapAgentProgram(target, reason, headSHA, false)
+	// Fence the close/start window before either the record or runtime changes.
+	// New polls skip OpReplacing; a poll already observing the outgoing pane sees
+	// the bumped state epoch and cannot apply that stale result to the incoming one.
+	if err := instance.Transition(session.BeginHandoff()); err != nil {
+		return HandoffSessionResponse{}, err
+	}
+	entry, err := instance.RecordHandoffSwap(target, reason, headSHA, false)
 	if err != nil {
+		_ = instance.Transition(session.AbortHandoff())
 		return HandoffSessionResponse{}, err
 	}
 
-	if swapErr := instance.SwapAgent(); swapErr != nil {
-		// Put the record back: the pane still runs the outgoing agent, so a
-		// Program that says otherwise would mis-resolve every later respawn.
+	if swapErr := instance.SwapAgent(plan); swapErr != nil {
+		// Put the record back: SwapAgent did not confirm an incoming runtime, so
+		// recording a completed handoff would make later resume/readiness decisions
+		// target an agent af never established. Expected target/config failures were
+		// already rejected by PrepareAgentSwap before teardown; this is the narrow
+		// runtime/infrastructure failure path.
 		if rbErr := instance.RevertHandoff(entry); rbErr != nil {
 			log.ErrorLog.Printf("handoff %q: swap failed (%v) AND the record could not be reverted (%v); "+
 				"the session's recorded agent may not match its running one", req.Title, swapErr, rbErr)
 		}
+		_ = instance.Transition(session.AbortHandoff())
 		return HandoffSessionResponse{}, fmt.Errorf("failed to hand %q off to %s: %w", req.Title, target, swapErr)
 	}
 
 	// The runtime this session's failure history was about is gone (#1794).
 	m.noteRuntimeReplaced(repoID, instance)
 
-	// Any usage-limit block is already cleared at this point: SwapAgent ends in
-	// ConfirmLive, which drops LiveLimitReached and its reset time. That is the
+	// Any usage-limit block is already cleared at this point: SwapAgent commits
+	// the replacement as LiveRunning, which drops LiveLimitReached. That is the
 	// CORRECT outcome here, and it is the opposite of what the #1146 respawn arm
 	// does — that path deliberately re-applies the block, because there the same
 	// agent is coming back and stays parked until its pending prompt lands.
@@ -188,12 +207,20 @@ func (m *Manager) HandoffSession(req HandoffSessionRequest) (HandoffSessionRespo
 	// instructions, which is a different problem than a usage limit and should
 	// not be reported as one.
 	//
+	// An operator-supplied brief becomes the durable goal for later limit resumes
+	// and handoffs; replaying the create-time prompt would send the new agent back
+	// to an obsolete mission.
+	if override := strings.TrimSpace(req.Brief); override != "" {
+		instance.SetPrompt(override)
+	}
+
 	// Persist before delivering: the swap is the durable fact, and a delivery
 	// failure must not lose it (the #1854 lesson from the resume path).
 	m.persistInstance(repoID, instance)
+	m.captureAgentConversationAsync(repoID, key, instance, conversationCapture)
 
 	mission := brief.Render()
-	if serr := instance.AgentServer().SendPrompt(mission); serr != nil {
+	if serr := task.WaitForReadyAndSendPrompt(context.Background(), instance, mission); serr != nil {
 		return HandoffSessionResponse{}, fmt.Errorf(
 			"handed %q off to %s, but its mission brief could not be delivered (%w); "+
 				"the new agent is running with no instructions — re-send them with `af sessions send-prompt`",

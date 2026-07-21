@@ -97,6 +97,7 @@ func TestSnapshotInFlightOpRoundTrips(t *testing.T) {
 	}{
 		{name: "archiving", op: OpArchiving, status: Deleting},
 		{name: "restoring", op: OpRestoring, status: Lost},
+		{name: "replacing", op: OpReplacing, status: Loading},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			i := &Instance{}
@@ -140,6 +141,7 @@ func TestLifecycleActionIsSharedAcrossInstanceAndProjection(t *testing.T) {
 		{name: "dead restores", id: "dead-id", live: LiveDead, want: LifecycleActionRestore},
 		{name: "archived restores", id: "archived-id", live: LiveArchived, want: LifecycleActionRestore},
 		{name: "creating has no lifecycle action", id: "pending-id", live: LiveReady, op: OpCreating, want: LifecycleActionNone},
+		{name: "replacing admits no competing lifecycle action", id: "handoff-id", live: LiveReady, op: OpReplacing, want: LifecycleActionNone},
 		{name: "id-less has no lifecycle action", live: LiveReady, want: LifecycleActionNone},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -177,6 +179,7 @@ func TestKillAddressabilityIsSharedAcrossInstanceAndProjection(t *testing.T) {
 		{name: "settled stable row", id: "ready-id", want: true},
 		{name: "startup unknown keeps teardown handle", id: "unknown-id", startupUnknown: true, want: true},
 		{name: "creating has no teardown target", id: "pending-id", op: OpCreating},
+		{name: "replacing already owns the teardown fence", id: "handoff-id", op: OpReplacing},
 		{name: "id-less cannot address teardown"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

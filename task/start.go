@@ -110,6 +110,17 @@ func StartAndSendPrompt(ctx context.Context, instance *session.Instance, prompt 
 	if err := instance.Start(true); err != nil {
 		return err
 	}
+	return WaitForReadyAndSendPrompt(ctx, instance, prompt)
+}
+
+// WaitForReadyAndSendPrompt is the post-launch half of StartAndSendPrompt. A
+// handoff has already launched its incoming pane, but it owes the same readiness
+// and trust-dialog contract as a fresh create before any mission text is typed.
+// Keeping that contract here prevents the two launch paths from drifting.
+func WaitForReadyAndSendPrompt(ctx context.Context, instance *session.Instance, prompt string) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 
 	// Readiness polling, trust-prompt dismissal and prompt delivery below all
 	// drive the agent's PTY locally; a backend without interactive input (remote

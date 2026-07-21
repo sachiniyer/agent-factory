@@ -56,7 +56,7 @@ func TestSandboxBackendsDoNotAdvertiseHandoff(t *testing.T) {
 			assert.False(t, b.Capabilities().Handoff,
 				"%s advertises Handoff, but swapping the agent inside a provisioned sandbox is a re-launch its recover path does not do (#2013)", name)
 
-			err := b.SwapAgent(&Instance{Title: "sandbox-inst", backend: b, started: true, Tabs: []*Tab{newRemoteAgentTab()}})
+			err := b.SwapAgent(&Instance{Title: "sandbox-inst", backend: b, started: true, Tabs: []*Tab{newRemoteAgentTab()}}, AgentSwapPlan{})
 			require.Error(t, err, "%s must refuse a swap outright rather than half-perform it", name)
 			assert.ErrorIs(t, err, ErrHandoffUnsupported,
 				"%s must refuse with the typed sentinel so clients can render the restriction instead of matching prose", name)
