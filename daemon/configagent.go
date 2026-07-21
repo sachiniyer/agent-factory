@@ -5,9 +5,11 @@ import (
 	"fmt"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/log"
+	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 	"github.com/sachiniyer/agent-factory/task"
 )
@@ -41,6 +43,13 @@ const configAgentSessionPrefix = "af-config-"
 // two config agents CAN legitimately be asked for in one daemon lifetime (the
 // user closes one and presses C again).
 var configAgentSeq atomic.Uint64
+
+// configAgentPromptReceiptTimeout bounds the receiver-side acknowledgement
+// after tmux submission. Codex writes its user turn locally before model work
+// begins, so this is startup I/O, not an API-response budget. A missing receipt
+// closes and fails the config agent instead of attaching the user to an empty
+// composer (#2220). A var keeps the deliberate-drop regression fast.
+var configAgentPromptReceiptTimeout = 5 * time.Second
 
 // configAgentSupervisor owns every bare tmux session this daemon spawned for a
 // config agent, so none can outlive its use.
@@ -188,6 +197,14 @@ func (m *Manager) SpawnConfigAgent(ctx context.Context, req SpawnConfigAgentRequ
 	if req.Program == "" {
 		return "", "", fmt.Errorf("config agent: no program to run")
 	}
+	// Detect before launch so the Codex rollout snapshot below is taken before
+	// the process can create its conversation file. The command the pane actually
+	// runs remains the source of truth, matching regular sessions (#1116/#1131).
+	agent := tmux.DetectAgentFromCommand(req.Program)
+	var promptReceipt session.ConversationCaptureSnapshot
+	if agent == tmux.ProgramCodex && req.Prompt != "" {
+		promptReceipt = session.BeginConversationCapture()
+	}
 	home, err := config.GetConfigDir()
 	if err != nil {
 		return "", "", fmt.Errorf("config agent: cannot resolve the agent-factory home: %w", err)
@@ -237,11 +254,6 @@ func (m *Manager) SpawnConfigAgent(ctx context.Context, req SpawnConfigAgentRequ
 		socketPath = ""
 	}
 
-	// The agent the pane ACTUALLY runs, detected from the command — so an
-	// override pointing "claude" at something else gets that program's readiness
-	// heuristic and trust-prompt handling, not claude's (#1116, #1131).
-	agent := tmux.DetectAgentFromCommand(req.Program)
-
 	if err := task.WaitForReadyOn(ctx, tmuxReadinessTarget{ts: ts, agent: agent}); err != nil {
 		return fail(fmt.Errorf("config agent: %w", err))
 	}
@@ -255,6 +267,19 @@ func (m *Manager) SpawnConfigAgent(ctx context.Context, req SpawnConfigAgentRequ
 	if req.Prompt != "" {
 		if err := ts.SendKeysCommand(req.Prompt); err != nil {
 			return fail(fmt.Errorf("config agent: failed to deliver the briefing: %w", err))
+		}
+		// A successful tmux send is not a delivery receipt. In the #2220
+		// reproduction every load/paste/Enter command succeeded against Codex's
+		// directory-trust modal; Enter merely selected "Yes", Codex opened a bare
+		// composer, and the briefing never became a user turn. Codex's rollout is
+		// the receiver-owned boundary: do not report "started" until that exact
+		// prompt is recorded there. Pane pixels cannot substitute — real Codex
+		// renders the same `› [Pasted Content …]` for both a pending paste and a
+		// submitted user message.
+		if agent == tmux.ProgramCodex {
+			if err := session.WaitForPromptReceipt(ctx, agent, promptReceipt, req.Prompt, configAgentPromptReceiptTimeout); err != nil {
+				return fail(fmt.Errorf("config agent: could not verify that Codex accepted the briefing as a turn; the uncertain session was closed: %w", err))
+			}
 		}
 	}
 	log.InfoLog.Printf("config agent: started %s in %s on socket %q (agent %q)", sessionName, home, socketPath, agent)

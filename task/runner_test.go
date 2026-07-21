@@ -86,6 +86,12 @@ func TestIsReadyContent(t *testing.T) {
 		// the dialog. Wait for the real "›" prompt. Regression from #714/#715.
 		{"codex trust folder prompt is not ready (#729)", "codex", "Do you trust this folder?\n> Yes", false},
 		{"codex trust dialog with later prompt is ready (#729)", "codex", "Do you trust this folder?\n› ", true},
+		{
+			name:    "codex directory trust modal is ready for anchored dismissal (#2220)",
+			agent:   "codex",
+			content: "Do you trust the contents of this directory?\n› 1. Yes, continue\n2. No, quit\nPress enter to continue",
+			want:    true,
+		},
 		// Codex must NOT be considered ready on claude's "❯" alone, and the
 		// banner box border ("╰") is not a codex ready signal by itself.
 		{"codex not ready on claude glyph", "codex", "rendering\n❯ ", false},

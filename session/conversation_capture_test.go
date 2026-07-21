@@ -1,6 +1,9 @@
 package session
 
 import (
+	"context"
+	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -55,4 +58,90 @@ func TestCaptureAgentConversation_UnsupportedAgentGracefullyNoID(t *testing.T) {
 		require.NoError(t, err)
 		require.False(t, conv.HasID())
 	}
+}
+
+func appendCodexRolloutEvent(t *testing.T, path string, event any) {
+	t.Helper()
+	data, err := json.Marshal(event)
+	require.NoError(t, err)
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0644)
+	require.NoError(t, err)
+	_, err = f.Write(append(data, '\n'))
+	require.NoError(t, err)
+	require.NoError(t, f.Close())
+}
+
+func TestWaitForPromptReceipt_CodexUserMessage(t *testing.T) {
+	codexHome := t.TempDir()
+	t.Setenv("CODEX_HOME", codexHome)
+	snap := BeginConversationCapture()
+	path := writeCodexRolloutFile(t, codexHome, "rollout-2026-07-06T10-17-35-019f386f-7206-7fc2-803b-f7045e07a242.jsonl")
+
+	const prompt = "the exact config-agent briefing"
+	appendCodexRolloutEvent(t, path, map[string]any{
+		"type": "event_msg",
+		"payload": map[string]any{
+			"type":    "user_message",
+			"message": prompt,
+		},
+	})
+
+	require.NoError(t, WaitForPromptReceipt(context.Background(), tmux.ProgramCodex, snap, prompt, time.Second))
+}
+
+func TestWaitForPromptReceipt_SessionMetaIsNotAReceipt(t *testing.T) {
+	codexHome := t.TempDir()
+	t.Setenv("CODEX_HOME", codexHome)
+	snap := BeginConversationCapture()
+	writeCodexRolloutFile(t, codexHome, "rollout-2026-07-06T10-17-35-019f386f-7206-7fc2-803b-f7045e07a242.jsonl")
+
+	err := WaitForPromptReceipt(context.Background(), tmux.ProgramCodex, snap, "briefing never submitted", 0)
+	require.ErrorIs(t, err, ErrPromptReceiptNotObserved,
+		"a created Codex session is not proof that its composer accepted a user turn")
+}
+
+func TestWaitForPromptReceipt_DifferentUserTurnDoesNotConfirmBriefing(t *testing.T) {
+	codexHome := t.TempDir()
+	t.Setenv("CODEX_HOME", codexHome)
+	snap := BeginConversationCapture()
+	path := writeCodexRolloutFile(t, codexHome, "rollout-2026-07-06T10-17-35-019f386f-7206-7fc2-803b-f7045e07a242.jsonl")
+	appendCodexRolloutEvent(t, path, map[string]any{
+		"type": "response_item",
+		"payload": map[string]any{
+			"type": "message",
+			"role": "user",
+			"content": []map[string]any{{
+				"type": "input_text",
+				"text": "some other prompt",
+			}},
+		},
+	})
+
+	err := WaitForPromptReceipt(context.Background(), tmux.ProgramCodex, snap, "config briefing", 0)
+	require.ErrorIs(t, err, ErrPromptReceiptNotObserved,
+		"a concurrent/unrelated user turn must not acknowledge the config briefing")
+}
+
+func TestWaitForPromptReceipt_CorrelatesExactPromptAcrossConcurrentRollouts(t *testing.T) {
+	codexHome := t.TempDir()
+	t.Setenv("CODEX_HOME", codexHome)
+	snap := BeginConversationCapture()
+	other := writeCodexRolloutFile(t, codexHome, "rollout-2026-07-06T10-17-35-019f386f-7206-7fc2-803b-f7045e07a242.jsonl")
+	want := writeCodexRolloutFile(t, codexHome, "rollout-2026-07-06T10-17-36-029f386f-7206-7fc2-803b-f7045e07a243.jsonl")
+	appendCodexRolloutEvent(t, other, map[string]any{
+		"type":    "event_msg",
+		"payload": map[string]any{"type": "user_message", "message": "unrelated session"},
+	})
+	appendCodexRolloutEvent(t, want, map[string]any{
+		"type":    "event_msg",
+		"payload": map[string]any{"type": "user_message", "message": "config briefing"},
+	})
+
+	require.NoError(t, WaitForPromptReceipt(context.Background(), tmux.ProgramCodex, snap, "config briefing", 0),
+		"an unrelated concurrent rollout must not make an exact receiver receipt ambiguous")
+}
+
+func TestWaitForPromptReceipt_UnsupportedAgentDoesNotInventReceipt(t *testing.T) {
+	err := WaitForPromptReceipt(context.Background(), tmux.ProgramClaude, ConversationCaptureSnapshot{}, "briefing", 0)
+	require.True(t, errors.Is(err, ErrPromptReceiptUnavailable))
 }

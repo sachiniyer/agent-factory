@@ -186,7 +186,8 @@ func (t *TmuxSession) CheckAndHandleTrustPrompt() bool {
 	// Key off the agent actually running in the pane, token-matched — a loose
 	// substring check would route e.g. /opt/claude-wrapper/run through the
 	// claude branch (#1116 defect class).
-	if DetectAgentFromCommand(t.programCmd()) == ProgramClaude {
+	switch DetectAgentFromCommand(t.programCmd()) {
+	case ProgramClaude:
 		if claudeTrustPromptPresent(content) {
 			if err := t.TapEnter(); err != nil {
 				log.ErrorLog.Printf("could not tap enter on trust/MCP screen: %v", err)
@@ -194,7 +195,15 @@ func (t *TmuxSession) CheckAndHandleTrustPrompt() bool {
 			}
 			return true
 		}
-	} else {
+	case ProgramCodex:
+		if CodexTrustPromptPresent(content) {
+			if err := t.TapEnter(); err != nil {
+				log.ErrorLog.Printf("could not tap enter on Codex directory-trust screen: %v", err)
+				return false
+			}
+			return true
+		}
+	default:
 		if DocTrustPromptPresent(content) {
 			if err := t.TapDAndEnter(); err != nil {
 				log.ErrorLog.Printf("could not tap enter on trust screen: %v", err)
@@ -204,6 +213,30 @@ func (t *TmuxSession) CheckAndHandleTrustPrompt() bool {
 		}
 	}
 	return false
+}
+
+// CodexTrustPromptPresent reports whether content shows Codex's directory-trust
+// modal introduced by 0.144.6:
+//
+//	Do you trust the contents of this directory?
+//	› 1. Yes, continue
+//	  2. No, quit
+//	Press enter to continue
+//
+// This modal is on the config-agent delivery path before the real composer.
+// Its selected option uses the SAME `›` glyph as Codex's composer, so the old
+// readiness check treated it as ready, pasted the briefing into the modal, and
+// used the trailing Enter to select Yes. Every tmux command succeeded while
+// Codex recorded no user turn, leaving an empty composer by attach time (#2220).
+//
+// The match is anchored on the question, both option labels and the affordance.
+// CheckAndHandleTrustPrompt also runs on live-session polls, so a prose mention
+// of one phrase must never inject Enter into a working agent.
+func CodexTrustPromptPresent(content string) bool {
+	return strings.Contains(content, "Do you trust the contents of this directory?") &&
+		strings.Contains(content, "Yes, continue") &&
+		strings.Contains(content, "No, quit") &&
+		strings.Contains(content, "Press enter to continue")
 }
 
 // DocTrustPromptPresent reports whether content shows the documentation-link
