@@ -77,6 +77,45 @@ const (
 	OpRestoring
 )
 
+// LifecycleAction is the session domain's answer to which reversible lifecycle
+// verb a visible row supports. The zero value means no lifecycle controls at all;
+// a client must not infer one from liveness or from the fact that the row rendered.
+// It is serialized into daemon projections so the TUI and web consume one decision
+// instead of maintaining parallel state tables (#2234).
+type LifecycleAction string
+
+const (
+	LifecycleActionNone    LifecycleAction = ""
+	LifecycleActionArchive LifecycleAction = "archive"
+	LifecycleActionRestore LifecycleAction = "restore"
+)
+
+// lifecycleActionFor is the one policy shared by Instance (the TUI) and
+// ToInstanceData (the web projection). A creating row has a provisional identity
+// but no session to destroy yet. An id-less row cannot address a destructive API
+// unambiguously, so it also exposes nothing. Resting rows restore; every other
+// settled row archives. Kill is available whenever this result is non-zero.
+func lifecycleActionFor(id string, liveness Liveness, op InFlightOp) LifecycleAction {
+	if id == "" || op == OpCreating {
+		return LifecycleActionNone
+	}
+	switch liveness {
+	case LiveArchived, LiveLost, LiveDead:
+		return LifecycleActionRestore
+	default:
+		return LifecycleActionArchive
+	}
+}
+
+// LifecycleAction returns the shared lifecycle verb for this instance. TUI menus
+// and handlers use this method; browser clients receive the same value from
+// InstanceData.LifecycleAction.
+func (i *Instance) LifecycleAction() LifecycleAction {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	return lifecycleActionFor(i.ID, i.liveness, i.inFlightOp)
+}
+
 // composeStatus derives the legacy Status enum from the two-axis model. An
 // in-flight op wins the composed value (it overlays the liveness), matching the
 // old single-field semantics where Loading/Deleting masked the underlying state.

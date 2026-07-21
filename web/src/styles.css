@@ -983,6 +983,12 @@ body {
   background: var(--af-bg-inset);
 }
 
+/* A row without the daemon's lifecycle capability is visible status only. Creating
+ * rows share this class but override the cursor below with progress. */
+.af-row-inert {
+  cursor: default;
+}
+
 /* A daemon-published OpCreating row is visible but cannot attach yet. The progress
  * cursor is the web analogue of the TUI's inert Loading row; no local spinner or
  * optimistic state is involved. */
@@ -1007,11 +1013,11 @@ body {
   flex: 1;
 }
 
-/* Per-session lifecycle controls (#2186, #2223): every row reserves this slot, so
- * revealing it never shifts the title under the pointer. It is visually withdrawn at
- * rest but remains in the tab order; focusing either button makes :focus-within reveal
- * the whole slot for keyboard parity. Archive/Restore matches the rail filter's quiet
- * outlined-glyph treatment; Kill stays quieter still at rest. */
+/* Per-session lifecycle controls (#2186, #2223, #2234): every actionable row reserves
+ * this slot, so revealing it never shifts the title under the pointer. Inert rows do
+ * not render the slot or its buttons at all. It is visually withdrawn at rest but
+ * remains in the tab order; focusing either button makes :focus-within reveal the
+ * whole slot for keyboard parity. */
 .af-row-actions {
   display: flex;
   align-items: center;

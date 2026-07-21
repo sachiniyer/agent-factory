@@ -10233,6 +10233,9 @@ function reorderTargetIndex(from, insertion) {
 }
 
 // src/ui.ts
+function isActionableSession(s) {
+  return typeof s.id === "string" && s.id !== "" && (s.lifecycle_action === "archive" || s.lifecycle_action === "restore");
+}
 var MAX_TABS = 9;
 var OFF_BOX_BACKENDS = /* @__PURE__ */ new Set(["docker", "ssh", "remote"]);
 function supportsTabManagement(s) {
@@ -10619,13 +10622,13 @@ var AppShell = class {
   // Header text nodes for the selected pane, (re)created per selection.
   headTitle = null;
   headMeta = null;
-  // The selected rail row's archive/restore control and the archived-ness it currently
-  // shows (#1932, #2186). Every row owns controls now (#2223), but a session can flip
-  // archived⇄live WITHOUT a selection change, so patchMainHead still needs this one
-  // reference to swap the selected control's glyph + accessible verb in place. null
-  // when the selected row is not visible in the rail.
+  // The selected rail row's archive/restore control and the daemon-owned verb it
+  // currently shows (#1932, #2186, #2234). Every actionable row owns controls now
+  // (#2223), but a session can flip archive⇄restore WITHOUT a selection change, so
+  // patchMainHead still needs this reference to swap the selected control in place.
+  // null when the selected row is not visible/actionable in the rail.
   lifecycleBtn = null;
-  lifecycleArchived = false;
+  lifecycleAction = null;
   // The usage-limit Retry button and whether it is currently shown (#1934). Same
   // treatment, and for the same reason, as lifecycleBtn above: a session hits the
   // limit wall — or is resumed off it — WITHOUT a selection change, which is the
@@ -10827,6 +10830,7 @@ var AppShell = class {
     const scoped = scopeToProject(state.sessions, state.selectedProject);
     const visible = filterSessions(orderedSessions(scoped), state.statusFilter);
     this.lifecycleBtn = null;
+    this.lifecycleAction = null;
     this.railCount.textContent = String(visible.length);
     this.renderFilterMenu(state, scoped);
     const list = this.railList;
@@ -10844,15 +10848,14 @@ var AppShell = class {
     }
     const rows = visible.map((s) => {
       const selected = s.id === state.selectedId;
-      return sessionRow(s, selected, this.actions, this.rowActions(s, selected));
+      return sessionRow(s, selected, this.actions, (target) => this.rowActions(target, selected));
     });
     const notice = this.railNotice(state, scoped, visible);
     list.replaceChildren(...notice ? [notice, ...rows] : rows);
   }
-  /** Quiet per-session controls reserved beside every rail row (#2186, #2223).
-   *  CSS reveals the slot for selection, hover, or keyboard focus without changing
-   *  row geometry. Archive/Restore share one slot; its data-action is read at gesture
-   *  time so patchMainHead can change the selected row without rebuilding it. */
+  /** Quiet per-session controls reserved beside every ACTIONABLE rail row (#2186,
+   *  #2223, #2234). The Go projection chooses Archive vs Restore; the browser never
+   *  reconstructs that policy from row state. */
   rowActions(session, selected) {
     const lifecycleBtn = h2("button", { type: "button", class: "af-rail-action af-rail-lifecycle" });
     lifecycleBtn.addEventListener("click", (e) => {
@@ -10863,30 +10866,30 @@ var AppShell = class {
         this.actions.archive(session);
       }
     });
-    const archived = isArchived(session);
-    this.patchLifecycleButton(lifecycleBtn, archived);
+    this.patchLifecycleButton(lifecycleBtn, session.lifecycle_action, session.title);
     if (selected) {
       this.lifecycleBtn = lifecycleBtn;
-      this.lifecycleArchived = archived;
+      this.lifecycleAction = session.lifecycle_action;
     }
     const killBtn = h2("button", { type: "button", class: "af-rail-action af-rail-kill" }, "\u232B");
-    killBtn.setAttribute("aria-label", "Kill session");
-    killBtn.setAttribute("title", "Kill session");
+    const killLabel = `Kill session \u201C${session.title}\u201D`;
+    killBtn.setAttribute("aria-label", killLabel);
+    killBtn.setAttribute("title", killLabel);
     killBtn.addEventListener("click", (e) => {
       e.stopPropagation();
       this.actions.kill(session);
     });
     return h2("div", { class: "af-row-actions" }, lifecycleBtn, killBtn);
   }
-  /** Applies both the visible static glyph and the accessible reverse verb to the
-   *  lifecycle slot. Kept in one helper so render and selected-row live patching
-   *  cannot disagree about what an archived row offers or fires. */
-  patchLifecycleButton(btn, archived) {
-    const verb = archived ? "Restore session" : "Archive session";
-    btn.dataset.action = archived ? "restore" : "archive";
-    btn.textContent = archived ? "\u21B6" : "\u25AA";
-    btn.setAttribute("aria-label", verb);
-    btn.setAttribute("title", verb);
+  /** Applies the daemon-projected verb, glyph, and target-qualified accessible name
+   *  in one place so render and same-selection live patching cannot drift. */
+  patchLifecycleButton(btn, action, sessionTitle) {
+    const verb = action === "restore" ? "Restore session" : "Archive session";
+    const label = `${verb} \u201C${sessionTitle}\u201D`;
+    btn.dataset.action = action;
+    btn.textContent = action === "restore" ? "\u21B6" : "\u25AA";
+    btn.setAttribute("aria-label", label);
+    btn.setAttribute("title", label);
   }
   /**
    * The dim one-liner above the rows explaining what ISN'T there, or null when the
@@ -11382,10 +11385,10 @@ var AppShell = class {
     }
     this.headMeta.textContent = parts.join(" \xB7 ");
     this.headMeta.className = `af-term-meta af-term-${state.termStatus}`;
-    const nowArchived = isArchived(selected);
-    if (this.lifecycleBtn && nowArchived !== this.lifecycleArchived) {
-      this.patchLifecycleButton(this.lifecycleBtn, nowArchived);
-      this.lifecycleArchived = nowArchived;
+    const nowAction = selected.lifecycle_action ?? null;
+    if (this.lifecycleBtn && nowAction && nowAction !== this.lifecycleAction) {
+      this.patchLifecycleButton(this.lifecycleBtn, nowAction, selected.title);
+      this.lifecycleAction = nowAction;
     }
     const nowLimited = isLimitReached(selected);
     if (this.retryBtn && nowLimited !== this.retryVisible) {
@@ -11490,9 +11493,10 @@ function beginTabRename(btn, tab, actions2, editedId, editedSessionId) {
   input.focus();
   input.select();
 }
-function sessionRow(s, selected, actions2, rowActions) {
+function sessionRow(s, selected, actions2, buildActions) {
   const status = rowStatus(s);
   const creating = isCreating(s);
+  const actionable = isActionableSession(s);
   const title = h2("div", { class: "af-row-title" }, rowTitle(s));
   const branch = h2(
     "div",
@@ -11502,7 +11506,7 @@ function sessionRow(s, selected, actions2, rowActions) {
     s.branch || "\u2014"
   );
   const main = h2("div", { class: "af-row-main" }, title, branch);
-  const cls = `af-row${selected ? " af-row-selected" : ""}${isArchived(s) ? " af-row-archived" : ""}${creating ? " af-row-creating" : ""}`;
+  const cls = `af-row${selected ? " af-row-selected" : ""}${isArchived(s) ? " af-row-archived" : ""}${actionable ? "" : " af-row-inert"}${creating ? " af-row-creating" : ""}`;
   const row = h2("li", { class: cls });
   if (status.kind) {
     const dot = h2("span", { class: `af-dot af-dot-${status.kind}` }, status.glyph);
@@ -11510,15 +11514,16 @@ function sessionRow(s, selected, actions2, rowActions) {
     row.append(dot);
   }
   row.append(main);
-  row.append(rowActions);
+  if (actionable) {
+    row.append(buildActions(s));
+  }
   row.setAttribute("role", "option");
   row.setAttribute("aria-selected", selected ? "true" : "false");
   row.setAttribute("title", `${s.title} \u2014 ${status.label}`);
-  if (creating) {
+  if (!actionable) {
     row.setAttribute("aria-disabled", "true");
-  } else if (s.id) {
-    const id = s.id;
-    row.addEventListener("click", () => actions2.open(id));
+  } else {
+    row.addEventListener("click", () => actions2.open(s.id));
   }
   return row;
 }
@@ -11819,7 +11824,7 @@ function newSession() {
   );
 }
 function openConfirm(action, session) {
-  const target = { id: session.id ?? "", title: session.title };
+  const target = { id: session.id, title: session.title };
   openModal(
     confirmModal({
       action,

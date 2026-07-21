@@ -297,8 +297,14 @@ func (m *Menu) SetNamingHasPrompt(has bool) {
 }
 
 func (m *Menu) addInstanceOptions() {
-	// Creating (Loading) instances only get minimal options
-	if m.instance != nil && m.instance.IsCreating() {
+	// A row with no shared lifecycle action gets the same minimal menu on every
+	// surface (#2234). This includes a create still in flight and a legacy/id-less
+	// row whose destructive target cannot be addressed unambiguously.
+	lifecycleAction := session.LifecycleActionNone
+	if m.instance != nil {
+		lifecycleAction = m.instance.LifecycleAction()
+	}
+	if lifecycleAction == session.LifecycleActionNone {
 		m.options = []keys.KeyName{keys.KeyNew, keys.KeyHelp, keys.KeyQuit}
 		m.groups = []menuGroup{
 			{start: 0, end: 3, isAction: false},
@@ -311,11 +317,8 @@ func (m *Menu) addInstanceOptions() {
 	// (#1605) — the two verbs no longer share the `a` binding, so the footer
 	// shows exactly the one action the selected row supports.
 	mgmtVerb := keys.KeyArchive
-	if m.instance != nil {
-		switch m.instance.GetLiveness() {
-		case session.LiveArchived, session.LiveLost, session.LiveDead:
-			mgmtVerb = keys.KeyRestore
-		}
+	if lifecycleAction == session.LifecycleActionRestore {
+		mgmtVerb = keys.KeyRestore
 	}
 	mgmtGroup := []keys.KeyName{keys.KeyNew, keys.KeyKill, mgmtVerb}
 

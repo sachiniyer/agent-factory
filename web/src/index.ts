@@ -75,6 +75,7 @@ import {
   canManageTabs,
   tabIdentity,
   tabRealId,
+  type ActionableSession,
   type AppState,
   type NewTabKind,
 } from "./ui.js";
@@ -603,8 +604,8 @@ function newSession(): void {
 /** Opens the kill/archive/restore confirm modal for the rail row that invoked it.
  *  This cannot derive its target from selection now that hover exposes actions on
  *  unselected rows (#2223). Restore remains the reverse of archive (#1932). */
-function openConfirm(action: "kill" | "archive" | "restore", session: SessionData): void {
-  const target = { id: session.id ?? "", title: session.title };
+function openConfirm(action: "kill" | "archive" | "restore", session: ActionableSession): void {
+  const target = { id: session.id, title: session.title };
   openModal(
     confirmModal({
       action,
@@ -1294,9 +1295,9 @@ const actions = {
   disconnect,
   open: openFromRail,
   newSession,
-  kill: (session: SessionData) => openConfirm("kill", session),
-  archive: (session: SessionData) => openConfirm("archive", session),
-  restore: (session: SessionData) => openConfirm("restore", session),
+  kill: (session: ActionableSession) => openConfirm("kill", session),
+  archive: (session: ActionableSession) => openConfirm("archive", session),
+  restore: (session: ActionableSession) => openConfirm("restore", session),
   retryLimit: doRetryLimit,
   switchTab,
   openTab,

@@ -155,7 +155,7 @@ func (m *home) handleDefaultKeyPress(msg tea.KeyMsg, name keys.KeyName) (tea.Mod
 // so the event loop never blocks on it (#844).
 func (m *home) handleKill() (tea.Model, tea.Cmd) {
 	selected := m.sidebar.GetSelectedInstance()
-	if selected == nil || selected.IsCreating() {
+	if selected == nil || selected.LifecycleAction() == session.LifecycleActionNone {
 		return m, nil
 	}
 	if selected.IsTearingDown() {
@@ -327,7 +327,11 @@ func (m *home) handleInstanceKilled(msg instanceKilledMsg) (tea.Model, tea.Cmd) 
 // rules authoritatively.
 func (m *home) handleArchive() (tea.Model, tea.Cmd) {
 	selected := m.sidebar.GetSelectedInstance()
-	if selected == nil || selected.IsCreating() {
+	if selected == nil {
+		return m, nil
+	}
+	lifecycleAction := selected.LifecycleAction()
+	if lifecycleAction == session.LifecycleActionNone {
 		return m, nil
 	}
 	if selected.IsTearingDown() {
@@ -337,9 +341,7 @@ func (m *home) handleArchive() (tea.Model, tea.Cmd) {
 
 	// A resting (Archived/Lost/Dead) row has no live worktree/tmux to tear down;
 	// `a` does nothing. Restore is on its own key now (`r`).
-	if selected.GetLiveness() == session.LiveArchived ||
-		selected.GetLiveness() == session.LiveLost ||
-		selected.GetLiveness() == session.LiveDead {
+	if lifecycleAction != session.LifecycleActionArchive {
 		return m, nil
 	}
 
@@ -382,7 +384,11 @@ func (m *home) handleArchive() (tea.Model, tea.Cmd) {
 // row; a restore failure clears it in handleInstanceRestored.
 func (m *home) handleRestore() (tea.Model, tea.Cmd) {
 	selected := m.sidebar.GetSelectedInstance()
-	if selected == nil || selected.IsCreating() {
+	if selected == nil {
+		return m, nil
+	}
+	lifecycleAction := selected.LifecycleAction()
+	if lifecycleAction == session.LifecycleActionNone {
 		return m, nil
 	}
 	if selected.IsTearingDown() {
@@ -392,9 +398,7 @@ func (m *home) handleRestore() (tea.Model, tea.Cmd) {
 
 	// Only a resting (Archived/Lost/Dead) row can be restored; on a live row `r`
 	// does nothing (archive is on `a`).
-	if selected.GetLiveness() != session.LiveArchived &&
-		selected.GetLiveness() != session.LiveLost &&
-		selected.GetLiveness() != session.LiveDead {
+	if lifecycleAction != session.LifecycleActionRestore {
 		return m, nil
 	}
 	if selected.GetInFlightOp() == session.OpRestoring {

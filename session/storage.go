@@ -44,6 +44,12 @@ type InstanceData struct {
 	// at disk write/load boundaries: in-flight operations are process-local and
 	// must not be resurrected after a daemon restart.
 	InFlightOp InFlightOp `json:"in_flight_op,omitempty"`
+	// LifecycleAction is a projection-only capability shared by the TUI and web
+	// (#2234): "archive", "restore", or omitted when the row has no safe
+	// lifecycle target (creating or id-less). It is derived from live state by
+	// ToInstanceData and scrubbed by ForStorage; instances.json must not preserve
+	// a UI decision that can go stale across restart.
+	LifecycleAction LifecycleAction `json:"lifecycle_action,omitempty"`
 	// TaskRunActive records whether this session's task run is still in flight
 	// (#1892) — true from creation, false once the agent goes idle. It is the one
 	// fact the watch-task concurrency cap counts, and it is stored rather than
@@ -117,6 +123,7 @@ func (d InstanceData) ForStorage() InstanceData {
 	d.Status = composeStatus(lv, OpNone)
 	d.Liveness = lv
 	d.InFlightOp = OpNone
+	d.LifecycleAction = LifecycleActionNone
 	return d
 }
 

@@ -50,6 +50,10 @@ export const InFlightOp = {
   Restoring: 4,
 } as const;
 
+/** session.LifecycleAction: the daemon-owned lifecycle verb for a row. Absence
+ *  means the row must expose no archive/restore/kill controls (#2234). */
+export type LifecycleAction = "archive" | "restore";
+
 /** session.Status (session/instance.go) — the legacy single-axis int, read ONLY
  *  as a defensive fallback when a projection somehow omits `liveness` (never
  *  expected from the daemon's live Snapshot, which always emits it). */
@@ -83,6 +87,9 @@ export interface SessionData {
   liveness?: number;
   /** Transient client-op axis; absent (→ None) in the steady state. */
   in_flight_op?: number;
+  /** Daemon-owned lifecycle capability. The web consumes this decision instead
+   *  of re-deriving TUI policy from liveness/in-flight fields. */
+  lifecycle_action?: LifecycleAction;
   /** Usage-limit reset time (RFC3339), present only for a LimitReached row. */
   limit_reset_at?: string;
   /** Backend discriminator; "remote" marks a remote-hook session (→ [remote]). */
