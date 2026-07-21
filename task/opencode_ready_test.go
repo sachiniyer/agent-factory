@@ -254,3 +254,31 @@ func TestOpencodeWorkingIgnoresIndicatorTextInTranscript(t *testing.T) {
 		t.Error("\"esc interrupt\" in the status bar below the composer must read as working")
 	}
 }
+
+// A rendered composer copied into the transcript is indistinguishable from the
+// real composer by glyph shape alone. The current frame is therefore the LAST
+// complete frame in the visible pane: only status rendered below that frame may
+// decide whether the current turn is running.
+func TestOpencodeWorkingUsesBottomMostCompleteComposer(t *testing.T) {
+	transcriptFrame := "┃  copied composer in agent output\n" +
+		"╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀\n"
+	liveFrame := "┃  Build · Claude Opus 4.5 (latest) Anthropic\n" +
+		"╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀\n"
+
+	idle := transcriptFrame +
+		"   ⬝⬝⬝⬝⬝⬝⬝⬝  esc interrupt\n" +
+		"┃  The text above was an example, not the live status.\n" +
+		liveFrame +
+		"                            tab agents  ctrl+p commands\n"
+	if IsWorkingContent(idle, "opencode") {
+		t.Error("a busy-looking transcript frame above an idle live composer must not pin the session at Running")
+	}
+
+	busy := transcriptFrame +
+		"                            tab agents  ctrl+p commands\n" +
+		liveFrame +
+		"   ⬝⬝⬝⬝⬝⬝⬝⬝  esc interrupt                    tab agents  ctrl+p commands\n"
+	if !IsWorkingContent(busy, "opencode") {
+		t.Error("a busy indicator below the bottom-most live composer must still read as working")
+	}
+}
