@@ -707,8 +707,8 @@ func (m *home) clearStaleAutoHideStatus() {
 
 // paneStatusLabel names a pane for a user-facing message the way the pane's own
 // header names it — `instance · tab` (ui.TabbedWindow.renderHeader), reading the
-// tab through the same tree label source so the toast and the header can never
-// disagree about what a pane is called.
+// tab through the same disambiguated tree label source so the toast and the
+// header can never disagree about what a pane is called.
 //
 // It reports false rather than guessing. An instance title alone is not a pane
 // identity (#930), and tree.TabLabels answers with a placeholder "Agent" slot

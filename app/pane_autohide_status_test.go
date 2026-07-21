@@ -200,6 +200,31 @@ func TestPane_AutoHideStatusNamesDisplacedTab(t *testing.T) {
 	}
 }
 
+// TestPane_AutoHideStatusDisambiguatesDuplicateTerminalTabs covers the status
+// half of #2150. The pane header and the narrow-layout notice are two views of
+// the same pane identity; neither may collapse two default Terminal tabs back
+// to the same label after the tree has already exposed their jump slots.
+func TestPane_AutoHideStatusDisambiguatesDuplicateTerminalTabs(t *testing.T) {
+	h := paneTestHome(t)
+	resizeHome(h, 80, 24)
+
+	alpha := h.store.GetInstanceByTitle("alpha")
+	require.NotNil(t, alpha)
+	alpha.AddTabForTest("shell-2", session.TabKindShell)
+
+	_, _ = h.openOrFocusPane(alpha, 1)
+	_, _ = h.openOrFocusPane(alpha, 2)
+
+	require.Equal(t, 2, h.store.NumOpenPanes())
+	require.Len(t, h.visiblePanes, 1)
+	require.Equal(t, 2, h.visiblePanes[0].Tab(), "slot 3 remains visible")
+	rendered := h.errBox.String()
+	assert.Contains(t, rendered, "alpha · 2 › Terminal hidden",
+		"the notice identifies the displaced slot-2 terminal")
+	assert.NotContains(t, rendered, "alpha · › Terminal hidden",
+		"a generic Terminal label cannot identify the displaced pane")
+}
+
 // TestPane_AutoHideStatusUnnamableTabMakesNoClaim covers the other half of the
 // #1997 contract: when the pane's tab cannot be named, the toast says a pane is
 // hidden rather than naming the wrong one. An instance whose tabs have not

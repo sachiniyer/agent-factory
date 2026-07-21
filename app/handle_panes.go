@@ -9,7 +9,6 @@ import (
 	"github.com/sachiniyer/agent-factory/ui"
 	"github.com/sachiniyer/agent-factory/ui/layout"
 	"github.com/sachiniyer/agent-factory/ui/store"
-	"github.com/sachiniyer/agent-factory/ui/tree"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/sachiniyer/agent-factory/internal/shellsuggest"
@@ -83,16 +82,8 @@ func (m *home) paneSelectionHint(p *store.OpenPane) string {
 	if m.paneMatchesSelection(p) {
 		return ""
 	}
-	tabLabel := ""
-	labels := tree.TabLabels(selected)
 	activeTab := m.store.ActiveTab()
-	if activeTab >= 0 && activeTab < len(labels) {
-		tabLabel = labels[activeTab]
-	}
-	if tabLabel == "" {
-		return selected.Title
-	}
-	return fmt.Sprintf("%s · %s", selected.Title, tabLabel)
+	return paneBindingLabel(paneBinding{instance: selected, tab: activeTab})
 }
 
 func (m *home) paneMatchesSelection(p *store.OpenPane) bool {

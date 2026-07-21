@@ -1,6 +1,8 @@
 package tree
 
 import (
+	"fmt"
+
 	"github.com/sachiniyer/agent-factory/session"
 )
 
@@ -105,13 +107,20 @@ func TabLabels(instance *session.Instance) []string {
 	return append([]string(nil), placeholderTabLabels...)
 }
 
-// TabLabelAt returns the display label for the instance's tab at idx, reporting
-// false when the instance's real tab list cannot answer: no tabs have
-// materialized yet, or idx is out of range. Unlike TabLabels it never falls
-// back to the placeholder slot — a caller that names a pane TO THE USER must be
-// able to tell "this is the Agent tab" from "no tab list exists yet", because
-// the placeholder's "Agent" is a guess and naming the wrong pane is worse than
-// not naming one (#1997).
+// TabLabelAt returns the presentation label for a real tab and prefixes its
+// 1-based jump slot when another tab has the same label. The tree already
+// renders that slot beside every child row; pane-facing surfaces need it only
+// when labels collide, so a numbered jump between two default Terminal tabs
+// produces a visibly different identity without adding noise to ordinary
+// single-Agent/single-Terminal panes (#2150).
+//
+// It reports false when the instance's real tab list cannot answer: no tabs have
+// materialized yet, or idx is out of range. Unlike TabLabels it never falls back
+// to the placeholder slot — a caller that names a pane TO THE USER must be able
+// to tell "this is the Agent tab" from "no tab list exists yet", because the
+// placeholder's "Agent" is a guess and naming the wrong pane is worse than not
+// naming one (#1997). Best-effort renderers may apply their existing placeholder
+// fallback after checking the bool.
 func TabLabelAt(instance *session.Instance, idx int) (string, bool) {
 	if instance == nil {
 		return "", false
@@ -120,7 +129,13 @@ func TabLabelAt(instance *session.Instance, idx int) (string, bool) {
 	if idx < 0 || idx >= len(tabs) {
 		return "", false
 	}
-	return labelForTab(tabs[idx]), true
+	label := labelForTab(tabs[idx])
+	for candidateIdx, candidate := range tabs {
+		if candidateIdx != idx && labelForTab(candidate) == label {
+			return fmt.Sprintf("%d %s", idx+1, label), true
+		}
+	}
+	return label, true
 }
 
 // labelForTab is the kind glyph, a space, then the tab's text. Every consumer
