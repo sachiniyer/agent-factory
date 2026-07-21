@@ -319,6 +319,84 @@ func TestTasksAdd_RefusesCloneInsideAfHome(t *testing.T) {
 	assert.Empty(t, tasks, "no task may be created by the refused add")
 }
 
+// TestSessionsCreate_RefusesCloneInsideAfHome pins the other binding command
+// named by the shared #1891 contract. A session created from the stray clone is
+// just as invisible from the intended project as a task, so it must stop before
+// the daemon sees a create request.
+func TestSessionsCreate_RefusesCloneInsideAfHome(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	silenceStdio(t)
+
+	clone := filepath.Join(home, "runtime", "detail-dlq-monitor")
+	require.NoError(t, os.MkdirAll(filepath.Dir(clone), 0o755))
+	require.NoError(t, exec.Command("git", "init", clone).Run())
+	require.NoError(t, exec.Command("git", "-C", clone, "config", "user.email", "t@e.com").Run())
+	require.NoError(t, exec.Command("git", "-C", clone, "config", "user.name", "T").Run())
+	require.NoError(t, exec.Command("git", "-C", clone, "commit", "--allow-empty", "-m", "init").Run())
+	t.Chdir(clone)
+
+	prevCreate := createSessionViaDaemon
+	createSessionViaDaemon = func(req daemon.CreateSessionRequest) (*session.InstanceData, error) {
+		t.Fatalf("daemon received refused AF-home binding: %+v", req)
+		return nil, nil
+	}
+	t.Cleanup(func() { createSessionViaDaemon = prevCreate })
+	setSessionsCreateFlags(t, "stray-session", "", false, false)
+
+	err := sessionsCreateCmd.RunE(sessionsCreateCmd, nil)
+	require.Error(t, err, "a cwd-derived session binding to a clone inside af's home must be refused")
+	assert.Contains(t, err.Error(), "--repo")
+	assert.Contains(t, strings.ToLower(err.Error()), "af's home")
+}
+
+func TestSessionsSendPromptCreate_RefusesCloneInsideAfHome(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	resetSendPromptState(t)
+	silenceStdio(t)
+
+	clone := filepath.Join(home, "runtime", "detail-dlq-monitor")
+	require.NoError(t, os.MkdirAll(filepath.Dir(clone), 0o755))
+	require.NoError(t, exec.Command("git", "init", clone).Run())
+	t.Chdir(clone)
+
+	prevDeliver := deliverPromptViaDaemon
+	deliverPromptViaDaemon = func(req daemon.DeliverPromptRequest) (string, error) {
+		t.Fatalf("daemon received refused send-prompt --create binding: %+v", req)
+		return "", nil
+	}
+	t.Cleanup(func() { deliverPromptViaDaemon = prevDeliver })
+	sendPromptCreateFlag = true
+
+	err := sessionsSendPromptCmd.RunE(sessionsSendPromptCmd, []string{"stray-session", "hello"})
+	require.Error(t, err, "send-prompt --create must share the AF-home binding refusal")
+	assert.Contains(t, err.Error(), "--repo")
+	assert.Contains(t, strings.ToLower(err.Error()), "af's home")
+}
+
+func TestSessionsCreate_ExplicitRepoInsideAfHomeIsAllowed(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	silenceStdio(t)
+
+	clone := filepath.Join(home, "runtime", "deliberate")
+	require.NoError(t, os.MkdirAll(filepath.Dir(clone), 0o755))
+	require.NoError(t, exec.Command("git", "init", clone).Run())
+
+	called := false
+	prevCreate := createSessionViaDaemon
+	createSessionViaDaemon = func(req daemon.CreateSessionRequest) (*session.InstanceData, error) {
+		called = true
+		return &session.InstanceData{Title: req.Title}, nil
+	}
+	t.Cleanup(func() { createSessionViaDaemon = prevCreate })
+	setSessionsCreateFlags(t, "deliberate-session", clone, false, false)
+
+	require.NoError(t, sessionsCreateCmd.RunE(sessionsCreateCmd, nil), "explicit --repo must remain the escape hatch")
+	assert.True(t, called, "explicit binding did not reach the daemon")
+}
+
 // TestTasksAdd_ExplicitRepoInsideAfHomeIsAllowed pins the escape hatch: a caller
 // who names the path has STATED the binding rather than inherited it, so
 // legitimate uses stay open.

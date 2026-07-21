@@ -146,20 +146,34 @@ func resolveRepoIDForLookup() (string, error) {
 	return repo.ID, nil
 }
 
-// resolveRepo resolves a *config.RepoContext for commands that require a repo
-// (sessions create, tasks add). It returns fully-formed, user-facing errors so
-// callers can surface them directly without re-deriving the cause: a provided
-// `--repo` that does not resolve names the path, while an absent `--repo` whose
-// cwd is also not a repo reports that `--repo is required` (#892). Wrapping any
-// resolution failure as "--repo is required" — as the callers used to — was
-// wrong precisely when the user did pass `--repo` but pointed it at a non-repo.
+// resolveRepo is the single binding resolver for commands that can create
+// persistent project state (sessions create, tasks add, and send-prompt
+// --create). Besides resolving the repo, it enforces the shared AF-home refusal;
+// putting that invariant here keeps a new caller from remembering resolution
+// while forgetting the destructive binding guard (#1891/#2205).
+//
+// Errors are fully formed for callers to surface directly: a provided `--repo`
+// that does not resolve names the path, while an absent `--repo` whose cwd is
+// also not a repo reports that `--repo is required` (#892). Wrapping every
+// failure as "--repo is required" would be wrong when the user did provide it.
 func resolveRepo() (*config.RepoContext, error) {
+	var (
+		repo *config.RepoContext
+		err  error
+	)
 	if repoFlag != "" {
-		return repoFromFlag()
+		repo, err = repoFromFlag()
+	} else {
+		repo, err = config.CurrentRepo()
+		if err != nil {
+			return nil, fmt.Errorf("--repo is required: current directory is not a git repository: %w", err)
+		}
 	}
-	repo, err := config.CurrentRepo()
 	if err != nil {
-		return nil, fmt.Errorf("--repo is required: current directory is not a git repository: %w", err)
+		return nil, err
+	}
+	if err := guardProjectBinding(repo, repoFlag != ""); err != nil {
+		return nil, err
 	}
 	return repo, nil
 }
