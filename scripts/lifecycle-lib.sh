@@ -42,15 +42,19 @@ lc_skip() {
 }
 
 # lc_log_proves_supervision <log> — true only when the native lifecycle leg
-# produced every positive assertion-4 record. Looking only for an explicit
-# "SKIP assertion #4" is insufficient: release lookup can stop scenario B
-# before assertion 4 is reached, leaving neither a PASS nor that SKIP line.
+# produced every positive assertion-4 record for BOTH upgrade paths. Looking
+# only for an explicit "SKIP assertion #4" is insufficient: release lookup can
+# stop one scenario B mode before assertion 4 while the other mode supplies
+# superficially identical PASS lines.
 lc_log_proves_supervision() {
     local log="${1:-}"
     [ -r "$log" ] || return 1
-    grep -Fxq '[lifecycle]   PASS  assertion 4: the unit is still active (= active)' "$log" &&
-        grep -Fxq '[lifecycle]   PASS  assertion 4: af still sees the autostart unit (= true)' "$log" &&
-        grep -Fq "[lifecycle]   PASS  assertion 4: the running daemon IS the unit's child " "$log"
+    local mode
+    for mode in upgrade-cmd launch; do
+        grep -Fxq "[lifecycle]   PASS  scenario-b/$mode assertion 4: the unit is still active (= active)" "$log" || return 1
+        grep -Fxq "[lifecycle]   PASS  scenario-b/$mode assertion 4: af still sees the autostart unit (= true)" "$log" || return 1
+        grep -Fq "[lifecycle]   PASS  scenario-b/$mode assertion 4: the running daemon IS the unit's child " "$log" || return 1
+    done
 }
 
 # lc_release_http_unavailable <status> — true only for HTTP outcomes where the

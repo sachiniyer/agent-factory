@@ -653,18 +653,19 @@ scenario_b() {
 
     # 4. if a unit was installed, it is STILL the supervisor.
     if [ "$supervised" = yes ]; then
-        lc_assert_eq "active" "$(lc_unit_active)" "assertion 4: the unit is still active"
+        lc_assert_eq "active" "$(lc_unit_active)" \
+            "scenario-b/$mode assertion 4: the unit is still active"
         lc_assert_eq "true" "$(lc_status_field "$bin" '.data.autostart_unit')" \
-            "assertion 4: af still sees the autostart unit"
+            "scenario-b/$mode assertion 4: af still sees the autostart unit"
         local unit_pid
         unit_pid="$(lc_unit_main_pid)"
         # The demotion this catches: a daemon still runs and still answers, but
         # it is an ad-hoc child systemd does not own — the unit's MainPID stops
         # matching the daemon that is actually serving (#796).
         if [ -n "$after_pid" ] && [ "$unit_pid" = "$after_pid" ]; then
-            lc_pass "assertion 4: the running daemon IS the unit's child (MainPID=$unit_pid) — not demoted"
+            lc_pass "scenario-b/$mode assertion 4: the running daemon IS the unit's child (MainPID=$unit_pid) — not demoted"
         else
-            lc_fail "assertion 4: daemon DEMOTED to an ad-hoc child (unit MainPID=$unit_pid, running daemon=$after_pid, was $before_unit_pid)"
+            lc_fail "scenario-b/$mode assertion 4: daemon DEMOTED to an ad-hoc child (unit MainPID=$unit_pid, running daemon=$after_pid, was $before_unit_pid)"
         fi
     fi
 

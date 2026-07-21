@@ -175,14 +175,17 @@ printf '\n=== native CI requires positive supervision proof ===\n'
 # supervision at all. Its log contract requires every assertion-4 PASS record.
 proof_log="$SELFTEST_TMP/supervision-pass.log"
 printf '%s\n' \
-    '[lifecycle]   PASS  assertion 4: the unit is still active (= active)' \
-    '[lifecycle]   PASS  assertion 4: af still sees the autostart unit (= true)' \
-    "[lifecycle]   PASS  assertion 4: the running daemon IS the unit's child (MainPID=7712) — not demoted" \
+    '[lifecycle]   PASS  scenario-b/upgrade-cmd assertion 4: the unit is still active (= active)' \
+    '[lifecycle]   PASS  scenario-b/upgrade-cmd assertion 4: af still sees the autostart unit (= true)' \
+    "[lifecycle]   PASS  scenario-b/upgrade-cmd assertion 4: the running daemon IS the unit's child (MainPID=7712) — not demoted" \
+    '[lifecycle]   PASS  scenario-b/launch assertion 4: the unit is still active (= active)' \
+    '[lifecycle]   PASS  scenario-b/launch assertion 4: af still sees the autostart unit (= true)' \
+    "[lifecycle]   PASS  scenario-b/launch assertion 4: the running daemon IS the unit's child (MainPID=8812) — not demoted" \
     >"$proof_log"
 if lc_log_proves_supervision "$proof_log" 2>/dev/null; then
-    ok "all three assertion-4 PASS records prove native supervision ran"
+    ok "all three assertion-4 PASS records for both modes prove native supervision ran"
 else
-    no "a complete assertion-4 PASS log was not recognized"
+    no "a complete per-mode assertion-4 PASS log was not recognized"
 fi
 
 skipped_log="$SELFTEST_TMP/release-skip.log"
@@ -194,6 +197,19 @@ if lc_log_proves_supervision "$skipped_log" 2>/dev/null; then
     no "a release-boundary SKIP with no assertion-4 records passed as supervision proof"
 else
     ok "a release-boundary SKIP cannot masquerade as native supervision coverage"
+fi
+
+mixed_log="$SELFTEST_TMP/supervision-one-mode-only.log"
+printf '%s\n' \
+    '[lifecycle]   PASS  scenario-b/upgrade-cmd assertion 4: the unit is still active (= active)' \
+    '[lifecycle]   PASS  scenario-b/upgrade-cmd assertion 4: af still sees the autostart unit (= true)' \
+    "[lifecycle]   PASS  scenario-b/upgrade-cmd assertion 4: the running daemon IS the unit's child (MainPID=7712) — not demoted" \
+    '[lifecycle]   SKIP  scenario-b/launch: could not verify the upgrade — GitHub release lookup unavailable or rate-limited' \
+    >"$mixed_log"
+if lc_log_proves_supervision "$mixed_log" 2>/dev/null; then
+    no "one completed upgrade mode masked another mode that skipped before supervision"
+else
+    ok "native supervision proof is required independently for every upgrade mode"
 fi
 
 printf '\n=== the kill path refuses an empty home ===\n'
