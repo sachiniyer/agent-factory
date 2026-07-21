@@ -118,6 +118,71 @@ func TestDenialReason(t *testing.T) {
 	}
 }
 
+func TestDenialReasonChecksKillServerInEveryTmuxChainPosition(t *testing.T) {
+	positions := []struct {
+		name string
+		args string
+	}{
+		{name: "first", args: `kill-server \; list-sessions`},
+		{name: "first with attached terminator", args: `kill-server\; list-sessions`},
+		{name: "middle", args: `list-sessions \; kill-server \; list-windows`},
+		{name: "middle with attached terminator", args: `list-sessions \; kill-server\; list-windows`},
+		{name: "last", args: `list-sessions \; kill-server`},
+		{name: "after attached separator", args: `list-sessions\; kill-server`},
+	}
+	for _, position := range positions {
+		for _, scoped := range []bool{false, true} {
+			name := "unscoped"
+			prefix := "tmux"
+			wantReason := broadTmuxReason
+			if scoped {
+				name = "scoped"
+				prefix = "tmux -L af-test"
+				wantReason = ""
+			}
+			t.Run(position.name+"/"+name, func(t *testing.T) {
+				command := prefix + " " + position.args
+				if got := DenialReason(command); got != wantReason {
+					t.Fatalf("DenialReason(%q) = %q, want %q", command, got, wantReason)
+				}
+			})
+		}
+	}
+}
+
+func TestDenialReasonDeniesUnmodeledCommandsOnScopedTmuxServers(t *testing.T) {
+	tests := []struct {
+		name    string
+		command string
+	}{
+		// P1 reproductions from #2305: documented aliases must not escape a
+		// canonical-name denylist.
+		{name: "new-window alias", command: `tmux -L af-test neww 'pkill tmux'`},
+		{name: "split-window alias", command: `tmux -L af-test splitw 'pkill tmux'`},
+		{name: "display-popup alias", command: `tmux -L af-test popup 'pkill tmux'`},
+
+		// P1 reproductions from #2304: a verb absent from a denylist must not
+		// become an implicit allow merely because the tmux server is scoped.
+		{name: "new-pane", command: `tmux -L af-test new-pane 'pkill tmux'`},
+		{name: "detach-client shell", command: `tmux -L af-test detach-client -E 'pkill tmux'`},
+
+		// tmux accepts unambiguous command prefixes. Matching only canonical
+		// spellings would leave the same bug under a shorter token.
+		{name: "new-window prefix", command: `tmux -L af-test new-w 'pkill tmux'`},
+
+		// Intersection with #2308: every sequence element must inherit the
+		// scoped-server deny-by-default policy after separator normalization.
+		{name: "unknown after separator", command: `tmux -L af-test list-sessions \; some-unknown-verb 'pkill tmux'`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := DenialReason(tt.command); got != unknownShellReason {
+				t.Fatalf("DenialReason(%q) = %q, want %q", tt.command, got, unknownShellReason)
+			}
+		})
+	}
+}
+
 func TestDenialReasonsAreActionable(t *testing.T) {
 	tests := []struct {
 		command string
