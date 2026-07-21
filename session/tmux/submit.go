@@ -70,8 +70,11 @@ type deliveryObservation struct {
 // can therefore support a terminal negative when completion is still absent.
 // Baselines prefer the capture after the pre-submit clear (and conservatively
 // fall back to the pre-clear frame if that capture fails), so old prompt text
-// in scrollback cannot be mistaken for evidence from this paste.
+// in scrollback cannot be mistaken for evidence from this paste. If neither
+// capture succeeds, baselineCaptured stays false and no count comparison may
+// claim either positive delivery or terminal absence.
 type deliveryProbe struct {
+	baselineCaptured      bool
 	completion            string
 	completionBaseline    int
 	renderWitness         string
@@ -403,10 +406,12 @@ func newDeliveryProbe(text string) deliveryProbe {
 	return probe
 }
 
-// withBaseline records how many copies of each witness were already visible
-// before this paste. A later observation is evidence only when its count grows.
+// withBaseline records that the pane was actually measured and how many copies
+// of each witness were already visible before this paste. A later observation
+// is evidence only when its count grows from this captured baseline.
 func (p deliveryProbe) withBaseline(content string) deliveryProbe {
 	normalized := normalizeDelivery(content)
+	p.baselineCaptured = true
 	if p.completion != "" {
 		p.completionBaseline = strings.Count(normalized, p.completion)
 	}
@@ -522,7 +527,8 @@ func (t *TmuxSession) waitForPasteDelivered(probe deliveryProbe) deliveryObserva
 		// server cannot push a single capture past the deadline below (#2099).
 		if content, ok := t.capturePaneForDeliveryWithin(time.Until(deadline)); ok {
 			normalized := normalizeDelivery(content)
-			if strings.Count(normalized, probe.completion) > probe.completionBaseline {
+			if probe.baselineCaptured &&
+				strings.Count(normalized, probe.completion) > probe.completionBaseline {
 				streak++
 				if streak >= needed {
 					return deliveryObservation{outcome: deliveryObservedLanded, pane: content}
@@ -530,7 +536,7 @@ func (t *TmuxSession) waitForPasteDelivered(probe deliveryProbe) deliveryObserva
 				// One weak short-tail sighting is neither confirmed delivery nor
 				// absence. A later failure must not combine with it.
 				lastObservation = deliveryObservation{outcome: deliveryCouldNotObserve, pane: content}
-			} else if probe.renderWitness != "" &&
+			} else if probe.baselineCaptured && probe.renderWitness != "" &&
 				strings.Count(normalized, probe.renderWitness) > probe.renderWitnessBaseline {
 				streak = 0
 				lastObservation = deliveryObservation{outcome: deliveryObservedAbsent, pane: content}

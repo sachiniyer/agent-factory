@@ -670,6 +670,50 @@ func TestFailedPostClearCaptureKeepsPreClearBaseline(t *testing.T) {
 		"an old prompt retained across a failed post-clear capture proves neither new delivery nor new partial rendering")
 }
 
+// TestFailedBaselineCapturesCannotAuthorizeObservedAbsent is the Codex review
+// fail-first: when neither pre-paste capture succeeds, zero is not a measured
+// baseline. A prompt prefix already present in scrollback may appear in every
+// later frame, so its count above zero cannot prove this paste rendered it.
+func TestFailedBaselineCapturesCannotAuthorizeObservedAbsent(t *testing.T) {
+	defer withPasteDeliveryTiming(20*time.Millisecond, time.Millisecond)()
+	errors := captureErrorLog(t)
+	pasted := false
+	const prompt = "run bash -lc 'printf started && inspect every file before reporting DELIVERY_TAIL_COMPLETE'"
+
+	cmdExec := cmd_test.MockCmdExec{
+		RunFunc: func(c *exec.Cmd) error {
+			if strings.Contains(strings.Join(c.Args, " "), "paste-buffer") {
+				pasted = true
+			}
+			return nil
+		},
+		OutputFunc: func(*exec.Cmd) ([]byte, error) {
+			if !pasted {
+				return nil, fmt.Errorf("transient baseline capture failure")
+			}
+			return []byte("old scrollback: run bash -lc 'printf started"), nil
+		},
+	}
+	session := newTmuxSession("af_proj", ProgramClaude, NewMockPtyFactory(t), cmdExec)
+
+	require.NoError(t, session.SendKeysCommand(prompt))
+	require.NotContains(t, errors.String(), "prompt delivery observed absent",
+		"without a measured baseline, retained prefix text cannot be called new")
+}
+
+func TestUncapturedBaselineCannotConfirmOldCompletionTail(t *testing.T) {
+	defer withPasteDeliveryTiming(8*time.Millisecond, time.Millisecond)()
+	const prompt = "an old complete prompt with a distinctive DELIVERY_TAIL_ALREADY_IN_SCROLLBACK"
+	cmdExec := cmd_test.MockCmdExec{
+		OutputFunc: func(*exec.Cmd) ([]byte, error) { return []byte(prompt), nil },
+	}
+	session := newTmuxSession("af_proj", ProgramClaude, NewMockPtyFactory(t), cmdExec)
+
+	got := session.waitForPasteDelivered(newDeliveryProbe(prompt))
+	require.Equal(t, deliveryCouldNotObserve, got.outcome,
+		"without a measured baseline, retained completion text cannot prove this paste landed")
+}
+
 func TestFinalCaptureFailureMakesEarlierAbsenceUnobservable(t *testing.T) {
 	defer withPasteDeliveryTiming(8*time.Millisecond, time.Millisecond)()
 	captures := 0
