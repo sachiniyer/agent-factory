@@ -464,6 +464,7 @@ func resetScopeFlags(t *testing.T) {
 	t.Helper()
 	reset := func() {
 		repoFlag = ""
+		sessionsListAllFlag = false
 		tasksListAllFlag = false
 	}
 	t.Cleanup(reset)

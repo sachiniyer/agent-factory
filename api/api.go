@@ -656,6 +656,10 @@ func init() {
 	sessionsTabsCmd.AddCommand(sessionsTabsRenameCmd)
 	sessionsTabsCmd.AddCommand(sessionsTabsReorderCmd)
 
+	// Listing is project-scoped by default; --all is the explicit read-only
+	// opt-in to global breadth, matching `tasks list` (#2089).
+	sessionsListCmd.Flags().BoolVar(&sessionsListAllFlag, "all", false, "List sessions across every project instead of only the current one")
+
 	SessionsCmd.AddCommand(sessionsListCmd)
 	SessionsCmd.AddCommand(sessionsGetCmd)
 	SessionsCmd.AddCommand(sessionsCreateCmd)
