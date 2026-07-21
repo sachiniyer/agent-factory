@@ -140,7 +140,7 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				selectedIdx = i
 			}
 		}
-		m.selectionOverlay = overlay.NewSelectionOverlay("Select Program", items)
+		m.selectionOverlay = overlay.NewSelectionOverlay("Select program", items)
 		m.selectionOverlay.SetWidth(40)
 		m.selectionOverlay.SetSelectedIndex(selectedIdx)
 		m.layoutSelectionOverlay()

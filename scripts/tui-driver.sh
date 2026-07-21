@@ -984,8 +984,8 @@ af_add_task() {
     af_open_tasks || return 1
     af_send n
     # Sync on the form title, not the footer: the footer's "enter create" hint
-    # collapses away at a narrow overlay width, but "New Task" is always shown.
-    af_wait_for 'New Task' "$AF_DRIVER_TIMEOUT" 'task create form' || return 1
+    # collapses away at a narrow overlay width, but "New task" is always shown.
+    af_wait_for 'New task' "$AF_DRIVER_TIMEOUT" 'task create form' || return 1
     af_send_literal "$name"
     af_send Tab                    # name -> trigger selector (cron is default)
     af_send Tab                    # -> trigger value (cron expression)

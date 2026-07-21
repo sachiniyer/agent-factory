@@ -185,8 +185,9 @@ func TestLayoutCutover_EnterOpensTaskInEditMode(t *testing.T) {
 
 	view := h.View()
 	requireViewSized(t, view, 100, 30)
-	assert.Contains(t, view, "Edit Task 2",
+	assert.Contains(t, view, "Edit task 2",
 		"the overlay opens the cursor's task straight into its edit form")
+	assert.NotContains(t, view, "Edit Task 2")
 	assert.Contains(t, view, "beta-task", "the form is prefilled with the selected task")
 	assert.Contains(t, view, "run now",
 		"the first edit screen must keep the documented run-now path visible (#1288)")
@@ -282,6 +283,8 @@ func TestLayoutCutover_TaskKeysOpenOverlay(t *testing.T) {
 
 	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("n")})
 	assert.True(t, h.automations.TaskPane().IsCreating(), "n inside the overlay opens the create form")
+	assert.Contains(t, h.View(), "New task", "the create-form title follows the sentence-case convention")
+	assert.NotContains(t, h.View(), "New Task")
 }
 
 // TestE2E_LayoutCutover_FocusRingAndHooksOverlay drives the real tea.Program

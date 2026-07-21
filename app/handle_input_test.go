@@ -86,6 +86,20 @@ func TestHandleMenuHighlightingDoesNotInterceptNamingText(t *testing.T) {
 	assert.Nil(t, cmd)
 }
 
+func TestNamingProgramPickerTitleUsesSentenceCase(t *testing.T) {
+	h := newTestHome(t)
+	resizeHome(h, 80, 24)
+	_, _ = h.startNewInstance(false)
+	require.Equal(t, stateNew, h.state)
+
+	_, _ = h.handleStateNew(tea.KeyMsg{Type: tea.KeyTab})
+
+	require.Equal(t, stateSelectProgram, h.state)
+	require.NotNil(t, h.selectionOverlay)
+	assert.Contains(t, h.selectionOverlay.Render(), "Select program")
+	assert.NotContains(t, h.selectionOverlay.Render(), "Select Program")
+}
+
 // TestHandleMenuHighlightingNewInstanceActions is the regression guard for
 // issue #691/#1413: pressing Enter, Tab, Shift-Tab, or Esc while naming a new
 // instance must drive the menu highlight animation. The bug (commit f294e5b)

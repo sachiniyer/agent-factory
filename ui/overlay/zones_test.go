@@ -90,7 +90,7 @@ func TestConfirmationOverlayZonesFollowCustomKeys(t *testing.T) {
 
 func TestSelectionOverlayRegistersRowZones(t *testing.T) {
 	items := []string{"claude", "aider", "codex"}
-	s := NewSelectionOverlay("Select Program", items)
+	s := NewSelectionOverlay("Select program", items)
 	s.SetWidth(50)
 	reg := zones.NewRegistry()
 	origin := layout.Point{X: 8, Y: 4}

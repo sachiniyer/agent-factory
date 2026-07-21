@@ -295,10 +295,10 @@ func (s *TaskPane) renderEditMode() string {
 	}
 
 	if s.creating {
-		b.WriteString(editTitleStyle.Render("New Task"))
+		b.WriteString(editTitleStyle.Render("New task"))
 	} else {
 		tsk := s.tasks[s.selectedIdx]
-		b.WriteString(editTitleStyle.Render(fmt.Sprintf("Edit Task %s", tsk.ID)))
+		b.WriteString(editTitleStyle.Render(fmt.Sprintf("Edit task %s", tsk.ID)))
 	}
 	b.WriteString("\n")
 

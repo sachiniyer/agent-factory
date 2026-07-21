@@ -903,7 +903,7 @@ func TestMouse_SelectionOverlayRowClick(t *testing.T) {
 	newFakeClock(h)
 	// The submit handler maps the row index into tmux.SupportedPrograms, so
 	// the overlay must carry the real list (as handleStateNew builds it).
-	h.selectionOverlay = overlay.NewSelectionOverlay("Select Program", tmux.SupportedPrograms)
+	h.selectionOverlay = overlay.NewSelectionOverlay("Select program", tmux.SupportedPrograms)
 	h.selectionOverlay.SetWidth(60)
 	h.state = stateSelectProgram
 

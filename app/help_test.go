@@ -84,6 +84,26 @@ func TestInstanceStartHelpShowsFirstRunActionsAndGenericAgentCopy(t *testing.T) 
 	}
 }
 
+func TestFirstRunHelpTitlesUseSentenceCase(t *testing.T) {
+	local := newStartedInstance(t, "local")
+	tests := []struct {
+		name    string
+		content string
+		want    string
+		old     string
+	}{
+		{"instance created", helpStart(local).toContent(), "Instance created", "Instance Created"},
+		{"attach", helpTypeInstanceAttach{}.toContent(), "Attaching to instance", "Attaching to Instance"},
+		{"interactive pane", helpTypeInteractive{}.toContent(), "Interactive pane", "Interactive Pane"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			require.Contains(t, tc.content, tc.want)
+			require.NotContains(t, tc.content, tc.old)
+		})
+	}
+}
+
 func TestInstanceAttachHelpShowsProceedCancelAndDetach(t *testing.T) {
 	content := helpTypeInstanceAttach{}.toContent()
 
