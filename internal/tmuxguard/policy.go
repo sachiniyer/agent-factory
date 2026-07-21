@@ -44,6 +44,7 @@ const (
 	roleSed
 	roleJournalctl
 	roleMake
+	roleFile
 )
 
 type programPolicy struct {
@@ -59,7 +60,7 @@ func classifyProgram(executable string) programPolicy {
 	}
 	switch name {
 	case ":", "agent-browser", "basename", "cat", "cd", "chmod", "cmp", "comm", "cp", "curl",
-		"cut", "date", "df", "diff", "dirname", "du", "echo", "false", "file", "gofmt",
+		"cut", "date", "df", "diff", "dirname", "du", "echo", "false", "gofmt",
 		"grep", "head", "hostname", "id", "jq", "ln", "ls", "mkdir", "mktemp", "mv",
 		"paste", "pgrep", "printenv", "ps", "pwd", "readlink", "realpath", "rm", "rmdir",
 		"seq", "sha256sum", "shellcheck", "sleep", "sort", "ss", "stat", "strings", "tail",
@@ -105,6 +106,8 @@ func classifyProgram(executable string) programPolicy {
 		return programPolicy{dispatch: dispatchAudited, role: roleJournalctl}
 	case "make":
 		return programPolicy{dispatch: dispatchAudited, role: roleMake}
+	case "file":
+		return programPolicy{dispatch: dispatchAudited, role: roleFile, directoryInert: true}
 	default:
 		if pythonVersionedExecutable(name) {
 			return programPolicy{dispatch: dispatchAudited, role: rolePython}

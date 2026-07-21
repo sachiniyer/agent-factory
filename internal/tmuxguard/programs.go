@@ -299,7 +299,10 @@ func inspectRipgrep(args []shellWord) string {
 			continue
 		}
 		if arg.literal == "--pre" || strings.HasPrefix(arg.literal, "--pre=") ||
-			arg.literal == "--hostname-bin" || strings.HasPrefix(arg.literal, "--hostname-bin=") {
+			arg.literal == "--hostname-bin" || strings.HasPrefix(arg.literal, "--hostname-bin=") ||
+			(arg.literal == "--search-zip" || strings.HasPrefix(arg.literal, "--search-zip=")) ||
+			(strings.HasPrefix(arg.literal, "-") &&
+				!strings.HasPrefix(arg.literal, "--") && strings.ContainsRune(arg.literal[1:], 'z')) {
 			return unknownShellReason
 		}
 	}
@@ -441,5 +444,30 @@ func inspectMake(args []shellWord) string {
 	// Targets select recipes from the reviewed repository Makefile. Alternate
 	// makefiles, command-line variables, eval, includes, and future options are
 	// excluded by the literal bare-target grammar above.
+	return ""
+}
+
+func inspectFile(args []shellWord) string {
+	optionsDone := false
+	for _, arg := range args {
+		if !arg.resolved {
+			if !optionsDone {
+				return unknownShellReason
+			}
+			continue
+		}
+		if arg.literal == "--" {
+			optionsDone = true
+			continue
+		}
+		if optionsDone {
+			continue
+		}
+		if arg.literal == "--uncompress" || arg.literal == "--uncompress-noreport" ||
+			(strings.HasPrefix(arg.literal, "-") && !strings.HasPrefix(arg.literal, "--") &&
+				strings.ContainsAny(arg.literal[1:], "zZ")) {
+			return unknownShellReason
+		}
+	}
 	return ""
 }

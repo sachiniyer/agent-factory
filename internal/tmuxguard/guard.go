@@ -264,6 +264,8 @@ func inspectCommand(command shellCommand, depth int) string {
 		return inspectJournalctl(words[1:])
 	case roleMake:
 		return inspectMake(words[1:])
+	case roleFile:
+		return inspectFile(words[1:])
 	default:
 		return unknownShellReason
 	}
