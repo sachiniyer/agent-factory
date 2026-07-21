@@ -33,6 +33,10 @@ type PRInfo struct {
 	Title  string `json:"title"`
 	URL    string `json:"url"`
 	State  string `json:"state"`
+	// Branch is the exact local branch this PR lookup was performed for. It is
+	// not supplied by `gh pr list`; FetchPRInfo binds it after parsing so callers
+	// can prove cached PR state still belongs to the ref they are acting on.
+	Branch string `json:"-"`
 }
 
 // FetchPRInfo runs `gh pr list --head <branch>` to look up a PR for the
@@ -81,7 +85,11 @@ func FetchPRInfo(repoPath, branchName string) (*PRInfo, error) {
 		return nil, fmt.Errorf("failed to fetch PR info: %w", err)
 	}
 
-	return parsePRList(out)
+	info, err := parsePRList(out)
+	if info != nil {
+		info.Branch = branchName
+	}
+	return info, err
 }
 
 // parsePRList parses the JSON array output from `gh pr list` and selects the

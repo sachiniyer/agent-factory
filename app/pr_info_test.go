@@ -20,9 +20,13 @@ import (
 // that yields a non-empty repoPath from FetchPRInfoSnapshot). Use for tests
 // that need fetchPRInfoCmd to actually return a non-nil command.
 func newStartedInstanceWithWorktree(t *testing.T, title string) *session.Instance {
+	return newStartedInstanceWithWorktreeBranch(t, title, "feature/"+title)
+}
+
+func newStartedInstanceWithWorktreeBranch(t *testing.T, title, branch string) *session.Instance {
 	t.Helper()
 	inst := newStartedInstance(t, title)
-	inst.Branch = "feature/" + title
+	inst.Branch = branch
 	gw, err := git.NewGitWorktreeFromStorage(
 		t.TempDir(),
 		filepath.Join(t.TempDir(), "worktree"),
@@ -104,26 +108,28 @@ func TestFetchPRInfoCmd_NoGitWorktree_ReturnsNil(t *testing.T) {
 	assert.Nil(t, fetchPRInfoCmd(inst, "", false))
 }
 
-// TestFetchPRInfoCmd_DetachedHead_ReturnsNil — a detached-HEAD worktree has a
-// non-empty repoPath but an empty branch (#687). fetchPRInfoCmd must skip the
-// fetch entirely so it never spawns `gh pr view ""` every tick. We force the
-// fetch (bypassing the freshness debounce) and assert the fetcher is never
-// invoked even though the instance is started, local, and has a worktree.
-func TestFetchPRInfoCmd_DetachedHead_ReturnsNil(t *testing.T) {
-	inst := newStartedInstanceWithWorktree(t, "detached")
-	inst.Branch = "" // detached HEAD: no branch to look up
+// PR lookup is bound to GitWorktree.BranchName, the exact ref cleanup owns.
+// A restored row's legacy Instance.Branch can be empty or stale and must not
+// redirect the cached PR state used by destructive confirmation.
+func TestFetchPRInfoCmd_UsesCanonicalWorktreeBranch(t *testing.T) {
+	inst := newStartedInstanceWithWorktreeBranch(t, "restored", "feature/canonical")
+	inst.Branch = "stale-legacy-value"
 
-	var calls int32
+	var gotBranch string
 	restore := SetPRInfoFetcherForTest(func(repoPath, branch string) (*git.PRInfo, error) {
-		atomic.AddInt32(&calls, 1)
-		return nil, nil
+		gotBranch = branch
+		return &git.PRInfo{Number: 9, State: "MERGED"}, nil
 	})
 	defer restore()
 
-	assert.Nil(t, fetchPRInfoCmd(inst, "", true),
-		"detached-HEAD instance must not schedule a fetch")
-	assert.Equal(t, int32(0), atomic.LoadInt32(&calls),
-		"fetcher must not be invoked for an empty branch (no gh pr view \"\")")
+	cmd := fetchPRInfoCmd(inst, "", true)
+	require.NotNil(t, cmd)
+	msg, ok := cmd().(prInfoUpdatedMsg)
+	require.True(t, ok)
+	assert.Equal(t, "feature/canonical", gotBranch)
+	assert.Equal(t, "feature/canonical", msg.branch)
+	require.NotNil(t, msg.info)
+	assert.Equal(t, "feature/canonical", msg.info.Branch)
 }
 
 // TestFetchPRInfoCmd_Fresh_NotForced_DebouncesFetch — core laziness check:
@@ -425,15 +431,13 @@ func TestPrInfoUpdatedMsg_BranchMismatch_DropsUpdate(t *testing.T) {
 	h := newTestHome(t)
 
 	// The instance the fetch was kicked off for, on branch X.
-	orphan := newStartedInstance(t, "reused")
-	orphan.Branch = "feature/x"
+	orphan := newStartedInstanceWithWorktreeBranch(t, "reused", "feature/x")
 	h.store.AddInstance(orphan)
 	h.sidebar.SetSelectedInstance(0)
 
 	// User killed it and recreated a same-title instance on branch Y while the
 	// gh fetch was still running.
-	recreated := newStartedInstance(t, "reused")
-	recreated.Branch = "feature/y"
+	recreated := newStartedInstanceWithWorktreeBranch(t, "reused", "feature/y")
 	h.store.RemoveInstanceByTitle("reused")
 	h.store.AddInstance(recreated)
 
@@ -453,13 +457,11 @@ func TestPrInfoUpdatedMsg_BranchMismatch_DropsUpdate(t *testing.T) {
 func TestPrInfoUpdatedMsg_BranchMatch_AppliesUpdate(t *testing.T) {
 	h := newTestHome(t)
 
-	orphan := newStartedInstance(t, "reused")
-	orphan.Branch = "feature/x"
+	orphan := newStartedInstanceWithWorktreeBranch(t, "reused", "feature/x")
 	h.store.AddInstance(orphan)
 	h.sidebar.SetSelectedInstance(0)
 
-	live := newStartedInstance(t, "reused")
-	live.Branch = "feature/x"
+	live := newStartedInstanceWithWorktreeBranch(t, "reused", "feature/x")
 	h.store.RemoveInstanceByTitle("reused")
 	h.store.AddInstance(live)
 	require.NotSame(t, orphan, live, "sanity: swap must produce a distinct pointer")
@@ -497,8 +499,7 @@ func TestPrInfoUpdatedMsg_ProjectSwitch_DropsUpdate(t *testing.T) {
 	projectARepoID := h.repoID
 
 	// Project A: session "worker" on branch feature/x, PR fetch in flight.
-	orphan := newStartedInstance(t, "worker")
-	orphan.Branch = "feature/x"
+	orphan := newStartedInstanceWithWorktreeBranch(t, "worker", "feature/x")
 	h.store.AddInstance(orphan)
 
 	// The user switches projects in place (#1461): the store is reset and the
@@ -508,8 +509,7 @@ func TestPrInfoUpdatedMsg_ProjectSwitch_DropsUpdate(t *testing.T) {
 
 	// Project B happens to have a same-title session on the same branch — the
 	// case the #921 branch guard cannot distinguish.
-	repoBWorker := newStartedInstance(t, "worker")
-	repoBWorker.Branch = "feature/x"
+	repoBWorker := newStartedInstanceWithWorktreeBranch(t, "worker", "feature/x")
 	h.store.AddInstance(repoBWorker)
 
 	var persisted bool
@@ -539,15 +539,13 @@ func TestPrInfoUpdatedMsg_ProjectSwitch_ErrorDropsUpdate(t *testing.T) {
 	h := newTestHome(t)
 	projectARepoID := h.repoID
 
-	orphan := newStartedInstance(t, "worker")
-	orphan.Branch = "feature/x"
+	orphan := newStartedInstanceWithWorktreeBranch(t, "worker", "feature/x")
 	h.store.AddInstance(orphan)
 
 	h.store.ResetInstances()
 	h.repoID = projectARepoID + "-project-b"
 
-	repoBWorker := newStartedInstance(t, "worker")
-	repoBWorker.Branch = "feature/x"
+	repoBWorker := newStartedInstanceWithWorktreeBranch(t, "worker", "feature/x")
 	h.store.AddInstance(repoBWorker)
 	require.Greater(t, repoBWorker.PRInfoAge(), 365*24*time.Hour,
 		"precondition: project B's session is never-fetched")
@@ -581,6 +579,8 @@ func TestFetchPRInfoCmd_StampsRepoIDAtKickoff(t *testing.T) {
 	assert.Equal(t, "repo-a", msg.repoID,
 		"the fetch must carry the repoID captured at kickoff so the handler can drop it after a project switch")
 	assert.Equal(t, inst.GetBranch(), msg.branch)
+	require.NotNil(t, msg.info)
+	assert.Equal(t, msg.branch, msg.info.Branch)
 }
 
 // sanity: exercise config.DefaultConfig / AppState wiring so a compile

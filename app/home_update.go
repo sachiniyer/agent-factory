@@ -113,7 +113,7 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// branch-specific, so applying a branch-X result to a branch-Y
 		// instance would show the wrong PR badge and persist it. Gate the
 		// apply on the captured branch still matching the resolved target.
-		if target.GetBranch() != msg.branch {
+		if target.GetWorktreeBranch() != msg.branch {
 			return m, nil
 		}
 		if msg.err != nil {
@@ -136,6 +136,7 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				Title:  msg.info.Title,
 				URL:    msg.info.URL,
 				State:  msg.info.State,
+				Branch: msg.info.Branch,
 			}
 		}
 		saveStart := time.Now()

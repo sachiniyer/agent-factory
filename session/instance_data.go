@@ -130,6 +130,7 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 			Title:  i.prInfo.Title,
 			URL:    i.prInfo.URL,
 			State:  i.prInfo.State,
+			Branch: i.prInfo.Branch,
 		}
 	}
 
@@ -243,6 +244,7 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 			Title:  data.PRInfo.Title,
 			URL:    data.PRInfo.URL,
 			State:  data.PRInfo.State,
+			Branch: data.PRInfo.Branch,
 		}
 	}
 
