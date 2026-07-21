@@ -37,6 +37,9 @@ const (
 	// then render once more with the content-derived version (#2179 review).
 	pluginVersionSeed = "0.0.0"
 
+	// Major 3 sorts after the unordered 2.<hash>.<hash> scheme shipped by #2243.
+	pluginVersionMajor = 3
+
 	// agentFactoryModule is the ownership proof writeAgentPlugins requires before
 	// its first write or prune. A random directory containing any go.mod is not an
 	// af checkout and must never become a destructive target (#2179 review).
@@ -53,6 +56,15 @@ const (
 	// generated README use.
 	pluginCategory = "Developer Tools"
 )
+
+// pluginReleaseDigests is an append-only release ledger. Its length is the
+// monotonic SemVer minor: a seeded payload/path/mode change must append the new
+// digest, which advances ordering automatically. pluginContentVersion refuses
+// to generate when the final entry does not match, so the ordinary fix for a
+// changed payload cannot update its identity without also moving forward.
+var pluginReleaseDigests = []string{
+	"951d1d7a412f6c4a28b9498c7b16bda79ff6fad12c5b40963b6cf68f637fcf91", // 3.1
+}
 
 // pluginGenBanner marks a generated Markdown/shell artifact. Like genBanner it
 // carries no version or timestamp, so regenerating an unchanged tree is
@@ -452,10 +464,10 @@ func pluginsReadme() string {
 	return b.String()
 }
 
-// generatedPluginFiles returns every generated artifact with a version derived
-// from the complete version-neutral tree. Content, path, or mode changes mint a
-// different semver, so Codex/Claude caches cannot keep serving old skill or hook
-// bytes under an unchanged manifest identity (#2179 review).
+// generatedPluginFiles returns every generated artifact with a version bound to
+// the complete version-neutral tree. The ordered release serial makes every
+// later release greater under SemVer; the pinned digest makes generation fail
+// until a payload change advances that serial (#2179/#2243 review).
 func generatedPluginFiles() []pluginFile {
 	seed := generatedPluginFilesAtVersion(pluginVersionSeed)
 	return generatedPluginFilesAtVersion(pluginContentVersion(seed))
@@ -477,17 +489,42 @@ func generatedPluginFilesAtVersion(version string) []pluginFile {
 	return files
 }
 
-// pluginContentVersion maps the seeded generated tree to a deterministic semver.
-// Two 32-bit SHA-256 words give a 64-bit content address while staying within
-// conservative semver numeric ranges. The fixed major separates this scheme
-// from the former manually frozen 1.0.0 without tying plugins to af releases.
+// pluginContentVersion validates the complete seeded tree against the release
+// pin, then gives it a monotonic SemVer identity. Minor is the ordered release
+// serial; patch plus build metadata retain a 64-bit content address. A payload
+// change without an explicit serial bump panics before any generated file is
+// written, turning the easy-to-forget cache invariant into a hard generation
+// gate rather than another maintainer convention.
 func pluginContentVersion(files []pluginFile) string {
+	sum := pluginContentSum(files)
+	digest := fmt.Sprintf("%x", sum)
+	release := uint64(len(pluginReleaseDigests))
+	if release == 0 || digest != pluginReleaseDigests[len(pluginReleaseDigests)-1] {
+		panic(fmt.Sprintf(
+			"plugin generator: release %d content digest is %s; append it to pluginReleaseDigests (do not replace existing entries) to advance the plugin version",
+			release, digest,
+		))
+	}
+	return pluginVersionForRelease(release, sum)
+}
+
+func pluginContentSum(files []pluginFile) [sha256.Size]byte {
 	h := sha256.New()
 	for _, f := range files {
 		_, _ = fmt.Fprintf(h, "%s\x00%o\x00%s\x00", f.path, f.mode, f.content)
 	}
-	sum := h.Sum(nil)
-	return fmt.Sprintf("2.%d.%d", binary.BigEndian.Uint32(sum[:4]), binary.BigEndian.Uint32(sum[4:8]))
+	var sum [sha256.Size]byte
+	copy(sum[:], h.Sum(nil))
+	return sum
+}
+
+func pluginVersionForRelease(release uint64, sum [sha256.Size]byte) string {
+	return fmt.Sprintf("%d.%d.%d+sha256.%x",
+		pluginVersionMajor,
+		release,
+		binary.BigEndian.Uint32(sum[:4]),
+		sum[:8],
+	)
 }
 
 // mustJSON renders a manifest as indented JSON with a trailing newline. The
