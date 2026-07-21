@@ -5702,11 +5702,18 @@ test("#2226 mobile (375px): drawer dismissal follows action intent, not click pr
   await expect(p.locator(".af-filter-menu")).toBeVisible();
   await expect(app).toHaveClass(/af-nav-open/);
 
-  // Restore is the archived row's version of the same lifecycle action. It must
-  // leave the drawer too; keeping this leg in the browser guard prevents the two
-  // branches in rowActions from drifting apart.
+  // Restore is the archived row's version of the same lifecycle action. On touch,
+  // an unselected row has no hover reveal: select the now-visible archived row,
+  // let that navigation close the drawer, then reopen it so the selected-row action
+  // is exposed. This is the real phone path pinned by #2223's reveal model.
   await expect(row(p, SESSION_B)).toHaveClass(/af-row-archived/);
-  await railAction(p, SESSION_B, "Restore session").click();
+  await row(p, SESSION_B).click();
+  await expectDrawerClosed();
+  await expect(row(p, SESSION_B)).toHaveClass(/af-row-selected/);
+  await openDrawer();
+  const restore = railAction(p, SESSION_B, "Restore session");
+  await expect(restore).toBeVisible();
+  await restore.click();
   await expectDrawerClosed();
   await expect(modal).toContainText(`Restore ${SESSION_B}?`);
   await modal.getByRole("button", { name: "Cancel", exact: true }).click();
