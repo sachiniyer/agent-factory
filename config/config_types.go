@@ -142,13 +142,11 @@ type Config struct {
 	// (typically a full path with flags). When unset for an agent, the
 	// bare agent name is used and resolved via $PATH.
 	ProgramOverrides map[string]string `json:"program_overrides,omitempty" toml:"program_overrides,omitempty"`
-	// AutoYes is a flag to automatically accept all prompts.
-	AutoYes bool `json:"auto_yes" toml:"auto_yes"`
 	// AutoUpdate controls the startup self-update check. It defaults to true:
 	// af checks the configured release channel on launch and applies newer
 	// releases automatically. Set false to opt out on this machine.
 	AutoUpdate bool `json:"auto_update" toml:"auto_update"`
-	// DaemonPollInterval is the interval (ms) at which the daemon polls sessions for autoyes mode.
+	// DaemonPollInterval is the interval (ms) at which the daemon polls session status.
 	DaemonPollInterval int `json:"daemon_poll_interval" toml:"daemon_poll_interval"`
 	// LogMaxSizeMB is the size cap (MB) for agent-factory.log. When the log
 	// exceeds it, the file is rotated (renamed to .1, older backups shifted
@@ -200,7 +198,7 @@ type Config struct {
 	// no parseable reset time). DEFAULT FALSE — opt-in for the first release. When
 	// false a limit is surface-only (the sidebar [limit] badge and the manual `c`
 	// retry from PR2) and the scheduler does zero work. Deliberately GLOBAL-ONLY
-	// (it configures daemon behavior), like auto_yes / daemon_poll_interval.
+	// (it configures daemon behavior), like daemon_poll_interval.
 	LimitAutoResume bool `json:"limit_auto_resume" toml:"limit_auto_resume"`
 	// GlobalAgentSkills opts af into writing its "agent-factory" skill file
 	// into the USER'S GLOBAL per-agent config directories — codex's
@@ -222,7 +220,7 @@ type Config struct {
 	// A file at that path without af's marker is the user's and is never
 	// touched either way.
 	//
-	// Global-only, like auto_yes and root_agents: what af writes into your home
+	// Global-only, like root_agents: what af writes into your home
 	// directory must not be settable by cloning a repo.
 	GlobalAgentSkills bool `json:"global_agent_skills" toml:"global_agent_skills"`
 	// LimitRetryInterval is the fixed fallback cadence the auto-resume scheduler
@@ -362,20 +360,6 @@ type RootAgentConfig struct {
 	// program. Empty selects the default root profile: the repo's resolved
 	// "claude" command with --dangerously-skip-permissions ensured.
 	Program string `json:"program,omitempty" toml:"program,omitempty"`
-	// AutoYes controls prompt auto-acceptance for the root session.
-	// Defaults to TRUE when unset — the root agent exists to act
-	// autonomously — which is why this is a pointer, unlike the global
-	// auto_yes flag whose zero value is the default.
-	AutoYes *bool `json:"auto_yes,omitempty" toml:"auto_yes,omitempty"`
-}
-
-// AutoYesEnabled resolves the root-agent auto_yes profile flag: unset means
-// enabled.
-func (c RootAgentConfig) AutoYesEnabled() bool {
-	if c.AutoYes == nil {
-		return true
-	}
-	return *c.AutoYes
 }
 
 // ValidateProgramEnum returns nil when name is one of tmux.SupportedPrograms.
@@ -438,7 +422,6 @@ func DefaultConfig() *Config {
 	cfg := &Config{
 		SchemaVersion:        GlobalConfigSchemaVersion,
 		DefaultProgram:       defaultProgram,
-		AutoYes:              false,
 		AutoUpdate:           true,
 		RequireToken:         false,
 		RequireLoopbackToken: false,

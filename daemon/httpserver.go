@@ -375,6 +375,12 @@ func decodeHTTPRequest(w http.ResponseWriter, r *http.Request, dst any) error {
 	if len(bytes.TrimSpace(body)) == 0 {
 		return nil
 	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(body, &fields); err == nil {
+		if _, present := fields["auto_yes"]; present {
+			return config.RemovedAutoYesError()
+		}
+	}
 	dec := json.NewDecoder(bytes.NewReader(body))
 	if r.Header.Get(agentproto.ClientVersionHeader) == "" {
 		dec.DisallowUnknownFields()

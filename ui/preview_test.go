@@ -59,7 +59,6 @@ func setupTestEnvironment(t *testing.T, cmdExec cmd_test.MockCmdExec) *testSetup
 		Title:   sessionName,
 		Path:    workdir,
 		Program: "bash",
-		AutoYes: false,
 	})
 	require.NoError(t, err)
 
@@ -791,7 +790,6 @@ func setupTwoInstances(t *testing.T, previewA, previewB string) (*session.Instan
 			Title:   title,
 			Path:    workdir,
 			Program: "bash",
-			AutoYes: false,
 		})
 		require.NoError(t, err)
 

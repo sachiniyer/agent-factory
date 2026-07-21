@@ -76,23 +76,25 @@ func TestResolveConfigPrecedence(t *testing.T) {
 	})
 
 	t.Run("global-only fields always come from global", func(t *testing.T) {
-		repoRoot := setupResolveTest(t, `{"default_program": "claude", "auto_yes": true, "branch_prefix": "team/", "detach_keys": "ctrl-q"}`)
+		repoRoot := setupResolveTest(t, `{"default_program": "claude", "branch_prefix": "team/", "detach_keys": "ctrl-q"}`)
 		writeInRepoConfig(t, repoRoot, `{"default_program": "gemini"}`)
 
 		res, err := ResolveConfig(repoRoot)
 		require.NoError(t, err)
-		assert.True(t, res.AutoYes)
 		assert.Equal(t, "team/", res.BranchPrefix)
 		assert.Equal(t, "ctrl-q", res.DetachKeys)
 	})
 
-	t.Run("in-repo validation errors propagate", func(t *testing.T) {
+	t.Run("removed in-repo auto_yes is ignored during upgrade", func(t *testing.T) {
 		repoRoot := setupResolveTest(t, `{"default_program": "claude"}`)
 		writeInRepoConfig(t, repoRoot, `{"auto_yes": true}`)
 
-		_, err := ResolveConfig(repoRoot)
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "auto_yes")
+		warnings := captureLog(t, &aflog.WarningLog)
+		resolved, err := ResolveConfig(repoRoot)
+		require.NoError(t, err)
+		assert.Equal(t, "claude", resolved.DefaultProgram)
+		assert.Contains(t, warnings.String(), "auto_yes was removed")
+		assert.Contains(t, warnings.String(), "ignored")
 	})
 }
 

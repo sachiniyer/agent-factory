@@ -153,8 +153,7 @@ func TestFindSessionDiscardsDuplicateWhenCanonicalRaced(t *testing.T) {
 // of the #867 fix: when no canonical Instance won the race, findSession must
 // register the Instance it built from disk so callers operate on a *tracked*
 // Instance (just as the refresh loop would have) rather than an orphan whose
-// PTY leaks. The restored Instance is left tracked, AutoYes-enabled, and is not
-// torn down.
+// PTY leaks. The restored Instance is left tracked and is not torn down.
 func TestFindSessionRegistersRestoredInstanceWhenUntracked(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	repoPath := setupControlRepo(t)
@@ -200,10 +199,6 @@ func TestFindSessionRegistersRestoredInstanceWhenUntracked(t *testing.T) {
 	if got := restoredBackend.kills.Load(); got != 0 {
 		t.Fatalf("restored Kill calls = %d, want 0", got)
 	}
-	if !inst.AutoYes {
-		t.Fatalf("restored instance should be AutoYes-enabled to match the refresh loop")
-	}
-
 	manager.mu.Lock()
 	tracked := manager.instances[key]
 	manager.mu.Unlock()

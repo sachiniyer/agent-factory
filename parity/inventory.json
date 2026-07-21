@@ -91,24 +91,6 @@
       "notes": "Closed by #1936: the naming form grew an initial-prompt field on shift+tab (a textarea overlay, so multi-line prompts and pastes survive), populating the sessionStartRequest.Prompt that was already plumbed to the daemon. Was an inverted gap — the TUI was the short surface, with the field dead at its only construction site."
     },
     {
-      "id": "session.create.opt.autoyes",
-      "title": "Set auto-yes for one session at create time",
-      "tui": {
-        "status": "no",
-        "pointer": "app/handle_input.go:107 sends process-wide m.autoYes (commands/root.go:250 -y)"
-      },
-      "web": {
-        "status": "yes",
-        "pointer": "web/src/modals.ts:180 autoYes checkbox"
-      },
-      "cli": {
-        "status": "no",
-        "pointer": "api/sessions.go:326 sends cfg.AutoYes; no per-create flag (root -y is Flags(), not PersistentFlags())"
-      },
-      "verdict": "unclear",
-      "notes": "The web is the ONLY surface with per-session auto-yes. TUI inherits the launch-time -y flag for every session in the process; the CLI reads the repo config and `af sessions create --autoyes` is an unknown-flag error. Deliberately NOT filed: this is a divergence in MODEL (process-wide vs per-session), and converging on the web's granularity presumes the web is the correct one — the checkbox may equally be the anomaly. Auto-yes is still flagged [experimental] (commands/root.go:251). Owner call."
-    },
-    {
       "id": "session.create.opt.backend",
       "title": "Choose the session's backend (local/docker/ssh/hook) per session",
       "tui": {
@@ -1069,24 +1051,6 @@
       "notes": "Both UIs have a pane workspace with surface-idiomatic gestures (the web adds mouse drag-and-drop the TUI cannot express; the TUI has keyboard splits the web reaches via Alt-chords). Layout is client-local and never hits the daemon."
     },
     {
-      "id": "session.autoyes-mode",
-      "title": "Run every session in auto-yes mode (process-wide)",
-      "tui": {
-        "status": "yes",
-        "pointer": "commands/root.go:250 (-y/--autoyes) -> app/handle_input.go:107"
-      },
-      "web": {
-        "status": "no",
-        "pointer": ""
-      },
-      "cli": {
-        "status": "yes",
-        "pointer": "commands/root.go:250 root --autoyes"
-      },
-      "verdict": "unclear",
-      "notes": "Distinct from session.create.opt.autoyes: this is the af PROCESS's mode, set once at launch and inherited by every session it creates, not a per-session choice. The web has the per-session control and no process-wide mode; the TUI/CLI have the reverse. Which model is right is the same owner call as session.create.opt.autoyes — triage them together."
-    },
-    {
       "id": "daemon.remote-access",
       "title": "Point a client at a remote daemon (URL + bearer token)",
       "tui": {
@@ -1467,7 +1431,6 @@
       "UpdateTask": "task.edit"
     },
     "cli_flags": {
-      "af --autoyes": "session.autoyes-mode",
       "af --daemon": "meta.internal",
       "af --daemon-url": "daemon.remote-access",
       "af --help": "meta.discovery",
@@ -1475,7 +1438,6 @@
       "af --program": "session.create.opt.program",
       "af --token": "daemon.remote-access",
       "af --version": "meta.discovery",
-      "af agent-server --auto-yes": "meta.internal",
       "af agent-server --help": "meta.discovery",
       "af agent-server --listen": "meta.internal",
       "af agent-server --program": "meta.internal",

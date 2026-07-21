@@ -407,8 +407,9 @@ func (m *home) switchProject(repo *config.RepoContext) (tea.Model, tea.Cmd) {
 	m.repoRoot = repo.Root
 	m.sidebar.SetProjectName(filepath.Base(repo.Root))
 
-	// Re-resolve the new project's default program for future sessions. AutoYes,
-	// BranchPrefix, etc. are global-only, so they do not change on switch.
+	// Re-resolve the new project's default program for future sessions.
+	// BranchPrefix and other machine preferences are global-only, so they do not
+	// change on switch.
 	//
 	// m.program is PROJECT-scoped state, so every path out of this block must
 	// land on a value derived from the INCOMING project: its own default_program

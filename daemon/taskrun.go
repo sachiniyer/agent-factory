@@ -51,7 +51,7 @@ var cronDeferPollInterval = 1 * time.Second
 // (#1586). Callers that can catch up a held delivery pass true; a forced final
 // attempt passes false.
 func deliverTaskPrompt(t *task.Task, prompt string, deferWhileAttached bool) (string, error) {
-	cfg, err := config.LoadConfig()
+	_, err := config.LoadConfig()
 	if err != nil {
 		// Pre-flight: this returns before any create or send, so the watch paths
 		// refund the rate slot (#2102). Inert for cron, which only checks err != nil.
@@ -75,7 +75,6 @@ func deliverTaskPrompt(t *task.Task, prompt string, deferWhileAttached bool) (st
 			RepoPath:  t.ProjectPath,
 			Program:   t.Program,
 			Prompt:    prompt,
-			AutoYes:   cfg.AutoYes,
 			// Provenance + the cap the manager admits against (#1892). TaskID is
 			// persisted on the session so the count is by association, never by a
 			// title prefix; MaxConcurrentRuns is zero for every task that has not
@@ -120,7 +119,6 @@ func deliverTaskPrompt(t *task.Task, prompt string, deferWhileAttached bool) (st
 		RepoPath: t.ProjectPath,
 		Program:  t.Program,
 		Prompt:   prompt,
-		AutoYes:  cfg.AutoYes,
 		// An automated delivery (cron fire or watch event): hold it while a TUI is
 		// attached to the target so it never pastes into and submits the user's
 		// in-progress input (#1586). The caller decides how a hold is handled.

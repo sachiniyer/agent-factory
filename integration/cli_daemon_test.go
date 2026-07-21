@@ -445,7 +445,6 @@ func testConfig() *config.Config {
 		// ProgramOverrides (see writeConfigWithProgramPath) to a harmless
 		// wrapper script that doesn't need a real agent binary.
 		DefaultProgram:     tmux.ProgramClaude,
-		AutoYes:            false,
 		DaemonPollInterval: 100,
 		BranchPrefix:       "test/",
 		DetachKeys:         "ctrl-w",

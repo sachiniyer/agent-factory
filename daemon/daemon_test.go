@@ -492,7 +492,7 @@ func TestStopDaemon_EscalatesToSIGKILL(t *testing.T) {
 // TestRefreshDaemonInstances_SkipsCorruptedRepoAtStartup is the regression
 // test for #603. Pre-fix, a single corrupted per-repo instances.json caused
 // refreshDaemonInstances(nil) to return (nil, err); NewManager propagated
-// that error so the daemon never started, orphaning every AutoYes session
+// that error so the daemon never started, orphaning every live session
 // across every repo. The fix logs a WARNING and continues, so valid repos
 // still load on startup.
 func TestRefreshDaemonInstances_SkipsCorruptedRepoAtStartup(t *testing.T) {
@@ -530,7 +530,7 @@ func TestRefreshDaemonInstances_SkipsCorruptedRepoAtStartup(t *testing.T) {
 
 	got, _, err := refreshDaemonInstances(nil)
 	if err != nil {
-		t.Fatalf("refreshDaemonInstances(nil) returned error on corrupted-repo input — daemon startup would fail and orphan every AutoYes session: %v", err)
+		t.Fatalf("refreshDaemonInstances(nil) returned error on corrupted-repo input — daemon startup would fail and orphan every live session: %v", err)
 	}
 
 	validKey := daemonInstanceKey(validRepoID, "valid-session")
@@ -587,7 +587,7 @@ func TestRefreshDaemonInstances_PreservesExistingForCorruptedRepoOnPoll(t *testi
 		t.Fatalf("refreshDaemonInstances on poll path errored on corrupted-repo input: %v", err)
 	}
 	if got[priorKey] != prior {
-		t.Fatalf("polling refresh dropped prior in-memory instance for corrupted repo %q; running AutoYes session would be silently abandoned", repoID)
+		t.Fatalf("polling refresh dropped prior in-memory instance for corrupted repo %q; running session would be silently abandoned", repoID)
 	}
 }
 
@@ -596,7 +596,7 @@ func TestRefreshDaemonInstances_PreservesExistingForCorruptedRepoOnPoll(t *testi
 // daemon is running, config.LoadAllRepoInstances no longer returns that repo,
 // so the polling refresh must preserve its in-memory instances (parallel to
 // the corrupted-JSON path) and log a warning naming the missing repo. Dropping
-// them would silently abandon a running AutoYes session.
+// them would silently abandon a running session.
 func TestRefreshDaemonInstances_PreservesInstancesForMissingRepoDirectory(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 
@@ -658,7 +658,7 @@ func TestRefreshDaemonInstances_PreservesInstancesForMissingRepoDirectory(t *tes
 	}
 
 	if got[missingKey] != missingInst {
-		t.Fatalf("running AutoYes session for missing repo %q was dropped; in-memory instance must be preserved", missingRepoID)
+		t.Fatalf("running session for missing repo %q was dropped; in-memory instance must be preserved", missingRepoID)
 	}
 	if got[presentKey] != presentInst {
 		t.Fatalf("session for present repo %q should still be loaded", presentRepoID)

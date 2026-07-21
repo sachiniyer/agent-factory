@@ -16,7 +16,7 @@ import (
 )
 
 func TestSidebarInitialState(t *testing.T) {
-	s := NewSidebar(false, store.NewProjection())
+	s := NewSidebar(store.NewProjection())
 
 	// The rail holds the Instances tree plus the Archived folder (#1028). The
 	// Archived section always exists so its collapse state persists, but it is
@@ -42,7 +42,7 @@ func TestSidebarInitialState(t *testing.T) {
 }
 
 func TestSidebarNavigation(t *testing.T) {
-	s := NewSidebar(false, store.NewProjection())
+	s := NewSidebar(store.NewProjection())
 
 	// Add some instances, each with a real agent + shell tab pair so the tree
 	// walk below has two child rows per instance (#1100: no padded slots).
@@ -108,7 +108,7 @@ func TestSidebarNavigation(t *testing.T) {
 }
 
 func TestSidebarExpandCollapse(t *testing.T) {
-	s := NewSidebar(false, store.NewProjection())
+	s := NewSidebar(store.NewProjection())
 
 	inst, _ := session.NewInstance(session.InstanceOptions{
 		Title: "inst", Path: t.TempDir(), Program: "test",
@@ -133,7 +133,7 @@ func TestSidebarExpandCollapse(t *testing.T) {
 }
 
 func TestSidebarToggleSection(t *testing.T) {
-	s := NewSidebar(false, store.NewProjection())
+	s := NewSidebar(store.NewProjection())
 
 	// Toggle Instances (starts expanded)
 	s.ToggleSection()
@@ -144,7 +144,7 @@ func TestSidebarToggleSection(t *testing.T) {
 }
 
 func TestSidebarCollapseFromChild(t *testing.T) {
-	s := NewSidebar(false, store.NewProjection())
+	s := NewSidebar(store.NewProjection())
 
 	inst, _ := session.NewInstance(session.InstanceOptions{
 		Title: "inst", Path: t.TempDir(), Program: "test",
@@ -173,7 +173,7 @@ func TestSidebarCollapseFromChild(t *testing.T) {
 }
 
 func TestSidebarInstanceManagement(t *testing.T) {
-	s := NewSidebar(false, store.NewProjection())
+	s := NewSidebar(store.NewProjection())
 
 	assert.Equal(t, 0, s.proj.NumInstances())
 
@@ -195,7 +195,7 @@ func TestSidebarInstanceManagement(t *testing.T) {
 // gone session.
 
 func TestSidebarSelectInstance(t *testing.T) {
-	s := NewSidebar(false, store.NewProjection())
+	s := NewSidebar(store.NewProjection())
 
 	inst1, _ := session.NewInstance(session.InstanceOptions{
 		Title: "first", Path: t.TempDir(), Program: "test",
@@ -221,7 +221,7 @@ func TestSidebarSelectInstance(t *testing.T) {
 // SetSelectedInstance while the Instances section is collapsed transparently
 // expands the section and selects the target instance (regression for #275).
 func TestSetSelectedInstanceExpandsCollapsedSection(t *testing.T) {
-	s := NewSidebar(false, store.NewProjection())
+	s := NewSidebar(store.NewProjection())
 
 	inst1, _ := session.NewInstance(session.InstanceOptions{
 		Title: "first", Path: t.TempDir(), Program: "test",
@@ -259,7 +259,7 @@ func TestSetSelectedInstanceExpandsCollapsedSection(t *testing.T) {
 }
 
 func TestSidebarTaskData(t *testing.T) {
-	s := NewSidebar(false, store.NewProjection())
+	s := NewSidebar(store.NewProjection())
 
 	tasks := []task.Task{
 		{ID: "1", Prompt: "backup", CronExpr: "0 0 * * *", Enabled: true, CreatedAt: time.Now()},
@@ -272,7 +272,7 @@ func TestSidebarTaskData(t *testing.T) {
 }
 
 func TestSidebarRender(t *testing.T) {
-	s := NewSidebar(false, store.NewProjection())
+	s := NewSidebar(store.NewProjection())
 	s.SetSize(40, 20)
 
 	inst, _ := session.NewInstance(session.InstanceOptions{
@@ -308,7 +308,7 @@ func indicatorArrows(out string) (up, down bool) {
 // the selected instance contributes two tab child rows (#1100: no padded slots).
 func newWindowingSidebar(t *testing.T, n int) *Sidebar {
 	t.Helper()
-	s := NewSidebar(false, store.NewProjection())
+	s := NewSidebar(store.NewProjection())
 	dir := t.TempDir()
 	for i := 0; i < n; i++ {
 		inst, err := session.NewInstance(session.InstanceOptions{
@@ -467,7 +467,7 @@ func newRepoInstance(t *testing.T, title, repoName string) *session.Instance {
 // otherwise a kill+recreate that moves a session to another repo leaves a stale
 // repo entry and shows a phantom multi-repo indicator (#971).
 func TestReplaceInstanceRepoTrackingStaleEntry(t *testing.T) {
-	s := NewSidebar(false, store.NewProjection())
+	s := NewSidebar(store.NewProjection())
 
 	a := newRepoInstance(t, "a", "repo-A")
 	c := newRepoInstance(t, "c", "repo-C")
@@ -488,7 +488,7 @@ func TestReplaceInstanceRepoTrackingStaleEntry(t *testing.T) {
 // DIFFERENT repo must register the incoming instance's repo — otherwise the new
 // repo is invisible to the multi-repo indicator until the next full reload (#971).
 func TestReplaceInstanceRepoTrackingMissingNew(t *testing.T) {
-	s := NewSidebar(false, store.NewProjection())
+	s := NewSidebar(store.NewProjection())
 
 	a := newRepoInstance(t, "a", "repo-A")
 	addTestInstance(s, a)()

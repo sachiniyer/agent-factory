@@ -46,8 +46,7 @@ var taskRunPollBackstop = 30 * time.Second
 // metadata tick used to (#935) and persists each transition through the
 // targeted single-writer path. With the daemon the sole owner of session state
 // (#960 PR 4/5), status is authoritative HERE and projected to the TUI via
-// Snapshot — the TUI no longer computes it. Called once per poll from RunDaemon,
-// alongside the AutoYes pass it now subsumes.
+// Snapshot — the TUI no longer computes it. Called once per poll from RunDaemon.
 //
 // The instance list is snapshotted under m.mu, then each instance's (possibly
 // slow) tmux probes run with the lock released so a hung capture-pane can't
@@ -212,8 +211,8 @@ func (m *Manager) isPollPaused(repoID, title string) bool {
 //     that cannot answer therefore tells us nothing and is dropped, exactly as the
 //     plain pause does.
 //
-// It also does not TapEnter: AutoYes is the normal poll's business, and a user is
-// attached and can answer their own prompt. Keeping this to the one question the
+// It also does not TapEnter: a user is attached and can answer their own prompt.
+// Keeping this to the one question the
 // cap needs is what keeps a bounded probe from quietly becoming the whole poll.
 func (m *Manager) observeTaskRunWhilePaused(repoID, key string, instance *session.Instance) {
 	before := instance.GetLiveness()
@@ -264,8 +263,7 @@ func (m *Manager) RefreshStatuses() {
 //     a session whose tmux is being spun up or torn down, #844/#1195);
 //   - dismiss a pending trust prompt (CheckAndHandleTrustPrompt), moved here from
 //     the TUI so it works whether or not a TUI is attached;
-//   - HasUpdated → Running; a waiting prompt → TapEnter (the AutoYes path, which
-//     this poll already owned — unchanged by #960);
+//   - HasUpdated → Running; a waiting prompt remains visible for the user;
 //   - otherwise probe liveness: a vanished tmux/remote session → Lost (never
 //     repainted Ready, the #935 invariant the hollow status-dot rendering
 //     relies on; Lost rather than Dead since #1108 — no kill intent on record
@@ -418,16 +416,6 @@ func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instanc
 		return
 	}
 	updated, hasPrompt, content := obs.Updated, obs.HasPrompt, obs.Content
-	if hasPrompt {
-		// Tap enter whenever a prompt is waiting (TapEnter is a no-op unless
-		// AutoYes is on), independent of `updated` — exactly as the pre-#965
-		// AutoYes loop did with `if _, hasPrompt := ...Snapshot(); …`. A prompt's
-		// text is itself fresh output, so a just-appeared prompt commonly reports
-		// (updated, hasPrompt) == (true, true); folding the tap into the switch
-		// below `case updated` swallowed it on that first tick and only tapped on
-		// the next poll — a one-interval AutoYes delay (#992).
-		as.TapEnter()
-	}
 	// The Snapshot answered, so the transport works and any loss episode is over.
 	// This is the ONLY thing the debounce tracks — see remoteloss.go: it counts
 	// unanswerable probes, not "looks dead" observations.

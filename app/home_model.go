@@ -75,7 +75,6 @@ type home struct {
 	// -- Storage and Configuration --
 
 	program string
-	autoYes bool
 	repoID  string
 	// repoRoot is the main-worktree root of the repo this TUI run is scoped
 	// to. Used to resolve and persist the in-repo .agent-factory/config.json.
@@ -421,7 +420,7 @@ type home struct {
 	attached atomic.Bool
 }
 
-func newHome(ctx context.Context, program string, autoYes bool, repo *config.RepoContext) *home {
+func newHome(ctx context.Context, program string, repo *config.RepoContext) *home {
 	repoID := repo.ID
 	// Load application config
 	appConfig, err := config.LoadConfig()
@@ -474,13 +473,12 @@ func newHome(ctx context.Context, program string, autoYes bool, repo *config.Rep
 		resumeStatusPoll: resumeStatusPollThroughDaemon,
 		appConfig:        appConfig,
 		program:          program,
-		autoYes:          autoYes,
 		repoID:           repoID,
 		repoRoot:         repo.Root,
 		state:            stateDefault,
 		appState:         appState,
 	}
-	h.sidebar = ui.NewSidebar(autoYes, proj)
+	h.sidebar = ui.NewSidebar(proj)
 	h.wireZoneRegistry()
 	// No panes are open at startup: the focus ring is tree → automations →
 	// projects until the first pane opens (relayout rebuilds the ring's pane

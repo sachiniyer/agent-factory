@@ -45,7 +45,7 @@ type Capabilities struct {
 	// per-session config (remote_hooks.terminal_cmd), so it is computed per
 	// instance rather than being a static per-type constant.
 	TerminalTab bool
-	// InteractiveInput: raw key / prompt injection works — SendKeys/TapEnter/
+	// InteractiveInput: raw key / prompt injection works — SendKeys/
 	// SendPrompt drive a live PTY rather than returning "not supported".
 	InteractiveInput bool
 	// Handoff: the session's agent program can be swapped in place, keeping the
@@ -142,9 +142,6 @@ type Backend interface {
 	// CheckAndHandleTrustPrompt auto-dismisses trust/permission prompts
 	// for supported programs.
 	CheckAndHandleTrustPrompt(instance *Instance) bool
-
-	// TapEnter sends an Enter keystroke (used with AutoYes).
-	TapEnter(instance *Instance)
 
 	// Recover re-establishes a Lost session's backing resources — the tmux
 	// session vanished out from under a live record with no kill on record

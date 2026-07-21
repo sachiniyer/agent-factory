@@ -11,7 +11,7 @@ Config is [TOML](https://toml.io) — chosen so it is easy to hand-edit. If you 
 
 You can also read and write the global config from the CLI. Bare `af config get <key>` / `af config list` keep their script-compatible global-only output. Add `--project <repository-path>` to read the effective value after that repository's current legacy and checked-in layers are applied, and add `--explain` to see every candidate, whether it was present and allowed, and why it won or lost. Dotted reads such as `af config get program_overrides.codex --project . --explain` show the source of one merged-table leaf. The project path is only a read-time selector: these commands do not register a project or write project identity. Displayed source locations preserve the selected/configured path spelling; symlinks are resolved only when paths must be compared for identity.
 
-`af config set <key> <value>` remains global-only. It writes a single settable scalar key **in place**, preserving all comments and ordering (it never regenerates the file) and validating the value first. Settable keys are the scalar tunables — `default_program`, `program_overrides.<agent>`, `auto_yes`, `auto_update`, `listen_addr`, `require_token`, `require_loopback_token`, `daemon_poll_interval`, `log_max_size_mb`, `log_max_backups`, `branch_prefix`, `worktree_root`, `detach_keys`, `update_channel`, `vscode_server_binary`, `limit_auto_resume`, `limit_retry_interval`, `limit_patterns.<agent>`, `global_agent_skills`; the structural tables (`root_agents`, `[theme]`, `[keys]`) and the `cors_allowed_origins` list are hand-edited only. See [`af config`](reference/cli.md#af-config) in the CLI reference. Changes apply on the next `af`/daemon start, the same as a hand-edit.
+`af config set <key> <value>` remains global-only. It writes a single settable scalar key **in place**, preserving all comments and ordering (it never regenerates the file) and validating the value first. Settable keys are the scalar tunables — `default_program`, `program_overrides.<agent>`, `auto_update`, `listen_addr`, `require_token`, `require_loopback_token`, `daemon_poll_interval`, `log_max_size_mb`, `log_max_backups`, `branch_prefix`, `worktree_root`, `detach_keys`, `update_channel`, `vscode_server_binary`, `limit_auto_resume`, `limit_retry_interval`, `limit_patterns.<agent>`, `global_agent_skills`; the structural tables (`root_agents`, `[theme]`, `[keys]`) and the `cors_allowed_origins` list are hand-edited only. See [`af config`](reference/cli.md#af-config) in the CLI reference. Changes apply on the next `af`/daemon start, the same as a hand-edit.
 
 ## Global config
 
@@ -19,7 +19,6 @@ You can also read and write the global config from the CLI. Bare `af config get 
 
 ```toml
 default_program = "claude"
-auto_yes = false
 auto_update = true
 daemon_poll_interval = 1000
 branch_prefix = "username/"
@@ -61,7 +60,6 @@ pane_border_preview = "#DC8CC3"
 |-------|-------------|
 | `default_program` | Default agent enum. Must be one of `claude`, `codex`, `aider`, `gemini`, `amp`, `opencode`. |
 | `program_overrides` | Optional map from agent enum to the full command string used when launching that agent. Use this to pin a path or pass flags (e.g. `--dangerously-skip-permissions`). Keys must be one of `claude`, `codex`, `aider`, `gemini`, `amp`, `opencode`. Agent-specific injection (claude's `--plugin-dir` flag, aider's `--read` flag, opencode's `OPENCODE_CONFIG` env var pointing at an af-owned config, and — when `global_agent_skills = true` — the af skill file dropped into codex/gemini/amp's own skills folder) and readiness detection follow the program the override actually runs, not the key: pointing an agent name at a different command (even a non-agent one like `bash`) launches it with no injected agent flags, and a command running no known agent counts as ready once its pane shows output. The agent is identified by command-token basename (`/opt/tools/claude --model opus` and `ionice -c 3 claude` are claude; `/opt/claude-wrapper/run` is not), so if you wrap an agent in a script, name the script after the agent to keep its flags and readiness behavior. |
-| `auto_yes` | Auto-accept agent prompts (experimental). |
 | `auto_update` | Startup self-update. Defaults to `true`: an interactive `af` checks the configured `update_channel` on launch — at most once every 6 hours, so a relaunch inside that window costs nothing and makes no network call — and when a newer release exists it installs it, restarts the daemon from it (sessions survive), and relaunches you into the new version straight away. It never downgrades, never interrupts an `af` that is already running, and skips silently when the check fails or you are offline. It is also skipped whenever stdout is not a terminal, so a script or CI job that calls `af` keeps the binary it installed. Set to `false`, or set `AGENT_FACTORY_AUTO_UPDATE=0`, to pin the installed version; `af upgrade` still works either way. |
 | `daemon_poll_interval` | Daemon polling interval in ms. |
 | `listen_addr` | Address the daemon serves the bundled **web UI** + HTTP/WS API on, over **plain HTTP** (no TLS). Defaults to `127.0.0.1:8443` (loopback), so a fresh install has a browser client at `http://127.0.0.1:8443` that connects with no token and no login screen. Set it to `""` to **disable** the web server entirely (pure-unix daemon); set it to a routable host:port like `0.0.0.0:8443` to expose it to the network — pair that with **`require_token = true`** unless you trust the network, because a tokenless network bind serves the control API to anyone who can reach it. af **allows** it and warns once at daemon start rather than refusing (see [Remote daemon access](remote-http-auth.md#the-tokenless-network-warning)). af serves no TLS either way, so front a routable listener with a TLS-terminating proxy or a private network. A web-port bind conflict is logged and skipped — it never blocks the daemon. Global-only. See [The web client](web.md) and [Remote daemon access](remote-http-auth.md). |
@@ -83,8 +81,45 @@ pane_border_preview = "#DC8CC3"
 | `theme` | Optional TUI color table. Defaults to a Zenburn-derived palette and validates each value as `#RRGGBB`; invalid values fall back to the corresponding default with a warning. See [Theme colors](#theme-colors-theme). |
 | `keys` | Optional keymap overrides for the TUI. See [Key bindings](#key-bindings-keys). |
 
+### Agent approval behavior
+
+Agent Factory does not answer an agent's routine approval prompts. Configure
+that behavior in the agent itself, usually through `program_overrides`. These
+settings weaken or remove provider safety checks; use them only in an execution
+environment whose access matches the risk.
+
+- **Claude:** paste
+  `program_overrides.claude = "claude --dangerously-skip-permissions"`.
+  Claude documents this as a full permission bypass intended for isolated
+  containers or VMs. See [Claude permission
+  modes](https://code.claude.com/docs/en/permission-modes).
+- **Codex:** paste
+  `program_overrides.codex = "codex --ask-for-approval never"`. This disables
+  approval prompts while keeping the sandbox selected by Codex's configuration.
+  To disable both approvals and sandboxing, Codex also exposes
+  `--dangerously-bypass-approvals-and-sandbox`; that is the higher-risk choice.
+- **Aider:** paste
+  `program_overrides.aider = "aider --yes-always"`. See [Aider's option
+  reference](https://aider.chat/docs/config/options.html).
+- **Gemini:** paste
+  `program_overrides.gemini = "gemini --approval-mode=yolo"`. The older
+  `--yolo` spelling is deprecated. See the [Gemini CLI
+  reference](https://github.com/google-gemini/gemini-cli/blob/main/docs/cli/cli-reference.md).
+- **Amp:** no flag or override is needed. Amp does not ask before running tools
+  by default. Existing permission settings can opt back into prompts. See the
+  [Amp manual](https://ampcode.com/manual#permissions).
+- **OpenCode:** no flag or override is needed with its default permissions. If
+  your OpenCode config currently asks, set `"permission": "allow"` in
+  `opencode.json`; this is OpenCode configuration, not an `af`
+  `program_overrides` line. See [OpenCode
+  permissions](https://opencode.ai/docs/permissions/).
+
+Agent Factory still dismisses a supported agent's one-time workspace trust
+dialog during first-run setup. That only gets a new session to a usable prompt;
+it does not approve later tool calls or actions.
+
 Codex's **additional safety checks** model-routing picker is separate from
-`auto_yes` and from approval/sandbox flags. The daemon recognizes the known
+approval and sandbox flags. The daemon recognizes the known
 picker, navigates to **Keep waiting** by its label, confirms that row is selected
 before accepting it, and compares Codex's model status line before and after.
 The intervention and verification result are written to `agent-factory.log`; a
@@ -117,7 +152,7 @@ reject it so a cloned repository cannot recolor your terminal.
 ```toml
 [root_agents]
 "/home/me/myrepo" = {}
-"~/work/other" = { program = "claude --model opus", auto_yes = false }
+"~/work/other" = { program = "claude --model opus" }
 ```
 
 Keys are repository paths (a leading `~` expands to your home directory). Per-repo profile fields:
@@ -125,7 +160,6 @@ Keys are repository paths (a leading `~` expands to your home directory). Per-re
 | Field | Description |
 |-------|-------------|
 | `program` | Command the root session runs. Unlike `default_program` this may be a full command string; a bare agent enum name (e.g. `claude`) still resolves through `program_overrides`. Default: the repo's resolved `claude` command with `--dangerously-skip-permissions` ensured — the root agent is meant to operate autonomously. |
-| `auto_yes` | Auto-accept the agent's prompts. Defaults to **true** for root agents (unlike the global `auto_yes`). |
 
 Behavior and guarantees:
 
@@ -136,7 +170,7 @@ Behavior and guarantees:
 - **Failures back off but never give up.** If ensuring a root repeatedly fails (e.g. the configured path is not a git repository, or the tmux server is temporarily unusable), the daemon retries with exponential backoff that settles at one attempt every 5 minutes, logging each outcome to the application log (with an escalation to ERROR after 6 consecutive failures). The first attempt after the cause clears heals the root — no daemon restart needed.
 - Changes to `root_agents` are picked up on the next **daemon restart**.
 
-Because the default profile skips permission prompts and auto-accepts, only opt in repositories where you are comfortable with a fully autonomous agent running at the repo root.
+Because the default profile skips permission prompts, only opt in repositories where you are comfortable with a fully autonomous agent running at the repo root.
 
 ### Usage-limit auto-resume
 
@@ -272,7 +306,7 @@ delete_cmd = "./infra/delete.sh"
 | `default_program`, `program_overrides` | Valid globally **and** in-repo (in-repo wins). |
 | `post_worktree_commands`, `remote_hooks` | **In-repo only.** The legacy `~/.agent-factory/repos/<repoID>/config.json` location keeps working for one more release (a deprecation warning in the log points at the new file) and is shadowed whenever the in-repo file sets the same key — including by an explicit empty value like `post_worktree_commands = []`. |
 | `backend`, `docker`, `ssh` | **In-repo only.** Select the runtime a repo's sessions run on. |
-| `auto_yes`, `auto_update`, `require_token`, `require_loopback_token`, `listen_addr`, `cors_allowed_origins`, `daemon_poll_interval`, `branch_prefix`, `worktree_root`, `detach_keys`, `log_max_size_mb`, `log_max_backups`, `update_channel`, `keys`, `theme`, `root_agents`, `limit_auto_resume`, `limit_retry_interval`, `vscode_server_binary`, `global_agent_skills` | Global only. Setting them in-repo is rejected with an error naming the key. The daemon network-surface keys (`require_token`, `listen_addr`, `cors_allowed_origins`) are global-only so a cloned repo can never open a port, widen CORS, or disable auth. `vscode_server_binary` is global-only for the same reason: it names a binary the daemon executes. See [remote-http-auth.md](remote-http-auth.md). |
+| `auto_update`, `require_token`, `require_loopback_token`, `listen_addr`, `cors_allowed_origins`, `daemon_poll_interval`, `branch_prefix`, `worktree_root`, `detach_keys`, `log_max_size_mb`, `log_max_backups`, `update_channel`, `keys`, `theme`, `root_agents`, `limit_auto_resume`, `limit_retry_interval`, `vscode_server_binary`, `global_agent_skills` | Global only. Setting them in-repo is rejected with an error naming the key. The daemon network-surface keys (`require_token`, `listen_addr`, `cors_allowed_origins`) are global-only so a cloned repo can never open a port, widen CORS, or disable auth. `vscode_server_binary` is global-only for the same reason: it names a binary the daemon executes. See [remote-http-auth.md](remote-http-auth.md). |
 
 `post_worktree_commands` are shell commands run after each new worktree is created (e.g. `npm install`, `make build`) — they can also be edited from the TUI via the `e` (worktree hooks) key. `remote_hooks` configures a remote-machine backend; see [remote-hooks.md](remote-hooks.md) for the script protocol.
 

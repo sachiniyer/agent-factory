@@ -146,7 +146,7 @@ func requireExactRect(t *testing.T, out string, r layout.Rect, name string) {
 // is binding-independent.
 func newTestWorkspace() (*Sidebar, *TabbedWindow, *AutomationsPane, *StatusBar) {
 	proj := store.NewProjection()
-	sidebar := NewSidebar(false, proj)
+	sidebar := NewSidebar(proj)
 	paneA := NewTabbedWindow(NewTabPane(previewFromInstance), nil)
 	automations := NewAutomationsPane(proj)
 	statusBar := NewStatusBar(NewMenu(), NewErrBox())

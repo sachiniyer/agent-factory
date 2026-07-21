@@ -166,7 +166,7 @@ func TestSetPRInfo_RaceKillRecreateNeverCorruptsIdentity(t *testing.T) {
 	key := daemonInstanceKey(repo.ID, title)
 
 	if _, err := manager.CreateSession(context.Background(), CreateSessionRequest{
-		Title: title, RepoPath: repoPath, Program: "claude", AutoYes: true,
+		Title: title, RepoPath: repoPath, Program: "claude",
 	}); err != nil {
 		t.Fatalf("initial CreateSession: %v", err)
 	}
@@ -194,7 +194,7 @@ func TestSetPRInfo_RaceKillRecreateNeverCorruptsIdentity(t *testing.T) {
 			defer wg.Done()
 			_, _ = manager.KillSession(KillSessionRequest{Title: title, RepoID: repo.ID})
 			_, _ = manager.CreateSession(context.Background(), CreateSessionRequest{
-				Title: title, RepoPath: repoPath, Program: "claude", AutoYes: true,
+				Title: title, RepoPath: repoPath, Program: "claude",
 			})
 		}()
 		wg.Wait()

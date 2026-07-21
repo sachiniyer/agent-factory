@@ -10,8 +10,8 @@ import (
 var Version string
 
 // Run is the main entrypoint into the application.
-func Run(ctx context.Context, program string, autoYes bool, repo *config.RepoContext) error {
-	h := newHome(ctx, program, autoYes, repo)
+func Run(ctx context.Context, program string, repo *config.RepoContext) error {
+	h := newHome(ctx, program, repo)
 	p := tea.NewProgram(
 		h,
 		tea.WithAltScreen(),

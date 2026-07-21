@@ -88,7 +88,7 @@ func TestPartitionByArchived_EqualCreatedAtTieBreaksByTitle(t *testing.T) {
 // (collapsed by default, so its row is hidden until expanded). The counts in the
 // two headers reflect the partition.
 func TestSidebar_ArchivedPartitionedIntoFolder(t *testing.T) {
-	s := NewSidebar(false, store.NewProjection())
+	s := NewSidebar(store.NewProjection())
 
 	addTestInstance(s, archTestInstance(t, "live-one", session.Ready))
 	addTestInstance(s, archTestInstance(t, "put-away", session.Archived))
@@ -124,7 +124,7 @@ func TestSidebar_ArchivedPartitionedIntoFolder(t *testing.T) {
 // restore. Its liveness deliberately stays Archived so the snapshot reconcile
 // still sees the Archived→live transition and runs its rebuild/re-Start (#1203).
 func TestSidebar_RestoringRowRehomedToInstances(t *testing.T) {
-	s := NewSidebar(false, store.NewProjection())
+	s := NewSidebar(store.NewProjection())
 
 	restoring := archTestInstance(t, "coming-back", session.Archived)
 	restoring.SetInFlightOpForTest(session.OpRestoring)
@@ -146,7 +146,7 @@ func TestSidebar_RestoringRowRehomedToInstances(t *testing.T) {
 // TestSidebar_NoArchivedFolderWhenEmpty (#1028): with nothing archived, the
 // Archived folder header is not shown at all.
 func TestSidebar_NoArchivedFolderWhenEmpty(t *testing.T) {
-	s := NewSidebar(false, store.NewProjection())
+	s := NewSidebar(store.NewProjection())
 	addTestInstance(s, archTestInstance(t, "live-one", session.Ready))
 	s.SetSize(40, 40)
 
@@ -162,7 +162,7 @@ func TestSidebar_NoArchivedFolderWhenEmpty(t *testing.T) {
 // folder reveals the archived row, and GetSelectedInstance resolves it (so the
 // restore action and the Enter fence can read the selected archived session).
 func TestSidebar_ArchivedRowSelectableWhenExpanded(t *testing.T) {
-	s := NewSidebar(false, store.NewProjection())
+	s := NewSidebar(store.NewProjection())
 	addTestInstance(s, archTestInstance(t, "put-away", session.Archived))
 	s.SetSize(40, 40)
 
@@ -199,7 +199,7 @@ func TestSidebar_ArchivedRowSelectableWhenExpanded(t *testing.T) {
 }
 
 func TestSidebar_MoveCursorToArchivedInstance(t *testing.T) {
-	s := NewSidebar(false, store.NewProjection())
+	s := NewSidebar(store.NewProjection())
 
 	liveInst := archTestInstance(t, "live-one", session.Ready)
 	archivedInst := archTestInstance(t, "put-away", session.Archived)
@@ -225,7 +225,7 @@ func TestSidebar_MoveCursorToArchivedInstance(t *testing.T) {
 }
 
 func TestSidebar_NavCrossesBetweenLiveTabsAndArchivedRows(t *testing.T) {
-	s := NewSidebar(false, store.NewProjection())
+	s := NewSidebar(store.NewProjection())
 
 	liveInst := archTestInstance(t, "live-one", session.Ready)
 	addAgentShellTabs(liveInst)
@@ -266,7 +266,7 @@ func TestSidebar_NavCrossesBetweenLiveTabsAndArchivedRows(t *testing.T) {
 // auto-open: Down at the live tail auto-expands the Archived folder, and Up back
 // into the live instances auto-collapses it again.
 func TestSidebar_NavUpFromArchivedAutoCollapses(t *testing.T) {
-	s := NewSidebar(false, store.NewProjection())
+	s := NewSidebar(store.NewProjection())
 
 	liveInst := archTestInstance(t, "live-one", session.Ready)
 	addAgentShellTabs(liveInst)
@@ -295,7 +295,7 @@ func TestSidebar_NavUpFromArchivedAutoCollapses(t *testing.T) {
 }
 
 func TestSidebar_NavSkipsNonExpandableLiveRowsBeforeArchived(t *testing.T) {
-	s := NewSidebar(false, store.NewProjection())
+	s := NewSidebar(store.NewProjection())
 
 	liveInst := archTestInstance(t, "live-one", session.Ready)
 	addAgentShellTabs(liveInst)
@@ -373,7 +373,7 @@ func archivedRowVisible(s *Sidebar) bool {
 // toggles the right folder), and — once expanded — an archived row registers a
 // clickable TreeInstance zone so the mouse can select/act on it.
 func TestSidebar_ArchivedZonesRegistered(t *testing.T) {
-	s := NewSidebar(false, store.NewProjection())
+	s := NewSidebar(store.NewProjection())
 	reg := zones.NewRegistry()
 	s.SetZoneRegistry(reg)
 	s.SetRect(layout.Rect{X: 0, Y: 0, W: 40, H: 40})
@@ -412,7 +412,7 @@ func TestSidebar_ArchivedZonesRegistered(t *testing.T) {
 // Archived header must collapse/expand the Archived folder ONLY, leaving the
 // Instances section untouched — the behavior the distinct header zones enable.
 func TestSidebar_ClickHeaderKindTogglesCorrectFolder(t *testing.T) {
-	s := NewSidebar(false, store.NewProjection())
+	s := NewSidebar(store.NewProjection())
 	addTestInstance(s, archTestInstance(t, "live-one", session.Ready))
 	addTestInstance(s, archTestInstance(t, "put-away", session.Archived))
 	s.SetSize(40, 40)

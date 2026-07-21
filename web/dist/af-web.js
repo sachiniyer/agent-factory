@@ -6255,8 +6255,7 @@ async function createSession(input, token2) {
     title_base: input.title,
     repo_path: input.repoPath,
     program: input.program,
-    prompt: input.prompt,
-    auto_yes: input.autoYes
+    prompt: input.prompt
   };
   const backend = (input.backend ?? "").trim();
   if (backend !== "") {
@@ -6610,16 +6609,13 @@ function newSessionModal(projects, defaultProject2, callbacks) {
   projectSelect.addEventListener("change", () => loadCatalogsFor(projectSelect.value));
   const promptArea = h("textarea", { class: "af-input af-textarea", placeholder: "Initial prompt (optional)", rows: 3 });
   promptArea.setAttribute("aria-label", "Initial prompt");
-  const autoYes = h("input", { type: "checkbox", id: "af-autoyes" });
-  const autoYesRow = h("label", { class: "af-check-row", htmlFor: "af-autoyes" }, autoYes, "Auto-yes (accept agent prompts automatically)");
   body.append(
     field("Title", titleInput),
     field("Project", projectSelect),
     field("Program", programSelect),
     field("Backend", backendSelect),
     backendHint,
-    field("Prompt", promptArea),
-    autoYesRow
+    field("Prompt", promptArea)
   );
   renderPrograms();
   renderChoices();
@@ -6637,7 +6633,6 @@ function newSessionModal(projects, defaultProject2, callbacks) {
       repoPath: projectSelect.value,
       program: programSelect.value,
       prompt: promptArea.value,
-      autoYes: autoYes.checked,
       // REPO_DEFAULT ("") when the user did not choose — createSession then omits
       // `backend` entirely and the repo's config decides (#1933).
       backend: backendSelect.value

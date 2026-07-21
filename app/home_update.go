@@ -386,8 +386,6 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if !swapped && started.Capabilities().Workspace == session.WorkspaceLocalWorktree {
 			m.store.RegisterRepoForInstance(started)
 		}
-		started.SetAutoYes(m.autoYes)
-
 		if !userStillWatching {
 			// User moved on — update status silently and keep their current
 			// focus. The instance flips from Loading to Running in the

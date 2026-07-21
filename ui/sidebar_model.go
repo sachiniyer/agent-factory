@@ -107,10 +107,6 @@ var blurredTitle = lipgloss.NewStyle().
 	Background(activeTheme.ForegroundDim).
 	Foreground(activeTheme.ForegroundStrong)
 
-var autoYesStyle = lipgloss.NewStyle().
-	Background(activeTheme.SelectionBackground).
-	Foreground(activeTheme.SelectionForeground)
-
 // Sidebar is the unified left navigation pane with collapsible sections. It is
 // a VIEW over the store.Projection (#1024 PR 2): the instance/task/hook data —
 // and the cross-pane selection — live in the store, written by the snapshot
@@ -173,7 +169,6 @@ type Sidebar struct {
 
 	// Rendering
 	renderer *tree.InstanceRenderer
-	autoyes  bool
 	height   int
 	width    int
 	focused  bool
@@ -193,7 +188,7 @@ type Sidebar struct {
 }
 
 // NewSidebar creates a new sidebar rendering the given projection.
-func NewSidebar(autoYes bool, proj *store.Projection) *Sidebar {
+func NewSidebar(proj *store.Projection) *Sidebar {
 	s := &Sidebar{
 		proj: proj,
 		sections: []SidebarSection{
@@ -204,7 +199,6 @@ func NewSidebar(autoYes bool, proj *store.Projection) *Sidebar {
 			{Kind: SectionArchived, Title: "Archived", Expanded: false},
 		},
 		renderer:      tree.NewInstanceRenderer(),
-		autoyes:       autoYes,
 		lastCursorTab: -1,
 	}
 	s.rebuildVisibleItems()

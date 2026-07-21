@@ -14,8 +14,8 @@ import (
 // (#1923): a spawn returning proves only that tmux accepted the new session, which
 // an agent that exits on startup also satisfies. The auto path now arms a
 // confirmation window instead of clearing the state; the manual path still ran an
-// unconditional delete(lostRestoreStates[key]) after Recover, so a user (or an
-// autoyes flow) restoring a flapping session re-opened the very hot-loop the auto
+// unconditional delete(lostRestoreStates[key]) after Recover, so a user
+// restoring a flapping session re-opened the very hot-loop the auto
 // path prevents. This pins the manual path to the same confirm-alive gate.
 
 // TestRestoreSession_ImmediateReLossAfterManualRestore_EscalatesNotResets drives

@@ -122,8 +122,7 @@ var resolveConfigForRepo = config.ResolveConfig
 // No Instance is created anywhere in this path, which is what keeps the config
 // agent out of instances.json and out of the session list.
 //
-// There is no AutoYes here, and nothing to hard-wire false: auto-yes is an
-// Instance concept, and there is no Instance. The agent runs its command
+// Approval behavior is not a field on this request: the agent runs its command
 // verbatim. Note what that does NOT buy — on a default install
 // program_overrides.claude already carries --dangerously-skip-permissions
 // (config_types.go), so a default claude user's config agent runs with

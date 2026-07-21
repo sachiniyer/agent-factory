@@ -301,6 +301,13 @@ func LoadInRepoConfig(repoRoot string) (*InRepoConfig, []byte, error) {
 	if !isToml && metadata.shape == nil {
 		return nil, nil, fmt.Errorf("in-repo config %s must be a JSON object, not null", prettyPath)
 	}
+	if _, present := metadata.shape["auto_yes"]; present {
+		warnRemovedAutoYesAt("in-repo config " + prettyPath)
+		// The raw bytes still feed the tolerant typed decoder below; removing the
+		// key from presence metadata is what keeps the allowlist and config
+		// provenance from treating this compatibility tombstone as live config.
+		delete(metadata.shape, "auto_yes")
+	}
 	presentKeys := make(map[string]bool, len(metadata.shape))
 	for key := range metadata.shape {
 		presentKeys[key] = true

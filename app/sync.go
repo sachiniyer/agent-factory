@@ -190,7 +190,6 @@ func (m *home) materializeSnapshot(data []session.InstanceData) {
 			continue
 		}
 		m.store.AddInstance(inst)()
-		inst.SetAutoYes(m.autoYes)
 	}
 }
 
@@ -573,7 +572,6 @@ func (m *home) addInstanceFromSnapshot(d session.InstanceData) bool {
 		return false
 	}
 	m.store.AddInstance(inst)()
-	inst.SetAutoYes(m.autoYes)
 	return true
 }
 
@@ -604,7 +602,6 @@ func (m *home) swapInstanceFromSnapshot(d session.InstanceData) bool {
 		// The row vanished between read and swap; add it fresh.
 		m.store.AddInstance(inst)()
 	}
-	inst.SetAutoYes(m.autoYes)
 	if m.reconcilePanesForTabs(inst, oldKeys, replacedSessionTabs) {
 		m.relayout()
 	}

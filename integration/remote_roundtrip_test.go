@@ -203,7 +203,6 @@ while [ $# -gt 0 ]; do
     --repo) REPO="$2"; shift 2;;
     --program) PROGRAM="$2"; shift 2;;
     --branch) shift 2;;
-    --auto-yes) shift;;
     *) shift;;
   esac
 done

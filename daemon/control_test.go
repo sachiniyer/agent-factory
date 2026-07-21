@@ -79,12 +79,11 @@ func TestManagerCreateSessionPersistsAndRejectsDuplicate(t *testing.T) {
 		Title:    "daemon-owned",
 		RepoPath: repoPath,
 		Program:  "claude",
-		AutoYes:  true,
 	})
 	if err != nil {
 		t.Fatalf("CreateSession: %v", err)
 	}
-	if data.Title != "daemon-owned" || !data.AutoYes || data.Status != session.Running {
+	if data.Title != "daemon-owned" || data.Status != session.Running {
 		t.Fatalf("unexpected created data: %+v", data)
 	}
 
@@ -271,7 +270,6 @@ func TestManagerCreateSessionRejectsCaseVariantTitle(t *testing.T) {
 		Title:    "MyApp",
 		RepoPath: repoPath,
 		Program:  "claude",
-		AutoYes:  true,
 	}); err != nil {
 		t.Fatalf("first CreateSession: %v", err)
 	}
@@ -280,7 +278,6 @@ func TestManagerCreateSessionRejectsCaseVariantTitle(t *testing.T) {
 		Title:    "myapp",
 		RepoPath: repoPath,
 		Program:  "claude",
-		AutoYes:  true,
 	})
 	if err == nil {
 		t.Fatalf("expected case-variant title to be rejected")
@@ -349,7 +346,6 @@ func TestManagerCreateSessionRejectsCaseVariantTitleFromDisk(t *testing.T) {
 		Title:    "myapp",
 		RepoPath: repoPath,
 		Program:  "claude",
-		AutoYes:  true,
 	})
 	if err == nil {
 		t.Fatalf("expected case-variant title to be rejected by disk check")
@@ -380,7 +376,6 @@ func TestManagerCreateSessionRejectsSanitizeCollision(t *testing.T) {
 		Title:    "A B",
 		RepoPath: repoPath,
 		Program:  "claude",
-		AutoYes:  true,
 	}); err != nil {
 		t.Fatalf("first CreateSession: %v", err)
 	}
@@ -389,7 +384,6 @@ func TestManagerCreateSessionRejectsSanitizeCollision(t *testing.T) {
 		Title:    "a-b",
 		RepoPath: repoPath,
 		Program:  "claude",
-		AutoYes:  true,
 	})
 	if err == nil {
 		t.Fatalf("expected sanitize-collision title to be rejected")
@@ -407,7 +401,6 @@ func TestManagerCreateSessionRejectsSanitizeCollision(t *testing.T) {
 		Title:    "Foo",
 		RepoPath: repoPath,
 		Program:  "claude",
-		AutoYes:  true,
 	}); err != nil {
 		t.Fatalf("CreateSession Foo: %v", err)
 	}
@@ -415,7 +408,6 @@ func TestManagerCreateSessionRejectsSanitizeCollision(t *testing.T) {
 		Title:    "foo",
 		RepoPath: repoPath,
 		Program:  "claude",
-		AutoYes:  true,
 	}); err == nil {
 		t.Fatalf("expected case-variant title \"foo\" to still be rejected (#605)")
 	}

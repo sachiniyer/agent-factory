@@ -118,7 +118,6 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				// `af sessions create --prompt` takes. Empty means "no prompt",
 				// exactly as before this field existed.
 				Prompt:      prompt,
-				AutoYes:     m.autoYes,
 				ForceRemote: instance.Capabilities().Workspace == session.WorkspaceRemote,
 			}
 			started, err := start(instance, req)

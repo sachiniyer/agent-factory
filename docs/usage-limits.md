@@ -135,9 +135,10 @@ af sessions handoff fix-auth --to gemini --brief "just finish the retry test; le
 Any supported agent can be a target. Two things worth knowing rather than being
 blocked on:
 
-- **`codex`, `amp`, and `opencode` have no auto-approve flag**, so handing an
-  autoyes session to one of them yields a session that stops at confirmation
-  prompts.
+- **Approval policy belongs to the target agent.** A handoff starts the target's
+  resolved command and configuration; it does not carry approval settings from
+  the outgoing agent. See [Agent approval
+  behavior](configuration.md#agent-approval-behavior).
 - **Local-worktree sessions only.** A docker/ssh/hook session runs its agent
   inside a provisioned sandbox, where swapping the agent is a different
   lifecycle; those sessions refuse the handoff rather than half-perform it.

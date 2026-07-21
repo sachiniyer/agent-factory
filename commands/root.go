@@ -26,7 +26,6 @@ var (
 	// main.version. The fallback only covers direct package tests.
 	version     = "dev"
 	programFlag string
-	autoYesFlag bool
 	daemonFlag  bool
 	rootCmd     = &cobra.Command{
 		Use:   "af",
@@ -111,25 +110,13 @@ https://sachiniyer.github.io/agent-factory/remote-http-auth/`,
 				}
 				program = programFlag
 			}
-			// AutoYes flag overrides config
-			autoYes := cfg.AutoYes
-			if autoYesFlag {
-				autoYes = true
-			}
-			if autoYes {
-				defer func() {
-					if err := daemon.LaunchDaemon(); err != nil {
-						log.ErrorLog.Printf("failed to launch daemon: %v", err)
-					}
-				}()
-			}
 			// The daemon hosts the task scheduler (#782), so make sure
 			// it is up whenever an enabled task exists. In the background:
 			// daemon launch can take a few seconds and must not delay the TUI.
 			go ensureDaemonForTasks()
 
 			app.Version = version
-			return app.Run(ctx, program, autoYes, repo)
+			return app.Run(ctx, program, repo)
 		},
 	}
 
@@ -248,15 +235,14 @@ func NewRootCommand(opts Options) *cobra.Command {
 }
 
 func init() {
+	rootCmd.SetFlagErrorFunc(removedAutoYesFlagError)
 	// The --program flag is validated as an enum (bare agent name) via
 	// tmux.SupportedPrograms, so advertise exactly those accepted values.
 	rootCmd.Flags().StringVarP(&programFlag, "program", "p", "",
 		fmt.Sprintf("Program to run in new sessions (one of: %s)",
 			tmux.SupportedProgramsString()))
-	rootCmd.Flags().BoolVarP(&autoYesFlag, "autoyes", "y", false,
-		"[experimental] If enabled, all sessions will automatically accept prompts")
 	rootCmd.Flags().BoolVar(&daemonFlag, "daemon", false, "Run the background daemon that schedules"+
-		" tasks and runs autoyes mode on all sessions.")
+		" tasks and monitors session status.")
 
 	// Hide the daemonFlag as it's only for internal use
 	err := rootCmd.Flags().MarkHidden("daemon")
@@ -294,4 +280,14 @@ func init() {
 	rootCmd.AddCommand(api.TasksCmd)
 	rootCmd.AddCommand(api.ProjectsCmd)
 	rootCmd.AddCommand(api.APICmd)
+}
+
+func removedAutoYesFlagError(_ *cobra.Command, err error) error {
+	message := err.Error()
+	if strings.Contains(message, "unknown flag: --autoyes") ||
+		strings.Contains(message, "unknown flag: --auto-yes") ||
+		strings.Contains(message, "unknown shorthand flag: 'y'") {
+		return config.RemovedAutoYesError()
+	}
+	return err
 }

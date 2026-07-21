@@ -105,8 +105,8 @@ var configEntriesInternalKeys = map[string]string{
 // configEntriesInternalKeys WITH a reason rather than skipping the check.
 //
 // Only top-level fields are considered, which is the right granularity —
-// globalConfigReadOrder is a top-level key list, and nested tables (root_agents'
-// per-repo program/auto_yes, the theme slots) are surfaced as whole composite
+// globalConfigReadOrder is a top-level key list, and nested tables (root-agent
+// profiles and theme slots) are surfaced as whole composite
 // values by their parent key.
 func TestConfigEntriesCoverAllKeys(t *testing.T) {
 	got := map[string]bool{}

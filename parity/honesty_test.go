@@ -120,7 +120,7 @@ func TestDerivationSeesWebCreateOptions(t *testing.T) {
 		}
 	}
 	// Not blind to the base fields.
-	for _, f := range []string{"program", "prompt", "auto_yes"} {
+	for _, f := range []string{"program", "prompt"} {
 		if !contains(sent, f) {
 			t.Errorf("web CreateSession body is missing %q, which it demonstrably sends "+
 				"(web/src/api.ts createSession) — the body parser is under-reporting.", f)

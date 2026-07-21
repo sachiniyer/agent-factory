@@ -222,14 +222,13 @@ program = "codex"
 
 [root_agents."/work/two"]
 program = "claude"
-auto_yes = false
 `)
 
 	resolved, err := ResolveGlobalConfig()
 	require.NoError(t, err)
 	require.Len(t, resolved.RootAgents, 2)
 	assert.Equal(t, "codex", resolved.RootAgents["/work/one"].Program)
-	assert.False(t, resolved.RootAgents["/work/two"].AutoYesEnabled())
+	assert.Equal(t, "claude", resolved.RootAgents["/work/two"].Program)
 
 	value := requireResolvedValue(t, resolved, "root_agents")
 	for _, path := range []string{"/work/one", "/work/two"} {

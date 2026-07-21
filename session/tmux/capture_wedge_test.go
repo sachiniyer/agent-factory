@@ -20,7 +20,7 @@ import (
 //   - #2105: the daemon's per-second status poll calls HasUpdated →
 //     CapturePaneContent → CapturePaneContentContext(context.Background()). The
 //     daemon polls instances SEQUENTIALLY, so one wedged session froze the status
-//     of every later instance — liveness, trust-prompt dismissal, AutoYes and the
+//     of every later instance — liveness, trust-prompt dismissal, and the
 //     usage-limit detector all stop.
 //   - #2099: CapturePaneContentWithOptions and the submit path's
 //     capturePaneForDelivery ran capture-pane with no deadline at all.
@@ -67,9 +67,9 @@ func TestCaptureAndPollTmuxCommandsDoNotHang(t *testing.T) {
 			_, err := ts.CapturePaneContentWithOptions("-", "-")
 			return err
 		}},
-		// #2105 explicitly recommends bounding both taps: they run on the same
-		// unsupervised daemon poll as HasUpdated (AutoYes accept, trust-prompt
-		// dismissal), so a stall here freezes the poll exactly like the capture.
+		// #2105 explicitly recommends bounding both taps: trust-prompt dismissal
+		// runs on the same unsupervised daemon poll as HasUpdated, so a stall here
+		// freezes the poll exactly like the capture.
 		{"TapEnter", func(ts *TmuxSession) error { return ts.TapEnter() }},
 		{"TapDAndEnter", func(ts *TmuxSession) error { return ts.TapDAndEnter() }},
 	}

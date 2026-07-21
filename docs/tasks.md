@@ -114,7 +114,7 @@ The TUI Tasks pane shows each watch task's supervision state, derived from the p
 
 ## Daemon lifecycle
 
-The daemon is the single scheduler host: it evaluates cron expressions, supervises watch scripts, and serves autoyes.
+The daemon is the single scheduler host: it evaluates cron expressions and supervises watch scripts.
 
 - Every `af` invocation ensures the daemon is running whenever an enabled task exists, and the daemon keeps running after the TUI exits.
 - To keep tasks firing across **reboots** without opening `af`, register the user-level autostart unit (a systemd user service on Linux, a launchd agent on macOS):

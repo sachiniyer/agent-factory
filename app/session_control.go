@@ -89,7 +89,6 @@ type sessionStartRequest struct {
 	RepoPath    string
 	Program     string
 	Prompt      string
-	AutoYes     bool
 	ForceRemote bool
 }
 
@@ -103,7 +102,6 @@ var startSessionThroughDaemon = func(_ *session.Instance, req sessionStartReques
 			RepoPath:    req.RepoPath,
 			Program:     req.Program,
 			Prompt:      req.Prompt,
-			AutoYes:     req.AutoYes,
 			ForceRemote: req.ForceRemote,
 		})
 		return e

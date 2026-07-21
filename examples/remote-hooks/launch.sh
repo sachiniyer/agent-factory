@@ -3,7 +3,7 @@
 # expose, #1592 Phase 4 PR7). It provisions the workspace on YOUR infrastructure,
 # starts an `af agent-server` there, and echoes that server's authed endpoint.
 #
-# Args:  --name <slug> --title <title> --repo <url> [--branch <b>] [--program <p>] [--auto-yes]
+# Args:  --name <slug> --title <title> --repo <url> [--branch <b>] [--program <p>]
 # stdout: one JSON object {"url","token"}  (the agent-server banner)
 # stderr: progress logs
 #
@@ -11,7 +11,7 @@
 
 set -euo pipefail
 
-NAME="" TITLE="" REPO="" BRANCH="" PROGRAM="" AUTOYES=""
+NAME="" TITLE="" REPO="" BRANCH="" PROGRAM=""
 while [[ $# -gt 0 ]]; do
   case $1 in
     --name)     NAME="$2";    shift 2 ;;
@@ -19,7 +19,6 @@ while [[ $# -gt 0 ]]; do
     --repo)     REPO="$2";    shift 2 ;;
     --branch)   BRANCH="$2";  shift 2 ;;
     --program)  PROGRAM="$2"; shift 2 ;;
-    --auto-yes) AUTOYES="--auto-yes"; shift ;;
     *) shift ;;
   esac
 done
@@ -35,7 +34,7 @@ echo "Provisioning session $NAME..." >&2
 #         [[ -n "$BRANCH" ]] && git -C "$WORKDIR/workspace" fetch -q origin "$BRANCH:$BRANCH"
 #   3. Start the agent-server, capturing its one-line JSON banner:
 #         af agent-server --listen 0.0.0.0:0 --repo "$WORKDIR/workspace" \
-#            --title "$TITLE" ${PROGRAM:+--program "$PROGRAM"} $AUTOYES >banner.json 2>log &
+#            --title "$TITLE" ${PROGRAM:+--program "$PROGRAM"} >banner.json 2>log &
 #   4. Re-emit its {addr,token} as the endpoint contract below.
 #
 # The daemon dials the URL you print, so it must be reachable from the daemon

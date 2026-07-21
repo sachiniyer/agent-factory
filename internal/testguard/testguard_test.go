@@ -76,7 +76,7 @@ func TestConfigTripwire_FiresOnCreationFromAbsent(t *testing.T) {
 
 func TestConfigTripwire_SilentWhenUntouched(t *testing.T) {
 	path := sandbox(t)
-	if err := os.WriteFile(path, []byte(`{"auto_yes":true}`), 0644); err != nil {
+	if err := os.WriteFile(path, []byte(`{"auto_update":true}`), 0644); err != nil {
 		t.Fatalf("seed config: %v", err)
 	}
 

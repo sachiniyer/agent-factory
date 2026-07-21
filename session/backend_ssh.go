@@ -538,9 +538,6 @@ func (p *sshProvisioner) startAgentServer() error {
 	if strings.TrimSpace(p.program) != "" {
 		inner += " --program " + shellQuote(p.program)
 	}
-	if p.spec.AutoYes {
-		inner += " --auto-yes"
-	}
 	// nohup + background + redirected fds + </dev/null so the agent-server outlives
 	// this ssh command; `echo $!` prints the background PID on stdout.
 	launch := fmt.Sprintf("nohup %s >%s 2>%s </dev/null & echo $!",

@@ -72,7 +72,6 @@ type configEntry struct {
 var globalConfigReadOrder = []string{
 	"default_program",
 	"program_overrides",
-	"auto_yes",
 	"auto_update",
 	"listen_addr",
 	"require_token",
@@ -156,7 +155,7 @@ var configGetCmd = &cobra.Command{
 	Use:   "get <key>",
 	Short: "Print one global or project-effective config value",
 	Long: `Print the effective global value of one config key (e.g. default_program,
-auto_yes, auto_update, update_channel). Run "af config list" to see every key. Scalar values
+auto_update, update_channel). Run "af config list" to see every key. Scalar values
 print bare; composite values (program_overrides, root_agents, limit_patterns,
 keys) print as JSON.
 
@@ -267,6 +266,9 @@ it won, was shadowed, was absent, or is disallowed for that key.`,
 }
 
 func unknownConfigKeyError(key string) error {
+	if key == "auto_yes" {
+		return config.RemovedAutoYesError()
+	}
 	return fmt.Errorf("unknown config key %q; run `af config list` to see all keys", key)
 }
 
@@ -282,7 +284,6 @@ written, so set can never leave a config that fails to load.
 Settable keys:
   default_program            agent enum (%s)
   program_overrides.<agent>  full command string for an agent
-  auto_yes                   true | false
   auto_update                true | false
   listen_addr                host:port serving the web UI + API, or "" to turn the web server off.
                              DANGER: a non-loopback address (0.0.0.0, a LAN/Tailscale IP) puts af's
@@ -311,7 +312,6 @@ Changes apply on the next af / daemon start.
 
 Examples:
   af config set default_program codex
-  af config set auto_yes true
   af config set auto_update false
   af config set program_overrides.claude "/usr/local/bin/claude --verbose"`, tmux.SupportedProgramsString()),
 	Args: cobra.ExactArgs(2),

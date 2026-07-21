@@ -15,7 +15,7 @@ import (
 // commands in #1592 Phase 2 PR7 (the tmux-server-mediated attach client, whose
 // master they used to write CR to, was retired). These tests pin the exact argv
 // so a regression back to a raw PTY write — or a wrong key name — is caught, and
-// pin the ErrSessionGone mapping the daemon poll / AutoYes callers depend on.
+// pin the ErrSessionGone mapping daemon-poll callers depend on.
 
 // recordTapCommands captures every tmux invocation the given tap func issues,
 // with has-session (ExistsOrUnknown) reporting `alive`.

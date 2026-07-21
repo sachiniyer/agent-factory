@@ -137,7 +137,7 @@ func TestRespawnAfterUpgradeFallsBackWhenRestartFails(t *testing.T) {
 // TestRespawnAfterUpgradeSpawnsWithZeroEnabledTasks pins the #813 fix: the
 // post-upgrade fallback must respawn unconditionally, not only when an
 // enabled task exists. Callers only invoke the respawn after stopping a
-// running daemon, and that daemon may have been serving autoyes mode alone.
+// running daemon, and that daemon may have been serving the web UI alone.
 // AGENT_FACTORY_HOME points at an empty temp dir so the task store is
 // guaranteed empty — if the enabled-task gate ever creeps back into the
 // respawn path, this test fails.
@@ -150,7 +150,7 @@ func TestRespawnAfterUpgradeSpawnsWithZeroEnabledTasks(t *testing.T) {
 	}
 
 	if *ensureCalls != 1 {
-		t.Fatalf("ad-hoc spawns = %d, want 1 even with zero enabled tasks (autoyes-only daemon must be restored, #813)", *ensureCalls)
+		t.Fatalf("ad-hoc spawns = %d, want 1 even with zero enabled tasks (the stopped daemon must be restored, #813)", *ensureCalls)
 	}
 }
 

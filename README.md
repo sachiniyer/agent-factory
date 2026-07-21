@@ -73,8 +73,8 @@ Three ideas carry the whole tool.
   to them isn't supported yet.
 - **Daemon — the thing that actually owns state.** A background daemon runs the
   sessions, schedules tasks, serves the web UI, and is the single source of
-  truth. Opening the TUI starts one, as do autoyes mode and any enabled task;
-  read-only commands like `af config list` and `af tasks list` leave it down. The
+  truth. Opening the TUI starts one, as does any enabled task; read-only commands
+  like `af config list` and `af tasks list` leave it down. The
   TUI, the browser, and the CLI are all thin clients reading the same state, so
   they never disagree.
 

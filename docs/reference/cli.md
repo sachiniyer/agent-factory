@@ -108,7 +108,6 @@ af [flags]
 
 | Flag | Type | Description |
 |------|------|-------------|
-| `-y`, `--autoyes` |  | [experimental] If enabled, all sessions will automatically accept prompts |
 | `--daemon-url` | `string` | Target a REMOTE daemon at this http:// or ws:// URL instead of the local unix socket (env: AF_DAEMON_URL). The daemon is HTTP-only; terminate TLS at your own proxy if needed. |
 | `-p`, `--program` | `string` | Program to run in new sessions (one of: claude, codex, aider, gemini, amp, opencode) |
 | `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
@@ -150,7 +149,6 @@ af agent-server [flags]
 
 | Flag | Type | Description |
 |------|------|-------------|
-| `--auto-yes` |  | Enable the agent-server's AutoYes accept for the workspace |
 | `--listen` | `string` | HTTP TCP bind address (host:port); :0 lets the kernel pick a free port (default `127.0.0.1:0`) |
 | `--program` | `string` | Agent program to run (default: the configured default_program) |
 | `--repo` | `string` | Repository path the workspace runs against (default: current directory) |
@@ -465,7 +463,7 @@ af config
 Print one global or project-effective config value
 
 Print the effective global value of one config key (e.g. default_program,
-auto_yes, auto_update, update_channel). Run "af config list" to see every key. Scalar values
+auto_update, update_channel). Run "af config list" to see every key. Scalar values
 print bare; composite values (program_overrides, root_agents, limit_patterns,
 keys) print as JSON.
 
@@ -534,7 +532,6 @@ written, so set can never leave a config that fails to load.
 Settable keys:
   default_program            agent enum (claude, codex, aider, gemini, amp, opencode)
   program_overrides.<agent>  full command string for an agent
-  auto_yes                   true | false
   auto_update                true | false
   listen_addr                host:port serving the web UI + API, or "" to turn the web server off.
                              DANGER: a non-loopback address (0.0.0.0, a LAN/Tailscale IP) puts af's
@@ -563,7 +560,6 @@ Changes apply on the next af / daemon start.
 
 Examples:
   af config set default_program codex
-  af config set auto_yes true
   af config set auto_update false
   af config set program_overrides.claude "/usr/local/bin/claude --verbose"
 
@@ -589,12 +585,12 @@ af config set <key> <value> [flags]
 Manage the background daemon: serves the web UI and schedules tasks
 
 The agent-factory daemon runs task cron schedules in-process, supervises
-watch-task scripts, drives autoyes mode, and serves the bundled web UI.
+watch-task scripts, monitors sessions, and serves the bundled web UI.
 
 The web UI is part of the daemon — there is no separate web command — so it is
 served whenever the daemon is running. Running af starts one: the TUI reads
 session state through the daemon and spawns it if none is up, so simply opening
-af serves the web UI. Autoyes mode and any enabled task start one too. Only
+af serves the web UI. Any enabled task starts one too. Only
 standalone commands that never talk to the daemon (such as 'af config list')
 leave it down.
 

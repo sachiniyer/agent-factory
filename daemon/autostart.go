@@ -117,7 +117,7 @@ func systemdAutostartUnit(execPath, pathEnv, shellEnv, agentFactoryHome string) 
 		envLines += "\n" + formatSystemdEnvLine("AGENT_FACTORY_HOME", agentFactoryHome)
 	}
 	return fmt.Sprintf(`[Unit]
-Description=Agent Factory daemon (task scheduler + autoyes)
+Description=Agent Factory daemon (task scheduler + session monitor)
 
 [Service]
 KillMode=process

@@ -395,9 +395,6 @@ func (p *dockerProvisioner) startAgentServer() error {
 	if strings.TrimSpace(p.program) != "" {
 		inner += " --program " + shellQuote(p.program)
 	}
-	if p.spec.AutoYes {
-		inner += " --auto-yes"
-	}
 	inner += fmt.Sprintf(" >%s 2>%s", shellQuote(dockerBannerPath), shellQuote(dockerLogPath))
 
 	// -d: detach. The agent-server keeps running in the container after this exec

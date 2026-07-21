@@ -49,7 +49,7 @@ func ParseBackendKind(s string) (BackendKind, error) {
 // ProvisionSpec is the input a Runtime needs to establish a session's execution
 // environment. The local/hook runtimes provision from the repo root alone; the
 // sandboxed runtimes (docker/ssh) additionally need the session's identity
-// (Title/Program/AutoYes) to start an `af agent-server` for exactly one
+// (Title/Program) to start an `af agent-server` for exactly one
 // workspace, and the clone source so the sandbox can pull the repo from GitHub
 // (epic decision 4: GitHub is the durable workspace store). They read their own
 // section (docker.*/ssh.*) from the repo's resolved config by RepoRoot.
@@ -64,8 +64,6 @@ type ProvisionSpec struct {
 	// Program is the agent program to run in the workspace (empty ⇒ the config
 	// default). Passed through to the sandbox's `af agent-server --program`.
 	Program string
-	// AutoYes enables the workspace's AutoYes accept.
-	AutoYes bool
 	// CloneURL is the git remote the sandbox clones the workspace from — the
 	// repo's `origin` for a docker/ssh session (GitHub for a real repo, a
 	// file:// or bind-mounted path for a self-contained test). Empty for the

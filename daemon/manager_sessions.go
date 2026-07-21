@@ -577,8 +577,6 @@ func (m *Manager) findSessionByStableID(stableID, title, repoID string) (*sessio
 		}
 		return tracked, rid, data, nil
 	}
-	// Match the refresh loop: instances the daemon tracks always run AutoYes.
-	instance.SetAutoYes(true)
 	m.instances[key] = instance
 	m.mu.Unlock()
 	return instance, rid, data, nil

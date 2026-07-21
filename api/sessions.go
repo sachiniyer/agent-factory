@@ -348,7 +348,6 @@ pointing at one).`,
 			RepoPath: repo.Root,
 			Program:  program,
 			Prompt:   createPromptFlag,
-			AutoYes:  cfg.AutoYes,
 			InPlace:  inPlace,
 			Backend:  createBackendFlag,
 		})

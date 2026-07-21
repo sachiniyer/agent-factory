@@ -79,7 +79,7 @@ type TabKind int
 
 const (
 	// TabKindAgent is the agent session: the resolved agent program with
-	// system-prompt injection, trust-prompt handling, and autoyes. Exactly one
+	// system-prompt injection and trust-prompt handling. Exactly one
 	// per instance today, at Tabs[0].
 	TabKindAgent TabKind = iota
 	// TabKindShell is a plain $SHELL session in the worktree (the future

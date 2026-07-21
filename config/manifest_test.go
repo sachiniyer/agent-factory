@@ -409,7 +409,6 @@ func TestRenderBriefingShowsCurrentValues(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.DefaultProgram = "codex"
 	cfg.ListenAddr = "0.0.0.0:9999"
-	cfg.AutoYes = true
 	cfg.AutoUpdate = false
 	cfg.DaemonPollInterval = 4321
 	cfg.VSCodeServerBinary = "/opt/code-server/bin/code-server"
@@ -421,7 +420,6 @@ func TestRenderBriefingShowsCurrentValues(t *testing.T) {
 	for _, want := range []string{
 		"current: codex",
 		"current: 0.0.0.0:9999",
-		"current: true",
 		"current: 4321",
 		"current: /opt/code-server/bin/code-server",
 		`current: ["https://af.example.com"]`,

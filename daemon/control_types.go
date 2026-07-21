@@ -19,7 +19,6 @@ type CreateSessionRequest struct {
 	RepoPath  string `json:"repo_path"`
 	Program   string `json:"program"`
 	Prompt    string `json:"prompt"`
-	AutoYes   bool   `json:"auto_yes"`
 	// TaskID records which task's delivery spawned this session, and
 	// MaxConcurrentRuns carries that task's cap so the manager can decide
 	// admission under its own lock — the only place a burst cannot race the check
@@ -185,7 +184,6 @@ type DeliverPromptRequest struct {
 	RepoPath string `json:"repo_path"`
 	Program  string `json:"program"`
 	Prompt   string `json:"prompt"`
-	AutoYes  bool   `json:"auto_yes"`
 	// DeferWhileAttached is set by the automated task-delivery path (cron +
 	// watch) so DeliverPrompt holds the send when a TUI is attached full-screen
 	// to an existing target session, rather than pasting a prompt + Enter into a

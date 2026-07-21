@@ -141,7 +141,7 @@ func TestEditorWriteKeepsConfigHandEditable(t *testing.T) {
 		"\n" +
 		"# the agent I actually use\n" +
 		"default_program = 'claude'   # trailing note\n" +
-		"auto_yes = false\n" +
+		"auto_update = false\n" +
 		"\n" +
 		"# overrides below\n" +
 		"[program_overrides]\n" +
@@ -204,7 +204,7 @@ func TestEditorRejectsInvalidValueWithTheCLIsOwnError(t *testing.T) {
 		// validator ever runs, so the message differs from the "0" case above.
 		{"daemon_poll_interval", "abc", `expected an integer, got "abc"`},
 		{"log_max_backups", "-1", "must be a non-negative integer"},
-		{"auto_yes", "yes-please", "invalid value for auto_yes"},
+		{"auto_yes", "yes-please", "auto_yes was removed"},
 		{"worktree_root", "somewhere-else", "worktree_root must be one of"},
 		{"listen_addr", "not a valid addr", "listen_addr"},
 	}

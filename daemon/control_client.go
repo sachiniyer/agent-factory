@@ -112,7 +112,8 @@ func ensureDaemonWithLauncher(launch func() error) error {
 
 	// A previous daemon version may have a PID file but no control socket. Stop
 	// it before launching the control-plane daemon so we do not run duplicate
-	// AutoYes loops. StopDaemon is also how an alive-but-unreachable daemon
+	// scheduler and session-monitor loops. StopDaemon is also how an
+	// alive-but-unreachable daemon
 	// (its control socket removed/corrupted) is reclaimed: it SIGTERMs the
 	// holder, which releases the per-home lock on exit, so the launch below
 	// acquires a free lock. That reclaim-then-respawn is what keeps auto-start

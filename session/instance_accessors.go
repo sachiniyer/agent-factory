@@ -25,17 +25,6 @@ func (i *Instance) RepoName() (string, error) {
 	return gw.GetRepoName(), nil
 }
 
-// SetAutoYes sets the AutoYes flag under the instance mutex. Writers must use
-// this rather than assigning i.AutoYes directly: TapEnter runs from the
-// metadata-tick background goroutine and reads AutoYes under i.mu.RLock, so
-// any unsynchronized write produces a data race (issue #563, regression from
-// PR #560 which moved the tick off the bubbletea event loop).
-func (i *Instance) SetAutoYes(autoYes bool) {
-	i.mu.Lock()
-	defer i.mu.Unlock()
-	i.AutoYes = autoYes
-}
-
 // SetPrompt replaces the durable goal used by later limit resumes and handoffs.
 // Prompt became mutable when handoff gained an operator-supplied brief, so the
 // write and every concurrent reader must use the instance lock.

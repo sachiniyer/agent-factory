@@ -278,7 +278,6 @@ func (s *stubAgentServer) PreviewByID(string, bool) (PreviewSnapshot, error) {
 }
 func (s *stubAgentServer) Alive() (bool, error)                        { return false, nil }
 func (s *stubAgentServer) SendPrompt(string) error                     { return nil }
-func (s *stubAgentServer) TapEnter()                                   {}
 func (s *stubAgentServer) Subscribe(int, Seq) (PTYSubscription, error) { return nil, nil }
 func (s *stubAgentServer) Input(int, []byte) error                     { return nil }
 func (s *stubAgentServer) Resize(int, uint16, uint16) error            { return nil }
