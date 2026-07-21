@@ -313,6 +313,30 @@ func inspectRipgrep(args []shellWord) string {
 	return ""
 }
 
+func inspectSort(args []shellWord) string {
+	optionsDone := false
+	for _, arg := range args {
+		if !arg.resolved {
+			if !optionsDone {
+				return unknownShellReason
+			}
+			continue
+		}
+		if arg.literal == "--" {
+			optionsDone = true
+			continue
+		}
+		if optionsDone {
+			continue
+		}
+		option, _, _ := strings.Cut(arg.literal, "=")
+		if len(option) >= len("--co") && strings.HasPrefix("--compress-program", option) {
+			return sortReason
+		}
+	}
+	return ""
+}
+
 func inspectGo(args []shellWord) string {
 	literals, ok := literalWords(args)
 	if !ok || len(literals) == 0 {

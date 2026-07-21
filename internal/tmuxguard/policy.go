@@ -38,6 +38,7 @@ const (
 	roleGit
 	roleDocker
 	roleRipgrep
+	roleSort
 	roleGitHub
 	roleGo
 	rolePython
@@ -63,7 +64,7 @@ func classifyProgram(executable string) programPolicy {
 		"cut", "date", "df", "diff", "dirname", "du", "echo", "false", "gofmt",
 		"grep", "head", "hostname", "id", "jq", "ln", "ls", "mkdir", "mktemp", "mv",
 		"paste", "pgrep", "printenv", "ps", "pwd", "readlink", "realpath", "rm", "rmdir",
-		"seq", "sha256sum", "shellcheck", "sleep", "sort", "ss", "stat", "strings", "tail",
+		"seq", "sha256sum", "shellcheck", "sleep", "ss", "stat", "strings", "tail",
 		"tee", "touch", "tr", "true", "uniq", "uptime", "wc", "which":
 		return programPolicy{dispatch: dispatchNone, role: roleData, directoryInert: true}
 	case "af":
@@ -94,6 +95,8 @@ func classifyProgram(executable string) programPolicy {
 		return programPolicy{dispatch: dispatchAudited, role: roleDocker}
 	case "rg":
 		return programPolicy{dispatch: dispatchAudited, role: roleRipgrep, directoryInert: true}
+	case "sort":
+		return programPolicy{dispatch: dispatchAudited, role: roleSort, directoryInert: true}
 	case "gh":
 		return programPolicy{dispatch: dispatchAudited, role: roleGitHub}
 	case "go":
