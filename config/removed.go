@@ -1,29 +1,32 @@
 package config
 
-import "errors"
+import (
+	"errors"
 
-// RemovedAutoYesMessage is shared by every compatibility tripwire for the
-// removed auto_yes feature. Keeping one message prevents config, CLI, doctor,
-// and HTTP callers from receiving different migration advice.
+	"github.com/sachiniyer/agent-factory/log"
+)
+
+// RemovedAutoYesMessage is shared by both compatibility warnings and new-input
+// rejection for the removed auto_yes feature. Keeping one message prevents
+// config, CLI, and HTTP callers from receiving different migration advice.
 const RemovedAutoYesMessage = "auto_yes was removed (including --autoyes and --auto-yes); configure approval behavior directly in the agent command via program_overrides (for example, program_overrides.codex = \"codex --ask-for-approval never\")"
 
-// RemovedAutoYesError returns the actionable migration error for a stale
-// auto_yes setting, flag, or request field.
+// RemovedAutoYesError returns the actionable migration error for a new write,
+// removed CLI flag, or removed request field. Existing config files are a
+// compatibility input: loaders ignore their stale key with a warning so an
+// upgrade cannot prevent af or its daemon from starting.
 func RemovedAutoYesError() error {
 	return errors.New(RemovedAutoYesMessage)
 }
 
-func rejectRemovedAutoYes(data []byte, path string, format ConfigFormat) error {
-	metadata, err := metadataForSource(data, path, format)
-	if err != nil {
-		// The real typed decoder owns syntax and type errors. This compatibility
-		// probe only replaces a valid stale key with migration guidance.
-		return nil
+func warnRemovedAutoYes(shape map[string]any, source string) {
+	if removedAutoYesInShape(shape) {
+		warnRemovedAutoYesAt(source)
 	}
-	if removedAutoYesInShape(metadata.shape) {
-		return RemovedAutoYesError()
-	}
-	return nil
+}
+
+func warnRemovedAutoYesAt(source string) {
+	log.WarningLog.Printf("%s: %s; the stale setting is ignored during upgrade", source, RemovedAutoYesMessage)
 }
 
 func removedAutoYesInShape(shape map[string]any) bool {
@@ -47,4 +50,11 @@ func removedAutoYesInShape(shape map[string]any) bool {
 		}
 	}
 	return false
+}
+
+func removedAutoYesKeyPath(key []string) bool {
+	if len(key) == 1 {
+		return key[0] == "auto_yes"
+	}
+	return len(key) >= 3 && key[0] == "root_agents" && key[len(key)-1] == "auto_yes"
 }

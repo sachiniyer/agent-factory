@@ -25,10 +25,6 @@ func parseConfig(data []byte, prettyConfigPath string) (*Config, error) {
 	if len(data) == 0 {
 		return nil, fmt.Errorf("config file %s is empty; delete it to regenerate defaults, or add valid JSON", prettyConfigPath)
 	}
-	if err := rejectRemovedAutoYes(data, prettyConfigPath, FormatJSON); err != nil {
-		return nil, fmt.Errorf("config file %s: %w", prettyConfigPath, err)
-	}
-
 	config := DefaultConfig()
 	config.source.builtIn = snapshotConfig(config)
 	if err := json.Unmarshal(data, config); err != nil {
@@ -36,6 +32,9 @@ func parseConfig(data []byte, prettyConfigPath string) (*Config, error) {
 	}
 	if err := validateLoadedConfigSchemaVersion(config.SchemaVersion, prettyConfigPath); err != nil {
 		return nil, err
+	}
+	if metadata, err := metadataForSource(data, prettyConfigPath, FormatJSON); err == nil {
+		warnRemovedAutoYes(metadata.shape, "config file "+prettyConfigPath)
 	}
 
 	// Warn about keys the frozen reader ignores so they are not silently lost
@@ -46,6 +45,9 @@ func parseConfig(data []byte, prettyConfigPath string) (*Config, error) {
 		known := knownJSONConfigKeys()
 		for key := range topLevel {
 			switch {
+			case key == "auto_yes":
+				// Compatibility warning emitted above. Do not follow it with the
+				// generic unknown-key warning for the same removed setting.
 			case key == "keys":
 				log.WarningLog.Printf("config %s: \"keys\" is ignored in config.json — the keymap is TOML-only; move it to a [keys] table in %s", prettyConfigPath, TomlConfigFileName)
 			case !known[key]:
@@ -78,10 +80,6 @@ func parseConfigTOML(data []byte, prettyConfigPath string) (*Config, error) {
 	if isEffectivelyEmptyToml(data) {
 		return nil, fmt.Errorf("config file %s is empty; add valid TOML, or delete it to fall back to config.json or defaults", prettyConfigPath)
 	}
-	if err := rejectRemovedAutoYes(data, prettyConfigPath, FormatTOML); err != nil {
-		return nil, fmt.Errorf("config file %s: %w", prettyConfigPath, err)
-	}
-
 	config := DefaultConfig()
 	config.source.builtIn = snapshotConfig(config)
 	if err := toml.Unmarshal(data, config); err != nil {
@@ -89,6 +87,9 @@ func parseConfigTOML(data []byte, prettyConfigPath string) (*Config, error) {
 	}
 	if err := validateLoadedConfigSchemaVersion(config.SchemaVersion, prettyConfigPath); err != nil {
 		return nil, err
+	}
+	if metadata, err := metadataForSource(data, prettyConfigPath, FormatTOML); err == nil {
+		warnRemovedAutoYes(metadata.shape, "config file "+prettyConfigPath)
 	}
 	warnUnknownTomlKeys(data, prettyConfigPath)
 
@@ -133,7 +134,13 @@ func warnUnknownTomlKeys(data []byte, prettyConfigPath string) {
 		return
 	}
 	for _, keyErr := range strictErr.Errors {
-		log.WarningLog.Printf("config %s: unknown key %q is ignored by this version of af", prettyConfigPath, strings.Join(keyErr.Key(), "."))
+		key := keyErr.Key()
+		if removedAutoYesKeyPath(key) {
+			// Compatibility warning emitted by parseConfigTOML. Avoid a second,
+			// generic warning that loses the migration recipe.
+			continue
+		}
+		log.WarningLog.Printf("config %s: unknown key %q is ignored by this version of af", prettyConfigPath, strings.Join(key, "."))
 	}
 }
 

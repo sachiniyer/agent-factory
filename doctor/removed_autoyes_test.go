@@ -10,7 +10,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestDoctorReportsRemovedAutoYesWithMigrationGuidance(t *testing.T) {
+func TestDoctorAcceptsConfigWithRemovedAutoYesDuringUpgrade(t *testing.T) {
 	testguard.IsolateTmux(t)
 	opts := testOptions(t, false)
 	require.NoError(t, os.WriteFile(
@@ -21,7 +21,6 @@ func TestDoctorReportsRemovedAutoYesWithMigrationGuidance(t *testing.T) {
 	require.NoError(t, err)
 	rows := findCheckRows(report, "config")
 	require.Len(t, rows, 1)
-	require.Equal(t, StatusFail, rows[0].Status)
-	require.Contains(t, rows[0].Detail, "auto_yes was removed")
-	require.Contains(t, rows[0].Detail, "program_overrides")
+	require.Equal(t, StatusPass, rows[0].Status)
+	require.Contains(t, rows[0].Detail, "loaded")
 }

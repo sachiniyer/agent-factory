@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	aflog "github.com/sachiniyer/agent-factory/log"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -77,16 +78,18 @@ func TestLoadInRepoConfigRejectsBothFormats(t *testing.T) {
 }
 
 func TestLoadInRepoConfigTOMLKeyPolicy(t *testing.T) {
-	t.Run("rejects removed auto_yes with migration guidance", func(t *testing.T) {
+	t.Run("ignores removed auto_yes during upgrade", func(t *testing.T) {
 		home := t.TempDir()
 		t.Setenv("AGENT_FACTORY_HOME", home)
 		repoRoot := t.TempDir()
 		writeInRepoTomlConfig(t, repoRoot, `auto_yes = true`+"\n")
 
-		_, _, err := LoadInRepoConfig(repoRoot)
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "auto_yes was removed")
-		assert.Contains(t, err.Error(), "program_overrides")
+		warnings := captureLog(t, &aflog.WarningLog)
+		cfg, _, err := LoadInRepoConfig(repoRoot)
+		require.NoError(t, err)
+		require.NotNil(t, cfg)
+		assert.Contains(t, warnings.String(), "auto_yes was removed")
+		assert.Contains(t, warnings.String(), "ignored")
 	})
 
 	t.Run("rejects vscode_server_binary as global-only", func(t *testing.T) {

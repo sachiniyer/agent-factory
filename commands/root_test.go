@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"strings"
 	"testing"
+
+	"github.com/spf13/cobra"
 )
 
 // TestVersionFlag covers #1749 item 7: `af --version` prints the version and
@@ -98,26 +100,29 @@ func TestAutoYesCLIFlagsAreRemovedWithGuidance(t *testing.T) {
 }
 
 func TestHelpDoesNotAdvertiseAutoYes(t *testing.T) {
-	origSilenceErrors := rootCmd.SilenceErrors
-	t.Cleanup(func() {
-		rootCmd.SetArgs(nil)
-		rootCmd.SetOut(nil)
-		rootCmd.SetErr(nil)
-		rootCmd.SilenceErrors = origSilenceErrors
-	})
+	var checkTree func(*cobra.Command)
+	checkTree = func(cmd *cobra.Command) {
+		t.Run(strings.ReplaceAll(cmd.CommandPath(), " ", "/"), func(t *testing.T) {
+			var output bytes.Buffer
+			cmd.SetOut(&output)
+			cmd.SetErr(&output)
+			t.Cleanup(func() {
+				cmd.SetOut(nil)
+				cmd.SetErr(nil)
+			})
 
-	for _, args := range [][]string{{"--help"}, {"agent-server", "--help"}} {
-		var output bytes.Buffer
-		rootCmd.SetOut(&output)
-		rootCmd.SetErr(&output)
-		rootCmd.SilenceErrors = true
-		rootCmd.SetArgs(args)
-		if err := rootCmd.Execute(); err != nil {
-			t.Fatalf("af %s: %v", strings.Join(args, " "), err)
-		}
-		lower := strings.ToLower(output.String())
-		if strings.Contains(lower, "autoyes") || strings.Contains(lower, "auto-yes") {
-			t.Fatalf("af %s still advertises removed auto-yes behavior:\n%s", strings.Join(args, " "), output.String())
+			if err := cmd.Help(); err != nil {
+				t.Fatalf("render %s help: %v", cmd.CommandPath(), err)
+			}
+			lower := strings.ToLower(output.String())
+			if strings.Contains(lower, "autoyes") || strings.Contains(lower, "auto-yes") {
+				t.Fatalf("%s help still advertises removed auto-yes behavior:\n%s", cmd.CommandPath(), output.String())
+			}
+		})
+		for _, child := range cmd.Commands() {
+			checkTree(child)
 		}
 	}
+
+	checkTree(rootCmd)
 }

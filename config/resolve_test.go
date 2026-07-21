@@ -85,14 +85,16 @@ func TestResolveConfigPrecedence(t *testing.T) {
 		assert.Equal(t, "ctrl-q", res.DetachKeys)
 	})
 
-	t.Run("in-repo validation errors propagate", func(t *testing.T) {
+	t.Run("removed in-repo auto_yes is ignored during upgrade", func(t *testing.T) {
 		repoRoot := setupResolveTest(t, `{"default_program": "claude"}`)
 		writeInRepoConfig(t, repoRoot, `{"auto_yes": true}`)
 
-		_, err := ResolveConfig(repoRoot)
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "auto_yes was removed")
-		assert.Contains(t, err.Error(), "program_overrides")
+		warnings := captureLog(t, &aflog.WarningLog)
+		resolved, err := ResolveConfig(repoRoot)
+		require.NoError(t, err)
+		assert.Equal(t, "claude", resolved.DefaultProgram)
+		assert.Contains(t, warnings.String(), "auto_yes was removed")
+		assert.Contains(t, warnings.String(), "ignored")
 	})
 }
 
