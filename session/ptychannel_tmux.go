@@ -41,14 +41,16 @@ type tmuxClientlessChannel struct {
 // never be confused with successful raw PTY output. Successful teardown never
 // injects a control byte.
 type captureReader struct {
-	f         *os.File
-	keepalive *os.File
-	dir       string
-	abort     atomic.Bool
-	eof       atomic.Bool
-	stopOnce  sync.Once
-	cleanOnce sync.Once
-	err       error
+	f          *os.File
+	keepalive  *os.File
+	dir        string
+	abort      atomic.Bool
+	eof        atomic.Bool
+	stopOnce   sync.Once
+	cleanOnce  sync.Once
+	keeperOnce sync.Once
+	err        error
+	keeperErr  error
 }
 
 func (r *captureReader) Read(p []byte) (int, error) {
@@ -95,11 +97,18 @@ func (r *captureReader) stop(drain bool) error {
 				_, _ = r.keepalive.Write([]byte{0})
 			}
 		}
-		if r.keepalive != nil {
-			r.err = r.keepalive.Close()
-		}
+		r.err = r.closeKeeper()
 	})
 	return r.err
+}
+
+func (r *captureReader) closeKeeper() error {
+	r.keeperOnce.Do(func() {
+		if r.keepalive != nil {
+			r.keeperErr = r.keepalive.Close()
+		}
+	})
+	return r.keeperErr
 }
 
 func (r *captureReader) finish() {
@@ -107,9 +116,7 @@ func (r *captureReader) finish() {
 		if r.f != nil {
 			_ = r.f.Close()
 		}
-		if r.keepalive != nil {
-			_ = r.keepalive.Close()
-		}
+		_ = r.closeKeeper()
 		if r.dir != "" {
 			_ = os.RemoveAll(r.dir)
 		}

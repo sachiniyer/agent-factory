@@ -110,6 +110,26 @@ func TestCaptureReaderAbortWakesWithExternalWriterStillOpen(t *testing.T) {
 	}
 }
 
+func TestCaptureReaderCloseAfterAbortCleanup(t *testing.T) {
+	outputR, outputW, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("create output pipe: %v", err)
+	}
+	r := &captureReader{f: outputR, keepalive: outputW}
+
+	// Reproduce the losing stop interleaving deterministically: stop has latched
+	// abort, then the reader observes it and finishes cleanup before stop reaches
+	// the keeper close.
+	r.abort.Store(true)
+	buf := make([]byte, 1)
+	if _, err := r.Read(buf); !errors.Is(err, io.EOF) {
+		t.Fatalf("Read error = %v, want EOF after abort", err)
+	}
+	if err := r.Close(); err != nil {
+		t.Fatalf("Close after reader cleanup = %v, want nil", err)
+	}
+}
+
 // TestTmuxSnapshotRepaintCursorRealTmux is the #1688 end-to-end gate against a REAL
 // tmux server: it drives the actual capture → buildRepaint → emulator path and
 // asserts the restored cursor lands on its true pane row when the client emulator's
