@@ -401,20 +401,30 @@ func TestPasteBufferNameProcessTokenPreventsCrossProcessCollision(t *testing.T) 
 // #1956 receiver gate writes its bytes to a FILE while the screen only shows
 // AF-RECEIVER-READY). "Not echoed" is not "not delivered" — arrival and echo are
 // different facts, and any echo-off pane, a password prompt being the everyday
-// case, looks identical. So an unobserved paste is logged loudly and never
-// turned into an error.
+// case, looks identical. So an unobserved paste is could-not-observe: Enter is
+// still sent best-effort, but the absence of evidence must not become an ERROR.
 func TestSubmitDoesNotManufactureAFailureWhenThePaneDoesNotEcho(t *testing.T) {
 	defer withPasteDeliveryTiming(50*time.Millisecond, time.Millisecond)()
+	errors := captureErrorLog(t)
+	enterSent := false
 
 	cmdExec := cmd_test.MockCmdExec{
-		RunFunc: func(c *exec.Cmd) error { return nil },
+		RunFunc: func(c *exec.Cmd) error {
+			if strings.Contains(strings.Join(c.Args, " "), "send-keys") && hasArg(c.Args, "Enter") {
+				enterSent = true
+			}
+			return nil
+		},
 		// A pane that never renders what it receives.
 		OutputFunc: func(c *exec.Cmd) ([]byte, error) { return []byte("AF-RECEIVER-READY"), nil },
 	}
-	session := newTmuxSession("af_proj", "claude", NewMockPtyFactory(t), cmdExec)
+	session := newTmuxSession("af_proj", ProgramCodex, NewMockPtyFactory(t), cmdExec)
 
 	require.NoError(t, session.SendKeysCommand("a prompt to a pane that does not echo"),
 		"a non-echoing pane must NOT be reported as a failed delivery — the bytes still arrive")
+	require.True(t, enterSent, "could-not-observe must retain the best-effort Enter")
+	require.Empty(t, errors.String(),
+		"a successful delivery to a non-echoing agent must not manufacture an ERROR")
 }
 
 // TestSubmitDoesNotManufactureAFailureWhenThePaneIsUnreadable is the polarity
@@ -425,6 +435,7 @@ func TestSubmitDoesNotManufactureAFailureWhenThePaneDoesNotEcho(t *testing.T) {
 // behaviour and report SUCCESS rather than invent a delivery failure.
 func TestSubmitDoesNotManufactureAFailureWhenThePaneIsUnreadable(t *testing.T) {
 	defer withPasteDeliveryTiming(50*time.Millisecond, time.Millisecond)()
+	errors := captureErrorLog(t)
 
 	cmdExec := cmd_test.MockCmdExec{
 		RunFunc: func(c *exec.Cmd) error { return nil },
@@ -436,6 +447,111 @@ func TestSubmitDoesNotManufactureAFailureWhenThePaneIsUnreadable(t *testing.T) {
 
 	require.NoError(t, session.SendKeysCommand("a prompt to an unreadable pane"),
 		"an unreadable pane is NOT evidence of a failed delivery; it must stay best-effort")
+	require.Empty(t, errors.String(),
+		"a failed observation probe must not manufacture an ERROR")
+}
+
+// TestMissingPromptInKnownEchoingPaneStaysLoud protects the genuine #1982
+// signal. Unlike the Codex case above, Claude is known to render pasted input
+// before Enter. Successful captures that never contain the prompt are therefore
+// observed-absent, not could-not-observe, and must remain actionable at ERROR.
+func TestMissingPromptInKnownEchoingPaneStaysLoud(t *testing.T) {
+	defer withPasteDeliveryTiming(50*time.Millisecond, time.Millisecond)()
+	errors := captureErrorLog(t)
+	enterSent := false
+	pasted := false
+	const prompt = "run bash -lc 'printf started && inspect every file before reporting DELIVERY_TAIL_COMPLETE'"
+
+	cmdExec := cmd_test.MockCmdExec{
+		RunFunc: func(c *exec.Cmd) error {
+			joined := strings.Join(c.Args, " ")
+			if strings.Contains(joined, "paste-buffer") {
+				pasted = true
+			}
+			if strings.Contains(joined, "send-keys") && hasArg(c.Args, "Enter") {
+				enterSent = true
+			}
+			return nil
+		},
+		// Capture works and sees a truncated prefix stranded inside an open quote,
+		// but never the distinctive tail: the genuine #1982 case that must stay
+		// loud even though Enter is still sent best-effort.
+		OutputFunc: func(c *exec.Cmd) ([]byte, error) {
+			if pasted {
+				return []byte("╭─ composer ─────────────────╮\n│ > run bash -lc 'printf started │\n╰────────────────────────────╯"), nil
+			}
+			return []byte("╭─ composer ─╮\n│ >          │\n╰────────────╯"), nil
+		},
+	}
+	session := newTmuxSession("af_proj", ProgramClaude, NewMockPtyFactory(t), cmdExec)
+
+	require.NoError(t, session.SendKeysCommand(prompt))
+	require.True(t, enterSent, "observed-absent must retain the best-effort Enter")
+	got := errors.String()
+	require.Equal(t, 1, strings.Count(got, "prompt delivery observed absent"),
+		"a genuine missing prompt should emit one actionable ERROR, got %q", got)
+	require.Contains(t, got, "pane known to echo input")
+	require.Contains(t, got, "Enter sent best-effort")
+	require.Contains(t, got, "run bash -lc 'printf started",
+		"the actionable ERROR should retain the observed truncated pane tail")
+	require.NotContains(t, got, "may simply not echo")
+	require.NotContains(t, got, "may be unsubmitted")
+}
+
+// TestObservedDeliveryCachesEchoBehavior proves unknown programs are detected
+// only from positive evidence, then reuse that capability. The first visible
+// delivery promotes the session; a later genuinely absent prompt is therefore
+// loud without consulting a per-agent guess table.
+func TestObservedDeliveryCachesEchoBehavior(t *testing.T) {
+	defer withPasteDeliveryTiming(50*time.Millisecond, time.Millisecond)()
+	errors := captureErrorLog(t)
+
+	var loaded string
+	delivery := 0
+	cmdExec := cmd_test.MockCmdExec{
+		RunFunc: func(c *exec.Cmd) error {
+			joined := strings.Join(c.Args, " ")
+			if strings.Contains(joined, "load-buffer") && c.Stdin != nil {
+				b, _ := io.ReadAll(c.Stdin)
+				loaded = string(b)
+			}
+			if strings.Contains(joined, "paste-buffer") {
+				delivery++
+			}
+			return nil
+		},
+		OutputFunc: func(c *exec.Cmd) ([]byte, error) {
+			if delivery == 1 && loaded != "" {
+				return []byte("custom composer: " + loaded), nil
+			}
+			return []byte("custom composer ready"), nil
+		},
+	}
+	session := newTmuxSession("af_proj", "custom-agent", NewMockPtyFactory(t), cmdExec)
+	require.Equal(t, preSubmitEchoUnknown, session.preSubmitEchoBehavior())
+
+	require.NoError(t, session.SendKeysCommand("first prompt lands visibly"))
+	require.Equal(t, preSubmitEchoes, session.preSubmitEchoBehavior(),
+		"a positively observed delivery should be cached for this agent session")
+	require.Empty(t, errors.String())
+
+	require.NoError(t, session.SendKeysCommand("second prompt is genuinely absent"))
+	require.Contains(t, errors.String(), "prompt delivery observed absent",
+		"the cached echo capability must keep a later genuine failure loud")
+}
+
+func TestPreSubmitEchoBehaviorTracksResolvedProgram(t *testing.T) {
+	session := newTmuxSession("af_proj", "/usr/local/bin/codex --full-auto", NewMockPtyFactory(t), cmd_test.MockCmdExec{})
+	require.Equal(t, preSubmitDoesNotEcho, session.preSubmitEchoBehavior(),
+		"capability detection must use the resolved executable, including absolute paths")
+
+	session.SetProgram("ionice -c 3 claude --model opus")
+	require.Equal(t, preSubmitEchoes, session.preSubmitEchoBehavior(),
+		"agent handoff must replace the cached capability with the new agent's behavior")
+
+	session.SetProgram("/opt/bin/claude-wrapper")
+	require.Equal(t, preSubmitEchoUnknown, session.preSubmitEchoBehavior(),
+		"an unknown override must stay unknown instead of substring-matching an agent name")
 }
 
 func captureRawPane(session *TmuxSession) (string, error) {

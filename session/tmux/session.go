@@ -52,9 +52,10 @@ type TmuxSession struct {
 	sanitizedName string
 	// program is the command the pane runs. It is mutated by Restore() while
 	// other goroutines read it, so all access goes through the programMu-guarded
-	// accessors in program.go (#1254) — never touch these two fields directly.
-	program   string
-	programMu sync.RWMutex
+	// accessors in program.go (#1254) — never touch these fields directly.
+	program       string
+	preSubmitEcho preSubmitEchoBehavior
+	programMu     sync.RWMutex
 	// ptyFactory is used to create a PTY for the tmux session.
 	ptyFactory PtyFactory
 	// cmdExec is used to execute commands in the tmux session.
@@ -187,6 +188,7 @@ func newTmuxSession(sanitizedName string, program string, ptyFactory PtyFactory,
 	return &TmuxSession{
 		sanitizedName: sanitizedName,
 		program:       program,
+		preSubmitEcho: knownPreSubmitEchoBehavior(program),
 		ptyFactory:    ptyFactory,
 		cmdExec:       cmdExec,
 	}
