@@ -1,5 +1,8 @@
-// Package tmuxguard implements the agent hook policy that prevents an
-// af-managed agent from tearing down the host's shared tmux server.
+// Package tmuxguard implements a best-effort guardrail against an agent
+// accidentally tearing down the host's shared tmux server. It is not a
+// security boundary: permitted shells and developer tools expose execution
+// surfaces this string-level policy cannot completely model. Host containment
+// tracked in #2194 must provide that boundary.
 package tmuxguard
 
 import (
@@ -81,8 +84,9 @@ func writeDenial(w io.Writer, reason string) error {
 
 // DenialReason returns an actionable reason when command contains a broad
 // tmux teardown or uses shell syntax the guard cannot prove safe. An empty
-// result means every shell word was statically resolved and no teardown was
-// found. The parser is agent-neutral so #2184 can reuse one policy everywhere.
+// result means no modeled hazard was found; it is not proof that arbitrary
+// shell or developer-tool execution is safe. The parser is agent-neutral so
+// #2184 can reuse one guardrail everywhere.
 func DenialReason(command string) string {
 	return denialReason(command, 0)
 }

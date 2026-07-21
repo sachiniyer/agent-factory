@@ -8,16 +8,13 @@ func inspectTmux(args []string) string {
 		return unknownShellReason
 	}
 	commandArgs := args[commandAt:]
-	if tmuxKillServerIsBroad(commandArgs, scoped) {
-		return broadTmuxReason
-	}
 	for _, arg := range args {
 		if strings.Contains(arg, "#(") {
 			return unknownShellReason
 		}
 	}
 	if commandAt == len(args) {
-		if scoped || versionOnly {
+		if versionOnly {
 			return ""
 		}
 		return unknownShellReason
@@ -28,21 +25,34 @@ func inspectTmux(args []string) string {
 		return unknownShellReason
 	}
 	for _, words := range commands {
-		command := strings.ToLower(words[0])
-		if isKillServerCommand(command) {
-			if !scoped {
-				return broadTmuxReason
-			}
-			continue
-		}
-		if tmuxCommandBuildsCommands(command) {
-			return unknownShellReason
-		}
-		if !scoped && !safeUnscopedTmuxCommand(command) {
-			return unknownShellReason
+		if reason := inspectTmuxSequenceCommand(words[0], scoped); reason != "" {
+			return reason
 		}
 	}
 	return ""
+}
+
+// inspectTmuxSequenceCommand is the only command-level policy decision. It is
+// called after separator normalization, so the first, middle, and last command
+// in a chain cannot be judged by different token shapes.
+func inspectTmuxSequenceCommand(rawCommand string, scoped bool) string {
+	command := strings.ToLower(rawCommand)
+	if isKillServerCommand(command) {
+		if scoped {
+			return ""
+		}
+		return broadTmuxReason
+	}
+	if safeUnscopedTmuxCommand(command) {
+		return ""
+	}
+	if scoped && safeScopedTmuxCommand(command) {
+		return ""
+	}
+	// Socket scope limits which tmux server a verb can mutate, but tmux verbs
+	// may still launch host shell commands. Unknown verbs therefore deny until
+	// they are explicitly audited and added to the small safe set below.
+	return unknownShellReason
 }
 
 // splitTmuxCommands models tmux's command-sequence boundary. Shell quoting is
@@ -137,33 +147,9 @@ func isTmuxFlagCluster(arg string) bool {
 	}) == -1
 }
 
-func tmuxKillServerIsBroad(args []string, socketScoped bool) bool {
-	for _, arg := range args {
-		if isKillServerCommand(arg) {
-			return !socketScoped
-		}
-	}
-	return false
-}
-
 func isKillServerCommand(arg string) bool {
 	arg = strings.ToLower(arg)
 	return arg != "" && strings.HasPrefix("kill-server", arg)
-}
-
-func tmuxCommandBuildsCommands(command string) bool {
-	commands := []string{
-		"bind-key", "choose-buffer", "choose-client", "choose-tree", "command-prompt",
-		"confirm-before", "display-menu", "display-popup", "if-shell", "new-session",
-		"new-window", "pipe-pane", "respawn-pane", "respawn-window", "run-shell",
-		"set-hook", "source-file", "split-window",
-	}
-	for _, opaque := range commands {
-		if command != "" && strings.HasPrefix(opaque, command) {
-			return true
-		}
-	}
-	return false
 }
 
 func safeUnscopedTmuxCommand(command string) bool {
@@ -173,6 +159,23 @@ func safeUnscopedTmuxCommand(command string) bool {
 		"list-commands", "lscm", "list-keys", "lsk", "list-panes", "lsp",
 		"list-sessions", "ls", "list-windows", "lsw", "show-environment", "showenv",
 		"show-hooks", "show-messages", "show-options", "show", "show-window-options", "showw":
+		return true
+	default:
+		return false
+	}
+}
+
+// safeScopedTmuxCommand is intentionally exact and small. A scoped server is
+// safe to mutate with these verbs, but scope does not make a verb that can
+// launch a host process safe. Aliases, abbreviations, and future tmux verbs
+// remain denied until audited rather than inheriting an allow by default.
+func safeScopedTmuxCommand(command string) bool {
+	switch command {
+	case "clock-mode", "copy-mode", "kill-pane", "kill-session", "kill-window",
+		"last-pane", "last-window", "next-layout", "next-window", "previous-layout",
+		"previous-window", "refresh-client", "rename-session", "rename-window",
+		"resize-pane", "resize-window", "rotate-window", "select-layout", "select-pane",
+		"select-window", "swap-pane", "swap-window", "switch-client", "unlink-window":
 		return true
 	default:
 		return false
