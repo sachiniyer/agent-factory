@@ -55,11 +55,25 @@ cat >"$WORK/bin/docker" <<'SHIM'
 printf '%s\n' "$*" >>"$DOCKER_LOG"
 for a in "$@"; do
     case "$a" in
-    build) exec cat >/dev/null ;;
+    build)
+        cat >/dev/null
+        if [ -n "${FAKE_BUILD_ENTERED:-}" ]; then
+            : >"$FAKE_BUILD_ENTERED"
+        fi
+        if [ -n "${FAKE_BUILD_RELEASE:-}" ]; then
+            while [ ! -e "$FAKE_BUILD_RELEASE" ]; do sleep 0.02; done
+        fi
+        exit 0
+        ;;
     esac
 done
 case "$1 ${2:-}" in
 "info --format") printf '%s\n' "${FAKE_INFO_ROOT:-}" ;;
+"inspect -f")
+    if [ -n "${FAKE_RUNNING_MARKER:-}" ] && [ -e "$FAKE_RUNNING_MARKER" ]; then
+        printf 'true\n'
+    fi
+    ;;
 "builder prune")
     case "${*}" in
     *--help*) echo "  --max-used-space bytes  Maximum amount of disk space allowed to keep for cache" ;;
@@ -70,7 +84,18 @@ esac
 # Only the run under test fails, and only when asked to: a failing
 # fix_cache_perms would abort the script before the interesting part.
 case "${*}" in
-*run-tests.sh*) exit "${FAKE_RUN_RC:-0}" ;;
+*run-tests.sh*)
+    if [ -n "${FAKE_RUNNING_MARKER:-}" ]; then
+        : >"$FAKE_RUNNING_MARKER"
+    fi
+    if [ -n "${FAKE_RUN_ENTERED:-}" ]; then
+        : >"$FAKE_RUN_ENTERED"
+    fi
+    if [ -n "${FAKE_RUN_RELEASE:-}" ]; then
+        while [ ! -e "$FAKE_RUN_RELEASE" ]; do sleep 0.02; done
+    fi
+    exit "${FAKE_RUN_RC:-0}"
+    ;;
 esac
 exit 0
 SHIM
@@ -86,6 +111,7 @@ run_testbox() {
     local rc=0
     env PATH="$WORK/bin:$PATH" DOCKER_LOG="$LOG" FAKE_RUN_RC="${FAKE_RUN_RC:-0}" \
         AF_TESTBOX_IMAGE=af-selftest-image \
+        AF_TESTBOX_IMAGE_LOCK="$WORK/image-startup.lock" \
         bash "$TESTBOX" "$@" >/dev/null 2>&1 || rc=$?
     if [ "$rc" != "$want" ]; then
         no "$name: testbox exited $rc, want $want"
@@ -150,6 +176,81 @@ else
     no "a failing run skips the build-cache cap"
 fi
 unset FAKE_RUN_RC
+
+printf '\n=== tagged cleanup waits for sibling image startup ===\n'
+
+# Hold one invocation inside its image build — after it has acquired the
+# cross-worktree startup lock, before any container can protect the tag — and
+# start `clean` against the same lock. Before the fix, clean reaches both
+# `image prune -a` and exact-tag `rmi` in this window. It must now reach neither
+# until the sibling is allowed to create/run its container.
+START_LOG="$WORK/start-race.log"
+CLEAN_LOG="$WORK/clean-race.log"
+ENTERED="$WORK/build-entered"
+RELEASE="$WORK/build-release"
+RUN_ENTERED="$WORK/run-entered"
+RUN_RELEASE="$WORK/run-release"
+RUNNING="$WORK/container-running"
+: >"$START_LOG"
+: >"$CLEAN_LOG"
+env PATH="$WORK/bin:$PATH" DOCKER_LOG="$START_LOG" \
+    FAKE_BUILD_ENTERED="$ENTERED" FAKE_BUILD_RELEASE="$RELEASE" \
+    FAKE_RUN_ENTERED="$RUN_ENTERED" FAKE_RUN_RELEASE="$RUN_RELEASE" \
+    FAKE_RUNNING_MARKER="$RUNNING" \
+    AF_TESTBOX_IMAGE=af-selftest-image \
+    AF_TESTBOX_IMAGE_LOCK="$WORK/image-startup-race.lock" \
+    bash "$TESTBOX" test ./config/... >/dev/null 2>&1 &
+starter=$!
+for _ in $(seq 1 200); do
+    [ -e "$ENTERED" ] && break
+    sleep 0.01
+done
+if [ ! -e "$ENTERED" ]; then
+    no "startup-race: sibling never reached the held build"
+    kill "$starter" 2>/dev/null || true
+else
+    env PATH="$WORK/bin:$PATH" DOCKER_LOG="$CLEAN_LOG" \
+        AF_TESTBOX_IMAGE=af-selftest-image \
+        AF_TESTBOX_IMAGE_LOCK="$WORK/image-startup-race.lock" \
+        bash "$TESTBOX" clean >/dev/null 2>&1 &
+    cleaner=$!
+    sleep 0.2
+    if has "$CLEAN_LOG" "^(image prune -a|rmi )"; then
+        no "tagged cleanup ran while a sibling had built no image-protecting container"
+    else
+        ok "tagged cleanup waits through a sibling's build-to-container gap"
+    fi
+    : >"$RELEASE"
+    for _ in $(seq 1 200); do
+        [ -e "$RUN_ENTERED" ] && break
+        sleep 0.01
+    done
+    if [ ! -e "$RUN_ENTERED" ]; then
+        no "startup-race: sibling never reached its held test container"
+    fi
+    # The fake container stays running here. Once the observer sees that
+    # positive state, the image is protected by its container reference and
+    # cleanup should proceed without waiting for the suite to finish.
+    for _ in $(seq 1 200); do
+        if has "$CLEAN_LOG" "^rmi af-selftest-image$"; then
+            break
+        fi
+        sleep 0.01
+    done
+    if has "$CLEAN_LOG" "^rmi af-selftest-image$" && kill -0 "$starter" 2>/dev/null; then
+        ok "the startup lease ends at Running, not at the end of the test suite"
+    else
+        no "tagged cleanup stayed blocked after the sibling container was running"
+    fi
+    : >"$RUN_RELEASE"
+    wait "$starter" || no "startup-race: sibling testbox failed after release"
+    wait "$cleaner" || no "startup-race: clean failed after release"
+    if has "$CLEAN_LOG" "^image prune -af" && has "$CLEAN_LOG" "^rmi af-selftest-image$"; then
+        ok "tagged cleanup proceeds once the sibling startup is protected"
+    else
+        no "tagged cleanup never resumed after the sibling startup completed"
+    fi
+fi
 
 printf '\n=== cleanup can never reach an artifact the harness did not create ===\n'
 
@@ -288,6 +389,7 @@ LOG="$WORK/nodisk.log"
 rc=0
 env PATH="$WORK/bin:$PATH" DOCKER_LOG="$LOG" FAKE_INFO_ROOT=/nonexistent/docker-root \
     AF_TESTBOX_IMAGE=af-selftest-image \
+    AF_TESTBOX_IMAGE_LOCK="$WORK/image-startup.lock" \
     bash "$TESTBOX" test ./config/... >"$WORK/nodisk.out" 2>&1 || rc=$?
 if [ "$rc" -eq 0 ]; then
     ok "an unreadable engine root does not fail the run"
@@ -306,6 +408,7 @@ LOG="$WORK/off.log"
 : >"$LOG"
 env PATH="$WORK/bin:$PATH" DOCKER_LOG="$LOG" AF_TESTBOX_CACHE_MAX=off \
     AF_TESTBOX_IMAGE=af-selftest-image \
+    AF_TESTBOX_IMAGE_LOCK="$WORK/image-startup.lock" \
     bash "$TESTBOX" test ./config/... >/dev/null 2>&1 || true
 if has "$LOG" "^builder prune"; then
     no "AF_TESTBOX_CACHE_MAX=off still touched the build cache"
