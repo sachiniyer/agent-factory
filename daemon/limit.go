@@ -192,7 +192,7 @@ func (m *Manager) persistPollChange(repoID string, instance *session.Instance, b
 	// this older payload landed last and clients re-projected the tab right back out of
 	// existence, until some later update happened to repair it (post-merge Codex finding
 	// on #1815). Serializing publish with persist makes the last event the newest state.
-	// publishEvent is non-blocking (drop-slow), so a wedged subscriber can't stall the poll.
+	// publishEvent is non-blocking (disconnect-slow), so a wedged subscriber can't stall the poll.
 	testHookPollBeforePublish()
 	m.publishEvent(agentproto.EventSessionUpdated, data)
 	repoStartLock.Unlock()

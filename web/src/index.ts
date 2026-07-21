@@ -601,7 +601,7 @@ function newSession(): void {
           })
           .catch((e) => {
             // The daemon publishes session.killed for the provisional id. Resync as a
-            // drop-slow/reconnect fallback so even a missed delete event cannot strand a
+            // direct fallback so even a missed delete event cannot strand a
             // phantom creating row, and surface the daemon's unmodified error text.
             requestResync();
             surfaceTabError(e);

@@ -157,7 +157,7 @@ func (m *Manager) CreateTab(req CreateTabRequest) (string, string, error) {
 	// ReconcileTabsFromData), so this needs no client change. Published after the
 	// persist so no client can observe a tab that isn't durable yet, and while
 	// still holding the repo start lock so concurrent tab mutations announce in
-	// the same order they persisted. publishEvent is non-blocking (drop-slow), so
+	// the same order they persisted. publishEvent is non-blocking (disconnect-slow), so
 	// a wedged subscriber can't stall the mutation.
 	m.publishEvent(agentproto.EventSessionUpdated, data)
 	// Report the tmux session the tab actually spawned under, read out of the very
