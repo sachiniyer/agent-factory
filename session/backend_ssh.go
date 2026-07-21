@@ -3,6 +3,7 @@ package session
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -158,13 +159,23 @@ func (sshRuntime) Provision(spec ProvisionSpec) (ProvisionResult, error) {
 	}
 	res, err := p.provision()
 	if err != nil {
-		// Reap whatever the failed provision left behind (a dialed connection, a
-		// half-created remote dir, a started agent-server, an opened tunnel) so a
-		// remote workspace never leaks on a partial failure.
-		p.reap()
-		return ProvisionResult{}, err
+		// Best-effort reap whatever the failed provision left behind (a dialed
+		// connection, a half-created remote dir, a started agent-server, an opened
+		// tunnel). Preserve any cleanup failure in the returned error: no Instance
+		// exists yet to own a retry handle, so silently dropping it would hide an
+		// orphan.
+		return ProvisionResult{}, p.reapProvisionFailure(err)
 	}
 	return res, nil
+}
+
+func (p *sshProvisioner) reapProvisionFailure(provisionErr error) error {
+	reapErr := p.reap()
+	if reapErr == nil {
+		return provisionErr
+	}
+	return fmt.Errorf("backend=ssh: provisioning failed and cleanup of its partial workspace on %s (remote dir %q) did not complete; inspect it before retrying: %w",
+		p.cfg.Host, p.sessionDir, errors.Join(provisionErr, reapErr))
 }
 
 // sshProvisioner holds the state of one remote provisioning so its steps and its
@@ -176,13 +187,27 @@ type sshProvisioner struct {
 	afBin   string
 	program string
 
-	client     *ssh.Client
-	agentConn  io.Closer
-	sessionDir string
-	remotePID  string
-	tunnelLn   net.Listener
-	tunnelWG   sync.WaitGroup
-	reapOnce   sync.Once
+	client         *ssh.Client
+	agentConn      io.Closer
+	sessionDir     string
+	remotePID      string
+	tunnelLn       net.Listener
+	tunnelAcceptWG sync.WaitGroup
+	tunnelWG       sync.WaitGroup
+
+	// Reap memoizes only an attempt that COMPLETED. A timeout leaves the remote
+	// directory's state unknown, so the daemon must retain the row and actually
+	// retry on its next poll; sync.Once cannot express that conditional latch.
+	reapMu  sync.Mutex
+	reaped  bool
+	reapErr error
+
+	// Narrow per-instance seams let the cleanup contract be exercised without a
+	// real SSH server. Production instances leave these nil and use the methods
+	// below; tests inject only the remote command/dial/client-close boundary.
+	reapRunCombined func(time.Duration, string) ([]byte, error)
+	reapDial        func() error
+	reapCloseClient func()
 }
 
 // provision runs the full remote lifecycle and returns the wiring an ssh session
@@ -550,6 +575,7 @@ func (p *sshProvisioner) startTunnel(remoteAddr string) (string, error) {
 		return "", fmt.Errorf("backend=ssh: opening the local tunnel listener failed: %w", err)
 	}
 	p.tunnelLn = ln
+	p.tunnelAcceptWG.Add(1)
 	go p.acceptLoop(remoteAddr)
 	return ln.Addr().String(), nil
 }
@@ -557,6 +583,7 @@ func (p *sshProvisioner) startTunnel(remoteAddr string) (string, error) {
 // acceptLoop accepts local tunnel connections until the listener is closed (by
 // reap), forwarding each to the remote agent-server addr.
 func (p *sshProvisioner) acceptLoop(remoteAddr string) {
+	defer p.tunnelAcceptWG.Done()
 	for {
 		local, err := p.tunnelLn.Accept()
 		if err != nil {
@@ -588,42 +615,140 @@ func (p *sshProvisioner) forward(local net.Conn, remoteAddr string) {
 // accepting), kill the remote agent-server PID, remove the session dir, and close
 // the ssh connection. It runs on the session's Kill (after the remote workspace is
 // torn down over REST), on a provisioning failure, and on a bad-endpoint
-// NewInstance failure — so a remote workspace/tunnel is never leaked. The sync.Once
-// collapses the repeated Kill retries and the Kill-vs-provision-failure races.
+// NewInstance failure — so a remote workspace/tunnel is never leaked.
+//
+// A completed result (success or an exit status returned by the remote command)
+// latches to collapse repeated Kill calls and Kill-vs-provision-failure races. A
+// timeout or lost transport deliberately does not latch: cleanup may have stopped
+// halfway through, so the row must remain and the next poll must make a real
+// attempt. Because every reap closes the old SSH client to drain tunnel forwards,
+// that retry first reconnects; otherwise a mutex/latch conversion alone would
+// only retry on a closed client.
 func (p *sshProvisioner) reap() error {
-	var reapErr error
-	p.reapOnce.Do(func() {
-		if p.tunnelLn != nil {
-			_ = p.tunnelLn.Close()
+	p.reapMu.Lock()
+	defer p.reapMu.Unlock()
+	if p.reaped {
+		return p.reapErr
+	}
+
+	if p.tunnelLn != nil {
+		_ = p.tunnelLn.Close()
+		// Wait until Accept has returned before any tunnelWG.Wait below. This
+		// closes the WaitGroup's Add-vs-Wait race: once the accept loop is gone,
+		// every forward that can exist has already incremented tunnelWG.
+		p.tunnelAcceptWG.Wait()
+	}
+	// authMethods can open the agent connection before dial succeeds. Release it
+	// independently of the SSH client and nil it so retries do not re-close a
+	// stale descriptor (#1684).
+	if p.agentConn != nil {
+		_ = p.agentConn.Close()
+		p.agentConn = nil
+	}
+
+	// No remote directory means provisioning never created a workspace. Closing
+	// any connection is sufficient, and that completed outcome can latch.
+	if p.sessionDir == "" {
+		p.finishReapTransport()
+		p.reaped = true
+		p.reapErr = nil
+		return nil
+	}
+
+	// A previous timed-out attempt closed its client so tunnel forwards could
+	// drain. Reconnect before retrying the remote rm; failure to connect tells us
+	// nothing about whether the directory still exists, so retain and retry.
+	if p.client == nil {
+		if err := p.dialForReap(); err != nil {
+			reapErr := fmt.Errorf("%w: backend=ssh: reconnecting to %s to remove remote session dir %q failed: %w",
+				ErrWorkspaceStateUnknown, p.cfg.Host, p.sessionDir, err)
+			log.WarningLog.Printf("%v", reapErr)
+			return reapErr
 		}
-		// Close the ssh-agent connection unconditionally — it is opened in
-		// authMethods() before the dial, so it must be released even when the
-		// dial itself failed (p.client == nil). Closing it stops the agent
-		// client's readLoop goroutine and frees the Unix socket FD (#1684).
-		if p.agentConn != nil {
-			_ = p.agentConn.Close()
-		}
-		if p.client != nil {
-			if p.remotePID != "" {
-				// SIGTERM lets the agent-server tear its workspace down cleanly (kill
-				// tmux, remove the worktree); the SIGKILL is a backstop if it hangs.
-				_, _ = p.runCombined(sshShortStepTimeout, fmt.Sprintf("kill %s 2>/dev/null; sleep 0.3; kill -9 %s 2>/dev/null; true", p.remotePID, p.remotePID))
-			}
-			if p.sessionDir != "" {
-				if out, err := p.runCombined(sshReapTimeout, "rm -rf "+shellQuote(p.sessionDir)); err != nil {
-					reapErr = fmt.Errorf("backend=ssh: removing remote session dir %q failed: %s: %w", p.sessionDir, strings.TrimSpace(string(out)), err)
-					log.WarningLog.Printf("%v", reapErr)
-				}
-			}
-			_ = p.client.Close()
-		}
-		if p.tunnelLn != nil {
-			// Let in-flight forwards drain against the now-closed ssh connection.
-			p.tunnelWG.Wait()
-		}
+	}
+
+	if remotePID := p.remotePID; remotePID != "" {
+		// Consume the PID before sending the command. Unlike removal of a unique
+		// session directory, killing a numeric PID is not idempotent across polls:
+		// the remote OS may recycle it after this attempt, and a retry must never
+		// kill an unrelated process that inherited the number.
+		p.remotePID = ""
+		// SIGTERM lets the agent-server tear its workspace down cleanly (kill
+		// tmux, remove the worktree); the SIGKILL is a backstop if it hangs.
+		_, _ = p.runReapCombined(sshShortStepTimeout, fmt.Sprintf("kill %s 2>/dev/null; sleep 0.3; kill -9 %s 2>/dev/null; true", remotePID, remotePID))
+	}
+	out, err := p.runReapCombined(sshReapTimeout, "rm -rf "+shellQuote(p.sessionDir))
+	p.finishReapTransport()
+	if err == nil {
+		p.reaped = true
+		p.reapErr = nil
 		log.InfoLog.Printf("ssh runtime: reaped session %q on %s (remote dir %s)", p.spec.Title, p.cfg.Host, p.sessionDir)
-	})
+		return nil
+	}
+
+	reapErr := fmt.Errorf("backend=ssh: removing remote session dir %q failed: %s: %w", p.sessionDir, strings.TrimSpace(string(out)), err)
+	if sshReapOutcomeUnknown(err) {
+		// Unknown-state and deliberately NOT latched: retain the record and let
+		// finishUserKill call this closure again on the next poll.
+		reapErr = fmt.Errorf("%w: %w", ErrWorkspaceStateUnknown, reapErr)
+		log.WarningLog.Printf("%v", reapErr)
+		return reapErr
+	}
+
+	// The remote command answered with an exit status. Preserve the established
+	// teardown taxonomy: this is a completed, known-state outcome, so latch it.
+	p.reaped = true
+	p.reapErr = reapErr
+	log.WarningLog.Printf("%v", reapErr)
 	return reapErr
+}
+
+// sshReapOutcomeUnknown keeps the destructive decision at the SSH command
+// boundary. CombinedOutput returns *ssh.ExitError only after the remote reports a
+// non-zero exit status; every other error (deadline, EOF, channel loss, failure to
+// open a session) lacks proof that rm completed and must retain the record.
+func sshReapOutcomeUnknown(err error) bool {
+	var exitErr *ssh.ExitError
+	return !errors.As(err, &exitErr)
+}
+
+func (p *sshProvisioner) runReapCombined(timeout time.Duration, script string) ([]byte, error) {
+	if p.reapRunCombined != nil {
+		return p.reapRunCombined(timeout, script)
+	}
+	return p.runCombined(timeout, script)
+}
+
+func (p *sshProvisioner) dialForReap() error {
+	if p.reapDial != nil {
+		return p.reapDial()
+	}
+	return p.dial()
+}
+
+// finishReapTransport closes the command/tunnel transport after every attempt.
+// Keeping a timed-out client around would strand active forwards; clearing it
+// also makes a subsequent retry's required re-dial explicit.
+func (p *sshProvisioner) finishReapTransport() {
+	client := p.client
+	if client != nil {
+		if p.reapCloseClient != nil {
+			p.reapCloseClient()
+		} else {
+			_ = client.Close()
+		}
+	}
+	if p.tunnelLn != nil {
+		// Let in-flight forwards drain against the now-closed ssh connection.
+		p.tunnelWG.Wait()
+		p.tunnelLn = nil
+	}
+	// Do not nil the pointer before forwards drain: forward reads p.client when
+	// it starts, and a just-accepted connection must see a closed client rather
+	// than race into a nil dereference.
+	if p.client == client {
+		p.client = nil
+	}
 }
 
 // --- remote command helpers -------------------------------------------------
@@ -647,6 +772,11 @@ func (p *sshProvisioner) runStdin(timeout time.Duration, script string, r io.Rea
 	return p.runSession(timeout, script, r, true)
 }
 
+type sshSessionResult struct {
+	out []byte
+	err error
+}
+
 // runSession opens one ssh session, runs `sh -c <script>` with an optional stdin,
 // and returns its output, bounding the whole thing with a timeout that closes the
 // session so a wedged remote command cannot hang a create or kill. Each ssh session
@@ -662,11 +792,7 @@ func (p *sshProvisioner) runSession(timeout time.Duration, script string, stdin 
 	}
 
 	cmd := "sh -c " + shellQuote(script)
-	type result struct {
-		out []byte
-		err error
-	}
-	ch := make(chan result, 1)
+	ch := make(chan sshSessionResult, 1)
 	go func() {
 		var out []byte
 		var runErr error
@@ -675,17 +801,21 @@ func (p *sshProvisioner) runSession(timeout time.Duration, script string, stdin 
 		} else {
 			out, runErr = sess.Output(cmd)
 		}
-		ch <- result{out, runErr}
+		ch <- sshSessionResult{out, runErr}
 	}()
 
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
+	return awaitSSHSession(ctx, sess, ch, timeout, script)
+}
+
+func awaitSSHSession(ctx context.Context, sess io.Closer, ch <-chan sshSessionResult, timeout time.Duration, script string) ([]byte, error) {
 	select {
 	case r := <-ch:
 		return r.out, r.err
 	case <-ctx.Done():
 		_ = sess.Close() // unblock the CombinedOutput/Output goroutine
-		return nil, fmt.Errorf("remote command timed out after %s: %q", timeout, script)
+		return nil, fmt.Errorf("remote command timed out after %s: %q: %w", timeout, script, ctx.Err())
 	}
 }
 
