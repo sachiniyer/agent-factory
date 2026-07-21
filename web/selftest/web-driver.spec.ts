@@ -5658,6 +5658,22 @@ test("#2226 mobile (375px): drawer dismissal follows action intent, not click pr
   await p.locator(".af-rail-new").click();
   await expectDrawerClosed();
   await expect(modal).toBeVisible();
+  const modalLayer = await p.evaluate(() => {
+    const appbar = document.querySelector(".af-appbar")!;
+    const host = document.querySelector(".af-modal-host")!;
+    const covered = [".af-project-switch", ".af-appbar-more"].map((selector) => {
+      const box = document.querySelector(selector)!.getBoundingClientRect();
+      const hit = document.elementFromPoint(box.left + box.width / 2, box.top + box.height / 2);
+      return hit?.closest(".af-modal-backdrop") !== null;
+    });
+    return {
+      appbarZ: Number.parseInt(getComputedStyle(appbar).zIndex, 10),
+      modalZ: Number.parseInt(getComputedStyle(host).zIndex, 10),
+      covered,
+    };
+  });
+  expect(modalLayer.modalZ, "aria-modal content owns the top interaction layer").toBeGreaterThan(modalLayer.appbarZ);
+  expect(modalLayer.covered, "the modal backdrop blocks every appbar action").toEqual([true, true]);
   const titleInput = modal.locator('input[aria-label="Session title"]');
   await titleInput.click();
   await expect(titleInput).toBeFocused();
@@ -5780,6 +5796,7 @@ test("#2227 mobile appbar: project context wins scarce width at 320px and 375px"
         const projectName = p.locator(".af-project-switch-name");
         const more = p.locator(".af-appbar-more");
         const tools = p.locator(".af-appbar-tools");
+        const viewTabs = p.locator(".af-viewtab");
         await expect(brand, "decoration yields before project context").toBeHidden();
         await expect(toggle).toBeVisible();
         await expect(project).toBeVisible();
@@ -5793,6 +5810,7 @@ test("#2227 mobile appbar: project context wins scarce width at 320px and 375px"
           };
           return {
             toggle: rect(".af-nav-toggle"),
+            views: rect(".af-viewnav"),
             project: rect(".af-project-switch"),
             more: rect(".af-appbar-more"),
           };
@@ -5802,9 +5820,25 @@ test("#2227 mobile appbar: project context wins scarce width at 320px and 375px"
           expect(box.right, `${name} ends inside ${width}px`).toBeLessThanOrEqual(width);
           expect(box.height, `${name} keeps a comfortable tap height`).toBeGreaterThanOrEqual(44);
         }
-        expect(primary.project.width, "project context owns the flexible middle of the primary row").toBeGreaterThan(150);
-        expect(Math.abs(primary.toggle.top - primary.project.top), "primary controls share one top edge").toBeLessThanOrEqual(1);
-        expect(Math.abs(primary.more.top - primary.project.top), "primary controls share one top edge").toBeLessThanOrEqual(1);
+        expect(primary.project.width, "project context owns nearly the whole second row").toBeGreaterThan(200);
+        expect(Math.abs(primary.toggle.top - primary.views.top), "top-level navigation shares one top edge").toBeLessThanOrEqual(1);
+        expect(Math.abs(primary.more.top - primary.project.top), "project and More share one top edge").toBeLessThanOrEqual(1);
+        expect(primary.project.top, "the project row follows the top-level navigation row").toBeGreaterThan(
+          primary.toggle.top + primary.toggle.height,
+        );
+
+        // Visual and focus order must agree at the responsive breakpoint. Positive
+        // tabindex or CSS-only reordering would still leave assistive technology
+        // jumping between rows, so walk the native DOM sequence end to end.
+        await toggle.focus();
+        for (let i = 0; i < 3; i++) {
+          await p.keyboard.press("Tab");
+          await expect(viewTabs.nth(i), `view tab ${i + 1} follows the drawer toggle`).toBeFocused();
+        }
+        await p.keyboard.press("Tab");
+        await expect(project, "project follows the view row in DOM and pixels").toBeFocused();
+        await p.keyboard.press("Tab");
+        await expect(more, "More follows the project in DOM and pixels").toBeFocused();
 
         const truncation = await projectName.evaluate((el) => {
           const css = getComputedStyle(el);
@@ -5852,7 +5886,7 @@ test("#2227 mobile appbar: project context wins scarce width at 320px and 375px"
         await projectItem(p, LONG_PROJECT).click();
         await expect(projectMenu).toBeHidden();
 
-        // Rare chrome remains operable rather than consuming the primary row.
+        // Rare chrome remains operable rather than consuming the project row.
         await more.click();
         await expect(tools).toBeVisible();
         await expect(tools.locator(`.af-theme-opt[data-theme-opt="${theme}"]`)).toHaveClass(/af-theme-opt-active/);
