@@ -122,6 +122,40 @@ func TestTakeoverFromDurableStopIntentRestartsPrevious(t *testing.T) {
 	require.Equal(t, "known-running-binary", string(installed))
 }
 
+func TestPreviousValidationTakeoverRestartsPreviousBeforeRevalidating(t *testing.T) {
+	txn, home, _ := prepareFixture(t)
+	lease, err := txn.tryAcquireRecoveryAs(txn.Journal().PreviousBinaryPath)
+	require.NoError(t, err)
+	runtime := &fakeSupervisorRuntime{running: "previous", candidateValid: false}
+
+	err = (Supervisor{
+		Operations: runtime.operations(),
+		AfterBoundary: func(phase Phase) error {
+			if phase == PhasePreviousValidating {
+				return errors.New("simulated reboot before previous validation")
+			}
+			return nil
+		},
+	}).Run(context.Background(), txn, lease)
+	require.ErrorIs(t, err, ErrSupervisorInterrupted)
+	require.Equal(t, PhasePreviousValidating, txn.Journal().Phase)
+	require.NoError(t, lease.Release())
+	runtime.running = ""
+
+	resumed, err := Load(home)
+	require.NoError(t, err)
+	takeover, err := resumed.tryAcquireRecoveryAs(resumed.Journal().PreviousBinaryPath)
+	require.NoError(t, err)
+	err = (Supervisor{Operations: runtime.operations()}).Run(context.Background(), resumed, takeover)
+	require.ErrorIs(t, err, ErrUpgradeRolledBack)
+	require.NoError(t, takeover.Release())
+	require.Equal(t, "previous", runtime.running,
+		"a reboot may remove the daemon along with its validating supervisor")
+
+	_, err = Load(home)
+	require.ErrorIs(t, err, ErrNoActiveTransaction)
+}
+
 func TestSupervisorRejectsLeaseFromAnotherTransactionBeforeMutation(t *testing.T) {
 	txn, _, _ := prepareFixture(t)
 	other, _, _ := prepareFixture(t)

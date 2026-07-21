@@ -97,6 +97,7 @@ func (s Supervisor) Run(ctx context.Context, txn *Transaction, lease *RecoveryLe
 	var rollbackCause error
 	var abortCause error
 	var candidateValidatedThisRun bool
+	var previousStartedThisRun bool
 	var previousValidatedThisRun bool
 	var takeoverFromStopIntent bool
 	firstIteration := true
@@ -359,6 +360,7 @@ func (s Supervisor) Run(ctx context.Context, txn *Transaction, lease *RecoveryLe
 					ctx, txn, lease, fmt.Errorf("start previous daemon after rollback: %w", err),
 				)
 			}
+			previousStartedThisRun = true
 			if err := lease.Advance(PhasePreviousValidating); err != nil {
 				return err
 			}
@@ -367,6 +369,18 @@ func (s Supervisor) Run(ctx context.Context, txn *Transaction, lease *RecoveryLe
 			}
 
 		case PhasePreviousValidating:
+			// The previous daemon may have died with the actor after the
+			// previous_validating boundary (especially across reboot). A
+			// takeover must re-establish it before treating validation failure
+			// as a terminal rollback failure.
+			if !previousStartedThisRun {
+				if err := s.Operations.StartPrevious(ctx, journal); err != nil {
+					return s.finishFailedRollback(
+						ctx, txn, lease, fmt.Errorf("restart previous daemon before validation: %w", err),
+					)
+				}
+				previousStartedThisRun = true
+			}
 			if err := s.Operations.ValidatePrevious(ctx, journal); err != nil {
 				return s.finishFailedRollback(
 					ctx, txn, lease, fmt.Errorf("validate previous daemon after rollback: %w", err),
