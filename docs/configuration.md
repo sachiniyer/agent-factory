@@ -83,6 +83,13 @@ pane_border_preview = "#DC8CC3"
 | `theme` | Optional TUI color table. Defaults to a Zenburn-derived palette and validates each value as `#RRGGBB`; invalid values fall back to the corresponding default with a warning. See [Theme colors](#theme-colors-theme). |
 | `keys` | Optional keymap overrides for the TUI. See [Key bindings](#key-bindings-keys). |
 
+Codex's **additional safety checks** model-routing picker is separate from
+`auto_yes` and from approval/sandbox flags. The daemon recognizes the known
+picker, navigates to **Keep waiting** by its label, confirms that row is selected
+before accepting it, and compares Codex's model status line before and after.
+The intervention and verification result are written to `agent-factory.log`; a
+changed picker that af cannot match safely is logged and left untouched.
+
 ### Theme colors (`theme`)
 
 The TUI palette defaults to Zenburn: low-contrast foreground/background colors
