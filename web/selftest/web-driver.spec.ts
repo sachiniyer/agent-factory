@@ -3680,7 +3680,6 @@ test("#2330: an older reconnect Snapshot cannot overwrite a newer session event"
   });
 
   try {
-    await openTokenless(p);
     await p.route("**/v1/Snapshot", async (route) => {
       const call = ++snapshotCalls;
       try {
@@ -3699,11 +3698,12 @@ test("#2330: an older reconnect Snapshot cannot overwrite a newer session event"
       }
     });
 
-    // Reload performs one bootstrap Snapshot, then the newly-open events socket asks
-    // for an authoritative resync. Hold that SECOND response after the daemon has
-    // already produced it, making it provably older than the event below.
-    await p.reload();
-    await expect(p.locator(".af-app")).toBeVisible();
+    // Install the route BEFORE first navigation: connect performs one bootstrap
+    // Snapshot, then the newly-open events socket asks for an authoritative resync.
+    // Hold that SECOND response after the daemon has already produced it, making it
+    // provably older than the event below. There is no prior page whose delayed
+    // first-open resync can steal either call number (Codex review P2).
+    await openTokenless(p);
     await row(p, SESSION_A).click();
     await expect(p.locator(".af-tabbar")).toBeVisible();
     await staleStarted;
