@@ -69,7 +69,7 @@ func TestDenialReason(t *testing.T) {
 		{name: "login nested shell", command: `bash -lc 'printf safe'`, wantReason: unknownShellReason},
 		{name: "dynamic nested shell", command: `bash -c 'echo "$HOME"'`, wantReason: unknownShellReason},
 		{name: "shell script file is opaque", command: `bash ./script.sh`, wantReason: unknownShellReason},
-		{name: "stdin-fed shell is opaque", command: `printf 'tmux kill-server\n' | bash`, wantReason: unknownShellReason},
+		{name: "stdin-fed shell is opaque", command: `printf 'tmux kill-server\n' | bash`, wantReason: opaqueInputReason},
 		{name: "dynamic socket", command: `tmux -L "$socket" kill-server`, wantReason: unknownShellReason},
 		{name: "shell assignment", command: `BASH_ENV=/tmp/rc bash -c 'printf safe'`, wantReason: unknownShellReason},
 		{name: "assignment only", command: `FOO=bar`, wantReason: unknownShellReason},
@@ -212,6 +212,9 @@ func TestDenialReasonExplainsAuditableHeredocBoundary(t *testing.T) {
 	tests := []string{
 		"python3 - <<'PY'\nprint('safe')\nPY",
 		"gh pr comment 1 --body-file - <<'EOF'\nsafe review note\nEOF",
+		"printf 'print(1)' | python3 -",
+		"printf 'safe review note' | gh pr comment 1 --body-file -",
+		"printf 'safe review note' |& gh pr comment 1 --body-file -",
 	}
 	for _, command := range tests {
 		reason := DenialReason(command)

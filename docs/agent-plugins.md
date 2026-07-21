@@ -115,13 +115,16 @@ leave the Codex session unguarded. Gemini, Amp, Aider, and OpenCode must be
 treated as unguarded until af ships and verifies a blocking delivery seam for
 each one.
 
-Claude and Codex both fail closed on shell here-documents. Quoting the delimiter
-prevents shell expansion, but it cannot prove whether the receiving program
-treats the body as data or executable code. Use the agent's non-shell file tool
-to create a reviewable literal file, then pass its literal path—for example,
-`python3 /tmp/task.py` or `gh pr comment <number> --body-file /tmp/reply.md`.
-The hook intentionally has no “trust this inline code” escape hatch because it
-cannot verify review provenance from inside the same Bash request.
+Af-launched Claude sessions and hook-trusted Codex plugin sessions fail closed
+on shell here-documents and pipelines. The manually installed Claude marketplace
+plugin carries the usage guidance but no blocking `PreToolUse` hook, so it does
+not provide this protection. Quoting a here-document delimiter prevents shell
+expansion, but it cannot prove whether the receiving program treats the body as
+data or executable code. Use the agent's non-shell file tool to create a
+reviewable literal file, then pass its literal path—for example, `python3
+/tmp/task.py` or `gh pr comment <number> --body-file /tmp/reply.md`. The hook
+intentionally has no “trust this inline code” escape hatch because it cannot
+verify review provenance from inside the same Bash request.
 
 ## Relationship to `global_agent_skills`
 

@@ -28,6 +28,10 @@ func parseShellCommands(command string) ([][]string, error) {
 			return false
 		}
 		switch node := node.(type) {
+		case *syntax.BinaryCmd:
+			if node.Op == syntax.Pipe || node.Op == syntax.PipeAll {
+				walkErr = errOpaqueStdin
+			}
 		case *syntax.CallExpr:
 			words := make([]string, 0, len(node.Args))
 			for _, word := range node.Args {
