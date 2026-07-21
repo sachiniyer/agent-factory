@@ -11,8 +11,8 @@ import (
 // construction; unknown spellings and future options fail closed. The shared
 // parser keeps launch routing and teardown policy aligned on option operands.
 type envEffects struct {
-	assigned bool
-	chdir    bool
+	environmentChanged bool
+	chdir              bool
 }
 
 func envTarget(args []shellWord) (target []shellWord, noCommand bool, effects envEffects, err error) {
@@ -31,9 +31,10 @@ func envTarget(args []shellWord) (target []shellWord, noCommand bool, effects en
 	if parseErr != nil {
 		return nil, false, effects, errUnsupportedShell
 	}
-	for _, mutation := range invocation.Mutations {
-		effects.assigned = effects.assigned || !mutation.Unset
-	}
+	// Clearing or removing inherited state can change a dispatching program's
+	// executable/configuration selection just as surely as adding a value.
+	// Model the property (environment mutation), not a list of variable names.
+	effects.environmentChanged = invocation.ClearEnvironment || len(invocation.Mutations) > 0
 	effects.chdir = invocation.Chdir != ""
 	if invocation.CommandIndex < 0 {
 		return nil, true, effects, nil

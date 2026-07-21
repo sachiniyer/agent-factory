@@ -27,13 +27,13 @@ type shellDeclaration struct {
 }
 
 type shellCommand struct {
-	words               []shellWord
-	assignments         []shellAssignment
-	declaration         *shellDeclaration
-	hasHeredoc          bool
-	scopePath           []int
-	environmentAssigned bool
-	directoryChanged    bool
+	words              []shellWord
+	assignments        []shellAssignment
+	declaration        *shellDeclaration
+	hasHeredoc         bool
+	scopePath          []int
+	environmentChanged bool
+	directoryChanged   bool
 }
 
 // parseShellCommands parses Bash syntax with a maintained parser, but resolves

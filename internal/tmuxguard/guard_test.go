@@ -205,6 +205,17 @@ func TestDenialReason(t *testing.T) {
 		{name: "git grep clustered pager dispatcher", command: `git grep -nO'tmux kill-server' pattern`, wantReason: unknownShellReason},
 		{name: "GitHub editor flag", command: `gh pr create --editor`, wantReason: unknownShellReason},
 		{name: "GitHub short editor flag", command: `gh issue create -e`, wantReason: unknownShellReason},
+
+		// Exact-head Codex review findings against c69d3f3e. These subtests
+		// were added and run fail-first before the corresponding fixes.
+		{name: "env unset reaches dispatcher", command: `env -u GIT_CONFIG_GLOBAL git status`, wantReason: unknownShellReason},
+		{name: "env clear reaches dispatcher", command: `env -i git status`, wantReason: unknownShellReason},
+		{name: "Docker named context can select SSH", command: `docker --context my-remote-engine ps`, wantReason: unknownShellReason},
+		{name: "Docker short named context can select SSH", command: `docker -c my-remote-engine ps`, wantReason: unknownShellReason},
+		{name: "Docker attached named context can select SSH", command: `docker --context=my-remote-engine ps`, wantReason: unknownShellReason},
+		{name: "journalctl no-pager consumed as grep operand", command: `journalctl --grep --no-pager`, wantReason: unknownShellReason},
+		{name: "journalctl leading no-pager", command: `journalctl --no-pager --grep pattern`},
+		{name: "journalctl leading short no-pager", command: `journalctl -P --grep pattern`},
 		{name: "opaque unknown program", command: `future-tool safe`, wantReason: unknownShellReason},
 		{name: "relative executable cannot spoof data program", command: `./echo safe`, wantReason: unknownShellReason},
 		{name: "shell assignment", command: `BASH_ENV=/tmp/rc bash -c 'printf safe'`, wantReason: unknownShellReason},
@@ -284,7 +295,7 @@ func TestDenialReason(t *testing.T) {
 		{name: "static double quotes", command: `printf "%s\n" "safe value"`},
 		{name: "safe escaped executable", command: `p\rintf safe`},
 		{name: "simple redirection", command: `printf safe >/tmp/out`},
-		{name: "known env options", command: `env -i -C /tmp --block-signal=PIPE printf safe`},
+		{name: "known env mutations reach target", command: `env -i -C /tmp --block-signal=PIPE printf safe`, wantReason: unknownShellReason},
 		{name: "timeout data arguments", command: `timeout -k 1 5 echo "$HOME"`},
 		{name: "timeout short verbose option", command: `timeout -v 5 echo safe`},
 		{name: "timeout dynamic duration", command: `timeout "$duration" echo safe`, wantReason: unknownShellReason},
@@ -322,6 +333,9 @@ func TestDenialReasonsAreActionable(t *testing.T) {
 		{command: `"$command" safe`, hint: "literal simple commands"},
 		{command: `find "$root" -name safe`, hint: `cd "$root" && find .`},
 		{command: "python3 - <<'PY'\nprint('safe')\nPY", hint: "literal script file"},
+		{command: `env -u GIT_CONFIG_GLOBAL git status`, hint: "env mutations"},
+		{command: `docker --context remote ps`, hint: "omit named contexts"},
+		{command: `journalctl --grep --no-pager`, hint: "immediately after journalctl"},
 	}
 	for _, tt := range tests {
 		reason := DenialReason(tt.command)

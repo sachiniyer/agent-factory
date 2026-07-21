@@ -20,7 +20,7 @@ const (
 	broadTmuxReason    = "Agent Factory blocked a host-wide tmux kill-server. Target an isolated server explicitly with 'tmux -L <socket> kill-server' or 'tmux -S <path> kill-server'."
 	patternKillReason  = "Agent Factory blocked a pattern-based process kill because it cannot prove the shared tmux server will be spared. Resolve the one intended PID and use 'kill -- <pid>'; for tmux teardown, use 'tmux -L <socket> kill-server' or 'tmux -S <path> kill-server'."
 	sortReason         = "Agent Factory blocked GNU sort's external compressor because --compress-program runs another host program. Run sort without --compress-program, or compress and decompress in an isolated runner."
-	unknownShellReason = "Agent Factory's best-effort tmux guard did not recognize this command as an approved shape, so it was blocked. This hook reduces accidental host-wide teardown; it is not containment and cannot prove an arbitrary developer command safe. Rewrite it as supported literal simple commands: keep executables, wrapper options, subcommands, and command-bearing arguments literal; put dynamic data after '--' where the program supports it. Remove assignment prefixes from command-dispatching programs, run inner commands directly instead of through eval or opaque builders, and use a dedicated non-shell tool for an unmodeled program. Move inline interpreter input to a literal script that you have reviewed, put GNU sed '--sandbox' before every script or -e/-f option, invoke Make with bare literal targets, and omit Go executor selectors such as -exec, -toolexec, and -vettool. Git commands must use a literal built-in subcommand without -c/--config-env. Docker inspection may use commands such as 'docker ps' or 'docker inspect' with literal, non-SSH global-option operands; container workloads need an isolated runner. Run gh without --web/-w or --editor/-e and consume its terminal output; supply authentication through a preconfigured token instead of browser-based auth login/refresh, and use a dedicated browser tool instead of a browser-launching CLI. Use af for session orchestration. For tmux teardown, use 'tmux -L <socket> kill-server' or 'tmux -S <path> kill-server' directly."
+	unknownShellReason = "Agent Factory's best-effort tmux guard did not recognize this command as an approved shape, so it was blocked. This hook reduces accidental host-wide teardown; it is not containment and cannot prove an arbitrary developer command safe. Rewrite it as supported literal simple commands: keep executables, wrapper options, subcommands, and command-bearing arguments literal; put dynamic data after '--' where the program supports it. Remove assignment prefixes and env mutations from command-dispatching programs, run inner commands directly instead of through eval or opaque builders, and use a dedicated non-shell tool for an unmodeled program. Move inline interpreter input to a literal script that you have reviewed, put GNU sed '--sandbox' before every script or -e/-f option, invoke Make with bare literal targets, and omit Go executor selectors such as -exec, -toolexec, and -vettool. Git commands must use a literal built-in subcommand without -c/--config-env. Docker inspection may use commands such as 'docker ps' or 'docker inspect' with literal, non-SSH --host operands; omit named contexts, and run container workloads in an isolated runner. Put journalctl --no-pager (or -P) immediately after journalctl, before every filter and option. Run gh without --web/-w or --editor/-e and consume its terminal output; supply authentication through a preconfigured token instead of browser-based auth login/refresh, and use a dedicated browser tool instead of a browser-launching CLI. Use af for session orchestration. For tmux teardown, use 'tmux -L <socket> kill-server' or 'tmux -S <path> kill-server' directly."
 	opaqueInputReason  = "Agent Factory blocked an unmodeled here-document or stdin consumer because it cannot inspect the supplied code or data. For data, write it to a literal file and pass that literal path (Git commit messages may use 'git commit -F -'); for Python code, create and review a literal script file, then run Python with that literal path. Put shell code directly in this Bash request as literal simple commands instead of feeding a shell or script file. For tmux teardown, use 'tmux -L <socket> kill-server' or 'tmux -S <path> kill-server'."
 	findReason         = "Agent Factory blocked a find command whose operands could become command-building syntax. Rewrite a dynamic root as 'cd \"$root\" && find . <literal predicates>', and replace -exec/-execdir/-ok/-okdir with a separate literal command over the results. For tmux teardown, use 'tmux -L <socket> kill-server' or 'tmux -S <path> kill-server'."
 )
@@ -111,7 +111,7 @@ func denialReason(command string, depth int) string {
 		// state is stored under its own ID and therefore cannot leak upward.
 		inherited := inheritedShellExecutionState(command.scopePath, states)
 		command.directoryChanged = command.directoryChanged || inherited.directoryChanged
-		command.environmentAssigned = command.environmentAssigned || inherited.environmentChanged
+		command.environmentChanged = command.environmentChanged || inherited.environmentChanged
 		if reason := inspectCommand(command, depth); reason != "" {
 			return reason
 		}
@@ -196,7 +196,7 @@ func inspectCommand(command shellCommand, depth int) string {
 		if reason := inspectTmux(suffix); reason != "" {
 			return reason
 		}
-		if len(command.assignments) > 0 || command.environmentAssigned || command.directoryChanged {
+		if len(command.assignments) > 0 || command.environmentChanged || command.directoryChanged {
 			return unknownShellReason
 		}
 		return ""
@@ -206,7 +206,7 @@ func inspectCommand(command shellCommand, depth int) string {
 	// the program that consumes the resulting environment. No current program
 	// policy proves arbitrary assignments inert, so they fail closed instead of
 	// relying on an inevitably incomplete variable-name denylist.
-	if len(command.assignments) > 0 || command.environmentAssigned {
+	if len(command.assignments) > 0 || command.environmentChanged {
 		return unknownShellReason
 	}
 	if command.directoryChanged && !policy.directoryInert {
@@ -253,9 +253,9 @@ func inspectCommand(command shellCommand, depth int) string {
 			return ""
 		}
 		return inspectCommand(shellCommand{
-			words:               target,
-			environmentAssigned: effects.assigned,
-			directoryChanged:    effects.chdir,
+			words:              target,
+			environmentChanged: effects.environmentChanged,
+			directoryChanged:   effects.chdir,
 		}, depth)
 	case roleFind:
 		return inspectFind(words[1:])

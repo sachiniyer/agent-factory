@@ -249,7 +249,11 @@ func dockerSubcommandAt(args []shellWord) (int, bool, bool) {
 			return 0, len(args) == 1, len(args) == 1
 		case "--debug", "-D", "--tls", "--tlsverify":
 			continue
-		case "--config", "-c", "--context", "--host", "-H", "--log-level", "-l",
+		case "--context", "-c":
+			// A context name is not proof of its transport; it can resolve to an
+			// SSH endpoint. Require the active local context or a literal host.
+			return 0, false, false
+		case "--config", "--host", "-H", "--log-level", "-l",
 			"--tlscacert", "--tlscert", "--tlskey":
 			if i+1 >= len(args) || !args[i+1].resolved {
 				return 0, false, false
@@ -277,7 +281,11 @@ func dockerSubcommandAt(args []shellWord) (int, bool, bool) {
 			}
 			continue
 		}
-		if strings.HasPrefix(arg, "--config=") || strings.HasPrefix(arg, "--context=") ||
+		if strings.HasPrefix(arg, "--context=") ||
+			(strings.HasPrefix(arg, "-c") && len(arg) > 2) {
+			return 0, false, false
+		}
+		if strings.HasPrefix(arg, "--config=") ||
 			strings.HasPrefix(arg, "--log-level=") ||
 			strings.HasPrefix(arg, "--tlscacert=") || strings.HasPrefix(arg, "--tlscert=") ||
 			strings.HasPrefix(arg, "--tlskey=") ||
@@ -512,10 +520,12 @@ func literalPythonScriptPath(path string) bool {
 }
 
 func inspectJournalctl(args []shellWord) string {
-	for _, arg := range args {
-		if arg.resolved && (arg.literal == "--no-pager" || arg.literal == "-P") {
-			return ""
-		}
+	// A later --no-pager can be the operand of an earlier option (for example,
+	// --grep --no-pager). Requiring it first proves journalctl parses it as the
+	// pager-control option without enumerating journalctl's full option grammar.
+	if len(args) > 0 && args[0].resolved &&
+		(args[0].literal == "--no-pager" || args[0].literal == "-P") {
+		return ""
 	}
 	return unknownShellReason
 }
