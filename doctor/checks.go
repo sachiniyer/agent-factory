@@ -395,8 +395,10 @@ func checkOrphanedProcesses(ctx *scanContext, report *Report) {
 }
 
 // tmuxServerDead parses a TMUX env value ("socketPath,serverPID,sessionIdx")
-// and reports whether the server it names is gone. Unparseable values are
-// treated as alive (never accuse on garbage).
+// and reports whether the process identity it records still belongs to tmux.
+// Unparseable values are treated as alive (never accuse on garbage). The socket
+// path is deliberately not a liveness signal: a crashed server can leave it
+// behind after the kernel recycles the recorded PID to an unrelated process.
 func tmuxServerDead(ctx *scanContext, tmuxEnv string) bool {
 	parts := strings.Split(tmuxEnv, ",")
 	if len(parts) < 2 {
@@ -410,12 +412,8 @@ func tmuxServerDead(ctx *scanContext, tmuxEnv string) bool {
 	if alive && strings.HasPrefix(server.Comm, "tmux") {
 		return false
 	}
-	// PID gone or recycled to a non-tmux process; confirm via the socket.
-	if _, err := os.Stat(parts[0]); err == nil && alive {
-		// Socket still present and some process holds the PID — too
-		// ambiguous to call dead.
-		return false
-	}
+	// PID gone or recycled to a non-tmux process: the server named by this
+	// environment value is dead, regardless of any stale or reused socket path.
 	return true
 }
 

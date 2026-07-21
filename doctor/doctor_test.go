@@ -518,6 +518,12 @@ func TestTmuxServerDeadParsing(t *testing.T) {
 	require.False(t, tmuxServerDead(ctx, "/tmp/sock,notanumber,0"))
 	// A PID that certainly exists but is not tmux, with no socket on disk.
 	require.True(t, tmuxServerDead(ctx, fmt.Sprintf("/nonexistent-sock-%d,%d,0", os.Getpid(), os.Getpid())))
+	// A crashed tmux server can leave its socket behind while the kernel recycles
+	// its PID to a non-tmux process. The stale path is not evidence that the
+	// process named by this TMUX value is still a tmux server (#2206).
+	staleSocket := filepath.Join(t.TempDir(), "stale-tmux.sock")
+	require.NoError(t, os.WriteFile(staleSocket, nil, 0o600))
+	require.True(t, tmuxServerDead(ctx, fmt.Sprintf("%s,%d,0", staleSocket, os.Getpid())))
 	// A dead PID.
 	c := exec.Command("true")
 	require.NoError(t, c.Run())
