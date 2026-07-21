@@ -1,7 +1,6 @@
 // Package upgradetxn owns the crash-durable filesystem transaction used to
-// replace the running af binary. The transaction is deliberately independent
-// of the candidate binary: only the already-running (previous) binary may
-// supervise, commit, or roll back an upgrade.
+// replace af. It is independent of the candidate: only the already-running
+// previous binary may supervise, commit, or roll back an upgrade.
 package upgradetxn
 
 import (
@@ -270,6 +269,9 @@ func Prepare(plan Plan) (_ *Transaction, retErr error) {
 	if err != nil {
 		return nil, fmt.Errorf("read running executable: %w", err)
 	}
+	if digest(previousBinary) == digest(plan.Candidate) {
+		return nil, errors.New("candidate binary is byte-identical to the previous binary")
+	}
 
 	root := upgradeRoot(home)
 	if err := os.MkdirAll(root, transactionDirMode); err != nil {
@@ -517,6 +519,9 @@ func (t *Transaction) AuthorizeActivation(transactionID, nonce string) error {
 	}
 	if status.Phase != PhaseSupervisorReady {
 		return fmt.Errorf("upgrade recovery actor has not reached supervisor_ready (status %s)", status.Phase)
+	}
+	if !time.Now().UTC().Before(status.Deadline) {
+		return fmt.Errorf("upgrade recovery actor's supervisor_ready deadline expired at %s", status.Deadline.Format(time.RFC3339Nano))
 	}
 	approvalPath := filepath.Join(transactionDir(current.HomeDir, current.ID), "activation.approved")
 	if err := config.AtomicWriteFile(approvalPath, []byte(current.RecoveryNonce+"\n"), journalFileMode); err != nil {

@@ -212,6 +212,24 @@ func TestActivationRequiresLivePreviousBinaryNonceHandshake(t *testing.T) {
 	require.NoError(t, lease.Release())
 }
 
+func TestActivationRejectsExpiredSupervisorLease(t *testing.T) {
+	txn, _, _ := prepareFixture(t)
+	journal := txn.Journal()
+	lease, err := txn.tryAcquireRecoveryAs(journal.PreviousBinaryPath)
+	require.NoError(t, err)
+	require.NoError(t, lease.Advance(PhaseSupervisorReady))
+	require.NoError(t, lease.Heartbeat(PhaseSupervisorReady, time.Now().Add(-time.Second)))
+
+	err = txn.AuthorizeActivation(journal.ID, journal.RecoveryNonce)
+	require.Error(t, err,
+		"a live-but-stuck actor whose own phase deadline expired is not ready to own shutdown")
+	require.ErrorContains(t, err, "deadline expired")
+	authorized, readErr := txn.ActivationAuthorized()
+	require.NoError(t, readErr)
+	require.False(t, authorized)
+	require.NoError(t, lease.Release())
+}
+
 func TestRecoveryTakeoverReloadsJournalAfterActorDeath(t *testing.T) {
 	txn, home, _ := prepareFixture(t)
 	stale, err := Load(home)
@@ -330,4 +348,19 @@ func TestPrepareNeverDeletesPreexistingRecoveryArtifact(t *testing.T) {
 	require.NoError(t, readErr)
 	require.Equal(t, "owned-by-an-earlier-recovery", string(got),
 		"refusing a collision must never clean up an artifact this call did not create")
+}
+
+func TestPrepareRejectsByteIdenticalCandidateIdentity(t *testing.T) {
+	home := t.TempDir()
+	executable := filepath.Join(t.TempDir(), "af")
+	require.NoError(t, os.WriteFile(executable, []byte("same-binary"), 0o755))
+
+	_, err := Prepare(Plan{
+		ID: "identical", HomeDir: home, ExecutablePath: executable,
+		FromVersion: "1", ToVersion: "2", Candidate: []byte("same-binary"),
+		RecoveryJob: RecoveryJob{Kind: RecoveryJobDetached},
+	})
+	require.Error(t, err,
+		"previous and candidate roles must remain structurally distinguishable by digest")
+	require.ErrorContains(t, err, "byte-identical")
 }
