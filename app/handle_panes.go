@@ -443,13 +443,11 @@ func (r tabSlotResolver) resolve(key tabSlotKey) (int, bool) {
 // opened). Re-resolving the pre-change key is what makes the selection move WITH
 // its tab instead.
 //
-// The sidebar cursor is remapped in the same breath, and that is load-bearing
-// rather than cosmetic: a tab row is keyed by SLOT (rowIdentity), so the cursor
-// has the same exposure, and pushSelection reads the cursor's slot straight back
-// into store.ActiveTab — leaving it behind would let the next read CLOBBER this
-// remap back onto the wrong tab. SyncCursorToActiveTab no-ops unless the cursor
-// really rests on a tab row, so a cursor parked on a header or an instance row is
-// untouched.
+// The caller remaps a tab-row cursor after this returns. That separation is
+// load-bearing for a same-title replacement: ReplaceInstanceByTitle may re-sort
+// the projection, so the sidebar's flattened indices are stale until the final
+// selection assertion rebuilds them. Syncing here would read a neighbor through
+// the stale index and overwrite the durable last-cursor identity.
 //
 // Only the STORE's selected instance has an active tab to carry (the same
 // question handleCloseTab answers with treeIsSelected), and a tab that is truly
@@ -469,7 +467,6 @@ func (m *home) reconcileActiveTabForTabs(instance *session.Instance, oldKeys []t
 	}
 	m.store.SetActiveTab(idx)
 	m.clampSelectionTab()
-	m.sidebar.SyncCursorToActiveTab()
 	return true
 }
 

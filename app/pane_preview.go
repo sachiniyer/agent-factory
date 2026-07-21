@@ -71,9 +71,10 @@ func paneBindingIdentityOf(binding paneBinding) paneBindingIdentity {
 	if tab.Kind != session.TabKindAgent {
 		identity.tabID = tab.ID
 	}
-	if identity.tabID == "" {
-		identity.tabName = tab.Name
-	}
+	// Keep the name even when an ID is present. A freshly-created tab is locally
+	// ID-less until the daemon snapshot backfills it; a suppression captured on
+	// one side of that transition needs the name as its shared identity bridge.
+	identity.tabName = tab.Name
 	return identity
 }
 
@@ -81,8 +82,8 @@ func samePaneBindingIdentity(a, b paneBindingIdentity) bool {
 	if a.instance != b.instance {
 		return false
 	}
-	if a.tabID != "" || b.tabID != "" {
-		return a.tabID != "" && a.tabID == b.tabID
+	if a.tabID != "" && b.tabID != "" {
+		return a.tabID == b.tabID
 	}
 	if a.tabName != "" || b.tabName != "" {
 		return a.tabName != "" && a.tabName == b.tabName

@@ -687,6 +687,9 @@ func (m *home) updateInstanceFromSnapshot(inst *session.Instance, d session.Inst
 			// index in range — which a permutation never violates — so an
 			// index-keyed selection silently becomes a different tab.
 			if m.reconcileActiveTabForTabs(inst, oldKeys, sameSessionTabs) {
+				// An in-place roster update never re-sorts the projection, so the
+				// sidebar indices are current and can follow the remapped tab now.
+				m.sidebar.SyncCursorToActiveTab()
 				changed = true
 			}
 		}

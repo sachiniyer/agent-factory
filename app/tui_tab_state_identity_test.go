@@ -3,6 +3,7 @@ package app
 import (
 	"encoding/json"
 	"testing"
+	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/session"
@@ -17,11 +18,13 @@ import (
 // re-opening the preview because the stored ordinal went stale.
 func TestPanePreviewSuppressionFollowsTabIdentityAcrossReorder(t *testing.T) {
 	for _, tc := range []struct {
-		name   string
-		idless bool
+		name       string
+		idless     bool
+		backfillID bool
 	}{
 		{name: "stable ID"},
 		{name: "legacy ID-less name fallback", idless: true},
+		{name: "ID backfill after dismissal", idless: true, backfillID: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			h, alpha := multiTabHome(t)
@@ -42,6 +45,9 @@ func TestPanePreviewSuppressionFollowsTabIdentityAcrossReorder(t *testing.T) {
 			h.cancelPanePreview(false)
 			require.NotNil(t, h.panePreviewSuppression)
 			require.Nil(t, h.panePreviewTxn)
+			if tc.backfillID {
+				alpha.GetTabs()[2].ID = "daemon-backfilled-target"
+			}
 
 			require.NoError(t, alpha.ReorderTab(2, 3))
 			require.Equal(t, targetName, alpha.GetTabs()[3].Name,
@@ -182,11 +188,70 @@ func TestSwapSameTitleActiveTabFollowsReplacementName(t *testing.T) {
 		return recreated, nil
 	}))
 
-	require.True(t, h.swapInstanceFromSnapshot(recreated.ToInstanceData()))
+	require.True(t, h.reconcileSnapshot([]session.InstanceData{recreated.ToInstanceData()}))
 	assert.Equal(t, "a", recreated.GetTabs()[h.store.ActiveTab()].Name,
 		"the active tab follows its equivalent name across the replaced-session reorder")
 	sel := h.sidebar.GetSelection()
 	require.True(t, sel.IsTab)
 	assert.Equal(t, "a", recreated.GetTabs()[sel.TabIndex].Name,
 		"the cursor and active tab stay on the same replacement tab")
+}
+
+// TestSwapSameTitleTabCursorSurvivesReplacementResort is the stale-index edge
+// behind row 4: ReplaceInstanceByTitle re-sorts by CreatedAt. The sidebar still
+// carries the pre-sort projection index until the snapshot's final selection
+// assertion rebuilds it, so synchronizing the cursor inside the swap can record
+// the neighbor as lastCursor* and lose the selected replacement tab.
+func TestSwapSameTitleTabCursorSurvivesReplacementResort(t *testing.T) {
+	h := newTestHome(t)
+	base := time.Now().Add(-4 * time.Hour)
+
+	first := instanceWithFakeBackend(t, "first")
+	first.ID = "first-id"
+	first.CreatedAt = base
+	stale := instanceWithFakeBackend(t, "dup")
+	stale.ID = "stale-dup"
+	stale.CreatedAt = base.Add(time.Hour)
+	last := instanceWithFakeBackend(t, "last")
+	last.ID = "last-id"
+	last.CreatedAt = base.Add(2 * time.Hour)
+	for i, name := range []string{"agent", "a", "b"} {
+		kind := session.TabKindShell
+		if i == 0 {
+			kind = session.TabKindAgent
+		}
+		stale.AddTabForTest(name, kind)
+		stale.GetTabs()[i].ID = "stale-" + name
+	}
+	h.store.AddInstance(first)
+	h.store.AddInstance(stale)
+	h.store.AddInstance(last)
+	h.sidebar.SelectInstance(stale)
+	h.sidebar.SelectTabRow(stale.Title, 1)
+	require.Equal(t, "a", stale.GetTabs()[h.store.ActiveTab()].Name)
+
+	recreated := instanceWithFakeBackend(t, "dup")
+	recreated.ID = "fresh-dup"
+	recreated.CreatedAt = base.Add(3 * time.Hour) // moves after "last"
+	for i, name := range []string{"agent", "b", "a"} {
+		kind := session.TabKindShell
+		if i == 0 {
+			kind = session.TabKindAgent
+		}
+		recreated.AddTabForTest(name, kind)
+		recreated.GetTabs()[i].ID = "fresh-" + name
+	}
+	t.Cleanup(SetInstanceBuilderForTest(func(session.InstanceData) (*session.Instance, error) {
+		return recreated, nil
+	}))
+
+	require.True(t, h.reconcileSnapshot([]session.InstanceData{
+		first.ToInstanceData(), recreated.ToInstanceData(), last.ToInstanceData(),
+	}))
+	require.Same(t, recreated, h.sidebar.GetSelectedInstance(),
+		"the snapshot's final assertion re-pins the replacement after it moves")
+	sel := h.sidebar.GetSelection()
+	require.True(t, sel.IsTab, "the cursor must stay on its replacement tab row")
+	assert.Equal(t, "a", recreated.GetTabs()[sel.TabIndex].Name)
+	assert.Equal(t, "a", recreated.GetTabs()[h.store.ActiveTab()].Name)
 }
