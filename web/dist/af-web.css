@@ -785,6 +785,9 @@ body {
 .af-row:hover {
   background: var(--af-bg-inset);
 }
+.af-row-inert {
+  cursor: default;
+}
 .af-row-creating {
   cursor: progress;
 }

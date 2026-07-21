@@ -101,7 +101,7 @@ function row(page: Page, title: string): Locator {
 
 /** One of the quiet lifecycle glyphs revealed on the selected rail row (#2186). */
 function railAction(page: Page, title: string, name: "Archive session" | "Restore session" | "Kill session"): Locator {
-  return row(page, title).getByRole("button", { name, exact: true });
+  return row(page, title).getByRole("button", { name: `${name} “${title}”`, exact: true });
 }
 
 /** One state's checkbox in the rail's filter menu (feat: hide archived by default). */
@@ -875,6 +875,62 @@ test("status dots (#1766): waiting shows a green dot, working shows none, error 
   await ctx.close();
 });
 
+test("#2234: creating and id-less rows expose no lifecycle actions; the shared projection chooses the verb", async ({
+  browser,
+}) => {
+  const ctx = await browser.newContext();
+  const p = await ctx.newPage();
+  await p.route("**/v1/Snapshot", async (route) => {
+    const resp = await route.fetch();
+    const body = await resp.json();
+    const snap = body?.data as { instances?: Array<Record<string, unknown> & { title: string }> };
+    const list = snap?.instances ?? [];
+    const proto = { ...(list.find((s) => s.title === SESSION_A) ?? {}) };
+    const synth = (title: string, extra: Record<string, unknown>) => ({
+      ...proto,
+      id: `synth-${title}`,
+      title,
+      branch: `synth-${title}`,
+      liveness: 2,
+      in_flight_op: 0,
+      lifecycle_action: "archive",
+      ...extra,
+    });
+    list.push(
+      synth("probe-actionable", {}),
+      synth("probe-restorable", { liveness: 3, lifecycle_action: "restore" }),
+      synth("probe-creating", { in_flight_op: 1, lifecycle_action: undefined }),
+      synth("probe-idless", { id: undefined, lifecycle_action: undefined }),
+    );
+    if (snap) {
+      snap.instances = list;
+    }
+    await route.fulfill({ status: resp.status(), contentType: "application/json", body: JSON.stringify(body) });
+  });
+  await p.goto("/");
+  await expect(row(p, "probe-actionable")).toBeVisible({ timeout: 15_000 });
+
+  // These are visible status rows, but the Go projection withheld a lifecycle
+  // action. The web must not manufacture controls from their pixels/state.
+  for (const title of ["probe-creating", "probe-idless"]) {
+    const inert = row(p, title);
+    await expect(inert).toBeVisible();
+    await expect(inert).toHaveAttribute("aria-disabled", "true");
+    await inert.hover();
+    await expect(inert.locator(".af-row-actions")).toHaveCount(0);
+    await expect(inert.getByRole("button")).toHaveCount(0);
+  }
+
+  // The same server-owned value selects Archive vs Restore, and every accessible
+  // name carries its target now that unselected rows can own controls.
+  await expect(railAction(p, "probe-actionable", "Archive session")).toHaveCount(1);
+  await expect(railAction(p, "probe-actionable", "Kill session")).toHaveCount(1);
+  await expect(railAction(p, "probe-restorable", "Restore session")).toHaveCount(1);
+  await expect(railAction(p, "probe-restorable", "Archive session")).toHaveCount(0);
+
+  await ctx.close();
+});
+
 test("click-to-attach opens the xterm terminal and shows live output", async () => {
   await row(page, SESSION_A).click();
 
@@ -892,8 +948,8 @@ test("click-to-attach opens the xterm terminal and shows live output", async () 
   await expect(page.locator(".af-term-meta")).toContainText("Live");
   await expect(page.locator(".af-app.af-kb-terminal")).toBeVisible();
 
-  // Every instance reserves the quiet action slot, but only the selected row shows
-  // it at rest. Kill remains muted; af-danger is reserved for confirmation.
+  // Every actionable instance reserves the quiet action slot, but only the selected
+  // row shows it at rest. Kill remains muted; af-danger is reserved for confirmation.
   const visibleRows = page.locator(".af-rail-list .af-row");
   await expect(page.locator(".af-row-actions")).toHaveCount(await visibleRows.count());
   await expect(row(page, SESSION_A).locator(".af-row-actions")).toHaveCSS("opacity", "1");

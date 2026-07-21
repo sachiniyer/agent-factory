@@ -99,7 +99,7 @@ func TestMenuNarrowWidthKeepsHelpAndQuit(t *testing.T) {
 // hint and still let the row degrade instead of overflowing.
 func TestMenuLimitBlockedRowFitsNarrowWidths(t *testing.T) {
 	m := NewMenu()
-	inst := &session.Instance{}
+	inst := &session.Instance{ID: "ui-test-session"}
 	inst.SetLimitReached(time.Time{})
 	m.SetInstance(inst)
 

@@ -11,11 +11,13 @@ import (
 	"github.com/sachiniyer/agent-factory/ui/layout"
 )
 
-// readyUIInstance builds a Ready-status instance for ui-package render tests.
-// liveness is unexported, so it goes through the SetStatus shim rather than a
+// readyUIInstance builds an actionable Ready-status instance for ui-package
+// render tests. Real daemon-published sessions carry stable IDs; tests that need
+// the legacy inert shape construct an id-less Instance explicitly (#2234).
+// Liveness is unexported, so this goes through the SetStatus shim rather than a
 // struct literal (#1195 Phase 1b).
 func readyUIInstance() *session.Instance {
-	i := &session.Instance{}
+	i := &session.Instance{ID: "ui-test-session"}
 	i.SetStatusForTest(session.Ready)
 	return i
 }
@@ -81,23 +83,29 @@ func TestMenuAgentTabShowsBothScrollKeys(t *testing.T) {
 func TestMenuArchiveRestoreActionByRowState(t *testing.T) {
 	for _, tc := range []struct {
 		name        string
+		id          string
 		status      session.Status
+		wantKill    bool
 		wantArchive bool
 		wantRestore bool
 	}{
-		{name: "running archives", status: session.Running, wantArchive: true},
-		{name: "ready archives", status: session.Ready, wantArchive: true},
-		{name: "lost restores", status: session.Lost, wantRestore: true},
-		{name: "dead restores", status: session.Dead, wantRestore: true},
-		{name: "archived restores", status: session.Archived, wantRestore: true},
-		{name: "creating omits both", status: session.Loading, wantArchive: false, wantRestore: false},
+		{name: "running archives", id: "running-id", status: session.Running, wantKill: true, wantArchive: true},
+		{name: "ready archives", id: "ready-id", status: session.Ready, wantKill: true, wantArchive: true},
+		{name: "lost restores", id: "lost-id", status: session.Lost, wantKill: true, wantRestore: true},
+		{name: "dead restores", id: "dead-id", status: session.Dead, wantKill: true, wantRestore: true},
+		{name: "archived restores", id: "archived-id", status: session.Archived, wantKill: true, wantRestore: true},
+		{name: "creating omits lifecycle actions", id: "pending-id", status: session.Loading},
+		{name: "id-less omits lifecycle actions", status: session.Ready},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			inst := &session.Instance{}
+			inst := &session.Instance{ID: tc.id}
 			inst.SetStatusForTest(tc.status)
 			m := NewMenu()
 			m.SetInstance(inst)
 
+			if got := menuHasOption(m, keys.KeyKill); got != tc.wantKill {
+				t.Fatalf("KeyKill present = %v, want %v", got, tc.wantKill)
+			}
 			if got := menuHasOption(m, keys.KeyArchive); got != tc.wantArchive {
 				t.Fatalf("KeyArchive present = %v, want %v", got, tc.wantArchive)
 			}
@@ -126,7 +134,7 @@ func TestMenuArchiveRestoreHintByRowState(t *testing.T) {
 		{name: "archived shows restore", status: session.Archived, want: "r restore", reject: "a archive"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			inst := &session.Instance{}
+			inst := &session.Instance{ID: "ui-test-session"}
 			inst.SetStatusForTest(tc.status)
 			m := NewMenu()
 			m.SetInstance(inst)

@@ -343,9 +343,10 @@ header shows the session title, the terminal's connection state (`Live` /
 
 #### Per-session actions
 
-Each session's rail row reserves space for two quiet glyph actions. They stay visible
-on the selected row and reveal on hover or keyboard focus on any other row, without
-moving the title:
+Each actionable session's rail row reserves space for two quiet glyph actions. They
+stay visible on the selected row and reveal on hover or keyboard focus on any other
+row, without moving the title. A creating or legacy id-less row renders status only —
+the daemon projects no lifecycle action, so neither the TUI nor web invents one:
 
 - **`▪` Archive** — move a live session into the archived group. On an archived
   row the same slot becomes **`↶` Restore**.
@@ -357,9 +358,11 @@ header only when the selected session is blocked at a usage limit; it is the esc
 from that wall and stays hidden in every other state. Send follow-up instructions by
 typing in the attached terminal (or with `af sessions send-prompt`).
 
-**Create** a session with **`+ New`**; the new row appears in the rail and opens
-attached. Kill and archive resolve the row that exposed the action by its stable id,
-so acting on an unselected row and titles that collide across repos are unambiguous.
+**Create** a session with **`+ New`**; the pending row appears immediately without
+destructive controls, then opens attached when creation completes. Kill and archive
+resolve the row that exposed the action by its stable id, so acting on an unselected
+row and titles that collide across repos are unambiguous. Accessible action names also
+include that row's title.
 
 ### Tabs
 

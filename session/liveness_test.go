@@ -122,6 +122,46 @@ func TestSnapshotInFlightOpRoundTrips(t *testing.T) {
 		"legacy data without in_flight_op keeps the old Deleting fallback")
 }
 
+// TestLifecycleActionIsSharedAcrossInstanceAndProjection is #2234's parity
+// contract. The TUI reads Instance.LifecycleAction while the web reads the value
+// serialized by ToInstanceData; both must be the same domain decision, including
+// the two non-actionable rows that triggered the regression.
+func TestLifecycleActionIsSharedAcrossInstanceAndProjection(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		id   string
+		live Liveness
+		op   InFlightOp
+		want LifecycleAction
+	}{
+		{name: "ready archives", id: "ready-id", live: LiveReady, want: LifecycleActionArchive},
+		{name: "running archives", id: "running-id", live: LiveRunning, want: LifecycleActionArchive},
+		{name: "lost restores", id: "lost-id", live: LiveLost, want: LifecycleActionRestore},
+		{name: "dead restores", id: "dead-id", live: LiveDead, want: LifecycleActionRestore},
+		{name: "archived restores", id: "archived-id", live: LiveArchived, want: LifecycleActionRestore},
+		{name: "creating has no lifecycle action", id: "pending-id", live: LiveReady, op: OpCreating, want: LifecycleActionNone},
+		{name: "id-less has no lifecycle action", live: LiveReady, want: LifecycleActionNone},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			inst := &Instance{ID: tc.id, liveness: tc.live, inFlightOp: tc.op}
+			require.Equal(t, tc.want, inst.LifecycleAction(), "TUI domain decision")
+			require.Equal(t, tc.want, inst.ToInstanceData().LifecycleAction, "web projection decision")
+		})
+	}
+}
+
+func TestLifecycleActionIsProjectionOnly(t *testing.T) {
+	data := (&Instance{ID: "ready-id", liveness: LiveReady}).ToInstanceData()
+	require.Equal(t, LifecycleActionArchive, data.LifecycleAction)
+
+	stored := data.ForStorage()
+	require.Equal(t, LifecycleActionNone, stored.LifecycleAction)
+	raw, err := json.Marshal(stored)
+	require.NoError(t, err)
+	assert.NotContains(t, string(raw), "lifecycle_action",
+		"instances.json must not persist a UI capability derived from live state")
+}
+
 func TestInFlightOpStrippedFromStorageRecords(t *testing.T) {
 	data := InstanceData{Status: Deleting, Liveness: LiveRunning, InFlightOp: OpArchiving}
 	stored := data.ForStorage()

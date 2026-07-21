@@ -11,6 +11,7 @@ import assert from "node:assert/strict";
 import {
   canManageTabs,
   documentTitle,
+  isActionableSession,
   supportsTabManagement,
   tabBarSig,
   tabCreationUnavailableReason,
@@ -32,6 +33,24 @@ function state(over: Partial<AppState> = {}): AppState {
     ...over,
   } as AppState;
 }
+
+test("rail actionability is granted only by the daemon projection (#2234)", () => {
+  assert.equal(
+    isActionableSession(sess({ lifecycle_action: "archive" })),
+    true,
+    "a stable row with the projected verb is actionable",
+  );
+  assert.equal(
+    isActionableSession(sess()),
+    false,
+    "the browser must not infer an action from a settled-looking row",
+  );
+  assert.equal(
+    isActionableSession(sess({ id: undefined, lifecycle_action: "archive" })),
+    false,
+    "a malformed id-less capability fails closed",
+  );
+});
 
 test("an unrelated status/title snapshot on the selected session keeps the SAME sig", () => {
   const base = state();
