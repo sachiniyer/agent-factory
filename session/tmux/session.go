@@ -53,9 +53,8 @@ type TmuxSession struct {
 	// program is the command the pane runs. It is mutated by Restore() while
 	// other goroutines read it, so all access goes through the programMu-guarded
 	// accessors in program.go (#1254) — never touch these fields directly.
-	program       string
-	preSubmitEcho preSubmitEchoBehavior
-	programMu     sync.RWMutex
+	program   string
+	programMu sync.RWMutex
 	// submitMu serializes the whole clear → paste → Enter transaction. A second
 	// submit must never clear the first submit's freshly pasted composer while
 	// that first call is still waiting to send Enter (#2178 review).
@@ -192,7 +191,6 @@ func newTmuxSession(sanitizedName string, program string, ptyFactory PtyFactory,
 	return &TmuxSession{
 		sanitizedName: sanitizedName,
 		program:       program,
-		preSubmitEcho: knownPreSubmitEchoBehavior(program),
 		ptyFactory:    ptyFactory,
 		cmdExec:       cmdExec,
 	}
