@@ -26,34 +26,49 @@ import (
 // threaded through the auth/CORS seam and covered by the WS harness.
 
 // eventsBufferSize bounds one subscriber's pending-event queue. A subscriber that
-// falls this far behind has an event dropped (non-blocking publish) rather than
-// stalling the mutation that published it — a dropped state-change is recoverable
-// by a Snapshot, a blocked daemon mutation is not. Generous enough that a healthy
-// client never drops.
+// falls this far behind is disconnected (non-blocking publish) rather than
+// stalling the mutation that published it. Reconnecting clients take a fresh
+// Snapshot, so the missed state change cannot leave them silently stale. Generous
+// enough that a healthy client is never disconnected.
 const eventsBufferSize = 256
 
 // eventsHub is the Manager-owned fan-out of state-change events to every
-// connected /v1/events subscriber. Non-blocking on publish (drop-slow), so no
-// subscriber can back-pressure a daemon mutation.
+// connected /v1/events subscriber. Non-blocking on publish (disconnect-slow), so
+// no subscriber can back-pressure a daemon mutation or silently miss an event.
 type eventsHub struct {
 	mu   sync.Mutex
-	subs map[uint64]chan agentproto.Event
+	subs map[uint64]*eventsSubscriber
 	next uint64
 }
 
+type eventsSubscriber struct {
+	events   chan agentproto.Event
+	overflow chan struct{}
+}
+
 func newEventsHub() *eventsHub {
-	return &eventsHub{subs: make(map[uint64]chan agentproto.Event)}
+	return &eventsHub{subs: make(map[uint64]*eventsSubscriber)}
 }
 
 // subscribe registers a subscriber and returns its id and receive channel.
 func (h *eventsHub) subscribe() (uint64, <-chan agentproto.Event) {
+	id, events, _ := h.subscribeWithOverflow()
+	return id, events
+}
+
+// subscribeWithOverflow also returns the signal serveEvents uses to turn a
+// missed event into a reconnect and authoritative Snapshot.
+func (h *eventsHub) subscribeWithOverflow() (uint64, <-chan agentproto.Event, <-chan struct{}) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.next++
 	id := h.next
-	ch := make(chan agentproto.Event, eventsBufferSize)
-	h.subs[id] = ch
-	return id, ch
+	sub := &eventsSubscriber{
+		events:   make(chan agentproto.Event, eventsBufferSize),
+		overflow: make(chan struct{}),
+	}
+	h.subs[id] = sub
+	return id, sub.events, sub.overflow
 }
 
 // unsubscribe removes a subscriber.
@@ -63,17 +78,20 @@ func (h *eventsHub) unsubscribe(id uint64) {
 	delete(h.subs, id)
 }
 
-// publish fans an event to every subscriber, dropping it for any whose buffer is
-// full (never blocking the mutation that published it).
+// publish fans an event to every subscriber, evicting any whose buffer is full
+// (never blocking the mutation that published it). Closing both channels makes
+// the gap observable to direct subscribers and lets serveEvents promptly close
+// the WebSocket instead of leaving the client silently stale.
 func (h *eventsHub) publish(ev agentproto.Event) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	for _, ch := range h.subs {
+	for id, sub := range h.subs {
 		select {
-		case ch <- ev:
+		case sub.events <- ev:
 		default:
-			// Slow subscriber: drop this event rather than block the daemon. The
-			// client can re-Snapshot to resynchronise.
+			delete(h.subs, id)
+			close(sub.overflow)
+			close(sub.events)
 		}
 	}
 }
@@ -122,7 +140,7 @@ func serveEvents(hub *eventsHub, conn *websocket.Conn) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	id, ch := hub.subscribe()
+	id, ch, overflow := hub.subscribeWithOverflow()
 	defer hub.unsubscribe(id)
 
 	var wg sync.WaitGroup
@@ -139,14 +157,38 @@ func serveEvents(hub *eventsHub, conn *websocket.Conn) {
 		}
 	}()
 	go func() { defer wg.Done(); defer cancel(); keepalivePTY(ctx, conn) }()
+	closeOverflow := func() {
+		// Send the close frame before canceling the read context. Canceling first
+		// can tear down coder/websocket as a raw EOF and hide the retryable 1013
+		// status from the client.
+		_ = conn.Close(websocket.StatusTryAgainLater, "event subscriber overflow")
+		cancel()
+		wg.Wait()
+	}
 
 	for {
+		// Prefer the overflow signal over draining buffered events: once a gap
+		// exists, no delta sequence can repair it, and the client needs a fresh
+		// Snapshot as soon as possible.
+		select {
+		case <-overflow:
+			closeOverflow()
+			return
+		default:
+		}
 		select {
 		case <-ctx.Done():
 			_ = conn.Close(websocket.StatusNormalClosure, "")
 			wg.Wait()
 			return
-		case ev := <-ch:
+		case <-overflow:
+			closeOverflow()
+			return
+		case ev, ok := <-ch:
+			if !ok {
+				closeOverflow()
+				return
+			}
 			wctx, wcancel := context.WithTimeout(ctx, wsWriteTimeout)
 			err := agentproto.WriteControl(wctx, conn, ev)
 			wcancel()
