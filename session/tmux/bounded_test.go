@@ -1,6 +1,7 @@
 package tmux
 
 import (
+	"bytes"
 	"errors"
 	"os"
 	"os/exec"
@@ -157,6 +158,25 @@ func TestRealPipePaneStreamsPastTheReap(t *testing.T) {
 	t.Cleanup(func() { _ = ex.Run(exec.Command("tmux", "kill-session", "-t", "="+name)) })
 
 	ts := NewTmuxSessionFromSanitizedNameWithDeps(name, "sh", MakePtyFactory(), ex)
+	regular := filepath.Join(t.TempDir(), "pane.log")
+	if err := ts.EnablePipePane("dd of=" + shellQuoteForTest(regular) + " bs=4096 2>/dev/null"); err != nil {
+		t.Fatalf("EnablePipePane to regular file: %v", err)
+	}
+	const fileMarker = "AF1787FILE"
+	if err := ts.SendRawKeys([]byte("echo " + fileMarker + "\n")); err != nil {
+		t.Fatalf("SendRawKeys to regular-file pipe: %v", err)
+	}
+	fileBytes, fileOK := waitForFileContains(regular, []byte(fileMarker), 2*time.Second)
+	if !fileOK {
+		pipeState, _ := ex.Output(exec.Command("tmux", "display-message", "-p", "-t", "="+name+":", "#{pane_pipe} #{pane_pipe_pid}"))
+		pane, _ := ts.CapturePaneContent()
+		t.Fatalf("pipe-pane accepted the command but its dd child wrote no regular-file bytes; pane_pipe/pid=%q pane=%q file=%q",
+			pipeState, pane, fileBytes)
+	}
+	if err := ts.DisablePipePane(); err != nil {
+		t.Fatalf("DisablePipePane after regular-file control: %v", err)
+	}
+
 	fifo := filepath.Join(t.TempDir(), "pane.out")
 	if err := syscall.Mkfifo(fifo, 0o600); err != nil {
 		t.Fatalf("mkfifo: %v", err)
@@ -218,3 +238,16 @@ func TestRealPipePaneStreamsPastTheReap(t *testing.T) {
 }
 
 func shellQuoteForTest(s string) string { return "'" + s + "'" }
+
+func waitForFileContains(path string, marker []byte, timeout time.Duration) ([]byte, bool) {
+	deadline := time.Now().Add(timeout)
+	var data []byte
+	for time.Now().Before(deadline) {
+		data, _ = os.ReadFile(path)
+		if bytes.Contains(data, marker) {
+			return data, true
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	return data, false
+}
