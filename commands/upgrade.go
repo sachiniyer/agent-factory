@@ -1,11 +1,8 @@
 package commands
 
 import (
-	"archive/tar"
-	"compress/gzip"
 	"fmt"
 	"io"
-	"net/http"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -14,6 +11,7 @@ import (
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/daemon"
+	"github.com/sachiniyer/agent-factory/internal/autoupdate"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/spf13/cobra"
 )
@@ -30,7 +28,7 @@ var requestDaemonShutdownFn = daemon.RequestShutdown
 var osExecutableFn = os.Executable
 
 const (
-	releaseBaseURL = "https://github.com/sachiniyer/agent-factory/releases"
+	releaseBaseURL = autoupdate.ReleaseBaseURL
 )
 
 // Download timeouts are variables (not consts) so tests can shrink them to
@@ -42,52 +40,24 @@ var (
 	// downloadResponseHeaderTimeout caps the time spent waiting for response
 	// headers, so a server that accepts the TCP connection but never replies
 	// fails fast instead of consuming the full downloadTimeout budget.
-	downloadResponseHeaderTimeout = 30 * time.Second
+	downloadResponseHeaderTimeout = autoupdate.DefaultResponseHeaderTimeout
 )
-
-// newDownloadClient builds an *http.Client suitable for fetching a release
-// tarball, with both an overall request timeout and a header timeout so a
-// stalled server can't hang the upgrade indefinitely (#471). The overall
-// budget is a parameter: a launch-path auto-update gives up far sooner than
-// a `af upgrade` the user is sitting and watching.
-func newDownloadClient(timeout time.Duration) *http.Client {
-	// A header timeout longer than the whole budget would never fire; keep it
-	// under the budget so a silent server still fails fast on short budgets.
-	headerTimeout := downloadResponseHeaderTimeout
-	if timeout < headerTimeout {
-		headerTimeout = timeout
-	}
-	return &http.Client{
-		Timeout: timeout,
-		Transport: &http.Transport{
-			ResponseHeaderTimeout: headerTimeout,
-		},
-	}
-}
 
 // downloadBinaryFn is indirected so tests can stub the download without
 // standing up an httptest server.
 var downloadBinaryFn = downloadBinary
 
 // downloadBinary fetches the release tarball at url and returns the embedded
-// `agent-factory` binary bytes. It uses newDownloadClient() to bound the
-// fetch with a timeout.
+// `agent-factory` binary bytes. CandidateStager bounds both the overall fetch
+// and response-header wait so a stalled server cannot hang the caller (#471).
 func downloadBinary(url string, timeout time.Duration) ([]byte, error) {
-	resp, err := newDownloadClient(timeout).Get(url)
-	if err != nil {
-		return nil, fmt.Errorf("download failed: %w", err)
-	}
-	defer resp.Body.Close()
+	return candidateStager().Download(url, timeout)
+}
 
-	if resp.StatusCode != 200 {
-		return nil, fmt.Errorf("download failed: HTTP %d from %s", resp.StatusCode, url)
-	}
-
-	binary, err := extractBinaryFromTarGz(resp.Body, "agent-factory")
-	if err != nil {
-		return nil, fmt.Errorf("failed to extract binary: %w", err)
-	}
-	return binary, nil
+func candidateStager() autoupdate.CandidateStager {
+	stager := autoupdate.DefaultCandidateStager()
+	stager.ResponseHeaderTimeout = downloadResponseHeaderTimeout
+	return stager
 }
 
 // upgradeAllowDowngrade is the opt-in for intentional channel-switch
@@ -165,7 +135,7 @@ on the old binary until you restart it yourself with 'af daemon restart'.`,
 		// Guard against silently downgrading (#1212): switching from a newer
 		// preview to an older stable resolves an older tag here, and without
 		// this check runUpgrade would happily install it. shouldUpgrade
-		// reuses the same isNewer/parseSemver precedence auto-update relies on.
+		// reuses the same version validation and ordering as auto-update.
 		proceed, msg := shouldUpgrade(latestTag, version, channel, upgradeAllowDowngrade)
 		if msg != "" {
 			fmt.Println(msg)
@@ -182,7 +152,8 @@ on the old binary until you restart it yourself with 'af daemon restart'.`,
 // shouldUpgrade decides whether `af upgrade` should install latestTag over the
 // currently running version, and returns a user-facing message to print
 // (empty when there is nothing to say beyond the normal download line). It
-// reuses parseSemver/isNewer so preview precedence matches auto-update
+// reuses the shared version validation and isNewer ordering so preview
+// precedence matches auto-update
 // exactly: 1.2.0 < 1.2.1-preview-1 < 1.2.1-preview-2 < 1.2.1 (#1212).
 //
 //   - latest newer than current  -> proceed (normal upgrade).
@@ -196,7 +167,7 @@ func shouldUpgrade(latestTag, current, channel string, allowDowngrade bool) (pro
 	latest := strings.TrimPrefix(latestTag, "v")
 	cur := strings.TrimPrefix(current, "v")
 
-	if parseSemver(latest) == nil {
+	if !autoupdate.IsValidVersion(latest) {
 		return false, fmt.Sprintf(
 			"Cannot compare latest release %q against the current %s; refusing to upgrade to avoid an accidental downgrade.",
 			latestTag, current)
@@ -399,42 +370,5 @@ func reportUpgradeRestart(out, errOut io.Writer, outcome restartOutcome, restart
 // extractBinaryFromTarGz reads a tar.gz stream and returns the contents of the
 // file whose name matches binaryName (or ends with /binaryName).
 func extractBinaryFromTarGz(r io.Reader, binaryName string) ([]byte, error) {
-	gz, err := gzip.NewReader(r)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create gzip reader: %w", err)
-	}
-	defer gz.Close()
-
-	tr := tar.NewReader(gz)
-	for {
-		hdr, err := tr.Next()
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			return nil, fmt.Errorf("failed to read tar entry: %w", err)
-		}
-
-		name := hdr.Name
-		if hdr.Typeflag == tar.TypeReg && (name == binaryName || strings.HasSuffix(name, "/"+binaryName)) {
-			const maxBinarySize = 500 << 20 // 500 MB
-			if hdr.Size > maxBinarySize {
-				return nil, fmt.Errorf("binary too large: %d bytes (max %d)", hdr.Size, maxBinarySize)
-			}
-			data, err := io.ReadAll(io.LimitReader(tr, maxBinarySize+1))
-			if err != nil {
-				return nil, fmt.Errorf("failed to read binary from archive: %w", err)
-			}
-			if int64(len(data)) > maxBinarySize {
-				return nil, fmt.Errorf("binary exceeds maximum size of %d bytes", maxBinarySize)
-			}
-			// Drain remaining gzip data to trigger CRC32 validation
-			if _, err := io.Copy(io.Discard, gz); err != nil {
-				return nil, fmt.Errorf("gzip integrity check failed: %w", err)
-			}
-			return data, nil
-		}
-	}
-
-	return nil, fmt.Errorf("binary %q not found in archive", binaryName)
+	return autoupdate.ExtractBinaryFromTarGz(r, binaryName)
 }
