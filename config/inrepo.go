@@ -87,73 +87,16 @@ func (c *InRepoConfig) CommandBearingFields() []string {
 	return fields
 }
 
-// inRepoAllowedKeys is the full set of top-level keys an in-repo config may
-// contain. Anything else is rejected so typos fail loudly instead of being
-// silently ignored in a file that can execute shell commands.
-var inRepoAllowedKeys = []string{
-	"backend",
-	"default_program",
-	"docker",
-	"post_worktree_commands",
-	"program_overrides",
-	"remote_hooks",
-	"ssh",
-}
-
-// inRepoGlobalOnlyKeys maps keys that configure the host or daemon — not the
-// repository — to rejection reasons. They are only meaningful machine-wide,
-// so an in-repo value would either silently do nothing or, worse, let a repo
-// flip host-level behavior like autoyes.
-var inRepoGlobalOnlyKeys = map[string]bool{
-	"auto_update":   true,
-	"auto_yes":      true,
-	"branch_prefix": true,
-	// The daemon's network surface is configured by the host, never a
-	// repository — a cloned repo must never be able to open a port or widen the
-	// CORS allow-list (#1592 Phase 3).
-	"cors_allowed_origins": true,
-	"daemon_poll_interval": true,
-	"detach_keys":          true,
-	// What af writes into your HOME directory is a user/host decision; a
-	// cloned repo must never be able to opt you into af editing your global
-	// codex/gemini/amp config (#1977).
-	"global_agent_skills": true,
-	"listen_addr":         true,
-	// The [keys] keymap is a user/host preference: a cloned repo must never
-	// be able to rebind someone's terminal (#1026).
-	"keys":                 true,
-	"limit_auto_resume":    true,
-	"limit_retry_interval": true,
-	"log_max_backups":      true,
-	"log_max_size_mb":      true,
-	// Disabling the bearer token — or tightening the loopback exemption — is a
-	// daemon-network-surface decision; a cloned repo must never be able to turn
-	// off web auth (#1696) or flip the loopback token requirement.
-	"require_token":          true,
-	"require_loopback_token": true,
-	"root_agents":            true,
-	// The [theme] table is a user/host visual preference; repositories must
-	// not be able to recolor a cloned user's TUI (#1389).
-	"theme":          true,
-	"update_channel": true,
-	// The value names a binary the DAEMON executes, so honoring it from a
-	// repo's checked-in config would let merely cloning a repo choose what af
-	// runs on your machine (#1817). It is already absent from
-	// inRepoAllowedKeys — a repo cannot hijack the binary either way — so
-	// listing it here is purely about the error the user gets: the actionable
-	// "global setting … move it to <global config>" instead of the generic
-	// "unknown key".
-	"vscode_server_binary": true,
-	"worktree_root":        true,
-}
-
-// tomlOnlyGlobalKeys is the subset of inRepoGlobalOnlyKeys that exists only in
-// config.toml (#1026/#1030), so their in-repo rejection message must direct
-// the user to config.toml rather than the resolved global config file.
-var tomlOnlyGlobalKeys = map[string]bool{
-	"keys":  true,
-	"theme": true,
-}
+// These are compatibility views of the manifest, not independent policy
+// registries. Anything outside inRepoAllowedKeys is rejected so typos fail
+// loudly in a checked-in file that can execute commands. Known global-only keys
+// get the more actionable "move it to global config" error. Format metadata
+// decides whether that destination must specifically be config.toml.
+var (
+	inRepoAllowedKeys    = manifestKeysForSource(SourceRepoShared)
+	inRepoGlobalOnlyKeys = manifestGlobalOnlyKeySet()
+	tomlOnlyGlobalKeys   = manifestTOMLOnlyGlobalKeySet()
+)
 
 // InRepoConfigPath returns the path of the in-repo JSON config file for a
 // repo root. The file is optional; callers should use LoadInRepoConfig rather

@@ -77,8 +77,10 @@ func configTomlFields(t *testing.T) map[string]string {
 	return fields
 }
 
-// TestManifestCoversEveryConfigKey is the anti-drift lock that justifies
-// curating the manifest by hand instead of generating it. It asserts both
+// TestGlobalManifestCoversEveryGlobalConfigKey preserves Manifest's historical
+// global-only view for the config agent and editors. The union/source parity
+// lock lives in TestManifestCoversEveryConfigKey (manifest_policy_test.go).
+// This test asserts both
 // directions:
 //
 //  1. every toml-tagged field of Config has a manifest entry, unless it is in
@@ -92,7 +94,7 @@ func configTomlFields(t *testing.T) map[string]string {
 // Direction 2 matters as much as direction 1: a manifest that describes keys
 // which do not exist is worse than no manifest, because an agent would try to
 // set them.
-func TestManifestCoversEveryConfigKey(t *testing.T) {
+func TestGlobalManifestCoversEveryGlobalConfigKey(t *testing.T) {
 	byKey := manifestKeyIndex(t)
 	fields := configTomlFields(t)
 
@@ -107,7 +109,7 @@ func TestManifestCoversEveryConfigKey(t *testing.T) {
 		if _, present := byKey[key]; !present {
 			t.Errorf("config.Config field %s (toml:%q) has no manifest entry: a config agent briefed from "+
 				"the manifest would never know %q exists. Add an entry to configManifest in config/manifest.go "+
-				"(key, type, default, a one-line purpose, tier, settable), or — if it is machine-managed and no "+
+				"(including source, precedence, merge, and format metadata), or — if it is machine-managed and no "+
 				"user should ever set it — add it to manifestSkippedKeys with a reason.",
 				fieldName, key, key)
 		}
@@ -300,7 +302,7 @@ func TestManifestEntriesAreWellFormed(t *testing.T) {
 	validTypes := map[string]bool{"string": true, "bool": true, "int": true, "table": true, "list": true}
 	validTiers := map[ConfigTier]bool{TierCore: true, TierCommon: true, TierAdvanced: true}
 
-	for _, e := range Manifest() {
+	for _, e := range AllManifest() {
 		if e.Key == "" {
 			t.Fatalf("manifest entry with an empty key: %+v", e)
 		}
@@ -331,7 +333,7 @@ func TestManifestEntriesAreWellFormed(t *testing.T) {
 // bury a core key under the advanced ones.
 func TestManifestIsTierOrdered(t *testing.T) {
 	last := ConfigTier(0)
-	for _, e := range Manifest() {
+	for _, e := range AllManifest() {
 		if e.Tier < last {
 			t.Errorf("manifest is not tier-ordered: %q (tier %d) follows a tier-%d entry — "+
 				"move it into its tier's block in config/manifest.go", e.Key, e.Tier, last)
@@ -479,39 +481,48 @@ func TestRenderBriefingNilConfig(t *testing.T) {
 	}
 }
 
-// TestManifestDoesNotAliasTheAgentList pins that Manifest() hands back a deep
-// copy. It is not a hypothetical: three entries take their Enum directly from
-// tmux.SupportedPrograms — the canonical agent list ValidateProgramEnum and
-// ResolveProgram read — so under a shallow copy, a caller sorting or rewriting
-// the Enum it was handed would silently corrupt agent validation for the whole
-// process.
+// TestManifestDoesNotAliasSharedMetadata pins that the public accessors hand
+// back deep copies. Enum slices alias canonical agent/backend registries in the
+// table, and Precedence slices are shared by many entries, so either kind of
+// shallow copy would let an ordinary caller corrupt process-wide policy.
 //
 // A picker UI sorting its options is a completely ordinary thing to write, and
 // the manifest exists to be consumed by exactly that kind of surface, so the
 // copy has to be the manifest's job. In production nothing mutates Enum today —
 // this locks the property before the first consumer relies on it.
-func TestManifestDoesNotAliasTheAgentList(t *testing.T) {
-	before := make([]string, len(tmux.SupportedPrograms))
-	copy(before, tmux.SupportedPrograms)
+func TestManifestDoesNotAliasSharedMetadata(t *testing.T) {
+	beforePrograms := append([]string(nil), tmux.SupportedPrograms...)
+	beforeBackends := append([]string(nil), SupportedBackends...)
 
 	// A consumer doing something entirely reasonable with what it was handed.
-	for _, e := range Manifest() {
+	for _, e := range AllManifest() {
 		for i := range e.Enum {
 			e.Enum[i] = "corrupted"
 		}
+		for i := range e.Precedence {
+			e.Precedence[i] = SourceInvalid
+		}
 	}
 
-	if !reflect.DeepEqual(tmux.SupportedPrograms, before) {
-		t.Fatalf("mutating a Manifest() entry's Enum corrupted tmux.SupportedPrograms: got %v, want %v — "+
-			"Manifest() must deep-copy Enum, or every agent-name validation in the process is one "+
-			"caller's sort away from breaking", tmux.SupportedPrograms, before)
+	if !reflect.DeepEqual(tmux.SupportedPrograms, beforePrograms) {
+		t.Fatalf("mutating an AllManifest() Enum corrupted tmux.SupportedPrograms: got %v, want %v",
+			tmux.SupportedPrograms, beforePrograms)
+	}
+	if !reflect.DeepEqual(SupportedBackends, beforeBackends) {
+		t.Fatalf("mutating an AllManifest() Enum corrupted SupportedBackends: got %v, want %v",
+			SupportedBackends, beforeBackends)
 	}
 
-	// The manifest's own table must be intact too, not just the package global.
-	for _, e := range Manifest() {
+	// The manifest's own table and shared precedence slices must remain intact.
+	for _, e := range AllManifest() {
 		for _, v := range e.Enum {
 			if v == "corrupted" {
 				t.Fatalf("manifest entry %q kept a mutated Enum across calls", e.Key)
+			}
+		}
+		for _, source := range e.Precedence {
+			if source == SourceInvalid {
+				t.Fatalf("manifest entry %q kept a mutated Precedence across calls", e.Key)
 			}
 		}
 	}

@@ -78,7 +78,7 @@ func RenderBriefing(cfg *Config, configPath string) string {
 // order.
 func manifestEntriesForTier(tier ConfigTier) []ManifestEntry {
 	var out []ManifestEntry
-	for _, e := range configManifest {
+	for _, e := range Manifest() {
 		if e.Tier == tier {
 			out = append(out, e)
 		}
@@ -169,8 +169,8 @@ func briefingSetHint(e ManifestEntry) string {
 // BRIEFING form, found by reflecting over Config's toml tags (never a
 // hand-written key → field map, see RenderBriefing). Returns "unknown" for a nil
 // cfg and for a key that names no field — the latter is unreachable while
-// TestManifestCoversEveryConfigKey passes, since it rejects a manifest key with
-// no matching field.
+// TestGlobalManifestCoversEveryGlobalConfigKey passes, since it rejects a key
+// in the global Manifest() view with no matching Config field.
 //
 // The field lookup is shared with CurrentValue (manifest_value.go); only the
 // rendering differs, because a briefing and an editable field want different
