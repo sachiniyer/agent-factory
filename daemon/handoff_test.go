@@ -237,3 +237,37 @@ func TestHandoffSession_RefusesBackendWithoutHandoffCapability(t *testing.T) {
 		t.Fatalf("SwapAgent called %d times on an unsupported backend, want 0", swaps)
 	}
 }
+
+// TestHandoffSession_RefusesArchivedSession is the #2231 regression. Backend
+// capability says what the runtime implementation can do; it does not say that
+// this particular session currently has a runtime. An archived row is inert and
+// its worktree is in archive storage, so handoff must not turn it live in place.
+func TestHandoffSession_RefusesArchivedSession(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	backend := &handoffBackend{FakeBackend: session.NewFakeBackend()}
+	inst := registerHandoffSubject(t, manager, repoID, repoPath, "archived", backend)
+	inst.SetStatusForTest(session.Archived)
+	inst.SetStartedForTest(false)
+
+	_, err := manager.HandoffSession(HandoffSessionRequest{
+		Title: "archived", RepoID: repoID, To: tmux.ProgramGemini,
+	})
+	if err == nil {
+		t.Fatal("handoff accepted an archived session and reanimated it outside the restore lifecycle")
+	}
+	if !strings.Contains(strings.ToLower(err.Error()), "archived") {
+		t.Fatalf("error = %q, want an actionable archived-session refusal", err)
+	}
+	if swaps, prompts := backend.snapshot(); swaps != 0 || len(prompts) != 0 {
+		t.Fatalf("archived handoff touched the runtime (swaps=%d prompts=%d), want neither", swaps, len(prompts))
+	}
+	if got := inst.AgentProgram(); got != tmux.ProgramClaude {
+		t.Fatalf("Program = %q after refused handoff, want %q", got, tmux.ProgramClaude)
+	}
+	if ledger := inst.Handoffs(); len(ledger) != 0 {
+		t.Fatalf("refused archived handoff wrote %d ledger entries, want 0", len(ledger))
+	}
+	if got := inst.GetLiveness(); got != session.LiveArchived {
+		t.Fatalf("liveness = %v after refused handoff, want Archived", got)
+	}
+}

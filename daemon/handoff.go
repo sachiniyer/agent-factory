@@ -94,6 +94,17 @@ func (m *Manager) HandoffSession(req HandoffSessionRequest) (HandoffSessionRespo
 	// session actually being swapped.
 	req.Title = title
 
+	// Capability answers whether this backend IMPLEMENTS handoff. The shared
+	// runtime-action guard answers the prior question: whether this row currently
+	// has a live runtime that may be replaced. Keeping state first prevents an
+	// Archived/Lost/Dead row from being reanimated through a capable backend
+	// instead of its restore path (#2231).
+	if err := instance.ValidateRuntimeAction(session.RuntimeActionHandoff); err != nil {
+		return HandoffSessionResponse{}, err
+	}
+	if session.IsReservedTitle(instance.Title) {
+		return HandoffSessionResponse{}, fmt.Errorf("session %q cannot be handed off", req.Title)
+	}
 	target := strings.TrimSpace(req.To)
 	if err := instance.ValidateHandoffTarget(target); err != nil {
 		return HandoffSessionResponse{}, err
@@ -101,10 +112,6 @@ func (m *Manager) HandoffSession(req HandoffSessionRequest) (HandoffSessionRespo
 	if !instance.Capabilities().Handoff {
 		return HandoffSessionResponse{}, session.ErrHandoffUnsupported
 	}
-	if instance.UserKilled() || session.IsReservedTitle(instance.Title) {
-		return HandoffSessionResponse{}, fmt.Errorf("session %q cannot be handed off", req.Title)
-	}
-
 	key := daemonInstanceKey(repoID, instance.Title)
 	m.mu.Lock()
 	if _, killing := m.killsInFlight[key]; killing {
@@ -128,8 +135,11 @@ func (m *Manager) HandoffSession(req HandoffSessionRequest) (HandoffSessionRespo
 	current := m.instances[key]
 	_, killing := m.killsInFlight[key]
 	m.mu.Unlock()
-	if killing || current != instance || instance.IsTearingDown() {
+	if killing || current != instance {
 		return HandoffSessionResponse{}, fmt.Errorf("session %q is no longer available to hand off", req.Title)
+	}
+	if err := instance.ValidateRuntimeAction(session.RuntimeActionHandoff); err != nil {
+		return HandoffSessionResponse{}, err
 	}
 	if err := instance.ValidateHandoffTarget(target); err != nil {
 		return HandoffSessionResponse{}, err

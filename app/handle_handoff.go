@@ -6,6 +6,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/sachiniyer/agent-factory/log"
+	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 	"github.com/sachiniyer/agent-factory/ui"
 	"github.com/sachiniyer/agent-factory/ui/overlay"
@@ -58,8 +59,8 @@ func (m *home) handleHandoff() (tea.Model, tea.Cmd) {
 	if selected == nil || selected.IsCreating() {
 		return m, nil
 	}
-	if selected.IsTearingDown() {
-		return m, m.handleError(fmt.Errorf("session '%s' is being deleted", selected.Title))
+	if err := selected.ValidateRuntimeAction(session.RuntimeActionHandoff); err != nil {
+		return m, m.handleError(err)
 	}
 	if !selected.Capabilities().Handoff {
 		return m, m.handleError(fmt.Errorf("session '%s' cannot be handed off: only local-worktree sessions can swap their agent", selected.Title))

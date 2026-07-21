@@ -43,8 +43,13 @@ func (i *Instance) Kill() error {
 
 // Recover re-establishes a Lost instance's backing session (#1108). Called by
 // the daemon's restore loop and by user-initiated restore (#1300); loads stay
-// side-effect free (#970).
+// side-effect free (#970). Lifecycle eligibility is enforced here, before any
+// backend can provision or spawn a runtime; backend capability alone is never
+// permission to revive a row.
 func (i *Instance) Recover() error {
+	if err := i.ValidateRuntimeAction(RuntimeActionRecoverLost); err != nil {
+		return fmt.Errorf("recover: %w", err)
+	}
 	return i.currentBackend().Recover(i)
 }
 
@@ -53,16 +58,22 @@ func (i *Instance) Recover() error {
 // manual-retry (#1146, resumeFromLimit) uses it to re-spawn an agent that exited
 // while blocked at a limit wall: that session is LiveLimitReached, which Recover's
 // !Lost guard rejects, but the re-spawn mechanics are identical. The caller owns
-// the precondition.
+// the precondition, enforced here before the guard-free backend core runs.
 func (i *Instance) Respawn() error {
+	if err := i.ValidateRuntimeAction(RuntimeActionResumeLimit); err != nil {
+		return fmt.Errorf("respawn: %w", err)
+	}
 	return i.currentBackend().Respawn(i)
 }
 
 // SwapAgent replaces the running agent process with the instance's current
 // program (#2013). Rewrite Instance.Program first (SwapAgentProgram); this only
-// performs the runtime half, and the caller owns every precondition. Refuses on
-// a backend whose workspace is off-box.
+// performs the runtime half. Refuses unless this instance is live and eligible
+// for handoff, then separately refuses a backend whose workspace is off-box.
 func (i *Instance) SwapAgent() error {
+	if err := i.ValidateRuntimeAction(RuntimeActionHandoff); err != nil {
+		return err
+	}
 	if !i.Capabilities().Handoff {
 		return ErrHandoffUnsupported
 	}
@@ -115,6 +126,10 @@ func (i *Instance) SetArchived() {
 // when the repo has been deleted so the caller can leave the archive intact.
 func (i *Instance) RestoreArchivedWorktree(dest string) error {
 	i.mu.RLock()
+	if err := i.lifecycleViewLocked().ValidateRuntimeAction(RuntimeActionRestoreArchived); err != nil {
+		i.mu.RUnlock()
+		return err
+	}
 	gw := i.gitWorktree
 	i.mu.RUnlock()
 	if gw == nil {
@@ -174,6 +189,9 @@ func (i *Instance) RenameArchived(newTitle, dest string) error {
 // out from under the restore. This replaces the old "park it in Lost purely to
 // trigger the re-spawn loop" overload (#1195).
 func (i *Instance) RestoreFromArchive() error {
+	if err := i.ValidateRuntimeAction(RuntimeActionRestoreArchived); err != nil {
+		return err
+	}
 	// Enter the restore fence through the chokepoint (#1195 Phase 2d): BeginRestore
 	// is legal only from Archived and sets started=true + Lost + OpRestoring — the
 	// exact head this used to write by hand, now enforcing I3 (a restore may begin

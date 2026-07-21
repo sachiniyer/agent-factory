@@ -30,17 +30,14 @@ func (m *Manager) RestoreSession(req RestoreSessionRequest) (string, error) {
 }
 
 func (m *Manager) restoreLostOrDeadSession(req RestoreSessionRequest, repoID string, instance *session.Instance) (string, error) {
-	if instance.UserKilled() {
-		return "", fmt.Errorf("cannot restore session %q: it is being deleted", req.Title)
+	if err := instance.ValidateRuntimeAction(session.RuntimeActionRestoreLostOrDead); err != nil {
+		return "", fmt.Errorf("cannot restore: %w", err)
 	}
 	if session.IsReservedTitle(instance.Title) {
 		return "", fmt.Errorf("cannot manually restore reserved session %q", req.Title)
 	}
 	if !instance.Capabilities().Recover {
 		return "", fmt.Errorf("cannot restore remote session %q: reconnect is not supported", req.Title)
-	}
-	if !instance.Started() {
-		return "", fmt.Errorf("cannot restore session %q: it is not started", req.Title)
 	}
 
 	key := daemonInstanceKey(repoID, req.Title)
@@ -67,7 +64,11 @@ func (m *Manager) restoreLostOrDeadSession(req RestoreSessionRequest, repoID str
 	if current != instance {
 		return "", fmt.Errorf("session %q changed state before restore could start", req.Title)
 	}
-	switch instance.GetLiveness() {
+	view := instance.LifecycleView()
+	if err := view.ValidateRuntimeAction(session.RuntimeActionRestoreLostOrDead); err != nil {
+		return "", fmt.Errorf("cannot restore: %w", err)
+	}
+	switch view.Liveness {
 	case session.LiveLost:
 	case session.LiveDead:
 		_ = instance.Transition(session.ObserveLiveness(session.LiveLost))

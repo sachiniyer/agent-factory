@@ -23,6 +23,7 @@ func handoffTestInstance(t *testing.T, program string) *Instance {
 		t.Fatalf("NewInstance: %v", err)
 	}
 	inst.SetBackend(NewFakeBackend())
+	inst.SetStartedForTest(true)
 	inst.Tabs = []*Tab{{
 		ID:   "tab-1",
 		Name: "agent",
@@ -123,6 +124,23 @@ func TestValidateHandoffTarget(t *testing.T) {
 	}
 	if err := inst.ValidateHandoffTarget(tmux.ProgramGemini); err != nil {
 		t.Fatalf("valid target rejected: %v", err)
+	}
+}
+
+func TestSwapAgentProgram_RejectsArchivedSessionWithoutMutatingRecord(t *testing.T) {
+	inst := handoffTestInstance(t, tmux.ProgramClaude)
+	inst.SetStatusForTest(Archived)
+	inst.SetStartedForTest(false)
+
+	_, err := inst.SwapAgentProgram(tmux.ProgramGemini, HandoffReasonManual, "sha", false)
+	if err == nil {
+		t.Fatal("SwapAgentProgram accepted an archived row")
+	}
+	if got := inst.AgentProgram(); got != tmux.ProgramClaude {
+		t.Fatalf("Program = %q after refusal, want %q", got, tmux.ProgramClaude)
+	}
+	if ledger := inst.Handoffs(); len(ledger) != 0 {
+		t.Fatalf("archived refusal wrote %d handoff records, want 0", len(ledger))
 	}
 }
 

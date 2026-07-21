@@ -290,6 +290,37 @@ func TestRestoreArchived_RejectsNonArchived(t *testing.T) {
 	assert.Contains(t, err.Error(), "not archived")
 }
 
+// TestRestoreArchived_RejectsPendingKill is the #2208 regression: an archived
+// row whose kill teardown was uncertain keeps its record and durable tombstone.
+// Restore must honor that terminal intent before moving the worktree or starting
+// a replacement runtime; otherwise the next status poll immediately finishes the
+// kill that restore just appeared to undo.
+func TestRestoreArchived_RejectsPendingKill(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	inst, _ := registerArchivable(t, manager, repoID, repoPath, "worker")
+
+	_, _, err := manager.ArchiveSession(ArchiveSessionRequest{Title: "worker", RepoID: repoID})
+	require.NoError(t, err)
+	archivedPath := inst.GetWorktreePath()
+
+	// Model the only failed-kill shape that retains a record: teardown did not
+	// establish whether the pane/workspace is gone, so KillSession records the
+	// tombstone and leaves the archived row addressable for its retry loop.
+	backend := session.NewFakeBackend()
+	backend.CompleteStart()
+	inst.SetBackend(failKillBackend{readyFakeBackend{backend}})
+	_, err = manager.KillSession(KillSessionRequest{Title: "worker", RepoID: repoID})
+	require.Error(t, err)
+	require.True(t, inst.UserKilled(), "the failed kill must leave its terminal intent on the retained row")
+
+	_, err = manager.RestoreArchived(RestoreArchivedRequest{Title: "worker", RepoID: repoID})
+	require.Error(t, err, "restore must not revive a session whose kill is pending")
+	assert.Contains(t, err.Error(), "pending kill", "the refusal must explain why retrying restore cannot work")
+	assert.Equal(t, session.Archived, inst.GetStatus())
+	assert.Equal(t, archivedPath, inst.GetWorktreePath(), "a refused restore must not move the archived worktree")
+	assert.True(t, exists(archivedPath), "the archived worktree must stay intact for the pending kill retry")
+}
+
 // TestRestoreArchived_RepoGoneLeavesArchiveIntact: when the origin repo has been
 // deleted, restore fails with an actionable message and leaves the archived
 // worktree and the Archived status untouched.
