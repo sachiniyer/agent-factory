@@ -36,7 +36,7 @@ func TestDaemonLifecycleNormalReadinessBarrier(t *testing.T) {
 func TestUpgradeProbationErrorIsTypedAndRetryable(t *testing.T) {
 	err := errDaemonUpgradeProbation("transaction-2212")
 	require.True(t, IsDaemonUpgradeProbationErr(err))
-	require.True(t, isDaemonAdmissionRetryable(err))
+	require.True(t, IsDaemonAdmissionRetryable(err))
 	require.Contains(t, err.Error(), "transaction-2212")
 	require.False(t, IsDaemonUpgradeProbationErr(errDaemonStarting()))
 }

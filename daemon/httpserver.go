@@ -306,7 +306,7 @@ func rpcHandlerCtx[Req any, Resp any](call func(context.Context, Req, *Resp) err
 		var resp Resp
 		if err := call(r.Context(), req, &resp); err != nil {
 			status := http.StatusInternalServerError
-			if isDaemonAdmissionRetryable(err) {
+			if IsDaemonAdmissionRetryable(err) {
 				status = http.StatusServiceUnavailable
 			}
 			writeHTTPError(w, r, status, err)
