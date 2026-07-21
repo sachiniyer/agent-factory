@@ -137,11 +137,61 @@ func TestQueuedScrollIntentsSurvivePendingFill(t *testing.T) {
 		"scroll intents queued during the pending fill must all be applied")
 }
 
-// TestOwnershipSnapshotPreservesPendingScrollIntent pins the other ordering of
-// the asynchronous race: a normal capture may already be in flight when the
-// user scrolls. Its terminal modes establish HostHistory, but must promote the
-// existing probe rather than replace the controller that holds queued input.
-func TestOwnershipSnapshotPreservesPendingScrollIntent(t *testing.T) {
+// TestDuplicateRefreshCannotStarveCurrentScrollFill pins the regular-refresh
+// ordering Codex Review found on #2257. BeginScrollFill masks the urgent refresh,
+// but a normal 100ms refresh may still call UpdateContent while the first fill is
+// pending. The controller must reject that duplicate before it launches another
+// full capture, leaving the initiating fill authoritative.
+func TestDuplicateRefreshCannotStarveCurrentScrollFill(t *testing.T) {
+	inst := makeShellInstance(t, "duplicate-scroll-fill", "visible-line")
+	defer func() { _ = inst.Kill() }()
+
+	firstStarted := make(chan struct{})
+	releaseFirst := make(chan struct{})
+	var fullCalls int32
+	src := func(_ *session.Instance, _ int, full bool) (PreviewSnapshot, error) {
+		if !full {
+			return hostPreview("visible-line"), nil
+		}
+		switch atomic.AddInt32(&fullCalls, 1) {
+		case 1:
+			close(firstStarted)
+			<-releaseFirst
+			return hostPreview(strings.ReplaceAll(
+				numberedScrollHistory(40), "history-", "first-history-")), nil
+		case 2:
+			return hostPreview(strings.ReplaceAll(
+				numberedScrollHistory(40), "history-", "second-history-")), nil
+		default:
+			return PreviewSnapshot{}, fmt.Errorf("unexpected full-history capture")
+		}
+	}
+
+	p := NewTabPane(src)
+	p.SetScrollOwnerFor(inst, 1, ScrollOwnerHostHistory)
+	p.SetSize(80, 10)
+	require.NoError(t, p.ScrollUp(inst, 1))
+	p.BeginScrollFill()
+
+	firstDone := make(chan error, 1)
+	go func() { firstDone <- p.UpdateContent(inst, 1) }()
+	<-firstStarted
+	require.NoError(t, p.UpdateContent(inst, 1),
+		"a periodic duplicate must return without waiting for the active fill")
+
+	close(releaseFirst)
+	require.NoError(t, <-firstDone)
+	require.Equal(t, int32(1), atomic.LoadInt32(&fullCalls),
+		"one fill lifecycle must launch exactly one full-history capture")
+	require.Contains(t, p.viewport.View(), "first-history-",
+		"the initiating fill must remain authoritative after a duplicate refresh")
+}
+
+// TestScrollEntryInvalidatesOlderNormalSnapshotWithoutLosingIntent pins the
+// other ordering of the asynchronous race: a normal capture may already be in
+// flight when the user scrolls. Scroll entry makes that older normal snapshot
+// stale, while the controller retains both intents for its full snapshot.
+func TestScrollEntryInvalidatesOlderNormalSnapshotWithoutLosingIntent(t *testing.T) {
 	inst := makeShellInstance(t, "ownership-snapshot", "visible-line")
 	defer func() { _ = inst.Kill() }()
 
@@ -163,13 +213,15 @@ func TestOwnershipSnapshotPreservesPendingScrollIntent(t *testing.T) {
 	go func() { normalDone <- p.UpdateContent(inst, 1) }()
 	<-normalStarted
 
-	// Both requests land while ownership is still unknown. The normal snapshot
-	// resolves the probe, then the full capture must replay both requests.
+	// Both requests land while ownership is still unknown. The older normal
+	// snapshot must not publish after scroll entry; the full capture resolves the
+	// same controller to HostHistory and replays both requests.
 	require.NoError(t, p.ScrollUp(inst, 1))
 	require.NoError(t, p.ScrollUp(inst, 1))
 	close(releaseNormal)
 	require.NoError(t, <-normalDone)
-	require.Equal(t, ScrollOwnerHostHistory, p.ScrollOwner())
+	require.Equal(t, ScrollOwnerNone, p.ScrollOwner(),
+		"scroll entry must invalidate the older normal snapshot")
 	require.True(t, p.NeedsScrollFill())
 
 	p.BeginScrollFill()

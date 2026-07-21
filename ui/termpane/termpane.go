@@ -150,7 +150,9 @@ type TermPane struct {
 	// can never stay stuck forwarding to a program that reset the terminal (#1748).
 	mouseModes    map[ansi.Mode]bool
 	terminalModes terminal.Modes
-	modesKnown    bool
+	// modeAuthority is the complete visibility/connection/recovery state for the
+	// snapshot above; modes.go owns every transition so independent flags cannot drift.
+	modeAuthority terminalModesAuthority
 	width, height int
 
 	dial Dialer
@@ -252,6 +254,12 @@ func (t *TermPane) run() {
 		rows, cols := t.wantRows, t.wantCols
 		t.connMu.Unlock()
 
+		t.gridMu.Lock()
+		// A clamped cursor crossed an unretained gap. A fresh repaint will
+		// normally follow, but the prior owner is unsafe until it does.
+		t.connectTerminalModesLocked(stream.StartSeq() == since)
+		t.gridMu.Unlock()
+
 		// (Re)assert our desired size so the server sizes this tab's window to us —
 		// the pane may have resized while we were disconnected (last-resize-wins).
 		wctx, cancelW := context.WithTimeout(t.ctx, writeTimeout)
@@ -259,6 +267,13 @@ func (t *TermPane) run() {
 		cancelW()
 
 		t.readStream(stream)
+
+		// Recv failed or Close cancelled it. The child may change ownership while
+		// there is no byte stream to observe, so input routing must fail closed for
+		// the entire disconnected window. Keep the value itself for exact replay.
+		t.gridMu.Lock()
+		t.disconnectTerminalModesLocked()
+		t.gridMu.Unlock()
 
 		t.connMu.Lock()
 		if t.stream == stream {
@@ -272,15 +287,21 @@ func (t *TermPane) run() {
 // readStream pumps one connection's inbound events into the emulator until it
 // errors (drop) or the context is cancelled (Close).
 func (t *TermPane) readStream(stream Stream) {
+	firstInbound := true
 	for {
 		ev, err := stream.Recv(t.ctx)
 		if err != nil {
 			return
 		}
+		openingCursor := firstInbound && ev.Kind == EventCursor && ev.Seq == stream.StartSeq()
+		firstInbound = false
 		switch ev.Kind {
 		case EventData:
 			t.gridMu.Lock()
 			_, _ = t.emu.Write(ev.Data)
+			// Live callbacks evolve a known base in the no-gap case, while any data
+			// consumes the repaint's one-shot recovery-cursor coverage.
+			t.observeTerminalDataLocked()
 			t.gridMu.Unlock()
 			t.connMu.Lock()
 			t.cursor += uint64(len(ev.Data))
@@ -295,15 +316,17 @@ func (t *TermPane) readStream(stream Stream) {
 				// modes. Assign the snapshot as the authority as well: tmux can
 				// report UTF-8 encoding even when an emulator does not expose a
 				// callback for it, and all-false is meaningful.
-				t.terminalModes = ev.Modes
-				t.modesKnown = true
+				t.installTerminalModesLocked(ev.Modes)
 			} else {
 				// A recovery repaint can jump over unretained DEC mode changes.
 				// Without snapshot metadata the old decision is no longer safe.
-				t.modesKnown = false
+				t.invalidateTerminalModesLocked()
 			}
 			t.gridMu.Unlock()
 		case EventCursor:
+			t.gridMu.Lock()
+			t.observeTerminalCursorLocked(openingCursor)
+			t.gridMu.Unlock()
 			// The server moved our cursor over bytes it no longer holds (an eviction or
 			// a recovery discard). Adopt its position verbatim — our own
 			// start + bytes-received count is now stale, and reconnecting on it would ask

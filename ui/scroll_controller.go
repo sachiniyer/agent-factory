@@ -47,12 +47,21 @@ type historyScrollController interface {
 	ScrollController
 	AwaitingHistory() bool
 	NeedsFill(viewportHeight int) bool
-	BeginFill()
-	FillGeneration() uint64
-	FillIsCurrent(uint64) bool
-	RearmFill()
+	MarkFillDispatched()
+	ClaimFill() (scrollFillToken, bool)
+	FillIsCurrent(scrollFillToken) bool
+	RearmFill(scrollFillToken)
 	ResolveHost()
-	CompleteFill(uint64, *viewport.Model, string) bool
+	CompleteFill(scrollFillToken, *viewport.Model, string) bool
+}
+
+// scrollFillToken is the controller-issued capability for one asynchronous
+// history capture. A generation number alone could order completions but could
+// not stop periodic refreshes from launching duplicate full captures. ClaimFill
+// makes that wrong state unrepresentable: only one caller can hold the current
+// lifecycle's token.
+type scrollFillToken struct {
+	generation uint64
 }
 
 type historyScrollPhase uint8
@@ -74,6 +83,7 @@ type captureHistoryScrollController struct {
 	pendingIntents []ScrollIntent
 	fillGen        uint64
 	dispatchedGen  uint64
+	fillInFlight   bool
 }
 
 var _ historyScrollController = (*captureHistoryScrollController)(nil)
@@ -154,18 +164,24 @@ func (c *captureHistoryScrollController) NeedsFill(viewportHeight int) bool {
 		c.dispatchedGen != c.fillGen
 }
 
-func (c *captureHistoryScrollController) BeginFill() {
+func (c *captureHistoryScrollController) MarkFillDispatched() {
 	if c.phase == historyScrollLoading {
 		c.dispatchedGen = c.fillGen
 	}
 }
 
-func (c *captureHistoryScrollController) FillGeneration() uint64 {
-	return c.fillGen
+func (c *captureHistoryScrollController) ClaimFill() (scrollFillToken, bool) {
+	if c.phase != historyScrollLoading || c.fillInFlight {
+		return scrollFillToken{}, false
+	}
+	c.dispatchedGen = c.fillGen
+	c.fillInFlight = true
+	return scrollFillToken{generation: c.fillGen}, true
 }
 
-func (c *captureHistoryScrollController) FillIsCurrent(gen uint64) bool {
-	return c.phase == historyScrollLoading && c.fillGen == gen
+func (c *captureHistoryScrollController) FillIsCurrent(token scrollFillToken) bool {
+	return c.phase == historyScrollLoading && c.fillInFlight &&
+		c.fillGen == token.generation
 }
 
 // Scroll either starts host-history acquisition, queues intent while that
@@ -183,6 +199,7 @@ func (c *captureHistoryScrollController) Scroll(v *viewport.Model, intent Scroll
 		c.phase = historyScrollLoading
 		c.pendingIntents = append(c.pendingIntents, intent)
 		c.fillGen++
+		c.fillInFlight = false
 	case historyScrollLoading:
 		c.pendingIntents = append(c.pendingIntents, intent)
 	case historyScrollReady:
@@ -195,11 +212,11 @@ func (c *captureHistoryScrollController) Scroll(v *viewport.Model, intent Scroll
 // offset, then apply every intent accumulated during the capture. There is no
 // final unconditional GotoBottom that can overwrite those requests (#2192).
 func (c *captureHistoryScrollController) CompleteFill(
-	gen uint64,
+	token scrollFillToken,
 	v *viewport.Model,
 	content string,
 ) bool {
-	if !c.FillIsCurrent(gen) {
+	if !c.FillIsCurrent(token) {
 		return false
 	}
 	v.SetContent(content)
@@ -213,6 +230,7 @@ func (c *captureHistoryScrollController) CompleteFill(
 	c.pendingIntents = nil
 	c.phase = historyScrollReady
 	c.fillGen++
+	c.fillInFlight = false
 	return true
 }
 
@@ -234,9 +252,10 @@ func (c *captureHistoryScrollController) Resize(v *viewport.Model, width, height
 // RearmFill preserves pending intent but gives the retry a fresh generation.
 // A capture that could not publish must not either lose input or leave the pane
 // permanently masked as in-flight (#1709).
-func (c *captureHistoryScrollController) RearmFill() {
-	if c.phase == historyScrollLoading {
+func (c *captureHistoryScrollController) RearmFill(token scrollFillToken) {
+	if c.FillIsCurrent(token) {
 		c.fillGen++
+		c.fillInFlight = false
 	}
 }
 
@@ -248,6 +267,7 @@ func (c *captureHistoryScrollController) Reset(v *viewport.Model) {
 	c.phase = historyScrollIdle
 	c.pendingIntents = nil
 	c.fillGen++
+	c.fillInFlight = false
 	v.SetContent("")
 	v.GotoTop()
 }
