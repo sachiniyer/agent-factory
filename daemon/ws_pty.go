@@ -113,14 +113,12 @@ func (cs *controlServer) streamHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Address the tab by its STABLE id (#1738) when the client supplies ?tab_id=.
-	// The binding resolves the id atomically on EVERY operation — the initial
-	// Subscribe and each later Input/Resize — so a reorder/close on another client
-	// can never make this connection address a different tab. Crucially the id is
-	// NOT converted to an ordinal here: doing that and letting the agent-server map
-	// the ordinal back to an id reopened the very race the id closes, because a
-	// concurrent close between the two steps shifts a different tab under the
-	// ordinal (#1779). Without a ?tab_id= (legacy client) the binding pins the
-	// ?tab= ordinal, preserving the pre-#1738 positional behavior.
+	// An id-native runtime resolves the id atomically on EVERY operation — the
+	// initial Subscribe and each later Input/Resize — so a reorder/close on another
+	// client can never redirect the connection. The ordinal-only remote bridge
+	// re-resolves per operation and is safe while that runtime's roster remains
+	// immutable; bindTab documents that capability boundary. Without a ?tab_id=
+	// (legacy client) the binding pins ?tab=, preserving positional behavior.
 	binding, err := cs.bindTab(as, instance, r.URL.Query().Get("tab_id"), tab)
 	if err != nil {
 		writeHTTPError(w, r, httpStatusForTab(err), err)
@@ -199,10 +197,13 @@ func (b ordinalTabBinding) resize(rows, cols uint16) error {
 // the one it saw at bind time. Pinning would mean that if the addressed tab shifts
 // mid-connection, later input/resize keep hitting the old index — the positional
 // misroute the stable id exists to prevent, reintroduced on this path (#1779). This
-// still has a narrow window the local path does not (the resolve and the remote
-// server's own ordinal→broker lookup are not one atomic step), but it is the best
-// an ordinal-shaped protocol allows and is strictly better than a fixed ordinal. A
-// tab that no longer resolves is ErrTabGone — the op is refused, not re-pointed.
+// The resolve and remote ordinal lookup are not one atomic step, but this site is
+// exempt from #2200's shifting-roster race: remote workspaces advertise
+// TabManagement=false and the headless agent-server's tab roster is fixed for its
+// lifetime, so there is no close/reorder writer on either side. If remote tabs ever
+// become mutable, their wire protocol must gain an id-native plane before that
+// capability is enabled. A tab that no longer resolves is ErrTabGone — the op is
+// refused, not re-pointed.
 type resolvingTabBinding struct {
 	as       session.AgentServer
 	instance *session.Instance

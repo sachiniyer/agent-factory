@@ -52,8 +52,11 @@ func (f *fakeHeadlessAgentServer) Snapshot() (session.Observation, error) {
 	return session.Observation{Updated: true, HasPrompt: false, Content: f.snapshotText}, nil
 }
 func (f *fakeHeadlessAgentServer) Preview(int, bool) (string, error) { return "preview-body", nil }
-func (f *fakeHeadlessAgentServer) Alive() (bool, error)              { return true, nil }
-func (f *fakeHeadlessAgentServer) Archive() (string, error)          { return "session/fake", nil }
+func (f *fakeHeadlessAgentServer) PreviewByID(string, bool) (string, error) {
+	return "preview-body", nil
+}
+func (f *fakeHeadlessAgentServer) Alive() (bool, error)     { return true, nil }
+func (f *fakeHeadlessAgentServer) Archive() (string, error) { return "session/fake", nil }
 func (f *fakeHeadlessAgentServer) SendPrompt(p string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()

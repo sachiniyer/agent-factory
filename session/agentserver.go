@@ -37,9 +37,10 @@ var ErrTabClosed = fmt.Errorf("tab closed: %w", io.EOF)
 //
 // The local runtime implements it (its brokers are already keyed by stable id, so
 // id-addressing is strictly simpler than the ordinal round-trip it replaces). A
-// runtime whose wire protocol is ordinal-shaped — the remote agent-server, whose
-// sessions stream through the daemon's Preview capture rather than this WS plane —
-// does not, and the handler falls back to the ordinal path for it.
+// runtime whose wire protocol is ordinal-shaped — the remote agent-server — does
+// not. Its roster is fixed (TabManagement=false), so the handler's compatibility
+// bridge cannot race a close/reorder; mutable remote tabs must add this id-native
+// plane before that capability is enabled.
 type TabAddressableServer interface {
 	// SubscribeTab is Subscribe addressed by stable tab id. ErrTabGone when the id
 	// names no live tab.
@@ -99,6 +100,12 @@ type AgentServer interface {
 	// can't stream live (remote/hook sessions, scroll-mode scrollback, the transient
 	// preview target) — the TUI no longer captures tmux itself (#1592 Phase 2 PR6).
 	Preview(tab int, full bool) (string, error)
+	// PreviewByID is Preview addressed by the tab's stable identity. Implementations
+	// must either bind directly to the identified capture target or keep identity
+	// resolution and the ordinal capture in one critical section; resolving first
+	// and using that ordinal against a later roster can expose another tab (#2200).
+	// ErrTabGone reports that the exact target no longer exists.
+	PreviewByID(tabID string, full bool) (string, error)
 	// Alive reports whether the underlying session process is still running, and
 	// whether the probe could be ANSWERED at all. Kept separate from Snapshot
 	// (rather than folded into Observation) so the daemon probes liveness ONLY on

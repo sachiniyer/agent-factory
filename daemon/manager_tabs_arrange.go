@@ -141,10 +141,9 @@ func (m *Manager) tabMutationTarget(reqID, reqTitle, reqRepoID string, labels ta
 // rather than cross-checked: the name changing underneath the client is the
 // normal case this field exists to survive, so a mismatch is not an error.
 //
-// The id is matched against the SAME tabs slice the caller goes on to index,
-// rather than via instance.TabIndexByID: the caller resolves against a snapshot
-// it already holds, and a second lookup against the live list could return an
-// index that no longer addresses the same element of tabs.
+// The id is matched against the SAME snapshot the caller uses for validation.
+// The caller then carries tabs[idx].ID into an id-native Instance mutation; idx
+// must never be applied to the live roster after this function returns (#2200).
 func resolveTabTarget(tabs []*session.Tab, title, tabID, tabName string, tabIndex int) (int, string, error) {
 	// The PRECEDENCE and the refuse-never-fall-back rule live in
 	// session.ResolveTabIndex (#1948), because the daemon is no longer the only
@@ -173,6 +172,17 @@ func resolveTabTarget(tabs []*session.Tab, title, tabID, tabName string, tabInde
 		return 0, "", err
 	}
 	return idx, tabs[idx].Name, nil
+}
+
+// stableTabTargetID carries the identity selected from a snapshot into the
+// mutation itself. A daemon-owned tab should always have an ID (legacy rows are
+// backfilled on restore); refusing an impossible id-less row is safer than
+// degrading the operation back to its ordinal (#2200).
+func stableTabTargetID(tab *session.Tab, title string) (string, error) {
+	if tab == nil || tab.ID == "" {
+		return "", fmt.Errorf("session %q has a tab without a stable identity; reload its tabs and retry", title)
+	}
+	return tab.ID, nil
 }
 
 // Rollback on persist failure: rename and reorder DO roll back, CloseTab
@@ -225,8 +235,12 @@ func (m *Manager) RenameTab(req RenameTabRequest) (string, error) {
 	if !session.TabKindRenameable(tabs[idx].Kind) {
 		return "", fmt.Errorf("tab %q of session %q can't be renamed: shell tabs always display as %q. Only web, process and VS Code tabs show a custom name — create one with 'af sessions tab-create --kind web' or '--command'", prevName, title, "Terminal")
 	}
+	targetID, err := stableTabTargetID(tabs[idx], title)
+	if err != nil {
+		return "", err
+	}
 
-	name, err := instance.RenameTab(idx, req.NewName)
+	name, err := instance.RenameTabByID(targetID, req.NewName)
 	if err != nil {
 		return "", err
 	}
@@ -238,7 +252,7 @@ func (m *Manager) RenameTab(req RenameTabRequest) (string, error) {
 		// locks are still held, so prevName cannot have been taken in the window
 		// and resolves back exactly; a surprise means the roster changed underneath
 		// us, which is worth a log line rather than a silent wrong name.
-		if got, rerr := instance.RenameTab(idx, prevName); rerr != nil || got != prevName {
+		if got, rerr := instance.RenameTabByID(targetID, prevName); rerr != nil || got != prevName {
 			log.WarningLog.Printf("RenameTab %q: rolling back unpersisted rename of tab %q returned %q, %v", title, prevName, got, rerr)
 		}
 		return "", fmt.Errorf("failed to persist tab rename: %w", err)
@@ -287,8 +301,12 @@ func (m *Manager) ReorderTab(req ReorderTabRequest) (string, int, error) {
 	if req.NewIndex < 0 || req.NewIndex >= len(tabs) {
 		return "", 0, fmt.Errorf("session %q has no tab slot at index %d (valid: 1-%d)", title, req.NewIndex, len(tabs)-1)
 	}
+	targetID, err := stableTabTargetID(tabs[idx], title)
+	if err != nil {
+		return "", 0, err
+	}
 
-	if err := instance.ReorderTab(idx, req.NewIndex); err != nil {
+	if err := instance.ReorderTabByID(targetID, req.NewIndex); err != nil {
 		return "", 0, err
 	}
 
@@ -296,7 +314,7 @@ func (m *Manager) ReorderTab(req ReorderTabRequest) (string, int, error) {
 	if err := persistInstanceData(repoID, data); err != nil {
 		// Put the original order back (see the rollback note above). Moving the tab from its
 		// new index back to its old one is the exact inverse of the move above.
-		if rerr := instance.ReorderTab(req.NewIndex, idx); rerr != nil {
+		if rerr := instance.ReorderTabByID(targetID, idx); rerr != nil {
 			log.WarningLog.Printf("ReorderTab %q: rolling back unpersisted move of tab %q failed: %v", title, name, rerr)
 		}
 		return "", 0, fmt.Errorf("failed to persist tab reorder: %w", err)
