@@ -39,12 +39,14 @@ type tmuxClientlessChannel struct {
 // return. Read reports io.EOF once stopped, so the sentinel never reaches the
 // broker ring.
 type captureReader struct {
-	f       *os.File
+	f       io.ReadCloser
 	fifo    string
 	stopped atomic.Bool
 	once    sync.Once
 	err     error
 }
+
+const captureStopSentinel byte = 0
 
 func (r *captureReader) Read(p []byte) (int, error) {
 	if r.stopped.Load() {
@@ -52,6 +54,17 @@ func (r *captureReader) Read(p []byte) (int, error) {
 	}
 	n, err := r.f.Read(p)
 	if r.stopped.Load() {
+		// Close writes exactly one sentinel after latching stopped. StopCapture has
+		// already disabled pipe-pane, so when that byte shares a FIFO read with the
+		// pane's final buffered output it is the tail. Consume only that private wake
+		// byte; bytes the read already obtained still belong to the broker ring and
+		// must be returned before EOF.
+		if n > 0 && p[n-1] == captureStopSentinel {
+			n--
+		}
+		if n > 0 {
+			return n, io.EOF
+		}
 		return 0, io.EOF
 	}
 	return n, err
@@ -61,7 +74,7 @@ func (r *captureReader) Close() error {
 	r.once.Do(func() {
 		r.stopped.Store(true)
 		if w, err := os.OpenFile(r.fifo, os.O_WRONLY|syscall.O_NONBLOCK, 0); err == nil {
-			_, _ = w.Write([]byte{0})
+			_, _ = w.Write([]byte{captureStopSentinel})
 			_ = w.Close()
 		}
 		r.err = r.f.Close()

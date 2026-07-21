@@ -1,6 +1,8 @@
 package session
 
 import (
+	"errors"
+	"io"
 	"os/exec"
 	"strings"
 	"testing"
@@ -10,6 +12,79 @@ import (
 
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
+
+type stagedCaptureReadCloser struct {
+	started chan struct{}
+	release chan struct{}
+	data    []byte
+}
+
+func (r *stagedCaptureReadCloser) Read(p []byte) (int, error) {
+	close(r.started)
+	<-r.release
+	return copy(p, r.data), nil
+}
+
+func (*stagedCaptureReadCloser) Close() error { return nil }
+
+type captureReadResult struct {
+	n   int
+	err error
+	buf []byte
+}
+
+func readAcrossCaptureStop(t *testing.T, data []byte) captureReadResult {
+	t.Helper()
+	f := &stagedCaptureReadCloser{
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+		data:    data,
+	}
+	r := &captureReader{f: f}
+	result := make(chan captureReadResult, 1)
+	go func() {
+		buf := make([]byte, 64)
+		n, err := r.Read(buf)
+		result <- captureReadResult{n: n, err: err, buf: buf}
+	}()
+
+	<-f.started
+	r.stopped.Store(true)
+	close(f.release)
+	return <-result
+}
+
+func TestCaptureReaderPreservesBytesReadAsCloseStarts(t *testing.T) {
+	const finalOutput = "final pane output"
+	got := readAcrossCaptureStop(t, []byte(finalOutput))
+	if string(got.buf[:got.n]) != finalOutput {
+		t.Fatalf("Read data = %q (n=%d), want final pane output %q", got.buf[:got.n], got.n, finalOutput)
+	}
+	if !errors.Is(got.err, io.EOF) {
+		t.Fatalf("Read error = %v, want io.EOF after returning final pane output", got.err)
+	}
+}
+
+func TestCaptureReaderAbsorbsStopSentinelAfterFinalBytes(t *testing.T) {
+	const finalOutput = "final pane output"
+	got := readAcrossCaptureStop(t, append([]byte(finalOutput), captureStopSentinel))
+	if string(got.buf[:got.n]) != finalOutput {
+		t.Fatalf("Read data = %q (n=%d), want final pane output %q without sentinel", got.buf[:got.n], got.n, finalOutput)
+	}
+	if !errors.Is(got.err, io.EOF) {
+		t.Fatalf("Read error = %v, want io.EOF after returning final pane output", got.err)
+	}
+}
+
+func TestCaptureReaderAbsorbsStopSentinelAlone(t *testing.T) {
+	got := readAcrossCaptureStop(t, []byte{captureStopSentinel})
+	if got.n != 0 {
+		t.Fatalf("Read returned %d sentinel bytes, want none", got.n)
+	}
+	if !errors.Is(got.err, io.EOF) {
+		t.Fatalf("Read error = %v, want io.EOF for the stop sentinel", got.err)
+	}
+}
 
 // TestTmuxSnapshotRepaintCursorRealTmux is the #1688 end-to-end gate against a REAL
 // tmux server: it drives the actual capture → buildRepaint → emulator path and
