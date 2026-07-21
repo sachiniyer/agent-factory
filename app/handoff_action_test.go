@@ -116,6 +116,33 @@ func TestHandleStateSelectHandoffAgent_ConfirmsThenSwapsTheChosenAgent(t *testin
 	require.Equal(t, tmux.ProgramGemini, gotTarget, "the swap must target the agent the user picked")
 }
 
+func TestHandleStateSelectHandoffAgent_KeepsTheSessionThatOpenedThePicker(t *testing.T) {
+	h := newTestHome(t)
+	alpha := handoffActionInstance(t, "alpha", tmux.ProgramClaude)
+	beta := handoffActionInstance(t, "beta", tmux.ProgramCodex)
+	h.store.AddInstance(alpha)
+	h.store.AddInstance(beta)
+	h.sidebar.SetSelectedInstance(0)
+
+	_, _ = h.handleHandoff()
+	require.Equal(t, tmux.ProgramCodex, h.handoffChoices[0], "fixture assumption: codex is offered for alpha")
+
+	// A snapshot can reconcile the sidebar while the modal owns the keyboard.
+	// Moving the cursor reproduces the consequential part of that update: the
+	// current selection is now beta even though alpha opened the picker.
+	h.sidebar.SetSelectedInstance(1)
+	h.selectionOverlay.SetSelectedIndex(0)
+	_, _ = h.handleStateSelectHandoffAgent(tea.KeyMsg{Type: tea.KeyEnter})
+
+	require.Equal(t, stateConfirm, h.state)
+	_, cmd := h.handleStateConfirm(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("y")})
+	require.NotNil(t, cmd)
+	start, ok := cmd().(startHandoffMsg)
+	require.True(t, ok, "confirming must emit startHandoffMsg")
+	require.Equal(t, alpha.Title, start.title,
+		"a background selection change must not retarget the handoff")
+}
+
 // Cancelling the picker must leave the session untouched.
 func TestHandleStateSelectHandoffAgent_CancelDoesNotSwap(t *testing.T) {
 	h := newTestHome(t)
