@@ -2,7 +2,6 @@ package tmuxguard
 
 import (
 	"strings"
-	"unicode"
 
 	"github.com/sachiniyer/agent-factory/internal/envcommand"
 )
@@ -95,19 +94,6 @@ func knownShellFlags(flags string) bool {
 	return strings.IndexFunc(flags, func(flag rune) bool {
 		return !strings.ContainsRune("abefhkmnprstuvxBCEHPT", flag)
 	}) == -1
-}
-
-func isAssignment(word string) bool {
-	eq := strings.IndexByte(word, '=')
-	if eq <= 0 {
-		return false
-	}
-	for i, r := range word[:eq] {
-		if (i == 0 && !unicode.IsLetter(r) && r != '_') || (i > 0 && !unicode.IsLetter(r) && !unicode.IsDigit(r) && r != '_') {
-			return false
-		}
-	}
-	return true
 }
 
 // timeoutTarget recognizes the complete option prefix documented by GNU
