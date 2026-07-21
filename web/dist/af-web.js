@@ -6748,6 +6748,7 @@ function createKeyedQueue() {
         tails.delete(key);
       }
     });
+    return next;
   };
 }
 var ConfigPane = class {
@@ -12226,7 +12227,7 @@ function applyConfigValue(key, value) {
   if (tok === null) {
     return;
   }
-  queueConfigSave(key, () => applyConfigValueNow(key, value, tok));
+  void queueConfigSave(key, () => applyConfigValueNow(key, value, tok));
 }
 function applyConfigValueNow(key, value, tok) {
   return setConfigValue(key, value, tok).then((resp) => {

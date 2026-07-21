@@ -1054,7 +1054,7 @@ function applyConfigValue(key: string, value: string): void {
   if (tok === null) {
     return;
   }
-  queueConfigSave(key, () => applyConfigValueNow(key, value, tok));
+  void queueConfigSave(key, () => applyConfigValueNow(key, value, tok));
 }
 
 function applyConfigValueNow(key: string, value: string, tok: string): Promise<void> {

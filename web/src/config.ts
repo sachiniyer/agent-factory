@@ -132,8 +132,11 @@ export function canCommit(shown: string, current: string): boolean {
  * Per KEY, not global: two different keys have no ordering relationship, and
  * queueing them behind each other would make a slow write block an unrelated one
  * for no gain.
+ *
+ * The returned promise settles when this queued run settles (and never rejects),
+ * giving tests and other completion-sensitive callers a deterministic barrier.
  */
-export function createKeyedQueue(): (key: string, run: () => Promise<void>) => void {
+export function createKeyedQueue(): (key: string, run: () => Promise<void>) => Promise<void> {
   const tails = new Map<string, Promise<void>>();
   return (key, run) => {
     const prev = tails.get(key) ?? Promise.resolve();
@@ -153,6 +156,7 @@ export function createKeyedQueue(): (key: string, run: () => Promise<void>) => v
         tails.delete(key);
       }
     });
+    return next;
   };
 }
 
