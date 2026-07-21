@@ -119,6 +119,14 @@ func TestControlRoundTrips(t *testing.T) {
 			t.Fatalf("ResumeFromLimit: %v", err)
 		}
 	})
+	t.Run("ResumeFromLimit rejects a daemon no-op", func(t *testing.T) {
+		c := routeServer(t, "ResumeFromLimit", func([]byte) apiproto.Envelope {
+			return apiproto.Success(daemon.ResumeFromLimitResponse{Reason: "another operation owns the retry"})
+		})
+		if err := c.ResumeFromLimit(daemon.ResumeFromLimitRequest{Title: "alpha"}); err == nil {
+			t.Fatal("ResumeFromLimit must not report success when the daemon performed no retry")
+		}
+	})
 
 	t.Run("PauseStatusPoll rides internal route", func(t *testing.T) {
 		c := routeServer(t, "PauseStatusPoll", func([]byte) apiproto.Envelope {

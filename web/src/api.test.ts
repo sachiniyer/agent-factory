@@ -118,6 +118,22 @@ test("resumeFromLimit posts the stable id, so a duplicate title cannot misroute 
   assert.equal(cap.body.repo_id, "", "an all-repos web client scopes by id, not repo");
 });
 
+test("resumeFromLimit rejects the daemon's no-op outcome", async () => {
+  (globalThis as { fetch: unknown }).fetch = async (): Promise<Response> =>
+    ({
+      ok: true,
+      status: 200,
+      statusText: "OK",
+      json: async () => ({ data: { ok: false, reason: "another operation owns the retry" }, error: null }),
+    }) as unknown as Response;
+
+  await assert.rejects(
+    resumeFromLimit("id-repoB", "feature", "tok"),
+    /another operation owns the retry/,
+    "a successful HTTP envelope must not turn a daemon no-op into a successful web action",
+  );
+});
+
 test("listPrograms asks the daemon for the agent catalog (#1970)", async () => {
   const cap = stubFetch();
   await listPrograms("/repos/af", "tok");

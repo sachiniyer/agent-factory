@@ -2,6 +2,7 @@ package apiclient
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/session"
@@ -72,7 +73,14 @@ func (c *Client) DeleteProject(req daemon.DeleteProjectRequest) (daemon.DeletePr
 // (#1146) — the action behind the TUI's `c` key and the web's Retry button.
 // The CLI reaches the same public handler over its gob control transport.
 func (c *Client) ResumeFromLimit(req daemon.ResumeFromLimitRequest) error {
-	return c.call("ResumeFromLimit", req, &daemon.ResumeFromLimitResponse{})
+	var resp daemon.ResumeFromLimitResponse
+	if err := c.call("ResumeFromLimit", req, &resp); err != nil {
+		return err
+	}
+	if !resp.OK {
+		return fmt.Errorf("resume was not performed: %s", resp.Reason)
+	}
+	return nil
 }
 
 // HandoffSession asks the daemon to continue a session under a different agent,

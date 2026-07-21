@@ -232,8 +232,16 @@ type ResumeFromLimitRequest struct {
 }
 
 type ResumeFromLimitResponse struct {
-	OK bool `json:"ok"`
+	OK     bool   `json:"ok"`
+	Reason string `json:"reason,omitempty"`
 }
+
+type resumeFromLimitOutcome uint8
+
+const (
+	resumeNotPerformed resumeFromLimitOutcome = iota
+	resumePerformed
+)
 
 // The TUI and web reach this handler through apiclient/HTTP. The CLI reaches the
 // same handler through daemon.ResumeFromLimit on the gob control socket; only
@@ -246,10 +254,14 @@ func (s *controlServer) ResumeFromLimit(req ResumeFromLimitRequest, resp *Resume
 	if err := validateRPCRepoID(req.RepoID); err != nil {
 		return err
 	}
-	if err := s.manager.resumeFromLimit(req); err != nil {
+	outcome, err := s.manager.resumeFromLimitOutcome(req)
+	if err != nil {
 		return err
 	}
-	resp.OK = true
+	resp.OK = outcome == resumePerformed
+	if !resp.OK {
+		resp.Reason = "the session changed or another operation owns its retry"
+	}
 	return nil
 }
 
@@ -286,6 +298,11 @@ func (s *controlServer) ResumeFromLimit(req ResumeFromLimitRequest, resp *Resume
 var testHookResumeAfterFirstLock = func() {}
 
 func (m *Manager) resumeFromLimit(req ResumeFromLimitRequest) error {
+	_, err := m.resumeFromLimitOutcome(req)
+	return err
+}
+
+func (m *Manager) resumeFromLimitOutcome(req ResumeFromLimitRequest) (resumeFromLimitOutcome, error) {
 	// resolveActionSession, not findSession: id-first with a {title, repoID}
 	// fallback, the same resolver kill/archive/restore and the tab verbs use. This
 	// verb re-delivers a prompt INTO a pane, so resolving it by title alone would
@@ -296,20 +313,20 @@ func (m *Manager) resumeFromLimit(req ResumeFromLimitRequest) error {
 	// id-keyed request may leave empty.
 	instance, repoID, title, _, _, err := m.resolveActionSession(req.ID, req.Title, req.RepoID)
 	if err != nil {
-		return err
+		return resumeNotPerformed, err
 	}
 	if instance == nil {
-		return fmt.Errorf("session %q not found", title)
+		return resumeNotPerformed, fmt.Errorf("session %q not found", title)
 	}
 	if !instance.LimitReached() {
-		return fmt.Errorf("session %q is not blocked on a usage limit", title)
+		return resumeNotPerformed, fmt.Errorf("session %q is not blocked on a usage limit", title)
 	}
 
 	key := daemonInstanceKey(repoID, instance.Title)
 	m.mu.Lock()
 	if _, killing := m.killsInFlight[key]; killing {
 		m.mu.Unlock()
-		return nil
+		return resumeNotPerformed, nil
 	}
 	m.mu.Unlock()
 
@@ -326,7 +343,7 @@ func (m *Manager) resumeFromLimit(req ResumeFromLimitRequest) error {
 
 	opLock := m.opLockFor(key)
 	if !opLock.TryLock() {
-		return nil
+		return resumeNotPerformed, nil
 	}
 	defer opLock.Unlock()
 
@@ -335,10 +352,10 @@ func (m *Manager) resumeFromLimit(req ResumeFromLimitRequest) error {
 	_, killing := m.killsInFlight[key]
 	m.mu.Unlock()
 	if killing || current != instance || instance.IsTearingDown() {
-		return nil
+		return resumeNotPerformed, nil
 	}
 
-	return m.resumeFromLimitLocked(repoID, key, instance, title)
+	return m.resumeFromLimitLockedOutcome(repoID, key, instance, title)
 }
 
 // resumeFromLimitLocked performs the shared limit-resume action. The caller must
@@ -349,20 +366,25 @@ func (m *Manager) resumeFromLimit(req ResumeFromLimitRequest) error {
 // points (resumeFromLimit and the auto-resume scheduler) take the two locks before
 // calling in, so this body never touches the lock helpers itself.
 func (m *Manager) resumeFromLimitLocked(repoID, key string, instance *session.Instance, requestedTitle string) error {
+	_, err := m.resumeFromLimitLockedOutcome(repoID, key, instance, requestedTitle)
+	return err
+}
+
+func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *session.Instance, requestedTitle string) (resumeFromLimitOutcome, error) {
 	// Re-verify under the lock: a self-recovery or the poll may have cleared the
 	// limit between the check above and the lock.
 	if !instance.LimitReached() {
-		return nil
+		return resumeNotPerformed, nil
 	}
 	m.mu.Lock()
 	current := m.instances[key]
 	_, killing := m.killsInFlight[key]
 	m.mu.Unlock()
 	if killing || current != instance || instance.IsTearingDown() {
-		return nil
+		return resumeNotPerformed, nil
 	}
 	if instance.UserKilled() || session.IsReservedTitle(instance.Title) {
-		return fmt.Errorf("session %q cannot be resumed", requestedTitle)
+		return resumeNotPerformed, fmt.Errorf("session %q cannot be resumed", requestedTitle)
 	}
 
 	// Re-spawn only when the agent's session actually exited while blocked (the
@@ -396,7 +418,7 @@ func (m *Manager) resumeFromLimitLocked(repoID, key string, instance *session.In
 		// A live stall — the common claude/codex case. No re-spawn; the un-stall
 		// prompt below is all it needs.
 	case probeUnknown:
-		return fmt.Errorf("cannot resume %q: its agent-server did not answer the liveness probe; not re-spawning, because re-provisioning a sandbox that may still be running would orphan it and discard its unpushed work", requestedTitle)
+		return resumeNotPerformed, fmt.Errorf("cannot resume %q: its agent-server did not answer the liveness probe; not re-spawning, because re-provisioning a sandbox that may still be running would orphan it and discard its unpushed work", requestedTitle)
 	case probeDead:
 		// Capture the limit window BEFORE the re-spawn: Respawn ends in ConfirmLive,
 		// which drops both the LiveLimitReached liveness and its reset time, and
@@ -405,7 +427,7 @@ func (m *Manager) resumeFromLimitLocked(repoID, key string, instance *session.In
 		// auto-resume scheduler schedules off it (reset + grace).
 		resetAt, _ := instance.LimitResetAt()
 		if rerr := instance.Respawn(); rerr != nil {
-			return fmt.Errorf("failed to re-spawn agent for %q: %w", requestedTitle, rerr)
+			return resumeNotPerformed, fmt.Errorf("failed to re-spawn agent for %q: %w", requestedTitle, rerr)
 		}
 		// The runtime this session's failure history was about is gone; the fresh
 		// sandbox must not inherit it (#1794).
@@ -463,7 +485,7 @@ func (m *Manager) resumeFromLimitLocked(repoID, key string, instance *session.In
 		prompt = "continue"
 	}
 	if serr := as.SendPrompt(prompt); serr != nil {
-		return fmt.Errorf("failed to resume %q: %w", requestedTitle, serr)
+		return resumeNotPerformed, fmt.Errorf("failed to resume %q: %w", requestedTitle, serr)
 	}
 	// The prompt landed: this is the resume's single completion point, and the only
 	// place the limit block is lifted on either arm.
@@ -474,5 +496,5 @@ func (m *Manager) resumeFromLimitLocked(repoID, key string, instance *session.In
 	// rebuilt worktree of a session still parked at the wall, this one records the
 	// resume that actually landed.
 	m.persistInstance(repoID, instance)
-	return nil
+	return resumePerformed, nil
 }
