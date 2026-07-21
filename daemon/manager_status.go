@@ -318,6 +318,15 @@ func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instanc
 		m.finishUserKill(repoID, instance)
 		return
 	}
+	// A startup-unknown record is intentionally inert (#2207). The create may
+	// have launched a tmux session under a spelling this binding cannot address;
+	// probing that requested name cannot establish liveness, and automatically
+	// killing after a false "absent" answer could delete its live worktree. Only an
+	// explicit user action may move this record into the UserKilled branch above.
+	if instance.StartupStateUnknown() {
+		m.clearRemoteLoss(key)
+		return
+	}
 	if !instance.Started() {
 		return
 	}

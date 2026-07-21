@@ -67,3 +67,50 @@ func TestSaveInstances_KeepsTombstonedRowAlongsideStartedSibling(t *testing.T) {
 			"and finishUserKill deliberately performed is undone by a writer in another layer (#1917 round 5)")
 	}
 }
+
+// TestSaveInstances_KeepsStartupUnknownRowAlongsideStartedSibling applies the
+// same retention rule to #2207's inert startup record. It has no kill tombstone
+// by design, so StartupStateUnknown must independently keep a wholesale storage
+// checkpoint from orphaning its workspace.
+func TestSaveInstances_KeepsStartupUnknownRowAlongsideStartedSibling(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	repoPath := t.TempDir()
+
+	alive := &Instance{Title: "alive", Path: repoPath, started: true}
+	alive.SetStatusForTest(Running)
+
+	uncertain := &Instance{Title: "uncertain", Path: repoPath, started: true}
+	uncertain.SetStatusForTest(Running)
+	uncertain.MarkStartupStateUnknown()
+
+	storage, err := NewStorage(config.LoadState(), "")
+	if err != nil {
+		t.Fatalf("NewStorage: %v", err)
+	}
+	if err := storage.SaveInstances([]*Instance{alive, uncertain}); err != nil {
+		t.Fatalf("SaveInstances: %v", err)
+	}
+
+	repoID := config.RepoIDFromRoot(repoPath)
+	scoped, err := NewStorage(config.LoadState(), repoID)
+	if err != nil {
+		t.Fatalf("NewStorage(scoped): %v", err)
+	}
+	rows, err := scoped.LoadInstanceData()
+	if err != nil {
+		t.Fatalf("LoadInstanceData: %v", err)
+	}
+	for _, row := range rows {
+		if row.Title != "uncertain" {
+			continue
+		}
+		if !row.StartupStateUnknown {
+			t.Fatal("the retained startup-unknown row lost its durable safety marker")
+		}
+		if row.UserKilled {
+			t.Fatal("the startup-unknown row became an automatic-cleanup tombstone")
+		}
+		return
+	}
+	t.Fatal("the daemon checkpoint dropped an inert startup-unknown row and orphaned its workspace")
+}

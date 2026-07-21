@@ -17,9 +17,9 @@ import (
 // The path that matters: has-session answers "no" (so Start proceeds), the spawn
 // SUCCEEDS — a detached session now exists and its pane may be RUNNING in the
 // worktree — and then the server wedges, so the readiness poll times out and the
-// cleanup Close cannot confirm the session's fate. LocalBackend.Launch calls
-// gw.Cleanup() the instant Start returns an error, so if this error does not carry
-// the unknown, the brand-new worktree is deleted out from under that live pane.
+// cleanup Close cannot confirm the session's fate. The sentinel is retained for
+// callers that distinguish a tmux deadline from other failures; Launch also
+// independently defaults every post-spawn failure to preservation (#2207).
 //
 // PRE-FIX BEHAVIOR THIS REPRODUCES: the returned error does not wrap ErrTmuxTimeout
 // (the state was dropped, and %v erased the sentinel even where it existed).
@@ -53,8 +53,10 @@ func TestStart_ReadinessTimeoutOnWedgedServer_PropagatesTheUnknown(t *testing.T)
 	}
 	if !errors.Is(err, ErrTmuxTimeout) {
 		t.Fatalf("Start dropped the unknown pane state: its cleanup Close could not confirm whether "+
-			"the session it just spawned is dead, but the error does not say so — LocalBackend.Launch "+
-			"then deletes the brand-new worktree out from under a possibly-live pane (#1917 round 7). "+
+			"the session it just spawned is dead, but the error does not say so (#1917 round 7). "+
 			"got: %v", err)
+	}
+	if errors.Is(err, ErrSessionNotStarted) {
+		t.Fatalf("a readiness timeout was misclassified as proof the session never started: %v", err)
 	}
 }

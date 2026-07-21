@@ -81,9 +81,15 @@ type InstanceData struct {
 	// Manager.KillSession before teardown begins. Present only in the crash
 	// window between tombstone write and record deletion — a surviving
 	// tombstoned record means "finish this kill", never "restore this".
-	UserKilled bool      `json:"user_killed,omitempty"`
-	TmuxName   string    `json:"tmux_name,omitempty"`
-	Tabs       []TabData `json:"tabs,omitempty"`
+	UserKilled bool `json:"user_killed,omitempty"`
+	// StartupStateUnknown retains a create that crossed the launch boundary but
+	// whose runtime could not be confirmed. Unlike UserKilled, it does NOT commit
+	// an automatic teardown: retrying the same uncertain binding could mistake a
+	// differently stored tmux name for absence and delete a live workspace
+	// (#2207). Additive + omitempty keeps older records unchanged.
+	StartupStateUnknown bool      `json:"startup_state_unknown,omitempty"`
+	TmuxName            string    `json:"tmux_name,omitempty"`
+	Tabs                []TabData `json:"tabs,omitempty"`
 	// AgentConversation mirrors the Agent tab's provider conversation id for
 	// API/CLI consumers. The per-tab source of truth is TabData.Conversation.
 	AgentConversation *AgentConversationData `json:"agent_conversation,omitempty"`
@@ -259,16 +265,16 @@ func (s *Storage) SaveInstances(instances []*Instance) error {
 		// the same repo is saved — would silently orphan the archived worktree.
 		// (Lost is unaffected: it loads started=true, so it already survives.)
 		//
-		// A TOMBSTONED instance is the same shape and is kept for the same reason
-		// (#1917). A kill clears started BEFORE teardown, so a teardown that could
-		// not complete safely — tmux never confirmed the pane dead, or a worktree
-		// removal was cut off — leaves exactly this: started=false, not Archived,
-		// workspace still on disk, and the record deliberately RETAINED as its only
+		// TOMBSTONED and startup-unknown instances are also kept (#1917/#2207).
+		// Both are started=false and not Archived while their workspace may still be
+		// live: one because teardown could not confirm the pane dead or finish a
+		// worktree removal, the other because startup never established the runtime's
+		// identity. The record is deliberately RETAINED as that workspace's only
 		// handle. Without this clause the next checkpoint triggered by any other
 		// started session in the repo would silently drop it, undoing the retention
 		// in a layer that never heard of it, and orphaning the very workspace the
 		// retention exists to protect. Retention is a claim on this writer too.
-		if !inst.Started() && status != Archived && !inst.UserKilled() {
+		if !inst.Started() && status != Archived && !inst.UserKilled() && !inst.StartupStateUnknown() {
 			continue
 		}
 		root := inst.GetRepoPath()

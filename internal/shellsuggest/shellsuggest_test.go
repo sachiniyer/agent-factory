@@ -9,8 +9,8 @@ import (
 )
 
 // hostileTitle is the session title from the #1978 report: a space, a single
-// quote, a backtick, a `;`, and a `$`. Every one of these survives toTmuxName
-// (which only rewrites what tmux needs), so it reaches a printed command intact.
+// quote, a backtick, a `;`, and a `$`. The tmux handle is sanitized separately,
+// but title-addressed user commands still receive this raw value intact.
 //
 // Every payload here is INERT on purpose. These strings are handed to a real
 // shell, so if the quoting is broken they RUN — a destructive payload would make

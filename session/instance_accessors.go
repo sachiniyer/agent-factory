@@ -62,6 +62,25 @@ func (i *Instance) UserKilled() bool {
 	return i.userKilled
 }
 
+// MarkStartupStateUnknown retains a failed create as an inert record. Clearing
+// started prevents attach/probe paths from treating the requested runtime name
+// as confirmed; StartupStateUnknown keeps storage checkpoints from dropping the
+// record merely because it is not started.
+func (i *Instance) MarkStartupStateUnknown() {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	i.startupStateUnknown = true
+	i.started = false
+}
+
+// StartupStateUnknown reports whether a create may have launched a runtime but
+// could not confirm its identity or liveness.
+func (i *Instance) StartupStateUnknown() bool {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	return i.startupStateUnknown
+}
+
 // TaskRunActive reports whether this session's task run is still in flight
 // (#1892). Prefer LifecycleView when the answer is combined with any other piece
 // of state: a verdict assembled from separate accessor calls can straddle a

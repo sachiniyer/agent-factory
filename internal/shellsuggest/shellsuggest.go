@@ -3,12 +3,12 @@
 //
 // It exists because those commands are built from values a user chose — session
 // titles, filesystem paths, config values — and titles are not shell-safe by
-// construction: toTmuxName (session/tmux/session.go) rewrites only the characters
-// TMUX needs, and its own comment notes that other punctuation is "preserved
-// verbatim". So a session titled  deploy `id` ; echo hi  reaches these commands
-// intact. Interpolated raw, the printed command either fails or — worse — reads
-// like one thing and does another. It is printed exactly when someone is already
-// cleaning up a mess, which is when it most has to be right (#1978).
+// construction. A session's tmux handle is sanitized, but user-facing commands
+// still address the raw title, so  deploy `id` ; echo hi  reaches these command
+// suggestions intact. Interpolated raw, the printed command either fails or —
+// worse — reads like one thing and does another. It is printed exactly when
+// someone is already cleaning up a mess, which is when it most has to be right
+// (#1978).
 //
 // # Why a seam rather than "remember to quote"
 //

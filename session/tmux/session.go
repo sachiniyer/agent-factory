@@ -5,9 +5,9 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"regexp"
 	"strings"
 	"sync"
+	"unicode"
 
 	"github.com/sachiniyer/agent-factory/cmd"
 )
@@ -88,6 +88,16 @@ const TmuxPrefix = "af_"
 // does not use this sentinel.
 var ErrSessionGone = errors.New("tmux session no longer exists")
 
+// ErrSessionNotStarted is positive evidence that Start failed before its
+// new-session process began. LocalBackend is allowed to remove a newly-created
+// worktree only when this marker is present; every other Start error is
+// conservatively treated as a session that may be running in that workspace.
+//
+// This is deliberately narrower than "Start returned an error". In particular,
+// a readiness timeout means af did not observe the session under the name it
+// probed; it does not prove tmux failed to create one (#2207).
+var ErrSessionNotStarted = errors.New("tmux session definitely did not start")
+
 // DetachKeyByte is the ASCII byte for the key used to detach from attached sessions.
 // Default is 23 (Ctrl-W). Set via SetDetachKey.
 var DetachKeyByte byte = 23
@@ -101,8 +111,6 @@ func SetDetachKey(b byte, display string) {
 	DetachKeyDisplay = display
 }
 
-var whiteSpaceRegex = regexp.MustCompile(`\s+`)
-
 // repoHash returns a short hex hash of the repo path for use in tmux session names.
 func repoHash(repoPath string) string {
 	h := sha256.Sum256([]byte(repoPath))
@@ -111,27 +119,30 @@ func repoHash(repoPath string) string {
 
 // toTmuxName builds the tmux session name from a user-supplied title.
 //
-// Characters that tmux does not preserve verbatim in session names must be
-// replaced here so ExistsOrUnknown() and kill paths match the name tmux
-// actually created (#574). Verified against tmux 3.4:
-//   - '.' and ':' are silently rewritten to '_'; using them as-is causes
-//     Start() to poll for a name tmux never created and time out, orphaning
-//     the session.
-//   - '$' is rewritten to a literal backslash+'$' (tmux uses '$' as the
-//     session-id prefix), which has the same round-trip failure.
-//   - '#' is preserved verbatim but is tmux's format-escape character, so
-//     it can corrupt status-line and display-message output that includes
-//     the session name. Sanitized defensively.
+// tmux 3.4's session_check_name rewrites '.' and ':', then utf8_stravis
+// escapes backslashes, variable-like '$' sequences, and control bytes. The
+// command layer also expands '#' formats before storing the name. Mirroring
+// those version-dependent transformations with a punctuation denylist has
+// repeatedly missed another character (#574, #2207), and a missed character
+// makes Start probe a different name from the one tmux created.
 //
-// Other punctuation (',', ';', '@', '%', '(', etc.) is preserved verbatim
-// by tmux and round-trips correctly, so we leave it alone to keep names
-// recognizable.
+// Use a positive policy instead: Unicode letters, numbers and combining marks
+// keep human-readable titles intact, while only '_' and '-' are admitted from
+// ASCII punctuation. Whitespace is removed for compatibility with the existing
+// naming scheme; every other rune becomes '_'. Persisted sessions bypass this
+// function through NewTmuxSessionFromSanitizedName, so their exact names remain
+// restorable across upgrades.
 func toTmuxName(title string, repoPath string) string {
-	title = whiteSpaceRegex.ReplaceAllString(title, "")
-	title = strings.ReplaceAll(title, ".", "_") // tmux silently rewrites '.' to '_'
-	title = strings.ReplaceAll(title, ":", "_") // tmux silently rewrites ':' to '_'
-	title = strings.ReplaceAll(title, "#", "_") // tmux treats '#' as format-escape
-	title = strings.ReplaceAll(title, "$", "_") // tmux escapes '$' to '\$' in session names
+	title = strings.Map(func(r rune) rune {
+		switch {
+		case unicode.IsLetter(r), unicode.IsNumber(r), unicode.IsMark(r), r == '_', r == '-':
+			return r
+		case unicode.IsSpace(r):
+			return -1
+		default:
+			return '_'
+		}
+	}, title)
 	if repoPath != "" {
 		return fmt.Sprintf("%s%s_%s", TmuxPrefix, repoHash(repoPath), title)
 	}

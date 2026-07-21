@@ -267,13 +267,12 @@ func (b *LocalBackend) Provision(i *Instance, firstTimeSetup bool) error {
 // Launch starts (or restores) the agent PROCESS in the workspace Provision
 // established (#1592 Phase 1 PR4): it materializes the worktree on disk
 // (worktree.Setup on a fresh create), spawns or reconnects the tmux session, and
-// brings up the non-agent tabs. It owns the failure-cleanup scope — a launch
-// failure tears down provision's worktree via i.Kill on a fresh create, or
-// releases only the attach PTY on a restore. worktree.Setup deliberately stays
-// here rather than in provision: it is the first on-disk mutation, and its
-// failure needs the same teardown as any other launch failure, so it belongs
-// inside this cleanup scope. Behavior is identical to the pre-split Start — this
-// is exactly the code that followed provision's work in the monolithic form.
+// brings up the non-agent tabs. It owns the failure-cleanup scope: a fresh
+// worktree is removed only when the failure positively proves no runtime began,
+// while an unknown post-spawn outcome preserves it; a restore failure releases
+// only the attach PTY. worktree.Setup deliberately stays here rather than in
+// provision because it is the first on-disk mutation and therefore belongs
+// inside this cleanup scope.
 func (b *LocalBackend) Launch(i *Instance, firstTimeSetup bool) error {
 	i.mu.RLock()
 	tmuxSession := i.tmuxLocked()
@@ -341,7 +340,7 @@ func (b *LocalBackend) Launch(i *Instance, firstTimeSetup bool) error {
 		// loop or user-initiated restore (#1108 PR 2, #1300), never a
 		// load-time side effect; a tombstoned record's only future is
 		// having its kill finished.
-		if status := i.GetStatus(); status == Dead || status == Lost || i.UserKilled() {
+		if status := i.GetStatus(); status == Dead || status == Lost || i.UserKilled() || i.StartupStateUnknown() {
 			return nil
 		}
 
@@ -390,19 +389,18 @@ func (b *LocalBackend) Launch(i *Instance, firstTimeSetup bool) error {
 
 		// Create new session
 		if err := tmuxSession.Start(gw.GetWorktreePath()); err != nil {
-			// A Start that could not establish the session's fate must NOT lead to a
-			// worktree delete (#1917 round 7). The claim that used to stand here —
-			// "the tmux session never came up, so there is no live pane to race the
-			// removal" — is false against a wedged server: Start's own cleanup Close
-			// reports PaneStateUnknown precisely because a detached session may exist
-			// with its pane still running in this worktree. Deleting it then destroys
-			// live work on a guess, which is the whole thing this PR exists to stop.
-			if errors.Is(err, tmux.ErrTmuxTimeout) {
+			// Fail closed: only Start's positive "the new-session process never
+			// began" marker authorizes deleting this worktree. An unclassified
+			// error is unknown, not a confident negative; in particular, a readiness
+			// timeout may mean tmux created a differently escaped name that af's
+			// probes and cleanup never found (#2207). Defaulting new error paths to
+			// preservation keeps the destructive action behind affirmative proof.
+			if !errors.Is(err, tmux.ErrSessionNotStarted) {
 				return fmt.Errorf("failed to start new session: %w: %w: leaving its workspace at %s in place",
 					err, ErrPaneMayBeLive, gw.GetWorktreePath())
 			}
-			// Cleanup git worktree if tmux session creation fails. tmux ANSWERED, so
-			// the session is confirmed not running and the worktree is ours to remove.
+			// Start positively established that it never launched a new tmux
+			// session in this worktree, so the worktree is ours to remove.
 			//
 			// A cleanup cut off by its own deadline is surfaced as ErrWorkspaceLeftBehind
 			// rather than folded into a prose message (#1917): the worktree is still

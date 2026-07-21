@@ -79,11 +79,12 @@ var tmuxCommandTimeout = 10 * time.Second
 // silently defeat the deadline above. Mirrors gitWaitDelay (#856/#896).
 const tmuxWaitDelay = 2 * time.Second
 
-// ErrTmuxTimeout marks a tmux command that was killed on tmuxCommandTimeout
-// rather than failing on its own. Callers distinguish it from ErrSessionGone:
-// a timeout means the server is wedged and the session's real state is UNKNOWN,
-// so it must never be mistaken for "the session is gone" (which would let a
-// caller tear down a session that is merely slow).
+// ErrTmuxTimeout marks a tmux operation whose deadline expired rather than
+// producing affirmative state. This includes a command killed on
+// tmuxCommandTimeout and Start's readiness deadline. Callers distinguish it
+// from ErrSessionGone: a timeout leaves the session's real state UNKNOWN, so it
+// must never be mistaken for "the session is gone" (which would let a caller
+// tear down a session that is merely slow or stored under another spelling).
 var ErrTmuxTimeout = errors.New("tmux command timed out")
 
 // boundedTmuxCommand builds a tmux command bound to ctx. It runs in its own
