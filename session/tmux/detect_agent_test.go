@@ -38,6 +38,8 @@ func TestDetectAgentFromCommand(t *testing.T) {
 		// Wrapper prefixes still match (#742 precedent from resumeProgram).
 		{"ionice wrapper", "ionice -c 3 claude", ProgramClaude},
 		{"env wrapper", "env FOO=1 gemini --resume latest", ProgramGemini},
+		{"assignment value is not an agent", "CODEX_HOME=/tmp/codex claude", ProgramClaude},
+		{"env operand is not an agent", "env -C /opt/codex claude", ProgramClaude},
 		{"amp env wrapper", "env AMP_URL=https://ampcode.com amp --no-notifications", ProgramAmp},
 		{"opencode ionice wrapper", "ionice -c 3 opencode", ProgramOpencode},
 		{"opencode env wrapper", "env FOO=1 opencode --continue", ProgramOpencode},

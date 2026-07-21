@@ -49,7 +49,7 @@ func TestCaptureAgentConversationPersistsCodexRolloutID(t *testing.T) {
 	snap := session.BeginConversationCapture()
 	writeDaemonCodexRolloutFile(t, codexHome, "rollout-2026-07-06T10-17-35-019f386f-7206-7fc2-803b-f7045e07a242.jsonl")
 
-	manager.captureAgentConversation(repo.ID, key, inst, snap, time.Second)
+	manager.captureAgentConversation(repo.ID, key, inst, snap, inst.AgentRuntimeToken(), time.Second)
 
 	raw, err := config.LoadRepoInstances(repo.ID)
 	require.NoError(t, err)

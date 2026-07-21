@@ -22,11 +22,11 @@ import (
 //     the prompt so the resume machinery (the daemon auto-resume scheduler when
 //     limit_auto_resume is on, or the manual `c` retry) re-delivers it once the
 //     window resets. Return nil so CreateSession registers+persists it as a
-//     parked row, not a failed one, firing no failure side-effects. instance.Prompt
-//     is the only input resumeFromLimit re-delivers and is never otherwise set on
-//     a daemon-created instance (the initial prompt goes straight to
-//     StartAndSendPrompt), so it is set here so a parked task run resumes its OWN
-//     work rather than a bare "continue".
+//     parked row, not a failed one, firing no failure side-effects. The stored
+//     prompt is the only input resumeFromLimit re-delivers, so it is set here so
+//     a parked task run resumes its OWN work rather than a bare "continue". A
+//     later handoff brief may replace this durable goal; both paths use Instance's
+//     prompt accessors so the resume scheduler cannot race the handoff writer.
 //   - any other error: return it for CreateSession to surface after tearing the
 //     half-started session down.
 func finishCreateStart(instance *session.Instance, prompt string, startErr error) error {
@@ -38,7 +38,7 @@ func finishCreateStart(instance *session.Instance, prompt string, startErr error
 	var limitErr *task.LimitReachedError
 	if errors.As(startErr, &limitErr) {
 		instance.SetLimitReached(limitErr.ResetAt)
-		instance.Prompt = prompt
+		instance.SetPrompt(prompt)
 		return nil
 	}
 	return startErr
@@ -456,7 +456,7 @@ func (m *Manager) resumeFromLimitLocked(repoID, key string, instance *session.In
 		m.persistInstance(repoID, instance)
 	}
 
-	prompt := strings.TrimSpace(instance.Prompt)
+	prompt := strings.TrimSpace(instance.GetPrompt())
 	if prompt == "" {
 		// Interactive session with no stored prompt: the best we can do is
 		// un-stall it. Loses the agent's prior context (documented caveat).

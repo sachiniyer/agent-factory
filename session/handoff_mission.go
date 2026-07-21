@@ -51,7 +51,7 @@ func (i *Instance) BuildMissionBrief(to, override, reason string) MissionBrief {
 	if goal := strings.TrimSpace(override); goal != "" {
 		brief.Goal = goal
 	} else {
-		brief.Goal = strings.TrimSpace(i.Prompt)
+		brief.Goal = strings.TrimSpace(i.GetPrompt())
 	}
 
 	i.mu.RLock()
@@ -105,9 +105,19 @@ func (m MissionBrief) Render() string {
 		default:
 			fmt.Fprintf(&b, "  %s, %s.\n", pluralize(m.Work.Commits, "commit"), pluralize(m.Work.DirtyFiles, "uncommitted file"))
 			if base := strings.TrimSpace(m.Work.BaseSHA); base != "" {
-				fmt.Fprintf(&b, "  Review it before you start:  git log %s..HEAD  ·  git diff %s...HEAD\n", base, base)
-			} else {
-				b.WriteString("  Review it before you start:  git log  ·  git status\n")
+				fmt.Fprintf(&b, "  Review committed work:  git log %s..HEAD  ·  git diff %s...HEAD\n", base, base)
+			} else if m.Work.Commits > 0 {
+				b.WriteString("  Review committed work:  git log\n")
+			}
+			if m.Work.DirtyFiles > 0 {
+				if strings.TrimSpace(m.Work.HeadSHA) == "" && m.Work.Commits == 0 {
+					// An unborn branch has no HEAD to diff. Status is what exposes
+					// untracked work; the two HEAD-less diffs cover staged and
+					// unstaged tracked changes without manufacturing a bad revision.
+					b.WriteString("  Review uncommitted work:  git status --short  ·  git diff --cached  ·  git diff\n")
+				} else {
+					b.WriteString("  Review uncommitted work:  git status --short  ·  git diff HEAD\n")
+				}
 			}
 		}
 	}

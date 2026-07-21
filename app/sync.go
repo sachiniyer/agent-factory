@@ -718,6 +718,12 @@ func reconcileSnapshotOp(inst *session.Instance, op session.InFlightOp, lv sessi
 			_ = inst.Transition(session.ClearOp())
 			return true
 		}
+	case session.OpReplacing:
+		// A daemon handoff owns the replacement fence. Once its snapshot settles
+		// to OpNone, the projection must release the same fence regardless of the
+		// resulting liveness (running, limit-parked, or startup-unknown).
+		_ = inst.Transition(session.ClearOp())
+		return true
 	}
 	return false
 }
@@ -743,6 +749,8 @@ func adoptSnapshotOp(inst *session.Instance, op session.InFlightOp, lv session.L
 		err = inst.Transition(session.BeginArchive())
 	case session.OpRestoring:
 		err = inst.Transition(session.MarkRestoring())
+	case session.OpReplacing:
+		err = inst.Transition(session.BeginHandoff())
 	default:
 		return false
 	}

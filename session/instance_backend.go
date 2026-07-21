@@ -2,6 +2,7 @@ package session
 
 import (
 	"fmt"
+	"strings"
 )
 
 // currentBackend snapshots the instance's backend under i.mu (#2096). The
@@ -66,18 +67,47 @@ func (i *Instance) Respawn() error {
 	return i.currentBackend().Respawn(i)
 }
 
-// SwapAgent replaces the running agent process with the instance's current
-// program (#2013). Rewrite Instance.Program first (SwapAgentProgram); this only
-// performs the runtime half. Refuses unless this instance is live and eligible
-// for handoff, then separately refuses a backend whose workspace is off-box.
-func (i *Instance) SwapAgent() error {
+// PrepareAgentSwap resolves and validates the incoming launch while the outgoing
+// agent is still untouched. The returned immutable plan is the only value
+// SwapAgent accepts, so the checked command and the launched command cannot drift.
+func (i *Instance) PrepareAgentSwap(target string) (AgentSwapPlan, error) {
 	if err := i.ValidateRuntimeAction(RuntimeActionHandoff); err != nil {
-		return err
+		return AgentSwapPlan{}, err
+	}
+	if err := i.ValidateHandoffTarget(target); err != nil {
+		return AgentSwapPlan{}, err
 	}
 	if !i.Capabilities().Handoff {
-		return ErrHandoffUnsupported
+		return AgentSwapPlan{}, ErrHandoffUnsupported
 	}
-	return i.currentBackend().SwapAgent(i)
+	return i.currentBackend().PrepareAgentSwap(i, target)
+}
+
+// SwapAgent executes a prepared runtime replacement. The daemon must already
+// have raised OpReplacing and recorded plan.target as Instance.Program. Success
+// deliberately leaves that fence raised: the replacement is not a completed
+// handoff until the daemon has delivered (or explicitly parked) its mission.
+func (i *Instance) SwapAgent(plan AgentSwapPlan) (InstanceData, error) {
+	view := i.LifecycleView()
+	if view.InFlightOp != OpReplacing {
+		return InstanceData{}, fmt.Errorf("session %q has no agent replacement in flight", i.Title)
+	}
+	if !i.Capabilities().Handoff {
+		return InstanceData{}, ErrHandoffUnsupported
+	}
+	if target := i.AgentProgram(); target != plan.target || strings.TrimSpace(plan.program) == "" {
+		return InstanceData{}, fmt.Errorf("session %q handoff plan no longer matches its recorded target", i.Title)
+	}
+	if plan.conversation.HasID() {
+		i.SetAgentConversation(plan.conversation)
+	}
+	if err := i.currentBackend().SwapAgent(i, plan); err != nil {
+		return InstanceData{}, err
+	}
+	// Returning the durable projection from the successful runtime operation
+	// makes it impossible for a caller to checkpoint the target before the
+	// backend has actually established it.
+	return i.handoffStorageCheckpoint(), nil
 }
 
 // ArchiveTeardown tears down every tab's tmux session for an archive AND

@@ -27,6 +27,13 @@ import (
 // falls back to the raw Program string so legacy free-form values still
 // reach tmux verbatim.
 func resolveProgramForInstance(i *Instance) string {
+	return resolveProgramForAgent(i, i.AgentProgram())
+}
+
+// resolveProgramForAgent is the target-explicit form used by handoff preflight.
+// It resolves configuration before Instance.Program is rewritten, so an invalid
+// incoming override can be rejected while the outgoing process is still alive.
+func resolveProgramForAgent(i *Instance, agent string) string {
 	var cfg *config.Config
 	if repo, err := config.RepoFromPath(i.Path); err == nil {
 		if resolved, rerr := config.ResolveConfig(repo.Root); rerr == nil {
@@ -47,7 +54,7 @@ func resolveProgramForInstance(i *Instance) string {
 	// rewrites Program in place while the instance is live and shared, so this
 	// is a genuinely concurrent read now. Every other reader of the field
 	// (ToInstanceData, ReconcileTabsFromData) already holds the instance lock.
-	resolved := config.ResolveProgram(cfg, i.AgentProgram())
+	resolved := config.ResolveProgram(cfg, agent)
 	// Key the claude-only flag off the agent the RESOLVED command actually
 	// runs, not the config-name enum: an override may point "claude" at a
 	// different program, which would exit on the unknown flag (#1116).
@@ -475,10 +482,10 @@ func (b *LocalBackend) Respawn(i *Instance) error {
 //     is gone there is nothing to replace it with — and the wait is the #802
 //     ordering that keeps its final writes from racing the new agent's first
 //     ones in the same worktree.
-//  2. Only then start the new program, through the FIRST-LAUNCH path
-//     (prepareLaunchConversation + Start), never the resume path. The incoming
-//     agent has no conversation in this worktree; asking it to continue one
-//     would at best start fresh noisily and at worst fail to boot.
+//  2. Only then start the new program from the already-prepared FIRST-LAUNCH
+//     plan, never the resume path. The incoming agent has no conversation in
+//     this worktree; asking it to continue one would at best start fresh noisily
+//     and at worst fail to boot.
 //
 // A teardown whose outcome tmux could not confirm ABORTS the swap. This is the
 // one place the honest answer costs something: refusing leaves the session on
@@ -490,7 +497,7 @@ func (b *LocalBackend) Respawn(i *Instance) error {
 // The worktree is never cleaned up on failure, unlike the first-launch path this
 // otherwise mirrors: on a create, a failed Start means the workspace holds
 // nothing worth keeping; here it holds everything the outgoing agent did.
-func (b *LocalBackend) SwapAgent(i *Instance) error {
+func (b *LocalBackend) SwapAgent(i *Instance, plan AgentSwapPlan) error {
 	i.mu.RLock()
 	ts := i.tmuxLocked()
 	gw := i.gitWorktree
@@ -523,8 +530,7 @@ func (b *LocalBackend) SwapAgent(i *Instance) error {
 		return fmt.Errorf("swap agent: failed to stop the current agent for %q: %w", i.Title, closeErr)
 	}
 
-	program := prepareLaunchConversation(i, resolveProgramForInstance(i))
-	ts.SetProgram(injectSystemPrompt(program))
+	ts.SetProgram(plan.program)
 	if err := ts.Start(workDir); err != nil {
 		if cleanupErr := ts.CloseAttachOnly(); cleanupErr != nil {
 			err = fmt.Errorf("%v (cleanup error: %v)", err, cleanupErr)
@@ -532,9 +538,7 @@ func (b *LocalBackend) SwapAgent(i *Instance) error {
 		return fmt.Errorf("swap agent: failed to start %s for %q: %w", i.AgentProgram(), i.Title, err)
 	}
 
-	// The new agent is booting: Running, exactly like a fresh create. Mirrors the
-	// respawn completion so the daemon poll re-derives Ready/Running from here.
-	_ = i.Transition(ConfirmLive())
+	resetAgentBrokerCaptures(i)
 	return nil
 }
 
@@ -620,10 +624,19 @@ func (b *LocalBackend) respawn(i *Instance) error {
 	// the live pane rather than a parked, silent readLoop (#1682). The memoized
 	// accessor keeps this a no-op for sessions nobody ever streamed (empty broker
 	// map) and skips a remote runtime's agent-server (not a localAgentServer).
+	resetAgentBrokerCaptures(i)
+	return nil
+}
+
+// resetAgentBrokerCaptures is the single post-replacement hook for every local
+// pane respawn. A handoff and a recovery both replace the process behind the
+// same stable tab; retaining a broker capture from either old pane strands every
+// existing and future subscriber on a silent read loop.
+func resetAgentBrokerCaptures(i *Instance) {
+	i.noteAgentRuntimeReplaced()
 	if as, ok := i.AgentServer().(*localAgentServer); ok {
 		as.resetBrokerCaptures()
 	}
-	return nil
 }
 
 // setupTabs brings up an instance's non-agent tabs after its agent session is

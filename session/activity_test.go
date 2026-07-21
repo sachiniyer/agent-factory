@@ -61,6 +61,7 @@ func TestClassifyActivity(t *testing.T) {
 		{"killing", InstanceData{InFlightOp: OpKilling, Liveness: LiveRunning}, ActivityPending},
 		{"archiving", InstanceData{InFlightOp: OpArchiving, Liveness: LiveRunning}, ActivityPending},
 		{"restoring", InstanceData{InFlightOp: OpRestoring, Liveness: LiveLost}, ActivityPending},
+		{"replacing", InstanceData{InFlightOp: OpReplacing, Liveness: LiveReady}, ActivityPending},
 
 		{"running", InstanceData{Liveness: LiveRunning}, ActivityPending},
 		// Parked at a usage limit the daemon auto-resumes (#1146): still the task's

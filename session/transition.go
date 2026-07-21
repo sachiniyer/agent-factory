@@ -3,6 +3,7 @@ package session
 import (
 	"errors"
 	"fmt"
+	"time"
 )
 
 // The lifecycle transition chokepoint (#1195 Phase 2c).
@@ -52,6 +53,10 @@ const (
 	tkBeginRestore
 	tkAbortRestoreToLost
 	tkMarkRestoring
+	tkBeginHandoff
+	tkCommitHandoff
+	tkParkHandoff
+	tkAbortHandoff
 	tkClearOp
 	numTransitionKinds
 )
@@ -80,6 +85,14 @@ func (k transitionKind) String() string {
 		return "AbortRestoreToLost"
 	case tkMarkRestoring:
 		return "MarkRestoring"
+	case tkBeginHandoff:
+		return "BeginHandoff"
+	case tkCommitHandoff:
+		return "CommitHandoff"
+	case tkParkHandoff:
+		return "ParkHandoff"
+	case tkAbortHandoff:
+		return "AbortHandoff"
 	case tkClearOp:
 		return "ClearOp"
 	}
@@ -92,6 +105,7 @@ func (k transitionKind) String() string {
 type TransitionEvent struct {
 	kind        transitionKind
 	lv          Liveness
+	resetAt     time.Time
 	epoch       uint64
 	epochScoped bool
 }
@@ -164,6 +178,21 @@ func AbortRestoreToLost() TransitionEvent { return TransitionEvent{kind: tkAbort
 // sees the Archived→live transition and rebuilds the row (#1203), while
 // ShownArchived re-homes it into the live section eagerly (#1210).
 func MarkRestoring() TransitionEvent { return TransitionEvent{kind: tkMarkRestoring} }
+
+// BeginHandoff raises the OpReplacing fence before the outgoing pane is touched.
+func BeginHandoff() TransitionEvent { return TransitionEvent{kind: tkBeginHandoff} }
+
+// CommitHandoff settles a successfully launched incoming agent as Running.
+func CommitHandoff() TransitionEvent { return TransitionEvent{kind: tkCommitHandoff} }
+
+// ParkHandoff settles an incoming agent that launched but reached its own usage
+// limit before the takeover mission could be delivered.
+func ParkHandoff(resetAt time.Time) TransitionEvent {
+	return TransitionEvent{kind: tkParkHandoff, resetAt: resetAt}
+}
+
+// AbortHandoff drops a replacement fence whose runtime swap did not complete.
+func AbortHandoff() TransitionEvent { return TransitionEvent{kind: tkAbortHandoff} }
 
 // ClearOp drops any in-flight optimistic op back to None, leaving liveness
 // untouched — the client-projection bookkeeping for when an optimistic op's
@@ -244,6 +273,14 @@ const (
 	runEnds
 )
 
+type limitResetEffect int
+
+const (
+	limitResetKeep limitResetEffect = iota
+	limitResetClear
+	limitResetFromEvent
+)
+
 // edgeSpec is one row of the allowed-edge table: which from-states an event is
 // legal from, the resulting state, and the event's side effects.
 type edgeSpec struct {
@@ -258,6 +295,10 @@ type edgeSpec struct {
 	// the zero value is invalid and the exhaustiveness test rejects it, so a new
 	// transition must state whether the run it lands in is still in flight.
 	run runEffect
+	// limitReset owns reset metadata only on edges that replace the provider
+	// state it described. Most transitions preserve the hidden value;
+	// LimitResetAt exposes it only while LiveLimitReached.
+	limitReset limitResetEffect
 	// yieldWhenBlocked makes an out-of-set from-state a silent no-op instead of a
 	// rejection — for the daemon-truth edge (ObserveLiveness is always allowed)
 	// and ConfirmLive (yields to an in-flight teardown rather than fighting it).
@@ -369,6 +410,34 @@ var transitionTable = map[transitionKind]edgeSpec{
 		// state and the daemon never counts caps off it.
 		run: runKeep,
 	},
+	tkBeginHandoff: {
+		allowedFrom: func(s stateAxes) bool {
+			return s.op == OpNone && (s.liveness == LiveRunning || s.liveness == LiveReady || s.liveness == LiveLimitReached)
+		},
+		target: func(s stateAxes, _ TransitionEvent) stateAxes { return stateAxes{s.liveness, OpReplacing} },
+		// Replacement continues the same task run under another agent.
+		run: runKeep,
+	},
+	tkCommitHandoff: {
+		allowedFrom: func(s stateAxes) bool { return s.op == OpReplacing },
+		target:      func(stateAxes, TransitionEvent) stateAxes { return stateAxes{LiveRunning, OpNone} },
+		run:         runKeep,
+		limitReset:  limitResetClear,
+	},
+	tkParkHandoff: {
+		allowedFrom: func(s stateAxes) bool { return s.op == OpReplacing },
+		target:      func(stateAxes, TransitionEvent) stateAxes { return stateAxes{LiveLimitReached, OpNone} },
+		// The incoming runtime exists but cannot accept its mission yet. Parking
+		// continues the same task run; resume will deliver the pending mission.
+		run:        runKeep,
+		limitReset: limitResetFromEvent,
+	},
+	tkAbortHandoff: {
+		allowedFrom:      func(s stateAxes) bool { return s.op == OpReplacing },
+		target:           func(s stateAxes, _ TransitionEvent) stateAxes { return stateAxes{s.liveness, OpNone} },
+		yieldWhenBlocked: true, // a terminal kill may supersede the replacement
+		run:              runKeep,
+	},
 	tkClearOp: {
 		// Clearing an optimistic overlay back to None is always valid — it never
 		// resurrects or teardown-clobbers (liveness is untouched).
@@ -451,11 +520,18 @@ func (i *Instance) Transition(ev TransitionEvent) error {
 			}
 		}
 	}
+	prevResetAt := i.limitResetAt
 	i.liveness = to.liveness
 	i.inFlightOp = to.op
+	switch spec.limitReset {
+	case limitResetClear:
+		i.limitResetAt = time.Time{}
+	case limitResetFromEvent:
+		i.limitResetAt = ev.resetAt
+	}
 	// Every real change to the lifecycle state advances the epoch, so an observer
 	// holding an older one learns its in-flight decision is stale (#2135).
-	i.noteStateChangeLocked(from.liveness, from.op, i.limitResetAt)
+	i.noteStateChangeLocked(from.liveness, from.op, prevResetAt)
 	switch spec.started {
 	case startedSet:
 		i.started = true
@@ -512,6 +588,8 @@ func opLabel(op InFlightOp) string {
 		return "Archiving"
 	case OpRestoring:
 		return "Restoring"
+	case OpReplacing:
+		return "Replacing"
 	}
 	return fmt.Sprintf("InFlightOp(%d)", int(op))
 }

@@ -25,34 +25,13 @@ func TestShellWords(t *testing.T) {
 	}
 }
 
-func TestFirstExecutable(t *testing.T) {
-	cases := []struct {
-		name  string
-		words []string
-		want  string
-	}{
-		{"bare", []string{"claude", "--flag"}, "claude"},
-		{"assignment", []string{"FOO=1", "codex"}, "codex"},
-		{"env assignment", []string{"env", "FOO=1", "gemini"}, "gemini"},
-		{"env unset", []string{"env", "-u", "FOO", "aider"}, "aider"},
-		{"env chdir", []string{"env", "-C", "/tmp", "claude"}, "claude"},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := firstExecutable(tc.words); got != tc.want {
-				t.Fatalf("firstExecutable(%#v) = %q, want %q", tc.words, got, tc.want)
-			}
-		})
-	}
-}
-
 func TestCheckCommand(t *testing.T) {
 	dir := t.TempDir()
 	exe := filepath.Join(dir, "fake-agent")
 	if err := os.WriteFile(exe, []byte("#!/bin/sh\n"), 0o755); err != nil {
 		t.Fatalf("write executable: %v", err)
 	}
-	t.Setenv("PATH", dir)
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	check, err := CheckCommand("env FOO=1 fake-agent --ready")
 	if err != nil {
@@ -60,6 +39,138 @@ func TestCheckCommand(t *testing.T) {
 	}
 	if check.Executable != "fake-agent" || check.Path != exe {
 		t.Fatalf("unexpected check: %+v", check)
+	}
+}
+
+func TestCheckCommandAtUsesLaunchContext(t *testing.T) {
+	workDir := t.TempDir()
+	binDir := filepath.Join(workDir, "bin")
+	if err := os.Mkdir(binDir, 0o755); err != nil {
+		t.Fatalf("mkdir bin: %v", err)
+	}
+	exe := filepath.Join(binDir, "codex")
+	if err := os.WriteFile(exe, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("write executable: %v", err)
+	}
+
+	for _, command := range []string{
+		"env PATH=bin codex",
+		"./bin/codex",
+		"env -C bin ./codex",
+	} {
+		check, err := CheckCommandAt(command, workDir)
+		if err != nil {
+			t.Fatalf("CheckCommandAt(%q): %v", command, err)
+		}
+		if check.Path != exe {
+			t.Fatalf("CheckCommandAt(%q) path = %q, want %q", command, check.Path, exe)
+		}
+	}
+}
+
+func TestCheckCommandAtRejectsMissingEnvChdir(t *testing.T) {
+	if _, err := CheckCommandAt("env -C missing codex", t.TempDir()); err == nil {
+		t.Fatal("CheckCommandAt approved an env chdir that will fail before exec")
+	}
+}
+
+func TestCheckCommandAtUsesShellPathForEnvWrapper(t *testing.T) {
+	workDir := t.TempDir()
+	binDir := filepath.Join(workDir, "bin")
+	if err := os.Mkdir(binDir, 0o755); err != nil {
+		t.Fatalf("mkdir bin: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(binDir, "codex"), []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("write codex: %v", err)
+	}
+
+	command := "PATH=bin env codex"
+	if _, err := CheckCommandAt(command, workDir); err == nil || !strings.Contains(err.Error(), "env wrapper") {
+		t.Fatalf("CheckCommandAt(%q) = %v, want missing env wrapper on the shell-assigned PATH", command, err)
+	}
+
+	if err := os.WriteFile(filepath.Join(binDir, "env"), []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("write env: %v", err)
+	}
+	check, err := CheckCommandAt(command, workDir)
+	if err != nil {
+		t.Fatalf("CheckCommandAt(%q): %v", command, err)
+	}
+	if check.Path != filepath.Join(binDir, "codex") {
+		t.Fatalf("CheckCommandAt(%q) path = %q, want %q", command, check.Path, filepath.Join(binDir, "codex"))
+	}
+}
+
+func TestCheckCommandAtAllowsOpaqueWrapperWithoutAgentToken(t *testing.T) {
+	workDir := t.TempDir()
+	wrapper := filepath.Join(workDir, "my-agent-wrapper")
+	if err := os.WriteFile(wrapper, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("write wrapper: %v", err)
+	}
+
+	check, err := CheckCommandAt(wrapper+" --ready", workDir)
+	if err != nil {
+		t.Fatalf("CheckCommandAt rejected a runnable opaque wrapper: %v", err)
+	}
+	if check.Executable != wrapper || check.Path != wrapper {
+		t.Fatalf("opaque wrapper check = %+v, want executable and path %q", check, wrapper)
+	}
+}
+
+func TestCheckCommandAtValidatesDetectedAgentBehindWrapper(t *testing.T) {
+	workDir := t.TempDir()
+	binDir := filepath.Join(workDir, "bin")
+	if err := os.Mkdir(binDir, 0o755); err != nil {
+		t.Fatalf("mkdir bin: %v", err)
+	}
+	for _, name := range []string{"ionice"} {
+		if err := os.WriteFile(filepath.Join(binDir, name), []byte("#!/bin/sh\n"), 0o755); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+	}
+	t.Setenv("PATH", binDir)
+
+	command := "ionice -c 3 codex"
+	if _, err := CheckCommandAt(command, workDir); err == nil || !strings.Contains(err.Error(), "codex") {
+		t.Fatalf("CheckCommandAt(%q) = %v, want the missing detected agent to fail preflight", command, err)
+	}
+
+	codex := filepath.Join(binDir, "codex")
+	if err := os.WriteFile(codex, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("write codex: %v", err)
+	}
+	check, err := CheckCommandAt(command, workDir)
+	if err != nil {
+		t.Fatalf("CheckCommandAt(%q): %v", command, err)
+	}
+	if check.Executable != "codex" || check.Path != codex {
+		t.Fatalf("wrapped agent check = %+v, want detected agent at %q", check, codex)
+	}
+}
+
+func TestCheckCommandParsesAndValidatesAbsoluteEnvWrapper(t *testing.T) {
+	dir := t.TempDir()
+	envPath := filepath.Join(dir, "env")
+	if err := os.WriteFile(envPath, []byte("#!/bin/sh\nexec /usr/bin/env \"$@\"\n"), 0o755); err != nil {
+		t.Fatalf("write env wrapper: %v", err)
+	}
+
+	missingTarget := filepath.Join(dir, "missing-codex")
+	check, err := CheckCommand(envPath + " FOO=1 " + missingTarget)
+	if err == nil {
+		t.Fatalf("absolute env wrapper approved missing command %q", missingTarget)
+	}
+	if check.Executable != missingTarget {
+		t.Fatalf("checked executable = %q, want env's command %q", check.Executable, missingTarget)
+	}
+
+	validTarget := filepath.Join(dir, "codex")
+	if err := os.WriteFile(validTarget, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("write target: %v", err)
+	}
+	missingEnv := filepath.Join(t.TempDir(), "env")
+	if _, err := CheckCommand(missingEnv + " " + validTarget); err == nil {
+		t.Fatalf("approved command whose env wrapper %q does not exist", missingEnv)
 	}
 }
 

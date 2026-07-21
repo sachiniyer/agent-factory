@@ -75,6 +75,10 @@ const (
 	// OpRestoring: an archive restore is in flight (replaces the RestoreFromArchive
 	// "park it in Lost to trigger the re-spawn loop" hack). Wired in 1c.
 	OpRestoring
+	// OpReplacing: an agent handoff is between its outgoing and incoming runtime.
+	// The status poll must not observe the close/start gap or settle a result from
+	// the outgoing pane after the incoming pane has taken its place.
+	OpReplacing
 )
 
 // LifecycleAction is the session domain's answer to which reversible lifecycle
@@ -94,12 +98,13 @@ const (
 // TUI) and ToInstanceData (the web projection). A creating row has a provisional
 // identity but no session to manage yet. An id-less row cannot address a mutation
 // API unambiguously, so it also exposes nothing. A startup-unknown row must not
-// reuse its unconfirmed runtime binding. Resting rows restore; every other settled
-// row archives. Kill addressability is intentionally independent (CanKill): a
-// retained startup-unknown row must remain removable without becoming attachable,
-// archivable, or restorable.
+// reuse its unconfirmed runtime binding, while a replacing row is inside one
+// transactional handoff and cannot admit a competing lifecycle mutation. Resting
+// rows restore; every other settled row archives. Kill addressability is
+// intentionally independent (CanKill): a retained startup-unknown row must remain
+// removable without becoming attachable, archivable, or restorable.
 func lifecycleActionFor(id string, liveness Liveness, op InFlightOp, startupStateUnknown bool) LifecycleAction {
-	if id == "" || op == OpCreating || startupStateUnknown {
+	if id == "" || op == OpCreating || op == OpReplacing || startupStateUnknown {
 		return LifecycleActionNone
 	}
 	switch liveness {
@@ -112,10 +117,11 @@ func lifecycleActionFor(id string, liveness Liveness, op InFlightOp, startupStat
 
 // canKillFor answers only whether a row has a stable teardown target. It does not
 // imply that the runtime binding is safe to reuse: startup-unknown rows are the
-// important counterexample. A creating row has no confirmed session to tear down,
-// and an id-less legacy row cannot address the destructive API without guessing.
+// important counterexample. A creating row has no confirmed session to tear down;
+// a replacing row already owns the runtime mutation fence; and an id-less legacy
+// row cannot address the destructive API without guessing.
 func canKillFor(id string, op InFlightOp) bool {
-	return id != "" && op != OpCreating
+	return id != "" && op != OpCreating && op != OpReplacing
 }
 
 // LifecycleAction returns the shared lifecycle verb for this instance. TUI menus
@@ -140,6 +146,13 @@ func (i *Instance) CanKill() bool {
 // in-flight op wins the composed value (it overlays the liveness), matching the
 // old single-field semantics where Loading/Deleting masked the underlying state.
 func composeStatus(lv Liveness, op InFlightOp) Status {
+	if op == OpReplacing {
+		// Loading is only the legacy client projection for replacement. Unlike a
+		// create, a replacement can carry PendingHandoffMission, which is a durable
+		// recovery obligation; persistence must inspect that marker rather than use
+		// this lossy display value as a retention decision.
+		return Loading
+	}
 	switch op {
 	case OpCreating:
 		return Loading

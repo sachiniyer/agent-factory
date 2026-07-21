@@ -54,20 +54,22 @@ func (g *GitWorktree) WorkSummary() (WorkSummary, error) {
 	}
 
 	head, err := g.runGitCommand(path, "rev-parse", "HEAD")
-	if err != nil {
-		// No HEAD means an unborn branch (a worktree cut but never committed to).
-		// That is a legitimate state to hand off from, so report the zero summary
-		// rather than an error the caller would have to special-case.
-		return summary, nil
-	}
-	summary.HeadSHA = strings.TrimSpace(head)
+	if err == nil {
+		summary.HeadSHA = strings.TrimSpace(head)
 
-	if summary.BaseSHA != "" {
-		if out, cErr := g.runGitCommand(path, "rev-list", "--count", summary.BaseSHA+"..HEAD"); cErr == nil {
-			if n, sErr := parseCount(out); sErr == nil {
-				summary.Commits = n
+		if summary.BaseSHA != "" {
+			if out, cErr := g.runGitCommand(path, "rev-list", "--count", summary.BaseSHA+"..HEAD"); cErr == nil {
+				if n, sErr := parseCount(out); sErr == nil {
+					summary.Commits = n
+				}
 			}
 		}
+	} else {
+		// No HEAD means an unborn branch (a worktree cut but never committed to).
+		// That is a legitimate state to hand off from, but it can still carry
+		// staged, unstaged, or untracked work. Continue to status instead of
+		// returning a fabricated clean summary merely because commit history is
+		// unavailable.
 	}
 
 	if out, sErr := g.runGitCommand(path, "status", "--porcelain"); sErr == nil {

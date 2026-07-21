@@ -11,6 +11,7 @@ import (
 	"unicode"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/envcommand"
 	"github.com/sachiniyer/agent-factory/internal/shellsuggest"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
@@ -67,10 +68,23 @@ func CheckProgram(cfg *config.Config, agent string) (*ProgramCheck, error) {
 	return check, nil
 }
 
-// CheckCommand verifies the first executable in command. It handles common
-// shell shapes used in program_overrides: quotes, explicit paths, leading
-// VAR=value assignments, and env VAR=value wrappers.
+// CheckCommand verifies the shell executable and, when detectable, the agent it
+// launches. It handles common shell shapes used in program_overrides: quotes,
+// explicit paths, leading VAR=value assignments, env wrappers, and opaque
+// wrappers whose own executable is the only command af can prove.
 func CheckCommand(command string) (*ProgramCheck, error) {
+	return checkCommand(command, "")
+}
+
+// CheckCommandAt verifies command in the same cwd and effective environment its
+// tmux launch will use. Handoff calls this before stopping the outgoing agent,
+// so wrappers, detected agent executables, relative paths, env -C, and PATH
+// assignments must be resolved exactly as the incoming process will see them.
+func CheckCommandAt(command, workingDir string) (*ProgramCheck, error) {
+	return checkCommand(command, workingDir)
+}
+
+func checkCommand(command, workingDir string) (*ProgramCheck, error) {
 	command = strings.TrimSpace(command)
 	check := &ProgramCheck{Command: command}
 	if command == "" {
@@ -80,35 +94,138 @@ func CheckCommand(command string) (*ProgramCheck, error) {
 	if err != nil {
 		return check, err
 	}
-	exe := firstExecutable(words)
-	check.Executable = exe
-	if exe == "" {
+	shellExe := shellExecutable(words)
+	if shellExe == "" {
 		return check, fmt.Errorf("could not find an executable in command %q", command)
 	}
+	launchDir := workingDir
+	if launchDir == "" {
+		launchDir, err = os.Getwd()
+		if err != nil {
+			return check, fmt.Errorf("cannot determine launch directory for command preflight: %w", err)
+		}
+	}
+	launch, err := tmux.CommandEnvironmentFromCommand(command, launchDir)
+	if err != nil {
+		return check, err
+	}
+	info, statErr := os.Stat(launch.WorkingDir)
+	if statErr != nil {
+		return check, fmt.Errorf("launch directory %q cannot be used: %w", launch.WorkingDir, statErr)
+	}
+	if !info.IsDir() {
+		return check, fmt.Errorf("launch directory %q is not a directory", launch.WorkingDir)
+	}
+	exe := launch.Executable
+	check.Executable = exe
+	// The shell command and the detected agent are independent executable
+	// obligations. For `ionice ... codex`, approving codex alone can still lose
+	// the handoff to a missing ionice; approving ionice alone repeats the shipped
+	// bug and discovers a missing codex only after teardown. Validate both, using
+	// the shell prefix for the wrapper and the shared env/cwd model for the target.
+	if shellExe != exe {
+		if _, shellErr := resolveShellExecutableAt(words, shellExe, launchDir); shellErr != nil {
+			kind := "command wrapper"
+			if isEnvExecutable(shellExe) {
+				kind = "env wrapper"
+			}
+			return check, fmt.Errorf("%s %q cannot be executed: %w", kind, shellExe, shellErr)
+		}
+	}
+	pathValue, pathSet := os.LookupEnv("PATH")
+	if override := launch.Override("PATH"); override.Present {
+		pathValue, pathSet = override.Value, override.Set
+	}
+	path, err := resolveExecutableAt(exe, launch.WorkingDir, pathValue, pathSet)
+	if err != nil {
+		return check, err
+	}
+	check.Path = path
+	return check, nil
+}
+
+// resolveShellExecutableAt models lookup of the command the shell itself starts.
+// Only leading shell assignments affect that lookup; an env-internal PATH= value
+// applies later to env's child, and an arbitrary wrapper's later operands cannot
+// retroactively change how the wrapper was found.
+func resolveShellExecutableAt(words []string, executable, workingDir string) (string, error) {
+	pathValue, pathSet := os.LookupEnv("PATH")
+	for _, word := range words {
+		name, value, assignment := strings.Cut(word, "=")
+		if !assignment || !isAssignment(word) {
+			break
+		}
+		if name == "PATH" {
+			if !envcommand.IsLiteral(value) {
+				return "", fmt.Errorf("PATH uses shell expansion; use a literal value for launch preflight")
+			}
+			pathValue, pathSet = value, true
+		}
+	}
+	return resolveExecutableAt(executable, workingDir, pathValue, pathSet)
+}
+
+func resolveExecutableAt(exe, workingDir, pathValue string, pathSet bool) (string, error) {
+	if strings.ContainsRune(exe, filepath.Separator) || strings.HasPrefix(exe, "~") {
+		path := config.ExpandTilde(exe)
+		if !filepath.IsAbs(path) {
+			path = filepath.Join(workingDir, path)
+		}
+		return resolveExecutable(path)
+	}
+	if !pathSet {
+		return "", fmt.Errorf("%w: executable %q was not found because PATH is unset", errProgramNotFound, exe)
+	}
+	var notExecutable string
+	for _, dir := range filepath.SplitList(pathValue) {
+		if dir == "" {
+			dir = workingDir
+		} else if !filepath.IsAbs(dir) {
+			dir = filepath.Join(workingDir, dir)
+		}
+		candidate := filepath.Join(dir, exe)
+		info, err := os.Stat(candidate)
+		if err != nil || info.IsDir() {
+			continue
+		}
+		if info.Mode().Perm()&0o111 == 0 {
+			if notExecutable == "" {
+				notExecutable = candidate
+			}
+			continue
+		}
+		return candidate, nil
+	}
+	if notExecutable != "" {
+		return "", fmt.Errorf("%w: executable %q is not executable; run: %s", errProgramNotExecutable, exe,
+			shellsuggest.Command("chmod", "+x", notExecutable))
+	}
+	return "", fmt.Errorf("%w: executable %q was not found on PATH", errProgramNotFound, exe)
+}
+
+func resolveExecutable(exe string) (string, error) {
 	if strings.ContainsRune(exe, filepath.Separator) || strings.HasPrefix(exe, "~") {
 		path := config.ExpandTilde(exe)
 		info, err := os.Stat(path)
 		if err != nil {
 			if os.IsNotExist(err) {
-				return check, fmt.Errorf("%w: executable %q does not exist", errProgramNotFound, exe)
+				return "", fmt.Errorf("%w: executable %q does not exist", errProgramNotFound, exe)
 			}
-			return check, fmt.Errorf("executable %q could not be checked: %w", exe, err)
+			return "", fmt.Errorf("executable %q could not be checked: %w", exe, err)
 		}
 		if info.IsDir() {
-			return check, fmt.Errorf("executable %q is a directory, not a program", exe)
+			return "", fmt.Errorf("executable %q is a directory, not a program", exe)
 		}
 		if info.Mode().Perm()&0o111 == 0 {
-			return check, fmt.Errorf("%w: executable %q is not executable; run: %s", errProgramNotExecutable, exe, shellsuggest.Command("chmod", "+x", path))
+			return "", fmt.Errorf("%w: executable %q is not executable; run: %s", errProgramNotExecutable, exe, shellsuggest.Command("chmod", "+x", path))
 		}
-		check.Path = path
-		return check, nil
+		return path, nil
 	}
 	path, err := exec.LookPath(exe)
 	if err != nil {
-		return check, fmt.Errorf("%w: executable %q was not found on PATH", errProgramNotFound, exe)
+		return "", fmt.Errorf("%w: executable %q was not found on PATH", errProgramNotFound, exe)
 	}
-	check.Path = path
-	return check, nil
+	return path, nil
 }
 
 // LocalSessionPrereqs verifies the prerequisites needed before creating a
@@ -206,56 +323,6 @@ func isSupportedAgent(agent string) bool {
 		}
 	}
 	return false
-}
-
-func firstExecutable(words []string) string {
-	for len(words) > 0 && isAssignment(words[0]) {
-		words = words[1:]
-	}
-	if len(words) == 0 {
-		return ""
-	}
-	if words[0] != "env" {
-		return words[0]
-	}
-	words = words[1:]
-	for len(words) > 0 {
-		switch {
-		case words[0] == "--":
-			words = words[1:]
-		case isAssignment(words[0]):
-			words = words[1:]
-		case words[0] == "-u" || words[0] == "--unset" || words[0] == "-C" || words[0] == "--chdir":
-			if len(words) < 2 {
-				return ""
-			}
-			words = words[2:]
-		case strings.HasPrefix(words[0], "-"):
-			words = words[1:]
-		default:
-			return words[0]
-		}
-	}
-	return ""
-}
-
-func isAssignment(word string) bool {
-	i := strings.IndexRune(word, '=')
-	if i <= 0 {
-		return false
-	}
-	for pos, r := range word[:i] {
-		if pos == 0 {
-			if r != '_' && !unicode.IsLetter(r) {
-				return false
-			}
-			continue
-		}
-		if r != '_' && !unicode.IsLetter(r) && !unicode.IsDigit(r) {
-			return false
-		}
-	}
-	return true
 }
 
 func shellWords(input string, limit int) ([]string, error) {

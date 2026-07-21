@@ -2,17 +2,21 @@ package task
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/sachiniyer/agent-factory/session"
+	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
 type startBackend struct {
 	trustPrompts int
 	trustChecks  int
 	sentPrompt   string
+	previewErr   error
+	sendErr      error
 }
 
 func (b *startBackend) Start(instance *session.Instance, _ bool) error {
@@ -21,7 +25,10 @@ func (b *startBackend) Start(instance *session.Instance, _ bool) error {
 }
 
 func (b *startBackend) Provision(*session.Instance, bool) error { return nil }
-func (b *startBackend) SwapAgent(*session.Instance) error       { return nil }
+func (b *startBackend) PrepareAgentSwap(_ *session.Instance, _ string) (session.AgentSwapPlan, error) {
+	return session.AgentSwapPlan{}, nil
+}
+func (b *startBackend) SwapAgent(*session.Instance, session.AgentSwapPlan) error { return nil }
 
 func (b *startBackend) Launch(instance *session.Instance, _ bool) error {
 	instance.SetStartedForTest(true)
@@ -36,7 +43,7 @@ func (b *startBackend) Kill(instance *session.Instance) error {
 func (b *startBackend) CloseAttachOnly(*session.Instance) error { return nil }
 
 func (b *startBackend) Preview(*session.Instance) (string, error) {
-	return "ready\n❯", nil
+	return "ready\n❯", b.previewErr
 }
 
 func (b *startBackend) PreviewFullHistory(*session.Instance) (string, error) {
@@ -46,7 +53,7 @@ func (b *startBackend) PreviewFullHistory(*session.Instance) (string, error) {
 func (b *startBackend) HasUpdated(*session.Instance) (bool, bool, string) { return false, false, "" }
 func (b *startBackend) SendPromptCommand(_ *session.Instance, prompt string) error {
 	b.sentPrompt = prompt
-	return nil
+	return b.sendErr
 }
 func (b *startBackend) SendKeys(*session.Instance, string) error         { return nil }
 func (b *startBackend) SetPreviewSize(*session.Instance, int, int) error { return nil }
@@ -162,4 +169,33 @@ func TestStartAndSendPrompt_AllowsSequentialTrustPrompts(t *testing.T) {
 	if backend.sentPrompt != "do work" {
 		t.Fatalf("expected prompt to be sent after trust prompts clear, got %q", backend.sentPrompt)
 	}
+}
+
+func TestWaitForReadyAndSendPromptClassifiesFailureStage(t *testing.T) {
+	t.Run("readiness", func(t *testing.T) {
+		oldPoll := waitForReadyPollInterval
+		waitForReadyPollInterval = time.Nanosecond
+		t.Cleanup(func() { waitForReadyPollInterval = oldPoll })
+
+		backend := &startBackend{previewErr: tmux.ErrSessionGone}
+		err := WaitForReadyAndSendPrompt(context.Background(), newStartTestInstance(t, backend), "do work")
+		if !errors.Is(err, ErrAgentReadiness) || !errors.Is(err, tmux.ErrSessionGone) {
+			t.Fatalf("readiness error = %v, want ErrAgentReadiness wrapping ErrSessionGone", err)
+		}
+		if errors.Is(err, ErrPromptDelivery) {
+			t.Fatalf("readiness error was misclassified as prompt delivery: %v", err)
+		}
+	})
+
+	t.Run("prompt delivery", func(t *testing.T) {
+		sendErr := errors.New("composer rejected paste")
+		backend := &startBackend{sendErr: sendErr}
+		err := WaitForReadyAndSendPrompt(context.Background(), newStartTestInstance(t, backend), "do work")
+		if !errors.Is(err, ErrPromptDelivery) || !errors.Is(err, sendErr) {
+			t.Fatalf("delivery error = %v, want ErrPromptDelivery wrapping the backend error", err)
+		}
+		if errors.Is(err, ErrAgentReadiness) {
+			t.Fatalf("delivery error was misclassified as readiness: %v", err)
+		}
+	})
 }

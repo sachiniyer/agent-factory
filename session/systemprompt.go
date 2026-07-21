@@ -207,7 +207,7 @@ func injectSystemPrompt(resolved string) string {
 		}
 		// Prefix, not append: an env assignment must precede the command. tmux
 		// runs the program string through a shell, and both DetectAgentFromCommand
-		// and preflight's firstExecutable already skip leading VAR=VALUE words
+		// and preflight's shared launch resolver skip leading VAR=VALUE words
 		// (the `env FOO=1 <agent>` wrapper case, #742), so the agent is still
 		// detected at the right token.
 		return "OPENCODE_CONFIG=" + shellQuote(path) + " " + resolved

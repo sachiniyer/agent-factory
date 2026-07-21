@@ -453,7 +453,7 @@ func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instanc
 		// Fresh output. Only a live pane produces bytes, and a dead one yields "" —
 		// so this is affirmative on its own, no probe needed.
 		observedAlive = true
-		_ = instance.Transition(session.ObserveLiveness(session.LiveRunning))
+		_ = instance.Transition(session.ObserveLiveness(session.LiveRunning).AtEpoch(epoch))
 	case hasPrompt:
 		// A matched prompt means the CAPTURE SUCCEEDED: hasPrompt is a substring test
 		// over content, and every failure path in HasUpdated returns content "". So
@@ -476,7 +476,7 @@ func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instanc
 			// AUTHORITATIVE: the agent-server (or local tmux) was asked and
 			// reports the agent gone. No debounce — the evidence is present and
 			// bad, not absent. #935's immediacy is unchanged for both runtimes.
-			_ = instance.Transition(session.ObserveLiveness(session.LiveLost))
+			_ = instance.Transition(session.ObserveLiveness(session.LiveLost).AtEpoch(epoch))
 		case probeUnknown:
 			// A REMOTE probe that never answered. It says nothing about the agent,
 			// and Lost here feeds a re-provision that orphans a possibly-live
@@ -493,7 +493,7 @@ func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instanc
 			// could not be answered" — so a degrading transport starts its episode
 			// at the first unanswered probe rather than the first failed Snapshot.
 			if m.noteRemoteProbeFailure(key, instance.Title) {
-				_ = instance.Transition(session.ObserveLiveness(session.LiveLost))
+				_ = instance.Transition(session.ObserveLiveness(session.LiveLost).AtEpoch(epoch))
 			}
 		case probeAlive:
 			// The agent-server was asked and reports its agent RUNNING — the

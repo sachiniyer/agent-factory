@@ -54,6 +54,15 @@ type AgentHandoff struct {
 	Automatic bool `json:"automatic,omitempty"`
 }
 
+// HandoffSwap is the process-local transaction token returned when the ledger
+// and Program are rewritten. AgentHandoff is the durable completed-swap record;
+// previousProgram is deliberately kept out of it because rollback is synchronous
+// and a successful ledger entry must not retain transaction-only state forever.
+type HandoffSwap struct {
+	AgentHandoff
+	previousProgram string
+}
+
 // From/To agent names for display, e.g. "codex → claude".
 func (h AgentHandoff) String() string {
 	from := strings.TrimSpace(h.From.Agent)
@@ -198,20 +207,64 @@ func (i *Instance) currentAgentNameLocked() string {
 //
 // The caller must hold whatever serialization the daemon requires; this method
 // takes only the instance lock.
-func (i *Instance) SwapAgentProgram(target, reason, headSHA string, automatic bool) (AgentHandoff, error) {
+func (i *Instance) SwapAgentProgram(target, reason, headSHA string, automatic bool) (HandoffSwap, error) {
 	target = strings.TrimSpace(target)
 
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	if err := i.validateHandoffTargetLocked(target); err != nil {
-		return AgentHandoff{}, err
+		return HandoffSwap{}, err
 	}
 	if err := i.lifecycleViewLocked().ValidateRuntimeAction(RuntimeActionHandoff); err != nil {
-		return AgentHandoff{}, err
+		return HandoffSwap{}, err
 	}
+	return i.recordHandoffSwapLocked(target, reason, headSHA, automatic)
+}
+
+// RecordHandoffSwap is the transaction-owned mutation used by the daemon after
+// BeginHandoff has raised OpReplacing. Keeping it separate from
+// SwapAgentProgram makes both legal orderings explicit: ordinary state-only
+// tests require a settled live row, while production replacement requires the
+// fence and cannot accidentally validate itself as "busy".
+func (i *Instance) RecordHandoffSwap(target, reason, headSHA string, automatic bool) (HandoffSwap, error) {
+	target = strings.TrimSpace(target)
+
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if i.inFlightOp != OpReplacing {
+		return HandoffSwap{}, fmt.Errorf("session %q has no agent replacement in flight", i.Title)
+	}
+	if err := i.validateHandoffTargetLocked(target); err != nil {
+		return HandoffSwap{}, err
+	}
+	return i.recordHandoffSwapLocked(target, reason, headSHA, automatic)
+}
+
+// handoffStorageCheckpoint projects a runtime swap that has completed while its
+// in-memory delivery fence is still raised. Disk cannot retain process-local
+// operations, but it must not keep claiming the outgoing agent either: a daemon
+// crash during readiness would then restore the wrong Program over a pane that
+// already runs the target. The persisted recovery posture is the same one a
+// generic post-swap delivery failure takes — incoming agent, LiveRunning, no
+// outgoing-provider limit metadata — while memory remains OpReplacing until the
+// mission is delivered or explicitly parked. The caller adds the rendered
+// PendingHandoffMission before writing this value so a crash cannot erase the
+// still-undelivered takeover context.
+func (i *Instance) handoffStorageCheckpoint() InstanceData {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	data := i.toInstanceDataLocked()
+	data.Status = Running
+	data.Liveness = LiveRunning
+	data.InFlightOp = OpNone
+	data.LimitResetAt = time.Time{}
+	return data
+}
+
+func (i *Instance) recordHandoffSwapLocked(target, reason, headSHA string, automatic bool) (HandoffSwap, error) {
 
 	if len(i.Tabs) == 0 {
-		return AgentHandoff{}, fmt.Errorf("session %q has no agent tab to hand off", i.Title)
+		return HandoffSwap{}, fmt.Errorf("session %q has no agent tab to hand off", i.Title)
 	}
 
 	// Record the outgoing agent through the shared identity resolver, so the
@@ -231,29 +284,35 @@ func (i *Instance) SwapAgentProgram(target, reason, headSHA string, automatic bo
 		Reason:    strings.TrimSpace(reason),
 		Automatic: automatic,
 	}
+	swap := HandoffSwap{AgentHandoff: entry, previousProgram: i.Program}
 
 	i.Tabs[0].Handoffs = append(i.Tabs[0].Handoffs, entry)
 	i.Tabs[0].Conversation = AgentConversationData{}
 	i.Program = target
+	// Invalidate outgoing-runtime capture BEFORE its pane is torn down. A capture
+	// already waiting on a rollout must not refill the live slot after this record
+	// has been rewritten for the incoming agent.
+	i.agentRuntimeGeneration++
 
-	return entry, nil
+	return swap, nil
 }
 
 // RevertHandoff undoes a SwapAgentProgram whose runtime swap then failed,
-// restoring the outgoing agent as the recorded program and putting its
-// conversation id back.
+// restoring the exact outgoing Program value and putting its conversation id
+// back. The exact value matters for free-form commands that have no provider
+// identity from which a launch command could be reconstructed.
 //
-// This exists because the record and the runtime must not disagree. If the pane
-// still runs codex while Program says claude, every later decision that keys off
-// the program — respawn flag injection, readiness heuristics, the next handoff's
-// same-agent check — is made against an agent that is not there. A stale ledger
-// entry for a swap that never happened is the same class of lie, so the entry
-// comes off too.
+// This exists because a failed replacement did not establish the incoming
+// runtime. Leaving Program set to that unconfirmed agent would make every later
+// decision — respawn flag injection, readiness heuristics, the next handoff's
+// same-agent check — act as though the swap committed. A stale ledger entry for
+// a swap that never completed is the same class of lie, so the entry comes off
+// too.
 //
 // It removes only the trailing entry, and only when it is the one passed in: if
 // anything else has appended since, this is no longer an unwind and refusing is
 // safer than truncating someone else's record.
-func (i *Instance) RevertHandoff(entry AgentHandoff) error {
+func (i *Instance) RevertHandoff(swap HandoffSwap) error {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 
@@ -264,14 +323,16 @@ func (i *Instance) RevertHandoff(entry AgentHandoff) error {
 	if n == 0 {
 		return fmt.Errorf("session %q has no handoff to revert", i.Title)
 	}
-	if last := i.Tabs[0].Handoffs[n-1]; last != entry {
+	if last := i.Tabs[0].Handoffs[n-1]; last != swap.AgentHandoff {
 		return fmt.Errorf("session %q: the last handoff is not the one being reverted", i.Title)
 	}
 
 	i.Tabs[0].Handoffs = i.Tabs[0].Handoffs[:n-1]
-	i.Tabs[0].Conversation = entry.From
-	if from := strings.TrimSpace(entry.From.Agent); from != "" {
-		i.Program = from
-	}
+	i.Tabs[0].Conversation = swap.From
+	i.Program = swap.previousProgram
+	// Generations are monotonic even on rollback. Reusing the old number would
+	// make a token from the abandoned target indistinguishable from the restored
+	// outgoing runtime.
+	i.agentRuntimeGeneration++
 	return nil
 }

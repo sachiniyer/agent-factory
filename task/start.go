@@ -2,6 +2,7 @@ package task
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -22,6 +23,17 @@ import (
 const MaxTrustPromptAttempts = 20
 
 var trustPromptRetryDelay = time.Second
+
+// ErrAgentReadiness marks failures that happen before the incoming agent has
+// reached a usable composer. ErrPromptDelivery marks the narrower failure after
+// readiness was established. Callers that have already crossed an irreversible
+// runtime-swap boundary need this distinction: the former must become an inert
+// startup-unknown record, while the latter can retain a delivery retry against
+// the runtime whose readiness was positively established.
+var (
+	ErrAgentReadiness = errors.New("agent did not become ready")
+	ErrPromptDelivery = errors.New("prompt delivery failed after readiness")
+)
 
 // SetTrustPromptTimingForTest compresses the trust-prompt dismissal loop's
 // timing — both the backoff between attempts and the readiness poll each retry
@@ -110,6 +122,17 @@ func StartAndSendPrompt(ctx context.Context, instance *session.Instance, prompt 
 	if err := instance.Start(true); err != nil {
 		return err
 	}
+	return WaitForReadyAndSendPrompt(ctx, instance, prompt)
+}
+
+// WaitForReadyAndSendPrompt is the post-launch half of StartAndSendPrompt. A
+// handoff has already launched its incoming pane, but it owes the same readiness
+// and trust-dialog contract as a fresh create before any mission text is typed.
+// Keeping that contract here prevents the two launch paths from drifting.
+func WaitForReadyAndSendPrompt(ctx context.Context, instance *session.Instance, prompt string) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 
 	// Readiness polling, trust-prompt dismissal and prompt delivery below all
 	// drive the agent's PTY locally; a backend without interactive input (remote
@@ -119,16 +142,16 @@ func StartAndSendPrompt(ctx context.Context, instance *session.Instance, prompt 
 	}
 
 	if err := WaitForReady(ctx, instance); err != nil {
-		return err
+		return fmt.Errorf("%w: %w", ErrAgentReadiness, err)
 	}
 
 	if err := DismissTrustPrompt(ctx, instanceTrustTarget{instanceReadinessTarget{inst: instance}}); err != nil {
-		return err
+		return fmt.Errorf("%w: %w", ErrAgentReadiness, err)
 	}
 
 	if prompt != "" {
 		if err := instance.AgentServer().SendPrompt(prompt); err != nil {
-			return err
+			return fmt.Errorf("%w: %w", ErrPromptDelivery, err)
 		}
 	}
 

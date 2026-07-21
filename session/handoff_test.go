@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/sachiniyer/agent-factory/session/git"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
@@ -81,7 +82,7 @@ func TestSwapAgentProgram_RewritesProgramAndRecordsLedger(t *testing.T) {
 	if len(ledger) != 1 {
 		t.Fatalf("ledger has %d entries, want 1", len(ledger))
 	}
-	if ledger[0] != entry {
+	if ledger[0] != entry.AgentHandoff {
 		t.Fatalf("ledger[0] = %+v, want the returned entry %+v", ledger[0], entry)
 	}
 }
@@ -166,6 +167,28 @@ func TestRevertHandoff_RestoresProgramAndConversation(t *testing.T) {
 	}
 }
 
+func TestRevertHandoff_RestoresOpaqueOutgoingProgram(t *testing.T) {
+	inst := handoffTestInstance(t, tmux.ProgramClaude)
+	const outgoing = "/opt/agent-tools/my-free-form-wrapper --profile legacy"
+	inst.Program = outgoing
+	inst.Tabs[0].Conversation = AgentConversationData{}
+	inst.SetTmuxSession(tmux.NewTmuxSession("opaque-rollback", outgoing))
+
+	entry, err := inst.SwapAgentProgram(tmux.ProgramGemini, HandoffReasonManual, "sha", false)
+	if err != nil {
+		t.Fatalf("SwapAgentProgram: %v", err)
+	}
+	if entry.From.Agent != "" {
+		t.Fatalf("precondition failed: opaque outgoing command resolved as agent %q", entry.From.Agent)
+	}
+	if err := inst.RevertHandoff(entry); err != nil {
+		t.Fatalf("RevertHandoff: %v", err)
+	}
+	if got := inst.AgentProgram(); got != outgoing {
+		t.Fatalf("Program after rollback = %q, want exact outgoing command %q", got, outgoing)
+	}
+}
+
 func TestRevertHandoff_RefusesWhenNotTheLastEntry(t *testing.T) {
 	inst := handoffTestInstance(t, tmux.ProgramClaude)
 
@@ -224,6 +247,48 @@ func TestMissionBrief_OverrideWinsOverStoredPrompt(t *testing.T) {
 	}
 	if strings.Contains(rendered, "the stale create-time prompt") {
 		t.Fatalf("brief carries BOTH the override and the stored prompt; two goals in one brief is the blended-context hazard #2013 names.\n%s", rendered)
+	}
+}
+
+// A base-to-HEAD diff contains only committed work. When the outgoing agent has
+// dirty files, the incoming agent must be pointed at both status (including
+// untracked files) and a working-tree diff or the most recent work is invisible.
+func TestMissionBrief_DirtyWorkIncludesWorkingTreeCommands(t *testing.T) {
+	brief := MissionBrief{
+		From: tmux.ProgramClaude,
+		To:   tmux.ProgramCodex,
+		Work: git.WorkSummary{
+			Branch:     "agent/in-progress",
+			BaseSHA:    "abc123",
+			Commits:    2,
+			DirtyFiles: 3,
+		},
+	}
+	rendered := brief.Render()
+	for _, command := range []string{"git diff abc123...HEAD", "git status --short", "git diff HEAD"} {
+		if !strings.Contains(rendered, command) {
+			t.Fatalf("dirty handoff brief omits %q; the incoming agent would see only committed work:\n%s", command, rendered)
+		}
+	}
+}
+
+func TestMissionBrief_UnbornDirtyWorkDoesNotReferenceHEAD(t *testing.T) {
+	brief := MissionBrief{
+		From: tmux.ProgramClaude,
+		To:   tmux.ProgramCodex,
+		Work: git.WorkSummary{
+			Branch:     "unborn-work",
+			DirtyFiles: 2,
+		},
+	}
+	rendered := brief.Render()
+	if strings.Contains(rendered, "git diff HEAD") {
+		t.Fatalf("unborn-branch brief tells the incoming agent to diff nonexistent HEAD:\n%s", rendered)
+	}
+	for _, command := range []string{"git status --short", "git diff --cached", "git diff"} {
+		if !strings.Contains(rendered, command) {
+			t.Fatalf("unborn dirty-work brief omits %q:\n%s", command, rendered)
+		}
 	}
 }
 

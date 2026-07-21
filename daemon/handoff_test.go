@@ -1,14 +1,19 @@
 package daemon
 
 import (
+	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/session/tmux"
+	"github.com/sachiniyer/agent-factory/task"
 )
 
 // registerHandoffSubject is registerStarted plus the agent tab a handoff needs:
@@ -16,6 +21,7 @@ import (
 // without one has nothing to hand off. SetTmuxSession materializes it.
 func registerHandoffSubject(t *testing.T, m *Manager, repoID, repoPath, title string, backend session.Backend) *session.Instance {
 	t.Helper()
+	t.Cleanup(task.SetTrustPromptTimingForTest(time.Millisecond))
 	inst := registerStarted(t, m, repoID, repoPath, title, backend, true, session.Running)
 	inst.SetTmuxSession(tmux.NewTmuxSession(title, tmux.ProgramClaude))
 	inst.SetAgentConversation(session.AgentConversationData{
@@ -31,11 +37,15 @@ func registerHandoffSubject(t *testing.T, m *Manager, repoID, repoPath, title st
 // swap so the rollback path is exercised.
 type handoffBackend struct {
 	*session.FakeBackend
-	mu          sync.Mutex
-	swapCalls   int
-	swapErr     error
-	sentPrompts []string
-	noHandoff   bool
+	mu              sync.Mutex
+	swapCalls       int
+	swapErr         error
+	sentPrompts     []string
+	previewCalls    int
+	hasUpdatedCalls int
+	events          []string
+	noHandoff       bool
+	sendErr         error
 }
 
 func (b *handoffBackend) Capabilities() session.Capabilities {
@@ -46,23 +56,142 @@ func (b *handoffBackend) Capabilities() session.Capabilities {
 	return caps
 }
 
-func (b *handoffBackend) SwapAgent(i *session.Instance) error {
+func (b *handoffBackend) SwapAgent(i *session.Instance, _ session.AgentSwapPlan) error {
 	b.mu.Lock()
 	b.swapCalls++
+	b.events = append(b.events, "swap")
 	err := b.swapErr
 	b.mu.Unlock()
 	if err != nil {
 		return err
 	}
-	_ = i.Transition(session.ConfirmLive())
+	// Mirror the local backend's SetProgram: readiness and conversation capture
+	// must identify the incoming agent from the pane command, not stale tmux state.
+	i.SetTmuxSession(tmux.NewTmuxSession(i.Title, i.AgentProgram()))
 	return nil
+}
+
+func (b *handoffBackend) Preview(*session.Instance) (string, error) {
+	// One fixture containing each simple agent's ready glyph keeps these daemon
+	// orchestration tests independent of which supported target they choose.
+	b.mu.Lock()
+	b.previewCalls++
+	b.events = append(b.events, "ready")
+	b.mu.Unlock()
+	return "ready\n❯\n›\n> \n╰", nil
+}
+
+func (b *handoffBackend) HasUpdated(*session.Instance) (bool, bool, string) {
+	b.mu.Lock()
+	b.hasUpdatedCalls++
+	b.mu.Unlock()
+	return false, false, ""
 }
 
 func (b *handoffBackend) SendPromptCommand(_ *session.Instance, prompt string) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	b.events = append(b.events, "send")
+	if b.sendErr != nil {
+		return b.sendErr
+	}
 	b.sentPrompts = append(b.sentPrompts, prompt)
 	return nil
+}
+
+func (b *handoffBackend) setSendErr(err error) {
+	b.mu.Lock()
+	b.sendErr = err
+	b.mu.Unlock()
+}
+
+func (b *handoffBackend) eventSnapshot() (events []string, previews, statusPolls int) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return append([]string(nil), b.events...), b.previewCalls, b.hasUpdatedCalls
+}
+
+type rejectingHandoffBackend struct {
+	*handoffBackend
+	err error
+}
+
+func (b *rejectingHandoffBackend) PrepareAgentSwap(*session.Instance, string) (session.AgentSwapPlan, error) {
+	return session.AgentSwapPlan{}, b.err
+}
+
+type blockingSwapBackend struct {
+	*handoffBackend
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (b *blockingSwapBackend) SwapAgent(i *session.Instance, plan session.AgentSwapPlan) error {
+	close(b.entered)
+	<-b.release
+	return b.handoffBackend.SwapAgent(i, plan)
+}
+
+type blockingReadinessHandoffBackend struct {
+	*handoffBackend
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (b *blockingReadinessHandoffBackend) Preview(i *session.Instance) (string, error) {
+	b.once.Do(func() { close(b.entered) })
+	<-b.release
+	return b.handoffBackend.Preview(i)
+}
+
+type limitHandoffBackend struct {
+	*handoffBackend
+}
+
+func (b *limitHandoffBackend) Preview(*session.Instance) (string, error) {
+	return "You've hit your usage limit. Try again at Jul 25th, 2026 5:55 PM.", nil
+}
+
+type goneReadinessHandoffBackend struct {
+	*handoffBackend
+}
+
+func (b *goneReadinessHandoffBackend) Preview(*session.Instance) (string, error) {
+	return "", tmux.ErrSessionGone
+}
+
+type stalePollHandoffBackend struct {
+	*handoffBackend
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (b *stalePollHandoffBackend) HasUpdated(*session.Instance) (bool, bool, string) {
+	close(b.entered)
+	<-b.release
+	return false, false, ""
+}
+
+func (b *stalePollHandoffBackend) IsAlive(*session.Instance) (bool, error) {
+	return false, nil
+}
+
+type rolloutHandoffBackend struct {
+	*handoffBackend
+	codexHome string
+}
+
+func (b *rolloutHandoffBackend) SwapAgent(i *session.Instance, plan session.AgentSwapPlan) error {
+	if err := b.handoffBackend.SwapAgent(i, plan); err != nil {
+		return err
+	}
+	path := filepath.Join(b.codexHome, "sessions", "2026", "07", "21",
+		"rollout-2026-07-21T10-17-35-019f386f-7206-7fc2-803b-f7045e07a242.jsonl")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(path, []byte(`{"type":"session_meta"}`+"\n"), 0o644)
 }
 
 func (b *handoffBackend) snapshot() (swaps int, prompts []string) {
@@ -269,5 +398,410 @@ func TestHandoffSession_RefusesArchivedSession(t *testing.T) {
 	}
 	if got := inst.GetLiveness(); got != session.LiveArchived {
 		t.Fatalf("liveness = %v after refused handoff, want Archived", got)
+	}
+}
+
+func TestHandoffSession_PreflightFailureLeavesOutgoingAgentUntouched(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	base := &handoffBackend{FakeBackend: session.NewFakeBackend()}
+	backend := &rejectingHandoffBackend{handoffBackend: base, err: errors.New("gemini executable is missing")}
+	inst := registerHandoffSubject(t, manager, repoID, repoPath, "preflight-fails", backend)
+
+	_, err := manager.HandoffSession(HandoffSessionRequest{
+		Title: "preflight-fails", RepoID: repoID, To: tmux.ProgramGemini,
+	})
+	if err == nil || !strings.Contains(err.Error(), "without stopping its current agent") {
+		t.Fatalf("preflight error = %v, want an actionable refusal before teardown", err)
+	}
+	if swaps, prompts := base.snapshot(); swaps != 0 || len(prompts) != 0 {
+		t.Fatalf("failed preflight touched runtime: swaps=%d prompts=%d", swaps, len(prompts))
+	}
+	if inst.AgentProgram() != tmux.ProgramClaude || len(inst.Handoffs()) != 0 || inst.GetInFlightOp() != session.OpNone {
+		t.Fatalf("failed preflight mutated record: program=%q handoffs=%d op=%v",
+			inst.AgentProgram(), len(inst.Handoffs()), inst.GetInFlightOp())
+	}
+}
+
+func TestHandoffSession_ReplacementFenceSkipsStatusPoll(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	base := &handoffBackend{FakeBackend: session.NewFakeBackend()}
+	backend := &blockingSwapBackend{
+		handoffBackend: base,
+		entered:        make(chan struct{}),
+		release:        make(chan struct{}),
+	}
+	inst := registerHandoffSubject(t, manager, repoID, repoPath, "fenced", backend)
+	done := make(chan error, 1)
+	go func() {
+		_, err := manager.HandoffSession(HandoffSessionRequest{
+			Title: "fenced", RepoID: repoID, To: tmux.ProgramGemini,
+		})
+		done <- err
+	}()
+
+	select {
+	case <-backend.entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("handoff never reached the runtime swap")
+	}
+	if got := inst.GetInFlightOp(); got != session.OpReplacing {
+		t.Fatalf("in-flight op during swap = %v, want OpReplacing", got)
+	}
+	manager.refreshInstanceStatus(repoID, inst)
+	_, _, statusPolls := base.eventSnapshot()
+	if statusPolls != 0 {
+		t.Fatalf("status poll probed %d times during replacement; it can observe the intentional no-pane gap as Lost", statusPolls)
+	}
+	close(backend.release)
+	if err := <-done; err != nil {
+		t.Fatalf("HandoffSession: %v", err)
+	}
+}
+
+// A successful process swap is only the middle of a handoff. The incoming
+// agent is still idle until its mission lands, so the replacement fence must
+// cover readiness and delivery too. Otherwise a status tick in this window can
+// observe Ready and end a task-backed run before the work has even been sent.
+func TestHandoffSession_ReplacementFenceCoversMissionDelivery(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	base := &handoffBackend{FakeBackend: session.NewFakeBackend()}
+	backend := &blockingReadinessHandoffBackend{
+		handoffBackend: base,
+		entered:        make(chan struct{}),
+		release:        make(chan struct{}),
+	}
+	inst := registerHandoffSubject(t, manager, repoID, repoPath, "fenced-delivery", backend)
+	inst.SetLimitReached(time.Date(2026, 7, 22, 9, 0, 0, 0, time.UTC))
+	done := make(chan error, 1)
+	go func() {
+		_, err := manager.HandoffSession(HandoffSessionRequest{
+			Title: "fenced-delivery", RepoID: repoID, To: tmux.ProgramGemini,
+		})
+		done <- err
+	}()
+
+	select {
+	case <-backend.entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("handoff never reached incoming-agent readiness")
+	}
+	opDuringReadiness := inst.GetInFlightOp()
+	manager.refreshInstanceStatus(repoID, inst)
+	_, _, statusPolls := base.eventSnapshot()
+	raw, checkpointErr := config.LoadRepoInstances(repoID)
+	var checkpoint []session.InstanceData
+	if checkpointErr == nil {
+		checkpointErr = json.Unmarshal(raw, &checkpoint)
+	}
+	close(backend.release)
+	if err := <-done; err != nil {
+		t.Fatalf("HandoffSession: %v", err)
+	}
+
+	if opDuringReadiness != session.OpReplacing {
+		t.Fatalf("in-flight op while the incoming mission was still undelivered = %v, want OpReplacing", opDuringReadiness)
+	}
+	if statusPolls != 0 {
+		t.Fatalf("status poll probed %d times before the incoming mission landed; an idle prompt here is not a completed task run", statusPolls)
+	}
+	if checkpointErr != nil {
+		t.Fatalf("load runtime-swap checkpoint: %v", checkpointErr)
+	}
+	if len(checkpoint) != 1 || checkpoint[0].Program != tmux.ProgramGemini ||
+		checkpoint[0].Liveness != session.LiveRunning || !checkpoint[0].LimitResetAt.IsZero() ||
+		!strings.Contains(checkpoint[0].PendingHandoffMission, "continuing work") {
+		t.Fatalf("disk checkpoint during delivery fence = %+v; want incoming program as Running with the outgoing limit cleared and the rendered mission pending", checkpoint)
+	}
+	if got := inst.GetInFlightOp(); got != session.OpNone {
+		t.Fatalf("in-flight op after mission delivery = %v, want OpNone", got)
+	}
+}
+
+// A swap can exec the target and still lose its pane before readiness. That is
+// not a prompt-delivery failure: no usable incoming runtime was confirmed, so
+// the row must be retained inert instead of persisted as healthy Running.
+func TestHandoffSession_ReadinessFailureRetainsStartupUnknown(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	base := &handoffBackend{FakeBackend: session.NewFakeBackend()}
+	backend := &goneReadinessHandoffBackend{handoffBackend: base}
+	inst := registerHandoffSubject(t, manager, repoID, repoPath, "startup-died", backend)
+
+	_, err := manager.HandoffSession(HandoffSessionRequest{
+		Title: "startup-died", RepoID: repoID, To: tmux.ProgramGemini,
+	})
+	if !errors.Is(err, task.ErrAgentReadiness) || !errors.Is(err, tmux.ErrSessionGone) {
+		t.Fatalf("HandoffSession error = %v, want readiness classification wrapping ErrSessionGone", err)
+	}
+	if !inst.StartupStateUnknown() || inst.Started() {
+		t.Fatalf("failed incoming startup remained actionable: startupUnknown=%v started=%v", inst.StartupStateUnknown(), inst.Started())
+	}
+	if got := inst.GetInFlightOp(); got != session.OpNone {
+		t.Fatalf("startup-unknown handoff retained op %v, want OpNone", got)
+	}
+	if inst.PendingHandoffMission() == "" {
+		t.Fatal("startup-unknown handoff discarded the mission that never landed")
+	}
+	rec := recordFor(t, repoID, "startup-died")
+	if rec == nil || !rec.StartupStateUnknown || rec.PendingHandoffMission == "" {
+		t.Fatalf("persisted failed handoff = %+v, want startup-unknown with its mission pending", rec)
+	}
+}
+
+// A post-ready paste failure keeps a durable pending marker. Once a later poll
+// positively observes Ready, the recovery path sends that exact rendered brief
+// and clears the marker in memory and on disk.
+func TestResumePendingHandoffs_DeliversPostReadyFailure(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	sendErr := errors.New("paste transport failed")
+	backend := &handoffBackend{FakeBackend: session.NewFakeBackend(), sendErr: sendErr}
+	inst := registerHandoffSubject(t, manager, repoID, repoPath, "retry-mission", backend)
+
+	_, err := manager.HandoffSession(HandoffSessionRequest{
+		Title: "retry-mission", RepoID: repoID, To: tmux.ProgramGemini,
+	})
+	if !errors.Is(err, task.ErrPromptDelivery) || !errors.Is(err, sendErr) {
+		t.Fatalf("HandoffSession error = %v, want post-ready prompt-delivery failure", err)
+	}
+	mission := inst.PendingHandoffMission()
+	if mission == "" || inst.StartupStateUnknown() || inst.GetInFlightOp() != session.OpReplacing {
+		t.Fatalf("post-ready failure state = pending:%q startupUnknown:%v op:%v", mission, inst.StartupStateUnknown(), inst.GetInFlightOp())
+	}
+
+	backend.setSendErr(nil)
+	manager.ResumePendingHandoffs()
+
+	if got := inst.PendingHandoffMission(); got != "" {
+		t.Fatalf("delivered recovery mission remained pending: %q", got)
+	}
+	if got := inst.GetInFlightOp(); got != session.OpNone {
+		t.Fatalf("delivered recovery mission retained replacement fence %v", got)
+	}
+	_, prompts := backend.snapshot()
+	if len(prompts) != 1 || prompts[0] != mission {
+		t.Fatalf("recovery prompts = %q, want exactly the pending rendered mission", prompts)
+	}
+	rec := recordFor(t, repoID, "retry-mission")
+	if rec == nil || rec.PendingHandoffMission != "" {
+		t.Fatalf("persisted recovered handoff = %+v, want no pending mission", rec)
+	}
+}
+
+func TestResumePendingHandoffs_PostReadyFailureClearsOutgoingLimit(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	sendErr := errors.New("paste transport failed")
+	backend := &handoffBackend{FakeBackend: session.NewFakeBackend(), sendErr: sendErr}
+	inst := registerHandoffSubject(t, manager, repoID, repoPath, "retry-after-outgoing-limit", backend)
+	inst.SetLimitReached(time.Now().Add(time.Hour))
+
+	_, err := manager.HandoffSession(HandoffSessionRequest{
+		Title: "retry-after-outgoing-limit", RepoID: repoID, To: tmux.ProgramGemini,
+	})
+	if !errors.Is(err, task.ErrPromptDelivery) || !errors.Is(err, sendErr) {
+		t.Fatalf("HandoffSession error = %v, want post-ready prompt-delivery failure", err)
+	}
+	if inst.LimitReached() {
+		t.Fatal("post-ready failure retained the outgoing provider's limit on the incoming runtime")
+	}
+	mission := inst.PendingHandoffMission()
+	if mission == "" || inst.GetInFlightOp() != session.OpReplacing {
+		t.Fatalf("retry state = pending:%q op:%v, want mission behind replacement fence", mission, inst.GetInFlightOp())
+	}
+
+	backend.setSendErr(nil)
+	manager.ResumePendingHandoffs()
+
+	_, prompts := backend.snapshot()
+	if len(prompts) != 1 || prompts[0] != mission {
+		t.Fatalf("recovery prompts = %q, want exact pending mission; stale limit state must not divert it to limit resume", prompts)
+	}
+}
+
+// A usage-limit banner can replace the incoming composer's ready prompt. That
+// is a parked handoff, not a generic delivery failure: the rendered takeover
+// brief must become the pending prompt so the normal limit-resume path sends
+// the context that never landed on this attempt.
+func TestHandoffSession_ParksIncomingLimitWithMissionPending(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	base := &handoffBackend{FakeBackend: session.NewFakeBackend()}
+	backend := &limitHandoffBackend{handoffBackend: base}
+	inst := registerHandoffSubject(t, manager, repoID, repoPath, "incoming-limit", backend)
+	inst.SetPrompt("finish the transaction without discarding the existing work")
+
+	_, err := manager.HandoffSession(HandoffSessionRequest{
+		Title: "incoming-limit", RepoID: repoID, To: tmux.ProgramCodex,
+	})
+	if !errors.Is(err, task.ErrLimitReached) {
+		t.Fatalf("HandoffSession error = %v, want a wrapped task.ErrLimitReached parked outcome", err)
+	}
+	if !inst.LimitReached() {
+		t.Fatal("incoming agent hit a limit during readiness but the handoff remained LiveRunning")
+	}
+	if _, ok := inst.LimitResetAt(); !ok {
+		t.Fatal("parked handoff lost the reset time parsed from the incoming agent's banner")
+	}
+	if got := inst.GetInFlightOp(); got != session.OpNone {
+		t.Fatalf("parked handoff retained in-flight op %v, want OpNone", got)
+	}
+	pending := inst.GetPrompt()
+	if !strings.Contains(pending, "continuing work") ||
+		!strings.Contains(pending, "finish the transaction without discarding the existing work") {
+		t.Fatalf("pending prompt is not the rendered takeover mission:\n%s", pending)
+	}
+	if _, prompts := base.snapshot(); len(prompts) != 0 {
+		t.Fatalf("sent %d prompts despite the incoming usage-limit banner, want 0", len(prompts))
+	}
+
+	raw, loadErr := config.LoadRepoInstances(repoID)
+	if loadErr != nil {
+		t.Fatalf("LoadRepoInstances: %v", loadErr)
+	}
+	var stored []session.InstanceData
+	if decodeErr := json.Unmarshal(raw, &stored); decodeErr != nil {
+		t.Fatalf("decode instances: %v", decodeErr)
+	}
+	if len(stored) != 1 || stored[0].Liveness != session.LiveLimitReached || stored[0].Prompt != pending {
+		t.Fatalf("persisted parked handoff = %+v, want LiveLimitReached with the rendered mission pending", stored)
+	}
+}
+
+func TestHandoffSession_StaleOutgoingPollCannotMarkIncomingAgentLost(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	base := &handoffBackend{FakeBackend: session.NewFakeBackend()}
+	backend := &stalePollHandoffBackend{
+		handoffBackend: base,
+		entered:        make(chan struct{}),
+		release:        make(chan struct{}),
+	}
+	inst := registerHandoffSubject(t, manager, repoID, repoPath, "stale-poll", backend)
+	pollDone := make(chan struct{})
+	go func() {
+		manager.refreshInstanceStatus(repoID, inst)
+		close(pollDone)
+	}()
+	select {
+	case <-backend.entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("status poll never captured the outgoing epoch")
+	}
+
+	if _, err := manager.HandoffSession(HandoffSessionRequest{
+		Title: "stale-poll", RepoID: repoID, To: tmux.ProgramGemini,
+	}); err != nil {
+		t.Fatalf("HandoffSession: %v", err)
+	}
+	close(backend.release)
+	select {
+	case <-pollDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("stale status poll did not return")
+	}
+	if got := inst.GetLiveness(); got != session.LiveRunning {
+		t.Fatalf("stale outgoing observation changed incoming liveness to %v, want Running", got)
+	}
+}
+
+func TestHandoffSession_OverrideBecomesDurablePrompt(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	backend := &handoffBackend{FakeBackend: session.NewFakeBackend()}
+	inst := registerHandoffSubject(t, manager, repoID, repoPath, "new-goal", backend)
+	inst.SetPrompt("obsolete create-time goal")
+
+	const newGoal = "finish the receipt race without reverting the existing fix"
+	if _, err := manager.HandoffSession(HandoffSessionRequest{
+		Title: "new-goal", RepoID: repoID, To: tmux.ProgramGemini, Brief: newGoal,
+	}); err != nil {
+		t.Fatalf("HandoffSession: %v", err)
+	}
+	if got := inst.GetPrompt(); got != newGoal {
+		t.Fatalf("in-memory prompt = %q, want handoff override %q", got, newGoal)
+	}
+	raw, err := config.LoadRepoInstances(repoID)
+	if err != nil {
+		t.Fatalf("LoadRepoInstances: %v", err)
+	}
+	var stored []session.InstanceData
+	if err := json.Unmarshal(raw, &stored); err != nil {
+		t.Fatalf("decode instances: %v", err)
+	}
+	if len(stored) != 1 || stored[0].Prompt != newGoal {
+		t.Fatalf("persisted prompt = %+v, want %q", stored, newGoal)
+	}
+}
+
+func TestHandoffSession_WaitsForIncomingReadinessBeforeBriefing(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	backend := &handoffBackend{FakeBackend: session.NewFakeBackend()}
+	registerHandoffSubject(t, manager, repoID, repoPath, "ordered-delivery", backend)
+
+	if _, err := manager.HandoffSession(HandoffSessionRequest{
+		Title: "ordered-delivery", RepoID: repoID, To: tmux.ProgramGemini,
+	}); err != nil {
+		t.Fatalf("HandoffSession: %v", err)
+	}
+	events, previews, _ := backend.eventSnapshot()
+	if previews == 0 {
+		t.Fatalf("handoff sent a mission without a readiness probe: events=%v", events)
+	}
+	want := []string{"swap", "ready", "send"}
+	if len(events) < len(want) || events[0] != want[0] || events[1] != want[1] || events[len(events)-1] != want[2] {
+		t.Fatalf("handoff event order = %v, want runtime swap then readiness then send", events)
+	}
+}
+
+func TestHandoffSession_CapturesIncomingCodexConversation(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	codexHome := t.TempDir()
+	t.Setenv("CODEX_HOME", codexHome)
+	base := &handoffBackend{FakeBackend: session.NewFakeBackend()}
+	backend := &rolloutHandoffBackend{handoffBackend: base, codexHome: codexHome}
+	inst := registerHandoffSubject(t, manager, repoID, repoPath, "capture-codex", backend)
+
+	if _, err := manager.HandoffSession(HandoffSessionRequest{
+		Title: "capture-codex", RepoID: repoID, To: tmux.ProgramCodex,
+	}); err != nil {
+		t.Fatalf("HandoffSession: %v", err)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if conv := inst.AgentConversation(); conv.Agent == tmux.ProgramCodex && conv.ID == "019f386f-7206-7fc2-803b-f7045e07a242" {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("incoming Codex conversation was never captured: %+v", inst.AgentConversation())
+}
+
+// Conversation capture is asynchronous. A capture started for one Codex
+// runtime must not write through two later handoffs merely because the session
+// pointer — and eventually even the agent name — match again.
+func TestConversationCapture_DropsResultAfterLaterHandoffs(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	codexHome := t.TempDir()
+	t.Setenv("CODEX_HOME", codexHome)
+	backend := &handoffBackend{FakeBackend: session.NewFakeBackend()}
+	inst := registerHandoffSubject(t, manager, repoID, repoPath, "capture-generation", backend)
+
+	if _, err := inst.SwapAgentProgram(tmux.ProgramCodex, session.HandoffReasonManual, "sha-1", false); err != nil {
+		t.Fatalf("move fixture to Codex: %v", err)
+	}
+	inst.SetTmuxSession(tmux.NewTmuxSession(inst.Title, tmux.ProgramCodex))
+	snap := session.BeginConversationCaptureAtCodexHome(codexHome)
+	token := inst.AgentRuntimeToken()
+
+	if _, err := inst.SwapAgentProgram(tmux.ProgramClaude, session.HandoffReasonManual, "sha-2", false); err != nil {
+		t.Fatalf("first later handoff: %v", err)
+	}
+	inst.SetTmuxSession(tmux.NewTmuxSession(inst.Title, tmux.ProgramClaude))
+	if _, err := inst.SwapAgentProgram(tmux.ProgramCodex, session.HandoffReasonManual, "sha-3", false); err != nil {
+		t.Fatalf("second later handoff: %v", err)
+	}
+	inst.SetTmuxSession(tmux.NewTmuxSession(inst.Title, tmux.ProgramCodex))
+
+	writeDaemonCodexRolloutFile(t, codexHome, "rollout-2026-07-21T10-17-35-019f386f-7206-7fc2-803b-f7045e07a242.jsonl")
+	manager.captureAgentConversation(
+		repoID, daemonInstanceKey(repoID, inst.Title), inst, snap, token, time.Second,
+	)
+	if conv := inst.AgentConversation(); conv.HasID() {
+		t.Fatalf("capture from the superseded Codex runtime overwrote the current live slot: %+v", conv)
 	}
 }

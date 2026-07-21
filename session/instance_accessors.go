@@ -36,6 +36,51 @@ func (i *Instance) SetAutoYes(autoYes bool) {
 	i.AutoYes = autoYes
 }
 
+// SetPrompt replaces the durable goal used by later limit resumes and handoffs.
+// Prompt became mutable when handoff gained an operator-supplied brief, so the
+// write and every concurrent reader must use the instance lock.
+func (i *Instance) SetPrompt(prompt string) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	i.Prompt = prompt
+}
+
+// GetPrompt returns the session's current durable goal.
+func (i *Instance) GetPrompt() string {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	return i.Prompt
+}
+
+// SetPendingHandoffMission records the rendered takeover brief before the
+// irreversible runtime-swap checkpoint. A daemon restart can then recover the
+// exact context that still needs delivery instead of guessing from Prompt.
+func (i *Instance) SetPendingHandoffMission(mission string) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	i.pendingHandoffMission = mission
+}
+
+// PendingHandoffMission returns the takeover brief awaiting confirmed delivery.
+func (i *Instance) PendingHandoffMission() string {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	return i.pendingHandoffMission
+}
+
+// ClearPendingHandoffMission clears the marker only if it still names mission.
+// The compare makes a delayed recovery attempt unable to erase a newer handoff's
+// brief after the same session has moved on.
+func (i *Instance) ClearPendingHandoffMission(mission string) bool {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if i.pendingHandoffMission != mission {
+		return false
+	}
+	i.pendingHandoffMission = ""
+	return true
+}
+
 // GetBranch returns the current worktree branch name under the Instance's
 // mutex. Readers that run from goroutines other than the one mutating the
 // instance (notably the bubbletea renderer) must use this accessor rather
@@ -276,14 +321,8 @@ func (i *Instance) TmuxAlive() bool {
 // "/home/foo/bin/claude --plugin-dir x" (#677).
 func (i *Instance) ResolvedAgent() string {
 	i.mu.RLock()
-	ts := i.tmuxLocked()
-	i.mu.RUnlock()
-	if ts != nil {
-		if p := ts.Program(); strings.TrimSpace(p) != "" {
-			return tmux.DetectAgentFromCommand(p)
-		}
-	}
-	return tmux.DetectAgentFromCommand(i.Program)
+	defer i.mu.RUnlock()
+	return i.resolvedAgentLocked()
 }
 
 // ResolvedPaneAgent returns the canonical agent proven by this instance's

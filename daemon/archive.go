@@ -459,7 +459,22 @@ func (m *Manager) persistInstanceErr(repoID string, instance *session.Instance) 
 	repoStartLock := m.startLockForRepo(repoID)
 	repoStartLock.Lock()
 	defer repoStartLock.Unlock()
+	// Snapshot only AFTER serialization. Taking ToInstanceData as an argument to
+	// a locking helper evaluates it before that helper acquires the lock, letting
+	// a stale status write erase a kill tombstone (#1917).
 	return persistInstanceData(repoID, instance.ToInstanceData())
+}
+
+// persistInstanceSnapshotErr is persistInstanceErr for a caller-owned atomic
+// projection. Handoff uses it to checkpoint the durable post-swap facts while
+// retaining its process-local OpReplacing delivery fence in memory. It is
+// intentionally separate from persistInstanceErr: ordinary writers must take
+// their Instance snapshot only after acquiring this serialization lock.
+func (m *Manager) persistInstanceSnapshotErr(repoID string, data session.InstanceData) error {
+	repoStartLock := m.startLockForRepo(repoID)
+	repoStartLock.Lock()
+	defer repoStartLock.Unlock()
+	return persistInstanceData(repoID, data)
 }
 
 // persistInstance is the best-effort form of persistInstanceErr: a failed write
