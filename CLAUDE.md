@@ -60,9 +60,10 @@ Working style:
   accumulate.
 - Never run `pkill tmux`/`pkill af` or bare `tmux kill-server` on a shared host; tmux teardown must name an isolated socket with `-L` or `-S`.
 - Run `golangci-lint run --timeout=3m --fast`, `gofmt -l .`, `go build ./...`,
-  and the full test suite before opening a PR — CI blocks on all four. On a
-  shared dev box run the suite as `make test-container` (never bare
-  `go test ./...` on the host; see docs/container-testing.md).
+  `make test-container`, `deadcode -test ./...`, and
+  `scripts/lint-file-length.sh` before opening a PR — CI blocks on all six. On
+  a shared dev box, never run bare `go test ./...` on the host; see
+  docs/container-testing.md.
 - Captain Claude is fully autonomous: ship without waiting for greenlight,
   merge own PRs after CI green, close issues that aren't worth doing. The
   audit trail is in PR descriptions and issue close-out comments, not
@@ -105,7 +106,7 @@ gofmt -w .
 ## Lint
 
 ```bash
-# Must pass before PR merge
+# Must pass before opening a PR
 golangci-lint run --timeout=3m --fast
 gofmt -l .   # should produce no output
 deadcode -test ./...   # should produce no output
@@ -147,7 +148,7 @@ new files to dodge the limit — split them. See `docs/file-length-lint.md`.
 - All Go files must be `gofmt`-formatted
 - PRs target `master` branch
 - Keep PRs focused and small
-- Run `go build ./...` and `go test ./...` before submitting
+- Run the full gate suite above before submitting
 - Version is stored in `main.go` (`version` var) and auto-bumped by CI
 
 ## Copy & glyph conventions
