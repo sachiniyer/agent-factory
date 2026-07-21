@@ -36,54 +36,46 @@ var (
 const minDistinctiveTail = 8
 
 // deliveryOutcome is deliberately THREE-valued. "The pane did not show the
-// prompt" is an observed absence only when that agent is known to render pasted
-// input before Enter. A non-echoing pane and a failed capture both mean the
-// delivery could not be observed; neither may manufacture a negative.
+// prompt" is an observed absence only when the terminal capture proves THIS
+// payload began rendering but its completion tail did not. A collapsed paste,
+// a composer frame, and a failed capture all mean delivery could not be
+// observed; agent-wide rendering habits may never manufacture a negative.
 type deliveryOutcome int
 
 const (
 	// deliveryObservedLanded: the pasted text was observed to arrive.
 	deliveryObservedLanded deliveryOutcome = iota
-	// deliveryObservedAbsent: the pane is known to echo pasted input, capture
-	// succeeded at the deadline, and the text was not there. This is the genuine
-	// #1982 signal and must stay loud.
+	// deliveryObservedAbsent: capture succeeded at the deadline, a new prefix
+	// from this exact prompt was rendered, and its completion tail was not. This
+	// is the genuine #1982 signal and must stay loud.
 	deliveryObservedAbsent
-	// deliveryCouldNotObserve: the pane does not echo (or its behavior is not
-	// known), capture failed, or the prompt had no distinctive text. Nothing may
-	// be concluded about delivery.
+	// deliveryCouldNotObserve: capture failed, the prompt had no distinctive
+	// text, or the pane never rendered prompt-specific evidence. Nothing may be
+	// concluded about delivery.
 	deliveryCouldNotObserve
 )
 
-// preSubmitEchoBehavior records whether the agent renders pasted input before
-// Enter. It is cached with TmuxSession.program and reused for every delivery.
-type preSubmitEchoBehavior int
+// deliveryObservation keeps the classification and the exact terminal pane
+// frame together. An observed-absent diagnostic must print the same evidence
+// that authorized the decision, not recapture after Enter and describe a newer,
+// unrelated frame (#2255/#2266).
+type deliveryObservation struct {
+	outcome deliveryOutcome
+	pane    string
+}
 
-const (
-	preSubmitEchoUnknown preSubmitEchoBehavior = iota
-	preSubmitEchoes
-	preSubmitDoesNotEcho
-)
-
-// knownPreSubmitEchoBehavior returns only behavior established by real-agent
-// evidence. There is no sound generic runtime probe for the negative case:
-// terminal ECHO says nothing about a full-screen app that draws its own input,
-// while failing to see a test paste is the exact ambiguity this code must not
-// collapse. Sending a sentinel would also mutate the live composer. Therefore
-// unknown agents stay unknown instead of being guessed; any positively observed
-// delivery promotes that session to preSubmitEchoes.
-func knownPreSubmitEchoBehavior(command string) preSubmitEchoBehavior {
-	switch DetectAgentFromCommand(command) {
-	case ProgramClaude, ProgramAider:
-		// Claude visibly renders pasted composer input; #1982's positive-tail
-		// delivery guard depends on this behavior. Aider does too (#2214 review).
-		return preSubmitEchoes
-	case ProgramCodex:
-		// Codex consumes successful pastes without rendering them before Enter
-		// (#2213: 228 unobserved but successful deliveries in one day).
-		return preSubmitDoesNotEcho
-	default:
-		return preSubmitEchoUnknown
-	}
+// deliveryProbe binds every observation to one payload. completion is the
+// suffix whose appearance proves the whole paste drained; renderWitness is a
+// disjoint prefix whose appearance proves the pane DID render this payload and
+// can therefore support a terminal negative when completion is still absent.
+// Baselines prefer the capture after the pre-submit clear (and conservatively
+// fall back to the pre-clear frame if that capture fails), so old prompt text
+// in scrollback cannot be mistaken for evidence from this paste.
+type deliveryProbe struct {
+	completion            string
+	completionBaseline    int
+	renderWitness         string
+	renderWitnessBaseline int
 }
 
 // pasteBufferSeq makes each bracketed-paste buffer name unique per call so two
@@ -160,7 +152,7 @@ func (t *TmuxSession) sendKeysPasteBuffer(text string) error {
 	// after pasting so buffers never accumulate.
 	buf := pasteBufferName(pasteBufferProcessToken, t.sanitizedName, pasteBufferSeq.Add(1))
 
-	tail := deliveryTail(text)
+	probe := newDeliveryProbe(text)
 
 	// Load the payload BEFORE touching the live composer. A load failure means
 	// there is nothing we can deliver, so clearing first would destroy a user's
@@ -212,17 +204,14 @@ func (t *TmuxSession) sendKeysPasteBuffer(text string) error {
 	// post-clear is also what lets a re-delivery whose prior attempt stranded an
 	// identical tail still confirm — the clear removed that copy, so the tail
 	// genuinely re-appears.
-	baseline := 0
-	if tail != "" {
-		switch {
-		case afterOK:
-			baseline = strings.Count(normalizeDelivery(after), tail)
-		case beforeOK:
-			// A failed post-clear capture must not erase the usable pre-clear
-			// baseline. Reusing it is conservative: content the clear removed can
-			// only make confirmation harder, never create a false success.
-			baseline = strings.Count(normalizeDelivery(before), tail)
-		}
+	switch {
+	case afterOK:
+		probe = probe.withBaseline(after)
+	case beforeOK:
+		// A failed post-clear capture must not erase the usable pre-clear
+		// baseline. Reusing it is conservative: content the clear removed can
+		// only make confirmation harder, never create a false success.
+		probe = probe.withBaseline(before)
 	}
 
 	// `-d` deletes the buffer after pasting, `-p` brackets it (see the doc
@@ -265,21 +254,22 @@ func (t *TmuxSession) sendKeysPasteBuffer(text string) error {
 	// (usually well under the old 500ms) and, on the rare pane where capture
 	// cannot confirm it, falls back to sending Enter after the cap so delivery is
 	// never worse than the old blind sleep.
-	delivered := t.waitForPasteDelivered(tail, baseline)
+	observation := t.waitForPasteDelivered(probe)
 
 	// Send Enter separately to submit.
 	if err := t.sendEnter(); err != nil {
 		return err
 	}
 
-	if delivered == deliveryObservedAbsent {
+	if observation.outcome == deliveryObservedAbsent {
 		// This is deliberately the only ERROR emitted by delivery observation:
-		// unlike could-not-observe, a known echoing pane was successfully read and
-		// the prompt was absent. Keep the best-effort Enter, but make this signal
-		// actionable and unhedged so a genuine #1982 truncation is not buried.
-		log.ErrorLog.Printf("submit: prompt delivery observed absent for session %q after %s in a pane known to echo input; "+
+		// unlike could-not-observe, the final capture contains a new prefix from
+		// this prompt but not its completion tail. Keep the best-effort Enter, but
+		// make this signal actionable and unhedged so genuine #1982 truncation is
+		// not buried. The pane tail is load-bearing diagnostic evidence (#2266).
+		log.ErrorLog.Printf("submit: prompt delivery observed absent for session %q after %s; the pane rendered this prompt's prefix but not its completion tail; "+
 			"Enter sent best-effort. Pane tail: %s",
-			t.sanitizedName, pasteDeliveryMaxWait, paneTailForLog(t))
+			t.sanitizedName, pasteDeliveryMaxWait, oneLineTail(observation.pane))
 	}
 	return nil
 }
@@ -382,19 +372,48 @@ func noteClearedDraft(sessionName, before, after string) {
 		"Prior pane tail: %s", sessionName, oneLineTail(before))
 }
 
-// deliveryTail returns a distinctive whitespace/box-free suffix of text used to
-// confirm the WHOLE paste landed before submitting: a racing Enter drops the
-// TAIL, so the tail is exactly what must be visible. Whitespace and box-drawing
-// glyphs are removed so an agent composer that wraps the prompt inside its
-// border box (claude/aider render one) still reads back as one contiguous run.
-// A short tail keeps it within a single composer line so a wrap can't split it.
-func deliveryTail(text string) string {
+// newDeliveryProbe derives two disjoint, payload-specific witnesses. The suffix
+// confirms the WHOLE paste landed before submitting: a racing Enter drops the
+// tail, so the tail is exactly what must be visible. A disjoint prefix can prove
+// that this same payload began rendering even when the tail never arrived — the
+// high-signal #1982 truncation case.
+//
+// Short prompts have no disjoint pair and therefore cannot produce a terminal
+// negative. That is intentional: seeing none of a short prompt does not prove
+// the pane chose to render it. Positive delivery can still be confirmed by the
+// complete prompt, with the existing two-capture rule for weak short strings.
+func newDeliveryProbe(text string) deliveryProbe {
 	n := []rune(normalizeDelivery(text))
-	const tailRunes = 32
-	if len(n) > tailRunes {
-		n = n[len(n)-tailRunes:]
+	const (
+		completionRunes = 32
+		witnessRunes    = 24
+	)
+	if len(n) == 0 {
+		return deliveryProbe{}
 	}
-	return string(n)
+
+	completion := n
+	if len(completion) > completionRunes {
+		completion = completion[len(completion)-completionRunes:]
+	}
+	probe := deliveryProbe{completion: string(completion)}
+	if len(n) >= completionRunes+witnessRunes {
+		probe.renderWitness = string(n[:witnessRunes])
+	}
+	return probe
+}
+
+// withBaseline records how many copies of each witness were already visible
+// before this paste. A later observation is evidence only when its count grows.
+func (p deliveryProbe) withBaseline(content string) deliveryProbe {
+	normalized := normalizeDelivery(content)
+	if p.completion != "" {
+		p.completionBaseline = strings.Count(normalized, p.completion)
+	}
+	if p.renderWitness != "" {
+		p.renderWitnessBaseline = strings.Count(normalized, p.renderWitness)
+	}
+	return p
 }
 
 // normalizeDelivery strips whitespace and box-drawing / block-element glyphs so
@@ -466,92 +485,86 @@ func (t *TmuxSession) capturePaneForDeliveryContext(ctx context.Context) (string
 	return string(out), true
 }
 
-// waitForPasteDelivered blocks until the pasted prompt's tail newly appears in
-// the pane (count exceeds the pre-paste baseline), or pasteDeliveryMaxWait
-// elapses. Its result distinguishes a genuine absence in a known echoing pane
-// from an inability to observe delivery. The caller always sends Enter afterward,
-// so delivery is never worse than the fixed sleep this replaced (#1982).
-func (t *TmuxSession) waitForPasteDelivered(
-	tail string,
-	baseline int,
-) deliveryOutcome {
-	if tail == "" {
+// waitForPasteDelivered blocks until this payload's completion tail newly
+// appears in the pane, or pasteDeliveryMaxWait elapses. A terminal negative
+// requires a new, disjoint render witness from THIS payload in the final
+// successful capture. Agent identity, earlier frames, generic composer chrome,
+// and collapsed-paste placeholders cannot grant that authority (#2266).
+//
+// The caller always sends Enter afterward, so delivery is never worse than the
+// fixed sleep this replaced (#1982).
+func (t *TmuxSession) waitForPasteDelivered(probe deliveryProbe) deliveryObservation {
+	if probe.completion == "" {
 		// Nothing distinctive to confirm (empty/all-whitespace prompt). There is
 		// no positive check to make, so keep the ORIGINAL 500ms drain rather than
 		// quietly shortening it.
 		time.Sleep(emptyPromptDrain)
-		return deliveryCouldNotObserve
+		return deliveryObservation{outcome: deliveryCouldNotObserve}
 	}
 	deadline := time.Now().Add(pasteDeliveryMaxWait)
 	streak := 0
 	// A short tail is weak evidence, so require two consecutive sightings before
 	// trusting it (see minDistinctiveTail).
 	needed := 1
-	if len([]rune(tail)) < minDistinctiveTail {
+	if len([]rune(probe.completion)) < minDistinctiveTail {
 		needed = 2
 	}
-	lastObservation := deliveryCouldNotObserve
-	deadlineOutcome := func() deliveryOutcome {
-		if lastObservation == deliveryObservedAbsent && t.preSubmitEchoBehavior() == preSubmitEchoes {
-			return deliveryObservedAbsent
-		}
-		return deliveryCouldNotObserve
-	}
+	lastObservation := deliveryObservation{outcome: deliveryCouldNotObserve}
 	for {
 		// If the prior capture succeeded and the following poll interval carried
 		// us across the deadline, that prior read is the terminal observation. Do
 		// not launch an already-expired capture just to turn success into unknown.
 		if time.Until(deadline) <= 0 {
-			return deadlineOutcome()
+			return lastObservation
 		}
 
 		// Bound each capture by what is LEFT of this loop's budget, so a wedged
 		// server cannot push a single capture past the deadline below (#2099).
 		if content, ok := t.capturePaneForDeliveryWithin(time.Until(deadline)); ok {
-			if strings.Count(normalizeDelivery(content), tail) > baseline {
+			normalized := normalizeDelivery(content)
+			if strings.Count(normalized, probe.completion) > probe.completionBaseline {
 				streak++
 				if streak >= needed {
-					t.notePreSubmitEchoObserved()
-					return deliveryObservedLanded
+					return deliveryObservation{outcome: deliveryObservedLanded, pane: content}
 				}
 				// One weak short-tail sighting is neither confirmed delivery nor
 				// absence. A later failure must not combine with it.
-				lastObservation = deliveryCouldNotObserve
-			} else {
+				lastObservation = deliveryObservation{outcome: deliveryCouldNotObserve, pane: content}
+			} else if probe.renderWitness != "" &&
+				strings.Count(normalized, probe.renderWitness) > probe.renderWitnessBaseline {
 				streak = 0
-				lastObservation = deliveryObservedAbsent
+				lastObservation = deliveryObservation{outcome: deliveryObservedAbsent, pane: content}
+			} else {
+				// A successful capture is not automatically a negative. Unless it
+				// newly renders this prompt's prefix, it says only that the pane was
+				// readable — a collapsed placeholder and an empty composer are both
+				// deliberate examples of could-not-observe (#2266).
+				streak = 0
+				lastObservation = deliveryObservation{outcome: deliveryCouldNotObserve, pane: content}
 			}
 		} else {
 			// Observation continuity is load-bearing. The paste can land after an
 			// earlier absent frame, and a failed frame can separate two coincidental
 			// short-tail sightings, so unreadability invalidates both signals.
 			streak = 0
-			lastObservation = deliveryCouldNotObserve
+			lastObservation = deliveryObservation{outcome: deliveryCouldNotObserve}
 		}
 		if time.Now().After(deadline) {
-			// Only a terminal successful absence in a known echoing pane supports a
-			// negative. Earlier absence followed by unreadability is unknown: the
-			// paste may have drained after that frame.
-			return deadlineOutcome()
+			// Only a terminal successful capture with this prompt's new render
+			// witness supports a negative. Earlier evidence followed by an
+			// unbound or unreadable frame is unknown: the pane may have elided or
+			// drained the paste after that frame.
+			return lastObservation
 		}
 		time.Sleep(pasteDeliveryPollInterval)
 	}
 }
 
-// paneTailForLog returns a short, single-line excerpt of the pane so a failure
-// says what the pane actually looked like instead of only that something failed.
-func paneTailForLog(t *TmuxSession) string {
-	content, ok := t.capturePaneForDelivery()
-	if !ok {
-		return "<pane not capturable>"
-	}
-	return oneLineTail(content)
-}
-
 // oneLineTail condenses pane content to a short, single-line excerpt for a log
 // line: the last few non-blank rows, whitespace collapsed, row breaks marked
-// with ⏎, and truncated. Shared by paneTailForLog and noteClearedDraft so a
-// discarded-draft record and a delivery-failure record read the same.
+// with ⏎, and truncated. Shared by the terminal delivery observation and
+// noteClearedDraft so a discarded-draft record and a delivery-failure record
+// read the same.
 func oneLineTail(content string) string {
 	lines := strings.Split(strings.TrimRight(content, "\n \t"), "\n")
 	keep := lines

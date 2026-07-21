@@ -4,8 +4,8 @@ package tmux
 //
 // program is the command the pane runs (override-resolved, flag-injected). It
 // is not immutable: Restore() rewrites it (resume-flag injection, #595) on the
-// restore goroutine while the status-poll and prompt-delivery goroutines read
-// it (readiness heuristics, submit routing). Every access therefore goes
+// restore goroutine while startup, status, and PTY-I/O paths read it for agent
+// detection and diagnostics. Every access therefore goes
 // through these helpers under programMu — the codex submit path reading program
 // is what first exposed this data race under `go test -race` (#1254).
 
@@ -29,31 +29,9 @@ func (t *TmuxSession) programCmd() string {
 	return t.program
 }
 
-// preSubmitEchoBehavior returns the cached behavior for the resolved program.
-// Agent detection happens when the program is set, not on every delivery.
-func (t *TmuxSession) preSubmitEchoBehavior() preSubmitEchoBehavior {
-	t.programMu.RLock()
-	defer t.programMu.RUnlock()
-	return t.preSubmitEcho
-}
-
-// notePreSubmitEchoObserved promotes an UNKNOWN capability only on positive
-// evidence. A known non-echoing agent stays non-echoing even if unrelated pane
-// output happens to contain the same short tail (#2214 review). A missing tail
-// can never demote it: absence is precisely the ambiguous signal #2213 forbids
-// us from treating as detection.
-func (t *TmuxSession) notePreSubmitEchoObserved() {
-	t.programMu.Lock()
-	defer t.programMu.Unlock()
-	if t.preSubmitEcho == preSubmitEchoUnknown {
-		t.preSubmitEcho = preSubmitEchoes
-	}
-}
-
 // setProgramCmd stores the pane's program command string under programMu.
 func (t *TmuxSession) setProgramCmd(program string) {
 	t.programMu.Lock()
 	defer t.programMu.Unlock()
 	t.program = program
-	t.preSubmitEcho = knownPreSubmitEchoBehavior(program)
 }
