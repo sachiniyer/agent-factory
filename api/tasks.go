@@ -180,14 +180,6 @@ var tasksAddCmd = &cobra.Command{
 			return jsonError(err)
 		}
 
-		// A cwd-derived binding to a clone inside af's home is the #1891
-		// accident: it creates a parallel automation project that the intended
-		// project's view never shows. An explicit --repo states the binding and
-		// is always honored.
-		if err := guardProjectBinding(repo, repoFlag != ""); err != nil {
-			return jsonError(err)
-		}
-
 		hasCron := strings.TrimSpace(taskAddCronFlag) != ""
 		hasWatch := strings.TrimSpace(taskAddWatchCmdFlag) != ""
 		if hasCron == hasWatch {
