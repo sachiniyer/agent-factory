@@ -43,8 +43,9 @@ func gitHubArgsDispatch(args []shellWord) bool {
 			continue
 		}
 		if arg.literal == "--web" || strings.HasPrefix(arg.literal, "--web=") ||
+			arg.literal == "--editor" || strings.HasPrefix(arg.literal, "--editor=") ||
 			(strings.HasPrefix(arg.literal, "-") && !strings.HasPrefix(arg.literal, "--") &&
-				strings.ContainsRune(arg.literal[1:], 'w')) {
+				strings.ContainsAny(arg.literal[1:], "ew")) {
 			return true
 		}
 	}
@@ -53,7 +54,7 @@ func gitHubArgsDispatch(args []shellWord) bool {
 
 func safeGitHubSubcommand(path string) bool {
 	switch path {
-	case "auth/login", "auth/logout", "auth/refresh", "auth/setup-git", "auth/status",
+	case "auth/logout", "auth/setup-git", "auth/status",
 		"auth/switch", "auth/token",
 		"cache/delete", "cache/list",
 		"config/clear-cache", "config/get", "config/list",

@@ -160,7 +160,15 @@ func safeGitSubcommand(name string) bool {
 }
 
 func gitArgsDispatch(command string, args []string) bool {
+	optionsDone := false
 	for _, arg := range args {
+		if optionsDone {
+			continue
+		}
+		if arg == "--" {
+			optionsDone = true
+			continue
+		}
 		option := arg
 		if before, _, found := strings.Cut(option, "="); found {
 			option = before
@@ -168,8 +176,7 @@ func gitArgsDispatch(command string, args []string) bool {
 		if gitLongOptionDispatch(option) {
 			return true
 		}
-		if command == "grep" && (option == "-O" ||
-			(strings.HasPrefix(arg, "-O") && len(arg) > 2)) {
+		if command == "grep" && shortOptionContains(arg, 'O') {
 			return true
 		}
 		if command == "clone" && (option == "-c" || option == "-u" ||
@@ -182,6 +189,10 @@ func gitArgsDispatch(command string, args []string) bool {
 		}
 	}
 	return false
+}
+
+func shortOptionContains(option string, flag byte) bool {
+	return len(option) > 1 && option[0] == '-' && option[1] != '-' && strings.ContainsRune(option[1:], rune(flag))
 }
 
 func gitLongOptionDispatch(option string) bool {
@@ -243,6 +254,9 @@ func dockerSubcommandAt(args []shellWord) (int, bool, bool) {
 			if i+1 >= len(args) || !args[i+1].resolved {
 				return 0, false, false
 			}
+			if (arg == "--host" || arg == "-H") && dockerHostDispatches(args[i+1].literal) {
+				return 0, false, false
+			}
 			i++
 			continue
 		case "--":
@@ -251,10 +265,22 @@ func dockerSubcommandAt(args []shellWord) (int, bool, bool) {
 			}
 			return i + 1, false, true
 		}
+		if host, found := strings.CutPrefix(arg, "--host="); found {
+			if dockerHostDispatches(host) {
+				return 0, false, false
+			}
+			continue
+		}
+		if host, found := strings.CutPrefix(arg, "-H="); found {
+			if dockerHostDispatches(host) {
+				return 0, false, false
+			}
+			continue
+		}
 		if strings.HasPrefix(arg, "--config=") || strings.HasPrefix(arg, "--context=") ||
-			strings.HasPrefix(arg, "--host=") || strings.HasPrefix(arg, "--log-level=") ||
+			strings.HasPrefix(arg, "--log-level=") ||
 			strings.HasPrefix(arg, "--tlscacert=") || strings.HasPrefix(arg, "--tlscert=") ||
-			strings.HasPrefix(arg, "--tlskey=") || strings.HasPrefix(arg, "-H=") ||
+			strings.HasPrefix(arg, "--tlskey=") ||
 			strings.HasPrefix(arg, "-l=") {
 			continue
 		}
@@ -264,6 +290,10 @@ func dockerSubcommandAt(args []shellWord) (int, bool, bool) {
 		return i, false, true
 	}
 	return 0, false, false
+}
+
+func dockerHostDispatches(host string) bool {
+	return strings.HasPrefix(strings.ToLower(host), "ssh://")
 }
 
 func dockerInspectionCommand(name string) bool {

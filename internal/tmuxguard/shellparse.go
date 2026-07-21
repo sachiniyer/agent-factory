@@ -31,7 +31,7 @@ type shellCommand struct {
 	assignments         []shellAssignment
 	declaration         *shellDeclaration
 	hasHeredoc          bool
-	cwdChangePersists   bool
+	scopePath           []int
 	environmentAssigned bool
 	directoryChanged    bool
 }
@@ -48,26 +48,37 @@ func parseShellCommands(command string) ([]shellCommand, error) {
 	heredocCalls := make(map[*syntax.CallExpr]bool)
 	var commands []shellCommand
 	var walkErr error
-	var scopeStack []bool
-	nonPersistentDepth := 0
+	var nodeStack []syntax.Node
+	var scopeFrames []bool
+	// Scope zero is the invoking shell. Subshell-like constructs append a
+	// unique child ID; separate pipeline operands must not share state.
+	scopePath := []int{0}
+	nextScopeID := 1
 	syntax.Walk(file, func(node syntax.Node) bool {
 		if node == nil {
-			last := len(scopeStack) - 1
+			last := len(scopeFrames) - 1
 			if last >= 0 {
-				if scopeStack[last] {
-					nonPersistentDepth--
+				if scopeFrames[last] {
+					scopePath = scopePath[:len(scopePath)-1]
 				}
-				scopeStack = scopeStack[:last]
+				scopeFrames = scopeFrames[:last]
+				nodeStack = nodeStack[:last]
 			}
 			return walkErr == nil
 		}
 		if walkErr != nil {
 			return false
 		}
-		nonPersistent := startsNonPersistentShellScope(node)
-		scopeStack = append(scopeStack, nonPersistent)
-		if nonPersistent {
-			nonPersistentDepth++
+		var parent syntax.Node
+		if len(nodeStack) > 0 {
+			parent = nodeStack[len(nodeStack)-1]
+		}
+		isolatedScope := startsIsolatedShellScope(node, parent)
+		nodeStack = append(nodeStack, node)
+		scopeFrames = append(scopeFrames, isolatedScope)
+		if isolatedScope {
+			scopePath = append(scopePath, nextScopeID)
+			nextScopeID++
 		}
 		switch node := node.(type) {
 		case *syntax.Stmt:
@@ -89,17 +100,17 @@ func parseShellCommands(command string) ([]shellCommand, error) {
 			}
 			if len(words) > 0 || len(node.Assigns) > 0 {
 				commands = append(commands, shellCommand{
-					words:             words,
-					assignments:       describeAssignments(node.Assigns),
-					hasHeredoc:        heredocCalls[node],
-					cwdChangePersists: nonPersistentDepth == 0,
+					words:       words,
+					assignments: describeAssignments(node.Assigns),
+					hasHeredoc:  heredocCalls[node],
+					scopePath:   append([]int(nil), scopePath...),
 				})
 			}
 		case *syntax.DeclClause:
 			commands = append(commands, shellCommand{declaration: &shellDeclaration{
 				variant:     node.Variant.Value,
 				assignments: describeAssignments(node.Args),
-			}})
+			}, scopePath: append([]int(nil), scopePath...)})
 		case *syntax.ArithmCmd, *syntax.ArithmExp, *syntax.CStyleLoop, *syntax.FuncDecl,
 			*syntax.LetClause:
 			walkErr = errUnsupportedShell
@@ -124,14 +135,16 @@ func parseShellCommands(command string) ([]shellCommand, error) {
 	return commands, nil
 }
 
-func startsNonPersistentShellScope(node syntax.Node) bool {
+func startsIsolatedShellScope(node, parent syntax.Node) bool {
 	switch node := node.(type) {
-	case *syntax.Subshell, *syntax.CmdSubst:
+	case *syntax.Subshell, *syntax.CmdSubst, *syntax.ProcSubst:
 		return true
-	case *syntax.BinaryCmd:
-		return node.Op == syntax.Pipe || node.Op == syntax.PipeAll
 	case *syntax.Stmt:
-		return node.Background || node.Coprocess || node.Disown
+		if node.Background || node.Coprocess || node.Disown {
+			return true
+		}
+		binary, ok := parent.(*syntax.BinaryCmd)
+		return ok && (binary.Op == syntax.Pipe || binary.Op == syntax.PipeAll)
 	default:
 		return false
 	}

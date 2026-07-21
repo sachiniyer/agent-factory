@@ -20,7 +20,7 @@ const (
 	broadTmuxReason    = "Agent Factory blocked a host-wide tmux kill-server. Target an isolated server explicitly with 'tmux -L <socket> kill-server' or 'tmux -S <path> kill-server'."
 	patternKillReason  = "Agent Factory blocked a pattern-based process kill because it cannot prove the shared tmux server will be spared. Resolve the one intended PID and use 'kill -- <pid>'; for tmux teardown, use 'tmux -L <socket> kill-server' or 'tmux -S <path> kill-server'."
 	sortReason         = "Agent Factory blocked GNU sort's external compressor because --compress-program runs another host program. Run sort without --compress-program, or compress and decompress in an isolated runner."
-	unknownShellReason = "Agent Factory's best-effort tmux guard did not recognize this command as an approved shape, so it was blocked. This hook reduces accidental host-wide teardown; it is not containment and cannot prove an arbitrary developer command safe. Rewrite it as supported literal simple commands: keep executables, wrapper options, subcommands, and command-bearing arguments literal; put dynamic data after '--' where the program supports it. Remove assignment prefixes from command-dispatching programs, run inner commands directly instead of through eval or opaque builders, and use a dedicated non-shell tool for an unmodeled program. Move inline interpreter input to a literal script that you have reviewed, put GNU sed '--sandbox' before every script or -e/-f option, invoke Make with bare literal targets, and omit Go executor selectors such as -exec, -toolexec, and -vettool. Git commands must use a literal built-in subcommand without -c/--config-env. Docker inspection may use commands such as 'docker ps' or 'docker inspect' with literal global-option operands; container workloads need an isolated runner. Run gh without --web/-w and consume its terminal output, and use a dedicated browser tool instead of a browser-launching CLI. Use af for session orchestration. For tmux teardown, use 'tmux -L <socket> kill-server' or 'tmux -S <path> kill-server' directly."
+	unknownShellReason = "Agent Factory's best-effort tmux guard did not recognize this command as an approved shape, so it was blocked. This hook reduces accidental host-wide teardown; it is not containment and cannot prove an arbitrary developer command safe. Rewrite it as supported literal simple commands: keep executables, wrapper options, subcommands, and command-bearing arguments literal; put dynamic data after '--' where the program supports it. Remove assignment prefixes from command-dispatching programs, run inner commands directly instead of through eval or opaque builders, and use a dedicated non-shell tool for an unmodeled program. Move inline interpreter input to a literal script that you have reviewed, put GNU sed '--sandbox' before every script or -e/-f option, invoke Make with bare literal targets, and omit Go executor selectors such as -exec, -toolexec, and -vettool. Git commands must use a literal built-in subcommand without -c/--config-env. Docker inspection may use commands such as 'docker ps' or 'docker inspect' with literal, non-SSH global-option operands; container workloads need an isolated runner. Run gh without --web/-w or --editor/-e and consume its terminal output; supply authentication through a preconfigured token instead of browser-based auth login/refresh, and use a dedicated browser tool instead of a browser-launching CLI. Use af for session orchestration. For tmux teardown, use 'tmux -L <socket> kill-server' or 'tmux -S <path> kill-server' directly."
 	opaqueInputReason  = "Agent Factory blocked an unmodeled here-document or stdin consumer because it cannot inspect the supplied code or data. For data, write it to a literal file and pass that literal path (Git commit messages may use 'git commit -F -'); for Python code, create and review a literal script file, then run Python with that literal path. Put shell code directly in this Bash request as literal simple commands instead of feeding a shell or script file. For tmux teardown, use 'tmux -L <socket> kill-server' or 'tmux -S <path> kill-server'."
 	findReason         = "Agent Factory blocked a find command whose operands could become command-building syntax. Rewrite a dynamic root as 'cd \"$root\" && find . <literal predicates>', and replace -exec/-execdir/-ok/-okdir with a separate literal command over the results. For tmux teardown, use 'tmux -L <socket> kill-server' or 'tmux -S <path> kill-server'."
 )
@@ -103,25 +103,43 @@ func denialReason(command string, depth int) string {
 	if err != nil {
 		return unknownShellReason
 	}
-	directoryChanged := false
+	states := make(map[int]shellExecutionState)
 	for _, parsed := range commands {
 		command := parsed
-		command.directoryChanged = command.directoryChanged || directoryChanged
+		// A child execution scope inherits state from each ancestor. Inspect
+		// before updating the local state so mutations flow only forward; child
+		// state is stored under its own ID and therefore cannot leak upward.
+		inherited := inheritedShellExecutionState(command.scopePath, states)
+		command.directoryChanged = command.directoryChanged || inherited.directoryChanged
+		command.environmentAssigned = command.environmentAssigned || inherited.environmentChanged
 		if reason := inspectCommand(command, depth); reason != "" {
 			return reason
 		}
-		directoryChanged = directoryChanged || changesShellDirectory(parsed)
-	}
-	if shellStateReachesCommand(commands) {
-		return unknownShellReason
+		scope := command.scopePath[len(command.scopePath)-1]
+		state := states[scope]
+		state.directoryChanged = state.directoryChanged || changesShellDirectory(parsed)
+		state.environmentChanged = state.environmentChanged || changesShellEnvironment(parsed)
+		states[scope] = state
 	}
 	return ""
 }
 
-func changesShellDirectory(command shellCommand) bool {
-	if !command.cwdChangePersists {
-		return false
+type shellExecutionState struct {
+	directoryChanged   bool
+	environmentChanged bool
+}
+
+func inheritedShellExecutionState(scopePath []int, states map[int]shellExecutionState) shellExecutionState {
+	var inherited shellExecutionState
+	for _, scope := range scopePath {
+		state := states[scope]
+		inherited.directoryChanged = inherited.directoryChanged || state.directoryChanged
+		inherited.environmentChanged = inherited.environmentChanged || state.environmentChanged
 	}
+	return inherited
+}
+
+func changesShellDirectory(command shellCommand) bool {
 	words := command.words
 	for len(words) > 0 && words[0].resolved && words[0].literal == "command" {
 		target, noCommand, err := commandTarget(words[1:])
@@ -133,21 +151,8 @@ func changesShellDirectory(command shellCommand) bool {
 	return len(words) > 0 && words[0].resolved && words[0].literal == "cd"
 }
 
-func shellStateReachesCommand(commands []shellCommand) bool {
-	hasEnvironmentState := false
-	hasExecutable := false
-	for _, command := range commands {
-		if (len(command.words) == 0 && len(command.assignments) > 0) || command.declaration != nil {
-			hasEnvironmentState = true
-		}
-		if len(command.words) > 0 {
-			hasExecutable = true
-		}
-	}
-	// A prior assignment may retain an inherited export attribute (PATH is
-	// the obvious example), so a semicolon cannot turn a denied prefix into an
-	// allow. State-only input remains harmless because it runs no program.
-	return hasEnvironmentState && hasExecutable
+func changesShellEnvironment(command shellCommand) bool {
+	return (len(command.words) == 0 && len(command.assignments) > 0) || command.declaration != nil
 }
 
 func inspectCommand(command shellCommand, depth int) string {
