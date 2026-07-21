@@ -19,6 +19,7 @@
 // session changes (a deliberate user act that rebuilds the terminal anyway).
 
 import type { EventStreamStatus } from "./events.js";
+import { icon } from "./icon.js";
 import type { KeyboardFocus, View } from "./nav.js";
 import { VIEWS } from "./nav.js";
 import { resolveDragTab, TAB_DND_MIME } from "./layout.js";
@@ -42,7 +43,7 @@ import {
   rowTitle,
 } from "./status.js";
 import { ConfigPane, type ConfigStatus } from "./config.js";
-import { isRenameableTab, tabDisplayLabel, tabGlyph, tabLabel } from "./tablabel.js";
+import { isRenameableTab, tabDisplayLabel, tabIcon, tabLabel } from "./tablabel.js";
 import { insertionIndexAt, reorderTargetIndex } from "./tabreorder.js";
 import { TasksPane } from "./tasks.js";
 import { type ThemeChoice, THEME_CHOICES } from "./theme.js";
@@ -768,10 +769,8 @@ export class AppShell {
     // dropdown listing every project with counts. `margin-left:auto` (the wrap) pushes
     // it — and everything after it — to the right of the segmented view nav.
     this.projectSwitchName = h("span", { class: "af-project-switch-name" }, "—");
-    const switchGlyph = h("span", { class: "af-project-glyph" }, "▣");
-    switchGlyph.setAttribute("aria-hidden", "true");
-    const switchCaret = h("span", { class: "af-project-caret" }, "▼");
-    switchCaret.setAttribute("aria-hidden", "true");
+    const switchGlyph = icon("folder-git", "af-project-glyph");
+    const switchCaret = icon("chevron-down", "af-project-caret");
     this.projectSwitchBtn = h(
       "button",
       { type: "button", class: "af-project-switch" },
@@ -804,7 +803,7 @@ export class AppShell {
     // session drawer over the terminal. CSS keeps it display:none on desktop and shows
     // it only in the sessions view on a phone (the tasks/config views have no rail), so
     // it never competes with the appbar controls on a comfortable width.
-    this.navToggle = h("button", { type: "button", class: "af-nav-toggle" }, "☰");
+    this.navToggle = h("button", { type: "button", class: "af-nav-toggle" }, icon("menu"));
     this.navToggle.setAttribute("aria-label", "Toggle sessions");
     this.navToggle.setAttribute("aria-controls", "af-rail");
     this.navToggle.setAttribute("aria-expanded", "false");
@@ -825,7 +824,7 @@ export class AppShell {
     );
     appbarTools.setAttribute("role", "group");
     appbarTools.setAttribute("aria-label", "App controls");
-    const appbarMore = h("button", { type: "button", class: "af-appbar-more" }, "⋯");
+    const appbarMore = h("button", { type: "button", class: "af-appbar-more" }, icon("ellipsis"));
     appbarMore.setAttribute("aria-label", "More app controls");
     appbarMore.setAttribute("title", "More app controls");
     appbarMore.setAttribute("aria-controls", "af-appbar-tools");
@@ -889,22 +888,20 @@ export class AppShell {
     );
 
     this.railCount = h("span", { class: "af-rail-count" }, "0");
-    const newBtn = h("button", { type: "button", class: "af-rail-new", title: "New session" }, "+ New");
+    const newBtn = h(
+      "button",
+      { type: "button", class: "af-rail-new", title: "New session" },
+      icon("plus"),
+      "New",
+    );
     newBtn.addEventListener("click", () => this.runRailExit(() => this.actions.newSession()));
 
     // The status filter (feat: hide archived by default). A small funnel mark rather
     // than a word, so the rail head still fits the count + New at 18rem; the dot beside
     // it lights only when the filter is NARROWED from the default, so the normal state
-    // (archived hidden) never nags. This is deliberately an inline SVG: Unicode has no
-    // consistently rendered funnel, while currentColor preserves every button state.
-    const filterGlyph = document.createElementNS("http://www.w3.org/2000/svg", "svg");
-    filterGlyph.classList.add("af-rail-filter-glyph");
-    filterGlyph.setAttribute("viewBox", "0 0 16 16");
-    filterGlyph.setAttribute("aria-hidden", "true");
-    filterGlyph.setAttribute("focusable", "false");
-    const filterGlyphPath = document.createElementNS("http://www.w3.org/2000/svg", "path");
-    filterGlyphPath.setAttribute("d", "M2 2h12L9.5 8v4.5L6.5 14V8L2 2Z");
-    filterGlyph.append(filterGlyphPath);
+    // (archived hidden) never nags. The shared icon helper keeps the funnel aligned
+    // with every other control and currentColor preserves every button state.
+    const filterGlyph = icon("funnel", "af-rail-filter-glyph");
     this.filterDot = h("span", { class: "af-rail-filter-dot" });
     this.filterDot.setAttribute("aria-hidden", "true");
     this.filterBtn = h("button", { type: "button", class: "af-rail-filter" }, filterGlyph, this.filterDot);
@@ -1276,10 +1273,14 @@ export class AppShell {
 
     if (isKillableSession(session)) {
       const killSession = session;
-      // Kill stays unmistakably destructive through its distinct ⌫ glyph and
+      // Kill stays unmistakably destructive through its distinct octagon-x icon and
       // confirm, but its resting rail treatment remains muted instead of af-danger.
       const killClass = surface === "rail" ? "af-rail-action af-rail-kill" : "af-ghost af-term-action af-term-kill";
-      const killBtn = h("button", { type: "button", class: killClass }, surface === "rail" ? "⌫" : "Kill");
+      const killBtn = h(
+        "button",
+        { type: "button", class: killClass },
+        ...(surface === "rail" ? [icon("octagon-x")] : ["Kill"]),
+      );
       const killLabel = `Kill session “${killSession.title}”`;
       killBtn.setAttribute("aria-label", killLabel);
       killBtn.setAttribute("title", killLabel);
@@ -1296,7 +1297,7 @@ export class AppShell {
     return buttons;
   }
 
-  /** Applies the daemon-projected verb, glyph, and target-qualified accessible name
+  /** Applies the daemon-projected verb, icon, and target-qualified accessible name
    *  in one place so render and same-selection live patching cannot drift. */
   private patchLifecycleButton(
     btn: HTMLElement,
@@ -1307,7 +1308,11 @@ export class AppShell {
     const verb = action === "restore" ? "Restore session" : "Archive session";
     const label = `${verb} “${sessionTitle}”`;
     btn.dataset.action = action;
-    btn.textContent = surface === "rail" ? (action === "restore" ? "↶" : "▪") : verb.replace(" session", "");
+    if (surface === "rail") {
+      btn.replaceChildren(icon(action === "restore" ? "archive-restore" : "archive"));
+    } else {
+      btn.textContent = verb.replace(" session", "");
+    }
     btn.setAttribute("aria-label", label);
     btn.setAttribute("title", label);
   }
@@ -1329,7 +1334,12 @@ export class AppShell {
     const name = projectName(state.selectedProject ?? "");
     const hasActive = scoped.some((s) => !isArchived(s));
     if (!hasActive) {
-      const newBtn = h("button", { type: "button", class: "af-rail-empty-new", title: "New session" }, "+ New");
+      const newBtn = h(
+        "button",
+        { type: "button", class: "af-rail-empty-new", title: "New session" },
+        icon("plus"),
+        "New",
+      );
       newBtn.addEventListener("click", () => this.runRailExit(() => this.actions.newSession()));
       const empty = h("li", { class: "af-rail-empty-project" }, `No active sessions in ${name} — `, newBtn);
       const archived = scoped.filter(isArchived).length;
@@ -1381,7 +1391,7 @@ export class AppShell {
    *  (the row's own word — status.ts ROW_KIND_LABELS), and how many sessions in this
    *  project are in it. Clicking toggles just that state and leaves the menu open. */
   private filterItem(kind: RowKind, on: boolean, count: number): HTMLElement {
-    const check = h("span", { class: "af-filter-check" }, on ? "✓" : "");
+    const check = h("span", { class: "af-filter-check" }, ...(on ? [icon("check")] : []));
     check.setAttribute("aria-hidden", "true");
     const item = h(
       "button",
@@ -1453,7 +1463,7 @@ export class AppShell {
    *  switches the active project and closes the menu. */
   private projectItem(p: ProjectSummary, current: boolean): HTMLElement {
     const cls = `af-project-item${current ? " af-project-item-current" : ""}`;
-    const check = h("span", { class: "af-project-check" }, current ? "✓" : "");
+    const check = h("span", { class: "af-project-check" }, ...(current ? [icon("check")] : []));
     check.setAttribute("aria-hidden", "true");
     const label = h(
       "span",
@@ -1473,10 +1483,10 @@ export class AppShell {
     return item;
   }
 
-  /** The visible `+ New tab` button and its kind menu.
+  /** The visible New tab button and its kind menu.
    *
-   *  The old split control created a terminal from `+` and hid VS Code behind a
-   *  separate, unlabeled `▾`. Even the project's maintainer could not find that
+   *  The old split control created a terminal from a plus and hid VS Code behind a
+   *  separate, unlabeled caret. Even the project's maintainer could not find that
    *  path (#2077), so the labelled button now makes the choice explicit where the
    *  editor will appear. The `t` shortcut remains the direct shell fast path.
    *
@@ -1488,9 +1498,9 @@ export class AppShell {
     const trigger = h(
       "button",
       { type: "button", class: "af-tab-new", title: "Create a terminal or VS Code tab" },
-      h("span", { class: "af-tab-new-plus" }, "+"),
+      icon("plus", "af-tab-new-plus"),
       h("span", {}, "New tab"),
-      h("span", { class: "af-tab-new-caret" }, "▾"),
+      icon("chevron-down", "af-tab-new-caret"),
     );
     trigger.setAttribute("aria-haspopup", "menu");
     trigger.setAttribute("aria-expanded", "false");
@@ -2204,15 +2214,14 @@ function tabButton(
   btn.setAttribute("aria-selected", active ? "true" : "false");
   // The index the delegated dragstart reads to build the drag payload.
   btn.dataset.tabIndex = String(index);
-  // The kind glyph (#1813), a DECORATIVE sibling of the label rather than part of
-  // its text: the pane headers render the very same glyph+label pair from the very
+  // The kind icon (#1813), a DECORATIVE sibling of the label rather than part of
+  // its text: the pane headers render the very same icon+label pair from the very
   // same two functions, so the two surfaces agree by construction — but keeping the
-  // glyph out of .af-tab-label leaves that node's text the bare label, which is what
+  // icon out of .af-tab-label leaves that node's text the bare label, which is what
   // both the bar's own aria-selected semantics and every existing label assertion
-  // read. tabDisplayLabel() is the same pair as one string, used for the title.
-  const glyph = h("span", { class: "af-tab-glyph" }, tabGlyph(tab.kind));
-  glyph.setAttribute("aria-hidden", "true");
-  btn.append(glyph, h("span", { class: "af-tab-label" }, tabLabel(tab)));
+  // read. tabDisplayLabel() supplies the plain-text title without leaking an icon
+  // name into the accessible surface.
+  btn.append(icon(tabIcon(tab.kind), "af-tab-glyph"), h("span", { class: "af-tab-label" }, tabLabel(tab)));
   btn.addEventListener("click", () => actions.openTab(index));
   // Rename-in-place (#1813), offered ONLY where a name is actually rendered: an
   // agent/shell tab draws a fixed label and ignores its name, so an edit there could
@@ -2234,7 +2243,7 @@ function tabButton(
   }
   // The agent tab (index 0) is unclosable — killing the session tears it down.
   if (index > 0 && canManage) {
-    const close = h("span", { class: "af-tab-close", title: "Close tab" }, "×");
+    const close = h("span", { class: "af-tab-close", title: "Close tab" }, icon("x"));
     close.setAttribute("aria-hidden", "true");
     close.addEventListener("click", (e) => {
       e.stopPropagation();
@@ -2367,8 +2376,7 @@ function sessionRow(
   const branch = h(
     "div",
     { class: "af-row-branch" },
-    h("span", { class: "af-branch-icon" }, "⎇"),
-    " ",
+    icon("git-branch", "af-branch-icon"),
     s.branch || "—",
   );
   const main = h("div", { class: "af-row-main" }, title, branch);
@@ -2380,8 +2388,8 @@ function sessionRow(
   // A working/busy row shows NO status dot (#1766) — only Ready/error states draw
   // one. When there is no dot the span is omitted entirely (kind is null), matching
   // the TUI's blank status cell.
-  if (status.kind) {
-    const dot = h("span", { class: `af-dot af-dot-${status.kind}` }, status.glyph);
+  if (status.kind && status.icon) {
+    const dot = h("span", { class: `af-dot af-dot-${status.kind}` }, icon(status.icon));
     dot.setAttribute("aria-hidden", "true");
     row.append(dot);
   }

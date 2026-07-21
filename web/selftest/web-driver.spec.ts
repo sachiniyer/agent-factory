@@ -989,16 +989,16 @@ test("status dots (#1766): waiting shows a green dot, working shows none, error 
   // would pass for the wrong reason.
   await expect(row(p, "probe-working")).toBeVisible({ timeout: 15_000 });
   await expect(row(p, "probe-working").locator(".af-dot")).toHaveCount(0);
-  // Waiting row: the static green ● dot, in the ready color bucket, never spinning.
+  // Waiting row: the static filled circle, in the ready color bucket, never spinning.
   const readyDot = row(p, "probe-waiting").locator(".af-dot");
   await expect(readyDot).toHaveClass(/af-dot-ready/);
-  await expect(readyDot).toHaveText("●");
+  await expect(readyDot.locator('.af-icon[data-icon="circle"]')).toHaveCount(1);
   await expect(readyDot).not.toHaveClass(/af-dot-spin/);
-  // Error/terminal states keep their STATIC glyphs (◌/○/◆), copied from the TUI.
-  await expect(row(p, "probe-lost").locator(".af-dot")).toHaveText("◌");
+  // Error/terminal states keep distinct STATIC shapes.
+  await expect(row(p, "probe-lost").locator('.af-icon[data-icon="circle-dashed"]')).toHaveCount(1);
   await expect(row(p, "probe-lost").locator(".af-dot")).toHaveClass(/af-dot-lost/);
-  await expect(row(p, "probe-dead").locator(".af-dot")).toHaveText("○");
-  await expect(row(p, "probe-limit").locator(".af-dot")).toHaveText("◆");
+  await expect(row(p, "probe-dead").locator('.af-icon[data-icon="circle"]')).toHaveCount(1);
+  await expect(row(p, "probe-limit").locator('.af-icon[data-icon="diamond"]')).toHaveCount(1);
   // The animation class is gone from every status row, and the removed "working" dot
   // kind never renders anywhere.
   await expect(p.locator(".af-dot-spin")).toHaveCount(0);
@@ -1163,8 +1163,8 @@ test("click-to-attach opens the xterm terminal and shows live output", REAL_FIXT
   await expect(row(page, SESSION_B).locator(".af-row-actions")).toHaveCSS("opacity", "0");
   await row(page, SESSION_A).hover();
   await expect(row(page, SESSION_A).locator(".af-row-actions")).toHaveCSS("opacity", "1");
-  await expect(railAction(page, SESSION_A, "Archive session")).toHaveText("▪");
-  await expect(railAction(page, SESSION_A, "Kill session")).toHaveText("⌫");
+  await expect(railAction(page, SESSION_A, "Archive session").locator('.af-icon[data-icon="archive"]')).toHaveCount(1);
+  await expect(railAction(page, SESSION_A, "Kill session").locator('.af-icon[data-icon="octagon-x"]')).toHaveCount(1);
   await expect(railAction(page, SESSION_A, "Kill session")).not.toHaveClass(/af-danger/);
   await expect(page.locator(".af-term-head button", { hasText: "Prompt" })).toHaveCount(0);
   await expect(page.locator(".af-term-head button", { hasText: "Archive" })).toHaveCount(0);
@@ -2980,20 +2980,22 @@ test("archive: an unselected row's hover action retires that session, not the se
   await expect(row(page, SESSION_B)).toHaveCount(0, { timeout: 30_000 });
 
   // B is NOT killed, though — revealing the archive brings the very same row back,
-  // muted, carrying the static ▧ archived dot (no spinner): the error/terminal states
-  // keep their static glyphs (#1766).
+  // muted, carrying the static archive shape (no spinner): the error/terminal states
+  // keep distinct static icons (#1766).
   await setFilter(page, "archived", true);
   await expect(row(page, SESSION_B)).toHaveClass(/af-row-archived/, { timeout: 30_000 });
   const archivedDot = row(page, SESSION_B).locator(".af-dot");
   await expect(archivedDot).toHaveClass(/af-dot-archived/);
-  await expect(archivedDot).toHaveText("▧");
+  await expect(archivedDot.locator('.af-icon[data-icon="archive"]')).toHaveCount(1);
   await expect(archivedDot).not.toHaveClass(/af-dot-spin/);
   // An archived unselected row reserves the same quiet slot, reveals it on hover,
   // and reverses the lifecycle action to Restore rather than Archive.
   await page.mouse.move(0, 0);
   await expect(row(page, SESSION_B).locator(".af-row-actions")).toHaveCSS("opacity", "0");
   await expect(railAction(page, SESSION_B, "Archive session")).toHaveCount(0);
-  await expect(railAction(page, SESSION_B, "Restore session")).toHaveText("↶");
+  await expect(
+    railAction(page, SESSION_B, "Restore session").locator('.af-icon[data-icon="archive-restore"]'),
+  ).toHaveCount(1);
   await row(page, SESSION_B).hover();
   await expect(row(page, SESSION_B).locator(".af-row-actions")).toHaveCSS("opacity", "1");
 
@@ -3022,7 +3024,9 @@ test("restore (#1932): the selected rail row's Restore action brings an archived
   // An archived session's lifecycle slot IS Restore, not Archive — one selected-row
   // slot whose accessible verb and static glyph both reverse.
   await expect(railAction(page, SESSION_B, "Archive session")).toHaveCount(0);
-  await expect(railAction(page, SESSION_B, "Restore session")).toHaveText("↶");
+  await expect(
+    railAction(page, SESSION_B, "Restore session").locator('.af-icon[data-icon="archive-restore"]'),
+  ).toHaveCount(1);
   await railAction(page, SESSION_B, "Restore session").click();
 
   // Restore is a confirm (mirroring kill/archive), so it inherits their busy/error
@@ -3038,7 +3042,7 @@ test("restore (#1932): the selected rail row's Restore action brings an archived
   // ...and its rail row — STILL selected, never reselected — flips its verb back to
   // Archive in place: the patchMainHead path remains load-bearing after the move.
   await expect(railAction(page, SESSION_B, "Restore session")).toHaveCount(0, { timeout: 30_000 });
-  await expect(railAction(page, SESSION_B, "Archive session")).toHaveText("▪");
+  await expect(railAction(page, SESSION_B, "Archive session").locator('.af-icon[data-icon="archive"]')).toHaveCount(1);
 
   // Re-archive from that same live-flipped button (NO reselect): restores the fixture
   // the downstream filter tests need (B archived) and re-proves both the archive leg
@@ -3049,7 +3053,9 @@ test("restore (#1932): the selected rail row's Restore action brings an archived
   await archiveModal.locator("button.af-primary").click();
   await expect(row(page, SESSION_B)).toHaveClass(/af-row-archived/, { timeout: 30_000 });
   await expect(railAction(page, SESSION_B, "Archive session")).toHaveCount(0);
-  await expect(railAction(page, SESSION_B, "Restore session")).toHaveText("↶");
+  await expect(
+    railAction(page, SESSION_B, "Restore session").locator('.af-icon[data-icon="archive-restore"]'),
+  ).toHaveCount(1);
 
   // Back to the default filter (archived hidden): B drops from the rail, exactly as
   // the archive test left it.
@@ -4771,6 +4777,104 @@ test("#2224: title and tabs share one scrolling header row at every width", REAL
   }
 });
 
+test("icons: the Lucide subset is inline, accessible, and currentColor-themed at desktop and 375px", REAL_FIXTURE, async ({
+  browser,
+}, testInfo) => {
+  const accentByTheme = new Map<string, string>();
+  for (const width of [1280, 375]) {
+    for (const theme of ["light", "dark"] as const) {
+      await test.step(`${width}px · ${theme}`, async () => {
+        const ctx = await browser.newContext({ viewport: { width, height: 720 } });
+        try {
+          await ctx.addInitScript((savedTheme) => localStorage.setItem("af-theme", savedTheme), theme);
+          const p = await ctx.newPage();
+          await openTokenless(p);
+          if (width === 375) {
+            await p.getByRole("button", { name: "Toggle sessions" }).click();
+            await expect(p.locator(".af-rail")).toBeVisible();
+          }
+
+          const projectIcon = p.locator(".af-project-glyph");
+          const filterIcon = p.locator(".af-rail-filter-glyph");
+          await expect(projectIcon).toBeVisible();
+          await expect(filterIcon).toBeVisible();
+          const projectPaint = await projectIcon.evaluate((node) => {
+            const style = getComputedStyle(node);
+            const box = node.getBoundingClientRect();
+            return { color: style.color, stroke: style.stroke, width: box.width, height: box.height };
+          });
+          expect(projectPaint.stroke, "stroke=currentColor must resolve to the icon's theme color").toBe(
+            projectPaint.color,
+          );
+          expect(projectPaint.width).toBeGreaterThanOrEqual(12);
+          expect(projectPaint.width).toBeLessThanOrEqual(16);
+          expect(projectPaint.height).toBe(projectPaint.width);
+          accentByTheme.set(theme, projectPaint.color);
+
+          const audit = await p.locator(".af-icon").evaluateAll((nodes) => {
+            const visible = nodes.filter((node) => {
+              const style = getComputedStyle(node);
+              const box = node.getBoundingClientRect();
+              return style.display !== "none" && style.visibility !== "hidden" && box.width > 0 && box.height > 0;
+            });
+            const unnamedIconControls = Array.from(document.querySelectorAll<HTMLElement>("button:has(.af-icon), a:has(.af-icon)"))
+              .filter((control) => {
+                const style = getComputedStyle(control);
+                const box = control.getBoundingClientRect();
+                return (
+                  style.display !== "none" &&
+                  style.visibility !== "hidden" &&
+                  box.width > 0 &&
+                  box.height > 0 &&
+                  (control.innerText ?? "").trim() === ""
+                );
+              })
+              .filter((control) => (control.getAttribute("aria-label") ?? "").trim() === "")
+              .map((control) => control.className);
+            const fontFaces = Array.from(document.styleSheets).flatMap((sheet) => {
+              try {
+                return Array.from(sheet.cssRules).filter((rule) => rule instanceof CSSFontFaceRule);
+              } catch {
+                return [];
+              }
+            }).length;
+            return {
+              count: visible.length,
+              allHiddenFromAT: visible.every(
+                (node) => node.getAttribute("aria-hidden") === "true" && node.getAttribute("focusable") === "false",
+              ),
+              allCurrentColor: visible.every((node) => getComputedStyle(node).stroke === getComputedStyle(node).color),
+              unnamedIconControls,
+              fontFaces,
+              fontRequests: performance
+                .getEntriesByType("resource")
+                .map((entry) => entry.name)
+                .filter((name) => /\.(?:woff2?|ttf|otf)(?:[?#]|$)/i.test(name)),
+            };
+          });
+          expect(audit.count, "the live shell must exercise several real icon placements").toBeGreaterThan(5);
+          expect(audit.allHiddenFromAT, "decorative SVGs stay out of the accessibility tree").toBe(true);
+          expect(audit.allCurrentColor, "every visible icon inherits the active theme color").toBe(true);
+          expect(audit.unnamedIconControls, "icon-only controls need an explicit accessible name").toEqual([]);
+          expect(audit.fontFaces, "the SVG subset must not smuggle in an icon font").toBe(0);
+          expect(audit.fontRequests, "the icon surface must make no font/network request").toEqual([]);
+          expect(await horizontalOverflow(p), "icons must not widen the desktop or phone layout").toBeLessThanOrEqual(1);
+
+          await testInfo.attach(`icons-${width}-${theme}`, {
+            body: await p.screenshot(),
+            contentType: "image/png",
+          });
+        } finally {
+          await ctx.close();
+        }
+      });
+    }
+  }
+  expect(accentByTheme.get("light"), "light and dark tokens must paint distinct icon colors").not.toBe(
+    accentByTheme.get("dark"),
+  );
+});
+
 test("vscode tab (#2077): the labelled New tab menu creates a VS Code tab and serves it through the proxy", REAL_FIXTURE, async () => {
   // End to end, with no seeded fixture: pick VS Code from the tab bar's kind menu,
   // and the daemon spawns a code-server (the FAKE one on PATH — no CI box has a
@@ -4953,7 +5057,7 @@ async function dragTabWithinBar(
   );
 }
 
-test("#1813: a pane header names its TAB — glyph + name — not a positional 'Tab N'", REAL_FIXTURE, async () => {
+test("#1813: a pane header names its tab — icon + name — not a positional 'Tab N'", REAL_FIXTURE, async () => {
   // The bug: every pane header read `Tab ${leaf.tab + 1}`, so at the exact moment the
   // label matters — several panes open, which is the whole point of splits — it told
   // you nothing, and it silently meant a different tab after a close.
@@ -4967,8 +5071,12 @@ test("#1813: a pane header names its TAB — glyph + name — not a positional '
 
   // Each header names its own tab, in pane order.
   await expect(page.locator(".af-term-host .af-pane-label")).toHaveText(["Agent", "alpha"]);
-  // ...with the kind glyph beside it, the same mark the tab bar draws (ui/tree/labels.go).
-  await expect(page.locator(".af-term-host .af-pane-glyph")).toHaveText(["◆", "◱"]);
+  // ...with the kind icon beside it, the same mark the tab bar draws.
+  expect(
+    await page.locator(".af-term-host .af-pane-glyph .af-icon").evaluateAll((nodes) =>
+      nodes.map((node) => node.getAttribute("data-icon")),
+    ),
+  ).toEqual(["bot", "panels"]);
   // The positional label is GONE — the assertion that would have failed before #1813.
   // Scoped to the pane host, which holds the panes and nothing else (the tab bar is
   // its sibling), and asserted on that single container rather than on the two
@@ -4976,10 +5084,10 @@ test("#1813: a pane header names its TAB — glyph + name — not a positional '
   await expect(page.locator(".af-term-host")).not.toContainText("Tab 1");
   await expect(page.locator(".af-term-host")).not.toContainText("Tab 2");
 
-  // The tab bar carries the same glyphs, so the two surfaces agree.
-  await expect(tabByLabel(page, "alpha").locator(".af-tab-glyph")).toHaveText("◱");
-  await expect(tabByLabel(page, "Agent").locator(".af-tab-glyph")).toHaveText("◆");
-  await expect(tabByLabel(page, "beta").locator(".af-tab-glyph")).toHaveText("›");
+  // The tab bar carries the same icons, so the two surfaces agree.
+  await expect(tabByLabel(page, "alpha").locator('.af-tab-glyph[data-icon="panels"]')).toHaveCount(1);
+  await expect(tabByLabel(page, "Agent").locator('.af-tab-glyph[data-icon="bot"]')).toHaveCount(1);
+  await expect(tabByLabel(page, "beta").locator('.af-tab-glyph[data-icon="terminal"]')).toHaveCount(1);
 });
 
 test("#1813: dragging a tab within the bar reorders it, and the order survives a reload", REAL_FIXTURE, async () => {

@@ -49,6 +49,7 @@ import {
   validate,
 } from "./layout.js";
 import { probeWebTab } from "./api.js";
+import { icon } from "./icon.js";
 // isLoopbackWebUrl is deliberately NOT imported any more: #1817 folded that test into
 // iframeIsProxied, which also answers it for a vscode tab (always proxied, and with no
 // target to classify). Calling it directly here would re-fork the question.
@@ -61,7 +62,7 @@ import {
   paneAddressUsesOrdinal,
   webProxyPath,
 } from "./tabaddr.js";
-import { tabGlyph, tabLabel } from "./tablabel.js";
+import { tabIcon, tabLabel } from "./tablabel.js";
 import { AttachTerminal, type TerminalStatus } from "./terminal.js";
 import { currentXtermTheme } from "./theme.js";
 import { TabKind } from "./types.js";
@@ -89,7 +90,7 @@ interface Pane {
   container: HTMLElement;
   host: HTMLElement;
   label: HTMLElement;
-  /** The decorative kind glyph beside the label (#1813) — the same pair the tab bar
+  /** The decorative kind icon beside the label (#1813) — the same pair the tab bar
    *  draws, from the same two functions (tablabel.ts). */
   glyph: HTMLElement;
   overlay: HTMLElement;
@@ -710,7 +711,7 @@ export class SplitView {
       // changes this string and nothing else, so a label written once at build time
       // would keep showing the old name for the life of the pane.
       const named = { name: this.tabNames[leaf.tab] ?? "", kind: this.tabKinds[leaf.tab] ?? TabKind.Agent };
-      pane.glyph.textContent = tabGlyph(named.kind);
+      pane.glyph.replaceChildren(icon(tabIcon(named.kind)));
       pane.label.textContent = tabLabel(named);
     }
 
@@ -721,7 +722,7 @@ export class SplitView {
     const container = el("div", "af-pane");
     container.setAttribute("data-leaf", leaf.id);
     const head = el("div", "af-pane-head");
-    // The kind glyph is a decorative sibling of the label, exactly as in the tab bar
+    // The kind icon is a decorative sibling of the label, exactly as in the tab bar
     // (#1813): same two functions, same pair, so the two surfaces cannot drift.
     const glyph = el("span", "af-pane-glyph");
     glyph.setAttribute("aria-hidden", "true");
@@ -731,7 +732,7 @@ export class SplitView {
     closeBtn.className = "af-pane-close";
     closeBtn.title = "Close pane";
     closeBtn.setAttribute("aria-label", "Close pane");
-    closeBtn.textContent = "×";
+    closeBtn.append(icon("x"));
     closeBtn.addEventListener("click", (e) => {
       e.stopPropagation();
       this.closePane(leaf.id);
@@ -840,7 +841,7 @@ export class SplitView {
     reload.className = "af-ghost af-webpane-reload";
     reload.title = "Reload";
     reload.setAttribute("aria-label", isVSCode ? "Reload VS Code" : "Reload web tab");
-    reload.textContent = "↻"; // ↻
+    reload.append(icon("reload"));
     const urlText = el("span", "af-webpane-url");
     // A vscode tab has no URL worth showing (an ephemeral loopback port the user
     // can neither predict nor use); name what the pane IS instead.
@@ -851,7 +852,7 @@ export class SplitView {
     open.href = openHref;
     open.target = "_blank";
     open.rel = "noopener noreferrer";
-    open.textContent = "Open ↗"; // ↗
+    open.append("Open", icon("external-link"));
     bar.append(reload, urlText, open);
 
     const frame = document.createElement("iframe");
@@ -897,7 +898,7 @@ export class SplitView {
     fbLink.href = openHref;
     fbLink.target = "_blank";
     fbLink.rel = "noopener noreferrer";
-    fbLink.textContent = "Open in a new tab ↗";
+    fbLink.append("Open in a new tab", icon("external-link"));
     // The retry affordance, shown ONLY in the dead-server state (#1813) — the other
     // fallbacks (archived, no-URL, blocked embedding) have nothing to retry: they
     // resolve by restoring a session, fixing a record, or leaving the frame.
@@ -1048,7 +1049,7 @@ export class SplitView {
       fallback.classList.add("af-webpane-external");
       fbMsg.textContent = "This site may block embedding.";
       fbLink.hidden = false;
-      fbLink.textContent = "Open it in a new tab ↗"; // ↗
+      fbLink.replaceChildren("Open it in a new tab", icon("external-link"));
       fbRetry.hidden = true;
       // ↻ is withdrawn here for the same reason fbRetry is, and it is the same
       // judgement: this state is not a failure to recover from but the DESIGNED

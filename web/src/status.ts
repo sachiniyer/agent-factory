@@ -6,12 +6,13 @@
 // in pixels (design §3). Adding a Liveness value forces a deliberate choice here,
 // mirroring the TUI's TOTAL liveness switch (render.go:274-301).
 //
-// Glyph shapes are copied from render.go so the state survives low contrast and
-// color-blindness the same way the TUI intends (its #935 discipline): a filled ●
-// for Ready, hollow ○/◌ for Dead/Lost, ▧ for Archived, ◆ for LimitReached. Colors
-// (the `kind`) map to the exact hexes render.go paints (see styles.css .af-dot-*).
+// SVG shapes preserve the TUI's low-contrast/color-blindness discipline: filled and
+// hollow circles for Ready/Dead, a dashed circle for Lost, an archive for Archived,
+// and a filled diamond for LimitReached. Colors (the `kind`) map to the exact hexes
+// render.go paints (see styles.css .af-dot-*).
 
 import { InFlightOp, Liveness, Status, type SessionData } from "./types.js";
+import type { IconName } from "./icon.js";
 
 /** The visual kind of a status dot, one per color bucket the TUI paints. Drives
  *  the .af-dot-<kind> CSS class whose color matches render.go's lipgloss styles.
@@ -40,27 +41,25 @@ export const ROW_KIND_LABELS: Record<RowKind, string> = {
  *  human label (used for the row's aria/title so the state is legible to a
  *  screen reader, not only by color — the same intent as the TUI's text prefixes). */
 export interface RowStatus {
-  /** The glyph to draw, or "" for a working/busy row which shows no dot (#1766). */
-  glyph: string;
+  /** The icon to draw, or null for a working/busy row which shows no dot (#1766). */
+  icon: IconName | null;
   /** The dot's color bucket, or null for a working row (the dot is omitted). */
   kind: DotKind | null;
   /** Accessible one-word state label, e.g. "Ready", "Working", "Lost". */
   label: string;
 }
 
-// Glyphs copied verbatim from ui/tree/render.go (readyIcon/deadIcon/lostIcon/
-// archivedIcon/limitIcon), minus the trailing pad space the terminal adds.
-const READY_GLYPH = "●";
-const DEAD_GLYPH = "○";
-const LOST_GLYPH = "◌";
-const ARCHIVED_GLYPH = "▧";
-const LIMIT_GLYPH = "◆";
+const READY_ICON: IconName = "circle";
+const DEAD_ICON: IconName = "circle";
+const LOST_ICON: IconName = "circle-dashed";
+const ARCHIVED_ICON: IconName = "archive";
+const LIMIT_ICON: IconName = "diamond";
 
 // A working/busy row shows NO status dot (#1766): the TUI renders a blank status
 // cell for LiveRunning / any in-flight op, and the web omits the dot entirely.
-// Kept as a resolved status (empty glyph, null kind) so rowStatus stays total and
+// Kept as a resolved status (null icon and kind) so rowStatus stays total and
 // callers can still detect the working state (isWorking, the project glance count).
-const WORKING: RowStatus = { glyph: "", kind: null, label: ROW_KIND_LABELS.working };
+const WORKING: RowStatus = { icon: null, kind: null, label: ROW_KIND_LABELS.working };
 
 /**
  * Resolves a session's status dot from its two axes, mirroring render.go exactly:
@@ -134,15 +133,15 @@ function livenessOf(s: SessionData): number {
 function dotForLiveness(lv: number): RowStatus {
   switch (lv) {
     case Liveness.Ready:
-      return { glyph: READY_GLYPH, kind: "ready", label: ROW_KIND_LABELS.ready };
+      return { icon: READY_ICON, kind: "ready", label: ROW_KIND_LABELS.ready };
     case Liveness.Lost:
-      return { glyph: LOST_GLYPH, kind: "lost", label: ROW_KIND_LABELS.lost };
+      return { icon: LOST_ICON, kind: "lost", label: ROW_KIND_LABELS.lost };
     case Liveness.Dead:
-      return { glyph: DEAD_GLYPH, kind: "dead", label: ROW_KIND_LABELS.dead };
+      return { icon: DEAD_ICON, kind: "dead", label: ROW_KIND_LABELS.dead };
     case Liveness.Archived:
-      return { glyph: ARCHIVED_GLYPH, kind: "archived", label: ROW_KIND_LABELS.archived };
+      return { icon: ARCHIVED_ICON, kind: "archived", label: ROW_KIND_LABELS.archived };
     case Liveness.LimitReached:
-      return { glyph: LIMIT_GLYPH, kind: "limit", label: ROW_KIND_LABELS.limit };
+      return { icon: LIMIT_ICON, kind: "limit", label: ROW_KIND_LABELS.limit };
     // LiveRunning and LivenessUnset both render as working (render.go:285, 297).
     case Liveness.Running:
     case Liveness.Unset:
@@ -151,13 +150,13 @@ function dotForLiveness(lv: number): RowStatus {
   }
 }
 
-/** True when the row is an archived session (dimmed, no text prefix — the ▧ glyph
- *  and dimming already convey it), mirroring render.go:335. */
+/** True when the row is an archived session (dimmed, no text prefix — the archive
+ *  icon and dimming already convey it), mirroring render.go:335. */
 export function isArchived(s: SessionData): boolean {
   return livenessOf(s) === Liveness.Archived;
 }
 
-/** True when the session is parked at a usage-limit wall — the state the ◆ glyph
+/** True when the session is parked at a usage-limit wall — the state the diamond
  *  and the "[limit] resets …" title prefix already render.
  *
  *  It gates the Retry action (#1934), mirroring the TUI, which advertises `c` only

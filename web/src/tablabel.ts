@@ -15,6 +15,7 @@
 // isRenameableTab): a rename would change a name no surface renders.
 
 import { TabKind } from "./types.js";
+import type { IconName } from "./icon.js";
 
 /** The fields any tab-shaped record must carry to be named. Structural, so both a
  *  wire TabData and split.ts's parallel kind/name arrays satisfy it. */
@@ -24,24 +25,22 @@ export interface NamedTab {
 }
 
 /**
- * The per-kind glyph a tab is prefixed with, mirroring the TUI's tab glyphs
- * (ui/tree/labels.go). Copied verbatim from that file — the Go side owns this map;
- * this is a mirror, not a second source of truth, exactly as status.ts mirrors
- * ui/tree/render.go's status glyphs.
+ * The per-kind icon a tab is prefixed with. It preserves the TUI's semantic groups
+ * (agent, terminal/process, browser surface) while using the web's Lucide subset.
  *
- * An unknown kind takes the process glyph, matching labelForTab's own default
+ * An unknown kind takes the process icon, matching labelForTab's own default
  * branch (which names an unknown kind like a process).
  */
-export function tabGlyph(kind: number): string {
+export function tabIcon(kind: number): IconName {
   switch (kind) {
     case TabKind.Agent:
-      return "◆";
+      return "bot";
     case TabKind.Shell:
-      return "›";
+      return "terminal";
     case TabKind.Process:
-      return "›";
-    // VS Code (#1817) shares the WEB glyph deliberately, on the same rule that has
-    // shell and process share `›`: the glyph names what a tab IS, and a VS Code tab
+      return "terminal";
+    // VS Code (#1817) shares the web icon deliberately, on the same rule that has
+    // shell and process share the terminal icon: the icon names what a tab IS, and a VS Code tab
     // is an embedded browser surface with no PTY — a web pane whose page happens to
     // be an editor. What separates them is the text beside the glyph ("VS Code" vs
     // the target's name), exactly as the command name separates a process tab from a
@@ -49,9 +48,9 @@ export function tabGlyph(kind: number): string {
     // which is the one thing it is not.
     case TabKind.Web:
     case TabKind.VSCode:
-      return "◱";
+      return "panels";
     default:
-      return "›";
+      return "terminal";
   }
 }
 
@@ -78,12 +77,11 @@ export function tabLabel(tab: NamedTab): string {
   }
 }
 
-/** The glyph and the label as one string — the tab's full display name, for a
- *  surface that renders it as a single run of text (a title/aria-label). Surfaces
- *  that render the glyph as its own decorative (aria-hidden) node compose
- *  tabGlyph + tabLabel themselves; this is the same string either way. */
+/** The tab's plain-text display name for titles and accessible names. The icon is
+ *  deliberately absent: every visual instance is a decorative aria-hidden SVG, so
+ *  assistive technology hears the meaningful label rather than an icon name. */
 export function tabDisplayLabel(tab: NamedTab): string {
-  return `${tabGlyph(tab.kind)} ${tabLabel(tab)}`;
+  return tabLabel(tab);
 }
 
 /**
