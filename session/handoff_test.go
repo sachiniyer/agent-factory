@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/sachiniyer/agent-factory/session/git"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
@@ -224,6 +225,28 @@ func TestMissionBrief_OverrideWinsOverStoredPrompt(t *testing.T) {
 	}
 	if strings.Contains(rendered, "the stale create-time prompt") {
 		t.Fatalf("brief carries BOTH the override and the stored prompt; two goals in one brief is the blended-context hazard #2013 names.\n%s", rendered)
+	}
+}
+
+// A base-to-HEAD diff contains only committed work. When the outgoing agent has
+// dirty files, the incoming agent must be pointed at both status (including
+// untracked files) and a working-tree diff or the most recent work is invisible.
+func TestMissionBrief_DirtyWorkIncludesWorkingTreeCommands(t *testing.T) {
+	brief := MissionBrief{
+		From: tmux.ProgramClaude,
+		To:   tmux.ProgramCodex,
+		Work: git.WorkSummary{
+			Branch:     "agent/in-progress",
+			BaseSHA:    "abc123",
+			Commits:    2,
+			DirtyFiles: 3,
+		},
+	}
+	rendered := brief.Render()
+	for _, command := range []string{"git diff abc123...HEAD", "git status --short", "git diff HEAD"} {
+		if !strings.Contains(rendered, command) {
+			t.Fatalf("dirty handoff brief omits %q; the incoming agent would see only committed work:\n%s", command, rendered)
+		}
 	}
 }
 

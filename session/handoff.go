@@ -209,6 +209,29 @@ func (i *Instance) SwapAgentProgram(target, reason, headSHA string, automatic bo
 	if err := i.lifecycleViewLocked().ValidateRuntimeAction(RuntimeActionHandoff); err != nil {
 		return AgentHandoff{}, err
 	}
+	return i.recordHandoffSwapLocked(target, reason, headSHA, automatic)
+}
+
+// RecordHandoffSwap is the transaction-owned mutation used by the daemon after
+// BeginHandoff has raised OpReplacing. Keeping it separate from
+// SwapAgentProgram makes both legal orderings explicit: ordinary state-only
+// tests require a settled live row, while production replacement requires the
+// fence and cannot accidentally validate itself as "busy".
+func (i *Instance) RecordHandoffSwap(target, reason, headSHA string, automatic bool) (AgentHandoff, error) {
+	target = strings.TrimSpace(target)
+
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if i.inFlightOp != OpReplacing {
+		return AgentHandoff{}, fmt.Errorf("session %q has no agent replacement in flight", i.Title)
+	}
+	if err := i.validateHandoffTargetLocked(target); err != nil {
+		return AgentHandoff{}, err
+	}
+	return i.recordHandoffSwapLocked(target, reason, headSHA, automatic)
+}
+
+func (i *Instance) recordHandoffSwapLocked(target, reason, headSHA string, automatic bool) (AgentHandoff, error) {
 
 	if len(i.Tabs) == 0 {
 		return AgentHandoff{}, fmt.Errorf("session %q has no agent tab to hand off", i.Title)
@@ -243,12 +266,12 @@ func (i *Instance) SwapAgentProgram(target, reason, headSHA string, automatic bo
 // restoring the outgoing agent as the recorded program and putting its
 // conversation id back.
 //
-// This exists because the record and the runtime must not disagree. If the pane
-// still runs codex while Program says claude, every later decision that keys off
-// the program — respawn flag injection, readiness heuristics, the next handoff's
-// same-agent check — is made against an agent that is not there. A stale ledger
-// entry for a swap that never happened is the same class of lie, so the entry
-// comes off too.
+// This exists because a failed replacement did not establish the incoming
+// runtime. Leaving Program set to that unconfirmed agent would make every later
+// decision — respawn flag injection, readiness heuristics, the next handoff's
+// same-agent check — act as though the swap committed. A stale ledger entry for
+// a swap that never completed is the same class of lie, so the entry comes off
+// too.
 //
 // It removes only the trailing entry, and only when it is the one passed in: if
 // anything else has appended since, this is no longer an unwind and refusing is

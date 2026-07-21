@@ -92,24 +92,36 @@ func (i *Instance) SetTabConversation(name string, conv AgentConversationData) b
 }
 
 func prepareLaunchConversation(i *Instance, program string) string {
-	if tmux.DetectAgentFromCommand(program) != tmux.ProgramClaude {
-		return program
+	rewritten, conversation := planLaunchConversation(i.ID, program)
+	if conversation.HasID() {
+		i.SetAgentConversation(conversation)
 	}
-	id := i.ID
+	return rewritten
+}
+
+// planLaunchConversation is the side-effect-free half of
+// prepareLaunchConversation. Handoff preflight uses it to freeze the exact
+// first-launch command before the outgoing pane is stopped; the conversation is
+// committed to the instance only when that prepared plan is executed.
+func planLaunchConversation(instanceID, program string) (string, AgentConversationData) {
+	if tmux.DetectAgentFromCommand(program) != tmux.ProgramClaude {
+		return program, AgentConversationData{}
+	}
+	id := instanceID
 	if strings.TrimSpace(id) == "" {
 		id = newSessionID()
 	}
 	rewritten, injected := tmux.ClaudeProgramWithSessionID(program, id)
 	if !injected {
-		return program
+		return program, AgentConversationData{}
 	}
-	i.SetAgentConversation(AgentConversationData{
+	conversation := AgentConversationData{
 		Agent:       tmux.ProgramClaude,
 		ID:          id,
 		CapturedAt:  time.Now(),
 		CaptureKind: ConversationCaptureInjected,
-	})
-	return rewritten
+	}
+	return rewritten, conversation
 }
 
 func prepareResumeConversation(i *Instance, program string) string {

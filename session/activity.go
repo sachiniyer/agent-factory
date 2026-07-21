@@ -61,7 +61,7 @@ func ClassifyActivity(data InstanceData) (Activity, string) {
 	// is mid-transition; wait for it to settle rather than reporting the
 	// transient composed status.
 	switch data.InFlightOp {
-	case OpCreating, OpKilling, OpArchiving, OpRestoring:
+	case OpCreating, OpKilling, OpArchiving, OpRestoring, OpReplacing:
 		return ActivityPending, ""
 	}
 

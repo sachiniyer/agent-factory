@@ -34,7 +34,11 @@ func (b *remoteAgentBackend) Capabilities() Capabilities {
 // origin, which would discard unpushed work rather than hand it over. Wiring a
 // genuine in-sandbox relaunch is its own change; until then this says so instead
 // of quietly doing the destructive thing.
-func (b *remoteAgentBackend) SwapAgent(*Instance) error {
+func (b *remoteAgentBackend) PrepareAgentSwap(*Instance, string) (AgentSwapPlan, error) {
+	return AgentSwapPlan{}, ErrHandoffUnsupported
+}
+
+func (b *remoteAgentBackend) SwapAgent(*Instance, AgentSwapPlan) error {
 	return ErrHandoffUnsupported
 }
 

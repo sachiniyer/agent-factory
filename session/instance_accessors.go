@@ -36,6 +36,22 @@ func (i *Instance) SetAutoYes(autoYes bool) {
 	i.AutoYes = autoYes
 }
 
+// SetPrompt replaces the durable goal used by later limit resumes and handoffs.
+// Prompt became mutable when handoff gained an operator-supplied brief, so the
+// write and every concurrent reader must use the instance lock.
+func (i *Instance) SetPrompt(prompt string) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	i.Prompt = prompt
+}
+
+// GetPrompt returns the session's current durable goal.
+func (i *Instance) GetPrompt() string {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	return i.Prompt
+}
+
 // GetBranch returns the current worktree branch name under the Instance's
 // mutex. Readers that run from goroutines other than the one mutating the
 // instance (notably the bubbletea renderer) must use this accessor rather

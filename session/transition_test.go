@@ -70,6 +70,11 @@ func TestTransitionTable_RunEffectsAreTheAgreedTable(t *testing.T) {
 		tkBeginRestore:       runKeep,
 		tkAbortRestoreToLost: runKeep,
 		tkMarkRestoring:      runKeep,
+		// A handoff continues the same task run; begin/commit/abort only bracket
+		// which agent process owns it.
+		tkBeginHandoff:  runKeep,
+		tkCommitHandoff: runKeep,
+		tkAbortHandoff:  runKeep,
 		// Dropping an overlay reveals liveness; it does not change the agent's work.
 		tkClearOp: runKeep,
 	}
@@ -126,6 +131,9 @@ func TestTransition_LegalEdgesApply(t *testing.T) {
 		// MarkRestoring: optimistic restore overlay — OpRestoring, liveness KEPT
 		// Archived (unlike BeginRestore which flips to Lost), started untouched.
 		{"MarkRestoring keeps liveness", stateAxes{LiveArchived, OpNone}, false, false, MarkRestoring(), LiveArchived, OpRestoring, false},
+		{"BeginHandoff fences running agent", stateAxes{LiveRunning, OpNone}, true, false, BeginHandoff(), LiveRunning, OpReplacing, true},
+		{"CommitHandoff settles incoming agent", stateAxes{LiveReady, OpReplacing}, true, false, CommitHandoff(), LiveRunning, OpNone, true},
+		{"AbortHandoff preserves outgoing liveness", stateAxes{LiveLimitReached, OpReplacing}, true, false, AbortHandoff(), LiveLimitReached, OpNone, true},
 		// ClearOp: drop any optimistic overlay to None, liveness untouched.
 		{"ClearOp from archiving", stateAxes{LiveReady, OpArchiving}, true, false, ClearOp(), LiveReady, OpNone, true},
 		{"ClearOp from restoring keeps liveness", stateAxes{LiveArchived, OpRestoring}, false, false, ClearOp(), LiveArchived, OpNone, false},

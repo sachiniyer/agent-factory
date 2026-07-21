@@ -1,6 +1,7 @@
 package session
 
 import (
+	"errors"
 	"fmt"
 	"math/rand"
 	"os"
@@ -15,9 +16,89 @@ import (
 
 	"github.com/sachiniyer/agent-factory/cmd"
 	"github.com/sachiniyer/agent-factory/cmd/cmd_test"
+	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/session/git"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
+
+func TestLocalBackendPrepareAgentSwapRejectsMissingExecutableBeforeRuntime(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	cfg := config.DefaultConfig()
+	if cfg.ProgramOverrides == nil {
+		cfg.ProgramOverrides = make(map[string]string)
+	}
+	missing := filepath.Join(t.TempDir(), "missing-gemini")
+	cfg.ProgramOverrides[tmux.ProgramGemini] = missing
+	require.NoError(t, config.SaveConfig(cfg))
+
+	inst := handoffTestInstance(t, tmux.ProgramClaude)
+	plan, err := (&LocalBackend{}).PrepareAgentSwap(inst, tmux.ProgramGemini)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), missing)
+	require.Empty(t, plan.program, "a rejected preflight must not produce an executable swap plan")
+	require.Equal(t, tmux.ProgramClaude, inst.AgentProgram(), "preflight must not rewrite the live record")
+}
+
+func TestLocalBackendSwapAgentResetsBrokerCapture(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	ptyFactory := &recordingPtyFactory{t: t}
+	killed := false
+	cmdExec := cmd_test.MockCmdExec{
+		RunFunc: func(c *exec.Cmd) error {
+			joined := strings.Join(c.Args, " ")
+			switch {
+			case strings.Contains(joined, "kill-session"):
+				killed = true
+				return nil
+			case strings.Contains(joined, "has-session"):
+				if killed && len(ptyFactory.cmds) == 0 {
+					return errors.New("session absent after close")
+				}
+			}
+			return nil
+		},
+		OutputFunc: func(c *exec.Cmd) ([]byte, error) {
+			if strings.Contains(strings.Join(c.Args, " "), "display-message") {
+				return nil, errors.New("pane pid unavailable")
+			}
+			return nil, nil
+		},
+	}
+
+	repoRoot := initTempGitRepo(t)
+	worktreePath := t.TempDir()
+	gw, err := git.NewGitWorktreeFromStorage(repoRoot, worktreePath, "handoff-broker", "handoff-broker-branch", "", false, false)
+	require.NoError(t, err)
+	ts := tmux.NewTmuxSessionWithDeps("handoff-broker", tmux.ProgramClaude, ptyFactory, cmdExec)
+	backend := &LocalBackend{}
+	inst := &Instance{
+		ID:          "handoff-broker-id",
+		Title:       "handoff-broker",
+		Path:        repoRoot,
+		Program:     tmux.ProgramGemini,
+		backend:     backend,
+		Tabs:        []*Tab{newAgentTab(ts)},
+		gitWorktree: gw,
+		started:     true,
+		liveness:    LiveRunning,
+	}
+
+	channel := &fakeClientlessChannel{snapshot: []byte("old-pane")}
+	broker := newPTYBroker(channel)
+	sub, err := broker.subscribe(0)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_ = sub.Close()
+		broker.close()
+	})
+	server := inst.AgentServer().(*localAgentServer)
+	server.brokers = map[string]*ptyBroker{"agent": broker}
+
+	plan := AgentSwapPlan{target: tmux.ProgramGemini, program: tmux.ProgramGemini}
+	require.NoError(t, backend.SwapAgent(inst, plan))
+	require.Equal(t, 1, channel.stops, "handoff must stop the capture bound to the outgoing pane")
+	require.Equal(t, 2, channel.starts, "the attached subscriber must resume on the incoming pane without reconnecting")
+}
 
 // recordingPtyFactory is a tmux.PtyFactory that records each exec.Cmd passed
 // to Start, lets the caller inspect the new-session vs attach-session sequence
