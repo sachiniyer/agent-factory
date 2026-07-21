@@ -1,6 +1,7 @@
 package commands
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -220,12 +221,16 @@ func runUpgrade(out, errOut io.Writer, downloadURL string, noRestart bool) error
 		return fmt.Errorf("failed to write new binary: %w", err)
 	}
 
-	if err := refreshAutostartUnitFn(); err != nil {
+	if err := refreshAutostartUnitForCurrentHome(); err != nil {
 		fmt.Fprintln(out, "Upgraded successfully!")
 		fmt.Fprintf(errOut, "The daemon autostart unit could not be made restart-safe: %v\n", err)
-		if noRestart {
+		var scopeErr *autostartRefreshScopeError
+		switch {
+		case errors.As(err, &scopeErr):
+			fmt.Fprintln(errOut, "The running daemon was left alone because af could not prove the installed unit belongs to this home. Run `af daemon install` to restore an authoritative unit before restarting.")
+		case noRestart:
 			fmt.Fprintln(errOut, "The running daemon was left alone as requested, but the installed unit still needs repair. Run `af daemon install` before restarting it.")
-		} else {
+		default:
 			fmt.Fprintln(errOut, "The running daemon was left alone because restarting through the stale unit could stop live tmux sessions. Run `af daemon install`, then `af daemon restart`.")
 		}
 		return nil

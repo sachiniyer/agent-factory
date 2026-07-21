@@ -179,6 +179,7 @@ func TestUpgrade_NoRestartSkipsRestart(t *testing.T) {
 	binPath, url := upgradeHarness(t)
 	shutdownCalls := stubShutdown(t, daemon.ShutdownViaRPC, nil)
 	refreshCalls := stubAutostartRefresh(t, nil)
+	stubAutostartScope(t, true, true, nil)
 	stubDaemonHealth(t, daemon.HealthStatus{})
 
 	var out, errOut bytes.Buffer
@@ -209,7 +210,7 @@ func TestUpgrade_NoRestartSkipsRestart(t *testing.T) {
 func TestUpgradeRefreshesAutostartBeforeStoppingDaemon(t *testing.T) {
 	_, url := upgradeHarness(t)
 	stubDaemonHealth(t, daemon.HealthStatus{})
-	stubRespawnCollaborators(t, false, nil)
+	stubRespawnCollaborators(t, true, nil)
 
 	previousRefresh := refreshAutostartUnitFn
 	previousShutdown := requestDaemonShutdownFn
@@ -239,6 +240,7 @@ func TestUpgradeRefreshFailureLeavesDaemonRunning(t *testing.T) {
 	_, url := upgradeHarness(t)
 	refreshCalls := stubAutostartRefresh(t, errors.New("daemon-reload failed"))
 	shutdownCalls := stubShutdown(t, daemon.ShutdownViaRPC, nil)
+	stubAutostartScope(t, true, true, nil)
 	stubDaemonHealth(t, daemon.HealthStatus{})
 
 	var out, errOut bytes.Buffer
@@ -255,6 +257,36 @@ func TestUpgradeRefreshFailureLeavesDaemonRunning(t *testing.T) {
 		if !strings.Contains(errOut.String(), want) {
 			t.Fatalf("refresh failure stderr missing %q:\n%s", want, errOut.String())
 		}
+	}
+}
+
+// An installed unit for another AGENT_FACTORY_HOME cannot own the daemon this
+// upgrade is about. Its parser/reload errors therefore must not block the
+// current home's ad-hoc restart after the binary swap (#2185).
+func TestUpgradeForeignHomeSkipsUnrelatedUnitRefresh(t *testing.T) {
+	_, url := upgradeHarness(t)
+	refreshCalls := stubAutostartRefresh(t, errors.New("foreign unit is malformed"))
+	shutdownCalls := stubShutdown(t, daemon.ShutdownViaRPC, nil)
+	restartCalls, ensureCalls := stubRespawnCollaborators(t, true, nil)
+	stubAutostartScope(t, false, true, nil)
+	stubDaemonHealth(t, daemon.HealthStatus{})
+
+	var out, errOut bytes.Buffer
+	if err := runUpgrade(&out, &errOut, url, false); err != nil {
+		t.Fatalf("runUpgrade: %v", err)
+	}
+	if *refreshCalls != 0 {
+		t.Fatalf("foreign-unit refresh calls = %d, want 0", *refreshCalls)
+	}
+	if *shutdownCalls != 1 {
+		t.Fatalf("shutdown calls = %d, want 1 for the current home's daemon", *shutdownCalls)
+	}
+	if *restartCalls != 0 || *ensureCalls != 1 {
+		t.Fatalf("respawn branches: unit=%d ad-hoc=%d, want foreign unit untouched and one ad-hoc spawn",
+			*restartCalls, *ensureCalls)
+	}
+	if strings.Contains(errOut.String(), "foreign unit is malformed") {
+		t.Fatalf("unrelated unit failure leaked into this home's upgrade: %q", errOut.String())
 	}
 }
 
@@ -361,13 +393,11 @@ func TestUpgrade_StaleUnitBinaryIsLoud(t *testing.T) {
 }
 
 // TestUpgrade_UnprovableUnitGateIsLoud: when we cannot TELL whether the unit
-// serves this home we refuse to restart it — the right call, but it costs a
-// supervised daemon its supervision, so it cannot be a log-only warning. The
-// quiet "no unit serves this home" case is a different thing entirely and is
-// locked below.
+// serves this home, neither refresh nor shutdown is safe. Leave the current
+// daemon running and name the one repair that makes unit ownership authoritative.
 func TestUpgrade_UnprovableUnitGateIsLoud(t *testing.T) {
 	_, url := upgradeHarness(t)
-	stubShutdown(t, daemon.ShutdownViaRPC, nil)
+	shutdownCalls := stubShutdown(t, daemon.ShutdownViaRPC, nil)
 	stubDaemonHealth(t, daemon.HealthStatus{})
 	stubRespawnCollaborators(t, true, nil)
 	autostartUnitServesHomeFn = func(string) (bool, bool, error) {
@@ -385,10 +415,11 @@ func TestUpgrade_UnprovableUnitGateIsLoud(t *testing.T) {
 	if !strings.Contains(errOut.String(), "permission denied") {
 		t.Fatalf("stderr must say why the unit was left alone.\ngot=%q", errOut.String())
 	}
-	// `af daemon restart` re-enters this same respawn, hits this same gate,
-	// and falls back to an ad-hoc daemon AGAIN — it looks like it worked and
-	// leaves supervision just as broken. Only a reinstall re-registers the
-	// unit for this home.
+	if *shutdownCalls != 0 {
+		t.Fatalf("shutdown calls = %d, want 0 when unit ownership is unprovable", *shutdownCalls)
+	}
+	// `af daemon restart` re-enters this same ownership gate and cannot repair
+	// it. Only a reinstall re-registers an authoritative unit for this home.
 	if strings.Contains(errOut.String(), "af daemon restart") {
 		t.Fatalf("`af daemon restart` re-hits this gate and silently demotes to ad-hoc again; it does not restore supervision.\ngot=%q", errOut.String())
 	}
