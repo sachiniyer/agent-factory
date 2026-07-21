@@ -170,7 +170,7 @@ func gitArgsDispatch(command string, args []string) bool {
 			"--textconv", "--upload-pack":
 			return true
 		}
-		if command == "grep" && (longOptionMatches(option, "--open-files-in-pager", "--open") || option == "-O" ||
+		if command == "grep" && (longOptionMatches(option, "--open-files-in-pager", "--op") || option == "-O" ||
 			(strings.HasPrefix(arg, "-O") && len(arg) > 2)) {
 			return true
 		}
@@ -498,7 +498,8 @@ func inspectFile(args []shellWord) string {
 		if optionsDone {
 			continue
 		}
-		if arg.literal == "--uncompress" || arg.literal == "--uncompress-noreport" ||
+		option, _, _ := strings.Cut(arg.literal, "=")
+		if option == "--uncompress" || longOptionMatches(option, "--uncompress-noreport", "--uncompress-") ||
 			(strings.HasPrefix(arg.literal, "-") && !strings.HasPrefix(arg.literal, "--") &&
 				strings.ContainsAny(arg.literal[1:], "zZ")) {
 			return unknownShellReason
