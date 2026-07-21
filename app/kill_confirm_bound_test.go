@@ -90,7 +90,7 @@ func TestUnmergedCommitWarningIsBounded(t *testing.T) {
 
 	done := make(chan struct{}, 1)
 	go func() {
-		_, _ = unmergedCommitWarning(wt, "dev/bounded", "deadbeef", "")
+		_, _ = unmergedCommitWarning(wt, "dev/bounded", "deadbeef", "", true)
 		done <- struct{}{}
 	}()
 

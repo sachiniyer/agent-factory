@@ -282,6 +282,13 @@ func fetchPRInfoCmd(inst *session.Instance, repoID string, force bool) tea.Cmd {
 		fetchStart := time.Now()
 		detachTraceMark("fetchPRInfoCmd-goroutine-entry")
 		info, err := fetch(repoPath, branch)
+		if info != nil {
+			// Bind even test/custom fetchers to the captured lookup ref. A PR state
+			// without provenance must never authorize a destructive shortcut.
+			bound := *info
+			bound.Branch = branch
+			info = &bound
+		}
 		detachTrace(fetchStart, "fetchPRInfoCmd-prInfoFetcher-returned")
 		return prInfoUpdatedMsg{instance: inst, branch: branch, repoID: repoID, info: info, err: err}
 	}
@@ -752,7 +759,7 @@ func prInfoFromData(d session.PRInfoData) *git.PRInfo {
 	if d.Number == 0 {
 		return nil
 	}
-	return &git.PRInfo{Number: d.Number, Title: d.Title, URL: d.URL, State: d.State}
+	return &git.PRInfo{Number: d.Number, Title: d.Title, URL: d.URL, State: d.State, Branch: d.Branch}
 }
 
 // prInfoDiffersFromData reports whether an instance's in-memory PR info differs
@@ -766,7 +773,7 @@ func prInfoDiffersFromData(inst *session.Instance, d session.PRInfoData) bool {
 	if cur == nil {
 		return true
 	}
-	return cur.Number != d.Number || cur.Title != d.Title || cur.URL != d.URL || cur.State != d.State
+	return cur.Number != d.Number || cur.Title != d.Title || cur.URL != d.URL || cur.State != d.State || cur.Branch != d.Branch
 }
 
 // snapshotLiveness resolves the daemon-owned liveness a snapshot record carries

@@ -167,6 +167,9 @@ type PRInfoData struct {
 	Title  string `json:"title,omitempty"`
 	URL    string `json:"url,omitempty"`
 	State  string `json:"state,omitempty"`
+	// Branch binds cached state to the exact ref used for the lookup. Legacy
+	// records omit it and are therefore never trusted for destructive decisions.
+	Branch string `json:"branch,omitempty"`
 }
 
 // GitWorktreeData represents the serializable data of a GitWorktree.

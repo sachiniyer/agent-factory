@@ -50,5 +50,8 @@ func (i *Instance) FetchPRInfoSnapshot() (repoPath, branch string) {
 	if !i.started || i.gitWorktree == nil {
 		return "", ""
 	}
-	return i.gitWorktree.GetRepoPath(), i.Branch
+	// The GitWorktree branch is the canonical ref cleanup owns. Instance.Branch
+	// is a legacy display field and can be stale on restored rows; fetching PR
+	// state for it can later suppress a warning about the canonical branch.
+	return i.gitWorktree.GetRepoPath(), i.gitWorktree.GetBranchName()
 }
