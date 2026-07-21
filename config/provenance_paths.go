@@ -27,7 +27,11 @@ func (r *ResolvedConfig) RebaseProjectPathsForDisplay(displayRoot string) error 
 		return fmt.Errorf("project display root must be absolute: %q", displayRoot)
 	}
 
-	resolvedRoot := pathutil.ResolveForCompare(r.ProjectRoot)
+	projectRoot := filepath.Clean(r.ProjectRoot)
+	if !filepath.IsAbs(projectRoot) {
+		return fmt.Errorf("resolved project root must be absolute: %q", r.ProjectRoot)
+	}
+	resolvedRoot := pathutil.ResolveForCompare(projectRoot)
 	displayRoot = filepath.Clean(displayRoot)
 	if pathutil.ResolveForCompare(displayRoot) != resolvedRoot {
 		return fmt.Errorf("project display root %q does not resolve to project root %q", displayRoot, r.ProjectRoot)
@@ -42,11 +46,18 @@ func (r *ResolvedConfig) RebaseProjectPathsForDisplay(displayRoot string) error 
 			return nil
 		}
 
-		resolvedPath := pathutil.ResolveForCompare(path)
+		sourcePath := filepath.Clean(path)
+		resolvedPath := pathutil.ResolveForCompare(sourcePath)
 		if resolvedPath != resolvedRoot && !pathutil.IsStrictlyInside(resolvedPath, resolvedRoot) {
 			return fmt.Errorf("%s source path %q is outside project root %q", SourceRepoShared, path, r.ProjectRoot)
 		}
-		rel, err := filepath.Rel(resolvedRoot, resolvedPath)
+		// Resolution above is only a containment check. The source path is the
+		// location the loader actually selected, so derive its displayed suffix
+		// from that lexical path rather than from a symlink target.
+		if sourcePath != projectRoot && !pathutil.IsStrictlyInside(sourcePath, projectRoot) {
+			return fmt.Errorf("%s source path %q is not lexically under project root %q", SourceRepoShared, path, r.ProjectRoot)
+		}
+		rel, err := filepath.Rel(projectRoot, sourcePath)
 		if err != nil {
 			return fmt.Errorf("rebase project source path %q: %w", path, err)
 		}

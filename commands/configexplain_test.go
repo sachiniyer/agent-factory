@@ -94,7 +94,12 @@ func TestConfigGetExplainKeepsBareGlobalContract(t *testing.T) {
 
 func TestConfigGetProjectPathResolvesExistingLayersWithoutRegistering(t *testing.T) {
 	home, repoRoot := setupConfigExplainCommandTest(t, "schema_version = 1\ndefault_program = \"codex\"\n")
-	writeCommandTestInRepoConfig(t, repoRoot, "default_program = \"aider\"\n")
+	writeCommandTestInRepoConfig(t, repoRoot, `
+default_program = "aider"
+
+[program_overrides]
+codex = "/repo/codex"
+`)
 	subdir := filepath.Join(repoRoot, "nested")
 	require.NoError(t, os.Mkdir(subdir, 0755))
 
@@ -114,6 +119,8 @@ func TestConfigGetProjectPathResolvesExistingLayersWithoutRegistering(t *testing
 
 	_, statErr := os.Stat(filepath.Join(home, "projects"))
 	assert.True(t, os.IsNotExist(statErr), "a path selector must not register durable identity in stage two")
+	_, statErr = os.Stat(filepath.Join(home, "repos"))
+	assert.True(t, os.IsNotExist(statErr), "a project config read must not persist load-observation state")
 }
 
 func TestConfigGetExplainJSONCarriesContextAndCompleteTrace(t *testing.T) {
@@ -189,6 +196,22 @@ func TestConfigListProjectIncludesRepoOnlyKeysButBareListDoesNot(t *testing.T) {
 	assert.Contains(t, projectOutput, "backend")
 	assert.Contains(t, projectOutput, "docker")
 	assert.Contains(t, projectOutput, "post_worktree_commands")
+}
+
+func TestConfigGetProjectReportsLocalForAbsentBackend(t *testing.T) {
+	_, repoRoot := setupConfigExplainCommandTest(t, "schema_version = 1\ndefault_program = \"codex\"\n")
+	setConfigGetReadFlags(t, repoRoot, false, false)
+
+	output, err := runConfigGetForTest(t, "backend")
+	require.NoError(t, err)
+	assert.Equal(t, config.BackendLocal+"\n", output)
+
+	configGetExplainFlag = true
+	output, err = runConfigGetForTest(t, "backend")
+	require.NoError(t, err)
+	assert.Contains(t, output, "backend = "+config.BackendLocal)
+	assert.Contains(t, output, "built-in")
+	assert.Contains(t, output, "winner · highest-precedence present allowed source")
 }
 
 func TestConfigListExplainJSONContainsEveryProjectResolution(t *testing.T) {

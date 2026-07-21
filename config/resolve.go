@@ -22,9 +22,9 @@ var legacyDeprecationLogged sync.Map
 
 // ResolvedConfig is effective configuration plus the provenance produced by
 // the same manifest-driven pass. Every consumer of per-repo configuration
-// (programs, remote hooks, post-worktree commands) must go through
-// ResolveConfig rather than reading source files directly, so precedence and
-// scoping stay uniform.
+// (programs, remote hooks, post-worktree commands) must go through this file's
+// ResolveConfig or ResolveConfigForInspection entry point rather than reading
+// source files directly, so precedence and scoping stay uniform.
 type ResolvedConfig struct {
 	// Config carries the effective app-level fields. DefaultProgram and
 	// ProgramOverrides may have been overridden/merged from the in-repo
@@ -81,11 +81,36 @@ func ResolveGlobalConfig() (*ResolvedConfig, error) {
 }
 
 // ResolveConfig returns effective configuration and provenance for repoRoot
-// (normally the main worktree root from RepoFromPath or CurrentRepo). The
-// manifest supplies each key's candidates and merge policy; this function only
-// loads source documents and performs the non-precedence logging and path
-// normalization that historically live at this chokepoint.
+// (normally the main worktree root from RepoFromPath or CurrentRepo). It also
+// records the existing per-repo load observation for command-bearing checked-in
+// config. Inspection-only callers must use ResolveConfigForInspection so a read
+// cannot create that durable state.
 func ResolveConfig(repoRoot string) (*ResolvedConfig, error) {
+	return resolveConfig(repoRoot, recordInRepoLoadObservation)
+}
+
+// ResolveConfigForInspection returns the same effective values and provenance
+// as ResolveConfig without logging or persisting the per-repo load observation.
+// It is the resolver for read surfaces such as `af config --project`. This is
+// deliberately not called a generally write-free load: LoadConfig retains its
+// documented first-run and legacy-format migration behavior.
+func ResolveConfigForInspection(repoRoot string) (*ResolvedConfig, error) {
+	return resolveConfig(repoRoot, suppressInRepoLoadObservation)
+}
+
+type inRepoLoadObservation uint8
+
+const (
+	suppressInRepoLoadObservation inRepoLoadObservation = iota
+	recordInRepoLoadObservation
+)
+
+// resolveConfig is the one value/provenance path for runtime and inspection
+// callers. The typed observation mode is the only behavior difference.
+func resolveConfig(repoRoot string, observation inRepoLoadObservation) (*ResolvedConfig, error) {
+	if observation != suppressInRepoLoadObservation && observation != recordInRepoLoadObservation {
+		return nil, fmt.Errorf("invalid in-repo load observation mode %d", observation)
+	}
 	global, err := LoadConfig()
 	if err != nil {
 		return nil, err
@@ -105,7 +130,7 @@ func ResolveConfig(repoRoot string) (*ResolvedConfig, error) {
 	if err != nil {
 		return nil, err
 	}
-	if inRepo != nil {
+	if inRepo != nil && observation == recordInRepoLoadObservation {
 		logInRepoConfigLoaded(repoID, repoRoot, inRepo, raw)
 	}
 
@@ -169,7 +194,7 @@ func globalResolutionDocuments(global *Config) ([]sourceDocument, error) {
 	return []sourceDocument{
 		{
 			layer:   SourceBuiltIn,
-			schemas: []any{global.source.builtIn, &InRepoConfig{}},
+			schemas: []any{global.source.builtIn, defaultInRepoConfig()},
 			builtIn: true,
 		},
 		{

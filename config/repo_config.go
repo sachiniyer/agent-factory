@@ -188,8 +188,9 @@ func repoConfigPath(repoID string) (string, string, error) {
 //
 // Legacy location: ~/.agent-factory/repos/<id>/config.json is superseded by
 // the in-repo .agent-factory/config.json (#800) and is read for one more
-// release as a fallback. Consumers must use ResolveConfig, which applies the
-// in-repo file over this one; do not read this directly.
+// release as a fallback. Consumers must use ResolveConfig (or its inspection
+// variant), which applies the in-repo file over this one; do not read this
+// directly.
 func LoadRepoConfig(repoID string) (*RepoConfig, error) {
 	_, path, err := repoConfigPath(repoID)
 	if err != nil {

@@ -118,6 +118,47 @@ func TestManifestCoversEveryConfigKey(t *testing.T) {
 	}
 }
 
+// TestAllManifestScalarDefaultsMatchBuiltInResolution extends the global
+// default drift lock to repo-only keys. The resolver used to pair DefaultConfig
+// with a zero-value InRepoConfig, so a non-zero manifest default such as
+// backend=local rendered as an empty effective value even while runtime treated
+// empty as local. Resolving the union's actual built-in schemas catches that
+// whole class for every present and future scalar.
+func TestAllManifestScalarDefaultsMatchBuiltInResolution(t *testing.T) {
+	entries := AllManifest()
+	computed, err := resolveManifest(entries, []sourceDocument{{
+		layer:   SourceBuiltIn,
+		schemas: []any{DefaultConfig(), defaultInRepoConfig()},
+		builtIn: true,
+	}}, false)
+	if err != nil {
+		t.Fatalf("resolve union built-in defaults: %v", err)
+	}
+	if len(computed) != len(entries) {
+		t.Fatalf("resolved %d built-in defaults for %d manifest entries", len(computed), len(entries))
+	}
+
+	checked := 0
+	for i, entry := range entries {
+		switch entry.Type {
+		case "string", "bool", "int":
+		default:
+			continue
+		}
+		if _, derived := manifestDerivedDefaults[entry.Key]; derived {
+			continue
+		}
+		got := renderConfigValue(computed[i].value)
+		if entry.Default != got {
+			t.Errorf("manifest Default for %q is %q, but built-in resolution produces %q", entry.Key, entry.Default, got)
+		}
+		checked++
+	}
+	if checked == 0 {
+		t.Fatal("no union scalar defaults were compared")
+	}
+}
+
 func formatsForManifestField(field reflect.StructField) FormatSet {
 	var formats FormatSet
 	if key := tomlTagName(field.Tag.Get("toml")); key != "" && key != "-" {

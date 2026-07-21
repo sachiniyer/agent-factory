@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/sachiniyer/agent-factory/internal/pathutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -20,6 +21,11 @@ func TestRebaseProjectPathsForDisplayUpdatesEverySourceReference(t *testing.T) {
 
 	realSource := filepath.Join(realRoot, InRepoConfigDirName, TomlConfigFileName)
 	displaySource := filepath.Join(displayRoot, InRepoConfigDirName, TomlConfigFileName)
+	realTarget := filepath.Join(realRoot, "config", "project.toml")
+	require.NoError(t, os.MkdirAll(filepath.Dir(realSource), 0755))
+	require.NoError(t, os.MkdirAll(filepath.Dir(realTarget), 0755))
+	require.NoError(t, os.WriteFile(realTarget, []byte("default_program = \"codex\"\n"), 0644))
+	require.NoError(t, os.Symlink(filepath.Join("..", "config", "project.toml"), realSource))
 	globalSource := filepath.Join(container, "home", TomlConfigFileName)
 	resolved := &ResolvedConfig{
 		ProjectRoot: realRoot,
@@ -37,6 +43,8 @@ func TestRebaseProjectPathsForDisplayUpdatesEverySourceReference(t *testing.T) {
 	}
 
 	require.NoError(t, resolved.RebaseProjectPathsForDisplay(displayRoot))
+	assert.NotEqual(t, realSource, filepath.Clean(pathutil.ResolveForCompare(realSource)),
+		"the test must exercise a config path whose symlink target has another name")
 	assert.Equal(t, displayRoot, resolved.ProjectRoot)
 	assert.Equal(t, displaySource, resolved.Resolution[0].Winner.Path)
 	assert.Equal(t, displaySource, resolved.Resolution[0].Origins["codex"].Path)
