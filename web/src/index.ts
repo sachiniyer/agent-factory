@@ -152,6 +152,11 @@ const loadPrograms = (repoPath: string): Promise<ProgramCatalog> =>
 // Debounces the re-Snapshot that archived/restored events and reconnects trigger,
 // so a burst of events collapses into a single authoritative refetch.
 let resyncTimer: number | null = null;
+// Snapshot and events are two asynchronous projections of the same session state.
+// Fence them independently so a Snapshot requested before a session event cannot
+// resolve afterwards and rewind the event's newer roster (#2330).
+let sessionEventGeneration = 0;
+let resyncRequestGeneration = 0;
 // Debounces the ListTasks refetch that task.* events trigger (#1592 Phase 5 PR8),
 // so a burst of task deltas collapses into one authoritative refetch.
 let taskResyncTimer: number | null = null;
@@ -1407,6 +1412,10 @@ function startStream(tok: string): void {
 }
 
 function stopStream(): void {
+  // Invalidate a Snapshot that is already in flight. Clearing the timer alone only
+  // prevents a request that has not started; a response from the previous stream
+  // must not land in a newly-connected (possibly differently-authorized) app.
+  resyncRequestGeneration += 1;
   if (resyncTimer !== null) {
     window.clearTimeout(resyncTimer);
     resyncTimer = null;
@@ -1438,6 +1447,7 @@ function onEvent(ev: WireEvent): void {
     requestTaskResync();
     return;
   }
+  sessionEventGeneration += 1;
   const { sessions, needsResync } = applyEvent(store.get().sessions, ev);
   applySessions(sessions);
   if (needsResync) {
@@ -1484,6 +1494,10 @@ function requestResync(): void {
   if (resyncTimer !== null) {
     return;
   }
+  // Allocate the generation when the request is scheduled, not after the debounce:
+  // a newer scheduled resync must invalidate an older request that is already in
+  // flight even before the newer request reaches fetchSnapshot.
+  const requestGeneration = ++resyncRequestGeneration;
   resyncTimer = window.setTimeout(() => {
     resyncTimer = null;
     const tok = token;
@@ -1491,8 +1505,21 @@ function requestResync(): void {
     if (tok === null) {
       return;
     }
+    const eventGeneration = sessionEventGeneration;
     void fetchSnapshot(tok)
       .then((sessions) => {
+        // A stop/reconnect or a newer resync owns the result now.
+        if (requestGeneration !== resyncRequestGeneration || token !== tok) {
+          return;
+        }
+        // An event that crossed this request may be newer than the response. Do not
+        // guess which reached the daemon first: preserve the event and ask for one
+        // fresh authoritative projection. If the event itself already scheduled a
+        // newer resync, the request-generation check above leaves that one alone.
+        if (eventGeneration !== sessionEventGeneration) {
+          requestResync();
+          return;
+        }
         applySessions(sessions);
       })
       .catch(() => {
