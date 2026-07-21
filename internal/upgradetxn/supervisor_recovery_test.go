@@ -79,6 +79,31 @@ func TestSupervisorRejectsLeaseFromAnotherTransactionBeforeMutation(t *testing.T
 	require.Empty(t, runtime.calls)
 }
 
+func TestConfirmedCandidateStopAllowsRollbackDespiteTrailingDiagnostic(t *testing.T) {
+	txn, home, executable := prepareFixture(t)
+	lease, err := txn.tryAcquireRecoveryAs(txn.Journal().PreviousBinaryPath)
+	require.NoError(t, err)
+	runtime := &fakeSupervisorRuntime{running: "previous", candidateValid: false}
+	operations := runtime.operations()
+	operations.StopCandidate = func(context.Context, Journal) (StopOutcome, error) {
+		runtime.calls = append(runtime.calls, "stop-candidate")
+		runtime.running = ""
+		return StopConfirmed, errors.New("transport closed after confirmed candidate stop")
+	}
+
+	err = (Supervisor{Operations: operations}).Run(context.Background(), txn, lease)
+	require.ErrorIs(t, err, ErrUpgradeRolledBack)
+	require.NoError(t, lease.Release())
+	require.Equal(t, "previous", runtime.running)
+	require.True(t, runtime.jobDisabled)
+
+	_, err = Load(home)
+	require.ErrorIs(t, err, ErrNoActiveTransaction)
+	installed, err := os.ReadFile(executable)
+	require.NoError(t, err)
+	require.Equal(t, "known-running-binary", string(installed))
+}
+
 func TestSupervisorLossAtEveryFileRollbackCheckpointIsTakenOver(t *testing.T) {
 	checkpoints := []struct {
 		name     string

@@ -412,10 +412,19 @@ func (s Supervisor) stopCandidateAndRestore(
 ) error {
 	journal := txn.Journal()
 	outcome, err := s.Operations.StopCandidate(ctx, journal)
-	if err != nil {
-		return fmt.Errorf("stop failed candidate: %w", err)
-	}
-	if outcome != StopConfirmed {
+	switch outcome {
+	case StopConfirmed:
+		// Positive identity-scoped stop proof is authoritative even if the
+		// transport reports a trailing diagnostic after shutdown completed.
+	case StopStillRunning:
+		if err != nil {
+			return fmt.Errorf("stop failed candidate: %w", err)
+		}
+		return errors.New("failed candidate is still running")
+	default:
+		if err != nil {
+			return fmt.Errorf("stop failed candidate: %w", err)
+		}
 		return fmt.Errorf("failed candidate stop was not confirmed (outcome %d)", outcome)
 	}
 	if err := lease.Rollback(); err != nil {
