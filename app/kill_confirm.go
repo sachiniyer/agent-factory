@@ -177,19 +177,34 @@ func killConfirmationWarning(wt string) string {
 // tracking ref is stale, reads as local-only and over-warns. Over-warning is the
 // conservative side — the loud path still kills on one keystroke — so we accept
 // it rather than risk staying silent on genuine loss.
-func unmergedCommitWarning(worktreePath, recordedBaseSHA, prState string) (string, bool) {
+//
+// branchName is the session's recorded branch — the exact ref Cleanup deletes —
+// not whichever branch the agent has left checked out at HEAD. The fully
+// qualified local ref must resolve before an empty warning can be returned;
+// missing or unverifiable deletion targets fail closed (#2199).
+func unmergedCommitWarning(worktreePath, branchName, recordedBaseSHA, prState string) (string, bool) {
 	if strings.TrimSpace(worktreePath) == "" {
-		return unmergedFailClosedLine(fmt.Errorf("no worktree path")), false
+		return unmergedFailClosedLine(branchName, fmt.Errorf("no worktree path")), false
+	}
+	branchName = strings.TrimSpace(branchName)
+	if branchName == "" {
+		return unmergedFailClosedLine(branchName, fmt.Errorf("no session branch name")), false
+	}
+	branchRef := "refs/heads/" + branchName
+	if _, err := runKillGit(worktreePath, "rev-parse", "--verify", "--quiet", branchRef+"^{commit}"); err != nil {
+		return unmergedFailClosedLine(branchName, fmt.Errorf("session branch could not be resolved: %w", err)), false
 	}
 	base, baseLabel, ok := resolveKillBase(worktreePath, recordedBaseSHA)
 	if !ok {
-		return unmergedFailClosedLine(fmt.Errorf("base branch/commit could not be determined")), false
+		return unmergedFailClosedLine(branchName, fmt.Errorf("base branch/commit could not be determined")), false
 	}
-	// Commits reachable from the branch tip (HEAD is the branch, checked out in
-	// the worktree) but not from base: the session's own commits.
-	uniqueOut, err := runKillGit(worktreePath, "log", "--oneline", base+"..HEAD")
+	// Commits reachable from the recorded session branch but not from base: the
+	// commits kill will orphan when Cleanup force-deletes that exact branch. An
+	// agent may have checked out a different branch in the worktree, so HEAD is
+	// deliberately not used here (#2199).
+	uniqueOut, err := runKillGit(worktreePath, "log", "--oneline", base+".."+branchRef)
 	if err != nil {
-		return unmergedFailClosedLine(err), false
+		return unmergedFailClosedLine(branchName, err), false
 	}
 	if countGitLines(uniqueOut) == 0 {
 		return "", false // nothing beyond base — kill loses no committed work
@@ -202,25 +217,25 @@ func unmergedCommitWarning(worktreePath, recordedBaseSHA, prState string) (strin
 	}
 	// Of the session's commits, those NOT reachable from any remote-tracking ref
 	// are the ones that exist only here. branch -D orphans exactly these.
-	localOut, err := runKillGit(worktreePath, "log", "--oneline", base+"..HEAD", "--not", "--remotes")
+	localOut, err := runKillGit(worktreePath, "log", "--oneline", base+".."+branchRef, "--not", "--remotes")
 	if err != nil {
-		return unmergedFailClosedLine(err), false
+		return unmergedFailClosedLine(branchName, err), false
 	}
 	localOnly := countGitLines(localOut)
 	if localOnly == 0 {
 		return "", false // every commit is pushed somewhere — recoverable
 	}
-	return unmergedSevereLine(localOnly, baseLabel), true
+	return unmergedSevereLine(branchName, localOnly, baseLabel), true
 }
 
 // resolveKillBase resolves the commit the branch is measured against for the
 // unmerged-work check, offline. It mirrors the base resolution the worktree code
 // already uses (session/git/worktree_ops.go): the recorded base commit first,
-// then origin's default branch. It deliberately does NOT fall back to HEAD —
-// HEAD is the branch tip itself, which would make every branch look zero commits
-// ahead and fabricate a "nothing to lose" negative. When neither resolves, ok is
-// false and the caller fails closed. baseLabel names the base branch when known
-// (for the copy), else "".
+// then origin's default branch. It deliberately does NOT fall back to HEAD:
+// HEAD may be the recorded branch tip (which would fabricate a zero-commits
+// result) or an unrelated branch the agent checked out. When neither resolves,
+// ok is false and the caller fails closed. baseLabel names the base branch when
+// known (for the copy), else "".
 func resolveKillBase(worktreePath, recordedBaseSHA string) (base, baseLabel string, ok bool) {
 	commitExists := func(rev string) bool {
 		_, err := runKillGit(worktreePath, "rev-parse", "--verify", "--quiet", rev+"^{commit}")
@@ -243,10 +258,10 @@ func resolveKillBase(worktreePath, recordedBaseSHA string) (base, baseLabel stri
 	return "", "", false
 }
 
-// unmergedSevereLine is the #2022 data-loss headline: it names the exact count
-// of commits that would be permanently deleted and that the loss is final. It is
-// the critical (never-clipped, #1973) line of the confirmation.
-func unmergedSevereLine(n int, baseLabel string) string {
+// unmergedSevereLine is the #2022 data-loss headline: it names the exact branch
+// and count of commits that would be permanently deleted and that the loss is
+// final. It is the critical (never-clipped, #1973) line of the confirmation.
+func unmergedSevereLine(branchName string, n int, baseLabel string) string {
 	commitWord, pronoun := "commits", "them"
 	where := "that aren't merged or pushed anywhere"
 	if n == 1 {
@@ -256,14 +271,18 @@ func unmergedSevereLine(n int, baseLabel string) string {
 	if baseLabel != "" {
 		where = fmt.Sprintf("not on %s and not pushed anywhere", baseLabel)
 	}
-	return fmt.Sprintf("This branch has %d %s %s. Killing permanently deletes %s · this cannot be undone.", n, commitWord, where, pronoun)
+	return fmt.Sprintf("Branch %q has %d %s %s. Killing permanently deletes %s · this cannot be undone.", branchName, n, commitWord, where, pronoun)
 }
 
 // unmergedFailClosedLine mirrors the #815 could-not-verify warning for the
 // committed-work check: when we cannot prove the branch is free of local-only
 // commits, we say so rather than showing the bare, safe-looking prompt.
-func unmergedFailClosedLine(err error) string {
-	return fmt.Sprintf("Could not verify whether this branch has unmerged commits (%v); any that exist only here would be permanently deleted.", err)
+func unmergedFailClosedLine(branchName string, err error) string {
+	branchLabel := "the session branch"
+	if branchName = strings.TrimSpace(branchName); branchName != "" {
+		branchLabel = fmt.Sprintf("session branch %q", branchName)
+	}
+	return fmt.Sprintf("Could not verify whether %s has unmerged commits (%v); any that exist only here would be permanently deleted.", branchLabel, err)
 }
 
 // countGitLines counts non-empty lines in git command output.

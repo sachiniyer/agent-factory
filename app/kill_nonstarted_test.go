@@ -27,6 +27,7 @@ func nonStartedWorktreeInstance(t *testing.T, title, repoDir, worktreePath, bran
 	t.Helper()
 	inst, err := session.NewInstance(session.InstanceOptions{Title: title, Path: repoDir, Program: "test"})
 	require.NoError(t, err)
+	inst.Branch = branch
 	inst.SetBackend(session.NewFakeBackend())
 	inst.SetStatusForTest(session.Ready) // clears OpCreating; started stays false
 	gw, err := git.NewGitWorktreeFromStorage(repoDir, worktreePath, title, branch, baseSHA, false, true)

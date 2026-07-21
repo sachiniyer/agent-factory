@@ -197,12 +197,13 @@ func (m *home) handleKill() (tea.Model, tea.Cmd) {
 	severeLine := ""
 	if selected.Capabilities().Workspace == session.WorkspaceLocalWorktree {
 		// Both loss checks run under the SAME worktree-path gate so they cover the
-		// same session states. GetWorktreePath and GetBaseCommitSHA are NOT gated on
-		// started (unlike GetGitWorktree), so a session that HAS a worktree but was
-		// never started — e.g. a restore-failed session — still gets the unmerged-work
-		// warning the old GetGitWorktree gate skipped for it (#2029). Killing force-
-		// deletes its branch either way, so the same committed work is at stake; the
-		// dirty-worktree check was already ungated, and the two must not diverge.
+		// same session states. GetWorktreePath, GetBranch, and GetBaseCommitSHA are
+		// NOT gated on started (unlike GetGitWorktree), so a session that HAS a
+		// worktree but was never started — e.g. a restore-failed session — still gets
+		// the unmerged-work warning the old GetGitWorktree gate skipped for it
+		// (#2029). Killing force-deletes its branch either way, so the same committed
+		// work is at stake; the dirty-worktree check was already ungated, and the two
+		// must not diverge.
 		if wt := selected.GetWorktreePath(); wt != "" {
 			if w := killConfirmationWarning(wt); w != "" {
 				warnings = append(warnings, w)
@@ -211,7 +212,7 @@ func (m *home) handleKill() (tea.Model, tea.Cmd) {
 			if pr := selected.GetPRInfo(); pr != nil {
 				prState = pr.State
 			}
-			if line, severe := unmergedCommitWarning(wt, selected.GetBaseCommitSHA(), prState); line != "" {
+			if line, severe := unmergedCommitWarning(wt, selected.GetBranch(), selected.GetBaseCommitSHA(), prState); line != "" {
 				if severe {
 					severeLine = line
 				} else {
