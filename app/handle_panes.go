@@ -431,7 +431,7 @@ func (r tabSlotResolver) resolve(key tabSlotKey) (int, bool) {
 	return idx, ok
 }
 
-// reconcileActiveTabForTabs carries the TREE's selection across a tab-set change
+// remapActiveTabForTabs carries the TREE's selection across a tab-set change
 // — the selection twin of reconcilePanesForTabs, keyed by the same identity
 // through the same resolver.
 //
@@ -453,7 +453,7 @@ func (r tabSlotResolver) resolve(key tabSlotKey) (int, bool) {
 // question handleCloseTab answers with treeIsSelected), and a tab that is truly
 // gone is left to the existing clamp — this fixes where the selection LANDS under
 // a permutation, and deliberately does not change what an out-of-band close does.
-func (m *home) reconcileActiveTabForTabs(instance *session.Instance, oldKeys []tabSlotKey, domain tabIdentityDomain) bool {
+func (m *home) remapActiveTabForTabs(instance *session.Instance, oldKeys []tabSlotKey, domain tabIdentityDomain) bool {
 	if instance == nil || instance != m.store.GetSelectedInstance() {
 		return false
 	}

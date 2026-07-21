@@ -611,7 +611,7 @@ func (m *home) swapInstanceFromSnapshot(d session.InstanceData) bool {
 	// The tree selection is another binding into the same replaced-session
 	// roster. Carry it through the same name domain as panes: every ID is freshly
 	// minted, while the equivalent replacement tab keeps its name (#1991).
-	m.reconcileActiveTabForTabs(inst, oldKeys, replacedSessionTabs)
+	m.remapActiveTabForTabs(inst, oldKeys, replacedSessionTabs)
 	return true
 }
 
@@ -686,7 +686,7 @@ func (m *home) updateInstanceFromSnapshot(inst *session.Instance, d session.Inst
 			// entirely here (no local action, #1813), and the clamps only keep the
 			// index in range — which a permutation never violates — so an
 			// index-keyed selection silently becomes a different tab.
-			if m.reconcileActiveTabForTabs(inst, oldKeys, sameSessionTabs) {
+			if m.remapActiveTabForTabs(inst, oldKeys, sameSessionTabs) {
 				// An in-place roster update never re-sorts the projection, so the
 				// sidebar indices are current and can follow the remapped tab now.
 				m.sidebar.SyncCursorToActiveTab()
