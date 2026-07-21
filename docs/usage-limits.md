@@ -98,7 +98,7 @@ af sessions handoff fix-auth --to claude
 In the TUI, press **`F`** on the selected session, pick the agent, and confirm.
 The key is advertised on the status bar for a limit-blocked session, next to the
 `c` retry, because the two are the two answers to the same wall: `c` waits for
-*this* agent's window, `H` continues under another one.
+*this* agent's window, `F` continues under another one.
 
 What a handoff does, and does not do:
 
