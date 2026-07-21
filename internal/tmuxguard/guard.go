@@ -16,7 +16,9 @@ const (
 
 	broadTmuxReason    = "Agent Factory blocked a host-wide tmux kill-server. Target an isolated server explicitly with 'tmux -L <socket> kill-server' or 'tmux -S <path> kill-server'."
 	patternKillReason  = "Agent Factory blocked a pattern-based process kill because it cannot prove the shared tmux server will be spared. Resolve the one intended PID and use 'kill -- <pid>'; for tmux teardown, use 'tmux -L <socket> kill-server' or 'tmux -S <path> kill-server'."
-	unknownShellReason = "Agent Factory could not prove this shell command safe, so it was blocked. Rewrite it as literal simple commands: replace variables, substitutions, globs, and brace or tilde expansions with literal values, and run inner commands directly instead of through eval or opaque command-building wrappers. Use af for session orchestration. For tmux teardown, use 'tmux -L <socket> kill-server' or 'tmux -S <path> kill-server' directly."
+	unknownShellReason = "Agent Factory could not resolve an execution-sensitive part of this shell command, so it was blocked. Rewrite it as literal simple commands: keep executables, wrapper options, and tmux/process-kill arguments literal; move dynamic values into ordinary data arguments or separate commands; and run inner commands directly instead of through eval or opaque command builders. Use af for session orchestration. For tmux teardown, use 'tmux -L <socket> kill-server' or 'tmux -S <path> kill-server' directly."
+	opaqueInputReason  = "Agent Factory blocked an unmodeled here-document or stdin consumer because it cannot inspect the supplied code or data. For data, write it to a literal file and pass that literal path (Git commit messages may use 'git commit -F -'); for interpreter code, create and review a literal script file, then run the interpreter with its literal path. For tmux teardown, use 'tmux -L <socket> kill-server' or 'tmux -S <path> kill-server'."
+	findReason         = "Agent Factory blocked a find command whose operands could become command-building syntax. Rewrite a dynamic root as 'cd \"$root\" && find . <literal predicates>', and replace -exec/-execdir/-ok/-okdir with a separate literal command over the results. For tmux teardown, use 'tmux -L <socket> kill-server' or 'tmux -S <path> kill-server'."
 )
 
 type hookInput struct {
@@ -80,9 +82,11 @@ func writeDenial(w io.Writer, reason string) error {
 }
 
 // DenialReason returns an actionable reason when command contains a broad
-// tmux teardown or uses shell syntax the guard cannot prove safe. An empty
-// result means every shell word was statically resolved and no teardown was
-// found. The parser is agent-neutral so #2184 can reuse one policy everywhere.
+// tmux teardown or uses shell dispatch syntax the guard cannot prove safe. An
+// empty result means executable positions and modeled wrapper/tmux semantics
+// were resolved; dynamic expansions appeared only in audited data positions.
+// This is a shell-dispatch guard, not a sandbox for arbitrary executable code.
+// The parser is agent-neutral so #2184 can reuse one policy everywhere.
 func DenialReason(command string) string {
 	return denialReason(command, 0)
 }
@@ -95,20 +99,94 @@ func denialReason(command string, depth int) string {
 	if err != nil {
 		return unknownShellReason
 	}
-	for _, words := range commands {
-		if reason := inspectWords(words, depth); reason != "" {
+	for _, command := range commands {
+		if reason := inspectCommand(command, depth); reason != "" {
 			return reason
 		}
 	}
 	return ""
 }
 
-func inspectWords(words []string, depth int) string {
+func inspectCommand(command shellCommand, depth int) string {
+	if command.declaration != nil {
+		if safeShellDeclaration(command.declaration) {
+			return ""
+		}
+		return unknownShellReason
+	}
+	if !safeShellAssignments(command.assignments) {
+		return unknownShellReason
+	}
+	if len(command.words) == 0 {
+		return "" // A modeled scalar assignment does not execute a command.
+	}
+	if !command.words[0].resolved {
+		return unknownShellReason
+	}
+	words := command.words
+	name := strings.ToLower(filepath.Base(words[0].literal))
+	if command.hasHeredoc && !safeHeredocCommand(words) {
+		return opaqueInputReason
+	}
+	// These commands consume their arguments as data rather than as another
+	// host command. Command/process substitutions within their arguments are
+	// separate AST commands and are still inspected below in the command list.
+	if safeTerminalCommand(name) {
+		return ""
+	}
+	if shellExecutable(name) {
+		payload, found, err := shellCommandPayloadWords(words[1:])
+		if err != nil || !found {
+			return unknownShellReason
+		}
+		return denialReason(payload, depth+1)
+	}
+	switch name {
+	case "command":
+		target, noCommand, err := commandTarget(words[1:])
+		if err != nil {
+			return unknownShellReason
+		}
+		if noCommand {
+			return ""
+		}
+		return inspectCommand(shellCommand{words: target}, depth)
+	case "env":
+		target, noCommand, err := envTarget(words[1:])
+		if err != nil {
+			return unknownShellReason
+		}
+		if noCommand {
+			return ""
+		}
+		return inspectCommand(shellCommand{words: target}, depth)
+	case "find":
+		return inspectFind(words[1:])
+	case "timeout":
+		target, noCommand, err := timeoutTarget(words[1:])
+		if err != nil {
+			return unknownShellReason
+		}
+		if noCommand {
+			return ""
+		}
+		return inspectCommand(shellCommand{words: target}, depth)
+	}
+	if unmodeledWrapper(name) && len(words) > 1 {
+		return unknownShellReason
+	}
 	for i, word := range words {
-		name := strings.ToLower(filepath.Base(word))
+		if !word.resolved {
+			continue
+		}
+		name := strings.ToLower(filepath.Base(word.literal))
 		switch name {
 		case "tmux":
-			if reason := inspectTmux(words[i+1:]); reason != "" {
+			suffix, ok := literalWords(words[i+1:])
+			if !ok {
+				return unknownShellReason
+			}
+			if reason := inspectTmux(suffix); reason != "" {
 				return reason
 			}
 		case "pkill", "killall":
@@ -116,11 +194,16 @@ func inspectWords(words []string, depth int) string {
 				return patternKillReason
 			}
 		case "env":
-			if err := validateEnvPrefix(words[i+1:]); err != nil {
+			suffix, ok := literalWords(words[i+1:])
+			if !ok || validateEnvPrefix(suffix) != nil {
 				return unknownShellReason
 			}
 		case "sh", "ash", "bash", "dash", "fish", "ksh", "mksh", "yash", "zsh":
-			payload, found, err := shellCommandPayload(words[i+1:])
+			suffix, ok := literalWords(words[i+1:])
+			if !ok {
+				return unknownShellReason
+			}
+			payload, found, err := shellCommandPayload(suffix)
 			if err != nil {
 				return unknownShellReason
 			}
@@ -139,12 +222,117 @@ func inspectWords(words []string, depth int) string {
 			}
 		case "find":
 			for _, arg := range words[i+1:] {
-				switch arg {
+				if !arg.resolved {
+					return unknownShellReason
+				}
+				switch arg.literal {
 				case "-exec", "-execdir", "-ok", "-okdir":
 					return unknownShellReason
 				}
 			}
 		}
 	}
+	if hasDynamicWord(words) {
+		return unknownShellReason
+	}
 	return ""
+}
+
+func inspectFind(args []shellWord) string {
+	for _, arg := range args {
+		if !arg.resolved {
+			return findReason
+		}
+		switch arg.literal {
+		case "-exec", "-execdir", "-ok", "-okdir":
+			return findReason
+		}
+	}
+	return ""
+}
+
+func safeShellAssignments(assignments []shellAssignment) bool {
+	for _, assignment := range assignments {
+		if !assignment.simple || executionSensitiveVariable(assignment.name) {
+			return false
+		}
+	}
+	return true
+}
+
+func safeShellDeclaration(declaration *shellDeclaration) bool {
+	if declaration.variant != "export" || len(declaration.assignments) == 0 {
+		return false
+	}
+	for _, assignment := range declaration.assignments {
+		if !assignment.simple || !safeExportVariable(assignment.name) {
+			return false
+		}
+	}
+	return true
+}
+
+func safeExportVariable(name string) bool {
+	switch name {
+	case "AF_PLAYTEST_NAME", "AGENT_FACTORY_HOME", "CLAUDE_CONFIG_DIR", "CODEX_HOME",
+		"GEMINI_CLI_HOME", "GOFLAGS":
+		return true
+	default:
+		return false
+	}
+}
+
+func executionSensitiveVariable(name string) bool {
+	switch name {
+	case "BASHOPTS", "BASH_ENV", "CDPATH", "ENV", "FPATH", "GLOBIGNORE", "IFS",
+		"KSHENV", "LD_LIBRARY_PATH", "LD_PRELOAD", "PATH", "PROMPT_COMMAND", "SHELL",
+		"SHELLOPTS", "TMUX", "TMUX_TMPDIR", "ZDOTDIR":
+		return true
+	default:
+		return strings.HasPrefix(name, "DYLD_")
+	}
+}
+
+func literalWords(words []shellWord) ([]string, bool) {
+	literals := make([]string, 0, len(words))
+	for _, word := range words {
+		if !word.resolved {
+			return nil, false
+		}
+		literals = append(literals, word.literal)
+	}
+	return literals, true
+}
+
+func hasDynamicWord(words []shellWord) bool {
+	for _, word := range words {
+		if !word.resolved {
+			return true
+		}
+	}
+	return false
+}
+
+func safeTerminalCommand(name string) bool {
+	switch name {
+	case ":", "[", "af", "agent-browser", "av", "basename", "cat", "cd", "chmod", "cmp", "comm",
+		"cp", "curl", "cut", "date", "diff", "dirname", "docker", "du", "echo", "false",
+		"file", "gcloud", "gh", "git", "go", "gofmt", "grep", "head", "jq", "ln", "ls", "mkdir",
+		"paste", "printenv", "printf", "ps", "pwd", "readlink", "realpath", "rg", "rm", "rmdir",
+		"shellcheck", "sort", "stat", "strings", "tail", "tee", "test", "touch", "tr", "true",
+		"wc", "which":
+		return true
+	default:
+		return false
+	}
+}
+
+func safeHeredocCommand(words []shellWord) bool {
+	name := strings.ToLower(filepath.Base(words[0].literal))
+	switch name {
+	case "cat", "grep", "head", "sort", "tail", "tr", "wc":
+		return true
+	}
+	literals, ok := literalWords(words)
+	return ok && name == "git" && gitCommitReadsMessageFromStdin(literals[1:])
 }

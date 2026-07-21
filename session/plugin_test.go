@@ -101,7 +101,7 @@ func TestInjectedClaudePluginGuardsBroadTmuxKills(t *testing.T) {
 		t.Fatalf("socket-scoped kill-server must be allowed, got: %s", allowed)
 	}
 
-	unproven := runHook(`echo "$HOME"`)
+	unproven := runHook(`"$command" safe`)
 	if err := json.Unmarshal([]byte(unproven), &decision); err != nil {
 		t.Fatalf("unprovable shell syntax did not return a structured denial: %q (%v)", unproven, err)
 	}

@@ -11,45 +11,74 @@ import (
 
 var errUnsupportedShell = errors.New("unsupported shell construct")
 
+type shellWord struct {
+	literal  string
+	resolved bool
+}
+
+type shellAssignment struct {
+	name   string
+	simple bool
+}
+
+type shellDeclaration struct {
+	variant     string
+	assignments []shellAssignment
+}
+
+type shellCommand struct {
+	words       []shellWord
+	assignments []shellAssignment
+	declaration *shellDeclaration
+	hasHeredoc  bool
+}
+
 // parseShellCommands parses Bash syntax with a maintained parser, but resolves
-// only a deliberately small, literal subset. Dynamic words fail closed before
-// command inspection, so new expansion shapes cannot silently become allows.
-func parseShellCommands(command string) ([][]string, error) {
+// only literal words. Dynamic words remain explicitly tainted so callers can
+// allow them in data positions while refusing them in execution-sensitive ones.
+func parseShellCommands(command string) ([]shellCommand, error) {
 	file, err := syntax.NewParser(syntax.Variant(syntax.LangBash)).Parse(strings.NewReader(command), "")
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", errUnsupportedShell, err)
 	}
 
-	var commands [][]string
+	heredocCalls := make(map[*syntax.CallExpr]bool)
+	var commands []shellCommand
 	var walkErr error
 	syntax.Walk(file, func(node syntax.Node) bool {
 		if node == nil || walkErr != nil {
 			return false
 		}
 		switch node := node.(type) {
-		case *syntax.CallExpr:
-			words := make([]string, 0, len(node.Args))
-			for _, word := range node.Args {
-				value, err := literalWord(word)
-				if err != nil {
-					walkErr = err
+		case *syntax.Stmt:
+			for _, redirect := range node.Redirs {
+				if !isHeredoc(redirect.Op) {
+					continue
+				}
+				call, ok := node.Cmd.(*syntax.CallExpr)
+				if !ok {
+					walkErr = errUnsupportedShell
 					return false
 				}
-				words = append(words, value)
+				heredocCalls[call] = true
 			}
-			if len(words) > 0 {
-				commands = append(commands, words)
+		case *syntax.CallExpr:
+			words := make([]shellWord, 0, len(node.Args))
+			for _, word := range node.Args {
+				words = append(words, resolveWord(word))
 			}
-		case *syntax.Word:
-			_, walkErr = literalWord(node)
-		case *syntax.Assign:
-			// Even a literal assignment can change later command resolution
-			// (PATH, BASH_ENV, LD_PRELOAD, exported shell functions, and more).
-			walkErr = errUnsupportedShell
-		case *syntax.Redirect:
-			if node.Op == syntax.Hdoc || node.Op == syntax.DashHdoc || node.Op == syntax.WordHdoc {
-				walkErr = errUnsupportedShell
+			if len(words) > 0 || len(node.Assigns) > 0 {
+				commands = append(commands, shellCommand{
+					words:       words,
+					assignments: describeAssignments(node.Assigns),
+					hasHeredoc:  heredocCalls[node],
+				})
 			}
+		case *syntax.DeclClause:
+			commands = append(commands, shellCommand{declaration: &shellDeclaration{
+				variant:     node.Variant.Value,
+				assignments: describeAssignments(node.Args),
+			}})
 		case *syntax.ArithmCmd, *syntax.CStyleLoop, *syntax.FuncDecl, *syntax.LetClause:
 			walkErr = errUnsupportedShell
 		}
@@ -61,42 +90,105 @@ func parseShellCommands(command string) ([][]string, error) {
 	return commands, nil
 }
 
-func literalWord(word *syntax.Word) (string, error) {
+func describeAssignments(assignments []*syntax.Assign) []shellAssignment {
+	described := make([]shellAssignment, 0, len(assignments))
+	for _, assignment := range assignments {
+		name := ""
+		if assignment.Name != nil {
+			name = assignment.Name.Value
+		}
+		described = append(described, shellAssignment{
+			name:   name,
+			simple: name != "" && assignment.Index == nil && assignment.Array == nil && !assignment.Append,
+		})
+	}
+	return described
+}
+
+func resolveWord(word *syntax.Word) shellWord {
 	for _, part := range word.Parts {
-		if err := validateLiteralPart(part, false); err != nil {
-			return "", err
+		if !literalPartIsStatic(part, false) {
+			return shellWord{}
 		}
 	}
 	fields, err := expand.Fields(&expand.Config{}, word)
 	if err != nil || len(fields) != 1 {
-		return "", errUnsupportedShell
+		return shellWord{}
 	}
-	return fields[0], nil
+	return shellWord{literal: fields[0], resolved: true}
 }
 
-func validateLiteralPart(part syntax.WordPart, quoted bool) error {
+func literalWord(word *syntax.Word) (string, error) {
+	resolved := resolveWord(word)
+	if !resolved.resolved {
+		return "", errUnsupportedShell
+	}
+	return resolved.literal, nil
+}
+
+func literalPartIsStatic(part syntax.WordPart, quoted bool) bool {
 	switch part := part.(type) {
 	case *syntax.Lit:
-		if !quoted && strings.ContainsAny(part.Value, "*?[{}~") {
-			return errUnsupportedShell
-		}
-		return nil
+		return quoted || !hasUnescapedExpansionMeta(part.Value)
 	case *syntax.SglQuoted:
-		if part.Dollar {
-			return errUnsupportedShell
-		}
-		return nil
+		return true // mvdan's expander resolves both ordinary and ANSI-C quotes.
 	case *syntax.DblQuoted:
 		if part.Dollar {
-			return errUnsupportedShell
+			return false
 		}
 		for _, nested := range part.Parts {
-			if err := validateLiteralPart(nested, true); err != nil {
-				return err
+			if !literalPartIsStatic(nested, true) {
+				return false
 			}
 		}
-		return nil
+		return true
 	default:
-		return errUnsupportedShell
+		return false
 	}
+}
+
+func hasUnescapedExpansionMeta(value string) bool {
+	for i := 0; i < len(value); i++ {
+		if value[i] == '\\' && i+1 < len(value) {
+			i++
+			continue
+		}
+		switch value[i] {
+		case '*', '?':
+			return true
+		case '[':
+			if hasUnescapedByte(value[i+1:], ']') {
+				return true
+			}
+		case '{':
+			if end := strings.IndexByte(value[i+1:], '}'); end >= 0 {
+				inside := value[i+1 : i+1+end]
+				if strings.Contains(inside, ",") || strings.Contains(inside, "..") {
+					return true
+				}
+			}
+		case '~':
+			if i == 0 {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func hasUnescapedByte(value string, target byte) bool {
+	for i := 0; i < len(value); i++ {
+		if value[i] == '\\' && i+1 < len(value) {
+			i++
+			continue
+		}
+		if value[i] == target {
+			return true
+		}
+	}
+	return false
+}
+
+func isHeredoc(operator syntax.RedirOperator) bool {
+	return operator == syntax.Hdoc || operator == syntax.DashHdoc || operator == syntax.WordHdoc
 }
