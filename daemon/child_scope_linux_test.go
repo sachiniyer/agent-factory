@@ -22,16 +22,29 @@ func installBoundScopeShim(t *testing.T) string {
 	shim := filepath.Join(dir, "systemd-run")
 	script := `#!/bin/sh
 set -eu
+if [ "${1:-}" = "--help" ]; then
+    printf '%s\n' '    --expand-environment=BOOL'
+    exit 0
+fi
 printf '%s\n' "$*" >> "$AF_TEST_SCOPE_LOG"
+expand=yes
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --user|--scope|--quiet|--collect) shift ;;
+        --expand-environment=no) expand=no; shift ;;
         --property=*) shift ;;
         --) shift; break ;;
         *) echo "unexpected systemd-run argument: $1" >&2; exit 64 ;;
     esac
 done
 export AF_TEST_BOUND_DAEMON_CHILD=1
+# systemd expansion sees the whole sh -c argument without understanding shell
+# quotes. Emulate the destructive case so this test proves argv preservation,
+# rather than merely checking that a flag happens to be present.
+if [ "$expand" = yes ] && [ "${1:-}" = sh ] && [ "${2:-}" = -c ]; then
+    rewritten="$(printf '%s' "${3:-}" | sed 's/\${AF_SYSTEMD_RUN_LITERAL}/expanded-by-systemd-run/g')"
+    exec "$1" "$2" "$rewritten"
+fi
 exec "$@"
 `
 	if err := os.WriteFile(shim, []byte(script), 0o700); err != nil {
@@ -52,7 +65,7 @@ func assertBoundScopeInvocation(t *testing.T, logPath, command string) {
 	}
 	got := string(raw)
 	for _, want := range []string{
-		"--user --scope --quiet --collect",
+		"--user --scope --quiet --collect --expand-environment=no",
 		"--property=BindsTo=" + autostartUnitName,
 		"--property=After=" + autostartUnitName,
 		"--property=KillMode=control-group",
@@ -70,7 +83,7 @@ func TestWatcherSpawnUsesDaemonBoundSystemdScope(t *testing.T) {
 	dir := t.TempDir()
 	s, rec := newTestSupervisor(t, staticTasks(watchTask(
 		"scope001",
-		`printf 'scope=%s\n' "${AF_TEST_BOUND_DAEMON_CHILD:-}"`,
+		`printf 'scope=%s literal=%s\n' "${AF_TEST_BOUND_DAEMON_CHILD:-}" '${AF_SYSTEMD_RUN_LITERAL}'`,
 		dir,
 	)))
 
@@ -80,8 +93,8 @@ func TestWatcherSpawnUsesDaemonBoundSystemdScope(t *testing.T) {
 	waitUntil(t, 5*time.Second, "scoped watcher to exit", func() bool {
 		return len(rec.statusesSnapshot()) > 0
 	})
-	if got := rec.eventsSnapshot(); len(got) != 1 || got[0] != "scope001:scope=1" {
-		t.Fatalf("watcher did not execute inside the bound scope shim: events=%v", got)
+	if got := rec.eventsSnapshot(); len(got) != 1 || got[0] != "scope001:scope=1 literal=${AF_SYSTEMD_RUN_LITERAL}" {
+		t.Fatalf("watcher argv changed while entering the bound scope: events=%v", got)
 	}
 	assertBoundScopeInvocation(t, logPath, "sh -c")
 }
