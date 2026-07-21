@@ -7238,6 +7238,9 @@ function rowStatus(s) {
 function isWorking(s) {
   return rowStatus(s).kind === null;
 }
+function isCreating(s) {
+  return (s.in_flight_op ?? InFlightOp.None) === InFlightOp.Creating;
+}
 function rowKind(s) {
   return rowStatus(s).kind ?? "working";
 }
@@ -11487,6 +11490,7 @@ function beginTabRename(btn, tab, actions2, editedId, editedSessionId) {
 }
 function sessionRow(s, selected, actions2, rowActions) {
   const status = rowStatus(s);
+  const creating = isCreating(s);
   const title = h2("div", { class: "af-row-title" }, rowTitle(s));
   const branch = h2(
     "div",
@@ -11496,7 +11500,7 @@ function sessionRow(s, selected, actions2, rowActions) {
     s.branch || "\u2014"
   );
   const main = h2("div", { class: "af-row-main" }, title, branch);
-  const cls = `af-row${selected ? " af-row-selected" : ""}${isArchived(s) ? " af-row-archived" : ""}`;
+  const cls = `af-row${selected ? " af-row-selected" : ""}${isArchived(s) ? " af-row-archived" : ""}${creating ? " af-row-creating" : ""}`;
   const row = h2("li", { class: cls });
   if (status.kind) {
     const dot = h2("span", { class: `af-dot af-dot-${status.kind}` }, status.glyph);
@@ -11510,7 +11514,9 @@ function sessionRow(s, selected, actions2, rowActions) {
   row.setAttribute("role", "option");
   row.setAttribute("aria-selected", selected ? "true" : "false");
   row.setAttribute("title", `${s.title} \u2014 ${status.label}`);
-  if (s.id) {
+  if (creating) {
+    row.setAttribute("aria-disabled", "true");
+  } else if (s.id) {
     const id = s.id;
     row.addEventListener("click", () => actions2.open(id));
   }
@@ -11795,16 +11801,17 @@ function newSession() {
           return;
         }
         const m = modal;
+        clearTabError();
         m.setBusy(true);
+        closeModal();
         void createSession(values, tok).then((created) => {
-          closeModal();
           if (created.id) {
             const sessions = upsertSession(store.get().sessions, created);
             store.set({ sessions, selectedId: created.id, activeTab: 0, tabError: null });
           }
         }).catch((e) => {
-          m.setBusy(false);
-          m.setError(describeError(e));
+          requestResync();
+          surfaceTabError(e);
         });
       },
       onCancel: closeModal
@@ -11981,7 +11988,7 @@ function reorderSessionTab(from, to) {
 }
 function surfaceTabError(e) {
   const msg = errorText(e);
-  console.error("af-web: tab operation failed:", msg);
+  console.error("af-web: operation failed:", msg);
   if (tabErrorTimer !== null) {
     window.clearTimeout(tabErrorTimer);
   }
@@ -12323,7 +12330,7 @@ function onKeydown(e) {
       orderedIds: filterSessions(
         orderedSessions(scopeToProject(state.sessions, state.selectedProject)),
         state.statusFilter
-      ).map((s) => s.id ?? "").filter((id) => id !== ""),
+      ).filter((s) => !isCreating(s)).map((s) => s.id ?? "").filter((id) => id !== ""),
       selectedId: state.selectedId,
       tabCount: selected ? sessionTabs(selected).length : 1,
       activeTab: state.activeTab,

@@ -133,6 +133,15 @@ go build -buildvcs=false -o "$BIN" .
 # ready as soon as it shows output (#1116/#1131).
 cat >"$HOME_DIR/fake-agent.sh" <<EOF
 #!/bin/sh
+# Creation-state probes deliberately hold the REAL backend path open. The web test
+# keys behavior by its throwaway session title, which appears in the worktree path:
+# one agent starts slowly but succeeds, and one stays alive long enough for the
+# creating row to be observed before exiting with no ready output. Every seeded and
+# ordinary fast-create session remains on the millisecond path below.
+case "\$PWD" in
+    *probe-create-slow*) sleep 8 ;;
+    *probe-create-fail*) sleep 4; exit 42 ;;
+esac
 printf '%s\n' "$READY_MARKER"
 exec cat
 EOF

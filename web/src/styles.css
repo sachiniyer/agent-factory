@@ -983,6 +983,13 @@ body {
   background: var(--af-bg-inset);
 }
 
+/* A daemon-published OpCreating row is visible but cannot attach yet. The progress
+ * cursor is the web analogue of the TUI's inert Loading row; no local spinner or
+ * optimistic state is involved. */
+.af-row-creating {
+  cursor: progress;
+}
+
 .af-row-selected {
   background: var(--af-accent-subtle);
 }
@@ -1427,9 +1434,9 @@ body {
   white-space: nowrap;
 }
 
-/* Tab-op error toast (#1592 Phase 5 PR7): a transient banner pinned bottom-right,
- * shown only while `tabError` is set. Tab ops have no modal, so this is where a
- * create/close failure surfaces instead of being swallowed. */
+/* Operation-error toast (#1592 Phase 5 PR7): a transient banner pinned bottom-right,
+ * shown only while `tabError` is set. Tab ops and asynchronous session creation have
+ * no open modal, so this is where their real daemon errors surface. */
 .af-toast {
   position: fixed;
   right: var(--af-sp-5);

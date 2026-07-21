@@ -785,6 +785,9 @@ body {
 .af-row:hover {
   background: var(--af-bg-inset);
 }
+.af-row-creating {
+  cursor: progress;
+}
 .af-row-selected {
   background: var(--af-accent-subtle);
 }

@@ -7,7 +7,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { type DotKind, isArchived, isLimitReached, isWorking, rowStatus, rowTitle } from "./status.js";
+import { type DotKind, isArchived, isCreating, isLimitReached, isWorking, rowStatus, rowTitle } from "./status.js";
 import { InFlightOp, Liveness, Status, type SessionData } from "./types.js";
 
 function sess(over: Partial<SessionData> = {}): SessionData {
@@ -52,6 +52,14 @@ test("any in-flight op overlays the liveness and reads as working (no dot)", () 
     assert.equal(st.glyph, "", `op ${op} draws no glyph`);
     assert.equal(isWorking(sess({ liveness: Liveness.Ready, in_flight_op: op })), true);
   }
+});
+
+test("isCreating distinguishes the daemon create operation from other working states", () => {
+  assert.equal(isCreating(sess({ in_flight_op: InFlightOp.Creating })), true);
+  assert.equal(isCreating(sess({ liveness: Liveness.Running })), false, "a running agent is working, not creating");
+  assert.equal(isCreating(sess({ in_flight_op: InFlightOp.Killing })), false);
+  assert.equal(isCreating(sess({ in_flight_op: InFlightOp.Archiving })), false);
+  assert.equal(isCreating(sess({ in_flight_op: InFlightOp.Restoring })), false);
 });
 
 test("liveness absent falls back to the legacy status int", () => {

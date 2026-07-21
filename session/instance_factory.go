@@ -9,6 +9,15 @@ import (
 
 // Options for creating a new instance
 type InstanceOptions struct {
+	// ID, when set, is the stable identity already announced for this instance.
+	// The daemon uses it to keep an OpCreating projection and the completed
+	// instance on one identity across slow provisioning. Empty mints a new id,
+	// which remains the normal path for every direct constructor call.
+	ID string
+	// CreatedAt, when set, is the creation time already announced with ID. The
+	// daemon supplies both together so a pending row does not jump in rail order
+	// when provisioning completes. Zero uses the current time.
+	CreatedAt time.Time
 	// Title is the title of the instance.
 	Title string
 	// TaskID marks the session as spawned by a task's delivery (#1892). Empty for
@@ -165,8 +174,22 @@ var newSessionID = func() string {
 	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
 }
 
+// NewInstanceID reserves the same stable identity NewInstance would mint. The
+// daemon calls it before a potentially slow backend factory so it can publish an
+// authoritative OpCreating projection whose id the finished Instance inherits.
+func NewInstanceID() string {
+	return newSessionID()
+}
+
 func NewInstance(opts InstanceOptions) (*Instance, error) {
-	t := time.Now()
+	t := opts.CreatedAt
+	if t.IsZero() {
+		t = time.Now()
+	}
+	id := opts.ID
+	if id == "" {
+		id = NewInstanceID()
+	}
 
 	// An in-place session runs in the repo's local working tree; a remote
 	// session has no local worktree at all — the two are contradictory. This
@@ -214,7 +237,7 @@ func NewInstance(opts InstanceOptions) (*Instance, error) {
 	}
 
 	return &Instance{
-		ID:     newSessionID(),
+		ID:     id,
 		TaskID: opts.TaskID,
 		Title:  opts.Title,
 		// A task delivery's run begins here and ends when the agent goes idle

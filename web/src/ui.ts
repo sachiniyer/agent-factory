@@ -32,7 +32,15 @@ import {
   type StatusFilter,
 } from "./filter.js";
 import { projectMeta, projectName, type ProjectSummary, projectSummaries, scopeToProject } from "./project.js";
-import { compareSessionsForRail, isArchived, isLimitReached, type RowKind, rowStatus, rowTitle } from "./status.js";
+import {
+  compareSessionsForRail,
+  isArchived,
+  isCreating,
+  isLimitReached,
+  type RowKind,
+  rowStatus,
+  rowTitle,
+} from "./status.js";
 import { ConfigPane, type ConfigStatus } from "./config.js";
 import { isRenameableTab, tabDisplayLabel, tabGlyph, tabLabel } from "./tablabel.js";
 import { insertionIndexAt, reorderTargetIndex } from "./tabreorder.js";
@@ -2071,6 +2079,7 @@ function beginTabRename(
  *  (never expected from a live Snapshot) is rendered but inert. */
 function sessionRow(s: SessionData, selected: boolean, actions: Actions, rowActions: HTMLElement | null): HTMLElement {
   const status = rowStatus(s);
+  const creating = isCreating(s);
 
   const title = h("div", { class: "af-row-title" }, rowTitle(s));
   const branch = h(
@@ -2082,7 +2091,9 @@ function sessionRow(s: SessionData, selected: boolean, actions: Actions, rowActi
   );
   const main = h("div", { class: "af-row-main" }, title, branch);
 
-  const cls = `af-row${selected ? " af-row-selected" : ""}${isArchived(s) ? " af-row-archived" : ""}`;
+  const cls = `af-row${selected ? " af-row-selected" : ""}${isArchived(s) ? " af-row-archived" : ""}${
+    creating ? " af-row-creating" : ""
+  }`;
   const row = h("li", { class: cls });
   // A working/busy row shows NO status dot (#1766) — only Ready/error states draw
   // one. When there is no dot the span is omitted entirely (kind is null), matching
@@ -2099,7 +2110,13 @@ function sessionRow(s: SessionData, selected: boolean, actions: Actions, rowActi
   row.setAttribute("role", "option");
   row.setAttribute("aria-selected", selected ? "true" : "false");
   row.setAttribute("title", `${s.title} — ${status.label}`);
-  if (s.id) {
+  if (creating) {
+    // The id is already the final stable id, but no terminal exists yet. Keeping
+    // the row inert also prevents selecting it before completion: if success then
+    // wrote the SAME selectedId, AppShell would see no selection change and retain
+    // the empty pane (the slow-create form of the invariant in index.ts newSession).
+    row.setAttribute("aria-disabled", "true");
+  } else if (s.id) {
     const id = s.id;
     row.addEventListener("click", () => actions.open(id));
   }

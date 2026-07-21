@@ -26,9 +26,15 @@ type Manager struct {
 	ready     chan struct{}
 	readyOnce sync.Once
 
-	mu             sync.Mutex
-	storage        *session.Storage
-	instances      map[string]*session.Instance
+	mu        sync.Mutex
+	storage   *session.Storage
+	instances map[string]*session.Instance
+	// pendingCreates is the daemon-owned projection of creates that have passed
+	// admission but have not finished provisioning. It is intentionally separate
+	// from instances: a docker/ssh/hook backend may block inside NewInstance before
+	// a concrete Instance exists. Snapshot and the events plane expose these rows;
+	// mutation lookups do not, so a half-built runtime cannot be acted on.
+	pendingCreates map[string]session.InstanceData
 	reservedTitles map[string]struct{}
 	// reservedRemoteNames holds in-flight remote-hook slug reservations, keyed by
 	// the BARE slug — deliberately global, unlike every other name a session owns.
@@ -217,6 +223,7 @@ func newManagerShell(cfg *config.Config) (*Manager, error) {
 		ready:               make(chan struct{}),
 		storage:             storage,
 		instances:           make(map[string]*session.Instance),
+		pendingCreates:      make(map[string]session.InstanceData),
 		reservedTitles:      make(map[string]struct{}),
 		reservedRemoteNames: make(map[string]struct{}),
 		reservedTaskRuns:    make(map[string]int),
@@ -288,16 +295,17 @@ func (m *Manager) SaveInstances() error {
 
 // Snapshot returns the authoritative InstanceData for every session the manager
 // owns, scoped to repoID (all repos when repoID is empty). It is the read side
-// of the single-writer model (#960 PR 3): the manager's in-memory instance map
-// IS the source of truth, so the TUI mirrors this projection instead of
-// re-reading instances.json. Pure read — it copies the instance pointers under
-// m.mu, then serializes each via ToInstanceData (which takes the instance's own
-// lock) OUTSIDE m.mu so a slow serialize never blocks a concurrent mutation.
-// Results are ordered by (repo, title) key for a stable diff, so the TUI
-// reconcile does not repaint on map-iteration jitter.
+// of the single-writer model (#960 PR 3): the manager's settled instance map plus
+// its daemon-owned pending-create map ARE the source of truth, so clients mirror
+// this projection instead of re-reading instances.json or inventing optimistic
+// rows. Pure read — it copies the instance pointers/pending values under m.mu,
+// then serializes each Instance via ToInstanceData (which takes its own lock)
+// OUTSIDE m.mu so a slow serialize never blocks a concurrent mutation. Results
+// are ordered by (repo, title) key for a stable diff, so the TUI reconcile does
+// not repaint on map-iteration jitter.
 func (m *Manager) Snapshot(repoID string) []session.InstanceData {
 	m.mu.Lock()
-	keys := make([]string, 0, len(m.instances))
+	keys := make([]string, 0, len(m.instances)+len(m.pendingCreates))
 	for key := range m.instances {
 		if repoID != "" {
 			rid, _ := splitDaemonInstanceKey(key)
@@ -307,18 +315,42 @@ func (m *Manager) Snapshot(repoID string) []session.InstanceData {
 		}
 		keys = append(keys, key)
 	}
+	for key := range m.pendingCreates {
+		if _, settled := m.instances[key]; settled {
+			continue
+		}
+		if repoID != "" {
+			rid, _ := splitDaemonInstanceKey(key)
+			if rid != repoID {
+				continue
+			}
+		}
+		keys = append(keys, key)
+	}
 	sort.Strings(keys)
-	insts := make([]*session.Instance, 0, len(keys))
+	type snapshotEntry struct {
+		instance *session.Instance
+		pending  session.InstanceData
+	}
+	entries := make([]snapshotEntry, 0, len(keys))
 	for _, key := range keys {
 		if inst := m.instances[key]; inst != nil {
-			insts = append(insts, inst)
+			entries = append(entries, snapshotEntry{instance: inst})
+			continue
+		}
+		if pending, ok := m.pendingCreates[key]; ok {
+			entries = append(entries, snapshotEntry{pending: pending})
 		}
 	}
 	m.mu.Unlock()
 
-	data := make([]session.InstanceData, 0, len(insts))
-	for _, inst := range insts {
-		data = append(data, inst.ToInstanceData())
+	data := make([]session.InstanceData, 0, len(entries))
+	for _, entry := range entries {
+		if entry.instance != nil {
+			data = append(data, entry.instance.ToInstanceData())
+			continue
+		}
+		data = append(data, entry.pending)
 	}
 	return data
 }
