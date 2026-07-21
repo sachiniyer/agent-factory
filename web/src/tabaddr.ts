@@ -47,6 +47,9 @@ export function isLoopbackWebUrl(raw: string): boolean {
   try {
     let host = new URL(raw).hostname.toLowerCase();
     host = host.replace(/^\[|\]$/g, ""); // strip IPv6 brackets
+    // A single trailing dot is the DNS root label. Strip exactly one to mirror
+    // session.IsLoopbackWebTarget; a doubled dot remains malformed/fail-closed.
+    host = host.replace(/\.$/, "");
     return host === "localhost" || host === "::1" || host === "127.0.0.1" || host.startsWith("127.");
   } catch {
     return false;

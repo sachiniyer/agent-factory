@@ -7832,6 +7832,7 @@ function isLoopbackWebUrl(raw) {
   try {
     let host = new URL(raw).hostname.toLowerCase();
     host = host.replace(/^\[|\]$/g, "");
+    host = host.replace(/\.$/, "");
     return host === "localhost" || host === "::1" || host === "127.0.0.1" || host.startsWith("127.");
   } catch {
     return false;
