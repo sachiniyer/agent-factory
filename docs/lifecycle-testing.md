@@ -39,14 +39,14 @@ is wired **nightly** rather than per-PR (`.github/workflows/lifecycle.yml`). It
 also runs on a PR that touches the gate's own files, so a change to the harness
 proves itself.
 
-CI authenticates both the harness's release-list request and current `af`'s
-release discovery with the scoped workflow `GITHUB_TOKEN`; they do not consume
-the shared runner IP's unauthenticated quota. A transport failure, quota
-response (403/429), or GitHub 5xx is reported as **SKIP / could not verify**, not
-as “upgrade broken.” This matters at the N-1 boundary: an already-published old
-binary cannot retroactively learn token support. Malformed release data, a 404,
-and every failure after discovery remain **FAIL**, so availability handling
-cannot launder a product or release regression into a green result.
+CI authenticates the harness's release-list request with the scoped workflow
+`GITHUB_TOKEN`, so that request does not consume the shared runner IP's
+unauthenticated quota. Product release discovery intentionally remains
+anonymous and never reads that ambient token; the harness therefore treats a
+transport failure, quota response (403/429), or GitHub 5xx from either discovery
+path as **SKIP / could not verify**, not as “upgrade broken.” Malformed release
+data, a 404, and every failure after discovery remain **FAIL**, so availability
+handling cannot launder a product or release regression into a green result.
 
 ## The scenarios
 
