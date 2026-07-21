@@ -56,8 +56,9 @@ type InstanceData struct {
 	// LifecycleAction, this is derived live and scrubbed before disk persistence.
 	CanKill bool `json:"can_kill,omitempty"`
 	// TaskRunActive records whether this session's task run is still in flight
-	// (#1892) — true from creation, false once the agent goes idle. It is the one
-	// fact the watch-task concurrency cap counts, and it is stored rather than
+	// (#1892) — true from creation, false once the agent goes idle or startup
+	// settles terminal-unknown. It is the one fact the watch-task concurrency cap
+	// counts, and it is stored rather than
 	// re-derived because every neighbouring signal answers a different question:
 	// Lost cannot tell a finished run from an interrupted one, and an in-flight op
 	// means the DAEMON is busy (archiving a completed session is teardown, not

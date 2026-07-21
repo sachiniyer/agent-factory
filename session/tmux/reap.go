@@ -1,6 +1,8 @@
 package tmux
 
 import (
+	"errors"
+	"fmt"
 	"strconv"
 	"strings"
 	"time"
@@ -49,8 +51,11 @@ var (
 // tmux session's panes: each pane root (verified to be a live child of a
 // tmux server), its ppid-descendants, and its kernel-session members. The
 // teardown paths call it BEFORE kill-session; `af doctor` uses it to map a
-// live session's legitimate processes. Returns nil on any failure — callers
-// treat it as strictly best-effort.
+// live session's legitimate processes. This public diagnostic form is strictly
+// best-effort: a command/snapshot failure returns nil, while malformed individual
+// pane rows are omitted and any independently verified panes are still returned.
+// Destructive teardown uses captureSessionProcessTrees below so it also receives
+// the completeness error and can refuse workspace cleanup.
 //
 // The list-panes probe is bounded by tmuxCommandTimeout (#1917): it runs first
 // on the kill teardown, so an unbounded stall here wedges the kill before
@@ -58,19 +63,31 @@ var (
 // nil (best-effort) result — nothing is reaped, which is the safe direction: a
 // wedged server has told us nothing about which processes are actually leaked.
 func SessionProcessTrees(cmdExec cmd.Executor, sanitizedName string) []proctree.Process {
+	procs, _ := captureSessionProcessTrees(cmdExec, sanitizedName)
+	return procs
+}
+
+// captureSessionProcessTrees is the evidence-bearing half of
+// SessionProcessTrees. Ordinary user-driven teardown remains best-effort and uses
+// any partial result, but a caller about to delete or move the worktree also needs
+// to know whether the capture itself was complete. Returning that answer separately
+// prevents "no descendants" from being confused with "the process table/list-panes
+// could not be read" (#2260 review).
+func captureSessionProcessTrees(cmdExec cmd.Executor, sanitizedName string) ([]proctree.Process, error) {
 	ctx, cancel := tmuxTimeoutContext()
 	defer cancel()
 	out, err := outputTmuxBoundedWith(ctx, cmdExec,
 		"list-panes", "-s", "-t", exactTarget(sanitizedName), "-F", "#{pane_pid}")
 	if err != nil {
-		return nil
+		return nil, fmt.Errorf("cannot list panes before teardown: %w", err)
 	}
 	snap, err := proctree.Snapshot()
 	if err != nil {
-		return nil
+		return nil, fmt.Errorf("cannot snapshot pane process trees before teardown: %w", err)
 	}
 	seen := make(map[int]bool)
 	var procs []proctree.Process
+	var captureErrs []error
 	add := func(p proctree.Process) {
 		if !seen[p.PID] {
 			seen[p.PID] = true
@@ -80,10 +97,12 @@ func SessionProcessTrees(cmdExec cmd.Executor, sanitizedName string) []proctree.
 	for _, field := range strings.Fields(string(out)) {
 		panePID, err := strconv.Atoi(field)
 		if err != nil || panePID <= 1 {
+			captureErrs = append(captureErrs, fmt.Errorf("invalid pane pid %q in list-panes output", field))
 			continue
 		}
 		root, ok := snap[panePID]
 		if !ok {
+			captureErrs = append(captureErrs, fmt.Errorf("pane process %d disappeared before its descendants could be captured", panePID))
 			continue
 		}
 		// A real pane root is a direct child of a tmux server. Anything
@@ -92,6 +111,7 @@ func SessionProcessTrees(cmdExec cmd.Executor, sanitizedName string) []proctree.
 		// isn't ours.
 		parent, ok := snap[root.PPID]
 		if !ok || !strings.HasPrefix(parent.Comm, "tmux") {
+			captureErrs = append(captureErrs, fmt.Errorf("pane process %d is not a verified child of a tmux server", panePID))
 			continue
 		}
 		for _, p := range proctree.TreeOf(snap, panePID) {
@@ -104,7 +124,7 @@ func SessionProcessTrees(cmdExec cmd.Executor, sanitizedName string) []proctree.
 			add(p)
 		}
 	}
-	return procs
+	return procs, errors.Join(captureErrs...)
 }
 
 // reapLeakedProcesses waits for the captured processes to exit after
@@ -112,8 +132,8 @@ func SessionProcessTrees(cmdExec cmd.Executor, sanitizedName string) []proctree.
 // verified — see proctree.KillEscalating). Runs synchronously; teardown
 // paths that must stay snappy call it in a goroutine. Every signal is logged
 // per-process.
-func reapLeakedProcesses(sanitizedName string, procs []proctree.Process, grace, termWait time.Duration) {
-	proctree.KillEscalating(procs, grace, termWait, func(format string, args ...any) {
+func reapLeakedProcesses(sanitizedName string, procs []proctree.Process, grace, termWait time.Duration) []proctree.Process {
+	return proctree.KillEscalating(procs, grace, termWait, func(format string, args ...any) {
 		// sanitizedName is a runtime value that deliberately preserves `%` (see
 		// tmux name sanitization), so it must be a `%s` ARGUMENT — never spliced
 		// into the format string, where its `%` sequences would be interpreted

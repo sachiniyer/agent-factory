@@ -66,6 +66,15 @@ type closeRun struct {
 	unknown bool
 }
 
+// closeProcessOutcome carries the process-tree half of teardown separately from
+// tmux's PaneState. Close remains latency-oriented and discards it; the destructive
+// CloseAndWaitForPaneExit path requires both answers before authorizing workspace
+// cleanup.
+type closeProcessOutcome struct {
+	captureErr error
+	remaining  []proctree.Process
+}
+
 // tmux runs one bounded tmux command and RECORDS a tripped deadline. The only
 // place in the close path that decides what a deadline means.
 func (r *closeRun) tmux(args ...string) error {
@@ -98,13 +107,21 @@ func (r *closeRun) state() PaneState {
 }
 
 func (t *TmuxSession) Close() (PaneState, error) {
+	state, err, _ := t.close(false)
+	return state, err
+}
+
+// close is the single tmux/process teardown implementation. waitForProcesses is
+// false for interactive teardown (the captured-tree reaper remains asynchronous)
+// and true only when a caller will mutate the worktree immediately afterward.
+func (t *TmuxSession) close(waitForProcesses bool) (PaneState, error, closeProcessOutcome) {
 	var errs []error
 	r := &closeRun{t: t}
 
 	// Capture the panes' process trees before kill-session — afterwards any
 	// survivor is reparented to init and its ancestry is unrecoverable
 	// (#1104).
-	leaked := SessionProcessTrees(t.cmdExec, t.sanitizedName)
+	leaked, captureErr := captureSessionProcessTrees(t.cmdExec, t.sanitizedName)
 
 	// Bounded by tmuxCommandTimeout (#1917), through the run so the deadline counts
 	// itself: an unbounded kill-session against a wedged server blocks
@@ -153,15 +170,20 @@ func (t *TmuxSession) Close() (PaneState, error) {
 	// Async so the SIGHUP grace period never adds latency to user-driven
 	// teardown; the daemon and TUI processes are long-lived, so the sweep
 	// always gets to finish. CLI kills run daemon-side (KillSession RPC).
+	processes := closeProcessOutcome{captureErr: captureErr}
 	if len(leaked) > 0 {
-		go reapLeakedProcesses(t.sanitizedName, leaked, reapGraceWait, reapTermWait)
+		if waitForProcesses {
+			processes.remaining = reapLeakedProcesses(t.sanitizedName, leaked, reapGraceWait, reapTermWait)
+		} else {
+			go reapLeakedProcesses(t.sanitizedName, leaked, reapGraceWait, reapTermWait)
+		}
 	}
 
 	// errors.Join, not a flattened string: the ErrTmuxTimeout sentinel has to stay
 	// reachable through errors.Is for callers that gate on it (#1917). The old
 	// hand-built message erased it. The state is DERIVED from the run — this
 	// function never names a PaneState constant.
-	return r.state(), errors.Join(errs...)
+	return r.state(), errors.Join(errs...), processes
 }
 
 // CloseAttachOnly is the non-destructive sibling of Close: it releases whatever
@@ -186,19 +208,20 @@ func (t *TmuxSession) CloseAttachOnly() error {
 // short enough that teardown of a wedged process doesn't hang the caller.
 var paneExitWait = 3 * time.Second
 
-// CloseAndWaitForPaneExit terminates the tmux session like Close, then waits
-// (bounded by paneExitWait) until the pane's root process has actually
-// exited. `tmux kill-session` only delivers SIGHUP and returns immediately;
-// an agent that is still flushing state files (.claude/, .turbo/, ...) races
-// any directory removal that follows and leaves a half-deleted worktree
-// behind ("Directory not empty", #802). Callers that delete the session's
+// CloseAndWaitForPaneExit terminates the tmux session like Close, then waits for
+// every process captured from the pane (root, descendants, and SID members) to
+// exit or finish the bounded TERM→KILL reaper. `tmux kill-session` only delivers
+// SIGHUP and returns immediately; any survivor that is still flushing state files
+// (.claude/, .turbo/, ...) races directory removal and leaves a half-deleted
+// worktree behind ("Directory not empty", #802). Callers that delete the session's
 // worktree right after teardown must use this instead of Close.
 //
-// paneExitWait bounds ONLY the waitForPIDExit poll below, NOT the whole call —
+// paneExitWait bounds ONLY the root fallback poll below, NOT the whole call —
 // a distinction #1917 was misread on. The tmux commands are what a wedged server
 // stalls, and each carries its own tmuxCommandTimeout: display-message (panePID),
-// then Close's list-panes, kill-session, and at most one has-session probe. So the
-// real worst case is ~4×tmuxCommandTimeout + paneExitWait, all of it finite —
+// then Close's list-panes, kill-session, and at most one has-session probe. The
+// captured-tree reaper adds at most reapGraceWait + reapTermWait + one final second.
+// So the real worst case remains finite —
 // which is the property daemon.KillSession needs, since it holds a per-session
 // kills-in-flight guard across this call with no deadline of its own.
 func (t *TmuxSession) CloseAndWaitForPaneExit() (PaneState, error) {
@@ -215,7 +238,7 @@ func (t *TmuxSession) CloseAndWaitForPaneExit() (PaneState, error) {
 		// both distinctions explicit.
 		paneProcess, waitForPane, processErr = capturePaneProcess(pid)
 	}
-	state, closeErr := t.Close()
+	state, closeErr, processes := t.close(true)
 	if pidErr != nil {
 		// A TIMED-OUT panePID is not "nothing to wait on" (#1917). It means the
 		// server never told us which process to wait for — so even if the
@@ -238,6 +261,23 @@ func (t *TmuxSession) CloseAndWaitForPaneExit() (PaneState, error) {
 		// prove that process stopped writing, so fail closed like a timed-out PID
 		// query rather than deleting the worktree on an existence guess.
 		return PaneStateUnknown, errors.Join(closeErr, processErr)
+	}
+	if processes.captureErr != nil {
+		// The pane leader was known, but the full process set was not. A child may
+		// already have detached/reparented and still be writing after the leader exits;
+		// leader death cannot manufacture proof about descendants we failed to see.
+		err := fmt.Errorf("could not establish the pane's complete process tree before kill-session: %w", processes.captureErr)
+		log.WarningLog.Printf("tmux session %s: %v; refusing worktree cleanup", t.sanitizedName, err)
+		return PaneStateUnknown, errors.Join(closeErr, err)
+	}
+	if len(processes.remaining) > 0 {
+		pids := make([]string, 0, len(processes.remaining))
+		for _, process := range processes.remaining {
+			pids = append(pids, strconv.Itoa(process.PID))
+		}
+		err := fmt.Errorf("pane processes %s are still alive after bounded teardown", strings.Join(pids, ", "))
+		log.WarningLog.Printf("tmux session %s: %v; refusing worktree cleanup", t.sanitizedName, err)
+		return PaneStateUnknown, errors.Join(closeErr, err)
 	}
 	if waitForPane && !waitForProcessExit(paneProcess, paneExitWait) {
 		// kill-session returning establishes only that SIGHUP was sent, not that the

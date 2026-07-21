@@ -159,6 +159,54 @@ func TestGhostTaskRunReleasesWhenItsRunIsOver(t *testing.T) {
 	}
 }
 
+// TestStartupUnknownGhostDoesNotHoldTaskRunSlot covers contradictory rows from
+// the rollout window: StartupStateUnknown is terminal even if an older writer
+// left TaskRunActive set. Ghost accounting reads raw storage because the row did
+// not load, so it must honor the terminal marker directly rather than wedging a
+// task behind a bit no in-memory lifecycle transition can ever clear.
+func TestStartupUnknownGhostDoesNotHoldTaskRunSlot(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	repoPath := setupControlRepo(t)
+	repo, err := config.RepoFromPath(repoPath)
+	if err != nil {
+		t.Fatalf("RepoFromPath: %v", err)
+	}
+	const title = "startup-unknown-ghost"
+	if err := appendInstanceData(repo.ID, session.InstanceData{
+		ID:                  "startup-unknown-id",
+		TaskID:              "task1",
+		Title:               title,
+		Path:                repoPath,
+		Status:              session.Lost,
+		Liveness:            session.LiveLost,
+		TaskRunActive:       true,
+		StartupStateUnknown: true,
+		BackendType:         "local",
+		Worktree:            session.GitWorktreeData{RepoPath: repoPath},
+	}); err != nil {
+		t.Fatalf("append startup-unknown row: %v", err)
+	}
+	failLoadFor(t, title)
+
+	manager, err := NewManager(config.DefaultConfig())
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	if err := manager.RestoreInstances(); err != nil {
+		t.Fatalf("RestoreInstances: %v", err)
+	}
+	manager.mu.Lock()
+	counted := manager.countTaskRunsLocked(repo.ID, "task1")
+	admitErr := manager.admitTaskRunLocked(repo.ID, "task1", 1)
+	manager.mu.Unlock()
+	if counted != 0 {
+		t.Fatalf("startup-unknown ghost consumed %d task slot(s); terminal startup outcomes must release the cap", counted)
+	}
+	if admitErr != nil {
+		t.Fatalf("startup-unknown ghost blocked the next task event: %v", admitErr)
+	}
+}
+
 // TestGhostTaskRunClearsWhenTheRowLoadsAgain: the ghost set is a projection,
 // rebuilt every refresh — not bookkeeping. A row that starts loading again must
 // stop being a ghost, or its slot would be held twice: once by the ghost and once

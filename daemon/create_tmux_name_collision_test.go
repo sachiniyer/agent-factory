@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/session/tmux"
@@ -179,4 +181,44 @@ func TestReserveCreateRejectsMultipleArchivedTmuxCollisionsWithoutRename(t *test
 			t.Fatalf("failed create mutated archived row %q: %+v", title, inst)
 		}
 	}
+}
+
+func TestReserveCreateRejectsDiskOnlyCollisionBeforeArchivedRename(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	archived, _ := seedArchivedSessionBranchFreed(t, manager, repoID, repoPath, "a/b", "slash-branch")
+	originalTitle := archived.Title
+	originalPath := archived.GetWorktreePath()
+
+	// This non-Loading row remains authoritative on disk but fails to materialize
+	// during refresh, reproducing a broken worktree/backend row. It shares the
+	// local tmux namespace with a/b even though its title differs.
+	const diskOnlyTitle = "a_b"
+	require.NoError(t, appendInstanceData(repoID, session.InstanceData{
+		ID:          "disk-only-collision",
+		Title:       diskOnlyTitle,
+		Path:        repoPath,
+		Status:      session.Ready,
+		Liveness:    session.LiveReady,
+		BackendType: "local",
+		Worktree:    session.GitWorktreeData{RepoPath: repoPath},
+	}))
+	failLoadFor(t, diskOnlyTitle)
+
+	_, _, _, renamed, err := manager.reserveCreate(CreateSessionRequest{
+		RepoPath: repoPath,
+		Title:    "a/b",
+		Program:  tmux.ProgramClaude,
+	})
+	require.Error(t, err)
+	require.Nil(t, renamed)
+	require.Contains(t, err.Error(), "both claim")
+
+	manager.mu.Lock()
+	tracked := manager.instances[daemonInstanceKey(repoID, originalTitle)]
+	manager.mu.Unlock()
+	require.Same(t, archived, tracked, "a refused create must keep the archived row under its original manager key")
+	require.Equal(t, originalTitle, archived.Title)
+	require.Equal(t, originalPath, archived.GetWorktreePath(), "a refused create must not relocate the archived worktree")
+	require.NotNil(t, recordFor(t, repoID, originalTitle), "the archived storage row must not be renamed")
+	require.NotNil(t, recordFor(t, repoID, diskOnlyTitle), "the disk-only claimant must remain untouched")
 }

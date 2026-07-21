@@ -366,6 +366,30 @@ func (b unsafeKillBackend) Kill(*session.Instance) error {
 	return fmt.Errorf("%w: leaving the workspace untouched", session.ErrPaneMayBeLive)
 }
 
+// retryFailedCreateBackend models a known startup failure whose first cleanup
+// cannot prove the workspace safe, followed by the successful retry
+// finishUserKill performs on a later status poll.
+type retryFailedCreateBackend struct {
+	readyFakeBackend
+	mu        sync.Mutex
+	killCalls int
+}
+
+func (b *retryFailedCreateBackend) Start(*session.Instance, bool) error {
+	return fmt.Errorf("agent program exited immediately")
+}
+
+func (b *retryFailedCreateBackend) Kill(instance *session.Instance) error {
+	b.mu.Lock()
+	b.killCalls++
+	call := b.killCalls
+	b.mu.Unlock()
+	if call == 1 {
+		return fmt.Errorf("%w: leaving the workspace untouched", session.ErrPaneMayBeLive)
+	}
+	return b.readyFakeBackend.Kill(instance)
+}
+
 // TestCreateSession_UnsafeCleanup_KeepsTheRecordAndTheTitle is round-3 finding (3).
 //
 // A failed create discards its instance and releases the title — correct, because
@@ -429,6 +453,61 @@ func TestCreateSession_UnsafeCleanup_KeepsTheRecordAndTheTitle(t *testing.T) {
 	manager.mu.Unlock()
 	if !tracked {
 		t.Fatal("the preserved session is not tracked, so the user cannot kill it through the product")
+	}
+}
+
+func TestFailedCreateCleanupRetryPublishesRemoval(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	backend := &retryFailedCreateBackend{readyFakeBackend: readyFakeBackend{session.NewFakeBackend()}}
+	restore := session.SetBackendFactoryForTest(func(session.InstanceOptions, string) (session.Backend, error) {
+		return backend, nil
+	})
+	t.Cleanup(restore)
+
+	repoPath := setupControlRepo(t)
+	repo, err := config.RepoFromPath(repoPath)
+	if err != nil {
+		t.Fatalf("RepoFromPath: %v", err)
+	}
+	manager, err := NewManager(config.DefaultConfig())
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	_, events := manager.events.subscribe()
+
+	_, createErr := manager.CreateSession(context.Background(), CreateSessionRequest{
+		Title: "retry-cleanup", RepoPath: repoPath, Program: "claude",
+	})
+	if createErr == nil {
+		t.Fatal("CreateSession reported success though startup failed")
+	}
+	pendingType, pending := nextCreateLifecycleEvent(t, events)
+	settledType, settled := nextCreateLifecycleEvent(t, events)
+	if pendingType != agentproto.EventSessionUpdated || settledType != agentproto.EventSessionUpdated ||
+		settled.ID != pending.ID || !settled.UserKilled {
+		t.Fatalf("failed create did not publish one stable retained tombstone: pending=(%s, %+v) settled=(%s, %+v)", pendingType, pending, settledType, settled)
+	}
+
+	manager.mu.Lock()
+	inst := manager.instances[daemonInstanceKey(repo.ID, "retry-cleanup")]
+	manager.mu.Unlock()
+	if inst == nil {
+		t.Fatal("failed create was not retained for its cleanup retry")
+	}
+	manager.refreshInstanceStatus(repo.ID, inst)
+
+	removedType, removed := nextCreateLifecycleEvent(t, events)
+	if removedType != agentproto.EventSessionKilled || removed.ID != pending.ID || removed.Title != pending.Title {
+		t.Fatalf("cleanup retry removal event = (%s, %+v), want stable session.killed for %+v", removedType, removed, pending)
+	}
+	if rec := recordFor(t, repo.ID, "retry-cleanup"); rec != nil {
+		t.Fatalf("successful cleanup retry left storage row: %+v", rec)
+	}
+	manager.mu.Lock()
+	_, tracked := manager.instances[daemonInstanceKey(repo.ID, "retry-cleanup")]
+	manager.mu.Unlock()
+	if tracked {
+		t.Fatal("successful cleanup retry left the failed create tracked")
 	}
 }
 

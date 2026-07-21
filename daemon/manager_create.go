@@ -302,7 +302,7 @@ func (m *Manager) reserveCreate(req CreateSessionRequest) (*config.RepoContext, 
 		// discovering it at `git worktree add` leaves the archived session renamed
 		// for a create that then did not happen, which is exactly the state the
 		// admission comment above promises this function never produces.
-		if err := m.refuseHeldBranchReuseLocked(repo.ID, repo.Root, title, nameNamespace, req.InPlace); err != nil {
+		if err := m.refuseHeldBranchReuseLocked(repo.ID, repo.Root, title, nameNamespace, req.InPlace, diskData); err != nil {
 			return nil, "", nil, nil, err
 		}
 		renamedArchived, err = m.renameArchivedForReuseLocked(repo.ID, repo.Root, title, req.Program, nameNamespace, &diskData)
@@ -404,11 +404,11 @@ func (m *Manager) reserveCreate(req CreateSessionRequest) (*config.RepoContext, 
 //     failed probe the create proceeds and, if the branch really is held, fails
 //     loudly at `git worktree add`: precisely the pre-guard behavior, which
 //     destroyed nothing. Only a branch git POSITIVELY reports as held refuses.
-func (m *Manager) refuseHeldBranchReuseLocked(repoID, repoPath, title string, namespace runtimeNameNamespace, inPlace bool) error {
+func (m *Manager) refuseHeldBranchReuseLocked(repoID, repoPath, title string, namespace runtimeNameNamespace, inPlace bool, diskData []session.InstanceData) error {
 	if namespace != runtimeNamespaceLocalTmux || inPlace {
 		return nil
 	}
-	archived, _, err := m.findArchivedOnlyCollisionLocked(repoID, repoPath, title, namespace)
+	archived, _, err := m.findArchivedOnlyCollisionLocked(repoID, repoPath, title, namespace, diskData)
 	if err != nil {
 		return err
 	}
@@ -442,7 +442,7 @@ var reuseArchivedRenamePersist = renameInstanceDataTitle
 // the name, in which case the create is left to fail in validateTitleAvailableLocked
 // exactly as before. Runs under m.mu.
 func (m *Manager) renameArchivedForReuseLocked(repoID, repoPath, title, program string, namespace runtimeNameNamespace, diskData *[]session.InstanceData) (*session.InstanceData, error) {
-	archived, oldKey, err := m.findArchivedOnlyCollisionLocked(repoID, repoPath, title, namespace)
+	archived, oldKey, err := m.findArchivedOnlyCollisionLocked(repoID, repoPath, title, namespace, *diskData)
 	if err != nil {
 		return nil, err
 	}
@@ -547,14 +547,15 @@ func (m *Manager) renameArchivedForReuseLocked(repoID, repoPath, title, program 
 	return &renamed, nil
 }
 
-// findArchivedOnlyCollisionLocked returns the ONE archived instance whose title
-// collides with `title`, together with its manager-map key — but only when it is
-// the sole claim. A live/reserved collision returns nil so ordinary availability
-// validation reports it. Multiple archived claims return an error immediately:
-// renaming an arbitrary map-iteration winner would mutate user state and still
-// leave the requested runtime name unavailable.
+// findArchivedOnlyCollisionLocked returns the ONE loaded archived instance whose
+// title collides with `title`, together with its manager-map key — but only when
+// it is the sole claim across reservations, loaded instances, and durable rows.
+// A live/reserved collision returns nil so ordinary availability validation
+// reports it. Multiple claims return an error immediately: renaming an arbitrary
+// loaded winner would mutate user state and still leave the requested runtime
+// name unavailable.
 // Runs under m.mu.
-func (m *Manager) findArchivedOnlyCollisionLocked(repoID, repoPath, title string, namespace runtimeNameNamespace) (*session.Instance, string, error) {
+func (m *Manager) findArchivedOnlyCollisionLocked(repoID, repoPath, title string, namespace runtimeNameNamespace, diskData []session.InstanceData) (*session.Instance, string, error) {
 	for key := range m.reservedTitles {
 		rid, existing := splitDaemonInstanceKey(key)
 		if rid == repoID && m.titlesCollide(existing, title) {
@@ -590,6 +591,32 @@ func (m *Manager) findArchivedOnlyCollisionLocked(repoID, repoPath, title string
 		}
 		archived = inst
 		archivedKey = key
+	}
+	if archived == nil {
+		// A disk-only claim will be rejected by the ordinary availability check.
+		// With no loaded archived row there is nothing this helper could mutate,
+		// so leave that path's established diagnostic in charge.
+		return nil, "", nil
+	}
+
+	// diskData contains the persisted copy of the loaded archived row as well as
+	// rows refreshLocked could not materialize. Consume exactly ONE matching copy
+	// of the loaded row; every other colliding non-Loading record is an independent
+	// namespace claim. Checking it before RenameArchived is load-bearing: the
+	// later availability check also sees disk-only rows, but by then the archive's
+	// worktree, title, manager key, and storage row have already been rewritten.
+	matchedPersistedCopy := false
+	for _, data := range diskData {
+		bothUseLocalTmux := namespace == runtimeNamespaceLocalTmux && data.UsesLocalTmux()
+		if m.titleCollisionNamespace(repoPath, data.Title, title, bothUseLocalTmux) == titleNamespaceNone || data.Status == session.Loading {
+			continue
+		}
+		if !matchedPersistedCopy && data.Title == archived.Title && data.ID == archived.ID {
+			matchedPersistedCopy = true
+			continue
+		}
+		return nil, "", fmt.Errorf("cannot reuse session name %q: archived session %q and stored session %q both claim its runtime namespace; rename or permanently delete one before retrying",
+			title, archived.Title, data.Title)
 	}
 	return archived, archivedKey, nil
 }

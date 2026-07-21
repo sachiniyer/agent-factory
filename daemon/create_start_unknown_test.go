@@ -78,7 +78,7 @@ func TestCreateSession_UnknownStartDoesNotAttemptDestructiveCleanup(t *testing.T
 	_, events := manager.events.subscribe()
 
 	_, createErr := manager.CreateSession(context.Background(), CreateSessionRequest{
-		Title: "uncertain-start", RepoPath: repoPath, Program: "claude",
+		Title: "uncertain-start", RepoPath: repoPath, Program: "claude", TaskID: "task-uncertain",
 	})
 	if createErr == nil {
 		t.Fatal("CreateSession reported success though startup state is unknown")
@@ -94,6 +94,9 @@ func TestCreateSession_UnknownStartDoesNotAttemptDestructiveCleanup(t *testing.T
 	if settled.ID != pending.ID || !settled.StartupStateUnknown || settled.InFlightOp != session.OpNone {
 		t.Fatalf("retained uncertain create did not settle the pending identity: pending=%+v settled=%+v", pending, settled)
 	}
+	if !pending.TaskRunActive || settled.TaskRunActive {
+		t.Fatalf("startup-unknown must atomically release its task slot: pending=%+v settled=%+v", pending, settled)
+	}
 	if calls := backend.kills(); calls != 0 {
 		t.Fatalf("CreateSession attempted %d destructive cleanup(s) after startup already reported an unknown state; the same uncertain binding cannot prove the runtime absent", calls)
 	}
@@ -104,6 +107,9 @@ func TestCreateSession_UnknownStartDoesNotAttemptDestructiveCleanup(t *testing.T
 	}
 	if !rec.StartupStateUnknown {
 		t.Fatal("the retained record did not durably classify its startup as unknown")
+	}
+	if rec.TaskRunActive {
+		t.Fatal("the retained startup-unknown record still consumes its task's concurrency slot")
 	}
 	if rec.UserKilled {
 		t.Fatal("an uncertain startup was recorded as a kill tombstone; the daemon would automatically retry destructive cleanup")

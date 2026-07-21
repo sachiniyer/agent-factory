@@ -4,7 +4,10 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -12,7 +15,65 @@ import (
 
 	"github.com/sachiniyer/agent-factory/cmd/cmd_test"
 	"github.com/sachiniyer/agent-factory/internal/proctree"
+	"github.com/sachiniyer/agent-factory/internal/testguard"
 )
+
+func TestCloseAndWaitForPaneExit_ReapsLivingDescendantBeforeReturning(t *testing.T) {
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skip("tmux is not installed")
+	}
+	testguard.IsolateTmux(t)
+	shrinkReapWaits(t)
+	name := fmt.Sprintf("af_test_close_desc_%d", time.Now().UnixNano())
+	childFile := filepath.Join(t.TempDir(), "child.pid")
+	// The pane leader exits on tmux's SIGHUP. Its child inherits ignored HUP/TERM
+	// dispositions and therefore survives until the captured-tree reaper reaches
+	// SIGKILL — exactly the process the old leader-only wait returned ahead of.
+	command := fmt.Sprintf("sh -c 'trap \"\" HUP TERM; echo $$ > %s; exec sleep 300' & exec sleep 300", strconv.Quote(childFile))
+	require.NoError(t, exec.Command("tmux", "new-session", "-d", "-s", name, command).Run())
+	t.Cleanup(func() { _ = exec.Command("tmux", "kill-session", "-t", name).Run() })
+
+	var childPID int
+	require.Eventually(t, func() bool {
+		raw, err := os.ReadFile(childFile)
+		if err != nil {
+			return false
+		}
+		childPID, err = strconv.Atoi(strings.TrimSpace(string(raw)))
+		return err == nil && childPID > 1
+	}, 3*time.Second, 20*time.Millisecond)
+	child := processIdentity(t, childPID)
+	t.Cleanup(func() { _ = syscall.Kill(childPID, syscall.SIGKILL) })
+
+	s := NewTmuxSessionFromSanitizedName(name, "sh")
+	state, err := s.CloseAndWaitForPaneExit()
+	require.NoError(t, err)
+	require.Equal(t, PaneStateKnown, state)
+	require.False(t, proctree.AliveSame(child),
+		"destructive teardown returned while a captured pane descendant could still write to the worktree")
+}
+
+func TestCloseAndWaitForPaneExit_UnobservableProcessTreeKeepsCleanupUnsafe(t *testing.T) {
+	process := exitedProcess(t)
+	cmdExec := cmd_test.MockCmdExec{
+		RunFunc: func(*exec.Cmd) error { return nil },
+		OutputFunc: func(command *exec.Cmd) ([]byte, error) {
+			if strings.Contains(command.String(), "display-message") {
+				return []byte(fmt.Sprintf("%d\n", process.PID)), nil
+			}
+			if strings.Contains(command.String(), "list-panes") {
+				return []byte("not-a-pane-pid\n"), nil
+			}
+			return nil, nil
+		},
+	}
+
+	s := newTmuxSession(toTmuxName("close-wait-unobservable-tree", ""), "claude", NewMockPtyFactory(t), cmdExec)
+	state, err := s.CloseAndWaitForPaneExit()
+	require.ErrorContains(t, err, "complete process tree")
+	require.Equal(t, PaneStateUnknown, state,
+		"an unreadable descendant set must not be reduced to the observed exit of the pane leader")
+}
 
 func processIdentity(t *testing.T, pid int) proctree.Process {
 	t.Helper()

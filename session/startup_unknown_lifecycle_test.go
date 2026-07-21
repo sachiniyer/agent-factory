@@ -26,7 +26,7 @@ func TestStartupUnknownIsTerminalAndKillableButHasNoLifecycleAction(t *testing.T
 	}
 
 	inst, err := NewInstance(InstanceOptions{
-		ID: "unknown-id", Title: "uncertain", Path: t.TempDir(), Program: "claude",
+		ID: "unknown-id", TaskID: "task-unknown", Title: "uncertain", Path: t.TempDir(), Program: "claude",
 	})
 	if err != nil {
 		t.Fatalf("NewInstance: %v", err)
@@ -38,6 +38,9 @@ func TestStartupUnknownIsTerminalAndKillableButHasNoLifecycleAction(t *testing.T
 	}
 	if view.Activity() != ActivityTerminal {
 		t.Fatalf("live startup-unknown instance classified as %v, want terminal", view.Activity())
+	}
+	if view.TaskRunActive {
+		t.Fatal("startup-unknown instance kept a task run slot no future poll can release")
 	}
 	if action := inst.LifecycleAction(); action != LifecycleActionNone {
 		t.Fatalf("startup-unknown instance advertises lifecycle action %q", action)
