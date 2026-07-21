@@ -6392,7 +6392,7 @@ function backendChoices(catalog) {
       // "Repo default" with no parenthetical when the daemon reports no default:
       // that is the misconfigured case, where naming a backend would be inventing
       // one. The reason says what is wrong with the key.
-      label: catalog.default === "" ? "Repo default" : `Repo default (${catalog.default})`,
+      label: catalog.default === "" ? "Repo default" : `Repo default (${catalog.backends.find((opt) => opt.name === catalog.default)?.label ?? catalog.default})`,
       // Taken from the daemon, not inferred here. A repo whose declared default is
       // broken resolves to that broken backend and FAILS — it does not quietly run
       // local — so the default is not automatically a safe harbour.
@@ -6403,7 +6403,7 @@ function backendChoices(catalog) {
   for (const opt of catalog.backends) {
     choices.push({
       value: opt.name,
-      label: opt.name,
+      label: opt.label,
       status: opt.status,
       reason: opt.status === "available" ? "" : opt.reason ?? ""
     });

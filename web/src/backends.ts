@@ -23,6 +23,8 @@ export type BackendAvailability = "available" | "unavailable" | "unknown";
 export interface BackendOption {
   /** The wire value sent back as CreateSession's `backend`. */
   name: string;
+  /** User-facing text derived by the daemon from this repo's configuration. */
+  label: string;
   /** The checked answer for this repo. */
   status: BackendAvailability;
   /** Actionable reason whenever `status` is not "available" — the same text the
@@ -54,9 +56,9 @@ export const REPO_DEFAULT = "";
 export interface BackendChoice {
   /** The <option> value: REPO_DEFAULT, or a backend name to send verbatim. */
   value: string;
-  /** The visible label. It is the daemon's backend name verbatim — deliberately
-   *  NOT looked up in a local name→label map, which is what would silently render
-   *  a newly added backend as blank. */
+  /** The visible label supplied by the daemon — deliberately NOT looked up in a
+   *  local name→label map, which would drift from repo-aware labels and silently
+   *  render a newly added backend as blank. */
   label: string;
   /** The daemon's checked answer. Only "available" may be offered as usable: both
    *  "unavailable" (checked, will fail) and "unknown" (could not be checked) are
@@ -93,7 +95,9 @@ export function backendChoices(catalog: BackendCatalog | null): BackendChoice[] 
       // "Repo default" with no parenthetical when the daemon reports no default:
       // that is the misconfigured case, where naming a backend would be inventing
       // one. The reason says what is wrong with the key.
-      label: catalog.default === "" ? "Repo default" : `Repo default (${catalog.default})`,
+      label: catalog.default === ""
+        ? "Repo default"
+        : `Repo default (${catalog.backends.find((opt) => opt.name === catalog.default)?.label ?? catalog.default})`,
       // Taken from the daemon, not inferred here. A repo whose declared default is
       // broken resolves to that broken backend and FAILS — it does not quietly run
       // local — so the default is not automatically a safe harbour.
@@ -105,7 +109,7 @@ export function backendChoices(catalog: BackendCatalog | null): BackendChoice[] 
   for (const opt of catalog.backends) {
     choices.push({
       value: opt.name,
-      label: opt.name,
+      label: opt.label,
       status: opt.status,
       reason: opt.status === "available" ? "" : (opt.reason ?? ""),
     });

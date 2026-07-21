@@ -172,6 +172,32 @@ for repo in "$MOCK" "$MOCK2" "$MOCK3"; do
     fi
 done
 
+# #2189: the primary repo has a real, versioned remote-hook configuration. The
+# commands only need to be discoverable for ListBackends' side-effect-free
+# availability check; the browser test never provisions a remote workspace.
+# Keeping the executable's real name in launch_cmd is what lets the daemon turn
+# af's internal "hook" key into the intent-bearing picker label.
+mkdir -p "$MOCK/.agent-factory"
+cat >"$MOCK/.agent-factory/config.json" <<'EOF'
+{
+  "remote_hooks": {
+    "launch_cmd": "coder-launch.sh",
+    "delete_cmd": "coder-delete.sh"
+  }
+}
+EOF
+git -C "$MOCK" add .agent-factory/config.json
+git -C "$MOCK" commit -qm "configure mock remote sandbox"
+
+for hook in coder-launch.sh coder-delete.sh; do
+    cat >"/usr/local/bin/$hook" <<'EOF'
+#!/bin/sh
+# The web selftest only probes availability; provisioning would be a fixture bug.
+exit 99
+EOF
+    chmod +x "/usr/local/bin/$hook"
+done
+
 # --- start the daemon + wait for the HTTP listener --------------------------
 # Both are functions because the harness restarts the daemon once, to seed a record
 # no API can mint (see the URL-less web tab below); the restart must reuse this exact
