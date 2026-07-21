@@ -579,9 +579,11 @@ func pluralize(word string, count int) string {
 }
 
 // ResolvedValuePath returns either a top-level resolution or a dotted leaf
-// projection such as program_overrides.codex or theme.accent. A leaf is
-// projected from the already-resolved value and origins; it never runs a
-// second precedence algorithm.
+// projection such as program_overrides.codex or theme.accent. Only values with
+// a real per-leaf origin can be projected: borrowing a replace-table's winner
+// would fabricate a source for omitted fields materialized as zero values. A
+// leaf is projected from the already-resolved value and origins; it never runs
+// a second precedence algorithm.
 func (r *ResolvedConfig) ResolvedValuePath(keyPath string) (ResolvedValue, bool) {
 	if value, ok := r.ResolvedValue(keyPath); ok {
 		return value, true
@@ -604,16 +606,17 @@ func (r *ResolvedConfig) ResolvedValuePath(keyPath string) (ResolvedValue, bool)
 	projected.Value = effective
 	projected.Default = ""
 	projected.Origins = nil
-	var winner SourceRef
-	if origin, present := parent.Origins[leaf]; present {
-		winner = origin
-	} else if parent.Winner != nil {
-		winner = *parent.Winner
-	} else {
+	winner, present := parent.Origins[leaf]
+	if !present {
 		return ResolvedValue{}, false
 	}
 	winner.KeyPath = keyPath
 	projected.Winner = &winner
+	precedenceRank := make(map[string]int, len(parent.Precedence))
+	for i, layer := range parent.Precedence {
+		precedenceRank[layer] = i
+	}
+	winnerRank := precedenceRank[winner.Layer]
 
 	projected.Candidates = make([]CandidateTrace, len(parent.Candidates))
 	for i, candidate := range parent.Candidates {
@@ -636,6 +639,9 @@ func (r *ResolvedConfig) ResolvedValuePath(keyPath string) (ResolvedValue, bool)
 		case candidate.Layer == winner.Layer:
 			candidate.Result = "winner"
 			candidate.Reason = "supplies the effective leaf"
+		case precedenceRank[candidate.Layer] > winnerRank:
+			candidate.Result = "ignored"
+			candidate.Reason = "configured leaf did not survive load-time normalization; lower-precedence " + winner.Layer + " supplies the effective leaf"
 		default:
 			candidate.Result = "shadowed"
 			candidate.Reason = "leaf is overridden by higher-precedence " + winner.Layer

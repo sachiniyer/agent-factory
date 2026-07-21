@@ -304,6 +304,40 @@ delete_cmd = "hook-delete"
 	assert.Equal(t, "winner", repo.Result)
 	assert.NotContains(t, repo.Reason, "load-time normalization changed")
 	assert.Contains(t, repo.Reason, "relative command paths resolved against the project root")
+
+	_, ok = resolved.ResolvedValuePath("remote_hooks.launch_cmd")
+	assert.False(t, ok, "a replace-table winner must not be reused as a fabricated per-leaf origin")
+}
+
+func TestResolvedValuePathExplainsHigherCandidateRemovedByNormalization(t *testing.T) {
+	builtIn := &Config{ProgramOverrides: map[string]string{"codex": "built-in"}}
+	global := &Config{ProgramOverrides: map[string]string{}}
+	computed, err := resolveManifest([]ManifestEntry{{
+		Key:        "program_overrides",
+		Precedence: []ConfigSource{SourceBuiltIn, SourceGlobal},
+		Merge:      MergeMapByKey,
+	}}, []sourceDocument{
+		{layer: SourceBuiltIn, schemas: []any{builtIn}, builtIn: true},
+		{
+			layer: SourceGlobal,
+			metadata: sourceMetadata{shape: map[string]any{
+				"program_overrides": map[string]any{"codex": "discarded"},
+			}},
+			schemas: []any{global},
+		},
+	}, true)
+	require.NoError(t, err)
+	require.Len(t, computed, 1)
+	computed[0].resolved.Value = clonedInterface(computed[0].value)
+	resolved := &ResolvedConfig{Resolution: []ResolvedValue{computed[0].resolved}}
+
+	leaf, ok := resolved.ResolvedValuePath("program_overrides.codex")
+	require.True(t, ok)
+	assert.Equal(t, "built-in", leaf.Value)
+	globalCandidate := candidateForLayer(t, leaf, SourceGlobal)
+	assert.Equal(t, "ignored", globalCandidate.Result)
+	assert.Contains(t, globalCandidate.Reason, "did not survive load-time normalization")
+	assert.Contains(t, globalCandidate.Reason, "lower-precedence built-in")
 }
 
 func TestResolveConfigResolutionCoversManifestAndDoesNotAliasSources(t *testing.T) {
