@@ -5,7 +5,7 @@ const CODEX_REVIEWER = "chatgpt-codex-connector[bot]";
 const CODEX_REVIEW_RE = /\bCodex Review\b/i;
 const CODEX_RATE_LIMIT_RE = /reached your Codex usage limits for code reviews/i;
 const CODEX_BODY_FINDING_RE = /\bP[0-3]\b/i;
-const REVIEWED_COMMIT_RE = /\*\*Reviewed commit:\*\*\s*`([0-9a-f]{7,40})`/i;
+const REVIEWED_COMMIT_RE = /(?:\*\*Reviewed commit:\*\*|Reviewed commit:)\s*`([0-9a-f]{7,40})`/i;
 // Docs/Deploy is deliberately conditional and is skipped on pull_request runs.
 const ALLOWED_SKIPPED_CHECKS = new Set(["Deploy"]);
 const RESOLUTION_MARKER_RE = /\b(?:RESOLVED|ACCEPTED)\b/;

@@ -268,6 +268,12 @@ test("draft and closed pull requests cannot merge", async () => {
 test("Codex verdict parsing requires a real verdict and matches its short SHA", () => {
   assert.equal(__test.parseReviewedCommit(codexRateLimit().body), null);
   assert.equal(__test.parseReviewedCommit(codexVerdict(HEAD_SHA).body), HEAD_SHA.slice(0, 10));
+  assert.equal(
+    __test.parseReviewedCommit(
+      `Codex Review: clean\n\nReviewed commit: \`${HEAD_SHA.slice(0, 10)}\``,
+    ),
+    HEAD_SHA.slice(0, 10),
+  );
   assert.equal(__test.reviewedCommitMatchesHead(HEAD_SHA.slice(0, 10), HEAD_SHA), true);
   assert.equal(__test.reviewedCommitMatchesHead(OTHER_SHA.slice(0, 10), HEAD_SHA), false);
 });
