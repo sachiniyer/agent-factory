@@ -61,6 +61,40 @@ func TestDiscoveryUsesChannelSpecificEndpoints(t *testing.T) {
 	}
 }
 
+func TestDiscoveryRetriesAnAuthFailureAnonymously(t *testing.T) {
+	for _, status := range []int{http.StatusUnauthorized, http.StatusForbidden} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			calls := 0
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls++
+				if r.Header.Get("Authorization") != "" {
+					http.Error(w, "ambient credential is not valid for this public repository", status)
+					return
+				}
+				if err := json.NewEncoder(w).Encode(Release{TagName: "v1.9.9"}); err != nil {
+					t.Errorf("encode anonymous release response: %v", err)
+				}
+			}))
+			t.Cleanup(server.Close)
+
+			discovery := Discovery{
+				LatestReleaseURL: server.URL,
+				AuthToken:        "unusable-ambient-token",
+			}
+			tag, err := discovery.LatestReleaseTag(config.UpdateChannelStable, time.Second)
+			if err != nil {
+				t.Fatalf("public release discovery must survive an unusable ambient token: %v", err)
+			}
+			if tag != "v1.9.9" {
+				t.Fatalf("stable tag = %q, want v1.9.9", tag)
+			}
+			if calls != 2 {
+				t.Fatalf("request count = %d, want authenticated attempt plus anonymous fallback", calls)
+			}
+		})
+	}
+}
+
 func TestVersionOrderingAndReleaseSelection(t *testing.T) {
 	comparisons := []struct {
 		latest  string

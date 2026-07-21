@@ -82,10 +82,23 @@ func (d Discovery) latestPreviewTag(timeout time.Duration) (string, error) {
 }
 
 func getJSON(url, authToken string, timeout time.Duration, out any) error {
+	status, err := getJSONOnce(url, authToken, timeout, out)
+	if authToken != "" && (status == http.StatusUnauthorized || status == http.StatusForbidden) {
+		// Release metadata is public. An ambient GITHUB_TOKEN can be expired or
+		// scoped to an unrelated resource; that credential must not make a
+		// request fail when the anonymous request would have worked. Keep the
+		// authenticated first attempt for CI's larger quota, but retry exactly
+		// once without it only when GitHub rejected the credential.
+		_, err = getJSONOnce(url, "", timeout, out)
+	}
+	return err
+}
+
+func getJSONOnce(url, authToken string, timeout time.Duration, out any) (int, error) {
 	client := &http.Client{Timeout: timeout}
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	req.Header.Set("Accept", "application/vnd.github.v3+json")
 	if authToken != "" {
@@ -94,14 +107,14 @@ func getJSON(url, authToken string, timeout time.Duration, out any) error {
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("GitHub API returned %d", resp.StatusCode)
+		return resp.StatusCode, fmt.Errorf("GitHub API returned %d", resp.StatusCode)
 	}
-	return json.NewDecoder(resp.Body).Decode(out)
+	return resp.StatusCode, json.NewDecoder(resp.Body).Decode(out)
 }
 
 // PickLatestReleaseTag returns the version-newest non-draft release tag on
