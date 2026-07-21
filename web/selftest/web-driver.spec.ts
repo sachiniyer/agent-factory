@@ -2462,6 +2462,80 @@ test("schedule picker (#2057): a preset generates the cron, an edit re-opens as 
   await expect(page.locator(".af-rail-list")).toBeVisible();
 });
 
+test("#2218: slow create closes immediately, shows daemon state, then opens attached", async () => {
+  const created = `probe-create-slow-${Date.now().toString(36)}`;
+  await row(page, SESSION_A).click();
+  await expect(page.locator(".af-main.af-main-term")).toBeVisible();
+
+  await page.locator("button.af-rail-new").click();
+  const modal = page.locator(".af-modal-card");
+  await expect(modal).toBeVisible();
+  await modal.locator('input[aria-label="Session title"]').fill(created);
+  await modal.locator("button.af-primary").click();
+
+  // The fake agent sleeps for eight seconds, so neither assertion can be hidden by
+  // a fast local create. Submit synchronously releases the modal; the row arrives
+  // separately from the daemon's session.updated projection with OpCreating.
+  await expect(modal, "submit must release the modal before provisioning finishes").toBeHidden({ timeout: 3000 });
+  const creating = row(page, created);
+  await expect(creating, "the daemon's pending row must arrive during the slow backend").toHaveClass(/af-row-creating/, {
+    timeout: 6000,
+  });
+  await expect(creating).toHaveAttribute("aria-disabled", "true");
+
+  // A pending row has its final id but no terminal. It must stay inert so a click
+  // cannot pre-select that id and suppress the success-time selection change that
+  // builds the pane (the exact slow-only regression guarded by index.ts's comment).
+  const selectedAfterClick = await creating.evaluate((row) => {
+    row.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    return row.getAttribute("aria-selected");
+  });
+  expect(selectedAfterClick).toBe("false");
+
+  // Completion replaces the same id, selects it in the same store update, and opens
+  // the Agent tab attached. A stuck empty pane here is the naive async regression.
+  await expect(creating).not.toHaveClass(/af-row-creating/, { timeout: 30_000 });
+  await expect(creating).toHaveAttribute("aria-selected", "true");
+  await expect(page.locator(".af-tabbar .af-tab")).toHaveCount(1);
+  await expect(page.locator(".af-tab.af-tab-active .af-tab-label")).toHaveText("Agent");
+  await expect(page.locator(".af-term-host")).toContainText(READY_MARKER, { timeout: 30_000 });
+
+  // Leave no successful probe behind for later shared-page tests.
+  await railAction(page, created, "Kill session").click();
+  const killModal = page.locator(".af-modal-card");
+  await expect(killModal).toBeVisible();
+  await killModal.locator("button.af-danger").click();
+  await expect(row(page, created)).toHaveCount(0, { timeout: 30_000 });
+});
+
+test("#2218: failing slow create shows the daemon error and leaves no phantom row", async () => {
+  const created = `probe-create-fail-${Date.now().toString(36)}`;
+  await page.locator("button.af-rail-new").click();
+  const modal = page.locator(".af-modal-card");
+  await expect(modal).toBeVisible();
+  await modal.locator('input[aria-label="Session title"]').fill(created);
+  const response = page.waitForResponse((r) => r.url().endsWith("/v1/CreateSession") && r.request().method() === "POST");
+  await modal.locator("button.af-primary").click();
+
+  await expect(modal, "a failing backend must not hold the form open either").toBeHidden({ timeout: 3000 });
+  const creating = row(page, created);
+  await expect(creating, "failure must still expose the real in-flight window").toHaveClass(/af-row-creating/, {
+    timeout: 6000,
+  });
+
+  const failed = await response;
+  const envelope = (await failed.json()) as { error?: { message?: string } };
+  const daemonMessage = envelope.error?.message ?? "";
+  expect(daemonMessage).toContain("failed to start instance");
+  await expect(page.locator(".af-toast"), "the web must render the daemon's exact failure").toHaveText(daemonMessage);
+  await expect(creating, "the failed provisional id must be removed").toHaveCount(0, { timeout: 30_000 });
+
+  // A fresh authoritative Snapshot must agree: reload cannot resurrect a phantom.
+  await page.reload();
+  await expect(page.locator(".af-app")).toBeVisible();
+  await expect(row(page, created)).toHaveCount(0);
+});
+
 test.describe("create → kill (one session, two flows)", () => {
   // The ONE genuine ordering dependency in this file, and the only place serial
   // mode is warranted: create stashes the title it invented and kill consumes it,
@@ -2532,10 +2606,10 @@ test.describe("create → kill (one session, two flows)", () => {
     await modal.locator('input[aria-label="Session title"]').fill(created);
     await modal.locator("button.af-primary").click();
 
-    // The created row lands in the rail (createSession returns the full projection,
-    // which index.ts upserts + selects immediately).
-    await expect(row(page, created)).toBeVisible({ timeout: 30_000 });
+    // The fast path may cross OpCreating between animation frames, but it must still
+    // close immediately and settle to the daemon's completed projection.
     await expect(modal).toBeHidden();
+    await expect(row(page, created)).toBeVisible({ timeout: 30_000 });
 
     // The new session is auto-selected AND attached at its AGENT tab (index 0), not
     // the tab-2 we were on: its tab bar has just the agent tab, and its terminal
@@ -2658,58 +2732,6 @@ test("restore (#1932): the selected rail row's Restore action brings an archived
   // the archive test left it.
   await resetFilter(page);
   await expect(row(page, SESSION_B)).toHaveCount(0);
-});
-
-test("#1933: a backend availability refresh must not re-enable Create mid-submit", async () => {
-  // The race: a ListBackends is in flight when the user submits, and its response
-  // lands DURING the create. Re-rendering the choices must not decide, on its own,
-  // whether Create is clickable — the busy state is a separate reason it is
-  // disabled, and clobbering it re-arms the button under an in-flight create (a
-  // double-create is one Enter away).
-  //
-  // Both sides are held with route interception so the ordering is deterministic
-  // rather than a timing hope. The create is aborted, never forwarded, so this test
-  // makes no session.
-  let releaseCatalog: () => void = () => {};
-  const catalogHeld = new Promise<void>((resolve) => {
-    releaseCatalog = resolve;
-  });
-  await page.route("**/v1/ListBackends", async (route) => {
-    await catalogHeld;
-    await route.continue();
-  });
-  await page.route("**/v1/CreateSession", async (route) => {
-    // Held open so the modal stays busy across the assertion, then aborted so the
-    // request never reaches the daemon.
-    await new Promise((resolve) => setTimeout(resolve, 2000));
-    await route.abort();
-  });
-
-  await page.locator("button.af-rail-new").click();
-  const modal = page.locator(".af-modal-card");
-  await expect(modal).toBeVisible();
-  await modal.locator('input[aria-label="Session title"]').fill("probe-busy-race");
-
-  const createBtn = modal.locator("button.af-primary");
-  await expect(createBtn).toBeEnabled();
-  await createBtn.click();
-  await expect(createBtn).toBeDisabled();
-
-  // Let the catalog land mid-create, then look AFTER the re-render has run — the
-  // assertion has to outlast the event, or it would pass on the pre-render state.
-  const catalogResponse = page.waitForResponse("**/v1/ListBackends");
-  releaseCatalog();
-  await catalogResponse;
-  await page.waitForTimeout(300);
-  await expect(createBtn, "an availability refresh must not re-enable Create while a create is in flight").toBeDisabled();
-
-  // And once the create actually fails, the button comes back — the busy gate must
-  // not strand the form either.
-  await expect(createBtn).toBeEnabled({ timeout: 15_000 });
-  await page.keyboard.press("Escape");
-  await expect(modal).toBeHidden();
-  await page.unroute("**/v1/ListBackends");
-  await page.unroute("**/v1/CreateSession");
 });
 
 // --- the status filter (feat: hide archived by default) --------------------

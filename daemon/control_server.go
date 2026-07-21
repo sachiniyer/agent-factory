@@ -263,7 +263,6 @@ func (s *controlServer) createSession(ctx context.Context, req CreateSessionRequ
 		return err
 	}
 	resp.Instance = data
-	s.manager.publishEvent(agentproto.EventSessionCreated, data)
 	return nil
 }
 

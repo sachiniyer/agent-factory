@@ -87,6 +87,13 @@ export function isWorking(s: SessionData): boolean {
   return rowStatus(s).kind === null;
 }
 
+/** True only for the daemon-owned create operation. Unlike isWorking (which also
+ * includes a running agent and every other in-flight operation), this is used to
+ * keep a not-yet-attachable row inert until its completed projection arrives. */
+export function isCreating(s: SessionData): boolean {
+  return (s.in_flight_op ?? InFlightOp.None) === InFlightOp.Creating;
+}
+
 /**
  * The state bucket a row READS AS, the key the rail's status filter partitions by
  * (filter.ts). Deliberately derived from rowStatus — the DISPLAYED status — and not

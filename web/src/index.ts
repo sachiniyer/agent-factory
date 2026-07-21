@@ -59,7 +59,7 @@ import {
   upsertSession,
 } from "./sessions.js";
 import { SplitView } from "./split.js";
-import { isArchived, type RowKind } from "./status.js";
+import { isArchived, isCreating, type RowKind } from "./status.js";
 import { isRenameableTab } from "./tablabel.js";
 import { Store } from "./store.js";
 import { registerServiceWorker } from "./serviceworker.js";
@@ -152,7 +152,7 @@ let resyncTimer: number | null = null;
 // Debounces the ListTasks refetch that task.* events trigger (#1592 Phase 5 PR8),
 // so a burst of task deltas collapses into one authoritative refetch.
 let taskResyncTimer: number | null = null;
-// The auto-dismiss timer for the tab-error toast, and how long it shows.
+// The auto-dismiss timer for the operation-error toast, and how long it shows.
 let tabErrorTimer: number | null = null;
 const TAB_ERROR_MS = 6000;
 
@@ -540,9 +540,11 @@ function openModal(m: ModalHandle): void {
   modalHost.replaceChildren(m.el);
 }
 
-/** Opens the new-session modal, its picker seeded from the live projects. On
- *  submit it creates the session via the daemon; the created row arrives via the
- *  events stream. Errors (e.g. a bad repo) surface in the modal for a retry. */
+/** Opens the new-session modal, its picker seeded from the live projects. Submit
+ *  closes immediately: the daemon publishes its authoritative OpCreating row on
+ *  the events stream, then either replaces it with the completed projection or
+ *  removes it. A failure surfaces through the shared operation toast because the
+ *  form is deliberately no longer held open by the RPC. */
 function newSession(): void {
   const projects = pickerProjects(store.get().sessions, store.get().tasks);
   openModal(
@@ -561,10 +563,14 @@ function newSession(): void {
           return;
         }
         const m = modal;
+        clearTabError();
+        // Latch the detached form against a duplicate submit, then release the UI
+        // immediately. The row that follows is NOT synthesized here: it comes from
+        // the daemon's session.updated OpCreating projection.
         m.setBusy(true);
+        closeModal();
         void createSession(values, tok)
           .then((created) => {
-            closeModal();
             // Upsert the created row AND select it in one update, so it opens
             // attached immediately. Upserting here (not just setting selectedId)
             // matters: the async created event may not have landed yet, and
@@ -582,8 +588,11 @@ function newSession(): void {
             }
           })
           .catch((e) => {
-            m.setBusy(false);
-            m.setError(describeError(e));
+            // The daemon publishes session.killed for the provisional id. Resync as a
+            // drop-slow/reconnect fallback so even a missed delete event cannot strand a
+            // phantom creating row, and surface the daemon's unmodified error text.
+            requestResync();
+            surfaceTabError(e);
           });
       },
       onCancel: closeModal,
@@ -952,16 +961,16 @@ function reorderSessionTab(from: number, to: number): void {
     .catch((e) => surfaceTabError(e));
 }
 
-/** Surfaces a failed tab mutation as a transient toast (there is no modal for tab
- *  ops, unlike create/kill/archive). The terminal keeps streaming; the message is
- *  the cue to fix the cause (e.g. the tab cap or a remote session). It auto-clears
- *  after a few seconds, and a fresh failure resets the timer. */
+/** Surfaces a failed asynchronous operation as a transient toast. Tab mutations
+ *  have no modal, and session creation closes its modal before awaiting the daemon;
+ *  the message is therefore the visible failure path for both. It auto-clears after
+ *  a few seconds, and a fresh failure resets the timer. */
 function surfaceTabError(e: unknown): void {
   // The raw error message — NOT describeError, whose "Login failed…/Couldn't reach
-  // the daemon…" framing is for the login probe. A tab op carries the daemon's own
-  // message (e.g. the tab cap) or the fail-closed "no stable id" refusal verbatim.
+  // the daemon…" framing is for the login probe. Operations carry the daemon's own
+  // message (e.g. create failure or tab cap) or a fail-closed refusal verbatim.
   const msg = errorText(e);
-  console.error("af-web: tab operation failed:", msg);
+  console.error("af-web: operation failed:", msg);
   if (tabErrorTimer !== null) {
     window.clearTimeout(tabErrorTimer);
   }
@@ -1535,6 +1544,10 @@ function onKeydown(e: KeyboardEvent): void {
         orderedSessions(scopeToProject(state.sessions, state.selectedProject)),
         state.statusFilter,
       )
+        // Creating rows are visible daemon state but not selectable: no terminal
+        // exists until CreateSession resolves, and success owns the one atomic
+        // upsert+selection that opens it attached.
+        .filter((s) => !isCreating(s))
         .map((s) => s.id ?? "")
         .filter((id) => id !== ""),
       selectedId: state.selectedId,

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/sachiniyer/agent-factory/agentproto"
 	"github.com/sachiniyer/agent-factory/config"
@@ -56,11 +57,57 @@ func (m *Manager) CreateSession(ctx context.Context, req CreateSessionRequest) (
 		m.publishEvent(agentproto.EventSessionUpdated, *renamedArchived)
 	}
 
+	// Publish the daemon's real in-flight state before anything that can be slow:
+	// waiting behind another create in this repo, provisioning docker/ssh/hook in
+	// NewInstance, creating the local worktree, and waiting for agent readiness.
+	// A raw projection lives separately from m.instances because off-box runtime
+	// provisioning happens inside NewInstance — there may be no concrete Instance
+	// to register yet. It still carries the final stable id and creation time, which
+	// the completed Instance inherits below, so clients upsert rather than replacing
+	// one identity with another.
+	createdAt := time.Now()
+	pending := session.InstanceData{
+		ID:            session.NewInstanceID(),
+		TaskID:        req.TaskID,
+		Title:         title,
+		Path:          repo.Root,
+		Status:        session.Loading,
+		Liveness:      session.LiveReady,
+		InFlightOp:    session.OpCreating,
+		TaskRunActive: req.TaskID != "",
+		CreatedAt:     createdAt,
+		UpdatedAt:     createdAt,
+		AutoYes:       req.AutoYes,
+		Prompt:        req.Prompt,
+		Program:       req.Program,
+		Worktree:      session.GitWorktreeData{RepoPath: repo.Root},
+	}
+	key := daemonInstanceKey(repo.ID, title)
+	m.mu.Lock()
+	m.pendingCreates[key] = pending
+	m.mu.Unlock()
+	m.publishEvent(agentproto.EventSessionUpdated, pending)
+
+	createSucceeded := false
+	defer func() {
+		m.mu.Lock()
+		delete(m.pendingCreates, key)
+		m.mu.Unlock()
+		if !createSucceeded {
+			// Delete-class events are id-keyed, so a client removes exactly the
+			// provisional row even when another repo has the same title. A missed
+			// event is repaired by Snapshot, which no longer contains the pending row.
+			m.publishEvent(agentproto.EventSessionKilled, session.InstanceData{ID: pending.ID, Title: title})
+		}
+	}()
+
 	repoStartLock := m.startLockForRepo(repo.ID)
 	repoStartLock.Lock()
 	defer repoStartLock.Unlock()
 
 	instance, err := session.NewInstance(session.InstanceOptions{
+		ID:          pending.ID,
+		CreatedAt:   pending.CreatedAt,
 		Title:       title,
 		TaskID:      req.TaskID,
 		Path:        repo.Root,
@@ -137,7 +184,6 @@ func (m *Manager) CreateSession(ctx context.Context, req CreateSessionRequest) (
 	// not in memory would let refresh construct a duplicate Instance
 	// (opening a fresh PTY in the tmux backend) that gets orphaned when
 	// the original is later stored under the same key.
-	key := daemonInstanceKey(repo.ID, title)
 	persistErr := func() error {
 		m.mu.Lock()
 		defer m.mu.Unlock()
@@ -159,6 +205,11 @@ func (m *Manager) CreateSession(ctx context.Context, req CreateSessionRequest) (
 		return session.InstanceData{}, persistErr
 	}
 	m.captureAgentConversationAsync(repo.ID, key, instance, conversationCapture)
+	createSucceeded = true
+	// Publish from the Manager, not only the control-server wrapper: task delivery
+	// and root-agent ensure call Manager.CreateSession directly. They announced the
+	// same pending row above and therefore must settle it on the same events plane.
+	m.publishEvent(agentproto.EventSessionCreated, data)
 
 	return data, nil
 }
