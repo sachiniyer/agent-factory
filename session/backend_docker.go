@@ -193,12 +193,15 @@ func (dockerRuntime) Provision(spec ProvisionSpec) (ProvisionResult, error) {
 		return ProvisionResult{}, fmt.Errorf("backend=docker: cannot locate the af binary to copy into the container: %w", err)
 	}
 
+	// Resolve once in the trusted host process. The agent-server receives this
+	// exact command with --program-resolved and must not reinterpret its enum.
+	resolvedProgram := config.ResolveProgram(&cfg.Config, spec.Program)
 	p := &dockerProvisioner{
 		spec:    spec,
 		image:   image,
 		runArgs: runArgs,
 		afBin:   afBin,
-		program: config.ResolveProgram(&cfg.Config, spec.Program),
+		program: resolvedProgram,
 	}
 	res, err := p.provision()
 	if err != nil {

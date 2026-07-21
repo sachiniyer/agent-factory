@@ -36,7 +36,8 @@ func TestRealPaneEnvironmentIsFiltered(t *testing.T) {
 	// the test exercise the existing-server import path instead of accidentally
 	// passing because a fresh server snapshotted the values at startup.
 	seedName := "af_session_env_seed"
-	if err := exec.Command("tmux", "new-session", "-d", "-s", seedName, "sleep", "30").Run(); err != nil {
+	seedServer := exec.Command("tmux", "new-session", "-d", "-s", seedName, "sleep", "30")
+	if err := seedServer.Run(); err != nil {
 		t.Fatal("could not prepare the isolated pre-existing tmux server")
 	}
 	t.Cleanup(func() { _ = exec.Command("tmux", "kill-session", "-t", "="+seedName).Run() })
