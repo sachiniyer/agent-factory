@@ -87,24 +87,27 @@ func (i *Instance) PrepareAgentSwap(target string) (AgentSwapPlan, error) {
 // have raised OpReplacing and recorded plan.target as Instance.Program. Success
 // deliberately leaves that fence raised: the replacement is not a completed
 // handoff until the daemon has delivered (or explicitly parked) its mission.
-func (i *Instance) SwapAgent(plan AgentSwapPlan) error {
+func (i *Instance) SwapAgent(plan AgentSwapPlan) (InstanceData, error) {
 	view := i.LifecycleView()
 	if view.InFlightOp != OpReplacing {
-		return fmt.Errorf("session %q has no agent replacement in flight", i.Title)
+		return InstanceData{}, fmt.Errorf("session %q has no agent replacement in flight", i.Title)
 	}
 	if !i.Capabilities().Handoff {
-		return ErrHandoffUnsupported
+		return InstanceData{}, ErrHandoffUnsupported
 	}
 	if target := i.AgentProgram(); target != plan.target || strings.TrimSpace(plan.program) == "" {
-		return fmt.Errorf("session %q handoff plan no longer matches its recorded target", i.Title)
+		return InstanceData{}, fmt.Errorf("session %q handoff plan no longer matches its recorded target", i.Title)
 	}
 	if plan.conversation.HasID() {
 		i.SetAgentConversation(plan.conversation)
 	}
 	if err := i.currentBackend().SwapAgent(i, plan); err != nil {
-		return err
+		return InstanceData{}, err
 	}
-	return nil
+	// Returning the durable projection from the successful runtime operation
+	// makes it impossible for a caller to checkpoint the target before the
+	// backend has actually established it.
+	return i.handoffStorageCheckpoint(), nil
 }
 
 // ArchiveTeardown tears down every tab's tmux session for an archive AND

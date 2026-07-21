@@ -177,7 +177,8 @@ func (m *Manager) HandoffSession(req HandoffSessionRequest) (HandoffSessionRespo
 		return HandoffSessionResponse{}, err
 	}
 
-	if swapErr := instance.SwapAgent(plan); swapErr != nil {
+	checkpoint, swapErr := instance.SwapAgent(plan)
+	if swapErr != nil {
 		// Put the record back: SwapAgent did not confirm an incoming runtime, so
 		// recording a completed handoff would make later resume/readiness decisions
 		// target an agent af never established. Expected target/config failures were
@@ -212,6 +213,17 @@ func (m *Manager) HandoffSession(req HandoffSessionRequest) (HandoffSessionRespo
 	// to an obsolete mission.
 	if override := strings.TrimSpace(req.Brief); override != "" {
 		instance.SetPrompt(override)
+		checkpoint.Prompt = override
+	}
+	// The process swap is already irreversible, so checkpoint its durable facts
+	// before the readiness wait. Memory stays fenced, but a daemon crash in this
+	// window must restore the incoming Program rather than lie that the outgoing
+	// agent still owns the pane. The projection also clears any outgoing-provider
+	// limit state, matching CommitHandoff's recovery posture.
+	if err := m.persistInstanceSnapshotErr(repoID, checkpoint); err != nil {
+		// Preserve the existing best-effort persist contract: delivery can still
+		// make the live agent useful, and the final settled write retries below.
+		log.WarningLog.Printf("handoff %q: failed to persist the post-swap checkpoint before mission delivery: %v", req.Title, err)
 	}
 
 	mission := brief.Render()

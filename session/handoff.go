@@ -231,6 +231,25 @@ func (i *Instance) RecordHandoffSwap(target, reason, headSHA string, automatic b
 	return i.recordHandoffSwapLocked(target, reason, headSHA, automatic)
 }
 
+// handoffStorageCheckpoint projects a runtime swap that has completed while its
+// in-memory delivery fence is still raised. Disk cannot retain process-local
+// operations, but it must not keep claiming the outgoing agent either: a daemon
+// crash during readiness would then restore the wrong Program over a pane that
+// already runs the target. The persisted recovery posture is the same one a
+// generic post-swap delivery failure takes — incoming agent, LiveRunning, no
+// outgoing-provider limit metadata — while memory remains OpReplacing until the
+// mission is delivered or explicitly parked.
+func (i *Instance) handoffStorageCheckpoint() InstanceData {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	data := i.toInstanceDataLocked()
+	data.Status = Running
+	data.Liveness = LiveRunning
+	data.InFlightOp = OpNone
+	data.LimitResetAt = time.Time{}
+	return data
+}
+
 func (i *Instance) recordHandoffSwapLocked(target, reason, headSHA string, automatic bool) (AgentHandoff, error) {
 
 	if len(i.Tabs) == 0 {

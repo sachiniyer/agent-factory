@@ -456,10 +456,17 @@ func (m *Manager) archiveExclusiveTabLock(key string, instance *session.Instance
 // it must NEVER be called with m.mu held — see startLockForRepo. Under m.mu, call
 // persistInstanceData directly instead.
 func (m *Manager) persistInstanceErr(repoID string, instance *session.Instance) error {
+	return m.persistInstanceSnapshotErr(repoID, instance.ToInstanceData())
+}
+
+// persistInstanceSnapshotErr is persistInstanceErr for a caller-owned atomic
+// projection. Handoff uses it to checkpoint the durable post-swap facts while
+// retaining its process-local OpReplacing delivery fence in memory.
+func (m *Manager) persistInstanceSnapshotErr(repoID string, data session.InstanceData) error {
 	repoStartLock := m.startLockForRepo(repoID)
 	repoStartLock.Lock()
 	defer repoStartLock.Unlock()
-	return persistInstanceData(repoID, instance.ToInstanceData())
+	return persistInstanceData(repoID, data)
 }
 
 // persistInstance is the best-effort form of persistInstanceErr: a failed write
