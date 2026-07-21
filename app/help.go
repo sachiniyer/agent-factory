@@ -86,7 +86,9 @@ type helpTypeInstanceStart struct {
 	instance *session.Instance
 }
 
-type helpTypeInstanceAttach struct{}
+type helpTypeInstanceAttach struct {
+	agent string
+}
 
 // helpTypeInteractive is shown once, the first time the user enters a pane
 // (#1089 PR 2): the sharpest edge of the interaction change is that every
@@ -95,6 +97,33 @@ type helpTypeInteractive struct{}
 
 func helpStart(instance *session.Instance) helpText {
 	return helpTypeInstanceStart{instance: instance}
+}
+
+// helpAttach scopes agent-specific copy to the agent tab. Shell/process tabs
+// deliberately get no scroll hint: their child program is arbitrary, and a
+// confident guess there would repeat the exact honesty bug this notice fixes.
+func helpAttach(instance *session.Instance, tabIdx int) helpText {
+	agent := ""
+	if instance != nil && tabIdx == 0 {
+		agent = instance.ResolvedAgent()
+	}
+	return helpTypeInstanceAttach{agent: agent}
+}
+
+const (
+	claudeAttachedScrollControls = "pgup/pgdn · ctrl+home/end · mouse wheel"
+	codexAttachedScrollControls  = "ctrl+t opens transcript · then pgup/pgdn or home/end"
+)
+
+func attachedScrollControls(agent string) (string, string) {
+	switch agent {
+	case tmux.ProgramClaude:
+		return "Claude", claudeAttachedScrollControls
+	case tmux.ProgramCodex:
+		return "Codex", codexAttachedScrollControls
+	default:
+		return "", ""
+	}
 }
 
 func firstRunActionLine(actions string) string {
@@ -153,7 +182,11 @@ func (h helpTypeGeneral) toContent() string {
 			{helpKey(keys.KeyJumpTab), "Select a tab by number (s opens it, enter attaches)"},
 			{helpKey(keys.KeyNewTab), "Choose a terminal or VS Code tab"},
 			{helpKey(keys.KeyCloseTab), "Close the current tab (the agent tab can't be closed)"},
-			{helpKey(keys.KeyShiftUp) + "/" + helpKey(keys.KeyShiftDown), "Scroll in the current tab"},
+			{helpKey(keys.KeyShiftUp) + "/" + helpKey(keys.KeyShiftDown), "Scroll the current tab preview (navigation mode only)"},
+		}},
+		{title: "Full-screen scrolling:", rows: []helpRow{
+			{"Claude", claudeAttachedScrollControls},
+			{"Codex", codexAttachedScrollControls},
 		}},
 		{title: "Other:", rows: []helpRow{
 			{helpKey(keys.KeyQuit), "Quit the application"},
@@ -194,13 +227,21 @@ func (h helpTypeInstanceStart) toContent() string {
 }
 
 func (h helpTypeInstanceAttach) toContent() string {
-	content := lipgloss.JoinVertical(lipgloss.Left,
-		titleStyle.Render("Attaching to Instance"),
+	lines := []string{
+		titleStyle.Render("Attaching to instance"),
 		"",
-		firstRunActionLine("enter attach full-screen • esc cancel"),
+		descStyle.Render("The attached program owns input and scrolling."),
+		descStyle.Render("AF's ") + keyStyle.Render(helpKey(keys.KeyShiftUp)+"/"+helpKey(keys.KeyShiftDown)) + descStyle.Render(" preview scrolling works only in navigation mode."),
+	}
+	if agent, controls := attachedScrollControls(h.agent); agent != "" {
+		lines = append(lines, descStyle.Render(fmt.Sprintf("%s owns attached scrolling: %s.", agent, controls)))
+	}
+	lines = append(lines,
+		"",
+		firstRunActionLine("enter attach full-screen · esc cancel"),
 		descStyle.Render("Detach later with ")+keyStyle.Render(tmux.DetachKeyDisplay),
 	)
-	return content
+	return lipgloss.JoinVertical(lipgloss.Left, lines...)
 }
 
 func (h helpTypeInteractive) toContent() string {

@@ -74,9 +74,11 @@ func TestMenuNarrowWidthKeepsHelpAndQuit(t *testing.T) {
 		assert.Containsf(t, out, "? help", "width %d: help must survive", w)
 	}
 
-	// At a roomy width nothing is dropped: the scroll hints still render.
+	// At a roomy width nothing is dropped: the scroll hints still render, and
+	// their copy scopes the binding to AF's preview rather than attached input.
 	m.SetSize(200, 1)
-	assert.Contains(t, m.String(), "scroll", "no drops at full width")
+	assert.Contains(t, m.String(), "ctrl+u preview scroll", "no drops at full width")
+	assert.Contains(t, m.String(), "ctrl+d preview scroll", "no drops at full width")
 	assert.Contains(t, m.String(), "q quit")
 }
 

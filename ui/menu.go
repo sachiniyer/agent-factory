@@ -454,15 +454,15 @@ func centerStart(box, content int) int {
 
 // hintDropOrder lists the options that may be dropped when the hint row is
 // wider than the status bar, least valuable first; options in the same inner
-// slice drop together (a lone "ctrl+d scroll" without its ctrl+u twin reads like a
-// bug). The full instance row is ~108 cells, so on narrow terminals something
-// has to go — and before this priority existed the CLAMP decided, silently
-// cutting the RIGHT edge, i.e. `? help` and `q quit` first: exactly the hints
-// a lost user needs (#1083 play-test). New, help, quit, and kill are
-// deliberately absent from this list: `n new` is the tree-focus affordance,
-// help/quit are the global escape hatches, and `D kill` is the selected-
-// instance affordance the containerized TUI driver uses to distinguish a real
-// row cursor from the sticky single-instance display selection (#1174/#1422
+// slice drop together (a lone "ctrl+d preview scroll" without its ctrl+u twin
+// reads like a bug). The full instance row is wider than common terminals, so
+// something has to go — and before this priority existed the CLAMP
+// decided, silently cutting the RIGHT edge, i.e. `? help` and `q quit` first:
+// exactly the hints a lost user needs (#1083 play-test). New, help, quit, and
+// kill are deliberately absent from this list: `n new` is the tree-focus
+// affordance, help/quit are the global escape hatches, and `D kill` is the
+// selected-instance affordance the containerized TUI driver uses to distinguish
+// a real row cursor from the sticky single-instance display selection (#1174/#1422
 // redo).
 //
 // The naming row used to be absent from this list because it was short. #1936
