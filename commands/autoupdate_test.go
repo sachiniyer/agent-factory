@@ -767,19 +767,12 @@ func TestFetchLatestReleaseTagChannels(t *testing.T) {
 	}
 }
 
-// TestFetchLatestReleaseTagAuthenticatesFromCI pins the lifecycle-gate path:
-// the workflow already exports GITHUB_TOKEN, so release discovery must put it
-// on the API request. Otherwise shared-runner traffic still consumes GitHub's
-// 60-request unauthenticated pool and an unrelated 403 makes upgrade look
-// broken (#2262).
-func TestFetchLatestReleaseTagAuthenticatesFromCI(t *testing.T) {
-	const token = "lifecycle-token"
-	t.Setenv("GITHUB_TOKEN", token)
+func TestFetchLatestReleaseTagDoesNotSendAmbientGitHubToken(t *testing.T) {
+	t.Setenv("GITHUB_TOKEN", "credential-for-an-unrelated-workload")
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if got := r.Header.Get("Authorization"); got != "Bearer "+token {
-			http.Error(w, "missing workflow authentication", http.StatusForbidden)
-			return
+		if got := r.Header.Get("Authorization"); got != "" {
+			t.Errorf("public product lookup sent ambient Authorization header")
 		}
 		if err := json.NewEncoder(w).Encode(releaseEntry{TagName: "v1.9.9"}); err != nil {
 			t.Errorf("encode latest release: %v", err)
@@ -793,10 +786,10 @@ func TestFetchLatestReleaseTagAuthenticatesFromCI(t *testing.T) {
 
 	tag, err := fetchLatestReleaseTag(config.UpdateChannelStable, manualCheckTimeout)
 	if err != nil {
-		t.Fatalf("authenticated release lookup: %v", err)
+		t.Fatalf("public release lookup: %v", err)
 	}
 	if tag != "v1.9.9" {
-		t.Fatalf("authenticated release lookup returned %q, want v1.9.9", tag)
+		t.Fatalf("public release lookup returned %q, want v1.9.9", tag)
 	}
 }
 

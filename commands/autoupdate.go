@@ -3,7 +3,6 @@ package commands
 import (
 	"errors"
 	"fmt"
-	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -245,7 +244,6 @@ func fetchLatestReleaseTag(channel string, timeout time.Duration) (string, error
 	discovery := autoupdate.Discovery{
 		LatestReleaseURL: githubAPILatestReleaseURL,
 		ReleasesURL:      githubAPIReleasesURL,
-		AuthToken:        os.Getenv("GITHUB_TOKEN"),
 	}
 	return discovery.LatestReleaseTag(channel, timeout)
 }
