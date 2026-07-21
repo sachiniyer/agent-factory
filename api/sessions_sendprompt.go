@@ -72,6 +72,22 @@ func sendPromptUsage(cmd *cobra.Command) string {
 	}
 }
 
+// validateSendPromptInvocation is the shared validation path for Cobra's Args
+// hook and RunE. RunE repeats the check because unit tests call it directly,
+// bypassing Args; keeping the rules here prevents those two entry paths from
+// drifting.
+func validateSendPromptInvocation(cmd *cobra.Command, args []string) error {
+	if err := validateSendPromptFlags(); err != nil {
+		return jsonError(err)
+	}
+	want := sendPromptArgCount(cmd)
+	if len(args) != want {
+		return jsonError(fmt.Errorf("%s takes exactly %d positional argument(s); got %d",
+			sendPromptUsage(cmd), want, len(args)))
+	}
+	return nil
+}
+
 // resolveSendPrompt returns the prompt for this invocation and the positionals
 // with it removed, so callers read the title from a consistent place regardless
 // of which spelling the user chose.
@@ -110,31 +126,15 @@ results.`,
 	// CLI = actionable errors). Arity is then mode-aware — with --all the single
 	// positional is the prompt; otherwise it's <title> <prompt>. Flags are
 	// parsed before Args runs, so the mode flags are already set here.
-	Args: func(cmd *cobra.Command, args []string) error {
-		if err := validateSendPromptFlags(); err != nil {
-			return jsonError(err)
-		}
-		if want := sendPromptArgCount(cmd); len(args) != want {
-			return jsonError(fmt.Errorf("%s takes exactly %d positional argument(s); got %d",
-				sendPromptUsage(cmd), want, len(args)))
-		}
-		return nil
-	},
+	Args: validateSendPromptInvocation,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		log.Initialize(false)
 		defer log.Close()
 
 		// Re-check here too: unit tests drive RunE directly (bypassing Args),
-		// and it is cheap defense-in-depth against a future caller that skips
-		// arg validation. In the real CLI Args already caught these.
-		if err := validateSendPromptFlags(); err != nil {
-			return jsonError(err)
-		}
-		// Re-check arity here too: unit tests drive RunE directly (bypassing
-		// Args), so indexing rest[0] below must not depend on Args having run.
-		if len(args) != sendPromptArgCount(cmd) {
-			return jsonError(fmt.Errorf("%s takes exactly %d positional argument(s); got %d",
-				sendPromptUsage(cmd), sendPromptArgCount(cmd), len(args)))
+		// so indexing rest[0] below must not depend on Args having run.
+		if err := validateSendPromptInvocation(cmd, args); err != nil {
+			return err
 		}
 
 		prompt, rest := resolveSendPrompt(cmd, args)
@@ -243,7 +243,8 @@ type broadcastTarget struct {
 // with an actionable message (public CLI standard, #658/#734). It runs from both
 // Args — so it fires before cobra's arity check, which would otherwise mask a
 // broadcast flag used without --all behind a generic "accepts 2 arg(s)" error —
-// and RunE, so unit tests that drive RunE directly still get the same guard.
+// and RunE through validateSendPromptInvocation, so unit tests that drive RunE
+// directly still get the same guard.
 func validateSendPromptFlags() error {
 	if !sendPromptAllFlag {
 		// The broadcast-only flags are meaningless without --all. Name whichever
