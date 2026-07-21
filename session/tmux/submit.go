@@ -35,28 +35,56 @@ var (
 // Enter race the paste after all.
 const minDistinctiveTail = 8
 
-// deliveryOutcome is deliberately THREE-valued. A probe that cannot see the pane
-// must never manufacture a negative — the failure mode this repo keeps
-// re-learning — so "I could not look" stays distinct from "I looked and it was
-// not there". Only the latter is evidence of a failed delivery.
+// deliveryOutcome is deliberately THREE-valued. "The pane did not show the
+// prompt" is an observed absence only when that agent is known to render pasted
+// input before Enter. A non-echoing pane and a failed capture both mean the
+// delivery could not be observed; neither may manufacture a negative.
 type deliveryOutcome int
 
 const (
-	// deliveryConfirmed: the pasted text was observed to arrive.
-	deliveryConfirmed deliveryOutcome = iota
-	// deliveryNotObserved: captures were working and the text never appeared on
-	// screen. Note the name — this is NOT "it did not arrive". A pane is free to
-	// consume input without echoing it (anything with echo off, e.g. a password
-	// prompt; the #1956 receiver-pane gate is exactly such a program, and its
-	// bytes provably arrive while the screen only ever shows AF-RECEIVER-READY).
-	// Arrival and echo are different facts, so this stays a loud WARNING and
-	// never an error: treating it as a delivery failure would condemn every
-	// non-echoing pane.
-	deliveryNotObserved
-	// deliveryUnknown: capture itself failed (headless/transient), or there was
-	// nothing assertable. Nothing may be concluded.
-	deliveryUnknown
+	// deliveryObservedLanded: the pasted text was observed to arrive.
+	deliveryObservedLanded deliveryOutcome = iota
+	// deliveryObservedAbsent: the pane is known to echo pasted input, capture
+	// succeeded at the deadline, and the text was not there. This is the genuine
+	// #1982 signal and must stay loud.
+	deliveryObservedAbsent
+	// deliveryCouldNotObserve: the pane does not echo (or its behavior is not
+	// known), capture failed, or the prompt had no distinctive text. Nothing may
+	// be concluded about delivery.
+	deliveryCouldNotObserve
 )
+
+// preSubmitEchoBehavior records whether the agent renders pasted input before
+// Enter. It is cached with TmuxSession.program and reused for every delivery.
+type preSubmitEchoBehavior int
+
+const (
+	preSubmitEchoUnknown preSubmitEchoBehavior = iota
+	preSubmitEchoes
+	preSubmitDoesNotEcho
+)
+
+// knownPreSubmitEchoBehavior returns only behavior established by real-agent
+// evidence. There is no sound generic runtime probe for the negative case:
+// terminal ECHO says nothing about a full-screen app that draws its own input,
+// while failing to see a test paste is the exact ambiguity this code must not
+// collapse. Sending a sentinel would also mutate the live composer. Therefore
+// unknown agents stay unknown instead of being guessed; any positively observed
+// delivery promotes that session to preSubmitEchoes.
+func knownPreSubmitEchoBehavior(command string) preSubmitEchoBehavior {
+	switch DetectAgentFromCommand(command) {
+	case ProgramClaude:
+		// Claude visibly renders pasted composer input; #1982's positive-tail
+		// delivery guard depends on this behavior.
+		return preSubmitEchoes
+	case ProgramCodex:
+		// Codex consumes successful pastes without rendering them before Enter
+		// (#2213: 228 unobserved but successful deliveries in one day).
+		return preSubmitDoesNotEcho
+	default:
+		return preSubmitEchoUnknown
+	}
+}
 
 // pasteBufferSeq makes each bracketed-paste buffer name unique per call so two
 // concurrent deliveries to the same session can never race on a shared tmux
@@ -234,14 +262,14 @@ func (t *TmuxSession) sendKeysPasteBuffer(text string) error {
 		return err
 	}
 
-	if delivered == deliveryNotObserved {
-		// Loud, but NOT an error — see deliveryNotObserved. This is the "silent
-		// success" half of #1982 addressed as far as this layer soundly can:
-		// the operator gets a record that the prompt was never seen to land,
-		// without a delivery failure being invented for every non-echoing pane.
-		log.ErrorLog.Printf("submit: prompt for session %q was never observed on screen; "+
-			"if this pane echoes input, the prompt may be unsubmitted. Pane tail: %s",
-			t.sanitizedName, paneTailForLog(t))
+	if delivered == deliveryObservedAbsent {
+		// This is deliberately the only ERROR emitted by delivery observation:
+		// unlike could-not-observe, a known echoing pane was successfully read and
+		// the prompt was absent. Keep the best-effort Enter, but make this signal
+		// actionable and unhedged so a genuine #1982 truncation is not buried.
+		log.ErrorLog.Printf("submit: prompt delivery observed absent for session %q after %s in a pane known to echo input; "+
+			"Enter sent best-effort. Pane tail: %s",
+			t.sanitizedName, pasteDeliveryMaxWait, paneTailForLog(t))
 	}
 	return nil
 }
@@ -430,18 +458,21 @@ func (t *TmuxSession) capturePaneForDeliveryContext(ctx context.Context) (string
 
 // waitForPasteDelivered blocks until the pasted prompt's tail newly appears in
 // the pane (count exceeds the pre-paste baseline), or pasteDeliveryMaxWait
-// elapses. On expiry it logs and returns so Enter is still sent best-effort —
-// delivery is never worse than the fixed sleep it replaces (#1982).
-func (t *TmuxSession) waitForPasteDelivered(tail string, baseline int) deliveryOutcome {
+// elapses. Its result distinguishes a genuine absence in a known echoing pane
+// from an inability to observe delivery. The caller always sends Enter afterward,
+// so delivery is never worse than the fixed sleep this replaced (#1982).
+func (t *TmuxSession) waitForPasteDelivered(
+	tail string,
+	baseline int,
+) deliveryOutcome {
 	if tail == "" {
 		// Nothing distinctive to confirm (empty/all-whitespace prompt). There is
 		// no positive check to make, so keep the ORIGINAL 500ms drain rather than
 		// quietly shortening it.
 		time.Sleep(emptyPromptDrain)
-		return deliveryUnknown
+		return deliveryCouldNotObserve
 	}
 	deadline := time.Now().Add(pasteDeliveryMaxWait)
-	sawCapture := false
 	streak := 0
 	// A short tail is weak evidence, so require two consecutive sightings before
 	// trusting it (see minDistinctiveTail).
@@ -449,30 +480,42 @@ func (t *TmuxSession) waitForPasteDelivered(tail string, baseline int) deliveryO
 	if len([]rune(tail)) < minDistinctiveTail {
 		needed = 2
 	}
+	lastCaptureOK := false
 	for {
+		// If the prior capture succeeded and the following poll interval carried
+		// us across the deadline, that prior read is the terminal observation. Do
+		// not launch an already-expired capture just to turn success into unknown.
+		if time.Until(deadline) <= 0 {
+			if lastCaptureOK && t.preSubmitEchoBehavior() == preSubmitEchoes {
+				return deliveryObservedAbsent
+			}
+			return deliveryCouldNotObserve
+		}
+
 		// Bound each capture by what is LEFT of this loop's budget, so a wedged
 		// server cannot push a single capture past the deadline below (#2099).
 		if content, ok := t.capturePaneForDeliveryWithin(time.Until(deadline)); ok {
-			sawCapture = true
+			lastCaptureOK = true
 			if strings.Count(normalizeDelivery(content), tail) > baseline {
 				streak++
 				if streak >= needed {
-					return deliveryConfirmed
+					t.notePreSubmitEchoObserved()
+					return deliveryObservedLanded
 				}
 			} else {
 				streak = 0
 			}
+		} else {
+			lastCaptureOK = false
 		}
 		if time.Now().After(deadline) {
-			if !sawCapture {
-				// Never saw the pane at all — unknown, not absent.
-				log.ErrorLog.Printf("submit: could not capture pane for session %q while confirming delivery; sending Enter best-effort",
-					t.sanitizedName)
-				return deliveryUnknown
+			// A failed final capture is "could not look", even if an earlier poll
+			// succeeded. Likewise, missing text in an agent not known to echo says
+			// nothing about whether the paste landed. Neither is an ERROR (#2213).
+			if !lastCaptureOK || t.preSubmitEchoBehavior() != preSubmitEchoes {
+				return deliveryCouldNotObserve
 			}
-			log.ErrorLog.Printf("submit: paste delivery for session %q NOT observed within %s (the pane may simply not echo input); sending Enter best-effort",
-				t.sanitizedName, pasteDeliveryMaxWait)
-			return deliveryNotObserved
+			return deliveryObservedAbsent
 		}
 		time.Sleep(pasteDeliveryPollInterval)
 	}

@@ -29,9 +29,27 @@ func (t *TmuxSession) programCmd() string {
 	return t.program
 }
 
+// preSubmitEchoBehavior returns the cached behavior for the resolved program.
+// Agent detection happens when the program is set, not on every delivery.
+func (t *TmuxSession) preSubmitEchoBehavior() preSubmitEchoBehavior {
+	t.programMu.RLock()
+	defer t.programMu.RUnlock()
+	return t.preSubmitEcho
+}
+
+// notePreSubmitEchoObserved promotes an unknown/non-echoing capability only on
+// positive evidence. A missing tail can never demote it: absence is precisely
+// the ambiguous signal #2213 forbids us from treating as detection.
+func (t *TmuxSession) notePreSubmitEchoObserved() {
+	t.programMu.Lock()
+	defer t.programMu.Unlock()
+	t.preSubmitEcho = preSubmitEchoes
+}
+
 // setProgramCmd stores the pane's program command string under programMu.
 func (t *TmuxSession) setProgramCmd(program string) {
 	t.programMu.Lock()
 	defer t.programMu.Unlock()
 	t.program = program
+	t.preSubmitEcho = knownPreSubmitEchoBehavior(program)
 }
