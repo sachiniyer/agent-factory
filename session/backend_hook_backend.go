@@ -208,7 +208,7 @@ func runHookScriptWithEnvironment(timeout time.Duration, name, program string, p
 	if agentName == "" && strings.TrimSpace(program) == "" {
 		agentName = tmux.ProgramClaude
 	}
-	cmd.Env = sessionenv.Filter(os.Environ(), agentName, passthrough)
+	cmd.Env = sessionenv.FilterForCommand(os.Environ(), agentName, program, passthrough)
 	cmd.Stdout = f
 	cmd.Stderr = f
 	runErr := cmd.Run()

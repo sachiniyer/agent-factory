@@ -102,6 +102,44 @@ echo '{"url":"http://127.0.0.1:9","token":"test-token"}'
 	}
 }
 
+func TestHookEnvironmentHonorsInlineClaudeCloudMode(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AWS_ACCESS_KEY_ID", "fixture")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "fixture")
+	t.Setenv("AZURE_CLIENT_SECRET", "fixture")
+	repoRoot := initTempGitRepo(t)
+	scriptDir := t.TempDir()
+	launch := writeScript(t, scriptDir, "launch.sh", `
+names=$(env | cut -d= -f1)
+printf '%s\n' "$names" | grep -qx AWS_ACCESS_KEY_ID || exit 9
+printf '%s\n' "$names" | grep -qx AWS_SECRET_ACCESS_KEY || exit 9
+printf '%s\n' "$names" | grep -qx AZURE_CLIENT_SECRET && exit 9
+echo '{"url":"http://127.0.0.1:9","token":"test-token"}'
+`)
+	writeInRepoConfig(t, repoRoot, map[string]any{
+		"backend": "hook",
+		"remote_hooks": map[string]any{
+			"launch_cmd": launch,
+			"delete_cmd": "true",
+		},
+		"program_overrides": map[string]any{
+			tmux.ProgramClaude: "CLAUDE_CODE_USE_BEDROCK=1 claude",
+		},
+	})
+
+	result, err := (hookRuntime{}).Provision(ProvisionSpec{
+		RepoRoot: repoRoot,
+		Title:    "inline-cloud-mode",
+		Program:  tmux.ProgramClaude,
+	})
+	if err != nil {
+		t.Fatalf("hook launch did not receive credentials selected by the resolved Claude command: %v", err)
+	}
+	if result.Teardown != nil {
+		defer func() { _ = result.Teardown() }()
+	}
+}
+
 func TestDockerRunForwardsAllowedNamesWithoutAmbientEnvironment(t *testing.T) {
 	const (
 		customName = "CUSTOM_PROVIDER_TOKEN"
@@ -203,7 +241,7 @@ func TestSandboxAgentServerUsesResolvedCommandForFilteringAndLaunch(t *testing.T
 		},
 		"ssh": {
 			executable: "/srv/af-session/af",
-			inner: fmt.Sprintf("%s agent-server --listen 127.0.0.1:0 --repo %s --title %s --program %s --program-resolved",
+			inner: fmt.Sprintf("exec %s agent-server --listen 127.0.0.1:0 --repo %s --title %s --program %s --program-resolved",
 				shellQuote("/srv/af-session/af"), shellQuote("/srv/af-session/workspace"), shellQuote(spec.Title), shellQuote(tmux.ProgramCodex)),
 			commandResult: func() (string, error) {
 				return (&sshProvisioner{spec: spec, program: tmux.ProgramCodex, sessionDir: "/srv/af-session"}).agentServerCommand()
@@ -243,6 +281,24 @@ func TestSandboxAgentServerMarksResolvedProgram(t *testing.T) {
 		if !strings.Contains(command, "--program-resolved") {
 			t.Fatalf("%s agent-server command can offer the resolved program for a second config lookup: %q", backend, command)
 		}
+	}
+}
+
+func TestSSHAgentServerCommandExecsAtRecordedPID(t *testing.T) {
+	spec := ProvisionSpec{Title: "pid-identity", Program: tmux.ProgramCodex}
+	p := &sshProvisioner{spec: spec, program: spec.Program, sessionDir: "/srv/af-session"}
+	command, err := p.agentServerCommand()
+	if err != nil {
+		t.Fatal(err)
+	}
+	inner := fmt.Sprintf("exec %s agent-server --listen 127.0.0.1:0 --repo %s --title %s --program %s --program-resolved",
+		shellQuote(p.afPath()), shellQuote(p.workspacePath()), shellQuote(spec.Title), shellQuote(spec.Program))
+	want, err := sessionenv.WrapCommand(p.afPath(), tmux.ProgramCodex, nil, inner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if command != want {
+		t.Fatalf("SSH agent-server launch does not exec af at the PID recorded for teardown: %q", command)
 	}
 }
 

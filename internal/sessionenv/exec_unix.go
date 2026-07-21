@@ -58,7 +58,7 @@ func execInvocation(args []string) error {
 		return err
 	}
 	command := args[len(args)-1]
-	environ := Filter(os.Environ(), agent, extras)
+	environ := FilterForCommand(os.Environ(), agent, command, extras)
 	// tmux runs shell-command through the system shell, not the user's login
 	// shell. Keep that POSIX contract: program overrides and injected commands
 	// commonly use assignment prefixes, redirects, and quoting that fish/tcsh

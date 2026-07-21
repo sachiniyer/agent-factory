@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"os/exec"
+	"slices"
 	"strings"
 	"testing"
 
@@ -107,6 +108,40 @@ func TestStartAllowsConfiguredExactVariable(t *testing.T) {
 	if strings.Contains(pty.cmd.String(), "test-value") {
 		t.Fatal("tmux argv rendered an environment value")
 	}
+}
+
+func TestInlineClaudeCloudModeImportsProviderCredentials(t *testing.T) {
+	forceSessionEnvExecutable(t, "/opt/af")
+	t.Setenv("AWS_ACCESS_KEY_ID", "fixture")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "fixture")
+	t.Setenv("AZURE_CLIENT_SECRET", "fixture")
+
+	session := NewTmuxSession("inline-cloud-mode", "CLAUDE_CODE_USE_BEDROCK=1 claude")
+	_, environ, imports, err := session.launchEnvironment("CLAUDE_CODE_USE_BEDROCK=1 claude")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"} {
+		if !launchEnvironmentHasName(environ, name) {
+			t.Fatalf("inline Claude Bedrock mode omitted %s from the launch environment", name)
+		}
+		if !slices.Contains(imports, name) {
+			t.Fatalf("inline Claude Bedrock mode omitted %s from the tmux import list", name)
+		}
+	}
+	if launchEnvironmentHasName(environ, "AZURE_CLIENT_SECRET") || slices.Contains(imports, "AZURE_CLIENT_SECRET") {
+		t.Fatal("Claude Bedrock mode admitted an inactive Foundry credential")
+	}
+}
+
+func launchEnvironmentHasName(environ []string, name string) bool {
+	prefix := name + "="
+	for _, entry := range environ {
+		if strings.HasPrefix(entry, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 func TestStartImportsAllowedEnvironmentIntoExistingTmuxServer(t *testing.T) {

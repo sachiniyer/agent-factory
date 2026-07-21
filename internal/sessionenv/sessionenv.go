@@ -86,7 +86,8 @@ type conditionalNames struct {
 // Cloud-provider credentials are narrower than the selected agent: Claude can
 // authenticate through Anthropic without needing the operator's unrelated AWS,
 // Google Cloud, or Azure production credentials. Admit each provider group only
-// when Claude's documented mode selector is enabled in the source environment.
+// when Claude's documented mode selector is enabled in the source environment
+// or as a literal assignment on the command that launches Claude.
 var conditionalAgentNames = map[string][]conditionalNames{
 	"claude": {
 		{
@@ -129,11 +130,9 @@ var dockerClientNames = nameSet(
 	"TMPDIR", "TMP", "TEMP", "PWD",
 	"XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME", "XDG_RUNTIME_DIR",
 	"DBUS_SESSION_BUS_ADDRESS",
-	// Remote Docker transports, proxies, and private trust roots.
+	// Remote Docker transport identity. Proxy/CA variables require the same
+	// explicit trust grant as every value a repo-controlled --env can request.
 	"SSH_AUTH_SOCK", "SSH_AGENT_PID",
-	"HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
-	"http_proxy", "https_proxy", "all_proxy", "no_proxy",
-	"SSL_CERT_FILE", "SSL_CERT_DIR", "NODE_EXTRA_CA_CERTS", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE",
 )
 
 // NormalizeExtraNames validates an explicit pass-through list, removes
@@ -164,7 +163,14 @@ func NormalizeExtraNames(names []string) ([]string, error) {
 // Filter returns source with only the common, selected-agent, and explicit
 // variables retained. It never logs or otherwise renders a value.
 func Filter(source []string, agent string, extras []string) []string {
-	allowed := allowedNames(source, agent, extras)
+	return FilterForCommand(source, agent, "", extras)
+}
+
+// FilterForCommand is Filter with command-local cloud-mode assignments folded
+// into the selected-agent policy. The command is parsed without evaluation;
+// dynamic or unsupported syntax fails closed.
+func FilterForCommand(source []string, agent, command string, extras []string) []string {
+	allowed := allowedNames(source, agent, command, extras)
 	out := make([]string, 0, len(source))
 	for _, entry := range source {
 		name, _, ok := strings.Cut(entry, "=")
@@ -182,7 +188,13 @@ func Filter(source []string, agent string, extras []string) []string {
 // Names absent from source are included so tmux marks stale server values as
 // removed instead of reviving an old credential in a new pane.
 func ImportNames(source []string, agent string, extras []string) []string {
-	allowed := allowedNames(source, agent, extras)
+	return ImportNamesForCommand(source, agent, "", extras)
+}
+
+// ImportNamesForCommand is ImportNames with the same command-local cloud-mode
+// policy as FilterForCommand.
+func ImportNamesForCommand(source []string, agent, command string, extras []string) []string {
+	allowed := allowedNames(source, agent, command, extras)
 	for _, entry := range source {
 		name, _, ok := strings.Cut(entry, "=")
 		if ok && strings.HasPrefix(name, "LC_") && validName(name) {
@@ -252,12 +264,12 @@ func DockerForwardNames(source []string, _ string, extras []string) []string {
 	return out
 }
 
-func allowedNames(source []string, agent string, extras []string) map[string]struct{} {
+func allowedNames(source []string, agent, command string, extras []string) map[string]struct{} {
 	allowed := make(map[string]struct{}, len(commonNames)+len(extras)+16)
 	for name := range commonNames {
 		allowed[name] = struct{}{}
 	}
-	for name := range selectedAgentNames(source, agent) {
+	for name := range selectedAgentNames(source, agent, command) {
 		allowed[name] = struct{}{}
 	}
 	for _, name := range extras {
@@ -268,13 +280,17 @@ func allowedNames(source []string, agent string, extras []string) map[string]str
 	return allowed
 }
 
-func selectedAgentNames(source []string, agent string) map[string]struct{} {
+func selectedAgentNames(source []string, agent, command string) map[string]struct{} {
 	selected := make(map[string]struct{}, len(agentNames[agent])+16)
 	for name := range agentNames[agent] {
 		selected[name] = struct{}{}
 	}
 	for _, group := range conditionalAgentNames[agent] {
-		if !environmentFlagEnabled(source, group.selector) {
+		enabled := environmentFlagEnabled(source, group.selector)
+		if found, commandEnabled := commandEnvironmentFlagState(command, agent, group.selector); found {
+			enabled = commandEnabled
+		}
+		if !enabled {
 			continue
 		}
 		for name := range group.names {
@@ -290,10 +306,14 @@ func environmentFlagEnabled(source []string, name string) bool {
 		if !strings.HasPrefix(entry, prefix) {
 			continue
 		}
-		value := strings.ToLower(strings.TrimSpace(strings.TrimPrefix(entry, prefix)))
-		return value != "" && value != "0" && value != "false" && value != "no" && value != "off"
+		return flagValueEnabled(strings.TrimPrefix(entry, prefix))
 	}
 	return false
+}
+
+func flagValueEnabled(value string) bool {
+	value = strings.ToLower(strings.TrimSpace(value))
+	return value != "" && value != "0" && value != "false" && value != "no" && value != "off"
 }
 
 func allowedName(allowed map[string]struct{}, name string) bool {

@@ -152,7 +152,12 @@ The built-in allowlist keeps the pieces sessions need:
   the standard OpenSSL, Node, Requests, and curl custom-CA paths.
 - Authentication for the selected agent only: Claude gets Anthropic/OAuth, and
   gets each Bedrock, Vertex, or Foundry credential group only when that mode's
-  `CLAUDE_CODE_USE_*` selector is enabled; Codex gets
+  `CLAUDE_CODE_USE_*` selector is exported or is a literal assignment in the
+  resolved command (for example,
+  `program_overrides.claude = "CLAUDE_CODE_USE_BEDROCK=1 claude"`). Only a
+  literal assignment prefix on the Claude invocation is inspected; dynamic or
+  unsupported shell forms require exporting the selector before starting af,
+  or explicitly listing the provider credential names. Codex gets
   `OPENAI_API_KEY`, `CODEX_API_KEY`, `CODEX_ACCESS_TOKEN`, `CODEX_HOME`,
   `CODEX_SQLITE_HOME`, and its CA path; Gemini gets Gemini/Google API keys and
   Google application-default/Vertex selectors; Amp gets `AMP_API_KEY` and
@@ -166,6 +171,8 @@ proxy, or CA variable. Add each required name to `session_env_passthrough` only
 after trusting the configured image, preferably at an immutable digest. Local,
 SSH, and hook launches retain the built-in selected-agent behavior; SSH reads
 matching values from the remote account rather than copying the daemon's.
+If the Docker client itself needs a proxy or private CA to reach its daemon or
+registry, list those exact names too.
 
 An agent wrapper that hides the real executable name, a custom Codex model
 provider whose `env_key` is user-defined, or a less-common Aider/OpenCode

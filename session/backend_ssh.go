@@ -563,7 +563,7 @@ func (p *sshProvisioner) startAgentServer() error {
 }
 
 func (p *sshProvisioner) agentServerCommand() (string, error) {
-	inner := fmt.Sprintf("%s agent-server --listen 127.0.0.1:0 --repo %s --title %s",
+	inner := fmt.Sprintf("exec %s agent-server --listen 127.0.0.1:0 --repo %s --title %s",
 		shellQuote(p.afPath()), shellQuote(p.workspacePath()), shellQuote(p.spec.Title))
 	if strings.TrimSpace(p.program) != "" {
 		inner += " --program " + shellQuote(p.program)

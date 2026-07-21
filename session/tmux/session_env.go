@@ -41,7 +41,9 @@ func (t *TmuxSession) launchEnvironment(program string) (string, []string, []str
 		return "", nil, nil, err
 	}
 	source := os.Environ()
-	return wrapped, sessionenv.Filter(source, agent, extra), sessionenv.ImportNames(source, agent, extra), nil
+	return wrapped,
+		sessionenv.FilterForCommand(source, agent, program, extra),
+		sessionenv.ImportNamesForCommand(source, agent, program, extra), nil
 }
 
 // importClientEnvironmentArgs makes an existing tmux server copy the approved
