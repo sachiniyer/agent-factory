@@ -54,13 +54,23 @@ func NewResizeMessage(rows, cols uint16) ResizeMessage {
 // snapshot. Presence is significant: an all-false Modes value truthfully means
 // primary screen with no mouse tracking, unlike a source that could not report.
 type TerminalModesMessage struct {
-	Type  MessageType    `json:"type"`
-	Modes terminal.Modes `json:"modes"`
+	Type             MessageType    `json:"type"`
+	Modes            terminal.Modes `json:"modes"`
+	CoversNextCursor bool           `json:"covers_next_cursor,omitempty"`
 }
 
 // NewTerminalModesMessage builds terminal mode snapshot metadata.
 func NewTerminalModesMessage(modes terminal.Modes) TerminalModesMessage {
 	return TerminalModesMessage{Type: MsgTerminalModes, Modes: modes}
+}
+
+// NewTerminalModesMessageCoveringNextCursor marks the recovery-barrier snapshot
+// that describes the cursor re-seed emitted immediately after its repaint. A
+// fresh repaint uses NewTerminalModesMessage and grants no future-gap coverage.
+func NewTerminalModesMessageCoveringNextCursor(modes terminal.Modes) TerminalModesMessage {
+	msg := NewTerminalModesMessage(modes)
+	msg.CoversNextCursor = true
+	return msg
 }
 
 // ExitReason says WHY a MsgExit ended the stream. It is an additive

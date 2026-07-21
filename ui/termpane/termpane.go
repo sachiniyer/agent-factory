@@ -82,6 +82,16 @@ const (
 	EventCursor
 )
 
+// RepaintCursorCoverage says whether a mode-bearing repaint authoritatively
+// describes the next cursor jump. Zero is deliberately no coverage: fresh
+// subscriber repaints cannot bless bytes evicted later.
+type RepaintCursorCoverage uint8
+
+const (
+	RepaintCoversNoCursor RepaintCursorCoverage = iota
+	RepaintCoversNextCursor
+)
+
 // Event is one inbound stream event, selected by Kind: output bytes or a repaint
 // (Data), the authoritative size echo (Rows/Cols), or a cursor re-seed (Seq).
 type Event struct {
@@ -94,6 +104,9 @@ type Event struct {
 	// not observe in the live byte ring.
 	Modes    terminal.Modes
 	HasModes bool
+	// CursorCoverage is nonzero only for a recovery-barrier repaint that
+	// authoritatively describes its immediately following cursor re-seed.
+	CursorCoverage RepaintCursorCoverage
 	// Seq is the server's authoritative replay cursor, valid only when
 	// Kind == EventCursor.
 	Seq uint64
@@ -255,9 +268,9 @@ func (t *TermPane) run() {
 		t.connMu.Unlock()
 
 		t.gridMu.Lock()
-		// A clamped cursor crossed an unretained gap. A fresh repaint will
-		// normally follow, but the prior owner is unsafe until it does.
-		t.connectTerminalModesLocked(stream.StartSeq() == since)
+		// Direction matters: a start ahead of our request crossed an unretained
+		// gap, while a start behind it is the broker's harmless clamp to live tail.
+		t.connectTerminalModesLocked(terminalModeReplayContinuityFor(since, stream.StartSeq()))
 		t.gridMu.Unlock()
 
 		// (Re)assert our desired size so the server sizes this tab's window to us —
@@ -316,7 +329,7 @@ func (t *TermPane) readStream(stream Stream) {
 				// modes. Assign the snapshot as the authority as well: tmux can
 				// report UTF-8 encoding even when an emulator does not expose a
 				// callback for it, and all-false is meaningful.
-				t.installTerminalModesLocked(ev.Modes)
+				t.installTerminalModesLocked(ev.Modes, ev.CursorCoverage)
 			} else {
 				// A recovery repaint can jump over unretained DEC mode changes.
 				// Without snapshot metadata the old decision is no longer safe.

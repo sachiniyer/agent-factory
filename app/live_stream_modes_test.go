@@ -69,6 +69,26 @@ func TestAPIStreamBindsTerminalModesToRepaint(t *testing.T) {
 	}
 }
 
+func TestAPIStreamBindsRecoveryCursorCoverageToRepaint(t *testing.T) {
+	want := terminal.Modes{AlternateScreen: true}
+	stream := testAPIStream(t, func(ctx context.Context, conn *websocket.Conn) error {
+		if err := agentproto.WriteControl(
+			ctx, conn, agentproto.NewTerminalModesMessageCoveringNextCursor(want),
+		); err != nil {
+			return err
+		}
+		return agentproto.WriteFrame(ctx, conn, agentproto.RepaintFrame([]byte("RECOVERED-GRID")))
+	})
+
+	ev, err := stream.Recv(context.Background())
+	if err != nil {
+		t.Fatalf("Recv: %v", err)
+	}
+	if ev.Kind != termpane.EventRepaint || ev.CursorCoverage != termpane.RepaintCoversNextCursor {
+		t.Fatalf("event = %+v, want recovery repaint covering its next cursor", ev)
+	}
+}
+
 func TestAPIStreamMalformedModesCannotReusePriorSnapshot(t *testing.T) {
 	stream := testAPIStream(t, func(ctx context.Context, conn *websocket.Conn) error {
 		if err := agentproto.WriteControl(ctx, conn, agentproto.NewTerminalModesMessage(terminal.Modes{AlternateScreen: true})); err != nil {

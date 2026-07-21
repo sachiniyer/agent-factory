@@ -558,6 +558,12 @@ func (w *TabbedWindow) SetScrollOwner(owner ScrollOwner) {
 	w.tab.SetScrollOwnerFor(w.effectiveInstance(), w.effectiveTab(), owner)
 }
 
+// ObserveScrollOwnerUnknown records a transient stream-authority gap. An active
+// AF history transaction remains usable; every idle pane becomes unavailable.
+func (w *TabbedWindow) ObserveScrollOwnerUnknown() ScrollOwner {
+	return w.tab.ObserveScrollOwnerUnknownFor(w.effectiveInstance(), w.effectiveTab())
+}
+
 // SetScrollOwnerResolving makes the effective capture target own the pending
 // ownership probe without inheriting the committed/previous target's decision.
 func (w *TabbedWindow) SetScrollOwnerResolving() {

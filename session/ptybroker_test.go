@@ -248,6 +248,9 @@ func TestPTYBrokerRepaintCarriesTerminalModes(t *testing.T) {
 	if ev.Kind != PTYRepaint || !ev.HasModes || ev.Modes != modes {
 		t.Fatalf("repaint metadata = %+v, want modes %+v", ev, modes)
 	}
+	if ev.RepaintProvenance != PTYRepaintFresh {
+		t.Fatalf("initial repaint provenance = %d, want fresh", ev.RepaintProvenance)
+	}
 	if !strings.HasPrefix(string(ev.Data), string(modes.RestoreSequence())) {
 		t.Fatalf("repaint data = %q, want terminal-mode restore prefix %q", ev.Data, modes.RestoreSequence())
 	}

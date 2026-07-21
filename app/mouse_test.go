@@ -688,6 +688,38 @@ func TestKeyboardScrollResolvesLiveOwnerAtInputTime(t *testing.T) {
 		"returning to the primary screen must restore host keyboard scrolling")
 }
 
+func TestUnknownLiveModesPreserveActiveHostScroll(t *testing.T) {
+	h, _ := liveTestHome(t)
+	resizeHome(h, 120, 40)
+	fakes, _ := stubLiveTermFactory(t)
+	h.syncLiveTermPane()
+	require.Len(t, *fakes, 1)
+	fake := (*fakes)[0]
+	p := h.focusedOpenPane()
+	require.NotNil(t, p)
+	w := h.paneWindows[p.ID()]
+	require.NotNil(t, w)
+
+	h.syncPaneScrollOwners()
+	require.Equal(t, ui.ScrollOwnerHostHistory, w.ScrollOwner())
+	w.ScrollUp()
+	require.True(t, w.IsInScrollMode(), "precondition: AF owns an active history transaction")
+
+	fake.modesKnown = false
+	h.syncPaneScrollOwners()
+	require.True(t, w.IsInScrollMode(),
+		"a transient reconnect gap must not discard an active history transaction")
+	require.Equal(t, ui.ScrollOwnerHostHistory, w.ScrollOwner())
+
+	// Unknown is only a preservation rule. Once the stream authoritatively reports
+	// a child owner, that new decision replaces the old host-history transaction.
+	fake.modes = terminal.Modes{AlternateScreen: true}
+	fake.modesKnown = true
+	h.syncPaneScrollOwners()
+	require.False(t, w.IsInScrollMode())
+	require.Equal(t, ui.ScrollOwnerChildApplication, w.ScrollOwner())
+}
+
 func TestMouse_TransientPreviewUsesTargetSnapshotOwner(t *testing.T) {
 	h := newTestHome(t)
 	for _, title := range []string{"alpha", "beta", "gamma"} {

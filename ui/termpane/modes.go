@@ -13,13 +13,31 @@ type terminalModesAuthority uint8
 const (
 	terminalModesUnknown terminalModesAuthority = iota
 	// terminalModesDisconnected retains an authoritative base only so an exact
-	// replay can continue evolving it. It is never exposed to input routing.
+	// or tail-clamped continuous replay can keep evolving it. It is never exposed
+	// to input routing.
 	terminalModesDisconnected
 	terminalModesCurrent
 	// terminalModesCursorCovered is current and permits exactly one recovery
 	// cursor re-seed immediately after the authoritative repaint that established it.
 	terminalModesCursorCovered
 )
+
+type terminalModeReplayContinuity uint8
+
+const (
+	terminalModeReplayContinuous terminalModeReplayContinuity = iota
+	terminalModeReplayMissingBytes
+)
+
+// terminalModeReplayContinuityFor classifies direction, not merely inequality.
+// Starting ahead of the requested cursor skipped bytes; starting at or behind it
+// is exact replay or the broker's harmless clamp down to its live tail.
+func terminalModeReplayContinuityFor(requestedSince, actualStart uint64) terminalModeReplayContinuity {
+	if actualStart > requestedSince {
+		return terminalModeReplayMissingBytes
+	}
+	return terminalModeReplayContinuous
+}
 
 // TerminalModes returns the most recent terminal ownership modes and whether a
 // complete authoritative base is known. Live DECSET/DECRST callbacks evolve a
@@ -34,11 +52,21 @@ func (t *TermPane) TerminalModes() (terminal.Modes, bool) {
 }
 
 // installTerminalModesLocked makes one repaint the authoritative base for every
-// ownership mode. It also covers a cursor re-seed delivered immediately after
-// that repaint (the broker's recovery ordering is repaint -> cursor -> data).
-func (t *TermPane) installTerminalModesLocked(modes terminal.Modes) {
+// ownership mode. Only explicit recovery provenance covers a cursor re-seed;
+// fresh repaints cannot predict a later eviction gap.
+func (t *TermPane) installTerminalModesLocked(
+	modes terminal.Modes,
+	coverage RepaintCursorCoverage,
+) {
 	t.terminalModes = modes
-	t.modeAuthority = terminalModesCursorCovered
+	switch coverage {
+	case RepaintCoversNoCursor:
+		t.modeAuthority = terminalModesCurrent
+	case RepaintCoversNextCursor:
+		t.modeAuthority = terminalModesCursorCovered
+	default:
+		panic("termpane: unknown repaint cursor coverage")
+	}
 }
 
 // invalidateTerminalModesLocked is the single authority-loss transition. The
@@ -49,13 +77,19 @@ func (t *TermPane) invalidateTerminalModesLocked() {
 	t.modeAuthority = terminalModesUnknown
 }
 
-// connectTerminalModesLocked makes a retained base public only when the broker
-// accepted the exact cursor. A clamp crossed bytes that may contain mode changes,
-// so it discards authority until a fresh metadata-bearing repaint arrives.
-func (t *TermPane) connectTerminalModesLocked(exactReplay bool) {
-	if !exactReplay {
+// connectTerminalModesLocked makes a retained base public after continuous
+// replay. A forward clamp crossed bytes that may contain mode changes, so it
+// discards authority until a fresh metadata-bearing repaint arrives.
+func (t *TermPane) connectTerminalModesLocked(continuity terminalModeReplayContinuity) {
+	switch continuity {
+	case terminalModeReplayMissingBytes:
 		t.invalidateTerminalModesLocked()
 		return
+	case terminalModeReplayContinuous:
+		// Retained authority can evolve through exact replay or a harmless
+		// clamp down to the broker's current tail.
+	default:
+		panic("termpane: unknown replay continuity")
 	}
 	if t.modeAuthority == terminalModesDisconnected {
 		t.modeAuthority = terminalModesCurrent
