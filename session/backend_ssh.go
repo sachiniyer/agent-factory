@@ -206,6 +206,11 @@ type sshProvisioner struct {
 	// real SSH server. Production instances leave these nil and use the methods
 	// below; tests inject only the remote command/dial/client-close boundary.
 	reapRunCombined func(time.Duration, string) ([]byte, error)
+	// reapRunKill reports whether the kill crossed the pre-send boundary. False
+	// means SSH could not even open a command channel, so remotePID is still safe
+	// and necessary to retry. True spends the PID regardless of the later command
+	// outcome, preventing a retry from targeting a recycled process number.
+	reapRunKill     func(time.Duration, string) (bool, error)
 	reapDial        func() error
 	reapCloseClient func()
 }
@@ -668,14 +673,29 @@ func (p *sshProvisioner) reap() error {
 	}
 
 	if remotePID := p.remotePID; remotePID != "" {
-		// Consume the PID before sending the command. Unlike removal of a unique
-		// session directory, killing a numeric PID is not idempotent across polls:
-		// the remote OS may recycle it after this attempt, and a retry must never
-		// kill an unrelated process that inherited the number.
-		p.remotePID = ""
 		// SIGTERM lets the agent-server tear its workspace down cleanly (kill
 		// tmux, remove the worktree); the SIGKILL is a backstop if it hangs.
-		_, _ = p.runReapCombined(sshShortStepTimeout, fmt.Sprintf("kill %s 2>/dev/null; sleep 0.3; kill -9 %s 2>/dev/null; true", remotePID, remotePID))
+		transmitted, killErr := p.runReapKill(sshShortStepTimeout, fmt.Sprintf("kill %s 2>/dev/null; sleep 0.3; kill -9 %s 2>/dev/null; true", remotePID, remotePID))
+		if !transmitted {
+			// The SSH client failed before it could hand over the kill. Keep the PID
+			// and abort before rm: deleting the directory while its agent-server is
+			// still running would turn a retryable row into an orphan.
+			p.finishReapTransport()
+			if killErr == nil {
+				killErr = errors.New("kill command was not transmitted")
+			}
+			reapErr := fmt.Errorf("%w: backend=ssh: opening a command channel on %s to kill remote PID %s failed: %w",
+				ErrWorkspaceStateUnknown, p.cfg.Host, remotePID, killErr)
+			log.WarningLog.Printf("%v", reapErr)
+			return reapErr
+		}
+		// The kill crossed the send boundary exactly once. Spend the numeric PID
+		// even if the connection failed afterward: the remote OS may recycle it,
+		// so a retained-row retry may repeat rm but must never repeat this kill.
+		p.remotePID = ""
+		if killErr != nil {
+			log.WarningLog.Printf("ssh runtime: remote PID %s kill was transmitted but did not report completion: %v", remotePID, killErr)
+		}
 	}
 	out, err := p.runReapCombined(sshReapTimeout, "rm -rf "+shellQuote(p.sessionDir))
 	p.finishReapTransport()
@@ -719,6 +739,24 @@ func (p *sshProvisioner) runReapCombined(timeout time.Duration, script string) (
 	return p.runCombined(timeout, script)
 }
 
+// runReapKill separates the one non-idempotent cleanup command from rm. The
+// returned boolean is false only when SSH failed to open a command channel, so
+// no exec request could be attempted; once the channel exists, the PID is spent
+// regardless of a later timeout or transport loss.
+func (p *sshProvisioner) runReapKill(timeout time.Duration, script string) (bool, error) {
+	if p.reapRunKill != nil {
+		return p.reapRunKill(timeout, script)
+	}
+	if p.reapRunCombined != nil {
+		// Existing tests inject at the combined-command boundary. Reaching that
+		// seam models an already-open channel and therefore a transmitted kill.
+		_, err := p.reapRunCombined(timeout, script)
+		return true, err
+	}
+	_, transmitted, err := p.runCombinedTracked(timeout, script)
+	return transmitted, err
+}
+
 func (p *sshProvisioner) dialForReap() error {
 	if p.reapDial != nil {
 		return p.reapDial()
@@ -759,6 +797,20 @@ func (p *sshProvisioner) runCombined(timeout time.Duration, script string) ([]by
 	return p.runSession(timeout, script, nil, true)
 }
 
+// runCombinedTracked is the reap-only sibling that exposes the non-idempotent
+// kill boundary. A NewSession failure is definitively pre-send. Once the command
+// channel exists, handoff to the SSH command runner spends the PID even if the
+// request later times out or loses its reply.
+func (p *sshProvisioner) runCombinedTracked(timeout time.Duration, script string) ([]byte, bool, error) {
+	sess, err := p.client.NewSession()
+	if err != nil {
+		return nil, false, fmt.Errorf("opening ssh session failed: %w", err)
+	}
+	defer func() { _ = sess.Close() }()
+	out, err := runOpenedSSHSession(timeout, sess, script, nil, true)
+	return out, true, err
+}
+
 // runOut runs script via `sh -c` on the remote and returns ONLY stdout — used
 // where stderr would pollute the captured value (the launch's PID, the banner
 // JSON).
@@ -787,6 +839,13 @@ func (p *sshProvisioner) runSession(timeout time.Duration, script string, stdin 
 		return nil, fmt.Errorf("opening ssh session failed: %w", err)
 	}
 	defer func() { _ = sess.Close() }()
+	return runOpenedSSHSession(timeout, sess, script, stdin, combined)
+}
+
+// runOpenedSSHSession owns command execution after NewSession has established
+// the SSH channel. Keeping this boundary explicit lets reap distinguish a kill
+// that could not be sent from one whose later result was merely lost.
+func runOpenedSSHSession(timeout time.Duration, sess *ssh.Session, script string, stdin io.Reader, combined bool) ([]byte, error) {
 	if stdin != nil {
 		sess.Stdin = stdin
 	}

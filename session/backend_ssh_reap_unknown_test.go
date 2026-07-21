@@ -101,6 +101,63 @@ func TestSSHReapTimeoutRetriesUntilCleanupCompletes(t *testing.T) {
 	}
 }
 
+// TestSSHReapKeepsPIDUntilKillReachesSSH is the late #2265 review regression.
+// A dead client can fail while opening the SSH session, before the kill command
+// is transmitted. That attempt must retain both the row and PID; once reconnect
+// succeeds, the retry must still send the kill before removing the directory.
+func TestSSHReapKeepsPIDUntilKillReachesSSH(t *testing.T) {
+	p := &sshProvisioner{
+		spec:       ProvisionSpec{Title: "remote-secret"},
+		cfg:        configSSHForReapTest(),
+		sessionDir: "/home/remote/.af-sessions/remote-secret.1234",
+		remotePID:  "4242",
+		client:     &ssh.Client{},
+	}
+	var killCalls, rmCalls, dialCalls int
+	p.reapRunKill = func(_ time.Duration, script string) (bool, error) {
+		if !strings.HasPrefix(script, "kill ") {
+			t.Fatalf("unexpected kill command %q", script)
+		}
+		killCalls++
+		if killCalls == 1 {
+			return false, fmt.Errorf("opening ssh session failed: %w", io.EOF)
+		}
+		return true, nil
+	}
+	p.reapRunCombined = func(_ time.Duration, script string) ([]byte, error) {
+		if !strings.HasPrefix(script, "rm -rf ") {
+			t.Fatalf("unexpected reap command %q", script)
+		}
+		rmCalls++
+		return nil, nil
+	}
+	p.reapDial = func() error {
+		dialCalls++
+		p.client = &ssh.Client{}
+		return nil
+	}
+	p.reapCloseClient = func() {}
+
+	if err := p.reap(); !errors.Is(err, ErrWorkspaceStateUnknown) {
+		t.Fatalf("pre-send SSH failure must retain the row, got %v", err)
+	}
+	if p.remotePID != "4242" {
+		t.Fatalf("pre-send SSH failure consumed PID: got %q, want 4242", p.remotePID)
+	}
+	if rmCalls != 0 {
+		t.Fatalf("pre-send SSH failure removed the directory before its process was killed: rm calls=%d", rmCalls)
+	}
+	if err := p.reap(); err != nil {
+		t.Fatalf("retry after reconnect must reap the process and directory: %v", err)
+	}
+	if p.remotePID != "" {
+		t.Fatalf("delivered kill did not spend PID: got %q", p.remotePID)
+	}
+	if killCalls != 2 || rmCalls != 1 || dialCalls != 1 {
+		t.Fatalf("retry lost cleanup work: kill=%d rm=%d dial=%d, want 2/1/1", killCalls, rmCalls, dialCalls)
+	}
+}
+
 // A re-dial failure is itself unknown: the daemon still cannot know whether
 // the retained remote directory exists. It must not convert one cleanup timeout
 // into a known error on the very next poll merely because the old client closed.
