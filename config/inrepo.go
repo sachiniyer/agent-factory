@@ -58,10 +58,15 @@ type InRepoConfig struct {
 	// SSH parameterizes the ssh runtime (used when Backend == "ssh").
 	SSH *SSHConfig `json:"ssh,omitempty" toml:"ssh,omitempty"`
 
-	// setKeys records which top-level keys were present in the JSON file so
+	// setKeys records which top-level keys were present in the config file so
 	// the resolver can distinguish "set to an empty value" (overrides) from
 	// "absent" (falls through to the legacy/global value).
 	setKeys map[string]bool
+
+	// source retains nested presence and the source path for provenance. It is
+	// populated by the same decode as setKeys; the resolver never re-reads the
+	// checked-in file to explain a value.
+	source sourceMetadata
 }
 
 // IsSet reports whether the given top-level JSON key was present in the
@@ -276,34 +281,29 @@ func LoadInRepoConfig(repoRoot string) (*InRepoConfig, []byte, error) {
 		return nil, nil, fmt.Errorf("in-repo config %s is empty; delete it or add valid %s", prettyPath, format)
 	}
 
-	// Decode the top level twice: once shapeless for the key allowlist and
-	// setKeys presence tracking, once into the struct. The shapeless pass is
-	// what lets typos fail loudly in a file that can execute shell commands.
-	presentKeys := map[string]bool{}
+	// Decode the top level shapelessly once for the key allowlist, presence,
+	// nested provenance, and source path, then decode the same in-memory bytes
+	// into the typed struct below. Sharing this metadata object is what prevents
+	// explanation from acquiring a third parser or a later filesystem read.
+	format := FormatJSON
 	if isToml {
-		var rawKeys map[string]any
-		if err := toml.Unmarshal(data, &rawKeys); err != nil {
+		format = FormatTOML
+	}
+	metadata, err := metadataForSource(data, path, format)
+	if err != nil {
+		if isToml {
 			return nil, nil, tomlParseError("in-repo config "+prettyPath, err)
 		}
-		for key := range rawKeys {
-			presentKeys[key] = true
-		}
-	} else {
-		var rawKeys map[string]json.RawMessage
-		if err := json.Unmarshal(data, &rawKeys); err != nil {
-			return nil, nil, fmt.Errorf("failed to parse in-repo config %s: %w", prettyPath, err)
-		}
-		// A bare JSON `null` unmarshals into a map as a no-op that leaves it
-		// nil — the one non-object top-level value encoding/json accepts
-		// (strings, numbers, arrays, and booleans already error above). Reject
-		// it explicitly so malformed input fails loudly instead of being
-		// silently treated as an empty config (#1153).
-		if rawKeys == nil {
-			return nil, nil, fmt.Errorf("in-repo config %s must be a JSON object, not null", prettyPath)
-		}
-		for key := range rawKeys {
-			presentKeys[key] = true
-		}
+		return nil, nil, fmt.Errorf("failed to parse in-repo config %s: %w", prettyPath, err)
+	}
+	// A bare JSON `null` decodes into a nil map without error. Reject it so it
+	// cannot masquerade as an empty config (#1153).
+	if !isToml && metadata.shape == nil {
+		return nil, nil, fmt.Errorf("in-repo config %s must be a JSON object, not null", prettyPath)
+	}
+	presentKeys := make(map[string]bool, len(metadata.shape))
+	for key := range metadata.shape {
+		presentKeys[key] = true
 	}
 	for key := range presentKeys {
 		if inRepoGlobalOnlyKeys[key] {
@@ -341,8 +341,9 @@ func LoadInRepoConfig(repoRoot string) (*InRepoConfig, []byte, error) {
 		}
 	}
 	cfg.setKeys = presentKeys
+	cfg.source = metadata
 
-	if cfg.DefaultProgram != "" {
+	if cfg.IsSet("default_program") {
 		if err := ValidateProgramEnum(
 			fmt.Sprintf("Config issue in %s: default_program", prettyPath),
 			"default_program",

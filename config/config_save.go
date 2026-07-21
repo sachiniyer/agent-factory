@@ -75,7 +75,7 @@ func loadConfigLocked() (*Config, error) {
 	if isEffectivelyEmptyToml(data) {
 		return DefaultConfig(), nil
 	}
-	return parseConfigTOML(data, prettyHomePath(tomlPath))
+	return parseLoadedConfigTOML(data, prettyHomePath(tomlPath), tomlPath)
 }
 
 // saveConfigLocked saves the configuration to disk as config.toml WITHOUT

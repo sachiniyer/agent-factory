@@ -27,6 +27,7 @@ func parseConfig(data []byte, prettyConfigPath string) (*Config, error) {
 	}
 
 	config := DefaultConfig()
+	config.source.builtIn = snapshotConfig(config)
 	if err := json.Unmarshal(data, config); err != nil {
 		return nil, fmt.Errorf("failed to parse config file %s: %w", prettyConfigPath, err)
 	}
@@ -76,6 +77,7 @@ func parseConfigTOML(data []byte, prettyConfigPath string) (*Config, error) {
 	}
 
 	config := DefaultConfig()
+	config.source.builtIn = snapshotConfig(config)
 	if err := toml.Unmarshal(data, config); err != nil {
 		return nil, tomlParseError("config file "+prettyConfigPath, err)
 	}

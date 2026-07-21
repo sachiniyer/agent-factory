@@ -165,15 +165,20 @@ daemon is running, it exits successfully without starting one.
 
 ## `af config`
 
-Read and write the **global** config (`~/.agent-factory/config.toml`) from the CLI. Config is a hand-editable file read by the daemon and TUI at startup (not daemon-owned state). `--json` wraps output in the shared envelope (success and error).
+Read global config, inspect the effective existing layers for a repository, and write the **global** config (`~/.agent-factory/config.toml`) from the CLI. Config is a hand-editable file read by the daemon and TUI at startup (not daemon-owned state). `--json` wraps output in the shared envelope (success and error).
 
 ```bash
-af config list                     # every key and its effective value (defaults applied)
-af config get <key>                # one key (scalars print bare; maps as JSON)
-af config set <key> <value>        # write one settable key, preserving comments/ordering
+af config list                                      # global keys and effective global values
+af config get <key>                                 # one global value (script-compatible)
+af config get <key> --explain                       # global candidates and why one won
+af config list --project .                          # effective global + existing repository layers
+af config get program_overrides.codex --project . --explain
+af config set <key> <value>                         # global write, preserving comments/ordering
 ```
 
-`get`/`list` report effective global values (defaults applied). `set` edits only the target value's bytes — every comment, blank line, and key ordering is preserved (the file is not regenerated) — and validates the value with the loader's own rules before writing, so it can never produce a config that fails to load. Settable keys: `default_program`, `program_overrides.<agent>`, `auto_yes`, `auto_update`, `daemon_poll_interval`, `log_max_size_mb`, `log_max_backups`, `branch_prefix`, `worktree_root`, `detach_keys`, `update_channel`, `limit_patterns.<agent>`. Structural keys (`root_agents`, `[keys]`) stay hand-edited. A change applies on the next `af`/daemon start, exactly like a hand-edit (`set` prints this reminder). Full key reference: [configuration.md](configuration.md).
+Bare `get`/`list` report effective global values (defaults applied), unchanged for existing scripts. `--project <repository-path>` adds the existing legacy per-repo and checked-in `.agent-factory/config.toml` layers; the path is a selector only and does not register or persist a project. `--explain` reports the on-disk effective value, merge policy, precedence, every candidate's path/presence/result/reason, and per-leaf origins for merged maps/tables. Displayed source locations keep the selected/configured path spelling; symlinks are resolved for identity comparison, never for display. The output also says explicitly that the running daemon value was not checked. JSON mode carries the same data structurally.
+
+`set` stays global-only. It edits only the target value's bytes — every comment, blank line, and key ordering is preserved (the file is not regenerated) — and validates the value with the loader's own rules before writing, so it can never produce a config that fails to load. Settable keys: `default_program`, `program_overrides.<agent>`, `auto_yes`, `auto_update`, `daemon_poll_interval`, `log_max_size_mb`, `log_max_backups`, `branch_prefix`, `worktree_root`, `detach_keys`, `update_channel`, `limit_patterns.<agent>`. Structural keys (`root_agents`, `[keys]`) stay hand-edited. A change applies on the next `af`/daemon start, exactly like a hand-edit (`set` prints this reminder). Full key reference: [configuration.md](configuration.md).
 
 ## Maintenance commands
 

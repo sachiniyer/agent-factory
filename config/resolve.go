@@ -1,8 +1,10 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 
@@ -18,12 +20,11 @@ const inRepoHashFileName = "inrepo-config-hash"
 // once per repo per process.
 var legacyDeprecationLogged sync.Map
 
-// ResolvedConfig is the effective configuration for one repository: app
-// defaults overlaid by the global ~/.agent-factory/config.json overlaid by
-// the repo's own .agent-factory/config.json. Every consumer of per-repo
-// configuration (programs, remote hooks, post-worktree commands) must go
-// through ResolveConfig rather than reading LoadConfig/LoadRepoConfig
-// directly, so the precedence and scoping rules apply uniformly.
+// ResolvedConfig is effective configuration plus the provenance produced by
+// the same manifest-driven pass. Every consumer of per-repo configuration
+// (programs, remote hooks, post-worktree commands) must go through this file's
+// ResolveConfig or ResolveConfigForInspection entry point rather than reading
+// source files directly, so precedence and scoping stay uniform.
 type ResolvedConfig struct {
 	// Config carries the effective app-level fields. DefaultProgram and
 	// ProgramOverrides may have been overridden/merged from the in-repo
@@ -35,49 +36,88 @@ type ResolvedConfig struct {
 	// PostWorktreeCommands are the effective post-worktree hooks: the
 	// in-repo value when its key is present (even empty), otherwise the
 	// legacy ~/.agent-factory/repos/<id>/config.json value.
-	PostWorktreeCommands []string
+	PostWorktreeCommands []string `config:"post_worktree_commands"`
 	// RemoteHooks is the effective remote hook backend config, with the
 	// same in-repo-then-legacy resolution as PostWorktreeCommands. Command
 	// values that were relative filesystem paths have been rewritten to
 	// absolute paths under repoRoot (#834); consumers can exec them without
 	// caring about the process cwd.
-	RemoteHooks *RemoteHooks
+	RemoteHooks *RemoteHooks `config:"remote_hooks"`
 
 	// Backend is the effective `backend` runtime selector (#1592 Phase 4 PR3):
 	// one of local|docker|ssh|hook, empty meaning local. In-repo only — there
 	// is no legacy per-repo location for it. Validated by the session package
 	// when it resolves the runtime, not here.
-	Backend string
+	Backend string `config:"backend"`
 	// Docker/SSH parameterize the docker/ssh runtimes; non-nil only when the
 	// repo's in-repo config declares the corresponding section.
-	Docker *DockerConfig
-	SSH    *SSHConfig
+	Docker *DockerConfig `config:"docker"`
+	SSH    *SSHConfig    `config:"ssh"`
+
+	// ProjectRoot is empty for ResolveGlobalConfig and is the repository root
+	// supplied to ResolveConfig. Presentation code may replace it with an
+	// equivalent lexical spelling through RebaseProjectPathsForDisplay.
+	ProjectRoot string `json:"-" toml:"-"`
+
+	// Resolution is produced by the same manifest-driven pass that populated
+	// the effective fields above. Renderers consume it directly; they never
+	// reconstruct precedence from the finished Config.
+	Resolution []ResolvedValue `json:"-" toml:"-"`
 }
 
-// ResolveConfig returns the effective configuration for the repository
-// rooted at repoRoot (the main worktree root, as returned by
-// config.RepoFromPath / CurrentRepo).
-//
-// Precedence is app defaults -> global config -> in-repo config, merged
-// field-wise: an in-repo field overrides the lower layers only when set.
-// program_overrides merges key-wise — an in-repo entry wins per agent,
-// global entries without an in-repo counterpart still apply.
-//
-// remote_hooks and post_worktree_commands are in-repo-only going forward;
-// values still in the legacy per-repo location keep working for one release
-// (with a deprecation warning) and are shadowed whenever the in-repo file
-// sets the same key.
-func ResolveConfig(repoRoot string) (*ResolvedConfig, error) {
+// ResolveGlobalConfig resolves the built-in and global layers only. It backs
+// the historical global `af config get/list` contract while still returning
+// presence-aware provenance for --explain.
+func ResolveGlobalConfig() (*ResolvedConfig, error) {
 	global, err := LoadConfig()
 	if err != nil {
 		return nil, err
 	}
-	res := &ResolvedConfig{Config: *global}
-	// The overrides map is merged into below; copy it so a resolved config
-	// never aliases (and can never mutate) the loaded global config.
-	res.ProgramOverrides = make(map[string]string, len(global.ProgramOverrides))
-	for k, v := range global.ProgramOverrides {
-		res.ProgramOverrides[k] = v
+	documents, err := globalResolutionDocuments(global)
+	if err != nil {
+		return nil, err
+	}
+	return materializeResolution(global, "", Manifest(), documents, false)
+}
+
+// ResolveConfig returns effective configuration and provenance for repoRoot
+// (normally the main worktree root from RepoFromPath or CurrentRepo). It also
+// records the existing per-repo load observation for command-bearing checked-in
+// config. Inspection-only callers must use ResolveConfigForInspection so a read
+// cannot create that durable state.
+func ResolveConfig(repoRoot string) (*ResolvedConfig, error) {
+	return resolveConfig(repoRoot, recordInRepoLoadObservation)
+}
+
+// ResolveConfigForInspection returns the same effective values and provenance
+// as ResolveConfig without logging or persisting the per-repo load observation.
+// It is the resolver for read surfaces such as `af config --project`. This is
+// deliberately not called a generally write-free load: LoadConfig retains its
+// documented first-run and legacy-format migration behavior.
+func ResolveConfigForInspection(repoRoot string) (*ResolvedConfig, error) {
+	return resolveConfig(repoRoot, suppressInRepoLoadObservation)
+}
+
+type inRepoLoadObservation uint8
+
+const (
+	suppressInRepoLoadObservation inRepoLoadObservation = iota
+	recordInRepoLoadObservation
+)
+
+// resolveConfig is the one value/provenance path for runtime and inspection
+// callers. The typed observation mode is the only behavior difference.
+func resolveConfig(repoRoot string, observation inRepoLoadObservation) (*ResolvedConfig, error) {
+	if observation != suppressInRepoLoadObservation && observation != recordInRepoLoadObservation {
+		return nil, fmt.Errorf("invalid in-repo load observation mode %d", observation)
+	}
+	global, err := LoadConfig()
+	if err != nil {
+		return nil, err
+	}
+	documents, err := globalResolutionDocuments(global)
+	if err != nil {
+		return nil, err
 	}
 
 	repoID := RepoIDFromRoot(repoRoot)
@@ -85,38 +125,35 @@ func ResolveConfig(repoRoot string) (*ResolvedConfig, error) {
 	if err != nil {
 		return nil, err
 	}
-	res.PostWorktreeCommands = legacy.PostWorktreeCommands
-	res.RemoteHooks = legacy.RemoteHooks
 
 	inRepo, raw, err := LoadInRepoConfig(repoRoot)
 	if err != nil {
 		return nil, err
 	}
-	if inRepo != nil {
-		if inRepo.DefaultProgram != "" {
-			res.DefaultProgram = inRepo.DefaultProgram
-		}
-		for k, v := range inRepo.ProgramOverrides {
-			res.ProgramOverrides[k] = v
-		}
-		if inRepo.IsSet("post_worktree_commands") {
-			res.PostWorktreeCommands = inRepo.PostWorktreeCommands
-		}
-		if inRepo.IsSet("remote_hooks") {
-			res.RemoteHooks = inRepo.RemoteHooks
-		}
-		// backend/docker/ssh are in-repo only (no legacy location), so they
-		// take the in-repo value directly whenever present.
-		if inRepo.Backend != "" {
-			res.Backend = inRepo.Backend
-		}
-		if inRepo.IsSet("docker") {
-			res.Docker = inRepo.Docker
-		}
-		if inRepo.IsSet("ssh") {
-			res.SSH = inRepo.SSH
-		}
+	if inRepo != nil && observation == recordInRepoLoadObservation {
 		logInRepoConfigLoaded(repoID, repoRoot, inRepo, raw)
+	}
+
+	documents = append(documents, sourceDocument{
+		layer:    SourceLegacyRepo,
+		metadata: legacy.source,
+		schemas:  []any{legacy},
+	})
+	if inRepo == nil {
+		inRepo = &InRepoConfig{source: sourceMetadata{
+			path:   InRepoTomlConfigPath(repoRoot),
+			format: FormatTOML,
+		}}
+	}
+	documents = append(documents, sourceDocument{
+		layer:    SourceRepoShared,
+		metadata: inRepo.source,
+		schemas:  []any{inRepo},
+	})
+
+	res, err := materializeResolution(global, repoRoot, AllManifest(), documents, true)
+	if err != nil {
+		return nil, err
 	}
 
 	// Rewrite relative hook command paths to absolute against repoRoot
@@ -129,11 +166,160 @@ func ResolveConfig(repoRoot string) (*ResolvedConfig, error) {
 	// applies to the legacy-location value too, so both sources behave
 	// identically.
 	if res.RemoteHooks != nil {
+		before := res.RemoteHooks
 		res.RemoteHooks = res.RemoteHooks.resolveCommandPaths(repoRoot)
+		if !jsonEquivalent(before, res.RemoteHooks) {
+			annotateResolutionWinner(res, "remote_hooks", "relative command paths resolved against the project root")
+		}
 	}
+	refreshResolutionValues(res)
 
 	warnLegacyRepoConfig(repoID, repoRoot, legacy, inRepo)
 	return res, nil
+}
+
+func globalResolutionDocuments(global *Config) ([]sourceDocument, error) {
+	if global == nil || global.source.builtIn == nil {
+		return nil, fmt.Errorf("loaded global config is missing its built-in source snapshot")
+	}
+	metadata := global.source
+	if metadata.path == "" {
+		path, err := globalConfigTomlPath()
+		if err != nil {
+			return nil, err
+		}
+		metadata.path = path
+		metadata.format = FormatTOML
+	}
+	return []sourceDocument{
+		{
+			layer:   SourceBuiltIn,
+			schemas: []any{global.source.builtIn, defaultInRepoConfig()},
+			builtIn: true,
+		},
+		{
+			layer:    SourceGlobal,
+			metadata: metadata,
+			schemas:  []any{global},
+		},
+	}, nil
+}
+
+func materializeResolution(global *Config, projectRoot string, entries []ManifestEntry, documents []sourceDocument, requireAllSources bool) (*ResolvedConfig, error) {
+	computed, err := resolveManifest(entries, documents, requireAllSources)
+	if err != nil {
+		return nil, err
+	}
+	res := &ResolvedConfig{Config: *global, ProjectRoot: projectRoot}
+	res.Resolution = make([]ResolvedValue, 0, len(computed))
+	for _, value := range computed {
+		if err := setResolvedConfigValue(res, value.resolved.Key, value.value); err != nil {
+			return nil, err
+		}
+		value.resolved.Value = clonedInterface(value.value)
+		res.Resolution = append(res.Resolution, value.resolved)
+	}
+	refreshResolutionValues(res)
+	return res, nil
+}
+
+func setResolvedConfigValue(res *ResolvedConfig, key string, value reflect.Value) error {
+	if field, ok := taggedFieldByKey(reflect.ValueOf(&res.Config), key); ok {
+		return assignResolvedField(key, field, value)
+	}
+	if field, ok := taggedFieldByKey(reflect.ValueOf(res), key); ok {
+		return assignResolvedField(key, field, value)
+	}
+	return fmt.Errorf("resolved manifest key %q has no destination field", key)
+}
+
+func assignResolvedField(key string, field, value reflect.Value) error {
+	if !field.CanSet() {
+		return fmt.Errorf("resolved manifest key %q destination is not settable", key)
+	}
+	if !value.IsValid() {
+		field.Set(reflect.Zero(field.Type()))
+		return nil
+	}
+	if !value.Type().AssignableTo(field.Type()) {
+		return fmt.Errorf("resolved manifest key %q has type %s, destination wants %s", key, value.Type(), field.Type())
+	}
+	field.Set(value)
+	return nil
+}
+
+func refreshResolutionValues(res *ResolvedConfig) {
+	for i := range res.Resolution {
+		resolved := &res.Resolution[i]
+		value, ok := effectiveResolvedValue(res, resolved.Key)
+		if ok {
+			if resolved.Key == "keys" && !jsonEquivalent(resolved.Value, value) {
+				annotateResolvedValueSources(resolved, "effective key bindings normalize each configured value to a list")
+			}
+			resolved.Value = value
+		}
+	}
+}
+
+func annotateResolvedValueSources(value *ResolvedValue, note string) {
+	layers := make(map[string]bool)
+	if value.Winner != nil {
+		layers[value.Winner.Layer] = true
+	}
+	for _, origin := range value.Origins {
+		layers[origin.Layer] = true
+	}
+	for i := range value.Candidates {
+		candidate := &value.Candidates[i]
+		if layers[candidate.Layer] && candidate.Present && candidate.Allowed {
+			candidate.Reason += "; " + note
+		}
+	}
+}
+
+func annotateResolutionWinner(res *ResolvedConfig, key, note string) {
+	for i := range res.Resolution {
+		value := &res.Resolution[i]
+		if value.Key != key || value.Winner == nil {
+			continue
+		}
+		for j := range value.Candidates {
+			candidate := &value.Candidates[j]
+			if candidate.Layer == value.Winner.Layer && candidate.Result == "winner" {
+				candidate.Reason += "; " + note
+				return
+			}
+		}
+	}
+}
+
+func effectiveResolvedValue(res *ResolvedConfig, key string) (any, bool) {
+	if res == nil {
+		return nil, false
+	}
+	if key == "keys" {
+		return cloneExportedValue(reflect.ValueOf(res.KeymapOverrides())).Interface(), true
+	}
+	if field, ok := taggedFieldByKey(reflect.ValueOf(&res.Config), key); ok {
+		return clonedInterface(field), true
+	}
+	if field, ok := taggedFieldByKey(reflect.ValueOf(res), key); ok {
+		return clonedInterface(field), true
+	}
+	return nil, false
+}
+
+// ResolvedValue returns one key's effective value and provenance.
+func (r *ResolvedConfig) ResolvedValue(key string) (ResolvedValue, bool) {
+	if r == nil {
+		return ResolvedValue{}, false
+	}
+	for _, value := range r.Resolution {
+		if value.Key == key {
+			return value, true
+		}
+	}
+	return ResolvedValue{}, false
 }
 
 // logInRepoConfigLoaded emits one INFO line the first time a command-bearing
