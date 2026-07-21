@@ -341,9 +341,9 @@ func (i *Instance) TabIDAt(idx int) (string, bool) {
 // tabTmuxTargetAt resolves an ordinal to both the stable broker key and its tmux
 // target under one lock. Reading those in separate calls can pair one tab's ID
 // with a sibling's tmux when a close shifts the roster between the calls (#2200).
-func (i *Instance) tabTmuxTargetAt(idx int) (id string, ts *tmux.TmuxSession, exists bool) {
-	i.mu.RLock()
-	defer i.mu.RUnlock()
+// tabTmuxTargetAtLocked resolves an ordinal and its stable stream target in one
+// snapshot. Callers must hold i.mu.
+func (i *Instance) tabTmuxTargetAtLocked(idx int) (id string, ts *tmux.TmuxSession, exists bool) {
 	if idx < 0 || idx >= len(i.Tabs) {
 		return "", nil, false
 	}
@@ -372,11 +372,17 @@ func (i *Instance) tabTmuxTargetAt(idx int) (id string, ts *tmux.TmuxSession, ex
 //     gone; a caller must not report it as such, since a not-yet-started tab may
 //     still come up and a client should keep addressing it.
 func (i *Instance) TabTmuxByID(id string) (ts *tmux.TmuxSession, exists bool) {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	return i.tabTmuxByIDLocked(id)
+}
+
+// tabTmuxByIDLocked is TabTmuxByID for callers coupling the resolved target to
+// another lock-protected operation. Callers must hold i.mu.
+func (i *Instance) tabTmuxByIDLocked(id string) (ts *tmux.TmuxSession, exists bool) {
 	if id == "" {
 		return nil, false
 	}
-	i.mu.RLock()
-	defer i.mu.RUnlock()
 	for idx, t := range i.Tabs {
 		if t.ID != id {
 			continue

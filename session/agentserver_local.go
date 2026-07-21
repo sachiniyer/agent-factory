@@ -237,15 +237,22 @@ func (s *localAgentServer) SendPrompt(prompt string) error {
 // panicking.
 func (s *localAgentServer) ensureBroker(tab int) (*ptyBroker, error) {
 	// Resolve the caller's ordinal to the tab's STABLE id (#1738) and the tmux it
-	// currently backs in ONE instance-lock acquisition, BEFORE taking s.mu. Two
-	// lookups could pair b's ID with c's tmux if a close shifted the roster between
-	// them — then cache that wrong binding under b forever (#2200).
-	id, ts, ok := s.inst.tabTmuxTargetAt(tab)
+	// currently backs in ONE instance-lock acquisition. Keep i.mu held while
+	// taking s.mu so CloseTab cannot remove the tab and finish broker cleanup
+	// between resolution and insertion (#2327). The lock order is always i.mu →
+	// s.mu; neither closeTabStream nor another server path acquires them in the
+	// reverse order. Keeping this a single lookup also prevents pairing b's ID
+	// with c's tmux if a close shifts the roster between two resolutions (#2200).
+	s.inst.mu.RLock()
+	id, ts, ok := s.inst.tabTmuxTargetAtLocked(tab)
 	if s.afterTabResolve != nil {
 		s.afterTabResolve()
 	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	defer func() {
+		s.mu.Unlock()
+		s.inst.mu.RUnlock()
+	}()
 	if s.closed {
 		return nil, fmt.Errorf("session %q is being terminated", s.inst.Title)
 	}
@@ -296,13 +303,20 @@ func (s *localAgentServer) resetBrokerCaptures() {
 // is the direct route: no ordinal is involved at any point. A stale/unknown id is
 // ErrTabGone — a refusal, never a fall back to a positional tab.
 func (s *localAgentServer) ensureBrokerByID(tabID string) (*ptyBroker, error) {
-	// Resolve under i.mu BEFORE taking s.mu (never nest s.mu → i.mu).
-	ts, exists := s.inst.TabTmuxByID(tabID)
+	// Couple resolution to broker insertion under i.mu → s.mu. CloseTab removes
+	// the tab under i.mu before taking s.mu for stream teardown, so it either wins
+	// before this lookup (ErrTabGone) or waits and then removes the broker we
+	// insert. It can never clean up first and leave a later stale insertion.
+	s.inst.mu.RLock()
+	ts, exists := s.inst.tabTmuxByIDLocked(tabID)
 	if s.afterTabResolve != nil {
 		s.afterTabResolve()
 	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	defer func() {
+		s.mu.Unlock()
+		s.inst.mu.RUnlock()
+	}()
 	if s.closed {
 		return nil, fmt.Errorf("session %q is being terminated", s.inst.Title)
 	}
