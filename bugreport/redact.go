@@ -250,17 +250,18 @@ func redactAFTmuxTitle(match string) string {
 
 // replaceBareTitle removes a title only when it occupies a complete text token.
 // The legacy logger's raw %s form is delimited by surrounding prose/newlines, so
-// this covers that representation without compiling punctuation-only titles
-// such as "." or "/" into an unbounded regexp that erases every period or path
-// separator in the bundle. Exact %q forms are handled above before this pass.
+// this covers that representation without compiling single-line punctuation-only
+// titles such as "." or "/" into an unbounded matcher that erases every period
+// or path separator in the bundle. A multiline title is different: its exact,
+// byte-identical cross-line sequence must be removed before a legacy line matcher
+// can consume line one and strand the rest. Exact %q forms are handled above.
 //
 // A token boundary means start/end of text or a neighboring rune that is not a
 // letter, number, combining mark, or underscore. Checking both edges regardless
 // of the title's own first/last character handles titles such as "client[prod]"
 // while refusing to match "." inside "1.2" or "/" inside "repo/path".
 func replaceBareTitle(s, title string) string {
-	title = strings.TrimSpace(title)
-	if title == "" || !containsWordRune(title) {
+	if strings.TrimSpace(title) == "" || (!containsWordRune(title) && !strings.ContainsAny(title, "\r\n")) {
 		return s
 	}
 	var out strings.Builder

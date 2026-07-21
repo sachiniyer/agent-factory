@@ -358,6 +358,30 @@ func TestScrubLogRedactsMultilineTaskTitleBeforeLegacyShape(t *testing.T) {
 		"next diagnostic survives")
 }
 
+// A multiline title does not become safe merely because it contains no word
+// runes. The legacy matcher is line-oriented, so it can consume line one and
+// strand the rest unless the exact full title is removed first. Include a
+// leading-newline title to pin byte-identical matching rather than TrimSpace.
+func TestScrubLogRedactsWordlessMultilineTitlesBeforeLegacyShape(t *testing.T) {
+	for _, title := range []string{"---\n///", "🔒\n🕵", "\n---"} {
+		t.Run(fmt.Sprintf("%q", title), func(t *testing.T) {
+			r := &redactor{}
+			r.noteTitle(title)
+			in := "task t1 started successfully as instance " + title + "\nnext diagnostic survives"
+
+			out := r.scrubLog(in)
+
+			mustNotContain(t, "daemon log", out, title)
+			for _, line := range strings.Split(title, "\n") {
+				if line != "" {
+					mustNotContain(t, "daemon log", out, line)
+				}
+			}
+			mustContain(t, "daemon log", out, redactedMarker, "next diagnostic survives")
+		})
+	}
+}
+
 // A shorter title must never destroy the prefix of a longer title before that
 // longer secret is considered. Map iteration is randomized, so exercise the
 // sanitizer repeatedly: any surviving suffix is a privacy leak.
