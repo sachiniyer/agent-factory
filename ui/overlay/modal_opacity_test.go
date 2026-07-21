@@ -151,7 +151,7 @@ func taskEditModal(t *testing.T, frameW, frameH int) string {
 	return style.Render(pane.String())
 }
 
-// taskCreateModal renders the real "New Task" form (the `n` path) in the same
+// taskCreateModal renders the real "New task" form (the `n` path) in the same
 // frame, so the adjacent-surface audit covers create as well as edit.
 func taskCreateModal(t *testing.T, frameW, frameH int) string {
 	t.Helper()

@@ -288,7 +288,7 @@ af_boot
 af_ensure_nav; af_focus_tree
 af_send n; af_wait_for 'submit name'
 af_wait_for 'initial prompt'                  # the field is advertised
-af_send Tab; af_wait_for 'Select Program'     # sibling field still opens
+af_send Tab; af_wait_for 'Select program'     # sibling field still opens
 af_send Escape; af_wait_for 'submit name'
 af_send BTab; af_wait_for 'enter newline'     # shift+tab opens the field
 af_send_literal 'first line'; af_send Enter   # enter is a NEWLINE here…

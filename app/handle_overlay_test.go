@@ -25,7 +25,7 @@ import (
 func TestHandleStateSelectProgramSelectsEnum(t *testing.T) {
 	h := newTestHome(t)
 	h.program = tmux.ProgramClaude
-	h.selectionOverlay = overlay.NewSelectionOverlay("Select Program", tmux.SupportedPrograms)
+	h.selectionOverlay = overlay.NewSelectionOverlay("Select program", tmux.SupportedPrograms)
 	h.selectionOverlay.SetSelectedIndex(0) // claude
 	h.state = stateSelectProgram
 
@@ -40,7 +40,7 @@ func TestHandleStateSelectProgramSelectsEnum(t *testing.T) {
 func TestHandleStateSelectProgramSwitchesAgent(t *testing.T) {
 	h := newTestHome(t)
 	h.program = tmux.ProgramClaude
-	h.selectionOverlay = overlay.NewSelectionOverlay("Select Program", tmux.SupportedPrograms)
+	h.selectionOverlay = overlay.NewSelectionOverlay("Select program", tmux.SupportedPrograms)
 	// Walk to codex (index 1 in SupportedPrograms).
 	h.selectionOverlay.SetSelectedIndex(1)
 	h.state = stateSelectProgram

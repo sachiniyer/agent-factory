@@ -103,7 +103,7 @@ func TestTinyClipTasksOverlayFits(t *testing.T) {
 	// #1431 property this test pins. The marker is `↓ more` rather than the
 	// `↑ more` this asserted before #1821: at 40x10 the overlay is now
 	// full-screen, so the form has the terminal's whole height instead of 60%
-	// of it, and the top of the form (New Task / Essentials / the focused Name
+	// of it, and the top of the form (New task / Essentials / the focused Name
 	// field) now fits without scrolling off the top. Strictly more of the form
 	// is visible; the hidden remainder moved below the window, so the marker
 	// moved with it. `↑`/`↓` marker semantics are pinned directly, and

@@ -206,7 +206,7 @@ func (h helpTypeInstanceStart) toContent() string {
 		tabHelp = keyStyle.Render("1-9 jump") + descStyle.Render(fmt.Sprintf(" - Select a tab (%s opens it; tabs live in the tree)", openPane))
 	}
 	content := lipgloss.JoinVertical(lipgloss.Left,
-		titleStyle.Render("Instance Created"),
+		titleStyle.Render("Instance created"),
 		"",
 		descStyle.Render("New session created:"),
 		descStyle.Render(fmt.Sprintf("• Git branch: %s (isolated worktree)",
@@ -246,7 +246,7 @@ func (h helpTypeInstanceAttach) toContent() string {
 
 func (h helpTypeInteractive) toContent() string {
 	content := lipgloss.JoinVertical(lipgloss.Left,
-		titleStyle.Render("Interactive Pane"),
+		titleStyle.Render("Interactive pane"),
 		"",
 		descStyle.Render("You are typing INTO this pane's terminal: every key — including tab —"),
 		descStyle.Render("goes to the agent/shell. The pane's frame turns green while it has the"),
