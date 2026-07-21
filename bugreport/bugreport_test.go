@@ -262,6 +262,110 @@ func TestRedactTaskScrubsTargetFromFailedRunStatus(t *testing.T) {
 	mustContain(t, "last_run_status", got.LastRunStatus, "errored:", "connection reset", redactedMarker)
 }
 
+// A task edit preserves LastRunStatus, so its historical target can differ from
+// its current TargetSession. Build must discover every instance/task title
+// before it sanitizes any status; collecting instances later leaves this title
+// in the text and JSON bundles even though instances.json still knows it.
+func TestBuildScrubsHistoricalTaskTargetAfterEdit(t *testing.T) {
+	const (
+		historicalTarget = "HistoricalConfidentialTarget"
+		currentTarget    = "Current Target"
+	)
+	home := t.TempDir()
+	afHome := filepath.Join(home, ".agent-factory")
+	t.Setenv("HOME", home)
+	t.Setenv("AGENT_FACTORY_HOME", afHome)
+
+	instances, err := json.Marshal([]session.InstanceData{{
+		ID:    "legacy-instance",
+		Title: historicalTarget,
+	}})
+	if err != nil {
+		t.Fatalf("marshal instances: %v", err)
+	}
+	instDir := filepath.Join(afHome, "instances", "testrepo")
+	if err := os.MkdirAll(instDir, 0o755); err != nil {
+		t.Fatalf("create instances directory: %v", err)
+	}
+	writeFile(t, filepath.Join(instDir, "instances.json"), string(instances))
+
+	status := fmt.Sprintf("errored: failed to deliver prompt to target session %q: connection reset", historicalTarget)
+	tasks, err := json.Marshal([]task.Task{{
+		ID:            "edited-task",
+		TargetSession: currentTarget,
+		LastRunStatus: status,
+	}})
+	if err != nil {
+		t.Fatalf("marshal tasks: %v", err)
+	}
+	writeFile(t, filepath.Join(afHome, "tasks.json"), string(tasks))
+
+	res, err := Build(Inputs{AFVersion: "test", GeneratedAt: "now"})
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	for surface, out := range map[string]string{
+		"text": res.Text,
+		"json": string(res.JSON),
+	} {
+		mustContain(t, surface, out, "edited-task", "connection reset")
+		mustNotContain(t, surface, out, historicalTarget, fmt.Sprintf("%q", historicalTarget))
+	}
+}
+
+// Punctuation-only titles are legal. They must still be redacted when emitted
+// as %q or as a bare title token, without turning every path separator or period
+// in the rest of the diagnostic bundle into a redaction marker.
+func TestScrubLogRedactsPunctuationTitleWithoutDestroyingDiagnostics(t *testing.T) {
+	r := &redactor{}
+	r.noteTitle(".")
+	r.noteTitle("/")
+	in := strings.Join([]string{
+		`version 1.2.3 at /tmp/agent-factory.log via https://example.test/api`,
+		`task t1 delivered prompt to target session "." (sent)`,
+		`task t1 delivered prompt to target session "/" (sent)`,
+		`task t2 started successfully as instance .`,
+		`task t3 parked at a usage limit as instance /; waiting for the limit window to reset`,
+	}, "\n")
+
+	out := r.scrubLog(in)
+
+	mustContain(t, "daemon log", out,
+		"version 1.2.3", "/tmp/agent-factory.log", "https://example.test/api",
+		`target session "[redacted]"`, "instance [redacted]",
+		"instance [redacted]; waiting for the limit window to reset")
+	mustNotContain(t, "daemon log", out,
+		`target session "."`, `target session "/"`, "instance .", "instance /;")
+}
+
+// A shorter title must never destroy the prefix of a longer title before that
+// longer secret is considered. Map iteration is randomized, so exercise the
+// sanitizer repeatedly: any surviving suffix is a privacy leak.
+func TestScrubSessionTitlesRedactsOverlappingTitlesDeterministically(t *testing.T) {
+	r := &redactor{}
+	r.noteTitle("VIP")
+	r.noteTitle("VIP migration")
+
+	for i := 0; i < 256; i++ {
+		out := r.scrubSessionTitles(`started VIP migration for target session "VIP migration"`)
+		if strings.Contains(out, "VIP") || strings.Contains(out, "migration") {
+			t.Fatalf("overlapping title leaked on pass %d: %q", i, out)
+		}
+	}
+}
+
+func TestScrubSessionTitlesDoesNotRewriteItsOwnMarker(t *testing.T) {
+	r := &redactor{}
+	r.noteTitle("Confidential migration")
+	r.noteTitle("redacted")
+
+	once := r.scrubSessionTitles(`target session "Confidential migration"`)
+	twice := r.scrubSessionTitles(once)
+	if once != `target session "[redacted]"` || twice != once {
+		t.Fatalf("title scrub rewrote its own marker: once=%q twice=%q", once, twice)
+	}
+}
+
 // TestRedactInstanceDataRedactsNonLoopbackWebTabURL pins the #1954 fix: a web
 // tab's URL is user-supplied (any http/https target passes NormalizeWebTabURL)
 // and can name internal infrastructure or a private repo, exactly the class of
