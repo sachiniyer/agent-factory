@@ -48,6 +48,13 @@ func LoadConfig() (*Config, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to get config directory: %w", err)
 	}
+	// Establish the owner-only boundary before reading or materializing any
+	// state. Besides making first-run creation safe, this repairs a default AF
+	// home left 0755 by an older version even when config.toml already exists and
+	// this load would otherwise perform no write at all (#2197).
+	if err := secureAFHomeForPath(filepath.Join(configDir, TomlConfigFileName)); err != nil {
+		return nil, fmt.Errorf("failed to secure config directory: %w", err)
+	}
 
 	configPath := filepath.Join(configDir, ConfigFileName)
 	prettyConfigPath := prettyHomePath(configPath)
@@ -391,7 +398,7 @@ var writeConfigForceFailForTest func() error
 // when the file already exists, so a concurrently written config is never
 // overwritten.
 func writeConfigIfMissing(configPath string, config *Config) (bool, error) {
-	if err := os.MkdirAll(filepath.Dir(configPath), 0755); err != nil {
+	if err := ensureStorageParent(configPath); err != nil {
 		return false, fmt.Errorf("failed to create config directory: %w", err)
 	}
 	data, err := toml.Marshal(config)
