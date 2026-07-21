@@ -634,19 +634,23 @@ func (p *sshProvisioner) forward(local net.Conn, remoteAddr string) {
 // torn down over REST), on a provisioning failure, and on a bad-endpoint
 // NewInstance failure — so a remote workspace/tunnel is never leaked.
 //
-// A completed result (success or an exit status returned by the remote command)
-// latches to collapse repeated Kill calls and Kill-vs-provision-failure races. A
-// timeout or lost transport deliberately does not latch: cleanup may have stopped
-// halfway through, so the row must remain and the next poll must make a real
-// attempt. Because every reap closes the old SSH client to drain tunnel forwards,
-// that retry first reconnects; otherwise a mutex/latch conversion alone would
-// only retry on a closed client.
+// A completed directory-removal result (success or an exit status returned by the
+// remote rm) latches to collapse repeated Kill calls and Kill-vs-provision-failure
+// races. A timeout, lost transport, or answered identity-kill failure deliberately
+// does not latch: cleanup may have stopped halfway through, so the row must remain
+// and the next poll must make a real attempt. Because every reap closes the old SSH
+// client to drain tunnel forwards, that retry first reconnects; otherwise a
+// mutex/latch conversion alone would only retry on a closed client.
 func (p *sshProvisioner) reap() error {
 	p.reapMu.Lock()
 	defer p.reapMu.Unlock()
 	if p.reaped {
 		return p.reapErr
 	}
+	// One ownership boundary for every non-latched attempt, including reconnect
+	// failures. dialForReap may acquire both an SSH client and an ssh-agent socket;
+	// neither may survive the attempt that acquired it.
+	defer p.finishReapTransport()
 
 	if p.tunnelLn != nil {
 		_ = p.tunnelLn.Close()
@@ -666,7 +670,6 @@ func (p *sshProvisioner) reap() error {
 	// No remote directory means provisioning never created a workspace. Closing
 	// any connection is sufficient, and that completed outcome can latch.
 	if p.sessionDir == "" {
-		p.finishReapTransport()
 		p.reaped = true
 		p.reapErr = nil
 		return nil
@@ -686,7 +689,6 @@ func (p *sshProvisioner) reap() error {
 
 	if remotePID := p.remotePID; remotePID != "" {
 		if !positivePID(remotePID) {
-			p.finishReapTransport()
 			reapErr := fmt.Errorf("%w: backend=ssh: refusing to signal invalid remote PID %q on %s",
 				ErrWorkspaceStateUnknown, remotePID, p.cfg.Host)
 			log.WarningLog.Printf("%v", reapErr)
@@ -701,7 +703,6 @@ func (p *sshProvisioner) reap() error {
 			// Opening a channel is not delivery. Keep the PID until the server accepts
 			// the exec request, and abort before rm so the retained-row retry still has
 			// the process handle it needs.
-			p.finishReapTransport()
 			if killErr == nil {
 				killErr = errors.New("kill exec was not accepted")
 			}
@@ -710,9 +711,19 @@ func (p *sshProvisioner) reap() error {
 			log.WarningLog.Printf("%v", reapErr)
 			return reapErr
 		}
+		if killErr != nil && !sshReapOutcomeUnknown(killErr) {
+			// The server answered, and the identity-kill script's only non-zero exits
+			// mean argv could not be verified or a signal failed. The PID is therefore
+			// still a safe, necessary retry handle; do not remove its directory.
+			reapErr := fmt.Errorf("%w: backend=ssh: remote PID %s identity kill on %s failed: %w",
+				ErrWorkspaceStateUnknown, remotePID, p.cfg.Host, killErr)
+			log.WarningLog.Printf("%v", reapErr)
+			return reapErr
+		}
 		// Start returned success: the server accepted the exec, so the live PID is
-		// spent exactly here even if the reply is later lost. A daemon restart can
-		// replay the pre-kill tombstone, but that copy is paired with the immutable
+		// spent exactly here if the command completed or its reply was lost. An
+		// answered script failure returned above without spending it. A daemon restart
+		// can replay the pre-kill tombstone, but that copy is paired with the immutable
 		// session path and rechecks argv before either signal.
 		p.remotePID = ""
 		if killErr != nil {
@@ -720,7 +731,6 @@ func (p *sshProvisioner) reap() error {
 		}
 	}
 	out, err := p.runReapCombined(sshReapTimeout, "rm -rf "+shellQuote(p.sessionDir))
-	p.finishReapTransport()
 	if err == nil {
 		p.reaped = true
 		p.reapErr = nil
@@ -763,21 +773,23 @@ func (p *sshProvisioner) runReapCombined(timeout time.Duration, script string) (
 
 // remotePIDKillScript makes a numeric-PID retry safe. Linux reads argv[0]
 // directly from procfs (including BusyBox/Alpine hosts whose ps rejects procps
-// flags); macOS and other hosts fall back to ps. The unique per-session af path
-// remains in argv for the agent-server's lifetime. A recycled PID whose argv
-// does not contain that path is treated as already gone, never signalled.
+// flags); macOS and other hosts fall back to ps's command-only field. The unique
+// per-session af path remains argv[0] for the agent-server's lifetime. A recycled
+// PID whose argv[0] is not exactly that path is treated as already gone, never
+// signalled; mentioning the path in an argument proves nothing.
 // Re-check before SIGKILL as well so recycling during the grace sleep cannot
 // redirect the second signal.
 func (p *sshProvisioner) remotePIDKillScript(remotePID string) string {
 	return fmt.Sprintf(
-		`pid=%s; expected=%s; matches_session() { if [ -r "/proc/$pid/cmdline" ]; then actual=$(tr '\000' '\n' < "/proc/$pid/cmdline" | sed -n '1p') || return 2; [ "$actual" = "$expected" ]; return; fi; args=$(ps -ww -p "$pid" -o args= 2>/dev/null) || return 2; printf '%%s\n' "$args" | grep -F -q -- "$expected"; }; if ! kill -0 "$pid" 2>/dev/null; then exit 0; fi; matches_session; matched=$?; if [ "$matched" -eq 1 ]; then exit 0; elif [ "$matched" -ne 0 ]; then exit 75; fi; kill "$pid" 2>/dev/null || exit 76; sleep 0.3; if ! kill -0 "$pid" 2>/dev/null; then exit 0; fi; matches_session; matched=$?; if [ "$matched" -eq 1 ]; then exit 0; elif [ "$matched" -ne 0 ]; then exit 75; fi; kill -9 "$pid" 2>/dev/null || exit 77`,
+		`pid=%s; expected=%s; matches_session() { if [ -r "/proc/$pid/cmdline" ]; then actual=$(tr '\000' '\n' < "/proc/$pid/cmdline" | sed -n '1p') || return 2; [ "$actual" = "$expected" ]; return; fi; actual=$(ps -ww -p "$pid" -o comm= 2>/dev/null) || return 2; [ "$actual" = "$expected" ]; }; if ! kill -0 "$pid" 2>/dev/null; then exit 0; fi; matches_session; matched=$?; if [ "$matched" -eq 1 ]; then exit 0; elif [ "$matched" -ne 0 ]; then exit 75; fi; kill "$pid" 2>/dev/null || exit 76; sleep 0.3; if ! kill -0 "$pid" 2>/dev/null; then exit 0; fi; matches_session; matched=$?; if [ "$matched" -eq 1 ]; then exit 0; elif [ "$matched" -ne 0 ]; then exit 75; fi; kill -9 "$pid" 2>/dev/null || exit 77`,
 		shellQuote(remotePID), shellQuote(p.afPath()))
 }
 
 // runReapKill separates exec acceptance from command completion. NewSession only
 // opens an SSH channel; Session.Start is the protocol boundary where the server
 // accepts the exec request. A Start failure retains the PID; once Start succeeds,
-// the PID is spent even if Wait later loses the reply.
+// transport loss spends it because delivery is uncertain, while an answered
+// non-zero exit lets reap safely retain it for another identity-checked attempt.
 func (p *sshProvisioner) runReapKill(timeout time.Duration, script string) (bool, error) {
 	if p.reapRunKill != nil {
 		return p.reapRunKill(timeout, script)
@@ -804,9 +816,10 @@ func (p *sshProvisioner) dialForReap() error {
 	return p.dial()
 }
 
-// finishReapTransport closes the command/tunnel transport after every attempt.
-// Keeping a timed-out client around would strand active forwards; clearing it
-// also makes a subsequent retry's required re-dial explicit.
+// finishReapTransport closes every command/tunnel/auth transport acquired by an
+// attempt. Keeping a timed-out client around would strand active forwards;
+// leaving the ssh-agent connection from a re-dial would leak its socket/readLoop
+// once a successful attempt latched and no later reap reached the next cleanup.
 func (p *sshProvisioner) finishReapTransport() {
 	client := p.client
 	if client != nil {
@@ -826,6 +839,10 @@ func (p *sshProvisioner) finishReapTransport() {
 	// than race into a nil dereference.
 	if p.client == client {
 		p.client = nil
+	}
+	if p.agentConn != nil {
+		_ = p.agentConn.Close()
+		p.agentConn = nil
 	}
 }
 

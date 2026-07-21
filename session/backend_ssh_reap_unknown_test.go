@@ -216,6 +216,88 @@ func TestSSHReapKeepsPIDUntilExecAccepted(t *testing.T) {
 	}
 }
 
+// TestSSHReapRetainsPIDWhenIdentityKillAnswersFailure distinguishes an accepted
+// exec from a successful identity kill. The kill script's non-zero exits mean it
+// could not verify or signal the process, so removing the directory and spending
+// the only PID handle would turn a retryable orphan risk into a silent leak.
+func TestSSHReapRetainsPIDWhenIdentityKillAnswersFailure(t *testing.T) {
+	p := &sshProvisioner{
+		spec:       ProvisionSpec{Title: "remote-secret"},
+		cfg:        configSSHForReapTest(),
+		sessionDir: "/home/remote/.af-sessions/remote-secret.1234",
+		remotePID:  "4242",
+		client:     &ssh.Client{},
+	}
+	var killCalls, rmCalls int
+	p.reapRunKill = func(time.Duration, string) (bool, error) {
+		killCalls++
+		if killCalls == 1 {
+			return true, &ssh.ExitError{}
+		}
+		return true, nil
+	}
+	p.reapRunCombined = func(time.Duration, string) ([]byte, error) {
+		rmCalls++
+		return nil, nil
+	}
+	p.reapDial = func() error {
+		p.client = &ssh.Client{}
+		return nil
+	}
+	p.reapCloseClient = func() {}
+
+	if err := p.reap(); !errors.Is(err, ErrWorkspaceStateUnknown) {
+		t.Fatalf("answered identity-kill failure must retain the tombstone, got %v", err)
+	}
+	if p.remotePID != "4242" {
+		t.Fatalf("answered identity-kill failure consumed PID: got %q, want 4242", p.remotePID)
+	}
+	if rmCalls != 0 {
+		t.Fatalf("answered identity-kill failure removed the process directory: rm calls=%d", rmCalls)
+	}
+
+	if err := p.reap(); err != nil {
+		t.Fatalf("retry after identity kill recovered did not converge: %v", err)
+	}
+	if p.remotePID != "" || killCalls != 2 || rmCalls != 1 {
+		t.Fatalf("retry did not spend the PID and remove the directory: pid=%q kill=%d rm=%d",
+			p.remotePID, killCalls, rmCalls)
+	}
+}
+
+// TestSSHReapClosesAgentConnectionOpenedByRedial pins transport ownership. A
+// cleanup re-dial may open ssh-agent while rebuilding its SSH client; once reap
+// latches, no later call reaches the top-of-attempt cleanup, so the attempt that
+// opened the socket must close it before returning.
+func TestSSHReapClosesAgentConnectionOpenedByRedial(t *testing.T) {
+	agentConn := &countingCloser{}
+	p := &sshProvisioner{
+		spec:       ProvisionSpec{Title: "remote-secret"},
+		cfg:        configSSHForReapTest(),
+		sessionDir: "/home/remote/.af-sessions/remote-secret.1234",
+	}
+	p.reapDial = func() error {
+		p.agentConn = agentConn
+		p.client = &ssh.Client{}
+		return nil
+	}
+	p.reapRunCombined = func(time.Duration, string) ([]byte, error) { return nil, nil }
+	p.reapCloseClient = func() {}
+
+	if err := p.reap(); err != nil {
+		t.Fatalf("successful re-dialed reap failed: %v", err)
+	}
+	if agentConn.calls != 1 || p.agentConn != nil {
+		t.Fatalf("re-dialed reap left ssh-agent transport open: closes=%d conn=%v", agentConn.calls, p.agentConn)
+	}
+	if err := p.reap(); err != nil {
+		t.Fatalf("latched reap failed: %v", err)
+	}
+	if agentConn.calls != 1 {
+		t.Fatalf("latched reap re-closed ssh-agent transport %d times, want 1", agentConn.calls)
+	}
+}
+
 // A re-dial failure is itself unknown: the daemon still cannot know whether
 // the retained remote directory exists. It must not convert one cleanup timeout
 // into a known error on the very next poll merely because the old client closed.
@@ -481,5 +563,65 @@ func TestSSHKillScriptUsesProcBeforeIncompatiblePS(t *testing.T) {
 	}
 	if err := child.Wait(); err == nil {
 		t.Fatal("procfs identity guard did not signal matching process")
+	}
+}
+
+// TestSSHKillScriptPSFallbackMatchesOnlyArgvZero drives the non-proc (macOS)
+// branch with fake ps/kill commands. Merely mentioning the session af path as an
+// argument is not process identity; only an exact argv[0] may be signalled.
+func TestSSHKillScriptPSFallbackMatchesOnlyArgvZero(t *testing.T) {
+	p := &sshProvisioner{sessionDir: filepath.Join(t.TempDir(), "session with spaces")}
+	expected := p.afPath()
+
+	for _, tc := range []struct {
+		name       string
+		psOutput   string
+		wantSignal bool
+	}{
+		{name: "expected path is only an argument", psOutput: "/usr/bin/editor " + expected},
+		{name: "argv zero matches exactly", psOutput: expected, wantSignal: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fakeBin := t.TempDir()
+			killLog := filepath.Join(t.TempDir(), "kill.log")
+			psScript := "#!/bin/sh\nprintf '%s\\n' " + shellQuote(tc.psOutput) + "\n"
+			requireExecutableScript(t, filepath.Join(fakeBin, "ps"), psScript)
+
+			// Force the generated script down its portable ps branch even though this
+			// test itself runs on Linux CI. Shell functions shadow kill/sleep so the
+			// test observes signals without touching a real process.
+			script := strings.ReplaceAll(
+				p.remotePIDKillScript("4242"),
+				`"/proc/$pid/cmdline"`,
+				`"/definitely-missing-proc/$pid/cmdline"`,
+			)
+			script = fmt.Sprintf(
+				`kill() { if [ "$1" = "-0" ]; then return 0; fi; printf '%%s\n' "$*" >> %s; }; sleep() { :; }; %s`,
+				shellQuote(killLog), script,
+			)
+			cmd := exec.Command("sh", "-c", script)
+			cmd.Env = append(os.Environ(), "PATH="+fakeBin+":"+os.Getenv("PATH"))
+			if out, err := cmd.CombinedOutput(); err != nil {
+				t.Fatalf("identity script failed: %v: %s", err, out)
+			}
+
+			logged, err := os.ReadFile(killLog)
+			if err != nil && !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("read fake kill log: %v", err)
+			}
+			if tc.wantSignal && len(logged) == 0 {
+				t.Fatal("exact argv[0] match was not signalled")
+			}
+			if !tc.wantSignal && len(logged) != 0 {
+				t.Fatalf("unrelated argv containing expected path was signalled: %q", logged)
+			}
+		})
+	}
+}
+
+func requireExecutableScript(t *testing.T, path, body string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(body), 0o755); err != nil {
+		t.Fatalf("write executable %s: %v", path, err)
 	}
 }
