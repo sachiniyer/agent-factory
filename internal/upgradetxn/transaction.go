@@ -54,6 +54,7 @@ type Phase string
 const (
 	PhasePrepared            Phase = "prepared"
 	PhaseSupervisorReady     Phase = "supervisor_ready"
+	PhaseDaemonStopping      Phase = "daemon_stopping"
 	PhaseDaemonStopped       Phase = "daemon_stopped"
 	PhaseCandidateInstalled  Phase = "candidate_installed"
 	PhaseCandidateStarting   Phase = "candidate_starting"
@@ -543,7 +544,8 @@ func (t *Transaction) advance(next Phase) error {
 	}
 	allowed := map[Phase]Phase{
 		PhasePrepared:           PhaseSupervisorReady,
-		PhaseSupervisorReady:    PhaseDaemonStopped,
+		PhaseSupervisorReady:    PhaseDaemonStopping,
+		PhaseDaemonStopping:     PhaseDaemonStopped,
 		PhaseCandidateInstalled: PhaseCandidateStarting,
 		PhaseCandidateStarting:  PhaseCandidateValidating,
 		PhaseRollbackRestored:   PhasePreviousStarting,
@@ -633,17 +635,18 @@ func (t *Transaction) commit() error {
 	return t.persistPhaseLocked(PhaseCommitted)
 }
 
-// abort records that activation ended before the previous daemon stopped.
-// It deliberately restores nothing: overwriting metadata while the proven
-// live previous daemon may still be writing it would turn a safe refusal into
-// data loss.
+// abort records that activation ended before the previous daemon was confirmed
+// stopped. It deliberately restores nothing: overwriting metadata while the
+// proven-live previous daemon may still be writing it would turn a safe refusal
+// into data loss.
 func (t *Transaction) abort() error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if t.journal.Phase == PhaseAborted {
 		return nil
 	}
-	if t.journal.Phase != PhasePrepared && t.journal.Phase != PhaseSupervisorReady {
+	if t.journal.Phase != PhasePrepared && t.journal.Phase != PhaseSupervisorReady &&
+		t.journal.Phase != PhaseDaemonStopping {
 		return fmt.Errorf("cannot abort upgrade from phase %s", t.journal.Phase)
 	}
 	return t.persistPhaseLocked(PhaseAborted)

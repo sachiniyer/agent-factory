@@ -187,6 +187,12 @@ func TestSupervisorLossAtEveryActivationBoundaryIsTakenOver(t *testing.T) {
 			wantBinary:  "known-running-binary",
 		},
 		{
+			boundary:    PhaseDaemonStopping,
+			wantErr:     ErrUpgradeRolledBack,
+			wantRunning: "previous",
+			wantBinary:  "known-running-binary",
+		},
+		{
 			boundary:    PhaseDaemonStopped,
 			wantErr:     ErrUpgradeRolledBack,
 			wantRunning: "previous",
@@ -240,6 +246,11 @@ func TestSupervisorLossAtEveryActivationBoundaryIsTakenOver(t *testing.T) {
 			require.ErrorIs(t, err, ErrSupervisorInterrupted)
 			require.True(t, injected, "fault injection must actually execute")
 			require.Equal(t, test.boundary, txn.Journal().Phase)
+			if test.boundary == PhaseDaemonStopping {
+				require.Equal(t, "previous", runtime.running,
+					"stop intent must be durable before the destructive stop call")
+				require.Equal(t, []string{"await-activation"}, runtime.calls)
+			}
 			require.NoError(t, lease.Release())
 
 			resumed, err := Load(home)

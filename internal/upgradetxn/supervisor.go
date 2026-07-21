@@ -95,6 +95,7 @@ func (s Supervisor) Run(ctx context.Context, txn *Transaction, lease *RecoveryLe
 	var abortCause error
 	var candidateValidatedThisRun bool
 	var previousValidatedThisRun bool
+	var takeoverFromStopIntent bool
 	firstIteration := true
 	if txn.Journal().Phase == PhaseSupervisorReady {
 		if err := ctx.Err(); err != nil {
@@ -123,6 +124,12 @@ func (s Supervisor) Run(ctx context.Context, txn *Transaction, lease *RecoveryLe
 		if firstIteration {
 			firstIteration = false
 			switch journal.Phase {
+			case PhaseDaemonStopping:
+				// The prior actor durably recorded its authorized stop intent,
+				// but may have died on either side of the stop operation. Repeat
+				// the identity-scoped stop to resolve that ambiguity, then roll
+				// back rather than letting a takeover continue the candidate.
+				takeoverFromStopIntent = true
 			case PhaseDaemonStopped, PhaseCandidateInstalled,
 				PhaseCandidateStarting, PhaseCandidateValidating:
 				// Before commit, actor loss is a durable negative verdict. A
@@ -163,6 +170,14 @@ func (s Supervisor) Run(ctx context.Context, txn *Transaction, lease *RecoveryLe
 				}
 				continue
 			}
+			if err := lease.Advance(PhaseDaemonStopping); err != nil {
+				return err
+			}
+			if err := s.afterBoundary(PhaseDaemonStopping); err != nil {
+				return err
+			}
+
+		case PhaseDaemonStopping:
 			outcome, err := s.Operations.StopPrevious(ctx, journal)
 			switch outcome {
 			case StopConfirmed:
@@ -188,6 +203,18 @@ func (s Supervisor) Run(ctx context.Context, txn *Transaction, lease *RecoveryLe
 			}
 			if err := s.afterBoundary(PhaseDaemonStopped); err != nil {
 				return err
+			}
+			if takeoverFromStopIntent {
+				rollbackCause = errSupervisorInterruptedBeforeCommit
+				if err := s.stopCandidateAndRestore(ctx, txn, lease); err != nil {
+					return s.finishTerminalRollbackFailure(
+						ctx, txn, lease, errors.Join(rollbackCause, err),
+					)
+				}
+				if err := s.afterBoundary(PhaseRollbackRestored); err != nil {
+					return err
+				}
+				continue
 			}
 
 		case PhaseDaemonStopped:

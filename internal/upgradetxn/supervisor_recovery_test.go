@@ -90,6 +90,38 @@ func TestSupervisorReadyTakeoverAbortsBeforePublishingReadiness(t *testing.T) {
 	require.NoError(t, takeover.Release())
 }
 
+func TestTakeoverFromDurableStopIntentRestartsPrevious(t *testing.T) {
+	txn, home, executable := prepareFixture(t)
+	lease, err := txn.tryAcquireRecoveryAs(txn.Journal().PreviousBinaryPath)
+	require.NoError(t, err)
+	require.NoError(t, lease.Advance(PhaseSupervisorReady))
+	require.NoError(t, lease.Advance(PhaseDaemonStopping))
+	require.NoError(t, lease.Release())
+
+	resumed, err := Load(home)
+	require.NoError(t, err)
+	takeover, err := resumed.tryAcquireRecoveryAs(resumed.Journal().PreviousBinaryPath)
+	require.NoError(t, err)
+	runtime := &fakeSupervisorRuntime{running: ""}
+	err = (Supervisor{Operations: runtime.operations()}).Run(context.Background(), resumed, takeover)
+	require.ErrorIs(t, err, ErrUpgradeRolledBack)
+	require.NoError(t, takeover.Release())
+	require.Equal(t, "previous", runtime.running)
+	require.Equal(t, []string{
+		"stop-previous",
+		"stop-candidate",
+		"start-previous",
+		"validate-previous",
+		"disable-recovery-job",
+	}, runtime.calls)
+
+	_, err = Load(home)
+	require.ErrorIs(t, err, ErrNoActiveTransaction)
+	installed, err := os.ReadFile(executable)
+	require.NoError(t, err)
+	require.Equal(t, "known-running-binary", string(installed))
+}
+
 func TestSupervisorRejectsLeaseFromAnotherTransactionBeforeMutation(t *testing.T) {
 	txn, _, _ := prepareFixture(t)
 	other, _, _ := prepareFixture(t)
@@ -140,6 +172,7 @@ func TestTakeoverBeforeCommitRollsBackWithoutRegradingCandidate(t *testing.T) {
 	lease, err := txn.tryAcquireRecoveryAs(txn.Journal().PreviousBinaryPath)
 	require.NoError(t, err)
 	require.NoError(t, lease.Advance(PhaseSupervisorReady))
+	require.NoError(t, lease.Advance(PhaseDaemonStopping))
 	require.NoError(t, lease.Advance(PhaseDaemonStopped))
 	require.NoError(t, lease.InstallCandidate())
 	require.NoError(t, lease.Advance(PhaseCandidateStarting))

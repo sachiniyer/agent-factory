@@ -453,7 +453,7 @@ func validateRecoveryJob(transactionID string, job RecoveryJob) error {
 
 func validPhase(phase Phase) bool {
 	switch phase {
-	case PhasePrepared, PhaseSupervisorReady, PhaseDaemonStopped,
+	case PhasePrepared, PhaseSupervisorReady, PhaseDaemonStopping, PhaseDaemonStopped,
 		PhaseCandidateInstalled, PhaseCandidateStarting, PhaseCandidateValidating,
 		PhaseCommitted, PhaseAborted, PhaseRollingBack, PhaseRollbackRestored,
 		PhasePreviousStarting, PhasePreviousValidating, PhaseRolledBack, PhaseRollbackFailed:
