@@ -38,6 +38,20 @@ func TestCaptureAgentConversation_CodexRolloutFile(t *testing.T) {
 	require.False(t, conv.CapturedAt.IsZero())
 }
 
+func TestBeginConversationCaptureAtCodexHomeIgnoresDaemonEnvironment(t *testing.T) {
+	t.Setenv("CODEX_HOME", t.TempDir())
+	exactHome := t.TempDir()
+	snap := BeginConversationCaptureAtCodexHome(exactHome)
+	require.Equal(t, exactHome, snap.codexHome)
+
+	path := writeCodexRolloutFile(t, exactHome, "rollout-2026-07-06T10-17-35-019f386f-7206-7fc2-803b-f7045e07a242.jsonl")
+	appendCodexRolloutEvent(t, path, map[string]any{
+		"type":    "event_msg",
+		"payload": map[string]any{"type": "user_message", "message": "inline-home briefing"},
+	})
+	require.NoError(t, WaitForPromptReceipt(context.Background(), tmux.ProgramCodex, snap, "inline-home briefing", 0))
+}
+
 func TestCaptureAgentConversation_CodexAmbiguousConcurrentRollouts(t *testing.T) {
 	codexHome := t.TempDir()
 	t.Setenv("CODEX_HOME", codexHome)
@@ -122,7 +136,7 @@ func TestWaitForPromptReceipt_DifferentUserTurnDoesNotConfirmBriefing(t *testing
 		"a concurrent/unrelated user turn must not acknowledge the config briefing")
 }
 
-func TestWaitForPromptReceipt_CorrelatesExactPromptAcrossConcurrentRollouts(t *testing.T) {
+func TestWaitForPromptReceipt_ConcurrentRolloutsRemainAmbiguous(t *testing.T) {
 	codexHome := t.TempDir()
 	t.Setenv("CODEX_HOME", codexHome)
 	snap := BeginConversationCapture()
@@ -137,8 +151,9 @@ func TestWaitForPromptReceipt_CorrelatesExactPromptAcrossConcurrentRollouts(t *t
 		"payload": map[string]any{"type": "user_message", "message": "config briefing"},
 	})
 
-	require.NoError(t, WaitForPromptReceipt(context.Background(), tmux.ProgramCodex, snap, "config briefing", 0),
-		"an unrelated concurrent rollout must not make an exact receiver receipt ambiguous")
+	err := WaitForPromptReceipt(context.Background(), tmux.ProgramCodex, snap, "config briefing", 0)
+	require.ErrorIs(t, err, ErrPromptReceiptAmbiguous,
+		"prompt coincidence cannot prove which new rollout belongs to the launched pane")
 }
 
 func TestWaitForPromptReceipt_UnsupportedAgentDoesNotInventReceipt(t *testing.T) {

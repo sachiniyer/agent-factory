@@ -94,6 +94,27 @@ func TestCheckAndHandleTrustPrompt_CodexTrustProseAloneInjectsNothing(t *testing
 	}
 }
 
+func TestCheckAndHandleTrustPrompt_CodexModalSourceInOutputInjectsNothing(t *testing.T) {
+	content := codexDirectoryTrustDialog + `
+
+func CodexTrustPromptPresent(content string) bool {
+    // The agent is displaying source after quoting the fixture above.
+    return false
+}`
+	handled, cmds := runTrustPromptCheck(t, ProgramCodex, content)
+	require.False(t, handled,
+		"four phrases somewhere in ordinary output are not proof the selected modal is active")
+	require.Empty(t, sentKeystrokes(cmds),
+		"the live-session poll must not inject Enter into ordinary output containing the fixture; got %v", cmds)
+}
+
+func TestCheckAndHandleTrustPrompt_CodexUnselectedYesInjectsNothing(t *testing.T) {
+	content := strings.Replace(codexDirectoryTrustDialog, "› 1. Yes, continue", "  1. Yes, continue", 1)
+	handled, cmds := runTrustPromptCheck(t, ProgramCodex, content)
+	require.False(t, handled, "the predicate must require the actual selected Yes row")
+	require.Empty(t, sentKeystrokes(cmds))
+}
+
 // The bug: ordinary agent output that happens to contain the documentation
 // phrase must NOT get keystrokes injected into it.
 func TestCheckAndHandleTrustPrompt_DocPhraseInOutputInjectsNothing(t *testing.T) {
