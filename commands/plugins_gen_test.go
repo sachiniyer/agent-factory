@@ -97,7 +97,7 @@ func TestGeneratedSkillsCarryTheCanonicalUsageText(t *testing.T) {
 // nothing is a half-added agent that the README would still advertise.
 func TestEveryAgentEmitsFiles(t *testing.T) {
 	for _, a := range pluginAgents {
-		if len(a.files()) == 0 {
+		if len(a.files(pluginVersionSeed)) == 0 {
 			t.Errorf("agent %q emits no files", a.name)
 		}
 		if a.packaging == "" {
@@ -249,7 +249,7 @@ func TestPreflightHookNeverInstalls(t *testing.T) {
 // is removed, not orphaned.
 func TestWriteAgentPluginsPrunesStaleArtifacts(t *testing.T) {
 	root := t.TempDir()
-	if err := os.WriteFile(filepath.Join(root, "go.mod"), []byte("module x\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(root, "go.mod"), []byte("module "+agentFactoryModule+"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -304,6 +304,27 @@ func TestWriteAgentPluginsRefusesNonCheckout(t *testing.T) {
 	}
 }
 
+func TestWriteAgentPluginsRefusesForeignModuleBeforePruning(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "go.mod"), []byte("module example.com/not-agent-factory\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	victim := filepath.Join(root, pluginsDir, "owner-data.txt")
+	if err := os.MkdirAll(filepath.Dir(victim), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(victim, []byte("must survive\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := writeAgentPlugins(root); err == nil || !strings.Contains(err.Error(), agentFactoryModule) {
+		t.Fatalf("foreign module error = %v, want expected af module named", err)
+	}
+	if data, err := os.ReadFile(victim); err != nil || string(data) != "must survive\n" {
+		t.Fatalf("foreign checkout was modified before refusal: data=%q err=%v", data, err)
+	}
+}
+
 // TestGeneratedFilesAreDeterministic guards the drift gate's premise: two runs
 // of an unchanged tree must be byte-identical, or CI would fail at random.
 func TestGeneratedFilesAreDeterministic(t *testing.T) {
@@ -314,6 +335,45 @@ func TestGeneratedFilesAreDeterministic(t *testing.T) {
 	for i := range first {
 		if first[i].path != second[i].path || first[i].content != second[i].content {
 			t.Errorf("%s is not deterministic across runs", first[i].path)
+		}
+	}
+}
+
+func TestGeneratedPluginVersionTracksEveryPayloadChange(t *testing.T) {
+	seed := generatedPluginFilesAtVersion(pluginVersionSeed)
+	version := pluginContentVersion(seed)
+	mutated := append([]pluginFile(nil), seed...)
+	for i := range mutated {
+		if strings.HasSuffix(mutated[i].path, "SKILL.md") {
+			mutated[i].content += "\nchanged guidance\n"
+			break
+		}
+	}
+	if got := pluginContentVersion(mutated); got == version {
+		t.Fatalf("content changed without changing plugin version %q", got)
+	}
+
+	files := generatedPluginFiles()
+	var codex codexManifest
+	mustUnmarshalGenerated(t, files, codexPluginRoot+"/.codex-plugin/plugin.json", &codex)
+	if codex.Version != version {
+		t.Errorf("Codex manifest version = %q, want content version %q", codex.Version, version)
+	}
+	var claude claudeManifest
+	mustUnmarshalGenerated(t, files, claudePluginRoot+"/.claude-plugin/plugin.json", &claude)
+	if claude.Version != version {
+		t.Errorf("Claude manifest version = %q, want content version %q", claude.Version, version)
+	}
+}
+
+func TestAmpInstallUsesDocumentedDirectoryCopy(t *testing.T) {
+	readme := pluginsReadme()
+	if strings.Contains(readme, "amp skill add") {
+		t.Fatal("generated Amp instructions advertise the removed `amp skill add` command")
+	}
+	for _, want := range []string{"mkdir -p .agents/skills", "cp -R", ".agents/skills/"} {
+		if !strings.Contains(readme, want) {
+			t.Errorf("generated Amp instructions are missing %q", want)
 		}
 	}
 }

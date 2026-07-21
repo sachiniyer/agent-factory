@@ -60,16 +60,18 @@ Or copy `plugins/gemini/agent-factory/` into `~/.gemini/skills/` yourself.
 
 ## amp
 
-amp installs a skill from a local path. It has no marketplace, so there is no
-one-line remote install — clone first:
+Amp has no skill add/install subcommand or marketplace. Clone the repo, then
+copy the skill into its documented project skill directory:
 
 ```
 git clone https://github.com/sachiniyer/agent-factory
-amp skill add agent-factory/plugins/amp/agent-factory
+mkdir -p .agents/skills
+cp -R agent-factory/plugins/amp/agent-factory .agents/skills/
 ```
 
-Copying `plugins/amp/agent-factory/` into `~/.config/amp/skills/` works too;
-that is the directory `af` writes when `global_agent_skills` is on.
+For a user-wide install, copy it into `~/.config/agents/skills/` instead. Amp
+also still discovers the legacy `~/.config/amp/skills/` directory that `af`
+writes when `global_agent_skills` is on.
 
 ## The preflight hook
 

@@ -1,6 +1,8 @@
 package commands
 
 import (
+	"crypto/sha256"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -30,12 +32,15 @@ import (
 // (.github/workflows/docs.yml) and TestGeneratedPluginsAreCommitted.
 
 const (
-	// agentPluginVersion is the semver carried by every generated plugin
-	// manifest. It is deliberately NOT af's own version (main.go, auto-bumped
-	// by CI on every release): tying them together would make each release
-	// bump rewrite the committed artifacts, so an unrelated release would fail
-	// the drift gate. Bump this by hand when the plugin's shape changes.
-	agentPluginVersion = "1.0.0"
+	// pluginVersionSeed breaks the version/content cycle while deriving the real
+	// manifest version. Hash the complete tree rendered with this fixed seed,
+	// then render once more with the content-derived version (#2179 review).
+	pluginVersionSeed = "0.0.0"
+
+	// agentFactoryModule is the ownership proof writeAgentPlugins requires before
+	// its first write or prune. A random directory containing any go.mod is not an
+	// af checkout and must never become a destructive target (#2179 review).
+	agentFactoryModule = "github.com/sachiniyer/agent-factory"
 
 	// pluginsDir is the committed output root for the per-agent plugins,
 	// relative to the repo root.
@@ -78,7 +83,7 @@ type pluginAgent struct {
 	// when the packaging is a plain copy documented in packaging.
 	install string
 	// files returns every artifact this agent owns, repo-root-relative.
-	files func() []pluginFile
+	files func(version string) []pluginFile
 }
 
 // pluginAgents is the agent table. Codex and Claude Code have verified plugin
@@ -114,10 +119,11 @@ var pluginAgents = []pluginAgent{
 	},
 	{
 		name: "amp",
-		packaging: "Skill directory, installed with `amp skill add` from a clone. amp has no " +
-			"marketplace, so there is no one-line remote install.",
+		packaging: "Skill directory copied from a clone into Amp's documented `.agents/skills/` project directory. " +
+			"Amp has no skill-install command or marketplace.",
 		install: "git clone https://github.com/sachiniyer/agent-factory\n" +
-			"amp skill add agent-factory/" + pluginsDir + "/amp/" + session.AfSkillName,
+			"mkdir -p .agents/skills\n" +
+			"cp -R agent-factory/" + pluginsDir + "/amp/" + session.AfSkillName + " .agents/skills/",
 		files: ampSkillFiles,
 	},
 }
@@ -228,10 +234,10 @@ type codexMarketplacePolicy struct {
 // directory, the manifest `name`, and the marketplace entry `name` all match.
 const codexPluginRoot = pluginsDir + "/codex/" + session.AfSkillName
 
-func codexPluginFiles() []pluginFile {
+func codexPluginFiles(version string) []pluginFile {
 	manifest := codexManifest{
 		Name:        session.AfSkillName,
-		Version:     agentPluginVersion,
+		Version:     version,
 		Description: session.AfPluginDescription,
 		Author:      afPluginAuthor(),
 		Homepage:    session.AfPluginHomepage,
@@ -361,11 +367,11 @@ type claudeMarketplacePlugin struct {
 
 const claudePluginRoot = pluginsDir + "/claude/" + session.AfSkillName
 
-func claudePluginFiles() []pluginFile {
+func claudePluginFiles(version string) []pluginFile {
 	manifest := claudeManifest{
 		Name:        session.AfSkillName,
 		Description: session.AfPluginDescription,
-		Version:     agentPluginVersion,
+		Version:     version,
 		Author:      afPluginAuthor(),
 		Homepage:    session.AfPluginHomepage,
 		Repository:  session.AfPluginHomepage,
@@ -380,7 +386,7 @@ func claudePluginFiles() []pluginFile {
 			Name:        session.AfSkillName,
 			Source:      "./" + claudePluginRoot,
 			Description: session.AfPluginDescription,
-			Version:     agentPluginVersion,
+			Version:     version,
 		}},
 	}
 
@@ -398,18 +404,17 @@ func claudePluginFiles() []pluginFile {
 // install --path` copies out of a repo, so no manifest is invented: a Gemini
 // CLI *extension* (gemini-extension.json) would be a second, unverified
 // packaging of the same text.
-func geminiSkillFiles() []pluginFile {
+func geminiSkillFiles(_ string) []pluginFile {
 	return []pluginFile{
 		{path: pluginsDir + "/gemini/" + session.AfSkillName + "/SKILL.md", content: afSkillMarkdown()},
 	}
 }
 
-// ampSkillFiles emits the portable skill directory. `amp skill add <path>`
-// installs it from a clone (verified against the amp CLI), and it is also the
-// shape amp discovers under ~/.config/amp/skills — the directory af writes when
-// global_agent_skills is on. amp has no marketplace to publish to, so no
-// manifest is invented for it.
-func ampSkillFiles() []pluginFile {
+// ampSkillFiles emits the portable skill directory Amp discovers under the
+// documented project/user skill roots. Amp no longer exposes add/remove/update
+// skill subcommands, so installation is an ordinary directory copy (#2179
+// review). No marketplace or invented manifest is emitted.
+func ampSkillFiles(_ string) []pluginFile {
 	return []pluginFile{
 		{path: pluginsDir + "/amp/" + session.AfSkillName + "/SKILL.md", content: afSkillMarkdown()},
 	}
@@ -447,13 +452,21 @@ func pluginsReadme() string {
 	return b.String()
 }
 
-// generatedPluginFiles returns every generated artifact, repo-root-relative and
-// sorted by path, with the default mode filled in. It is the single enumeration
-// the writer, the pruner and the drift test all read.
+// generatedPluginFiles returns every generated artifact with a version derived
+// from the complete version-neutral tree. Content, path, or mode changes mint a
+// different semver, so Codex/Claude caches cannot keep serving old skill or hook
+// bytes under an unchanged manifest identity (#2179 review).
 func generatedPluginFiles() []pluginFile {
+	seed := generatedPluginFilesAtVersion(pluginVersionSeed)
+	return generatedPluginFilesAtVersion(pluginContentVersion(seed))
+}
+
+// generatedPluginFilesAtVersion is the single enumeration the content-version
+// pass, writer, pruner, and drift test read.
+func generatedPluginFilesAtVersion(version string) []pluginFile {
 	files := []pluginFile{{path: pluginsDir + "/README.md", content: pluginsReadme()}}
 	for _, a := range pluginAgents {
-		files = append(files, a.files()...)
+		files = append(files, a.files(version)...)
 	}
 	for i := range files {
 		if files[i].mode == 0 {
@@ -462,6 +475,19 @@ func generatedPluginFiles() []pluginFile {
 	}
 	sort.Slice(files, func(i, j int) bool { return files[i].path < files[j].path })
 	return files
+}
+
+// pluginContentVersion maps the seeded generated tree to a deterministic semver.
+// Two 32-bit SHA-256 words give a 64-bit content address while staying within
+// conservative semver numeric ranges. The fixed major separates this scheme
+// from the former manually frozen 1.0.0 without tying plugins to af releases.
+func pluginContentVersion(files []pluginFile) string {
+	h := sha256.New()
+	for _, f := range files {
+		_, _ = fmt.Fprintf(h, "%s\x00%o\x00%s\x00", f.path, f.mode, f.content)
+	}
+	sum := h.Sum(nil)
+	return fmt.Sprintf("2.%d.%d", binary.BigEndian.Uint32(sum[:4]), binary.BigEndian.Uint32(sum[4:8]))
 }
 
 // mustJSON renders a manifest as indented JSON with a trailing newline. The
@@ -480,12 +506,18 @@ func mustJSON(v any) string {
 // deleting an agent removes its artifacts instead of orphaning them (the same
 // property session.ensurePluginDir gives the runtime plugin dir).
 //
-// root must be an af checkout — it is verified by the presence of go.mod before
-// anything under it is removed. The pruner deletes files under plugins/ only;
-// the two marketplace files are named, single, and overwritten in place.
+// root must be THIS af checkout — the go.mod module directive is validated
+// before the first write. The pruner deletes files under plugins/ only; the two
+// marketplace files are named, single, and overwritten in place.
 func writeAgentPlugins(root string) ([]string, error) {
-	if _, err := os.Stat(filepath.Join(root, "go.mod")); err != nil {
-		return nil, fmt.Errorf("--plugin-root %q is not an af checkout (no go.mod): %w", root, err)
+	goModPath := filepath.Join(root, "go.mod")
+	goMod, err := os.ReadFile(goModPath)
+	if err != nil {
+		return nil, fmt.Errorf("--plugin-root %q is not an af checkout (cannot read go.mod): %w", root, err)
+	}
+	module := goModulePath(goMod)
+	if module != agentFactoryModule {
+		return nil, fmt.Errorf("--plugin-root %q is not an af checkout (go.mod module is %q, want %q)", root, module, agentFactoryModule)
 	}
 
 	files := generatedPluginFiles()
@@ -514,6 +546,20 @@ func writeAgentPlugins(root string) ([]string, error) {
 		return nil, err
 	}
 	return paths, nil
+}
+
+// goModulePath reads the module directive without accepting a mere go.mod as
+// ownership proof. Quoted module paths are legal, though this repo uses the
+// ordinary unquoted form.
+func goModulePath(goMod []byte) string {
+	for _, line := range strings.Split(string(goMod), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 2 || fields[0] != "module" {
+			continue
+		}
+		return strings.Trim(fields[1], `"`)
+	}
+	return ""
 }
 
 // prunePluginTree removes every file under dir that the generator did not just
