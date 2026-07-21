@@ -129,7 +129,6 @@ func TestAllManifestScalarDefaultsMatchBuiltInResolution(t *testing.T) {
 	computed, err := resolveManifest(entries, []sourceDocument{{
 		layer:   SourceBuiltIn,
 		schemas: []any{DefaultConfig(), defaultInRepoConfig()},
-		builtIn: true,
 	}}, false)
 	if err != nil {
 		t.Fatalf("resolve union built-in defaults: %v", err)

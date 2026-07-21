@@ -52,10 +52,25 @@ type ResolvedValue struct {
 }
 
 type sourceDocument struct {
-	layer    ConfigSource
-	metadata sourceMetadata
-	schemas  []any
-	builtIn  bool
+	layer          ConfigSource
+	metadata       sourceMetadata
+	schemas        []any
+	valueSemantics sourceValueSemantics
+}
+
+// sourceValueSemantics says whether a decoded schema is one source's delta or
+// the complete effective snapshot through that source. Global Config is
+// decoded on top of DefaultConfig, so treating it as a delta can resurrect a
+// built-in map entry that the loader removed (for example a TOML inline map).
+type sourceValueSemantics uint8
+
+const (
+	sourceValueDelta sourceValueSemantics = iota
+	sourceValueSnapshot
+)
+
+func (d sourceDocument) isBuiltIn() bool {
+	return d.layer == SourceBuiltIn
 }
 
 type computedValue struct {
@@ -64,13 +79,13 @@ type computedValue struct {
 }
 
 type sourceCandidate struct {
-	document        sourceDocument
-	traceIndex      int
-	typed           reflect.Value
-	leaves          map[string]reflect.Value
-	configuredCount int
-	normalizedCount int
-	materialized    bool
+	document         sourceDocument
+	traceIndex       int
+	typed            reflect.Value
+	leaves           map[string]reflect.Value
+	configuredCount  int
+	normalizedCount  int
+	removedInherited int
 }
 
 func resolveManifest(entries []ManifestEntry, documents []sourceDocument, requireAllSources bool) ([]computedValue, error) {
@@ -83,6 +98,9 @@ func resolveManifest(entries []ManifestEntry, documents []sourceDocument, requir
 	})
 	byLayer := make(map[ConfigSource]bool, len(documents))
 	for _, document := range documents {
+		if document.valueSemantics != sourceValueDelta && document.valueSemantics != sourceValueSnapshot {
+			return nil, fmt.Errorf("config resolver received invalid value semantics %d for %s source", document.valueSemantics, document.layer)
+		}
 		if byLayer[document.layer] {
 			return nil, fmt.Errorf("config resolver received duplicate %s source", document.layer)
 		}
@@ -128,7 +146,7 @@ func resolveManifestEntry(entry ManifestEntry, documents []sourceDocument) (comp
 	for _, document := range documents {
 		allowed := sourceInPrecedence(document.layer, entry.Precedence)
 		configured, present := document.metadata.topLevel(entry.Key)
-		if document.builtIn {
+		if document.isBuiltIn() {
 			present = allowed
 		}
 		trace := CandidateTrace{
@@ -141,7 +159,7 @@ func resolveManifestEntry(entry ManifestEntry, documents []sourceDocument) (comp
 			Value:   nil,
 		}
 		if present {
-			if document.builtIn {
+			if document.isBuiltIn() {
 				value, ok := valueFromSchemas(document.schemas, entry.Key)
 				if !ok {
 					return computedValue{}, fmt.Errorf("built-in source has no typed field")
@@ -189,7 +207,7 @@ func resolveReplace(entry ManifestEntry, result ResolvedValue, candidates []sour
 	winnerTrace := &result.Candidates[candidates[winner].traceIndex]
 	winnerTrace.Result = "winner"
 	winnerTrace.Reason = "highest-precedence present allowed source"
-	if !candidates[winner].document.builtIn &&
+	if !candidates[winner].document.isBuiltIn() &&
 		!jsonEquivalent(winnerTrace.Value, clonedInterface(candidates[winner].typed)) {
 		winnerTrace.Reason += "; load-time normalization changed the configured value before resolution"
 	}
@@ -218,7 +236,7 @@ func resolveComposite(entry ManifestEntry, result ResolvedValue, candidates []so
 
 	leafValues := make(map[string]reflect.Value)
 	origins := make(map[string]SourceRef)
-	anyMaterialized := false
+	materialized := false
 	for i := range candidates {
 		candidate := &candidates[i]
 		trace := &result.Candidates[candidate.traceIndex]
@@ -228,15 +246,47 @@ func resolveComposite(entry ManifestEntry, result ResolvedValue, candidates []so
 		}
 
 		configured, _ := candidate.document.metadata.topLevel(entry.Key)
-		leaves, configuredCount, normalizedCount, materialized, err := compositeLeaves(candidate.typed, configured, candidate.document.builtIn)
+		leaves, configuredCount, normalizedCount, candidateMaterialized, err := compositeLeaves(
+			candidate.typed, configured, candidate.document.isBuiltIn())
 		if err != nil {
 			return computedValue{}, err
 		}
 		candidate.leaves = leaves
 		candidate.configuredCount = configuredCount
 		candidate.normalizedCount = normalizedCount
-		candidate.materialized = materialized
-		anyMaterialized = anyMaterialized || materialized
+
+		if candidate.document.valueSemantics == sourceValueSnapshot {
+			full, _, _, snapshotMaterialized, err := compositeLeaves(candidate.typed, nil, true)
+			if err != nil {
+				return computedValue{}, fmt.Errorf("read materialized %s snapshot: %w", candidate.document.layer, err)
+			}
+			for leaf := range leafValues {
+				if _, retained := full[leaf]; retained {
+					continue
+				}
+				delete(leafValues, leaf)
+				delete(origins, leaf)
+				candidate.removedInherited++
+			}
+			for leaf, value := range full {
+				if explicit, configuredHere := leaves[leaf]; configuredHere {
+					leafValues[leaf] = cloneExportedValue(explicit)
+					origins[leaf] = sourceReference(candidate.document, leafKeyPath(entry.Key, leaf))
+					continue
+				}
+				inherited, present := leafValues[leaf]
+				if !present {
+					return computedValue{}, fmt.Errorf("%s snapshot materialized unconfigured leaf %q with no lower-precedence origin", candidate.document.layer, leaf)
+				}
+				if !jsonEquivalent(clonedInterface(inherited), clonedInterface(value)) {
+					return computedValue{}, fmt.Errorf("%s snapshot changed unconfigured inherited leaf %q", candidate.document.layer, leaf)
+				}
+			}
+			materialized = snapshotMaterialized
+			continue
+		}
+
+		materialized = materialized || candidateMaterialized
 		for leaf, value := range leaves {
 			leafValues[leaf] = cloneExportedValue(value)
 			origins[leaf] = sourceReference(candidate.document, leafKeyPath(entry.Key, leaf))
@@ -257,12 +307,20 @@ func resolveComposite(entry ManifestEntry, result ResolvedValue, candidates []so
 		}
 		ignored := candidate.configuredCount - len(candidate.leaves)
 		switch {
+		case len(candidate.leaves) == 0 && candidate.removedInherited > 0:
+			trace.Result = "replaced"
+			trace.Reason = fmt.Sprintf("loaded value removes %d lower-precedence %s and contributes no entries",
+				candidate.removedInherited, pluralize("entry", candidate.removedInherited))
+			if ignored > 0 {
+				trace.Reason += fmt.Sprintf("; load-time validation removed %d configured %s",
+					ignored, pluralize("entry", ignored))
+			}
 		case len(candidate.leaves) == 0 && ignored > 0:
 			trace.Result = "ignored"
 			trace.Reason = "all configured entries were removed by load-time validation"
 		case len(candidate.leaves) == 0:
 			trace.Result = "empty"
-			trace.Reason = "present but contains no entries; lower-priority entries remain"
+			trace.Reason = "present but contains no entries"
 		case surviving == len(candidate.leaves):
 			trace.Result = "contributed"
 			trace.Reason = fmt.Sprintf("contributes %d effective %s", surviving, pluralize("entry", surviving))
@@ -277,13 +335,17 @@ func resolveComposite(entry ManifestEntry, result ResolvedValue, candidates []so
 		if ignored > 0 && len(candidate.leaves) > 0 {
 			trace.Reason += fmt.Sprintf("; load-time validation removed %d configured %s", ignored, pluralize("entry", ignored))
 		}
+		if candidate.removedInherited > 0 && len(candidate.leaves) > 0 {
+			trace.Reason += fmt.Sprintf("; loaded value also removes %d lower-precedence %s",
+				candidate.removedInherited, pluralize("entry", candidate.removedInherited))
+		}
 		if candidate.normalizedCount > 0 {
 			trace.Reason += fmt.Sprintf("; load-time normalization changed %d configured %s",
 				candidate.normalizedCount, pluralize("entry", candidate.normalizedCount))
 		}
 	}
 
-	value, err := buildComposite(targetType, leafValues, anyMaterialized)
+	value, err := buildComposite(targetType, leafValues, materialized)
 	if err != nil {
 		return computedValue{}, err
 	}

@@ -19,6 +19,15 @@ func setupProvenanceTest(t *testing.T, globalTOML string) string {
 	return t.TempDir()
 }
 
+func setupProvenanceTestWithDetectedClaude(t *testing.T, globalTOML string) string {
+	t.Helper()
+	bin := t.TempDir()
+	claudePath := filepath.Join(bin, "claude")
+	require.NoError(t, os.WriteFile(claudePath, []byte("#!/bin/sh\nexit 0\n"), 0755))
+	t.Setenv("PATH", bin)
+	return setupProvenanceTest(t, globalTOML)
+}
+
 func requireResolvedValue(t *testing.T, cfg *ResolvedConfig, key string) ResolvedValue {
 	t.Helper()
 	value, ok := cfg.ResolvedValue(key)
@@ -86,6 +95,82 @@ limit_patterns = {}
 	globalPatterns := candidateForLayer(t, patterns, SourceGlobal)
 	assert.True(t, globalPatterns.Present)
 	assert.Equal(t, "empty", globalPatterns.Result)
+}
+
+func TestResolveGlobalConfigPreservesLoadedMapReplacementSemantics(t *testing.T) {
+	tests := []struct {
+		name       string
+		globalTOML string
+		wantClaude bool
+		wantCodex  bool
+	}{
+		{
+			name: "inline map replaces detected default entry",
+			globalTOML: `
+schema_version = 1
+program_overrides = { codex = "/bin/codex" }
+`,
+			wantCodex: true,
+		},
+		{
+			name: "inline empty map clears detected default entry",
+			globalTOML: `
+schema_version = 1
+program_overrides = {}
+`,
+		},
+		{
+			name: "table merges with detected default entry",
+			globalTOML: `
+schema_version = 1
+
+[program_overrides]
+codex = "/bin/codex"
+`,
+			wantClaude: true,
+			wantCodex:  true,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			repoRoot := setupProvenanceTestWithDetectedClaude(t, test.globalTOML)
+
+			loaded, err := LoadConfig()
+			require.NoError(t, err)
+			resolved, err := ResolveGlobalConfig()
+			require.NoError(t, err)
+			projectResolved, err := ResolveConfig(repoRoot)
+			require.NoError(t, err)
+			assert.Equal(t, loaded.ProgramOverrides, projectResolved.ProgramOverrides,
+				"project resolution must preserve the global loader's replacement semantics")
+
+			for _, entry := range Manifest() {
+				loadedField, loadedOK := taggedFieldByKey(reflect.ValueOf(loaded), entry.Key)
+				resolvedField, resolvedOK := taggedFieldByKey(reflect.ValueOf(&resolved.Config), entry.Key)
+				require.True(t, loadedOK && resolvedOK, "manifest field %q must exist on both configs", entry.Key)
+				assert.True(t, jsonEquivalent(clonedInterface(loadedField), clonedInterface(resolvedField)),
+					"resolution changed LoadConfig's effective value for %s", entry.Key)
+			}
+
+			_, hasClaude := resolved.ProgramOverrides["claude"]
+			_, hasCodex := resolved.ProgramOverrides["codex"]
+			assert.Equal(t, test.wantClaude, hasClaude)
+			assert.Equal(t, test.wantCodex, hasCodex)
+
+			value := requireResolvedValue(t, resolved, "program_overrides")
+			if test.wantClaude {
+				assert.Equal(t, SourceBuiltIn.String(), value.Origins["claude"].Layer)
+			} else {
+				_, hasOrigin := value.Origins["claude"]
+				assert.False(t, hasOrigin)
+				_, hasLeaf := resolved.ResolvedValuePath("program_overrides.claude")
+				assert.False(t, hasLeaf)
+				assert.Contains(t, candidateForLayer(t, value, SourceGlobal).Reason,
+					"removes 1 lower-precedence entry")
+			}
+		})
+	}
 }
 
 func TestResolveConfigReportsPerLeafMapOrigins(t *testing.T) {
@@ -311,19 +396,19 @@ delete_cmd = "hook-delete"
 
 func TestResolvedValuePathExplainsHigherCandidateRemovedByNormalization(t *testing.T) {
 	builtIn := &Config{ProgramOverrides: map[string]string{"codex": "built-in"}}
-	global := &Config{ProgramOverrides: map[string]string{}}
+	repo := &InRepoConfig{ProgramOverrides: map[string]string{}}
 	computed, err := resolveManifest([]ManifestEntry{{
 		Key:        "program_overrides",
-		Precedence: []ConfigSource{SourceBuiltIn, SourceGlobal},
+		Precedence: []ConfigSource{SourceBuiltIn, SourceRepoShared},
 		Merge:      MergeMapByKey,
 	}}, []sourceDocument{
-		{layer: SourceBuiltIn, schemas: []any{builtIn}, builtIn: true},
+		{layer: SourceBuiltIn, schemas: []any{builtIn}},
 		{
-			layer: SourceGlobal,
+			layer: SourceRepoShared,
 			metadata: sourceMetadata{shape: map[string]any{
 				"program_overrides": map[string]any{"codex": "discarded"},
 			}},
-			schemas: []any{global},
+			schemas: []any{repo},
 		},
 	}, true)
 	require.NoError(t, err)
@@ -334,10 +419,10 @@ func TestResolvedValuePathExplainsHigherCandidateRemovedByNormalization(t *testi
 	leaf, ok := resolved.ResolvedValuePath("program_overrides.codex")
 	require.True(t, ok)
 	assert.Equal(t, "built-in", leaf.Value)
-	globalCandidate := candidateForLayer(t, leaf, SourceGlobal)
-	assert.Equal(t, "ignored", globalCandidate.Result)
-	assert.Contains(t, globalCandidate.Reason, "did not survive load-time normalization")
-	assert.Contains(t, globalCandidate.Reason, "lower-precedence built-in")
+	repoCandidate := candidateForLayer(t, leaf, SourceRepoShared)
+	assert.Equal(t, "ignored", repoCandidate.Result)
+	assert.Contains(t, repoCandidate.Reason, "did not survive load-time normalization")
+	assert.Contains(t, repoCandidate.Reason, "lower-precedence built-in")
 }
 
 func TestResolveConfigResolutionCoversManifestAndDoesNotAliasSources(t *testing.T) {

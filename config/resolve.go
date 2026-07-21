@@ -195,12 +195,12 @@ func globalResolutionDocuments(global *Config) ([]sourceDocument, error) {
 		{
 			layer:   SourceBuiltIn,
 			schemas: []any{global.source.builtIn, defaultInRepoConfig()},
-			builtIn: true,
 		},
 		{
-			layer:    SourceGlobal,
-			metadata: metadata,
-			schemas:  []any{global},
+			layer:          SourceGlobal,
+			metadata:       metadata,
+			schemas:        []any{global},
+			valueSemantics: sourceValueSnapshot,
 		},
 	}, nil
 }
