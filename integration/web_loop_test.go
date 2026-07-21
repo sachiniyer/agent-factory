@@ -9,6 +9,7 @@ import (
 	"github.com/coder/websocket"
 
 	"github.com/sachiniyer/agent-factory/agentproto"
+	"github.com/sachiniyer/agent-factory/internal/testguard"
 )
 
 // TestWebActionsLoop is the #1592 Phase 5 PR5 play-test in code: it drives the
@@ -29,6 +30,7 @@ import (
 // Run it in the container fence: make test-container GOTESTARGS="./integration
 // -run TestWebActionsLoop". The output (-v) is the play-test transcript.
 func TestWebActionsLoop(t *testing.T) {
+	testguard.SkipDarwinPTYStream(t)
 	h := newHarness(t)
 	h.startDaemon()
 

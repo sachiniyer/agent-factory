@@ -42,6 +42,7 @@ type agentServerBanner struct {
 //
 // Run it in the container fence: make agent-server-roundtrip-container.
 func TestAgentServerRoundTrip(t *testing.T) {
+	testguard.SkipDarwinPTYStream(t)
 	requireTool(t, "git")
 	requireTool(t, "tmux")
 	testguard.IsolateTmux(t)

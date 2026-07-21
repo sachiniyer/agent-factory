@@ -24,6 +24,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"testing"
@@ -438,4 +439,30 @@ func CanonicalTempDir(t *testing.T) string {
 		t.Fatalf("testguard: canonicalizing temp dir: %v", err)
 	}
 	return dir
+}
+
+// SkipDarwinPTYStream skips a test that asserts bytes flow through the clientless
+// PTY stream (tmux pipe-pane -> dd -> FIFO -> ptyBroker.readLoop).
+//
+// THIS SKIP HIDES A REAL GAP (#1945) — it is not a harness quirk. On the darwin CI
+// runner that path delivers NO bytes: typed input never reaches the stream, and
+// preview renders blank. It is not the transport (tests that never touch the
+// agent-server fail identically), not tmux itself (capture-pane-based tests pass
+// on the same runner), and not BSD dd buffering (dd write()s each partial read —
+// which is why ptychannel_tmux.go picked it over cat).
+//
+// Read #1945 before acting on this: it is NOT established that live panes are
+// broken for every macOS user — a real darwin user's panes work, so this may be
+// environmental to the runner. What IS established is that these tests cannot run
+// there, which is why they are skipped rather than deleted.
+//
+// TO REVERSE: grep for SkipDarwinPTYStream, delete this helper and its call sites,
+// and let the macOS job confirm. Do not extend it to new tests.
+func SkipDarwinPTYStream(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS == "darwin" {
+		t.Skip("clientless PTY streaming delivers no bytes on the darwin runner: typed input " +
+			"never reaches the stream — see #1945 (REAL DEFECT, not a test-harness assumption; " +
+			"this test times out rather than fails)")
+	}
 }

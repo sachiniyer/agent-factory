@@ -166,12 +166,22 @@ func TestRealPipePaneStreamsPastTheReap(t *testing.T) {
 	if err := ts.SendRawKeys([]byte("echo " + fileMarker + "\n")); err != nil {
 		t.Fatalf("SendRawKeys to regular-file pipe: %v", err)
 	}
-	fileBytes, fileOK := waitForFileContains(regular, []byte(fileMarker), 2*time.Second)
+	fileBytes, fileOK, fileErr := waitForFileContains(regular, []byte(fileMarker), 2*time.Second)
 	if !fileOK {
 		pipeState, _ := ex.Output(exec.Command("tmux", "display-message", "-p", "-t", "="+name+":", "#{pane_pipe} #{pane_pipe_pid}"))
 		pane, _ := ts.CapturePaneContent()
-		t.Fatalf("pipe-pane accepted the command but its dd child wrote no regular-file bytes; pane_pipe/pid=%q pane=%q file=%q",
-			pipeState, pane, fileBytes)
+		ddDisableErr := ts.DisablePipePane()
+
+		catRegular := filepath.Join(t.TempDir(), "pane-cat.log")
+		catEnableErr := ts.EnablePipePane("cat > " + shellQuoteForTest(catRegular))
+		var catSendErr error
+		if catEnableErr == nil {
+			catSendErr = ts.SendRawKeys([]byte("echo AF1787CAT\n"))
+		}
+		catBytes, catOK, catFileErr := waitForFileContains(catRegular, []byte("AF1787CAT"), 2*time.Second)
+		catDisableErr := ts.DisablePipePane()
+		t.Fatalf("pipe-pane accepted the command but its dd child wrote no regular-file bytes; pane_pipe/pid=%q pane=%q dd_file=%q dd_file_err=%v dd_disable_err=%v; cat_control_ok=%v cat_file=%q cat_file_err=%v cat_enable_err=%v cat_send_err=%v cat_disable_err=%v",
+			pipeState, pane, fileBytes, fileErr, ddDisableErr, catOK, catBytes, catFileErr, catEnableErr, catSendErr, catDisableErr)
 	}
 	if err := ts.DisablePipePane(); err != nil {
 		t.Fatalf("DisablePipePane after regular-file control: %v", err)
@@ -239,15 +249,16 @@ func TestRealPipePaneStreamsPastTheReap(t *testing.T) {
 
 func shellQuoteForTest(s string) string { return "'" + s + "'" }
 
-func waitForFileContains(path string, marker []byte, timeout time.Duration) ([]byte, bool) {
+func waitForFileContains(path string, marker []byte, timeout time.Duration) ([]byte, bool, error) {
 	deadline := time.Now().Add(timeout)
 	var data []byte
+	var err error
 	for time.Now().Before(deadline) {
-		data, _ = os.ReadFile(path)
+		data, err = os.ReadFile(path)
 		if bytes.Contains(data, marker) {
-			return data, true
+			return data, true, nil
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	return data, false
+	return data, false, err
 }
