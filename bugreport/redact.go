@@ -556,17 +556,22 @@ type redactedTask struct {
 	LastRunStatus string `json:"last_run_status,omitempty"`
 }
 
-// redactTask maps a task.Task to its redacted projection.
-func redactTask(t task.Task) redactedTask {
+// redactTask maps a task.Task to its redacted projection. Recording the target
+// here keeps both title defenses inseparable: the structured task field is
+// dropped below, and scrubLog removes the same title from daemon log lines.
+func (r *redactor) redactTask(t task.Task) redactedTask {
+	r.noteTitle(t.TargetSession)
 	rt := redactedTask{
 		ID:            t.ID,
 		Name:          t.Name,
 		CronExpr:      t.CronExpr,
-		TargetSession: t.TargetSession,
 		ProjectPath:   t.ProjectPath,
 		Program:       t.Program,
 		Enabled:       t.Enabled,
 		LastRunStatus: t.LastRunStatus,
+	}
+	if t.TargetSession != "" {
+		rt.TargetSession = redactedMarker
 	}
 	if strings.TrimSpace(t.Prompt) != "" {
 		rt.HasPrompt = true
