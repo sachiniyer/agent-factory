@@ -27,6 +27,10 @@ var (
 	// before the acknowledgement deadline. A tmux send returning nil does not
 	// override this observation (#2220).
 	ErrPromptReceiptNotObserved = errors.New("prompt receipt not observed")
+	// ErrPromptReceiptAmbiguous means more than one new receiver conversation
+	// appeared after the snapshot. Prompt text cannot identify which process owns
+	// which rollout, even when only one has recorded it so far (#2228 review).
+	ErrPromptReceiptAmbiguous = errors.New("prompt receipt ambiguous")
 )
 
 const promptReceiptPollInterval = 50 * time.Millisecond
@@ -45,7 +49,14 @@ type ConversationCaptureSnapshot struct {
 // other providers degrade to their existing latest-session resume path unless a
 // deterministic id was injected before spawn (Claude).
 func BeginConversationCapture() ConversationCaptureSnapshot {
-	home := codexHomeDir()
+	return BeginConversationCaptureAtCodexHome(codexHomeDir())
+}
+
+// BeginConversationCaptureAtCodexHome snapshots an exact Codex store rather
+// than the daemon's inherited CODEX_HOME. Config-agent commands can carry an
+// inline environment assignment, so the process-specific path must be resolved
+// before launch and supplied here (#2228 review).
+func BeginConversationCaptureAtCodexHome(home string) ConversationCaptureSnapshot {
 	return ConversationCaptureSnapshot{
 		startedAt:   time.Now(),
 		codexHome:   home,
@@ -181,6 +192,9 @@ func codexPromptReceiptOnce(snap ConversationCaptureSnapshot, prompt string) (bo
 	if len(candidates) == 0 {
 		return false, nil
 	}
+	if len(candidates) > 1 {
+		return false, fmt.Errorf("%w: %d new Codex rollout files appeared", ErrPromptReceiptAmbiguous, len(candidates))
+	}
 	matches := 0
 	for _, path := range candidates {
 		received, err := codexRolloutHasPrompt(path, prompt)
@@ -200,10 +214,9 @@ func codexPromptReceiptOnce(snap ConversationCaptureSnapshot, prompt string) (bo
 	case 1:
 		return true, nil
 	default:
-		// Two new conversations recorded the exact same prompt, so af cannot
-		// prove which one belongs to this pane. Fail closed rather than let the
-		// other conversation acknowledge an unbriefed config agent.
-		return false, fmt.Errorf("codex prompt receipt ambiguous: %d new rollouts recorded the briefing", matches)
+		// One candidate can contribute at most one match. Keep this defensive arm
+		// so future receipt formats cannot silently weaken that invariant.
+		return false, fmt.Errorf("%w: one rollout produced %d matches", ErrPromptReceiptAmbiguous, matches)
 	}
 }
 

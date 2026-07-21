@@ -2,6 +2,7 @@ package tmux
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 
@@ -232,11 +233,30 @@ func (t *TmuxSession) CheckAndHandleTrustPrompt() bool {
 // The match is anchored on the question, both option labels and the affordance.
 // CheckAndHandleTrustPrompt also runs on live-session polls, so a prose mention
 // of one phrase must never inject Enter into a working agent.
+var ansiCSISequence = regexp.MustCompile(`\x1b\[[0-?]*[ -/]*[@-~]`)
+
 func CodexTrustPromptPresent(content string) bool {
-	return strings.Contains(content, "Do you trust the contents of this directory?") &&
-		strings.Contains(content, "Yes, continue") &&
-		strings.Contains(content, "No, quit") &&
-		strings.Contains(content, "Press enter to continue")
+	content = ansiCSISequence.ReplaceAllString(strings.ReplaceAll(content, "\r\n", "\n"), "")
+	question, selectedYes, noOption, affordance, last := -1, -1, -1, -1, -1
+	for idx, line := range strings.Split(content, "\n") {
+		line = strings.TrimSpace(strings.TrimSuffix(line, "\r"))
+		if line == "" {
+			continue
+		}
+		last = idx
+		switch {
+		case strings.HasPrefix(line, "Do you trust the contents of this directory?"):
+			question = idx
+		case line == "› 1. Yes, continue":
+			selectedYes = idx
+		case line == "2. No, quit":
+			noOption = idx
+		case line == "Press enter to continue":
+			affordance = idx
+		}
+	}
+	return question >= 0 && question < selectedYes && selectedYes < noOption &&
+		noOption < affordance && affordance == last
 }
 
 // DocTrustPromptPresent reports whether content shows the documentation-link

@@ -102,6 +102,69 @@ func TestConfigAgentCodexMissingReceiptFailsSpawn(t *testing.T) {
 	}
 }
 
+func TestConfigAgentCodexInlineHomeSubmitsAndVerifiesBriefing(t *testing.T) {
+	testguard.IsolateTmux(t)
+	manager, program, rollout := newConfigAgentCodexFixture(t, "accept-inline-home")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	sessionName, _, err := manager.SpawnConfigAgent(ctx, SpawnConfigAgentRequest{
+		Program: program,
+		Prompt:  "briefing whose receipt lives under the inline CODEX_HOME",
+	})
+	if err != nil {
+		t.Fatalf("config-agent spawn with inline CODEX_HOME: %v", err)
+	}
+	t.Cleanup(func() { _ = manager.ReapConfigAgent(ReapConfigAgentRequest{SessionName: sessionName}) })
+
+	data, err := os.ReadFile(rollout)
+	if err != nil {
+		t.Fatalf("read inline-home rollout: %v", err)
+	}
+	if !strings.Contains(string(data), "briefing whose receipt lives under the inline CODEX_HOME") {
+		t.Fatalf("receiver did not record the briefing under the command-specific CODEX_HOME:\n%s", data)
+	}
+}
+
+func TestConfigAgentCodexReceiptHome(t *testing.T) {
+	workDir := t.TempDir()
+	daemonCodexHome := t.TempDir()
+	includeHome := t.TempDir()
+	t.Setenv("CODEX_HOME", daemonCodexHome)
+	t.Setenv("HOME", includeHome)
+
+	tests := []struct {
+		name    string
+		program string
+		want    string
+		wantErr string
+	}{
+		{name: "inherits daemon", program: "codex", want: daemonCodexHome},
+		{name: "inline absolute wins", program: "CODEX_HOME=/tmp/inline-codex codex", want: "/tmp/inline-codex"},
+		{name: "inline relative uses launch cwd", program: "CODEX_HOME=relative-codex codex", want: filepath.Join(workDir, "relative-codex")},
+		{name: "unset uses command home", program: "env -u CODEX_HOME HOME=/tmp/inline-home codex", want: "/tmp/inline-home/.codex"},
+		{name: "cleared environment without home", program: "env -i codex", wantErr: "no literal HOME fallback"},
+		{name: "dynamic path refused", program: "CODEX_HOME=$OTHER codex", wantErr: "uses shell expansion"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := configAgentCodexReceiptHome(tc.program, workDir)
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("error = %v, want substring %q", err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("resolve receipt home: %v", err)
+			}
+			if got != tc.want {
+				t.Fatalf("receipt home = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 func newConfigAgentCodexFixture(t *testing.T, mode string) (*Manager, string, string) {
 	t.Helper()
 	afHome := testguard.SocketTempDir(t)
@@ -117,6 +180,12 @@ func newConfigAgentCodexFixture(t *testing.T, mode string) (*Manager, string, st
 		t.Fatalf("symlink Codex fixture: %v", err)
 	}
 	program := codexBin + " -test.run=^TestConfigAgentCodexFixtureProcess$"
+	if strings.Contains(mode, "inline-home") {
+		// The daemon environment intentionally points elsewhere. Only parsing the
+		// exact launched command finds the rollout the fixture will write.
+		t.Setenv("CODEX_HOME", t.TempDir())
+		program = "CODEX_HOME=" + shSingleQuote(codexHome) + " " + program
+	}
 
 	manager, err := NewManager(config.DefaultConfig())
 	if err != nil {

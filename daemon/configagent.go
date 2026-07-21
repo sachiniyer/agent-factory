@@ -3,6 +3,9 @@ package daemon
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -197,17 +200,21 @@ func (m *Manager) SpawnConfigAgent(ctx context.Context, req SpawnConfigAgentRequ
 	if req.Program == "" {
 		return "", "", fmt.Errorf("config agent: no program to run")
 	}
-	// Detect before launch so the Codex rollout snapshot below is taken before
-	// the process can create its conversation file. The command the pane actually
-	// runs remains the source of truth, matching regular sessions (#1116/#1131).
-	agent := tmux.DetectAgentFromCommand(req.Program)
-	var promptReceipt session.ConversationCaptureSnapshot
-	if agent == tmux.ProgramCodex && req.Prompt != "" {
-		promptReceipt = session.BeginConversationCapture()
-	}
 	home, err := config.GetConfigDir()
 	if err != nil {
 		return "", "", fmt.Errorf("config agent: cannot resolve the agent-factory home: %w", err)
+	}
+	// Detect and snapshot before launch so Codex cannot create its rollout between
+	// the before-image and tmux start. The receipt path is resolved from the exact
+	// command environment, not the daemon's CODEX_HOME (#2228 review).
+	agent := tmux.DetectAgentFromCommand(req.Program)
+	var promptReceipt session.ConversationCaptureSnapshot
+	if agent == tmux.ProgramCodex && req.Prompt != "" {
+		codexHome, rerr := configAgentCodexReceiptHome(req.Program, home)
+		if rerr != nil {
+			return "", "", fmt.Errorf("config agent: cannot locate the launched Codex receipt store: %w", rerr)
+		}
+		promptReceipt = session.BeginConversationCaptureAtCodexHome(codexHome)
 	}
 
 	// seq is only for uniqueness within this daemon; the tmux session NewTmuxSession
@@ -284,6 +291,44 @@ func (m *Manager) SpawnConfigAgent(ctx context.Context, req SpawnConfigAgentRequ
 	}
 	log.InfoLog.Printf("config agent: started %s in %s on socket %q (agent %q)", sessionName, home, socketPath, agent)
 	return sessionName, socketPath, nil
+}
+
+// configAgentCodexReceiptHome resolves the same CODEX_HOME the launched shell
+// command will give Codex. Command-local assignments win over daemon variables;
+// an unset CODEX_HOME falls back through the command-specific HOME. Relative
+// values resolve against the AF-home working directory passed to tmux.Start.
+func configAgentCodexReceiptHome(program, workingDir string) (string, error) {
+	effective := func(name string) (string, bool, error) {
+		override := tmux.EnvironmentOverrideFromCommand(program, name)
+		if !override.Present {
+			value, set := os.LookupEnv(name)
+			return value, set, nil
+		}
+		if !override.Literal {
+			return "", false, fmt.Errorf("%s uses shell expansion; use a literal path so receipt verification can follow it", name)
+		}
+		return override.Value, override.Set, nil
+	}
+	resolve := func(path string) string {
+		if filepath.IsAbs(path) {
+			return filepath.Clean(path)
+		}
+		return filepath.Clean(filepath.Join(workingDir, path))
+	}
+
+	if codexHome, set, err := effective("CODEX_HOME"); err != nil {
+		return "", err
+	} else if set && strings.TrimSpace(codexHome) != "" {
+		return resolve(codexHome), nil
+	}
+	home, set, err := effective("HOME")
+	if err != nil {
+		return "", err
+	}
+	if !set || strings.TrimSpace(home) == "" {
+		return "", fmt.Errorf("CODEX_HOME is unset and the launched command has no literal HOME fallback")
+	}
+	return filepath.Join(resolve(home), ".codex"), nil
 }
 
 // dismissConfigAgentTrustPrompt clears the agent's first-run trust dialog, the
