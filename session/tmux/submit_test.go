@@ -219,6 +219,47 @@ func TestClearNeverSendsEscapeTheInterruptKey(t *testing.T) {
 	}
 }
 
+func TestClearedComposerNoticeRequiresObservableRemovedContent(t *testing.T) {
+	tests := []struct {
+		name   string
+		before string
+		after  string
+	}{
+		{
+			name:   "empty prompt redraw",
+			before: "completed response\n❯\n────────────────────────────────",
+			after:  "completed response\n\n────────────────────────────────",
+		},
+		{
+			name:   "content disappears during an unrelated redraw",
+			before: "status: working\n❯ pending-looking-text\nfooter stable",
+			after:  "status: done\n❯\nfooter stable",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			errors := captureErrorLog(t)
+			noteClearedComposerContent("af_proj", tt.before, tt.after)
+			require.Empty(t, errors.String(),
+				"a whole-pane difference is not proof that C-u removed a non-empty composer")
+		})
+	}
+}
+
+func TestClearedComposerNoticeKeepsExactAnchoredRemoval(t *testing.T) {
+	errors := captureErrorLog(t)
+
+	noteClearedComposerContent("af_proj", "history\n│ ❯ STRANDED-\n│ DRAFT │\nfooter stable", "history\n│ ❯ │\nfooter stable")
+
+	got := errors.String()
+	require.Equal(t, 1, strings.Count(got, "removed visible composer content"),
+		"an exact suffix removal from a stable prompt is actionable once, got %q", got)
+	require.Contains(t, got, "Prior pane tail:")
+	require.NotContains(t, got, "or the pane was mid-render",
+		"an ERROR must state only what the captures actually establish")
+}
+
 func TestSubmitLoadsPayloadBeforeClearingComposer(t *testing.T) {
 	loadErr := fmt.Errorf("load rejected")
 	clearSent := false

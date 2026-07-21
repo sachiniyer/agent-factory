@@ -182,8 +182,10 @@ func (t *TmuxSession) sendKeysPasteBuffer(text string) error {
 	// not "not submitted"), so we do NOT try to detect whether a strand exists:
 	// that check cannot be made soundly from pane content. We clear
 	// unconditionally instead, which asserts nothing about the pane. The captures
-	// around the clear are for the LOG only (noteClearedDraft) — nothing is gated
-	// on them — and the post-clear pane doubles as the delivery baseline below.
+	// around the clear are for the LOG only (noteClearedComposerContent) — nothing
+	// is gated on them — and the post-clear pane doubles as the delivery baseline
+	// below. The log itself requires an exact visible removal; an arbitrary pane
+	// redraw is not evidence that the composer held a draft (#2225).
 	//
 	// Clearing unconditionally is only safe because the clear keystroke is inert
 	// on a BUSY pane: see clearComposerDraft for why it is C-u and explicitly NOT
@@ -193,13 +195,13 @@ func (t *TmuxSession) sendKeysPasteBuffer(text string) error {
 	// Cost: this is one capture more than the single (tail-conditional) baseline
 	// capture it replaces, and both are unconditional. Each is bounded by
 	// tmuxCommandTimeout, so against a WEDGED server the delivery path can now
-	// stall one extra bound before giving up. That is the price of the
-	// discarded-draft record; if it ever matters, the `before` capture is the
-	// droppable half (it feeds only the log, never the baseline).
+	// stall one extra bound before giving up. That is the price of recording a
+	// demonstrably non-empty clear; if it ever matters, the `before` capture is
+	// the droppable half (it feeds only the log, never the baseline).
 	before, beforeOK := t.capturePaneForDelivery()
 	t.clearComposerDraft()
 	after, afterOK := t.capturePaneForDelivery()
-	noteClearedDraft(t.sanitizedName, before, after)
+	noteClearedComposerContent(t.sanitizedName, before, after)
 
 	// Baseline the pane AFTER the clear but BEFORE the paste so the post-paste
 	// check waits for the prompt's tail to newly APPEAR (a count increase), not
@@ -357,23 +359,65 @@ func (t *TmuxSession) clearComposerDraft() {
 	}
 }
 
-// noteClearedDraft logs when the pre-delivery clear visibly changed the pane —
-// evidence the composer held pending content that would otherwise have fused
-// with this prompt (#2070). It stays SOUND because nothing is gated on it: this
-// is a record for the operator, not a decision. A normalized difference between
-// the pane captured before and after the clear is the observable EFFECT of our
-// own C-u, not an inference about composer state from ambiguous pixels — the
-// unsound move #2065 closed. A pane merely mid-render can also differ, so the
-// message hedges rather than asserting a strand. Empty/failed captures produce
-// no log (nb == "").
-func noteClearedDraft(sessionName, before, after string) {
-	nb := normalizeDelivery(before)
-	if nb == "" || nb == normalizeDelivery(after) {
+// noteClearedComposerContent records only an observable removal from a stable
+// composer anchor. A whole-pane difference is not enough: the pane may be
+// rendering concurrently, and an empty prompt may itself disappear (#2225).
+// Ambiguous and failed captures stay silent, following deliveryCouldNotObserve.
+func noteClearedComposerContent(sessionName, before, after string) {
+	if !paneShowsComposerContentRemoved(before, after) {
 		return
 	}
-	log.ErrorLog.Printf("submit: cleared composer for session %q before delivery; the pane changed "+
-		"across the clear, so a stranded draft was likely discarded (or the pane was mid-render). "+
+	log.ErrorLog.Printf("submit: pre-delivery clear removed visible composer content for session %q; "+
+		"the prior composer was non-empty, which can indicate a stranded draft. "+
 		"Prior pane tail: %s", sessionName, oneLineTail(before))
+}
+
+// paneShowsComposerContentRemoved recognizes the narrow pane transition that a
+// successful C-u produces: surrounding normalized rows are unchanged, the
+// changed region keeps a non-text prompt anchor, and text after that anchor is
+// gone. Requiring this exact shape makes unrelated redraws fail closed without
+// coupling the detector to any agent's particular prompt glyph.
+func paneShowsComposerContentRemoved(before, after string) bool {
+	beforeRows := normalizedPaneRows(before)
+	afterRows := normalizedPaneRows(after)
+	if len(beforeRows) == 0 || len(afterRows) == 0 {
+		return false
+	}
+
+	prefix := 0
+	for prefix < len(beforeRows) && prefix < len(afterRows) && beforeRows[prefix] == afterRows[prefix] {
+		prefix++
+	}
+	beforeEnd, afterEnd := len(beforeRows), len(afterRows)
+	for beforeEnd > prefix && afterEnd > prefix && beforeRows[beforeEnd-1] == afterRows[afterEnd-1] {
+		beforeEnd--
+		afterEnd--
+	}
+
+	beforeChanged := strings.Join(beforeRows[prefix:beforeEnd], "")
+	afterChanged := strings.Join(afterRows[prefix:afterEnd], "")
+	if afterChanged == "" || !strings.HasPrefix(beforeChanged, afterChanged) {
+		return false
+	}
+
+	removed := strings.TrimPrefix(beforeChanged, afterChanged)
+	return hasLetterOrNumber(removed) && !hasLetterOrNumber(afterChanged)
+}
+
+func normalizedPaneRows(pane string) []string {
+	rows := make([]string, 0, strings.Count(pane, "\n")+1)
+	for _, row := range strings.Split(pane, "\n") {
+		if normalized := normalizeDelivery(row); normalized != "" {
+			rows = append(rows, normalized)
+		}
+	}
+	return rows
+}
+
+func hasLetterOrNumber(s string) bool {
+	return strings.IndexFunc(s, func(r rune) bool {
+		return unicode.IsLetter(r) || unicode.IsNumber(r)
+	}) >= 0
 }
 
 // newDeliveryProbe derives two disjoint, payload-specific witnesses. The suffix
@@ -583,8 +627,7 @@ func (t *TmuxSession) waitForPasteDelivered(probe deliveryProbe) deliveryObserva
 // oneLineTail condenses pane content to a short, single-line excerpt for a log
 // line: the last few non-blank rows, whitespace collapsed, row breaks marked
 // with ⏎, and truncated. Shared by the terminal delivery observation and
-// noteClearedDraft so a discarded-draft record and a delivery-failure record
-// read the same.
+// noteClearedComposerContent so both diagnostics use the same escaping policy.
 func oneLineTail(content string) string {
 	lines := strings.Split(strings.TrimRight(content, "\n \t"), "\n")
 	keep := lines
