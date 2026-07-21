@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/systemdunit"
 	"github.com/sachiniyer/agent-factory/log"
 )
 
@@ -20,13 +21,13 @@ import (
 // longer exist (#782).
 
 const (
-	autostartUnitName     = "agent-factory-daemon.service"
+	autostartUnitName     = systemdunit.DaemonUnitName
 	autostartLaunchdLabel = "com.agent-factory.daemon"
 	// autostartSystemdMarker lets the daemon distinguish its direct service
 	// process from descendants that merely inherited the unit's environment.
 	// session/tmux checks it together with SYSTEMD_EXEC_PID before asking the
 	// user manager to put a newly-created tmux server in its own scope (#2176).
-	autostartSystemdMarker = "AGENT_FACTORY_SYSTEMD_UNIT"
+	autostartSystemdMarker = systemdunit.DaemonMarkerEnv
 )
 
 // Every launchctl call af makes names the gui/<uid> domain explicitly, and

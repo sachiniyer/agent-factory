@@ -543,7 +543,7 @@ func exitedFromSignal(err error, sig syscall.Signal) bool {
 // run's output tail (never nil) for the caller's failure logging.
 func (w *taskWatcher) runOnce() (*tailBuffer, error) {
 	tail := &tailBuffer{}
-	cmd := exec.Command(w.sup.shell, "-c", w.cmdStr)
+	cmd := newDaemonChildCommand(w.sup.shell, "-c", w.cmdStr)
 	cmd.Dir = w.dir
 	cmd.Env = append(os.Environ(),
 		"AF_TASK_ID="+w.taskID,

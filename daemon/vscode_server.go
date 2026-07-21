@@ -675,7 +675,7 @@ func (v *vscodeSupervisor) startOne(binary string, flavor vscodeFlavor, socketPa
 	if err := os.Remove(socketPath); err != nil && !os.IsNotExist(err) {
 		return nil, fmt.Errorf("clearing the stale VS Code socket %s failed: %w", socketPath, err)
 	}
-	cmd := exec.Command(binary, vscodeArgs(flavor, socketPath, worktree)...)
+	cmd := newDaemonChildCommand(binary, vscodeArgs(flavor, socketPath, worktree)...)
 	cmd.Dir = worktree
 	cmd.Env = vscodeChildEnv()
 	// Own process group so the editor's whole tree (extension host, terminal
