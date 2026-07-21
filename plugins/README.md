@@ -40,11 +40,12 @@ gemini skills install https://github.com/sachiniyer/agent-factory --path plugins
 
 ## amp
 
-Skill directory, installed with `amp skill add` from a clone. amp has no marketplace, so there is no one-line remote install.
+Skill directory copied from a clone into Amp's documented `.agents/skills/` project directory. Amp has no skill-install command or marketplace.
 
 ```
 git clone https://github.com/sachiniyer/agent-factory
-amp skill add agent-factory/plugins/amp/agent-factory
+mkdir -p .agents/skills
+cp -R agent-factory/plugins/amp/agent-factory .agents/skills/
 ```
 
 See [docs/agent-plugins.md](../docs/agent-plugins.md) for what each packaging does and does not do.
