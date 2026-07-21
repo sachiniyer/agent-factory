@@ -5,8 +5,9 @@ import (
 	"strconv"
 )
 
-// This file is the manifest's value-reading half: given a manifest key, what is
-// the user's live value, and in what form?
+// This file is the GLOBAL manifest view's value-reading half: given a key from
+// Manifest(), what is the user's live global value, and in what form? Repo-only
+// entries from AllManifest() resolve through the per-repo resolver instead.
 //
 // There are two forms, and the distinction is the whole reason this file is
 // separate from manifest_briefing.go:
@@ -28,8 +29,9 @@ import (
 //
 // It is the single reflection walk behind every value read — the briefing, the
 // TUI editor, and the web editor all land here. ok is false for a key that
-// names no toml-tagged field, which TestManifestCoversEveryConfigKey makes
-// unreachable for a manifest key.
+// names no toml-tagged field, which
+// TestGlobalManifestCoversEveryGlobalConfigKey makes unreachable for a key
+// returned by Manifest().
 func configFieldByTomlKey(cfg *Config, key string) (reflect.Value, bool) {
 	if cfg == nil {
 		return reflect.Value{}, false
@@ -49,8 +51,8 @@ func configFieldByTomlKey(cfg *Config, key string) (reflect.Value, bool) {
 	return reflect.Value{}, false
 }
 
-// CurrentValue returns cfg's live value for one manifest key in the form an
-// editor should show and `af config set` would accept back: a string bare, a
+// CurrentValue returns cfg's live value for one global manifest key in the form
+// an editor should show and `af config set` would accept back: a string bare, a
 // bool as "true"/"false", an int in decimal, and a composite (a table or list)
 // as compact JSON.
 //
@@ -80,8 +82,8 @@ func CurrentValue(cfg *Config, key string) (string, bool) {
 // config_types.go reaches both without either UI being touched.
 //
 // No single test pins that end to end; one per link in the chain does:
-//   - TestManifestCoversEveryConfigKey (config) — every toml-tagged Config field
-//     has a manifest entry.
+//   - TestGlobalManifestCoversEveryGlobalConfigKey (config) — every toml-tagged
+//     Config field is in the global Manifest() view.
 //   - TestCurrentValueCoversEveryManifestKey (config) — every entry's Key
 //     resolves through the reflection walk both surfaces read values with, so an
 //     entry with a typo'd Key cannot render as "unknown" in both UIs.
@@ -145,8 +147,9 @@ type ConfigEntry struct {
 	RequiresRestart bool `json:"requires_restart"`
 }
 
-// ManifestWithValues returns the manifest zipped with cfg's live values: the
-// single description of config that BOTH editor surfaces render from.
+// ManifestWithValues returns the global Manifest() view zipped with cfg's live
+// values: the single description of config that BOTH current editor surfaces
+// render from.
 //
 // A nil cfg (or a key that will not resolve) yields an empty Value rather than a
 // default, for the reason CurrentValue documents: an editor that pre-filled a
