@@ -495,20 +495,28 @@ async function evaluateCodex({ github, context, number, sha, lastCommitDate }) {
     issue_number: number,
     per_page: 100,
   });
-  const codexComments = comments
+  const reviews = await github.paginate(github.rest.pulls.listReviews, {
+    owner,
+    repo,
+    pull_number: number,
+    per_page: 100,
+  });
+  const codexComments = comments.filter((comment) => comment.user?.login === CODEX_REVIEWER);
+  const codexReviewArtifacts = [...codexComments, ...reviews]
     .filter((comment) => comment.user?.login === CODEX_REVIEWER)
-    .sort((a, b) => commentTime(b) - commentTime(a));
-  const verdict = codexComments.find((comment) => {
+    .sort((a, b) => reviewArtifactTime(b) - reviewArtifactTime(a));
+  const verdict = codexReviewArtifacts.find((comment) => {
     const reviewedCommit = parseReviewedCommit(comment.body || "");
     return reviewedCommit != null && reviewedCommitMatchesHead(reviewedCommit, sha);
   });
 
   if (!verdict) {
-    const rateLimited = CODEX_RATE_LIMIT_RE.test(codexComments[0]?.body || "");
+    const latestCodexComment = codexComments.sort((a, b) => reviewArtifactTime(b) - reviewArtifactTime(a))[0];
+    const rateLimited = CODEX_RATE_LIMIT_RE.test(latestCodexComment?.body || "");
     const suffix = rateLimited ? "; the latest Codex response was usage-limited" : "";
     reasons.push(`Codex has not reviewed head ${sha} yet${suffix}`);
   } else {
-    const verdictTime = commentTime(verdict);
+    const verdictTime = reviewArtifactTime(verdict);
     if (lastPushTime == null || verdictTime === 0 || verdictTime <= lastPushTime) {
       reasons.push("Codex verdict for the head commit is older than the head commit timestamp");
     } else {
@@ -567,8 +575,8 @@ function reviewedCommitMatchesHead(reviewedCommit, headSha) {
   return /^[0-9a-f]{40}$/.test(normalizedHead) && normalizedHead.startsWith(reviewedCommit);
 }
 
-function commentTime(comment) {
-  return parseTimestamp(comment.updated_at || comment.created_at) || 0;
+function reviewArtifactTime(artifact) {
+  return parseTimestamp(artifact.updated_at || artifact.submitted_at || artifact.created_at) || 0;
 }
 
 function hasResolutionMarker(body) {

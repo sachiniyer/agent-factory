@@ -146,6 +146,20 @@ test("an allowed author resolves a live finding only with an explicit marker", a
   assert.equal(resolved.shouldMerge, true);
 });
 
+test("an exact-head Codex PR review proves review after its finding is resolved", async () => {
+  const finding = codexFinding({ id: 10, line: 32 });
+  const result = await evaluateGate({
+    issueComments: [],
+    reviews: [codexReview(HEAD_SHA)],
+    reviewComments: [
+      finding,
+      findingReply({ id: 12, inReplyToId: 10, body: "The documented tradeoff is ACCEPTED." }),
+    ],
+  });
+
+  assert.equal(result.shouldMerge, true);
+});
+
 test("a verdict for an older head does not verify the current head", async () => {
   const result = await evaluateGate({ issueComments: [codexVerdict(OTHER_SHA)] });
 
@@ -221,6 +235,7 @@ function fakeGateGithub({
   checkRuns = happyCheckRuns(),
   statuses = [],
   issueComments = [codexVerdict(headSha)],
+  reviews = [],
   reviewComments = [],
   files = [],
   requiredChecks = [
@@ -232,6 +247,7 @@ function fakeGateGithub({
   const listForRef = function listForRef() {};
   const listCommitStatusesForRef = function listCommitStatusesForRef() {};
   const listComments = function listComments() {};
+  const listReviews = function listReviews() {};
   const listReviewComments = function listReviewComments() {};
   const merge = async function merge(options) {
     github.mergedWith = options;
@@ -242,6 +258,7 @@ function fakeGateGithub({
     [listForRef, checkRuns],
     [listCommitStatusesForRef, statuses],
     [listComments, issueComments],
+    [listReviews, reviews],
     [listReviewComments, reviewComments],
   ]);
 
@@ -252,7 +269,7 @@ function fakeGateGithub({
       checks: { listForRef },
       issues: { listComments },
       repos: { listCommitStatusesForRef },
-      pulls: { listFiles, listReviewComments, merge },
+      pulls: { listFiles, listReviews, listReviewComments, merge },
     },
     graphql: async () => ({
       repository: {
@@ -368,6 +385,14 @@ function codexRateLimit() {
     body: "You have reached your Codex usage limits for code reviews.",
     created_at: "2026-07-09T01:20:00Z",
     updated_at: "2026-07-09T01:20:00Z",
+  };
+}
+
+function codexReview(sha) {
+  return {
+    user: { login: "chatgpt-codex-connector[bot]" },
+    body: `### Codex Review\n\nHere are some suggestions.\n\n**Reviewed commit:** \`${sha.slice(0, 10)}\``,
+    submitted_at: "2026-07-09T01:20:00Z",
   };
 }
 
