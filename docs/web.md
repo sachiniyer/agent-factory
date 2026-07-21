@@ -258,16 +258,15 @@ the top bar, the **project switcher** (top-right), or the `[` / `]` keys:
 ┌───────────────────────────────────────────────────────────────────────┐
 │  Agent Factory   [ Sessions ]  Tasks       project ▾   ● Live   Disconnect│  ← app bar
 ├──────────────────────┬────────────────────────────────────────────────┤
-│ Sessions      3 ▤ +New│  fix-login-flow · Live · fix/login             │  ← pane header
+│ Sessions      3 ▤ +New│ fix-login-flow · Live │ Agent │ Terminal │ + │  ← title + tabs
 │                       │ ┌────────────────────────────────────────────┐ │
-│ ● fix-login-flow      │ │ Agent │ Terminal │ +                       │ │  ← tab bar
-│   ⎇ fix/login         │ ├────────────────────────────────────────────┤ │
+│ ● fix-login-flow      │ │                                            │ │
+│   ⎇ fix/login         │ │                                            │ │
 │ ○ add-metrics         │ │                                            │ │
 │   ⎇ metrics           │ │   (live agent terminal — xterm.js)         │ │  ← attach terminal
 │ ◆ nightly-refactor    │ │                                            │ │
 │   ⎇ refactor          │ │                                            │ │
 │                       │ └────────────────────────────────────────────┘ │
-│                       │           [ Prompt ]  [ Archive ]  [ Kill ]     │  ← pane actions
 └──────────────────────┴────────────────────────────────────────────────┘
 ```
 
@@ -349,9 +348,11 @@ tapping the dimmed scrim dismisses the drawer directly.
 #### The attach terminal
 
 The main pane hosts a real terminal (xterm.js) streaming the agent's live output
-over the daemon's WebSocket PTY plane — the same bytes the TUI paints. The pane
-header shows the session title, the terminal's connection state (`Live` /
-`Connecting…` / `Reconnecting…` / `Agent exited`), and the branch.
+over the daemon's WebSocket PTY plane — the same bytes the TUI paints. One pane-header
+row holds the session title, terminal connection state (`Live` / `Connecting…` /
+`Reconnecting…` / `Agent exited`), horizontally scrolling tabs, and the conditional
+**Retry** escape. The title keeps a useful minimum and ellipsizes; Retry never shrinks;
+the tab strip owns the remaining width and scrolls rather than wrapping.
 
 #### Per-session actions
 
@@ -379,8 +380,8 @@ include that row's title.
 ### Tabs
 
 Just like the TUI, a session isn't limited to its agent — each one holds up to
-**nine tabs**, all running in the *same* worktree. The tab bar sits between the
-pane header and the terminal:
+**nine tabs**, all running in the *same* worktree. The tab bar shares the pane
+header row with the title at every viewport width:
 
 ```
 ┌──────────┬────────────┬──────────┬─────────────┐

@@ -11260,18 +11260,19 @@ var AppShell = class {
     this.retryBtn = retryBtn;
     this.retryVisible = isLimitReached(selected);
     retryBtn.hidden = !this.retryVisible;
-    const actions2 = h2("div", { class: "af-term-actions" }, retryBtn);
-    const head = h2("div", { class: "af-term-head" }, titleBox, actions2);
-    this.tabBar = h2("div", { class: "af-tabbar" });
-    this.tabBar.setAttribute("role", "tablist");
-    this.tabBar.setAttribute("aria-label", "Session tabs");
-    this.attachTabDrag(this.tabBar);
+    const tabBar = h2("div", { class: "af-tabbar" });
+    this.tabBar = tabBar;
+    tabBar.setAttribute("role", "tablist");
+    tabBar.setAttribute("aria-label", "Session tabs");
+    this.attachTabDrag(tabBar);
     this.tabInsert = h2("div", { class: "af-tab-insert" });
     this.tabInsert.hidden = true;
     this.tabInsert.setAttribute("aria-hidden", "true");
-    this.attachTabReorder(this.tabBar);
+    this.attachTabReorder(tabBar);
+    this.attachTabRename(tabBar);
+    const head = h2("div", { class: "af-term-head" }, titleBox, tabBar, retryBtn);
     this.main.className = "af-main af-main-term";
-    this.main.replaceChildren(head, this.tabBar, this.termHost);
+    this.main.replaceChildren(head, this.termHost);
     this.renderTabBar(state);
     this.patchMainHead(state);
   }
@@ -11319,11 +11320,13 @@ var AppShell = class {
       reason.setAttribute("aria-label", `New tab unavailable \xB7 ${unavailable}`);
       children.push(reason);
     }
+    const scrollLeft = bar.scrollLeft;
     bar.replaceChildren(...children);
     if (this.tabInsert) {
       this.tabInsert.hidden = true;
       bar.append(this.tabInsert);
     }
+    bar.scrollLeft = scrollLeft;
     document.body.classList.remove("af-dragging-tab");
     this.dragFromIndex = null;
     this.lastTabBarSig = tabBarSig(state);
@@ -11357,13 +11360,55 @@ var AppShell = class {
       this.hideTabInsert();
     });
   }
+  /** Owns inline rename on the stable bar rather than on an individual button.
+   *  Activating an inactive tab rebuilds the buttons synchronously on the first
+   *  click of a double-click. Depending on geometry, Chromium may then target the
+   *  second click at the replacement button or at the gap it moved away from, and
+   *  may emit no useful dblclick at all. Capture the first click's stable identity,
+   *  then consume click #2 before its button handler can rebuild again. This makes
+   *  the intended tab — not a transient DOM node or coordinate — own the gesture. */
+  attachTabRename(bar) {
+    let firstIdentity = null;
+    bar.addEventListener(
+      "click",
+      (e) => {
+        const target = e.target instanceof Element ? e.target.closest(".af-tab") : null;
+        const button = target && bar.contains(target) ? target : null;
+        const targetIntent = button ? tabRenameIntents.get(button) : void 0;
+        if (e.detail === 1) {
+          firstIdentity = targetIntent?.identity() ?? null;
+          return;
+        }
+        if (e.detail !== 2) {
+          firstIdentity = null;
+          return;
+        }
+        const intendedIdentity = firstIdentity;
+        firstIdentity = null;
+        if (!intendedIdentity) {
+          return;
+        }
+        const current = barTabs(bar).find(
+          (candidate) => tabRenameIntents.get(candidate)?.identity() === intendedIdentity
+        );
+        const intent = current ? tabRenameIntents.get(current) : void 0;
+        if (!intent) {
+          return;
+        }
+        e.preventDefault();
+        e.stopPropagation();
+        intent.begin();
+      },
+      { capture: true }
+    );
+  }
   /**
    * Wires the tab bar as a drop TARGET, for reordering tabs within it (#1813).
    *
    * The gesture is disambiguated from drag-to-split by WHERE the drag is released,
-   * and the two regions are disjoint DOM subtrees that never overlap: the bar is a
-   * sibling of the terminal host (renderMain appends head, tabBar, termHost), and
-   * every split drop handler is bound inside a .af-pane within that host (split.ts
+   * and the two regions are disjoint DOM subtrees that never overlap: the bar sits
+   * inside the header, which is a sibling of the terminal host, and every split drop
+   * handler is bound inside a .af-pane within that host (split.ts
    * wireDrop). A drag released over the strip reorders; over a pane it splits or
    * replaces. Neither handler can see the other's event — there is no shared
    * ancestor between them below <main>, so no bubbling to suppress and no
@@ -11500,6 +11545,7 @@ function tabBarSig(state) {
 function barTabs(bar) {
   return [...bar.querySelectorAll(".af-tab")];
 }
+var tabRenameIntents = /* @__PURE__ */ new WeakMap();
 function tabCenters(bar) {
   return barTabs(bar).map((t) => {
     const r = t.getBoundingClientRect();
@@ -11519,9 +11565,11 @@ function tabButton(tab, index, active, shown, canManage, actions2, liveIdentity,
   const renameable = canManage && isRenameableTab(tab.kind);
   btn.title = renameable ? `${tabDisplayLabel(tab)} \u2014 double-click to rename` : tabDisplayLabel(tab);
   if (renameable) {
-    btn.addEventListener("dblclick", (e) => {
-      e.preventDefault();
-      beginTabRename(btn, tab, actions2, liveIdentity(), selectedSessionId);
+    tabRenameIntents.set(btn, {
+      identity: liveIdentity,
+      begin: () => {
+        beginTabRename(btn, tab, actions2, liveIdentity(), selectedSessionId);
+      }
     });
   }
   if (index > 0 && canManage) {

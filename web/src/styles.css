@@ -1206,7 +1206,7 @@ body {
   font-size: var(--af-fs-md);
 }
 
-/* Terminal pane: a slim header (session title + connection status) over the xterm
+/* Terminal pane: one slim title + tabs + conditional-Retry header over the xterm
  * host, which fills the remaining height so the FitAddon has real dimensions. */
 .af-main-term {
   min-height: 0;
@@ -1215,7 +1215,7 @@ body {
 .af-term-head {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  justify-content: flex-start;
   gap: 0.6rem;
   padding: var(--af-sp-2) 0.9rem;
   border-bottom: 1px solid var(--af-border);
@@ -1226,17 +1226,14 @@ body {
   display: flex;
   align-items: baseline;
   gap: 0.6rem;
-  min-width: 0;
-}
-
-.af-term-actions {
-  display: flex;
-  align-items: center;
-  gap: 0.4rem;
-  flex: 0 0 auto;
+  flex: 0 1 auto;
+  min-width: 7.5rem;
+  max-width: min(18rem, 34vw);
+  overflow: hidden;
 }
 
 .af-term-action {
+  flex: 0 0 auto;
   padding: 0.3rem 0.6rem;
   font-size: var(--af-fs-xs);
 }
@@ -1254,6 +1251,8 @@ body {
 }
 
 .af-term-title {
+  flex: 1 1 auto;
+  min-width: 5.5rem;
   font-size: var(--af-fs-md);
   font-weight: 600;
   white-space: nowrap;
@@ -1262,9 +1261,13 @@ body {
 }
 
 .af-term-meta {
+  flex: 0 1 auto;
+  min-width: 0;
   font-size: var(--af-fs-xs);
   color: var(--af-text-2);
   white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 /* Status tints on the pane header, matching the live-pip vocabulary. */
@@ -1281,18 +1284,19 @@ body {
   color: var(--af-dot-dead);
 }
 
-/* Tab bar (#1592 Phase 5 PR7): a slim strip of the session's tabs between the pane
- * header and the terminal, mirroring the TUI's tab row (ui/tabbed_window.go). The
- * active tab is accent-underlined; each non-agent tab carries a × close, and the
- * labelled New tab control offers Terminal / VS Code. It scrolls horizontally
- * rather than wrapping so a full row of tabs never pushes the terminal down. */
+/* Tab bar (#1592 Phase 5 PR7, #2224): the flexible middle of the pane's single
+ * header row, mirroring the TUI's tab row (ui/tabbed_window.go). The title keeps a
+ * useful minimum, Retry never shrinks, and this bar consumes the remainder and
+ * scrolls horizontally rather than wrapping or pushing the terminal down. */
 .af-tabbar {
   display: flex;
   align-items: stretch;
+  flex: 1 1 0;
+  min-width: 6rem;
   gap: 0.15rem;
-  padding: 0 0.6rem;
-  background: var(--af-bg-surface);
-  border-bottom: 1px solid var(--af-border);
+  padding: 0;
+  background: transparent;
+  border: 0;
   overflow-x: auto;
   scrollbar-width: thin;
   /* The containing block for the reorder insertion indicator (#1813), which is
