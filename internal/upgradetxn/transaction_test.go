@@ -156,6 +156,7 @@ func TestRollbackResyncsAlreadyAbsentMetadataBeforeCheckpoint(t *testing.T) {
 	require.NoError(t, err)
 	defer lease.Release()
 	require.NoError(t, lease.Advance(PhaseSupervisorReady))
+	require.NoError(t, lease.Advance(PhaseDaemonStopping))
 	require.NoError(t, lease.Advance(PhaseDaemonStopped))
 	require.NoError(t, lease.InstallCandidate())
 	require.NoError(t, os.WriteFile(filepath.Join(home, "tasks.json"), []byte("candidate-state"), 0o600))
