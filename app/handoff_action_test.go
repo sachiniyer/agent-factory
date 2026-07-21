@@ -193,6 +193,27 @@ func TestHandleStateSelectHandoffAgent_DropsARecreatedLegacyTarget(t *testing.T)
 		"a replacement must not inherit an id-less session's pending handoff")
 }
 
+func TestHandleStateSelectHandoffAgent_KeepsARebuiltLegacyTarget(t *testing.T) {
+	h := newTestHome(t)
+	original := handoffActionInstance(t, "worker", tmux.ProgramClaude)
+	original.ID = ""
+	h.store.AddInstance(original)
+	h.sidebar.SetSelectedInstance(0)
+
+	_, _ = h.handleHandoff()
+	rebuilt := handoffActionInstance(t, original.Title, tmux.ProgramClaude)
+	rebuilt.ID = ""
+	rebuilt.CreatedAt = original.CreatedAt
+	require.True(t, h.store.ReplaceInstance(original, rebuilt))
+	h.selectionOverlay.SetSelectedIndex(0)
+
+	_, _ = h.handleStateSelectHandoffAgent(tea.KeyMsg{Type: tea.KeyEnter})
+
+	require.Equal(t, stateConfirm, h.state,
+		"a snapshot rebuild with the same legacy discriminator remains the same target")
+	require.NotNil(t, h.confirmationOverlay)
+}
+
 // Cancelling the picker must leave the session untouched.
 func TestHandleStateSelectHandoffAgent_CancelDoesNotSwap(t *testing.T) {
 	h := newTestHome(t)

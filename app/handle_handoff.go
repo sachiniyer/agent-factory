@@ -2,6 +2,7 @@ package app
 
 import (
 	"fmt"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -14,9 +15,10 @@ import (
 )
 
 type handoffPickerTarget struct {
-	id     string
-	title  string
-	repoID string
+	id        string
+	title     string
+	repoID    string
+	createdAt time.Time
 }
 
 // handoffAgentChoices returns the agents the selected session may be handed to:
@@ -80,7 +82,9 @@ func (m *home) handleHandoff() (tea.Model, tea.Cmd) {
 	}
 
 	m.handoffChoices = choices
-	m.handoffTarget = handoffPickerTarget{id: selected.ID, title: selected.Title, repoID: m.repoID}
+	m.handoffTarget = handoffPickerTarget{
+		id: selected.ID, title: selected.Title, repoID: m.repoID, createdAt: selected.CreatedAt,
+	}
 	m.selectionOverlay = overlay.NewSelectionOverlay("Hand off to", choices)
 	m.state = stateSelectHandoffAgent
 	return m, nil
@@ -137,9 +141,17 @@ func (m *home) resolveHandoffPickerTarget(target handoffPickerTarget) *session.I
 	}
 	if target.id == "" {
 		// Compatibility for records written before stable session IDs existed.
-		// Current sessions take the ID arm below, which is what prevents a killed
-		// and recreated same-title row from inheriting the pending action.
-		return m.store.GetInstanceByTitle(target.title)
+		// CreatedAt is the same legacy discriminator snapshot reconciliation uses;
+		// a zero timestamp proves no identity, so fail closed instead of letting
+		// title reuse inherit a retained destructive action (#2322/#2358).
+		if target.createdAt.IsZero() {
+			return nil
+		}
+		inst := m.store.GetInstanceByTitle(target.title)
+		if inst != nil && inst.CreatedAt.Equal(target.createdAt) {
+			return inst
+		}
+		return nil
 	}
 	for _, inst := range m.store.GetInstances() {
 		if inst.ID == target.id {
