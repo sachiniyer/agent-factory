@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -26,13 +27,7 @@ func readAcrossCaptureStop(t *testing.T, data []byte) captureReadResult {
 	if err != nil {
 		t.Fatalf("create output pipe: %v", err)
 	}
-	wakeR, wakeW, err := os.Pipe()
-	if err != nil {
-		_ = outputR.Close()
-		_ = outputW.Close()
-		t.Fatalf("create wake pipe: %v", err)
-	}
-	r := &captureReader{f: outputR, keepalive: outputW, wakeR: wakeR, wakeW: wakeW}
+	r := &captureReader{f: outputR, keepalive: outputW}
 	result := make(chan captureReadResult, 1)
 	go func() {
 		buf, readErr := io.ReadAll(r)
@@ -86,13 +81,15 @@ func TestCaptureReaderAbortWakesWithExternalWriterStillOpen(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create output pipe: %v", err)
 	}
-	t.Cleanup(func() { _ = outputW.Close() })
-	wakeR, wakeW, err := os.Pipe()
+	externalFD, err := syscall.Dup(int(outputW.Fd()))
 	if err != nil {
 		_ = outputR.Close()
-		t.Fatalf("create wake pipe: %v", err)
+		_ = outputW.Close()
+		t.Fatalf("duplicate external writer: %v", err)
 	}
-	r := &captureReader{f: outputR, wakeR: wakeR, wakeW: wakeW}
+	externalW := os.NewFile(uintptr(externalFD), "capture-external-writer")
+	t.Cleanup(func() { _ = externalW.Close() })
+	r := &captureReader{f: outputR, keepalive: outputW}
 	result := make(chan error, 1)
 	go func() {
 		buf := make([]byte, 1)
@@ -106,7 +103,7 @@ func TestCaptureReaderAbortWakesWithExternalWriterStillOpen(t *testing.T) {
 	select {
 	case err := <-result:
 		if !errors.Is(err, io.EOF) {
-			t.Fatalf("Read error = %v, want EOF from out-of-band abort", err)
+			t.Fatalf("Read error = %v, want EOF from failure-only abort wake", err)
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("capture reader stayed blocked with an external writer open")

@@ -1,7 +1,6 @@
 package session
 
 import (
-	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -12,7 +11,6 @@ import (
 	"syscall"
 
 	"github.com/sachiniyer/agent-factory/session/tmux"
-	"golang.org/x/sys/unix"
 )
 
 // tmuxClientlessChannel is the local runtime's clientlessChannel (#1592 Phase 2
@@ -37,16 +35,14 @@ type tmuxClientlessChannel struct {
 // pane bytes (including NULs and chunks larger than the broker buffer) are read
 // first, then EOF arrives after the real writer closes.
 //
-// A separate anonymous pipe is the failure-only escape hatch. Go cannot put a
-// FIFO into the darwin netpoller, and close(2) does not interrupt an in-flight
-// FIFO read, so Read uses poll(2) on both descriptors. If disabling pipe-pane
-// fails and the external writer may remain open forever, Close wakes the poll
-// out of band instead of placing an ambiguous sentinel in the raw PTY stream.
+// If disabling pipe-pane fails, its writer may remain open forever. That
+// already-aborted path writes one wake byte through the keeper before closing
+// it; Read sees the abort latch and discards the whole read, so the byte can
+// never be confused with successful raw PTY output. Successful teardown never
+// injects a control byte.
 type captureReader struct {
 	f         *os.File
 	keepalive *os.File
-	wakeR     *os.File
-	wakeW     *os.File
 	dir       string
 	abort     atomic.Bool
 	eof       atomic.Bool
@@ -63,55 +59,24 @@ func (r *captureReader) Read(p []byte) (int, error) {
 		return 0, nil
 	}
 
-	for {
-		if r.abort.Load() {
-			r.eof.Store(true)
-			r.finish()
-			return 0, io.EOF
-		}
-		pollFDs := []unix.PollFd{
-			{Fd: int32(r.f.Fd()), Events: unix.POLLIN},
-			{Fd: int32(r.wakeR.Fd()), Events: unix.POLLIN},
-		}
-		if _, err := unix.Poll(pollFDs, -1); err != nil {
-			if errors.Is(err, unix.EINTR) {
-				continue
-			}
-			r.finish()
-			return 0, fmt.Errorf("poll pty stream fifo: %w", err)
-		}
-
-		outputEvents := pollFDs[0].Revents
-		if outputEvents&(unix.POLLIN|unix.POLLHUP) != 0 {
-			n, err := r.f.Read(p)
-			if n > 0 {
-				return n, err
-			}
-			if errors.Is(err, syscall.EAGAIN) {
-				continue
-			}
-			if errors.Is(err, io.EOF) || outputEvents&unix.POLLHUP != 0 {
-				r.eof.Store(true)
-				r.finish()
-				return 0, io.EOF
-			}
-			if err != nil {
-				r.finish()
-				return 0, err
-			}
-		}
-		if outputEvents&(unix.POLLERR|unix.POLLNVAL) != 0 {
-			r.finish()
-			return 0, fmt.Errorf("poll pty stream fifo: events %#x", outputEvents)
-		}
-
-		wakeEvents := pollFDs[1].Revents
-		if wakeEvents&(unix.POLLIN|unix.POLLHUP|unix.POLLERR|unix.POLLNVAL) != 0 && r.abort.Load() {
-			r.eof.Store(true)
-			r.finish()
-			return 0, io.EOF
-		}
+	if r.abort.Load() {
+		r.eof.Store(true)
+		r.finish()
+		return 0, io.EOF
 	}
+	n, err := r.f.Read(p)
+	if r.abort.Load() {
+		r.eof.Store(true)
+		r.finish()
+		return 0, io.EOF
+	}
+	if err != nil {
+		if err == io.EOF {
+			r.eof.Store(true)
+		}
+		r.finish()
+	}
+	return n, err
 }
 
 func (r *captureReader) Close() error {
@@ -120,17 +85,18 @@ func (r *captureReader) Close() error {
 
 // stop closes the FIFO's private keeper. When tmux positively disabled its
 // writer, drain=true lets Read consume through the kernel EOF. Otherwise the
-// out-of-band wake prevents an unknown external writer from wedging teardown.
+// keeper's failure-only byte prevents an unknown external writer from wedging
+// teardown; Read discards it because abort is already latched.
 func (r *captureReader) stop(drain bool) error {
 	r.stopOnce.Do(func() {
-		if r.keepalive != nil {
-			r.err = r.keepalive.Close()
-		}
 		if !drain {
 			r.abort.Store(true)
-			if r.wakeW != nil {
-				_, _ = r.wakeW.Write([]byte{1})
+			if r.keepalive != nil {
+				_, _ = r.keepalive.Write([]byte{0})
 			}
+		}
+		if r.keepalive != nil {
+			r.err = r.keepalive.Close()
 		}
 	})
 	return r.err
@@ -143,12 +109,6 @@ func (r *captureReader) finish() {
 		}
 		if r.keepalive != nil {
 			_ = r.keepalive.Close()
-		}
-		if r.wakeR != nil {
-			_ = r.wakeR.Close()
-		}
-		if r.wakeW != nil {
-			_ = r.wakeW.Close()
 		}
 		if r.dir != "" {
 			_ = os.RemoveAll(r.dir)
@@ -183,33 +143,35 @@ func (c *tmuxClientlessChannel) StartCapture() (io.ReadCloser, error) {
 		_ = os.RemoveAll(dir)
 		return nil, fmt.Errorf("mkfifo pty stream: %w", err)
 	}
-	f, err := os.OpenFile(fifo, os.O_RDONLY|syscall.O_NONBLOCK, 0600)
+	// Open the read side nonblocking only long enough to establish the keeper;
+	// wrapping the descriptor after restoring blocking mode deliberately keeps
+	// FIFOs out of Go's kqueue/netpoll path on Darwin (where writer close does not
+	// produce a readiness event).
+	fd, err := syscall.Open(fifo, syscall.O_RDONLY|syscall.O_NONBLOCK|syscall.O_CLOEXEC, 0600)
 	if err != nil {
 		_ = os.RemoveAll(dir)
 		return nil, fmt.Errorf("open pty stream fifo: %w", err)
 	}
 	keepalive, err := os.OpenFile(fifo, os.O_WRONLY|syscall.O_NONBLOCK, 0600)
 	if err != nil {
-		_ = f.Close()
+		_ = syscall.Close(fd)
 		_ = os.RemoveAll(dir)
 		return nil, fmt.Errorf("keep pty stream fifo open: %w", err)
 	}
-	wakeR, wakeW, err := os.Pipe()
-	if err != nil {
+	if err := syscall.SetNonblock(fd, false); err != nil {
 		_ = keepalive.Close()
-		_ = f.Close()
+		_ = syscall.Close(fd)
 		_ = os.RemoveAll(dir)
-		return nil, fmt.Errorf("create pty stream wake pipe: %w", err)
+		return nil, fmt.Errorf("make pty stream fifo blocking: %w", err)
 	}
+	f := os.NewFile(uintptr(fd), fifo)
 	if err := c.ts.EnablePipePane(pipePaneCommand(fifo)); err != nil {
-		_ = wakeW.Close()
-		_ = wakeR.Close()
 		_ = keepalive.Close()
 		_ = f.Close()
 		_ = os.RemoveAll(dir)
 		return nil, err
 	}
-	rc := &captureReader{f: f, keepalive: keepalive, wakeR: wakeR, wakeW: wakeW, dir: dir}
+	rc := &captureReader{f: f, keepalive: keepalive, dir: dir}
 	c.dir, c.fifo, c.rc = dir, fifo, rc
 	return rc, nil
 }
