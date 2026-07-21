@@ -6,18 +6,8 @@ import "strings"
 // subset of literal scripts whose grammar is understood below. Script files,
 // dynamic scripts, unknown options, and unknown commands fail closed.
 func inspectSed(args []shellWord) string {
-	optionsDone := false
-	for _, arg := range args {
-		if !arg.resolved || optionsDone {
-			continue
-		}
-		if arg.literal == "--" {
-			optionsDone = true
-			continue
-		}
-		if arg.literal == "--sandbox" {
-			return ""
-		}
+	if hasEffectiveSedSandbox(args) {
+		return ""
 	}
 
 	scripts, ok := literalSedScripts(args)
@@ -30,6 +20,65 @@ func inspectSed(args []shellWord) string {
 		}
 	}
 	return ""
+}
+
+func hasEffectiveSedSandbox(args []shellWord) bool {
+	for i := 0; i < len(args); i++ {
+		if !args[i].resolved {
+			return false
+		}
+		arg := args[i].literal
+		switch {
+		case arg == "--":
+			return false
+		case arg == "--sandbox":
+			return true
+		case arg == "-e" || arg == "-f" || arg == "-l" ||
+			arg == "--expression" || arg == "--file" || arg == "--line-length":
+			if i+1 >= len(args) || !args[i+1].resolved {
+				return false
+			}
+			i++
+		case strings.HasPrefix(arg, "--expression=") || strings.HasPrefix(arg, "--file=") ||
+			strings.HasPrefix(arg, "--line-length="):
+		case arg == "--debug" || arg == "--follow-symlinks" || arg == "--null-data" ||
+			arg == "--posix" || arg == "--quiet" || arg == "--regexp-extended" ||
+			arg == "--separate" || arg == "--silent" || arg == "--unbuffered":
+		case strings.HasPrefix(arg, "--"):
+			return false
+		case strings.HasPrefix(arg, "-") && arg != "-":
+			consumesNext, ok := sedShortOptionConsumesNext(arg[1:])
+			if !ok {
+				return false
+			}
+			if consumesNext {
+				if i+1 >= len(args) || !args[i+1].resolved {
+					return false
+				}
+				i++
+			}
+		default:
+			// Requiring --sandbox in the literal option prefix avoids relying
+			// on GNU option permutation or inherited POSIXLY_CORRECT state.
+			return false
+		}
+	}
+	return false
+}
+
+func sedShortOptionConsumesNext(flags string) (bool, bool) {
+	for i := 0; i < len(flags); i++ {
+		switch flags[i] {
+		case 'E', 'n', 'r', 's', 'u', 'z':
+		case 'e', 'f', 'l':
+			return i+1 == len(flags), true
+		case 'i':
+			return false, true
+		default:
+			return false, false
+		}
+	}
+	return false, true
 }
 
 func literalSedScripts(args []shellWord) ([]string, bool) {

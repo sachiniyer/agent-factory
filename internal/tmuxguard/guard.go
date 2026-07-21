@@ -1,5 +1,8 @@
-// Package tmuxguard implements the agent hook policy that prevents an
-// af-managed agent from tearing down the host's shared tmux server.
+// Package tmuxguard implements a best-effort safety interlock against an agent
+// accidentally tearing down the host's shared tmux server. It is not a
+// security boundary: permitted developer tools can execute programs through
+// files, configuration, plugins, and other surfaces this package cannot model.
+// Host containment tracked in #2194 must provide that boundary.
 package tmuxguard
 
 import (
@@ -16,7 +19,7 @@ const (
 
 	broadTmuxReason    = "Agent Factory blocked a host-wide tmux kill-server. Target an isolated server explicitly with 'tmux -L <socket> kill-server' or 'tmux -S <path> kill-server'."
 	patternKillReason  = "Agent Factory blocked a pattern-based process kill because it cannot prove the shared tmux server will be spared. Resolve the one intended PID and use 'kill -- <pid>'; for tmux teardown, use 'tmux -L <socket> kill-server' or 'tmux -S <path> kill-server'."
-	unknownShellReason = "Agent Factory could not prove this command stays outside the host command-dispatch paths, so it was blocked. Rewrite it as supported literal simple commands: keep executables, wrapper options, subcommands, and command-bearing arguments literal; put dynamic data after '--' where the program supports it. Remove assignment prefixes from command-dispatching programs, run inner commands directly instead of through eval or opaque builders, and use a dedicated non-shell tool for an unmodeled program. Move inline interpreter input to a reviewed literal script, add '--sandbox' to GNU sed, and invoke Make with bare literal targets. Git commands must use a literal built-in subcommand without -c/--config-env; Docker inspection may use commands such as 'docker ps' or 'docker inspect', but container workloads need an isolated runner. Use af for session orchestration. For tmux teardown, use 'tmux -L <socket> kill-server' or 'tmux -S <path> kill-server' directly."
+	unknownShellReason = "Agent Factory's best-effort tmux guard did not recognize this command as an approved shape, so it was blocked. This hook reduces accidental host-wide teardown; it is not containment and cannot prove an arbitrary developer command safe. Rewrite it as supported literal simple commands: keep executables, wrapper options, subcommands, and command-bearing arguments literal; put dynamic data after '--' where the program supports it. Remove assignment prefixes from command-dispatching programs, run inner commands directly instead of through eval or opaque builders, and use a dedicated non-shell tool for an unmodeled program. Move inline interpreter input to a reviewed literal script, add '--sandbox' to GNU sed, and invoke Make with bare literal targets. Git commands must use a literal built-in subcommand without -c/--config-env; Docker inspection may use commands such as 'docker ps' or 'docker inspect', but container workloads need an isolated runner. Use af for session orchestration. For tmux teardown, use 'tmux -L <socket> kill-server' or 'tmux -S <path> kill-server' directly."
 	opaqueInputReason  = "Agent Factory blocked an unmodeled here-document or stdin consumer because it cannot inspect the supplied code or data. For data, write it to a literal file and pass that literal path (Git commit messages may use 'git commit -F -'); for Python code, create and review a literal script file, then run Python with that literal path. Put shell code directly in this Bash request as literal simple commands instead of feeding a shell or script file. For tmux teardown, use 'tmux -L <socket> kill-server' or 'tmux -S <path> kill-server'."
 	findReason         = "Agent Factory blocked a find command whose operands could become command-building syntax. Rewrite a dynamic root as 'cd \"$root\" && find . <literal predicates>', and replace -exec/-execdir/-ok/-okdir with a separate literal command over the results. For tmux teardown, use 'tmux -L <socket> kill-server' or 'tmux -S <path> kill-server'."
 )
@@ -82,11 +85,11 @@ func writeDenial(w io.Writer, reason string) error {
 }
 
 // DenialReason returns an actionable reason when command contains a broad
-// tmux teardown or uses a shell/program dispatch path the guard cannot prove
-// safe. An empty result means the program was classified and every modeled
-// command-bearing position was resolved; dynamic expansions appeared only in
-// audited data positions. The parser and program policy are agent-neutral so
-// #2184 can reuse one policy everywhere.
+// tmux teardown or a shell/program dispatch path covered by this best-effort
+// model. An empty result means no modeled hazard was found; it is not proof
+// that an arbitrary program, file, plugin, or inherited configuration is safe.
+// The parser and program policy are agent-neutral so #2184 can reuse one speed
+// bump everywhere, while containment in #2194 supplies the security boundary.
 func DenialReason(command string) string {
 	return denialReason(command, 0)
 }
@@ -99,15 +102,31 @@ func denialReason(command string, depth int) string {
 	if err != nil {
 		return unknownShellReason
 	}
-	for _, command := range commands {
+	directoryChanged := false
+	for _, parsed := range commands {
+		command := parsed
+		command.directoryChanged = command.directoryChanged || directoryChanged
 		if reason := inspectCommand(command, depth); reason != "" {
 			return reason
 		}
+		directoryChanged = directoryChanged || changesShellDirectory(parsed)
 	}
 	if shellStateReachesCommand(commands) {
 		return unknownShellReason
 	}
 	return ""
+}
+
+func changesShellDirectory(command shellCommand) bool {
+	words := command.words
+	for len(words) > 0 && words[0].resolved && words[0].literal == "command" {
+		target, noCommand, err := commandTarget(words[1:])
+		if err != nil || noCommand {
+			return false
+		}
+		words = target
+	}
+	return len(words) > 0 && words[0].resolved && words[0].literal == "cd"
 }
 
 func shellStateReachesCommand(commands []shellCommand) bool {

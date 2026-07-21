@@ -104,6 +104,7 @@ func TestDenialReason(t *testing.T) {
 		{name: "git config env option", command: `git --config-env=alias.x=VALUE x`, wantReason: unknownShellReason},
 		{name: "git unknown subcommand can be alias", command: `git x`, wantReason: unknownShellReason},
 		{name: "git external diff option", command: `git diff --ext-diff`, wantReason: unknownShellReason},
+		{name: "git grep pager dispatcher", command: `git grep --open-files-in-pager='tmux kill-server' pattern`, wantReason: unknownShellReason},
 		{name: "git clone upload pack", command: `git clone -u 'tmux kill-server' source target`, wantReason: unknownShellReason},
 		{name: "git remote transport dispatcher", command: `git clone 'ext::tmux kill-server' target`, wantReason: unknownShellReason},
 		{name: "git push transport dispatcher", command: `git push 'ext::tmux kill-server' main`, wantReason: unknownShellReason},
@@ -126,6 +127,7 @@ func TestDenialReason(t *testing.T) {
 		{name: "make eval dispatcher", command: `make --eval='all:; tmux kill-server' all`, wantReason: unknownShellReason},
 		{name: "make command-line variable", command: `make SHELL='tmux kill-server' all`, wantReason: unknownShellReason},
 		{name: "go exec wrapper", command: `go test -exec 'tmux kill-server' ./...`, wantReason: unknownShellReason},
+		{name: "go vet alternate tool", command: `go vet -vettool=/tmp/evil ./...`, wantReason: unknownShellReason},
 		{name: "go tool executor", command: `go tool tmux kill-server`, wantReason: unknownShellReason},
 		{name: "go generate executor", command: `go generate ./...`, wantReason: unknownShellReason},
 		{name: "GitHub extension dispatcher", command: `gh future-extension safe`, wantReason: unknownShellReason},
@@ -150,6 +152,7 @@ func TestDenialReason(t *testing.T) {
 		{name: "sandboxed sed command language", command: `sed --sandbox 's/a/b/' file`},
 		{name: "sandboxed sed exec rejected at runtime", command: `sed --sandbox 'e tmux kill-server' file`},
 		{name: "sed sandbox after option terminator is data", command: `sed 'e tmux kill-server' -- --sandbox`, wantReason: unknownShellReason},
+		{name: "sed dynamic terminator before sandbox", command: `sed "$(printf -- --)" 'e tmux kill-server' --sandbox /etc/passwd`, wantReason: unknownShellReason},
 		{name: "opaque unknown program", command: `future-tool safe`, wantReason: unknownShellReason},
 		{name: "relative executable cannot spoof data program", command: `./echo safe`, wantReason: unknownShellReason},
 		{name: "shell assignment", command: `BASH_ENV=/tmp/rc bash -c 'printf safe'`, wantReason: unknownShellReason},
@@ -165,6 +168,9 @@ func TestDenialReason(t *testing.T) {
 		{name: "env chdir operand named tmux", command: `env -C tmux echo safe`},
 		{name: "env target dynamic data", command: `env -C /tmp echo "$HOME"`},
 		{name: "env chdir reaches dispatcher", command: `env -C /tmp git status`, wantReason: unknownShellReason},
+		{name: "cd reaches reviewed makefile", command: `cd /tmp; make test`, wantReason: unknownShellReason},
+		{name: "command cd reaches reviewed makefile", command: `command cd /tmp; make test`, wantReason: unknownShellReason},
+		{name: "cd before data command", command: `cd /tmp; printf safe`},
 		{name: "env dynamic option operand", command: `env -C "$dir" echo safe`, wantReason: unknownShellReason},
 		{name: "env end options and assignment", command: `env -- FOO=bar echo "$HOME"`, wantReason: unknownShellReason},
 		{name: "env pattern kill target", command: `env FOO=bar pkill worker`, wantReason: patternKillReason},
@@ -266,6 +272,15 @@ func TestDenialReasonsAreActionable(t *testing.T) {
 			if !strings.Contains(reason, hint) {
 				t.Errorf("denial for %q = %q, missing actionable hint %q", tt.command, reason, hint)
 			}
+		}
+	}
+}
+
+func TestUnknownDenialStatesBoundary(t *testing.T) {
+	reason := DenialReason(`"$command" safe`)
+	for _, statement := range []string{"best-effort", "not containment", "cannot prove"} {
+		if !strings.Contains(reason, statement) {
+			t.Errorf("unknown denial = %q, missing boundary statement %q", reason, statement)
 		}
 	}
 }

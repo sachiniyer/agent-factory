@@ -6,10 +6,10 @@ import (
 )
 
 // commandDispatch is a property of the selected program, not of the shell
-// spelling that selected it. A data-only program never turns its arguments
-// into another host command. An audited dispatcher does, but only in positions
-// understood by this package. Trusted dispatchers are explicit Agent Factory
-// boundaries. Everything else is opaque and therefore denied.
+// spelling that selected it. It supports a best-effort policy, not a complete
+// program-semantics proof: file contents, inherited configuration, plugins,
+// and future executable behavior remain outside this model. Unknown programs
+// deny to make accidental bypasses harder; host containment remains necessary.
 type commandDispatch uint8
 
 const (

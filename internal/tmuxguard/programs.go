@@ -170,6 +170,10 @@ func gitArgsDispatch(command string, args []string) bool {
 			"--textconv", "--upload-pack":
 			return true
 		}
+		if command == "grep" && (option == "--open-files-in-pager" || option == "-O" ||
+			(strings.HasPrefix(arg, "-O") && len(arg) > 2)) {
+			return true
+		}
 		if command == "clone" && (option == "-c" || option == "--config" || option == "-u" ||
 			(strings.HasPrefix(arg, "-c") && len(arg) > 2) ||
 			(strings.HasPrefix(arg, "-u") && len(arg) > 2)) {
@@ -336,7 +340,7 @@ func inspectGo(args []shellWord) string {
 			option = before
 		}
 		switch option {
-		case "-exec", "-toolexec":
+		case "-exec", "-toolexec", "-vettool":
 			return unknownShellReason
 		}
 	}
