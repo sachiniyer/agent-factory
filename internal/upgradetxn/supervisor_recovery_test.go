@@ -40,17 +40,17 @@ func TestSupervisorLossBeforeActivationHandshakeAbortsWithoutStoppingPrevious(t 
 	require.NoError(t, err)
 	operations := runtime.operations()
 	operations.AwaitActivation = func(context.Context, Journal) error {
-		runtime.calls = append(runtime.calls, "await-activation")
+		t.Fatal("a takeover must not inherit or re-evaluate the dead actor's activation handshake")
 		return ErrActivationNotAuthorized
 	}
 	err = (Supervisor{Operations: operations}).Run(context.Background(), resumed, takeover)
 	require.ErrorIs(t, err, ErrUpgradeAborted)
-	require.ErrorIs(t, err, ErrActivationNotAuthorized)
+	require.ErrorIs(t, err, errSupervisorInterruptedBeforeShutdown)
 	require.NoError(t, takeover.Release())
 	require.Equal(t, "previous", runtime.running)
 	require.False(t, runtime.approved)
 	require.True(t, runtime.jobDisabled)
-	require.Equal(t, []string{"await-activation", "disable-recovery-job"}, runtime.calls)
+	require.Equal(t, []string{"disable-recovery-job"}, runtime.calls)
 
 	_, err = Load(home)
 	require.ErrorIs(t, err, ErrNoActiveTransaction)
@@ -102,6 +102,40 @@ func TestConfirmedCandidateStopAllowsRollbackDespiteTrailingDiagnostic(t *testin
 	installed, err := os.ReadFile(executable)
 	require.NoError(t, err)
 	require.Equal(t, "known-running-binary", string(installed))
+}
+
+func TestTakeoverBeforeCommitRollsBackWithoutRegradingCandidate(t *testing.T) {
+	txn, home, executable := prepareFixture(t)
+	lease, err := txn.tryAcquireRecoveryAs(txn.Journal().PreviousBinaryPath)
+	require.NoError(t, err)
+	require.NoError(t, lease.Advance(PhaseSupervisorReady))
+	require.NoError(t, lease.Advance(PhaseDaemonStopped))
+	require.NoError(t, lease.InstallCandidate())
+	require.NoError(t, lease.Advance(PhaseCandidateStarting))
+	require.NoError(t, lease.Advance(PhaseCandidateValidating))
+	require.NoError(t, os.WriteFile(filepath.Join(home, "state.json"), []byte("candidate-state"), 0o600))
+	require.NoError(t, lease.Release())
+
+	resumed, err := Load(home)
+	require.NoError(t, err)
+	takeover, err := resumed.tryAcquireRecoveryAs(resumed.Journal().PreviousBinaryPath)
+	require.NoError(t, err)
+	runtime := &fakeSupervisorRuntime{running: "candidate", candidateValid: true}
+	err = (Supervisor{Operations: runtime.operations()}).Run(context.Background(), resumed, takeover)
+	require.ErrorIs(t, err, ErrUpgradeRolledBack)
+	require.NoError(t, takeover.Release())
+	require.False(t, runtime.approved, "a candidate must not grade itself after supervisor loss")
+	require.Equal(t, "previous", runtime.running)
+	require.NotContains(t, runtime.calls, "validate-candidate")
+
+	_, err = Load(home)
+	require.ErrorIs(t, err, ErrNoActiveTransaction)
+	installed, err := os.ReadFile(executable)
+	require.NoError(t, err)
+	require.Equal(t, "known-running-binary", string(installed))
+	state, err := os.ReadFile(filepath.Join(home, "state.json"))
+	require.NoError(t, err)
+	require.Equal(t, "old-state", string(state))
 }
 
 func TestSupervisorLossAtEveryFileRollbackCheckpointIsTakenOver(t *testing.T) {

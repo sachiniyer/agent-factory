@@ -173,16 +173,53 @@ func TestSupervisorAbortsWithoutRestoringOverAConfirmedLivePreviousDaemon(t *tes
 }
 
 func TestSupervisorLossAtEveryActivationBoundaryIsTakenOver(t *testing.T) {
-	boundaries := []Phase{
-		PhaseSupervisorReady,
-		PhaseDaemonStopped,
-		PhaseCandidateInstalled,
-		PhaseCandidateStarting,
-		PhaseCandidateValidating,
-		PhaseCommitted,
+	tests := []struct {
+		boundary     Phase
+		wantErr      error
+		wantRunning  string
+		wantBinary   string
+		wantApproved bool
+	}{
+		{
+			boundary:    PhaseSupervisorReady,
+			wantErr:     ErrUpgradeAborted,
+			wantRunning: "previous",
+			wantBinary:  "known-running-binary",
+		},
+		{
+			boundary:    PhaseDaemonStopped,
+			wantErr:     ErrUpgradeRolledBack,
+			wantRunning: "previous",
+			wantBinary:  "known-running-binary",
+		},
+		{
+			boundary:    PhaseCandidateInstalled,
+			wantErr:     ErrUpgradeRolledBack,
+			wantRunning: "previous",
+			wantBinary:  "known-running-binary",
+		},
+		{
+			boundary:    PhaseCandidateStarting,
+			wantErr:     ErrUpgradeRolledBack,
+			wantRunning: "previous",
+			wantBinary:  "known-running-binary",
+		},
+		{
+			boundary:    PhaseCandidateValidating,
+			wantErr:     ErrUpgradeRolledBack,
+			wantRunning: "previous",
+			wantBinary:  "known-running-binary",
+		},
+		{
+			boundary:     PhaseCommitted,
+			wantRunning:  "candidate",
+			wantBinary:   "candidate-binary",
+			wantApproved: true,
+		},
 	}
-	for _, boundary := range boundaries {
-		t.Run(string(boundary), func(t *testing.T) {
+	for _, test := range tests {
+		test := test
+		t.Run(string(test.boundary), func(t *testing.T) {
 			txn, home, executable := prepareFixture(t)
 			lease, err := txn.tryAcquireRecoveryAs(txn.Journal().PreviousBinaryPath)
 			require.NoError(t, err)
@@ -191,7 +228,7 @@ func TestSupervisorLossAtEveryActivationBoundaryIsTakenOver(t *testing.T) {
 			supervisor := Supervisor{
 				Operations: runtime.operations(),
 				AfterBoundary: func(got Phase) error {
-					if !injected && got == boundary {
+					if !injected && got == test.boundary {
 						injected = true
 						return errors.New("simulated actor loss")
 					}
@@ -202,24 +239,28 @@ func TestSupervisorLossAtEveryActivationBoundaryIsTakenOver(t *testing.T) {
 			err = supervisor.Run(context.Background(), txn, lease)
 			require.ErrorIs(t, err, ErrSupervisorInterrupted)
 			require.True(t, injected, "fault injection must actually execute")
-			require.Equal(t, boundary, txn.Journal().Phase)
+			require.Equal(t, test.boundary, txn.Journal().Phase)
 			require.NoError(t, lease.Release())
 
 			resumed, err := Load(home)
 			require.NoError(t, err)
 			takeover, err := resumed.tryAcquireRecoveryAs(resumed.Journal().PreviousBinaryPath)
 			require.NoError(t, err)
-			require.NoError(t,
-				(Supervisor{Operations: runtime.operations()}).Run(context.Background(), resumed, takeover))
+			err = (Supervisor{Operations: runtime.operations()}).Run(context.Background(), resumed, takeover)
+			if test.wantErr == nil {
+				require.NoError(t, err)
+			} else {
+				require.ErrorIs(t, err, test.wantErr)
+			}
 			require.NoError(t, takeover.Release())
-			require.True(t, runtime.approved)
-			require.Equal(t, "candidate", runtime.running)
+			require.Equal(t, test.wantApproved, runtime.approved)
+			require.Equal(t, test.wantRunning, runtime.running)
 
 			_, err = Load(home)
 			require.ErrorIs(t, err, ErrNoActiveTransaction)
 			installed, err := os.ReadFile(executable)
 			require.NoError(t, err)
-			require.Equal(t, "candidate-binary", string(installed))
+			require.Equal(t, test.wantBinary, string(installed))
 		})
 	}
 }
