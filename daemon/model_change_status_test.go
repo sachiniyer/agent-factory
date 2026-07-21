@@ -18,6 +18,24 @@ func (b *modelChangeBackend) AgentModelChange(*session.Instance) *session.AgentM
 	return b.change
 }
 
+type runtimeSwapModelChangeBackend struct {
+	*session.FakeBackend
+	change *session.AgentModelChange
+	onRead func()
+}
+
+func (b *runtimeSwapModelChangeBackend) HasUpdated(*session.Instance) (bool, bool, string) {
+	return true, false, "working"
+}
+
+func (b *runtimeSwapModelChangeBackend) AgentModelChange(*session.Instance) *session.AgentModelChange {
+	change := b.change
+	if b.onRead != nil {
+		b.onRead()
+	}
+	return change
+}
+
 func TestRefreshStatusPublishesProjectionOnlyModelChange(t *testing.T) {
 	manager, repoID, repoPath := newStatusTestManager(t)
 	backend := &modelChangeBackend{
@@ -47,11 +65,30 @@ func TestRuntimeReplacementClearsPriorModelChange(t *testing.T) {
 	inst := registerStarted(
 		t, manager, repoID, repoPath, "model-change-replaced", session.NewFakeBackend(), true, session.Ready,
 	)
-	require.True(t, inst.SetAgentModelChange(
+	require.True(t, inst.SetAgentModelChangeAtEpoch(
 		session.NewAgentModelChange("gpt-5.6-sol max", "gpt-5.6-luna low"),
+		inst.StateEpoch(),
 	))
 
 	manager.noteRuntimeReplaced(repoID, inst)
 
 	require.Nil(t, inst.AgentModelChange(), "a replacement runtime must not inherit its predecessor's warning")
+}
+
+func TestRefreshStatusDropsModelChangeFromReplacedRuntime(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	backend := &runtimeSwapModelChangeBackend{
+		FakeBackend: session.NewFakeBackend(),
+		change:      session.NewAgentModelChange("gpt-5.6-sol max", "gpt-5.6-luna low"),
+	}
+	inst := registerStarted(t, manager, repoID, repoPath, "model-change-race", backend, true, session.Ready)
+	backend.onRead = func() {
+		require.NoError(t, inst.Transition(session.BeginHandoff()))
+		manager.noteRuntimeReplaced(repoID, inst)
+	}
+
+	manager.refreshInstanceStatus(repoID, inst)
+
+	require.Nil(t, inst.AgentModelChange(),
+		"an observation from the outgoing runtime must not cross the handoff boundary")
 }

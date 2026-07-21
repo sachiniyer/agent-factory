@@ -206,7 +206,7 @@ func (m *Manager) noteRuntimeReplaced(repoID string, instance *session.Instance)
 	// recovery/re-provision/handoff already crosses this chokepoint, so retire both
 	// predecessor-owned facts together rather than making each caller remember a
 	// second reset site.
-	instance.SetAgentModelChange(nil)
+	instance.ClearAgentModelChange()
 	m.clearRemoteLoss(remoteLossKey(repoID, instance))
 }
 

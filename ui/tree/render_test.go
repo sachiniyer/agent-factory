@@ -315,7 +315,7 @@ func TestInstanceRendererModelChangeMarker(t *testing.T) {
 		Program: "codex",
 	})
 	require.NoError(t, err)
-	require.True(t, inst.SetAgentModelChange(session.NewAgentModelChange(
+	require.True(t, inst.ReconcileAgentModelChange(session.NewAgentModelChange(
 		"gpt-5.6-sol max",
 		"gpt-5.6-luna low",
 	)))

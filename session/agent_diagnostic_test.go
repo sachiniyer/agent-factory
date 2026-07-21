@@ -11,7 +11,7 @@ func TestAgentModelChangeProjectionIsTypedAndStorageSafe(t *testing.T) {
 	inst := &Instance{ID: "session-id", liveness: LiveReady}
 	change := NewAgentModelChange("gpt-5.6-sol max", "gpt-5.6-luna low")
 	require.NotNil(t, change)
-	require.True(t, inst.SetAgentModelChange(change))
+	require.True(t, inst.SetAgentModelChangeAtEpoch(change, inst.StateEpoch()))
 
 	// The live API/CLI projection carries the exact explanation.
 	projected := inst.ToInstanceData()
@@ -29,14 +29,16 @@ func TestAgentModelChangeProjectionIsTypedAndStorageSafe(t *testing.T) {
 
 	// Constructors/setters reject values that do not describe a transition.
 	require.Nil(t, NewAgentModelChange("same", "same"))
-	require.True(t, inst.SetAgentModelChange(&AgentModelChange{Before: "", After: "unknown"}))
+	require.True(t, inst.SetAgentModelChangeAtEpoch(
+		&AgentModelChange{Before: "", After: "unknown"}, inst.StateEpoch(),
+	))
 	require.Nil(t, inst.AgentModelChange())
 }
 
 func TestAgentModelChangeDoesNotCrossArchiveRestoreRuntimeBoundary(t *testing.T) {
 	change := NewAgentModelChange("gpt-5.6-sol max", "gpt-5.6-luna low")
 	inst := &Instance{liveness: LiveRunning, started: true}
-	require.True(t, inst.SetAgentModelChange(change))
+	require.True(t, inst.SetAgentModelChangeAtEpoch(change, inst.StateEpoch()))
 
 	require.NoError(t, inst.Transition(BeginArchive()))
 	require.NoError(t, inst.Transition(CommitArchive()))
@@ -46,7 +48,8 @@ func TestAgentModelChangeDoesNotCrossArchiveRestoreRuntimeBoundary(t *testing.T)
 	// Also reject a stale projection injected while the row is archived. Restore
 	// creates a new runtime under the same Instance identity, so its first snapshot
 	// must not inherit a warning observed from the retired process.
-	require.False(t, inst.SetAgentModelChange(change), "an archived row must reject runtime diagnostics")
+	require.False(t, inst.SetAgentModelChangeAtEpoch(change, inst.StateEpoch()),
+		"an archived row must reject runtime diagnostics")
 	require.Nil(t, inst.AgentModelChange())
 
 	// Simulate stale in-memory state from an older process/version so BeginRestore

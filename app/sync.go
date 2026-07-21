@@ -649,7 +649,7 @@ func (m *home) updateInstanceFromSnapshot(inst *session.Instance, d session.Inst
 	// Mirror the daemon's live model diagnostic on its own projection axis. It
 	// can appear or clear while liveness stays Ready/Running, so folding it into
 	// the status compare above would leave the TUI stale until an unrelated event.
-	if inst.SetAgentModelChange(d.ModelChange) {
+	if inst.ReconcileAgentModelChange(d.ModelChange) {
 		changed = true
 	}
 	// Backends without user-managed tabs (the off-box docker/ssh/hook runtimes)

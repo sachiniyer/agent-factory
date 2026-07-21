@@ -51,12 +51,40 @@ func (i *Instance) AgentModelChange() *AgentModelChange {
 	return cloneAgentModelChange(i.agentModelChange)
 }
 
-// SetAgentModelChange replaces the live projection diagnostic and reports
-// whether clients need a refreshed snapshot. Invalid transitions normalize to
-// nil so malformed wire data fails closed instead of rendering a false alarm.
-func (i *Instance) SetAgentModelChange(change *AgentModelChange) bool {
+// SetAgentModelChangeAtEpoch applies a diagnostic observed from the running
+// agent only while the lifecycle epoch still matches the one captured before
+// that observation. Every runtime replacement crosses a lifecycle transition,
+// so an outgoing process cannot write its warning back after handoff/recovery
+// retired it. Invalid transitions normalize to nil so malformed wire data fails
+// closed instead of rendering a false alarm.
+func (i *Instance) SetAgentModelChangeAtEpoch(change *AgentModelChange, observedEpoch uint64) bool {
 	i.mu.Lock()
 	defer i.mu.Unlock()
+	if i.stateEpoch != observedEpoch {
+		return false
+	}
+	return i.setAgentModelChangeLocked(change)
+}
+
+// ReconcileAgentModelChange applies the daemon's already-correlated projection
+// to a client-side Instance. It is intentionally separate from the epoch-bound
+// observation API above: a client's local lifecycle epoch is unrelated to the
+// daemon epoch that validated the observation.
+func (i *Instance) ReconcileAgentModelChange(change *AgentModelChange) bool {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	return i.setAgentModelChangeLocked(change)
+}
+
+// ClearAgentModelChange retires the diagnostic at an authoritative runtime
+// boundary. Positive observations must use SetAgentModelChangeAtEpoch instead.
+func (i *Instance) ClearAgentModelChange() bool {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	return i.setAgentModelChangeLocked(nil)
+}
+
+func (i *Instance) setAgentModelChangeLocked(change *AgentModelChange) bool {
 	// Archived rows have no running agent whose observation could be current.
 	// Normalize under the same lock as the liveness check so an in-flight poll
 	// cannot reinsert the retired runtime's warning after archive commits.
