@@ -98,13 +98,14 @@ const TmuxPrefix = "af_"
 // does not use this sentinel.
 var ErrSessionGone = errors.New("tmux session no longer exists")
 
-// ErrSessionNotStarted is positive evidence that a failed Start left no tmux
-// session running under the fresh launch identity. The process may have failed
-// before it began, its answered launch command may have left the name absent, or
-// a readiness-timeout cleanup may have confirmed the name gone. LocalBackend is
-// allowed to remove a newly-created worktree only when this marker is present;
-// every other Start error is conservatively treated as a session that may be
-// running in that workspace.
+// ErrSessionNotStarted is positive evidence that a failed Start left no pane
+// process able to write into the fresh worktree. The launch may have failed
+// before its process began, or bounded readiness-timeout cleanup may have both
+// removed the session and confirmed its pane exited. An answered launch failure
+// is not enough: later name absence cannot prove that a pane never ran or finished
+// flushing. LocalBackend may remove a newly-created worktree only when this marker
+// is present; every other Start error is conservatively treated as a session that
+// may still be using that workspace.
 //
 // A readiness timeout for a legacy spelling still does not prove tmux failed to
 // create one: tmux may have rewritten that spelling (#2207). Only names admitted

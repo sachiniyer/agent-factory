@@ -69,11 +69,11 @@ func (f answeredFailurePtyFactory) StartTracked(*exec.Cmd) (*os.File, <-chan err
 
 func (answeredFailurePtyFactory) Close() {}
 
-// TestStartAnsweredCommandFailureConfirmsAbsence covers a new-session (or its
-// systemd-run wrapper) that exits non-zero and a follow-up exact probe that
-// answers that no session exists. The launch process did begin, but the runtime
-// outcome is known absent, so callers may remove the just-created worktree.
-func TestStartAnsweredCommandFailureConfirmsAbsence(t *testing.T) {
+// TestStartAnsweredCommandFailureDoesNotClaimPreSpawn covers a new-session (or
+// its systemd-run wrapper) that exits non-zero while exact probes answer that no
+// session exists. The launch process began, so later name absence is not proof
+// that a pane never ran or finished flushing into the worktree.
+func TestStartAnsweredCommandFailureDoesNotClaimPreSpawn(t *testing.T) {
 	forceNewSessionEnvMarkers(t, false)
 	cmdExec := cmd_test.MockCmdExec{
 		RunFunc: func(*exec.Cmd) error { return errors.New("session not found") },
@@ -91,7 +91,7 @@ func TestStartAnsweredCommandFailureConfirmsAbsence(t *testing.T) {
 	if err == nil {
 		t.Fatal("Start succeeded after its launch command exited non-zero")
 	}
-	if !errors.Is(err, ErrSessionNotStarted) {
-		t.Fatalf("an answered follow-up probe confirmed the session absent, but Start left the outcome unknown: %v", err)
+	if errors.Is(err, ErrSessionNotStarted) {
+		t.Fatalf("a post-spawn failure was misclassified as proof the process never began: %v", err)
 	}
 }

@@ -92,20 +92,10 @@ func (t *TmuxSession) Start(workDir string) error {
 					launchErr = fmt.Errorf("error starting tmux session: tmux new-session for %q failed: %w", t.sanitizedName, commandErr)
 				}
 
-				// The launch process began, so its exit status alone is not proof that
-				// no runtime remains. Ask once more AFTER receiving that status. For a
-				// fresh positive-policy name, an answered "absent" is conclusive and
-				// authorizes LocalBackend to remove the just-created worktree. A live,
-				// unanswered, or legacy-rewritten name remains conservative.
-				if hasStableTmuxSpelling(t.sanitizedName) {
-					exists, known := t.ProbeSession()
-					switch {
-					case known && !exists:
-						return fmt.Errorf("%w: %w", launchErr, ErrSessionNotStarted)
-					case !known:
-						return fmt.Errorf("%w: follow-up has-session probe did not answer: %w", launchErr, ErrTmuxTimeout)
-					}
-				}
+				// The launch process began. Its exit status, even paired with later
+				// name absence, cannot prove a pane never ran and is not still flushing
+				// after tmux removed its session. Keep every answered post-spawn failure
+				// outside ErrSessionNotStarted so LocalBackend preserves the worktree.
 				return launchErr
 			}
 		case <-timeout:

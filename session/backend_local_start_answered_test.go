@@ -36,11 +36,11 @@ func (f answeredLaunchPtyFactory) StartTracked(*exec.Cmd) (*os.File, <-chan erro
 
 func (answeredLaunchPtyFactory) Close() {}
 
-// TestLocalBackendAnsweredStartFailureCleansFreshWorktree is the user-visible
-// half of the answered-start classification. Once the post-exit probe confirms
-// no runtime remains, Launch removes the worktree instead of returning
-// ErrPaneMayBeLive and forcing the daemon to retain an inert uncertain record.
-func TestLocalBackendAnsweredStartFailureCleansFreshWorktree(t *testing.T) {
+// TestLocalBackendAnsweredStartFailurePreservesFreshWorktree is the user-visible
+// half of the pre-spawn-only cleanup invariant. A process that started and then
+// failed may have launched a pane which is still flushing even after the tmux
+// name disappears, so Launch must retain the worktree for explicit cleanup.
+func TestLocalBackendAnsweredStartFailurePreservesFreshWorktree(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 	repoRoot := initInPlaceRepo(t, "main")
 	gw, _, err := git.NewGitWorktree(repoRoot, "answered-start")
@@ -70,9 +70,9 @@ func TestLocalBackendAnsweredStartFailureCleansFreshWorktree(t *testing.T) {
 
 	err = (&LocalBackend{}).Launch(inst, true)
 	require.Error(t, err)
-	require.ErrorIs(t, err, tmux.ErrSessionNotStarted)
-	require.NotErrorIs(t, err, ErrPaneMayBeLive)
+	require.NotErrorIs(t, err, tmux.ErrSessionNotStarted)
+	require.ErrorIs(t, err, ErrPaneMayBeLive)
 	_, statErr := os.Stat(worktreePath)
-	require.ErrorIs(t, statErr, os.ErrNotExist,
-		"a confirmed-absent startup left its fresh worktree behind")
+	require.NoError(t, statErr,
+		"a post-spawn failure deleted a worktree whose pane may still be flushing")
 }
