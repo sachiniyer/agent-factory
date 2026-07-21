@@ -51,46 +51,48 @@ func jsonWrapError(cmd *cobra.Command, jsonMode bool, err error) error {
 // there is no bare-vs-envelope legacy to preserve here.
 var configJSONFlag bool
 
-// configEntry is one global config key and its effective value (defaults
-// applied). Value is heterogeneous — scalars for simple keys, maps for
-// program_overrides/root_agents/limit_patterns/keys.
+var (
+	configGetExplainFlag  bool
+	configGetProjectFlag  string
+	configListExplainFlag bool
+	configListProjectFlag string
+)
+
+// configEntry is one config key and its effective value. Value is
+// heterogeneous — scalars for simple keys, maps for structural values.
 type configEntry struct {
 	Key   string `json:"key"`
 	Value any    `json:"value"`
 }
 
-// configEntries lists every global config key in a stable order with the
-// effective value from the loaded config (i.e. what a session sees before any
-// in-repo override). It must cover every toml-tagged field of config.Config —
-// TestConfigEntriesCoverAllKeys reflects over the struct and fails when a key
-// is missing, so a new config field cannot ship unreadable through
-// `af config get/list`.
-func configEntries(cfg *config.Config) []configEntry {
-	return []configEntry{
-		{"default_program", cfg.DefaultProgram},
-		{"program_overrides", cfg.ProgramOverrides},
-		{"auto_yes", cfg.AutoYes},
-		{"auto_update", cfg.AutoUpdate},
-		{"listen_addr", cfg.ListenAddr},
-		{"require_token", cfg.RequireToken},
-		{"require_loopback_token", cfg.RequireLoopbackToken},
-		{"cors_allowed_origins", cfg.CORSAllowedOrigins},
-		{"daemon_poll_interval", cfg.DaemonPollInterval},
-		{"log_max_size_mb", cfg.LogMaxSizeMB},
-		{"log_max_backups", cfg.LogMaxBackups},
-		{"branch_prefix", cfg.BranchPrefix},
-		{"worktree_root", cfg.WorktreeRoot},
-		{"detach_keys", cfg.DetachKeys},
-		{"update_channel", cfg.UpdateChannel},
-		{"vscode_server_binary", cfg.VSCodeServerBinary},
-		{"theme", cfg.Theme},
-		{"root_agents", cfg.RootAgents},
-		{"limit_auto_resume", cfg.LimitAutoResume},
-		{"global_agent_skills", cfg.GlobalAgentSkills},
-		{"limit_retry_interval", cfg.LimitRetryInterval},
-		{"limit_patterns", cfg.LimitPatterns},
-		{"keys", cfg.KeymapOverrides()},
-	}
+// globalConfigReadOrder preserves the historical `af config list` order. It is
+// presentation metadata only: values come from ResolveGlobalConfig, never from
+// a parallel key-to-field switch. The reflective coverage test makes adding a
+// Config field without placing it here a loud failure.
+var globalConfigReadOrder = []string{
+	"default_program",
+	"program_overrides",
+	"auto_yes",
+	"auto_update",
+	"listen_addr",
+	"require_token",
+	"require_loopback_token",
+	"cors_allowed_origins",
+	"daemon_poll_interval",
+	"log_max_size_mb",
+	"log_max_backups",
+	"branch_prefix",
+	"worktree_root",
+	"detach_keys",
+	"update_channel",
+	"vscode_server_binary",
+	"theme",
+	"root_agents",
+	"limit_auto_resume",
+	"global_agent_skills",
+	"limit_retry_interval",
+	"limit_patterns",
+	"keys",
 }
 
 // loadGlobalConfigEntries loads the global config and returns its keys. It
@@ -98,11 +100,19 @@ func configEntries(cfg *config.Config) []configEntry {
 // it never resolves in-repo overrides, matching the get/set contract of
 // operating on the global file.
 func loadGlobalConfigEntries() ([]configEntry, error) {
-	cfg, err := config.LoadConfig()
+	resolved, err := config.ResolveGlobalConfig()
 	if err != nil {
 		return nil, err
 	}
-	return configEntries(cfg), nil
+	entries := make([]configEntry, 0, len(globalConfigReadOrder))
+	for _, key := range globalConfigReadOrder {
+		value, ok := resolved.ResolvedValue(key)
+		if !ok {
+			return nil, fmt.Errorf("global config read order contains unknown manifest key %q", key)
+		}
+		entries = append(entries, configEntry{Key: key, Value: value.Value})
+	}
+	return entries, nil
 }
 
 // formatConfigValue renders a value for human output: scalars bare (so
@@ -127,28 +137,64 @@ func formatConfigValue(v any) string {
 
 var configCmd = &cobra.Command{
 	Use:   "config",
-	Short: "Read and write the global agent-factory config",
+	Short: "Read global or project-effective config and write global config",
 	Long: `Read and write keys in the global config (~/.agent-factory/config.toml).
 
 "get"/"list" print the effective global config with defaults applied — what a
 session gets before any in-repo .agent-factory/config.toml override is layered
-on. "set" writes a single settable key, editing only that value in place so all
-comments and ordering in your config.toml are preserved. Changes apply the same
-way a hand-edit does: af and the daemon read config.toml at startup, so restart
-them to pick up a change.`,
+on. Pass --project <repository-path> to inspect the existing global, legacy,
+and checked-in layers for that project. --explain shows every candidate and why
+it did or did not supply the effective value.
+
+"set" remains global-only: it writes a single settable key, editing only that
+value in place so all comments and ordering in config.toml are preserved.
+Changes apply the same way a hand-edit does: af and the daemon read config.toml
+at startup, so restart them to pick up a change.`,
 }
 
 var configGetCmd = &cobra.Command{
 	Use:   "get <key>",
-	Short: "Print the value of a single global config key",
+	Short: "Print one global or project-effective config value",
 	Long: `Print the effective global value of one config key (e.g. default_program,
 auto_yes, auto_update, update_channel). Run "af config list" to see every key. Scalar values
 print bare; composite values (program_overrides, root_agents, limit_patterns,
-keys) print as JSON.`,
+keys) print as JSON.
+
+With --project <repository-path>, print the value after the repository's current
+legacy and checked-in config layers are applied. The path is a selector only;
+this command does not register a project or write identity state. --explain
+prints the same resolved value with the complete source trace.`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		log.Initialize(false)
 		defer log.Close()
+
+		if configGetExplainFlag || configGetProjectFlag != "" || strings.Contains(args[0], ".") {
+			resolved, err := loadResolvedConfig(configGetProjectFlag)
+			if err != nil {
+				return jsonWrapError(cmd, configJSONFlag, err)
+			}
+			value, ok := resolved.ResolvedValuePath(args[0])
+			if !ok {
+				return jsonWrapError(cmd, configJSONFlag, unknownConfigKeyError(args[0]))
+			}
+			if configGetExplainFlag {
+				if configJSONFlag {
+					output := configGetExplanation{
+						Context:       configExplanationContext(resolved),
+						ResolvedValue: value,
+					}
+					return apiproto.WriteEnvelope(cmd.OutOrStdout(), apiproto.Success(output))
+				}
+				return writeConfigExplanations(cmd.OutOrStdout(), resolved, []config.ResolvedValue{value})
+			}
+			entry := configEntry{Key: value.Key, Value: value.Value}
+			if configJSONFlag {
+				return apiproto.WriteEnvelope(cmd.OutOrStdout(), apiproto.Success(entry))
+			}
+			fmt.Fprintln(cmd.OutOrStdout(), formatConfigValue(entry.Value))
+			return nil
+		}
 
 		entries, err := loadGlobalConfigEntries()
 		if err != nil {
@@ -163,18 +209,47 @@ keys) print as JSON.`,
 				return nil
 			}
 		}
-		return jsonWrapError(cmd, configJSONFlag,
-			fmt.Errorf("unknown config key %q; run `af config list` to see all keys", args[0]))
+		return jsonWrapError(cmd, configJSONFlag, unknownConfigKeyError(args[0]))
 	},
 }
 
 var configListCmd = &cobra.Command{
 	Use:   "list",
-	Short: "Print every global config key and its effective value",
-	Args:  cobra.NoArgs,
+	Short: "Print global or project-effective config values",
+	Long: `Print every global config key and its effective value. Pass --project
+<repository-path> to include the repository's current legacy and checked-in
+config keys and layers. --explain prints every source candidate and the reason
+it won, was shadowed, was absent, or is disallowed for that key.`,
+	Args: cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		log.Initialize(false)
 		defer log.Close()
+
+		if configListExplainFlag || configListProjectFlag != "" {
+			resolved, err := loadResolvedConfig(configListProjectFlag)
+			if err != nil {
+				return jsonWrapError(cmd, configJSONFlag, err)
+			}
+			if configListExplainFlag {
+				if configJSONFlag {
+					output := configListExplanation{
+						Context: configExplanationContext(resolved),
+						Values:  resolved.Resolution,
+					}
+					return apiproto.WriteEnvelope(cmd.OutOrStdout(), apiproto.Success(output))
+				}
+				return writeConfigExplanations(cmd.OutOrStdout(), resolved, resolved.Resolution)
+			}
+			entries := configEntriesFromResolution(resolved)
+			if configJSONFlag {
+				return apiproto.WriteEnvelope(cmd.OutOrStdout(), apiproto.Success(entries))
+			}
+			tw := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 0, 2, ' ', 0)
+			for _, entry := range entries {
+				fmt.Fprintf(tw, "%s\t%s\n", entry.Key, formatConfigValue(entry.Value))
+			}
+			return tw.Flush()
+		}
 
 		entries, err := loadGlobalConfigEntries()
 		if err != nil {
@@ -189,6 +264,10 @@ var configListCmd = &cobra.Command{
 		}
 		return tw.Flush()
 	},
+}
+
+func unknownConfigKeyError(key string) error {
+	return fmt.Errorf("unknown config key %q; run `af config list` to see all keys", key)
 }
 
 var configSetCmd = &cobra.Command{
@@ -288,7 +367,15 @@ func prettyPath(p string) string {
 func init() {
 	const jsonUsage = "Emit the value(s) as JSON wrapped in the {data,error} envelope"
 	configGetCmd.Flags().BoolVar(&configJSONFlag, "json", false, jsonUsage)
+	configGetCmd.Flags().BoolVar(&configGetExplainFlag, "explain", false,
+		"Show every source candidate and why it did or did not supply the value")
+	configGetCmd.Flags().StringVar(&configGetProjectFlag, "project", "",
+		"Resolve config for the project at this repository path")
 	configListCmd.Flags().BoolVar(&configJSONFlag, "json", false, jsonUsage)
+	configListCmd.Flags().BoolVar(&configListExplainFlag, "explain", false,
+		"Show every source candidate and why it did or did not supply each value")
+	configListCmd.Flags().StringVar(&configListProjectFlag, "project", "",
+		"Resolve config for the project at this repository path")
 	configSetCmd.Flags().BoolVar(&configJSONFlag, "json", false, jsonUsage)
 	configCmd.AddCommand(configGetCmd)
 	configCmd.AddCommand(configListCmd)

@@ -815,6 +815,44 @@
       "notes": "#1960 added a config editor to the TUI (`,`, over the config manifest) and the web (GetConfig/SetConfigValue), so reading global config is now at parity across all three surfaces — the earlier 'is config a UI concern?' question is answered yes."
     },
     {
+      "id": "config.read-project",
+      "title": "Read the effective config for a selected project",
+      "tui": {
+        "status": "no",
+        "pointer": ""
+      },
+      "web": {
+        "status": "no",
+        "pointer": ""
+      },
+      "cli": {
+        "status": "yes",
+        "pointer": "commands/configcmd.go:163-195,219-251 --project"
+      },
+      "verdict": "real-gap",
+      "issue": "#2216",
+      "notes": "Stage 2 of #2216 adds read-only CLI selection of an existing repository path; it neither registers a project nor writes identity state. TUI/web exposure is intentionally scheduled for #2216's stage 7 after the durable project model and personal layers exist."
+    },
+    {
+      "id": "config.explain",
+      "title": "Explain which config layers supplied an effective value",
+      "tui": {
+        "status": "no",
+        "pointer": ""
+      },
+      "web": {
+        "status": "no",
+        "pointer": ""
+      },
+      "cli": {
+        "status": "yes",
+        "pointer": "commands/configexplain.go:53-127; commands/configcmd.go:181-190,233-241 --explain"
+      },
+      "verdict": "real-gap",
+      "issue": "#2216",
+      "notes": "The CLI now exposes complete on-disk source candidates, per-leaf origins, and whether the running daemon was checked. TUI/web/config-agent introspection remains #2216 stage 7 so those surfaces consume the same resolver rather than growing a second precedence implementation."
+    },
+    {
       "id": "config.write",
       "title": "Set a global config key",
       "tui": {
@@ -1460,9 +1498,13 @@
       "af completion zsh --no-descriptions": "cli.shell-completion",
       "af config --help": "meta.discovery",
       "af config get --help": "meta.discovery",
+      "af config get --explain": "config.explain",
       "af config get --json": "cli.json-envelope",
+      "af config get --project": "config.read-project",
       "af config list --help": "meta.discovery",
+      "af config list --explain": "config.explain",
       "af config list --json": "cli.json-envelope",
+      "af config list --project": "config.read-project",
       "af config set --help": "meta.discovery",
       "af config set --json": "cli.json-envelope",
       "af daemon --help": "meta.discovery",

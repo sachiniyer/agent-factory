@@ -90,7 +90,7 @@ var configEntriesInternalKeys = map[string]string{
 	"schema_version": "internal migration bookkeeping, not a user-settable setting",
 }
 
-// TestConfigEntriesCoverAllKeys guards that configEntries covers every
+// TestConfigEntriesCoverAllKeys guards that globalConfigReadOrder covers every
 // toml-tagged field of config.Config, so a key added to the struct cannot ship
 // unreadable through `af config get/list`.
 //
@@ -105,16 +105,16 @@ var configEntriesInternalKeys = map[string]string{
 // configEntriesInternalKeys WITH a reason rather than skipping the check.
 //
 // Only top-level fields are considered, which is the right granularity —
-// configEntries is a top-level key list, and nested tables (root_agents'
+// globalConfigReadOrder is a top-level key list, and nested tables (root_agents'
 // per-repo program/auto_yes, the theme slots) are surfaced as whole composite
 // values by their parent key.
 func TestConfigEntriesCoverAllKeys(t *testing.T) {
 	got := map[string]bool{}
-	for _, e := range configEntries(config.DefaultConfig()) {
-		if got[e.Key] {
-			t.Fatalf("duplicate config key %q in configEntries", e.Key)
+	for _, key := range globalConfigReadOrder {
+		if got[key] {
+			t.Fatalf("duplicate config key %q in globalConfigReadOrder", key)
 		}
-		got[e.Key] = true
+		got[key] = true
 	}
 
 	want := map[string]bool{}
@@ -134,16 +134,16 @@ func TestConfigEntriesCoverAllKeys(t *testing.T) {
 		}
 		if reason, internal := configEntriesInternalKeys[key]; internal {
 			if got[key] {
-				t.Errorf("config key %q is listed in configEntries but also marked internal (%s) — pick one", key, reason)
+				t.Errorf("config key %q is listed in globalConfigReadOrder but also marked internal (%s) — pick one", key, reason)
 			}
 			continue
 		}
 		want[key] = true
 		if !got[key] {
-			t.Errorf("config.Config field %s (toml:%q) is missing from configEntries: `af config get %s` "+
-				"would fail even though the key configures a real setting. Add {%q, cfg.%s} to configEntries "+
+			t.Errorf("config.Config field %s (toml:%q) is missing from globalConfigReadOrder: `af config get %s` "+
+				"would fail even though the key configures a real setting. Add %q to globalConfigReadOrder "+
 				"(and document it in docs/configuration.md), or add it to configEntriesInternalKeys with a reason.",
-				f.Name, key, key, key, f.Name)
+				f.Name, key, key, key)
 		}
 	}
 	if len(want) == 0 {
@@ -152,19 +152,23 @@ func TestConfigEntriesCoverAllKeys(t *testing.T) {
 
 	for key := range got {
 		if !want[key] {
-			t.Errorf("configEntries lists key %q, which is not a toml-tagged field of config.Config "+
+			t.Errorf("globalConfigReadOrder lists key %q, which is not a toml-tagged field of config.Config "+
 				"(stale entry or typo?)", key)
 		}
 	}
 }
 
 // TestConfigGetReadsEveryEntry drives `af config get` for every key
-// configEntries advertises, so coverage means the key actually READS rather
+// globalConfigReadOrder advertises, so coverage means the key actually READS rather
 // than merely appearing in the list — the value must render without error and
 // print something for a key with a non-zero default. `af config list` must
 // agree with each one.
 func TestConfigGetReadsEveryEntry(t *testing.T) {
 	tempAFHome(t)
+	entries, err := loadGlobalConfigEntries()
+	if err != nil {
+		t.Fatalf("load config entries: %v", err)
+	}
 
 	var listOut bytes.Buffer
 	listCmd := &cobra.Command{}
@@ -174,7 +178,7 @@ func TestConfigGetReadsEveryEntry(t *testing.T) {
 	}
 	list := listOut.String()
 
-	for _, e := range configEntries(config.DefaultConfig()) {
+	for _, e := range entries {
 		t.Run(e.Key, func(t *testing.T) {
 			var out bytes.Buffer
 			cmd := &cobra.Command{}

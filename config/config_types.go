@@ -335,6 +335,11 @@ type Config struct {
 	// keyOverrides is the normalized, validated form of Keys, set by
 	// validateConfig. Global-only and TUI-only: the daemon never reads it.
 	keyOverrides map[string][]string
+
+	// source records presence and nested leaf names from the same file decode
+	// that produced this Config. Defaults overlaid during unmarshal make this
+	// impossible to recover from the typed fields alone.
+	source sourceMetadata
 }
 
 // KeymapOverrides returns the validated [keys] rebinding table: action name →

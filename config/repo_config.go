@@ -147,6 +147,10 @@ type RepoConfig struct {
 	// RemoteHooks, when set, causes all sessions for this repo to use the
 	// remote hook backend.
 	RemoteHooks *RemoteHooks `json:"remote_hooks,omitempty"`
+
+	// source preserves explicit empty values and the legacy file path for the
+	// compatibility layer's provenance. It is never serialized.
+	source sourceMetadata
 }
 
 // repoStateDir validates repoID and returns the per-repo state directory
@@ -194,7 +198,7 @@ func LoadRepoConfig(repoID string) (*RepoConfig, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return &RepoConfig{}, nil
+			return &RepoConfig{source: sourceMetadata{path: path, format: FormatJSON}}, nil
 		}
 		return nil, fmt.Errorf("failed to read repo config: %w", err)
 	}
@@ -202,6 +206,11 @@ func LoadRepoConfig(repoID string) (*RepoConfig, error) {
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		return nil, fmt.Errorf("failed to parse repo config: %w", err)
 	}
+	metadata, err := metadataForSource(data, path, FormatJSON)
+	if err != nil {
+		return nil, fmt.Errorf("failed to record repo config presence: %w", err)
+	}
+	cfg.source = metadata
 	return &cfg, nil
 }
 
