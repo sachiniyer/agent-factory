@@ -164,12 +164,15 @@ func isReadyContent(content, agent string) bool {
 		// codex renders "›" (U+203A — distinct from claude's "❯" U+276F) as
 		// its input-prompt glyph after the banner (#714).
 		//
-		// The workspace-trust dialog ("Do you trust this folder") is
-		// deliberately NOT a ready signal (#729): there is no codex-specific
-		// dismissal in CheckAndHandleTrustPrompt, so treating it as ready let
-		// the next user prompt get typed into the dialog. Wait for the real
-		// "›" prompt instead.
-		return strings.Contains(content, "›")
+		// The older workspace-trust dialog ("Do you trust this folder") is
+		// deliberately NOT a ready signal (#729): af has no observed, anchored
+		// dismissal for it. Codex 0.144.6's newer directory-trust modal IS a
+		// readiness stop because tmux.CodexTrustPromptPresent positively
+		// identifies it and CheckAndHandleTrustPrompt dismisses it before any
+		// prompt can be sent (#2220). Its selected option also contains `›`, so
+		// name the handled case explicitly instead of pretending every glyph is
+		// necessarily the composer.
+		return tmux.CodexTrustPromptPresent(content) || strings.Contains(content, "›")
 	case tmux.ProgramAider:
 		// aider prints an "Aider v…" banner, then a line-start "> " prompt.
 		return strings.Contains(content, "\n> ") ||

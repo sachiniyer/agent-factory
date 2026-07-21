@@ -35,6 +35,16 @@ const aiderDocPhraseInOutput = `I read through the aider docs to answer your que
 The CLI prints "Open documentation url for more info" when it wants to open a
 link. Here is the summary you asked for, with no prompt waiting.`
 
+const codexDirectoryTrustDialog = `> You are in /tmp/af-home
+
+  Do you trust the contents of this directory? Working with untrusted contents
+  comes with higher risk of prompt injection.
+
+› 1. Yes, continue
+  2. No, quit
+
+  Press enter to continue`
+
 // runTrustPromptCheck drives CheckAndHandleTrustPrompt for a pane running
 // `program` and showing `content`, returning its verdict plus every tmux
 // command it issued.
@@ -61,6 +71,27 @@ func sentKeystrokes(cmds []string) []string {
 		}
 	}
 	return keys
+}
+
+func TestCheckAndHandleTrustPrompt_CodexDirectoryDialogIsDismissed(t *testing.T) {
+	handled, cmds := runTrustPromptCheck(t, ProgramCodex, codexDirectoryTrustDialog)
+	require.True(t, handled, "the observed Codex directory-trust dialog must be reported handled")
+	require.Contains(t, sentKeystrokes(cmds), "tmux send-keys -t =af_trust: Enter",
+		"the selected 'Yes, continue' option must be accepted before briefing delivery; got %v", cmds)
+}
+
+func TestCheckAndHandleTrustPrompt_CodexTrustProseAloneInjectsNothing(t *testing.T) {
+	fragments := []string{
+		"Do you trust the contents of this directory?",
+		"Do you trust the contents of this directory?\n› 1. Yes, continue",
+		"Yes, continue\n2. No, quit\nPress enter to continue",
+	}
+	for _, content := range fragments {
+		handled, cmds := runTrustPromptCheck(t, ProgramCodex, content)
+		require.False(t, handled, "a partial/modal prose fragment is not the anchored Codex dialog")
+		require.Empty(t, sentKeystrokes(cmds),
+			"a continuous live-session poll must not inject Enter from partial trust prose; got %v", cmds)
+	}
 }
 
 // The bug: ordinary agent output that happens to contain the documentation
