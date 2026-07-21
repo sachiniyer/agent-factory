@@ -54,3 +54,32 @@ func TestHandleArchive_ConfirmationDoesNotTargetSameTitleReplacement(t *testing.
 	require.Equal(t, session.OpNone, replacement.GetInFlightOp(),
 		"a stale confirmation must not mark the replacement as archiving")
 }
+
+// The RPC completion is another retained-intent boundary. A reconcile may swap
+// in a same-title replacement after the daemon call starts but before its result
+// reaches the event loop; the old completion must not mutate that new row.
+func TestHandleInstanceKilled_CompletionDoesNotRemoveSameTitleReplacement(t *testing.T) {
+	h := newTestHome(t)
+	original := newKillableInstance(t, "worker")
+	h.store.AddInstance(original)
+
+	replacement := newKillableInstance(t, original.Title)
+	require.True(t, h.store.ReplaceInstance(original, replacement))
+
+	_, _ = h.handleInstanceKilled(instanceKilledMsg{title: original.Title})
+	require.Same(t, replacement, h.store.GetInstanceByTitle(original.Title),
+		"the old kill completion must not remove the replacement")
+}
+
+func TestHandleInstanceArchived_CompletionDoesNotArchiveSameTitleReplacement(t *testing.T) {
+	h := newTestHome(t)
+	original := archiveActionInstance(t, "worker", session.Ready)
+	h.store.AddInstance(original)
+
+	replacement := archiveActionInstance(t, original.Title, session.Ready)
+	require.True(t, h.store.ReplaceInstance(original, replacement))
+
+	_, _ = h.handleInstanceArchived(instanceArchivedMsg{title: original.Title})
+	require.Equal(t, session.Ready, replacement.GetStatus(),
+		"the old archive completion must not archive the replacement")
+}
