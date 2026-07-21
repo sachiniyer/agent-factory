@@ -6051,6 +6051,86 @@ async function horizontalOverflow(p: Page): Promise<number> {
   });
 }
 
+/** Waits on the browser's own drawer/descendant animation timeline, then captures the
+ *  CURRENT row and all relevant geometry in one page task. Live session events rebuild
+ *  the rail with replaceChildren(); resolving action locators and later measuring a row
+ *  in separate browser calls can otherwise inspect different row generations. */
+async function settledMobileDrawerGeometry(p: Page, title: string) {
+  return p.locator(".af-rail").evaluate(async (rail, expectedTitle) => {
+    const describeAnimation = (animation: Animation) => {
+      const target = animation.effect instanceof KeyframeEffect ? animation.effect.target : null;
+      return {
+        target: target instanceof Element ? target.getAttribute("class") : null,
+        playState: animation.playState,
+      };
+    };
+    const animations = rail.getAnimations({ subtree: true });
+    const waitedAnimations = animations.map(describeAnimation);
+    await Promise.allSettled(animations.map((animation) => animation.finished));
+    await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+
+    const rect = (el: Element) => {
+      const box = el.getBoundingClientRect();
+      return {
+        x: box.x,
+        y: box.y,
+        width: box.width,
+        height: box.height,
+        right: box.right,
+        bottom: box.bottom,
+      };
+    };
+    const app = rail.closest(".af-app");
+    const toggle = app?.querySelector(".af-nav-toggle");
+    const rows = Array.from(rail.querySelectorAll<HTMLElement>(".af-row"));
+    const matches = rows.filter((candidate) => candidate.textContent?.includes(expectedTitle));
+    const selected = matches[0] ?? null;
+    const main = selected?.querySelector<HTMLElement>(".af-row-main") ?? null;
+    const actions = selected?.querySelector<HTMLElement>(".af-row-actions") ?? null;
+    const railStyle = getComputedStyle(rail);
+
+    return {
+      appOpen: app?.classList.contains("af-nav-open") ?? false,
+      toggleExpanded: toggle?.getAttribute("aria-expanded") ?? null,
+      waitedAnimations,
+      remainingAnimations: rail.getAnimations({ subtree: true }).map(describeAnimation),
+      rail: {
+        connected: rail.isConnected,
+        rect: rect(rail),
+        display: railStyle.display,
+        visibility: railStyle.visibility,
+        transform: railStyle.transform,
+      },
+      rows: rows.map((candidate) => ({
+        connected: candidate.isConnected,
+        text: candidate.textContent,
+        rect: rect(candidate),
+      })),
+      targetMatches: matches.length,
+      target:
+        selected && main && actions
+          ? {
+              connected: selected.isConnected,
+              rect: rect(selected),
+              main: rect(main),
+              actions: rect(actions),
+              actionStyle: {
+                display: getComputedStyle(actions).display,
+                opacity: getComputedStyle(actions).opacity,
+                visibility: getComputedStyle(actions).visibility,
+              },
+              buttons: Array.from(actions.querySelectorAll<HTMLButtonElement>("button")).map((button) => ({
+                label: button.getAttribute("aria-label"),
+                rect: rect(button),
+              })),
+              actionsInside: actions.getBoundingClientRect().right <= selected.getBoundingClientRect().right + 1,
+              overflow: selected.scrollWidth - selected.clientWidth,
+            }
+          : null,
+    };
+  }, title);
+}
+
 test("mobile (375px): the rail auto-collapses to a drawer; the hamburger reveals it as an overlay and picking a session folds it shut", REAL_FIXTURE, async ({
   browser,
 }) => {
@@ -6099,23 +6179,43 @@ test("mobile (375px): the rail auto-collapses to a drawer; the hamburger reveals
 
   // Re-open the narrow drawer with a selection: both quiet glyphs fit inside the row
   // without squeezing its title away or widening the page.
-  await toggle.click();
-  await expect(rail).toBeVisible();
-  await expect(railAction(p, SESSION_A, "Archive session")).toBeVisible();
-  await expect(railAction(p, SESSION_A, "Kill session")).toBeVisible();
-  const fit = await row(p, SESSION_A).evaluate((el) => {
-    const rowBox = el.getBoundingClientRect();
-    const mainBox = el.querySelector(".af-row-main")!.getBoundingClientRect();
-    const actionBox = el.querySelector(".af-row-actions")!.getBoundingClientRect();
-    return {
-      mainWidth: mainBox.width,
-      actionsInside: actionBox.right <= rowBox.right + 1,
-      overflow: el.scrollWidth - el.clientWidth,
-    };
+  //
+  // Controlled regression for #2331: browser/daemon load can leave a descendant's
+  // layout work behind the drawer's immediate visibility flip. Hold the flexible cell
+  // at zero basis on the browser animation timeline. The old visibility-only check
+  // deterministically read it mid-animation; the settled snapshot below waits on the
+  // actual work rather than sleeping or retrying the assertion.
+  await row(p, SESSION_A).evaluate((el) => {
+    const main = el.querySelector<HTMLElement>(".af-row-main")!;
+    main.animate(
+      [
+        { flexBasis: "0px", flexGrow: "0" },
+        { flexBasis: "0px", flexGrow: "1" },
+      ],
+      { duration: 1_000, easing: "steps(1, end)" },
+    );
   });
-  expect(fit.mainWidth, "the selected row keeps readable room for its title").toBeGreaterThan(80);
-  expect(fit.actionsInside, "the action glyphs stay inside the selected row").toBe(true);
-  expect(fit.overflow, "the selected row does not overflow at 375px").toBeLessThanOrEqual(1);
+  await toggle.click();
+  const fit = await settledMobileDrawerGeometry(p, SESSION_A);
+  const diagnostic = `settled mobile drawer geometry:\n${JSON.stringify(fit, null, 2)}`;
+  expect(fit.appOpen, diagnostic).toBe(true);
+  expect(fit.toggleExpanded, diagnostic).toBe("true");
+  expect(fit.remainingAnimations.filter((animation) => animation.playState !== "finished"), diagnostic).toEqual([]);
+  expect(fit.rail.connected, diagnostic).toBe(true);
+  expect(fit.rail.visibility, diagnostic).toBe("visible");
+  expect(fit.rail.rect.x, diagnostic).toBeGreaterThanOrEqual(-1);
+  expect(fit.targetMatches, diagnostic).toBe(1);
+  expect(fit.target, diagnostic).not.toBeNull();
+  if (!fit.target) throw new Error(diagnostic);
+  expect(
+    fit.target.buttons.map((button) => button.label),
+    diagnostic,
+  ).toEqual([`Archive session “${SESSION_A}”`, `Kill session “${SESSION_A}”`]);
+  expect(fit.target.buttons.every((button) => button.rect.width > 0 && button.rect.height > 0), diagnostic).toBe(true);
+  expect(fit.target.actionStyle, diagnostic).toMatchObject({ display: "flex", opacity: "1", visibility: "visible" });
+  expect(fit.target.main.width, diagnostic).toBeGreaterThan(80);
+  expect(fit.target.actionsInside, diagnostic).toBe(true);
+  expect(fit.target.overflow, diagnostic).toBeLessThanOrEqual(1);
 
   await ctx.close();
 });
