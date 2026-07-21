@@ -162,6 +162,109 @@ func TestResolveStreamSessionIDBeatsCrossRepoTitleCollision(t *testing.T) {
 	}
 }
 
+// TestResolveStreamSessionRepoScopedTitleBeatsForeignStableID pins the other
+// authoritative request shape: repo_id means the opaque segment is a title in
+// that repo, even when another repo happens to use the same bytes as its stable
+// ID. The hot path must never jump namespaces before checking the scoped target.
+func TestResolveStreamSessionRepoScopedTitleBeatsForeignStableID(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	repoA := setupControlRepo(t)
+	repoB := setupControlRepo(t)
+	ra, err := config.RepoFromPath(repoA)
+	if err != nil {
+		t.Fatalf("RepoFromPath A: %v", err)
+	}
+	rb, err := config.RepoFromPath(repoB)
+	if err != nil {
+		t.Fatalf("RepoFromPath B: %v", err)
+	}
+
+	manager, err := NewManager(config.DefaultConfig())
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	const target = "scoped-title"
+	scoped, _ := newCountingInstance(t, target, repoA)
+	scoped.ID = "scoped-instance-id"
+	foreign, _ := newCountingInstance(t, "foreign", repoB)
+	foreign.ID = target
+	manager.mu.Lock()
+	manager.instances[daemonInstanceKey(ra.ID, target)] = scoped
+	manager.instances[daemonInstanceKey(rb.ID, foreign.Title)] = foreign
+	manager.mu.Unlock()
+
+	got, rid, title, err := manager.resolveStreamSession(target, ra.ID)
+	if err != nil {
+		t.Fatalf("resolve repo-scoped stream target: %v", err)
+	}
+	if got != scoped || rid != ra.ID || title != target {
+		t.Fatalf("repo-scoped target = (%p, %q, %q), want (%p, %q, %q); foreign stable ID won",
+			got, rid, title, scoped, ra.ID, target)
+	}
+}
+
+// TestResolveStreamSessionRepoScopedTitleBeatsForeignStableIDAfterRefresh pins
+// the same authority after a cache miss. Fixing only trackedStreamSessionLocked
+// still lets findSessionByStableID invert the target once refresh materializes
+// the foreign row, which was the review finding.
+func TestResolveStreamSessionRepoScopedTitleBeatsForeignStableIDAfterRefresh(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	repoA := setupControlRepo(t)
+	repoB := setupControlRepo(t)
+	ra, err := config.RepoFromPath(repoA)
+	if err != nil {
+		t.Fatalf("RepoFromPath A: %v", err)
+	}
+	rb, err := config.RepoFromPath(repoB)
+	if err != nil {
+		t.Fatalf("RepoFromPath B: %v", err)
+	}
+	const target = "refreshed-scoped-title"
+	rows := map[string]session.InstanceData{
+		ra.ID: {ID: "scoped-instance-id", Title: target, Path: repoA, Status: session.Running},
+		rb.ID: {ID: target, Title: "foreign", Path: repoB, Status: session.Running},
+	}
+	for rid, data := range rows {
+		raw, marshalErr := json.Marshal([]session.InstanceData{data})
+		if marshalErr != nil {
+			t.Fatalf("marshal %s: %v", rid, marshalErr)
+		}
+		if saveErr := config.LoadState().SaveInstances(rid, raw); saveErr != nil {
+			t.Fatalf("save %s: %v", rid, saveErr)
+		}
+	}
+
+	scoped, _ := newCountingInstance(t, target, repoA)
+	scoped.ID = rows[ra.ID].ID
+	foreign, _ := newCountingInstance(t, "foreign", repoB)
+	foreign.ID = rows[rb.ID].ID
+	prev := fromInstanceDataForRefresh
+	fromInstanceDataForRefresh = func(data session.InstanceData) (*session.Instance, error) {
+		switch data.ID {
+		case scoped.ID:
+			return scoped, nil
+		case foreign.ID:
+			return foreign, nil
+		default:
+			return nil, errors.New("unexpected persisted row")
+		}
+	}
+	t.Cleanup(func() { fromInstanceDataForRefresh = prev })
+	manager, err := NewManager(config.DefaultConfig())
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+
+	got, rid, title, err := manager.resolveStreamSession(target, ra.ID)
+	if err != nil {
+		t.Fatalf("resolve refreshed repo-scoped stream target: %v", err)
+	}
+	if got != scoped || rid != ra.ID || title != target {
+		t.Fatalf("refreshed repo-scoped target = (%p, %q, %q), want (%p, %q, %q); foreign stable ID won",
+			got, rid, title, scoped, ra.ID, target)
+	}
+}
+
 // TestResolveStreamSessionTrackedTitleSkipsDiskRefresh pins the TUI hot path: a
 // repo-scoped title already restored in the daemon resolves from m.instances
 // without walking persisted session history before every preview capture.
