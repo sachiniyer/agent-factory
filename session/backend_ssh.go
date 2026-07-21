@@ -572,7 +572,9 @@ func (p *sshProvisioner) agentServerCommand() (string, error) {
 	for _, name := range p.spec.SessionEnvPassthrough {
 		inner += " --session-env " + shellQuote(name)
 	}
-	filteredInner, err := sessionenv.WrapCommand(p.afPath(), p.agentName(), p.spec.SessionEnvPassthrough, inner)
+	filteredInner, err := sessionenv.WrapCommand(
+		p.afPath(), p.agentName(), p.spec.SessionEnvPassthrough, inner,
+	)
 	if err != nil {
 		return "", fmt.Errorf("backend=ssh: preparing filtered agent-server environment failed: %w", err)
 	}
