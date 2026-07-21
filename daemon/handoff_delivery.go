@@ -22,6 +22,16 @@ type handoffDelivery struct {
 	conversationCapture session.ConversationCaptureSnapshot
 }
 
+// prepareHandoffDelivery crosses the runtime-identity boundary exactly once.
+// A limit observation belongs to the outgoing provider, so constructing the
+// incoming delivery obligation clears it while leaving OpReplacing raised. A
+// newly observed incoming limit is classified independently by the readiness
+// result in deliverHandoffMission.
+func prepareHandoffDelivery(delivery handoffDelivery) handoffDelivery {
+	delivery.instance.ClearLimitReached()
+	return delivery
+}
+
 func (m *Manager) deliverHandoffMission(delivery handoffDelivery) error {
 	settle := func(event session.TransitionEvent, clearPending bool) error {
 		if err := delivery.instance.Transition(event); err != nil {
@@ -78,10 +88,13 @@ func (m *Manager) deliverHandoffMission(delivery handoffDelivery) error {
 	}
 	// Readiness proved this is the incoming runtime, so conversation capture is
 	// safe even though its mission remains behind the durable retry fence. The
-	// later recovery pass no longer has the command-specific capture plan.
+	// later recovery pass no longer has the command-specific capture plan. The
+	// delivery constructor already cleared every predecessor-scoped limit, so the
+	// retry cannot be diverted into the outgoing provider's reset schedule.
 	m.captureAgentConversationAsync(delivery.repoID, delivery.key, delivery.instance, delivery.conversationCapture)
 	return fmt.Errorf(
 		"handed %q off to %s, but its mission brief could not be delivered (%w); "+
-			"the exact mission remains pending behind the replacement fence for a readiness-based retry",
+			"the exact mission remains pending behind the replacement fence for a readiness-based retry "+
+			"(the outgoing provider's limit state was cleared at the runtime boundary)",
 		delivery.title, delivery.target, serr)
 }

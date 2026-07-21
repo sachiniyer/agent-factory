@@ -190,12 +190,10 @@ func (m *Manager) HandoffSession(req HandoffSessionRequest) (HandoffSessionRespo
 		_ = instance.Transition(session.AbortHandoff())
 		return HandoffSessionResponse{}, fmt.Errorf("failed to hand %q off to %s: %w", req.Title, target, swapErr)
 	}
-	// A usage-limit observation belongs to one concrete provider runtime. Once
-	// the replacement succeeds, retaining the outgoing block would make recovery
-	// divert an undelivered incoming mission into the old provider's limit-resume
-	// path. Clear it at the runtime boundary while OpReplacing remains raised; a
-	// newly observed incoming limit is recorded independently below.
-	instance.ClearLimitReached()
+	delivery := prepareHandoffDelivery(handoffDelivery{
+		repoID: repoID, key: key, title: req.Title, target: target, mission: mission,
+		instance: instance, conversationCapture: conversationCapture,
+	})
 
 	// The runtime this session's failure history was about is gone (#1794).
 	m.noteRuntimeReplaced(repoID, instance)
@@ -238,10 +236,7 @@ func (m *Manager) HandoffSession(req HandoffSessionRequest) (HandoffSessionRespo
 		log.WarningLog.Printf("handoff %q: failed to persist the post-swap checkpoint before mission delivery: %v", req.Title, err)
 	}
 
-	if err := m.deliverHandoffMission(handoffDelivery{
-		repoID: repoID, key: key, title: req.Title, target: target, mission: mission,
-		instance: instance, conversationCapture: conversationCapture,
-	}); err != nil {
+	if err := m.deliverHandoffMission(delivery); err != nil {
 		return HandoffSessionResponse{}, err
 	}
 	log.InfoLog.Printf("handoff: session %q swapped %s → %s at %s", instance.Title, outgoing, target, shortSHA(headSHA))

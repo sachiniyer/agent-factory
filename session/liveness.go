@@ -146,6 +146,13 @@ func (i *Instance) CanKill() bool {
 // in-flight op wins the composed value (it overlays the liveness), matching the
 // old single-field semantics where Loading/Deleting masked the underlying state.
 func composeStatus(lv Liveness, op InFlightOp) Status {
+	if op == OpReplacing {
+		// Loading is only the legacy client projection for replacement. Unlike a
+		// create, a replacement can carry PendingHandoffMission, which is a durable
+		// recovery obligation; persistence must inspect that marker rather than use
+		// this lossy display value as a retention decision.
+		return Loading
+	}
 	switch op {
 	case OpCreating:
 		return Loading
@@ -153,8 +160,6 @@ func composeStatus(lv Liveness, op InFlightOp) Status {
 		return Deleting
 	case OpRestoring:
 		return Lost
-	case OpReplacing:
-		return Loading
 	}
 	switch lv {
 	case LiveRunning:
