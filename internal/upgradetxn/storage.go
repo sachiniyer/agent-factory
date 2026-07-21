@@ -182,11 +182,11 @@ func restoreMetadataEntry(home string, metadata MetadataSnapshot) (retErr error)
 		return fmt.Errorf("validate rollback path %s: %w", metadata.Path, err)
 	}
 	if !metadata.Existed {
-		if err := os.Remove(target); err != nil {
-			if errors.Is(err, os.ErrNotExist) {
+		if removeErr := os.Remove(target); removeErr != nil {
+			if errors.Is(removeErr, os.ErrNotExist) {
 				return nil
 			}
-			return fmt.Errorf("restore absence of %s: %w", metadata.Path, err)
+			return fmt.Errorf("restore absence of %s: %w", metadata.Path, removeErr)
 		}
 		if err := syncTransactionDirectory(filepath.Dir(target)); err != nil {
 			return fmt.Errorf("sync restored absence of %s: %w", metadata.Path, err)
