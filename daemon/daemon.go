@@ -579,12 +579,6 @@ func daemonInstances(instanceMap map[string]*session.Instance) []*session.Instan
 	return instances
 }
 
-// LaunchDaemon launches the daemon process if it is not already serving the
-// local control plane.
-func LaunchDaemon() error {
-	return EnsureDaemon()
-}
-
 // launchDaemonProcessFn is the spawn entry point EnsureDaemon uses.
 // Package-level so tests can record or suppress real daemon spawns and prove
 // a bound-but-warming daemon is treated as running, never respawned (#829).
