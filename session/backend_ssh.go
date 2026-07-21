@@ -761,15 +761,16 @@ func (p *sshProvisioner) runReapCombined(timeout time.Duration, script string) (
 	return p.runCombined(timeout, script)
 }
 
-// remotePIDKillScript makes a numeric-PID retry safe. ps -ww is available on the
-// Linux and macOS hosts supported by the SSH backend; the unique per-session af
-// path remains in the agent-server argv for its lifetime. A recycled PID whose
-// argv does not contain that path is treated as already gone, never signalled.
+// remotePIDKillScript makes a numeric-PID retry safe. Linux reads argv[0]
+// directly from procfs (including BusyBox/Alpine hosts whose ps rejects procps
+// flags); macOS and other hosts fall back to ps. The unique per-session af path
+// remains in argv for the agent-server's lifetime. A recycled PID whose argv
+// does not contain that path is treated as already gone, never signalled.
 // Re-check before SIGKILL as well so recycling during the grace sleep cannot
 // redirect the second signal.
 func (p *sshProvisioner) remotePIDKillScript(remotePID string) string {
 	return fmt.Sprintf(
-		`pid=%s; expected=%s; matches_session() { args=$(ps -ww -p "$pid" -o args= 2>/dev/null) || return 2; printf '%%s\n' "$args" | grep -F -q -- "$expected"; }; if ! kill -0 "$pid" 2>/dev/null; then exit 0; fi; matches_session; matched=$?; if [ "$matched" -eq 1 ]; then exit 0; elif [ "$matched" -ne 0 ]; then exit 75; fi; kill "$pid" 2>/dev/null || exit 76; sleep 0.3; if ! kill -0 "$pid" 2>/dev/null; then exit 0; fi; matches_session; matched=$?; if [ "$matched" -eq 1 ]; then exit 0; elif [ "$matched" -ne 0 ]; then exit 75; fi; kill -9 "$pid" 2>/dev/null || exit 77`,
+		`pid=%s; expected=%s; matches_session() { if [ -r "/proc/$pid/cmdline" ]; then actual=$(tr '\000' '\n' < "/proc/$pid/cmdline" | sed -n '1p') || return 2; [ "$actual" = "$expected" ]; return; fi; args=$(ps -ww -p "$pid" -o args= 2>/dev/null) || return 2; printf '%%s\n' "$args" | grep -F -q -- "$expected"; }; if ! kill -0 "$pid" 2>/dev/null; then exit 0; fi; matches_session; matched=$?; if [ "$matched" -eq 1 ]; then exit 0; elif [ "$matched" -ne 0 ]; then exit 75; fi; kill "$pid" 2>/dev/null || exit 76; sleep 0.3; if ! kill -0 "$pid" 2>/dev/null; then exit 0; fi; matches_session; matched=$?; if [ "$matched" -eq 1 ]; then exit 0; elif [ "$matched" -ne 0 ]; then exit 75; fi; kill -9 "$pid" 2>/dev/null || exit 77`,
 		shellQuote(remotePID), shellQuote(p.afPath()))
 }
 

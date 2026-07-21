@@ -447,3 +447,39 @@ func TestSSHKillScriptSignalsMatchingSessionProcess(t *testing.T) {
 		t.Fatal("matching process exited successfully instead of receiving teardown signal")
 	}
 }
+
+func TestSSHKillScriptUsesProcBeforeIncompatiblePS(t *testing.T) {
+	if _, err := os.Stat("/proc/self/cmdline"); err != nil {
+		t.Skip("Linux procfs-specific BusyBox compatibility guard")
+	}
+	p := &sshProvisioner{sessionDir: t.TempDir()}
+	if err := os.Symlink("/bin/sleep", p.afPath()); err != nil {
+		t.Fatalf("create controlled af-path process: %v", err)
+	}
+	child := exec.Command(p.afPath(), "30")
+	if err := child.Start(); err != nil {
+		t.Fatalf("start controlled matching child: %v", err)
+	}
+	t.Cleanup(func() {
+		if child.ProcessState == nil {
+			_ = child.Process.Kill()
+			_ = child.Wait()
+		}
+	})
+
+	// Alpine's BusyBox ps rejects the procps/BSD flags used by the macOS
+	// fallback. Poison ps so this test proves Linux took the procfs path instead
+	// of accidentally depending on the host's full procps installation.
+	fakeBin := t.TempDir()
+	if err := os.WriteFile(filepath.Join(fakeBin, "ps"), []byte("#!/bin/sh\nexit 99\n"), 0o755); err != nil {
+		t.Fatalf("write incompatible ps stand-in: %v", err)
+	}
+	script := "PATH=" + shellQuote(fakeBin) + ":$PATH; export PATH; " +
+		p.remotePIDKillScript(strconv.Itoa(child.Process.Pid))
+	if out, err := exec.Command("sh", "-c", script).CombinedOutput(); err != nil {
+		t.Fatalf("procfs identity-guarded kill failed with incompatible ps: %v: %s", err, out)
+	}
+	if err := child.Wait(); err == nil {
+		t.Fatal("procfs identity guard did not signal matching process")
+	}
+}
