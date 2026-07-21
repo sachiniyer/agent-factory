@@ -813,6 +813,20 @@ func (p *TabPane) canEnterScrollModeLocked(instance *session.Instance, activeTab
 		p.setFallbackState("Tearing down session…")
 		return false
 	}
+	// Agent liveness is already authoritative in memory. Reject scroll entry
+	// synchronously for dead/lost sessions so the immediate Bubble Tea frame
+	// renders the same fallback as updateAgent instead of an empty viewport while
+	// the off-loop history capture catches up (#2134).
+	if activeTab == 0 {
+		switch instance.GetLiveness() {
+		case session.LiveDead:
+			p.setFallbackState("Session no longer running.")
+			return false
+		case session.LiveLost:
+			p.setFallbackState("Session lost — its tmux session is gone.")
+			return false
+		}
+	}
 	// A web/vscode tab has no scrollback (no PTY): keep the placeholder rather than
 	// entering scroll mode over an empty capture. Mirrors updateShell's branch.
 	if tabs := instance.GetTabs(); activeTab >= 0 && activeTab < len(tabs) {
