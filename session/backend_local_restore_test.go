@@ -39,6 +39,38 @@ func TestLocalBackendPrepareAgentSwapRejectsMissingExecutableBeforeRuntime(t *te
 	require.Equal(t, tmux.ProgramClaude, inst.AgentProgram(), "preflight must not rewrite the live record")
 }
 
+func TestLocalBackendPrepareAgentSwapSnapshotsCommandSpecificCodexHome(t *testing.T) {
+	afHome := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", afHome)
+	t.Setenv("CODEX_HOME", t.TempDir()) // deliberately not the launched store
+
+	binDir := t.TempDir()
+	codexBin := filepath.Join(binDir, "codex")
+	require.NoError(t, os.WriteFile(codexBin, []byte("#!/bin/sh\n"), 0o755))
+	launchedHome := filepath.Join(t.TempDir(), "command-codex-home")
+	cfg := config.DefaultConfig()
+	if cfg.ProgramOverrides == nil {
+		cfg.ProgramOverrides = make(map[string]string)
+	}
+	cfg.ProgramOverrides[tmux.ProgramCodex] = "env CODEX_HOME=" + launchedHome + " " + codexBin
+	require.NoError(t, config.SaveConfig(cfg))
+
+	repoRoot := initTempGitRepo(t)
+	gw, err := git.NewGitWorktreeFromStorage(
+		repoRoot, repoRoot, "handoff-capture", "handoff-capture", "", true, false,
+	)
+	require.NoError(t, err)
+	inst := handoffTestInstance(t, tmux.ProgramClaude)
+	inst.Path = repoRoot
+	inst.gitWorktree = gw
+	inst.SetBackend(&LocalBackend{})
+
+	plan, err := (&LocalBackend{}).PrepareAgentSwap(inst, tmux.ProgramCodex)
+	require.NoError(t, err)
+	require.Equal(t, launchedHome, plan.conversationCapture.codexHome,
+		"handoff capture must watch the incoming command's store, not daemon CODEX_HOME")
+}
+
 func TestLocalBackendSwapAgentResetsBrokerCapture(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 	ptyFactory := &recordingPtyFactory{t: t}

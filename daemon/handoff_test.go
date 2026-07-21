@@ -122,6 +122,27 @@ func (b *blockingSwapBackend) SwapAgent(i *session.Instance, plan session.AgentS
 	return b.handoffBackend.SwapAgent(i, plan)
 }
 
+type blockingReadinessHandoffBackend struct {
+	*handoffBackend
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (b *blockingReadinessHandoffBackend) Preview(i *session.Instance) (string, error) {
+	b.once.Do(func() { close(b.entered) })
+	<-b.release
+	return b.handoffBackend.Preview(i)
+}
+
+type limitHandoffBackend struct {
+	*handoffBackend
+}
+
+func (b *limitHandoffBackend) Preview(*session.Instance) (string, error) {
+	return "You've hit your usage limit. Try again at Jul 25th, 2026 5:55 PM.", nil
+}
+
 type stalePollHandoffBackend struct {
 	*handoffBackend
 	entered chan struct{}
@@ -419,6 +440,99 @@ func TestHandoffSession_ReplacementFenceSkipsStatusPoll(t *testing.T) {
 	}
 }
 
+// A successful process swap is only the middle of a handoff. The incoming
+// agent is still idle until its mission lands, so the replacement fence must
+// cover readiness and delivery too. Otherwise a status tick in this window can
+// observe Ready and end a task-backed run before the work has even been sent.
+func TestHandoffSession_ReplacementFenceCoversMissionDelivery(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	base := &handoffBackend{FakeBackend: session.NewFakeBackend()}
+	backend := &blockingReadinessHandoffBackend{
+		handoffBackend: base,
+		entered:        make(chan struct{}),
+		release:        make(chan struct{}),
+	}
+	inst := registerHandoffSubject(t, manager, repoID, repoPath, "fenced-delivery", backend)
+	done := make(chan error, 1)
+	go func() {
+		_, err := manager.HandoffSession(HandoffSessionRequest{
+			Title: "fenced-delivery", RepoID: repoID, To: tmux.ProgramGemini,
+		})
+		done <- err
+	}()
+
+	select {
+	case <-backend.entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("handoff never reached incoming-agent readiness")
+	}
+	opDuringReadiness := inst.GetInFlightOp()
+	manager.refreshInstanceStatus(repoID, inst)
+	_, _, statusPolls := base.eventSnapshot()
+	close(backend.release)
+	if err := <-done; err != nil {
+		t.Fatalf("HandoffSession: %v", err)
+	}
+
+	if opDuringReadiness != session.OpReplacing {
+		t.Fatalf("in-flight op while the incoming mission was still undelivered = %v, want OpReplacing", opDuringReadiness)
+	}
+	if statusPolls != 0 {
+		t.Fatalf("status poll probed %d times before the incoming mission landed; an idle prompt here is not a completed task run", statusPolls)
+	}
+	if got := inst.GetInFlightOp(); got != session.OpNone {
+		t.Fatalf("in-flight op after mission delivery = %v, want OpNone", got)
+	}
+}
+
+// A usage-limit banner can replace the incoming composer's ready prompt. That
+// is a parked handoff, not a generic delivery failure: the rendered takeover
+// brief must become the pending prompt so the normal limit-resume path sends
+// the context that never landed on this attempt.
+func TestHandoffSession_ParksIncomingLimitWithMissionPending(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	base := &handoffBackend{FakeBackend: session.NewFakeBackend()}
+	backend := &limitHandoffBackend{handoffBackend: base}
+	inst := registerHandoffSubject(t, manager, repoID, repoPath, "incoming-limit", backend)
+	inst.SetPrompt("finish the transaction without discarding the existing work")
+
+	_, err := manager.HandoffSession(HandoffSessionRequest{
+		Title: "incoming-limit", RepoID: repoID, To: tmux.ProgramCodex,
+	})
+	if !errors.Is(err, task.ErrLimitReached) {
+		t.Fatalf("HandoffSession error = %v, want a wrapped task.ErrLimitReached parked outcome", err)
+	}
+	if !inst.LimitReached() {
+		t.Fatal("incoming agent hit a limit during readiness but the handoff remained LiveRunning")
+	}
+	if _, ok := inst.LimitResetAt(); !ok {
+		t.Fatal("parked handoff lost the reset time parsed from the incoming agent's banner")
+	}
+	if got := inst.GetInFlightOp(); got != session.OpNone {
+		t.Fatalf("parked handoff retained in-flight op %v, want OpNone", got)
+	}
+	pending := inst.GetPrompt()
+	if !strings.Contains(pending, "continuing work") ||
+		!strings.Contains(pending, "finish the transaction without discarding the existing work") {
+		t.Fatalf("pending prompt is not the rendered takeover mission:\n%s", pending)
+	}
+	if _, prompts := base.snapshot(); len(prompts) != 0 {
+		t.Fatalf("sent %d prompts despite the incoming usage-limit banner, want 0", len(prompts))
+	}
+
+	raw, loadErr := config.LoadRepoInstances(repoID)
+	if loadErr != nil {
+		t.Fatalf("LoadRepoInstances: %v", loadErr)
+	}
+	var stored []session.InstanceData
+	if decodeErr := json.Unmarshal(raw, &stored); decodeErr != nil {
+		t.Fatalf("decode instances: %v", decodeErr)
+	}
+	if len(stored) != 1 || stored[0].Liveness != session.LiveLimitReached || stored[0].Prompt != pending {
+		t.Fatalf("persisted parked handoff = %+v, want LiveLimitReached with the rendered mission pending", stored)
+	}
+}
+
 func TestHandoffSession_StaleOutgoingPollCannotMarkIncomingAgentLost(t *testing.T) {
 	manager, repoID, repoPath := newStatusTestManager(t)
 	base := &handoffBackend{FakeBackend: session.NewFakeBackend()}
@@ -524,4 +638,39 @@ func TestHandoffSession_CapturesIncomingCodexConversation(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatalf("incoming Codex conversation was never captured: %+v", inst.AgentConversation())
+}
+
+// Conversation capture is asynchronous. A capture started for one Codex
+// runtime must not write through two later handoffs merely because the session
+// pointer — and eventually even the agent name — match again.
+func TestConversationCapture_DropsResultAfterLaterHandoffs(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	codexHome := t.TempDir()
+	t.Setenv("CODEX_HOME", codexHome)
+	backend := &handoffBackend{FakeBackend: session.NewFakeBackend()}
+	inst := registerHandoffSubject(t, manager, repoID, repoPath, "capture-generation", backend)
+
+	if _, err := inst.SwapAgentProgram(tmux.ProgramCodex, session.HandoffReasonManual, "sha-1", false); err != nil {
+		t.Fatalf("move fixture to Codex: %v", err)
+	}
+	inst.SetTmuxSession(tmux.NewTmuxSession(inst.Title, tmux.ProgramCodex))
+	snap := session.BeginConversationCaptureAtCodexHome(codexHome)
+	token := inst.AgentRuntimeToken()
+
+	if _, err := inst.SwapAgentProgram(tmux.ProgramClaude, session.HandoffReasonManual, "sha-2", false); err != nil {
+		t.Fatalf("first later handoff: %v", err)
+	}
+	inst.SetTmuxSession(tmux.NewTmuxSession(inst.Title, tmux.ProgramClaude))
+	if _, err := inst.SwapAgentProgram(tmux.ProgramCodex, session.HandoffReasonManual, "sha-3", false); err != nil {
+		t.Fatalf("second later handoff: %v", err)
+	}
+	inst.SetTmuxSession(tmux.NewTmuxSession(inst.Title, tmux.ProgramCodex))
+
+	writeDaemonCodexRolloutFile(t, codexHome, "rollout-2026-07-21T10-17-35-019f386f-7206-7fc2-803b-f7045e07a242.jsonl")
+	manager.captureAgentConversation(
+		repoID, daemonInstanceKey(repoID, inst.Title), inst, snap, token, time.Second,
+	)
+	if conv := inst.AgentConversation(); conv.HasID() {
+		t.Fatalf("capture from the superseded Codex runtime overwrote the current live slot: %+v", conv)
+	}
 }

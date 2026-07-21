@@ -85,8 +85,8 @@ func (i *Instance) PrepareAgentSwap(target string) (AgentSwapPlan, error) {
 
 // SwapAgent executes a prepared runtime replacement. The daemon must already
 // have raised OpReplacing and recorded plan.target as Instance.Program. Success
-// commits that fence in this wrapper rather than relying on every backend to
-// remember the lifecycle transition.
+// deliberately leaves that fence raised: the replacement is not a completed
+// handoff until the daemon has delivered (or explicitly parked) its mission.
 func (i *Instance) SwapAgent(plan AgentSwapPlan) error {
 	view := i.LifecycleView()
 	if view.InFlightOp != OpReplacing {
@@ -104,7 +104,7 @@ func (i *Instance) SwapAgent(plan AgentSwapPlan) error {
 	if err := i.currentBackend().SwapAgent(i, plan); err != nil {
 		return err
 	}
-	return i.Transition(CommitHandoff())
+	return nil
 }
 
 // ArchiveTeardown tears down every tab's tmux session for an archive AND

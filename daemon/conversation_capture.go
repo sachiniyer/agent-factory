@@ -10,14 +10,18 @@ import (
 var conversationCaptureTimeout = 2 * time.Second
 
 func (m *Manager) captureAgentConversationAsync(repoID, key string, inst *session.Instance, snap session.ConversationCaptureSnapshot) {
-	go m.captureAgentConversation(repoID, key, inst, snap, conversationCaptureTimeout)
+	if inst == nil {
+		return
+	}
+	token := inst.AgentRuntimeToken()
+	go m.captureAgentConversation(repoID, key, inst, snap, token, conversationCaptureTimeout)
 }
 
-func (m *Manager) captureAgentConversation(repoID, key string, inst *session.Instance, snap session.ConversationCaptureSnapshot, timeout time.Duration) {
+func (m *Manager) captureAgentConversation(repoID, key string, inst *session.Instance, snap session.ConversationCaptureSnapshot, token session.AgentRuntimeToken, timeout time.Duration) {
 	if inst == nil || inst.UserKilled() || inst.AgentConversation().HasID() {
 		return
 	}
-	agent := inst.ResolvedAgent()
+	agent := token.Agent()
 	if agent == "" {
 		return
 	}
@@ -36,7 +40,7 @@ func (m *Manager) captureAgentConversation(repoID, key string, inst *session.Ins
 	if current != inst || inst.UserKilled() {
 		return
 	}
-	if !inst.SetAgentConversation(conv) {
+	if !inst.SetAgentConversationForRuntime(token, conv) {
 		return
 	}
 
