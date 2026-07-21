@@ -1333,11 +1333,28 @@ export class AppShell {
     menu.setAttribute("aria-label", "Tab type");
     menu.hidden = true;
 
+    let scrollParent: HTMLElement | null = null;
+    const positionMenu = (): void => {
+      // The menu is fixed so the tab bar's horizontal overflow cannot clip it. Anchor
+      // its right edge to the trigger's caret, then keep the whole box in the viewport.
+      const anchor = trigger.getBoundingClientRect();
+      const menuBox = menu.getBoundingClientRect();
+      const maxLeft = Math.max(0, window.innerWidth - menuBox.width);
+      const left = Math.min(Math.max(0, anchor.right - menuBox.width), maxLeft);
+      const below = anchor.bottom + 6;
+      const above = anchor.top - menuBox.height - 6;
+      const top = below + menuBox.height <= window.innerHeight ? below : Math.max(0, above);
+      menu.style.left = `${left}px`;
+      menu.style.top = `${top}px`;
+    };
     const close = (): void => {
       menu.hidden = true;
       trigger.setAttribute("aria-expanded", "false");
       document.removeEventListener("mousedown", onDocMouseDown);
       document.removeEventListener("keydown", onKeyDown, true);
+      scrollParent?.removeEventListener("scroll", positionMenu);
+      scrollParent = null;
+      window.removeEventListener("resize", positionMenu);
     };
     const onDocMouseDown = (e: MouseEvent): void => {
       // A rerender can detach this control while the menu is open; closing on a
@@ -1359,7 +1376,11 @@ export class AppShell {
     };
     const open = (): void => {
       menu.hidden = false;
+      positionMenu();
       trigger.setAttribute("aria-expanded", "true");
+      scrollParent = wrap.closest<HTMLElement>(".af-tabbar");
+      scrollParent?.addEventListener("scroll", positionMenu, { passive: true });
+      window.addEventListener("resize", positionMenu);
       document.addEventListener("mousedown", onDocMouseDown);
       // CAPTURE phase, deliberately. The app's own keydown handler is a
       // capture-phase listener on document that stopPropagation()s Escape (so

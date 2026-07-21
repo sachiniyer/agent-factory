@@ -1046,8 +1046,8 @@ body {
   align-items: center;
 }
 .af-tab-menu {
-  position: absolute;
-  top: calc(100% + 6px);
+  position: fixed;
+  top: 0;
   left: 0;
   min-width: 9rem;
   background: var(--af-bg-raised);

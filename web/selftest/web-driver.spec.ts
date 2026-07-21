@@ -234,6 +234,66 @@ async function createTerminalTab(page: Page): Promise<void> {
   await expect(menu).toBeHidden();
 }
 
+interface ElementBox {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+/** Waits for an open new-tab menu to settle, then proves it is pixels the user can
+ *  actually click — not merely a non-hidden box clipped by an ancestor's overflow.
+ *  Two identical geometry samples avoid accepting a transition's in-flight frame. */
+async function settledHitTestableTabMenu(
+  page: Page,
+  menu: Locator,
+  trigger: Locator,
+): Promise<{ menu: ElementBox; trigger: ElementBox }> {
+  let previous = "";
+  let settled: { menu: ElementBox; trigger: ElementBox } | null = null;
+  await expect
+    .poll(
+      async () => {
+        const menuBox = await menu.boundingBox();
+        const triggerBox = await trigger.boundingBox();
+        const itemBox = await menu.locator(".af-tab-menu-item").first().boundingBox();
+        const viewport = page.viewportSize();
+        if (!menuBox || !triggerBox || !itemBox || !viewport) {
+          return false;
+        }
+        const geometry = [menuBox, triggerBox]
+          .flatMap((box) => [box.x, box.y, box.width, box.height])
+          .map((value) => value.toFixed(2))
+          .join(":");
+        const stable = geometry === previous;
+        previous = geometry;
+        const insideViewport =
+          menuBox.x >= 0 &&
+          menuBox.y >= 0 &&
+          menuBox.x + menuBox.width <= viewport.width &&
+          menuBox.y + menuBox.height <= viewport.height;
+        const hitTestable = await page.evaluate(
+          ({ x, y }) => {
+            const hit = document.elementFromPoint(x, y);
+            return hit instanceof Element && hit.closest(".af-tab-menu-item") !== null;
+          },
+          { x: itemBox.x + itemBox.width / 2, y: itemBox.y + itemBox.height / 2 },
+        );
+        if (stable && insideViewport && hitTestable) {
+          settled = { menu: menuBox, trigger: triggerBox };
+          return true;
+        }
+        return false;
+      },
+      { message: "the settled new-tab menu must be inside the viewport and receive pointer hits", timeout: 5_000 },
+    )
+    .toBe(true);
+  if (!settled) {
+    throw new Error("new-tab menu geometry did not settle");
+  }
+  return settled;
+}
+
 /**
  * Dispatches a drop carrying a HAND-CRAFTED drag payload ({index, tabs}) onto the
  * (single) current pane — bypassing the real tab buttons so a stale / out-of-range /
@@ -4038,6 +4098,52 @@ test("dismissing the install affordance sticks across reloads — it must never 
   await fireInstallOffer(p);
   await expect(p.locator(".af-install")).toBeHidden();
   await ctx.close();
+});
+
+test("new-tab menu (#2219): stays visible, hit-testable, and anchored while the tab bar scrolls", async () => {
+  // The seeded reorder session has enough real tabs to overflow a phone-width bar.
+  // Select its project explicitly: after a worker restart the daemon's most-recent
+  // project can be the task-only fixture, and this regression must not inherit that.
+  await page.setViewportSize({ width: 1280, height: 720 });
+  if ((await page.locator(".af-project-switch-name").textContent()) !== "mock-repo") {
+    await page.locator(".af-project-switch").click();
+    await projectItem(page, "mock-repo").click();
+  }
+  await expect(page.locator(".af-project-switch-name")).toHaveText("mock-repo");
+  await row(page, SESSION_ORDER).click();
+  await expect(page.locator(".af-main.af-main-term")).toBeVisible();
+  await page.setViewportSize({ width: 375, height: 700 });
+
+  const tabbar = page.locator(".af-tabbar");
+  await expect
+    .poll(() => tabbar.evaluate((bar) => bar.scrollWidth > bar.clientWidth), {
+      message: "the real four-tab roster must overflow the narrow tab bar",
+    })
+    .toBe(true);
+  const trigger = tabbar.locator(".af-tab-new");
+  await trigger.click();
+  const menu = tabbar.locator(".af-tab-menu");
+  await expect(menu).toBeVisible();
+  const before = await settledHitTestableTabMenu(page, menu, trigger);
+
+  // Playwright scrolls the end-of-row trigger fully into view before clicking it.
+  // Move the bar back a few pixels with the menu OPEN: both the caret and its fixed
+  // menu should move together, while the menu remains clickable and in the viewport.
+  const scroll = await tabbar.evaluate((bar) => {
+    const before = bar.scrollLeft;
+    bar.scrollLeft = Math.max(0, before - 4);
+    return { before, after: bar.scrollLeft };
+  });
+  expect(scroll.after, "the overflow fixture must permit a real horizontal scroll").toBeLessThan(scroll.before);
+  const after = await settledHitTestableTabMenu(page, menu, trigger);
+  const triggerShift = after.trigger.x - before.trigger.x;
+  const menuShift = after.menu.x - before.menu.x;
+  expect(Math.abs(menuShift - triggerShift), "the menu must track the caret's horizontal scroll").toBeLessThan(1);
+  expect(Math.abs(after.menu.x + after.menu.width - (after.trigger.x + after.trigger.width))).toBeLessThan(1);
+
+  await page.keyboard.press("Escape");
+  await expect(menu).toBeHidden();
+  await page.setViewportSize({ width: 1280, height: 720 });
 });
 
 test("vscode tab (#2077): the labelled New tab menu creates a VS Code tab and serves it through the proxy", async () => {
