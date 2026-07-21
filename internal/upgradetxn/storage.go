@@ -118,6 +118,32 @@ func prepareMetadataParents(home string, parents []MetadataParentSnapshot) (int,
 	return len(parents), nil
 }
 
+func prepareCandidateMetadataParents(
+	home, relative string, snapshotted int,
+) ([]MetadataParentSnapshot, error) {
+	paths := metadataParentPaths(relative)
+	prepared := make([]MetadataParentSnapshot, 0, len(paths)-snapshotted)
+	for _, relativePath := range paths[snapshotted:] {
+		path := filepath.Join(home, relativePath)
+		info, err := os.Lstat(path)
+		if errors.Is(err, os.ErrNotExist) {
+			break
+		}
+		if err != nil {
+			return prepared, fmt.Errorf("inspect candidate-created metadata parent %s: %w", relativePath, err)
+		}
+		if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+			return prepared, fmt.Errorf("candidate-created metadata parent %s is not a real directory", relativePath)
+		}
+		parent := MetadataParentSnapshot{Path: relativePath, Mode: uint32(info.Mode().Perm())}
+		if err := os.Chmod(path, info.Mode().Perm()|0o700); err != nil {
+			return prepared, fmt.Errorf("make candidate-created metadata parent %s writable: %w", relativePath, err)
+		}
+		prepared = append(prepared, parent)
+	}
+	return prepared, nil
+}
+
 func restoreMetadataParentModes(home string, parents []MetadataParentSnapshot) error {
 	var result error
 	for index := len(parents) - 1; index >= 0; index-- {
@@ -141,6 +167,15 @@ func restoreMetadataEntry(home string, metadata MetadataSnapshot) (retErr error)
 	}()
 	if err != nil {
 		return err
+	}
+	if !metadata.Existed {
+		candidateParents, err := prepareCandidateMetadataParents(home, metadata.Path, len(metadata.Parents))
+		defer func() {
+			retErr = errors.Join(retErr, restoreMetadataParentModes(home, candidateParents))
+		}()
+		if err != nil {
+			return err
+		}
 	}
 	target := filepath.Join(home, metadata.Path)
 	if err := ensureNoSymlinkParents(home, target); err != nil {

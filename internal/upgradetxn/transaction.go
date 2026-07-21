@@ -218,6 +218,7 @@ type RecoveryLease struct {
 	path       string
 	txnID      string
 	nonce      string
+	actorID    string
 	executable string
 	txn        *Transaction
 	released   bool
@@ -230,6 +231,7 @@ type RecoveryStatus struct {
 	SchemaVersion int       `json:"schema_version"`
 	TransactionID string    `json:"transaction_id"`
 	Nonce         string    `json:"nonce"`
+	ActorID       string    `json:"actor_id"`
 	PID           int       `json:"pid"`
 	ProcessStart  string    `json:"process_start,omitempty"`
 	BootID        string    `json:"boot_id,omitempty"`
@@ -428,6 +430,7 @@ func readRecoveryStatusForJournal(journal Journal) (RecoveryStatus, error) {
 	if status.SchemaVersion != journalSchemaVersion ||
 		status.TransactionID != journal.ID ||
 		status.Nonce != journal.RecoveryNonce ||
+		!validDigest(status.ActorID) ||
 		status.PID <= 0 ||
 		!validPhase(status.Phase) ||
 		status.HeartbeatAt.IsZero() ||
@@ -499,88 +502,6 @@ func (t *Transaction) RecoveryActorLive() (bool, error) {
 	return false, releaseFileLock(file)
 }
 
-// AuthorizeActivation completes the old process -> previous-binary actor nonce
-// handshake. It succeeds only while a recovery actor holds the kernel lock and
-// its validated status reports supervisor_ready for this exact transaction.
-func (t *Transaction) AuthorizeActivation(transactionID, nonce string) error {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	current, err := readJournal(activeJournalPath(t.journal.HomeDir))
-	if err != nil {
-		return err
-	}
-	if err := validateJournal(t.journal.HomeDir, current); err != nil {
-		return err
-	}
-	if current.ID != transactionID || current.RecoveryNonce != nonce {
-		return errors.New("upgrade activation handshake does not match the active transaction")
-	}
-	if current.Phase != PhaseSupervisorReady {
-		return fmt.Errorf("upgrade supervisor is not ready for activation (phase %s)", current.Phase)
-	}
-	if err := validateActivationRecoveryProof(current, time.Now().UTC()); err != nil {
-		return err
-	}
-	approvalPath := filepath.Join(transactionDir(current.HomeDir, current.ID), "activation.approved")
-	if err := durableAtomicWriteFile(approvalPath, []byte(current.RecoveryNonce+"\n"), journalFileMode); err != nil {
-		return fmt.Errorf("persist upgrade activation approval: %w", err)
-	}
-	t.journal = current
-	return nil
-}
-
-func validateActivationRecoveryProof(current Journal, now time.Time) error {
-	lockPath := filepath.Join(transactionDir(current.HomeDir, current.ID), "recovery.lock")
-	probe, err := acquireFileLock(lockPath, true)
-	if err == nil {
-		_ = releaseFileLock(probe)
-		return errors.New("upgrade activation cannot be authorized without a live recovery actor")
-	}
-	if !errors.Is(err, ErrRecoveryActive) {
-		return fmt.Errorf("verify recovery actor before activation: %w", err)
-	}
-	readyPath := filepath.Join(transactionDir(current.HomeDir, current.ID), "recovery.ready.lock")
-	readyProbe, err := acquireFileLock(readyPath, true)
-	if err == nil {
-		_ = releaseFileLock(readyProbe)
-		return errors.New("upgrade recovery actor has not published its current readiness proof")
-	}
-	if !errors.Is(err, ErrRecoveryActive) {
-		return fmt.Errorf("verify recovery actor readiness before activation: %w", err)
-	}
-	status, err := readRecoveryStatusForJournal(current)
-	if err != nil {
-		return err
-	}
-	if status.Phase != PhaseSupervisorReady {
-		return fmt.Errorf("upgrade recovery actor has not reached supervisor_ready (status %s)", status.Phase)
-	}
-	if !now.Before(status.Deadline) {
-		return fmt.Errorf("upgrade recovery actor's supervisor_ready deadline expired at %s", status.Deadline.Format(time.RFC3339Nano))
-	}
-	return nil
-}
-
-// ActivationAuthorized is read by the previous-binary actor before it stops
-// the old daemon. A missing file is a normal not-yet result; mismatched content
-// is a hard error rather than permission to proceed.
-func (t *Transaction) ActivationAuthorized() (bool, error) {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	path := filepath.Join(transactionDir(t.journal.HomeDir, t.journal.ID), "activation.approved")
-	data, err := os.ReadFile(path)
-	if errors.Is(err, os.ErrNotExist) {
-		return false, nil
-	}
-	if err != nil {
-		return false, fmt.Errorf("read upgrade activation approval: %w", err)
-	}
-	if strings.TrimSpace(string(data)) != t.journal.RecoveryNonce {
-		return false, errors.New("upgrade activation approval nonce does not match the transaction")
-	}
-	return true, nil
-}
-
 // Advance persists a state-machine boundary that does not itself modify the
 // candidate or rollback inputs.
 func (t *Transaction) advance(next Phase) error {
@@ -646,7 +567,18 @@ func (t *Transaction) installCandidate() error {
 }
 
 func (t *Transaction) verifyInstalledCandidateLocked() error {
-	_, err := readAndVerify(t.journal.ExecutablePath, t.journal.CandidateSHA256)
+	info, err := os.Lstat(t.journal.ExecutablePath)
+	if err != nil {
+		return fmt.Errorf("inspect installed candidate: %w", err)
+	}
+	if !info.Mode().IsRegular() {
+		return errors.New("installed candidate is not a regular file")
+	}
+	if info.Mode().Perm() != os.FileMode(t.journal.ExecutableMode) {
+		return fmt.Errorf("installed candidate mode is %04o, want %04o",
+			info.Mode().Perm(), os.FileMode(t.journal.ExecutableMode))
+	}
+	_, err = readAndVerify(t.journal.ExecutablePath, t.journal.CandidateSHA256)
 	if err != nil {
 		return fmt.Errorf("verify installed candidate: %w", err)
 	}
@@ -830,12 +762,19 @@ func (t *Transaction) tryAcquireRecoveryAs(actorExecutable string) (*RecoveryLea
 		_ = releaseFileLock(file)
 		return nil, fmt.Errorf("acquire upgrade recovery readiness lock: %w", err)
 	}
+	actorID, err := newRecoveryActorID()
+	if err != nil {
+		_ = releaseFileLock(readyFile)
+		_ = releaseFileLock(file)
+		return nil, err
+	}
 	return &RecoveryLease{
 		file:       file,
 		readyFile:  readyFile,
 		path:       statusPath,
 		txnID:      t.journal.ID,
 		nonce:      t.journal.RecoveryNonce,
+		actorID:    actorID,
 		executable: actorPath,
 		txn:        t,
 	}, nil
@@ -941,6 +880,7 @@ func (l *RecoveryLease) Heartbeat(phase Phase, deadline time.Time) error {
 		SchemaVersion: journalSchemaVersion,
 		TransactionID: l.txnID,
 		Nonce:         l.nonce,
+		ActorID:       l.actorID,
 		PID:           os.Getpid(),
 		ProcessStart:  processStartIdentity(),
 		BootID:        kernelBootID(),

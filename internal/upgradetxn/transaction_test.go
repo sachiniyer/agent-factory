@@ -116,6 +116,34 @@ func TestRollbackRestoresBinaryMetadataAndAbsence(t *testing.T) {
 	require.NoError(t, lease.Rollback())
 }
 
+func TestRollbackRemovesAbsentMetadataUnderCandidatePrivateParent(t *testing.T) {
+	home := t.TempDir()
+	plan := basicPreparePlan(t, home, "candidate-private-parent")
+	plan.MetadataPaths = []string{filepath.Join("candidate", "tasks.json")}
+	txn, err := Prepare(plan)
+	require.NoError(t, err)
+	lease, err := txn.tryAcquireRecoveryAs(txn.Journal().PreviousBinaryPath)
+	require.NoError(t, err)
+	defer lease.Release()
+	require.NoError(t, lease.Advance(PhaseSupervisorReady))
+	require.NoError(t, lease.Advance(PhaseDaemonStopped))
+	require.NoError(t, lease.InstallCandidate())
+
+	parent := filepath.Join(home, "candidate")
+	require.NoError(t, os.Mkdir(parent, 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(parent, "tasks.json"), []byte("candidate-state"), 0o600))
+	require.NoError(t, os.Chmod(parent, 0o500))
+	t.Cleanup(func() { _ = os.Chmod(parent, 0o700) })
+
+	require.NoError(t, lease.Rollback(),
+		"rollback must temporarily make candidate-created parents writable to restore recorded absence")
+	require.NoFileExists(t, filepath.Join(parent, "tasks.json"))
+	info, err := os.Stat(parent)
+	require.NoError(t, err)
+	require.Equal(t, os.FileMode(0o500), info.Mode().Perm(),
+		"temporary rollback permissions must not broaden a surviving candidate-created directory")
+}
+
 func TestRollbackResumesFromDurablePerFileCheckpoints(t *testing.T) {
 	txn, home, executable := prepareFixture(t)
 	lease, err := txn.tryAcquireRecoveryAs(txn.Journal().PreviousBinaryPath)
@@ -206,10 +234,33 @@ func TestActivationRequiresLivePreviousBinaryNonceHandshake(t *testing.T) {
 	require.NoError(t, lease.Heartbeat(PhaseSupervisorReady, time.Now().Add(time.Minute)))
 	require.Error(t, txn.AuthorizeActivation(journal.ID, "wrong-nonce"))
 	require.NoError(t, txn.AuthorizeActivation(journal.ID, journal.RecoveryNonce))
-	authorized, err := txn.ActivationAuthorized()
+	authorized, err := lease.ActivationAuthorized()
 	require.NoError(t, err)
 	require.True(t, authorized)
 	require.NoError(t, lease.Release())
+}
+
+func TestActivationApprovalCannotBeConsumedByTakeoverActor(t *testing.T) {
+	txn, _, _ := prepareFixture(t)
+	journal := txn.Journal()
+	first, err := txn.tryAcquireRecoveryAs(journal.PreviousBinaryPath)
+	require.NoError(t, err)
+	require.NoError(t, first.Advance(PhaseSupervisorReady))
+	require.NoError(t, first.Heartbeat(PhaseSupervisorReady, time.Now().Add(time.Minute)))
+	require.NoError(t, txn.AuthorizeActivation(journal.ID, journal.RecoveryNonce))
+	require.NoError(t, first.Release())
+
+	takeover, err := txn.tryAcquireRecoveryAs(journal.PreviousBinaryPath)
+	require.NoError(t, err)
+	defer takeover.Release()
+	require.NoError(t, takeover.Heartbeat(PhaseSupervisorReady, time.Now().Add(time.Minute)))
+	authorized, err := takeover.ActivationAuthorized()
+	require.NoError(t, err)
+	require.False(t, authorized)
+	require.NoError(t, txn.AuthorizeActivation(journal.ID, journal.RecoveryNonce))
+	authorized, err = takeover.ActivationAuthorized()
+	require.NoError(t, err)
+	require.True(t, authorized, "the old daemon can explicitly authorize the new lock owner")
 }
 
 func TestActivationRejectsExpiredSupervisorLease(t *testing.T) {
@@ -224,7 +275,7 @@ func TestActivationRejectsExpiredSupervisorLease(t *testing.T) {
 	require.Error(t, err,
 		"a live-but-stuck actor whose own phase deadline expired is not ready to own shutdown")
 	require.ErrorContains(t, err, "deadline expired")
-	authorized, readErr := txn.ActivationAuthorized()
+	authorized, readErr := lease.ActivationAuthorized()
 	require.NoError(t, readErr)
 	require.False(t, authorized)
 	require.NoError(t, lease.Release())
@@ -348,6 +399,25 @@ func TestCommitIsDurableBeforeCleanup(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "candidate-binary", string(got),
 		"cleanup after commit must never restore the previous binary")
+}
+
+func TestCommitRejectsCandidateWithChangedExecutableMode(t *testing.T) {
+	txn, _, executable := prepareFixture(t)
+	lease, err := txn.tryAcquireRecoveryAs(txn.Journal().PreviousBinaryPath)
+	require.NoError(t, err)
+	defer lease.Release()
+	require.NoError(t, lease.Advance(PhaseSupervisorReady))
+	require.NoError(t, lease.Advance(PhaseDaemonStopped))
+	require.NoError(t, lease.InstallCandidate())
+	require.NoError(t, lease.Advance(PhaseCandidateStarting))
+	require.NoError(t, lease.Advance(PhaseCandidateValidating))
+	require.NoError(t, os.Chmod(executable, 0o644))
+
+	err = lease.Commit()
+	require.Error(t, err, "validation must not commit a candidate that cannot be executed on restart")
+	require.Equal(t, PhaseCandidateValidating, txn.Journal().Phase)
+	require.FileExists(t, txn.Journal().PreviousBinaryPath,
+		"rollback material must remain after refusing the candidate")
 }
 
 func TestTerminalCleanupRecoversAfterTransactionDirectoryDisappears(t *testing.T) {
