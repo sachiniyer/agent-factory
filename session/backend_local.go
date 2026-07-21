@@ -176,6 +176,10 @@ func (b *LocalBackend) Provision(i *Instance, firstTimeSetup bool) error {
 // provision because it is the first on-disk mutation and therefore belongs
 // inside this cleanup scope.
 func (b *LocalBackend) Launch(i *Instance, firstTimeSetup bool) error {
+	return b.launch(i, firstTimeSetup, nil)
+}
+
+func (b *LocalBackend) launch(i *Instance, firstTimeSetup bool, prepared *CreateLaunchPlan) error {
 	i.mu.RLock()
 	tmuxSession := i.tmuxLocked()
 	i.mu.RUnlock()
@@ -282,12 +286,24 @@ func (b *LocalBackend) Launch(i *Instance, firstTimeSetup bool) error {
 			return setupErr
 		}
 
-		// Inject Agent Factory instructions into the session. On a first launch
-		// only, seed provider conversation identity when a supported agent offers
-		// an explicit id flag; restore/respawn paths keep their existing latest-
-		// session behavior until PR2 wires resume-by-recorded-id.
-		program := prepareLaunchConversation(i, resolveProgramForInstance(i))
-		tmuxSession.SetProgram(injectSystemPrompt(program))
+		// Inject Agent Factory instructions into the session. The daemon create
+		// path supplies a command frozen after provisioning and before process
+		// launch; direct Start callers retain the established inline preparation.
+		var program string
+		if prepared != nil {
+			if prepared.workDir != gw.GetWorktreePath() || strings.TrimSpace(prepared.program) == "" {
+				setupErr = fmt.Errorf("prepared create launch no longer matches session %q", i.Title)
+				return setupErr
+			}
+			program = prepared.program
+			if prepared.conversation.HasID() {
+				i.SetAgentConversation(prepared.conversation)
+			}
+		} else {
+			program = prepareLaunchConversation(i, resolveProgramForInstance(i))
+			program = injectSystemPrompt(program)
+		}
+		tmuxSession.SetProgram(program)
 
 		// Create new session
 		if err := tmuxSession.Start(gw.GetWorktreePath()); err != nil {

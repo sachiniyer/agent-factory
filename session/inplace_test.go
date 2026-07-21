@@ -24,8 +24,9 @@ import (
 // lets LocalBackend.Start(true) — agent session AND the default shell tab —
 // run end-to-end with no real tmux server.
 type inPlaceTmuxWorld struct {
-	t  *testing.T
-	mu sync.Mutex
+	t        *testing.T
+	mu       sync.Mutex
+	commands []*exec.Cmd
 	// created holds sanitized session names spawned via new-session.
 	created map[string]bool
 }
@@ -45,6 +46,9 @@ func argAfter(args []string, flag string) string {
 }
 
 func (w *inPlaceTmuxWorld) Start(c *exec.Cmd) (*os.File, error) {
+	w.mu.Lock()
+	w.commands = append(w.commands, c)
+	w.mu.Unlock()
 	if name := argAfter(c.Args, "-s"); name != "" {
 		w.mu.Lock()
 		w.created[name] = true

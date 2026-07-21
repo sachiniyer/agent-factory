@@ -127,13 +127,12 @@ func (m *Manager) CreateSession(ctx context.Context, req CreateSessionRequest) (
 		return session.InstanceData{}, err
 	}
 
-	conversationCapture := session.BeginConversationCapture()
-
 	// Single creation flow (#930 PR 3): every instance owns its worktree 1:1.
 	// InPlace only changes WHICH worktree that is — the repo's own working tree,
 	// marked external — not the flow itself. finishCreateStart marks the instance
 	// live, PARKS it at a usage-limit wall (#1146 PR4), or returns a fatal error.
-	if serr := finishCreateStart(instance, req.Prompt, task.StartAndSendPrompt(ctx, instance, req.Prompt)); serr != nil {
+	conversationCapture, startErr := task.StartAndSendPromptWithConversationCapture(ctx, instance, req.Prompt)
+	if serr := finishCreateStart(instance, req.Prompt, startErr); serr != nil {
 		// An unknown startup outcome is already a teardown boundary. Launch may have
 		// failed because the name it probed is not the name tmux stored; asking Kill
 		// through that same binding can then answer "absent" for the wrong name and
