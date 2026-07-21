@@ -146,12 +146,16 @@ func (d InstanceData) ForStorage() InstanceData {
 	d.InFlightOp = OpNone
 	d.LifecycleAction = LifecycleActionNone
 	d.CanKill = false
-	if !d.UserKilled || lv == LiveArchived {
-		// Cleanup credentials/identities have no reason to live in ordinary session
-		// records. The kill tombstone is the commit point that makes them durable,
-		// except for archived rows whose runtime was already reaped before archive.
+	switch {
+	case lv == LiveArchived:
+		// Archived rows have already reaped their runtime, so retaining a teardown
+		// identity here would only preserve unused credentials until row deletion.
 		d.RuntimeCleanup = nil
-	} else if d.runtimeCleanup != nil {
+	case !d.UserKilled:
+		// Cleanup credentials/identities have no reason to live in ordinary session
+		// records. The kill tombstone is their only persistence boundary.
+		d.RuntimeCleanup = nil
+	case d.runtimeCleanup != nil:
 		d.RuntimeCleanup = d.runtimeCleanup.clone()
 	}
 	// Never let the private staging pointer escape a storage projection. Loaded
