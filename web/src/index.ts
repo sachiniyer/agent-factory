@@ -1247,13 +1247,7 @@ function doRetryLimit(): void {
   if (!sel || tok === null) {
     return;
   }
-  void resumeFromLimit(sel.id, sel.title, tok)
-    .then((result) => {
-      if (!result.ok) {
-        throw new Error(result.reason || "resume was not performed");
-      }
-    })
-    .catch((e) => surfaceTabError(e));
+  void resumeFromLimit(sel.id, sel.title, tok).catch((e) => surfaceTabError(e));
 }
 
 /** Removes a task (RemoveTask), then refetches. Keys off the stable id. */

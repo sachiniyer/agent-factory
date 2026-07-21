@@ -118,7 +118,7 @@ test("resumeFromLimit posts the stable id, so a duplicate title cannot misroute 
   assert.equal(cap.body.repo_id, "", "an all-repos web client scopes by id, not repo");
 });
 
-test("resumeFromLimit returns the daemon's no-op outcome", async () => {
+test("resumeFromLimit rejects the daemon's no-op outcome", async () => {
   (globalThis as { fetch: unknown }).fetch = async (): Promise<Response> =>
     ({
       ok: true,
@@ -127,8 +127,11 @@ test("resumeFromLimit returns the daemon's no-op outcome", async () => {
       json: async () => ({ data: { ok: false, reason: "another operation owns the retry" }, error: null }),
     }) as unknown as Response;
 
-  const result = await resumeFromLimit("id-repoB", "feature", "tok");
-  assert.deepEqual(result, { ok: false, reason: "another operation owns the retry" });
+  await assert.rejects(
+    resumeFromLimit("id-repoB", "feature", "tok"),
+    /another operation owns the retry/,
+    "a successful HTTP envelope must not turn a daemon no-op into a successful web action",
+  );
 });
 
 test("listPrograms asks the daemon for the agent catalog (#1970)", async () => {

@@ -415,8 +415,11 @@ export interface ResumeFromLimitResult {
   reason?: string;
 }
 
-export async function resumeFromLimit(id: string, title: string, token: string): Promise<ResumeFromLimitResult> {
-  return af<ResumeFromLimitResult>("ResumeFromLimit", { id, title, repo_id: "" }, token);
+export async function resumeFromLimit(id: string, title: string, token: string): Promise<void> {
+  const result = await af<ResumeFromLimitResult>("ResumeFromLimit", { id, title, repo_id: "" }, token);
+  if (!result.ok) {
+    throw new Error(result.reason || "resume was not performed");
+  }
 }
 
 /** The daemon's DeleteProject response: how many sessions it archived vs tore
