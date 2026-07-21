@@ -56,6 +56,12 @@ export const InFlightOp = {
  *  torn down but must not reuse their unconfirmed runtime binding. */
 export type LifecycleAction = "archive" | "restore";
 
+/** A verified model transition observed after af handled an agent safety dialog. */
+export interface AgentModelChange {
+  before: string;
+  after: string;
+}
+
 /** session.Status (session/instance.go) — the legacy single-axis int, read ONLY
  *  as a defensive fallback when a projection somehow omits `liveness` (never
  *  expected from the daemon's live Snapshot, which always emits it). */
@@ -95,6 +101,8 @@ export interface SessionData {
   /** Daemon-owned explicit teardown capability. True means the row has a stable
    *  non-creating target; absence/false fails closed. */
   can_kill?: boolean;
+  /** Live, projection-only model diagnostic; never restored from instances.json. */
+  model_change?: AgentModelChange;
   /** Usage-limit reset time (RFC3339), present only for a LimitReached row. */
   limit_reset_at?: string;
   /** Backend discriminator; "remote" marks a remote-hook session (→ [remote]). */

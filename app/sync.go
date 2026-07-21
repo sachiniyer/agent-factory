@@ -646,6 +646,12 @@ func (m *home) updateInstanceFromSnapshot(inst *session.Instance, d session.Inst
 			changed = true
 		}
 	}
+	// Mirror the daemon's live model diagnostic on its own projection axis. It
+	// can appear or clear while liveness stays Ready/Running, so folding it into
+	// the status compare above would leave the TUI stale until an unrelated event.
+	if inst.SetAgentModelChange(d.ModelChange) {
+		changed = true
+	}
 	// Backends without user-managed tabs (the off-box docker/ssh/hook runtimes)
 	// have a tab list their runtime owns — a single agent tab, fixed at Launch —
 	// so there is nothing for the snapshot to reconcile against. Skipping is a

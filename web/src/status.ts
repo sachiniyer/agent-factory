@@ -1,7 +1,8 @@
 // The status-dot + title mapping for a sidebar row (#1592 Phase 5 PR3). This is a
 // line-for-line port of the TUI renderer, ui/tree/render.go — the single source of
 // truth for how (Liveness, InFlightOp) become a glyph, a color, and the [lost] /
-// [deleting] / [limit] / [remote] title prefixes. The web MUST match it exactly:
+// [deleting] / [limit] / [remote] / [model changed] title prefixes. The web MUST
+// match it exactly:
 // two thin clients of the same projection cannot diverge in status semantics, only
 // in pixels (design §3). Adding a Liveness value forces a deliberate choice here,
 // mirroring the TUI's TOTAL liveness switch (render.go:274-301).
@@ -200,9 +201,10 @@ export function compareSessionsForRail(a: SessionData, b: SessionData): number {
 
 /**
  * Builds the row title with the same prefixes the TUI prepends (render.go:304-345),
- * in the same precedence: [remote] outermost, then the state marker. Archived rows
- * deliberately carry NO word prefix (render.go:326-338) — the glyph + dimming say
- * it, and an 11-char prefix would eat the title cell.
+ * in the same precedence for ordinary status prefixes, with the orthogonal model
+ * diagnostic outermost so narrow rows cannot hide it. Archived rows carry NO
+ * word prefix (render.go:326-338) — the glyph + dimming say it, and an 11-char
+ * prefix would eat the title cell.
  */
 export function rowTitle(s: SessionData): string {
   const lv = livenessOf(s);
@@ -217,6 +219,9 @@ export function rowTitle(s: SessionData): string {
   }
   if (s.backend_type === "remote") {
     title = "[remote] " + title;
+  }
+  if (s.model_change) {
+    title = "[model changed] " + title;
   }
   return title;
 }

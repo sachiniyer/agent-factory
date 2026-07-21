@@ -133,7 +133,12 @@ func (s *remoteAgentServer) Snapshot() (Observation, error) {
 	if err := s.rc.call("/v1/agent/snapshot", struct{}{}, &resp); err != nil {
 		return Observation{}, err
 	}
-	return Observation{Updated: resp.Updated, HasPrompt: resp.HasPrompt, Content: resp.Content}, nil
+	return Observation{
+		Updated:     resp.Updated,
+		HasPrompt:   resp.HasPrompt,
+		Content:     resp.Content,
+		ModelChange: cloneAgentModelChange(resp.ModelChange),
+	}, nil
 }
 
 func (s *remoteAgentServer) Preview(tab int, full bool) (PreviewSnapshot, error) {
@@ -685,9 +690,10 @@ type agentLifecycleReq struct {
 }
 
 type agentSnapshotResp struct {
-	Updated   bool   `json:"updated"`
-	HasPrompt bool   `json:"has_prompt"`
-	Content   string `json:"content"`
+	Updated     bool              `json:"updated"`
+	HasPrompt   bool              `json:"has_prompt"`
+	Content     string            `json:"content"`
+	ModelChange *AgentModelChange `json:"model_change,omitempty"`
 }
 
 type agentPreviewReq struct {

@@ -221,16 +221,21 @@ func (m *Manager) observeTaskRunWhilePaused(repoID, key string, instance *sessio
 	obs, err := instance.AgentServer().Snapshot()
 	// Whatever happened, no loss episode survives an attach (see above).
 	m.clearRemoteLoss(key)
-	if err != nil || obs.Updated || obs.HasPrompt {
-		// Unanswerable, still working, or waiting on the user: either way the run
-		// has not finished, so there is nothing for the cap to learn this tick.
+	if err != nil {
+		return
+	}
+	projectionChanged := instance.SetAgentModelChange(obs.ModelChange)
+	if obs.Updated || obs.HasPrompt {
+		// Still working or waiting on the user: either way the run has not
+		// finished, so there is nothing for the cap to learn this tick.
+		m.persistPollChange(repoID, instance, before, beforeReset, projectionChanged)
 		return
 	}
 	// Idle output. The normal poll would probe liveness here to tell a healthy idle
 	// session from a vanished one; this path deliberately does not, because it must
 	// never conclude death. The attach already answers that question.
 	m.resolveIdleLiveness(instance, obs.Content, epoch)
-	m.persistPollChange(repoID, instance, before, beforeReset)
+	m.persistPollChange(repoID, instance, before, beforeReset, projectionChanged)
 }
 
 func (m *Manager) RefreshStatuses() {
@@ -415,6 +420,7 @@ func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instanc
 		m.settleRemoteProbeFailure(repoID, key, instance, before, beforeReset)
 		return
 	}
+	projectionChanged := instance.SetAgentModelChange(obs.ModelChange)
 	updated, hasPrompt, content := obs.Updated, obs.HasPrompt, obs.Content
 	// The Snapshot answered, so the transport works and any loss episode is over.
 	// This is the ONLY thing the debounce tracks — see remoteloss.go: it counts
@@ -498,7 +504,7 @@ func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instanc
 	}
 
 	// Persist a liveness OR usage-limit reset-time change (#1146); see limit.go.
-	m.persistPollChange(repoID, instance, before, beforeReset)
+	m.persistPollChange(repoID, instance, before, beforeReset, projectionChanged)
 }
 
 // SaveInstances writes the manager's authoritative in-memory instances to disk

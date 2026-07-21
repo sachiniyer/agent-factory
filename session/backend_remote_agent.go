@@ -124,6 +124,10 @@ func (b *remoteAgentBackend) IsAlive(i *Instance) (bool, error) {
 // handles it before returning a snapshot.
 func (b *remoteAgentBackend) CheckAndHandleTrustPrompt(*Instance) bool { return false }
 
+// AgentModelChange is carried by the remote AgentServer's Snapshot; asking the
+// daemon-side backend would recurse through that same server.
+func (b *remoteAgentBackend) AgentModelChange(*Instance) *AgentModelChange { return nil }
+
 // Recover and Respawn both re-provision a disposable remote workspace from the
 // session branch, then launch it again.
 func (b *remoteAgentBackend) Recover(i *Instance) error { return recoverSandbox(i) }

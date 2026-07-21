@@ -15,12 +15,12 @@ func (i *Instance) ToInstanceData() InstanceData {
 	return i.toInstanceDataLocked()
 }
 
-// ToInstanceDataWithEpoch returns the serializable form together with the state
-// epoch it was read at, both under ONE hold of i.mu (#2135). A writer that
-// persists what it read uses it so the epoch it re-checks before the write
-// provably belongs to the payload it is about to write — reading the two
-// separately would leave a window in which the state moves between them, which is
-// the very thing the epoch exists to detect.
+// ToInstanceDataWithEpoch returns the serializable form together with the
+// lifecycle epoch it was read at, both under ONE hold of i.mu (#2135). The epoch
+// deliberately does not cover every field in InstanceData (tabs are the notable
+// example), so it may correlate lifecycle observations but must not be used as a
+// whole-projection freshness guard. Writers of the whole payload re-read it in
+// their ordering domain instead; see daemon.persistPollChange.
 func (i *Instance) ToInstanceDataWithEpoch() (InstanceData, uint64) {
 	i.mu.RLock()
 	defer i.mu.RUnlock()
@@ -44,6 +44,7 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 		InFlightOp:            i.inFlightOp,
 		LifecycleAction:       lifecycleActionFor(i.ID, i.liveness, i.inFlightOp, i.startupStateUnknown),
 		CanKill:               canKillFor(i.ID, i.inFlightOp),
+		ModelChange:           agentModelChangeForLiveness(i.agentModelChange, i.liveness),
 		Height:                i.Height,
 		Width:                 i.Width,
 		CreatedAt:             i.CreatedAt,
@@ -181,6 +182,7 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 		// finished run from an interrupted one.
 		taskRunActive:         data.TaskRunActive,
 		limitResetAt:          data.LimitResetAt,
+		agentModelChange:      agentModelChangeForLiveness(data.ModelChange, liveness),
 		Height:                data.Height,
 		Width:                 data.Width,
 		CreatedAt:             data.CreatedAt,

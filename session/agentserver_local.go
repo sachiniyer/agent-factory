@@ -145,7 +145,12 @@ func (s *localAgentServer) Snapshot() (Observation, error) {
 	b := s.inst.currentBackend()
 	b.CheckAndHandleTrustPrompt(s.inst)
 	updated, hasPrompt, content := b.HasUpdated(s.inst)
-	return Observation{Updated: updated, HasPrompt: hasPrompt, Content: content}, nil
+	return Observation{
+		Updated:     updated,
+		HasPrompt:   hasPrompt,
+		Content:     content,
+		ModelChange: b.AgentModelChange(s.inst),
+	}, nil
 }
 
 func (s *localAgentServer) Preview(tab int, full bool) (PreviewSnapshot, error) {

@@ -2399,7 +2399,10 @@ function sessionRow(
   }
   row.setAttribute("role", "option");
   row.setAttribute("aria-selected", selected ? "true" : "false");
-  row.setAttribute("title", `${s.title} — ${status.label}`);
+  const modelChange = s.model_change
+    ? `; model changed from ${s.model_change.before} to ${s.model_change.after}`
+    : "";
+  row.setAttribute("title", `${s.title} — ${status.label}${modelChange}`);
   if (!actionable && !managed) {
     // The server withheld both capabilities: a creating row has no session yet,
     // while an id-less row has no unambiguous mutation target.

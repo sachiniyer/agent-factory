@@ -87,6 +87,28 @@ test("title prefixes match render.go precedence", () => {
     rowTitle(sess({ title: "w", liveness: Liveness.Lost, backend_type: "remote" })),
     "[remote] [lost] w",
   );
+  assert.equal(
+    rowTitle(
+      sess({
+        title: "w",
+        model_change: { before: "gpt-5.6-sol max", after: "gpt-5.6-luna low" },
+      }),
+    ),
+    "[model changed] w",
+    "a model change is visible even when the liveness remains healthy",
+  );
+  assert.equal(
+    rowTitle(
+      sess({
+        title: "w",
+        liveness: Liveness.Lost,
+        backend_type: "remote",
+        model_change: { before: "gpt-5.6-sol max", after: "gpt-5.6-luna low" },
+      }),
+    ),
+    "[model changed] [remote] [lost] w",
+    "the diagnostic remains outermost when state and backend prefixes coexist",
+  );
 });
 
 test("[limit] badge shows the reset time like render.go's limitBadgePrefix", () => {

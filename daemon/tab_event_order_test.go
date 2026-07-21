@@ -60,7 +60,7 @@ func TestPersistPollChange_PublishesUnderRepoLock(t *testing.T) {
 
 	// A liveness that differs from the instance's own makes the poll treat this tick
 	// as a real transition, which is what drives it to persist + publish at all.
-	manager.persistPollChange(repo.ID, instance, otherLiveness(instance.GetLiveness()), time.Time{})
+	manager.persistPollChange(repo.ID, instance, otherLiveness(instance.GetLiveness()), time.Time{}, false)
 
 	if !probed {
 		t.Fatal("the poll never reached its publish: persistPollChange returned without announcing a change")
@@ -84,17 +84,31 @@ func TestPersistPollChange_PublishesRosterAsOfItsLock(t *testing.T) {
 		t.Fatalf("session %q missing from the manager", title)
 	}
 
-	name, _, err := manager.CreateTab(CreateTabRequest{
-		Title: title, RepoID: repo.ID, Kind: "web", URL: "http://localhost:5173", Name: "livepreview",
-	})
-	if err != nil {
-		t.Fatalf("CreateTab(web): %v", err)
+	// Make the tab mutation land in the exact stale-snapshot window: after the
+	// projection-only poll decided to publish and captured its payload, but before
+	// it acquires the ordering lock. Tab mutations do not move the lifecycle epoch,
+	// so an epoch-conditional re-read misses this change.
+	var name string
+	prev := testHookPollBeforePersistLock
+	t.Cleanup(func() { testHookPollBeforePersistLock = prev })
+	testHookPollBeforePersistLock = func() {
+		var err error
+		name, _, err = manager.CreateTab(CreateTabRequest{
+			Title: title, RepoID: repo.ID, Kind: "web", URL: "http://localhost:5173", Name: "livepreview",
+		})
+		if err != nil {
+			t.Fatalf("CreateTab(web): %v", err)
+		}
 	}
 
-	// Subscribe after the create so the only event drained is the poll's.
 	_, ch := manager.events.subscribe()
-	manager.persistPollChange(repo.ID, instance, otherLiveness(instance.GetLiveness()), time.Time{})
+	beforeReset, _ := instance.LimitResetAt()
+	manager.persistPollChange(repo.ID, instance, instance.GetLiveness(), beforeReset, true)
 
+	created := drainNextSessionEvent(t, ch, agentproto.EventSessionUpdated)
+	if !tabNamed(created, name) {
+		t.Fatalf("the tab-create event roster %v is missing its new tab %q", created.Tabs, name)
+	}
 	got := drainNextSessionEvent(t, ch, agentproto.EventSessionUpdated)
 	if !tabNamed(got, name) {
 		t.Fatalf("the poll published roster %v without the already-created tab %q: "+

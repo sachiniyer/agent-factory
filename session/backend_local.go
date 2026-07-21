@@ -815,3 +815,17 @@ func (b *LocalBackend) CheckAndHandleTrustPrompt(i *Instance) bool {
 	}
 	return false
 }
+
+func (b *LocalBackend) AgentModelChange(i *Instance) *AgentModelChange {
+	i.mu.RLock()
+	ts := i.tmuxLocked()
+	i.mu.RUnlock()
+	if ts == nil {
+		return nil
+	}
+	before, after, changed := ts.CodexSafetyModelChange()
+	if !changed {
+		return nil
+	}
+	return NewAgentModelChange(before, after)
+}
