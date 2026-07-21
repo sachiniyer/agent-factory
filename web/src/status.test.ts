@@ -7,6 +7,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
+import type { IconName } from "./icon.js";
 import { type DotKind, isArchived, isCreating, isLimitReached, isWorking, rowStatus, rowTitle } from "./status.js";
 import { InFlightOp, Liveness, Status, type SessionData } from "./types.js";
 
@@ -15,28 +16,28 @@ function sess(over: Partial<SessionData> = {}): SessionData {
 }
 
 test("liveness → dot kind mirrors render.go's TOTAL switch", () => {
-  // Working (LiveRunning / the Unset sentinel) shows NO dot (#1766): null kind, empty
-  // glyph. Ready is the only positive/green dot; the error states keep static glyphs.
-  const cases: Array<[number, DotKind | null, string]> = [
-    [Liveness.Ready, "ready", "●"],
-    [Liveness.Lost, "lost", "◌"],
-    [Liveness.Dead, "dead", "○"],
-    [Liveness.Archived, "archived", "▧"],
-    [Liveness.LimitReached, "limit", "◆"],
-    [Liveness.Running, null, ""],
-    [Liveness.Unset, null, ""], // stray zero renders like Running (render.go:297)
+  // Working (LiveRunning / the Unset sentinel) shows NO dot (#1766): null kind and
+  // icon. Ready is the only positive/green dot; error states keep static shapes.
+  const cases: Array<[number, DotKind | null, IconName | null]> = [
+    [Liveness.Ready, "ready", "circle"],
+    [Liveness.Lost, "lost", "circle-dashed"],
+    [Liveness.Dead, "dead", "circle"],
+    [Liveness.Archived, "archived", "archive"],
+    [Liveness.LimitReached, "limit", "diamond"],
+    [Liveness.Running, null, null],
+    [Liveness.Unset, null, null], // stray zero renders like Running (render.go:297)
   ];
-  for (const [lv, kind, glyph] of cases) {
+  for (const [lv, kind, icon] of cases) {
     const st = rowStatus(sess({ liveness: lv }));
     assert.equal(st.kind, kind, `liveness ${lv} → ${kind}`);
-    assert.equal(st.glyph, glyph, `liveness ${lv} glyph`);
+    assert.equal(st.icon, icon, `liveness ${lv} icon`);
   }
 });
 
 test("a working row has no dot; Ready/error states do (#1766)", () => {
   const running = rowStatus(sess({ liveness: Liveness.Running }));
   assert.equal(running.kind, null, "Running is working → no dot");
-  assert.equal(running.glyph, "", "a working row draws no glyph");
+  assert.equal(running.icon, null, "a working row draws no icon");
   assert.equal(isWorking(sess({ liveness: Liveness.Running })), true);
   assert.equal(isWorking(sess({ liveness: Liveness.Unset })), true);
   assert.equal(isWorking(sess({ liveness: Liveness.Ready })), false);
@@ -49,7 +50,7 @@ test("any in-flight op overlays the liveness and reads as working (no dot)", () 
     // Even a Ready liveness reads as working while an op is in flight (render.go:280).
     const st = rowStatus(sess({ liveness: Liveness.Ready, in_flight_op: op }));
     assert.equal(st.kind, null, `op ${op} → working (no dot)`);
-    assert.equal(st.glyph, "", `op ${op} draws no glyph`);
+    assert.equal(st.icon, null, `op ${op} draws no icon`);
     assert.equal(isWorking(sess({ liveness: Liveness.Ready, in_flight_op: op })), true);
   }
 });
@@ -79,7 +80,7 @@ test("title prefixes match render.go precedence", () => {
     "[deleting] w",
   );
   assert.equal(rowTitle(sess({ title: "w", in_flight_op: InFlightOp.Archiving })), "[deleting] w");
-  // Archived carries NO word prefix (render.go:326-338) — the glyph + dimming say it.
+  // Archived carries NO word prefix (render.go:326-338) — the icon + dimming say it.
   assert.equal(rowTitle(sess({ title: "w", liveness: Liveness.Archived })), "w");
   // [remote] is outermost.
   assert.equal(

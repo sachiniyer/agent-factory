@@ -21,6 +21,7 @@
 // picker's Custom type.
 
 import { asForm, field, h, modalChrome, type ModalHandle, projectLabel } from "./modals.js";
+import { icon } from "./icon.js";
 import { PROGRAM_REPO_DEFAULT, type ProgramCatalog, type ProgramChoice, programChoices } from "./programs.js";
 import { SCHEDULE_TYPE_OPTIONS, type Schedule, type ScheduleType, cron as scheduleCron, describe as scheduleDescribe, parseCron } from "./schedule.js";
 import type { TaskData } from "./types.js";
@@ -142,7 +143,12 @@ export class TasksPane {
   }
 
   private render(tasks: TaskData[]): void {
-    const addBtn = h("button", { type: "button", class: "af-tasks-add", title: "Add task" }, "+ Add");
+    const addBtn = h(
+      "button",
+      { type: "button", class: "af-tasks-add", title: "Add task" },
+      icon("plus"),
+      "Add",
+    );
     addBtn.addEventListener("click", () => this.actions.add());
     const head = h(
       "div",
@@ -169,18 +175,24 @@ export class TasksPane {
   }
 
   private taskRow(t: TaskData): HTMLElement {
-    const glyph = t.enabled ? "[✓]" : "[ ]";
-    const enabledDot = h("span", { class: `af-task-enabled${t.enabled ? " af-task-on" : ""}` }, glyph);
+    const enabledDot = h(
+      "span",
+      { class: `af-task-enabled${t.enabled ? " af-task-on" : ""}` },
+      icon(t.enabled ? "square-check" : "square"),
+    );
     enabledDot.setAttribute("aria-hidden", "true");
 
     const name = h("div", { class: "af-task-name" }, t.name && t.name.trim() !== "" ? t.name : "(unnamed task)");
     const trigger = h("div", { class: "af-task-trigger" }, triggerSummary(t));
-    const metaParts: string[] = [];
+    const metaParts: (Node | string)[] = [];
     if (t.target_session && t.target_session.trim() !== "") {
-      metaParts.push(`→ ${t.target_session}`);
+      metaParts.push(
+        h("span", { class: "af-task-target" }, icon("arrow-right"), t.target_session),
+        " · ",
+      );
     }
     metaParts.push(lastRunSummary(t));
-    const meta = h("div", { class: "af-task-meta" }, metaParts.join("  ·  "));
+    const meta = h("div", { class: "af-task-meta" }, ...metaParts);
     const main = h("div", { class: "af-task-main" }, name, trigger, meta);
 
     const toggleBtn = h(

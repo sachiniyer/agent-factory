@@ -271,6 +271,16 @@ body {
   min-height: 100vh;
 }
 
+/* All interface icons are inline Lucide SVGs. One sizing primitive keeps their
+ * 24px source grid crisp and lets every state inherit the surrounding currentColor. */
+.af-icon {
+  display: block;
+  width: 1em;
+  height: 1em;
+  flex: 0 0 auto;
+  pointer-events: none;
+}
+
 /* Login view */
 .af-login {
   min-height: 100vh;
@@ -478,7 +488,6 @@ body {
 .af-project-glyph {
   flex: 0 0 auto;
   color: var(--af-accent);
-  font-weight: 700;
 }
 
 .af-project-switch-name {
@@ -551,7 +560,6 @@ body {
   flex: 0 0 auto;
   width: 0.8rem;
   color: var(--af-accent);
-  font-weight: 700;
 }
 
 .af-project-item-label {
@@ -694,6 +702,9 @@ body {
 }
 
 .af-install__dismiss {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   padding: 0 0.3rem;
   background: transparent;
   color: var(--af-text-3);
@@ -823,7 +834,7 @@ body {
   display: flex;
 }
 
-/* The status filter control (feat: hide archived by default). A quiet glyph button —
+/* The status filter control (feat: hide archived by default). A quiet icon button —
  * it sits beside the accent-outlined + New, and two competing outlines in a 18rem
  * head would read as two primary actions. */
 .af-rail-filter {
@@ -858,7 +869,6 @@ body {
   width: 0.875rem;
   height: 0.875rem;
   flex: 0 0 auto;
-  fill: currentColor;
 }
 
 /* A static 4px dot — the #1766 rule: state reads from a static glyph, never motion. */
@@ -929,7 +939,6 @@ body {
   flex: 0 0 auto;
   width: 0.8rem;
   color: var(--af-accent);
-  font-weight: 700;
 }
 
 .af-filter-item-label {
@@ -1006,6 +1015,9 @@ body {
 }
 
 .af-rail-empty-new {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
   padding: 0.1rem 0.5rem;
   background: var(--af-accent-subtle);
   color: var(--af-accent);
@@ -1135,15 +1147,25 @@ body {
 }
 
 .af-branch-icon {
+  display: inline-block;
+  width: 0.85rem;
+  height: 0.85rem;
+  margin-right: 0.2rem;
+  vertical-align: -0.15rem;
   opacity: 0.8;
 }
 
-/* Status dot: the glyph itself carries shape (● / ○ / ◌ / ▧ / ◆ — copied from the
- * TUI so state survives color-blindness), the class carries the matching color. */
+/* Status icon: shape carries the state so it survives color-blindness; the class
+ * carries the matching TUI color. Every shape is static (#1766). */
 .af-dot {
   flex: 0 0 auto;
   line-height: 1.4;
   font-size: var(--af-fs-sm);
+}
+
+.af-dot-ready .af-icon,
+.af-dot-limit .af-icon {
+  fill: currentColor;
 }
 
 .af-dot-ready {
@@ -1367,13 +1389,14 @@ body {
   cursor: grabbing;
 }
 
-/* The tab's kind glyph (#1813): a quiet mark that tells agent / terminal / web apart
+/* The tab's kind icon (#1813): a quiet mark that tells agent / terminal / web apart
  * at a glance, mirroring the TUI (ui/tree/labels.go). Dimmer than the label even on
  * the active tab — it classifies, it doesn't compete with the name. */
 .af-tab-glyph {
   flex: 0 0 auto;
+  width: 0.8rem;
+  height: 0.8rem;
   color: var(--af-text-3, var(--af-text-2));
-  line-height: 1;
 }
 
 .af-tab-label {
@@ -1413,7 +1436,7 @@ body {
   display: none;
 }
 
-/* The × close affordance on a non-agent tab: dim until hovered, and it must not
+/* The close affordance on a non-agent tab: dim until hovered, and it must not
  * also trigger the tab's switch/attach (stopPropagation in ui.ts). */
 .af-tab-close {
   display: inline-flex;
@@ -1430,6 +1453,11 @@ body {
 .af-tab-close:hover {
   color: var(--af-danger);
   background: var(--af-danger-subtle);
+}
+
+.af-tab-close .af-icon {
+  width: 0.75rem;
+  height: 0.75rem;
 }
 
 /* The labelled new-tab control and its kind menu. The wrap keeps their lifecycle and
@@ -1504,7 +1532,6 @@ body {
 
 .af-tab-new-plus {
   font-size: var(--af-fs-md);
-  line-height: 0.8;
 }
 
 .af-tab-new-caret {
@@ -1657,7 +1684,7 @@ body {
   line-height: 1;
 }
 
-/* Takes the free space, so the glyph stays beside it and only the × is pushed right
+/* Takes the free space, so the icon stays beside it and only close is pushed right
  * (the head is space-between, and it has three children since #1813). min-width:0 is
  * what lets a long tab name actually ellipsize inside a flex item. */
 .af-pane-label {
@@ -1672,6 +1699,9 @@ body {
 }
 
 .af-pane-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   flex: 0 0 auto;
   padding: 0 var(--af-sp-1);
   background: transparent;
@@ -1732,6 +1762,7 @@ body {
   flex: 0 0 auto;
   display: inline-flex;
   align-items: center;
+  gap: 0.25rem;
   padding: 0.1rem 0.4rem;
   font-size: var(--af-fs-xs);
   line-height: 1.4;
@@ -1799,6 +1830,9 @@ body {
 }
 
 .af-webpane-fallback-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
   color: var(--af-accent);
 }
 
@@ -1912,6 +1946,9 @@ body {
 /* Rail "+ New" button (#1592 Phase 5 PR5): a compact accent-outlined action in
  * the rail header, beside the session count. */
 .af-rail-new {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
   padding: var(--af-sp-1) 0.55rem;
   background: transparent;
   color: var(--af-accent);
@@ -2278,6 +2315,9 @@ body {
 /* The tasks "+ Add" button, styled like the rail's "+ New" and pushed to the far
  * right of its header (its own class so the rail's .af-rail-new stays unambiguous). */
 .af-tasks-add {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
   margin-left: auto;
   padding: var(--af-sp-1) 0.55rem;
   background: transparent;
@@ -2322,6 +2362,12 @@ body {
   font-size: var(--af-fs-sm);
   color: var(--af-text-2);
   line-height: 1.5;
+}
+
+.af-task-target {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.2rem;
 }
 
 .af-task-enabled.af-task-on {

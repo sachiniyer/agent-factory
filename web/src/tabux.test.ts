@@ -11,33 +11,33 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 
 import { cacheBustedWebSrc, nextReloadNonce } from "./tabaddr.js";
-import { isRenameableTab, tabDisplayLabel, tabGlyph, tabLabel } from "./tablabel.js";
+import { isRenameableTab, tabDisplayLabel, tabIcon, tabLabel } from "./tablabel.js";
 import { insertionIndexAt, PINNED_TABS, reorderTargetIndex } from "./tabreorder.js";
 import { TabKind } from "./types.js";
 
-// --- the kind → glyph map (mirrors ui/tree/labels.go) -----------------------
+// --- the kind → icon map ----------------------------------------------------
 
-test("tabGlyph: each kind gets the TUI's glyph", () => {
-  assert.equal(tabGlyph(TabKind.Agent), "◆");
-  assert.equal(tabGlyph(TabKind.Shell), "›");
-  assert.equal(tabGlyph(TabKind.Process), "›");
-  assert.equal(tabGlyph(TabKind.Web), "◱");
+test("tabIcon: each kind gets its semantic Lucide icon", () => {
+  assert.equal(tabIcon(TabKind.Agent), "bot");
+  assert.equal(tabIcon(TabKind.Shell), "terminal");
+  assert.equal(tabIcon(TabKind.Process), "terminal");
+  assert.equal(tabIcon(TabKind.Web), "panels");
 });
 
-test("tabGlyph: a VS Code tab shares the WEB glyph, not the process fallback (#1817)", () => {
-  // The rule that has shell and process share `›`: the glyph names what a tab IS, and
+test("tabIcon: a VS Code tab shares the web icon, not the process fallback (#1817)", () => {
+  // The rule that has shell and process share an icon: the icon names what a tab IS, and
   // a VS Code tab is an embedded browser surface with no PTY. Pinned explicitly
   // because the failure mode is SILENT — VSCode landing on the default arm would
-  // render `›` and call the editor a terminal, which is the one thing it is not.
-  assert.equal(tabGlyph(TabKind.VSCode), "◱");
-  assert.equal(tabGlyph(TabKind.VSCode), tabGlyph(TabKind.Web));
-  assert.notEqual(tabGlyph(TabKind.VSCode), tabGlyph(TabKind.Shell));
+  // render a terminal icon and call the editor a terminal, which it is not.
+  assert.equal(tabIcon(TabKind.VSCode), "panels");
+  assert.equal(tabIcon(TabKind.VSCode), tabIcon(TabKind.Web));
+  assert.notEqual(tabIcon(TabKind.VSCode), tabIcon(TabKind.Shell));
 });
 
-test("tabGlyph: an unknown kind falls back to the process glyph, as labelForTab does", () => {
+test("tabIcon: an unknown kind falls back to the process icon, as labelForTab does", () => {
   // ui/tree/labels.go's default branch names an unknown kind like a process; the
-  // glyph follows the same branch rather than rendering a blank.
-  assert.equal(tabGlyph(99), "›");
+  // icon follows the same branch rather than rendering a blank.
+  assert.equal(tabIcon(99), "terminal");
 });
 
 // --- the kind + name → label map (mirrors ui/tree/labels.go labelForTab) ----
@@ -70,19 +70,15 @@ test("tabLabel: a VS Code tab shows its name, or VS Code when it has none (#1817
   assert.equal(tabLabel({ name: "", kind: TabKind.VSCode }), "VS Code");
 });
 
-test("a VS Code tab reads as the web glyph plus its own text (#1817)", () => {
-  // The pair, composed: the glyph says "browser surface, no PTY", the text says which
-  // one. That division is the whole reason VSCode shares Web's glyph.
-  assert.equal(tabDisplayLabel({ name: "", kind: TabKind.VSCode }), "◱ VS Code");
-  assert.equal(tabDisplayLabel({ name: "editor", kind: TabKind.VSCode }), "◱ editor");
+test("a VS Code tab's text label stays independent of its decorative icon (#1817)", () => {
+  assert.equal(tabDisplayLabel({ name: "", kind: TabKind.VSCode }), "VS Code");
+  assert.equal(tabDisplayLabel({ name: "editor", kind: TabKind.VSCode }), "editor");
 });
 
-test("tabDisplayLabel: the glyph, one space, then the label", () => {
-  // The exact string both surfaces compose — the tab bar as two nodes, a pane header
-  // as two nodes, a title attribute as one. They must be the same pair either way.
-  assert.equal(tabDisplayLabel({ name: "preview", kind: TabKind.Web }), "◱ preview");
-  assert.equal(tabDisplayLabel({ name: "agent", kind: TabKind.Agent }), "◆ Agent");
-  assert.equal(tabDisplayLabel({ name: "x", kind: TabKind.Shell }), "› Terminal");
+test("tabDisplayLabel: accessible titles contain text, never icon glyphs", () => {
+  assert.equal(tabDisplayLabel({ name: "preview", kind: TabKind.Web }), "preview");
+  assert.equal(tabDisplayLabel({ name: "agent", kind: TabKind.Agent }), "Agent");
+  assert.equal(tabDisplayLabel({ name: "x", kind: TabKind.Shell }), "Terminal");
 });
 
 // --- pane label derivation --------------------------------------------------
@@ -96,7 +92,7 @@ test("pane label: a pane names its TAB, not its position (#1813)", () => {
     { name: "preview", kind: TabKind.Web },
     { name: "logs", kind: TabKind.Process },
   ];
-  assert.deepEqual(tabs.map(tabDisplayLabel), ["◆ Agent", "◱ preview", "› logs"]);
+  assert.deepEqual(tabs.map(tabDisplayLabel), ["Agent", "preview", "logs"]);
 });
 
 test("pane label: a rename changes the label the pane renders", () => {

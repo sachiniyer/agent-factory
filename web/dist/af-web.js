@@ -1438,31 +1438,31 @@ WARNING: This link could potentially be dangerous`)) {
                 const t4 = j;
                 j = K, K = t4;
               }
-              let V, G, X, J = false;
+              let V, G, X2, J = false;
               switch (this._decorationService.forEachDecorationAtCell(M, t3, void 0, ((e4) => {
                 "top" !== e4.options.layer && J || (e4.backgroundColorRGB && (K = 50331648, z = e4.backgroundColorRGB.rgba >> 8 & 16777215, V = e4.backgroundColorRGB), e4.foregroundColorRGB && (j = 50331648, $ = e4.foregroundColorRGB.rgba >> 8 & 16777215, G = e4.foregroundColorRGB), J = "top" === e4.options.layer);
               })), !J && H && (V = this._coreBrowserService.isFocused ? S.selectionBackgroundOpaque : S.selectionInactiveBackgroundOpaque, z = V.rgba >> 8 & 16777215, K = 50331648, J = true, S.selectionForeground && (j = 50331648, $ = S.selectionForeground.rgba >> 8 & 16777215, G = S.selectionForeground)), J && B.push("xterm-decoration-top"), K) {
                 case 16777216:
                 case 33554432:
-                  X = S.ansi[z], B.push(`xterm-bg-${z}`);
+                  X2 = S.ansi[z], B.push(`xterm-bg-${z}`);
                   break;
                 case 50331648:
-                  X = c.channels.toColor(z >> 16, z >> 8 & 255, 255 & z), this._addStyle(C, `background-color:#${v((z >>> 0).toString(16), "0", 6)}`);
+                  X2 = c.channels.toColor(z >> 16, z >> 8 & 255, 255 & z), this._addStyle(C, `background-color:#${v((z >>> 0).toString(16), "0", 6)}`);
                   break;
                 default:
-                  q ? (X = S.foreground, B.push(`xterm-bg-${n.INVERTED_DEFAULT_COLOR}`)) : X = S.background;
+                  q ? (X2 = S.foreground, B.push(`xterm-bg-${n.INVERTED_DEFAULT_COLOR}`)) : X2 = S.background;
               }
-              switch (V || I.isDim() && (V = c.color.multiplyOpacity(X, 0.5)), j) {
+              switch (V || I.isDim() && (V = c.color.multiplyOpacity(X2, 0.5)), j) {
                 case 16777216:
                 case 33554432:
-                  I.isBold() && $ < 8 && this._optionsService.rawOptions.drawBoldTextInBrightColors && ($ += 8), this._applyMinimumContrast(C, X, S.ansi[$], I, V, void 0) || B.push(`xterm-fg-${$}`);
+                  I.isBold() && $ < 8 && this._optionsService.rawOptions.drawBoldTextInBrightColors && ($ += 8), this._applyMinimumContrast(C, X2, S.ansi[$], I, V, void 0) || B.push(`xterm-fg-${$}`);
                   break;
                 case 50331648:
                   const e4 = c.channels.toColor($ >> 16 & 255, $ >> 8 & 255, 255 & $);
-                  this._applyMinimumContrast(C, X, e4, I, V, G) || this._addStyle(C, `color:#${v($.toString(16), "0", 6)}`);
+                  this._applyMinimumContrast(C, X2, e4, I, V, G) || this._addStyle(C, `color:#${v($.toString(16), "0", 6)}`);
                   break;
                 default:
-                  this._applyMinimumContrast(C, X, S.foreground, I, V, G) || q && B.push(`xterm-fg-${n.INVERTED_DEFAULT_COLOR}`);
+                  this._applyMinimumContrast(C, X2, S.foreground, I, V, G) || q && B.push(`xterm-fg-${n.INVERTED_DEFAULT_COLOR}`);
               }
               B.length && (C.className = B.join(" "), B.length = 0), F || O || U ? C.textContent = y : w++, A !== this.defaultSpacing && (C.style.letterSpacing = `${A}px`), g.push(C), M = P;
             }
@@ -7013,6 +7013,222 @@ var EventStream = class {
   }
 };
 
+// node_modules/lucide/dist/esm/icons/archive-restore.mjs
+var ArchiveRestore = [
+  ["rect", { width: "20", height: "5", x: "2", y: "3", rx: "1" }],
+  ["path", { d: "M4 8v11a2 2 0 0 0 2 2h2" }],
+  ["path", { d: "M20 8v11a2 2 0 0 1-2 2h-2" }],
+  ["path", { d: "m9 15 3-3 3 3" }],
+  ["path", { d: "M12 12v9" }]
+];
+
+// node_modules/lucide/dist/esm/icons/archive.mjs
+var Archive = [
+  ["rect", { width: "20", height: "5", x: "2", y: "3", rx: "1" }],
+  ["path", { d: "M4 8v11a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8" }],
+  ["path", { d: "M10 12h4" }]
+];
+
+// node_modules/lucide/dist/esm/icons/arrow-right.mjs
+var ArrowRight = [
+  ["path", { d: "M5 12h14" }],
+  ["path", { d: "m12 5 7 7-7 7" }]
+];
+
+// node_modules/lucide/dist/esm/icons/bot.mjs
+var Bot = [
+  ["path", { d: "M12 8V4H8" }],
+  ["rect", { width: "16", height: "12", x: "4", y: "8", rx: "2" }],
+  ["path", { d: "M2 14h2" }],
+  ["path", { d: "M20 14h2" }],
+  ["path", { d: "M15 13v2" }],
+  ["path", { d: "M9 13v2" }]
+];
+
+// node_modules/lucide/dist/esm/icons/check.mjs
+var Check = [["path", { d: "M20 6 9 17l-5-5" }]];
+
+// node_modules/lucide/dist/esm/icons/chevron-down.mjs
+var ChevronDown = [["path", { d: "m6 9 6 6 6-6" }]];
+
+// node_modules/lucide/dist/esm/icons/circle-dashed.mjs
+var CircleDashed = [
+  ["path", { d: "M10.1 2.182a10 10 0 0 1 3.8 0" }],
+  ["path", { d: "M13.9 21.818a10 10 0 0 1-3.8 0" }],
+  ["path", { d: "M17.609 3.721a10 10 0 0 1 2.69 2.7" }],
+  ["path", { d: "M2.182 13.9a10 10 0 0 1 0-3.8" }],
+  ["path", { d: "M20.279 17.609a10 10 0 0 1-2.7 2.69" }],
+  ["path", { d: "M21.818 10.1a10 10 0 0 1 0 3.8" }],
+  ["path", { d: "M3.721 6.391a10 10 0 0 1 2.7-2.69" }],
+  ["path", { d: "M6.391 20.279a10 10 0 0 1-2.69-2.7" }]
+];
+
+// node_modules/lucide/dist/esm/icons/circle.mjs
+var Circle = [["circle", { cx: "12", cy: "12", r: "10" }]];
+
+// node_modules/lucide/dist/esm/icons/diamond.mjs
+var Diamond = [
+  [
+    "path",
+    {
+      d: "M2.7 10.3a2.41 2.41 0 0 0 0 3.41l7.59 7.59a2.41 2.41 0 0 0 3.41 0l7.59-7.59a2.41 2.41 0 0 0 0-3.41l-7.59-7.59a2.41 2.41 0 0 0-3.41 0Z"
+    }
+  ]
+];
+
+// node_modules/lucide/dist/esm/icons/ellipsis.mjs
+var Ellipsis = [
+  ["circle", { cx: "12", cy: "12", r: "1" }],
+  ["circle", { cx: "19", cy: "12", r: "1" }],
+  ["circle", { cx: "5", cy: "12", r: "1" }]
+];
+
+// node_modules/lucide/dist/esm/icons/external-link.mjs
+var ExternalLink = [
+  ["path", { d: "M15 3h6v6" }],
+  ["path", { d: "M10 14 21 3" }],
+  ["path", { d: "M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" }]
+];
+
+// node_modules/lucide/dist/esm/icons/folder-git-2.mjs
+var FolderGit2 = [
+  ["path", { d: "M18 19a5 5 0 0 1-5-5v8" }],
+  [
+    "path",
+    {
+      d: "M9 20H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H20a2 2 0 0 1 2 2v5"
+    }
+  ],
+  ["circle", { cx: "13", cy: "12", r: "2" }],
+  ["circle", { cx: "20", cy: "19", r: "2" }]
+];
+
+// node_modules/lucide/dist/esm/icons/funnel.mjs
+var Funnel = [
+  [
+    "path",
+    {
+      d: "M10 20a1 1 0 0 0 .553.895l2 1A1 1 0 0 0 14 21v-7a2 2 0 0 1 .517-1.341L21.74 4.67A1 1 0 0 0 21 3H3a1 1 0 0 0-.742 1.67l7.225 7.989A2 2 0 0 1 10 14z"
+    }
+  ]
+];
+
+// node_modules/lucide/dist/esm/icons/git-branch.mjs
+var GitBranch = [
+  ["path", { d: "M15 6a9 9 0 0 0-9 9V3" }],
+  ["circle", { cx: "18", cy: "6", r: "3" }],
+  ["circle", { cx: "6", cy: "18", r: "3" }]
+];
+
+// node_modules/lucide/dist/esm/icons/menu.mjs
+var Menu = [
+  ["path", { d: "M4 5h16" }],
+  ["path", { d: "M4 12h16" }],
+  ["path", { d: "M4 19h16" }]
+];
+
+// node_modules/lucide/dist/esm/icons/octagon-x.mjs
+var OctagonX = [
+  ["path", { d: "m15 9-6 6" }],
+  [
+    "path",
+    {
+      d: "M2.586 16.726A2 2 0 0 1 2 15.312V8.688a2 2 0 0 1 .586-1.414l4.688-4.688A2 2 0 0 1 8.688 2h6.624a2 2 0 0 1 1.414.586l4.688 4.688A2 2 0 0 1 22 8.688v6.624a2 2 0 0 1-.586 1.414l-4.688 4.688a2 2 0 0 1-1.414.586H8.688a2 2 0 0 1-1.414-.586z"
+    }
+  ],
+  ["path", { d: "m9 9 6 6" }]
+];
+
+// node_modules/lucide/dist/esm/icons/panels-top-left.mjs
+var PanelsTopLeft = [
+  ["rect", { width: "18", height: "18", x: "3", y: "3", rx: "2" }],
+  ["path", { d: "M3 9h18" }],
+  ["path", { d: "M9 21V9" }]
+];
+
+// node_modules/lucide/dist/esm/icons/plus.mjs
+var Plus = [
+  ["path", { d: "M5 12h14" }],
+  ["path", { d: "M12 5v14" }]
+];
+
+// node_modules/lucide/dist/esm/icons/refresh-cw.mjs
+var RefreshCw = [
+  ["path", { d: "M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8" }],
+  ["path", { d: "M21 3v5h-5" }],
+  ["path", { d: "M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16" }],
+  ["path", { d: "M8 16H3v5" }]
+];
+
+// node_modules/lucide/dist/esm/icons/square-check-big.mjs
+var SquareCheckBig = [
+  ["path", { d: "M21 10.656V19a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h12.344" }],
+  ["path", { d: "m9 11 3 3L22 4" }]
+];
+
+// node_modules/lucide/dist/esm/icons/square.mjs
+var Square = [["rect", { width: "18", height: "18", x: "3", y: "3", rx: "2" }]];
+
+// node_modules/lucide/dist/esm/icons/terminal.mjs
+var Terminal = [
+  ["path", { d: "M12 19h8" }],
+  ["path", { d: "m4 17 6-6-6-6" }]
+];
+
+// node_modules/lucide/dist/esm/icons/x.mjs
+var X = [
+  ["path", { d: "M18 6 6 18" }],
+  ["path", { d: "m6 6 12 12" }]
+];
+
+// src/icon.ts
+var ICONS = {
+  archive: Archive,
+  "archive-restore": ArchiveRestore,
+  "arrow-right": ArrowRight,
+  bot: Bot,
+  check: Check,
+  "chevron-down": ChevronDown,
+  circle: Circle,
+  "circle-dashed": CircleDashed,
+  diamond: Diamond,
+  ellipsis: Ellipsis,
+  "external-link": ExternalLink,
+  "folder-git": FolderGit2,
+  funnel: Funnel,
+  "git-branch": GitBranch,
+  menu: Menu,
+  "octagon-x": OctagonX,
+  panels: PanelsTopLeft,
+  plus: Plus,
+  reload: RefreshCw,
+  square: Square,
+  "square-check": SquareCheckBig,
+  terminal: Terminal,
+  x: X
+};
+function icon(name, className = "") {
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("class", `af-icon${className ? ` ${className}` : ""}`);
+  svg.setAttribute("data-icon", name);
+  svg.setAttribute("viewBox", "0 0 24 24");
+  svg.setAttribute("fill", "none");
+  svg.setAttribute("stroke", "currentColor");
+  svg.setAttribute("stroke-width", "2");
+  svg.setAttribute("stroke-linecap", "round");
+  svg.setAttribute("stroke-linejoin", "round");
+  svg.setAttribute("aria-hidden", "true");
+  svg.setAttribute("focusable", "false");
+  for (const [tag, attrs] of ICONS[name]) {
+    const child = document.createElementNS("http://www.w3.org/2000/svg", tag);
+    for (const [attr, value] of Object.entries(attrs)) {
+      child.setAttribute(attr, String(value));
+    }
+    svg.append(child);
+  }
+  return svg;
+}
+
 // src/install.ts
 var DISMISS_KEY = "af-install-dismissed";
 function shouldShowInstall(state) {
@@ -7046,7 +7262,7 @@ var InstallAffordance = class {
     const dismiss = document.createElement("button");
     dismiss.type = "button";
     dismiss.className = "af-install__dismiss";
-    dismiss.textContent = "\xD7";
+    dismiss.append(icon("x"));
     dismiss.setAttribute("aria-label", "Dismiss install");
     dismiss.title = "Dismiss";
     dismiss.addEventListener("click", () => this.dismiss());
@@ -7223,12 +7439,12 @@ var ROW_KIND_LABELS = {
   limit: "Limit reached",
   archived: "Archived"
 };
-var READY_GLYPH = "\u25CF";
-var DEAD_GLYPH = "\u25CB";
-var LOST_GLYPH = "\u25CC";
-var ARCHIVED_GLYPH = "\u25A7";
-var LIMIT_GLYPH = "\u25C6";
-var WORKING = { glyph: "", kind: null, label: ROW_KIND_LABELS.working };
+var READY_ICON = "circle";
+var DEAD_ICON = "circle";
+var LOST_ICON = "circle-dashed";
+var ARCHIVED_ICON = "archive";
+var LIMIT_ICON = "diamond";
+var WORKING = { icon: null, kind: null, label: ROW_KIND_LABELS.working };
 function rowStatus(s) {
   const op = s.in_flight_op ?? InFlightOp.None;
   if (op !== InFlightOp.None) {
@@ -7268,15 +7484,15 @@ function livenessOf(s) {
 function dotForLiveness(lv) {
   switch (lv) {
     case Liveness.Ready:
-      return { glyph: READY_GLYPH, kind: "ready", label: ROW_KIND_LABELS.ready };
+      return { icon: READY_ICON, kind: "ready", label: ROW_KIND_LABELS.ready };
     case Liveness.Lost:
-      return { glyph: LOST_GLYPH, kind: "lost", label: ROW_KIND_LABELS.lost };
+      return { icon: LOST_ICON, kind: "lost", label: ROW_KIND_LABELS.lost };
     case Liveness.Dead:
-      return { glyph: DEAD_GLYPH, kind: "dead", label: ROW_KIND_LABELS.dead };
+      return { icon: DEAD_ICON, kind: "dead", label: ROW_KIND_LABELS.dead };
     case Liveness.Archived:
-      return { glyph: ARCHIVED_GLYPH, kind: "archived", label: ROW_KIND_LABELS.archived };
+      return { icon: ARCHIVED_ICON, kind: "archived", label: ROW_KIND_LABELS.archived };
     case Liveness.LimitReached:
-      return { glyph: LIMIT_GLYPH, kind: "limit", label: ROW_KIND_LABELS.limit };
+      return { icon: LIMIT_ICON, kind: "limit", label: ROW_KIND_LABELS.limit };
     // LiveRunning and LivenessUnset both render as working (render.go:285, 297).
     case Liveness.Running:
     case Liveness.Unset:
@@ -7877,16 +8093,16 @@ function paneAddressUsesOrdinal(webTarget, realId) {
 }
 
 // src/tablabel.ts
-function tabGlyph(kind) {
+function tabIcon(kind) {
   switch (kind) {
     case TabKind.Agent:
-      return "\u25C6";
+      return "bot";
     case TabKind.Shell:
-      return "\u203A";
+      return "terminal";
     case TabKind.Process:
-      return "\u203A";
-    // VS Code (#1817) shares the WEB glyph deliberately, on the same rule that has
-    // shell and process share `›`: the glyph names what a tab IS, and a VS Code tab
+      return "terminal";
+    // VS Code (#1817) shares the web icon deliberately, on the same rule that has
+    // shell and process share the terminal icon: the icon names what a tab IS, and a VS Code tab
     // is an embedded browser surface with no PTY — a web pane whose page happens to
     // be an editor. What separates them is the text beside the glyph ("VS Code" vs
     // the target's name), exactly as the command name separates a process tab from a
@@ -7894,9 +8110,9 @@ function tabGlyph(kind) {
     // which is the one thing it is not.
     case TabKind.Web:
     case TabKind.VSCode:
-      return "\u25F1";
+      return "panels";
     default:
-      return "\u203A";
+      return "terminal";
   }
 }
 function tabLabel(tab) {
@@ -7914,7 +8130,7 @@ function tabLabel(tab) {
   }
 }
 function tabDisplayLabel(tab) {
-  return `${tabGlyph(tab.kind)} ${tabLabel(tab)}`;
+  return tabLabel(tab);
 }
 function isRenameableTab(kind) {
   return kind === TabKind.Web || kind === TabKind.Process || kind === TabKind.VSCode;
@@ -8929,7 +9145,7 @@ var SplitView = class {
       pane.container.classList.toggle("af-pane-multi", multi);
       pane.container.setAttribute("data-tab-id", realId);
       const named = { name: this.tabNames[leaf.tab] ?? "", kind: this.tabKinds[leaf.tab] ?? TabKind.Agent };
-      pane.glyph.textContent = tabGlyph(named.kind);
+      pane.glyph.replaceChildren(icon(tabIcon(named.kind)));
       pane.label.textContent = tabLabel(named);
     }
     this.applyFocusClass();
@@ -8946,7 +9162,7 @@ var SplitView = class {
     closeBtn.className = "af-pane-close";
     closeBtn.title = "Close pane";
     closeBtn.setAttribute("aria-label", "Close pane");
-    closeBtn.textContent = "\xD7";
+    closeBtn.append(icon("x"));
     closeBtn.addEventListener("click", (e) => {
       e.stopPropagation();
       this.closePane(leaf.id);
@@ -9019,7 +9235,7 @@ var SplitView = class {
     reload.className = "af-ghost af-webpane-reload";
     reload.title = "Reload";
     reload.setAttribute("aria-label", isVSCode ? "Reload VS Code" : "Reload web tab");
-    reload.textContent = "\u21BB";
+    reload.append(icon("reload"));
     const urlText = el("span", "af-webpane-url");
     urlText.textContent = isVSCode ? "VS Code \u2014 session worktree" : target || "(no URL)";
     urlText.title = urlText.textContent;
@@ -9028,7 +9244,7 @@ var SplitView = class {
     open.href = openHref;
     open.target = "_blank";
     open.rel = "noopener noreferrer";
-    open.textContent = "Open \u2197";
+    open.append("Open", icon("external-link"));
     bar.append(reload, urlText, open);
     const frame = document.createElement("iframe");
     frame.className = "af-webframe";
@@ -9049,7 +9265,7 @@ var SplitView = class {
     fbLink.href = openHref;
     fbLink.target = "_blank";
     fbLink.rel = "noopener noreferrer";
-    fbLink.textContent = "Open in a new tab \u2197";
+    fbLink.append("Open in a new tab", icon("external-link"));
     const fbRetry = document.createElement("button");
     fbRetry.type = "button";
     fbRetry.className = "af-ghost af-webpane-fallback-retry";
@@ -9105,7 +9321,7 @@ var SplitView = class {
       fallback.classList.add("af-webpane-external");
       fbMsg.textContent = "This site may block embedding.";
       fbLink.hidden = false;
-      fbLink.textContent = "Open it in a new tab \u2197";
+      fbLink.replaceChildren("Open it in a new tab", icon("external-link"));
       fbRetry.hidden = true;
       reload.hidden = true;
       fallback.hidden = false;
@@ -9698,7 +9914,12 @@ var TasksPane = class {
     this.render(scoped);
   }
   render(tasks) {
-    const addBtn = h("button", { type: "button", class: "af-tasks-add", title: "Add task" }, "+ Add");
+    const addBtn = h(
+      "button",
+      { type: "button", class: "af-tasks-add", title: "Add task" },
+      icon("plus"),
+      "Add"
+    );
     addBtn.addEventListener("click", () => this.actions.add());
     const head = h(
       "div",
@@ -9722,17 +9943,23 @@ var TasksPane = class {
     this.el.replaceChildren(head, h("ul", { class: "af-tasks-list" }, ...rows));
   }
   taskRow(t) {
-    const glyph = t.enabled ? "[\u2713]" : "[ ]";
-    const enabledDot = h("span", { class: `af-task-enabled${t.enabled ? " af-task-on" : ""}` }, glyph);
+    const enabledDot = h(
+      "span",
+      { class: `af-task-enabled${t.enabled ? " af-task-on" : ""}` },
+      icon(t.enabled ? "square-check" : "square")
+    );
     enabledDot.setAttribute("aria-hidden", "true");
     const name = h("div", { class: "af-task-name" }, t.name && t.name.trim() !== "" ? t.name : "(unnamed task)");
     const trigger = h("div", { class: "af-task-trigger" }, triggerSummary(t));
     const metaParts = [];
     if (t.target_session && t.target_session.trim() !== "") {
-      metaParts.push(`\u2192 ${t.target_session}`);
+      metaParts.push(
+        h("span", { class: "af-task-target" }, icon("arrow-right"), t.target_session),
+        " \xB7 "
+      );
     }
     metaParts.push(lastRunSummary(t));
-    const meta = h("div", { class: "af-task-meta" }, metaParts.join("  \xB7  "));
+    const meta = h("div", { class: "af-task-meta" }, ...metaParts);
     const main = h("div", { class: "af-task-main" }, name, trigger, meta);
     const toggleBtn = h(
       "button",
@@ -10470,10 +10697,8 @@ var AppShell = class {
       viewNav.append(tab);
     }
     this.projectSwitchName = h2("span", { class: "af-project-switch-name" }, "\u2014");
-    const switchGlyph = h2("span", { class: "af-project-glyph" }, "\u25A3");
-    switchGlyph.setAttribute("aria-hidden", "true");
-    const switchCaret = h2("span", { class: "af-project-caret" }, "\u25BC");
-    switchCaret.setAttribute("aria-hidden", "true");
+    const switchGlyph = icon("folder-git", "af-project-glyph");
+    const switchCaret = icon("chevron-down", "af-project-caret");
     this.projectSwitchBtn = h2(
       "button",
       { type: "button", class: "af-project-switch" },
@@ -10499,7 +10724,7 @@ var AppShell = class {
         this.closeProjectMenu();
       }
     });
-    this.navToggle = h2("button", { type: "button", class: "af-nav-toggle" }, "\u2630");
+    this.navToggle = h2("button", { type: "button", class: "af-nav-toggle" }, icon("menu"));
     this.navToggle.setAttribute("aria-label", "Toggle sessions");
     this.navToggle.setAttribute("aria-controls", "af-rail");
     this.navToggle.setAttribute("aria-expanded", "false");
@@ -10514,7 +10739,7 @@ var AppShell = class {
     );
     appbarTools.setAttribute("role", "group");
     appbarTools.setAttribute("aria-label", "App controls");
-    const appbarMore = h2("button", { type: "button", class: "af-appbar-more" }, "\u22EF");
+    const appbarMore = h2("button", { type: "button", class: "af-appbar-more" }, icon("ellipsis"));
     appbarMore.setAttribute("aria-label", "More app controls");
     appbarMore.setAttribute("title", "More app controls");
     appbarMore.setAttribute("aria-controls", "af-appbar-tools");
@@ -10574,16 +10799,14 @@ var AppShell = class {
       appbarToolsWrap
     );
     this.railCount = h2("span", { class: "af-rail-count" }, "0");
-    const newBtn = h2("button", { type: "button", class: "af-rail-new", title: "New session" }, "+ New");
+    const newBtn = h2(
+      "button",
+      { type: "button", class: "af-rail-new", title: "New session" },
+      icon("plus"),
+      "New"
+    );
     newBtn.addEventListener("click", () => this.runRailExit(() => this.actions.newSession()));
-    const filterGlyph = document.createElementNS("http://www.w3.org/2000/svg", "svg");
-    filterGlyph.classList.add("af-rail-filter-glyph");
-    filterGlyph.setAttribute("viewBox", "0 0 16 16");
-    filterGlyph.setAttribute("aria-hidden", "true");
-    filterGlyph.setAttribute("focusable", "false");
-    const filterGlyphPath = document.createElementNS("http://www.w3.org/2000/svg", "path");
-    filterGlyphPath.setAttribute("d", "M2 2h12L9.5 8v4.5L6.5 14V8L2 2Z");
-    filterGlyph.append(filterGlyphPath);
+    const filterGlyph = icon("funnel", "af-rail-filter-glyph");
     this.filterDot = h2("span", { class: "af-rail-filter-dot" });
     this.filterDot.setAttribute("aria-hidden", "true");
     this.filterBtn = h2("button", { type: "button", class: "af-rail-filter" }, filterGlyph, this.filterDot);
@@ -10973,7 +11196,11 @@ var AppShell = class {
     if (isKillableSession(session)) {
       const killSession2 = session;
       const killClass = surface === "rail" ? "af-rail-action af-rail-kill" : "af-ghost af-term-action af-term-kill";
-      const killBtn = h2("button", { type: "button", class: killClass }, surface === "rail" ? "\u232B" : "Kill");
+      const killBtn = h2(
+        "button",
+        { type: "button", class: killClass },
+        ...surface === "rail" ? [icon("octagon-x")] : ["Kill"]
+      );
       const killLabel = `Kill session \u201C${killSession2.title}\u201D`;
       killBtn.setAttribute("aria-label", killLabel);
       killBtn.setAttribute("title", killLabel);
@@ -10989,13 +11216,17 @@ var AppShell = class {
     }
     return buttons;
   }
-  /** Applies the daemon-projected verb, glyph, and target-qualified accessible name
+  /** Applies the daemon-projected verb, icon, and target-qualified accessible name
    *  in one place so render and same-selection live patching cannot drift. */
   patchLifecycleButton(btn, action, sessionTitle, surface = "rail") {
     const verb = action === "restore" ? "Restore session" : "Archive session";
     const label = `${verb} \u201C${sessionTitle}\u201D`;
     btn.dataset.action = action;
-    btn.textContent = surface === "rail" ? action === "restore" ? "\u21B6" : "\u25AA" : verb.replace(" session", "");
+    if (surface === "rail") {
+      btn.replaceChildren(icon(action === "restore" ? "archive-restore" : "archive"));
+    } else {
+      btn.textContent = verb.replace(" session", "");
+    }
     btn.setAttribute("aria-label", label);
     btn.setAttribute("title", label);
   }
@@ -11016,7 +11247,12 @@ var AppShell = class {
     const name = projectName(state.selectedProject ?? "");
     const hasActive = scoped.some((s) => !isArchived(s));
     if (!hasActive) {
-      const newBtn = h2("button", { type: "button", class: "af-rail-empty-new", title: "New session" }, "+ New");
+      const newBtn = h2(
+        "button",
+        { type: "button", class: "af-rail-empty-new", title: "New session" },
+        icon("plus"),
+        "New"
+      );
       newBtn.addEventListener("click", () => this.runRailExit(() => this.actions.newSession()));
       const empty = h2("li", { class: "af-rail-empty-project" }, `No active sessions in ${name} \u2014 `, newBtn);
       const archived = scoped.filter(isArchived).length;
@@ -11066,7 +11302,7 @@ var AppShell = class {
    *  (the row's own word — status.ts ROW_KIND_LABELS), and how many sessions in this
    *  project are in it. Clicking toggles just that state and leaves the menu open. */
   filterItem(kind, on, count) {
-    const check = h2("span", { class: "af-filter-check" }, on ? "\u2713" : "");
+    const check = h2("span", { class: "af-filter-check" }, ...on ? [icon("check")] : []);
     check.setAttribute("aria-hidden", "true");
     const item = h2(
       "button",
@@ -11126,7 +11362,7 @@ var AppShell = class {
    *  switches the active project and closes the menu. */
   projectItem(p, current) {
     const cls = `af-project-item${current ? " af-project-item-current" : ""}`;
-    const check = h2("span", { class: "af-project-check" }, current ? "\u2713" : "");
+    const check = h2("span", { class: "af-project-check" }, ...current ? [icon("check")] : []);
     check.setAttribute("aria-hidden", "true");
     const label = h2(
       "span",
@@ -11145,10 +11381,10 @@ var AppShell = class {
     });
     return item;
   }
-  /** The visible `+ New tab` button and its kind menu.
+  /** The visible New tab button and its kind menu.
    *
-   *  The old split control created a terminal from `+` and hid VS Code behind a
-   *  separate, unlabeled `▾`. Even the project's maintainer could not find that
+   *  The old split control created a terminal from a plus and hid VS Code behind a
+   *  separate, unlabeled caret. Even the project's maintainer could not find that
    *  path (#2077), so the labelled button now makes the choice explicit where the
    *  editor will appear. The `t` shortcut remains the direct shell fast path.
    *
@@ -11160,9 +11396,9 @@ var AppShell = class {
     const trigger = h2(
       "button",
       { type: "button", class: "af-tab-new", title: "Create a terminal or VS Code tab" },
-      h2("span", { class: "af-tab-new-plus" }, "+"),
+      icon("plus", "af-tab-new-plus"),
       h2("span", {}, "New tab"),
-      h2("span", { class: "af-tab-new-caret" }, "\u25BE")
+      icon("chevron-down", "af-tab-new-caret")
     );
     trigger.setAttribute("aria-haspopup", "menu");
     trigger.setAttribute("aria-expanded", "false");
@@ -11633,9 +11869,7 @@ function tabButton(tab, index, active, shown, canManage, actions2, liveIdentity,
   btn.setAttribute("role", "tab");
   btn.setAttribute("aria-selected", active ? "true" : "false");
   btn.dataset.tabIndex = String(index);
-  const glyph = h2("span", { class: "af-tab-glyph" }, tabGlyph(tab.kind));
-  glyph.setAttribute("aria-hidden", "true");
-  btn.append(glyph, h2("span", { class: "af-tab-label" }, tabLabel(tab)));
+  btn.append(icon(tabIcon(tab.kind), "af-tab-glyph"), h2("span", { class: "af-tab-label" }, tabLabel(tab)));
   btn.addEventListener("click", () => actions2.openTab(index));
   const renameable = canManage && isRenameableTab(tab.kind);
   btn.title = renameable ? `${tabDisplayLabel(tab)} \u2014 double-click to rename` : tabDisplayLabel(tab);
@@ -11648,7 +11882,7 @@ function tabButton(tab, index, active, shown, canManage, actions2, liveIdentity,
     });
   }
   if (index > 0 && canManage) {
-    const close = h2("span", { class: "af-tab-close", title: "Close tab" }, "\xD7");
+    const close = h2("span", { class: "af-tab-close", title: "Close tab" }, icon("x"));
     close.setAttribute("aria-hidden", "true");
     close.addEventListener("click", (e) => {
       e.stopPropagation();
@@ -11697,15 +11931,14 @@ function sessionRow(s, selected, openSession, buildActions) {
   const branch = h2(
     "div",
     { class: "af-row-branch" },
-    h2("span", { class: "af-branch-icon" }, "\u2387"),
-    " ",
+    icon("git-branch", "af-branch-icon"),
     s.branch || "\u2014"
   );
   const main = h2("div", { class: "af-row-main" }, title, branch);
   const cls = `af-row${selected ? " af-row-selected" : ""}${isArchived(s) ? " af-row-archived" : ""}${actionable ? "" : " af-row-inert"}${creating ? " af-row-creating" : ""}`;
   const row = h2("li", { class: cls });
-  if (status.kind) {
-    const dot = h2("span", { class: `af-dot af-dot-${status.kind}` }, status.glyph);
+  if (status.kind && status.icon) {
+    const dot = h2("span", { class: `af-dot af-dot-${status.kind}` }, icon(status.icon));
     dot.setAttribute("aria-hidden", "true");
     row.append(dot);
   }
@@ -12599,3 +12832,36 @@ if (document.readyState === "loading") {
 } else {
   mount();
 }
+/*! Bundled license information:
+
+lucide/dist/esm/icons/archive-restore.mjs:
+lucide/dist/esm/icons/archive.mjs:
+lucide/dist/esm/icons/arrow-right.mjs:
+lucide/dist/esm/icons/bot.mjs:
+lucide/dist/esm/icons/check.mjs:
+lucide/dist/esm/icons/chevron-down.mjs:
+lucide/dist/esm/icons/circle-dashed.mjs:
+lucide/dist/esm/icons/circle.mjs:
+lucide/dist/esm/icons/diamond.mjs:
+lucide/dist/esm/icons/ellipsis.mjs:
+lucide/dist/esm/icons/external-link.mjs:
+lucide/dist/esm/icons/folder-git-2.mjs:
+lucide/dist/esm/icons/funnel.mjs:
+lucide/dist/esm/icons/git-branch.mjs:
+lucide/dist/esm/icons/menu.mjs:
+lucide/dist/esm/icons/octagon-x.mjs:
+lucide/dist/esm/icons/panels-top-left.mjs:
+lucide/dist/esm/icons/plus.mjs:
+lucide/dist/esm/icons/refresh-cw.mjs:
+lucide/dist/esm/icons/square-check-big.mjs:
+lucide/dist/esm/icons/square.mjs:
+lucide/dist/esm/icons/terminal.mjs:
+lucide/dist/esm/icons/x.mjs:
+lucide/dist/esm/lucide.mjs:
+  (**
+   * @license lucide v1.25.0 - ISC
+   *
+   * This source code is licensed under the ISC license.
+   * See the LICENSE file in the root directory of this source tree.
+   *)
+*/

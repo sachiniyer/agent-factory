@@ -26,6 +26,8 @@
 // Firefox and iOS Safari never fire beforeinstallprompt at all, so they simply never
 // see the button and use the browser's own add-to-home-screen. Nothing to do.
 
+import { icon } from "./icon.js";
+
 /** The Chromium-only event behind the install flow. Not in lib.dom, so it is declared
  *  here to the shape the spec gives it. */
 interface BeforeInstallPromptEvent extends Event {
@@ -104,7 +106,7 @@ export class InstallAffordance {
     const dismiss = document.createElement("button");
     dismiss.type = "button";
     dismiss.className = "af-install__dismiss";
-    dismiss.textContent = "×";
+    dismiss.append(icon("x"));
     dismiss.setAttribute("aria-label", "Dismiss install");
     dismiss.title = "Dismiss";
     dismiss.addEventListener("click", () => this.dismiss());

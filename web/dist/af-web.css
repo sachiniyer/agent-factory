@@ -228,6 +228,13 @@ body {
 #app {
   min-height: 100vh;
 }
+.af-icon {
+  display: block;
+  width: 1em;
+  height: 1em;
+  flex: 0 0 auto;
+  pointer-events: none;
+}
 .af-login {
   min-height: 100vh;
   display: flex;
@@ -384,7 +391,6 @@ body {
 .af-project-glyph {
   flex: 0 0 auto;
   color: var(--af-accent);
-  font-weight: 700;
 }
 .af-project-switch-name {
   min-width: 0;
@@ -448,7 +454,6 @@ body {
   flex: 0 0 auto;
   width: 0.8rem;
   color: var(--af-accent);
-  font-weight: 700;
 }
 .af-project-item-label {
   min-width: 0;
@@ -560,6 +565,9 @@ body {
   display: none;
 }
 .af-install__dismiss {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   padding: 0 0.3rem;
   background: transparent;
   color: var(--af-text-3);
@@ -683,7 +691,6 @@ body {
   width: 0.875rem;
   height: 0.875rem;
   flex: 0 0 auto;
-  fill: currentColor;
 }
 .af-rail-filter-dot {
   width: 4px;
@@ -739,7 +746,6 @@ body {
   flex: 0 0 auto;
   width: 0.8rem;
   color: var(--af-accent);
-  font-weight: 700;
 }
 .af-filter-item-label {
   flex: 1;
@@ -802,6 +808,9 @@ body {
   line-height: 1.5;
 }
 .af-rail-empty-new {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
   padding: 0.1rem 0.5rem;
   background: var(--af-accent-subtle);
   color: var(--af-accent);
@@ -903,12 +912,21 @@ body {
   text-overflow: ellipsis;
 }
 .af-branch-icon {
+  display: inline-block;
+  width: 0.85rem;
+  height: 0.85rem;
+  margin-right: 0.2rem;
+  vertical-align: -0.15rem;
   opacity: 0.8;
 }
 .af-dot {
   flex: 0 0 auto;
   line-height: 1.4;
   font-size: var(--af-fs-sm);
+}
+.af-dot-ready .af-icon,
+.af-dot-limit .af-icon {
+  fill: currentColor;
 }
 .af-dot-ready {
   color: var(--af-dot-ready);
@@ -1071,8 +1089,9 @@ body {
 }
 .af-tab-glyph {
   flex: 0 0 auto;
+  width: 0.8rem;
+  height: 0.8rem;
   color: var(--af-text-3, var(--af-text-2));
-  line-height: 1;
 }
 .af-tab-label {
   overflow: hidden;
@@ -1116,6 +1135,10 @@ body {
 .af-tab-close:hover {
   color: var(--af-danger);
   background: var(--af-danger-subtle);
+}
+.af-tab-close .af-icon {
+  width: 0.75rem;
+  height: 0.75rem;
 }
 .af-tab-new-wrap {
   position: relative;
@@ -1175,7 +1198,6 @@ body {
 }
 .af-tab-new-plus {
   font-size: var(--af-fs-md);
-  line-height: 0.8;
 }
 .af-tab-new-caret {
   color: var(--af-text-2);
@@ -1297,6 +1319,9 @@ body {
   text-overflow: ellipsis;
 }
 .af-pane-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   flex: 0 0 auto;
   padding: 0 var(--af-sp-1);
   background: transparent;
@@ -1342,6 +1367,7 @@ body {
   flex: 0 0 auto;
   display: inline-flex;
   align-items: center;
+  gap: 0.25rem;
   padding: 0.1rem 0.4rem;
   font-size: var(--af-fs-xs);
   line-height: 1.4;
@@ -1383,6 +1409,9 @@ body {
   display: none;
 }
 .af-webpane-fallback-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
   color: var(--af-accent);
 }
 .af-webpane-dead {
@@ -1447,6 +1476,9 @@ body {
   height: 50%;
 }
 .af-rail-new {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
   padding: var(--af-sp-1) 0.55rem;
   background: transparent;
   color: var(--af-accent);
@@ -1729,6 +1761,9 @@ body {
   padding: 0.05rem var(--af-sp-2);
 }
 .af-tasks-add {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
   margin-left: auto;
   padding: var(--af-sp-1) 0.55rem;
   background: transparent;
@@ -1766,6 +1801,11 @@ body {
   font-size: var(--af-fs-sm);
   color: var(--af-text-2);
   line-height: 1.5;
+}
+.af-task-target {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.2rem;
 }
 .af-task-enabled.af-task-on {
   color: var(--af-dot-ready);
