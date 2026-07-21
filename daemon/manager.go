@@ -25,6 +25,10 @@ type Manager struct {
 	// (#829) but state-dependent RPCs return errDaemonStarting.
 	ready     chan struct{}
 	readyOnce sync.Once
+	// lifecycle is the daemon-wide health/admission state. Manager readiness
+	// means persisted session state is safe to read; lifecycle readiness is the
+	// later barrier where scheduler/watch/AutoYes work may run.
+	lifecycle *daemonLifecycle
 
 	mu        sync.Mutex
 	storage   *session.Storage
@@ -196,12 +200,29 @@ func NewManager(cfg *config.Config) (*Manager, error) {
 	if err := manager.RestoreInstances(); err != nil {
 		return nil, err
 	}
+	// NewManager is used without RunDaemon's scheduler/watcher startup. For that
+	// standalone manager, restore completion is the full readiness barrier.
+	if err := manager.lifecycle.markReady(); err != nil {
+		return nil, err
+	}
 	return manager, nil
 }
 
 // newManagerShell constructs a Manager with no instances loaded. The manager
 // reports !Ready() until RestoreInstances completes.
 func newManagerShell(cfg *config.Config) (*Manager, error) {
+	return newManagerShellForDaemon(cfg, "")
+}
+
+// newManagerShellForDaemon constructs the same manager shell with an optional
+// upgrade transaction identity. The transaction-bearing path stays unexported:
+// an ordinary caller can construct only a normal shell, while runDaemon owns
+// the probation selection.
+func newManagerShellForDaemon(cfg *config.Config, transactionID string) (*Manager, error) {
+	lifecycle, err := newDaemonLifecycle(transactionID, cfg.ListenAddr)
+	if err != nil {
+		return nil, err
+	}
 	state := config.LoadState()
 	storage, err := session.NewStorage(state, "")
 	if err != nil {
@@ -221,6 +242,7 @@ func newManagerShell(cfg *config.Config) (*Manager, error) {
 		cfg:                 cfg,
 		limitDetector:       task.NewLimitDetector(cfg.LimitPatterns),
 		ready:               make(chan struct{}),
+		lifecycle:           lifecycle,
 		storage:             storage,
 		instances:           make(map[string]*session.Instance),
 		pendingCreates:      make(map[string]session.InstanceData),
@@ -264,6 +286,13 @@ func (m *Manager) RestoreInstances() error {
 	m.ghostTaskRuns = ghosts
 	m.mu.Unlock()
 	m.readyOnce.Do(func() { close(m.ready) })
+	// Publish the lifecycle phase only after the Manager readiness barrier is
+	// open. A Ping that says upgrade_probation must never race a Snapshot that
+	// still says the restore is in progress. Transaction-tagged mutations remain
+	// blocked independently of phase, so this ordering opens no write gap.
+	if m.lifecycle != nil {
+		m.lifecycle.markRestoreComplete()
+	}
 	return nil
 }
 

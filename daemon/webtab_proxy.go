@@ -364,7 +364,11 @@ func (cs *controlServer) webTabProxyHandler(w http.ResponseWriter, r *http.Reque
 	// Kind-agnostic by necessity AND by rights: resolving the kind is the very thing
 	// that touches the manager, so it is not known here — and a dev-server preview
 	// must not be told VS Code is starting.
-	if err := cs.requireManagerReady(); err != nil {
+	if err := cs.requireStateMutationAdmission(); err != nil {
+		if IsDaemonUpgradeProbationErr(err) {
+			writeTabNoticePage(w, "Validating upgrade", "af is validating a daemon upgrade — this tab will reload when validation finishes.", true)
+			return
+		}
 		writeTabNoticePage(w, "Starting up", "af is starting up — this tab will load as soon as the daemon has restored its sessions.", true)
 		return
 	}

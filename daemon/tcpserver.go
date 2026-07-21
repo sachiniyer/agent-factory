@@ -37,6 +37,7 @@ import (
 type tcpListenerInfo struct {
 	Addr  string // the resolved bound address (host:port, port filled in for :0)
 	Token string // the bearer token clients must present
+	done  <-chan struct{}
 }
 
 // tokenGatePolicy is how a TCP listener's bearer-token gate treats peers. Its
@@ -161,7 +162,9 @@ func startTCPListener(mux http.Handler, cfg *config.Config, policy tokenGatePoli
 		Handler:           handler,
 		ReadHeaderTimeout: httpReadHeaderTimeout,
 	}
+	done := make(chan struct{})
 	go func() {
+		defer close(done)
 		if err := srv.Serve(listener); err != nil && err != http.ErrServerClosed {
 			log.WarningLog.Printf("daemon TCP listener stopped: %v", err)
 		}
@@ -170,6 +173,7 @@ func startTCPListener(mux http.Handler, cfg *config.Config, policy tokenGatePoli
 	info := tcpListenerInfo{
 		Addr:  listener.Addr().String(),
 		Token: token,
+		done:  done,
 	}
 	return srv.Close, info, nil
 }
