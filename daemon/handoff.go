@@ -75,11 +75,11 @@ func (s *controlServer) HandoffSession(req HandoffSessionRequest, resp *HandoffS
 // Rollback: if the runtime swap fails, step 4's state change is reverted, because
 // a record claiming the session runs claude while the pane still runs codex is
 // worse than no handoff at all — every subsequent decision keyed off
-// Instance.Program would be wrong. If the swap SUCCEEDS but the mission delivery
-// fails, the swap stands: the new agent is genuinely the one running now, and
-// lying about that to make the error tidier would strand the record. The error
-// says the agent changed but the brief did not land, which is the truth and is
-// recoverable with a send-prompt.
+// Instance.Program would be wrong. If the swap SUCCEEDS but readiness cannot be
+// established, the record becomes startup-unknown rather than claiming a
+// healthy incoming runtime. If readiness succeeds but the mission paste fails,
+// the exact rendered brief and OpReplacing fence remain durable for the daemon's
+// bounded retry path; neither failure is flattened into a false Running state.
 //
 // Locking mirrors resumeFromLimit exactly: per-(repo,title) target lock FIRST,
 // then the per-session op lock (#2006's canonical target-before-op order), with
@@ -162,6 +162,7 @@ func (m *Manager) HandoffSession(req HandoffSessionRequest) (HandoffSessionRespo
 		reason = session.HandoffReasonUsageLimit
 	}
 	brief := instance.BuildMissionBrief(target, req.Brief, reason)
+	mission := brief.Render()
 	headSHA := brief.Work.HeadSHA
 	conversationCapture := plan.ConversationCapture()
 
@@ -215,6 +216,13 @@ func (m *Manager) HandoffSession(req HandoffSessionRequest) (HandoffSessionRespo
 		instance.SetPrompt(override)
 		checkpoint.Prompt = override
 	}
+	// The incoming runtime now exists, but its takeover context does not. Record
+	// that exact rendered mission in memory and in the post-swap checkpoint BEFORE
+	// waiting for readiness: if the daemon exits anywhere in that potentially
+	// minute-long window, the restored row has an explicit delivery obligation
+	// instead of silently claiming an instruction-less agent is complete.
+	instance.SetPendingHandoffMission(mission)
+	checkpoint.PendingHandoffMission = mission
 	// The process swap is already irreversible, so checkpoint its durable facts
 	// before the readiness wait. Memory stays fenced, but a daemon crash in this
 	// window must restore the incoming Program rather than lie that the outgoing
@@ -226,10 +234,12 @@ func (m *Manager) HandoffSession(req HandoffSessionRequest) (HandoffSessionRespo
 		log.WarningLog.Printf("handoff %q: failed to persist the post-swap checkpoint before mission delivery: %v", req.Title, err)
 	}
 
-	mission := brief.Render()
-	settle := func(event session.TransitionEvent) error {
+	settle := func(event session.TransitionEvent, clearPending bool) error {
 		if err := instance.Transition(event); err != nil {
 			return err
+		}
+		if clearPending && !instance.ClearPendingHandoffMission(mission) {
+			return fmt.Errorf("pending handoff mission changed before settlement")
 		}
 		// Persist only settled outcomes. Disk persistence strips transient ops, so
 		// writing while OpReplacing is raised would manufacture an unfenced state
@@ -245,7 +255,7 @@ func (m *Manager) HandoffSession(req HandoffSessionRequest) (HandoffSessionRespo
 			// context — not the old create prompt or bare override — because the
 			// normal limit-resume path replays exactly Instance.Prompt.
 			instance.SetPrompt(mission)
-			if terr := settle(session.ParkHandoff(limitErr.ResetAt)); terr != nil {
+			if terr := settle(session.ParkHandoff(limitErr.ResetAt), true); terr != nil {
 				return HandoffSessionResponse{}, fmt.Errorf(
 					"handed %q off to %s, which hit a usage limit before its mission could be delivered, and failed to park the handoff: %w",
 					req.Title, target, errors.Join(serr, terr))
@@ -255,17 +265,28 @@ func (m *Manager) HandoffSession(req HandoffSessionRequest) (HandoffSessionRespo
 					"the rendered mission is saved and will be sent by the normal limit-resume path: %w",
 				req.Title, target, serr)
 		}
-		if terr := settle(session.CommitHandoff()); terr != nil {
+		if !errors.Is(serr, task.ErrPromptDelivery) {
+			// Readiness/trust failures do not prove a usable incoming runtime. Retain
+			// the record and pending mission, but make it inert: claiming Running here
+			// turns a startup death into a fake delivery failure and invites commands
+			// into an unconfirmed binding.
+			instance.MarkStartupStateUnknown()
+			m.persistInstance(repoID, instance)
 			return HandoffSessionResponse{}, fmt.Errorf(
-				"handed %q off to %s, but its mission delivery and replacement-fence settlement both failed: %w",
-				req.Title, target, errors.Join(serr, terr))
+				"handed %q off to %s, but the incoming agent never reached a confirmed ready state (%w); "+
+					"the session was retained as startup-unknown with its mission pending for inspection",
+				req.Title, target, serr)
 		}
+		// Readiness proved this is the incoming runtime, so conversation capture
+		// is safe even though its mission remains behind the durable retry fence.
+		// The later recovery pass no longer has the command-specific capture plan.
+		m.captureAgentConversationAsync(repoID, key, instance, conversationCapture)
 		return HandoffSessionResponse{}, fmt.Errorf(
 			"handed %q off to %s, but its mission brief could not be delivered (%w); "+
-				"the new agent is running with no instructions — re-send them with `af sessions send-prompt`",
+				"the exact mission remains pending behind the replacement fence for a readiness-based retry",
 			req.Title, target, serr)
 	}
-	if err := settle(session.CommitHandoff()); err != nil {
+	if err := settle(session.CommitHandoff(), true); err != nil {
 		return HandoffSessionResponse{}, fmt.Errorf(
 			"handed %q off to %s and delivered its mission, but could not settle the replacement fence: %w",
 			req.Title, target, err)

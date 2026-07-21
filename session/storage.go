@@ -87,6 +87,11 @@ type InstanceData struct {
 	UpdatedAt    time.Time `json:"updated_at"`
 	AutoYes      bool      `json:"auto_yes"`
 	Prompt       string    `json:"prompt,omitempty"`
+	// PendingHandoffMission is a rendered takeover brief whose incoming runtime
+	// has been established but whose delivery has not been durably confirmed.
+	// Unlike Prompt, it is an at-least-once recovery marker and is cleared after
+	// the exact mission lands (or is transferred to the usage-limit retry path).
+	PendingHandoffMission string `json:"pending_handoff_mission,omitempty"`
 
 	Program string `json:"program"`
 	// UserKilled is the kill-intent tombstone (#1108): persisted by

@@ -2,6 +2,7 @@ package task
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -22,6 +23,17 @@ import (
 const MaxTrustPromptAttempts = 20
 
 var trustPromptRetryDelay = time.Second
+
+// ErrAgentReadiness marks failures that happen before the incoming agent has
+// reached a usable composer. ErrPromptDelivery marks the narrower failure after
+// readiness was established. Callers that have already crossed an irreversible
+// runtime-swap boundary need this distinction: the former must become an inert
+// startup-unknown record, while the latter can retain a delivery retry against
+// the runtime whose readiness was positively established.
+var (
+	ErrAgentReadiness = errors.New("agent did not become ready")
+	ErrPromptDelivery = errors.New("prompt delivery failed after readiness")
+)
 
 // SetTrustPromptTimingForTest compresses the trust-prompt dismissal loop's
 // timing — both the backoff between attempts and the readiness poll each retry
@@ -130,16 +142,16 @@ func WaitForReadyAndSendPrompt(ctx context.Context, instance *session.Instance, 
 	}
 
 	if err := WaitForReady(ctx, instance); err != nil {
-		return err
+		return fmt.Errorf("%w: %w", ErrAgentReadiness, err)
 	}
 
 	if err := DismissTrustPrompt(ctx, instanceTrustTarget{instanceReadinessTarget{inst: instance}}); err != nil {
-		return err
+		return fmt.Errorf("%w: %w", ErrAgentReadiness, err)
 	}
 
 	if prompt != "" {
 		if err := instance.AgentServer().SendPrompt(prompt); err != nil {
-			return err
+			return fmt.Errorf("%w: %w", ErrPromptDelivery, err)
 		}
 	}
 

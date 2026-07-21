@@ -53,13 +53,16 @@ func (e CommandEnvironment) Override(name string) CommandEnvOverride {
 // must surface that error and abort rather than polling a guessed path.
 func CommandEnvironmentFromCommand(command, workingDir string) (CommandEnvironment, error) {
 	tokens, _ := splitShellTokens(command)
-	agentIdx, agent := findAgentToken(tokens)
+	agentIdx, agent, findErr := findAgentTokenStrict(tokens)
 	result := CommandEnvironment{
 		WorkingDir: filepath.Clean(workingDir),
 		overrides:  make(map[string]CommandEnvOverride),
 	}
 	if !filepath.IsAbs(workingDir) {
 		return result, fmt.Errorf("launch directory %q is not absolute; cannot resolve relative receipt paths", workingDir)
+	}
+	if findErr != nil {
+		return result, fmt.Errorf("cannot resolve env invocation before agent: %w", findErr)
 	}
 	if agent == "" {
 		return result, fmt.Errorf("could not find a supported agent executable")

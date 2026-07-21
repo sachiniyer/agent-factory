@@ -72,6 +72,18 @@ func CheckProgram(cfg *config.Config, agent string) (*ProgramCheck, error) {
 // shell shapes used in program_overrides: quotes, explicit paths, leading
 // VAR=value assignments, and env VAR=value wrappers.
 func CheckCommand(command string) (*ProgramCheck, error) {
+	return checkCommand(command, "")
+}
+
+// CheckCommandAt verifies command in the same cwd and effective environment its
+// tmux launch will use. Handoff calls this before stopping the outgoing agent,
+// so relative executables, env -C, and PATH assignments must be resolved exactly
+// as the incoming process will see them.
+func CheckCommandAt(command, workingDir string) (*ProgramCheck, error) {
+	return checkCommand(command, workingDir)
+}
+
+func checkCommand(command, workingDir string) (*ProgramCheck, error) {
 	command = strings.TrimSpace(command)
 	check := &ProgramCheck{Command: command}
 	if command == "" {
@@ -89,21 +101,108 @@ func CheckCommand(command string) (*ProgramCheck, error) {
 	if exe == "" {
 		return check, fmt.Errorf("could not find an executable in command %q", command)
 	}
+	var launch tmux.CommandEnvironment
+	if workingDir != "" {
+		launch, err = tmux.CommandEnvironmentFromCommand(command, workingDir)
+		if err != nil {
+			return check, err
+		}
+		info, statErr := os.Stat(launch.WorkingDir)
+		if statErr != nil {
+			return check, fmt.Errorf("launch directory %q cannot be used: %w", launch.WorkingDir, statErr)
+		}
+		if !info.IsDir() {
+			return check, fmt.Errorf("launch directory %q is not a directory", launch.WorkingDir)
+		}
+	}
 	// env is itself an executable as well as a command parser. Validate both
 	// halves: approving only the wrapper misses a missing target, while approving
 	// only the target turns a missing custom /path/to/env into a launch-time
 	// failure after a destructive handoff has already stopped the old agent.
 	if wrapper := envWrapperExecutable(words); wrapper != "" {
-		if _, err := resolveExecutable(wrapper); err != nil {
-			return check, fmt.Errorf("env wrapper %q cannot be executed: %w", wrapper, err)
+		var wrapperErr error
+		if workingDir == "" {
+			_, wrapperErr = resolveExecutable(wrapper)
+		} else {
+			_, wrapperErr = resolveEnvWrapperAt(words, wrapper, workingDir)
+		}
+		if wrapperErr != nil {
+			return check, fmt.Errorf("env wrapper %q cannot be executed: %w", wrapper, wrapperErr)
 		}
 	}
-	path, err := resolveExecutable(exe)
+	var path string
+	if workingDir == "" {
+		path, err = resolveExecutable(exe)
+	} else {
+		pathValue, pathSet := os.LookupEnv("PATH")
+		if override := launch.Override("PATH"); override.Present {
+			pathValue, pathSet = override.Value, override.Set
+		}
+		path, err = resolveExecutableAt(exe, launch.WorkingDir, pathValue, pathSet)
+	}
 	if err != nil {
 		return check, err
 	}
 	check.Path = path
 	return check, nil
+}
+
+// resolveEnvWrapperAt models the shell lookup that happens before GNU env can
+// apply its own operands. Only leading shell assignments affect that lookup;
+// an env-internal PATH= value applies later, to env's child command.
+func resolveEnvWrapperAt(words []string, wrapper, workingDir string) (string, error) {
+	pathValue, pathSet := os.LookupEnv("PATH")
+	for _, word := range words {
+		name, value, assignment := strings.Cut(word, "=")
+		if !assignment || !isAssignment(word) {
+			break
+		}
+		if name == "PATH" {
+			if !envcommand.IsLiteral(value) {
+				return "", fmt.Errorf("PATH uses shell expansion; use a literal value for launch preflight")
+			}
+			pathValue, pathSet = value, true
+		}
+	}
+	return resolveExecutableAt(wrapper, workingDir, pathValue, pathSet)
+}
+
+func resolveExecutableAt(exe, workingDir, pathValue string, pathSet bool) (string, error) {
+	if strings.ContainsRune(exe, filepath.Separator) || strings.HasPrefix(exe, "~") {
+		path := config.ExpandTilde(exe)
+		if !filepath.IsAbs(path) {
+			path = filepath.Join(workingDir, path)
+		}
+		return resolveExecutable(path)
+	}
+	if !pathSet {
+		return "", fmt.Errorf("%w: executable %q was not found because PATH is unset", errProgramNotFound, exe)
+	}
+	var notExecutable string
+	for _, dir := range filepath.SplitList(pathValue) {
+		if dir == "" {
+			dir = workingDir
+		} else if !filepath.IsAbs(dir) {
+			dir = filepath.Join(workingDir, dir)
+		}
+		candidate := filepath.Join(dir, exe)
+		info, err := os.Stat(candidate)
+		if err != nil || info.IsDir() {
+			continue
+		}
+		if info.Mode().Perm()&0o111 == 0 {
+			if notExecutable == "" {
+				notExecutable = candidate
+			}
+			continue
+		}
+		return candidate, nil
+	}
+	if notExecutable != "" {
+		return "", fmt.Errorf("%w: executable %q is not executable; run: %s", errProgramNotExecutable, exe,
+			shellsuggest.Command("chmod", "+x", notExecutable))
+	}
+	return "", fmt.Errorf("%w: executable %q was not found on PATH", errProgramNotFound, exe)
 }
 
 func resolveExecutable(exe string) (string, error) {

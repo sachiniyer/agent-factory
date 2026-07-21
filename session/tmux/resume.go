@@ -3,6 +3,8 @@ package tmux
 import (
 	"path/filepath"
 	"strings"
+
+	"github.com/sachiniyer/agent-factory/internal/envcommand"
 )
 
 // resumeProgram derives a "resume the most recent session in cwd" variant of
@@ -302,15 +304,40 @@ func DetectAgentFromCommand(command string) string {
 // findAgentToken returns the index and canonical name of the first token whose
 // filepath.Base equals a SupportedPrograms entry, or (-1, "") when none does.
 func findAgentToken(tokens []string) (int, string) {
-	for i, tok := range tokens {
+	idx, agent, _ := findAgentTokenStrict(tokens)
+	return idx, agent
+}
+
+// findAgentTokenStrict is findAgentToken with the parser failure preserved for
+// callers that must explain why a command cannot be modeled. Detection-only
+// callers deliberately collapse that failure to "no agent" and fail closed.
+func findAgentTokenStrict(tokens []string) (int, string, error) {
+	for i := 0; i < len(tokens); {
+		tok := tokens[i]
+		if _, _, assignment := shellAssignment(tok); assignment {
+			i++
+			continue
+		}
+		if strings.EqualFold(baseCommand(tok), "env") {
+			invocation, err := envcommand.Parse(tokens[i+1:], envcommand.Policy{AllowAssignments: true})
+			if err != nil {
+				return -1, "", err
+			}
+			if invocation.CommandIndex < 0 {
+				return -1, "", nil
+			}
+			i += 1 + invocation.CommandIndex
+			continue
+		}
 		base := strings.ToLower(filepath.Base(tok))
 		for _, supported := range SupportedPrograms {
 			if base == supported {
-				return i, supported
+				return i, supported, nil
 			}
 		}
+		i++
 	}
-	return -1, ""
+	return -1, "", nil
 }
 
 // ampResumeInsertIndex returns the token index before which Amp's resume

@@ -238,7 +238,9 @@ func (i *Instance) RecordHandoffSwap(target, reason, headSHA string, automatic b
 // already runs the target. The persisted recovery posture is the same one a
 // generic post-swap delivery failure takes — incoming agent, LiveRunning, no
 // outgoing-provider limit metadata — while memory remains OpReplacing until the
-// mission is delivered or explicitly parked.
+// mission is delivered or explicitly parked. The caller adds the rendered
+// PendingHandoffMission before writing this value so a crash cannot erase the
+// still-undelivered takeover context.
 func (i *Instance) handoffStorageCheckpoint() InstanceData {
 	i.mu.RLock()
 	defer i.mu.RUnlock()

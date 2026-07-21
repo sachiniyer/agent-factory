@@ -78,6 +78,65 @@ func TestCheckCommand(t *testing.T) {
 	}
 }
 
+func TestCheckCommandAtUsesLaunchContext(t *testing.T) {
+	workDir := t.TempDir()
+	binDir := filepath.Join(workDir, "bin")
+	if err := os.Mkdir(binDir, 0o755); err != nil {
+		t.Fatalf("mkdir bin: %v", err)
+	}
+	exe := filepath.Join(binDir, "codex")
+	if err := os.WriteFile(exe, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("write executable: %v", err)
+	}
+
+	for _, command := range []string{
+		"env PATH=bin codex",
+		"./bin/codex",
+		"env -C bin ./codex",
+	} {
+		check, err := CheckCommandAt(command, workDir)
+		if err != nil {
+			t.Fatalf("CheckCommandAt(%q): %v", command, err)
+		}
+		if check.Path != exe {
+			t.Fatalf("CheckCommandAt(%q) path = %q, want %q", command, check.Path, exe)
+		}
+	}
+}
+
+func TestCheckCommandAtRejectsMissingEnvChdir(t *testing.T) {
+	if _, err := CheckCommandAt("env -C missing codex", t.TempDir()); err == nil {
+		t.Fatal("CheckCommandAt approved an env chdir that will fail before exec")
+	}
+}
+
+func TestCheckCommandAtUsesShellPathForEnvWrapper(t *testing.T) {
+	workDir := t.TempDir()
+	binDir := filepath.Join(workDir, "bin")
+	if err := os.Mkdir(binDir, 0o755); err != nil {
+		t.Fatalf("mkdir bin: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(binDir, "codex"), []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("write codex: %v", err)
+	}
+
+	command := "PATH=bin env codex"
+	if _, err := CheckCommandAt(command, workDir); err == nil || !strings.Contains(err.Error(), "env wrapper") {
+		t.Fatalf("CheckCommandAt(%q) = %v, want missing env wrapper on the shell-assigned PATH", command, err)
+	}
+
+	if err := os.WriteFile(filepath.Join(binDir, "env"), []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("write env: %v", err)
+	}
+	check, err := CheckCommandAt(command, workDir)
+	if err != nil {
+		t.Fatalf("CheckCommandAt(%q): %v", command, err)
+	}
+	if check.Path != filepath.Join(binDir, "codex") {
+		t.Fatalf("CheckCommandAt(%q) path = %q, want %q", command, check.Path, filepath.Join(binDir, "codex"))
+	}
+}
+
 func TestCheckCommandParsesAndValidatesAbsoluteEnvWrapper(t *testing.T) {
 	dir := t.TempDir()
 	envPath := filepath.Join(dir, "env")

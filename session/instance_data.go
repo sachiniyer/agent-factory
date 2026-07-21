@@ -39,20 +39,21 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 		// the daemon truth; InFlightOp rides daemon snapshots so secondary TUIs can
 		// cold-start into archive/restore operations without lossy Status
 		// reconstruction (#1436). Disk writers scrub InFlightOp before persistence.
-		Status:              i.statusLocked(),
-		Liveness:            i.liveness,
-		InFlightOp:          i.inFlightOp,
-		LifecycleAction:     lifecycleActionFor(i.ID, i.liveness, i.inFlightOp, i.startupStateUnknown),
-		CanKill:             canKillFor(i.ID, i.inFlightOp),
-		Height:              i.Height,
-		Width:               i.Width,
-		CreatedAt:           i.CreatedAt,
-		UpdatedAt:           time.Now(),
-		Program:             i.Program,
-		AutoYes:             i.AutoYes,
-		Prompt:              i.Prompt,
-		UserKilled:          i.userKilled,
-		StartupStateUnknown: i.startupStateUnknown,
+		Status:                i.statusLocked(),
+		Liveness:              i.liveness,
+		InFlightOp:            i.inFlightOp,
+		LifecycleAction:       lifecycleActionFor(i.ID, i.liveness, i.inFlightOp, i.startupStateUnknown),
+		CanKill:               canKillFor(i.ID, i.inFlightOp),
+		Height:                i.Height,
+		Width:                 i.Width,
+		CreatedAt:             i.CreatedAt,
+		UpdatedAt:             time.Now(),
+		Program:               i.Program,
+		AutoYes:               i.AutoYes,
+		Prompt:                i.Prompt,
+		PendingHandoffMission: i.pendingHandoffMission,
+		UserKilled:            i.userKilled,
+		StartupStateUnknown:   i.startupStateUnknown,
 	}
 
 	if i.backend != nil {
@@ -159,6 +160,14 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 	// Loading/Deleting), but a SNAPSHOT can catch archive/restore in progress and
 	// must round-trip the exact op (#1436).
 	inFlightOp := inFlightOpFromData(data)
+	// PendingHandoffMission is the one operation marker that IS durable: it says
+	// an irreversible runtime swap completed but its takeover brief did not. Disk
+	// still scrubs the generic op enum, then this specific proof reconstructs the
+	// replacement fence so status polling cannot call the idle incoming composer a
+	// completed task before recovery delivers its mission.
+	if data.PendingHandoffMission != "" && !data.StartupStateUnknown && inFlightOp == OpNone {
+		inFlightOp = OpReplacing
+	}
 	instance := &Instance{
 		ID:         data.ID,
 		TaskID:     data.TaskID,
@@ -171,17 +180,18 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 		// same event that restarts the daemon, so this fact has to come back from
 		// disk or the cap would re-decide it from a Lost state that cannot tell a
 		// finished run from an interrupted one.
-		taskRunActive:       data.TaskRunActive,
-		limitResetAt:        data.LimitResetAt,
-		Height:              data.Height,
-		Width:               data.Width,
-		CreatedAt:           data.CreatedAt,
-		UpdatedAt:           data.UpdatedAt,
-		Program:             data.Program,
-		AutoYes:             data.AutoYes,
-		Prompt:              data.Prompt,
-		userKilled:          data.UserKilled,
-		startupStateUnknown: data.StartupStateUnknown,
+		taskRunActive:         data.TaskRunActive,
+		limitResetAt:          data.LimitResetAt,
+		Height:                data.Height,
+		Width:                 data.Width,
+		CreatedAt:             data.CreatedAt,
+		UpdatedAt:             data.UpdatedAt,
+		Program:               data.Program,
+		AutoYes:               data.AutoYes,
+		Prompt:                data.Prompt,
+		pendingHandoffMission: data.PendingHandoffMission,
+		userKilled:            data.UserKilled,
+		startupStateUnknown:   data.StartupStateUnknown,
 	}
 
 	// Pick backend based on persisted BackendType.

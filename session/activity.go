@@ -57,6 +57,14 @@ func ClassifyActivity(data InstanceData) (Activity, string) {
 	if data.StartupStateUnknown {
 		return ActivityTerminal, "session startup state is unknown (af could not confirm which runtime owns its workspace); inspect it and explicitly remove it before retrying"
 	}
+	// A post-swap runtime with an undelivered takeover mission is still settling,
+	// even though instances.json intentionally scrubs the generic OpReplacing
+	// value. Treat the durable marker as its specific fence so a raw-record reader
+	// cannot release the task slot in the crash window before FromInstanceData has
+	// reconstructed the op axis.
+	if data.PendingHandoffMission != "" {
+		return ActivityPending, ""
+	}
 	// Any operation in flight (create, kill, archive, restore) means the session
 	// is mid-transition; wait for it to settle rather than reporting the
 	// transient composed status.

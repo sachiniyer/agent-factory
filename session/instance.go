@@ -176,6 +176,12 @@ type Instance struct {
 	AutoYes bool
 	// Prompt is the initial prompt to pass to the instance on startup
 	Prompt string
+	// pendingHandoffMission is a rendered takeover brief whose delivery has not
+	// been durably confirmed. It is separate from Prompt: Prompt is the user's
+	// durable goal, while this value includes one handoff's generated context and
+	// must be cleared once that exact delivery lands. Persisting it closes the
+	// daemon-crash window between a runtime swap and readiness.
+	pendingHandoffMission string
 	// inPlace is true when the instance was created with `--here`: on first
 	// start it attaches to the repo's existing working tree at its current
 	// branch (external worktree) instead of creating a fresh worktree+branch.

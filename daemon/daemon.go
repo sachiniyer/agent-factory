@@ -287,6 +287,13 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) error {
 			// root title). Backoff-throttled per session, like root-ensure.
 			manager.RestoreLostSessions()
 
+			// Complete a handoff mission whose post-swap checkpoint survived a
+			// daemon restart before delivery was confirmed. This runs after status
+			// and Lost recovery so it acts only on a positively ready pane, and
+			// before limit resume so a newly observed incoming limit can inherit the
+			// exact rendered mission in the same tick.
+			manager.ResumePendingHandoffs()
+
 			// Opt-in auto-resume of usage-limit-blocked sessions (#1146 PR3):
 			// re-prompt a LiveLimitReached row once its limit window elapsed. A
 			// no-op unless limit_auto_resume is set, so a default install keeps

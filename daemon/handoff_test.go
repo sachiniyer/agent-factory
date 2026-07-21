@@ -45,6 +45,7 @@ type handoffBackend struct {
 	hasUpdatedCalls int
 	events          []string
 	noHandoff       bool
+	sendErr         error
 }
 
 func (b *handoffBackend) Capabilities() session.Capabilities {
@@ -91,8 +92,17 @@ func (b *handoffBackend) SendPromptCommand(_ *session.Instance, prompt string) e
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.events = append(b.events, "send")
+	if b.sendErr != nil {
+		return b.sendErr
+	}
 	b.sentPrompts = append(b.sentPrompts, prompt)
 	return nil
+}
+
+func (b *handoffBackend) setSendErr(err error) {
+	b.mu.Lock()
+	b.sendErr = err
+	b.mu.Unlock()
 }
 
 func (b *handoffBackend) eventSnapshot() (events []string, previews, statusPolls int) {
@@ -141,6 +151,14 @@ type limitHandoffBackend struct {
 
 func (b *limitHandoffBackend) Preview(*session.Instance) (string, error) {
 	return "You've hit your usage limit. Try again at Jul 25th, 2026 5:55 PM.", nil
+}
+
+type goneReadinessHandoffBackend struct {
+	*handoffBackend
+}
+
+func (b *goneReadinessHandoffBackend) Preview(*session.Instance) (string, error) {
+	return "", tmux.ErrSessionGone
 }
 
 type stalePollHandoffBackend struct {
@@ -490,11 +508,81 @@ func TestHandoffSession_ReplacementFenceCoversMissionDelivery(t *testing.T) {
 		t.Fatalf("load runtime-swap checkpoint: %v", checkpointErr)
 	}
 	if len(checkpoint) != 1 || checkpoint[0].Program != tmux.ProgramGemini ||
-		checkpoint[0].Liveness != session.LiveRunning || !checkpoint[0].LimitResetAt.IsZero() {
-		t.Fatalf("disk checkpoint during delivery fence = %+v; want incoming program as Running with the outgoing limit cleared", checkpoint)
+		checkpoint[0].Liveness != session.LiveRunning || !checkpoint[0].LimitResetAt.IsZero() ||
+		!strings.Contains(checkpoint[0].PendingHandoffMission, "continuing work") {
+		t.Fatalf("disk checkpoint during delivery fence = %+v; want incoming program as Running with the outgoing limit cleared and the rendered mission pending", checkpoint)
 	}
 	if got := inst.GetInFlightOp(); got != session.OpNone {
 		t.Fatalf("in-flight op after mission delivery = %v, want OpNone", got)
+	}
+}
+
+// A swap can exec the target and still lose its pane before readiness. That is
+// not a prompt-delivery failure: no usable incoming runtime was confirmed, so
+// the row must be retained inert instead of persisted as healthy Running.
+func TestHandoffSession_ReadinessFailureRetainsStartupUnknown(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	base := &handoffBackend{FakeBackend: session.NewFakeBackend()}
+	backend := &goneReadinessHandoffBackend{handoffBackend: base}
+	inst := registerHandoffSubject(t, manager, repoID, repoPath, "startup-died", backend)
+
+	_, err := manager.HandoffSession(HandoffSessionRequest{
+		Title: "startup-died", RepoID: repoID, To: tmux.ProgramGemini,
+	})
+	if !errors.Is(err, task.ErrAgentReadiness) || !errors.Is(err, tmux.ErrSessionGone) {
+		t.Fatalf("HandoffSession error = %v, want readiness classification wrapping ErrSessionGone", err)
+	}
+	if !inst.StartupStateUnknown() || inst.Started() {
+		t.Fatalf("failed incoming startup remained actionable: startupUnknown=%v started=%v", inst.StartupStateUnknown(), inst.Started())
+	}
+	if got := inst.GetInFlightOp(); got != session.OpNone {
+		t.Fatalf("startup-unknown handoff retained op %v, want OpNone", got)
+	}
+	if inst.PendingHandoffMission() == "" {
+		t.Fatal("startup-unknown handoff discarded the mission that never landed")
+	}
+	rec := recordFor(t, repoID, "startup-died")
+	if rec == nil || !rec.StartupStateUnknown || rec.PendingHandoffMission == "" {
+		t.Fatalf("persisted failed handoff = %+v, want startup-unknown with its mission pending", rec)
+	}
+}
+
+// A post-ready paste failure keeps a durable pending marker. Once a later poll
+// positively observes Ready, the recovery path sends that exact rendered brief
+// and clears the marker in memory and on disk.
+func TestResumePendingHandoffs_DeliversPostReadyFailure(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	sendErr := errors.New("paste transport failed")
+	backend := &handoffBackend{FakeBackend: session.NewFakeBackend(), sendErr: sendErr}
+	inst := registerHandoffSubject(t, manager, repoID, repoPath, "retry-mission", backend)
+
+	_, err := manager.HandoffSession(HandoffSessionRequest{
+		Title: "retry-mission", RepoID: repoID, To: tmux.ProgramGemini,
+	})
+	if !errors.Is(err, task.ErrPromptDelivery) || !errors.Is(err, sendErr) {
+		t.Fatalf("HandoffSession error = %v, want post-ready prompt-delivery failure", err)
+	}
+	mission := inst.PendingHandoffMission()
+	if mission == "" || inst.StartupStateUnknown() || inst.GetInFlightOp() != session.OpReplacing {
+		t.Fatalf("post-ready failure state = pending:%q startupUnknown:%v op:%v", mission, inst.StartupStateUnknown(), inst.GetInFlightOp())
+	}
+
+	backend.setSendErr(nil)
+	manager.ResumePendingHandoffs()
+
+	if got := inst.PendingHandoffMission(); got != "" {
+		t.Fatalf("delivered recovery mission remained pending: %q", got)
+	}
+	if got := inst.GetInFlightOp(); got != session.OpNone {
+		t.Fatalf("delivered recovery mission retained replacement fence %v", got)
+	}
+	_, prompts := backend.snapshot()
+	if len(prompts) != 1 || prompts[0] != mission {
+		t.Fatalf("recovery prompts = %q, want exactly the pending rendered mission", prompts)
+	}
+	rec := recordFor(t, repoID, "retry-mission")
+	if rec == nil || rec.PendingHandoffMission != "" {
+		t.Fatalf("persisted recovered handoff = %+v, want no pending mission", rec)
 	}
 }
 

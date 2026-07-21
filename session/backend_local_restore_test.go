@@ -31,7 +31,14 @@ func TestLocalBackendPrepareAgentSwapRejectsMissingExecutableBeforeRuntime(t *te
 	cfg.ProgramOverrides[tmux.ProgramGemini] = missing
 	require.NoError(t, config.SaveConfig(cfg))
 
+	repoRoot := initTempGitRepo(t)
+	gw, gwErr := git.NewGitWorktreeFromStorage(
+		repoRoot, repoRoot, "handoff-preflight", "handoff-preflight", "", true, false,
+	)
+	require.NoError(t, gwErr)
 	inst := handoffTestInstance(t, tmux.ProgramClaude)
+	inst.Path = repoRoot
+	inst.gitWorktree = gw
 	plan, err := (&LocalBackend{}).PrepareAgentSwap(inst, tmux.ProgramGemini)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), missing)

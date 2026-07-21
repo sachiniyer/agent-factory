@@ -130,6 +130,11 @@ type Manager struct {
 	// auto-resume scheduler (#1146 PR3), keyed by daemon instance key — the
 	// opt-in sibling of lostRestoreStates. Guarded by m.mu.
 	limitResumeStates map[string]*limitResumeState
+	// handoffRetryDue throttles recovery of rendered takeover missions
+	// that survived a daemon restart before delivery was confirmed. Keyed by
+	// stable instance identity so a same-title successor cannot inherit an old
+	// retry delay. Guarded by m.mu.
+	handoffRetryDue map[string]time.Time
 	// remoteLossStates debounces the remote Lost transition (#1794), keyed by
 	// daemon instance key. A remote probe failure is transport-shaped — one
 	// blip fails identically to a dead sandbox — so the poll accumulates
@@ -266,6 +271,7 @@ func newManagerShellForDaemon(cfg *config.Config, transactionID string) (*Manage
 		killsInFlight:       make(map[string]struct{}),
 		lostRestoreStates:   make(map[string]*lostRestoreState),
 		limitResumeStates:   make(map[string]*limitResumeState),
+		handoffRetryDue:     make(map[string]time.Time),
 		remoteLossStates:    make(map[string]*remoteLossState),
 		instanceOpLocks:     make(map[string]*sync.Mutex),
 		pausedPolls:         make(map[string]time.Time),

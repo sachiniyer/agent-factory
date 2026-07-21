@@ -103,16 +103,16 @@ func (b *LocalBackend) PrepareAgentSwap(i *Instance, target string) (AgentSwapPl
 	resolved := resolveProgramForAgent(i, target)
 	program := injectSystemPrompt(resolved)
 	program, conversation := planLaunchConversation(i.ID, program)
-	if _, err := preflight.CheckCommand(program); err != nil {
+	workDir := i.GetWorktreePath()
+	if workDir == "" {
+		return AgentSwapPlan{}, fmt.Errorf("handoff target %s has no worktree path for launch preflight", target)
+	}
+	if _, err := preflight.CheckCommandAt(program, workDir); err != nil {
 		return AgentSwapPlan{}, fmt.Errorf("handoff target %s failed launch preflight: %w", target,
 			preflight.ProgramError(target, resolved, err))
 	}
 	var capture ConversationCaptureSnapshot
 	if tmux.DetectAgentFromCommand(program) == tmux.ProgramCodex {
-		workDir := i.GetWorktreePath()
-		if workDir == "" {
-			return AgentSwapPlan{}, fmt.Errorf("handoff target %s has no worktree path for resolving its Codex conversation store", target)
-		}
 		codexHome, err := tmux.CodexHomeFromCommand(program, workDir)
 		if err != nil {
 			return AgentSwapPlan{}, fmt.Errorf("handoff target %s has an unresolvable Codex conversation store: %w", target, err)
