@@ -11998,6 +11998,8 @@ var token = null;
 var stream = null;
 var loadPrograms = (repoPath) => token === null ? Promise.reject(new Error("not authorized")) : listPrograms(repoPath, token);
 var resyncTimer = null;
+var sessionEventGeneration = 0;
+var resyncRequestGeneration = 0;
 var taskResyncTimer = null;
 var tabErrorTimer = null;
 var TAB_ERROR_MS = 6e3;
@@ -12684,6 +12686,7 @@ function startStream(tok) {
   stream.start();
 }
 function stopStream() {
+  resyncRequestGeneration += 1;
   if (resyncTimer !== null) {
     window.clearTimeout(resyncTimer);
     resyncTimer = null;
@@ -12702,6 +12705,7 @@ function onEvent(ev) {
     requestTaskResync();
     return;
   }
+  sessionEventGeneration += 1;
   const { sessions, needsResync } = applyEvent(store.get().sessions, ev);
   applySessions(sessions);
   if (needsResync) {
@@ -12726,13 +12730,22 @@ function requestResync() {
   if (resyncTimer !== null) {
     return;
   }
+  const requestGeneration = ++resyncRequestGeneration;
   resyncTimer = window.setTimeout(() => {
     resyncTimer = null;
     const tok = token;
     if (tok === null) {
       return;
     }
+    const eventGeneration = sessionEventGeneration;
     void fetchSnapshot(tok).then((sessions) => {
+      if (requestGeneration !== resyncRequestGeneration || token !== tok) {
+        return;
+      }
+      if (eventGeneration !== sessionEventGeneration) {
+        requestResync();
+        return;
+      }
       applySessions(sessions);
     }).catch(() => {
     });

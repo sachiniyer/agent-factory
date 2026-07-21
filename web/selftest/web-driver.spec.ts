@@ -3651,6 +3651,89 @@ test("#1812: a tab created/deleted out-of-band reaches the open client with no r
   expect(await notReloaded()).toBe(true);
 });
 
+test("#2330: an older reconnect Snapshot cannot overwrite a newer session event", REAL_FIXTURE, async ({ browser }) => {
+  const afBin = process.env.AF_BIN;
+  const mockRepo = process.env.AF_MOCK_REPO;
+  test.skip(!afBin || !mockRepo, "AF_BIN/AF_MOCK_REPO are set only by web-selftest-entry.sh");
+  const { execFileSync } = await import("node:child_process");
+  const af = (...args: string[]): void => {
+    execFileSync(afBin as string, ["--repo", mockRepo as string, "sessions", ...args], { stdio: "pipe" });
+  };
+
+  const ctx = await browser.newContext();
+  const p = await ctx.newPage();
+  const tabName = "resync-race-2330";
+  let created = false;
+  let snapshotCalls = 0;
+  let releaseStale = (): void => {};
+  const staleGate = new Promise<void>((resolve) => {
+    releaseStale = resolve;
+  });
+  let staleCaptured = (): void => {};
+  const staleStarted = new Promise<void>((resolve) => {
+    staleCaptured = resolve;
+  });
+  let staleResponseCaptured = false;
+  let staleSettled = (): void => {};
+  const staleFinished = new Promise<void>((resolve) => {
+    staleSettled = resolve;
+  });
+
+  try {
+    await p.route("**/v1/Snapshot", async (route) => {
+      const call = ++snapshotCalls;
+      try {
+        const response = await route.fetch();
+        const body = await response.body();
+        if (call === 2) {
+          staleResponseCaptured = true;
+          staleCaptured();
+          await staleGate;
+        }
+        await route.fulfill({ status: response.status(), headers: response.headers(), body });
+      } finally {
+        if (call === 2) {
+          staleSettled();
+        }
+      }
+    });
+
+    // Install the route BEFORE first navigation: connect performs one bootstrap
+    // Snapshot, then the newly-open events socket asks for an authoritative resync.
+    // Hold that SECOND response after the daemon has already produced it, making it
+    // provably older than the event below. There is no prior page whose delayed
+    // first-open resync can steal either call number (Codex review P2).
+    await openTokenless(p);
+    await row(p, SESSION_A).click();
+    await expect(p.locator(".af-tabbar")).toBeVisible();
+    await staleStarted;
+
+    af("tab-create", SESSION_A, "--kind", "web", "--url", WEBTAB_EXTERNAL_URL, "--name", tabName);
+    created = true;
+    const liveTab = p.locator(".af-tabbar .af-tab", { hasText: tabName });
+    await expect(liveTab, "the real session.updated event lands while the older Snapshot is held").toHaveCount(1);
+
+    releaseStale();
+    await expect
+      .poll(() => snapshotCalls, {
+        message: "discarding a Snapshot crossed by an event schedules a fresh authoritative resync",
+        timeout: 5_000,
+      })
+      .toBeGreaterThanOrEqual(3);
+    await expect(liveTab, "the older Snapshot must not rewind the newer event").toHaveCount(1);
+  } finally {
+    releaseStale();
+    if (staleResponseCaptured) {
+      await staleFinished;
+    }
+    await p.unroute("**/v1/Snapshot");
+    if (created) {
+      af("tab-delete", SESSION_A, "--name", tabName);
+    }
+    await ctx.close();
+  }
+});
+
 // The other half of #1812/#1815's bill: the event must arrive WITHOUT disturbing
 // what the user is doing. Delivering a tab into the open window is only half the
 // feature if it rips the pane they are reading out from under them.
