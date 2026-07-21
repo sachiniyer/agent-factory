@@ -283,6 +283,10 @@ func (s *remoteAgentServer) Archive() (string, error) {
 // two impls.
 type deadRemoteAgentServer struct {
 	title string
+	// teardown is non-nil only for a kill-tombstoned row whose off-box cleanup
+	// identity was restored from storage. There is still no agent-server client,
+	// but finishUserKill must be able to reap the sandbox itself after restart.
+	teardown func() error
 }
 
 var _ AgentServer = (*deadRemoteAgentServer)(nil)
@@ -316,10 +320,15 @@ func (s *deadRemoteAgentServer) Subscribe(int, Seq) (PTYSubscription, error) { r
 func (s *deadRemoteAgentServer) Input(int, []byte) error                     { return s.err() }
 func (s *deadRemoteAgentServer) Resize(int, uint16, uint16) error            { return s.err() }
 
-// Kill is a no-op success: the sandbox was already reaped, so there is nothing
-// live to tear down, and a killed row must still delete cleanly — instance.Kill()
-// routes here, and returning an error would keep the record for a doomed retry.
-func (s *deadRemoteAgentServer) Kill() error { return nil }
+// Kill is normally a no-op success: an ordinary inert sandbox has already been
+// reaped. A tombstoned row is different — its persisted teardown handle is the
+// work still owed after a daemon restart, so run it before the record can go.
+func (s *deadRemoteAgentServer) Kill() error {
+	if s.teardown != nil {
+		return s.teardown()
+	}
+	return nil
+}
 
 func (s *deadRemoteAgentServer) Archive() (string, error) { return "", s.err() }
 

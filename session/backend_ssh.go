@@ -72,11 +72,10 @@ const (
 	// agent-server runs against it (--repo) and its LOCAL backend creates the
 	// session's git worktree + branch off it, just like a local session.
 	sshWorkspaceSubdir = "workspace"
-	// sshAfBinaryName / sshBannerName / sshLogName / sshPidName are the files the
+	// sshAfBinaryName / sshBannerName / sshLogName are the files the
 	// runtime writes inside the per-session dir: the streamed `af` binary, the
 	// agent-server's stdout banner (one JSON line: addr/token), its
-	// stderr log (pulled into the error on a start failure), and the background
-	// PID (used to kill it on teardown).
+	// stderr log (pulled into the error on a start failure).
 	sshAfBinaryName = "af"
 	sshBannerName   = "agent-server.json"
 	sshLogName      = "agent-server.log"
@@ -206,11 +205,12 @@ type sshProvisioner struct {
 	// real SSH server. Production instances leave these nil and use the methods
 	// below; tests inject only the remote command/dial/client-close boundary.
 	reapRunCombined func(time.Duration, string) ([]byte, error)
-	// reapRunKill reports whether the kill crossed the pre-send boundary. False
-	// means SSH could not even open a command channel, so remotePID is still safe
-	// and necessary to retry. True spends the PID regardless of the later command
-	// outcome, preventing a retry from targeting a recycled process number.
+	// reapRunKill reports whether SSH accepted the exec request. Reap consumes the
+	// live PID at that acceptance boundary; only pre-acceptance failures retry it.
+	// A persisted pre-kill copy remains safe after a crash because the remote
+	// command re-verifies the process identity before signalling.
 	reapRunKill     func(time.Duration, string) (bool, error)
+	reapOpenSession func() (sshCommandSession, error)
 	reapDial        func() error
 	reapCloseClient func()
 }
@@ -253,7 +253,15 @@ func (p *sshProvisioner) provision() (ProvisionResult, error) {
 	teardown := p.reap
 	log.InfoLog.Printf("ssh runtime: session %q running on %s (remote dir %s), agent-server tunneled at %s", p.spec.Title, p.cfg.Host, p.sessionDir, endpoint.URL)
 	return ProvisionResult{
-		Backend:  &sshBackend{remoteAgentBackend: remoteAgentBackend{reap: teardown}},
+		Backend: &sshBackend{
+			remoteAgentBackend: remoteAgentBackend{reap: teardown},
+			provisioner:        p,
+			cleanup: &SSHRuntimeCleanupData{
+				Config:     p.cfg,
+				SessionDir: p.sessionDir,
+				RemotePID:  p.remotePID,
+			},
+		},
 		Endpoint: endpoint,
 		Teardown: teardown,
 	}, nil
@@ -541,7 +549,11 @@ func (p *sshProvisioner) startAgentServer() error {
 	if err != nil {
 		return fmt.Errorf("backend=ssh: starting af agent-server on the remote failed: %s: %w", strings.TrimSpace(string(out)), err)
 	}
-	p.remotePID = strings.TrimSpace(string(out))
+	pid := strings.TrimSpace(string(out))
+	p.remotePID = pid
+	if !positivePID(pid) {
+		return fmt.Errorf("backend=ssh: starting af agent-server returned invalid background PID %q", pid)
+	}
 	return nil
 }
 
@@ -673,28 +685,38 @@ func (p *sshProvisioner) reap() error {
 	}
 
 	if remotePID := p.remotePID; remotePID != "" {
-		// SIGTERM lets the agent-server tear its workspace down cleanly (kill
-		// tmux, remove the worktree); the SIGKILL is a backstop if it hangs.
-		transmitted, killErr := p.runReapKill(sshShortStepTimeout, fmt.Sprintf("kill %s 2>/dev/null; sleep 0.3; kill -9 %s 2>/dev/null; true", remotePID, remotePID))
-		if !transmitted {
-			// The SSH client failed before it could hand over the kill. Keep the PID
-			// and abort before rm: deleting the directory while its agent-server is
-			// still running would turn a retryable row into an orphan.
+		if !positivePID(remotePID) {
 			p.finishReapTransport()
-			if killErr == nil {
-				killErr = errors.New("kill command was not transmitted")
-			}
-			reapErr := fmt.Errorf("%w: backend=ssh: opening a command channel on %s to kill remote PID %s failed: %w",
-				ErrWorkspaceStateUnknown, p.cfg.Host, remotePID, killErr)
+			reapErr := fmt.Errorf("%w: backend=ssh: refusing to signal invalid remote PID %q on %s",
+				ErrWorkspaceStateUnknown, remotePID, p.cfg.Host)
 			log.WarningLog.Printf("%v", reapErr)
 			return reapErr
 		}
-		// The kill crossed the send boundary exactly once. Spend the numeric PID
-		// even if the connection failed afterward: the remote OS may recycle it,
-		// so a retained-row retry may repeat rm but must never repeat this kill.
+		// The command verifies that this numeric PID still belongs to the exact
+		// per-session af binary before signalling it. That turns a later retry into
+		// a safe identity check rather than another blind numeric kill: a recycled
+		// PID cannot match the unique session-dir path in the original argv.
+		accepted, killErr := p.runReapKill(sshShortStepTimeout, p.remotePIDKillScript(remotePID))
+		if !accepted {
+			// Opening a channel is not delivery. Keep the PID until the server accepts
+			// the exec request, and abort before rm so the retained-row retry still has
+			// the process handle it needs.
+			p.finishReapTransport()
+			if killErr == nil {
+				killErr = errors.New("kill exec was not accepted")
+			}
+			reapErr := fmt.Errorf("%w: backend=ssh: remote PID %s kill exec on %s was not accepted: %w",
+				ErrWorkspaceStateUnknown, remotePID, p.cfg.Host, killErr)
+			log.WarningLog.Printf("%v", reapErr)
+			return reapErr
+		}
+		// Start returned success: the server accepted the exec, so the live PID is
+		// spent exactly here even if the reply is later lost. A daemon restart can
+		// replay the pre-kill tombstone, but that copy is paired with the immutable
+		// session path and rechecks argv before either signal.
 		p.remotePID = ""
 		if killErr != nil {
-			log.WarningLog.Printf("ssh runtime: remote PID %s kill was transmitted but did not report completion: %v", remotePID, killErr)
+			log.WarningLog.Printf("ssh runtime: remote PID %s kill exec was accepted but did not report completion: %v", remotePID, killErr)
 		}
 	}
 	out, err := p.runReapCombined(sshReapTimeout, "rm -rf "+shellQuote(p.sessionDir))
@@ -739,22 +761,39 @@ func (p *sshProvisioner) runReapCombined(timeout time.Duration, script string) (
 	return p.runCombined(timeout, script)
 }
 
-// runReapKill separates the one non-idempotent cleanup command from rm. The
-// returned boolean is false only when SSH failed to open a command channel, so
-// no exec request could be attempted; once the channel exists, the PID is spent
-// regardless of a later timeout or transport loss.
+// remotePIDKillScript makes a numeric-PID retry safe. ps -ww is available on the
+// Linux and macOS hosts supported by the SSH backend; the unique per-session af
+// path remains in the agent-server argv for its lifetime. A recycled PID whose
+// argv does not contain that path is treated as already gone, never signalled.
+// Re-check before SIGKILL as well so recycling during the grace sleep cannot
+// redirect the second signal.
+func (p *sshProvisioner) remotePIDKillScript(remotePID string) string {
+	return fmt.Sprintf(
+		`pid=%s; expected=%s; matches_session() { args=$(ps -ww -p "$pid" -o args= 2>/dev/null) || return 2; printf '%%s\n' "$args" | grep -F -q -- "$expected"; }; if ! kill -0 "$pid" 2>/dev/null; then exit 0; fi; matches_session; matched=$?; if [ "$matched" -eq 1 ]; then exit 0; elif [ "$matched" -ne 0 ]; then exit 75; fi; kill "$pid" 2>/dev/null || exit 76; sleep 0.3; if ! kill -0 "$pid" 2>/dev/null; then exit 0; fi; matches_session; matched=$?; if [ "$matched" -eq 1 ]; then exit 0; elif [ "$matched" -ne 0 ]; then exit 75; fi; kill -9 "$pid" 2>/dev/null || exit 77`,
+		shellQuote(remotePID), shellQuote(p.afPath()))
+}
+
+// runReapKill separates exec acceptance from command completion. NewSession only
+// opens an SSH channel; Session.Start is the protocol boundary where the server
+// accepts the exec request. A Start failure retains the PID; once Start succeeds,
+// the PID is spent even if Wait later loses the reply.
 func (p *sshProvisioner) runReapKill(timeout time.Duration, script string) (bool, error) {
 	if p.reapRunKill != nil {
 		return p.reapRunKill(timeout, script)
 	}
-	if p.reapRunCombined != nil {
-		// Existing tests inject at the combined-command boundary. Reaching that
-		// seam models an already-open channel and therefore a transmitted kill.
-		_, err := p.reapRunCombined(timeout, script)
-		return true, err
+	sess, err := p.openReapSession()
+	if err != nil {
+		return false, fmt.Errorf("opening ssh session failed: %w", err)
 	}
-	_, transmitted, err := p.runCombinedTracked(timeout, script)
-	return transmitted, err
+	defer func() { _ = sess.Close() }()
+	return runAcceptedSSHCommand(timeout, sess, "sh -c "+shellQuote(script))
+}
+
+func (p *sshProvisioner) openReapSession() (sshCommandSession, error) {
+	if p.reapOpenSession != nil {
+		return p.reapOpenSession()
+	}
+	return p.client.NewSession()
 }
 
 func (p *sshProvisioner) dialForReap() error {
@@ -797,20 +836,6 @@ func (p *sshProvisioner) runCombined(timeout time.Duration, script string) ([]by
 	return p.runSession(timeout, script, nil, true)
 }
 
-// runCombinedTracked is the reap-only sibling that exposes the non-idempotent
-// kill boundary. A NewSession failure is definitively pre-send. Once the command
-// channel exists, handoff to the SSH command runner spends the PID even if the
-// request later times out or loses its reply.
-func (p *sshProvisioner) runCombinedTracked(timeout time.Duration, script string) ([]byte, bool, error) {
-	sess, err := p.client.NewSession()
-	if err != nil {
-		return nil, false, fmt.Errorf("opening ssh session failed: %w", err)
-	}
-	defer func() { _ = sess.Close() }()
-	out, err := runOpenedSSHSession(timeout, sess, script, nil, true)
-	return out, true, err
-}
-
 // runOut runs script via `sh -c` on the remote and returns ONLY stdout — used
 // where stderr would pollute the captured value (the launch's PID, the banner
 // JSON).
@@ -829,6 +854,45 @@ type sshSessionResult struct {
 	err error
 }
 
+// sshCommandSession is the narrow x/crypto session surface the kill delivery
+// boundary needs. The interface lets tests make an accepted/rejected exec
+// explicit without standing up a real SSH server.
+type sshCommandSession interface {
+	Start(string) error
+	Wait() error
+	Close() error
+}
+
+// runAcceptedSSHCommand bounds both exec acceptance and completion. The boolean
+// answers only whether Session.Start returned nil; callers must still inspect the
+// error before treating the command as complete.
+func runAcceptedSSHCommand(timeout time.Duration, sess sshCommandSession, command string) (bool, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	started := make(chan error, 1)
+	go func() { started <- sess.Start(command) }()
+	select {
+	case err := <-started:
+		if err != nil {
+			return false, fmt.Errorf("starting remote command failed: %w", err)
+		}
+	case <-ctx.Done():
+		_ = sess.Close()
+		return false, fmt.Errorf("remote command acceptance timed out after %s: %w", timeout, ctx.Err())
+	}
+
+	done := make(chan error, 1)
+	go func() { done <- sess.Wait() }()
+	select {
+	case err := <-done:
+		return true, err
+	case <-ctx.Done():
+		_ = sess.Close()
+		return true, fmt.Errorf("accepted remote command timed out after %s: %w", timeout, ctx.Err())
+	}
+}
+
 // runSession opens one ssh session, runs `sh -c <script>` with an optional stdin,
 // and returns its output, bounding the whole thing with a timeout that closes the
 // session so a wedged remote command cannot hang a create or kill. Each ssh session
@@ -842,9 +906,9 @@ func (p *sshProvisioner) runSession(timeout time.Duration, script string, stdin 
 	return runOpenedSSHSession(timeout, sess, script, stdin, combined)
 }
 
-// runOpenedSSHSession owns command execution after NewSession has established
-// the SSH channel. Keeping this boundary explicit lets reap distinguish a kill
-// that could not be sent from one whose later result was merely lost.
+// runOpenedSSHSession owns ordinary command execution after NewSession has
+// established the SSH channel. Reap uses runAcceptedSSHCommand instead because
+// its identity-bearing kill must expose Start acceptance separately from Wait.
 func runOpenedSSHSession(timeout time.Duration, sess *ssh.Session, script string, stdin io.Reader, combined bool) ([]byte, error) {
 	if stdin != nil {
 		sess.Stdin = stdin
@@ -913,6 +977,12 @@ func expandUserPath(path string) string {
 // retains only SSH-specific provisioning and the serialized backend discriminator.
 type sshBackend struct {
 	remoteAgentBackend
+	// provisioner owns the concrete reaper. nil for an ordinary inert backend.
+	provisioner *sshProvisioner
+	// cleanup is the immutable ORIGINAL teardown identity. Keeping the original
+	// PID is safe because every retry re-verifies the unique session argv before
+	// signalling; immutability lets snapshots stage it without waiting on SSH I/O.
+	cleanup *SSHRuntimeCleanupData
 }
 
 var _ Backend = (*sshBackend)(nil)

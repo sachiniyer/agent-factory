@@ -227,8 +227,9 @@ func (i *Instance) resetRemoteRuntime() {
 // teardown is read under i.mu.RLock and invoked OUTSIDE the lock (it may block on
 // docker/ssh I/O), then resetRemoteRuntime clears remoteClient/runtimeTeardown/
 // agentSrv together so a retry starts from a clean, unbound state and never
-// stacks a second sandbox on the first. runtimeTeardown is sync.Once-guarded, so
-// a later Kill re-running it is a harmless no-op.
+// stacks a second sandbox on the first. Each runtime serializes teardown, so a
+// later Kill cannot overlap it; docker/SSH latch completed outcomes and leave an
+// outcome whose completion was unknown deliberately retryable.
 func (i *Instance) teardownAfterStartFailure() {
 	i.mu.RLock()
 	teardown := i.runtimeTeardown

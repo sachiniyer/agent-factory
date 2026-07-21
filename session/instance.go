@@ -241,11 +241,11 @@ type Instance struct {
 	// local/hook sessions.
 	remoteClient *remoteAgentClient
 	// runtimeTeardown reaps the off-box sandbox a runtime provisioned (#1592
-	// Phase 4 PR4): `docker rm -f` the container. Set at NewInstance from the
-	// runtime's ProvisionResult and run by the remote agent-server's Kill AFTER it
-	// tears the in-sandbox workspace down over REST, so killing the session also
-	// removes the container it ran in. nil for local/hook sessions (nothing
-	// off-box to reap). Idempotent — the runtime guards it with a sync.Once.
+	// Phase 4 PR4): remove the container, SSH directory, or hook-provisioned
+	// workspace. Set at NewInstance from the runtime's ProvisionResult and run by
+	// the remote agent-server's Kill AFTER it tears the in-sandbox workspace down
+	// over REST. nil only for local sessions. Each runtime serializes repeated
+	// calls; docker/SSH deliberately retry outcomes whose completion is unknown.
 	runtimeTeardown func() error
 }
 

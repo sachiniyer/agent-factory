@@ -5,7 +5,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -45,11 +50,14 @@ func TestSSHReapTimeoutRetriesUntilCleanupCompletes(t *testing.T) {
 		client:     &ssh.Client{},
 	}
 	var killCalls, rmCalls, dialCalls, closeCalls int
-	p.reapRunCombined = func(_ time.Duration, script string) ([]byte, error) {
-		if strings.HasPrefix(script, "kill ") {
-			killCalls++
-			return nil, nil
+	p.reapRunKill = func(_ time.Duration, script string) (bool, error) {
+		if !strings.Contains(script, "kill ") || !strings.Contains(script, "4242") {
+			t.Fatalf("unexpected identity-guarded kill command %q", script)
 		}
+		killCalls++
+		return true, nil
+	}
+	p.reapRunCombined = func(_ time.Duration, script string) ([]byte, error) {
 		if !strings.HasPrefix(script, "rm -rf ") {
 			t.Fatalf("unexpected reap command %q", script)
 		}
@@ -115,7 +123,7 @@ func TestSSHReapKeepsPIDUntilKillReachesSSH(t *testing.T) {
 	}
 	var killCalls, rmCalls, dialCalls int
 	p.reapRunKill = func(_ time.Duration, script string) (bool, error) {
-		if !strings.HasPrefix(script, "kill ") {
+		if !strings.Contains(script, "kill ") || !strings.Contains(script, "4242") {
 			t.Fatalf("unexpected kill command %q", script)
 		}
 		killCalls++
@@ -155,6 +163,56 @@ func TestSSHReapKeepsPIDUntilKillReachesSSH(t *testing.T) {
 	}
 	if killCalls != 2 || rmCalls != 1 || dialCalls != 1 {
 		t.Fatalf("retry lost cleanup work: kill=%d rm=%d dial=%d, want 2/1/1", killCalls, rmCalls, dialCalls)
+	}
+}
+
+// TestSSHReapKeepsPIDUntilExecAccepted covers the second late #2265 review
+// finding. Opening an SSH channel is not proof that the server accepted its exec
+// request. A rejected exec must retain the PID and abort before rm; an accepted
+// exec spends it even if the completion reply is lost.
+func TestSSHReapKeepsPIDUntilExecAccepted(t *testing.T) {
+	p := &sshProvisioner{
+		spec:       ProvisionSpec{Title: "remote-secret"},
+		cfg:        configSSHForReapTest(),
+		sessionDir: "/home/remote/.af-sessions/remote-secret.1234",
+		remotePID:  "4242",
+		client:     &ssh.Client{},
+	}
+	var rmCalls int
+	p.reapRunKill = func(time.Duration, string) (bool, error) {
+		// This is the pre-fix runCombinedTracked shape: NewSession succeeded, so
+		// it reported true even though CombinedOutput could not start the exec.
+		return false, errors.New("ssh: command rejected")
+	}
+	p.reapRunCombined = func(time.Duration, string) ([]byte, error) {
+		rmCalls++
+		return nil, nil
+	}
+	p.reapCloseClient = func() {}
+
+	err := p.reap()
+	if !errors.Is(err, ErrWorkspaceStateUnknown) {
+		t.Fatalf("unaccepted kill must retain the row, got %v", err)
+	}
+	if p.remotePID != "4242" {
+		t.Fatalf("unaccepted kill consumed PID: got %q, want 4242", p.remotePID)
+	}
+	if rmCalls != 0 {
+		t.Fatalf("unaccepted kill removed the remote directory: rm calls=%d", rmCalls)
+	}
+
+	p.client = &ssh.Client{}
+	p.reapRunKill = func(time.Duration, string) (bool, error) {
+		return true, io.EOF
+	}
+	if err := p.reap(); err != nil {
+		t.Fatalf("accepted kill with a lost completion reply did not continue cleanup: %v", err)
+	}
+	if p.remotePID != "" {
+		t.Fatalf("accepted kill did not spend PID: got %q", p.remotePID)
+	}
+	if rmCalls != 1 {
+		t.Fatalf("accepted kill did not remove the remote directory: rm calls=%d", rmCalls)
 	}
 }
 
@@ -305,4 +363,87 @@ func (c *countingCloser) Close() error {
 
 func configSSHForReapTest() config.SSHConfig {
 	return config.SSHConfig{Host: "cleanup.example.test", User: "remote"}
+}
+
+type fakeSSHCommandSession struct {
+	startErr error
+	waitErr  error
+	starts   int
+	waits    int
+	closes   int
+}
+
+func (s *fakeSSHCommandSession) Start(string) error { s.starts++; return s.startErr }
+func (s *fakeSSHCommandSession) Wait() error        { s.waits++; return s.waitErr }
+func (s *fakeSSHCommandSession) Close() error       { s.closes++; return nil }
+
+func TestSSHReapKillRequiresExecAcceptance(t *testing.T) {
+	rejected := &fakeSSHCommandSession{startErr: errors.New("ssh: command rejected")}
+	p := &sshProvisioner{
+		reapOpenSession: func() (sshCommandSession, error) { return rejected, nil },
+	}
+	accepted, err := p.runReapKill(time.Second, "true")
+	if accepted || err == nil {
+		t.Fatalf("rejected exec reported accepted=%t err=%v", accepted, err)
+	}
+	if rejected.starts != 1 || rejected.waits != 0 || rejected.closes != 1 {
+		t.Fatalf("rejected exec lifecycle: start=%d wait=%d close=%d, want 1/0/1",
+			rejected.starts, rejected.waits, rejected.closes)
+	}
+
+	lostReply := &fakeSSHCommandSession{waitErr: io.EOF}
+	p.reapOpenSession = func() (sshCommandSession, error) { return lostReply, nil }
+	accepted, err = p.runReapKill(time.Second, "true")
+	if !accepted || !errors.Is(err, io.EOF) {
+		t.Fatalf("accepted exec with lost reply reported accepted=%t err=%v", accepted, err)
+	}
+	if lostReply.starts != 1 || lostReply.waits != 1 || lostReply.closes != 1 {
+		t.Fatalf("lost-reply exec lifecycle: start=%d wait=%d close=%d, want 1/1/1",
+			lostReply.starts, lostReply.waits, lostReply.closes)
+	}
+}
+
+func TestSSHKillScriptDoesNotSignalRecycledPID(t *testing.T) {
+	child := exec.Command("sleep", "30")
+	if err := child.Start(); err != nil {
+		t.Fatalf("start controlled non-SSH child: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = child.Process.Kill()
+		_ = child.Wait()
+	})
+
+	p := &sshProvisioner{sessionDir: filepath.Join(t.TempDir(), "session with spaces")}
+	script := p.remotePIDKillScript(strconv.Itoa(child.Process.Pid))
+	if out, err := exec.Command("sh", "-c", script).CombinedOutput(); err != nil {
+		t.Fatalf("identity guard failed for recycled PID: %v: %s", err, out)
+	}
+	if err := child.Process.Signal(syscall.Signal(0)); err != nil {
+		t.Fatalf("identity guard signalled unrelated process %d: %v", child.Process.Pid, err)
+	}
+}
+
+func TestSSHKillScriptSignalsMatchingSessionProcess(t *testing.T) {
+	p := &sshProvisioner{sessionDir: t.TempDir()}
+	if err := os.Symlink("/bin/sleep", p.afPath()); err != nil {
+		t.Fatalf("create controlled af-path process: %v", err)
+	}
+	child := exec.Command(p.afPath(), "30")
+	if err := child.Start(); err != nil {
+		t.Fatalf("start controlled matching child: %v", err)
+	}
+	t.Cleanup(func() {
+		if child.ProcessState == nil {
+			_ = child.Process.Kill()
+			_ = child.Wait()
+		}
+	})
+
+	script := p.remotePIDKillScript(strconv.Itoa(child.Process.Pid))
+	if out, err := exec.Command("sh", "-c", script).CombinedOutput(); err != nil {
+		t.Fatalf("identity-guarded kill failed: %v: %s", err, out)
+	}
+	if err := child.Wait(); err == nil {
+		t.Fatal("matching process exited successfully instead of receiving teardown signal")
+	}
 }

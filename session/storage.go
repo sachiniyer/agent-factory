@@ -108,6 +108,12 @@ type InstanceData struct {
 	Worktree          GitWorktreeData        `json:"worktree"`
 	PRInfo            PRInfoData             `json:"pr_info,omitempty"`
 	BackendType       string                 `json:"backend_type,omitempty"`
+	// RuntimeCleanup is written only for a committed UserKilled tombstone. It is
+	// the durable identity finishUserKill needs to resume off-box teardown after a
+	// daemon restart; normal snapshots keep it nil and stage the live handle in the
+	// private field below until ForStorage sees the tombstone.
+	RuntimeCleanup *RuntimeCleanupData `json:"runtime_cleanup,omitempty"`
+	runtimeCleanup *RuntimeCleanupData
 }
 
 // IsRemoteHook reports whether this serialized record is a remote hook session,
@@ -140,6 +146,16 @@ func (d InstanceData) ForStorage() InstanceData {
 	d.InFlightOp = OpNone
 	d.LifecycleAction = LifecycleActionNone
 	d.CanKill = false
+	if !d.UserKilled {
+		// Cleanup credentials/identities have no reason to live in ordinary session
+		// records. The kill tombstone is the commit point that makes them durable.
+		d.RuntimeCleanup = nil
+	} else if d.runtimeCleanup != nil {
+		d.RuntimeCleanup = d.runtimeCleanup.clone()
+	}
+	// Never let the private staging pointer escape a storage projection. Loaded
+	// tombstones have only RuntimeCleanup set and therefore preserve it above.
+	d.runtimeCleanup = nil
 	return d
 }
 

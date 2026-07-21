@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/task"
 )
@@ -140,6 +141,11 @@ func TestRedactInstanceDataKeepsStructuralDropsFreeText(t *testing.T) {
 		},
 		AgentConversation: &session.AgentConversationData{Agent: "claude", ID: "019f386f-7206-7fc2-803b-f7045e07a242"},
 		PRInfo:            session.PRInfoData{Number: 42, State: "open", Title: "secret pr title", URL: "https://example.com/pr/42"},
+		RuntimeCleanup: &session.RuntimeCleanupData{SSH: &session.SSHRuntimeCleanupData{
+			Config:     config.SSHConfig{Host: "private-builder.internal", User: "alice", IdentityFile: "/home/alice/.ssh/private-builder"},
+			SessionDir: "/srv/private/proprietary-session",
+			RemotePID:  "4242",
+		}},
 		Worktree: session.GitWorktreeData{
 			RepoPath:          "/home/alice/Desktop/proj",
 			WorktreePath:      "/home/alice/Desktop/proj-fix",
@@ -152,6 +158,9 @@ func TestRedactInstanceDataKeepsStructuralDropsFreeText(t *testing.T) {
 	}
 
 	redactInstanceData(&d)
+	if d.RuntimeCleanup != nil {
+		t.Fatal("runtime cleanup credentials/identity survived structured redaction")
+	}
 
 	if d.Title != redactedMarker {
 		t.Errorf("title not redacted: %q", d.Title)
@@ -191,6 +200,31 @@ func TestRedactInstanceDataKeepsStructuralDropsFreeText(t *testing.T) {
 	}
 	if d.Worktree.SessionName != redactedMarker {
 		t.Errorf("worktree session name not redacted: %q", d.Worktree.SessionName)
+	}
+}
+
+func TestRedactInstancesFallbackDropsRuntimeCleanup(t *testing.T) {
+	r := &redactor{}
+	// A string status forces the generic fallback. runtime_cleanup must still be
+	// dropped as one secret-bearing unit rather than relying on its current nested
+	// field names being remembered by the key scrubber.
+	raw := json.RawMessage(`[{
+		"status": "legacy-status",
+		"runtime_cleanup": {"ssh": {
+			"config": {"host": "private-builder.internal", "user": "alice", "identity_file": "/home/alice/.ssh/private-builder"},
+			"session_dir": "/srv/private/proprietary-session",
+			"remote_pid": "4242"
+		}}
+	}]`)
+
+	out := string(r.redactInstancesJSON(raw))
+	for _, secret := range []string{"private-builder.internal", "alice", "private-builder", "proprietary-session", "4242"} {
+		if strings.Contains(out, secret) {
+			t.Fatalf("fallback runtime cleanup leaked %q:\n%s", secret, out)
+		}
+	}
+	if !strings.Contains(out, redactedMarker) {
+		t.Fatalf("fallback did not replace runtime cleanup with a marker:\n%s", out)
 	}
 }
 

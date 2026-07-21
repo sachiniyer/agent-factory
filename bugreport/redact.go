@@ -552,6 +552,11 @@ var sensitiveJSONKeys = map[string]bool{
 	"private_key": true, "url": true,
 	"path": true, "home": true, "repo_path": true, "worktree_path": true,
 	"remote_meta": true,
+	// A typed record drops this storage-only teardown union in
+	// redactInstanceData. Drop the whole object on the generic fallback too: a
+	// malformed sibling field must not expose its SSH host/user/key paths, hook
+	// command, remote session directory, or container id.
+	"runtime_cleanup": true,
 	// tmux_name and session_name mirror the typed-path redaction
 	// (redactInstanceData drops TmuxName, Worktree.SessionName, and
 	// Tabs[].TmuxName): each carries the free-text session title. Without
@@ -603,6 +608,11 @@ func redactUnknownJSON(v any) any {
 // liveness/status, program, timestamps, git SHAs, counts, flags) intact.
 // Paths are left for the text scrub to collapse ($HOME→~, username→[user]).
 func redactInstanceData(d *session.InstanceData) {
+	// A kill tombstone's storage-only cleanup handle can contain a private SSH
+	// host/user/key path, a hook command path, or a container id. None is needed
+	// to diagnose the session shape, and unlike ordinary snapshots instances.json
+	// carries it specifically so teardown can resume after restart.
+	d.RuntimeCleanup = nil
 	if d.Title != "" {
 		d.Title = redactedMarker
 	}
