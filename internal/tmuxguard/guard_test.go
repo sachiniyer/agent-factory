@@ -261,6 +261,7 @@ func TestDenialReason(t *testing.T) {
 		{name: "scoped tmux builder alias neww", command: `tmux -L af-test neww 'pkill tmux'`, wantReason: unknownShellReason},
 		{name: "scoped tmux builder alias splitw", command: `tmux -L af-test splitw 'pkill tmux'`, wantReason: unknownShellReason},
 		{name: "scoped tmux builder alias popup", command: `tmux -L af-test popup 'pkill tmux'`, wantReason: unknownShellReason},
+		{name: "scoped tmux canonical prefix abbreviation", command: `tmux -L af-test new-w 'pkill tmux'`, wantReason: unknownShellReason},
 		{name: "scoped tmux future new-pane", command: `tmux -L af-test new-pane 'pkill tmux'`, wantReason: unknownShellReason},
 		{name: "scoped tmux detach command", command: `tmux -L af-test detach-client -E 'pkill tmux'`, wantReason: unknownShellReason},
 		{name: "scoped tmux unknown verb", command: `tmux -L af-test future-command safe`, wantReason: unknownShellReason},
