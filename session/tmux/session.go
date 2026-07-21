@@ -59,6 +59,14 @@ type TmuxSession struct {
 	// submit must never clear the first submit's freshly pasted composer while
 	// that first call is still waiting to send Enter (#2178 review).
 	submitMu sync.Mutex
+	// promptMu serializes the daemon poll's capture/navigation/verification
+	// transaction. CheckAndHandleTrustPrompt also runs during startup, and two
+	// callers must never both navigate the same Codex picker (#2181).
+	promptMu sync.Mutex
+	// codexSafety remembers the last normal-pane model footer across polls so a
+	// safety-buffering intervention can prove it did not select the downgrade.
+	// Access only while promptMu is held.
+	codexSafety codexSafetyBufferingState
 	// lastPastedTail is the normalized distinctive tail of the most recent
 	// payload paste that tmux accepted. The next submit may use it only as
 	// provenance for the cleared-composer diagnostic: matching arbitrary pane

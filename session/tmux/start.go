@@ -196,6 +196,9 @@ func (t *TmuxSession) Start(workDir string) error {
 // CheckAndHandleTrustPrompt checks the pane content once for a trust prompt and dismisses it if found.
 // Returns true if the prompt was found and handled.
 func (t *TmuxSession) CheckAndHandleTrustPrompt() bool {
+	t.promptMu.Lock()
+	defer t.promptMu.Unlock()
+
 	content, err := t.CapturePaneContent()
 	if err != nil {
 		return false
@@ -214,6 +217,9 @@ func (t *TmuxSession) CheckAndHandleTrustPrompt() bool {
 			return true
 		}
 	case ProgramCodex:
+		if t.handleCodexSafetyBuffering(content) {
+			return true
+		}
 		if CodexTrustPromptPresent(content) {
 			if err := t.TapEnter(); err != nil {
 				log.ErrorLog.Printf("could not tap enter on Codex directory-trust screen: %v", err)
