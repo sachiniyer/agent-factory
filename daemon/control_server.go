@@ -27,6 +27,13 @@ type controlServer struct {
 func (s *controlServer) Ping(_ PingRequest, resp *PingResponse) error {
 	resp.OK = true
 	resp.Version = Version()
+	if s.manager != nil && s.manager.lifecycle != nil {
+		state := s.manager.lifecycle.snapshot()
+		resp.BootID = state.bootID
+		resp.TransactionID = state.transactionID
+		resp.Phase = state.phase
+		resp.Listeners = state.listeners
+	}
 	return nil
 }
 
@@ -36,8 +43,12 @@ func (s *controlServer) Ping(_ PingRequest, resp *PingResponse) error {
 // m.mu), independent of the instance restore — a pause that lands during
 // warm-up is honored once the instance is restored, and it can never corrupt
 // state the way a create/kill racing the restore could. A nil manager (some
-// test control servers) is a no-op ack.
+// test control servers) is a no-op ack. Upgrade probation is different: every
+// mutation is closed there, so requireMutationAdmission still applies.
 func (s *controlServer) PauseStatusPoll(req PauseStatusPollRequest, resp *PauseStatusPollResponse) error {
+	if err := s.requireMutationAdmission(); err != nil {
+		return err
+	}
 	if s.manager != nil {
 		s.manager.PauseStatusPoll(req.RepoID, req.Title)
 	}
@@ -45,9 +56,12 @@ func (s *controlServer) PauseStatusPoll(req PauseStatusPollRequest, resp *PauseS
 	return nil
 }
 
-// ResumeStatusPoll clears a pause set by PauseStatusPoll (#1160). Same
-// lightweight, ungated conventions as PauseStatusPoll.
+// ResumeStatusPoll clears a pause set by PauseStatusPoll (#1160). Same restore
+// independence and probation gate as PauseStatusPoll.
 func (s *controlServer) ResumeStatusPoll(req ResumeStatusPollRequest, resp *ResumeStatusPollResponse) error {
+	if err := s.requireMutationAdmission(); err != nil {
+		return err
+	}
 	if s.manager != nil {
 		s.manager.ResumeStatusPoll(req.RepoID, req.Title)
 	}
@@ -87,6 +101,9 @@ func (s *controlServer) reloadTaskSchedules() error {
 }
 
 func (s *controlServer) ReloadTasks(_ ReloadTasksRequest, resp *ReloadTasksResponse) error {
+	if err := s.requireMutationAdmission(); err != nil {
+		return err
+	}
 	if err := s.reloadTaskSchedules(); err != nil {
 		return err
 	}
@@ -135,6 +152,9 @@ func (s *controlServer) GetConfig(_ GetConfigRequest, resp *GetConfigResponse) e
 // Errors (unknown key, invalid value) propagate verbatim so the web form shows
 // the validator's own message, which is the one the CLI prints.
 func (s *controlServer) SetConfigValue(req SetConfigValueRequest, resp *SetConfigValueResponse) error {
+	if err := s.requireMutationAdmission(); err != nil {
+		return err
+	}
 	result, err := config.SetGlobalConfigValue(req.Key, req.Value)
 	if err != nil {
 		return err
@@ -163,6 +183,9 @@ func (s *controlServer) ListTasks(_ ListTasksRequest, resp *ListTasksResponse) e
 // difference is the daemon now owns it and refreshes its own scheduler/watchers
 // in the same call.
 func (s *controlServer) AddTask(req AddTaskRequest, resp *AddTaskResponse) error {
+	if err := s.requireMutationAdmission(); err != nil {
+		return err
+	}
 	if err := task.AddTask(req.Task); err != nil {
 		return err
 	}
@@ -175,6 +198,9 @@ func (s *controlServer) AddTask(req AddTaskRequest, resp *AddTaskResponse) error
 }
 
 func (s *controlServer) UpdateTask(req UpdateTaskRequest, resp *UpdateTaskResponse) error {
+	if err := s.requireMutationAdmission(); err != nil {
+		return err
+	}
 	merged, err := task.UpdateTask(req.ID, req.Update, req.Expect)
 	if err != nil {
 		return err
@@ -191,6 +217,9 @@ func (s *controlServer) UpdateTask(req UpdateTaskRequest, resp *UpdateTaskRespon
 }
 
 func (s *controlServer) RemoveTask(req RemoveTaskRequest, resp *RemoveTaskResponse) error {
+	if err := s.requireMutationAdmission(); err != nil {
+		return err
+	}
 	if err := task.RemoveTask(req.ID, req.Expect); err != nil {
 		return err
 	}
@@ -209,6 +238,9 @@ func (s *controlServer) RemoveTask(req RemoveTaskRequest, resp *RemoveTaskRespon
 // (#1169-class fix). RunTask preserves the guards: watch tasks and disabled
 // tasks are refused.
 func (s *controlServer) TriggerTask(req TriggerTaskRequest, resp *TriggerTaskResponse) error {
+	if err := s.requireMutationAdmission(); err != nil {
+		return err
+	}
 	if err := RunTask(req.ID, req.Expect); err != nil {
 		return err
 	}
@@ -246,6 +278,27 @@ func (s *controlServer) requireManagerReady() error {
 	return errDaemonStarting()
 }
 
+// requireMutationAdmission is the probation gate for mutations that are safe
+// during ordinary restore (task/config writes and poll leases). A candidate
+// blocks them from socket bind onward so rollback can restore one coherent
+// metadata snapshot.
+func (s *controlServer) requireMutationAdmission() error {
+	if s.manager == nil || s.manager.lifecycle == nil {
+		return nil
+	}
+	return s.manager.lifecycle.mutationAdmissionError()
+}
+
+// requireStateMutationAdmission composes the existing restored-state barrier
+// with upgrade probation. Every session mutation uses this one entrypoint, so
+// neither phase can accidentally authorize what the other refuses.
+func (s *controlServer) requireStateMutationAdmission() error {
+	if err := s.requireManagerReady(); err != nil {
+		return err
+	}
+	return s.requireMutationAdmission()
+}
+
 // CreateSession is the net/rpc entrypoint. net/rpc gives no per-call context, so
 // it passes Background; the create is still bounded by WaitForReady's internal
 // timeout and torn down when this returns. The HTTP route wires the request
@@ -255,7 +308,7 @@ func (s *controlServer) CreateSession(req CreateSessionRequest, resp *CreateSess
 }
 
 func (s *controlServer) createSession(ctx context.Context, req CreateSessionRequest, resp *CreateSessionResponse) error {
-	if err := s.requireManagerReady(); err != nil {
+	if err := s.requireStateMutationAdmission(); err != nil {
 		return err
 	}
 	data, err := s.manager.CreateSession(ctx, req)
@@ -271,7 +324,7 @@ func (s *controlServer) createSession(ctx context.Context, req CreateSessionRequ
 // bounded by the readiness timeout inside WaitForReadyOn, and any failure tears
 // the session down before returning.
 func (s *controlServer) SpawnConfigAgent(req SpawnConfigAgentRequest, resp *SpawnConfigAgentResponse) error {
-	if err := s.requireManagerReady(); err != nil {
+	if err := s.requireStateMutationAdmission(); err != nil {
 		return err
 	}
 	name, socketPath, err := s.manager.SpawnConfigAgent(context.Background(), req)
@@ -286,14 +339,14 @@ func (s *controlServer) SpawnConfigAgent(req SpawnConfigAgentRequest, resp *Spaw
 // ReapConfigAgent tears down a config-agent session. No event is published: a
 // config agent is not a session, so nothing on the events plane models it.
 func (s *controlServer) ReapConfigAgent(req ReapConfigAgentRequest, _ *ReapConfigAgentResponse) error {
-	if err := s.requireManagerReady(); err != nil {
+	if err := s.requireStateMutationAdmission(); err != nil {
 		return err
 	}
 	return s.manager.ReapConfigAgent(req)
 }
 
 func (s *controlServer) CreateTab(req CreateTabRequest, resp *CreateTabResponse) error {
-	if err := s.requireManagerReady(); err != nil {
+	if err := s.requireStateMutationAdmission(); err != nil {
 		return err
 	}
 	if err := validateRPCRepoID(req.RepoID); err != nil {
@@ -309,7 +362,7 @@ func (s *controlServer) CreateTab(req CreateTabRequest, resp *CreateTabResponse)
 }
 
 func (s *controlServer) CloseTab(req CloseTabRequest, resp *CloseTabResponse) error {
-	if err := s.requireManagerReady(); err != nil {
+	if err := s.requireStateMutationAdmission(); err != nil {
 		return err
 	}
 	if err := validateRPCRepoID(req.RepoID); err != nil {
@@ -324,7 +377,7 @@ func (s *controlServer) CloseTab(req CloseTabRequest, resp *CloseTabResponse) er
 }
 
 func (s *controlServer) RenameTab(req RenameTabRequest, resp *RenameTabResponse) error {
-	if err := s.requireManagerReady(); err != nil {
+	if err := s.requireStateMutationAdmission(); err != nil {
 		return err
 	}
 	if err := validateRPCRepoID(req.RepoID); err != nil {
@@ -339,7 +392,7 @@ func (s *controlServer) RenameTab(req RenameTabRequest, resp *RenameTabResponse)
 }
 
 func (s *controlServer) ReorderTab(req ReorderTabRequest, resp *ReorderTabResponse) error {
-	if err := s.requireManagerReady(); err != nil {
+	if err := s.requireStateMutationAdmission(); err != nil {
 		return err
 	}
 	if err := validateRPCRepoID(req.RepoID); err != nil {
@@ -355,7 +408,7 @@ func (s *controlServer) ReorderTab(req ReorderTabRequest, resp *ReorderTabRespon
 }
 
 func (s *controlServer) SetPRInfo(req SetPRInfoRequest, resp *SetPRInfoResponse) error {
-	if err := s.requireManagerReady(); err != nil {
+	if err := s.requireStateMutationAdmission(); err != nil {
 		return err
 	}
 	if err := validateRPCRepoID(req.RepoID); err != nil {
@@ -381,7 +434,7 @@ func (s *controlServer) Snapshot(req SnapshotRequest, resp *SnapshotResponse) er
 }
 
 func (s *controlServer) KillSession(req KillSessionRequest, resp *KillSessionResponse) error {
-	if err := s.requireManagerReady(); err != nil {
+	if err := s.requireStateMutationAdmission(); err != nil {
 		return err
 	}
 	if err := validateRPCRepoID(req.RepoID); err != nil {
@@ -402,7 +455,7 @@ func (s *controlServer) KillSession(req KillSessionRequest, resp *KillSessionRes
 }
 
 func (s *controlServer) ArchiveSession(req ArchiveSessionRequest, resp *ArchiveSessionResponse) error {
-	if err := s.requireManagerReady(); err != nil {
+	if err := s.requireStateMutationAdmission(); err != nil {
 		return err
 	}
 	if err := validateRPCRepoID(req.RepoID); err != nil {
@@ -422,7 +475,7 @@ func (s *controlServer) ArchiveSession(req ArchiveSessionRequest, resp *ArchiveS
 }
 
 func (s *controlServer) RestoreArchived(req RestoreArchivedRequest, resp *RestoreArchivedResponse) error {
-	if err := s.requireManagerReady(); err != nil {
+	if err := s.requireStateMutationAdmission(); err != nil {
 		return err
 	}
 	if err := validateRPCRepoID(req.RepoID); err != nil {
@@ -442,7 +495,7 @@ func (s *controlServer) RestoreArchived(req RestoreArchivedRequest, resp *Restor
 }
 
 func (s *controlServer) RestoreSession(req RestoreSessionRequest, resp *RestoreSessionResponse) error {
-	if err := s.requireManagerReady(); err != nil {
+	if err := s.requireStateMutationAdmission(); err != nil {
 		return err
 	}
 	if err := validateRPCRepoID(req.RepoID); err != nil {
@@ -462,7 +515,7 @@ func (s *controlServer) RestoreSession(req RestoreSessionRequest, resp *RestoreS
 }
 
 func (s *controlServer) SendPrompt(req SendPromptRequest, resp *SendPromptResponse) error {
-	if err := s.requireManagerReady(); err != nil {
+	if err := s.requireStateMutationAdmission(); err != nil {
 		return err
 	}
 	if err := validateRPCRepoID(req.RepoID); err != nil {
@@ -484,7 +537,7 @@ func (s *controlServer) SendPrompt(req SendPromptRequest, resp *SendPromptRespon
 // projects view. On a partial failure it still publishes what DID happen before
 // surfacing the error, so the rail never lags reality.
 func (s *controlServer) DeleteProject(req DeleteProjectRequest, resp *DeleteProjectResponse) error {
-	if err := s.requireManagerReady(); err != nil {
+	if err := s.requireStateMutationAdmission(); err != nil {
 		return err
 	}
 	if err := validateRPCRepoID(req.RepoID); err != nil {
@@ -524,7 +577,7 @@ func validateRPCRepoID(repoID string) error {
 }
 
 func (s *controlServer) DeliverPrompt(req DeliverPromptRequest, resp *DeliverPromptResponse) error {
-	if err := s.requireManagerReady(); err != nil {
+	if err := s.requireStateMutationAdmission(); err != nil {
 		return err
 	}
 	status, err := s.manager.DeliverPrompt(req)

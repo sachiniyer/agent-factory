@@ -39,6 +39,14 @@ var restoreManagerForStartup = func(m *Manager) error { return m.RestoreInstance
 // scheduler, watcher supervisor, and AutoYes poll loop start only after the
 // restore because they act on restored state.
 func RunDaemon(cfg *config.Config) error {
+	return runDaemon(cfg, "")
+}
+
+// runDaemon carries the transaction identity used by the probation machinery.
+// The public daemon entrypoint deliberately supplies no transaction: only the
+// durable transaction layer may eventually select the unexported non-empty
+// path, so this stage cannot put an ordinary daemon into probation.
+func runDaemon(cfg *config.Config, upgradeTransactionID string) error {
 	log.InfoLog.Printf("starting daemon")
 
 	// No auth-posture gate here, deliberately (#2168 Phase 0). #2090 made a
@@ -94,7 +102,7 @@ func RunDaemon(cfg *config.Config) error {
 
 	// Shell only — no restore yet, so the bind below happens within
 	// milliseconds of process start.
-	manager, err := newManagerShell(cfg)
+	manager, err := newManagerShellForDaemon(cfg, upgradeTransactionID)
 	if err != nil {
 		return err
 	}
@@ -207,7 +215,17 @@ func RunDaemon(cfg *config.Config) error {
 		log.InfoLog.Printf("received shutdown request via control socket during instance restore; exiting")
 		return nil
 	}
-	log.InfoLog.Printf("instance restore complete; daemon ready")
+	if manager.lifecycle.isUpgradeProbation() {
+		log.InfoLog.Printf("instance restore complete; daemon is in upgrade probation")
+		select {
+		case sig := <-sigChan:
+			log.InfoLog.Printf("received signal %s during upgrade probation; exiting", sig.String())
+			return nil
+		case <-shutdownCh:
+			log.InfoLog.Printf("received shutdown request during upgrade probation; exiting")
+			return nil
+		}
+	}
 
 	// Remove per-task timer units left behind by pre-#782 versions; the
 	// in-process scheduler below replaces them.
@@ -305,6 +323,16 @@ func RunDaemon(cfg *config.Config) error {
 			watchDaemonHome(homeDir, stopCh, homeGoneCh)
 		}()
 	}
+
+	// This is the full operational barrier, later than Manager.Ready: the
+	// scheduler, watcher supervisor, status/AutoYes poll, and home watcher are
+	// all armed. Ping answering before here is liveness, never proof of health.
+	if err := manager.lifecycle.markReady(); err != nil {
+		close(stopCh)
+		wg.Wait()
+		return fmt.Errorf("failed to mark daemon ready: %w", err)
+	}
+	log.InfoLog.Printf("daemon ready")
 
 	// Block until a signal, a Shutdown RPC, or the home-deleted self-check
 	// ends the daemon (sigChan and shutdownCh were armed before the restore

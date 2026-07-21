@@ -29,7 +29,7 @@ import (
 //	POST /v1/<Method>   JSON body = the RPC request struct
 //	                    response  = the shared {data,error} envelope wrapping
 //	                                the RPC response struct
-//	GET  /v1/health     liveness alias for Ping
+//	GET  /v1/health     lifecycle-health alias for Ping
 //
 // Each route decodes the request body into the EXACT SAME request struct the
 // net/rpc handler uses and calls the SAME (*controlServer) method — there is no
@@ -94,6 +94,9 @@ func startHTTPServer(manager *Manager, scheduler *taskScheduler, watchers *watch
 		_ = listener.Close()
 		return nil, err
 	}
+	if manager.lifecycle != nil {
+		manager.lifecycle.setHTTPUnixBound(true)
+	}
 
 	cs := &controlServer{manager: manager, scheduler: scheduler, watchers: watchers}
 	// One mux, shared by both listeners, so the REST/RPC/WS handler graph is
@@ -111,7 +114,11 @@ func startHTTPServer(manager *Manager, scheduler *taskScheduler, watchers *watch
 	go func() {
 		// Serve returns ErrServerClosed on a clean Close/Shutdown; anything else
 		// is worth logging (the listener died unexpectedly).
-		if err := srv.Serve(listener); err != nil && err != http.ErrServerClosed {
+		err := srv.Serve(listener)
+		if manager.lifecycle != nil {
+			manager.lifecycle.setHTTPUnixBound(false)
+		}
+		if err != nil && err != http.ErrServerClosed {
 			log.WarningLog.Printf("daemon HTTP server stopped: %v", err)
 		}
 	}()
@@ -151,6 +158,13 @@ func startHTTPServer(manager *Manager, scheduler *taskScheduler, watchers *watch
 			log.WarningLog.Printf("failed to start daemon HTTP TCP listener on %q: %v", manager.cfg.ListenAddr, err)
 		} else {
 			closeTCP = closer
+			if manager.lifecycle != nil {
+				manager.lifecycle.setTCPBound(info.Addr)
+				go func() {
+					<-info.done
+					manager.lifecycle.clearTCPBound()
+				}()
+			}
 			log.InfoLog.Printf("daemon HTTP TCP listener enabled on %s (plain HTTP — terminate TLS at a proxy if needed)", info.Addr)
 			log.InfoLog.Printf("  bearer token: %s", info.Token)
 			switch {
@@ -176,6 +190,9 @@ func startHTTPServer(manager *Manager, scheduler *taskScheduler, watchers *watch
 		// default for a listener it created) and terminates active connections.
 		// Deliberately no explicit os.Remove: mirrors startControlServer's
 		// #718/#767 reasoning — a Remove could race a freshly bound socket.
+		if manager.lifecycle != nil {
+			manager.lifecycle.clearHTTPListeners()
+		}
 		tcpErr := closeTCP()
 		if err := srv.Close(); err != nil {
 			return err
@@ -250,7 +267,8 @@ func newHTTPMux(cs *controlServer) *http.ServeMux {
 //	400 — malformed / unreadable JSON request body, or unknown request field
 //	405 — wrong HTTP verb (not POST)
 //	413 — request body exceeds maxHTTPBodyBytes
-//	500 — the handler (validation or execution) returned an error
+//	503 — daemon warm-up or upgrade probation (typed, retryable)
+//	500 — any other handler (validation or execution) error
 //
 // 404 for unknown routes is handled by the mux's catch-all, not here. A rejected
 // body (400 or 413) short-circuits before the manager call, so an oversize or
@@ -287,15 +305,20 @@ func rpcHandlerCtx[Req any, Resp any](call func(context.Context, Req, *Resp) err
 		}
 		var resp Resp
 		if err := call(r.Context(), req, &resp); err != nil {
-			writeHTTPError(w, r, http.StatusInternalServerError, err)
+			status := http.StatusInternalServerError
+			if IsDaemonAdmissionRetryable(err) {
+				status = http.StatusServiceUnavailable
+			}
+			writeHTTPError(w, r, status, err)
 			return
 		}
 		writeHTTPSuccess(w, r, resp)
 	}
 }
 
-// healthHandler answers GET /v1/health by calling Ping, giving a trivial
-// liveness probe (curl the socket, look for {"data":{"ok":true},"error":null}).
+// healthHandler answers GET /v1/health by calling Ping. OK establishes
+// liveness; the phase/identity/listener fields establish whether the responder
+// is the expected fully ready daemon.
 func healthHandler(cs *controlServer) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {

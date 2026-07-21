@@ -37,7 +37,7 @@ type HandoffSessionResponse struct {
 }
 
 func (s *controlServer) HandoffSession(req HandoffSessionRequest, resp *HandoffSessionResponse) error {
-	if err := s.requireManagerReady(); err != nil {
+	if err := s.requireStateMutationAdmission(); err != nil {
 		return err
 	}
 	if err := validateRPCRepoID(req.RepoID); err != nil {

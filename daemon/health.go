@@ -27,6 +27,13 @@ type HealthStatus struct {
 	// client that can ask, which is exactly the skew that makes a newer
 	// client's requests fail with "unknown field <name>" (#1044).
 	DaemonVersion string
+	// BootID, TransactionID, Phase, and Listeners are the responding daemon's
+	// additive Ping health surface. Empty phase/IDs mean the responder predates
+	// these fields; read them only when PingErr is nil.
+	BootID        string
+	TransactionID string
+	Phase         DaemonPhase
+	Listeners     DaemonListenerStatus
 	// HTTPSocketPath is the daemon's HTTP/JSON socket location.
 	HTTPSocketPath string
 	// HTTPSocketExists reports whether HTTPSocketPath is present on disk.
@@ -75,6 +82,10 @@ func Health() HealthStatus {
 	h.PingErr = pingErr
 	if pingErr == nil {
 		h.DaemonVersion = ping.Version
+		h.BootID = ping.BootID
+		h.TransactionID = ping.TransactionID
+		h.Phase = ping.Phase
+		h.Listeners = ping.Listeners
 	}
 	h.HTTPSocketPath, h.HTTPSocketExists, h.HTTPListening = probeHTTPSocket()
 	h.AutostartUnit = AutostartInstalled()

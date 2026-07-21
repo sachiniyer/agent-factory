@@ -122,7 +122,23 @@ func checkDaemonHealth(ctx *scanContext, report *Report, h daemon.HealthStatus, 
 	}
 	switch {
 	case h.PingErr == nil:
-		report.Pass(sectionDaemon, "daemon", "responding on "+h.SocketPath)
+		switch h.Phase {
+		case "", daemon.DaemonPhaseReady:
+			// Empty is a responding daemon from before the additive phase field.
+			report.Pass(sectionDaemon, "daemon", "responding on "+h.SocketPath)
+		case daemon.DaemonPhaseWarming:
+			report.Warn(sectionDaemon, "daemon",
+				"responding on "+h.SocketPath+" but startup is still in progress (phase warming)",
+				"wait for daemon startup to finish; if it remains warming, inspect the daemon log", false)
+		case daemon.DaemonPhaseUpgradeProbation:
+			report.Warn(sectionDaemon, "daemon",
+				fmt.Sprintf("responding on %s while upgrade transaction %s is in validation probation", h.SocketPath, h.TransactionID),
+				"wait for upgrade validation to commit or roll back; inspect the daemon log if the phase does not advance", false)
+		default:
+			report.Warn(sectionDaemon, "daemon",
+				fmt.Sprintf("responding on %s with unrecognized lifecycle phase %q", h.SocketPath, h.Phase),
+				"upgrade this af client before diagnosing daemon readiness", false)
+		}
 	case !h.SocketExists:
 		report.Pass(sectionDaemon, "daemon", "not running; starts on demand")
 	default:

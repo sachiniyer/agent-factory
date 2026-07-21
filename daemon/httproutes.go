@@ -46,7 +46,7 @@ var httpRoutes = []HTTPRoute{
 	{
 		Method:      http.MethodGet,
 		Path:        "/v1/health",
-		Description: "Liveness probe (alias for the Ping RPC); answers even while the daemon is restoring sessions.",
+		Description: "Lifecycle health probe (alias for Ping): version, boot/transaction identity, phase, and bound listeners; answers before readiness.",
 		handler:     func(cs *controlServer) http.HandlerFunc { return healthHandler(cs) },
 	},
 

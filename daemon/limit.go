@@ -241,7 +241,7 @@ type ResumeFromLimitResponse struct {
 // below still serves the verb over both transports.
 
 func (s *controlServer) ResumeFromLimit(req ResumeFromLimitRequest, resp *ResumeFromLimitResponse) error {
-	if err := s.requireManagerReady(); err != nil {
+	if err := s.requireStateMutationAdmission(); err != nil {
 		return err
 	}
 	if err := validateRPCRepoID(req.RepoID); err != nil {

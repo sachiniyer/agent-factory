@@ -91,7 +91,7 @@ func (cs *controlServer) streamHandler(w http.ResponseWriter, r *http.Request) {
 	// available is a close frame, which a client reads as a stream that DROPPED and
 	// handles on an entirely different path; a plain 503 is a retry it already
 	// understands, and matches every other pre-upgrade error on this route.
-	if err := cs.requireManagerReady(); err != nil {
+	if err := cs.requireStateMutationAdmission(); err != nil {
 		writeHTTPError(w, r, http.StatusServiceUnavailable, err)
 		return
 	}

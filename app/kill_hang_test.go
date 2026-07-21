@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/sachiniyer/agent-factory/apiclient"
+	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
 )
 
@@ -86,7 +87,7 @@ func TestKillSessionThroughDaemon_WedgedDaemon_ReturnsActionableError(t *testing
 	}
 }
 
-// TestHTTPCallWarming_ContextErrorsAreNotRetryable guards the interaction between
+// TestHTTPCallRetryable_ContextErrorsAreNotRetryable guards the interaction between
 // the kill bound and withDaemonHTTP's warm-up retry, which the tests above cannot
 // see because they stub withDaemonHTTP.
 //
@@ -96,7 +97,7 @@ func TestKillSessionThroughDaemon_WedgedDaemon_ReturnsActionableError(t *testing
 // deadline would be re-issued for the whole 5s warm-up window against a context
 // that is already dead — every attempt failing instantly — before finally
 // reporting the timeout the user should have seen 5 seconds earlier.
-func TestHTTPCallWarming_ContextErrorsAreNotRetryable(t *testing.T) {
+func TestHTTPCallRetryable_ContextErrorsAreNotRetryable(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		err  error
@@ -112,7 +113,7 @@ func TestHTTPCallWarming_ContextErrorsAreNotRetryable(t *testing.T) {
 			if !apiclient.IsTransportError(wrapped) {
 				t.Fatal("precondition: a context failure does arrive as a TransportError, which is what the warm-up loop retries")
 			}
-			if httpCallWarming(wrapped) {
+			if httpCallRetryable(wrapped) {
 				t.Fatal("a caller's own deadline/cancel must not be retried as daemon warm-up: every retry re-issues the call with a dead context and fails instantly")
 			}
 		})
@@ -120,8 +121,31 @@ func TestHTTPCallWarming_ContextErrorsAreNotRetryable(t *testing.T) {
 
 	// The genuine warm-up condition must still retry, or a cold-start kill breaks.
 	stillWarming := &apiclient.TransportError{Err: errors.New("dial unix: connect: connection refused")}
-	if !httpCallWarming(stillWarming) {
+	if !httpCallRetryable(stillWarming) {
 		t.Fatal("a real transport failure must still be retried while the daemon's socket binds")
+	}
+}
+
+// TestHTTPCallRetryable_DaemonAdmissionParity pins the cross-transport
+// invariant behind the retry classifier. A new daemon admission phase belongs
+// in daemon.IsDaemonAdmissionRetryable once; both net/rpc and the TUI's HTTP
+// path then inherit it instead of maintaining parallel phase lists.
+func TestHTTPCallRetryable_DaemonAdmissionParity(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+	}{
+		{"startup warming", errDaemonStarting()},
+		{"upgrade probation", errors.New("agent-factory daemon is validating an upgrade (transaction tx-2212); retry shortly")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if !daemon.IsDaemonAdmissionRetryable(tc.err) {
+				t.Fatal("precondition: daemon admission classifier did not recognize the wire error")
+			}
+			if !httpCallRetryable(tc.err) {
+				t.Fatal("TUI HTTP retry drifted from the daemon admission classifier")
+			}
+		})
 	}
 }
 
