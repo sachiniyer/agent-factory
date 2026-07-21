@@ -28,7 +28,7 @@ var restoreManagerForStartup = func(m *Manager) error { return m.RestoreInstance
 // RunDaemon runs the daemon process: it serves the local control plane,
 // evaluates task cron schedules in-process, supervises watch-task scripts,
 // and iterates over all sessions each poll to compute their authoritative
-// status (Ready/Dead/Running, #935/#960 PR 5) and run AutoYes mode on them.
+// status (Ready/Dead/Running, #935/#960 PR 5).
 //
 // Startup ordering matters (#829): the control socket binds BEFORE the
 // instance restore, which can take minutes on remote-hook repos (list_cmd /
@@ -36,7 +36,7 @@ var restoreManagerForStartup = func(m *Manager) error { return m.RestoreInstance
 // EnsureDaemon found no socket and spawned another daemon that burned a full
 // restore before losing the bind race. During the warm-up window Ping and
 // Shutdown work and state-dependent RPCs return errDaemonStarting; the
-// scheduler, watcher supervisor, and AutoYes poll loop start only after the
+// scheduler, watcher supervisor, and session-status poll loop start only after the
 // restore because they act on restored state.
 func RunDaemon(cfg *config.Config) error {
 	return runDaemon(cfg, "")
@@ -71,7 +71,7 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) error {
 	// Refuse to run two daemons against the same control socket. EnsureDaemon
 	// pings before launching, but a daemon started directly (af --daemon, the
 	// autostart unit, or two racing af invocations) would otherwise steal the
-	// socket from a live daemon and leave duplicate AutoYes/scheduler loops.
+	// socket from a live daemon and leave duplicate status/scheduler loops.
 	// Exiting cleanly matters: under the autostart unit a non-zero exit would
 	// trip Restart=on-failure into a retry loop against the live daemon.
 	if err := pingDaemon(); err == nil {
@@ -264,8 +264,8 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) error {
 				log.WarningLog.Printf("failed to refresh daemon instances: %v", err)
 			}
 
-			// Compute and persist each session's status (Ready/Dead/Running) and
-			// run the AutoYes prompt-tap in the same pass. The daemon is the sole
+			// Compute and persist each session's status (Ready/Dead/Running). The
+			// daemon is the sole
 			// owner of status now (#935/#960 PR 5): it computes the liveness here
 			// and the TUI renders it from Snapshot instead of computing its own.
 			manager.RefreshStatuses()
@@ -332,7 +332,7 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) error {
 	}
 
 	// This is the full operational barrier, later than Manager.Ready: the
-	// scheduler, watcher supervisor, status/AutoYes poll, and home watcher are
+	// scheduler, watcher supervisor, status poll, and home watcher are
 	// all armed. Ping answering before here is liveness, never proof of health.
 	if err := manager.lifecycle.markReady(); err != nil {
 		close(stopCh)
@@ -465,8 +465,8 @@ func refreshDaemonInstances(existing map[string]*session.Instance) (map[string]*
 		if err := json.Unmarshal(raw, &data); err != nil {
 			// Skip corrupted per-repo JSON instead of failing the whole
 			// refresh (#603). At startup (existing==nil) a single corrupt
-			// file used to abort NewManager and orphan every AutoYes
-			// session across every repo. On the polling path we also
+			// file used to abort NewManager and orphan every live session
+			// across every repo. On the polling path we also
 			// re-hydrate this repo's prior in-memory instances so a
 			// transient/persistent corruption doesn't silently drop
 			// already-running sessions — matching the pre-fix semantics
@@ -518,8 +518,6 @@ func refreshDaemonInstances(existing map[string]*session.Instance) (map[string]*
 				}
 				continue
 			}
-			// Assume AutoYes is true if the daemon is running.
-			instance.SetAutoYes(true)
 			next[key] = instance
 		}
 	}
@@ -530,7 +528,7 @@ func refreshDaemonInstances(existing map[string]*session.Instance) (map[string]*
 	// simply absent from allInstances and would otherwise be dropped from
 	// `next`. This is a recoverable disk inconsistency — SaveInstances recreates
 	// missing repo directories — so we re-hydrate the prior instances and log
-	// loudly rather than silently abandoning running AutoYes sessions. This
+	// loudly rather than silently abandoning running sessions. This
 	// parallels the corrupted-JSON handling above, which also re-hydrates from
 	// `existing`. On startup (existing == nil) there is nothing to preserve.
 	if existing != nil {

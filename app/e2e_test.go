@@ -114,7 +114,6 @@ func installDirectSessionStarter(t *testing.T) {
 				Title:       req.Title,
 				Path:        req.RepoPath,
 				Program:     req.Program,
-				AutoYes:     req.AutoYes,
 				ForceRemote: req.ForceRemote,
 			})
 			if err != nil {

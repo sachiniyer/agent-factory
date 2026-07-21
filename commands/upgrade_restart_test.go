@@ -544,7 +544,7 @@ func TestUpgrade_UnreachableDaemonIsLoud(t *testing.T) {
 // restartDaemonFromPathDetailed wraps two OPPOSITE failures into a non-nil
 // error: a failed SHUTDOWN means the old daemon is still alive on the old code
 // (#1947's own symptom), and a failed RESPAWN means there is no daemon at all
-// (schedules, watches and autoyes all stopped). Reporting both with one message
+// (schedules, watches, and session monitoring all stopped). Reporting both with one message
 // guarantees it is wrong for one of them — and for the respawn case the old
 // message was actively false: it claimed something was "still running the old
 // binary" when nothing was running, and offered a remedy for a daemon that did

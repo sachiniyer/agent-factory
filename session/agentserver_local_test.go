@@ -13,7 +13,6 @@ type probeBackend struct {
 	*FakeBackend
 
 	trustChecked   bool
-	tapped         bool
 	provisionFirst *bool
 	launchFirst    *bool
 	sentPrompt     string
@@ -29,8 +28,6 @@ func (b *probeBackend) CheckAndHandleTrustPrompt(*Instance) bool {
 func (b *probeBackend) HasUpdated(*Instance) (bool, bool, string) {
 	return true, true, "captured-pane"
 }
-
-func (b *probeBackend) TapEnter(*Instance) { b.tapped = true }
 
 func (b *probeBackend) IsAlive(*Instance) (bool, error) { return false, nil }
 
@@ -80,14 +77,6 @@ func TestLocalAgentServerSnapshot(t *testing.T) {
 	}
 	if !obs.Updated || !obs.HasPrompt || obs.Content != "captured-pane" {
 		t.Errorf("Observation mismapped: got %+v", obs)
-	}
-}
-
-func TestLocalAgentServerTapEnter(t *testing.T) {
-	inst, b := newProbeInstance(t)
-	inst.AgentServer().TapEnter()
-	if !b.tapped {
-		t.Error("TapEnter must route to Backend.TapEnter")
 	}
 }
 

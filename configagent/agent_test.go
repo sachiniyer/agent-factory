@@ -52,7 +52,7 @@ func stubResolve(t *testing.T, cfg config.Config) {
 //
 // The proof is the request type itself: it carries a program and a briefing and
 // NOTHING that could make a session — no Title, no TitleBase, no RepoPath, no
-// InPlace, no Backend, no AutoYes. There is no field to get wrong.
+// InPlace and no Backend. There is no field to get wrong.
 //
 // That also retires a whole class of bug by construction. The old seam needed a
 // test that Backend was pinned to local, because an empty Backend silently

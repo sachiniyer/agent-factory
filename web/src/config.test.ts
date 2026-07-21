@@ -110,10 +110,10 @@ test("setConfigValue surfaces the validator's own message on a rejected value", 
 test("setConfigValue sends no Authorization header for the tokenless credential", async () => {
   // "" is the authorized-tokenless sentinel (#1696); null-vs-"" matters here.
   const cap = stubFetch({
-    result: { key: "auto_yes", value: "true", path: "/tmp/config.toml", requires_restart: true },
+    result: { key: "auto_update", value: "true", path: "/tmp/config.toml", requires_restart: true },
     restart_notice: "",
   });
-  await setConfigValue("auto_yes", "true", "");
+  await setConfigValue("auto_update", "true", "");
   assert.equal(cap.auth, undefined);
 });
 
@@ -189,8 +189,8 @@ test("saves for one key run in the order the user made them, however slow the ne
     finished.push(v);
   };
 
-  queue("auto_yes", save("off"));
-  const done = queue("auto_yes", save("on"));
+  queue("auto_update", save("off"));
+  const done = queue("auto_update", save("on"));
   await done;
 
   assert.deepEqual(started, ["off", "on"], "the second save must not start until the first settles");
@@ -221,10 +221,10 @@ test("different keys are not queued behind each other", async () => {
     await new Promise((r) => setTimeout(r, 40));
     finished.push("listen_addr");
   });
-  const fast = queue("auto_yes", async () => {
-    finished.push("auto_yes");
+  const fast = queue("auto_update", async () => {
+    finished.push("auto_update");
   });
   await Promise.all([slow, fast]);
 
-  assert.deepEqual(finished, ["auto_yes", "listen_addr"], "keys have no ordering relationship; they must not block each other");
+  assert.deepEqual(finished, ["auto_update", "listen_addr"], "keys have no ordering relationship; they must not block each other");
 });

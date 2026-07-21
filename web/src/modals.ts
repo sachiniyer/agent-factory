@@ -132,8 +132,8 @@ export function asForm(card: HTMLElement, onSubmit: () => void): void {
   });
 }
 
-/** The new-session modal: title, project picker, program, backend, initial prompt,
- *  auto-yes. Projects are the distinct repo roots derived from the current sessions
+/** The new-session modal: title, project picker, program, backend, and initial
+ *  prompt. Projects are the distinct repo roots derived from the current sessions
  *  (like the TUI's zero-config picker). onSubmit fires with the collected form
  *  values.
  *
@@ -312,9 +312,6 @@ export function newSessionModal(
   const promptArea = h("textarea", { class: "af-input af-textarea", placeholder: "Initial prompt (optional)", rows: 3 });
   promptArea.setAttribute("aria-label", "Initial prompt");
 
-  const autoYes = h("input", { type: "checkbox", id: "af-autoyes" });
-  const autoYesRow = h("label", { class: "af-check-row", htmlFor: "af-autoyes" }, autoYes, "Auto-yes (accept agent prompts automatically)");
-
   body.append(
     field("Title", titleInput),
     field("Project", projectSelect),
@@ -322,7 +319,6 @@ export function newSessionModal(
     field("Backend", backendSelect),
     backendHint,
     field("Prompt", promptArea),
-    autoYesRow,
   );
 
   renderPrograms();
@@ -342,7 +338,6 @@ export function newSessionModal(
       repoPath: projectSelect.value,
       program: programSelect.value,
       prompt: promptArea.value,
-      autoYes: autoYes.checked,
       // REPO_DEFAULT ("") when the user did not choose — createSession then omits
       // `backend` entirely and the repo's config decides (#1933).
       backend: backendSelect.value,

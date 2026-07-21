@@ -37,8 +37,6 @@ paragraph because it's why `af` doesn't corrupt itself:
 - **Runs the scheduler.** All [tasks](../tasks.md) — cron schedules and
   watch-script triggers — are hosted by the daemon. It arms the timers, watches
   the scripts, and delivers prompts on time, whether or not a TUI is open.
-- **Drives auto-yes.** In autoyes mode the daemon auto-accepts agent prompts so
-  work proceeds unattended.
 - **Handles usage limits.** With auto-resume enabled, the daemon parks a session
   that hit a Claude/Codex usage limit and resumes it once the window elapses —
   see [Usage limits](../usage-limits.md).
@@ -49,7 +47,7 @@ paragraph because it's why `af` doesn't corrupt itself:
 ## Lifecycle
 
 The daemon starts **on demand**: whenever you run `af` and there is work to host
-(an enabled task, autoyes, a root agent), `af` makes sure a daemon is running.
+(an enabled task or a root agent), `af` makes sure a daemon is running.
 That means for interactive use you usually don't have to think about it at all.
 
 To keep tasks and sessions running across logouts and reboots, install the

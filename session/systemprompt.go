@@ -165,8 +165,8 @@ func injectSystemPrompt(resolved string) string {
 			log.WarningLog.Printf("failed to set up plugin directory, slash commands unavailable: %v", err)
 			return resolved
 		}
-		// Unconditional append is safe here, unlike the AutoYes (#818) and
-		// codex (#820) flags: no binary has ever persisted --plugin-dir into
+		// Unconditional append is safe here, unlike provider approval and
+		// sandbox flags: no binary has ever persisted --plugin-dir into
 		// Instance.Program (the injected form only reaches tmux SetProgram),
 		// and claude's --plugin-dir is repeatable, so one in a user's
 		// program_overrides is additive rather than a conflict.

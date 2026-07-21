@@ -20,7 +20,7 @@ import (
 // Since #1100 the slot list mirrors the real tabs — there is no padding.
 func newTreeSidebar(t *testing.T, n int) *Sidebar {
 	t.Helper()
-	s := NewSidebar(false, store.NewProjection())
+	s := NewSidebar(store.NewProjection())
 	dir := t.TempDir()
 	for i := 0; i < n; i++ {
 		inst, err := session.NewInstance(session.InstanceOptions{
@@ -80,7 +80,7 @@ func TestSidebarTreeRendersTabChildren(t *testing.T) {
 // one child row — no phantom "Terminal" row for a tab that doesn't exist —
 // and the on-demand shell tab (`t`) grows it to two.
 func TestSidebarTreeFreshInstanceSingleTabRow(t *testing.T) {
-	s := NewSidebar(false, store.NewProjection())
+	s := NewSidebar(store.NewProjection())
 	inst, err := session.NewInstance(session.InstanceOptions{
 		Title: "fresh", Path: t.TempDir(), Program: "test",
 	})
@@ -378,31 +378,29 @@ func TestSidebarTreeWindowingWithTabRows(t *testing.T) {
 
 // TestSidebarUltraNarrowNoOverflow pins the #646 no-overflow guarantee for
 // EVERY sidebar row kind at ultra-narrow allocations — section headers, the
-// title bar (both auto-yes chips), instance rows, tab rows, and the ▲/▼
+// title bar, instance rows, tab rows, and the ▲/▼
 // window indicators. Greptile/T-Rex reproduced a section-header overflow at
 // SetSize(9,18): the header text was truncated to the effective content width
 // and then wrapped in Padding(0,1), rendering 10 cells into a 9-cell
 // allocation. Every rendered line must fit the allocated width.
 func TestSidebarUltraNarrowNoOverflow(t *testing.T) {
-	for _, autoyes := range []bool{false, true} {
-		for _, w := range []int{8, 9, 10, 11, 12} {
-			s := NewSidebar(autoyes, store.NewProjection())
-			dir := t.TempDir()
-			for i := 0; i < 12; i++ {
-				inst, err := session.NewInstance(session.InstanceOptions{
-					Title: fmt.Sprintf("narrow-instance-%02d", i), Path: dir, Program: "test",
-				})
-				require.NoError(t, err)
-				addTestInstance(s, inst)
-			}
-			s.SetSize(w, 18)
-			// Select a middle instance so tab rows and both ▲/▼ indicators are
-			// inside the rendered window.
-			s.SetSelectedInstance(5)
-			for i, line := range strings.Split(s.String(), "\n") {
-				require.LessOrEqualf(t, lipgloss.Width(line), w,
-					"autoyes=%v width=%d: line %d overflows: %q", autoyes, w, i, line)
-			}
+	for _, w := range []int{8, 9, 10, 11, 12} {
+		s := NewSidebar(store.NewProjection())
+		dir := t.TempDir()
+		for i := 0; i < 12; i++ {
+			inst, err := session.NewInstance(session.InstanceOptions{
+				Title: fmt.Sprintf("narrow-instance-%02d", i), Path: dir, Program: "test",
+			})
+			require.NoError(t, err)
+			addTestInstance(s, inst)
+		}
+		s.SetSize(w, 18)
+		// Select a middle instance so tab rows and both ▲/▼ indicators are
+		// inside the rendered window.
+		s.SetSelectedInstance(5)
+		for i, line := range strings.Split(s.String(), "\n") {
+			require.LessOrEqualf(t, lipgloss.Width(line), w,
+				"width=%d: line %d overflows: %q", w, i, line)
 		}
 	}
 }
@@ -412,7 +410,7 @@ func TestSidebarUltraNarrowNoOverflow(t *testing.T) {
 // instance's children render — collapse-by-default bounds the row count), full
 // String() per iteration at a typical sidebar allocation.
 func BenchmarkSidebarTreeRender(b *testing.B) {
-	s := NewSidebar(false, store.NewProjection())
+	s := NewSidebar(store.NewProjection())
 	dir := b.TempDir()
 	for i := 0; i < 50; i++ {
 		inst, err := session.NewInstance(session.InstanceOptions{

@@ -179,6 +179,26 @@ func TestHTTP_UnknownJSONField_400(t *testing.T) {
 	assert.Contains(t, env.Error.Message, `unknown field "repo_idd"`)
 }
 
+func TestHTTP_RemovedAutoYesIsRejectedForEveryClientVersion(t *testing.T) {
+	for _, clientVersion := range []string{"", "9.9.9"} {
+		name := "hand-authored"
+		if clientVersion != "" {
+			name = "af-client"
+		}
+		t.Run(name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, "/v1/CreateSession", strings.NewReader(`{"auto_yes":true}`))
+			if clientVersion != "" {
+				req.Header.Set(agentproto.ClientVersionHeader, clientVersion)
+			}
+			var decoded CreateSessionRequest
+			err := decodeHTTPRequest(httptest.NewRecorder(), req, &decoded)
+			require.Error(t, err)
+			require.Contains(t, err.Error(), "auto_yes was removed")
+			require.Contains(t, err.Error(), "program_overrides")
+		})
+	}
+}
+
 // TestHTTP_AfClientUnknownAdditiveField_Tolerated is the forward-compat lock.
 //
 // The daemon is upgraded independently of its clients (#960), so a client newer

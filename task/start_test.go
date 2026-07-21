@@ -66,7 +66,6 @@ func (b *startBackend) CheckAndHandleTrustPrompt(*session.Instance) bool {
 	b.trustPrompts--
 	return true
 }
-func (b *startBackend) TapEnter(*session.Instance)      {}
 func (b *startBackend) Recover(*session.Instance) error { return nil }
 func (b *startBackend) Respawn(*session.Instance) error { return nil }
 func (b *startBackend) Type() string                    { return "local" }

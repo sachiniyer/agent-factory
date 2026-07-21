@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 	"strings"
-	"sync"
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/log"
@@ -19,13 +18,9 @@ import (
 // bare agent name. The overrides come from the repo-resolved config (global
 // program_overrides merged with the repo's .agent-factory/config.json) when
 // the instance path belongs to a git repo; outside a repo, or when repo
-// resolution fails, the global config alone applies. When AutoYes is set and
-// the RESOLVED command actually runs claude, the --permission-mode
-// bypassPermissions flag is appended to it — claude needs the flag at exec
-// time, and Instance.Program now holds only the bare enum so the append can
-// no longer happen in main.go. A nil cfg (e.g. tests that don't materialize a config)
-// falls back to the raw Program string so legacy free-form values still
-// reach tmux verbatim.
+// resolution fails, the global config alone applies. A nil cfg (e.g. tests
+// that don't materialize a config) falls back to the raw Program string so
+// legacy free-form values still reach tmux verbatim.
 func resolveProgramForInstance(i *Instance) string {
 	return resolveProgramForAgent(i, i.AgentProgram())
 }
@@ -54,107 +49,7 @@ func resolveProgramForAgent(i *Instance, agent string) string {
 	// rewrites Program in place while the instance is live and shared, so this
 	// is a genuinely concurrent read now. Every other reader of the field
 	// (ToInstanceData, ReconcileTabsFromData) already holds the instance lock.
-	resolved := config.ResolveProgram(cfg, agent)
-	// Key the claude-only flag off the agent the RESOLVED command actually
-	// runs, not the config-name enum: an override may point "claude" at a
-	// different program, which would exit on the unknown flag (#1116).
-	//
-	// opencode has NO auto-approve flag on the TUI to wire, so instead of joining
-	// codex/amp as a SILENT AutoYes no-op (#1963) it says so out loud — see
-	// noteAutoYesUnsupported below.
-	//
-	// Its whole TUI flag set is -h -v --print-logs --log-level --pure --port
-	// --hostname --mdns --mdns-domain --cors -m/--model -c/--continue -s/--session
-	// --fork --prompt --agent: no permission/approval knob among them. Both
-	// candidate flags were tested against the real binary
-	// (0.0.0-main-202604230742) and BOTH are rejected by the TUI, producing output
-	// byte-identical to a nonsense flag (help text, then exit):
-	//   --dangerously-skip-permissions  real, but only on the `opencode run`
-	//                                   SUBCOMMAND — not on the TUI af launches
-	//   --auto                          not a flag at all (it appears in the
-	//                                   binary's strings only as vendored library
-	//                                   data alongside --autocorrect/--auto-fill)
-	// Note opencode's arg parser is NON-STRICT, so exit codes prove nothing here;
-	// only a real launch distinguishes a valid flag from a bogus one. Injecting
-	// either would kill every AutoYes opencode spawn as an opaque readiness
-	// timeout — the #1043/#1116/#1131 class this block exists to prevent.
-	if i.AutoYes && tmux.DetectAgentFromCommand(resolved) == tmux.ProgramClaude &&
-		// Sessions persisted by pre-#659 binaries got the flag appended at
-		// create-time in main.go (19c0dd9), so legacy Instance.Program values
-		// can already carry it; appending again duplicates the flag on every
-		// restore (#818). A substring check suffices: claude exposes no short
-		// form of --permission-mode, and the check also matches the
-		// =-attached spelling.
-		!strings.Contains(resolved, "--permission-mode") {
-		resolved = resolved + " --permission-mode bypassPermissions"
-	}
-	if i.AutoYes {
-		noteAutoYesUnsupported(tmux.DetectAgentFromCommand(resolved), i.Title)
-	}
-	return resolved
-}
-
-// autoYesUnsupported explains, per agent, why AutoYes cannot be honored — and is
-// the list of agents for which af must NOT pretend it was.
-//
-// AutoYes reaches an agent by exactly two routes, and an agent needs at least one:
-// a launch flag (claude's --permission-mode bypassPermissions) or TapEnter, which
-// the daemon only fires when tmux/io.go can recognize that agent's confirmation
-// dialog. codex and amp have NEITHER, so `auto_yes` has silently done nothing for
-// them for as long as they have been supported (#1963). opencode joins them, but
-// loudly: a setting the user turned on that quietly does nothing is the actual
-// defect, so at minimum af says so.
-//
-// This is intentionally a per-agent REASON, not a bool: "af cannot do this and
-// here is what to do instead" is actionable; "unsupported" is not. Fixing #1963
-// means deleting entries from this map, and the map makes the gap impossible to
-// add a new agent without noticing.
-// Every reason is VERSION-SCOPED: it describes the build af tested, and names the
-// escape hatch that works regardless of version. af deliberately does NOT probe
-// the installed binary for the flag, because for opencode specifically that probe
-// cannot be trusted: opencode HIDES real flags from its help
-// (--dangerously-skip-permissions is genuine on `opencode run` yet absent from
-// `--help`), so a help-grep yields false negatives, and its parser is non-strict,
-// so an exit code cannot tell a real flag from a bogus one either. The only
-// reliable oracle is launching the binary — ~1.4s per session create, on a path
-// that must not hang. Naming program_overrides in the reason gives the user a
-// version-proof answer without af guessing at their build.
-var autoYesUnsupported = map[string]string{
-	tmux.ProgramCodex: "codex exposes --dangerously-bypass-approvals-and-sandbox; set it via program_overrides.codex if you want unattended approval",
-	tmux.ProgramAmp:   "amp exposes an amp.dangerouslyAllowAll setting; set it in amp's own settings if you want unattended approval",
-	tmux.ProgramOpencode: "the opencode build af was verified against (0.0.0-main-202604230742) has no auto-approve flag on its TUI " +
-		"(--dangerously-skip-permissions is `opencode run`-only and makes the TUI print help and exit); " +
-		"opencode's default config already auto-approves tool calls, so sessions are unlikely to stall. " +
-		"If your opencode exposes one, set it via program_overrides.opencode",
-}
-
-// autoYesNoticed records the (agent, session) pairs this process has already told
-// the user about, so the notice is emitted once per session per process rather
-// than on every start AND every restore. Restore runs on daemon reconcile and on
-// each lost-restore retry, so without this the same static, unchanging fact is
-// re-logged on a timer.
-var autoYesNoticed sync.Map
-
-// noteAutoYesUnsupported tells the user when auto_yes will not be honored for the
-// agent they picked, instead of ignoring the setting in silence (#1963).
-//
-// This is INFO, not WARNING (#2166). Severity states whether something is wrong,
-// and nothing here is: the user turned on auto_yes and picked an agent whose
-// approval knob af cannot reach, which is an expected configuration with a
-// documented escape hatch printed right in the message. An operator scraping the
-// log for WARNING/ERROR should not be paged by a normal codex session start. The
-// guidance text is unchanged — the message is still worth reading, it just is not
-// a defect report. It also keeps a plain `af` run out of log.dirty (#1749), so a
-// successful command stops ending with the "wrote logs to …" note.
-func noteAutoYesUnsupported(agent, title string) {
-	reason, ok := autoYesUnsupported[agent]
-	if !ok {
-		return
-	}
-	if _, seen := autoYesNoticed.LoadOrStore(agent+"\x00"+title, struct{}{}); seen {
-		return
-	}
-	log.InfoLog.Printf("auto_yes has no effect for %s (session %q): %s", agent, title, reason)
+	return config.ResolveProgram(cfg, agent)
 }
 
 // LocalBackend implements Backend using local tmux sessions and git worktrees.
@@ -903,19 +798,4 @@ func (b *LocalBackend) CheckAndHandleTrustPrompt(i *Instance) bool {
 		return ts.CheckAndHandleTrustPrompt()
 	}
 	return false
-}
-
-func (b *LocalBackend) TapEnter(i *Instance) {
-	i.mu.RLock()
-	s := i.started
-	ts := i.tmuxLocked()
-	autoYes := i.AutoYes
-	i.mu.RUnlock()
-
-	if !s || !autoYes || ts == nil {
-		return
-	}
-	if err := ts.TapEnter(); err != nil {
-		log.ErrorLog.Printf("error tapping enter: %v", err)
-	}
 }

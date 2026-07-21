@@ -48,7 +48,6 @@ af                 # launch the TUI
 | Flag | Description |
 |------|-------------|
 | `-p`, `--program` | Agent to run in new sessions, one of `claude`, `codex`, `aider`, `gemini`, `amp`, `opencode`. To pass custom paths or flags, use `program_overrides` in the config instead — see [configuration.md](configuration.md#choosing-the-agent). |
-| `-y`, `--autoyes` | Experimental: automatically accept agent prompts in all sessions. |
 
 ## `af sessions`
 
@@ -154,7 +153,7 @@ Because the binding is inherited from the current directory, running `tasks add`
 
 ## `af daemon`
 
-The background daemon hosts task cron schedules, watch-task scripts, and autoyes mode. It starts on demand whenever `af` runs and an enabled task exists; installing it as a user-level autostart unit (systemd user service on Linux, launchd agent on macOS) keeps scheduled tasks firing after reboots. See [tasks.md](tasks.md#daemon-lifecycle).
+The background daemon hosts task cron schedules, watch-task scripts, session monitoring, and the web UI. It starts on demand whenever `af` runs and an enabled task exists; installing it as a user-level autostart unit (systemd user service on Linux, launchd agent on macOS) keeps scheduled tasks firing after reboots. See [tasks.md](tasks.md#daemon-lifecycle).
 
 ```bash
 af daemon install      # register autostart at login
@@ -185,7 +184,7 @@ af config set <key> <value>                         # global write, preserving c
 
 Bare `get`/`list` report effective global values (defaults applied), unchanged for existing scripts. `--project <repository-path>` adds the existing legacy per-repo and checked-in `.agent-factory/config.toml` layers; the path is a selector only and does not register or persist a project. `--explain` reports the on-disk effective value, merge policy, precedence, every candidate's path/presence/result/reason, and per-leaf origins for merged maps/tables. Displayed source locations keep the selected/configured path spelling; symlinks are resolved for identity comparison, never for display. The output also says explicitly that the running daemon value was not checked. JSON mode carries the same data structurally.
 
-`set` stays global-only. It edits only the target value's bytes — every comment, blank line, and key ordering is preserved (the file is not regenerated) — and validates the value with the loader's own rules before writing, so it can never produce a config that fails to load. Settable keys: `default_program`, `program_overrides.<agent>`, `auto_yes`, `auto_update`, `daemon_poll_interval`, `log_max_size_mb`, `log_max_backups`, `branch_prefix`, `worktree_root`, `detach_keys`, `update_channel`, `limit_patterns.<agent>`. Structural keys (`root_agents`, `[keys]`) stay hand-edited. A change applies on the next `af`/daemon start, exactly like a hand-edit (`set` prints this reminder). Full key reference: [configuration.md](configuration.md).
+`set` stays global-only. It edits only the target value's bytes — every comment, blank line, and key ordering is preserved (the file is not regenerated) — and validates the value with the loader's own rules before writing, so it can never produce a config that fails to load. Settable keys: `default_program`, `program_overrides.<agent>`, `auto_update`, `daemon_poll_interval`, `log_max_size_mb`, `log_max_backups`, `branch_prefix`, `worktree_root`, `detach_keys`, `update_channel`, `limit_patterns.<agent>`. Structural keys (`root_agents`, `[keys]`) stay hand-edited. A change applies on the next `af`/daemon start, exactly like a hand-edit (`set` prints this reminder). Full key reference: [configuration.md](configuration.md).
 
 ## Maintenance commands
 

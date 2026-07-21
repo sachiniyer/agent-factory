@@ -346,7 +346,6 @@ func TestDefaultConfig(t *testing.T) {
 
 		require.NotNil(t, cfg)
 		assert.Equal(t, tmux.ProgramClaude, cfg.DefaultProgram)
-		assert.False(t, cfg.AutoYes)
 		assert.True(t, cfg.AutoUpdate)
 		// require_token defaults to FALSE — auth is opt-in, so the daemon-bundled
 		// web UI opens with no token to find or paste. The loopback-only
@@ -714,7 +713,6 @@ func TestLoadConfig(t *testing.T) {
 		require.NoError(t, err)
 		require.NotNil(t, cfg)
 		assert.Equal(t, tmux.ProgramClaude, cfg.DefaultProgram)
-		assert.False(t, cfg.AutoYes)
 		assert.Equal(t, 1000, cfg.DaemonPollInterval)
 		assert.NotEmpty(t, cfg.BranchPrefix)
 		assert.Equal(t, WorktreeRootSibling, cfg.WorktreeRoot)
@@ -729,7 +727,6 @@ func TestLoadConfig(t *testing.T) {
 		configPath := filepath.Join(configDir, ConfigFileName)
 		configContent := `{
 			"default_program": "amp",
-			"auto_yes": true,
 			"daemon_poll_interval": 2000,
 			"branch_prefix": "test/",
 			"worktree_root": "subdirectory"
@@ -740,7 +737,6 @@ func TestLoadConfig(t *testing.T) {
 		require.NoError(t, err)
 		require.NotNil(t, cfg)
 		assert.Equal(t, tmux.ProgramAmp, cfg.DefaultProgram)
-		assert.True(t, cfg.AutoYes)
 		assert.Equal(t, 2000, cfg.DaemonPollInterval)
 		assert.Equal(t, "test/", cfg.BranchPrefix)
 		assert.Equal(t, WorktreeRootSubdirectory, cfg.WorktreeRoot)
@@ -1083,7 +1079,6 @@ func TestLoadConfigTOML(t *testing.T) {
 	t.Run("loads valid config.toml", func(t *testing.T) {
 		writeToml(t, `
 default_program = "codex"
-auto_yes = true
 daemon_poll_interval = 2000
 branch_prefix = "test/"
 worktree_root = "subdirectory"
@@ -1102,7 +1097,6 @@ codex = "/opt/codex/bin/codex --quiet"
 		require.NoError(t, err)
 		require.NotNil(t, cfg)
 		assert.Equal(t, "codex", cfg.DefaultProgram)
-		assert.True(t, cfg.AutoYes)
 		assert.Equal(t, 2000, cfg.DaemonPollInterval)
 		assert.Equal(t, "test/", cfg.BranchPrefix)
 		assert.Equal(t, WorktreeRootSubdirectory, cfg.WorktreeRoot)
@@ -1209,14 +1203,14 @@ error = "#cc9393"
 		configDir := writeToml(t, `default_program = "codex"`+"\n")
 		// The json sets a different program AND a key the toml does not carry;
 		// neither may leak through — toml is canonical, not a merge layer.
-		jsonContent := `{"default_program": "gemini", "auto_yes": true}`
+		jsonContent := `{"default_program": "gemini", "auto_update": false}`
 		require.NoError(t, os.WriteFile(filepath.Join(configDir, ConfigFileName), []byte(jsonContent), 0644))
 
 		cfg, err := LoadConfig()
 		require.NoError(t, err)
 		require.NotNil(t, cfg)
 		assert.Equal(t, "codex", cfg.DefaultProgram)
-		assert.False(t, cfg.AutoYes, "auto_yes from the shadowed config.json must not merge in")
+		assert.True(t, cfg.AutoUpdate, "auto_update from the shadowed config.json must not merge in")
 	})
 
 	t.Run("does not materialize config.json when only config.toml exists", func(t *testing.T) {
@@ -1230,7 +1224,7 @@ error = "#cc9393"
 	})
 
 	t.Run("surfaces parse error with position on invalid TOML", func(t *testing.T) {
-		writeToml(t, "default_program = \"claude\"\nauto_yes = maybe\n")
+		writeToml(t, "default_program = \"claude\"\nauto_update = maybe\n")
 
 		cfg, err := LoadConfig()
 		require.Error(t, err)
@@ -1443,7 +1437,6 @@ default_program = "claude"
 
 [root_agents."~/repos/mine"]
 program = "claude"
-auto_yes = false
 `)
 
 		cfg, err := LoadConfig()
@@ -1452,7 +1445,6 @@ auto_yes = false
 		require.Contains(t, cfg.RootAgents, "~/repos/mine")
 		agent := cfg.RootAgents["~/repos/mine"]
 		assert.Equal(t, "claude", agent.Program)
-		assert.False(t, agent.AutoYesEnabled())
 	})
 }
 
@@ -1467,7 +1459,6 @@ func TestSaveConfig(t *testing.T) {
 		testConfig := &Config{
 			DefaultProgram:     tmux.ProgramClaude,
 			ProgramOverrides:   map[string]string{tmux.ProgramClaude: "/home/me/claude"},
-			AutoYes:            true,
 			DaemonPollInterval: 3000,
 			BranchPrefix:       "test-branch/",
 		}
@@ -1484,7 +1475,6 @@ func TestSaveConfig(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, testConfig.DefaultProgram, loadedConfig.DefaultProgram)
 		assert.Equal(t, testConfig.ProgramOverrides, loadedConfig.ProgramOverrides)
-		assert.Equal(t, testConfig.AutoYes, loadedConfig.AutoYes)
 		assert.Equal(t, testConfig.DaemonPollInterval, loadedConfig.DaemonPollInterval)
 		assert.Equal(t, testConfig.BranchPrefix, loadedConfig.BranchPrefix)
 	})

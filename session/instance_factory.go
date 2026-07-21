@@ -28,8 +28,6 @@ type InstanceOptions struct {
 	Path string
 	// Program is the program to run in the instance (e.g. "claude", "aider --model ollama_chat/gemma3:1b")
 	Program string
-	// If AutoYes is true, then
-	AutoYes bool
 	// ForceRemote forces the instance to use the remote hook backend,
 	// even if the repo config would default to local. It is the pre-Phase-4
 	// hook selector, equivalent to Backend == BackendHook, and takes precedence
@@ -87,7 +85,6 @@ func defaultBackendFactory(opts InstanceOptions, absPath string) (ProvisionResul
 		RepoRoot: absPath,
 		Title:    opts.Title,
 		Program:  opts.Program,
-		AutoYes:  opts.AutoYes,
 	}
 	// An off-box runtime clones the workspace from the repo's origin (epic
 	// decision 4: GitHub is the durable store); resolve it only for those kinds so
@@ -251,7 +248,6 @@ func NewInstance(opts InstanceOptions) (*Instance, error) {
 		Width:           0,
 		CreatedAt:       t,
 		UpdatedAt:       t,
-		AutoYes:         opts.AutoYes,
 		inPlace:         opts.InPlace,
 		backend:         backend,
 		remoteClient:    remoteClient,

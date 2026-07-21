@@ -135,9 +135,6 @@ func applyThemeStyles() {
 	blurredTitle = lipgloss.NewStyle().
 		Background(activeTheme.ForegroundDim).
 		Foreground(activeTheme.ForegroundStrong)
-	autoYesStyle = lipgloss.NewStyle().
-		Background(activeTheme.SelectionBackground).
-		Foreground(activeTheme.SelectionForeground)
 	projectRowStyle = lipgloss.NewStyle().
 		Foreground(activeTheme.Foreground)
 	projectRowActiveStyle = lipgloss.NewStyle().

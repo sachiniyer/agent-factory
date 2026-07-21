@@ -104,7 +104,7 @@ func TestHTTPRoutes_RequestFieldsMatchWireStruct(t *testing.T) {
 	// so the HTTP plane can neither set nor advertise task provenance (#1892) —
 	// only the daemon's own gob delivery loopback carries them.
 	assert.Equal(t,
-		[]string{"title", "title_base", "repo_path", "program", "prompt", "auto_yes", "in_place", "force_remote", "backend"},
+		[]string{"title", "title_base", "repo_path", "program", "prompt", "in_place", "force_remote", "backend"},
 		create.RequestFields,
 		"request_fields must mirror CreateSessionRequest's json tags in declaration order")
 }

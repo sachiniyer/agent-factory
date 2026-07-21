@@ -16,10 +16,10 @@ import (
 )
 
 // The daemon is the single always-on host for task schedules (cron and watch
-// scripts) and autoyes mode (#782), and serves the web UI. Launching the TUI
-// starts it: the cold start reads session state through the daemon
-// (coldStartFromSnapshot -> withDaemonHTTP -> daemon.EnsureDaemon), and autoyes
-// and ensureDaemonForTasks cover the other root-path cases. `af daemon install`
+// scripts), session monitoring, and the web UI. Launching the TUI starts it:
+// the cold start reads session state through the daemon
+// (coldStartFromSnapshot -> withDaemonHTTP -> daemon.EnsureDaemon), and
+// ensureDaemonForTasks covers the scheduled-work case. `af daemon install`
 // registers a user-level autostart unit so schedules and the web UI survive
 // logouts and reboots without ever opening af.
 
@@ -27,12 +27,12 @@ var daemonCmd = &cobra.Command{
 	Use:   "daemon",
 	Short: "Manage the background daemon: serves the web UI and schedules tasks",
 	Long: `The agent-factory daemon runs task cron schedules in-process, supervises
-watch-task scripts, drives autoyes mode, and serves the bundled web UI.
+watch-task scripts, monitors sessions, and serves the bundled web UI.
 
 The web UI is part of the daemon — there is no separate web command — so it is
 served whenever the daemon is running. Running af starts one: the TUI reads
 session state through the daemon and spawns it if none is up, so simply opening
-af serves the web UI. Autoyes mode and any enabled task start one too. Only
+af serves the web UI. Any enabled task starts one too. Only
 standalone commands that never talk to the daemon (such as 'af config list')
 leave it down.
 
@@ -461,8 +461,8 @@ type respawnResult struct {
 //     RUNNING THE OLD BINARY. That is #1947's own symptom — the upgrade did not
 //     reach the daemon.
 //   - restartPhaseRespawn: the old daemon stopped but no new one came up, so
-//     NOTHING IS RUNNING. Task schedules, watch scripts and autoyes are all
-//     stopped until something starts a daemon.
+//     NOTHING IS RUNNING. Task schedules, watch scripts, and session monitoring
+//     are all stopped until something starts a daemon.
 //
 // "Still on the old code" and "no daemon at all" need opposite remedies, and
 // telling them apart by reading the wrapped error's text is exactly the
@@ -597,11 +597,12 @@ func canonicalExec(p string) string {
 // line is half of #1947.
 //
 // Both branches respawn unconditionally: callers only reach this function
-// after stopping a running daemon, and that daemon may have been serving
-// autoyes mode with zero enabled tasks. Gating the fallback on enabled tasks
-// left autoyes-only users without a daemon until the next af run (#813). The
-// task gate belongs only on the cold-start path (ensureDaemonForTasks), where
-// nothing was running and "no enabled tasks" means there is nothing to start.
+// after stopping a running daemon, and that daemon may have been serving the
+// web UI or monitoring sessions with zero enabled tasks. Gating the fallback
+// on enabled tasks leaves those users without a daemon until the next af run.
+// The task gate belongs only on the cold-start path (ensureDaemonForTasks),
+// where nothing was running and "no enabled tasks" means there is nothing to
+// start.
 func respawnDaemonAfterUpgrade(execPath string) (respawnResult, error) {
 	// The Shutdown RPC acks before the daemon tears down, so the old daemon's
 	// control socket can still answer pings here. Respawning into that window
@@ -641,7 +642,7 @@ func respawnDaemonAfterUpgrade(execPath string) (respawnResult, error) {
 }
 
 // ensureDaemonForTasks starts the daemon when any enabled task exists, so
-// cron schedules are evaluated even if the user never toggles autoyes.
+// cron schedules are evaluated even if the user never opens the TUI.
 // Failures are logged rather than surfaced: the TUI is fully usable without
 // the daemon, and the next af invocation retries.
 //

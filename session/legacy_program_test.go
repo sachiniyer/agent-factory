@@ -69,66 +69,17 @@ func TestInjectSystemPrompt_BareEnumStillInjects(t *testing.T) {
 	}
 }
 
-// Regression for #677: a restored AutoYes Claude session with a legacy path
-// must still get --permission-mode bypassPermissions, or unattended operation
-// silently breaks after upgrade.
-func TestResolveProgramForInstance_LegacyAutoYes(t *testing.T) {
+// A legacy free-form program is returned unchanged. Approval flags are now the
+// user's program_overrides choice; af does not append one based on agent type.
+func TestResolveProgramForInstance_LegacyProgramUnchanged(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 
 	i := &Instance{
 		Program: "/home/foo/bin/claude",
-		AutoYes: true,
 	}
 	result := resolveProgramForInstance(i)
-	if !strings.Contains(result, "--permission-mode bypassPermissions") {
-		t.Errorf("expected --permission-mode bypassPermissions, got %q", result)
-	}
-}
-
-// Regression for #818: pre-#659 binaries appended --permission-mode
-// bypassPermissions at create-time and persisted the full string into
-// Instance.Program, so a restored legacy AutoYes session already carries the
-// flag — the restore-time append must not duplicate it.
-func TestResolveProgramForInstance_LegacyAutoYesFlagAlreadyPresent(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
-
-	i := &Instance{
-		Program: "/home/foo/bin/claude --permission-mode bypassPermissions",
-		AutoYes: true,
-	}
-	result := resolveProgramForInstance(i)
-	if got := strings.Count(result, "--permission-mode"); got != 1 {
-		t.Errorf("expected exactly one --permission-mode flag, got %d in %q", got, result)
-	}
-}
-
-// Companion to the #818 case: the =-attached spelling must also suppress the
-// append.
-func TestResolveProgramForInstance_LegacyAutoYesEqualsFormAlreadyPresent(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
-
-	i := &Instance{
-		Program: "/home/foo/bin/claude --permission-mode=bypassPermissions",
-		AutoYes: true,
-	}
-	result := resolveProgramForInstance(i)
-	if got := strings.Count(result, "--permission-mode"); got != 1 {
-		t.Errorf("expected exactly one --permission-mode flag, got %d in %q", got, result)
-	}
-}
-
-// Defensive guard for the AutoYes branch: an unknown AutoYes program must NOT
-// get the Claude-only bypassPermissions flag.
-func TestResolveProgramForInstance_UnknownAutoYesNoFlag(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
-
-	i := &Instance{
-		Program: "/usr/bin/some-other-tool",
-		AutoYes: true,
-	}
-	result := resolveProgramForInstance(i)
-	if strings.Contains(result, "bypassPermissions") {
-		t.Errorf("expected no bypassPermissions for unknown program, got %q", result)
+	if result != i.Program {
+		t.Errorf("expected legacy program unchanged, got %q", result)
 	}
 }
 
@@ -146,18 +97,13 @@ func saveOverrideConfig(t *testing.T, claudeOverride string) {
 	}
 }
 
-// Regression for #1116/#1131: an AutoYes instance whose claude enum is
-// overridden to a NON-claude command must not get the claude-only
-// --permission-mode flag — the resolved program would exit on the unknown
-// option and the spawn would die as an opaque timeout.
-func TestResolveProgramForInstance_OverrideToNonAgentNoAutoYesFlag(t *testing.T) {
+func TestResolveProgramForInstance_OverrideToNonAgent(t *testing.T) {
 	saveOverrideConfig(t, "bash")
 
 	i := &Instance{
 		Title:   "cheap-instance",
 		Program: tmux.ProgramClaude,
 		Path:    t.TempDir(),
-		AutoYes: true,
 	}
 	result := resolveProgramForInstance(i)
 	if result != "bash" {
@@ -165,23 +111,18 @@ func TestResolveProgramForInstance_OverrideToNonAgentNoAutoYesFlag(t *testing.T)
 	}
 }
 
-// Companion: an override that still runs claude (custom path + flags) must
-// keep the AutoYes flag — keying off the resolved command must not LOSE
-// flags for claude-compatible overrides.
-func TestResolveProgramForInstance_OverrideToClaudePathKeepsAutoYesFlag(t *testing.T) {
+// A custom Claude command is also returned verbatim. This is where users put
+// any approval mode they deliberately chose.
+func TestResolveProgramForInstance_OverrideToClaudePathUnchanged(t *testing.T) {
 	saveOverrideConfig(t, "/opt/claude-next/bin/claude --model opus")
 
 	i := &Instance{
 		Title:   "custom-claude",
 		Program: tmux.ProgramClaude,
 		Path:    t.TempDir(),
-		AutoYes: true,
 	}
 	result := resolveProgramForInstance(i)
-	if !strings.HasPrefix(result, "/opt/claude-next/bin/claude --model opus") {
-		t.Errorf("expected override preserved as prefix, got %q", result)
-	}
-	if !strings.Contains(result, "--permission-mode bypassPermissions") {
-		t.Errorf("expected AutoYes flag for claude-running override, got %q", result)
+	if result != "/opt/claude-next/bin/claude --model opus" {
+		t.Errorf("expected override unchanged, got %q", result)
 	}
 }

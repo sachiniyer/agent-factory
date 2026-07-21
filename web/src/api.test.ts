@@ -64,7 +64,7 @@ afterEach(() => {
 
 /** A create form submission with no backend chosen (the default state). */
 function createInput(over: Partial<CreateSessionInput> = {}): CreateSessionInput {
-  return { title: "feature", repoPath: "/repos/af", program: "", prompt: "", autoYes: false, ...over };
+  return { title: "feature", repoPath: "/repos/af", program: "", prompt: "", ...over };
 }
 
 for (const backend of ["local", "docker", "ssh", "hook"]) {

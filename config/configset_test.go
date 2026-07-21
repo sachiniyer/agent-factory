@@ -12,9 +12,9 @@ import (
 // section header, ordering, and even the changed line's trailing inline comment
 // stays byte-identical.
 func TestSetTOMLScalarReplacePreservesComments(t *testing.T) {
-	in := "# header comment\n\ndefault_program = 'claude'   # inline note\nauto_yes = false\n\n" +
+	in := "# header comment\n\ndefault_program = 'claude'   # inline note\nauto_update = false\n\n" +
 		"# section comment\n[program_overrides]\nclaude = '/bin/claude --flag'  # path\n"
-	want := "# header comment\n\ndefault_program = 'codex'   # inline note\nauto_yes = false\n\n" +
+	want := "# header comment\n\ndefault_program = 'codex'   # inline note\nauto_update = false\n\n" +
 		"# section comment\n[program_overrides]\nclaude = '/bin/claude --flag'  # path\n"
 
 	got := setTOMLScalar(in, "", "default_program", "'codex'")
@@ -24,9 +24,9 @@ func TestSetTOMLScalarReplacePreservesComments(t *testing.T) {
 }
 
 func TestSetTOMLScalarInsertRootKeyBeforeSections(t *testing.T) {
-	in := "default_program = 'claude'\nauto_yes = false\n\n[program_overrides]\nclaude = 'x'\n"
+	in := "default_program = 'claude'\nauto_update = false\n\n[program_overrides]\nclaude = 'x'\n"
 	got := setTOMLScalar(in, "", "branch_prefix", "'feat/'")
-	want := "default_program = 'claude'\nauto_yes = false\nbranch_prefix = 'feat/'\n\n[program_overrides]\nclaude = 'x'\n"
+	want := "default_program = 'claude'\nauto_update = false\nbranch_prefix = 'feat/'\n\n[program_overrides]\nclaude = 'x'\n"
 	if got != want {
 		t.Fatalf("root insert wrong.\n got: %q\nwant: %q", got, want)
 	}
@@ -156,7 +156,7 @@ func TestSetTOMLScalarDottedFormWhitespaceAndScoping(t *testing.T) {
 }
 
 func TestSetTOMLScalarEmptyFile(t *testing.T) {
-	if got := setTOMLScalar("", "", "auto_yes", "true"); got != "auto_yes = true\n" {
+	if got := setTOMLScalar("", "", "auto_update", "true"); got != "auto_update = true\n" {
 		t.Fatalf("empty root wrong: %q", got)
 	}
 	if got := setTOMLScalar("", "limit_patterns", "claude", "'x'"); got != "[limit_patterns]\nclaude = 'x'\n" {
@@ -232,7 +232,7 @@ func writeTempConfig(t *testing.T, content string) string {
 // custom-ordered config keeps every comment/line except the changed value, the
 // result still loads, and the loaded value is the new one.
 func TestSetGlobalConfigValueRoundTrip(t *testing.T) {
-	orig := "# keep me\ndefault_program = 'claude'  # fav\nauto_yes = false\n\n[program_overrides]\nclaude = '/bin/claude'\n"
+	orig := "# keep me\ndefault_program = 'claude'  # fav\nauto_update = false\n\n[program_overrides]\nclaude = '/bin/claude'\n"
 	path := writeTempConfig(t, orig)
 
 	res, err := SetGlobalConfigValue("default_program", "codex")
@@ -244,7 +244,7 @@ func TestSetGlobalConfigValueRoundTrip(t *testing.T) {
 	}
 
 	got, _ := os.ReadFile(path)
-	want := "# keep me\ndefault_program = 'codex'  # fav\nauto_yes = false\nschema_version = 1\n\n[program_overrides]\nclaude = '/bin/claude'\n"
+	want := "# keep me\ndefault_program = 'codex'  # fav\nauto_update = false\nschema_version = 1\n\n[program_overrides]\nclaude = '/bin/claude'\n"
 	if string(got) != want {
 		t.Fatalf("file not preserved.\n got: %q\nwant: %q", got, want)
 	}
@@ -339,7 +339,7 @@ func TestSetGlobalConfigValueRefusesOnUnloadableConfig(t *testing.T) {
 	path := writeTempConfig(t, "default_program = 'claude'\n\n[keys]\nquit = 'not-a-real-key'\n")
 	before, _ := os.ReadFile(path)
 
-	_, err := SetGlobalConfigValue("auto_yes", "true")
+	_, err := SetGlobalConfigValue("auto_update", "true")
 	if err == nil {
 		t.Fatal("expected refusal on unloadable config")
 	}
@@ -349,6 +349,17 @@ func TestSetGlobalConfigValueRefusesOnUnloadableConfig(t *testing.T) {
 	after, _ := os.ReadFile(path)
 	if string(before) != string(after) {
 		t.Fatal("config file must be untouched when the current config does not load")
+	}
+}
+
+func TestSetGlobalConfigValueRejectsRemovedAutoYesWithGuidance(t *testing.T) {
+	_, err := SetGlobalConfigValue("auto_yes", "true")
+	if err == nil {
+		t.Fatal("removed auto_yes key was accepted")
+	}
+	if !strings.Contains(err.Error(), "auto_yes was removed") ||
+		!strings.Contains(err.Error(), "program_overrides") {
+		t.Fatalf("removed auto_yes error is not actionable: %v", err)
 	}
 }
 
@@ -529,7 +540,7 @@ func TestSetGlobalConfigValueWarnsOnTokenlessNetworkListener(t *testing.T) {
 		{"network listener with token on", "default_program = 'claude'\nrequire_token = true\n", "listen_addr", "0.0.0.0:8443", false},
 		{"token on while listener is network", "default_program = 'claude'\nlisten_addr = '0.0.0.0:8443'\n", "require_token", "true", false},
 		// Unrelated keys never warn.
-		{"unrelated key", "default_program = 'claude'\nlisten_addr = '0.0.0.0:8443'\n", "auto_yes", "true", false},
+		{"unrelated key", "default_program = 'claude'\nlisten_addr = '0.0.0.0:8443'\n", "auto_update", "true", false},
 	}
 
 	for _, c := range cases {

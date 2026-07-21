@@ -194,7 +194,6 @@ results.`,
 				RepoPath: repo.Root,
 				Program:  program,
 				Prompt:   prompt,
-				AutoYes:  cfg.AutoYes,
 			}); err != nil {
 				return jsonError(err)
 			}

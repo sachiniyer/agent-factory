@@ -28,7 +28,6 @@ var (
 	agentServerRepo    string
 	agentServerTitle   string
 	agentServerProgram string
-	agentServerAutoYes bool
 )
 
 var agentServerCmd = &cobra.Command{
@@ -73,7 +72,6 @@ branch before shutdown), not this server's.`,
 			RepoPath:   repo,
 			Title:      agentServerTitle,
 			Program:    agentServerProgram,
-			AutoYes:    agentServerAutoYes,
 		}, cmd.OutOrStdout())
 	},
 }
@@ -97,6 +95,7 @@ func resolveAgentServerRepo(repoFlag string) (string, error) {
 }
 
 func init() {
+	agentServerCmd.SetFlagErrorFunc(removedAutoYesFlagError)
 	agentServerCmd.Flags().StringVar(&agentServerListen, "listen", "127.0.0.1:0",
 		"HTTP TCP bind address (host:port); :0 lets the kernel pick a free port")
 	agentServerCmd.Flags().StringVar(&agentServerRepo, "repo", "",
@@ -105,7 +104,5 @@ func init() {
 		"Session title for the workspace (required)")
 	agentServerCmd.Flags().StringVar(&agentServerProgram, "program", "",
 		"Agent program to run (default: the configured default_program)")
-	agentServerCmd.Flags().BoolVar(&agentServerAutoYes, "auto-yes", false,
-		"Enable the agent-server's AutoYes accept for the workspace")
 	_ = agentServerCmd.MarkFlagRequired("title")
 }

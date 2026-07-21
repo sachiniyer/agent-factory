@@ -264,8 +264,8 @@ func TestLedgerAgreesWithSurfaceStatus(t *testing.T) {
 	}
 	check("cli", inv.Ledger.CLIVerbs, func(c capability) string { return c.CLI.Status })
 	// Flags carry option capabilities, so they need the same agreement: mapping
-	// `af sessions create --autoyes` while session.create.opt.autoyes still says
-	// cli:no would otherwise pass with a stale row.
+	// a newly-added option to a capability whose CLI status is still "no" would
+	// otherwise pass with a stale row.
 	check("cli", inv.Ledger.CLIFlags, func(c capability) string { return c.CLI.Status })
 	check("tui", inv.Ledger.TUIBindings, func(c capability) string { return c.TUI.Status })
 	check("web", inv.Ledger.WebRPCs, func(c capability) string { return c.Web.Status })

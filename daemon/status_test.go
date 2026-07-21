@@ -29,8 +29,7 @@ type deadTmuxBackend struct {
 func (deadTmuxBackend) IsAlive(*session.Instance) (bool, error) { return false, nil }
 
 // promptTapBackend is a FakeBackend that always reports a waiting prompt and
-// counts TapEnter calls, so the AutoYes path the status pass now subsumes can be
-// asserted (#960 PR 5 folded the old AutoYes-only loop into RefreshStatuses).
+// counts TapEnter calls, proving the status pass does not answer it.
 type promptTapBackend struct {
 	*session.FakeBackend
 	tapped int
@@ -41,10 +40,7 @@ func (b *promptTapBackend) TapEnter(*session.Instance)                        { 
 
 // bothFlagsBackend reports (updated, hasPrompt) == (true, true) — the state a
 // freshly-appeared prompt commonly produces, because the prompt text is itself
-// new output — and counts TapEnter calls. It guards the #992 regression: the
-// pre-#965 AutoYes loop tapped Enter whenever hasPrompt was true regardless of
-// updated, but the merged switch matched `case updated` first and swallowed the
-// tap on that first tick.
+// new output — and counts TapEnter calls.
 type bothFlagsBackend struct {
 	*session.FakeBackend
 	tapped int
@@ -242,18 +238,18 @@ func TestRefreshStatuses_SkipsTransientAndUnstarted(t *testing.T) {
 	}
 }
 
-// TestRefreshStatuses_TapsEnterOnWaitingPrompt guards that the AutoYes path the
-// status pass subsumed still fires: a session reporting a waiting prompt gets
-// TapEnter, and its status is left for the next tick to resolve (Running here).
-func TestRefreshStatuses_TapsEnterOnWaitingPrompt(t *testing.T) {
+// A waiting approval prompt remains visible for the user. Snapshot still
+// handles first-run trust dialogs internally, but the daemon must not translate
+// an arbitrary approval prompt into Enter now that auto_yes is removed.
+func TestRefreshStatuses_WaitingPromptDoesNotTapEnter(t *testing.T) {
 	manager, repoID, repoPath := newStatusTestManager(t)
 	backend := &promptTapBackend{FakeBackend: session.NewFakeBackend()}
 	registerStarted(t, manager, repoID, repoPath, "prompted", backend, true, session.Running)
 
 	manager.RefreshStatuses()
 
-	if backend.tapped == 0 {
-		t.Fatal("AutoYes regressed: TapEnter was not called for a session with a waiting prompt")
+	if backend.tapped != 0 {
+		t.Fatalf("TapEnter called %d times for a waiting prompt after auto_yes removal", backend.tapped)
 	}
 	inst := manager.instances[daemonInstanceKey(repoID, "prompted")]
 	if got := inst.GetStatus(); got != session.Running {
@@ -261,22 +257,17 @@ func TestRefreshStatuses_TapsEnterOnWaitingPrompt(t *testing.T) {
 	}
 }
 
-// TestRefreshStatuses_TapsEnterWhenUpdatedAndPrompt is the #992 regression guard:
-// when HasUpdated reports (true, true) — the usual shape on the first tick a
-// prompt appears, since the prompt text is fresh output — AutoYes must still tap
-// Enter on that tick, not one poll interval later. The merged switch matched
-// `case updated` before `case hasPrompt`, so the tap was swallowed until the
-// next poll once output stabilized. Status is still set Running by the updated
-// branch (left as-is from before this fix).
-func TestRefreshStatuses_TapsEnterWhenUpdatedAndPrompt(t *testing.T) {
+// Fresh output and a simultaneous approval prompt still drive liveness, but do
+// not restore the removed auto-approval behavior through the updated branch.
+func TestRefreshStatuses_UpdatedPromptDoesNotTapEnter(t *testing.T) {
 	manager, repoID, repoPath := newStatusTestManager(t)
 	backend := &bothFlagsBackend{FakeBackend: session.NewFakeBackend()}
 	registerStarted(t, manager, repoID, repoPath, "both-flags", backend, true, session.Running)
 
 	manager.RefreshStatuses()
 
-	if backend.tapped == 0 {
-		t.Fatal("BUG (#992): TapEnter was not called when HasUpdated returned (true, true)")
+	if backend.tapped != 0 {
+		t.Fatalf("TapEnter called %d times when HasUpdated returned (true, true)", backend.tapped)
 	}
 	inst := manager.instances[daemonInstanceKey(repoID, "both-flags")]
 	if got := inst.GetStatus(); got != session.Running {
@@ -286,7 +277,7 @@ func TestRefreshStatuses_TapsEnterWhenUpdatedAndPrompt(t *testing.T) {
 
 // TestRefreshStatuses_UpdatedWithoutPromptDoesNotTap is the complement: pure
 // output churn (true, false) must transition the session to Running WITHOUT
-// tapping Enter — only a waiting prompt drives AutoYes.
+// tapping Enter.
 func TestRefreshStatuses_UpdatedWithoutPromptDoesNotTap(t *testing.T) {
 	manager, repoID, repoPath := newStatusTestManager(t)
 	backend := &updatedOnlyBackend{FakeBackend: session.NewFakeBackend()}
@@ -295,7 +286,7 @@ func TestRefreshStatuses_UpdatedWithoutPromptDoesNotTap(t *testing.T) {
 	manager.RefreshStatuses()
 
 	if backend.tapped != 0 {
-		t.Fatalf("TapEnter called %d times for (updated, hasPrompt)==(true,false); AutoYes must only tap on a waiting prompt", backend.tapped)
+		t.Fatalf("TapEnter called %d times for (updated, hasPrompt)==(true,false)", backend.tapped)
 	}
 	inst := manager.instances[daemonInstanceKey(repoID, "updated-only")]
 	if got := inst.GetStatus(); got != session.Running {

@@ -86,19 +86,9 @@ func (s *Sidebar) String() string {
 		titleChip = blurredTitle
 	}
 	titleText := s.titleText()
-	if !s.autoyes {
-		b.WriteString(lipgloss.Place(
-			titleWidth, 1, lipgloss.Left, lipgloss.Bottom,
-			titleChip.Render(fitTitleText(titleText, titleWidth))))
-	} else {
-		title := lipgloss.Place(
-			titleWidth/2, 1, lipgloss.Left, lipgloss.Bottom,
-			titleChip.Render(fitTitleText(titleText, titleWidth/2)))
-		autoYes := lipgloss.Place(
-			titleWidth-(titleWidth/2), 1, lipgloss.Right, lipgloss.Bottom,
-			autoYesStyle.Render(fitTitleText(" auto-yes ", titleWidth-(titleWidth/2))))
-		b.WriteString(lipgloss.JoinHorizontal(lipgloss.Top, title, autoYes))
-	}
+	b.WriteString(lipgloss.Place(
+		titleWidth, 1, lipgloss.Left, lipgloss.Bottom,
+		titleChip.Render(fitTitleText(titleText, titleWidth))))
 
 	if hiddenAbove > 0 {
 		b.WriteString("\n")

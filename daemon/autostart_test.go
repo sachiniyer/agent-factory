@@ -12,7 +12,7 @@ import (
 func TestSystemdAutostartUnitContent(t *testing.T) {
 	got := systemdAutostartUnit("/home/user/.local/bin/af", "/usr/bin:/bin", "/bin/zsh", "")
 	want := `[Unit]
-Description=Agent Factory daemon (task scheduler + autoyes)
+Description=Agent Factory daemon (task scheduler + session monitor)
 
 [Service]
 KillMode=process
@@ -138,7 +138,7 @@ func TestLaunchdAutostartPlistEscapesXML(t *testing.T) {
 func TestSystemdAutostartUnitCapturesAgentFactoryHome(t *testing.T) {
 	got := systemdAutostartUnit("/home/user/.local/bin/af", "/usr/bin:/bin", "/bin/zsh", "/srv/af-home")
 	want := `[Unit]
-Description=Agent Factory daemon (task scheduler + autoyes)
+Description=Agent Factory daemon (task scheduler + session monitor)
 
 [Service]
 KillMode=process

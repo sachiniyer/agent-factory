@@ -39,7 +39,7 @@ func findRootInstance(t *testing.T, manager *Manager, repoPath string) *session.
 
 // TestEnsureRootAgentsCreatesInPlaceRoot: a configured repo with no root gets
 // one created in place, with the default root profile — resolved claude with
-// --dangerously-skip-permissions ensured — and auto_yes on.
+// --dangerously-skip-permissions ensured.
 func TestEnsureRootAgentsCreatesInPlaceRoot(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	seen := installOptionsRecordingBackend(t)
@@ -64,16 +64,13 @@ func TestEnsureRootAgentsCreatesInPlaceRoot(t *testing.T) {
 	if !strings.Contains(opts.Program, "--dangerously-skip-permissions") {
 		t.Fatalf("default root profile must carry --dangerously-skip-permissions, got %q", opts.Program)
 	}
-	if !opts.AutoYes {
-		t.Fatalf("default root profile must enable auto_yes")
-	}
 	if findRootInstance(t, manager, repoPath) == nil {
 		t.Fatalf("root instance not registered with the manager")
 	}
 }
 
 // TestEnsureRootAgentsHonorsProfileOverrides: an explicit program is used
-// verbatim and auto_yes=false is respected.
+// verbatim.
 func TestEnsureRootAgentsHonorsProfileOverrides(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	seen := installOptionsRecordingBackend(t)
@@ -83,10 +80,8 @@ func TestEnsureRootAgentsHonorsProfileOverrides(t *testing.T) {
 	// "❯" ready prompt matches and the create never waits out the 60s
 	// readiness timeout).
 	customProgram := "/opt/claude --model opus"
-	autoYes := false
 	manager, err := NewManager(rootTestConfig(repoPath, config.RootAgentConfig{
 		Program: customProgram,
-		AutoYes: &autoYes,
 	}))
 	if err != nil {
 		t.Fatalf("NewManager: %v", err)
@@ -98,9 +93,6 @@ func TestEnsureRootAgentsHonorsProfileOverrides(t *testing.T) {
 	}
 	if (*seen)[0].Program != customProgram {
 		t.Fatalf("explicit root program must be used verbatim, got %q", (*seen)[0].Program)
-	}
-	if (*seen)[0].AutoYes {
-		t.Fatalf("auto_yes=false in the root profile must be respected")
 	}
 }
 

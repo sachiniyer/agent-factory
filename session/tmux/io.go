@@ -38,8 +38,8 @@ func (m *statusMonitor) hash(s string) []byte {
 // command (#1592 Phase 2 PR7). It replaces the old write of CR to the attach
 // PTY: the tmux-server-mediated attach client is gone, so input now lands
 // through a command exactly like the interactive multi-writer path. Used by
-// AutoYes (daemon poll) and the trust-prompt dismissal in
-// CheckAndHandleTrustPrompt. A missing session surfaces ErrSessionGone so
+// the trust-prompt dismissal in CheckAndHandleTrustPrompt. A missing session
+// surfaces ErrSessionGone so
 // callers degrade gracefully instead of logging at ERROR (#510).
 //
 // Bounded by tmuxCommandTimeout (#2105): this runs on the daemon's unsupervised
@@ -176,7 +176,7 @@ func (t *TmuxSession) HasUpdated() (updated bool, hasPrompt bool, content string
 // This is the daemon's per-second status-poll capture (via HasUpdated), and the
 // daemon polls instances SEQUENTIALLY with no watchdog, so a single wedged server
 // silently froze the status of every instance behind it — liveness tracking,
-// trust-prompt dismissal, AutoYes and the usage-limit detector (#1146) all stop.
+// trust-prompt dismissal, and the usage-limit detector (#1146) all stop.
 // CapturePaneContentContext now applies tmuxCommandTimeout regardless of the ctx
 // it is handed, which is what bounds this path; a tripped deadline surfaces as
 // ErrTmuxTimeout, never ErrSessionGone.

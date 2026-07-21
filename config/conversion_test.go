@@ -31,7 +31,6 @@ func seedJSONHome(t *testing.T, jsonContent string) string {
 func TestConversion_MigratesLegacyJSON(t *testing.T) {
 	configDir := seedJSONHome(t, `{
 		"default_program": "codex",
-		"auto_yes": true,
 		"auto_update": false,
 		"daemon_poll_interval": 2500,
 		"program_overrides": {"claude": "/opt/claude --dsp", "codex": "/opt/codex --quiet"},
@@ -44,7 +43,7 @@ func TestConversion_MigratesLegacyJSON(t *testing.T) {
 		"limit_patterns": {"claude": "custom limit banner"},
 		"limit_auto_resume": true,
 		"limit_retry_interval": "45m",
-		"root_agents": {"/tmp/repo": {"program": "codex", "auto_yes": false}}
+		"root_agents": {"/tmp/repo": {"program": "codex"}}
 	}`)
 	infoBuf := captureLog(t, &aflog.InfoLog)
 	warnBuf := captureLog(t, &aflog.WarningLog)
@@ -55,7 +54,6 @@ func TestConversion_MigratesLegacyJSON(t *testing.T) {
 
 	// Settings are preserved through the conversion.
 	assert.Equal(t, "codex", cfg.DefaultProgram)
-	assert.True(t, cfg.AutoYes)
 	assert.False(t, cfg.AutoUpdate)
 	assert.Equal(t, 2500, cfg.DaemonPollInterval)
 	assert.Equal(t, "/opt/claude --dsp", cfg.ProgramOverrides["claude"])
@@ -72,8 +70,6 @@ func TestConversion_MigratesLegacyJSON(t *testing.T) {
 	require.Contains(t, cfg.RootAgents, "/tmp/repo")
 	rootAgent := cfg.RootAgents["/tmp/repo"]
 	assert.Equal(t, "codex", rootAgent.Program)
-	require.NotNil(t, rootAgent.AutoYes)
-	assert.False(t, rootAgent.AutoYesEnabled())
 	assert.NotContains(t, warnBuf.String(), "worktree_root", "worktree_root must be recognized and preserved, not warned as dropped")
 
 	// config.toml is now canonical; config.json is moved aside to .bak.
@@ -108,7 +104,7 @@ func TestConversion_PreservesExistingBackup(t *testing.T) {
 	// and now a new af converts again. The ORIGINAL backup must survive; the
 	// new (defaults) backup lands beside it under a non-colliding name.
 	configDir := seedJSONHome(t, `{"default_program": "codex"}`)
-	original := []byte(`{"default_program": "aider", "auto_yes": true}`)
+	original := []byte(`{"default_program": "aider", "auto_update": false}`)
 	bakPath := filepath.Join(configDir, ConfigFileName+".bak")
 	require.NoError(t, os.WriteFile(bakPath, original, 0644))
 

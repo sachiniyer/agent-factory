@@ -28,7 +28,7 @@ const RepoConfigFileName = "config.json"
 type RemoteHooks struct {
 	// LaunchCmd provisions the remote workspace and echoes the af agent-server
 	// endpoint JSON (see the type doc). Invoked with --name/--repo/--branch and
-	// optional --program/--auto-yes flags (see docs/remote-hooks.md).
+	// an optional --program flag (see docs/remote-hooks.md).
 	LaunchCmd string `json:"launch_cmd" toml:"launch_cmd"`
 	// DeleteCmd reaps the provisioned sandbox. Invoked with --name <slug>.
 	DeleteCmd string `json:"delete_cmd" toml:"delete_cmd"`

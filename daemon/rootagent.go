@@ -191,14 +191,13 @@ func (m *Manager) ensureRootAgent(path string, rc config.RootAgentConfig) {
 		Title:         session.RootSessionTitle,
 		RepoPath:      repo.Root,
 		Program:       program,
-		AutoYes:       rc.AutoYesEnabled(),
 		InPlace:       true,
 		allowReserved: true,
 	}); err != nil {
 		m.rootEnsureFailed(path, st, fmt.Errorf("failed to create root session: %w", err))
 		return
 	}
-	log.InfoLog.Printf("ensured root agent for %s (in-place, program %q, auto_yes %t)", repo.Root, program, rc.AutoYesEnabled())
+	log.InfoLog.Printf("ensured root agent for %s (in-place, program %q)", repo.Root, program)
 	m.rootEnsureSucceeded(st)
 }
 

@@ -51,8 +51,8 @@ func warmingManager(t *testing.T) *Manager {
 // session it would serve is sitting on disk.
 //
 // resolveStreamSession opens with refreshLocked, which loads that session off disk
-// and into the map (constructing instances and flipping AutoYes on, exactly as the
-// restore does). So the map growing IS the bug, observed directly: the request
+// and into the map (constructing instances exactly as the restore does). So the
+// map growing IS the bug, observed directly: the request
 // restored a session that nothing asked it to restore.
 func TestWebTabProxy_WarmUpRequestDoesNotDriveItsOwnRestore(t *testing.T) {
 	upstream := newEchoPathUpstream(t)

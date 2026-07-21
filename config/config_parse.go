@@ -25,6 +25,9 @@ func parseConfig(data []byte, prettyConfigPath string) (*Config, error) {
 	if len(data) == 0 {
 		return nil, fmt.Errorf("config file %s is empty; delete it to regenerate defaults, or add valid JSON", prettyConfigPath)
 	}
+	if err := rejectRemovedAutoYes(data, prettyConfigPath, FormatJSON); err != nil {
+		return nil, fmt.Errorf("config file %s: %w", prettyConfigPath, err)
+	}
 
 	config := DefaultConfig()
 	config.source.builtIn = snapshotConfig(config)
@@ -74,6 +77,9 @@ func parseConfig(data []byte, prettyConfigPath string) (*Config, error) {
 func parseConfigTOML(data []byte, prettyConfigPath string) (*Config, error) {
 	if isEffectivelyEmptyToml(data) {
 		return nil, fmt.Errorf("config file %s is empty; add valid TOML, or delete it to fall back to config.json or defaults", prettyConfigPath)
+	}
+	if err := rejectRemovedAutoYes(data, prettyConfigPath, FormatTOML); err != nil {
+		return nil, fmt.Errorf("config file %s: %w", prettyConfigPath, err)
 	}
 
 	config := DefaultConfig()

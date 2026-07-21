@@ -124,8 +124,6 @@ func (b *remoteAgentBackend) IsAlive(i *Instance) (bool, error) {
 // handles it before returning a snapshot.
 func (b *remoteAgentBackend) CheckAndHandleTrustPrompt(*Instance) bool { return false }
 
-func (b *remoteAgentBackend) TapEnter(i *Instance) { i.AgentServer().TapEnter() }
-
 // Recover and Respawn both re-provision a disposable remote workspace from the
 // session branch, then launch it again.
 func (b *remoteAgentBackend) Recover(i *Instance) error { return recoverSandbox(i) }

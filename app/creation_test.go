@@ -118,7 +118,7 @@ func newTestHome(t *testing.T) *home {
 	// so the source captures it.
 	h.previewFetcher = testPreviewFetcher(h)
 
-	h.sidebar = ui.NewSidebar(false, proj)
+	h.sidebar = ui.NewSidebar(proj)
 	wireTestPanes(h, proj)
 	return h
 }
@@ -338,20 +338,6 @@ func TestInstanceStarted_Failure_OnFailedInstance(t *testing.T) {
 
 	assert.Empty(t, h.store.GetInstances(), "failed instance must be removed")
 	assert.Nil(t, h.sidebar.GetSelectedInstance(), "no instance should remain selected")
-}
-
-// TestInstanceStarted_Success_AutoYesApplied — sanity check that the autoYes
-// assignment didn't get lost in the refactor.
-func TestInstanceStarted_Success_AutoYesApplied(t *testing.T) {
-	h := newTestHome(t)
-	h.autoYes = true
-	inst := newLoadingInstance(t, "auto-yes")
-	h.store.AddInstance(inst)
-	h.sidebar.SetSelectedInstance(0)
-
-	_, _ = h.Update(instanceStartedMsg{instance: inst, err: nil})
-
-	assert.True(t, inst.AutoYes, "autoYes must propagate to the new instance when enabled")
 }
 
 func TestSaveContentPaneStateDoesNotOverwriteUnreadableRepoConfig(t *testing.T) {

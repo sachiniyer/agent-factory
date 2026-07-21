@@ -10,12 +10,12 @@ import (
 // Phase 2 PR4): the agent runs as a tmux session on the daemon's own machine, so
 // this "server" is a thin in-process facade that drives that tmux session
 // directly. It is where the tmux-shaped operations the daemon used to call itself
-// (HasUpdated/TapEnter/IsAlive/SendPromptCommand/Preview) now live — internal to
+// (HasUpdated/IsAlive/SendPromptCommand/Preview) now live — internal to
 // the local runtime, reached only through the uniform AgentServer interface.
 //
 // It calls the Backend methods directly (via i.currentBackend()) rather than the Instance
 // wrappers, so the wrappers that existed only for the daemon's path (Instance
-// HasUpdated/TapEnter) could be deleted with the daemon routed here — the seam is
+// HasUpdated) could be deleted with the daemon routed here — the seam is
 // the AgentServer interface, not a second set of pass-through methods.
 //
 // As of PR5 it is a CACHED per-instance singleton (Instance.AgentServer memoizes
@@ -219,10 +219,6 @@ func (s *localAgentServer) SendPrompt(prompt string) error {
 	// The reliable command path (tmux send-keys), which is what automated/scheduled
 	// deliveries need — it lands whether or not a PTY is currently attached.
 	return s.inst.currentBackend().SendPromptCommand(s.inst, prompt)
-}
-
-func (s *localAgentServer) TapEnter() {
-	s.inst.currentBackend().TapEnter(s.inst)
 }
 
 // --- data plane: WS PTY broker + clientless tmux fan-out (#1592 PR5) ---

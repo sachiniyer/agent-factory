@@ -310,8 +310,6 @@ export interface CreateSessionInput {
   program: string;
   /** An optional initial prompt fed to the new agent. */
   prompt: string;
-  /** Whether to run the session in auto-yes mode. */
-  autoYes: boolean;
   /** The runtime to create the session on (#1933) — a name from ListBackends,
    *  mirroring `af sessions create --backend`. Empty means the user did not
    *  choose, and createSession then sends NO backend so the repo's own config
@@ -346,7 +344,6 @@ export async function createSession(input: CreateSessionInput, token: string): P
     repo_path: input.repoPath,
     program: input.program,
     prompt: input.prompt,
-    auto_yes: input.autoYes,
   };
   // `backend` is sent ONLY when the user picked one. Sending "local" for an
   // unspecified choice would look equivalent and is not: an explicit backend wins

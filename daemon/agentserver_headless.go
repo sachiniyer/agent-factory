@@ -70,8 +70,6 @@ type AgentServerOptions struct {
 	Title string
 	// Program is the agent program to run (empty ⇒ the config default).
 	Program string
-	// AutoYes enables the agent-server's AutoYes accept for the workspace.
-	AutoYes bool
 }
 
 // AgentServerInfo is the machine-readable startup banner the process prints to
@@ -126,7 +124,6 @@ func RunAgentServer(opts AgentServerOptions, stdout io.Writer) error {
 		Title:   opts.Title,
 		Path:    opts.RepoPath,
 		Program: program,
-		AutoYes: opts.AutoYes,
 		// The in-sandbox agent-server ALWAYS runs the local runtime (tmux + git
 		// worktree against RepoPath) — it IS the sandbox (§1.2). Force it explicitly
 		// so a workspace whose repo config declares backend=docker/ssh (cloned into
@@ -203,7 +200,9 @@ func (hs *headlessServer) newMux() *http.ServeMux {
 	mux.HandleFunc("/v1/agent/preview", rpcHandler(hs.Preview))
 	mux.HandleFunc("/v1/agent/alive", rpcHandler(hs.Alive))
 	mux.HandleFunc("/v1/agent/send-prompt", rpcHandler(hs.SendPrompt))
-	mux.HandleFunc("/v1/agent/tap-enter", rpcHandler(hs.TapEnter))
+	// Compatibility tripwire for older daemons. The behavior is gone, but an
+	// old caller gets migration guidance instead of a successful no-op.
+	mux.HandleFunc("/v1/agent/tap-enter", rpcHandler(hs.RemovedAutoYes))
 	mux.HandleFunc("/v1/agent/archive", rpcHandler(hs.Archive))
 	mux.HandleFunc("/v1/agent/kill", rpcHandler(hs.Kill))
 
@@ -345,10 +344,8 @@ func (hs *headlessServer) SendPrompt(req agentSendPromptRequest, resp *agentOKRe
 	return nil
 }
 
-func (hs *headlessServer) TapEnter(_ struct{}, resp *agentOKResponse) error {
-	hs.as.TapEnter()
-	resp.OK = true
-	return nil
+func (hs *headlessServer) RemovedAutoYes(_ struct{}, _ *agentOKResponse) error {
+	return config.RemovedAutoYesError()
 }
 
 // agentArchiveResponse carries the pushed branch back to the driving daemon so

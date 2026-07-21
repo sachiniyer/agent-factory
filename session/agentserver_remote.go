@@ -31,7 +31,7 @@ import (
 // observation/delivery paths above it do not change (§0, §1.1).
 //
 //   - The control plane (Provision/Launch/Expose/Snapshot/Preview/Alive/
-//     SendPrompt/TapEnter/Kill) is REST to /v1/agent/* — the 1:1 mirror the
+//     SendPrompt/Kill) is REST to /v1/agent/* — the 1:1 mirror the
 //     agent-server exposes.
 //   - The data plane (Subscribe/Input/Resize) is the WS PTY stream to the
 //     agent-server, reached through the SAME ptyBroker fan-out the local runtime
@@ -171,12 +171,6 @@ func (s *remoteAgentServer) SendPrompt(prompt string) error {
 	return s.rc.call("/v1/agent/send-prompt", agentSendPromptReq{Prompt: prompt}, nil)
 }
 
-func (s *remoteAgentServer) TapEnter() {
-	// Mirrors localAgentServer.TapEnter: fire-and-forget, no error surfaced (a
-	// no-op unless the workspace has AutoYes; the daemon never consumed a result).
-	_ = s.rc.call("/v1/agent/tap-enter", struct{}{}, nil)
-}
-
 // --- data plane: one remote WS per tab, fanned by the shared ptyBroker ---
 
 // ensureBroker lazily builds the ptyBroker for tab `tab`, bound to a remote WS
@@ -314,7 +308,6 @@ func (s *deadRemoteAgentServer) PreviewByID(string, bool) (PreviewSnapshot, erro
 func (s *deadRemoteAgentServer) Alive() (bool, error) { return false, s.err() }
 
 func (s *deadRemoteAgentServer) SendPrompt(string) error { return s.err() }
-func (s *deadRemoteAgentServer) TapEnter()               {}
 
 func (s *deadRemoteAgentServer) Subscribe(int, Seq) (PTYSubscription, error) { return nil, s.err() }
 func (s *deadRemoteAgentServer) Input(int, []byte) error                     { return s.err() }

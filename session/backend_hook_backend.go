@@ -30,7 +30,7 @@ import (
 // Contract (docs/remote-hooks.md):
 //
 //	launch_cmd --name <slug> --title <title> --repo <cloneURL> \
-//	           [--branch <branch>] [--program <p>] [--auto-yes]
+//	           [--branch <branch>] [--program <p>]
 //	    clones <cloneURL> (repo@branch on RESTORE) on the user's infra, starts
 //	    `af agent-server --listen :PORT --repo <clonedir> --title <title> …`
 //	    there, and echoes ONE JSON object on stdout:
@@ -288,10 +288,6 @@ func (p *hookProvisioner) launch() (*AgentServerEndpoint, error) {
 	if prog := strings.TrimSpace(p.spec.Program); prog != "" {
 		args = append(args, "--program", prog)
 	}
-	if p.spec.AutoYes {
-		args = append(args, "--auto-yes")
-	}
-
 	out, cmd, err := runHookScript(hookLaunchTimeout, p.hooks.LaunchCmd, args...)
 
 	// Gate the reap on whether launch_cmd STARTED, not on whether it succeeded

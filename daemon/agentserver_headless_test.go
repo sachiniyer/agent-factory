@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
@@ -31,7 +32,6 @@ type fakeHeadlessAgentServer struct {
 	launched     bool
 	killed       bool
 	lastPrompt   string
-	tapped       int
 	subs         map[*fakeSub]struct{}
 	snapshotText string
 }
@@ -70,12 +70,6 @@ func (f *fakeHeadlessAgentServer) SendPrompt(p string) error {
 	f.lastPrompt = p
 	return nil
 }
-func (f *fakeHeadlessAgentServer) TapEnter() {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.tapped++
-}
-
 func (f *fakeHeadlessAgentServer) Subscribe(_ int, _ session.Seq) (session.PTYSubscription, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -214,7 +208,7 @@ func TestHeadlessAgentServer_HTTPTokenRoundTrip(t *testing.T) {
 	require.True(t, preview.Modes.MouseButton)
 	require.True(t, preview.Modes.MouseSGR)
 
-	// --- control REST: alive / send-prompt / tap-enter ----------------------
+	// --- control REST: alive / send-prompt ----------------------------------
 	resp, err = post("/v1/agent/alive", ``)
 	require.NoError(t, err)
 	var alive agentAliveResponse
@@ -281,6 +275,18 @@ func TestHeadlessAgentServer_HTTPTokenRoundTrip(t *testing.T) {
 		_ = badConn.Close(websocket.StatusNormalClosure, "")
 	}
 	require.Error(t, err, "unauthenticated WS handshake must be rejected")
+}
+
+func TestHeadlessAgentServerRemovedTapEnterReturnsMigrationGuidance(t *testing.T) {
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/agent/tap-enter", nil)
+	(&headlessServer{as: newFakeHeadlessAgentServer(), events: newEventsHub()}).newMux().ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusInternalServerError, rec.Code)
+	env := decodeEnvelope(t, rec)
+	require.NotNil(t, env.Error)
+	require.Contains(t, env.Error.Message, "auto_yes was removed")
+	require.Contains(t, env.Error.Message, "program_overrides")
 }
 
 // TestAgentServerServesNoWebShell pins the frontend boundary in the code, not just

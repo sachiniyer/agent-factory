@@ -147,7 +147,6 @@ func (i *Instance) reprovisionRemote() error {
 		RepoRoot:      i.Path,
 		Title:         i.Title,
 		Program:       i.Program,
-		AutoYes:       i.AutoYes,
 		CloneURL:      originRemoteURL(i.Path),
 		RestoreBranch: i.Branch,
 	}

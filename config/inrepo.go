@@ -301,6 +301,9 @@ func LoadInRepoConfig(repoRoot string) (*InRepoConfig, []byte, error) {
 	if !isToml && metadata.shape == nil {
 		return nil, nil, fmt.Errorf("in-repo config %s must be a JSON object, not null", prettyPath)
 	}
+	if removedAutoYesInShape(metadata.shape) {
+		return nil, nil, fmt.Errorf("in-repo config %s: %w", prettyPath, RemovedAutoYesError())
+	}
 	presentKeys := make(map[string]bool, len(metadata.shape))
 	for key := range metadata.shape {
 		presentKeys[key] = true

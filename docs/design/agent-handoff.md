@@ -392,10 +392,9 @@ constraint is availability, not compatibility.
 
 Two properties worth setting expectations on rather than blocking:
 
-- **AutoYes support is uneven** — `autoYesUnsupported` (`session/backend_local.go:110`)
-  lists codex, amp, opencode. Handing an autoyes session to one of them yields a
-  session that will stop at confirmation prompts. Warn at handoff time; do not
-  refuse.
+- **Approval policy belongs to the target agent.** A handoff starts the target's
+  resolved command and configuration; it does not carry approval settings from
+  the outgoing agent.
 - **`--here` sessions** attach to the repo's own working tree
   (`session/instance_factory.go:38`). Swap-in-place works fine for them; nothing
   special is needed. (Archive is what `--here` cannot do — another cost of D3-B.)

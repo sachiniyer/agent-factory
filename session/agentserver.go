@@ -65,7 +65,7 @@ type TabAddressableServer interface {
 // above it does not change.
 //
 // This is the locality leak the epic set out to remove: before PR4 the daemon
-// called tmux-shaped Backend methods (HasUpdated/TapEnter/IsAlive/
+// called tmux-shaped Backend methods (HasUpdated/IsAlive/
 // SendPromptCommand/Preview) directly, baking "the session is local tmux" into
 // the orchestrator. Those methods now live behind the agent-server.
 //
@@ -91,7 +91,7 @@ type AgentServer interface {
 	Expose() (StreamEndpoint, error)
 
 	// Snapshot returns the current non-interactive observation the daemon's
-	// liveness/AutoYes poll reads each tick, dismissing any pending trust/permission
+	// liveness poll reads each tick, dismissing any pending trust/permission
 	// prompt as a side effect (the poll always did both, in that order). See
 	// Observation. The local implementation never errors; the error is for a future
 	// remote runtime whose observation channel can fail.
@@ -135,11 +135,6 @@ type AgentServer interface {
 	// survives a PTY that is not currently attached. This is the daemon's delivery
 	// primitive; interactive per-keystroke input is Input, on the data plane.
 	SendPrompt(prompt string) error
-	// TapEnter sends a bare Enter keystroke — the AutoYes accept. A no-op unless
-	// the session has AutoYes enabled. An input helper that routes through the same
-	// underlying channel as SendPrompt.
-	TapEnter()
-
 	// Subscribe returns a fan-out read of tab `tab`'s PTY stream from cursor
 	// `since` (0 = from the ring-buffer tail / live), so a reconnecting client
 	// replays the gap it missed. tab 0 is the agent tab; tab>0 is a shell/process
@@ -193,7 +188,7 @@ type StreamEndpoint struct {
 	URL string
 }
 
-// Observation is the non-interactive snapshot the daemon's liveness/AutoYes poll
+// Observation is the non-interactive snapshot the daemon's liveness poll
 // reads each tick (#1592 Phase 2): whether the pane changed since the last probe,
 // whether the program is showing a prompt awaiting input, and the raw captured
 // pane content so the usage-limit detector (#1146) can inspect it without a
@@ -202,8 +197,7 @@ type StreamEndpoint struct {
 type Observation struct {
 	// Updated is true if the session output changed since the last probe.
 	Updated bool
-	// HasPrompt is true if the program is showing a yes/no prompt awaiting input
-	// (the AutoYes trigger).
+	// HasPrompt is true if the program is showing a yes/no prompt awaiting input.
 	HasPrompt bool
 	// Content is the raw captured pane content, handed back so the idle branch can
 	// run the usage-limit detector without a second capture (#1146). Empty for a

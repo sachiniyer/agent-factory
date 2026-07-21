@@ -226,18 +226,6 @@ var configManifest = []ManifestEntry{
 
 	// ---- Tier 3: everything else user-facing ----
 	{
-		Key:        "auto_yes",
-		Type:       "bool",
-		Default:    "false",
-		Purpose:    "Accept an agent's prompts automatically instead of waiting for you to confirm each one · experimental.",
-		Tier:       TierAdvanced,
-		Settable:   true,
-		Sources:    sourceGlobalOnly,
-		Precedence: precedenceGlobal,
-		Merge:      MergeReplace,
-		Formats:    formatTOMLJSON,
-	},
-	{
 		Key:        "daemon_poll_interval",
 		Type:       "int",
 		Default:    "1000",

@@ -27,7 +27,7 @@ type Manager struct {
 	readyOnce sync.Once
 	// lifecycle is the daemon-wide health/admission state. Manager readiness
 	// means persisted session state is safe to read; lifecycle readiness is the
-	// later barrier where scheduler/watch/AutoYes work may run.
+	// later barrier where scheduler, watcher, and status work may run.
 	lifecycle *daemonLifecycle
 
 	mu        sync.Mutex

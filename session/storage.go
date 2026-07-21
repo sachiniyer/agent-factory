@@ -85,7 +85,6 @@ type InstanceData struct {
 	Width        int       `json:"width"`
 	CreatedAt    time.Time `json:"created_at"`
 	UpdatedAt    time.Time `json:"updated_at"`
-	AutoYes      bool      `json:"auto_yes"`
 	Prompt       string    `json:"prompt,omitempty"`
 	// PendingHandoffMission is a rendered takeover brief whose incoming runtime
 	// has been established but whose delivery has not been durably confirmed.

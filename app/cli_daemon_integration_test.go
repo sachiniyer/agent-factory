@@ -196,7 +196,6 @@ func writeIntegrationConfig(t *testing.T, home string) {
 	cfg := &config.Config{
 		DefaultProgram:     tmux.ProgramClaude,
 		ProgramOverrides:   map[string]string{tmux.ProgramClaude: wrapper},
-		AutoYes:            false,
 		DaemonPollInterval: 100,
 		BranchPrefix:       "test/",
 		DetachKeys:         "ctrl-w",

@@ -77,7 +77,7 @@ func TestLoadInRepoConfigRejectsBothFormats(t *testing.T) {
 }
 
 func TestLoadInRepoConfigTOMLKeyPolicy(t *testing.T) {
-	t.Run("rejects global-only key", func(t *testing.T) {
+	t.Run("rejects removed auto_yes with migration guidance", func(t *testing.T) {
 		home := t.TempDir()
 		t.Setenv("AGENT_FACTORY_HOME", home)
 		repoRoot := t.TempDir()
@@ -85,10 +85,8 @@ func TestLoadInRepoConfigTOMLKeyPolicy(t *testing.T) {
 
 		_, _, err := LoadInRepoConfig(repoRoot)
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "auto_yes")
-		assert.Contains(t, err.Error(), "global setting")
-		// A non-TOML-only global key points at the resolved global config file.
-		assert.Contains(t, err.Error(), ConfigFileName)
+		assert.Contains(t, err.Error(), "auto_yes was removed")
+		assert.Contains(t, err.Error(), "program_overrides")
 	})
 
 	t.Run("rejects vscode_server_binary as global-only", func(t *testing.T) {

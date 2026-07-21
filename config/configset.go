@@ -71,7 +71,7 @@ type settableKeySpec struct {
 // vice versa.
 //
 // Structural values stay hand-edited, and the manifest marks them Settable:false:
-//   - root_agents — a nested table (path → {program, auto_yes}); no scalar shape.
+//   - root_agents — a nested table (path → {program}); no scalar shape.
 //   - theme — a color table (see ThemeConfig); setting one slot at a time through
 //     the CLI is not how anyone edits a palette.
 //   - keys — array-capable rebinds (an action may map to a list of keys).
@@ -87,7 +87,6 @@ var settableKeySpecs = map[string]settableKeySpec{
 	"default_program": {kind: cfgString, validate: func(_, v string) error {
 		return ValidateProgramEnum("default_program", "default_program", v, "")
 	}},
-	"auto_yes":               {kind: cfgBool},
 	"auto_update":            {kind: cfgBool},
 	"require_token":          {kind: cfgBool},
 	"require_loopback_token": {kind: cfgBool},
@@ -270,6 +269,9 @@ func resolveSettable(key string) (section, leaf string, spec settableKeySpec, ok
 // guarantees the written file still loads. Returns an actionable error for an
 // unknown key, a wrong-typed or invalid value, or an I/O failure.
 func SetGlobalConfigValue(key, rawValue string) (*SetResult, error) {
+	if key == "auto_yes" {
+		return nil, RemovedAutoYesError()
+	}
 	section, leaf, spec, ok := resolveSettable(key)
 	if !ok {
 		return nil, fmt.Errorf("%q is not a settable config key. Settable keys: %s. "+

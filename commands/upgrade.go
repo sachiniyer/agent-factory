@@ -314,7 +314,7 @@ func reportUpgradeRestart(out, errOut io.Writer, outcome restartOutcome, restart
 		// The opposite state: the old daemon is gone and nothing replaced it.
 		fmt.Fprintln(out, "Upgraded successfully!")
 		fmt.Fprintf(errOut, "The old daemon was stopped, but a new one could not be started: %v\n", restartErr)
-		fmt.Fprintln(errOut, "No daemon is running at all right now, so task schedules, watch scripts, and autoyes are stopped.")
+		fmt.Fprintln(errOut, "No daemon is running at all right now, so task schedules, watch scripts, and session monitoring are stopped.")
 		fmt.Fprintln(errOut, startDaemonHint())
 		return
 	}

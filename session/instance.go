@@ -172,8 +172,6 @@ type Instance struct {
 	CreatedAt time.Time
 	// UpdatedAt is the time the instance was last updated.
 	UpdatedAt time.Time
-	// AutoYes is true if the instance should automatically press enter when prompted.
-	AutoYes bool
 	// Prompt is the initial prompt to pass to the instance on startup
 	Prompt string
 	// pendingHandoffMission is a rendered takeover brief whose delivery has not

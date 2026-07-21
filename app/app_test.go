@@ -132,7 +132,7 @@ func TestConfirmationModalStateTransitions(t *testing.T) {
 // TestConfirmationModalKeyHandling tests the actual key handling in confirmation state
 func TestConfirmationModalKeyHandling(t *testing.T) {
 	proj := store.NewProjection()
-	sidebar := ui.NewSidebar(false, proj)
+	sidebar := ui.NewSidebar(proj)
 
 	// Create enough of home struct to test handleKeyPress in confirmation state
 	h := &home{
@@ -253,14 +253,13 @@ func TestConfirmationMessageFormatting(t *testing.T) {
 // TestConfirmationFlowSimulation tests the confirmation flow by simulating the state changes
 func TestConfirmationFlowSimulation(t *testing.T) {
 	proj := store.NewProjection()
-	sidebar := ui.NewSidebar(false, proj)
+	sidebar := ui.NewSidebar(proj)
 
 	// Add test instance
 	instance, err := session.NewInstance(session.InstanceOptions{
 		Title:   "test-session",
 		Path:    t.TempDir(),
 		Program: "claude",
-		AutoYes: false,
 	})
 	require.NoError(t, err)
 	_ = proj.AddInstance(instance)
@@ -463,7 +462,7 @@ func TestMultipleConfirmationsDontInterfere(t *testing.T) {
 // session is killed). Regression test for #259.
 func TestConfirmActionForwardsNonErrorMsg(t *testing.T) {
 	proj := store.NewProjection()
-	sidebar := ui.NewSidebar(false, proj)
+	sidebar := ui.NewSidebar(proj)
 
 	h := &home{
 		ctx:       context.Background(),

@@ -326,7 +326,7 @@ func TestLoadInRepoConfigHomeRepoCollision(t *testing.T) {
 	configHome := filepath.Join(repoRoot, InRepoConfigDirName)
 	t.Setenv("AGENT_FACTORY_HOME", configHome)
 	require.NoError(t, os.MkdirAll(configHome, 0755))
-	require.NoError(t, os.WriteFile(filepath.Join(configHome, ConfigFileName), []byte(`{"default_program": "claude", "auto_yes": true}`), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(configHome, ConfigFileName), []byte(`{"default_program": "claude", "auto_update": true}`), 0644))
 
 	cfg, raw, err := LoadInRepoConfig(repoRoot)
 	require.NoError(t, err)
@@ -346,7 +346,7 @@ func TestSaveInRepoSymlinkedConfigHomeCollision(t *testing.T) {
 	repoRoot := t.TempDir()
 	realHome := filepath.Join(repoRoot, InRepoConfigDirName)
 	require.NoError(t, os.MkdirAll(realHome, 0755))
-	globalContent := `{"default_program": "claude", "auto_yes": true}`
+	globalContent := `{"default_program": "claude", "auto_update": true}`
 	globalFile := filepath.Join(realHome, ConfigFileName)
 	require.NoError(t, os.WriteFile(globalFile, []byte(globalContent), 0644))
 
