@@ -2368,6 +2368,33 @@ test("project switcher (redesign PR2): lists projects with counts; selecting one
   await expect(row(page, SESSION_B)).toBeVisible();
 });
 
+test("#2276: selecting the reconciled project repairs a stale persisted choice", REAL_FIXTURE, async ({ browser }) => {
+  const fixtureRepo = process.env.AF_MOCK_REPO;
+  expect(fixtureRepo, "the real-project persistence regression needs AF_MOCK_REPO").toBeTruthy();
+
+  const ctx = await browser.newContext();
+  try {
+    const p = await ctx.newPage();
+    await openTokenless(p);
+    await expect(p.locator(".af-project-switch-name")).toHaveText("mock-repo");
+
+    // Reproduce the state left by a project disappearing: reconciliation has already
+    // selected a valid fallback in memory, but localStorage still names the vanished
+    // project. Clicking the checked project is the user's explicit choice to keep it,
+    // so it must repair storage even though the in-memory scope does not change.
+    await p.evaluate((stale) => localStorage.setItem("af-project", stale), `${fixtureRepo}-deleted`);
+    await p.locator(".af-project-switch").click();
+    const current = projectItem(p, "mock-repo");
+    await expect(current).toHaveAttribute("aria-selected", "true");
+    await current.click();
+    await expect(p.locator(".af-project-menu")).toBeHidden();
+
+    expect(await p.evaluate(() => localStorage.getItem("af-project"))).toBe(fixtureRepo);
+  } finally {
+    await ctx.close();
+  }
+});
+
 test("task-only project (redesign PR2, Fix 1): a repo with a task but no session lists, scopes Tasks, and its delete is disabled", REAL_FIXTURE, async () => {
   // Select the task-only project (a third repo with a task but NO session). It lists in
   // the switcher (derived from sessions OR tasks), so its tasks stay reachable.
