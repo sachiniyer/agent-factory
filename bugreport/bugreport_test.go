@@ -338,6 +338,26 @@ func TestScrubLogRedactsPunctuationTitleWithoutDestroyingDiagnostics(t *testing.
 		`target session "."`, `target session "/"`, "instance .", "instance /;")
 }
 
+// A legacy task-start log rendered titles with %s. If a known title contains a
+// newline, scrub the exact title before the line-oriented legacy matcher can
+// destroy its first line and leave the remainder behind (#2249 late review).
+func TestScrubLogRedactsMultilineTaskTitleBeforeLegacyShape(t *testing.T) {
+	const title = "Confidential\nDeal"
+	r := &redactor{}
+	r.noteTitle(title)
+	in := strings.Join([]string{
+		"task t1 started successfully as instance " + title,
+		fmt.Sprintf("task t2 started successfully as instance %q", title),
+		"next diagnostic survives",
+	}, "\n")
+
+	out := r.scrubLog(in)
+
+	mustNotContain(t, "daemon log", out, "Confidential", "Deal", title)
+	mustContain(t, "daemon log", out, "task t1 started successfully as instance", redactedMarker,
+		"next diagnostic survives")
+}
+
 // A shorter title must never destroy the prefix of a longer title before that
 // longer secret is considered. Map iteration is randomized, so exercise the
 // sanitizer repeatedly: any surviving suffix is a privacy leak.

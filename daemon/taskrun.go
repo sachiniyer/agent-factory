@@ -100,10 +100,10 @@ func deliverTaskPrompt(t *task.Task, prompt string, deferWhileAttached bool) (st
 		// is NOT counted as a failure; the resume machinery re-delivers the
 		// prompt once the limit window resets.
 		if data.Liveness == session.LiveLimitReached {
-			log.InfoLog.Printf("task %s parked at a usage limit as instance %s; waiting for the limit window to reset", t.ID, data.Title)
+			log.InfoLog.Print(taskParkedLogMessage(t.ID, data.Title))
 			return TaskStatusLimitParked, nil
 		}
-		log.InfoLog.Printf("task %s started successfully as instance %s", t.ID, data.Title)
+		log.InfoLog.Print(taskStartedLogMessage(t.ID, data.Title))
 		return "started", nil
 	}
 
@@ -131,6 +131,18 @@ func deliverTaskPrompt(t *task.Task, prompt string, deferWhileAttached bool) (st
 	}
 	log.InfoLog.Printf("task %s delivered prompt to target session %q (%s)", t.ID, target, status)
 	return status, nil
+}
+
+// Keep task-created title logging on the same %q encoding as target-session
+// delivery errors. Besides preventing multiline titles from forging extra log
+// lines, one encoding lets the bug-report redactor register and scrub the title
+// once instead of maintaining another raw representation.
+func taskStartedLogMessage(taskID, title string) string {
+	return fmt.Sprintf("task %s started successfully as instance %q", taskID, title)
+}
+
+func taskParkedLogMessage(taskID, title string) string {
+	return fmt.Sprintf("task %s parked at a usage limit as instance %q; waiting for the limit window to reset", taskID, title)
 }
 
 // deliverCronTaskPrompt delivers a cron task's prompt, waiting out a #1586
