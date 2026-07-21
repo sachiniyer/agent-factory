@@ -1,6 +1,9 @@
 package api
 
 import (
+	"encoding/json"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -24,4 +27,16 @@ func TestProjectsRegistryCommandsRegistered(t *testing.T) {
 	for name, registered := range want {
 		require.Truef(t, registered, "af projects %s is not wired into the production command", name)
 	}
+}
+
+func TestProjectsListMissingHomeIsReadOnly(t *testing.T) {
+	home := filepath.Join(t.TempDir(), "missing-af-home")
+	t.Setenv("AGENT_FACTORY_HOME", home)
+
+	out := captureJSON(t, func() error { return projectsListCmd.RunE(projectsListCmd, nil) })
+	var projects []map[string]any
+	require.NoError(t, json.Unmarshal(out, &projects))
+	require.Empty(t, projects)
+	_, err := os.Stat(home)
+	require.ErrorIs(t, err, os.ErrNotExist, "the production list command must not create config or log files")
 }

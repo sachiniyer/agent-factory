@@ -569,11 +569,17 @@ func silenceCobraOutput() {
 	SessionsCmd.SilenceErrors = true
 	TasksCmd.SilenceUsage = true
 	TasksCmd.SilenceErrors = true
+	ProjectsCmd.SilenceUsage = true
+	ProjectsCmd.SilenceErrors = true
 	if root := SessionsCmd.Root(); root != nil {
 		root.SilenceUsage = true
 		root.SilenceErrors = true
 	}
 	if root := TasksCmd.Root(); root != nil {
+		root.SilenceUsage = true
+		root.SilenceErrors = true
+	}
+	if root := ProjectsCmd.Root(); root != nil {
 		root.SilenceUsage = true
 		root.SilenceErrors = true
 	}
@@ -681,6 +687,9 @@ func init() {
 
 	// Projects (repo groupings, #1735)
 	ProjectsCmd.PersistentFlags().BoolVar(&envelopeOutput, "json", false, jsonFlagUsage)
+	ProjectsCmd.AddCommand(projectsListCmd)
+	ProjectsCmd.AddCommand(projectsRegisterCmd)
+	ProjectsCmd.AddCommand(projectsRebindCmd)
 	ProjectsCmd.AddCommand(projectsDeleteCmd)
 
 	// Tasks

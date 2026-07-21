@@ -11,12 +11,70 @@ import (
 	"github.com/sachiniyer/agent-factory/log"
 )
 
-// ProjectsCmd is the top-level command group for project (repo-grouping)
-// management (#1735). A "project" is derived: the set of sessions sharing a repo
-// root. Today the only verb is delete; more can join it as the surface grows.
+// ProjectsCmd is the top-level command group for project management.
 var ProjectsCmd = &cobra.Command{
 	Use:   "projects",
-	Short: "Manage projects (repo groupings of sessions)",
+	Short: "Manage projects and durable registrations",
+}
+
+var projectsListCmd = &cobra.Command{
+	Use:   "list",
+	Short: "List registered projects",
+	Long: `List durable machine-local project bindings.
+
+path_exists reports only whether the last-known path is present. It does not
+claim that a new checkout at a reused path has the registered identity.`,
+	Args: cobra.NoArgs,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		projects, err := config.ListProjects()
+		if err != nil {
+			return jsonError(err)
+		}
+		return jsonOut(projects)
+	},
+}
+
+var projectsRegisterCmd = &cobra.Command{
+	Use:   "register <path>",
+	Short: "Register a project with a stable local identity",
+	Long: `Register a project directory with a stable, machine-local identity.
+
+The returned project id survives an explicit rebind after the checkout moves.
+Two clones remain separate projects. Any directory inside a checkout resolves
+to that checkout's canonical main-repo root, and registration is idempotent for
+the same checkout. Identity is anchored in agent-factory/checkout-id under the
+Git common directory; no working-tree file is created.`,
+	Args: cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		log.Initialize(false)
+		defer log.Close()
+
+		project, err := config.RegisterProject(args[0])
+		if err != nil {
+			return jsonError(err)
+		}
+		return jsonOut(project)
+	},
+}
+
+var projectsRebindCmd = &cobra.Command{
+	Use:   "rebind <project-id> <path>",
+	Short: "Rebind a registered project after its checkout moves",
+	Long: `Rebind a stable project id to a new checkout path.
+
+The project id is preserved. Rebinding refuses to take a path already owned by
+another registered project.`,
+	Args: cobra.ExactArgs(2),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		log.Initialize(false)
+		defer log.Close()
+
+		project, err := config.RebindProject(args[0], args[1])
+		if err != nil {
+			return jsonError(err)
+		}
+		return jsonOut(project)
+	},
 }
 
 // deleteProjectViaDaemon is the daemon seam, overridable in tests.
