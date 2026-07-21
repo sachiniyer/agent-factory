@@ -11,21 +11,12 @@ import (
 	"testing"
 
 	"github.com/sachiniyer/agent-factory/cmd/cmd_test"
+	"github.com/sachiniyer/agent-factory/internal/systemdunit"
 )
 
-func stubSelfCgroup(t *testing.T, content string, err error) {
-	t.Helper()
-	previous := readSelfCgroup
-	readSelfCgroup = func(string) ([]byte, error) {
-		return []byte(content), err
-	}
-	t.Cleanup(func() { readSelfCgroup = previous })
-}
-
 func TestNewTmuxServerCommandScopesDaemonUnitSpawn(t *testing.T) {
-	t.Setenv(systemdDaemonMarkerEnv, systemdDaemonUnit)
+	t.Setenv(systemdunit.DaemonMarkerEnv, systemdunit.DaemonUnitName)
 	t.Setenv("SYSTEMD_EXEC_PID", strconv.Itoa(os.Getpid()))
-	stubSelfCgroup(t, "", errors.New("proc unavailable"))
 
 	cmd, scoped := newTmuxServerCommand("new-session", "-d", "-s", "af_worker")
 	if !scoped {
@@ -37,24 +28,9 @@ func TestNewTmuxServerCommandScopesDaemonUnitSpawn(t *testing.T) {
 	}
 }
 
-func TestRunningInSystemdDaemonUnitRecognizesLegacyUnitCgroup(t *testing.T) {
-	t.Setenv(systemdDaemonMarkerEnv, "")
-	t.Setenv("SYSTEMD_EXEC_PID", "")
-	stubSelfCgroup(t, "0::/user.slice/user-1001.slice/user@1001.service/app.slice/agent-factory-daemon.service\n", nil)
-
-	cmd, scoped := newTmuxServerCommand("new-session")
-	if !scoped {
-		t.Fatal("legacy daemon cgroup command was not marked systemd-scoped")
-	}
-	if got := cmd.Args[0]; got != "systemd-run" {
-		t.Fatalf("legacy unit cgroup launched %q, want systemd-run scope", got)
-	}
-}
-
 func TestNewTmuxServerCommandDoesNotTrustInheritedSystemdMarker(t *testing.T) {
-	t.Setenv(systemdDaemonMarkerEnv, systemdDaemonUnit)
+	t.Setenv(systemdunit.DaemonMarkerEnv, systemdunit.DaemonUnitName)
 	t.Setenv("SYSTEMD_EXEC_PID", strconv.Itoa(os.Getpid()+1))
-	stubSelfCgroup(t, "0::/user.slice/user-1001.slice/session-7.scope\n", nil)
 
 	cmd, scoped := newTmuxServerCommand("new-session")
 	if scoped {
@@ -62,22 +38,6 @@ func TestNewTmuxServerCommandDoesNotTrustInheritedSystemdMarker(t *testing.T) {
 	}
 	if got := strings.Join(cmd.Args, " "); got != "tmux new-session" {
 		t.Fatalf("descendant with inherited marker launched %q, want direct tmux client", got)
-	}
-}
-
-func TestCgroupContainsUnitRequiresExactPathComponent(t *testing.T) {
-	for _, content := range []string{
-		"0::/user.slice/session-7.scope\n",
-		"0::/user.slice/not-agent-factory-daemon.service\n",
-		"12:memory:/agent-factory-daemon.service-old\n",
-		"malformed\n",
-	} {
-		if cgroupContainsUnit(content, systemdDaemonUnit) {
-			t.Errorf("cgroupContainsUnit(%q) = true for no exact unit component", content)
-		}
-	}
-	if !cgroupContainsUnit("12:memory:/x/agent-factory-daemon.service/y\n", systemdDaemonUnit) {
-		t.Error("exact legacy/hybrid cgroup component was not recognized")
 	}
 }
 
@@ -112,9 +72,8 @@ func (refusingTrackedPtyFactory) Close() {}
 // generic non-zero wrapper status came from systemd-run itself or the scoped
 // tmux child, though, so it must not authorize fresh-worktree deletion.
 func TestSystemdRunRefusalIsActionableButCleanupUnsafe(t *testing.T) {
-	t.Setenv(systemdDaemonMarkerEnv, systemdDaemonUnit)
+	t.Setenv(systemdunit.DaemonMarkerEnv, systemdunit.DaemonUnitName)
 	t.Setenv("SYSTEMD_EXEC_PID", strconv.Itoa(os.Getpid()))
-	stubSelfCgroup(t, "", errors.New("proc unavailable"))
 	forceNewSessionEnvMarkers(t, false)
 
 	cmdExec := cmd_test.MockCmdExec{

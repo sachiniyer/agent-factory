@@ -121,6 +121,52 @@ jobs:
       - name: Run tests
         run: go test -v -race -count=1 ./...
 
+  # KillMode=process is the compatibility fence that keeps pre-scope tmux
+  # servers alive, so the daemon's abrupt-failure cleanup cannot be proven by
+  # the ordinary testbox (it has no systemd user manager). Exercise the actual
+  # cgroup transaction on both systemd generations shipped by the supported
+  # Ubuntu runners: a stubborn watcher tree must be reaped before replacement,
+  # while the exact tmux server and pane PIDs survive.
+  test-systemd:
+    name: Test (systemd, ${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, ubuntu-24.04]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: "1.25"
+          cache: true
+
+      - name: Install lifecycle dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends tmux
+
+      - name: Enable the systemd user manager
+        run: |
+          sudo loginctl enable-linger "$USER"
+          XDG_RUNTIME_DIR="/run/user/$(id -u)"
+          export XDG_RUNTIME_DIR
+          echo "XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR" >> "$GITHUB_ENV"
+          for _ in $(seq 1 30); do
+            [ -d "$XDG_RUNTIME_DIR" ] && break
+            sleep 1
+          done
+          systemd --version | head -1
+          systemctl --user show-environment >/dev/null
+
+      - name: Test abrupt daemon failure ownership
+        env:
+          AF_SYSTEMD_LIFECYCLE_TEST: "1"
+        run: go test -v -count=1 ./integration -run '^TestAbruptDaemonFailureReapsOwnedChildrenAndPreservesTmux$'
+
   # The web client's deterministic gates (#2069). Until this landed, NOTHING in
   # GitHub Actions ran them: the schedule/frame/icons parity tests, the typecheck,
   # and the committed-bundle reproducibility check were enforced only by a human
@@ -259,7 +305,7 @@ jobs:
     # blocks anyway, since it demands conclusion === "success", but the native path
     # would not.) So: run ALWAYS, and fail loudly on any unsuccessful need. Now a
     # red macOS job turns the REQUIRED check red instead of quietly skipping it.
-    needs: [lint, test, test-macos, web]
+    needs: [lint, test, test-systemd, test-macos, web]
     if: always()
     steps:
       - name: Gate on the jobs this check stands in for
@@ -268,7 +314,7 @@ jobs:
           echo "::error::A required job failed — failing Build so the required check goes RED rather than skipping."
           # needs['test-macos'], not needs.test-macos: a hyphen in a property path is
           # parsed as subtraction, so the dotted form silently yields an empty string.
-          echo "lint=${{ needs.lint.result }} test=${{ needs.test.result }} test-macos=${{ needs['test-macos'].result }} web=${{ needs.web.result }}"
+          echo "lint=${{ needs.lint.result }} test=${{ needs.test.result }} test-systemd=${{ needs['test-systemd'].result }} test-macos=${{ needs['test-macos'].result }} web=${{ needs.web.result }}"
           exit 1
 
       - uses: actions/checkout@v6
