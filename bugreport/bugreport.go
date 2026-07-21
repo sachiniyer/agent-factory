@@ -153,7 +153,7 @@ func Build(in Inputs) (Result, error) {
 		bundlePath:  in.BundlePath,
 	}
 
-	b.Tasks, b.Errors = collectTasks(b.Errors)
+	b.Tasks, b.Errors = collectTasks(r, b.Errors)
 	b.Instances, b.Errors = collectInstances(r, b.Errors)
 	b.Config, b.Errors = collectConfig(r, b.Errors)
 	b.Log, b.Errors = collectLog(r, b.Errors)
@@ -499,14 +499,14 @@ func countInstances(repos []repoInstances) int {
 }
 
 // collectTasks loads and redacts the configured tasks.
-func collectTasks(errs []string) ([]redactedTask, []string) {
+func collectTasks(r *redactor, errs []string) ([]redactedTask, []string) {
 	tasks, err := task.LoadTasks()
 	if err != nil {
 		return nil, append(errs, fmt.Sprintf("tasks: %v", err))
 	}
 	out := make([]redactedTask, 0, len(tasks))
 	for _, t := range tasks {
-		out = append(out, redactTask(t))
+		out = append(out, r.redactTask(t))
 	}
 	return out, errs
 }

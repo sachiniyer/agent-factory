@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/sachiniyer/agent-factory/session"
+	"github.com/sachiniyer/agent-factory/task"
 )
 
 // A realistic 40-hex git SHA that must survive redaction — the "keep
@@ -190,6 +191,30 @@ func TestRedactInstanceDataKeepsStructuralDropsFreeText(t *testing.T) {
 	}
 	if d.Worktree.SessionName != redactedMarker {
 		t.Errorf("worktree session name not redacted: %q", d.Worktree.SessionName)
+	}
+}
+
+// TestRedactTaskDropsTargetSession pins that a task's delivery target is a raw
+// session title, not a safe routing id. Bug reports promise to drop session
+// titles, so the structured task projection must never carry it verbatim.
+func TestRedactTaskDropsTargetSession(t *testing.T) {
+	const target = "ConfidentialCustomerMigration"
+
+	r := &redactor{}
+	got := r.redactTask(task.Task{
+		ID:            "task-2201",
+		Name:          "nightly",
+		CronExpr:      "0 9 * * *",
+		TargetSession: target,
+		Program:       "claude",
+		Enabled:       true,
+	})
+
+	if got.TargetSession != redactedMarker {
+		t.Fatalf("task target session leaked: got %q, want %q", got.TargetSession, redactedMarker)
+	}
+	if got.ID != "task-2201" || got.CronExpr != "0 9 * * *" || got.Program != "claude" || !got.Enabled {
+		t.Fatalf("safe structural task fields changed: %+v", got)
 	}
 }
 
@@ -804,7 +829,7 @@ func TestBuildEndToEnd(t *testing.T) {
 	writeFile(t, filepath.Join(instDir, "instances.json"), string(instances))
 
 	// tasks.json
-	tasks := `[{"id": "t1", "name": "nightly", "prompt": "run with sk-TASKSECRET0123456789ABCD", "cron_expr": "0 9 * * *", "enabled": true, "project_path": "` + home + `/Desktop/proj", "program": "claude"}]`
+	tasks := `[{"id": "t1", "name": "nightly", "prompt": "run with sk-TASKSECRET0123456789ABCD", "cron_expr": "0 9 * * *", "target_session": "ConfidentialTaskTargetAlpha", "enabled": true, "project_path": "` + home + `/Desktop/proj", "program": "claude"}]`
 	writeFile(t, filepath.Join(afHome, "tasks.json"), tasks)
 
 	// config.toml with planted credentials and a home path.
@@ -817,7 +842,8 @@ func TestBuildEndToEnd(t *testing.T) {
 	// log tail with a home path, a secret, and a verbatim tmux session name
 	// (the #1584 leak vector: the session title rides in on the log blob).
 	logLine := "2026-01-01 boot at " + home + "/Desktop key sk-LOGSECRET0123456789ABCDEF sha " + testSHA + "\n" +
-		"2026-01-01 tmux session af_0f8fc14c_myproprietarysession is gone\n"
+		"2026-01-01 tmux session af_0f8fc14c_myproprietarysession is gone\n" +
+		"2026-01-01 task t1 delivered prompt to target session \"ConfidentialTaskTargetAlpha\" (sent)\n"
 	writeFile(t, filepath.Join(afHome, "agent-factory.log"), logLine)
 
 	res, err := Build(Inputs{
@@ -854,6 +880,7 @@ func TestBuildEndToEnd(t *testing.T) {
 		"Project Nightingale",
 		"customer launch details",
 		"secret pr",
+		"ConfidentialTaskTargetAlpha",      // task target title, in both task JSON and daemon log (#2201)
 		"myproprietarysession",             // session title, leaked via the log tmux name (#1584)
 		"af_0f8fc14c_myproprietarysession", // the verbatim tmux name itself
 		home,                               // raw home path (username-revealing) must never appear verbatim
