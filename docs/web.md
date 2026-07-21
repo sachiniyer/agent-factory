@@ -334,6 +334,11 @@ keyboard never surprises you:
 The pane you're driving is highlighted with an accent border, so the active mode is
 always legible.
 
+On a phone the rail is a drawer over the main pane. Actions that take you somewhere
+else — **+ New**, selecting a session, and Archive/Restore/Kill — close it before
+opening the terminal or modal. The state filter stays open while you change it, and
+tapping the dimmed scrim dismisses the drawer directly.
+
 #### The attach terminal
 
 The main pane hosts a real terminal (xterm.js) streaming the agent's live output
