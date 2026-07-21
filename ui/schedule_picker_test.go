@@ -127,6 +127,22 @@ func TestSchedulePickerTypeSwitchChangesCron(t *testing.T) {
 	assert.Equal(t, "0 9 1 * *", p.Cron())
 }
 
+func TestSchedulePickerTypeSwitchNormalizesDisplayedInterval(t *testing.T) {
+	p := newSchedulePicker()
+	p.seed(schedule.Schedule{Type: schedule.EveryNMinutes, Interval: 50})
+	p.setWidth(80)
+	p.setFocused(true)
+
+	p.handleKey(keyType(tea.KeyRight)) // Every 50 minutes -> Every N hours.
+
+	require.Equal(t, schedule.EveryNHours, p.kind())
+	assert.Equal(t, "23", p.interval, "the editable chip must match the canonical value")
+	assert.Equal(t, 23, p.toSchedule().Interval, "the saved schedule must match the chip")
+	out := p.render()
+	assert.Contains(t, out, "Every 23 hours")
+	assert.NotContains(t, out, "Every 50 hours")
+}
+
 // TestSchedulePickerNumericAndMeridiemEntry drives the daily contextual inputs:
 // move to the hour/minute cells, type values, and flip AM->PM.
 func TestSchedulePickerNumericAndMeridiemEntry(t *testing.T) {
