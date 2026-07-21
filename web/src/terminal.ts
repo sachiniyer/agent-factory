@@ -41,6 +41,7 @@ import { type ITheme, Terminal } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
 import { handleClipboardKeydown } from "./clipboard.js";
 import { decode, encode, inputFrame, Op, resizeFrame } from "./frame.js";
+import { shouldRefitVisibleTerminal, viewportLineFromBottom } from "./terminal-geometry.js";
 import { currentXtermTheme } from "./theme.js";
 
 /** The attach terminal's connection state, surfaced for a small status line. */
@@ -83,6 +84,7 @@ export class AttachTerminal {
   private readonly fit: FitAddon;
   private readonly enc = new TextEncoder();
   private readonly ro: ResizeObserver;
+  private readonly io: IntersectionObserver;
 
   private ws: WebSocket | null = null;
   private stopped = false;
@@ -90,6 +92,8 @@ export class AttachTerminal {
   private retry = 0;
   private reconnectTimer: number | null = null;
   private resizeTimer: number | null = null;
+  private visibleFitFrame: number | null = null;
+  private viewportRestoreFrame: number | null = null;
 
   // The absolute replay cursor: seeded from OpHello, advanced by OpPTYOut byte
   // counts (never by OpRepaint). `seeded` gates whether a reconnect can pass a
@@ -100,10 +104,39 @@ export class AttachTerminal {
   // an authoritative echo that matches is a no-op.
   private lastRows = 0;
   private lastCols = 0;
+  // A peer resize can temporarily collapse this client's scrollback (for example,
+  // 60 lines fit in a peer's 111-row grid). Preserve the user's local reading
+  // position independently of that reflow so the next visible-host fit can restore
+  // it. Null means no peer-owned grid is pending reconciliation.
+  private pendingViewportDistance: number | null = null;
   private exited = false;
 
+  // A peer is allowed to resize the one shared PTY and every client obeys that
+  // authoritative echo. When this window becomes active again, its visible host
+  // becomes the local writer: refit once instead of leaving a peer-sized emulator in
+  // an unchanged container until the user physically resizes the window (#2347).
+  private readonly onWindowFocus = (): void => this.scheduleVisibleFit();
+  private readonly onVisibilityChange = (): void => {
+    if (document.visibilityState === "visible") {
+      this.scheduleVisibleFit();
+    }
+  };
+  // Entering a pane is the earliest reliable activation signal for side-by-side
+  // clients: reconcile before the wheel gesture arrives so xterm can consume that
+  // first gesture rather than making the user scroll twice.
+  private readonly onPointerEnter = (): void => this.fitVisibleHost();
+  // Wheel can target an already-focused window after another client resized the PTY
+  // without the pointer ever leaving this pane. Capture repairs that less-common
+  // path; pointer entry above handles the ordinary first gesture. The pending-peer
+  // gate makes every ordinary wheel a no-op before even measuring layout.
+  private readonly onWheel = (): void => {
+    if (this.pendingViewportDistance !== null) {
+      this.fitVisibleHost();
+    }
+  };
+
   constructor(
-    container: HTMLElement,
+    private readonly container: HTMLElement,
     private readonly sessionId: string,
     private readonly token: string,
     private readonly tabId: string,
@@ -125,7 +158,6 @@ export class AttachTerminal {
     this.fit = new FitAddon();
     this.term.loadAddon(this.fit);
     this.term.open(container);
-    this.fit.fit();
 
     // Report focus/blur of xterm's helper textarea so index.ts can track which pane
     // owns the keyboard (#1693) even when the user clicks straight into the terminal
@@ -169,6 +201,25 @@ export class AttachTerminal {
     this.ro = new ResizeObserver(() => this.scheduleFit());
     this.ro.observe(container);
 
+    // ResizeObserver alone cannot express two important transitions:
+    //   * xterm is opened before its first painted cell metrics exist, even when the
+    //     host already has its final border-box; and
+    //   * a peer's authoritative resize changes xterm's grid, not this host's box.
+    // Intersection/activation schedule a one-frame-later fit at those boundaries.
+    // A zero-size hidden pane is rejected by fitVisibleHost and retried when it
+    // intersects; there is no polling timer.
+    this.io = new IntersectionObserver((entries) => {
+      if (entries.some((entry) => entry.target === container && entry.isIntersecting)) {
+        this.scheduleVisibleFit();
+      }
+    });
+    this.io.observe(container);
+    window.addEventListener("focus", this.onWindowFocus);
+    document.addEventListener("visibilitychange", this.onVisibilityChange);
+    container.addEventListener("pointerenter", this.onPointerEnter);
+    container.addEventListener("wheel", this.onWheel, { capture: true, passive: true });
+    this.scheduleVisibleFit();
+
     this.connect();
   }
 
@@ -184,7 +235,20 @@ export class AttachTerminal {
       window.clearTimeout(this.resizeTimer);
       this.resizeTimer = null;
     }
+    if (this.visibleFitFrame !== null) {
+      window.cancelAnimationFrame(this.visibleFitFrame);
+      this.visibleFitFrame = null;
+    }
+    if (this.viewportRestoreFrame !== null) {
+      window.cancelAnimationFrame(this.viewportRestoreFrame);
+      this.viewportRestoreFrame = null;
+    }
     this.ro.disconnect();
+    this.io.disconnect();
+    window.removeEventListener("focus", this.onWindowFocus);
+    document.removeEventListener("visibilitychange", this.onVisibilityChange);
+    this.container.removeEventListener("pointerenter", this.onPointerEnter);
+    this.container.removeEventListener("wheel", this.onWheel, true);
     this.closeSocket();
     this.term.dispose();
   }
@@ -192,6 +256,7 @@ export class AttachTerminal {
   /** Gives the terminal the keyboard (focuses xterm's helper textarea) so typed
    *  keys reach the agent — the attach half of the #1693 nav/attach model. */
   focus(): void {
+    this.fitVisibleHost();
     this.term.focus();
   }
 
@@ -359,6 +424,77 @@ export class AttachTerminal {
 
   // --- resize ----------------------------------------------------------------
 
+  /** Fits on the next painted frame, after visibility/layout changes have settled.
+   *  Repeated activation signals coalesce into one frame; unlike the resize debounce,
+   *  this is not a time guess and never repeats on its own. */
+  private scheduleVisibleFit(): void {
+    if (this.stopped || this.visibleFitFrame !== null) {
+      return;
+    }
+    this.visibleFitFrame = window.requestAnimationFrame(() => {
+      this.visibleFitFrame = null;
+      this.fitVisibleHost();
+    });
+  }
+
+  /** Reconciles xterm's grid with this host only when the host is measurable and the
+   *  FitAddon proposes a real change. A peer-owned MsgResize remains authoritative
+   *  while this client is inactive; activation/wheel makes this client the newest
+   *  writer once, without a resize-echo ping-pong between visible clients. */
+  private fitVisibleHost(): void {
+    if (this.stopped) {
+      return;
+    }
+    let proposed;
+    try {
+      proposed = this.fit.proposeDimensions();
+    } catch {
+      return; // xterm has not painted metrics yet, or the container detached
+    }
+    if (
+      !shouldRefitVisibleTerminal(
+        { width: this.container.clientWidth, height: this.container.clientHeight },
+        { rows: this.term.rows, cols: this.term.cols },
+        proposed,
+      )
+    ) {
+      return;
+    }
+    try {
+      this.fit.fit();
+    } catch {
+      return; // container detached between proposal and fit
+    }
+    this.scheduleViewportRestore(this.term.rows, this.term.cols);
+    this.sendResize(this.term.rows, this.term.cols, false);
+  }
+
+  /** Restores the pre-peer reading position after xterm has rendered its new grid.
+   *  resize() schedules the buffer reflow: reading baseY synchronously after fit can
+   *  still see the peer-collapsed zero. The next painted frame is the first settled
+   *  value. A newer peer grid cancels this frame and leaves the distance pending for
+   *  the next local activation. */
+  private scheduleViewportRestore(rows: number, cols: number): void {
+    if (this.pendingViewportDistance === null) {
+      return;
+    }
+    if (this.viewportRestoreFrame !== null) {
+      window.cancelAnimationFrame(this.viewportRestoreFrame);
+    }
+    this.viewportRestoreFrame = window.requestAnimationFrame(() => {
+      this.viewportRestoreFrame = null;
+      if (this.stopped || this.term.rows !== rows || this.term.cols !== cols) {
+        return;
+      }
+      const distance = this.pendingViewportDistance;
+      if (distance === null) {
+        return;
+      }
+      this.pendingViewportDistance = null;
+      this.term.scrollToLine(viewportLineFromBottom(this.term.buffer.active.baseY, distance));
+    });
+  }
+
   private scheduleFit(): void {
     if (this.resizeTimer !== null) {
       window.clearTimeout(this.resizeTimer);
@@ -368,12 +504,7 @@ export class AttachTerminal {
       if (this.stopped) {
         return;
       }
-      try {
-        this.fit.fit(); // resizes xterm locally to the container; onResize fires
-      } catch {
-        return; // container detached mid-resize
-      }
-      this.sendResize(this.term.rows, this.term.cols, false);
+      this.fitVisibleHost();
     }, RESIZE_DEBOUNCE_MS);
   }
 
@@ -398,6 +529,18 @@ export class AttachTerminal {
     this.lastRows = rows;
     this.lastCols = cols;
     if (rows !== this.term.rows || cols !== this.term.cols) {
+      // Capture only the FIRST peer-owned resize in a run. Further peer echoes may
+      // already have collapsed/reflowed the buffer, but the first boundary still
+      // knows where this client was reading in its own grid. The active-host fit
+      // consumes and clears this value before its own echo comes back.
+      if (this.pendingViewportDistance === null) {
+        const buffer = this.term.buffer.active;
+        this.pendingViewportDistance = Math.max(0, buffer.baseY - buffer.viewportY);
+      }
+      if (this.viewportRestoreFrame !== null) {
+        window.cancelAnimationFrame(this.viewportRestoreFrame);
+        this.viewportRestoreFrame = null;
+      }
       try {
         this.term.resize(cols, rows);
       } catch {

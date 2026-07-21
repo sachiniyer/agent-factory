@@ -3630,6 +3630,243 @@ test("theme (redesign PR1): toggling Light vs Dark changes token-driven colors l
   await page.evaluate(() => localStorage.removeItem("af-theme"));
 });
 
+interface TerminalGeometry {
+  hostHeight?: number;
+  viewportHeight: number;
+  scrollHeight: number;
+  scrollTop: number;
+  rows: number;
+}
+
+async function terminalGeometry(host: Locator, includeHost = false): Promise<TerminalGeometry> {
+  return host.evaluate(
+    (root, withHost) => {
+      const pane = root.querySelector<HTMLElement>(".af-pane-host");
+      const viewport = root.querySelector<HTMLElement>(".xterm-viewport");
+      return {
+        ...(withHost ? { hostHeight: pane?.clientHeight ?? -1 } : {}),
+        viewportHeight: viewport?.clientHeight ?? -1,
+        scrollHeight: viewport?.scrollHeight ?? -1,
+        scrollTop: viewport?.scrollTop ?? -1,
+        rows: root.querySelectorAll(".xterm-rows > div").length,
+      };
+    },
+    includeHost,
+  );
+}
+
+/** Proves the #2347 failure boundary and the user-visible repair against two real
+ *  browser subscribers to one PTY. The tall peer deliberately owns a grid larger
+ *  than all emitted output, collapsing the first client's scroll range to zero. */
+async function assertActiveTerminalReclaimsPeerGeometry(
+  first: Page,
+  second: Page,
+  firstHost: Locator,
+  lastLine: string,
+  lineCount: number,
+  scenario: string,
+): Promise<void> {
+  const firstViewport = firstHost.locator(".xterm-viewport");
+  const firstRows = (): Promise<number> => firstHost.locator(".xterm-rows > div").count();
+
+  // On a phone the drawer closes underneath the pointer that selected the row,
+  // leaving that pointer over the newly exposed terminal. Move it to inert appbar
+  // chrome and cross two paint boundaries so a delayed pointerenter from the drawer
+  // transition cannot reassert the tall peer after we return to the first page.
+  await second.mouse.move(0, 0);
+  await second.evaluate(
+    () =>
+      new Promise<void>((resolve) => {
+        requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
+      }),
+  );
+  await expect
+    .poll(firstRows, { message: `${scenario}: the authoritative peer resize must reach the first client` })
+    .toBeGreaterThan(lineCount);
+  const stranded = await terminalGeometry(firstHost, true);
+  expect(stranded.rows, `${scenario}: the peer must overwrite the local row count`).toBeGreaterThan(lineCount);
+  expect(stranded.scrollHeight, `${scenario}: the oversized grid must remove the local scroll range`).toBe(
+    stranded.viewportHeight,
+  );
+
+  // The pointer comes back to the first window before the user reaches for the
+  // wheel. Its container never changed, so ResizeObserver has nothing to report;
+  // pointer activation must reclaim local geometry. Before #2347, rows stayed at
+  // the peer's size, every wheel was dead, and only a physical resize fixed them.
+  // The tall peer is already the active page after construction. Re-focusing it
+  // here would queue another local fit immediately before the first page's fit;
+  // that synthetic race would correctly let the peer win last-writer-wins again.
+  await first.bringToFront();
+  // Target the actual xterm mount, not its full split-layout wrapper. On narrow
+  // layouts the wrapper also spans drawer/scrim stacking surfaces; the production
+  // activation listener lives on .af-pane-host.
+  await firstHost.locator(".af-pane-host").hover();
+  await expect
+    .poll(firstRows, { message: `${scenario}: pointer activation must refit; stranded=${JSON.stringify(stranded)}` })
+    .toBeLessThan(lineCount);
+  const refit = await terminalGeometry(firstHost);
+  expect(
+    refit.scrollHeight,
+    `${scenario}: the local grid must recreate scrollback; geometry=${JSON.stringify({ stranded, refit })}`,
+  ).toBeGreaterThan(refit.viewportHeight);
+  await expect
+    .poll(() => firstViewport.evaluate((el) => el.scrollTop), {
+      message: `${scenario}: activation must restore the pre-peer position; geometry=${JSON.stringify({ stranded, refit })}`,
+    })
+    .toBeGreaterThan(0);
+  const repaired = await terminalGeometry(firstHost);
+  await expect(firstHost).toContainText(lastLine);
+  await first.mouse.wheel(0, -900);
+  await expect
+    .poll(() => firstViewport.evaluate((el) => el.scrollTop), {
+      message: `${scenario}: wheel must work without a resize; geometry=${JSON.stringify({ stranded, repaired })}`,
+    })
+    .toBeLessThan(repaired.scrollTop);
+}
+
+test("#2347: activating a terminal repairs peer-owned geometry before scrolling", REAL_FIXTURE, async ({
+  browser,
+}) => {
+  const afBin = process.env.AF_BIN;
+  const mockRepo = process.env.AF_MOCK_REPO;
+  test.skip(!afBin || !mockRepo, "AF_BIN/AF_MOCK_REPO are set only by web-selftest-entry.sh");
+  const { execFileSync } = await import("node:child_process");
+  const af = (...args: string[]): void => {
+    execFileSync(afBin as string, ["--repo", mockRepo as string, ...args], { stdio: "pipe" });
+  };
+  const shellName = "peer-fit-2347";
+
+  const firstCtx = await browser.newContext({ viewport: { width: 1280, height: 720 } });
+  let secondCtx: BrowserContext | null = null;
+  let created = false;
+  try {
+    const first = await firstCtx.newPage();
+    await openTokenless(first);
+    await row(first, SESSION_A).click();
+    af("sessions", "tab-create", SESSION_A, "--command", "bash", "--name", shellName);
+    created = true;
+    const firstShell = first.locator(".af-tabbar .af-tab", { hasText: shellName });
+    await expect(firstShell).toHaveCount(1, { timeout: 15_000 });
+    await firstShell.click();
+    await expect(first.locator(".af-term-meta")).toContainText("Live");
+    const firstHost = first.locator(".af-term-host");
+    const firstRows = (): Promise<number> => firstHost.locator(".xterm-rows > div").count();
+    await expect.poll(firstRows).toBeGreaterThan(24);
+
+    await firstHost.click();
+    await first.keyboard.type("for i in $(seq 1 60); do echo peer-fit-line-$i; done");
+    await first.keyboard.press("Enter");
+    await expect(firstHost).toContainText("peer-fit-line-60", { timeout: 15_000 });
+    // Leave the pane for the peer window. Returning across this boundary is the
+    // pointer-activation path a side-by-side user takes before their first wheel.
+    await first.mouse.move(0, 0);
+
+    secondCtx = await browser.newContext({ viewport: { width: 1280, height: 2000 } });
+    const second = await secondCtx.newPage();
+    await openTokenless(second);
+    await row(second, SESSION_A).click();
+    const secondShell = second.locator(".af-tabbar .af-tab", { hasText: shellName });
+    await expect(secondShell).toHaveCount(1, { timeout: 15_000 });
+    await secondShell.click();
+    await expect(second.locator(".af-term-meta")).toContainText("Live");
+    await assertActiveTerminalReclaimsPeerGeometry(
+      first,
+      second,
+      firstHost,
+      "peer-fit-line-60",
+      60,
+      "desktop shell",
+    );
+  } finally {
+    await secondCtx?.close();
+    await firstCtx.close();
+    if (created) {
+      try {
+        af("sessions", "tab-delete", SESSION_A, "--name", shellName);
+      } catch {
+        // The throwaway daemon may already have removed a failed startup.
+      }
+    }
+  }
+});
+
+test("#2347: the mobile agent terminal also reclaims peer-owned geometry", REAL_FIXTURE, async ({ browser }) => {
+  const afBin = process.env.AF_BIN;
+  const mockRepo = process.env.AF_MOCK_REPO;
+  test.skip(!afBin || !mockRepo, "AF_BIN/AF_MOCK_REPO are set only by web-selftest-entry.sh");
+  const { execFileSync } = await import("node:child_process");
+  const af = (...args: string[]): void => {
+    execFileSync(afBin as string, ["--repo", mockRepo as string, ...args], { stdio: "pipe" });
+  };
+  const sessionName = "peer-agent-2347";
+  const lineCount = 40;
+  const lastLine = `peer-agent-line-${lineCount}`;
+  af("sessions", "create", "--name", sessionName, "--program", "claude");
+
+  const firstCtx = await browser.newContext({ viewport: { width: 375, height: 667 } });
+  let secondCtx: BrowserContext | null = null;
+  try {
+    const first = await firstCtx.newPage();
+    await openTokenless(first);
+    await first.locator(".af-nav-toggle").click();
+    await expect(row(first, sessionName)).toBeVisible({ timeout: 15_000 });
+    await row(first, sessionName).click();
+    await expect(first.locator(".af-term-meta")).toContainText("Live");
+    const firstHost = first.locator(".af-term-host");
+    const firstRows = (): Promise<number> => firstHost.locator(".xterm-rows > div").count();
+    await expect.poll(firstRows).toBeGreaterThan(0);
+    await expect.poll(firstRows).toBeLessThan(lineCount);
+
+    // The fixture's `claude` is the real agent-tab PTY path with a deterministic
+    // cat-shaped agent. Feed it many lines directly so this test covers the agent
+    // terminal without polluting SESSION_A's marker-dependent serial flows. Use
+    // real Enter key events: insertText("\\n") writes literal LF bytes and does
+    // not exercise the PTY line discipline, so it can paint text without creating
+    // the row progression/scrollback that this regression needs.
+    await firstHost.click();
+    for (let i = 1; i <= lineCount; i += 1) {
+      await first.keyboard.type(`peer-agent-line-${i}`);
+      await first.keyboard.press("Enter");
+    }
+    await expect(firstHost).toContainText(lastLine, { timeout: 15_000 });
+    const local = await terminalGeometry(firstHost);
+    expect(
+      local.scrollHeight,
+      `mobile agent setup must have scrollback; geometry=${JSON.stringify(local)}`,
+    ).toBeGreaterThan(local.viewportHeight);
+    expect(
+      local.scrollTop,
+      `mobile agent setup must start at the bottom; geometry=${JSON.stringify(local)}`,
+    ).toBeGreaterThan(0);
+    await first.mouse.move(0, 0);
+
+    secondCtx = await browser.newContext({ viewport: { width: 375, height: 2000 } });
+    const second = await secondCtx.newPage();
+    await openTokenless(second);
+    await second.locator(".af-nav-toggle").click();
+    await expect(row(second, sessionName)).toBeVisible({ timeout: 15_000 });
+    await row(second, sessionName).click();
+    await expect(second.locator(".af-term-meta")).toContainText("Live");
+
+    await assertActiveTerminalReclaimsPeerGeometry(
+      first,
+      second,
+      firstHost,
+      lastLine,
+      lineCount,
+      "mobile agent",
+    );
+  } finally {
+    await secondCtx?.close();
+    await firstCtx.close();
+    try {
+      af("sessions", "kill", sessionName);
+    } catch {
+      // The throwaway daemon may already have removed a failed startup.
+    }
+  }
+});
+
 // The #1812 regression guard: a tab created or deleted by ANY actor other than
 // this browser window — an agent running `af sessions tab-create` inside its own
 // session, the TUI, a script, a second window — must reach an already-open client

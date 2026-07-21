@@ -8249,6 +8249,17 @@ function decode(raw) {
   }
 }
 
+// src/terminal-geometry.ts
+function shouldRefitVisibleTerminal(host, current, proposed) {
+  if (host.width <= 0 || host.height <= 0 || !proposed || proposed.rows <= 0 || proposed.cols <= 0) {
+    return false;
+  }
+  return proposed.rows !== current.rows || proposed.cols !== current.cols;
+}
+function viewportLineFromBottom(baseY, distanceFromBottom) {
+  return Math.max(0, baseY - Math.max(0, distanceFromBottom));
+}
+
 // src/theme.ts
 var THEME_CHOICES = ["auto", "light", "dark"];
 var STORAGE_KEY = "af-theme";
@@ -8377,6 +8388,7 @@ function wsScheme2() {
 }
 var AttachTerminal = class {
   constructor(container, sessionId, token2, tabId, tab, cb) {
+    this.container = container;
     this.sessionId = sessionId;
     this.token = token2;
     this.tabId = tabId;
@@ -8397,7 +8409,6 @@ var AttachTerminal = class {
     this.fit = new import_addon_fit.FitAddon();
     this.term.loadAddon(this.fit);
     this.term.open(container);
-    this.fit.fit();
     const textarea = this.term.textarea;
     if (textarea) {
       textarea.addEventListener("focus", () => {
@@ -8423,18 +8434,32 @@ var AttachTerminal = class {
     );
     this.ro = new ResizeObserver(() => this.scheduleFit());
     this.ro.observe(container);
+    this.io = new IntersectionObserver((entries) => {
+      if (entries.some((entry) => entry.target === container && entry.isIntersecting)) {
+        this.scheduleVisibleFit();
+      }
+    });
+    this.io.observe(container);
+    window.addEventListener("focus", this.onWindowFocus);
+    document.addEventListener("visibilitychange", this.onVisibilityChange);
+    container.addEventListener("pointerenter", this.onPointerEnter);
+    container.addEventListener("wheel", this.onWheel, { capture: true, passive: true });
+    this.scheduleVisibleFit();
     this.connect();
   }
   term;
   fit;
   enc = new TextEncoder();
   ro;
+  io;
   ws = null;
   stopped = false;
   everOpened = false;
   retry = 0;
   reconnectTimer = null;
   resizeTimer = null;
+  visibleFitFrame = null;
+  viewportRestoreFrame = null;
   // The absolute replay cursor: seeded from OpHello, advanced by OpPTYOut byte
   // counts (never by OpRepaint). `seeded` gates whether a reconnect can pass a
   // real ?since; the first connect omits it (live tail + a fresh-screen repaint).
@@ -8444,7 +8469,35 @@ var AttachTerminal = class {
   // an authoritative echo that matches is a no-op.
   lastRows = 0;
   lastCols = 0;
+  // A peer resize can temporarily collapse this client's scrollback (for example,
+  // 60 lines fit in a peer's 111-row grid). Preserve the user's local reading
+  // position independently of that reflow so the next visible-host fit can restore
+  // it. Null means no peer-owned grid is pending reconciliation.
+  pendingViewportDistance = null;
   exited = false;
+  // A peer is allowed to resize the one shared PTY and every client obeys that
+  // authoritative echo. When this window becomes active again, its visible host
+  // becomes the local writer: refit once instead of leaving a peer-sized emulator in
+  // an unchanged container until the user physically resizes the window (#2347).
+  onWindowFocus = () => this.scheduleVisibleFit();
+  onVisibilityChange = () => {
+    if (document.visibilityState === "visible") {
+      this.scheduleVisibleFit();
+    }
+  };
+  // Entering a pane is the earliest reliable activation signal for side-by-side
+  // clients: reconcile before the wheel gesture arrives so xterm can consume that
+  // first gesture rather than making the user scroll twice.
+  onPointerEnter = () => this.fitVisibleHost();
+  // Wheel can target an already-focused window after another client resized the PTY
+  // without the pointer ever leaving this pane. Capture repairs that less-common
+  // path; pointer entry above handles the ordinary first gesture. The pending-peer
+  // gate makes every ordinary wheel a no-op before even measuring layout.
+  onWheel = () => {
+    if (this.pendingViewportDistance !== null) {
+      this.fitVisibleHost();
+    }
+  };
   /** Permanently closes the terminal: stops the reconnect loop, drops the socket,
    *  disconnects the observer, and disposes xterm (freeing its DOM/renderer). */
   dispose() {
@@ -8457,13 +8510,27 @@ var AttachTerminal = class {
       window.clearTimeout(this.resizeTimer);
       this.resizeTimer = null;
     }
+    if (this.visibleFitFrame !== null) {
+      window.cancelAnimationFrame(this.visibleFitFrame);
+      this.visibleFitFrame = null;
+    }
+    if (this.viewportRestoreFrame !== null) {
+      window.cancelAnimationFrame(this.viewportRestoreFrame);
+      this.viewportRestoreFrame = null;
+    }
     this.ro.disconnect();
+    this.io.disconnect();
+    window.removeEventListener("focus", this.onWindowFocus);
+    document.removeEventListener("visibilitychange", this.onVisibilityChange);
+    this.container.removeEventListener("pointerenter", this.onPointerEnter);
+    this.container.removeEventListener("wheel", this.onWheel, true);
     this.closeSocket();
     this.term.dispose();
   }
   /** Gives the terminal the keyboard (focuses xterm's helper textarea) so typed
    *  keys reach the agent — the attach half of the #1693 nav/attach model. */
   focus() {
+    this.fitVisibleHost();
     this.term.focus();
   }
   /** Takes the keyboard away from the terminal (blurs it) so document-level rail
@@ -8598,6 +8665,72 @@ var AttachTerminal = class {
     this.ws = null;
   }
   // --- resize ----------------------------------------------------------------
+  /** Fits on the next painted frame, after visibility/layout changes have settled.
+   *  Repeated activation signals coalesce into one frame; unlike the resize debounce,
+   *  this is not a time guess and never repeats on its own. */
+  scheduleVisibleFit() {
+    if (this.stopped || this.visibleFitFrame !== null) {
+      return;
+    }
+    this.visibleFitFrame = window.requestAnimationFrame(() => {
+      this.visibleFitFrame = null;
+      this.fitVisibleHost();
+    });
+  }
+  /** Reconciles xterm's grid with this host only when the host is measurable and the
+   *  FitAddon proposes a real change. A peer-owned MsgResize remains authoritative
+   *  while this client is inactive; activation/wheel makes this client the newest
+   *  writer once, without a resize-echo ping-pong between visible clients. */
+  fitVisibleHost() {
+    if (this.stopped) {
+      return;
+    }
+    let proposed;
+    try {
+      proposed = this.fit.proposeDimensions();
+    } catch {
+      return;
+    }
+    if (!shouldRefitVisibleTerminal(
+      { width: this.container.clientWidth, height: this.container.clientHeight },
+      { rows: this.term.rows, cols: this.term.cols },
+      proposed
+    )) {
+      return;
+    }
+    try {
+      this.fit.fit();
+    } catch {
+      return;
+    }
+    this.scheduleViewportRestore(this.term.rows, this.term.cols);
+    this.sendResize(this.term.rows, this.term.cols, false);
+  }
+  /** Restores the pre-peer reading position after xterm has rendered its new grid.
+   *  resize() schedules the buffer reflow: reading baseY synchronously after fit can
+   *  still see the peer-collapsed zero. The next painted frame is the first settled
+   *  value. A newer peer grid cancels this frame and leaves the distance pending for
+   *  the next local activation. */
+  scheduleViewportRestore(rows, cols) {
+    if (this.pendingViewportDistance === null) {
+      return;
+    }
+    if (this.viewportRestoreFrame !== null) {
+      window.cancelAnimationFrame(this.viewportRestoreFrame);
+    }
+    this.viewportRestoreFrame = window.requestAnimationFrame(() => {
+      this.viewportRestoreFrame = null;
+      if (this.stopped || this.term.rows !== rows || this.term.cols !== cols) {
+        return;
+      }
+      const distance = this.pendingViewportDistance;
+      if (distance === null) {
+        return;
+      }
+      this.pendingViewportDistance = null;
+      this.term.scrollToLine(viewportLineFromBottom(this.term.buffer.active.baseY, distance));
+    });
+  }
   scheduleFit() {
     if (this.resizeTimer !== null) {
       window.clearTimeout(this.resizeTimer);
@@ -8607,12 +8740,7 @@ var AttachTerminal = class {
       if (this.stopped) {
         return;
       }
-      try {
-        this.fit.fit();
-      } catch {
-        return;
-      }
-      this.sendResize(this.term.rows, this.term.cols, false);
+      this.fitVisibleHost();
     }, RESIZE_DEBOUNCE_MS);
   }
   /** Sends an OpResize for the given size unless it's unchanged. `force` re-sends
@@ -8635,6 +8763,14 @@ var AttachTerminal = class {
     this.lastRows = rows;
     this.lastCols = cols;
     if (rows !== this.term.rows || cols !== this.term.cols) {
+      if (this.pendingViewportDistance === null) {
+        const buffer = this.term.buffer.active;
+        this.pendingViewportDistance = Math.max(0, buffer.baseY - buffer.viewportY);
+      }
+      if (this.viewportRestoreFrame !== null) {
+        window.cancelAnimationFrame(this.viewportRestoreFrame);
+        this.viewportRestoreFrame = null;
+      }
       try {
         this.term.resize(cols, rows);
       } catch {
