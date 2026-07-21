@@ -66,17 +66,21 @@ clones the branch back (see [Archive & restore](#archive--restore)).
 | `docker.run_args` | no | Extra arguments appended verbatim to `docker run` (mounts, env, resource limits). |
 
 The Docker runtime does not copy the daemon's whole environment into the
-container. It forwards only present GitHub token/proxy/CA variables, the
-selected agent's built-in authentication names, and names explicitly listed in
-the global `session_env_passthrough` setting. Docker receives each as `-e NAME`,
-so the value does not appear in the docker command line. Container-native
-`HOME` and `PATH` remain owned by the image. An environment added through
-`docker.run_args` still has to be built in or named in
+container. Because repository config selects the image and its binaries, af
+does not automatically grant that image the built-in agent, GitHub, proxy, or
+CA variables used by local sessions. Only names explicitly listed in the
+global `session_env_passthrough` setting cross this boundary. Docker receives
+each as `-e NAME`, so the value does not appear in the docker command line.
+Container-native `HOME` and `PATH` remain owned by the image. An environment
+added through `docker.run_args` still has to be built in or named in
 `session_env_passthrough` before the agent pane may inherit it.
 
-For private GitHub repositories, an environment-backed `GH_TOKEN` or
-`GITHUB_TOKEN` is forwarded automatically and supports clone, `gh`, and HTTPS
-push. If you use stored `gh` credentials instead, mount the relevant config or
+Treat each Docker pass-through name as a trust grant to the configured image,
+and prefer an image pinned by digest. For example, a private GitHub Codex
+session using environment-backed credentials may explicitly list
+`GH_TOKEN` and `OPENAI_API_KEY`; that keeps clone, `gh`, HTTPS push, and Codex
+authentication working after the operator has made that trust decision. If you
+use stored credentials instead, mount only the relevant config or
 credential-helper resources deliberately with `docker.run_args`; host paths and
 native keyrings are not implicitly mounted into a container.
 

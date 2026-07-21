@@ -123,6 +123,19 @@ var dockerControlNames = nameSet(
 	"DOCKER_CONTENT_TRUST", "DOCKER_CONTENT_TRUST_SERVER", "BUILDKIT_HOST",
 )
 
+var dockerClientNames = nameSet(
+	// Process basics and Docker credential-helper discovery.
+	"PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "LANGUAGE", "TZ",
+	"TMPDIR", "TMP", "TEMP", "PWD",
+	"XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME", "XDG_RUNTIME_DIR",
+	"DBUS_SESSION_BUS_ADDRESS",
+	// Remote Docker transports, proxies, and private trust roots.
+	"SSH_AUTH_SOCK", "SSH_AGENT_PID",
+	"HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
+	"http_proxy", "https_proxy", "all_proxy", "no_proxy",
+	"SSL_CERT_FILE", "SSL_CERT_DIR", "NODE_EXTRA_CA_CERTS", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE",
+)
+
 // NormalizeExtraNames validates an explicit pass-through list, removes
 // duplicates, and returns it sorted. Exact names only are accepted: allowing
 // glob syntax here would turn a small escape hatch back into ambient authority.
@@ -184,13 +197,22 @@ func ImportNames(source []string, agent string, extras []string) []string {
 	return out
 }
 
-// DockerCLIEnvironment is the environment for the trusted, short-lived docker
-// client. It includes Docker connection selection in addition to the session
-// allowlist because those values decide which daemon the CLI contacts.
-func DockerCLIEnvironment(source []string, agent string, extras []string) []string {
-	allowed := allowedNames(source, agent, extras)
+// DockerCLIEnvironment is the environment for the trusted, short-lived Docker
+// client. Agent and GitHub credentials are deliberately absent unless the
+// operator named them explicitly: repo-controlled run_args can ask Docker to
+// copy any variable present in the client environment into the container.
+func DockerCLIEnvironment(source []string, _ string, extras []string) []string {
+	allowed := make(map[string]struct{}, len(dockerClientNames)+len(dockerControlNames)+len(extras))
+	for name := range dockerClientNames {
+		allowed[name] = struct{}{}
+	}
 	for name := range dockerControlNames {
 		allowed[name] = struct{}{}
+	}
+	for _, name := range extras {
+		if validName(name) {
+			allowed[name] = struct{}{}
+		}
 	}
 	out := make([]string, 0, len(source))
 	for _, entry := range source {
@@ -202,25 +224,16 @@ func DockerCLIEnvironment(source []string, agent string, extras []string) []stri
 	return out
 }
 
-// DockerForwardNames returns the host variable names whose values should be
-// copied into a container. Container-native basics such as HOME and PATH stay
-// owned by the image; only authentication/network variables and explicit
-// extensions cross the host/container boundary.
-func DockerForwardNames(source []string, agent string, extras []string) []string {
-	forward := make(map[string]struct{})
-	for name := range selectedAgentNames(source, agent) {
-		forward[name] = struct{}{}
-	}
+// DockerForwardNames returns the explicit host variable names whose values
+// should be copied into a container. A repository selects the image, so af
+// does not grant that image built-in agent, GitHub, or network credentials.
+// The global-only pass-through list is the deliberate trust escape hatch.
+func DockerForwardNames(source []string, _ string, extras []string) []string {
+	forward := make(map[string]struct{}, len(extras))
 	for _, name := range extras {
-		forward[name] = struct{}{}
-	}
-	for _, name := range []string{
-		"GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN", "GH_HOST",
-		"HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
-		"http_proxy", "https_proxy", "all_proxy", "no_proxy",
-		"SSL_CERT_FILE", "SSL_CERT_DIR", "NODE_EXTRA_CA_CERTS", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE",
-	} {
-		forward[name] = struct{}{}
+		if validName(name) {
+			forward[name] = struct{}{}
+		}
 	}
 	present := make(map[string]struct{})
 	for _, entry := range source {

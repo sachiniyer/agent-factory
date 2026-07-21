@@ -13,7 +13,7 @@ import (
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
-func TestDockerEnvironmentUsesResolvedProgramOverride(t *testing.T) {
+func TestDockerEnvironmentDoesNotTrustRepoSelectedImageWithResolvedCredentials(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 	t.Setenv("OPENAI_API_KEY", "test-value")
 	t.Setenv("ANTHROPIC_API_KEY", "test-value")
@@ -42,11 +42,10 @@ func TestDockerEnvironmentUsesResolvedProgramOverride(t *testing.T) {
 		Program:  tmux.ProgramClaude,
 		CloneURL: "file:///fixture.git",
 	})
-	if !dockerHasEnvName(runArgs, "OPENAI_API_KEY") {
-		t.Fatal("docker dropped Codex authentication selected by program_overrides.claude")
-	}
-	if dockerHasEnvName(runArgs, "ANTHROPIC_API_KEY") {
-		t.Fatal("docker forwarded Claude authentication after the override selected Codex")
+	for _, name := range []string{"OPENAI_API_KEY", "ANTHROPIC_API_KEY"} {
+		if dockerHasEnvName(runArgs, name) {
+			t.Fatalf("docker forwarded built-in credential %s to a repo-selected image", name)
+		}
 	}
 }
 
@@ -135,12 +134,12 @@ func TestDockerRunForwardsAllowedNamesWithoutAmbientEnvironment(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	for _, name := range []string{"GH_TOKEN", "OPENAI_API_KEY", customName} {
-		if name == "OPENAI_API_KEY" && os.Getenv(name) == "" {
-			continue
-		}
-		if !dockerHasEnvName(gotArgs, name) {
-			t.Fatalf("docker run did not forward allowed variable name %s", name)
+	if !dockerHasEnvName(gotArgs, customName) {
+		t.Fatalf("docker run did not forward explicit variable name %s", customName)
+	}
+	for _, name := range []string{"GH_TOKEN", "OPENAI_API_KEY"} {
+		if dockerHasEnvName(gotArgs, name) {
+			t.Fatalf("docker run forwarded built-in credential %s without explicit trust", name)
 		}
 	}
 	if dockerHasEnvName(gotArgs, deniedName) {
@@ -148,6 +147,9 @@ func TestDockerRunForwardsAllowedNamesWithoutAmbientEnvironment(t *testing.T) {
 	}
 	if !environmentHasName(gotEnv, customName) {
 		t.Fatalf("docker CLI environment omitted configured variable %s", customName)
+	}
+	if environmentHasName(gotEnv, "GH_TOKEN") || environmentHasName(gotEnv, "OPENAI_API_KEY") {
+		t.Fatal("docker CLI environment retained a built-in credential without explicit trust")
 	}
 	if environmentHasName(gotEnv, deniedName) {
 		t.Fatalf("docker CLI inherited disallowed variable %s", deniedName)

@@ -100,7 +100,7 @@ func TestNormalizeExtraNamesDoesNotRenderInvalidAssignmentValue(t *testing.T) {
 	}
 }
 
-func TestDockerForwardNamesCarriesNamesOnlyWhenPresent(t *testing.T) {
+func TestDockerForwardNamesCarriesOnlyExplicitNamesWhenPresent(t *testing.T) {
 	source := []string{
 		"HOME=/host/home",
 		"GH_TOKEN=present",
@@ -108,10 +108,34 @@ func TestDockerForwardNamesCarriesNamesOnlyWhenPresent(t *testing.T) {
 		"UNRELATED_DATABASE_KEY=present",
 		"CUSTOM_PROVIDER_TOKEN=present",
 	}
-	got := DockerForwardNames(source, "codex", []string{"CUSTOM_PROVIDER_TOKEN"})
+	extras := []string{"CUSTOM_PROVIDER_TOKEN", "GH_TOKEN", "OPENAI_API_KEY"}
+	got := DockerForwardNames(source, "codex", extras)
 	want := []string{"CUSTOM_PROVIDER_TOKEN", "GH_TOKEN", "OPENAI_API_KEY"}
 	if !slices.Equal(got, want) {
 		t.Fatalf("DockerForwardNames() = %v, want %v", got, want)
+	}
+	client := DockerCLIEnvironment(source, "codex", extras)
+	for _, wantEntry := range []string{"CUSTOM_PROVIDER_TOKEN=present", "GH_TOKEN=present", "OPENAI_API_KEY=present"} {
+		if !slices.Contains(client, wantEntry) {
+			t.Fatalf("explicit Docker trust grant omitted %s", strings.SplitN(wantEntry, "=", 2)[0])
+		}
+	}
+}
+
+func TestDockerRepoSelectedImageDoesNotReceiveBuiltInCredentials(t *testing.T) {
+	source := []string{
+		"PATH=/usr/bin",
+		"GH_TOKEN=fixture",
+		"OPENAI_API_KEY=fixture",
+	}
+	for _, entry := range DockerCLIEnvironment(source, "codex", nil) {
+		name, _, _ := strings.Cut(entry, "=")
+		if name == "GH_TOKEN" || name == "OPENAI_API_KEY" {
+			t.Fatalf("Docker CLI environment exposed built-in credential %s to repo-controlled run arguments", name)
+		}
+	}
+	if got := DockerForwardNames(source, "codex", nil); len(got) != 0 {
+		t.Fatalf("repo-selected Docker image received built-in credential names: %v", got)
 	}
 }
 
