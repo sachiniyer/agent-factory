@@ -123,3 +123,71 @@ esac
 		t.Fatalf("install.sh error = %v, output = %q; want checksum mismatch", err, output)
 	}
 }
+
+func runInstallWithoutChecksumManifest(t *testing.T, version string) (string, error) {
+	t.Helper()
+	dir := t.TempDir()
+	fakeBin := filepath.Join(dir, "fakebin")
+	writeExecutable(t, filepath.Join(fakeBin, "uname"), `#!/bin/sh
+case "$1" in
+	-s) echo Linux ;;
+	-m) echo x86_64 ;;
+	*) exit 2 ;;
+esac
+`)
+	writeExecutable(t, filepath.Join(fakeBin, "curl"), `#!/bin/sh
+out=
+while [ "$#" -gt 0 ]; do
+	if [ "$1" = "-o" ]; then
+		out="$2"
+		break
+	fi
+	shift
+done
+[ -n "$out" ] || exit 2
+case "$out" in
+	*/sha256sums.txt) exit 22 ;;
+	*) printf legacy-archive > "$out" ;;
+esac
+`)
+	writeExecutable(t, filepath.Join(fakeBin, "sha256sum"), `#!/bin/sh
+printf '%s  %s\n' '6db75e6ff648c3b8d75172a4720b9eb8b8477bd52cd753a85b2495b67ffc633b' "$1"
+`)
+
+	root := repoRoot(t)
+	args := []string{filepath.Join(root, "install.sh")}
+	if version != "" {
+		args = append(args, "--version", version)
+	}
+	cmd := exec.Command("sh", args...)
+	cmd.Dir = root
+	cmd.Env = append(os.Environ(),
+		"PATH="+fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"AF_INSTALL_DIR="+filepath.Join(dir, "install"),
+	)
+	output, err := cmd.CombinedOutput()
+	return string(output), err
+}
+
+func TestInstallScriptUsesPinnedChecksumForPreManifestLatest(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("install.sh is POSIX sh; not run on Windows")
+	}
+	output, err := runInstallWithoutChecksumManifest(t, "")
+	if err == nil || !strings.Contains(output, "not a valid gzip/tar archive") {
+		t.Fatalf("install.sh error = %v, output = %q; want checksum verification to reach archive validation", err, output)
+	}
+	if strings.Contains(output, "checksum manifest download failed") {
+		t.Fatalf("default install rejected the pinned pre-manifest release: %q", output)
+	}
+}
+
+func TestInstallScriptRejectsMissingManifestForUnpinnedRelease(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("install.sh is POSIX sh; not run on Windows")
+	}
+	output, err := runInstallWithoutChecksumManifest(t, "v9.9.9")
+	if err == nil || !strings.Contains(output, "checksum manifest download failed") {
+		t.Fatalf("install.sh error = %v, output = %q; want missing-manifest rejection", err, output)
+	}
+}
