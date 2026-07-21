@@ -177,7 +177,7 @@
       },
       "cli": {
         "status": "yes",
-        "pointer": "api/sessions.go:174 sessionsListCmd"
+        "pointer": "api/sessions.go:186 sessionsListCmd"
       },
       "verdict": "parity",
       "notes": ""
@@ -1548,6 +1548,7 @@
       "af sessions handoff --to": "session.handoff",
       "af sessions kill --force": "session.kill",
       "af sessions kill --help": "meta.discovery",
+      "af sessions list --all": "session.list",
       "af sessions list --help": "meta.discovery",
       "af sessions preview --full": "session.preview-full",
       "af sessions preview --help": "meta.discovery",

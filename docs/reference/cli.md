@@ -39,7 +39,7 @@ Run `af <command> --help` for the same information at the terminal. For a narrat
 - [`af sessions get`](#af-sessions-get) — Get a session by title
 - [`af sessions handoff`](#af-sessions-handoff) — Continue a session under a different agent, in place
 - [`af sessions kill`](#af-sessions-kill) — Permanently destroy a session and prune its worktree branch
-- [`af sessions list`](#af-sessions-list) — List sessions
+- [`af sessions list`](#af-sessions-list) — List sessions in the current project
 - [`af sessions preview`](#af-sessions-preview) — Preview a session's terminal content
 - [`af sessions restore`](#af-sessions-restore) — Restore an archived, lost, or dead session
 - [`af sessions send-prompt`](#af-sessions-send-prompt) — Send a prompt to a session (or broadcast to all with --all)
@@ -958,7 +958,7 @@ af sessions
 - [`af sessions get`](#af-sessions-get) — Get a session by title
 - [`af sessions handoff`](#af-sessions-handoff) — Continue a session under a different agent, in place
 - [`af sessions kill`](#af-sessions-kill) — Permanently destroy a session and prune its worktree branch
-- [`af sessions list`](#af-sessions-list) — List sessions
+- [`af sessions list`](#af-sessions-list) — List sessions in the current project
 - [`af sessions preview`](#af-sessions-preview) — Preview a session's terminal content
 - [`af sessions restore`](#af-sessions-restore) — Restore an archived, lost, or dead session
 - [`af sessions send-prompt`](#af-sessions-send-prompt) — Send a prompt to a session (or broadcast to all with --all)
@@ -1186,11 +1186,21 @@ af sessions kill <title> [flags]
 
 ## af sessions list
 
-List sessions
+List sessions in the current project
+
+List sessions in the current project.
+
+Scope follows the shared project-context contract: --repo names a project, otherwise the current directory's project is used, and --all spans every project. Run from outside a git repository with no --repo, there is no project context and every project's sessions are listed.
 
 ```
-af sessions list
+af sessions list [flags]
 ```
+
+**Flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--all` |  | List sessions across every project instead of only the current one |
 
 **Global flags**
 

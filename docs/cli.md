@@ -15,9 +15,13 @@ Like the TUI and the web UI, **every `af sessions` and `af tasks` command is sco
     - Listing spans every project.
     - A `<title>` or task `<id>` resolves across projects, but a title held by several projects is ambiguous and errors rather than picking one.
 
-Acting on another project always takes an explicit `--repo`. The one exception is `af tasks list --all`, a read-only opt-in that spans every project.
+Acting on another project always takes an explicit `--repo`. The read-only list
+commands also accept `--all` as an explicit opt-in to span every project.
 
 ```bash
+af sessions list              # this project's sessions
+af sessions list --all        # every project's sessions
+af sessions list --repo /repos/beta
 af tasks list                 # this project's tasks
 af tasks list --all           # every project's tasks
 af tasks list --repo /repos/beta
@@ -66,7 +70,7 @@ Caveat for the reads: `--repo` becomes an id by hashing the path **as given on t
 One exception to per-project titles: **remote hook** sessions share a global name namespace, because the slug reaches `launch_cmd`/`delete_cmd` verbatim and external provisioners key real sandboxes on it — see [remote-hooks.md](remote-hooks.md#session-names).
 
 ```bash
-af sessions list                                          # list sessions in the repo
+af sessions list [--all]                                  # list this repo, or every repo explicitly
 af sessions get <title>                                   # fetch one session
 af sessions create --name <title> [--prompt "..."] [--program <agent>] [--here]
 af sessions send-prompt <title> "..."                     # append a prompt to a session
@@ -90,6 +94,7 @@ af sessions restore <title>                               # restore an archived/
 
 Flags:
 
+- `list`: `--all` spans every project's sessions explicitly; it is mutually exclusive with `--repo`.
 - `create`: `--name` (required), `--prompt` (initial prompt to send), `--program` (agent enum, defaults to the configured `default_program`). `--here` (alias `--in-place`) attaches the session to the repo's **existing working tree at its current branch** instead of cutting a new worktree+branch: the agent runs in the repo root, no branch is created, and killing the session never removes the working tree or branch. Requires a git repository (the current directory, or `--repo`); incompatible with remote sessions. The title `root` (any casing) is reserved for the daemon-managed root agent — see the `root_agents` key in [configuration.md](configuration.md#root-agents-always-ensured).
 - `send-prompt`: `--create` auto-creates the session if it doesn't exist; `--program` picks the agent when creating.
 - `tab-create`: creates a new tab in the session's worktree. By default, `--command` is run in the worktree as a process tab; `--name` sets the tab's name — the handle the other tab verbs address it by, not the label the TUI renders (defaults to the command's basename; sanitized to `[A-Za-z0-9_-]`, then auto-suffixed `-2`, `-3`, … on collision, so the name you pass is not always the name you get). With `--kind web`, creates an iframe tab targeting `--url` (or `--port` as a localhost:<port> convenience) instead. With `--kind vscode`, creates a VS Code editor tab on the session's own worktree — it takes no target, so `--url`/`--port`/`--command` are rejected, and it needs `code-server` (or `openvscode-server`) installed, which af detects rather than bundles. Both are browser panes with no PTY — see [web.md](web.md). The resolved tab name is printed as `{"name": "..."}` so scripts/agents can address it. The tab persists and reconnects across a daemon/`af` restart like every other tab. Refused once a session already holds 9 tabs. **Local sessions only:** an off-box session (docker/ssh/hook) has no daemon-side worktree to spawn a tab in, so the daemon rejects the request — its tab list is fixed at the single agent tab (see [remote-hooks.md](remote-hooks.md)).

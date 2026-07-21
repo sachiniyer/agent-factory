@@ -181,18 +181,33 @@ func resolveSelfSession() (*session.InstanceData, error) {
 	return whoamiSession(tmuxName)
 }
 
+var sessionsListAllFlag bool
+
 var sessionsListCmd = &cobra.Command{
 	Use:   "list",
-	Short: "List sessions",
+	Short: "List sessions in the current project",
+	Long: "List sessions in the current project.\n\n" +
+		"Scope follows the shared project-context contract: --repo names a project, " +
+		"otherwise the current directory's project is used, and --all spans every " +
+		"project. Run from outside a git repository with no --repo, there is no " +
+		"project context and every project's sessions are listed.",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		log.Initialize(false)
 		defer log.Close()
 
+		if sessionsListAllFlag && repoFlag != "" {
+			return jsonError(fmt.Errorf("--repo and --all are mutually exclusive: --repo names one project, --all spans every project"))
+		}
+
 		// Snapshot-based read: it follows --daemon-url to the remote, so it uses
 		// the lookup resolver (which ignores the client's cwd against a remote).
-		repoID, err := resolveRepoIDForLookup()
-		if err != nil {
-			return jsonError(err)
+		repoID := ""
+		if !sessionsListAllFlag {
+			var err error
+			repoID, err = resolveRepoIDForLookup()
+			if err != nil {
+				return jsonError(err)
+			}
 		}
 
 		// Read from the daemon's authoritative in-memory state when a daemon is
