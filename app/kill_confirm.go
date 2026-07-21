@@ -191,16 +191,32 @@ func unmergedCommitWarning(worktreePath, branchName, recordedBaseSHA, prState st
 	// agent can detach from a clean recorded branch, create commits, and leave
 	// those commits reachable only through the worktree's HEAD. Cleanup removes
 	// that worktree, so a branch-only check would silently orphan them (#2210
-	// review). Assess both and preserve every warning in the confirmation.
-	branchLine, branchSevere := branchCommitWarning(worktreePath, branchName, recordedBaseSHA, prState)
-	detachedLine, detachedSevere := detachedHeadCommitWarning(worktreePath)
+	// review). Assess both independently and preserve every warning in the
+	// confirmation. They run concurrently because this path blocks the Bubble Tea
+	// event loop: adding a second serial chain would multiply the existing bounded
+	// Git-read latency and violate #2030's whole-confirmation responsiveness gate.
+	type warningResult struct {
+		line   string
+		severe bool
+	}
+	branchResult := make(chan warningResult, 1)
+	detachedResult := make(chan warningResult, 1)
+	go func() {
+		line, severe := branchCommitWarning(worktreePath, branchName, recordedBaseSHA, prState)
+		branchResult <- warningResult{line: line, severe: severe}
+	}()
+	go func() {
+		line, severe := detachedHeadCommitWarning(worktreePath)
+		detachedResult <- warningResult{line: line, severe: severe}
+	}()
+	branch, detached := <-branchResult, <-detachedResult
 	lines := make([]string, 0, 2)
-	for _, line := range []string{branchLine, detachedLine} {
+	for _, line := range []string{branch.line, detached.line} {
 		if strings.TrimSpace(line) != "" {
 			lines = append(lines, line)
 		}
 	}
-	return strings.Join(lines, "\n\n"), branchSevere || detachedSevere
+	return strings.Join(lines, "\n\n"), branch.severe || detached.severe
 }
 
 // branchCommitWarning is the recorded-branch half of
