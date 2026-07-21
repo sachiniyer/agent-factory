@@ -469,7 +469,6 @@ func (m *home) reconcileActiveTabForTabs(instance *session.Instance, oldKeys []t
 	}
 	m.store.SetActiveTab(idx)
 	m.clampSelectionTab()
-	m.menu.SetActiveTab(m.store.ActiveTab())
 	m.sidebar.SyncCursorToActiveTab()
 	return true
 }

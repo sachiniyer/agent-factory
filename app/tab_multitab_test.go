@@ -62,7 +62,6 @@ func TestPaneJump_StaysPut_NoPreviewRepaint(t *testing.T) {
 	// the repaint needs (a same-instance non-tab-specific selection is already
 	// cancelled by the #1289 guard, so it would hide the bug).
 	h.store.SetActiveTab(1) // tree active tab = shell (slot 1)
-	h.menu.SetActiveTab(1)
 
 	// Open alpha's shell pane and focus it, then jump it elsewhere.
 	pane := openTestPane(t, h, alpha, 1)
@@ -111,7 +110,6 @@ func TestCloseTab_ActsOnFocusedPaneTab(t *testing.T) {
 	// Tree active tab = shell (slot 1) — a closable tab, the destructive
 	// precondition.
 	h.store.SetActiveTab(1)
-	h.menu.SetActiveTab(1)
 
 	// Open a pane and jump it to shell-3 (slot 3) — the tab on screen.
 	pane := openTestPane(t, h, alpha, 1)
@@ -135,7 +133,6 @@ func TestCloseTab_FocusedAgentPaneRefuses(t *testing.T) {
 
 	// Tree active tab = shell-2 (slot 2), a closable tab.
 	h.store.SetActiveTab(2)
-	h.menu.SetActiveTab(2)
 
 	// Focused pane on the agent tab (slot 0) — the tab actually on screen.
 	pane := openTestPane(t, h, alpha, 0)
@@ -158,7 +155,6 @@ func TestCloseTab_TreeFocusUnchanged(t *testing.T) {
 	h, _ := multiTabHome(t)
 	h.focusRegion(layout.RegionTree)
 	h.store.SetActiveTab(2) // shell-2
-	h.menu.SetActiveTab(2)
 	require.Nil(t, h.focusedOpenPane(), "precondition: no pane holds focus")
 
 	closerCalls := recordCloseTab(t, h)
@@ -318,7 +314,6 @@ func TestEnterTabA_Esc_EnterTabB_RoutesAndRenders(t *testing.T) {
 func TestCloseTab_PaneFocusedClosePreservesTreeTab(t *testing.T) {
 	h, alpha := multiTabHome(t)
 	h.store.SetActiveTab(1) // tree on shell (slot 1)
-	h.menu.SetActiveTab(1)
 
 	pane := openTestPane(t, h, alpha, 1)
 	_, _ = h.handleTabJump(4) // pane jumps to shell-3 (slot 3); tree stays on slot 1
@@ -341,7 +336,6 @@ func TestCloseTab_PaneFocusedClosePreservesTreeTab(t *testing.T) {
 func TestCloseTab_ClosingBelowTreeTabShiftsIt(t *testing.T) {
 	h, alpha := multiTabHome(t)
 	h.store.SetActiveTab(3) // tree on shell-3 (slot 3)
-	h.menu.SetActiveTab(3)
 
 	pane := openTestPane(t, h, alpha, 3)
 	_, _ = h.handleTabJump(2) // pane jumps DOWN to shell (slot 1)
@@ -363,7 +357,6 @@ func TestCloseTab_ClosingTheTreesOwnTabFallsBackToNeighbor(t *testing.T) {
 	h, _ := multiTabHome(t)
 	h.focusRegion(layout.RegionTree)
 	h.store.SetActiveTab(2)
-	h.menu.SetActiveTab(2)
 
 	recordCloseTab(t, h)
 	_, _ = h.handleCloseTab()
@@ -380,7 +373,6 @@ func TestCloseTab_ClosingTheTreesOwnTabFallsBackToNeighbor(t *testing.T) {
 func TestPaneJump_PinSurvivesUnseededEpoch(t *testing.T) {
 	h, alpha := multiTabHome(t)
 	h.store.SetActiveTab(1)
-	h.menu.SetActiveTab(1)
 	pane := openTestPane(t, h, alpha, 1)
 
 	// Simulate the startup / restored-pane window: no selectionChanged has primed
@@ -407,7 +399,6 @@ func TestPaneJump_PinSurvivesUnseededEpoch(t *testing.T) {
 func TestPaneJump_TreeTabChangeStalesThePin(t *testing.T) {
 	h, alpha := multiTabHome(t)
 	h.store.SetActiveTab(1)
-	h.menu.SetActiveTab(1)
 	pane := openTestPane(t, h, alpha, 1)
 
 	_, _ = h.handleTabJump(4) // pane-focused: pins intent
@@ -555,7 +546,6 @@ func TestCloseTab_IDLessTreeTabTracksByOrdinal(t *testing.T) {
 
 	// The tree sits on shell-3 (slot 3) — the newest tab.
 	h.store.SetActiveTab(3)
-	h.menu.SetActiveTab(3)
 
 	// The focused pane is jumped BACK to an older tab, shell (slot 1), and closes it.
 	pane := openTestPane(t, h, alpha, 3)
@@ -694,7 +684,6 @@ func TestCloseTab_StickySelectionShiftsActiveTab(t *testing.T) {
 
 	// The tree's active tab is shell-3 (slot 3) — ABOVE the tab about to close.
 	h.store.SetActiveTab(3)
-	h.menu.SetActiveTab(3)
 
 	// A pane on shell (slot 1), the lower-numbered tab that will be closed.
 	pane := openTestPane(t, h, alpha, 1)

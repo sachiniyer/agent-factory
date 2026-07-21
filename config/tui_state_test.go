@@ -22,17 +22,18 @@ func TestSaveTUIRepoViewStateWritesSchemaAndPreservesRepos(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 
 	stateA := TUIRepoViewState{
-		Selected: &TUIStateTarget{InstanceID: "id-a", Title: "alpha", TabName: "agent"},
+		Selected: &TUIStateTarget{InstanceID: "id-a", Title: "alpha", TabID: "tab-agent-a", TabName: "agent"},
 		OpenPanes: []TUIStateOpenPane{{
 			Key:        "title:alpha:tab:agent",
 			InstanceID: "id-a",
 			Title:      "alpha",
+			TabID:      "tab-agent-a",
 			TabName:    "agent",
 			FocusRank:  1,
 		}},
 	}
 	stateB := TUIRepoViewState{
-		Selected: &TUIStateTarget{InstanceID: "id-b", Title: "beta", TabName: "shell"},
+		Selected: &TUIStateTarget{InstanceID: "id-b", Title: "beta", TabID: "tab-shell-b", TabName: "shell"},
 	}
 
 	require.NoError(t, SaveTUIRepoViewState("repo-a", stateA))
@@ -49,7 +50,10 @@ func TestSaveTUIRepoViewStateWritesSchemaAndPreservesRepos(t *testing.T) {
 	require.Contains(t, file.Repos, "repo-a")
 	require.Contains(t, file.Repos, "repo-b")
 	assert.Equal(t, "alpha", file.Repos["repo-a"].Selected.Title)
+	assert.Equal(t, "tab-agent-a", file.Repos["repo-a"].Selected.TabID)
+	assert.Equal(t, "tab-agent-a", file.Repos["repo-a"].OpenPanes[0].TabID)
 	assert.Equal(t, "beta", file.Repos["repo-b"].Selected.Title)
+	assert.Contains(t, string(raw), `"tab_id"`)
 	assert.NotContains(t, string(raw), `"version"`)
 }
 

@@ -50,10 +50,6 @@ func (m *home) selectionChanged() tea.Cmd {
 		m.store.SetSelectedInstance(selected)
 		m.clampSelectionTab()
 		m.menu.SetInstance(selected)
-		// The tree cursor drives the active tab too (landing on a tab row
-		// selects that tab — #1024 PR 3), so mirror it into the menu here, not
-		// just in the explicit tab-jump handlers.
-		m.menu.SetActiveTab(m.store.ActiveTab())
 		m.maybeAutoOpenInitialPane(selected)
 		previewTab := m.store.ActiveTab()
 		previewTabSpecific := previewTab != 0

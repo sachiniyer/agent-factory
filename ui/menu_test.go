@@ -22,15 +22,15 @@ func readyUIInstance() *session.Instance {
 	return i
 }
 
-// TestMenuTerminalTabShowsBothScrollKeys verifies that a terminal tab with
-// authoritative host history surfaces both scroll shortcuts. Regression test
-// for issue #270.
-func TestMenuTerminalTabShowsBothScrollKeys(t *testing.T) {
+// TestMenuShowsBothScrollKeysWhenControllerProvidesHistory verifies that the
+// controller's explicit history capability surfaces both scroll shortcuts.
+// Menu never owned a tab binding; its old activeTab mirror was unread dead state
+// that made the former agent/terminal variants of this test identical (#1991).
+func TestMenuShowsBothScrollKeysWhenControllerProvidesHistory(t *testing.T) {
 	m := NewMenu()
 	m.SetScrollAvailable(true)
 	// Use a non-loading instance so addInstanceOptions renders the full menu.
 	m.SetInstance(readyUIInstance())
-	m.SetActiveTab(1)
 
 	var gotShiftUp, gotShiftDown int
 	for _, k := range m.options {
@@ -47,34 +47,6 @@ func TestMenuTerminalTabShowsBothScrollKeys(t *testing.T) {
 	}
 	if gotShiftDown != 1 {
 		t.Errorf("expected exactly 1 KeyShiftDown in terminal tab menu, got %d", gotShiftDown)
-	}
-}
-
-// TestMenuAgentTabShowsBothScrollKeys verifies that the Agent tab also
-// surfaces both scroll shortcuts — the agent output supports scrolling identically to
-// terminal, and the help screen documents the shortcuts for both. Regression
-// test for issue #467.
-func TestMenuAgentTabShowsBothScrollKeys(t *testing.T) {
-	m := NewMenu()
-	m.SetScrollAvailable(true)
-	m.SetInstance(readyUIInstance())
-	m.SetActiveTab(0)
-
-	var gotShiftUp, gotShiftDown int
-	for _, k := range m.options {
-		switch k {
-		case keys.KeyShiftUp:
-			gotShiftUp++
-		case keys.KeyShiftDown:
-			gotShiftDown++
-		}
-	}
-
-	if gotShiftUp != 1 {
-		t.Errorf("expected exactly 1 KeyShiftUp in agent tab menu, got %d", gotShiftUp)
-	}
-	if gotShiftDown != 1 {
-		t.Errorf("expected exactly 1 KeyShiftDown in agent tab menu, got %d", gotShiftDown)
 	}
 }
 

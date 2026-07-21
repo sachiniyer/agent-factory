@@ -153,13 +153,17 @@ type Sidebar struct {
 	// auto-expanded (collapse-by-default applies to non-selected instances).
 	treeCollapsed string
 
-	// lastCursorTitle/lastCursorTab remember the identity of the last
-	// instance-section row the cursor rested on (tab -1 = the instance row
-	// itself). The reconcile's #969 re-pin asserts only the instance; this memo
-	// restores the tab SUB-selection too, so a snapshot arriving while the
-	// cursor sits on a tab row doesn't yank it up to the instance row.
-	lastCursorTitle string
-	lastCursorTab   int
+	// lastCursor* remember the identity of the last instance-section row the
+	// cursor rested on (tab -1 = the instance row itself). The reconcile's #969
+	// re-pin asserts only the instance; this memo restores the tab sub-selection
+	// too. Stable IDs carry same-session reorders; names cover the same-title
+	// replacement domain plus agent/legacy ID-less tabs. Slot is only the final
+	// fallback when the older memo has no usable identity.
+	lastCursorTitle      string
+	lastCursorInstanceID string
+	lastCursorTabID      string
+	lastCursorTabName    string
+	lastCursorTab        int
 
 	// scrollOffset is the index into visibleItems of the first rendered row
 	// when the list is too tall for the allocation. It is adjusted lazily in

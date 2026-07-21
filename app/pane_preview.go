@@ -25,8 +25,20 @@ type panePreviewTxn struct {
 }
 
 type panePreviewSuppression struct {
-	original paneBinding
-	target   paneBinding
+	original paneBindingIdentity
+	target   paneBindingIdentity
+}
+
+// paneBindingIdentity is the durable comparison key for a dismissed preview.
+// The binding itself still carries the current ordinal needed to render, but a
+// suppression survives an out-of-band reorder by keying non-agent tabs on their
+// stable ID. Agent and legacy/id-less tabs use the same name fallback as pane
+// reconciliation; the slot remains only for an invalid/incomplete binding.
+type paneBindingIdentity struct {
+	instance *session.Instance
+	tabID    string
+	tabName  string
+	tab      int
 }
 
 // Two capture cadences give a retarget suppressed by the per-pane throttle one
@@ -44,6 +56,38 @@ type panePreviewStaleExpiredMsg struct {
 
 func samePaneBinding(a, b paneBinding) bool {
 	return a.instance == b.instance && a.tab == b.tab
+}
+
+func paneBindingIdentityOf(binding paneBinding) paneBindingIdentity {
+	identity := paneBindingIdentity{instance: binding.instance, tab: binding.tab}
+	if binding.instance == nil {
+		return identity
+	}
+	tabs := binding.instance.GetTabs()
+	if binding.tab < 0 || binding.tab >= len(tabs) {
+		return identity
+	}
+	tab := tabs[binding.tab]
+	if tab.Kind != session.TabKindAgent {
+		identity.tabID = tab.ID
+	}
+	if identity.tabID == "" {
+		identity.tabName = tab.Name
+	}
+	return identity
+}
+
+func samePaneBindingIdentity(a, b paneBindingIdentity) bool {
+	if a.instance != b.instance {
+		return false
+	}
+	if a.tabID != "" || b.tabID != "" {
+		return a.tabID != "" && a.tabID == b.tabID
+	}
+	if a.tabName != "" || b.tabName != "" {
+		return a.tabName != "" && a.tabName == b.tabName
+	}
+	return a.tab == b.tab
 }
 
 // updatePanePreview returns a tea.Cmd the caller MUST dispatch: the
@@ -244,8 +288,8 @@ func (m *home) suppressPanePreview(original, target paneBinding) {
 		return
 	}
 	m.panePreviewSuppression = &panePreviewSuppression{
-		original: original,
-		target:   target,
+		original: paneBindingIdentityOf(original),
+		target:   paneBindingIdentityOf(target),
 	}
 }
 
@@ -309,11 +353,11 @@ func (m *home) isPanePreviewSuppressed(original, target paneBinding) bool {
 	if suppressed == nil {
 		return false
 	}
-	if !samePaneBinding(suppressed.target, target) {
+	if !samePaneBindingIdentity(suppressed.target, paneBindingIdentityOf(target)) {
 		m.panePreviewSuppression = nil
 		return false
 	}
-	return samePaneBinding(suppressed.original, original)
+	return samePaneBindingIdentity(suppressed.original, paneBindingIdentityOf(original))
 }
 
 func (m *home) commitPanePreviewReplace() (*store.OpenPane, tea.Cmd) {

@@ -33,12 +33,12 @@ func (m *home) restoreTUIViewStateOnLaunch() int {
 }
 
 func (m *home) applyTUIViewState(state config.TUIRepoViewState) int {
-	restored := m.restoreTUIViewPanes(state.OpenPanes)
-	m.restoreTUISelection(state)
 	if state.Focus != nil {
 		focusCopy := *state.Focus
 		m.pendingTUIViewFocus = &focusCopy
 	}
+	restored := m.restoreTUIViewPanes(state.OpenPanes)
+	m.restoreTUISelection(state)
 	// A persisted selection that resolved to an archived row (or to nothing)
 	// leaves the store with no display selection, yet a live pane may have been
 	// restored above — an incoherent mix where the sidebar highlights nothing (or
@@ -68,7 +68,7 @@ func (m *home) restoreTUIViewPanes(saved []config.TUIStateOpenPane) int {
 		if inst == nil || inst.GetLiveness() == session.LiveArchived {
 			continue
 		}
-		tab, ok := tabIndexByName(inst, paneState.TabName)
+		tab, ok := tabIndexByIdentity(inst, paneState.TabID, paneState.TabName)
 		if !ok {
 			continue
 		}
@@ -86,6 +86,14 @@ func (m *home) restoreTUIViewPanes(saved []config.TUIStateOpenPane) int {
 		}
 		if pane == nil {
 			continue
+		}
+		// Pane keys intentionally stay name-based for persisted-state backward
+		// compatibility. If ID-first restore followed a renamed tab, translate
+		// the pending focus from its saved key to that pane's current name key so
+		// the first sized relayout can still restore keyboard focus.
+		if m.pendingTUIViewFocus != nil && m.pendingTUIViewFocus.Region == tuiFocusRegionPane &&
+			m.pendingTUIViewFocus.PaneKey == key {
+			m.pendingTUIViewFocus.PaneKey = tuiPaneKeyForOpenPane(pane)
 		}
 		restored = append(restored, restoredPane{saved: paneState, pane: pane})
 	}
@@ -106,15 +114,16 @@ func (m *home) restoreTUISelection(state config.TUIRepoViewState) {
 	if inst == nil || inst.GetLiveness() == session.LiveArchived {
 		return
 	}
+	tabID := state.Selected.TabID
 	tabName := state.Selected.TabName
 	if state.ActiveTab != nil && sameTUIStateInstance(*state.Selected, *state.ActiveTab) {
+		tabID = state.ActiveTab.TabID
 		tabName = state.ActiveTab.TabName
 	}
-	tab := tabIndexOrDefault(inst, tabName)
+	tab := tabIndexOrDefault(inst, tabID, tabName)
 	m.sidebar.SelectInstance(inst)
 	m.store.SetActiveTab(tab)
 	m.menu.SetInstance(inst)
-	m.menu.SetActiveTab(tab)
 	m.sidebar.SelectTabRow(inst.Title, tab)
 }
 
@@ -148,7 +157,6 @@ func (m *home) reconcileRestoredSelectionWithWorkspace() {
 	m.sidebar.SelectInstance(inst)
 	m.store.SetActiveTab(tab)
 	m.menu.SetInstance(inst)
-	m.menu.SetActiveTab(tab)
 	m.sidebar.SelectTabRow(inst.Title, tab)
 }
 
@@ -209,7 +217,7 @@ func (m *home) captureTUIViewState() config.TUIRepoViewState {
 		if inst == nil || !m.store.ContainsInstance(inst) {
 			continue
 		}
-		tabName, ok := tabNameAt(inst, p.Tab())
+		tabID, tabName, ok := tabIdentityAt(inst, p.Tab())
 		if !ok {
 			continue
 		}
@@ -217,6 +225,7 @@ func (m *home) captureTUIViewState() config.TUIRepoViewState {
 			Key:        tuiPaneKeyForInstance(inst, tabName),
 			InstanceID: inst.ID,
 			Title:      inst.Title,
+			TabID:      tabID,
 			TabName:    tabName,
 			FocusRank:  p.LastFocus(),
 		})
@@ -235,10 +244,11 @@ func (m *home) captureTUISelectedTarget() *config.TUIStateTarget {
 	if inst == nil || !m.store.ContainsInstance(inst) {
 		return nil
 	}
-	tabName, _ := tabNameAt(inst, m.store.ActiveTab())
+	tabID, tabName, _ := tabIdentityAt(inst, m.store.ActiveTab())
 	return &config.TUIStateTarget{
 		InstanceID: inst.ID,
 		Title:      inst.Title,
+		TabID:      tabID,
 		TabName:    tabName,
 	}
 }
@@ -350,15 +360,28 @@ func (m *home) openPaneByKey(key string) *store.OpenPane {
 }
 
 func tabNameAt(inst *session.Instance, idx int) (string, bool) {
-	tabs := inst.GetTabs()
-	if idx < 0 || idx >= len(tabs) {
-		return "", false
-	}
-	return tabs[idx].Name, true
+	_, name, ok := tabIdentityAt(inst, idx)
+	return name, ok
 }
 
-func tabIndexByName(inst *session.Instance, name string) (int, bool) {
-	for i, tab := range inst.GetTabs() {
+func tabIdentityAt(inst *session.Instance, idx int) (string, string, bool) {
+	tabs := inst.GetTabs()
+	if idx < 0 || idx >= len(tabs) {
+		return "", "", false
+	}
+	return tabs[idx].ID, tabs[idx].Name, true
+}
+
+func tabIndexByIdentity(inst *session.Instance, id, name string) (int, bool) {
+	tabs := inst.GetTabs()
+	if id != "" {
+		for i, tab := range tabs {
+			if tab.ID == id {
+				return i, true
+			}
+		}
+	}
+	for i, tab := range tabs {
 		if tab.Name == name {
 			return i, true
 		}
@@ -366,8 +389,8 @@ func tabIndexByName(inst *session.Instance, name string) (int, bool) {
 	return 0, false
 }
 
-func tabIndexOrDefault(inst *session.Instance, name string) int {
-	if idx, ok := tabIndexByName(inst, name); ok {
+func tabIndexOrDefault(inst *session.Instance, id, name string) int {
+	if idx, ok := tabIndexByIdentity(inst, id, name); ok {
 		return idx
 	}
 	return 0

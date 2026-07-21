@@ -140,7 +140,6 @@ func (m *home) createNewTab(selected *session.Instance, kind session.TabKind) (t
 	// the browser renders the editor itself.
 	newIdx := len(tree.TabLabels(selected)) - 1
 	m.store.SetActiveTab(newIdx)
-	m.menu.SetActiveTab(newIdx)
 	m.sidebar.SyncCursorToActiveTab()
 	return m.openOrFocusPane(selected, newIdx)
 }
@@ -287,7 +286,6 @@ func (m *home) handleCloseTab() (tea.Model, tea.Cmd) {
 		}
 		m.store.SetActiveTab(next)
 		m.clampSelectionTab()
-		m.menu.SetActiveTab(m.store.ActiveTab())
 		m.sidebar.SyncCursorToActiveTab()
 	}
 	return m, m.selectionChanged()
@@ -330,7 +328,6 @@ func (m *home) handleTabJump(oneBased int) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	m.store.SetActiveTab(idx)
-	m.menu.SetActiveTab(idx)
 	m.sidebar.SyncCursorToActiveTab()
 	return m, m.selectionChanged()
 }
