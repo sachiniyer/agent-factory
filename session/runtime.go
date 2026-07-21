@@ -90,20 +90,20 @@ type ProvisionResult struct {
 	// Backend is the in-process Backend an Instance is built with. Always set
 	// on success.
 	Backend Backend
-	// Endpoint is the authed `af agent-server` URL + token a sandbox
-	// runtime exposes (#1592 Phase 4). nil for an in-process runtime
-	// (local/hook), whose agent-server is the local tmux facade with no network
-	// hop. The docker/ssh runtimes fill this in (docker: PR4); NewInstance threads
-	// a non-nil endpoint into the instance's remote agent-server client. The
-	// runtime-contract test exercises the non-nil path via a fake runtime.
+	// Endpoint is the authed `af agent-server` URL + token a sandbox runtime
+	// exposes (#1592 Phase 4). nil only for the local in-process runtime; the
+	// docker/ssh/hook runtimes fill this in. NewInstance threads a non-nil endpoint
+	// into the instance's remote agent-server client. The runtime-contract test
+	// exercises the non-nil path via a fake runtime.
 	Endpoint *AgentServerEndpoint
 	// Teardown reaps the sandbox this Runtime provisioned — `docker rm -f` the
 	// container (PR4), close the ssh tunnel + remove the remote dir (PR5). nil for
 	// an in-process runtime (nothing off-box to reap). NewInstance stashes it on
 	// the instance so the agent-server Kill path runs it AFTER tearing the remote
 	// workspace down over REST, and NewInstance itself runs it if wiring the
-	// remote client fails, so a provisioned sandbox never leaks. Idempotent (the
-	// docker runtime guards it with a sync.Once).
+	// remote client fails, so a provisioned sandbox never leaks. Repeated calls are
+	// serialized by the runtime; docker/SSH latch answered outcomes and leave
+	// unknown outcomes retryable, while hook runs its idempotent delete once.
 	Teardown func() error
 }
 

@@ -266,7 +266,12 @@ func (p *dockerProvisioner) provision() (ProvisionResult, error) {
 	teardown := p.reap
 	log.InfoLog.Printf("docker runtime: session %q running in container %s, agent-server at %s", p.spec.Title, p.shortID(), endpoint.URL)
 	return ProvisionResult{
-		Backend:  &dockerBackend{containerID: p.containerID, remoteAgentBackend: remoteAgentBackend{reap: teardown}},
+		Backend: &dockerBackend{
+			containerID:        p.containerID,
+			remoteAgentBackend: remoteAgentBackend{reap: teardown},
+			provisioner:        p,
+			cleanup:            &DockerRuntimeCleanupData{ContainerID: p.containerID},
+		},
 		Endpoint: endpoint,
 		Teardown: teardown,
 	}, nil
@@ -612,6 +617,10 @@ func originRemoteURL(repoRoot string) string {
 type dockerBackend struct {
 	remoteAgentBackend
 	containerID string
+	// provisioner owns the concrete reaper; cleanup is its immutable storage-only
+	// identity. Both are nil for an ordinary inert backend loaded from a live row.
+	provisioner *dockerProvisioner
+	cleanup     *DockerRuntimeCleanupData
 }
 
 var _ Backend = (*dockerBackend)(nil)

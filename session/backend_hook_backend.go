@@ -237,7 +237,14 @@ func (p *hookProvisioner) provision() (ProvisionResult, error) {
 	teardown := p.reap
 	log.InfoLog.Printf("hook runtime: session %q provisioned via launch_cmd, agent-server at %s", p.spec.Title, ep.URL)
 	return ProvisionResult{
-		Backend:  &HookBackend{remoteAgentBackend: remoteAgentBackend{reap: teardown}},
+		Backend: &HookBackend{
+			remoteAgentBackend: remoteAgentBackend{reap: teardown},
+			provisioner:        p,
+			cleanup: &HookRuntimeCleanupData{
+				DeleteCmd: p.hooks.DeleteCmd,
+				Slug:      p.slug,
+			},
+		},
 		Endpoint: ep,
 		Teardown: teardown,
 	}, nil
@@ -382,6 +389,10 @@ func (p *hookProvisioner) reap() error {
 // restore replaces wholesale via a fresh hookRuntime.Provision.
 type HookBackend struct {
 	remoteAgentBackend
+	// provisioner owns the concrete reaper; cleanup is its immutable storage-only
+	// identity. Both are nil for an ordinary inert backend.
+	provisioner *hookProvisioner
+	cleanup     *HookRuntimeCleanupData
 }
 
 var _ Backend = (*HookBackend)(nil)

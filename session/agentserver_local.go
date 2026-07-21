@@ -101,7 +101,7 @@ func (i *Instance) AgentServer() AgentServer {
 			// the poll's remote-probe-failure path (#1794) and the restore loop's
 			// Alive gate already handle that, and the instance keeps its started+Lost
 			// state so auto-recovery is never stranded.
-			i.agentSrv = &deadRemoteAgentServer{title: i.Title}
+			i.agentSrv = &deadRemoteAgentServer{title: i.Title, teardown: i.runtimeTeardown}
 		default:
 			i.agentSrv = &localAgentServer{inst: i}
 		}
