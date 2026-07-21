@@ -300,14 +300,16 @@ func (w *TabbedWindow) SelectTab(idx int) {
 }
 
 // tabLabels returns the labels for the bound instance's tabs. The label
-// derivation lives in tree.TabLabels (#1024 PR 3) — the single source of truth
-// shared with the sidebar tree, so the pane header, the tree's child rows, and
-// the 1-9 jump keys always agree on slot numbering. Never empty.
+// derivation lives in tree.TabLabels (#1024 PR 3), shared with the sidebar tree
+// and the 1-9 jump keys. Never empty.
 func (w *TabbedWindow) tabLabels() []string {
 	return tree.TabLabels(w.boundInstance())
 }
 
 func tabLabelFor(inst *session.Instance, idx int) string {
+	if label, ok := tree.TabLabelAt(inst, idx); ok {
+		return label
+	}
 	labels := tree.TabLabels(inst)
 	if idx >= 0 && idx < len(labels) {
 		return labels[idx]
@@ -591,8 +593,9 @@ func (w *TabbedWindow) BeginScrollFill() {
 }
 
 // renderHeader renders the one-line `title · tab` header. The header is the
-// only place the pane's tab is named inside the pane (the tab bar is gone);
-// the highlight doubles as the pane's focus indicator.
+// only place the pane's tab is named inside the pane (the tab bar is gone), so
+// duplicate labels include their 1-based jump slot (#2150); the highlight
+// doubles as the pane's focus indicator.
 func (w *TabbedWindow) renderHeader(width int) string {
 	var text string
 	if w.preview != nil && w.preview.instance != nil {

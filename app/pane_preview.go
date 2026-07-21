@@ -457,10 +457,12 @@ func paneBindingLabel(binding paneBinding) string {
 	if binding.instance == nil {
 		return "no session"
 	}
-	label := ""
-	labels := tree.TabLabels(binding.instance)
-	if binding.tab >= 0 && binding.tab < len(labels) {
-		label = labels[binding.tab]
+	label, ok := tree.TabLabelAt(binding.instance, binding.tab)
+	if !ok {
+		labels := tree.TabLabels(binding.instance)
+		if binding.tab >= 0 && binding.tab < len(labels) {
+			label = labels[binding.tab]
+		}
 	}
 	if label == "" {
 		return binding.instance.Title
