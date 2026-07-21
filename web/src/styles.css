@@ -1332,8 +1332,8 @@ body {
   background: var(--af-danger-subtle);
 }
 
-/* The labelled new-tab control and its kind menu. The wrap is the positioning
-   context the absolutely-placed menu hangs from. */
+/* The labelled new-tab control and its kind menu. The wrap keeps their lifecycle and
+   outside-click boundary together; the menu itself uses viewport coordinates below. */
 .af-tab-new-wrap {
   position: relative;
   display: inline-flex;
@@ -1341,12 +1341,12 @@ body {
 }
 
 /* The new-tab menu (Terminal / VS Code). Mirrors .af-project-menu's chrome so the two
-   dropdowns read as one component, but hangs from the LEFT: the + sits at the
-   start of the free space after the tabs, so a right-anchored menu would drift
-   away from its button as the tab count changes. */
+   dropdowns read as one component. Fixed positioning deliberately escapes the tab
+   bar's overflow clip; ui.ts aligns its right edge to the caret and recomputes the
+   viewport coordinates whenever the horizontal tab bar scrolls. */
 .af-tab-menu {
-  position: absolute;
-  top: calc(100% + 6px);
+  position: fixed;
+  top: 0;
   left: 0;
   min-width: 9rem;
   background: var(--af-bg-raised);

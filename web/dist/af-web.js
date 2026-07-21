@@ -11050,11 +11050,26 @@ var AppShell = class {
     menu.setAttribute("role", "menu");
     menu.setAttribute("aria-label", "Tab type");
     menu.hidden = true;
+    let scrollParent = null;
+    const positionMenu = () => {
+      const anchor = trigger.getBoundingClientRect();
+      const menuBox = menu.getBoundingClientRect();
+      const maxLeft = Math.max(0, window.innerWidth - menuBox.width);
+      const left = Math.min(Math.max(0, anchor.right - menuBox.width), maxLeft);
+      const below = anchor.bottom + 6;
+      const above = anchor.top - menuBox.height - 6;
+      const top = below + menuBox.height <= window.innerHeight ? below : Math.max(0, above);
+      menu.style.left = `${left}px`;
+      menu.style.top = `${top}px`;
+    };
     const close = () => {
       menu.hidden = true;
       trigger.setAttribute("aria-expanded", "false");
       document.removeEventListener("mousedown", onDocMouseDown);
       document.removeEventListener("keydown", onKeyDown, true);
+      scrollParent?.removeEventListener("scroll", positionMenu);
+      scrollParent = null;
+      window.removeEventListener("resize", positionMenu);
     };
     const onDocMouseDown = (e) => {
       if (!wrap.isConnected || !wrap.contains(e.target)) {
@@ -11071,7 +11086,11 @@ var AppShell = class {
     };
     const open = () => {
       menu.hidden = false;
+      positionMenu();
       trigger.setAttribute("aria-expanded", "true");
+      scrollParent = wrap.closest(".af-tabbar");
+      scrollParent?.addEventListener("scroll", positionMenu, { passive: true });
+      window.addEventListener("resize", positionMenu);
       document.addEventListener("mousedown", onDocMouseDown);
       document.addEventListener("keydown", onKeyDown, true);
     };
