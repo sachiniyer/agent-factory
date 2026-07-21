@@ -2,6 +2,7 @@ package session
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -115,6 +116,59 @@ func TestSSHRuntime_ConfigValidation(t *testing.T) {
 	_, err = sshRuntime{}.Provision(ProvisionSpec{RepoRoot: withHost, Title: "s", CloneURL: ""})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "origin")
+}
+
+func TestSSHRuntimeRejectsEmbeddedHTTPCloneCredentialsBeforeProvisioning(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	repoRoot := initTempGitRepo(t)
+	writeInRepoConfig(t, repoRoot, map[string]any{
+		"backend": "ssh",
+		"ssh":     map[string]any{"host": "build-box:2222"},
+	})
+
+	previousSelfBinary := sshSelfBinary
+	sshSelfBinary = func() (string, error) {
+		return "", errors.New("ssh provisioning continued past clone URL validation")
+	}
+	t.Cleanup(func() { sshSelfBinary = previousSelfBinary })
+
+	_, err := sshRuntime{}.Provision(ProvisionSpec{
+		RepoRoot: repoRoot,
+		Title:    "credential-boundary",
+		CloneURL: "https://fixture-user:fixture-secret@example.invalid/project.git",
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "embedded HTTP credentials")
+	assert.NotContains(t, err.Error(), "fixture-user")
+	assert.NotContains(t, err.Error(), "fixture-secret")
+}
+
+func TestHookRuntimeRejectsEmbeddedHTTPCloneCredentialsBeforeLaunch(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	repoRoot := initTempGitRepo(t)
+	marker := filepath.Join(t.TempDir(), "launch-ran")
+	launch := writeScript(t, t.TempDir(), "launch.sh",
+		"touch "+shellQuote(marker)+"\n"+
+			`echo '{"url":"http://127.0.0.1:9","token":"test-token"}'`)
+	writeInRepoConfig(t, repoRoot, map[string]any{
+		"backend": "hook",
+		"remote_hooks": map[string]any{
+			"launch_cmd": launch,
+			"delete_cmd": "true",
+		},
+	})
+
+	_, err := hookRuntime{}.Provision(ProvisionSpec{
+		RepoRoot: repoRoot,
+		Title:    "credential-boundary",
+		CloneURL: "https://fixture-user:fixture-secret@example.invalid/project.git",
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "embedded HTTP credentials")
+	assert.NotContains(t, err.Error(), "fixture-user")
+	assert.NotContains(t, err.Error(), "fixture-secret")
+	_, statErr := os.Stat(marker)
+	assert.ErrorIs(t, statErr, os.ErrNotExist, "launch_cmd ran before clone URL credential validation")
 }
 
 // TestDockerRuntime_ConfigValidation pins the docker runtime's cheap, hermetic

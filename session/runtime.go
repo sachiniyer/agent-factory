@@ -64,20 +64,20 @@ type ProvisionSpec struct {
 	// Program is the agent program to run in the workspace (empty ⇒ the config
 	// default). Passed through to the sandbox's `af agent-server --program`.
 	Program string
-	// CloneURL is the git remote the sandbox clones the workspace from — the
-	// repo's `origin` for a docker/ssh session (GitHub for a real repo, a
-	// file:// or bind-mounted path for a self-contained test). Empty for the
-	// in-process local/hook runtimes, which never clone. On a fresh create the
-	// sandbox clones its default branch and the in-sandbox worktree derives the
-	// session branch from Title.
+	// CloneURL is the git remote the off-host runtime clones the workspace from —
+	// the repo's `origin` for a docker/ssh/hook session (GitHub for a real repo,
+	// a file:// or bind-mounted path for a self-contained test). Empty for the
+	// in-process local runtime. Docker and SSH clone it directly; hook passes it
+	// to launch_cmd. On a fresh create the sandbox clones its default branch and
+	// the in-sandbox worktree derives the session branch from Title.
 	CloneURL string
 	// RestoreBranch, when set, makes this a RESTORE provision rather than a fresh
 	// create (#1592 Phase 4 PR6): after cloning, the sandbox materializes this
 	// exact branch (the one archive pushed to origin) as a LOCAL ref so the
 	// in-sandbox local backend's Setup reuses it — bringing the pushed commits
 	// back — instead of branching fresh off the default. Empty on a fresh create.
-	// Only the sandbox runtimes (docker/ssh) honor it; the in-process runtimes
-	// never clone, so it is a no-op for them.
+	// Every off-host runtime honors it: docker/ssh directly and hook through
+	// launch_cmd. The in-process local runtime never clones, so it is a no-op.
 	RestoreBranch string
 	// SessionEnvPassthrough contains exact global-only variable names approved
 	// for the agent. Sandboxed runtimes pass names, never values, to their

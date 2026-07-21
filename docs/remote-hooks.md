@@ -72,6 +72,11 @@ Provisions the workspace on your infrastructure, starts an `af agent-server` the
 | `--program-resolved` | Present with `--program`; forward it to `af agent-server` so the cloned repo cannot apply a second `program_overrides` lookup. |
 | `--session-env <name>` | Repeated for each global `session_env_passthrough` name; forward each one to `af agent-server --session-env`. Values are never command arguments. |
 
+af rejects an HTTP(S) origin containing userinfo before `launch_cmd` runs,
+because `--repo` would otherwise put that credential in process arguments and
+hook diagnostics. Remove the userinfo and let the provisioned environment's
+credential mechanism authenticate the clone.
+
 Both hook scripts themselves run with af's filtered session environment: core
 runtime/Git/GitHub variables, authentication for the selected agent, and the
 explicit `session_env_passthrough` names. Unrelated daemon secrets are absent.

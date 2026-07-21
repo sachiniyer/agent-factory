@@ -54,35 +54,100 @@ clones the branch back (see [Archive & restore](#archive--restore)).
 {
   "backend": "docker",
   "docker": {
-    "image": "my-org/af-runtime:latest",
-    "run_args": ["--memory", "4g", "-e", "MY_VAR=1"]
+    "image": "ghcr.io/my-org/af-runtime@sha256:<64-lowercase-hex-digits>"
   }
 }
 ```
 
 | Key | Required | Description |
 |-----|----------|-------------|
-| `docker.image` | yes | The container image the session runs in (see requirements below). |
-| `docker.run_args` | no | Extra arguments appended verbatim to `docker run` (mounts, env, resource limits). |
+| `docker.image` | yes | The container image the session runs in (see requirements and trust grant below). |
+| `docker.run_args` | no | Extra arguments appended verbatim to `docker run` (mounts, env, resource limits). These are repository-controlled and cannot be combined with host environment forwarding or client transport state. |
 
-The Docker runtime does not copy the daemon's whole environment into the
-container. Because repository config selects the image and its binaries, af
-does not automatically grant that image the built-in agent, GitHub, proxy, or
-CA variables used by local sessions. Only names explicitly listed in the
-global `session_env_passthrough` setting cross this boundary. Docker receives
-each as `-e NAME`, so the value does not appear in the docker command line.
-Container-native `HOME` and `PATH` remain owned by the image. An environment
-added through `docker.run_args` still has to be built in or named in
-`session_env_passthrough` before the agent pane may inherit it.
+### Credentials and the host boundary
 
-Treat each Docker pass-through name as a trust grant to the configured image,
-and prefer an image pinned by digest. For example, a private GitHub Codex
-session using environment-backed credentials may explicitly list
-`GH_TOKEN` and `OPENAI_API_KEY`; that keeps clone, `gh`, HTTPS push, and Codex
-authentication working after the operator has made that trust decision. If you
-use stored credentials instead, mount only the relevant config or
-credential-helper resources deliberately with `docker.run_args`; host paths and
-native keyrings are not implicitly mounted into a container.
+By default, the Docker runtime does not mount or copy the host home, Claude's
+`.credentials.json`, Codex's `auth.json`, the GitHub CLI config, an SSH agent,
+or host certificate/config paths. A path such as `CODEX_HOME=/home/me/.codex`
+is deliberately absent from the built-in Docker policy: that path names host
+state which does not exist inside the container, and mounting it would give the
+session the refresh credential it is meant to be isolated from. Explicitly
+adding a path variable to `session_env_passthrough` forwards only its string
+value; af still does not mount or copy the referenced host file.
+
+Portable environment credentials are opt-in at the **host/image boundary**.
+When a supported Claude or Codex credential, a GitHub HTTPS token, a proxy, or
+an explicit `session_env_passthrough` name is present, af refuses to invoke
+Docker unless the host's global `config.toml` grants the repo-selected image by
+its exact immutable digest:
+
+```toml
+# ~/.agent-factory/config.toml — global only, hand-edited
+docker_env_trusted_images = [
+  "ghcr.io/my-org/af-runtime@sha256:<64-lowercase-hex-digits>",
+]
+```
+
+The checked-in `docker.image` must be the same `image@sha256:...` string. A tag
+such as `latest`, a short digest, or a grant in the repository config cannot
+authorize the transfer. Invalid global grants fail config loading instead of
+silently leaving the agent unauthenticated. af passes approved **names** as
+`-e NAME`; values stay out of argv and diagnostics. For the initial `docker
+run`, the Docker CLI gets those approved values plus the client/daemon state it
+needs for registry access and configured transports (including an SSH agent for
+an SSH Docker context). Once any approved value is present, af requires
+`docker.run_args` to be empty, so checked-in arguments cannot request either the
+approved values or that client-only transport state. Later Docker calls no
+longer carry agent, GitHub, or explicit session values; they retain only the
+proxy/custom-CA and Docker transport state needed to control or reap the
+container, including after a daemon restart. Agent Factory control-plane
+tokens, other agents' credentials, and unrelated ambient variables are
+excluded from the Docker client unless the host operator deliberately names
+them in global `session_env_passthrough`.
+
+Docker can also [inject proxy values from its client
+config](https://docs.docker.com/engine/cli/proxy/) into a new container without
+an explicit `-e`. Those URLs may contain credentials, so af sends empty
+assignments for every unapproved HTTP, HTTPS, FTP, ALL, and NO proxy spelling;
+client-config or image defaults cannot bypass the same image-trust decision.
+To give the session a proxy, expose the corresponding non-empty proxy variable
+to the daemon and grant the immutable image as above.
+
+The built-in portable agent surface is deliberately narrow:
+
+- Claude: direct Anthropic API/auth values and `CLAUDE_CODE_OAUTH_TOKEN`; use a
+  vendor-supported automation token rather than the host credentials file.
+- Codex: direct OpenAI/Codex API values and `CODEX_ACCESS_TOKEN`; file-backed
+  login under `CODEX_HOME` is not copied.
+- GitHub: for an HTTPS GitHub origin, af forwards only the highest-precedence
+  token that matches that public or configured Enterprise host; it does not
+  also expose tokens for the other host. A value-free Git helper supports clone
+  and push, and the same token supports `gh`. HTTP(S) origin URLs with embedded
+  userinfo are rejected before any off-host runtime runs because they would put
+  a credential in process arguments and clone diagnostics; remove the userinfo
+  and use the environment helper instead. SSH origins do not implicitly receive
+  the host SSH agent; use HTTPS or configure a separate container-owned
+  credential mechanism.
+- Other agents or providers: add each portable value's exact variable name to
+  global `session_env_passthrough`. File/keyring/cloud-profile paths remain
+  unsupported until they have a container-owned credential mechanism.
+
+If any host value crosses this boundary, `docker.run_args` must be empty. Even
+a seemingly harmless resource flag is repository-controlled, and Docker's raw
+argument surface also admits mounts, namespace changes, environment files, and
+requests for values from the Docker client's own environment; an image-only
+trust grant cannot authorize those separately. A later host-owned
+runtime-profile slice can add constrained arguments without making the
+checked-in repository its own sandbox authority.
+
+This is a **partial containment boundary**, not a claim that credentials are
+safe from code in the session. The trusted image and repository code can use
+the forwarded tokens, their network access is not restricted, and token scopes
+remain whatever the provider granted. When no host values are forwarded, raw
+`docker.run_args` still retain their existing power to mount host paths or
+widen container privileges. Keep them empty for containment-sensitive sessions.
+The workspace itself is cloned into the disposable container; it is not bind-
+mounted from the daemon host.
 
 ### Image requirements (bring-your-own image)
 
@@ -213,7 +278,9 @@ inherit it. A local token is never copied to the SSH host implicitly.
   daemon, so there is nothing to pre-install.
 - The agent CLIs you intend to run (claude, codex, aider, gemini, …).
 - The repo must have an `origin` remote the **remote host** can clone from
-  (GitHub for a real repo; a `file://` path for a self-contained test).
+  (GitHub for a real repo; a `file://` path for a self-contained test). af
+  rejects HTTP(S) origins containing userinfo before dialing the host; use a
+  credential helper or credentials already present on the remote instead.
 
 ### Operations
 

@@ -184,8 +184,30 @@ func (dockerRuntime) Provision(spec ProvisionSpec) (ProvisionResult, error) {
 	if spec.CloneURL == "" {
 		return ProvisionResult{}, missingOriginError(BackendDocker, spec.RepoRoot)
 	}
+	if err := validateOffHostCloneURLCredentials(spec.CloneURL); err != nil {
+		return ProvisionResult{}, fmt.Errorf("backend=docker: %w", err)
+	}
 	if _, err := lookPath("docker"); err != nil {
 		return ProvisionResult{}, dockerCLIMissingError(err)
+	}
+
+	// Resolve once in the trusted host process. The agent-server receives this
+	// exact command with --program-resolved and must not reinterpret its enum.
+	resolvedProgram := config.ResolveProgram(&cfg.Config, spec.Program)
+	name := dockerAgentName(resolvedProgram)
+	sourceEnvironment := os.Environ()
+	githubHost, _ := sourceEnvironmentValue(sourceEnvironment, "GH_HOST")
+	forwardCandidates := append([]string(nil), spec.SessionEnvPassthrough...)
+	forwardCandidates = append(forwardCandidates, dockerGitHubEnvironmentNames(sourceEnvironment, spec.CloneURL)...)
+	forwardNames := sessionenv.DockerForwardNames(sourceEnvironment, name, forwardCandidates)
+	clientConnectionNames := sessionenv.DockerClientConnectionNames(sourceEnvironment)
+	if len(forwardNames) > 0 {
+		if !config.IsDockerEnvironmentImageTrusted(image, cfg.DockerEnvTrustedImages) {
+			return ProvisionResult{}, fmt.Errorf("backend=docker: refusing to forward host environment values to image %q; add its exact immutable image digest (image@sha256:<64 lowercase hexadecimal digits>) to global docker_env_trusted_images — mutable tags and in-repo config cannot grant this access", image)
+		}
+	}
+	if len(runArgs) > 0 && (len(forwardNames) > 0 || len(clientConnectionNames) > 0) {
+		return ProvisionResult{}, fmt.Errorf("backend=docker: refusing to combine host environment values with repository-controlled docker.run_args; remove docker.run_args or leave host credentials, Docker/SSH transport state, proxies, and custom CA paths outside this Docker session until a host-owned runtime-argument policy is configured")
 	}
 
 	afBin, err := dockerSelfBinary()
@@ -193,15 +215,18 @@ func (dockerRuntime) Provision(spec ProvisionSpec) (ProvisionResult, error) {
 		return ProvisionResult{}, fmt.Errorf("backend=docker: cannot locate the af binary to copy into the container: %w", err)
 	}
 
-	// Resolve once in the trusted host process. The agent-server receives this
-	// exact command with --program-resolved and must not reinterpret its enum.
-	resolvedProgram := config.ResolveProgram(&cfg.Config, spec.Program)
+	runEnvironmentNames := append(append([]string(nil), clientConnectionNames...), forwardNames...)
 	p := &dockerProvisioner{
-		spec:    spec,
-		image:   image,
-		runArgs: runArgs,
-		afBin:   afBin,
-		program: resolvedProgram,
+		spec:       spec,
+		image:      image,
+		runArgs:    runArgs,
+		afBin:      afBin,
+		program:    resolvedProgram,
+		githubHost: githubHost,
+
+		containerEnvironmentNames: forwardNames,
+		clientEnvironment:         sessionenv.DockerControlEnvironment(sourceEnvironment),
+		runEnvironment:            sessionenv.DockerCLIEnvironmentForForwarding(sourceEnvironment, runEnvironmentNames),
 	}
 	res, err := p.provision()
 	if err != nil {
@@ -218,11 +243,20 @@ func (dockerRuntime) Provision(spec ProvisionSpec) (ProvisionResult, error) {
 // dockerProvisioner holds the state of one container provisioning so its steps
 // (run/clone/cp/exec/port) and its reap closure share the container ID.
 type dockerProvisioner struct {
-	spec    ProvisionSpec
-	image   string
-	runArgs []string
-	afBin   string
-	program string
+	spec       ProvisionSpec
+	image      string
+	runArgs    []string
+	afBin      string
+	program    string
+	githubHost string
+
+	// The environment boundary is frozen once, before the first Docker call.
+	// containerEnvironmentNames is safe for argv; runEnvironment carries the
+	// corresponding values only for `docker run`, after the image trust preflight
+	// above. Later client calls keep only Docker-control and connection state.
+	containerEnvironmentNames []string
+	clientEnvironment         []string
+	runEnvironment            []string
 
 	containerID string
 
@@ -297,15 +331,16 @@ func (p *dockerProvisioner) runContainer() error {
 		"-e", "HOME=/root",
 		"-p", "127.0.0.1::" + dockerAgentPort,
 	}
-	for _, name := range p.containerEnvironmentNames() {
-		// Docker looks the value up in the CLI process's filtered environment;
-		// only the name appears in argv, logs, and test captures.
-		args = append(args, "-e", name)
+	for _, spec := range sessionenv.DockerContainerEnvironmentSpecs(p.containerEnvironmentNames) {
+		// Docker looks approved names up in the CLI process's filtered
+		// environment; only names appear in argv. Explicit empty proxy entries
+		// suppress Docker client-config injection for every unapproved spelling.
+		args = append(args, "-e", spec)
 	}
 	args = append(args, p.runArgs...)
 	args = append(args, "--entrypoint", "sleep", p.image, "2147483647")
 
-	out, err := p.docker(dockerProvisionStepTimeout, args...)
+	out, err := p.dockerRun(dockerProvisionStepTimeout, args...)
 	if err != nil {
 		// `docker run -d` can CREATE the container and print its id to stdout, then
 		// still exit non-zero when a later start step fails — a run_arg naming a
@@ -329,10 +364,6 @@ func (p *dockerProvisioner) runContainer() error {
 	return nil
 }
 
-func (p *dockerProvisioner) containerEnvironmentNames() []string {
-	return sessionenv.DockerForwardNames(os.Environ(), p.agentName(), p.spec.SessionEnvPassthrough)
-}
-
 // configureGit sets a git identity and marks every directory safe inside the
 // container so the clone + worktree creation (which run as root over a possibly
 // foreign-owned bind mount) don't trip on "dubious ownership" or a missing
@@ -354,13 +385,13 @@ func (p *dockerProvisioner) configureGit() error {
 // (spec.RestoreBranch set, #1592 Phase 4 PR6) it additionally materializes the
 // pushed session branch as a local ref so the in-container Setup checks it out.
 func (p *dockerProvisioner) cloneWorkspace() error {
-	script := gitCloneCommand(p.spec.CloneURL, dockerWorkspaceDir)
+	script := gitCloneCommandForHost(p.spec.CloneURL, dockerWorkspaceDir, p.githubHost)
 	out, err := p.execSh(dockerProvisionStepTimeout, script)
 	if err != nil {
 		return fmt.Errorf("backend=docker: cloning %q into the container failed (is git in the image, and the URL reachable from inside the container?): %s: %w",
 			p.spec.CloneURL, strings.TrimSpace(string(out)), err)
 	}
-	if credentialCommand := gitPersistCredentialCommand(p.spec.CloneURL, dockerWorkspaceDir); credentialCommand != "" {
+	if credentialCommand := gitPersistCredentialCommandForHost(p.spec.CloneURL, dockerWorkspaceDir, p.githubHost); credentialCommand != "" {
 		out, err = p.execSh(dockerShortStepTimeout, credentialCommand)
 		if err != nil {
 			return fmt.Errorf("backend=docker: configuring value-free GitHub credentials in the clone failed: %s: %w",
@@ -559,16 +590,33 @@ func (p *dockerProvisioner) docker(timeout time.Duration, args ...string) ([]byt
 	return dockerExec(ctx, p.dockerEnvironment(), args...)
 }
 
+func (p *dockerProvisioner) dockerRun(timeout time.Duration, args ...string) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	return dockerExec(ctx, p.runEnvironment, args...)
+}
+
 func (p *dockerProvisioner) agentName() string {
-	agent := sessionenv.AgentForCommand(p.program)
-	if agent == "" && strings.TrimSpace(p.program) == "" {
+	return dockerAgentName(p.program)
+}
+
+func dockerAgentName(program string) string {
+	agent := sessionenv.AgentForCommand(program)
+	if agent == "" && strings.TrimSpace(program) == "" {
 		return tmux.ProgramClaude
 	}
 	return agent
 }
 
 func (p *dockerProvisioner) dockerEnvironment() []string {
-	return sessionenv.DockerCLIEnvironment(os.Environ(), p.agentName(), p.spec.SessionEnvPassthrough)
+	if p.clientEnvironment != nil {
+		return p.clientEnvironment
+	}
+	// A kill tombstone restored after daemon restart stores only the container
+	// identity, never credential values. Recompute the minimum Docker-client
+	// environment so reap still targets the configured daemon without reviving
+	// any session credentials.
+	return sessionenv.DockerControlEnvironment(os.Environ())
 }
 
 // execSh runs a `sh -c <script>` inside the container.

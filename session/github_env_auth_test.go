@@ -70,6 +70,87 @@ func TestGitHubEnvironmentCredentialUsesPublicTokenForEnterpriseCloud(t *testing
 	}
 }
 
+func TestGitHubEnvironmentCredentialDoesNotBroadenConfiguredPort(t *testing.T) {
+	t.Setenv("GH_HOST", "github.enterprise.test:8443")
+	if _, _, ok := githubEnvironmentCredential("https://github.enterprise.test:9443/example/project.git"); ok {
+		t.Fatal("configured Enterprise host authorized a different service port")
+	}
+	if _, _, ok := githubEnvironmentCredential("https://github.enterprise.test:8443/example/project.git"); !ok {
+		t.Fatal("configured Enterprise host and port did not produce a credential helper")
+	}
+}
+
+func TestDockerGitHubEnvironmentNamesScopeCredentialToCloneOrigin(t *testing.T) {
+	source := []string{
+		"GH_HOST=github.enterprise.test",
+		"GH_TOKEN=public-primary",
+		"GITHUB_TOKEN=public-fallback",
+		"GH_ENTERPRISE_TOKEN=enterprise-primary",
+		"GITHUB_ENTERPRISE_TOKEN=enterprise-fallback",
+	}
+	tests := []struct {
+		name     string
+		cloneURL string
+		want     []string
+	}{
+		{name: "public", cloneURL: "https://github.com/example/project.git", want: []string{"GH_TOKEN"}},
+		{name: "enterprise", cloneURL: "https://github.enterprise.test/example/project.git", want: []string{"GH_ENTERPRISE_TOKEN", "GH_HOST"}},
+		{name: "unrelated host", cloneURL: "https://gitlab.example/example/project.git"},
+		{name: "ssh origin unsupported", cloneURL: "git@github.com:example/project.git"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := dockerGitHubEnvironmentNames(source, tt.cloneURL)
+			if strings.Join(got, ",") != strings.Join(tt.want, ",") {
+				t.Fatalf("Docker GitHub environment names = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestDockerGitHubEnvironmentNamesSkipsHostWithoutUsableToken(t *testing.T) {
+	source := []string{"GH_HOST=github.enterprise.test", "GH_ENTERPRISE_TOKEN=", "GH_TOKEN=public-token"}
+	if got := dockerGitHubEnvironmentNames(source, "https://github.enterprise.test/example/project.git"); len(got) != 0 {
+		t.Fatalf("Enterprise host fell back to public GitHub environment names: %v", got)
+	}
+}
+
+func TestDockerGitHubEnvironmentNamesUsesCloudTokenForConfiguredGHEHost(t *testing.T) {
+	source := []string{
+		"GH_HOST=tenant.ghe.com",
+		"GH_TOKEN=cloud-token",
+		"GH_ENTERPRISE_TOKEN=server-token",
+	}
+	want := "GH_TOKEN,GH_HOST"
+	if got := strings.Join(dockerGitHubEnvironmentNames(source, "https://tenant.ghe.com/example/project.git"), ","); got != want {
+		t.Fatalf("Docker GitHub Enterprise Cloud environment names = %q, want %q", got, want)
+	}
+}
+
+func TestOffHostCloneURLCredentialsRejectHTTPUserinfoOnly(t *testing.T) {
+	for _, cloneURL := range []string{
+		"https://fixture-token@example.invalid/project.git",
+		"https://fixture-user:fixture-secret@example.invalid/project.git",
+	} {
+		err := validateOffHostCloneURLCredentials(cloneURL)
+		if err == nil {
+			t.Fatalf("accepted HTTP origin with embedded userinfo")
+		}
+		if strings.Contains(err.Error(), "fixture-token") || strings.Contains(err.Error(), "fixture-secret") {
+			t.Fatal("embedded credential rejection rendered URL userinfo")
+		}
+	}
+	for _, cloneURL := range []string{
+		"https://example.invalid/project.git",
+		"ssh://git@example.invalid/project.git",
+		"git@example.invalid:project.git",
+	} {
+		if err := validateOffHostCloneURLCredentials(cloneURL); err != nil {
+			t.Fatalf("rejected credential-free origin %q: %v", cloneURL, err)
+		}
+	}
+}
+
 func TestGitHubEnvironmentCredentialSpeaksGitCredentialProtocol(t *testing.T) {
 	key, helper, ok := githubEnvironmentCredential("https://github.com/example/project.git")
 	if !ok {

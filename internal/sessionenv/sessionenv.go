@@ -124,8 +124,17 @@ var dockerControlNames = nameSet(
 	"DOCKER_CONTENT_TRUST", "DOCKER_CONTENT_TRUST_SERVER", "BUILDKIT_HOST",
 )
 
+var dockerSSHTransportNames = nameSet("SSH_AUTH_SOCK", "SSH_AGENT_PID")
+
+// dockerClientNames is the non-session state the short-lived Docker CLI needs
+// in order to find its binary, config, credential helper, locale, temp files,
+// and selected daemon. It deliberately excludes af control-plane and agent
+// credentials. SSH transport remains client-only; proxy values cross only as
+// explicitly authorized forward candidates, while host CA paths do not cross at
+// all. Whenever session values are forwarded, repository-controlled run_args are
+// refused so the image cannot request this client state as an additional
+// environment.
 var dockerClientNames = nameSet(
-	// Process basics and Docker credential-helper discovery.
 	"PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "LANGUAGE", "TZ",
 	"TMPDIR", "TMP", "TEMP", "PWD",
 	"XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME", "XDG_RUNTIME_DIR",
@@ -133,6 +142,30 @@ var dockerClientNames = nameSet(
 	// Remote Docker transport identity. Proxy/CA variables require the same
 	// explicit trust grant as every value a repo-controlled --env can request.
 	"SSH_AUTH_SOCK", "SSH_AGENT_PID",
+)
+
+// dockerAgentNames is a positive list because a host path is not a portable
+// credential. Reusing the broader local-session list would pass CODEX_HOME,
+// CLAUDE_CONFIG_DIR, certificate paths, and cloud credential-file paths into a
+// container where they name unrelated or nonexistent files. New Docker agent
+// credential mechanisms therefore fail closed until classified here.
+var dockerAgentNames = map[string]map[string]struct{}{
+	"claude": nameSet(
+		"ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL",
+		"CLAUDE_CODE_OAUTH_TOKEN",
+	),
+	"codex": nameSet(
+		"OPENAI_API_KEY", "CODEX_API_KEY", "CODEX_ACCESS_TOKEN",
+	),
+}
+
+var dockerProxyNames = nameSet(
+	"HTTP_PROXY", "HTTPS_PROXY", "FTP_PROXY", "ALL_PROXY", "NO_PROXY",
+	"http_proxy", "https_proxy", "ftp_proxy", "all_proxy", "no_proxy",
+)
+
+var dockerClientCAPathNames = nameSet(
+	"SSL_CERT_FILE", "SSL_CERT_DIR", "NODE_EXTRA_CA_CERTS", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE",
 )
 
 // NormalizeExtraNames validates an explicit pass-through list, removes
@@ -226,19 +259,22 @@ func ImportNamesForCommand(source []string, agent, command string, extras []stri
 	return out
 }
 
-// DockerCLIEnvironment is the environment for the trusted, short-lived Docker
-// client. Agent and GitHub credentials are deliberately absent unless the
-// operator named them explicitly: repo-controlled run_args can ask Docker to
-// copy any variable present in the client environment into the container.
-func DockerCLIEnvironment(source []string, _ string, extras []string) []string {
-	allowed := make(map[string]struct{}, len(dockerClientNames)+len(dockerControlNames)+len(extras))
+// DockerCLIEnvironmentForForwarding returns the environment for the trusted,
+// short-lived Docker client after the caller has authorized forwardNames for
+// the selected image. Only Docker client/transport state and those exact names
+// survive; af daemon tokens, other agents' credentials, and unrelated ambient
+// variables are excluded. The caller must reject repository-controlled run
+// arguments before adding any forwardNames, because Docker can copy any client
+// variable named by an `-e NAME` argument.
+func DockerCLIEnvironmentForForwarding(source, forwardNames []string) []string {
+	allowed := make(map[string]struct{}, len(dockerClientNames)+len(dockerControlNames)+len(forwardNames))
 	for name := range dockerClientNames {
 		allowed[name] = struct{}{}
 	}
 	for name := range dockerControlNames {
 		allowed[name] = struct{}{}
 	}
-	for _, name := range extras {
+	for _, name := range forwardNames {
 		if validName(name) {
 			allowed[name] = struct{}{}
 		}
@@ -254,22 +290,89 @@ func DockerCLIEnvironment(source []string, _ string, extras []string) []string {
 	return out
 }
 
-// DockerForwardNames returns the explicit host variable names whose values
-// should be copied into a container. A repository selects the image, so af
-// does not grant that image built-in agent, GitHub, or network credentials.
-// The global-only pass-through list is the deliberate trust escape hatch.
-func DockerForwardNames(source []string, _ string, extras []string) []string {
-	forward := make(map[string]struct{}, len(extras))
+// DockerClientConnectionNames returns every present client authority or
+// connection name that repository-controlled docker.run_args must not be able
+// to request from the Docker CLI environment: daemon/context configuration,
+// SSH transport identity, proxies, and custom CA paths. Proxy values may also
+// cross through the separate image trust gate; the others remain client-only.
+func DockerClientConnectionNames(source []string) []string {
+	wanted := make(map[string]struct{}, len(dockerControlNames)+len(dockerSSHTransportNames)+len(dockerProxyNames)+len(dockerClientCAPathNames))
+	for name := range dockerControlNames {
+		wanted[name] = struct{}{}
+	}
+	for name := range dockerSSHTransportNames {
+		wanted[name] = struct{}{}
+	}
+	for name := range dockerProxyNames {
+		wanted[name] = struct{}{}
+	}
+	for name := range dockerClientCAPathNames {
+		wanted[name] = struct{}{}
+	}
+	return presentNonEmptyNames(source, wanted)
+}
+
+// DockerControlEnvironment is the value-minimal environment for Docker calls
+// whose arguments are wholly constructed by af (exec/cp/port/rm). It includes
+// client connection state but no agent, GitHub, or explicit session values.
+func DockerControlEnvironment(source []string) []string {
+	return DockerCLIEnvironmentForForwarding(source, DockerClientConnectionNames(source))
+}
+
+// DockerForwardNames returns the host variable names whose values should be
+// copied into a container. By default, container-native basics such as HOME and
+// PATH stay owned by the image; only authentication/network variables cross.
+// Global explicit extensions are the deliberate escape hatch and may name any
+// valid variable. The caller must authorize the selected image before using the
+// returned names.
+func DockerForwardNames(source []string, agent string, extras []string) []string {
+	forward := make(map[string]struct{})
+	for name := range dockerAgentNames[agent] {
+		forward[name] = struct{}{}
+	}
 	for _, name := range extras {
 		if validName(name) {
 			forward[name] = struct{}{}
 		}
 	}
-	present := make(map[string]struct{})
+	for name := range dockerProxyNames {
+		forward[name] = struct{}{}
+	}
+	return presentNonEmptyNames(source, forward)
+}
+
+// DockerContainerEnvironmentSpecs returns the safe arguments for `docker run
+// -e`. Approved names remain value-free so Docker reads them from its filtered
+// client environment. Every other standard proxy spelling gets an explicit
+// empty assignment: Docker otherwise injects proxy values from the client's
+// config.json into new containers without any -e argument, bypassing the image
+// trust preflight above this layer.
+func DockerContainerEnvironmentSpecs(forwardNames []string) []string {
+	forwarded := make(map[string]struct{}, len(forwardNames))
+	for _, name := range forwardNames {
+		if validName(name) {
+			forwarded[name] = struct{}{}
+		}
+	}
+	out := make([]string, 0, len(forwarded)+len(dockerProxyNames))
+	for name := range forwarded {
+		out = append(out, name)
+	}
+	for name := range dockerProxyNames {
+		if _, ok := forwarded[name]; !ok {
+			out = append(out, name+"=")
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+func presentNonEmptyNames(source []string, wanted map[string]struct{}) []string {
+	present := make(map[string]struct{}, len(wanted))
 	for _, entry := range source {
-		name, _, ok := strings.Cut(entry, "=")
-		if ok {
-			if _, wanted := forward[name]; wanted {
+		name, value, ok := strings.Cut(entry, "=")
+		if ok && value != "" {
+			if _, allowed := wanted[name]; allowed {
 				present[name] = struct{}{}
 			}
 		}

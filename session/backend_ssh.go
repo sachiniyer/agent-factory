@@ -146,6 +146,9 @@ func (sshRuntime) Provision(spec ProvisionSpec) (ProvisionResult, error) {
 		// create time.
 		return ProvisionResult{}, missingOriginError(BackendSSH, spec.RepoRoot)
 	}
+	if err := validateOffHostCloneURLCredentials(spec.CloneURL); err != nil {
+		return ProvisionResult{}, fmt.Errorf("backend=ssh: %w", err)
+	}
 
 	afBin, err := sshSelfBinary()
 	if err != nil {

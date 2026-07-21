@@ -224,9 +224,10 @@ func TestNormalizeExtraNamesDoesNotRenderInvalidAssignmentValue(t *testing.T) {
 	}
 }
 
-func TestDockerForwardNamesCarriesOnlyExplicitNamesWhenPresent(t *testing.T) {
+func TestDockerForwardNamesCarriesPortableAndExplicitNamesWhenPresent(t *testing.T) {
 	source := []string{
 		"HOME=/host/home",
+		"CODEX_ACCESS_TOKEN=",
 		"GH_TOKEN=present",
 		"OPENAI_API_KEY=present",
 		"HTTPS_PROXY=present",
@@ -240,7 +241,7 @@ func TestDockerForwardNamesCarriesOnlyExplicitNamesWhenPresent(t *testing.T) {
 	if !slices.Equal(got, want) {
 		t.Fatalf("DockerForwardNames() = %v, want %v", got, want)
 	}
-	client := DockerCLIEnvironment(source, "codex", extras)
+	client := DockerCLIEnvironmentForForwarding(source, got)
 	for _, wantEntry := range []string{"CUSTOM_PROVIDER_TOKEN=present", "GH_TOKEN=present", "HTTPS_PROXY=present", "LC_PACKAGE_TOKEN=present", "OPENAI_API_KEY=present"} {
 		if !slices.Contains(client, wantEntry) {
 			t.Fatalf("explicit Docker trust grant omitted %s", strings.SplitN(wantEntry, "=", 2)[0])
@@ -248,7 +249,7 @@ func TestDockerForwardNamesCarriesOnlyExplicitNamesWhenPresent(t *testing.T) {
 	}
 }
 
-func TestDockerRepoSelectedImageDoesNotReceiveBuiltInCredentials(t *testing.T) {
+func TestDockerClientBaselineDoesNotReceiveBuiltInCredentials(t *testing.T) {
 	source := []string{
 		"PATH=/usr/bin",
 		"GH_TOKEN=fixture",
@@ -257,7 +258,7 @@ func TestDockerRepoSelectedImageDoesNotReceiveBuiltInCredentials(t *testing.T) {
 		"SSL_CERT_FILE=/fixture/ca.pem",
 		"LC_SECRET_TOKEN=fixture",
 	}
-	for _, entry := range DockerCLIEnvironment(source, "codex", nil) {
+	for _, entry := range DockerCLIEnvironmentForForwarding(source, nil) {
 		name, _, _ := strings.Cut(entry, "=")
 		for _, denied := range []string{"GH_TOKEN", "OPENAI_API_KEY", "HTTPS_PROXY", "SSL_CERT_FILE", "LC_SECRET_TOKEN"} {
 			if name == denied {
@@ -265,8 +266,80 @@ func TestDockerRepoSelectedImageDoesNotReceiveBuiltInCredentials(t *testing.T) {
 			}
 		}
 	}
-	if got := DockerForwardNames(source, "codex", nil); len(got) != 0 {
-		t.Fatalf("repo-selected Docker image received built-in credential names: %v", got)
+	if got := DockerForwardNames(source, "codex", nil); !slices.Equal(got, []string{"HTTPS_PROXY", "OPENAI_API_KEY"}) {
+		t.Fatalf("Docker trust preflight candidates = %v, want selected portable credentials and network values", got)
+	}
+	if got := DockerClientConnectionNames(source); !slices.Equal(got, []string{"HTTPS_PROXY", "SSL_CERT_FILE"}) {
+		t.Fatalf("Docker client connection names = %v, want proxy and custom CA", got)
+	}
+	control := DockerControlEnvironment(source)
+	for _, want := range []string{"PATH=/usr/bin", "HTTPS_PROXY=fixture", "SSL_CERT_FILE=/fixture/ca.pem"} {
+		if !slices.Contains(control, want) {
+			t.Fatalf("controlled Docker call omitted client connection entry %s", strings.SplitN(want, "=", 2)[0])
+		}
+	}
+	for _, denied := range []string{"GH_TOKEN=fixture", "OPENAI_API_KEY=fixture"} {
+		if slices.Contains(control, denied) {
+			t.Fatalf("controlled Docker call retained session credential %s", strings.SplitN(denied, "=", 2)[0])
+		}
+	}
+}
+
+func TestDockerForwardNamesDoNotTreatHostPathsAsPortableCredentials(t *testing.T) {
+	source := []string{
+		"CODEX_ACCESS_TOKEN=present",
+		"CODEX_HOME=/host/codex",
+		"CODEX_CA_CERTIFICATE=/host/certs/codex.pem",
+		"GH_TOKEN=present",
+		"SSL_CERT_FILE=/host/certs/ca.pem",
+		"HTTPS_PROXY=http://proxy.invalid",
+	}
+	got := DockerForwardNames(source, "codex", nil)
+	for _, want := range []string{"CODEX_ACCESS_TOKEN", "HTTPS_PROXY"} {
+		if !slices.Contains(got, want) {
+			t.Fatalf("DockerForwardNames omitted portable value %s", want)
+		}
+	}
+	for _, denied := range []string{"CODEX_HOME", "CODEX_CA_CERTIFICATE", "GH_TOKEN", "SSL_CERT_FILE"} {
+		if slices.Contains(got, denied) {
+			t.Fatalf("DockerForwardNames forwarded host-only path %s", denied)
+		}
+	}
+}
+
+func TestDockerContainerEnvironmentSpecsClearOnlyUnapprovedProxies(t *testing.T) {
+	got := DockerContainerEnvironmentSpecs([]string{"CUSTOM_TOKEN", "HTTPS_PROXY"})
+	for _, want := range []string{"CUSTOM_TOKEN", "HTTPS_PROXY", "HTTP_PROXY=", "FTP_PROXY=", "ftp_proxy="} {
+		if !slices.Contains(got, want) {
+			t.Fatalf("Docker container environment specs omitted %q: %v", want, got)
+		}
+	}
+	if slices.Contains(got, "HTTPS_PROXY=") {
+		t.Fatalf("Docker container environment specs cleared approved HTTPS_PROXY: %v", got)
+	}
+}
+
+func TestDockerCLIEnvironmentContainsOnlyClientStateAndExplicitForwards(t *testing.T) {
+	source := []string{
+		"PATH=/usr/bin",
+		"HOME=/host/home",
+		"LANG=C.UTF-8",
+		"DOCKER_HOST=unix:///run/docker.sock",
+		"CODEX_ACCESS_TOKEN=present",
+		"AF_DAEMON_TOKEN=control-plane-secret",
+		"SSH_AUTH_SOCK=/run/user/1000/agent",
+		"UNRELATED_DATABASE_KEY=present",
+	}
+	got := DockerCLIEnvironmentForForwarding(source, []string{"CODEX_ACCESS_TOKEN"})
+	for _, want := range []string{"PATH=/usr/bin", "HOME=/host/home", "LANG=C.UTF-8", "DOCKER_HOST=unix:///run/docker.sock", "SSH_AUTH_SOCK=/run/user/1000/agent", "CODEX_ACCESS_TOKEN=present"} {
+		if !slices.Contains(got, want) {
+			t.Fatalf("Docker CLI environment omitted required entry %s", strings.SplitN(want, "=", 2)[0])
+		}
+	}
+	for _, denied := range []string{"AF_DAEMON_TOKEN=control-plane-secret", "UNRELATED_DATABASE_KEY=present"} {
+		if slices.Contains(got, denied) {
+			t.Fatalf("Docker CLI environment retained unrelated entry %s", strings.SplitN(denied, "=", 2)[0])
+		}
 	}
 }
 

@@ -557,7 +557,8 @@ Settable keys:
   global_agent_skills        true | false
 
 Structural keys (root_agents, [theme], the [keys] rebind table) and the
-cors_allowed_origins list are not settable here — edit config.toml directly.
+cors_allowed_origins and docker_env_trusted_images lists are not settable here —
+edit config.toml directly.
 Changes apply on the next af / daemon start.
 
 Examples:

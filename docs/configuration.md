@@ -31,6 +31,7 @@ limit_auto_resume = false
 global_agent_skills = false
 limit_retry_interval = "30m"
 session_env_passthrough = []
+docker_env_trusted_images = []
 
 [program_overrides]
 claude = "/home/me/.local/bin/claude --dangerously-skip-permissions"
@@ -61,7 +62,8 @@ pane_border_preview = "#DC8CC3"
 |-------|-------------|
 | `default_program` | Default agent enum. Must be one of `claude`, `codex`, `aider`, `gemini`, `amp`, `opencode`. |
 | `program_overrides` | Optional map from agent enum to the full command string used when launching that agent. Use this to pin a path or pass flags (e.g. `--dangerously-skip-permissions`). Keys must be one of `claude`, `codex`, `aider`, `gemini`, `amp`, `opencode`. Agent-specific injection (claude's `--plugin-dir` flag, aider's `--read` flag, opencode's `OPENCODE_CONFIG` env var pointing at an af-owned config, and — when `global_agent_skills = true` — the af skill file dropped into codex/gemini/amp's own skills folder) and readiness detection follow the program the override actually runs, not the key: pointing an agent name at a different command (even a non-agent one like `bash`) launches it with no injected agent flags, and a command running no known agent counts as ready once its pane shows output. The agent is identified by command-token basename (`/opt/tools/claude --model opus` and `ionice -c 3 claude` are claude; `/opt/claude-wrapper/run` is not), so if you wrap an agent in a script, name the script after the agent to keep its flags and readiness behavior. |
-| `session_env_passthrough` | Extra exact environment variable names agent sessions may inherit. Default: none beyond af's built-in runtime, Git/GitHub, network, and selected-agent authentication allowlist; Docker requires explicit names because repo config selects its image. Global-only and hand-edited; values stay in the process environment and must not be placed in this list. See [Session environment isolation](#session-environment-isolation). |
+| `session_env_passthrough` | Extra exact environment variable names agent sessions may inherit. Default: none beyond af's built-in runtime, Git/GitHub, network, and selected-agent authentication allowlist. Global-only and hand-edited; values stay in the process environment and must not be placed in this list. Docker also requires an exact image trust grant before any approved value crosses. See [Session environment isolation](#session-environment-isolation). |
+| `docker_env_trusted_images` | Exact immutable `image@sha256:<64 lowercase hexadecimal digits>` references allowed to receive approved host environment values in Docker sessions. Default: none. Global-only, TOML-only, and hand-edited; a repository may choose `docker.image` but cannot grant that image credential access. Invalid or mutable entries fail config loading. See [Docker credentials and the host boundary](backends.md#credentials-and-the-host-boundary). |
 | `auto_update` | Startup self-update. Defaults to `true`: an interactive `af` checks the configured `update_channel` on launch — at most once every 6 hours, so a relaunch inside that window costs nothing and makes no network call — and when a newer release exists it installs it, restarts the daemon from it (sessions survive), and relaunches you into the new version straight away. It never downgrades, never interrupts an `af` that is already running, and skips silently when the check fails or you are offline. It is also skipped whenever stdout is not a terminal, so a script or CI job that calls `af` keeps the binary it installed. Set to `false`, or set `AGENT_FACTORY_AUTO_UPDATE=0`, to pin the installed version; `af upgrade` still works either way. |
 | `daemon_poll_interval` | Daemon polling interval in ms. |
 | `listen_addr` | Address the daemon serves the bundled **web UI** + HTTP/WS API on, over **plain HTTP** (no TLS). Defaults to `127.0.0.1:8443` (loopback), so a fresh install has a browser client at `http://127.0.0.1:8443` that connects with no token and no login screen. Set it to `""` to **disable** the web server entirely (pure-unix daemon); set it to a routable host:port like `0.0.0.0:8443` to expose it to the network — pair that with **`require_token = true`** unless you trust the network, because a tokenless network bind serves the control API to anyone who can reach it. af **allows** it and warns once at daemon start rather than refusing (see [Remote daemon access](remote-http-auth.md#the-tokenless-network-warning)). af serves no TLS either way, so front a routable listener with a TLS-terminating proxy or a private network. A web-port bind conflict is logged and skipped — it never blocks the daemon. Global-only. See [The web client](web.md) and [Remote daemon access](remote-http-auth.md). |
@@ -167,14 +169,15 @@ The built-in allowlist keeps the pieces sessions need:
   their own config locations. File- or keyring-backed logins remain preferred
   because they do not put a credential in any environment at all.
 
-Docker is a stricter trust boundary. A repository selects its container image,
-so af does not automatically send that image any built-in agent, GitHub,
-proxy, or CA variable. Add each required name to `session_env_passthrough` only
-after trusting the configured image, preferably at an immutable digest. Local,
-SSH, and hook launches retain the built-in selected-agent behavior; SSH reads
-matching values from the remote account rather than copying the daemon's.
-If the Docker client itself needs a proxy or private CA to reach its daemon or
-registry, list those exact names too.
+That file/keyring preference applies to host-local sessions. Docker does not
+mount those host stores: its narrower credential boundary accepts portable
+environment values only after an exact immutable image grant. Once granted,
+the selected Claude/Codex portable values, GitHub HTTPS tokens, proxies, and
+explicit `session_env_passthrough` names may cross; path-backed stores do not.
+Local, SSH, and hook launches retain the broader built-in selected-agent
+behavior, with SSH reading matching values from the remote account. See
+[Docker credentials and the host
+boundary](backends.md#credentials-and-the-host-boundary).
 
 An agent wrapper that hides the real executable name, a custom Codex model
 provider whose `env_key` is user-defined, or a less-common Aider/OpenCode
@@ -189,10 +192,11 @@ Entries are exact POSIX names; assignments and wildcards are rejected. The key
 is global-only so a cloned repository cannot request secrets from the daemon's
 environment. Git worktree subprocesses and `post_worktree_commands` use the
 same boundary; list a package-manager/build credential explicitly if a setup
-command needs it. For Docker, listing a name is also the explicit trust grant
-that lets the repo-selected image receive it. New and respawned panes use the
-current list. A pane that was already running before an upgrade keeps the
-environment it started with until that process is restarted.
+command needs it. For Docker, listing a name only extends the candidate set;
+the repo-selected image must also match `docker_env_trusted_images` before any
+candidate value crosses. New and respawned panes use the current list. A pane
+that was already running before an upgrade keeps the environment it started
+with until that process is restarted.
 
 ### Theme colors (`theme`)
 

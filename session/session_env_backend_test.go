@@ -13,14 +13,14 @@ import (
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
-func TestDockerEnvironmentDoesNotTrustRepoSelectedImageWithResolvedCredentials(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+func TestDockerEnvironmentTrustUsesResolvedProgramOverride(t *testing.T) {
+	saveDockerEnvironmentTrust(t, trustedDockerEnvironmentImage)
 	t.Setenv("OPENAI_API_KEY", "test-value")
 	t.Setenv("ANTHROPIC_API_KEY", "test-value")
 	repoRoot := initTempGitRepo(t)
 	writeInRepoConfig(t, repoRoot, map[string]any{
 		"backend": "docker",
-		"docker":  map[string]any{"image": "example.invalid/agent:latest"},
+		"docker":  map[string]any{"image": trustedDockerEnvironmentImage},
 		"program_overrides": map[string]any{
 			tmux.ProgramClaude: tmux.ProgramCodex,
 		},
@@ -42,10 +42,11 @@ func TestDockerEnvironmentDoesNotTrustRepoSelectedImageWithResolvedCredentials(t
 		Program:  tmux.ProgramClaude,
 		CloneURL: "file:///fixture.git",
 	})
-	for _, name := range []string{"OPENAI_API_KEY", "ANTHROPIC_API_KEY"} {
-		if dockerHasEnvName(runArgs, name) {
-			t.Fatalf("docker forwarded built-in credential %s to a repo-selected image", name)
-		}
+	if !dockerHasEnvName(runArgs, "OPENAI_API_KEY") {
+		t.Fatal("trusted Docker image dropped Codex authentication selected by program_overrides.claude")
+	}
+	if dockerHasEnvName(runArgs, "ANTHROPIC_API_KEY") {
+		t.Fatal("trusted Docker image received Claude authentication after the override selected Codex")
 	}
 }
 
@@ -178,6 +179,7 @@ func TestDockerRunForwardsAllowedNamesWithoutAmbientEnvironment(t *testing.T) {
 		deniedName = "AF_TEST_UNRELATED_SECRET"
 	)
 	t.Setenv("GH_TOKEN", "test-value")
+	t.Setenv("OPENAI_API_KEY", "test-value")
 	t.Setenv(customName, "test-value")
 	t.Setenv(deniedName, "test-value")
 
@@ -197,19 +199,23 @@ func TestDockerRunForwardsAllowedNamesWithoutAmbientEnvironment(t *testing.T) {
 		program: tmux.ProgramCodex,
 		spec: ProvisionSpec{
 			Title:                 "filtered",
+			CloneURL:              "https://github.com/example/project.git",
 			SessionEnvPassthrough: []string{customName},
 		},
 	}
+	forwardCandidates := append([]string(nil), p.spec.SessionEnvPassthrough...)
+	forwardCandidates = append(forwardCandidates, dockerGitHubEnvironmentNames(os.Environ(), p.spec.CloneURL)...)
+	p.containerEnvironmentNames = sessionenv.DockerForwardNames(os.Environ(), p.agentName(), forwardCandidates)
+	p.clientEnvironment = sessionenv.DockerControlEnvironment(os.Environ())
+	runEnvironmentNames := append(sessionenv.DockerClientConnectionNames(os.Environ()), p.containerEnvironmentNames...)
+	p.runEnvironment = sessionenv.DockerCLIEnvironmentForForwarding(os.Environ(), runEnvironmentNames)
 	if err := p.runContainer(); err != nil {
 		t.Fatal(err)
 	}
 
-	if !dockerHasEnvName(gotArgs, customName) {
-		t.Fatalf("docker run did not forward explicit variable name %s", customName)
-	}
-	for _, name := range []string{"GH_TOKEN", "OPENAI_API_KEY"} {
-		if dockerHasEnvName(gotArgs, name) {
-			t.Fatalf("docker run forwarded built-in credential %s without explicit trust", name)
+	for _, name := range []string{customName, "GH_TOKEN", "OPENAI_API_KEY"} {
+		if !dockerHasEnvName(gotArgs, name) {
+			t.Fatalf("prepared Docker run omitted approved variable name %s", name)
 		}
 	}
 	if dockerHasEnvName(gotArgs, deniedName) {
@@ -218,8 +224,10 @@ func TestDockerRunForwardsAllowedNamesWithoutAmbientEnvironment(t *testing.T) {
 	if !environmentHasName(gotEnv, customName) {
 		t.Fatalf("docker CLI environment omitted configured variable %s", customName)
 	}
-	if environmentHasName(gotEnv, "GH_TOKEN") || environmentHasName(gotEnv, "OPENAI_API_KEY") {
-		t.Fatal("docker CLI environment retained a built-in credential without explicit trust")
+	for _, name := range []string{customName, "GH_TOKEN", "OPENAI_API_KEY"} {
+		if !environmentHasName(gotEnv, name) {
+			t.Fatalf("prepared Docker client environment omitted approved variable %s", name)
+		}
 	}
 	if environmentHasName(gotEnv, deniedName) {
 		t.Fatalf("docker CLI inherited disallowed variable %s", deniedName)

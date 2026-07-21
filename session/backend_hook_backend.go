@@ -90,6 +90,9 @@ func (hookRuntime) Provision(spec ProvisionSpec) (ProvisionResult, error) {
 	if err := resolved.RemoteHooks.Validate(); err != nil {
 		return ProvisionResult{}, fmt.Errorf("backend=hook: %w", err)
 	}
+	if err := validateOffHostCloneURLCredentials(spec.CloneURL); err != nil {
+		return ProvisionResult{}, fmt.Errorf("backend=hook: %w", err)
+	}
 	hooks := *resolved.RemoteHooks
 	p := &hookProvisioner{
 		hooks:   hooks,
