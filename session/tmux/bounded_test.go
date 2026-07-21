@@ -142,12 +142,11 @@ func TestBoundedTmuxCommandsSucceedWhenTmuxIsHealthy(t *testing.T) {
 // catch. So this drives a REAL tmux, on a private server (IsolateTmux) so it
 // cannot touch the developer's sessions.
 func TestRealPipePaneStreamsPastTheReap(t *testing.T) {
-	// This is the MINIMAL repro of #1945 — raw mkfifo + pipe-pane + dd + one read,
-	// no agent-server, no daemon, no broker. If #1945 is real then bytes never
-	// arrive here either, and whoever picks it up gets a 20-line reproduction
-	// instead of a full round-trip to bisect. (#1943's teardown wedge, which this
-	// used to be skipped for, is FIXED by #1944 — this skip is about delivery.)
-	testguard.SkipDarwinPTYStream(t)
+	// This is the minimal #1945 delivery gate — raw mkfifo + pipe-pane + dd + one
+	// read, with no agent-server, daemon, or broker. It mirrors the post-#2300
+	// production FIFO posture: a blocking read-only descriptor plus a private
+	// keeper writer, never the O_RDWR descriptor implicated by the original
+	// Darwin failures.
 	testguard.IsolateTmux(t)
 
 	const name = "af1787-reap-pipe"
@@ -162,12 +161,22 @@ func TestRealPipePaneStreamsPastTheReap(t *testing.T) {
 	if err := syscall.Mkfifo(fifo, 0o600); err != nil {
 		t.Fatalf("mkfifo: %v", err)
 	}
-	// O_RDWR so the read end stays valid before tmux's writer opens, mirroring
-	// tmuxClientlessChannel.StartCapture.
-	rc, err := os.OpenFile(fifo, os.O_RDWR, 0o600)
+	fd, err := syscall.Open(fifo, syscall.O_RDONLY|syscall.O_NONBLOCK|syscall.O_CLOEXEC, 0o600)
 	if err != nil {
 		t.Fatalf("open fifo: %v", err)
 	}
+	keeper, err := os.OpenFile(fifo, os.O_WRONLY|syscall.O_NONBLOCK, 0o600)
+	if err != nil {
+		_ = syscall.Close(fd)
+		t.Fatalf("open fifo keeper: %v", err)
+	}
+	t.Cleanup(func() { _ = keeper.Close() })
+	if err := syscall.SetNonblock(fd, false); err != nil {
+		_ = keeper.Close()
+		_ = syscall.Close(fd)
+		t.Fatalf("make fifo read blocking: %v", err)
+	}
+	rc := os.NewFile(uintptr(fd), fifo)
 	t.Cleanup(func() { _ = rc.Close() })
 
 	if err := ts.EnablePipePane("dd of=" + shellQuoteForTest(fifo) + " bs=4096 2>/dev/null"); err != nil {

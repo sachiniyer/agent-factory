@@ -3,8 +3,6 @@ package integration_test
 import (
 	"testing"
 	"time"
-
-	"github.com/sachiniyer/agent-factory/internal/testguard"
 )
 
 // TestEmbeddedPaneRefreshesFromSendPrompt is the #1661 end-to-end guard: an
@@ -20,7 +18,6 @@ import (
 // Run it in the container fence: make ws-pty-roundtrip-container GOTESTARGS=...
 // (a real daemon + real tmux, like TestWSPTYBrokerRoundTrip).
 func TestEmbeddedPaneRefreshesFromSendPrompt(t *testing.T) {
-	testguard.SkipDarwinPTYStream(t)
 	h := newHarness(t)
 	h.startDaemon()
 	h.createSession("beta")
