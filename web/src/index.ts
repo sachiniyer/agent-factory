@@ -501,15 +501,18 @@ function resetStatusFilter(): void {
   store.set({ statusFilter: next });
 }
 
-/** Switches the active project (redesign PR2): scope the rail + views to `root`,
- *  persist it so a reload resumes it, and drop a selection that doesn't belong to the
- *  new project (its terminal detaches). A no-op when already on that project. */
+/** Switches the active project (redesign PR2): persist the explicit choice so a
+ *  reload resumes it, scope the rail + views to `root`, and drop a selection that
+ *  doesn't belong to the new project (its terminal detaches). The in-memory update
+ *  is a no-op when already on that project, but persistence is still load-bearing:
+ *  reconciliation can choose this valid fallback while storage names a project that
+ *  just disappeared (#2276). */
 function switchProject(root: string): void {
+  persistProjectChoice(root);
   if (store.get().selectedProject === root) {
     return;
   }
   clearTabError();
-  persistProjectChoice(root);
   // Keep the current selection only if it lives in the newly selected project; else
   // clear it so the main pane returns to its empty state instead of showing a session
   // hidden from the scoped rail.

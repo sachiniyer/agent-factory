@@ -12192,11 +12192,11 @@ function resetStatusFilter() {
   store.set({ statusFilter: next });
 }
 function switchProject(root2) {
+  persistProjectChoice(root2);
   if (store.get().selectedProject === root2) {
     return;
   }
   clearTabError();
-  persistProjectChoice(root2);
   const sel = selectedSessionData();
   const keep = sel && sel.worktree?.repo_path === root2 ? store.get().selectedId : null;
   splitView.blur();
