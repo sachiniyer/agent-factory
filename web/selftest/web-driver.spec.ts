@@ -828,8 +828,47 @@ test("status dots (#1766): waiting shows a green dot, working shows none, error 
   await row(p, "probe-limit").click();
   const retry = p.locator(".af-term-head button", { hasText: "Retry" });
   await expect(retry).toBeVisible();
-  await expect(row(p, "probe-limit").locator(".af-row-actions")).toBeVisible();
-  await expect(row(p, "probe-waiting").locator(".af-row-actions")).toHaveCount(0);
+  const selectedActions = row(p, "probe-limit").locator(".af-row-actions");
+  const waitingActions = row(p, "probe-waiting").locator(".af-row-actions");
+  await expect(selectedActions).toHaveCSS("opacity", "1");
+  await expect(waitingActions).toHaveCount(1);
+  await expect(waitingActions).toHaveCSS("opacity", "0");
+
+  // #2223: selection, pointer hover, and keyboard focus all reveal the same quiet
+  // controls. Every row reserves the slot, so hovering an unselected row cannot move
+  // its text under the pointer.
+  await row(p, "probe-limit").hover();
+  await expect(selectedActions).toHaveCSS("opacity", "1");
+  await p.mouse.move(0, 0);
+  const geometry = () =>
+    row(p, "probe-waiting").evaluate((el) => {
+      const main = el.querySelector(".af-row-main")!.getBoundingClientRect();
+      const actions = el.querySelector(".af-row-actions")!.getBoundingClientRect();
+      return { mainLeft: main.left, mainWidth: main.width, actionsLeft: actions.left, actionsWidth: actions.width };
+    });
+  const beforeHover = await geometry();
+  await row(p, "probe-waiting").hover();
+  await expect(waitingActions).toHaveCSS("opacity", "1");
+  expect(await geometry(), "hover reveal keeps the reserved row geometry").toEqual(beforeHover);
+  await p.mouse.move(0, 0);
+  await expect(waitingActions).toHaveCSS("opacity", "0");
+
+  // Put focus on the preceding button in DOM order, then use a real Tab keystroke to
+  // enter this row. The opacity-zero action remains tabbable and :focus-within makes
+  // it visible as soon as focus arrives.
+  const keyboardTarget = railAction(p, "probe-waiting", "Archive session");
+  await keyboardTarget.evaluate((target) => {
+    const buttons = [...document.querySelectorAll<HTMLButtonElement>('button:not([disabled])')];
+    const before = buttons[buttons.indexOf(target as HTMLButtonElement) - 1];
+    if (!before) {
+      throw new Error("archive action has no preceding tab stop");
+    }
+    before.focus();
+  });
+  await p.keyboard.press("Tab");
+  await expect(keyboardTarget).toBeFocused();
+  await expect(waitingActions).toHaveCSS("opacity", "1");
+  await keyboardTarget.evaluate((el) => el.blur());
   await row(p, "probe-waiting").click();
   await expect(retry).toBeHidden();
 
@@ -853,12 +892,15 @@ test("click-to-attach opens the xterm terminal and shows live output", async () 
   await expect(page.locator(".af-term-meta")).toContainText("Live");
   await expect(page.locator(".af-app.af-kb-terminal")).toBeVisible();
 
-  // The quiet actions live beside the selected instance, not permanently in the
-  // terminal header or on every rail row. Kill is a muted glyph here; af-danger is
-  // reserved for the confirmation step.
-  await expect(page.locator(".af-row-actions")).toHaveCount(1);
-  await expect(row(page, SESSION_A).locator(".af-row-actions")).toBeVisible();
-  await expect(row(page, SESSION_B).locator(".af-row-actions")).toHaveCount(0);
+  // Every instance reserves the quiet action slot, but only the selected row shows
+  // it at rest. Kill remains muted; af-danger is reserved for confirmation.
+  const visibleRows = page.locator(".af-rail-list .af-row");
+  await expect(page.locator(".af-row-actions")).toHaveCount(await visibleRows.count());
+  await expect(row(page, SESSION_A).locator(".af-row-actions")).toHaveCSS("opacity", "1");
+  await page.mouse.move(0, 0);
+  await expect(row(page, SESSION_B).locator(".af-row-actions")).toHaveCSS("opacity", "0");
+  await row(page, SESSION_A).hover();
+  await expect(row(page, SESSION_A).locator(".af-row-actions")).toHaveCSS("opacity", "1");
   await expect(railAction(page, SESSION_A, "Archive session")).toHaveText("▪");
   await expect(railAction(page, SESSION_A, "Kill session")).toHaveText("⌫");
   await expect(railAction(page, SESSION_A, "Kill session")).not.toHaveClass(/af-danger/);
@@ -876,13 +918,14 @@ test("the #1694 keyboard model: j/k navigate, Enter attaches, Escape returns to 
 
   // j moves the selection off A to the next row; the terminal is NOT stolen — j/k
   // always navigate the rail in nav mode. (Pre-#1693 j/k silently fed the agent.)
+  await page.mouse.move(0, 0);
   await page.keyboard.press("j");
   await expect(row(page, SESSION_A)).not.toHaveClass(/af-row-selected/);
-  await expect(row(page, SESSION_A).locator(".af-row-actions")).toHaveCount(0);
+  await expect(row(page, SESSION_A).locator(".af-row-actions")).toHaveCSS("opacity", "0");
   const movedTo = page.locator(".af-rail-list .af-row.af-row-selected");
   await expect(movedTo).toHaveCount(1);
-  await expect(movedTo.locator(".af-row-actions")).toBeVisible();
-  await expect(page.locator(".af-row-actions")).toHaveCount(1);
+  await expect(movedTo.locator(".af-row-actions")).toHaveCSS("opacity", "1");
+  await expect(page.locator(".af-row-actions")).toHaveCount(await page.locator(".af-rail-list .af-row").count());
   await expect(page.locator(".af-app.af-kb-rail")).toBeVisible();
 
   // k moves back up to A — j/k are symmetric rail navigation.
@@ -2646,16 +2689,22 @@ test.describe("create → kill (one session, two flows)", () => {
   });
 });
 
-test("archive: the archive confirm retires the session out of the default rail", async () => {
-  // Archive session B. Select it (click attaches, which is fine), then archive +
-  // confirm.
-  await row(page, SESSION_B).click();
+test("archive: an unselected row's hover action retires that session, not the selection", async () => {
+  // Keep A selected, then invoke B's hover-revealed action. The modal target must be
+  // the row that owns the button; deriving it from the current selection would archive
+  // A instead (#2223).
+  await row(page, SESSION_A).click();
   await expect(page.locator(".af-main.af-main-term")).toBeVisible();
-
-  // Archive is the quiet ▪ glyph beside the selected row, not a labelled header chip.
+  await page.mouse.move(0, 0);
+  await expect(row(page, SESSION_B).locator(".af-row-actions")).toHaveCSS("opacity", "0");
+  await row(page, SESSION_B).hover();
+  await expect(row(page, SESSION_B).locator(".af-row-actions")).toHaveCSS("opacity", "1");
   await railAction(page, SESSION_B, "Archive session").click();
   const modal = page.locator(".af-modal-card");
   await expect(modal).toBeVisible();
+  await expect(modal).toContainText(SESSION_B);
+  await expect(row(page, SESSION_A)).toHaveClass(/af-row-selected/);
+  await expect(row(page, SESSION_B)).not.toHaveClass(/af-row-selected/);
   await modal.locator("button.af-primary").click();
 
   // B LEAVES the default rail (feat: hide archived by default) — archived sessions are
@@ -2673,6 +2722,14 @@ test("archive: the archive confirm retires the session out of the default rail",
   await expect(archivedDot).toHaveClass(/af-dot-archived/);
   await expect(archivedDot).toHaveText("▧");
   await expect(archivedDot).not.toHaveClass(/af-dot-spin/);
+  // An archived unselected row reserves the same quiet slot, reveals it on hover,
+  // and reverses the lifecycle action to Restore rather than Archive.
+  await page.mouse.move(0, 0);
+  await expect(row(page, SESSION_B).locator(".af-row-actions")).toHaveCSS("opacity", "0");
+  await expect(railAction(page, SESSION_B, "Archive session")).toHaveCount(0);
+  await expect(railAction(page, SESSION_B, "Restore session")).toHaveText("↶");
+  await row(page, SESSION_B).hover();
+  await expect(row(page, SESSION_B).locator(".af-row-actions")).toHaveCSS("opacity", "1");
 
   await resetFilter(page);
   await expect(row(page, SESSION_B)).toHaveCount(0);

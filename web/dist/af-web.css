@@ -807,6 +807,14 @@ body {
   align-self: center;
   flex: 0 0 auto;
   gap: 0.15rem;
+  opacity: 0;
+  pointer-events: none;
+}
+.af-row-selected > .af-row-actions,
+.af-row:hover > .af-row-actions,
+.af-row:focus-within > .af-row-actions {
+  opacity: 1;
+  pointer-events: auto;
 }
 .af-rail-action {
   display: inline-flex;

@@ -10620,10 +10620,10 @@ var AppShell = class {
   headTitle = null;
   headMeta = null;
   // The selected rail row's archive/restore control and the archived-ness it currently
-  // shows (#1932, #2186). A session can flip archived⇄live WITHOUT a selection change
-  // (archiving or restoring the row that is already selected — the common path), so
-  // patchMainHead swaps this control's glyph + accessible verb in place, exactly as it
-  // patches the header text. null when the selected row is not visible in the rail.
+  // shows (#1932, #2186). Every row owns controls now (#2223), but a session can flip
+  // archived⇄live WITHOUT a selection change, so patchMainHead still needs this one
+  // reference to swap the selected control's glyph + accessible verb in place. null
+  // when the selected row is not visible in the rail.
   lifecycleBtn = null;
   lifecycleArchived = false;
   // The usage-limit Retry button and whether it is currently shown (#1934). Same
@@ -10844,45 +10844,46 @@ var AppShell = class {
     }
     const rows = visible.map((s) => {
       const selected = s.id === state.selectedId;
-      return sessionRow(s, selected, this.actions, selected ? this.selectedRowActions(s) : null);
+      return sessionRow(s, selected, this.actions, this.rowActions(s, selected));
     });
     const notice = this.railNotice(state, scoped, visible);
     list.replaceChildren(...notice ? [notice, ...rows] : rows);
   }
-  /** Quiet per-session controls shown only beside the selected rail row (#2186).
-   *  Archive/Restore share one slot; the click reads lifecycleArchived at gesture
-   *  time so patchMainHead can change the action without rebuilding the row. */
-  selectedRowActions(selected) {
+  /** Quiet per-session controls reserved beside every rail row (#2186, #2223).
+   *  CSS reveals the slot for selection, hover, or keyboard focus without changing
+   *  row geometry. Archive/Restore share one slot; its data-action is read at gesture
+   *  time so patchMainHead can change the selected row without rebuilding it. */
+  rowActions(session, selected) {
     const lifecycleBtn = h2("button", { type: "button", class: "af-rail-action af-rail-lifecycle" });
     lifecycleBtn.addEventListener("click", (e) => {
       e.stopPropagation();
-      if (this.lifecycleArchived) {
-        this.actions.restore();
+      if (lifecycleBtn.dataset.action === "restore") {
+        this.actions.restore(session);
       } else {
-        this.actions.archive();
+        this.actions.archive(session);
       }
     });
-    this.lifecycleBtn = lifecycleBtn;
-    this.patchLifecycleButton(isArchived(selected));
+    const archived = isArchived(session);
+    this.patchLifecycleButton(lifecycleBtn, archived);
+    if (selected) {
+      this.lifecycleBtn = lifecycleBtn;
+      this.lifecycleArchived = archived;
+    }
     const killBtn = h2("button", { type: "button", class: "af-rail-action af-rail-kill" }, "\u232B");
     killBtn.setAttribute("aria-label", "Kill session");
     killBtn.setAttribute("title", "Kill session");
     killBtn.addEventListener("click", (e) => {
       e.stopPropagation();
-      this.actions.kill();
+      this.actions.kill(session);
     });
     return h2("div", { class: "af-row-actions" }, lifecycleBtn, killBtn);
   }
   /** Applies both the visible static glyph and the accessible reverse verb to the
-   *  selected row's lifecycle slot. Kept in one helper so render and live patching
-   *  cannot disagree about what an archived row offers. */
-  patchLifecycleButton(archived) {
-    const btn = this.lifecycleBtn;
-    if (!btn) {
-      return;
-    }
-    this.lifecycleArchived = archived;
+   *  lifecycle slot. Kept in one helper so render and selected-row live patching
+   *  cannot disagree about what an archived row offers or fires. */
+  patchLifecycleButton(btn, archived) {
     const verb = archived ? "Restore session" : "Archive session";
+    btn.dataset.action = archived ? "restore" : "archive";
     btn.textContent = archived ? "\u21B6" : "\u25AA";
     btn.setAttribute("aria-label", verb);
     btn.setAttribute("title", verb);
@@ -11383,7 +11384,8 @@ var AppShell = class {
     this.headMeta.className = `af-term-meta af-term-${state.termStatus}`;
     const nowArchived = isArchived(selected);
     if (this.lifecycleBtn && nowArchived !== this.lifecycleArchived) {
-      this.patchLifecycleButton(nowArchived);
+      this.patchLifecycleButton(this.lifecycleBtn, nowArchived);
+      this.lifecycleArchived = nowArchived;
     }
     const nowLimited = isLimitReached(selected);
     if (this.retryBtn && nowLimited !== this.retryVisible) {
@@ -11508,9 +11510,7 @@ function sessionRow(s, selected, actions2, rowActions) {
     row.append(dot);
   }
   row.append(main);
-  if (rowActions) {
-    row.append(rowActions);
-  }
+  row.append(rowActions);
   row.setAttribute("role", "option");
   row.setAttribute("aria-selected", selected ? "true" : "false");
   row.setAttribute("title", `${s.title} \u2014 ${status.label}`);
@@ -11818,15 +11818,12 @@ function newSession() {
     })
   );
 }
-function openConfirm(action) {
-  const sel = selectedSession2();
-  if (!sel) {
-    return;
-  }
+function openConfirm(action, session) {
+  const target = { id: session.id ?? "", title: session.title };
   openModal(
     confirmModal({
       action,
-      sessionTitle: sel.title,
+      sessionTitle: target.title,
       onConfirm: () => {
         const tok = token;
         if (tok === null || !modal) {
@@ -11834,7 +11831,7 @@ function openConfirm(action) {
         }
         const m = modal;
         m.setBusy(true);
-        const run = action === "kill" ? killSession(sel.id, sel.title, tok) : action === "archive" ? archiveSession(sel.id, sel.title, tok) : restoreSession(sel.title, tok);
+        const run = action === "kill" ? killSession(target.id, target.title, tok) : action === "archive" ? archiveSession(target.id, target.title, tok) : restoreSession(target.title, tok);
         void run.then(closeModal).catch((e) => {
           m.setBusy(false);
           m.setError(describeError(e));
@@ -12183,9 +12180,9 @@ var actions = {
   disconnect,
   open: openFromRail,
   newSession,
-  kill: () => openConfirm("kill"),
-  archive: () => openConfirm("archive"),
-  restore: () => openConfirm("restore"),
+  kill: (session) => openConfirm("kill", session),
+  archive: (session) => openConfirm("archive", session),
+  restore: (session) => openConfirm("restore", session),
   retryLimit: doRetryLimit,
   switchTab,
   openTab,
