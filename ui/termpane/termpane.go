@@ -36,6 +36,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/charmbracelet/x/vt"
+	"github.com/sachiniyer/agent-factory/terminal"
 )
 
 const (
@@ -88,6 +89,11 @@ type Event struct {
 	Data []byte
 	Rows uint16
 	Cols uint16
+	// Modes accompany EventRepaint when HasModes is true. They are the
+	// authoritative pre-existing state a fresh/recovered stream subscriber did
+	// not observe in the live byte ring.
+	Modes    terminal.Modes
+	HasModes bool
 	// Seq is the server's authoritative replay cursor, valid only when
 	// Kind == EventCursor.
 	Seq uint64
@@ -143,6 +149,8 @@ type TermPane struct {
 	// mode and thus fires DisableMode for each — clearing this set — so the wheel
 	// can never stay stuck forwarding to a program that reset the terminal (#1748).
 	mouseModes    map[ansi.Mode]bool
+	terminalModes terminal.Modes
+	modesKnown    bool
 	width, height int
 
 	dial Dialer
@@ -183,6 +191,9 @@ func New(dial Dialer, width, height int) *TermPane {
 	// field write is ordered against Render's locked reads.
 	t.emu.SetCallbacks(vt.Callbacks{
 		CursorVisibility: func(visible bool) { t.cursorVisible = visible },
+		AltScreen: func(on bool) {
+			t.terminalModes.AlternateScreen = on
+		},
 		// Track the inner app's mouse-reporting requests so the host can tell
 		// whether the wheel belongs to the program or to pane scrollback (#1024
 		// wheel fix). Both callbacks fire from emu.Write under gridMu's write lock,
@@ -190,10 +201,14 @@ func New(dial Dialer, width, height int) *TermPane {
 		EnableMode: func(mode ansi.Mode) {
 			if isMouseTrackingMode(mode) {
 				t.mouseModes[mode] = true
+				t.terminalModes.MouseTracking = true
 			}
+			setTerminalMode(&t.terminalModes, mode, true)
 		},
 		DisableMode: func(mode ansi.Mode) {
 			delete(t.mouseModes, mode)
+			t.terminalModes.MouseTracking = len(t.mouseModes) > 0
+			setTerminalMode(&t.terminalModes, mode, false)
 		},
 	})
 
@@ -275,6 +290,18 @@ func (t *TermPane) readStream(stream Stream) {
 			// per-subscriber and not part of the server's ring seq (§ EventRepaint).
 			t.gridMu.Lock()
 			_, _ = t.emu.Write(ev.Data)
+			if ev.HasModes {
+				// The repaint's DEC prefix already updated supported emulator
+				// modes. Assign the snapshot as the authority as well: tmux can
+				// report UTF-8 encoding even when an emulator does not expose a
+				// callback for it, and all-false is meaningful.
+				t.terminalModes = ev.Modes
+				t.modesKnown = true
+			} else {
+				// A recovery repaint can jump over unretained DEC mode changes.
+				// Without snapshot metadata the old decision is no longer safe.
+				t.modesKnown = false
+			}
 			t.gridMu.Unlock()
 		case EventCursor:
 			// The server moved our cursor over bytes it no longer holds (an eviction or

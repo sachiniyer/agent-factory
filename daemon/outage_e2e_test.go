@@ -112,9 +112,9 @@ func TestOutageEndToEnd_LostRestoreAndReplay(t *testing.T) {
 		if err != nil {
 			return false
 		}
-		i1 := strings.Index(content, "replay-e1")
-		i2 := strings.Index(content, "replay-e2")
-		i3 := strings.Index(content, "replay-e3")
+		i1 := strings.Index(content.Content, "replay-e1")
+		i2 := strings.Index(content.Content, "replay-e2")
+		i3 := strings.Index(content.Content, "replay-e3")
 		return i1 >= 0 && i2 > i1 && i3 > i2
 	})
 	waitUntil(t, 10*time.Second, "the drained queue files to clean up", func() bool {

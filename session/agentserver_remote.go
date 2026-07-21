@@ -19,6 +19,7 @@ import (
 
 	"github.com/sachiniyer/agent-factory/agentproto"
 	"github.com/sachiniyer/agent-factory/apiproto"
+	"github.com/sachiniyer/agent-factory/terminal"
 )
 
 // remoteAgentServer is the daemon-side AgentServer for a runtime whose agent runs
@@ -135,17 +136,21 @@ func (s *remoteAgentServer) Snapshot() (Observation, error) {
 	return Observation{Updated: resp.Updated, HasPrompt: resp.HasPrompt, Content: resp.Content}, nil
 }
 
-func (s *remoteAgentServer) Preview(tab int, full bool) (string, error) {
+func (s *remoteAgentServer) Preview(tab int, full bool) (PreviewSnapshot, error) {
 	return s.rc.preview(tab, full)
 }
 
-func (s *remoteAgentServer) PreviewByID(tabID string, full bool) (string, error) {
+func (s *remoteAgentServer) PreviewByID(tabID string, full bool) (PreviewSnapshot, error) {
 	if s.inst == nil {
-		return "", fmt.Errorf("remote session %q cannot resolve stable tab id %q without its owning instance", s.rc.title, tabID)
+		return PreviewSnapshot{}, fmt.Errorf("remote session %q cannot resolve stable tab id %q without its owning instance", s.rc.title, tabID)
 	}
-	return s.inst.previewByIDAsOrdinal(tabID, func(tab int) (string, error) {
-		return s.rc.preview(tab, full)
+	var snapshot PreviewSnapshot
+	_, err := s.inst.previewByIDAsOrdinal(tabID, func(tab int) (string, error) {
+		var err error
+		snapshot, err = s.rc.preview(tab, full)
+		return snapshot.Content, err
 	})
+	return snapshot, err
 }
 
 // Alive asks the in-sandbox agent-server whether its agent is running. The error
@@ -286,13 +291,15 @@ func (s *deadRemoteAgentServer) err() error {
 	return fmt.Errorf("session %q has no live agent-server: its sandbox is not provisioned", s.title)
 }
 
-func (s *deadRemoteAgentServer) Provision(bool) error              { return s.err() }
-func (s *deadRemoteAgentServer) Launch(bool) error                 { return s.err() }
-func (s *deadRemoteAgentServer) Expose() (StreamEndpoint, error)   { return StreamEndpoint{}, s.err() }
-func (s *deadRemoteAgentServer) Snapshot() (Observation, error)    { return Observation{}, s.err() }
-func (s *deadRemoteAgentServer) Preview(int, bool) (string, error) { return "", s.err() }
-func (s *deadRemoteAgentServer) PreviewByID(string, bool) (string, error) {
-	return "", s.err()
+func (s *deadRemoteAgentServer) Provision(bool) error            { return s.err() }
+func (s *deadRemoteAgentServer) Launch(bool) error               { return s.err() }
+func (s *deadRemoteAgentServer) Expose() (StreamEndpoint, error) { return StreamEndpoint{}, s.err() }
+func (s *deadRemoteAgentServer) Snapshot() (Observation, error)  { return Observation{}, s.err() }
+func (s *deadRemoteAgentServer) Preview(int, bool) (PreviewSnapshot, error) {
+	return PreviewSnapshot{}, s.err()
+}
+func (s *deadRemoteAgentServer) PreviewByID(string, bool) (PreviewSnapshot, error) {
+	return PreviewSnapshot{}, s.err()
 }
 
 // Alive returns (false, err) = UNKNOWN, never an authoritative "the agent is gone":
@@ -450,7 +457,7 @@ func (c *remoteClientlessChannel) Resize(rows, cols uint16) error {
 // the first live byte, mirroring tmux capture-pane. The WS stream carries only
 // future output, so without this a just-opened remote pane would render blank.
 func (c *remoteClientlessChannel) Snapshot() (PaneSnapshot, error) {
-	content, err := c.rc.preview(c.tab, false)
+	snapshot, err := c.rc.preview(c.tab, false)
 	if err != nil {
 		return PaneSnapshot{}, err
 	}
@@ -462,7 +469,11 @@ func (c *remoteClientlessChannel) Snapshot() (PaneSnapshot, error) {
 	// limitation of the still-dark remote runtime (no cursor cascade to corrupt, since
 	// HasCursor is false); productizing it needs the agent-server to expose a grid
 	// capture + cursor over REST, mirroring tmuxClientlessChannel.Snapshot.
-	return PaneSnapshot{Screen: []byte(content)}, nil
+	return PaneSnapshot{
+		Screen:   []byte(snapshot.Content),
+		Modes:    snapshot.Modes,
+		HasModes: snapshot.HasModes,
+	}, nil
 }
 
 // activeConn returns the live capture socket and its context, or an error if
@@ -590,12 +601,16 @@ func (c *remoteAgentClient) call(path string, req, resp any) error {
 
 // preview fetches tab `tab`'s content over the control REST — shared by the
 // AgentServer.Preview surface and the broker's fresh-subscriber repaint (Snapshot).
-func (c *remoteAgentClient) preview(tab int, full bool) (string, error) {
+func (c *remoteAgentClient) preview(tab int, full bool) (PreviewSnapshot, error) {
 	var resp agentPreviewResp
 	if err := c.call("/v1/agent/preview", agentPreviewReq{Tab: tab, Full: full}, &resp); err != nil {
-		return "", err
+		return PreviewSnapshot{}, err
 	}
-	return resp.Content, nil
+	return PreviewSnapshot{
+		Content:  resp.Content,
+		Modes:    resp.Modes,
+		HasModes: resp.HasModes,
+	}, nil
 }
 
 // dialStream opens the WS PTY subscription to tab `tab` (from the live tail). The
@@ -679,7 +694,9 @@ type agentPreviewReq struct {
 }
 
 type agentPreviewResp struct {
-	Content string `json:"content"`
+	Content  string         `json:"content"`
+	Modes    terminal.Modes `json:"terminal_modes,omitempty"`
+	HasModes bool           `json:"has_terminal_modes,omitempty"`
 }
 
 type agentAliveResp struct {

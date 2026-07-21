@@ -17,9 +17,6 @@ import (
 var tabPaneStyle = lipgloss.NewStyle().
 	Foreground(activeTheme.Foreground)
 
-var tabPaneFooterStyle = lipgloss.NewStyle().
-	Foreground(activeTheme.ForegroundMuted)
-
 // tabContentState holds the rendered content of the tab pane.
 //
 // Invariant: fallback==true iff text is a centered fallback message
@@ -68,11 +65,18 @@ type TabPane struct {
 	// retargeting snapshots it so a grace-period expiry can replace stale content
 	// without racing and overwriting a capture that landed at the deadline.
 	renderRevision uint64
+	// captureGeneration orders same-target preview snapshots. Every capture
+	// dispatch and every state transition that invalidates pending captures
+	// advances it; only the current generation may publish. A slow older capture
+	// therefore cannot overwrite a newer terminal-owner decision merely because
+	// it finished last.
+	captureGeneration uint64
 	// scroll is the explicit scroll owner and transition controller (#2192).
-	// Captured tabs use host-history ownership. It owns active/loading/
-	// ready state, fill generations, and pending intent; TabPane owns only the
-	// rendered viewport it asks the controller to manipulate.
-	scroll   historyScrollController
+	// Capture-backed tabs begin with an ownership probe and resolve to host or
+	// child ownership from the same snapshot as their content. The controller
+	// owns active/loading/ready state, fill generations, and pending intent;
+	// TabPane owns only the rendered viewport it asks it to manipulate.
+	scroll   ScrollController
 	viewport viewport.Model
 
 	// currentInstance + currentTab identify the (instance, tab-index) view
@@ -94,11 +98,20 @@ type TabPane struct {
 	previewSrc PreviewSource
 }
 
-// PreviewSource captures a session tab's content for a TabPane. tab 0 is the agent
-// tab (formatted by the backend preview); tab>0 is a shell/process tab. full=true
-// returns the entire scrollback history (the scroll-mode source). It returns
-// tmux.ErrSessionGone when the session's tmux vanished mid-capture.
-type PreviewSource func(instance *session.Instance, tab int, full bool) (string, error)
+// PreviewSnapshot binds rendered content to the owner that can truthfully scroll
+// that exact terminal target. Owner=None means the capture source could not
+// establish ownership; callers must not infer HostHistory from the content.
+type PreviewSnapshot struct {
+	Content string
+	Owner   ScrollOwner
+}
+
+// PreviewSource captures a session tab's content and scroll owner for a TabPane.
+// tab 0 is the agent tab (formatted by the backend preview); tab>0 is a
+// shell/process tab. full=true returns the entire scrollback history (the
+// scroll-mode source). It returns tmux.ErrSessionGone when the session's tmux
+// vanished mid-capture.
+type PreviewSource func(instance *session.Instance, tab int, full bool) (PreviewSnapshot, error)
 
 // NewTabPane creates a TabPane whose content is captured through src — the
 // daemon-backed capture in production (#1592 Phase 2 PR6).
@@ -106,7 +119,7 @@ func NewTabPane(src PreviewSource) *TabPane {
 	return &TabPane{
 		viewport:   viewport.New(0, 0),
 		previewSrc: src,
-		scroll:     newHostHistoryScrollController(),
+		scroll:     newOwnershipProbeScrollController(),
 	}
 }
 
@@ -127,6 +140,99 @@ func (p *TabPane) ScrollOwner() ScrollOwner {
 	return p.scroll.Owner()
 }
 
+// CanResolveScrollOwner reports whether this capture-backed target can preserve
+// an intent while ownership is unknown. It is false for a fresh live stream,
+// where only the stream repaint may establish ownership.
+func (p *TabPane) CanResolveScrollOwner() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	_, ok := p.historyScrollLocked()
+	return ok
+}
+
+// SetScrollOwnerFor installs an authoritative owner for one exact render target.
+// Keying the transition prevents a retargeted pane from borrowing the prior
+// target's owner during the capture window.
+func (p *TabPane) SetScrollOwnerFor(instance *session.Instance, activeTab int, owner ScrollOwner) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.dropStaleView(instance, activeTab)
+	p.setScrollOwnerLocked(owner)
+}
+
+// SetScrollOwnerResolvingFor starts an ownership probe for a capture-backed
+// target. Scroll intent may queue while modes are unknown; the full snapshot
+// either resolves it to HostHistory and applies it, or rejects the wrong buffer.
+func (p *TabPane) SetScrollOwnerResolvingFor(instance *session.Instance, activeTab int) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if !p.isCurrentViewLocked(instance, activeTab) {
+		p.dropStaleView(instance, activeTab)
+		return
+	}
+	if history, ok := p.historyScrollLocked(); ok && history.Owner() == ScrollOwnerNone {
+		return
+	}
+	p.installOwnershipProbeLocked()
+}
+
+// setScrollOwnerLocked is the single controller replacement path. Both live
+// stream updates and detached preview snapshots use it, so changing ownership
+// always invalidates a pending/ready host viewport in exactly the same way.
+func (p *TabPane) setScrollOwnerLocked(owner ScrollOwner) {
+	switch owner {
+	case ScrollOwnerNone, ScrollOwnerHostHistory, ScrollOwnerChildApplication:
+		// Exhaustive below.
+	default:
+		panic(fmt.Sprintf("ui: unknown scroll owner %d", owner))
+	}
+	switch owner {
+	case ScrollOwnerHostHistory:
+		// An authoritative normal snapshot can land after a gesture has already
+		// queued against the capture-backed ownership probe. Promote that exact
+		// controller instead of replacing it, or the snapshot silently erases
+		// both the initiating gesture and any later queued gestures.
+		if history, ok := p.historyScrollLocked(); ok && history.Owner() == ScrollOwnerNone {
+			history.ResolveHost()
+			return
+		}
+		if p.scroll.Owner() == ScrollOwnerHostHistory {
+			return
+		}
+	case ScrollOwnerChildApplication:
+		if _, ok := p.scroll.(*childApplicationScrollController); ok {
+			return
+		}
+	case ScrollOwnerNone:
+		if _, ok := p.scroll.(*unavailableScrollController); ok {
+			return
+		}
+	}
+	p.scroll.Reset(&p.viewport)
+	p.captureGeneration++
+	switch owner {
+	case ScrollOwnerHostHistory:
+		p.scroll = newHostHistoryScrollController()
+	case ScrollOwnerChildApplication:
+		p.scroll = newChildApplicationScrollController()
+	case ScrollOwnerNone:
+		p.scroll = newUnavailableScrollController()
+	}
+	p.scroll.Resize(&p.viewport, p.width, p.height)
+}
+
+func (p *TabPane) installOwnershipProbeLocked() {
+	p.scroll.Reset(&p.viewport)
+	p.captureGeneration++
+	p.scroll = newOwnershipProbeScrollController()
+	p.scroll.Resize(&p.viewport, p.width, p.height)
+}
+
+func (p *TabPane) historyScrollLocked() (historyScrollController, bool) {
+	history, ok := p.scroll.(historyScrollController)
+	return history, ok
+}
+
 // NeedsScrollFill reports whether the pane is in scroll mode with an unfilled
 // viewport — ScrollUp/ScrollDown just entered scroll mode and the off-loop
 // capture that populates the scrollback (updateAgent/updateShell lazy-fill) has
@@ -136,7 +242,8 @@ func (p *TabPane) ScrollOwner() ScrollOwner {
 func (p *TabPane) NeedsScrollFill() bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	return p.scroll.NeedsFill(p.viewport.Height)
+	history, ok := p.historyScrollLocked()
+	return ok && history.NeedsFill(p.viewport.Height)
 }
 
 // BeginScrollFill records that panesRefresh has dispatched a capture for the
@@ -148,7 +255,9 @@ func (p *TabPane) NeedsScrollFill() bool {
 func (p *TabPane) BeginScrollFill() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.scroll.BeginFill()
+	if history, ok := p.historyScrollLocked(); ok {
+		history.BeginFill()
+	}
 }
 
 func (p *TabPane) SetSize(width, maxHeight int) {
@@ -174,9 +283,7 @@ func (p *TabPane) SetSize(width, maxHeight int) {
 // entry points consistent (the #669 motivation).
 func (p *TabPane) dropStaleView(instance *session.Instance, activeTab int) {
 	if instance != p.currentInstance || activeTab != p.currentTab {
-		if p.scroll.Active() {
-			p.scroll.Reset(&p.viewport)
-		}
+		p.installOwnershipProbeLocked()
 		p.currentInstance = instance
 		p.currentTab = activeTab
 	}
@@ -202,7 +309,12 @@ func (p *TabPane) setFallbackState(message string) {
 		fallback: true,
 		text:     lipgloss.JoinVertical(lipgloss.Center, FallBackText, "", message),
 	})
+	// Reset unconditionally: an already-None controller can still have viewport
+	// data left by a prior owner or a test seam. Fallback must make stale scroll
+	// rendering impossible even when the ownership enum does not change (#940).
+	p.captureGeneration++
 	p.scroll.Reset(&p.viewport)
+	p.setScrollOwnerLocked(ScrollOwnerNone)
 }
 
 // RenderRevision returns the completed-render generation. It is safe to read
@@ -217,6 +329,19 @@ type contentGuard func() bool
 
 func guardOK(guard contentGuard) bool {
 	return guard == nil || guard()
+}
+
+func (p *TabPane) beginCaptureLocked() uint64 {
+	p.captureGeneration++
+	return p.captureGeneration
+}
+
+// capturePaneHistoryRows removes capture-pane's one output-record separator.
+// The separator is not a terminal row; removing exactly one newline preserves
+// every intentional blank row in the pane while keeping viewport coordinates
+// aligned with tmux history_size.
+func capturePaneHistoryRows(content string) string {
+	return strings.TrimSuffix(content, "\n")
 }
 
 func (p *TabPane) isCurrentViewLocked(instance *session.Instance, activeTab int) bool {
@@ -286,16 +411,27 @@ func (p *TabPane) fillHostHistoryLocked(
 	guard contentGuard,
 	goneMessage string,
 ) error {
-	gen := p.scroll.FillGeneration()
+	history, ok := p.historyScrollLocked()
+	if !ok {
+		return nil
+	}
+	gen := history.FillGeneration()
+	captureGeneration := p.beginCaptureLocked()
 	p.mu.Unlock()
-	content, err := p.previewSrc(instance, activeTab, true)
+	snapshot, err := p.previewSrc(instance, activeTab, true)
 	p.mu.Lock()
 
-	if !p.scroll.FillIsCurrent(gen) {
+	// Ownership can switch while capture is off-loop. A child transition replaces
+	// the controller and resets the old generation; never publish that host buffer.
+	if p.captureGeneration != captureGeneration {
+		return nil
+	}
+	current, stillHost := p.historyScrollLocked()
+	if !stillHost || current != history || !history.FillIsCurrent(gen) {
 		return nil
 	}
 	if !guardOK(guard) || !p.isCurrentViewLocked(instance, activeTab) {
-		p.scroll.RearmFill()
+		history.RearmFill()
 		return nil
 	}
 	if err != nil {
@@ -303,11 +439,21 @@ func (p *TabPane) fillHostHistoryLocked(
 			p.setFallbackState(goneMessage)
 			return nil
 		}
-		p.scroll.RearmFill()
+		history.RearmFill()
 		return err
 	}
-	content = lipgloss.JoinVertical(lipgloss.Left, content, scrollFooter())
-	if p.scroll.CompleteFill(gen, &p.viewport, content) {
+	if snapshot.Owner != ScrollOwnerHostHistory {
+		p.setScrollOwnerLocked(snapshot.Owner)
+		return nil
+	}
+	history.ResolveHost()
+	// capture-pane terminates its output with a record-separator newline. It is
+	// not a terminal row: admitting it into the viewport makes the first upward
+	// gesture disappear into a phantom blank line. Keep AF chrome out of this
+	// value too; TabbedWindow renders the scroll cue in its header, outside the
+	// child's history coordinate system.
+	content := capturePaneHistoryRows(snapshot.Content)
+	if history.CompleteFill(gen, &p.viewport, content) {
 		p.renderRevision++
 	}
 	return nil
@@ -358,7 +504,7 @@ func (p *TabPane) updateAgent(instance *session.Instance, guard contentGuard) er
 
 	// Scroll entry is I/O-free; the controller preserves pending intent while
 	// this off-loop full-history capture runs (#1637/#2192).
-	if p.scroll.AwaitingHistory() {
+	if history, ok := p.historyScrollLocked(); ok && history.AwaitingHistory() {
 		err := p.fillHostHistoryLocked(instance, 0, guard, "Session no longer running.")
 		p.mu.Unlock()
 		return err
@@ -368,12 +514,14 @@ func (p *TabPane) updateAgent(instance *session.Instance, guard contentGuard) er
 		p.mu.Unlock()
 		return nil
 	}
+	captureGeneration := p.beginCaptureLocked()
 	p.mu.Unlock()
 
-	content, err := p.previewSrc(instance, 0, false)
+	snapshot, err := p.previewSrc(instance, 0, false)
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if !guardOK(guard) || !p.isCurrentViewLocked(instance, 0) {
+	if p.captureGeneration != captureGeneration ||
+		!guardOK(guard) || !p.isCurrentViewLocked(instance, 0) {
 		return nil
 	}
 	if err != nil {
@@ -385,12 +533,13 @@ func (p *TabPane) updateAgent(instance *session.Instance, guard contentGuard) er
 		}
 		return err
 	}
+	p.setScrollOwnerLocked(snapshot.Owner)
 	// Always update with content, even if empty, so a newly created instance
 	// displays immediately.
-	if len(content) == 0 && !instance.Started() {
+	if len(snapshot.Content) == 0 && !instance.Started() {
 		p.setFallbackState("Please enter a name for the instance.")
 	} else {
-		p.publishContent(tabContentState{fallback: false, text: content})
+		p.publishContent(tabContentState{fallback: false, text: snapshot.Content})
 	}
 	return nil
 }
@@ -495,7 +644,7 @@ func (p *TabPane) updateShell(instance *session.Instance, activeTab int, guard c
 
 	// The shell slot uses the same controller and off-loop fill transition as the
 	// agent slot; input queued during capture is applied when history publishes.
-	if p.scroll.AwaitingHistory() {
+	if history, ok := p.historyScrollLocked(); ok && history.AwaitingHistory() {
 		err := p.fillHostHistoryLocked(instance, activeTab, guard, "Terminal session no longer running.")
 		p.mu.Unlock()
 		return err
@@ -507,12 +656,14 @@ func (p *TabPane) updateShell(instance *session.Instance, activeTab int, guard c
 		p.mu.Unlock()
 		return nil
 	}
+	captureGeneration := p.beginCaptureLocked()
 	p.mu.Unlock()
 
-	content, err := p.previewSrc(instance, activeTab, false)
+	snapshot, err := p.previewSrc(instance, activeTab, false)
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if !guardOK(guard) || !p.isCurrentViewLocked(instance, activeTab) {
+	if p.captureGeneration != captureGeneration ||
+		!guardOK(guard) || !p.isCurrentViewLocked(instance, activeTab) {
 		return nil
 	}
 	if err != nil {
@@ -524,7 +675,8 @@ func (p *TabPane) updateShell(instance *session.Instance, activeTab int, guard c
 		}
 		return fmt.Errorf("tab pane: failed to capture terminal content: %w", err)
 	}
-	p.publishContent(tabContentState{fallback: false, text: content})
+	p.setScrollOwnerLocked(snapshot.Owner)
+	p.publishContent(tabContentState{fallback: false, text: snapshot.Content})
 	return nil
 }
 
@@ -611,10 +763,14 @@ func (p *TabPane) scrollBy(instance *session.Instance, activeTab int, intent Scr
 	// Reset scroll mode if the view changed out from under us, so we capture the
 	// newly selected view's content rather than scrolling stale content (#702).
 	p.dropStaleView(instance, activeTab)
+	history, canResolve := p.historyScrollLocked()
+	if !canResolve {
+		return nil
+	}
 	if !p.scroll.Active() && !p.canEnterScrollModeLocked(instance, activeTab) {
 		return nil
 	}
-	p.scroll.Scroll(&p.viewport, intent)
+	history.Scroll(&p.viewport, intent)
 	return nil
 }
 
@@ -691,8 +847,4 @@ func (p *TabPane) ResetToNormalMode(instance *session.Instance, activeTab int) e
 		p.setFallbackState("Session lost — its tmux session is gone.")
 	}
 	return nil
-}
-
-func scrollFooter() string {
-	return tabPaneFooterStyle.Render("ESC to exit scroll mode")
 }

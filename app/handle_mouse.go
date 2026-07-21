@@ -338,17 +338,51 @@ func (m *home) forwardInteractiveMouse(msg tea.MouseMsg) bool {
 		return false
 	}
 	if kind == zones.PaneKindTerm {
-		// The wheel belongs to the inner app ONLY when it has enabled mouse
-		// reporting (tmux semantics): otherwise it falls through to handleWheel so
-		// the wheel scrolls the pane scrollback instead of being swallowed by a
-		// program sitting at a prompt (#1024 wheel fix). Clicks/motion/release stay
-		// forwarded regardless — this narrows the change to the wheel alone.
-		if isWheelButton(msg.Button) && !lt.MouseTrackingEnabled() {
-			return false
+		if isWheelButton(msg.Button) {
+			w := m.paneWindows[p.ID()]
+			if m.routePaneWheel(p, w, msg, local, true) {
+				// Host history owns this wheel even while keyboard input continues
+				// to forward through the raw interactive contract.
+				return false
+			}
+			return true
 		}
 		lt.SendMouse(msg, local.X, local.Y)
 	}
 	return true
+}
+
+// routePaneWheel is the single nav/interactive ownership router. It returns
+// true only when AF's host-history controller should receive the gesture.
+// ChildApplication forwards through the child protocol when the same terminal
+// snapshot says tracking is active; an untracked child is consumed so AF never
+// reveals its background primary buffer.
+func (m *home) routePaneWheel(
+	p *store.OpenPane,
+	w *ui.TabbedWindow,
+	msg tea.MouseMsg,
+	local layout.Point,
+	childInput bool,
+) bool {
+	decision := m.resolvePaneScrollOwnership(p, w)
+	switch decision.owner {
+	case ui.ScrollOwnerHostHistory:
+		return true
+	case ui.ScrollOwnerChildApplication:
+		if decision.childMouse && childInput {
+			if lt := m.liveTerms[p.ID()]; lt != nil {
+				lt.SendMouse(msg, local.X, local.Y)
+			}
+		}
+		return false
+	case ui.ScrollOwnerNone:
+		// Capture-backed targets can queue the gesture while their full snapshot
+		// resolves ownership. Fresh live streams install an unavailable controller
+		// and wait for their authoritative repaint instead of guessing.
+		return w != nil && w.CanResolveScrollOwner()
+	default:
+		return false
+	}
 }
 
 // isWheelButton reports whether b is any mouse-wheel button. Wheel events are the
@@ -372,14 +406,17 @@ func (m *home) handleWheel(msg tea.MouseMsg) tea.Cmd {
 	if m.state != stateDefault {
 		return nil
 	}
-	id, _, ok := m.zones.Resolve(msg.X, msg.Y)
+	id, local, ok := m.zones.Resolve(msg.X, msg.Y)
 	if !ok {
 		return nil
 	}
 	up := msg.Button == tea.MouseButtonWheelUp
-	if region, _, isPane := zones.PaneZone(id); isPane {
+	if region, kind, isPane := zones.PaneZone(id); isPane {
 		p, w := m.paneByRegion(region)
 		if p == nil || w == nil || p.Instance() == nil {
+			return nil
+		}
+		if !m.routePaneWheel(p, w, msg, local, kind == zones.PaneKindTerm) {
 			return nil
 		}
 		if up {

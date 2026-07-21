@@ -53,6 +53,7 @@ func TestBoundedTmuxCommandsDoNotHang(t *testing.T) {
 	}{
 		{"CaptureVisiblePaneGrid", func(ts *TmuxSession) error { _, err := ts.CaptureVisiblePaneGrid(); return err }},
 		{"CursorPosition", func(ts *TmuxSession) error { _, _, err := ts.CursorPosition(); return err }},
+		{"ReadTerminalState", func(ts *TmuxSession) error { _, err := ts.ReadTerminalState(); return err }},
 		{"EnablePipePane", func(ts *TmuxSession) error { return ts.EnablePipePane("dd of=/dev/null") }},
 		{"DisablePipePane", func(ts *TmuxSession) error { return ts.DisablePipePane() }},
 		// Not named in #1787, but the same unbounded pattern on the same WS data
@@ -96,7 +97,7 @@ func TestBoundedTmuxCommandsSucceedWhenTmuxIsHealthy(t *testing.T) {
 	dir := t.TempDir()
 	// display-message drives CursorPosition, which parses "row col"; every other
 	// command just needs a clean exit.
-	script := "#!/bin/sh\nif [ \"$1\" = \"display-message\" ]; then echo '3 7'; else echo 'pane line'; fi\n"
+	script := "#!/bin/sh\nif [ \"$1\" = \"display-message\" ]; then echo '3 7 0 0 0 0 0 0 0'; else echo 'pane line'; fi\n"
 	if err := os.WriteFile(filepath.Join(dir, "tmux"), []byte(script), 0o755); err != nil {
 		t.Fatalf("write fake tmux: %v", err)
 	}
@@ -110,6 +111,10 @@ func TestBoundedTmuxCommandsSucceedWhenTmuxIsHealthy(t *testing.T) {
 	row, col, err := ts.CursorPosition()
 	if err != nil || row != 3 || col != 7 {
 		t.Fatalf("CursorPosition: got (%d,%d) err %v, want (3,7)", row, col, err)
+	}
+	state, err := ts.ReadTerminalState()
+	if err != nil || state.CursorRow != 3 || state.CursorCol != 7 {
+		t.Fatalf("ReadTerminalState: got %+v err %v, want cursor (3,7)", state, err)
 	}
 	if err := ts.EnablePipePane("dd of=/dev/null"); err != nil {
 		t.Fatalf("EnablePipePane: %v", err)

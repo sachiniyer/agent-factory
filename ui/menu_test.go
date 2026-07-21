@@ -22,11 +22,12 @@ func readyUIInstance() *session.Instance {
 	return i
 }
 
-// TestMenuTerminalTabShowsBothScrollKeys verifies that when the terminal tab
-// is active, the instance menu surfaces both scroll shortcuts. Regression test
+// TestMenuTerminalTabShowsBothScrollKeys verifies that a terminal tab with
+// authoritative host history surfaces both scroll shortcuts. Regression test
 // for issue #270.
 func TestMenuTerminalTabShowsBothScrollKeys(t *testing.T) {
 	m := NewMenu()
+	m.SetScrollAvailable(true)
 	// Use a non-loading instance so addInstanceOptions renders the full menu.
 	m.SetInstance(readyUIInstance())
 	m.SetActiveTab(1)
@@ -55,6 +56,7 @@ func TestMenuTerminalTabShowsBothScrollKeys(t *testing.T) {
 // test for issue #467.
 func TestMenuAgentTabShowsBothScrollKeys(t *testing.T) {
 	m := NewMenu()
+	m.SetScrollAvailable(true)
 	m.SetInstance(readyUIInstance())
 	m.SetActiveTab(0)
 
@@ -73,6 +75,36 @@ func TestMenuAgentTabShowsBothScrollKeys(t *testing.T) {
 	}
 	if gotShiftDown != 1 {
 		t.Errorf("expected exactly 1 KeyShiftDown in agent tab menu, got %d", gotShiftDown)
+	}
+}
+
+func TestMenuHidesScrollKeysWhenControllerCannotProvideHistory(t *testing.T) {
+	m := NewMenu()
+	m.SetInstance(readyUIInstance())
+	m.SetScrollAvailable(false)
+
+	assertAbsent := func() {
+		t.Helper()
+		for _, k := range m.options {
+			if k == keys.KeyShiftUp || k == keys.KeyShiftDown {
+				t.Fatalf("unavailable scroll key leaked into options: %v", m.options)
+			}
+		}
+	}
+	m.SetFocusRegion(layout.RegionTree)
+	assertAbsent()
+	m.SetFocusRegion(layout.PaneRegion(7))
+	assertAbsent()
+
+	m.SetScrollAvailable(true)
+	var found int
+	for _, k := range m.options {
+		if k == keys.KeyShiftUp || k == keys.KeyShiftDown {
+			found++
+		}
+	}
+	if found != 2 {
+		t.Fatalf("restoring host ownership yielded %d scroll keys, want 2: %v", found, m.options)
 	}
 }
 

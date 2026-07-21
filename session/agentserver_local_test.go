@@ -101,11 +101,11 @@ func TestLocalAgentServerAlive(t *testing.T) {
 func TestLocalAgentServerPreview(t *testing.T) {
 	inst, _ := newProbeInstance(t)
 	as := inst.AgentServer()
-	if got, _ := as.Preview(0, false); got != "short" {
-		t.Errorf("Preview(false) = %q, want the visible-pane capture", got)
+	if got, _ := as.Preview(0, false); got.Content != "short" {
+		t.Errorf("Preview(false) = %q, want the visible-pane capture", got.Content)
 	}
-	if got, _ := as.Preview(0, true); got != "full" {
-		t.Errorf("Preview(true) = %q, want the full scrollback", got)
+	if got, _ := as.Preview(0, true); got.Content != "full" {
+		t.Errorf("Preview(true) = %q, want the full scrollback", got.Content)
 	}
 }
 

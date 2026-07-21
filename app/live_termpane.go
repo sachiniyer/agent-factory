@@ -8,6 +8,8 @@ import (
 
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
+	"github.com/sachiniyer/agent-factory/terminal"
+	"github.com/sachiniyer/agent-factory/ui"
 	"github.com/sachiniyer/agent-factory/ui/store"
 	"github.com/sachiniyer/agent-factory/ui/termpane"
 )
@@ -45,11 +47,10 @@ type liveTermAttachment interface {
 	// in-pane mouse path (#1024 R4). The emulator is mode-aware: the event reaches
 	// the inner app only if it enabled mouse tracking, and is dropped otherwise.
 	SendMouse(msg tea.MouseMsg, x, y int) bool
-	// MouseTrackingEnabled reports whether the inner app has requested mouse
-	// reporting (a mouse-tracking DECMode is active). The router uses it to decide
-	// wheel ownership: an app that has not enabled tracking leaves the wheel to
-	// pane scrollback rather than swallowing it (#1024 wheel fix).
-	MouseTrackingEnabled() bool
+	// TerminalModes reports the ownership-affecting terminal snapshot and whether
+	// it is known. A fresh/reconnected client stays unknown until its repaint
+	// lands; zero modes are otherwise a valid primary-screen state.
+	TerminalModes() (terminal.Modes, bool)
 }
 
 // newLiveTermPaneFn is the attachment creation seam. Production dials the daemon
@@ -65,6 +66,7 @@ var newLiveTermPaneFn = func(title, repoID, tabID string, tab, width, height int
 // steady-state cost is a per-visible-pane eligibility check plus map lookups.
 func (m *home) syncLiveTermPane() {
 	m.reconcileLiveTermPanes()
+	m.syncPaneScrollOwners()
 	m.enforceInteractiveInvariant()
 }
 
@@ -161,6 +163,9 @@ func (m *home) bindLiveTermPaneFor(p *store.OpenPane, create bool) (string, bool
 	m.liveTerms[p.ID()] = tp
 	m.liveKeys[p.ID()] = key
 	w.SetLive(tp)
+	// Do not guess primary-screen ownership during the fresh-subscribe window.
+	// The stream repaint carries an explicit all-off state when that is true.
+	w.SetScrollOwner(ui.ScrollOwnerNone)
 	return key, true
 }
 
@@ -386,6 +391,9 @@ func (m *home) closeLiveTermPaneFor(paneID int) {
 	}
 	if w := m.paneWindows[paneID]; w != nil {
 		w.SetLive(nil)
+		// The pane is capture-backed again. Preserve an immediate scroll gesture
+		// while its next detached snapshot resolves the current target's owner.
+		w.SetScrollOwnerResolving()
 	}
 	if err := lt.Close(); err != nil {
 		log.WarningLog.Printf("termpane: close pane %d: %v", paneID, err)

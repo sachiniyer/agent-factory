@@ -11,6 +11,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/sachiniyer/agent-factory/session"
+	"github.com/sachiniyer/agent-factory/terminal"
 )
 
 // fakeLiveTerm drives the per-pane live-attachment state machine (#1592 Phase 2
@@ -24,11 +25,9 @@ type fakeLiveTerm struct {
 	keys []string
 	// mice records every event forwarded through SendMouse with its grid-local
 	// coordinates (#1024 R4 interactive forwarding).
-	mice []forwardedMouse
-	// mouseTracking is what MouseTrackingEnabled reports — the fake's stand-in for
-	// the inner app having requested mouse reporting (#1024 wheel fix). Off by
-	// default: a program sitting at a prompt owns no wheel.
-	mouseTracking bool
+	mice       []forwardedMouse
+	modes      terminal.Modes
+	modesKnown bool
 }
 
 // forwardedMouse is one SendMouse call as the fake recorded it.
@@ -37,7 +36,7 @@ type forwardedMouse struct {
 	x, y int
 }
 
-func newFakeLiveTerm() *fakeLiveTerm { return &fakeLiveTerm{} }
+func newFakeLiveTerm() *fakeLiveTerm { return &fakeLiveTerm{modesKnown: true} }
 
 // Render stands in for the streamed grid, echoing whatever has been SendKey'd
 // into it. The echo lets a test assert the pane RENDERS what the user typed —
@@ -60,7 +59,9 @@ func (f *fakeLiveTerm) SendMouse(msg tea.MouseMsg, x, y int) bool {
 	return true
 }
 
-func (f *fakeLiveTerm) MouseTrackingEnabled() bool { return f.mouseTracking }
+func (f *fakeLiveTerm) TerminalModes() (terminal.Modes, bool) {
+	return f.modes, f.modesKnown
+}
 
 // stubLiveTermFactory points the attachment seam at fake attachments and returns
 // the created fakes + the session titles they were created for.

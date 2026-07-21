@@ -10,20 +10,36 @@ import (
 // TabPane state-machine tests exercise the same content path they did before the
 // daemon became the sole capturer (#1592 Phase 2 PR6). Production injects the
 // daemon-backed source instead.
-func previewFromInstance(instance *session.Instance, tab int, full bool) (string, error) {
+func hostPreview(content string) PreviewSnapshot {
+	return PreviewSnapshot{Content: content, Owner: ScrollOwnerHostHistory}
+}
+
+func enableHostHistory(p *TabPane, instance *session.Instance, tab int) {
+	p.SetScrollOwnerFor(instance, tab, ScrollOwnerHostHistory)
+}
+
+func previewFromInstance(instance *session.Instance, tab int, full bool) (PreviewSnapshot, error) {
 	if tab == 0 {
-		return instance.AgentServer().Preview(tab, full)
+		snapshot, err := instance.AgentServer().Preview(tab, full)
+		return hostPreview(snapshot.Content), err
 	}
+	var (
+		content string
+		err     error
+	)
 	if full {
-		return instance.PreviewTabFullHistory(tab)
+		content, err = instance.PreviewTabFullHistory(tab)
+	} else {
+		content, err = instance.PreviewTab(tab)
 	}
-	return instance.PreviewTab(tab)
+	return hostPreview(content), err
 }
 
 // newTestTabbedWindow builds an unbound TabbedWindow; tests bind an instance
 // via setWindowInstance.
 func newTestTabbedWindow() *TabbedWindow {
-	return NewTabbedWindow(NewTabPane(previewFromInstance), nil)
+	pane := NewTabPane(previewFromInstance)
+	return NewTabbedWindow(pane, nil)
 }
 
 // setWindowInstance is the test wiring for binding a window: give it an open

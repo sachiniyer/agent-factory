@@ -17,6 +17,7 @@ import (
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
 	"github.com/sachiniyer/agent-factory/session"
+	"github.com/sachiniyer/agent-factory/terminal"
 )
 
 // fakeHeadlessAgentServer is an in-memory session.AgentServer for the headless
@@ -51,9 +52,15 @@ func (f *fakeHeadlessAgentServer) Snapshot() (session.Observation, error) {
 	defer f.mu.Unlock()
 	return session.Observation{Updated: true, HasPrompt: false, Content: f.snapshotText}, nil
 }
-func (f *fakeHeadlessAgentServer) Preview(int, bool) (string, error) { return "preview-body", nil }
-func (f *fakeHeadlessAgentServer) PreviewByID(string, bool) (string, error) {
-	return "preview-body", nil
+func (f *fakeHeadlessAgentServer) Preview(int, bool) (session.PreviewSnapshot, error) {
+	return session.PreviewSnapshot{
+		Content:  "preview-body",
+		Modes:    terminal.Modes{AlternateScreen: true, MouseButton: true, MouseSGR: true},
+		HasModes: true,
+	}, nil
+}
+func (f *fakeHeadlessAgentServer) PreviewByID(string, bool) (session.PreviewSnapshot, error) {
+	return f.Preview(0, false)
 }
 func (f *fakeHeadlessAgentServer) Alive() (bool, error)     { return true, nil }
 func (f *fakeHeadlessAgentServer) Archive() (string, error) { return "session/fake", nil }
@@ -195,6 +202,17 @@ func TestHeadlessAgentServer_HTTPTokenRoundTrip(t *testing.T) {
 	decodeData(resp, &snap)
 	require.Equal(t, "❯ ready", snap.Content)
 	require.True(t, snap.Updated)
+
+	// --- control REST: preview carries terminal ownership with the grid ------
+	resp, err = post("/v1/agent/preview", `{"tab":0,"full":false}`)
+	require.NoError(t, err)
+	var preview agentPreviewResponse
+	decodeData(resp, &preview)
+	require.Equal(t, "preview-body", preview.Content)
+	require.True(t, preview.HasModes)
+	require.True(t, preview.Modes.AlternateScreen)
+	require.True(t, preview.Modes.MouseButton)
+	require.True(t, preview.Modes.MouseSGR)
 
 	// --- control REST: alive / send-prompt / tap-enter ----------------------
 	resp, err = post("/v1/agent/alive", ``)

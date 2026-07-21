@@ -100,11 +100,13 @@ func (m *home) handleDefaultKeyPress(msg tea.KeyMsg, name keys.KeyName) (tea.Mod
 
 	// Scrolling (each pane scrolls its own view, #1088)
 	case keys.KeyShiftUp:
+		m.syncPaneScrollOwners()
 		if pane, _ := m.focusedContentPane(); pane != nil {
 			pane.ScrollUp()
 		}
 		return m, m.selectionChanged()
 	case keys.KeyShiftDown:
+		m.syncPaneScrollOwners()
 		if pane, _ := m.focusedContentPane(); pane != nil {
 			pane.ScrollDown()
 		}

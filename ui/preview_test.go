@@ -247,8 +247,8 @@ func TestPreviewScrolling(t *testing.T) {
 	require.NoError(t, err)
 
 	// Verify that the full history contains both the command and early output
-	require.Contains(t, fullHistory, "$ seq 100", "Full history should contain the command")
-	require.Contains(t, fullHistory, "1", "Full history should contain earliest output")
+	require.Contains(t, fullHistory.Content, "$ seq 100", "Full history should contain the command")
+	require.Contains(t, fullHistory.Content, "1", "Full history should contain earliest output")
 
 	// Step 3: Enter scroll mode
 	err = previewPane.ScrollUp(setup.instance, 0)
@@ -502,6 +502,7 @@ func TestPreviewResetToNormalModeNilInstance(t *testing.T) {
 
 	p := NewTabPane(previewFromInstance)
 	p.SetSize(80, 30)
+	enableHostHistory(p, nil, 0)
 
 	// Simulate being in scroll mode with stale viewport content.
 	const staleContent = "stale-scroll-content-line\nanother-line"
@@ -549,6 +550,7 @@ func TestPreviewResetToNormalModeLoadingShowsFallback(t *testing.T) {
 	require.True(t, p.content.fallback,
 		"precondition: Loading instance shows the fallback in normal mode")
 
+	enableHostHistory(p, inst, 0)
 	require.NoError(t, p.ScrollUp(inst, 0))
 	require.True(t, p.scroll.Active(), "precondition: ScrollUp enters scroll mode")
 
@@ -992,6 +994,7 @@ func TestScrollMouseDifferentInstanceResetsScrollMode(t *testing.T) {
 
 	p := NewTabPane(previewFromInstance)
 	p.SetSize(80, 30)
+	enableHostHistory(p, instA, 0)
 
 	// Enter scroll mode on A via the mouse path (no prior UpdateContent). Scroll
 	// entry is I/O-free (#1637); the off-loop refresh (UpdateContent) fills the

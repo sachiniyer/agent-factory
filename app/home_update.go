@@ -314,6 +314,7 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// so any in-flight watchdog should stop. No-op when no detach is
 		// currently in flight.
 		endDetachWatchdog()
+		m.syncScrollHint()
 		return m, nil
 	case panePreviewStaleExpiredMsg:
 		m.expireStalePanePreview(msg)

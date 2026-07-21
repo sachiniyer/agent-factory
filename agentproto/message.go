@@ -3,11 +3,13 @@ package agentproto
 import (
 	"encoding/json"
 	"fmt"
+
+	"github.com/sachiniyer/agent-factory/terminal"
 )
 
 // MessageType is the discriminator of a JSON control frame carried as a WS text
 // frame on the PTY stream (§4.2). Binary frames (frame.go) carry the hot path;
-// these text frames carry size/lifecycle control.
+// these text frames carry terminal snapshot, size, and lifecycle control.
 //
 // Multi-writer model (Sachin, supersedes the design doc's lease sections §3-Q3 /
 // §4.2): af is single-owner, so there is NO attach lease and no interactive/observer
@@ -29,6 +31,11 @@ const (
 	// MsgDetach (client → server) is a clean-close signal; also implicit on socket
 	// close.
 	MsgDetach MessageType = "detach"
+	// MsgTerminalModes (server → client) accompanies a fresh/recovery repaint
+	// with the modes that were already active before the subscriber existed.
+	// Older clients safely ignore this additive control frame; the repaint also
+	// contains DEC restore bytes for terminal-only consumers.
+	MsgTerminalModes MessageType = "terminal_modes"
 )
 
 // ResizeMessage is the server's authoritative size echo (last-resize-wins, §6.2).
@@ -41,6 +48,19 @@ type ResizeMessage struct {
 // NewResizeMessage builds a size echo.
 func NewResizeMessage(rows, cols uint16) ResizeMessage {
 	return ResizeMessage{Type: MsgResize, Rows: rows, Cols: cols}
+}
+
+// TerminalModesMessage carries the ownership-affecting mode half of a pane
+// snapshot. Presence is significant: an all-false Modes value truthfully means
+// primary screen with no mouse tracking, unlike a source that could not report.
+type TerminalModesMessage struct {
+	Type  MessageType    `json:"type"`
+	Modes terminal.Modes `json:"modes"`
+}
+
+// NewTerminalModesMessage builds terminal mode snapshot metadata.
+func NewTerminalModesMessage(modes terminal.Modes) TerminalModesMessage {
+	return TerminalModesMessage{Type: MsgTerminalModes, Modes: modes}
 }
 
 // ExitReason says WHY a MsgExit ended the stream. It is an additive
