@@ -61,6 +61,38 @@ func TestPanePreviewSuppressionFollowsTabIdentityAcrossReorder(t *testing.T) {
 	}
 }
 
+// TestPanePreviewSuppressionDoesNotTransferAcrossStableIDReuse covers the
+// close/recreate window after a stable target was dismissed. AttachShellTab
+// leaves the replacement locally ID-less until the daemon snapshot arrives;
+// reusing the old name must not make that distinct tab inherit the old tab's
+// suppression.
+func TestPanePreviewSuppressionDoesNotTransferAcrossStableIDReuse(t *testing.T) {
+	h, alpha := multiTabHome(t)
+	pane := openTestPane(t, h, alpha, 1)
+
+	h.sidebar.SelectTabRow(alpha.Title, 2)
+	_ = h.selectionChanged()
+	require.NotNil(t, h.panePreviewTxn, "precondition: shell-2 is being previewed")
+	targetName := alpha.GetTabs()[2].Name
+	require.NotEmpty(t, alpha.GetTabs()[2].ID, "precondition: the dismissed tab has stable identity")
+
+	h.suppressActivePanePreview()
+	h.cancelPanePreview(false)
+	require.NotNil(t, h.panePreviewSuppression)
+	require.NoError(t, alpha.CloseTab(2))
+	alpha.AddTabForTest(targetName, session.TabKindShell)
+	replacement := len(alpha.GetTabs()) - 1
+	require.Empty(t, alpha.GetTabs()[replacement].ID,
+		"precondition: the locally attached replacement is awaiting ID backfill")
+
+	_ = h.updatePanePreview(alpha, replacement, true, false)
+
+	require.NotNil(t, h.panePreviewTxn,
+		"a distinct ID-less replacement must not inherit a stable tab's suppression")
+	assert.Equal(t, replacement, h.panePreviewTxn.target.tab)
+	assert.True(t, h.paneWindows[pane.ID()].Previewing())
+}
+
 // TestTUIViewStateRestorePrefersTabIDAcrossNameReuse is the row-3 regression
 // from #1991. The payload is decoded from JSON so it compiles against the old
 // schema: before TabID support the additive field is ignored and restore binds
@@ -154,6 +186,45 @@ func TestTUIViewStateRestoreFallsBackToNameForUnresolvedTabID(t *testing.T) {
 	require.Len(t, h.store.OpenPanes(), 1)
 	assert.Equal(t, "shell", inst.GetTabs()[h.store.OpenPanes()[0].Tab()].Name)
 	assert.Equal(t, "shell", inst.GetTabs()[h.store.ActiveTab()].Name)
+}
+
+// TestTUIViewStateFocusSurvivesSwappedTabNames covers two restored panes whose
+// stable IDs survive while their names swap. Translating the first pane's saved
+// focus key must not let the translated key match and redirect focus to the
+// second saved pane.
+func TestTUIViewStateFocusSurvivesSwappedTabNames(t *testing.T) {
+	h := newTestHome(t)
+	h.initialPaneOpened = false
+	inst := instanceWithFakeBackend(t, "alpha")
+	inst.AddTabForTest("agent", session.TabKindAgent)
+	inst.AddWebTabForTest("b", "http://localhost:3000")
+	inst.AddWebTabForTest("a", "http://localhost:3001")
+	inst.GetTabs()[1].ID = "id-a"
+	inst.GetTabs()[2].ID = "id-b"
+	h.store.AddInstance(inst)
+
+	state := config.TUIRepoViewState{
+		Focus: &config.TUIStateFocus{
+			Region: tuiFocusRegionPane, PaneKey: tuiPaneKeyForInstance(inst, "a"),
+		},
+		OpenPanes: []config.TUIStateOpenPane{
+			{
+				Key: tuiPaneKeyForInstance(inst, "a"), InstanceID: inst.ID, Title: inst.Title,
+				TabID: "id-a", TabName: "a", FocusRank: 2,
+			},
+			{
+				Key: tuiPaneKeyForInstance(inst, "b"), InstanceID: inst.ID, Title: inst.Title,
+				TabID: "id-b", TabName: "b", FocusRank: 1,
+			},
+		},
+	}
+
+	require.Equal(t, 2, h.applyTUIViewState(state))
+	resizeHome(h, 120, 30)
+	focused := h.focusedOpenPane()
+	require.NotNil(t, focused)
+	assert.Equal(t, "id-a", inst.GetTabs()[focused.Tab()].ID,
+		"focus must follow the originally saved key, not a translated key reused by another pane")
 }
 
 // TestSwapSameTitleActiveTabFollowsReplacementName is the row-4 regression

@@ -63,6 +63,10 @@ func (m *home) restoreTUIViewPanes(saved []config.TUIStateOpenPane) int {
 	}
 	var restored []restoredPane
 	seen := make(map[string]bool, len(saved))
+	savedFocusPaneKey := ""
+	if m.pendingTUIViewFocus != nil && m.pendingTUIViewFocus.Region == tuiFocusRegionPane {
+		savedFocusPaneKey = m.pendingTUIViewFocus.PaneKey
+	}
 	for _, paneState := range saved {
 		inst := m.resolveTUIStateInstance(paneState.InstanceID, paneState.Title)
 		if inst == nil || inst.GetLiveness() == session.LiveArchived {
@@ -91,8 +95,7 @@ func (m *home) restoreTUIViewPanes(saved []config.TUIStateOpenPane) int {
 		// compatibility. If ID-first restore followed a renamed tab, translate
 		// the pending focus from its saved key to that pane's current name key so
 		// the first sized relayout can still restore keyboard focus.
-		if m.pendingTUIViewFocus != nil && m.pendingTUIViewFocus.Region == tuiFocusRegionPane &&
-			m.pendingTUIViewFocus.PaneKey == key {
+		if savedFocusPaneKey != "" && savedFocusPaneKey == key {
 			m.pendingTUIViewFocus.PaneKey = tuiPaneKeyForOpenPane(pane)
 		}
 		restored = append(restored, restoredPane{saved: paneState, pane: pane})

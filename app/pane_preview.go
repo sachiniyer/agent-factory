@@ -78,17 +78,22 @@ func paneBindingIdentityOf(binding paneBinding) paneBindingIdentity {
 	return identity
 }
 
-func samePaneBindingIdentity(a, b paneBindingIdentity) bool {
-	if a.instance != b.instance {
+// suppressionIdentityMatches compares the identity captured when a preview was
+// dismissed with its current binding. The direction matters: an ID-less saved
+// identity may match a later ID-bearing snapshot by name (daemon backfill), but
+// a saved stable ID must never fall back to name when a different, newly
+// attached tab is still locally ID-less.
+func suppressionIdentityMatches(saved, current paneBindingIdentity) bool {
+	if saved.instance != current.instance {
 		return false
 	}
-	if a.tabID != "" && b.tabID != "" {
-		return a.tabID == b.tabID
+	if saved.tabID != "" {
+		return current.tabID != "" && saved.tabID == current.tabID
 	}
-	if a.tabName != "" || b.tabName != "" {
-		return a.tabName != "" && a.tabName == b.tabName
+	if saved.tabName != "" || current.tabName != "" {
+		return saved.tabName != "" && saved.tabName == current.tabName
 	}
-	return a.tab == b.tab
+	return saved.tab == current.tab
 }
 
 // updatePanePreview returns a tea.Cmd the caller MUST dispatch: the
@@ -354,11 +359,11 @@ func (m *home) isPanePreviewSuppressed(original, target paneBinding) bool {
 	if suppressed == nil {
 		return false
 	}
-	if !samePaneBindingIdentity(suppressed.target, paneBindingIdentityOf(target)) {
+	if !suppressionIdentityMatches(suppressed.target, paneBindingIdentityOf(target)) {
 		m.panePreviewSuppression = nil
 		return false
 	}
-	return samePaneBindingIdentity(suppressed.original, paneBindingIdentityOf(original))
+	return suppressionIdentityMatches(suppressed.original, paneBindingIdentityOf(original))
 }
 
 func (m *home) commitPanePreviewReplace() (*store.OpenPane, tea.Cmd) {
