@@ -171,7 +171,6 @@ func applyThemeStyles() {
 	menuStyle = lipgloss.NewStyle().Foreground(activeTheme.Purple)
 
 	tabPaneStyle = lipgloss.NewStyle().Foreground(activeTheme.Foreground)
-	tabPaneFooterStyle = lipgloss.NewStyle().Foreground(activeTheme.ForegroundMuted)
 
 	taskPlaceholderStyle = lipgloss.NewStyle().
 		Faint(true).

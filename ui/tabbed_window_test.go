@@ -85,6 +85,8 @@ func TestTabbedWindowResetPreviewScrollUsesCommittedBinding(t *testing.T) {
 
 	w.SetPreview(beta, 0, "alpha · › Terminal")
 	w.InvalidateContent(beta, 0, "Loading preview…")
+	require.NoError(t, w.UpdateContentAt(beta, 0, w.ContentSeq()),
+		"the detached snapshot establishes the preview target's host owner")
 	w.ScrollUp()
 	require.True(t, w.IsInScrollMode(), "precondition: preview target is scrolled")
 
@@ -128,4 +130,19 @@ func TestTabbedWindowHeaderEllipsizesAtNarrowWidth(t *testing.T) {
 	assert.LessOrEqual(t, lipgloss.Width(header), 16, "header must fit the pane width")
 	assert.Contains(t, header, "…", "the cut must be marked with an ellipsis")
 	assert.NotContains(t, header, "Agent", "the tail is truncated")
+}
+
+func TestTabbedWindowScrollCueIsPaneChrome(t *testing.T) {
+	inst := startedWindowInstance(t, "scroll-cue")
+	w := newTestTabbedWindow()
+	setWindowInstance(w, inst)
+	setWindowSize(w, 100, 30)
+	w.SetScrollOwner(ScrollOwnerHostHistory)
+
+	require.NotContains(t, w.renderHeader(98), "SCROLL")
+	w.ScrollUp()
+	require.True(t, w.IsInScrollMode())
+	header := w.renderHeader(98)
+	require.Contains(t, header, "SCROLL")
+	require.Contains(t, header, "Esc exits")
 }

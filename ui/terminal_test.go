@@ -115,6 +115,7 @@ func TestTabPaneShellUpdateContent(t *testing.T) {
 
 	p := NewTabPane(previewFromInstance)
 	p.SetSize(80, 30)
+	enableHostHistory(p, inst, 1)
 
 	require.NoError(t, p.UpdateContent(inst, 1))
 
@@ -188,6 +189,7 @@ func TestTabPaneShellScrolling(t *testing.T) {
 
 	p := NewTabPane(previewFromInstance)
 	p.SetSize(80, 30)
+	enableHostHistory(p, inst, 1)
 
 	require.False(t, p.IsScrolling(), "should not be scrolling initially")
 
@@ -217,6 +219,7 @@ func TestTabPaneShellFallbackResetsScrollMode(t *testing.T) {
 	t.Run("nil instance", func(t *testing.T) {
 		p := NewTabPane(previewFromInstance)
 		p.SetSize(80, 30)
+		enableHostHistory(p, prior, 1)
 		require.NoError(t, p.ScrollUp(prior, 1))
 		require.True(t, p.IsScrolling(), "precondition: in scroll mode")
 		// Scroll entry is I/O-free (#1637); the off-loop refresh fills the viewport.
@@ -238,6 +241,7 @@ func TestTabPaneShellFallbackResetsScrollMode(t *testing.T) {
 	t.Run("not started instance", func(t *testing.T) {
 		p := NewTabPane(previewFromInstance)
 		p.SetSize(80, 30)
+		enableHostHistory(p, prior, 1)
 		require.NoError(t, p.ScrollUp(prior, 1))
 		require.True(t, p.IsScrolling())
 
@@ -277,6 +281,7 @@ func TestTabPaneShellScrollUsesSelectedView(t *testing.T) {
 
 	p := NewTabPane(previewFromInstance)
 	p.SetSize(80, 30)
+	enableHostHistory(p, instA, 1)
 
 	// A is rendered first, so it becomes the current view.
 	require.NoError(t, p.UpdateContent(instA, 1))
@@ -312,6 +317,7 @@ func TestTabPaneSwitchTabResetsScroll(t *testing.T) {
 
 	p := NewTabPane(previewFromInstance)
 	p.SetSize(80, 30)
+	enableHostHistory(p, inst, 0)
 
 	// Scroll on the agent slot.
 	require.NoError(t, p.ScrollUp(inst, 0))
@@ -461,6 +467,7 @@ func TestTabPaneShellScrollModeSessionGoneExternally(t *testing.T) {
 
 	p := NewTabPane(previewFromInstance)
 	p.SetSize(80, 30)
+	enableHostHistory(p, inst, 1)
 
 	// Enter scroll mode on the live shell tab, then let the off-loop refresh fill
 	// the viewport with scrollback (scroll entry itself is I/O-free — #1637).

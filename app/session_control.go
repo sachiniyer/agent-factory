@@ -380,15 +380,13 @@ func snapshotThroughDaemon(repoID string) (daemon.SnapshotResponse, error) {
 // (refreshPaneBindingCmd), so a mutable global would race a test seam swap under
 // `go test -parallel`; the fetcher lives per-home instead, and tests assign a fake
 // to home.previewFetcher directly (the #960 PR4 / snapshot-fetcher race lesson).
-func previewThroughDaemon(req daemon.PreviewRequest) (content string, gone bool, err error) {
+func previewThroughDaemon(req daemon.PreviewRequest) (resp daemon.PreviewResponse, err error) {
 	err = withDaemonHTTP(func(c *apiclient.Client) error {
 		var e error
-		// tabGone is deliberately dropped here: the TUI renders its session-gone
-		// fallback for either cause, and it addresses tabs it can see (#1948).
-		content, gone, _, e = c.Preview(req)
+		resp, e = c.PreviewSnapshot(req)
 		return e
 	})
-	return content, gone, err
+	return resp, err
 }
 
 // allReposSnapshotFetcher returns the daemon's session list across EVERY repo

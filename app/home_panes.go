@@ -24,6 +24,7 @@ import (
 // reads it. Synchronous fields touched here (selection binding, menu state)
 // stay on the event loop.
 func (m *home) selectionChanged() tea.Cmd {
+	defer m.syncScrollHint()
 	selectionStart := time.Now()
 	detachTraceMark("selectionChanged-entry")
 	sel := m.sidebar.GetSelection()

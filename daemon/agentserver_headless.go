@@ -14,6 +14,7 @@ import (
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
+	"github.com/sachiniyer/agent-factory/terminal"
 )
 
 // The headless single-workspace agent-server (#1592 Phase 4 PR1) — the process
@@ -297,15 +298,19 @@ type agentPreviewRequest struct {
 }
 
 type agentPreviewResponse struct {
-	Content string `json:"content"`
+	Content  string         `json:"content"`
+	Modes    terminal.Modes `json:"terminal_modes,omitempty"`
+	HasModes bool           `json:"has_terminal_modes,omitempty"`
 }
 
 func (hs *headlessServer) Preview(req agentPreviewRequest, resp *agentPreviewResponse) error {
-	content, err := hs.as.Preview(req.Tab, req.Full)
+	snapshot, err := hs.as.Preview(req.Tab, req.Full)
 	if err != nil {
 		return err
 	}
-	resp.Content = content
+	resp.Content = snapshot.Content
+	resp.Modes = snapshot.Modes
+	resp.HasModes = snapshot.HasModes
 	return nil
 }
 

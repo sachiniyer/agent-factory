@@ -84,13 +84,13 @@ func TestWSPTYBrokerRoundTrip(t *testing.T) {
 	// server's ping times out and drops it. It must NOT take the session or the live
 	// subscriber down.
 	dead := h.dialWSRaw(t, streamPath)
-	// A fresh subscriber receives two leading server→client frames before it goes
-	// silent: the OpHello start-seq (#1592 Phase 5 PR1) then the one-shot initial
-	// screen repaint (#1592 PR6). Drain BOTH first, otherwise the keepalive diagnostic
-	// below would read one of those still-buffered frames (a non-error) instead of the
-	// eventual close. After draining them the client stops reading, so the next ping
-	// goes unanswered and the server drops it.
-	for _, what := range []string{"hello", "repaint"} {
+	// A fresh subscriber receives three leading server→client frames before it
+	// goes silent: the OpHello start-seq (#1592 Phase 5 PR1), terminal ownership
+	// modes, then the one-shot initial screen repaint (#1592 PR6). Drain all three
+	// first, otherwise the keepalive diagnostic below would read a buffered frame
+	// (a non-error) instead of the eventual close. After draining them the client
+	// stops reading, so the next ping goes unanswered and the server drops it.
+	for _, what := range []string{"hello", "terminal modes", "repaint"} {
 		if err := dead.readErrWithin(2 * time.Second); err != nil {
 			t.Fatalf("dead subscriber never received its initial %s frame: %v", what, err)
 		}

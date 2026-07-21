@@ -405,6 +405,8 @@ func TestPanePreviewEscFromScrollRevertsOriginalCommittedTab(t *testing.T) {
 	_ = h.selectionChanged()
 	require.NotNil(t, h.panePreviewTxn)
 	require.True(t, w.Previewing())
+	require.IsType(t, panesRefreshedMsg{},
+		refreshPaneBindingCmd(w, beta, 0, h.panePreviewTxn.seq)())
 
 	_, _ = h.handleDefaultKeyPress(tea.KeyMsg{Type: tea.KeyCtrlU}, keys.KeyShiftUp)
 	require.True(t, w.IsInScrollMode(), "precondition: preview pane is in scroll mode")

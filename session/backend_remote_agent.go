@@ -85,11 +85,13 @@ func (b *remoteAgentBackend) CloseAttachOnly(i *Instance) error {
 }
 
 func (b *remoteAgentBackend) Preview(i *Instance) (string, error) {
-	return i.AgentServer().Preview(0, false)
+	snapshot, err := i.AgentServer().Preview(0, false)
+	return snapshot.Content, err
 }
 
 func (b *remoteAgentBackend) PreviewFullHistory(i *Instance) (string, error) {
-	return i.AgentServer().Preview(0, true)
+	snapshot, err := i.AgentServer().Preview(0, true)
+	return snapshot.Content, err
 }
 
 func (b *remoteAgentBackend) HasUpdated(i *Instance) (updated bool, hasPrompt bool, content string) {

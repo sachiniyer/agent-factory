@@ -60,6 +60,10 @@ type Menu struct {
 	// interactive: every keystroke is forwarding into the focused pane's
 	// terminal (#1089, RFC §2.3), so the bar shows only the escape hatch.
 	interactive bool
+	// scrollAvailable says the current pane action target has truthful AF-owned
+	// history. Child-owned/unknown terminals hide Ctrl-U/Ctrl-D instead of
+	// advertising a capture-pane view of the wrong buffer.
+	scrollAvailable bool
 
 	// splitPaneAvailable is true only while there is an active preview that
 	// `S` can commit as another pane. Without that preview the key no-ops, so
@@ -180,6 +184,17 @@ func (m *Menu) SetActiveTab(tab int) {
 // the Ctrl-] escape hatch shows while keystrokes forward to the pane (#1089).
 func (m *Menu) SetInteractive(on bool) {
 	m.interactive = on
+	m.updateOptions()
+}
+
+// SetScrollAvailable controls whether pane/instance options advertise the AF
+// preview scroll keys. The key binding remains global; its controller is also a
+// no-op for child/unknown owners, so menu and behavior share the same truth.
+func (m *Menu) SetScrollAvailable(available bool) {
+	if m.scrollAvailable == available {
+		return
+	}
+	m.scrollAvailable = available
 	m.updateOptions()
 }
 
@@ -325,11 +340,12 @@ func (m *Menu) addInstanceOptions() {
 	// Action group: enter interacts in-pane, o attaches full-screen (#1089).
 	actionGroup := []keys.KeyName{keys.KeyEnter, keys.KeyAttach}
 
-	// Navigation group: every tab is a captured tmux session and supports
-	// scroll mode (#930 PR 2 — the Agent tab and the terminal tab
-	// both scroll), so the scroll keys always show for an instance.
-	actionGroup = append(actionGroup, keys.KeyShiftUp)
-	actionGroup = append(actionGroup, keys.KeyShiftDown)
+	// Navigation group: agent and terminal tabs use the same scroll controller,
+	// but only an authoritative host-history owner can honor these keys.
+	if m.scrollAvailable {
+		actionGroup = append(actionGroup, keys.KeyShiftUp)
+		actionGroup = append(actionGroup, keys.KeyShiftDown)
+	}
 
 	// Usage-limit retry (#1146): advertised only when the selected session is
 	// actually blocked at a limit wall — c re-spawns (if the agent exited) and
@@ -399,7 +415,10 @@ func (m *Menu) addInstanceOptions() {
 func (m *Menu) setPaneFocusOptions() {
 	// Action group: enter interacts in-pane / o attaches full-screen (#1089),
 	// and scroll acts on this pane's binding.
-	actionGroup := []keys.KeyName{keys.KeyEnter, keys.KeyAttach, keys.KeyShiftUp, keys.KeyShiftDown}
+	actionGroup := []keys.KeyName{keys.KeyEnter, keys.KeyAttach}
+	if m.scrollAvailable {
+		actionGroup = append(actionGroup, keys.KeyShiftUp, keys.KeyShiftDown)
+	}
 	focusGroup := []keys.KeyName{keys.KeyPanePrev, keys.KeyPaneNext}
 	paneGroup := []keys.KeyName{keys.KeyOpenPane}
 	if m.splitPaneAvailable {

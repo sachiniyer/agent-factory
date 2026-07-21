@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+
+	"github.com/sachiniyer/agent-factory/terminal"
 )
 
 // ErrTabGone reports that a stable tab id (#1738) names no live tab — it was
@@ -99,13 +101,13 @@ type AgentServer interface {
 	// shell/process tab. This is the daemon's SOLE capture path for content the TUI
 	// can't stream live (remote/hook sessions, scroll-mode scrollback, the transient
 	// preview target) — the TUI no longer captures tmux itself (#1592 Phase 2 PR6).
-	Preview(tab int, full bool) (string, error)
+	Preview(tab int, full bool) (PreviewSnapshot, error)
 	// PreviewByID is Preview addressed by the tab's stable identity. Implementations
 	// must either bind directly to the identified capture target or keep identity
 	// resolution and the ordinal capture in one critical section; resolving first
 	// and using that ordinal against a later roster can expose another tab (#2200).
 	// ErrTabGone reports that the exact target no longer exists.
-	PreviewByID(tabID string, full bool) (string, error)
+	PreviewByID(tabID string, full bool) (PreviewSnapshot, error)
 	// Alive reports whether the underlying session process is still running, and
 	// whether the probe could be ANSWERED at all. Kept separate from Snapshot
 	// (rather than folded into Observation) so the daemon probes liveness ONLY on
@@ -266,4 +268,8 @@ type PTYEvent struct {
 	// Seq is the subscription's authoritative output cursor, valid only when
 	// Kind == PTYCursor.
 	Seq Seq
+	// Modes accompany PTYRepaint when HasModes is true. They are snapshot
+	// metadata, not ring bytes, and therefore do not advance Seq.
+	Modes    terminal.Modes
+	HasModes bool
 }

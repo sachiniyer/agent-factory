@@ -8,10 +8,13 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/keys"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 	"github.com/sachiniyer/agent-factory/task"
+	"github.com/sachiniyer/agent-factory/terminal"
+	"github.com/sachiniyer/agent-factory/ui"
 	"github.com/sachiniyer/agent-factory/ui/layout"
 	"github.com/sachiniyer/agent-factory/ui/layout/zones"
 	"github.com/sachiniyer/agent-factory/ui/overlay"
@@ -574,6 +577,8 @@ func TestMouse_WheelScrollsRegionUnderCursor(t *testing.T) {
 	p := openTestPane(t, h, alpha, 0)
 	region := layout.PaneRegion(p.ID())
 	h.focusRegion(region)
+	require.NoError(t, h.paneWindows[p.ID()].UpdateContent(alpha),
+		"the first detached snapshot establishes host ownership")
 	require.False(t, h.sidebar.GetSelection().IsTab)
 
 	// Over the tree: the cursor walks down (alpha → its first tab row) and
@@ -604,6 +609,151 @@ func TestMouse_WheelScrollsRegionUnderCursor(t *testing.T) {
 		"wheel over the pane scrolls the pane")
 	assert.Equal(t, 1, h.automations.SelectedTaskIndex(),
 		"pane scroll must not leak into the task selection")
+}
+
+func TestMouse_NavWheelUsesTerminalScrollOwner(t *testing.T) {
+	h, inst := liveTestHome(t)
+	resizeHome(h, 200, 40)
+	fakes, _ := stubLiveTermFactory(t)
+	h.syncLiveTermPane()
+	require.Len(t, *fakes, 1)
+	fake := (*fakes)[0]
+	p := h.focusedOpenPane()
+	require.NotNil(t, p)
+	w := h.paneWindows[p.ID()]
+	require.NotNil(t, w)
+	term := zoneRect(t, h, zones.PaneTerm(layout.PaneRegion(p.ID())))
+
+	// Claude-style fullscreen: the alternate-screen child explicitly tracks
+	// mouse, so nav wheel goes to that child instead of capture-pane history.
+	fake.modes = terminal.Modes{
+		AlternateScreen: true,
+		MouseTracking:   true,
+		MouseButton:     true,
+		MouseSGR:        true,
+	}
+	h.syncPaneScrollOwners()
+	wheel(h, term.X+4, term.Y+2, true)
+	require.Len(t, fake.mice, 1)
+	assert.Equal(t, ui.ScrollOwnerChildApplication, w.ScrollOwner())
+	assert.False(t, w.IsInScrollMode(), "child wheel must not enter host history")
+
+	// Codex transcript: alternate-screen remains child-owned, but Codex requests
+	// no mouse protocol. The wheel is unavailable rather than silently scrolling
+	// the primary composer history behind the transcript.
+	fake.modes = terminal.Modes{AlternateScreen: true}
+	h.syncPaneScrollOwners()
+	wheel(h, term.X+4, term.Y+2, true)
+	assert.Len(t, fake.mice, 1, "untracked child wheel must not be fabricated")
+	assert.False(t, w.IsInScrollMode(), "untracked child must not fall back to host history")
+	assert.NotContains(t, h.menu.String(), "ctrl+u",
+		"child-owned preview must not advertise AF history scrolling")
+	_, _ = h.handleDefaultKeyPress(tea.KeyMsg{Type: tea.KeyCtrlU}, keys.KeyShiftUp)
+	assert.False(t, w.IsInScrollMode(), "advertised-off keyboard scroll must also be a controller no-op")
+
+	// The same process returns to Codex's primary composer: ownership switches
+	// back to tmux history without a pane rebind.
+	fake.modes = terminal.Modes{}
+	h.syncPaneScrollOwners()
+	assert.Equal(t, ui.ScrollOwnerHostHistory, w.ScrollOwner())
+	assert.Contains(t, h.menu.String(), "ctrl+u")
+	wheel(h, term.X+4, term.Y+2, true)
+	assert.True(t, w.IsInScrollMode(), "primary-screen Codex must regain host history")
+	assert.Same(t, inst, p.Instance())
+}
+
+func TestKeyboardScrollResolvesLiveOwnerAtInputTime(t *testing.T) {
+	h, _ := liveTestHome(t)
+	resizeHome(h, 120, 40)
+	fakes, _ := stubLiveTermFactory(t)
+	h.syncLiveTermPane()
+	require.Len(t, *fakes, 1)
+	fake := (*fakes)[0]
+	p := h.focusedOpenPane()
+	require.NotNil(t, p)
+	w := h.paneWindows[p.ID()]
+
+	// Switch after the last preview tick. The key handler must read the current
+	// stream snapshot itself, not trust the controller installed by that tick.
+	fake.modes = terminal.Modes{AlternateScreen: true}
+	_, _ = h.handleDefaultKeyPress(tea.KeyMsg{Type: tea.KeyCtrlU}, keys.KeyShiftUp)
+	require.Equal(t, ui.ScrollOwnerChildApplication, w.ScrollOwner())
+	require.False(t, w.IsInScrollMode(),
+		"a mode switch immediately before Ctrl-U must not expose primary history")
+
+	fake.modes = terminal.Modes{}
+	_, _ = h.handleDefaultKeyPress(tea.KeyMsg{Type: tea.KeyCtrlU}, keys.KeyShiftUp)
+	require.Equal(t, ui.ScrollOwnerHostHistory, w.ScrollOwner())
+	require.True(t, w.IsInScrollMode(),
+		"returning to the primary screen must restore host keyboard scrolling")
+}
+
+func TestMouse_TransientPreviewUsesTargetSnapshotOwner(t *testing.T) {
+	h := newTestHome(t)
+	for _, title := range []string{"alpha", "beta", "gamma"} {
+		inst := instanceWithFakeBackend(t, title)
+		inst.AddTabForTest("agent", session.TabKindAgent)
+		h.store.AddInstance(inst)
+	}
+	h.previewFetcher = func(req daemon.PreviewRequest) (daemon.PreviewResponse, error) {
+		content := req.Title + "-visible"
+		if req.Full {
+			content = appNumberedHistory(100)
+		}
+		resp := testPreviewResponse(content)
+		if req.Title == "beta" {
+			resp.Modes = terminal.Modes{AlternateScreen: true}
+		}
+		return resp, nil
+	}
+	h.sidebar.SetSelectedInstance(0)
+	_ = h.selectionChanged()
+	resizeHome(h, 200, 40)
+
+	alpha := h.store.GetInstanceByTitle("alpha")
+	p := openTestPane(t, h, alpha, 0)
+	w := h.paneWindows[p.ID()]
+	require.NotNil(t, w)
+	h.focusRegion(layout.PaneRegion(p.ID()))
+	require.NoError(t, w.UpdateContent(alpha))
+	require.Equal(t, ui.ScrollOwnerHostHistory, w.ScrollOwner())
+
+	// Retarget the pane to an alternate-screen target. The target capture, not
+	// alpha's committed binding, supplies the ownership decision.
+	h.sidebar.SetSelectedInstance(1)
+	_ = h.selectionChanged()
+	beta := h.store.GetInstanceByTitle("beta")
+	require.NotNil(t, h.panePreviewTxn)
+	require.IsType(t, panesRefreshedMsg{},
+		refreshPaneBindingCmd(w, beta, 0, h.panePreviewTxn.seq)())
+	h.syncScrollHint()
+	require.Equal(t, ui.ScrollOwnerChildApplication, w.ScrollOwner())
+	assert.NotContains(t, h.menu.String(), "ctrl+u")
+
+	_ = h.View()
+	body := zoneRect(t, h, zones.PaneBody(layout.PaneRegion(p.ID())))
+	wheel(h, body.X+2, body.Y+3, true)
+	assert.False(t, w.IsInScrollMode(),
+		"an alt-screen transient preview must not expose the committed pane's host history")
+	_, _ = h.handleDefaultKeyPress(tea.KeyMsg{Type: tea.KeyCtrlU}, keys.KeyShiftUp)
+	assert.False(t, w.IsInScrollMode(), "hidden keyboard scroll must be a no-op too")
+
+	// A later primary-screen target establishes HostHistory from its own capture
+	// and immediately regains both input paths.
+	h.sidebar.SetSelectedInstance(2)
+	_ = h.selectionChanged()
+	gamma := h.store.GetInstanceByTitle("gamma")
+	require.NotNil(t, h.panePreviewTxn)
+	require.IsType(t, panesRefreshedMsg{},
+		refreshPaneBindingCmd(w, gamma, 0, h.panePreviewTxn.seq)())
+	h.syncScrollHint()
+	require.Equal(t, ui.ScrollOwnerHostHistory, w.ScrollOwner())
+	assert.Contains(t, h.menu.String(), "ctrl+u")
+
+	_ = h.View()
+	body = zoneRect(t, h, zones.PaneBody(layout.PaneRegion(p.ID())))
+	wheel(h, body.X+2, body.Y+3, true)
+	assert.True(t, w.IsInScrollMode(), "host-owned transient preview must retain scrolling")
 }
 
 // TestMouse_ConfirmOverlayClicks: the kill confirmation's y/n words act as
@@ -838,7 +988,7 @@ func TestMouse_InteractiveForwardsGridEvents(t *testing.T) {
 
 	// The wheel forwards ONLY when the inner app enabled mouse reporting (#1024
 	// wheel fix). With tracking on it owns the wheel, exactly like a click.
-	fake.mouseTracking = true
+	fake.modes.MouseTracking = true
 	wheel(h, term.X+5, term.Y+3, true)
 	require.Len(t, fake.mice, 2, "with tracking enabled the inner app owns the wheel (§2.5)")
 	assert.Equal(t, tea.MouseButtonWheelUp, fake.mice[1].msg.Button)
@@ -857,7 +1007,8 @@ func TestMouse_InteractiveForwardsGridEvents(t *testing.T) {
 // semantics) — the #1024 regression where the wheel was swallowed at a prompt.
 func TestMouse_InteractiveWheelWithoutTrackingScrollsScrollback(t *testing.T) {
 	h, fake, region := interactiveMouseHome(t)
-	require.False(t, fake.mouseTracking, "the inner app owns no wheel until it enables tracking")
+	require.False(t, fake.modes.MouseTrackingEnabled(),
+		"the inner app owns no wheel until it enables tracking")
 
 	term := zoneRect(t, h, zones.PaneTerm(region))
 	wheel(h, term.X+5, term.Y+3, true)
@@ -872,6 +1023,20 @@ func TestMouse_InteractiveWheelWithoutTrackingScrollsScrollback(t *testing.T) {
 	press(h, term.X+5, term.Y+3)
 	require.Len(t, fake.mice, 1, "clicks forward unchanged — only the wheel falls through")
 	assert.Equal(t, tea.MouseButtonLeft, fake.mice[0].msg.Button)
+}
+
+func TestMouse_InteractiveUntrackedAltScreenDoesNotScrollBackgroundHistory(t *testing.T) {
+	h, fake, region := interactiveMouseHome(t)
+	fake.modes = terminal.Modes{AlternateScreen: true}
+	h.syncPaneScrollOwners()
+
+	term := zoneRect(t, h, zones.PaneTerm(region))
+	wheel(h, term.X+5, term.Y+3, true)
+
+	assert.Empty(t, fake.mice, "Codex transcript did not request mouse reports")
+	assert.False(t, h.paneWindows[h.focusedOpenPane().ID()].IsInScrollMode(),
+		"alternate-screen wheel must never reveal the background primary buffer")
+	assert.True(t, h.interactive, "unsupported wheel must not change keyboard ownership")
 }
 
 func TestMouse_InteractiveTabDragConsumesTerminalMotionAndDrop(t *testing.T) {

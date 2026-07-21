@@ -19,6 +19,45 @@ func numberedScrollHistory(lines int) string {
 	return strings.Join(out, "\n")
 }
 
+// TestFirstScrollIntentRevealsAnOlderTerminalRow pins the user-visible contract,
+// not just the controller's internal offset. tmux terminates capture-pane output
+// with a newline; that record separator and AF's own scroll-mode chrome must not
+// become rows in the terminal's history coordinate system. With a ten-row pane,
+// the normal bottom view is history-031..040, so one upward gesture must reveal
+// history-030 immediately.
+func TestFirstScrollIntentRevealsAnOlderTerminalRow(t *testing.T) {
+	inst := makeShellInstance(t, "visible-first-intent", "visible-line")
+	defer func() { _ = inst.Kill() }()
+
+	src := func(_ *session.Instance, _ int, full bool) (PreviewSnapshot, error) {
+		if !full {
+			return hostPreview("visible-line"), nil
+		}
+		return hostPreview(numberedScrollHistory(40) + "\n"), nil
+	}
+	p := NewTabPane(src)
+	p.SetScrollOwnerFor(inst, 1, ScrollOwnerHostHistory)
+	p.SetSize(80, 10)
+	require.NoError(t, p.ScrollUp(inst, 1))
+	p.BeginScrollFill()
+	require.NoError(t, p.UpdateContent(inst, 1))
+
+	rendered := p.String()
+	require.Contains(t, rendered, "history-030",
+		"the first gesture must reveal a row older than the normal bottom view")
+	require.NotContains(t, rendered, "history-040",
+		"scrolling up one row must move the newest row out of the viewport")
+	require.NotContains(t, rendered, "SCROLL",
+		"AF scroll-mode chrome must not be part of terminal history")
+}
+
+func TestCapturePaneHistoryRowsRemovesOnlyTheRecordSeparator(t *testing.T) {
+	require.Equal(t, "history", capturePaneHistoryRows("history\n"))
+	require.Equal(t, "history\n", capturePaneHistoryRows("history\n\n"),
+		"an intentional blank terminal row must survive")
+	require.Equal(t, "history", capturePaneHistoryRows("history"))
+}
+
 // TestFirstScrollIntentSurvivesPendingFill is the fail-first half of #2192:
 // the gesture that ENTERS scroll mode is still a scroll request. The history
 // capture remains off the event loop (#1637), but when it lands the viewport
@@ -31,16 +70,17 @@ func TestFirstScrollIntentSurvivesPendingFill(t *testing.T) {
 	history := numberedScrollHistory(40)
 	started := make(chan struct{})
 	release := make(chan struct{})
-	src := func(_ *session.Instance, _ int, full bool) (string, error) {
+	src := func(_ *session.Instance, _ int, full bool) (PreviewSnapshot, error) {
 		if !full {
-			return "visible-line", nil
+			return hostPreview("visible-line"), nil
 		}
 		close(started)
 		<-release
-		return history, nil
+		return hostPreview(history), nil
 	}
 
 	p := NewTabPane(src)
+	p.SetScrollOwnerFor(inst, 1, ScrollOwnerHostHistory)
 	p.SetSize(80, height)
 	require.NoError(t, p.ScrollUp(inst, 1))
 	p.BeginScrollFill()
@@ -51,9 +91,9 @@ func TestFirstScrollIntentSurvivesPendingFill(t *testing.T) {
 	close(release)
 	require.NoError(t, <-filled)
 
-	// Forty history rows plus the one-row footer produce a bottom offset of 31.
-	// The initiating up intent must therefore land at offset 30.
-	require.Equal(t, 30, p.viewport.YOffset,
+	// Forty terminal rows produce a bottom offset of 30. The initiating up
+	// intent must therefore land at offset 29.
+	require.Equal(t, 29, p.viewport.YOffset,
 		"the first scroll-up must be applied after the async history fill")
 }
 
@@ -69,16 +109,17 @@ func TestQueuedScrollIntentsSurvivePendingFill(t *testing.T) {
 	history := numberedScrollHistory(40)
 	started := make(chan struct{})
 	release := make(chan struct{})
-	src := func(_ *session.Instance, _ int, full bool) (string, error) {
+	src := func(_ *session.Instance, _ int, full bool) (PreviewSnapshot, error) {
 		if !full {
-			return "visible-line", nil
+			return hostPreview("visible-line"), nil
 		}
 		close(started)
 		<-release
-		return history, nil
+		return hostPreview(history), nil
 	}
 
 	p := NewTabPane(src)
+	p.SetScrollOwnerFor(inst, 1, ScrollOwnerHostHistory)
 	p.SetSize(80, height)
 	require.NoError(t, p.ScrollUp(inst, 1)) // initiating intent
 	p.BeginScrollFill()
@@ -91,9 +132,193 @@ func TestQueuedScrollIntentsSurvivePendingFill(t *testing.T) {
 	close(release)
 	require.NoError(t, <-filled)
 
-	// Bottom is 31; all three up intents must survive, yielding 28.
-	require.Equal(t, 28, p.viewport.YOffset,
+	// Bottom is 30; all three up intents must survive, yielding 27.
+	require.Equal(t, 27, p.viewport.YOffset,
 		"scroll intents queued during the pending fill must all be applied")
+}
+
+// TestOwnershipSnapshotPreservesPendingScrollIntent pins the other ordering of
+// the asynchronous race: a normal capture may already be in flight when the
+// user scrolls. Its terminal modes establish HostHistory, but must promote the
+// existing probe rather than replace the controller that holds queued input.
+func TestOwnershipSnapshotPreservesPendingScrollIntent(t *testing.T) {
+	inst := makeShellInstance(t, "ownership-snapshot", "visible-line")
+	defer func() { _ = inst.Kill() }()
+
+	const height = 10
+	normalStarted := make(chan struct{})
+	releaseNormal := make(chan struct{})
+	src := func(_ *session.Instance, _ int, full bool) (PreviewSnapshot, error) {
+		if full {
+			return hostPreview(numberedScrollHistory(40)), nil
+		}
+		close(normalStarted)
+		<-releaseNormal
+		return hostPreview("visible-line"), nil
+	}
+
+	p := NewTabPane(src)
+	p.SetSize(80, height)
+	normalDone := make(chan error, 1)
+	go func() { normalDone <- p.UpdateContent(inst, 1) }()
+	<-normalStarted
+
+	// Both requests land while ownership is still unknown. The normal snapshot
+	// resolves the probe, then the full capture must replay both requests.
+	require.NoError(t, p.ScrollUp(inst, 1))
+	require.NoError(t, p.ScrollUp(inst, 1))
+	close(releaseNormal)
+	require.NoError(t, <-normalDone)
+	require.Equal(t, ScrollOwnerHostHistory, p.ScrollOwner())
+	require.True(t, p.NeedsScrollFill())
+
+	p.BeginScrollFill()
+	require.NoError(t, p.UpdateContent(inst, 1))
+	require.Equal(t, 28, p.viewport.YOffset,
+		"an ownership snapshot must not erase input queued by its capture probe")
+}
+
+func TestOwnerSwitchInvalidatesPendingHostHistoryFill(t *testing.T) {
+	inst := makeShellInstance(t, "owner-switch", "visible-line")
+	defer func() { _ = inst.Kill() }()
+
+	started := make(chan struct{})
+	release := make(chan struct{})
+	src := func(_ *session.Instance, _ int, full bool) (PreviewSnapshot, error) {
+		if !full {
+			return hostPreview("visible-line"), nil
+		}
+		close(started)
+		<-release
+		return hostPreview(numberedScrollHistory(40)), nil
+	}
+	p := NewTabPane(src)
+	p.SetScrollOwnerFor(inst, 1, ScrollOwnerHostHistory)
+	p.SetSize(80, 10)
+	require.NoError(t, p.ScrollUp(inst, 1))
+	p.BeginScrollFill()
+
+	filled := make(chan error, 1)
+	go func() { filled <- p.UpdateContent(inst, 1) }()
+	<-started
+	p.SetScrollOwnerFor(inst, 1, ScrollOwnerChildApplication)
+	close(release)
+	require.NoError(t, <-filled)
+
+	require.Equal(t, ScrollOwnerChildApplication, p.ScrollOwner())
+	require.False(t, p.IsScrolling(),
+		"a late host capture must not paint over a child-owned terminal")
+	require.Equal(t, 0, p.viewport.YOffset)
+}
+
+func TestLateNormalSnapshotCannotOverrideNewerChildOwnership(t *testing.T) {
+	inst := makeShellInstance(t, "late-normal-owner", "visible-line")
+	defer func() { _ = inst.Kill() }()
+
+	normalStarted := make(chan struct{})
+	releaseNormal := make(chan struct{})
+	src := func(_ *session.Instance, _ int, full bool) (PreviewSnapshot, error) {
+		if full {
+			return PreviewSnapshot{
+				Content: numberedScrollHistory(40),
+				Owner:   ScrollOwnerChildApplication,
+			}, nil
+		}
+		close(normalStarted)
+		<-releaseNormal
+		return hostPreview("stale-primary-grid"), nil
+	}
+
+	p := NewTabPane(src)
+	p.SetSize(80, 10)
+	normalDone := make(chan error, 1)
+	go func() { normalDone <- p.UpdateContent(inst, 1) }()
+	<-normalStarted
+
+	// The gesture starts a newer full snapshot. It observes an alternate-screen
+	// child and rejects tmux's background primary buffer.
+	require.NoError(t, p.ScrollUp(inst, 1))
+	p.BeginScrollFill()
+	require.NoError(t, p.UpdateContent(inst, 1))
+	require.Equal(t, ScrollOwnerChildApplication, p.ScrollOwner())
+
+	// The older primary-screen snapshot finishes last. Completion order must not
+	// let it reclassify the pane as HostHistory.
+	close(releaseNormal)
+	require.NoError(t, <-normalDone)
+	require.Equal(t, ScrollOwnerChildApplication, p.ScrollOwner(),
+		"a stale normal capture must not overwrite the newer full snapshot")
+	require.False(t, p.IsScrolling())
+}
+
+func TestSameTargetPreviewPublishesByDispatchOrderNotCompletionOrder(t *testing.T) {
+	inst := makeShellInstance(t, "same-target-preview-order", "visible-line")
+	defer func() { _ = inst.Kill() }()
+
+	firstStarted := make(chan struct{})
+	secondStarted := make(chan struct{})
+	releaseFirst := make(chan struct{})
+	releaseSecond := make(chan struct{})
+	var calls int32
+	src := func(_ *session.Instance, _ int, full bool) (PreviewSnapshot, error) {
+		require.False(t, full)
+		switch atomic.AddInt32(&calls, 1) {
+		case 1:
+			close(firstStarted)
+			<-releaseFirst
+			return hostPreview("older-grid"), nil
+		case 2:
+			close(secondStarted)
+			<-releaseSecond
+			return hostPreview("newer-grid"), nil
+		default:
+			return PreviewSnapshot{}, fmt.Errorf("unexpected preview capture")
+		}
+	}
+
+	p := NewTabPane(src)
+	p.SetSize(80, 10)
+	firstDone := make(chan error, 1)
+	secondDone := make(chan error, 1)
+	go func() { firstDone <- p.UpdateContent(inst, 1) }()
+	<-firstStarted
+	go func() { secondDone <- p.UpdateContent(inst, 1) }()
+	<-secondStarted
+
+	close(releaseSecond)
+	require.NoError(t, <-secondDone)
+	require.Contains(t, p.String(), "newer-grid")
+
+	close(releaseFirst)
+	require.NoError(t, <-firstDone)
+	require.Contains(t, p.String(), "newer-grid",
+		"an older capture finishing last must not replace the newer snapshot")
+	require.NotContains(t, p.String(), "older-grid")
+}
+
+func TestFullCaptureCannotPublishAfterTargetBecomesChildOwned(t *testing.T) {
+	inst := makeShellInstance(t, "owner-from-fill", "visible-line")
+	defer func() { _ = inst.Kill() }()
+
+	src := func(_ *session.Instance, _ int, full bool) (PreviewSnapshot, error) {
+		if !full {
+			return hostPreview("visible-line"), nil
+		}
+		return PreviewSnapshot{
+			Content: numberedScrollHistory(40),
+			Owner:   ScrollOwnerChildApplication,
+		}, nil
+	}
+	p := NewTabPane(src)
+	p.SetSize(80, 10)
+	enableHostHistory(p, inst, 1)
+	require.NoError(t, p.ScrollUp(inst, 1))
+	require.NoError(t, p.UpdateContent(inst, 1))
+
+	require.Equal(t, ScrollOwnerChildApplication, p.ScrollOwner())
+	require.False(t, p.IsScrolling())
+	require.NotContains(t, p.viewport.View(), "history-",
+		"a full capture from an alternate-screen target is the wrong buffer")
 }
 
 // TestHostHistoryScrollRetargetKeepsNewViewIntent pins the view-key boundary:
@@ -109,22 +334,23 @@ func TestHostHistoryScrollRetargetKeepsNewViewIntent(t *testing.T) {
 	historyB := strings.ReplaceAll(numberedScrollHistory(40), "history", "b-history")
 	aStarted := make(chan struct{})
 	releaseA := make(chan struct{})
-	src := func(inst *session.Instance, _ int, full bool) (string, error) {
+	src := func(inst *session.Instance, _ int, full bool) (PreviewSnapshot, error) {
 		if !full {
 			if inst == instA {
-				return "visible-a", nil
+				return hostPreview("visible-a"), nil
 			}
-			return "visible-b", nil
+			return hostPreview("visible-b"), nil
 		}
 		if inst == instA {
 			close(aStarted)
 			<-releaseA
-			return historyA, nil
+			return hostPreview(historyA), nil
 		}
-		return historyB, nil
+		return hostPreview(historyB), nil
 	}
 
 	p := NewTabPane(src)
+	p.SetScrollOwnerFor(instA, 1, ScrollOwnerHostHistory)
 	p.SetSize(80, 10)
 	require.NoError(t, p.ScrollUp(instA, 1))
 	p.BeginScrollFill()
@@ -140,7 +366,7 @@ func TestHostHistoryScrollRetargetKeepsNewViewIntent(t *testing.T) {
 	require.NoError(t, p.UpdateContent(instB, 1))
 	require.Contains(t, p.viewport.View(), "b-history")
 	require.NotContains(t, p.viewport.View(), "a-history")
-	require.Equal(t, 30, p.viewport.YOffset,
+	require.Equal(t, 29, p.viewport.YOffset,
 		"the retargeting intent must be applied to B's host history")
 
 	// A's stale capture may return afterward, but cannot overwrite B or consume
@@ -149,7 +375,7 @@ func TestHostHistoryScrollRetargetKeepsNewViewIntent(t *testing.T) {
 	require.NoError(t, <-aFilled)
 	require.Contains(t, p.viewport.View(), "b-history")
 	require.NotContains(t, p.viewport.View(), "a-history")
-	require.Equal(t, 30, p.viewport.YOffset)
+	require.Equal(t, 29, p.viewport.YOffset)
 }
 
 // TestScrollEntryExitNeverCapturesOnEventLoop is the #1637 regression: entering
@@ -169,13 +395,14 @@ func TestScrollEntryExitNeverCapturesOnEventLoop(t *testing.T) {
 
 	release := make(chan struct{})
 	var calls int32
-	blockingSrc := func(_ *session.Instance, _ int, _ bool) (string, error) {
+	blockingSrc := func(_ *session.Instance, _ int, _ bool) (PreviewSnapshot, error) {
 		atomic.AddInt32(&calls, 1)
 		<-release // stand in for a slow/hung tmux capture or daemon Preview RPC
-		return "scrollback-line", nil
+		return hostPreview("scrollback-line"), nil
 	}
 
 	p := NewTabPane(blockingSrc)
+	p.SetScrollOwnerFor(inst, 1, ScrollOwnerHostHistory)
 	p.SetSize(80, 30)
 
 	// mustReturnPromptly runs fn on another goroutine and fails if it does not
@@ -237,11 +464,12 @@ func TestBeginScrollFillMasksNeedsScrollFill(t *testing.T) {
 	defer func() { _ = inst.Kill() }()
 
 	var calls int32
-	countingSrc := func(_ *session.Instance, _ int, _ bool) (string, error) {
+	countingSrc := func(_ *session.Instance, _ int, _ bool) (PreviewSnapshot, error) {
 		atomic.AddInt32(&calls, 1)
-		return "scrollback-line", nil
+		return hostPreview("scrollback-line"), nil
 	}
 	p := NewTabPane(countingSrc)
+	p.SetScrollOwnerFor(inst, 1, ScrollOwnerHostHistory)
 	p.SetSize(80, 30)
 
 	// Enter scroll mode: a fill is owed, none dispatched yet.
@@ -289,14 +517,15 @@ func TestStaleScrollFillDoesNotSatisfyNewEntry(t *testing.T) {
 	type gate struct{ ch chan struct{} }
 	gates := make(chan *gate, 4)
 	var calls int32
-	blockingSrc := func(_ *session.Instance, _ int, _ bool) (string, error) {
+	blockingSrc := func(_ *session.Instance, _ int, _ bool) (PreviewSnapshot, error) {
 		atomic.AddInt32(&calls, 1)
 		g := &gate{ch: make(chan struct{})}
 		gates <- g
 		<-g.ch
-		return "scrollback-line", nil
+		return hostPreview("scrollback-line"), nil
 	}
 	p := NewTabPane(blockingSrc)
+	p.SetScrollOwnerFor(inst, 1, ScrollOwnerHostHistory)
 	p.SetSize(80, 30)
 
 	// Session #1: enter scroll mode and dispatch its fill (still in flight).

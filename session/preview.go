@@ -1,41 +1,79 @@
 package session
 
-import "fmt"
+import (
+	"fmt"
+
+	"github.com/sachiniyer/agent-factory/session/tmux"
+	"github.com/sachiniyer/agent-factory/terminal"
+)
+
+// PreviewSnapshot keeps a captured terminal grid and the ownership-affecting
+// modes observed for that same target in one value. HasModes is explicit: the
+// zero-value Modes is a valid primary-screen/no-mouse observation, not an
+// invitation for a client to guess. Runtimes that cannot report modes leave it
+// false and scrolling remains unavailable until an authoritative snapshot lands.
+type PreviewSnapshot struct {
+	Content  string
+	Modes    terminal.Modes
+	HasModes bool
+}
+
+func previewSnapshotWithModes(content string, ts *tmux.TmuxSession) PreviewSnapshot {
+	snapshot := PreviewSnapshot{Content: content}
+	if ts == nil {
+		return snapshot
+	}
+	state, err := ts.ReadTerminalState()
+	if err != nil {
+		return snapshot
+	}
+	snapshot.Modes = state.Modes
+	snapshot.HasModes = true
+	return snapshot
+}
 
 // PreviewTab captures the detached content of the tab currently at idx. The
 // ordinal form exists for legacy callers that never supplied a stable tab id.
 // An out-of-range ordinal is an explicit error: returning ("", nil) would claim
 // that a nonexistent pane was merely blank (#2200).
 func (i *Instance) PreviewTab(idx int) (string, error) {
+	snapshot, err := i.PreviewTabSnapshot(idx, false)
+	return snapshot.Content, err
+}
+
+// PreviewTabSnapshot is PreviewTab with an authoritative terminal-mode
+// observation when the selected runtime exposes a tmux pane.
+func (i *Instance) PreviewTabSnapshot(idx int, full bool) (PreviewSnapshot, error) {
 	i.mu.RLock()
 	if idx < 0 || idx >= len(i.Tabs) {
 		i.mu.RUnlock()
-		return "", fmt.Errorf("session %q tab %d: %w", i.Title, idx, ErrTabIndexOutOfRange)
+		return PreviewSnapshot{}, fmt.Errorf("session %q tab %d: %w", i.Title, idx, ErrTabIndexOutOfRange)
 	}
 	started := i.started
 	ts := i.tabTmuxAtLocked(idx)
 	i.mu.RUnlock()
 	if !started || ts == nil {
-		return "", nil
+		return PreviewSnapshot{}, nil
 	}
-	return ts.CapturePaneContent()
+
+	var content string
+	var err error
+	if full {
+		content, err = ts.CapturePaneContentWithOptions("-", "-")
+	} else {
+		content, err = ts.CapturePaneContent()
+	}
+	if err != nil {
+		return PreviewSnapshot{}, err
+	}
+	return previewSnapshotWithModes(content, ts), nil
 }
 
 // PreviewTabFullHistory is PreviewTab's full-scrollback counterpart. It keeps
 // the same explicit out-of-range refusal.
 func (i *Instance) PreviewTabFullHistory(idx int) (string, error) {
-	i.mu.RLock()
-	if idx < 0 || idx >= len(i.Tabs) {
-		i.mu.RUnlock()
-		return "", fmt.Errorf("session %q tab %d: %w", i.Title, idx, ErrTabIndexOutOfRange)
-	}
-	started := i.started
-	ts := i.tabTmuxAtLocked(idx)
-	i.mu.RUnlock()
-	if !started || ts == nil {
-		return "", nil
-	}
-	return ts.CapturePaneContentWithOptions("-", "-")
+	snapshot, err := i.PreviewTabSnapshot(idx, true)
+	return snapshot.Content, err
 }
 
 // PreviewTabByID captures the tab named by stable id without ever converting
@@ -48,16 +86,24 @@ func (i *Instance) PreviewTabFullHistory(idx int) (string, error) {
 // zero and cannot be closed or reordered, so snapshotting its backend under the
 // same lock preserves both its identity and the formatting contract.
 func (i *Instance) PreviewTabByID(tabID string, full bool) (string, error) {
+	snapshot, err := i.PreviewTabSnapshotByID(tabID, full)
+	return snapshot.Content, err
+}
+
+// PreviewTabSnapshotByID binds content and terminal modes to one stable tab
+// identity. A mode read can fail without losing a valid capture; HasModes=false
+// makes that uncertainty explicit to routing clients.
+func (i *Instance) PreviewTabSnapshotByID(tabID string, full bool) (PreviewSnapshot, error) {
 	i.mu.RLock()
 	idx, exists := i.tabIndexByIDLocked(tabID)
 	if !exists {
 		i.mu.RUnlock()
-		return "", fmt.Errorf("session %q tab id %q: %w", i.Title, tabID, ErrTabGone)
+		return PreviewSnapshot{}, fmt.Errorf("session %q tab id %q: %w", i.Title, tabID, ErrTabGone)
 	}
 	tab := i.Tabs[idx]
 	if !i.started {
 		i.mu.RUnlock()
-		return "", nil
+		return PreviewSnapshot{}, nil
 	}
 	if tab.Kind != TabKindAgent {
 		// Keep the roster read lock through the bounded tmux capture. Besides
@@ -66,25 +112,44 @@ func (i *Instance) PreviewTabByID(tabID string, full bool) (string, error) {
 		defer i.mu.RUnlock()
 		ts := tab.tmux
 		if ts == nil {
-			return "", nil
+			return PreviewSnapshot{}, nil
 		}
+		var (
+			content string
+			err     error
+		)
 		if full {
-			return ts.CapturePaneContentWithOptions("-", "-")
+			content, err = ts.CapturePaneContentWithOptions("-", "-")
+		} else {
+			content, err = ts.CapturePaneContent()
 		}
-		return ts.CapturePaneContent()
+		if err != nil {
+			return PreviewSnapshot{}, err
+		}
+		return previewSnapshotWithModes(content, ts), nil
 	}
 
 	// Backend preview methods re-enter i.mu, so the pinned agent target snapshots
 	// the backend under the lock and performs the call after releasing it.
 	backend := i.backend
+	ts := tab.tmux
 	i.mu.RUnlock()
 	if backend == nil {
-		return "", fmt.Errorf("session %q has no preview backend", i.Title)
+		return PreviewSnapshot{}, fmt.Errorf("session %q has no preview backend", i.Title)
 	}
+	var (
+		content string
+		err     error
+	)
 	if full {
-		return backend.PreviewFullHistory(i)
+		content, err = backend.PreviewFullHistory(i)
+	} else {
+		content, err = backend.Preview(i)
 	}
-	return backend.Preview(i)
+	if err != nil {
+		return PreviewSnapshot{}, err
+	}
+	return previewSnapshotWithModes(content, ts), nil
 }
 
 // previewByIDAsOrdinal is the compatibility bridge for a remote agent-server

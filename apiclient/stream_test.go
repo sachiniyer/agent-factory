@@ -16,6 +16,7 @@ import (
 	"github.com/sachiniyer/agent-factory/apiproto"
 	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
+	"github.com/sachiniyer/agent-factory/terminal"
 )
 
 // previewServer stands up a Unix-socket HTTP server answering POST /v1/Preview
@@ -63,6 +64,29 @@ func TestPreview_CarriesTabAndReturnsContent(t *testing.T) {
 	}
 	if got.Title != "alpha" || got.RepoID != "r" || got.Tab != 2 || !got.Full {
 		t.Fatalf("request lost fields: %+v", *got)
+	}
+}
+
+func TestPreviewSnapshotCarriesTerminalModes(t *testing.T) {
+	wantModes := terminal.Modes{
+		AlternateScreen: true,
+		MouseButton:     true,
+		MouseSGR:        true,
+	}
+	c, _ := previewServer(t, func(daemon.PreviewRequest) apiproto.Envelope {
+		return apiproto.Success(daemon.PreviewResponse{
+			Content:  "ALT-GRID",
+			Modes:    wantModes,
+			HasModes: true,
+		})
+	})
+
+	snapshot, err := c.PreviewSnapshot(daemon.PreviewRequest{Title: "alpha"})
+	if err != nil {
+		t.Fatalf("PreviewSnapshot: %v", err)
+	}
+	if snapshot.Content != "ALT-GRID" || !snapshot.HasModes || snapshot.Modes != wantModes {
+		t.Fatalf("PreviewSnapshot = %+v, want content and modes %+v", snapshot, wantModes)
 	}
 }
 

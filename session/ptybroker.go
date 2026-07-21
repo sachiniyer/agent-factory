@@ -8,6 +8,7 @@ import (
 	"sync"
 
 	"github.com/sachiniyer/agent-factory/log"
+	"github.com/sachiniyer/agent-factory/terminal"
 )
 
 // The WS PTY broker's server-side data plane (#1592 Phase 2 PR5). A ptyBroker
@@ -85,6 +86,20 @@ type PaneSnapshot struct {
 	CursorRow int
 	CursorCol int
 	HasCursor bool
+	// Modes are the ownership-affecting terminal modes that were already active
+	// before this subscriber existed. HasModes distinguishes a truthful all-off
+	// primary-screen snapshot from a source that cannot report modes.
+	Modes    terminal.Modes
+	HasModes bool
+}
+
+// repaintSnapshot is one atomic broker event: the grid repaint plus the terminal
+// modes captured with it. The daemon emits the modes immediately before Data,
+// and Data also restores them as DEC sequences for terminal-only clients.
+type repaintSnapshot struct {
+	data     []byte
+	modes    terminal.Modes
+	hasModes bool
 }
 
 // ptyBroker is the per-session data plane. Guarded by mu; the ring buffer, the
@@ -216,10 +231,10 @@ func (b *ptyBroker) subscribe(since Seq) (*ptySub, error) {
 	// the snapshot and the cursor: bytes in that tiny window are simply in both the
 	// snapshot and the replayed tail (a harmless double-render), never dropped.
 	if needRepaint {
-		if snap, err := b.ch.Snapshot(); err == nil && len(snap.Screen) > 0 {
-			rp := buildRepaint(snap)
+		if snap, err := b.ch.Snapshot(); err == nil && snapshotHasRepaintState(snap) {
+			rp := buildRepaintSnapshot(snap)
 			b.mu.Lock()
-			sub.pendingRepaint = rp
+			sub.pendingRepaint = &rp
 			b.mu.Unlock()
 			sub.wake()
 		}
@@ -254,7 +269,11 @@ func (b *ptyBroker) subscribe(since Seq) (*ptySub, error) {
 // line) renders at the bottom while a stale copy sits at the top. The restore lands
 // the emulator cursor on the real position so that redraw overwrites in place.
 func buildRepaint(snap PaneSnapshot) []byte {
-	out := []byte("\x1b[2J")
+	var out []byte
+	if snap.HasModes {
+		out = append(out, snap.Modes.RestoreSequence()...)
+	}
+	out = append(out, []byte("\x1b[2J")...)
 	// capture-pane emits ONE trailing "\n" after the last row and strips trailing
 	// blank rows, so that final "\n" is a row SEPARATOR, not a real empty row.
 	// Splitting without trimming it would yield a phantom trailing "" element and emit
@@ -271,6 +290,21 @@ func buildRepaint(snap PaneSnapshot) []byte {
 		out = append(out, []byte(fmt.Sprintf("\x1b[%d;%dH", snap.CursorRow+1, snap.CursorCol+1))...)
 	}
 	return out
+}
+
+func buildRepaintSnapshot(snap PaneSnapshot) repaintSnapshot {
+	return repaintSnapshot{
+		data:     buildRepaint(snap),
+		modes:    snap.Modes,
+		hasModes: snap.HasModes,
+	}
+}
+
+// snapshotHasRepaintState keeps authoritative metadata from disappearing merely
+// because the grid is blank. A fresh primary-screen pane can have no printable
+// cells while its all-false mode snapshot is exactly what resolves ownership.
+func snapshotHasRepaintState(snap PaneSnapshot) bool {
+	return len(snap.Screen) > 0 || snap.HasCursor || snap.HasModes
 }
 
 // ensureCaptureStarted brings the clientless output capture up if it is not
@@ -406,7 +440,7 @@ func (b *ptyBroker) resetCapture() {
 	// waiting for a repaint that never comes. rp is read when the deferred call runs,
 	// so this single exit point both installs whatever repaint the recovery managed to
 	// build and lifts the barrier, atomically under b.mu.
-	var rp []byte
+	var rp *repaintSnapshot
 	defer func() { b.releaseRecoveryRepaint(armed, rp) }()
 
 	if stop != nil {
@@ -478,26 +512,27 @@ func (b *ptyBroker) armRecoveryRepaintLocked() []*ptySub {
 // screen yields nil, and the release degrades to just lifting the barrier and waking
 // the subscribers — the restarted capture's next live byte still reaches them — rather
 // than failing the recovery. Caller holds captureMu.
-func (b *ptyBroker) recoveryRepaint() []byte {
+func (b *ptyBroker) recoveryRepaint() *repaintSnapshot {
 	snap, err := b.ch.Snapshot()
 	if err != nil {
 		log.WarningLog.Printf("pty broker: snapshot for recovery re-seed: %v", err)
 		return nil
 	}
-	if len(snap.Screen) == 0 {
+	if !snapshotHasRepaintState(snap) {
 		return nil
 	}
-	return buildRepaint(snap)
+	rp := buildRepaintSnapshot(snap)
+	return &rp
 }
 
 // releaseRecoveryRepaint installs rp on every armed subscriber and lifts the barrier —
 // both under ONE b.mu hold, so a subscriber can never observe the lifted barrier
 // without also seeing the repaint that was owed to it. Waking is what makes a parked
 // subscriber re-read that state.
-func (b *ptyBroker) releaseRecoveryRepaint(armed []*ptySub, rp []byte) {
+func (b *ptyBroker) releaseRecoveryRepaint(armed []*ptySub, rp *repaintSnapshot) {
 	b.mu.Lock()
 	for _, s := range armed {
-		if len(rp) > 0 {
+		if rp != nil && len(rp.data) > 0 {
 			s.pendingRepaint = rp
 		}
 		s.repaintArmed = false
@@ -663,7 +698,7 @@ type ptySub struct {
 	resizeSeen uint64 // last resizeGen echoed to this subscriber
 	// pendingRepaint is a one-shot initial screen repaint delivered before any
 	// other event to a fresh subscriber (set by subscribe). Read/written under br.mu.
-	pendingRepaint []byte
+	pendingRepaint *repaintSnapshot
 	// repaintArmed marks this subscriber as held at a recovery boundary: a repaint of
 	// the recovered screen is being captured for it, so NextEvent must emit NOTHING
 	// until it lands (#1975). Set/cleared under br.mu by resetCapture's arm/release
@@ -706,11 +741,16 @@ func (s *ptySub) NextEvent(ctx context.Context) (PTYEvent, error) {
 		// subscriber paints the current screen before the first live byte lands. It
 		// is a PTYRepaint (not PTYData) so the client renders it without advancing its
 		// replay cursor — the repaint is per-subscriber and not part of the ring seq.
-		if len(s.pendingRepaint) > 0 {
-			data := s.pendingRepaint
+		if s.pendingRepaint != nil {
+			rp := s.pendingRepaint
 			s.pendingRepaint = nil
 			s.br.mu.Unlock()
-			return PTYEvent{Kind: PTYRepaint, Data: data}, nil
+			return PTYEvent{
+				Kind:     PTYRepaint,
+				Data:     rp.data,
+				Modes:    rp.modes,
+				HasModes: rp.hasModes,
+			}, nil
 		}
 		// A recovery is in flight and this subscriber's repaint of the recovered screen
 		// is still being captured: emit NOTHING until it lands (#1975). Everything this

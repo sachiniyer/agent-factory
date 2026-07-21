@@ -7,6 +7,7 @@ import (
 
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/session/tmux"
+	"github.com/sachiniyer/agent-factory/terminal"
 )
 
 // The Preview RPC (#1592 Phase 2 PR6) is the daemon's SOLE capture path for the
@@ -68,6 +69,12 @@ type PreviewRequest struct {
 type PreviewResponse struct {
 	Content string `json:"content"`
 	Gone    bool   `json:"gone,omitempty"`
+	// Modes and HasModes travel with the captured target so preview input can use
+	// the same ownership decision as the live stream. HasModes distinguishes an
+	// authoritative primary-screen/no-mouse observation from an older or
+	// incapable runtime that supplied no mode data.
+	Modes    terminal.Modes `json:"terminal_modes,omitempty"`
+	HasModes bool           `json:"has_terminal_modes,omitempty"`
 	// TabGone NARROWS Gone: the session is alive and well, but the TAB the request
 	// addressed is not there — an id that no longer resolves, or an ordinal that is
 	// not a slot. Gone is always set alongside it, so a client that only knows
@@ -143,7 +150,7 @@ func (s *controlServer) Preview(req PreviewRequest, resp *PreviewResponse) error
 	if tabID == "" {
 		return fmt.Errorf("session %q tab %d has no stable identity; reload the session before previewing it", req.Title, tab)
 	}
-	content, err := as.PreviewByID(tabID, req.Full)
+	snapshot, err := as.PreviewByID(tabID, req.Full)
 	if err != nil {
 		if errors.Is(err, session.ErrTabGone) {
 			resp.Gone, resp.TabGone = true, true
@@ -155,6 +162,8 @@ func (s *controlServer) Preview(req PreviewRequest, resp *PreviewResponse) error
 		}
 		return err
 	}
-	resp.Content = content
+	resp.Content = snapshot.Content
+	resp.Modes = snapshot.Modes
+	resp.HasModes = snapshot.HasModes
 	return nil
 }

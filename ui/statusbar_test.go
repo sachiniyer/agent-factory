@@ -63,6 +63,7 @@ func TestMenuFocusRegionSwitchesHints(t *testing.T) {
 // lower-frequency session actions, but help/quit remain the hard floor.
 func TestMenuNarrowWidthKeepsHelpAndQuit(t *testing.T) {
 	m := NewMenu()
+	m.SetScrollAvailable(true)
 	m.SetInstance(readyUIInstance())
 
 	for _, w := range []int{110, 80, 60, 45} {

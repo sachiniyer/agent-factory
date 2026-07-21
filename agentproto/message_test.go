@@ -3,6 +3,8 @@ package agentproto
 import (
 	"encoding/json"
 	"testing"
+
+	"github.com/sachiniyer/agent-factory/terminal"
 )
 
 // TestControlMessageWireShapes pins the exact JSON each control frame serializes
@@ -32,6 +34,29 @@ func TestControlMessageWireShapes(t *testing.T) {
 				t.Fatalf("wire shape mismatch:\n got  = %s\n want = %s", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestTerminalModesMessageRoundTrip(t *testing.T) {
+	want := NewTerminalModesMessage(terminal.Modes{
+		AlternateScreen: true,
+		MouseTracking:   true,
+		MouseButton:     true,
+		MouseSGR:        true,
+	})
+	raw, err := json.Marshal(want)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	if typ, err := MessageTypeOf(raw); err != nil || typ != MsgTerminalModes {
+		t.Fatalf("MessageTypeOf = %q, %v; want %q", typ, err, MsgTerminalModes)
+	}
+	var got TerminalModesMessage
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if got != want {
+		t.Fatalf("round trip = %+v, want %+v", got, want)
 	}
 }
 

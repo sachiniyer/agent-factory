@@ -100,7 +100,7 @@ type home struct {
 	// TabPane's capture runs on the refreshPaneBindingCmd goroutine, so a package
 	// global swapped by a test would race under `go test -parallel`. Defaults to
 	// previewThroughDaemon; tests assign a fake directly.
-	previewFetcher func(req daemon.PreviewRequest) (content string, gone bool, err error)
+	previewFetcher func(req daemon.PreviewRequest) (daemon.PreviewResponse, error)
 	// pauseStatusPoll / resumeStatusPoll are the daemon poll-pause seams for the
 	// attach heartbeat (#1160). PER-home fields, not package globals, for the
 	// same reason as snapshotFetcher: the heartbeat reads the seam from an
@@ -787,6 +787,7 @@ func (m *home) syncFocus() {
 	}
 	m.menu.SetFocusRegion(active)
 	m.syncSplitPaneHint()
+	m.syncScrollHint()
 }
 
 // focusRegion moves focus directly to the given region and re-solves the

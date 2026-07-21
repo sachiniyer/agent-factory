@@ -148,27 +148,37 @@ func (s *localAgentServer) Snapshot() (Observation, error) {
 	return Observation{Updated: updated, HasPrompt: hasPrompt, Content: content}, nil
 }
 
-func (s *localAgentServer) Preview(tab int, full bool) (string, error) {
+func (s *localAgentServer) Preview(tab int, full bool) (PreviewSnapshot, error) {
 	// The agent tab (0) keeps the backend preview path — a backend may format its
 	// agent output specially (e.g. the remote hook's sanitized stream). Shell/process
 	// tabs (>0) capture their own tmux session, mirroring TabPane's former
 	// updateAgent/updateShell split now that the daemon is the sole capturer.
-	if tab == 0 {
-		if full {
-			return s.inst.currentBackend().PreviewFullHistory(s.inst)
-		}
-		return s.inst.currentBackend().Preview(s.inst)
+	if tab != 0 {
+		return s.inst.PreviewTabSnapshot(tab, full)
 	}
+	b := s.inst.currentBackend()
+	var (
+		content string
+		err     error
+	)
 	if full {
-		return s.inst.PreviewTabFullHistory(tab)
+		content, err = b.PreviewFullHistory(s.inst)
+	} else {
+		content, err = b.Preview(s.inst)
 	}
-	return s.inst.PreviewTab(tab)
+	if err != nil {
+		return PreviewSnapshot{}, err
+	}
+	s.inst.mu.RLock()
+	ts := s.inst.tmuxLocked()
+	s.inst.mu.RUnlock()
+	return previewSnapshotWithModes(content, ts), nil
 }
 
 // PreviewByID binds directly to the tmux/backend target selected under the
 // instance lock. No ordinal crosses that lock boundary (#2200).
-func (s *localAgentServer) PreviewByID(tabID string, full bool) (string, error) {
-	return s.inst.PreviewTabByID(tabID, full)
+func (s *localAgentServer) PreviewByID(tabID string, full bool) (PreviewSnapshot, error) {
+	return s.inst.PreviewTabSnapshotByID(tabID, full)
 }
 
 // ctxPreviewBackend is the optional backend capability for a pane capture bound to
@@ -189,7 +199,8 @@ func (s *localAgentServer) PreviewContext(ctx context.Context, tab int, full boo
 			return cb.PreviewContext(ctx, s.inst)
 		}
 	}
-	return s.Preview(tab, full)
+	snapshot, err := s.Preview(tab, full)
+	return snapshot.Content, err
 }
 
 // Alive probes the local backend in-process, so the answer is always definitive

@@ -159,8 +159,11 @@ func TestRemoteAgentServerRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Preview over the wire: %v", err)
 	}
-	if !strings.Contains(preview, "hello-remote") {
-		t.Fatalf("Preview did not reflect the typed input: %q", preview)
+	if !strings.Contains(preview.Content, "hello-remote") {
+		t.Fatalf("Preview did not reflect the typed input: %q", preview.Content)
+	}
+	if !preview.HasModes {
+		t.Fatal("Preview over the remote agent-server lost terminal ownership modes")
 	}
 
 	// --- Alive reports the remote workspace is running ----------------------

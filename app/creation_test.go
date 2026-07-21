@@ -126,26 +126,31 @@ func newTestHome(t *testing.T) *home {
 // testPreviewFetcher resolves a Preview request's title back to the in-store
 // instance and captures from it, the test stand-in for the daemon's server-side
 // capture. tmux.ErrSessionGone maps to gone=true, mirroring the daemon handler.
-func testPreviewFetcher(h *home) func(daemon.PreviewRequest) (string, bool, error) {
-	return func(req daemon.PreviewRequest) (string, bool, error) {
+func testPreviewResponse(content string) daemon.PreviewResponse {
+	return daemon.PreviewResponse{Content: content, HasModes: true}
+}
+
+func testPreviewFetcher(h *home) func(daemon.PreviewRequest) (daemon.PreviewResponse, error) {
+	return func(req daemon.PreviewRequest) (daemon.PreviewResponse, error) {
 		inst := h.store.GetInstanceByTitle(req.Title)
 		if inst == nil {
-			return "", false, nil
+			return daemon.PreviewResponse{}, nil
 		}
 		var content string
 		var err error
 		switch {
 		case req.Tab == 0:
-			content, err = inst.AgentServer().Preview(req.Tab, req.Full)
+			snapshot, snapshotErr := inst.AgentServer().Preview(req.Tab, req.Full)
+			content, err = snapshot.Content, snapshotErr
 		case req.Full:
 			content, err = inst.PreviewTabFullHistory(req.Tab)
 		default:
 			content, err = inst.PreviewTab(req.Tab)
 		}
 		if errors.Is(err, tmux.ErrSessionGone) {
-			return "", true, nil
+			return daemon.PreviewResponse{Gone: true}, nil
 		}
-		return content, false, err
+		return testPreviewResponse(content), err
 	}
 }
 

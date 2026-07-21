@@ -22,7 +22,8 @@ func WriteFrame(ctx context.Context, c *websocket.Conn, f Frame) error {
 }
 
 // WriteControl marshals a JSON control frame (ResizeMessage, ExitMessage,
-// DetachMessage) or an events-plane Event and sends it as a WS text message.
+// DetachMessage, TerminalModesMessage) or an events-plane Event and sends it as
+// a WS text message.
 func WriteControl(ctx context.Context, c *websocket.Conn, msg any) error {
 	b, err := json.Marshal(msg)
 	if err != nil {

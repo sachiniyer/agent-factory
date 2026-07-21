@@ -42,9 +42,9 @@ func TestRefreshPaneBindingCmd_SuppressesTearingDownError(t *testing.T) {
 	inst, err := session.NewInstance(session.InstanceOptions{Title: "closing", Path: t.TempDir(), Program: "test"})
 	require.NoError(t, err)
 
-	tw := ui.NewTabbedWindow(ui.NewTabPane(func(*session.Instance, int, bool) (string, error) {
+	tw := ui.NewTabbedWindow(ui.NewTabPane(func(*session.Instance, int, bool) (ui.PreviewSnapshot, error) {
 		inst.SetStatusForTest(session.Deleting)
-		return "", errors.New("session \"closing\" is being deleted")
+		return ui.PreviewSnapshot{}, errors.New("session \"closing\" is being deleted")
 	}), nil)
 	warnings := captureWarningLog(t)
 
@@ -57,8 +57,8 @@ func TestRefreshPaneBindingCmd_LogsUnexpectedError(t *testing.T) {
 	inst, err := session.NewInstance(session.InstanceOptions{Title: "active", Path: t.TempDir(), Program: "test"})
 	require.NoError(t, err)
 
-	tw := ui.NewTabbedWindow(ui.NewTabPane(func(*session.Instance, int, bool) (string, error) {
-		return "", errors.New("unexpected capture failure")
+	tw := ui.NewTabbedWindow(ui.NewTabPane(func(*session.Instance, int, bool) (ui.PreviewSnapshot, error) {
+		return ui.PreviewSnapshot{}, errors.New("unexpected capture failure")
 	}), nil)
 	warnings := captureWarningLog(t)
 
