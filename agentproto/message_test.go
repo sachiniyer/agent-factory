@@ -2,6 +2,7 @@ package agentproto
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/sachiniyer/agent-factory/terminal"
@@ -38,7 +39,7 @@ func TestControlMessageWireShapes(t *testing.T) {
 }
 
 func TestTerminalModesMessageRoundTrip(t *testing.T) {
-	want := NewTerminalModesMessage(terminal.Modes{
+	want := NewTerminalModesMessageCoveringNextCursor(terminal.Modes{
 		AlternateScreen: true,
 		MouseTracking:   true,
 		MouseButton:     true,
@@ -57,6 +58,16 @@ func TestTerminalModesMessageRoundTrip(t *testing.T) {
 	}
 	if got != want {
 		t.Fatalf("round trip = %+v, want %+v", got, want)
+	}
+}
+
+func TestFreshTerminalModesMessageOmitsCursorCoverage(t *testing.T) {
+	raw, err := json.Marshal(NewTerminalModesMessage(terminal.Modes{}))
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	if strings.Contains(string(raw), "covers_next_cursor") {
+		t.Fatalf("fresh mode snapshot granted recovery cursor coverage: %s", raw)
 	}
 }
 

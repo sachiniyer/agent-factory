@@ -48,8 +48,9 @@ type liveTermAttachment interface {
 	// the inner app only if it enabled mouse tracking, and is dropped otherwise.
 	SendMouse(msg tea.MouseMsg, x, y int) bool
 	// TerminalModes reports the ownership-affecting terminal snapshot and whether
-	// it is known. A fresh/reconnected client stays unknown until its repaint
-	// lands; zero modes are otherwise a valid primary-screen state.
+	// it is known. A disconnected client is unknown; continuous replay or a fresh
+	// authoritative repaint re-establishes it. Zero modes are a valid primary-screen
+	// state.
 	TerminalModes() (terminal.Modes, bool)
 }
 

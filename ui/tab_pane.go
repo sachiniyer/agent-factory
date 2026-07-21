@@ -160,6 +160,21 @@ func (p *TabPane) SetScrollOwnerFor(instance *session.Instance, activeTab int, o
 	p.setScrollOwnerLocked(owner)
 }
 
+// ObserveScrollOwnerUnknownFor applies a transient lack of stream authority
+// without destroying an already-active AF host-history transaction. Unknown is
+// still fail-closed everywhere else, including an idle host owner, so a new
+// scroll cannot begin from stale terminal modes during a reconnect.
+func (p *TabPane) ObserveScrollOwnerUnknownFor(instance *session.Instance, activeTab int) ScrollOwner {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.dropStaleView(instance, activeTab)
+	if p.scroll.Owner() == ScrollOwnerHostHistory && p.scroll.Active() {
+		return ScrollOwnerHostHistory
+	}
+	p.setScrollOwnerLocked(ScrollOwnerNone)
+	return p.scroll.Owner()
+}
+
 // SetScrollOwnerResolvingFor starts an ownership probe for a capture-backed
 // target. Scroll intent may queue while modes are unknown; the full snapshot
 // either resolves it to HostHistory and applies it, or rejects the wrong buffer.

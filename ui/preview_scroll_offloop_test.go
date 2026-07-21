@@ -263,6 +263,35 @@ func TestOwnerSwitchInvalidatesPendingHostHistoryFill(t *testing.T) {
 	require.Equal(t, 0, p.viewport.YOffset)
 }
 
+func TestUnknownOwnerObservationPreservesOnlyActiveHostHistory(t *testing.T) {
+	inst := makeShellInstance(t, "unknown-active-host", "visible-line")
+	defer func() { _ = inst.Kill() }()
+
+	p := NewTabPane(func(_ *session.Instance, _ int, full bool) (PreviewSnapshot, error) {
+		if full {
+			return hostPreview(numberedScrollHistory(40)), nil
+		}
+		return hostPreview("visible-line"), nil
+	})
+	p.SetScrollOwnerFor(inst, 1, ScrollOwnerHostHistory)
+	p.SetSize(80, 10)
+	require.NoError(t, p.ScrollUp(inst, 1))
+	p.BeginScrollFill()
+	require.NoError(t, p.UpdateContent(inst, 1))
+	beforeOffset, beforeView := p.viewport.YOffset, p.viewport.View()
+
+	owner := p.ObserveScrollOwnerUnknownFor(inst, 1)
+	require.Equal(t, ScrollOwnerHostHistory, owner)
+	require.True(t, p.IsScrolling())
+	require.Equal(t, beforeOffset, p.viewport.YOffset)
+	require.Equal(t, beforeView, p.viewport.View(),
+		"transient unknown authority must preserve the active history position")
+
+	require.NoError(t, p.ResetToNormalMode(inst, 1))
+	require.Equal(t, ScrollOwnerNone, p.ObserveScrollOwnerUnknownFor(inst, 1),
+		"an idle host owner must fail closed so stale modes cannot start new history")
+}
+
 func TestLateNormalSnapshotCannotOverrideNewerChildOwnership(t *testing.T) {
 	inst := makeShellInstance(t, "late-normal-owner", "visible-line")
 	defer func() { _ = inst.Kill() }()

@@ -358,6 +358,9 @@ func TestPTYBrokerRecoveryRepaintPrecedesLiveBytes(t *testing.T) {
 				"the recovered screen: pane output delivered before the recovery repaint "+
 				"renders a stale frame the repaint then wipes (the flicker)", ev.Kind, ev.Data)
 		}
+		if ev.RepaintProvenance != PTYRepaintRecovery {
+			t.Fatalf("recovery repaint provenance = %d, want recovery", ev.RepaintProvenance)
+		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("no post-recovery event: A was never re-seeded")
 	}
