@@ -80,6 +80,7 @@ func TestDenialReason(t *testing.T) {
 		{name: "tmux config option", command: `tmux -f /tmp/tmux.conf list-sessions`, wantReason: unknownShellReason},
 		{name: "tmux run-shell", command: `tmux run-shell 'tmux kill-server'`, wantReason: unknownShellReason},
 		{name: "scoped tmux run-shell", command: `tmux -L af-test run-shell 'printf safe'`, wantReason: unknownShellReason},
+		{name: "tmux command builder after separator", command: `tmux list-sessions \; run-shell 'pkill tmux'`, wantReason: unknownShellReason},
 		{name: "tmux command format", command: `tmux display-message '#(tmux kill-server)'`, wantReason: unknownShellReason},
 		{name: "unscoped state-changing tmux command", command: `tmux new-session`, wantReason: unknownShellReason},
 
@@ -88,6 +89,7 @@ func TestDenialReason(t *testing.T) {
 		{name: "socket path", command: "tmux -S /tmp/af-test.sock kill-server"},
 		{name: "abbreviated kill on named socket", command: "tmux -L af-test kill-se"},
 		{name: "socket option after command is too late", command: "tmux kill-server -L af-test", wantReason: broadTmuxReason},
+		{name: "attached separator after broad kill", command: `tmux kill-server\; list-sessions`, wantReason: broadTmuxReason},
 		{name: "empty socket", command: `tmux -L '' kill-server`, wantReason: unknownShellReason},
 		{name: "command-local socket-like option does not scope", command: `tmux list-sessions -L fake \; kill-server`, wantReason: broadTmuxReason},
 		{name: "other tmux command", command: "tmux list-sessions"},
