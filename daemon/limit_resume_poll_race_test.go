@@ -188,7 +188,7 @@ func TestPersistPollChange_ResumeDuringWriteWindowIsNotOverwritten(t *testing.T)
 		}
 	}
 
-	manager.persistPollChange(repoID, inst, before, beforeReset)
+	manager.persistPollChange(repoID, inst, before, beforeReset, false)
 
 	if got := persistedLiveness(t, repoID, "limited"); got != session.LiveRunning {
 		t.Errorf("persisted liveness = %v, want LiveRunning: the poll must not overwrite a resume that landed while it waited for the write lock (#2135)", got)

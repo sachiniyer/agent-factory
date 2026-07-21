@@ -308,6 +308,29 @@ func TestInstanceRendererLimitReachedMarker(t *testing.T) {
 	assert.Contains(t, out, "throttled", "the title must remain visible")
 }
 
+func TestInstanceRendererModelChangeMarker(t *testing.T) {
+	inst, err := session.NewInstance(session.InstanceOptions{
+		Title:   "security-review",
+		Path:    t.TempDir(),
+		Program: "codex",
+	})
+	require.NoError(t, err)
+	require.True(t, inst.ReconcileAgentModelChange(session.NewAgentModelChange(
+		"gpt-5.6-sol max",
+		"gpt-5.6-luna low",
+	)))
+
+	out, _ := renderForTerminal(t, 160, inst)
+	assert.Contains(t, ansiEscape.ReplaceAllString(out, ""), "[model changed] security-review",
+		"a healthy-looking session must still surface its verified model change")
+
+	inst.SetBackend(&session.HookBackend{})
+	_ = inst.Transition(session.ObserveLiveness(session.LiveLost))
+	out, _ = renderForTerminal(t, 160, inst)
+	assert.Contains(t, ansiEscape.ReplaceAllString(out, ""), "[model changed] [lost] [remote]",
+		"the diagnostic stays outermost when lower-priority row prefixes coexist")
+}
+
 // TestInstanceRendererStatusGlyphs pins the #1766 status-cell contract, the same
 // (Liveness, InFlightOp)→glyph mapping the web mirrors (web/src/status.ts): only a
 // waiting/Ready session shows the green ● dot; every working/busy state — LiveRunning

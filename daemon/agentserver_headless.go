@@ -273,9 +273,10 @@ func (hs *headlessServer) Expose(_ struct{}, resp *agentExposeResponse) error {
 // agentSnapshotResponse is Observation over the wire — the non-interactive poll
 // the daemon reads each tick.
 type agentSnapshotResponse struct {
-	Updated   bool   `json:"updated"`
-	HasPrompt bool   `json:"has_prompt"`
-	Content   string `json:"content"`
+	Updated     bool                      `json:"updated"`
+	HasPrompt   bool                      `json:"has_prompt"`
+	Content     string                    `json:"content"`
+	ModelChange *session.AgentModelChange `json:"model_change,omitempty"`
 }
 
 func (hs *headlessServer) Snapshot(_ struct{}, resp *agentSnapshotResponse) error {
@@ -286,6 +287,7 @@ func (hs *headlessServer) Snapshot(_ struct{}, resp *agentSnapshotResponse) erro
 	resp.Updated = obs.Updated
 	resp.HasPrompt = obs.HasPrompt
 	resp.Content = obs.Content
+	resp.ModelChange = obs.ModelChange
 	return nil
 }
 

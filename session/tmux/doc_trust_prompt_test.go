@@ -2,6 +2,7 @@ package tmux
 
 import (
 	"bytes"
+	"errors"
 	"os/exec"
 	"strings"
 	"sync"
@@ -303,12 +304,54 @@ func TestCheckAndHandleTrustPrompt_CodexSafetyModelDowngradeIsSurfaced(t *testin
 		codexSafetyBufferingDialog,
 		codexSafetyBufferingKeepWaitingSelected,
 		"gpt-5.6-luna low · ~/agent-factory",
+		"gpt-5.6-luna low · ~/agent-factory",
+		"gpt-5.6-sol max · ~/agent-factory",
 	)
 
 	require.False(t, session.CheckAndHandleTrustPrompt())
 	require.True(t, session.CheckAndHandleTrustPrompt())
 	require.False(t, session.CheckAndHandleTrustPrompt())
 	require.Contains(t, errors.String(), `model changed after additional safety checks: before "gpt-5.6-sol max", after "gpt-5.6-luna low"`)
+	before, after, changed := session.CodexSafetyModelChange()
+	require.True(t, changed, "a logged model change must survive as observable session state")
+	require.Equal(t, "gpt-5.6-sol max", before)
+	require.Equal(t, "gpt-5.6-luna low", after)
+
+	require.False(t, session.CheckAndHandleTrustPrompt())
+	before, after, changed = session.CodexSafetyModelChange()
+	require.True(t, changed, "ordinary polls on the changed model must retain the warning")
+	require.Equal(t, "gpt-5.6-sol max", before)
+	require.Equal(t, "gpt-5.6-luna low", after)
+
+	require.False(t, session.CheckAndHandleTrustPrompt())
+	_, _, changed = session.CodexSafetyModelChange()
+	require.False(t, changed, "seeing the original model again resolves the live warning")
+}
+
+func TestCodexSafetyModelChangeClearsWhenRuntimeIsReplaced(t *testing.T) {
+	session, _ := runTrustPromptSequence(t, ProgramCodex,
+		"gpt-5.6-sol max · ~/agent-factory",
+		codexSafetyBufferingDialog,
+		codexSafetyBufferingKeepWaitingSelected,
+		"gpt-5.6-luna low · ~/agent-factory",
+	)
+	require.False(t, session.CheckAndHandleTrustPrompt())
+	require.True(t, session.CheckAndHandleTrustPrompt())
+	require.False(t, session.CheckAndHandleTrustPrompt())
+	_, _, changed := session.CodexSafetyModelChange()
+	require.True(t, changed)
+
+	forceNewSessionEnvMarkers(t, false)
+	session.ptyFactory = failingPtyFactory{}
+	session.cmdExec = cmd_test.MockCmdExec{
+		RunFunc: func(*exec.Cmd) error { return errors.New("session not found") },
+		OutputFunc: func(*exec.Cmd) ([]byte, error) {
+			return nil, nil
+		},
+	}
+	require.Error(t, session.Start(t.TempDir()))
+	_, _, changed = session.CodexSafetyModelChange()
+	require.False(t, changed, "a replacement process must not inherit the old runtime's warning")
 }
 
 func TestCheckAndHandleTrustPrompt_CodexChangedSafetyPickerIsSurfacedWithoutInput(t *testing.T) {

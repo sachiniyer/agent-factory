@@ -113,6 +113,7 @@ func (b *FakeBackend) HasUpdated(*Instance) (bool, bool, string)    { return fal
 func (b *FakeBackend) SendPromptCommand(*Instance, string) error    { return nil }
 func (b *FakeBackend) IsAlive(*Instance) (bool, error)              { return true, nil }
 func (b *FakeBackend) CheckAndHandleTrustPrompt(*Instance) bool     { return false }
+func (b *FakeBackend) AgentModelChange(*Instance) *AgentModelChange { return nil }
 func (b *FakeBackend) Recover(*Instance) error                      { return nil }
 func (b *FakeBackend) Respawn(*Instance) error                      { return nil }
 func (b *FakeBackend) PrepareAgentSwap(_ *Instance, target string) (AgentSwapPlan, error) {

@@ -55,6 +55,11 @@ type InstanceData struct {
 	// vetoes runtime reuse but must remain explicitly removable. Like
 	// LifecycleAction, this is derived live and scrubbed before disk persistence.
 	CanKill bool `json:"can_kill,omitempty"`
+	// ModelChange is the projection-only agent diagnostic carried to the CLI,
+	// TUI, and web row. It is derived from the live runtime's Observation and
+	// scrubbed by ForStorage so a resolved or replaced process cannot inherit a
+	// stale warning after daemon restart.
+	ModelChange *AgentModelChange `json:"model_change,omitempty"`
 	// TaskRunActive records whether this session's task run is still in flight
 	// (#1892) — true from creation, false once the agent goes idle or startup
 	// settles terminal-unknown. It is the one fact the watch-task concurrency cap
@@ -150,6 +155,7 @@ func (d InstanceData) ForStorage() InstanceData {
 	d.InFlightOp = OpNone
 	d.LifecycleAction = LifecycleActionNone
 	d.CanKill = false
+	d.ModelChange = nil
 	switch {
 	case lv == LiveArchived:
 		// Archived rows have already reaped their runtime, so retaining a teardown

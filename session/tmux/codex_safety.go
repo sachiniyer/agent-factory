@@ -24,6 +24,8 @@ const (
 type codexSafetyBufferingState struct {
 	lastModel          string
 	expectedModel      string
+	modelChangedFrom   string
+	modelChangedTo     string
 	verificationPolls  int
 	awaitingModelCheck bool
 	notified           bool
@@ -49,7 +51,8 @@ type codexPickerOption struct {
 // complete dialog chrome, navigation targets the literal label (never its
 // displayed ordinal), and Enter is sent only after a second capture proves the
 // intended row is selected. A later poll compares Codex's default status-line
-// model with the pre-dialog value and surfaces the result in af's log.
+// model with the pre-dialog value and retains a verified change for the shared
+// session observation, as well as logging it.
 func (t *TmuxSession) handleCodexSafetyBuffering(content string) bool {
 	targetLabel, safetyPromptPresent, safetyPromptActive := t.inspectCodexSafetyPrompt(content)
 	dialog, dialogPresent := parseCodexSafetyDialog(content, targetLabel, safetyPromptActive)
@@ -76,7 +79,7 @@ func (t *TmuxSession) handleCodexSafetyBuffering(content string) bool {
 			return true
 		}
 		if model != "" {
-			state.lastModel = model
+			state.observeModel(model)
 		}
 		state.notified = false
 		return false
@@ -121,7 +124,7 @@ func (t *TmuxSession) handleCodexSafetyBuffering(content string) bool {
 				return true
 			}
 			if current := codexStatusLineModel(selectedContent); current != "" {
-				state.lastModel = current
+				state.observeModel(current)
 			}
 			state.notified = false
 			log.InfoLog.Printf("Codex session %q additional safety checks resolved before af accepted a choice", t.sanitizedName)
@@ -175,12 +178,14 @@ func (t *TmuxSession) verifyCodexSafetyModel(model string, dialogPresent bool) {
 			"Codex session %q model changed after additional safety checks: before %q, after %q; possible unintended downgrade",
 			t.sanitizedName, state.expectedModel, model,
 		)
+		state.recordModelChange(state.expectedModel, model)
 	default:
 		log.InfoLog.Printf(
 			"Codex session %q additional safety checks: verified model unchanged: %s",
 			t.sanitizedName, model,
 		)
 	}
+	state.observeModel(model)
 	state.finishModelVerification(model)
 }
 
@@ -188,7 +193,61 @@ func (s *codexSafetyBufferingState) finishModelVerification(model string) {
 	if model == "" {
 		model = s.lastModel
 	}
-	*s = codexSafetyBufferingState{lastModel: model}
+	*s = codexSafetyBufferingState{
+		lastModel:        model,
+		modelChangedFrom: s.modelChangedFrom,
+		modelChangedTo:   s.modelChangedTo,
+	}
+}
+
+// observeModel keeps a verified model-change diagnostic live while Codex stays
+// on the changed model, updates its current value if Codex changes again, and
+// clears it only when the original pre-dialog model is visible again. A later
+// safety dialog that preserves the already-changed model therefore cannot erase
+// the earlier warning merely by comparing equal to its newer local baseline.
+func (s *codexSafetyBufferingState) observeModel(model string) {
+	if model == "" {
+		return
+	}
+	s.lastModel = model
+	if s.modelChangedFrom == "" {
+		return
+	}
+	if model == s.modelChangedFrom {
+		s.modelChangedFrom = ""
+		s.modelChangedTo = ""
+		return
+	}
+	s.modelChangedTo = model
+}
+
+func (s *codexSafetyBufferingState) recordModelChange(before, after string) {
+	if before == "" || after == "" || before == after {
+		return
+	}
+	if s.modelChangedFrom == "" {
+		s.modelChangedFrom = before
+	}
+	s.modelChangedTo = after
+}
+
+// CodexSafetyModelChange returns the active post-safety-dialog model change.
+// It is retained across pane polls so every observation surface can render the
+// same state, rather than trying to rediscover a one-shot log message.
+func (t *TmuxSession) CodexSafetyModelChange() (before, after string, changed bool) {
+	t.inputMu.Lock()
+	defer t.inputMu.Unlock()
+	state := &t.codexSafety
+	if state.modelChangedFrom == "" || state.modelChangedTo == "" {
+		return "", "", false
+	}
+	return state.modelChangedFrom, state.modelChangedTo, true
+}
+
+func (t *TmuxSession) resetCodexSafetyState() {
+	t.inputMu.Lock()
+	defer t.inputMu.Unlock()
+	t.codexSafety = codexSafetyBufferingState{}
 }
 
 // parseCodexSafetyDialog admits the observed Codex 0.144.6 picker and the

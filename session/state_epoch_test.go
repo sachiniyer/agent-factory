@@ -109,9 +109,10 @@ func TestTransitionAtEpoch_DropsSupersededObservation(t *testing.T) {
 	}
 }
 
-// TestToInstanceDataWithEpoch_ReadsBothUnderOneLock: the payload and the epoch a
-// writer re-checks before persisting must describe the same instant, or the
-// re-check proves nothing about what is being written (#2135).
+// TestToInstanceDataWithEpoch_ReadsBothUnderOneLock: the lifecycle portion of
+// the payload and its lifecycle epoch must describe the same instant. The method
+// is not a whole-projection freshness guard; tabs and other projection fields do
+// not advance this epoch (#2135).
 func TestToInstanceDataWithEpoch_ReadsBothUnderOneLock(t *testing.T) {
 	inst := newEpochTestInstance(t)
 	resetAt := time.Date(2026, 7, 20, 18, 0, 0, 0, time.UTC)

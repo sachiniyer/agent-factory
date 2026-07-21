@@ -10,6 +10,20 @@ import (
 	"github.com/sachiniyer/agent-factory/session"
 )
 
+func TestSnapshotReconcilesModelChangeWithoutLivenessChange(t *testing.T) {
+	h := newTestHome(t)
+	inst := instanceWithFakeBackend(t, "model-change")
+	data := inst.ToInstanceData()
+	data.ModelChange = session.NewAgentModelChange("gpt-5.6-sol max", "gpt-5.6-luna low")
+
+	require.True(t, h.updateInstanceFromSnapshot(inst, data))
+	require.Equal(t, data.ModelChange, inst.AgentModelChange())
+
+	data.ModelChange = nil
+	require.True(t, h.updateInstanceFromSnapshot(inst, data), "clearing the live diagnostic is itself a visible change")
+	require.Nil(t, inst.AgentModelChange())
+}
+
 // instanceWithFakeBackend builds an instance backed by FakeBackend, marked
 // Started and Running. Used by metadata-tick tests to exercise the loop body
 // without spinning up real tmux sessions.

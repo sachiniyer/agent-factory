@@ -143,6 +143,10 @@ type Backend interface {
 	// for supported programs.
 	CheckAndHandleTrustPrompt(instance *Instance) bool
 
+	// AgentModelChange returns the active, runtime-derived model diagnostic after
+	// prompt handling has had a chance to observe a safety dialog. It is read by
+	// AgentServer.Snapshot so local and off-box runtimes cross the same choke point.
+	AgentModelChange(instance *Instance) *AgentModelChange
 	// Recover re-establishes a Lost session's backing resources — the tmux
 	// session vanished out from under a live record with no kill on record
 	// (#1108) — re-spawning the program in the instance's worktree. It is

@@ -105,6 +105,7 @@ func (i *Instance) noteAgentRuntimeReplaced() {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	i.agentRuntimeGeneration++
+	i.clearAgentModelChangeLocked()
 }
 
 func (i *Instance) resolvedAgentLocked() string {

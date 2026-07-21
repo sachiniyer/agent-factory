@@ -149,6 +149,10 @@ type Instance struct {
 	// carried in the daemon snapshot so the badge survives a restart; PR3's
 	// auto-resume scheduler reads it. Mutex-protected.
 	limitResetAt time.Time
+	// agentModelChange is a live, projection-only diagnostic supplied by the
+	// running agent-server. It is mutex-protected and deliberately omitted from
+	// durable restore state; see AgentModelChange and InstanceData.ForStorage.
+	agentModelChange *AgentModelChange
 	// stateEpoch is the generation counter for the lifecycle state above — the two
 	// axes plus limitResetAt — bumped by every writer that actually changes one of
 	// them (#2135). It is how an observer that decided from a captured pane learns

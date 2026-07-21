@@ -24,6 +24,11 @@ func (t *TmuxSession) Start(workDir string) error {
 	if exists {
 		return fmt.Errorf("%w: tmux session already exists: %s", ErrSessionNotStarted, t.sanitizedName)
 	}
+	// The name is positively absent, so any Start from here creates a new pane
+	// process. Drop diagnostics owned by the prior process at that proven runtime
+	// boundary. SetProgram cannot do this: the live-session Restore path rewrites
+	// the command string without re-execing the existing pane.
+	t.resetCodexSafetyState()
 
 	// Create a new detached tmux session and start claude in it. The -e
 	// markers (when supported) let `af doctor` trace any process the pane

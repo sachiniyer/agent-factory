@@ -221,16 +221,21 @@ func (m *Manager) observeTaskRunWhilePaused(repoID, key string, instance *sessio
 	obs, err := instance.AgentServer().Snapshot()
 	// Whatever happened, no loss episode survives an attach (see above).
 	m.clearRemoteLoss(key)
-	if err != nil || obs.Updated || obs.HasPrompt {
-		// Unanswerable, still working, or waiting on the user: either way the run
-		// has not finished, so there is nothing for the cap to learn this tick.
+	if err != nil {
+		return
+	}
+	projectionChanged := instance.SetAgentModelChangeAtEpoch(obs.ModelChange, epoch)
+	if obs.Updated || obs.HasPrompt {
+		// Still working or waiting on the user: either way the run has not
+		// finished, so there is nothing for the cap to learn this tick.
+		m.persistPollChange(repoID, instance, before, beforeReset, projectionChanged)
 		return
 	}
 	// Idle output. The normal poll would probe liveness here to tell a healthy idle
 	// session from a vanished one; this path deliberately does not, because it must
 	// never conclude death. The attach already answers that question.
 	m.resolveIdleLiveness(instance, obs.Content, epoch)
-	m.persistPollChange(repoID, instance, before, beforeReset)
+	m.persistPollChange(repoID, instance, before, beforeReset, projectionChanged)
 }
 
 func (m *Manager) RefreshStatuses() {
@@ -381,14 +386,17 @@ func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instanc
 	// (#1592 Phase 2 PR4) — never the tmux-shaped Backend probes directly, so this
 	// poll makes no assumption that the session is local tmux. For the local
 	// runtime the agent-server drives tmux in-process.
-	as := instance.AgentServer()
-	before := instance.GetLiveness()
-	beforeReset, _ := instance.LimitResetAt()
 	// Captured BEFORE the observation below, so the idle resolve can tell whether
 	// the conclusion it draws from that capture is still about the state it
 	// observed — or whether a resume/kill/archive has moved the session on since
 	// (#2135). See resolveIdleLiveness and session/state_epoch.go.
 	epoch := instance.StateEpoch()
+	// Select the AgentServer only after capturing the epoch. A remote runtime swap
+	// replaces this handle; taking the handle first could pair the outgoing server
+	// with the incoming runtime's epoch and make a stale observation look current.
+	as := instance.AgentServer()
+	before := instance.GetLiveness()
+	beforeReset, _ := instance.LimitResetAt()
 	// Snapshot dismisses a pending trust prompt then reads the pane in one probe
 	// (the exact order the poll used to run CheckAndHandleTrustPrompt then
 	// HasUpdated). Content is the capture handed back so the idle branch runs the
@@ -415,6 +423,7 @@ func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instanc
 		m.settleRemoteProbeFailure(repoID, key, instance, before, beforeReset)
 		return
 	}
+	projectionChanged := instance.SetAgentModelChangeAtEpoch(obs.ModelChange, epoch)
 	updated, hasPrompt, content := obs.Updated, obs.HasPrompt, obs.Content
 	// The Snapshot answered, so the transport works and any loss episode is over.
 	// This is the ONLY thing the debounce tracks — see remoteloss.go: it counts
@@ -498,7 +507,7 @@ func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instanc
 	}
 
 	// Persist a liveness OR usage-limit reset-time change (#1146); see limit.go.
-	m.persistPollChange(repoID, instance, before, beforeReset)
+	m.persistPollChange(repoID, instance, before, beforeReset, projectionChanged)
 }
 
 // SaveInstances writes the manager's authoritative in-memory instances to disk

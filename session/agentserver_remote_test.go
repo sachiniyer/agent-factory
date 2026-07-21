@@ -1,6 +1,9 @@
 package session
 
 import (
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 )
@@ -73,6 +76,37 @@ func TestNewRemoteAgentServer_ValidatesEndpoint(t *testing.T) {
 		if _, ok := as.(*remoteAgentServer); !ok {
 			t.Fatalf("expected *remoteAgentServer, got %T", as)
 		}
+	}
+}
+
+func TestRemoteAgentServerSnapshotCarriesModelChange(t *testing.T) {
+	want := NewAgentModelChange("gpt-5.6-sol max", "gpt-5.6-luna low")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/agent/snapshot" {
+			t.Errorf("path = %q, want snapshot route", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(map[string]any{
+			"data": agentSnapshotResp{
+				Updated: true, Content: "ready", ModelChange: want,
+			},
+			"error": nil,
+		}); err != nil {
+			t.Errorf("encode response: %v", err)
+		}
+	}))
+	defer server.Close()
+
+	as, err := NewRemoteAgentServer(AgentServerEndpoint{URL: server.URL, Token: "test-token"}, "remote")
+	if err != nil {
+		t.Fatalf("NewRemoteAgentServer: %v", err)
+	}
+	obs, err := as.Snapshot()
+	if err != nil {
+		t.Fatalf("Snapshot: %v", err)
+	}
+	if !obs.Updated || obs.Content != "ready" || !sameAgentModelChange(obs.ModelChange, want) {
+		t.Fatalf("remote snapshot dropped model change: %+v", obs)
 	}
 }
 

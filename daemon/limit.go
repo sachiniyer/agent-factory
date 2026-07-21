@@ -115,11 +115,11 @@ func (m *Manager) resolveIdleLiveness(instance *session.Instance, content string
 // tab roster. No-op in production.
 var testHookPollBeforePublish = func() {}
 
-// testHookPollBeforePersistLock runs in persistPollChange after it has read the
-// payload it intends to write and BEFORE it takes the repo start lock — the exact
-// window a concurrent transition (a usage-limit resume) can land in and be
-// overwritten by this poll's older payload. Tests substitute it to land that
-// transition deterministically, with no goroutines or sleeps. No-op in production.
+// testHookPollBeforePersistLock runs in persistPollChange after it has decided to
+// write or publish and BEFORE it takes the repo start lock — the exact window a
+// concurrent transition or tab mutation can land in and be overwritten by this
+// poll's older payload. Tests substitute it to land that mutation
+// deterministically, with no goroutines or sleeps. No-op in production.
 var testHookPollBeforePersistLock = func() {}
 
 // persistPollChange writes an instance's state to disk when the poll changed
@@ -138,13 +138,19 @@ var testHookPollBeforePersistLock = func() {}
 // would have no time to schedule against once the daemon restarts and reloads
 // from disk. beforeReset is the reset time captured before this tick's poll.
 //
+// projectionChanged additionally announces a live-only diagnostic change without
+// writing it to disk. This is the event-plane half of projection-only state: a
+// quiet session can change its diagnostic while liveness and reset time remain
+// identical, and already-open clients must not wait for an unrelated transition.
+//
 // A concurrent client op (create/kill/archive) means that op's executor owns the
 // durable state, so the poll never persists over it. Split from
 // refreshInstanceStatus so control.go stays under its length ceiling (#1145).
 //
-// WHAT IS WRITTEN IS WHAT IS TRUE AT WRITE TIME (#2135). The change test above is
-// a decision about a payload read at one instant, and the write happens at
-// another — after a repo start lock that a session create can hold for seconds.
+// WHAT IS WRITTEN OR PUBLISHED IS WHAT IS TRUE UNDER THE ORDERING LOCK (#2135).
+// The change test above is a decision about a payload read at one instant, and
+// the write/publish happens at another — after a repo start lock that a session
+// create can hold for seconds.
 // An authoritative transition landing in between (a usage-limit resume clearing
 // the block and persisting LiveRunning, above all) would otherwise be overwritten
 // by the intermediate this poll decided from, and the reset-time arm is what
@@ -152,33 +158,42 @@ var testHookPollBeforePersistLock = func() {}
 // liveness compare read "unchanged" (LimitReached → LimitReached) still flushed —
 // planting a limit-blocked row on disk for a session that was working.
 //
-// So the payload is re-read under the lock whenever the state epoch shows it
-// moved: the poll's gate decides WHETHER to write, never WHAT. Deliberately not
-// the reverse (take the lock, then read once): the lock is uncontended only when
-// nothing is being created, and taking it on every tick of every session would
-// park the whole poll behind an unrelated create. The epoch keeps the hot path
-// lock-free and costs a second read only in the rare superseded case.
-func (m *Manager) persistPollChange(repoID string, instance *session.Instance, before session.Liveness, beforeReset time.Time) {
+// So the payload is ALWAYS re-read under the lock once the lock-free gate decides
+// there is something to announce: the gate decides WHETHER to write/publish,
+// never WHAT. A lifecycle epoch cannot safely optimize this re-read because the
+// payload also contains projection state outside that epoch — notably the tab
+// roster. Deliberately do not take the lock before the gate: taking it on every
+// tick of every session would park the whole poll behind an unrelated create.
+func (m *Manager) persistPollChange(
+	repoID string,
+	instance *session.Instance,
+	before session.Liveness,
+	beforeReset time.Time,
+	projectionChanged bool,
+) {
 	if instance.GetInFlightOp() != session.OpNone {
 		return
 	}
-	data, epoch := instance.ToInstanceDataWithEpoch()
+	data := instance.ToInstanceData()
 	livenessChanged := data.Liveness != before
 	resetChanged := !data.LimitResetAt.Equal(beforeReset)
-	if !livenessChanged && !resetChanged {
+	durableChanged := livenessChanged || resetChanged
+	publishChanged := durableChanged || projectionChanged
+	if !publishChanged {
 		return
 	}
 	repoStartLock := m.startLockForRepo(repoID)
 	testHookPollBeforePersistLock()
 	repoStartLock.Lock()
-	if current, now := instance.ToInstanceDataWithEpoch(); now != epoch {
-		// Superseded while we waited for the lock. Persist and publish what is true
-		// NOW — the transition that beat us owns this state, and both the disk row
-		// and the session.updated payload must show it, not the intermediate this
-		// tick decided from.
-		data = current
+	// Re-read the WHOLE projection after joining the same ordering domain as tab
+	// mutations and session creation. StateEpoch intentionally covers lifecycle
+	// state only, so using it as a whole-payload change detector lets an untracked
+	// roster mutation publish first and then get erased by this stale event.
+	data = instance.ToInstanceData()
+	var err error
+	if durableChanged {
+		err = persistInstanceData(repoID, data)
 	}
-	err := persistInstanceData(repoID, data)
 	// Push the change onto the events plane (#1592 PR5): this is the single choke
 	// point every liveness/limit transition already flows through, so one publish
 	// here covers session.updated without threading it through each caller.

@@ -7533,6 +7533,9 @@ function rowTitle(s) {
   if (s.backend_type === "remote") {
     title = "[remote] " + title;
   }
+  if (s.model_change) {
+    title = "[model changed] " + title;
+  }
   return title;
 }
 function limitBadgePrefix(s) {
@@ -11946,7 +11949,8 @@ function sessionRow(s, selected, openSession, buildActions) {
   }
   row.setAttribute("role", "option");
   row.setAttribute("aria-selected", selected ? "true" : "false");
-  row.setAttribute("title", `${s.title} \u2014 ${status.label}`);
+  const modelChange = s.model_change ? `; model changed from ${s.model_change.before} to ${s.model_change.after}` : "";
+  row.setAttribute("title", `${s.title} \u2014 ${status.label}${modelChange}`);
   if (!actionable && !managed) {
     row.setAttribute("aria-disabled", "true");
   } else if (actionable) {

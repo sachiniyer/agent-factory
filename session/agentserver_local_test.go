@@ -17,11 +17,18 @@ type probeBackend struct {
 	launchFirst    *bool
 	sentPrompt     string
 	killed         bool
+	modelChange    *AgentModelChange
+	diagnosticRead bool
 }
 
 func (b *probeBackend) CheckAndHandleTrustPrompt(*Instance) bool {
 	b.trustChecked = true
 	return false
+}
+
+func (b *probeBackend) AgentModelChange(*Instance) *AgentModelChange {
+	b.diagnosticRead = true
+	return b.modelChange
 }
 
 // HasUpdated returns a distinct triple so Snapshot's field mapping is verifiable.
@@ -68,6 +75,7 @@ func newProbeInstance(t *testing.T) (*Instance, *probeBackend) {
 
 func TestLocalAgentServerSnapshot(t *testing.T) {
 	inst, b := newProbeInstance(t)
+	b.modelChange = NewAgentModelChange("gpt-5.6-sol max", "gpt-5.6-luna low")
 	obs, err := inst.AgentServer().Snapshot()
 	if err != nil {
 		t.Fatalf("Snapshot: %v", err)
@@ -77,6 +85,9 @@ func TestLocalAgentServerSnapshot(t *testing.T) {
 	}
 	if !obs.Updated || !obs.HasPrompt || obs.Content != "captured-pane" {
 		t.Errorf("Observation mismapped: got %+v", obs)
+	}
+	if !b.diagnosticRead || !sameAgentModelChange(obs.ModelChange, b.modelChange) {
+		t.Errorf("Snapshot dropped the backend model diagnostic: got %+v", obs.ModelChange)
 	}
 }
 

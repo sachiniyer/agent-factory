@@ -361,6 +361,13 @@ func (r *InstanceRenderer) Render(i *session.Instance, _ int, selected bool, has
 	if liveness == session.LiveLimitReached {
 		titleText = limitBadgePrefix(i) + titleText
 	}
+	// A verified post-safety-dialog model change is orthogonal to liveness: the
+	// session can keep working and otherwise look healthy. Add it LAST so it is
+	// the outermost prefix; narrow rails retain the reason before lower-priority
+	// remote/lifecycle context or the title can be clipped (#2307).
+	if i.AgentModelChange() != nil {
+		titleText = "[model changed] " + titleText
+	}
 	prefixSepWidth := 0
 	if prefix != "" {
 		prefixSepWidth = 1

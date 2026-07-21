@@ -203,6 +203,10 @@ type Observation struct {
 	// run the usage-limit detector without a second capture (#1146). Empty for a
 	// runtime with no live pane.
 	Content string
+	// ModelChange is the retained, verified model transition observed after an
+	// agent safety dialog. The runtime reports it on every snapshot until the
+	// model returns to Before, so no consumer has to race a one-shot log line.
+	ModelChange *AgentModelChange
 }
 
 // PTYSubscription is one subscriber's read side of a session's PTY stream

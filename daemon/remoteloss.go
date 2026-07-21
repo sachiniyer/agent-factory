@@ -170,9 +170,10 @@ func (m *Manager) remoteSandboxAnswersAlive(instance *session.Instance) bool {
 	return aliveWithin(instance.AgentServer(), remoteLostConfirmTimeout) == probeAlive
 }
 
-// noteRuntimeReplaced resets a session's remote-loss debounce after a lifecycle
-// event that REPLACED the runtime its failures were about: a Recover, a
-// Respawn, an archive-restore's re-provision.
+// noteRuntimeReplaced retires observations owned by the prior runtime after a
+// lifecycle event that REPLACED it: a Recover, a Respawn, an archive-restore's
+// re-provision. Today those are the remote-loss debounce and the live model
+// diagnostic.
 //
 // Call it the INSTANT the swap succeeds — before any persist, log, or other
 // work. The poll goroutine does not hold the op-lock and does not skip a session
@@ -200,6 +201,12 @@ func (m *Manager) remoteSandboxAnswersAlive(instance *session.Instance) bool {
 // lostrestore.go (automatic Recover), restore.go (manual Recover RPC),
 // limit.go (limit-resume Respawn), archive.go (archive-restore re-provision).
 func (m *Manager) noteRuntimeReplaced(repoID string, instance *session.Instance) {
+	// Model diagnostics are observations of one concrete agent process, just like
+	// the remote-loss episode is an observation of one concrete sandbox. Every
+	// recovery/re-provision/handoff already crosses this chokepoint, so retire both
+	// predecessor-owned facts together rather than making each caller remember a
+	// second reset site.
+	instance.ClearAgentModelChange()
 	m.clearRemoteLoss(remoteLossKey(repoID, instance))
 }
 
@@ -287,7 +294,7 @@ func (m *Manager) settleRemoteProbeFailure(repoID, key string, instance *session
 		log.WarningLog.Printf("remote session %q: agent-server unreachable and still unanswerable after %s — marking it Lost", instance.Title, remoteLostGracePeriod)
 	}
 	_ = instance.Transition(session.ObserveLiveness(session.LiveLost))
-	m.persistPollChange(repoID, instance, before, beforeReset)
+	m.persistPollChange(repoID, instance, before, beforeReset, false)
 }
 
 // livenessProbe is the outcome of a liveness probe. It is a tri-state, not a

@@ -34,6 +34,7 @@ type fakeHeadlessAgentServer struct {
 	lastPrompt   string
 	subs         map[*fakeSub]struct{}
 	snapshotText string
+	modelChange  *session.AgentModelChange
 }
 
 func newFakeHeadlessAgentServer() *fakeHeadlessAgentServer {
@@ -50,7 +51,9 @@ func (f *fakeHeadlessAgentServer) Expose() (session.StreamEndpoint, error) {
 func (f *fakeHeadlessAgentServer) Snapshot() (session.Observation, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return session.Observation{Updated: true, HasPrompt: false, Content: f.snapshotText}, nil
+	return session.Observation{
+		Updated: true, HasPrompt: false, Content: f.snapshotText, ModelChange: f.modelChange,
+	}, nil
 }
 func (f *fakeHeadlessAgentServer) Preview(int, bool) (session.PreviewSnapshot, error) {
 	return session.PreviewSnapshot{
@@ -190,12 +193,14 @@ func TestHeadlessAgentServer_HTTPTokenRoundTrip(t *testing.T) {
 	require.True(t, fake.launched)
 
 	// --- control REST: snapshot ---------------------------------------------
+	fake.modelChange = session.NewAgentModelChange("gpt-5.6-sol max", "gpt-5.6-luna low")
 	resp, err = post("/v1/agent/snapshot", ``)
 	require.NoError(t, err)
 	var snap agentSnapshotResponse
 	decodeData(resp, &snap)
 	require.Equal(t, "❯ ready", snap.Content)
 	require.True(t, snap.Updated)
+	require.Equal(t, fake.modelChange, snap.ModelChange)
 
 	// --- control REST: preview carries terminal ownership with the grid ------
 	resp, err = post("/v1/agent/preview", `{"tab":0,"full":false}`)

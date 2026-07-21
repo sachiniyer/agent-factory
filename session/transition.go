@@ -538,6 +538,13 @@ func (i *Instance) Transition(ev TransitionEvent) error {
 	case startedClear:
 		i.started = false
 	}
+	// A model-change diagnostic belongs to one concrete agent process. Archive
+	// retires that process, and restore starts a new one under the same Instance
+	// identity; neither boundary may carry the predecessor's warning across.
+	switch ev.kind {
+	case tkCommitArchive, tkBeginRestore:
+		i.clearAgentModelChangeLocked()
+	}
 	return nil
 }
 
