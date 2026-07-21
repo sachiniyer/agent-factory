@@ -82,19 +82,21 @@ var deleteProjectViaDaemon = daemon.DeleteProject
 
 var projectsDeleteCmd = &cobra.Command{
 	Use:   "delete [repo]",
-	Short: "Delete a project: archive its sessions and remove it (reversibly)",
-	Long: `Delete a project — the group of sessions sharing a git repository.
+	Short: "Archive and remove a project's sessions (reversibly)",
+	Long: `Archive and remove every live session for a git repository.
 
-This is ARCHIVE-THEN-REMOVE and reversible. Every live session of the repo is
+This is archive-then-remove and reversible. Every live session of the repo is
 archived (its tmux is torn down and its worktree moved to the archive dir, but
-its branch and uncommitted changes are preserved), the project drops out of the
-active projects list, and its always-on root agent (if any) is stopped and its
-root_agents opt-in removed. In-place sessions (the root agent, 'af sessions
-create --here') are torn down instead of archived — their cleanup never touches
-your working tree or branch.
+its branch and uncommitted changes are preserved), and its always-on root agent
+(if any) is stopped and its root-agent opt-in removed. In-place sessions (the
+root agent, 'af sessions create --here') are torn down instead of archived —
+their cleanup never touches your working tree or branch.
+
+The durable project registration, if any, is preserved. This command removes
+session state; it does not unregister the project.
 
 Your real git repository is never touched. To undo a mis-click, restore any
-archived session with 'af sessions restore <title>' — its project reappears.
+archived session with 'af sessions restore <title>'.
 
 [repo] is a path inside the repository to delete (default: the current repo).
 Deleting an unknown or already-empty project is a clean no-op. Prints how many

@@ -161,9 +161,10 @@ func RegisterProject(path string) (Project, error) {
 
 // RebindProject moves an existing stable project identity to path. It refuses
 // to steal a root already owned by another project. When path belongs to a
-// checkout already present in the registry, the rebound project joins that
-// checkout's identity. A whole-checkout move carries its marker and therefore
-// its checkout ID; a genuine new clone receives a new checkout ID.
+// checkout already present in the registry, its marker is reused unless that
+// would duplicate another project binding. A whole-checkout move carries its
+// marker and therefore its checkout ID; a genuine new clone receives a new
+// checkout ID.
 func RebindProject(id, path string) (Project, error) {
 	if err := ValidateProjectID(id); err != nil {
 		return Project{}, err
