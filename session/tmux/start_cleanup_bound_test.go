@@ -1,6 +1,7 @@
 package tmux
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -110,6 +111,9 @@ func TestStartPtyFailureCleanupKillSessionIsBounded(t *testing.T) {
 		// own (timeout) cause to it — it does not replace or swallow the real error.
 		if !strings.Contains(err.Error(), "error starting tmux session") {
 			t.Fatalf("want the pty-start failure surfaced, got %v", err)
+		}
+		if !errors.Is(err, ErrSessionNotStarted) {
+			t.Fatalf("a PtyFactory.Start failure happens before the new-session process begins; got %v", err)
 		}
 	case <-time.After(30 * time.Second):
 		t.Fatal("Start hung on the pty-start-failure cleanup kill-session against a wedged tmux " +

@@ -84,8 +84,9 @@ type Backend interface {
 
 	// Launch starts (or restores) WHAT runs in the workspace Provision established
 	// — the agent process and its tabs. The second half of Start; it owns the
-	// failure-cleanup scope (a launch failure tears down Provision's worktree on a
-	// fresh create).
+	// failure-cleanup scope. A fresh worktree is removed only when the launcher
+	// positively establishes that no runtime began; an unknown startup outcome
+	// leaves it in place for the caller to retain (#2207).
 	Launch(instance *Instance, firstTimeSetup bool) error
 
 	// Kill terminates the session and cleans up all associated resources.

@@ -137,10 +137,9 @@ func tabTmuxToken(agentPrefix string, t *Tab) string {
 
 // tabNameUnsafe matches any run of characters that must not appear in a tab's
 // derived tmux session name (the agent session name + "__" + the tab name).
-// tmux silently rewrites '.', ':', '#', '$' in session names, so a name
-// containing them would not round-trip on restore; whitespace and path
-// separators are likewise collapsed. Anything outside [A-Za-z0-9_-] becomes a
-// single '-'.
+// Keep the tab token inside the same conservative ASCII subset as the agent
+// name's positive tmux policy. Anything outside [A-Za-z0-9_-] becomes a single
+// '-'.
 var tabNameUnsafe = regexp.MustCompile(`[^A-Za-z0-9_-]+`)
 
 // sanitizeTabName converts a requested or derived tab name into a token safe to

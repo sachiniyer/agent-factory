@@ -21,7 +21,7 @@ func (t *TmuxSession) Start(workDir string) error {
 		return fmt.Errorf("%w: has-session probe for session %q did not answer", ErrTmuxTimeout, t.sanitizedName)
 	}
 	if exists {
-		return fmt.Errorf("tmux session already exists: %s", t.sanitizedName)
+		return fmt.Errorf("%w: tmux session already exists: %s", ErrSessionNotStarted, t.sanitizedName)
 	}
 
 	// Create a new detached tmux session and start claude in it. The -e
@@ -37,10 +37,11 @@ func (t *TmuxSession) Start(workDir string) error {
 		if systemdScoped {
 			err = fmt.Errorf("systemd-run --user --scope could not start: %w", err)
 		}
-		// Cleanup any partially created session if any exists. ExistsOrUnknown is
-		// safe here: the only action gated on true is a bounded best-effort
-		// kill-session, so a wedged→"exists" merely triggers a harmless cleanup
-		// attempt against a possibly-live session, never a false liveness claim.
+		// A failed PtyFactory.Start means the process did not begin, which is why
+		// this path may return ErrSessionNotStarted. Keep the historical defensive
+		// cleanup for injected factories or platform edges that expose a partial
+		// session. ExistsOrUnknown is safe here: the only action gated on true is a
+		// bounded best-effort kill-session, never a false liveness claim.
 		if t.ExistsOrUnknown() {
 			leaked := SessionProcessTrees(t.cmdExec, t.sanitizedName)
 			// Bound the cleanup kill-session (#2028): on bare exec.Command it could
@@ -58,7 +59,7 @@ func (t *TmuxSession) Start(workDir string) error {
 				go reapLeakedProcesses(t.sanitizedName, leaked, reapGraceWait, reapTermWait)
 			}
 		}
-		return fmt.Errorf("error starting tmux session: %w", err)
+		return fmt.Errorf("%w: error starting tmux session: %w", ErrSessionNotStarted, err)
 	}
 
 	// Poll for session existence with exponential backoff. Break only on a probe
@@ -98,22 +99,19 @@ func (t *TmuxSession) Start(workDir string) error {
 			if systemdScoped {
 				timeoutErr = fmt.Errorf("systemd-run --user --scope completed but the tmux session did not appear: %w", timeoutErr)
 			}
-			// The pane state is LOAD-BEARING here, and the comment that used to sit
-			// on this line said the opposite: "Start's failure path touches no
-			// worktree". It does. LocalBackend.Launch calls gw.Cleanup() the moment
-			// Start returns an error, so dropping an unknown here deletes the
-			// brand-new worktree out from under a pane that may still be RUNNING —
-			// tmux never confirmed this session's fate, and a detached session can
-			// exist even though the readiness poll never saw it (#1917 round 7).
-			// %w, never %v: flattening the error erases the sentinel Launch gates on.
-			state, cleanupErr := t.Close()
+			// The timeout classification is load-bearing: Launch uses it for
+			// diagnostics, and older callers may still distinguish an unknown tmux
+			// outcome from a clean pre-spawn failure. %w, never %v, so the sentinel
+			// survives every wrapping layer.
+			_, cleanupErr := t.Close()
 			if cleanupErr != nil {
 				timeoutErr = fmt.Errorf("%v (cleanup error: %v)", timeoutErr, cleanupErr)
 			}
-			if state != PaneStateKnown {
-				timeoutErr = fmt.Errorf("%w: %w", timeoutErr, ErrTmuxTimeout)
-			}
-			return timeoutErr
+			// The readiness deadline itself is the unknown. Even if Close
+			// confidently reports that the requested name is absent, tmux may
+			// have created a differently escaped name that Close never targeted
+			// (#2207). A timeout can therefore never authorize workspace deletion.
+			return fmt.Errorf("%w: %w", timeoutErr, ErrTmuxTimeout)
 		default:
 			time.Sleep(sleepDuration)
 			// Exponential backoff up to 50ms max
@@ -159,8 +157,8 @@ func (t *TmuxSession) Start(workDir string) error {
 		// claim against a merely-slow server. This only picks the error wording;
 		// no destructive action is gated on it (#1962).
 		vanished := !t.ExistsOrUnknown()
-		// Same rule as the timeout path above: a failed Start DOES lead to a worktree
-		// delete in Launch, so an unknown pane state must reach it (#1917 round 7).
+		// Preserve the teardown's unknown classification for callers even though
+		// Launch now independently fails closed on every post-spawn Start error.
 		state, cleanupErr := t.Close()
 		if cleanupErr != nil {
 			err = fmt.Errorf("%v (cleanup error: %v)", err, cleanupErr)

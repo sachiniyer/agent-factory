@@ -184,6 +184,13 @@ type Instance struct {
 	// daemon poll finishes a tombstoned record's teardown instead of probing it.
 	userKilled bool
 
+	// startupStateUnknown means a fresh create crossed the process-spawn boundary
+	// but af could not determine whether its runtime came up. The record is kept
+	// inert: no liveness probe, restore, or automatic teardown may turn that
+	// uncertainty into permission to delete its workspace (#2207). Persisted so a
+	// daemon restart cannot re-arm the destructive path.
+	startupStateUnknown bool
+
 	// prInfo stores the associated GitHub PR info
 	prInfo *git.PRInfo
 	// prInfoLastFetched is the wall-clock time of the most recent PR info

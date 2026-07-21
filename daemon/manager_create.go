@@ -81,10 +81,27 @@ func (m *Manager) CreateSession(ctx context.Context, req CreateSessionRequest) (
 	// marked external — not the flow itself. finishCreateStart marks the instance
 	// live, PARKS it at a usage-limit wall (#1146 PR4), or returns a fatal error.
 	if serr := finishCreateStart(instance, req.Prompt, task.StartAndSendPrompt(ctx, instance, req.Prompt)); serr != nil {
-		// The create failed, so this instance is about to be discarded — it was never
-		// registered or persisted, and the deferred release() hands its title straight
-		// back out. That is only safe if the cleanup below actually removed what the
-		// create built (#1917).
+		// An unknown startup outcome is already a teardown boundary. Launch may have
+		// failed because the name it probed is not the name tmux stored; asking Kill
+		// through that same binding can then answer "absent" for the wrong name and
+		// delete a worktree whose real pane is still using it (#2207). A second probe
+		// cannot turn "I do not know" into proof that the session never started, so
+		// do not attempt cleanup in that case. Keep an inert, durable record of the
+		// uncertain workspace instead; unlike a kill tombstone, it never schedules an
+		// automatic retry through that suspect identity.
+		if session.TeardownStateUnknown(serr) {
+			if keepErr := m.keepUncertainCreate(repo.ID, title, instance); keepErr != nil {
+				return session.InstanceData{}, fmt.Errorf("failed to start instance %q, and its startup outcome could not be determined safely — its workspace may still be on disk at %s and could not be recorded, so it must be inspected and cleaned up by hand: %w",
+					title, instance.GetWorktreePath(), errors.Join(serr, keepErr))
+			}
+			return session.InstanceData{}, fmt.Errorf("failed to start instance %q, and its startup outcome could not be determined safely, so its workspace was left in place; the session is recorded for inspection and no automatic cleanup will run: %w",
+				title, serr)
+		}
+
+		// The create failed, so this instance would normally be discarded — it was
+		// never registered or persisted, and the deferred release() hands its title
+		// straight back out. That is only safe if startup was known not to have left a
+		// runtime and cleanup actually removed what the create built (#1917/#2207).
 		//
 		// Kill swallows everything tmux and git ANSWER for, so an error here means it
 		// could NOT: a pane whose liveness is unknown, or a worktree removal cut off
@@ -844,6 +861,19 @@ func (m *Manager) branchForTitle(title string) string {
 // takes that same non-reentrant lock).
 func (m *Manager) keepFailedCreate(repoID, title string, instance *session.Instance) error {
 	instance.MarkUserKilled()
+	return m.persistFailedCreate(repoID, title, instance)
+}
+
+// keepUncertainCreate retains a create whose runtime may exist under an identity
+// af could not confirm. It deliberately does NOT mark a kill tombstone: the
+// daemon must not retry teardown automatically through the same suspect binding
+// and let a false "absent" answer authorize workspace deletion (#2207).
+func (m *Manager) keepUncertainCreate(repoID, title string, instance *session.Instance) error {
+	instance.MarkStartupStateUnknown()
+	return m.persistFailedCreate(repoID, title, instance)
+}
+
+func (m *Manager) persistFailedCreate(repoID, title string, instance *session.Instance) error {
 	key := daemonInstanceKey(repoID, title)
 	m.mu.Lock()
 	defer m.mu.Unlock()

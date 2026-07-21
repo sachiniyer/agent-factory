@@ -39,17 +39,18 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 		// the daemon truth; InFlightOp rides daemon snapshots so secondary TUIs can
 		// cold-start into archive/restore operations without lossy Status
 		// reconstruction (#1436). Disk writers scrub InFlightOp before persistence.
-		Status:     i.statusLocked(),
-		Liveness:   i.liveness,
-		InFlightOp: i.inFlightOp,
-		Height:     i.Height,
-		Width:      i.Width,
-		CreatedAt:  i.CreatedAt,
-		UpdatedAt:  time.Now(),
-		Program:    i.Program,
-		AutoYes:    i.AutoYes,
-		Prompt:     i.Prompt,
-		UserKilled: i.userKilled,
+		Status:              i.statusLocked(),
+		Liveness:            i.liveness,
+		InFlightOp:          i.inFlightOp,
+		Height:              i.Height,
+		Width:               i.Width,
+		CreatedAt:           i.CreatedAt,
+		UpdatedAt:           time.Now(),
+		Program:             i.Program,
+		AutoYes:             i.AutoYes,
+		Prompt:              i.Prompt,
+		UserKilled:          i.userKilled,
+		StartupStateUnknown: i.startupStateUnknown,
 	}
 
 	if i.backend != nil {
@@ -161,16 +162,17 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 		// same event that restarts the daemon, so this fact has to come back from
 		// disk or the cap would re-decide it from a Lost state that cannot tell a
 		// finished run from an interrupted one.
-		taskRunActive: data.TaskRunActive,
-		limitResetAt:  data.LimitResetAt,
-		Height:        data.Height,
-		Width:         data.Width,
-		CreatedAt:     data.CreatedAt,
-		UpdatedAt:     data.UpdatedAt,
-		Program:       data.Program,
-		AutoYes:       data.AutoYes,
-		Prompt:        data.Prompt,
-		userKilled:    data.UserKilled,
+		taskRunActive:       data.TaskRunActive,
+		limitResetAt:        data.LimitResetAt,
+		Height:              data.Height,
+		Width:               data.Width,
+		CreatedAt:           data.CreatedAt,
+		UpdatedAt:           data.UpdatedAt,
+		Program:             data.Program,
+		AutoYes:             data.AutoYes,
+		Prompt:              data.Prompt,
+		userKilled:          data.UserKilled,
+		startupStateUnknown: data.StartupStateUnknown,
 	}
 
 	// Pick backend based on persisted BackendType.
@@ -241,6 +243,15 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 			URL:    data.PRInfo.URL,
 			State:  data.PRInfo.State,
 		}
+	}
+
+	// An uncertain startup loads INERT. Re-running Start(false) would probe or
+	// even re-spawn through the same tmux name whose identity was never confirmed,
+	// converting a daemon restart into a second destructive guess. The restored
+	// worktree and exact tmux binding above remain available for inspection and an
+	// explicit user kill, while the daemon status loop leaves the record alone.
+	if data.StartupStateUnknown {
+		return instance, nil
 	}
 
 	// An archived session (#1028) loads INERT: its tmux was torn down and its

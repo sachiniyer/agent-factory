@@ -102,11 +102,11 @@ func TestSanitizeName(t *testing.T) {
 	require.Equal(t, "af_custom_name", session3.sanitizedName)
 }
 
-// TestSanitizeNameTmuxRestrictedChars guards toTmuxName against the #574
-// failure mode: tmux silently rewrites or escapes certain characters in
-// session names, so a title containing them must be transformed before we
-// hand it to tmux. Otherwise ExistsOrUnknown() polls for a name tmux never
-// created and Start() times out, orphaning the session.
+// TestSanitizeNameTmuxRestrictedChars guards toTmuxName against the #574/#2207
+// failure mode: tmux silently rewrites, expands, or escapes parts of session
+// names. The positive policy must transform every rune outside the reviewed
+// safe set before tmux sees it; otherwise Start probes a different spelling
+// and times out while the created session keeps running.
 func TestSanitizeNameTmuxRestrictedChars(t *testing.T) {
 	cases := []struct {
 		name  string
@@ -122,8 +122,17 @@ func TestSanitizeNameTmuxRestrictedChars(t *testing.T) {
 		// '$' is tmux's session-id prefix — tmux escapes it to '\$' in the
 		// stored name, so has-session round-trips fail without sanitization.
 		{"dollar", "a$b", TmuxPrefix + "a_b"},
-		// All four together, plus whitespace stripping.
-		{"all-four-and-spaces", "a.b :c #d $e", TmuxPrefix + "a_b_c_d_e"},
+		// tmux 3.4 visually escapes a backslash in the stored session name.
+		{"backslash", `a\b`, TmuxPrefix + "a_b"},
+		// All tmux-special characters together, plus whitespace stripping.
+		{"tmux-specials-and-spaces", `a.b :c #d $e \f`, TmuxPrefix + "a_b_c_d_e_f"},
+		// The positive policy rejects punctuation even when one tmux version
+		// happens to preserve it, avoiding another parser-version denylist gap.
+		{"other-punctuation", "a/b,c;d@e%f(g)", TmuxPrefix + "a_b_c_d_e_f_g_"},
+		// tmux preserves valid UTF-8; keep letters and combining marks readable.
+		{"unicode", "日本語-e\u0301", TmuxPrefix + "日本語-e\u0301"},
+		// Non-whitespace controls are visually escaped by tmux and must not pass.
+		{"control", "a\x1bb", TmuxPrefix + "a_b"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -288,6 +297,8 @@ func TestStartTimeoutCleanupSucceeds(t *testing.T) {
 
 	err := session.Start(t.TempDir())
 	require.Error(t, err)
+	require.ErrorIs(t, err, ErrTmuxTimeout)
+	require.NotErrorIs(t, err, ErrSessionNotStarted)
 	require.Contains(t, err.Error(), "timed out waiting for tmux session af_timeout-ok")
 	require.NotContains(t, err.Error(), "<nil>")
 	require.NotContains(t, err.Error(), "cleanup error")
@@ -327,6 +338,8 @@ func TestStartTimeoutCleanupFails(t *testing.T) {
 
 	err := session.Start(t.TempDir())
 	require.Error(t, err)
+	require.ErrorIs(t, err, ErrTmuxTimeout)
+	require.NotErrorIs(t, err, ErrSessionNotStarted)
 	require.Contains(t, err.Error(), "timed out waiting for tmux session af_timeout-bad")
 	require.Contains(t, err.Error(), "cleanup error")
 	require.Contains(t, err.Error(), "kill-session exploded")
