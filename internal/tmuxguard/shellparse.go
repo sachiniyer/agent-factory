@@ -118,14 +118,6 @@ func resolveWord(word *syntax.Word) shellWord {
 	return shellWord{literal: fields[0], resolved: true}
 }
 
-func literalWord(word *syntax.Word) (string, error) {
-	resolved := resolveWord(word)
-	if !resolved.resolved {
-		return "", errUnsupportedShell
-	}
-	return resolved.literal, nil
-}
-
 func literalPartIsStatic(part syntax.WordPart, quoted bool) bool {
 	switch part := part.(type) {
 	case *syntax.Lit:
