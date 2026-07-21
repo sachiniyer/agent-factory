@@ -6,6 +6,7 @@ import (
 	"os/user"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/sachiniyer/agent-factory/session"
@@ -87,10 +88,11 @@ type redactor struct {
 	home  string
 	users []string
 	// tmuxNames and titles are the known session tmux names and raw session
-	// titles gathered while redacting instances (see noteSession). scrubLog uses
-	// them to redact bare titles and non-repo-scoped names (af_<title>, no hash,
-	// which the afTmuxSessionName shape can't match) out of the verbatim log
-	// tail — closing the #1584 leak the structured sections don't reach.
+	// titles gathered while redacting instances and tasks. scrubSessionTitles
+	// uses titles for both structured task status strings and the verbatim log;
+	// scrubLog additionally removes non-repo-scoped names (af_<title>, no hash,
+	// which the afTmuxSessionName shape can't match) — closing the #1584 leak the
+	// structured sections don't reach.
 	tmuxNames map[string]struct{}
 	titles    map[string]struct{}
 }
@@ -147,6 +149,17 @@ func (r *redactor) scrub(s string) string {
 	return s
 }
 
+// scrubUnstructured is the single sanitizer for a free-text scalar or blob
+// before it is embedded in any bug-report rendering. In addition to scrub's
+// credential/path policy, it removes every known representation of a session
+// title. Keeping this separate from scrub is intentional: scrub also runs over
+// already-encoded JSON documents, where treating a short title such as "id" as
+// bare text would rewrite structural keys. Call this while the value is still a
+// value; all later text/JSON renderings then inherit the safe form.
+func (r *redactor) scrubUnstructured(s string) string {
+	return r.scrub(r.scrubSessionTitles(s))
+}
+
 // scrubLog scrubs the daemon log tail. On top of the standard scrub() pass it
 // redacts the free-text <title> in every af_<hash>_<title> tmux session name and
 // any bare session title the log prints, so the verbatim log blob can't leak the
@@ -166,15 +179,23 @@ func (r *redactor) scrubLog(s string) string {
 			s = strings.ReplaceAll(s, name, tmuxPrefixMarker)
 		}
 	}
-	// Bare raw titles the log prints verbatim (e.g. via a %q-formatted Title).
-	// Best-effort: only titles long enough to redact without mangling unrelated
-	// words, matched on word boundaries.
+	return r.scrubUnstructured(s)
+}
+
+// scrubSessionTitles removes exact Go-quoted forms of every known title, then
+// applies the conservative bare-title matcher. The quoted form is the important
+// invariant for task targets: daemon delivery logs and persisted delivery errors
+// both format them with %q. Matching strconv.Quote therefore covers every legal
+// title byte-for-byte, including short names that are unsafe to replace as bare
+// words and quotes/backslashes that %q escapes (#2238 review).
+func (r *redactor) scrubSessionTitles(s string) string {
 	for title := range r.titles {
+		s = strings.ReplaceAll(s, strconv.Quote(title), strconv.Quote(redactedMarker))
 		if re := bareTitleRegexp(title); re != nil {
 			s = re.ReplaceAllString(s, redactedMarker)
 		}
 	}
-	return r.scrub(s)
+	return s
 }
 
 // tmuxPrefixMarker is the redaction of an af tmux session name whose title
@@ -188,11 +209,11 @@ func redactAFTmuxTitle(match string) string {
 	return match[:12] + redactedMarker
 }
 
-// bareTitleRegexp compiles a boundary-anchored matcher for a bare session title,
-// or nil when the title is too short (< 4 chars) to redact without risking
-// mangling unrelated log text. Best-effort by design — the tmux-name redaction
-// above is the primary defense; this catches raw titles the log prints outside a
-// name.
+// bareTitleRegexp compiles a boundary-anchored matcher for any non-empty bare
+// session title. Short titles can collide with ordinary words, but silently
+// publishing a known secret is worse than losing some diagnostic prose. Exact
+// Go-quoted matching above handles the common short-title path without that
+// collateral; this matcher closes raw %s-style log paths too (#2238 review).
 //
 // A `\b` anchor is only emitted on the edge where the title's own boundary
 // character is a word char ([A-Za-z0-9_]); `\b` matches only at a word↔non-word
@@ -203,7 +224,7 @@ func redactAFTmuxTitle(match string) string {
 // self-delimiting and needs no anchor.
 func bareTitleRegexp(title string) *regexp.Regexp {
 	title = strings.TrimSpace(title)
-	if len(title) < 4 {
+	if title == "" {
 		return nil
 	}
 	var left, right string
@@ -242,7 +263,8 @@ func (r *redactor) noteSession(d *session.InstanceData) {
 	}
 }
 
-// noteTitle records one raw session title for scrubLog, skipping blanks.
+// noteTitle records one raw session title for structured-string and log
+// scrubbing, skipping blanks.
 func (r *redactor) noteTitle(title string) {
 	if strings.TrimSpace(title) == "" {
 		return
@@ -538,9 +560,9 @@ func redactInstanceData(d *session.InstanceData) {
 
 // redactedTask is the structural, secret-free projection of a task.Task. The
 // prompt and watch command — both free-text that can carry secrets — collapse
-// to a marker (and a boolean recording that one was present); everything else
-// is scheduling metadata safe to keep. ProjectPath survives here and is
-// scrubbed for $HOME/username by the text pass.
+// to a marker (and a boolean recording that one was present). LastRunStatus is
+// kept for diagnostics after known session titles are removed. ProjectPath
+// survives here and is scrubbed for $HOME/username by the text pass.
 type redactedTask struct {
 	ID            string `json:"id"`
 	Name          string `json:"name,omitempty"`
@@ -568,7 +590,7 @@ func (r *redactor) redactTask(t task.Task) redactedTask {
 		ProjectPath:   t.ProjectPath,
 		Program:       t.Program,
 		Enabled:       t.Enabled,
-		LastRunStatus: t.LastRunStatus,
+		LastRunStatus: r.scrubUnstructured(t.LastRunStatus),
 	}
 	if t.TargetSession != "" {
 		rt.TargetSession = redactedMarker

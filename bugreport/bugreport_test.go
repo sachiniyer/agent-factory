@@ -218,6 +218,50 @@ func TestRedactTaskDropsTargetSession(t *testing.T) {
 	}
 }
 
+// TestScrubLogRedactsShortTaskTarget is the first #2238 review regression. A
+// known three-byte title must be removed in both the task's %q log form and any
+// raw %s-style line; privacy cannot silently turn off below a length threshold.
+func TestScrubLogRedactsShortTaskTarget(t *testing.T) {
+	const target = "VIP"
+	r := &redactor{}
+	r.redactTask(task.Task{TargetSession: target})
+	logText := fmt.Sprintf("delivered to target session %q\nstarted as instance %s", target, target)
+
+	out := r.scrubLog(logText)
+
+	mustNotContain(t, "daemon log", out, target, fmt.Sprintf("%q", target))
+	mustContain(t, "daemon log", out, redactedMarker)
+}
+
+// TestScrubLogRedactsEscapedTaskTarget is the second #2238 review regression.
+// strconv.Quote must mirror the daemon's %q encoding so quotes and backslashes
+// cannot make the registered raw title miss its rendered representation.
+func TestScrubLogRedactsEscapedTaskTarget(t *testing.T) {
+	const target = `Confidential "Deal" \\ Alpha`
+	r := &redactor{}
+	r.redactTask(task.Task{TargetSession: target})
+	quoted := fmt.Sprintf("%q", target)
+
+	out := r.scrubLog("delivered to target session " + quoted)
+
+	mustNotContain(t, "daemon log", out, target, quoted)
+	mustContain(t, "daemon log", out, redactedMarker)
+}
+
+// TestRedactTaskScrubsTargetFromFailedRunStatus is the third #2238 review
+// regression. LastRunStatus is structured task data, not a log blob, but both
+// must cross the same unstructured-text sanitizer before rendering.
+func TestRedactTaskScrubsTargetFromFailedRunStatus(t *testing.T) {
+	const target = `Confidential "Deal" Alpha`
+	r := &redactor{}
+	status := fmt.Sprintf("errored: failed to deliver prompt to target session %q: connection reset", target)
+
+	got := r.redactTask(task.Task{TargetSession: target, LastRunStatus: status})
+
+	mustNotContain(t, "last_run_status", got.LastRunStatus, target, fmt.Sprintf("%q", target))
+	mustContain(t, "last_run_status", got.LastRunStatus, "errored:", "connection reset", redactedMarker)
+}
+
 // TestRedactInstanceDataRedactsNonLoopbackWebTabURL pins the #1954 fix: a web
 // tab's URL is user-supplied (any http/https target passes NormalizeWebTabURL)
 // and can name internal infrastructure or a private repo, exactly the class of
