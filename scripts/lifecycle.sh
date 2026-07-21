@@ -169,7 +169,7 @@ lc_goos_goarch() {
 # current boundary as releases cut. Nothing here asserts a specific version —
 # the assertions are about daemon/client coherence, which is version-agnostic.
 lc_two_newest_stable() {
-    local auth=() page=1 json n stable=() tag
+    local auth=() page=1 json n stable=() tag response status curl_rc
     [ -n "${GITHUB_TOKEN:-}" ] && auth=(-H "Authorization: Bearer $GITHUB_TOKEN")
 
     # PAGINATE. A single ?per_page=100 fetch makes "100 is enough" a silent
@@ -178,8 +178,19 @@ lc_two_newest_stable() {
     # pages until two stables are found, and FAIL if the set cannot be
     # enumerated — never guess from page one and call it an upgrade matrix.
     while [ "$page" -le "${LC_RELEASE_MAX_PAGES:-10}" ]; do
-        json=$(curl -sSL --max-time 60 "${auth[@]}" \
-            "$LC_API_BASE?per_page=100&page=$page" 2>/dev/null) || return 1
+        curl_rc=0
+        response=$(curl -sSL --max-time 60 "${auth[@]}" \
+            --write-out $'\n%{http_code}' \
+            "$LC_API_BASE?per_page=100&page=$page" 2>/dev/null) || curl_rc=$?
+        # Transport failures and GitHub availability/quota responses mean the
+        # release boundary could not be verified. Status 2 is deliberately
+        # distinct from a malformed release set (status 1), which is a real
+        # gate failure. scenario_b records 2 as SKIP, never PASS (#2262).
+        [ "$curl_rc" = 0 ] || return 2
+        status="${response##*$'\n'}"
+        json="${response%$'\n'*}"
+        lc_release_http_unavailable "$status" && return 2
+        [ "$status" = 200 ] || return 1
         # A non-array (rate-limit object, error envelope) must not read as "no
         # more releases" — that would end the walk and look like exhaustion.
         [ "$(printf '%s' "$json" | jq -r 'type' 2>/dev/null)" = "array" ] || return 1
@@ -432,11 +443,15 @@ scenario_b() {
         return 1
     }
 
-    local tags old_tag new_tag
-    tags="$(lc_two_newest_stable)" || {
-        lc_fail "scenario-b/$mode: could not resolve the two newest stable releases (network? rate limit?)"
+    local tags old_tag new_tag tags_rc=0
+    tags="$(lc_two_newest_stable)" || tags_rc=$?
+    if [ "$tags_rc" = 2 ]; then
+        lc_skip "scenario-b/$mode: could not verify the release boundary — GitHub release API unavailable or rate-limited"
+        return 0
+    elif [ "$tags_rc" != 0 ]; then
+        lc_fail "scenario-b/$mode: could not resolve two usable stable releases"
         return 1
-    }
+    fi
     old_tag="$(printf '%s' "$tags" | cut -f1)"
     new_tag="$(printf '%s' "$tags" | cut -f2)"
     lc_say "upgrading across the real release boundary: $old_tag -> $new_tag"
@@ -540,10 +555,17 @@ scenario_b() {
     fi
 
     # --- the upgrade ---------------------------------------------------------
-    lc_do_upgrade "$mode" "$bin" "$home" "$repo" "$new_tag" || {
+    local upgrade_rc=0
+    lc_do_upgrade "$mode" "$bin" "$home" "$repo" "$new_tag" || upgrade_rc=$?
+    if [ "$upgrade_rc" = 2 ]; then
+        lc_skip "scenario-b/$mode: could not verify the upgrade — GitHub release lookup unavailable or rate-limited"
+        lc_teardown_home "$home" "$supervised"
+        return 0
+    elif [ "$upgrade_rc" != 0 ]; then
         lc_fail "scenario-b/$mode: the upgrade step itself failed"
+        lc_teardown_home "$home" "$supervised"
         return 1
-    }
+    fi
 
     # Fault injection: leave a session in a state that is NOT healthy, to prove
     # assertion 5 can actually FIRE. The check it replaced tested status/liveness
@@ -631,18 +653,19 @@ scenario_b() {
 
     # 4. if a unit was installed, it is STILL the supervisor.
     if [ "$supervised" = yes ]; then
-        lc_assert_eq "active" "$(lc_unit_active)" "assertion 4: the unit is still active"
+        lc_assert_eq "active" "$(lc_unit_active)" \
+            "scenario-b/$mode assertion 4: the unit is still active"
         lc_assert_eq "true" "$(lc_status_field "$bin" '.data.autostart_unit')" \
-            "assertion 4: af still sees the autostart unit"
+            "scenario-b/$mode assertion 4: af still sees the autostart unit"
         local unit_pid
         unit_pid="$(lc_unit_main_pid)"
         # The demotion this catches: a daemon still runs and still answers, but
         # it is an ad-hoc child systemd does not own — the unit's MainPID stops
         # matching the daemon that is actually serving (#796).
         if [ -n "$after_pid" ] && [ "$unit_pid" = "$after_pid" ]; then
-            lc_pass "assertion 4: the running daemon IS the unit's child (MainPID=$unit_pid) — not demoted"
+            lc_pass "scenario-b/$mode assertion 4: the running daemon IS the unit's child (MainPID=$unit_pid) — not demoted"
         else
-            lc_fail "assertion 4: daemon DEMOTED to an ad-hoc child (unit MainPID=$unit_pid, running daemon=$after_pid, was $before_unit_pid)"
+            lc_fail "scenario-b/$mode assertion 4: daemon DEMOTED to an ad-hoc child (unit MainPID=$unit_pid, running daemon=$after_pid, was $before_unit_pid)"
         fi
     fi
 
@@ -700,9 +723,14 @@ lc_do_upgrade() {
     case "$mode" in
     upgrade-cmd)
         lc_say "running: af upgrade"
-        local out
-        out="$("$bin" upgrade 2>&1)"
+        local out rc=0
+        out="$("$bin" upgrade 2>&1)" || rc=$?
         printf '%s\n' "$out" | sed 's/^/[lifecycle]   | /' >&2
+        if [ "$rc" != 0 ] && lc_release_lookup_unavailable "$out"; then
+            lc_say "GitHub release lookup was unavailable; upgrade behavior was not exercised"
+            return 2
+        fi
+        [ "$rc" = 0 ] || return 1
         printf '%s' "$out" | grep -q 'Upgraded successfully' || return 1
         ;;
     launch)
@@ -722,6 +750,12 @@ lc_do_upgrade() {
             if [ "$(lc_client_version "$bin")" = "${new_tag#v}" ]; then
                 ok=0
                 break
+            fi
+            if [ -f "$home/agent-factory.log" ] && \
+                lc_release_lookup_unavailable "$(tail -40 "$home/agent-factory.log" 2>/dev/null)"; then
+                lc_say "GitHub release lookup was unavailable; launch-time upgrade behavior was not exercised"
+                tmux kill-session -t lc-b 2>/dev/null
+                return 2
             fi
             sleep 0.5
         done
@@ -949,4 +983,6 @@ main() {
     lc_summary
 }
 
-main "$@"
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+    main "$@"
+fi

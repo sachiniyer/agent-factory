@@ -108,7 +108,7 @@ jobs:
         run: |
           sudo loginctl enable-linger "$USER"
           echo "XDG_RUNTIME_DIR=/run/user/$(id -u)" >> "$GITHUB_ENV"
-          for i in $(seq 1 30); do
+          for _ in $(seq 1 30); do
             [ -d "/run/user/$(id -u)" ] && break
             sleep 1
           done
@@ -137,19 +137,25 @@ jobs:
         # run of this workflow, which passed while reporting two FAILs.
         run: |
           set -o pipefail
-          bash scripts/lifecycle.sh all 2>&1 | tee "$RUNNER_TEMP/lifecycle.log"
+          # External release availability is an explicit SKIP, not a product
+          # failure. Scope that acknowledgement to the harness process; the
+          # independent step below still requires positive supervision proof.
+          AF_LIFECYCLE_ALLOW_PARTIAL=1 \
+            bash scripts/lifecycle.sh all 2>&1 | tee "$RUNNER_TEMP/lifecycle.log"
 
       - name: Verify the supervision assertion actually ran
         # The container leg legitimately skips assertion #4. This leg is the ONLY
-        # place it runs, so a SKIP here means the job proved nothing about the
-        # thing it exists for.
+        # place it runs, so require its positive proof records independently
+        # for both upgrade modes. Merely checking for no explicit assertion-4
+        # SKIP is vacuous when one mode stops before supervision.
         if: ${{ always() && github.event.inputs.inject == '' }}
         run: |
-          if grep -q 'SKIP.*assertion #4' "$RUNNER_TEMP/lifecycle.log"; then
-            echo "::error::assertion #4 (unit stays the supervisor) was SKIPPED on the native leg — this job exists to cover it. Check the systemd user manager setup."
+          . scripts/lifecycle-lib.sh
+          if ! lc_log_proves_supervision "$RUNNER_TEMP/lifecycle.log"; then
+            echo "::error::missing per-mode positive proof for assertion #4 (unit stays the supervisor) on the native leg. A Scenario B mode may have stopped before supervision or the systemd checks may not have completed."
             exit 1
           fi
-          echo "assertion #4 ran on this leg."
+          echo "all assertion #4 supervision checks passed for both upgrade modes on this leg."
 
       - name: Upload the run log
         if: always()
