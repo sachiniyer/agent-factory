@@ -27,11 +27,11 @@ func parseShellCommands(command string) ([][]string, error) {
 		if node == nil || walkErr != nil {
 			return false
 		}
+		if isOpaqueStdinSyntax(node) {
+			walkErr = errOpaqueStdin
+			return false
+		}
 		switch node := node.(type) {
-		case *syntax.BinaryCmd:
-			if node.Op == syntax.Pipe || node.Op == syntax.PipeAll {
-				walkErr = errOpaqueStdin
-			}
 		case *syntax.CallExpr:
 			words := make([]string, 0, len(node.Args))
 			for _, word := range node.Args {
@@ -51,10 +51,6 @@ func parseShellCommands(command string) ([][]string, error) {
 			// Even a literal assignment can change later command resolution
 			// (PATH, BASH_ENV, LD_PRELOAD, exported shell functions, and more).
 			walkErr = errUnsupportedShell
-		case *syntax.Redirect:
-			if node.Op == syntax.Hdoc || node.Op == syntax.DashHdoc || node.Op == syntax.WordHdoc {
-				walkErr = errOpaqueStdin
-			}
 		case *syntax.ArithmCmd, *syntax.CStyleLoop, *syntax.FuncDecl, *syntax.LetClause:
 			walkErr = errUnsupportedShell
 		}
@@ -64,6 +60,17 @@ func parseShellCommands(command string) ([][]string, error) {
 		return nil, walkErr
 	}
 	return commands, nil
+}
+
+func isOpaqueStdinSyntax(node syntax.Node) bool {
+	switch node := node.(type) {
+	case *syntax.BinaryCmd:
+		return node.Op == syntax.Pipe || node.Op == syntax.PipeAll
+	case *syntax.Redirect:
+		return node.Op == syntax.Hdoc || node.Op == syntax.DashHdoc || node.Op == syntax.WordHdoc
+	default:
+		return false
+	}
 }
 
 func literalWord(word *syntax.Word) (string, error) {
