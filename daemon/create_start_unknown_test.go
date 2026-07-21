@@ -2,10 +2,13 @@ package daemon
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"sync"
 	"testing"
+	"time"
 
+	"github.com/sachiniyer/agent-factory/agentproto"
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/session"
 )
@@ -38,6 +41,23 @@ func (b *unknownStartBackend) kills() int {
 	return b.killCalls
 }
 
+func nextCreateLifecycleEvent(t *testing.T, events <-chan agentproto.Event) (agentproto.EventType, session.InstanceData) {
+	t.Helper()
+	select {
+	case event := <-events:
+		var data session.InstanceData
+		if len(event.Data) > 0 {
+			if err := json.Unmarshal(event.Data, &data); err != nil {
+				t.Fatalf("unmarshal %s payload: %v", event.Type, err)
+			}
+		}
+		return event.Type, data
+	case <-time.After(3 * time.Second):
+		t.Fatal("no create lifecycle event published within the deadline")
+		return "", session.InstanceData{}
+	}
+}
+
 func TestCreateSession_UnknownStartDoesNotAttemptDestructiveCleanup(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 	backend := &unknownStartBackend{readyFakeBackend: readyFakeBackend{session.NewFakeBackend()}}
@@ -55,12 +75,24 @@ func TestCreateSession_UnknownStartDoesNotAttemptDestructiveCleanup(t *testing.T
 	if err != nil {
 		t.Fatalf("NewManager: %v", err)
 	}
+	_, events := manager.events.subscribe()
 
 	_, createErr := manager.CreateSession(context.Background(), CreateSessionRequest{
 		Title: "uncertain-start", RepoPath: repoPath, Program: "claude",
 	})
 	if createErr == nil {
 		t.Fatal("CreateSession reported success though startup state is unknown")
+	}
+	pendingType, pending := nextCreateLifecycleEvent(t, events)
+	if pendingType != agentproto.EventSessionUpdated || pending.InFlightOp != session.OpCreating {
+		t.Fatalf("first create event = (%s, %+v), want pending session.updated", pendingType, pending)
+	}
+	settledType, settled := nextCreateLifecycleEvent(t, events)
+	if settledType != agentproto.EventSessionUpdated {
+		t.Fatalf("retained uncertain create event = %s, want session.updated; session.killed removes the only cleanup handle from live clients", settledType)
+	}
+	if settled.ID != pending.ID || !settled.StartupStateUnknown || settled.InFlightOp != session.OpNone {
+		t.Fatalf("retained uncertain create did not settle the pending identity: pending=%+v settled=%+v", pending, settled)
 	}
 	if calls := backend.kills(); calls != 0 {
 		t.Fatalf("CreateSession attempted %d destructive cleanup(s) after startup already reported an unknown state; the same uncertain binding cannot prove the runtime absent", calls)

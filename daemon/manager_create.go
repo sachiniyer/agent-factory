@@ -88,18 +88,26 @@ func (m *Manager) CreateSession(ctx context.Context, req CreateSessionRequest) (
 	m.mu.Unlock()
 	m.publishEvent(agentproto.EventSessionUpdated, pending)
 
-	createSucceeded := false
+	// Tracks whether the provisional client row was replaced by any durable
+	// outcome, not merely whether CreateSession returns nil. Retained failures are
+	// real rows too: deleting their provisional identity from live clients would
+	// hide the only handle that can inspect or clean up the uncertain workspace.
+	creatingProjectionSettled := false
 	defer func() {
 		m.mu.Lock()
 		delete(m.pendingCreates, key)
 		m.mu.Unlock()
-		if !createSucceeded {
+		if !creatingProjectionSettled {
 			// Delete-class events are id-keyed, so a client removes exactly the
 			// provisional row even when another repo has the same title. A missed
 			// event is repaired by Snapshot, which no longer contains the pending row.
 			m.publishEvent(agentproto.EventSessionKilled, session.InstanceData{ID: pending.ID, Title: title})
 		}
 	}()
+	settleRetainedCreate := func(instance *session.Instance) {
+		creatingProjectionSettled = true
+		m.publishEvent(agentproto.EventSessionUpdated, instance.ToInstanceData())
+	}
 
 	repoStartLock := m.startLockForRepo(repo.ID)
 	repoStartLock.Lock()
@@ -141,6 +149,7 @@ func (m *Manager) CreateSession(ctx context.Context, req CreateSessionRequest) (
 				return session.InstanceData{}, fmt.Errorf("failed to start instance %q, and its startup outcome could not be determined safely — its workspace may still be on disk at %s and could not be recorded, so it must be inspected and cleaned up by hand: %w",
 					title, instance.GetWorktreePath(), errors.Join(serr, keepErr))
 			}
+			settleRetainedCreate(instance)
 			return session.InstanceData{}, fmt.Errorf("failed to start instance %q, and its startup outcome could not be determined safely, so its workspace was left in place; the session is recorded for inspection and no automatic cleanup will run: %w",
 				title, serr)
 		}
@@ -170,6 +179,7 @@ func (m *Manager) CreateSession(ctx context.Context, req CreateSessionRequest) (
 				return session.InstanceData{}, fmt.Errorf("failed to start instance %q, and its cleanup could not complete safely — its workspace may still be on disk at %s and could not be recorded, so it must be cleaned up by hand: %w",
 					title, instance.GetWorktreePath(), errors.Join(serr, killErr, keepErr))
 			}
+			settleRetainedCreate(instance)
 			return session.InstanceData{}, fmt.Errorf("failed to start instance %q, and its cleanup could not complete safely, so its workspace was left in place; the session is recorded and the daemon will keep retrying the cleanup — it will clear once that succeeds: %w",
 				title, errors.Join(serr, killErr))
 		}
@@ -205,7 +215,7 @@ func (m *Manager) CreateSession(ctx context.Context, req CreateSessionRequest) (
 		return session.InstanceData{}, persistErr
 	}
 	m.captureAgentConversationAsync(repo.ID, key, instance, conversationCapture)
-	createSucceeded = true
+	creatingProjectionSettled = true
 	// Publish from the Manager, not only the control-server wrapper: task delivery
 	// and root-agent ensure call Manager.CreateSession directly. They announced the
 	// same pending row above and therefore must settle it on the same events plane.

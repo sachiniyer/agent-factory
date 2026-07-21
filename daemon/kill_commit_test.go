@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sachiniyer/agent-factory/agentproto"
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/session/git"
@@ -393,6 +394,7 @@ func TestCreateSession_UnsafeCleanup_KeepsTheRecordAndTheTitle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewManager: %v", err)
 	}
+	_, events := manager.events.subscribe()
 
 	_, cerr := manager.CreateSession(context.Background(), CreateSessionRequest{
 		Title: "leftover", RepoPath: repoPath, Program: "claude",
@@ -402,6 +404,17 @@ func TestCreateSession_UnsafeCleanup_KeepsTheRecordAndTheTitle(t *testing.T) {
 	}
 	if !strings.Contains(cerr.Error(), "recorded") {
 		t.Fatalf("the error must tell the user the session was preserved so they can act on it: %v", cerr)
+	}
+	pendingType, pending := nextCreateLifecycleEvent(t, events)
+	if pendingType != agentproto.EventSessionUpdated || pending.InFlightOp != session.OpCreating {
+		t.Fatalf("first create event = (%s, %+v), want pending session.updated", pendingType, pending)
+	}
+	settledType, settled := nextCreateLifecycleEvent(t, events)
+	if settledType != agentproto.EventSessionUpdated {
+		t.Fatalf("retained failed create event = %s, want session.updated; session.killed hides the cleanup tombstone from live clients", settledType)
+	}
+	if settled.ID != pending.ID || !settled.UserKilled || settled.InFlightOp != session.OpNone {
+		t.Fatalf("retained failed create did not settle the pending identity: pending=%+v settled=%+v", pending, settled)
 	}
 
 	// The leftovers must be addressable: a record holds the title, so the next
