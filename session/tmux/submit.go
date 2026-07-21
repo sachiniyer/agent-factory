@@ -27,13 +27,14 @@ var (
 	emptyPromptDrain = 500 * time.Millisecond
 )
 
-// minDistinctiveTail is the shortest tail treated as self-evidently distinctive.
-// A very short prompt ("ok", "y") yields a tail that unrelated pane churn could
-// plausibly emit, so a single sighting is weak evidence. Below this length the
-// delivery check additionally requires the tail to be seen in TWO consecutive
-// captures, so a one-frame coincidence cannot confirm delivery early and let
-// Enter race the paste after all.
-const minDistinctiveTail = 8
+// minDistinctiveFragment is the shortest payload fragment treated as
+// self-evidently prompt-specific. A very short prompt ("ok", "y") yields text
+// that unrelated pane churn could plausibly emit, so a single completion
+// sighting is weak evidence and cannot serve as a render witness. Below this
+// length the delivery check additionally requires the completion to be seen in
+// TWO consecutive captures, so a one-frame coincidence cannot confirm delivery
+// early and let Enter race the paste after all.
+const minDistinctiveFragment = 8
 
 // deliveryOutcome is deliberately THREE-valued. "The pane did not show the
 // prompt" is an observed absence only when the terminal capture proves THIS
@@ -381,10 +382,13 @@ func noteClearedDraft(sessionName, before, after string) {
 // that this same payload began rendering even when the tail never arrived — the
 // high-signal #1982 truncation case.
 //
-// Short prompts have no disjoint pair and therefore cannot produce a terminal
-// negative. That is intentional: seeing none of a short prompt does not prove
-// the pane chose to render it. Positive delivery can still be confirmed by the
-// complete prompt, with the existing two-capture rule for weak short strings.
+// Prefer a 32-rune completion and a 24-rune prefix. For prompts longer than the
+// completion but shorter than the preferred pair, shorten the completion only
+// enough to reserve a distinctive prefix: otherwise a 33–55-rune payload could
+// visibly render prompt-specific text yet lose #1982's terminal negative merely
+// because the preferred pair does not fit. Prompts of 32 runes or fewer keep
+// their entire text as the completion and therefore cannot produce a terminal
+// negative. The existing two-capture rule still protects weak short strings.
 func newDeliveryProbe(text string) deliveryProbe {
 	n := []rune(normalizeDelivery(text))
 	const (
@@ -395,13 +399,23 @@ func newDeliveryProbe(text string) deliveryProbe {
 		return deliveryProbe{}
 	}
 
-	completion := n
-	if len(completion) > completionRunes {
-		completion = completion[len(completion)-completionRunes:]
+	completionLen := len(n)
+	availablePrefix := 0
+	if len(n) > completionRunes {
+		completionLen = completionRunes
+		availablePrefix = len(n) - completionLen
+		if availablePrefix < minDistinctiveFragment {
+			completionLen = len(n) - minDistinctiveFragment
+			availablePrefix = minDistinctiveFragment
+		}
 	}
-	probe := deliveryProbe{completion: string(completion)}
-	if len(n) >= completionRunes+witnessRunes {
-		probe.renderWitness = string(n[:witnessRunes])
+
+	probe := deliveryProbe{completion: string(n[len(n)-completionLen:])}
+	if availablePrefix >= minDistinctiveFragment {
+		if availablePrefix > witnessRunes {
+			availablePrefix = witnessRunes
+		}
+		probe.renderWitness = string(n[:availablePrefix])
 	}
 	return probe
 }
@@ -509,9 +523,9 @@ func (t *TmuxSession) waitForPasteDelivered(probe deliveryProbe) deliveryObserva
 	deadline := time.Now().Add(pasteDeliveryMaxWait)
 	streak := 0
 	// A short tail is weak evidence, so require two consecutive sightings before
-	// trusting it (see minDistinctiveTail).
+	// trusting it (see minDistinctiveFragment).
 	needed := 1
-	if len([]rune(probe.completion)) < minDistinctiveTail {
+	if len([]rune(probe.completion)) < minDistinctiveFragment {
 		needed = 2
 	}
 	lastObservation := deliveryObservation{outcome: deliveryCouldNotObserve}

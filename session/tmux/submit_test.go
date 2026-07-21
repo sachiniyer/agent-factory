@@ -645,6 +645,68 @@ func TestMissingPromptAfterPromptSpecificRenderingStaysLoud(t *testing.T) {
 	require.NotContains(t, got, "may be unsubmitted")
 }
 
+// TestMediumPromptPartialRenderingStaysLoud is the Codex review fail-first.
+// A medium prompt can still provide two disjoint, distinctive fragments even
+// though a fixed 32-rune completion tail leaves less than the preferred 24-rune
+// prefix. Seeing that prompt-specific prefix newly render must preserve #1982's
+// terminal negative instead of silently becoming could-not-observe.
+func TestMediumPromptPartialRenderingStaysLoud(t *testing.T) {
+	defer withPasteDeliveryTiming(20*time.Millisecond, time.Millisecond)()
+	errors := captureErrorLog(t)
+	pasted := false
+	prompt := "PFX12345" + strings.Repeat("completion", 3)
+	require.Equal(t, 38, len([]rune(normalizeDelivery(prompt))))
+
+	cmdExec := cmd_test.MockCmdExec{
+		RunFunc: func(c *exec.Cmd) error {
+			if strings.Contains(strings.Join(c.Args, " "), "paste-buffer") {
+				pasted = true
+			}
+			return nil
+		},
+		OutputFunc: func(*exec.Cmd) ([]byte, error) {
+			if pasted {
+				return []byte("╭─ composer ─╮\n│ > PFX12345 │\n╰────────────╯"), nil
+			}
+			return []byte("╭─ composer ─╮\n│ >          │\n╰────────────╯"), nil
+		},
+	}
+	session := newTmuxSession("af_proj", ProgramClaude, NewMockPtyFactory(t), cmdExec)
+
+	require.NoError(t, session.SendKeysCommand(prompt))
+	require.Contains(t, errors.String(), "prompt delivery observed absent",
+		"a newly rendered prompt-specific prefix must remain loud even when the prompt is shorter than the preferred witness pair")
+}
+
+func TestDeliveryProbeReservesTwoDistinctiveFragments(t *testing.T) {
+	tests := []struct {
+		name           string
+		promptRunes    int
+		wantCompletion int
+		wantWitness    int
+	}{
+		{name: "short prompt keeps full completion", promptRunes: 15, wantCompletion: 15},
+		{name: "completion-sized prompt stays conservative", promptRunes: 32, wantCompletion: 32},
+		{name: "lower reviewed range", promptRunes: 33, wantCompletion: 25, wantWitness: 8},
+		{name: "full completion fits", promptRunes: 40, wantCompletion: 32, wantWitness: 8},
+		{name: "upper reviewed range", promptRunes: 55, wantCompletion: 32, wantWitness: 23},
+		{name: "preferred pair", promptRunes: 56, wantCompletion: 32, wantWitness: 24},
+		{name: "long prompt caps both fragments", promptRunes: 100, wantCompletion: 32, wantWitness: 24},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			probe := newDeliveryProbe(strings.Repeat("x", tt.promptRunes))
+			require.Equal(t, tt.wantCompletion, len([]rune(probe.completion)))
+			require.Equal(t, tt.wantWitness, len([]rune(probe.renderWitness)))
+			require.LessOrEqual(t,
+				len([]rune(probe.completion))+len([]rune(probe.renderWitness)),
+				tt.promptRunes,
+				"the completion and render witness must remain disjoint")
+		})
+	}
+}
+
 func TestFailedPostClearCaptureKeepsPreClearBaseline(t *testing.T) {
 	defer withPasteDeliveryTiming(10*time.Millisecond, time.Millisecond)()
 	errors := captureErrorLog(t)
