@@ -2,6 +2,8 @@ package daemon
 
 import (
 	"fmt"
+	"path/filepath"
+	"strings"
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/session"
@@ -57,6 +59,10 @@ type ListBackendsRequest struct {
 type BackendOption struct {
 	// Name is the wire value: what a client sends back as CreateSessionRequest.Backend.
 	Name string `json:"name"`
+	// Label is the user-facing name clients render. It normally matches Name, but
+	// the hook backend names the remote sandbox launcher the repo configured while
+	// retaining "hook" as the literal CLI/config key.
+	Label string `json:"label"`
 	// Status is the checked answer; see BackendAvailability.
 	Status BackendAvailability `json:"status"`
 	// Reason is the actionable, user-facing explanation whenever Status is not
@@ -137,7 +143,7 @@ func backendCatalog(names []string, cfg *config.ResolvedConfig, cfgErr error, re
 // fabricated finding: docker.image might be set perfectly well in a file with a
 // stray comma elsewhere. The user needs to hear about the comma.
 func backendOptionFor(kind session.BackendKind, cfg *config.ResolvedConfig, cfgErr error, repoRoot string) BackendOption {
-	opt := BackendOption{Name: string(kind)}
+	opt := BackendOption{Name: string(kind), Label: backendLabel(kind, cfg)}
 
 	if cfgErr != nil {
 		// local is the one backend that reads nothing from the repo config, so an
@@ -160,6 +166,24 @@ func backendOptionFor(kind session.BackendKind, cfg *config.ResolvedConfig, cfgE
 	}
 	opt.Status = BackendAvailable
 	return opt
+}
+
+// backendLabel turns the daemon's resolved repo config into presentation text so
+// every client describes a backend the same way. "hook" is an implementation key;
+// the configured launcher's basename is the useful identity. The key stays visible
+// because users still select it through `--backend hook` and `backend = "hook"`.
+func backendLabel(kind session.BackendKind, cfg *config.ResolvedConfig) string {
+	if kind != session.BackendHook {
+		return string(kind)
+	}
+
+	if cfg != nil && cfg.RemoteHooks != nil {
+		launcher := filepath.Base(strings.TrimSpace(cfg.RemoteHooks.LaunchCmd))
+		if launcher != "" && launcher != "." {
+			return fmt.Sprintf("Remote sandbox · %s (hook)", launcher)
+		}
+	}
+	return "Remote sandbox (hook)"
 }
 
 // defaultFor reports the backend an unspecified create resolves to, and whether

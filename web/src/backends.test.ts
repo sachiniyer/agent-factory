@@ -15,10 +15,10 @@ function catalog(over: Partial<BackendCatalog> = {}): BackendCatalog {
     default: "local",
     default_status: "available",
     backends: [
-      { name: "local", status: "available" },
-      { name: "docker", status: "unavailable", reason: "backend=docker requires docker.image to be set in this repo's .agent-factory/config.json" },
-      { name: "ssh", status: "unavailable", reason: "backend=ssh requires ssh.host to be set in this repo's .agent-factory/config.json" },
-      { name: "hook", status: "unavailable", reason: "backend=hook requires remote_hooks to be configured" },
+      { name: "local", label: "local", status: "available" },
+      { name: "docker", label: "docker", status: "unavailable", reason: "backend=docker requires docker.image to be set in this repo's .agent-factory/config.json" },
+      { name: "ssh", label: "ssh", status: "unavailable", reason: "backend=ssh requires ssh.host to be set in this repo's .agent-factory/config.json" },
+      { name: "hook", label: "Remote sandbox (hook)", status: "unavailable", reason: "backend=hook requires remote_hooks to be configured" },
     ],
     ...over,
   };
@@ -43,8 +43,8 @@ test("the picker offers every backend the daemon lists, in the daemon's order", 
 test("a backend the web has never heard of is offered without a web change", () => {
   const withNewBackend = catalog({
     backends: [
-      { name: "local", status: "available" },
-      { name: "fargate", status: "available" },
+      { name: "local", label: "local", status: "available" },
+      { name: "fargate", label: "fargate", status: "available" },
     ],
   });
 
@@ -73,7 +73,7 @@ test("an unconfigured backend is offered, explained, and blocked from submitting
 
 test("a configured backend is selectable with nothing to explain", () => {
   const choices = backendChoices(
-    catalog({ backends: [{ name: "docker", status: "available" }] }),
+    catalog({ backends: [{ name: "docker", label: "docker", status: "available" }] }),
   );
 
   const docker = choices.find((c) => c.value === "docker");
@@ -84,10 +84,23 @@ test("a configured backend is selectable with nothing to explain", () => {
 });
 
 test("the repo default is labelled with the backend it resolves to", () => {
-  const choices = backendChoices(catalog({ default: "docker", backends: [{ name: "docker", status: "available" }] }));
+  const choices = backendChoices(catalog({ default: "docker", backends: [{ name: "docker", label: "docker", status: "available" }] }));
 
   assert.equal(choices[0].value, REPO_DEFAULT, "the default choice always sends nothing");
   assert.equal(choices[0].label, "Repo default (docker)", "a repo that defaults to docker says so, so the user need not pick docker to get it");
+});
+
+test("the picker renders the daemon's repo-derived backend label", () => {
+  const hook = {
+    name: "hook",
+    label: "Remote sandbox · coder-launch.sh (hook)",
+    status: "available",
+  } satisfies BackendCatalog["backends"][number];
+  const choices = backendChoices(catalog({ default: "hook", backends: [hook] }));
+
+  assert.equal(choices[0].label, "Repo default (Remote sandbox · coder-launch.sh (hook))");
+  assert.equal(choices[1].value, "hook", "the CLI/config key stays the submitted value");
+  assert.equal(choices[1].label, hook.label, "the web renders the daemon's label instead of its internal key");
 });
 
 test("a repo whose declared default is unconfigured is explained, not silently broken", () => {
@@ -117,8 +130,8 @@ test("an unknown backend is never offered as usable, and says why", () => {
   const choices = backendChoices(
     catalog({
       backends: [
-        { name: "local", status: "available" },
-        { name: "docker", status: "unknown", reason: "cannot tell whether this repo can use backend=docker: its .agent-factory/config.toml could not be read (unexpected comma)" },
+        { name: "local", label: "local", status: "available" },
+        { name: "docker", label: "docker", status: "unknown", reason: "cannot tell whether this repo can use backend=docker: its .agent-factory/config.toml could not be read (unexpected comma)" },
       ],
     }),
   );

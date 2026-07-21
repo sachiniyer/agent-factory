@@ -2891,7 +2891,7 @@ test.describe("create → kill (one session, two flows)", () => {
     // "repo default"-only placeholder the field is built with.
     await expect(backendSelect.locator("option")).not.toHaveCount(1, { timeout: 30_000 });
     await expect(backendSelect.locator("option")).toHaveText(
-      [/^Repo default \(local\)$/, "local", "docker", "ssh", "hook"],
+      [/^Repo default \(local\)$/, "local", "docker", "ssh", "Remote sandbox · coder-launch.sh (hook)"],
       { timeout: 30_000 },
     );
     // The mock repo configures no docker.image. Picking docker must state the missing
@@ -2901,6 +2901,12 @@ test.describe("create → kill (one session, two flows)", () => {
     await backendSelect.selectOption("docker");
     await expect(modal.locator(".af-modal-hint")).toHaveText(/docker\.image/);
     await expect(modal.locator("button.af-primary")).toBeDisabled();
+
+    // The repo's versioned remote_hooks config is available, and the option names
+    // its launcher while retaining "hook" as the submitted CLI/config key.
+    await backendSelect.selectOption("hook");
+    await expect(modal.locator(".af-modal-hint")).toHaveText("");
+    await expect(modal.locator("button.af-primary")).toBeEnabled();
 
     // Back to the repo default: the notice clears, Create is live again, and the
     // submit below sends NO backend — so this create stays local.

@@ -74,6 +74,7 @@ func TestListBackends_OffersEverySupportedBackend(t *testing.T) {
 	names := make([]string, 0, len(resp.Backends))
 	for _, opt := range resp.Backends {
 		names = append(names, opt.Name)
+		assert.NotEmptyf(t, opt.Label, "%s must carry a user-facing label", opt.Name)
 	}
 	assert.Equal(t, config.SupportedBackends, names, "the catalog is the canonical enum, in canonical order")
 	// The RPC feeds the canonical enum straight into the catalog builder and does no
@@ -240,6 +241,43 @@ func TestListBackends_HookAvailableWhenCommandsResolve(t *testing.T) {
 	assert.Empty(t, opt.Reason)
 }
 
+// TestListBackends_HookLabelNamesConfiguredLauncher is the regression for #2189:
+// "hook" describes af's plumbing, not the remote sandbox a repo configured. The
+// daemon owns the resolved repo config, so its wire response must carry the human
+// label rather than making each client reverse-engineer launch_cmd independently.
+func TestListBackends_HookLabelNamesConfiguredLauncher(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	stubLookPath(t)
+	repo := setupControlRepo(t)
+	writeRepoBackendConfig(t, repo, map[string]any{
+		"remote_hooks": map[string]any{
+			"launch_cmd": "./infra/coder-launch.sh",
+			"delete_cmd": "./infra/coder-delete.sh",
+		},
+	})
+
+	// Decode the public JSON shape rather than reaching for a Go field that the
+	// old response did not have. That lets this regression compile against the
+	// broken implementation and fail on the actual missing wire contract.
+	blob, err := json.Marshal(listBackends(t, repo))
+	require.NoError(t, err)
+	var wire struct {
+		Backends []struct {
+			Name  string `json:"name"`
+			Label string `json:"label"`
+		} `json:"backends"`
+	}
+	require.NoError(t, json.Unmarshal(blob, &wire))
+
+	for _, opt := range wire.Backends {
+		if opt.Name == config.BackendHook {
+			assert.Equal(t, "Remote sandbox · coder-launch.sh (hook)", opt.Label)
+			return
+		}
+	}
+	t.Fatalf("backend %q missing from the catalog %+v", config.BackendHook, wire.Backends)
+}
+
 // TestListBackends_EmptyHookCommandIsNotAvailable: remote_hooks present but
 // launch_cmd empty. RemoteHooks.Validate is what create runs, so reusing it here is
 // what stops "configured" from ever again meaning merely "the section exists".
@@ -322,6 +360,7 @@ func TestListBackends_NewBackendReachesClientsWithNoClientChange(t *testing.T) {
 
 	fargate := catalog[len(catalog)-1]
 	assert.Equal(t, "fargate", fargate.Name, "a newly added backend lands in enum order, not appended by a special case")
+	assert.Equal(t, "fargate", fargate.Label, "an unknown backend keeps its daemon-provided wire name as the label")
 	assert.Equal(t, BackendAvailable, fargate.Status, "a backend with no repo-config requirement is selectable as soon as it is in the enum")
 	assert.Empty(t, fargate.Reason)
 }
