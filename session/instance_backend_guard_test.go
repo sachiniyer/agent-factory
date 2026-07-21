@@ -21,6 +21,9 @@ import (
 //   - SetBackend / bindProvisionResult — the writers; both take i.mu.Lock.
 //   - AgentServer / reprovisionRemote / toInstanceDataLocked — read inside an
 //     i.mu section their callers established.
+//   - PreviewTabByID — snapshots the backend while its stable tab target is
+//     selected under i.mu, then performs the potentially blocking capture after
+//     releasing the lock.
 //   - FromInstanceData — a constructor. It populates a local *Instance that no
 //     other goroutine can observe yet, so there is nothing to synchronize with.
 var backendReadersUnderLock = map[string]bool{
@@ -31,6 +34,7 @@ var backendReadersUnderLock = map[string]bool{
 	"AgentServer":          true,
 	"reprovisionRemote":    true,
 	"toInstanceDataLocked": true,
+	"PreviewTabByID":       true,
 	"FromInstanceData":     true,
 }
 

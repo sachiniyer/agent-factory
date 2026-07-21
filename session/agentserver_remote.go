@@ -54,6 +54,11 @@ import (
 // starts a real `af agent-server` on loopback and drives it through here.
 type remoteAgentServer struct {
 	rc *remoteAgentClient
+	// inst owns the authoritative stable-id→ordinal roster for daemon-created
+	// remote runtimes. The in-sandbox protocol is ordinal-shaped, so PreviewByID
+	// holds inst's roster lock across the bounded REST capture (#2200). nil only
+	// for the transport-only NewRemoteAgentServer constructor used by integrations.
+	inst *Instance
 	// teardown reaps the sandbox the agent runs in AFTER the in-sandbox workspace
 	// is killed over REST (#1592 Phase 4 PR4): `docker rm -f` the container. nil
 	// for the PR2 out-of-process case (an `af agent-server` the test owns — nothing
@@ -132,6 +137,15 @@ func (s *remoteAgentServer) Snapshot() (Observation, error) {
 
 func (s *remoteAgentServer) Preview(tab int, full bool) (string, error) {
 	return s.rc.preview(tab, full)
+}
+
+func (s *remoteAgentServer) PreviewByID(tabID string, full bool) (string, error) {
+	if s.inst == nil {
+		return "", fmt.Errorf("remote session %q cannot resolve stable tab id %q without its owning instance", s.rc.title, tabID)
+	}
+	return s.inst.previewByIDAsOrdinal(tabID, func(tab int) (string, error) {
+		return s.rc.preview(tab, full)
+	})
 }
 
 // Alive asks the in-sandbox agent-server whether its agent is running. The error
@@ -277,6 +291,9 @@ func (s *deadRemoteAgentServer) Launch(bool) error                 { return s.er
 func (s *deadRemoteAgentServer) Expose() (StreamEndpoint, error)   { return StreamEndpoint{}, s.err() }
 func (s *deadRemoteAgentServer) Snapshot() (Observation, error)    { return Observation{}, s.err() }
 func (s *deadRemoteAgentServer) Preview(int, bool) (string, error) { return "", s.err() }
+func (s *deadRemoteAgentServer) PreviewByID(string, bool) (string, error) {
+	return "", s.err()
+}
 
 // Alive returns (false, err) = UNKNOWN, never an authoritative "the agent is gone":
 // there is no sandbox to answer, so a caller must not treat this false as proof of

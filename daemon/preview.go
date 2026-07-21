@@ -98,11 +98,11 @@ func (s *controlServer) Preview(req PreviewRequest, resp *PreviewResponse) error
 	if err != nil {
 		return err
 	}
-	// Address the capture by the stable tab id (#1738), or by name (#1948), when
-	// the client gives one: resolve it to the tab's CURRENT ordinal so a capture
-	// follows the tab across a reorder/close. The precedence — id, then name, then
-	// ordinal — is session.ResolveTabIndex's, shared with every other tab verb
-	// rather than restated here.
+	// Resolve the selector once, then carry the selected tab's stable identity all
+	// the way through AgentServer.PreviewByID. The precedence — id, then name, then
+	// ordinal — is session.ResolveTabIndex's, shared with every other tab verb;
+	// the resulting ordinal is used only to read the ID from this SAME snapshot.
+	// It is never applied to the live roster later (#2200).
 	//
 	// A non-empty id that no longer resolves is REFUSED as gone, NOT fallen back to
 	// req.Tab (#1779): the fallback previewed whatever tab had shifted into the
@@ -139,8 +139,16 @@ func (s *controlServer) Preview(req PreviewRequest, resp *PreviewResponse) error
 	case rerr != nil:
 		return rerr
 	}
-	content, err := as.Preview(tab, req.Full)
+	tabID := tabs[tab].ID
+	if tabID == "" {
+		return fmt.Errorf("session %q tab %d has no stable identity; reload the session before previewing it", req.Title, tab)
+	}
+	content, err := as.PreviewByID(tabID, req.Full)
 	if err != nil {
+		if errors.Is(err, session.ErrTabGone) {
+			resp.Gone, resp.TabGone = true, true
+			return nil
+		}
 		if errors.Is(err, tmux.ErrSessionGone) {
 			resp.Gone = true
 			return nil

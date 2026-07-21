@@ -86,7 +86,7 @@ func (i *Instance) AgentServer() AgentServer {
 			// teardown reaps the sandbox this session runs in (docker rm -f) after
 			// the remote Kill tears the in-sandbox workspace down — nil for the PR2
 			// out-of-process case (no sandbox to reap), set for a docker session.
-			i.agentSrv = &remoteAgentServer{rc: i.remoteClient, teardown: i.runtimeTeardown}
+			i.agentSrv = &remoteAgentServer{rc: i.remoteClient, inst: i, teardown: i.runtimeTeardown}
 		case backendIsRemoteWorkspace(i.backend):
 			// A remote-workspace backend (docker/ssh/hook) with NO live client:
 			// remoteClient is nil because the runtime wiring was torn down — a
@@ -165,6 +165,12 @@ func (s *localAgentServer) Preview(tab int, full bool) (string, error) {
 	return s.inst.PreviewTab(tab)
 }
 
+// PreviewByID binds directly to the tmux/backend target selected under the
+// instance lock. No ordinal crosses that lock boundary (#2200).
+func (s *localAgentServer) PreviewByID(tabID string, full bool) (string, error) {
+	return s.inst.PreviewTabByID(tabID, full)
+}
+
 // ctxPreviewBackend is the optional backend capability for a pane capture bound to
 // a context (the local tmux runtime). When the backend supports it, PreviewContext
 // threads ctx down to the capture so a cancelled readiness wait kills the in-flight
@@ -216,12 +222,10 @@ func (s *localAgentServer) TapEnter() {
 // panicking.
 func (s *localAgentServer) ensureBroker(tab int) (*ptyBroker, error) {
 	// Resolve the caller's ordinal to the tab's STABLE id (#1738) and the tmux it
-	// currently backs, under the instance lock, BEFORE taking s.mu — so the broker
-	// map key is the identity that follows the tab across a reorder/close, not the
-	// shifting ordinal. tabTmuxSession and TabIDAt each take i.mu; call them before
-	// s.mu (never nest s.mu → i.mu).
-	id, ok := s.inst.TabIDAt(tab)
-	ts := s.inst.tabTmuxSession(tab)
+	// currently backs in ONE instance-lock acquisition, BEFORE taking s.mu. Two
+	// lookups could pair b's ID with c's tmux if a close shifted the roster between
+	// them — then cache that wrong binding under b forever (#2200).
+	id, ts, ok := s.inst.tabTmuxTargetAt(tab)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.closed {

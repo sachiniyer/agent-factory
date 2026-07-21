@@ -61,6 +61,27 @@ func (i *Instance) RenameTab(idx int, requestedName string) (string, error) {
 
 	i.mu.Lock()
 	defer i.mu.Unlock()
+	return i.renameTabLocked(idx, base)
+}
+
+// RenameTabByID selects and renames the stable target under one write lock, so
+// a caller never applies an ordinal from an older roster to a different tab.
+func (i *Instance) RenameTabByID(tabID, requestedName string) (string, error) {
+	base := sanitizeTabName(requestedName)
+	if base == "" {
+		return "", fmt.Errorf("tab name %q has no usable characters: a name may contain only letters, digits, '_' and '-'", requestedName)
+	}
+
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	idx, exists := i.tabIndexByIDLocked(tabID)
+	if !exists {
+		return "", fmt.Errorf("session %q tab id %q: %w", i.Title, tabID, ErrTabGone)
+	}
+	return i.renameTabLocked(idx, base)
+}
+
+func (i *Instance) renameTabLocked(idx int, base string) (string, error) {
 	if idx < 0 || idx >= len(i.Tabs) {
 		return "", fmt.Errorf("tab cannot be renamed")
 	}
@@ -96,6 +117,21 @@ func (i *Instance) RenameTab(idx int, requestedName string) (string, error) {
 func (i *Instance) ReorderTab(from, to int) error {
 	i.mu.Lock()
 	defer i.mu.Unlock()
+	return i.reorderTabLocked(from, to)
+}
+
+// ReorderTabByID selects and moves the stable target under one write lock.
+func (i *Instance) ReorderTabByID(tabID string, to int) error {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	from, exists := i.tabIndexByIDLocked(tabID)
+	if !exists {
+		return fmt.Errorf("session %q tab id %q: %w", i.Title, tabID, ErrTabGone)
+	}
+	return i.reorderTabLocked(from, to)
+}
+
+func (i *Instance) reorderTabLocked(from, to int) error {
 	n := len(i.Tabs)
 	if from <= 0 || from >= n || to <= 0 || to >= n {
 		return fmt.Errorf("tab cannot be moved")

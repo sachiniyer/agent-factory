@@ -136,8 +136,9 @@ func (m *Manager) CreateTab(req CreateTabRequest) (string, string, error) {
 	data := instance.ToInstanceData()
 	if err := persistInstanceData(repoID, data); err != nil {
 		// Roll back the just-spawned tab so a persist failure does not leave a
-		// live tmux session that vanishes from the tab list on restart.
-		if closeErr := instance.CloseTab(instance.TabCount() - 1); closeErr != nil {
+		// live tmux session that vanishes from the tab list on restart. Carry the
+		// new tab's ID into rollback rather than assuming it is still the last slot.
+		if closeErr := instance.CloseTabByID(tab.ID); closeErr != nil {
 			log.WarningLog.Printf("CreateTab %q: rolling back unpersisted tab failed: %v", title, closeErr)
 		}
 		return "", "", fmt.Errorf("failed to persist new tab: %w", err)
@@ -225,8 +226,12 @@ func (m *Manager) CloseTab(req CloseTabRequest) (string, error) {
 	}
 
 	closedVSCode := tabs[idx].Kind == session.TabKindVSCode
+	targetID, err := stableTabTargetID(tabs[idx], title)
+	if err != nil {
+		return "", err
+	}
 
-	if err := instance.CloseTab(idx); err != nil {
+	if err := instance.CloseTabByID(targetID); err != nil {
 		return "", err
 	}
 

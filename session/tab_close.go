@@ -23,10 +23,41 @@ func (i *Instance) CloseTab(idx int) error {
 		i.mu.Unlock()
 		return fmt.Errorf("tab cannot be closed")
 	}
+	tab := i.removeTabLocked(idx)
+	i.mu.Unlock()
+	return i.closeRemovedTab(tab)
+}
+
+// CloseTabByID removes the tab with stable id, selecting and removing it in the
+// same critical section. An ordinal resolved from an earlier snapshot is never
+// applied to the live roster (#2200).
+func (i *Instance) CloseTabByID(tabID string) error {
+	i.mu.Lock()
+	idx, exists := i.tabIndexByIDLocked(tabID)
+	if !exists {
+		i.mu.Unlock()
+		return fmt.Errorf("session %q tab id %q: %w", i.Title, tabID, ErrTabGone)
+	}
+	if idx == 0 {
+		i.mu.Unlock()
+		return fmt.Errorf("tab cannot be closed")
+	}
+	tab := i.removeTabLocked(idx)
+	i.mu.Unlock()
+	return i.closeRemovedTab(tab)
+}
+
+// removeTabLocked detaches idx from the roster and returns the exact tab object
+// whose stream/process teardown must continue after i.mu is released.
+func (i *Instance) removeTabLocked(idx int) *Tab {
 	tab := i.Tabs[idx]
 	i.Tabs = append(i.Tabs[:idx], i.Tabs[idx+1:]...)
-	i.mu.Unlock()
+	return tab
+}
 
+// closeRemovedTab finishes the irreversible half outside i.mu: stream shutdown
+// and tmux teardown may block and both can acquire their own locks.
+func (i *Instance) closeRemovedTab(tab *Tab) error {
 	// End this tab's stream BEFORE its tmux dies — the same order localAgentServer
 	// .Kill uses for the session-wide case (brokers first, then the backend), and
 	// for the same reason: a subscriber should be told the stream is over rather

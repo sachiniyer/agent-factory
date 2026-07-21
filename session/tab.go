@@ -394,6 +394,21 @@ func ResolveTabIndex(tabs []*Tab, tabID, tabName string, tabIndex int) (int, err
 	return tabIndex, nil
 }
 
+// tabIndexByIDLocked resolves id against i.Tabs while the caller holds i.mu.
+// Returning an index is safe only inside that same critical section; callers
+// must finish selecting or mutating the target before releasing the lock.
+func (i *Instance) tabIndexByIDLocked(id string) (int, bool) {
+	if id == "" {
+		return 0, false
+	}
+	for idx, tab := range i.Tabs {
+		if tab.ID == id {
+			return idx, true
+		}
+	}
+	return 0, false
+}
+
 // TabIdentifiers renders a tab as the strings that help a user address it in an
 // error: its canonical Name, plus the label the UI shows when that differs.
 // Because the label is presentation-only and never accepted (TabMatches keys on

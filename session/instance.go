@@ -247,19 +247,6 @@ type Instance struct {
 	runtimeTeardown func() error
 }
 
-// tabTmuxSession returns the tmux session backing the tab at idx (0 is the agent
-// tab), or nil when the instance is not started, is remote, or idx is out of
-// range. It is the tab-aware binding point the clientless data plane subscribes
-// per pane (#1592 Phase 2 PR6). Takes i.mu, so callers must not already hold it.
-func (i *Instance) tabTmuxSession(idx int) *tmux.TmuxSession {
-	i.mu.RLock()
-	defer i.mu.RUnlock()
-	if !i.started {
-		return nil
-	}
-	return i.tabTmuxAtLocked(idx)
-}
-
 // tmuxLocked returns the agent tab's tmux session, or nil when the instance has
 // no agent tab yet (not started) or is remote. Callers must hold i.mu (read or
 // write).
@@ -333,6 +320,22 @@ func (i *Instance) TabIDAt(idx int) (string, bool) {
 		return "", false
 	}
 	return i.Tabs[idx].ID, true
+}
+
+// tabTmuxTargetAt resolves an ordinal to both the stable broker key and its tmux
+// target under one lock. Reading those in separate calls can pair one tab's ID
+// with a sibling's tmux when a close shifts the roster between the calls (#2200).
+func (i *Instance) tabTmuxTargetAt(idx int) (id string, ts *tmux.TmuxSession, exists bool) {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	if idx < 0 || idx >= len(i.Tabs) {
+		return "", nil, false
+	}
+	tab := i.Tabs[idx]
+	if !i.started {
+		return tab.ID, nil, true
+	}
+	return tab.ID, tab.tmux, true
 }
 
 // TabTmuxByID resolves a tab's stable id (#1738) DIRECTLY to the tmux session it
@@ -412,46 +415,9 @@ func (i *Instance) TabTargetByID(id string) (kind TabKind, url string, exists bo
 // for what the caller actually needs: an ordinal handed back to a SECOND lookup
 // reopens the close/reorder window this resolution is meant to close.
 func (i *Instance) TabIndexByID(id string) (int, bool) {
-	if id == "" {
-		return 0, false
-	}
 	i.mu.RLock()
 	defer i.mu.RUnlock()
-	for idx, t := range i.Tabs {
-		if t.ID == id {
-			return idx, true
-		}
-	}
-	return 0, false
-}
-
-// PreviewTab captures the detached content of the tab at idx. Returns ("", nil)
-// when the instance is not started or the tab has no live session, and
-// tmux.ErrSessionGone when the session vanished — mirroring Instance.Preview for
-// the agent tab so the UI can degrade gracefully. idx is the same 0-based index
-// the UI tab bar uses (0 is the agent tab; 1+ are shell/process tabs).
-func (i *Instance) PreviewTab(idx int) (string, error) {
-	i.mu.RLock()
-	started := i.started
-	ts := i.tabTmuxAtLocked(idx)
-	i.mu.RUnlock()
-	if !started || ts == nil {
-		return "", nil
-	}
-	return ts.CapturePaneContent()
-}
-
-// PreviewTabFullHistory captures the full scrollback of the tab at idx, used
-// when entering scroll mode. Same nil/started guards as PreviewTab.
-func (i *Instance) PreviewTabFullHistory(idx int) (string, error) {
-	i.mu.RLock()
-	started := i.started
-	ts := i.tabTmuxAtLocked(idx)
-	i.mu.RUnlock()
-	if !started || ts == nil {
-		return "", nil
-	}
-	return ts.CapturePaneContentWithOptions("-", "-")
+	return i.tabIndexByIDLocked(id)
 }
 
 // TabAlive reports whether the tab at idx has a live tmux session, as a LOSSY

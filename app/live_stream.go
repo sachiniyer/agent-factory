@@ -29,8 +29,8 @@ func (m *home) newTabPaneSource() ui.PreviewSource {
 			return "", nil
 		}
 		// Address the capture by the tab's stable id (#1738) so it can't grab the
-		// wrong tab after a reorder/close; the daemon falls back to the ordinal Tab
-		// when the id is empty or no longer resolves.
+		// wrong tab after a reorder/close. Only an empty id uses the legacy ordinal;
+		// a non-empty id that no longer resolves is refused, never fallen back.
 		tabID, _ := instance.TabIDAt(tab)
 		content, gone, err := fetch(daemon.PreviewRequest{Title: instance.Title, RepoID: repoID, Tab: tab, TabID: tabID, Full: full})
 		if err != nil {
