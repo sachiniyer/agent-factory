@@ -15,8 +15,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-
-	"github.com/sachiniyer/agent-factory/config"
 )
 
 const (
@@ -151,14 +149,22 @@ type RecoveryJob struct {
 	UnitPath string          `json:"unit_path,omitempty"`
 }
 
+// MetadataParentSnapshot preserves the permissions of a metadata file's
+// pre-existing parent directories so rollback never recreates them as 0755.
+type MetadataParentSnapshot struct {
+	Path string `json:"path"`
+	Mode uint32 `json:"mode"`
+}
+
 // MetadataSnapshot describes one rollback input. SnapshotPath is empty when
 // the metadata file did not exist at prepare time.
 type MetadataSnapshot struct {
-	Path         string `json:"path"`
-	Existed      bool   `json:"existed"`
-	Mode         uint32 `json:"mode,omitempty"`
-	SHA256       string `json:"sha256,omitempty"`
-	SnapshotPath string `json:"snapshot_path,omitempty"`
+	Path         string                   `json:"path"`
+	Existed      bool                     `json:"existed"`
+	Mode         uint32                   `json:"mode,omitempty"`
+	SHA256       string                   `json:"sha256,omitempty"`
+	SnapshotPath string                   `json:"snapshot_path,omitempty"`
+	Parents      []MetadataParentSnapshot `json:"parents,omitempty"`
 }
 
 // Journal is the fsynced recovery authority. Artifact paths are recorded for
@@ -274,11 +280,8 @@ func Prepare(plan Plan) (_ *Transaction, retErr error) {
 	}
 
 	root := upgradeRoot(home)
-	if err := os.MkdirAll(root, transactionDirMode); err != nil {
-		return nil, fmt.Errorf("create upgrade root: %w", err)
-	}
-	if err := os.Chmod(root, transactionDirMode); err != nil {
-		return nil, fmt.Errorf("secure upgrade root: %w", err)
+	if err := ensureDurableDirectory(home, root, transactionDirMode); err != nil {
+		return nil, fmt.Errorf("prepare upgrade root: %w", err)
 	}
 
 	preparationLock, err := acquireFileLock(filepath.Join(root, "prepare.lock"), false)
@@ -298,16 +301,14 @@ func Prepare(plan Plan) (_ *Transaction, retErr error) {
 
 	txnDir := transactionDir(home, plan.ID)
 	transactionsRoot := filepath.Dir(txnDir)
-	if err := os.MkdirAll(transactionsRoot, transactionDirMode); err != nil {
-		return nil, fmt.Errorf("create transactions root: %w", err)
+	if err := ensureDurableDirectory(root, transactionsRoot, transactionDirMode); err != nil {
+		return nil, fmt.Errorf("prepare transactions root: %w", err)
 	}
-	if err := os.Chmod(transactionsRoot, transactionDirMode); err != nil {
-		return nil, fmt.Errorf("secure transactions root: %w", err)
-	}
-	if err := os.Mkdir(txnDir, transactionDirMode); err != nil {
+	if err := createDurableDirectory(transactionsRoot, txnDir, transactionDirMode); err != nil {
 		if errors.Is(err, os.ErrExist) {
 			return nil, fmt.Errorf("upgrade transaction artifacts already exist for %q", plan.ID)
 		}
+		_ = os.Remove(txnDir)
 		return nil, fmt.Errorf("create transaction directory: %w", err)
 	}
 	published := false
@@ -322,6 +323,10 @@ func Prepare(plan Plan) (_ *Transaction, retErr error) {
 		}
 		_ = os.RemoveAll(txnDir)
 	}()
+	metadataDir := filepath.Join(txnDir, "metadata")
+	if err := createDurableDirectory(txnDir, metadataDir, transactionDirMode); err != nil {
+		return nil, fmt.Errorf("create metadata snapshot directory: %w", err)
+	}
 
 	for _, path := range []string{previousPath, candidatePath} {
 		if _, err := os.Lstat(path); err == nil {
@@ -332,14 +337,14 @@ func Prepare(plan Plan) (_ *Transaction, retErr error) {
 	}
 
 	mode := executableInfo.Mode().Perm()
-	if err := config.AtomicWriteFile(previousPath, previousBinary, mode); err != nil {
+	createdArtifacts = append(createdArtifacts, previousPath)
+	if err := durableAtomicWriteFile(previousPath, previousBinary, mode); err != nil {
 		return nil, fmt.Errorf("snapshot previous binary: %w", err)
 	}
-	createdArtifacts = append(createdArtifacts, previousPath)
-	if err := config.AtomicWriteFile(candidatePath, plan.Candidate, mode); err != nil {
+	createdArtifacts = append(createdArtifacts, candidatePath)
+	if err := durableAtomicWriteFile(candidatePath, plan.Candidate, mode); err != nil {
 		return nil, fmt.Errorf("stage candidate binary: %w", err)
 	}
-	createdArtifacts = append(createdArtifacts, candidatePath)
 
 	metadata, err := snapshotMetadata(home, txnDir, plan.MetadataPaths)
 	if err != nil {
@@ -369,6 +374,9 @@ func Prepare(plan Plan) (_ *Transaction, retErr error) {
 		return nil, fmt.Errorf("validate prepared journal: %w", err)
 	}
 	if err := persistJournal(activePath, journal); err != nil {
+		if _, statErr := os.Lstat(activePath); statErr == nil {
+			published = true
+		}
 		return nil, fmt.Errorf("publish upgrade journal: %w", err)
 	}
 	published = true
@@ -437,6 +445,10 @@ func (t *Transaction) Journal() Journal {
 	defer t.mu.Unlock()
 	journal := t.journal
 	journal.Metadata = append([]MetadataSnapshot(nil), t.journal.Metadata...)
+	for index := range journal.Metadata {
+		journal.Metadata[index].Parents = append(
+			[]MetadataParentSnapshot(nil), journal.Metadata[index].Parents...)
+	}
 	return journal
 }
 
@@ -524,7 +536,7 @@ func (t *Transaction) AuthorizeActivation(transactionID, nonce string) error {
 		return fmt.Errorf("upgrade recovery actor's supervisor_ready deadline expired at %s", status.Deadline.Format(time.RFC3339Nano))
 	}
 	approvalPath := filepath.Join(transactionDir(current.HomeDir, current.ID), "activation.approved")
-	if err := config.AtomicWriteFile(approvalPath, []byte(current.RecoveryNonce+"\n"), journalFileMode); err != nil {
+	if err := durableAtomicWriteFile(approvalPath, []byte(current.RecoveryNonce+"\n"), journalFileMode); err != nil {
 		return fmt.Errorf("persist upgrade activation approval: %w", err)
 	}
 	t.journal = current
@@ -605,7 +617,7 @@ func (t *Transaction) installCandidate() error {
 		if digest(previous) != t.journal.PreviousBinarySHA256 {
 			return errors.New("previous binary snapshot changed during install")
 		}
-		if err := config.AtomicWriteFile(
+		if err := durableAtomicWriteFile(
 			t.journal.ExecutablePath, candidate, os.FileMode(t.journal.ExecutableMode)); err != nil {
 			return fmt.Errorf("install candidate binary: %w", err)
 		}
@@ -669,10 +681,12 @@ func (t *Transaction) rollback() error {
 		return errors.New("cannot roll back a committed upgrade")
 	case PhaseRollingBack:
 		// Resume an interrupted restoration.
-	default:
+	case PhaseDaemonStopped, PhaseCandidateInstalled, PhaseCandidateStarting, PhaseCandidateValidating:
 		if err := t.persistPhaseLocked(PhaseRollingBack); err != nil {
 			return err
 		}
+	default:
+		return fmt.Errorf("cannot roll back upgrade from phase %s", t.journal.Phase)
 	}
 
 	if err := t.restoreLocked(); err != nil {
@@ -691,7 +705,7 @@ func (t *Transaction) restoreLocked() error {
 		if err != nil {
 			return fmt.Errorf("verify previous binary snapshot: %w", err)
 		}
-		if err := config.AtomicWriteFile(
+		if err := durableAtomicWriteFile(
 			t.journal.ExecutablePath, previous, os.FileMode(t.journal.ExecutableMode)); err != nil {
 			return fmt.Errorf("restore previous binary: %w", err)
 		}
@@ -709,22 +723,8 @@ func (t *Transaction) restoreLocked() error {
 
 	for index := t.journal.RollbackProgress.MetadataRestored; index < len(t.journal.Metadata); index++ {
 		metadata := t.journal.Metadata[index]
-		target := filepath.Join(t.journal.HomeDir, metadata.Path)
-		if err := ensureNoSymlinkParents(t.journal.HomeDir, target); err != nil {
-			return fmt.Errorf("validate rollback path %s: %w", metadata.Path, err)
-		}
-		if !metadata.Existed {
-			if err := os.Remove(target); err != nil && !errors.Is(err, os.ErrNotExist) {
-				return fmt.Errorf("restore absence of %s: %w", metadata.Path, err)
-			}
-		} else {
-			data, err := readAndVerify(metadata.SnapshotPath, metadata.SHA256)
-			if err != nil {
-				return fmt.Errorf("verify metadata snapshot %s: %w", metadata.Path, err)
-			}
-			if err := config.AtomicWriteFile(target, data, os.FileMode(metadata.Mode)); err != nil {
-				return fmt.Errorf("restore metadata %s: %w", metadata.Path, err)
-			}
+		if err := restoreMetadataEntry(t.journal.HomeDir, metadata); err != nil {
+			return err
 		}
 		journal := t.journal
 		journal.RollbackProgress.MetadataRestored = index + 1
@@ -738,47 +738,6 @@ func (t *Transaction) restoreLocked() error {
 		}
 	}
 	return nil
-}
-
-// Cleanup removes only paths re-derived from a validated terminal journal and
-// removes active.json last. A crash during cleanup therefore resumes cleanup;
-// it can never reinterpret a committed candidate as needing rollback.
-func (t *Transaction) cleanup() error {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	if t.journal.Phase != PhaseCommitted &&
-		t.journal.Phase != PhaseRolledBack &&
-		t.journal.Phase != PhaseAborted {
-		return fmt.Errorf("cannot clean up upgrade in phase %s", t.journal.Phase)
-	}
-
-	current, err := readJournal(activeJournalPath(t.journal.HomeDir))
-	if errors.Is(err, ErrNoActiveTransaction) {
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-	if err := validateJournal(t.journal.HomeDir, current); err != nil {
-		return fmt.Errorf("validate journal before cleanup: %w", err)
-	}
-	if current.ID != t.journal.ID || current.Phase != t.journal.Phase {
-		return errors.New("active upgrade transaction changed before cleanup")
-	}
-
-	for _, path := range []string{t.journal.PreviousBinaryPath, t.journal.CandidatePath} {
-		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return fmt.Errorf("remove upgrade artifact %s: %w", path, err)
-		}
-	}
-	if err := os.RemoveAll(transactionDir(t.journal.HomeDir, t.journal.ID)); err != nil {
-		return fmt.Errorf("remove upgrade transaction directory: %w", err)
-	}
-	activePath := activeJournalPath(t.journal.HomeDir)
-	if err := os.Remove(activePath); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("remove active upgrade journal: %w", err)
-	}
-	return syncDirectory(filepath.Dir(activePath))
 }
 
 // TryAcquireRecovery obtains the only authority to advance or recover this
@@ -880,13 +839,10 @@ func (t *Transaction) ensureRecoveryLockDirectoryLocked() error {
 		return fmt.Errorf("recovery storage is missing in nonterminal phase %s", current.Phase)
 	}
 	parent := filepath.Dir(txnDir)
-	if err := os.MkdirAll(parent, transactionDirMode); err != nil {
-		return fmt.Errorf("recreate transactions root for terminal cleanup: %w", err)
+	if err := validateDirectoryNoSymlink(parent); err != nil {
+		return fmt.Errorf("validate transactions root for terminal cleanup: %w", err)
 	}
-	if err := os.Chmod(parent, transactionDirMode); err != nil {
-		return fmt.Errorf("secure recreated transactions root: %w", err)
-	}
-	if err := os.Mkdir(txnDir, transactionDirMode); err != nil && !errors.Is(err, os.ErrExist) {
+	if err := createDurableDirectory(parent, txnDir, transactionDirMode); err != nil && !errors.Is(err, os.ErrExist) {
 		return fmt.Errorf("recreate terminal transaction lock directory: %w", err)
 	}
 	info, err = os.Lstat(txnDir)
@@ -965,7 +921,7 @@ func (l *RecoveryLease) Heartbeat(phase Phase, deadline time.Time) error {
 		return fmt.Errorf("encode recovery heartbeat: %w", err)
 	}
 	data = append(data, '\n')
-	if err := config.AtomicWriteFile(l.path, data, journalFileMode); err != nil {
+	if err := durableAtomicWriteFile(l.path, data, journalFileMode); err != nil {
 		return fmt.Errorf("persist recovery heartbeat: %w", err)
 	}
 	return nil

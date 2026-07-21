@@ -11,8 +11,11 @@ import (
 	"runtime"
 	"strings"
 	"syscall"
+)
 
-	"github.com/sachiniyer/agent-factory/config"
+var (
+	syncTransactionDirectory = syncDirectory
+	removeTransactionFile    = os.Remove
 )
 
 func snapshotMetadata(home, txnDir string, paths []string) ([]MetadataSnapshot, error) {
@@ -28,10 +31,14 @@ func snapshotMetadata(home, txnDir string, paths []string) ([]MetadataSnapshot, 
 			return nil, fmt.Errorf("metadata path %q is listed more than once", relative)
 		}
 		seen[relative] = struct{}{}
+		parents, err := snapshotMetadataParents(home, relative)
+		if err != nil {
+			return nil, err
+		}
 
 		info, err := os.Lstat(target)
 		if errors.Is(err, os.ErrNotExist) {
-			snapshots = append(snapshots, MetadataSnapshot{Path: relative})
+			snapshots = append(snapshots, MetadataSnapshot{Path: relative, Parents: parents})
 			continue
 		}
 		if err != nil {
@@ -45,7 +52,7 @@ func snapshotMetadata(home, txnDir string, paths []string) ([]MetadataSnapshot, 
 			return nil, fmt.Errorf("read metadata %s: %w", relative, err)
 		}
 		snapshotPath := filepath.Join(metadataDir, fmt.Sprintf("%04d.snapshot", index))
-		if err := config.AtomicWriteFile(snapshotPath, data, info.Mode().Perm()); err != nil {
+		if err := durableAtomicWriteFile(snapshotPath, data, info.Mode().Perm()); err != nil {
 			return nil, fmt.Errorf("snapshot metadata %s: %w", relative, err)
 		}
 		snapshots = append(snapshots, MetadataSnapshot{
@@ -54,9 +61,111 @@ func snapshotMetadata(home, txnDir string, paths []string) ([]MetadataSnapshot, 
 			Mode:         uint32(info.Mode().Perm()),
 			SHA256:       digest(data),
 			SnapshotPath: snapshotPath,
+			Parents:      parents,
 		})
 	}
 	return snapshots, nil
+}
+
+func snapshotMetadataParents(home, relative string) ([]MetadataParentSnapshot, error) {
+	paths := metadataParentPaths(relative)
+	parents := make([]MetadataParentSnapshot, 0, len(paths))
+	for _, path := range paths {
+		info, err := os.Lstat(filepath.Join(home, path))
+		if errors.Is(err, os.ErrNotExist) {
+			break
+		}
+		if err != nil {
+			return nil, fmt.Errorf("inspect metadata parent %s: %w", path, err)
+		}
+		if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+			return nil, fmt.Errorf("metadata parent %s is not a directory", path)
+		}
+		parents = append(parents, MetadataParentSnapshot{Path: path, Mode: uint32(info.Mode().Perm())})
+	}
+	return parents, nil
+}
+
+func prepareMetadataParents(home string, parents []MetadataParentSnapshot) (int, error) {
+	for index, parent := range parents {
+		path := filepath.Join(home, parent.Path)
+		info, err := os.Lstat(path)
+		if errors.Is(err, os.ErrNotExist) {
+			if err := validateDirectoryNoSymlink(filepath.Dir(path)); err != nil {
+				return index, fmt.Errorf("validate parent of %s: %w", parent.Path, err)
+			}
+			if err := os.Mkdir(path, os.FileMode(parent.Mode)|0o700); err != nil {
+				return index, fmt.Errorf("recreate metadata parent %s: %w", parent.Path, err)
+			}
+			if err := os.Chmod(path, os.FileMode(parent.Mode)|0o700); err != nil {
+				return index + 1, fmt.Errorf("make recreated metadata parent %s writable: %w", parent.Path, err)
+			}
+			if err := syncTransactionDirectory(path); err != nil {
+				return index + 1, fmt.Errorf("sync recreated metadata parent %s: %w", parent.Path, err)
+			}
+			if err := syncTransactionDirectory(filepath.Dir(path)); err != nil {
+				return index + 1, fmt.Errorf("sync parent after recreating %s: %w", parent.Path, err)
+			}
+		} else if err != nil {
+			return index, fmt.Errorf("inspect metadata parent %s: %w", parent.Path, err)
+		} else if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+			return index, fmt.Errorf("metadata parent %s is not a real directory", parent.Path)
+		}
+		if err := os.Chmod(path, os.FileMode(parent.Mode)|0o700); err != nil {
+			return index + 1, fmt.Errorf("make metadata parent %s writable for restoration: %w", parent.Path, err)
+		}
+	}
+	return len(parents), nil
+}
+
+func restoreMetadataParentModes(home string, parents []MetadataParentSnapshot) error {
+	var result error
+	for index := len(parents) - 1; index >= 0; index-- {
+		parent := parents[index]
+		path := filepath.Join(home, parent.Path)
+		if err := os.Chmod(path, os.FileMode(parent.Mode)); err != nil {
+			result = errors.Join(result, fmt.Errorf("restore metadata parent mode %s: %w", parent.Path, err))
+			continue
+		}
+		if err := syncTransactionDirectory(path); err != nil {
+			result = errors.Join(result, fmt.Errorf("sync metadata parent mode %s: %w", parent.Path, err))
+		}
+	}
+	return result
+}
+
+func restoreMetadataEntry(home string, metadata MetadataSnapshot) (retErr error) {
+	prepared, err := prepareMetadataParents(home, metadata.Parents)
+	defer func() {
+		retErr = errors.Join(retErr, restoreMetadataParentModes(home, metadata.Parents[:prepared]))
+	}()
+	if err != nil {
+		return err
+	}
+	target := filepath.Join(home, metadata.Path)
+	if err := ensureNoSymlinkParents(home, target); err != nil {
+		return fmt.Errorf("validate rollback path %s: %w", metadata.Path, err)
+	}
+	if !metadata.Existed {
+		if err := os.Remove(target); err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				return nil
+			}
+			return fmt.Errorf("restore absence of %s: %w", metadata.Path, err)
+		}
+		if err := syncTransactionDirectory(filepath.Dir(target)); err != nil {
+			return fmt.Errorf("sync restored absence of %s: %w", metadata.Path, err)
+		}
+		return nil
+	}
+	data, err := readAndVerify(metadata.SnapshotPath, metadata.SHA256)
+	if err != nil {
+		return fmt.Errorf("verify metadata snapshot %s: %w", metadata.Path, err)
+	}
+	if err := durableAtomicWriteFile(target, data, os.FileMode(metadata.Mode)); err != nil {
+		return fmt.Errorf("restore metadata %s: %w", metadata.Path, err)
+	}
+	return nil
 }
 
 func validateJournal(home string, journal Journal) error {
@@ -104,6 +213,12 @@ func validateJournal(home string, journal Journal) error {
 	if err := validateRecoveryJob(journal.ID, journal.RecoveryJob); err != nil {
 		return err
 	}
+	if err := validateDaemonRecoveryPair(journal.Daemon, journal.RecoveryJob); err != nil {
+		return err
+	}
+	if err := validateTransactionStorage(home, journal); err != nil {
+		return err
+	}
 
 	seen := make(map[string]struct{}, len(journal.Metadata))
 	txnDir := transactionDir(home, journal.ID)
@@ -119,6 +234,17 @@ func validateJournal(home string, journal Journal) error {
 			return fmt.Errorf("metadata path %q is duplicated", relative)
 		}
 		seen[relative] = struct{}{}
+		expectedParents := metadataParentPaths(relative)
+		if len(metadata.Parents) > len(expectedParents) ||
+			(metadata.Existed && len(metadata.Parents) != len(expectedParents)) {
+			return fmt.Errorf("metadata snapshot %q has an invalid parent manifest", relative)
+		}
+		for parentIndex, parent := range metadata.Parents {
+			if parent.Path != expectedParents[parentIndex] ||
+				parent.Mode == 0 || os.FileMode(parent.Mode)&^os.ModePerm != 0 {
+				return fmt.Errorf("metadata snapshot %q has an invalid parent manifest", relative)
+			}
+		}
 		if !metadata.Existed {
 			if metadata.Mode != 0 || metadata.SHA256 != "" || metadata.SnapshotPath != "" {
 				return fmt.Errorf("absent metadata %q has snapshot data", relative)
@@ -134,6 +260,42 @@ func validateJournal(home string, journal Journal) error {
 		}
 	}
 	return nil
+}
+
+func validateDaemonRecoveryPair(snapshot DaemonSnapshot, job RecoveryJob) error {
+	expected := RecoveryJobDetached
+	if snapshot.WasRunning {
+		switch snapshot.Owner.Kind {
+		case SupervisionAdHoc:
+			expected = RecoveryJobDetached
+		case SupervisionSystemd:
+			expected = RecoveryJobSystemd
+		case SupervisionLaunchd:
+			expected = RecoveryJobLaunchd
+		}
+	}
+	if job.Kind != expected {
+		return fmt.Errorf("daemon owner %q requires recovery job kind %q, got %q",
+			snapshot.Owner.Kind, expected, job.Kind)
+	}
+	return nil
+}
+
+func validateTransactionStorage(home string, journal Journal) error {
+	for _, path := range []string{upgradeRoot(home), filepath.Join(upgradeRoot(home), "transactions")} {
+		if err := validateDirectoryNoSymlink(path); err != nil {
+			return fmt.Errorf("validate upgrade storage %s: %w", path, err)
+		}
+	}
+	txnDir := transactionDir(home, journal.ID)
+	err := validateDirectoryNoSymlink(txnDir)
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, os.ErrNotExist) && terminalPhase(journal.Phase) {
+		return nil
+	}
+	return fmt.Errorf("validate upgrade transaction directory %s: %w", txnDir, err)
 }
 
 func validateDaemonSnapshot(snapshot DaemonSnapshot) error {
@@ -239,6 +401,82 @@ func validPhase(phase Phase) bool {
 func validateTransactionID(id string) error {
 	if !transactionIDPattern.MatchString(id) || id == "." || id == ".." {
 		return fmt.Errorf("invalid upgrade transaction ID %q", id)
+	}
+	return nil
+}
+
+func metadataParentPaths(relative string) []string {
+	dir := filepath.Dir(relative)
+	if dir == "." {
+		return nil
+	}
+	components := strings.Split(dir, string(filepath.Separator))
+	paths := make([]string, 0, len(components))
+	current := ""
+	for _, component := range components {
+		current = filepath.Join(current, component)
+		paths = append(paths, current)
+	}
+	return paths
+}
+
+func terminalPhase(phase Phase) bool {
+	return phase == PhaseCommitted || phase == PhaseRolledBack || phase == PhaseAborted
+}
+
+func validateDirectoryNoSymlink(path string) error {
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return err
+	}
+	if filepath.Clean(resolved) != filepath.Clean(path) {
+		return errors.New("directory path contains a symlink")
+	}
+	info, err := os.Lstat(path)
+	if err != nil {
+		return err
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		return errors.New("path is not a real directory")
+	}
+	return nil
+}
+
+func ensureDurableDirectory(parent, path string, mode os.FileMode) error {
+	if filepath.Dir(path) != parent {
+		return fmt.Errorf("directory %s is not an immediate child of %s", path, parent)
+	}
+	err := validateDirectoryNoSymlink(path)
+	if err == nil {
+		if err := os.Chmod(path, mode); err != nil {
+			return fmt.Errorf("secure directory %s: %w", path, err)
+		}
+		return syncTransactionDirectory(path)
+	}
+	if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return createDurableDirectory(parent, path, mode)
+}
+
+func createDurableDirectory(parent, path string, mode os.FileMode) error {
+	if filepath.Dir(path) != parent {
+		return fmt.Errorf("directory %s is not an immediate child of %s", path, parent)
+	}
+	if err := validateDirectoryNoSymlink(parent); err != nil {
+		return fmt.Errorf("validate parent directory %s: %w", parent, err)
+	}
+	if err := os.Mkdir(path, mode); err != nil {
+		return err
+	}
+	if err := os.Chmod(path, mode); err != nil {
+		return fmt.Errorf("secure new directory %s: %w", path, err)
+	}
+	if err := syncTransactionDirectory(path); err != nil {
+		return fmt.Errorf("sync new directory %s: %w", path, err)
+	}
+	if err := syncTransactionDirectory(parent); err != nil {
+		return fmt.Errorf("sync parent directory %s after creating %s: %w", parent, path, err)
 	}
 	return nil
 }
@@ -352,7 +590,131 @@ func persistJournal(path string, journal Journal) error {
 		return fmt.Errorf("encode upgrade journal: %w", err)
 	}
 	data = append(data, '\n')
-	return config.AtomicWriteFile(path, data, journalFileMode)
+	return durableAtomicWriteFile(path, data, journalFileMode)
+}
+
+func durableAtomicWriteFile(path string, data []byte, mode os.FileMode) error {
+	dir := filepath.Dir(path)
+	if err := validateDirectoryNoSymlink(dir); err != nil {
+		return fmt.Errorf("validate durable write directory %s: %w", dir, err)
+	}
+	temporary, err := os.CreateTemp(dir, filepath.Base(path)+".tmp.*")
+	if err != nil {
+		return fmt.Errorf("create durable temporary file: %w", err)
+	}
+	temporaryPath := temporary.Name()
+	renamed := false
+	defer func() {
+		if !renamed {
+			_ = os.Remove(temporaryPath)
+		}
+	}()
+	if _, err := temporary.Write(data); err != nil {
+		_ = temporary.Close()
+		return fmt.Errorf("write durable temporary file: %w", err)
+	}
+	if err := temporary.Chmod(mode); err != nil {
+		_ = temporary.Close()
+		return fmt.Errorf("set durable temporary file mode: %w", err)
+	}
+	if err := temporary.Sync(); err != nil {
+		_ = temporary.Close()
+		return fmt.Errorf("sync durable temporary file: %w", err)
+	}
+	if err := temporary.Close(); err != nil {
+		return fmt.Errorf("close durable temporary file: %w", err)
+	}
+	if err := os.Rename(temporaryPath, path); err != nil {
+		return fmt.Errorf("install durable file %s: %w", path, err)
+	}
+	renamed = true
+	if err := syncTransactionDirectory(dir); err != nil {
+		return fmt.Errorf("sync durable file directory %s: %w", dir, err)
+	}
+	return nil
+}
+
+func removeDurableFile(path string) error {
+	if err := validateDirectoryNoSymlink(filepath.Dir(path)); err != nil {
+		return fmt.Errorf("validate file removal directory: %w", err)
+	}
+	if err := removeTransactionFile(path); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+	return syncTransactionDirectory(filepath.Dir(path))
+}
+
+func removeRequiredDurableFile(path string) error {
+	if err := validateDirectoryNoSymlink(filepath.Dir(path)); err != nil {
+		return fmt.Errorf("validate required file removal directory: %w", err)
+	}
+	if err := removeTransactionFile(path); err != nil {
+		return err
+	}
+	return syncTransactionDirectory(filepath.Dir(path))
+}
+
+func removeDurableTree(path string) error {
+	parent := filepath.Dir(path)
+	if err := validateDirectoryNoSymlink(parent); err != nil {
+		return fmt.Errorf("validate tree removal parent: %w", err)
+	}
+	if err := validateDirectoryNoSymlink(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("validate tree removal target: %w", err)
+	}
+	if err := os.RemoveAll(path); err != nil {
+		return err
+	}
+	return syncTransactionDirectory(parent)
+}
+
+// cleanup keeps both the flock path and previous-binary actor until active.json
+// is durably gone. After that authority marker disappears, leftover artifacts
+// are inert and cleanup is best-effort across process loss.
+func (t *Transaction) cleanup() error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if !terminalPhase(t.journal.Phase) {
+		return fmt.Errorf("cannot clean up upgrade in phase %s", t.journal.Phase)
+	}
+
+	current, err := readJournal(activeJournalPath(t.journal.HomeDir))
+	if errors.Is(err, ErrNoActiveTransaction) {
+		return t.cleanupInactiveArtifacts()
+	}
+	if err != nil {
+		return err
+	}
+	if err := validateJournal(t.journal.HomeDir, current); err != nil {
+		return fmt.Errorf("validate journal before cleanup: %w", err)
+	}
+	if current.ID != t.journal.ID || current.Phase != t.journal.Phase {
+		return errors.New("active upgrade transaction changed before cleanup")
+	}
+	if err := removeDurableFile(t.journal.CandidatePath); err != nil {
+		return fmt.Errorf("remove candidate upgrade artifact: %w", err)
+	}
+	activePath := activeJournalPath(t.journal.HomeDir)
+	if err := removeRequiredDurableFile(activePath); err != nil {
+		return fmt.Errorf("remove active upgrade journal: %w", err)
+	}
+	return t.cleanupInactiveArtifacts()
+}
+
+func (t *Transaction) cleanupInactiveArtifacts() error {
+	if err := removeDurableFile(t.journal.CandidatePath); err != nil {
+		return fmt.Errorf("remove inactive candidate artifact: %w", err)
+	}
+	if err := removeDurableTree(transactionDir(t.journal.HomeDir, t.journal.ID)); err != nil {
+		return fmt.Errorf("remove inactive transaction directory: %w", err)
+	}
+	if err := removeDurableFile(t.journal.PreviousBinaryPath); err != nil {
+		return fmt.Errorf("remove previous-binary cleanup actor: %w", err)
+	}
+	return nil
 }
 
 func readJournal(path string) (Journal, error) {

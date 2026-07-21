@@ -364,3 +364,357 @@ func TestPrepareRejectsByteIdenticalCandidateIdentity(t *testing.T) {
 		"previous and candidate roles must remain structurally distinguishable by digest")
 	require.ErrorContains(t, err, "byte-identical")
 }
+
+func TestRollbackRefusesBeforeDaemonStop(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		ready bool
+	}{
+		{name: "prepared"},
+		{name: "supervisor ready", ready: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			txn, home, _ := prepareFixture(t)
+			lease, err := txn.tryAcquireRecoveryAs(txn.Journal().PreviousBinaryPath)
+			require.NoError(t, err)
+			defer lease.Release()
+			if test.ready {
+				require.NoError(t, lease.Advance(PhaseSupervisorReady))
+			}
+			statePath := filepath.Join(home, "state.json")
+			require.NoError(t, os.WriteFile(statePath, []byte("live-daemon-write"), 0o640))
+
+			err = lease.Rollback()
+			require.Error(t, err, "rollback must not overwrite metadata before daemon shutdown is proven")
+			got, readErr := os.ReadFile(statePath)
+			require.NoError(t, readErr)
+			require.Equal(t, "live-daemon-write", string(got))
+		})
+	}
+}
+
+func TestCleanupKeepsPreviousActorUntilActiveJournalIsRemoved(t *testing.T) {
+	txn, home, _ := prepareFixture(t)
+	lease, err := txn.tryAcquireRecoveryAs(txn.Journal().PreviousBinaryPath)
+	require.NoError(t, err)
+	defer lease.Release()
+	require.NoError(t, lease.Advance(PhaseSupervisorReady))
+	require.NoError(t, lease.Advance(PhaseDaemonStopped))
+	require.NoError(t, lease.InstallCandidate())
+	require.NoError(t, lease.Advance(PhaseCandidateStarting))
+	require.NoError(t, lease.Advance(PhaseCandidateValidating))
+	require.NoError(t, lease.Commit())
+
+	injected := errors.New("injected active journal removal failure")
+	activePath := activeJournalPath(txn.Journal().HomeDir)
+	previousRemove := removeTransactionFile
+	removeTransactionFile = func(path string) error {
+		if path == activePath {
+			return injected
+		}
+		return previousRemove(path)
+	}
+	t.Cleanup(func() { removeTransactionFile = previousRemove })
+	err = lease.Cleanup()
+	require.ErrorIs(t, err, injected, "the injected active-journal removal failure must be observed")
+	require.DirExists(t, transactionDir(home, txn.Journal().ID),
+		"the flock inode must not be unlinked while active.json can still authorize takeover")
+	require.FileExists(t, txn.Journal().PreviousBinaryPath,
+		"the only executable authorized to resume terminal cleanup must remain while active.json exists")
+}
+
+func TestPrepareRejectsSymlinkedUpgradeStorage(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		link func(t *testing.T, home, external string)
+	}{
+		{
+			name: "upgrade root",
+			link: func(t *testing.T, home, external string) {
+				require.NoError(t, os.Symlink(external, upgradeRoot(home)))
+			},
+		},
+		{
+			name: "transactions root",
+			link: func(t *testing.T, home, external string) {
+				require.NoError(t, os.Mkdir(upgradeRoot(home), 0o700))
+				require.NoError(t, os.Symlink(external, filepath.Join(upgradeRoot(home), "transactions")))
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			home := t.TempDir()
+			external := t.TempDir()
+			test.link(t, home, external)
+			plan := basicPreparePlan(t, home, "symlink-storage")
+
+			_, err := Prepare(plan)
+			require.Error(t, err, "upgrade transaction storage must remain inside the canonical AF home")
+		})
+	}
+}
+
+func TestCleanupRejectsStorageRootReplacedBySymlink(t *testing.T) {
+	txn, _, _ := prepareFixture(t)
+	lease, err := txn.tryAcquireRecoveryAs(txn.Journal().PreviousBinaryPath)
+	require.NoError(t, err)
+	defer lease.Release()
+	require.NoError(t, lease.Advance(PhaseSupervisorReady))
+	require.NoError(t, lease.Advance(PhaseDaemonStopped))
+	require.NoError(t, lease.InstallCandidate())
+	require.NoError(t, lease.Advance(PhaseCandidateStarting))
+	require.NoError(t, lease.Advance(PhaseCandidateValidating))
+	require.NoError(t, lease.Commit())
+
+	journal := txn.Journal()
+	root := upgradeRoot(journal.HomeDir)
+	realRoot := root + ".real"
+	require.NoError(t, os.Rename(root, realRoot))
+	external := t.TempDir()
+	externalTxn := filepath.Join(external, "transactions", journal.ID)
+	require.NoError(t, os.MkdirAll(externalTxn, 0o700))
+	sentinel := filepath.Join(externalTxn, "must-survive")
+	require.NoError(t, os.WriteFile(sentinel, []byte("foreign"), 0o600))
+	require.NoError(t, os.Symlink(external, root))
+
+	err = lease.Cleanup()
+	require.Error(t, err)
+	require.FileExists(t, sentinel, "cleanup must never traverse a symlinked storage ancestor")
+	require.FileExists(t, journal.PreviousBinaryPath)
+}
+
+func TestPrepareRejectsRecoveryJobMismatchedToDaemonOwner(t *testing.T) {
+	for _, owner := range []DaemonOwner{
+		{Kind: SupervisionSystemd, ServiceName: "agent-factory-daemon.service"},
+		{Kind: SupervisionLaunchd, ServiceName: "com.agent-factory.daemon"},
+	} {
+		t.Run(string(owner.Kind), func(t *testing.T) {
+			home := t.TempDir()
+			plan := basicPreparePlan(t, home, "owner-job-mismatch")
+			plan.Daemon = DaemonSnapshot{WasRunning: true, BootID: "boot-1", Owner: owner}
+
+			_, err := Prepare(plan)
+			require.Error(t, err, "service-managed daemons require the matching persistent recovery job kind")
+		})
+	}
+}
+
+func TestRollbackRestoresPrivateMetadataParentModes(t *testing.T) {
+	home := t.TempDir()
+	privateDir := filepath.Join(home, "private")
+	nestedDir := filepath.Join(privateDir, "nested")
+	require.NoError(t, os.Mkdir(privateDir, 0o710))
+	require.NoError(t, os.Mkdir(nestedDir, 0o700))
+	metadataPath := filepath.Join(nestedDir, "state.json")
+	require.NoError(t, os.WriteFile(metadataPath, []byte("private-state"), 0o600))
+	plan := basicPreparePlan(t, home, "parent-modes")
+	plan.MetadataPaths = []string{filepath.Join("private", "nested", "state.json")}
+	txn, err := Prepare(plan)
+	require.NoError(t, err)
+	lease, err := txn.tryAcquireRecoveryAs(txn.Journal().PreviousBinaryPath)
+	require.NoError(t, err)
+	defer lease.Release()
+	require.NoError(t, lease.Advance(PhaseSupervisorReady))
+	require.NoError(t, lease.Advance(PhaseDaemonStopped))
+	require.NoError(t, lease.InstallCandidate())
+	require.NoError(t, os.RemoveAll(privateDir))
+
+	require.NoError(t, lease.Rollback())
+	privateInfo, err := os.Stat(privateDir)
+	require.NoError(t, err)
+	require.Equal(t, os.FileMode(0o710), privateInfo.Mode().Perm())
+	nestedInfo, err := os.Stat(nestedDir)
+	require.NoError(t, err)
+	require.Equal(t, os.FileMode(0o700), nestedInfo.Mode().Perm())
+}
+
+func TestPersistJournalReturnsDirectorySyncFailure(t *testing.T) {
+	injected := errors.New("injected directory sync failure")
+	previousSync := syncTransactionDirectory
+	syncTransactionDirectory = func(string) error { return injected }
+	t.Cleanup(func() { syncTransactionDirectory = previousSync })
+
+	err := persistJournal(filepath.Join(t.TempDir(), "active.json"), Journal{ID: "durability"})
+	require.ErrorIs(t, err, injected)
+}
+
+func TestPrepareFsyncsCreatedTransactionDirectoriesBeforePublishing(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		target func(home string) string
+	}{
+		{
+			name: "transaction directory entry",
+			target: func(home string) string {
+				return filepath.Join(upgradeRoot(home), "transactions")
+			},
+		},
+		{
+			name: "metadata directory entry",
+			target: func(home string) string {
+				return transactionDir(home, "directory-fsync")
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			home := t.TempDir()
+			canonicalHome, err := canonicalExistingDir(home)
+			require.NoError(t, err)
+			injected := errors.New("injected directory creation sync failure")
+			target := test.target(canonicalHome)
+			previousSync := syncTransactionDirectory
+			targetSyncs := 0
+			syncTransactionDirectory = func(path string) error {
+				if path == target {
+					targetSyncs++
+					if targetSyncs == 2 {
+						return injected
+					}
+				}
+				return nil
+			}
+			t.Cleanup(func() { syncTransactionDirectory = previousSync })
+
+			_, err = Prepare(basicPreparePlan(t, home, "directory-fsync"))
+			require.ErrorIs(t, err, injected)
+			require.Equal(t, 2, targetSyncs,
+				"the newly-created child must be made durable through its parent after that parent is durable itself")
+			_, statErr := os.Stat(activeJournalPath(canonicalHome))
+			require.ErrorIs(t, statErr, os.ErrNotExist,
+				"the transaction must not be published after a directory durability failure")
+		})
+	}
+}
+
+func TestCleanupKeepsRecoveryAuthorityWhenActiveRemovalSyncFails(t *testing.T) {
+	txn, home, _ := prepareFixture(t)
+	lease, err := txn.tryAcquireRecoveryAs(txn.Journal().PreviousBinaryPath)
+	require.NoError(t, err)
+	defer lease.Release()
+	require.NoError(t, lease.Advance(PhaseSupervisorReady))
+	require.NoError(t, lease.Advance(PhaseDaemonStopped))
+	require.NoError(t, lease.InstallCandidate())
+	require.NoError(t, lease.Advance(PhaseCandidateStarting))
+	require.NoError(t, lease.Advance(PhaseCandidateValidating))
+	require.NoError(t, lease.Commit())
+
+	injected := errors.New("injected active removal sync failure")
+	previousSync := syncTransactionDirectory
+	root := upgradeRoot(txn.Journal().HomeDir)
+	syncTransactionDirectory = func(path string) error {
+		if path == root {
+			return injected
+		}
+		return previousSync(path)
+	}
+	t.Cleanup(func() { syncTransactionDirectory = previousSync })
+	err = lease.Cleanup()
+	require.ErrorIs(t, err, injected)
+	require.DirExists(t, transactionDir(home, txn.Journal().ID))
+	require.FileExists(t, txn.Journal().PreviousBinaryPath)
+}
+
+func TestPrepareRetainsRecoveryInputsWhenJournalPublishSyncFails(t *testing.T) {
+	home := t.TempDir()
+	canonicalHome, err := canonicalExistingDir(home)
+	require.NoError(t, err)
+	plan := basicPreparePlan(t, home, "publish-sync-failure")
+	injected := errors.New("injected active journal sync failure")
+	previousSync := syncTransactionDirectory
+	rootSyncs := 0
+	syncTransactionDirectory = func(path string) error {
+		if path == upgradeRoot(canonicalHome) {
+			rootSyncs++
+			if rootSyncs == 3 {
+				return injected
+			}
+		}
+		return previousSync(path)
+	}
+	t.Cleanup(func() { syncTransactionDirectory = previousSync })
+
+	_, err = Prepare(plan)
+	require.ErrorIs(t, err, injected)
+	require.Equal(t, 3, rootSyncs)
+	journal, readErr := readJournal(activeJournalPath(canonicalHome))
+	require.NoError(t, readErr, "a visible journal must retain everything needed for later recovery")
+	require.FileExists(t, journal.PreviousBinaryPath)
+	require.FileExists(t, journal.CandidatePath)
+	require.DirExists(t, transactionDir(home, journal.ID))
+}
+
+func TestMetadataParentModesAreRestoredEvenWhenRollbackFails(t *testing.T) {
+	home := t.TempDir()
+	privateDir := filepath.Join(home, "private")
+	nestedDir := filepath.Join(privateDir, "nested")
+	require.NoError(t, os.Mkdir(privateDir, 0o710))
+	require.NoError(t, os.Mkdir(nestedDir, 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(nestedDir, "state.json"), []byte("state"), 0o600))
+	plan := basicPreparePlan(t, home, "parent-mode-failure")
+	plan.MetadataPaths = []string{filepath.Join("private", "nested", "state.json")}
+	txn, err := Prepare(plan)
+	require.NoError(t, err)
+	lease, err := txn.tryAcquireRecoveryAs(txn.Journal().PreviousBinaryPath)
+	require.NoError(t, err)
+	defer lease.Release()
+	require.NoError(t, lease.Advance(PhaseSupervisorReady))
+	require.NoError(t, lease.Advance(PhaseDaemonStopped))
+	require.NoError(t, lease.InstallCandidate())
+	require.NoError(t, os.RemoveAll(privateDir))
+
+	injected := errors.New("injected recreated parent sync failure")
+	previousSync := syncTransactionDirectory
+	canonicalPrivateDir := filepath.Join(txn.Journal().HomeDir, "private")
+	syncTransactionDirectory = func(path string) error {
+		if path == canonicalPrivateDir {
+			return injected
+		}
+		return previousSync(path)
+	}
+	t.Cleanup(func() { syncTransactionDirectory = previousSync })
+	err = lease.Rollback()
+	require.ErrorIs(t, err, injected)
+	info, statErr := os.Stat(privateDir)
+	require.NoError(t, statErr)
+	require.Equal(t, os.FileMode(0o710), info.Mode().Perm(),
+		"a failed rollback must not leave private parents broadened")
+}
+
+func TestPrepareAcceptsRecoveryJobMatchingDaemonOwner(t *testing.T) {
+	for _, test := range []struct {
+		owner DaemonOwner
+		kind  RecoveryJobKind
+	}{
+		{
+			owner: DaemonOwner{Kind: SupervisionSystemd, ServiceName: "agent-factory-daemon.service"},
+			kind:  RecoveryJobSystemd,
+		},
+		{
+			owner: DaemonOwner{Kind: SupervisionLaunchd, ServiceName: "com.agent-factory.daemon"},
+			kind:  RecoveryJobLaunchd,
+		},
+	} {
+		t.Run(string(test.kind), func(t *testing.T) {
+			home := t.TempDir()
+			plan := basicPreparePlan(t, home, "matching-owner-job")
+			plan.Daemon = DaemonSnapshot{WasRunning: true, BootID: "boot-1", Owner: test.owner}
+			job, err := NewRecoveryJob(test.kind, plan.ID, t.TempDir())
+			require.NoError(t, err)
+			plan.RecoveryJob = job
+
+			_, err = Prepare(plan)
+			require.NoError(t, err)
+		})
+	}
+}
+
+func basicPreparePlan(t *testing.T, home, id string) Plan {
+	t.Helper()
+	executable := filepath.Join(t.TempDir(), "af")
+	require.NoError(t, os.WriteFile(executable, []byte("known-running"), 0o755))
+	return Plan{
+		ID: id, HomeDir: home, ExecutablePath: executable,
+		FromVersion: "1", ToVersion: "2", Candidate: []byte("candidate"),
+		RecoveryJob: RecoveryJob{Kind: RecoveryJobDetached},
+	}
+}
