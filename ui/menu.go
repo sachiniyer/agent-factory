@@ -48,7 +48,6 @@ type Menu struct {
 	height, width int
 	state         MenuState
 	instance      *session.Instance
-	activeTab     int
 
 	// focusRegion is the focus-ring region the hints are rendered for
 	// (layout.RegionTree / RegionAutomations / a layout.PaneRegion id). The
@@ -126,10 +125,9 @@ var interactiveMenuOptions = []keys.KeyName{keys.KeyExitInteractive}
 
 func NewMenu() *Menu {
 	m := &Menu{
-		options:   defaultMenuOptions,
-		state:     StateEmpty,
-		activeTab: 0,
-		keyDown:   -1,
+		options: defaultMenuOptions,
+		state:   StateEmpty,
+		keyDown: -1,
 	}
 	m.updateOptions()
 	return m
@@ -171,12 +169,6 @@ func (m *Menu) SetInstance(instance *session.Instance) {
 // workspace share the instance/default sets driven by SetInstance.
 func (m *Menu) SetFocusRegion(region string) {
 	m.focusRegion = region
-	m.updateOptions()
-}
-
-// SetActiveTab updates the currently active tab
-func (m *Menu) SetActiveTab(tab int) {
-	m.activeTab = tab
 	m.updateOptions()
 }
 

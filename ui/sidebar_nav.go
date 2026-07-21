@@ -16,7 +16,7 @@ import (
 //   - a pending SelectInstance assertion (the reconcile's #969 re-pin, the
 //     search overlay, an explicit re-select) moves the cursor onto the
 //     asserted instance's row — restoring the tab sub-selection when the
-//     cursor was on one of its tab rows (lastCursorTab); a dangling or nil
+//     cursor was on one of its tab rows (lastCursor*); a dangling or nil
 //     assertion leaves the clamped cursor as-is, matching the old "selected
 //     title gone → sidebar clamp behavior" rule.
 //
@@ -47,8 +47,8 @@ func (s *Sidebar) afterCursorMove() {
 
 // moveCursorToInstance places the cursor on the row of target, if it is in
 // the projection and its row is visible. When the cursor last rested on one of
-// target's tab rows (lastCursorTab), the same tab row is preferred so the #969
-// re-pin keeps the tab dimension; a vanished tab slot falls back to the
+// target's tab rows, the same tab identity is preferred so the #969 re-pin
+// keeps the tab dimension across a reorder; a vanished tab falls back to the
 // instance row. No-op otherwise.
 func (s *Sidebar) moveCursorToInstance(target *session.Instance) {
 	instIdx := -1
@@ -63,7 +63,44 @@ func (s *Sidebar) moveCursorToInstance(target *session.Instance) {
 	}
 	wantTab := -1
 	if s.lastCursorTitle == target.Title {
-		wantTab = s.lastCursorTab
+		tabs := target.GetTabs()
+		replacedSession := s.lastCursorInstanceID != "" && target.ID != "" &&
+			s.lastCursorInstanceID != target.ID
+		switch {
+		case replacedSession:
+			// A same-title kill/recreate mints fresh tab IDs. Preserve the
+			// equivalent replacement tab by name, matching the pane reconcile.
+			for i, tab := range tabs {
+				if tab.Name == s.lastCursorTabName {
+					wantTab = i
+					break
+				}
+			}
+		case s.lastCursorTabID != "":
+			// Within one session, an ID that vanished means the tab vanished. Do
+			// not hijack the cursor onto a different tab that reused its name.
+			for i, tab := range tabs {
+				if tab.ID == s.lastCursorTabID {
+					wantTab = i
+					break
+				}
+			}
+		case s.lastCursorTabName != "":
+			// Agent and legacy/id-less rows still have unique names. Prefer that
+			// identity across a reorder, then retain the historical ordinal
+			// fallback.
+			for i, tab := range tabs {
+				if tab.Name == s.lastCursorTabName {
+					wantTab = i
+					break
+				}
+			}
+			if wantTab < 0 {
+				wantTab = s.lastCursorTab
+			}
+		default:
+			wantTab = s.lastCursorTab
+		}
 	}
 	instRow := -1
 	for j, item := range s.visibleItems {
@@ -108,11 +145,28 @@ func (s *Sidebar) pushSelection() {
 	inst := instances[sel.ItemIndex]
 	prev := s.proj.GetSelectedInstance()
 	s.proj.SetSelectedInstance(inst)
+	s.lastCursorInstanceID = inst.ID
 	if sel.IsTab {
 		s.proj.SetActiveTab(sel.TabIndex)
 		s.lastCursorTab = sel.TabIndex
+		tabs := inst.GetTabs()
+		if sel.TabIndex >= 0 && sel.TabIndex < len(tabs) {
+			tab := tabs[sel.TabIndex]
+			s.lastCursorTabID = tab.ID
+			if tab.Kind == session.TabKindAgent {
+				// The daemon may heal the locally minted agent ID in place. Its
+				// unique fixed name is the stable identity in that domain.
+				s.lastCursorTabID = ""
+			}
+			s.lastCursorTabName = tab.Name
+		} else {
+			s.lastCursorTabID = ""
+			s.lastCursorTabName = ""
+		}
 	} else {
 		s.lastCursorTab = -1
+		s.lastCursorTabID = ""
+		s.lastCursorTabName = ""
 	}
 	s.lastCursorTitle = inst.Title
 	if prev != inst {

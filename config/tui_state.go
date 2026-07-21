@@ -27,10 +27,11 @@ type TUIRepoViewState struct {
 }
 
 // TUIStateTarget identifies a session/tab by stable identity, falling back to
-// title for older records that did not carry a session ID.
+// title/name for older records that did not carry IDs.
 type TUIStateTarget struct {
 	InstanceID string `json:"instance_id,omitempty"`
 	Title      string `json:"title,omitempty"`
+	TabID      string `json:"tab_id,omitempty"`
 	TabName    string `json:"tab_name,omitempty"`
 }
 
@@ -46,6 +47,7 @@ type TUIStateOpenPane struct {
 	Key        string `json:"key"`
 	InstanceID string `json:"instance_id,omitempty"`
 	Title      string `json:"title,omitempty"`
+	TabID      string `json:"tab_id,omitempty"`
 	TabName    string `json:"tab_name"`
 	FocusRank  uint64 `json:"focus_rank,omitempty"`
 }

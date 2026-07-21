@@ -400,7 +400,6 @@ func TestPanePreviewEscFromScrollRevertsOriginalCommittedTab(t *testing.T) {
 	require.Equal(t, 1, paneA.Tab(), "precondition: original pane is alpha's terminal tab")
 
 	h.store.SetActiveTab(0)
-	h.menu.SetActiveTab(0)
 	h.sidebar.SetSelectedInstance(1)
 	_ = h.selectionChanged()
 	require.NotNil(t, h.panePreviewTxn)
@@ -503,7 +502,6 @@ func TestPanePreviewInstanceRowUsesSelectedTerminalTab(t *testing.T) {
 
 	h.sidebar.SetSelectedInstance(1)
 	h.store.SetActiveTab(1)
-	h.menu.SetActiveTab(1)
 	_ = h.selectionChanged()
 
 	sel := h.sidebar.GetSelection()
@@ -1000,7 +998,6 @@ func TestPaneArrowKeysSwitchFocusedPaneAndClamp(t *testing.T) {
 
 	h.focusRegion(layout.RegionTree)
 	h.store.SetActiveTab(1) // Unopened terminal tab: isolate tree routing from #1493 open-pane focus.
-	h.menu.SetActiveTab(1)
 	_, _ = h.handleKeyPress(tea.KeyMsg{Type: tea.KeyLeft})
 	assert.Equal(t, layout.RegionTree, h.ring.Active(), "left/right on the tree stay sidebar navigation, not pane switching")
 	_, _ = h.handleKeyPress(tea.KeyMsg{Type: tea.KeyRight})
