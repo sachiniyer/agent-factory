@@ -803,7 +803,11 @@ body {
 }
 
 .af-rail-filter-glyph {
-  font-size: 0.9em;
+  display: block;
+  width: 0.875rem;
+  height: 0.875rem;
+  flex: 0 0 auto;
+  fill: currentColor;
 }
 
 /* A static 4px dot — the #1766 rule: state reads from a static glyph, never motion. */

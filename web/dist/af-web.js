@@ -10504,8 +10504,14 @@ var AppShell = class {
     this.railCount = h2("span", { class: "af-rail-count" }, "0");
     const newBtn = h2("button", { type: "button", class: "af-rail-new", title: "New session" }, "+ New");
     newBtn.addEventListener("click", () => this.actions.newSession());
-    const filterGlyph = h2("span", { class: "af-rail-filter-glyph" }, "\u25A4");
+    const filterGlyph = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    filterGlyph.classList.add("af-rail-filter-glyph");
+    filterGlyph.setAttribute("viewBox", "0 0 16 16");
     filterGlyph.setAttribute("aria-hidden", "true");
+    filterGlyph.setAttribute("focusable", "false");
+    const filterGlyphPath = document.createElementNS("http://www.w3.org/2000/svg", "path");
+    filterGlyphPath.setAttribute("d", "M2 2h12L9.5 8v4.5L6.5 14V8L2 2Z");
+    filterGlyph.append(filterGlyphPath);
     this.filterDot = h2("span", { class: "af-rail-filter-dot" });
     this.filterDot.setAttribute("aria-hidden", "true");
     this.filterBtn = h2("button", { type: "button", class: "af-rail-filter" }, filterGlyph, this.filterDot);

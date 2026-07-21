@@ -778,12 +778,19 @@ export class AppShell {
     const newBtn = h("button", { type: "button", class: "af-rail-new", title: "New session" }, "+ New");
     newBtn.addEventListener("click", () => this.actions.newSession());
 
-    // The status filter (feat: hide archived by default). A small ▤ glyph button
-    // rather than a word, so the rail head still fits the count + New at 18rem; the
-    // dot beside it lights only when the filter is NARROWED from the default, so the
-    // normal state (archived hidden) never nags.
-    const filterGlyph = h("span", { class: "af-rail-filter-glyph" }, "▤");
+    // The status filter (feat: hide archived by default). A small funnel mark rather
+    // than a word, so the rail head still fits the count + New at 18rem; the dot beside
+    // it lights only when the filter is NARROWED from the default, so the normal state
+    // (archived hidden) never nags. This is deliberately an inline SVG: Unicode has no
+    // consistently rendered funnel, while currentColor preserves every button state.
+    const filterGlyph = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    filterGlyph.classList.add("af-rail-filter-glyph");
+    filterGlyph.setAttribute("viewBox", "0 0 16 16");
     filterGlyph.setAttribute("aria-hidden", "true");
+    filterGlyph.setAttribute("focusable", "false");
+    const filterGlyphPath = document.createElementNS("http://www.w3.org/2000/svg", "path");
+    filterGlyphPath.setAttribute("d", "M2 2h12L9.5 8v4.5L6.5 14V8L2 2Z");
+    filterGlyph.append(filterGlyphPath);
     this.filterDot = h("span", { class: "af-rail-filter-dot" });
     this.filterDot.setAttribute("aria-hidden", "true");
     this.filterBtn = h("button", { type: "button", class: "af-rail-filter" }, filterGlyph, this.filterDot);
