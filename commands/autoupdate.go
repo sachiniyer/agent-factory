@@ -1,29 +1,21 @@
 package commands
 
 import (
-	"encoding/json"
 	"fmt"
-	"net/http"
-	"os"
 	"path/filepath"
 	"runtime"
-	"strconv"
 	"strings"
 	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/daemon"
+	"github.com/sachiniyer/agent-factory/internal/autoupdate"
 	"github.com/sachiniyer/agent-factory/log"
 )
 
 const (
-	// autoUpdateCheckInterval throttles the launch check. Releases now cut
-	// several times a day, so a day-long window left users pinned to a build
-	// well behind their channel; six hours keeps them close to the tip while
-	// still collapsing a burst of launches into a single GitHub call.
-	autoUpdateCheckInterval = 6 * time.Hour
-	lastCheckFile           = "last_update_check"
-	autoUpdateEnv           = "AGENT_FACTORY_AUTO_UPDATE"
+	lastCheckFile = autoupdate.CheckCacheFileName
+	autoUpdateEnv = autoupdate.EnvironmentVariable
 )
 
 // Timeouts differ by who is waiting. The launch check runs synchronously in
@@ -50,7 +42,7 @@ var (
 	// here — with a preview cut every 3 hours, page 1 fills with
 	// prereleases within days and the newest stable falls off it, so a
 	// stable-channel client would resolve nothing (Greptile review, #1078).
-	githubAPILatestReleaseURL = "https://api.github.com/repos/sachiniyer/agent-factory/releases/latest"
+	githubAPILatestReleaseURL = autoupdate.DefaultLatestReleaseAPIURL
 	// githubAPIReleasesURL answers the preview channel: /releases/latest
 	// never returns prereleases, so previews must come from the list. One
 	// page of 100 suffices: under the release scheme versions are only ever
@@ -58,7 +50,7 @@ var (
 	// releases are validated strictly greater), so the version-newest
 	// release is always among the most recently created — and the whole
 	// page is scanned for the max rather than trusting item order.
-	githubAPIReleasesURL = "https://api.github.com/repos/sachiniyer/agent-factory/releases?per_page=100"
+	githubAPIReleasesURL = autoupdate.DefaultReleasesAPIURL
 )
 
 // runtimeGOOS is a variable so tests can override the value reported by
@@ -230,81 +222,24 @@ func latestDownloadURL(channel, goos, goarch string, timeout time.Duration) (tag
 	if err != nil {
 		return "", "", fmt.Errorf("failed to fetch latest release: %w", err)
 	}
-	url = fmt.Sprintf("%s/download/%s/agent-factory-%s-%s.tar.gz",
-		releaseBaseURL, tag, goos, goarch)
+	url = autoupdate.DownloadURL(tag, goos, goarch)
 	return tag, url, nil
 }
 
 // releaseEntry is the subset of the GitHub release object needed to pick an
 // update target.
-type releaseEntry struct {
-	TagName    string `json:"tag_name"`
-	Draft      bool   `json:"draft"`
-	Prerelease bool   `json:"prerelease"`
-}
+type releaseEntry = autoupdate.Release
 
 // fetchLatestReleaseTag queries the GitHub API for the newest release tag on
 // the given channel (#1041): the stable channel resolves directly through
 // /releases/latest, the preview channel through the release list (see the
 // endpoint docs above for why each channel needs its own endpoint).
 func fetchLatestReleaseTag(channel string, timeout time.Duration) (string, error) {
-	if channel == config.UpdateChannelPreview {
-		return fetchLatestPreviewChannelTag(timeout)
+	discovery := autoupdate.Discovery{
+		LatestReleaseURL: githubAPILatestReleaseURL,
+		ReleasesURL:      githubAPIReleasesURL,
 	}
-	return fetchLatestStableTag(timeout)
-}
-
-// fetchLatestStableTag resolves the newest stable release via
-// /releases/latest. The endpoint already excludes prereleases and drafts;
-// the shape checks below are a tripwire against a stable release published
-// with an off-scheme tag, which must fail loudly rather than become an
-// update target.
-func fetchLatestStableTag(timeout time.Duration) (string, error) {
-	var release releaseEntry
-	if err := getGitHubJSON(githubAPILatestReleaseURL, timeout, &release); err != nil {
-		return "", err
-	}
-	parsed := parseSemver(strings.TrimPrefix(release.TagName, "v"))
-	if parsed == nil || parsed.preview || release.Prerelease || release.Draft {
-		return "", fmt.Errorf("releases/latest returned unusable tag %q for the stable channel", release.TagName)
-	}
-	return release.TagName, nil
-}
-
-// fetchLatestPreviewChannelTag resolves the newest release including
-// prereleases from the release list.
-func fetchLatestPreviewChannelTag(timeout time.Duration) (string, error) {
-	var releases []releaseEntry
-	if err := getGitHubJSON(githubAPIReleasesURL, timeout, &releases); err != nil {
-		return "", err
-	}
-	tag := pickLatestReleaseTag(config.UpdateChannelPreview, releases)
-	if tag == "" {
-		return "", fmt.Errorf("no published release with a parseable version tag found on the preview channel")
-	}
-	return tag, nil
-}
-
-// getGitHubJSON fetches url from the GitHub API and decodes the JSON
-// response into out, giving up after timeout.
-func getGitHubJSON(url string, timeout time.Duration, out any) error {
-	client := &http.Client{Timeout: timeout}
-	req, err := http.NewRequest("GET", url, nil)
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Accept", "application/vnd.github.v3+json")
-
-	resp, err := client.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != 200 {
-		return fmt.Errorf("GitHub API returned %d", resp.StatusCode)
-	}
-	return json.NewDecoder(resp.Body).Decode(out)
+	return discovery.LatestReleaseTag(channel, timeout)
 }
 
 // pickLatestReleaseTag returns the version-newest non-draft release tag on
@@ -313,32 +248,7 @@ func getGitHubJSON(url string, timeout time.Duration, out any) error {
 // -preview-N suffix marks it as a preview; the preview channel includes
 // everything.
 func pickLatestReleaseTag(channel string, releases []releaseEntry) string {
-	best := ""
-	for _, r := range releases {
-		if r.Draft {
-			continue
-		}
-		v := strings.TrimPrefix(r.TagName, "v")
-		parsed := parseSemver(v)
-		if parsed == nil {
-			continue
-		}
-		if channel != config.UpdateChannelPreview && (r.Prerelease || parsed.preview) {
-			continue
-		}
-		if best == "" || isNewer(v, strings.TrimPrefix(best, "v")) {
-			best = r.TagName
-		}
-	}
-	return best
-}
-
-// semver is a parsed version under the two-channel scheme (#1041):
-// MAJOR.MINOR.PATCH with an optional "-preview-N" prerelease suffix.
-type semver struct {
-	nums    [3]int
-	preview bool
-	z       int
+	return autoupdate.PickLatestReleaseTag(channel, releases)
 }
 
 // isNewer returns true if latest is strictly newer than current under the
@@ -347,107 +257,22 @@ type semver struct {
 // precedence), and previews order by their preview number:
 // 1.2.0 < 1.2.1-preview-1 < 1.2.1-preview-2 < 1.2.1.
 func isNewer(latest, current string) bool {
-	l := parseSemver(latest)
-	c := parseSemver(current)
-	if l == nil || c == nil {
-		return false
-	}
-	for i := 0; i < 3; i++ {
-		if l.nums[i] != c.nums[i] {
-			return l.nums[i] > c.nums[i]
-		}
-	}
-	if l.preview != c.preview {
-		// Equal base: the stable release outranks its previews.
-		return c.preview
-	}
-	return l.preview && l.z > c.z
-}
-
-// parseSemver parses "X.Y.Z" or "X.Y.Z-preview-N". Any other shape —
-// including unknown prerelease suffixes — returns nil so that unrecognized
-// tags are never treated as update targets.
-func parseSemver(v string) *semver {
-	core := v
-	var preview bool
-	var z int
-	if i := strings.IndexByte(v, '-'); i >= 0 {
-		core = v[:i]
-		numStr, ok := strings.CutPrefix(v[i+1:], "preview-")
-		if !ok {
-			return nil
-		}
-		n, err := strconv.Atoi(numStr)
-		if err != nil || n < 0 {
-			return nil
-		}
-		preview = true
-		z = n
-	}
-	parts := strings.Split(core, ".")
-	if len(parts) != 3 {
-		return nil
-	}
-	out := &semver{preview: preview, z: z}
-	for i, p := range parts {
-		n, err := strconv.Atoi(p)
-		if err != nil || n < 0 {
-			return nil
-		}
-		out.nums[i] = n
-	}
-	return out
+	return autoupdate.IsNewer(latest, current)
 }
 
 func lastCheckPath() string {
-	dir, err := config.GetConfigDir()
-	if err != nil {
-		return ""
-	}
-	return filepath.Join(dir, lastCheckFile)
+	return autoupdate.CheckCachePath()
 }
 
 func autoUpdateEnabled(cfg *config.Config) bool {
-	enabled := true
-	if cfg != nil {
-		enabled = cfg.AutoUpdate
-	}
-	raw, ok := os.LookupEnv(autoUpdateEnv)
-	if !ok {
-		return enabled
-	}
-	switch strings.ToLower(strings.TrimSpace(raw)) {
-	case "1", "true", "t", "yes", "y", "on":
-		return true
-	case "0", "false", "f", "no", "n", "off":
-		return false
-	case "":
-		return enabled
-	default:
-		log.WarningLog.Printf("auto-update: ignoring invalid %s=%q (expected true/false, 1/0, yes/no, on/off)", autoUpdateEnv, raw)
-		return enabled
-	}
+	return autoupdate.Enabled(cfg)
 }
 
 func normalizeUpdateChannel(channel string) string {
-	if channel == config.UpdateChannelPreview {
-		return config.UpdateChannelPreview
-	}
-	return config.UpdateChannelStable
+	return autoupdate.NormalizeChannel(channel)
 }
 
-type updateCheckCache struct {
-	path          string
-	SchemaVersion int                          `json:"schema_version,omitempty"`
-	LastChannel   string                       `json:"last_channel,omitempty"`
-	Channels      map[string]updateCheckRecord `json:"channels,omitempty"`
-}
-
-type updateCheckRecord struct {
-	CheckedAt      time.Time `json:"checked_at"`
-	LastSeenTag    string    `json:"last_seen_tag,omitempty"`
-	CurrentVersion string    `json:"current_version,omitempty"`
-}
+type updateCheckCache = autoupdate.CheckCache
 
 // withUpdateCheckLock runs fn against the throttle cache under the update
 // lock. The lock is taken without waiting: when another `af` is already
@@ -456,14 +281,7 @@ type updateCheckRecord struct {
 // lose, since this now sits in front of the TUI and a blocking wait would read
 // as a hang for as long as that download takes.
 func withUpdateCheckLock(fn func(cache *updateCheckCache, now time.Time) error) error {
-	path := lastCheckPath()
-	if path == "" {
-		return fn(&updateCheckCache{}, time.Now().UTC())
-	}
-	acquired, err := config.TryWithFileLock(path, func() error {
-		cache := readUpdateCheckCache(path)
-		return fn(cache, time.Now().UTC())
-	})
+	acquired, err := autoupdate.TryWithCheckCache(lastCheckPath(), fn)
 	if err != nil {
 		return err
 	}
@@ -474,22 +292,7 @@ func withUpdateCheckLock(fn func(cache *updateCheckCache, now time.Time) error) 
 }
 
 func readUpdateCheckCache(path string) *updateCheckCache {
-	cache := &updateCheckCache{path: path}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return cache
-	}
-	if err := json.Unmarshal(data, cache); err == nil {
-		cache.path = path
-		if cache.Channels == nil {
-			cache.Channels = map[string]updateCheckRecord{}
-		}
-		return cache
-	}
-	// Legacy cache files were a bare RFC3339 timestamp with no channel. Treat
-	// them as stale so the first new build re-checks and writes channel-aware
-	// metadata instead of letting a prior stable check suppress preview (#1466).
-	return cache
+	return autoupdate.ReadCheckCache(path)
 }
 
 func shouldCheck(channel string) bool {
@@ -502,58 +305,13 @@ func shouldCheck(channel string) bool {
 }
 
 func updateCheckDue(cache *updateCheckCache, channel, currentVersion string, now time.Time) bool {
-	channel = normalizeUpdateChannel(channel)
-	if cache == nil {
-		return true
-	}
-	if cache.LastChannel != "" && cache.LastChannel != channel {
-		return true
-	}
-	rec, ok := cache.Channels[channel]
-	if !ok {
-		return true
-	}
-	if rec.CurrentVersion != "" && rec.CurrentVersion != currentVersion {
-		return true
-	}
-	if rec.CheckedAt.IsZero() || rec.CheckedAt.After(now) {
-		return true
-	}
-	return now.Sub(rec.CheckedAt) >= autoUpdateCheckInterval
+	return cache.Due(channel, currentVersion, now)
 }
 
 func recordCheck(channel, lastSeenTag, currentVersion string) {
-	path := lastCheckPath()
-	if path == "" {
-		return
-	}
-	_ = config.WithFileLock(path, func() error {
-		return recordCheckLocked(readUpdateCheckCache(path), channel, lastSeenTag, currentVersion, time.Now().UTC())
-	})
+	_ = autoupdate.RecordCheck(lastCheckPath(), channel, lastSeenTag, currentVersion)
 }
 
 func recordCheckLocked(cache *updateCheckCache, channel, lastSeenTag, currentVersion string, now time.Time) error {
-	if cache == nil {
-		cache = &updateCheckCache{}
-	}
-	if cache.path == "" {
-		return nil
-	}
-	channel = normalizeUpdateChannel(channel)
-	if cache.Channels == nil {
-		cache.Channels = map[string]updateCheckRecord{}
-	}
-	cache.SchemaVersion = 1
-	cache.LastChannel = channel
-	cache.Channels[channel] = updateCheckRecord{
-		CheckedAt:      now.UTC(),
-		LastSeenTag:    lastSeenTag,
-		CurrentVersion: strings.TrimPrefix(currentVersion, "v"),
-	}
-	data, err := json.MarshalIndent(cache, "", "  ")
-	if err != nil {
-		return err
-	}
-	data = append(data, '\n')
-	return config.AtomicWriteFile(cache.path, data, 0644)
+	return cache.Record(channel, lastSeenTag, currentVersion, now)
 }
