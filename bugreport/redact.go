@@ -82,10 +82,11 @@ var privateKeyBlock = regexp.MustCompile(`(?s)-----BEGIN [A-Z0-9 ]*PRIVATE KEY--
 // name *shape*, so it scrubs archived/killed sessions no live set still knows.
 var afTmuxSessionName = regexp.MustCompile(`af_[0-9a-f]{8}_[^\s:]+`)
 
-// taskStartedInstanceTitle and taskParkedInstanceTitle are the only daemon log
-// shapes that render a raw session title with %s rather than %q. Match the field
-// by its fixed surrounding syntax so punctuation-only legal titles can be
-// removed without treating "." or "/" as a global search pattern. The parked
+// taskStartedInstanceTitle and taskParkedInstanceTitle recognize the two legacy
+// daemon log shapes that rendered a raw session title with %s. New logs use %q,
+// but a bundled tail can contain lines written by an older binary. Match the
+// legacy field by its fixed surrounding syntax so punctuation-only titles can
+// be removed without treating "." or "/" as a global search pattern. The parked
 // form keeps its diagnostic suffix; the started form owns the rest of its line.
 var (
 	taskStartedInstanceTitle = regexp.MustCompile(`(?m)(task \S+ started successfully as instance )[^\r\n]+$`)
@@ -181,6 +182,12 @@ func (r *redactor) scrubUnstructured(s string) string {
 // the log section; it ends by delegating to scrub() for the usual
 // $HOME/username/secret pass.
 func (r *redactor) scrubLog(s string) string {
+	// Remove every known full title representation before any shape-based pass
+	// can consume only part of it. In particular, the legacy raw task-start
+	// matcher is line-oriented while a legal title may contain newlines; running
+	// that matcher first replaced line one and made the original full-title match
+	// impossible, leaking the remaining lines (#2249 late review).
+	s = r.scrubSessionTitles(s)
 	// Redact the title in every af_<hash>_<title> name. Keys on the name shape,
 	// so it catches current AND historical (archived/killed) sessions the live
 	// instance set no longer references.
@@ -192,12 +199,12 @@ func (r *redactor) scrubLog(s string) string {
 			s = strings.ReplaceAll(s, name, tmuxPrefixMarker)
 		}
 	}
-	// taskrun.go has two raw %s title emitters. Their syntax is a safer
-	// boundary than a global punctuation matcher and also catches historical
-	// task-created titles no longer present in instances.json.
+	// Retain compatibility with the two legacy raw %s taskrun.go forms. Their
+	// syntax is a safer boundary than a global punctuation matcher and also
+	// catches historical task-created titles no longer present in instances.json.
 	s = taskStartedInstanceTitle.ReplaceAllString(s, `${1}`+redactedMarker)
 	s = taskParkedInstanceTitle.ReplaceAllString(s, `${1}`+redactedMarker+`${3}`)
-	return r.scrubUnstructured(s)
+	return r.scrub(s)
 }
 
 // scrubSessionTitles removes exact Go-quoted forms of every known title, then
@@ -206,8 +213,8 @@ func (r *redactor) scrubLog(s string) string {
 // delivery errors both format them with %q. Matching strconv.Quote therefore
 // covers every legal title byte-for-byte, including short names and punctuation
 // that are unsafe to replace globally, plus quotes/backslashes that %q escapes
-// (#2238 review). scrubLog handles the two actual raw punctuation emitters by
-// their fixed field syntax.
+// (#2238 review). scrubLog handles legacy raw punctuation emitters by their
+// fixed field syntax.
 func (r *redactor) scrubSessionTitles(s string) string {
 	titles := make([]string, 0, len(r.titles))
 	for title := range r.titles {
@@ -242,7 +249,7 @@ func redactAFTmuxTitle(match string) string {
 }
 
 // replaceBareTitle removes a title only when it occupies a complete text token.
-// The logger's raw %s form is always delimited by surrounding prose/newlines, so
+// The legacy logger's raw %s form is delimited by surrounding prose/newlines, so
 // this covers that representation without compiling punctuation-only titles
 // such as "." or "/" into an unbounded regexp that erases every period or path
 // separator in the bundle. Exact %q forms are handled above before this pass.

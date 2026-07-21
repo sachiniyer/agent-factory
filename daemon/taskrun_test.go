@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -14,6 +15,21 @@ import (
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/task"
 )
+
+func TestTaskInstanceLogMessagesQuoteMultilineTitle(t *testing.T) {
+	const title = "Confidential\nDeal"
+	for name, message := range map[string]string{
+		"started": taskStartedLogMessage("task-1", title),
+		"parked":  taskParkedLogMessage("task-2", title),
+	} {
+		if strings.Contains(message, title) || strings.ContainsRune(message, '\n') {
+			t.Fatalf("%s task log contains a raw multiline title: %q", name, message)
+		}
+		if !strings.Contains(message, strconv.Quote(title)) {
+			t.Fatalf("%s task log does not carry the uniform %%q title encoding: %q", name, message)
+		}
+	}
+}
 
 func seedDisabledTask(id string) error {
 	return task.AddTask(task.Task{
