@@ -229,9 +229,10 @@ func mustUnmarshalGenerated(t *testing.T, files []pluginFile, path string, out a
 }
 
 // TestPreflightHookNeverInstalls is the #2172/#2174 rule as a test: the hook
-// runs as the user, af's releases carry no checksum to verify, so the hook may
-// PRINT the install command and must never run it. Every mention of the
-// installer therefore has to sit inside an echo or a comment.
+// runs as the user, and an unsigned checksum delivered beside the archive does
+// not make unattended fetch-and-execute appropriate. The hook may PRINT the
+// install command and must never run it. Every mention of the installer
+// therefore has to sit inside an echo or a comment.
 func TestPreflightHookNeverInstalls(t *testing.T) {
 	hook := afPreflightHook()
 	if !strings.Contains(hook, session.AfInstallCommand) {

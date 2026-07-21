@@ -28,9 +28,10 @@ var (
 	autoUpdateCheckTimeout = 2 * time.Second
 	// manualCheckTimeout bounds the release lookup for `af upgrade`.
 	manualCheckTimeout = 10 * time.Second
-	// autoUpdateDownloadBudget bounds the launch-path download. Release
-	// tarballs are a few MB, so this clears a slow link with room to spare
-	// while capping how long a launch can stall behind a crawling transfer.
+	// autoUpdateDownloadBudget bounds the launch-path manifest and archive
+	// download. Release tarballs are a few MB, so this clears a slow link with
+	// room to spare while capping how long a launch can stall behind a crawling
+	// transfer.
 	autoUpdateDownloadBudget = 45 * time.Second
 )
 

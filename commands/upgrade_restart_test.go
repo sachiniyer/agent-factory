@@ -3,8 +3,6 @@ package commands
 import (
 	"bytes"
 	"errors"
-	"net/http"
-	"net/http/httptest"
 	"os"
 	"strings"
 	"testing"
@@ -47,15 +45,12 @@ func upgradeHarness(t *testing.T) (binPath string, url string) {
 		t.Fatalf("seed binary: %v", err)
 	}
 	archive := makeTarGz(t, map[string][]byte{"agent-factory": []byte("new-binary")})
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Write(archive)
-	}))
-	t.Cleanup(srv.Close)
+	url = verifiedUpgradeURL(t, archive)
 
 	prevExe := osExecutableFn
 	t.Cleanup(func() { osExecutableFn = prevExe })
 	osExecutableFn = func() (string, error) { return binPath, nil }
-	return binPath, srv.URL
+	return binPath, url
 }
 
 // stubShutdown pins what RequestShutdown reports and counts the calls.

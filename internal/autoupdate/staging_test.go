@@ -4,18 +4,27 @@ import (
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
+	"crypto/sha256"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
 
+const testReleaseArchiveName = "agent-factory-linux-amd64.tar.gz"
+
 func TestCandidateStagerDownloadsNestedBinary(t *testing.T) {
 	archive := testTarGz(t, "dist/agent-factory", []byte("candidate-binary"))
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		if _, err := w.Write(archive); err != nil {
-			t.Errorf("write archive: %v", err)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/sha256sums.txt":
+			_, _ = w.Write(testChecksumManifest(testReleaseArchiveName, archive))
+		case "/" + testReleaseArchiveName:
+			_, _ = w.Write(archive)
+		default:
+			http.NotFound(w, r)
 		}
 	}))
 	t.Cleanup(server.Close)
@@ -24,7 +33,7 @@ func TestCandidateStagerDownloadsNestedBinary(t *testing.T) {
 		BinaryName:            "agent-factory",
 		ResponseHeaderTimeout: time.Second,
 	}
-	candidate, err := stager.Download(server.URL, time.Second)
+	candidate, err := stager.Download(server.URL+"/"+testReleaseArchiveName, time.Second)
 	if err != nil {
 		t.Fatalf("Download: %v", err)
 	}
@@ -39,10 +48,82 @@ func TestCandidateStagerRejectsNonSuccessResponse(t *testing.T) {
 	}))
 	t.Cleanup(server.Close)
 
-	_, err := (CandidateStager{ResponseHeaderTimeout: time.Second}).Download(server.URL, time.Second)
+	_, err := (CandidateStager{ResponseHeaderTimeout: time.Second}).Download(
+		server.URL+"/"+testReleaseArchiveName,
+		time.Second,
+	)
 	if err == nil {
 		t.Fatal("Download returned nil error for HTTP 404")
 	}
+}
+
+func TestCandidateStagerRejectsChecksumMismatch(t *testing.T) {
+	archive := []byte("not even a gzip archive")
+	mux := http.NewServeMux()
+	mux.HandleFunc("/sha256sums.txt", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(strings.Repeat("0", 64) + "  " + testReleaseArchiveName + "\n"))
+	})
+	mux.HandleFunc("/"+testReleaseArchiveName, func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write(archive)
+	})
+	server := httptest.NewServer(mux)
+	t.Cleanup(server.Close)
+
+	_, err := (CandidateStager{ResponseHeaderTimeout: time.Second}).Download(
+		server.URL+"/"+testReleaseArchiveName,
+		time.Second,
+	)
+	if err == nil || !strings.Contains(err.Error(), "checksum mismatch") {
+		t.Fatalf("Download error = %v, want checksum mismatch", err)
+	}
+}
+
+func TestCandidateStagerRejectsMissingChecksumEntryBeforeArchiveDownload(t *testing.T) {
+	archiveRequested := make(chan struct{}, 1)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/sha256sums.txt", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write(testChecksumManifest("some-other-asset.tar.gz", []byte("other")))
+	})
+	mux.HandleFunc("/"+testReleaseArchiveName, func(w http.ResponseWriter, _ *http.Request) {
+		archiveRequested <- struct{}{}
+		_, _ = w.Write([]byte("untrusted archive"))
+	})
+	server := httptest.NewServer(mux)
+	t.Cleanup(server.Close)
+
+	_, err := (CandidateStager{ResponseHeaderTimeout: time.Second}).Download(
+		server.URL+"/"+testReleaseArchiveName,
+		time.Second,
+	)
+	if err == nil || !strings.Contains(err.Error(), "no checksum") {
+		t.Fatalf("Download error = %v, want missing checksum entry", err)
+	}
+	select {
+	case <-archiveRequested:
+		t.Fatal("archive was downloaded before its checksum entry was validated")
+	default:
+	}
+}
+
+func TestCandidateStagerRejectsMalformedChecksum(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/sha256sums.txt", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = fmt.Fprintf(w, "not-a-sha256  %s\n", testReleaseArchiveName)
+	})
+	server := httptest.NewServer(mux)
+	t.Cleanup(server.Close)
+
+	_, err := (CandidateStager{ResponseHeaderTimeout: time.Second}).Download(
+		server.URL+"/"+testReleaseArchiveName,
+		time.Second,
+	)
+	if err == nil || !strings.Contains(err.Error(), "malformed SHA-256") {
+		t.Fatalf("Download error = %v, want malformed checksum", err)
+	}
+}
+
+func testChecksumManifest(archiveName string, archive []byte) []byte {
+	return []byte(fmt.Sprintf("%x  %s\n", sha256.Sum256(archive), archiveName))
 }
 
 func testTarGz(t *testing.T, name string, contents []byte) []byte {

@@ -80,10 +80,12 @@ esac
 
 asset="agent-factory-${os}-${arch}.tar.gz"
 if [ "$VERSION" = "latest" ]; then
-	url="https://github.com/$REPO/releases/latest/download/$asset"
+	release_url="https://github.com/$REPO/releases/latest/download"
 else
-	url="https://github.com/$REPO/releases/download/$VERSION/$asset"
+	release_url="https://github.com/$REPO/releases/download/$VERSION"
 fi
+url="$release_url/$asset"
+checksums_url="$release_url/sha256sums.txt"
 
 # --- downloader (curl, falling back to wget) -------------------------------
 download() {
@@ -105,11 +107,58 @@ cleanup() { rm -rf "$tmpdir"; }
 trap cleanup EXIT INT TERM
 
 tarball="$tmpdir/$asset"
+checksums="$tmpdir/sha256sums.txt"
 
 echo "Downloading $asset ($VERSION) for $os/$arch..."
 if ! download "$url" "$tarball"; then
 	echo "error: download failed from $url" >&2
 	echo "Check your network, or that the release/tag exists at https://github.com/$REPO/releases" >&2
+	exit 1
+fi
+if ! download "$checksums_url" "$checksums"; then
+	echo "error: checksum manifest download failed from $checksums_url" >&2
+	echo "The release is incomplete or predates checksum verification; refusing to install it." >&2
+	exit 1
+fi
+
+# Select exactly one well-formed entry for this platform archive. A missing,
+# malformed, or duplicate entry is an incomplete release, never permission to
+# install without verification.
+expected_checksum="$(awk -v target="$asset" '
+	{
+		if (NF != 2) next
+		name = $2
+		sub(/^\*/, "", name)
+		if (name == target) {
+			matches++
+			digest = $1
+		}
+	}
+	END {
+		if (matches != 1 || length(digest) != 64 || digest ~ /[^[:xdigit:]]/) exit 1
+		print tolower(digest)
+	}
+' "$checksums")" || {
+	echo "error: checksum manifest has no single valid SHA-256 entry for $asset" >&2
+	exit 1
+}
+
+if command -v sha256sum >/dev/null 2>&1; then
+	actual_checksum="$(sha256sum "$tarball" | awk '{print tolower($1)}')"
+elif command -v shasum >/dev/null 2>&1; then
+	actual_checksum="$(shasum -a 256 "$tarball" | awk '{print tolower($1)}')"
+elif command -v openssl >/dev/null 2>&1; then
+	actual_checksum="$(openssl dgst -sha256 "$tarball" | awk '{print tolower($NF)}')"
+else
+	echo "error: sha256sum, shasum, or openssl is required to verify the release" >&2
+	exit 1
+fi
+
+if [ "$actual_checksum" != "$expected_checksum" ]; then
+	echo "error: checksum mismatch for $asset" >&2
+	echo "Expected: $expected_checksum" >&2
+	echo "Actual:   $actual_checksum" >&2
+	echo "The download may be corrupted or tampered with; refusing to install it." >&2
 	exit 1
 fi
 

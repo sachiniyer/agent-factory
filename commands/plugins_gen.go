@@ -360,9 +360,10 @@ func codexTmuxGuardHook() string {
 // afPreflightHook reports whether af is on PATH, and nothing else.
 //
 // It deliberately does NOT download or install anything. A plugin hook runs as
-// the user, and af's releases carry no checksum or signature to verify against
-// (install.sh and `af upgrade` both check only that the tarball is a tarball),
-// so fetch-and-execute from inside an agent session is the wrong shape at any
+// the user. Af verifies release checksums, but those checksums are unsigned and
+// arrive through the same release channel as the archive, so they protect
+// against corruption rather than a compromised publisher or channel.
+// Fetch-and-execute from inside an agent session remains the wrong shape at any
 // convenience — see #2172 and #2174. Detect and instruct.
 func afPreflightHook() string {
 	return "#!/usr/bin/env bash\n" +

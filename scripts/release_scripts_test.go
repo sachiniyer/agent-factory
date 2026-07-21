@@ -487,6 +487,13 @@ func TestInstallScriptRestartsDaemonWithInstalledBinary(t *testing.T) {
 	installDir := filepath.Join(dir, "install")
 	callsFile := filepath.Join(dir, "af-calls")
 
+	writeExecutable(t, filepath.Join(fakeBin, "uname"), `#!/bin/sh
+case "$1" in
+	-s) echo Linux ;;
+	-m) echo x86_64 ;;
+	*) exit 2 ;;
+esac
+`)
 	writeExecutable(t, filepath.Join(fakeBin, "curl"), `#!/bin/sh
 out=
 while [ "$#" -gt 0 ]; do
@@ -497,7 +504,14 @@ while [ "$#" -gt 0 ]; do
 	shift
 done
 [ -n "$out" ] || exit 2
-printf fake-tarball > "$out"
+case "$out" in
+	*/sha256sums.txt)
+		printf '%s\n' '746e8948ec0a7b6e150cc34446bad2bd0d0e2e3f0bd8f03f0edef7467a38e3b6  agent-factory-linux-amd64.tar.gz' > "$out"
+		;;
+	*)
+		printf fake-tarball > "$out"
+		;;
+esac
 `)
 	writeExecutable(t, filepath.Join(fakeBin, "tar"), `#!/bin/sh
 case "$1" in

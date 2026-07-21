@@ -131,11 +131,18 @@ jobs:
     needs: [check-and-tag, build]
     runs-on: ubuntu-latest
     steps:
+    - uses: actions/checkout@v6
+      with:
+        ref: v${{ needs.check-and-tag.outputs.new_version }}
+
     - name: Download build artifacts
       uses: actions/download-artifact@v7
       with:
         path: dist
         merge-multiple: true
+
+    - name: Generate checksum manifest
+      run: .github/scripts/write-sha256sums.sh dist
 
     # Immutable releases require all assets to be attached before the release
     # is published: create as draft, upload assets into the draft, then publish.
@@ -153,5 +160,6 @@ jobs:
           --generate-notes \
           --prerelease \
           --draft \
-          dist/*.tar.gz
+          dist/*.tar.gz \
+          dist/sha256sums.txt
         gh release edit "v${VERSION}" --draft=false
