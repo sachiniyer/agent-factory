@@ -51,14 +51,17 @@ type codexPickerOption struct {
 // intended row is selected. A later poll compares Codex's default status-line
 // model with the pre-dialog value and surfaces the result in af's log.
 func (t *TmuxSession) handleCodexSafetyBuffering(content string) bool {
-	targetLabel, safetyPromptPresent := codexSafetyPromptTarget(content)
-	dialog, dialogPresent := parseCodexSafetyDialog(content)
+	targetLabel, safetyPromptPresent, safetyPromptActive := t.inspectCodexSafetyPrompt(content)
+	dialog, dialogPresent := parseCodexSafetyDialog(content, targetLabel, safetyPromptActive)
 	model := codexStatusLineModel(content)
 	state := &t.codexSafety
 
 	if state.awaitingModelCheck {
 		t.verifyCodexSafetyModel(model, dialogPresent)
-		return false
+		// Startup treats false as permission to deliver the queued prompt. The
+		// accepted picker can take another frame to close, so keep blocking while
+		// its live modal shell remains visible.
+		return safetyPromptPresent
 	}
 
 	if !dialogPresent {
@@ -70,7 +73,7 @@ func (t *TmuxSession) handleCodexSafetyBuffering(content string) bool {
 				)
 				state.notified = true
 			}
-			return false
+			return true
 		}
 		if model != "" {
 			state.lastModel = model
@@ -96,7 +99,7 @@ func (t *TmuxSession) handleCodexSafetyBuffering(content string) bool {
 	if len(keys) > 0 {
 		if err := t.tapPromptKeys(keys...); err != nil {
 			log.ErrorLog.Printf("could not navigate Codex additional safety checks for session %q: %v", t.sanitizedName, err)
-			return false
+			return true
 		}
 
 		// Selection is a terminal UI state, not a numbered form value. Read
@@ -107,8 +110,16 @@ func (t *TmuxSession) handleCodexSafetyBuffering(content string) bool {
 			log.ErrorLog.Printf("could not verify Codex additional safety-check selection for session %q: %v", t.sanitizedName, err)
 			return true
 		}
-		selectedDialog, stillPresent := parseCodexSafetyDialog(selectedContent)
+		selectedTarget, selectedPromptPresent, selectedPromptActive := t.inspectCodexSafetyPrompt(selectedContent)
+		selectedDialog, stillPresent := parseCodexSafetyDialog(selectedContent, selectedTarget, selectedPromptActive)
 		if !stillPresent {
+			if selectedPromptPresent {
+				log.ErrorLog.Printf(
+					"refusing to accept Codex additional safety checks for session %q: could not prove the selected row while the picker remained visible",
+					t.sanitizedName,
+				)
+				return true
+			}
 			if current := codexStatusLineModel(selectedContent); current != "" {
 				state.lastModel = current
 			}
@@ -130,7 +141,7 @@ func (t *TmuxSession) handleCodexSafetyBuffering(content string) bool {
 
 	if err := t.tapPromptKeys("Enter"); err != nil {
 		log.ErrorLog.Printf("could not accept Codex additional safety checks for session %q: %v", t.sanitizedName, err)
-		return false
+		return true
 	}
 	state.expectedModel = state.lastModel
 	state.verificationPolls = 0
@@ -184,10 +195,9 @@ func (s *codexSafetyBufferingState) finishModelVerification(model string) {
 // current upstream rewording. Both forms require their full prose/chrome plus
 // all three exact actions. The selected and target rows are found by label;
 // numeric prefixes are parsed only as inert picker syntax.
-func parseCodexSafetyDialog(content string) (codexSafetyDialog, bool) {
+func parseCodexSafetyDialog(content, targetLabel string, promptActive bool) (codexSafetyDialog, bool) {
 	clean := normalizeCodexPane(content)
-	targetLabel, promptPresent := codexSafetyPromptTarget(clean)
-	if !promptPresent {
+	if !promptActive {
 		return codexSafetyDialog{}, false
 	}
 
@@ -239,6 +249,27 @@ func parseCodexSafetyDialog(content string) (codexSafetyDialog, bool) {
 		return codexSafetyDialog{}, false
 	}
 	return dialog, true
+}
+
+// inspectCodexSafetyPrompt separates transcript text that quotes the picker
+// from Codex's active bottom-pane ListSelectionView. Upstream's selection view
+// implements no cursor position, so Codex hides the terminal cursor while it is
+// active; the ordinary composer exposes one. The exact dialog shell remains a
+// fail-closed startup blocker if the cursor query fails, but it is never
+// actionable without the positive hidden-cursor signal.
+func (t *TmuxSession) inspectCodexSafetyPrompt(content string) (targetLabel string, promptPresent, promptActive bool) {
+	targetLabel, candidate := codexSafetyPromptTarget(content)
+	if !candidate {
+		return "", false, false
+	}
+	cursor, err := t.readPaneCursorState()
+	if err != nil {
+		return targetLabel, true, false
+	}
+	if cursor.Visible {
+		return "", false, false
+	}
+	return targetLabel, true, true
 }
 
 // codexSafetyPromptTarget recognizes the whole modal shell independently from

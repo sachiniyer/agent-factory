@@ -118,8 +118,8 @@ func pasteBufferName(processToken, sanitizedName string, seq uint64) string {
 // Every pane gets the bracketed paste — there is no per-agent exception list.
 // See sendKeysPasteBuffer for why that is both necessary and safe (#1956).
 func (t *TmuxSession) SendKeysCommand(text string) error {
-	t.submitMu.Lock()
-	defer t.submitMu.Unlock()
+	t.inputMu.Lock()
+	defer t.inputMu.Unlock()
 	return t.sendKeysPasteBuffer(text)
 }
 
@@ -266,7 +266,7 @@ func (t *TmuxSession) sendKeysPasteBuffer(text string) error {
 	// probe's exact completion suffix keeps one source of truth for what tmux was
 	// asked to render. On the next submit it is provenance that distinguishes
 	// prior pasted input from a spinner, footer, or unrelated pane redraw.
-	// submitMu owns the field.
+	// inputMu owns the field.
 	t.lastPastedTail = probe.completion
 
 	// Confirm the paste actually LANDED in the pane before sending Enter, instead

@@ -196,8 +196,8 @@ func (t *TmuxSession) Start(workDir string) error {
 // CheckAndHandleTrustPrompt checks the pane content once for a trust prompt and dismisses it if found.
 // Returns true if the prompt was found and handled.
 func (t *TmuxSession) CheckAndHandleTrustPrompt() bool {
-	t.promptMu.Lock()
-	defer t.promptMu.Unlock()
+	t.inputMu.Lock()
+	defer t.inputMu.Unlock()
 
 	content, err := t.CapturePaneContent()
 	if err != nil {

@@ -4,7 +4,10 @@ import (
 	"bytes"
 	"os/exec"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -97,7 +100,12 @@ func runTrustPromptCheck(t *testing.T, program, content string) (handled bool, c
 			cmds = append(cmds, strings.Join(c.Args, " "))
 			return nil
 		},
-		OutputFunc: func(c *exec.Cmd) ([]byte, error) { return []byte(content), nil },
+		OutputFunc: func(c *exec.Cmd) ([]byte, error) {
+			if strings.Contains(strings.Join(c.Args, " "), "display-message") {
+				return []byte("0 0 0"), nil
+			}
+			return []byte(content), nil
+		},
 	}
 	session := newTmuxSession(toTmuxName("trust", ""), program, NewMockPtyFactory(t), cmdExec)
 	return session.CheckAndHandleTrustPrompt(), cmds
@@ -118,7 +126,12 @@ func runTrustPromptSequence(t *testing.T, program string, contents ...string) (*
 			cmds = append(cmds, strings.Join(c.Args, " "))
 			return nil
 		},
-		OutputFunc: func(*exec.Cmd) ([]byte, error) {
+		OutputFunc: func(c *exec.Cmd) ([]byte, error) {
+			if strings.Contains(strings.Join(c.Args, " "), "display-message") {
+				// Codex's active ListSelectionView has no cursor position, so
+				// the TUI hides the terminal cursor while the picker is open.
+				return []byte("0 0 0"), nil
+			}
 			require.Less(t, captureIdx, len(contents), "unexpected extra pane capture")
 			content := contents[captureIdx]
 			captureIdx++
@@ -303,9 +316,126 @@ func TestCheckAndHandleTrustPrompt_CodexChangedSafetyPickerIsSurfacedWithoutInpu
 	changed := strings.Replace(codexSafetyBufferingDialog, "2. Keep waiting", "2. Continue waiting", 1)
 	handled, commands := runTrustPromptCheck(t, ProgramCodex, changed)
 
-	require.False(t, handled, "an unknown action label must stay for a human instead of guessing")
+	require.True(t, handled,
+		"an active picker that af cannot answer must block startup prompt delivery")
 	require.Empty(t, sentKeystrokes(commands))
 	require.Contains(t, warnings.String(), "could not safely select \"Keep waiting\"")
+}
+
+func TestCheckAndHandleTrustPrompt_CodexSafetyPickerStillVisibleBlocksDelivery(t *testing.T) {
+	session, _ := runTrustPromptSequence(t, ProgramCodex,
+		"gpt-5.6-sol max · ~/agent-factory",
+		codexSafetyBufferingDialog,
+		codexSafetyBufferingKeepWaitingSelected,
+		codexSafetyBufferingKeepWaitingSelected,
+	)
+
+	require.False(t, session.CheckAndHandleTrustPrompt())
+	require.True(t, session.CheckAndHandleTrustPrompt())
+	require.True(t, session.CheckAndHandleTrustPrompt(),
+		"the accepted picker is still visible, so startup must not paste through it")
+}
+
+func TestCheckAndHandleTrustPrompt_QuotedCodexSafetyPickerWithComposerCursorInjectsNothing(t *testing.T) {
+	const modelFooter = "  gpt-5.6-sol max · ~/agent-factory"
+	content := codexSafetyBufferingKeepWaitingSelected + "\n\n" + modelFooter
+	var commands []string
+	cmdExec := cmd_test.MockCmdExec{
+		RunFunc: func(c *exec.Cmd) error {
+			commands = append(commands, strings.Join(c.Args, " "))
+			return nil
+		},
+		OutputFunc: func(c *exec.Cmd) ([]byte, error) {
+			if strings.Contains(strings.Join(c.Args, " "), "display-message") {
+				// The ordinary Codex composer owns a visible cursor. The picker
+				// text above is quoted transcript, not the active bottom pane.
+				return []byte("20 0 1"), nil
+			}
+			return []byte(content), nil
+		},
+	}
+	session := newTmuxSession(toTmuxName("trust", ""), ProgramCodex, NewMockPtyFactory(t), cmdExec)
+
+	require.False(t, session.CheckAndHandleTrustPrompt())
+	require.Empty(t, sentKeystrokes(commands),
+		"quoted picker text above a live composer must never receive navigation or Enter")
+}
+
+func TestCheckAndHandleTrustPrompt_SerializesPickerInputWithPromptDelivery(t *testing.T) {
+	var (
+		captureCount atomic.Int32
+		pasted       atomic.Bool
+		loadOnce     sync.Once
+	)
+	selectionCaptureStarted := make(chan struct{})
+	releaseSelectionCapture := make(chan struct{})
+	promptDeliveryStarted := make(chan struct{})
+
+	cmdExec := cmd_test.MockCmdExec{
+		RunFunc: func(c *exec.Cmd) error {
+			command := strings.Join(c.Args, " ")
+			if strings.Contains(command, "load-buffer") {
+				loadOnce.Do(func() { close(promptDeliveryStarted) })
+			}
+			if strings.Contains(command, "paste-buffer") {
+				pasted.Store(true)
+			}
+			return nil
+		},
+		OutputFunc: func(c *exec.Cmd) ([]byte, error) {
+			command := strings.Join(c.Args, " ")
+			if strings.Contains(command, "display-message") {
+				return []byte("0 0 0"), nil
+			}
+			switch captureCount.Add(1) {
+			case 1:
+				return []byte(codexSafetyBufferingDialog), nil
+			case 2:
+				close(selectionCaptureStarted)
+				<-releaseSelectionCapture
+				return []byte(codexSafetyBufferingKeepWaitingSelected), nil
+			default:
+				if pasted.Load() {
+					return []byte("concurrent prompt"), nil
+				}
+				return nil, nil
+			}
+		},
+	}
+	session := newTmuxSession(toTmuxName("trust", ""), ProgramCodex, NewMockPtyFactory(t), cmdExec)
+
+	handlerDone := make(chan bool, 1)
+	go func() { handlerDone <- session.CheckAndHandleTrustPrompt() }()
+	select {
+	case <-selectionCaptureStarted:
+	case <-time.After(time.Second):
+		t.Fatal("picker handler did not reach its selection verification capture")
+	}
+
+	deliveryDone := make(chan error, 1)
+	go func() { deliveryDone <- session.SendKeysCommand("concurrent prompt") }()
+	interleaved := false
+	select {
+	case <-promptDeliveryStarted:
+		interleaved = true
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(releaseSelectionCapture)
+
+	select {
+	case handled := <-handlerDone:
+		require.True(t, handled)
+	case <-time.After(time.Second):
+		t.Fatal("picker handler did not finish")
+	}
+	select {
+	case err := <-deliveryDone:
+		require.NoError(t, err)
+	case <-time.After(time.Second):
+		t.Fatal("prompt delivery did not finish")
+	}
+	require.False(t, interleaved,
+		"prompt delivery started between picker selection and Enter")
 }
 
 func TestCheckAndHandleTrustPrompt_CodexSafetyFixtureInOutputInjectsNothing(t *testing.T) {

@@ -55,23 +55,21 @@ type TmuxSession struct {
 	// accessors in program.go (#1254) — never touch these fields directly.
 	program   string
 	programMu sync.RWMutex
-	// submitMu serializes the whole clear → paste → Enter transaction. A second
-	// submit must never clear the first submit's freshly pasted composer while
-	// that first call is still waiting to send Enter (#2178 review).
-	submitMu sync.Mutex
-	// promptMu serializes the daemon poll's capture/navigation/verification
-	// transaction. CheckAndHandleTrustPrompt also runs during startup, and two
-	// callers must never both navigate the same Codex picker (#2181).
-	promptMu sync.Mutex
+	// inputMu serializes every multi-command transaction that injects pane input.
+	// A submit must not clear/paste between a prompt handler's selected-row
+	// capture and Enter, two submits must not clear each other's freshly pasted
+	// composers, and two prompt handlers must not navigate the same picker
+	// concurrently (#2178/#2181).
+	inputMu sync.Mutex
 	// codexSafety remembers the last normal-pane model footer across polls so a
 	// safety-buffering intervention can prove it did not select the downgrade.
-	// Access only while promptMu is held.
+	// Access only while inputMu is held.
 	codexSafety codexSafetyBufferingState
 	// lastPastedTail is the normalized distinctive tail of the most recent
 	// payload paste that tmux accepted. The next submit may use it only as
 	// provenance for the cleared-composer diagnostic: matching arbitrary pane
 	// text is not enough to claim that a prior delivery was stranded (#2225).
-	// Protected by submitMu; it never gates delivery.
+	// Protected by inputMu; it never gates delivery.
 	lastPastedTail string
 	// ptyFactory is used to create a PTY for the tmux session.
 	ptyFactory PtyFactory
