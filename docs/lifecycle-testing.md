@@ -39,6 +39,15 @@ is wired **nightly** rather than per-PR (`.github/workflows/lifecycle.yml`). It
 also runs on a PR that touches the gate's own files, so a change to the harness
 proves itself.
 
+CI authenticates both the harness's release-list request and current `af`'s
+release discovery with the scoped workflow `GITHUB_TOKEN`; they do not consume
+the shared runner IP's unauthenticated quota. A transport failure, quota
+response (403/429), or GitHub 5xx is reported as **SKIP / could not verify**, not
+as “upgrade broken.” This matters at the N-1 boundary: an already-published old
+binary cannot retroactively learn token support. Malformed release data, a 404,
+and every failure after discovery remain **FAIL**, so availability handling
+cannot launder a product or release regression into a green result.
+
 ## The scenarios
 
 ### A — clean first run
@@ -174,7 +183,9 @@ Two guards keep that honest:
 * a **SKIP is not a pass**: any skipped check exits the run non-zero unless
   `AF_LIFECYCLE_ALLOW_PARTIAL=1` is set. `make lifecycle-container` sets it (a
   dev-box container genuinely cannot host a service manager) and prints a
-  PARTIAL COVERAGE banner naming what went untested;
+  PARTIAL COVERAGE banner naming what went untested. The native CI leg also
+  permits an explicit external-release-availability skip; its dedicated check
+  below still makes assertion #4 non-skippable;
 * the CI native leg **fails the job** if assertion #4 ever silently starts
   skipping — a green run that quietly stopped testing supervision is the exact
   lie this gate exists to prevent.

@@ -767,6 +767,39 @@ func TestFetchLatestReleaseTagChannels(t *testing.T) {
 	}
 }
 
+// TestFetchLatestReleaseTagAuthenticatesFromCI pins the lifecycle-gate path:
+// the workflow already exports GITHUB_TOKEN, so release discovery must put it
+// on the API request. Otherwise shared-runner traffic still consumes GitHub's
+// 60-request unauthenticated pool and an unrelated 403 makes upgrade look
+// broken (#2262).
+func TestFetchLatestReleaseTagAuthenticatesFromCI(t *testing.T) {
+	const token = "lifecycle-token"
+	t.Setenv("GITHUB_TOKEN", token)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "Bearer "+token {
+			http.Error(w, "missing workflow authentication", http.StatusForbidden)
+			return
+		}
+		if err := json.NewEncoder(w).Encode(releaseEntry{TagName: "v1.9.9"}); err != nil {
+			t.Errorf("encode latest release: %v", err)
+		}
+	}))
+	defer srv.Close()
+
+	prevLatestURL := githubAPILatestReleaseURL
+	githubAPILatestReleaseURL = srv.URL
+	t.Cleanup(func() { githubAPILatestReleaseURL = prevLatestURL })
+
+	tag, err := fetchLatestReleaseTag(config.UpdateChannelStable, manualCheckTimeout)
+	if err != nil {
+		t.Fatalf("authenticated release lookup: %v", err)
+	}
+	if tag != "v1.9.9" {
+		t.Fatalf("authenticated release lookup returned %q, want v1.9.9", tag)
+	}
+}
+
 // TestFetchLatestStableTagRejectsOffSchemeTag pins the tripwire: a
 // /releases/latest response whose tag does not parse as a stable X.Y.Z must
 // error rather than become an update target.

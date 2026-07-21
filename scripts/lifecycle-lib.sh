@@ -41,6 +41,28 @@ lc_skip() {
     printf '[lifecycle]   SKIP  %s\n' "$*" >&2
 }
 
+# lc_release_http_unavailable <status> — true only for HTTP outcomes where the
+# GitHub release service/quota could not answer. Other non-200 responses remain
+# failures: a 404 or malformed release payload can expose a broken release and
+# must not be laundered into an infrastructure skip (#2262).
+lc_release_http_unavailable() {
+    case "$1" in
+    000 | 403 | 429 | 5??) return 0 ;;
+    *) return 1 ;;
+    esac
+}
+
+# lc_release_lookup_unavailable <output> — recognize the availability errors an
+# already-published N-1 `af upgrade` can emit. N-1 cannot gain this tree's token
+# support retroactively, so the cross-version harness needs a narrow textual
+# compatibility bridge until those releases age out. The required
+# "failed to fetch latest release" prefix prevents an unrelated timeout in the
+# upgrade/restart path from being mislabeled as a GitHub outage.
+lc_release_lookup_unavailable() {
+    printf '%s\n' "$1" | grep -Eiq \
+        'failed to fetch latest release:.*(GitHub API returned (403|429|5[0-9][0-9])|context deadline exceeded|Client\.Timeout|i/o timeout|TLS handshake timeout|no such host|connection (refused|reset)|unexpected EOF)'
+}
+
 lc_assert_eq() {
     local want="$1" got="$2" what="$3"
     if [ "$want" = "$got" ]; then

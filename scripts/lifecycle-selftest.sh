@@ -19,6 +19,8 @@ set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PASS=0
 FAIL=0
+SELFTEST_TMP="$(mktemp -d)"
+trap 'rm -rf "$SELFTEST_TMP"' EXIT
 
 ok() {
     PASS=$((PASS + 1))
@@ -31,9 +33,14 @@ no() {
 
 # Source the library in a subshell-safe way: it only defines functions and
 # counters, and touches nothing outside the process.
-LC_WORKSPACE="/tmp/lc-selftest-never-created"
+AF_LIFECYCLE_WORKSPACE="$SELFTEST_TMP/never-created"
+export AF_LIFECYCLE_WORKSPACE
 # shellcheck source=scripts/lifecycle-lib.sh
 . "$HERE/lifecycle-lib.sh"
+# Source the production scenario functions without executing main. This makes
+# the selftest drive the same upgrade classifier the real lifecycle gate calls.
+# shellcheck source=scripts/lifecycle.sh
+. "$HERE/lifecycle.sh"
 
 printf '\n=== fault injections that cannot execute must FAIL the harness ===\n'
 
@@ -80,6 +87,87 @@ else
     no "the no-injection case was treated as a missing injection"
 fi
 
+printf '\n=== external release availability is not a product failure ===\n'
+
+# The authenticated release-list probe must carry an unavailable result as a
+# distinct status. Returning ordinary failure here makes scenario_b record a
+# product FAIL for GitHub's shared-runner quota (#2262).
+curl() {
+    printf '{"message":"API rate limit exceeded"}\n403'
+}
+release_rc=0
+lc_two_newest_stable >/dev/null 2>&1 || release_rc=$?
+unset -f curl
+if [ "$release_rc" = "2" ]; then
+    ok "an API 403 is classified as could-not-verify"
+else
+    no "an API 403 returned $release_rc, want could-not-verify status 2"
+fi
+
+# Drive scenario_b itself, not only its helper: it must consume status 2 as one
+# explicit SKIP and stop before any install/daemon work. A malformed release
+# set (status 1) remains a product/release failure and must never be pardoned.
+if (
+    LC_PASS=0
+    LC_FAIL=0
+    LC_SKIP=0
+    lc_mock_repo() { return 0; }
+    lc_two_newest_stable() { return 2; }
+    scenario_b upgrade-cmd >/dev/null 2>&1
+    [ "$LC_SKIP" = 1 ] && [ "$LC_FAIL" = 0 ]
+); then
+    ok "scenario B records release API unavailability as SKIP"
+else
+    no "scenario B did not preserve the could-not-verify outcome"
+fi
+if (
+    LC_PASS=0
+    LC_FAIL=0
+    LC_SKIP=0
+    lc_mock_repo() { return 0; }
+    lc_two_newest_stable() { return 1; }
+    scenario_b upgrade-cmd >/dev/null 2>&1
+); then
+    no "scenario B pardoned a malformed/unusable release set"
+else
+    ok "scenario B keeps malformed/unusable release data red"
+fi
+
+# The published N-1 binary performs its own lookup. Until every supported N-1
+# knows how to consume GITHUB_TOKEN, its exact quota error must get the same
+# distinct result instead of becoming "the upgrade step itself failed".
+fake_af="$SELFTEST_TMP/af-403"
+printf '%s\n' '#!/usr/bin/env bash' \
+    'printf "%s\\n" "Error: failed to fetch latest release: GitHub API returned 403" >&2' \
+    'exit 1' >"$fake_af"
+chmod +x "$fake_af"
+upgrade_rc=0
+lc_do_upgrade upgrade-cmd "$fake_af" unused-home unused-repo v1.0.2 >/dev/null 2>&1 || upgrade_rc=$?
+if [ "$upgrade_rc" = "2" ]; then
+    ok "an N-1 af upgrade quota error is classified as could-not-verify"
+else
+    no "an N-1 af upgrade quota error returned $upgrade_rc, want could-not-verify status 2"
+fi
+if lc_release_lookup_unavailable \
+    "Error: failed to fetch latest release: GitHub API returned 404"; then
+    no "a 404 was mislabeled as transient GitHub unavailability"
+else
+    ok "non-transient release API errors remain failures"
+fi
+
+# ALLOW_PARTIAL acknowledges SKIPs only; it must make an otherwise partial run
+# green, but never pardon a genuine product assertion failure.
+if (LC_FAIL=0; LC_SKIP=1; AF_LIFECYCLE_ALLOW_PARTIAL=1; lc_summary >/dev/null 2>&1); then
+    ok "AF_LIFECYCLE_ALLOW_PARTIAL=1 permits a skip-only partial run"
+else
+    no "AF_LIFECYCLE_ALLOW_PARTIAL=1 still failed a skip-only partial run"
+fi
+if (LC_FAIL=1; LC_SKIP=1; LC_FAILED_NAMES=("real failure"); AF_LIFECYCLE_ALLOW_PARTIAL=1; lc_summary >/dev/null 2>&1); then
+    no "AF_LIFECYCLE_ALLOW_PARTIAL=1 pardoned a genuine FAIL"
+else
+    ok "AF_LIFECYCLE_ALLOW_PARTIAL=1 does not pardon genuine FAILs"
+fi
+
 printf '\n=== the kill path refuses an empty home ===\n'
 
 # lc_daemon_pids feeds lc_teardown_home, which SIGKILLs what it returns. With an
@@ -112,8 +200,8 @@ printf '\n=== the disposable guard defaults to NO ===\n'
 # grepped the source for "/run/.containerenv" — and PASSED against code with
 # podman detection deleted, because that string also lives in the guard's error
 # message. Watched failing is the only reason we know this one works.
-probe="$(mktemp -d)"
-trap 'rm -rf "$probe"' EXIT
+probe="$SELFTEST_TMP/disposable"
+mkdir -p "$probe"
 : >"$probe/dockerenv"
 : >"$probe/containerenv"
 

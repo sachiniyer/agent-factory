@@ -41,6 +41,10 @@ type Release struct {
 type Discovery struct {
 	LatestReleaseURL string
 	ReleasesURL      string
+	// AuthToken is optional GitHub API authentication. CI supplies its scoped
+	// workflow token here so release discovery does not share the runner IP's
+	// tiny unauthenticated quota with unrelated jobs (#2262).
+	AuthToken string
 }
 
 // LatestReleaseTag returns the newest published tag on channel. Stable uses
@@ -55,7 +59,7 @@ func (d Discovery) LatestReleaseTag(channel string, timeout time.Duration) (stri
 
 func (d Discovery) latestStableTag(timeout time.Duration) (string, error) {
 	var release Release
-	if err := getJSON(d.LatestReleaseURL, timeout, &release); err != nil {
+	if err := getJSON(d.LatestReleaseURL, d.AuthToken, timeout, &release); err != nil {
 		return "", err
 	}
 	parsed := parseVersion(strings.TrimPrefix(release.TagName, "v"))
@@ -67,7 +71,7 @@ func (d Discovery) latestStableTag(timeout time.Duration) (string, error) {
 
 func (d Discovery) latestPreviewTag(timeout time.Duration) (string, error) {
 	var releases []Release
-	if err := getJSON(d.ReleasesURL, timeout, &releases); err != nil {
+	if err := getJSON(d.ReleasesURL, d.AuthToken, timeout, &releases); err != nil {
 		return "", err
 	}
 	tag := PickLatestReleaseTag(config.UpdateChannelPreview, releases)
@@ -77,13 +81,16 @@ func (d Discovery) latestPreviewTag(timeout time.Duration) (string, error) {
 	return tag, nil
 }
 
-func getJSON(url string, timeout time.Duration, out any) error {
+func getJSON(url, authToken string, timeout time.Duration, out any) error {
 	client := &http.Client{Timeout: timeout}
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
 		return err
 	}
 	req.Header.Set("Accept", "application/vnd.github.v3+json")
+	if authToken != "" {
+		req.Header.Set("Authorization", "Bearer "+authToken)
+	}
 
 	resp, err := client.Do(req)
 	if err != nil {

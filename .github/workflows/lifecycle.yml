@@ -108,7 +108,7 @@ jobs:
         run: |
           sudo loginctl enable-linger "$USER"
           echo "XDG_RUNTIME_DIR=/run/user/$(id -u)" >> "$GITHUB_ENV"
-          for i in $(seq 1 30); do
+          for _ in $(seq 1 30); do
             [ -d "/run/user/$(id -u)" ] && break
             sleep 1
           done
@@ -129,6 +129,10 @@ jobs:
           AF_LIFECYCLE_AF_BIN: ${{ runner.temp }}/bin/af
           AF_LIFECYCLE_WORKSPACE: ${{ runner.temp }}/af-lifecycle
           AF_LIFECYCLE_INJECT: ${{ github.event.inputs.inject }}
+          # External release availability is reported as an explicit SKIP. Do
+          # not turn that into a product-red job; the dedicated step below still
+          # makes the one mandatory native-only assertion (#4) non-skippable.
+          AF_LIFECYCLE_ALLOW_PARTIAL: "1"
           # Raises the release-API rate limit; the API is public either way.
           GITHUB_TOKEN: ${{ github.token }}
         # `set -o pipefail` is load-bearing: without it the exit status of
