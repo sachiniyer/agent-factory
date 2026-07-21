@@ -24,11 +24,12 @@ import (
 // boundary.
 
 var (
-	agentServerListen     string
-	agentServerRepo       string
-	agentServerTitle      string
-	agentServerProgram    string
-	agentServerSessionEnv []string
+	agentServerListen          string
+	agentServerRepo            string
+	agentServerTitle           string
+	agentServerProgram         string
+	agentServerProgramResolved bool
+	agentServerSessionEnv      []string
 )
 
 var agentServerCmd = &cobra.Command{
@@ -73,6 +74,7 @@ branch before shutdown), not this server's.`,
 			RepoPath:              repo,
 			Title:                 agentServerTitle,
 			Program:               agentServerProgram,
+			ProgramResolved:       agentServerProgramResolved,
 			SessionEnvPassthrough: agentServerSessionEnv,
 		}, cmd.OutOrStdout())
 	},
@@ -106,6 +108,8 @@ func init() {
 		"Session title for the workspace (required)")
 	agentServerCmd.Flags().StringVar(&agentServerProgram, "program", "",
 		"Agent program to run (default: the configured default_program)")
+	agentServerCmd.Flags().BoolVar(&agentServerProgramResolved, "program-resolved", false,
+		"Treat --program as an already-resolved runtime command")
 	agentServerCmd.Flags().StringSliceVar(&agentServerSessionEnv, "session-env", nil,
 		"Additional exact environment variable name an agent may inherit (repeatable)")
 	_ = agentServerCmd.MarkFlagRequired("title")

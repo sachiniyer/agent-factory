@@ -23,7 +23,14 @@ import (
 // that don't materialize a config) falls back to the raw Program string so
 // legacy free-form values still reach tmux verbatim.
 func resolveProgramForInstance(i *Instance) string {
-	return resolveProgramForAgent(i, i.AgentProgram())
+	i.mu.RLock()
+	agent := i.Program
+	alreadyResolved := agent != "" && agent == i.preResolvedProgram
+	i.mu.RUnlock()
+	if alreadyResolved {
+		return agent
+	}
+	return resolveProgramForAgent(i, agent)
 }
 
 // resolveProgramForAgent is the target-explicit form used by handoff preflight.

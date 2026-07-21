@@ -318,6 +318,7 @@ func (p *hookProvisioner) launch() (*AgentServerEndpoint, error) {
 	}
 	if prog := strings.TrimSpace(p.environmentProgram()); prog != "" {
 		args = append(args, "--program", prog)
+		args = append(args, "--program-resolved")
 	}
 	for _, name := range p.spec.SessionEnvPassthrough {
 		args = append(args, "--session-env", name)

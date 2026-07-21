@@ -60,15 +60,19 @@ func TestHookEnvironmentUsesResolvedProgramOverride(t *testing.T) {
 env | cut -d= -f1 | grep -qx OPENAI_API_KEY || exit 9
 env | cut -d= -f1 | grep -qx ANTHROPIC_API_KEY && exit 9
 resolved=
+resolved_marker=
 while [ "$#" -gt 0 ]; do
   if [ "$1" = "--program" ]; then
     shift
     [ "$1" = "codex" ] || exit 9
     resolved=yes
+  elif [ "$1" = "--program-resolved" ]; then
+    resolved_marker=yes
   fi
   shift
 done
 [ "$resolved" = yes ] || exit 9
+[ "$resolved_marker" = yes ] || exit 9
 echo '{"url":"http://127.0.0.1:9","token":"test-token"}'
 `)
 	writeInRepoConfig(t, repoRoot, map[string]any{
@@ -189,7 +193,7 @@ func TestSandboxAgentServerUsesResolvedCommandForFilteringAndLaunch(t *testing.T
 	}{
 		"docker": {
 			executable: dockerAfBinaryPath,
-			inner: fmt.Sprintf("%s agent-server --listen :%s --repo %s --title %s --program %s",
+			inner: fmt.Sprintf("%s agent-server --listen :%s --repo %s --title %s --program %s --program-resolved",
 				shellQuote(dockerAfBinaryPath), dockerAgentPort, shellQuote(dockerWorkspaceDir), shellQuote(spec.Title), shellQuote(tmux.ProgramCodex)),
 			commandResult: func() (string, error) {
 				return (&dockerProvisioner{spec: spec, program: tmux.ProgramCodex}).agentServerCommand()
@@ -197,7 +201,7 @@ func TestSandboxAgentServerUsesResolvedCommandForFilteringAndLaunch(t *testing.T
 		},
 		"ssh": {
 			executable: "/srv/af-session/af",
-			inner: fmt.Sprintf("%s agent-server --listen 127.0.0.1:0 --repo %s --title %s --program %s",
+			inner: fmt.Sprintf("%s agent-server --listen 127.0.0.1:0 --repo %s --title %s --program %s --program-resolved",
 				shellQuote("/srv/af-session/af"), shellQuote("/srv/af-session/workspace"), shellQuote(spec.Title), shellQuote(tmux.ProgramCodex)),
 			commandResult: func() (string, error) {
 				return (&sshProvisioner{spec: spec, program: tmux.ProgramCodex, sessionDir: "/srv/af-session"}).agentServerCommand()
@@ -216,6 +220,52 @@ func TestSandboxAgentServerUsesResolvedCommandForFilteringAndLaunch(t *testing.T
 		if command != want {
 			t.Fatalf("%s agent-server command = %q, want the resolved Codex command inside the Codex filter %q", backend, command, want)
 		}
+	}
+}
+
+func TestSandboxAgentServerMarksResolvedProgram(t *testing.T) {
+	spec := ProvisionSpec{Title: "override", Program: tmux.ProgramClaude}
+	tests := map[string]func() (string, error){
+		"docker": func() (string, error) {
+			return (&dockerProvisioner{spec: spec, program: tmux.ProgramCodex}).agentServerCommand()
+		},
+		"ssh": func() (string, error) {
+			return (&sshProvisioner{spec: spec, program: tmux.ProgramCodex, sessionDir: "/srv/af-session"}).agentServerCommand()
+		},
+	}
+	for backend, commandResult := range tests {
+		command, err := commandResult()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(command, "--program-resolved") {
+			t.Fatalf("%s agent-server command can offer the resolved program for a second config lookup: %q", backend, command)
+		}
+	}
+}
+
+func TestPreResolvedSandboxProgramBypassesSecondOverrideLookup(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	repoRoot := initTempGitRepo(t)
+	writeInRepoConfig(t, repoRoot, map[string]any{
+		"program_overrides": map[string]any{
+			tmux.ProgramCodex: "codex --model second-lookup",
+		},
+	})
+
+	resolved := &Instance{
+		Title:              "resolved",
+		Path:               repoRoot,
+		Program:            tmux.ProgramCodex,
+		preResolvedProgram: tmux.ProgramCodex,
+	}
+	if got := resolveProgramForInstance(resolved); got != tmux.ProgramCodex {
+		t.Fatalf("pre-resolved program = %q, want %q without a second override lookup", got, tmux.ProgramCodex)
+	}
+
+	ordinary := &Instance{Title: "ordinary", Path: repoRoot, Program: tmux.ProgramCodex}
+	if got := resolveProgramForInstance(ordinary); got != "codex --model second-lookup" {
+		t.Fatalf("ordinary program = %q, want one override lookup", got)
 	}
 }
 

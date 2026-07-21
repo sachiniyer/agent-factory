@@ -70,6 +70,9 @@ type AgentServerOptions struct {
 	Title string
 	// Program is the agent program to run (empty ⇒ the config default).
 	Program string
+	// ProgramResolved means Program is the final command selected by the outer
+	// runtime and must not be offered to program_overrides a second time.
+	ProgramResolved bool
 	// SessionEnvPassthrough carries exact operator-approved variable names from
 	// the outer runtime. Values remain in this host's environment.
 	SessionEnvPassthrough []string
@@ -127,6 +130,7 @@ func RunAgentServer(opts AgentServerOptions, stdout io.Writer) error {
 		Title:                 opts.Title,
 		Path:                  opts.RepoPath,
 		Program:               program,
+		ProgramResolved:       opts.ProgramResolved && opts.Program != "",
 		SessionEnvPassthrough: opts.SessionEnvPassthrough,
 		// The in-sandbox agent-server ALWAYS runs the local runtime (tmux + git
 		// worktree against RepoPath) — it IS the sandbox (§1.2). Force it explicitly

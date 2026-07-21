@@ -567,6 +567,7 @@ func (p *sshProvisioner) agentServerCommand() (string, error) {
 		shellQuote(p.afPath()), shellQuote(p.workspacePath()), shellQuote(p.spec.Title))
 	if strings.TrimSpace(p.program) != "" {
 		inner += " --program " + shellQuote(p.program)
+		inner += " --program-resolved"
 	}
 	for _, name := range p.spec.SessionEnvPassthrough {
 		inner += " --session-env " + shellQuote(name)

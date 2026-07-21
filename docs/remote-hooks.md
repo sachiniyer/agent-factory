@@ -69,6 +69,7 @@ Provisions the workspace on your infrastructure, starts an `af agent-server` the
 | `--repo <url>` | The repo's `origin` URL to clone the workspace from (GitHub is the durable store). |
 | `--branch <branch>` | **Only on restore** — the archived branch to materialize (see [Archive & restore](#archive--restore)). Absent on a fresh create. |
 | `--program <p>` | The agent program to run (optional; forward to `af agent-server --program`). |
+| `--program-resolved` | Present with `--program`; forward it to `af agent-server` so the cloned repo cannot apply a second `program_overrides` lookup. |
 | `--session-env <name>` | Repeated for each global `session_env_passthrough` name; forward each one to `af agent-server --session-env`. Values are never command arguments. |
 
 Both hook scripts themselves run with af's filtered session environment: core
@@ -178,7 +179,7 @@ Durability lives in **GitHub, not the sandbox** (the epic's push/pull-branch mod
 #!/usr/bin/env bash
 set -euo pipefail
 
-NAME="" TITLE="" REPO="" BRANCH="" PROGRAM=""
+NAME="" TITLE="" REPO="" BRANCH="" PROGRAM="" PROGRAM_RESOLVED=""
 SESSION_ENV=()
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -187,6 +188,7 @@ while [ $# -gt 0 ]; do
     --repo)    REPO="$2";    shift 2;;
     --branch)  BRANCH="$2";  shift 2;;
     --program) PROGRAM="$2"; shift 2;;
+    --program-resolved) PROGRAM_RESOLVED="--program-resolved"; shift;;
     --session-env) SESSION_ENV+=("$2"); shift 2;;
     *) shift;;
   esac
@@ -208,6 +210,7 @@ BANNER="$WORKDIR/banner.json"
 LOG="$WORKDIR/agent-server.log"
 ARGS=(agent-server --listen 0.0.0.0:0 --repo "$WORKDIR/workspace" --title "$TITLE")
 [ -n "$PROGRAM" ] && ARGS+=(--program "$PROGRAM")
+[ -n "$PROGRAM_RESOLVED" ] && ARGS+=("$PROGRAM_RESOLVED")
 for ENV_NAME in "${SESSION_ENV[@]}"; do ARGS+=(--session-env "$ENV_NAME"); done
 nohup af "${ARGS[@]}" >"$BANNER" 2>"$LOG" &
 echo $! > "$WORKDIR/pid"

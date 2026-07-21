@@ -30,6 +30,10 @@ type InstanceOptions struct {
 	Path string
 	// Program is the program to run in the instance (e.g. "claude", "aider --model ollama_chat/gemma3:1b")
 	Program string
+	// ProgramResolved marks Program as the final command selected by an outer
+	// runtime. It is internal to the sandbox agent-server handoff; ordinary
+	// callers pass an agent enum and leave this false.
+	ProgramResolved bool
 	// ForceRemote forces the instance to use the remote hook backend,
 	// even if the repo config would default to local. It is the pre-Phase-4
 	// hook selector, equivalent to Backend == BackendHook, and takes precedence
@@ -260,10 +264,18 @@ func NewInstance(opts InstanceOptions) (*Instance, error) {
 		Width:                 0,
 		CreatedAt:             t,
 		UpdatedAt:             t,
+		preResolvedProgram:    resolvedProgramMarker(opts),
 		sessionEnvPassthrough: normalizedSessionEnv,
 		inPlace:               opts.InPlace,
 		backend:               backend,
 		remoteClient:          remoteClient,
 		runtimeTeardown:       res.Teardown,
 	}, nil
+}
+
+func resolvedProgramMarker(opts InstanceOptions) string {
+	if opts.ProgramResolved {
+		return opts.Program
+	}
+	return ""
 }

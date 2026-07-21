@@ -17,6 +17,12 @@ import (
 // covers the full production chain: Start -> tmux -> internal exec shim ->
 // agent-named program, including a pre-existing tmux server.
 func TestRealPaneEnvironmentIsFiltered(t *testing.T) {
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skipf("tmux not available: %v", err)
+	}
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skipf("git not available: %v", err)
+	}
 	const (
 		customName = "CUSTOM_PROVIDER_TOKEN"
 		deniedName = "AF_TEST_UNRELATED_SECRET"

@@ -430,6 +430,7 @@ func (p *dockerProvisioner) agentServerCommand() (string, error) {
 		shellQuote(dockerAfBinaryPath), dockerAgentPort, shellQuote(dockerWorkspaceDir), shellQuote(p.spec.Title))
 	if strings.TrimSpace(p.program) != "" {
 		inner += " --program " + shellQuote(p.program)
+		inner += " --program-resolved"
 	}
 	for _, name := range p.spec.SessionEnvPassthrough {
 		inner += " --session-env " + shellQuote(name)
