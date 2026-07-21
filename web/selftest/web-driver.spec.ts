@@ -411,11 +411,130 @@ async function setCustomCron(modal: Locator, expr: string): Promise<void> {
  *  NO credential. The absence of the #af-token field is the proof no login was
  *  shown; the rail being populated proves the Snapshot was fetched authorized. */
 async function openTokenless(page: Page): Promise<void> {
+  await pinRealFixtureProject(page);
   await page.goto("/");
   // The authed shell renders without any login interaction.
   await expect(page.locator(".af-app")).toBeVisible();
   // The paste-token login was never required — its input is absent from the DOM.
   await expect(page.locator("#af-token")).toHaveCount(0);
+  await assertRealRailFixture(page);
+}
+
+/**
+ * A fresh browser tab has no persisted project choice, so the product correctly
+ * defaults to the project holding the newest live session. This harness creates
+ * sessions in several repos as it runs; its real-rail tests intentionally consume
+ * the original mock repo. Pin that contract before the app's first script executes.
+ * The sessionStorage marker makes it one-shot, so later project-persistence tests can
+ * select another repo and reload without this setup overwriting their choice.
+ */
+async function pinRealFixtureProject(page: Page): Promise<void> {
+  const repo = process.env.AF_MOCK_REPO;
+  if (!repo) return;
+  await page.addInitScript((fixtureRepo) => {
+    if (window.top !== window) return;
+    try {
+      const marker = "af-selftest-real-project-pinned";
+      if (sessionStorage.getItem(marker) === "1") return;
+      localStorage.setItem("af-project", fixtureRepo);
+      sessionStorage.setItem(marker, "1");
+    } catch {
+      // Sandboxed/non-origin documents can deny storage; the real app document does
+      // not, and assertRealRailFixture will report the selected repo if that changes.
+    }
+  }, repo);
+}
+
+class RealRailFixtureUnavailableError extends Error {}
+
+/**
+ * Describes the three surfaces that can disagree when the seeded rail disappears:
+ * the browser's selected project/rendered rows, an out-of-page real Snapshot probe,
+ * and a fresh real events socket. Page routing does not affect APIRequestContext, so
+ * the Snapshot line still reports the daemon's truth when a regression test (or a
+ * stale service worker/client projection) gives the SPA an empty response.
+ */
+async function realRailDiagnostics(page: Page): Promise<string> {
+  const selectedRepo = await page.locator(".af-project-switch-name").textContent().catch(() => null);
+  const selectedRepoKey = await page.evaluate(() => localStorage.getItem("af-project")).catch(() => null);
+  const renderedRows = await page.locator(".af-rail-list .af-row").allTextContents().catch(() => []);
+  const livePipClass = await page.locator(".af-live-pip").getAttribute("class").catch(() => null);
+
+  let snapshotLine: string;
+  try {
+    const url = new URL("/v1/Snapshot", page.url()).toString();
+    const response = await page.context().request.post(url, { data: { repo_id: "" } });
+    const status = response.status();
+    const text = await response.text();
+    let body: unknown;
+    try {
+      body = JSON.parse(text);
+    } catch {
+      body = text;
+    }
+    const envelope = body as {
+      data?: { instances?: Array<{ title?: unknown; worktree?: { repo_path?: unknown } }> | null };
+      error?: unknown;
+    };
+    const instances = Array.isArray(envelope?.data?.instances) ? envelope.data.instances : [];
+    const rows = instances.map(
+      (instance) =>
+        `title=${JSON.stringify(instance.title ?? null)} repo=${JSON.stringify(instance.worktree?.repo_path ?? null)}`,
+    );
+    snapshotLine = `status=${status} error=${JSON.stringify(envelope?.error ?? null)} instances=[${rows.join(", ")}]`;
+  } catch (err) {
+    snapshotLine = `request failed: ${err instanceof Error ? err.message : String(err)}`;
+  }
+
+  const eventsLine = await page
+    .evaluate(
+      (timeoutMs) =>
+        new Promise<string>((resolve) => {
+          const url = new URL("/v1/events", window.location.href);
+          url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+          // Keep the probe distinguishable from the app's subscription. Tests can
+          // isolate a stale client projection while this socket still reaches the
+          // daemon's real events plane; the daemon ignores the diagnostic marker.
+          url.searchParams.set("af_selftest_probe", "1");
+          const socket = new WebSocket(url);
+          let settled = false;
+          const finish = (result: string): void => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timer);
+            socket.close();
+            resolve(result);
+          };
+          const timer = window.setTimeout(() => finish(`timeout after ${timeoutMs}ms`), timeoutMs);
+          socket.addEventListener("open", () => finish("open"), { once: true });
+          socket.addEventListener("error", () => finish("error"), { once: true });
+          socket.addEventListener("close", (event) => finish(`closed code=${event.code} reason=${JSON.stringify(event.reason)}`), {
+            once: true,
+          });
+        }),
+      1_500,
+    )
+    .catch((err) => `probe failed: ${err instanceof Error ? err.message : String(err)}`);
+
+  return [
+    `selected repo=${JSON.stringify(selectedRepo)} persisted=${JSON.stringify(selectedRepoKey)}`,
+    `rendered rail rows=${JSON.stringify(renderedRows)} ui events=${JSON.stringify(livePipClass)}`,
+    `real Snapshot: ${snapshotLine}`,
+    `real events: ${eventsLine}`,
+  ].join("\n");
+}
+
+/** Fails at the first missing-row boundary instead of blaming the next selector. */
+async function assertRealRailFixture(page: Page, expectedTitle = SESSION_A): Promise<void> {
+  try {
+    // Presence, not CSS visibility: the responsive rail is deliberately
+    // visibility:hidden while its mobile drawer is closed.
+    await expect(row(page, expectedTitle)).toHaveCount(1, { timeout: 3_000 });
+  } catch {
+    throw new RealRailFixtureUnavailableError(
+      `real rail fixture unavailable: expected ${JSON.stringify(expectedTitle)}\n${await realRailDiagnostics(page)}`,
+    );
+  }
 }
 
 // NO file-wide serial mode, deliberately (#1898).
@@ -450,10 +569,29 @@ let page: Page;
 // module state, so a worker restart resets it — which is exactly why the two flows
 // that share it live in one serial describe rather than at the top level.
 let createdTitle = "";
+let realRailUnavailable = "";
+// Keep the tagged details at each declaration (instead of registering through a
+// wrapper) so a failure still reports its real source line; beforeEach uses the tag
+// to skip only seeded-rail consumers after a worker restart.
+const REAL_FIXTURE_TAG = "@real-fixture";
+const REAL_FIXTURE = { tag: REAL_FIXTURE_TAG };
 
 test.beforeAll(async ({ browser }) => {
   page = await browser.newPage();
-  await openTokenless(page);
+  try {
+    await openTokenless(page);
+  } catch (err) {
+    if (!(err instanceof RealRailFixtureUnavailableError)) throw err;
+    // Do not fail beforeAll: Playwright would restart it for every following test.
+    // The first tokenless test reports this once; after a mid-suite worker restart,
+    // tagged real-fixture tests skip while independent mocked tests keep running.
+    realRailUnavailable = err.message;
+  }
+});
+
+test.beforeEach(({}, testInfo) => {
+  if (realRailUnavailable === "" || !testInfo.tags.includes(REAL_FIXTURE_TAG)) return;
+  testInfo.skip(true, "the seeded real rail is unavailable; see the initiating #2276 diagnostic failure");
 });
 
 test.afterAll(async () => {
@@ -461,15 +599,59 @@ test.afterAll(async () => {
 });
 
 test("tokenless loopback (#1696): the SPA auto-connects with no token, no login screen", async () => {
+  test.skip(realRailUnavailable !== "", "the dedicated #2276 diagnostic test reports the missing real rail");
   // The authed shell is up (openTokenless asserted it) with NO paste-token step —
   // reload to prove it is not a one-off: a fresh load re-probes /v1/auth-info and
   // again auto-connects with no credential.
   await page.reload();
   await expect(page.locator(".af-app")).toBeVisible();
   await expect(page.locator("#af-token")).toHaveCount(0);
+  await assertRealRailFixture(page);
   // The events WS connected on the empty-token credential (the ?access_token= is
   // blank and the loopback peer is exempt): the live pip reads open.
   await expect(page.locator(".af-live-pip.af-live-open")).toBeVisible();
+});
+
+test("#2276: a fresh shell with no seeded real row reports rail-plane diagnostics", async ({ browser }) => {
+  if (realRailUnavailable) throw new Error(realRailUnavailable);
+  const ctx = await browser.newContext();
+  try {
+    const p = await ctx.newPage();
+    await p.routeWebSocket(
+      (url) => url.pathname === "/v1/events" && !url.searchParams.has("af_selftest_probe"),
+      () => {
+        // Keep the app's socket open but deliberately silent: the browser
+        // projection stays on its mocked Snapshot while the marked diagnostic
+        // socket below bypasses this route and probes the real events plane.
+      },
+    );
+    await p.route("**/v1/Snapshot", async (route) => {
+      const resp = await route.fetch();
+      const body = await resp.json();
+      const fixturelessBody = body?.data ? { ...body, data: { ...body.data, instances: [] } } : body;
+      await route.fulfill({
+        status: resp.status(),
+        contentType: "application/json",
+        body: JSON.stringify(fixturelessBody),
+      });
+    });
+
+    let failure = "";
+    try {
+      await openTokenless(p);
+    } catch (err) {
+      failure = err instanceof Error ? err.message : String(err);
+    }
+
+    expect(failure).toContain(`real rail fixture unavailable: expected ${JSON.stringify(SESSION_A)}`);
+    expect(failure).toContain("selected repo=");
+    expect(failure).toContain("real Snapshot: status=200");
+    const snapshotDiagnostic = failure.split("\n").find((line) => line.startsWith("real Snapshot: ")) ?? "";
+    expect(snapshotDiagnostic).toContain(JSON.stringify(SESSION_A));
+    expect(failure).toContain("real events: open");
+  } finally {
+    await ctx.close();
+  }
 });
 
 // The auth-info envelope the SPA probes, as the daemon would send it.
@@ -725,7 +907,7 @@ test("token persistence: the tokenless path stores no credential (#1696)", async
   expect(await storedToken(page)).toBeNull();
 });
 
-test("sidebar lists the seeded sessions from the Snapshot/events plane", async () => {
+test("sidebar lists the seeded sessions from the Snapshot/events plane", REAL_FIXTURE, async () => {
   // Both seeded rows are present — proof the rail is driven by the daemon
   // projection, not a static list. The rail is SCOPED to the default project (the
   // first repo, redesign PR2), so A and B (that repo) show while SESSION_C (the
@@ -742,7 +924,7 @@ test("sidebar lists the seeded sessions from the Snapshot/events plane", async (
   await expect(page.locator(".af-live-pip.af-live-open")).toBeVisible();
 });
 
-test("status dots (#1766): waiting shows a green dot, working shows none, error states are static — no spin anywhere", async ({
+test("status dots (#1766): waiting shows a green dot, working shows none, error states are static — no spin anywhere", REAL_FIXTURE, async ({
   browser,
 }) => {
   // The daemon can't be coerced to Running/Lost/Dead/Limit on demand, so pin the
@@ -875,7 +1057,7 @@ test("status dots (#1766): waiting shows a green dot, working shows none, error 
   await ctx.close();
 });
 
-test("#2234: creating and id-less rows expose no lifecycle actions; the shared projection chooses the verb", async ({
+test("#2234: creating and id-less rows expose no lifecycle actions; the shared projection chooses the verb", REAL_FIXTURE, async ({
   browser,
 }) => {
   const ctx = await browser.newContext();
@@ -955,7 +1137,7 @@ test("#2234: creating and id-less rows expose no lifecycle actions; the shared p
   await ctx.close();
 });
 
-test("click-to-attach opens the xterm terminal and shows live output", async () => {
+test("click-to-attach opens the xterm terminal and shows live output", REAL_FIXTURE, async () => {
   await row(page, SESSION_A).click();
 
   // The main pane switched to the terminal view and mounted a real xterm instance.
@@ -989,7 +1171,7 @@ test("click-to-attach opens the xterm terminal and shows live output", async () 
   await expect(page.locator(".af-term-head button", { hasText: "Kill" })).toHaveCount(0);
 });
 
-test("the #1694 keyboard model: j/k navigate, Enter attaches, Escape returns to rail", async () => {
+test("the #1694 keyboard model: j/k navigate, Enter attaches, Escape returns to rail", REAL_FIXTURE, async () => {
   // We are attached to A (terminal mode from the previous flow). Escape is the one
   // hatch back to the rail — no stray ESC byte leaks to the PTY.
   await page.keyboard.press("Escape");
@@ -1021,7 +1203,7 @@ test("the #1694 keyboard model: j/k navigate, Enter attaches, Escape returns to 
   await expect(page.locator(".af-app.af-kb-rail")).toBeVisible();
 });
 
-test("the #1694 keyboard model: [ / ] cycle the top-level view (sessions → tasks → config)", async () => {
+test("the #1694 keyboard model: [ / ] cycle the top-level view (sessions → tasks → config)", REAL_FIXTURE, async () => {
   // Rail mode from the previous flow. [ / ] cycle the top-level view; they fire in
   // rail mode only (a modal or focused terminal would swallow them). After Escape
   // the active element is document.body, so the document-level capture-phase keydown
@@ -1048,7 +1230,7 @@ test("the #1694 keyboard model: [ / ] cycle the top-level view (sessions → tas
   await expect(page.locator(".af-rail-list")).toBeVisible();
 });
 
-test("config: the editor renders from the manifest and writes through the real path", async () => {
+test("config: the editor renders from the manifest and writes through the real path", REAL_FIXTURE, async () => {
   // The config view is rendered entirely from GetConfig (the config manifest zipped
   // with live values) — the bundle carries no key list of its own. This drives the
   // real daemon against the container's throwaway AF home, so the write goes through
@@ -1110,7 +1292,7 @@ test("config: the editor renders from the manifest and writes through the real p
   await expect(page.locator(".af-rail-list")).toBeVisible();
 });
 
-test("tabs: create a shell tab, switch to it, see its distinct output, close it (#1592 PR7)", async () => {
+test("tabs: create a shell tab, switch to it, see its distinct output, close it (#1592 PR7)", REAL_FIXTURE, async () => {
   // Capture the tab-mutation request bodies so we can assert they carry the stable
   // session id (#1592 PR7 fix 1 — the daemon must resolve by id, not the cross-repo
   // ambiguous title), and let one CloseTab be forced to fail (fix 3 — the error
@@ -1207,7 +1389,7 @@ test("tabs: create a shell tab, switch to it, see its distinct output, close it 
   await page.unroute("**/v1/CloseTab");
 });
 
-test("split panes (feat): drag a tab to a pane edge splits into two live panes; close collapses back", async () => {
+test("split panes (feat): drag a tab to a pane edge splits into two live panes; close collapses back", REAL_FIXTURE, async () => {
   // Attach to A and give it a second tab, so there is a distinct tab to drag into a
   // split (dragging the only tab onto itself just moves it — no split).
   await row(page, SESSION_A).click();
@@ -1257,7 +1439,7 @@ test("split panes (feat): drag a tab to a pane edge splits into two live panes; 
   await expect(tabbar.locator(".af-tab")).toHaveCount(1, { timeout: 30_000 });
 });
 
-test("split panes (feat): a FRESHLY-CREATED tab is a drag source too — drag the new tab splits (#1737 follow-up)", async () => {
+test("split panes (feat): a FRESHLY-CREATED tab is a drag source too — drag the new tab splits (#1737 follow-up)", REAL_FIXTURE, async () => {
   // The regression: only tabs present at first render were drag sources; a tab created
   // AFTER load (a new terminal tab) could not be dragged into a split. Create a new
   // terminal tab, then drag THAT tab (not an initial one) onto a pane edge and prove it
@@ -1312,7 +1494,7 @@ test("split panes (feat): a FRESHLY-CREATED tab is a drag source too — drag th
   await expect(tabbar.locator(".af-tab")).toHaveCount(1, { timeout: 30_000 });
 });
 
-test("split panes (feat): a bar rebuild that replaces a drag's source ends the drag cleanly — no stuck state (#1737 Greptile)", async () => {
+test("split panes (feat): a bar rebuild that replaces a drag's source ends the drag cleanly — no stuck state (#1737 Greptile)", REAL_FIXTURE, async () => {
   // If the source tab button is REPLACED mid-drag (a concurrent tab change rebuilds the
   // bar), no dragend can fire on the now-detached source — the global "dragging" state
   // would otherwise stick, leaving the pane hints + drop overlay on screen forever. The
@@ -1360,7 +1542,7 @@ test("split panes (feat): a bar rebuild that replaces a drag's source ends the d
   await expect(tabbar.locator(".af-tab")).toHaveCount(1, { timeout: 30_000 });
 });
 
-test("split panes (feat): an out-of-range dropped tab is ignored — no broken pane", async () => {
+test("split panes (feat): an out-of-range dropped tab is ignored — no broken pane", REAL_FIXTURE, async () => {
   // Attach to A (a single agent tab, so tab index 1+ does not exist).
   await row(page, SESSION_A).click();
   await expect(page.locator(".af-main.af-main-term")).toBeVisible();
@@ -1376,7 +1558,7 @@ test("split panes (feat): an out-of-range dropped tab is ignored — no broken p
   await expect(page.locator(".af-term-host")).toContainText(READY_MARKER);
 });
 
-test("split panes (feat): a mid-drag tab-set change cancels the drop — no misbinding (#1738 repro)", async () => {
+test("split panes (feat): a mid-drag tab-set change cancels the drop — no misbinding (#1738 repro)", REAL_FIXTURE, async () => {
   // Attach to A and give it a second tab, so a drop index of 1 is IN RANGE (2 tabs).
   // This is the T-Rex reproduction: the index is valid, but the tab set changed since
   // the drag began, so binding by index alone would attach the new pane to the WRONG
@@ -1408,7 +1590,7 @@ test("split panes (feat): a mid-drag tab-set change cancels the drop — no misb
   await expect(tabbar.locator(".af-tab")).toHaveCount(1, { timeout: 30_000 });
 });
 
-test("split panes (#1901): dragging the ACTIVE tab splits and opens a DIFFERENT tab beside it", async () => {
+test("split panes (#1901): dragging the ACTIVE tab splits and opens a DIFFERENT tab beside it", REAL_FIXTURE, async () => {
   // The regression: the tab a pane already shows could not be dragged into a split. The
   // drop bound that tab to BOTH halves, so the one-tab-one-pane dedupe closed the
   // original and the split collapsed back — the drag read as a dead gesture. The new
@@ -1470,7 +1652,7 @@ test("split panes (#1901): dragging the ACTIVE tab splits and opens a DIFFERENT 
   await expect(tabbar.locator(".af-tab")).toHaveCount(1, { timeout: 30_000 });
 });
 
-test("split panes (#1901): dragging the only tab of a ONE-tab session is an inert no-op", async () => {
+test("split panes (#1901): dragging the only tab of a ONE-tab session is an inert no-op", REAL_FIXTURE, async () => {
   // The documented degradation: with no other tab to put in the new half, the drag does
   // NOTHING — it does not split, and it does not duplicate the tab into two panes. A
   // duplicate would be the very A|A the dedupe exists to prevent, and it would collapse
@@ -1494,7 +1676,7 @@ test("split panes (#1901): dragging the only tab of a ONE-tab session is an iner
   await expect(page.locator(".af-term-meta")).toContainText("Live");
 });
 
-test("web tab (feat): a local dev-server preview is daemon-proxied and rendered in an iframe", async () => {
+test("web tab (feat): a local dev-server preview is daemon-proxied and rendered in an iframe", REAL_FIXTURE, async () => {
   // The web-tab session was seeded (web-selftest-entry.sh) with a LOCAL web tab
   // "preview" pointing at a loopback HTTP server. Attaching shows the agent tab
   // plus the two web tabs; the tab bar renders web tabs by name.
@@ -1525,7 +1707,7 @@ test("web tab (feat): a local dev-server preview is daemon-proxied and rendered 
   });
 });
 
-test("web tab (#1806/#1811): a Vite-shaped subdirectory app previews, and its absolute-path asset 404s instead of getting the SPA shell", async () => {
+test("web tab (#1806/#1811): a Vite-shaped subdirectory app previews, and its absolute-path asset 404s instead of getting the SPA shell", REAL_FIXTURE, async () => {
   // The fixture is the shape the old single-document fixture structurally could not
   // fail on: a document under /app/ referencing a SIBLING (x.css), a PARENT-relative
   // (../shared.css) and an ABSOLUTE (/assets/app.js) asset.
@@ -1573,7 +1755,7 @@ test("web tab (#1806/#1811): a Vite-shaped subdirectory app previews, and its ab
   expect(await viteFrame!.title()).not.toContain(VITE_ABS_TITLE);
 });
 
-test("web tab (#1810): closing a LOWER tab leaves an open preview on its OWN dev server", async () => {
+test("web tab (#1810): closing a LOWER tab leaves an open preview on its OWN dev server", REAL_FIXTURE, async () => {
   // The #1810 misroute, end to end. This session's tabs are [agent, lower, mis,
   // after]; a pane opens on "mis" (index 2, the vite-shaped server). Closing "lower"
   // shifts mis 2->1 and after 3->2, so an ORDINAL-keyed iframe would start serving
@@ -1622,7 +1804,7 @@ test("web tab (#1810): closing a LOWER tab leaves an open preview on its OWN dev
   expect(stamp).toBe("af-not-remounted");
 });
 
-test("web tab (#1809): a web tab survives archive -> restore and still renders through the proxy", async () => {
+test("web tab (#1809): a web tab survives archive -> restore and still renders through the proxy", REAL_FIXTURE, async () => {
   // The harness already drove the issue's CLI repro end to end against the real
   // daemon: this session was given a web tab ("webpreview" -> the loopback server)
   // plus a process tab ("watcher"), then archived and restored. Archive used to
@@ -1654,7 +1836,7 @@ test("web tab (#1809): a web tab survives archive -> restore and still renders t
   });
 });
 
-test("web tab (#1809 follow-up): an ARCHIVED session's preserved web tab is inert — placeholder, no proxy, no ×", async () => {
+test("web tab (#1809 follow-up): an ARCHIVED session's preserved web tab is inert — placeholder, no proxy, no ×", REAL_FIXTURE, async () => {
   // The harness left this session archived holding a preserved web tab (and already
   // proved the CLI refuses to delete it). Preserving the URL must not make an
   // archived session live again: the target is a loopback address whose dev server
@@ -1705,7 +1887,7 @@ test("web tab (#1809 follow-up): an ARCHIVED session's preserved web tab is iner
   await resetFilter(page);
 });
 
-test("web tab (item A / Sachin): an external tab shows af's fallback + a working open link, NEVER the browser's raw refusal", async () => {
+test("web tab (item A / Sachin): an external tab shows af's fallback + a working open link, NEVER the browser's raw refusal", REAL_FIXTURE, async () => {
   // The bug: an external site that sends X-Frame-Options renders the BROWSER'S OWN
   // "refused to connect" page inside the iframe — and that block page FIRES the iframe
   // `load` event, so the old onLoad hid the fallback and revealed the raw refusal. The
@@ -1755,7 +1937,7 @@ test("web tab (item A / Sachin): an external tab shows af's fallback + a working
   expect(await frame.getAttribute("src")).toBeNull();
 });
 
-test("web tab (feat): a tab with no target URL renders a clean fallback, not a blank pane", async () => {
+test("web tab (feat): a tab with no target URL renders a clean fallback, not a blank pane", REAL_FIXTURE, async () => {
   // The URL-less web tab is a malformed/older record that no API can mint — three
   // guards refuse an empty target — so the harness writes it the way an older version
   // would have, straight into the daemon's own store before it boots
@@ -1794,7 +1976,7 @@ test("web tab (feat): a tab with no target URL renders a clean fallback, not a b
   ).toHaveCount(0);
 });
 
-test("split panes (fix): a WEB/iframe pane doesn't swallow a tab drag — dropping on its edge splits", async () => {
+test("split panes (fix): a WEB/iframe pane doesn't swallow a tab drag — dropping on its edge splits", REAL_FIXTURE, async () => {
   // The bug: dragover/drop over an <iframe> go to the FRAMED document, so a pane showing a
   // web tab ate the drag — no drop zone, no split, "nothing happens". The fix makes pane
   // iframes pointer-events:none for the duration of a drag, so the drag reaches the pane.
@@ -1831,7 +2013,7 @@ test("split panes (fix): a WEB/iframe pane doesn't swallow a tab drag — droppi
   await expect(page.locator(".af-term-host .af-pane")).toHaveCount(1, { timeout: 15_000 });
 });
 
-test("split panes (fix): the WEB tab itself drags onto a terminal pane edge and splits", async () => {
+test("split panes (fix): the WEB tab itself drags onto a terminal pane edge and splits", REAL_FIXTURE, async () => {
   // The mirror of the case above: the web tab as the drag SOURCE, dropped on a terminal
   // pane. The target isn't framed, so this proves the fix didn't break the ordinary path.
   await row(page, SESSION_WEB).click();
@@ -1853,7 +2035,7 @@ test("split panes (fix): the WEB tab itself drags onto a terminal pane edge and 
   await expect(page.locator(".af-term-host .af-pane")).toHaveCount(1, { timeout: 15_000 });
 });
 
-test("split panes (#1817 follow-up): Alt+j onto a WEB pane returns the keyboard to the rail, not the pane you left", async () => {
+test("split panes (#1817 follow-up): Alt+j onto a WEB pane returns the keyboard to the rail, not the pane you left", REAL_FIXTURE, async () => {
   // The cyclePane half of the SplitView.focus() boolean contract. nav.ts resolves Alt+j/k
   // in EITHER mode, ahead of the terminal branch, so a user ATTACHED to a terminal pane can
   // cycle onto an iframe pane that has no xterm to receive the keyboard. When cyclePane
@@ -1903,7 +2085,7 @@ test("split panes (#1817 follow-up): Alt+j onto a WEB pane returns the keyboard 
   await expect(page.locator(".af-term-host .af-pane")).toHaveCount(1, { timeout: 15_000 });
 });
 
-test("split panes (fix): a pane iframe is inert ONLY while dragging — normal interaction is untouched", async () => {
+test("split panes (fix): a pane iframe is inert ONLY while dragging — normal interaction is untouched", REAL_FIXTURE, async () => {
   // The fix must not cost the web tab its interactivity: the frame is inert for the drag
   // and immediately usable again afterwards. Both states are asserted on the live frame.
   await row(page, SESSION_WEB).click();
@@ -1937,7 +2119,7 @@ test("split panes (fix): a pane iframe is inert ONLY while dragging — normal i
   expect(await framePointerEvents()).toBe("auto");
 });
 
-test("web tab (feat): a surviving web tab that only SHIFTS ordinal is followed, not remounted (#1779)", async () => {
+test("web tab (feat): a surviving web tab that only SHIFTS ordinal is followed, not remounted (#1779)", REAL_FIXTURE, async () => {
   // Ordering note: this consumes probe-web's "preview" tab, so it must stay AFTER the
   // web-tab tests above that rely on it.
   //
@@ -2007,7 +2189,7 @@ test("web tab (feat): a surviving web tab that only SHIFTS ordinal is followed, 
 // session's tabs here are [Agent, external] and "external" is the non-agent tab these
 // two use as the retained pane.
 
-test("tabs (#1855): re-selecting the SAME session leaves the bar on the tab the pane shows, not Agent", async () => {
+test("tabs (#1855): re-selecting the SAME session leaves the bar on the tab the pane shows, not Agent", REAL_FIXTURE, async () => {
   // Selecting a session asserted `activeTab: 0` about a layout it had already retained:
   // the tree still pointed at tab N, so the bar highlighted Agent while the pane kept
   // showing N. Re-selecting the session you are ALREADY on is the shortest proof —
@@ -2037,7 +2219,7 @@ test("tabs (#1855): re-selecting the SAME session leaves the bar on the tab the 
   await expect(page.locator(".af-tab.af-tab-active .af-tab-label")).toHaveText("external");
 });
 
-test("tabs (#1855): switching away and back keeps activeTab on the visible pane — and the next close doesn't yank it to Agent", async () => {
+test("tabs (#1855): switching away and back keeps activeTab on the visible pane — and the next close doesn't yank it to Agent", REAL_FIXTURE, async () => {
   // The issue's own repro. It needs the re-entry to settle on the SAME focused index the
   // last report carried: report() dedups on (focusedTab, shownTabs, paneCount), so an
   // identical index makes it early-return and the `activeTab: 0` reset stands
@@ -2104,7 +2286,7 @@ test("tabs (#1855): switching away and back keeps activeTab on the visible pane 
   await expect(tabbar.locator(".af-tab")).toHaveCount(1, { timeout: 30_000 });
 });
 
-test("split panes (feat): logout clears retained trees — a fresh login shows the single-leaf default", async () => {
+test("split panes (feat): logout clears retained trees — a fresh login shows the single-leaf default", REAL_FIXTURE, async () => {
   // Split A into two panes.
   await row(page, SESSION_A).click();
   await expect(page.locator(".af-main.af-main-term")).toBeVisible();
@@ -2138,7 +2320,7 @@ test("split panes (feat): logout clears retained trees — a fresh login shows t
   }
 });
 
-test("project switcher (redesign PR2): lists projects with counts; selecting one scopes + swaps the rail; persists", async () => {
+test("project switcher (redesign PR2): lists projects with counts; selecting one scopes + swaps the rail; persists", REAL_FIXTURE, async () => {
   // The top-right switcher shows the current (default) project — the first repo.
   const switcher = page.locator(".af-project-switch");
   await expect(page.locator(".af-project-switch-name")).toHaveText("mock-repo");
@@ -2173,6 +2355,7 @@ test("project switcher (redesign PR2): lists projects with counts; selecting one
   await page.reload();
   await expect(page.locator(".af-app")).toBeVisible();
   await expect(page.locator(".af-project-switch-name")).toHaveText("mock-repo-2");
+  await assertRealRailFixture(page, SESSION_C);
   await expect(row(page, SESSION_C)).toBeVisible();
   await expect(row(page, SESSION_A)).toHaveCount(0);
 
@@ -2185,7 +2368,7 @@ test("project switcher (redesign PR2): lists projects with counts; selecting one
   await expect(row(page, SESSION_B)).toBeVisible();
 });
 
-test("task-only project (redesign PR2, Fix 1): a repo with a task but no session lists, scopes Tasks, and its delete is disabled", async () => {
+test("task-only project (redesign PR2, Fix 1): a repo with a task but no session lists, scopes Tasks, and its delete is disabled", REAL_FIXTURE, async () => {
   // Select the task-only project (a third repo with a task but NO session). It lists in
   // the switcher (derived from sessions OR tasks), so its tasks stay reachable.
   await page.locator(".af-project-switch").click();
@@ -2225,7 +2408,7 @@ test("task-only project (redesign PR2, Fix 1): a repo with a task but no session
   await expect(row(page, SESSION_A)).toBeVisible();
 });
 
-test("task-only project (redesign PR2, follow-on): add-task targets ITS repo, and a reload restores it as itself", async () => {
+test("task-only project (redesign PR2, follow-on): add-task targets ITS repo, and a reload restores it as itself", REAL_FIXTURE, async () => {
   // Capture the AddTask request so we can prove it targeted the task-only project's
   // repo — not a session-derived one, and not blocked by the absence of a session.
   let addBody: { task?: { project_path?: string } } | null = null;
@@ -2280,7 +2463,7 @@ test("task-only project (redesign PR2, follow-on): add-task targets ITS repo, an
   await expect(row(page, SESSION_A)).toBeVisible();
 });
 
-test("tasks view (#1592 PR8): list the seeded task; add / trigger / remove round-trips", async () => {
+test("tasks view (#1592 PR8): list the seeded task; add / trigger / remove round-trips", REAL_FIXTURE, async () => {
   // Capture the task-mutation request bodies so we can prove every mutation carries
   // the STABLE task id — the add mints it client-side, and trigger/remove must send
   // that SAME id, never the (non-unique) name (the #1678 id-scoping class, PR8).
@@ -2362,7 +2545,7 @@ test("tasks view (#1592 PR8): list the seeded task; add / trigger / remove round
   await expect(page.locator(".af-rail-list")).toBeVisible();
 });
 
-test("tasks view edit (#1935): the Edit form is seeded from the task, and a changed cron/prompt PERSISTS", async () => {
+test("tasks view edit (#1935): the Edit form is seeded from the task, and a changed cron/prompt PERSISTS", REAL_FIXTURE, async () => {
   // The gap this fixes: before #1935 the web could create a task but never change it —
   // the only UpdateTask call was the enable toggle, and no edit form existed. This
   // fails on the old bundle at the very first step (no "Edit" button in the row).
@@ -2442,6 +2625,7 @@ test("tasks view edit (#1935): the Edit form is seeded from the task, and a chan
   // the daemon actually applied the UpdateTask — not just an optimistic local echo.
   await page.reload();
   await expect(page.locator(".af-app")).toBeVisible();
+  await assertRealRailFixture(page);
   await page.locator('.af-viewtab[data-view="tasks"]').click();
   const reloadedRow = page.locator(".af-tasks .af-task-row", { hasText: named });
   await expect(reloadedRow).toBeVisible({ timeout: 30_000 });
@@ -2460,7 +2644,7 @@ test("tasks view edit (#1935): the Edit form is seeded from the task, and a chan
   await expect(page.locator(".af-rail-list")).toBeVisible();
 });
 
-test("schedule picker (#2057): a preset generates the cron, an edit re-opens as that preset, and the change PERSISTS", async () => {
+test("schedule picker (#2057): a preset generates the cron, an edit re-opens as that preset, and the change PERSISTS", REAL_FIXTURE, async () => {
   // Phase 2 of #2057: the raw-cron box in the task form is replaced by a schedule
   // TYPE plus only that type's inputs, a plain-English preview, and the generated
   // cron shown read-only. Cron is still what gets stored, so this asserts the whole
@@ -2564,6 +2748,7 @@ test("schedule picker (#2057): a preset generates the cron, an edit re-opens as 
   // actually persisted, and the picker seeds itself from it again.
   await page.reload();
   await expect(page.locator(".af-app")).toBeVisible();
+  await assertRealRailFixture(page);
   await page.locator('.af-viewtab[data-view="tasks"]').click();
   const reloadedRow = page.locator(".af-tasks .af-task-row", { hasText: named });
   await expect(reloadedRow).toBeVisible({ timeout: 30_000 });
@@ -2585,7 +2770,7 @@ test("schedule picker (#2057): a preset generates the cron, an edit re-opens as 
   await expect(page.locator(".af-rail-list")).toBeVisible();
 });
 
-test("#2218: slow create closes immediately, shows daemon state, then opens attached", async () => {
+test("#2218: slow create closes immediately, shows daemon state, then opens attached", REAL_FIXTURE, async () => {
   const created = `probe-create-slow-${Date.now().toString(36)}`;
   await row(page, SESSION_A).click();
   await expect(page.locator(".af-main.af-main-term")).toBeVisible();
@@ -2631,7 +2816,7 @@ test("#2218: slow create closes immediately, shows daemon state, then opens atta
   await expect(row(page, created)).toHaveCount(0, { timeout: 30_000 });
 });
 
-test("#2218: failing slow create shows the daemon error and leaves no phantom row", async () => {
+test("#2218: failing slow create shows the daemon error and leaves no phantom row", REAL_FIXTURE, async () => {
   const created = `probe-create-fail-${Date.now().toString(36)}`;
   await page.locator("button.af-rail-new").click();
   const modal = page.locator(".af-modal-card");
@@ -2656,6 +2841,7 @@ test("#2218: failing slow create shows the daemon error and leaves no phantom ro
   // A fresh authoritative Snapshot must agree: reload cannot resurrect a phantom.
   await page.reload();
   await expect(page.locator(".af-app")).toBeVisible();
+  await assertRealRailFixture(page);
   await expect(row(page, created)).toHaveCount(0);
 });
 
@@ -2670,7 +2856,7 @@ test.describe("create → kill (one session, two flows)", () => {
   // here: two tests, not the 41 a file-wide serial took down in #1898.
   test.describe.configure({ mode: "serial" });
 
-  test("create: the + New modal creates a session and its row appears", async () => {
+  test("create: the + New modal creates a session and its row appears", REAL_FIXTURE, async () => {
     const created = `probe-created-${Date.now().toString(36)}`;
 
     // Regression guard (#1592 PR7 review): first move the CURRENT session onto a
@@ -2752,7 +2938,7 @@ test.describe("create → kill (one session, two flows)", () => {
     createdTitle = created;
   });
 
-  test("kill: the kill confirm removes the session's row", async () => {
+  test("kill: the kill confirm removes the session's row", REAL_FIXTURE, async () => {
     expect(createdTitle).not.toBe("");
     // The created session is the current selection, so its rail row reveals the
     // quiet actions. Kill it and confirm.
@@ -2769,7 +2955,7 @@ test.describe("create → kill (one session, two flows)", () => {
   });
 });
 
-test("archive: an unselected row's hover action retires that session, not the selection", async () => {
+test("archive: an unselected row's hover action retires that session, not the selection", REAL_FIXTURE, async () => {
   // Keep A selected, then invoke B's hover-revealed action. The modal target must be
   // the row that owns the button; deriving it from the current selection would archive
   // A instead (#2223).
@@ -2815,7 +3001,7 @@ test("archive: an unselected row's hover action retires that session, not the se
   await expect(row(page, SESSION_B)).toHaveCount(0);
 });
 
-test("restore (#1932): the selected rail row's Restore action brings an archived session back", async () => {
+test("restore (#1932): the selected rail row's Restore action brings an archived session back", REAL_FIXTURE, async () => {
   // The return leg of archive. The preceding test left B archived; the web could
   // shelve a session but — until #1932 — offered no way back, contradicting the "you
   // can restore it later" copy the archive confirm itself prints. This drives the real
@@ -2879,7 +3065,7 @@ test("restore (#1932): the selected rail row's Restore action brings an archived
 // that follow see the rail they expect (the filter is persisted, and the page is
 // shared).
 
-test("filter (feat): the default shows every state EXCEPT archived", async () => {
+test("filter (feat): the default shows every state EXCEPT archived", REAL_FIXTURE, async () => {
   // The sane default: archived off, everything else on. Asserted through the menu the
   // user actually reads, so a default that drifts in filter.ts is caught here too.
   await page.locator(".af-rail-filter").click();
@@ -2902,7 +3088,7 @@ test("filter (feat): the default shows every state EXCEPT archived", async () =>
   await expect(page.locator(".af-rail-count")).toHaveText(String(shown));
 });
 
-test("filter (feat): Show archived reveals the archived row, muted, and hides it again", async () => {
+test("filter (feat): Show archived reveals the archived row, muted, and hides it again", REAL_FIXTURE, async () => {
   await setFilter(page, "archived", true);
   // The archived row is back and reads as inactive: it reuses the dimmed archived
   // styling rather than looking like live work.
@@ -2923,12 +3109,13 @@ test("filter (feat): Show archived reveals the archived row, muted, and hides it
   await expect(page.locator(".af-rail-filter")).not.toHaveClass(/af-rail-filter-narrowed/);
 });
 
-test("filter (feat): the choice persists across a reload", async () => {
+test("filter (feat): the choice persists across a reload", REAL_FIXTURE, async () => {
   await setFilter(page, "archived", true);
   await expect(row(page, SESSION_B)).toBeVisible();
 
   await page.reload();
   await expect(page.locator(".af-app")).toBeVisible();
+  await assertRealRailFixture(page);
 
   // The archived row is there on load with NO interaction — the choice came back from
   // localStorage, and the menu agrees with what the rail drew.
@@ -2942,11 +3129,12 @@ test("filter (feat): the choice persists across a reload", async () => {
   await resetFilter(page);
   await page.reload();
   await expect(page.locator(".af-app")).toBeVisible();
+  await assertRealRailFixture(page);
   await expect(row(page, SESSION_A)).toBeVisible({ timeout: 30_000 });
   await expect(row(page, SESSION_B)).toHaveCount(0);
 });
 
-test("filter (feat): the default hides ONLY archived, and each state's box hides exactly its own group", async ({
+test("filter (feat): the default hides ONLY archived, and each state's box hides exactly its own group", REAL_FIXTURE, async ({
   browser,
 }) => {
   // One row per state, SYNTHETIC and in their own context — the #1898 rule: a real
@@ -2991,8 +3179,7 @@ test("filter (feat): the default hides ONLY archived, and each state's box hides
     }
     await route.fulfill({ status: resp.status(), contentType: "application/json", body: JSON.stringify(body) });
   });
-  await p.goto("/");
-  await expect(p.locator(".af-app")).toBeVisible();
+  await openTokenless(p);
 
   // Each state's row and the checkbox that governs it, in the menu's own order.
   const states: Array<{ kind: string; title: string }> = [
@@ -3047,7 +3234,7 @@ test("filter (feat): the default hides ONLY archived, and each state's box hides
   await ctx.close();
 });
 
-test("#2188: a filtered selected session keeps one visible management surface", async ({ browser }) => {
+test("#2188: a filtered selected session keeps one visible management surface", REAL_FIXTURE, async ({ browser }) => {
   // Use a separate context because the filter is persisted, but a REAL session: the
   // invariant matters precisely while its terminal keeps streaming. Hiding every
   // live state makes the final absence deterministic even if the agent transitions
@@ -3056,8 +3243,7 @@ test("#2188: a filtered selected session keeps one visible management surface", 
   const ctx = await browser.newContext();
   try {
     const p = await ctx.newPage();
-    await p.goto("/");
-    await expect(p.locator(".af-app")).toBeVisible();
+    await openTokenless(p);
 
     await expect(row(p, title)).toBeVisible({ timeout: 15_000 });
     await row(p, title).click();
@@ -3100,7 +3286,7 @@ test("#2188: a filtered selected session keeps one visible management surface", 
   }
 });
 
-test("filter (feat): keyboard nav walks the VISIBLE rows — j never lands on a hidden one", async () => {
+test("filter (feat): keyboard nav walks the VISIBLE rows — j never lands on a hidden one", REAL_FIXTURE, async () => {
   // The rail's j/k order must be the rows on screen. If nav still walked the archived
   // rows the rail hides, j would select something invisible: the pane would swap to a
   // session the user cannot see in the rail, with no row highlighted.
@@ -3126,7 +3312,7 @@ test("filter (feat): keyboard nav walks the VISIBLE rows — j never lands on a 
   }
 });
 
-test("delete project (#1735, redesign PR2, Fix 2): deleting an archived-only-bound project makes it go away — not a no-op", async () => {
+test("delete project (#1735, redesign PR2, Fix 2): deleting an archived-only-bound project makes it go away — not a no-op", REAL_FIXTURE, async () => {
   // Use the SECOND project (SESSION_C, no task): switch to it, then delete it from the
   // switcher menu footer. Delete archives its one live session; with no task left, the
   // repo is no longer a project — so it must DISAPPEAR from the switcher (not linger as
@@ -3149,16 +3335,22 @@ test("delete project (#1735, redesign PR2, Fix 2): deleting an archived-only-bou
   await modal.locator("button.af-danger").click();
 
   // The project ACTUALLY GOES AWAY: SESSION_C is archived, the repo now has no live
-  // session and no task, so it drops from the derivation and the selection falls back
-  // to the first project (its live sessions the most-recently-active).
-  await expect(page.locator(".af-project-switch-name")).toHaveText("mock-repo", { timeout: 30_000 });
+  // session and no task, so it drops from the derivation and selection reconciles to
+  // another valid project. Do not hard-code WHICH one: an earlier task flow creates a
+  // newer live session in mock-repo-3, so the product's most-recent default can
+  // correctly choose either fixture depending on when that event reaches this page.
+  const switchName = page.locator(".af-project-switch-name");
+  await expect(switchName).not.toHaveText("mock-repo-2", { timeout: 30_000 });
   await page.locator(".af-project-switch").click();
   await expect(projectItem(page, "mock-repo-2")).toHaveCount(0);
   await expect(projectItem(page, "mock-repo")).toHaveCount(1);
-  await page.locator(".af-project-switch").click();
+  // Downstream real-rail cases consume SESSION_A, so restore their project explicitly
+  // instead of handing them whichever valid default won the timing race above.
+  await projectItem(page, "mock-repo").click();
+  await expect(switchName).toHaveText("mock-repo");
   await expect(page.locator(".af-project-menu")).toBeHidden();
 
-  // Back on the (fallen-back) first project, its live rail is intact.
+  // Back on the explicitly selected first project, its live rail is intact.
   await expect(row(page, SESSION_A)).toBeVisible();
 });
 
@@ -3210,7 +3402,7 @@ test("empty state (#1592 PR9): an empty Snapshot renders the empty rail + placeh
   await page.unroute("**/v1/ListTasks");
 });
 
-test("filter (feat): a project whose sessions are ALL archived reads as empty, and the filter still reveals them", async ({
+test("filter (feat): a project whose sessions are ALL archived reads as empty, and the filter still reveals them", REAL_FIXTURE, async ({
   browser,
 }) => {
   // An archived-only project is only reachable when something else keeps the repo a
@@ -3412,7 +3604,7 @@ test("theme (redesign PR1): toggling Light vs Dark changes token-driven colors l
 // The mutation is driven through the real `af` CLI over the control socket, not the
 // HTTP API the SPA uses, so this also proves the event reaches the browser
 // regardless of which transport drove the change (both mutate one Manager).
-test("#1812: a tab created/deleted out-of-band reaches the open client with no reload", async () => {
+test("#1812: a tab created/deleted out-of-band reaches the open client with no reload", REAL_FIXTURE, async () => {
   const afBin = process.env.AF_BIN;
   const mockRepo = process.env.AF_MOCK_REPO;
   test.skip(!afBin || !mockRepo, "AF_BIN/AF_MOCK_REPO are set only by web-selftest-entry.sh");
@@ -3469,7 +3661,7 @@ test("#1812: a tab created/deleted out-of-band reaches the open client with no r
 //
 // Driven through the real `af` CLI, like the #1812 test above: a tab created by
 // someone else, on the session being watched, while its scrollback is parked.
-test("#1815: a tab created out-of-band must not rewind the scrolled terminal", async () => {
+test("#1815: a tab created out-of-band must not rewind the scrolled terminal", REAL_FIXTURE, async () => {
   const afBin = process.env.AF_BIN;
   const mockRepo = process.env.AF_MOCK_REPO;
   test.skip(!afBin || !mockRepo, "AF_BIN/AF_MOCK_REPO are set only by web-selftest-entry.sh");
@@ -3569,7 +3761,7 @@ test("#1815: a tab created out-of-band must not rewind the scrolled terminal", a
 // The resize ITSELF is allowed to move the viewport (a narrower pane reflows, and
 // xterm rewraps), so the baseline is re-read once the resize has settled. What must
 // not move it is the RESYNC that follows.
-test("#1815: a resize must not re-arm the rewind on the next out-of-band resync", async () => {
+test("#1815: a resize must not re-arm the rewind on the next out-of-band resync", REAL_FIXTURE, async () => {
   const afBin = process.env.AF_BIN;
   const mockRepo = process.env.AF_MOCK_REPO;
   test.skip(!afBin || !mockRepo, "AF_BIN/AF_MOCK_REPO are set only by web-selftest-entry.sh");
@@ -3670,7 +3862,7 @@ test("#1815: a resize must not re-arm the rewind on the next out-of-band resync"
 // afterwards would yank their selection away. The user's newer intent must win. The
 // roster event races the same window and must still be free to pass the guard, which
 // is why it keys off explicit layout mutations rather than the tab index itself.
-test("#1812 review: a close held in flight must not clobber a tab the user picks meanwhile", async () => {
+test("#1812 review: a close held in flight must not clobber a tab the user picks meanwhile", REAL_FIXTURE, async () => {
   const afBin = process.env.AF_BIN;
   const mockRepo = process.env.AF_MOCK_REPO;
   test.skip(!afBin || !mockRepo, "AF_BIN/AF_MOCK_REPO are set only by web-selftest-entry.sh");
@@ -3734,7 +3926,7 @@ test("#1812 review: a close held in flight must not clobber a tab the user picks
 // ordinal-vs-identity assumptions into reachable misroutes. Each drives the exact
 // scenario Codex described and asserts on the tab the user is actually looking at.
 
-test("#1815 review: a concurrent out-of-band close cannot re-point the pane to a neighbour", async () => {
+test("#1815 review: a concurrent out-of-band close cannot re-point the pane to a neighbour", REAL_FIXTURE, async () => {
   const afBin = process.env.AF_BIN;
   const mockRepo = process.env.AF_MOCK_REPO;
   test.skip(!afBin || !mockRepo, "AF_BIN/AF_MOCK_REPO are set only by web-selftest-entry.sh");
@@ -3806,7 +3998,7 @@ test("#1815 review: a concurrent out-of-band close cannot re-point the pane to a
   await expect(tabbar.locator(".af-tab")).toHaveCount(baseline, { timeout: 15_000 });
 });
 
-test("#1815 review: a pane focused mid-close keeps its own tab", async () => {
+test("#1815 review: a pane focused mid-close keeps its own tab", REAL_FIXTURE, async () => {
   const afBin = process.env.AF_BIN;
   const mockRepo = process.env.AF_MOCK_REPO;
   test.skip(!afBin || !mockRepo, "AF_BIN/AF_MOCK_REPO are set only by web-selftest-entry.sh");
@@ -3884,7 +4076,7 @@ test("#1815 review: a pane focused mid-close keeps its own tab", async () => {
   await expect(tabbar.locator(".af-tab")).toHaveCount(baseline, { timeout: 15_000 });
 });
 
-test("#1815 review: a retained layout follows its tab when the roster changes while away", async () => {
+test("#1815 review: a retained layout follows its tab when the roster changes while away", REAL_FIXTURE, async () => {
   const afBin = process.env.AF_BIN;
   const mockRepo = process.env.AF_MOCK_REPO;
   test.skip(!afBin || !mockRepo, "AF_BIN/AF_MOCK_REPO are set only by web-selftest-entry.sh");
@@ -4215,10 +4407,12 @@ test("the service worker does not SERVE /v1: offline, the shell survives from ca
   await ctx.close();
 });
 
-test("a live PTY stream and the events WS survive the service worker controlling the page", async ({ browser }) => {
+test("a live PTY stream and the events WS survive the service worker controlling the page", REAL_FIXTURE, async ({ browser }) => {
   const ctx = await browser.newContext();
   const p = await ctx.newPage();
+  await pinRealFixtureProject(p);
   await openControlledByWorker(p);
+  await assertRealRailFixture(p);
 
   // The functional half of the bypass, and the one that matters to a user: with the
   // worker in control, attach and watch real PTY frames arrive. A worker that
@@ -4312,7 +4506,7 @@ test("dismissing the install affordance sticks across reloads — it must never 
   await ctx.close();
 });
 
-test("new-tab menu (#2219): stays visible, hit-testable, and anchored while the tab bar scrolls", async () => {
+test("new-tab menu (#2219): stays visible, hit-testable, and anchored while the tab bar scrolls", REAL_FIXTURE, async () => {
   // The seeded reorder session has enough real tabs to overflow a phone-width bar.
   // Select its project explicitly: after a worker restart the daemon's most-recent
   // project can be the task-only fixture, and this regression must not inherit that.
@@ -4358,7 +4552,7 @@ test("new-tab menu (#2219): stays visible, hit-testable, and anchored while the 
   await page.setViewportSize({ width: 1280, height: 720 });
 });
 
-test("#2224: title and tabs share one scrolling header row at every width", async ({ browser }, testInfo) => {
+test("#2224: title and tabs share one scrolling header row at every width", REAL_FIXTURE, async ({ browser }, testInfo) => {
   const mockRepo = process.env.AF_MOCK_REPO;
   test.skip(!mockRepo, "AF_MOCK_REPO is set only by web-selftest-entry.sh");
 
@@ -4577,7 +4771,7 @@ test("#2224: title and tabs share one scrolling header row at every width", asyn
   }
 });
 
-test("vscode tab (#2077): the labelled New tab menu creates a VS Code tab and serves it through the proxy", async () => {
+test("vscode tab (#2077): the labelled New tab menu creates a VS Code tab and serves it through the proxy", REAL_FIXTURE, async () => {
   // End to end, with no seeded fixture: pick VS Code from the tab bar's kind menu,
   // and the daemon spawns a code-server (the FAKE one on PATH — no CI box has a
   // real one) on a 0600 unix socket it names, rooted at THIS session's worktree,
@@ -4759,7 +4953,7 @@ async function dragTabWithinBar(
   );
 }
 
-test("#1813: a pane header names its TAB — glyph + name — not a positional 'Tab N'", async () => {
+test("#1813: a pane header names its TAB — glyph + name — not a positional 'Tab N'", REAL_FIXTURE, async () => {
   // The bug: every pane header read `Tab ${leaf.tab + 1}`, so at the exact moment the
   // label matters — several panes open, which is the whole point of splits — it told
   // you nothing, and it silently meant a different tab after a close.
@@ -4788,7 +4982,7 @@ test("#1813: a pane header names its TAB — glyph + name — not a positional '
   await expect(tabByLabel(page, "beta").locator(".af-tab-glyph")).toHaveText("›");
 });
 
-test("#1813: dragging a tab within the bar reorders it, and the order survives a reload", async () => {
+test("#1813: dragging a tab within the bar reorders it, and the order survives a reload", REAL_FIXTURE, async () => {
   // Reordering is a drag over the BAR; splitting is a drag over a PANE. Same payload,
   // disjoint drop regions — this asserts the bar half exists at all, which it did not
   // before #1813 (the strip had dragstart but no dragover/drop).
@@ -4804,13 +4998,15 @@ test("#1813: dragging a tab within the bar reorders it, and the order survives a
   // The daemon persisted it: a reload re-reads the roster from the Snapshot, so the
   // new order surviving proves it is real state and not a local DOM shuffle.
   await page.reload();
+  await expect(page.locator(".af-app")).toBeVisible();
+  await assertRealRailFixture(page);
   await row(page, SESSION_ORDER).click();
   await expect(page.locator(".af-tabbar .af-tab .af-tab-label")).toHaveText(["Agent", "alpha", "gamma", "beta"], {
     timeout: 15_000,
   });
 });
 
-test("#1813: a reorder does not misroute an OPEN pane — panes are pinned by tab id", async () => {
+test("#1813: a reorder does not misroute an OPEN pane — panes are pinned by tab id", REAL_FIXTURE, async () => {
   // The #1810 guarantee, now reachable from the client for the first time: before
   // #1813 no client could produce a reorder at all, so the id-keyed pane binding had
   // never actually been driven by one. Moving a tab must move the PANE's tab with it,
@@ -4843,7 +5039,7 @@ test("#1813: a reorder does not misroute an OPEN pane — panes are pinned by ta
   expect(await frame.getAttribute("src"), "the pane must still address alpha's own tab id").toBe(srcBefore);
 });
 
-test("#1813: the agent tab can't be reordered, but still drags onto a pane to split", async () => {
+test("#1813: the agent tab can't be reordered, but still drags onto a pane to split", REAL_FIXTURE, async () => {
   // Go's Tabs[0] is a load-bearing invariant (archive teardown and the agent's own
   // conversation/tmux all index it), so the daemon refuses to move it or to move
   // anything in front of it. The bar refuses up front — but it must refuse ONLY the
@@ -4879,6 +5075,8 @@ test("#1813: the agent tab can't be reordered, but still drags onto a pane to sp
   // were undraggable. Point the single pane at another tab first, then drag the agent
   // tab in beside it: 1 → 2 panes is the assertion that can actually fail.
   await page.reload();
+  await expect(page.locator(".af-app")).toBeVisible();
+  await assertRealRailFixture(page);
   await row(page, SESSION_ORDER).click();
   await expect(page.locator(".af-term-host .af-pane")).toHaveCount(1, { timeout: 15_000 });
   await tabByLabel(page, "alpha").click();
@@ -4887,7 +5085,7 @@ test("#1813: the agent tab can't be reordered, but still drags onto a pane to sp
   await expect(page.locator(".af-term-host .af-pane-label")).toHaveText(["alpha", "Agent"]);
 });
 
-test("#1813: renaming from the UI repaints the tab bar AND an open pane, live", async () => {
+test("#1813: renaming from the UI repaints the tab bar AND an open pane, live", REAL_FIXTURE, async () => {
   await row(page, SESSION_ORDER).click();
   // Put alpha in its own pane, so the rename has an open pane header to repaint —
   // the case reconcile() used to miss entirely (it set a pane's label only when the
@@ -4906,7 +5104,7 @@ test("#1813: renaming from the UI repaints the tab bar AND an open pane, live", 
   await expect(page.frameLocator(".af-webframe").locator("#marker")).toHaveText(WEBTAB_LOCAL_MARKER);
 });
 
-test("#1813: the daemon's RESOLVED name is rendered, not the one that was typed", async () => {
+test("#1813: the daemon's RESOLVED name is rendered, not the one that was typed", REAL_FIXTURE, async () => {
   // The daemon applies the same sanitize + dup-suffix rules a create goes through, so
   // what a user types and what the tab is called are different strings. Renaming beta
   // to a name that is already taken must land as "storefront-2" — rendering the typed
@@ -4922,7 +5120,7 @@ test("#1813: the daemon's RESOLVED name is rendered, not the one that was typed"
   await expect(tabByLabel(page, "beta")).toHaveCount(0);
 });
 
-test("#1813: Escape cancels a rename, and an agent tab offers no rename at all", async () => {
+test("#1813: Escape cancels a rename, and an agent tab offers no rename at all", REAL_FIXTURE, async () => {
   await row(page, SESSION_ORDER).click();
 
   // Escape abandons the edit — and the blur it causes must not commit it instead.
@@ -4942,7 +5140,7 @@ test("#1813: Escape cancels a rename, and an agent tab offers no rename at all",
   await expect(page.locator(".af-tabbar .af-tab-edit"), "no rename affordance on the agent tab").toHaveCount(0);
 });
 
-test("#1813 (#1812 path): a CLI rename reaches a SECOND open window with no reload", async ({ browser }) => {
+test("#1813 (#1812 path): a CLI rename reaches a SECOND open window with no reload", REAL_FIXTURE, async ({ browser }) => {
   // The event half: a rename is published as session.updated, so a window that did
   // not make the change still repaints. This is the shape a real user hits — an agent
   // renames a tab from inside its own session while the browser sits open.
@@ -4984,7 +5182,7 @@ test("#1813 (#1812 path): a CLI rename reaches a SECOND open window with no relo
   }
 });
 
-test("#1813: a roster change mid-edit renames the EDITED tab, not whatever slid into its slot", async () => {
+test("#1813: a roster change mid-edit renames the EDITED tab, not whatever slid into its slot", REAL_FIXTURE, async () => {
   // The stale-ordinal bug, driven through the path that makes it ordinary rather than
   // rare. An inline edit captured the ordinal it was opened at and dereferenced it at
   // COMMIT — against a roster that another client may have permuted meanwhile. What
@@ -5048,7 +5246,7 @@ test("#1813: a roster change mid-edit renames the EDITED tab, not whatever slid 
   await expect(tabByLabel(page, EDITED_TO)).toHaveCount(1);
 });
 
-test("#1813: a close+recreate of the same name mid-edit renames NOTHING — never the replacement", async ({
+test("#1813: a close+recreate of the same name mid-edit renames NOTHING — never the replacement", REAL_FIXTURE, async ({
   browser,
 }) => {
   // The same class as the spec above, one layer in from the ordinal. Keying the commit
@@ -5197,7 +5395,7 @@ test("#1813: a close+recreate of the same name mid-edit renames NOTHING — neve
   }
 });
 
-test("#1813: a double-click renames an INACTIVE tab, not only the active one", async () => {
+test("#1813: a double-click renames an INACTIVE tab, not only the active one", REAL_FIXTURE, async () => {
   // The first click of a double-click switches tabs, which changes tabBarSig (active)
   // and so REPLACES the very button the gesture began on — a shape that has broken real
   // gestures here before (#1737). Rename is therefore owned by the stable bar: it
@@ -5231,7 +5429,7 @@ test("#1813: a double-click renames an INACTIVE tab, not only the active one", a
   await page.locator(".af-tabbar .af-tab-edit").press("Escape");
 });
 
-test("#1738 invariant: every tab the daemon serves carries a stable id — the premise the bar's rename rests on", async () => {
+test("#1738 invariant: every tab the daemon serves carries a stable id — the premise the bar's rename rests on", REAL_FIXTURE, async () => {
   // A tab BUTTON outlives every snapshot that leaves tabBarSig unchanged: the
   // signature covers only what the bar DRAWS (kind/name/active/shown) and is
   // deliberately blind to tab IDS, because rebuilding on an id change would destroy a
@@ -5272,7 +5470,7 @@ test("#1738 invariant: every tab the daemon serves carries a stable id — the p
   expect(total, "the seeded sessions must actually carry tabs for the check to mean anything").toBeGreaterThan(0);
 });
 
-test("#1813: a dead dev server shows the designed fallback — never the raw JSON envelope", async () => {
+test("#1813: a dead dev server shows the designed fallback — never the raw JSON envelope", REAL_FIXTURE, async () => {
   // The most common failure in the loop web tabs exist for: the port isn't up yet, or
   // the server crashed. An agent creating a preview tab and a dev server finishing
   // boot are inherently racy, so "the tab exists before the port answers" is the
@@ -5338,7 +5536,7 @@ test("#1813: a dead dev server shows the designed fallback — never the raw JSO
   }
 });
 
-test("item C (Codex P2): a probe that never resolves reaches the fallback within the timeout, not a blank pane", async () => {
+test("item C (Codex P2): a probe that never resolves reaches the fallback within the timeout, not a blank pane", REAL_FIXTURE, async () => {
   // The bug: probeWebTab's fetch had no client timeout, so a loopback target that
   // ACCEPTS the connection but never sends headers left load() awaiting forever — the
   // pane blank, no fallback, no Retry. The fix bounds the probe with an AbortController
@@ -5389,7 +5587,7 @@ test("item C (Codex P2): a probe that never resolves reaches the fallback within
   }
 });
 
-test("#1813: a refused rename surfaces the daemon's OWN message, verbatim, in the toast", async () => {
+test("#1813: a refused rename surfaces the daemon's OWN message, verbatim, in the toast", REAL_FIXTURE, async () => {
   // The daemon's refusals (agent/shell rename, new_index 0, archived, remote) are all
   // UNREACHABLE through this UI by construction: the affordance is withheld for a tab
   // the daemon would refuse, and the insertion math clamps a reorder off slot 0. That
@@ -5427,7 +5625,7 @@ test("#1813: a refused rename surfaces the daemon's OWN message, verbatim, in th
   await page.unroute("**/v1/RenameTab");
 });
 
-test("#1900: ↻ cache-busts a PROXIED preview; an external frame's URL is left untouched", async () => {
+test("#1900: ↻ cache-busts a PROXIED preview; an external frame's URL is left untouched", REAL_FIXTURE, async () => {
   // Re-assigning the same URL is not a guarantee of fresh content — the browser's HTTP
   // cache, or any intermediary, may answer from a stale entry, which is exactly the
   // page ↻ exists to escape. A URL that differs per attempt cannot be.
@@ -5496,7 +5694,7 @@ test("#1900: ↻ cache-busts a PROXIED preview; an external frame's URL is left 
   expect(await frame.getAttribute("src")).toBeNull();
 });
 
-test("#1900: the cache-buster is unique across a pane REMOUNT — ↻ never re-issues a URL the cache already holds", async () => {
+test("#1900: the cache-buster is unique across a pane REMOUNT — ↻ never re-issues a URL the cache already holds", REAL_FIXTURE, async () => {
   // The sibling of the dead-↻ bug, and the same shape: the control looks like it
   // worked and didn't. #1900 shipped the buster as a counter local to the pane MOUNT,
   // but the browser's HTTP cache outlives the pane — so a remount reset it to 0 and
@@ -5592,7 +5790,7 @@ async function reprobeDeadTab(page: Page): Promise<void> {
   await page.locator(".af-term-host .af-webpane-reload").click();
 }
 
-test("#1909: an UPSTREAM's own 502 renders the app's page — only af's own 502 shows the fallback", async () => {
+test("#1909: an UPSTREAM's own 502 renders the app's page — only af's own 502 shows the fallback", REAL_FIXTURE, async () => {
   // The bug: the daemon proxy forwards upstream statuses UNCHANGED, so an app that
   // answers 502 on its own (a framework proxy whose backend is down, a local gateway
   // error page) was byte-identical, by status, to af's "nothing is listening" 502. The
@@ -5641,7 +5839,7 @@ test("#1909: an UPSTREAM's own 502 renders the app's page — only af's own 502 
   expect(await frame.getAttribute("src"), "the frame must never be pointed at a dead target").toBeNull();
 });
 
-test("#1909/probe: a preview that redirects CROSS-ORIGIN cannot steer the probe off-origin", async () => {
+test("#1909/probe: a preview that redirects CROSS-ORIGIN cannot steer the probe off-origin", REAL_FIXTURE, async () => {
   // fetch follows redirects by DEFAULT, so the health probe — a request the PARENT
   // document makes — could be sent wherever the probed server pointed it. An OAuth/SSO
   // login is the everyday shape: the dev server 302s to an identity provider on another
@@ -5713,7 +5911,7 @@ test("#1909/probe: a preview that redirects CROSS-ORIGIN cannot steer the probe 
   }
 });
 
-test("#1929/#1971: a rename, a reorder and a close from the web carry the tab's STABLE id", async () => {
+test("#1929/#1971: a rename, a reorder and a close from the web carry the tab's STABLE id", REAL_FIXTURE, async () => {
   // The web client already HOLDS the stable tab id (#1738) and threw it away, resolving
   // the tab locally and then sending only its NAME. A name is not an identity — it is
   // the very thing a rename changes — so a request racing a rename from another window
@@ -5840,9 +6038,7 @@ test("#1929/#1971: a rename, a reorder and a close from the web carry the tab's 
 async function openAt(browser: Browser, width: number, height: number): Promise<{ ctx: BrowserContext; p: Page }> {
   const ctx = await browser.newContext({ viewport: { width, height } });
   const p = await ctx.newPage();
-  await p.goto("/");
-  await expect(p.locator(".af-app")).toBeVisible();
-  await expect(p.locator(".af-rail-list .af-row", { hasText: SESSION_A })).toHaveCount(1);
+  await openTokenless(p);
   return { ctx, p };
 }
 
@@ -5855,7 +6051,7 @@ async function horizontalOverflow(p: Page): Promise<number> {
   });
 }
 
-test("mobile (375px): the rail auto-collapses to a drawer; the hamburger reveals it as an overlay and picking a session folds it shut", async ({
+test("mobile (375px): the rail auto-collapses to a drawer; the hamburger reveals it as an overlay and picking a session folds it shut", REAL_FIXTURE, async ({
   browser,
 }) => {
   const { ctx, p } = await openAt(browser, 375, 667);
@@ -5924,7 +6120,7 @@ test("mobile (375px): the rail auto-collapses to a drawer; the hamburger reveals
   await ctx.close();
 });
 
-test("#2226 mobile (375px): drawer dismissal follows action intent, not click propagation", async ({ browser }) => {
+test("#2226 mobile (375px): drawer dismissal follows action intent, not click propagation", REAL_FIXTURE, async ({ browser }) => {
   const { ctx, p } = await openAt(browser, 375, 667);
   const app = p.locator(".af-app");
   const rail = p.locator(".af-rail");
@@ -6232,7 +6428,7 @@ test("#2227 mobile appbar: project context wins scarce width at 320px and 375px"
 });
 
 for (const width of [375, 768]) {
-  test(`mobile (${width}px): the page never scrolls sideways, drawer closed or open`, async ({ browser }) => {
+  test(`mobile (${width}px): the page never scrolls sideways, drawer closed or open`, REAL_FIXTURE, async ({ browser }) => {
     const { ctx, p } = await openAt(browser, width, 812);
 
     expect(await horizontalOverflow(p), "the page must not scroll sideways with the drawer closed").toBeLessThanOrEqual(
@@ -6249,7 +6445,7 @@ for (const width of [375, 768]) {
   });
 }
 
-test("desktop (1280px): the mobile drawer never engages — the rail stays in view and the hamburger is hidden", async ({
+test("desktop (1280px): the mobile drawer never engages — the rail stays in view and the hamburger is hidden", REAL_FIXTURE, async ({
   browser,
 }) => {
   // The desktop guard: the responsive rules are scoped to a @media (max-width: 768px)
