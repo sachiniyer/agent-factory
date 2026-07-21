@@ -41,7 +41,7 @@ func withShortDockerReapTimeout(t *testing.T, d time.Duration) {
 // fix reap returned a plain error and TeardownStateUnknown was false.
 func TestDockerReapTimeoutIsWorkspaceStateUnknown(t *testing.T) {
 	withShortDockerReapTimeout(t, 150*time.Millisecond)
-	restore := SetDockerExecForTest(func(ctx context.Context, _ ...string) ([]byte, error) {
+	restore := SetDockerExecForTest(func(ctx context.Context, _ []string, _ ...string) ([]byte, error) {
 		<-ctx.Done()
 		return nil, ctx.Err()
 	})
@@ -78,7 +78,7 @@ func TestDockerReapTimeoutIsWorkspaceStateUnknown(t *testing.T) {
 // the "No such container" (already-gone) case wedge the record forever.
 func TestDockerReapReportedErrorStaysKnown(t *testing.T) {
 	withShortDockerReapTimeout(t, 5*time.Second) // never reached; the fake answers instantly
-	restore := SetDockerExecForTest(func(_ context.Context, _ ...string) ([]byte, error) {
+	restore := SetDockerExecForTest(func(_ context.Context, _ []string, _ ...string) ([]byte, error) {
 		return []byte("Error: No such container: deadbeef"), fmt.Errorf("exit status 1")
 	})
 	defer restore()
@@ -100,7 +100,7 @@ func TestDockerReapReportedErrorStaysKnown(t *testing.T) {
 // nil, so the WaitDelay/timeout plumbing never turns a successful `docker rm -f`
 // into a phantom leak report.
 func TestDockerReapSuccessReturnsNil(t *testing.T) {
-	restore := SetDockerExecForTest(func(_ context.Context, _ ...string) ([]byte, error) {
+	restore := SetDockerExecForTest(func(_ context.Context, _ []string, _ ...string) ([]byte, error) {
 		return []byte("deadbeefcafe0000\n"), nil
 	})
 	defer restore()
@@ -136,7 +136,7 @@ func reapWithin(t *testing.T, p *dockerProvisioner, guard time.Duration) error {
 func TestDockerReapTimeoutIsReRunnable(t *testing.T) {
 	withShortDockerReapTimeout(t, 150*time.Millisecond)
 	var calls int32
-	restore := SetDockerExecForTest(func(ctx context.Context, _ ...string) ([]byte, error) {
+	restore := SetDockerExecForTest(func(ctx context.Context, _ []string, _ ...string) ([]byte, error) {
 		atomic.AddInt32(&calls, 1)
 		<-ctx.Done()
 		return nil, ctx.Err()
@@ -181,7 +181,7 @@ func TestDockerReapTimeoutThenSuccessClears(t *testing.T) {
 	var wedged atomic.Bool
 	var calls int32
 	wedged.Store(true)
-	restore := SetDockerExecForTest(func(ctx context.Context, _ ...string) ([]byte, error) {
+	restore := SetDockerExecForTest(func(ctx context.Context, _ []string, _ ...string) ([]byte, error) {
 		atomic.AddInt32(&calls, 1)
 		if wedged.Load() {
 			<-ctx.Done()

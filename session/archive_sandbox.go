@@ -144,11 +144,12 @@ func (i *Instance) reprovisionRemote() error {
 	i.mu.RLock()
 	backend := i.backend
 	spec := ProvisionSpec{
-		RepoRoot:      i.Path,
-		Title:         i.Title,
-		Program:       i.Program,
-		CloneURL:      originRemoteURL(i.Path),
-		RestoreBranch: i.Branch,
+		RepoRoot:              i.Path,
+		Title:                 i.Title,
+		Program:               i.Program,
+		CloneURL:              originRemoteURL(i.Path),
+		RestoreBranch:         i.Branch,
+		SessionEnvPassthrough: configuredSessionEnvPassthrough(i.sessionEnvPassthrough),
 	}
 	i.mu.RUnlock()
 	if backend == nil {

@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"os"
 	"os/exec"
 	"syscall"
 	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 	"github.com/sachiniyer/agent-factory/log"
 )
 
@@ -39,6 +41,13 @@ const hookWaitDelay = 2 * time.Second
 // readiness wait uses it so a slow build hook running concurrently with the
 // agent is not charged against the agent's startup budget (see task.WaitForReady).
 func RunPostWorktreeHooksAsync(ctx context.Context, repoPath, worktreePath string) <-chan struct{} {
+	return RunPostWorktreeHooksAsyncWithEnvironment(ctx, repoPath, worktreePath, "", nil)
+}
+
+// RunPostWorktreeHooksAsyncWithEnvironment is the session-aware form used by
+// GitWorktree. The compatibility wrapper above remains default-deny too, but
+// has no selected-agent or explicit extension names to add.
+func RunPostWorktreeHooksAsyncWithEnvironment(ctx context.Context, repoPath, worktreePath, agent string, passthrough []string) <-chan struct{} {
 	done := make(chan struct{})
 	repoCfg, err := config.ResolveConfig(repoPath)
 	if err != nil {
@@ -65,6 +74,7 @@ func RunPostWorktreeHooksAsync(ctx context.Context, repoPath, worktreePath strin
 
 			var output bytes.Buffer
 			cmd := exec.Command("sh", "-c", cmdStr)
+			cmd.Env = sessionenv.Filter(os.Environ(), agent, passthrough)
 			cmd.Dir = worktreePath
 			cmd.Stdout = &output
 			cmd.Stderr = &output

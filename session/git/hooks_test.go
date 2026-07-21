@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -15,6 +16,40 @@ import (
 
 	"github.com/sachiniyer/agent-factory/config"
 )
+
+func TestPostWorktreeHookEnvironmentIsDefaultDeny(t *testing.T) {
+	const (
+		customName = "CUSTOM_PACKAGE_TOKEN"
+		deniedName = "AF_TEST_UNRELATED_SECRET"
+	)
+	t.Setenv("OPENAI_API_KEY", "unit-test-credential")
+	t.Setenv(customName, "unit-test-credential")
+	t.Setenv(deniedName, "unit-test-credential")
+
+	namesPath := filepath.Join(t.TempDir(), "hook-environment-names")
+	repoPath := freshRepoConfig(t, []string{
+		fmt.Sprintf(`env | sed 's/=.*//' | sort > %q`, namesPath),
+	})
+	done := RunPostWorktreeHooksAsyncWithEnvironment(context.Background(), repoPath, t.TempDir(), "codex", []string{customName})
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("post-worktree hook did not finish")
+	}
+	data, err := os.ReadFile(namesPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	names := strings.Fields(string(data))
+	for _, want := range []string{"PATH", "OPENAI_API_KEY", customName} {
+		if !slices.Contains(names, want) {
+			t.Fatalf("post-worktree hook omitted allowed variable %s", want)
+		}
+	}
+	if slices.Contains(names, deniedName) {
+		t.Fatalf("post-worktree hook inherited disallowed variable %s", deniedName)
+	}
+}
 
 // TestHookCancellation_ChildProcessOrphaned is the regression test for #610.
 // Before the process-group fix, cancelling the context only SIGKILL'd the

@@ -69,6 +69,15 @@ Provisions the workspace on your infrastructure, starts an `af agent-server` the
 | `--repo <url>` | The repo's `origin` URL to clone the workspace from (GitHub is the durable store). |
 | `--branch <branch>` | **Only on restore** — the archived branch to materialize (see [Archive & restore](#archive--restore)). Absent on a fresh create. |
 | `--program <p>` | The agent program to run (optional; forward to `af agent-server --program`). |
+| `--session-env <name>` | Repeated for each global `session_env_passthrough` name; forward each one to `af agent-server --session-env`. Values are never command arguments. |
+
+Both hook scripts themselves run with af's filtered session environment: core
+runtime/Git/GitHub variables, authentication for the selected agent, and the
+explicit `session_env_passthrough` names. Unrelated daemon secrets are absent.
+If `launch_cmd` provisions another machine or container, it is responsible for
+delivering approved values through that provider's secret mechanism and for
+forwarding the `--session-env` **names** to the remote agent-server. Do not put a
+credential value in argv or endpoint JSON.
 
 **stdout (one JSON object):**
 
@@ -170,6 +179,7 @@ Durability lives in **GitHub, not the sandbox** (the epic's push/pull-branch mod
 set -euo pipefail
 
 NAME="" TITLE="" REPO="" BRANCH="" PROGRAM=""
+SESSION_ENV=()
 while [ $# -gt 0 ]; do
   case "$1" in
     --name)    NAME="$2";    shift 2;;
@@ -177,6 +187,7 @@ while [ $# -gt 0 ]; do
     --repo)    REPO="$2";    shift 2;;
     --branch)  BRANCH="$2";  shift 2;;
     --program) PROGRAM="$2"; shift 2;;
+    --session-env) SESSION_ENV+=("$2"); shift 2;;
     *) shift;;
   esac
 done
@@ -197,6 +208,7 @@ BANNER="$WORKDIR/banner.json"
 LOG="$WORKDIR/agent-server.log"
 ARGS=(agent-server --listen 0.0.0.0:0 --repo "$WORKDIR/workspace" --title "$TITLE")
 [ -n "$PROGRAM" ] && ARGS+=(--program "$PROGRAM")
+for ENV_NAME in "${SESSION_ENV[@]}"; do ARGS+=(--session-env "$ENV_NAME"); done
 nohup af "${ARGS[@]}" >"$BANNER" 2>"$LOG" &
 echo $! > "$WORKDIR/pid"
 

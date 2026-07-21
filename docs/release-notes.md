@@ -13,6 +13,23 @@ behavior](configuration.md#agent-approval-behavior). Existing persisted session
 records carrying the old field still load, but the field is ignored and is not
 written back.
 
+## Session environment isolation
+
+- New and respawned agent panes now inherit a conservative allowlist instead of
+  the launching user's entire environment. Runtime basics, Git/GitHub auth,
+  proxies/custom CAs, and authentication for the selected supported agent keep
+  working; unrelated variables are denied by default.
+- If a workflow relied on another environment variable, add its exact name to
+  the global `session_env_passthrough` list. This is an intentional behavior
+  change. Existing panes keep their original environment until restarted.
+- Docker forwards approved host variables by name, SSH uses matching variables
+  from the remote account without copying local values, and hook scripts now run
+  under the same filter and receive repeated `--session-env <name>` arguments to
+  pass to their remote `af agent-server`.
+- Local Git worktree subprocesses and checked-in `post_worktree_commands` also
+  use the filtered environment. Package/build credentials needed by those
+  commands must be named explicitly in `session_env_passthrough`.
+
 ## Keymap Changes
 
 - Default TUI keys changed to ergonomic lower-case (`a/m/y/e`,

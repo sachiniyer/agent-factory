@@ -28,10 +28,20 @@ func (t *TmuxSession) Start(workDir string) error {
 	// Create a new detached tmux session and start claude in it. The -e
 	// markers (when supported) let `af doctor` trace any process the pane
 	// spawns back to this session even after it is orphaned (#1104).
+	program := t.programCmd()
+	wrappedProgram, launchEnv, envErr := t.launchEnvironment(program)
+	if envErr != nil {
+		return fmt.Errorf("%w: prepare filtered session environment: %v", ErrSessionNotStarted, envErr)
+	}
 	args := []string{"new-session", "-d", "-s", t.sanitizedName, "-c", workDir}
 	args = append(args, sessionEnvFlags(t.sanitizedName)...)
-	args = append(args, t.programCmd())
+	args = append(args, wrappedProgram)
 	cmd, systemdScoped := newTmuxServerCommand(args...)
+	// A fresh tmux server snapshots its first client's environment. Filter the
+	// client as well as the pane so a server created here never stores unrelated
+	// credentials in its global environment. The pane exec shim filters again
+	// for an already-running server whose global environment predates this fix.
+	cmd.Env = launchEnv
 
 	ptmx, commandDone, err := startPtyTracked(t.ptyFactory, cmd)
 	if err != nil {

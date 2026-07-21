@@ -10,6 +10,7 @@ import (
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/pathutil"
+	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 	"github.com/sachiniyer/agent-factory/log"
 )
 
@@ -76,6 +77,11 @@ type GitWorktree struct {
 	sessionName string
 	// Branch name for the worktree
 	branchName string
+	// hookAgent and hookEnvPassthrough define the environment boundary for
+	// repository-provided post-worktree commands. Git itself receives the common
+	// Git/GitHub subset plus the explicit names, but never agent-provider keys.
+	hookAgent          string
+	hookEnvPassthrough []string
 	// Base commit hash for the worktree
 	baseCommitSHA string
 	// externalWorktree is true if the worktree was not created by agent-factory.
@@ -104,6 +110,18 @@ type GitWorktree struct {
 	// until the first hook run is launched (e.g. external worktrees that skip
 	// hooks entirely), which HooksDone reports as "no hooks in flight".
 	hooksDone <-chan struct{}
+}
+
+// SetHookEnvironment sets the selected agent and exact operator-approved names
+// used by post-worktree commands. Call it before Setup or either rebuild path.
+func (g *GitWorktree) SetHookEnvironment(agent string, names []string) error {
+	normalized, err := sessionenv.NormalizeExtraNames(names)
+	if err != nil {
+		return err
+	}
+	g.hookAgent = agent
+	g.hookEnvPassthrough = normalized
+	return nil
 }
 
 // HooksDone returns a channel that is closed once the worktree's post-worktree

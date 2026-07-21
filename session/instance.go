@@ -213,6 +213,10 @@ type Instance struct {
 
 	// backend abstracts session lifecycle (local tmux+git vs off-box runtimes).
 	backend Backend
+	// sessionEnvPassthrough is an internal exact-name extension delivered by an
+	// outer runtime's agent-server flags. Local sessions normally source the
+	// same setting from global config during Provision.
+	sessionEnvPassthrough []string
 
 	// The below fields are initialized upon calling Start().
 

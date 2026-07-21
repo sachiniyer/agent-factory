@@ -11,8 +11,10 @@ import (
 	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 	"github.com/sachiniyer/agent-factory/internal/shellsuggest"
 	"github.com/sachiniyer/agent-factory/log"
+	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
 // The remote-hook runtime (#1592 Phase 4 PR7) — the bring-your-own-provisioner
@@ -139,8 +141,8 @@ func (p *hookProvisioner) manualReapCommand() string {
 	return shellsuggest.Command(p.hooks.DeleteCmd, "--name", p.slug)
 }
 
-// runHookScript runs one hook script under a timeout and returns its combined
-// output. It exists to answer a question the obvious CombinedOutput() gets wrong:
+// runHookScriptWithEnvironment runs one hook script under a timeout and returns
+// its combined output. It exists to answer a question the obvious CombinedOutput() gets wrong:
 // WHICH CHILDREN ARE OURS TO KILL?
 //
 // Answer: only the script itself. A launch_cmd is DOCUMENTED to leave a tunnel or
@@ -167,7 +169,7 @@ func (p *hookProvisioner) manualReapCommand() string {
 //
 // Reaping a FAILED launch's sandbox is a separate act with a real criterion, and
 // it is delete_cmd's job, not a side effect of how we captured output: see reap.
-func runHookScript(timeout time.Duration, name string, args ...string) ([]byte, *exec.Cmd, error) {
+func runHookScriptWithEnvironment(timeout time.Duration, name, program string, passthrough []string, args ...string) ([]byte, *exec.Cmd, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
@@ -184,6 +186,11 @@ func runHookScript(timeout time.Duration, name string, args ...string) ([]byte, 
 	}()
 
 	cmd := exec.CommandContext(ctx, name, args...)
+	agentName := tmux.DetectAgentFromCommand(program)
+	if agentName == "" && strings.TrimSpace(program) == "" {
+		agentName = tmux.ProgramClaude
+	}
+	cmd.Env = sessionenv.Filter(os.Environ(), agentName, passthrough)
 	cmd.Stdout = f
 	cmd.Stderr = f
 	runErr := cmd.Run()
@@ -288,7 +295,12 @@ func (p *hookProvisioner) launch() (*AgentServerEndpoint, error) {
 	if prog := strings.TrimSpace(p.spec.Program); prog != "" {
 		args = append(args, "--program", prog)
 	}
-	out, cmd, err := runHookScript(hookLaunchTimeout, p.hooks.LaunchCmd, args...)
+	for _, name := range p.spec.SessionEnvPassthrough {
+		args = append(args, "--session-env", name)
+	}
+
+	out, cmd, err := runHookScriptWithEnvironment(hookLaunchTimeout, p.hooks.LaunchCmd,
+		p.spec.Program, p.spec.SessionEnvPassthrough, args...)
 
 	// Gate the reap on whether launch_cmd STARTED, not on whether it succeeded
 	// (#1955). A script that creates a VM and then times out or exits non-zero
@@ -358,7 +370,8 @@ func (p *hookProvisioner) reap() error {
 		// expired, and a WithTimeout derived from a dead parent is born expired:
 		// delete_cmd would never spawn and the sandbox would leak in silence. That
 		// is the exact failure #1955 is about, reintroduced by the cleanup.
-		out, _, err := runHookScript(hookDeleteTimeout, p.hooks.DeleteCmd, "--name", p.slug)
+		out, _, err := runHookScriptWithEnvironment(hookDeleteTimeout, p.hooks.DeleteCmd,
+			p.spec.Program, p.spec.SessionEnvPassthrough, "--name", p.slug)
 		if err != nil {
 			reapErr = fmt.Errorf("backend=hook: delete_cmd failed for %q: %s: %w", p.slug, strings.TrimSpace(string(out)), err)
 			log.ErrorLog.Printf("%s", p.orphanWarning(reapErr))

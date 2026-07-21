@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"path/filepath"
 	"time"
+
+	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 )
 
 // Options for creating a new instance
@@ -51,6 +53,10 @@ type InstanceOptions struct {
 	// fill this in yet (PR3-PR5); it is exercised by the out-of-process round-trip
 	// test.
 	RemoteAgentServer *AgentServerEndpoint
+	// SessionEnvPassthrough carries exact, operator-approved environment names
+	// into an out-of-process agent-server. Ordinary local callers leave it empty
+	// and use the global session_env_passthrough config key.
+	SessionEnvPassthrough []string
 }
 
 // backendFactory provisions the runtime for a new Instance, returning the
@@ -82,9 +88,10 @@ func defaultBackendFactory(opts InstanceOptions, absPath string) (ProvisionResul
 		return ProvisionResult{}, err
 	}
 	spec := ProvisionSpec{
-		RepoRoot: absPath,
-		Title:    opts.Title,
-		Program:  opts.Program,
+		RepoRoot:              absPath,
+		Title:                 opts.Title,
+		Program:               opts.Program,
+		SessionEnvPassthrough: append([]string(nil), opts.SessionEnvPassthrough...),
 	}
 	// An off-box runtime clones the workspace from the repo's origin (epic
 	// decision 4: GitHub is the durable store); resolve it only for those kinds so
@@ -201,6 +208,11 @@ func NewInstance(opts InstanceOptions) (*Instance, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to get absolute path: %w", err)
 	}
+	normalizedSessionEnv, err := sessionenv.NormalizeExtraNames(opts.SessionEnvPassthrough)
+	if err != nil {
+		return nil, fmt.Errorf("invalid session environment pass-through: %w", err)
+	}
+	opts.SessionEnvPassthrough = normalizedSessionEnv
 
 	res, err := backendFactory(opts, absPath)
 	if err != nil {
@@ -240,17 +252,18 @@ func NewInstance(opts InstanceOptions) (*Instance, error) {
 		// A task delivery's run begins here and ends when the agent goes idle
 		// (#1892). Only a task-spawned session has a run to bound; a user's session
 		// is never counted against a cap.
-		taskRunActive:   opts.TaskID != "",
-		liveness:        LiveReady,
-		Path:            absPath,
-		Program:         opts.Program,
-		Height:          0,
-		Width:           0,
-		CreatedAt:       t,
-		UpdatedAt:       t,
-		inPlace:         opts.InPlace,
-		backend:         backend,
-		remoteClient:    remoteClient,
-		runtimeTeardown: res.Teardown,
+		taskRunActive:         opts.TaskID != "",
+		liveness:              LiveReady,
+		Path:                  absPath,
+		Program:               opts.Program,
+		Height:                0,
+		Width:                 0,
+		CreatedAt:             t,
+		UpdatedAt:             t,
+		sessionEnvPassthrough: normalizedSessionEnv,
+		inPlace:               opts.InPlace,
+		backend:               backend,
+		remoteClient:          remoteClient,
+		runtimeTeardown:       res.Teardown,
 	}, nil
 }

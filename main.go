@@ -4,6 +4,7 @@ import (
 	"os"
 
 	"github.com/sachiniyer/agent-factory/commands"
+	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 )
 
 var (
@@ -17,6 +18,7 @@ var (
 )
 
 func main() {
+	sessionenv.HandleInternalExec()
 	rootCmd := rootCommand(commands.Options{Version: version})
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)

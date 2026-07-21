@@ -11,7 +11,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 	"github.com/sachiniyer/agent-factory/log"
+	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
 // The docker container runtime (#1592 Phase 4 PR4) — the first-class sandboxed
@@ -120,8 +122,9 @@ func SetDockerSelfBinaryForTest(path string) func() {
 // package-level seam (mirroring dockerSelfBinary / lookPath) so tests can drive
 // the runtime against a fake docker CLI — including the create-then-fail path
 // (#2008) — without a real daemon on the box. Production wraps exec.CommandContext.
-var dockerExec = func(ctx context.Context, args ...string) ([]byte, error) {
+var dockerExec = func(ctx context.Context, environ []string, args ...string) ([]byte, error) {
 	cmd := exec.CommandContext(ctx, "docker", args...)
+	cmd.Env = environ
 	cmd.WaitDelay = dockerWaitDelay
 	out, err := cmd.CombinedOutput()
 	if errors.Is(err, exec.ErrWaitDelay) {
@@ -137,7 +140,7 @@ var dockerExec = func(ctx context.Context, args ...string) ([]byte, error) {
 }
 
 // SetDockerExecForTest overrides the docker CLI runner and returns a restore func.
-func SetDockerExecForTest(f func(ctx context.Context, args ...string) ([]byte, error)) func() {
+func SetDockerExecForTest(f func(ctx context.Context, environ []string, args ...string) ([]byte, error)) func() {
 	prev := dockerExec
 	dockerExec = f
 	return func() { dockerExec = prev }
@@ -290,6 +293,11 @@ func (p *dockerProvisioner) runContainer() error {
 		"-e", "HOME=/root",
 		"-p", "127.0.0.1::" + dockerAgentPort,
 	}
+	for _, name := range sessionenv.DockerForwardNames(os.Environ(), p.agentName(), p.spec.SessionEnvPassthrough) {
+		// Docker looks the value up in the CLI process's filtered environment;
+		// only the name appears in argv, logs, and test captures.
+		args = append(args, "-e", name)
+	}
 	args = append(args, p.runArgs...)
 	args = append(args, "--entrypoint", "sleep", p.image, "2147483647")
 
@@ -338,11 +346,18 @@ func (p *dockerProvisioner) configureGit() error {
 // (spec.RestoreBranch set, #1592 Phase 4 PR6) it additionally materializes the
 // pushed session branch as a local ref so the in-container Setup checks it out.
 func (p *dockerProvisioner) cloneWorkspace() error {
-	script := fmt.Sprintf("git clone %s %s", shellQuote(p.spec.CloneURL), shellQuote(dockerWorkspaceDir))
+	script := gitCloneCommand(p.spec.CloneURL, dockerWorkspaceDir)
 	out, err := p.execSh(dockerProvisionStepTimeout, script)
 	if err != nil {
 		return fmt.Errorf("backend=docker: cloning %q into the container failed (is git in the image, and the URL reachable from inside the container?): %s: %w",
 			p.spec.CloneURL, strings.TrimSpace(string(out)), err)
+	}
+	if credentialCommand := gitPersistCredentialCommand(p.spec.CloneURL, dockerWorkspaceDir); credentialCommand != "" {
+		out, err = p.execSh(dockerShortStepTimeout, credentialCommand)
+		if err != nil {
+			return fmt.Errorf("backend=docker: configuring value-free GitHub credentials in the clone failed: %s: %w",
+				strings.TrimSpace(string(out)), err)
+		}
 	}
 	if branch := strings.TrimSpace(p.spec.RestoreBranch); branch != "" {
 		return p.fetchRestoreBranch(branch)
@@ -390,20 +405,35 @@ func (p *dockerProvisioner) copyAfBinary() error {
 // workspace title matches the daemon-side session title so the daemon's remote
 // client dials /v1/sessions/{title}/stream. readBanner then polls the banner file.
 func (p *dockerProvisioner) startAgentServer() error {
+	filteredInner, err := p.agentServerCommand()
+	if err != nil {
+		return err
+	}
+	filteredInner += fmt.Sprintf(" >%s 2>%s", shellQuote(dockerBannerPath), shellQuote(dockerLogPath))
+
+	// -d: detach. The agent-server keeps running in the container after this exec
+	// client returns; we read its banner from the file below.
+	out, err := p.docker(dockerShortStepTimeout, "exec", "-d", p.containerID, "sh", "-c", filteredInner)
+	if err != nil {
+		return fmt.Errorf("backend=docker: starting af agent-server in the container failed: %s: %w", strings.TrimSpace(string(out)), err)
+	}
+	return nil
+}
+
+func (p *dockerProvisioner) agentServerCommand() (string, error) {
 	inner := fmt.Sprintf("%s agent-server --listen :%s --repo %s --title %s",
 		shellQuote(dockerAfBinaryPath), dockerAgentPort, shellQuote(dockerWorkspaceDir), shellQuote(p.spec.Title))
 	if strings.TrimSpace(p.program) != "" {
 		inner += " --program " + shellQuote(p.program)
 	}
-	inner += fmt.Sprintf(" >%s 2>%s", shellQuote(dockerBannerPath), shellQuote(dockerLogPath))
-
-	// -d: detach. The agent-server keeps running in the container after this exec
-	// client returns; we read its banner from the file below.
-	out, err := p.docker(dockerShortStepTimeout, "exec", "-d", p.containerID, "sh", "-c", inner)
-	if err != nil {
-		return fmt.Errorf("backend=docker: starting af agent-server in the container failed: %s: %w", strings.TrimSpace(string(out)), err)
+	for _, name := range p.spec.SessionEnvPassthrough {
+		inner += " --session-env " + shellQuote(name)
 	}
-	return nil
+	filteredInner, err := sessionenv.WrapCommand(dockerAfBinaryPath, p.agentName(), p.spec.SessionEnvPassthrough, inner)
+	if err != nil {
+		return "", fmt.Errorf("backend=docker: preparing filtered agent-server environment failed: %w", err)
+	}
+	return filteredInner, nil
 }
 
 // readBanner polls the in-container banner file until the agent-server has bound
@@ -485,7 +515,7 @@ func (p *dockerProvisioner) reap() error {
 	// opposite things for the record (#2049).
 	ctx, cancel := context.WithTimeout(context.Background(), dockerReapTimeout)
 	defer cancel()
-	out, err := dockerExec(ctx, "rm", "-f", p.containerID)
+	out, err := dockerExec(ctx, p.dockerEnvironment(), "rm", "-f", p.containerID)
 	if err == nil {
 		p.reaped = true
 		p.reapErr = nil
@@ -517,7 +547,19 @@ func (p *dockerProvisioner) reap() error {
 func (p *dockerProvisioner) docker(timeout time.Duration, args ...string) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	return dockerExec(ctx, args...)
+	return dockerExec(ctx, p.dockerEnvironment(), args...)
+}
+
+func (p *dockerProvisioner) agentName() string {
+	agent := tmux.DetectAgentFromCommand(p.program)
+	if agent == "" && strings.TrimSpace(p.program) == "" {
+		return tmux.ProgramClaude
+	}
+	return agent
+}
+
+func (p *dockerProvisioner) dockerEnvironment() []string {
+	return sessionenv.DockerCLIEnvironment(os.Environ(), p.agentName(), p.spec.SessionEnvPassthrough)
 }
 
 // execSh runs a `sh -c <script>` inside the container.

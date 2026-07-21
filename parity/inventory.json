@@ -1442,6 +1442,7 @@
       "af agent-server --listen": "meta.internal",
       "af agent-server --program": "meta.internal",
       "af agent-server --repo": "meta.internal",
+      "af agent-server --session-env": "meta.internal",
       "af agent-server --title": "meta.internal",
       "af api --help": "meta.discovery",
       "af api --json": "cli.json-envelope",

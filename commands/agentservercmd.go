@@ -24,10 +24,11 @@ import (
 // boundary.
 
 var (
-	agentServerListen  string
-	agentServerRepo    string
-	agentServerTitle   string
-	agentServerProgram string
+	agentServerListen     string
+	agentServerRepo       string
+	agentServerTitle      string
+	agentServerProgram    string
+	agentServerSessionEnv []string
 )
 
 var agentServerCmd = &cobra.Command{
@@ -68,10 +69,11 @@ branch before shutdown), not this server's.`,
 		}
 
 		return daemon.RunAgentServer(daemon.AgentServerOptions{
-			ListenAddr: agentServerListen,
-			RepoPath:   repo,
-			Title:      agentServerTitle,
-			Program:    agentServerProgram,
+			ListenAddr:            agentServerListen,
+			RepoPath:              repo,
+			Title:                 agentServerTitle,
+			Program:               agentServerProgram,
+			SessionEnvPassthrough: agentServerSessionEnv,
 		}, cmd.OutOrStdout())
 	},
 }
@@ -104,5 +106,7 @@ func init() {
 		"Session title for the workspace (required)")
 	agentServerCmd.Flags().StringVar(&agentServerProgram, "program", "",
 		"Agent program to run (default: the configured default_program)")
+	agentServerCmd.Flags().StringSliceVar(&agentServerSessionEnv, "session-env", nil,
+		"Additional exact environment variable name an agent may inherit (repeatable)")
 	_ = agentServerCmd.MarkFlagRequired("title")
 }

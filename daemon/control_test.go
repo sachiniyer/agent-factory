@@ -108,6 +108,37 @@ func TestManagerCreateSessionPersistsAndRejectsDuplicate(t *testing.T) {
 	}
 }
 
+func TestManagerCreateSessionPassesConfiguredSessionEnvironment(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	repoPath := setupControlRepo(t)
+
+	var got []string
+	restore := session.SetBackendFactoryForTest(func(opts session.InstanceOptions, _ string) (session.Backend, error) {
+		got = append([]string(nil), opts.SessionEnvPassthrough...)
+		backend := session.NewFakeBackend()
+		backend.CompleteStart()
+		return readyFakeBackend{backend}, nil
+	})
+	t.Cleanup(restore)
+
+	cfg := config.DefaultConfig()
+	cfg.SessionEnvPassthrough = []string{"CUSTOM_PROVIDER_TOKEN"}
+	manager, err := NewManager(cfg)
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	if _, err := manager.CreateSession(context.Background(), CreateSessionRequest{
+		Title:    "configured-env",
+		RepoPath: repoPath,
+		Program:  "claude",
+	}); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	if len(got) != 1 || got[0] != "CUSTOM_PROVIDER_TOKEN" {
+		t.Fatalf("backend received session environment names %v, want configured exact name", got)
+	}
+}
+
 // TestManagerCreateSessionAtomicWithRefresh is a regression test for
 // sachiniyer/agent-factory#509. The pre-fix code persisted a new session to
 // disk before inserting it into m.instances under m.mu. The daemon's refresh

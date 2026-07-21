@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session/git"
 	"github.com/sachiniyer/agent-factory/session/tmux"
@@ -29,6 +30,15 @@ func resolveProgramForInstance(i *Instance) string {
 // It resolves configuration before Instance.Program is rewritten, so an invalid
 // incoming override can be rejected while the outgoing process is still alive.
 func resolveProgramForAgent(i *Instance, agent string) string {
+	cfg := resolveConfigForInstance(i)
+	// Read the enum through the accessor, not the bare field: a handoff (#2013)
+	// rewrites Program in place while the instance is live and shared, so this
+	// is a genuinely concurrent read now. Every other reader of the field
+	// (ToInstanceData, ReconcileTabsFromData) already holds the instance lock.
+	return config.ResolveProgram(cfg, agent)
+}
+
+func resolveConfigForInstance(i *Instance) *config.Config {
 	var cfg *config.Config
 	if repo, err := config.RepoFromPath(i.Path); err == nil {
 		if resolved, rerr := config.ResolveConfig(repo.Root); rerr == nil {
@@ -45,11 +55,45 @@ func resolveProgramForAgent(i *Instance, agent string) string {
 		}
 		cfg = loaded
 	}
-	// Read the enum through the accessor, not the bare field: a handoff (#2013)
-	// rewrites Program in place while the instance is live and shared, so this
-	// is a genuinely concurrent read now. Every other reader of the field
-	// (ToInstanceData, ReconcileTabsFromData) already holds the instance lock.
-	return config.ResolveProgram(cfg, agent)
+	return cfg
+}
+
+func configuredSessionEnvPassthrough(explicit []string) []string {
+	names := append([]string(nil), explicit...)
+	if cfg, err := config.LoadConfig(); err == nil && cfg != nil {
+		names = append(names, cfg.SessionEnvPassthrough...)
+	}
+	normalized, _ := sessionenv.NormalizeExtraNames(names)
+	return normalized
+}
+
+func sessionEnvPassthroughForInstance(i *Instance) []string {
+	i.mu.RLock()
+	explicit := append([]string(nil), i.sessionEnvPassthrough...)
+	i.mu.RUnlock()
+	if cfg := resolveConfigForInstance(i); cfg != nil {
+		explicit = append(explicit, cfg.SessionEnvPassthrough...)
+	}
+	normalized, _ := sessionenv.NormalizeExtraNames(explicit)
+	return normalized
+}
+
+func refreshSessionEnvironment(i *Instance, tmuxSession *tmux.TmuxSession) error {
+	if err := tmuxSession.SetEnvPassthrough(sessionEnvPassthroughForInstance(i)); err != nil {
+		return fmt.Errorf("invalid session environment pass-through: %w", err)
+	}
+	return nil
+}
+
+func refreshWorktreeEnvironment(i *Instance, worktree *git.GitWorktree) error {
+	if worktree == nil {
+		return nil
+	}
+	agent := tmux.DetectAgentFromCommand(resolveProgramForInstance(i))
+	if err := worktree.SetHookEnvironment(agent, sessionEnvPassthroughForInstance(i)); err != nil {
+		return fmt.Errorf("invalid post-worktree environment pass-through: %w", err)
+	}
+	return nil
 }
 
 // LocalBackend implements Backend using local tmux sessions and git worktrees.
@@ -135,6 +179,9 @@ func (b *LocalBackend) Provision(i *Instance, firstTimeSetup bool) error {
 		// before Start/Restore.
 		tmuxSession = tmux.NewTmuxSessionForRepo(i.Title, i.Path, i.Program)
 	}
+	if err := refreshSessionEnvironment(i, tmuxSession); err != nil {
+		return err
+	}
 
 	i.mu.Lock()
 	i.setTmuxLocked(tmuxSession)
@@ -161,6 +208,12 @@ func (b *LocalBackend) Provision(i *Instance, firstTimeSetup bool) error {
 		i.gitWorktree = gitWorktree
 		i.Branch = branchName
 		i.mu.Unlock()
+	}
+	i.mu.RLock()
+	gitWorktree := i.gitWorktree
+	i.mu.RUnlock()
+	if err := refreshWorktreeEnvironment(i, gitWorktree); err != nil {
+		return err
 	}
 
 	return nil
@@ -426,6 +479,9 @@ func (b *LocalBackend) SwapAgent(i *Instance, plan AgentSwapPlan) error {
 	}
 
 	ts.SetProgram(plan.program)
+	if err := refreshSessionEnvironment(i, ts); err != nil {
+		return fmt.Errorf("swap agent: %w", err)
+	}
 	if err := ts.Start(workDir); err != nil {
 		if cleanupErr := ts.CloseAttachOnly(); cleanupErr != nil {
 			err = fmt.Errorf("%v (cleanup error: %v)", err, cleanupErr)
@@ -465,6 +521,9 @@ func (b *LocalBackend) respawn(i *Instance) error {
 	if workDir == "" {
 		return fmt.Errorf("recover: session %q has no worktree to re-spawn into", i.Title)
 	}
+	if err := refreshWorktreeEnvironment(i, gw); err != nil {
+		return fmt.Errorf("recover: %w", err)
+	}
 	resolvedProgram := resolveProgramForInstance(i)
 	if _, err := os.Stat(workDir); err != nil {
 		if !os.IsNotExist(err) {
@@ -499,6 +558,9 @@ func (b *LocalBackend) respawn(i *Instance) error {
 	}
 
 	ts.SetProgram(injectSystemPrompt(prepareResumeConversation(i, resolvedProgram)))
+	if err := refreshSessionEnvironment(i, ts); err != nil {
+		return fmt.Errorf("recover: %w", err)
+	}
 	if err := ts.Restore(workDir); err != nil {
 		if cleanupErr := ts.CloseAttachOnly(); cleanupErr != nil {
 			err = fmt.Errorf("%v (cleanup error: %v)", err, cleanupErr)

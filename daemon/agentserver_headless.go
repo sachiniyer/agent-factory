@@ -70,6 +70,9 @@ type AgentServerOptions struct {
 	Title string
 	// Program is the agent program to run (empty ⇒ the config default).
 	Program string
+	// SessionEnvPassthrough carries exact operator-approved variable names from
+	// the outer runtime. Values remain in this host's environment.
+	SessionEnvPassthrough []string
 }
 
 // AgentServerInfo is the machine-readable startup banner the process prints to
@@ -121,9 +124,10 @@ func RunAgentServer(opts AgentServerOptions, stdout io.Writer) error {
 	}
 
 	instance, err := session.NewInstance(session.InstanceOptions{
-		Title:   opts.Title,
-		Path:    opts.RepoPath,
-		Program: program,
+		Title:                 opts.Title,
+		Path:                  opts.RepoPath,
+		Program:               program,
+		SessionEnvPassthrough: opts.SessionEnvPassthrough,
 		// The in-sandbox agent-server ALWAYS runs the local runtime (tmux + git
 		// worktree against RepoPath) — it IS the sandbox (§1.2). Force it explicitly
 		// so a workspace whose repo config declares backend=docker/ssh (cloned into

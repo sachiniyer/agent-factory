@@ -113,15 +113,16 @@ func (m *Manager) CreateSession(ctx context.Context, req CreateSessionRequest) (
 	defer repoStartLock.Unlock()
 
 	instance, err := session.NewInstance(session.InstanceOptions{
-		ID:          pending.ID,
-		CreatedAt:   pending.CreatedAt,
-		Title:       title,
-		TaskID:      req.TaskID,
-		Path:        repo.Root,
-		Program:     req.Program,
-		InPlace:     req.InPlace,
-		ForceRemote: req.ForceRemote,
-		Backend:     session.BackendKind(req.Backend),
+		ID:                    pending.ID,
+		CreatedAt:             pending.CreatedAt,
+		Title:                 title,
+		TaskID:                req.TaskID,
+		Path:                  repo.Root,
+		Program:               req.Program,
+		InPlace:               req.InPlace,
+		ForceRemote:           req.ForceRemote,
+		Backend:               session.BackendKind(req.Backend),
+		SessionEnvPassthrough: append([]string(nil), m.cfg.SessionEnvPassthrough...),
 	})
 	if err != nil {
 		return session.InstanceData{}, err

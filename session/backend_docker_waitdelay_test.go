@@ -9,6 +9,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 )
 
 // #1967: exec.CommandContext kills only the DIRECT child, not its descendants. A
@@ -47,7 +49,9 @@ func TestDockerExec_WaitDelayBoundsStraggler(t *testing.T) {
 	// Real production path: dockerExec is the single seam every docker invocation
 	// (including the `docker rm -f` reap) flows through. The 400ms ctx proves the
 	// deadline does not bound the call — only dockerWaitDelay does.
-	if !returnsWithinExec(dockerStragglerGuard, func() { out, err = dockerExec(ctx, "rm", "-f", "some-container") }) {
+	if !returnsWithinExec(dockerStragglerGuard, func() {
+		out, err = dockerExec(ctx, sessionenv.DockerCLIEnvironment(os.Environ(), "", nil), "rm", "-f", "some-container")
+	}) {
 		t.Fatalf("dockerExec did not return within %s — the ctx deadline does not bound CombinedOutput() while a straggler holds the capture pipe; dockerWaitDelay is missing (#1967)", dockerStragglerGuard)
 	}
 	if err != nil {

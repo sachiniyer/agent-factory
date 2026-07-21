@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
@@ -21,6 +22,7 @@ import (
 
 // TestMain runs before all tests to set up the test environment
 func TestMain(m *testing.M) {
+	sessionenv.HandleInternalExec()
 	// #837: fail the package loudly if any test touches the real config.json.
 	verifyRealConfig := testguard.ConfigTripwire()
 	// #1056: fail loudly if a test leaks an af_ session onto the ambient tmux
