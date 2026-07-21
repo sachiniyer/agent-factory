@@ -27,6 +27,9 @@ type localAgentServer struct {
 	inst *Instance
 
 	mu sync.Mutex
+	// afterTabResolve is a deterministic race-test seam. Production leaves it
+	// nil; tests use it to pause between tab resolution and broker-map locking.
+	afterTabResolve func()
 	// brokers holds one lazy ptyBroker per tab, keyed by the tab's STABLE id
 	// (#1738), not its ordinal index (#1592 Phase 2 PR6, tab-aware streaming): the
 	// agent tab and each shell/process tab have their own clientless capture + ring
@@ -238,6 +241,9 @@ func (s *localAgentServer) ensureBroker(tab int) (*ptyBroker, error) {
 	// lookups could pair b's ID with c's tmux if a close shifted the roster between
 	// them — then cache that wrong binding under b forever (#2200).
 	id, ts, ok := s.inst.tabTmuxTargetAt(tab)
+	if s.afterTabResolve != nil {
+		s.afterTabResolve()
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.closed {
@@ -292,6 +298,9 @@ func (s *localAgentServer) resetBrokerCaptures() {
 func (s *localAgentServer) ensureBrokerByID(tabID string) (*ptyBroker, error) {
 	// Resolve under i.mu BEFORE taking s.mu (never nest s.mu → i.mu).
 	ts, exists := s.inst.TabTmuxByID(tabID)
+	if s.afterTabResolve != nil {
+		s.afterTabResolve()
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.closed {
