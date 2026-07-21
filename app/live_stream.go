@@ -11,6 +11,7 @@ import (
 	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/session/tmux"
+	"github.com/sachiniyer/agent-factory/terminal"
 	"github.com/sachiniyer/agent-factory/ui"
 	"github.com/sachiniyer/agent-factory/ui/termpane"
 )
@@ -24,22 +25,25 @@ import (
 func (m *home) newTabPaneSource() ui.PreviewSource {
 	repoID := m.repoID
 	fetch := m.previewFetcher
-	return func(instance *session.Instance, tab int, full bool) (string, error) {
+	return func(instance *session.Instance, tab int, full bool) (ui.PreviewSnapshot, error) {
 		if instance == nil || fetch == nil {
-			return "", nil
+			return ui.PreviewSnapshot{}, nil
 		}
 		// Address the capture by the tab's stable id (#1738) so it can't grab the
 		// wrong tab after a reorder/close. Only an empty id uses the legacy ordinal;
 		// a non-empty id that no longer resolves is refused, never fallen back.
 		tabID, _ := instance.TabIDAt(tab)
-		content, gone, err := fetch(daemon.PreviewRequest{Title: instance.Title, RepoID: repoID, Tab: tab, TabID: tabID, Full: full})
+		resp, err := fetch(daemon.PreviewRequest{Title: instance.Title, RepoID: repoID, Tab: tab, TabID: tabID, Full: full})
 		if err != nil {
-			return "", err
+			return ui.PreviewSnapshot{}, err
 		}
-		if gone {
-			return "", tmux.ErrSessionGone
+		if resp.Gone {
+			return ui.PreviewSnapshot{}, tmux.ErrSessionGone
 		}
-		return content, nil
+		return ui.PreviewSnapshot{
+			Content: resp.Content,
+			Owner:   scrollOwnerForModes(resp.Modes, resp.HasModes),
+		}, nil
 	}
 }
 
@@ -73,7 +77,8 @@ func streamDialer(title, repoID, tabID string, tab int) termpane.Dialer {
 // authoritative resize control frame becomes EventResize, and INPUT/RESIZE go out as
 // binary frames.
 type apiStream struct {
-	sc *apiclient.StreamConn
+	sc           *apiclient.StreamConn
+	pendingModes *terminal.Modes
 }
 
 var _ termpane.Stream = (*apiStream)(nil)
@@ -94,7 +99,12 @@ func (s *apiStream) Recv(ctx context.Context) (termpane.Event, error) {
 			case agentproto.OpPTYOut:
 				return termpane.Event{Kind: termpane.EventData, Data: msg.Frame.Data}, nil
 			case agentproto.OpRepaint:
-				return termpane.Event{Kind: termpane.EventRepaint, Data: msg.Frame.Data}, nil
+				ev := termpane.Event{Kind: termpane.EventRepaint, Data: msg.Frame.Data}
+				if s.pendingModes != nil {
+					ev.Modes, ev.HasModes = *s.pendingModes, true
+					s.pendingModes = nil
+				}
+				return ev, nil
 			case agentproto.OpHello:
 				// The server's authoritative cursor. The opening hello merely restates the
 				// X-Af-Stream-Seq header the pane already adopted (harmlessly idempotent);
@@ -104,7 +114,21 @@ func (s *apiStream) Recv(ctx context.Context) (termpane.Event, error) {
 			}
 			continue // INPUT/RESIZE are client→server; ignore any echoed back
 		}
-		if typ, _ := agentproto.MessageTypeOf(msg.Text); typ == agentproto.MsgResize {
+		typ, _ := agentproto.MessageTypeOf(msg.Text)
+		if typ == agentproto.MsgTerminalModes {
+			var mm agentproto.TerminalModesMessage
+			// A malformed replacement must not lend the prior repaint's modes to
+			// the next grid. Clear first so ownership metadata is fail-closed.
+			s.pendingModes = nil
+			if json.Unmarshal(msg.Text, &mm) == nil {
+				modes := mm.Modes
+				s.pendingModes = &modes
+			}
+			// Modes and repaint are emitted consecutively by the daemon. Keep
+			// reading so termpane applies both under one emulator lock.
+			continue
+		}
+		if typ == agentproto.MsgResize {
 			var rm agentproto.ResizeMessage
 			if json.Unmarshal(msg.Text, &rm) == nil {
 				return termpane.Event{Kind: termpane.EventResize, Rows: rm.Rows, Cols: rm.Cols}, nil

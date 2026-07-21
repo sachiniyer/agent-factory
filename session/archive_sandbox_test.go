@@ -266,12 +266,16 @@ type stubAgentServer struct {
 func (s *stubAgentServer) Archive() (string, error) { return s.branch, nil }
 func (s *stubAgentServer) Kill() error              { s.killCalls++; return s.killErr }
 
-func (s *stubAgentServer) Provision(bool) error                        { return nil }
-func (s *stubAgentServer) Launch(bool) error                           { return nil }
-func (s *stubAgentServer) Expose() (StreamEndpoint, error)             { return StreamEndpoint{}, nil }
-func (s *stubAgentServer) Snapshot() (Observation, error)              { return Observation{}, nil }
-func (s *stubAgentServer) Preview(int, bool) (string, error)           { return "", nil }
-func (s *stubAgentServer) PreviewByID(string, bool) (string, error)    { return "", nil }
+func (s *stubAgentServer) Provision(bool) error            { return nil }
+func (s *stubAgentServer) Launch(bool) error               { return nil }
+func (s *stubAgentServer) Expose() (StreamEndpoint, error) { return StreamEndpoint{}, nil }
+func (s *stubAgentServer) Snapshot() (Observation, error)  { return Observation{}, nil }
+func (s *stubAgentServer) Preview(int, bool) (PreviewSnapshot, error) {
+	return PreviewSnapshot{}, nil
+}
+func (s *stubAgentServer) PreviewByID(string, bool) (PreviewSnapshot, error) {
+	return PreviewSnapshot{}, nil
+}
 func (s *stubAgentServer) Alive() (bool, error)                        { return false, nil }
 func (s *stubAgentServer) SendPrompt(string) error                     { return nil }
 func (s *stubAgentServer) TapEnter()                                   {}

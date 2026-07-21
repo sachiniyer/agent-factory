@@ -490,16 +490,19 @@ func (t *TmuxSession) waitForPasteDelivered(
 	if len([]rune(tail)) < minDistinctiveTail {
 		needed = 2
 	}
-	sawAbsentCapture := false
+	lastObservation := deliveryCouldNotObserve
+	deadlineOutcome := func() deliveryOutcome {
+		if lastObservation == deliveryObservedAbsent && t.preSubmitEchoBehavior() == preSubmitEchoes {
+			return deliveryObservedAbsent
+		}
+		return deliveryCouldNotObserve
+	}
 	for {
 		// If the prior capture succeeded and the following poll interval carried
 		// us across the deadline, that prior read is the terminal observation. Do
 		// not launch an already-expired capture just to turn success into unknown.
 		if time.Until(deadline) <= 0 {
-			if sawAbsentCapture && t.preSubmitEchoBehavior() == preSubmitEchoes {
-				return deliveryObservedAbsent
-			}
-			return deliveryCouldNotObserve
+			return deadlineOutcome()
 		}
 
 		// Bound each capture by what is LEFT of this loop's budget, so a wedged
@@ -511,19 +514,25 @@ func (t *TmuxSession) waitForPasteDelivered(
 					t.notePreSubmitEchoObserved()
 					return deliveryObservedLanded
 				}
+				// One weak short-tail sighting is neither confirmed delivery nor
+				// absence. A later failure must not combine with it.
+				lastObservation = deliveryCouldNotObserve
 			} else {
 				streak = 0
-				sawAbsentCapture = true
+				lastObservation = deliveryObservedAbsent
 			}
+		} else {
+			// Observation continuity is load-bearing. The paste can land after an
+			// earlier absent frame, and a failed frame can separate two coincidental
+			// short-tail sightings, so unreadability invalidates both signals.
+			streak = 0
+			lastObservation = deliveryCouldNotObserve
 		}
 		if time.Now().After(deadline) {
-			// A final failed capture must not erase earlier successful observations
-			// of absence (#2214 review). Missing text in an agent not known to echo
-			// still says nothing about whether the paste landed (#2213).
-			if !sawAbsentCapture || t.preSubmitEchoBehavior() != preSubmitEchoes {
-				return deliveryCouldNotObserve
-			}
-			return deliveryObservedAbsent
+			// Only a terminal successful absence in a known echoing pane supports a
+			// negative. Earlier absence followed by unreadability is unknown: the
+			// paste may have drained after that frame.
+			return deadlineOutcome()
 		}
 		time.Sleep(pasteDeliveryPollInterval)
 	}

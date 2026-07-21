@@ -707,7 +707,6 @@ export class AppShell {
     // transport action, not a logout.
     const disconnect = h("button", { type: "button", class: "af-ghost" }, "Disconnect");
     disconnect.setAttribute("title", "Disconnect and forget the saved token");
-    disconnect.addEventListener("click", () => this.actions.disconnect());
 
     // The theme toggle: a compact Auto/Light/Dark segmented control. A click routes
     // through actions.setTheme, which persists the choice and re-themes the terminals.
@@ -758,6 +757,7 @@ export class AppShell {
     this.projectSwitchBtn.setAttribute("aria-label", "Switch project");
     this.projectSwitchBtn.addEventListener("click", (e) => {
       e.stopPropagation();
+      setAppbarToolsOpen(false);
       this.toggleProjectMenu();
     });
     this.projectMenu = h("div", { class: "af-project-menu" });
@@ -783,6 +783,74 @@ export class AppShell {
     this.navToggle.setAttribute("aria-expanded", "false");
     this.navToggle.addEventListener("click", () => this.toggleNav());
 
+    // Secondary appbar chrome stays inline on desktop, but a phone cannot give all
+    // four controls scarce primary-row width without clipping the project context
+    // (#2227). Group them behind one More trigger at the narrow breakpoint instead
+    // of deleting functionality or shrinking touch targets. The listeners exist only
+    // while the popover is open, so logout/login cannot accumulate document handlers.
+    const appbarTools = h(
+      "div",
+      { class: "af-appbar-tools", id: "af-appbar-tools" },
+      live,
+      ...(this.installEl ? [this.installEl] : []),
+      themeToggle,
+      disconnect,
+    );
+    appbarTools.setAttribute("role", "group");
+    appbarTools.setAttribute("aria-label", "App controls");
+    const appbarMore = h("button", { type: "button", class: "af-appbar-more" }, "⋯");
+    appbarMore.setAttribute("aria-label", "More app controls");
+    appbarMore.setAttribute("title", "More app controls");
+    appbarMore.setAttribute("aria-controls", "af-appbar-tools");
+    appbarMore.setAttribute("aria-expanded", "false");
+    const appbarToolsWrap = h("div", { class: "af-appbar-tools-wrap" }, appbarMore, appbarTools);
+    let appbarToolsOpen = false;
+    function setAppbarToolsOpen(open: boolean): void {
+      if (appbarToolsOpen === open) {
+        return;
+      }
+      appbarToolsOpen = open;
+      appbarToolsWrap.classList.toggle("af-appbar-tools-open", open);
+      appbarMore.setAttribute("aria-expanded", open ? "true" : "false");
+      if (open) {
+        document.addEventListener("mousedown", onAppbarToolsMouseDown);
+        document.addEventListener("keydown", onAppbarToolsKeyDown, true);
+        window.addEventListener("resize", onAppbarToolsResize);
+      } else {
+        document.removeEventListener("mousedown", onAppbarToolsMouseDown);
+        document.removeEventListener("keydown", onAppbarToolsKeyDown, true);
+        window.removeEventListener("resize", onAppbarToolsResize);
+      }
+    }
+    const onAppbarToolsMouseDown = (e: MouseEvent): void => {
+      if (!appbarToolsWrap.isConnected || !appbarToolsWrap.contains(e.target as Node)) {
+        setAppbarToolsOpen(false);
+      }
+    };
+    const onAppbarToolsKeyDown = (e: KeyboardEvent): void => {
+      if (e.key !== "Escape") {
+        return;
+      }
+      e.stopPropagation();
+      setAppbarToolsOpen(false);
+      appbarMore.focus();
+    };
+    const onAppbarToolsResize = (): void => setAppbarToolsOpen(false);
+    appbarMore.addEventListener("click", (e) => {
+      e.stopPropagation();
+      const opening = !appbarToolsOpen;
+      if (opening) {
+        this.closeProjectMenu();
+      }
+      setAppbarToolsOpen(opening);
+    });
+    // Disconnect replaces the shell synchronously. Close first so the temporary
+    // document/window listeners cannot outlive the DOM subtree they describe.
+    disconnect.addEventListener("click", () => {
+      setAppbarToolsOpen(false);
+      this.actions.disconnect();
+    });
+
     const header = h(
       "header",
       { class: "af-appbar" },
@@ -790,13 +858,7 @@ export class AppShell {
       h("span", { class: "af-brand" }, "Agent Factory"),
       viewNav,
       this.projectSwitchWrap,
-      live,
-      // Install sits with the other trailing appbar controls. It carries `hidden`
-      // unless the browser reports the app installable, which on most loads (and
-      // always over plain-HTTP Tailscale) means it contributes nothing to the bar.
-      ...(this.installEl ? [this.installEl] : []),
-      themeToggle,
-      disconnect,
+      appbarToolsWrap,
     );
 
     this.railCount = h("span", { class: "af-rail-count" }, "0");
@@ -1541,32 +1603,40 @@ export class AppShell {
     this.retryVisible = isLimitReached(selected);
     retryBtn.hidden = !this.retryVisible;
 
-    const actions = h("div", { class: "af-term-actions" }, retryBtn);
-
-    const head = h("div", { class: "af-term-head" }, titleBox, actions);
-
-    // The tab bar sits between the header and the terminal, mirroring the TUI's
-    // tab row (ui/tabbed_window.go): one button per tab, the active one highlighted,
-    // a × on closable (non-agent) tabs, and a + to add a shell tab.
-    this.tabBar = h("div", { class: "af-tabbar" });
-    this.tabBar.setAttribute("role", "tablist");
-    this.tabBar.setAttribute("aria-label", "Session tabs");
+    // The tab bar is the flexible middle of the single pane-header row (#2224):
+    // title first, the same horizontally scrolling bar, then the fixed Retry escape
+    // when a limit wall makes it visible. Keeping the real bar node here (rather
+    // than projecting a second mobile/desktop copy) preserves one drag/drop and
+    // popover-anchoring path at every width.
+    const tabBar = h("div", { class: "af-tabbar" });
+    this.tabBar = tabBar;
+    tabBar.setAttribute("role", "tablist");
+    tabBar.setAttribute("aria-label", "Session tabs");
     // The drag source is wired ONCE here on the (stable) bar container via delegation,
     // not per button — so EVERY tab, including one created after load, is a drag source
     // by construction, with no per-button binding to forget on a re-render (#1737).
-    this.attachTabDrag(this.tabBar);
+    this.attachTabDrag(tabBar);
     // ...and the bar is also a drop TARGET, for reordering (#1813). Same delegation,
     // same reason. See attachTabReorder for how this stays unambiguous against the
     // drag-to-split drop the panes wire.
     this.tabInsert = h("div", { class: "af-tab-insert" });
     this.tabInsert.hidden = true;
     this.tabInsert.setAttribute("aria-hidden", "true");
-    this.attachTabReorder(this.tabBar);
+    this.attachTabReorder(tabBar);
+    // Rename is delegated from the same stable container. The first click of a
+    // double-click can activate an inactive tab and synchronously replace every
+    // button; a listener owned by the old button cannot receive the final dblclick.
+    this.attachTabRename(tabBar);
+
+    // Retry is the only pane-level action. Append it directly instead of keeping a
+    // wrapper box: hidden controls create no flex item and therefore no phantom gap
+    // on the common path, while the visible button cannot shrink behind the tabs.
+    const head = h("div", { class: "af-term-head" }, titleBox, tabBar, retryBtn);
 
     this.main.className = "af-main af-main-term";
     // The persistent terminal host is (re)mounted here; renderMain runs only on a
     // selection change, so this reparent is rare and never happens mid-type.
-    this.main.replaceChildren(head, this.tabBar, this.termHost);
+    this.main.replaceChildren(head, this.termHost);
     this.renderTabBar(state);
     this.patchMainHead(state);
   }
@@ -1637,6 +1707,10 @@ export class AppShell {
       reason.setAttribute("aria-label", `New tab unavailable · ${unavailable}`);
       children.push(reason);
     }
+    // Replacing every child resets a horizontally scrolled bar to its left edge.
+    // Preserve the stable container's viewport so activating an off-screen tab does
+    // not snap the row — or move a different tab under the second half of a gesture.
+    const scrollLeft = bar.scrollLeft;
     bar.replaceChildren(...children);
     // The insertion indicator is absolutely positioned and sits outside the tab flow,
     // so it simply rides along as a last child — but replaceChildren above just
@@ -1646,6 +1720,7 @@ export class AppShell {
       this.tabInsert.hidden = true;
       bar.append(this.tabInsert);
     }
+    bar.scrollLeft = scrollLeft;
     // Rebuilding the bar detaches EVERY tab button — including the source of an
     // in-flight drag. A native dragend can't fire on a detached node, so the delegated
     // dragend (on the bar) would never run and the drag flag would stick, leaving the UI
@@ -1696,13 +1771,68 @@ export class AppShell {
     });
   }
 
+  /** Owns inline rename on the stable bar rather than on an individual button.
+   *  Activating an inactive tab rebuilds the buttons synchronously on the first
+   *  click of a double-click. Depending on geometry, Chromium may then target the
+   *  second click at the replacement button or at the gap it moved away from, and
+   *  may emit no useful dblclick at all. Capture the first click's stable identity,
+   *  then consume click #2 before its button handler can rebuild again. This makes
+   *  the intended tab — not a transient DOM node or coordinate — own the gesture. */
+  private attachTabRename(bar: HTMLElement): void {
+    let firstIdentity: string | null = null;
+    bar.addEventListener(
+      "click",
+      (e) => {
+        const target = e.target instanceof Element ? e.target.closest<HTMLElement>(".af-tab") : null;
+        const button = target && bar.contains(target) ? target : null;
+        const targetIntent = button ? tabRenameIntents.get(button) : undefined;
+
+        if (e.detail === 1) {
+          firstIdentity = targetIntent?.identity() ?? null;
+          return;
+        }
+        if (e.detail !== 2) {
+          firstIdentity = null;
+          return;
+        }
+
+        const intendedIdentity = firstIdentity;
+        firstIdentity = null;
+        if (!intendedIdentity) {
+          return;
+        }
+
+        // `detail === 2` is the browser's declaration that this is one multi-click
+        // gesture. Its DOM target is not authoritative: rebuilding an overflowed bar
+        // can reset scroll between the two clicks, putting an entirely different tab
+        // under the unchanged pointer. Resolve the CURRENT button from the FIRST
+        // click's identity, so the visual jump cannot turn rename into a second tab
+        // selection or rename the neighbour that happened to move underneath it.
+        const current = barTabs(bar).find(
+          (candidate) => tabRenameIntents.get(candidate)?.identity() === intendedIdentity,
+        );
+        const intent = current ? tabRenameIntents.get(current) : undefined;
+        if (!intent) {
+          return;
+        }
+
+        // The first click already selected the tab. Stop the second click before its
+        // ordinary openTab handler can replace the button whose edit is opening.
+        e.preventDefault();
+        e.stopPropagation();
+        intent.begin();
+      },
+      { capture: true },
+    );
+  }
+
   /**
    * Wires the tab bar as a drop TARGET, for reordering tabs within it (#1813).
    *
    * The gesture is disambiguated from drag-to-split by WHERE the drag is released,
-   * and the two regions are disjoint DOM subtrees that never overlap: the bar is a
-   * sibling of the terminal host (renderMain appends head, tabBar, termHost), and
-   * every split drop handler is bound inside a .af-pane within that host (split.ts
+   * and the two regions are disjoint DOM subtrees that never overlap: the bar sits
+   * inside the header, which is a sibling of the terminal host, and every split drop
+   * handler is bound inside a .af-pane within that host (split.ts
    * wireDrop). A drag released over the strip reorders; over a pane it splits or
    * replaces. Neither handler can see the other's event — there is no shared
    * ancestor between them below <main>, so no bubbling to suppress and no
@@ -1915,6 +2045,12 @@ function barTabs(bar: HTMLElement): HTMLElement[] {
   return [...bar.querySelectorAll<HTMLElement>(".af-tab")];
 }
 
+/** The rename intent captured by each currently rendered tab button. The stable bar
+ *  carries a double-click across a button replacement by matching these identities;
+ *  WeakMap ownership means detached buttons and their stale captures disappear
+ *  together. */
+const tabRenameIntents = new WeakMap<HTMLElement, { identity: () => string; begin: () => void }>();
+
 /** Each tab's horizontal centre, in viewport px — the geometry the pure insertion
  *  math takes (tabreorder.ts). Measured rather than derived: tab widths vary with
  *  their labels, and a bar can scroll. */
@@ -1979,12 +2115,14 @@ function tabButton(
   const renameable = canManage && isRenameableTab(tab.kind);
   btn.title = renameable ? `${tabDisplayLabel(tab)} — double-click to rename` : tabDisplayLabel(tab);
   if (renameable) {
-    btn.addEventListener("dblclick", (e) => {
-      e.preventDefault();
-      // Resolved HERE, as the edit OPENS — the identity is captured, never a getter
-      // the commit could re-read against a roster the user never saw. See
-      // beginTabRename. The session id is captured with it, for the same reason.
-      beginTabRename(btn, tab, actions, liveIdentity(), selectedSessionId);
+    tabRenameIntents.set(btn, {
+      identity: liveIdentity,
+      begin: () => {
+        // Resolved HERE, as the edit OPENS — the identity is captured, never a getter
+        // the commit could re-read against a roster the user never saw. See
+        // beginTabRename. The session id is captured with it, for the same reason.
+        beginTabRename(btn, tab, actions, liveIdentity(), selectedSessionId);
+      },
     });
   }
   // The agent tab (index 0) is unclosable — killing the session tears it down.

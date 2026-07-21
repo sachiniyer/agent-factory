@@ -153,8 +153,14 @@ func Build(in Inputs) (Result, error) {
 		bundlePath:  in.BundlePath,
 	}
 
-	b.Tasks, b.Errors = collectTasks(r, b.Errors)
+	// Task statuses can mention a historical target that differs from the
+	// task's current TargetSession. Keep raw tasks local until instances have
+	// registered every persisted title, then sanitize all task statuses against
+	// the complete known-title set. No raw task enters Bundle.
+	tasks, errs := loadTasksForRedaction(b.Errors)
+	b.Errors = errs
 	b.Instances, b.Errors = collectInstances(r, b.Errors)
+	b.Tasks = r.redactTasks(tasks)
 	b.Config, b.Errors = collectConfig(r, b.Errors)
 	b.Log, b.Errors = collectLog(r, b.Errors)
 
@@ -498,17 +504,14 @@ func countInstances(repos []repoInstances) int {
 	return total
 }
 
-// collectTasks loads and redacts the configured tasks.
-func collectTasks(r *redactor, errs []string) ([]redactedTask, []string) {
+// loadTasksForRedaction keeps raw tasks out of Bundle while allowing Build to
+// discover instance titles before task statuses are sanitized.
+func loadTasksForRedaction(errs []string) ([]task.Task, []string) {
 	tasks, err := task.LoadTasks()
 	if err != nil {
 		return nil, append(errs, fmt.Sprintf("tasks: %v", err))
 	}
-	out := make([]redactedTask, 0, len(tasks))
-	for _, t := range tasks {
-		out = append(out, r.redactTask(t))
-	}
-	return out, errs
+	return tasks, errs
 }
 
 // collectInstances loads every repo's instances.json and redacts each, sorted

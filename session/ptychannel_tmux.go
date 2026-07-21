@@ -147,9 +147,15 @@ func (c *tmuxClientlessChannel) Snapshot() (PaneSnapshot, error) {
 		return PaneSnapshot{}, err
 	}
 	snap := PaneSnapshot{Screen: []byte(content)}
-	// The cursor position is best-effort: a failure to read it degrades to a
-	// screen-only repaint (the pre-fix behavior) rather than failing the subscribe.
-	if row, col, curErr := c.ts.CursorPosition(); curErr == nil {
+	// Cursor and terminal modes are best-effort: a failure degrades to the old
+	// screen-only repaint rather than failing the subscription. ReadTerminalState
+	// gets both in one tmux request so a fresh client receives a coherent owner.
+	if state, stateErr := c.ts.ReadTerminalState(); stateErr == nil {
+		snap.CursorRow, snap.CursorCol, snap.HasCursor = state.CursorRow, state.CursorCol, true
+		snap.Modes, snap.HasModes = state.Modes, true
+	} else if row, col, curErr := c.ts.CursorPosition(); curErr == nil {
+		// Preserve the cursor-only fallback for tmux versions/sources that cannot
+		// expose the mode formats.
 		snap.CursorRow, snap.CursorCol, snap.HasCursor = row, col, true
 	}
 	return snap, nil

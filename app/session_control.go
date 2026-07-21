@@ -20,22 +20,21 @@ import (
 // (a lifecycle concern, transport-agnostic) survives from the old path, to spawn
 // the daemon at cold start exactly as callDaemon's implicit ensure used to.
 
-// daemonHTTPWarmup{Wait,Poll} bound the retry the TUI's HTTP calls tolerate
-// while a freshly-ensured daemon finishes coming up. Two transient conditions
-// need it and both clear inside this window: (1) the daemon reports the #829
-// "still restoring sessions" starting error, and (2) its HTTP socket has not
-// finished binding — the daemon binds daemon-http.sock microseconds AFTER the
-// control socket EnsureDaemon waits for (daemon boot order), so a call fired in
-// that sliver sees a transport refusal. The values mirror the net/rpc callDaemon
-// warm-up (daemonReadyTimeout / a 100ms cadence) so the switch is behavior-
-// preserving.
+// daemonHTTPRetry{Wait,Poll} bound the retry the TUI's HTTP calls tolerate for
+// transient daemon lifecycle admission and startup transport races. Three
+// conditions clear inside this window: (1) the daemon reports the #829 "still
+// restoring sessions" error, (2) an upgrade candidate is in validation
+// probation, or (3) daemon-http.sock has not finished binding — it binds
+// microseconds AFTER the control socket EnsureDaemon waits for. The values
+// mirror the net/rpc callDaemon admission retry (daemonReadyTimeout / a 100ms
+// cadence), preserving transport parity.
 const (
-	daemonHTTPWarmupWait = 5 * time.Second
-	daemonHTTPWarmupPoll = 100 * time.Millisecond
+	daemonHTTPRetryWait = 5 * time.Second
+	daemonHTTPRetryPoll = 100 * time.Millisecond
 )
 
 // withDaemonHTTP ensures a daemon is running, then invokes fn against a fresh
-// HTTP client, retrying while the daemon is warming (starting error) or its
+// HTTP client, retrying while lifecycle admission is transiently closed or its
 // HTTP socket has not yet bound (transport error). It is the HTTP twin of the
 // net/rpc callDaemon: EnsureDaemon spawns the daemon if absent (the TUI relied
 // on callDaemon's implicit ensure to boot the daemon at cold start — spawning is
@@ -57,31 +56,31 @@ var withDaemonHTTP = func(fn func(*apiclient.Client) error) error {
 		return err
 	}
 	err = fn(c)
-	deadline := time.Now().Add(daemonHTTPWarmupWait)
-	for httpCallWarming(err) && time.Now().Before(deadline) {
-		time.Sleep(daemonHTTPWarmupPoll)
+	deadline := time.Now().Add(daemonHTTPRetryWait)
+	for httpCallRetryable(err) && time.Now().Before(deadline) {
+		time.Sleep(daemonHTTPRetryPoll)
 		err = fn(c)
 	}
 	return err
 }
 
-// httpCallWarming reports whether an HTTP control error is a transient warm-up
-// condition worth retrying: the daemon's #829 starting error, or a transport
-// failure while its HTTP socket finishes binding. A daemon application error
-// (session not found, invalid repo) comes back as an envelope message — never a
+// httpCallRetryable reports whether an HTTP control error is transient: a
+// lifecycle admission refusal classified by daemon, or a transport failure
+// while its HTTP socket finishes binding. A daemon application error (session
+// not found, invalid repo) comes back as an envelope message — never a
 // TransportError — so it is never retried and surfaces to the caller at once.
 //
-// A cancelled or expired context is NOT warming, even though it arrives dressed
-// as a TransportError (http.Client reports it through the round-trip, which this
-// package tags). It means the CALLER gave up, so every retry re-issues the call
-// with the same dead context and fails instantly: a bounded call (killRPCTimeout)
-// would burn its entire warm-up window spinning on a request that cannot
-// succeed, and would report the deadline seconds after it actually fired.
-func httpCallWarming(err error) bool {
+// A cancelled or expired context is NOT retryable, even though it arrives
+// dressed as a TransportError (http.Client reports it through the round-trip,
+// which this package tags). It means the CALLER gave up, so every retry
+// re-issues the call with the same dead context and fails instantly: a bounded
+// call (killRPCTimeout) would burn its entire retry window spinning on a request
+// that cannot succeed, and would report the deadline seconds after it fired.
+func httpCallRetryable(err error) bool {
 	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
 		return false
 	}
-	return daemon.IsDaemonStartingErr(err) || apiclient.IsTransportError(err)
+	return daemon.IsDaemonAdmissionRetryable(err) || apiclient.IsTransportError(err)
 }
 
 type sessionStartRequest struct {
@@ -381,15 +380,13 @@ func snapshotThroughDaemon(repoID string) (daemon.SnapshotResponse, error) {
 // (refreshPaneBindingCmd), so a mutable global would race a test seam swap under
 // `go test -parallel`; the fetcher lives per-home instead, and tests assign a fake
 // to home.previewFetcher directly (the #960 PR4 / snapshot-fetcher race lesson).
-func previewThroughDaemon(req daemon.PreviewRequest) (content string, gone bool, err error) {
+func previewThroughDaemon(req daemon.PreviewRequest) (resp daemon.PreviewResponse, err error) {
 	err = withDaemonHTTP(func(c *apiclient.Client) error {
 		var e error
-		// tabGone is deliberately dropped here: the TUI renders its session-gone
-		// fallback for either cause, and it addresses tabs it can see (#1948).
-		content, gone, _, e = c.Preview(req)
+		resp, e = c.PreviewSnapshot(req)
 		return e
 	})
-	return content, gone, err
+	return resp, err
 }
 
 // allReposSnapshotFetcher returns the daemon's session list across EVERY repo

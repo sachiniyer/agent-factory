@@ -6,8 +6,11 @@ import (
 	"os/user"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/task"
@@ -78,6 +81,17 @@ var privateKeyBlock = regexp.MustCompile(`(?s)-----BEGIN [A-Z0-9 ]*PRIVATE KEY--
 // truncating a real title mid-way and leaving a fragment behind. Keys on the
 // name *shape*, so it scrubs archived/killed sessions no live set still knows.
 var afTmuxSessionName = regexp.MustCompile(`af_[0-9a-f]{8}_[^\s:]+`)
+
+// taskStartedInstanceTitle and taskParkedInstanceTitle recognize the two legacy
+// daemon log shapes that rendered a raw session title with %s. New logs use %q,
+// but a bundled tail can contain lines written by an older binary. Match the
+// legacy field by its fixed surrounding syntax so punctuation-only titles can
+// be removed without treating "." or "/" as a global search pattern. The parked
+// form keeps its diagnostic suffix; the started form owns the rest of its line.
+var (
+	taskStartedInstanceTitle = regexp.MustCompile(`(?m)(task \S+ started successfully as instance )[^\r\n]+$`)
+	taskParkedInstanceTitle  = regexp.MustCompile(`(?m)(task \S+ parked at a usage limit as instance )(.+)(; waiting for the limit window to reset)$`)
+)
 
 // redactor holds the per-run redaction context — the home directory to
 // collapse to "~" and the username token(s) to blank to "[user]" — resolved
@@ -168,6 +182,12 @@ func (r *redactor) scrubUnstructured(s string) string {
 // the log section; it ends by delegating to scrub() for the usual
 // $HOME/username/secret pass.
 func (r *redactor) scrubLog(s string) string {
+	// Remove every known full title representation before any shape-based pass
+	// can consume only part of it. In particular, the legacy raw task-start
+	// matcher is line-oriented while a legal title may contain newlines; running
+	// that matcher first replaced line one and made the original full-title match
+	// impossible, leaking the remaining lines (#2249 late review).
+	s = r.scrubSessionTitles(s)
 	// Redact the title in every af_<hash>_<title> name. Keys on the name shape,
 	// so it catches current AND historical (archived/killed) sessions the live
 	// instance set no longer references.
@@ -179,21 +199,40 @@ func (r *redactor) scrubLog(s string) string {
 			s = strings.ReplaceAll(s, name, tmuxPrefixMarker)
 		}
 	}
-	return r.scrubUnstructured(s)
+	// Retain compatibility with the two legacy raw %s taskrun.go forms. Their
+	// syntax is a safer boundary than a global punctuation matcher and also
+	// catches historical task-created titles no longer present in instances.json.
+	s = taskStartedInstanceTitle.ReplaceAllString(s, `${1}`+redactedMarker)
+	s = taskParkedInstanceTitle.ReplaceAllString(s, `${1}`+redactedMarker+`${3}`)
+	return r.scrub(s)
 }
 
 // scrubSessionTitles removes exact Go-quoted forms of every known title, then
-// applies the conservative bare-title matcher. The quoted form is the important
-// invariant for task targets: daemon delivery logs and persisted delivery errors
-// both format them with %q. Matching strconv.Quote therefore covers every legal
-// title byte-for-byte, including short names that are unsafe to replace as bare
-// words and quotes/backslashes that %q escapes (#2238 review).
+// applies the conservative word-bearing bare-title matcher. The quoted form is
+// the important invariant for task targets: daemon delivery logs and persisted
+// delivery errors both format them with %q. Matching strconv.Quote therefore
+// covers every legal title byte-for-byte, including short names and punctuation
+// that are unsafe to replace globally, plus quotes/backslashes that %q escapes
+// (#2238 review). scrubLog handles legacy raw punctuation emitters by their
+// fixed field syntax.
 func (r *redactor) scrubSessionTitles(s string) string {
+	titles := make([]string, 0, len(r.titles))
 	for title := range r.titles {
-		s = strings.ReplaceAll(s, strconv.Quote(title), strconv.Quote(redactedMarker))
-		if re := bareTitleRegexp(title); re != nil {
-			s = re.ReplaceAllString(s, redactedMarker)
+		titles = append(titles, title)
+	}
+	// A shorter title may be a prefix of a longer one. Redacting the prefix
+	// first destroys the only exact match for the longer secret and leaves its
+	// suffix behind, so the order is part of the privacy invariant. The lexical
+	// tie-break makes output deterministic even though titles are stored in a map.
+	sort.Slice(titles, func(i, j int) bool {
+		if len(titles[i]) != len(titles[j]) {
+			return len(titles[i]) > len(titles[j])
 		}
+		return titles[i] < titles[j]
+	})
+	for _, title := range titles {
+		s = strings.ReplaceAll(s, strconv.Quote(title), strconv.Quote(redactedMarker))
+		s = replaceBareTitle(s, title)
 	}
 	return s
 }
@@ -209,46 +248,98 @@ func redactAFTmuxTitle(match string) string {
 	return match[:12] + redactedMarker
 }
 
-// bareTitleRegexp compiles a boundary-anchored matcher for any non-empty bare
-// session title. Short titles can collide with ordinary words, but silently
-// publishing a known secret is worse than losing some diagnostic prose. Exact
-// Go-quoted matching above handles the common short-title path without that
-// collateral; this matcher closes raw %s-style log paths too (#2238 review).
+// replaceBareTitle removes a title only when it occupies a complete text token.
+// The legacy logger's raw %s form is delimited by surrounding prose/newlines, so
+// this covers that representation without compiling single-line punctuation-only
+// titles such as "." or "/" into an unbounded matcher that erases every period
+// or path separator in the bundle. A multiline title is different: its exact,
+// byte-identical cross-line sequence must be removed before a legacy line matcher
+// can consume line one and strand the rest. Exact %q forms are handled above.
 //
-// A `\b` anchor is only emitted on the edge where the title's own boundary
-// character is a word char ([A-Za-z0-9_]); `\b` matches only at a word↔non-word
-// transition, so anchoring an edge whose title char is itself non-word (e.g. the
-// trailing `]` of "client[prod]") never matches and the title leaks (#1639). The
-// per-edge anchor still guards word-char edges against partial-word mangling
-// (title "test" won't match inside "testing") while a non-word edge is already
-// self-delimiting and needs no anchor.
-func bareTitleRegexp(title string) *regexp.Regexp {
-	title = strings.TrimSpace(title)
-	if title == "" {
-		return nil
+// A token boundary means start/end of text or a neighboring rune that is not a
+// letter, number, combining mark, or underscore. Checking both edges regardless
+// of the title's own first/last character handles titles such as "client[prod]"
+// while refusing to match "." inside "1.2" or "/" inside "repo/path".
+func replaceBareTitle(s, title string) string {
+	if strings.TrimSpace(title) == "" || (!containsWordRune(title) && !strings.ContainsAny(title, "\r\n")) {
+		return s
 	}
-	var left, right string
-	if isWordByte(title[0]) {
-		left = `\b`
+	var out strings.Builder
+	scan, copied := 0, 0
+	changed := false
+	for scan <= len(s)-len(title) {
+		rel := strings.Index(s[scan:], title)
+		if rel < 0 {
+			break
+		}
+		start := scan + rel
+		end := start + len(title)
+		if titleTokenBoundary(s, start, end) && !insideRedactionMarker(s, start, end) {
+			out.WriteString(s[copied:start])
+			out.WriteString(redactedMarker)
+			copied = end
+			scan = end
+			changed = true
+			continue
+		}
+		// Advance one byte past this rejected occurrence. strings.Index remains
+		// byte-based too, so this cannot skip a later exact byte sequence.
+		scan = start + 1
 	}
-	if isWordByte(title[len(title)-1]) {
-		right = `\b`
+	if !changed {
+		return s
 	}
-	re, err := regexp.Compile(left + regexp.QuoteMeta(title) + right)
-	if err != nil {
-		return nil
-	}
-	return re
+	out.WriteString(s[copied:])
+	return out.String()
 }
 
-// isWordByte reports whether b is a regex word character ([A-Za-z0-9_]), i.e. a
-// byte across which `\b` forms a boundary. ASCII-only, matching RE2's default
-// `\b` semantics.
-func isWordByte(b byte) bool {
-	return b == '_' ||
-		(b >= 'a' && b <= 'z') ||
-		(b >= 'A' && b <= 'Z') ||
-		(b >= '0' && b <= '9')
+func titleTokenBoundary(s string, start, end int) bool {
+	if start > 0 {
+		r, _ := utf8.DecodeLastRuneInString(s[:start])
+		if isWordRune(r) {
+			return false
+		}
+	}
+	if end < len(s) {
+		r, _ := utf8.DecodeRuneInString(s[end:])
+		if isWordRune(r) {
+			return false
+		}
+	}
+	return true
+}
+
+func isWordRune(r rune) bool {
+	return r == '_' || unicode.IsLetter(r) || unicode.IsNumber(r) || unicode.IsMark(r)
+}
+
+func containsWordRune(s string) bool {
+	for _, r := range s {
+		if isWordRune(r) {
+			return true
+		}
+	}
+	return false
+}
+
+// insideRedactionMarker keeps the title sanitizer idempotent when a legal title
+// is itself "redacted", "secret", or another substring of a marker emitted by
+// an earlier title. Such a match is already inside public replacement text; it
+// must not grow the marker or destroy its recognizable shape.
+func insideRedactionMarker(s string, start, end int) bool {
+	for _, marker := range []string{redactedMarker, secretMarker, userMarker} {
+		first := start - len(marker) + 1
+		if first < 0 {
+			first = 0
+		}
+		for candidate := first; candidate <= start; candidate++ {
+			markerEnd := candidate + len(marker)
+			if markerEnd >= end && markerEnd <= len(s) && s[candidate:markerEnd] == marker {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // noteSession records a session's tmux name(s) and raw title(s) before they are
@@ -604,4 +695,18 @@ func (r *redactor) redactTask(t task.Task) redactedTask {
 		rt.WatchCmd = redactedMarker
 	}
 	return rt
+}
+
+// redactTasks first registers every current task target, then creates the
+// secret-free projections. The two passes make task order irrelevant: one
+// task's historical status may mention another task's current target.
+func (r *redactor) redactTasks(tasks []task.Task) []redactedTask {
+	for _, t := range tasks {
+		r.noteTitle(t.TargetSession)
+	}
+	out := make([]redactedTask, 0, len(tasks))
+	for _, t := range tasks {
+		out = append(out, r.redactTask(t))
+	}
+	return out
 }

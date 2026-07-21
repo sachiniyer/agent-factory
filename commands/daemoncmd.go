@@ -113,15 +113,20 @@ var daemonStatusJSON bool
 // no-spawn probe `af doctor` uses) plus an os.Stat of the HTTP socket, so the
 // command never dials or starts a daemon and needs no new RPC.
 type daemonStatusInfo struct {
-	Running           bool   `json:"running"`
-	ControlSocket     string `json:"control_socket"`
-	ControlSocketFile bool   `json:"control_socket_file"`
-	HTTPSocket        string `json:"http_socket"`
-	HTTPSocketFile    bool   `json:"http_socket_file"`
-	PID               int    `json:"pid"`
-	PIDVerified       bool   `json:"pid_verified"`
-	AutostartUnit     bool   `json:"autostart_unit"`
-	BinaryStale       bool   `json:"binary_stale"`
+	Running           bool                         `json:"running"`
+	Version           string                       `json:"version,omitempty"`
+	BootID            string                       `json:"boot_id,omitempty"`
+	TransactionID     string                       `json:"transaction_id,omitempty"`
+	Phase             daemon.DaemonPhase           `json:"phase,omitempty"`
+	Listeners         *daemon.DaemonListenerStatus `json:"listeners,omitempty"`
+	ControlSocket     string                       `json:"control_socket"`
+	ControlSocketFile bool                         `json:"control_socket_file"`
+	HTTPSocket        string                       `json:"http_socket"`
+	HTTPSocketFile    bool                         `json:"http_socket_file"`
+	PID               int                          `json:"pid"`
+	PIDVerified       bool                         `json:"pid_verified"`
+	AutostartUnit     bool                         `json:"autostart_unit"`
+	BinaryStale       bool                         `json:"binary_stale"`
 	// ExposureWarning is non-empty when the config on disk serves the control API
 	// unauthenticated on a network address (#2090) — an ALLOWED posture since
 	// #2168 Phase 0, so this reports it rather than predicting a failure.
@@ -142,12 +147,20 @@ func collectDaemonStatus() daemonStatusInfo {
 	h := daemon.Health()
 	info := daemonStatusInfo{
 		Running:           h.PingErr == nil,
+		Version:           h.DaemonVersion,
+		BootID:            h.BootID,
+		TransactionID:     h.TransactionID,
+		Phase:             h.Phase,
 		ControlSocket:     h.SocketPath,
 		ControlSocketFile: h.SocketExists,
 		PID:               h.PIDFilePID,
 		PIDVerified:       h.PIDVerified,
 		AutostartUnit:     h.AutostartUnit,
 		BinaryStale:       h.BinaryDeleted,
+	}
+	if h.PingErr == nil && h.Phase != "" {
+		listeners := h.Listeners
+		info.Listeners = &listeners
 	}
 	if httpPath, err := daemon.DaemonHTTPSocketPath(); err == nil {
 		info.HTTPSocket = httpPath
@@ -178,6 +191,33 @@ func printDaemonStatusHuman(cmd *cobra.Command, info daemonStatusInfo) {
 		// is no config the daemon refuses to start under, so there is no posture
 		// that makes this line a lie.
 		fmt.Fprintln(w, "daemon: not running (starts on demand when you run af with an enabled task)")
+	}
+	if info.Phase != "" {
+		fmt.Fprintf(w, "  phase:          %s\n", info.Phase)
+	}
+	if info.Version != "" {
+		fmt.Fprintf(w, "  version:        %s\n", info.Version)
+	}
+	if info.BootID != "" {
+		fmt.Fprintf(w, "  boot id:        %s\n", info.BootID)
+	}
+	if info.TransactionID != "" {
+		fmt.Fprintf(w, "  transaction:    %s\n", info.TransactionID)
+	}
+	if info.Listeners != nil {
+		httpState := "not bound"
+		if info.Listeners.HTTPUnixBound {
+			httpState = "bound"
+		}
+		fmt.Fprintf(w, "  http listener:  %s\n", httpState)
+		switch {
+		case !info.Listeners.TCPConfigured:
+			fmt.Fprintln(w, "  tcp listener:   disabled")
+		case info.Listeners.TCPBound:
+			fmt.Fprintf(w, "  tcp listener:   %s (bound)\n", info.Listeners.TCPBoundAddr)
+		default:
+			fmt.Fprintf(w, "  tcp listener:   %s (not bound)\n", info.Listeners.TCPListenAddr)
+		}
 	}
 	fmt.Fprintf(w, "  control socket: %s (%s)\n", info.ControlSocket, presence(info.ControlSocketFile))
 	if info.HTTPSocket != "" {

@@ -465,6 +465,17 @@ type PingResponse struct {
 	// positive skew signal (the daemon predates version reporting, so it is
 	// older than this client), not merely an unknown.
 	Version string `json:"version"`
+	// BootID is unique to this daemon process start. TransactionID is retained
+	// for the full candidate boot, including after it reaches ready, so an
+	// upgrade supervisor can reject a different daemon that happened to answer
+	// the same socket (#1947).
+	BootID        string `json:"boot_id,omitempty"`
+	TransactionID string `json:"transaction_id,omitempty"`
+	// Phase distinguishes liveness from operational readiness. Ping answers
+	// while warming and in upgrade probation; only ready means daemon-owned work
+	// and ordinary mutations have been admitted.
+	Phase     DaemonPhase          `json:"phase,omitempty"`
+	Listeners DaemonListenerStatus `json:"listeners"`
 }
 
 type ReloadTasksRequest struct{}

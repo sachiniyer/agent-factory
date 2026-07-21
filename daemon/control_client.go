@@ -24,6 +24,11 @@ var ensureDaemonMu sync.Mutex
 // against a sentinel value; IsDaemonStartingErr matches this text instead.
 const daemonStartingErrText = "agent-factory daemon is starting (restoring sessions); retry shortly"
 
+// daemonUpgradeProbationErrText is the stable portion of the wire-visible
+// probation refusal. The transaction ID follows it for diagnosis, so clients
+// match the prefix rather than one complete dynamic string.
+const daemonUpgradeProbationErrText = "agent-factory daemon is validating an upgrade"
+
 // errDaemonStarting is returned by state-dependent RPC handlers in the window
 // between the control-socket bind and the completion of the instance restore
 // (#829). The socket now binds before the restore, which can take minutes on
@@ -32,12 +37,32 @@ func errDaemonStarting() error {
 	return errors.New(daemonStartingErrText)
 }
 
+func errDaemonUpgradeProbation(transactionID string) error {
+	return fmt.Errorf("%s (transaction %s); retry shortly", daemonUpgradeProbationErrText, transactionID)
+}
+
 // IsDaemonStartingErr reports whether an RPC client error means the daemon is
 // up but still restoring instances. Callers should treat it as retryable: the
 // daemon is alive (EnsureDaemon's ping succeeds, so it must NOT spawn another)
 // and the same request succeeds once the restore finishes.
 func IsDaemonStartingErr(err error) bool {
 	return err != nil && strings.Contains(err.Error(), daemonStartingErrText)
+}
+
+// IsDaemonUpgradeProbationErr reports whether a daemon mutation was refused
+// because a candidate is restored but its previous-binary supervisor has not
+// released admission yet. Like the warm-up error, net/rpc flattens the server
+// error to text, so this classifier matches the stable wire prefix.
+func IsDaemonUpgradeProbationErr(err error) bool {
+	return err != nil && strings.Contains(err.Error(), daemonUpgradeProbationErrText)
+}
+
+// IsDaemonAdmissionRetryable reports whether err is a lifecycle admission
+// refusal expected to clear without restarting the daemon. Both the net/rpc
+// and HTTP/TUI transports use this predicate so a new admission phase cannot
+// become retryable on one transport while failing immediately on the other.
+func IsDaemonAdmissionRetryable(err error) bool {
+	return IsDaemonStartingErr(err) || IsDaemonUpgradeProbationErr(err)
 }
 
 // DaemonSocketPath returns the Unix socket path used by the local control
@@ -145,16 +170,16 @@ func pingDaemonResponse() (PingResponse, error) {
 	return resp, err
 }
 
-// daemonWarmupWait bounds how long RPC clients wait for a warming daemon
-// (socket bound, instance restore still running — #829) before surfacing the
-// typed starting error. It mirrors daemonReadyTimeout, the wait callers
-// already tolerated pre-#829 when EnsureDaemon polled for the socket: a local
-// restore completes well inside this window so CLI/TUI calls just work, while
-// a minutes-long remote-hook restore fails fast with an actionable message
-// instead of hanging the caller. daemonWarmupPoll is the retry cadence.
+// daemonAdmissionRetryWait bounds how long RPC clients wait for a transient
+// lifecycle admission refusal before surfacing it. It mirrors
+// daemonReadyTimeout, the wait callers already tolerated pre-#829 when
+// EnsureDaemon polled for the socket: a local restore or probation release
+// completes inside this window so calls just work, while a stuck transition
+// fails fast with its actionable message instead of hanging the caller.
+// daemonAdmissionRetryPoll is the retry cadence.
 const (
-	daemonWarmupWait = daemonReadyTimeout
-	daemonWarmupPoll = 100 * time.Millisecond
+	daemonAdmissionRetryWait = daemonReadyTimeout
+	daemonAdmissionRetryPoll = 100 * time.Millisecond
 )
 
 func callDaemon(method string, req any, resp any) error {
@@ -162,13 +187,13 @@ func callDaemon(method string, req any, resp any) error {
 		return err
 	}
 	err := callDaemonNoEnsure(method, req, resp)
-	// A warming daemon rejects state-dependent RPCs until its instance
-	// restore completes (#829). Retry briefly so callers that race a fresh
-	// daemon spawn (CLI create right after boot, task runs after an upgrade
-	// respawn) succeed without every call site growing retry logic.
-	deadline := time.Now().Add(daemonWarmupWait)
-	for IsDaemonStartingErr(err) && time.Now().Before(deadline) {
-		time.Sleep(daemonWarmupPoll)
+	// A warming daemon rejects state-dependent RPCs until restore completes;
+	// an upgrade candidate rejects mutations until its validator releases
+	// probation. Both are alive and retryable, so callers share one bounded
+	// retry rather than growing per-call-site lifecycle logic.
+	deadline := time.Now().Add(daemonAdmissionRetryWait)
+	for IsDaemonAdmissionRetryable(err) && time.Now().Before(deadline) {
+		time.Sleep(daemonAdmissionRetryPoll)
 		err = callDaemonNoEnsure(method, req, resp)
 	}
 	return err

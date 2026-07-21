@@ -17,9 +17,9 @@ Run `af <command> --help` for the same information at the terminal. For a narrat
 - [`af completion fish`](#af-completion-fish) — Generate the autocompletion script for fish
 - [`af completion powershell`](#af-completion-powershell) — Generate the autocompletion script for powershell
 - [`af completion zsh`](#af-completion-zsh) — Generate the autocompletion script for zsh
-- [`af config`](#af-config) — Read and write the global agent-factory config
-- [`af config get`](#af-config-get) — Print the value of a single global config key
-- [`af config list`](#af-config-list) — Print every global config key and its effective value
+- [`af config`](#af-config) — Read global or project-effective config and write global config
+- [`af config get`](#af-config-get) — Print one global or project-effective config value
+- [`af config list`](#af-config-list) — Print global or project-effective config values
 - [`af config set`](#af-config-set) — Set a single settable global config key
 - [`af daemon`](#af-daemon) — Manage the background daemon: serves the web UI and schedules tasks
 - [`af daemon install`](#af-daemon-install) — Register the daemon to start automatically at login
@@ -90,7 +90,7 @@ af [flags]
 - [`af api`](#af-api) — Show the daemon-hosted HTTP/JSON API catalog
 - [`af bug-report`](#af-bug-report) — Bundle logs, versions, tasks, and redacted state for a bug report
 - [`af completion`](#af-completion) — Generate the autocompletion script for the specified shell
-- [`af config`](#af-config) — Read and write the global agent-factory config
+- [`af config`](#af-config) — Read global or project-effective config and write global config
 - [`af daemon`](#af-daemon) — Manage the background daemon: serves the web UI and schedules tasks
 - [`af debug`](#af-debug) — Print debug information like config paths
 - [`af doctor`](#af-doctor) — Diagnose setup, daemon health, and leaked session resources
@@ -427,16 +427,20 @@ af completion zsh [flags]
 
 ## af config
 
-Read and write the global agent-factory config
+Read global or project-effective config and write global config
 
 Read and write keys in the global config (~/.agent-factory/config.toml).
 
 "get"/"list" print the effective global config with defaults applied — what a
 session gets before any in-repo .agent-factory/config.toml override is layered
-on. "set" writes a single settable key, editing only that value in place so all
-comments and ordering in your config.toml are preserved. Changes apply the same
-way a hand-edit does: af and the daemon read config.toml at startup, so restart
-them to pick up a change.
+on. Pass --project <repository-path> to inspect the existing global, legacy,
+and checked-in layers for that project. --explain shows every candidate and why
+it did or did not supply the effective value.
+
+"set" remains global-only: it writes a single settable key, editing only that
+value in place so all comments and ordering in config.toml are preserved.
+Changes apply the same way a hand-edit does: af and the daemon read config.toml
+at startup, so restart them to pick up a change.
 
 ```
 af config
@@ -444,8 +448,8 @@ af config
 
 **Subcommands**
 
-- [`af config get`](#af-config-get) — Print the value of a single global config key
-- [`af config list`](#af-config-list) — Print every global config key and its effective value
+- [`af config get`](#af-config-get) — Print one global or project-effective config value
+- [`af config list`](#af-config-list) — Print global or project-effective config values
 - [`af config set`](#af-config-set) — Set a single settable global config key
 
 **Global flags**
@@ -457,12 +461,17 @@ af config
 
 ## af config get
 
-Print the value of a single global config key
+Print one global or project-effective config value
 
 Print the effective global value of one config key (e.g. default_program,
 auto_yes, auto_update, update_channel). Run "af config list" to see every key. Scalar values
 print bare; composite values (program_overrides, root_agents, limit_patterns,
 keys) print as JSON.
+
+With --project <repository-path>, print the value after the repository's current
+legacy and checked-in config layers are applied. The path is a selector only;
+this command does not register a project or write identity state. --explain
+prints the same resolved value with the complete source trace.
 
 ```
 af config get <key> [flags]
@@ -472,7 +481,9 @@ af config get <key> [flags]
 
 | Flag | Type | Description |
 |------|------|-------------|
+| `--explain` |  | Show every source candidate and why it did or did not supply the value |
 | `--json` |  | Emit the value(s) as JSON wrapped in the {data,error} envelope |
+| `--project` | `string` | Resolve config for the project at this repository path |
 
 **Global flags**
 
@@ -483,7 +494,12 @@ af config get <key> [flags]
 
 ## af config list
 
-Print every global config key and its effective value
+Print global or project-effective config values
+
+Print every global config key and its effective value. Pass --project
+<repository-path> to include the repository's current legacy and checked-in
+config keys and layers. --explain prints every source candidate and the reason
+it won, was shadowed, was absent, or is disallowed for that key.
 
 ```
 af config list [flags]
@@ -493,7 +509,9 @@ af config list [flags]
 
 | Flag | Type | Description |
 |------|------|-------------|
+| `--explain` |  | Show every source candidate and why it did or did not supply each value |
 | `--json` |  | Emit the value(s) as JSON wrapped in the {data,error} envelope |
+| `--project` | `string` | Resolve config for the project at this repository path |
 
 **Global flags**
 

@@ -26,10 +26,12 @@ const (
 	// OpRepaint (server → client) prefixes a one-shot screen repaint (clear + the
 	// current pane content) sent to a FRESH subscriber before any live output —
 	// pipe-pane carries no history, so without it a just-opened pane renders blank
-	// (#1592 Phase 2 PR6). The client feeds it to the emulator exactly like OpPTYOut
-	// but must NOT count it toward its replay cursor: a repaint is per-subscriber and
-	// is not part of the shared ring's monotonic seq, so counting it would desync the
-	// ?since arithmetic.
+	// (#1592 Phase 2 PR6). An authoritative MsgTerminalModes immediately precedes
+	// it when the source can report modes; the repaint bytes also carry the same
+	// DEC mode restore for terminal-only clients. The client feeds the repaint to
+	// the emulator exactly like OpPTYOut but must NOT count it toward its replay
+	// cursor: a repaint is per-subscriber and is not part of the shared ring's
+	// monotonic seq, so counting it would desync the ?since arithmetic.
 	OpRepaint Opcode = 0x03
 	// OpHello (server → client) carries the subscription's AUTHORITATIVE output
 	// cursor: an 8-byte big-endian uint64 the client adopts verbatim as its replay

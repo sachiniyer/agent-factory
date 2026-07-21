@@ -632,7 +632,9 @@ func capturePreview(ctx context.Context, instance *session.Instance) (string, er
 		if cp, ok := server.(contextPreviewer); ok {
 			content, err = cp.PreviewContext(cctx, 0, false)
 		} else {
-			content, err = server.Preview(0, false)
+			var snapshot session.PreviewSnapshot
+			snapshot, err = server.Preview(0, false)
+			content = snapshot.Content
 		}
 		ch <- previewResult{content: content, err: err}
 	}()

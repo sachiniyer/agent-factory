@@ -81,6 +81,13 @@
   --af-shadow-2: 0 4px 10px rgba(16, 24, 40, 0.08), 0 2px 4px rgba(16, 24, 40, 0.06);
   --af-shadow-overlay: 0 16px 48px rgba(16, 24, 40, 0.22), 0 4px 12px rgba(16, 24, 40, 0.12);
   --af-backdrop: rgba(23, 32, 46, 0.42);
+
+  /* Layer contract: a drawer may cover the body, appbar disclosures may cover the
+   * drawer, and an aria-modal surface must cover and block every one of them. */
+  --af-z-drawer: 30;
+  --af-z-appbar: 40;
+  --af-z-popover: 60;
+  --af-z-modal: 100;
 }
 
 /* --- Design tokens: DARK via OS preference (Auto) ------------------------ */
@@ -249,6 +256,7 @@ body {
 .af-tab-new:focus-visible,
 .af-viewtab:focus-visible,
 .af-theme-opt:focus-visible,
+.af-appbar-more:focus-visible,
 .af-project-switch:focus-visible,
 .af-project-item:focus-visible,
 .af-rail-filter:focus-visible,
@@ -435,6 +443,7 @@ body {
 .af-project-switch-wrap {
   position: relative;
   margin-left: auto;
+  min-width: 0;
 }
 
 /* Project switcher (redesign PR2): the top-right control that shows the current
@@ -467,11 +476,20 @@ body {
 }
 
 .af-project-glyph {
+  flex: 0 0 auto;
   color: var(--af-accent);
   font-weight: 700;
 }
 
+.af-project-switch-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .af-project-caret {
+  flex: 0 0 auto;
   color: var(--af-text-3);
   font-size: 0.6em;
 }
@@ -607,6 +625,39 @@ body {
 .af-live-pip.af-live-reconnecting {
   background: var(--af-dot-lost);
   animation: af-pulse 1.2s ease-in-out infinite;
+}
+
+/* The trailing appbar controls are one semantic group. It stays inline on desktop;
+ * the narrow breakpoint turns the wrapper into a single More trigger + popover so
+ * project context gets the phone's scarce primary-row width (#2227). */
+.af-appbar-tools-wrap,
+.af-appbar-tools {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--af-sp-4);
+  flex: 0 0 auto;
+}
+
+.af-appbar-more {
+  display: none;
+  align-items: center;
+  justify-content: center;
+  width: 2.75rem;
+  height: 2.75rem;
+  padding: 0;
+  background: transparent;
+  color: var(--af-text);
+  border: 1px solid var(--af-border);
+  border-radius: var(--af-r-md);
+  font: inherit;
+  font-size: var(--af-fs-lg);
+  line-height: 1;
+  cursor: pointer;
+}
+
+.af-appbar-more:hover {
+  background: var(--af-bg-inset);
+  border-color: var(--af-border-strong);
 }
 
 .af-ghost {
@@ -1155,7 +1206,7 @@ body {
   font-size: var(--af-fs-md);
 }
 
-/* Terminal pane: a slim header (session title + connection status) over the xterm
+/* Terminal pane: one slim title + tabs + conditional-Retry header over the xterm
  * host, which fills the remaining height so the FitAddon has real dimensions. */
 .af-main-term {
   min-height: 0;
@@ -1164,7 +1215,7 @@ body {
 .af-term-head {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  justify-content: flex-start;
   gap: 0.6rem;
   padding: var(--af-sp-2) 0.9rem;
   border-bottom: 1px solid var(--af-border);
@@ -1175,17 +1226,14 @@ body {
   display: flex;
   align-items: baseline;
   gap: 0.6rem;
-  min-width: 0;
-}
-
-.af-term-actions {
-  display: flex;
-  align-items: center;
-  gap: 0.4rem;
-  flex: 0 0 auto;
+  flex: 0 1 auto;
+  min-width: 7.5rem;
+  max-width: min(18rem, 34vw);
+  overflow: hidden;
 }
 
 .af-term-action {
+  flex: 0 0 auto;
   padding: 0.3rem 0.6rem;
   font-size: var(--af-fs-xs);
 }
@@ -1203,6 +1251,8 @@ body {
 }
 
 .af-term-title {
+  flex: 1 1 auto;
+  min-width: 5.5rem;
   font-size: var(--af-fs-md);
   font-weight: 600;
   white-space: nowrap;
@@ -1211,9 +1261,13 @@ body {
 }
 
 .af-term-meta {
+  flex: 0 1 auto;
+  min-width: 0;
   font-size: var(--af-fs-xs);
   color: var(--af-text-2);
   white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 /* Status tints on the pane header, matching the live-pip vocabulary. */
@@ -1230,18 +1284,19 @@ body {
   color: var(--af-dot-dead);
 }
 
-/* Tab bar (#1592 Phase 5 PR7): a slim strip of the session's tabs between the pane
- * header and the terminal, mirroring the TUI's tab row (ui/tabbed_window.go). The
- * active tab is accent-underlined; each non-agent tab carries a × close, and the
- * labelled New tab control offers Terminal / VS Code. It scrolls horizontally
- * rather than wrapping so a full row of tabs never pushes the terminal down. */
+/* Tab bar (#1592 Phase 5 PR7, #2224): the flexible middle of the pane's single
+ * header row, mirroring the TUI's tab row (ui/tabbed_window.go). The title keeps a
+ * useful minimum, Retry never shrinks, and this bar consumes the remainder and
+ * scrolls horizontally rather than wrapping or pushing the terminal down. */
 .af-tabbar {
   display: flex;
   align-items: stretch;
+  flex: 1 1 0;
+  min-width: 6rem;
   gap: 0.15rem;
-  padding: 0 0.6rem;
-  background: var(--af-bg-surface);
-  border-bottom: 1px solid var(--af-border);
+  padding: 0;
+  background: transparent;
+  border: 0;
   overflow-x: auto;
   scrollbar-width: thin;
   /* The containing block for the reorder insertion indicator (#1813), which is
@@ -1882,7 +1937,7 @@ body {
  * mounts into it. */
 .af-modal-host {
   position: relative;
-  z-index: 20;
+  z-index: var(--af-z-modal);
 }
 
 .af-modal-backdrop {
@@ -1893,7 +1948,7 @@ body {
   align-items: center;
   justify-content: center;
   padding: var(--af-sp-5);
-  z-index: 20;
+  z-index: var(--af-z-modal);
 }
 
 .af-modal-card {
@@ -2309,9 +2364,31 @@ body {
  * so the main pane keeps the full body width whether the drawer is open or shut, and the
  * terminal's own ResizeObserver never sees a width change when it toggles. */
 @media (max-width: 768px) {
+  /* The decorative brand yields entirely. The remaining controls keep DOM/focus
+   * order in the grid: drawer + top-level views, then a wider project row + rare
+   * tools. Width allocation is structural rather than whichever flex child happens
+   * to shrink or wrap first. */
+  .af-appbar {
+    position: relative;
+    z-index: var(--af-z-appbar);
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    grid-template-areas:
+      "nav views views"
+      "project project tools";
+    align-items: center;
+    gap: var(--af-sp-2);
+    padding: max(var(--af-sp-2), env(safe-area-inset-top)) max(var(--af-sp-2), env(safe-area-inset-right))
+      var(--af-sp-2) max(var(--af-sp-2), env(safe-area-inset-left));
+  }
+
   /* The hamburger is meaningful only where there is a rail to reveal — the sessions
    * view. In tasks/config the body (and its drawer) is display:none, so the toggle
    * would be a dead control; hide it there. */
+  .af-nav-toggle {
+    grid-area: nav;
+  }
+
   .af-app.af-view-sessions .af-nav-toggle {
     display: inline-flex;
   }
@@ -2328,7 +2405,7 @@ body {
     top: 0;
     left: 0;
     bottom: 0;
-    z-index: 30;
+    z-index: var(--af-z-drawer);
     width: min(85vw, 20rem);
     flex: none;
     transform: translateX(-100%);
@@ -2355,7 +2432,7 @@ body {
     display: block;
     position: absolute;
     inset: 0;
-    z-index: 29;
+    z-index: calc(var(--af-z-drawer) - 1);
     background: var(--af-backdrop);
     opacity: 0;
     pointer-events: none;
@@ -2371,6 +2448,125 @@ body {
    * controls (hamburger, view nav, project switch) have room before they wrap. */
   .af-brand {
     display: none;
+  }
+
+  /* Project context owns nearly the whole second row. The explicit
+   * min-width chain (grid track → wrapper → button → name) is what lets the browser
+   * draw a real ellipsis instead of clipping a flex item at an arbitrary glyph. */
+  .af-project-switch-wrap {
+    grid-area: project;
+    width: 100%;
+    min-width: 0;
+    margin-left: 0;
+  }
+
+  .af-project-switch {
+    width: 100%;
+    min-width: 0;
+    height: 2.75rem;
+  }
+
+  .af-project-switch-name {
+    flex: 1 1 auto;
+    text-align: left;
+  }
+
+  /* The menu spans the usable phone width and extends across the More column. This
+   * keeps a right-anchored menu inside both 320px and 375px viewports, whether the
+   * drawer is open or closed. The appbar's stacking context keeps it above the drawer. */
+  .af-project-menu {
+    right: calc(-2.75rem - var(--af-sp-2));
+    width: calc(100vw - var(--af-sp-2) - var(--af-sp-2));
+    min-width: 0;
+    max-width: none;
+    max-height: calc(100dvh - 7rem);
+    overflow-y: auto;
+    z-index: var(--af-z-popover);
+  }
+
+  .af-viewnav {
+    grid-area: views;
+    width: 100%;
+    margin-left: 0;
+    padding: 0;
+    border: 0;
+    box-shadow: inset 0 0 0 1px var(--af-border-subtle);
+  }
+
+  .af-appbar .af-viewtab {
+    flex: 1 1 0;
+    min-width: 0;
+    min-height: 2.75rem;
+    padding-inline: var(--af-sp-2);
+  }
+
+  /* Live/install/theme/disconnect are useful but secondary. One 44px trigger keeps
+   * every function reachable without letting four desktop controls squeeze the
+   * project name. The popover is a vertical touch-target stack, not a shrunken bar. */
+  .af-appbar-tools-wrap {
+    grid-area: tools;
+    position: relative;
+    display: block;
+  }
+
+  .af-appbar-more {
+    display: inline-flex;
+  }
+
+  .af-appbar-tools {
+    display: none;
+    position: absolute;
+    top: calc(100% + 6px);
+    right: 0;
+    z-index: var(--af-z-popover);
+    width: min(17rem, calc(100vw - var(--af-sp-2) - var(--af-sp-2)));
+    max-height: calc(100dvh - 4rem);
+    overflow-y: auto;
+    flex-direction: column;
+    align-items: stretch;
+    gap: var(--af-sp-2);
+    padding: var(--af-sp-2);
+    background: var(--af-bg-raised);
+    border: 1px solid var(--af-border);
+    border-radius: var(--af-r-lg);
+    box-shadow: var(--af-shadow-overlay);
+  }
+
+  .af-appbar-tools-open > .af-appbar-tools {
+    display: flex;
+  }
+
+  .af-appbar-tools .af-live {
+    min-height: 2.75rem;
+    padding-inline: var(--af-sp-3);
+  }
+
+  .af-appbar-tools .af-install {
+    width: 100%;
+  }
+
+  .af-appbar-tools .af-install__go {
+    flex: 1 1 auto;
+    min-height: 2.75rem;
+  }
+
+  .af-appbar-tools .af-install__dismiss {
+    min-width: 2.75rem;
+    min-height: 2.75rem;
+  }
+
+  .af-appbar-tools .af-theme-toggle {
+    width: 100%;
+  }
+
+  .af-appbar-tools .af-theme-opt {
+    flex: 1 1 0;
+    min-height: 2.5rem;
+  }
+
+  .af-appbar-tools > .af-ghost {
+    width: 100%;
+    min-height: 2.75rem;
   }
 
   /* Touch targets: lift the primary controls to a ~40-44px tap area so nothing on the

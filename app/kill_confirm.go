@@ -182,7 +182,7 @@ func killConfirmationWarning(wt string) string {
 // not whichever branch the agent has left checked out at HEAD. The fully
 // qualified local ref must resolve before an empty warning can be returned;
 // missing or unverifiable deletion targets fail closed (#2199).
-func unmergedCommitWarning(worktreePath, branchName, recordedBaseSHA, prState string) (string, bool) {
+func unmergedCommitWarning(worktreePath, branchName, recordedBaseSHA, prState string, deleteBranch bool) (string, bool) {
 	if strings.TrimSpace(worktreePath) == "" {
 		return unmergedFailClosedLine(branchName, fmt.Errorf("no worktree path")), false
 	}
@@ -201,12 +201,18 @@ func unmergedCommitWarning(worktreePath, branchName, recordedBaseSHA, prState st
 	}
 	branchResult := make(chan warningResult, 1)
 	detachedResult := make(chan warningResult, 1)
+	if deleteBranch {
+		go func() {
+			line, severe := branchCommitWarning(worktreePath, branchName, recordedBaseSHA, prState)
+			branchResult <- warningResult{line: line, severe: severe}
+		}()
+	} else {
+		// Cleanup preserves a user-owned branch, so commits reachable from that
+		// ref survive. Only worktree-private reachability remains at risk.
+		branchResult <- warningResult{}
+	}
 	go func() {
-		line, severe := branchCommitWarning(worktreePath, branchName, recordedBaseSHA, prState)
-		branchResult <- warningResult{line: line, severe: severe}
-	}()
-	go func() {
-		line, severe := detachedHeadCommitWarning(worktreePath)
+		line, severe := detachedHeadCommitWarning(worktreePath, branchName, deleteBranch)
 		detachedResult <- warningResult{line: line, severe: severe}
 	}()
 	branch, detached := <-branchResult, <-detachedResult
@@ -266,13 +272,11 @@ func branchCommitWarning(worktreePath, branchName, recordedBaseSHA, prState stri
 	return unmergedSevereLine(branchName, localOnly, baseLabel), true
 }
 
-// detachedHeadCommitWarning reports commits that would lose their final ref
-// when the worktree is removed. `for-each-ref --contains=HEAD` asks the exact
-// durability question across every ref namespace (branches, remotes, tags,
-// stash, and custom refs) without guessing which namespaces a user relies on.
-// Empty output while HEAD is detached proves its tip is unreferenced; at least
-// that tip is then orphaned by cleanup even when the recorded branch is clean.
-func detachedHeadCommitWarning(worktreePath string) (string, bool) {
+// detachedHeadCommitWarning reports commits that lose their final surviving ref
+// when cleanup runs. Per-worktree refs disappear with the linked worktree, and
+// Cleanup may delete the AF-created session branch, so neither can prove the tip
+// durable. A tag, remote, other branch, stash, or custom shared ref can.
+func detachedHeadCommitWarning(worktreePath, branchName string, deleteBranch bool) (string, bool) {
 	if _, err := runKillGit(worktreePath, "symbolic-ref", "--quiet", "HEAD"); err == nil {
 		return "", false // attached HEAD: the branch check owns committed loss
 	} else {
@@ -288,11 +292,30 @@ func detachedHeadCommitWarning(worktreePath string) (string, bool) {
 	if err != nil {
 		return detachedHeadFailClosedLine(err), false
 	}
-	if strings.TrimSpace(string(refs)) != "" {
-		return "", false // some durable ref contains HEAD; removing the worktree preserves it
+	for _, ref := range strings.Split(string(refs), "\n") {
+		if refSurvivesWorktreeCleanup(strings.TrimSpace(ref), branchName, deleteBranch) {
+			return "", false
+		}
 	}
-	return "Detached HEAD points to one or more commits not reachable from any ref. " +
+	return "Detached HEAD points to one or more commits not reachable from any ref that survives cleanup. " +
 		"Killing removes the worktree and permanently orphans them · this cannot be undone.", true
+}
+
+func refSurvivesWorktreeCleanup(ref, branchName string, deleteBranch bool) bool {
+	if ref == "" {
+		return false
+	}
+	// Git stores these namespaces per worktree. Removing the linked worktree
+	// removes its private ref store even though for-each-ref can see it now.
+	for _, private := range []string{"refs/bisect", "refs/worktree", "refs/rewritten"} {
+		if ref == private || strings.HasPrefix(ref, private+"/") {
+			return false
+		}
+	}
+	if deleteBranch && ref == "refs/heads/"+strings.TrimSpace(branchName) {
+		return false
+	}
+	return true
 }
 
 func detachedHeadFailClosedLine(err error) string {

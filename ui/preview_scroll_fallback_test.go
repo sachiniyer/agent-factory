@@ -36,6 +36,7 @@ const staleScrollMarker = "STALE-SCROLL-VIEWPORT-CONTENT"
 // reset scroll mode on its own — we want to prove setFallbackState is what
 // clears it.
 func enterScrollWithStaleViewport(p *TabPane, inst *session.Instance) {
+	enableHostHistory(p, inst, 0)
 	p.currentInstance = inst
 	// Adopt the agent slot too, so dropStaleView sees no (instance, tab) change
 	// when UpdateContent(inst, 0) runs — we want to prove setFallbackState is
@@ -151,6 +152,7 @@ func TestPreviewScrollEntryDeletingShowsTeardownFallback(t *testing.T) {
 
 	p := NewTabPane(previewFromInstance)
 	p.SetSize(80, 30)
+	enableHostHistory(p, inst, 0)
 
 	require.NoError(t, p.ScrollUp(inst, 0))
 
@@ -159,8 +161,8 @@ func TestPreviewScrollEntryDeletingShowsTeardownFallback(t *testing.T) {
 	require.True(t, p.content.fallback,
 		"deleting agent tab must enter fallback state when scrolling starts")
 	require.Contains(t, p.content.text, "Tearing down session…")
-	require.NotContains(t, p.viewport.View(), scrollFooter(),
-		"scroll footer must not be the only visible content")
+	require.Empty(t, strings.TrimSpace(p.viewport.View()),
+		"a rejected scroll entry must not leave viewport content")
 	require.Contains(t, p.String(), "Tearing down session…",
 		"rendered frame must show the teardown fallback")
 }

@@ -53,11 +53,11 @@ func TestPreviewScrollFirstIntentConformanceKeyboardAndWheel(t *testing.T) {
 		for _, input := range []string{"keyboard", "wheel"} {
 			t.Run(size.name+"/"+input, func(t *testing.T) {
 				h := newTestHome(t)
-				h.previewFetcher = func(req daemon.PreviewRequest) (string, bool, error) {
+				h.previewFetcher = func(req daemon.PreviewRequest) (daemon.PreviewResponse, error) {
 					if req.Full {
-						return history, false, nil
+						return testPreviewResponse(history), nil
 					}
-					return "visible-line", false, nil
+					return testPreviewResponse("visible-line"), nil
 				}
 				inst := instanceWithFakeBackend(t, "scroll-input")
 				inst.AddTabForTest("agent", session.TabKindAgent)
@@ -69,6 +69,8 @@ func TestPreviewScrollFirstIntentConformanceKeyboardAndWheel(t *testing.T) {
 				pane := openTestPane(t, h, inst, 0)
 				w := h.paneWindows[pane.ID()]
 				require.NotNil(t, w)
+				require.NoError(t, w.UpdateContent(inst),
+					"the first detached snapshot establishes host ownership")
 
 				switch input {
 				case "keyboard":
@@ -85,9 +87,10 @@ func TestPreviewScrollFirstIntentConformanceKeyboardAndWheel(t *testing.T) {
 				require.NoError(t, w.UpdateContent(inst))
 
 				_, paneHeight := w.GetPreviewSize()
-				// History has 100 rows plus the footer. Bottom's first marker is
-				// 102-paneHeight; one preserved up intent makes it 101-paneHeight.
-				require.Equal(t, 101-paneHeight, firstRenderedHistoryMarker(w.View(), historyLines),
+				// AF chrome lives in the pane header, outside these 100 terminal
+				// rows. Bottom's first marker is 101-paneHeight; one preserved up
+				// intent makes it 100-paneHeight.
+				require.Equal(t, 100-paneHeight, firstRenderedHistoryMarker(w.View(), historyLines),
 					"first %s intent must be visible after fill at %s", input, size.name)
 
 				// Exercise the matching down route too. Once history is ready this
@@ -101,7 +104,7 @@ func TestPreviewScrollFirstIntentConformanceKeyboardAndWheel(t *testing.T) {
 					body := zoneRect(t, h, zones.PaneBody(region))
 					wheel(h, body.X+1, body.Y+1, false)
 				}
-				require.Equal(t, 102-paneHeight, firstRenderedHistoryMarker(w.View(), historyLines),
+				require.Equal(t, 101-paneHeight, firstRenderedHistoryMarker(w.View(), historyLines),
 					"%s down intent must return to bottom at %s", input, size.name)
 			})
 		}
@@ -132,17 +135,19 @@ func TestPanesRefreshNoRedundantScrollFillCapture(t *testing.T) {
 	// how many times it is dispatched. The non-full path is left unblocked.
 	release := make(chan struct{})
 	var fullCaptures int32
-	h.previewFetcher = func(req daemon.PreviewRequest) (string, bool, error) {
+	h.previewFetcher = func(req daemon.PreviewRequest) (daemon.PreviewResponse, error) {
 		if req.Full {
 			atomic.AddInt32(&fullCaptures, 1)
 			<-release
 		}
-		return "scrollback-line", false, nil
+		return testPreviewResponse("scrollback-line"), nil
 	}
 
 	pane := openTestPane(t, h, inst, 0) // captures the gated fetcher above
 	w := h.paneWindows[pane.ID()]
 	require.NotNil(t, w)
+	require.NoError(t, w.UpdateContent(inst),
+		"the first detached snapshot establishes host ownership")
 
 	// Enter scroll mode: marks a pending off-loop fill, no capture on the loop.
 	w.ScrollUp()

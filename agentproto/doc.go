@@ -6,7 +6,8 @@
 // broker and events plane (Phase 2 PR5), and the TUI/CLI/web clients import it to
 // speak the same wire format; so agentproto must depend on NEITHER daemon nor any
 // client package, or those importers would form a cycle. It imports only the
-// standard library and github.com/coder/websocket.
+// standard library, github.com/coder/websocket, and the leaf terminal mode
+// value shared by stream producers and consumers.
 //
 // # Reuse, not re-declaration, of the control plane
 //
@@ -18,8 +19,8 @@
 // authoritative one, and importing the daemon package here would create the
 // import cycle described above. The control action contract therefore has exactly
 // one definition, in package daemon, and this package adds only what is genuinely
-// new to Phase 2 — the PTY data plane, the resize/exit/detach control frames, the
-// events plane, and the auth-readiness seam.
+// new to Phase 2 — the PTY data plane, the resize/terminal-modes/exit/detach
+// control frames, the events plane, and the auth-readiness seam.
 //
 // # Multi-writer, no lease
 //
@@ -34,8 +35,9 @@
 // # What is defined here
 //
 //   - frame.go   — binary PTY frames: PTY_OUT / INPUT / RESIZE opcodes + codec.
-//   - message.go — JSON control frames (resize/exit/detach) carried as WS text
-//     frames on the PTY stream, and the events-plane Event envelope.
+//   - message.go — JSON control frames (resize/terminal-modes/exit/detach)
+//     carried as WS text frames on the PTY stream, and the events-plane Event
+//     envelope.
 //   - auth.go    — transport-carried bearer-token extraction (Authorization
 //     header + ?access_token= query fallback per §4.4). Types and pure helpers
 //     only; Phase 2 enforces nothing (the unix-socket peer is trusted, #1029).

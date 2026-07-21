@@ -91,7 +91,7 @@ func (cs *controlServer) streamHandler(w http.ResponseWriter, r *http.Request) {
 	// available is a close frame, which a client reads as a stream that DROPPED and
 	// handles on an entirely different path; a plain 503 is a retry it already
 	// understands, and matches every other pre-upgrade error on this route.
-	if err := cs.requireManagerReady(); err != nil {
+	if err := cs.requireStateMutationAdmission(); err != nil {
 		writeHTTPError(w, r, http.StatusServiceUnavailable, err)
 		return
 	}
@@ -348,7 +348,18 @@ func writePTYStream(ctx context.Context, sub session.PTYSubscription, conn *webs
 		case session.PTYData:
 			err = agentproto.WriteFrame(wctx, conn, agentproto.PTYOutFrame(ev.Data))
 		case session.PTYRepaint:
-			err = agentproto.WriteFrame(wctx, conn, agentproto.RepaintFrame(ev.Data))
+			// Snapshot modes must precede the repaint they describe. A fresh client
+			// did not observe the application's earlier alternate-screen/mouse
+			// DECSETs, and a recovered client may have lost them with the ring gap.
+			// The additive text control lets AF make an explicit ownership decision;
+			// the repaint's DEC restore prefix keeps terminal-only/older clients
+			// correct too.
+			if ev.HasModes {
+				err = agentproto.WriteControl(wctx, conn, agentproto.NewTerminalModesMessage(ev.Modes))
+			}
+			if err == nil {
+				err = agentproto.WriteFrame(wctx, conn, agentproto.RepaintFrame(ev.Data))
+			}
 		case session.PTYCursor:
 			// The broker fast-forwarded this subscriber over bytes that no longer exist
 			// (a ring eviction or the #1840 recovery discard). Re-seed the client's

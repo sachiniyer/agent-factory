@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/charmbracelet/x/vt"
+	"github.com/sachiniyer/agent-factory/terminal"
 )
 
 // fakeClientlessChannel is an in-memory clientlessChannel: StartCapture hands
@@ -35,6 +36,8 @@ type fakeClientlessChannel struct {
 	cursorRow int
 	cursorCol int
 	hasCursor bool
+	modes     terminal.Modes
+	hasModes  bool
 	// wClosed reports whether the CURRENT capture writer (f.w) has been closed by a
 	// StopCapture — the test proxy for "the pane pipe was disabled". Reset on each
 	// StartCapture. Used by the #1661 teardown-clobber regression test.
@@ -115,6 +118,8 @@ func (f *fakeClientlessChannel) Snapshot() (PaneSnapshot, error) {
 		CursorRow: f.cursorRow,
 		CursorCol: f.cursorCol,
 		HasCursor: f.hasCursor,
+		Modes:     f.modes,
+		HasModes:  f.hasModes,
 	}, nil
 }
 
@@ -217,6 +222,54 @@ func TestPTYBrokerInitialRepaint(t *testing.T) {
 	}
 	ch.emit(t, []byte("live"))
 	mustData(t, re, "live")
+}
+
+func TestPTYBrokerRepaintCarriesTerminalModes(t *testing.T) {
+	modes := terminal.Modes{
+		AlternateScreen: true,
+		MouseTracking:   true,
+		MouseButton:     true,
+		MouseSGR:        true,
+	}
+	ch := &fakeClientlessChannel{
+		snapshot: []byte("ALT-SCREEN"),
+		modes:    modes,
+		hasModes: true,
+	}
+	br := newPTYBroker(ch)
+	sub, err := br.subscribe(0)
+	if err != nil {
+		t.Fatalf("subscribe: %v", err)
+	}
+	ev, err := nextWithin(t, sub, 2*time.Second)
+	if err != nil {
+		t.Fatalf("NextEvent: %v", err)
+	}
+	if ev.Kind != PTYRepaint || !ev.HasModes || ev.Modes != modes {
+		t.Fatalf("repaint metadata = %+v, want modes %+v", ev, modes)
+	}
+	if !strings.HasPrefix(string(ev.Data), string(modes.RestoreSequence())) {
+		t.Fatalf("repaint data = %q, want terminal-mode restore prefix %q", ev.Data, modes.RestoreSequence())
+	}
+}
+
+func TestPTYBrokerBlankRepaintStillCarriesTerminalModes(t *testing.T) {
+	// An all-false mode value is authoritative HostHistory, not missing data.
+	// A fresh pane is commonly blank before its first prompt; suppressing this
+	// repaint would leave that client ownership-unknown indefinitely.
+	ch := &fakeClientlessChannel{hasModes: true}
+	br := newPTYBroker(ch)
+	sub, err := br.subscribe(0)
+	if err != nil {
+		t.Fatalf("subscribe: %v", err)
+	}
+	ev, err := nextWithin(t, sub, 2*time.Second)
+	if err != nil {
+		t.Fatalf("NextEvent: %v", err)
+	}
+	if ev.Kind != PTYRepaint || !ev.HasModes || ev.Modes != (terminal.Modes{}) {
+		t.Fatalf("blank repaint = %+v, want authoritative all-false modes", ev)
+	}
 }
 
 // gridRows renders a vt emulator's grid to plain-text rows (cell contents, blanks

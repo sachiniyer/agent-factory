@@ -100,11 +100,13 @@ func (m *home) handleDefaultKeyPress(msg tea.KeyMsg, name keys.KeyName) (tea.Mod
 
 	// Scrolling (each pane scrolls its own view, #1088)
 	case keys.KeyShiftUp:
+		m.syncPaneScrollOwners()
 		if pane, _ := m.focusedContentPane(); pane != nil {
 			pane.ScrollUp()
 		}
 		return m, m.selectionChanged()
 	case keys.KeyShiftDown:
+		m.syncPaneScrollOwners()
 		if pane, _ := m.focusedContentPane(); pane != nil {
 			pane.ScrollDown()
 		}
@@ -202,18 +204,20 @@ func (m *home) handleKill() (tea.Model, tea.Cmd) {
 		// GetGitWorktree), so a session that HAS a
 		// worktree but was never started — e.g. a restore-failed session — still gets
 		// the unmerged-work warning the old GetGitWorktree gate skipped for it
-		// (#2029). Killing force-deletes its branch either way, so the same committed
-		// work is at stake; the dirty-worktree check was already ungated, and the two
-		// must not diverge.
-		if wt := selected.GetWorktreePath(); wt != "" {
+		// (#2029). The cleanup-impact snapshot is the authority for ownership:
+		// external worktrees survive kill, and a reused user branch survives even
+		// when its linked worktree does not.
+		impact, hasWorktree := selected.GetWorktreeCleanupImpact()
+		if hasWorktree && impact.RemoveWorktree && impact.Path != "" {
+			wt := impact.Path
 			if w := killConfirmationWarning(wt); w != "" {
 				warnings = append(warnings, w)
 			}
 			prState := ""
-			if pr := selected.GetPRInfo(); pr != nil {
+			if pr := selected.GetPRInfo(); pr != nil && pr.Branch == impact.Branch {
 				prState = pr.State
 			}
-			if line, severe := unmergedCommitWarning(wt, selected.GetWorktreeBranch(), selected.GetBaseCommitSHA(), prState); line != "" {
+			if line, severe := unmergedCommitWarning(wt, impact.Branch, impact.BaseCommitSHA, prState, impact.DeleteBranch); line != "" {
 				if severe {
 					severeLine = line
 				} else {
@@ -234,7 +238,7 @@ func (m *home) handleKill() (tea.Model, tea.Cmd) {
 		// elaboration — goes in the clippable detail.
 		critical := killConfirmMessage(selectedTitle, joinWarnings(append([]string{severeLine}, warnings...)), reserved)
 		archiveKey := keys.GlobalKeyBindings[keys.KeyArchive].Help().Key
-		detail := fmt.Sprintf("Archive (%s) keeps the branch to restore later — kill removes it for good.", archiveKey)
+		detail := fmt.Sprintf("Archive (%s) preserves the worktree and its refs — kill removes the worktree for good.", archiveKey)
 		cmd := m.confirmActionWithDetail(critical, detail, killAction)
 		if m.confirmationOverlay != nil {
 			m.confirmationOverlay.SetConfirmKey(unmergedKillConfirmKey)

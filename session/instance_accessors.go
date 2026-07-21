@@ -195,6 +195,37 @@ func (i *Instance) IsExternalWorktree() bool {
 	return gw != nil && gw.IsExternalWorktree()
 }
 
+// WorktreeCleanupImpact snapshots exactly what GitWorktree.Cleanup will remove.
+// Destructive confirmation code consumes this instead of reconstructing cleanup
+// ownership from capability flags, which do not distinguish AF-owned linked
+// worktrees from in-place or user-branch worktrees.
+type WorktreeCleanupImpact struct {
+	Path           string
+	Branch         string
+	BaseCommitSHA  string
+	RemoveWorktree bool
+	DeleteBranch   bool
+}
+
+// GetWorktreeCleanupImpact returns a coherent description of Cleanup's targets.
+// The GitWorktree ownership fields are immutable after construction.
+func (i *Instance) GetWorktreeCleanupImpact() (WorktreeCleanupImpact, bool) {
+	i.mu.RLock()
+	gw := i.gitWorktree
+	i.mu.RUnlock()
+	if gw == nil {
+		return WorktreeCleanupImpact{}, false
+	}
+	external := gw.IsExternalWorktree()
+	return WorktreeCleanupImpact{
+		Path:           gw.GetWorktreePath(),
+		Branch:         gw.GetBranchName(),
+		BaseCommitSHA:  gw.GetBaseCommitSHA(),
+		RemoveWorktree: !external,
+		DeleteBranch:   !external && gw.BranchCreatedByUs(),
+	}, true
+}
+
 // SetTitle sets the title of the instance. Returns an error if the instance has started.
 // We cant change the title once it's been used for a tmux session etc.
 func (i *Instance) SetTitle(title string) error {

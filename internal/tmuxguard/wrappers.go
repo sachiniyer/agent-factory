@@ -1,84 +1,48 @@
 package tmuxguard
 
 import (
-	"fmt"
 	"strings"
 	"unicode"
+
+	"github.com/sachiniyer/agent-factory/internal/envcommand"
 )
 
 // envTarget recognizes a closed set of GNU env options. Split-string is
 // intentionally unsupported because it performs a second round of command
-// construction; unknown spellings and future options fail closed. Assignments
-// are preserved for the selected program policy.
+// construction; unknown spellings and future options fail closed. The shared
+// parser keeps launch routing and teardown policy aligned on option operands.
 type envEffects struct {
 	assigned bool
 	chdir    bool
 }
 
 func envTarget(args []shellWord) (target []shellWord, noCommand bool, effects envEffects, err error) {
-	i := 0
-	optionsDone := false
-	for i < len(args) && !optionsDone {
-		if !args[i].resolved {
-			return nil, false, effects, errUnsupportedShell
-		}
-		arg := args[i].literal
-		switch {
-		case arg == "--":
-			optionsDone = true
-			i++
-		case isAssignment(arg) || !strings.HasPrefix(arg, "-"):
-			optionsDone = true
-		case arg == "-" || arg == "-i" || arg == "-0" || arg == "-v" ||
-			arg == "--debug" || arg == "--ignore-environment" || arg == "--null":
-			i++
-		case arg == "--help" || arg == "--list-signal-handling" || arg == "--version":
-			if len(args) != i+1 {
-				return nil, false, effects, errUnsupportedShell
-			}
-			return nil, true, effects, nil
-		case arg == "-S" || strings.HasPrefix(arg, "-S") || arg == "--split-string" || strings.HasPrefix(arg, "--split-string="):
-			return nil, false, effects, errUnsupportedShell
-		case arg == "-u" || arg == "-C" || arg == "--unset" || arg == "--chdir":
-			if i+1 >= len(args) || !args[i+1].resolved || args[i+1].literal == "" {
-				return nil, false, effects, errUnsupportedShell
-			}
-			effects.chdir = effects.chdir || arg == "-C" || arg == "--chdir"
-			i += 2
-		case (strings.HasPrefix(arg, "-u") || strings.HasPrefix(arg, "-C")) && len(arg) > 2:
-			effects.chdir = effects.chdir || strings.HasPrefix(arg, "-C")
-			i++
-		case strings.HasPrefix(arg, "--unset=") || strings.HasPrefix(arg, "--chdir="):
-			effects.chdir = effects.chdir || strings.HasPrefix(arg, "--chdir=")
-			i++
-		case signalEnvOption(arg):
-			i++
-		default:
-			return nil, false, effects, fmt.Errorf("%w: unknown env option", errUnsupportedShell)
+	literals := make([]string, len(args))
+	for i, arg := range args {
+		if arg.resolved {
+			literals[i] = arg.literal
+		} else {
+			// Parse must reject this marker in an option operand or assignment.
+			// If it occurs after the executable, Parse stops before it and the
+			// selected program's grammar decides whether dynamic data is safe.
+			literals[i] = "$AF_TMUXGUARD_DYNAMIC"
 		}
 	}
-
-	for i < len(args) {
-		if !args[i].resolved {
-			return nil, false, effects, errUnsupportedShell
-		}
-		arg := args[i].literal
-		if !isAssignment(arg) {
-			return args[i:], false, effects, nil
-		}
-		effects.assigned = true
-		i++
+	invocation, parseErr := envcommand.Parse(literals, envcommand.Policy{AllowAssignments: true})
+	if parseErr != nil {
+		return nil, false, effects, errUnsupportedShell
 	}
-	return nil, true, effects, nil
-}
-
-func signalEnvOption(arg string) bool {
-	for _, option := range []string{"--block-signal", "--default-signal", "--ignore-signal"} {
-		if arg == option || strings.HasPrefix(arg, option+"=") {
-			return true
-		}
+	for _, mutation := range invocation.Mutations {
+		effects.assigned = effects.assigned || !mutation.Unset
 	}
-	return false
+	effects.chdir = invocation.Chdir != ""
+	if invocation.CommandIndex < 0 {
+		return nil, true, effects, nil
+	}
+	if !args[invocation.CommandIndex].resolved {
+		return nil, false, effects, errUnsupportedShell
+	}
+	return args[invocation.CommandIndex:], false, effects, nil
 }
 
 func shellCommandPayloadWords(args []shellWord) (string, bool, error) {

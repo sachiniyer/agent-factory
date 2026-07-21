@@ -36,6 +36,14 @@ const (
 // a web change (#1933).
 var SupportedBackends = []string{BackendLocal, BackendDocker, BackendSSH, BackendHook}
 
+// defaultInRepoConfig is the built-in schema for repo-only configuration.
+// Keep non-zero defaults here rather than relying on InRepoConfig's zero value:
+// the provenance resolver reads this exact object when no checked-in key is
+// present, and the manifest default parity test covers every scalar field.
+func defaultInRepoConfig() *InRepoConfig {
+	return &InRepoConfig{Backend: BackendLocal}
+}
+
 // SupportedBackendsString returns the canonical user-facing backend enum list,
 // comma-separated — the string CLI help and error messages interpolate.
 func SupportedBackendsString() string {

@@ -48,6 +48,13 @@ func LoadConfig() (*Config, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to get config directory: %w", err)
 	}
+	// Establish the owner-only boundary before reading or materializing any
+	// state. Besides making first-run creation safe, this repairs a default AF
+	// home left 0755 by an older version even when config.toml already exists and
+	// this load would otherwise perform no write at all (#2197).
+	if err := secureAFHomeForPath(filepath.Join(configDir, TomlConfigFileName)); err != nil {
+		return nil, fmt.Errorf("failed to secure config directory: %w", err)
+	}
 
 	configPath := filepath.Join(configDir, ConfigFileName)
 	prettyConfigPath := prettyHomePath(configPath)
@@ -79,7 +86,7 @@ func LoadConfig() (*Config, error) {
 			log.WarningLog.Printf("both %s and %s exist; %s is canonical and %s is ignored — delete or rename %s to silence this warning",
 				prettyTomlPath, prettyConfigPath, prettyTomlPath, prettyConfigPath, prettyConfigPath)
 		}
-		return parseConfigTOML(tomlData, prettyTomlPath)
+		return parseLoadedConfigTOML(tomlData, prettyTomlPath, tomlPath)
 	}
 	if !os.IsNotExist(tomlErr) {
 		return nil, fmt.Errorf("failed to read config file %s: %w", prettyTomlPath, tomlErr)
@@ -134,7 +141,7 @@ func LoadConfigReadOnly() (ReadOnlyConfigLoad, error) {
 
 	tomlData, tomlErr := os.ReadFile(tomlPath)
 	if tomlErr == nil {
-		cfg, err := parseConfigTOML(tomlData, prettyTomlPath)
+		cfg, err := parseLoadedConfigTOML(tomlData, prettyTomlPath, tomlPath)
 		return ReadOnlyConfigLoad{
 			Config:       cfg,
 			Path:         tomlPath,
@@ -147,7 +154,7 @@ func LoadConfigReadOnly() (ReadOnlyConfigLoad, error) {
 
 	data, err := os.ReadFile(configPath)
 	if err == nil {
-		cfg, parseErr := parseConfig(data, prettyConfigPath)
+		cfg, parseErr := parseLoadedConfigJSON(data, prettyConfigPath, configPath)
 		return ReadOnlyConfigLoad{
 			Config:     cfg,
 			Path:       configPath,
@@ -249,7 +256,7 @@ func convertJSONToTOML(configDir, configPath, tomlPath, prettyConfigPath, pretty
 		// (Our writes are atomic, so a non-empty config.toml here is complete.)
 		if td, err := os.ReadFile(tomlPath); err == nil {
 			if !isEffectivelyEmptyToml(td) {
-				cfg, perr := parseConfigTOML(td, prettyTomlPath)
+				cfg, perr := parseLoadedConfigTOML(td, prettyTomlPath, tomlPath)
 				if perr != nil {
 					return perr
 				}
@@ -317,7 +324,10 @@ func convertJSONToTOML(configDir, configPath, tomlPath, prettyConfigPath, pretty
 			log.InfoLog.Printf("migrated config to TOML: wrote %s and moved the original to %s — edit %s from now on",
 				prettyTomlPath, prettyHomePath(bakPath), prettyTomlPath)
 		}
-		result = cfg
+		result, err = parseLoadedConfigTOML(tomlBytes, prettyTomlPath, tomlPath)
+		if err != nil {
+			return fmt.Errorf("failed to reload converted config %s: %w", prettyTomlPath, err)
+		}
 		return nil
 	})
 	if lockErr != nil {
@@ -349,6 +359,7 @@ func materializeDefaultConfig(configDir, tomlPath, prettyTomlPath string) (*Conf
 	}
 
 	defaultCfg := DefaultConfig()
+	defaultCfg.source.builtIn = snapshotConfig(defaultCfg)
 	created, saveErr := writeConfigIfMissing(tomlPath, defaultCfg)
 	if saveErr != nil {
 		log.WarningLog.Printf("failed to save default config: %v", saveErr)
@@ -358,10 +369,19 @@ func materializeDefaultConfig(configDir, tomlPath, prettyTomlPath string) (*Conf
 		// Lost the create race: a concurrent process wrote config.toml after
 		// our read. Treat its file as authoritative.
 		if data, err := os.ReadFile(tomlPath); err == nil && !isEffectivelyEmptyToml(data) {
-			return parseConfigTOML(data, prettyTomlPath)
+			return parseLoadedConfigTOML(data, prettyTomlPath, tomlPath)
 		}
 		// The concurrent file vanished or is empty; fall back to in-memory
 		// defaults without another write attempt.
+	}
+	if created {
+		data, err := toml.Marshal(defaultCfg)
+		if err != nil {
+			return nil, fmt.Errorf("failed to marshal materialized config metadata: %w", err)
+		}
+		if err := attachConfigSource(defaultCfg, data, tomlPath, FormatTOML); err != nil {
+			return nil, fmt.Errorf("failed to record materialized config presence: %w", err)
+		}
 	}
 	return defaultCfg, nil
 }
@@ -391,7 +411,7 @@ var writeConfigForceFailForTest func() error
 // when the file already exists, so a concurrently written config is never
 // overwritten.
 func writeConfigIfMissing(configPath string, config *Config) (bool, error) {
-	if err := os.MkdirAll(filepath.Dir(configPath), 0755); err != nil {
+	if err := ensureStorageParent(configPath); err != nil {
 		return false, fmt.Errorf("failed to create config directory: %w", err)
 	}
 	data, err := toml.Marshal(config)

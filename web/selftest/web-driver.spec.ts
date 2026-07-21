@@ -4281,6 +4281,225 @@ test("new-tab menu (#2219): stays visible, hit-testable, and anchored while the 
   await page.setViewportSize({ width: 1280, height: 720 });
 });
 
+test("#2224: title and tabs share one scrolling header row at every width", async ({ browser }, testInfo) => {
+  const mockRepo = process.env.AF_MOCK_REPO;
+  test.skip(!mockRepo, "AF_MOCK_REPO is set only by web-selftest-entry.sh");
+
+  // Eight long tabs overflow even the desktop allocation while leaving the ninth
+  // slot available, so the New-tab caret whose anchoring we verify still exists.
+  const longTabs = Array.from({ length: 8 }, (_, i) => ({
+    id: `title-row-tab-${i}`,
+    name: i === 0 ? "agent" : `distinguishing-long-tab-${i}`,
+    kind: i === 0 ? 0 : 2,
+    command: i === 0 ? undefined : `sleep ${300 + i}`,
+  }));
+  const oneTab = [longTabs[0]];
+
+  for (const width of [1280, 375]) {
+    for (const theme of ["light", "dark"] as const) {
+      for (const roster of ["one", "overflow"] as const) {
+        await test.step(`${width}px · ${theme} · ${roster}`, async () => {
+          const ctx = await browser.newContext({ viewport: { width, height: 720 } });
+          try {
+            await ctx.addInitScript(
+              ({ root, savedTheme }) => {
+                localStorage.setItem("af-project", root);
+                localStorage.setItem("af-theme", savedTheme);
+              },
+              { root: mockRepo!, savedTheme: theme },
+            );
+            const p = await ctx.newPage();
+            const title = `title-row-${roster}-${width}-${theme}-with-a-useful-distinguishing-suffix`;
+            await p.route("**/v1/Snapshot", async (route) => {
+              const resp = await route.fetch();
+              const body = await resp.json();
+              const snap = body?.data as { instances?: Array<Record<string, unknown> & { title: string }> };
+              const list = snap?.instances ?? [];
+              const proto = { ...(list.find((s) => s.title === SESSION_A) ?? {}) };
+              list.push({
+                ...proto,
+                id: `synth-${title}`,
+                title,
+                branch: `synth-${roster}-${width}-${theme}`,
+                liveness: roster === "overflow" ? 6 : 2,
+                in_flight_op: 0,
+                lifecycle_action: "archive",
+                limit_reset_at: roster === "overflow" ? "2099-01-01T00:00:00Z" : undefined,
+                tabs: roster === "overflow" ? longTabs : oneTab,
+                worktree: { ...(proto.worktree as Record<string, unknown>), repo_path: mockRepo },
+              });
+              if (snap) {
+                snap.instances = list;
+              }
+              await route.fulfill({ status: resp.status(), contentType: "application/json", body: JSON.stringify(body) });
+            });
+            // The synthetic row cannot be reordered by the real daemon. The browser
+            // assertion only needs the delegated dragover path and its marker, but a
+            // successful-shaped response keeps that gesture free of unrelated toasts.
+            await p.route("**/v1/ReorderTab", async (route) => {
+              await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ data: {} }) });
+            });
+            await p.goto("/");
+            await expect(p.locator(".af-app")).toBeVisible();
+            if (width <= 768) {
+              await p.locator(".af-nav-toggle").click();
+              await expect(p.locator(".af-app")).toHaveClass(/af-nav-open/);
+            }
+            await row(p, title).click();
+            await expect(p.locator(".af-main.af-main-term")).toBeVisible();
+
+            const head = p.locator(".af-term-head");
+            const titleBox = head.locator(":scope > .af-term-head-main");
+            const titleNode = titleBox.locator(".af-term-title");
+            const tabbar = head.locator(":scope > .af-tabbar");
+            const retry = head.getByRole("button", { name: "Retry", exact: true });
+            await expect(tabbar, "the strip belongs to the title row, not a second row").toHaveCount(1);
+            await expect(titleNode).toHaveText(title);
+            if (roster === "overflow") {
+              await expect(retry, "Retry remains reachable at the usage-limit wall").toBeVisible();
+            } else {
+              await expect(retry, "the common path spends no width on hidden actions").toBeHidden();
+            }
+
+            const layout = await p.evaluate(() => {
+              const rect = (selector: string) => {
+                const box = document.querySelector(selector)!.getBoundingClientRect();
+                return {
+                  left: box.left,
+                  right: box.right,
+                  top: box.top,
+                  bottom: box.bottom,
+                  width: box.width,
+                  height: box.height,
+                  centerY: box.top + box.height / 2,
+                };
+              };
+              const titleEl = document.querySelector<HTMLElement>(".af-term-title")!;
+              const bar = document.querySelector<HTMLElement>(".af-tabbar")!;
+              const retryEl = document.querySelector<HTMLElement>(".af-term-action:not([hidden])");
+              const titleStyle = getComputedStyle(titleEl);
+              const barStyle = getComputedStyle(bar);
+              return {
+                head: rect(".af-term-head"),
+                titleBox: rect(".af-term-head-main"),
+                title: rect(".af-term-title"),
+                bar: rect(".af-tabbar"),
+                retry: retryEl ? rect(".af-term-action:not([hidden])") : null,
+                host: rect(".af-term-host"),
+                titleClientWidth: titleEl.clientWidth,
+                titleScrollWidth: titleEl.scrollWidth,
+                titleOverflow: titleStyle.overflow,
+                titleTextOverflow: titleStyle.textOverflow,
+                titleWhiteSpace: titleStyle.whiteSpace,
+                barClientWidth: bar.clientWidth,
+                barScrollWidth: bar.scrollWidth,
+                barOverflowX: barStyle.overflowX,
+                barPosition: barStyle.position,
+                barParent: bar.parentElement?.className ?? "",
+                hostPrevious: document.querySelector(".af-term-host")?.previousElementSibling?.className ?? "",
+              };
+            });
+            expect(layout.barParent).toContain("af-term-head");
+            expect(layout.hostPrevious).toContain("af-term-head");
+            expect(layout.head.height, "one row reclaims the old stacked chrome height").toBeLessThan(64);
+            expect(Math.abs(layout.titleBox.centerY - layout.bar.centerY), "title and tabs share a baseline row").toBeLessThanOrEqual(1);
+            expect(layout.bar.top).toBeGreaterThanOrEqual(layout.head.top);
+            expect(layout.bar.bottom).toBeLessThanOrEqual(layout.head.bottom);
+            expect(layout.host.top).toBeGreaterThanOrEqual(layout.head.bottom - 1);
+            expect(layout.titleBox.width, "the title keeps a useful allocation").toBeGreaterThanOrEqual(120);
+            expect(layout.titleClientWidth, "the readable title itself never collapses to a token").toBeGreaterThanOrEqual(88);
+            expect(layout.titleScrollWidth, "the long title really needs truncation").toBeGreaterThan(layout.titleClientWidth);
+            expect({
+              overflow: layout.titleOverflow,
+              textOverflow: layout.titleTextOverflow,
+              whiteSpace: layout.titleWhiteSpace,
+            }).toEqual({ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" });
+            expect(layout.barClientWidth, "the scrolling strip keeps an operable viewport").toBeGreaterThanOrEqual(96);
+            expect(layout.barOverflowX).toBe("auto");
+            expect(layout.barPosition, "#1813 marker keeps the tab bar as its containing block").toBe("relative");
+            expect(await horizontalOverflow(p), "the combined row never widens the page").toBeLessThanOrEqual(1);
+            if (layout.retry) {
+              expect(Math.abs(layout.retry.centerY - layout.bar.centerY), "Retry stays aligned with the tab strip").toBeLessThanOrEqual(1);
+              expect(layout.retry.width, "Retry is fixed-size rather than squeezed").toBeGreaterThan(40);
+              expect(layout.retry.right).toBeLessThanOrEqual(layout.head.right);
+            }
+
+            if (roster === "one") {
+              expect(layout.barScrollWidth, "one tab fits without a vestigial second row").toBeLessThanOrEqual(
+                layout.barClientWidth + 1,
+              );
+            } else {
+              expect(layout.barScrollWidth, "the long roster genuinely overflows").toBeGreaterThan(layout.barClientWidth);
+              const trigger = tabbar.locator(".af-tab-new");
+              await trigger.click();
+              const menu = tabbar.locator(".af-tab-menu");
+              await expect(menu).toBeVisible();
+              const before = await settledHitTestableTabMenu(p, menu, trigger);
+              const scroll = await tabbar.evaluate((bar) => {
+                const before = bar.scrollLeft;
+                bar.scrollLeft = Math.max(0, before - 4);
+                return { before, after: bar.scrollLeft };
+              });
+              expect(scroll.after).toBeLessThan(scroll.before);
+              const after = await settledHitTestableTabMenu(p, menu, trigger);
+              expect(Math.abs(after.menu.x - before.menu.x - (after.trigger.x - before.trigger.x))).toBeLessThan(1);
+              await p.keyboard.press("Escape");
+              await expect(menu).toBeHidden();
+
+              // Activating a tab rebuilds every button. The stable strip must retain
+              // its viewport across that rebuild instead of snapping back to Agent —
+              // otherwise the row moves under the pointer midway through a gesture.
+              const farTab = tabByLabel(p, "distinguishing-long-tab-7");
+              await farTab.scrollIntoViewIfNeeded();
+              const beforeActivationScroll = await tabbar.evaluate((bar) => bar.scrollLeft);
+              expect(beforeActivationScroll, "the activation starts from a genuinely scrolled viewport").toBeGreaterThan(0);
+              await farTab.click();
+              await expect(tabByLabel(p, "distinguishing-long-tab-7")).toHaveClass(/af-tab-active/);
+              const afterActivationScroll = await tabbar.evaluate((bar) => bar.scrollLeft);
+              expect(
+                Math.abs(afterActivationScroll - beforeActivationScroll),
+                "activating a tab preserves the strip's horizontal viewport",
+              ).toBeLessThanOrEqual(1);
+
+              await tabbar.evaluate((bar) => {
+                bar.scrollLeft = 0;
+              });
+              const drag = await dragTabWithinBar(
+                p,
+                "distinguishing-long-tab-2",
+                "distinguishing-long-tab-1",
+                "before",
+              );
+              expect(drag.dropAllowed, "the nested strip remains a reorder target").toBe(true);
+              expect(drag.markerShown, "the nested strip still draws its insertion marker").toBe(true);
+
+              // The first click of a double-click activates an inactive tab and
+              // synchronously rebuilds every button. Rename therefore belongs to the
+              // stable bar, not to the button that may disappear halfway through the
+              // gesture. Escape avoids mutating the synthetic daemon fixture while
+              // proving the replacement button still enters edit mode.
+              const renameTarget = tabByLabel(p, "distinguishing-long-tab-2");
+              await renameTarget.dblclick();
+              const edit = tabbar.locator(".af-tab-edit");
+              await expect(edit, "an inactive tab remains renameable after activation rebuilds the bar").toBeVisible();
+              await p.keyboard.press("Escape");
+              await expect(edit).toBeHidden();
+              await expect(tabByLabel(p, "distinguishing-long-tab-2")).toHaveCount(1);
+            }
+
+            await testInfo.attach(`2224-${width}-${theme}-${roster}`, {
+              body: await p.screenshot(),
+              contentType: "image/png",
+            });
+          } finally {
+            await ctx.close();
+          }
+        });
+      }
+    }
+  }
+});
+
 test("vscode tab (#2077): the labelled New tab menu creates a VS Code tab and serves it through the proxy", async () => {
   // End to end, with no seeded fixture: pick VS Code from the tab bar's kind menu,
   // and the daemon spawns a code-server (the FAKE one on PATH — no CI box has a
@@ -4904,10 +5123,10 @@ test("#1813: a close+recreate of the same name mid-edit renames NOTHING — neve
 test("#1813: a double-click renames an INACTIVE tab, not only the active one", async () => {
   // The first click of a double-click switches tabs, which changes tabBarSig (active)
   // and so REPLACES the very button the gesture began on — a shape that has broken real
-  // gestures here before (#1737). It does not break this one: Chromium targets dblclick
-  // at the node both halves of the SECOND click hit, which is the fresh button, and
-  // tabButton binds the listener on every button it builds. So rename-by-double-click
-  // works from any tab, active or not.
+  // gestures here before (#1737). Rename is therefore owned by the stable bar: it
+  // captures the first click's tab identity, then resolves the replacement button on
+  // click two. So rename-by-double-click works from any tab, active or not, even when
+  // the replacement shifts away from the original pointer coordinate.
   //
   // Pinned because the reasoning is not local to this file — it is a property of how
   // Blink resolves a click target across a DOM swap — and because the specs above all
@@ -5658,6 +5877,22 @@ test("#2226 mobile (375px): drawer dismissal follows action intent, not click pr
   await p.locator(".af-rail-new").click();
   await expectDrawerClosed();
   await expect(modal).toBeVisible();
+  const modalLayer = await p.evaluate(() => {
+    const appbar = document.querySelector(".af-appbar")!;
+    const host = document.querySelector(".af-modal-host")!;
+    const covered = [".af-project-switch", ".af-appbar-more"].map((selector) => {
+      const box = document.querySelector(selector)!.getBoundingClientRect();
+      const hit = document.elementFromPoint(box.left + box.width / 2, box.top + box.height / 2);
+      return hit?.closest(".af-modal-backdrop") !== null;
+    });
+    return {
+      appbarZ: Number.parseInt(getComputedStyle(appbar).zIndex, 10),
+      modalZ: Number.parseInt(getComputedStyle(host).zIndex, 10),
+      covered,
+    };
+  });
+  expect(modalLayer.modalZ, "aria-modal content owns the top interaction layer").toBeGreaterThan(modalLayer.appbarZ);
+  expect(modalLayer.covered, "the modal backdrop blocks every appbar action").toEqual([true, true]);
   const titleInput = modal.locator('input[aria-label="Session title"]');
   await titleInput.click();
   await expect(titleInput).toBeFocused();
@@ -5702,11 +5937,18 @@ test("#2226 mobile (375px): drawer dismissal follows action intent, not click pr
   await expect(p.locator(".af-filter-menu")).toBeVisible();
   await expect(app).toHaveClass(/af-nav-open/);
 
-  // Restore is the archived row's version of the same lifecycle action. It must
-  // leave the drawer too; keeping this leg in the browser guard prevents the two
-  // branches in rowActions from drifting apart.
+  // Restore is the archived row's version of the same lifecycle action. On touch,
+  // an unselected row has no hover reveal: select the now-visible archived row,
+  // let that navigation close the drawer, then reopen it so the selected-row action
+  // is exposed. This is the real phone path pinned by #2223's reveal model.
   await expect(row(p, SESSION_B)).toHaveClass(/af-row-archived/);
-  await railAction(p, SESSION_B, "Restore session").click();
+  await row(p, SESSION_B).click();
+  await expectDrawerClosed();
+  await expect(row(p, SESSION_B)).toHaveClass(/af-row-selected/);
+  await openDrawer();
+  const restore = railAction(p, SESSION_B, "Restore session");
+  await expect(restore).toBeVisible();
+  await restore.click();
   await expectDrawerClosed();
   await expect(modal).toContainText(`Restore ${SESSION_B}?`);
   await modal.getByRole("button", { name: "Cancel", exact: true }).click();
@@ -5723,6 +5965,193 @@ test("#2226 mobile (375px): drawer dismissal follows action intent, not click pr
   await expectDrawerClosed();
 
   await ctx.close();
+});
+
+test("#2227 mobile appbar: project context wins scarce width at 320px and 375px", async ({ browser }, testInfo) => {
+  const LONG_PROJECT = "project-with-a-deliberately-long-distinguishing-name";
+  const LONG_ROOT = `/work/${LONG_PROJECT}`;
+
+  for (const width of [320, 375]) {
+    for (const theme of ["light", "dark"] as const) {
+      await test.step(`${width}px · ${theme}`, async () => {
+        const ctx = await browser.newContext({ viewport: { width, height: 812 } });
+        await ctx.addInitScript(
+          ({ root, savedTheme }) => {
+            localStorage.setItem("af-project", root);
+            localStorage.setItem("af-theme", savedTheme);
+          },
+          { root: LONG_ROOT, savedTheme: theme },
+        );
+        const p = await ctx.newPage();
+        await p.route("**/v1/Snapshot", async (route) => {
+          const resp = await route.fetch();
+          const body = await resp.json();
+          const snap = body?.data as { instances?: Array<Record<string, unknown> & { title: string }> };
+          const list = snap?.instances ?? [];
+          const proto = { ...(list.find((s) => s.title === SESSION_A) ?? {}) };
+          list.push({
+            ...proto,
+            id: `synth-mobile-appbar-${width}-${theme}`,
+            title: `mobile-appbar-${width}-${theme}`,
+            branch: `mobile-appbar-${width}-${theme}`,
+            liveness: 2,
+            in_flight_op: 0,
+            lifecycle_action: "archive",
+            worktree: { ...(proto.worktree as Record<string, unknown>), repo_path: LONG_ROOT },
+          });
+          if (snap) {
+            snap.instances = list;
+          }
+          await route.fulfill({ status: resp.status(), contentType: "application/json", body: JSON.stringify(body) });
+        });
+        await p.goto("/");
+        await expect(p.locator(".af-app")).toBeVisible();
+        await expect(p.locator(".af-project-switch-name")).toHaveText(LONG_PROJECT);
+        await expect(p.locator("html")).toHaveAttribute("data-theme", theme);
+
+        const brand = p.locator(".af-brand");
+        const toggle = p.locator(".af-nav-toggle");
+        const project = p.locator(".af-project-switch");
+        const projectName = p.locator(".af-project-switch-name");
+        const more = p.locator(".af-appbar-more");
+        const tools = p.locator(".af-appbar-tools");
+        const viewTabs = p.locator(".af-viewtab");
+        await expect(brand, "decoration yields before project context").toBeHidden();
+        await expect(toggle).toBeVisible();
+        await expect(project).toBeVisible();
+        await expect(more, "secondary appbar tools collapse behind one touch target").toBeVisible();
+        await expect(tools).toBeHidden();
+
+        const primary = await p.evaluate(() => {
+          const rect = (selector: string) => {
+            const box = document.querySelector(selector)!.getBoundingClientRect();
+            return { left: box.left, right: box.right, top: box.top, height: box.height, width: box.width };
+          };
+          return {
+            toggle: rect(".af-nav-toggle"),
+            views: rect(".af-viewnav"),
+            project: rect(".af-project-switch"),
+            more: rect(".af-appbar-more"),
+          };
+        });
+        for (const [name, box] of Object.entries(primary)) {
+          expect(box.left, `${name} starts inside ${width}px`).toBeGreaterThanOrEqual(0);
+          expect(box.right, `${name} ends inside ${width}px`).toBeLessThanOrEqual(width);
+          expect(box.height, `${name} keeps a comfortable tap height`).toBeGreaterThanOrEqual(44);
+        }
+        expect(primary.project.width, "project context owns nearly the whole second row").toBeGreaterThan(200);
+        expect(Math.abs(primary.toggle.top - primary.views.top), "top-level navigation shares one top edge").toBeLessThanOrEqual(1);
+        expect(Math.abs(primary.more.top - primary.project.top), "project and More share one top edge").toBeLessThanOrEqual(1);
+        expect(primary.project.top, "the project row follows the top-level navigation row").toBeGreaterThan(
+          primary.toggle.top + primary.toggle.height,
+        );
+
+        // Visual and focus order must agree at the responsive breakpoint. Positive
+        // tabindex or CSS-only reordering would still leave assistive technology
+        // jumping between rows, so walk the native DOM sequence end to end.
+        await toggle.focus();
+        for (let i = 0; i < 3; i++) {
+          await p.keyboard.press("Tab");
+          await expect(viewTabs.nth(i), `view tab ${i + 1} follows the drawer toggle`).toBeFocused();
+        }
+        await p.keyboard.press("Tab");
+        await expect(project, "project follows the view row in DOM and pixels").toBeFocused();
+        await p.keyboard.press("Tab");
+        await expect(more, "More follows the project in DOM and pixels").toBeFocused();
+
+        const truncation = await projectName.evaluate((el) => {
+          const css = getComputedStyle(el);
+          return {
+            clientWidth: el.clientWidth,
+            scrollWidth: el.scrollWidth,
+            overflow: css.overflow,
+            textOverflow: css.textOverflow,
+            whiteSpace: css.whiteSpace,
+          };
+        });
+        expect(truncation.scrollWidth, "the long name genuinely exceeds its visible slot").toBeGreaterThan(
+          truncation.clientWidth,
+        );
+        expect(truncation).toMatchObject({ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" });
+        expect(await horizontalOverflow(p), "the closed drawer never widens the page").toBeLessThanOrEqual(1);
+
+        // The project popover itself must remain inside the phone and offer several
+        // projects. Clicking the current long-name item proves it is hit-testable.
+        await project.click();
+        const projectMenu = p.locator(".af-project-menu");
+        await expect(projectMenu).toBeVisible();
+        expect(
+          await projectMenu.locator(".af-project-item").count(),
+          "the phone menu keeps several projects operable",
+        ).toBeGreaterThanOrEqual(3);
+        const menuBox = await projectMenu.boundingBox();
+        expect(menuBox, "project menu has phone geometry").not.toBeNull();
+        expect(menuBox!.x).toBeGreaterThanOrEqual(0);
+        expect(menuBox!.x + menuBox!.width).toBeLessThanOrEqual(width);
+
+        // Disclosure exclusivity belongs to the actions, not pointer bubbling. The
+        // More click stops propagation and keyboard activation has no mousedown, so
+        // both directions would otherwise leave overlapping panels open (#2226's
+        // event-path gotcha in miniature).
+        await more.click();
+        await expect(projectMenu).toBeHidden();
+        await expect(tools).toBeVisible();
+        await expect(more).toHaveAttribute("aria-expanded", "true");
+        await project.focus();
+        await p.keyboard.press("Enter");
+        await expect(tools).toBeHidden();
+        await expect(more).toHaveAttribute("aria-expanded", "false");
+        await expect(projectMenu).toBeVisible();
+        await projectItem(p, LONG_PROJECT).click();
+        await expect(projectMenu).toBeHidden();
+
+        // Rare chrome remains operable rather than consuming the project row.
+        await more.click();
+        await expect(tools).toBeVisible();
+        await expect(tools.locator(`.af-theme-opt[data-theme-opt="${theme}"]`)).toHaveClass(/af-theme-opt-active/);
+        const disconnect = tools.getByRole("button", { name: "Disconnect" });
+        await expect(disconnect).toBeVisible();
+        const toolsBox = await tools.boundingBox();
+        expect(toolsBox, "More popover has phone geometry").not.toBeNull();
+        expect(toolsBox!.x).toBeGreaterThanOrEqual(0);
+        expect(toolsBox!.x + toolsBox!.width).toBeLessThanOrEqual(width);
+        for (const control of [disconnect, ...(await tools.locator(".af-theme-opt").all())]) {
+          const box = await control.boundingBox();
+          expect(box, "every More action has geometry").not.toBeNull();
+          expect(box!.height, "More actions keep comfortable tap heights").toBeGreaterThanOrEqual(40);
+        }
+        await p.keyboard.press("Escape");
+        await expect(tools).toBeHidden();
+        await expect(more).toHaveAttribute("aria-expanded", "false");
+        await expect(more).toBeFocused();
+
+        await testInfo.attach(`2227-${width}-${theme}-drawer-closed`, {
+          body: await p.screenshot(),
+          contentType: "image/png",
+        });
+
+        // Opening the drawer must not reflow the bar, and its z-index must not cover
+        // the project menu: selecting the same project while open proves both.
+        await toggle.click();
+        await expect(p.locator(".af-app")).toHaveClass(/af-nav-open/);
+        const openProjectBox = await project.boundingBox();
+        expect(openProjectBox, "drawer-open project switch has geometry").not.toBeNull();
+        expect(openProjectBox!.x).toBeCloseTo(primary.project.left, 0);
+        expect(openProjectBox!.width).toBeCloseTo(primary.project.width, 0);
+        await project.click();
+        await expect(projectMenu).toBeVisible();
+        await projectItem(p, LONG_PROJECT).click();
+        await expect(projectMenu).toBeHidden();
+        expect(await horizontalOverflow(p), "the open drawer never widens the page").toBeLessThanOrEqual(1);
+
+        await testInfo.attach(`2227-${width}-${theme}-drawer-open`, {
+          body: await p.screenshot(),
+          contentType: "image/png",
+        });
+        await ctx.close();
+      });
+    }
+  }
 });
 
 for (const width of [375, 768]) {
@@ -5752,6 +6181,9 @@ test("desktop (1280px): the mobile drawer never engages — the rail stays in vi
   const { ctx, p } = await openAt(browser, 1280, 800);
   await expect(p.locator(".af-rail")).toBeVisible();
   await expect(p.locator(".af-nav-toggle")).toBeHidden();
+  await expect(p.locator(".af-brand")).toBeVisible();
+  await expect(p.locator(".af-appbar-more")).toBeHidden();
+  await expect(p.locator(".af-appbar-tools")).toBeVisible();
   await expect(p.locator(".af-app")).not.toHaveClass(/af-nav-open/);
   await ctx.close();
 });

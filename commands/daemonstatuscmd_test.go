@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
 )
 
@@ -45,7 +46,17 @@ func TestPrintDaemonStatusHumanRunning(t *testing.T) {
 	cmd.SetOut(&out)
 
 	printDaemonStatusHuman(cmd, daemonStatusInfo{
-		Running:           true,
+		Running:       true,
+		Version:       "1.2.3",
+		BootID:        "boot-123",
+		TransactionID: "transaction-123",
+		Phase:         daemon.DaemonPhaseUpgradeProbation,
+		Listeners: &daemon.DaemonListenerStatus{
+			HTTPUnixBound: true,
+			TCPConfigured: true,
+			TCPBound:      true,
+			TCPBoundAddr:  "127.0.0.1:8443",
+		},
 		ControlSocket:     "/h/daemon.sock",
 		ControlSocketFile: true,
 		HTTPSocket:        "/h/daemon-http.sock",
@@ -58,6 +69,12 @@ func TestPrintDaemonStatusHumanRunning(t *testing.T) {
 	got := out.String()
 	for _, want := range []string{
 		"daemon: running",
+		"phase:          upgrade_probation",
+		"version:        1.2.3",
+		"boot id:        boot-123",
+		"transaction:    transaction-123",
+		"http listener:  bound",
+		"tcp listener:   127.0.0.1:8443 (bound)",
 		"control socket: /h/daemon.sock (present)",
 		"http socket:    /h/daemon-http.sock (present)",
 		"pid:            42 (verified)",

@@ -518,6 +518,12 @@ func TestTmuxServerDeadParsing(t *testing.T) {
 	require.False(t, tmuxServerDead(ctx, "/tmp/sock,notanumber,0"))
 	// A PID that certainly exists but is not tmux, with no socket on disk.
 	require.True(t, tmuxServerDead(ctx, fmt.Sprintf("/nonexistent-sock-%d,%d,0", os.Getpid(), os.Getpid())))
+	// A crashed tmux server can leave its socket behind while the kernel recycles
+	// its PID to a non-tmux process. The stale path is not evidence that the
+	// process named by this TMUX value is still a tmux server (#2206).
+	staleSocket := filepath.Join(t.TempDir(), "stale-tmux.sock")
+	require.NoError(t, os.WriteFile(staleSocket, nil, 0o600))
+	require.True(t, tmuxServerDead(ctx, fmt.Sprintf("%s,%d,0", staleSocket, os.Getpid())))
 	// A dead PID.
 	c := exec.Command("true")
 	require.NoError(t, c.Run())
@@ -743,6 +749,33 @@ func TestDaemonPingTimeoutIsAdvisoryNotFail(t *testing.T) {
 	require.Equal(t, StatusWarn, rows[0].Status,
 		"a dial timeout is not proof the daemon is dead — a busy daemon times out identically (#2040)")
 	require.False(t, rows[0].Problem, "a timeout is advisory; it must not drive the exit code (#2040)")
+}
+
+func TestDaemonUpgradeProbationIsVisibleButNotAHealthFailure(t *testing.T) {
+	testguard.IsolateTmux(t)
+	opts := testOptions(t, false)
+	sockPath := filepath.Join(opts.ConfigDir, "daemon.sock")
+	httpPath := filepath.Join(opts.ConfigDir, "daemon-http.sock")
+	opts.daemonHealth = func() daemon.HealthStatus {
+		return daemon.HealthStatus{
+			SocketPath:       sockPath,
+			DaemonVersion:    "dev",
+			TransactionID:    "transaction-2212",
+			Phase:            daemon.DaemonPhaseUpgradeProbation,
+			HTTPSocketPath:   httpPath,
+			HTTPSocketExists: true,
+			HTTPListening:    daemon.AnswerYes(),
+		}
+	}
+
+	report, err := Run(opts)
+	require.NoError(t, err)
+	rows := findCheckRows(report, "daemon")
+	require.Len(t, rows, 1)
+	require.Equal(t, StatusWarn, rows[0].Status)
+	require.False(t, rows[0].Problem, "a live validation window is not itself a failed upgrade")
+	require.Contains(t, rows[0].Detail, "transaction-2212")
+	require.Contains(t, rows[0].Detail, "validation probation")
 }
 
 // TestDaemonPingRefusalStaysFail: a refusal (ECONNREFUSED) is a completed answer

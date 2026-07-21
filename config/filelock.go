@@ -5,9 +5,11 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
+	"github.com/sachiniyer/agent-factory/internal/pathutil"
 	"github.com/sachiniyer/agent-factory/log"
 )
 
@@ -21,7 +23,7 @@ import (
 func TryWithFileLock(path string, fn func() error) (acquired bool, err error) {
 	lockPath := path + ".lock"
 
-	if err := os.MkdirAll(filepath.Dir(lockPath), 0755); err != nil {
+	if err := ensureStorageParent(lockPath); err != nil {
 		return false, fmt.Errorf("failed to create lock directory: %w", err)
 	}
 
@@ -68,7 +70,7 @@ var ErrLockTimeout = errors.New("timed out waiting for file lock")
 func WithFileLockTimeout(path string, timeout time.Duration, fn func() error) error {
 	lockPath := path + ".lock"
 
-	if err := os.MkdirAll(filepath.Dir(lockPath), 0755); err != nil {
+	if err := ensureStorageParent(lockPath); err != nil {
 		return fmt.Errorf("failed to create lock directory: %w", err)
 	}
 
@@ -114,7 +116,7 @@ func WithFileLock(path string, fn func() error) error {
 	lockPath := path + ".lock"
 
 	// Ensure the directory exists so the lock file can be created.
-	if err := os.MkdirAll(filepath.Dir(lockPath), 0755); err != nil {
+	if err := ensureStorageParent(lockPath); err != nil {
 		return fmt.Errorf("failed to create lock directory: %w", err)
 	}
 
@@ -137,7 +139,7 @@ func WithFileLock(path string, fn func() error) error {
 // visible to readers.
 func AtomicWriteFile(path string, data []byte, perm os.FileMode) error {
 	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0755); err != nil {
+	if err := ensureStorageParent(path); err != nil {
 		return fmt.Errorf("failed to create directory %s: %w", dir, err)
 	}
 
@@ -197,4 +199,127 @@ func AtomicWriteFile(path string, data []byte, perm os.FileMode) error {
 		log.WarningLog.Printf("AtomicWriteFile: failed to close directory %s after post-rename sync of %s: %v", dir, path, err)
 	}
 	return nil
+}
+
+// ensureStorageParent creates path's parent without changing the historical
+// 0755 policy for generic callers (upgrade binaries, autostart files, repo
+// plugin files). When path is inside the AF home, it first secures that root.
+// Creating a descendant with MkdirAll(0755) can then never accidentally create
+// the default secret-bearing home world-readable (#2197).
+func ensureStorageParent(path string) error {
+	if err := secureAFHomeForPath(path); err != nil {
+		return err
+	}
+	return os.MkdirAll(filepath.Dir(path), 0o755)
+}
+
+// secureAFHomeForPath handles the single-owner boundary only for paths inside
+// the configured AF home. A newly created home is always 0700, and the default
+// ~/.agent-factory is tightened on upgrade. An existing custom home is left
+// alone: AGENT_FACTORY_HOME explicitly supports broad caller-owned directories
+// such as "~", and a file helper must never chmod those. A default-name symlink
+// is custom ownership too: AF neither chmods its target nor blocks startup over
+// that mode. AtomicWriteFile and the lock helpers are generic, so paths elsewhere
+// are left alone too.
+func secureAFHomeForPath(path string) error {
+	afHome, err := GetConfigDir()
+	if err != nil {
+		// A generic write outside config storage must not start depending on a
+		// resolvable AGENT_FACTORY_HOME. Callers writing inside it obtained their
+		// path from GetConfigDir already and will have surfaced that error there.
+		return nil
+	}
+	absHome, err := filepath.Abs(afHome)
+	if err != nil {
+		return fmt.Errorf("resolve AF home: %w", err)
+	}
+	absPath, err := filepath.Abs(path)
+	if err != nil {
+		return fmt.Errorf("resolve storage path: %w", err)
+	}
+	rel, err := filepath.Rel(absHome, absPath)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return nil
+	}
+	info, statErr := os.Lstat(absHome)
+	created := false
+	if os.IsNotExist(statErr) {
+		if err := os.MkdirAll(absHome, 0o700); err != nil {
+			return fmt.Errorf("create AF home: %w", err)
+		}
+		// Reinspect after creation. Besides making chmod independent of umask,
+		// this catches another process winning the missing-path race with a
+		// symlink instead of blindly following it below.
+		info, statErr = os.Lstat(absHome)
+		created = true
+	}
+	if statErr != nil {
+		return fmt.Errorf("inspect AF home: %w", statErr)
+	}
+	// Environment presence does not make a path custom: users commonly export an
+	// alias of $HOME/.agent-factory to pin the default explicitly. Direction does
+	// matter, though. An alias INTO a concrete default is AF-owned and repairable;
+	// when the default name itself is a symlink, its target remains caller-owned.
+	// concreteDefaultAFHome returns the path AF may safely chmod, never the alias.
+	defaultRepairPath := concreteDefaultAFHome(absHome)
+	if defaultRepairPath == "" && !created {
+		return nil
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		// Chmod follows symlinks. Never let a default ~/.agent-factory symlink
+		// trick this repair into changing an unrelated target directory.
+		target, err := os.Stat(absHome)
+		if err != nil {
+			return fmt.Errorf("inspect AF home symlink target: %w", err)
+		}
+		if !target.IsDir() {
+			return fmt.Errorf("AF home %s is a symlink whose target is not an owner-only directory", absHome)
+		}
+		if target.Mode().Perm() != 0o700 {
+			if defaultRepairPath == "" {
+				return fmt.Errorf("AF home %s is a symlink whose target is not an owner-only directory", absHome)
+			}
+			// Repair the concrete default, not the user-provided alias. That keeps a
+			// retargeted alias from redirecting chmod to a caller-owned directory.
+			if err := os.Chmod(defaultRepairPath, 0o700); err != nil {
+				return fmt.Errorf("secure AF home: %w", err)
+			}
+		}
+		return nil
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("AF home %s is not a directory", absHome)
+	}
+	repairPath := absHome
+	if defaultRepairPath != "" {
+		repairPath = defaultRepairPath
+	}
+	if err := os.Chmod(repairPath, 0o700); err != nil {
+		return fmt.Errorf("secure AF home: %w", err)
+	}
+	return nil
+}
+
+// concreteDefaultAFHome returns the concrete default directory when absHome is
+// another spelling of it. The direction is intentional: if the default name is
+// itself a symlink, its target is caller-owned and no spelling of that target is
+// permission-repairable here. This resolves both sides of the policy without
+// turning symmetric path equality into symmetric ownership.
+func concreteDefaultAFHome(absHome string) string {
+	defaultHome, err := ConfigDirFor("")
+	if err != nil {
+		return ""
+	}
+	absDefault, err := filepath.Abs(defaultHome)
+	if err != nil {
+		return ""
+	}
+	defaultInfo, err := os.Lstat(absDefault)
+	if err != nil || !defaultInfo.IsDir() || defaultInfo.Mode()&os.ModeSymlink != 0 {
+		return ""
+	}
+	if pathutil.ResolveForCompare(absHome) != pathutil.ResolveForCompare(absDefault) {
+		return ""
+	}
+	return absDefault
 }

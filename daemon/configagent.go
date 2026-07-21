@@ -296,10 +296,14 @@ func (m *Manager) SpawnConfigAgent(ctx context.Context, req SpawnConfigAgentRequ
 // configAgentCodexReceiptHome resolves the same CODEX_HOME the launched shell
 // command will give Codex. Command-local assignments win over daemon variables;
 // an unset CODEX_HOME falls back through the command-specific HOME. Relative
-// values resolve against the AF-home working directory passed to tmux.Start.
+// values resolve against the effective launch cwd, including GNU env -C.
 func configAgentCodexReceiptHome(program, workingDir string) (string, error) {
+	launch, err := tmux.CommandEnvironmentFromCommand(program, workingDir)
+	if err != nil {
+		return "", fmt.Errorf("cannot resolve Codex receipt environment: %w", err)
+	}
 	effective := func(name string) (string, bool, error) {
-		override := tmux.EnvironmentOverrideFromCommand(program, name)
+		override := launch.Override(name)
 		if !override.Present {
 			value, set := os.LookupEnv(name)
 			return value, set, nil
@@ -313,7 +317,7 @@ func configAgentCodexReceiptHome(program, workingDir string) (string, error) {
 		if filepath.IsAbs(path) {
 			return filepath.Clean(path)
 		}
-		return filepath.Clean(filepath.Join(workingDir, path))
+		return filepath.Clean(filepath.Join(launch.WorkingDir, path))
 	}
 
 	if codexHome, set, err := effective("CODEX_HOME"); err != nil {

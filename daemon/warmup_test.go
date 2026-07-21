@@ -94,7 +94,7 @@ func TestControlServer_WarmupGatesStateRPCs(t *testing.T) {
 
 // TestCallDaemon_RetriesThroughWarmup verifies the client side of the warm-up
 // contract: a state-dependent call that lands during the warm-up window keeps
-// retrying (bounded by daemonWarmupWait) and succeeds once the restore
+// retrying (bounded by daemonAdmissionRetryWait) and succeeds once the restore
 // completes, so call sites racing a fresh daemon spawn — CLI create right
 // after boot, task runs after an upgrade respawn — need no retry logic of
 // their own.

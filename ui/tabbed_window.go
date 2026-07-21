@@ -2,6 +2,7 @@ package ui
 
 import (
 	"fmt"
+	"strings"
 	"sync/atomic"
 
 	"github.com/sachiniyer/agent-factory/log"
@@ -206,6 +207,12 @@ func (w *TabbedWindow) setActiveTab(idx int) {
 		return
 	}
 	w.pane.SetTab(idx)
+	if w.preview == nil {
+		// Ownership belongs to the rendered tab, not the window. The next live or
+		// detached snapshot will establish the new tab's owner. A transient preview
+		// still renders its own target and therefore keeps its current owner.
+		w.SetScrollOwnerResolving()
+	}
 	w.bumpContentSeq()
 }
 
@@ -229,6 +236,10 @@ func (w *TabbedWindow) SetPreview(instance *session.Instance, tab int, original 
 		return w.ContentSeq()
 	}
 	w.preview = &windowPreview{instance: instance, tab: tab, original: original}
+	// A transient preview has no live stream and therefore no authoritative
+	// terminal-mode snapshot. Unknown must not inherit the committed pane's owner
+	// and accidentally capture a fullscreen target's background primary history.
+	w.SetScrollOwnerResolving()
 	return w.bumpContentSeq()
 }
 
@@ -240,6 +251,9 @@ func (w *TabbedWindow) ClearPreview() uint64 {
 		return w.ContentSeq()
 	}
 	w.preview = nil
+	// The app will replace this with the freshly rebound live stream's owner (or
+	// HostHistory for a capture-only pane). Until then there is no truthful owner.
+	w.SetScrollOwnerResolving()
 	return w.bumpContentSeq()
 }
 
@@ -538,6 +552,24 @@ func (w *TabbedWindow) ScrollOwner() ScrollOwner {
 	return w.tab.ScrollOwner()
 }
 
+// SetScrollOwner switches the pane's controller to the terminal's current owner.
+// It is event-loop safe; TabPane serializes against an off-loop history fill.
+func (w *TabbedWindow) SetScrollOwner(owner ScrollOwner) {
+	w.tab.SetScrollOwnerFor(w.effectiveInstance(), w.effectiveTab(), owner)
+}
+
+// SetScrollOwnerResolving makes the effective capture target own the pending
+// ownership probe without inheriting the committed/previous target's decision.
+func (w *TabbedWindow) SetScrollOwnerResolving() {
+	w.tab.SetScrollOwnerResolvingFor(w.effectiveInstance(), w.effectiveTab())
+}
+
+// CanResolveScrollOwner distinguishes a capture-backed unknown target from a
+// live stream still waiting for its authoritative repaint.
+func (w *TabbedWindow) CanResolveScrollOwner() bool {
+	return w.tab.CanResolveScrollOwner()
+}
+
 // NeedsScrollFill reports whether the pane just entered scroll mode and is still
 // waiting for its off-loop scrollback capture — panesRefresh bypasses its
 // throttle for such a pane so the fill is immediate (#1637).
@@ -569,6 +601,12 @@ func (w *TabbedWindow) renderHeader(width int) string {
 		}
 	} else {
 		text = " no session selected "
+	}
+	if w.IsInScrollMode() {
+		// Scroll mode is pane chrome, not terminal history. Keeping this cue in
+		// the header prevents an AF-owned footer row from consuming the first
+		// scroll gesture or changing the child's history coordinates (#2192).
+		text = strings.TrimSuffix(text, " ") + " · SCROLL · Esc exits "
 	}
 	style := paneHeaderStyle
 	switch {

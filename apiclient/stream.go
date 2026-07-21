@@ -119,9 +119,20 @@ const streamSeqHeader = "X-Af-Stream-Seq"
 // Callers that let a user ADDRESS a tab need it to avoid reporting a healthy
 // session as dead — a distinction the daemon can make and a client cannot (#1948).
 func (c *Client) Preview(req daemon.PreviewRequest) (content string, gone, tabGone bool, err error) {
-	var resp daemon.PreviewResponse
-	if err := c.call("Preview", req, &resp); err != nil {
+	resp, err := c.PreviewSnapshot(req)
+	if err != nil {
 		return "", false, false, err
 	}
 	return resp.Content, resp.Gone, resp.TabGone, nil
+}
+
+// PreviewSnapshot is the typed preview response used by terminal-aware clients.
+// Keeping modes beside content prevents a preview target from inheriting the
+// ownership state of whichever pane happened to render before it.
+func (c *Client) PreviewSnapshot(req daemon.PreviewRequest) (daemon.PreviewResponse, error) {
+	var resp daemon.PreviewResponse
+	if err := c.call("Preview", req, &resp); err != nil {
+		return daemon.PreviewResponse{}, err
+	}
+	return resp, nil
 }
