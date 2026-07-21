@@ -92,6 +92,28 @@ func TestResumeFromLimit_BrowserBodyDecodes(t *testing.T) {
 	assert.NotContains(t, env.Error.Message, "malformed JSON")
 }
 
+// TestResumeFromLimit_NoOpIsNotSuccess pins the shared outcome contract: a kill
+// that already owns the target may make ResumeFromLimit do nothing, but every
+// client must be told not to announce a retry or clear its local limit state.
+func TestResumeFromLimit_NoOpIsNotSuccess(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	backend := &limitResumeBackend{FakeBackend: session.NewFakeBackend(), alive: true}
+	inst := registerStarted(t, manager, repoID, repoPath, "parked", backend, true, session.Running)
+	inst.SetLimitReached(time.Now().Add(time.Hour))
+	key := daemonInstanceKey(repoID, inst.Title)
+	manager.mu.Lock()
+	manager.killsInFlight[key] = struct{}{}
+	manager.mu.Unlock()
+
+	var resp ResumeFromLimitResponse
+	err := (&controlServer{manager: manager}).ResumeFromLimit(
+		ResumeFromLimitRequest{ID: inst.ID}, &resp)
+	require.NoError(t, err)
+	assert.False(t, resp.OK)
+	assert.NotEmpty(t, resp.Reason)
+	assert.True(t, inst.LimitReached())
+}
+
 // TestResumeFromLimit_ResolvesByStableID pins the id-first addressing the web
 // needs, and the reason the request grew an ID field at all.
 //

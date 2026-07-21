@@ -109,3 +109,12 @@ func TestHandleLimitRetried_ClearsLocally(t *testing.T) {
 	_, _ = h.handleLimitRetried(limitRetriedMsg{title: "worker"})
 	require.False(t, inst.LimitReached(), "a successful retry must clear the local limit state")
 }
+
+func TestHandleLimitRetried_NoOpKeepsLimitLocally(t *testing.T) {
+	h := newTestHome(t)
+	inst := limitActionInstance(t, "worker", time.Now().Add(time.Hour))
+	h.store.AddInstance(inst)
+
+	_, _ = h.handleLimitRetried(limitRetriedMsg{title: "worker", err: errors.New("resume was not performed: another operation owns the retry")})
+	require.True(t, inst.LimitReached(), "a daemon no-op must not clear the local limit state")
+}

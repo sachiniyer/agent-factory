@@ -410,8 +410,13 @@ export async function restoreSession(title: string, token: string): Promise<void
  *  The daemon refuses a session that is not actually limit-blocked, so a stale
  *  click (the limit cleared itself between render and click) surfaces as an error
  *  rather than an unwanted prompt. */
-export async function resumeFromLimit(id: string, title: string, token: string): Promise<void> {
-  await af("ResumeFromLimit", { id, title, repo_id: "" }, token);
+export interface ResumeFromLimitResult {
+  ok: boolean;
+  reason?: string;
+}
+
+export async function resumeFromLimit(id: string, title: string, token: string): Promise<ResumeFromLimitResult> {
+  return af<ResumeFromLimitResult>("ResumeFromLimit", { id, title, repo_id: "" }, token);
 }
 
 /** The daemon's DeleteProject response: how many sessions it archived vs tore
