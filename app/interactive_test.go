@@ -454,22 +454,42 @@ func TestAttachKeyKeepsFullScreenAttach(t *testing.T) {
 }
 
 func TestFirstInteractiveEntryShowsHelpScreenOnce(t *testing.T) {
-	h, _ := liveTestHome(t)
-	_, _ = stubLiveTermFactory(t)
+	for _, size := range []struct {
+		name   string
+		width  int
+		height int
+	}{
+		{name: "80x24", width: 80, height: 24},
+		{name: "72x20", width: 72, height: 20},
+	} {
+		t.Run(size.name, func(t *testing.T) {
+			h, _ := liveTestHome(t)
+			_, _ = stubLiveTermFactory(t)
+			resizeHome(h, size.width, size.height)
 
-	_, _ = h.handleDefaultKeyPress(tea.KeyMsg{Type: tea.KeyEnter}, keys.KeyEnter)
+			_, _ = h.handleDefaultKeyPress(tea.KeyMsg{Type: tea.KeyEnter}, keys.KeyEnter)
 
-	require.Equal(t, stateHelp, h.state, "first Enter must show the interactive help screen")
-	require.NotNil(t, h.textOverlay)
-	assert.Contains(t, h.textOverlay.Render(), "ctrl+]",
-		"the help screen must lead with the escape hatch (RFC §5.7)")
-	assert.False(t, h.interactive, "activation waits for the overlay dismissal")
+			require.Equal(t, stateHelp, h.state, "first Enter must show the interactive help screen")
+			require.NotNil(t, h.textOverlay)
+			view := h.View()
+			requireViewSized(t, view, size.width, size.height)
+			copy := flatten(view)
+			assert.Contains(t, copy, "You are typing into this pane's",
+				"the help screen follows the TUI sentence-case convention")
+			assert.Contains(t, copy, "terminal: every key",
+				"the wrapped sentence remains visible at compact widths")
+			assert.NotContains(t, copy, "typing INTO", "the help screen must not caps-shout")
+			assert.Contains(t, copy, "ctrl+]",
+				"the help screen must lead with the escape hatch (RFC §5.7)")
+			assert.False(t, h.interactive, "activation waits for the overlay dismissal")
 
-	// Any key dismisses the overlay; the deferred activation then runs.
-	_, cmd := h.handleHelpState(tea.KeyMsg{Type: tea.KeyEnter})
-	require.Equal(t, stateDefault, h.state)
-	runHermeticCmd(t, h, cmd, 0)
-	assert.True(t, h.interactive, "dismissing the help screen must complete the activation")
+			// Any key dismisses the overlay; the deferred activation then runs.
+			_, cmd := h.handleHelpState(tea.KeyMsg{Type: tea.KeyEnter})
+			require.Equal(t, stateDefault, h.state)
+			runHermeticCmd(t, h, cmd, 0)
+			assert.True(t, h.interactive, "dismissing the help screen must complete the activation")
+		})
+	}
 }
 
 func TestWheelIsInertWhileInteractive(t *testing.T) {
