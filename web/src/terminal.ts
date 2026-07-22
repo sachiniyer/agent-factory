@@ -298,6 +298,13 @@ export class AttachTerminal {
     this.term.focus();
   }
 
+  /** Reconciles this terminal after an app-shell layout/visibility transition.
+   *  Coalesced onto the next painted frame so CSS has settled; the measurable-host
+   *  gate in fitVisibleHost keeps hidden or zero-sized panes inert. */
+  refit(): void {
+    this.scheduleVisibleFit();
+  }
+
   /** Takes the keyboard away from the terminal (blurs it) so document-level rail
    *  navigation gets the keys again — the Escape/back-to-nav half of #1693. */
   blur(): void {

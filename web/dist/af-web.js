@@ -8568,6 +8568,12 @@ var AttachTerminal = class {
     this.fitVisibleHost();
     this.term.focus();
   }
+  /** Reconciles this terminal after an app-shell layout/visibility transition.
+   *  Coalesced onto the next painted frame so CSS has settled; the measurable-host
+   *  gate in fitVisibleHost keeps hidden or zero-sized panes inert. */
+  refit() {
+    this.scheduleVisibleFit();
+  }
   /** Takes the keyboard away from the terminal (blurs it) so document-level rail
    *  navigation gets the keys again — the Escape/back-to-nav half of #1693. */
   blur() {
@@ -9189,6 +9195,13 @@ var SplitView = class {
     const theme = currentXtermTheme();
     for (const pane of this.panes.values()) {
       pane.term?.setTheme(theme);
+    }
+  }
+  /** Refit every live terminal after app chrome changes the pane's usable surface.
+   *  Web/VS Code leaves have no terminal and are intentionally inert. */
+  refit() {
+    for (const pane of this.panes.values()) {
+      pane.term?.refit();
     }
   }
   /** Moves pane focus by `delta` (wrapping) and attaches the newly focused pane. */
@@ -11103,6 +11116,10 @@ var AppShell = class {
   tasksPane;
   configPane;
   lastView = null;
+  // Whether the selected sessions surface is using the phone's condensed shell.
+  // Kept separately from lastView/lastSelectedId because either can flip this one
+  // presentation decision. The root class is media-query inert on desktop.
+  lastCondensedSessionChrome = null;
   lastTasks = null;
   lastTasksProject = null;
   // The top-right project switcher (redesign PR2): a button showing the current
@@ -11226,6 +11243,7 @@ var AppShell = class {
     this.navOpen = open;
     this.el.classList.toggle("af-nav-open", open);
     this.navToggle.setAttribute("aria-expanded", open ? "true" : "false");
+    this.actions.layoutChanged();
   }
   /** Runs an action whose result lives outside the session drawer (#2226). Drawer
    *  dismissal belongs to the action's intent, not to where its click happened or
@@ -11242,6 +11260,12 @@ var AppShell = class {
   /** Applies the latest state, touching only what changed. */
   update(state) {
     this.syncDocumentTitle(state);
+    const condensedSessionChrome = usesCondensedSessionChrome(state);
+    if (this.lastCondensedSessionChrome !== condensedSessionChrome) {
+      this.lastCondensedSessionChrome = condensedSessionChrome;
+      this.el.classList.toggle("af-session-selected", condensedSessionChrome);
+      this.actions.layoutChanged();
+    }
     const kb = state.selectedId && state.focus === "terminal" ? "terminal" : "rail";
     if (this.lastKb !== kb) {
       this.lastKb = kb;
@@ -12064,6 +12088,9 @@ function documentTitle(state) {
 function selectedSession(state) {
   return state.selectedId ? state.sessions.find((s) => s.id === state.selectedId) ?? null : null;
 }
+function usesCondensedSessionChrome(state) {
+  return state.view === "sessions" && !!state.selectedId && state.sessions.some((session) => session.id === state.selectedId);
+}
 function tabBarSig(state) {
   const selected = selectedSession(state);
   if (!selected) {
@@ -12850,6 +12877,7 @@ var actions = {
   restore: (session) => openConfirm("restore", session),
   retryLimit: doRetryLimit,
   switchTab,
+  layoutChanged: () => splitView.refit(),
   openTab,
   newTab: createSessionTab,
   closeTab: closeSessionTab,

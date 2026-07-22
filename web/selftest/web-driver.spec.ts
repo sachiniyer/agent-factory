@@ -3974,10 +3974,25 @@ test("#2347: the mobile agent terminal also reclaims peer-owned geometry", REAL_
     };
 
     // Each tall peer leaves its authoritative grid behind, then disconnects. That
-    // isolates the direct-input path under test: an activation still queued in a
-    // live peer is a legitimate later writer, not evidence that this host failed to
-    // fit. Exercise the real xterm DOM listeners while the stale peer grid remains.
-    let peer = await openTallPeer("the tall peer must strand the mobile client before the touch check");
+    // isolates the local trigger under test: an activation still queued in a live
+    // peer is a legitimate later writer, not evidence that this host failed to fit.
+    // Start with #2354's explicit drawer transition. dispatchEvent deliberately does
+    // not focus or move a pointer into this page, so the only possible repair is the
+    // app shell's layout-change hook — not #2347's focus/pointer fallbacks.
+    let peer = await openTallPeer("the tall peer must strand the mobile client before the drawer check");
+    await peer.close();
+    await test.step("drawer visibility transitions explicitly refit the active pane", async () => {
+      const app = first.locator(".af-app");
+      const toggle = first.locator(".af-nav-toggle");
+      await toggle.dispatchEvent("click");
+      await expect(app).toHaveClass(/af-nav-open/);
+      await expectSettledLocalGeometry("opening the overlay must reclaim peer-owned terminal geometry");
+      await toggle.dispatchEvent("click");
+      await expect(app).not.toHaveClass(/af-nav-open/);
+    });
+
+    // Exercise the real xterm DOM listeners while the stale peer grid remains.
+    peer = await openTallPeer("the tall peer must strand the mobile client before the touch check");
     await peer.close();
     await test.step("touch scroll input reclaims the peer grid", async () => {
       await firstHost.locator(".af-pane-host").dispatchEvent("touchmove", {
@@ -5069,7 +5084,7 @@ test("new-tab menu (#2219): stays visible, hit-testable, and anchored while the 
   await page.setViewportSize({ width: 1280, height: 720 });
 });
 
-test("#2224: title and tabs share one scrolling header row at every width", REAL_FIXTURE, async ({ browser }, testInfo) => {
+test("#2224/#2354: desktop keeps title + tabs; mobile keeps only hamburger + tabs", REAL_FIXTURE, async ({ browser }, testInfo) => {
   const mockRepo = process.env.AF_MOCK_REPO;
   test.skip(!mockRepo, "AF_MOCK_REPO is set only by web-selftest-entry.sh");
 
@@ -5141,8 +5156,19 @@ test("#2224: title and tabs share one scrolling header row at every width", REAL
             const titleNode = titleBox.locator(".af-term-title");
             const tabbar = head.locator(":scope > .af-tabbar");
             const retry = head.getByRole("button", { name: "Retry", exact: true });
+            const navToggle = p.locator(".af-nav-toggle");
             await expect(tabbar, "the strip belongs to the title row, not a second row").toHaveCount(1);
             await expect(titleNode).toHaveText(title);
+            if (width <= 768) {
+              await expect(titleBox, "mobile spends no row or width on a repeated session title").toBeHidden();
+              await expect(navToggle, "the static hamburger remains the first mobile control").toBeVisible();
+              await expect(p.locator(".af-viewnav"), "top-level navigation moves into the open drawer").toBeHidden();
+              await expect(p.locator(".af-project-switch"), "project chrome moves into the open drawer").toBeHidden();
+              await expect(p.locator(".af-appbar-more"), "app chrome moves into the open drawer").toBeHidden();
+            } else {
+              await expect(titleBox, "desktop keeps its identifying pane title").toBeVisible();
+              await expect(navToggle).toBeHidden();
+            }
             if (roster === "overflow") {
               await expect(retry, "Retry remains reachable at the usage-limit wall").toBeVisible();
             } else {
@@ -5172,6 +5198,7 @@ test("#2224: title and tabs share one scrolling header row at every width", REAL
                 titleBox: rect(".af-term-head-main"),
                 title: rect(".af-term-title"),
                 bar: rect(".af-tabbar"),
+                nav: rect(".af-nav-toggle"),
                 retry: retryEl ? rect(".af-term-action:not([hidden])") : null,
                 host: rect(".af-term-host"),
                 titleClientWidth: titleEl.clientWidth,
@@ -5190,18 +5217,24 @@ test("#2224: title and tabs share one scrolling header row at every width", REAL
             expect(layout.barParent).toContain("af-term-head");
             expect(layout.hostPrevious).toContain("af-term-head");
             expect(layout.head.height, "one row reclaims the old stacked chrome height").toBeLessThan(64);
-            expect(Math.abs(layout.titleBox.centerY - layout.bar.centerY), "title and tabs share a baseline row").toBeLessThanOrEqual(1);
             expect(layout.bar.top).toBeGreaterThanOrEqual(layout.head.top);
             expect(layout.bar.bottom).toBeLessThanOrEqual(layout.head.bottom);
             expect(layout.host.top).toBeGreaterThanOrEqual(layout.head.bottom - 1);
-            expect(layout.titleBox.width, "the title keeps a useful allocation").toBeGreaterThanOrEqual(120);
-            expect(layout.titleClientWidth, "the readable title itself never collapses to a token").toBeGreaterThanOrEqual(88);
-            expect(layout.titleScrollWidth, "the long title really needs truncation").toBeGreaterThan(layout.titleClientWidth);
-            expect({
-              overflow: layout.titleOverflow,
-              textOverflow: layout.titleTextOverflow,
-              whiteSpace: layout.titleWhiteSpace,
-            }).toEqual({ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" });
+            if (width <= 768) {
+              expect(Math.abs(layout.nav.centerY - layout.bar.centerY), "hamburger and tabs share the sole mobile row").toBeLessThanOrEqual(1);
+              expect(layout.titleBox.width, "the repeated mobile title consumes no horizontal space").toBe(0);
+              expect(layout.host.top, "only the slim hamburger/tab row precedes mobile content").toBeLessThan(64);
+            } else {
+              expect(Math.abs(layout.titleBox.centerY - layout.bar.centerY), "desktop title and tabs share a baseline row").toBeLessThanOrEqual(1);
+              expect(layout.titleBox.width, "the desktop title keeps a useful allocation").toBeGreaterThanOrEqual(120);
+              expect(layout.titleClientWidth, "the readable desktop title never collapses to a token").toBeGreaterThanOrEqual(88);
+              expect(layout.titleScrollWidth, "the long desktop title really needs truncation").toBeGreaterThan(layout.titleClientWidth);
+              expect({
+                overflow: layout.titleOverflow,
+                textOverflow: layout.titleTextOverflow,
+                whiteSpace: layout.titleWhiteSpace,
+              }).toEqual({ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" });
+            }
             expect(layout.barClientWidth, "the scrolling strip keeps an operable viewport").toBeGreaterThanOrEqual(96);
             expect(layout.barOverflowX).toBe("auto");
             expect(layout.barPosition, "#1813 marker keeps the tab bar as its containing block").toBe("relative");
@@ -6749,6 +6782,115 @@ async function settledMobileDrawerGeometry(p: Page, title: string) {
     };
   }, title);
 }
+
+test("#2354 mobile: one slim hamburger/tab row owns the viewport and the drawer stays an overlay", REAL_FIXTURE, async ({
+  browser,
+}) => {
+  for (const width of [320, 375]) {
+    await test.step(`${width}px`, async () => {
+      const height = 812;
+      const { ctx, p } = await openAt(browser, width, height);
+      try {
+        const app = p.locator(".af-app");
+        const toggle = p.locator(".af-nav-toggle");
+        const rail = p.locator(".af-rail");
+        const viewNav = p.locator(".af-viewnav");
+        const project = p.locator(".af-project-switch");
+        const more = p.locator(".af-appbar-more");
+
+        await toggle.click();
+        await expect(app).toHaveClass(/af-nav-open/);
+        await row(p, SESSION_ORDER).click();
+        await expect(app).not.toHaveClass(/af-nav-open/);
+        await expect(app, "a real selected session enables the condensed mobile shell").toHaveClass(/af-session-selected/);
+        await expect(p.locator(".af-main.af-main-term")).toBeVisible();
+        await expect(p.locator(".af-term-head-main"), "the title is not a redundant mobile row").toBeHidden();
+        await expect(viewNav, "top-level navigation reserves no closed-state row").toBeHidden();
+        await expect(project, "project chrome reserves no closed-state row").toBeHidden();
+        await expect(more, "secondary app chrome reserves no closed-state row").toBeHidden();
+
+        const geometry = () =>
+          p.evaluate(() => {
+            const rect = (selector: string) => {
+              const box = document.querySelector(selector)!.getBoundingClientRect();
+              return {
+                x: box.x,
+                y: box.y,
+                width: box.width,
+                height: box.height,
+                right: box.right,
+                bottom: box.bottom,
+                centerY: box.top + box.height / 2,
+              };
+            };
+            return {
+              app: rect(".af-app"),
+              toggle: rect(".af-nav-toggle"),
+              head: rect(".af-term-head"),
+              tabs: rect(".af-tabbar"),
+              host: rect(".af-term-host"),
+            };
+          });
+        const closed = await geometry();
+        expect(Math.abs(closed.toggle.centerY - closed.tabs.centerY), "hamburger and tabs share one row").toBeLessThanOrEqual(1);
+        expect(closed.head.height, "the mobile control row stays slim").toBeLessThan(64);
+        expect(closed.host.y - closed.app.y, "session content begins immediately after that one row").toBeLessThan(64);
+        expect(closed.host.bottom, "the pane reaches the mobile viewport bottom").toBeCloseTo(closed.app.bottom, 0);
+
+        // The hamburger reveals navigation as an overlay. The app/project controls
+        // become reachable only inside that transient state, while the pane keeps the
+        // exact same usable rectangle underneath it.
+        await toggle.click();
+        await expect(app).toHaveClass(/af-nav-open/);
+        await expect(rail).toBeVisible();
+        await expect(viewNav).toBeVisible();
+        await expect(project).toBeVisible();
+        await expect(more).toBeVisible();
+        const opened = await geometry();
+        expect(opened.host, "opening the overlay must not resize or displace the pane").toEqual(closed.host);
+
+        // A drawer-only view control is genuinely operable, and leaving Sessions
+        // dismisses the drawer. Returning keeps the selected terminal and restores
+        // the condensed row rather than stacking the old appbar back above it.
+        await viewNav.getByRole("tab", { name: "Tasks", exact: true }).click();
+        await expect(app).not.toHaveClass(/af-nav-open/);
+        await expect(p.locator(".af-tasks")).toBeVisible();
+        await p.getByRole("tab", { name: "Sessions", exact: true }).click();
+        await expect(p.locator(".af-main.af-main-term")).toBeVisible();
+        await expect(app).toHaveClass(/af-session-selected/);
+        await expect(viewNav).toBeHidden();
+
+        // Outside tap is the other drawer exit. Aim at the scrim's exposed right
+        // edge because the left portion is intentionally covered by the rail.
+        await toggle.click();
+        await expect(app).toHaveClass(/af-nav-open/);
+        const scrim = p.locator(".af-nav-scrim");
+        const scrimBox = await scrim.boundingBox();
+        expect(scrimBox, "the open drawer exposes an outside-tap surface").not.toBeNull();
+        await scrim.click({ position: { x: scrimBox!.width - 4, y: scrimBox!.height / 2 } });
+        await expect(app).not.toHaveClass(/af-nav-open/);
+
+        // Switch to a real process terminal from the strip, then change the usable
+        // height. ResizeObserver owns orientation/viewport changes; the row count is
+        // the product signal that FitAddon actually consumed the new geometry.
+        const processTab = p.locator('.af-tabbar .af-tab:has([data-icon="terminal"])').first();
+        await expect(processTab, "the seeded session keeps a real terminal tab for the mobile strip").toBeVisible();
+        await processTab.click();
+        await expect(processTab).toHaveClass(/af-tab-active/);
+        const rows = () => p.locator(".af-term-host .xterm-rows > div").count();
+        await expect.poll(rows, { message: "the selected mobile tab has fitted terminal rows" }).toBeGreaterThan(0);
+        const beforeResizeRows = await rows();
+        await p.setViewportSize({ width, height: height + 120 });
+        await expect
+          .poll(rows, { message: "a taller mobile viewport refits the active terminal without manual recovery" })
+          .toBeGreaterThan(beforeResizeRows);
+        expect(await horizontalOverflow(p), "the condensed shell never widens the phone").toBeLessThanOrEqual(1);
+      } finally {
+        await ctx.close();
+      }
+    });
+  }
+});
 
 test("mobile (375px): the rail auto-collapses to a drawer; the hamburger reveals it as an overlay and picking a session folds it shut", REAL_FIXTURE, async ({
   browser,

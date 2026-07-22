@@ -457,6 +457,14 @@ export class SplitView {
     }
   }
 
+  /** Refit every live terminal after app chrome changes the pane's usable surface.
+   *  Web/VS Code leaves have no terminal and are intentionally inert. */
+  refit(): void {
+    for (const pane of this.panes.values()) {
+      pane.term?.refit();
+    }
+  }
+
   /** Moves pane focus by `delta` (wrapping) and attaches the newly focused pane. */
   cyclePane(delta: 1 | -1): void {
     if (!this.tree) {
