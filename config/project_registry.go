@@ -124,21 +124,24 @@ func ResetProjectRegistry() error {
 		}
 		markers := make(map[string]string, len(records))
 		for _, record := range records {
-			binding, err := resolveProjectBinding(record.Root)
+			marker, accessible, err := storedProjectMarkerPath(record.Root)
 			if err != nil {
 				return fmt.Errorf("locate checkout marker for project %s: %w", record.ID, err)
 			}
-			markerID, exists, err := readCheckoutID(binding.checkoutMarkerPath)
+			if !accessible {
+				continue
+			}
+			markerID, exists, err := readCheckoutID(marker)
 			if err != nil {
 				return err
 			}
 			if exists && markerID != record.CheckoutID {
-				return fmt.Errorf("project %s expects checkout marker %s, but %s contains %s", record.ID, record.CheckoutID, binding.checkoutMarkerPath, markerID)
+				return fmt.Errorf("project %s expects checkout marker %s, but %s contains %s", record.ID, record.CheckoutID, marker, markerID)
 			}
-			if prior, exists := markers[binding.checkoutMarkerPath]; exists && prior != record.CheckoutID {
-				return fmt.Errorf("checkout marker %s is claimed by both %s and %s", binding.checkoutMarkerPath, prior, record.CheckoutID)
+			if prior, exists := markers[marker]; exists && prior != record.CheckoutID {
+				return fmt.Errorf("checkout marker %s is claimed by both %s and %s", marker, prior, record.CheckoutID)
 			}
-			markers[binding.checkoutMarkerPath] = record.CheckoutID
+			markers[marker] = record.CheckoutID
 		}
 
 		for marker := range markers {
@@ -179,9 +182,20 @@ func RegisterProject(path string) (Project, error) {
 		if err != nil {
 			return err
 		}
-		checkoutID, err := ensureCheckoutID(binding.checkoutMarkerPath)
+		checkoutID, markerExists, err := readCheckoutID(binding.checkoutMarkerPath)
 		if err != nil {
 			return err
+		}
+		if !markerExists {
+			for _, record := range records {
+				if sameProjectPath(record.Root, binding.root) {
+					return fmt.Errorf("path %s is already the last-known root of project %s, but this checkout has no marker instead of %s — run `af projects rebind %s <replacement-path>` if this checkout replaces it; otherwise move the new checkout", binding.root, record.ID, record.CheckoutID, record.ID)
+				}
+			}
+			checkoutID, err = ensureCheckoutID(binding.checkoutMarkerPath)
+			if err != nil {
+				return err
+			}
 		}
 		for _, record := range records {
 			if record.CheckoutID == checkoutID && record.RelativeRoot == binding.relativeRoot {
@@ -521,6 +535,34 @@ func readCheckoutID(markerPath string) (id string, exists bool, err error) {
 		return "", false, fmt.Errorf("checkout marker %s contains invalid id %q", markerPath, id)
 	}
 	return id, true, nil
+}
+
+// storedProjectMarkerPath resolves a marker only while the record's last-known
+// root is still reachable. A moved/deleted checkout gives reset no safe path to
+// mutate, but must not strand AF's own registry. An existing root with a broken
+// Git entry remains an error because it may still contain identity state that
+// reset cannot validate.
+func storedProjectMarkerPath(root string) (string, bool, error) {
+	binding, err := resolveProjectBinding(root)
+	if err == nil {
+		return binding.checkoutMarkerPath, true, nil
+	}
+	info, statErr := os.Stat(root)
+	if errors.Is(statErr, os.ErrNotExist) {
+		return "", false, nil
+	}
+	if statErr != nil {
+		return "", false, fmt.Errorf("inspect last-known project root %s: %w", root, statErr)
+	}
+	if !info.IsDir() {
+		return "", false, nil
+	}
+	if _, gitErr := os.Lstat(filepath.Join(root, ".git")); errors.Is(gitErr, os.ErrNotExist) {
+		return "", false, nil
+	} else if gitErr != nil {
+		return "", false, fmt.Errorf("inspect last-known project Git entry %s: %w", root, gitErr)
+	}
+	return "", false, err
 }
 
 func projectRootHasCheckoutID(root, checkoutID string) (bool, error) {
