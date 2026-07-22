@@ -444,6 +444,13 @@ func RemoveTask(id string, expect task.ProjectExpectation) error {
 	return callDaemon("RemoveTask", RemoveTaskRequest{ID: id, Expect: expect}, &resp)
 }
 
+// RestartTask asks the daemon to stop and replace one enabled watch command,
+// waiting until the old process tree is gone and the replacement has started.
+func RestartTask(id string, expect task.ProjectExpectation) error {
+	var resp RestartTaskResponse
+	return callDaemon("RestartTask", RestartTaskRequest{ID: id, Expect: expect}, &resp)
+}
+
 // TriggerTask asks the daemon to fire a task now through the shared RunTask
 // firing path (the same entrypoint the in-daemon scheduler uses). Replaces the
 // old in-process daemon.RunTask CLI call so CLI, TUI, and scheduler triggers all

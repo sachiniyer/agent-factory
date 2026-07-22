@@ -64,7 +64,7 @@ af tasks add --name "gh-issues" --watch-cmd "./watch-issues.sh" \
 - **Each newline-terminated stdout line is one event.** Lines over 64KB are truncated to the cap (the remainder is discarded with a logged note). Unterminated trailing output at exit is not an event. Silence is fine — a quiet watcher is healthy; there is no output timeout.
 - **stderr** appends to `~/.agent-factory/logs/task-<id>.log`, size-capped by the same `log_max_size_mb`/`log_max_backups` rotation as the main log. Use it for all logging — anything on stdout becomes an event.
 - **Environment**: the script receives `AF_TASK_ID`, `AF_TASK_NAME`, and `AF_PROJECT_PATH` on top of the daemon's environment.
-- **Exit 0 = intentional stop.** The task's status becomes `stopped` and the script is not restarted until the next daemon start, task edit, or re-enable.
+- **Exit 0 = intentional stop.** The task's status becomes `stopped` and the script is not restarted until the next daemon start, task edit, re-enable, or explicit `af tasks restart <id>`.
 - **Non-zero exit = failure.** The script is restarted with exponential backoff, 1s doubling to a 5-minute cap. A run that stays healthy for 10 minutes resets the backoff.
 - **Crash-loop breaker**: 5 or more non-zero exits within 10 minutes set the status to `errored` and stop restarts. Re-arm by editing the task, toggling it, or restarting the daemon.
 - **Rate limit**: at most 10 events per minute per task. Excess events are dropped — never silently: a warning is logged with a running drop counter. Rate-dropped events are not queued for replay (the limit is protective policy against a chatty script, not an outage signal). This is a limit on the event *rate*, and is independent of `max_concurrent_runs`, which bounds in-flight *sessions* and queues rather than drops — the two are never the binding constraint at the same time (see [Limiting concurrent sessions](#limiting-concurrent-sessions)).
@@ -76,7 +76,7 @@ af tasks add --name "gh-issues" --watch-cmd "./watch-issues.sh" \
   - **Bounds**: at most 500 events / 256KB queued per task — overflow drops the *oldest* with a logged count; events older than **72h** are expired at replay time, also logged. Sources worth watching re-emit on their next poll, so scripts that poll should still track their own cursor (see `examples/tasks/gh-issue-poll.sh`).
   - **Disabled vs deleted**: a disabled task keeps its backlog and replays it on re-enable; a deleted task's queue is removed.
 
-Edits to delivery fields (`prompt`, `target_session`, `program`) apply from the next event without restarting the script; edits to `watch_cmd`, `project_path`, or `name` restart it.
+Edits to delivery fields (`prompt`, `target_session`, `program`) apply from the next event without restarting the script; edits to `watch_cmd`, `project_path`, or `name` restart it. Editing the contents of a script at the same `watch_cmd` path is intentionally not polled. Run `af tasks restart <id>` after that edit: the command synchronously stops and joins the old process group, then starts exactly one replacement from the current script. A disable update uses the same stop-and-join path, so a subsequent enable cannot overlap the old watcher.
 
 ### Limiting concurrent sessions
 
@@ -142,6 +142,7 @@ af tasks add --name <n> --prompt <p> --cron "0 9 * * *" [--target-session <title
 af tasks add --name <n> --watch-cmd <cmd> [--prompt "… {{line}} …"] [--target-session <title>] [--max-concurrent-runs <n>]
 af tasks get <id>
 af tasks update <id> [--cron …|--watch-cmd …] [--prompt …] [--target-session …] [--max-concurrent-runs <n>] [--program <agent>] [--enabled true|false]
+af tasks restart <id>          # enabled watch tasks only; reloads an edited script
 af tasks trigger <id>          # cron tasks only
 af tasks remove <id>
 ```

@@ -37,5 +37,6 @@ Request fields are the JSON keys of each route's request body; a `—` means the
 | `POST` | `/v1/AddTask` | `task` | Append a new task and re-arm the scheduler. |
 | `POST` | `/v1/UpdateTask` | `id`, `update`, `expect` | Apply a field-level patch to a task (only the fields in `update` are changed), preserving every unspecified field and the scheduler-owned fields. |
 | `POST` | `/v1/RemoveTask` | `id`, `expect` | Remove a task by ID. |
+| `POST` | `/v1/RestartTask` | `id`, `expect` | Stop and replace one enabled watch task without overlapping its process tree. |
 | `POST` | `/v1/TriggerTask` | `id`, `expect` | Fire a cron task now through the daemon's scheduler path (refuses disabled and watch tasks). |
 

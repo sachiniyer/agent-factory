@@ -1,5 +1,14 @@
 # Release Notes
 
+## Watch-task restart
+
+- `af tasks restart <id>` now reloads an edited watch script without manual
+  process signals. It waits for the old process group and queue drainer to exit
+  before starting one replacement, so restarts cannot double-emit events.
+- Task write/reload and restart operations are serialized in the daemon. A
+  disable returns only after its watcher is gone, and a project-scoped restart
+  cannot race a concurrent task rebind.
+
 ## Breaking: `auto_yes` removed
 
 The `auto_yes` config key, `af --autoyes` / `-y`, and

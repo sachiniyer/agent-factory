@@ -88,6 +88,23 @@ func (s *controlServer) ResumeStatusPoll(req ResumeStatusPollRequest, resp *Resu
 // so a change just written is picked up then. It returns nil (nothing to
 // reload) instead of erroring — the write is already durable.
 func (s *controlServer) reloadTaskSchedules() error {
+	unlock, err := s.lockTaskControl()
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	return s.reloadTaskSchedulesLocked()
+}
+
+func (s *controlServer) lockTaskControl() (func(), error) {
+	if s.scheduler == nil {
+		return nil, fmt.Errorf("this daemon does not host a task scheduler")
+	}
+	s.scheduler.controlMu.Lock()
+	return s.scheduler.controlMu.Unlock, nil
+}
+
+func (s *controlServer) reloadTaskSchedulesLocked() error {
 	if s.scheduler == nil {
 		return fmt.Errorf("this daemon does not host a task scheduler")
 	}
@@ -194,10 +211,15 @@ func (s *controlServer) AddTask(req AddTaskRequest, resp *AddTaskResponse) error
 	if err := s.requireMutationAdmission(); err != nil {
 		return err
 	}
+	unlock, err := s.lockTaskControl()
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	if err := task.AddTask(req.Task); err != nil {
 		return err
 	}
-	if err := s.reloadTaskSchedules(); err != nil {
+	if err := s.reloadTaskSchedulesLocked(); err != nil {
 		return err
 	}
 	resp.OK = true
@@ -209,11 +231,16 @@ func (s *controlServer) UpdateTask(req UpdateTaskRequest, resp *UpdateTaskRespon
 	if err := s.requireMutationAdmission(); err != nil {
 		return err
 	}
+	unlock, err := s.lockTaskControl()
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	merged, err := task.UpdateTask(req.ID, req.Update, req.Expect)
 	if err != nil {
 		return err
 	}
-	if err := s.reloadTaskSchedules(); err != nil {
+	if err := s.reloadTaskSchedulesLocked(); err != nil {
 		return err
 	}
 	resp.OK = true
@@ -228,14 +255,50 @@ func (s *controlServer) RemoveTask(req RemoveTaskRequest, resp *RemoveTaskRespon
 	if err := s.requireMutationAdmission(); err != nil {
 		return err
 	}
+	unlock, err := s.lockTaskControl()
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	if err := task.RemoveTask(req.ID, req.Expect); err != nil {
 		return err
 	}
-	if err := s.reloadTaskSchedules(); err != nil {
+	if err := s.reloadTaskSchedulesLocked(); err != nil {
 		return err
 	}
 	resp.OK = true
 	s.manager.publishEvent(agentproto.EventTaskRemoved, task.Task{ID: req.ID})
+	return nil
+}
+
+// RestartTask synchronously replaces one enabled watch command. The task-control
+// lock makes the scope re-check, stop/join, and replacement one operation with
+// respect to Add/Update/Remove/ReloadTasks, so a concurrent rebind cannot turn a
+// project-scoped restart into a different project's process.
+func (s *controlServer) RestartTask(req RestartTaskRequest, resp *RestartTaskResponse) error {
+	if err := s.requireStateMutationAdmission(); err != nil {
+		return err
+	}
+	if s.watchers == nil {
+		return fmt.Errorf("this daemon does not host a watch task supervisor")
+	}
+	unlock, err := s.lockTaskControl()
+	if err != nil {
+		return err
+	}
+	defer unlock()
+
+	tsk, err := task.GetTask(req.ID)
+	if err != nil {
+		return err
+	}
+	if err := req.Expect.Verify(*tsk); err != nil {
+		return err
+	}
+	if err := s.watchers.restart(*tsk); err != nil {
+		return err
+	}
+	resp.OK = true
 	return nil
 }
 

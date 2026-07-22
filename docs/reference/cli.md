@@ -60,6 +60,7 @@ Run `af <command> --help` for the same information at the terminal. For a narrat
 - [`af tasks get`](#af-tasks-get) — Get a task in the current project by ID
 - [`af tasks list`](#af-tasks-list) — List tasks in the current project
 - [`af tasks remove`](#af-tasks-remove) — Remove a task in the current project
+- [`af tasks restart`](#af-tasks-restart) — Restart an enabled watch task without process overlap
 - [`af tasks trigger`](#af-tasks-trigger) — Trigger a task in the current project to run immediately
 - [`af tasks update`](#af-tasks-update) — Update a task in the current project
 - [`af token`](#af-token) — Manage the daemon's bearer token for the direct-TCP API
@@ -1740,6 +1741,7 @@ af tasks
 - [`af tasks get`](#af-tasks-get) — Get a task in the current project by ID
 - [`af tasks list`](#af-tasks-list) — List tasks in the current project
 - [`af tasks remove`](#af-tasks-remove) — Remove a task in the current project
+- [`af tasks restart`](#af-tasks-restart) — Restart an enabled watch task without process overlap
 - [`af tasks trigger`](#af-tasks-trigger) — Trigger a task in the current project to run immediately
 - [`af tasks update`](#af-tasks-update) — Update a task in the current project
 
@@ -1852,6 +1854,27 @@ The task must belong to the resolved project: --repo when given, otherwise the c
 
 ```
 af tasks remove <id>
+```
+
+**Global flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http:// or ws:// URL instead of the local unix socket (env: AF_DAEMON_URL). The daemon is HTTP-only; terminate TLS at your own proxy if needed. |
+| `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload) |
+| `--repo` | `string` | Path to the project's git repository (default: the current directory's project) |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
+
+## af tasks restart
+
+Restart an enabled watch task without process overlap
+
+Restart an enabled watch task in the current project. The command waits for the old process tree to exit before starting one replacement, so an edited script is re-read without double-emitting events.
+
+The task must belong to the resolved project: --repo when given, otherwise the current directory's project. Outside a git repository there is no project context and the id resolves globally.
+
+```
+af tasks restart <id>
 ```
 
 **Global flags**

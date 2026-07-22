@@ -233,6 +233,13 @@ var httpRoutes = []HTTPRoute{
 	},
 	{
 		Method:        http.MethodPost,
+		Path:          "/v1/RestartTask",
+		Description:   "Stop and replace one enabled watch task without overlapping its process tree.",
+		RequestFields: jsonFields(reflect.TypeOf(RestartTaskRequest{})),
+		handler:       func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.RestartTask) },
+	},
+	{
+		Method:        http.MethodPost,
 		Path:          "/v1/TriggerTask",
 		Description:   "Fire a cron task now through the daemon's scheduler path (refuses disabled and watch tasks).",
 		RequestFields: jsonFields(reflect.TypeOf(TriggerTaskRequest{})),

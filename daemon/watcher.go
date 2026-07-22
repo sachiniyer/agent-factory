@@ -304,6 +304,7 @@ func (s *watcherSupervisor) newTaskWatcher(t task.Task) *taskWatcher {
 		sup:           s,
 		stopCh:        make(chan struct{}),
 		doneCh:        make(chan struct{}),
+		startedCh:     make(chan struct{}),
 	}
 	// Resolve the repo the task belongs to so a delivery alarm can be scoped to
 	// the right repo's snapshot (#1238). A resolution failure only costs the
@@ -327,22 +328,6 @@ func (s *watcherSupervisor) newTaskWatcher(t task.Task) *taskWatcher {
 
 // watcherSignature captures the fields that define the watch process itself;
 // a change to any of them restarts the script on reload.
-func watcherSignature(t task.Task) string {
-	return t.WatchCmd + "\x00" + t.ProjectPath + "\x00" + t.Name
-}
-
-func stopWatchers(ws []*taskWatcher) {
-	var wg sync.WaitGroup
-	for _, w := range ws {
-		wg.Add(1)
-		go func(w *taskWatcher) {
-			defer wg.Done()
-			w.stop()
-		}(w)
-	}
-	wg.Wait()
-}
-
 // tailBuffer and its failure-summary helpers live in tailbuffer.go (extracted
 // to keep watcher.go under its file-length ceiling, #1145).
 
@@ -374,9 +359,11 @@ type taskWatcher struct {
 	// the pre-queue drop-with-log behavior.
 	queue *eventQueue
 
-	stopCh   chan struct{}
-	stopOnce sync.Once
-	doneCh   chan struct{}
+	stopCh      chan struct{}
+	stopOnce    sync.Once
+	doneCh      chan struct{}
+	startedCh   chan struct{}
+	startedOnce sync.Once
 	// wg counts the drainer goroutine so stop() can join it; drainers spawn
 	// lazily via ensureDrainer.
 	wg sync.WaitGroup
@@ -621,6 +608,9 @@ func (w *taskWatcher) runOnce() (*tailBuffer, error) {
 			_ = stderrW.Close()
 		}
 		return tail, err
+	}
+	if w.startedCh != nil {
+		w.startedOnce.Do(func() { close(w.startedCh) })
 	}
 	_ = pw.Close() // the child holds its own dup
 	if stderrW != nil {

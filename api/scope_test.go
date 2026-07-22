@@ -247,6 +247,18 @@ func TestTasksTrigger_RefusesOtherProjectsTask(t *testing.T) {
 	assert.Empty(t, calls.triggered, "the trigger RPC must not fire")
 }
 
+func TestTasksRestart_RefusesOtherProjectsTask(t *testing.T) {
+	useTempConfig(t)
+	resetScopeFlags(t)
+	calls := stubDaemon(t)
+	seedTasksInTwoProjects(t) // cwd = alpha
+
+	err := tasksRestartCmd.RunE(tasksRestartCmd, []string{"bbbb2222"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "belongs to project")
+	assert.Empty(t, calls.restarted, "the restart RPC must not fire")
+}
+
 // TestTasksUpdate_RefusesOtherProjectsTask
 func TestTasksUpdate_RefusesOtherProjectsTask(t *testing.T) {
 	useTempConfig(t)
@@ -690,6 +702,17 @@ func TestTasksTrigger_CarriesExpectationToDaemon(t *testing.T) {
 	alpha, _ := seedTasksInTwoProjects(t)
 
 	require.NoError(t, tasksRunCmd.RunE(tasksRunCmd, []string{"aaaa1111"}))
+	assert.True(t, calls.lastExpect.Enforce)
+	assert.Equal(t, alpha, calls.lastExpect.ProjectPath)
+}
+
+func TestTasksRestart_CarriesExpectationToDaemon(t *testing.T) {
+	useTempConfig(t)
+	resetScopeFlags(t)
+	calls := stubDaemon(t)
+	alpha, _ := seedTasksInTwoProjects(t)
+
+	require.NoError(t, tasksRestartCmd.RunE(tasksRestartCmd, []string{"aaaa1111"}))
 	assert.True(t, calls.lastExpect.Enforce)
 	assert.Equal(t, alpha, calls.lastExpect.ProjectPath)
 }
