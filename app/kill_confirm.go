@@ -141,10 +141,10 @@ func killConfirmationWarning(wt string) string {
 	out, err := runKillGit(wt, "status", "--porcelain", "--untracked-files=normal")
 	if err != nil {
 		log.WarningLog.Printf("could not verify worktree status for %s before kill: %v", wt, err)
-		return fmt.Sprintf("WARNING: Could not verify worktree status (%v); it may contain uncommitted changes that will be lost!", err)
+		return fmt.Sprintf("Warning: Could not verify worktree status (%v); it may contain uncommitted changes that will be lost!", err)
 	}
 	if len(strings.TrimSpace(string(out))) > 0 {
-		return "WARNING: This worktree has uncommitted changes that will be lost!"
+		return "Warning: This worktree has uncommitted changes that will be lost!"
 	}
 	return ""
 }
