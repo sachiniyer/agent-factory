@@ -262,11 +262,12 @@ func (s *controlServer) UpdateTask(req UpdateTaskRequest, resp *UpdateTaskRespon
 	// outcome below and every other client still learns to refetch this value.
 	// The payload is the authoritative merged record, not the partial patch.
 	s.manager.publishEvent(agentproto.EventTaskUpdated, merged)
-	if err := s.reloadTaskSchedulesLocked(); err != nil {
-		return &mutationCommittedError{err: fmt.Errorf(
-			"task update committed, but failed to reload task schedules: %w", err)}
+	reloadErr := s.reloadTaskSchedulesLocked()
+	if reloadErr == nil {
+		return nil
 	}
-	return nil
+	return &mutationCommittedError{err: fmt.Errorf(
+		"task update committed, but failed to reload task schedules: %w", reloadErr)}
 }
 
 func (s *controlServer) RemoveTask(req RemoveTaskRequest, resp *RemoveTaskResponse) error {
