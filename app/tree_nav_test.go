@@ -7,6 +7,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/keys"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/ui"
@@ -151,8 +152,8 @@ func TestTreeNav_TabStopAcrossInstancePreservesParentForActions(t *testing.T) {
 		"instance actions resolve the selected tab's parent instance")
 
 	var createdFor string
-	t.Cleanup(SetTabCreatorForTest(func(title, repoID string) (string, string, error) {
-		createdFor = title
+	t.Cleanup(SetTabCreatorForTest(func(request daemon.CreateTabRequest) (string, string, error) {
+		createdFor = request.Title
 		return spawnDaemonTab(beta)
 	}))
 
@@ -206,11 +207,11 @@ func TestTreeNav_TabCreateCloseFromTabRow(t *testing.T) {
 	selectInstance(h, inst)
 
 	var closedNames []string
-	t.Cleanup(SetTabCreatorForTest(func(title, repoID string) (string, string, error) {
+	t.Cleanup(SetTabCreatorForTest(func(daemon.CreateTabRequest) (string, string, error) {
 		return spawnDaemonTab(inst)
 	}))
-	t.Cleanup(SetTabCloserForTest(func(title, repoID, tabName string) error {
-		closedNames = append(closedNames, tabName)
+	t.Cleanup(SetTabCloserForTest(func(request daemon.CloseTabRequest) error {
+		closedNames = append(closedNames, request.TabName)
 		return nil
 	}))
 

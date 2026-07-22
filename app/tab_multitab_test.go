@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/keys"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/ui/layout"
@@ -171,8 +172,8 @@ func TestCloseTab_TreeFocusUnchanged(t *testing.T) {
 func recordCloseTab(t *testing.T, h *home) *[]string {
 	t.Helper()
 	var names []string
-	t.Cleanup(SetTabCloserForTest(func(title, repoID, tabName string) error {
-		names = append(names, tabName)
+	t.Cleanup(SetTabCloserForTest(func(request daemon.CloseTabRequest) error {
+		names = append(names, request.TabName)
 		return nil
 	}))
 	return &names

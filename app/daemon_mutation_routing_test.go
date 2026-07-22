@@ -5,6 +5,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/session"
 	sessiongit "github.com/sachiniyer/agent-factory/session/git"
 )
@@ -18,17 +19,17 @@ func TestHandleNewTab_RoutesThroughDaemon_NoLocalSave(t *testing.T) {
 	inst := startedLocalInstance(t, "route-create")
 	selectInstance(h, inst)
 
-	var gotTitle, gotRepo string
-	restore := SetTabCreatorForTest(func(title, repoID string) (string, string, error) {
-		gotTitle, gotRepo = title, repoID
+	var gotRequest daemon.CreateTabRequest
+	restore := SetTabCreatorForTest(func(request daemon.CreateTabRequest) (string, string, error) {
+		gotRequest = request
 		return spawnDaemonTab(inst)
 	})
 	defer restore()
 
 	_, _ = h.handleNewTab()
 
-	require.Equal(t, inst.Title, gotTitle, "CreateTab must be called for the selected session")
-	require.Equal(t, h.repoID, gotRepo, "CreateTab must be scoped to the TUI's repo")
+	require.Equal(t, daemon.CreateTabRequest{ID: inst.ID, Title: inst.Title, RepoID: h.repoID, Shell: true}, gotRequest,
+		"CreateTab must carry the selected session's stable identity")
 	require.Equal(t, 3, inst.TabCount(), "the daemon-created tab must appear locally")
 
 	// On the daemon-success path nothing is written to the TUI's storage — the
@@ -45,13 +46,13 @@ func TestHandleCloseTab_RoutesThroughDaemon_NoLocalSave(t *testing.T) {
 	inst := startedLocalInstance(t, "route-close")
 	selectInstance(h, inst)
 
-	var gotTitle, gotRepo, gotTab string
-	createRestore := SetTabCreatorForTest(func(title, repoID string) (string, string, error) {
+	var gotRequest daemon.CloseTabRequest
+	createRestore := SetTabCreatorForTest(func(daemon.CreateTabRequest) (string, string, error) {
 		return spawnDaemonTab(inst)
 	})
 	defer createRestore()
-	closeRestore := SetTabCloserForTest(func(title, repoID, tabName string) error {
-		gotTitle, gotRepo, gotTab = title, repoID, tabName
+	closeRestore := SetTabCloserForTest(func(request daemon.CloseTabRequest) error {
+		gotRequest = request
 		return nil
 	})
 	defer closeRestore()
@@ -61,9 +62,9 @@ func TestHandleCloseTab_RoutesThroughDaemon_NoLocalSave(t *testing.T) {
 
 	_, _ = h.handleCloseTab()
 
-	require.Equal(t, inst.Title, gotTitle, "CloseTab must be called for the selected session")
-	require.Equal(t, h.repoID, gotRepo, "CloseTab must be scoped to the TUI's repo")
-	require.Equal(t, "shell-2", gotTab, "CloseTab must target the active tab by name")
+	require.Equal(t, daemon.CloseTabRequest{
+		ID: inst.ID, Title: inst.Title, RepoID: h.repoID, TabName: "shell-2",
+	}, gotRequest, "CloseTab must carry the selected session identity and active tab name")
 	require.Equal(t, 2, inst.TabCount(), "the closed tab must be dropped locally")
 
 	requireTUIInstancesEmpty(t, h)
@@ -84,13 +85,19 @@ func TestHandleCloseTab_DoesNotTargetReusedTabName(t *testing.T) {
 	replacementID := "replacement-tab-id"
 	daemonNameOwner := map[string]string{target.Name: replacementID}
 	var killedID string
-	restore := SetTabCloserForTest(func(title, repoID, tabName string) error {
-		killedID = daemonNameOwner[tabName]
+	restore := SetTabCloserForTest(func(request daemon.CloseTabRequest) error {
+		if request.TabID != "" {
+			killedID = request.TabID
+		} else {
+			killedID = daemonNameOwner[request.TabName]
+		}
 		return nil
 	})
 	defer restore()
 
 	_, _ = h.handleCloseTab()
+	require.Equal(t, target.ID, killedID,
+		"the close must resolve the stable tab that was visible when the user acted")
 	require.NotEqual(t, replacementID, killedID,
 		"a reused tab name must not redirect the close to the replacement tab")
 }
@@ -105,7 +112,7 @@ func TestHandleCloseTab_AgentTabSkipsDaemon(t *testing.T) {
 	h.store.SetActiveTab(0)
 
 	called := false
-	restore := SetTabCloserForTest(func(title, repoID, tabName string) error {
+	restore := SetTabCloserForTest(func(daemon.CloseTabRequest) error {
 		called = true
 		return nil
 	})

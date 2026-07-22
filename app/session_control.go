@@ -304,7 +304,7 @@ func resumeStatusPollThroughDaemon(title, repoID string) error {
 // choices use it, so VS Code creation sends the same Kind:"vscode" request the
 // CLI does rather than growing a TUI-only implementation. It returns the resolved
 // tab name and, for a shell/process tab, the exact tmux session the daemon spawned.
-func createTabThroughDaemon(req daemon.CreateTabRequest) (string, string, error) {
+var createTabThroughDaemon = func(req daemon.CreateTabRequest) (string, string, error) {
 	var name, tmuxName string
 	err := withDaemonHTTP(func(c *apiclient.Client) error {
 		var e error
@@ -314,26 +314,12 @@ func createTabThroughDaemon(req daemon.CreateTabRequest) (string, string, error)
 	return name, tmuxName, err
 }
 
-// createShellTabThroughDaemon routes the Terminal picker choice through the
-// shared RPC. The returned tab name and tmux name are independent namespaces
-// after a rename (#1957), so AttachShellTab receives both verbatim.
-var createShellTabThroughDaemon = func(title, repoID string) (string, string, error) {
-	return createTabThroughDaemon(daemon.CreateTabRequest{Title: title, RepoID: repoID, Shell: true})
-}
-
-// createVSCodeTabThroughDaemon routes the VS Code picker choice through the same
-// request shape as `af sessions tab-create <title> --kind vscode`. A VS Code tab
-// has no tmux session, so the second return value is empty by design.
-var createVSCodeTabThroughDaemon = func(title, repoID string) (string, string, error) {
-	return createTabThroughDaemon(daemon.CreateTabRequest{Title: title, RepoID: repoID, Kind: "vscode"})
-}
-
 // closeTabThroughDaemon routes the TUI's `w` (close tab) mutation to the daemon,
 // which kills the tab's tmux session and persists the shrunk list. The TUI drops
 // the now-dead tab locally via Instance.DropClosedTab.
-var closeTabThroughDaemon = func(title, repoID, tabName string) error {
+var closeTabThroughDaemon = func(request daemon.CloseTabRequest) error {
 	return withDaemonHTTP(func(c *apiclient.Client) error {
-		_, e := c.CloseTab(daemon.CloseTabRequest{Title: title, RepoID: repoID, TabName: tabName})
+		_, e := c.CloseTab(request)
 		return e
 	})
 }
@@ -464,21 +450,13 @@ func SetLimitResumerForTest(f func(daemon.ResumeFromLimitRequest) error) func() 
 	return func() { resumeFromLimitThroughDaemon = prev }
 }
 
-func SetTabCreatorForTest(f func(title, repoID string) (string, string, error)) func() {
-	prev := createShellTabThroughDaemon
-	createShellTabThroughDaemon = f
-	return func() { createShellTabThroughDaemon = prev }
+func SetTabCreatorForTest(f func(daemon.CreateTabRequest) (string, string, error)) func() {
+	prev := createTabThroughDaemon
+	createTabThroughDaemon = f
+	return func() { createTabThroughDaemon = prev }
 }
 
-// SetVSCodeTabCreatorForTest swaps the VS Code half of the TUI tab-create seam
-// without dialing a daemon.
-func SetVSCodeTabCreatorForTest(f func(title, repoID string) (string, string, error)) func() {
-	prev := createVSCodeTabThroughDaemon
-	createVSCodeTabThroughDaemon = f
-	return func() { createVSCodeTabThroughDaemon = prev }
-}
-
-func SetTabCloserForTest(f func(title, repoID, tabName string) error) func() {
+func SetTabCloserForTest(f func(daemon.CloseTabRequest) error) func() {
 	prev := closeTabThroughDaemon
 	closeTabThroughDaemon = f
 	return func() { closeTabThroughDaemon = prev }
