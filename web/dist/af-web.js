@@ -8156,9 +8156,15 @@ var import_xterm = __toESM(require_xterm(), 1);
 
 // src/clipboard.ts
 var ETX = "";
+var LF = "\n";
 function handleClipboardKeydown(ev, deps) {
   if (ev.type !== "keydown") {
     return true;
+  }
+  if (ev.key === "Enter" && ev.shiftKey && !ev.ctrlKey && !ev.metaKey && !ev.altKey) {
+    ev.preventDefault();
+    deps.sendInput(LF);
+    return false;
   }
   if (ev.metaKey || ev.altKey || !ev.ctrlKey) {
     return true;

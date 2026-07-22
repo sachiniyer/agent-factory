@@ -14,6 +14,8 @@
 //     no-op otherwise, and NEVER interrupts.
 //   - Ctrl+V / Ctrl+Shift+V → paste, by deferring to xterm's native browser
 //     paste (see below).
+//   - Shift+Enter → LF (Ctrl+J), which Codex and Claude bind to composer newline;
+//     plain Enter stays on xterm's CR path and therefore still submits.
 //
 // This is the DECISION half, kept pure and DOM-free so it unit-tests against
 // what reaches the wire/clipboard rather than against a synthetic keydown.
@@ -53,6 +55,8 @@ export interface ClipboardDeps {
 
 /** The Ctrl+C interrupt byte (End-of-Text), sent verbatim on the no-selection path. */
 const ETX = "\x03";
+/** Line Feed / Ctrl+J: the cross-agent composer-newline input (#2337). */
+const LF = "\n";
 
 /**
  * Decide what a key event does for clipboard vs. interrupt. Returns whether xterm
@@ -62,9 +66,9 @@ const ETX = "\x03";
  *   - `false` → we fully handled it; xterm skips its own processing so it does not
  *     ALSO emit bytes for the key.
  *
- * Only Ctrl+* is claimed. Cmd+* (metaKey) and Alt+* are left untouched so macOS
- * Cmd+C/Cmd+V keep working exactly as before — the browser copies/pastes before
- * xterm ever sees the key.
+ * Only Ctrl+* clipboard gestures and bare Shift+Enter are claimed. Cmd+* (metaKey)
+ * and Alt+* are left untouched so macOS Cmd+C/Cmd+V and agent-specific modified
+ * keys keep working exactly as before.
  *
  * Paste note: for Ctrl+V (and Ctrl+Shift+V) we return `false` WITHOUT calling
  * preventDefault. In xterm, a custom handler that returns false makes _keyDown
@@ -79,6 +83,16 @@ export function handleClipboardKeydown(ev: ClipboardKeyEvent, deps: ClipboardDep
   // returning false there would suppress xterm's own keyup/keypress bookkeeping.
   if (ev.type !== "keydown") {
     return true;
+  }
+  // xterm maps Enter and Shift+Enter to the same CR, so the agent cannot otherwise
+  // distinguish "newline" from "submit". Both shipped agent composers recognize
+  // LF / Ctrl+J as newline without terminal-protocol negotiation. Claim ONLY the
+  // bare Shift variant: plain Enter keeps xterm's CR path, while Ctrl/Alt/Meta
+  // combinations remain available to the agent and terminal.
+  if (ev.key === "Enter" && ev.shiftKey && !ev.ctrlKey && !ev.metaKey && !ev.altKey) {
+    ev.preventDefault();
+    deps.sendInput(LF);
+    return false;
   }
   // Leave Cmd+* (macOS) and Alt+* to the browser/xterm untouched.
   if (ev.metaKey || ev.altKey || !ev.ctrlKey) {

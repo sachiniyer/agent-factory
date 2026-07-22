@@ -224,10 +224,11 @@ export class AttachTerminal {
     // multibyte char reaches the PTY as the same bytes a real terminal would send.
     this.term.onData((data) => this.sendInput(data));
 
-    // Clipboard vs. interrupt (Sachin's decision — see clipboard.ts): intercept the
-    // key BEFORE xterm turns it into input. Ctrl+C copies a present selection (else
-    // interrupts), Ctrl+Shift+C is an explicit always-copy, and Ctrl+V defers to
-    // xterm's native browser paste. Returning false suppresses xterm's own handling.
+    // Modified input + clipboard decisions (see clipboard.ts): intercept the key
+    // BEFORE xterm turns it into input. Bare Shift+Enter emits LF for an agent
+    // composer newline while plain Enter retains xterm's submitting CR; Ctrl+C
+    // copies a present selection (else interrupts), Ctrl+Shift+C is explicit copy,
+    // and Ctrl+V defers to native paste. False suppresses xterm's own handling.
     this.term.attachCustomKeyEventHandler((ev) =>
       handleClipboardKeydown(ev, {
         hasSelection: () => this.term.hasSelection(),

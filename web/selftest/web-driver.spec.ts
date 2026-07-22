@@ -37,6 +37,7 @@
 // AF_WEB_SESSION_A / AF_WEB_SESSION_B. No token is needed.
 
 import { expect, type Browser, type BrowserContext, type Locator, type Page, test } from "@playwright/test";
+import { decode, Op } from "../src/frame.js";
 
 const SESSION_A = process.env.AF_WEB_SESSION_A ?? "probe-a";
 const SESSION_B = process.env.AF_WEB_SESSION_B ?? "probe-b";
@@ -1187,6 +1188,65 @@ test("click-to-attach opens the xterm terminal and shows live output", REAL_FIXT
   await expect(page.locator(".af-term-head button", { hasText: "Prompt" })).toHaveCount(0);
   await expect(page.locator(".af-term-head button", { hasText: "Archive" })).toHaveCount(0);
   await expect(page.locator(".af-term-head button", { hasText: "Kill" })).toHaveCount(0);
+});
+
+test("#2337: Shift+Enter sends LF, plain Enter keeps CR, and a shell accepts both", REAL_FIXTURE, async ({ browser }) => {
+  const ctx = await browser.newContext();
+  const p = await ctx.newPage();
+  const inputPayloads: number[][] = [];
+  let shellCreated = false;
+
+  p.on("websocket", (ws) => {
+    if (!ws.url().includes("/v1/sessions/") || !ws.url().includes("/stream")) {
+      return;
+    }
+    ws.on("framesent", ({ payload }) => {
+      const raw = typeof payload === "string" ? new TextEncoder().encode(payload) : new Uint8Array(payload);
+      const frame = decode(raw);
+      if (frame.op === Op.Input) {
+        inputPayloads.push(Array.from(frame.data));
+      }
+    });
+  });
+
+  try {
+    await openTokenless(p);
+    await row(p, SESSION_A).click();
+    await expect(p.locator(".af-term-host .xterm")).toBeVisible();
+    await expect(p.locator(".af-term-meta")).toContainText("Live");
+
+    await p.keyboard.press("Shift+Enter");
+    await expect.poll(() => inputPayloads.length, { message: "Shift+Enter must emit one OpInput" }).toBe(1);
+    expect(inputPayloads[0], "Shift+Enter reaches the PTY as LF / Ctrl+J, never xterm's default CR").toEqual([0x0a]);
+
+    await p.keyboard.press("Enter");
+    await expect.poll(() => inputPayloads.length, { message: "plain Enter must emit one more OpInput" }).toBe(2);
+    expect(inputPayloads[1], "plain Enter keeps xterm's submitting CR path").toEqual([0x0d]);
+
+    // The same terminal component owns non-agent tabs. In a real shell LF is a
+    // normal line delimiter (not a literal ^J): execute one command with the new
+    // mapping, then another with plain Enter to pin both paths end to end.
+    await createTerminalTab(p);
+    shellCreated = true;
+    await expect(p.locator(".af-tab.af-tab-active .af-tab-label")).toHaveText("Terminal", { timeout: 30_000 });
+    await expect(p.locator(".af-term-meta")).toContainText("Live");
+
+    inputPayloads.length = 0;
+    await p.keyboard.type("echo $((233700 + 42))");
+    await p.keyboard.press("Shift+Enter");
+    await expect(p.locator(".af-term-host")).toContainText("233742");
+    expect(inputPayloads.at(-1), "a shell receives Shift+Enter as its ordinary LF delimiter").toEqual([0x0a]);
+
+    await p.keyboard.type("echo $((233700 + 43))");
+    await p.keyboard.press("Enter");
+    await expect(p.locator(".af-term-host")).toContainText("233743");
+    expect(inputPayloads.at(-1), "plain shell Enter remains CR").toEqual([0x0d]);
+  } finally {
+    if (shellCreated) {
+      await resetToAgentTab(p);
+    }
+    await ctx.close();
+  }
 });
 
 test("the #1694 keyboard model: j/k navigate, Enter attaches, Escape returns to rail", REAL_FIXTURE, async () => {

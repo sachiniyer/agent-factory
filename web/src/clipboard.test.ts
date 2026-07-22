@@ -79,6 +79,40 @@ function wireInput(frames: Uint8Array[]): string {
   return out;
 }
 
+// --- Modified Enter: newline in agent composers, plain Enter still submits -----
+
+test("Shift+Enter sends LF on the wire and suppresses xterm's default CR", () => {
+  const r = rig({});
+  const ret = handleClipboardKeydown(keyEvent({ key: "Enter", shiftKey: true }, r.markPrevented), r.deps);
+
+  assert.equal(ret, false, "xterm must not also turn Shift+Enter into a submitting CR");
+  assert.equal(wireInput(r.wire), "\n", "Codex and Claude both bind LF / Ctrl+J to composer newline");
+  assert.equal(r.prevented(), 1, "the handled key must not retain browser-default behavior");
+});
+
+test("plain Enter remains xterm-owned so it still submits as CR", () => {
+  const r = rig({});
+  const ret = handleClipboardKeydown(keyEvent({ key: "Enter" }, r.markPrevented), r.deps);
+
+  assert.equal(ret, true, "plain Enter must keep xterm's existing CR path");
+  assert.equal(wireInput(r.wire), "", "the custom handler must not duplicate plain Enter");
+  assert.equal(r.prevented(), 0);
+});
+
+test("Ctrl/Alt/Meta combinations do not get mistaken for bare Shift+Enter", () => {
+  for (const modifiers of [{ ctrlKey: true }, { altKey: true }, { metaKey: true }]) {
+    const r = rig({});
+    const ret = handleClipboardKeydown(
+      keyEvent({ key: "Enter", shiftKey: true, ...modifiers }, r.markPrevented),
+      r.deps,
+    );
+
+    assert.equal(ret, true, JSON.stringify(modifiers));
+    assert.equal(wireInput(r.wire), "", JSON.stringify(modifiers));
+    assert.equal(r.prevented(), 0, JSON.stringify(modifiers));
+  }
+});
+
 // --- Ctrl+C: copy when there's a selection, interrupt when there isn't --------
 
 test("Ctrl+C WITH a selection copies it and sends NO \\x03", () => {
