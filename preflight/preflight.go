@@ -308,6 +308,8 @@ func agentDisplayName(agent string) string {
 		// default arm would return the same string, so this reads as a decision
 		// rather than an omission a later reader "fixes" to "OpenCode".
 		return "opencode"
+	case tmux.ProgramDevin:
+		return "Devin"
 	default:
 		if agent == "" {
 			return "the configured agent"

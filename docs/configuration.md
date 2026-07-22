@@ -58,8 +58,8 @@ pane_border_preview = "#DC8CC3"
 
 | Field | Description |
 |-------|-------------|
-| `default_program` | Default agent enum. Must be one of `claude`, `codex`, `aider`, `gemini`, `amp`, `opencode`. |
-| `program_overrides` | Optional map from agent enum to the full command string used when launching that agent. Use this to pin a path or pass flags (e.g. `--dangerously-skip-permissions`). Keys must be one of `claude`, `codex`, `aider`, `gemini`, `amp`, `opencode`. Agent-specific injection (claude's `--plugin-dir` flag, aider's `--read` flag, opencode's `OPENCODE_CONFIG` env var pointing at an af-owned config, and — when `global_agent_skills = true` — the af skill file dropped into codex/gemini/amp's own skills folder) and readiness detection follow the program the override actually runs, not the key: pointing an agent name at a different command (even a non-agent one like `bash`) launches it with no injected agent flags, and a command running no known agent counts as ready once its pane shows output. The agent is identified by command-token basename (`/opt/tools/claude --model opus` and `ionice -c 3 claude` are claude; `/opt/claude-wrapper/run` is not), so if you wrap an agent in a script, name the script after the agent to keep its flags and readiness behavior. |
+| `default_program` | Default agent enum. Must be one of `claude`, `codex`, `aider`, `gemini`, `amp`, `opencode`, `devin`. |
+| `program_overrides` | Optional map from agent enum to the full command string used when launching that agent. Use this to pin a path or pass flags (e.g. `--dangerously-skip-permissions`). Keys must be one of `claude`, `codex`, `aider`, `gemini`, `amp`, `opencode`, `devin`. Agent-specific injection (claude's `--plugin-dir` flag, aider's `--read` flag, opencode's `OPENCODE_CONFIG` env var pointing at an af-owned config, devin's `--respect-workspace-trust false` to skip its workspace-trust modal, and — when `global_agent_skills = true` — the af skill file dropped into codex/gemini/amp/devin's own skills folder) and readiness detection follow the program the override actually runs, not the key: pointing an agent name at a different command (even a non-agent one like `bash`) launches it with no injected agent flags, and a command running no known agent counts as ready once its pane shows output. The agent is identified by command-token basename (`/opt/tools/claude --model opus` and `ionice -c 3 claude` are claude; `/opt/claude-wrapper/run` is not), so if you wrap an agent in a script, name the script after the agent to keep its flags and readiness behavior. |
 | `auto_update` | Startup self-update. Defaults to `true`: an interactive `af` checks the configured `update_channel` on launch — at most once every 6 hours, so a relaunch inside that window costs nothing and makes no network call — and when a newer release exists it installs it, restarts the daemon from it (sessions survive), and relaunches you into the new version straight away. It never downgrades, never interrupts an `af` that is already running, and skips silently when the check fails or you are offline. It is also skipped whenever stdout is not a terminal, so a script or CI job that calls `af` keeps the binary it installed. Set to `false`, or set `AGENT_FACTORY_AUTO_UPDATE=0`, to pin the installed version; `af upgrade` still works either way. |
 | `daemon_poll_interval` | Daemon polling interval in ms. |
 | `listen_addr` | Address the daemon serves the bundled **web UI** + HTTP/WS API on, over **plain HTTP** (no TLS). Defaults to `127.0.0.1:8443` (loopback), so a fresh install has a browser client at `http://127.0.0.1:8443` that connects with no token and no login screen. Set it to `""` to **disable** the web server entirely (pure-unix daemon); set it to a routable host:port like `0.0.0.0:8443` to expose it to the network — pair that with **`require_token = true`** unless you trust the network, because a tokenless network bind serves the control API to anyone who can reach it. af **allows** it and warns once at daemon start rather than refusing (see [Remote daemon access](remote-http-auth.md#the-tokenless-network-warning)). af serves no TLS either way, so front a routable listener with a TLS-terminating proxy or a private network. A web-port bind conflict is logged and skipped — it never blocks the daemon. Global-only. See [The web client](web.md) and [Remote daemon access](remote-http-auth.md). |
@@ -76,7 +76,7 @@ pane_border_preview = "#DC8CC3"
 | `root_agents` | Opt-in table of repositories that get an always-ensured `root` agent (default: none). See [Root agents](#root-agents-always-ensured). |
 | `limit_auto_resume` | Opt in to the daemon auto-resuming a session parked at a usage-limit wall once its limit window elapses (default: `false`). See [Usage-limit auto-resume](#usage-limit-auto-resume). |
 | `limit_retry_interval` | Fallback retry cadence (Go duration, e.g. `30m`) used only when `limit_auto_resume` is on **and** the limit banner carried no parseable reset time (default: `30m`). Empty or `0` disables the fallback. |
-| `global_agent_skills` | Opt in to af writing its `agent-factory` skill file into your **global** codex/gemini/amp config directories so those agents discover af's CLI guidance (default: `false`). See [Agent guidance and your global agent config](#agent-guidance-and-your-global-agent-config). |
+| `global_agent_skills` | Opt in to af writing its `agent-factory` skill file into your **global** codex/gemini/amp/devin config directories so those agents discover af's CLI guidance (default: `false`). See [Agent guidance and your global agent config](#agent-guidance-and-your-global-agent-config). |
 | `limit_patterns` | Optional map from agent enum to a regex that overrides the built-in usage-limit **detection** banner for that agent (the built-in reset-time parser is kept). Default: none. See [Custom usage-limit detection](#custom-usage-limit-detection-limit_patterns). |
 | `theme` | Optional TUI color table. Defaults to a Zenburn-derived palette and validates each value as `#RRGGBB`; invalid values fall back to the corresponding default with a warning. See [Theme colors](#theme-colors-theme). |
 | `keys` | Optional keymap overrides for the TUI. See [Key bindings](#key-bindings-keys). |
@@ -113,10 +113,25 @@ environment whose access matches the risk.
   `opencode.json`; this is OpenCode configuration, not an `af`
   `program_overrides` line. See [OpenCode
   permissions](https://opencode.ai/docs/permissions/).
+- **Devin:** af launches devin in its own default permission mode, `auto`,
+  which auto-approves read-only tools but still asks before edits and commands.
+  For an unattended af session that would pause the agent on every edit, so to
+  let devin edit and run without prompting, paste
+  `program_overrides.devin = "devin --permission-mode accept-edits"` (or
+  `smart`, which additionally auto-runs actions a fast model judges safe;
+  `dangerous` auto-approves everything — the higher-risk choice). af leaves the
+  default at `auto` rather than picking `accept-edits` for you, so an unattended
+  devin session is opt-in to auto-editing, matching devin's own default. The env
+  var `DEVIN_PERMISSION_MODE` works too but a `program_overrides` line is the
+  af-native, per-repo way.
 
 Agent Factory still dismisses a supported agent's one-time workspace trust
 dialog during first-run setup. That only gets a new session to a usable prompt;
-it does not approve later tool calls or actions.
+it does not approve later tool calls or actions. (**Devin** is the exception: af
+launches it with `--respect-workspace-trust false` so its workspace-trust modal
+never appears — af created and owns the worktree, so it is already trusted.
+Include the flag yourself if you set a custom `program_overrides.devin`, or af
+appends it for you when your override omits it.)
 
 Codex's **additional safety checks** model-routing picker is separate from
 approval and sandbox flags. The daemon recognizes the known
@@ -208,8 +223,8 @@ claude = "Claude usage limit reached\\."
 codex  = "You've hit your usage limit"
 ```
 
-- Keys must be a supported agent enum (`claude`, `codex`, `aider`, `gemini`, `amp`, `opencode`).
-- An override for an agent with no built-in matcher (`aider`/`gemini`/`amp`/`opencode` today — none of them expose a plan-reset banner to parse) is ignored with a warning.
+- Keys must be a supported agent enum (`claude`, `codex`, `aider`, `gemini`, `amp`, `opencode`, `devin`).
+- An override for an agent with no built-in matcher (`aider`/`gemini`/`amp`/`opencode`/`devin` today) is ignored with a warning — af ships built-in reset-banner matchers only for `claude`/`codex`. (`devin` tracks its own separate quota and shows a persistent "N% remaining" line, but af does not yet parse a devin limit-reached banner.)
 - An uncompilable regex warns and falls back to the built-in default, so a typo can never disable detection.
 - `limit_patterns` is a detection tweak, not a behavior switch: it is honored everywhere the built-in detector runs (the daemon status poll, and the task-run startup park path).
 
@@ -281,7 +296,7 @@ Override the agent for new sessions with `-p`:
 af -p aider
 ```
 
-`-p` and the per-task `program` field both accept a bare agent enum only (`claude`, `codex`, `aider`, `gemini`, `amp`, `opencode`). To pass a custom path or flags for an agent, set `program_overrides.<agent>` in your config — every session that launches that agent will use the override.
+`-p` and the per-task `program` field both accept a bare agent enum only (`claude`, `codex`, `aider`, `gemini`, `amp`, `opencode`, `devin`). To pass a custom path or flags for an agent, set `program_overrides.<agent>` in your config — every session that launches that agent will use the override.
 
 ## In-repo config
 

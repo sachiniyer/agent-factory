@@ -43,6 +43,10 @@ import (
 //     opencode session exists for the cwd yet, --continue does fall back to a
 //     fresh session (the same contract aider/gemini have above) but announces it
 //     with a transient error overlay first — see opencodeResumePrecondition.
+//   - devin: append --continue at the end. devin's interactive TUI is its
+//     DEFAULT command ("devin"), and -c/--continue is a position-independent
+//     boolean flag on it, so this is a tail append like claude/opencode. Falls
+//     back to a fresh session when cwd has no prior devin session.
 //
 // The latest-session paths above either fall back to a fresh session when no
 // prior session exists or are left unchanged when af cannot identify a safe
@@ -124,6 +128,24 @@ func resumeProgram(program string) string {
 		// check (#742).
 		for _, tok := range tokens[agentIdx+1:] {
 			if isOpencodeResumeFlag(tok) {
+				return program
+			}
+		}
+		return program + " --continue"
+	case ProgramDevin:
+		// devin: append --continue at the end (resume the most recent session in
+		// cwd). --continue is a position-independent boolean flag, so this is a
+		// tail append like claude/gemini/aider/opencode, not a subcommand splice.
+		// devin's only "-r"-prefixed short flag is -r/--resume, so the same
+		// attached-value guard claude/gemini use applies. Falls back to a fresh
+		// session when no prior session exists in cwd (verified: devin -c on an
+		// empty cwd starts fresh). Only scan tokens AFTER the agent token so a
+		// wrapper's flags (e.g. `ionice -c 3 devin`, whose -c is ionice's) can't
+		// false-positive the already-has-resume check (#742).
+		for _, tok := range tokens[agentIdx+1:] {
+			if tok == "-c" || tok == "--continue" || tok == "-r" || tok == "--resume" ||
+				strings.HasPrefix(tok, "--resume=") || strings.HasPrefix(tok, "-r=") ||
+				isShortResumeWithAttachedValue(tok) {
 				return program
 			}
 		}

@@ -18,13 +18,14 @@ const ProgramAider = "aider"
 const ProgramGemini = "gemini"
 const ProgramAmp = "amp"
 const ProgramOpencode = "opencode"
+const ProgramDevin = "devin"
 
 // SupportedPrograms is the canonical list of known agent programs.
 //
 // APPEND-ONLY: app/handle_overlay.go indexes this slice by overlay position, so
 // inserting an entry silently re-points every agent after it at the wrong menu
 // row. New agents go on the end.
-var SupportedPrograms = []string{ProgramClaude, ProgramCodex, ProgramAider, ProgramGemini, ProgramAmp, ProgramOpencode}
+var SupportedPrograms = []string{ProgramClaude, ProgramCodex, ProgramAider, ProgramGemini, ProgramAmp, ProgramOpencode, ProgramDevin}
 
 // SupportedProgramsString returns the canonical user-facing agent enum list.
 func SupportedProgramsString() string {

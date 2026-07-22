@@ -263,6 +263,14 @@ func ensureGeminiSkillDir() (string, error) {
 	return ensureAfSkillDir(base)
 }
 
+func ensureDevinSkillDir() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	return ensureAfSkillDir(filepath.Join(home, ".config", "devin", "skills"))
+}
+
 // aiderReadDoc is the read-only context file aider loads via --read. Aider has NO
 // auto-discovered global skills/instructions directory (its only persistent
 // global-instructions seams are the --read flag and the user-owned .aider.conf.yml

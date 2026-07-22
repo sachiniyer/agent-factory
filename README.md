@@ -10,9 +10,9 @@
 
 **Demo video:** [MP4](docs/assets/demo.mp4) · [WebM](docs/assets/demo.webm) · [GIF fallback](docs/assets/demo.gif)
 
-Agent Factory (`af`) supervises Claude Code, Codex, Aider, Gemini, Amp, and
-opencode. Each session gets a dedicated branch and worktree, so agents never
-trample the same checkout.
+Agent Factory (`af`) supervises Claude Code, Codex, Aider, Gemini, Amp,
+opencode, and Devin. Each session gets a dedicated branch and worktree, so
+agents never trample the same checkout.
 
 One agent in one terminal is easy. Several is not — they collide in the same
 checkout, you lose track of which is working and which is stuck waiting on you,

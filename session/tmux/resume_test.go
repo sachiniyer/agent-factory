@@ -435,6 +435,38 @@ func TestResumeProgram(t *testing.T) {
 			"OPENCODE_CONFIG='/x/af.jsonc' opencode --continue",
 		},
 
+		// devin: append --continue at the end (position-independent boolean flag),
+		// like claude/opencode.
+		{"devin bare", "devin", "devin --continue"},
+		{"devin with flags", "devin --permission-mode accept-edits", "devin --permission-mode accept-edits --continue"},
+		{"devin absolute path", "/home/u/.local/bin/devin", "/home/u/.local/bin/devin --continue"},
+		// devin already-resuming: no-op so repeated Restore calls don't stack flags.
+		{"devin already --continue", "devin --continue", "devin --continue"},
+		{"devin already -c", "devin -c", "devin -c"},
+		{"devin already --resume", "devin --resume sess-1", "devin --resume sess-1"},
+		{"devin already -r", "devin -r sess-1", "devin -r sess-1"},
+		{"devin already --resume=value", "devin --resume=sess-1", "devin --resume=sess-1"},
+		{"devin already -rVALUE", "devin -rsess1", "devin -rsess1"},
+		// A wrapper's -c (ionice's class flag) must not false-positive the
+		// already-has-resume check (#742): devin here has no resume flag of its own.
+		{"devin ionice wrapper", "ionice -c 3 devin", "ionice -c 3 devin --continue"},
+		// Restore feeds resumeProgram the INJECTED form, and devin's af seam appends
+		// --respect-workspace-trust false (injectSystemPrompt). On every restore the
+		// two rewrites compose: resumeProgram must append --continue AFTER the trust
+		// flag, and the trust flag's "false" value must not be mistaken for a resume
+		// token. If it were, resume would silently drop and the devin session would
+		// come back with no context — the failure resume exists to prevent.
+		{
+			"devin with af's --respect-workspace-trust false suffix",
+			"devin --respect-workspace-trust false",
+			"devin --respect-workspace-trust false --continue",
+		},
+		{
+			"devin trust flag + permission mode, already resuming, stays idempotent",
+			"devin --permission-mode accept-edits --respect-workspace-trust false --continue",
+			"devin --permission-mode accept-edits --respect-workspace-trust false --continue",
+		},
+
 		// Unknown programs are passed through unchanged so unrelated CLIs
 		// aren't accidentally rewritten.
 		{"unknown program", "mytool --bar", "mytool --bar"},
@@ -649,6 +681,16 @@ func TestResumeProgram_Idempotent(t *testing.T) {
 		"OPENCODE_CONFIG='/home/u/.agent-factory/opencode/af-config.jsonc' opencode",
 		"OPENCODE_CONFIG='/af home/opencode/af-config.jsonc' opencode --model x",
 		"OPENCODE_CONFIG='/x/af.jsonc' opencode --continue",
+		"devin",
+		"devin --permission-mode accept-edits",
+		"devin --continue",
+		"devin -c",
+		"devin --resume sess-1",
+		"devin -rsess1",
+		"ionice -c 3 devin",
+		// The af-injected trust-flag form Restore actually re-spawns.
+		"devin --respect-workspace-trust false",
+		"devin --permission-mode accept-edits --respect-workspace-trust false",
 	} {
 		once := resumeProgram(in)
 		twice := resumeProgram(once)

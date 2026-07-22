@@ -35,7 +35,7 @@ import (
 // one an unspecified create resolves to.
 //
 // RepoPath is OPTIONAL, which is the deliberate difference from
-// ListBackendsRequest. The enum itself is global — the same six agents exist
+// ListBackendsRequest. The enum itself is global — the same agents exist
 // everywhere — so unlike backends there IS a repo-less answer, and a caller with
 // no repo in hand (the task form before a project is picked) still deserves the
 // list. RepoPath only sharpens Default, whose in-repo override is repo-scoped.

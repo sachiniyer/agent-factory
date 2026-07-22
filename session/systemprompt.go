@@ -148,6 +148,11 @@ func shellQuote(s string) string {
 //   - Aider: --read flag pointing at an af-owned context file. Aider has NO
 //     auto-discovered global skills folder, so it takes a flag (like claude);
 //     --read is a known, repeatable, additive aider flag.
+//   - Devin: --respect-workspace-trust false, appended CONDITIONALLY (devin
+//     rejects the flag twice) to suppress its interactive workspace-trust modal
+//     so an af worktree reaches ready without a human answering it. af writes no
+//     af-usage skill for devin yet — that file seam ($HOME/.config/devin/skills)
+//     is a follow-up; this case only finalizes devin's launch command.
 //   - Commands running no known agent: no injection.
 //
 // Accepted tradeoff (#1585 review, finding 2): DetectAgentFromCommand is a shared
@@ -225,6 +230,41 @@ func injectSystemPrompt(resolved string) string {
 			return resolved
 		}
 		return resolved + " --read " + shellQuote(path)
+	case tmux.ProgramDevin:
+		if _, err := ensureDevinSkillDir(); err != nil {
+			log.WarningLog.Printf("failed to set up devin af skill, af guidance unavailable to devin: %v", err)
+		}
+		// af created and owns this worktree, so it is trusted. Suppress devin's
+		// interactive workspace-trust modal ("Do you trust the authors of this
+		// directory?") so the session reaches ready WITHOUT a human answering it —
+		// there is no reliable, anchored dismissal for it and gating on it would
+		// race the modal (the #729 class). --respect-workspace-trust false disables
+		// the gate in interactive mode (verified against devin 3000.2.17).
+		//
+		// CONDITIONAL append, not unconditional: devin rejects a repeated
+		// --respect-workspace-trust ("cannot be used multiple times" — verified),
+		// so appending it when the resolved command already carries the flag would
+		// crash the launch. `resolved` has already folded in any
+		// program_overrides.devin, so skipping when the flag is present lets a user
+		// set --permission-mode via program_overrides without collision, and lets a
+		// user who set --respect-workspace-trust explicitly (either value) win.
+		//
+		// Unlike claude's --plugin-dir, this is NOT a repeatable flag and CAN be
+		// persisted into a user's program_overrides, so it needs the guard the
+		// unconditional appends above do not.
+		if devinCarriesWorkspaceTrustFlag(resolved) {
+			return resolved
+		}
+		return resolved + " --respect-workspace-trust false"
 	}
 	return resolved
+}
+
+// devinCarriesWorkspaceTrustFlag reports whether a resolved devin command
+// already specifies --respect-workspace-trust (in any position or value form),
+// so injectSystemPrompt does not append a second one — devin rejects the flag
+// given twice. The name is distinctive enough that a substring check cannot
+// false-match another flag.
+func devinCarriesWorkspaceTrustFlag(resolved string) bool {
+	return strings.Contains(resolved, "--respect-workspace-trust")
 }
