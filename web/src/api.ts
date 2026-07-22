@@ -333,6 +333,9 @@ export interface CreateSessionInput {
    *  choose, and createSession then sends NO backend so the repo's own config
    *  decides. */
   backend?: string;
+  /** Whether to force the remote hook backend (`af sessions create --backend hook` /
+   *  the TUI's `N new remote`, regardless of repo default or selected backend). */
+  forceRemote?: boolean;
 }
 
 /** Lists the runtimes a session in this repo can be created on, whether the repo's
@@ -363,13 +366,21 @@ export async function createSession(input: CreateSessionInput, token: string): P
     program: input.program,
     prompt: input.prompt,
   };
+
+  if (input.forceRemote === true) {
+    body.force_remote = true;
+  }
+
   // `backend` is sent ONLY when the user picked one. Sending "local" for an
   // unspecified choice would look equivalent and is not: an explicit backend wins
   // over the repo's `backend` config key, so it would silently override the repo
   // default that `af sessions create` (with no --backend) honours. Absent is the
   // only way to mean "let the repo decide" (#1933).
   const backend = (input.backend ?? "").trim();
-  if (backend !== "") {
+  // When forcing remote, drop the backend choice so ForceRemote remains source of
+  // truth (#1933). `backend` is explicit and has precedence over ForceRemote in
+  // backend resolution; this keeps the wire shape in parity with TUI behavior.
+  if (!input.forceRemote && backend !== "") {
     body.backend = backend;
   }
   const resp = await af<{ instance: SessionData }>("CreateSession", body, token);

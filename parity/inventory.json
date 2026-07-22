@@ -117,8 +117,8 @@
         "pointer": "keys/keys.go:153 (N) -> app/handle_input.go:207 ForceRemote"
       },
       "web": {
-        "status": "no",
-        "pointer": "web/src/api.ts:251-264 never sends force_remote"
+        "status": "yes",
+        "pointer": "web/src/api.ts:351,363-371 createSession force_remote; web/src/modals.ts remote hooks checkbox"
       },
       "cli": {
         "status": "yes",
@@ -126,7 +126,7 @@
       },
       "verdict": "real-gap",
       "issue": "#1933",
-      "notes": "TUI is 'partial' because ForceRemote resolves to the hook backend ONLY (session/instance_factory.go:106-108) — N cannot reach docker or ssh. The web has no remote affordance at all; this is the gap the owner reported."
+      "notes": "TUI remains partial (legacy ForceRemote-only selector), CLI reaches remote via --backend hook, and web now has parity for this one option. The capability is still a real gap across all three surfaces."
     },
     {
       "id": "session.create.opt.inplace",
@@ -1891,9 +1891,6 @@
         },
         "in_place": {
           "gap": "session.create.opt.inplace"
-        },
-        "force_remote": {
-          "gap": "session.create.opt.remote"
         }
       },
       "CreateTab": {
