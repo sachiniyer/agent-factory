@@ -1,8 +1,17 @@
 package daemon
 
 import (
+	"bytes"
+	"errors"
+	stdlog "log"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
+	"github.com/sachiniyer/agent-factory/internal/testguard"
+	aflog "github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
 )
 
@@ -117,5 +126,75 @@ func TestRestoreSession_LongLivedThenDied_ResetsBackoff(t *testing.T) {
 	if failures > 0 {
 		t.Fatalf("a runtime confirmed alive after a manual restore was charged %d failure(s) from "+
 			"the PREVIOUS episode when it later died: a genuine re-loss must start a fresh backoff", failures)
+	}
+}
+
+// TestRestoreSession_FailedManualRestoresShareDiagnosticsAndBackoff pins the
+// failure half of the same manual/automatic restore contract. A user-triggered
+// Recover failure is still a failed restore attempt: it must advance the retry
+// episode exactly once, arm the automatic loop's backoff, and emit the same
+// one-shot missing-worktree diagnostic as an automatic attempt.
+func TestRestoreSession_FailedManualRestoresShareDiagnosticsAndBackoff(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	worktreePath := filepath.Join(testguard.CanonicalTempDir(t), "missing-manual-restore")
+	restoreErr := &session.WorktreeUnavailableError{
+		Title:        "manual-failure",
+		WorktreePath: worktreePath,
+		Err:          &os.PathError{Op: "stat", Path: worktreePath, Err: os.ErrNotExist},
+	}
+	backend := &recoverFakeBackend{FakeBackend: session.NewFakeBackend(), failWith: restoreErr}
+	registerStarted(t, manager, repoID, repoPath, "manual-failure", backend, true, session.Lost)
+
+	key := daemonInstanceKey(repoID, "manual-failure")
+	manager.mu.Lock()
+	manager.lostRestoreStates[key] = &lostRestoreState{consecutiveFailures: 2}
+	manager.mu.Unlock()
+
+	var warnings, diagnostics bytes.Buffer
+	previousWarning, previousError := aflog.WarningLog, aflog.ErrorLog
+	aflog.WarningLog = stdlog.New(&warnings, "WARNING: ", 0)
+	aflog.ErrorLog = stdlog.New(&diagnostics, "ERROR: ", 0)
+	t.Cleanup(func() {
+		aflog.WarningLog = previousWarning
+		aflog.ErrorLog = previousError
+	})
+
+	for attempt := 0; attempt < 2; attempt++ {
+		if _, err := manager.RestoreSession(RestoreSessionRequest{Title: "manual-failure", RepoID: repoID}); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("manual restore %d error = %v, want missing-worktree cause", attempt+1, err)
+		}
+	}
+	if got := backend.recoverCalls(); got != 2 {
+		t.Fatalf("manual Recover calls = %d, want 2", got)
+	}
+
+	manager.mu.Lock()
+	state := manager.lostRestoreStates[key]
+	manager.mu.Unlock()
+	if state == nil {
+		t.Fatal("manual restore failures were not entered into the shared lost-restore retry state")
+	}
+	if state.consecutiveFailures != 4 {
+		t.Fatalf("consecutiveFailures = %d, want 4: each of two manual attempts must add exactly one to the two existing failures", state.consecutiveFailures)
+	}
+	if !state.nextAttempt.After(time.Now()) {
+		t.Fatalf("nextAttempt = %v, want a future automatic-retry backoff", state.nextAttempt)
+	}
+
+	manager.RestoreLostSessions()
+	if got := backend.recoverCalls(); got != 2 {
+		t.Fatalf("automatic loop ignored the backoff recorded by manual restore: Recover calls = %d, want 2", got)
+	}
+
+	if got := strings.Count(diagnostics.String(), "WORKTREE_MISSING_DETECTED"); got != 1 {
+		t.Fatalf("missing-worktree diagnostic count = %d, want one per loss episode; logs:\n%s", got, diagnostics.String())
+	}
+	if strings.Contains(diagnostics.String(), `classification="expected_teardown"`) {
+		t.Fatalf("manual restore's own busy marker was misreported as teardown intent; logs:\n%s", diagnostics.String())
+	}
+	for _, want := range []string{"attempt 3", "attempt 4"} {
+		if !strings.Contains(warnings.String(), want) {
+			t.Fatalf("missing %q in shared failure-accounting logs:\n%s", want, warnings.String())
+		}
 	}
 }
