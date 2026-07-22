@@ -259,7 +259,12 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case startHandoffMsg:
 		// Handoff confirmed; run the daemon swap off the event loop, mirroring the
 		// kill/archive dispatch — it stops one agent process and starts another.
-		return m, m.handoffCmd(msg.title, msg.target)
+		// Recheck identity at this final event-loop boundary: a snapshot can land
+		// after confirmation produced the message but before Update receives it.
+		if m.resolveHandoffPickerTarget(msg.target) == nil {
+			return m, nil
+		}
+		return m, m.handoffCmd(msg.request)
 	case handoffDoneMsg:
 		return m.handleHandoffDone(msg)
 	case instanceRestoredMsg:

@@ -394,6 +394,11 @@ type home struct {
 	// omits the running agent), so the overlay's selected index cannot be mapped
 	// back through tmux.SupportedPrograms the way the create-time picker's can.
 	handoffChoices []string
+	// handoffTarget is the immutable session identity that opened the picker.
+	// Background snapshots may move the sidebar cursor or replace a same-title
+	// row while the modal owns the keyboard; submit must never re-read that
+	// mutable selection and retarget a destructive runtime swap (#2322).
+	handoffTarget handoffPickerTarget
 	// pendingProgram tracks the program selected during new instance naming
 	pendingProgram string
 	// promptOverlay handles initial-prompt entry during new-instance naming

@@ -3,10 +3,12 @@ package app
 import (
 	"strings"
 	"testing"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/stretchr/testify/require"
 
+	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
@@ -43,7 +45,7 @@ func TestHandleHandoff_OpensPickerWithoutDispatching(t *testing.T) {
 	h.sidebar.SetSelectedInstance(0)
 
 	called := false
-	restore := SetHandoffRunnerForTest(func(string, string, string) (string, error) {
+	restore := SetHandoffRunnerForTest(func(daemon.HandoffSessionRequest) (string, error) {
 		called = true
 		return "", nil
 	})
@@ -76,12 +78,13 @@ func TestHandleHandoff_RefusesArchivedSessionBeforePicker(t *testing.T) {
 // hand off to the wrong agent — silently, and to a plausible-looking one.
 func TestHandleStateSelectHandoffAgent_ConfirmsThenSwapsTheChosenAgent(t *testing.T) {
 	h := newTestHome(t)
-	h.store.AddInstance(handoffActionInstance(t, "worker", tmux.ProgramClaude))
+	worker := handoffActionInstance(t, "worker", tmux.ProgramClaude)
+	h.store.AddInstance(worker)
 	h.sidebar.SetSelectedInstance(0)
 
-	var gotTitle, gotTarget string
-	restore := SetHandoffRunnerForTest(func(title, _, target string) (string, error) {
-		gotTitle, gotTarget = title, target
+	var gotRequest daemon.HandoffSessionRequest
+	restore := SetHandoffRunnerForTest(func(req daemon.HandoffSessionRequest) (string, error) {
+		gotRequest = req
 		return tmux.ProgramClaude, nil
 	})
 	defer restore()
@@ -98,7 +101,7 @@ func TestHandleStateSelectHandoffAgent_ConfirmsThenSwapsTheChosenAgent(t *testin
 
 	// Picking does not swap — it raises the confirmation.
 	require.Equal(t, stateConfirm, h.state, "a handoff must be confirmed before it runs")
-	require.Empty(t, gotTarget, "the swap must not fire before confirmation")
+	require.Empty(t, gotRequest.To, "the swap must not fire before confirmation")
 	require.NotNil(t, h.confirmationOverlay)
 
 	// Press the confirm key, which forwards the stashed message into the loop.
@@ -106,14 +109,156 @@ func TestHandleStateSelectHandoffAgent_ConfirmsThenSwapsTheChosenAgent(t *testin
 	require.NotNil(t, cmd, "confirming must forward the handoff message")
 	start, ok := cmd().(startHandoffMsg)
 	require.True(t, ok, "confirming must emit startHandoffMsg")
-	require.Equal(t, tmux.ProgramGemini, start.target)
+	require.Equal(t, tmux.ProgramGemini, start.request.To)
 
-	msg := h.handoffCmd(start.title, start.target)()
+	msg := h.handoffCmd(start.request)()
 	done, ok := msg.(handoffDoneMsg)
 	require.True(t, ok, "expected handoffDoneMsg, got %T", msg)
 	require.NoError(t, done.err)
-	require.Equal(t, "worker", gotTitle)
-	require.Equal(t, tmux.ProgramGemini, gotTarget, "the swap must target the agent the user picked")
+	require.Equal(t, "worker", gotRequest.Title)
+	require.Equal(t, h.repoID, gotRequest.RepoID)
+	require.Equal(t, worker.ID, gotRequest.ID, "the TUI must carry the stable session identity to the daemon")
+	require.Equal(t, tmux.ProgramGemini, gotRequest.To, "the swap must target the agent the user picked")
+}
+
+func TestHandleStateSelectHandoffAgent_KeepsTheSessionThatOpenedThePicker(t *testing.T) {
+	h := newTestHome(t)
+	alpha := handoffActionInstance(t, "alpha", tmux.ProgramClaude)
+	beta := handoffActionInstance(t, "beta", tmux.ProgramCodex)
+	h.store.AddInstance(alpha)
+	h.store.AddInstance(beta)
+	h.sidebar.SetSelectedInstance(0)
+
+	_, _ = h.handleHandoff()
+	require.Equal(t, tmux.ProgramCodex, h.handoffChoices[0], "fixture assumption: codex is offered for alpha")
+
+	// A snapshot can reconcile the sidebar while the modal owns the keyboard.
+	// Moving the cursor reproduces the consequential part of that update: the
+	// current selection is now beta even though alpha opened the picker.
+	h.sidebar.SetSelectedInstance(1)
+	h.selectionOverlay.SetSelectedIndex(0)
+	_, _ = h.handleStateSelectHandoffAgent(tea.KeyMsg{Type: tea.KeyEnter})
+
+	require.Equal(t, stateConfirm, h.state)
+	_, cmd := h.handleStateConfirm(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("y")})
+	require.NotNil(t, cmd)
+	start, ok := cmd().(startHandoffMsg)
+	require.True(t, ok, "confirming must emit startHandoffMsg")
+	require.Equal(t, alpha.Title, start.request.Title,
+		"a background selection change must not retarget the handoff")
+	require.Equal(t, alpha.ID, start.request.ID)
+	require.Equal(t, h.repoID, start.request.RepoID)
+}
+
+func TestHandleStateSelectHandoffAgent_DropsARecreatedSameTitleTarget(t *testing.T) {
+	h := newTestHome(t)
+	original := handoffActionInstance(t, "worker", tmux.ProgramClaude)
+	h.store.AddInstance(original)
+	h.sidebar.SetSelectedInstance(0)
+
+	_, _ = h.handleHandoff()
+	require.True(t, h.store.RemoveInstanceByTitle(original.Title))
+	replacement := handoffActionInstance(t, original.Title, tmux.ProgramClaude)
+	require.NotEqual(t, original.ID, replacement.ID, "fixture requires a replacement session identity")
+	h.store.AddInstance(replacement)
+	h.selectionOverlay.SetSelectedIndex(0)
+
+	_, cmd := h.handleStateSelectHandoffAgent(tea.KeyMsg{Type: tea.KeyEnter})
+
+	require.Nil(t, cmd)
+	require.Equal(t, stateDefault, h.state)
+	require.Nil(t, h.confirmationOverlay,
+		"a replacement that reused the title must not inherit the pending handoff")
+}
+
+func TestHandleStateSelectHandoffAgent_DropsARecreatedLegacyTarget(t *testing.T) {
+	h := newTestHome(t)
+	original := handoffActionInstance(t, "worker", tmux.ProgramClaude)
+	original.ID = "" // persisted before stable session IDs existed
+	h.store.AddInstance(original)
+	h.sidebar.SetSelectedInstance(0)
+
+	_, _ = h.handleHandoff()
+	require.True(t, h.store.RemoveInstanceByTitle(original.Title))
+	replacement := handoffActionInstance(t, original.Title, tmux.ProgramClaude)
+	replacement.CreatedAt = original.CreatedAt.Add(time.Second)
+	require.False(t, replacement.CreatedAt.Equal(original.CreatedAt),
+		"fixture requires a distinct legacy identity")
+	h.store.AddInstance(replacement)
+	h.selectionOverlay.SetSelectedIndex(0)
+
+	_, cmd := h.handleStateSelectHandoffAgent(tea.KeyMsg{Type: tea.KeyEnter})
+
+	require.Nil(t, cmd)
+	require.Equal(t, stateDefault, h.state)
+	require.Nil(t, h.confirmationOverlay,
+		"a replacement must not inherit an id-less session's pending handoff")
+}
+
+func TestHandleStateSelectHandoffAgent_KeepsARebuiltLegacyTarget(t *testing.T) {
+	h := newTestHome(t)
+	original := handoffActionInstance(t, "worker", tmux.ProgramClaude)
+	original.ID = ""
+	h.store.AddInstance(original)
+	h.sidebar.SetSelectedInstance(0)
+
+	_, _ = h.handleHandoff()
+	rebuilt := handoffActionInstance(t, original.Title, tmux.ProgramClaude)
+	rebuilt.ID = ""
+	rebuilt.CreatedAt = original.CreatedAt
+	require.True(t, h.store.ReplaceInstance(original, rebuilt))
+	h.selectionOverlay.SetSelectedIndex(0)
+
+	_, _ = h.handleStateSelectHandoffAgent(tea.KeyMsg{Type: tea.KeyEnter})
+
+	require.Equal(t, stateConfirm, h.state,
+		"a snapshot rebuild with the same legacy discriminator remains the same target")
+	require.NotNil(t, h.confirmationOverlay)
+}
+
+func legacyHandoffAtConfirmation(t *testing.T) (*home, *session.Instance) {
+	t.Helper()
+	h := newTestHome(t)
+	original := handoffActionInstance(t, "worker", tmux.ProgramClaude)
+	original.ID = ""
+	h.store.AddInstance(original)
+	h.sidebar.SetSelectedInstance(0)
+
+	_, _ = h.handleHandoff()
+	h.selectionOverlay.SetSelectedIndex(0)
+	_, _ = h.handleStateSelectHandoffAgent(tea.KeyMsg{Type: tea.KeyEnter})
+	require.Equal(t, stateConfirm, h.state)
+	return h, original
+}
+
+func replaceLegacyHandoffTarget(t *testing.T, h *home, original *session.Instance) {
+	t.Helper()
+	require.True(t, h.store.RemoveInstanceByTitle(original.Title))
+	replacement := handoffActionInstance(t, original.Title, tmux.ProgramClaude)
+	replacement.CreatedAt = original.CreatedAt.Add(time.Second)
+	h.store.AddInstance(replacement)
+}
+
+func TestHandleStateSelectHandoffAgent_RechecksLegacyTargetAtConfirmation(t *testing.T) {
+	h, original := legacyHandoffAtConfirmation(t)
+	replaceLegacyHandoffTarget(t, h, original)
+
+	_, cmd := h.handleStateConfirm(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("y")})
+
+	require.Nil(t, cmd, "a replacement during confirmation must not inherit the pending handoff")
+}
+
+func TestStartHandoffMsg_RechecksLegacyTargetAtDispatch(t *testing.T) {
+	h, original := legacyHandoffAtConfirmation(t)
+	_, cmd := h.handleStateConfirm(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("y")})
+	require.NotNil(t, cmd)
+	start, ok := cmd().(startHandoffMsg)
+	require.True(t, ok)
+
+	replaceLegacyHandoffTarget(t, h, original)
+	_, dispatch := h.Update(start)
+
+	require.Nil(t, dispatch, "a replacement before async dispatch must not inherit the pending handoff")
 }
 
 // Cancelling the picker must leave the session untouched.
@@ -123,7 +268,7 @@ func TestHandleStateSelectHandoffAgent_CancelDoesNotSwap(t *testing.T) {
 	h.sidebar.SetSelectedInstance(0)
 
 	called := false
-	restore := SetHandoffRunnerForTest(func(string, string, string) (string, error) {
+	restore := SetHandoffRunnerForTest(func(daemon.HandoffSessionRequest) (string, error) {
 		called = true
 		return "", nil
 	})
@@ -134,6 +279,7 @@ func TestHandleStateSelectHandoffAgent_CancelDoesNotSwap(t *testing.T) {
 
 	require.Equal(t, stateDefault, h.state, "cancelling returns to the default state")
 	require.Nil(t, h.confirmationOverlay, "cancelling must not raise a confirmation")
+	require.Equal(t, handoffPickerTarget{}, h.handoffTarget)
 	require.False(t, called)
 }
 
