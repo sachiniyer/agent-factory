@@ -257,13 +257,15 @@ func (s *controlServer) UpdateTask(req UpdateTaskRequest, resp *UpdateTaskRespon
 	}
 	resp.OK = true
 	resp.Task = merged
+	// Publish at the durable commit boundary, before the non-transactional
+	// schedule refresh. If refresh fails, the caller receives the committed
+	// outcome below and every other client still learns to refetch this value.
+	// The payload is the authoritative merged record, not the partial patch.
+	s.manager.publishEvent(agentproto.EventTaskUpdated, merged)
 	if err := s.reloadTaskSchedulesLocked(); err != nil {
 		return &mutationCommittedError{err: fmt.Errorf(
 			"task update committed, but failed to reload task schedules: %w", err)}
 	}
-	// Publish the merged record — the authoritative post-edit task — not the
-	// partial patch, so subscribers (TUI/web) receive the full updated task.
-	s.manager.publishEvent(agentproto.EventTaskUpdated, merged)
 	return nil
 }
 
