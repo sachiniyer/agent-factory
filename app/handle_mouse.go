@@ -581,7 +581,7 @@ func (m *home) dragStatusText() string {
 	if m.tabDrag.targetRegion == "" {
 		return "Dragging… " + label
 	}
-	return "Dragging… " + label + " - drop to open pane"
+	return "Dragging… " + label + " — drop to open pane"
 }
 
 // handleModalClick handles clicks while an overlay owns the screen: overlay
