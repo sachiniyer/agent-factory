@@ -71,6 +71,59 @@ func TestInteractivePollPause_HoldsLeaseForFocusedInteractivePane(t *testing.T) 
 	assert.Empty(t, h.interactivePauseTitle)
 }
 
+// TestInteractivePollPause_SameTitleReplacementTransfersLease is the #2358
+// fail-first. A capture-poll lease belongs to the session being edited, not to
+// its reusable title: when a snapshot replaces the focused pane binding with a
+// different same-title session, the old lease must be released and the new
+// identity paused immediately. Comparing only titles mistakes the replacement
+// for a renewal of the old session and does neither.
+func TestInteractivePollPause_SameTitleReplacementTransfersLease(t *testing.T) {
+	h, original := liveTestHome(t)
+	stubLiveTermFactory(t)
+	h.syncLiveTermPane()
+
+	var mu sync.Mutex
+	var paused, resumed []string
+	h.pauseStatusPoll = func(title, _ string) error {
+		mu.Lock()
+		defer mu.Unlock()
+		paused = append(paused, title)
+		return nil
+	}
+	h.resumeStatusPoll = func(title, _ string) error {
+		mu.Lock()
+		defer mu.Unlock()
+		resumed = append(resumed, title)
+		return nil
+	}
+	run := func(cmd tea.Cmd) {
+		if cmd != nil {
+			_ = cmd()
+		}
+	}
+
+	h.setInteractive(true)
+	run(h.interactivePollPauseCmd())
+	require.Equal(t, original.Title, h.interactivePauseTitle, "precondition: original lease is retained")
+
+	replacement := startedLocalInstance(t, "replacement")
+	replacement.Title = original.Title
+	require.NotEqual(t, original.ID, replacement.ID, "replacement must have a distinct stable identity")
+	require.Equal(t, original.Title, replacement.Title, "replacement must reuse the exact title")
+	require.True(t, h.store.ReplaceInstanceByTitle(original.Title, replacement))
+	require.Same(t, replacement, h.focusedOpenPane().Instance(), "focused pane must now bind the replacement")
+	require.True(t, h.interactive, "replacement must occur while the pane remains interactive")
+	require.Equal(t, original.Title, h.interactivePauseTitle, "old title-only lease must still be retained")
+	h.interactivePauseAt = time.Now() // stay inside the title-only renewal throttle
+
+	run(h.interactivePollPauseCmd())
+
+	mu.Lock()
+	defer mu.Unlock()
+	require.Len(t, paused, 2, "replacement identity must acquire its own pause immediately")
+	require.Len(t, resumed, 1, "the original identity's pause must be released")
+}
+
 // TestInteractivePollPause_NoLeaseWhileFullScreenAttached pins that the
 // embedded-interactive hold yields to full-screen attach, which runs its own
 // pause heartbeat (attachOverlayCallback): while m.attached is set the embedded
