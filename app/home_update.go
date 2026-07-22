@@ -247,13 +247,13 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case startKillMsg:
 		// The row was already flipped to Deleting synchronously by the kill
 		// confirmation; dispatch the slow teardown off the event loop (#844).
-		return m, m.killInstanceCmd(msg.title)
+		return m, m.killInstanceCmd(msg.target)
 	case instanceKilledMsg:
 		return m.handleInstanceKilled(msg)
 	case startArchiveMsg:
 		// Archive confirmed; run the daemon teardown+move off the event loop
 		// (#1028), mirroring the kill dispatch.
-		return m, m.archiveInstanceCmd(msg.title)
+		return m, m.archiveInstanceCmd(msg.target)
 	case instanceArchivedMsg:
 		return m.handleInstanceArchived(msg)
 	case startHandoffMsg:
@@ -261,7 +261,7 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// kill/archive dispatch — it stops one agent process and starts another.
 		// Recheck identity at this final event-loop boundary: a snapshot can land
 		// after confirmation produced the message but before Update receives it.
-		if m.resolveHandoffPickerTarget(msg.target) == nil {
+		if m.resolveSessionActionTarget(msg.target) == nil {
 			return m, nil
 		}
 		return m, m.handoffCmd(msg.request)

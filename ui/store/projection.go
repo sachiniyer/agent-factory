@@ -149,7 +149,9 @@ func (p *Projection) GetInstanceTitles() map[string]bool {
 // background sync may have removed the captured instance and rebuilt a fresh
 // same-title copy via FromInstanceData while the fetch was in flight (#765),
 // orphaning the original pointer. Re-resolving by title lands the update on
-// the instance that currently represents the session (#862).
+// the instance that currently represents the session (#862). It is NOT safe
+// for retained mutation intent: a title can be reused by a different session;
+// those flows capture and resolve sessionActionTarget in app (#2358).
 func (p *Projection) GetInstanceByTitle(title string) *session.Instance {
 	for _, inst := range p.instances {
 		if inst.Title == title {
@@ -350,11 +352,13 @@ func (p *Projection) ReplaceInstanceByTitle(title string, replacement *session.I
 	return false
 }
 
-// RemoveInstanceByTitle removes an instance by title without killing it (the
-// external process already cleaned up tmux/worktree).
-func (p *Projection) RemoveInstanceByTitle(title string) bool {
+// RemoveInstance removes target by pointer identity without killing it (the
+// external process already cleaned up tmux/worktree). Retained action
+// completions use this form so a new row that reused the title cannot inherit
+// the old session's removal (#2358).
+func (p *Projection) RemoveInstance(target *session.Instance) bool {
 	for i, inst := range p.instances {
-		if inst.Title == title {
+		if inst == target {
 			if inst.Started() {
 				repoName, err := inst.RepoName()
 				if err != nil {
@@ -371,18 +375,12 @@ func (p *Projection) RemoveInstanceByTitle(title string) bool {
 	return false
 }
 
-// RemoveInstanceByTitleWithRepo removes an instance by title using the
-// supplied repoName instead of calling RepoName() on the instance. This is
-// useful when the caller has already killed the instance (which causes
-// RepoName() to fail) but captured the repo name beforehand, ensuring the
-// repo count is still decremented correctly.
-func (p *Projection) RemoveInstanceByTitleWithRepo(title, repoName string) bool {
-	for i, inst := range p.instances {
+// RemoveInstanceByTitle removes an instance by title without killing it (the
+// external process already cleaned up tmux/worktree).
+func (p *Projection) RemoveInstanceByTitle(title string) bool {
+	for _, inst := range p.instances {
 		if inst.Title == title {
-			p.rmRepo(repoName)
-			p.instances = append(p.instances[:i], p.instances[i+1:]...)
-			p.bump()
-			return true
+			return p.RemoveInstance(inst)
 		}
 	}
 	return false

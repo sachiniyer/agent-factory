@@ -312,7 +312,7 @@ func TestHandleInstanceArchived_FinalizesRowImmediately(t *testing.T) {
 	inst.SetInFlightOpForTest(session.OpArchiving) // as left by the optimistic archive action
 	h.store.AddInstance(inst)
 
-	h.handleInstanceArchived(instanceArchivedMsg{title: "worker"})
+	h.handleInstanceArchived(instanceArchivedMsg{target: captureSessionActionTarget(inst, h.repoID)})
 
 	require.Equal(t, session.OpNone, inst.GetInFlightOp(), "the op is cleared on finalize")
 	require.Equal(t, session.Archived, inst.GetStatus(),

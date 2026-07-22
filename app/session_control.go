@@ -129,11 +129,11 @@ var startSessionThroughDaemon = func(_ *session.Instance, req sessionStartReques
 // actually fires rather than waiting a real minute.
 var killRPCTimeout = 60 * time.Second
 
-var killSessionThroughDaemon = func(title, repoID string) error {
+var killSessionThroughDaemon = func(request daemon.KillSessionRequest) error {
 	ctx, cancel := context.WithTimeout(context.Background(), killRPCTimeout)
 	defer cancel()
 	err := withDaemonHTTP(func(c *apiclient.Client) error {
-		return c.KillSession(ctx, daemon.KillSessionRequest{Title: title, RepoID: repoID})
+		return c.KillSession(ctx, request)
 	})
 	// A deadline here means the daemon took the request and went quiet, so this
 	// client genuinely does not know whether the teardown happened — say exactly
@@ -152,11 +152,11 @@ var killSessionThroughDaemon = func(title, repoID string) error {
 // archiveSessionThroughDaemon / restoreSessionThroughDaemon route archive and
 // restore verbs through the daemon (the single writer). Package vars so the app
 // test suite can stub them without dialing a real daemon.
-var archiveSessionThroughDaemon = func(title, repoID string) (string, error) {
+var archiveSessionThroughDaemon = func(request daemon.ArchiveSessionRequest) (string, error) {
 	var path string
 	err := withDaemonHTTP(func(c *apiclient.Client) error {
 		var e error
-		path, e = c.ArchiveSession(daemon.ArchiveSessionRequest{Title: title, RepoID: repoID})
+		path, e = c.ArchiveSession(request)
 		return e
 	})
 	return path, err

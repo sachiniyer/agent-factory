@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/session"
 )
 
@@ -26,7 +27,9 @@ import (
 func setKillerForTest(t *testing.T, f func(title, repoID string) error) {
 	t.Helper()
 	prev := killSessionThroughDaemon
-	killSessionThroughDaemon = f
+	killSessionThroughDaemon = func(request daemon.KillSessionRequest) error {
+		return f(request.Title, request.RepoID)
+	}
 	t.Cleanup(func() { killSessionThroughDaemon = prev })
 }
 
@@ -213,6 +216,6 @@ func TestHandleEnter_DeletingInstanceIsNoOp(t *testing.T) {
 // The handler must tolerate the missing row.
 func TestInstanceKilled_RowAlreadyRemoved(t *testing.T) {
 	h := newTestHome(t)
-	_, _ = h.Update(instanceKilledMsg{title: "already-gone"})
+	_, _ = h.Update(instanceKilledMsg{target: sessionActionTarget{title: "already-gone", repoID: h.repoID}})
 	assert.Empty(t, h.store.GetInstances())
 }

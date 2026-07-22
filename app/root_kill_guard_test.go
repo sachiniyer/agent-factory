@@ -87,7 +87,7 @@ func TestHandleKill_RootRequiresDistinctConfirmKey(t *testing.T) {
 		"root row must be marked Deleting once confirmed")
 	startMsg, ok := cmd().(startKillMsg)
 	require.True(t, ok, "confirm must emit startKillMsg, got a different msg")
-	assert.Equal(t, session.RootSessionTitle, startMsg.title)
+	assert.Equal(t, session.RootSessionTitle, startMsg.target.title)
 }
 
 // TestHandleKill_NonReservedKeepsOrdinaryConfirm guards the acceptance criterion

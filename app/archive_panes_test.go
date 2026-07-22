@@ -23,7 +23,7 @@ func TestArchive_ClosesOpenPanesViaFinalize(t *testing.T) {
 	_, _ = h.openOrFocusPane(inst, 0) // open the agent pane
 	require.Equal(t, 1, h.store.NumOpenPanes(), "precondition: a pane is open on the session")
 
-	h.handleInstanceArchived(instanceArchivedMsg{title: inst.Title})
+	h.handleInstanceArchived(instanceArchivedMsg{target: captureSessionActionTarget(inst, h.repoID)})
 
 	require.Equal(t, session.Archived, inst.GetStatus())
 	require.True(t, h.store.ContainsInstance(inst),
@@ -71,7 +71,7 @@ func TestRestore_LeavesNoStalePaneBinding(t *testing.T) {
 	require.Equal(t, 1, h.store.NumOpenPanes())
 
 	// Archive closes the pane bound to the (about-to-be) archived session.
-	h.handleInstanceArchived(instanceArchivedMsg{title: inst.Title})
+	h.handleInstanceArchived(instanceArchivedMsg{target: captureSessionActionTarget(inst, h.repoID)})
 	require.Equal(t, 0, h.store.NumOpenPanes(),
 		"archive closes the session's panes — no live pane on an archived row")
 
