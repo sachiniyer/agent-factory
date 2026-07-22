@@ -528,9 +528,9 @@ func TestSnapshot_AgentIDHealKeepsPaneOpen(t *testing.T) {
 		"the agent pane stays bound to slot 0 across the heal")
 }
 
-// TestCloseTab_IDLessTreeTabTracksByOrdinal covers the id-less window. A tab the
-// user just created is ID-LESS by design (AttachShellTab leaves Tab.ID empty
-// until the next snapshot backfills the daemon's), so the tree's tab cannot be
+// TestCloseTab_IDLessTreeTabTracksByOrdinal covers the legacy id-less window. An
+// older daemon can omit CreateTabResponse.ID until the next snapshot backfills
+// it, so the tree's tab cannot be
 // found by id at all. With the id lookup skipped, `next` fell back to idx-1 —
 // where idx is the FOCUSED PANE's closed tab, not the tree's — so a pane-focused
 // close of a DIFFERENT tab jumped the tree to a neighbour of the wrong tab, even
@@ -539,8 +539,8 @@ func TestSnapshot_AgentIDHealKeepsPaneOpen(t *testing.T) {
 func TestCloseTab_IDLessTreeTabTracksByOrdinal(t *testing.T) {
 	h, alpha := multiTabHome(t)
 
-	// The freshly-created tabs are id-less, exactly as AttachShellTab leaves them
-	// before the daemon's snapshot backfills their ids.
+	// Model projections created from an older daemon response before snapshot
+	// backfill.
 	for _, tab := range alpha.GetTabs() {
 		tab.ID = ""
 	}

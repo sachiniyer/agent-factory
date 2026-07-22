@@ -651,18 +651,18 @@ func (i *Instance) ReconcileTabsFromData(target []TabData) (bool, error) {
 	// change and lets the pane layer close the orphaned pane.
 	//
 	// Name remains the join key ONLY where there is no id to key on: a local tab
-	// materialized by AttachShellTab carries an empty id on purpose and adopts the
-	// daemon's below, and a legacy roster row written before #1738 has none.
+	// materialized from an older daemon's CreateTab response adopts the daemon's
+	// below, and a legacy roster row written before #1738 has none.
 	// A local id that matches NO target id is treated as a different tab (drop +
 	// add) rather than adopting the target's id: those two cases are
 	// indistinguishable from here, and re-pointing the id is the silent-wrong-target
 	// failure #1886 is about, whereas drop+add is a visible, self-healing blip.
 
 	// Adopt the daemon's authoritative id for ID-LESS local tabs, by name-join. The
-	// daemon is the single owner of tab identity (#960); AttachShellTab leaves the
-	// id empty on purpose, so this is the bootstrap that makes the tab addressable
-	// by id at all. Runs FIRST so the id-keyed passes below see it. Not a visible
-	// change: the id is internal addressing, not display state.
+	// daemon is the single owner of tab identity (#960); this is the compatibility
+	// bootstrap for an older daemon response or legacy row. Runs FIRST so the
+	// id-keyed passes below see it. Not a visible change: the id is internal
+	// addressing, not display state.
 	//
 	// The AGENT tab additionally adopts over a NON-EMPTY local id, because it is the
 	// only row the id-keyed passes below can never repair: it is never dropped or

@@ -278,9 +278,9 @@ func TestQuitClosesLiveAttachment(t *testing.T) {
 }
 
 // TestLiveBindKeyIncludesTabID is the regression test for the id-adoption rebind
-// (#1779). AttachShellTab opens a pane BEFORE the daemon has minted the tab's
-// stable id, so that pane necessarily connects positionally (?tab=). When the next
-// snapshot adopts the real id, nothing else about the pane changes — same pane id,
+// (#1779). A legacy or older-daemon projection can open before its stable ID is
+// known, so that pane connects positionally (?tab=). When the next snapshot
+// adopts the real id, nothing else about the pane changes — same pane id,
 // same ordinal, same tmux name — so a bind key built only from those would be
 // unchanged and the pane would keep its ORDINAL connection for life. It could then
 // send keystrokes to a DIFFERENT tab once another client closes a lower one. The id
@@ -290,7 +290,7 @@ func TestLiveBindKeyIncludesTabID(t *testing.T) {
 	h, inst := liveTestHome(t)
 	p := openTestPane(t, h, inst, 1)
 
-	// The just-created tab whose daemon id has not synced yet: bound positionally.
+	// Model an older-daemon projection before ID backfill: bound positionally.
 	inst.Tabs[1].ID = ""
 	keyBefore, _, _, tabIDBefore, _, ok := h.liveBindCandidate(p)
 	require.True(t, ok)
