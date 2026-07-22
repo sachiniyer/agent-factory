@@ -366,7 +366,7 @@ func (p *TabPane) isCurrentViewLocked(instance *session.Instance, activeTab int)
 
 // InvalidateContent synchronously adopts a new view key and fallback state.
 // This is used by #1321 preview retargeting so the next render frame cannot
-// pair a new PREVIEW header with stale content from the previous binding.
+// pair a new preview header with stale content from the previous binding.
 func (p *TabPane) InvalidateContent(instance *session.Instance, activeTab int, message string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()

@@ -139,10 +139,10 @@ func TestTabbedWindowScrollCueIsPaneChrome(t *testing.T) {
 	setWindowSize(w, 100, 30)
 	w.SetScrollOwner(ScrollOwnerHostHistory)
 
-	require.NotContains(t, w.renderHeader(98), "SCROLL")
+	require.NotContains(t, w.renderHeader(98), "Scroll")
 	w.ScrollUp()
 	require.True(t, w.IsInScrollMode())
 	header := w.renderHeader(98)
-	require.Contains(t, header, "SCROLL")
+	require.Contains(t, header, "Scroll")
 	require.Contains(t, header, "Esc exits")
 }

@@ -47,7 +47,7 @@ func TestFirstScrollIntentRevealsAnOlderTerminalRow(t *testing.T) {
 		"the first gesture must reveal a row older than the normal bottom view")
 	require.NotContains(t, rendered, "history-040",
 		"scrolling up one row must move the newest row out of the viewport")
-	require.NotContains(t, rendered, "SCROLL",
+	require.NotContains(t, rendered, "Scroll",
 		"AF scroll-mode chrome must not be part of terminal history")
 }
 
