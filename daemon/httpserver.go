@@ -405,6 +405,14 @@ func writeHTTPSuccess(w http.ResponseWriter, r *http.Request, data any) {
 // writeHTTPError encodes err in a failure envelope with the given status. The
 // envelope body is always returned on error, never a bare status.
 func writeHTTPError(w http.ResponseWriter, r *http.Request, status int, err error) {
+	type codedError interface {
+		APIErrorCode() string
+	}
+	var coded codedError
+	if errors.As(err, &coded) {
+		writeHTTPEnvelope(w, r, status, apiproto.FailureWithCode(err.Error(), coded.APIErrorCode()))
+		return
+	}
 	writeHTTPEnvelope(w, r, status, apiproto.Failure(err.Error()))
 }
 

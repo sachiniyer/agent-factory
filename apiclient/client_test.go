@@ -151,3 +151,25 @@ func TestSnapshot_FailureEnvelope_SurfacesMessage(t *testing.T) {
 		t.Fatalf("want verbatim daemon message, got %v", err)
 	}
 }
+
+// A mutation_committed envelope keeps surfacing its human-readable failure,
+// while also preserving the durable outcome through the HTTP client boundary.
+func TestFailureEnvelope_PreservesMutationCommittedOutcome(t *testing.T) {
+	c := snapshotServer(t, func(daemon.SnapshotRequest) apiproto.Envelope {
+		return apiproto.FailureWithCode(
+			"task update committed, but scheduler reload failed",
+			apiproto.ErrorCodeMutationCommitted,
+		)
+	})
+
+	_, err := c.Snapshot(daemon.SnapshotRequest{})
+	if err == nil {
+		t.Fatal("want the post-commit failure to remain visible")
+	}
+	if !IsMutationCommitted(err) {
+		t.Fatalf("want mutation-committed outcome, got %T: %v", err, err)
+	}
+	if err.Error() != "task update committed, but scheduler reload failed" {
+		t.Fatalf("want verbatim daemon message, got %q", err)
+	}
+}

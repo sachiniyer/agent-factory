@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/sachiniyer/agent-factory/apiclient"
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/task"
@@ -49,16 +50,14 @@ func (m *home) handleQuit() (tea.Model, tea.Cmd) {
 // destructive action and surface it via handleError; the dirty pane preserves
 // the edit so the user can retry from where they left off.
 //
-// Recovery semantics on a task-save failure (#934): we reload BOTH the sidebar
-// and the TaskPane from disk so the two panes always agree and always reflect
-// the committed on-disk state — never a mix of stale in-memory edits in one
-// pane and disk state in the other. Reloading clears the TaskPane's dirty flag,
-// which means a failed edit is discarded rather than left dangling; we
-// therefore return the error so callers surface it (via handleError) and the
-// dropped edit is never silent. We deliberately do NOT keep dirty=true for an
-// in-place retry: after the reload the in-memory edits are gone, so a lingering
-// dirty flag would point at nothing. The user re-applies the edit from a
-// known-consistent state instead.
+// Recovery semantics on a task-save failure (#934): when the final reload
+// succeeds, we replace BOTH the sidebar and TaskPane from disk so they agree on
+// committed state. Reloading clears the TaskPane's dirty flag; a failed edit is
+// discarded, and the returned error makes that loss visible. If the reload
+// itself fails (#2324), each successful task update has already advanced its
+// diff baseline, while each failed update remains dirty and retryable. That is
+// the only state that neither resends an old successful field nor treats an
+// unpersisted edit as saved.
 func (m *home) saveContentPaneState() error {
 	// Accumulate failures across both panes so a hooks error and a task error
 	// can never clobber one another (#1001).
@@ -96,9 +95,9 @@ func (m *home) saveContentPaneState() error {
 	// writer of tasks.json among clients (#960), so a TUI edit/delete goes
 	// through the same RPC wrappers the CLI uses instead of touching the file
 	// directly. Each CRUD RPC re-arms the daemon's scheduler + watchers
-	// in-process, so there is no separate ReloadTasks poke here — the write and
-	// its schedule refresh are one atomic daemon call (removing the old
-	// double-reload).
+	// in-process, so there is no separate ReloadTasks poke here. The write lands
+	// before the refresh; a post-commit refresh failure is classified below so
+	// the error remains visible without retrying a durable edit.
 	//
 	// Persist ONLY the tasks the user actually edited (ConsumeDirty), and only
 	// the FIELDS they changed: each edit carries a field-level patch (diffed
@@ -109,9 +108,19 @@ func (m *home) saveContentPaneState() error {
 	// harmless no-op the daemon still validates.
 	for _, edit := range sp.ConsumeDirty() {
 		if err := updateTaskThroughDaemon(edit.ID, edit.Update); err != nil {
+			if apiclient.IsMutationCommitted(err) {
+				// The task write landed; only the daemon's schedule refresh
+				// failed. Keep surfacing that failure, but advance this task's
+				// baseline so a later edit is diffed against durable state.
+				sp.AcknowledgeSavedEdit(edit.ID)
+			} else {
+				sp.RestoreFailedEdit(edit.ID)
+			}
 			log.ErrorLog.Printf("failed to update task: %v", err)
 			saveErr = errors.Join(saveErr, fmt.Errorf("failed to save task %q: %w", edit.ID, err))
+			continue
 		}
+		sp.AcknowledgeSavedEdit(edit.ID)
 	}
 	for _, tsk := range sp.ConsumeDeleted() {
 		if err := removeTaskThroughDaemon(tsk.ID); err != nil {

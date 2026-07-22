@@ -128,6 +128,43 @@ func TestHTTP_AddTask_MutationRoute(t *testing.T) {
 		"AddTask route must re-arm the scheduler like the RPC handler")
 }
 
+// An UpdateTask write happens before the scheduler reload. If that reload
+// fails, the HTTP client needs a machine-readable outcome so it does not treat
+// the durable edit as rejected and retry it against a stale baseline.
+func TestHTTP_UpdateTask_PostCommitErrorCarriesOutcome(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	require.NoError(t, task.AddTask(enabledCronTask("bbbb1002", "")))
+
+	disabled := false
+	body, err := json.Marshal(UpdateTaskRequest{
+		ID:     "bbbb1002",
+		Update: task.TaskUpdate{Enabled: &disabled},
+	})
+	require.NoError(t, err)
+
+	// The scheduler admits the mutation's control lock, then fails while
+	// reloading after task.UpdateTask has written the patch. That reproduces the
+	// ambiguous production outcome without turning the failure into a pre-write
+	// admission error.
+	rec := doHTTP(&controlServer{scheduler: failingReloadTaskScheduler()},
+		http.MethodPost, "/v1/UpdateTask", string(body))
+	require.Equal(t, http.StatusInternalServerError, rec.Code)
+
+	var env struct {
+		Error *struct {
+			Message string `json:"message"`
+			Code    string `json:"code"`
+		} `json:"error"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &env))
+	require.NotNil(t, env.Error)
+	assert.Equal(t, "mutation_committed", env.Error.Code)
+
+	got, err := task.GetTask("bbbb1002")
+	require.NoError(t, err)
+	assert.False(t, got.Enabled, "the test must prove the write committed before the reload error")
+}
+
 // TestHTTP_TriggerTask_HandlerError covers the TriggerTask mutation route and the
 // handler-error → 500 mapping: RunTask refuses a disabled task, and the envelope
 // still carries the error message.

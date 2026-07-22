@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/sachiniyer/agent-factory/agentproto"
+	"github.com/sachiniyer/agent-factory/apiproto"
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/task"
@@ -22,6 +23,19 @@ type controlServer struct {
 	watchers     *watcherSupervisor
 	shutdownCh   chan struct{}
 	shutdownOnce sync.Once
+}
+
+// mutationCommittedError preserves the otherwise-ambiguous outcome of a
+// durable mutation whose non-transactional follow-up failed. HTTP exposes its
+// code additively; net/rpc clients retain the same human-readable error text.
+type mutationCommittedError struct {
+	err error
+}
+
+func (e *mutationCommittedError) Error() string { return e.err.Error() }
+func (e *mutationCommittedError) Unwrap() error { return e.err }
+func (e *mutationCommittedError) APIErrorCode() string {
+	return apiproto.ErrorCodeMutationCommitted
 }
 
 func (s *controlServer) Ping(_ PingRequest, resp *PingResponse) error {
@@ -79,9 +93,10 @@ func (s *controlServer) ResumeStatusPoll(req ResumeStatusPollRequest, resp *Resu
 
 // reloadTaskSchedules re-arms the daemon's cron scheduler and watcher
 // supervisor from tasks.json. It is the shared refresh the ReloadTasks poke and
-// the task CRUD RPCs (Add/Update/RemoveTask) both invoke after a write, so the
-// write and its schedule refresh happen atomically in-daemon and no separate
-// ReloadTasks poke is needed for CRUD.
+// the task CRUD RPCs (Add/Update/RemoveTask) both invoke after a write, so one
+// daemon call owns both steps and no separate ReloadTasks poke is needed for
+// CRUD. The steps are not transactional: persistence happens first, and update
+// callers receive a machine-readable committed outcome if the refresh fails.
 //
 // During warm-up (#829) the scheduler and watcher supervisor have not started
 // yet; RunDaemon reloads both from tasks.json right after the restore completes,
@@ -240,15 +255,19 @@ func (s *controlServer) UpdateTask(req UpdateTaskRequest, resp *UpdateTaskRespon
 	if err != nil {
 		return err
 	}
-	if err := s.reloadTaskSchedulesLocked(); err != nil {
-		return err
-	}
 	resp.OK = true
 	resp.Task = merged
-	// Publish the merged record — the authoritative post-edit task — not the
-	// partial patch, so subscribers (TUI/web) receive the full updated task.
+	// Publish at the durable commit boundary, before the non-transactional
+	// schedule refresh. If refresh fails, the caller receives the committed
+	// outcome below and every other client still learns to refetch this value.
+	// The payload is the authoritative merged record, not the partial patch.
 	s.manager.publishEvent(agentproto.EventTaskUpdated, merged)
-	return nil
+	reloadErr := s.reloadTaskSchedulesLocked()
+	if reloadErr == nil {
+		return nil
+	}
+	return &mutationCommittedError{err: fmt.Errorf(
+		"task update committed, but failed to reload task schedules: %w", reloadErr)}
 }
 
 func (s *controlServer) RemoveTask(req RemoveTaskRequest, resp *RemoveTaskResponse) error {

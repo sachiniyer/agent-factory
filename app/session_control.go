@@ -249,8 +249,10 @@ var triggerTaskThroughDaemon = func(taskID string) error {
 // task.AddTask/UpdateTask/RemoveTask and then poked ReloadTasks; now they go
 // through the SAME spawning RPC wrappers the CLI uses (api/tasks.go's
 // daemonAddTask/…), and because the daemon's CRUD handlers re-arm the scheduler
-// and watchers in-process (#1029 PR 3), the separate ReloadTasks poke is gone —
-// the write and its schedule refresh are one atomic daemon call. Like the tab
+// and watchers in-process (#1029 PR 3), the separate ReloadTasks poke is gone.
+// Persistence happens before that refresh; UpdateTask reports the committed
+// outcome explicitly if the refresh fails so the pane advances its baseline.
+// Like the tab
 // create/close RPCs (handleNewTab/handleCloseTab), these are quick daemon writes
 // dispatched synchronously on the event loop — not the tens-of-seconds ssh
 // teardowns that motivate the async kill/archive cmds — so saveContentPaneState

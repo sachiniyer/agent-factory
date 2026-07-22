@@ -1,10 +1,13 @@
 package daemon
 
 import (
+	"encoding/json"
+	"errors"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/sachiniyer/agent-factory/agentproto"
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
 	"github.com/sachiniyer/agent-factory/task"
@@ -29,6 +32,14 @@ func enabledCronTask(id, repoPath string) task.Task {
 		Enabled:     true,
 		CreatedAt:   time.Now(),
 	}
+}
+
+func failingReloadTaskScheduler() *taskScheduler {
+	scheduler := newTaskScheduler()
+	scheduler.loadTasks = func() ([]task.Task, error) {
+		return nil, errors.New("forced task reload failure")
+	}
+	return scheduler
 }
 
 // TestControlListTasks_ReadsDisk pins that the ListTasks handler returns the
@@ -85,6 +96,43 @@ func TestControlUpdateTask_WritesAndRearms(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "30 6 * * 1", got.CronExpr, "UpdateTask must persist the edit")
 	assert.Contains(t, srv.scheduler.scheduledTaskIDs(), "cccc0001")
+}
+
+// A schedule reload failure happens after UpdateTask has committed. Even though
+// the RPC must still report that failure, every other client needs the
+// task.updated event so it can refetch the durable value instead of staying
+// stale after its own promise rejects.
+func TestControlUpdateTask_PostCommitFailureStillPublishes(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	require.NoError(t, task.AddTask(enabledCronTask("cccc0002", "")))
+
+	ready := make(chan struct{})
+	close(ready)
+	manager := &Manager{events: newEventsHub(), ready: ready}
+	_, events := manager.events.subscribe()
+	srv := &controlServer{
+		manager:   manager,
+		scheduler: failingReloadTaskScheduler(),
+	}
+	disabled := false
+
+	var resp UpdateTaskResponse
+	err := srv.UpdateTask(UpdateTaskRequest{
+		ID:     "cccc0002",
+		Update: task.TaskUpdate{Enabled: &disabled},
+	}, &resp)
+	require.ErrorContains(t, err, "task update committed")
+
+	select {
+	case event := <-events:
+		require.Equal(t, agentproto.EventTaskUpdated, event.Type)
+		var updated task.Task
+		require.NoError(t, json.Unmarshal(event.Data, &updated))
+		assert.Equal(t, "cccc0002", updated.ID)
+		assert.False(t, updated.Enabled)
+	default:
+		t.Fatal("committed task update was not published before the post-commit error returned")
+	}
 }
 
 // TestControlRemoveTask_WritesAndDisarms pins that RemoveTask deletes the task

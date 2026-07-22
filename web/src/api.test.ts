@@ -15,6 +15,7 @@ import {
   type CreateSessionInput,
   createTab,
   errorText,
+  isMutationCommittedError,
   killSession,
   listBackends,
   listPrograms,
@@ -378,6 +379,28 @@ test("an envelope error object renders its message, never [object Object]", asyn
   assert.equal(err.status, 400);
   assert.equal(err.message, 'session "nope" not found');
   assert.doesNotMatch(err.message, /\[object Object\]/);
+});
+
+test("an envelope error preserves its machine-readable outcome code", async () => {
+  stubFetchResponse({
+    ok: false,
+    status: 500,
+    statusText: "Internal Server Error",
+    json: async () => ({
+      data: null,
+      error: {
+        message: "task update committed, but schedule refresh failed",
+        code: "mutation_committed",
+      },
+    }),
+  });
+  const err = await updateTask("t-committed", { enabled: false }, "tok").then(
+    () => null,
+    (e: unknown) => e,
+  );
+  assert.ok(err instanceof ApiError);
+  assert.equal(err.code, "mutation_committed");
+  assert.equal(isMutationCommittedError(err), true);
 });
 
 test("a 200 carrying an envelope error still surfaces the real message", async () => {

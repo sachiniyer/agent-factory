@@ -266,7 +266,7 @@ func (c *Client) callCtx(ctx context.Context, method string, req any, resp any) 
 		// net/rpc client would carry, since both transports wrap the same
 		// controlServer error — except where the message is provably a version
 		// skew, which is unactionable in its raw form.
-		return interpretEnvelopeError(env.Error.Message)
+		return interpretEnvelopeError(env.Error.Message, env.Error.Code)
 	}
 	if resp != nil {
 		if err := json.Unmarshal(env.Data, resp); err != nil {

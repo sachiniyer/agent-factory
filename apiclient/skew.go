@@ -1,8 +1,11 @@
 package apiclient
 
 import (
+	"errors"
 	"fmt"
 	"regexp"
+
+	"github.com/sachiniyer/agent-factory/apiproto"
 )
 
 // unknownFieldPattern matches the daemon's strict-decoder rejection. It requires
@@ -52,9 +55,33 @@ func (e *VersionSkewError) Error() string {
 // upgrading a provable version skew into an actionable VersionSkewError and
 // passing everything else through verbatim so existing callers that match on
 // daemon message text are unaffected.
-func interpretEnvelopeError(msg string) error {
+func interpretEnvelopeError(msg, code string) error {
+	if code == apiproto.ErrorCodeMutationCommitted {
+		return &mutationCommittedError{detail: msg}
+	}
 	if m := unknownFieldPattern.FindStringSubmatch(msg); m != nil {
 		return &VersionSkewError{Field: m[1], Detail: msg}
 	}
 	return fmt.Errorf("%s", msg)
+}
+
+// mutationCommittedError tells mutation callers that the daemon durably wrote
+// their change before the reported follow-up failure. Its marker method keeps
+// the classification usable through errors.Join and other wrappers.
+type mutationCommittedError struct {
+	detail string
+}
+
+func (e *mutationCommittedError) Error() string           { return e.detail }
+func (e *mutationCommittedError) MutationCommitted() bool { return true }
+
+// IsMutationCommitted distinguishes a rejected mutation from a durable one
+// whose post-commit work failed. The latter still surfaces as an error, but a
+// caller must advance its persistence baseline instead of retrying the write.
+func IsMutationCommitted(err error) bool {
+	type committed interface {
+		MutationCommitted() bool
+	}
+	var outcome committed
+	return errors.As(err, &outcome) && outcome.MutationCommitted()
 }
