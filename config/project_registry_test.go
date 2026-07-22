@@ -63,7 +63,7 @@ func TestProjectRegistryRebindPreservesIdentityAndClonesStayDistinct(t *testing.
 	require.Len(t, projects, 2)
 	assert.ElementsMatch(t, []string{rebound.ID, second.ID}, []string{projects[0].ID, projects[1].ID})
 	for _, project := range projects {
-		_, err := os.Stat(projectRecordPath(filepath.Join(base, "af-home", "projects"), project.ID))
+		_, err := os.Stat(projectRecordPath(filepath.Join(base, "af-home", ProjectRegistryDirName), project.ID))
 		require.NoError(t, err, "each listed identity must come from durable project.json metadata")
 	}
 }
@@ -163,6 +163,46 @@ func TestRegisterProjectRediscoversWholeCheckoutMoveByMarker(t *testing.T) {
 	projects, err := ListProjects()
 	require.NoError(t, err)
 	require.Equal(t, []Project{rediscovered}, projects)
+}
+
+func TestProjectRegistryMoveIgnoresReusedUnmarkedOldRoot(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		move func(Project, string) (Project, error)
+	}{
+		{
+			name: "register",
+			move: func(_ Project, movedRoot string) (Project, error) {
+				return RegisterProject(movedRoot)
+			},
+		},
+		{
+			name: "rebind",
+			move: func(project Project, movedRoot string) (Project, error) {
+				return RebindProject(project.ID, movedRoot)
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			base := t.TempDir()
+			t.Setenv("AGENT_FACTORY_HOME", filepath.Join(base, "af-home"))
+			oldRoot := filepath.Join(base, "repo")
+			project, err := RegisterProject(initProjectRegistryRepo(t, oldRoot))
+			require.NoError(t, err)
+
+			movedRoot := filepath.Join(base, "moved")
+			require.NoError(t, os.Rename(oldRoot, movedRoot))
+			require.NoError(t, os.Mkdir(oldRoot, 0o755),
+				"an unrelated directory now reuses the last-known path")
+
+			moved, err := tc.move(project, movedRoot)
+			require.NoError(t, err,
+				"an existing old path without this checkout's marker is not a duplicate identity")
+			require.Equal(t, project.ID, moved.ID)
+			require.Equal(t, project.CheckoutID, moved.CheckoutID)
+			require.Equal(t, canonicalExistingPath(t, movedRoot), moved.Root)
+		})
+	}
 }
 
 func TestRegisterProjectLinkedWorktreeUsesMainCheckoutIdentity(t *testing.T) {
@@ -296,7 +336,7 @@ func TestProjectRegistryRefusesNewerMetadata(t *testing.T) {
 	home := filepath.Join(base, "af-home")
 	t.Setenv("AGENT_FACTORY_HOME", home)
 	id := "prj_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-	dir := filepath.Join(home, "projects", id)
+	dir := filepath.Join(home, ProjectRegistryDirName, id)
 	require.NoError(t, os.MkdirAll(dir, 0o755))
 	metadata := `{
   "schema_version": 2,

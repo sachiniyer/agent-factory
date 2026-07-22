@@ -200,6 +200,10 @@ func TestFactoryReset_WipesEverythingKeepsRepoAndConfig(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(home, config.ProjectRegistryDirName, registered.ID, "project.json")); err != nil {
 		t.Fatalf("registered sessionless project is not durable before reset: %v", err)
 	}
+	checkoutMarker := filepath.Join(repo, ".git", "agent-factory", "checkout-id")
+	if _, err := os.Stat(checkoutMarker); err != nil {
+		t.Fatalf("registered checkout marker is not durable before reset: %v", err)
+	}
 
 	// --- Plan reflects the real scope ---
 	plan, err := planFactoryReset()
@@ -248,6 +252,8 @@ func TestFactoryReset_WipesEverythingKeepsRepoAndConfig(t *testing.T) {
 	assertGone(t, filepath.Join(home, config.TUIStateFileName))
 	assertGone(t, filepath.Join(home, "tasks.json"))
 	assertGone(t, filepath.Join(home, config.ProjectRegistryDirName))
+	assertGone(t, checkoutMarker)
+	assertGone(t, checkoutMarker+".lock")
 	assertGone(t, liveWT)
 	assertGone(t, reusedWT)
 	projects, err := config.ListProjects()
@@ -323,6 +329,39 @@ func TestFactoryReset_WipesEverythingKeepsRepoAndConfig(t *testing.T) {
 	got2, _ := os.ReadFile(filepath.Join(home, "config.toml"))
 	if string(got2) != string(cfgBytes) {
 		t.Errorf("config.toml changed on second reset")
+	}
+
+	reregistered, err := config.RegisterProject(repo)
+	if err != nil {
+		t.Fatalf("RegisterProject after reset: %v", err)
+	}
+	if reregistered.CheckoutID == registered.CheckoutID {
+		t.Errorf("checkout id after reset = %s, want a newly minted identity", reregistered.CheckoutID)
+	}
+}
+
+func TestFactoryReset_PreservesUnownedProjectsDirectory(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	t.Chdir(t.TempDir())
+
+	userFile := filepath.Join(home, "projects", "personal-repo", "README.md")
+	writeFile(t, userFile, "keep me")
+
+	plan, err := planFactoryReset()
+	if err != nil {
+		t.Fatalf("planFactoryReset: %v", err)
+	}
+	if _, err := executeFactoryReset(plan); err != nil {
+		t.Fatalf("executeFactoryReset: %v", err)
+	}
+
+	got, err := os.ReadFile(userFile)
+	if err != nil {
+		t.Fatalf("factory reset removed caller-owned projects directory: %v", err)
+	}
+	if string(got) != "keep me" {
+		t.Fatalf("caller-owned project changed to %q", got)
 	}
 }
 
