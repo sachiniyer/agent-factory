@@ -36,7 +36,7 @@ type Envelope struct {
 // ordinary failure envelopes byte-for-byte compatible with older clients.
 type EnvelopeError struct {
 	Message string `json:"message"`
-	Code    string `json:"code,omitempty"`
+	Code    string `json:"code,omitempty"` // Clients preserve this for retry safety.
 }
 
 // ErrorCodeMutationCommitted says the requested mutation reached durable
