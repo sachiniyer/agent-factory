@@ -3938,23 +3938,47 @@ test("#2347: the mobile agent terminal also reclaims peer-owned geometry", REAL_
     ).toBeGreaterThan(0);
     await first.mouse.move(0, 0);
 
-    secondCtx = await browser.newContext({ viewport: { width: 375, height: 2000 } });
-    const second = await secondCtx.newPage();
-    await openTokenless(second);
-    await second.locator(".af-nav-toggle").click();
-    await expect(row(second, sessionName)).toBeVisible({ timeout: 15_000 });
-    await row(second, sessionName).click();
-    await expect(second.locator(".af-term-meta")).toContainText("Live");
-    const secondHost = second.locator(".af-term-host");
+    const peerContext = await browser.newContext({ viewport: { width: 375, height: 2000 } });
+    secondCtx = peerContext;
+    const openTallPeer = async (label: string): Promise<Page> => {
+      const peer = await peerContext.newPage();
+      await openTokenless(peer);
+      await peer.locator(".af-nav-toggle").click();
+      await expect(row(peer, sessionName)).toBeVisible({ timeout: 15_000 });
+      await row(peer, sessionName).click();
+      await expect(peer.locator(".af-term-meta")).toContainText("Live");
+      await expect.poll(firstRows, { message: label }).toBeGreaterThan(lineCount);
+      const stranded = await terminalGeometry(firstHost, true);
+      expect(stranded.rows, `${label}; peer geometry=${JSON.stringify(stranded)}`).toBeGreaterThan(lineCount);
+      expect(stranded.scrollHeight, `${label}; peer geometry=${JSON.stringify(stranded)}`).toBe(
+        stranded.viewportHeight,
+      );
+      return peer;
+    };
+    const expectSettledLocalGeometry = async (label: string): Promise<void> => {
+      let observed = await terminalGeometry(firstHost, true);
+      try {
+        await expect
+          .poll(
+            async () => {
+              observed = await terminalGeometry(firstHost, true);
+              return observed.rows < lineCount && observed.scrollHeight > observed.viewportHeight;
+            },
+            { message: label },
+          )
+          .toBe(true);
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        throw new Error(`${label}; last geometry=${JSON.stringify(observed)}\n${detail}`);
+      }
+    };
 
-    // Touch and scrollbar input can begin while the browser still considers the
-    // peer window active (for example, a phone swipe delivered as the tab becomes
-    // foreground, or a scrollbar drag in a side-by-side window). Exercise the real
-    // xterm DOM listeners while the peer-owned grid is still stranded: neither path
-    // may wait for a later focus/resize signal to rebuild scrollback.
-    await expect
-      .poll(firstRows, { message: "the tall peer must strand the mobile client before direct-input checks" })
-      .toBeGreaterThan(lineCount);
+    // Each tall peer leaves its authoritative grid behind, then disconnects. That
+    // isolates the direct-input path under test: an activation still queued in a
+    // live peer is a legitimate later writer, not evidence that this host failed to
+    // fit. Exercise the real xterm DOM listeners while the stale peer grid remains.
+    let peer = await openTallPeer("the tall peer must strand the mobile client before the touch check");
+    await peer.close();
     await test.step("touch scroll input reclaims the peer grid", async () => {
       await firstHost.locator(".af-pane-host").dispatchEvent("touchmove", {
         bubbles: true,
@@ -3962,17 +3986,11 @@ test("#2347: the mobile agent terminal also reclaims peer-owned geometry", REAL_
         touches: [{ identifier: 1, clientX: 180, clientY: 300 }],
         changedTouches: [{ identifier: 1, clientX: 180, clientY: 300 }],
       });
-      await expect
-        .poll(firstRows, { message: "touchmove must synchronously reclaim the measurable local grid" })
-        .toBeLessThan(lineCount);
+      await expectSettledLocalGeometry("touchmove must reclaim the measurable local grid and rebuild scrollback");
     });
 
-    const letTallPeerReclaim = async (label: string): Promise<void> => {
-      await second.mouse.move(0, 0);
-      await secondHost.locator(".af-pane-host").hover();
-      await expect.poll(firstRows, { message: label }).toBeGreaterThan(lineCount);
-    };
-    await letTallPeerReclaim("the tall peer must reclaim the grid after the touch check");
+    peer = await openTallPeer("the next tall peer must strand the mobile client before the scrollbar check");
+    await peer.close();
     await test.step("scrollbar input reclaims the peer grid", async () => {
       await firstHost.locator(".xterm-viewport").dispatchEvent("pointerdown", {
         bubbles: true,
@@ -3981,15 +3999,14 @@ test("#2347: the mobile agent terminal also reclaims peer-owned geometry", REAL_
         button: 0,
         buttons: 1,
       });
-      await expect
-        .poll(firstRows, { message: "a pointer on xterm's scrollbar viewport must reclaim the local grid" })
-        .toBeLessThan(lineCount);
+      await expectSettledLocalGeometry("a pointer on xterm's scrollbar viewport must reclaim the local grid");
     });
-    await letTallPeerReclaim("the tall peer must reclaim the grid before the immediate-wheel check");
+
+    peer = await openTallPeer("the final tall peer must strand the mobile client before the immediate-wheel check");
 
     await assertActiveTerminalReclaimsPeerGeometry(
       first,
-      second,
+      peer,
       firstHost,
       lastLine,
       lineCount,
