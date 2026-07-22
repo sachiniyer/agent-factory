@@ -113,7 +113,7 @@ func TestDerivationSeesWebCreateOptions(t *testing.T) {
 			"parser is blind again; if the feature was reverted, flip the inventory cell back.")
 	}
 	// Still not sent — the remaining half of the create-option gap.
-	for _, f := range []string{"force_remote", "in_place"} {
+	for _, f := range []string{"in_place"} {
 		if contains(sent, f) {
 			t.Errorf("web CreateSession now sends %q — update session.create.opt.* and "+
 				"field_coverage.web_rpcs.CreateSession in the same change.", f)
