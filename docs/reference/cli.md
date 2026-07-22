@@ -34,7 +34,7 @@ Run `af <command> --help` for the same information at the terminal. For a narrat
 - [`af projects list`](#af-projects-list) — List registered projects
 - [`af projects rebind`](#af-projects-rebind) — Rebind a registered project after its checkout moves
 - [`af projects register`](#af-projects-register) — Register a project with a stable local identity
-- [`af reset`](#af-reset) — Factory-reset Agent Factory: remove ALL AF sessions, tasks, worktrees, and state (keeps your repos + config)
+- [`af reset`](#af-reset) — Factory-reset Agent Factory: remove AF sessions, tasks, project registrations, worktrees, and state (keeps repos and config)
 - [`af sessions`](#af-sessions) — Manage sessions
 - [`af sessions archive`](#af-sessions-archive) — Finish with a session by archiving it for later restore
 - [`af sessions attach`](#af-sessions-attach) — Attach to a session's terminal
@@ -100,7 +100,7 @@ af [flags]
 - [`af doctor`](#af-doctor) — Diagnose setup, daemon health, and leaked session resources
 - [`af keys`](#af-keys) — Show the effective TUI key bindings (defaults plus [keys] rebinds)
 - [`af projects`](#af-projects) — Manage projects and durable registrations
-- [`af reset`](#af-reset) — Factory-reset Agent Factory: remove ALL AF sessions, tasks, worktrees, and state (keeps your repos + config)
+- [`af reset`](#af-reset) — Factory-reset Agent Factory: remove AF sessions, tasks, project registrations, worktrees, and state (keeps repos and config)
 - [`af sessions`](#af-sessions) — Manage sessions
 - [`af tasks`](#af-tasks) — Manage tasks
 - [`af token`](#af-token) — Manage the daemon's bearer token for the direct-TCP API
@@ -953,8 +953,10 @@ Register a project directory with a stable, machine-local identity.
 The returned project id survives an explicit rebind after the checkout moves.
 Two clones remain separate projects. Any directory inside a checkout resolves
 to that checkout's canonical main-repo root, and registration is idempotent for
-the same checkout. Identity is anchored in agent-factory/checkout-id under the
-Git common directory; no working-tree file is created.
+the same checkout. Identity is anchored in an AF-home-scoped
+agent-factory/checkout-id-<home-id> marker under the Git common directory, so
+one AF home's reset cannot remove another home's identity. No working-tree file
+is created.
 
 ```
 af projects register <path>
@@ -970,13 +972,14 @@ af projects register <path>
 
 ## af reset
 
-Factory-reset Agent Factory: remove ALL AF sessions, tasks, worktrees, and state (keeps your repos + config)
+Factory-reset Agent Factory: remove AF sessions, tasks, project registrations, worktrees, and state (keeps repos and config)
 
 Factory-reset Agent Factory.
 
 Removes every AF-created resource — all sessions (live and archived), all
-scheduled cron/watch tasks, all AF worktrees, the AF session branches AF
-created, and all stored state — returning AF to a clean slate.
+scheduled cron/watch tasks, registered-project bindings and their reachable
+checkout identity markers for this AF home, all AF worktrees, the AF session
+branches AF created, and all stored state — returning AF to a clean slate.
 
 Stops every af daemon running for this AF home — the managed one and any
 orphan left behind by an upgrade or a source build — and removes the daemon
