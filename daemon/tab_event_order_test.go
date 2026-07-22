@@ -93,12 +93,13 @@ func TestPersistPollChange_PublishesRosterAsOfItsLock(t *testing.T) {
 	t.Cleanup(func() { testHookPollBeforePersistLock = prev })
 	testHookPollBeforePersistLock = func() {
 		var err error
-		name, _, err = manager.CreateTab(CreateTabRequest{
+		created, err := manager.CreateTab(CreateTabRequest{
 			Title: title, RepoID: repo.ID, Kind: "web", URL: "http://localhost:5173", Name: "livepreview",
 		})
 		if err != nil {
 			t.Fatalf("CreateTab(web): %v", err)
 		}
+		name = created.Name
 	}
 
 	_, ch := manager.events.subscribe()

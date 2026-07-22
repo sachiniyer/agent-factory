@@ -115,7 +115,7 @@ func runTabCreate(cmd *cobra.Command, args []string) error {
 		return jsonError(err)
 	}
 
-	name, err := createTabViaDaemon(daemon.CreateTabRequest{
+	created, err := createTabViaDaemon(daemon.CreateTabRequest{
 		Title:   args[0],
 		RepoID:  repoID,
 		Command: tabCreateCommandFlag,
@@ -127,7 +127,7 @@ func runTabCreate(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return jsonError(err)
 	}
-	return jsonOut(map[string]string{"name": name})
+	return jsonOut(map[string]string{"name": created.Name})
 }
 
 var tabDeleteNameFlag string

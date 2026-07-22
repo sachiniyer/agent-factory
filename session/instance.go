@@ -503,23 +503,17 @@ func (i *Instance) TabTmuxName(idx int) string {
 // Local instances only — callers reject backends without TabManagement first. A
 // tab with that name already present (a refresh raced ahead) makes this a no-op
 // returning it. Errors when the instance is not started or has no session.
-func (i *Instance) AttachShellTab(name, tmuxName string) (*Tab, error) {
-	i.mu.RLock()
+func (i *Instance) AttachShellTab(name, tmuxName, tabID string) (*Tab, error) {
+	i.mu.Lock()
+	if existing, ok, err := i.resolveAttachedTabLocked(name, tabID); ok || err != nil {
+		i.mu.Unlock()
+		return existing, err
+	}
 	started := i.started
 	agentTmux := i.tmuxLocked()
 	gw := i.gitWorktree
-	var existing *Tab
-	for _, t := range i.Tabs {
-		if t.Name == name {
-			existing = t
-			break
-		}
-	}
-	i.mu.RUnlock()
-
-	if existing != nil {
-		return existing, nil
-	}
+	title := i.Title
+	i.mu.Unlock()
 	if !started || agentTmux == nil || gw == nil {
 		return nil, fmt.Errorf("cannot attach a tab to an instance that is not started")
 	}
@@ -547,12 +541,17 @@ func (i *Instance) AttachShellTab(name, tmuxName string) (*Tab, error) {
 
 	tab := newShellTab(shellTmux)
 	tab.Name = name
-	// The daemon owns this tab's stable id (#1738) — it minted and persisted one in
-	// its CreateTab. Don't invent a competing local id: leave it empty so the tab is
-	// addressed positionally (safe: the TUI just created it, single-client) until the
-	// next snapshot's ReconcileTabsFromData adopts the daemon's authoritative id.
-	tab.ID = ""
+	// The daemon owns this tab's stable id (#1738). Empty is not a locally minted
+	// substitute: it means an older daemon omitted the additive response field.
+	tab.ID = tabID
 	i.mu.Lock()
+	if existing, ok, err := i.resolveAttachedTabLocked(name, tabID); ok || err != nil {
+		i.mu.Unlock()
+		if cerr := shellTmux.CloseAttachOnly(); cerr != nil {
+			log.WarningLog.Printf("attach shell tab to %q: releasing raced attach client: %v", title, cerr)
+		}
+		return existing, err
+	}
 	// Re-check the teardown fence under the write lock before appending, mirroring
 	// AddShellTab: Kill is not serialized against attach and can have flipped
 	// started=false (snapshotting Tabs for teardown) in the window since our
@@ -565,7 +564,6 @@ func (i *Instance) AttachShellTab(name, tmuxName string) (*Tab, error) {
 	// the projection; the next reconcile re-adds the tab if it still exists
 	// server-side.
 	killed := !i.started || i.tabSpawnBlockedLocked() != nil
-	title := i.Title
 	if !killed {
 		i.Tabs = append(i.Tabs, tab)
 	}

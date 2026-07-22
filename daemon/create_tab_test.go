@@ -156,7 +156,7 @@ func TestCreateTab_RejectsEmptyCommand(t *testing.T) {
 		t.Fatalf("NewManager: %v", err)
 	}
 
-	if _, _, err := manager.CreateTab(CreateTabRequest{Title: "x", Command: "   "}); err == nil {
+	if _, err := manager.CreateTab(CreateTabRequest{Title: "x", Command: "   "}); err == nil {
 		t.Fatal("expected error for empty command, got nil")
 	}
 }
@@ -187,7 +187,7 @@ func TestCreateTab_RejectsRemoteInstance(t *testing.T) {
 	manager.instances[daemonInstanceKey(repo.ID, "rem")] = inst
 	manager.mu.Unlock()
 
-	_, _, err = manager.CreateTab(CreateTabRequest{Title: "rem", RepoID: repo.ID, Command: "btop"})
+	_, err = manager.CreateTab(CreateTabRequest{Title: "rem", RepoID: repo.ID, Command: "btop"})
 	assertTabRejection(t, err, "only local sessions support user-managed tabs")
 }
 
@@ -211,12 +211,12 @@ func TestCreateTab_SpawnsPersistsAndReturnsName(t *testing.T) {
 	agentName := "af_" + title + "_agent"
 	startedLocalTabInstance(t, manager, repo.ID, repoPath, title, agentName)
 
-	name, _, err := manager.CreateTab(CreateTabRequest{Title: title, RepoID: repo.ID, Command: "btop -t"})
+	created, err := manager.CreateTab(CreateTabRequest{Title: title, RepoID: repo.ID, Command: "btop -t"})
 	if err != nil {
 		t.Fatalf("CreateTab: %v", err)
 	}
-	if name != "btop" {
-		t.Fatalf("resolved tab name = %q, want %q (derived from command basename)", name, "btop")
+	if created.Name != "btop" {
+		t.Fatalf("resolved tab name = %q, want %q (derived from command basename)", created.Name, "btop")
 	}
 
 	// The tab must be persisted to disk with its command + a derived tmux name so
@@ -274,12 +274,12 @@ func TestCreateTab_ShellSpawnsPersistsAndReturnsName(t *testing.T) {
 	startedLocalTabInstance(t, manager, repo.ID, repoPath, title, agentName)
 
 	// Shell=true ignores Command and creates a $SHELL tab named "shell".
-	name, _, err := manager.CreateTab(CreateTabRequest{Title: title, RepoID: repo.ID, Shell: true})
+	created, err := manager.CreateTab(CreateTabRequest{Title: title, RepoID: repo.ID, Shell: true})
 	if err != nil {
 		t.Fatalf("CreateTab(shell): %v", err)
 	}
-	if name != "shell" {
-		t.Fatalf("resolved shell tab name = %q, want %q", name, "shell")
+	if created.Name != "shell" {
+		t.Fatalf("resolved shell tab name = %q, want %q", created.Name, "shell")
 	}
 
 	raw, err := config.LoadRepoInstances(repo.ID)
@@ -337,6 +337,6 @@ func TestCreateTab_ShellRejectsRemoteInstance(t *testing.T) {
 	manager.instances[daemonInstanceKey(repo.ID, "rem")] = inst
 	manager.mu.Unlock()
 
-	_, _, err = manager.CreateTab(CreateTabRequest{Title: "rem", RepoID: repo.ID, Shell: true})
+	_, err = manager.CreateTab(CreateTabRequest{Title: "rem", RepoID: repo.ID, Shell: true})
 	assertTabRejection(t, err, "only local sessions support user-managed tabs")
 }

@@ -27,29 +27,29 @@ import (
 // commands — a remote session's only terminal tab is the terminal_cmd one), an
 // empty command, or an instance already at the soft cap (maxTabs, enforced by
 // AddProcessTab).
-func (m *Manager) CreateTab(req CreateTabRequest) (string, string, error) {
+func (m *Manager) CreateTab(req CreateTabRequest) (CreateTabResponse, error) {
 	// An empty kind is the default (shell-or-process, per req.Shell), not a kind;
 	// every explicit kind resolves through session.ParseTabKindName, the shared
 	// vocabulary the CLI validates against, so the two can't drift.
 	kind, explicitKind := session.ParseTabKindName(req.Kind)
 	if !explicitKind && req.Kind != "" {
-		return "", "", fmt.Errorf("unknown tab kind %q (expected one of %s, or empty)",
+		return CreateTabResponse{}, fmt.Errorf("unknown tab kind %q (expected one of %s, or empty)",
 			req.Kind, strings.Join(session.TabKindNameList(), ", "))
 	}
 	isWeb := explicitKind && kind == session.TabKindWeb
 	isVSCode := explicitKind && kind == session.TabKindVSCode
 	if !explicitKind && !req.Shell && strings.TrimSpace(req.Command) == "" {
-		return "", "", fmt.Errorf("a process tab requires a non-empty command (--command)")
+		return CreateTabResponse{}, fmt.Errorf("a process tab requires a non-empty command (--command)")
 	}
 	// A vscode tab always edits the session's own worktree, so a target is not
 	// just unnecessary but meaningless — reject one rather than silently ignoring
 	// it and leaving the caller thinking it took effect.
 	if isVSCode {
 		if strings.TrimSpace(req.URL) != "" || req.Port != 0 {
-			return "", "", fmt.Errorf("--url/--port are not valid for a vscode tab (--kind vscode): it always opens the session's worktree")
+			return CreateTabResponse{}, fmt.Errorf("--url/--port are not valid for a vscode tab (--kind vscode): it always opens the session's worktree")
 		}
 		if strings.TrimSpace(req.Command) != "" {
-			return "", "", fmt.Errorf("--command is not valid for a vscode tab (--kind vscode)")
+			return CreateTabResponse{}, fmt.Errorf("--command is not valid for a vscode tab (--kind vscode)")
 		}
 	}
 	// Resolve the web target up front so an invalid URL/port fails fast, before
@@ -60,17 +60,17 @@ func (m *Manager) CreateTab(req CreateTabRequest) (string, string, error) {
 		target := strings.TrimSpace(req.URL)
 		if target == "" {
 			if req.Port == 0 {
-				return "", "", fmt.Errorf("a web tab requires a target (--url or --port)")
+				return CreateTabResponse{}, fmt.Errorf("a web tab requires a target (--url or --port)")
 			}
 			portURL, perr := session.WebTabURLForPort(req.Port)
 			if perr != nil {
-				return "", "", perr
+				return CreateTabResponse{}, perr
 			}
 			target = portURL
 		}
 		normalized, nerr := session.NormalizeWebTabURL(target)
 		if nerr != nil {
-			return "", "", nerr
+			return CreateTabResponse{}, nerr
 		}
 		webURL = normalized
 	}
@@ -82,16 +82,16 @@ func (m *Manager) CreateTab(req CreateTabRequest) (string, string, error) {
 	// RESOLVED title, not the (possibly ambiguous) request title.
 	instance, repoID, title, _, _, err := m.resolveActionSession(req.ID, req.Title, req.RepoID)
 	if err != nil {
-		return "", "", err
+		return CreateTabResponse{}, err
 	}
 	if instance == nil {
-		return "", "", fmt.Errorf("failed to restore instance %q", title)
+		return CreateTabResponse{}, fmt.Errorf("failed to restore instance %q", title)
 	}
 	// The message names the real reason rather than the old
 	// remote_hooks.terminal_cmd knob, which #1592 Phase 4 PR7 deleted — pointing a
 	// user at a setting that no longer exists is worse than no advice (#1874).
 	if !instance.Capabilities().TabManagement {
-		return "", "", fmt.Errorf("cannot create a tab on session %q: only local sessions support user-managed tabs — this session's workspace runs off-box (docker/ssh/remote), so there is no local worktree to spawn a tab in", title)
+		return CreateTabResponse{}, fmt.Errorf("cannot create a tab on session %q: only local sessions support user-managed tabs — this session's workspace runs off-box (docker/ssh/remote), so there is no local worktree to spawn a tab in", title)
 	}
 
 	// Serialize the tab spawn against an archive/kill/restore teardown+move for
@@ -99,7 +99,7 @@ func (m *Manager) CreateTab(req CreateTabRequest) (string, string, error) {
 	// archiveExclusiveTabLock for the op-lock ordering and orphan rationale.
 	opLock, err := m.archiveExclusiveTabLock(daemonInstanceKey(repoID, title), instance)
 	if err != nil {
-		return "", "", err
+		return CreateTabResponse{}, err
 	}
 	defer opLock.Unlock()
 
@@ -126,7 +126,7 @@ func (m *Manager) CreateTab(req CreateTabRequest) (string, string, error) {
 		tab, err = instance.AddProcessTab(req.Command, req.Name)
 	}
 	if err != nil {
-		return "", "", err
+		return CreateTabResponse{}, err
 	}
 
 	// Persist through the targeted per-repo writer (persistInstanceData) — the
@@ -141,7 +141,7 @@ func (m *Manager) CreateTab(req CreateTabRequest) (string, string, error) {
 		if closeErr := instance.CloseTabByID(tab.ID); closeErr != nil {
 			log.WarningLog.Printf("CreateTab %q: rolling back unpersisted tab failed: %v", title, closeErr)
 		}
-		return "", "", fmt.Errorf("failed to persist new tab: %w", err)
+		return CreateTabResponse{}, fmt.Errorf("failed to persist new tab: %w", err)
 	}
 
 	// Announce the grown roster (#1812). A tab created by an agent, the CLI, the
@@ -165,7 +165,9 @@ func (m *Manager) CreateTab(req CreateTabRequest) (string, string, error) {
 	// its ordinal (which any concurrent close shifts) and not by re-deriving
 	// "<agent>__<name>", which is the assumption #1957 retired. Empty for a
 	// tmux-less kind (web, vscode), which is the honest answer for them.
-	return tab.Name, tabTmuxNameByID(data.Tabs, tab.ID), nil
+	return CreateTabResponse{
+		ID: tab.ID, Name: tab.Name, TmuxName: tabTmuxNameByID(data.Tabs, tab.ID),
+	}, nil
 }
 
 // tabTmuxNameByID returns the persisted tmux session name of the tab with this

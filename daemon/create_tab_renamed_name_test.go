@@ -38,14 +38,14 @@ func TestCreateTab_ReusesTheNameARenamedTabGaveUp(t *testing.T) {
 	agentName := "af_" + title + "_agent"
 	startedLocalTabInstance(t, manager, repo.ID, repoPath, title, agentName)
 
-	name, tmuxName, err := manager.CreateTab(CreateTabRequest{
+	created, err := manager.CreateTab(CreateTabRequest{
 		Title: title, RepoID: repo.ID, Command: "btop", Name: "fresh",
 	})
 	if err != nil {
 		t.Fatalf("CreateTab(fresh): %v", err)
 	}
-	if name != "fresh" || tmuxName != agentName+"__fresh" {
-		t.Fatalf("CreateTab(fresh) = %q/%q, want fresh/%s__fresh", name, tmuxName, agentName)
+	if created.Name != "fresh" || created.TmuxName != agentName+"__fresh" {
+		t.Fatalf("CreateTab(fresh) = %q/%q, want fresh/%s__fresh", created.Name, created.TmuxName, agentName)
 	}
 
 	renamed, err := manager.RenameTab(RenameTabRequest{
@@ -59,18 +59,18 @@ func TestCreateTab_ReusesTheNameARenamedTabGaveUp(t *testing.T) {
 	}
 
 	// Nothing on the roster is called "fresh" now, so asking for it must get it.
-	name, tmuxName, err = manager.CreateTab(CreateTabRequest{
+	created, err = manager.CreateTab(CreateTabRequest{
 		Title: title, RepoID: repo.ID, Command: "btop", Name: "fresh",
 	})
 	if err != nil {
 		t.Fatalf("CreateTab(fresh, second): %v", err)
 	}
-	if name != "fresh" {
-		t.Fatalf("CreateTab returned %q for a name no tab holds; want fresh (#1957)", name)
+	if created.Name != "fresh" {
+		t.Fatalf("CreateTab returned %q for a name no tab holds; want fresh (#1957)", created.Name)
 	}
-	if tmuxName != agentName+"__fresh-2" {
+	if created.TmuxName != agentName+"__fresh-2" {
 		t.Fatalf("spawned tmux session = %q, want %s__fresh-2 — it must miss the renamed tab's live session",
-			tmuxName, agentName)
+			created.TmuxName, agentName)
 	}
 
 	// And the persisted roster agrees, so a restart rebinds each tab to its own
@@ -119,17 +119,17 @@ func TestCreateTab_ReportsNoTmuxNameForATmuxlessKind(t *testing.T) {
 	const title = "webby"
 	startedLocalTabInstance(t, manager, repo.ID, repoPath, title, "af_"+title+"_agent")
 
-	name, tmuxName, err := manager.CreateTab(CreateTabRequest{
+	created, err := manager.CreateTab(CreateTabRequest{
 		Title: title, RepoID: repo.ID, Kind: "web", URL: "http://localhost:5173", Name: "preview",
 	})
 	if err != nil {
 		t.Fatalf("CreateTab(web): %v", err)
 	}
-	if name != "preview" {
-		t.Fatalf("CreateTab(web) name = %q, want preview", name)
+	if created.Name != "preview" {
+		t.Fatalf("CreateTab(web) name = %q, want preview", created.Name)
 	}
-	if tmuxName != "" {
-		t.Fatalf("CreateTab(web) tmux name = %q, want empty — a web tab owns no session", tmuxName)
+	if created.TmuxName != "" {
+		t.Fatalf("CreateTab(web) tmux name = %q, want empty — a web tab owns no session", created.TmuxName)
 	}
 	if !tabNamed(snapshotTabs(t, manager, repo.ID, title), "preview") {
 		t.Fatal("the web tab was not persisted")
