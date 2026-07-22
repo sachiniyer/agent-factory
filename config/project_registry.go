@@ -64,11 +64,11 @@ type projectRecord struct {
 }
 
 type projectBinding struct {
-	root           string
-	checkoutRoot   string
-	relativeRoot   string
-	gitCommonDir   string
-	checkoutMarker string
+	root               string
+	checkoutRoot       string
+	relativeRoot       string
+	gitCommonDir       string
+	checkoutMarkerPath string
 }
 
 // ValidateProjectID rejects anything that is not an opaque ID minted by the
@@ -128,17 +128,17 @@ func ResetProjectRegistry() error {
 			if err != nil {
 				return fmt.Errorf("locate checkout marker for project %s: %w", record.ID, err)
 			}
-			markerID, exists, err := readCheckoutID(binding.checkoutMarker)
+			markerID, exists, err := readCheckoutID(binding.checkoutMarkerPath)
 			if err != nil {
 				return err
 			}
 			if exists && markerID != record.CheckoutID {
-				return fmt.Errorf("project %s expects checkout marker %s, but %s contains %s", record.ID, record.CheckoutID, binding.checkoutMarker, markerID)
+				return fmt.Errorf("project %s expects checkout marker %s, but %s contains %s", record.ID, record.CheckoutID, binding.checkoutMarkerPath, markerID)
 			}
-			if prior, exists := markers[binding.checkoutMarker]; exists && prior != record.CheckoutID {
-				return fmt.Errorf("checkout marker %s is claimed by both %s and %s", binding.checkoutMarker, prior, record.CheckoutID)
+			if prior, exists := markers[binding.checkoutMarkerPath]; exists && prior != record.CheckoutID {
+				return fmt.Errorf("checkout marker %s is claimed by both %s and %s", binding.checkoutMarkerPath, prior, record.CheckoutID)
 			}
-			markers[binding.checkoutMarker] = record.CheckoutID
+			markers[binding.checkoutMarkerPath] = record.CheckoutID
 		}
 
 		for marker := range markers {
@@ -179,7 +179,7 @@ func RegisterProject(path string) (Project, error) {
 		if err != nil {
 			return err
 		}
-		checkoutID, err := ensureCheckoutID(binding.checkoutMarker)
+		checkoutID, err := ensureCheckoutID(binding.checkoutMarkerPath)
 		if err != nil {
 			return err
 		}
@@ -273,7 +273,7 @@ func RebindProject(id, path string) (Project, error) {
 		}
 
 		record := records[index]
-		checkoutID, err := ensureCheckoutID(binding.checkoutMarker)
+		checkoutID, err := ensureCheckoutID(binding.checkoutMarkerPath)
 		if err != nil {
 			return err
 		}
@@ -468,11 +468,11 @@ func resolveProjectBinding(path string) (projectBinding, error) {
 		}
 	}
 	return projectBinding{
-		root:           filepath.Clean(checkoutRoot),
-		checkoutRoot:   filepath.Clean(checkoutRoot),
-		relativeRoot:   ".",
-		gitCommonDir:   filepath.Clean(commonDir),
-		checkoutMarker: filepath.Join(commonDir, checkoutMarkerDirName, checkoutMarkerFileName),
+		root:               filepath.Clean(checkoutRoot),
+		checkoutRoot:       filepath.Clean(checkoutRoot),
+		relativeRoot:       ".",
+		gitCommonDir:       filepath.Clean(commonDir),
+		checkoutMarkerPath: filepath.Join(commonDir, checkoutMarkerDirName, checkoutMarkerFileName),
 	}, nil
 }
 
@@ -533,7 +533,7 @@ func projectRootHasCheckoutID(root, checkoutID string) (bool, error) {
 		}
 		return false, fmt.Errorf("inspect last-known project root %s: %w", root, err)
 	}
-	id, exists, err := readCheckoutID(binding.checkoutMarker)
+	id, exists, err := readCheckoutID(binding.checkoutMarkerPath)
 	if err != nil {
 		return false, err
 	}
