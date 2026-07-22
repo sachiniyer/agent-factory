@@ -185,6 +185,11 @@ export interface Actions {
   /** Switches the selected session's active tab WITHOUT attaching — the keyboard
    *  stays in rail nav mode (the 1-9 keys, mirroring the TUI). */
   switchTab(index: number): void;
+  /** Re-measures every live terminal after shell chrome changes usable geometry.
+   *  The app shell owns drawer/view/condensed-header state, while SplitView owns
+   *  xterm; this explicit boundary keeps those two owners synchronized without a
+   *  resize-event shim or a polling timer. */
+  layoutChanged(): void;
   /** Switches to a tab AND attaches its terminal (a tab-bar click, mirroring how a
    *  session-row click attaches). */
   openTab(index: number): void;
@@ -605,6 +610,10 @@ export class AppShell {
   private readonly tasksPane: TasksPane;
   private readonly configPane: ConfigPane;
   private lastView: View | null = null;
+  // Whether the selected sessions surface is using the phone's condensed shell.
+  // Kept separately from lastView/lastSelectedId because either can flip this one
+  // presentation decision. The root class is media-query inert on desktop.
+  private lastCondensedSessionChrome: boolean | null = null;
   private lastTasks: TaskData[] | null = null;
   private lastTasksProject: string | null = null;
 
@@ -993,6 +1002,10 @@ export class AppShell {
     this.navOpen = open;
     this.el.classList.toggle("af-nav-open", open);
     this.navToggle.setAttribute("aria-expanded", open ? "true" : "false");
+    // The drawer overlays the pane, so its transition need not change the host's
+    // border box and ResizeObserver may correctly stay silent. It is still a usable-
+    // area/visibility transition: explicitly reconcile xterm on the next paint.
+    this.actions.layoutChanged();
   }
 
   /** Runs an action whose result lives outside the session drawer (#2226). Drawer
@@ -1012,6 +1025,12 @@ export class AppShell {
   /** Applies the latest state, touching only what changed. */
   update(state: AppState): void {
     this.syncDocumentTitle(state);
+    const condensedSessionChrome = usesCondensedSessionChrome(state);
+    if (this.lastCondensedSessionChrome !== condensedSessionChrome) {
+      this.lastCondensedSessionChrome = condensedSessionChrome;
+      this.el.classList.toggle("af-session-selected", condensedSessionChrome);
+      this.actions.layoutChanged();
+    }
     // The keyboard-focus indicator (#1693): a modifier class on the app root that
     // CSS turns into an accent border on whichever pane owns the keyboard. The
     // terminal only "holds" it while a session is actually selected; with none
@@ -2112,6 +2131,21 @@ export function documentTitle(state: AppState): string {
 /** The currently selected session row, or null. */
 function selectedSession(state: AppState): SessionData | null {
   return state.selectedId ? (state.sessions.find((s) => s.id === state.selectedId) ?? null) : null;
+}
+
+/** Whether mobile CSS should collapse the persistent appbar/title chrome into the
+ *  selected session's hamburger + tab row. A stale selected id is deliberately false:
+ *  renderMain shows the empty state in that case, so hiding its app navigation would
+ *  strand the user on a blank shell. Desktop consumes the same class but ignores it
+ *  outside the narrow media query. */
+export function usesCondensedSessionChrome(
+  state: Pick<AppState, "view" | "selectedId" | "sessions">,
+): boolean {
+  return (
+    state.view === "sessions" &&
+    !!state.selectedId &&
+    state.sessions.some((session) => session.id === state.selectedId)
+  );
 }
 
 /** A signature of everything the tab BAR draws for the selected session: which session

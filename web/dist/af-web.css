@@ -1992,6 +1992,72 @@ body {
     width: 100%;
     min-height: 2.75rem;
   }
+  .af-app.af-view-sessions.af-session-selected > .af-appbar {
+    position: absolute;
+    inset: 0 0 auto;
+    z-index: var(--af-z-appbar);
+    display: block;
+    height: calc(max(var(--af-sp-1), env(safe-area-inset-top)) + 2.75rem + var(--af-sp-1));
+    padding: 0;
+    background: transparent;
+    border: 0;
+    pointer-events: none;
+  }
+  .af-app.af-view-sessions.af-session-selected > .af-appbar > .af-nav-toggle {
+    position: absolute;
+    top: max(var(--af-sp-1), env(safe-area-inset-top));
+    left: max(var(--af-sp-2), env(safe-area-inset-left));
+    display: inline-flex;
+    width: 2.75rem;
+    height: 2.75rem;
+    padding: 0;
+    pointer-events: auto;
+  }
+  .af-app.af-view-sessions.af-session-selected > .af-appbar > .af-viewnav,
+  .af-app.af-view-sessions.af-session-selected > .af-appbar > .af-project-switch-wrap,
+  .af-app.af-view-sessions.af-session-selected > .af-appbar > .af-appbar-tools-wrap {
+    display: none;
+  }
+  .af-app.af-view-sessions.af-session-selected .af-term-head {
+    min-height: calc(max(var(--af-sp-1), env(safe-area-inset-top)) + 2.75rem + var(--af-sp-1));
+    gap: var(--af-sp-1);
+    padding: max(var(--af-sp-1), env(safe-area-inset-top)) max(var(--af-sp-2), env(safe-area-inset-right)) var(--af-sp-1) calc(max(var(--af-sp-2), env(safe-area-inset-left)) + 2.75rem + var(--af-sp-2));
+  }
+  .af-app.af-view-sessions.af-session-selected .af-term-head-main {
+    display: none;
+  }
+  .af-app.af-view-sessions.af-session-selected .af-tabbar {
+    min-width: 0;
+  }
+  .af-app.af-view-sessions.af-session-selected .af-tab {
+    min-height: 2.75rem;
+  }
+  .af-app.af-view-sessions.af-session-selected.af-nav-open > .af-appbar {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    grid-template-areas: "nav views views" "project project tools";
+    height: auto;
+    align-items: center;
+    gap: var(--af-sp-2);
+    padding: max(var(--af-sp-2), env(safe-area-inset-top)) max(var(--af-sp-2), env(safe-area-inset-right)) var(--af-sp-2) max(var(--af-sp-2), env(safe-area-inset-left));
+    background: var(--af-bg-surface);
+    border-bottom: 1px solid var(--af-border);
+    pointer-events: auto;
+  }
+  .af-app.af-view-sessions.af-session-selected.af-nav-open > .af-appbar > .af-nav-toggle {
+    position: static;
+    width: auto;
+  }
+  .af-app.af-view-sessions.af-session-selected.af-nav-open > .af-appbar > .af-viewnav {
+    display: inline-flex;
+  }
+  .af-app.af-view-sessions.af-session-selected.af-nav-open > .af-appbar > .af-project-switch-wrap,
+  .af-app.af-view-sessions.af-session-selected.af-nav-open > .af-appbar > .af-appbar-tools-wrap {
+    display: block;
+  }
+  .af-app.af-view-sessions.af-session-selected.af-nav-open .af-rail {
+    top: calc(max(var(--af-sp-2), env(safe-area-inset-top)) + 2.75rem + var(--af-sp-2) + 2.75rem + var(--af-sp-2));
+  }
   .af-tab {
     min-height: 2.5rem;
   }

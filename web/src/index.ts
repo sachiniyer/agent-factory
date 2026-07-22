@@ -1319,6 +1319,7 @@ const actions = {
   restore: (session: ActionableSession) => openConfirm("restore", session),
   retryLimit: doRetryLimit,
   switchTab,
+  layoutChanged: () => splitView.refit(),
   openTab,
   newTab: createSessionTab,
   closeTab: closeSessionTab,
