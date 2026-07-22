@@ -283,19 +283,23 @@ func (p *hookProvisioner) provision() (ProvisionResult, error) {
 		Backend: &HookBackend{
 			remoteAgentBackend: remoteAgentBackend{reap: teardown},
 			provisioner:        p,
-			cleanup: &HookRuntimeCleanupData{
-				DeleteCmd:             p.hooks.DeleteCmd,
-				Slug:                  p.slug,
-				Agent:                 p.environmentAgent(),
-				AgentResolved:         true,
-				AuthSelectors:         append([]string(nil), p.authSelectors...),
-				AuthSelectorsResolved: true,
-				SessionEnvPassthrough: append([]string(nil), p.spec.SessionEnvPassthrough...),
-			},
+			cleanup:            p.cleanupData(),
 		},
 		Endpoint: ep,
 		Teardown: teardown,
 	}, nil
+}
+
+func (p *hookProvisioner) cleanupData() *HookRuntimeCleanupData {
+	return &HookRuntimeCleanupData{
+		DeleteCmd:             p.hooks.DeleteCmd,
+		Slug:                  p.slug,
+		Agent:                 p.environmentAgent(),
+		AgentResolved:         true,
+		AuthSelectors:         append([]string(nil), p.authSelectors...),
+		AuthSelectorsResolved: true,
+		SessionEnvPassthrough: append([]string(nil), p.spec.SessionEnvPassthrough...),
+	}
 }
 
 // hookOutputSuffix renders a hook script's combined output for an error
