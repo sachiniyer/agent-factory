@@ -7,10 +7,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
+
+	"golang.org/x/sys/unix"
 )
 
 var (
@@ -416,11 +419,19 @@ func NewRecoveryJob(kind RecoveryJobKind, transactionID, unitDir string) (Recove
 			return RecoveryJob{}, errors.New("detached recovery job cannot have a unit directory")
 		}
 	case RecoveryJobSystemd:
+		canonicalUnitDir, err := canonicalExistingDir(unitDir)
+		if err != nil {
+			return RecoveryJob{}, fmt.Errorf("resolve systemd recovery unit directory: %w", err)
+		}
 		job.Name = "agent-factory-upgrade-recovery-" + transactionID + ".service"
-		job.UnitPath = filepath.Join(unitDir, job.Name)
+		job.UnitPath = filepath.Join(canonicalUnitDir, job.Name)
 	case RecoveryJobLaunchd:
+		canonicalUnitDir, err := canonicalExistingDir(unitDir)
+		if err != nil {
+			return RecoveryJob{}, fmt.Errorf("resolve launchd recovery unit directory: %w", err)
+		}
 		job.Name = "com.agent-factory.upgrade-recovery." + transactionID
-		job.UnitPath = filepath.Join(unitDir, job.Name+".plist")
+		job.UnitPath = filepath.Join(canonicalUnitDir, job.Name+".plist")
 	default:
 		return RecoveryJob{}, fmt.Errorf("unsupported upgrade recovery job kind %q", kind)
 	}
@@ -825,25 +836,51 @@ func removeExactRecoveryUnit(journal Journal) error {
 	default:
 		return fmt.Errorf("cannot remove invalid recovery job kind %q", journal.RecoveryJob.Kind)
 	}
-	data, err := os.ReadFile(journal.RecoveryJob.UnitPath)
+	data, info, err := readRegularRecoveryUnit(journal.RecoveryJob.UnitPath)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
 	}
 	if err != nil {
 		return fmt.Errorf("read recovery unit before cleanup: %w", err)
 	}
-	info, err := os.Lstat(journal.RecoveryJob.UnitPath)
-	if err != nil {
-		return fmt.Errorf("inspect recovery unit before cleanup: %w", err)
-	}
-	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 ||
-		info.Mode().Perm() != recoveryUnitMode || !bytes.Equal(data, expected) {
+	if info.Mode().Perm() != recoveryUnitMode || !bytes.Equal(data, expected) {
 		return errors.New("refusing to remove a recovery unit that no longer matches the transaction")
 	}
 	if err := removeDurableFile(journal.RecoveryJob.UnitPath); err != nil {
 		return fmt.Errorf("remove inactive recovery unit: %w", err)
 	}
 	return nil
+}
+
+func readRegularRecoveryUnit(path string) ([]byte, os.FileInfo, error) {
+	file, err := os.OpenFile(path, os.O_RDONLY|unix.O_NONBLOCK|unix.O_NOFOLLOW, 0)
+	if err != nil {
+		if errors.Is(err, unix.ELOOP) {
+			return nil, nil, errors.New("upgrade recovery unit is not a regular file")
+		}
+		return nil, nil, err
+	}
+	defer func() { _ = file.Close() }()
+
+	info, err := file.Stat()
+	if err != nil {
+		return nil, nil, err
+	}
+	if !info.Mode().IsRegular() {
+		return nil, nil, errors.New("upgrade recovery unit is not a regular file")
+	}
+	data, err := io.ReadAll(file)
+	if err != nil {
+		return nil, nil, err
+	}
+	current, err := os.Lstat(path)
+	if err != nil {
+		return nil, nil, err
+	}
+	if !os.SameFile(info, current) {
+		return nil, nil, errors.New("upgrade recovery unit changed while it was inspected")
+	}
+	return data, info, nil
 }
 
 func readJournal(path string) (Journal, error) {

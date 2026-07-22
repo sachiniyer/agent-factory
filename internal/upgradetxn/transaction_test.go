@@ -42,7 +42,8 @@ func prepareFixture(t *testing.T) (*Transaction, string, string) {
 }
 
 func TestRecoveryJobIdentityIsTransactionScopedAndJournaled(t *testing.T) {
-	unitDir := t.TempDir()
+	unitDir, err := canonicalExistingDir(t.TempDir())
+	require.NoError(t, err)
 	systemd, err := NewRecoveryJob(RecoveryJobSystemd, "txn-2212", unitDir)
 	require.NoError(t, err)
 	require.Equal(t, "agent-factory-upgrade-recovery-txn-2212.service", systemd.Name)

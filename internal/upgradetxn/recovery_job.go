@@ -228,15 +228,8 @@ func ensureExactRecoveryUnit(path string, content []byte) (bool, error) {
 }
 
 func inspectExactRecoveryUnit(path string, content []byte) (bool, error) {
-	data, err := os.ReadFile(path)
+	data, info, err := readRegularRecoveryUnit(path)
 	if err == nil {
-		info, statErr := os.Lstat(path)
-		if statErr != nil {
-			return false, statErr
-		}
-		if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
-			return false, errors.New("upgrade recovery unit is not a regular file")
-		}
 		if info.Mode().Perm() != recoveryUnitMode {
 			return false, fmt.Errorf("existing upgrade recovery unit %s has mode %04o, want %04o",
 				path, info.Mode().Perm(), os.FileMode(recoveryUnitMode))
@@ -247,7 +240,7 @@ func inspectExactRecoveryUnit(path string, content []byte) (bool, error) {
 		return true, nil
 	}
 	if !errors.Is(err, os.ErrNotExist) {
-		return false, fmt.Errorf("read upgrade recovery unit: %w", err)
+		return false, fmt.Errorf("inspect upgrade recovery unit: %w", err)
 	}
 	return false, nil
 }

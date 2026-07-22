@@ -7,7 +7,9 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -80,6 +82,75 @@ func prepareRecoveryJobFixture(t *testing.T, kind RecoveryJobKind) *Transaction 
 	})
 	require.NoError(t, err)
 	return txn
+}
+
+func TestNewRecoveryJobCanonicalizesExistingUnitDirectory(t *testing.T) {
+	realDirectory := t.TempDir()
+	alias := filepath.Join(t.TempDir(), "units")
+	require.NoError(t, os.Symlink(realDirectory, alias))
+	canonicalDirectory, err := filepath.EvalSymlinks(realDirectory)
+	require.NoError(t, err)
+
+	job, err := NewRecoveryJob(RecoveryJobSystemd, "txn-canonical-unit-dir", alias)
+	require.NoError(t, err)
+	require.Equal(t, filepath.Join(canonicalDirectory, job.Name), job.UnitPath)
+
+	created, err := ensureExactRecoveryUnit(job.UnitPath, []byte("recovery unit\n"))
+	require.NoError(t, err)
+	require.True(t, created)
+}
+
+func TestRecoveryUnitReadersRejectFIFOWithoutBlocking(t *testing.T) {
+	tests := []struct {
+		name string
+		run  func(string) error
+	}{
+		{
+			name: "startup inspection",
+			run: func(path string) error {
+				_, err := inspectExactRecoveryUnit(path, []byte("expected unit\n"))
+				return err
+			},
+		},
+		{
+			name: "cleanup inspection",
+			run: func(path string) error {
+				return removeExactRecoveryUnit(Journal{
+					ID: "txn-fifo",
+					RecoveryJob: RecoveryJob{
+						Kind:     RecoveryJobSystemd,
+						Name:     "agent-factory-upgrade-recovery-txn-fifo.service",
+						UnitPath: path,
+					},
+				})
+			},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "recovery.service")
+			require.NoError(t, syscall.Mkfifo(path, recoveryUnitMode))
+			result := make(chan error, 1)
+			go func() { result <- tc.run(path) }()
+
+			select {
+			case err := <-result:
+				require.ErrorContains(t, err, "not a regular file")
+			case <-time.After(2 * time.Second):
+				// Unblock the old read-before-stat implementation before failing so
+				// the regression test never leaves a goroutine behind.
+				writer, err := os.OpenFile(path, os.O_WRONLY|syscall.O_NONBLOCK, 0)
+				require.NoError(t, err)
+				require.NoError(t, writer.Close())
+				select {
+				case <-result:
+				case <-time.After(time.Second):
+					require.FailNow(t, "FIFO inspection remained blocked after releasing its reader")
+				}
+				require.FailNow(t, "FIFO inspection blocked before checking the file type")
+			}
+		})
+	}
 }
 
 func TestSystemdRecoveryJobIsPersistentAndRunsOnlyPreviousBinary(t *testing.T) {
