@@ -331,9 +331,9 @@ var closeTabThroughDaemon = func(request daemon.CloseTabRequest) error {
 // daemon for persistence (#921 write moved daemon-side, #960 PR 2). The gh fetch
 // stays TUI-side; only the persisted write moves. The TUI keeps its in-memory
 // SetPRInfo for instant UI feedback.
-var setPRInfoThroughDaemon = func(title, repoID string, info session.PRInfoData) error {
+var setPRInfoThroughDaemon = func(request daemon.SetPRInfoRequest) error {
 	return withDaemonHTTP(func(c *apiclient.Client) error {
-		return c.SetPRInfo(daemon.SetPRInfoRequest{Title: title, RepoID: repoID, PRInfo: info})
+		return c.SetPRInfo(request)
 	})
 }
 
@@ -465,7 +465,7 @@ func SetTabCloserForTest(f func(daemon.CloseTabRequest) error) func() {
 	return func() { closeTabThroughDaemon = prev }
 }
 
-func SetPRInfoSetterForTest(f func(title, repoID string, info session.PRInfoData) error) func() {
+func SetPRInfoSetterForTest(f func(daemon.SetPRInfoRequest) error) func() {
 	prev := setPRInfoThroughDaemon
 	setPRInfoThroughDaemon = f
 	return func() { setPRInfoThroughDaemon = prev }

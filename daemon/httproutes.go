@@ -179,7 +179,7 @@ var httpRoutes = []HTTPRoute{
 	{
 		Method:        http.MethodPost,
 		Path:          "/v1/SetPRInfo",
-		Description:   "Record or clear the GitHub PR info for a session.",
+		Description:   "Record or clear the GitHub PR info for a session. Address the session by id when available: it is authoritative over title/repo_id, so an asynchronous result cannot land on a different session that reused the title.",
 		RequestFields: jsonFields(reflect.TypeOf(SetPRInfoRequest{})),
 		handler:       func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.SetPRInfo) },
 	},

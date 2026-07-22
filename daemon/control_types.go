@@ -417,15 +417,18 @@ type ReorderTabResponse struct {
 }
 
 // SetPRInfoRequest records (or clears) the GitHub PR info for a session and
-// persists it (#960 PR 1). Title selects the session; RepoID scopes the lookup
-// (empty = all-repo). A zero-value PRInfo (Number 0) clears the recorded info,
+// persists it (#960). ID is authoritative when present; legacy callers resolve
+// by {Title, RepoID}. A zero-value PRInfo (Number 0) clears the recorded info,
 // matching how pr_info round-trips through storage (FromInstanceData treats
-// Number 0 as "no PR"). This is the daemon-side write that the TUI performs
-// today via prInfoUpdatedMsg + a full-list save (#921); PR 1 only adds the
-// mutation — the TUI is not switched to it until PR 2.
+// Number 0 as "no PR").
 type SetPRInfoRequest struct {
-	Title  string             `json:"title"`
-	RepoID string             `json:"repo_id"`
+	Title  string `json:"title"`
+	RepoID string `json:"repo_id"`
+	// ID is the session's stable id; see KillSessionRequest.ID. The TUI's PR
+	// lookup is asynchronous, so a completed fetch must not persist onto a
+	// different same-title row that appeared while gh was running.
+	ID string `json:"id"`
+	// PRInfo is the fetched projection to persist.
 	PRInfo session.PRInfoData `json:"pr_info"`
 }
 

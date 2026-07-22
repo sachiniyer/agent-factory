@@ -59,6 +59,38 @@ func TestSetPRInfo_SetsAndPersists(t *testing.T) {
 	}
 }
 
+// TestSetPRInfo_ByIDTargetsCanonicalSession proves the daemon half of the
+// retained-fetch invariant: with duplicate titles across repos, the stable ID
+// chooses one session and supplies its canonical title/repo. A stale display
+// title must never redirect the persistence onto the sibling.
+func TestSetPRInfo_ByIDTargetsCanonicalSession(t *testing.T) {
+	manager, repoA, dataA, repoB, dataB := createDuplicateTitleSessions(t, "feature")
+	want := session.PRInfoData{Number: 42, Title: "repo B PR", State: "OPEN"}
+
+	if err := manager.SetPRInfo(SetPRInfoRequest{
+		ID: dataB.ID, Title: "stale-display-title", PRInfo: want,
+	}); err != nil {
+		t.Fatalf("SetPRInfo by id B: %v", err)
+	}
+
+	assertTracked(t, manager, repoA.ID, "feature", dataA.ID)
+	assertTracked(t, manager, repoB.ID, "feature", dataB.ID)
+	instA, _, _, err := manager.findSession("feature", repoA.ID)
+	if err != nil {
+		t.Fatalf("findSession A: %v", err)
+	}
+	instB, _, _, err := manager.findSession("feature", repoB.ID)
+	if err != nil {
+		t.Fatalf("findSession B: %v", err)
+	}
+	if got := instA.GetPRInfo(); got != nil {
+		t.Fatalf("repo A PR info = %+v, want untouched", got)
+	}
+	if got := instB.GetPRInfo(); got == nil || got.Number != want.Number || got.Title != want.Title {
+		t.Fatalf("repo B PR info = %+v, want %+v", got, want)
+	}
+}
+
 // TestSetPRInfo_ClearsWithZeroValue verifies a zero-value PRInfo (Number 0)
 // clears previously-recorded info, both in memory and on disk.
 func TestSetPRInfo_ClearsWithZeroValue(t *testing.T) {

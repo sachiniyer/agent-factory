@@ -66,22 +66,19 @@ type snapshotFetchedMsg struct {
 // info is nil when the fetch resolved to "no PR for this branch".
 // err is set for transient errors — the handler keeps the cached value.
 // branch is the worktree branch captured at fetch kickoff (the same value
-// passed to prInfoFetcher); the handler drops the update if the re-resolved
-// target instance is no longer on that branch (#921).
+// passed to prInfoFetcher). target captures the session identity and repo at
+// the same moment; the handler drops the update if either identity is gone, the
+// active project changed, or the resolved session is no longer on that branch.
 type prInfoUpdatedMsg struct {
-	instance *session.Instance
-	branch   string
-	// repoID is the repo the fetch was scoped to, captured at kickoff. The
+	target sessionActionTarget
+	branch string
+	// target.repoID is the repo the fetch was scoped to, captured at kickoff. The
 	// handler drops the message when it no longer matches m.repoID: an in-place
 	// project switch (#1461) resets the store and swaps the active repo while a
-	// fetch launched for the previous one is still in flight, and the handler's
-	// title-only re-resolution would otherwise land the old project's PR info on
-	// a same-title, same-branch session in the NEW project — then persist it
-	// under the new repoID, where the snapshot reconcile mirrors it back and
-	// makes the bleed durable (#1780). Mirrors snapshotFetchedMsg's guard.
-	repoID string
-	info   *git.PRInfo
-	err    error
+	// fetch launched for the previous one is still in flight. Mirrors
+	// snapshotFetchedMsg's guard (#1780).
+	info *git.PRInfo
+	err  error
 }
 
 // -- Ticker commands --
@@ -272,6 +269,7 @@ func fetchPRInfoCmd(inst *session.Instance, repoID string, force bool) tea.Cmd {
 	// returned. The completion handler bumps the timestamp again with the
 	// real result, so the fresh window starts from fetch completion.
 	inst.MarkPRInfoFetched()
+	target := captureSessionActionTarget(inst, repoID)
 	// Capture the fetch seam on the event loop, before the goroutine reads it: it
 	// is a package var swapped by test seams, so reading it inside the cmd
 	// goroutine would race a sibling parallel test's swap (#960 PR 4 race-fix
@@ -289,7 +287,7 @@ func fetchPRInfoCmd(inst *session.Instance, repoID string, force bool) tea.Cmd {
 			info = &bound
 		}
 		detachTrace(fetchStart, "fetchPRInfoCmd-prInfoFetcher-returned")
-		return prInfoUpdatedMsg{instance: inst, branch: branch, repoID: repoID, info: info, err: err}
+		return prInfoUpdatedMsg{target: target, branch: branch, info: info, err: err}
 	}
 }
 
