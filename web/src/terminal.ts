@@ -45,6 +45,8 @@ import {
   hasVisibleTerminalGeometry,
   shouldRefitVisibleTerminal,
   shouldRestoreViewport,
+  terminalUserScrollPlan,
+  type TerminalUserScrollSource,
   viewportAnchorLine,
   viewportMarkerOffset,
 } from "./terminal-geometry.js";
@@ -110,9 +112,9 @@ export class AttachTerminal {
   private resizeTimer: number | null = null;
   private visibleFitFrame: number | null = null;
   private viewportRestoreFrame: number | null = null;
-  // Incremented only by an actual wheel while a peer-owned anchor is pending.
-  // Output and resize reflows can move viewportY too, so position deltas alone do
-  // not prove that a user intended to override the saved reading line.
+  // Incremented only by an actual user scroll input while a peer-owned anchor is
+  // pending. Output and resize reflows can move viewportY too, so position deltas
+  // alone do not prove that a user intended to override the saved reading line.
   private userScrollRevision = 0;
 
   // The absolute replay cursor: seeded from OpHello, advanced by OpPTYOut byte
@@ -145,19 +147,35 @@ export class AttachTerminal {
   // clients: reconcile before the wheel gesture arrives so xterm can consume that
   // first gesture rather than making the user scroll twice.
   private readonly onPointerEnter = (): void => this.fitVisibleHost();
-  // Wheel can target an already-focused window after another client resized the PTY
-  // without the pointer ever leaving this pane. Capture repairs that less-common
+  // A scroll can target an already-focused window after another client resized the
+  // PTY without the pointer ever leaving this pane. Capture repairs that less-common
   // path; pointer entry above handles the ordinary first gesture. The pending-peer
-  // gate makes every ordinary wheel a no-op before even measuring layout.
-  private readonly onWheel = (): void => {
-    if (this.pendingViewport !== null) {
-      this.fitVisibleHost();
-      // fitVisibleHost schedules from the pre-wheel revision. xterm consumes the
-      // wheel after this capture listener, so the deferred callback sees a newer
-      // explicit user intent and leaves that first gesture authoritative.
-      this.userScrollRevision += 1;
+  // gate makes every ordinary input a no-op before even measuring layout.
+  private readonly onWheel = (): void => this.handleUserScroll("wheel");
+  private readonly onTouchMove = (): void => this.handleUserScroll("touch");
+  private readonly onPointerDown = (event: PointerEvent): void => {
+    // The xterm screen is a sibling of its scrollable viewport. A pointer whose
+    // target is the viewport itself is therefore a scrollbar/track gesture, while
+    // an ordinary terminal click targets the screen and keeps the saved anchor.
+    if (event.target === this.container.querySelector(".xterm-viewport")) {
+      this.handleUserScroll("scrollbar");
     }
   };
+
+  private handleUserScroll(source: TerminalUserScrollSource): void {
+    if (this.pendingViewport === null) {
+      return;
+    }
+    const plan = terminalUserScrollPlan(source, this.visibleFitFrame !== null);
+    if (plan.cancelScheduledVisibleFit) {
+      this.cancelVisibleFitFrame();
+    }
+    this.fitVisibleHost();
+    // fitVisibleHost schedules from the pre-input revision. xterm consumes the
+    // user gesture after this capture listener, so the deferred callback sees a
+    // newer explicit intent and leaves that first gesture authoritative.
+    this.userScrollRevision += 1;
+  }
 
   constructor(
     private readonly container: HTMLElement,
@@ -242,6 +260,8 @@ export class AttachTerminal {
     document.addEventListener("visibilitychange", this.onVisibilityChange);
     container.addEventListener("pointerenter", this.onPointerEnter);
     container.addEventListener("wheel", this.onWheel, { capture: true, passive: true });
+    container.addEventListener("touchmove", this.onTouchMove, { capture: true, passive: true });
+    container.addEventListener("pointerdown", this.onPointerDown, true);
     this.scheduleVisibleFit();
   }
 
@@ -257,10 +277,7 @@ export class AttachTerminal {
       window.clearTimeout(this.resizeTimer);
       this.resizeTimer = null;
     }
-    if (this.visibleFitFrame !== null) {
-      window.cancelAnimationFrame(this.visibleFitFrame);
-      this.visibleFitFrame = null;
-    }
+    this.cancelVisibleFitFrame();
     this.clearPendingViewport();
     this.ro.disconnect();
     this.io.disconnect();
@@ -268,6 +285,8 @@ export class AttachTerminal {
     document.removeEventListener("visibilitychange", this.onVisibilityChange);
     this.container.removeEventListener("pointerenter", this.onPointerEnter);
     this.container.removeEventListener("wheel", this.onWheel, true);
+    this.container.removeEventListener("touchmove", this.onTouchMove, true);
+    this.container.removeEventListener("pointerdown", this.onPointerDown, true);
     this.closeSocket();
     this.term.dispose();
   }
@@ -464,6 +483,17 @@ export class AttachTerminal {
       this.visibleFitFrame = null;
       this.fitVisibleHost();
     });
+  }
+
+  /** Drops activation work queued before a direct user scroll. Leaving that frame
+   * alive lets it run after the input fit and rebase the restore onto the new user
+   * revision, which makes the first gesture appear inert. */
+  private cancelVisibleFitFrame(): void {
+    if (this.visibleFitFrame === null) {
+      return;
+    }
+    window.cancelAnimationFrame(this.visibleFitFrame);
+    this.visibleFitFrame = null;
   }
 
   /** Reconciles xterm's grid with this host only when the host is measurable and the

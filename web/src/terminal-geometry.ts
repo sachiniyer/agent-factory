@@ -25,6 +25,12 @@ export interface ViewportRestoreIntent {
   currentUserScroll: number;
 }
 
+export type TerminalUserScrollSource = "wheel" | "touch" | "scrollbar";
+
+export interface TerminalUserScrollPlan {
+  cancelScheduledVisibleFit: boolean;
+}
+
 /** Whether FitAddon has a real grid for a non-hidden host. This also gates the
  * first socket connect, so a newly opened client never advertises xterm's 80x24
  * constructor default to the shared PTY before layout has produced its real grid. */
@@ -66,4 +72,20 @@ export function viewportAnchorLine(anchor: ViewportAnchorTarget, baseY: number):
  * may move viewportY on its own and must not pose as user intent. */
 export function shouldRestoreViewport(intent: ViewportRestoreIntent): boolean {
   return intent.scheduledUserScroll === intent.currentUserScroll;
+}
+
+/** Plans the activation work for an explicit user scroll while a peer anchor is
+ * pending. Wheel, touch, and a scrollbar gesture are equally authoritative. A
+ * queued focus/visibility fit must be cancelled before the synchronous input fit,
+ * or it can reschedule restoration from the newly incremented revision. */
+export function terminalUserScrollPlan(
+  source: TerminalUserScrollSource,
+  hasScheduledVisibleFit: boolean,
+): TerminalUserScrollPlan {
+  switch (source) {
+    case "wheel":
+    case "touch":
+    case "scrollbar":
+      return { cancelScheduledVisibleFit: hasScheduledVisibleFit };
+  }
 }

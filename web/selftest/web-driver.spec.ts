@@ -3945,6 +3945,47 @@ test("#2347: the mobile agent terminal also reclaims peer-owned geometry", REAL_
     await expect(row(second, sessionName)).toBeVisible({ timeout: 15_000 });
     await row(second, sessionName).click();
     await expect(second.locator(".af-term-meta")).toContainText("Live");
+    const secondHost = second.locator(".af-term-host");
+
+    // Touch and scrollbar input can begin while the browser still considers the
+    // peer window active (for example, a phone swipe delivered as the tab becomes
+    // foreground, or a scrollbar drag in a side-by-side window). Exercise the real
+    // xterm DOM listeners while the peer-owned grid is still stranded: neither path
+    // may wait for a later focus/resize signal to rebuild scrollback.
+    await expect
+      .poll(firstRows, { message: "the tall peer must strand the mobile client before direct-input checks" })
+      .toBeGreaterThan(lineCount);
+    await test.step("touch scroll input reclaims the peer grid", async () => {
+      await firstHost.locator(".af-pane-host").dispatchEvent("touchmove", {
+        bubbles: true,
+        cancelable: true,
+        touches: [{ identifier: 1, clientX: 180, clientY: 300 }],
+        changedTouches: [{ identifier: 1, clientX: 180, clientY: 300 }],
+      });
+      await expect
+        .poll(firstRows, { message: "touchmove must synchronously reclaim the measurable local grid" })
+        .toBeLessThan(lineCount);
+    });
+
+    const letTallPeerReclaim = async (label: string): Promise<void> => {
+      await second.mouse.move(0, 0);
+      await secondHost.locator(".af-pane-host").hover();
+      await expect.poll(firstRows, { message: label }).toBeGreaterThan(lineCount);
+    };
+    await letTallPeerReclaim("the tall peer must reclaim the grid after the touch check");
+    await test.step("scrollbar input reclaims the peer grid", async () => {
+      await firstHost.locator(".xterm-viewport").dispatchEvent("pointerdown", {
+        bubbles: true,
+        cancelable: true,
+        pointerType: "mouse",
+        button: 0,
+        buttons: 1,
+      });
+      await expect
+        .poll(firstRows, { message: "a pointer on xterm's scrollbar viewport must reclaim the local grid" })
+        .toBeLessThan(lineCount);
+    });
+    await letTallPeerReclaim("the tall peer must reclaim the grid before the immediate-wheel check");
 
     await assertActiveTerminalReclaimsPeerGeometry(
       first,

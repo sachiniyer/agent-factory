@@ -4,6 +4,7 @@ import {
   hasVisibleTerminalGeometry,
   shouldRefitVisibleTerminal,
   shouldRestoreViewport,
+  terminalUserScrollPlan,
   viewportAnchorLine,
   viewportMarkerOffset,
 } from "./terminal-geometry.js";
@@ -50,4 +51,14 @@ test("#2347: a disposed marker falls back to the saved line instead of the top",
 test("#2347: only user scroll intent cancels a deferred viewport restore", () => {
   assert.equal(shouldRestoreViewport({ scheduledUserScroll: 4, currentUserScroll: 4 }), true);
   assert.equal(shouldRestoreViewport({ scheduledUserScroll: 4, currentUserScroll: 5 }), false);
+});
+
+test("#2347: every direct scroll input supersedes the saved peer anchor", () => {
+  for (const source of ["wheel", "touch", "scrollbar"] as const) {
+    assert.deepEqual(terminalUserScrollPlan(source, false), { cancelScheduledVisibleFit: false });
+  }
+});
+
+test("#2347: a direct scroll cancels a stale queued activation fit", () => {
+  assert.deepEqual(terminalUserScrollPlan("wheel", true), { cancelScheduledVisibleFit: true });
 });
