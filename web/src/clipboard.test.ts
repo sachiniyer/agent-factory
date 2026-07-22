@@ -18,16 +18,18 @@ const ETX = "\x03";
 
 /** A recording rig: captures every frame that would hit the WS (as the exact
  *  bytes terminal.ts sends), every clipboard write, and preventDefault calls. */
-function rig(opts: { selection?: string }) {
+function rig(opts: { selection?: string; composerNewline?: boolean }) {
   const enc = new TextEncoder();
   const wire: Uint8Array[] = [];
   const clipboard: string[] = [];
+  const userInput: string[] = [];
   let prevented = 0;
   let cleared = 0;
   // Mutable so clearSelection() genuinely drops it — a later hasSelection() then
   // reports false, exactly as xterm behaves after a real clear.
   let selection = opts.selection ?? "";
   const deps: ClipboardDeps = {
+    composerNewline: opts.composerNewline ?? true,
     hasSelection: () => selection !== "",
     getSelection: () => selection,
     clearSelection: () => {
@@ -37,11 +39,16 @@ function rig(opts: { selection?: string }) {
     copy: (t) => clipboard.push(t),
     // Byte-identical to terminal.ts's input path, so `wire` holds real OpInput frames.
     sendInput: (t) => wire.push(encode(inputFrame(enc.encode(t)))),
+    sendUserInput: (t) => {
+      userInput.push(t);
+      wire.push(encode(inputFrame(enc.encode(t))));
+    },
   };
   return {
     deps,
     wire,
     clipboard,
+    userInput,
     prevented: () => prevented,
     cleared: () => cleared,
     markPrevented: () => {
@@ -81,13 +88,24 @@ function wireInput(frames: Uint8Array[]): string {
 
 // --- Modified Enter: newline in agent composers, plain Enter still submits -----
 
-test("Shift+Enter sends LF on the wire and suppresses xterm's default CR", () => {
+test("agent Shift+Enter sends LF through xterm's user-input path and suppresses its default CR", () => {
   const r = rig({});
   const ret = handleClipboardKeydown(keyEvent({ key: "Enter", shiftKey: true }, r.markPrevented), r.deps);
 
   assert.equal(ret, false, "xterm must not also turn Shift+Enter into a submitting CR");
+  assert.deepEqual(r.userInput, ["\n"], "LF must traverse xterm's genuine-user-input side effects");
   assert.equal(wireInput(r.wire), "\n", "Codex and Claude both bind LF / Ctrl+J to composer newline");
   assert.equal(r.prevented(), 1, "the handled key must not retain browser-default behavior");
+});
+
+test("Shift+Enter stays xterm-owned outside the agent composer", () => {
+  const r = rig({ composerNewline: false });
+  const ret = handleClipboardKeydown(keyEvent({ key: "Enter", shiftKey: true }, r.markPrevented), r.deps);
+
+  assert.equal(ret, true, "shell/process tabs must retain xterm's existing CR mapping");
+  assert.deepEqual(r.userInput, []);
+  assert.equal(wireInput(r.wire), "", "the custom handler sends no replacement byte outside the agent tab");
+  assert.equal(r.prevented(), 0);
 });
 
 test("plain Enter remains xterm-owned so it still submits as CR", () => {

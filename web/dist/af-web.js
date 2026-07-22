@@ -8161,9 +8161,9 @@ function handleClipboardKeydown(ev, deps) {
   if (ev.type !== "keydown") {
     return true;
   }
-  if (ev.key === "Enter" && ev.shiftKey && !ev.ctrlKey && !ev.metaKey && !ev.altKey) {
+  if (deps.composerNewline && ev.key === "Enter" && ev.shiftKey && !ev.ctrlKey && !ev.metaKey && !ev.altKey) {
     ev.preventDefault();
-    deps.sendInput(LF);
+    deps.sendUserInput(LF);
     return false;
   }
   if (ev.metaKey || ev.altKey || !ev.ctrlKey) {
@@ -8464,11 +8464,15 @@ var AttachTerminal = class {
     this.term.onData((data) => this.sendInput(data));
     this.term.attachCustomKeyEventHandler(
       (ev) => handleClipboardKeydown(ev, {
+        composerNewline: this.tab === 0,
         hasSelection: () => this.term.hasSelection(),
         getSelection: () => this.term.getSelection(),
         clearSelection: () => this.term.clearSelection(),
         copy: (text) => this.copyToClipboard(text),
-        sendInput: (text) => this.sendInput(text)
+        sendInput: (text) => this.sendInput(text),
+        // Public Terminal.input(..., true) is xterm's genuine-user-input path:
+        // it scrolls to bottom and clears selection, then fires onData above.
+        sendUserInput: (text) => this.term.input(text, true)
       })
     );
     this.ro = new ResizeObserver(() => this.scheduleFit());

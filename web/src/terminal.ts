@@ -225,17 +225,22 @@ export class AttachTerminal {
     this.term.onData((data) => this.sendInput(data));
 
     // Modified input + clipboard decisions (see clipboard.ts): intercept the key
-    // BEFORE xterm turns it into input. Bare Shift+Enter emits LF for an agent
-    // composer newline while plain Enter retains xterm's submitting CR; Ctrl+C
-    // copies a present selection (else interrupts), Ctrl+Shift+C is explicit copy,
-    // and Ctrl+V defers to native paste. False suppresses xterm's own handling.
+    // BEFORE xterm turns it into input. Bare Shift+Enter emits LF only for the
+    // invariant agent tab at index 0; shell/process tabs and plain Enter retain
+    // xterm's CR. Ctrl+C copies a present selection (else interrupts),
+    // Ctrl+Shift+C is explicit copy, and Ctrl+V defers to native paste. False
+    // suppresses xterm's own handling.
     this.term.attachCustomKeyEventHandler((ev) =>
       handleClipboardKeydown(ev, {
+        composerNewline: this.tab === 0,
         hasSelection: () => this.term.hasSelection(),
         getSelection: () => this.term.getSelection(),
         clearSelection: () => this.term.clearSelection(),
         copy: (text) => this.copyToClipboard(text),
         sendInput: (text) => this.sendInput(text),
+        // Public Terminal.input(..., true) is xterm's genuine-user-input path:
+        // it scrolls to bottom and clears selection, then fires onData above.
+        sendUserInput: (text) => this.term.input(text, true),
       }),
     );
 
