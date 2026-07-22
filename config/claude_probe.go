@@ -91,6 +91,40 @@ func GetClaudeCommand() (string, error) {
 	return path, err
 }
 
+// shellQuoteDetectedCommand quotes the filesystem-backed executable at the
+// front of a shell-probed command while preserving any alias-provided argument
+// suffix byte-for-byte. The probe cannot return argv: shell aliases are free-form
+// text, and an unquoted path containing spaces is indistinguishable from several
+// words by syntax alone. Filesystem existence supplies the missing boundary.
+//
+// Search longest-first so an existing directory or file that is merely a prefix
+// of the real executable cannot win over the executable itself. Prefix candidates
+// must not be directories; if no file-backed prefix can be proved, leave the
+// command unchanged rather than guessing at shell syntax.
+func shellQuoteDetectedCommand(command string) string {
+	if command == "" {
+		return command
+	}
+	if info, err := os.Stat(command); err == nil && !info.IsDir() {
+		return ShellQuotePath(command)
+	}
+	for boundary := len(command) - 1; boundary >= 0; boundary-- {
+		if command[boundary] != ' ' && command[boundary] != '\t' {
+			continue
+		}
+		candidate := command[:boundary]
+		if candidate == "" {
+			continue
+		}
+		info, err := os.Stat(candidate)
+		if err != nil || info.IsDir() {
+			continue
+		}
+		return ShellQuotePath(candidate) + command[boundary:]
+	}
+	return command
+}
+
 // probeClaudeCommand performs the actual shell probe for the claude command.
 // GetClaudeCommand wraps it with per-environment memoization.
 func probeClaudeCommand() (string, error) {
