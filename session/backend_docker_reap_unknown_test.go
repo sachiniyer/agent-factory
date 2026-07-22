@@ -9,6 +9,8 @@ import (
 	"time"
 )
 
+const dockerReapTestEngineID = "engine-reap-test"
+
 // #2049: a wedged / timed-out `docker rm -f` reap actually LEAKED a container, but
 // the reap returned a PLAIN error. KillSession/deleteSessionRecord classify a
 // teardown by session.TeardownStateUnknown — retain on ErrWorkspaceStateUnknown /
@@ -41,13 +43,16 @@ func withShortDockerReapTimeout(t *testing.T, d time.Duration) {
 // fix reap returned a plain error and TeardownStateUnknown was false.
 func TestDockerReapTimeoutIsWorkspaceStateUnknown(t *testing.T) {
 	withShortDockerReapTimeout(t, 150*time.Millisecond)
-	restore := SetDockerExecForTest(func(ctx context.Context, _ ...string) ([]byte, error) {
+	restore := SetDockerExecForTest(func(ctx context.Context, args ...string) ([]byte, error) {
+		if len(args) > 0 && args[0] == "info" {
+			return []byte(dockerReapTestEngineID + "\n"), nil
+		}
 		<-ctx.Done()
 		return nil, ctx.Err()
 	})
 	defer restore()
 
-	p := &dockerProvisioner{spec: ProvisionSpec{Title: "wedged"}, containerID: "deadbeefcafe0000"}
+	p := &dockerProvisioner{spec: ProvisionSpec{Title: "wedged"}, containerID: "deadbeefcafe0000", engineID: dockerReapTestEngineID}
 
 	done := make(chan error, 1)
 	go func() { done <- p.reap() }()
@@ -78,12 +83,15 @@ func TestDockerReapTimeoutIsWorkspaceStateUnknown(t *testing.T) {
 // the "No such container" (already-gone) case wedge the record forever.
 func TestDockerReapReportedErrorStaysKnown(t *testing.T) {
 	withShortDockerReapTimeout(t, 5*time.Second) // never reached; the fake answers instantly
-	restore := SetDockerExecForTest(func(_ context.Context, _ ...string) ([]byte, error) {
+	restore := SetDockerExecForTest(func(_ context.Context, args ...string) ([]byte, error) {
+		if len(args) > 0 && args[0] == "info" {
+			return []byte(dockerReapTestEngineID + "\n"), nil
+		}
 		return []byte("Error: No such container: deadbeef"), fmt.Errorf("exit status 1")
 	})
 	defer restore()
 
-	p := &dockerProvisioner{spec: ProvisionSpec{Title: "answered"}, containerID: "deadbeefcafe0000"}
+	p := &dockerProvisioner{spec: ProvisionSpec{Title: "answered"}, containerID: "deadbeefcafe0000", engineID: dockerReapTestEngineID}
 	err := p.reap()
 	if err == nil {
 		t.Fatal("a failed `docker rm -f` must return an error")
@@ -100,12 +108,15 @@ func TestDockerReapReportedErrorStaysKnown(t *testing.T) {
 // nil, so the WaitDelay/timeout plumbing never turns a successful `docker rm -f`
 // into a phantom leak report.
 func TestDockerReapSuccessReturnsNil(t *testing.T) {
-	restore := SetDockerExecForTest(func(_ context.Context, _ ...string) ([]byte, error) {
+	restore := SetDockerExecForTest(func(_ context.Context, args ...string) ([]byte, error) {
+		if len(args) > 0 && args[0] == "info" {
+			return []byte(dockerReapTestEngineID + "\n"), nil
+		}
 		return []byte("deadbeefcafe0000\n"), nil
 	})
 	defer restore()
 
-	p := &dockerProvisioner{spec: ProvisionSpec{Title: "clean"}, containerID: "deadbeefcafe0000"}
+	p := &dockerProvisioner{spec: ProvisionSpec{Title: "clean"}, containerID: "deadbeefcafe0000", engineID: dockerReapTestEngineID}
 	if err := p.reap(); err != nil {
 		t.Fatalf("a successful reap must return nil, got %v", err)
 	}
@@ -136,14 +147,17 @@ func reapWithin(t *testing.T, p *dockerProvisioner, guard time.Duration) error {
 func TestDockerReapTimeoutIsReRunnable(t *testing.T) {
 	withShortDockerReapTimeout(t, 150*time.Millisecond)
 	var calls int32
-	restore := SetDockerExecForTest(func(ctx context.Context, _ ...string) ([]byte, error) {
+	restore := SetDockerExecForTest(func(ctx context.Context, args ...string) ([]byte, error) {
+		if len(args) > 0 && args[0] == "info" {
+			return []byte(dockerReapTestEngineID + "\n"), nil
+		}
 		atomic.AddInt32(&calls, 1)
 		<-ctx.Done()
 		return nil, ctx.Err()
 	})
 	defer restore()
 
-	p := &dockerProvisioner{spec: ProvisionSpec{Title: "wedged"}, containerID: "deadbeefcafe0000"}
+	p := &dockerProvisioner{spec: ProvisionSpec{Title: "wedged"}, containerID: "deadbeefcafe0000", engineID: dockerReapTestEngineID}
 
 	first := reapWithin(t, p, 10*time.Second)
 	if !errors.Is(first, ErrWorkspaceStateUnknown) {
@@ -181,7 +195,10 @@ func TestDockerReapTimeoutThenSuccessClears(t *testing.T) {
 	var wedged atomic.Bool
 	var calls int32
 	wedged.Store(true)
-	restore := SetDockerExecForTest(func(ctx context.Context, _ ...string) ([]byte, error) {
+	restore := SetDockerExecForTest(func(ctx context.Context, args ...string) ([]byte, error) {
+		if len(args) > 0 && args[0] == "info" {
+			return []byte(dockerReapTestEngineID + "\n"), nil
+		}
 		atomic.AddInt32(&calls, 1)
 		if wedged.Load() {
 			<-ctx.Done()
@@ -191,7 +208,7 @@ func TestDockerReapTimeoutThenSuccessClears(t *testing.T) {
 	})
 	defer restore()
 
-	p := &dockerProvisioner{spec: ProvisionSpec{Title: "recovers"}, containerID: "deadbeefcafe0000"}
+	p := &dockerProvisioner{spec: ProvisionSpec{Title: "recovers"}, containerID: "deadbeefcafe0000", engineID: dockerReapTestEngineID}
 
 	if err := reapWithin(t, p, 10*time.Second); !errors.Is(err, ErrWorkspaceStateUnknown) {
 		t.Fatalf("first (wedged) reap must be unknown, got %v", err)

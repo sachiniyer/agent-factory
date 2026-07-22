@@ -132,7 +132,10 @@ func TestRuntimeCleanupHandleRoundTripsEveryOffBoxBackend(t *testing.T) {
 			name: "docker",
 			backend: &dockerBackend{
 				provisioner: &dockerProvisioner{containerID: "sha256:cleanup-container"},
-				cleanup:     &DockerRuntimeCleanupData{ContainerID: "sha256:cleanup-container"},
+				cleanup: &DockerRuntimeCleanupData{
+					ContainerID: "sha256:cleanup-container",
+					EngineID:    "engine-cleanup",
+				},
 			},
 		},
 		{
@@ -198,6 +201,122 @@ func TestRuntimeCleanupHandleRoundTripsEveryOffBoxBackend(t *testing.T) {
 				t.Fatalf("cleanup handle changed across restart:\n got %#v\nwant %#v", roundTrip, stored.RuntimeCleanup)
 			}
 		})
+	}
+}
+
+func restoreDockerTombstoneForTest(t *testing.T, engineID string) *Instance {
+	t.Helper()
+	restored, err := FromInstanceData(InstanceData{
+		ID:          "docker-tombstone-id",
+		Title:       "docker-tombstone",
+		Path:        "/repo",
+		BackendType: "docker",
+		UserKilled:  true,
+		RuntimeCleanup: &RuntimeCleanupData{Docker: &DockerRuntimeCleanupData{
+			ContainerID: "sha256:cleanup-container",
+			EngineID:    engineID,
+		}},
+	})
+	if err != nil {
+		t.Fatalf("restore docker tombstone: %v", err)
+	}
+	return restored
+}
+
+func TestRestoredDockerCleanupRefusesDifferentEngine(t *testing.T) {
+	restored := restoreDockerTombstoneForTest(t, "engine-a")
+	var calls [][]string
+	restoreExec := SetDockerExecForTest(func(_ context.Context, args ...string) ([]byte, error) {
+		calls = append(calls, append([]string(nil), args...))
+		if len(args) > 0 && args[0] == "info" {
+			return []byte("engine-b\n"), nil
+		}
+		return []byte("sha256:cleanup-container\n"), nil
+	})
+	defer restoreExec()
+
+	err := restored.Kill()
+	if !errors.Is(err, ErrWorkspaceStateUnknown) {
+		t.Fatalf("cleanup on a different Docker engine must retain the tombstone as unknown, got %v", err)
+	}
+	for _, call := range calls {
+		if len(call) > 0 && call[0] == "rm" {
+			t.Fatalf("cleanup targeted a container before proving the Docker engine identity: calls=%v", calls)
+		}
+	}
+}
+
+func TestRestoredDockerCleanupReapsMatchingEngine(t *testing.T) {
+	restored := restoreDockerTombstoneForTest(t, "engine-a")
+	var calls [][]string
+	restoreExec := SetDockerExecForTest(func(_ context.Context, args ...string) ([]byte, error) {
+		calls = append(calls, append([]string(nil), args...))
+		if len(args) > 0 && args[0] == "info" {
+			return []byte("engine-a\n"), nil
+		}
+		return []byte("sha256:cleanup-container\n"), nil
+	})
+	defer restoreExec()
+
+	if err := restored.Kill(); err != nil {
+		t.Fatalf("cleanup on the recorded Docker engine failed: %v", err)
+	}
+	if len(calls) != 2 || len(calls[0]) == 0 || calls[0][0] != "info" || len(calls[1]) == 0 || calls[1][0] != "rm" {
+		t.Fatalf("restored cleanup calls=%v, want identity probe followed by rm", calls)
+	}
+}
+
+func TestRestoredDockerCleanupRetriesIdentityProbe(t *testing.T) {
+	restored := restoreDockerTombstoneForTest(t, "engine-a")
+	var infoCalls, rmCalls int
+	restoreExec := SetDockerExecForTest(func(_ context.Context, args ...string) ([]byte, error) {
+		if len(args) == 0 {
+			return nil, errors.New("missing docker command")
+		}
+		switch args[0] {
+		case "info":
+			infoCalls++
+			if infoCalls == 1 {
+				return nil, errors.New("docker daemon temporarily unavailable")
+			}
+			return []byte("engine-a\n"), nil
+		case "rm":
+			rmCalls++
+			return []byte("sha256:cleanup-container\n"), nil
+		default:
+			return nil, errors.New("unexpected docker command")
+		}
+	})
+	defer restoreExec()
+
+	if err := restored.Kill(); !errors.Is(err, ErrWorkspaceStateUnknown) {
+		t.Fatalf("an unverifiable Docker target must retain the tombstone, got %v", err)
+	}
+	if rmCalls != 0 {
+		t.Fatalf("identity-probe failure still issued docker rm %d time(s)", rmCalls)
+	}
+	if err := restored.Kill(); err != nil {
+		t.Fatalf("cleanup did not retry after Docker identity became verifiable: %v", err)
+	}
+	if infoCalls != 2 || rmCalls != 1 {
+		t.Fatalf("retry work: info=%d rm=%d, want 2/1", infoCalls, rmCalls)
+	}
+}
+
+func TestLegacyDockerCleanupWithoutEngineIdentityFailsClosed(t *testing.T) {
+	restored := restoreDockerTombstoneForTest(t, "")
+	var calls int
+	restoreExec := SetDockerExecForTest(func(_ context.Context, _ ...string) ([]byte, error) {
+		calls++
+		return nil, nil
+	})
+	defer restoreExec()
+
+	if err := restored.Kill(); !errors.Is(err, ErrWorkspaceStateUnknown) {
+		t.Fatalf("legacy Docker tombstone without engine identity must remain retryable, got %v", err)
+	}
+	if calls != 0 {
+		t.Fatalf("legacy Docker tombstone guessed a target and invoked Docker %d time(s)", calls)
 	}
 }
 

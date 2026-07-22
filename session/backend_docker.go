@@ -70,6 +70,11 @@ const (
 	// `docker ps -aq -f label=af.session` (documented in docs/backends.md). The
 	// runtime reaps by container ID; the label is for operators.
 	dockerSessionLabel = "af.session"
+	// dockerEngineIDFormat selects the daemon's stable, non-secret identity from
+	// `docker info`. Cleanup tombstones persist this value so a daemon restart
+	// cannot redirect `docker rm -f` to whichever engine the client happens to
+	// target later (#2382).
+	dockerEngineIDFormat = "{{.ID}}"
 )
 
 // docker command timeouts. Provisioning steps (run/clone/cp/exec) get a generous
@@ -217,7 +222,9 @@ type dockerProvisioner struct {
 	afBin   string
 	program string
 
-	containerID string
+	containerID        string
+	engineID           string
+	verifyEngineOnReap bool
 
 	// reap memoizes across the repeated Kill retries and the Kill-vs-provision-
 	// failure race, but only for a reap that COMPLETED: reaped latches on success
@@ -235,6 +242,11 @@ type dockerProvisioner struct {
 // session needs. Each step wraps docker's combined output in the error so a
 // failure is self-diagnosing.
 func (p *dockerProvisioner) provision() (ProvisionResult, error) {
+	engineID, err := p.currentEngineID(dockerShortStepTimeout)
+	if err != nil {
+		return ProvisionResult{}, fmt.Errorf("backend=docker: cannot establish the Docker cleanup target before creating a container: %w", err)
+	}
+	p.engineID = engineID
 	if err := p.runContainer(); err != nil {
 		return ProvisionResult{}, err
 	}
@@ -270,7 +282,10 @@ func (p *dockerProvisioner) provision() (ProvisionResult, error) {
 			containerID:        p.containerID,
 			remoteAgentBackend: remoteAgentBackend{reap: teardown},
 			provisioner:        p,
-			cleanup:            &DockerRuntimeCleanupData{ContainerID: p.containerID},
+			cleanup: &DockerRuntimeCleanupData{
+				ContainerID: p.containerID,
+				EngineID:    p.engineID,
+			},
 		},
 		Endpoint: endpoint,
 		Teardown: teardown,
@@ -485,6 +500,27 @@ func (p *dockerProvisioner) reap() error {
 	// opposite things for the record (#2049).
 	ctx, cancel := context.WithTimeout(context.Background(), dockerReapTimeout)
 	defer cancel()
+	if p.verifyEngineOnReap {
+		if strings.TrimSpace(p.engineID) == "" {
+			reapErr := fmt.Errorf("%w: backend=docker: refusing to reap container %s for session %q because its cleanup handle predates Docker engine identity tracking; inspect the original Docker engine and remove the container manually",
+				ErrWorkspaceStateUnknown, p.shortID(), p.spec.Title)
+			log.WarningLog.Printf("%v", reapErr)
+			return reapErr
+		}
+		currentEngineID, err := currentDockerEngineID(ctx)
+		if err != nil {
+			reapErr := fmt.Errorf("%w: backend=docker: cannot verify the Docker engine before reaping container %s for session %q; restore Docker access and retry: %v",
+				ErrWorkspaceStateUnknown, p.shortID(), p.spec.Title, err)
+			log.WarningLog.Printf("%v", reapErr)
+			return reapErr
+		}
+		if currentEngineID != p.engineID {
+			reapErr := fmt.Errorf("%w: backend=docker: refusing to reap container %s for session %q because the current Docker engine is %q, but the cleanup handle belongs to %q; select the original Docker context or DOCKER_HOST and retry",
+				ErrWorkspaceStateUnknown, p.shortID(), p.spec.Title, currentEngineID, p.engineID)
+			log.WarningLog.Printf("%v", reapErr)
+			return reapErr
+		}
+	}
 	out, err := dockerExec(ctx, "rm", "-f", p.containerID)
 	if err == nil {
 		p.reaped = true
@@ -511,6 +547,31 @@ func (p *dockerProvisioner) reap() error {
 	p.reapErr = reapErr
 	log.WarningLog.Printf("%v", reapErr)
 	return reapErr
+}
+
+// currentEngineID returns the daemon identity that the provisioner's Docker
+// client currently targets. New containers record it before `docker run`, and
+// restored reapers prove the same identity again before issuing the destructive
+// command. It deliberately stores no endpoint, context path, or credential.
+func (p *dockerProvisioner) currentEngineID(timeout time.Duration) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	return currentDockerEngineID(ctx)
+}
+
+func currentDockerEngineID(ctx context.Context) (string, error) {
+	out, err := dockerExec(ctx, "info", "--format", dockerEngineIDFormat)
+	if err != nil {
+		return "", fmt.Errorf("`docker info` could not report the engine identity: %w", err)
+	}
+	id := strings.TrimSpace(string(out))
+	if id == "" {
+		return "", errors.New("`docker info` returned an empty engine identity")
+	}
+	if len(id) > 256 || len(strings.Fields(id)) != 1 {
+		return "", errors.New("`docker info` returned a malformed engine identity")
+	}
+	return id, nil
 }
 
 // docker runs `docker <args...>` with a timeout and returns its combined output.
