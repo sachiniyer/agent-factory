@@ -46,6 +46,9 @@ func TestEnsureDaemonPrefersHomeServingUnit(t *testing.T) {
 	if _, err := os.Stat(marker); err != nil {
 		t.Fatalf("bounded systemctl start was not invoked: %v", err)
 	}
+	if _, err := os.Stat(marker + ".reset"); err != nil {
+		t.Fatalf("retained systemd start-limit state was not reset before start: %v", err)
+	}
 }
 
 func TestEnsureDaemonPrefersHomeServingLaunchdUnit(t *testing.T) {
@@ -60,7 +63,7 @@ func TestEnsureDaemonPrefersHomeServingLaunchdUnit(t *testing.T) {
 	managerDir := t.TempDir()
 	marker := filepath.Join(managerDir, "kickstart-called")
 	script := "#!/bin/sh\n" +
-		"if [ \"$1\" != \"kickstart\" ] || [ \"$2\" != \"" + launchdServiceTarget() + "\" ]; then\n" +
+		"if [ \"$1\" != \"kickstart\" ] || [ \"$2\" != \"-k\" ] || [ \"$3\" != \"" + launchdServiceTarget() + "\" ]; then\n" +
 		"  exit 64\n" +
 		"fi\n" +
 		"printf 'called\\n' > " + shellQuote(marker) + "\n"
@@ -123,6 +126,27 @@ func TestEnsureDaemonManagerHangFallsBackWithDegradation(t *testing.T) {
 	}
 	if elapsed >= daemonReadyTimeout {
 		t.Fatalf("manager fallback took %s, want less than the existing %s readiness budget", elapsed, daemonReadyTimeout)
+	}
+}
+
+func TestEnsureDaemonFallbackGetsFreshReadinessWindow(t *testing.T) {
+	_, _ = installEnsureTestUnitAndManager(t, true)
+	startServer, serverErr := ensureTestServerStarter(t)
+
+	// The manager consumes its bounded two-second slice. Reclaiming a stale
+	// daemon and launching its replacement are allowed to take longer than the
+	// remainder of that manager window; the compatibility path historically
+	// starts its five-second readiness clock only after launch returns.
+	err := ensureDaemonWithLauncher(func() error {
+		time.Sleep(daemonReadyTimeout - ensureUnitStartTimeout + 250*time.Millisecond)
+		return startServer()
+	})
+	var degraded *SupervisionDegradedError
+	if !errors.As(err, &degraded) {
+		t.Fatalf("fallback result = %v, want successful launch plus *SupervisionDegradedError", err)
+	}
+	if err := serverErr(); err != nil {
+		t.Fatalf("start delayed ad-hoc daemon: %v", err)
 	}
 }
 
@@ -250,8 +274,16 @@ func installEnsureTestUnitAndManager(t *testing.T, block bool) (string, string) 
 	managerDir := t.TempDir()
 	marker := filepath.Join(managerDir, "start-called")
 	script := "#!/bin/sh\n" +
+		"if [ \"$1\" = \"--user\" ] && [ \"$2\" = \"reset-failed\" ] && [ \"$3\" = \"" + autostartUnitName + "\" ]; then\n" +
+		"  printf 'reset\\n' > " + shellQuote(marker+".reset") + "\n" +
+		"  exit 0\n" +
+		"fi\n" +
 		"if [ \"$1\" != \"--user\" ] || [ \"$2\" != \"start\" ] || [ \"$3\" != \"" + autostartUnitName + "\" ]; then\n" +
 		"  exit 64\n" +
+		"fi\n" +
+		"if [ ! -f " + shellQuote(marker+".reset") + " ]; then\n" +
+		"  printf 'start-limit-hit\\n' >&2\n" +
+		"  exit 1\n" +
 		"fi\n" +
 		"printf 'called\\n' > " + shellQuote(marker) + "\n"
 	if block {

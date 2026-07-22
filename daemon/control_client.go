@@ -129,15 +129,11 @@ func ensureDaemonWithPolicy(launch func() error, preferUnit bool) error {
 			}
 		}
 	}
-	return ensureDaemonAdHoc(launch, time.Time{})
+	return ensureDaemonAdHoc(launch)
 }
 
 func ensureDaemonThroughUnit(launch func() error) error {
-	overallDeadline := time.Now().Add(daemonReadyTimeout)
 	unitDeadline := time.Now().Add(ensureUnitStartTimeout)
-	if unitDeadline.After(overallDeadline) {
-		unitDeadline = overallDeadline
-	}
 
 	unitErr := runEnsureUnitStartCommand(unitDeadline)
 	if unitErr == nil {
@@ -147,13 +143,13 @@ func ensureDaemonThroughUnit(launch func() error) error {
 		}
 	}
 	log.WarningLog.Printf("failed to start daemon through its installed service; falling back to an ad-hoc daemon: %v", unitErr)
-	if err := ensureDaemonAdHoc(launch, overallDeadline); err != nil {
+	if err := ensureDaemonAdHoc(launch); err != nil {
 		return fmt.Errorf("installed daemon service failed: %v; ad-hoc fallback failed: %w", unitErr, err)
 	}
 	return &SupervisionDegradedError{Cause: unitErr}
 }
 
-func ensureDaemonAdHoc(launch func() error, deadline time.Time) error {
+func ensureDaemonAdHoc(launch func() error) error {
 	// A previous daemon version may have a PID file but no control socket. Stop
 	// it before launching the control-plane daemon so we do not run duplicate
 	// scheduler and session-monitor loops. StopDaemon is also how an
@@ -187,10 +183,7 @@ func ensureDaemonAdHoc(launch func() error, deadline time.Time) error {
 		return err
 	}
 
-	if deadline.IsZero() {
-		deadline = time.Now().Add(daemonReadyTimeout)
-	}
-	return waitForDaemonReady(deadline)
+	return waitForDaemonReady(time.Now().Add(daemonReadyTimeout))
 }
 
 func waitForDaemonReady(deadline time.Time) error {

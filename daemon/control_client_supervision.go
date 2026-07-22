@@ -60,19 +60,31 @@ const (
 )
 
 func runEnsureUnitStartCommand(deadline time.Time) error {
-	var name string
-	var args []string
 	switch autostartGOOS {
 	case "linux":
-		name = "systemctl"
-		args = []string{"--user", "start", autostartUnitName}
+		resetErr := runEnsureManagerCommand(
+			deadline, "systemctl", "--user", "reset-failed", autostartUnitName,
+		)
+		startErr := runEnsureManagerCommand(
+			deadline, "systemctl", "--user", "start", autostartUnitName,
+		)
+		if startErr == nil {
+			return nil
+		}
+		if resetErr != nil {
+			return fmt.Errorf("could not clear retained systemd failure state: %v; %w", resetErr, startErr)
+		}
+		return startErr
 	case "darwin":
-		name = "launchctl"
-		args = []string{"kickstart", launchdServiceTarget()}
+		return runEnsureManagerCommand(
+			deadline, "launchctl", "kickstart", "-k", launchdServiceTarget(),
+		)
 	default:
 		return fmt.Errorf("daemon autostart is not supported on %s", autostartGOOS)
 	}
+}
 
+func runEnsureManagerCommand(deadline time.Time, name string, args ...string) error {
 	ctx, cancel := context.WithDeadline(context.Background(), deadline)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, name, args...)
