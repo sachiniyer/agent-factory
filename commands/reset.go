@@ -85,13 +85,17 @@ var resetWipePaths = []string{
 type resetPlan struct {
 	configDir string
 	storage   *session.Storage
-	sessions  int                 // live (non-archived) session records
-	archived  int                 // archived session records
-	tasks     int                 // scheduled cron/watch tasks
-	projects  int                 // durable project registrations for this AF home
-	worktrees int                 // AF-managed worktrees (excludes external --here trees)
-	repoRoots map[string]struct{} // distinct repos with AF records (display only)
-	branches  map[string][]string // repoRoot -> AF-created branch names to prune
+	sessions  int // live (non-archived) session records
+	archived  int // archived session records
+	tasks     int // scheduled cron/watch tasks
+	projects  int // durable project registrations for this AF home
+	// projectCountUnavailable means the registry could not be decoded during
+	// read-only planning. ResetProjectRegistry reports the concrete error during
+	// execution, while the resilient reset still clears unrelated AF state.
+	projectCountUnavailable bool
+	worktrees               int                 // AF-managed worktrees (excludes external --here trees)
+	repoRoots               map[string]struct{} // distinct repos with AF records (display only)
+	branches                map[string][]string // repoRoot -> AF-created branch names to prune
 
 	// worktreeTargets are the SPECIFIC worktree dirs AF created for its sessions
 	// (from the records), each paired with its repo root. Reset removes exactly
@@ -571,9 +575,11 @@ func planFactoryReset() (*resetPlan, error) {
 	plan.tasks = len(tasks)
 	projects, err := config.ListProjects()
 	if err != nil {
-		return nil, fmt.Errorf("failed to read registered projects: %w", err)
+		plan.projectCountUnavailable = true
+		log.WarningLog.Printf("reset: registered project count unavailable; registry cleanup will still be attempted: %v", err)
+	} else {
+		plan.projects = len(projects)
 	}
-	plan.projects = len(projects)
 
 	return plan, nil
 }
@@ -893,7 +899,11 @@ func printResetPlan(out io.Writer, plan *resetPlan) {
 	fmt.Fprintln(out, "WILL REMOVE:")
 	fmt.Fprintf(out, "  • %d session(s) and %d archived session(s)\n", plan.sessions, plan.archived)
 	fmt.Fprintf(out, "  • %d scheduled task(s)\n", plan.tasks)
-	fmt.Fprintf(out, "  • %d registered project record(s), plus reachable checkout identity marker(s) for this AF home\n", plan.projects)
+	if plan.projectCountUnavailable {
+		fmt.Fprintln(out, "  • registered project record count unavailable; registry cleanup and reachable checkout identity marker removal will still be attempted")
+	} else {
+		fmt.Fprintf(out, "  • %d registered project record(s), plus reachable checkout identity marker(s) for this AF home\n", plan.projects)
+	}
 	fmt.Fprintf(out, "  • %d AF worktree(s) across %d repo(s)\n", plan.worktrees, len(plan.repoRoots))
 	fmt.Fprintf(out, "  • %d AF-created session branch(es)\n", plan.branchCount())
 	fmt.Fprintln(out, "  • all AF state (live sessions, archived sessions, events, logs, locks)")

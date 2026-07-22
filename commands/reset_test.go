@@ -375,6 +375,55 @@ func TestFactoryReset_PreservesUnownedProjectsDirectory(t *testing.T) {
 	}
 }
 
+func TestFactoryReset_MalformedProjectRegistryDoesNotBlockOtherCleanup(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	t.Chdir(t.TempDir())
+
+	const projectID = "prj_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	recordPath := filepath.Join(home, config.ProjectRegistryDirName, projectID, "project.json")
+	writeFile(t, recordPath, "{not valid json")
+	if err := task.AddTask(task.Task{
+		ID: "reset-task", CronExpr: "* * * * *", Prompt: "do", Enabled: true,
+	}); err != nil {
+		t.Fatalf("AddTask: %v", err)
+	}
+	eventsDir := filepath.Join(home, "events")
+	writeFile(t, filepath.Join(eventsDir, "pending.json"), "{}")
+
+	plan, err := planFactoryReset()
+	if err != nil {
+		t.Fatalf("a malformed project record must not block reset planning: %v", err)
+	}
+	if !plan.projectCountUnavailable {
+		t.Fatal("malformed registry should make the project count explicitly unavailable")
+	}
+	var planOutput strings.Builder
+	printResetPlan(&planOutput, plan)
+	if !strings.Contains(planOutput.String(), "project record count unavailable") ||
+		!strings.Contains(planOutput.String(), "cleanup") {
+		t.Fatalf("reset plan hid the unreadable registry:\n%s", planOutput.String())
+	}
+	summary, err := executeFactoryReset(plan)
+	if err == nil || !strings.Contains(err.Error(), "reset project registry") {
+		t.Fatalf("executeFactoryReset error = %v, want the deferred project-registry error", err)
+	}
+	if summary.tasks != 1 {
+		t.Fatalf("removed tasks = %d, want 1", summary.tasks)
+	}
+	tasks, loadErr := task.LoadTasks()
+	if loadErr != nil {
+		t.Fatalf("LoadTasks after reset: %v", loadErr)
+	}
+	if len(tasks) != 0 {
+		t.Fatalf("tasks after reset = %d, want 0", len(tasks))
+	}
+	assertGone(t, eventsDir)
+	if _, statErr := os.Stat(recordPath); statErr != nil {
+		t.Fatalf("malformed project record should remain for repair: %v", statErr)
+	}
+}
+
 func assertGone(t *testing.T, path string) {
 	t.Helper()
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
