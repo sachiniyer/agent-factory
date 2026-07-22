@@ -100,13 +100,15 @@ export function shouldForgetToken(e: unknown): boolean {
 
 /**
  * The `error` member of the shared envelope. It is an OBJECT, not a string:
- * apiproto.Failure() marshals `EnvelopeError{Message string}`, so the wire shape
- * is `{"error":{"message":"..."}}`. Getting this wrong is what rendered
+ * apiproto.Failure() marshals `EnvelopeError{Message, Code}`, so the wire shape
+ * is `{"error":{"message":"...","code":"..."}}` when a machine-readable
+ * outcome exists. Getting this wrong is what rendered
  * "[object Object]" at every error site — a bare `${env.error}` stringifies the
  * object. Mirrors apiclient/client.go, which reads env.Error.Message.
  */
 interface EnvelopeError {
   message: string;
+  code?: string;
 }
 
 /** The shared REST envelope every /v1/ route returns (apiproto/envelope.go). */
@@ -176,17 +178,33 @@ function envelopeErrorText(err: EnvelopeError | null | undefined, statusLine: st
   return errorText(err, statusLine);
 }
 
+function envelopeErrorCode(err: unknown): string {
+  if (err === null || typeof err !== "object") {
+    return "";
+  }
+  const code = (err as { code?: unknown }).code;
+  return typeof code === "string" ? code : "";
+}
+
+export const MUTATION_COMMITTED_ERROR_CODE = "mutation_committed";
+
 /**
  * A failed API call. `status` is the HTTP status (0 for a network/transport
- * failure) so callers can distinguish 401-unauthorized from a genuine error.
+ * failure), while `code` preserves an optional machine-readable daemon outcome.
  */
 export class ApiError extends Error {
   readonly status: number;
-  constructor(status: number, message: string) {
+  readonly code: string;
+  constructor(status: number, message: string, code = "") {
     super(message);
     this.name = "ApiError";
     this.status = status;
+    this.code = code;
   }
+}
+
+export function isMutationCommittedError(e: unknown): e is ApiError {
+  return e instanceof ApiError && e.code === MUTATION_COMMITTED_ERROR_CODE;
 }
 
 /**
@@ -227,10 +245,10 @@ export async function af<T>(method: string, body: unknown, token: string): Promi
 
   const statusLine = `${resp.status} ${resp.statusText}`.trim();
   if (!resp.ok) {
-    throw new ApiError(resp.status, envelopeErrorText(env?.error, statusLine));
+    throw new ApiError(resp.status, envelopeErrorText(env?.error, statusLine), envelopeErrorCode(env?.error));
   }
   if (env && env.error != null) {
-    throw new ApiError(resp.status, envelopeErrorText(env.error, statusLine));
+    throw new ApiError(resp.status, envelopeErrorText(env.error, statusLine), envelopeErrorCode(env.error));
   }
   return env?.data as T;
 }

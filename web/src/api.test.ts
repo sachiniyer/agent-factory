@@ -15,6 +15,7 @@ import {
   type CreateSessionInput,
   createTab,
   errorText,
+  isMutationCommittedError,
   killSession,
   listBackends,
   listPrograms,
@@ -398,7 +399,8 @@ test("an envelope error preserves its machine-readable outcome code", async () =
     (e: unknown) => e,
   );
   assert.ok(err instanceof ApiError);
-  assert.equal((err as ApiError & { code?: string }).code, "mutation_committed");
+  assert.equal(err.code, "mutation_committed");
+  assert.equal(isMutationCommittedError(err), true);
 });
 
 test("a 200 carrying an envelope error still surfaces the real message", async () => {

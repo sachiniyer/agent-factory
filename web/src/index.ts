@@ -26,6 +26,7 @@ import {
   fetchSnapshot,
   killSession,
   getConfig,
+  isMutationCommittedError,
   listBackends,
   listPrograms,
   listTasks,
@@ -1193,6 +1194,12 @@ function openEditTask(task: TaskData): void {
             refreshTasks();
           })
           .catch((e) => {
+            if (isMutationCommittedError(e)) {
+              closeModal();
+              refreshTasks();
+              surfaceTabError(e);
+              return;
+            }
             m.setBusy(false);
             m.setError(describeError(e));
           });
@@ -1215,7 +1222,12 @@ function toggleTask(task: TaskData): void {
   // concurrent edit another client made to the prompt/trigger/target.
   void updateTask(task.id, { enabled: !task.enabled }, tok)
     .then(refreshTasks)
-    .catch((e) => surfaceTabError(e));
+    .catch((e) => {
+      if (isMutationCommittedError(e)) {
+        refreshTasks();
+      }
+      surfaceTabError(e);
+    });
 }
 
 /** Fires a task now (TriggerTask), then refetches to pick up the new last-run. The
