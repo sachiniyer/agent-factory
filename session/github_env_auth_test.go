@@ -52,6 +52,22 @@ func TestGitHubEnvironmentCredentialAllowsConfiguredEnterpriseHost(t *testing.T)
 	if !strings.Contains(helper, "GH_ENTERPRISE_TOKEN") {
 		t.Fatal("enterprise credential helper omitted the enterprise token name")
 	}
+	for _, publicName := range []string{"GH_TOKEN", "GITHUB_TOKEN"} {
+		if strings.Contains(helper, publicName) {
+			t.Fatalf("enterprise credential helper fell back to public token name %s", publicName)
+		}
+	}
+}
+
+func TestGitHubEnvironmentCredentialUsesPublicTokenForEnterpriseCloud(t *testing.T) {
+	t.Setenv("GH_HOST", "tenant.ghe.com")
+	_, helper, ok := githubEnvironmentCredential("https://tenant.ghe.com/example/project.git")
+	if !ok {
+		t.Fatal("configured GitHub Enterprise Cloud origin did not produce a credential helper")
+	}
+	if !strings.Contains(helper, "GH_TOKEN") || strings.Contains(helper, "GH_ENTERPRISE_TOKEN") {
+		t.Fatal("GitHub Enterprise Cloud helper did not use only public-host token names")
+	}
 }
 
 func TestGitHubEnvironmentCredentialSpeaksGitCredentialProtocol(t *testing.T) {

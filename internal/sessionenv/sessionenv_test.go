@@ -6,6 +6,38 @@ import (
 	"testing"
 )
 
+func TestAgentForCommandRequiresLiteralAgentInvocation(t *testing.T) {
+	tests := []struct {
+		name    string
+		command string
+		want    string
+	}{
+		{name: "bare agent", command: "codex --model o3", want: "codex"},
+		{name: "agent path", command: "/opt/bin/claude --permission-mode plan", want: "claude"},
+		{name: "literal assignment", command: "CODEX_HOME=/tmp/codex codex", want: "codex"},
+		{name: "exec", command: "exec -- gemini --model flash", want: "gemini"},
+		{name: "env", command: "env -i HOME=/tmp aider --model sonnet", want: "aider"},
+		{
+			name:    "generated agent server",
+			command: "/srv/af agent-server --listen :43110 --repo /workspace --title test --program 'opencode --model test' --program-resolved --session-env CUSTOM_TOKEN",
+			want:    "opencode",
+		},
+		{name: "agent name used as data", command: "./collect codex"},
+		{name: "agent server title lookalike", command: "/srv/af agent-server --listen :43110 --repo /workspace --title codex"},
+		{name: "compound command", command: "collect; codex"},
+		{name: "redirect", command: "codex >output"},
+		{name: "dynamic argument", command: "codex --model $MODEL"},
+		{name: "unsupported wrapper", command: "command codex"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := AgentForCommand(test.command); got != test.want {
+				t.Fatalf("AgentForCommand(%q) = %q, want %q", test.command, got, test.want)
+			}
+		})
+	}
+}
+
 func TestFilterScopesAuthenticationToSelectedAgent(t *testing.T) {
 	source := []string{
 		"PATH=/usr/bin",

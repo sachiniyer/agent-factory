@@ -327,20 +327,21 @@ func TestPreResolvedSandboxProgramBypassesSecondOverrideLookup(t *testing.T) {
 	}
 }
 
-func TestHookScriptGetsFilteredEnvironment(t *testing.T) {
+func TestHookScriptRejectsAgentNameUsedAsDataAndGetsConfiguredEnvironment(t *testing.T) {
 	const (
 		customName = "CUSTOM_PROVIDER_TOKEN"
 		deniedName = "AF_TEST_UNRELATED_SECRET"
 	)
 	t.Setenv(customName, "test-value")
 	t.Setenv(deniedName, "test-value")
+	t.Setenv("OPENAI_API_KEY", "test-value")
 
 	script := filepath.Join(t.TempDir(), "print-env-names")
 	if err := os.WriteFile(script, []byte("#!/bin/sh\nenv | cut -d= -f1\n"), 0700); err != nil {
 		t.Fatal(err)
 	}
 	out, _, err := runHookScriptWithEnvironment(
-		hookDeleteTimeout, script, tmux.ProgramCodex, []string{customName},
+		hookDeleteTimeout, script, "./collect codex", []string{customName},
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -351,6 +352,23 @@ func TestHookScriptGetsFilteredEnvironment(t *testing.T) {
 	}
 	if slices.Contains(names, deniedName) {
 		t.Fatalf("hook environment retained disallowed variable %s", deniedName)
+	}
+	if slices.Contains(names, "OPENAI_API_KEY") {
+		t.Fatal("hook environment selected Codex credentials from an agent-looking data argument")
+	}
+}
+
+func TestSandboxCredentialSelectionRejectsAgentNameUsedAsData(t *testing.T) {
+	program := "./collect codex"
+	tests := map[string]func() string{
+		"docker": func() string { return (&dockerProvisioner{program: program}).agentName() },
+		"ssh":    func() string { return (&sshProvisioner{program: program}).agentName() },
+		"hook":   func() string { return (&hookProvisioner{program: program}).environmentAgent() },
+	}
+	for backend, selectedAgent := range tests {
+		if got := selectedAgent(); got != "" {
+			t.Fatalf("%s credential boundary selected %q from an agent-looking data argument", backend, got)
+		}
 	}
 }
 

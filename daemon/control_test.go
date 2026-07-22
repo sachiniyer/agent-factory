@@ -108,7 +108,7 @@ func TestManagerCreateSessionPersistsAndRejectsDuplicate(t *testing.T) {
 	}
 }
 
-func TestManagerCreateSessionPassesConfiguredSessionEnvironment(t *testing.T) {
+func TestManagerCreateSessionReloadsConfiguredSessionEnvironment(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	repoPath := setupControlRepo(t)
 
@@ -122,10 +122,18 @@ func TestManagerCreateSessionPassesConfiguredSessionEnvironment(t *testing.T) {
 	t.Cleanup(restore)
 
 	cfg := config.DefaultConfig()
-	cfg.SessionEnvPassthrough = []string{"CUSTOM_PROVIDER_TOKEN"}
+	cfg.SessionEnvPassthrough = []string{"REMOVED_PROVIDER_TOKEN"}
+	if err := config.SaveConfig(cfg); err != nil {
+		t.Fatal(err)
+	}
 	manager, err := NewManager(cfg)
 	if err != nil {
 		t.Fatalf("NewManager: %v", err)
+	}
+	current := config.DefaultConfig()
+	current.SessionEnvPassthrough = []string{"CURRENT_PROVIDER_TOKEN"}
+	if err := config.SaveConfig(current); err != nil {
+		t.Fatal(err)
 	}
 	if _, err := manager.CreateSession(context.Background(), CreateSessionRequest{
 		Title:    "configured-env",
@@ -134,8 +142,8 @@ func TestManagerCreateSessionPassesConfiguredSessionEnvironment(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("CreateSession: %v", err)
 	}
-	if len(got) != 1 || got[0] != "CUSTOM_PROVIDER_TOKEN" {
-		t.Fatalf("backend received session environment names %v, want configured exact name", got)
+	if len(got) != 1 || got[0] != "CURRENT_PROVIDER_TOKEN" {
+		t.Fatalf("backend received session environment names %v, want the current on-disk exact name", got)
 	}
 }
 

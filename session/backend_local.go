@@ -96,8 +96,7 @@ func refreshWorktreeEnvironment(i *Instance, worktree *git.GitWorktree) error {
 	if worktree == nil {
 		return nil
 	}
-	agent := tmux.DetectAgentFromCommand(resolveProgramForInstance(i))
-	if err := worktree.SetHookEnvironment(agent, sessionEnvPassthroughForInstance(i)); err != nil {
+	if err := worktree.SetHookEnvironment("", sessionEnvPassthroughForInstance(i)); err != nil {
 		return fmt.Errorf("invalid post-worktree environment pass-through: %w", err)
 	}
 	return nil

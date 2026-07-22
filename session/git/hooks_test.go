@@ -17,7 +17,7 @@ import (
 	"github.com/sachiniyer/agent-factory/config"
 )
 
-func TestPostWorktreeHookEnvironmentIsDefaultDeny(t *testing.T) {
+func TestPostWorktreeHookEnvironmentRequiresExplicitCredentialNames(t *testing.T) {
 	const (
 		customName = "CUSTOM_PACKAGE_TOKEN"
 		deniedName = "AF_TEST_UNRELATED_SECRET"
@@ -41,10 +41,13 @@ func TestPostWorktreeHookEnvironmentIsDefaultDeny(t *testing.T) {
 		t.Fatal(err)
 	}
 	names := strings.Fields(string(data))
-	for _, want := range []string{"PATH", "OPENAI_API_KEY", customName} {
+	for _, want := range []string{"PATH", customName} {
 		if !slices.Contains(names, want) {
 			t.Fatalf("post-worktree hook omitted allowed variable %s", want)
 		}
+	}
+	if slices.Contains(names, "OPENAI_API_KEY") {
+		t.Fatal("repo-controlled post-worktree hook inherited selected-agent credentials without explicit pass-through")
 	}
 	if slices.Contains(names, deniedName) {
 		t.Fatalf("post-worktree hook inherited disallowed variable %s", deniedName)

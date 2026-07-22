@@ -582,7 +582,7 @@ func (p *sshProvisioner) agentServerCommand() (string, error) {
 }
 
 func (p *sshProvisioner) agentName() string {
-	agentName := tmux.DetectAgentFromCommand(p.program)
+	agentName := sessionenv.AgentForCommand(p.program)
 	if agentName == "" && strings.TrimSpace(p.program) == "" {
 		return tmux.ProgramClaude
 	}

@@ -45,9 +45,11 @@ func RunPostWorktreeHooksAsync(ctx context.Context, repoPath, worktreePath strin
 }
 
 // RunPostWorktreeHooksAsyncWithEnvironment is the session-aware form used by
-// GitWorktree. The compatibility wrapper above remains default-deny too, but
-// has no selected-agent or explicit extension names to add.
-func RunPostWorktreeHooksAsyncWithEnvironment(ctx context.Context, repoPath, worktreePath, agent string, passthrough []string) <-chan struct{} {
+// GitWorktree. Repository-provided commands receive common Git/runtime names
+// plus only the operator's explicit extensions. Selecting an agent for the
+// session does not grant that agent's provider credentials to repository code;
+// the agent parameter remains only for compatibility with existing callers.
+func RunPostWorktreeHooksAsyncWithEnvironment(ctx context.Context, repoPath, worktreePath, _ string, passthrough []string) <-chan struct{} {
 	done := make(chan struct{})
 	repoCfg, err := config.ResolveConfig(repoPath)
 	if err != nil {
@@ -74,7 +76,7 @@ func RunPostWorktreeHooksAsyncWithEnvironment(ctx context.Context, repoPath, wor
 
 			var output bytes.Buffer
 			cmd := exec.Command("sh", "-c", cmdStr)
-			cmd.Env = sessionenv.Filter(os.Environ(), agent, passthrough)
+			cmd.Env = sessionenv.Filter(os.Environ(), "", passthrough)
 			cmd.Dir = worktreePath
 			cmd.Stdout = &output
 			cmd.Stderr = &output

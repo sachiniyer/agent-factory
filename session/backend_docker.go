@@ -560,7 +560,7 @@ func (p *dockerProvisioner) docker(timeout time.Duration, args ...string) ([]byt
 }
 
 func (p *dockerProvisioner) agentName() string {
-	agent := tmux.DetectAgentFromCommand(p.program)
+	agent := sessionenv.AgentForCommand(p.program)
 	if agent == "" && strings.TrimSpace(p.program) == "" {
 		return tmux.ProgramClaude
 	}

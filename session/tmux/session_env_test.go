@@ -32,7 +32,7 @@ func forceSessionEnvExecutable(t *testing.T, path string) {
 
 func wrappedProgramForTest(t *testing.T, executable, program string) string {
 	t.Helper()
-	wrapped, err := sessionenv.WrapCommand(executable, DetectAgentFromCommand(program), nil, program)
+	wrapped, err := sessionenv.WrapCommand(executable, sessionenv.AgentForCommand(program), nil, program)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -107,6 +107,28 @@ func TestStartAllowsConfiguredExactVariable(t *testing.T) {
 	}
 	if strings.Contains(pty.cmd.String(), "test-value") {
 		t.Fatal("tmux argv rendered an environment value")
+	}
+}
+
+func TestAgentNameUsedAsDataDoesNotSelectCredentialAllowlist(t *testing.T) {
+	forceSessionEnvExecutable(t, "/opt/af")
+	t.Setenv("OPENAI_API_KEY", "fixture")
+	t.Setenv("ANTHROPIC_API_KEY", "fixture")
+
+	for _, program := range []string{
+		"./collect codex",
+		"/srv/af agent-server --listen :43110 --repo /workspace --title codex",
+	} {
+		session := NewTmuxSession("agent-name-data", program)
+		_, environ, imports, err := session.launchEnvironment(program)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, name := range []string{"OPENAI_API_KEY", "ANTHROPIC_API_KEY"} {
+			if launchEnvironmentHasName(environ, name) || slices.Contains(imports, name) {
+				t.Fatalf("program %q selected %s from an agent-looking data argument", program, name)
+			}
+		}
 	}
 }
 

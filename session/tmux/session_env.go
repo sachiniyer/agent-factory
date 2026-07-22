@@ -31,7 +31,7 @@ func (t *TmuxSession) launchEnvironment(program string) (string, []string, []str
 	t.programMu.RLock()
 	extra := append([]string(nil), t.envPassthrough...)
 	t.programMu.RUnlock()
-	agent := DetectAgentFromCommand(program)
+	agent := sessionenv.AgentForCommand(program)
 	executable, err := sessionEnvExecutable()
 	if err != nil {
 		return "", nil, nil, err

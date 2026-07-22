@@ -77,10 +77,10 @@ type GitWorktree struct {
 	sessionName string
 	// Branch name for the worktree
 	branchName string
-	// hookAgent and hookEnvPassthrough define the environment boundary for
-	// repository-provided post-worktree commands. Git itself receives the common
-	// Git/GitHub subset plus the explicit names, but never agent-provider keys.
-	hookAgent          string
+	// hookEnvPassthrough extends the default-deny environment boundary for
+	// repository-provided post-worktree commands. Hooks receive the common
+	// Git/runtime subset plus these exact names, but never agent-provider keys
+	// merely because the session selected that agent.
 	hookEnvPassthrough []string
 	// Base commit hash for the worktree
 	baseCommitSHA string
@@ -112,14 +112,14 @@ type GitWorktree struct {
 	hooksDone <-chan struct{}
 }
 
-// SetHookEnvironment sets the selected agent and exact operator-approved names
-// used by post-worktree commands. Call it before Setup or either rebuild path.
-func (g *GitWorktree) SetHookEnvironment(agent string, names []string) error {
+// SetHookEnvironment sets exact operator-approved names used by post-worktree
+// commands. The agent parameter remains for compatibility but never grants
+// provider credentials to repository code. Call this before Setup or rebuild.
+func (g *GitWorktree) SetHookEnvironment(_ string, names []string) error {
 	normalized, err := sessionenv.NormalizeExtraNames(names)
 	if err != nil {
 		return err
 	}
-	g.hookAgent = agent
 	g.hookEnvPassthrough = normalized
 	return nil
 }

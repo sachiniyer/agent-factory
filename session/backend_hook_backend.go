@@ -189,7 +189,7 @@ func (p *hookProvisioner) manualReapCommand() string {
 // Reaping a FAILED launch's sandbox is a separate act with a real criterion, and
 // it is delete_cmd's job, not a side effect of how we captured output: see reap.
 func runHookScriptWithEnvironment(timeout time.Duration, name, program string, passthrough []string, args ...string) ([]byte, *exec.Cmd, error) {
-	agentName := tmux.DetectAgentFromCommand(program)
+	agentName := sessionenv.AgentForCommand(program)
 	if agentName == "" && strings.TrimSpace(program) == "" {
 		agentName = tmux.ProgramClaude
 	}
@@ -437,7 +437,7 @@ func (p *hookProvisioner) environmentProgram() string {
 }
 
 func (p *hookProvisioner) environmentAgent() string {
-	agent := tmux.DetectAgentFromCommand(p.environmentProgram())
+	agent := sessionenv.AgentForCommand(p.environmentProgram())
 	if agent == "" && strings.TrimSpace(p.environmentProgram()) == "" {
 		return tmux.ProgramClaude
 	}

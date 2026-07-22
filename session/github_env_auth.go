@@ -23,8 +23,8 @@ func githubEnvironmentCredential(cloneURL string) (key, helper string, ok bool) 
 	// Keep a non-default port in the credential scope. Hostname() would broaden
 	// https://git.example:8443 to every HTTPS service on git.example.
 	host := u.Host
-	tokenExpression := `${GH_ENTERPRISE_TOKEN:-${GITHUB_ENTERPRISE_TOKEN:-${GH_TOKEN:-${GITHUB_TOKEN:-}}}}`
-	if publicGitHub {
+	tokenExpression := `${GH_ENTERPRISE_TOKEN:-${GITHUB_ENTERPRISE_TOKEN:-}}`
+	if publicGitHub || strings.HasSuffix(strings.ToLower(u.Hostname()), ".ghe.com") {
 		tokenExpression = `${GH_TOKEN:-${GITHUB_TOKEN:-}}`
 	}
 	helper = `!f() { token="` + tokenExpression + `"; ` +
