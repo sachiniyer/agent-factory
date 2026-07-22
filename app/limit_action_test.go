@@ -63,6 +63,35 @@ func TestHandleLimitRetry_LimitRow_Dispatches(t *testing.T) {
 	require.Equal(t, "worker", gotTitle, "the resume command must call the daemon for the selected title")
 }
 
+// A manual retry retains its target while the tea.Cmd waits to run. If a
+// snapshot replaces the selected row with a different session that reused the
+// title in that window, the pending retry must not deliver the old prompt into
+// the replacement.
+func TestHandleLimitRetry_DoesNotTargetSameTitleReplacement(t *testing.T) {
+	h := newTestHome(t)
+	original := limitActionInstance(t, "worker", time.Now().Add(time.Hour))
+	h.store.AddInstance(original)
+	h.sidebar.SetSelectedInstance(0)
+
+	var deliveredTo *session.Instance
+	restore := SetLimitResumerForTest(func(title, _ string) error {
+		deliveredTo = h.store.GetInstanceByTitle(title)
+		return nil
+	})
+	defer restore()
+
+	_, cmd := h.handleLimitRetry()
+	require.NotNil(t, cmd)
+
+	replacement := limitActionInstance(t, original.Title, time.Now().Add(2*time.Hour))
+	require.NotEqual(t, original.ID, replacement.ID)
+	require.True(t, h.store.ReplaceInstance(original, replacement))
+
+	_ = cmd()
+	require.NotSame(t, replacement, deliveredTo,
+		"a pending retry must not re-deliver the original prompt into a same-title replacement")
+}
+
 // TestHandleLimitRetry_TearingDownRow_NoDispatch: pressing c on a limit-blocked
 // row that is already being deleted must not race a resume RPC against teardown.
 func TestHandleLimitRetry_TearingDownRow_NoDispatch(t *testing.T) {
@@ -108,6 +137,20 @@ func TestHandleLimitRetried_ClearsLocally(t *testing.T) {
 
 	_, _ = h.handleLimitRetried(limitRetriedMsg{title: "worker"})
 	require.False(t, inst.LimitReached(), "a successful retry must clear the local limit state")
+}
+
+func TestHandleLimitRetried_DoesNotClearSameTitleReplacement(t *testing.T) {
+	h := newTestHome(t)
+	original := limitActionInstance(t, "worker", time.Now().Add(time.Hour))
+	h.store.AddInstance(original)
+
+	replacement := limitActionInstance(t, original.Title, time.Now().Add(2*time.Hour))
+	require.NotEqual(t, original.ID, replacement.ID)
+	require.True(t, h.store.ReplaceInstance(original, replacement))
+
+	_, _ = h.handleLimitRetried(limitRetriedMsg{title: original.Title})
+	require.True(t, replacement.LimitReached(),
+		"the old retry completion must not clear a same-title replacement's limit state")
 }
 
 func TestHandleLimitRetried_NoOpKeepsLimitLocally(t *testing.T) {
