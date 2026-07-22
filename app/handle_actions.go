@@ -461,8 +461,8 @@ func (m *home) handleInstanceArchived(msg instanceArchivedMsg) (tea.Model, tea.C
 // (#1146, `c`). On success the daemon cleared the limit and re-delivered the
 // prompt; a non-nil err is surfaced in the error box.
 type limitRetriedMsg struct {
-	title string
-	err   error
+	target sessionActionTarget
+	err    error
 }
 
 // handleLimitRetry is the usage-limit manual-retry verb (#1146, `c`): on a
@@ -483,21 +483,21 @@ func (m *home) handleLimitRetry() (tea.Model, tea.Cmd) {
 	if !selected.LimitReached() {
 		return m, m.handleError(fmt.Errorf("session '%s' is not blocked on a usage limit", selected.Title))
 	}
-	return m, m.resumeFromLimitCmd(selected.Title)
+	target := captureSessionActionTarget(selected, m.repoID)
+	return m, m.resumeFromLimitCmd(target)
 }
 
 // resumeFromLimitCmd runs the daemon resume (re-spawn if needed + re-deliver the
 // prompt + clear the limit state) off the event loop (#1146), mirroring
 // restoreInstanceCmd.
-func (m *home) resumeFromLimitCmd(title string) tea.Cmd {
-	repoID := m.repoID
+func (m *home) resumeFromLimitCmd(target sessionActionTarget) tea.Cmd {
 	resume := resumeFromLimitThroughDaemon
 	return func() tea.Msg {
-		if err := resume(title, repoID); err != nil {
-			log.ErrorLog.Printf("could not resume limited session %q: %v", title, err)
-			return limitRetriedMsg{title: title, err: err}
+		if err := resume(target.resumeFromLimitRequest()); err != nil {
+			log.ErrorLog.Printf("could not resume limited session %q: %v", target.title, err)
+			return limitRetriedMsg{target: target, err: err}
 		}
-		return limitRetriedMsg{title: title}
+		return limitRetriedMsg{target: target}
 	}
 }
 
@@ -507,13 +507,10 @@ func (m *home) resumeFromLimitCmd(title string) tea.Cmd {
 // the next snapshot reconcile). On failure the error lands in the error box.
 func (m *home) handleLimitRetried(msg limitRetriedMsg) (tea.Model, tea.Cmd) {
 	if msg.err != nil {
-		return m, m.handleError(fmt.Errorf("failed to resume session '%s': %w", msg.title, msg.err))
+		return m, m.handleError(fmt.Errorf("failed to resume session '%s': %w", msg.target.title, msg.err))
 	}
-	for _, inst := range m.store.GetInstances() {
-		if inst.Title == msg.title {
-			inst.ClearLimitReached()
-			break
-		}
+	if inst := m.resolveSessionActionTarget(msg.target); inst != nil {
+		inst.ClearLimitReached()
 	}
 	return m, nil
 }

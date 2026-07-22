@@ -235,8 +235,8 @@ type ResumeFromLimitRequest struct {
 	// is the PRIMARY lookup key: the daemon resolves the target by id first and
 	// only falls back to {Title, RepoID} when it is empty. Same contract as
 	// KillSessionRequest.ID — web clients send it so a duplicate title across
-	// repos cannot target the wrong session, TUI/CLI callers omit it and resolve
-	// by title.
+	// repos cannot target the wrong session. Retained TUI retries send it;
+	// one-shot CLI callers resolve by repo-scoped title.
 	//
 	// Added when this verb was promoted out of internalHTTPRoutes for the web
 	// (#1934). It is not decoration: the verb re-delivers a prompt into a pane, so
