@@ -380,6 +380,27 @@ test("an envelope error object renders its message, never [object Object]", asyn
   assert.doesNotMatch(err.message, /\[object Object\]/);
 });
 
+test("an envelope error preserves its machine-readable outcome code", async () => {
+  stubFetchResponse({
+    ok: false,
+    status: 500,
+    statusText: "Internal Server Error",
+    json: async () => ({
+      data: null,
+      error: {
+        message: "task update committed, but schedule refresh failed",
+        code: "mutation_committed",
+      },
+    }),
+  });
+  const err = await updateTask("t-committed", { enabled: false }, "tok").then(
+    () => null,
+    (e: unknown) => e,
+  );
+  assert.ok(err instanceof ApiError);
+  assert.equal((err as ApiError & { code?: string }).code, "mutation_committed");
+});
+
 test("a 200 carrying an envelope error still surfaces the real message", async () => {
   stubFetchResponse({
     ok: true,
