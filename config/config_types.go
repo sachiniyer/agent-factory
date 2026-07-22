@@ -448,13 +448,10 @@ func DefaultConfig() *Config {
 
 	if claudePath, err := GetClaudeCommand(); err == nil && claudePath != "" {
 		// An alias can resolve to a full command with flags (e.g. "claude
-		// --model opus"), which is already shell syntax and must not be
-		// re-quoted wholesale. Only a bare path that exists on disk gets the
-		// space/apostrophe quoting treatment (#569).
-		command := claudePath
-		if _, statErr := os.Stat(claudePath); statErr == nil {
-			command = ShellQuotePath(claudePath)
-		}
+		// --model opus"), which is already shell syntax and must not be quoted
+		// wholesale. Quote only a provable executable-path prefix and preserve
+		// the alias-provided argument suffix (#569, #2323).
+		command := shellQuoteDetectedCommand(claudePath)
 		cfg.ProgramOverrides = map[string]string{
 			tmux.ProgramClaude: command + " --dangerously-skip-permissions",
 		}
