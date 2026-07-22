@@ -350,6 +350,67 @@ func TestInjectSystemPrompt_OpencodeDoesNotClobberAfOwnedFiles(t *testing.T) {
 	}
 }
 
+// TestInjectSystemPrompt_Devin pins devin's launch-flag seam: af appends
+// --respect-workspace-trust false so devin's interactive workspace-trust modal
+// never blocks an af worktree from reaching ready.
+//
+// The load-bearing property is the CONDITIONAL append. devin rejects
+// --respect-workspace-trust given twice ("cannot be used multiple times",
+// verified against devin 3000.2.17), so an unconditional append would
+// launch-crash for any user whose program_overrides.devin already carries the
+// flag. So af must skip the append exactly when the resolved command already
+// specifies it — which also lets a --permission-mode override compose cleanly
+// and lets a user's explicit trust choice (either value) win.
+func TestInjectSystemPrompt_Devin(t *testing.T) {
+	// The devin seam writes no files, but keep HOME/AF_HOME off the real ones.
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("HOME", t.TempDir())
+
+	tests := []struct {
+		name     string
+		resolved string
+		want     string
+	}{
+		// No trust flag present → af appends it (default, and the create path).
+		{"bare devin gets the trust flag", "devin", "devin --respect-workspace-trust false"},
+		{"abs path devin gets the trust flag", "/home/u/.local/bin/devin", "/home/u/.local/bin/devin --respect-workspace-trust false"},
+		// A permission-mode override composes with the appended trust flag — the
+		// exact program_overrides shape documented for unattended devin sessions.
+		{
+			"permission-mode override composes with the trust flag",
+			"devin --permission-mode accept-edits",
+			"devin --permission-mode accept-edits --respect-workspace-trust false",
+		},
+		// Already present (either value / either position) → NO second flag, so the
+		// launch cannot crash on a repeated --respect-workspace-trust.
+		{"already --respect-workspace-trust false is left alone", "devin --respect-workspace-trust false", "devin --respect-workspace-trust false"},
+		{"an explicit --respect-workspace-trust true wins", "devin --respect-workspace-trust true", "devin --respect-workspace-trust true"},
+		{
+			"user override already carrying the flag is not doubled",
+			"devin --respect-workspace-trust false --permission-mode smart",
+			"devin --respect-workspace-trust false --permission-mode smart",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := injectSystemPrompt(tt.resolved)
+			if got != tt.want {
+				t.Errorf("injectSystemPrompt(%q) = %q, want %q", tt.resolved, got, tt.want)
+			}
+			// Whatever the shape, the flag must never appear twice — that is the
+			// exact input devin rejects at launch.
+			if strings.Count(got, "--respect-workspace-trust") > 1 {
+				t.Errorf("--respect-workspace-trust appears more than once in %q; devin rejects the repeated flag", got)
+			}
+			// devin must still be the detected agent after injection, or resume /
+			// readiness silently unbind from it.
+			if agent := tmux.DetectAgentFromCommand(got); agent != tmux.ProgramDevin {
+				t.Errorf("DetectAgentFromCommand(%q) = %q, want devin", got, agent)
+			}
+		})
+	}
+}
+
 // TestInjectSystemPrompt_ResolvedCommandMatrix pins #1116/#1131: which seam is
 // used is decided by the agent the RESOLVED command actually runs — through every
 // override shape (bare name, absolute path, path+flags, redirect to a different
@@ -397,6 +458,11 @@ func TestInjectSystemPrompt_ResolvedCommandMatrix(t *testing.T) {
 		// opencode's default install path — the common case, not an exotic one.
 		{name: "opencode override path", resolved: "/home/me/.opencode/bin/opencode", want: "OPENCODE_CONFIG=", envPrefix: true},
 		{name: "opencode override path with flags", resolved: "/home/me/.opencode/bin/opencode --model anthropic/claude-opus-4-5", want: "OPENCODE_CONFIG=", envPrefix: true},
+
+		// devin appends its workspace-trust flag, like the flag-seam agents.
+		{name: "devin bare", resolved: "devin", want: "--respect-workspace-trust false"},
+		{name: "devin override path", resolved: "/home/me/.local/bin/devin", want: "--respect-workspace-trust false"},
+		{name: "devin override path with flags", resolved: "/home/me/.local/bin/devin --permission-mode accept-edits", want: "--respect-workspace-trust false"},
 
 		// name→other-agent: the RESOLVED agent's seam, not the key's.
 		{name: "claude key resolved to codex is file seam", resolved: "codex --full-auto", want: ""},

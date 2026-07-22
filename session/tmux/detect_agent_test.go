@@ -20,6 +20,7 @@ func TestDetectAgentFromCommand(t *testing.T) {
 		{"bare gemini", "gemini", ProgramGemini},
 		{"bare amp", "amp", ProgramAmp},
 		{"bare opencode", "opencode", ProgramOpencode},
+		{"bare devin", "devin", ProgramDevin},
 
 		// Override / legacy shapes: absolute paths, flags, quoting.
 		{"claude abs path", "/home/foo/bin/claude", ProgramClaude},
@@ -43,6 +44,16 @@ func TestDetectAgentFromCommand(t *testing.T) {
 		{"amp env wrapper", "env AMP_URL=https://ampcode.com amp --no-notifications", ProgramAmp},
 		{"opencode ionice wrapper", "ionice -c 3 opencode", ProgramOpencode},
 		{"opencode env wrapper", "env FOO=1 opencode --continue", ProgramOpencode},
+
+		// devin: bare, absolute path, the af-injected trust flag, and a wrapper.
+		// The default install symlinks ~/.local/bin/devin at a versioned path, so
+		// the absolute-path shape is common for it.
+		{"devin abs path", "/home/foo/.local/bin/devin", ProgramDevin},
+		{"devin with trust flag", "devin --respect-workspace-trust false", ProgramDevin},
+		{"devin path with flags", "/home/foo/.local/bin/devin --permission-mode accept-edits --respect-workspace-trust false", ProgramDevin},
+		{"quoted devin path", "'/opt/my tools/devin' --continue", ProgramDevin},
+		{"devin ionice wrapper", "ionice -c 3 devin", ProgramDevin},
+		{"devin env wrapper", "env DEVIN_PERMISSION_MODE=smart devin", ProgramDevin},
 
 		// Non-agent commands: no agent behavior may attach to these.
 		{"bare shell (#1131)", "bash", ""},

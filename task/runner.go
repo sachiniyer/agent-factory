@@ -203,6 +203,19 @@ func isReadyContent(content, agent string) bool {
 		// opencode doc-link dialog degrades the same way theirs does.
 		return isOpencodePromptFrame(content) ||
 			isDocTrustPrompt(content)
+	case tmux.ProgramDevin:
+		// devin renders "❭" (U+276D) as its composer prompt glyph once it is past
+		// the boot splash and accepting input — distinct from codex's "›" (U+203A)
+		// and claude's "❯" (U+276F). Matched on the raw pane like codex's glyph
+		// (devin does not split the glyph with color escapes), so no ANSI strip.
+		//
+		// Deliberately NO isDocTrustPrompt arm (unlike the file-seam agents): af
+		// launches devin with --respect-workspace-trust false (injectSystemPrompt),
+		// so devin's interactive workspace-trust modal never appears, and af wires
+		// no devin trust dismissal. Treating a trust/doc prompt as ready without an
+		// anchored way to clear it is the #729 trap — af would type the first prompt
+		// into an undismissed modal. The "❭" composer is the only ready signal.
+		return strings.Contains(content, "❭")
 	case tmux.ProgramClaude:
 		if strings.Contains(content, "❯") ||
 			strings.Contains(content, "Do you trust") ||
