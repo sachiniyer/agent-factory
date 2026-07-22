@@ -192,37 +192,54 @@ func TestMouse_SubThresholdTabJitterSelectsPressedTab(t *testing.T) {
 }
 
 func TestMouse_DragTreeTabToPaneOpensSplitAppend(t *testing.T) {
-	h, alpha, _ := mouseTestHome(t)
-	newFakeClock(h)
-	paneAgent := openTestPane(t, h, alpha, 0)
-	regionAgent := layout.PaneRegion(paneAgent.ID())
-	require.Equal(t, 1, h.store.NumOpenPanes())
+	for _, size := range []struct {
+		name   string
+		width  int
+		height int
+	}{
+		{name: "80x24", width: 80, height: 24},
+		{name: "72x20", width: 72, height: 20},
+	} {
+		t.Run(size.name, func(t *testing.T) {
+			h, alpha, _ := mouseTestHome(t)
+			resizeHome(h, size.width, size.height)
+			newFakeClock(h)
+			paneAgent := openTestPane(t, h, alpha, 0)
+			regionAgent := layout.PaneRegion(paneAgent.ID())
+			require.Equal(t, 1, h.store.NumOpenPanes())
 
-	tab := zoneRect(t, h, zones.TreeTab(alpha.Title, 1))
-	body := zoneRect(t, h, zones.PaneBody(regionAgent))
+			tab := zoneRect(t, h, zones.TreeTab(alpha.Title, 1))
+			body := zoneRect(t, h, zones.PaneBody(regionAgent))
 
-	press(h, tab.X, tab.Y)
-	motion(h, body.X+3, body.Y+4)
-	require.NotNil(t, h.tabDrag)
-	assert.True(t, h.tabDrag.active, ">=2-cell motion promotes the candidate to a drag")
-	assert.Equal(t, regionAgent, h.tabDragDropTargetRegion(), "pane under cursor is the drop target")
-	assert.Contains(t, h.View(), "Dragging", "active drag renders a status affordance")
+			press(h, tab.X, tab.Y)
+			motion(h, body.X+3, body.Y+4)
+			require.NotNil(t, h.tabDrag)
+			assert.True(t, h.tabDrag.active, ">=2-cell motion promotes the candidate to a drag")
+			assert.Equal(t, regionAgent, h.tabDragDropTargetRegion(), "pane under cursor is the drop target")
+			view := h.View()
+			requireViewSized(t, view, size.width, size.height)
+			assert.Contains(t, view, " · › Terminal — drop to open",
+				"active drag status uses the TUI clause separator")
+			assert.NotContains(t, view, " · › Terminal - drop to open",
+				"active drag status must not use an ASCII hyphen as a separator")
 
-	release(h, body.X+3, body.Y+4)
+			release(h, body.X+3, body.Y+4)
 
-	require.Nil(t, h.tabDrag)
-	require.Equal(t, 2, h.store.NumOpenPanes(), "drop opens a split pane")
-	panes := h.store.OpenPanes()
-	require.Len(t, panes, 2)
-	assert.Same(t, paneAgent, panes[0], "drop uses s/S append order, not adjacent replacement")
-	paneTerminal := panes[1]
-	assert.Same(t, alpha, paneTerminal.Instance())
-	assert.Equal(t, 1, paneTerminal.Tab())
-	assert.Equal(t, layout.PaneRegion(paneTerminal.ID()), h.ring.Active(), "the dropped tab's pane takes focus")
-	assert.Equal(t, 1, h.store.ActiveTab(), "drop selects the dragged tab in the sidebar")
-	sel := h.sidebar.GetSelection()
-	require.True(t, sel.IsTab)
-	assert.Equal(t, 1, sel.TabIndex)
+			require.Nil(t, h.tabDrag)
+			require.Equal(t, 2, h.store.NumOpenPanes(), "drop opens a split pane")
+			panes := h.store.OpenPanes()
+			require.Len(t, panes, 2)
+			assert.Same(t, paneAgent, panes[0], "drop uses s/S append order, not adjacent replacement")
+			paneTerminal := panes[1]
+			assert.Same(t, alpha, paneTerminal.Instance())
+			assert.Equal(t, 1, paneTerminal.Tab())
+			assert.Equal(t, layout.PaneRegion(paneTerminal.ID()), h.ring.Active(), "the dropped tab's pane takes focus")
+			assert.Equal(t, 1, h.store.ActiveTab(), "drop selects the dragged tab in the sidebar")
+			sel := h.sidebar.GetSelection()
+			require.True(t, sel.IsTab)
+			assert.Equal(t, 1, sel.TabIndex)
+		})
+	}
 }
 
 func TestMouse_DragDropReresolvesInstanceAfterProjectionSwap(t *testing.T) {
