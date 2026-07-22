@@ -451,6 +451,39 @@ func TestPrInfoUpdatedMsg_BranchMismatch_DropsUpdate(t *testing.T) {
 		"the orphaned pointer must not receive the update either")
 }
 
+// TestPrInfoUpdatedMsg_SameBranchReplacement_DropsUpdate closes the identity
+// hole left by the branch guard: killing and recreating a session can reuse both
+// its title and branch while still producing a distinct session. A PR fetch
+// retained for the old stable ID must not paint or persist onto that replacement.
+func TestPrInfoUpdatedMsg_SameBranchReplacement_DropsUpdate(t *testing.T) {
+	h := newTestHome(t)
+
+	original := newStartedInstanceWithWorktreeBranch(t, "reused", "feature/x")
+	h.store.AddInstance(original)
+
+	replacement := newStartedInstanceWithWorktreeBranch(t, "reused", "feature/x")
+	require.NotEqual(t, original.ID, replacement.ID)
+	h.store.RemoveInstanceByTitle("reused")
+	h.store.AddInstance(replacement)
+
+	persisted := false
+	restore := SetPRInfoSetterForTest(func(string, string, session.PRInfoData) error {
+		persisted = true
+		return nil
+	})
+	defer restore()
+
+	info := &git.PRInfo{Number: 42, Title: "old session PR", State: "MERGED"}
+	_, cmd := h.Update(prInfoUpdatedMsg{
+		instance: original, branch: "feature/x", repoID: h.repoID, info: info,
+	})
+
+	assert.Nil(t, cmd)
+	assert.False(t, persisted, "an old fetch must not persist onto a replacement with the same title and branch")
+	assert.Nil(t, replacement.GetPRInfo(), "an old fetch must not paint the replacement's PR badge")
+	assert.Nil(t, original.GetPRInfo(), "the detached original pointer must remain untouched")
+}
+
 // TestPrInfoUpdatedMsg_BranchMatch_AppliesUpdate — same swap as above, but the
 // recreated same-title instance is back on the original branch. The captured
 // branch matches, so the update applies to the live instance.
