@@ -248,7 +248,7 @@ func (h helpTypeInteractive) toContent() string {
 	content := lipgloss.JoinVertical(lipgloss.Left,
 		titleStyle.Render("Interactive pane"),
 		"",
-		descStyle.Render("You are typing INTO this pane's terminal: every key — including tab —"),
+		descStyle.Render("You are typing into this pane's terminal: every key — including tab —"),
 		descStyle.Render("goes to the agent/shell. The pane's frame turns green while it has the"),
 		descStyle.Render("keyboard, and the instances rail stays visible."),
 		"",
