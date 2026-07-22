@@ -88,7 +88,7 @@ func TestWebTabProxy_PreservesEscapedSpecialChars(t *testing.T) {
 // TestWebTabProxy_ForwardsQueryButNotTheDaemonToken pins the query half of the
 // mirror: the app's own parameters reach the dev server untouched, while the
 // daemon's credential — which authorized the iframe's navigation and means nothing
-// upstream — is stripped before the hop. The daemon's credential rides its OWN
+// upstream — is stripped by the bootstrap redirect before the hop. The daemon's credential rides its OWN
 // param (af_webtab_token), so the app's params are stripped-proof even when one of
 // them is literally named access_token (the P1 token-conflation fix).
 func TestWebTabProxy_ForwardsQueryButNotTheDaemonToken(t *testing.T) {
@@ -98,7 +98,9 @@ func TestWebTabProxy_ForwardsQueryButNotTheDaemonToken(t *testing.T) {
 	// The target carries its OWN access_token — a real case (a dev app that proxies
 	// an authenticated API, or signs its asset URLs) — alongside doc, and the daemon
 	// appends its own af_webtab_token last.
-	rec := proxyGet(t, mux, id, tabID, "viewer.html?doc=123&access_token=app-value&af_webtab_token=daemon-tok")
+	req := httptest.NewRequest(http.MethodGet,
+		fmt.Sprintf("/v1/webtab/%s/%s/viewer.html?doc=123&access_token=app-value&af_webtab_token=daemon-tok", id, tabID), nil)
+	_, rec := followWebTabTokenBootstrap(t, mux, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200 (body: %s)", rec.Code, rec.Body.String())
 	}
@@ -133,13 +135,12 @@ func TestWebTabProxy_AppAccessTokenAuthorizesOnBothPostures(t *testing.T) {
 		}
 		authed := withAuth(mux, gate, nil)
 
-		rec := httptest.NewRecorder()
 		// The app's access_token comes FIRST — the position that made TokenFromRequest
 		// read it as the daemon credential and 401 the iframe before the fix.
 		req := httptest.NewRequest(http.MethodGet,
 			fmt.Sprintf("/v1/webtab/%s/%s/api?access_token=app-value&af_webtab_token=secret-tok", id, tabID), nil)
 		req.RemoteAddr = "172.17.0.4:54321"
-		authed.ServeHTTP(rec, req)
+		_, rec := followWebTabTokenBootstrap(t, authed, req)
 
 		if rec.Code != http.StatusOK {
 			t.Fatalf("status = %d, want 200 — the app's own access_token was read as the daemon credential (body: %s)",
@@ -195,11 +196,10 @@ func TestWebTabProxy_EncodedTokenKeyIsAuthedAndStripped(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			rec := httptest.NewRecorder()
 			req := httptest.NewRequest(http.MethodGet,
 				fmt.Sprintf("/v1/webtab/%s/%s/api?doc=123&%s", id, tabID, tc.spelling), nil)
 			req.RemoteAddr = "172.17.0.4:54321"
-			authed.ServeHTTP(rec, req)
+			_, rec := followWebTabTokenBootstrap(t, authed, req)
 
 			// Every spelling the gate accepts must reach the upstream at all...
 			if rec.Code != http.StatusOK {
@@ -234,7 +234,9 @@ func TestWebTabProxy_PreservesSignedQueryByteForByte(t *testing.T) {
 
 	// Keys deliberately NOT in sorted order, a %20 that must not become +, and the
 	// daemon token wedged in the MIDDLE to prove the strip is positional-safe.
-	rec := proxyGet(t, mux, id, tabID, "sign?z=1&af_webtab_token=tok&a=hello%20world&sig=abc")
+	req := httptest.NewRequest(http.MethodGet,
+		fmt.Sprintf("/v1/webtab/%s/%s/sign?z=1&af_webtab_token=tok&a=hello%%20world&sig=abc", id, tabID), nil)
+	_, rec := followWebTabTokenBootstrap(t, mux, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200 (body: %s)", rec.Code, rec.Body.String())
 	}

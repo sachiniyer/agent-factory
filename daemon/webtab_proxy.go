@@ -299,7 +299,7 @@ func (m *Manager) stopVSCodeIfUnwanted(instance *session.Instance, key, title st
 	return err
 }
 
-// webTabProxyHandler reverse-proxies GET /v1/webtab/{sessionId}/{tabId}/{rest...}
+// webTabProxyHandler reverse-proxies /v1/webtab/{sessionId}/{tabId}/{rest...}
 // to the tab's loopback dev-server target ON THE DAEMON MACHINE. This is what
 // makes a localhost dev-server preview visible to a REMOTE web-UI viewer (over
 // Tailscale/SSH): the browser fetches this same-origin daemon path, the daemon
@@ -341,6 +341,19 @@ func (m *Manager) stopVSCodeIfUnwanted(instance *session.Instance, key, title st
 // exemption (#1697) honored and the webtabTokenCookie fallback for iframe
 // sub-resource requests.
 func (cs *controlServer) webTabProxyHandler(w http.ResponseWriter, r *http.Request) {
+	// A network browser can authorize an iframe's first navigation only through a
+	// query parameter. Treat that parameter as a ONE-HOP bootstrap transport, not
+	// as part of the preview app's address: store the already-authenticated value
+	// in an HttpOnly cookie, then redirect to the exact same browser path with every
+	// decoded spelling of only our private parameter removed.
+	//
+	// This runs before manager access by design. Resolving a VS Code target may
+	// START the editor, and arbitrary preview code must never run while its own
+	// window.location still contains the daemon bearer. The clean cookie-backed
+	// follow-up is the first request allowed to resolve or contact any target.
+	if cleanWebTabTokenBootstrap(w, r) {
+		return
+	}
 	if cs.manager == nil {
 		writeHTTPError(w, r, http.StatusServiceUnavailable, fmt.Errorf("daemon has no session manager"))
 		return
@@ -464,29 +477,6 @@ func (cs *controlServer) webTabProxyHandler(w http.ResponseWriter, r *http.Reque
 	if err != nil {
 		writeHTTPError(w, r, http.StatusInternalServerError, fmt.Errorf("invalid web tab target: %w", err))
 		return
-	}
-
-	// On the TCP listener a network peer authorized this top-level request via the
-	// af_webtab_token query (an iframe src cannot set the Authorization header).
-	// Persist the credential it PRESENTED — the header or that private query param,
-	// never an existing cookie — as a path-scoped cookie, so the framed app's
-	// sub-resource GETs, which carry neither header nor query, stay authorized.
-	// Reading only the presented credential keeps this from re-issuing Set-Cookie on
-	// every cookie-authorized sub-resource. Loopback peers present none and need
-	// none, so nothing is set for them.
-	presented := agentproto.BearerToken(r.Header.Get(agentproto.AuthHeader))
-	if presented == "" {
-		presented = r.URL.Query().Get(webtabTokenQueryParam)
-	}
-	if presented != "" {
-		http.SetCookie(w, &http.Cookie{
-			Name:     webtabTokenCookie,
-			Value:    presented,
-			Path:     webtabPathPrefix,
-			HttpOnly: true,
-			Secure:   requestIsHTTPS(r),
-			SameSite: http.SameSiteStrictMode,
-		})
 	}
 
 	// The path prefix this tab's cookies are scoped under. Upstream Set-Cookie
@@ -646,6 +636,43 @@ func (cs *controlServer) webTabProxyHandler(w http.ResponseWriter, r *http.Reque
 		},
 	}
 	proxy.ServeHTTP(w, r)
+}
+
+// cleanWebTabTokenBootstrap persists a credential presented directly by the
+// caller and, when the private query transport is present, redirects to the same
+// request URI without it. It reports whether it wrote that redirect.
+//
+// The caller is behind withAuth, so a query value reaching this point has already
+// been compared with the daemon's token. Existing cookie-authorized requests do
+// not reissue the cookie: only a credential PRESENTED in the header or query does.
+func cleanWebTabTokenBootstrap(w http.ResponseWriter, r *http.Request) bool {
+	presented := agentproto.BearerToken(r.Header.Get(agentproto.AuthHeader))
+	if presented == "" {
+		presented = r.URL.Query().Get(webtabTokenQueryParam)
+	}
+	if presented != "" {
+		http.SetCookie(w, &http.Cookie{
+			Name:     webtabTokenCookie,
+			Value:    presented,
+			Path:     webtabPathPrefix,
+			HttpOnly: true,
+			Secure:   requestIsHTTPS(r),
+			SameSite: http.SameSiteStrictMode,
+		})
+	}
+
+	cleanRawQuery := stripRawQueryParam(r.URL.RawQuery, webtabTokenQueryParam)
+	if cleanRawQuery == r.URL.RawQuery {
+		return false
+	}
+
+	cleanURL := *r.URL
+	cleanURL.RawQuery = cleanRawQuery
+	cleanURL.ForceQuery = false
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Referrer-Policy", "no-referrer")
+	http.Redirect(w, r, cleanURL.RequestURI(), http.StatusTemporaryRedirect)
+	return true
 }
 
 // forwardAppCookies forwards the dev app's cookies upstream while stripping the

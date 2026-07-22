@@ -1705,6 +1705,36 @@ test("web tab (feat): a local dev-server preview is daemon-proxied and rendered 
   await expect(page.frameLocator(".af-webframe").locator("#marker")).toHaveText(WEBTAB_LOCAL_MARKER, {
     timeout: 15_000,
   });
+
+  // The daemon credential is allowed in an iframe src only as a one-hop bootstrap
+  // transport. Drive that path with an inert fixture value, observe the redirect,
+  // and then ask the framed document what URL arbitrary preview JavaScript sees.
+  // The app must render only after the private parameter has disappeared.
+  const bootstrapSeen = page.waitForResponse(
+    (response) => response.url().includes("af_webtab_token=browser-fixture") && response.status() === 307,
+  );
+  await frame.evaluate((node) => {
+    const iframe = node as HTMLIFrameElement;
+    const bootstrap = new URL(iframe.src);
+    bootstrap.searchParams.set("af_webtab_token", "browser-fixture");
+    bootstrap.searchParams.set("_af_bootstrap_probe", "clean-hop");
+    iframe.src = `${bootstrap.pathname}${bootstrap.search}`;
+  });
+  await bootstrapSeen;
+  await expect(page.frameLocator(".af-webframe").locator("#marker")).toHaveText(WEBTAB_LOCAL_MARKER, {
+    timeout: 15_000,
+  });
+  await expect
+    .poll(() => page.frameLocator(".af-webframe").locator("html").evaluate(() => window.location.href))
+    .toContain("_af_bootstrap_probe=clean-hop");
+  const renderedAddress = await page
+    .frameLocator(".af-webframe")
+    .locator("html")
+    .evaluate(() => ({ href: window.location.href, referrer: document.referrer }));
+  expect(new URL(renderedAddress.href).searchParams.get("_af_bootstrap_probe")).toBe("clean-hop");
+  expect(new URL(renderedAddress.href).searchParams.has("af_webtab_token")).toBe(false);
+  expect(renderedAddress.href).not.toContain("browser-fixture");
+  expect(renderedAddress.referrer).not.toContain("browser-fixture");
 });
 
 test("web tab (#1806/#1811): a Vite-shaped subdirectory app previews, and its absolute-path asset 404s instead of getting the SPA shell", REAL_FIXTURE, async () => {
