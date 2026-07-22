@@ -432,7 +432,12 @@ func TestRecoveryJobRefusesToOverwriteUnexpectedUnitContent(t *testing.T) {
 }
 
 func TestRecoveryUnitPublicationIsAtomicAcrossEntrypointRaces(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "recovery.service")
+	// Production unit paths are derived from NewRecoveryJob's canonicalized
+	// directory. Mirror that boundary because macOS exposes its temp root through
+	// /var, which is a symlink to /private/var.
+	directory, err := canonicalExistingDir(t.TempDir())
+	require.NoError(t, err)
+	path := filepath.Join(directory, "recovery.service")
 	content := []byte("complete unit\n")
 	const contenders = 20
 	start := make(chan struct{})
