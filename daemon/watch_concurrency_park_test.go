@@ -18,18 +18,29 @@ import (
 // cappedDeliver is a delivery hook that refuses while the task is "at its cap",
 // exactly as deliverTaskPrompt does when the manager declines admission.
 type cappedDeliver struct {
-	mu       sync.Mutex
-	atLimit  bool
-	accepted []string
+	mu           sync.Mutex
+	atLimit      bool
+	accepted     []string
+	refused      int
+	pauseStarted chan struct{}
+	pauseRelease chan struct{}
 }
 
 func (d *cappedDeliver) deliver(taskID, line string) error {
 	d.mu.Lock()
-	defer d.mu.Unlock()
 	if d.atLimit {
+		d.refused++
+		started, release := d.pauseStarted, d.pauseRelease
+		d.pauseStarted, d.pauseRelease = nil, nil
+		d.mu.Unlock()
+		if started != nil {
+			close(started)
+			<-release
+		}
 		return errAtConcurrencyLimit
 	}
 	d.accepted = append(d.accepted, line)
+	d.mu.Unlock()
 	return nil
 }
 
@@ -43,6 +54,23 @@ func (d *cappedDeliver) delivered() []string {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	return append([]string(nil), d.accepted...)
+}
+
+func (d *cappedDeliver) refusedAttempts() int {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.refused
+}
+
+func (d *cappedDeliver) pauseNextAttempt() (<-chan struct{}, func()) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	started := make(chan struct{})
+	release := make(chan struct{})
+	d.pauseStarted = started
+	d.pauseRelease = release
+	var once sync.Once
+	return started, func() { once.Do(func() { close(release) }) }
 }
 
 // TestWatcherQueuesEventsParkedByConcurrencyLimit is the issue's core promise:
@@ -109,10 +137,17 @@ func TestConcurrencyParkDoesNotAlarm(t *testing.T) {
 
 // reservedRateSlots reports how many reservations the task's sliding rate window
 // currently holds.
-func reservedRateSlots(s *watcherSupervisor, taskID string) int {
+func watcherForTask(s *watcherSupervisor, taskID string) *taskWatcher {
 	s.mu.Lock()
-	w := s.watchers[taskID]
-	s.mu.Unlock()
+	defer s.mu.Unlock()
+	return s.watchers[taskID]
+}
+
+func reservedRateSlots(s *watcherSupervisor, taskID string) int {
+	return watcherReservedRateSlots(watcherForTask(s, taskID))
+}
+
+func watcherReservedRateSlots(w *taskWatcher) int {
 	if w == nil {
 		return 0
 	}
@@ -158,15 +193,32 @@ func TestConcurrencyParkRefundsRateSlots(t *testing.T) {
 		t.Fatalf("a concurrency park must never drop an event; %d were dropped", dropped)
 	}
 
-	// Let the drainer retry the head event many times against the cap
-	// (drainBaseBackoff is 20ms under test), then assert every refused attempt gave
-	// its slot back. Without the refund this climbs with each retry until the
-	// window is full.
-	waitUntil(t, 10*time.Second, "the drainer to retry the parked head repeatedly", func() bool {
-		return len(cd.delivered()) == 0 && reservedRateSlots(s, "ab189202") == 0
+	// Pause one retry inside delivery, after its slot was reserved but before the
+	// refusal returns to the drainer and releases it. This is the window the old
+	// fixed-delay assertion occasionally sampled on macOS: one in-flight slot is
+	// legitimate and is not evidence of a leak.
+	started, release := cd.pauseNextAttempt()
+	defer release()
+	<-started
+	if held := reservedRateSlots(s, "ab189202"); held != 1 {
+		t.Fatalf("in-flight parked retry holds %d rate reservations, want exactly 1", held)
+	}
+
+	// Judge completed retries, not an arbitrary wall-clock sample. Let ten more
+	// refused attempts finish, then stop and join every watcher goroutine before
+	// inspecting the captured watcher. Without the refund, completed attempts
+	// accumulate slots; with it, the joined watcher holds none.
+	completedBefore := cd.refusedAttempts()
+	release()
+	waitUntil(t, 10*time.Second, "ten more parked retries to complete", func() bool {
+		return cd.refusedAttempts() >= completedBefore+10
 	})
-	time.Sleep(200 * time.Millisecond) // ~10 more parked retries at the test backoff
-	if held := reservedRateSlots(s, "ab189202"); held != 0 {
-		t.Fatalf("parked retries leaked %d rate reservation(s); a park delivers nothing and must refund its slot", held)
+	w := watcherForTask(s, "ab189202")
+	if w == nil {
+		t.Fatal("watcher disappeared before the completed retries could be inspected")
+	}
+	s.Stop()
+	if held := watcherReservedRateSlots(w); held != 0 {
+		t.Fatalf("completed parked retries leaked %d rate reservation(s); want 0", held)
 	}
 }
