@@ -1719,22 +1719,12 @@
           "id": {
             "gap": "wire.id-addressing"
           }
-        },
-        "tui": {
-          "id": {
-            "ok": "The TUI captures the selected session ID before confirmation and carries it through the daemon request and async completion."
-          }
         }
       },
       "ArchiveSessionRequest": {
         "cli": {
           "id": {
             "gap": "wire.id-addressing"
-          }
-        },
-        "tui": {
-          "id": {
-            "ok": "The TUI captures the selected session ID before confirmation and carries it through the daemon request and async completion."
           }
         }
       },
