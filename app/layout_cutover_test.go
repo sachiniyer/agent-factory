@@ -251,22 +251,34 @@ func TestLayoutCutover_DegradationLadder(t *testing.T) {
 // (#1024 PR 4 — hooks lost their persistent sidebar slot); Esc closes it and
 // returns to the workspace.
 func TestLayoutCutover_HooksOverlay(t *testing.T) {
-	h := newTestHome(t)
-	resizeHome(h, 100, 30)
-	h.hooksPane.SetCommands([]string{"make setup"})
+	for _, size := range []struct {
+		name   string
+		width  int
+		height int
+	}{
+		{name: "80x24", width: 80, height: 24},
+		{name: "72x20", width: 72, height: 20},
+	} {
+		t.Run(size.name, func(t *testing.T) {
+			h := newTestHome(t)
+			resizeHome(h, size.width, size.height)
+			h.hooksPane.SetCommands([]string{"make setup"})
 
-	_, _ = h.handleDefaultKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("e")}, keys.KeyHooks)
-	require.Equal(t, stateHooks, h.state)
-	require.True(t, h.hooksPane.HasFocus(), "the editor opens with input focus")
+			_, _ = h.handleDefaultKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("e")}, keys.KeyHooks)
+			require.Equal(t, stateHooks, h.state)
+			require.True(t, h.hooksPane.HasFocus(), "the editor opens with input focus")
 
-	view := h.View()
-	requireViewSized(t, view, 100, 30)
-	assert.Contains(t, view, "Post-Worktree Hooks", "the overlay hosts the existing editor")
-	assert.Contains(t, view, "make setup")
+			view := h.View()
+			requireViewSized(t, view, size.width, size.height)
+			assert.Contains(t, view, "Post-worktree hooks", "the overlay title follows sentence case")
+			assert.NotContains(t, view, "Post-Worktree Hooks", "the overlay title must not use title case")
+			assert.Contains(t, view, "make setup")
 
-	_, _ = h.handleStateHooks(tea.KeyMsg{Type: tea.KeyEsc})
-	assert.Equal(t, stateDefault, h.state, "Esc closes the overlay")
-	assert.NotContains(t, h.View(), "Post-Worktree Hooks")
+			_, _ = h.handleStateHooks(tea.KeyMsg{Type: tea.KeyEsc})
+			assert.Equal(t, stateDefault, h.state, "Esc closes the overlay")
+			assert.NotContains(t, h.View(), "Post-worktree hooks")
+		})
+	}
 }
 
 // TestLayoutCutover_TaskKeysOpenOverlay: m opens the task manager overlay,

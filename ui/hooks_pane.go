@@ -166,7 +166,7 @@ func (h *HooksPane) String() string {
 	descStyle := lipgloss.NewStyle().Foreground(t.ForegroundDim).Italic(true)
 
 	var b strings.Builder
-	b.WriteString(tStyle.Render("Post-Worktree Hooks"))
+	b.WriteString(tStyle.Render("Post-worktree hooks"))
 	b.WriteString("\n")
 	b.WriteString(descStyle.Render("Commands run async in new worktrees"))
 	b.WriteString("\n\n")

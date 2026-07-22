@@ -78,7 +78,7 @@ func TestTinyClipHooksOverlayFits(t *testing.T) {
 	view := h.View()
 	requireViewSized(t, view, 40, 10)
 	plain := xansi.Strip(view)
-	assert.Contains(t, plain, "Post-Worktree Hooks")
+	assert.Contains(t, plain, "Post-worktree hooks")
 	assert.Contains(t, plain, "enter save")
 	assert.Contains(t, plain, "esc cancel")
 }
