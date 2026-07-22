@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/session/tmux"
 
 	"golang.org/x/crypto/ssh"
 )
@@ -71,6 +72,76 @@ func TestHookCleanupHandleRestoresFilteredEnvironment(t *testing.T) {
 	}
 	if _, err := os.Stat(marker); err != nil {
 		t.Fatal("restored delete_cmd did not receive its filtered cleanup environment")
+	}
+}
+
+func TestHookCleanupHandlePreservesInlineCloudSelector(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AWS_ACCESS_KEY_ID", "fixture")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "fixture")
+	t.Setenv("AZURE_CLIENT_SECRET", "fixture")
+	repoRoot := initTempGitRepo(t)
+	scriptDir := t.TempDir()
+	launch := writeScript(t, scriptDir, "launch.sh", `
+echo '{"url":"http://127.0.0.1:9","token":"test-token"}'
+`)
+	marker := filepath.Join(scriptDir, "cleanup-complete")
+	deleteCmd := writeScript(t, scriptDir, "delete.sh", `
+names=$(env | cut -d= -f1)
+printf '%s\n' "$names" | grep -qx AWS_ACCESS_KEY_ID || exit 9
+printf '%s\n' "$names" | grep -qx AWS_SECRET_ACCESS_KEY || exit 9
+printf '%s\n' "$names" | grep -qx AZURE_CLIENT_SECRET && exit 9
+: > "$AF_TEST_CLEANUP_MARKER"
+`)
+	writeInRepoConfig(t, repoRoot, map[string]any{
+		"backend": "hook",
+		"remote_hooks": map[string]any{
+			"launch_cmd": launch,
+			"delete_cmd": deleteCmd,
+		},
+		"program_overrides": map[string]any{
+			tmux.ProgramClaude: "CLAUDE_CODE_USE_BEDROCK=1 claude",
+		},
+	})
+
+	result, err := (hookRuntime{}).Provision(ProvisionSpec{
+		RepoRoot: repoRoot,
+		Title:    "inline-selector-cleanup",
+		Program:  tmux.ProgramClaude,
+		SessionEnvPassthrough: []string{
+			"AF_TEST_CLEANUP_MARKER",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("AF_TEST_CLEANUP_MARKER", marker)
+	inst := &Instance{
+		ID:              "inline-selector-cleanup-id",
+		Title:           "inline-selector-cleanup",
+		Path:            repoRoot,
+		backend:         result.Backend,
+		runtimeTeardown: result.Teardown,
+		userKilled:      true,
+	}
+	stored := inst.ToInstanceData().ForStorage()
+	if stored.RuntimeCleanup == nil || stored.RuntimeCleanup.Hook == nil {
+		t.Fatal("hook tombstone omitted its durable cleanup policy")
+	}
+	cleanup := stored.RuntimeCleanup.Hook
+	if !cleanup.AuthSelectorsResolved || !reflect.DeepEqual(cleanup.AuthSelectors, []string{"CLAUDE_CODE_USE_BEDROCK"}) {
+		t.Fatalf("stored hook authentication selectors = %v (resolved=%v), want the value-free Bedrock selector snapshot",
+			cleanup.AuthSelectors, cleanup.AuthSelectorsResolved)
+	}
+	restored, err := FromInstanceData(stored)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := restored.Kill(); err != nil {
+		t.Fatalf("restored hook cleanup lost its inline cloud selector: %v", err)
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatal("restored delete_cmd did not complete with its selected cloud credentials")
 	}
 }
 
@@ -250,7 +321,12 @@ func TestRuntimeCleanupHandleRoundTripsEveryOffBoxBackend(t *testing.T) {
 					slug:          "cleanup-slug",
 					launchStarted: true,
 				},
-				cleanup: &HookRuntimeCleanupData{DeleteCmd: "/opt/hooks/delete", Slug: "cleanup-slug"},
+				cleanup: &HookRuntimeCleanupData{
+					DeleteCmd: "/opt/hooks/delete", Slug: "cleanup-slug",
+					Agent: tmux.ProgramClaude, AgentResolved: true,
+					AuthSelectors: []string{"CLAUDE_CODE_USE_BEDROCK"}, AuthSelectorsResolved: true,
+					SessionEnvPassthrough: []string{"CUSTOM_PROVIDER_TOKEN"},
+				},
 			},
 		},
 	}
@@ -363,6 +439,22 @@ func TestMalformedRemoteCleanupHandleFailsClosed(t *testing.T) {
 			backend: "ssh",
 			cleanup: &RuntimeCleanupData{SSH: &SSHRuntimeCleanupData{
 				Config: config.SSHConfig{Host: "host"}, SessionDir: "/session", RemotePID: "not-a-pid",
+			}},
+		},
+		{
+			name:    "hook selector without resolved marker",
+			backend: "remote",
+			cleanup: &RuntimeCleanupData{Hook: &HookRuntimeCleanupData{
+				DeleteCmd: "/opt/hooks/delete", Slug: "session", Agent: tmux.ProgramClaude,
+				AgentResolved: true, AuthSelectors: []string{"CLAUDE_CODE_USE_BEDROCK"},
+			}},
+		},
+		{
+			name:    "unknown hook selector",
+			backend: "remote",
+			cleanup: &RuntimeCleanupData{Hook: &HookRuntimeCleanupData{
+				DeleteCmd: "/opt/hooks/delete", Slug: "session", Agent: tmux.ProgramClaude,
+				AgentResolved: true, AuthSelectorsResolved: true, AuthSelectors: []string{"UNKNOWN_SELECTOR"},
 			}},
 		},
 	}

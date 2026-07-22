@@ -106,6 +106,7 @@ func (hookRuntime) Provision(spec ProvisionSpec) (ProvisionResult, error) {
 // with a hand-built provisioner — the gate is the thing #1955 was about, and a
 // test that re-implemented it would prove nothing about this path.
 func (p *hookProvisioner) provisionOrReap() (ProvisionResult, error) {
+	p.resolveAuthSelectors()
 	res, err := p.provision()
 	if err == nil {
 		return res, nil
@@ -188,6 +189,15 @@ func (p *hookProvisioner) manualReapCommand() string {
 // Reaping a FAILED launch's sandbox is a separate act with a real criterion, and
 // it is delete_cmd's job, not a side effect of how we captured output: see reap.
 func runHookScriptWithEnvironment(timeout time.Duration, name, program string, passthrough []string, args ...string) ([]byte, *exec.Cmd, error) {
+	agentName := tmux.DetectAgentFromCommand(program)
+	if agentName == "" && strings.TrimSpace(program) == "" {
+		agentName = tmux.ProgramClaude
+	}
+	authSelectors := sessionenv.ResolveAuthSelectors(os.Environ(), agentName, program)
+	return runHookScriptWithResolvedEnvironment(timeout, name, agentName, authSelectors, passthrough, args...)
+}
+
+func runHookScriptWithResolvedEnvironment(timeout time.Duration, name, agent string, authSelectors, passthrough []string, args ...string) ([]byte, *exec.Cmd, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
@@ -204,11 +214,11 @@ func runHookScriptWithEnvironment(timeout time.Duration, name, program string, p
 	}()
 
 	cmd := exec.CommandContext(ctx, name, args...)
-	agentName := tmux.DetectAgentFromCommand(program)
-	if agentName == "" && strings.TrimSpace(program) == "" {
-		agentName = tmux.ProgramClaude
+	filtered, err := sessionenv.FilterWithAuthSelectors(os.Environ(), agent, authSelectors, passthrough)
+	if err != nil {
+		return nil, nil, fmt.Errorf("resolving the hook environment policy failed: %w", err)
 	}
-	cmd.Env = sessionenv.FilterForCommand(os.Environ(), agentName, program, passthrough)
+	cmd.Env = filtered
 	cmd.Stdout = f
 	cmd.Stderr = f
 	runErr := cmd.Run()
@@ -230,6 +240,11 @@ type hookProvisioner struct {
 	// program is the resolved command used to select the environment allowlist
 	// and as the command handed to the remote agent-server.
 	program string
+	// authSelectors is a value-free snapshot of the resolved conditional
+	// provider modes. It keeps launch and delete on the same allowlist and is
+	// safe to persist in the durable cleanup handle.
+	authSelectors         []string
+	authSelectorsResolved bool
 
 	// launchStarted records that the kernel spawned launch_cmd — NOT that it
 	// succeeded. It gates the delete_cmd reap, so it must stay the weaker of the
@@ -273,6 +288,8 @@ func (p *hookProvisioner) provision() (ProvisionResult, error) {
 				Slug:                  p.slug,
 				Agent:                 p.environmentAgent(),
 				AgentResolved:         true,
+				AuthSelectors:         append([]string(nil), p.authSelectors...),
+				AuthSelectorsResolved: true,
 				SessionEnvPassthrough: append([]string(nil), p.spec.SessionEnvPassthrough...),
 			},
 		},
@@ -324,8 +341,8 @@ func (p *hookProvisioner) launch() (*AgentServerEndpoint, error) {
 		args = append(args, "--session-env", name)
 	}
 
-	out, cmd, err := runHookScriptWithEnvironment(hookLaunchTimeout, p.hooks.LaunchCmd,
-		p.environmentProgram(), p.spec.SessionEnvPassthrough, args...)
+	out, cmd, err := runHookScriptWithResolvedEnvironment(hookLaunchTimeout, p.hooks.LaunchCmd,
+		p.environmentAgent(), p.authSelectors, p.spec.SessionEnvPassthrough, args...)
 
 	// Gate the reap on whether launch_cmd STARTED, not on whether it succeeded
 	// (#1955). A script that creates a VM and then times out or exits non-zero
@@ -389,14 +406,15 @@ func (p *hookProvisioner) reap() error {
 		if !p.launchStarted {
 			return
 		}
+		p.resolveAuthSelectors()
 		// runHookScript builds its timeout from context.Background(), NEVER a
 		// caller's context — and that is load-bearing here. reap's whole job is to
 		// run on the failure path, where the launch context is already cancelled or
 		// expired, and a WithTimeout derived from a dead parent is born expired:
 		// delete_cmd would never spawn and the sandbox would leak in silence. That
 		// is the exact failure #1955 is about, reintroduced by the cleanup.
-		out, _, err := runHookScriptWithEnvironment(hookDeleteTimeout, p.hooks.DeleteCmd,
-			p.environmentProgram(), p.spec.SessionEnvPassthrough, "--name", p.slug)
+		out, _, err := runHookScriptWithResolvedEnvironment(hookDeleteTimeout, p.hooks.DeleteCmd,
+			p.environmentAgent(), p.authSelectors, p.spec.SessionEnvPassthrough, "--name", p.slug)
 		if err != nil {
 			reapErr = fmt.Errorf("backend=hook: delete_cmd failed for %q: %s: %w", p.slug, strings.TrimSpace(string(out)), err)
 			log.ErrorLog.Printf("%s", p.orphanWarning(reapErr))
@@ -420,6 +438,14 @@ func (p *hookProvisioner) environmentAgent() string {
 		return tmux.ProgramClaude
 	}
 	return agent
+}
+
+func (p *hookProvisioner) resolveAuthSelectors() {
+	if p.authSelectorsResolved {
+		return
+	}
+	p.authSelectors = sessionenv.ResolveAuthSelectors(os.Environ(), p.environmentAgent(), p.environmentProgram())
+	p.authSelectorsResolved = true
 }
 
 // HookBackend is the in-process Backend for a remote-hook session (#1592 Phase 4

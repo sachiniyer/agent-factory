@@ -154,10 +154,12 @@ The built-in allowlist keeps the pieces sessions need:
   gets each Bedrock, Vertex, or Foundry credential group only when that mode's
   `CLAUDE_CODE_USE_*` selector is exported or is a literal assignment in the
   resolved command (for example,
-  `program_overrides.claude = "CLAUDE_CODE_USE_BEDROCK=1 claude"`). Only a
-  literal assignment prefix on the Claude invocation is inspected; dynamic or
-  unsupported shell forms require exporting the selector before starting af,
-  or explicitly listing the provider credential names. Codex gets
+  `program_overrides.claude = "CLAUDE_CODE_USE_BEDROCK=1 claude"`). A
+  command-local selector is trusted only when the entire command is one literal
+  Claude invocation (optionally through `env` or `exec`) or af's own generated
+  agent-server handoff. Compound commands, redirects, arbitrary wrappers, and
+  dynamic words require exporting the selector before starting af, or explicitly
+  listing the provider credential names. Codex gets
   `OPENAI_API_KEY`, `CODEX_API_KEY`, `CODEX_ACCESS_TOKEN`, `CODEX_HOME`,
   `CODEX_SQLITE_HOME`, and its CA path; Gemini gets Gemini/Google API keys and
   Google application-default/Vertex selectors; Amp gets `AMP_API_KEY` and

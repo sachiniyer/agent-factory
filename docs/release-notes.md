@@ -32,6 +32,10 @@ written back.
 - Local Git worktree subprocesses and checked-in `post_worktree_commands` also
   use the filtered environment. Package/build credentials needed by those
   commands must be named explicitly in `session_env_passthrough`.
+- Claude cloud-provider credentials selected by a command-local
+  `CLAUDE_CODE_USE_*` assignment are admitted only for one literal Claude
+  invocation. Compound commands, redirects, arbitrary wrappers, and dynamic
+  words must use an exported selector or explicit pass-through names.
 
 ## Keymap Changes
 

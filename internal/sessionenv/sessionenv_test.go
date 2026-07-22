@@ -91,8 +91,9 @@ func TestFilterForCommandHonorsLiteralClaudeCloudModeSelectors(t *testing.T) {
 	commands := []string{
 		"CLAUDE_CODE_USE_BEDROCK=1 claude",
 		"env CLAUDE_CODE_USE_BEDROCK=true claude",
-		"env CLAUDE_CODE_USE_BEDROCK=1 claude --model \"$MODEL\"",
-		"/srv/af agent-server --program 'CLAUDE_CODE_USE_BEDROCK=1 claude'",
+		"env -i CLAUDE_CODE_USE_BEDROCK=1 claude",
+		"/srv/af agent-server --listen :43110 --repo /workspace --title test --program 'CLAUDE_CODE_USE_BEDROCK=1 claude' --program-resolved",
+		"exec /srv/af agent-server --listen 127.0.0.1:0 --repo /workspace --title test --program 'CLAUDE_CODE_USE_BEDROCK=1 claude' --program-resolved --session-env CUSTOM_TOKEN",
 	}
 	for _, command := range commands {
 		got := FilterForCommand(source, "claude", command, nil)
@@ -113,10 +114,14 @@ func TestFilterForCommandFailsClosedOnDisabledOrDynamicCloudMode(t *testing.T) {
 		"CLAUDE_CODE_USE_BEDROCK=0 claude",
 		"CLAUDE_CODE_USE_BEDROCK=$MODE claude",
 		"env CLAUDE_CODE_USE_BEDROCK=$MODE claude",
+		"env CLAUDE_CODE_USE_BEDROCK=1 claude --model \"$MODEL\"",
 		"CLAUDE_CODE_USE_BEDROCK=1 CLAUDE_CODE_USE_BEDROCK=off claude",
 		"CLAUDE_CODE_USE_BEDROCK=1 env -u CLAUDE_CODE_USE_BEDROCK claude",
 		"CLAUDE_CODE_USE_BEDROCK=1 env -u CLAUDE_CODE_USE_BEDROCK claude --model \"$MODEL\"",
 		"helper --program 'CLAUDE_CODE_USE_BEDROCK=1 claude'",
+		"claude || CLAUDE_CODE_USE_BEDROCK=1 claude",
+		"CLAUDE_CODE_USE_BEDROCK=1 claude || claude",
+		"echo env CLAUDE_CODE_USE_BEDROCK=1 claude; ./steal",
 	}
 	for _, command := range commands {
 		if got := FilterForCommand(source, "claude", command, nil); len(got) != 0 {
@@ -125,10 +130,46 @@ func TestFilterForCommandFailsClosedOnDisabledOrDynamicCloudMode(t *testing.T) {
 	}
 
 	exported := []string{"CLAUDE_CODE_USE_BEDROCK=1", "AWS_ACCESS_KEY_ID=fixture"}
-	for _, command := range commands[:6] {
+	explicitlyDisabled := append([]string(nil), commands[:7]...)
+	explicitlyDisabled = append(explicitlyDisabled, "env -i claude", "env --ignore-environment claude")
+	for _, command := range explicitlyDisabled {
 		if got := FilterForCommand(exported, "claude", command, nil); slices.Contains(got, "AWS_ACCESS_KEY_ID=fixture") {
 			t.Fatalf("disabled or dynamic command override inherited an exported provider credential: %q", command)
 		}
+	}
+}
+
+func TestResolvedAuthSelectorsReapplyOnlyValidatedProviderPolicy(t *testing.T) {
+	selectors := ResolveAuthSelectors(nil, "claude", "CLAUDE_CODE_USE_BEDROCK=1 claude")
+	if !slices.Equal(selectors, []string{"CLAUDE_CODE_USE_BEDROCK"}) {
+		t.Fatalf("resolved selectors = %v, want the Bedrock selector name", selectors)
+	}
+
+	got, err := FilterWithAuthSelectors([]string{
+		"AWS_ACCESS_KEY_ID=fixture",
+		"AWS_SECRET_ACCESS_KEY=fixture",
+		"AZURE_CLIENT_SECRET=fixture",
+	}, "claude", selectors, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"AWS_ACCESS_KEY_ID=fixture", "AWS_SECRET_ACCESS_KEY=fixture"} {
+		if !slices.Contains(got, want) {
+			t.Fatalf("resolved Bedrock policy omitted %s", strings.SplitN(want, "=", 2)[0])
+		}
+	}
+	if slices.Contains(got, "AZURE_CLIENT_SECRET=fixture") {
+		t.Fatal("resolved Bedrock policy admitted Foundry credentials")
+	}
+}
+
+func TestNormalizeAuthSelectorsRejectsUnknownNameWithoutRenderingIt(t *testing.T) {
+	_, err := NormalizeAuthSelectors("claude", []string{"TOKEN=do-not-render"})
+	if err == nil {
+		t.Fatal("NormalizeAuthSelectors accepted an unknown selector")
+	}
+	if strings.Contains(err.Error(), "do-not-render") {
+		t.Fatal("selector validation error rendered untrusted stored text")
 	}
 }
 

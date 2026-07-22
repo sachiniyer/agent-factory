@@ -171,6 +171,23 @@ func Filter(source []string, agent string, extras []string) []string {
 // dynamic or unsupported syntax fails closed.
 func FilterForCommand(source []string, agent, command string, extras []string) []string {
 	allowed := allowedNames(source, agent, command, extras)
+	return filterAllowed(source, allowed)
+}
+
+// FilterWithAuthSelectors applies a previously resolved set of conditional
+// authentication selector names. It is used by durable teardown handles: the
+// selector names can safely be stored, while the credential values remain only
+// in the current process environment.
+func FilterWithAuthSelectors(source []string, agent string, selectors, extras []string) ([]string, error) {
+	normalized, err := NormalizeAuthSelectors(agent, selectors)
+	if err != nil {
+		return nil, err
+	}
+	allowed := allowedNamesWithAuthSelectors(agent, normalized, extras)
+	return filterAllowed(source, allowed), nil
+}
+
+func filterAllowed(source []string, allowed map[string]struct{}) []string {
 	out := make([]string, 0, len(source))
 	for _, entry := range source {
 		name, _, ok := strings.Cut(entry, "=")
@@ -265,11 +282,15 @@ func DockerForwardNames(source []string, _ string, extras []string) []string {
 }
 
 func allowedNames(source []string, agent, command string, extras []string) map[string]struct{} {
+	return allowedNamesWithAuthSelectors(agent, ResolveAuthSelectors(source, agent, command), extras)
+}
+
+func allowedNamesWithAuthSelectors(agent string, selectors, extras []string) map[string]struct{} {
 	allowed := make(map[string]struct{}, len(commonNames)+len(extras)+16)
 	for name := range commonNames {
 		allowed[name] = struct{}{}
 	}
-	for name := range selectedAgentNames(source, agent, command) {
+	for name := range selectedAgentNames(agent, selectors) {
 		allowed[name] = struct{}{}
 	}
 	for _, name := range extras {
@@ -280,17 +301,14 @@ func allowedNames(source []string, agent, command string, extras []string) map[s
 	return allowed
 }
 
-func selectedAgentNames(source []string, agent, command string) map[string]struct{} {
+func selectedAgentNames(agent string, selectors []string) map[string]struct{} {
 	selected := make(map[string]struct{}, len(agentNames[agent])+16)
 	for name := range agentNames[agent] {
 		selected[name] = struct{}{}
 	}
+	selectorSet := nameSet(selectors...)
 	for _, group := range conditionalAgentNames[agent] {
-		enabled := environmentFlagEnabled(source, group.selector)
-		if found, commandEnabled := commandEnvironmentFlagState(command, agent, group.selector); found {
-			enabled = commandEnabled
-		}
-		if !enabled {
+		if _, enabled := selectorSet[group.selector]; !enabled {
 			continue
 		}
 		for name := range group.names {
@@ -298,6 +316,49 @@ func selectedAgentNames(source []string, agent, command string) map[string]struc
 		}
 	}
 	return selected
+}
+
+// ResolveAuthSelectors returns the deterministic names of the selected agent's
+// conditional authentication modes that are effectively enabled. It persists
+// no values: callers may safely retain these names as durable policy state.
+func ResolveAuthSelectors(source []string, agent, command string) []string {
+	var selectors []string
+	for _, group := range conditionalAgentNames[agent] {
+		enabled := environmentFlagEnabled(source, group.selector)
+		if found, commandEnabled := commandEnvironmentFlagState(command, agent, group.selector); found {
+			enabled = commandEnabled
+		}
+		if enabled {
+			selectors = append(selectors, group.selector)
+		}
+	}
+	sort.Strings(selectors)
+	return selectors
+}
+
+// NormalizeAuthSelectors validates a stored selector-name snapshot against the
+// selected agent's known conditional modes. Errors identify only the position,
+// never the untrusted stored text, so an accidental NAME=value record cannot
+// render a credential in a log.
+func NormalizeAuthSelectors(agent string, selectors []string) ([]string, error) {
+	allowed := make(map[string]struct{}, len(conditionalAgentNames[agent]))
+	for _, group := range conditionalAgentNames[agent] {
+		allowed[group.selector] = struct{}{}
+	}
+	set := make(map[string]struct{}, len(selectors))
+	for idx, raw := range selectors {
+		selector := strings.TrimSpace(raw)
+		if _, ok := allowed[selector]; !ok {
+			return nil, fmt.Errorf("invalid authentication selector name at position %d", idx+1)
+		}
+		set[selector] = struct{}{}
+	}
+	out := make([]string, 0, len(set))
+	for selector := range set {
+		out = append(out, selector)
+	}
+	sort.Strings(out)
+	return out, nil
 }
 
 func environmentFlagEnabled(source []string, name string) bool {
